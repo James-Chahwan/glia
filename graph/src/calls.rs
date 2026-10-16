@@ -170,6 +170,7 @@ pub(crate) fn resolve_calls<H>(
     let mut gate = BareFieldGate::default();
     let mut constructed = ConstructedReceivers::default();
     let mut state_reads = StateReads::default();
+    let mut class_scope = ClassScopeReceivers::default();
     // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
     // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
     let (mut iface_recv, mut iface_static) = (0usize, 0usize);
@@ -244,6 +245,9 @@ pub(crate) fn resolve_calls<H>(
             }
             Some((to, branch))
         });
+        if is_class_scope_receiver(g, site) {
+            class_scope.tally(resolved.is_some());
+        }
 
         let resolved = match resolved {
             Some((to, branch)) => {
@@ -284,6 +288,41 @@ pub(crate) fn resolve_calls<H>(
     }
     if let Some(line) = state_reads.marker() {
         eprintln!("{line}");
+    }
+    if let Some(line) = class_scope.marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// DT.5c's per-graph tally of [`is_class_scope_receiver`] sites: `bound` by
+/// the receiver-type branch through the caller's own field, `unbound` when
+/// that branch found nothing (an unknown field, an external or ambiguous
+/// type, no such method). A site's later binding by `extra_hook` or by the
+/// TS family's inherited-receiver walk counts as unbound here.
+#[derive(Default)]
+struct ClassScopeReceivers {
+    bound: usize,
+    unbound: usize,
+}
+
+impl ClassScopeReceivers {
+    fn tally(&mut self, bound: bool) {
+        if bound {
+            self.bound += 1;
+        } else {
+            self.unbound += 1;
+        }
+    }
+
+    /// fired_on, once per graph that met such a site:
+    /// `[recv] class-scope receivers bound=<b> unbound=<u>`.
+    fn marker(&self) -> Option<String> {
+        (self.bound + self.unbound > 0).then(|| {
+            format!(
+                "[recv] class-scope receivers bound={} unbound={}",
+                self.bound, self.unbound
+            )
+        })
     }
 }
 
@@ -1204,6 +1243,12 @@ fn constructed_type_id(g: &RepoGraph, from_module: NodeId, name: &str) -> Option
 /// same-named field (it shadows it), and a local recorded as `self.<f>`
 /// aliases field `f`. A receiver no local claims falls through to A6.2a's
 /// field lookup, so parsers that record no locals see A6.2a exactly.
+///
+/// DT.5c: when the caller is itself a CLASS / STRUCT / ENUM and the receiver
+/// is `this.<f>` / `self.<f>`, the field is `f` of the caller
+/// ([`own_field_type`]), not of a type enclosing it. Every other caller and
+/// receiver shape (a bare `svc.m()` in a class body included) reads as
+/// before.
 pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g str> {
     let (name, is_self) = match &site.qualifier {
         CallQualifier::Attribute { base, .. } => (base.as_str(), false),
@@ -1213,6 +1258,13 @@ pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g
         }
         _ => return None,
     };
+    // DT.5c: a `this.<f>` / `self.<f>` receiver whose caller IS a type (a
+    // call written in a class body, or an Angular template credited to its
+    // component CLASS) reads the caller's own field: `this` there is the
+    // instance, and the enclosing-type walk would start above it.
+    if is_self && is_type_scope(&g.nav, site.from) {
+        return own_field_type(g, site.from, name);
+    }
     if !is_self && let Some(ty) = local_type(g, site.from, name) {
         if ty.is_empty() {
             return None;
@@ -1223,6 +1275,39 @@ pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g
         };
     }
     field_type(g, site.from, name)
+}
+
+/// True when `id` is a CLASS / STRUCT / ENUM: a type that owns fields and
+/// methods, the scope `this` / `self` names inside its own body.
+fn is_type_scope(nav: &CodeNav, id: NodeId) -> bool {
+    matches!(
+        nav.kind_by_id.get(&id),
+        Some(&k) if k == node_kind::CLASS || k == node_kind::STRUCT || k == node_kind::ENUM
+    )
+}
+
+/// DT.5c: a CallSite from a type node whose receiver is `this.<f>` /
+/// `self.<f>` (one hop, [`receiver_field`]): the sites the
+/// [`is_type_scope`] branch of [`receiver_type`] types, counted by the
+/// `[recv] class-scope receivers` line.
+fn is_class_scope_receiver(g: &RepoGraph, site: &CallSite) -> bool {
+    let CallQualifier::ComplexReceiver { receiver, .. } = &site.qualifier else {
+        return false;
+    };
+    (receiver.starts_with("this.") || receiver.starts_with("self."))
+        && receiver_field(receiver).is_some()
+        && is_type_scope(&g.nav, site.from)
+}
+
+/// The declared type of `field` on the type `owner` itself (A6.2a's
+/// `field_types`); an empty recorded type is no type.
+fn own_field_type<'g>(g: &'g RepoGraph, owner: NodeId, field: &str) -> Option<&'g str> {
+    g.nav
+        .field_types
+        .get(&owner)?
+        .get(field)
+        .map(String::as_str)
+        .filter(|t| !t.is_empty())
 }
 
 /// The type `scope` records for its local `name` (`""` = unknown type), or
@@ -1238,13 +1323,7 @@ fn local_type<'g>(g: &'g RepoGraph, scope: NodeId, name: &str) -> Option<&'g str
 /// The declared type of `field` on the innermost CLASS / STRUCT / ENUM
 /// enclosing `from` (A6.2a's `field_types`).
 fn field_type<'g>(g: &'g RepoGraph, from: NodeId, field: &str) -> Option<&'g str> {
-    let owner = enclosing_class_or_struct(&g.nav, from)?;
-    g.nav
-        .field_types
-        .get(&owner)?
-        .get(field)
-        .map(String::as_str)
-        .filter(|t| !t.is_empty())
+    own_field_type(g, enclosing_class_or_struct(&g.nav, from)?, field)
 }
 
 /// Where a bare identifier can name an instance field (A6.6, the A6.2b
@@ -2310,6 +2389,107 @@ mod tests {
             .unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    // ---- DT.5c: a type caller reads its own `this.<f>` field ------------------
+
+    /// `m1`: `class A { <field>: UserRepo }` with one call written in A's body
+    /// itself (an Angular template, a field initialiser), so its caller is the
+    /// CLASS; `nested` adds `class A { class B {} }` and moves the call to B.
+    fn class_scope_caller(
+        qualifier: CallQualifier,
+        field: Option<&str>,
+        nested: bool,
+    ) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
+        if let Some(f) = field {
+            s.nav.record_field_type(a, f, "UserRepo");
+        }
+        let from = if nested { s.add(node_kind::CLASS, "m1::A::B", Some(a)) } else { a };
+        (s.file(vec![], vec![CallSite { from, qualifier, line: 8 }], vec![]), from)
+    }
+
+    #[test]
+    fn a_class_callers_this_receiver_binds_through_its_own_field() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, a) = class_scope_caller(recv("this.repo", "find"), Some("repo"), false);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(a, find)]);
+        let ev = g
+            .edges
+            .iter()
+            .find(|e| e.category == edge_category::CALLS)
+            .and_then(|e| Evidence::read(&e.cells))
+            .expect("evidence");
+        assert_eq!(
+            (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
+            ("graph:calls", Some("receiver_type"), Some(8))
+        );
+        assert!(g.unresolved_calls.is_empty());
+        // `self.` reads the same way (a Swift / Python type body).
+        let (repo_file, _, find) = repo_module();
+        let (caller, a) = class_scope_caller(recv("self.repo", "find"), Some("repo"), false);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(a, find)]);
+    }
+
+    /// HEAD's paths stay: a METHOD caller's `this.repo` reads its enclosing
+    /// class's field; a CLASS caller's bare `repo` names no field of the class
+    /// (no enclosing type above it), so nothing binds.
+    #[test]
+    fn method_callers_and_bare_class_receivers_read_as_before() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, _, get) = caller_module(recv("this.repo", "find"), vec![]);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+        let (repo_file, _, _) = repo_module();
+        let (caller, _) = class_scope_caller(attr("repo", "find"), Some("repo"), false);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// A CLASS caller without the field binds nothing, and a nested class's
+    /// `this.repo` is its own instance's, never the outer class's field.
+    #[test]
+    fn a_class_caller_without_the_field_binds_nothing() {
+        let (repo_file, _, _) = repo_module();
+        let (caller, _) = class_scope_caller(recv("this.repo", "find"), None, false);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+        let (repo_file, _, _) = repo_module();
+        let (caller, b) = class_scope_caller(recv("this.repo", "find"), Some("repo"), true);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls[0].from, b);
+    }
+
+    #[test]
+    fn class_scope_marker_counts_bound_and_unbound() {
+        let mut t = ClassScopeReceivers::default();
+        assert_eq!(t.marker(), None);
+        t.tally(true);
+        t.tally(true);
+        t.tally(false);
+        assert_eq!(
+            t.marker().as_deref(),
+            Some("[recv] class-scope receivers bound=2 unbound=1")
+        );
+        let (caller, a) = class_scope_caller(recv("this.repo", "find"), Some("repo"), false);
+        let g = build_dotted(repo(), vec![caller]).unwrap();
+        let site = |r: &str| CallSite { from: a, qualifier: recv(r, "find"), line: 0 };
+        assert!(is_class_scope_receiver(&g, &site("this.repo")));
+        assert!(is_class_scope_receiver(&g, &site("self.repo")));
+        assert!(!is_class_scope_receiver(&g, &site("this.repo.inner")));
+        assert!(!is_class_scope_receiver(&g, &site("repo")));
+        let m1 = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m1");
+        assert!(!is_class_scope_receiver(
+            &g,
+            &CallSite { from: m1, qualifier: recv("this.repo", "find"), line: 0 }
+        ));
     }
 
     // ---- LA.35a: locals before fields ----------------------------------------

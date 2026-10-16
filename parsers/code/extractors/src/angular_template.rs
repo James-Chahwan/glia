@@ -22,17 +22,33 @@
 //! [`bind_component`] keeps the names that are METHODs of the class; a field,
 //! a signal (STATE_VAR), an inherited or unknown name binds nothing.
 //!
-//! fired_on, on stderr, one line per TS file with an inline template or a
-//! host binding: `[angular-template] inline file=<path> components=<c>
-//! calls=<k> uses=<u> unbound=<n> shadowed=<s> unread=<r> no_class=<m>`.
+//! DT.5c adds two readings. A binding expression's `<member>.<m>(..)`, with
+//! `<member>` a top-level member ref (no template local in scope) and exactly
+//! one hop (`a.b.c(` and `a().b(` record nothing), is a [`ReceiverRef`]; the
+//! component's binding turns it into a [`CallSite`] from the CLASS with
+//! receiver `this.<member>`, which the graph binds through the member's
+//! declared type (`graph::calls::receiver_type`, rule `receiver_type`), so a
+//! template call of an injected service's method is a CALLS. And a class
+//! member Angular itself invokes, named by a member decorator
+//! (`angular::MemberDecorator`: a `@HostListener` method, a `@HostBinding`
+//! getter, an `@Input` / view / content query setter), is a USES from its
+//! class at the decorator's row (rules `host_listener` / `host_binding` /
+//! `input_setter` / `query_setter`).
+//!
+//! fired_on, on stderr, one line per TS file with an inline template, a host
+//! binding or a decorator-bound member: `[angular-template] inline
+//! file=<path> components=<c> calls=<k> uses=<u> unbound=<n> shadowed=<s>
+//! unread=<r> no_class=<m> receivers=<v> decorated=<d>`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use glia_code_domain::evidence::Evidence;
-use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, line_of, node_kind};
+use glia_code_domain::{
+    CallQualifier, CallSite, CodeNav, GRAPH_TYPE, edge_category, line_of, node_kind,
+};
 use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
 
-use crate::angular::{self, HostEntry};
+use crate::angular::{self, DecoratedMember, HostEntry};
 
 /// The evidence emitter of every edge this module mints.
 pub const EMITTER: &str = "extractor:angular_template";
@@ -43,6 +59,16 @@ pub const EMITTER: &str = "extractor:angular_template";
 pub struct MemberRef {
     pub name: String,
     pub called: bool,
+    pub row: u32,
+}
+
+/// DT.5c: a call through a component member, `<member>.<method>(..)` (also
+/// `member?.method(` and `this.member.method(`), one hop, the member a ref no
+/// template local shadows; `row` 0-based from the scanned text's start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverRef {
+    pub member: String,
+    pub method: String,
     pub row: u32,
 }
 
@@ -57,6 +83,8 @@ pub struct PipeRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TemplateRefs {
     pub members: Vec<MemberRef>,
+    /// DT.5c: the one-hop calls through a member, in scan order.
+    pub receivers: Vec<ReceiverRef>,
     pub pipes: Vec<PipeRef>,
     /// Member refs dropped because a template local of that name was in scope.
     pub shadowed: usize,
@@ -64,11 +92,18 @@ pub struct TemplateRefs {
 
 /// Where a [`TemplateRefs`] sits: the file, the row its text starts at (0 for
 /// host entries, whose rows are the file's) and whether it is `host:`.
+///
+/// DT.5c: `call_row` is the row every receiver [`CallSite`] takes instead of
+/// its binding's: a CallSite carries no file, and the graph locates a CALLS
+/// in its caller's file, so an external template's receiver calls sit at the
+/// component's `templateUrl` row in its TS file. `None` for an inline
+/// template or host binding, whose rows are the TS file's own.
 #[derive(Debug, Clone, Copy)]
 pub struct BindSite<'a> {
     pub path: &'a str,
     pub base_row: u32,
     pub host: bool,
+    pub call_row: Option<u32>,
 }
 
 /// The edges a component's bindings mint and the marker's counts.
@@ -88,6 +123,14 @@ pub struct TemplateBinding {
     pub unread: usize,
     /// Decorators whose class is no CLASS of the file.
     pub no_class: usize,
+    /// DT.5c: one receiver CallSite per (member, method), from the CLASS, at
+    /// its lowest binding row (or the [`BindSite::call_row`]); the caller
+    /// adds them to the parse's calls for the graph to bind.
+    pub call_sites: Vec<CallSite>,
+    /// `call_sites.len()`, for the marker.
+    pub receivers: usize,
+    /// DT.5c: decorator-bound members naming a METHOD of their class.
+    pub decorated: usize,
 }
 
 impl TemplateBinding {
@@ -106,15 +149,28 @@ impl TemplateBinding {
                 None => self.edges.push(e),
             }
         }
+        for c in other.call_sites {
+            match self
+                .call_sites
+                .iter_mut()
+                .find(|x| x.from == c.from && x.qualifier == c.qualifier)
+            {
+                Some(held) if c.line < held.line => *held = c,
+                Some(_) => {}
+                None => self.call_sites.push(c),
+            }
+        }
         self.components += other.components;
         self.unbound += other.unbound;
         self.shadowed += other.shadowed;
         self.unread += other.unread;
         self.no_class += other.no_class;
+        self.decorated += other.decorated;
         self.recount();
     }
 
     fn recount(&mut self) {
+        self.receivers = self.call_sites.len();
         self.calls = self
             .edges
             .iter()
@@ -128,18 +184,20 @@ impl TemplateBinding {
     }
 
     /// The per-file fired_on line, `None` when the file had no inline
-    /// template or host binding.
+    /// template, host binding or decorator-bound member.
     pub fn marker(&self, path: &str) -> Option<String> {
         (self.components > 0).then(|| {
             format!(
-                "[angular-template] inline file={path} components={} calls={} uses={} unbound={} shadowed={} unread={} no_class={}",
+                "[angular-template] inline file={path} components={} calls={} uses={} unbound={} shadowed={} unread={} no_class={} receivers={} decorated={}",
                 self.components,
                 self.calls,
                 self.uses,
                 self.unbound,
                 self.shadowed,
                 self.unread,
-                self.no_class
+                self.no_class,
+                self.receivers,
+                self.decorated
             )
         })
     }
@@ -152,9 +210,11 @@ fn edge_row(e: &Edge) -> u32 {
 }
 
 /// The per-file entry: every `@Component` / `@Directive` class of `source`
-/// binds its inline template (rows offset to the file) and its host entries
-/// against CLASS `<module_qname>::<Class>`; prints the fired_on marker.
-/// Costs a `contains` and nothing else on a file with no such decorator.
+/// binds its inline template (rows offset to the file), its host entries and
+/// (DT.5c) its decorator-bound members against CLASS
+/// `<module_qname>::<Class>`; prints the fired_on marker. A class counts
+/// toward `components` when it has any of the three. Costs a `contains` and
+/// nothing else on a file with no such decorator.
 pub fn bind_inline(
     source: &str,
     path: &str,
@@ -168,7 +228,11 @@ pub fn bind_inline(
         return out;
     }
     for dc in angular::decorated_classes(source) {
-        if dc.template.is_none() && !dc.template_unread && dc.host.is_empty() {
+        if dc.template.is_none()
+            && !dc.template_unread
+            && dc.host.is_empty()
+            && dc.members.is_empty()
+        {
             continue;
         }
         out.components += 1;
@@ -191,6 +255,7 @@ pub fn bind_inline(
                 path,
                 base_row: line_of(source, t.start),
                 host: false,
+                call_row: None,
             };
             out.absorb(bind_component(nodes, nav, class_id, &refs, &site));
         }
@@ -200,8 +265,12 @@ pub fn bind_inline(
                 path,
                 base_row: 0,
                 host: true,
+                call_row: None,
             };
             out.absorb(bind_component(nodes, nav, class_id, &refs, &site));
+        }
+        if !dc.members.is_empty() {
+            out.absorb(bind_members(nodes, nav, class_id, &dc.members, path));
         }
     }
     if let Some(m) = out.marker(path) {
@@ -210,16 +279,13 @@ pub fn bind_inline(
     out
 }
 
-/// The CLASS -> METHOD edges `refs` mint for `class_id`: its METHOD children
-/// by simple name (`nodes` order, first wins), a called ref a CALLS, any other
-/// a USES, deduped by (method, category) at the lowest row.
-pub fn bind_component(
+/// The METHOD children of `class_id` by simple name (`nodes` order, first
+/// wins).
+fn class_methods<'a>(
     nodes: &[Node],
-    nav: &CodeNav,
+    nav: &'a CodeNav,
     class_id: NodeId,
-    refs: &TemplateRefs,
-    site: &BindSite,
-) -> TemplateBinding {
+) -> BTreeMap<&'a str, NodeId> {
     let mut methods: BTreeMap<&str, NodeId> = BTreeMap::new();
     for n in nodes {
         if nav.kind_by_id.get(&n.id) == Some(&node_kind::METHOD)
@@ -229,6 +295,56 @@ pub fn bind_component(
             methods.entry(name.as_str()).or_insert(n.id);
         }
     }
+    methods
+}
+
+/// DT.5c: the USES edges `class_id`'s decorator-bound members mint: one per
+/// METHOD the member names, at the decorator's row, its rule the
+/// decorator's ([`angular::MemberDecorator::rule`]), deduped by method at
+/// the lowest row. A member naming no METHOD of the class counts unbound.
+pub fn bind_members(
+    nodes: &[Node],
+    nav: &CodeNav,
+    class_id: NodeId,
+    members: &[DecoratedMember],
+    path: &str,
+) -> TemplateBinding {
+    let methods = class_methods(nodes, nav, class_id);
+    let mut out = TemplateBinding::default();
+    for m in members {
+        let Some(&id) = methods.get(m.name.as_str()) else {
+            out.unbound += 1;
+            continue;
+        };
+        out.decorated += 1;
+        let ev = Evidence::emitter(EMITTER)
+            .rule(m.decorator.rule())
+            .at(path, m.row);
+        out.absorb(TemplateBinding {
+            edges: vec![
+                Edge::new(class_id, id, edge_category::USES, Confidence::Strong)
+                    .with_cell(ev.to_cell()),
+            ],
+            ..TemplateBinding::default()
+        });
+    }
+    out
+}
+
+/// The CLASS -> METHOD edges `refs` mint for `class_id`: its METHOD children
+/// by simple name (`nodes` order, first wins), a called ref a CALLS, any other
+/// a USES, deduped by (method, category) at the lowest row. DT.5c: each
+/// receiver ref is a CallSite from `class_id` with receiver `this.<member>`
+/// (one per (member, method), lowest row), whatever the class declares: the
+/// graph types the member.
+pub fn bind_component(
+    nodes: &[Node],
+    nav: &CodeNav,
+    class_id: NodeId,
+    refs: &TemplateRefs,
+    site: &BindSite,
+) -> TemplateBinding {
+    let methods = class_methods(nodes, nav, class_id);
     let mut out = TemplateBinding {
         shadowed: refs.shadowed,
         ..TemplateBinding::default()
@@ -270,6 +386,28 @@ pub fn bind_component(
         out.edges
             .push(Edge::new(class_id, id, cat, Confidence::Strong).with_cell(ev.to_cell()));
     }
+    // (member, method) -> lowest row
+    let mut receivers: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    for r in &refs.receivers {
+        let row = site
+            .call_row
+            .unwrap_or_else(|| site.base_row.saturating_add(r.row));
+        receivers
+            .entry((r.member.as_str(), r.method.as_str()))
+            .and_modify(|held| *held = (*held).min(row))
+            .or_insert(row);
+    }
+    out.call_sites = receivers
+        .into_iter()
+        .map(|((member, method), line)| CallSite {
+            from: class_id,
+            qualifier: CallQualifier::ComplexReceiver {
+                receiver: format!("this.{member}"),
+                name: method.to_string(),
+            },
+            line,
+        })
+        .collect();
     out.recount();
     out
 }
@@ -296,6 +434,13 @@ pub fn scan_host(entries: &[HostEntry]) -> TemplateRefs {
                     row: e.row,
                 });
             } else {
+                if let Some(method) = t.recv {
+                    out.receivers.push(ReceiverRef {
+                        member: t.name.clone(),
+                        method,
+                        row: e.row,
+                    });
+                }
                 out.members.push(MemberRef {
                     name: t.name,
                     called: t.called,
@@ -339,6 +484,8 @@ struct Cand {
     name: String,
     called: bool,
     pos: usize,
+    /// DT.5c: the method a one-hop `name.<m>(` calls.
+    recv: Option<String>,
 }
 
 /// Locals scoped to one element: from its open tag to the end of its
@@ -397,6 +544,13 @@ impl Scanner<'_> {
                 self.out.shadowed += 1;
             } else {
                 let row = self.row(c.pos);
+                if let Some(method) = c.recv {
+                    self.out.receivers.push(ReceiverRef {
+                        member: c.name.clone(),
+                        method,
+                        row,
+                    });
+                }
                 self.out.members.push(MemberRef {
                     name: c.name,
                     called: c.called,
@@ -432,6 +586,7 @@ impl Scanner<'_> {
                     name: t.name,
                     called: t.called,
                     pos: t.pos,
+                    recv: t.recv,
                 });
             }
         }
@@ -913,6 +1068,8 @@ struct Tok {
     pos: usize,
     called: bool,
     pipe: bool,
+    /// DT.5c: the method of a one-hop `name.<m>(` ([`receiver_call`]).
+    recv: Option<String>,
 }
 
 /// The top-level identifiers and pipe names of the expression `b[start..end]`.
@@ -962,6 +1119,7 @@ fn lex(b: &[u8], start: usize, end: usize, header: bool, out: &mut Vec<Tok>) {
                             pos: s,
                             called: false,
                             pipe: true,
+                            recv: None,
                         });
                     }
                     continue;
@@ -988,6 +1146,7 @@ fn lex(b: &[u8], start: usize, end: usize, header: bool, out: &mut Vec<Tok>) {
                     pos: s,
                     called,
                     pipe: false,
+                    recv: receiver_call(b, j, end),
                 });
             }
             b'|' => {
@@ -1010,6 +1169,26 @@ fn lex(b: &[u8], start: usize, end: usize, header: bool, out: &mut Vec<Tok>) {
             }
         }
     }
+}
+
+/// DT.5c: with `b[j]` the first non-space byte after a member ref, the
+/// method of a one-hop call through it: `.m(`, `?.m(` or `!.m(`, then `(` or
+/// `?.(` (an optional call). A second hop (`.m.n(`), an index or a property
+/// read is `None`.
+fn receiver_call(b: &[u8], j: usize, end: usize) -> Option<String> {
+    let at = |k: usize| b.get(k).copied().filter(|_| k < end);
+    let dot = match (at(j)?, at(j + 1)) {
+        (b'.', Some(c)) if c != b'.' => j + 1,
+        (b'?' | b'!', Some(b'.')) => j + 2,
+        _ => return None,
+    };
+    let (ms, me) = ident_at(b, skip_ws(b, dot, end), end)?;
+    let p = skip_ws(b, me, end);
+    let called = at(p) == Some(b'(')
+        || (at(p) == Some(b'?')
+            && at(p + 1) == Some(b'.')
+            && at(skip_ws(b, p + 2, end)) == Some(b'('));
+    called.then(|| ascii(&b[ms..me]))
 }
 
 // ----------------------------------------------------------------------------
@@ -1519,6 +1698,7 @@ mod tests {
             path: "m.ts",
             base_row: 10,
             host: false,
+            call_row: None,
         };
         let mut got = bind_component(&nodes, &nav, class_id, &refs, &site);
         assert_eq!((got.calls, got.uses, got.unbound), (1, 1, 2));
@@ -1552,6 +1732,7 @@ mod tests {
                 path: "m.ts",
                 base_row: 0,
                 host: true,
+                call_row: None,
             },
         ));
         let save = got
@@ -1592,7 +1773,7 @@ mod tests {
         assert_eq!(
             out.marker("m.ts").as_deref(),
             Some(
-                "[angular-template] inline file=m.ts components=1 calls=2 uses=0 unbound=1 shadowed=0 unread=0 no_class=0"
+                "[angular-template] inline file=m.ts components=1 calls=2 uses=0 unbound=1 shadowed=0 unread=0 no_class=0 receivers=0 decorated=0"
             )
         );
         // No decorator: nothing read, no marker.
@@ -1605,5 +1786,170 @@ mod tests {
             RepoId(1),
         );
         assert!(none.edges.is_empty() && none.marker("m.ts").is_none());
+    }
+
+    /// `(member, method, row)` of every receiver ref, in scan order.
+    fn receivers(text: &str) -> Vec<(String, String, u32)> {
+        scan_template(text)
+            .receivers
+            .into_iter()
+            .map(|r| (r.member, r.method, r.row))
+            .collect()
+    }
+
+    /// DT.5c: a one-hop call through a member is a receiver ref (also
+    /// `?.`, `this.` and a host entry's statement); a chain, a call result's
+    /// method, a property read and a template local's call are not, and the
+    /// member is still an ordinary (unbound) member ref.
+    #[test]
+    fn receiver_refs_are_one_hop_calls_through_an_unshadowed_member() {
+        let t = "<b (click)=\"theme.toggle()\">{{ auth?.logout() }}</b>\n\
+                 <i (click)=\"this.store.save(x); auth.session.end()\"></i>\n\
+                 <i [title]=\"items().map(f) + svc.label\" (blur)=\"svc.check?.()\"></i>\n\
+                 @for (auth of sessions; track $index) { <b (click)=\"auth.stop()\"></b> }\n\
+                 <input #box (keyup)=\"box.focus()\"/>\n\
+                 {{ auth.logout() }}";
+        assert_eq!(
+            receivers(t),
+            vec![
+                ("theme".to_string(), "toggle".to_string(), 0),
+                ("auth".to_string(), "logout".to_string(), 0),
+                ("store".to_string(), "save".to_string(), 1),
+                ("svc".to_string(), "check".to_string(), 2),
+                ("auth".to_string(), "logout".to_string(), 5),
+            ]
+        );
+        let got = scan_template(t);
+        assert!(got.members.iter().any(|m| m.name == "theme" && !m.called));
+        // The @for block's `auth` and the `#box` ref shadow their calls.
+        assert_eq!(got.shadowed, 2);
+        let host = scan_host(&[HostEntry {
+            key: "(document:click)".into(),
+            value: "tracker.hit($event)".into(),
+            row: 4,
+        }]);
+        assert_eq!(
+            host.receivers,
+            vec![ReceiverRef {
+                member: "tracker".into(),
+                method: "hit".into(),
+                row: 4
+            }]
+        );
+    }
+
+    /// DT.5c: each receiver ref is one CallSite from the CLASS with receiver
+    /// `this.<member>`, deduped by (member, method) at the lowest row: an
+    /// inline template's rows are the file's (`base_row` + row), an external
+    /// template's are its `call_row`.
+    #[test]
+    fn receiver_call_sites_come_from_the_class() {
+        let (nodes, nav, class_id) = class_with(&[("save", node_kind::METHOD)]);
+        let refs = scan_template(
+            "<b (click)=\"theme.toggle()\"></b>\n{{ theme.toggle() }} {{ auth.logout() }}",
+        );
+        let site = |call_row| BindSite {
+            path: "m.html",
+            base_row: 7,
+            host: false,
+            call_row,
+        };
+        let shape = |b: &TemplateBinding| -> Vec<(String, String, u32)> {
+            b.call_sites
+                .iter()
+                .map(|c| {
+                    assert_eq!(c.from, class_id);
+                    match &c.qualifier {
+                        CallQualifier::ComplexReceiver { receiver, name } => {
+                            (receiver.clone(), name.clone(), c.line)
+                        }
+                        q => panic!("unexpected qualifier {q:?}"),
+                    }
+                })
+                .collect()
+        };
+        let inline = bind_component(&nodes, &nav, class_id, &refs, &site(None));
+        assert_eq!(
+            shape(&inline),
+            vec![
+                ("this.auth".to_string(), "logout".to_string(), 8),
+                ("this.theme".to_string(), "toggle".to_string(), 7),
+            ]
+        );
+        assert_eq!((inline.receivers, inline.calls, inline.uses), (2, 0, 0));
+        let external = bind_component(&nodes, &nav, class_id, &refs, &site(Some(3)));
+        assert_eq!(
+            shape(&external),
+            vec![
+                ("this.auth".to_string(), "logout".to_string(), 3),
+                ("this.theme".to_string(), "toggle".to_string(), 3),
+            ]
+        );
+        // Absorbing a lower-row duplicate keeps one site at that row.
+        let mut both = external;
+        both.absorb(inline);
+        assert_eq!(
+            shape(&both),
+            vec![
+                ("this.auth".to_string(), "logout".to_string(), 3),
+                ("this.theme".to_string(), "toggle".to_string(), 3),
+            ]
+        );
+        assert_eq!(both.receivers, 2);
+    }
+
+    /// DT.5c: a decorated class's decorator-bound METHODs are USES from the
+    /// class at the decorator's row, with the decorator's rule; a decorated
+    /// field and an undecorated method bind nothing. A class with members
+    /// alone (a `templateUrl` component) fires the marker.
+    #[test]
+    fn bind_inline_binds_decorator_bound_members() {
+        let src = "@Component({ templateUrl: './s.html' })\n\
+                   export class C {\n\
+                   \x20 @HostListener('window:resize', ['$event'])\n\
+                   \x20 onResize(): void {}\n\
+                   \x20 @HostBinding('class.open') get isOpen() { return true; }\n\
+                   \x20 @Input() set title(v: string) {}\n\
+                   \x20 @ViewChild('c') private set canvas(el: unknown) {}\n\
+                   \x20 @Input() size = 1;\n\
+                   \x20 close(): void {}\n\
+                   }\n";
+        let (nodes, nav, class_id) = class_with(&[
+            ("onResize", node_kind::METHOD),
+            ("isOpen", node_kind::METHOD),
+            ("title", node_kind::METHOD),
+            ("canvas", node_kind::METHOD),
+            ("close", node_kind::METHOD),
+        ]);
+        let out = bind_inline(src, "m.ts", &nodes, &nav, "m", RepoId(1));
+        let got: Vec<(String, String, u32)> = out
+            .edges
+            .iter()
+            .map(|e| {
+                assert_eq!((e.from, e.category), (class_id, edge_category::USES));
+                let ev = Evidence::read(&e.cells).expect("evidence");
+                assert_eq!(ev.emitter, EMITTER);
+                (
+                    nav.name_by_id[&e.to].clone(),
+                    ev.rule.unwrap_or_default(),
+                    ev.line.unwrap_or(0),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("onResize".to_string(), "host_listener".to_string(), 2),
+                ("isOpen".to_string(), "host_binding".to_string(), 4),
+                ("title".to_string(), "input_setter".to_string(), 5),
+                ("canvas".to_string(), "query_setter".to_string(), 6),
+            ]
+        );
+        assert_eq!(
+            out.marker("m.ts").as_deref(),
+            Some(
+                "[angular-template] inline file=m.ts components=1 calls=0 uses=4 unbound=0 shadowed=0 unread=0 no_class=0 receivers=0 decorated=4"
+            )
+        );
     }
 }

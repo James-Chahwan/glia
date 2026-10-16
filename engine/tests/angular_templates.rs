@@ -397,3 +397,248 @@ fn a_watch_update_of_the_template_equals_a_clean_build() {
         .collect();
     assert_eq!(calls, ["cancel", "isLocked", "totalLabel"]);
 }
+
+// ---------------------------------------------------------------------------
+// DT.5c — template receivers and decorator-bound members
+// ---------------------------------------------------------------------------
+//
+// The fixture is `bench/substrate-gap/fixtures/angular-template-receivers`.
+// `ProfileCardComponent`'s inline template calls `theme.toggle()` (an
+// `inject(ThemeService)` field) and `auth.logout()` (a `public auth:
+// AuthService` constructor property): receiver CallSites from the CLASS,
+// bound by the graph's receiver-type branch through the member's declared
+// type. `auth.session.end()` is two hops and the `@for` loop variable `auth`
+// shadows the member in `auth.stop()`. `SheetComponent` / `QrComponent`'s
+// decorator-bound members are USES from their class at the decorator's row.
+
+const RECV_FIXTURE: &str = "../bench/substrate-gap/fixtures/angular-template-receivers";
+const RECV_FILES: [&str; 6] = [
+    "package.json",
+    "src/app/core/auth.service.ts",
+    "src/app/core/theme.service.ts",
+    "src/app/profile/profile-card.component.ts",
+    "src/app/shared/qr.component.ts",
+    "src/app/shared/sheet.component.ts",
+];
+const CARD: &str = "src::app::profile::profile-card.component::ProfileCardComponent";
+const SHEET: &str = "src::app::shared::sheet.component::SheetComponent";
+const QR: &str = "src::app::shared::qr.component::QrComponent";
+const AUTH: &str = "src::app::core::auth.service";
+const THEME: &str = "src::app::core::theme.service";
+
+fn write_recv_fixture(dir: &Path) {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(RECV_FIXTURE);
+    for f in RECV_FILES {
+        let body = std::fs::read_to_string(src.join(f)).unwrap_or_else(|e| panic!("read {f}: {e}"));
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, body).expect("write");
+    }
+}
+
+/// Every edge of `cat` out of CLASS `class`, as (target qname, emitter, rule,
+/// evidence file, 0-based line), sorted.
+fn qualified_edges_from(
+    m: &MergedGraph,
+    class: &str,
+    cat: EdgeCategoryId,
+) -> Vec<(String, String, String, String, u32)> {
+    let mut out = Vec::new();
+    for g in &m.graphs {
+        for e in &g.edges {
+            let from_is_class = g.nav.qname_by_id.get(&e.from).map(String::as_str) == Some(class)
+                && g.nav.kind_by_id.get(&e.from) == Some(&node_kind::CLASS);
+            if e.category != cat || !from_is_class {
+                continue;
+            }
+            let to = g.nav.qname_by_id.get(&e.to).expect("target qname");
+            let ev = Evidence::read(&e.cells).expect("every edge carries EVIDENCE");
+            out.push((
+                to.clone(),
+                ev.emitter,
+                ev.rule.unwrap_or_default(),
+                ev.file.unwrap_or_default(),
+                ev.line.expect("located"),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+fn located(
+    to: &str,
+    emitter: &str,
+    rule: &str,
+    file: &str,
+    line: u32,
+) -> (String, String, String, String, u32) {
+    (
+        to.to_string(),
+        emitter.to_string(),
+        rule.to_string(),
+        file.to_string(),
+        line,
+    )
+}
+
+fn dead_rows(m: &MergedGraph) -> Vec<String> {
+    let rep = gaps_report(m, &[], &GapsOptions::default()).expect("known categories");
+    rep.rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect()
+}
+
+#[test]
+fn template_receivers_call_the_members_declared_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_recv_fixture(dir.path());
+    let m = generate_one(dir.path().to_str().expect("utf-8 temp path"))
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged;
+    let card = "src/app/profile/profile-card.component.ts";
+    // 0-based rows: the file's 1-based lines 10 and 9 minus one.
+    assert_eq!(
+        qualified_edges_from(&m, CARD, edge_category::CALLS),
+        vec![
+            located(
+                &format!("{AUTH}::AuthService::logout"),
+                "graph:calls",
+                "receiver_type",
+                card,
+                9
+            ),
+            located(
+                &format!("{THEME}::ThemeService::toggle"),
+                "graph:calls",
+                "receiver_type",
+                card,
+                8
+            ),
+        ],
+        "a two-hop chain, a loop variable's call and an uncalled method bind nothing"
+    );
+    assert!(qualified_edges_from(&m, CARD, edge_category::USES).is_empty());
+    let sheet = "src/app/shared/sheet.component.ts";
+    let ng = "extractor:angular_template";
+    assert_eq!(
+        qualified_edges_from(&m, SHEET, edge_category::USES),
+        vec![
+            located(&format!("{SHEET}::isOpen"), ng, "host_binding", sheet, 13),
+            located(
+                &format!("{SHEET}::onResize"),
+                ng,
+                "host_listener",
+                sheet,
+                10
+            ),
+            located(&format!("{SHEET}::title"), ng, "input_setter", sheet, 16),
+        ]
+    );
+    let qr = "src/app/shared/qr.component.ts";
+    assert_eq!(
+        qualified_edges_from(&m, QR, edge_category::USES),
+        vec![
+            located(&format!("{QR}::canvas"), ng, "query_setter", qr, 7),
+            located(&format!("{QR}::link"), ng, "input_setter", qr, 4),
+        ]
+    );
+    for class in [SHEET, QR] {
+        assert!(qualified_edges_from(&m, class, edge_category::CALLS).is_empty());
+    }
+    let dead = dead_rows(&m);
+    for live in [
+        format!("{THEME}::ThemeService::toggle"),
+        format!("{AUTH}::AuthService::logout"),
+        format!("{SHEET}::onResize"),
+        format!("{SHEET}::isOpen"),
+        format!("{SHEET}::title"),
+        format!("{QR}::link"),
+        format!("{QR}::canvas"),
+    ] {
+        assert!(!dead.contains(&live), "{live} is bound: {dead:?}");
+    }
+    for gone in [
+        format!("{AUTH}::Session"),
+        format!("{AUTH}::Session::end"),
+        format!("{AUTH}::AuthService::stop"),
+        format!("{THEME}::ThemeService::set"),
+        format!("{SHEET}::close"),
+        format!("{QR}::redraw"),
+    ] {
+        assert!(
+            dead.contains(&gone),
+            "{gone} stays a dead_symbol row: {dead:?}"
+        );
+    }
+}
+
+/// A `templateUrl` template's receiver calls are CallSites too, at the
+/// component's `templateUrl` row in its TS file (a CallSite has no file); an
+/// edit to the template alone rebinds a cache-served component exactly as a
+/// clean build does, with no duplicated site.
+#[test]
+fn template_url_receivers_sit_at_the_template_url_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_recv_fixture(dir.path());
+    let badge = dir.path().join("src/app/profile/badge.component.ts");
+    std::fs::write(
+        &badge,
+        "import { Component, inject } from '@angular/core';\n\
+         import { ThemeService } from '../core/theme.service';\n\
+         \n\
+         @Component({\n\
+         \x20 selector: 'ks-badge',\n\
+         \x20 templateUrl: './badge.component.html',\n\
+         })\n\
+         export class BadgeComponent {\n\
+         \x20 private readonly theme = inject(ThemeService);\n\
+         }\n",
+    )
+    .expect("write badge");
+    let html = dir.path().join("src/app/profile/badge.component.html");
+    std::fs::write(
+        &html,
+        "<b>badge</b>\n<i (click)=\"theme.set(true)\">dark</i>\n",
+    )
+    .expect("write template");
+    let repo = dir.path().to_str().expect("utf-8 temp path");
+    let class = "src::app::profile::badge.component::BadgeComponent";
+    let ts = "src/app/profile/badge.component.ts";
+    let mut cache = ParseCache::new();
+    let cold = generate_one_with_cache(repo, &mut cache)
+        .expect("cold build")
+        .merged;
+    assert_eq!(
+        qualified_edges_from(&cold, class, edge_category::CALLS),
+        vec![located(
+            &format!("{THEME}::ThemeService::set"),
+            "graph:calls",
+            "receiver_type",
+            ts,
+            5
+        )]
+    );
+    std::fs::write(&html, "<i (click)=\"theme.toggle()\">dark</i>\n").expect("edit template");
+    let warm = generate_one_with_cache(repo, &mut cache)
+        .expect("warm build")
+        .merged;
+    let clean = generate_one(repo).expect("clean build").merged;
+    let calls = qualified_edges_from(&warm, class, edge_category::CALLS);
+    assert_eq!(
+        calls,
+        qualified_edges_from(&clean, class, edge_category::CALLS)
+    );
+    assert_eq!(
+        calls,
+        vec![located(
+            &format!("{THEME}::ThemeService::toggle"),
+            "graph:calls",
+            "receiver_type",
+            ts,
+            5
+        )]
+    );
+}

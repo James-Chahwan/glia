@@ -26,7 +26,15 @@
 //! `template_ref`, EVIDENCE `extractor:angular_template` at the template's
 //! repo-relative path and 0-based row, so the evidence fill never moves it.
 //! An edge the parse already holds for the same (CLASS, METHOD, category)
-//! (a host binding's, say) is kept and the template's dropped. A `templateUrl`
+//! (a host binding's, say) is kept and the template's dropped.
+//!
+//! DT.5c: a template call through a component member (`theme.toggle()`) is a
+//! receiver CallSite from the CLASS (`this.theme`), pushed into the parse's
+//! calls before the graph build reads them, so the graph binds it through
+//! the member's declared type. A CallSite has no file and the graph locates a
+//! CALLS in its caller's file, so it sits at the component's `templateUrl`
+//! row in its TS file (`BindSite::call_row`), not the template's. A site the
+//! parse already holds (same caller and receiver) is kept. A `templateUrl`
 //! naming no walked file (outside the walk, gated, a typo) counts `missing`
 //! and binds nothing; a template no `templateUrl` names binds nothing.
 //!
@@ -37,7 +45,9 @@
 //!
 //! fired_on, on stderr, once per repo where a component names a templateUrl:
 //! `[angular-template] external repo=<label> components=<c> templates=<t>
-//! missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x>`.
+//! missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x>
+//! receivers=<v>`. Decorator-bound members are the component file's own
+//! text, bound per file by `bind_inline` (its `decorated=` field).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -68,11 +78,13 @@ pub(super) struct TemplateUrlStats {
     pub(super) shadowed: usize,
     /// Decorators whose class is no CLASS of the component file's parse.
     pub(super) no_class: usize,
+    /// DT.5c: receiver CallSites the templates added to the parses.
+    pub(super) receivers: usize,
 }
 
 impl TemplateUrlStats {
     /// fired_on marker, once per repo with a `templateUrl` component:
-    ///   `[angular-template] external repo=<label> components=<c> templates=<t> missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x>`
+    ///   `[angular-template] external repo=<label> components=<c> templates=<t> missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x> receivers=<v>`
     pub(super) fn report(&self, repo_label: &str) {
         if let Some(line) = self.marker(repo_label) {
             eprintln!("{line}");
@@ -82,7 +94,7 @@ impl TemplateUrlStats {
     fn marker(&self, repo_label: &str) -> Option<String> {
         (self.components > 0).then(|| {
             format!(
-                "[angular-template] external repo={repo_label} components={} templates={} missing={} calls={} uses={} unbound={} shadowed={} no_class={}",
+                "[angular-template] external repo={repo_label} components={} templates={} missing={} calls={} uses={} unbound={} shadowed={} no_class={} receivers={}",
                 self.components,
                 self.templates,
                 self.missing,
@@ -90,7 +102,8 @@ impl TemplateUrlStats {
                 self.uses,
                 self.unbound,
                 self.shadowed,
-                self.no_class
+                self.no_class,
+                self.receivers
             )
         })
     }
@@ -145,7 +158,7 @@ pub(super) fn graft_template_urls(
         let module_qname = modules.module_qname(path);
         let candidates = by_module.get(&modules.module_id(path, repo).0);
         for dc in decorated {
-            let Some((url, _row)) = &dc.template_url else {
+            let Some((url, url_row)) = &dc.template_url else {
                 continue;
             };
             stats.components += 1;
@@ -188,6 +201,7 @@ pub(super) fn graft_template_urls(
                 path: template_path,
                 base_row: 0,
                 host: false,
+                call_row: Some(*url_row),
             };
             let bound = crate::parallel::quiet(|| {
                 let refs = angular_template::scan_template(text);
@@ -214,6 +228,16 @@ pub(super) fn graft_template_urls(
                     stats.uses += 1;
                 }
                 fp.edges.push(e);
+            }
+            for c in binding.call_sites {
+                let held = fp
+                    .calls
+                    .iter()
+                    .any(|x| x.from == c.from && x.qualifier == c.qualifier);
+                if !held {
+                    stats.receivers += 1;
+                    fp.calls.push(c);
+                }
             }
         }
     }
@@ -289,7 +313,7 @@ mod tests {
         assert_eq!(
             s.marker("web").as_deref(),
             Some(
-                "[angular-template] external repo=web components=2 templates=2 missing=0 calls=5 uses=1 unbound=0 shadowed=0 no_class=0"
+                "[angular-template] external repo=web components=2 templates=2 missing=0 calls=5 uses=1 unbound=0 shadowed=0 no_class=0 receivers=0"
             )
         );
     }

@@ -116,6 +116,77 @@ pub struct DecoratedClass {
     pub template_unread: bool,
     /// The `host:` object's entries with a quoted value, in source order.
     pub host: Vec<HostEntry>,
+    /// DT.5c: the class body's members Angular itself invokes, bound by a
+    /// member decorator ([`MemberDecorator`]), in source order.
+    pub members: Vec<DecoratedMember>,
+}
+
+/// DT.5c: a member decorator whose member Angular calls: on a host event
+/// (`@HostListener`), to read a host binding (`@HostBinding`), on an input
+/// write (`@Input`) or a view / content query update (`@ViewChild`,
+/// `@ViewChildren`, `@ContentChild`, `@ContentChildren`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberDecorator {
+    HostListener,
+    HostBinding,
+    Input,
+    Query,
+}
+
+impl MemberDecorator {
+    /// The decorator named `name` (`HostListener`, `ViewChild`, ..).
+    fn named(name: &[u8]) -> Option<Self> {
+        Some(match name {
+            b"HostListener" => Self::HostListener,
+            b"HostBinding" => Self::HostBinding,
+            b"Input" => Self::Input,
+            b"ViewChild" | b"ViewChildren" | b"ContentChild" | b"ContentChildren" => Self::Query,
+            _ => return None,
+        })
+    }
+
+    /// The EVIDENCE rule of the USES edge the bound member gets.
+    pub fn rule(self) -> &'static str {
+        match self {
+            Self::HostListener => "host_listener",
+            Self::HostBinding => "host_binding",
+            Self::Input => "input_setter",
+            Self::Query => "query_setter",
+        }
+    }
+
+    /// The member shapes Angular invokes through this decorator: a
+    /// `@HostListener` method, a `@HostBinding` getter or method, an `@Input`
+    /// or query setter. A decorated field is none of them.
+    fn accepts(self, shape: MemberShape) -> bool {
+        matches!(
+            (self, shape),
+            (Self::HostListener, MemberShape::Method)
+                | (Self::HostBinding, MemberShape::Getter | MemberShape::Method)
+                | (Self::Input | Self::Query, MemberShape::Setter)
+        )
+    }
+}
+
+/// DT.5c: one decorator-bound member of a decorated class: the decorator,
+/// the member's simple name (a getter / setter is its property name) and the
+/// 0-based row of the decorator's `@` in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecoratedMember {
+    pub decorator: MemberDecorator,
+    pub name: String,
+    pub row: u32,
+}
+
+/// The class member that follows a member decorator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberShape {
+    /// `name(` (or `name<T>(`).
+    Method,
+    /// `get name(`.
+    Getter,
+    /// `set name(`.
+    Setter,
 }
 
 /// An inline template literal: its raw content (escapes kept, so offsets stay
@@ -148,6 +219,9 @@ pub fn decorated_classes(source: &str) -> Vec<DecoratedClass> {
         ("@Directive(", node_kind::DIRECTIVE),
     ];
     let mut found: Vec<(usize, DecoratedClass)> = Vec::new();
+    // DT.5c: the source with `//` and `/* */` comments blanked (offsets and
+    // newlines kept), read for the class bodies' member decorators.
+    let mut masked: Option<Vec<u8>> = None;
     for &(needle, kind) in DECORATORS {
         let mut from = 0;
         while let Some(rel) = source[from..].find(needle) {
@@ -158,13 +232,21 @@ pub fn decorated_classes(source: &str) -> Vec<DecoratedClass> {
                 continue;
             };
             let close = arg + off;
+            let class = next_class(&source[close + 1..]);
+            let b = masked.get_or_insert_with(|| mask_ts_comments(source.as_bytes()));
+            let members = class
+                .as_ref()
+                .and_then(|(_, at)| class_body(b, close + 1 + at))
+                .map(|body| member_decorators(b, source, body))
+                .unwrap_or_default();
             let mut dc = DecoratedClass {
-                name: find_next_class_name(&source[close + 1..]),
+                name: class.map(|(name, _)| name),
                 kind,
                 template: None,
                 template_url: None,
                 template_unread: false,
                 host: Vec::new(),
+                members,
             };
             read_metadata(source, arg, close, &mut dc);
             found.push((pos, dc));
@@ -409,8 +491,19 @@ fn find_balanced_paren(s: &str) -> Option<usize> {
 /// Skips whitespace, line/block comments, and the `export`/`default`/
 /// `abstract` modifiers commonly preceding `class` in TS.
 fn find_next_class_name(s: &str) -> Option<String> {
-    for line in s.lines() {
+    next_class(s).map(|(name, _)| name)
+}
+
+/// [`find_next_class_name`]'s walk, also returning the byte offset in `s`
+/// just past the class name (DT.5c reads the class body from there).
+fn next_class(s: &str) -> Option<(String, usize)> {
+    let mut at = 0;
+    for line in s.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
         let t = line.trim_start();
+        let t_at = start + (line.len() - t.len());
+        let t = t.trim_end();
         if t.is_empty()
             || t.starts_with("//")
             || t.starts_with("/*")
@@ -419,8 +512,8 @@ fn find_next_class_name(s: &str) -> Option<String> {
         {
             continue;
         }
-        if let Some(name) = extract_class_name(t) {
-            return Some(name);
+        if let Some((name, end)) = class_name_span(t) {
+            return Some((name, t_at + end));
         }
         // If the line starts with another `@<Decorator>` (additional decorators
         // are legal in TS), keep scanning rather than aborting.
@@ -438,19 +531,245 @@ fn find_next_class_name(s: &str) -> Option<String> {
 /// `default` and `abstract` modifiers (CH.1: `export abstract class X` behind
 /// a decorator is a decorated class like any other).
 fn extract_class_name(line: &str) -> Option<String> {
+    class_name_span(line).map(|(name, _)| name)
+}
+
+/// [`extract_class_name`] with the byte offset in `line` past the name.
+fn class_name_span(line: &str) -> Option<(String, usize)> {
     let trimmed = line
         .trim_start_matches("export ")
         .trim_start_matches("default ")
         .trim_start_matches("abstract ");
     let rest = trimmed.strip_prefix("class ")?;
+    let rest_at = line.len() - rest.len();
     let name_end = rest
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
         .unwrap_or(rest.len());
-    if name_end == 0 {
-        None
-    } else {
-        Some(rest[..name_end].to_string())
+    (name_end > 0).then(|| (rest[..name_end].to_string(), rest_at + name_end))
+}
+
+// ----------------------------------------------------------------------------
+// DT.5c: member decorators in a class body
+// ----------------------------------------------------------------------------
+
+/// `src` with every `//` and `/* */` comment turned to spaces (newlines
+/// kept, so offsets and rows stay the file's); string and template literals
+/// are skipped whole, so a `//` inside a URL masks nothing.
+fn mask_ts_comments(src: &[u8]) -> Vec<u8> {
+    let mut b = src.to_vec();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b'\'' | b'"' | b'`' => i = skip_string(&b, i, n),
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < n && b[i] != b'\n' {
+                    b[i] = b' ';
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let end = b[i + 2..]
+                    .windows(2)
+                    .position(|w| w == b"*/")
+                    .map_or(n, |p| i + 2 + p + 2);
+                for c in &mut b[i..end] {
+                    if *c != b'\n' {
+                        *c = b' ';
+                    }
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
     }
+    b
+}
+
+/// The body `(start, end)` of the class whose name ends at `b[from]`: past
+/// the `{` that opens it (after `extends` / `implements` clauses, their
+/// generic and call arguments skipped) up to its matching `}`. `None` when a
+/// `;` or the end comes first, or the body never closes.
+fn class_body(b: &[u8], from: usize) -> Option<(usize, usize)> {
+    let n = b.len();
+    let mut depth = 0usize;
+    let mut i = from;
+    let open = loop {
+        let c = *b.get(i)?;
+        match c {
+            b'\'' | b'"' | b'`' => {
+                i = skip_string(b, i, n);
+                continue;
+            }
+            b'(' | b'<' | b'[' => depth += 1,
+            // `=>` in a generic argument (`Base<() => void>`) closes nothing.
+            b'>' if i > 0 && b[i - 1] == b'=' => {}
+            b')' | b'>' | b']' => depth = depth.saturating_sub(1),
+            b'{' if depth == 0 => break i,
+            b';' if depth == 0 => return None,
+            _ => {}
+        }
+        i += 1;
+    };
+    let close = bracket_close(b, open)?;
+    Some((open + 1, close))
+}
+
+/// With `b[open]` an opening bracket, the offset of the bracket that closes
+/// it (strings skipped, every bracket kind nested).
+fn bracket_close(b: &[u8], open: usize) -> Option<usize> {
+    let n = b.len();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < n {
+        match b[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_string(b, i, n);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The member decorators at the top level of the class body `b[s..e]`
+/// (comments already masked), each with the member it binds when that member
+/// is a shape the decorator invokes ([`MemberDecorator::accepts`]).
+fn member_decorators(b: &[u8], source: &str, (s, e): (usize, usize)) -> Vec<DecoratedMember> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut i = s;
+    while i < e {
+        match b[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_string(b, i, e);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b'@' if depth == 0 => {
+                let Some((ns, ne)) = ident_span(b, i + 1, e) else {
+                    i += 1;
+                    continue;
+                };
+                if let Some(decorator) = MemberDecorator::named(&b[ns..ne])
+                    && let Some(member_at) = decorator_end(b, ne, e)
+                    && let Some((shape, name)) = member_after(b, member_at, e)
+                    && decorator.accepts(shape)
+                {
+                    out.push(DecoratedMember {
+                        decorator,
+                        name,
+                        row: glia_code_domain::line_of(source, i),
+                    });
+                }
+                i = ne;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The identifier starting at `b[i]` (not a digit), within `end`.
+fn ident_span(b: &[u8], i: usize, end: usize) -> Option<(usize, usize)> {
+    let c = *b.get(i).filter(|_| i < end)?;
+    if !is_ident_byte(c) || c.is_ascii_digit() {
+        return None;
+    }
+    let mut j = i;
+    while j < end && is_ident_byte(b[j]) {
+        j += 1;
+    }
+    Some((i, j))
+}
+
+/// Past a decorator's call arguments: with `b[ne]` just after `@Name`, the
+/// offset after its `(..)`; `None` when no `(` follows (`@Input` written
+/// without a call is no Angular decorator).
+fn decorator_end(b: &[u8], ne: usize, end: usize) -> Option<usize> {
+    let p = skip_ws(b, ne, end);
+    if b.get(p) != Some(&b'(') || p >= end {
+        return None;
+    }
+    let close = bracket_close(b, p).filter(|&c| c < end)?;
+    Some(close + 1)
+}
+
+/// The class member a decorator ending at `b[i]` decorates: further
+/// decorators (`@X(..)` / `@X`), the modifiers `public private protected
+/// readonly static async override` and whitespace (blank and masked comment
+/// lines included) are skipped, then `get name(` / `set name(` / `name(` (or
+/// `name<T>(`). A field (`name = ..`, `name: T`, `name!: T`) is `None`.
+fn member_after(b: &[u8], mut i: usize, end: usize) -> Option<(MemberShape, String)> {
+    const MODIFIERS: &[&[u8]] = &[
+        b"public",
+        b"private",
+        b"protected",
+        b"readonly",
+        b"static",
+        b"async",
+        b"override",
+    ];
+    let (ws, we) = loop {
+        i = skip_ws(b, i, end);
+        if b.get(i) == Some(&b'@') && i < end {
+            let (_, ne) = ident_span(b, i + 1, end)?;
+            i = decorator_end(b, ne, end).unwrap_or(ne);
+            continue;
+        }
+        let (ws, we) = ident_span(b, i, end)?;
+        let after = skip_ws(b, we, end);
+        // A modifier is followed by more of the member; `async(` or
+        // `static = 1` names a member of that name.
+        if MODIFIERS.contains(&&b[ws..we]) && ident_span(b, after, end).is_some() {
+            i = we;
+            continue;
+        }
+        break (ws, we);
+    };
+    let word = &b[ws..we];
+    let j = skip_ws(b, we, end);
+    if matches!(word, b"get" | b"set")
+        && let Some((ns, ne)) = ident_span(b, j, end)
+    {
+        let k = skip_ws(b, ne, end);
+        if b.get(k) != Some(&b'(') || k >= end {
+            return None;
+        }
+        let shape = if word == b"get" {
+            MemberShape::Getter
+        } else {
+            MemberShape::Setter
+        };
+        return Some((shape, String::from_utf8_lossy(&b[ns..ne]).into_owned()));
+    }
+    matches!(b.get(j), Some(b'(' | b'<'))
+        .then(|| {
+            (
+                MemberShape::Method,
+                String::from_utf8_lossy(word).into_owned(),
+            )
+        })
+        .filter(|_| j < end)
+}
+
+fn skip_ws(b: &[u8], mut i: usize, end: usize) -> usize {
+    while i < end && i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -760,5 +1079,89 @@ RouterModule.forRoot(routes);
                 ("FilterDataService".to_string(), node_kind::SERVICE),
             ]
         );
+    }
+
+    fn members(src: &str) -> Vec<(MemberDecorator, String, u32)> {
+        decorated_classes(src)
+            .into_iter()
+            .flat_map(|d| d.members)
+            .map(|m| (m.decorator, m.name, m.row))
+            .collect()
+    }
+
+    fn m(d: MemberDecorator, name: &str, row: u32) -> (MemberDecorator, String, u32) {
+        (d, name.to_string(), row)
+    }
+
+    /// DT.5c: the member decorators of a decorated class body, each with the
+    /// member Angular invokes and the decorator's 0-based row: a HostListener
+    /// with arguments, a stacked decorator, a HostBinding getter (its field
+    /// form binds nothing), an Input setter on its own line and on the
+    /// decorator's line, a `private set` behind a ViewChild, `async` /
+    /// `override` modifiers; an Input field and commented decorators read as
+    /// nothing.
+    #[test]
+    fn decorated_classes_read_member_decorators() {
+        use MemberDecorator::{HostBinding, HostListener, Input, Query};
+        let src = "import { Component } from '@angular/core';\n\
+                   @Component({ selector: 'x', template: '<i></i>' })\n\
+                   export class SheetComponent extends Base<() => void> implements OnInit {\n\
+                   \x20 open = false;\n\
+                   \x20 @HostListener('window:resize', ['$event'])\n\
+                   \x20 onResize(e: Event): void { const o = { a: () => {} }; }\n\
+                   \x20 @HostListener('document:keydown.escape')\n\
+                   \x20 @Deprecated()\n\
+                   \x20 // keeps the sheet open on purpose\n\
+                   \x20 public async onEscape(): Promise<void> {}\n\
+                   \x20 @HostBinding('class.is-open')\n\
+                   \x20 get isOpen(): boolean { return this.open; }\n\
+                   \x20 @HostBinding('attr.role') role = 'dialog';\n\
+                   \x20 @Input()\n\
+                   \x20 set title(value: string) { this.open = value.length > 0; }\n\
+                   \x20 @Input() set link(value: string) {}\n\
+                   \x20 @Input() size = 1;\n\
+                   \x20 @Input({ required: true }) label!: string;\n\
+                   \x20 @ViewChild('qr')\n\
+                   \x20 private set canvas(el: unknown) {}\n\
+                   \x20 @ContentChildren(Item) override set items(q: unknown) {}\n\
+                   \x20 // @HostListener('click') onClick() {}\n\
+                   \x20 /* @Input() set gone(v: string) {} */\n\
+                   \x20 note = '@HostListener(\"x\") fake() {}';\n\
+                   \x20 close(): void { this.open = false; }\n\
+                   }\n\
+                   @HostListener('click') loose() {}\n";
+        assert_eq!(
+            members(src),
+            vec![
+                m(HostListener, "onResize", 4),
+                m(HostListener, "onEscape", 6),
+                m(HostBinding, "isOpen", 10),
+                m(Input, "title", 13),
+                m(Input, "link", 15),
+                m(Query, "canvas", 18),
+                m(Query, "items", 20),
+            ]
+        );
+        assert_eq!(MemberDecorator::Query.rule(), "query_setter");
+        assert_eq!(MemberDecorator::HostBinding.rule(), "host_binding");
+    }
+
+    /// DT.5c: the shapes each decorator accepts: a HostListener getter, an
+    /// Input getter and a HostBinding setter bind nothing; a HostBinding
+    /// method binds; a class with no body or a decorator with no call reads
+    /// nothing.
+    #[test]
+    fn member_decorators_bind_only_the_invoked_shape() {
+        use MemberDecorator::HostBinding;
+        let src = "@Directive({ selector: '[d]' })\n\
+                   export class D {\n\
+                   \x20 @HostListener('click') get clicked() { return 1; }\n\
+                   \x20 @Input() get value() { return 1; }\n\
+                   \x20 @HostBinding('class.on') set on(v: boolean) {}\n\
+                   \x20 @HostBinding('style.width') width() { return '1px'; }\n\
+                   \x20 @Input set bare(v: string) {}\n\
+                   }\n";
+        assert_eq!(members(src), vec![m(HostBinding, "width", 5)]);
+        assert!(members("@Component({})\ndeclare class X;\n").is_empty());
     }
 }

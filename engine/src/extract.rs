@@ -528,7 +528,10 @@ pub(crate) fn apply_cross_cutting_extractors(
         // the binding's row. The template is this file's text, so the edges
         // are cached with the parse; `bind_inline` prints the per-file
         // `[angular-template] inline` marker. `stamp_missing` is a backstop:
-        // every edge carries its own EVIDENCE.
+        // every edge carries its own EVIDENCE. DT.5c: a template call through
+        // a member (`theme.toggle()`) is a receiver CallSite from the CLASS,
+        // bound by the graph through the member's declared type, and a
+        // decorator-bound member (`@HostListener`, `@Input() set ..`) a USES.
         let mut out = angular_template::bind_inline(
             source,
             path,
@@ -539,6 +542,7 @@ pub(crate) fn apply_cross_cutting_extractors(
         );
         evidence::stamp_missing(&mut out.edges, angular_template::EMITTER);
         fp.edges.extend(out.edges);
+        fp.calls.extend(out.call_sites);
     }
     if matches!(lang, "vue" | "typescript") {
         let module_qname = fp
