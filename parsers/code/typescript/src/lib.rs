@@ -21,7 +21,7 @@ use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint;
 use glia_code_domain::evidence;
-use glia_code_domain::wire::{ModelField, ModelSchema, WireFormat};
+use glia_code_domain::wire::{self, ModelField, ModelSchema, Shape, ShapeField, WireFormat};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -535,6 +535,10 @@ struct EndpointCandidate {
     /// dropped from `path` and `template` ([`query_suffix`]: the `const` it
     /// names, or `inline`). Serialised as `"query"` on ENDPOINT_HIT, last.
     query: Option<String>,
+    /// DT.1d: the wire shapes the call site states. `response` and the
+    /// request `resolve_intra_file` picks ([`request_of`]) are spliced onto
+    /// ENDPOINT_HIT after every other key (`wire::append_hit_fields`).
+    wire: WireRead,
 }
 
 /// The path text of an HTTP call whose URL argument could not be read.
@@ -3260,14 +3264,23 @@ fn try_detect_endpoint(
             None => return,
         };
         let mut arg = classify_path_arg(first, src);
-        let method = fetch_method_from_opts(args.named_child(1), src).unwrap_or_else(|| {
+        let init = args.named_child(1);
+        let method = fetch_method_from_opts(init, src).unwrap_or_else(|| {
             // Method override is opaque (variable, spread, conditional) — drop
             // confidence one tier.
-            if args.named_child(1).is_some() {
+            if init.is_some() {
                 arg.confidence = downgrade(arg.confidence);
             }
             "GET".to_string()
         });
+        // DT.1d: the init object's `body: JSON.stringify(<expr>)` and the
+        // awaited response's `.json() as T`.
+        let wire = WireRead {
+            fetch: true,
+            response: fetch_response(call, src).map(|s| (s, WireSource::Fetch)),
+            fetch_request: init.and_then(|i| fetch_request(i, src)),
+            ..WireRead::default()
+        };
         push_endpoint(
             call,
             from,
@@ -3275,10 +3288,19 @@ fn try_detect_endpoint(
             method,
             arg,
             CallBase::Fetch,
+            wire,
             acc,
         );
         return;
     }
+
+    // DT.1d: `await recv.verb<T>(..)` parses with the `await` inside the
+    // callee ([`awaited_generic_callee`]); its member is the callee, and the
+    // hit is located at the member, where the unawaited form's call starts.
+    let (func, awaited_generic) = match awaited_generic_callee(call) {
+        Some((member, _)) => (member, true),
+        None => (func, false),
+    };
 
     // Shapes 1 & 2 — member call `<obj>.<method>(...)`.
     if func.kind() != "member_expression" {
@@ -3330,27 +3352,33 @@ fn try_detect_endpoint(
         None => return,
     };
     let arg = classify_path_arg(first, src);
+    let wire = member_call_wire(call, method_lower, args, awaited_generic, src);
     push_endpoint(
-        call,
+        if awaited_generic { func } else { call },
         from,
         enclosing_class,
         method_lower.to_uppercase(),
         arg,
         base,
+        wire,
         acc,
     );
 }
 
+/// `site` is the node the hit is located at: the call, or the callee member
+/// of an awaited generic call (DT.1d), whose call node starts at `await`.
+#[allow(clippy::too_many_arguments)]
 fn push_endpoint(
-    call: TsNode,
+    site: TsNode,
     from: NodeId,
     class: Option<NodeId>,
     method: String,
     arg: PathArg,
     base: CallBase,
+    wire: WireRead,
     acc: &mut Acc,
 ) {
-    let start = call.start_position();
+    let start = site.start_position();
     let (requires_import_alias, receiver_field) = match base {
         CallBase::Fetch => (None, None),
         CallBase::ThisField(field) => (None, Some(field)),
@@ -3394,6 +3422,7 @@ fn push_endpoint(
         read,
         alias,
         query,
+        wire,
     });
 }
 
@@ -4348,10 +4377,14 @@ fn downgrade(c: Confidence) -> Confidence {
 /// `alias` (DF.20) follows `wrapper_of`, skipped the same way: only a
 /// template that read a config-expression class member (`this.api`) names it.
 ///
-/// `query` (DT.4) is written last, skipped the same way: only a template whose
-/// trailing query-string substitution [`classify_template`] dropped names it
-/// (the `const` the substitution read, or `inline`).
-fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell {
+/// `query` (DT.4) is written after `alias`, skipped the same way: only a
+/// template whose trailing query-string substitution [`classify_template`]
+/// dropped names it (the `const` the substitution read, or `inline`).
+///
+/// `response` and then `request` (DT.1d) are spliced in last through
+/// `wire::append_hit_fields`, each only when the site states it: a hit with
+/// neither keeps HEAD's bytes. The endpoint fold appends `host` after them.
+fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>, request: Option<&Shape>) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
         method: &'a str,
@@ -4393,10 +4426,826 @@ fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell
         query: cand.query.as_deref(),
     })
     .unwrap_or_else(|_| String::from("{}"));
+    let response = cand.wire.response.as_ref().map(|(s, _)| s);
+    let json = wire::append_hit_fields(&json, response, request);
     Cell {
         kind: cell_type::ENDPOINT_HIT,
         payload: CellPayload::Json(json),
     }
+}
+
+// ============================================================================
+// DT.1d: client wire shapes
+// ============================================================================
+//
+// What an HTTP call site expects back (`response`) and sends (`request`), as
+// the site states it, spliced onto its ENDPOINT_HIT through
+// `wire::append_hit_fields`:
+//
+// - response: the call's first type argument for `get` / `post` / `put` /
+//   `patch` / `delete` on shape 1 (`this.<x>.<verb><T>(..)`) and shape 2 (an
+//   import alias, `axios.get<T>(..)`); for `fetch`, `(await fetch(..)).json()
+//   as T`, or on `const r = await fetch(..)` in the same callable,
+//   `(await r.json()) as T`, `r.json() as Promise<T>` or `const d: T = await
+//   r.json()`. No type argument, no response key. A typing after the call
+//   (ky's `.json<T>()`, an RxJS `map`) is not read.
+// - request: the body argument whose position the client fixes
+//   ([`request_of`]): Angular HttpClient's and axios's second argument of
+//   `post` / `put` / `patch`, ky's and got's `json:` option, fetch's
+//   `body: JSON.stringify(<expr>)`. A body is read as an object literal's
+//   keys, a declared type (a parameter or local annotation, `x as T`, `x
+//   satisfies T`, `new T()`) or, unread, open ([`body_shape`]); FormData /
+//   Blob / string bodies are no JSON body and write none.
+//
+// Type names stay unresolved text (`Order`): the models pass resolves them in
+// the hit file's module (DT.1g). Fired-on: `[ts-wire] responses=.. requests=..
+// (typed=.. inline=.. literal=.. annotated=.. fetch=..) request_unknown_client=..
+// awaited_generic=.. file=..`, per file with a shape or an awaited generic
+// endpoint.
+
+/// DT.1d: which reading produced a shape (the `[ts-wire]` counters).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireSource {
+    /// A type argument other than an inline object type (`get<Order[]>`).
+    Typed,
+    /// An inline object type argument (`get<{ items: Item[] }>`).
+    Inline,
+    /// An object-literal body (`{ status: 'cancelled' }`), at the call or in
+    /// the local it names.
+    Literal,
+    /// A body read through a declared type: a parameter or local annotation,
+    /// `x as T`, `x satisfies T`, `new T()`.
+    Annotated,
+    /// A body expression nothing states the type of: an open shape.
+    Unread,
+    /// A `fetch` call's `JSON.stringify` body or `.json() as T` result.
+    Fetch,
+}
+
+/// DT.1d: the shapes an HTTP call site states, read during the call walk.
+/// The tree is gone by `resolve_intra_file`, which picks the request
+/// ([`request_of`]) once the file's imports and field types are known.
+#[derive(Debug, Clone, Default)]
+struct WireRead {
+    /// Shape 3, `fetch(..)`.
+    fetch: bool,
+    /// The response shape.
+    response: Option<(Shape, WireSource)>,
+    /// `fetch`: the init object's `body: JSON.stringify(<expr>)`.
+    fetch_request: Option<(Shape, WireSource)>,
+    /// Shapes 1 / 2: the call has a second argument.
+    has_second: bool,
+    /// Shapes 1 / 2: the second argument read as a JSON body.
+    second: Option<(Shape, WireSource)>,
+    /// Shapes 1 / 2: the `json:` property of the second argument's object
+    /// literal (ky / got).
+    json_option: Option<(Shape, WireSource)>,
+    /// The callee was reached through [`awaited_generic_callee`].
+    awaited_generic: bool,
+}
+
+/// DT.1d: what [`request_of`] found for one emitted call site.
+enum RequestRead<'c> {
+    /// The client's body position, read (`None` when the call passes no JSON
+    /// body there).
+    Body(Option<&'c (Shape, WireSource)>),
+    /// A `post` / `put` / `patch` with a second argument on a receiver or
+    /// library whose body position is not known (`request_unknown_client`).
+    UnknownClient,
+    /// No body position: a verb the client sends no body with, or no second
+    /// argument.
+    NoBody,
+}
+
+/// DT.1d: the `[ts-wire]` counters of one file's emitted HTTP call sites.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct WireStats {
+    responses: usize,
+    requests: usize,
+    typed: usize,
+    inline: usize,
+    literal: usize,
+    annotated: usize,
+    fetch: usize,
+    unknown_client: usize,
+    awaited_generic: usize,
+}
+
+impl WireStats {
+    fn record(&mut self, cand: &EndpointCandidate, request: &RequestRead) {
+        let mut source = |s: WireSource| match s {
+            WireSource::Typed => self.typed += 1,
+            WireSource::Inline => self.inline += 1,
+            WireSource::Literal => self.literal += 1,
+            WireSource::Annotated => self.annotated += 1,
+            WireSource::Fetch => self.fetch += 1,
+            WireSource::Unread => {}
+        };
+        if let Some((_, s)) = &cand.wire.response {
+            source(*s);
+        }
+        if let RequestRead::Body(Some((_, s))) = request {
+            source(*s);
+        }
+        self.responses += usize::from(cand.wire.response.is_some());
+        self.requests += usize::from(matches!(request, RequestRead::Body(Some(_))));
+        self.unknown_client += usize::from(matches!(request, RequestRead::UnknownClient));
+        self.awaited_generic += usize::from(cand.wire.awaited_generic);
+    }
+
+    fn report(&self, file: &str) {
+        #[cfg(test)]
+        LAST_WIRE_STATS.with(|w| *w.borrow_mut() = self.clone());
+        if self.responses + self.requests + self.awaited_generic == 0 {
+            return;
+        }
+        eprintln!(
+            "[ts-wire] responses={} requests={} (typed={} inline={} literal={} annotated={} fetch={}) \
+             request_unknown_client={} awaited_generic={} file={file}",
+            self.responses,
+            self.requests,
+            self.typed,
+            self.inline,
+            self.literal,
+            self.annotated,
+            self.fetch,
+            self.unknown_client,
+            self.awaited_generic,
+        );
+    }
+}
+
+// The last file's `[ts-wire]` counters on this thread, which the tests read.
+#[cfg(test)]
+thread_local! {
+    static LAST_WIRE_STATS: std::cell::RefCell<WireStats> = std::cell::RefCell::new(WireStats::default());
+}
+
+/// The verbs whose type argument is the response (`head` / `options` carry
+/// no body back).
+const WIRE_RESPONSE_VERBS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+/// The declared types of a body that is no JSON value: the call sends the
+/// bytes or the form as they are, so it writes no `request`.
+const NON_JSON_BODY_TYPES: &[&str] = &[
+    "FormData",
+    "Blob",
+    "File",
+    "URLSearchParams",
+    "ArrayBuffer",
+    "ReadableStream",
+    "Uint8Array",
+    "string",
+    "String",
+];
+
+/// How deep an object-literal body's values are followed: the body's own
+/// keys, a nested literal's keys and the locals they name, then open.
+const BODY_DEPTH: u8 = 2;
+
+/// DT.1d: the callee member and the type arguments of an awaited generic
+/// call. tree-sitter-typescript 0.23.2 lists `[call_expression,
+/// instantiation_expression, binary_expression, await_expression]` as a
+/// conflict (define-grammar.js:77) and resolves `await recv.verb<T>(..)` as
+/// `call_expression(function: await_expression(member_expression),
+/// type_arguments, arguments)`: the `await` sits INSIDE the callee, so the
+/// call's `function` is no member. `None` for every other call, an
+/// unawaited generic call (`function: member_expression`) and an awaited
+/// call without type arguments (`await_expression(call_expression)`)
+/// included. The unary / update conflicts (`!x.get<T>(..)`) are not
+/// unwrapped. CallSites keep HEAD's reading ([`extract_call_qualifier`]).
+fn awaited_generic_callee<'t>(call: TsNode<'t>) -> Option<(TsNode<'t>, TsNode<'t>)> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "await_expression" {
+        return None;
+    }
+    let type_args = call.child_by_field_name("type_arguments")?;
+    let member = first_named(func)?;
+    (member.kind() == "member_expression").then_some((member, type_args))
+}
+
+/// DT.1d: the wire read of a shape-1 / shape-2 call `<recv>.<verb>(..)`: the
+/// response from its first type argument, and both body readings of its
+/// second argument (the argument itself, and its `json:` option), between
+/// which [`request_of`] picks.
+fn member_call_wire(call: TsNode, verb: &str, args: TsNode, awaited_generic: bool, src: &[u8]) -> WireRead {
+    let response = WIRE_RESPONSE_VERBS
+        .contains(&verb)
+        .then(|| call.child_by_field_name("type_arguments"))
+        .flatten()
+        .and_then(first_named)
+        .map(|t| {
+            let shape = ts_type_shape(t, src);
+            let source = if matches!(shape, Shape::Object { .. }) {
+                WireSource::Inline
+            } else {
+                WireSource::Typed
+            };
+            (shape, source)
+        });
+    let second = args.named_child(1).filter(|a| a.kind() != "comment");
+    WireRead {
+        fetch: false,
+        response,
+        fetch_request: None,
+        has_second: second.is_some(),
+        second: second.and_then(|a| body_shape(a, src)),
+        json_option: second
+            .and_then(|a| object_property(a, "json", src))
+            .and_then(|v| body_shape(v, src)),
+        awaited_generic,
+    }
+}
+
+/// DT.1d: the request of one emitted call site. `receiver_type` is a shape-1
+/// receiver field's declared type, `alias_module` the module a shape-2 alias
+/// is imported from.
+///
+/// - `fetch`: the `JSON.stringify` body.
+/// - a receiver field typed `HttpClient` (`private http: HttpClient`,
+///   `inject(HttpClient)`): the second argument of `post` / `put` / `patch`;
+///   `get` / `delete`'s second argument is an options object, never a body.
+/// - an alias imported from `axios`: the second argument of `post` / `put` /
+///   `patch` (`axios.post(url, data, config)`).
+/// - an alias imported from `ky` / `got`: the `json:` property of the second
+///   argument's object literal, any verb.
+/// - any other receiver or library: none; a `post` / `put` / `patch` with a
+///   second argument counts `request_unknown_client`.
+fn request_of<'c>(
+    cand: &'c EndpointCandidate,
+    receiver_type: Option<&str>,
+    alias_module: Option<&str>,
+) -> RequestRead<'c> {
+    let w = &cand.wire;
+    if w.fetch {
+        return RequestRead::Body(w.fetch_request.as_ref());
+    }
+    let body_verb = matches!(cand.method.as_str(), "POST" | "PUT" | "PATCH");
+    let second = || {
+        if body_verb && w.has_second {
+            RequestRead::Body(w.second.as_ref())
+        } else {
+            RequestRead::NoBody
+        }
+    };
+    let unknown = || {
+        if body_verb && w.has_second {
+            RequestRead::UnknownClient
+        } else {
+            RequestRead::NoBody
+        }
+    };
+    if cand.receiver_field.is_some() {
+        return match receiver_type {
+            Some("HttpClient") => second(),
+            _ => unknown(),
+        };
+    }
+    match alias_module {
+        Some("axios") => second(),
+        Some("ky" | "ky-universal" | "got") if w.has_second => RequestRead::Body(w.json_option.as_ref()),
+        Some("ky" | "ky-universal" | "got") => RequestRead::NoBody,
+        _ => unknown(),
+    }
+}
+
+/// DT.1d: the module the import binding `binding` comes from (`axios` for
+/// `import axios from 'axios'` / `import * as axios from 'axios'` /
+/// `import { default as axios } from 'axios'`).
+fn import_module<'i>(imports: &'i [ImportStmt], binding: &str) -> Option<&'i str> {
+    imports.iter().find_map(|imp| match &imp.target {
+        ImportTarget::Symbol {
+            module, name, alias, ..
+        } if alias.as_deref().unwrap_or(name.as_str()) == binding => Some(module.as_str()),
+        ImportTarget::Module {
+            path,
+            alias: Some(a),
+        } if a == binding => Some(path.as_str()),
+        _ => None,
+    })
+}
+
+/// DT.1d: a declared type as a wire [`Shape`].
+///
+/// - a type name (`Order`, `ns.Order`), an array of one (`Order[]`,
+///   `Array<Order>`, `ReadonlyArray<Order>`), a predefined type other than
+///   `any` / `unknown` / `object`, a literal type: [`Shape::named`] of the
+///   whitespace-collapsed text (one array layer peeled off, `array`);
+/// - an object type: [`Shape::Object`] of its property signatures (`?` or a
+///   top-level `| undefined` -> not required); an index signature or a
+///   computed key leaves it open; method signatures are skipped;
+/// - a union: its `null` / `undefined` members dropped, the one left read
+///   alone, else [`Shape::Union`] of the rest (`null | undefined` alone is
+///   `null`);
+/// - parenthesised and `readonly` types: their inner type;
+/// - `any` / `unknown` / `object`, every other generic (`Pick<..>`,
+///   `Partial<..>`, `ApiResponse<T>`, `Observable<T>`), an intersection, a
+///   tuple, a function, a conditional or a mapped type: [`Shape::Open`].
+fn ts_type_shape(ty: TsNode, src: &[u8]) -> Shape {
+    let written = || collapse_ws(text(ty, src));
+    match ty.kind() {
+        "type_annotation" | "parenthesized_type" | "readonly_type" => match first_named(ty) {
+            Some(inner) => ts_type_shape(inner, src),
+            None => Shape::open(&written()),
+        },
+        "union_type" => {
+            let mut members = Vec::new();
+            flatten_union(ty, &mut members);
+            let kept: Vec<TsNode> = members
+                .into_iter()
+                .filter(|m| !(m.kind() == "literal_type" && matches!(text(*m, src).trim(), "null" | "undefined")))
+                .collect();
+            match kept.as_slice() {
+                [] => Shape::named("null"),
+                [one] => ts_type_shape(*one, src),
+                many => Shape::Union(many.iter().map(|m| ts_type_shape(*m, src)).collect()),
+            }
+        }
+        "object_type" => object_type_shape(ty, src),
+        "predefined_type" => match text(ty, src).trim() {
+            t @ ("any" | "unknown" | "object") => Shape::open(t),
+            t => Shape::named(t),
+        },
+        "type_identifier" | "nested_type_identifier" | "array_type" | "literal_type" => Shape::named(&written()),
+        "generic_type" => {
+            let name = ty.child_by_field_name("name").map(|n| text(n, src));
+            let one_arg = ty
+                .child_by_field_name("type_arguments")
+                .is_some_and(|a| a.named_children(&mut a.walk()).filter(|c| c.kind() != "comment").count() == 1);
+            if one_arg && matches!(name, Some("Array" | "ReadonlyArray")) {
+                Shape::named(&written())
+            } else {
+                Shape::open(&written())
+            }
+        }
+        _ => Shape::open(&written()),
+    }
+}
+
+/// The members of a (left-nested) `union_type`, in source order.
+fn flatten_union<'t>(ty: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
+    let mut cursor = ty.walk();
+    for member in ty.named_children(&mut cursor) {
+        match member.kind() {
+            "union_type" => flatten_union(member, out),
+            "comment" => {}
+            _ => out.push(member),
+        }
+    }
+}
+
+/// An `object_type` as a [`Shape::Object`] ([`ts_type_shape`]); the key and
+/// optionality rules are DT.1c's ([`ts_interface_schema`]).
+fn object_type_shape(ty: TsNode, src: &[u8]) -> Shape {
+    let mut fields = Vec::new();
+    let mut open = false;
+    let mut cursor = ty.walk();
+    for member in ty.named_children(&mut cursor) {
+        match member.kind() {
+            "property_signature" => {
+                let Some(name) = member.child_by_field_name("name") else {
+                    continue;
+                };
+                let Some(key) = ts_property_key(name, src) else {
+                    open |= name.kind() == "computed_property_name";
+                    continue;
+                };
+                let t = member.child_by_field_name("type").and_then(first_named);
+                let optional = has_token(member, "?") || t.is_some_and(|t| ts_optional_type(t, src));
+                let shape = t.map_or_else(|| Shape::open("any"), |t| ts_type_shape(t, src));
+                fields.push(ShapeField::new(&key, !optional, shape));
+            }
+            "index_signature" => open = true,
+            _ => {}
+        }
+    }
+    Shape::Object { fields, open }
+}
+
+/// DT.1d: a body argument as a JSON request shape, and how it was read.
+///
+/// - an object literal: [`Shape::Object`] of its keys (`pair` and shorthand
+///   keys; a spread or a computed key leaves it open), each key's value read
+///   by [`value_shape`];
+/// - an identifier (or a shorthand property): the declared type of the name
+///   in its scope ([`declared_shape`]), else open;
+/// - `x as T` / `x satisfies T`: `T`; `new T(..)`: `T`;
+/// - a string, template, number, boolean, `null` or `undefined`: no JSON
+///   body (`None`), as is any shape naming a [`NON_JSON_BODY_TYPES`] type;
+/// - anything else (a member read, a call): open, its text as `raw`.
+fn body_shape(arg: TsNode, src: &[u8]) -> Option<(Shape, WireSource)> {
+    let (shape, source) = match arg.kind() {
+        "object" => (object_literal_shape(arg, src, BODY_DEPTH), WireSource::Literal),
+        "identifier" | "shorthand_property_identifier" => {
+            let name = text(arg, src);
+            if name == "undefined" {
+                return None;
+            }
+            declared_shape(arg, name, src, BODY_DEPTH).unwrap_or_else(|| (Shape::open(name), WireSource::Unread))
+        }
+        "as_expression" | "satisfies_expression" => match asserted_type(arg) {
+            Some(t) => (ts_type_shape(t, src), WireSource::Annotated),
+            None => return body_shape(first_named(arg)?, src),
+        },
+        "parenthesized_expression" | "non_null_expression" => return body_shape(first_named(arg)?, src),
+        "new_expression" => (constructed_shape(arg, src), WireSource::Annotated),
+        "string" | "template_string" | "number" | "true" | "false" | "null" | "undefined" => return None,
+        _ => (Shape::open(&collapse_ws(text(arg, src))), WireSource::Unread),
+    };
+    let non_json = matches!(&shape, Shape::Named { ty, array: false, .. } if NON_JSON_BODY_TYPES.contains(&ty.as_str()));
+    (!non_json).then_some((shape, source))
+}
+
+/// The type of `x as T` / `x satisfies T` (its second named child); `None`
+/// for `x as const`.
+fn asserted_type(expr: TsNode) -> Option<TsNode> {
+    let mut cursor = expr.walk();
+    expr.named_children(&mut cursor)
+        .filter(|c| c.kind() != "comment")
+        .nth(1)
+}
+
+/// `new T(..)` as the constructed type `T` (DT.1c's
+/// [`ts_initializer_type`]), open when the constructor is no name.
+fn constructed_shape(new_expr: TsNode, src: &[u8]) -> Shape {
+    match ts_initializer_type(new_expr, src).as_str() {
+        "any" => Shape::open(&collapse_ws(text(new_expr, src))),
+        ty => Shape::named(ty),
+    }
+}
+
+/// An object literal as a [`Shape::Object`] ([`body_shape`]); every listed key
+/// is present, so `required`. `depth` bounds how far nested literals and the
+/// locals their values name are followed.
+fn object_literal_shape(obj: TsNode, src: &[u8], depth: u8) -> Shape {
+    let mut fields = Vec::new();
+    let mut open = false;
+    let mut cursor = obj.walk();
+    for member in obj.named_children(&mut cursor) {
+        match member.kind() {
+            "pair" => {
+                let Some(key) = member.child_by_field_name("key").and_then(|k| ts_property_key(k, src)) else {
+                    open = true;
+                    continue;
+                };
+                let Some(value) = member.child_by_field_name("value") else {
+                    continue;
+                };
+                if let Some(shape) = value_shape(value, src, depth) {
+                    fields.push(ShapeField::new(&key, true, shape));
+                }
+            }
+            "shorthand_property_identifier" => {
+                let name = text(member, src);
+                if let Some(shape) = value_shape(member, src, depth) {
+                    fields.push(ShapeField::new(name, true, shape));
+                }
+            }
+            "spread_element" => open = true,
+            _ => {}
+        }
+    }
+    Shape::Object { fields, open }
+}
+
+/// One object-literal value as a shape: a literal by its JSON kind (DT.1c's
+/// [`ts_initializer_type`]: `string`, `number`, `boolean`, `null`, `any[]`,
+/// `new T()` -> `T`), a nested literal by its keys, a name by its declared
+/// type, `x as T` / `x satisfies T` by `T`, anything else open. `None` for a
+/// value JSON drops (`undefined`, a function).
+fn value_shape(value: TsNode, src: &[u8], depth: u8) -> Option<Shape> {
+    let shape = match value.kind() {
+        "string" | "template_string" | "number" | "true" | "false" | "null" | "array" => {
+            Shape::named(&ts_initializer_type(value, src))
+        }
+        "new_expression" => constructed_shape(value, src),
+        "object" if depth > 0 => object_literal_shape(value, src, depth - 1),
+        "identifier" | "shorthand_property_identifier" => {
+            let name = text(value, src);
+            if name == "undefined" {
+                return None;
+            }
+            match declared_shape(value, name, src, depth) {
+                Some((shape, _)) => shape,
+                None => Shape::open(name),
+            }
+        }
+        "as_expression" | "satisfies_expression" => match asserted_type(value) {
+            Some(t) => ts_type_shape(t, src),
+            None => return value_shape(first_named(value)?, src, depth),
+        },
+        "parenthesized_expression" | "non_null_expression" => return value_shape(first_named(value)?, src, depth),
+        "arrow_function" | "function_expression" | "generator_function" | "undefined" => return None,
+        _ => Shape::open(&collapse_ws(text(value, src))),
+    };
+    Some(shape)
+}
+
+/// Where a name a use reads is declared ([`declared_binding`]).
+enum Declared<'t> {
+    /// A `required_parameter` / `optional_parameter` (or an arrow's single
+    /// parameter) of an enclosing callable.
+    Param(TsNode<'t>),
+    /// A `variable_declarator` of a `const` / `let` / `var` the scope chain
+    /// declares before the use.
+    Var(TsNode<'t>),
+}
+
+/// DT.1d: the declared shape of the name `name` a use node reads: a
+/// parameter's annotation, else a declarator's annotation, `as T` /
+/// `satisfies T` value, `new T()` value or (within `depth`) object-literal
+/// value. `None` when the name is unbound, bound by a pattern, or declared
+/// with nothing that states its type (the caller reads it as open). A
+/// declaration is read, never an assignment: no value data-flow.
+fn declared_shape(use_node: TsNode, name: &str, src: &[u8], depth: u8) -> Option<(Shape, WireSource)> {
+    if depth == 0 {
+        return None;
+    }
+    match declared_binding(use_node, name, src)? {
+        Declared::Param(p) => {
+            let ty = p.child_by_field_name("type").and_then(first_named)?;
+            Some((ts_type_shape(ty, src), WireSource::Annotated))
+        }
+        Declared::Var(d) => {
+            if let Some(ty) = d.child_by_field_name("type").and_then(first_named) {
+                return Some((ts_type_shape(ty, src), WireSource::Annotated));
+            }
+            let value = d.child_by_field_name("value")?;
+            match value.kind() {
+                "as_expression" | "satisfies_expression" => {
+                    Some((ts_type_shape(asserted_type(value)?, src), WireSource::Annotated))
+                }
+                "new_expression" => Some((constructed_shape(value, src), WireSource::Annotated)),
+                "object" => Some((object_literal_shape(value, src, depth - 1), WireSource::Literal)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// DT.1d: the declaration of `name` that a use at `use_node` reads, walking
+/// the scope chain outwards: each block's (or the module's) last declarator
+/// of `name` before the use, then each enclosing callable's parameters. A
+/// binding by a destructuring pattern, a loop or catch variable, a hoisted
+/// `var`, a function or a class (CH.3a's [`binds_outside_block`]) or one
+/// declared only after the use stops the walk (`None`).
+fn declared_binding<'t>(use_node: TsNode<'t>, name: &str, src: &[u8]) -> Option<Declared<'t>> {
+    let at = use_node.start_byte();
+    let mut cur = use_node;
+    while let Some(parent) = cur.parent() {
+        if matches!(parent.kind(), "statement_block" | "program" | "switch_body") {
+            match scope_declarator(parent, name, at, src) {
+                ScopeDecl::Unbound => {}
+                ScopeDecl::Declarator(d) => return Some(Declared::Var(d)),
+                ScopeDecl::Other => return None,
+            }
+        } else {
+            if let Some(p) = param_declaring(parent, name, src) {
+                return Some(Declared::Param(p));
+            }
+            if binds_outside_block(parent, name, src) {
+                return None;
+            }
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// How one scope declares a name for [`declared_binding`].
+enum ScopeDecl<'t> {
+    Unbound,
+    Declarator(TsNode<'t>),
+    Other,
+}
+
+/// The last `variable_declarator` binding `name` (as a plain identifier) in a
+/// statement of `scope` that ends before byte `at`; [`ScopeDecl::Other`] for
+/// a pattern binding, a function / class declaration of the name, or a
+/// binding only at or after the use (the TDZ).
+fn scope_declarator<'t>(scope: TsNode<'t>, name: &str, at: usize, src: &[u8]) -> ScopeDecl<'t> {
+    let mut seen = false;
+    let mut before = None;
+    for stmt in scope_statements(scope) {
+        let decl = if stmt.kind() == "export_statement" {
+            match stmt.child_by_field_name("declaration") {
+                Some(d) => d,
+                None => continue,
+            }
+        } else {
+            stmt
+        };
+        let found = match decl.kind() {
+            "lexical_declaration" | "variable_declaration" => {
+                let mut cursor = decl.walk();
+                let declarator = decl.named_children(&mut cursor).find(|d| {
+                    d.kind() == "variable_declarator"
+                        && d.child_by_field_name("name")
+                            .is_some_and(|n| binds_name(n, name, src))
+                });
+                declarator.map(|d| match d.child_by_field_name("name") {
+                    Some(n) if n.kind() == "identifier" => ScopeDecl::Declarator(d),
+                    _ => ScopeDecl::Other,
+                })
+            }
+            "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration" => decl
+                .child_by_field_name("name")
+                .is_some_and(|n| text(n, src) == name)
+                .then_some(ScopeDecl::Other),
+            _ => None,
+        };
+        let Some(found) = found else {
+            continue;
+        };
+        seen = true;
+        if stmt.end_byte() <= at {
+            before = Some(found);
+        }
+    }
+    match before {
+        Some(b) => b,
+        None if seen => ScopeDecl::Other,
+        None => ScopeDecl::Unbound,
+    }
+}
+
+/// The parameter of the function-like `func` that binds `name` as a plain
+/// identifier: a `required_parameter` / `optional_parameter` whose pattern is
+/// the name, or an arrow's single `parameter`.
+fn param_declaring<'t>(func: TsNode<'t>, name: &str, src: &[u8]) -> Option<TsNode<'t>> {
+    if !matches!(
+        func.kind(),
+        "arrow_function"
+            | "function_declaration"
+            | "generator_function_declaration"
+            | "method_definition"
+            | "function_expression"
+            | "generator_function"
+    ) {
+        return None;
+    }
+    if let Some(p) = func.child_by_field_name("parameter") {
+        return (p.kind() == "identifier" && text(p, src) == name).then_some(p);
+    }
+    let params = func.child_by_field_name("parameters")?;
+    let mut cursor = params.walk();
+    params.named_children(&mut cursor).find(|p| {
+        matches!(p.kind(), "required_parameter" | "optional_parameter")
+            && p.child_by_field_name("pattern")
+                .is_some_and(|pat| pat.kind() == "identifier" && text(pat, src) == name)
+    })
+}
+
+/// The value of the property `key` of an object literal: a `pair`'s value,
+/// or the shorthand identifier itself (`{ json }`).
+fn object_property<'t>(obj: TsNode<'t>, key: &str, src: &[u8]) -> Option<TsNode<'t>> {
+    if obj.kind() != "object" {
+        return None;
+    }
+    let mut cursor = obj.walk();
+    obj.named_children(&mut cursor).find_map(|m| match m.kind() {
+        "pair" if m
+            .child_by_field_name("key")
+            .and_then(|k| ts_property_key(k, src))
+            .is_some_and(|k| k == key) =>
+        {
+            m.child_by_field_name("value")
+        }
+        "shorthand_property_identifier" if text(m, src) == key => Some(m),
+        _ => None,
+    })
+}
+
+/// DT.1d: a `fetch` init object's `body: JSON.stringify(<expr>)` as the
+/// request ([`body_shape`] of `<expr>`); any other body (a string, a
+/// FormData, a variable) is none.
+fn fetch_request(init: TsNode, src: &[u8]) -> Option<(Shape, WireSource)> {
+    let value = object_property(init, "body", src)?;
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let callee = value.child_by_field_name("function")?;
+    if callee.kind() != "member_expression" || collapse_ws(text(callee, src)) != "JSON.stringify" {
+        return None;
+    }
+    let arg = value.child_by_field_name("arguments")?.named_child(0)?;
+    body_shape(arg, src).map(|(shape, _)| (shape, WireSource::Fetch))
+}
+
+/// DT.1d: a `fetch` call's response type: `(await fetch(..)).json() as T`,
+/// or, on `const r = await fetch(..)`, the first `r.json()` after the call in
+/// the same callable typed by [`json_result_type`].
+fn fetch_response(call: TsNode, src: &[u8]) -> Option<Shape> {
+    let mut node = call;
+    let mut awaited = false;
+    while let Some(p) = node.parent() {
+        match p.kind() {
+            "await_expression" => awaited = true,
+            "parenthesized_expression" | "non_null_expression" => {}
+            _ => break,
+        }
+        node = p;
+    }
+    if !awaited {
+        return None;
+    }
+    let parent = node.parent()?;
+    match parent.kind() {
+        "member_expression" if parent.child_by_field_name("object") == Some(node) => {
+            let json_call = parent.parent()?;
+            let is_json = parent
+                .child_by_field_name("property")
+                .is_some_and(|p| text(p, src) == "json")
+                && json_call.kind() == "call_expression"
+                && json_call.child_by_field_name("function") == Some(parent);
+            if is_json { json_result_type(json_call, src) } else { None }
+        }
+        "variable_declarator" if parent.child_by_field_name("value") == Some(node) => {
+            let name = parent.child_by_field_name("name").filter(|n| n.kind() == "identifier")?;
+            let name = text(name, src);
+            let scope = enclosing_callable(call);
+            let mut stack = vec![scope];
+            let mut json_calls = Vec::new();
+            while let Some(n) = stack.pop() {
+                if n.kind() == "call_expression"
+                    && n.start_byte() >= call.end_byte()
+                    && let Some(f) = n.child_by_field_name("function")
+                    && f.kind() == "member_expression"
+                    && f.child_by_field_name("object")
+                        .is_some_and(|o| o.kind() == "identifier" && text(o, src) == name)
+                    && f.child_by_field_name("property").is_some_and(|p| text(p, src) == "json")
+                {
+                    json_calls.push(n);
+                }
+                let mut cursor = n.walk();
+                stack.extend(n.named_children(&mut cursor));
+            }
+            json_calls.sort_by_key(|n| n.start_byte());
+            json_calls.into_iter().find_map(|jc| json_result_type(jc, src))
+        }
+        _ => None,
+    }
+}
+
+/// The type a `.json()` call's result is given: climbing through `await`,
+/// parentheses and `!`, an `as T` / `satisfies T` (`Promise<T>` unwrapped to
+/// `T`), or the annotation of the `const` / `let` it initialises.
+fn json_result_type(json_call: TsNode, src: &[u8]) -> Option<Shape> {
+    let mut node = json_call;
+    loop {
+        let p = node.parent()?;
+        match p.kind() {
+            "await_expression" | "parenthesized_expression" | "non_null_expression" => node = p,
+            "as_expression" | "satisfies_expression" => {
+                if first_named(p) != Some(node) {
+                    return None;
+                }
+                return Some(ts_type_shape(unwrap_promise(asserted_type(p)?, src), src));
+            }
+            "variable_declarator" => {
+                if p.child_by_field_name("value") != Some(node) {
+                    return None;
+                }
+                let ty = p.child_by_field_name("type").and_then(first_named)?;
+                return Some(ts_type_shape(unwrap_promise(ty, src), src));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `T` for a `Promise<T>` type node, else the node itself.
+fn unwrap_promise<'t>(ty: TsNode<'t>, src: &[u8]) -> TsNode<'t> {
+    if ty.kind() == "generic_type"
+        && ty.child_by_field_name("name").is_some_and(|n| text(n, src) == "Promise")
+        && let Some(arg) = ty.child_by_field_name("type_arguments").and_then(first_named)
+    {
+        return arg;
+    }
+    ty
+}
+
+/// The innermost function-like node enclosing `n`, else the tree's root.
+fn enclosing_callable(n: TsNode) -> TsNode {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        if matches!(
+            p.kind(),
+            "function_declaration"
+                | "generator_function_declaration"
+                | "function_expression"
+                | "generator_function"
+                | "arrow_function"
+                | "method_definition"
+        ) {
+            return p;
+        }
+        cur = p;
+    }
+    cur
 }
 
 fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
@@ -4956,12 +5805,30 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     let mut endpoint_nav_seen: std::collections::HashSet<NodeId> =
         std::collections::HashSet::new();
     let repo = acc.repo.expect("Acc.repo set in parse_file");
+    let mut wire_stats = WireStats::default();
     for cand in acc.endpoints {
         if let Some(req) = cand.requires_import_alias.as_ref()
             && !alias_set.contains(req.as_str())
         {
             continue;
         }
+        // DT.1d: which argument is the body depends on the client: the
+        // receiver field's declared type (A7.1's `inject(T)` fields are on
+        // `out.nav` by now) or the module the alias is imported from.
+        let receiver_type = cand
+            .class
+            .zip(cand.receiver_field.as_deref())
+            .and_then(|(c, f)| out.nav.field_types.get(&c)?.get(f).map(String::as_str));
+        let alias_module = cand
+            .requires_import_alias
+            .as_deref()
+            .and_then(|a| import_module(&out.imports, a));
+        let request = request_of(&cand, receiver_type, alias_module);
+        wire_stats.record(&cand, &request);
+        let request = match request {
+            RequestRead::Body(r) => r.map(|(s, _)| s.clone()),
+            RequestRead::UnknownClient | RequestRead::NoBody => None,
+        };
         // `cand.path` is already canonical (`push_endpoint`); the shared
         // builder keeps ONE definition of the qname shape.
         let qname = endpoint::endpoint_qname(&cand.method, &cand.path);
@@ -4972,7 +5839,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             .class
             .zip(cand.wrapper_recv.as_deref())
             .and_then(|(c, f)| out.nav.field_types.get(&c)?.get(f).cloned());
-        let cell = endpoint_hit_cell(&cand, wrapper_of.as_deref());
+        let cell = endpoint_hit_cell(&cand, wrapper_of.as_deref(), request.as_ref());
         out.nodes.push(Node {
             id: endpoint_id,
             repo,
@@ -4992,6 +5859,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             cells: Vec::new(),
         });
     }
+    wire_stats.report(&acc.file_rel);
 
     Ok(out)
 }
@@ -9683,6 +10551,448 @@ export class Api { base = '/api'; }
                 let schema = ModelSchema::from_cell(c).expect("a wire ModelSchema");
                 assert_eq!(schema.cell(), *c);
             }
+        }
+    }
+}
+
+/// DT.1d: client wire shapes on ENDPOINT_HIT.
+#[cfg(test)]
+mod wire_shape_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts_wire")
+    }
+
+    fn parse(src: &str, path: &str) -> FileParse {
+        parse_file(src, path, "src::svc", repo()).unwrap()
+    }
+
+    /// The ENDPOINT_HIT payload texts of the ENDPOINT `method path`.
+    fn hits(parse: &FileParse, method: &str, path: &str) -> Vec<String> {
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        );
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) if c.kind == cell_type::ENDPOINT_HIT => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sole(parse: &FileParse, method: &str, path: &str) -> String {
+        let h = hits(parse, method, path);
+        assert_eq!(h.len(), 1, "{method} {path}: {h:?}");
+        h[0].clone()
+    }
+
+    /// The `response` / `request` of a hit, as JSON text (`None` when absent).
+    fn shapes(payload: &str) -> (Option<String>, Option<String>) {
+        let (r, q) = wire::hit_shapes(payload);
+        (r.map(|s| s.to_json()), q.map(|s| s.to_json()))
+    }
+
+    fn last_stats() -> WireStats {
+        LAST_WIRE_STATS.with(|w| w.borrow().clone())
+    }
+
+    const NG_HEAD: &str = "import { HttpClient } from '@angular/common/http';\n\
+                           import { Injectable } from '@angular/core';\n\
+                           @Injectable({ providedIn: 'root' })\n\
+                           export class OrderService {\n  constructor(private http: HttpClient) {}\n";
+
+    fn ng(body: &str) -> String {
+        format!("{NG_HEAD}{body}}}\n")
+    }
+
+    /// The call node of the first statement of `async function f() {..}`'s
+    /// body that is a call (`src` holds one such function).
+    fn first_call<'t>(tree: &'t tree_sitter::Tree) -> TsNode<'t> {
+        let mut stack = vec![tree.root_node()];
+        let mut calls = Vec::new();
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression" {
+                calls.push(n);
+            }
+            let mut c = n.walk();
+            stack.extend(n.named_children(&mut c));
+        }
+        calls.sort_by_key(|n| n.start_byte());
+        calls[0]
+    }
+
+    fn ts_tree(src: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        parser.set_language(&lang).unwrap();
+        parser.parse(src, None).unwrap()
+    }
+
+    /// The parse shape DT.1d relies on, pinned: tree-sitter-typescript
+    /// 0.23.2 puts the `await` of `await recv.verb<T>(..)` inside the
+    /// callee, with the type arguments on the call; the unawaited and the
+    /// untyped forms keep a member callee.
+    #[test]
+    fn awaited_generic_call_parse_shape_is_pinned() {
+        let src = "async function f() { const r = await axios.get<Foo>(u); }";
+        let tree = ts_tree(src);
+        let call = first_call(&tree);
+        assert_eq!(
+            call.to_sexp(),
+            "(call_expression function: (await_expression (member_expression object: (identifier) \
+             property: (property_identifier))) type_arguments: (type_arguments (type_identifier)) \
+             arguments: (arguments (identifier)))"
+        );
+        let (member, targs) = awaited_generic_callee(call).expect("the awaited generic callee");
+        assert_eq!(text(member, src.as_bytes()), "axios.get");
+        assert_eq!(text(targs, src.as_bytes()), "<Foo>");
+
+        // `.toPromise()` chains: the quirk call is the chain's inner call.
+        let src = "async function f() { const r = await this.http.get<Foo>(u).toPromise(); }";
+        let tree = ts_tree(src);
+        let call = first_call(&tree);
+        assert_eq!(call.child_by_field_name("function").unwrap().kind(), "member_expression");
+        let inner = call
+            .child_by_field_name("function")
+            .and_then(|m| m.child_by_field_name("object"))
+            .unwrap();
+        let (member, _) = awaited_generic_callee(inner).expect("the inner call is the quirk");
+        assert_eq!(text(member, src.as_bytes()), "this.http.get");
+
+        for (src, kind) in [
+            ("async function f() { const r = axios.get<Foo>(u); }", "member_expression"),
+            ("async function f() { const r = await axios.get(u); }", "member_expression"),
+        ] {
+            let tree = ts_tree(src);
+            let call = first_call(&tree);
+            assert_eq!(call.child_by_field_name("function").unwrap().kind(), kind, "{src}");
+            assert!(awaited_generic_callee(call).is_none(), "{src}");
+        }
+    }
+
+    /// `get<Order[]>`: one array layer peeled off; no body, no request.
+    #[test]
+    fn get_typed_array() {
+        let p = parse(
+            &ng("  list() { return this.http.get<Order[]>('/api/orders'); }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "GET", "/api/orders");
+        assert!(hit.ends_with(",\"response\":{\"array\":true,\"type\":\"Order\"}}"), "{hit}");
+        assert_eq!(shapes(&hit).1, None);
+        let stats = last_stats();
+        assert_eq!((stats.responses, stats.requests, stats.typed), (1, 0, 1), "{stats:?}");
+    }
+
+    /// examples-glia `place(order: NewOrder)`: the body is the parameter, read
+    /// by its annotation; `response` then `request`, last.
+    #[test]
+    fn post_body_param_annotation() {
+        let p = parse(
+            &ng("  place(order: NewOrder) { return this.http.post<Order>('/api/orders', order); }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "POST", "/api/orders");
+        assert!(
+            hit.ends_with(",\"response\":{\"type\":\"Order\"},\"request\":{\"type\":\"NewOrder\"}}"),
+            "{hit}"
+        );
+        let stats = last_stats();
+        assert_eq!((stats.requests, stats.annotated), (1, 1), "{stats:?}");
+    }
+
+    /// An object-literal body: its keys, each read by its value (a literal by
+    /// its JSON kind, a shorthand name by its declared type).
+    #[test]
+    fn patch_object_literal_keys() {
+        let p = parse(
+            &ng("  cancel(id: string, reason: string) {\n    \
+                 return this.http.patch<Order>(`/api/orders/${id}/status`, { status: 'cancelled', reason, n: 2, ok: true, tags: [], extra: undefined });\n  }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "PATCH", "/api/orders/${…}/status");
+        assert_eq!(
+            shapes(&hit).1.as_deref(),
+            Some(
+                "{\"fields\":[{\"name\":\"status\",\"required\":true,\"shape\":{\"type\":\"string\"}},\
+                 {\"name\":\"reason\",\"required\":true,\"shape\":{\"type\":\"string\"}},\
+                 {\"name\":\"n\",\"required\":true,\"shape\":{\"type\":\"number\"}},\
+                 {\"name\":\"ok\",\"required\":true,\"shape\":{\"type\":\"boolean\"}},\
+                 {\"name\":\"tags\",\"required\":true,\"shape\":{\"array\":true,\"type\":\"any\"}}]}"
+            )
+        );
+        assert_eq!(last_stats().literal, 1);
+        // A spread leaves the literal open; a local object literal is read
+        // through its declarator.
+        let p = parse(
+            &ng("  save(base: Order) {\n    const patch = { ...base, state: 'x' };\n    \
+                 return this.http.put('/api/orders/one', patch);\n  }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "PUT", "/api/orders/one");
+        assert_eq!(
+            shapes(&hit),
+            (
+                None,
+                Some("{\"fields\":[{\"name\":\"state\",\"required\":true,\"shape\":{\"type\":\"string\"}}],\"open\":true}".into())
+            )
+        );
+    }
+
+    /// An inline envelope type argument is an object shape; `?` is not
+    /// required.
+    #[test]
+    fn inline_envelope_type() {
+        let p = parse(
+            &ng("  offers() { return this.http.get<{ offers: Offer[]; page: number; limit?: number }>('/api/offers'); }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "GET", "/api/offers");
+        assert_eq!(
+            shapes(&hit).0.as_deref(),
+            Some(
+                "{\"fields\":[{\"name\":\"offers\",\"required\":true,\"shape\":{\"array\":true,\"type\":\"Offer\"}},\
+                 {\"name\":\"page\",\"required\":true,\"shape\":{\"type\":\"number\"}},\
+                 {\"name\":\"limit\",\"required\":false,\"shape\":{\"type\":\"number\"}}]}"
+            )
+        );
+        assert_eq!(last_stats().inline, 1);
+    }
+
+    /// `T | null` reads as `T`; a union of models stays a union; a `| null`
+    /// field of an envelope reads its one model.
+    #[test]
+    fn union_with_null() {
+        let p = parse(
+            &ng("  a() { return this.http.get<Order | null>('/api/a'); }\n  \
+                 b() { return this.http.get<Order | Refund>('/api/b'); }\n  \
+                 c() { return this.http.get<{ users: User[] | null }>('/api/c'); }\n"),
+            "src/order.service.ts",
+        );
+        assert_eq!(shapes(&sole(&p, "GET", "/api/a")).0.as_deref(), Some("{\"type\":\"Order\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/b")).0.as_deref(),
+            Some("{\"union\":[{\"type\":\"Order\"},{\"type\":\"Refund\"}]}")
+        );
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/c")).0.as_deref(),
+            Some("{\"fields\":[{\"name\":\"users\",\"required\":true,\"shape\":{\"array\":true,\"type\":\"User\"}}]}")
+        );
+    }
+
+    /// `any` / `unknown` and every generic but `Array<X>` are open, their text
+    /// kept as `raw`; `Array<X>` / `ReadonlyArray<X>` are arrays of `X`.
+    #[test]
+    fn any_response_is_open() {
+        let p = parse(
+            &ng("  a() { return this.http.get<any>('/api/a'); }\n  \
+                 b() { return this.http.get<unknown>('/api/b'); }\n  \
+                 c() { return this.http.get<Partial<Order>>('/api/c'); }\n  \
+                 d() { return this.http.get<Array<Order>>('/api/d'); }\n  \
+                 e() { return this.http.get<ReadonlyArray<Order>>('/api/e'); }\n"),
+            "src/order.service.ts",
+        );
+        let resp = |path: &str| shapes(&sole(&p, "GET", path)).0;
+        assert_eq!(resp("/api/a").as_deref(), Some("{\"open\":true,\"raw\":\"any\"}"));
+        assert_eq!(resp("/api/b").as_deref(), Some("{\"open\":true,\"raw\":\"unknown\"}"));
+        assert_eq!(resp("/api/c").as_deref(), Some("{\"open\":true,\"raw\":\"Partial<Order>\"}"));
+        assert_eq!(resp("/api/d").as_deref(), Some("{\"array\":true,\"type\":\"Order\"}"));
+        assert_eq!(resp("/api/e").as_deref(), Some("{\"array\":true,\"type\":\"Order\"}"));
+    }
+
+    /// `await axios.get<T>(..)`, `(await axios.post<T>(..)).data`, `await
+    /// this.http.get<T>(..).toPromise()` and `const x = await
+    /// this.http.get<T>(..)` mint their ENDPOINTs (none did before DT.1d),
+    /// located at the callee as the unawaited form is.
+    #[test]
+    fn awaited_generic_axios_mints_endpoint() {
+        let src = "import axios from 'axios';\n\
+                   export async function load() {\n  \
+                   const r = await axios.get<Foo>('/api/foo');\n  \
+                   const s = (await axios.post<Bar>('/api/bar', { a: 1 })).data;\n  \
+                   const t = await axios.get<Array<Foo>>('/api/foos');\n  \
+                   return [r, s, t];\n}\n";
+        let p = parse(src, "src/load.ts");
+        let foo = sole(&p, "GET", "/api/foo");
+        let v: serde_json::Value = serde_json::from_str(&foo).unwrap();
+        assert_eq!((v["line"].as_u64(), v["col"].as_u64()), (Some(3), Some(19)), "col at `axios`: {foo}");
+        assert_eq!(shapes(&foo).0.as_deref(), Some("{\"type\":\"Foo\"}"));
+        let bar = sole(&p, "POST", "/api/bar");
+        assert_eq!(
+            shapes(&bar),
+            (
+                Some("{\"type\":\"Bar\"}".into()),
+                Some("{\"fields\":[{\"name\":\"a\",\"required\":true,\"shape\":{\"type\":\"number\"}}]}".into())
+            )
+        );
+        assert_eq!(shapes(&sole(&p, "GET", "/api/foos")).0.as_deref(), Some("{\"array\":true,\"type\":\"Foo\"}"));
+        assert_eq!(last_stats().awaited_generic, 3);
+        let load = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::svc::load");
+        let foo_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/api/foo");
+        assert!(
+            p.edges
+                .iter()
+                .any(|e| e.from == load && e.to == foo_id && e.category == edge_category::CALLS),
+            "load CALLS the awaited endpoint"
+        );
+
+        let p = parse(
+            &ng("  async one() { return await this.http.get<Order>('/api/one').toPromise(); }\n  \
+                 async two() { const x = await this.http.get<Order[]>('/api/two'); return x; }\n"),
+            "src/order.service.ts",
+        );
+        assert_eq!(shapes(&sole(&p, "GET", "/api/one")).0.as_deref(), Some("{\"type\":\"Order\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/two")).0.as_deref(),
+            Some("{\"array\":true,\"type\":\"Order\"}")
+        );
+        assert_eq!(last_stats().awaited_generic, 2);
+    }
+
+    /// fetch: the init's `body: JSON.stringify(<expr>)` is the request, and
+    /// the awaited response's `.json()` typed by `as T`, `as Promise<T>` or a
+    /// declarator annotation is the response.
+    #[test]
+    fn fetch_stringify_body_and_json_as() {
+        let src = "export async function addComment(ticketId: string, body: string): Promise<Comment> {\n  \
+                   const res = await fetch(`/api/tickets/${ticketId}/comments`, {\n    method: 'POST',\n    \
+                   headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ body }),\n  });\n  \
+                   return (await res.json()) as Comment;\n}\n\
+                   export async function one(): Promise<Order> {\n  return (await fetch('/api/one')).json() as Order;\n}\n\
+                   export async function two(o: NewOrder) {\n  const r = await fetch('/api/two', { method: 'PUT', body: JSON.stringify(o) });\n  \
+                   const d: Order[] = await r.json();\n  return d;\n}\n\
+                   export async function three() {\n  const r = await fetch('/api/three');\n  return r.json() as Promise<Stats>;\n}\n\
+                   export async function four(fd: FormData) {\n  await fetch('/api/four', { method: 'POST', body: fd });\n}\n";
+        let p = parse(src, "src/comments.ts");
+        let hit = sole(&p, "POST", "/api/tickets/${…}/comments");
+        assert!(
+            hit.ends_with(
+                ",\"response\":{\"type\":\"Comment\"},\"request\":{\"fields\":[{\"name\":\"body\",\"required\":true,\
+                 \"shape\":{\"type\":\"string\"}}]}}"
+            ),
+            "{hit}"
+        );
+        assert_eq!(shapes(&sole(&p, "GET", "/api/one")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "PUT", "/api/two")),
+            (Some("{\"array\":true,\"type\":\"Order\"}".into()), Some("{\"type\":\"NewOrder\"}".into()))
+        );
+        assert_eq!(shapes(&sole(&p, "GET", "/api/three")), (Some("{\"type\":\"Stats\"}".into()), None));
+        // A FormData body is no JSON body: the hit keeps HEAD's bytes.
+        assert_eq!(shapes(&sole(&p, "POST", "/api/four")), (None, None));
+        let stats = last_stats();
+        assert_eq!((stats.responses, stats.requests, stats.fetch), (4, 2, 6), "{stats:?}");
+    }
+
+    /// ky / got: the body is the `json:` option of the second argument, any
+    /// verb; axios's second argument of `post` / `put` / `patch`.
+    #[test]
+    fn ky_json_option_is_the_body() {
+        let src = "import ky from 'ky';\nimport got from 'got';\nimport axios from 'axios';\n\
+                   export function a(name: string) { return ky.post('/api/a', { json: { name } }); }\n\
+                   export function b(p: Profile) { return got.put('/api/b', { json: p, timeout: 3 }); }\n\
+                   export function c() { return ky.post('/api/c', { body: 'raw' }); }\n\
+                   export function d(o: NewOrder) { return axios.post<Order>('/api/d', o); }\n\
+                   export function e(params: Q) { return axios.get<Order>('/api/e', { params }); }\n";
+        let p = parse(src, "src/clients.ts");
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/a")).1.as_deref(),
+            Some("{\"fields\":[{\"name\":\"name\",\"required\":true,\"shape\":{\"type\":\"string\"}}]}")
+        );
+        assert_eq!(shapes(&sole(&p, "PUT", "/api/b")).1.as_deref(), Some("{\"type\":\"Profile\"}"));
+        assert_eq!(shapes(&sole(&p, "POST", "/api/c")), (None, None));
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/d")),
+            (Some("{\"type\":\"Order\"}".into()), Some("{\"type\":\"NewOrder\"}".into()))
+        );
+        // axios `get`'s second argument is its config, never a body.
+        assert_eq!(shapes(&sole(&p, "GET", "/api/e")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(last_stats().unknown_client, 0);
+    }
+
+    /// A receiver whose body position is unknown (an in-repo wrapper, an
+    /// alias from a local module) records the response it is typed with but
+    /// no request, and counts `request_unknown_client`.
+    #[test]
+    fn custom_wrapper_receiver_records_no_request() {
+        let src = "import { Injectable } from '@angular/core';\nimport { api } from './api';\n\
+                   @Injectable()\nexport class S {\n  constructor(private client: ApiClient) {}\n  \
+                   a(o: NewOrder) { return this.client.post<Order>('/api/a', o); }\n  \
+                   b(o: NewOrder) { return api.post<Order>('/api/b', o); }\n}\n";
+        let p = parse(src, "src/s.service.ts");
+        assert_eq!(shapes(&sole(&p, "POST", "/api/a")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(shapes(&sole(&p, "POST", "/api/b")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(last_stats().unknown_client, 2);
+    }
+
+    /// An `inject(HttpClient)` field is an HttpClient receiver too; its
+    /// `get` / `delete` options object is never a body; a string or
+    /// FormData body writes no request.
+    #[test]
+    fn inject_http_client_and_non_json_bodies() {
+        let src = "import { HttpClient } from '@angular/common/http';\nimport { inject, Injectable } from '@angular/core';\n\
+                   @Injectable()\nexport class S {\n  private readonly http = inject(HttpClient);\n  \
+                   a(o: NewOrder) { return this.http.post<Order>('/api/a', o); }\n  \
+                   b(params: P) { return this.http.get<Order>('/api/b', { params }); }\n  \
+                   c(token: string) { return this.http.post('/api/c', token); }\n  \
+                   d(file: File) { const fd = new FormData(); fd.append('f', file); return this.http.post('/api/d', fd); }\n  \
+                   e() { return this.http.post('/api/e', this.form.value); }\n}\n";
+        let p = parse(src, "src/s.service.ts");
+        assert_eq!(shapes(&sole(&p, "POST", "/api/a")).1.as_deref(), Some("{\"type\":\"NewOrder\"}"));
+        assert_eq!(shapes(&sole(&p, "GET", "/api/b")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(shapes(&sole(&p, "POST", "/api/c")), (None, None));
+        assert_eq!(shapes(&sole(&p, "POST", "/api/d")), (None, None));
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/e")).1.as_deref(),
+            Some("{\"open\":true,\"raw\":\"this.form.value\"}")
+        );
+    }
+
+    /// An untyped call with no body writes no shape: its payload is HEAD's,
+    /// byte for byte, and the file prints no `[ts-wire]` line.
+    #[test]
+    fn untyped_call_writes_no_shape() {
+        let p = parse(
+            &ng("  a() { return this.http.get('/api/plain'); }\n  \
+                 b(params: P) { return this.http.get(`/api/q/${params.id}`, { params }); }\n"),
+            "src/order.service.ts",
+        );
+        assert_eq!(
+            sole(&p, "GET", "/api/plain"),
+            "{\"method\":\"GET\",\"path\":\"/api/plain\",\"file\":\"src/order.service.ts\",\"line\":6,\"col\":16,\"confidence\":\"strong\"}"
+        );
+        assert_eq!(
+            sole(&p, "GET", "/api/q/${…}"),
+            "{\"method\":\"GET\",\"path\":\"/api/q/${…}\",\"file\":\"src/order.service.ts\",\"line\":7,\"col\":25,\
+             \"confidence\":\"medium\",\"template\":\"/api/q/${params.id}\"}"
+        );
+        assert_eq!(last_stats(), WireStats::default());
+    }
+
+    /// Every shape this parser writes reads back through the wire vocabulary
+    /// and re-serialises to the same bytes (the sorted-key rule the endpoint
+    /// fold's `serde_json::Value` round trip relies on).
+    #[test]
+    fn hit_shapes_round_trip() {
+        let p = parse(
+            &ng("  a(o: NewOrder) { return this.http.post<{ items: Item[]; next?: string | null; [k: string]: unknown }>('/api/a', { o, n: 1 }); }\n"),
+            "src/order.service.ts",
+        );
+        let hit = sole(&p, "POST", "/api/a");
+        let v: serde_json::Value = serde_json::from_str(&hit).unwrap();
+        for key in ["response", "request"] {
+            let raw = serde_json::to_string(&v[key]).unwrap();
+            let shape = Shape::parse(&raw).expect("a wire Shape");
+            assert_eq!(shape.to_json(), raw, "{key}");
+            assert!(hit.contains(&raw), "{key}: {hit}");
         }
     }
 }

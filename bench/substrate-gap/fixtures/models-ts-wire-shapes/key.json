@@ -1,0 +1,18 @@
+{
+  "framework": "models-ts-wire-shapes",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "DT.1d: a TypeScript HTTP call site's wire shapes ride on its ENDPOINT_HIT (code-domain wire::append_hit_fields): `response` from the call's type argument (Angular HttpClient / axios), `request` from the body argument whose position the library fixes (HttpClient / axios post, put, patch: the second argument; its declared parameter type or an object literal's keys), fetch's `JSON.stringify(<expr>)` body and `(await res.json()) as T`. Type names stay unresolved text (the models pass resolves them). `T | null` reads as T; an inline envelope type is an object shape. `await axios.get<T>(..)` parses as call(await(instantiation(member, type_arguments)), arguments) in tree-sitter-typescript 0.23.2, and before DT.1d minted no ENDPOINT at all.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/tickets/${…}/comments", "exact": true, "note": "the awaited generic axios call mints its ENDPOINT"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/tickets", "cell": "ENDPOINT_HIT", "contains": "\"response\":{\"array\":true,\"type\":\"Ticket\"}", "note": "get<Ticket[]>: one array layer peeled off"},
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/api/tickets", "cell": "ENDPOINT_HIT", "contains": "\"request\":{\"type\":\"NewTicket\"}", "note": "the body argument's declared parameter type"},
+    {"kind": "ENDPOINT", "node": "endpoint:PATCH:/api/tickets/${…}", "cell": "ENDPOINT_HIT", "contains": "\"name\":\"reason\"", "note": "an object-literal body: its keys, a shorthand key included"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/board", "cell": "ENDPOINT_HIT", "contains": "\"name\":\"tickets\"", "note": "an inline envelope type argument is an object shape"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/tickets/${…}/comments", "cell": "ENDPOINT_HIT", "contains": "\"type\":\"Comment\"", "note": "the awaited generic axios call's type argument"},
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/api/tickets/${…}/comments", "cell": "ENDPOINT_HIT", "contains": "\"name\":\"body\"", "note": "fetch: the init object's body: JSON.stringify({ body })"},
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/api/tickets/${…}/comments", "cell": "ENDPOINT_HIT", "contains": "\"response\":{\"type\":\"Comment\"}", "note": "fetch: (await res.json()) as Comment on the awaited response"}
+  ]
+}
