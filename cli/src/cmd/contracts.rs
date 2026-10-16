@@ -5,7 +5,11 @@
 //! field-level diff (`contract_fields::contract_fields`): after the topic
 //! table, one row per producer → consumer pairing (schema copy, topic, AsyncAPI
 //! channel, OpenAPI route vs Pact) with its verdict and declared changes.
-//! Without `--fields` the output is exactly the topic table it always was.
+//! DT.1i adds the model drift pairings: `http_model` (a client call site's
+//! model against the server model of each HTTP exchange it is paired with,
+//! response and request) and `client_contract` (a typed client against the
+//! OpenAPI / swagger op that DOCUMENTS the route it calls). Without `--fields`
+//! the output is exactly the topic table it always was.
 
 use glia_engine::contract_fields::{FieldChange, FieldDiffRow, FieldSide};
 
@@ -22,8 +26,11 @@ pub(crate) struct Args {
     #[arg(long)]
     mismatch_only: bool,
     /// Also diff the declared fields of each contract pairing (schema copies,
-    /// queue topics, AsyncAPI channels, OpenAPI routes vs Pact): a second
-    /// table after the topic table; with --json, an object {topics, fields}.
+    /// queue topics, AsyncAPI channels, OpenAPI routes vs Pact, and model
+    /// drift: http_model, a client's model against the server's per HTTP
+    /// exchange, and client_contract, a typed client against the OpenAPI op
+    /// documenting its route): a second table after the topic table; with
+    /// --json, an object {topics, fields}.
     #[arg(long)]
     fields: bool,
     /// With --fields: keep only field rows whose status is `breaking`.

@@ -1,0 +1,31 @@
+{
+  "swagger": "2.0",
+  "info": {"title": "Billing API", "version": "1.0"},
+  "paths": {
+    "/api/plans/{id}": {
+      "get": {
+        "operationId": "getPlan",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "type": "string"}
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {"$ref": "#/definitions/Plan"}
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Plan": {
+      "type": "object",
+      "required": ["id", "name", "priceCents"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "priceCents": {"type": "integer"}
+      }
+    }
+  }
+}

@@ -23,29 +23,72 @@
 //!   channel (surrounding `/` trimmed) declared in a different file;
 //! - `route`: an OpenAPI op (provider) against a Pact interaction (consumer)
 //!   with the same method and `normalise_http_path` path, a provider `{}`
-//!   segment matching any one Pact segment (most specific provider wins).
+//!   segment matching any one Pact segment (most specific provider wins);
+//! - `http_model` (DT.1i): a client call site against the handler of each
+//!   route the `http` resolver paired it with, per direction, as DT.1m's
+//!   `glia_graph::wire_pairs` compared them (JSON names, kinds, requiredness
+//!   of the models that travel). Key `<METHOD path> response|request`, the
+//!   route qname with its owner segment dropped. A response's producer is the
+//!   server model (the handler, located at its write, for an inline
+//!   envelope) and its consumer the client model (the ENDPOINT, located at
+//!   the call site, for an inline type); a request the reverse. One row per
+//!   (route, direction, client model or call site, server model or handler)
+//!   and verdict, so several call sites reading one model give one row, at
+//!   the first;
+//! - `client_contract` (DT.1i): a client call site's typed side against the
+//!   OpenAPI / swagger op that DOCUMENTS the route it is paired with, when that op
+//!   carries SCHEMA_FIELDS (a swaggo annotation or a feature.yaml op does
+//!   not, and is skipped). Key `<op METHOD path> response|request`. A
+//!   response is compared with the op's lowest 2xx `response:<code>`
+//!   section, a request with its `request` section, by the op's flattened
+//!   names (`a.b`, `items[].sku`, `[]` for an array body, `$` for a scalar
+//!   one), the client's names spelled the same way. Response (producer = the
+//!   op): a client-only name is `contract_field_undeclared` (breaking) when
+//!   the client requires it, else `contract_field_optional_undeclared`; an
+//!   op-only name `contract_field_unread`. Request (producer = the client): a
+//!   client-only name is `contract_request_field_undeclared`; an op-only
+//!   name `contract_required_missing` (breaking) when the op requires it,
+//!   else `contract_field_unset`. Both: JSON kinds that differ while both
+//!   are known (`wire::json_schema_kind` on the op's side) are
+//!   `contract_type_mismatch` (breaking). One row per (op, direction, client
+//!   model or call site) and verdict.
 //!
 //! The rules are FACT-level statements about declared schemas; the pairing is
 //! DERIVED, hence every row's `tier`. Nothing is guessed: a side with no
 //! SCHEMA_FIELDS cell (an enum, a body-less op) makes the row `unknown`, an
 //! unresolvable `$ref` is an `unknown` change rather than a type mismatch, and
-//! a field absent from a `truncated` cell is never reported as dropped.
+//! a field absent from a `truncated` cell is never reported as dropped. The
+//! two model pairings claim no name absent from an open side (a model with an
+//! index signature or a custom codec, an `any` value, an object the op
+//! declares with no properties): the row keeps the verdict of what was
+//! compared, note `open`; a union compared as its members' merged fields
+//! keeps its verdict, note `union`. A row that compared nothing is `unknown`:
+//! a handler with no one 2xx write (or bind) to pick (`ambiguous_server`), a
+//! root that resolves to no JSON kind (`client_type_unresolved`,
+//! `server_type_unresolved`, `op_type_unresolved`).
 //!
 //! Read-only: no node, edge or cell is added or changed. Rows are sorted, so
 //! two calls over one graph serialise byte-identically.
 //!
 //! Fired-on marker, printed once per call that returns rows:
 //! `[contract-fields] pairs=<rows> schema_copy=.. topic=.. channel=.. route=..
-//! identical=.. compatible=.. breaking=.. unknown=..`.
+//! identical=.. compatible=.. breaking=.. unknown=.. http_model=..
+//! client_contract=..`; the wire compare's own `[models] pairs=..` line
+//! (`WirePairs::marker`) precedes it when any exchange was compared.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::CategorySet;
 use glia_activation::algo::classes::Classes;
+use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
+use glia_code_domain::wire::{JsonKind, ModelSchema, Shape, WireFormat, json_kind, json_schema_kind};
 use glia_code_domain::{cell_type, edge_category, node_kind, same_as};
 use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
-use glia_graph::{MergedGraph, normalise_http_path};
+use glia_graph::{
+    ClientWire, MergedGraph, ResolvedField, ResolvedShape, WireChange, WireDirection, WirePair,
+    client_wires, normalise_http_path, wire_pairs,
+};
 use serde_json::Value;
 
 use crate::{Locator, MessageContractSide, message_contracts};
@@ -57,10 +100,14 @@ pub struct FieldSide {
     /// `RepoId.0`; `GenerateResult::repo_labels` maps it to a human label.
     pub repo_id: u64,
     /// The MESSAGE_TYPE / contract-op qname; for a topic side whose message
-    /// type did not resolve, the queue node's own qname.
+    /// type did not resolve, the queue node's own qname; for a model pairing
+    /// (DT.1i) the model's, else the ENDPOINT's (an inline client type) or
+    /// the handler's (an inline server envelope).
     pub qname: String,
-    /// The cell's `format` (`proto`, `avro`, `openapi`, `pact`, `asyncapi`),
-    /// else the ORIGIN `source`, else empty (an unresolved topic side).
+    /// The cell's `format` (`proto`, `avro`, `openapi`, `pact`, `asyncapi`;
+    /// a model's `ts`, `go`, `dart`), else the ORIGIN `source`, else the
+    /// call site's or handler's language (`ts`, `go`, `dart`), else empty
+    /// (an unresolved topic side).
     pub format: String,
     pub file: Option<String>,
     /// 1-based, from the one [`Locator`] this call builds.
@@ -71,15 +118,22 @@ pub struct FieldSide {
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct FieldChange {
-    /// `fields` (proto / Avro), `request`, `response:<code>` or `payload[:<name>]`.
+    /// `fields` (proto / Avro), `request`, `response:<code>` or
+    /// `payload[:<name>]`; `response` / `request` for an `http_model` row
+    /// (DT.1i), the op's `response:<code>` / `request` for a
+    /// `client_contract` row.
     pub section: String,
     /// The flattened field name (`a.b`, `lines[].sku`); the producer's name
-    /// when both sides declare it.
+    /// when both sides declare it. An `http_model` change names the client's
+    /// JSON path (`items[].sku`, `[].id` under a root array; the server's for
+    /// a server-only name); a `client_contract` change the OpenAPI spelling
+    /// (`tags[]`, `items[].sku`, `$` for a scalar body).
     pub field: String,
     /// `type`, `number`, `name`, `label`, `reserved`, `producer_only`,
     /// `consumer_only` or `unknown`; CC.8a's contract breaks add `required`
     /// (a field's requiredness changed) and `section` (a whole section
-    /// declared on one side only).
+    /// declared on one side only); an `http_model` row's `required` is a
+    /// name the client requires and the server may omit.
     pub change: &'static str,
     /// The producer's type (a proto field number for `number`, the name for
     /// `name`, `reserved` for the side that reserves it).
@@ -94,9 +148,12 @@ pub struct FieldChange {
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct FieldDiffRow {
-    /// `schema_copy` | `topic` | `channel` | `route`.
+    /// `schema_copy` | `topic` | `channel` | `route` | `http_model` |
+    /// `client_contract`.
     pub pairing: &'static str,
-    /// The message's qualified name, the topic, the channel, or `METHOD path`.
+    /// The message's qualified name, the topic, the channel, or `METHOD
+    /// path`; `METHOD path response|request` for a model pairing (the
+    /// route's path for `http_model`, the op's for `client_contract`).
     pub key: String,
     pub producer: FieldSide,
     pub consumer: FieldSide,
@@ -108,8 +165,11 @@ pub struct FieldDiffRow {
     pub tier: &'static str,
     /// Why a row is `unknown` without a change saying so (`no_fields`,
     /// `producer_no_fields`, `format_mismatch`, `truncated`,
-    /// `consumer_message_type_unresolved`, ...); `truncated` also rides on a
-    /// verdict row whose cell a cap cut short.
+    /// `consumer_message_type_unresolved`, `ambiguous_server`,
+    /// `client_type_unresolved`, ...); `truncated` also rides on a verdict
+    /// row whose cell a cap cut short, and a model row's `open` (a side was
+    /// open, so a name may be unclaimed) and `union` (a union compared as its
+    /// members' merged fields) on its verdict.
     pub note: Option<&'static str>,
     pub changes: Vec<FieldChange>,
 }
@@ -235,11 +295,13 @@ pub fn contract_fields(merged: &MergedGraph) -> Vec<FieldDiffRow> {
         rows.push(row("route", key, ps, cs, verdict));
     }
 
+    rows.extend(model_rows(merged, &holders, &loc, &mut side));
+
     rows.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
     if !rows.is_empty() {
         let n = |f: &dyn Fn(&FieldDiffRow) -> bool| rows.iter().filter(|r| f(r)).count();
         eprintln!(
-            "[contract-fields] pairs={} schema_copy={} topic={} channel={} route={} identical={} compatible={} breaking={} unknown={}",
+            "[contract-fields] pairs={} schema_copy={} topic={} channel={} route={} identical={} compatible={} breaking={} unknown={} http_model={} client_contract={}",
             rows.len(),
             n(&|r| r.pairing == "schema_copy"),
             n(&|r| r.pairing == "topic"),
@@ -249,6 +311,8 @@ pub fn contract_fields(merged: &MergedGraph) -> Vec<FieldDiffRow> {
             n(&|r| r.status == "compatible"),
             n(&|r| r.status == "breaking"),
             n(&|r| r.status == "unknown"),
+            n(&|r| r.pairing == HTTP_MODEL),
+            n(&|r| r.pairing == CLIENT_CONTRACT),
         );
     }
     rows
@@ -1449,6 +1513,853 @@ pub(crate) fn json_type_change(p: &str, c: &str) -> Option<TypeChange> {
     } else {
         TypeChange::Changed
     })
+}
+
+// ---- model drift: http_model and client_contract (DT.1i) -------------------
+
+const HTTP_MODEL: &str = "http_model";
+const CLIENT_CONTRACT: &str = "client_contract";
+
+/// `WirePair.notes` (graph/src/resolvers/models.rs): nothing was compared.
+const NOTE_AMBIGUOUS_SERVER: &str = "ambiguous_server";
+/// A compared side is open: no name is claimed absent from it.
+const NOTE_OPEN: &str = "open";
+/// A side is a union, compared as its members' merged fields.
+const NOTE_UNION: &str = "union";
+/// The client's root resolves to no JSON kind (an unbound name, `any`, a
+/// call no builder typed) and nothing was compared.
+const NOTE_CLIENT_UNRESOLVED: &str = "client_type_unresolved";
+/// The server's root resolves to no JSON kind and nothing was compared.
+const NOTE_SERVER_UNRESOLVED: &str = "server_type_unresolved";
+/// The op's scalar body declares no JSON kind and nothing was compared.
+const NOTE_OP_UNRESOLVED: &str = "op_type_unresolved";
+
+/// How many object levels an OpenAPI body flattens to (the contracts
+/// extractor's `FIELD_MAX_DEPTH`): names exist at levels 1..=4 and an object
+/// at level 4 lists no properties, so a client object there is not compared.
+const OP_FIELD_DEPTH: usize = 4;
+
+/// A direction this report judges. [`WireDirection`] is non-exhaustive: a
+/// direction it adds later has no producer / consumer reading here, so its
+/// pairs are skipped, never guessed.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Dir {
+    Response,
+    Request,
+}
+
+impl Dir {
+    fn of(d: WireDirection) -> Option<Dir> {
+        match d {
+            WireDirection::Response => Some(Dir::Response),
+            WireDirection::Request => Some(Dir::Request),
+            _ => None,
+        }
+    }
+
+    fn wire(self) -> WireDirection {
+        match self {
+            Dir::Response => WireDirection::Response,
+            Dir::Request => WireDirection::Request,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        self.wire().as_str()
+    }
+}
+
+/// What a call site or a handler is told apart by in a row's dedup: the
+/// model a side resolved to, else the node and position that wrote it.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+enum SideKey {
+    Model(u64),
+    Site(u64, String, u32),
+}
+
+/// The repo and SCHEMA_FIELDS format of each node a model row names, read
+/// in one pass over the graphs (first graph that holds a node wins).
+struct NodeFacts(HashMap<u64, (u64, Option<String>)>);
+
+impl NodeFacts {
+    fn new(merged: &MergedGraph, wanted: &BTreeSet<u64>) -> NodeFacts {
+        let mut out: HashMap<u64, (u64, Option<String>)> = HashMap::new();
+        if wanted.is_empty() {
+            return NodeFacts(out);
+        }
+        for g in &merged.graphs {
+            for n in g.nodes.iter().filter(|n| wanted.contains(&n.id.0)) {
+                let format = n
+                    .cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::SCHEMA_FIELDS)
+                    .filter_map(payload_str)
+                    .find_map(ModelSchema::parse)
+                    .map(|s| s.format.as_str().to_string());
+                let e = out.entry(n.id.0).or_insert((n.repo.0, None));
+                if e.1.is_none() {
+                    e.1 = format;
+                }
+            }
+        }
+        NodeFacts(out)
+    }
+
+    /// A model side: located at its declaration, its schema's format (else
+    /// the site's language).
+    fn model(&self, loc: &Locator<'_>, id: NodeId, site: Option<WireFormat>) -> FieldSide {
+        let at = loc.locate(id);
+        let (repo, format) = self.0.get(&id.0).cloned().unwrap_or((0, None));
+        FieldSide {
+            repo_id: repo,
+            qname: at.qname,
+            format: format.unwrap_or_else(|| site.map(|f| f.as_str().to_string()).unwrap_or_default()),
+            file: at.file,
+            line: at.line,
+        }
+    }
+
+    /// A call site's ENDPOINT or a handler: located at the site (its file
+    /// when given, else the node's), the site's language.
+    fn site(
+        &self,
+        loc: &Locator<'_>,
+        id: NodeId,
+        format: Option<WireFormat>,
+        file: Option<&str>,
+        line: Option<u32>,
+    ) -> FieldSide {
+        let at = loc.locate(id);
+        FieldSide {
+            repo_id: self.0.get(&id.0).map_or(0, |f| f.0),
+            qname: at.qname,
+            format: format.map(|f| f.as_str().to_string()).unwrap_or_default(),
+            file: file.map(str::to_string).or(at.file),
+            line: line.filter(|l| *l > 0).map(i64::from).or(at.line),
+        }
+    }
+}
+
+/// The HTTP contract ops (OpenAPI / swagger, any source with a method and a
+/// path) that DOCUMENT each ROUTE: route id -> op ids, ascending.
+fn documenting_ops(merged: &MergedGraph, holders: &BTreeMap<u64, Holder>) -> BTreeMap<u64, Vec<u64>> {
+    let mut out: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for e in merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::DOCUMENTS)
+    {
+        let is_op = holders
+            .get(&e.from.0)
+            .is_some_and(|h| !h.message && h.origin_str("method").is_some() && !h.payloads.is_empty());
+        if is_op {
+            out.entry(e.to.0).or_default().push(e.from.0);
+        }
+    }
+    for ops in out.values_mut() {
+        ops.sort_unstable();
+        ops.dedup();
+    }
+    out
+}
+
+/// Every `http_model` and `client_contract` row of `merged` (module doc).
+fn model_rows(
+    merged: &MergedGraph,
+    holders: &BTreeMap<u64, Holder>,
+    loc: &Locator<'_>,
+    op_side: &mut dyn FnMut(u64) -> FieldSide,
+) -> Vec<FieldDiffRow> {
+    let wp = wire_pairs(merged);
+    let docs = documenting_ops(merged, holders);
+    if wp.pairs.is_empty() && docs.is_empty() {
+        return Vec::new();
+    }
+    let cw = client_wires(merged);
+    if wp.pairs.is_empty() && cw.wires.is_empty() {
+        return Vec::new();
+    }
+    if !wp.pairs.is_empty() {
+        eprintln!("{}", wp.marker());
+    }
+    let mut wanted: BTreeSet<u64> = BTreeSet::new();
+    for p in &wp.pairs {
+        wanted.extend([p.endpoint.0, p.handler.0]);
+        wanted.extend(p.client_model.iter().chain(&p.server_model).map(|m| m.0));
+    }
+    for w in &cw.wires {
+        wanted.insert(w.endpoint.0);
+        for s in [&w.response, &w.request].into_iter().flatten() {
+            wanted.extend(s.model.map(|m| m.0));
+        }
+    }
+    let facts = NodeFacts::new(merged, &wanted);
+    let by_site: HashMap<(u64, &str, u32), &ClientWire> = cw
+        .wires
+        .iter()
+        .map(|w| ((w.endpoint.0, w.file.as_str(), w.line), w))
+        .collect();
+    let mut out = Vec::new();
+
+    type Seen = (String, Dir, SideKey, SideKey, Vec<(String, &'static str)>, Vec<&'static str>);
+    let mut seen: BTreeSet<Seen> = BTreeSet::new();
+    for p in &wp.pairs {
+        let Some(dir) = Dir::of(p.direction) else {
+            continue;
+        };
+        let client_key = match p.client_model {
+            Some(m) => SideKey::Model(m.0),
+            None => SideKey::Site(p.endpoint.0, p.file.clone(), p.line),
+        };
+        let server_key = match p.server_model {
+            Some(m) => SideKey::Model(m.0),
+            None => SideKey::Site(p.handler.0, String::new(), 0),
+        };
+        let sig = p.changes.iter().map(|c| (c.path.clone(), c.rule)).collect();
+        if !seen.insert((p.route_qname.clone(), dir, client_key, server_key, sig, p.notes.clone())) {
+            continue;
+        }
+        let client = match p.client_model {
+            Some(m) => facts.model(loc, m, p.client_format),
+            None => facts.site(loc, p.endpoint, p.client_format, Some(&p.file), Some(p.line)),
+        };
+        let server = match p.server_model {
+            Some(m) => facts.model(loc, m, p.server_format),
+            None => facts.site(loc, p.handler, p.server_format, None, p.server_line),
+        };
+        let key = format!("{} {}", split_owner(&p.route_qname).0, dir.as_str());
+        let (producer, consumer) = match dir {
+            Dir::Response => (server, client),
+            Dir::Request => (client, server),
+        };
+        let roots = by_site
+            .get(&(p.endpoint.0, p.file.as_str(), p.line))
+            .and_then(|w| wire_roots(w, p, dir));
+        out.push(wire_row(p, dir, roots, key, producer, consumer));
+    }
+
+    type SeenOp = (u64, Dir, SideKey, Vec<(String, &'static str)>, Option<&'static str>);
+    let mut seen_op: BTreeSet<SeenOp> = BTreeSet::new();
+    for w in &cw.wires {
+        let ops: BTreeSet<u64> = w
+            .routes
+            .iter()
+            .filter_map(|r| docs.get(&r.route.0))
+            .flatten()
+            .copied()
+            .collect();
+        for op in ops {
+            let Some(h) = holders.get(&op) else {
+                continue;
+            };
+            let schema = h.schema();
+            let openapi = match &schema {
+                Ok(s) => s.format == "openapi",
+                Err(_) => h.origin_str("source") == Some("openapi"),
+            };
+            let display = h.origin.as_ref().and_then(same_as::contract_op_key).map(|k| k.display);
+            let (true, Some(display)) = (openapi, display) else {
+                continue;
+            };
+            for dir in [Dir::Response, Dir::Request] {
+                let Some(client) = w.client(dir.wire()) else {
+                    continue;
+                };
+                let verdict = match &schema {
+                    Err(g) => Err(gap_note(Some(*g), None)),
+                    Ok(s) => match op_section(s, dir) {
+                        Some((sec, fields)) => {
+                            let c = ContractCmp::run(dir, sec, fields, s.truncated, client);
+                            match (c.d.changes.is_empty(), element_kind(client)) {
+                                (true, None) => Err(NOTE_CLIENT_UNRESOLVED),
+                                (true, Some(_)) if c.op_unresolved => Err(NOTE_OP_UNRESOLVED),
+                                _ => Ok(c),
+                            }
+                        }
+                        // The op declares no body this way: nothing to compare.
+                        None => continue,
+                    },
+                };
+                let client_key = match client.model {
+                    Some(m) => SideKey::Model(m.0),
+                    None => SideKey::Site(w.endpoint.0, w.file.clone(), w.line),
+                };
+                let (sig, note) = match &verdict {
+                    Ok(c) => (
+                        c.d.changes.iter().map(|x| (x.field.clone(), x.rule)).collect(),
+                        c.note(),
+                    ),
+                    Err(note) => (Vec::new(), Some(*note)),
+                };
+                if !seen_op.insert((op, dir, client_key, sig, note)) {
+                    continue;
+                }
+                let client_side = match client.model {
+                    Some(m) => facts.model(loc, m, w.format),
+                    None => facts.site(loc, w.endpoint, w.format, Some(&w.file), Some(w.line)),
+                };
+                let (producer, consumer) = match dir {
+                    Dir::Response => (op_side(op), client_side),
+                    Dir::Request => (client_side, op_side(op)),
+                };
+                let key = format!("{display} {}", dir.as_str());
+                out.push(match verdict {
+                    Err(note) => row(CLIENT_CONTRACT, key, producer, consumer, Err(note)),
+                    Ok(c) => {
+                        let note = c.note();
+                        noted_row(CLIENT_CONTRACT, key, producer, consumer, c.d, note)
+                    }
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Whether a wire pair's two roots resolve to a JSON kind at all (the
+/// element's, under an array): `(client, server)`, read from the call site's
+/// [`ClientWire`] and the handler site the pair picked. `None` when the pair
+/// names no site of `w`.
+fn wire_roots(w: &ClientWire, p: &WirePair, dir: Dir) -> Option<(bool, bool)> {
+    let client = w.client(dir.wire())?;
+    let server = w
+        .routes
+        .iter()
+        .find(|r| r.route == p.route)?
+        .handlers
+        .iter()
+        .find(|h| h.handler == p.handler)?
+        .sites(dir.wire())
+        .iter()
+        .find(|s| Some(s.line) == p.server_line)?;
+    Some((element_kind(client).is_some(), element_kind(&server.shape).is_some()))
+}
+
+/// A verdict row with its comparison's note (`open`, `union`), unless the
+/// verdict already carries one (`truncated`).
+fn noted_row(
+    pairing: &'static str,
+    key: String,
+    producer: FieldSide,
+    consumer: FieldSide,
+    d: Diff,
+    note: Option<&'static str>,
+) -> FieldDiffRow {
+    let mut r = row(pairing, key, producer, consumer, Ok(d));
+    r.note = r.note.or(note);
+    r
+}
+
+/// One `http_model` row from DT.1m's [`WirePair`]: each [`WireChange`] in
+/// the field vocabulary, section `response` / `request`. Nothing compared is
+/// `unknown`: a handler with no one shape to pick (`ambiguous_server`), or
+/// a root that resolves to no JSON kind and drew no change
+/// (`client_type_unresolved`, `server_type_unresolved`; `roots` from
+/// [`wire_roots`]).
+fn wire_row(
+    p: &WirePair,
+    dir: Dir,
+    roots: Option<(bool, bool)>,
+    key: String,
+    producer: FieldSide,
+    consumer: FieldSide,
+) -> FieldDiffRow {
+    let gap = if p.notes.contains(&NOTE_AMBIGUOUS_SERVER) {
+        Some(NOTE_AMBIGUOUS_SERVER)
+    } else if !p.changes.is_empty() {
+        None
+    } else {
+        match roots {
+            Some((false, _)) => Some(NOTE_CLIENT_UNRESOLVED),
+            Some((true, false)) => Some(NOTE_SERVER_UNRESOLVED),
+            _ => None,
+        }
+    };
+    if let Some(note) = gap {
+        return row(HTTP_MODEL, key, producer, consumer, Err(note));
+    }
+    let section = dir.as_str();
+    let mut d = Diff::default();
+    for c in &p.changes {
+        let (change, prod, cons) = wire_change(dir, c);
+        d.push((section, &c.path), change, (prod, cons), c.rule, c.breaking);
+    }
+    let note = [NOTE_OPEN, NOTE_UNION].into_iter().find(|n| p.notes.contains(n));
+    noted_row(HTTP_MODEL, key, producer, consumer, d, note)
+}
+
+/// A [`WireChange`] as `(change, producer type, consumer type)`. A response's
+/// producer is the server, a request's the client. Response: a client-only
+/// name (`json_field_missing`, `json_field_optional_absent`) is
+/// `consumer_only`, a server-only one (`json_field_unread`) `producer_only`,
+/// `json_field_may_be_absent` `required`; request: a client-only name
+/// (`json_field_dropped`) is `producer_only`, a server-only one
+/// (`json_required_missing`, `json_field_unset`) `consumer_only`; both:
+/// `json_type_mismatch` is `type`.
+fn wire_change(dir: Dir, c: &WireChange) -> (&'static str, Option<&str>, Option<&str>) {
+    let (client, server) = (c.client.as_deref(), c.server.as_deref());
+    let (prod, cons) = match dir {
+        Dir::Response => (server, client),
+        Dir::Request => (client, server),
+    };
+    let change = match c.rule {
+        "json_type_mismatch" => "type",
+        "json_field_may_be_absent" => "required",
+        _ => match (prod, cons) {
+            (Some(_), None) => "producer_only",
+            (None, Some(_)) => "consumer_only",
+            _ => UNKNOWN,
+        },
+    };
+    (change, prod, cons)
+}
+
+/// The op section a client direction is compared with: a response's lowest
+/// 2xx `response:<code>` (else a `response:2XX` class), a request's
+/// `request`. `None` when the op declares no such body.
+fn op_section(s: &Schema, dir: Dir) -> Option<(&str, &[Field])> {
+    match dir {
+        Dir::Request => s
+            .sections
+            .get_key_value("request")
+            .map(|(k, v)| (k.as_str(), v.as_slice())),
+        Dir::Response => {
+            let code = |k: &str| {
+                k.strip_prefix("response:")
+                    .and_then(|c| c.parse::<u16>().ok())
+                    .filter(|c| (200..300).contains(c))
+            };
+            s.sections
+                .iter()
+                .filter_map(|(k, v)| code(k).map(|c| (c, k, v)))
+                .min_by_key(|(c, _, _)| *c)
+                .map(|(_, k, v)| (k.as_str(), v.as_slice()))
+                .or_else(|| {
+                    ["response:2XX", "response:2xx"]
+                        .iter()
+                        .find_map(|k| s.sections.get_key_value(*k))
+                        .map(|(k, v)| (k.as_str(), v.as_slice()))
+                })
+        }
+    }
+}
+
+// ---- the client's side of a contract op (OpenAPI spelling) -----------------
+
+/// A kind that can be judged: never any, null or an unknown name.
+fn judged(k: JsonKind) -> Option<JsonKind> {
+    (!matches!(k, JsonKind::Any | JsonKind::Null | JsonKind::Unknown(_))).then_some(k)
+}
+
+/// An OpenAPI field type's kind (`wire::json_schema_kind`), when judged.
+fn op_kind(f: &Field) -> Option<JsonKind> {
+    f.ty.as_deref().map(json_schema_kind).and_then(judged)
+}
+
+/// The JSON kind of a client value at its position: an array when one layer
+/// was peeled; else its declared text's kind (an unknown name is an object
+/// only when it resolved to a model); else its element's kind. As DT.1m
+/// judges a client side.
+fn client_kind(declared: Option<&str>, v: &ResolvedShape) -> Option<JsonKind> {
+    if v.array {
+        return Some(JsonKind::Array);
+    }
+    match declared {
+        Some(d) => match v.format.map(|f| json_kind(f, d)) {
+            Some(JsonKind::Unknown(_)) | None => v.model.is_some().then_some(JsonKind::Object),
+            Some(k) => judged(k),
+        },
+        None => element_kind(v),
+    }
+}
+
+/// The kind of a client value's element (the value itself when no array): a
+/// model or an inline object is an object, a written name its language's
+/// kind, a union the kind its members share; a call, an open value and an
+/// unbound name are never judged.
+fn element_kind(v: &ResolvedShape) -> Option<JsonKind> {
+    if v.model.is_some() {
+        return Some(JsonKind::Object);
+    }
+    match &v.written {
+        Shape::Named { ty, .. } => v.format.map(|f| json_kind(f, ty)).and_then(judged),
+        Shape::Object { .. } => Some(JsonKind::Object),
+        Shape::Union(_) => {
+            let mut kinds = v.members.iter().map(|m| client_kind(None, m));
+            let first = kinds.next()??;
+            kinds.all(|k| k.as_ref() == Some(&first)).then_some(first)
+        }
+        Shape::Call { .. } | Shape::Chain { .. } | Shape::Open { .. } => None,
+    }
+}
+
+/// A client value's type text: its declared text, else as written.
+fn client_text(declared: Option<&str>, v: &ResolvedShape) -> String {
+    if let Some(d) = declared {
+        return d.trim().to_string();
+    }
+    match &v.written {
+        Shape::Named { ty, array, .. } => match (array, v.format) {
+            (false, _) => ty.clone(),
+            (true, Some(WireFormat::Go)) => format!("[]{ty}"),
+            (true, Some(WireFormat::Dart)) => format!("List<{ty}>"),
+            (true, Some(WireFormat::Graphql)) => format!("[{ty}]"),
+            (true, _) => format!("{ty}[]"),
+        },
+        Shape::Call { chain, .. } | Shape::Chain { chain, .. } => chain.clone(),
+        Shape::Object { .. } => "object".to_string(),
+        Shape::Union(_) => v
+            .members
+            .iter()
+            .map(|m| client_text(None, m))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Shape::Open { raw } => raw.clone(),
+    }
+}
+
+/// A client value as an object compared name by name: a model or an inline
+/// object itself; a union whose members all are (none an array) as their
+/// merged fields, a name required only when every member requires it, open
+/// when any member is. `None` for anything else.
+struct View<'s> {
+    fields: BTreeMap<&'s str, (&'s ResolvedField, bool)>,
+    open: bool,
+    union: bool,
+}
+
+fn client_view(v: &ResolvedShape) -> Option<View<'_>> {
+    if v.model.is_some() || matches!(v.written, Shape::Object { .. }) {
+        let fields = v.fields.iter().map(|(k, f)| (k.as_str(), (f, f.required))).collect();
+        return Some(View { fields, open: v.open, union: false });
+    }
+    if !matches!(v.written, Shape::Union(_)) || v.members.is_empty() {
+        return None;
+    }
+    let mut views = Vec::with_capacity(v.members.len());
+    for m in &v.members {
+        if m.array {
+            return None;
+        }
+        views.push(client_view(m)?);
+    }
+    let mut fields: BTreeMap<&str, (&ResolvedField, bool)> = BTreeMap::new();
+    for view in &views {
+        for (k, (f, _)) in &view.fields {
+            fields.entry(*k).or_insert((*f, true));
+        }
+    }
+    for (k, (_, req)) in &mut fields {
+        *req = views.iter().all(|view| view.fields.get(k).is_some_and(|(_, r)| *r));
+    }
+    Some(View { fields, open: views.iter().any(|view| view.open), union: true })
+}
+
+/// `prefix.name`, or `name` at the body root.
+fn op_join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
+}
+
+/// The level a flattened OpenAPI name sits at: everything before its last
+/// `.` (`items[].sku` -> `items[]`, `a` and `a[]` -> the root).
+fn op_parent(name: &str) -> &str {
+    name.rfind('.').map_or("", |i| &name[..i])
+}
+
+/// One client side against one op section (module doc: `client_contract`).
+struct ContractCmp<'a> {
+    dir: Dir,
+    section: &'a str,
+    op: HashMap<&'a str, &'a Field>,
+    /// Each level's names, in declaration order (the root markers `$`, `[]`
+    /// and `$ref` excluded).
+    levels: HashMap<&'a str, Vec<&'a Field>>,
+    truncated: bool,
+    d: Diff,
+    /// A compared level was open on either side (a claim may be withheld).
+    open: bool,
+    /// A compared client level was a union's merged fields.
+    union: bool,
+    /// The op's scalar body declares no JSON kind (`any`).
+    op_unresolved: bool,
+    /// `$ref` names already reported unknown.
+    refs: BTreeSet<String>,
+}
+
+impl<'a> ContractCmp<'a> {
+    fn run(
+        dir: Dir,
+        section: &'a str,
+        fields: &'a [Field],
+        truncated: bool,
+        client: &ResolvedShape,
+    ) -> ContractCmp<'a> {
+        let mut op: HashMap<&str, &Field> = HashMap::new();
+        let mut levels: HashMap<&str, Vec<&Field>> = HashMap::new();
+        for f in fields {
+            if op.insert(f.name.as_str(), f).is_some() {
+                continue;
+            }
+            if !matches!(f.name.as_str(), "$" | "[]" | "$ref") {
+                levels.entry(op_parent(&f.name)).or_default().push(f);
+            }
+        }
+        let mut c = ContractCmp {
+            dir,
+            section,
+            op,
+            levels,
+            truncated,
+            d: Diff::default(),
+            open: false,
+            union: false,
+            op_unresolved: false,
+            refs: BTreeSet::new(),
+        };
+        c.root(client);
+        c
+    }
+
+    /// The row's note: `open` over `union`.
+    fn note(&self) -> Option<&'static str> {
+        if self.open {
+            Some(NOTE_OPEN)
+        } else {
+            self.union.then_some(NOTE_UNION)
+        }
+    }
+
+    /// Push a change with the op's and the client's type texts placed by
+    /// direction (a response's producer is the op, a request's the client).
+    fn push(
+        &mut self,
+        field: &str,
+        change: &'static str,
+        (op, client): (Option<&str>, Option<&str>),
+        rule: &'static str,
+        breaking: bool,
+    ) {
+        let sides = match self.dir {
+            Dir::Response => (op, client),
+            Dir::Request => (client, op),
+        };
+        self.d.push((self.section, field), change, sides, rule, breaking);
+    }
+
+    /// An op name whose type is an unresolvable `$ref`: one unknown change.
+    fn unresolved(&mut self, name: &str, f: &Field) -> bool {
+        if !is_ref(f.ty.as_deref()) {
+            return false;
+        }
+        if self.refs.insert(name.to_string()) {
+            self.push(name, UNKNOWN, (f.ty.as_deref(), None), "unresolved_ref", false);
+        }
+        true
+    }
+
+    fn mismatch(&mut self, field: &str, op: &str, client: &str) {
+        self.push(
+            field,
+            "type",
+            (Some(op), Some(client)),
+            "contract_type_mismatch",
+            true,
+        );
+    }
+
+    fn root(&mut self, client: &ResolvedShape) {
+        let text = client_text(None, client);
+        if let Some(f) = self.op.get("$ref").copied() {
+            self.unresolved("$ref", f);
+            return;
+        }
+        let ck = client_kind(None, client);
+        if let Some(f) = self.op.get("[]").copied() {
+            if self.unresolved("[]", f) {
+                return;
+            }
+            match &ck {
+                Some(JsonKind::Array) if client.array => {}
+                // A tuple's elements are no one type: not judged.
+                Some(JsonKind::Array) => return,
+                Some(_) => {
+                    let ty = format!("{}[]", f.ty.as_deref().unwrap_or("any"));
+                    return self.mismatch("$", &ty, &text);
+                }
+                // An unbound root: nothing to compare (the caller says so).
+                None => return,
+            }
+            if let (Some(a), Some(b)) = (op_kind(f), element_kind(client))
+                && a != b
+            {
+                let ty = format!("{}[]", f.ty.as_deref().unwrap_or("any"));
+                return self.mismatch("[]", &ty, &text);
+            }
+            if let Some(view) = client_view(client) {
+                self.level("[]", &view, 1);
+            }
+            return;
+        }
+        if let Some(f) = self.op.get("$").copied() {
+            if self.unresolved("$", f) {
+                return;
+            }
+            match (op_kind(f), ck) {
+                (Some(a), Some(b)) if a != b => {
+                    self.mismatch("$", f.ty.as_deref().unwrap_or("any"), &text)
+                }
+                (None, _) => self.op_unresolved = true,
+                _ => {}
+            }
+            return;
+        }
+        // The op's body is an object.
+        match (&ck, client_view(client)) {
+            (Some(JsonKind::Object), Some(view)) if !client.array => self.level("", &view, 1),
+            (Some(k), _) if *k != JsonKind::Object => self.mismatch("$", "object", &text),
+            _ => {}
+        }
+    }
+
+    /// One object level both sides declare, at `depth` (the body's
+    /// properties are level 1): the client's names, then the op's names the
+    /// client lacks. Neither side's absent names are claimed when the other
+    /// side's level is open; an op level with no properties is open.
+    fn level(&mut self, prefix: &str, view: &View<'_>, depth: usize) {
+        self.union |= view.union;
+        let names: Vec<&'a Field> = self.levels.get(prefix).cloned().unwrap_or_default();
+        let op_open = names.is_empty();
+        if op_open || view.open {
+            self.open = true;
+        }
+        let mut matched: BTreeSet<&str> = BTreeSet::new();
+        for (name, (f, required)) in &view.fields {
+            let declared = f.declared.as_deref();
+            let ck = client_kind(declared, &f.value);
+            let text = client_text(declared, &f.value);
+            let base = op_join(prefix, name);
+            let arr = format!("{base}[]");
+            let array = ck == Some(JsonKind::Array);
+            let (hit, other) = if array { (&arr, &base) } else { (&base, &arr) };
+            if let Some(of) = self.op.get(hit.as_str()).copied() {
+                matched.insert(of.name.as_str());
+                if self.unresolved(hit, of) {
+                    continue;
+                }
+                let (a, b) = if array {
+                    // A tuple's elements are no one type: not judged.
+                    if !f.value.array {
+                        continue;
+                    }
+                    (op_kind(of), element_kind(&f.value))
+                } else {
+                    (op_kind(of), ck.clone())
+                };
+                if let (Some(a), Some(b)) = (&a, &b)
+                    && a != b
+                {
+                    let ty = of.ty.as_deref().unwrap_or("any");
+                    let ty = if array { format!("{ty}[]") } else { ty.to_string() };
+                    self.mismatch(hit, &ty, &text);
+                    continue;
+                }
+                if depth < OP_FIELD_DEPTH
+                    && let Some(child) = client_view(&f.value)
+                    && (array || b == Some(JsonKind::Object))
+                {
+                    self.level(hit, &child, depth + 1);
+                }
+            } else if let Some(of) = self.op.get(other.as_str()).copied() {
+                // One side declares an array, the other does not.
+                matched.insert(of.name.as_str());
+                if self.unresolved(other, of) {
+                    continue;
+                }
+                let ty = of.ty.as_deref().unwrap_or("any");
+                let (op_k, op_text) = if array {
+                    (op_kind(of), ty.to_string())
+                } else {
+                    (Some(JsonKind::Array), format!("{ty}[]"))
+                };
+                if let (Some(a), Some(b)) = (op_k, &ck)
+                    && a != *b
+                {
+                    self.mismatch(&base, &op_text, &text);
+                }
+            } else {
+                self.client_only(prefix, hit, *required, &text, op_open);
+            }
+        }
+        if view.open {
+            return;
+        }
+        for of in names {
+            let name = of.name.as_str();
+            if matched.contains(name) || name.ends_with("$ref") {
+                continue;
+            }
+            let ty = of.ty.as_deref();
+            match self.dir {
+                Dir::Response => {
+                    self.push(name, "producer_only", (ty, None), "contract_field_unread", false)
+                }
+                Dir::Request if of.required => self.push(
+                    name,
+                    "consumer_only",
+                    (ty, None),
+                    "contract_required_missing",
+                    true,
+                ),
+                Dir::Request => {
+                    self.push(name, "consumer_only", (ty, None), "contract_field_unset", false)
+                }
+            }
+        }
+    }
+
+    /// A name the client declares at `prefix` and the op does not list.
+    fn client_only(&mut self, prefix: &str, name: &str, required: bool, text: &str, op_open: bool) {
+        if op_open {
+            return;
+        }
+        let base_ref = op_join(prefix, "$ref");
+        if let Some(f) = self.op.get(base_ref.as_str()).copied() {
+            // An external `allOf` member may declare it.
+            self.unresolved(&base_ref, f);
+            return;
+        }
+        if self.truncated {
+            self.d.suppressed = true;
+            return;
+        }
+        let text = Some(text);
+        match (self.dir, required) {
+            (Dir::Response, true) => self.push(
+                name,
+                "consumer_only",
+                (None, text),
+                "contract_field_undeclared",
+                true,
+            ),
+            (Dir::Response, false) => self.push(
+                name,
+                "consumer_only",
+                (None, text),
+                "contract_field_optional_undeclared",
+                false,
+            ),
+            (Dir::Request, _) => self.push(
+                name,
+                "producer_only",
+                (None, text),
+                "contract_request_field_undeclared",
+                false,
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,13 @@
+{
+  "framework": "models-http-contract",
+  "language": "typescript",
+  "dirs": ["portal", "billing"],
+  "note": "DT.1i: model drift in contract_fields. An Angular portal reads GET /api/plans/:id as its Plan interface (id, name, priceCents, trialDays); the gin handler writes planBody (id, name, priceCents), and the swagger.json op documenting the route declares the same three as its 200 response. So contract_fields reports two drift rows for one exchange: http_model `GET /api/plans/:id response` (the client against the server's model, trialDays json_field_missing, breaking) and client_contract `GET /api/plans/{id} response` (the client against the documenting op's SCHEMA_FIELDS, trialDays contract_field_undeclared, breaking). The swaggo `@Router` comment on GetPlan documents the route too but carries no SCHEMA_FIELDS, so it gives no client_contract row. engine/tests/model_drift.rs pins the rows.",
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/plans/${…}", "to": "GET /api/plans/:id", "category": "HTTP_CALLS", "note": "PlanService.plan against the gin route"},
+    {"from": "contract::docs::swagger::GET:/api/plans/{id}", "to": "GET /api/plans/:id", "category": "DOCUMENTS", "note": "the swagger.json op documents the route; its SCHEMA_FIELDS are what client_contract compares the client with"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/plans/${…}", "cell": "ENDPOINT_HIT", "contains": "\"type\":\"Plan\"", "note": "DT.1d: the call's response type argument, the client side of both drift rows"}
+  ]
+}
