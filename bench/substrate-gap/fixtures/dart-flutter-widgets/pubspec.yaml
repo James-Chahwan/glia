@@ -1,0 +1,5 @@
+name: app
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1

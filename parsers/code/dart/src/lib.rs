@@ -52,8 +52,17 @@ pub fn parse_file(
     // DH.15: read before the class walk, which emits INJECTS only in a file
     // importing injectable.
     acc.injectable_import = imports_injectable(root, src);
+    // DT.5e: read before the class walk, which tags a widget / State
+    // subclass a COMPONENT only in a file importing a Flutter library.
+    acc.flutter_import = imports_any(root, src, FLUTTER_IMPORT_PREFIXES);
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    // DT.5e: every member is declared now, so a name passed by value can be
+    // checked against the METHOD / FUNCTION it would name.
+    resolve_name_refs(&mut acc, module_qname, repo);
     if let Some(line) = acc.di.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
+    if let Some(line) = acc.flutter.marker(file_rel_path) {
         eprintln!("{line}");
     }
     let shelf = scan_dart_routes(source, repo, module_id, &mut acc);
@@ -72,12 +81,15 @@ pub fn parse_file(
     }
 
     // LA.34 fired_on marker: this file had an unqualified call that Dart's
-    // lexical scope decided (a class member or a local binding).
+    // lexical scope decided (a class member or a local binding); DT.5e: or a
+    // closure walked for its member, a `const` / `new` creation site, or a
+    // method / function passed by name.
     let s = &acc.bare_calls;
-    if s.self_calls + s.local_skip > 0 {
+    if s.self_calls + s.local_skip + s.closures + s.creations + s.method_refs > 0 {
         eprintln!(
-            "[dart-calls] self={} bare={} local_skip={} file={file_rel_path}",
-            s.self_calls, s.bare, s.local_skip
+            "[dart-calls] self={} bare={} local_skip={} closures={} creations={} method_refs={} \
+             file={file_rel_path}",
+            s.self_calls, s.bare, s.local_skip, s.closures, s.creations, s.method_refs
         );
     }
 
@@ -182,6 +194,56 @@ struct Acc {
     /// DH.15: injectable classes and their INJECTS refs, for the `[dart-di]`
     /// marker.
     di: DiStats,
+    /// DT.5e: this file imports a [`FLUTTER_IMPORT_PREFIXES`] library, so a
+    /// class extending a [`FLUTTER_COMPONENT_BASES`] name is Flutter's.
+    flutter_import: bool,
+    /// DT.5e: the widget / State classes tagged COMPONENT, for the
+    /// `[dart-flutter]` marker.
+    flutter: FlutterStats,
+    /// DT.5e: the getter / setter METHODs and FUNCTIONs this file declares,
+    /// which a name passed by value reads rather than uses. Lookup-only.
+    accessor_ids: HashSet<NodeId>,
+    /// DT.5e: the names passed by value ([`record_name_ref`]), in walk order,
+    /// bound once the whole file is declared ([`resolve_name_refs`]).
+    name_refs: Vec<NameRef>,
+}
+
+/// DT.5e: an identifier passed as a whole argument value (`onPressed:
+/// _save`), as the scope of its body classified it.
+struct NameRef {
+    /// The member / function / variable whose body holds the argument.
+    from: NodeId,
+    target: NameTarget,
+    /// The identifier's 0-based row.
+    line: u32,
+}
+
+enum NameTarget {
+    /// A member of the enclosing class: the qname of the METHOD it would be.
+    Member(String),
+    /// Neither a local nor a member: a library-scope name.
+    Library(String),
+}
+
+/// DT.5e: the classes [`visit_class`] tagged a Flutter COMPONENT.
+#[derive(Default)]
+struct FlutterStats {
+    /// Subclasses of a widget base (everything but a State).
+    widgets: usize,
+    /// Subclasses of `State` / `ConsumerState`.
+    states: usize,
+}
+
+impl FlutterStats {
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        let n = self.widgets + self.states;
+        (n > 0).then(|| {
+            format!(
+                "[dart-flutter] components={n} (widgets={} states={}) file={file_rel}",
+                self.widgets, self.states
+            )
+        })
+    }
 }
 
 #[derive(Default)]
@@ -274,6 +336,13 @@ struct BareCallStats {
     bare: usize,
     /// `<id>(..)` naming a parameter or local -> no call site.
     local_skip: usize,
+    /// DT.5e: closures (`function_expression`) walked for their enclosing
+    /// member, function or variable.
+    closures: usize,
+    /// DT.5e: `const T(..)` / `new T(..)` / `const T.named(..)` call sites.
+    creations: usize,
+    /// DT.5e: names passed by value that became a USES edge.
+    method_refs: usize,
 }
 
 fn visit_top(
@@ -366,6 +435,27 @@ fn visit_class(
     acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
     // LA.37b: a later container of the same name adds no second Node.
     acc.declared_ids.insert(id);
+
+    // DT.5e: a Flutter widget / State subclass is a framework component, so
+    // a COMPONENT overlay of its qname, which graph::roles folds into ROLE
+    // COMPONENT on this CLASS (as angular.rs tags an `@Component`).
+    if acc.flutter_import
+        && let Some(base) = flutter_component_base(node, src)
+    {
+        let overlay = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::COMPONENT, &qname);
+        acc.nodes.push(Node {
+            id: overlay,
+            repo,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav.record(overlay, &name, &qname, node_kind::COMPONENT, Some(parent_id));
+        if FLUTTER_STATE_BASES.contains(&base) {
+            acc.flutter.states += 1;
+        } else {
+            acc.flutter.widgets += 1;
+        }
+    }
 
     // G12.5 — heritage: `extends Y` → INHERITS_FROM (superclass);
     // `implements I` and `with M` → IMPLEMENTS (interface/mixin). A6.5: emitted
@@ -883,6 +973,62 @@ fn heritage_type_heads<'a>(clause: TsNode, src: &'a [u8]) -> Vec<&'a str> {
         .collect()
 }
 
+// ============================================================================
+// DT.5e: Flutter widget / State classes are framework components
+// ============================================================================
+//
+// Flutter builds a widget the framework renders, and creates (createState) and
+// drives (initState / build / dispose) the State a StatefulWidget names: no
+// source line calls them, as no line calls an Angular `@Component`. A class
+// whose `extends` head is one of these bases, in a file importing a Flutter
+// library, gets a COMPONENT overlay folded into ROLE COMPONENT on its CLASS:
+// an entry of the one entry rule, and the owner role the code domain's
+// `flutter` INVOKED_MEMBERS row reads. The base is matched by simple name
+// (generic arguments and a `p.` prefix stripped), so a user class called
+// `State` in a Flutter file would match too. A user-defined base widget
+// (`class X extends BaseScreen`, BaseScreen extends StatelessWidget in the
+// repo) is not followed: X is no COMPONENT, BaseScreen is.
+
+/// The Flutter, Riverpod and flutter_hooks widget and State base classes.
+const FLUTTER_COMPONENT_BASES: &[&str] = &[
+    "StatelessWidget",
+    "StatefulWidget",
+    "State",
+    "ConsumerWidget",
+    "ConsumerStatefulWidget",
+    "ConsumerState",
+    "HookWidget",
+    "HookConsumerWidget",
+    "StatefulHookWidget",
+    "StatefulHookConsumerWidget",
+    "InheritedWidget",
+    "InheritedNotifier",
+    "InheritedModel",
+];
+
+/// The [`FLUTTER_COMPONENT_BASES`] whose subclasses are a widget's State
+/// (the `[dart-flutter]` marker's `states=`); every other base is a widget.
+const FLUTTER_STATE_BASES: &[&str] = &["State", "ConsumerState"];
+
+/// A file importing one of these defines Flutter widgets.
+const FLUTTER_IMPORT_PREFIXES: &[&str] = &[
+    "package:flutter/",
+    "package:flutter_riverpod/",
+    "package:hooks_riverpod/",
+    "package:flutter_hooks/",
+];
+
+/// The [`FLUTTER_COMPONENT_BASES`] entry a `class_declaration` extends: its
+/// `extends` head (the `type_identifier`s directly under `superclass`; a
+/// `with` clause nests in `mixins`, generic arguments in `type_arguments`),
+/// reduced to its simple name.
+fn flutter_component_base(class: TsNode, src: &[u8]) -> Option<&'static str> {
+    let superclass = class.child_by_field_name("superclass")?;
+    let head = heritage_type_heads(superclass, src).into_iter().next()?;
+    let simple = head.rsplit('.').next().unwrap_or(head).trim();
+    FLUTTER_COMPONENT_BASES.iter().copied().find(|b| *b == simple)
+}
+
 fn emit_heritage_ref(
     raw: &str,
     category: glia_core::EdgeCategoryId,
@@ -940,6 +1086,9 @@ fn visit_class_member(
                 };
                 let id = declare_member(node, &name, owner, repo, file_rel, src, acc);
                 acc.members.count(kind, child.kind() == "declaration");
+                if kind == MemberKind::Accessor {
+                    acc.accessor_ids.insert(id);
+                }
                 signature = Some(child);
                 member = Some((id, kind));
                 visit_initializers(child, id, owner, src, repo, file_rel, acc);
@@ -955,6 +1104,7 @@ fn visit_class_member(
                     acc.members.accessors += 1;
                 }
                 let scope = CallScope {
+                    owner: Some(owner.qname),
                     members: owner.members,
                     locals: local_names(signature, child, src),
                 };
@@ -1019,6 +1169,7 @@ fn visit_initializers(
             continue;
         }
         let scope = CallScope {
+            owner: Some(owner.qname),
             members: owner.members,
             locals: local_names(Some(sig), part, src),
         };
@@ -1128,9 +1279,11 @@ fn visit_enum_constant(
         if !matches!(args.kind(), "arguments" | "argument_part") {
             continue;
         }
+        // DT.5e: a closure in the arguments binds its parameters.
         let scope = CallScope {
+            owner: Some(owner.qname),
             members: owner.members,
-            locals: HashSet::new(),
+            locals: local_names(None, args, src),
         };
         collect_calls_in(args, src, id, &scope, repo, file_rel, acc);
     }
@@ -1178,6 +1331,7 @@ fn visit_function(
 
     if matches!(node.kind(), "getter_signature" | "setter_signature") {
         acc.top_level.accessors += 1;
+        acc.accessor_ids.insert(id);
     }
     // The second half of a getter / setter pair is the same FUNCTION: it adds
     // no Node, DEFINES edge or nav record, only its body's calls.
@@ -1206,6 +1360,7 @@ fn visit_function(
     acc.top_level.bodies += 1;
     let no_members = HashSet::new();
     let scope = CallScope {
+        owner: None,
         members: &no_members,
         locals: local_names(Some(node), body, src),
     };
@@ -1308,8 +1463,9 @@ fn declaration_head(list: TsNode) -> TsNode {
 /// declaration's - its DEFINES edge from the module and its nav record,
 /// pushed once per file. Noise gate: undocumented + a primitive-literal
 /// initialiser emits nothing. CB.17: the initialiser is walked for calls and
-/// client ENDPOINTs FROM the STATE_VAR, under library scope (no members, no
-/// locals; closures are not entered, as in every body walk).
+/// client ENDPOINTs FROM the STATE_VAR, under library scope (no members;
+/// DT.5e: its closures are entered, as in every body walk, and their
+/// parameters are locals).
 #[allow(clippy::too_many_arguments)]
 fn emit_top_level_var(
     decl: TsNode,
@@ -1374,9 +1530,16 @@ fn emit_top_level_var(
     }
     acc.top_level.initialisers += 1;
     let no_members = HashSet::new();
+    // DT.5e: a closure in the initialiser (`StateNotifierProvider((ref) =>
+    // ..)`) binds its parameters; the variable's own name is no local.
+    // The value is several `value` siblings (a primary and its selectors), so
+    // the bindings are read over the whole declarator.
+    let mut locals = local_names(None, decl, src);
+    locals.remove(name);
     let scope = CallScope {
+        owner: None,
         members: &no_members,
-        locals: HashSet::new(),
+        locals,
     };
     collect_calls_in(decl, src, id, &scope, repo, file_rel, acc);
 }
@@ -1550,7 +1713,16 @@ fn shown_names(spec: TsNode, src: &[u8]) -> Option<Vec<String>> {
 /// (LA.34), all credited to `from` - the body's own METHOD / FUNCTION (a
 /// constructor / factory / operator is its own METHOD since CB.9, which also
 /// walks a constructor's initializer list and an enum constant's arguments
-/// through here). Nested closures and local functions are not entered.
+/// through here), or the STATE_VAR whose initialiser it is (CB.17).
+///
+/// DT.5e: the walk enters every closure (`function_expression`, an arrow or
+/// a block body: a `builder: (ctx) { .. }`, an `onTap: () => ..`), so its
+/// calls and endpoints are `from`'s, as the TS parser credits an anonymous
+/// callback's calls to the enclosing node; `scope.locals` already holds the
+/// closures' parameters. Local functions were always walked (their name is a
+/// local). A `const T(..)` / `new T(..)` is a call of T
+/// ([`push_creation_call`]) and an identifier passed as a whole argument value
+/// is recorded for a USES ([`record_name_ref`]).
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
@@ -1566,15 +1738,171 @@ fn collect_calls_in(
         // HttpStackResolver can pair it with a server ROUTE.
         try_detect_dart_endpoint(n, src, from, repo, file_rel, acc);
         push_selector_chain_calls(n, src, from, scope, acc);
-        let mut cursor = n.walk();
-        for child in n.named_children(&mut cursor) {
-            if !matches!(
-                child.kind(),
-                "function_expression" | "class_definition" | "function_definition"
-            ) {
-                stack.push(child);
+        match n.kind() {
+            "function_expression" => acc.bare_calls.closures += 1,
+            "const_object_expression" | "new_expression" => {
+                push_creation_call(n, src, from, scope, acc);
             }
+            "argument" => record_name_ref(n, src, from, scope, acc),
+            _ => {}
         }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+}
+
+/// DT.5e: a `const_object_expression` / `new_expression` (grammar fields
+/// `type`, the optional `constructor` and `arguments`) is a call of its class:
+/// `const T(..)` / `new T(..)` -> Bare(T), `const T.named(..)` ->
+/// Attribute { T, named }, the qualifiers `T(..)` / `T.named(..)` already get
+/// from the selector chain scan. Classified by `scope` and, for a named
+/// constructor of a same-file type, recorded for the receiver-type pass
+/// ([`record_type_receiver`]), as a `T.named(..)` is.
+///
+/// tree-sitter-dart 0.1.0 reads `A.b` after `const` / `new` as one prefixed
+/// type name (`type_identifier` `.` `type_identifier`, the grammar's
+/// `_type_name`), never as a type and its `constructor`: only a third part
+/// (`const p.T.named()`) lands in the `constructor` field. Dart's naming
+/// convention splits the two ([`is_dart_class_name`]): a capitalised last part
+/// is the class behind a library prefix (`const p.Chip()` -> Bare(Chip)), a
+/// lowercase one is a named constructor of the class before it
+/// (`const Dot.small()` -> Attribute { Dot, small }).
+fn push_creation_call(n: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    let mut cursor = n.walk();
+    let parts: Vec<&str> = n
+        .children_by_field_name("type", &mut cursor)
+        .filter(|k| k.kind() == "type_identifier")
+        .map(|k| text_of(k, src).trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let ctor = n
+        .child_by_field_name("constructor")
+        .map(|c| text_of(c, src).trim())
+        .filter(|c| !c.is_empty());
+    let (class, ctor) = match (parts.as_slice(), ctor) {
+        ([.., class], Some(ctor)) => (*class, Some(ctor)),
+        ([class, named], None) if is_dart_class_name(class) && !is_dart_class_name(named) => {
+            (*class, Some(*named))
+        }
+        ([.., class], None) => (*class, None),
+        ([], _) => return,
+    };
+    let qualifier = match ctor {
+        Some(ctor) => CallQualifier::Attribute {
+            base: class.to_string(),
+            name: ctor.to_string(),
+        },
+        None => CallQualifier::Bare(class.to_string()),
+    };
+    if let Some(qualifier) = scope.classify(qualifier, &mut acc.bare_calls) {
+        record_type_receiver(&qualifier, from, scope, acc);
+        acc.calls.push(CallSite {
+            from,
+            qualifier,
+            line: line_at(n),
+        });
+        acc.bare_calls.creations += 1;
+    }
+}
+
+/// DT.5e: an `argument` whose whole value is one `identifier` (`f(_save)`,
+/// or a `named_argument`'s value after its `label`: `onPressed: _save`), with
+/// no selector after it, is a name passed by value. Classified by `scope`
+/// ([`CallScope::lookup`], Dart's lexical order) and kept for
+/// [`resolve_name_refs`]: a local binds nothing (`final onTap = ..;
+/// onTap: onTap`); a member is the METHOD `<owner>::<name>` it would be; a
+/// library-scope name is the top-level FUNCTION of this file it would be.
+fn record_name_ref(arg: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    let Some(id) = by_name_value(arg) else {
+        return;
+    };
+    let name = text_of(id, src).trim();
+    if name.is_empty() || name == "_" {
+        return;
+    }
+    let target = match scope.lookup(name) {
+        NameScope::Local => return,
+        NameScope::Member => {
+            let Some(owner) = scope.owner else { return };
+            NameTarget::Member(format!("{owner}::{name}"))
+        }
+        NameScope::Library => NameTarget::Library(name.to_string()),
+    };
+    acc.name_refs.push(NameRef {
+        from,
+        target,
+        line: line_at(id),
+    });
+}
+
+/// The lone `identifier` an `argument` passes: its only named child, or a
+/// `named_argument`'s value after its `label`. Comments are skipped.
+fn by_name_value(arg: TsNode) -> Option<TsNode> {
+    fn named(n: TsNode) -> Vec<TsNode> {
+        let mut c = n.walk();
+        n.named_children(&mut c).filter(|k| k.kind() != "comment").collect()
+    }
+    let kids = named(arg);
+    let value = match kids.as_slice() {
+        [only] if only.kind() == "named_argument" => match named(*only).as_slice() {
+            [label, value] if label.kind() == "label" => *value,
+            _ => return None,
+        },
+        [only] => *only,
+        _ => return None,
+    };
+    (value.kind() == "identifier").then_some(value)
+}
+
+/// DT.5e: bind every [`NameRef`] of the file once all of it is declared.
+///
+/// - A member: a USES edge to the METHOD `<owner>::<name>` when this file
+///   declared it (a field, which `members` holds too, declares none).
+/// - A library-scope name: a USES edge to this file's top-level FUNCTION
+///   `<module>::<name>` when it declared one.
+///
+/// Nothing else binds: a getter / setter (reading state), a variable, class
+/// or other type, a self-reference (a method passing itself,
+/// `removeListener(_onChange)` inside `_onChange`), and a name this file does
+/// not declare. A state read is never a USES (the TS parser's CH.4 rule), and
+/// the graph binds a Bare ref to whatever symbol an import names: on
+/// quokka-stack every imported name passed by value that bound was a Riverpod
+/// provider variable (`ref.watch(cartProvider)`), so an imported name is left
+/// alone rather than made a USES of a STATE_VAR. Each edge carries an
+/// EVIDENCE cell, emitter `parser:dart`, rule `method_ref`, at the
+/// identifier's row; one edge per (from, to), at its earliest row.
+fn resolve_name_refs(acc: &mut Acc, module_qname: &str, repo: RepoId) {
+    // The walk is a stack, so walk order is not source order: the earliest
+    // row of each (from, target) wins.
+    let mut refs = std::mem::take(&mut acc.name_refs);
+    refs.sort_by_key(|r| r.line);
+    let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for r in refs {
+        let to = match &r.target {
+            NameTarget::Member(qname) => {
+                NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, qname)
+            }
+            NameTarget::Library(name) => NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::FUNCTION,
+                &format!("{module_qname}::{name}"),
+            ),
+        };
+        if to == r.from
+            || !acc.declared_ids.contains(&to)
+            || acc.accessor_ids.contains(&to)
+            || !seen.insert((r.from, to))
+        {
+            continue;
+        }
+        let ev = glia_code_domain::evidence::Evidence::emitter("parser:dart")
+            .rule("method_ref")
+            .line(r.line);
+        acc.edges.push(
+            Edge::new(r.from, to, edge_category::USES, Confidence::Strong).with_cell(ev.to_cell()),
+        );
+        acc.bare_calls.method_refs += 1;
     }
 }
 
@@ -1794,6 +2122,9 @@ fn chain_call_sites(
 /// The names an unqualified call inside one class member can reach before
 /// library scope.
 struct CallScope<'a> {
+    /// DT.5e: the qname of the type whose members `members` lists (the
+    /// owner a member's METHOD hangs on); None outside a type.
+    owner: Option<&'a str>,
     /// Everything the enclosing class declares: methods, getters, setters and
     /// fields, instance or static ([`class_member_names`]).
     members: &'a HashSet<String>,
@@ -1802,22 +2133,49 @@ struct CallScope<'a> {
     locals: HashSet<String>,
 }
 
+/// Where Dart's lexical order finds one unqualified name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NameScope {
+    /// A parameter or a name bound in the body.
+    Local,
+    /// A member of the enclosing type.
+    Member,
+    /// Neither: library scope (the file, its imports), or inherited.
+    Library,
+}
+
 impl CallScope<'_> {
+    /// Where an unqualified `name` binds: locals first, then the enclosing
+    /// type's members, then library scope.
+    fn lookup(&self, name: &str) -> NameScope {
+        if self.locals.contains(name) {
+            NameScope::Local
+        } else if self.members.contains(name) {
+            NameScope::Member
+        } else {
+            NameScope::Library
+        }
+    }
+
     /// Apply Dart's lexical order to one call site. Only `Bare` changes:
     /// `this.m()` and receiver calls pass through as LA.23e built them.
     fn classify(&self, q: CallQualifier, stats: &mut BareCallStats) -> Option<CallQualifier> {
         let CallQualifier::Bare(name) = q else {
             return Some(q);
         };
-        if self.locals.contains(&name) {
-            stats.local_skip += 1;
-            None
-        } else if self.members.contains(&name) {
-            stats.self_calls += 1;
-            Some(CallQualifier::SelfMethod(name))
-        } else {
-            stats.bare += 1;
-            Some(CallQualifier::Bare(name))
+        match self.lookup(&name) {
+            NameScope::Local => {
+                stats.local_skip += 1;
+                None
+            }
+            NameScope::Member => {
+                stats.self_calls += 1;
+                Some(CallQualifier::SelfMethod(name))
+            }
+            NameScope::Library => {
+                stats.bare += 1;
+                Some(CallQualifier::Bare(name))
+            }
         }
     }
 }
@@ -2261,6 +2619,12 @@ impl DiStats {
 
 /// Whether the file imports any `package:injectable/` library.
 fn imports_injectable(root: TsNode, src: &[u8]) -> bool {
+    imports_any(root, src, &["package:injectable/"])
+}
+
+/// Whether the file imports a library whose uri starts with one of
+/// `prefixes`.
+fn imports_any(root: TsNode, src: &[u8], prefixes: &[&str]) -> bool {
     let mut cursor = root.walk();
     root.named_children(&mut cursor)
         .filter(|c| c.kind() == "import_or_export")
@@ -2270,7 +2634,7 @@ fn imports_injectable(root: TsNode, src: &[u8]) -> bool {
                 .and_then(|spec| spec.child_by_field_name("uri"))
                 .and_then(|u| import_uri(u, src))
         })
-        .any(|uri| uri.starts_with("package:injectable/"))
+        .any(|uri| prefixes.iter().any(|p| uri.starts_with(p)))
 }
 
 /// Whether a `class_declaration` carries an [`INJECTABLE_ANNOTATIONS`]
@@ -2767,8 +3131,9 @@ fn collect_dio_base_facts(
 }
 
 /// Every client base URL in the file, depth-first in source order over the
-/// whole tree (not the body walks: quokka's Dio is built inside a top-level
-/// provider closure, which they do not enter). Returns (bases, copies).
+/// whole tree (not the body walks, which entered no closure before DT.5e:
+/// quokka's Dio is built inside a top-level provider closure). Returns
+/// (bases, copies).
 ///
 /// Shape A: `BaseOptions(.., baseUrl: X, ..)`, an `identifier` followed by its
 /// call selector, or a `const` / `new` construction of it. Shape B: an
@@ -5525,8 +5890,9 @@ class Wallet {
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(calls_of(&fp, state_var_id("lib::m::k")), vec![bare("h")]);
         assert_eq!(calls_of(&fp, state_var_id("lib::m::client")), vec![bare("Dio")]);
-        // A closure's body is not the initialiser's call.
-        assert_eq!(calls_of(&fp, state_var_id("lib::m::f")), vec![]);
+        // DT.5e: a closure's call is the initialiser's, as a member's
+        // closure's call is the member's.
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::f")), vec![bare("g")]);
         assert_eq!(
             calls_of(&fp, state_var_id("lib::m::r")),
             sorted(vec![attr("a", "b"), complex("a.b()", "c"), bare("d")])
@@ -5763,7 +6129,7 @@ void routes() {
     }
 
     /// CH.5a: every `BaseOptions(baseUrl: X)` - inside a top-level provider
-    /// closure, which the body walks never enter - and every
+    /// closure, read by the whole-tree scan - and every
     /// `<recv>.options.baseUrl = X` records a ClientBase on the MODULE.
     #[test]
     fn base_options_records_client_base() {
@@ -6301,5 +6667,342 @@ class Detail {
             Some("[dart-routes] shelf routes=2 handlers=2 path=server/server.dart")
         );
         assert_eq!(ShelfRouteStats::default().marker("a.dart"), None);
+    }
+
+    // ---- DT.5e: closures, creation sites, names passed by value, Flutter ----
+
+    /// The USES edges the parser emitted from `from`, as (to, evidence rule),
+    /// sorted.
+    fn uses_edges(fp: &FileParse, from: NodeId) -> Vec<(NodeId, Option<String>)> {
+        let mut out: Vec<(NodeId, Option<String>)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::USES)
+            .map(|e| {
+                let ev = glia_code_domain::evidence::Evidence::read(&e.cells);
+                (e.to, ev.and_then(|ev| ev.rule))
+            })
+            .collect();
+        out.sort_by_key(|(to, _)| format!("{to:?}"));
+        out
+    }
+
+    /// The qnames of this file's COMPONENT overlay nodes, sorted.
+    fn component_overlays(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::COMPONENT))
+            .filter_map(|n| fp.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    const CLOSURES_FIXTURE: &str = r#"class Page {
+  Widget build(BuildContext context) {
+    return Builder(builder: (ctx) {
+      return CardPage(title: label());
+    });
+  }
+
+  void arrow() => list.forEach((x) => render(x));
+
+  void nested() {
+    run(() {
+      later(() => deep());
+    });
+  }
+
+  void local() {
+    void inner() {
+      target();
+    }
+    inner();
+  }
+
+  void shadow() {
+    items.map((save) => save());
+  }
+
+  void save() {}
+  String label() => 'x';
+}
+"#;
+
+    /// DT.5e: a call inside a block closure, an arrow closure and a nested
+    /// closure is the enclosing member's; at HEAD every one was lost.
+    #[test]
+    fn closure_calls_are_the_members() {
+        let fp = parse_file(CLOSURES_FIXTURE, "lib/page.dart", "lib::page", repo()).unwrap();
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::build"),
+            sorted(vec![bare("Builder"), bare("CardPage"), self_m("label")])
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::arrow"),
+            sorted(vec![attr("list", "forEach"), bare("render")])
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::nested"),
+            sorted(vec![bare("run"), bare("later"), bare("deep")])
+        );
+    }
+
+    /// A local function's body was always walked for its member (HEAD
+    /// behaviour, pinned), and the local function's own name is a local.
+    #[test]
+    fn local_function_calls_stay_the_members() {
+        let fp = parse_file(CLOSURES_FIXTURE, "lib/page.dart", "lib::page", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::page::Page::local"), vec![bare("target")]);
+    }
+
+    /// `items.map((save) => save())`: the closure parameter shadows the
+    /// member `save`, so `save()` is no call site at all.
+    #[test]
+    fn closure_parameter_shadows_a_member() {
+        let fp = parse_file(CLOSURES_FIXTURE, "lib/page.dart", "lib::page", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::page::Page::shadow"), vec![attr("items", "map")]);
+    }
+
+    /// `const T(..)`, `new T(..)`, `const T.named(..)`, `new T.named(..)` and
+    /// a prefixed `const p.T(..)` are calls of T, like `T(..)` / `T.named(..)`.
+    #[test]
+    fn const_and_new_are_creation_calls() {
+        let source = r#"import 'package:ui/ui.dart' as p;
+
+class Dot {
+  const Dot();
+  const Dot.small();
+}
+
+class Page {
+  void make() {
+    final a = const Dot();
+    final b = new Label('x');
+    final c = const Dot.small();
+    final d = new Label.big(2);
+    final e = const p.Chip();
+    final f = const p.Chip.round();
+    final g = const <int>[];
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/page.dart", "lib::page", repo()).unwrap();
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::make"),
+            sorted(vec![
+                bare("Dot"),
+                bare("Label"),
+                attr("Dot", "small"),
+                attr("Label", "big"),
+                bare("Chip"),
+                attr("Chip", "round"),
+            ])
+        );
+        // CB.9's receiver-type record: `const Dot.small()` names a type this
+        // file declares, so `Dot` is recorded as the caller's type `Dot`.
+        let make = method_id("lib::page::Page::make");
+        assert_eq!(
+            fp.nav.local_types.get(&make).and_then(|t| t.get("Dot")).map(String::as_str),
+            Some("Dot")
+        );
+    }
+
+    const BY_NAME_FIXTURE: &str = r#"import 'helpers.dart';
+
+void _noop() {}
+
+String get title => 'x';
+
+final kAction = _noop;
+
+class Card {
+  final VoidCallback onTap;
+  Card(this.onTap);
+
+  void _save() {}
+
+  bool get ready => true;
+
+  void wire() {
+    final onLocal = _save;
+    use(_save);
+    Button(onPressed: _save, onLong: _noop);
+    Button(onPressed: onLocal);
+    Button(onPressed: onTap);
+    Button(onPressed: ready);
+    Button(onPressed: title);
+    Button(onPressed: kAction);
+    Button(onPressed: shared);
+    Button(onPressed: Card);
+    Button(onPressed: widget.onTap);
+    Button(onPressed: () => _save());
+    Button(onPressed: _save);
+  }
+
+  void _relisten() {
+    removeListener(_relisten);
+  }
+}
+"#;
+
+    /// DT.5e: `onPressed: _save` / `use(_save)` name the member METHOD: a USES
+    /// edge, emitter parser:dart rule method_ref, once per (from, to). A
+    /// same-file top-level FUNCTION by name is a USES edge too.
+    #[test]
+    fn a_method_or_function_passed_by_name_is_used() {
+        let fp = parse_file(BY_NAME_FIXTURE, "lib/card.dart", "lib::card", repo()).unwrap();
+        let wire = method_id("lib::card::Card::wire");
+        let rule = Some("method_ref".to_string());
+        let mut want = vec![
+            (method_id("lib::card::Card::_save"), rule.clone()),
+            (function_id("lib::card::_noop"), rule),
+        ];
+        want.sort_by_key(|(to, _)| format!("{to:?}"));
+        assert_eq!(uses_edges(&fp, wire), want);
+        let save = fp
+            .edges
+            .iter()
+            .find(|e| e.from == wire && e.to == method_id("lib::card::Card::_save"))
+            .and_then(|e| glia_code_domain::evidence::Evidence::read(&e.cells))
+            .expect("evidence");
+        assert_eq!(save.emitter, "parser:dart");
+        // `final onLocal = _save;` is no argument: the first argument row is
+        // `use(_save)`.
+        assert_eq!(save.line, Some(18));
+    }
+
+    /// A library-scope name this file does not declare (an imported
+    /// function, or a Riverpod provider variable) binds nothing: no USES edge
+    /// and no ref the graph would bind to a STATE_VAR.
+    #[test]
+    fn an_imported_name_passed_by_name_binds_nothing() {
+        let fp = parse_file(BY_NAME_FIXTURE, "lib/card.dart", "lib::card", repo()).unwrap();
+        assert!(!fp.refs.iter().any(|r| r.category == edge_category::USES), "{:?}", fp.refs);
+        let wire = method_id("lib::card::Card::wire");
+        let named = |to: &NodeId| fp.nav.name_by_id.get(to).cloned().unwrap_or_default();
+        assert!(uses_edges(&fp, wire).iter().all(|(to, _)| named(to) != "shared"));
+    }
+
+    /// A local (`onLocal`), a field (`onTap`), a getter (`ready`, `title`), a
+    /// same-file variable (`kAction`), a class (`Card`), a member access
+    /// (`widget.onTap`) and a self-reference bind nothing.
+    #[test]
+    fn locals_fields_accessors_and_self_bind_nothing() {
+        let fp = parse_file(BY_NAME_FIXTURE, "lib/card.dart", "lib::card", repo()).unwrap();
+        let card = "lib::card::Card";
+        let wire = method_id(&format!("{card}::wire"));
+        let targets: Vec<NodeId> = uses_edges(&fp, wire).into_iter().map(|(to, _)| to).collect();
+        assert!(!targets.contains(&method_id(&format!("{card}::ready"))), "a getter");
+        assert!(!targets.contains(&function_id("lib::card::title")), "a top-level getter");
+        let relisten = method_id(&format!("{card}::_relisten"));
+        assert_eq!(uses_edges(&fp, relisten), vec![], "a self-reference");
+        assert!(!targets.contains(&state_var_id("lib::card::kAction")), "a variable");
+        // Exactly the two edges from `wire`: `_save` and `_noop`.
+        let uses = fp.edges.iter().filter(|e| e.category == edge_category::USES).count();
+        assert_eq!(uses, 2);
+    }
+
+    /// The by-name rule runs in a top-level function's body too: its own
+    /// parameter shadows a same-file function.
+    #[test]
+    fn by_name_in_a_top_level_function() {
+        let source = r#"void tick() {}
+void other() {}
+void start(void Function() other) {
+  Timer.periodic(d, (_) => tick());
+  schedule(tick);
+  schedule(other);
+}
+"#;
+        let fp = parse_file(source, "lib/t.dart", "lib::t", repo()).unwrap();
+        let start = function_id("lib::t::start");
+        assert_eq!(
+            uses_edges(&fp, start),
+            vec![(function_id("lib::t::tick"), Some("method_ref".to_string()))]
+        );
+        assert_eq!(
+            fn_calls(&fp, "lib::t::start"),
+            sorted(vec![
+                attr("Timer", "periodic"),
+                bare("tick"),
+                bare("schedule"),
+                bare("schedule"),
+            ])
+        );
+    }
+
+    const FLUTTER_IMPORT: &str = "import 'package:flutter/material.dart';\n";
+
+    /// DT.5e: a subclass of each Flutter / Riverpod / hooks base, in a file
+    /// importing a Flutter library, gets a COMPONENT overlay of its qname.
+    #[test]
+    fn every_flutter_base_tags_a_component() {
+        for base in FLUTTER_COMPONENT_BASES {
+            let source = format!("{FLUTTER_IMPORT}class W extends {base}<X> {{}}\n");
+            let fp = parse_file(&source, "lib/w.dart", "lib::w", repo()).unwrap();
+            assert_eq!(component_overlays(&fp), ["lib::w::W"], "{base}");
+            let overlay = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::COMPONENT, "lib::w::W");
+            let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::w");
+            assert_eq!(fp.nav.parent_of.get(&overlay), Some(&module), "{base}");
+        }
+        for import in [
+            "package:flutter/widgets.dart",
+            "package:flutter_riverpod/flutter_riverpod.dart",
+            "package:hooks_riverpod/hooks_riverpod.dart",
+            "package:flutter_hooks/flutter_hooks.dart",
+        ] {
+            let source = format!("import '{import}';\nclass W extends p.StatelessWidget {{}}\n");
+            let fp = parse_file(&source, "lib/w.dart", "lib::w", repo()).unwrap();
+            assert_eq!(component_overlays(&fp), ["lib::w::W"], "{import}");
+        }
+    }
+
+    /// No Flutter import, a ChangeNotifier, a mixin-only class, an
+    /// `implements` of a widget base and a user-defined base widget: none is
+    /// tagged.
+    #[test]
+    fn non_flutter_classes_are_no_components() {
+        let plain = "import 'package:meta/meta.dart';\nclass W extends StatelessWidget {}\n";
+        let fp = parse_file(plain, "lib/w.dart", "lib::w", repo()).unwrap();
+        assert!(component_overlays(&fp).is_empty(), "no Flutter import");
+        let source = format!(
+            "{FLUTTER_IMPORT}class CartModel extends ChangeNotifier {{}}\n\
+             class M with State {{}}\n\
+             class I implements StatelessWidget {{}}\n\
+             abstract class BaseScreen extends StatelessWidget {{}}\n\
+             class Home extends BaseScreen {{}}\n"
+        );
+        let fp = parse_file(&source, "lib/w.dart", "lib::w", repo()).unwrap();
+        assert_eq!(component_overlays(&fp), ["lib::w::BaseScreen"]);
+    }
+
+    #[test]
+    fn dt5e_flutter_marker() {
+        let stats = FlutterStats {
+            widgets: 3,
+            states: 1,
+        };
+        assert_eq!(
+            stats.marker("lib/features/card.dart").as_deref(),
+            Some("[dart-flutter] components=4 (widgets=3 states=1) file=lib/features/card.dart")
+        );
+        assert_eq!(FlutterStats::default().marker("a.dart"), None);
+        let source = format!(
+            "{FLUTTER_IMPORT}class A extends StatelessWidget {{}}\n\
+             class B extends ConsumerStatefulWidget {{}}\n\
+             class _BState extends ConsumerState<B> {{}}\n"
+        );
+        let mut acc = Acc::default();
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_dart::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(&source, None).unwrap();
+        let (root, src) = (tree.root_node(), source.as_bytes());
+        acc.flutter_import = imports_any(root, src, FLUTTER_IMPORT_PREFIXES);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::w");
+        visit_top(root, src, "lib/w.dart", "lib::w", module, repo(), &mut acc);
+        assert_eq!((acc.flutter.widgets, acc.flutter.states), (2, 1));
     }
 }

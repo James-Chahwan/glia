@@ -400,7 +400,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
 /// constructor of Dart, Java, C# and C++.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvokedMembers {
-    /// What invokes the member: `angular` or `constructor`.
+    /// What invokes the member: `angular`, `constructor` or `flutter`.
     pub framework: &'static str,
     pub owner_roles: &'static [NodeKindId],
     pub exts: &'static [&'static str],
@@ -464,6 +464,10 @@ const CTOR_LIKE_OWNER: &[&str] = &[
 ///   Swift `init`, and the METHOD named like its class in Dart (CB.9's
 ///   `<T>::<T>`), Java, C# and C++ (a constructor declared only in a header
 ///   included).
+/// - DT.5e: Flutter calls a widget's `build` / `createState`, a State's
+///   `initState` / `build` / `dispose` and the rest of its lifecycle, and an
+///   InheritedWidget's `updateShouldNotify`, on every Dart class the parser
+///   tags a COMPONENT (a widget / State subclass in a Flutter file).
 ///
 /// engine/tests/dead_framework.rs builds a one-file graph per constructor
 /// language and asserts its parser mints the constructor METHOD this table
@@ -562,9 +566,27 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
         names: &[],
         named_like_owner: true,
     },
+    InvokedMembers {
+        framework: "flutter",
+        owner_roles: &[nk::COMPONENT],
+        exts: &["dart"],
+        names: &[
+            "build",
+            "createState",
+            "initState",
+            "dispose",
+            "didChangeDependencies",
+            "didUpdateWidget",
+            "deactivate",
+            "activate",
+            "reassemble",
+            "updateShouldNotify",
+        ],
+        named_like_owner: false,
+    },
 ];
 
-/// DT.5d: the framework tag (`angular`, `constructor`) of the first
+/// DT.5d: the framework tag (`angular`, `constructor`, `flutter`) of the first
 /// [`INVOKED_MEMBERS`] row matching a METHOD called `member_name`, in a file
 /// of extension `ext` (no dot), owned by `owner_name` carrying
 /// `owner_roles`; `None` when none does.
@@ -652,6 +674,17 @@ mod tests {
         assert_eq!(m(none, "Repo", "Constructor", "ts"), None);
         // The first match wins: a component's constructor is a constructor.
         assert_eq!(m(comp, "Page", "constructor", "ts"), Some("constructor"));
+        // (l) DT.5e: Flutter's lifecycle, on a Dart COMPONENT only.
+        for member in INVOKED_MEMBERS[11].names {
+            assert_eq!(m(comp, "CardPage", member, "dart"), Some("flutter"), "{member}");
+            assert_eq!(m(none, "CartModel", member, "dart"), None, "{member} on a plain class");
+            assert_eq!(m(svc, "Repo", member, "dart"), None, "{member} on a SERVICE");
+            assert_eq!(m(comp, "Page", member, "ts"), None, "{member} in a .ts file");
+        }
+        assert_eq!(m(comp, "CardPage", "onTap", "dart"), None, "a plain member");
+        assert_eq!(m(comp, "CardPage", "Build", "dart"), None, "the name compares exactly");
+        // A widget's constructor is still the constructor row's.
+        assert_eq!(m(comp, "CardPage", "CardPage", "dart"), Some("constructor"));
     }
 
     /// The table's shape: Angular rows are TypeScript only and role-gated,
@@ -671,6 +704,7 @@ mod tests {
             "constructor",
             "constructor",
             "constructor",
+            "flutter",
         ]);
         for r in INVOKED_MEMBERS {
             match r.framework {
@@ -678,6 +712,11 @@ mod tests {
                     assert_eq!(r.exts, TS_ONLY);
                     assert!(!r.owner_roles.is_empty() && !r.names.is_empty());
                     assert!(!r.named_like_owner);
+                }
+                "flutter" => {
+                    assert_eq!(r.exts, ["dart"]);
+                    assert_eq!(r.owner_roles, [nk::COMPONENT]);
+                    assert!(!r.names.is_empty() && !r.named_like_owner);
                 }
                 _ => {
                     assert!(r.owner_roles.is_empty());
