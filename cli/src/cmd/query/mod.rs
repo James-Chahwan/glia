@@ -1,7 +1,8 @@
 //! `query` area: graph lookups — pages (LA.6e), find (LD.3b), flows (LD.4b),
 //! implementors (LD.7c), serves (LD.8b), why (LE.5), pack (CC.4c), hotspots
 //! (CC.10b), communities (CD.1e), splits (CD.2d), hubs (CD.4c),
-//! duplicate-flows (CD.4f), identity (DD.15), query (DB.5).
+//! duplicate-flows (CD.4f), identity (DD.15), query (DB.5; its file is
+//! `rules_query.rs`, so the module is not `query::query`).
 //!
 //! Each command is a variant of `QueryCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -20,7 +21,7 @@ mod identity;
 mod implementors;
 mod pack;
 mod pages;
-mod query;
+mod rules_query;
 mod serves;
 mod splits;
 mod why;
@@ -99,6 +100,17 @@ pub(crate) enum QueryCmd {
     /// route serves, with the catch-all that absorbs it) and pages no in-repo
     /// link reaches. A report: exits 0 whatever it finds.
     Pages(pages::Args),
+    /// Query (DB.5): a Datalog program from a file, `-e` or stdin (or with
+    /// `--gql` a GQL read query) over the code graph, the predicate prelude
+    /// merged in (docs/rules.md). One table per output — the program's sinks,
+    /// or each `--output` — with every row's values (a node as its qname),
+    /// tier (fact, derived or heuristic: the weakest input of its best
+    /// derivation) and location; `--explain` follows each row with its witness
+    /// edges, located. Rows through a negation carry the coverage caveats of
+    /// what it reads. Exits 0 with rows, 1 with none (the absence says why), 2
+    /// on a usage, parse, analysis, budget or build error, the diagnostics as
+    /// `<source>:<line>:<col>: error: <message>`.
+    Query(rules_query::Args),
     /// Serves (LD.8b): who serves a channel — an HTTP `METHOD /path` (a bare
     /// `/path` means every verb) through the HTTP resolver's route matcher, or
     /// a queue topic. Each server is located, names the matcher tier that
@@ -137,6 +149,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pack(a) => pack::run(a),
         QueryCmd::Pages(a) => pages::run(a),
+        QueryCmd::Query(a) => rules_query::run(a),
         QueryCmd::Serves(a) => serves::run(a),
         QueryCmd::Splits(a) => splits::run(a),
         QueryCmd::Why(a) => why::run(a),

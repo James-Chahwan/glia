@@ -255,6 +255,7 @@ glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN
     outline line or a bare qname), located, with the links between them. stdout is
     the pack only, a summary goes to stderr; --json is the pack with its manifest.
     Exits 1 when the pack is empty (the absence says why).
+glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-rows <N>] [--output <PRED>]... [--with <WITH>]...
 
 # A change (git rev or pasted diff)
 glia delta <REPO> [--base <BASE>] [--category <CATEGORY>]... [--edges-only] [--json]
