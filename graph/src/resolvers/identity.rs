@@ -1,21 +1,26 @@
 //! IdentityResolver (DD.5): the last Resolve pass. It writes one SAME_AS star
 //! per identity class: two or more nodes that are one thing - one package
 //! across repos, a package and the project that publishes it, one proto /
-//! Avro / JSON Schema message in several repos, and one contract operation
-//! declared several times - and, as HEURISTIC candidates, a declaration
-//! vendored into another repo (DD.6). SCIP symbols (DD.7) are a later rule
-//! over the same table.
+//! Avro / JSON Schema message in several repos, one contract operation
+//! declared several times, and one definition two repos' SCIP indexes name
+//! (DD.7) - and, as HEURISTIC candidates, a declaration vendored into another
+//! repo (DD.6).
 //!
 //! **Nodes only.** The pass reads nodes, their qnames and cells, never
 //! another resolver's edges, so it can run anywhere in the Resolve stage and
 //! a layout merge recomputes it over the union (`resolver:` emitters are
 //! dropped from members and re-run), which is what keeps merge == joint
 //! build. The one index it builds is the HTTP resolver's own ROUTE matcher,
-//! for the route anchor below.
+//! for the route anchor below. The SCIP keys are the one input from outside
+//! the graph: the engine reads each repo's snapshot and hands the pass the
+//! `(node, symbol)` pairs it bound ([`IdentityResolver::with_scip`]); a merge
+//! reads them from its members' recorded roots, as a joint build reads them
+//! from the roots it was given.
 //!
 //! **Rules.** Which kinds a rule pairs and how surely (its tier) are the code
 //! domain's `CODE_TABLES.identity_rules` rows (DD.3), read by name, never a
-//! local list; the keys are `glia_code_domain::same_as`'s (DD.2). Seven rules:
+//! local list; the keys are `glia_code_domain::same_as`'s (DD.2). Eight
+//! rules, in `same_as::RULES` order:
 //!
 //! - `package_name` (FACT): PACKAGE_DEPs whose `same_as::dep_identity_key`
 //!   agrees (`package:pypi:My_Lib` == `package:pypi:my-lib`; npm `requests`
@@ -43,6 +48,16 @@
 //!   reaches exactly one ROUTE through `HttpRouteMatcher` (the tiers and
 //!   order `link_contract_routes` pairs DOCUMENTS with). `any`-tier hits never
 //!   anchor, and an op reaching two routes anchors to neither.
+//! - `scip_symbol` (FACT, DD.7): definitions whose SCIP symbols agree on
+//!   `same_as::scip_identity_key` - scheme, manager, package and descriptor,
+//!   the version cut out (`money 1.0` and `money 1.1` of one function are one
+//!   identity whose bodies may differ). The engine binds each symbol of a
+//!   fresh snapshot document to one node (the SCIP stage's BIND: innermost
+//!   span, exact name, an ambiguous symbol dropped) and never hands over a
+//!   `local` one, so one repo names a key with one node and a class is cross
+//!   repo in practice. Keys are joined through `Classes::from_pairs`: a node
+//!   two symbols name joins both keys' classes into one, so no member ->
+//!   center edge is written twice.
 //! - `body_hash` and `path_suffix` (HEURISTIC, DD.6): vendored copies, CROSS
 //!   repo only (two directories of one repo are its own business). A
 //!   declaration (MODULE, FUNCTION, METHOD, CLASS, ... with a POSITION file)
@@ -88,10 +103,10 @@
 //! `[evidence-rules] resolver=identity package_name=<n> ...` (edges per rule):
 //! `[identity] classes=<c> edges=<e> diverged=<d> package_name=<n>
 //! manifest_name=<n> message_fqname=<n> contract_op=<n> contract_route=<n>
-//! body_hash=<n> path_suffix=<n> offsets=<confirmed>/<seen>` (classes per
-//! rule; `d` counts the classes with a diverged edge; `seen` the vendoring
-//! offsets any declaration pair had, `confirmed` those an identical pair
-//! confirmed).
+//! scip_symbol=<n> body_hash=<n> path_suffix=<n> offsets=<confirmed>/<seen>`
+//! (classes per rule; `d` counts the classes with a diverged edge; `seen` the
+//! vendoring offsets any declaration pair had, `confirmed` those an identical
+//! pair confirmed).
 //! grep: `... 2>&1 | grep '^\[identity\] classes='`
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -115,23 +130,42 @@ use crate::types::RepoGraph;
 /// engine's `resolver!("identity", ..)` row would give.
 const PASS: &str = "identity";
 
-/// The rules this pass writes, in report and emission order.
-const PASS_RULES: [&str; 7] = [
-    same_as::RULE_PACKAGE_NAME,
-    same_as::RULE_MANIFEST_NAME,
-    same_as::RULE_MESSAGE_FQNAME,
-    same_as::RULE_CONTRACT_OP,
-    same_as::RULE_CONTRACT_ROUTE,
-    same_as::RULE_BODY_HASH,
-    same_as::RULE_PATH_SUFFIX,
-];
+/// The rules this pass writes, in report and emission order: every identity
+/// rule of the code domain, in its order.
+const PASS_RULES: [&str; 8] = same_as::RULES;
 
-/// SAME_AS stars over every identity class of the build (module doc).
-pub struct IdentityResolver;
+/// SAME_AS stars over every identity class of the build (module doc). The
+/// `scip_symbol` rule pairs only the `(node, SCIP symbol)` keys it is given
+/// ([`Self::with_scip`]); [`Self::new`] has none, so that rule forms nothing.
+pub struct IdentityResolver<'a> {
+    scip: &'a [(NodeId, String)],
+}
 
-impl CrossGraphResolver for IdentityResolver {
+impl IdentityResolver<'static> {
+    /// The resolver with no SCIP keys.
+    pub fn new() -> Self {
+        Self { scip: &[] }
+    }
+}
+
+impl Default for IdentityResolver<'static> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> IdentityResolver<'a> {
+    /// The resolver with `scip`: each definition a repo's SCIP snapshot bound
+    /// and the symbol it bound it by (the engine's `identity_symbols`). Order
+    /// and repeats are free: classes are keyed sets.
+    pub fn with_scip(scip: &'a [(NodeId, String)]) -> Self {
+        Self { scip }
+    }
+}
+
+impl CrossGraphResolver for IdentityResolver<'_> {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let (edges, report) = identity_edges(&merged.graphs);
+        let (edges, report) = identity_edges(&merged.graphs, self.scip);
         report.print();
         merged.cross_edges.extend(edges);
     }
@@ -211,8 +245,9 @@ impl Report {
     }
 }
 
-/// The SAME_AS edges of `graphs` and the report behind the markers.
-fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
+/// The SAME_AS edges of `graphs` (with the SCIP keys `scip`) and the report
+/// behind the markers.
+fn identity_edges(graphs: &[RepoGraph], scip: &[(NodeId, String)]) -> (Vec<Edge>, Report) {
     let rule = |name: &str| CODE_TABLES.identity_rule(name);
     let [
         package,
@@ -220,6 +255,7 @@ fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
         message,
         contract_op,
         contract_route,
+        scip_symbol,
         body_hash,
         path_suffix,
     ] = PASS_RULES.map(rule);
@@ -247,7 +283,16 @@ fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
         .flatten()
         .flat_map(rule_kinds)
         .collect();
-    let cands = collect_candidates(graphs, &plain_kinds, &op_kinds);
+    // The SCIP rule takes only the nodes a snapshot keyed: lookup only.
+    let keyed = Keyed {
+        kinds: scip_symbol
+            .filter(|_| !scip.is_empty())
+            .into_iter()
+            .flat_map(rule_kinds)
+            .collect(),
+        ids: scip.iter().map(|(id, _)| *id).collect(),
+    };
+    let cands = collect_candidates(graphs, &plain_kinds, &op_kinds, &keyed);
     if cands.is_empty() {
         return (edges, report);
     }
@@ -274,6 +319,9 @@ fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
     if let Some(r) = contract_route {
         stars.emit(4, r, contract_route_classes(r, &cands, graphs).values());
     }
+    if let Some(r) = scip_symbol.filter(|_| !scip.is_empty()) {
+        stars.emit(5, r, scip_classes(r, &cands, scip).iter());
+    }
     let [body, suffix] = vendored;
     if body.is_some() || suffix.is_some() {
         let decls = vendored_candidates(graphs, &cands, &vendored);
@@ -281,13 +329,26 @@ fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
         stars.report.offsets_confirmed = found.confirmed;
         stars.report.offsets_seen = found.seen;
         if let Some(r) = body {
-            stars.emit(5, r, vendored_classes(&found.body_hash, &cands).iter());
+            stars.emit(6, r, joined_classes(&found.body_hash, &cands).iter());
         }
         if let Some(r) = suffix {
-            stars.emit(6, r, vendored_classes(&found.path_suffix, &cands).iter());
+            stars.emit(7, r, joined_classes(&found.path_suffix, &cands).iter());
         }
     }
     (edges, report)
+}
+
+/// The nodes the SCIP rule may pair: of a kind it pairs, and keyed by a
+/// snapshot. Both are lookup-only.
+struct Keyed {
+    kinds: Vec<NodeKindId>,
+    ids: HashSet<NodeId>,
+}
+
+impl Keyed {
+    fn takes(&self, kind: NodeKindId, id: NodeId) -> bool {
+        self.kinds.contains(&kind) && self.ids.contains(&id)
+    }
 }
 
 /// The member kinds of `rule`, both sides.
@@ -303,11 +364,13 @@ fn pairs(rule: &IdentityRule, kind: NodeKindId) -> bool {
 /// Every node of a kind some rule pairs, walking `graphs` in order, each
 /// NodeId once (the first graph holding it wins, as `Locator` does). A node of
 /// a kind only the contract rules pair is kept only when its ORIGIN reads as
-/// a contract op, so a build's markdown sections cost one ORIGIN scan each.
+/// a contract op, so a build's markdown sections cost one ORIGIN scan each;
+/// a node of a kind only the SCIP rule pairs only when a snapshot keyed it.
 fn collect_candidates<'g>(
     graphs: &'g [RepoGraph],
     plain_kinds: &[NodeKindId],
     op_kinds: &[NodeKindId],
+    keyed: &Keyed,
 ) -> Vec<Candidate<'g>> {
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut out = Vec::new();
@@ -316,7 +379,7 @@ fn collect_candidates<'g>(
             let Some(&kind) = g.nav.kind_by_id.get(&n.id) else {
                 continue;
             };
-            let plain = plain_kinds.contains(&kind);
+            let plain = plain_kinds.contains(&kind) || keyed.takes(kind, n.id);
             let contract = op_kinds.contains(&kind);
             if !plain && !contract {
                 continue;
@@ -350,7 +413,7 @@ fn collect_candidates<'g>(
     out
 }
 
-// ---- the five rules ---------------------------------------------------------
+// ---- the keyed rules ---------------------------------------------------------
 
 /// `package_name`: PACKAGE_DEPs by `same_as::dep_identity_key`.
 fn package_classes(rule: &IdentityRule, cands: &[Candidate]) -> BTreeMap<String, Members> {
@@ -499,6 +562,38 @@ fn contract_route_classes(
         }
     }
     classes
+}
+
+/// `scip_symbol`: the candidates `scip` keys, grouped by
+/// `same_as::scip_identity_key` (the symbol minus its version) and joined
+/// transitively (module doc), as candidate-index member sets in member order.
+/// A key one node holds is no class; a symbol that is no global SCIP symbol
+/// keys nothing.
+fn scip_classes(
+    rule: &IdentityRule,
+    cands: &[Candidate],
+    scip: &[(NodeId, String)],
+) -> Vec<Members> {
+    // Lookup only, never iterated: the order below is `scip`'s keys'.
+    let at: HashMap<NodeId, usize> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| pairs(rule, c.kind))
+        .map(|(i, c)| (c.id, i))
+        .collect();
+    let mut keys: BTreeMap<String, Members> = BTreeMap::new();
+    for (id, symbol) in scip {
+        let (Some(&i), Some(key)) = (at.get(id), same_as::scip_identity_key(symbol)) else {
+            continue;
+        };
+        keys.entry(key.key).or_default().insert(i);
+    }
+    let links: Vec<(usize, usize)> = keys
+        .values()
+        .filter_map(|m| Some((*m.first()?, m)))
+        .flat_map(|(first, m)| m.iter().skip(1).map(move |&i| (first, i)))
+        .collect();
+    joined_classes(&links, cands)
 }
 
 /// Every PROJECT path of every repo (`""` for the repo root), for the owning
@@ -772,8 +867,8 @@ fn vendored_pairs(
 
 /// The classes `pairs` (candidate indices) join, transitively, through
 /// DD.1's `Classes::from_pairs`, as candidate-index member sets in member
-/// order.
-fn vendored_classes(pairs: &[(usize, usize)], cands: &[Candidate]) -> Vec<Members> {
+/// order (the vendored rules' pairs, and the SCIP rule's key links).
+fn joined_classes(pairs: &[(usize, usize)], cands: &[Candidate]) -> Vec<Members> {
     if pairs.is_empty() {
         return Vec::new();
     }
@@ -1042,7 +1137,7 @@ mod tests {
 
     fn run(graphs: Vec<RepoGraph>) -> MergedGraph {
         let mut m = MergedGraph::new(graphs);
-        m.run(&IdentityResolver);
+        m.run(&IdentityResolver::new());
         m
     }
 
@@ -1234,12 +1329,12 @@ mod tests {
             Some("message_fqname/diverged")
         );
         assert_eq!(stars(&m).len(), 2);
-        let report = identity_edges(&m.graphs).1;
+        let report = identity_edges(&m.graphs, &[]).1;
         assert_eq!(
             report.line().as_deref(),
             Some(
                 "[identity] classes=1 edges=2 diverged=1 package_name=0 manifest_name=0 \
-                 message_fqname=1 contract_op=0 contract_route=0 body_hash=0 path_suffix=0 \
+                 message_fqname=1 contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0 \
                  offsets=0/0"
             )
         );
@@ -1486,10 +1581,10 @@ mod tests {
         // One offset (``, `vendor`), confirmed by f; the MODULEs (no CODE)
         // are pairs of it that emit nothing.
         assert_eq!(
-            identity_edges(&m.graphs).1.line().as_deref(),
+            identity_edges(&m.graphs, &[]).1.line().as_deref(),
             Some(
                 "[identity] classes=2 edges=2 diverged=1 package_name=0 manifest_name=0 \
-                 message_fqname=0 contract_op=0 contract_route=0 body_hash=1 path_suffix=1 \
+                 message_fqname=0 contract_op=0 contract_route=0 scip_symbol=0 body_hash=1 path_suffix=1 \
                  offsets=1/1"
             )
         );
@@ -1515,7 +1610,7 @@ mod tests {
                 )
                 .build(),
         ];
-        let (edges, report) = identity_edges(&graphs);
+        let (edges, report) = identity_edges(&graphs, &[]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!((report.offsets_confirmed, report.offsets_seen), (0, 1));
         assert_eq!(report.line(), None);
@@ -1546,7 +1641,7 @@ mod tests {
                 "export function login() { return registerLogin(); }",
             ),
         ];
-        let (edges, report) = identity_edges(&graphs);
+        let (edges, report) = identity_edges(&graphs, &[]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!((report.offsets_confirmed, report.offsets_seen), (0, 1));
     }
@@ -1621,7 +1716,7 @@ mod tests {
                 .func("vendor/lib/a.ts", "f", f60())
                 .build(),
         ];
-        assert_eq!(identity_edges(&solo).1.offsets_seen, 0);
+        assert_eq!(identity_edges(&solo, &[]).1.offsets_seen, 0);
     }
 
     #[test]
@@ -1650,8 +1745,8 @@ mod tests {
                 ),
             ]
         );
-        let report = identity_edges(&m.graphs).1;
-        assert_eq!(report.classes[5], 1, "one class, not two");
+        let report = identity_edges(&m.graphs, &[]).1;
+        assert_eq!(report.classes[6], 1, "one class, not two");
         // lib-app and lib-cli; app's and cli's paths are no suffix of each other.
         assert_eq!((report.offsets_confirmed, report.offsets_seen), (2, 2));
     }
@@ -1739,12 +1834,138 @@ mod tests {
         assert_eq!(suffixes("dir/", false).count(), 0, "no empty suffix");
     }
 
+    // ---- SCIP symbols (DD.7) --------------------------------------------------
+
+    const MONEY_10: &str = "scip-python python money 1.0 `lib.money`/format_cents().";
+    const MONEY_11: &str = "scip-python python money 1.1 `lib.money`/format_cents().";
+    const PARSE_11: &str = "scip-python python money 1.1 `lib.money`/parse_cents().";
+    const BILLING: &str = "billing::money::format_cents";
+    const SHOP: &str = "shop::pay::format_cents";
+
+    /// `graphs` resolved with the SCIP keys `(graph index, qname, symbol)`.
+    fn run_scip(graphs: Vec<RepoGraph>, keys: &[(usize, &str, &str)]) -> MergedGraph {
+        let mut m = MergedGraph::new(graphs);
+        let scip: Vec<(NodeId, String)> = keys
+            .iter()
+            .map(|&(g, q, sym)| (id_of(&m, g, q), sym.to_string()))
+            .collect();
+        m.run(&IdentityResolver::with_scip(&scip));
+        m
+    }
+
+    /// Two repos' `format_cents`, in files of different basenames so the
+    /// vendored rules never pair them: only a SCIP key can.
+    fn two_defs(shop_body: CellPayload) -> Vec<RepoGraph> {
+        vec![
+            G::new("billing")
+                .func("billing/money.ts", "format_cents", f60())
+                .build(),
+            G::new("shop")
+                .func("shop/pay.ts", "format_cents", shop_body)
+                .build(),
+        ]
+    }
+
+    #[test]
+    fn scip_rule_groups_by_key() {
+        // The version is no part of the key: one identity.
+        let m = run_scip(
+            two_defs(f60()),
+            &[(0, BILLING, MONEY_10), (1, SHOP, MONEY_11)],
+        );
+        assert_eq!(
+            stars(&m),
+            [row(SHOP, BILLING, "scip_symbol", Confidence::Strong)]
+        );
+        assert_eq!(
+            identity_edges(
+                &m.graphs,
+                &[
+                    (id_of(&m, 0, BILLING), MONEY_10.to_string()),
+                    (id_of(&m, 1, SHOP), MONEY_11.to_string()),
+                ]
+            )
+            .1
+            .line()
+            .as_deref(),
+            Some(
+                "[identity] classes=1 edges=1 diverged=0 package_name=0 manifest_name=0 \
+                 message_fqname=0 contract_op=0 contract_route=0 scip_symbol=1 body_hash=0 \
+                 path_suffix=0 offsets=0/0"
+            )
+        );
+        // Another descriptor is another identity.
+        let apart = run_scip(
+            two_defs(f60()),
+            &[(0, BILLING, MONEY_10), (1, SHOP, PARSE_11)],
+        );
+        assert!(stars(&apart).is_empty(), "{:?}", stars(&apart));
+        // No keys, no class: the same graphs under `new()`.
+        assert!(stars(&run(two_defs(f60()))).is_empty());
+    }
+
+    #[test]
+    fn scip_diverged_bodies() {
+        let m = run_scip(
+            two_defs(g_lib()),
+            &[(0, BILLING, MONEY_10), (1, SHOP, MONEY_11)],
+        );
+        assert_eq!(
+            stars(&m),
+            [row(
+                SHOP,
+                BILLING,
+                "scip_symbol/diverged",
+                Confidence::Strong
+            )]
+        );
+    }
+
+    #[test]
+    fn scip_keys_need_global_symbols_of_rule_kinds() {
+        // `local` symbols are file-scoped: never an identity.
+        let local = run_scip(
+            two_defs(f60()),
+            &[(0, BILLING, "local 0"), (1, SHOP, "local 0")],
+        );
+        assert!(stars(&local).is_empty(), "{:?}", stars(&local));
+        // A MODULE is no definition the SCIP rule pairs.
+        let modules = run_scip(
+            two_defs(f60()),
+            &[(0, "billing::money", MONEY_10), (1, "shop::pay", MONEY_10)],
+        );
+        assert!(stars(&modules).is_empty(), "{:?}", stars(&modules));
+        // One repo alone: a key with one node is no class.
+        let one = run_scip(two_defs(f60()), &[(0, BILLING, MONEY_10)]);
+        assert!(stars(&one).is_empty(), "{:?}", stars(&one));
+    }
+
+    #[test]
+    fn scip_aliases_write_one_edge() {
+        // The pair keyed by two symbols (an alias the index defines twice) is
+        // one class: no edge is written twice.
+        let alias = "scip-python python money 1.0 `lib`/format_cents().";
+        let m = run_scip(
+            two_defs(f60()),
+            &[
+                (0, BILLING, MONEY_10),
+                (1, SHOP, MONEY_11),
+                (0, BILLING, alias),
+                (1, SHOP, alias),
+            ],
+        );
+        assert_eq!(
+            stars(&m),
+            [row(SHOP, BILLING, "scip_symbol", Confidence::Strong)]
+        );
+    }
+
     /// The evidence-rules tally counts edges per rule, the `[identity]` line
     /// classes per rule; both are silent with nothing to pair.
     #[test]
     fn markers() {
         let m = run(vec![G::new("solo").dep("package:npm:react").build()]);
-        let report = identity_edges(&m.graphs).1;
+        let report = identity_edges(&m.graphs, &[]).1;
         assert_eq!(report.line(), None);
         assert_eq!(report.tally.line(), None);
         let graphs = vec![
@@ -1758,19 +1979,19 @@ mod tests {
                 .build(),
             G::new("c").dep("package:npm:react").build(),
         ];
-        let report = identity_edges(&graphs).1;
+        let report = identity_edges(&graphs, &[]).1;
         assert_eq!(
             report.tally.line().as_deref(),
             Some(
                 "[evidence-rules] resolver=identity package_name=3 manifest_name=0 message_fqname=0 \
-                 contract_op=0 contract_route=0 body_hash=0 path_suffix=0"
+                 contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0"
             )
         );
         assert_eq!(
             report.line().as_deref(),
             Some(
                 "[identity] classes=2 edges=3 diverged=0 package_name=2 manifest_name=0 \
-                 message_fqname=0 contract_op=0 contract_route=0 body_hash=0 path_suffix=0 \
+                 message_fqname=0 contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0 \
                  offsets=0/0"
             )
         );

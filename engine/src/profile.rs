@@ -9,9 +9,9 @@
 //! assembled [`MergedGraph`], in run order: the cross-graph resolvers
 //! (`Resolve`), the post-passes of [`crate::passes`] (`Post`), then the
 //! evidence fill and the determinism sort (`Finalize`). Every build tail —
-//! `generate_one*` and `generate_many*` ([`run_code_passes_with`], given the
-//! build's [`CodeBuildCtx`]) and a layout merge ([`crate::merge`],
-//! [`run_code_passes`]) — is one call. A new resolver or build pass is one
+//! `generate_one*` and `generate_many*` (given the build's [`CodeBuildCtx`])
+//! and a layout merge ([`crate::merge`], given [`CodeBuildCtx::for_merge`]) —
+//! is one [`run_code_passes_with`] call. A new resolver or build pass is one
 //! [`PassSpec`] here, never a new call in `build/`.
 //!
 //! The build context is [`CodeBuildCtx`] (LF.2b): every repo's external
@@ -24,8 +24,8 @@
 //! LD.14a: [`CODE_PROFILE`] is the code domain's whole
 //! [`DomainProfile`]: the data tables (`code_domain::profile::CODE_TABLES` —
 //! registries, entry rule, carry edges, effect sinks, activation weights and
-//! presets) plus [`CODE_PASSES`]. [`run_code_passes`] runs the passes through
-//! it.
+//! presets) plus [`CODE_PASSES`]. [`run_code_passes_with`] runs the passes
+//! through it.
 //!
 //! LD.14b: its tables are the only source of the code domain's query dials.
 //! Liveness (`answers::entrypoint_reachable`) seeds from `tables.entry` and
@@ -42,10 +42,12 @@
 //! GRAPHQL_RESOLVER, CRON_JOB), and [`entry_kinds`] lists its kinds for the
 //! consumers that kept their own copy.
 
+use std::path::PathBuf;
+
 use glia_activation::passes::{PassRegistry, PassReport, PassSpec, Stage};
 use glia_activation::profile::DomainProfile;
 use glia_code_domain::{cell_type, evidence, node_kind};
-use glia_core::NodeKindId;
+use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
@@ -54,7 +56,7 @@ use glia_graph::{
 };
 
 use crate::build::BuildOptions;
-use crate::external::{RepoInputs, apply_external_edges};
+use crate::external::{RepoInputs, apply_external_edges, identity_symbols};
 use crate::passes::GroupFill;
 use crate::{adr, passes};
 
@@ -69,21 +71,38 @@ use crate::{adr, passes};
 /// project or docs graph); the Finalize `fill_evidence_sites` pass applies
 /// them. A context with none (a layout merge, [`Self::empty`]) fills every
 /// edge at Finalize, as before.
+///
+/// DD.7: `scip_roots` are the `(repo, root, marker label)` whose
+/// `.glia/scip-snapshot/` the `identity` pass reads for its `scip_symbol`
+/// keys: a build's every repo ([`Self::new`]), a layout merge's every member
+/// root still on disk ([`Self::for_merge`]: the merge has no inputs, so its
+/// SCIP stage stays a no-op and the SCIP edges its members kept are not
+/// added twice, but its identity pass keys the union as a joint build does).
 pub struct CodeBuildCtx {
     pub(crate) inputs: Vec<RepoInputs>,
     pub(crate) overlay: bool,
     pub(crate) group_fills: Vec<Option<GroupFill>>,
+    pub(crate) scip_roots: Vec<(RepoId, PathBuf, String)>,
 }
 
 impl CodeBuildCtx {
-    /// A build's context: its repos' inputs and options.
+    /// A build's context: its repos' inputs and options. Every repo is a SCIP
+    /// root, labelled with its path as given (its markers' `repo=`).
     pub(crate) fn new(inputs: Vec<RepoInputs>, opts: &BuildOptions) -> Self {
-        Self { inputs, overlay: opts.overlay, group_fills: Vec::new() }
+        let scip_roots = inputs.iter().map(|i| (i.repo, i.root.clone(), i.label.clone())).collect();
+        Self { inputs, overlay: opts.overlay, group_fills: Vec::new(), scip_roots }
     }
 
     /// No external inputs: every external stage is a no-op.
     pub(crate) fn empty() -> Self {
-        Self { inputs: Vec::new(), overlay: true, group_fills: Vec::new() }
+        Self { inputs: Vec::new(), overlay: true, group_fills: Vec::new(), scip_roots: Vec::new() }
+    }
+
+    /// A layout merge's context (DD.7): no external inputs, and `roots` - each
+    /// member repo whose recorded root is a directory, with its label - as the
+    /// SCIP roots. No group fills: a merge fills every edge at Finalize.
+    pub(crate) fn for_merge(roots: Vec<(RepoId, PathBuf, String)>) -> Self {
+        Self { scip_roots: roots, ..Self::empty() }
     }
 
     /// This context with the build's group evidence fills (DC.5), aligned
@@ -151,8 +170,23 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("package", PackageResolver),
     // DD.5: SAME_AS identity stars, the last Resolve pass. It reads nodes
     // only (never another resolver's edges), so its place is a convention:
-    // last, beside the SHARES_* pairings DD.16 retires.
-    resolver!("identity", IdentityResolver),
+    // last, beside the SHARES_* pairings DD.16 retires. DD.7: plus the SCIP
+    // keys of every snapshot under the context's SCIP roots (the SCIP stage
+    // reads the same snapshots again in Post).
+    PassSpec {
+        name: "identity",
+        stage: Stage::Resolve,
+        after: &[],
+        populates: &[],
+        run: |m, ctx| {
+            let mut scip: Vec<(NodeId, String)> = Vec::new();
+            for (repo, root, label) in &ctx.scip_roots {
+                scip.extend(identity_symbols(m, *repo, root, label));
+            }
+            scip.sort_by(|a, b| (a.0.0, &a.1).cmp(&(b.0.0, &b.1)));
+            resolve(m, &IdentityResolver::with_scip(&scip), "resolver:identity")
+        },
+    },
     // LF.2b: the external edges (`.glia/overlay.toml` `[[edge]]` stanzas),
     // first of the post-passes so every one of them sees them. They carry
     // their own EVIDENCE (emitter `overlay:edge`), which the Finalize fill
@@ -304,12 +338,6 @@ pub(crate) fn run_code_passes_with(merged: &mut MergedGraph, ctx: &CodeBuildCtx)
     let report = CODE_PROFILE.run_passes(merged, ctx);
     passes::edge_cells_marker(merged);
     report
-}
-
-/// [`run_code_passes_with`] and no external inputs: the tail of a layout
-/// merge, whose members' external edges are already in their layouts.
-pub(crate) fn run_code_passes(merged: &mut MergedGraph) -> PassReport {
-    run_code_passes_with(merged, &CodeBuildCtx::empty())
 }
 
 #[cfg(test)]

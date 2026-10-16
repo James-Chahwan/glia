@@ -1,0 +1,9 @@
+{
+  "framework": "identity-scip-symbols",
+  "language": "python",
+  "dirs": ["billing", "shop"],
+  "note": "DD.7: both repos' SCIP indexes define package money, descriptor `lib.money`/format_cents(). - one identity (rule scip_symbol, FACT) whose bodies differ (scip_symbol/diverged). Version is not part of the key (billing indexes money 1.0, shop money 1.1). Snapshots written by engine/tests/identity_scip.rs::write_identity_scip_fixture. The two lib/money.py files share a path but no identical declaration, so the vendored-copy offset is never confirmed and only the SCIP rule pairs them. grade.py cannot read edge cells: engine/tests/identity_scip.rs pins the rule and tier.",
+  "expect_edges": [
+    {"from": "format_cents", "to": "format_cents", "category": "SAME_AS"}
+  ]
+}

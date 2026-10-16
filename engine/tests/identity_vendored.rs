@@ -333,7 +333,7 @@ fn marker() {
         lines,
         [
             "[identity] classes=4 edges=4 diverged=2 package_name=0 manifest_name=0 message_fqname=0 \
-             contract_op=0 contract_route=0 body_hash=2 path_suffix=2 offsets=1/2"
+             contract_op=0 contract_route=0 scip_symbol=0 body_hash=2 path_suffix=2 offsets=1/2"
         ],
         "{stderr}"
     );
@@ -345,7 +345,7 @@ fn marker() {
         rules,
         [
             "[evidence-rules] resolver=identity package_name=0 manifest_name=0 message_fqname=0 \
-             contract_op=0 contract_route=0 body_hash=2 path_suffix=2"
+             contract_op=0 contract_route=0 scip_symbol=0 body_hash=2 path_suffix=2"
         ]
     );
 }

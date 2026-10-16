@@ -14,7 +14,12 @@
 //!   (`MergedGraph::undo_pass_mutations`, LC.10a);
 //! - repo labels are recomputed with [`crate::arch::repo_label_map`] over the
 //!   recorded roots in merge order, the call a joint build makes, because a
-//!   label deepens (`api` -> `x/api`) only when two basenames collide.
+//!   label deepens (`api` -> `x/api`) only when two basenames collide;
+//! - the identity pass's SCIP keys (DD.7) are read from the snapshot under
+//!   every recorded root that is still a directory, as a joint build reads
+//!   them from the roots it was given: a root edited since is read as it is
+//!   now (its stale documents skipped, as a joint build of that tree would),
+//!   and a member whose root is gone keys nothing.
 //!
 //! Members are merged in the order given; each member's graphs keep their
 //! stored shard order, which is `generate_many`'s slot order, so the merged
@@ -48,7 +53,7 @@ use std::time::Instant;
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::node_kind;
-use glia_core::Edge;
+use glia_core::{Edge, RepoId};
 use glia_graph::{MergedGraph, RepoGraph};
 use glia_store::{
     LayoutExtras, MANIFEST_NAME, MemberMeta, read_layout_extras, read_manifest_lenient,
@@ -62,7 +67,7 @@ use crate::build::timing::{BuildTimes, persist_marker};
 use crate::persist::{
     LoadOutcome, default_layout_dir, layout_meta, load_layout, load_or_rebuild, write_self_ignore,
 };
-use crate::profile::run_code_passes;
+use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::{BUILD_STAMP, GenerateResult};
 
 /// The default file name of a workspace manifest ([`read_workspace`]).
@@ -312,15 +317,24 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
         });
     }
 
+    let labels_stored = stored_labels.len();
+    let repo_labels = union_labels(&label_inputs, stored_labels);
+    // DD.7: the SCIP roots, the repos whose recorded root is on disk, in the
+    // order the labels are given (merge order, as a joint build meets them).
+    let scip_roots: Vec<(RepoId, PathBuf, String)> = label_inputs
+        .iter()
+        .map(|(id, root)| {
+            let label = repo_labels.get(id).cloned().unwrap_or_else(|| root.clone());
+            (RepoId(*id), PathBuf::from(root), label)
+        })
+        .collect();
+
     let code_shards = graphs.len();
     let mut merged = MergedGraph::new(graphs);
-    let report = run_code_passes(&mut merged);
+    let report = run_code_passes_with(&mut merged, &CodeBuildCtx::for_merge(scip_roots));
     let kept_member_edges = kept.len();
     merged.cross_edges.extend(kept);
     merged.sort_cross_edges();
-
-    let labels_stored = stored_labels.len();
-    let repo_labels = union_labels(&label_inputs, stored_labels);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();

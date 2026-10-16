@@ -74,6 +74,7 @@ mod wrappers;
 
 pub(crate) use history::{MAX_COMMIT_FILES, commit_file_sets};
 pub(crate) use infer_wrappers::infer_entity_wrappers;
+pub(crate) use scip::identity_symbols;
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
 
 use std::path::PathBuf;

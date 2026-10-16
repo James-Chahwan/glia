@@ -307,7 +307,7 @@ fn marker() {
             // DD.6's vendored fields: the two src/index.js MODULEs share a
             // path but no body, so their one offset is seen, never confirmed.
             "[identity] classes=2 edges=2 diverged=0 package_name=2 manifest_name=0 message_fqname=0 \
-             contract_op=0 contract_route=0 body_hash=0 path_suffix=0 offsets=0/1"
+             contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0 offsets=0/1"
         ],
         "{stderr}"
     );
@@ -319,7 +319,7 @@ fn marker() {
         rules,
         [
             "[evidence-rules] resolver=identity package_name=2 manifest_name=0 message_fqname=0 \
-             contract_op=0 contract_route=0 body_hash=0 path_suffix=0"
+             contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0"
         ]
     );
 }

@@ -490,7 +490,7 @@ fn identity_edges_name_their_rule() {
         "message:proto:shop.Order",
         vec![fields(r#",{"name":"extra"}"#)],
     );
-    let m = resolve(vec![a.build(), b.build()], &IdentityResolver);
+    let m = resolve(vec![a.build(), b.build()], &IdentityResolver::new());
 
     let mut seen: Vec<String> = Vec::new();
     for e in m

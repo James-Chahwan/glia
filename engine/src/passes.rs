@@ -3337,6 +3337,7 @@ mod passes_tests {
             ],
             overlay,
             group_fills: Vec::new(),
+            scip_roots: Vec::new(),
         };
         let fixture = vec![r#"{"provenance":"test_fixture"}"#.to_string()];
 
@@ -3456,6 +3457,7 @@ mod passes_tests {
             }],
             overlay: true,
             group_fills: Vec::new(),
+            scip_roots: Vec::new(),
         };
         let origin = |p: &str| vec![format!(r#"{{"provenance":"{p}"}}"#)];
         let none: Vec<String> = Vec::new();

@@ -92,6 +92,17 @@
 //! re-stamps apply in [`EdgePos`] order and contradiction lines sort by
 //! `(file, line)` then text.
 //!
+//! IDENTITY (DD.7). [`identity_symbols`] is BIND alone, for the identity
+//! resolver's `scip_symbol` rule: every symbol a fresh document's definition
+//! row binds, with the node it binds, `local` symbols left out. It runs in
+//! the `identity` Resolve pass, before this stage, so a build with a snapshot
+//! reads it twice (an incomplete one prints `read_scip`'s line twice); both
+//! reads select the same fresh documents ([`fresh_documents`]) and bind over
+//! the same nodes (no pass between them adds a node or moves a POSITION).
+//! Its marker, once per repo with a complete snapshot, in the Resolve stage:
+//!   `[scip] identity repo=<label> defs=<b> keyed=<k>`
+//! where `defs` counts bound symbols and `k` those that key an identity.
+//!
 //! Markers, once per repo with a complete snapshot, in this order (the first
 //! two are the fired_on lines):
 //!   `[scip] ingest repo=<label> tool=<tool> documents=<d> stale=<s> defs=<n> bound=<b> unbound=<u> ambiguous=<a> refs=<r> imports=<i> unowned=<o> added=<e> (calls=<c> uses=<x>) confirmed=<f> category_differs=<k> self_refs=<z>`
@@ -107,9 +118,11 @@
 //!   `[scip] contradicts <from qname> -[<CAT> <emitter>[/<rule>]]-> <to qname> at <file>:<line+1>; index says <qname>`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
-use glia_code_domain::snapshots::{ScipDocumentRecord, ScipSymbolRecord, read_scip, source_hash};
+use glia_code_domain::same_as::scip_identity_key;
+use glia_code_domain::snapshots::{ScipDocumentRecord, ScipSnapshot, ScipSymbolRecord, read_scip, source_hash};
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
@@ -147,7 +160,9 @@ const CONTRADICT_CATEGORIES: [EdgeCategoryId; 4] =
 /// Most `[scip] contradicts` lines one repo prints; the marker counts all.
 const MAX_CONTRADICTION_LINES: usize = 20;
 
-/// The node kinds a definition row may bind.
+/// The node kinds a definition row may bind: the code domain's `scip_symbol`
+/// identity rule pairs exactly these (`def_kinds_are_the_identity_rule_kinds`
+/// pins the two equal).
 const DEF_KINDS: [NodeKindId; 8] = [
     node_kind::FUNCTION,
     node_kind::METHOD,
@@ -771,16 +786,12 @@ fn ref_candidates<'a>(
     out
 }
 
-/// The SCIP edge stage for one repo (module doc). `None`, with nothing
-/// changed, when the repo has no complete snapshot.
-pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option<ScipTally> {
-    let snap = read_scip(&input.root)?;
-    let tool = tool_tag(&snap.meta.tool);
-    let mut tally = ScipTally { tool: tool.clone(), documents: snap.documents.len(), ..ScipTally::default() };
-
-    let mut fresh: Vec<Fresh<'_>> = Vec::new();
+/// The documents of `snap` whose file under `root` still hashes to the bytes
+/// the import read (module doc: STALE); every other one counts `stale`.
+fn fresh_documents<'a>(snap: &'a ScipSnapshot, root: &Path, tally: &mut ScipTally) -> Vec<Fresh<'a>> {
+    let mut fresh: Vec<Fresh<'a>> = Vec::new();
     for doc in &snap.documents {
-        match std::fs::read(input.root.join(&doc.path)) {
+        match std::fs::read(root.join(&doc.path)) {
             Ok(bytes) if source_hash(&bytes) == doc.source_hash => {
                 let lines = bytes.iter().filter(|&&b| b == b'\n').count() + 1;
                 fresh.push(Fresh { doc, lines });
@@ -788,6 +799,42 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
             _ => tally.stale += 1,
         }
     }
+    fresh
+}
+
+/// The SCIP identity keys of `repo` (module doc: IDENTITY): every node a fresh
+/// document of the snapshot under `root` binds, with the symbol it binds it
+/// by, sorted by (NodeId, symbol). A symbol `same_as::scip_identity_key`
+/// reads as no identity (`local <id>`, a malformed one) keys nothing. Empty
+/// without a complete snapshot; prints `[scip] identity` with one.
+pub(crate) fn identity_symbols(merged: &MergedGraph, repo: RepoId, root: &Path, label: &str) -> Vec<(NodeId, String)> {
+    let Some(snap) = read_scip(root) else { return Vec::new() };
+    // A throwaway tally: the stage's own marker counts the real ones.
+    let mut tally = ScipTally::default();
+    let fresh = fresh_documents(&snap, root, &mut tally);
+    let index = SpanIndex::build(merged, repo);
+    let bound = bind_defs(&fresh, &index, &mut tally);
+    let mut keys: Vec<(NodeId, String)> = bound
+        .iter()
+        .filter_map(|(&s, b)| {
+            let symbol = &snap.symbols.get(s as usize)?.symbol;
+            scip_identity_key(symbol).map(|_| (b.id, symbol.clone()))
+        })
+        .collect();
+    keys.sort_by(|a, b| (a.0.0, &a.1).cmp(&(b.0.0, &b.1)));
+    keys.dedup();
+    eprintln!("[scip] identity repo={label} defs={} keyed={}", bound.len(), keys.len());
+    keys
+}
+
+/// The SCIP edge stage for one repo (module doc). `None`, with nothing
+/// changed, when the repo has no complete snapshot.
+pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option<ScipTally> {
+    let snap = read_scip(&input.root)?;
+    let tool = tool_tag(&snap.meta.tool);
+    let mut tally = ScipTally { tool: tool.clone(), documents: snap.documents.len(), ..ScipTally::default() };
+
+    let fresh = fresh_documents(&snap, &input.root, &mut tally);
 
     let index = SpanIndex::build(merged, input.repo);
     let bound = bind_defs(&fresh, &index, &mut tally);
@@ -1095,6 +1142,39 @@ mod tests {
             Some(Evidence::emitter("scip:scip-python").rule("confirms:graph:refs/global_unique_method").at("a.py", 1))
         );
         assert_eq!(Evidence::of(kept), Some(fact));
+    }
+
+    /// DD.3's handoff: the `scip_symbol` identity rule pairs the kinds a
+    /// definition row binds, so the two lists cannot drift.
+    #[test]
+    fn def_kinds_are_the_identity_rule_kinds() {
+        let rule = glia_code_domain::profile::CODE_TABLES
+            .identity_rule(glia_code_domain::same_as::RULE_SCIP_SYMBOL)
+            .expect("the scip_symbol rule");
+        assert_eq!(rule.from, DEF_KINDS);
+        assert_eq!(rule.to, DEF_KINDS);
+    }
+
+    /// DD.7: BIND alone, sorted by NodeId; a stale document keys nothing.
+    #[test]
+    fn identity_symbols_bind_global_fresh_symbols() {
+        let dir = a_py_snapshot("identity", &[]);
+        let repo = RepoId::from_canonical("test://scip-identity");
+        let merged = graph(repo);
+        let keys = identity_symbols(&merged, repo, &dir, "identity");
+        assert_eq!(
+            keys,
+            [
+                (NodeId(2), "scip-python python app 0.1 `a`/run().".to_string()),
+                (NodeId(3), "scip-python python app 0.1 `a`/helper().".to_string()),
+            ]
+        );
+        // The source edited since the snapshot: its document keys nothing.
+        std::fs::write(dir.join("a.py"), format!("{A_PY}\n")).unwrap();
+        assert!(identity_symbols(&merged, repo, &dir, "identity").is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+        // No snapshot at all: nothing, silently.
+        assert!(identity_symbols(&merged, repo, &dir, "identity").is_empty());
     }
 
     #[test]
