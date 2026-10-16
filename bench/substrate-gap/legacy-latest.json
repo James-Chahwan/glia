@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 409,
+  "fixtures": 412,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -752,6 +752,14 @@
         "RPC_CALLS": 1.0
       }
     },
+    "go-ethereum-method-wrappers": {
+      "framework": "go-ethereum-method-wrappers",
+      "language": "go",
+      "per_category": {
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
+      }
+    },
     "go-field-dispatch": {
       "framework": "go-field-dispatch",
       "language": "go",
@@ -1355,6 +1363,14 @@
         "INJECTS": 1.0
       }
     },
+    "models-dart-dio": {
+      "framework": "models-dart-dio",
+      "language": "dart",
+      "per_category": {
+        "HTTP_CALLS": 1.0,
+        "SAME_AS": 1.0
+      }
+    },
     "models-declared-fields": {
       "framework": "models-declared-fields",
       "language": "go",
@@ -1370,7 +1386,9 @@
     "models-graphql-stock": {
       "framework": "models-graphql-stock",
       "language": "graphql",
-      "per_category": {}
+      "per_category": {
+        "GRAPHQL_CALLS": 1.0
+      }
     },
     "models-http-contract": {
       "framework": "models-http-contract",
@@ -2414,6 +2432,16 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0,
+        "USES": 1.0
+      }
+    },
+    "ts-viem-web3-contract-calls": {
+      "framework": "ts-viem-web3-contract-calls",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0,
         "USES": 1.0
       }
     },
