@@ -24,6 +24,12 @@ move), with one closing docs packet. 0.5.2 is bumped only after them and after J
 | T9 | **pyo3 `neighbours(categories=..)` takes ids only** | `["CALLS"]` -> `TypeError: ... 'str' object cannot be interpreted as an integer` | API only |
 | T10 | **Smart contracts are not modelled across the stack** | Kina `contracts/contracts/EscrowManager.sol` called from the frontend (ethers, 7+ files) and the backend (`ethclient`, `signer.go`, `indexer.go`) | no edge joins a call to the Solidity function; 26 of Kina's dead METHODs are Solidity functions |
 
+| T11 | **A GraphQL operation named unlike its root field does not pair** | examples-glia `query StockList { products { .. } }` vs `Query.products`; `mutation Restock { restock .. }` pairs only because the names agree | 1 of 2 GRAPHQL_CALLS |
+
+James, 2026-10-16: *"lets consider this pre 0.5.3 work and part of 0.5.2"* - T10 is in this batch. The test bed for every
+tweak is `~/Code/examples-glia` (expected answers and baseline: `dev-notes/examples-glia-expected.md`), plus the Kina and
+quokka-stack shapes above, each turned into a substrate-gap fixture.
+
 Checked and fine: gRPC (quokka's Android client and turps' WS-to-gRPC bridge both pair to `grpc:chat.QuokkaChatService`).
 Not testable here: GraphQL (neither repo uses it).
 
