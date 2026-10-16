@@ -79,7 +79,9 @@ James's rulings on the five raised:
    `--strict` / `strict=True` makes it exit 2 (correction on DT.7b).
 2. Drop the name-only pairing of Solidity events in EventBusResolver (*"yeah sure"*; correction on DT.10b).
 3. Contract-model classes collapse in answers (*"i guess so that makes sense"*; DT.1h).
-4. JSON-tag renames in `contract-breaks` / review: explained, awaiting James.
+4. JSON-tag renames in `contract-breaks` / review: IN (James, *"yes ?"*, 2026-10-17), advisory by default - an inferred
+   client <-> server model break shows in review / contract-breaks but blocks only for a FACT pairing or on opt-in; one
+   packet DT.1o after DT.1h / DT.1i (specced by `wf_c85572dc-7b3`).
 5. Config-templated subjects: noted for later (*"is it nessacary at some point and we should not it for later"*; the
    0.5.3 seed's value-flow item).
 
