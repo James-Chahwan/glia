@@ -17,7 +17,7 @@
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
-//! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
+//! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS and no WebSocket client connecting through it (DT.3c: the route lent its path to a generic upgrade handler and a client paired with it at its best tier, `glia_graph::WebSocketStackResolver::served_routes`) | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
@@ -101,6 +101,10 @@
 //! - `[dead-dispatch] dead_symbol rows withheld: <n> (implementations of a called method)`
 //!   once per report that computes `dead_symbol` (and per [`graph_counts`])
 //!   when the CH.1c dispatch rule keeps `n > 0` rows out;
+//! - `[gaps] ws-served routes=<n>` once per report, before its `rows=` line,
+//!   when `n > 0` ROUTEs with no incoming HTTP_CALLS are kept out of
+//!   `unpaired_route` because a WebSocket client connects through them
+//!   (DT.3c);
 //! - `[dead-framework] dead_symbol rows withheld: invoked=<i> generated=<g>`
 //!   once per report that computes `dead_symbol` (and per [`graph_counts`])
 //!   when the DT.5d rules keep any row out: `g` generated-code candidates
@@ -359,7 +363,7 @@ pub fn graph_counts(merged: &MergedGraph) -> GraphCounts {
     }
     let mut gaps_by_category: BTreeMap<&'static str, usize> =
         GRAPH_CATEGORIES.iter().map(|c| (*c, 0)).collect();
-    for r in collect_rows(merged, &[], &GRAPH_CATEGORIES, &Wrapped::new()) {
+    for r in collect_rows(merged, &[], &GRAPH_CATEGORIES, &Wrapped::new()).rows {
         *gaps_by_category.entry(r.category).or_default() += 1;
     }
     GraphCounts {
@@ -441,7 +445,13 @@ pub fn gaps_report(
     } else {
         Wrapped::new()
     };
-    let mut rows = collect_rows(merged, roots, &wanted, &wrapped);
+    let Collected {
+        mut rows,
+        ws_served,
+    } = collect_rows(merged, roots, &wanted, &wrapped);
+    if ws_served > 0 {
+        eprintln!("[gaps] ws-served routes={ws_served}");
+    }
     rows.sort_by(row_order);
     debug_assert!(
         {
@@ -529,7 +539,7 @@ pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<Overlay
     let counts_without = graph_counts(&without.merged);
     let counts_with = graph_counts(&with.merged);
     let orphans = |m: &MergedGraph, wrapped: &Wrapped| {
-        collect_rows(m, &[], &ORPHAN_CATEGORIES, wrapped).len()
+        collect_rows(m, &[], &ORPHAN_CATEGORIES, wrapped).rows.len()
     };
     let with_roots: Vec<(u64, PathBuf)> = with
         .repo_roots
@@ -677,6 +687,10 @@ struct View<'a> {
     handlers: HashMap<NodeId, Vec<NodeId>>,
     /// Per repo, the repo-relative dirs of its PROJECT anchors (`.` left out).
     project_roots: BTreeMap<u64, Vec<String>>,
+    /// DT.3c: the ROUTEs a WebSocket client connects through
+    /// ([`glia_graph::WebSocketStackResolver::served_routes`]). Only looked
+    /// up, never iterated.
+    ws_served: HashSet<NodeId>,
 }
 
 impl<'a> View<'a> {
@@ -696,6 +710,7 @@ impl<'a> View<'a> {
             callers: HashMap::new(),
             handlers: HashMap::new(),
             project_roots: BTreeMap::new(),
+            ws_served: glia_graph::WebSocketStackResolver::served_routes(&merged.graphs),
         };
         let mut methods: HashSet<NodeId> = HashSet::new();
         // The CALLS / USES edges into each METHOD from another node, in edge
@@ -908,6 +923,14 @@ fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
     out
 }
 
+/// What [`collect_rows`] returns: the rows, unsorted, and how many ROUTEs
+/// the DT.3c WebSocket rule kept out of `unpaired_route` (counted only when
+/// that category is wanted).
+struct Collected {
+    rows: Vec<GapRow>,
+    ws_served: usize,
+}
+
 /// Every row of the `wanted` categories, unsorted. `wrapped` is
 /// [`declared_wrappers`] (empty when no wrapper is known).
 fn collect_rows(
@@ -915,7 +938,7 @@ fn collect_rows(
     roots: &[(u64, PathBuf)],
     wanted: &[&'static str],
     wrapped: &Wrapped,
-) -> Vec<GapRow> {
+) -> Collected {
     let want = |c: &str| wanted.contains(&c);
     let view = View::build(merged);
     let loc = Locator::new(merged);
@@ -945,6 +968,8 @@ fn collect_rows(
     // DT.5d: candidates that are generated code, and framework- or
     // runtime-invoked members of an owner with an incoming carry edge.
     let (mut generated, mut invoked) = (0usize, 0usize);
+    // DT.3c: routes a WebSocket client connects through.
+    let mut ws_served = 0usize;
 
     for n in &view.nodes {
         let mut node_row =
@@ -1092,6 +1117,12 @@ fn collect_rows(
                 && !is_nav_route(n.cells)
                 && !view.http_in.contains(&n.id) =>
             {
+                // DT.3c: reached by WS_CONNECTS into the generic upgrade
+                // handler it lent its path to, never by HTTP_CALLS.
+                if view.ws_served.contains(&n.id) {
+                    ws_served += 1;
+                    continue;
+                }
                 let handlers = view.handlers.get(&n.id).map(Vec::as_slice).unwrap_or(&[]);
                 let detail = match view.named(handlers) {
                     Some(h) => format!("no incoming HTTP_CALLS; handler={h}"),
@@ -1209,7 +1240,7 @@ fn collect_rows(
             }
         }
     }
-    rows
+    Collected { rows, ws_served }
 }
 
 // ---------------------------------------------------------------------------
@@ -2106,6 +2137,133 @@ mod tests {
             deltas(&base.nodes_by_kind, &grew.nodes_by_kind),
             BTreeMap::from([("DATA_ENTITY", 1)])
         );
+    }
+
+    /// DT.3c: one hand-built graph, nodes by (kind, qname), edges by id.
+    struct G {
+        repo: RepoId,
+        nodes: Vec<glia_core::Node>,
+        nav: glia_code_domain::CodeNav,
+        edges: Vec<Edge>,
+    }
+
+    impl G {
+        fn new(tag: &str) -> Self {
+            Self {
+                repo: RepoId::from_canonical(&format!("test://gaps-ws/{tag}")),
+                nodes: Vec::new(),
+                nav: glia_code_domain::CodeNav::default(),
+                edges: Vec::new(),
+            }
+        }
+
+        fn node(&mut self, kind: NodeKindId, qname: &str) -> NodeId {
+            let id = NodeId::from_parts(glia_code_domain::GRAPH_TYPE, self.repo, kind, qname);
+            self.nodes.push(glia_core::Node {
+                id,
+                repo: self.repo,
+                confidence: glia_core::Confidence::Medium,
+                cells: Vec::new(),
+            });
+            self.nav.record(id, qname, qname, kind, None);
+            id
+        }
+
+        fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
+            self.edges.push(Edge {
+                from,
+                to,
+                category,
+                confidence: glia_core::Confidence::Strong,
+                cells: Vec::new(),
+            });
+        }
+
+        fn build(self) -> glia_graph::RepoGraph {
+            glia_graph::RepoGraph {
+                repo: self.repo,
+                nodes: self.nodes,
+                edges: self.edges,
+                nav: self.nav,
+                symbols: glia_graph::SymbolTable::default(),
+                unresolved_calls: Vec::new(),
+                unresolved_refs: Vec::new(),
+                properties: Default::default(),
+            }
+        }
+    }
+
+    /// DT.3a's route-upgrade shape: a gin server whose `GET /live/orders`
+    /// is HANDLED_BY `Hub::Serve`, which upgrades (the generic `ws:ws`
+    /// HANDLED_BY it, LA.18b), and a `GET /admin/live` HANDLED_BY the
+    /// upgrading function too (`admin_on_upgrade`) or by a plain page
+    /// handler; a client graph with one WS_CLIENT per key.
+    fn ws_build(clients: &[&str], admin_on_upgrade: bool) -> MergedGraph {
+        let mut s = G::new("server");
+        let serve = s.node(node_kind::FUNCTION, "live::Hub::Serve");
+        let page = s.node(node_kind::FUNCTION, "admin::page");
+        let orders = s.node(node_kind::ROUTE, "GET /live/orders");
+        let admin = s.node(node_kind::ROUTE, "GET /admin/live");
+        let ws = s.node(node_kind::WS_HANDLER, "ws:ws");
+        s.edge(orders, serve, edge_category::HANDLED_BY);
+        let admin_fn = if admin_on_upgrade { serve } else { page };
+        s.edge(admin, admin_fn, edge_category::HANDLED_BY);
+        s.edge(ws, serve, edge_category::HANDLED_BY);
+        let mut c = G::new("client");
+        for key in clients {
+            c.node(node_kind::WS_CLIENT, &format!("ws_client:{key}"));
+        }
+        MergedGraph::new(vec![s.build(), c.build()])
+    }
+
+    /// The `unpaired_route` qnames of `m`'s report (row order), the
+    /// category's count and the routes the WebSocket rule kept out (what
+    /// `[gaps] ws-served routes=<n>` prints).
+    fn route_rows(m: &MergedGraph) -> (Vec<String>, usize, usize) {
+        let o = GapsOptions {
+            category: Some(UNPAIRED_ROUTE.into()),
+            ..GapsOptions::default()
+        };
+        let rep = gaps_report(m, &[], &o).expect("known category");
+        let rows = rep.rows.iter().map(|r| r.qname.clone()).collect();
+        let served = collect_rows(m, &[], &[UNPAIRED_ROUTE], &Wrapped::new()).ws_served;
+        (
+            rows,
+            rep.counts.get(UNPAIRED_ROUTE).copied().unwrap_or(0),
+            served,
+        )
+    }
+
+    /// DT.3c: a ROUTE a WebSocket client connects through (it lent its path
+    /// to the generic upgrade handler, and the client paired with it) is no
+    /// `unpaired_route` row; the route no client reaches still is.
+    #[test]
+    fn ws_served_route_is_not_unpaired() {
+        let (rows, n, served) = route_rows(&ws_build(&[], false));
+        assert_eq!(rows, ["GET /admin/live", "GET /live/orders"]);
+        assert_eq!((n, served), (2, 0));
+        let m = ws_build(&["/live/orders"], false);
+        let (rows, n, served) = route_rows(&m);
+        assert_eq!(rows, ["GET /admin/live"]);
+        assert_eq!((n, served), (1, 1));
+        // The graph count overlay_delta judges by moves the same way.
+        assert_eq!(
+            graph_counts(&m).gaps_by_category.get(UNPAIRED_ROUTE),
+            Some(&1)
+        );
+    }
+
+    /// DT.3c: a route that lends its path to the upgrade function but that no
+    /// paired client matched stays a row, and a generic client (an
+    /// unreadable URL) serves no route at all.
+    #[test]
+    fn unmatched_route_of_an_upgrade_function_stays_unpaired() {
+        let (rows, n, served) = route_rows(&ws_build(&["/live/orders"], true));
+        assert_eq!(rows, ["GET /admin/live"]);
+        assert_eq!((n, served), (1, 1));
+        let (rows, n, served) = route_rows(&ws_build(&["ws"], true));
+        assert_eq!(rows, ["GET /admin/live", "GET /live/orders"]);
+        assert_eq!((n, served), (2, 0));
     }
 
     #[test]

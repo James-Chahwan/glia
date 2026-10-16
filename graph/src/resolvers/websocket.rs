@@ -45,6 +45,18 @@
 //!   before. [`WebSocketStackResolver::third_party_clients`] lists such
 //!   clients by the same predicate.
 //!
+//! - **Served routes (DT.3c).** A pair with a generic handler connects
+//!   through the ROUTE(s) that lent the path it matched, so `glia gaps` does
+//!   not report such a route as an `unpaired_route`. The edge is one
+//!   WS_CONNECTS whichever inherited path matched, and the pairing takes the
+//!   first that does; the served set takes every path at the client's BEST
+//!   tier instead (Exact, then Param, then Suffix, then Wildcard), so a
+//!   client of `/rt/prices` serves `/rt/prices`, never a `/prices` decoy it
+//!   reaches only by suffix. Only generic-handler pairs serve a route (a
+//!   handler naming its own path has no ROUTE behind it in LA.18b's model),
+//!   and only recorded ones: after host narrowing and the DF.9 third-party
+//!   skip. [`WebSocketStackResolver::served_routes`] lists them.
+//!
 //! fired_on marker, once per build that pairs or drops anything:
 //!   `[ws-resolve] 2 pairs (exact=1 suffix=0 param=0 inherited=0 wildcard=1 host=0) dropped-generic=0 narrowed-by-host=0`
 //! A pair with a generic handler counts `inherited` whatever tier its
@@ -91,11 +103,19 @@ impl WebSocketStackResolver {
     pub fn third_party_clients(graphs: &[RepoGraph]) -> HashSet<NodeId> {
         third_party_sides(graphs, node_kind::WS_CLIENT)
     }
+
+    /// DT.3c: the ROUTE ids a WebSocket client connects through (the module
+    /// doc's served-routes rule), by the pairing [`CrossGraphResolver::resolve`]
+    /// runs, so `glia gaps` reads one predicate rather than a second copy of
+    /// it. Prints nothing. Only probed: no order is promised.
+    pub fn served_routes(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+        pair_all(graphs).2
+    }
 }
 
 impl CrossGraphResolver for WebSocketStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let (edges, stats) = pair_all(&merged.graphs);
+        let (edges, stats, _) = pair_all(&merged.graphs);
         merged.cross_edges.extend(edges);
         stats.rules().report();
         let pairs = stats.pairs();
@@ -272,19 +292,22 @@ impl HostScoped for WsTarget {
 }
 
 /// Every WS_CONNECTS edge of the build, in client-node order then
-/// handler-node order (graph order both), each (client, handler) once.
+/// handler-node order (graph order both), each (client, handler) once, and
+/// the ROUTEs those pairs connect through (DT.3c, [`best_paths`]: a lookup
+/// set, never iterated into an output).
 ///
 /// CB.21: a client that matches two or more handlers is narrowed by its
 /// hosts first ([`narrow_by_host`] over the handlers' LB.8 owners); the alias
 /// index is built once, on the first client that needs it. DF.9: a
 /// third-party client (the module doc) is counted in `external` and pairs
 /// with nothing; the alias index it reads is the same one.
-fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
+fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats, HashSet<NodeId>) {
     let mut stats = WsStats::default();
-    let (handlers, owners) = collect_handlers(graphs);
+    let (handlers, owners, reach) = collect_handlers(graphs);
     let mut edges = Vec::new();
+    let mut served: HashSet<NodeId> = HashSet::new();
     if handlers.is_empty() {
-        return (edges, stats);
+        return (edges, stats, served);
     }
     let mut aliases: Option<AliasIndex> = None;
     for client in collect_clients(graphs) {
@@ -339,6 +362,15 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
             let Some(rule) = stats.record(h.generic, t.tier, narrowed) else {
                 continue;
             };
+            // DT.3c: a generic handler's pair connects through the routes
+            // whose path the client matched at its best tier.
+            if h.generic
+                && let Some(reach) = &reach
+            {
+                for p in best_paths(&c, &h.paths) {
+                    served.extend(reach.routes_of(h.id, p));
+                }
+            }
             // LC.3c: the edge's evidence names the rule it counted under.
             let confidence = weakest(client.confidence, h.confidence);
             edges.push(
@@ -347,14 +379,48 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
             );
         }
     }
-    (edges, stats)
+    (edges, stats, served)
+}
+
+/// DT.3c: the paths of `paths` client `c` pairs with at its best tier
+/// ([`tier_rank`]); empty when it pairs with none. The pairing itself takes
+/// the first path that pairs at all ([`pair_all`]), which in [`BTreeSet`]
+/// order of the raw text can be a suffix decoy (`/prices` before
+/// `/rt/prices`); the routes a client connects through never are.
+fn best_paths<'p>(c: &[String], paths: &'p [Vec<String>]) -> Vec<&'p [String]> {
+    let tiers: Vec<(WsPair, &'p [String])> = paths
+        .iter()
+        .map(|p| (ws_pair(c, p), p.as_slice()))
+        .filter(|(t, _)| *t != WsPair::No)
+        .collect();
+    let Some(best) = tiers.iter().map(|(t, _)| tier_rank(*t)).min() else {
+        return Vec::new();
+    };
+    tiers
+        .into_iter()
+        .filter(|(t, _)| tier_rank(*t) == best)
+        .map(|(_, p)| p)
+        .collect()
+}
+
+/// DT.3c: how specific a tier is, lowest best: Exact, then Param (equal
+/// length, parameters standing in), then Suffix, then Wildcard; `No` last.
+fn tier_rank(t: WsPair) -> u8 {
+    match t {
+        WsPair::Exact => 0,
+        WsPair::Param => 1,
+        WsPair::Suffix => 2,
+        WsPair::Wildcard => 3,
+        WsPair::No => 4,
+    }
 }
 
 /// Every WS_HANDLER node once, in graph order, and the [`Owners`] their LB.8
 /// owner segments intern to (in that order). A handler that names its own
 /// path pairs by it; a generic one gets its inherited route paths (the join
-/// is only built when a generic handler exists).
-fn collect_handlers(graphs: &[RepoGraph]) -> (Vec<Handler>, Owners) {
+/// is only built when a generic handler exists, and returned for DT.3c's
+/// served routes).
+fn collect_handlers(graphs: &[RepoGraph]) -> (Vec<Handler>, Owners, Option<RouteReach>) {
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut owners = Owners::default();
     let mut found: Vec<(NodeId, Confidence, &str, RepoId, Option<u32>)> = Vec::new();
@@ -398,7 +464,7 @@ fn collect_handlers(graphs: &[RepoGraph]) -> (Vec<Handler>, Owners) {
             }
         })
         .collect();
-    (handlers, owners)
+    (handlers, owners, reach)
 }
 
 /// The route join for generic handlers, built from each graph's own edges
@@ -408,8 +474,9 @@ fn collect_handlers(graphs: &[RepoGraph]) -> (Vec<Handler>, Owners) {
 struct RouteReach {
     /// WS_HANDLER -> the functions its upgrade sites sit in (LA.18a anchors).
     ws_owner: HashMap<NodeId, Vec<NodeId>>,
-    /// Function -> the raw paths of the ROUTEs HANDLED_BY it.
-    route_paths: HashMap<NodeId, Vec<String>>,
+    /// Function -> the raw path and id of each ROUTE HANDLED_BY it (the id
+    /// for DT.3c's [`RouteReach::routes_of`]).
+    route_paths: HashMap<NodeId, Vec<(String, NodeId)>>,
     /// Upgrading function -> its direct callers (CALLS, one hop).
     callers: HashMap<NodeId, Vec<NodeId>>,
 }
@@ -417,7 +484,7 @@ struct RouteReach {
 impl RouteReach {
     fn new(graphs: &[RepoGraph]) -> Self {
         let mut ws_owner: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut route_paths: HashMap<NodeId, Vec<String>> = HashMap::new();
+        let mut route_paths: HashMap<NodeId, Vec<(String, NodeId)>> = HashMap::new();
         for g in graphs {
             for e in &g.edges {
                 if e.category != edge_category::HANDLED_BY {
@@ -431,7 +498,10 @@ impl RouteReach {
                         if let Some(path) =
                             g.nav.qname_by_id.get(&e.from).and_then(|q| route_path(q))
                         {
-                            route_paths.entry(e.to).or_default().push(path.to_string());
+                            route_paths
+                                .entry(e.to)
+                                .or_default()
+                                .push((path.to_string(), e.from));
                         }
                     }
                     _ => {}
@@ -454,25 +524,32 @@ impl RouteReach {
         }
     }
 
-    /// The effective paths of generic handler `ws`: for every function F an
-    /// upgrade site of it sits in, the paths of the routes HANDLED_BY F and of
-    /// the routes HANDLED_BY a direct caller of F. Deduplicated and ordered.
+    /// The routes that reach generic handler `ws`, each with its raw path:
+    /// for every function F an upgrade site of it sits in, the routes
+    /// HANDLED_BY F, then those HANDLED_BY each direct caller of F.
+    fn routes(&self, ws: NodeId) -> impl Iterator<Item = &(String, NodeId)> {
+        self.ws_owner
+            .get(&ws)
+            .into_iter()
+            .flatten()
+            .flat_map(move |f| std::iter::once(f).chain(self.callers.get(f).into_iter().flatten()))
+            .flat_map(move |f| self.route_paths.get(f).into_iter().flatten())
+    }
+
+    /// The effective paths of generic handler `ws` ([`RouteReach::routes`]).
+    /// Deduplicated and ordered.
     fn paths_of(&self, ws: NodeId) -> BTreeSet<&str> {
-        let mut out = BTreeSet::new();
-        let paths = |f: &NodeId| {
-            self.route_paths
-                .get(f)
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-        };
-        for f in self.ws_owner.get(&ws).into_iter().flatten() {
-            out.extend(paths(f));
-            for g in self.callers.get(f).into_iter().flatten() {
-                out.extend(paths(g));
-            }
-        }
-        out
+        self.routes(ws).map(|(path, _)| path.as_str()).collect()
+    }
+
+    /// DT.3c: the ROUTE ids reachable for generic handler `ws` (the
+    /// [`RouteReach::paths_of`] rule) whose path's [`ws_segments`] equal
+    /// `segments`, in reach order (several raw spellings segment alike).
+    fn routes_of(&self, ws: NodeId, segments: &[String]) -> Vec<NodeId> {
+        self.routes(ws)
+            .filter(|(path, _)| ws_segments(path) == segments)
+            .map(|(_, id)| *id)
+            .collect()
     }
 }
 
@@ -734,14 +811,14 @@ mod tests {
         // before LA.18b, and must not now.
         let (server, ws) = gorilla_server("route:/chat");
         let (client, ids) = clients(&["/ws"]);
-        let (edges, stats) = pair_all(&[server, client]);
+        let (edges, stats, _) = pair_all(&[server, client]);
         assert!(!connects(&edges, ids[0], ws), "{edges:?}");
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(stats.dropped_generic, 1);
         // The same upgrade reached by route /ws: one edge, counted inherited.
         let (server, ws) = gorilla_server("route:/ws");
         let (client, ids) = clients(&["/ws"]);
-        let (edges, stats) = pair_all(&[server, client]);
+        let (edges, stats, _) = pair_all(&[server, client]);
         assert_eq!(edges.len(), 1, "{edges:?}");
         assert!(connects(&edges, ids[0], ws));
         assert_eq!(
@@ -755,7 +832,7 @@ mod tests {
         for route in ["GET /ws", "route:/ws @services/chat"] {
             let (server, ws) = gorilla_server(route);
             let (client, ids) = clients(&["/ws"]);
-            let (edges, _) = pair_all(&[server, client]);
+            let (edges, ..) = pair_all(&[server, client]);
             assert!(connects(&edges, ids[0], ws), "{route}: {edges:?}");
         }
     }
@@ -767,7 +844,7 @@ mod tests {
         let mut literal = G::new("literal");
         literal.node(node_kind::WS_HANDLER, "ws:/ws");
         let (client, _) = clients(&["ws"]);
-        let (edges, stats) = pair_all(&[server, literal.build(), client]);
+        let (edges, stats, _) = pair_all(&[server, literal.build(), client]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(stats.pairs(), 0);
         assert_eq!(stats.dropped_generic, 2);
@@ -783,7 +860,7 @@ mod tests {
         s.edge(ws, serve, edge_category::HANDLED_BY);
         s.node(node_kind::WS_HANDLER, "ws:default");
         let (client, _) = clients(&["/ws", "/default"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(stats.dropped_generic, 4);
     }
@@ -807,7 +884,7 @@ mod tests {
         s.edge(h2, h3, edge_category::CALLS);
         s.edge(h3, upgrade, edge_category::CALLS);
         let (client, ids) = clients(&["/one", "/two"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert!(connects(&edges, ids[0], ws), "{edges:?}");
         assert!(!connects(&edges, ids[1], ws), "{edges:?}");
         assert_eq!(stats.inherited, 1);
@@ -824,7 +901,7 @@ mod tests {
         let literal = s.node(node_kind::WS_HANDLER, "ws:/ws");
         let generic = s.node(node_kind::WS_HANDLER, "ws:ws");
         let (client, ids) = clients(&["/ws"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert!(connects(&edges, ids[0], literal), "{edges:?}");
         assert!(!connects(&edges, ids[0], generic), "{edges:?}");
         assert_eq!(stats.exact, 1);
@@ -836,7 +913,7 @@ mod tests {
         let mut s = G::new("server");
         let room = s.node(node_kind::WS_HANDLER, "ws:/chat/{room}");
         let (client, ids) = clients(&["/chat/lobby", "/chat/lobby/feed"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert!(connects(&edges, ids[0], room));
         assert!(!connects(&edges, ids[1], room));
         assert_eq!(
@@ -861,7 +938,7 @@ mod tests {
         s.edge(b, serve, edge_category::HANDLED_BY);
         s.edge(ws, serve, edge_category::HANDLED_BY);
         let (client, ids) = clients(&["/api/ws"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert_eq!(edges.len(), 1, "{edges:?}");
         assert!(connects(&edges, ids[0], ws));
         assert_eq!(stats.inherited, 1);
@@ -925,7 +1002,7 @@ mod tests {
             ],
         ] {
             let (g, client, chat, notify) = ws_monorepo(cells);
-            let (edges, stats) = pair_all(&[g]);
+            let (edges, stats, _) = pair_all(&[g]);
             assert!(connects(&edges, client, chat), "{edges:?}");
             assert!(!connects(&edges, client, notify), "{edges:?}");
             assert_eq!(edges.len(), 1);
@@ -955,7 +1032,7 @@ mod tests {
     fn ws_external_client_is_counted_not_paired() {
         let binance = r#"{"via":"ws","host":"stream.binance.com","external":true}"#;
         let (g, client, ..) = ws_monorepo(vec![hit(binance), hit(binance)]);
-        let (edges, stats) = pair_all(&[g]);
+        let (edges, stats, _) = pair_all(&[g]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(
             stats.external.line("ws").as_deref(),
@@ -967,7 +1044,7 @@ mod tests {
 
         let own = r#"{"via":"ws","host":"chat.example-corp.com","external":true}"#;
         let (g, client, chat, notify) = ws_monorepo(vec![hit(own)]);
-        let (edges, stats) = pair_all(&[g]);
+        let (edges, stats, _) = pair_all(&[g]);
         assert!(
             connects(&edges, client, chat) && connects(&edges, client, notify),
             "{edges:?}"
@@ -993,7 +1070,7 @@ mod tests {
             ],
         ] {
             let (g, client, chat, notify) = ws_monorepo(cells.clone());
-            let (edges, stats) = pair_all(&[g]);
+            let (edges, stats, _) = pair_all(&[g]);
             assert!(
                 connects(&edges, client, chat) && connects(&edges, client, notify),
                 "{cells:?}: {edges:?}"
@@ -1050,7 +1127,7 @@ mod tests {
         s.edge(r, serve, edge_category::HANDLED_BY);
         s.edge(star, serve, edge_category::HANDLED_BY);
         let (client, _) = clients(&["room:lobby", "/room:lobby"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(stats.pairs(), 0);
         assert_eq!(stats.dropped_generic, 2);
@@ -1076,7 +1153,7 @@ mod tests {
         let mount = s.node(node_kind::WS_HANDLER, "ws:/socket");
         let room = s.node(node_kind::WS_HANDLER, "ws:room:*");
         let (client, ids) = clients(&["/socket", "room:lobby"]);
-        let (edges, stats) = pair_all(&[s.build(), client]);
+        let (edges, stats, _) = pair_all(&[s.build(), client]);
         assert_eq!(edges.len(), 2, "{edges:?}");
         assert!(connects(&edges, ids[0], mount));
         assert!(connects(&edges, ids[1], room));
@@ -1089,5 +1166,177 @@ mod tests {
                 ..WsStats::default()
             }
         );
+    }
+
+    // ---- DT.3c: the routes a client connects through ----------------------
+
+    /// One upgrading function `serve` with the generic `ws:ws` in it and a
+    /// ROUTE per `paths` entry HANDLED_BY it. Returns (graph, ws handler id,
+    /// route ids in `paths` order).
+    fn upgrade_server(paths: &[&str]) -> (RepoGraph, NodeId, Vec<NodeId>) {
+        let mut s = G::new("server");
+        let serve = s.node(node_kind::FUNCTION, "hub::Serve");
+        let routes: Vec<NodeId> = paths
+            .iter()
+            .map(|p| s.node(node_kind::ROUTE, &format!("GET {p}")))
+            .collect();
+        let ws = s.node(node_kind::WS_HANDLER, "ws:ws");
+        for r in &routes {
+            s.edge(*r, serve, edge_category::HANDLED_BY);
+        }
+        s.edge(ws, serve, edge_category::HANDLED_BY);
+        (s.build(), ws, routes)
+    }
+
+    /// DT.3c: two routes HANDLED_BY one upgrading function both lend the
+    /// generic handler their path; a client of one connects through that
+    /// route only. A handler naming its own path serves no route, even one
+    /// HANDLED_BY the function it sits in.
+    #[test]
+    fn served_routes_lists_the_matched_route_only() {
+        let (server, ws, routes) = upgrade_server(&["/live/orders", "/admin/live"]);
+        let (client, ids) = clients(&["/live/orders"]);
+        let graphs = [server, client];
+        let (edges, stats, served) = pair_all(&graphs);
+        assert!(connects(&edges, ids[0], ws), "{edges:?}");
+        assert_eq!(stats.inherited, 1);
+        assert_eq!(served, HashSet::from([routes[0]]));
+        assert_eq!(WebSocketStackResolver::served_routes(&graphs), served);
+
+        // A literal `ws:/feed` beside a generic handler (so the route join is
+        // built): the client pairs it Exact, and `GET /feed` is not served.
+        let mut s = G::new("server");
+        let feed_fn = s.node(node_kind::FUNCTION, "hub::Feed");
+        let feed = s.node(node_kind::ROUTE, "GET /feed");
+        let literal = s.node(node_kind::WS_HANDLER, "ws:/feed");
+        s.edge(feed, feed_fn, edge_category::HANDLED_BY);
+        s.edge(literal, feed_fn, edge_category::HANDLED_BY);
+        let other_fn = s.node(node_kind::FUNCTION, "hub::Other");
+        let other = s.node(node_kind::ROUTE, "GET /other");
+        let generic = s.node(node_kind::WS_HANDLER, "ws:ws");
+        s.edge(other, other_fn, edge_category::HANDLED_BY);
+        s.edge(generic, other_fn, edge_category::HANDLED_BY);
+        let (client, ids) = clients(&["/feed"]);
+        let graphs = [s.build(), client];
+        let (edges, stats, served) = pair_all(&graphs);
+        assert!(connects(&edges, ids[0], literal), "{edges:?}");
+        assert!(!connects(&edges, ids[0], generic), "{edges:?}");
+        assert_eq!(stats.exact, 1);
+        assert!(served.is_empty(), "{served:?}");
+        assert!(WebSocketStackResolver::served_routes(&graphs).is_empty());
+    }
+
+    /// DT.3c (the env-base shape): the upgrade inherits `/prices`, `/rt/feed`
+    /// and `/rt/prices`, in that BTreeSet order, so the pairing meets the
+    /// `/prices` decoy first and pairs by suffix. The edge is unchanged (one,
+    /// counted inherited), but the served route is the exact `/rt/prices`. A
+    /// client two paths reach at one tier serves both; Param beats Suffix.
+    #[test]
+    fn served_routes_prefers_the_exact_path_over_a_suffix() {
+        let (server, ws, routes) = upgrade_server(&["/prices", "/rt/feed", "/rt/prices"]);
+        let (client, ids) = clients(&["/rt/prices"]);
+        let graphs = [server, client];
+        let (edges, stats, served) = pair_all(&graphs);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert!(connects(&edges, ids[0], ws));
+        assert_eq!(
+            stats,
+            WsStats {
+                inherited: 1,
+                ..WsStats::default()
+            }
+        );
+        assert_eq!(served, HashSet::from([routes[2]]), "not the /prices decoy");
+
+        let (server, _, routes) = upgrade_server(&["/prices", "/rt/feed", "/rt/prices"]);
+        let (client, _) = clients(&["/x/rt/prices"]);
+        let (_, _, served) = pair_all(&[server, client]);
+        assert_eq!(served, HashSet::from([routes[0], routes[2]]), "both suffix");
+
+        let (server, _, routes) = upgrade_server(&["/room", "/chat/:room"]);
+        let (client, _) = clients(&["/chat/room"]);
+        let (_, _, served) = pair_all(&[server, client]);
+        assert_eq!(served, HashSet::from([routes[1]]), "param over suffix");
+    }
+
+    /// DT.3c: a generic client (an unreadable URL) and a third-party client
+    /// (DF.9: every site dials a public host outside the build) pair with
+    /// nothing, so they serve nothing; the build's own client of the same
+    /// path serves the route.
+    #[test]
+    fn served_routes_skips_third_party_and_generic_clients() {
+        let binance = r#"{"via":"ws","host":"stream.binance.com","external":true}"#;
+        for (key, cells, serves) in [
+            ("ws", vec![], false),
+            ("/ws", vec![hit(binance)], false),
+            ("/ws", vec![], true),
+        ] {
+            let (server, _, routes) = upgrade_server(&["/ws"]);
+            let mut c = G::new("client");
+            c.node(node_kind::WS_CLIENT, &format!("ws_client:{key}"));
+            if let Some(n) = c.nodes.last_mut() {
+                n.cells = cells.clone();
+            }
+            let graphs = [server, c.build()];
+            let (edges, _, served) = pair_all(&graphs);
+            assert_eq!(
+                edges.len(),
+                usize::from(serves),
+                "{key} {cells:?}: {edges:?}"
+            );
+            let want: HashSet<NodeId> = if serves {
+                HashSet::from([routes[0]])
+            } else {
+                HashSet::new()
+            };
+            assert_eq!(served, want, "{key} {cells:?}");
+            assert_eq!(WebSocketStackResolver::served_routes(&graphs), want);
+        }
+    }
+
+    /// DT.3c: the channel-monorepo-owner shape with generic upgrades, the
+    /// `chat` and `notify` projects each routing `/ws` to their own. A client
+    /// naming `chat-svc` is narrowed to chat's handler (CB.21) and serves
+    /// chat's route only; with no host both routes are served.
+    #[test]
+    fn served_routes_after_host_narrowing() {
+        let build = |cells: Vec<Cell>| {
+            let mut g = G::new("mono");
+            for (rel, label) in [
+                ("services/chat", "chat"),
+                ("services/notify", "notify"),
+                ("web", "web"),
+            ] {
+                let id = g.node(node_kind::PROJECT, &format!("project:{rel}"));
+                g.nav.name_by_id.insert(id, label.to_string());
+            }
+            let mut routes = Vec::new();
+            for svc in ["chat", "notify"] {
+                let serve = g.node(node_kind::FUNCTION, &format!("{svc}::Serve"));
+                let r = g.node(node_kind::ROUTE, &format!("GET /ws @services/{svc}"));
+                let ws = g.node(node_kind::WS_HANDLER, &format!("ws:ws @services/{svc}"));
+                g.edge(r, serve, edge_category::HANDLED_BY);
+                g.edge(ws, serve, edge_category::HANDLED_BY);
+                routes.push(r);
+            }
+            g.node(node_kind::WS_CLIENT, "ws_client:/ws @web");
+            if let Some(n) = g.nodes.last_mut() {
+                n.cells = cells;
+            }
+            (g.build(), routes)
+        };
+        let (g, routes) = build(vec![hit(r#"{"via":"ws","host":"chat-svc:8080"}"#)]);
+        let graphs = [g];
+        let (edges, stats, served) = pair_all(&graphs);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert_eq!((stats.host, stats.narrowed_by_host), (1, 1), "{stats:?}");
+        assert_eq!(served, HashSet::from([routes[0]]), "chat's route only");
+        assert_eq!(WebSocketStackResolver::served_routes(&graphs), served);
+
+        let (g, routes) = build(vec![]);
+        let (edges, stats, served) = pair_all(&[g]);
+        assert_eq!(edges.len(), 2, "{edges:?}");
+        assert_eq!(stats.inherited, 2);
+        assert_eq!(served, HashSet::from([routes[0], routes[1]]));
     }
 }
