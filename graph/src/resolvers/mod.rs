@@ -31,6 +31,9 @@ mod iac;
 mod cli;
 // 0.5.2 (D0.5): SAME_AS identity stars (DD.5-DD.7).
 mod identity;
+// DT.1g: the models pass's inputs (client wires: both sides of every paired
+// HTTP exchange, resolved to models).
+mod models;
 // CB.12: host narrowing (the service alias index and `narrow_by_host`),
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;
@@ -51,6 +54,10 @@ pub use config::ConfigResolver;
 pub use iac::IacResolver;
 pub use cli::CliInvocationResolver;
 pub use identity::IdentityResolver;
+pub use models::{
+    ClientWire, ClientWireStats, ClientWires, ResolvedField, ResolvedShape, RouteHandler, RouteSide,
+    ServerSite, WireDirection, client_wires,
+};
 pub use http::normalise_http_path;
 // A10.2 — the route index + tiers 1-4 for passes that pair a DECLARED path
 // (a contract operation) with the ROUTE serving it.
