@@ -1,0 +1,155 @@
+{
+    "framework": "ts-ethers-call-forms",
+    "language": "typescript",
+    "dirs": [
+        "web",
+        "contracts"
+    ],
+    "note": "DT.10i (T10; Kina frontend wallet.service.ts shape). HEAD 7661c035 and DT.10c alone: no RPC_CALL from this file (no member call on a bound receiver).",
+    "expect_nodes": [
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.createTrade",
+            "exact": true,
+            "note": "element access"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.confirmPayment",
+            "exact": true,
+            "note": "connect chain on a class field"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.releaseFunds",
+            "exact": true,
+            "note": "v6 staticCall"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.raiseDispute",
+            "exact": true,
+            "note": "signature key"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.getTrade",
+            "exact": true
+        },
+        {
+            "kind": "EVENT_HANDLER",
+            "name": "evm_event:abi:ESCROW_ABI.TradeFunded",
+            "exact": true
+        }
+    ],
+    "expect_edges": [
+        {
+            "from": "src::app::core::services::wallet.service::WalletService::openTrade",
+            "to": "evm_call:abi:ESCROW_ABI.createTrade",
+            "category": "USES",
+            "exact": true
+        },
+        {
+            "from": "src::app::core::services::wallet.service::WalletService::confirm",
+            "to": "evm_call:abi:ESCROW_ABI.confirmPayment",
+            "category": "USES",
+            "exact": true
+        },
+        {
+            "from": "src::app::core::services::wallet.service::WalletService::preview",
+            "to": "evm_call:abi:ESCROW_ABI.releaseFunds",
+            "category": "USES",
+            "exact": true
+        },
+        {
+            "from": "src::app::core::services::wallet.service::WalletService::dispute",
+            "to": "evm_call:abi:ESCROW_ABI.raiseDispute",
+            "category": "USES",
+            "exact": true
+        },
+        {
+            "from": "evm_event:abi:ESCROW_ABI.TradeFunded",
+            "to": "src::app::core::services::wallet.service::WalletService::fundedSince",
+            "category": "HANDLED_BY",
+            "exact": true
+        },
+        {
+            "from": "evm_call:abi:ESCROW_ABI.createTrade",
+            "to": "evm:EscrowManager.createTrade",
+            "category": "RPC_CALLS",
+            "exact": true
+        },
+        {
+            "from": "evm_call:abi:ESCROW_ABI.confirmPayment",
+            "to": "evm:EscrowManager.confirmPayment",
+            "category": "RPC_CALLS",
+            "exact": true
+        },
+        {
+            "from": "evm_call:abi:ESCROW_ABI.releaseFunds",
+            "to": "evm:EscrowManager.releaseFunds",
+            "category": "RPC_CALLS",
+            "exact": true
+        },
+        {
+            "from": "evm_call:abi:ESCROW_ABI.raiseDispute",
+            "to": "evm:EscrowManager.raiseDispute",
+            "category": "RPC_CALLS",
+            "exact": true
+        },
+        {
+            "from": "evm_call:abi:ESCROW_ABI.getTrade",
+            "to": "evm:EscrowManager.getTrade",
+            "category": "RPC_CALLS",
+            "exact": true
+        },
+        {
+            "from": "contracts::EscrowManager::EscrowManager::TradeFunded",
+            "to": "evm_event:abi:ESCROW_ABI.TradeFunded",
+            "category": "EVENT_FLOWS",
+            "exact": true
+        }
+    ],
+    "forbid": [
+        {
+            "from": "evm_call:abi:ESCROW_ABI.confirmPayment",
+            "to": "evm:Pauser.confirmPayment",
+            "category": "RPC_CALLS",
+            "note": "PRECISION: Pauser shares one function name only"
+        },
+        {
+            "from": "contracts::Pauser::Pauser::TradeFunded",
+            "to": "evm_event:abi:ESCROW_ABI.TradeFunded",
+            "category": "EVENT_FLOWS"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.connect"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.staticCall"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.queryFilter"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.filters"
+        },
+        {
+            "kind": "RPC_CALL",
+            "name": "evm_call:abi:ESCROW_ABI.name",
+            "note": "a non-literal element key is dynamic"
+        },
+        {
+            "kind": "RPC_CALL",
+            "max_nodes": 5
+        },
+        {
+            "kind": "EVENT_HANDLER",
+            "max_nodes": 1
+        }
+    ]
+}

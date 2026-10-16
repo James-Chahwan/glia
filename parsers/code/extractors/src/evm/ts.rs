@@ -1,4 +1,4 @@
-//! The TypeScript / JavaScript ethers client reader (DT.10c).
+//! The TypeScript / JavaScript ethers client reader (DT.10c, DT.10i).
 //!
 //! 1. **Gate.** The file imports or requires `ethers` (`ethers/..` and an
 //!    `@ethersproject/` path too) or `hardhat` (whose `ethers` is ethers);
@@ -7,41 +7,70 @@
 //!    at any depth, read by `abi::read_abi`. A binding whose literal does not
 //!    read is no ABI. An ABI binding is visible file-wide (the nearest one
 //!    before a use, else the first).
-//! 3. **Contract bindings.** `(const|let|var) <x>(: T)? = (await )?new
-//!    (ethers.)?(Contract|BaseContract)(<addr>, <abi>, ..)` and a bare `<x> =
-//!    new ..`. The ABI argument (an identifier may carry a TS `!` or `as T`):
-//!    an identifier with an ABI binding is `Scope::Abi(<identifier>)` with its
+//! 3. **Contract bindings.** A construction `(await )?new
+//!    (ethers.)?(Contract|BaseContract)(<addr>, <abi>, ..)`, optionally
+//!    chained through `.connect(..)` / `.attach(..)`, bound by
+//!    - `(const|let|var) <x>(: T)? = ..` and a bare `<x> = ..`, key `<x>`;
+//!    - a class field `(private|public|protected|readonly|static|..
+//!      )*<x>(?|!)?(: T)? = ..` (or `#<x> = ..`), key `this.<x>` (`this.#<x>`);
+//!    - `this.<x> = ..` / `this.#<x> = ..` in a constructor or method, key
+//!      `this.<x>`.
+//!
+//!    The ABI argument (an identifier may carry a TS `!` or `as T`): an
+//!    identifier with an ABI binding is `Scope::Abi(<identifier>)` with its
 //!    entries; any other identifier (an import) `Scope::Abi(<identifier>)`
 //!    with no entries; an inline literal that reads `Scope::Abi(<x>)` with its
 //!    entries; anything else (a call, a member path) binds nothing and counts
-//!    `dynamic`.
+//!    `dynamic`. A rebinding `<y> = R.connect(..)` / `R.attach(..)` (any of
+//!    the binding forms above, on a bound receiver `R`) binds `y` to R's
+//!    scope and entries.
 //! 4. **Scope.** A `const` / `let` binding is visible from the end of its
-//!    `new ..(..)` to the end of its innermost enclosing block; a `var`
+//!    initializer to the end of its innermost enclosing block; a `var`
 //!    binding file-wide. A bare assignment binds in the block of the nearest
 //!    preceding `let x` declaration that holds it, file-wide after a `var x`
-//!    or with none; a bare assignment in a class body or after a field
-//!    modifier is a class field (DT.10i's form) and binds nothing, as does one
-//!    in a parameter list or after a type annotation (`x: T = new ..`, a
-//!    default parameter). A site reads the NEAREST binding of its receiver
-//!    that precedes it and whose scope holds it, so a later function's
-//!    parameter `escrow` never reads an earlier function's contract.
-//! 5. **Call sites** on a bound receiver `R` (not itself a member, so
-//!    `this.escrow` is not `escrow`): `R.<m>(` (and `R?.<m>(`, `R!.<m>(`),
-//!    and a chained `new (ethers.)?Contract(<addr>, <abi identifier>, ..).<m>(`
-//!    with no binding. [`ETHERS_MEMBERS`] are never sites and are not
-//!    counted. With ABI entries known, a member that is no function of them
+//!    or with none; one in a parameter list or after a type annotation (`x: T
+//!    = new ..` outside a class body, a default parameter) binds nothing. A
+//!    `this.` binding is visible in its class body only, before its
+//!    assignment too (methods run in any order), and never as a bare `<x>`:
+//!    a class field is no variable in scope. A site reads the NEAREST binding
+//!    of its receiver that precedes it and whose scope holds it (for a
+//!    `this.` key with none before it, the first one in the class), so a
+//!    later function's parameter `escrow` never reads an earlier function's
+//!    contract.
+//! 5. **Call sites** on a bound receiver `R` (a bare `R` is never a member,
+//!    so `this.escrow` is not `escrow`), after any `.connect(..)` /
+//!    `.attach(..)` links:
+//!    - `R.<m>(` (and `R?.<m>(`, `R!.<m>(`), `R['<m>'](` / `R["<m>"](`; a
+//!      signature key `'m(uint256,address)'` is member `m` whose `args` is
+//!      the arity it spells;
+//!    - ethers v6 `R.<m>.(staticCall|send|estimateGas|populateTransaction|
+//!      staticCallResult)(` and v5 `R.(callStatic|estimateGas|
+//!      populateTransaction|functions).<m>(`;
+//!    - a chained `new (ethers.)?Contract(<addr>, <abi identifier>, ..)<links>`
+//!      followed by any of those, with no binding.
+//!
+//!    [`ETHERS_MEMBERS`] are never sites and are not counted (the stop list
+//!    applies to the member after the chain: `R.connect(s).getAddress()` is
+//!    none). With ABI entries known, a member that is no function of them
 //!    mints nothing and counts `not_in_abi`. `args` is the depth-0 argument
-//!    count; `lib` is `ethers`.
-//! 6. **Event sites** on `R`: `R.on('<E>'` / `R.once('<E>'` (a signature key
-//!    `'E(uint256)'` reads as `E`). With entries known, only an event of them.
+//!    count of the final call; `lib` is `ethers`. A non-literal element key
+//!    `R[name](` is no site and counts `dynamic`. A chain on an unbound
+//!    receiver is not read.
+//! 6. **Event sites** on `R`: `R.(on|once|addListener|queryFilter)('<E>'` (a
+//!    signature key `'E(uint256)'` reads as `E`) and every `R.filters.<E>(`
+//!    (so `R.on(R.filters.E(), ..)` and `R.queryFilter(R.filters.E(), ..)`
+//!    are one site each, at the filter). With entries known, only an event
+//!    of them.
+
+use std::collections::BTreeSet;
 
 use glia_code_domain::evm::{AbiEntry, ClientSide, EntryKind, Scope};
 
 use super::Site;
 use super::abi::read_abi;
 use super::scan::{
-    enclosing_block, ident_end, ident_start_before, is_ident, matching, prev_non_ws, skip_ws,
-    split_args, string_literal, trim, word_hits,
+    enclosing_block, ident_end, ident_start_before, is_ident, is_ident_byte, matching, prev_non_ws,
+    skip_ws, split_args, string_literal, trim, word_hits,
 };
 
 /// The client library every site of this reader names.
@@ -87,10 +116,30 @@ const ETHERS_MEMBERS: &[&str] = &[
     "toString",
 ];
 
-/// The subscription members read as event sites.
-const EVENT_MEMBERS: &[&str] = &["on", "once"];
+/// The members whose first argument names the event they read (step 6).
+const EVENT_MEMBERS: &[&str] = &["on", "once", "addListener", "queryFilter"];
 
-/// Field modifiers: an assignment after one is a class field.
+/// Chain links that keep the contract and its ABI (steps 3 and 5).
+const LINKS: &[&str] = &["connect", "attach"];
+
+/// ethers v5 namespaces: `R.<ns>.<m>(` calls or previews ABI function `m`.
+const V5_NAMESPACES: &[&str] = &[
+    "callStatic",
+    "estimateGas",
+    "populateTransaction",
+    "functions",
+];
+
+/// ethers v6 method members: `R.<m>.<s>(` calls or previews ABI function `m`.
+const V6_METHODS: &[&str] = &[
+    "staticCall",
+    "send",
+    "estimateGas",
+    "populateTransaction",
+    "staticCallResult",
+];
+
+/// Field modifiers: a class member may lead with any number of them.
 const FIELD_MODIFIERS: &[&str] = &[
     "private",
     "public",
@@ -113,7 +162,7 @@ pub(super) struct TsCounts {
     /// Members and events left out because the known ABI does not list them.
     pub(super) not_in_abi: usize,
     /// Contract constructions whose ABI argument is neither an identifier nor
-    /// a literal that reads.
+    /// a literal that reads, and calls through a non-literal element key.
     pub(super) dynamic: usize,
 }
 
@@ -145,12 +194,23 @@ struct AbiBinding {
 /// One contract binding (step 3) and the range it is visible in (step 4).
 #[derive(Debug)]
 struct Binding {
+    /// The receiver key: `<x>`, `this.<x>` or `this.#<x>`.
     name: String,
     scope: Scope,
     abi: Option<Vec<AbiEntry>>,
-    /// The end of its `new ..(..)`: a site must come after it.
+    /// The end of its initializer: a site must come after it, unless
+    /// `hoisted`.
     at: usize,
     block: (usize, usize),
+    /// A `this.` binding, visible in its whole class body (step 4).
+    hoisted: bool,
+}
+
+/// What a construction or rebinding binds (step 3).
+struct Target {
+    key: String,
+    block: (usize, usize),
+    hoisted: bool,
 }
 
 /// The ABI argument of a construction.
@@ -158,6 +218,40 @@ enum AbiArg {
     Ident(String),
     Literal(Vec<AbiEntry>),
     Dynamic,
+}
+
+/// One member access after a receiver.
+enum Step {
+    /// `.m`, `?.m`, `!.m`, `['m']` or `["m(uint256)"]`: the member's offset
+    /// and name, the arity a signature key spells, the offset just past it
+    /// and whether it was dotted.
+    Name {
+        at: usize,
+        name: String,
+        arity: Option<u32>,
+        end: usize,
+        dotted: bool,
+    },
+    /// `[<key>]` naming no member: `literal` when the key is a string that
+    /// is no member name, else a computed key; `end` is just past the `]`.
+    Keyed { literal: bool, end: usize },
+}
+
+/// What follows a receiver (steps 5 and 6).
+enum Access {
+    /// A call of ABI function `member` whose name is at `at`.
+    Call {
+        member: String,
+        at: usize,
+        args: Option<u32>,
+    },
+    /// A subscription, query or filter of event `event`.
+    Event { event: String, at: usize },
+    /// `R[<expr>](`: a call through a non-literal key.
+    Dynamic,
+    /// A member access that is no site: a stop-listed member, a property, an
+    /// event member without a literal name.
+    Other,
 }
 
 /// The sites of one TS-family file (module doc) over its code `view`.
@@ -193,8 +287,8 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         };
         let arg = abi_arg(source, view, &split_args(view, open, close));
         // A chained call on the construction (step 5).
-        if let Some((m_at, member, paren)) = member_call(vb, close + 1) {
-            if ETHERS_MEMBERS.contains(&member) {
+        if let Some(access) = access(source, view, close + 1) {
+            if matches!(access, Access::Other) {
                 continue;
             }
             let AbiArg::Ident(name) = arg else {
@@ -208,11 +302,12 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
                 abi,
                 at: close,
                 block: (0, vb.len()),
+                hoisted: false,
             };
-            push_call(&mut sites, &mut counts, view, &chained, member, m_at, paren);
+            record(&mut sites, &mut counts, &chained, access);
             continue;
         }
-        let Some((name, block)) = binding_target(view, &decls, new_at) else {
+        let Some(target) = binding_target(view, &decls, new_at) else {
             continue;
         };
         let (scope, abi) = match arg {
@@ -222,7 +317,8 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
             }
             AbiArg::Literal(entries) => {
                 counts.abis += 1;
-                (Scope::Abi(name.clone()), Some(entries))
+                let base = target.key.rsplit(['.', '#']).next().unwrap_or_default();
+                (Scope::Abi(base.to_string()), Some(entries))
             }
             AbiArg::Dynamic => {
                 counts.dynamic += 1;
@@ -230,34 +326,25 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
             }
         };
         bindings.push(Binding {
-            name,
+            name: target.key,
             scope,
             abi,
             at: close,
-            block,
+            block: target.block,
+            hoisted: target.hoisted,
         });
     }
+    rebind(source, view, &decls, &mut bindings);
 
-    let mut receivers: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
-    receivers.sort_unstable();
-    receivers.dedup();
-    for receiver in receivers {
-        for at in word_hits(view, receiver) {
-            // `this.escrow` / `this.#escrow` are members, not the binding.
-            if at > 0 && matches!(vb[at - 1], b'.' | b'#') {
-                continue;
-            }
-            let Some((m_at, member, paren)) = member_call(vb, at + receiver.len()) else {
+    for receiver in keys(&bindings) {
+        for (start, end) in receiver_hits(view, &receiver) {
+            let Some(access) = access(source, view, end) else {
                 continue;
             };
-            let Some(binding) = visible(&bindings, receiver, at) else {
+            let Some(binding) = visible(&bindings, &receiver, start) else {
                 continue;
             };
-            if EVENT_MEMBERS.contains(&member) {
-                push_event(&mut sites, &mut counts, source, view, binding, m_at, paren);
-            } else if !ETHERS_MEMBERS.contains(&member) {
-                push_call(&mut sites, &mut counts, view, binding, member, m_at, paren);
-            }
+            record(&mut sites, &mut counts, binding, access);
         }
     }
     sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
@@ -421,35 +508,225 @@ fn abi_lookup(abis: &[AbiBinding], name: &str, at: usize) -> Option<Vec<AbiEntry
         .map(|a| a.entries.clone())
 }
 
-/// `.<m>(` after a receiver ending at `from` (also `?.` and a TS `!.`): the
-/// member's offset, the member and its `(`.
-fn member_call(vb: &[u8], from: usize) -> Option<(usize, &str, usize)> {
+/// The member access starting at `from` (after a receiver or a previous
+/// access); `None` when none starts there.
+fn step(source: &str, view: &str, from: usize) -> Option<Step> {
+    let vb = view.as_bytes();
     let mut k = skip_ws(vb, from);
-    if vb.get(k) == Some(&b'!') {
+    if vb.get(k) == Some(&b'!') && vb.get(k + 1) != Some(&b'=') {
         k = skip_ws(vb, k + 1);
     }
     if vb.get(k) == Some(&b'?') && vb.get(k + 1) == Some(&b'.') {
         k += 1;
+        let after = skip_ws(vb, k + 1);
+        if vb.get(after) == Some(&b'[') {
+            k = after;
+        }
     }
-    if vb.get(k) != Some(&b'.') {
-        return None;
+    match vb.get(k)? {
+        b'.' => {
+            let at = skip_ws(vb, k + 1);
+            let end = ident_end(vb, at)?;
+            Some(Step::Name {
+                at,
+                name: view[at..end].to_string(),
+                arity: None,
+                end,
+                dotted: true,
+            })
+        }
+        b'[' => {
+            let close = matching(view, k)?;
+            let (s, e) = trim(vb, k + 1, close);
+            let end = close + 1;
+            let Some((text, _)) = string_literal(source, s).filter(|(_, le)| *le == e) else {
+                return Some(Step::Keyed {
+                    literal: false,
+                    end,
+                });
+            };
+            Some(match signature_key(&text) {
+                Some((name, arity)) => Step::Name {
+                    at: s,
+                    name,
+                    arity,
+                    end,
+                    dotted: false,
+                },
+                None => Step::Keyed { literal: true, end },
+            })
+        }
+        _ => None,
     }
-    let m_at = skip_ws(vb, k + 1);
-    let m_end = ident_end(vb, m_at)?;
-    let paren = skip_ws(vb, m_end);
-    if vb.get(paren) != Some(&b'(') {
-        return None;
-    }
-    let member = std::str::from_utf8(&vb[m_at..m_end]).ok()?;
-    Some((m_at, member, paren))
 }
 
-/// The variable a construction at `new_at` binds and the range it is visible
-/// in (steps 3 and 4); `None` when the construction binds no variable.
-fn binding_target(view: &str, decls: &[Decl], new_at: usize) -> Option<(String, (usize, usize))> {
+/// A member name or a signature key `m(uint256,(address,bytes))`: the name
+/// and, for a signature, the arity it spells (depth-0 parameters).
+fn signature_key(text: &str) -> Option<(String, Option<u32>)> {
+    let text = text.trim();
+    let Some(open) = text.find('(') else {
+        return is_ident(text).then(|| (text.to_string(), None));
+    };
+    let name = text[..open].trim();
+    let inner = text[open + 1..].strip_suffix(')')?;
+    if !is_ident(name) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut arity = 0u32;
+    let mut piece = false;
+    for c in inner.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                piece = true;
+            }
+            ')' | ']' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                if !piece {
+                    return None;
+                }
+                arity += 1;
+                piece = false;
+            }
+            c if !c.is_whitespace() => piece = true,
+            _ => {}
+        }
+    }
+    if depth != 0 || (!piece && arity > 0) {
+        return None;
+    }
+    Some((name.to_string(), Some(arity + u32::from(piece))))
+}
+
+/// The `(` right after `end`, if one is there.
+fn paren_after(vb: &[u8], end: usize) -> Option<usize> {
+    let p = skip_ws(vb, end);
+    (vb.get(p) == Some(&b'(')).then_some(p)
+}
+
+/// The offset just past any `.connect(..)` / `.attach(..)` links starting at
+/// `from`; `from` itself when there are none.
+fn skip_links(source: &str, view: &str, from: usize) -> usize {
     let vb = view.as_bytes();
-    let mut init = new_at;
-    let mut eq = prev_non_ws(vb, new_at)?;
+    let mut k = from;
+    while let Some(Step::Name {
+        name,
+        end,
+        dotted: true,
+        ..
+    }) = step(source, view, k)
+        && LINKS.contains(&name.as_str())
+        && let Some(paren) = paren_after(vb, end)
+        && let Some(close) = matching(view, paren)
+    {
+        k = close + 1;
+    }
+    k
+}
+
+/// What follows a receiver ending at `from`, past its links (steps 5 and 6);
+/// `None` when no member access follows.
+fn access(source: &str, view: &str, from: usize) -> Option<Access> {
+    let vb = view.as_bytes();
+    let k = skip_links(source, view, from);
+    let (at, name, arity, end, dotted) = match step(source, view, k)? {
+        Step::Name {
+            at,
+            name,
+            arity,
+            end,
+            dotted,
+        } => (at, name, arity, end, dotted),
+        Step::Keyed { literal, end } => {
+            let called = !literal && paren_after(vb, end).is_some();
+            return Some(if called {
+                Access::Dynamic
+            } else {
+                Access::Other
+            });
+        }
+    };
+    let next = step(source, view, end);
+    if dotted && name == "filters" {
+        return Some(match next {
+            Some(Step::Name { at, name, end, .. }) if paren_after(vb, end).is_some() => {
+                Access::Event { event: name, at }
+            }
+            _ => Access::Other,
+        });
+    }
+    if dotted && EVENT_MEMBERS.contains(&name.as_str()) {
+        let event = paren_after(vb, end).and_then(|paren| literal_event(source, vb, paren));
+        return Some(event.map_or(Access::Other, |event| Access::Event { event, at }));
+    }
+    if dotted && V5_NAMESPACES.contains(&name.as_str()) {
+        match &next {
+            Some(Step::Name {
+                at,
+                name,
+                arity,
+                end,
+                ..
+            }) => {
+                if let Some(paren) = paren_after(vb, *end) {
+                    return Some(call(view, *at, name.clone(), *arity, paren));
+                }
+            }
+            Some(Step::Keyed {
+                literal: false,
+                end,
+            }) if paren_after(vb, *end).is_some() => return Some(Access::Dynamic),
+            _ => {}
+        }
+    }
+    if let Some(paren) = paren_after(vb, end) {
+        return Some(call(view, at, name, arity, paren));
+    }
+    if let Some(Step::Name {
+        name: method,
+        end: m_end,
+        dotted: true,
+        ..
+    }) = next
+        && V6_METHODS.contains(&method.as_str())
+        && let Some(paren) = paren_after(vb, m_end)
+    {
+        return Some(call(view, at, name, arity, paren));
+    }
+    Some(Access::Other)
+}
+
+/// A call of `member` (named at `at`) whose final `(` is at `paren`: a site
+/// unless the member is stop-listed. `args` is a signature key's spelled
+/// arity, else the final call's depth-0 argument count.
+fn call(view: &str, at: usize, member: String, arity: Option<u32>, paren: usize) -> Access {
+    if ETHERS_MEMBERS.contains(&member.as_str()) {
+        return Access::Other;
+    }
+    let args = arity.or_else(|| {
+        matching(view, paren)
+            .map(|close| split_args(view, paren, close).len())
+            .and_then(|n| u32::try_from(n).ok())
+    });
+    Access::Call { member, at, args }
+}
+
+/// The event a string first argument after `paren` names (`'E'` or
+/// `'E(uint256)'`); `None` for any other first argument.
+fn literal_event(source: &str, vb: &[u8], paren: usize) -> Option<String> {
+    let q = skip_ws(vb, paren + 1);
+    let (text, _) = string_literal(source, q)?;
+    signature_key(&text).map(|(name, _)| name)
+}
+
+/// The variable a construction or rebinding whose initializer starts at
+/// `start` binds, and the range it is visible in (steps 3 and 4); `None`
+/// when it binds none.
+fn binding_target(view: &str, decls: &[Decl], start: usize) -> Option<Target> {
+    let vb = view.as_bytes();
+    let mut init = start;
+    let mut eq = prev_non_ws(vb, start)?;
     if let Some(s) = ident_start_before(vb, eq + 1)
         && &view[s..=eq] == "await"
     {
@@ -461,17 +738,33 @@ fn binding_target(view: &str, decls: &[Decl], new_at: usize) -> Option<(String, 
             Kw::Var => (0, vb.len()),
             Kw::Const | Kw::Let => enclosing_block(view, d.kw_at),
         };
-        return Some((d.name.clone(), block));
+        return Some(Target {
+            key: d.name.clone(),
+            block,
+            hoisted: false,
+        });
     }
-    // A bare assignment `<x> = new ..`.
     if vb[eq] != b'=' || eq == 0 || b"=!<>+-*/%&|^?".contains(&vb[eq - 1]) {
         return None;
+    }
+    // A class field: the statement right in a class body.
+    let (open, close) = enclosing_block(view, eq);
+    if close < vb.len() && is_class_body(view, open) {
+        let name = class_field(view, open, eq)?;
+        return Some(Target {
+            key: format!("this.{name}"),
+            block: (open, close),
+            hoisted: true,
+        });
     }
     let x_end = prev_non_ws(vb, eq)? + 1;
     let x_start = ident_start_before(vb, x_end)?;
     let name = &view[x_start..x_end];
     if let Some(before) = prev_non_ws(vb, x_start) {
-        if matches!(vb[before], b'.' | b'#' | b'(' | b',' | b':') {
+        if matches!(vb[before], b'.' | b'#') {
+            return this_target(view, before, x_start, name);
+        }
+        if matches!(vb[before], b'(' | b',' | b':') {
             return None;
         }
         if let Some(w) = ident_start_before(vb, before + 1)
@@ -479,10 +772,6 @@ fn binding_target(view: &str, decls: &[Decl], new_at: usize) -> Option<(String, 
         {
             return None;
         }
-    }
-    let (open, close) = enclosing_block(view, x_start);
-    if close < vb.len() && is_class_body(view, open) {
-        return None;
     }
     let block = decls
         .iter()
@@ -496,7 +785,81 @@ fn binding_target(view: &str, decls: &[Decl], new_at: usize) -> Option<(String, 
         })
         .max_by_key(|&(at, _)| at)
         .map_or((0, vb.len()), |(_, b)| b);
-    Some((name.to_string(), block))
+    Some(Target {
+        key: name.to_string(),
+        block,
+        hoisted: false,
+    })
+}
+
+/// `this.<name> = ..` / `this.#<name> = ..` in a constructor or method, the
+/// `.` or `#` before the name at `before`: key `this.<name>` scoped to the
+/// enclosing class body; `None` for any other object or outside a class.
+fn this_target(view: &str, before: usize, x_start: usize, name: &str) -> Option<Target> {
+    let vb = view.as_bytes();
+    let hash = vb[before] == b'#';
+    let dot = if hash { before.checked_sub(1)? } else { before };
+    if vb[dot] != b'.' {
+        return None;
+    }
+    let this_end = prev_non_ws(vb, dot)? + 1;
+    let this_start = ident_start_before(vb, this_end)?;
+    if &view[this_start..this_end] != "this"
+        || prev_non_ws(vb, this_start).is_some_and(|p| matches!(vb[p], b'.' | b'#'))
+    {
+        return None;
+    }
+    let block = class_body(view, x_start)?;
+    Some(Target {
+        key: format!("this.{}{name}", if hash { "#" } else { "" }),
+        block,
+        hoisted: true,
+    })
+}
+
+/// The field a class-body statement ending in the `=` at `eq` (the class
+/// body opening at `open`) declares: `(<modifier> )*(#)?<x>(?|!)?(: T)?`, as
+/// `x` or `#x`; `None` for any other statement. Inside a parameter list
+/// (a constructor's, a method's, an arrow field's) only a parameter property,
+/// one with a modifier, is a field: a plain default parameter binds nothing.
+fn class_field(view: &str, open: usize, eq: usize) -> Option<String> {
+    let vb = view.as_bytes();
+    let head = &vb[open + 1..eq];
+    let depth = head.iter().fold(0usize, |d, &c| match c {
+        b'(' | b'[' => d + 1,
+        b')' | b']' => d.saturating_sub(1),
+        _ => d,
+    });
+    let in_params = depth > 0;
+    let start = head
+        .iter()
+        .rposition(|&c| {
+            matches!(c, b';' | b'{' | b'}' | b'\n') || (in_params && matches!(c, b'(' | b','))
+        })
+        .map_or(open + 1, |p| open + 1 + p + 1);
+    let mut k = skip_ws(vb, start);
+    let mut modified = false;
+    loop {
+        let hash = vb.get(k) == Some(&b'#');
+        let n_at = k + usize::from(hash);
+        let n_end = ident_end(vb, n_at)?;
+        let word = &view[n_at..n_end];
+        let mut j = skip_ws(vb, n_end);
+        let more = vb.get(j) == Some(&b'#') || ident_end(vb, j).is_some();
+        if !hash && FIELD_MODIFIERS.contains(&word) && more {
+            modified = true;
+            k = j;
+            continue;
+        }
+        if matches!(vb.get(j), Some(b'?' | b'!')) {
+            j = skip_ws(vb, j + 1);
+        }
+        if vb.get(j) == Some(&b':') {
+            j = type_end(vb, j + 1)?;
+        }
+        let field = j == eq && (modified || !in_params);
+        return field.then(|| format!("{}{word}", if hash { "#" } else { "" }));
+    }
 }
 
 /// True when the `{` at `open` opens a class body: its statement header
@@ -512,23 +875,122 @@ fn is_class_body(view: &str, open: usize) -> bool {
         .any(|w| w == "class")
 }
 
-/// The binding of `receiver` a site at `at` reads (step 4).
-fn visible<'a>(bindings: &'a [Binding], receiver: &str, at: usize) -> Option<&'a Binding> {
-    bindings
-        .iter()
-        .filter(|b| b.name == receiver && b.at < at && b.block.0 <= at && at <= b.block.1)
-        .max_by_key(|b| b.at)
+/// The innermost class body holding `at`; `None` outside every class.
+fn class_body(view: &str, at: usize) -> Option<(usize, usize)> {
+    let mut pos = at;
+    loop {
+        let (open, close) = enclosing_block(view, pos);
+        if close >= view.len() {
+            return None;
+        }
+        if is_class_body(view, open) {
+            return Some((open, close));
+        }
+        if open == 0 {
+            return None;
+        }
+        pos = open;
+    }
 }
 
-/// A call site `<binding>.<member>(..)` whose `(` is at `paren` (step 5).
+/// Rebindings `<y> = R.connect(..)` / `R.attach(..)` on a bound receiver
+/// (step 3), followed until no new one binds (`y` may itself be rebound).
+fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>) {
+    let mut rebound: BTreeSet<usize> = BTreeSet::new();
+    loop {
+        let mut added = Vec::new();
+        for receiver in keys(bindings) {
+            for (start, end) in receiver_hits(view, &receiver) {
+                if rebound.contains(&start) {
+                    continue;
+                }
+                let tail = skip_links(source, view, end);
+                if tail == end || step(source, view, tail).is_some() {
+                    continue;
+                }
+                let Some(from) = visible(bindings, &receiver, start) else {
+                    continue;
+                };
+                let Some(target) = binding_target(view, decls, start) else {
+                    continue;
+                };
+                rebound.insert(start);
+                added.push(Binding {
+                    name: target.key,
+                    scope: from.scope.clone(),
+                    abi: from.abi.clone(),
+                    at: tail - 1,
+                    block: target.block,
+                    hoisted: target.hoisted,
+                });
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        bindings.extend(added);
+    }
+}
+
+/// The distinct receiver keys of `bindings`, sorted.
+fn keys(bindings: &[Binding]) -> Vec<String> {
+    let set: BTreeSet<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
+    set.into_iter().map(str::to_string).collect()
+}
+
+/// Every place receiver `key` stands in the view, as its `(start, end)`: a
+/// bare `<x>` not itself a member (so `this.escrow` is not `escrow`), or
+/// `this.<x>` / `this.#<x>`.
+fn receiver_hits(view: &str, key: &str) -> Vec<(usize, usize)> {
+    let vb = view.as_bytes();
+    let ident = key.strip_prefix("this.").unwrap_or(key);
+    let ident = ident.strip_prefix('#').unwrap_or(ident);
+    let lead = &key.as_bytes()[..key.len() - ident.len()];
+    word_hits(view, ident)
+        .into_iter()
+        .filter_map(|at| {
+            let end = at + ident.len();
+            let s = at.checked_sub(lead.len())?;
+            if vb.get(s..at) != Some(lead) {
+                return None;
+            }
+            let free = s == 0 || !(is_ident_byte(vb[s - 1]) || matches!(vb[s - 1], b'.' | b'#'));
+            free.then_some((s, end))
+        })
+        .collect()
+}
+
+/// The binding of `receiver` a site at `at` reads (step 4).
+fn visible<'a>(bindings: &'a [Binding], receiver: &str, at: usize) -> Option<&'a Binding> {
+    let held = || {
+        bindings
+            .iter()
+            .filter(move |b| b.name == receiver && b.block.0 <= at && at <= b.block.1)
+    };
+    held()
+        .filter(|b| b.at < at)
+        .max_by_key(|b| b.at)
+        .or_else(|| held().filter(|b| b.hoisted).min_by_key(|b| b.at))
+}
+
+/// The site (or count) one access on `binding` gives.
+fn record(sites: &mut Vec<Site>, counts: &mut TsCounts, binding: &Binding, access: Access) {
+    match access {
+        Access::Call { member, at, args } => push_call(sites, counts, binding, member, args, at),
+        Access::Event { event, at } => push_event(sites, counts, binding, event, at),
+        Access::Dynamic => counts.dynamic += 1,
+        Access::Other => {}
+    }
+}
+
+/// A call site of `member` on `binding`, named at `at` (step 5).
 fn push_call(
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
-    view: &str,
     binding: &Binding,
-    member: &str,
-    m_at: usize,
-    paren: usize,
+    member: String,
+    args: Option<u32>,
+    at: usize,
 ) {
     if let Some(entries) = &binding.abi
         && !entries
@@ -538,41 +1000,25 @@ fn push_call(
         counts.not_in_abi += 1;
         return;
     }
-    let args = matching(view, paren)
-        .map(|close| split_args(view, paren, close).len())
-        .and_then(|n| u32::try_from(n).ok());
     sites.push(Site {
         side: ClientSide::Call,
         scope: binding.scope.clone(),
-        member: member.to_string(),
+        member,
         args,
         lib: LIB,
         abi: binding.abi.clone(),
-        at: m_at,
+        at,
     });
 }
 
-/// An event site `<binding>.on('<E>', ..)` whose `(` is at `paren` (step 6).
+/// An event site of `event` on `binding`, read at `at` (step 6).
 fn push_event(
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
-    source: &str,
-    view: &str,
     binding: &Binding,
-    m_at: usize,
-    paren: usize,
+    event: String,
+    at: usize,
 ) {
-    let vb = view.as_bytes();
-    let q = skip_ws(vb, paren + 1);
-    let Some((text, _)) = string_literal(source, q) else {
-        return;
-    };
-    let event = text.split('(').next().unwrap_or_default();
-    let (s, e) = trim(event.as_bytes(), 0, event.len());
-    let event = &event[s..e];
-    if !is_ident(event) {
-        return;
-    }
     if let Some(entries) = &binding.abi
         && !entries
             .iter()
@@ -584,11 +1030,11 @@ fn push_event(
     sites.push(Site {
         side: ClientSide::Event,
         scope: binding.scope.clone(),
-        member: event.to_string(),
+        member: event,
         args: None,
         lib: LIB,
         abi: binding.abi.clone(),
-        at: m_at,
+        at,
     });
 }
 
@@ -676,9 +1122,14 @@ function f(addr: string, p: any) {{
 "
         );
         let (rows, counts) = read(&src);
+        // DT.10i: a `.connect(p)` link keeps the contract, so line 10 is a
+        // site; the stop list reads the member after the chain.
         assert_eq!(
             rows,
-            ["call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=14"]
+            [
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=10",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=14"
+            ]
         );
         assert_eq!(counts.not_in_abi, 1, "withdraw only");
     }
@@ -798,9 +1249,13 @@ const inline = (a: string) => new Contract(a, ['function f()'], p).f();
 "
         );
         let (rows, counts) = read(&src);
+        // DT.10i: a construction chained through `.connect(s)` is a site.
         assert_eq!(
             rows,
-            ["call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=7"]
+            [
+                "call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=7",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=8"
+            ]
         );
         assert_eq!(
             counts,
@@ -833,6 +1288,8 @@ function watch(p: any) {{
             [
                 "event abi:ESCROW_ABI.Released args=- abi=f:deposit/1,f:release/1,e:Released/2 line=9",
                 "event abi:ESCROW_ABI.Released args=- abi=f:deposit/1,f:release/1,e:Released/2 line=10",
+                // DT.10i: the filter is the site, once.
+                "event abi:ESCROW_ABI.Released args=- abi=f:deposit/1,f:release/1,e:Released/2 line=12",
                 "event abi:IMPORTED_ABI.Anything args=- abi=- line=14",
             ]
         );
@@ -878,5 +1335,408 @@ export function localDeposit(id: string) {
         assert_eq!(read(hh).0, ["call abi:c.f args=0 abi=f:f/0 line=3"]);
         let ep = "import { Contract } from '@ethersproject/contracts';\nconst c = new Contract(a, ['function f()'], s);\nc.f();\n";
         assert_eq!(read(ep).0.len(), 1);
+    }
+
+    #[test]
+    fn element_access_and_signature_key() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+async function pay(addr: string, signer: any, id: string) {{
+  const escrow = new Contract(addr, ESCROW_ABI, signer);
+  await escrow['deposit'](id, {{ value: 1n }});
+  await escrow[\"release(bytes32)\"](id, {{ gasLimit: 1 }});
+  await escrow?.[`release`](id);
+  await escrow['withdraw'](id);
+  await escrow['getAddress']();
+  await escrow['release(bytes32'](id);
+  const pick = escrow['deposit'];
+  const vault = new Contract(addr, VAULT_ABI, signer);
+  await vault['settle((uint256,address),bytes32[])'](a, b, {{ gasLimit: 1 }});
+  await vault['settle()']();
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:ESCROW_ABI.deposit args=2 abi=f:deposit/1,f:release/1,e:Released/2 line=9",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=10",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=11",
+                "call abi:VAULT_ABI.settle args=2 abi=- line=17",
+                "call abi:VAULT_ABI.settle args=0 abi=- line=18",
+            ],
+            "a signature key's spelled arity is the site's args"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 1,
+                dynamic: 0
+            },
+            "withdraw is no ABI function; a stop-listed key and a malformed signature count nothing"
+        );
+        assert_eq!(
+            signature_key(" f(uint256, address) "),
+            Some(("f".to_string(), Some(2)))
+        );
+        assert_eq!(signature_key("f(uint256,)"), None);
+        assert_eq!(signature_key("f(uint256))"), None);
+        assert_eq!(signature_key("1f"), None);
+    }
+
+    #[test]
+    fn non_literal_key_is_dynamic() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+function call(addr: string, p: any, name: string) {{
+  const escrow = new Contract(addr, ESCROW_ABI, p);
+  escrow[name](addr);
+  escrow[`${{name}}`](addr);
+  escrow.callStatic[name](addr);
+  escrow.connect(p)[name](addr);
+  const f = escrow[name];
+  other[name](addr);
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 0,
+                dynamic: 4
+            },
+            "four calls through a computed key on a bound receiver; an uncalled one and an unbound receiver count nothing"
+        );
+    }
+
+    #[test]
+    fn connect_and_attach_chains_and_rebinding() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+async function settle(addr: string, p: any, s: any, id: string) {{
+  const escrow = new Contract(addr, ESCROW_ABI, p);
+  await escrow.connect(s).release(id);
+  await escrow.attach(addr).connect(s).deposit(id);
+  await escrow.connect(s).getAddress();
+  await escrow.connect(s).withdraw(id);
+  const signed = escrow.connect(s);
+  await signed.release(id);
+  let moved;
+  moved = await signed.attach(addr);
+  moved.deposit(id);
+  await stranger.connect(s).release(id);
+  const linked = new Contract(addr, ESCROW_ABI, p).connect(s);
+  linked.release(id);
+}}
+function later(signed: any, id: string) {{
+  return signed.release(id);
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=9",
+                "call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=10",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=14",
+                "call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=17",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=20",
+            ],
+            "a rebinding is block-scoped: `later`'s parameter is no contract"
+        );
+        assert_eq!(
+            counts.not_in_abi, 1,
+            "withdraw only: getAddress is stop-listed"
+        );
+        assert_eq!(counts.dynamic, 0);
+    }
+
+    #[test]
+    fn class_field_and_this_assignment_bindings_scope_to_the_class() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+const TOKEN_ABI = ['function decimals() view returns (uint8)'];
+export class Escrows {{
+  private readonly escrow: Contract = new Contract(A, ESCROW_ABI, P);
+  #vault = new Contract(A, ESCROW_ABI, P);
+  private token: Contract | null = null;
+  constructor(private p: any) {{
+    this.token = new Contract(A, TOKEN_ABI, p);
+  }}
+  early(id: string) {{
+    return this.late.release(id);
+  }}
+  pay(id: string) {{
+    this.escrow.deposit(id);
+    this.#vault.release(id);
+    this.token.decimals();
+    escrow.release(id);
+    vault.release(id);
+  }}
+  arm() {{
+    this.late = new Contract(A, ESCROW_ABI, this.p);
+    const signed = this.escrow.connect(this.p);
+    return signed.release('x');
+  }}
+}}
+class Other {{
+  go(id: string) {{ return this.escrow.release(id); }}
+}}
+function loose(this: any, id: string) {{
+  this.vault2 = new Contract(A, ESCROW_ABI, P);
+  return this.vault2.release(id);
+}}
+class Params {{
+  constructor(
+    private held = new Contract(A, ESCROW_ABI, P),
+    plain = new Contract(A, ESCROW_ABI, P),
+  ) {{}}
+  go(id: string, one = new Contract(A, ESCROW_ABI, P)) {{ this.held.deposit(id); this.one.release(id); return this.plain.release(id); }}
+}}
+class Inline {{
+  constructor(public a: string, protected spare = new Contract(A, ESCROW_ABI, P)) {{}}
+  go() {{ return this.spare.release('y'); }}
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=16",
+                "call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=19",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=20",
+                "call abi:TOKEN_ABI.decimals args=0 abi=f:decimals/0 line=21",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=28",
+                "call abi:ESCROW_ABI.deposit args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=43",
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=47",
+            ],
+            "a `this.` binding reads in its whole class body (line 16 before its \
+             assignment), never as a bare name, never in another class or outside one; \
+             a parameter property is a field, a plain default parameter is none"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 2,
+                not_in_abi: 0,
+                dynamic: 0
+            }
+        );
+    }
+
+    #[test]
+    fn static_call_and_v5_namespace_forms() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+async function preview(addr: string, p: any, id: string) {{
+  const escrow = new Contract(addr, ESCROW_ABI, p);
+  await escrow.release.staticCall(id);
+  await escrow.deposit.send(id, {{ value: 1n }});
+  await escrow.deposit.estimateGas(id);
+  await escrow.release.populateTransaction(id);
+  await escrow['release'].staticCallResult(id);
+  await escrow.callStatic.release(id);
+  await escrow.estimateGas.deposit(id, {{ value: 1n }});
+  await escrow.populateTransaction.release(id);
+  await escrow.functions.release(id);
+  await escrow.callStatic.getAddress();
+  await escrow.estimateGas.withdraw(id);
+  await escrow.withdraw.staticCall(id);
+  const fn = escrow.release.staticCall;
+  await escrow.release.wait(id);
+  await escrow.estimateGas(id);
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        let abi = "abi=f:deposit/1,f:release/1,e:Released/2";
+        let want: Vec<String> = [
+            ("release", 1, 9),
+            ("deposit", 2, 10),
+            ("deposit", 1, 11),
+            ("release", 1, 12),
+            ("release", 1, 13),
+            ("release", 1, 14),
+            ("deposit", 2, 15),
+            ("release", 1, 16),
+            ("release", 1, 17),
+        ]
+        .iter()
+        .map(|(m, args, line)| format!("call abi:ESCROW_ABI.{m} args={args} {abi} line={line}"))
+        .collect();
+        assert_eq!(rows, want, "args is the final call's argument count");
+        assert_eq!(counts.not_in_abi, 2, "withdraw twice");
+        assert_eq!(counts.dynamic, 0);
+    }
+
+    #[test]
+    fn query_filter_filters_and_add_listener_events() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{ABI}\
+async function watch(addr: string, p: any, cb: any) {{
+  const escrow = new Contract(addr, ESCROW_ABI, p);
+  escrow.addListener('Released', cb);
+  escrow.on(escrow.filters.Released(), cb);
+  await escrow.queryFilter('Released(bytes32,address)', 0);
+  await escrow.queryFilter(escrow.filters.Released(null), 0, 9);
+  const topic = escrow.filters.Released(id);
+  escrow.connect(p).once(escrow.filters['Released'](), cb);
+  escrow.filters.Funded();
+  escrow.queryFilter('Funded');
+  escrow.off('Released', cb);
+  escrow.removeListener('Released', cb);
+  escrow.queryFilter(filter, 0);
+  const f = escrow.filters.Released;
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        let want: Vec<String> = (9..=14)
+            .map(|line| {
+                format!(
+                    "event abi:ESCROW_ABI.Released args=- abi=f:deposit/1,f:release/1,e:Released/2 line={line}"
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows, want,
+            "a filter inside on / once / queryFilter is one site"
+        );
+        assert_eq!(counts.not_in_abi, 2, "Funded twice");
+    }
+
+    #[test]
+    fn kina_wallet_service_shape() {
+        // Kina frontend/src/app/core/services/wallet.service.ts, condensed.
+        let escrow_fns: [(&str, &str, &str); 10] = [
+            (
+                "createTrade",
+                "address buyer, uint256 amount",
+                "buyer, amountBN",
+            ),
+            ("confirmPayment", "uint256 tradeId", "id"),
+            ("releaseFunds", "uint256 tradeId", "id"),
+            ("raiseDispute", "uint256 tradeId", "id"),
+            ("cancelTrade", "uint256 tradeId", "id"),
+            ("claimTimeout", "uint256 tradeId", "id"),
+            ("claimTimeoutForBuyer", "uint256 tradeId", "id"),
+            (
+                "proposeResolution",
+                "uint256 tradeId, uint8 outcome",
+                "id, outcome",
+            ),
+            (
+                "acceptResolution",
+                "uint256 tradeId, uint8 expectedOutcome",
+                "id, outcome",
+            ),
+            ("enterPenaltyHold", "uint256 tradeId", "id"),
+        ];
+        let mut src = String::from(
+            "import { Injectable, inject, signal } from '@angular/core';
+import { BrowserProvider, Contract, ethers, formatUnits } from 'ethers';
+
+// Minimal ERC-20 ABI - only what we need.
+const ERC20_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+const ESCROW_ABI = [
+",
+        );
+        for (f, params, _) in escrow_fns {
+            src.push_str(&format!("  'function {f}({params})',\n"));
+        }
+        src.push_str(
+            "];
+
+@Injectable({ providedIn: 'root' })
+export class WalletService {
+  private provider: BrowserProvider | null = null;
+
+  async approveEscrow(chain: Chain, amount: string): Promise<string> {
+    const signer = await this.getSigner();
+    const token = new Contract(this.getStablecoinAddress(chain), ERC20_ABI, signer);
+    const tx = await token['approve'](environment.chains[chain].contractAddress, BigInt(amount));
+    await tx.wait();
+    return tx.hash;
+  }
+",
+        );
+        for (f, _, args) in escrow_fns {
+            src.push_str(&format!(
+                "
+  async {f}(chain: Chain, id: string, buyer: string, amountBN: bigint, outcome: number): Promise<string> {{
+    const signer = await this.getSigner();
+    const escrow = new Contract(environment.chains[chain].contractAddress, ESCROW_ABI, signer);
+    const tx = await escrow['{f}']({args});
+    await tx.wait();
+    return tx.hash;
+  }}
+"
+            ));
+        }
+        src.push_str(
+            "
+  async loadBalance(chain: Chain): Promise<void> {
+    if (!this.provider || !this._state().address) return;
+    const token = new Contract(this.getStablecoinAddress(chain), ERC20_ABI, this.provider);
+    const decimals = await token['decimals']();
+    const raw = await token['balanceOf'](this._state().address);
+    this._state.update(s => ({ ...s, balance: formatUnits(raw, decimals) }));
+  }
+}
+",
+        );
+        let out = crate::evm::extract_evm_clients(
+            &src,
+            "angular",
+            glia_core::NodeId(1),
+            glia_core::RepoId(1),
+        );
+        let path = "frontend/src/app/core/services/wallet.service.ts";
+        assert_eq!(
+            out.markers(path),
+            [format!(
+                "[evm-client] lang=ts calls=13 events=0 sites=13 (ethers=13 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=2 not_in_abi=0 dynamic=0 path={path}"
+            )]
+        );
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        let mut want: Vec<String> = escrow_fns
+            .iter()
+            .map(|(f, _, _)| format!("evm_call:abi:ESCROW_ABI.{f}"))
+            .chain(
+                ["approve", "balanceOf", "decimals"]
+                    .iter()
+                    .map(|f| format!("evm_call:abi:ERC20_ABI.{f}")),
+            )
+            .collect();
+        want.sort_unstable();
+        assert_eq!(
+            qnames, want,
+            "ten escrow['..'] sites over a 10-entry ABI, three token['..']"
+        );
+        let (rows, _) = read(&src);
+        assert!(
+            rows.iter().any(|r| r.starts_with(
+                "call abi:ERC20_ABI.decimals args=0 abi=f:approve/2,f:balanceOf/1,f:decimals/0 "
+            )),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("call abi:ESCROW_ABI.createTrade args=2 ")),
+            "{rows:?}"
+        );
     }
 }

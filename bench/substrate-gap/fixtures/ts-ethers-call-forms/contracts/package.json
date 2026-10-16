@@ -1,0 +1,1 @@
+{ "name": "trade-contracts", "private": true, "devDependencies": { "hardhat": "2.22.2" } }
