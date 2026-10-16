@@ -41,6 +41,24 @@
 //! re-plans the walk, reusing the table's read of every file it was not told
 //! about, and recomputes the repo-level inputs.
 //!
+//! Stat poll (DC.7c, no notify crate): [`WatchSession::changed_paths`] stats
+//! (a) every table entry (`len`, mtime), (b) re-reads under the racy rule
+//! ([`Window`]) each entry whose recorded mtime could hide a same-length
+//! rewrite inside one timestamp tick, (c) stats every walked directory and
+//! region root (an entry added, removed or renamed moves its directory's
+//! mtime, and a region root's entries are what `gate_dir` reads) and (d) the
+//! inputs a build reads besides the table ([`Input`]: the `.gitignore`s, the
+//! manifests root detection and a re-plan read that are no table entry, the
+//! `CMakeLists.txt` / `compile_commands.json` the include roots read, every
+//! file under `.glia/` but the layout, the git identity files). A directory
+//! or watched input inside the racy window is checked against a fingerprint
+//! of its listing or bytes taken right before the update that last read it
+//! ([`WatchSession::capture`]); one with none is reported, and the update it
+//! triggers takes one. [`WatchSession::poll`] is the scan, then
+//! [`WatchSession::apply`] of what it found. The watermark the racy window
+//! hangs from moves only when a scan finds nothing, so a recorded value is
+//! never trusted past the last time all of them were checked.
+//!
 //! fired_on markers, on stderr:
 //! - `[watch] open repo=<label> files=<n> groups=<g> nodes=<N> edges=<E> took=<ms>`
 //!   once per [`WatchSession::open`]; `files` counts the walked sources and docs
@@ -51,15 +69,23 @@
 //! - `[watch] noop repo=<label> paths=<n>` for an update that changed nothing
 //!   (`n` = the paths it was given), and `[watch] outside repo=<label> paths=<n>`
 //!   when some given paths do not lie under the root.
+//! - `[watch] poll files=<n> dirs=<d> watched=<w> changed=<c> racy=<k> took=<ms> repo=<label>`
+//!   once per [`WatchSession::changed_paths`] scan that found something: `n`
+//!   table entries, `d` directories and region roots and `w` watched inputs
+//!   checked, `c` paths reported, `k` checks the racy rule made (an entry
+//!   re-read, a listing or input fingerprinted, or one reported for want of
+//!   a fingerprint).
 //!
 //! An update also prints the stage markers of what it ran (`[timing] repo=`,
 //! `[timing] build`, `[graft-memo]`, the walk's lines on a re-plan, ...): never
 //! gate on marker equality with a clean build (R2-watch section 8).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::hash::Hasher as _;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use glia_code_domain::FileParse;
 use glia_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE};
@@ -90,9 +116,28 @@ use crate::external::{RepoInputs, repo_inputs};
 use crate::extract::{GoModules, TS_FAMILY, detect_language};
 use crate::passes::GroupFill;
 use crate::walk::{
-    FileStamp, Pending, Read, ReadRecord, RegionAnchor, Reuse, WalkPlan, plan_walk, read_one,
-    read_walk,
+    FileStamp, Pending, Read, ReadRecord, RegionAnchor, Reuse, WalkPlan, WalkedDir, plan_walk,
+    read_one, read_walk,
 };
+
+/// DC.7c: the racy rule's window ([`Window`]): git's racy-index rule,
+/// widened from one timestamp tick to 2 s so a filesystem whose file times
+/// tick in whole seconds (or two) is covered too.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// DC.7c: the names besides [`project_roots::MANIFESTS`] a re-plan reads at
+/// a project root (`TsAliasSet::read`).
+const TSCONFIGS: [&str; 2] = ["tsconfig.json", "tsconfig.base.json"];
+
+/// DC.7c: the C/C++ build files `IncludeRoots::read` reads off disk.
+const CMAKE_LISTS: &str = "CMakeLists.txt";
+const COMPILE_COMMANDS: &str = "compile_commands.json";
+
+/// DC.7c: the identity files `repo_identity` (and the recorded rev) reads at
+/// the root. `.git` is watched only while it is a file (a worktree or
+/// submodule pointer): a `.git` directory's own mtime moves with every git
+/// command, and `.git/HEAD` appearing or going tells a checkout's.
+const IDENTITY_FILES: [&str; 3] = [".git", ".git/HEAD", ".git/config"];
 
 /// How far a changed path reaches ([`durability`]). `High` carries the input
 /// class it belongs to (`glia_inputs`, `gitignore`, `go_mod`, `tsconfig`,
@@ -276,6 +321,125 @@ pub struct WatchSession {
     /// follow them.
     graph_keys: Vec<&'static str>,
     seq: u64,
+    /// DC.7c: every input a build reads besides the table ([`Input`]), by
+    /// repo-relative path: its class and its stat as of the update that last
+    /// read it (`None`: absent, or not a file). A class an update did not
+    /// re-read keeps its entries, so a change nobody named stays visible.
+    watched: BTreeMap<String, Watched>,
+    /// DC.7c: the fingerprints [`WatchSession::capture`] took right before
+    /// the update that last read each class: of the walked directories
+    /// ([`dir_fp`], class [`Input::Walk`]) and watched inputs ([`bytes_fp`])
+    /// that were inside the racy window then.
+    baselines: BTreeMap<String, (Input, u64)>,
+    /// DC.7c: the racy rule's watermark: every record, directory listing and
+    /// watched input was read, or stat'ed and found unchanged, at or after
+    /// it. Set at open (before any read) and moved only by a scan that finds
+    /// nothing, never by an update: an update re-reads only what it was
+    /// named (a re-plan reuses every other entry's read under its recorded
+    /// stamp), so moving it there would age an entry out of the window
+    /// unchecked. Behind a lock because [`WatchSession::changed_paths`]
+    /// takes `&self`.
+    scanned_at: Mutex<SystemTime>,
+}
+
+/// DC.7c: which update re-reads a watched input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Input {
+    /// The walk's descent, re-read by every re-plan: a `.gitignore`
+    /// (`IgnoreStack::push_dir`), a [`project_roots::MANIFESTS`] file (root
+    /// detection reads its text) or a [`TSCONFIGS`] file in an entered
+    /// directory that is no table entry (a walk-skipped name, or a
+    /// gitignored file: root detection lists ignored files too), a region
+    /// root's `.git` file (`gate_dir` reads it: submodule or worktree). Also
+    /// the class of the directory baselines.
+    Walk,
+    /// `IncludeRoots::read`, re-read on a re-plan or a changed file list:
+    /// the `CMakeLists.txt` of every directory above a walked C/C++ file and
+    /// every `compile_commands.json` it looks for (c_includes'
+    /// `HeldDirs` and `compile_commands_dirs`, mirrored).
+    Includes,
+    /// Every file under `.glia/` but `.glia/graph/` (the overlay, the
+    /// snapshots), re-read when the update holds a `.glia` path.
+    Glia,
+    /// [`IDENTITY_FILES`], re-read when the update holds one.
+    Identity,
+}
+
+/// DC.7c: one watched input ([`WatchSession::watched`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Watched {
+    class: Input,
+    stamp: Option<FileStamp>,
+}
+
+/// DC.7c: the [`Input`] classes one update re-read: a re-plan re-reads the
+/// walk's and the include roots', a changed file list the include roots', a
+/// High `glia_inputs` / `identity` path its own (`Setup::refresh`).
+#[derive(Clone, Copy)]
+struct Consumed {
+    walk: bool,
+    includes: bool,
+    glia: bool,
+    identity: bool,
+}
+
+impl Consumed {
+    const ALL: Self = Self {
+        walk: true,
+        includes: true,
+        glia: true,
+        identity: true,
+    };
+
+    fn has(self, class: Input) -> bool {
+        match class {
+            Input::Walk => self.walk,
+            Input::Includes => self.includes,
+            Input::Glia => self.glia,
+            Input::Identity => self.identity,
+        }
+    }
+}
+
+/// DC.7c: the racy rule. A stat that matches its record proves the content
+/// unchanged only when the recorded mtime is older than every check since
+/// by more than a timestamp tick: a rewrite inside the tick the record was
+/// taken in keeps (`len`, mtime). So an mtime from `scanned_at` minus
+/// [`RACY_WINDOW`] on is racy, up to [`RACY_WINDOW`] past the scan's own
+/// clock (a write before the scan is stamped no later than the scan, so a
+/// far-future mtime cannot hide one yet). An unknown mtime is racy.
+#[derive(Clone, Copy)]
+struct Window {
+    from: SystemTime,
+    to: SystemTime,
+}
+
+impl Window {
+    fn at(scanned_at: SystemTime, now: SystemTime) -> Self {
+        Self {
+            from: scanned_at
+                .checked_sub(RACY_WINDOW)
+                .unwrap_or(SystemTime::UNIX_EPOCH),
+            to: now.checked_add(RACY_WINDOW).unwrap_or(now),
+        }
+    }
+
+    fn racy(self, mtime: Option<SystemTime>) -> bool {
+        mtime.is_none_or(|m| m >= self.from && m <= self.to)
+    }
+}
+
+/// DC.7c: one stat scan ([`WatchSession::scan`]): the repo-relative paths it
+/// found changed (sorted, deduplicated), what it checked, the racy checks it
+/// made, when it started and what it took.
+struct Scan {
+    found: BTreeSet<String>,
+    files: usize,
+    dirs: usize,
+    watched: usize,
+    racy: usize,
+    started: SystemTime,
+    took: Duration,
 }
 
 /// One language group's pre-pass build (DC.7b), kept for the next update
@@ -447,6 +611,8 @@ impl WatchSession {
     /// inputs and run one build. Errs when `root` is not a directory.
     pub fn open(root: &str, opts: &BuildOptions) -> Result<Self, String> {
         let started = Instant::now();
+        // DC.7c: before any read, so every record is newer than it.
+        let scanned_at = SystemTime::now();
         let root_path = PathBuf::from(root);
         if !root_path.is_dir() {
             return Err(format!("not a directory: {root}"));
@@ -487,7 +653,7 @@ impl WatchSession {
             built.result.total_edges,
             timing::ms(started.elapsed())
         );
-        Ok(Self {
+        let mut session = Self {
             abs_roots: abs_roots(&root_path),
             index: index_of(&records),
             root: root_path,
@@ -504,7 +670,12 @@ impl WatchSession {
             groups: refresh_groups(Vec::new(), built.slots),
             graph_keys: built.graph_keys,
             seq: 0,
-        })
+            watched: BTreeMap::new(),
+            baselines: BTreeMap::new(),
+            scanned_at: Mutex::new(scanned_at),
+        };
+        session.refresh_watch(Consumed::ALL, BTreeMap::new());
+        Ok(session)
     }
 
     /// Bring the session up to date with `changed`, the paths the caller saw
@@ -553,6 +724,12 @@ impl WatchSession {
             })
             .collect();
         let replan = !high.is_empty() || named.iter().any(|rel| self.reshapes(rel));
+        // DC.7c: the baselines, before this update reads anything.
+        let captured = if named.is_empty() {
+            BTreeMap::new()
+        } else {
+            self.capture(replan)
+        };
         let tree = if named.is_empty() {
             None
         } else if replan {
@@ -569,6 +746,12 @@ impl WatchSession {
             opts: &self.opts,
         };
         let setup = self.setup.refresh(&at, &tree, &high, replan);
+        let consumed = Consumed {
+            walk: replan,
+            includes: replan || setup.files_fp != self.setup.files_fp,
+            glia: high.contains("glia_inputs"),
+            identity: high.contains("identity"),
+        };
         let unchanged = tree.changes.added.is_empty()
             && tree.changes.modified.is_empty()
             && tree.changes.removed.is_empty()
@@ -578,6 +761,7 @@ impl WatchSession {
         if unchanged {
             let (walk, read) = (tree.walk, tree.read);
             self.commit_tree(tree, setup);
+            self.refresh_watch(consumed, captured);
             return Ok(self.noop(changed.len(), started, walk, read));
         }
         let services_fp = proto_services_fp(&tree.files);
@@ -633,6 +817,7 @@ impl WatchSession {
         let (walk, read) = (tree.walk, tree.read);
         let changes = std::mem::take(&mut tree.changes);
         self.commit_tree(tree, setup);
+        self.refresh_watch(consumed, captured);
         self.services_fp = services_fp;
         self.groups = refresh_groups(std::mem::take(&mut self.groups), slots);
         self.graph_keys = graph_keys;
@@ -699,6 +884,53 @@ impl WatchSession {
     /// Updates that rebuilt since [`WatchSession::open`] (0 right after it).
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    /// DC.7c: the stat scan, no rebuild, for a caller that debounces and
+    /// then hands the result to [`WatchSession::apply`]: the paths that
+    /// changed since the update that last read them (module doc, "Stat
+    /// poll"), absolute (the root made absolute, joined with each
+    /// repo-relative path; the root itself for its own directory), sorted
+    /// and deduplicated. A path keeps being reported until an update reads
+    /// it, so a quiet scan is an empty one. A scan that finds nothing moves
+    /// the racy watermark to its start; one that finds something prints the
+    /// `[watch] poll` line.
+    pub fn changed_paths(&self) -> Vec<PathBuf> {
+        let scan = self.scan();
+        if scan.found.is_empty() {
+            let mut at = self
+                .scanned_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *at = (*at).max(scan.started);
+            return Vec::new();
+        }
+        eprintln!("{}", poll_marker(&scan, &self.label));
+        let base = self.abs_roots.first().unwrap_or(&self.root);
+        scan.found
+            .iter()
+            .map(|rel| {
+                if rel.is_empty() {
+                    base.clone()
+                } else {
+                    base.join(rel)
+                }
+            })
+            .collect()
+    }
+
+    /// DC.7c: [`WatchSession::changed_paths`], then [`WatchSession::apply`]
+    /// of what it found. `None` when nothing changed: a quiet scan, or an
+    /// update that found every reported path's content unchanged (a touch)
+    /// and left `seq` as it was. Errs as `apply` does.
+    pub fn poll(&mut self) -> Result<Option<WatchUpdate>, String> {
+        let paths = self.changed_paths();
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        let seq = self.seq;
+        let update = self.apply(&paths)?;
+        Ok((update.seq != seq).then_some(update))
     }
 
     /// `p` as a repo-relative `/` path: an absolute `p` must lie under the
@@ -933,6 +1165,243 @@ impl WatchSession {
                 ..WatchPhases::default()
             },
         }
+    }
+
+    /// DC.7c: the racy watermark ([`WatchSession::scanned_at`]).
+    fn scanned(&self) -> SystemTime {
+        *self
+            .scanned_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// DC.7c: one stat scan (module doc, "Stat poll"). A table entry is
+    /// found when its stat differs from its record or, inside the racy
+    /// window, when a fresh read (by its class's rule) differs from the
+    /// recorded one; a directory when it is gone, its mtime moved or, inside
+    /// the window, its listing differs from its baseline (or it has none); a
+    /// watched input when it appeared, vanished or its stat moved or, inside
+    /// the window, its bytes differ from its baseline (or it has none). The
+    /// table and the directories are stat'ed on the pool.
+    fn scan(&self) -> Scan {
+        let started = SystemTime::now();
+        let timer = Instant::now();
+        let window = Window::at(self.scanned(), started);
+        let mut found = BTreeSet::new();
+        let mut racy = 0usize;
+        let table: Vec<(&Pending, &ReadRecord)> =
+            self.plan.pending.iter().zip(&self.records).collect();
+        let (hits, _) = crate::parallel::par_map_ordered(&table, |(p, r)| {
+            if FileStamp::of(&p.abs) != r.stamp {
+                return (true, false);
+            }
+            if !r.stamp.is_some_and(|s| window.racy(s.mtime)) {
+                return (false, false);
+            }
+            (read_one(p) != r.read, true)
+        });
+        for ((p, _), (hit, checked)) in table.iter().zip(hits) {
+            racy += usize::from(checked);
+            if hit {
+                found.insert(p.rel.clone());
+            }
+        }
+        let dirs = self.walked_dirs();
+        let (root, baselines) = (&self.root, &self.baselines);
+        let (hits, _) = crate::parallel::par_map_ordered(&dirs, |d| {
+            let abs = root.join(&d.rel);
+            if dir_mtime(&abs) != Some(d.mtime) {
+                return (true, false);
+            }
+            if !window.racy(d.mtime) {
+                return (false, false);
+            }
+            (
+                baselines.get(&d.rel).map(|(_, fp)| *fp) != Some(dir_fp(&abs)),
+                true,
+            )
+        });
+        for (d, (hit, checked)) in dirs.iter().zip(hits) {
+            racy += usize::from(checked);
+            if hit {
+                found.insert(d.rel.clone());
+            }
+        }
+        let inputs = self.watched_now();
+        for (rel, _) in &inputs {
+            let abs = self.root.join(rel);
+            let was = self.watched.get(rel).and_then(|w| w.stamp);
+            if file_stamp(&abs) != was {
+                found.insert(rel.clone());
+            } else if was.is_some_and(|s| window.racy(s.mtime)) {
+                racy += 1;
+                if self.baselines.get(rel).map(|(_, fp)| *fp) != Some(bytes_fp(&abs)) {
+                    found.insert(rel.clone());
+                }
+            }
+        }
+        Scan {
+            found,
+            files: table.len(),
+            dirs: dirs.len(),
+            watched: inputs.len(),
+            racy,
+            started,
+            took: timer.elapsed(),
+        }
+    }
+
+    /// DC.7c: every walked directory and region root of the plan.
+    fn walked_dirs(&self) -> Vec<&WalkedDir> {
+        self.plan
+            .dirs
+            .iter()
+            .chain(&self.plan.region_dirs)
+            .collect()
+    }
+
+    /// DC.7c: the watched inputs to check now: the recorded ones, plus every
+    /// file under `.glia/` (but the layout) not recorded, listed afresh: a
+    /// new one moves no directory the walk entered.
+    fn watched_now(&self) -> Vec<(String, Input)> {
+        let mut inputs: BTreeMap<String, Input> = self
+            .watched
+            .iter()
+            .map(|(rel, w)| (rel.clone(), w.class))
+            .collect();
+        for (rel, _) in glia_files(&self.root) {
+            inputs
+                .entry(format!("{CONTROL_DIR}/{rel}"))
+                .or_insert(Input::Glia);
+        }
+        inputs.into_iter().collect()
+    }
+
+    /// DC.7c: the baselines an update takes BEFORE it reads anything: the
+    /// listing fingerprint of every walked directory inside the racy window
+    /// (on a re-plan, the only update that lists them again) and the content
+    /// fingerprint of every watched input inside it. Taken first, a baseline
+    /// never holds a change its update did not read: a change after it is a
+    /// mismatch on a later scan, one between it and the read a spurious one
+    /// that the next update settles. A directory or input new to the update
+    /// has none until the update after.
+    fn capture(&self, replan: bool) -> BTreeMap<String, (Input, u64)> {
+        let window = Window::at(self.scanned(), SystemTime::now());
+        let mut out = BTreeMap::new();
+        if replan {
+            let dirs = self.walked_dirs();
+            let root = &self.root;
+            let (fps, _) = crate::parallel::par_map_ordered(&dirs, |d| {
+                let abs = root.join(&d.rel);
+                dir_mtime(&abs)
+                    .filter(|m| window.racy(*m))
+                    .map(|_| dir_fp(&abs))
+            });
+            for (d, fp) in dirs.iter().zip(fps) {
+                if let Some(fp) = fp {
+                    out.insert(d.rel.clone(), (Input::Walk, fp));
+                }
+            }
+        }
+        for (rel, class) in self.watched_now() {
+            let abs = self.root.join(&rel);
+            if file_stamp(&abs).is_some_and(|s| window.racy(s.mtime)) {
+                let fp = bytes_fp(&abs);
+                out.insert(rel, (class, fp));
+            }
+        }
+        out
+    }
+
+    /// DC.7c: after an update (or the open) that read the classes in
+    /// `consumed`: those classes' watched inputs recomputed from the
+    /// committed table and plan with a stat now, their baselines replaced by
+    /// `captured`'s. Every other class keeps its entries and baselines, and
+    /// a kept entry wins over a recomputed one at the same path (a
+    /// `CMakeLists.txt` the walk reads stays [`Input::Walk`] when only the
+    /// include roots were re-read). A stat taken after the read is safe:
+    /// a write between them is newer than the watermark, so it sits in the
+    /// racy window and meets the baseline taken before the read.
+    fn refresh_watch(&mut self, consumed: Consumed, captured: BTreeMap<String, (Input, u64)>) {
+        self.watched.retain(|_, w| !consumed.has(w.class));
+        self.baselines.retain(|_, (class, _)| !consumed.has(*class));
+        for (rel, class) in self.input_rels(consumed) {
+            let stamp = file_stamp(&self.root.join(&rel));
+            self.watched.entry(rel).or_insert(Watched { class, stamp });
+        }
+        self.baselines.extend(
+            captured
+                .into_iter()
+                .filter(|(_, (class, _))| consumed.has(*class)),
+        );
+    }
+
+    /// DC.7c: the repo-relative path of every watched input of a class in
+    /// `classes`, as the table, the plan, the project roots and `.glia/`
+    /// stand ([`Input`]). Where the walk and the include roots read one path
+    /// it is [`Input::Walk`]'s (a re-plan re-reads both).
+    fn input_rels(&self, classes: Consumed) -> BTreeMap<String, Input> {
+        let mut out = BTreeMap::new();
+        if classes.includes {
+            let c_files: Vec<&str> = self
+                .records
+                .iter()
+                .filter(|r| matches!(r.read, Read::Src(_)))
+                .filter(|r| detect_language(&r.rel) == Some("c_cpp"))
+                .map(|r| r.rel.as_str())
+                .collect();
+            if !c_files.is_empty() {
+                for dir in held_dirs(&c_files) {
+                    out.insert(join_rel(&dir, CMAKE_LISTS), Input::Includes);
+                }
+                for rel in compile_dbs(&self.root, &self.roots) {
+                    out.insert(rel, Input::Includes);
+                }
+            }
+        }
+        if classes.walk {
+            for rel in &self.plan.gitignores {
+                out.insert(rel.clone(), Input::Walk);
+            }
+            for d in &self.plan.region_dirs {
+                let pointer = join_rel(&d.rel, ".git");
+                if self.root.join(&pointer).is_file() {
+                    out.insert(pointer, Input::Walk);
+                }
+            }
+            let probes: Vec<String> = self
+                .plan
+                .dirs
+                .iter()
+                .flat_map(|d| {
+                    project_roots::MANIFESTS
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .chain(TSCONFIGS)
+                        .map(|name| join_rel(&d.rel, name))
+                })
+                .filter(|rel| !self.index.contains_key(rel))
+                .collect();
+            let root = &self.root;
+            let (present, _) =
+                crate::parallel::par_map_ordered(&probes, |rel| root.join(rel).is_file());
+            for (rel, present) in probes.into_iter().zip(present) {
+                if present {
+                    out.insert(rel, Input::Walk);
+                }
+            }
+        }
+        if classes.glia {
+            for (rel, _) in glia_files(&self.root) {
+                out.insert(format!("{CONTROL_DIR}/{rel}"), Input::Glia);
+            }
+        }
+        if classes.identity {
+            for rel in IDENTITY_FILES {
+                out.insert(rel.to_string(), Input::Identity);
+            }
+        }
+        out
     }
 }
 
@@ -1357,6 +1826,20 @@ fn overlay_fp(root: &Path, opts: &BuildOptions) -> u64 {
 /// config and the snapshots (`glia history sync`, `tests ingest`, `scip
 /// import`, `docs sync`) that a build reads at pass time.
 fn glia_inputs_fp(root: &Path) -> u64 {
+    let mut h = XxHash64::with_seed(0);
+    for (rel, path) in glia_files(root) {
+        h.write(rel.as_bytes());
+        h.write_u8(0);
+        h.write(&std::fs::read(&path).unwrap_or_default());
+        h.write_u8(0);
+    }
+    h.finish()
+}
+
+/// Every file under `<root>/.glia` but the layout dir `.glia/graph`, by
+/// sorted path relative to `.glia`: what [`glia_inputs_fp`] hashes and the
+/// stat poll watches ([`Input::Glia`]).
+fn glia_files(root: &Path) -> Vec<(String, PathBuf)> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut stack = vec![(root.join(CONTROL_DIR), String::new())];
     while let Some((dir, rel)) = stack.pop() {
@@ -1382,14 +1865,129 @@ fn glia_inputs_fp(root: &Path) -> u64 {
         }
     }
     files.sort();
+    files
+}
+
+/// DC.7c: a watched input's stat: `None` when it is absent or not a file.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    Some(FileStamp {
+        len: m.len(),
+        mtime: m.modified().ok(),
+    })
+}
+
+/// DC.7c: a walked directory's mtime now, as the plan took it (following
+/// symlinks); `None` when it is gone or no longer a directory.
+fn dir_mtime(path: &Path) -> Option<Option<SystemTime>> {
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_dir())?;
+    Some(m.modified().ok())
+}
+
+/// DC.7c: a directory's listing fingerprint: xxh64 of its entries by sorted
+/// name, each with the kinds the walk and `gate_dir` tell apart (a symlink,
+/// a directory, a file, following symlinks for the last two). An unlistable
+/// directory has its own value.
+fn dir_fp(dir: &Path) -> u64 {
     let mut h = XxHash64::with_seed(0);
-    for (rel, path) in files {
-        h.write(rel.as_bytes());
+    let Ok(entries) = std::fs::read_dir(dir) else {
         h.write_u8(0);
-        h.write(&std::fs::read(&path).unwrap_or_default());
+        return h.finish();
+    };
+    let mut names: Vec<(OsString, u8)> = entries
+        .flatten()
+        .map(|e| {
+            let path = e.path();
+            let kind = u8::from(e.file_type().is_ok_and(|t| t.is_symlink())) << 2
+                | u8::from(path.is_dir()) << 1
+                | u8::from(path.is_file());
+            (e.file_name(), kind)
+        })
+        .collect();
+    names.sort();
+    h.write_u8(1);
+    for (name, kind) in names {
+        h.write(name.as_encoded_bytes());
         h.write_u8(0);
+        h.write_u8(kind);
     }
     h.finish()
+}
+
+/// DC.7c: a watched input's content fingerprint: xxh64 of its bytes, an
+/// unreadable one its own value.
+fn bytes_fp(path: &Path) -> u64 {
+    let mut h = XxHash64::with_seed(0);
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            h.write_u8(1);
+            h.write(&bytes);
+        }
+        Err(_) => h.write_u8(0),
+    }
+    h.finish()
+}
+
+/// DC.7c: every directory `IncludeRoots::read` reads a `CMakeLists.txt` in
+/// (c_includes' `HeldDirs`, mirrored): the root and each directory above a
+/// walked C/C++ file, repo-relative.
+fn held_dirs(c_files: &[&str]) -> BTreeSet<String> {
+    let mut out = BTreeSet::from([String::new()]);
+    for file in c_files {
+        let parts: Vec<&str> = file.split('/').filter(|s| !s.is_empty()).collect();
+        let mut dir = String::new();
+        for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            if !dir.is_empty() {
+                dir.push('/');
+            }
+            dir.push_str(part);
+            out.insert(dir.clone());
+        }
+    }
+    out
+}
+
+/// DC.7c: every `compile_commands.json` `IncludeRoots::read` looks for
+/// (c_includes' `compile_commands_dirs`, mirrored), repo-relative: at the
+/// root and at each CMake project root, and in each of their depth-1
+/// `build*`, `out` and `cmake-build-*` directories (listed now; a new one
+/// moves its parent's mtime, which re-plans and lists them again).
+fn compile_dbs(root: &Path, roots: &[ProjectRoot]) -> Vec<String> {
+    let dirs: BTreeSet<&str> = std::iter::once("")
+        .chain(
+            roots
+                .iter()
+                .filter(|r| r.ecosystem == "cmake")
+                .map(|r| r.rel_path.as_str()),
+        )
+        .collect();
+    let mut out = Vec::new();
+    for dir in dirs {
+        out.push(join_rel(dir, COMPILE_COMMANDS));
+        let mut subs: Vec<String> = std::fs::read_dir(root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with("build") || n == "out" || n.starts_with("cmake-build-"))
+            .collect();
+        subs.sort();
+        out.extend(
+            subs.iter()
+                .map(|sub| join_rel(&join_rel(dir, sub), COMPILE_COMMANDS)),
+        );
+    }
+    out
+}
+
+/// `name` under the repo-relative directory `dir` (`""` the root).
+fn join_rel(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 /// LB.1's `[repo-id]` line, as a build prints it.
@@ -1405,6 +2003,19 @@ fn repo_id_marker(ident: &RepoIdentity, label: &str) {
 fn ms(d: Duration) -> f64 {
     let tenths = d.as_micros() / 100;
     (tenths as f64) / 10.0
+}
+
+/// The `[watch] poll` line (module doc).
+fn poll_marker(scan: &Scan, label: &str) -> String {
+    format!(
+        "[watch] poll files={} dirs={} watched={} changed={} racy={} took={} repo={label}",
+        scan.files,
+        scan.dirs,
+        scan.watched,
+        scan.found.len(),
+        scan.racy,
+        timing::ms(scan.took),
+    )
 }
 
 /// The `[watch] update` line (module doc).
@@ -2033,6 +2644,254 @@ mod tests {
         serde_json::to_value(v).expect("serialise")
     }
 
+    /// DC.7c: an hour ago, the mtime [`settle`] gives a fixture.
+    fn old() -> SystemTime {
+        SystemTime::now() - Duration::from_secs(3600)
+    }
+
+    /// Set the mtime of the file or directory at `path` (no clock ticks
+    /// slept on).
+    fn set_mtime(path: &Path, t: SystemTime) {
+        std::fs::File::open(path).unwrap().set_modified(t).unwrap();
+    }
+
+    /// Every file and directory under `dir`, `dir` included, set to [`old`]:
+    /// nothing in the fixture sits in the racy window when a session opens.
+    fn settle(dir: &Path) {
+        let t = old();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    set_mtime(&p, t);
+                }
+            }
+            set_mtime(&d, t);
+        }
+    }
+
+    /// `paths` (from `changed_paths`) as repo-relative paths, `""` the root.
+    fn rels(s: &WatchSession, paths: &[PathBuf]) -> Vec<String> {
+        paths.iter().map(|p| s.rel_of(p).unwrap()).collect()
+    }
+
+    #[test]
+    fn poll_sees_edit_add_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        settle(&dir);
+        let mut s = open(&dir);
+        assert!(s.changed_paths().is_empty(), "a settled tree is quiet");
+        assert!(s.poll().unwrap().is_none());
+
+        write(
+            &dir,
+            "a.py",
+            "def foo():\n    return bar() + 1\n\ndef bar():\n    return 1\n",
+        );
+        let found = s.changed_paths();
+        assert!(found.iter().all(|p| p.is_absolute()), "{found:?}");
+        assert_eq!(rels(&s, &found), ["a.py"]);
+        let scan = s.scan();
+        let line = poll_marker(&scan, "r");
+        assert!(
+            line.starts_with(&format!(
+                "[watch] poll files={} dirs={} watched={} changed=1 racy=",
+                s.records.len(),
+                s.plan.dirs.len() + s.plan.region_dirs.len(),
+                scan.watched
+            )) && line.ends_with(" repo=r"),
+            "{line}"
+        );
+        let u = s.poll().unwrap().expect("an edit rebuilds");
+        assert_eq!(
+            (u.seq, u.files.modified.clone()),
+            (1, vec!["a.py".to_string()])
+        );
+        assert!(u.files.added.is_empty() && u.files.removed.is_empty());
+        assert_clean(&s, &dir, tmp.path(), "poll_edit");
+        assert!(s.changed_paths().is_empty(), "quiet after the update");
+        assert!(s.poll().unwrap().is_none());
+
+        write(&dir, "b.py", "def b():\n    return foo()\n");
+        assert_eq!(rels(&s, &s.changed_paths()), [""], "the root's mtime moved");
+        let u = s.poll().unwrap().expect("an add rebuilds");
+        assert_eq!(
+            (u.seq, u.files.added.clone()),
+            (2, vec!["b.py".to_string()])
+        );
+        assert_clean(&s, &dir, tmp.path(), "poll_add");
+        assert!(s.changed_paths().is_empty(), "quiet after the re-plan");
+
+        std::fs::remove_file(dir.join("b.py")).unwrap();
+        assert_eq!(rels(&s, &s.changed_paths()), ["", "b.py"]);
+        let u = s.poll().unwrap().expect("a delete rebuilds");
+        assert_eq!(
+            (u.seq, u.files.removed.clone()),
+            (3, vec!["b.py".to_string()])
+        );
+        assert_clean(&s, &dir, tmp.path(), "poll_delete");
+        assert!(s.changed_paths().is_empty());
+        assert!(s.poll().unwrap().is_none());
+        assert_eq!(s.seq(), 3);
+    }
+
+    /// A new file in a subdirectory moves only that directory's mtime; a
+    /// nested clone's `.git` removed moves only its region root's.
+    #[test]
+    fn poll_relists_a_changed_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        write(&dir, "pkg/c.py", "def c():\n    return 3\n");
+        write(&dir, "third/lib/x.py", "def x():\n    return 4\n");
+        write(&dir, "third/lib/.git/HEAD", "ref: refs/heads/main\n");
+        settle(&dir);
+        let mut s = open(&dir);
+        let region = |s: &WatchSession| s.plan.region_dirs.iter().any(|d| d.rel == "third/lib");
+        assert!(region(&s), "{:?}", s.plan.region_dirs);
+        assert!(s.changed_paths().is_empty());
+
+        write(&dir, "pkg/d.py", "def d():\n    return c()\n");
+        assert_eq!(rels(&s, &s.changed_paths()), ["pkg"]);
+        let u = s.poll().unwrap().expect("a new file");
+        assert_eq!(u.files.added, ["pkg/d.py"]);
+        assert_clean(&s, &dir, tmp.path(), "subdir_add");
+        assert!(s.poll().unwrap().is_none());
+
+        std::fs::remove_dir_all(dir.join("third/lib/.git")).unwrap();
+        assert_eq!(rels(&s, &s.changed_paths()), ["third/lib"]);
+        let u = s.poll().unwrap().expect("the region un-collapses");
+        assert_eq!(u.files.added, ["third/lib/x.py"]);
+        assert!(!region(&s), "{:?}", s.plan.region_dirs);
+        assert_clean(&s, &dir, tmp.path(), "unregioned");
+        assert!(s.changed_paths().is_empty());
+    }
+
+    #[test]
+    fn racy_same_length_rewrite_is_seen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        settle(&dir);
+        let path = dir.join("a.py");
+        // Written "just now": inside the racy window when the session opens.
+        set_mtime(&path, SystemTime::now());
+        let mut s = open(&dir);
+        let recorded = s.records[s.index["a.py"]].stamp.unwrap();
+        let scan = s.scan();
+        assert!(scan.found.is_empty(), "{:?}", scan.found);
+        assert_eq!(scan.racy, 1, "a.py alone sits in the window");
+        assert!(s.changed_paths().is_empty());
+
+        // Same length, other bytes, the recorded mtime put back: the stat
+        // alone cannot tell.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rewrite = text.replace("return 1", "return 7");
+        assert_eq!((rewrite.len(), rewrite != text), (text.len(), true));
+        std::fs::write(&path, &rewrite).unwrap();
+        set_mtime(&path, recorded.mtime.unwrap());
+        assert_eq!(FileStamp::of(&path), Some(recorded));
+        assert_eq!(rels(&s, &s.changed_paths()), ["a.py"]);
+        let u = s.poll().unwrap().expect("the racy rule re-reads it");
+        assert_eq!(u.files.modified, ["a.py"]);
+        assert_clean(&s, &dir, tmp.path(), "racy");
+        assert!(s.changed_paths().is_empty());
+    }
+
+    /// The inputs a build reads besides the table: the overlay (`.glia/`
+    /// is a hard skip of the walk), a `.gitignore`, a `CMakeLists.txt`
+    /// beside a C++ file (the walk admits none) and the git identity files,
+    /// each edited in place so no directory mtime moves (`.glia/` exists at
+    /// open, so the overlay's creation moves only `.glia`'s own).
+    #[test]
+    fn poll_watches_inputs_outside_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        write(&dir, "pkg/c.py", "def c():\n    return 3\n");
+        write(
+            &dir,
+            "src/main.cpp",
+            "#include \"util.hpp\"\n\nint main() { return util(); }\n",
+        );
+        write(&dir, "lib/inc/util.hpp", "int util();\n");
+        write(&dir, "src/CMakeLists.txt", "add_executable(app main.cpp)\n");
+        std::fs::create_dir_all(dir.join(".glia")).unwrap();
+        settle(&dir);
+        let mut s = open(&dir);
+        for rel in [
+            ".gitignore",
+            "src/CMakeLists.txt",
+            ".git/HEAD",
+            ".git/config",
+        ] {
+            assert!(s.watched.contains_key(rel), "{rel}: {:?}", s.watched.keys());
+        }
+        assert!(s.changed_paths().is_empty());
+
+        write(&dir, ".glia/overlay.toml", "version = 1\n");
+        assert_eq!(rels(&s, &s.changed_paths()), [".glia/overlay.toml"]);
+        let u = s.poll().unwrap().expect("the overlay");
+        assert_eq!(u.full_rebuild.as_deref(), Some("overlay"));
+        assert_clean(&s, &dir, tmp.path(), "overlay");
+        assert!(s.changed_paths().is_empty());
+
+        write(&dir, ".gitignore", "*.log\npkg/\n");
+        assert_eq!(rels(&s, &s.changed_paths()), [".gitignore"]);
+        let u = s.poll().unwrap().expect("the gitignore");
+        assert_eq!(u.files.removed, ["pkg/c.py"]);
+        assert_clean(&s, &dir, tmp.path(), "gitignore");
+        assert!(s.changed_paths().is_empty());
+
+        write(
+            &dir,
+            "src/CMakeLists.txt",
+            "add_executable(app main.cpp)\ninclude_directories(../lib/inc)\n",
+        );
+        assert_eq!(rels(&s, &s.changed_paths()), ["src/CMakeLists.txt"]);
+        let u = s.poll().unwrap().expect("the include roots");
+        assert!(
+            u.groups_rebuilt.iter().any(|k| k == "c_cpp"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert_eq!(u.full_rebuild, None);
+        assert_clean(&s, &dir, tmp.path(), "cmake");
+        assert!(s.changed_paths().is_empty());
+
+        // `git init`: the root gains `.git` (its mtime moves) and `.git/HEAD`.
+        write(&dir, ".git/HEAD", "ref: refs/heads/main\n");
+        assert_eq!(rels(&s, &s.changed_paths()), ["", ".git/HEAD"]);
+        let u = s.poll().unwrap().expect("the identity");
+        assert_eq!(u.full_rebuild.as_deref(), Some("identity"));
+        assert_clean(&s, &dir, tmp.path(), "identity");
+        assert!(s.changed_paths().is_empty());
+    }
+
+    /// A touch (a new mtime, the same bytes) of a file, a directory or a
+    /// watched input reaches `apply`, which finds nothing changed.
+    #[test]
+    fn touch_without_change_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        settle(&dir);
+        let mut s = open(&dir);
+        let t = old() + Duration::from_secs(60);
+        set_mtime(&dir.join("a.py"), t);
+        assert_eq!(rels(&s, &s.changed_paths()), ["a.py"]);
+        assert!(s.poll().unwrap().is_none());
+        assert_eq!(s.seq(), 0);
+        assert!(s.changed_paths().is_empty(), "the noop took the new stamp");
+
+        set_mtime(&dir, t);
+        set_mtime(&dir.join(".gitignore"), t);
+        assert_eq!(rels(&s, &s.changed_paths()), ["", ".gitignore"]);
+        assert!(s.poll().unwrap().is_none());
+        assert_eq!(s.seq(), 0);
+        assert!(s.changed_paths().is_empty());
+    }
+
     /// A session moves between threads (a pyo3 class, a watcher thread).
     #[test]
     fn session_is_send() {
@@ -2088,5 +2947,49 @@ mod tests {
             );
         }
         std::fs::write(&path, &original).unwrap();
+    }
+
+    /// Release timing harness for DC.7c's acceptance (a quiet poll of the
+    /// glia copy), run by hand on a `git archive` copy:
+    /// `GLIA_WATCH_POLL_BENCH=<repo> cargo test --release -p glia-engine --lib watch::tests::bench_quiet_poll -- --ignored --nocapture`.
+    /// Opens a session, then times ten scans of the untouched tree, printing
+    /// what each checked; asserts each was quiet and the poll after them too.
+    /// Then touches the root directory (its mtime moved back one second,
+    /// out of the racy window) and times the poll, a re-plan that finds
+    /// nothing changed: what a directory touch costs.
+    #[test]
+    #[ignore = "release timing harness: set GLIA_WATCH_POLL_BENCH=<repo>; touches its root"]
+    fn bench_quiet_poll() {
+        let Ok(repo) = std::env::var("GLIA_WATCH_POLL_BENCH") else {
+            return;
+        };
+        let mut s = WatchSession::open(&repo, &BuildOptions::default()).unwrap();
+        for i in 1..=10 {
+            let started = Instant::now();
+            let found = s.changed_paths();
+            let took = started.elapsed();
+            let scan = s.scan();
+            eprintln!(
+                "[watch-bench] quiet poll {i} files={} dirs={} watched={} racy={} changed={} took={}",
+                scan.files,
+                scan.dirs,
+                scan.watched,
+                scan.racy,
+                found.len(),
+                timing::ms(took)
+            );
+            assert!(found.is_empty(), "{found:?}");
+        }
+        assert!(s.poll().unwrap().is_none());
+        let root = Path::new(&repo);
+        let mtime = std::fs::metadata(root).unwrap().modified().unwrap();
+        set_mtime(root, mtime - Duration::from_secs(1));
+        let started = Instant::now();
+        assert!(s.poll().unwrap().is_none());
+        eprintln!(
+            "[watch-bench] dir touch poll (noop re-plan) took={}",
+            timing::ms(started.elapsed())
+        );
+        assert!(s.changed_paths().is_empty());
     }
 }
