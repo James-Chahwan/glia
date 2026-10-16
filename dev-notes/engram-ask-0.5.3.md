@@ -75,3 +75,15 @@ James's ruling, 2026-10-16 ("sure" to the session's recommendations): determinis
 the Kina + glia replays once at the 0.5.2 release candidate after W14; the public streams only if those pass. No
 Engram corrections writer in 0.5.3.
 James then, 2026-10-16: *"no still in 0.5.3"* - the corrections writer stays in 0.5.3 (section 2, item 1).
+
+**Determinism check, engram-34, 2026-10-16: PASS at `3921a636`.** glia-export-engram built from a `git archive` copy;
+clone pairs at different directory names and depths (`git clone --no-hardlinks`, same commit).
+- Single commit, `--no-persist --ppr-candidates 16`, on Kina a448fb3, glia 6da2965, quokka a77d4cb and hono 6abd35b:
+  `.engram-gmap`, `.files.json`, `.meta.json` and `.ppr.jsonl` were identical on all four. The only difference in
+  `<out>.glia/` was `manifest.json`'s `label` (the directory name), which Engram does not read.
+- Replay-style chains over the last 30 first-parent commits (step 0 full, then `--since`): 0 of 89 files differed for
+  Kina persist, Kina `--no-persist` and glia persist. Persist and `--no-persist` gmaps were also identical.
+- Control: the 0.5.1 binary (pe2aae4dd) also gave 0 differences (Kina 0/59, glia 0/59), so the 0.4.13-era difference
+  was already gone by 0.5.1. This confirms no regression; glia's own byte_identical gate covers DE.2's fix.
+- Measured speed: a full Kina export about 1 s, glia 2-3 s, a 30-step glia chain about 90 s. Workspace:
+  `~/.cache/engram-eval/de-check`.
