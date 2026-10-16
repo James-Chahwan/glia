@@ -5,7 +5,9 @@ pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use glia_code_domain::data_entity;
 use glia_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
+use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::line_of;
 
 pub fn parse_file(
@@ -63,6 +65,9 @@ pub fn parse_file(
     if let Some(line) = acc.types.marker(file_rel_path) {
         eprintln!("{line}");
     }
+    if let Some(line) = acc.ecto.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -92,6 +97,14 @@ struct Acc {
     module_id: Option<NodeId>,
     /// DH.17b's per-file tallies (the `[elixir-types]` marker).
     types: TypeCounts,
+    /// DH.18's per-file tallies (the `[orm-ecto]` marker).
+    ecto: EctoCounts,
+    /// DATA_ENTITY ids already pushed from this file: one node per entity,
+    /// whichever of its declaration and its query sites comes first.
+    data_entities: std::collections::HashSet<NodeId>,
+    /// `(function, entity)` ACCESSES_DATA pairs already pushed: one edge per
+    /// pair, however many sites (or clauses) repeat it.
+    access_edges: std::collections::HashSet<(NodeId, NodeId)>,
     /// Per-file dedup for the shared ENDPOINT nodes client calls mint.
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Client HTTP call sites emitted from this file (drives the fired-on marker).
@@ -216,18 +229,26 @@ fn visit_defmodule(
     acc.nav.record(id, &short, &qname, kind, Some(parent_id));
 
     if let Some(body) = body {
-        let module = ModuleScope { qname: &qname, id, exunit: shape.exunit };
+        let module = ModuleScope {
+            qname: &qname,
+            id,
+            exunit: shape.exunit,
+            ecto_schema: shape.ecto_schema,
+        };
         visit_module_body(body, src, file_rel, &module, repo, acc);
     }
 }
 
 /// The module a body walk is in: its qname and node id (the parent of every
-/// def, the `from` of every IMPLEMENTS / INJECTS ref), and whether it `use`s
-/// an ExUnit case template, so its `test` blocks are test functions.
+/// def, the `from` of every IMPLEMENTS / INJECTS ref), whether it `use`s
+/// an ExUnit case template, so its `test` blocks are test functions, and
+/// whether it `use`s Ecto.Schema, so its `schema "x" do` declares the
+/// model's DATA_ENTITY (DH.18).
 struct ModuleScope<'a> {
     qname: &'a str,
     id: NodeId,
     exunit: bool,
+    ecto_schema: bool,
 }
 
 /// What a `defmodule` body declares at its top level, read before the node
@@ -243,6 +264,8 @@ struct BodyShape {
     /// A `use ExUnit.Case` / `use <..>Case` line (Phoenix's `ConnCase` /
     /// `DataCase` / `ChannelCase` `use ExUnit.Case` in turn).
     exunit: bool,
+    /// A `use Ecto.Schema` / `use <App>.Schema` line ([`is_ecto_schema_use`]).
+    ecto_schema: bool,
 }
 
 impl BodyShape {
@@ -285,10 +308,12 @@ fn body_shape(body: TsNode, src: &[u8]) -> BodyShape {
             Some("def" | "defp" | "defmodule" | "defprotocol" | "defstruct") => {
                 shape.children = true;
             }
-            Some("use")
-                if find_args(*child).is_some_and(|a| is_exunit_case(&first_arg_text(a, src))) =>
-            {
-                shape.exunit = true;
+            Some("use") => {
+                if let Some(args) = find_args(*child) {
+                    let used = first_arg_text(args, src);
+                    shape.exunit |= is_exunit_case(&used);
+                    shape.ecto_schema |= is_ecto_schema_use(&used);
+                }
             }
             _ => {}
         }
@@ -481,6 +506,9 @@ fn do_block_of(node: TsNode) -> Option<TsNode> {
 /// In an ExUnit case module (`module.exunit`) a `test` block is a test
 /// FUNCTION and a `describe` block's tests are walked with its name as
 /// prefix ([`visit_exunit_test`]); `setup` / `setup_all` emit nothing.
+///
+/// DH.18: in an Ecto schema module (`module.ecto_schema`) a `schema "<table>"
+/// do` statement declares the model's DATA_ENTITY ([`Acc::push_ecto_schema`]).
 fn visit_module_body(
     body: TsNode,
     src: &[u8],
@@ -523,6 +551,13 @@ fn visit_module_body(
                 }
                 ExUnitBlock::Setup => {}
             }
+            continue;
+        }
+        if module.ecto_schema
+            && let Some(decl) = ecto_schema_decl(child, src)
+        {
+            pending = None;
+            acc.push_ecto_schema(module, &decl, repo);
             continue;
         }
         if let Some(name) = def_call_name(child, src) {
@@ -608,6 +643,8 @@ fn visit_def(
     // argument instead, and the head itself can never contain a client call.
     let hits = collect_client_endpoints_in(node, src, id, repo, file_rel, acc);
     acc.endpoint_hits += hits;
+    // DH.18: the Ecto query sites, over the whole call for the same reason.
+    collect_ecto_sites(node, src, parent_qname, id, repo, acc);
 }
 
 /// One ExUnit `test "<name>" [, ctx] do .. end` (or `, do: ..`, or the
@@ -1085,6 +1122,403 @@ fn collect_client_endpoints_in(
         }
     }
     hits
+}
+
+// ---------------------------------------------------------------------------
+// Ecto schemas and Repo query sites -> DATA_ENTITY / ACCESSES_DATA (DH.18)
+// ---------------------------------------------------------------------------
+//
+// An Ecto schema module (`use Ecto.Schema` + `schema "users" do .. end`,
+// hexdocs.pm/ecto/Ecto.Schema.html) declares the model the rest of the app
+// queries through its Repo (`Repo.all(User)`, `Repo.insert(%User{..})`,
+// hexdocs.pm/ecto/Ecto.Repo.html) or a query (`from u in User`,
+// hexdocs.pm/ecto/Ecto.Query.html#from/2). Identity follows A13.1's ORM rule
+// (`code_domain::data_entity`): both sites key the entity on the MODEL,
+// `data_entity:sql:<last alias segment>`, the one token a query site in any
+// file can name, so a site lands on the declaration's node with no
+// cross-file pre-pass. The declared table rides a table cell (orm `ecto`) on
+// the declaration only; `DbResolver` reads it to join the model to the table
+// other services name.
+
+/// `Ecto.Repo` functions whose first argument (or piped value) is the
+/// queryable, schema module or struct they read or write.
+const ECTO_REPO_FUNCS: &[&str] = &[
+    "all",
+    "get",
+    "get!",
+    "get_by",
+    "get_by!",
+    "one",
+    "one!",
+    "insert",
+    "insert!",
+    "insert_or_update",
+    "insert_or_update!",
+    "update",
+    "update!",
+    "delete",
+    "delete!",
+    "insert_all",
+    "update_all",
+    "delete_all",
+    "aggregate",
+    "exists?",
+    "stream",
+    "preload",
+];
+
+/// DH.18 per-file tallies, the `[orm-ecto]` marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct EctoCounts {
+    /// `schema` declarations of a schema module (each mints its DATA_ENTITY).
+    schemas: usize,
+    /// Of those, the ones whose source is a string literal: a table cell.
+    table_cells: usize,
+    /// Query sites that named an entity: a Repo call's queryable, and each
+    /// `from` / `*join:` source.
+    repo_sites: usize,
+}
+
+impl EctoCounts {
+    /// `[orm-ecto] schemas=<n> table_cells=<n> repo_sites=<n> path=<file>`,
+    /// when any count is non-zero.
+    fn marker(&self, path: &str) -> Option<String> {
+        (self.schemas + self.repo_sites > 0).then(|| {
+            format!(
+                "[orm-ecto] schemas={} table_cells={} repo_sites={} path={path}",
+                self.schemas, self.table_cells, self.repo_sites
+            )
+        })
+    }
+}
+
+/// `use <alias>` makes a module an Ecto schema: `Ecto.Schema` itself, or an
+/// app's own `<App>.Schema` wrapper, whose `__using__` does `use Ecto.Schema`
+/// plus shared `@primary_key` / timestamp options (the `..Case` convention of
+/// [`is_exunit_case`]). A `..Schema` module that is not Ecto's (`use
+/// Absinthe.Schema`) mints nothing: only a `schema "<source>" do` statement
+/// declares an entity, and Absinthe's notation has none.
+fn is_ecto_schema_use(alias: &str) -> bool {
+    alias == "Ecto.Schema"
+        || (is_module_alias(alias)
+            && alias.contains('.')
+            && alias.rsplit('.').next() == Some("Schema"))
+}
+
+/// A table-backed `schema "<source>" do .. end` declaration (or its `, do:`
+/// one-liner form).
+struct SchemaDecl {
+    /// The source when it is a string literal (`"users"`); `None` for any
+    /// other expression (`schema @source do`), which names no table.
+    table: Option<String>,
+}
+
+/// The [`SchemaDecl`] a schema-module statement makes, if any. An
+/// `embedded_schema do` (no table) and a `schema` call without a body are
+/// none.
+fn ecto_schema_decl(node: TsNode, src: &[u8]) -> Option<SchemaDecl> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    if target.kind() != "identifier" || text_of(target, src) != "schema" {
+        return None;
+    }
+    let args = find_args(node)?;
+    if do_block_of(node).is_none() && keyword_value(args, "do", src).is_none() {
+        return None;
+    }
+    let mut cursor = args.walk();
+    let first = args.named_children(&mut cursor).next()?;
+    if first.kind() == "keywords" {
+        return None;
+    }
+    Some(SchemaDecl { table: literal_source(first, src) })
+}
+
+/// A string literal naming a table (`"users"`, `"public.users"`): no
+/// interpolation, identifier characters and `.` only. Anything else (an
+/// interpolated or blank string, a non-string) is `None`.
+fn literal_source(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let (text, interpolated) = string_text(node, src);
+    let ok = !interpolated
+        && !text.is_empty()
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    ok.then_some(text)
+}
+
+/// The model token of a module qname: its last dotted alias segment
+/// (`lib::user::Shop.User` -> `User`), the short name `visit_defmodule`
+/// gives the node. A file MODULE qname (`lib::user`, a top-level `def`'s
+/// parent) is no module alias and names none.
+fn model_of(module_qname: &str) -> Option<&str> {
+    let name = module_qname.rsplit("::").next()?;
+    let last = name.rsplit('.').next()?;
+    is_module_alias(last).then_some(last)
+}
+
+/// The model-keyed DATA_ENTITY qname and id for an Ecto entity name: the one
+/// construction site, shared by the declaration and every query site.
+fn ecto_entity(name: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+/// The entity a queryable expression names: a schema module alias
+/// (`Shop.User`, `User`) or struct literal (`%User{..}`) -> its last
+/// segment; `__MODULE__` / `%__MODULE__{}` -> the enclosing module's
+/// (`module`); a schemaless string source (`"users"`) -> the table itself,
+/// since the literal IS the table (the SQL precedent). A variable, a call or
+/// an atom names nothing.
+fn queryable_entity(expr: TsNode, src: &[u8], module: Option<&str>) -> Option<String> {
+    match expr.kind() {
+        "alias" => {
+            let text = text_of(expr, src).trim();
+            is_module_alias(text).then(|| text.rsplit('.').next().unwrap_or(text).to_string())
+        }
+        "identifier" if text_of(expr, src) == "__MODULE__" => module.map(str::to_string),
+        "map" => {
+            let mut cursor = expr.walk();
+            let st = expr.named_children(&mut cursor).find(|c| c.kind() == "struct")?;
+            let mut inner = st.walk();
+            let name = st.named_children(&mut inner).next()?;
+            matches!(name.kind(), "alias" | "identifier")
+                .then(|| queryable_entity(name, src, module))
+                .flatten()
+        }
+        "string" => literal_source(expr, src),
+        _ => None,
+    }
+}
+
+/// A `|>` pipeline operator node.
+fn is_pipe(node: TsNode, src: &[u8]) -> bool {
+    node.kind() == "binary_operator"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|op| text_of(op, src) == "|>")
+}
+
+/// When `call` is a pipeline stage (the right operand of a `|>`), the head
+/// of its pipeline: the leftmost operand of the left-nested `|>` chain, the
+/// value piped in as the stage's first argument.
+fn pipeline_head<'a>(call: TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    let parent = call.parent()?;
+    if !is_pipe(parent, src) || parent.child_by_field_name("right")?.id() != call.id() {
+        return None;
+    }
+    let mut head = parent.child_by_field_name("left")?;
+    while is_pipe(head, src) {
+        head = head.child_by_field_name("left")?;
+    }
+    Some(head)
+}
+
+/// The queryable expression of an `Ecto.Repo` call: `<..>Repo.<f>(q, ..)`
+/// with `f` in [`ECTO_REPO_FUNCS`] -> its first argument or, when the call
+/// is a pipeline stage (`%User{} |> User.changeset(a) |> Repo.insert()`),
+/// the pipeline's head. The base gate is the Repo convention (`MyApp.Repo`,
+/// generated by `mix ecto.gen.repo` with `use Ecto.Repo`): a module alias
+/// whose last segment is `Repo`. No import is required, since a context
+/// module calls `Repo.*` after `alias MyApp.Repo` without naming Ecto; a
+/// non-Ecto module so named whose `all/1` takes a module would read as Ecto.
+fn repo_call_queryable<'a>(call: TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    let target = call.child_by_field_name("target")?;
+    if target.kind() != "dot" {
+        return None;
+    }
+    let base = text_of(target.child_by_field_name("left")?, src).trim();
+    let func = text_of(target.child_by_field_name("right")?, src);
+    if !is_module_alias(base)
+        || base.rsplit('.').next() != Some("Repo")
+        || !ECTO_REPO_FUNCS.contains(&func)
+    {
+        return None;
+    }
+    if let Some(head) = pipeline_head(call, src) {
+        return Some(head);
+    }
+    let args = find_args(call)?;
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .next()
+        .filter(|first| first.kind() != "keywords")
+}
+
+/// The right operand of an `x in <source>` expression.
+fn in_source<'a>(node: TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    (node.kind() == "binary_operator"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|op| text_of(op, src) == "in"))
+    .then(|| node.child_by_field_name("right"))
+    .flatten()
+}
+
+/// The source operands of an `Ecto.Query.from` call (`from u in User, join:
+/// p in Post, ..`, imported or written `Ecto.Query.from`): the right side of
+/// its leading `in` expression, and of every `*join:` keyword's (`join`,
+/// `left_join`, `inner_lateral_join`, ..). `join: p in assoc(u, :posts)`
+/// names no source (a call), and other keywords (`where: u.id in ^ids`) are
+/// never sources.
+fn from_sources<'a>(call: TsNode<'a>, src: &[u8]) -> Vec<TsNode<'a>> {
+    let Some(target) = call.child_by_field_name("target") else {
+        return Vec::new();
+    };
+    let is_from = match target.kind() {
+        "identifier" => text_of(target, src) == "from",
+        "dot" => {
+            target.child_by_field_name("left").is_some_and(|l| text_of(l, src) == "Ecto.Query")
+                && target.child_by_field_name("right").is_some_and(|r| text_of(r, src) == "from")
+        }
+        _ => false,
+    };
+    let Some(args) = find_args(call).filter(|_| is_from) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = args.walk();
+    let parts: Vec<TsNode<'a>> = args.named_children(&mut cursor).collect();
+    if let Some(first) = parts.first().and_then(|p| in_source(*p, src)) {
+        out.push(first);
+    }
+    for kw in parts.iter().filter(|p| p.kind() == "keywords") {
+        let mut pairs = kw.walk();
+        for pair in kw.named_children(&mut pairs) {
+            let is_join = pair
+                .child_by_field_name("key")
+                .is_some_and(|k| text_of(k, src).trim().trim_end_matches(':').ends_with("join"));
+            if let Some(source) = pair
+                .child_by_field_name("value")
+                .filter(|_| is_join)
+                .and_then(|v| in_source(v, src))
+            {
+                out.push(source);
+            }
+        }
+    }
+    out
+}
+
+/// Every Ecto query site inside one `def` (the WHOLE call, as
+/// [`collect_client_endpoints_in`] scans it: a one-liner carries its body in
+/// the `do:` keyword, and the head holds no Repo call or `from`) ->
+/// ACCESSES_DATA from the function `from` to the entity each names. An
+/// anonymous function's body is the function's too. Sites are emitted in
+/// source order, so a repeated pair keeps its first site's line.
+fn collect_ecto_sites(
+    def: TsNode,
+    src: &[u8],
+    module_qname: &str,
+    from: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let module = model_of(module_qname);
+    let mut sites: Vec<(u32, usize, &'static str, String)> = Vec::new();
+    let mut stack = vec![def];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call" {
+            let (row, col) = (line_at(n), n.start_position().column);
+            if let Some(name) =
+                repo_call_queryable(n, src).and_then(|q| queryable_entity(q, src, module))
+            {
+                sites.push((row, col, "ecto_repo", name));
+            }
+            for source in from_sources(n, src) {
+                if let Some(name) = queryable_entity(source, src, module) {
+                    sites.push((row, col, "ecto_from", name));
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    sites.sort();
+    for (line, _, rule, name) in sites {
+        acc.push_ecto_access(from, &name, rule, line, repo);
+    }
+}
+
+impl Acc {
+    /// A schema module's `schema` declaration: the model-keyed DATA_ENTITY
+    /// (Strong), its table cell when the source is a literal, and a DEFINES
+    /// edge from the module. A query site earlier in the file may have
+    /// minted the node already: the declaration is the authoritative site,
+    /// so it lifts that node's confidence and carries the table cell onto it.
+    ///
+    /// The nav records the entity with no parent: under the module PACKAGE
+    /// it would join that package's `module_symbols` under the model's short
+    /// name, beside the PACKAGE itself (also named `User` under its file
+    /// MODULE), and make the repo-wide unique-name lookup ambiguous for every
+    /// ref naming the module. The DEFINES edge carries the structure.
+    fn push_ecto_schema(&mut self, module: &ModuleScope, decl: &SchemaDecl, repo: RepoId) {
+        let Some(model) = model_of(module.qname) else {
+            return;
+        };
+        let (qname, id) = ecto_entity(model, repo);
+        let cell = decl
+            .table
+            .as_deref()
+            .map(|table| data_entity::table_cell(table, data_entity::orm::ECTO));
+        self.ecto.schemas += 1;
+        self.ecto.table_cells += usize::from(cell.is_some());
+        if self.data_entities.insert(id) {
+            self.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: cell.into_iter().collect(),
+            });
+            self.nav.record(id, model, &qname, node_kind::DATA_ENTITY, None);
+        } else if let Some(existing) = self.nodes.iter_mut().find(|n| n.id == id) {
+            existing.confidence = Confidence::Strong;
+            existing.cells.extend(cell);
+        }
+        self.edges.push(Edge {
+            from: module.id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+    }
+
+    /// One query site: the entity `name` (Medium unless this file declared
+    /// it, then the declaration's Strong node) and an ACCESSES_DATA edge
+    /// from the enclosing function `from` (LE.4a: a statement site hangs on
+    /// its function), its evidence at the site's 0-based `line`. The nav
+    /// records no parent, as for the declaration.
+    fn push_ecto_access(&mut self, from: NodeId, name: &str, rule: &str, line: u32, repo: RepoId) {
+        let (qname, id) = ecto_entity(name, repo);
+        self.ecto.repo_sites += 1;
+        if self.data_entities.insert(id) {
+            self.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: Vec::new(),
+            });
+            self.nav.record(id, name, &qname, node_kind::DATA_ENTITY, None);
+        }
+        if self.access_edges.insert((from, id)) {
+            let mut edge = Edge {
+                from,
+                to: id,
+                category: edge_category::ACCESSES_DATA,
+                confidence: Confidence::Medium,
+                cells: Vec::new(),
+            };
+            evidence::attach(&mut edge, Evidence::emitter("parser:elixir").rule(rule).line(line));
+            self.edges.push(edge);
+        }
+    }
 }
 
 fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) {
@@ -2522,5 +2956,263 @@ end
             refs_from(&fp, "lib::user_repo::Shop.PgUserRepo"),
             vec![(edge_category::IMPLEMENTS, "UserRepo".to_string())]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // DH.18: Ecto schemas and Repo query sites
+    // -----------------------------------------------------------------------
+
+    /// bench/substrate-gap/matrix/elixir/db/lib/user.ex
+    const ECTO_USER: &str = "defmodule Shop.User do\n  use Ecto.Schema\n\n  schema \"users\" do\n    field :email, :string\n  end\nend\n";
+    /// bench/substrate-gap/matrix/elixir/db/lib/accounts.ex
+    const ECTO_ACCOUNTS: &str = "defmodule Shop.Accounts do\n  import Ecto.Query\n\n  def list_users, do: Shop.Repo.all(Shop.User)\nend\n";
+
+    fn entity_id(name: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, &format!("data_entity:sql:{name}"))
+    }
+
+    fn fn_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    /// The DATA_ENTITY qnames the parse minted, sorted.
+    fn entities(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::DATA_ENTITY)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The entity names (`data_entity:sql:<name>`) the FUNCTION `qname`
+    /// has an ACCESSES_DATA edge to, sorted.
+    fn accesses_from(fp: &FileParse, qname: &str) -> Vec<String> {
+        let from = fn_id(qname);
+        let mut v: Vec<String> = fp
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::ACCESSES_DATA)
+            .filter_map(|e| fp.nav.qname_by_id.get(&e.to).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn ecto_counts_of(source: &str, file: &str, module_qname: &str) -> EctoCounts {
+        let lang: tree_sitter::Language = tree_sitter_elixir::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_qname);
+        let mut acc = Acc {
+            module_qname: module_qname.to_string(),
+            module_id: Some(module_id),
+            ..Acc::default()
+        };
+        visit_top(tree.root_node(), source.as_bytes(), file, module_qname, module_id, repo(), &mut acc);
+        acc.ecto
+    }
+
+    #[test]
+    fn ecto_schema_declares_model_entity_with_table_cell() {
+        let fp = parse_file(ECTO_USER, "lib/user.ex", "lib::user", repo()).unwrap();
+        assert_eq!(entities(&fp), vec!["data_entity:sql:User"]);
+        let id = entity_id("User");
+        let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(node.confidence, Confidence::Strong);
+        let payloads: Vec<&str> = node
+            .cells
+            .iter()
+            .filter(|c| c.kind == cell_type::CODE)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(j) => Some(j.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads, vec![r#"{"orm":"ecto","table":"users"}"#]);
+        assert_eq!(data_entity::table_of(&node.cells), Some("users".to_string()));
+        let package = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "lib::user::Shop.User");
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == package && e.to == id && e.category == edge_category::DEFINES),
+            "the schema module DEFINES its entity"
+        );
+        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("User"));
+    }
+
+    #[test]
+    fn embedded_schema_mints_nothing() {
+        let src = "defmodule Shop.Address do\n  use Ecto.Schema\n\n  embedded_schema do\n    field :street, :string\n  end\nend\n";
+        let fp = parse_file(src, "lib/address.ex", "lib::address", repo()).unwrap();
+        assert!(entities(&fp).is_empty());
+        assert_eq!(ecto_counts_of(src, "lib/address.ex", "lib::address").marker("lib/address.ex"), None);
+    }
+
+    #[test]
+    fn schema_call_outside_a_schema_module_mints_nothing() {
+        // No `use Ecto.Schema`: a `schema` call is some other macro.
+        let src = "defmodule Shop.Doc do\n  schema \"users\" do\n    field :email\n  end\nend\n";
+        let fp = parse_file(src, "lib/doc.ex", "lib::doc", repo()).unwrap();
+        assert!(entities(&fp).is_empty());
+    }
+
+    #[test]
+    fn app_schema_wrapper_is_a_schema_module() {
+        let src = "defmodule Shop.Order do\n  use Shop.Schema\n\n  schema \"orders\" do\n    field :total, :integer\n  end\nend\n";
+        let fp = parse_file(src, "lib/order.ex", "lib::order", repo()).unwrap();
+        assert_eq!(entities(&fp), vec!["data_entity:sql:Order"]);
+        let node = fp.nodes.iter().find(|n| n.id == entity_id("Order")).unwrap();
+        assert_eq!(data_entity::table_of(&node.cells), Some("orders".to_string()));
+        assert!(is_ecto_schema_use("Ecto.Schema"));
+        assert!(!is_ecto_schema_use("Schema"), "a bare `Schema` names no app wrapper");
+        assert!(!is_ecto_schema_use("Ecto.Migration"));
+    }
+
+    #[test]
+    fn repo_all_alias_is_an_access() {
+        let src = "defmodule Shop.Accounts do\n  alias Shop.Repo\n  alias Shop.User\n\n  def list_users do\n    Repo.all(User)\n  end\n\n  def get_user!(id), do: Repo.get!(User, id)\nend\n";
+        let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"), vec!["data_entity:sql:User"]);
+        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::get_user!"), vec!["data_entity:sql:User"]);
+        // One node per entity per file; not declared here, so Medium.
+        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("User")).collect();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].confidence, Confidence::Medium);
+        assert!(nodes[0].cells.is_empty(), "the table rides the declaration only");
+    }
+
+    #[test]
+    fn repo_site_in_keyword_do_body() {
+        let fp = parse_file(ECTO_ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"), vec!["data_entity:sql:User"]);
+        let edge = fp
+            .edges
+            .iter()
+            .find(|e| e.category == edge_category::ACCESSES_DATA)
+            .unwrap();
+        let ev = Evidence::of(edge).unwrap();
+        assert_eq!(ev.emitter, "parser:elixir");
+        assert_eq!(ev.rule.as_deref(), Some("ecto_repo"));
+        assert_eq!(ev.line, Some(3), "the Repo call's 0-based row");
+    }
+
+    #[test]
+    fn repo_insert_struct_literal() {
+        let src = r#"defmodule Shop.Accounts do
+  alias Shop.Repo
+
+  def create(email), do: Repo.insert(%Shop.User{email: email})
+
+  def register(attrs) do
+    %User{}
+    |> User.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  def save(user, attrs) do
+    user |> User.changeset(attrs) |> Repo.update()
+  end
+end
+"#;
+        let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::create"), vec!["data_entity:sql:User"]);
+        assert_eq!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::register"),
+            vec!["data_entity:sql:User"],
+            "a pipeline's head is the stage's first argument"
+        );
+        assert!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::save").is_empty(),
+            "a variable head names nothing"
+        );
+        // The pipeline stage `User.changeset(attrs)` is still a CALLS site.
+        assert!(calls_from(&fp, "lib::accounts::Shop.Accounts::register").contains(&attr("User", "changeset")));
+    }
+
+    #[test]
+    fn from_in_query_names_the_model() {
+        let src = r#"defmodule Shop.Reports do
+  import Ecto.Query
+  alias Shop.Repo
+
+  def active(ids) do
+    query = from u in User, join: p in Post, on: p.user_id == u.id, left_join: c in assoc(p, :comments), where: u.id in ^ids
+    Repo.all(query)
+  end
+
+  def orders, do: Ecto.Query.from(o in Shop.Order) |> Repo.all()
+end
+"#;
+        let fp = parse_file(src, "lib/reports.ex", "lib::reports", repo()).unwrap();
+        assert_eq!(
+            accesses_from(&fp, "lib::reports::Shop.Reports::active"),
+            vec!["data_entity:sql:Post", "data_entity:sql:User"]
+        );
+        assert_eq!(accesses_from(&fp, "lib::reports::Shop.Reports::orders"), vec!["data_entity:sql:Order"]);
+        let ev = fp
+            .edges
+            .iter()
+            .find(|e| e.from == fn_id("lib::reports::Shop.Reports::orders"))
+            .and_then(Evidence::of)
+            .unwrap();
+        assert_eq!(ev.rule.as_deref(), Some("ecto_from"));
+    }
+
+    #[test]
+    fn schemaless_from_string_names_the_table() {
+        let src = "defmodule Shop.Stats do\n  import Ecto.Query\n\n  def emails, do: Shop.Repo.all(from u in \"users\", select: u.email)\n  def purge, do: Repo.delete_all(\"sessions\")\n  def dynamic(t), do: Repo.all(from u in \"#{t}_users\")\nend\n";
+        let fp = parse_file(src, "lib/stats.ex", "lib::stats", repo()).unwrap();
+        assert_eq!(accesses_from(&fp, "lib::stats::Shop.Stats::emails"), vec!["data_entity:sql:users"]);
+        assert_eq!(accesses_from(&fp, "lib::stats::Shop.Stats::purge"), vec!["data_entity:sql:sessions"]);
+        assert!(accesses_from(&fp, "lib::stats::Shop.Stats::dynamic").is_empty(), "an interpolated source names no table");
+    }
+
+    #[test]
+    fn non_repo_call_is_no_site() {
+        let src = "defmodule Shop.Web do\n  def a, do: Cache.all(User)\n  def b(repo), do: repo.all(User)\n  def c(q), do: Repo.all(q)\n  def d, do: Repo.transaction(User)\n  def e, do: Shop.UserRepo.all(User)\nend\n";
+        let fp = parse_file(src, "lib/web.ex", "lib::web", repo()).unwrap();
+        assert!(entities(&fp).is_empty(), "{:?}", entities(&fp));
+        assert!(!fp.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
+        assert_eq!(ecto_counts_of(src, "lib/web.ex", "lib::web").marker("lib/web.ex"), None);
+    }
+
+    #[test]
+    fn schema_module_self_query_lands_on_its_declaration() {
+        let src = "defmodule Shop.User do\n  use Ecto.Schema\n\n  def by_email(e), do: Shop.Repo.get_by(__MODULE__, email: e)\n\n  schema \"users\" do\n    field :email, :string\n  end\n\n  def blank, do: Shop.Repo.insert(%__MODULE__{})\nend\n";
+        let fp = parse_file(src, "lib/user.ex", "lib::user", repo()).unwrap();
+        assert_eq!(entities(&fp), vec!["data_entity:sql:User"]);
+        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("User")).collect();
+        assert_eq!(nodes.len(), 1, "the site before the declaration and the declaration share one node");
+        assert_eq!(nodes[0].confidence, Confidence::Strong, "the declaration lifts the site's node");
+        assert_eq!(data_entity::table_of(&nodes[0].cells), Some("users".to_string()));
+        assert_eq!(accesses_from(&fp, "lib::user::Shop.User::by_email"), vec!["data_entity:sql:User"]);
+        assert_eq!(accesses_from(&fp, "lib::user::Shop.User::blank"), vec!["data_entity:sql:User"]);
+    }
+
+    #[test]
+    fn ecto_counters_match_the_fixture_markers() {
+        assert_eq!(
+            ecto_counts_of(ECTO_USER, "lib/user.ex", "lib::user").marker("lib/user.ex").as_deref(),
+            Some("[orm-ecto] schemas=1 table_cells=1 repo_sites=0 path=lib/user.ex")
+        );
+        assert_eq!(
+            ecto_counts_of(ECTO_ACCOUNTS, "lib/accounts.ex", "lib::accounts")
+                .marker("lib/accounts.ex")
+                .as_deref(),
+            Some("[orm-ecto] schemas=0 table_cells=0 repo_sites=1 path=lib/accounts.ex")
+        );
+        // A non-literal source declares the entity but no table.
+        let src = "defmodule Shop.Tag do\n  use Ecto.Schema\n  schema @source do\n    field :name\n  end\nend\n";
+        assert_eq!(
+            ecto_counts_of(src, "lib/tag.ex", "lib::tag"),
+            EctoCounts { schemas: 1, table_cells: 0, repo_sites: 0 }
+        );
+        // A file with neither prints nothing.
+        assert_eq!(ecto_counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"), None);
     }
 }

@@ -11,17 +11,27 @@
   "expect_nodes": [
     {
       "kind": "DATA_ENTITY",
-      "name": "users"
+      "name": "data_entity:sql:User",
+      "note": "model-keyed (A13.1)"
     }
   ],
   "expect_edges": [
     {
       "from": "Accounts",
-      "to": "users",
-      "category": "ACCESSES_DATA"
+      "to": "data_entity:sql:User",
+      "category": "ACCESSES_DATA",
+      "note": "Repo.all(Shop.User) inside list_users"
     }
   ],
-  "expect_cells": [],
+  "expect_cells": [
+    {
+      "kind": "DATA_ENTITY",
+      "node": "data_entity:sql:User",
+      "cell": "CODE",
+      "contains": "\"table\":\"users\"",
+      "note": "the schema's table on the declaration's table cell"
+    }
+  ],
   "forbid": [],
-  "note": "Ecto schema \"users\" + Repo.all(User) || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Ecto `schema \"users\" do .. end` + `Repo.all(User)` have no DATA_ENTITY row in parsers/code/extractors/src/data_entities.rs."
+  "note": "Ecto schema \"users\" + Repo.all(User) || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. || DH.18: corrected from a table-keyed expectation (`users`), which A13.1's ORM identity rule rejects: a query site in another file names only the model. The Elixir parser reads `use Ecto.Schema` + `schema \"users\" do` as DATA_ENTITY data_entity:sql:User with an ecto table cell, and `Shop.Repo.all(Shop.User)` as ACCESSES_DATA from list_users."
 }

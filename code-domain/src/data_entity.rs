@@ -12,8 +12,9 @@
 //!
 //! A table name the ORM DECLARES (`@Table`, `@Document(collection)`,
 //! `ToTable`, `[Table]`, `TableName()`, `self.table_name`, `$table`,
-//! `@Entity('x')`, `@@map`, `db_table`), or derives by a rule that is not a
-//! plain plural of the model (Django's `<app_label>_<model>`), rides a CODE
+//! `@Entity('x')`, `@@map`, `db_table`, Ecto's `schema "x"`), or derives by
+//! a rule that is not a plain plural of the model (Django's
+//! `<app_label>_<model>`), rides a CODE
 //! cell built by [`table_cell`] and emitted ONLY at the declaration site.
 //! Duplicate-id nodes stack their cells when the graph builder merges file
 //! parses, so query-site files never need to know the table.
@@ -48,6 +49,9 @@ pub mod orm {
     pub const PRISMA: &str = "prisma";
     /// Django: `Meta.db_table`, or the derived `<app_label>_<model>`.
     pub const DJANGO: &str = "django";
+    /// Ecto: the `schema "x" do .. end` source of a `use Ecto.Schema` module
+    /// (DH.18; an `embedded_schema` has no table and emits none).
+    pub const ECTO: &str = "ecto";
 }
 
 /// Build the CODE cell recording that an ORM model maps to `table`.
@@ -92,6 +96,17 @@ mod tests {
         let cell = table_cell("app_users", orm::JPA);
         assert_eq!(cell.kind, cell_type::CODE);
         assert_eq!(table_of(&[cell]), Some("app_users".to_string()));
+    }
+
+    #[test]
+    fn orm_tags_include_ecto() {
+        let cell = table_cell("users", orm::ECTO);
+        let CellPayload::Json(raw) = &cell.payload else {
+            panic!("a table cell is JSON");
+        };
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(v["orm"], "ecto");
+        assert_eq!(table_of(&[cell]), Some("users".to_string()));
     }
 
     #[test]
