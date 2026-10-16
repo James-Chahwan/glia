@@ -100,6 +100,18 @@ pub(crate) enum ChangeCmd {
     /// naming `glia timeline build`), 2 on a git or build error, an unknown
     /// rev or a missing sidecar for `as-of`.
     Timeline(timeline::Args),
+    /// Watch (DC.8): keep the repo's build open and stream what each change
+    /// does to the graph — a foreground loop, no daemon, socket or pidfile.
+    /// Prints a ready line, then one NDJSON object per update on stdout (the
+    /// files that moved, the groups rebuilt, the totals and the located delta
+    /// rows, in delta order). Stat-polls every `--poll-ms`, applies the
+    /// changes once they stayed still for `--debounce-ms`, and persists the
+    /// layout (`<repo>/.glia/graph`) and parse cache every `--persist-every`
+    /// seconds while unsaved and on exit. Stops on SIGINT, SIGTERM or stdin
+    /// EOF (persisting, exit 0; off unix only stdin EOF persists). Refuses
+    /// `--no-overlay`. Exits 2 on a missing repo or a build error, 5 when a
+    /// persist fails.
+    Watch(watch::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -112,5 +124,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::Review(a) => review::run(a),
         ChangeCmd::Cochange(a) => cochange::run(a),
         ChangeCmd::Timeline(a) => timeline::run(a),
+        ChangeCmd::Watch(a) => watch::run(a),
     }
 }

@@ -303,6 +303,7 @@ glia timeline history <REPO> <QNAME> [--category <CATEGORY>] [--json]
 glia timeline as-of <REPO> <REV> [--json]
     The graph at one rev of the window (an index, or a commit id prefix of 7+ hex
     chars): its counts by category. history and as-of read the sidecar, never rebuild.
+glia watch <REPO> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]
 
 # Rules
 glia check <REPO> [--json] [--with <WITH>]...
