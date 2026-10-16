@@ -220,6 +220,8 @@ Not candidates: each becomes packets in the spec run.
 3. **A memory budget for long-lived watch.** DC.4's memos add one entry per walked path and a watch session keeps them;
    multi-repo watch multiplies that. Measure RSS over repeated applies on the 0.5.2 WatchSession (DC.7a), then cap or
    evict, with a `[watch]` RSS marker and a gate.
+   First data (DC.7a, W6): post-trim RSS 404 -> 432 -> 441 MB on glia and 180 -> 228 -> 241 MB on grpc-go over 3
+   updates, with paired incremental builds in the same process; whether it levels off is still unmeasured.
 4. **One tier vocabulary.** `rules::value::Tier`, the string consts in `why.rs` / `check.rs` and `implementors.rs`'s
    enum become one code-domain type (§E W1, DA.3), before Engram's HEURISTIC rows add a fifth reading.
 5. **Runner fixes** (the 0.5.2 waves found both; the session landed them for the remaining 0.5.2 waves too):
@@ -365,6 +367,20 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W5 (DH.3): Dart SNS (`aws_sns_api` `sns.publish(topicArn: ..)`) has no row; redis_task_queue's
   `worker.handle(type, handlerFn)` and dart_amqp's `consumer.listen(cb)` bind no HANDLED_BY; dart_amqp
   `exchange.publish(msg, 'routing.key')` never reads the routing key.
+- W6 (DF.11): a layout merge (`CodeBuildCtx::for_merge`) has no RepoInputs, so declared TESTS edges built by
+  `glia build` disappear in `glia merge` (it drops `pass:tests` edges and recomputes them); the same gap hits CJ.4's
+  ORIGIN and overlay `[[edge]]` stanzas. The merge could re-read each member's `.glia/overlay.toml` from its recorded
+  root (for_merge already carries them as scip_roots). No 0.5.2 packet owns `engine/src/merge.rs`.
+- W6 (DF.11, for 0.5.4's precision rate): every module under a declared `[walk] tests` path pairs by stem, barrels and
+  helpers included (`qa/index.ts` -> up to three `index` modules, Python `__init__`); exclude generic stems (index,
+  mod, __init__, main) for declared modules if real repos show noise.
+- W6 (DF.4b): Dart `export` barrels are not read (an `import 'package:app/app.dart'` barrel binds nothing it
+  re-exports); `hide` is treated as visible; calls inside closures (`builder: (..) => const MyCart()`) are not entered.
+- W6 (DH.4): Elixir brokers not read: BroadwaySQS.Producer (`queue_url:`), BroadwayRabbitMQ.Producer (`queue:`),
+  ExAws.SNS.publish (`topic_arn:`), KafkaEx / Elsa producers and consumers.
+- W6 (DH.4, DH.7; DD.10): small duplicates for one owner of both files: `eventbus.rs`'s PHP helpers vs `queues.rs`'s,
+  and `cli/src/cmd/blast_radius.rs`'s place / also_in formatting vs `query/find.rs`'s location_cell (move to
+  `cli/src/common.rs`).
 
 ## 3. Open questions for James
 
