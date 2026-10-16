@@ -1,0 +1,90 @@
+{
+  "framework": "angular-template-url-bindings",
+  "language": "typescript",
+  "dirs": [
+    "web"
+  ],
+  "note": "DT.5b (T5, quokka-stack's and examples-glia's shape: `templateUrl` templates, legacy *ngFor / trackBy syntax, an Angular-style `<name>.page.html` beside `<name>.page.ts` as well as `.component.html`). The walk admits a `.html` whose same-stem `.ts` sibling exists; the post-cache graft reads the template a component's `templateUrl` names and binds its members, EVIDENCE at the template's file and row. A sibling `.html` no `templateUrl` names (legacy/widget.html) binds nothing; index.html has no `.ts` sibling; neither html mints a MODULE. HEAD 5dfe4c72 (debug CLI + the glia-leap wheel): CALLS 0/5, USES 0/1, FORBID VIOLATIONS 0; orders.page.html is not walked (`[parallel] walk web: read 7 files`).",
+  "expect_edges": [
+    {
+      "from": "OrdersPage",
+      "to": "totalLabel",
+      "category": "CALLS"
+    },
+    {
+      "from": "OrdersPage",
+      "to": "pay",
+      "category": "CALLS"
+    },
+    {
+      "from": "OrdersPage",
+      "to": "cancel",
+      "category": "CALLS"
+    },
+    {
+      "from": "OrdersPage",
+      "to": "isLocked",
+      "category": "CALLS"
+    },
+    {
+      "from": "OrdersPage",
+      "to": "trackByOrder",
+      "category": "USES",
+      "note": "trackBy: a method passed by reference"
+    },
+    {
+      "from": "ProfileComponent",
+      "to": "save",
+      "category": "CALLS",
+      "note": "(ngSubmit) on a .component.html"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "OrdersPage",
+      "to": "archive",
+      "category": "CALLS",
+      "note": "only inside an HTML comment"
+    },
+    {
+      "from": "OrdersPage",
+      "to": "archive",
+      "category": "USES",
+      "note": "only inside an HTML comment"
+    },
+    {
+      "from": "ProfileComponent",
+      "to": "reset",
+      "category": "CALLS",
+      "note": "never bound"
+    },
+    {
+      "from": "Widget",
+      "to": "open",
+      "category": "CALLS",
+      "note": "widget.html is no component's templateUrl"
+    },
+    {
+      "from": "Widget",
+      "to": "open",
+      "category": "USES",
+      "note": "widget.html is no component's templateUrl"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::app::orders::orders.page",
+      "max_nodes": 1,
+      "note": "the template mints no second MODULE beside orders.page.ts"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::app::orders::orders.page.html",
+      "note": "nor one named by its full file name (LB.9a's form)"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::legacy::widget.html",
+      "note": "a walked sibling html is never a MODULE"
+    }
+  ]
+}

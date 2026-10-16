@@ -818,7 +818,11 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
                 eprintln!("[migrations] skipped file={rel_str} over_cap={MIGRATION_SQL_CAP}");
                 continue;
             }
-            if source_rule() {
+            // DT.5b: an `.html` beside a same-stem `.ts` is a component's
+            // external template candidate (`orders.page.html`, Angular 20's
+            // `user-profile.html`), read into `files` for the `templateUrl`
+            // graft (`build::angular_templates`) only.
+            if source_rule() || is_component_template_sibling(&path) {
                 plan.pending.push(Pending {
                     rel: rel_str,
                     abs: path,
@@ -966,6 +970,18 @@ fn is_bypass_path(path: &str) -> bool {
 pub(crate) fn is_angular_template_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.len() > ".component.html".len() && base.ends_with(".component.html")
+}
+
+/// DT.5b: an `.html` file whose same-stem `.ts` sibling exists
+/// (`orders.page.html` beside `orders.page.ts`, `user-profile.html` beside
+/// `user-profile.ts`): the shape an Angular component's `templateUrl`
+/// template takes when it is no `.component.html`. The walk reads it into
+/// `files` for the post-cache `templateUrl` graft only: `detect_language` has
+/// no html arm and `parser_route` returns `None` for it, so the router skips
+/// it (never parsed, const-scanned or a MODULE) and no MODULE qname moves.
+/// `index.html` beside `main.ts` has no sibling and stays out.
+fn is_component_template_sibling(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "html") && path.with_extension("ts").is_file()
 }
 
 pub(crate) fn is_dockerfile_path(path: &str) -> bool {
@@ -1452,7 +1468,8 @@ mod walk_tests {
     }
 
     /// LA.6c: an Angular `*.component.html` template is walked (for its
-    /// navigation links); a plain `.html` page is not.
+    /// navigation links), as (DT.5b) is any `.html` with a same-stem `.ts`
+    /// sibling; a plain `.html` page is not.
     #[test]
     fn walk_admits_component_templates_only() {
         let root = walk_tmp("templates");
@@ -1481,6 +1498,67 @@ mod walk_tests {
         assert!(is_angular_template_path("a/b/user-list.component.html"));
         assert!(!is_angular_template_path("a/b/index.html"));
         assert!(!is_angular_template_path("a/b/component.html"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DT.5b: an `.html` beside a same-stem `.ts` (`orders.page.html`,
+    /// Angular 20's `user-profile.html`) is walked for the `templateUrl`
+    /// graft; `index.html` beside `main.ts`, an `.html` beside a `.tsx` or a
+    /// `.js` only, and a directory named `x.ts` are not. The router skips the
+    /// walked html: it mints no MODULE and moves no TS MODULE qname.
+    #[test]
+    fn walk_admits_component_template_siblings() {
+        let root = walk_tmp("template-siblings");
+        for d in ["src/app/orders", "src/app/user-profile", "src/legacy", "src/odd.ts"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, body) in [
+            ("src/index.html", "<shop-root></shop-root>"),
+            ("src/main.ts", "export const main = 1;\n"),
+            ("src/app/orders/orders.page.html", "<p>{{ total() }}</p>"),
+            ("src/app/orders/orders.page.ts", "export class OrdersPage {}\n"),
+            ("src/app/user-profile/user-profile.html", "<p></p>"),
+            ("src/app/user-profile/user-profile.ts", "export class UserProfile {}\n"),
+            ("src/legacy/view.html", "<p></p>"),
+            ("src/legacy/view.tsx", "export const View = () => null;\n"),
+            ("src/legacy/page.html", "<p></p>"),
+            ("src/legacy/page.js", "export const page = 1;\n"),
+            ("src/odd.html", "<p></p>"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let html: Vec<&str> = files
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .filter(|p| p.ends_with(".html"))
+            .collect();
+        assert_eq!(
+            html,
+            [
+                "src/app/orders/orders.page.html",
+                "src/app/user-profile/user-profile.html"
+            ]
+        );
+        // No route reads it, and the MODULE plan names the TS files as it
+        // would with the html left out.
+        let without: Vec<(String, String)> =
+            files.iter().filter(|(p, _)| !p.ends_with(".html")).cloned().collect();
+        let (with_plan, without_plan) = (
+            crate::route::ModuleQnames::plan(&files),
+            crate::route::ModuleQnames::plan(&without),
+        );
+        for (p, _) in &files {
+            if p.ends_with(".html") {
+                assert_eq!(crate::route::parser_route(p), None, "{p}");
+            } else {
+                assert_eq!(with_plan.module_qname(p), without_plan.module_qname(p), "{p}");
+            }
+        }
+        assert!(is_component_template_sibling(&root.join("src/app/orders/orders.page.html")));
+        assert!(!is_component_template_sibling(&root.join("src/index.html")));
+        assert!(!is_component_template_sibling(&root.join("src/odd.html")));
+        assert!(!is_component_template_sibling(&root.join("src/app/orders/orders.page.ts")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

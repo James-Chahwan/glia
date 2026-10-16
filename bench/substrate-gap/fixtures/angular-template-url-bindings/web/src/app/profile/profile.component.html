@@ -1,0 +1,4 @@
+<form #profileForm="ngForm" (ngSubmit)="save()">
+  <input name="name" [(ngModel)]="name" />
+  <button type="submit" [disabled]="!profileForm.valid">Save</button>
+</form>

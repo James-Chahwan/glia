@@ -95,7 +95,9 @@ fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
 
 /// One `@Component(` / `@Directive(` decorator and what its metadata says
 /// about the class's bindings (DT.5a): the inline `template:` and the `host:`
-/// entries, read as text, for [`crate::angular_template::bind_inline`].
+/// entries, read as text, for [`crate::angular_template::bind_inline`]; and
+/// (DT.5b) the `templateUrl:` an external template is named by, which the
+/// engine's post-cache graft reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecoratedClass {
     /// The decorated class's simple name; `None` when no `class <Name>`
@@ -105,6 +107,10 @@ pub struct DecoratedClass {
     pub kind: NodeKindId,
     /// The `template:` value when it is ONE string literal.
     pub template: Option<InlineTemplate>,
+    /// DT.5b: the `templateUrl:` value when it is ONE string literal, as
+    /// written (`./orders.page.html`), with the 0-based row of the literal in
+    /// the file. A non-literal value reads as `None`.
+    pub template_url: Option<(String, u32)>,
     /// A `template:` key whose value is no single literal (a concatenation,
     /// an identifier, a call): read as nothing.
     pub template_unread: bool,
@@ -156,6 +162,7 @@ pub fn decorated_classes(source: &str) -> Vec<DecoratedClass> {
                 name: find_next_class_name(&source[close + 1..]),
                 kind,
                 template: None,
+                template_url: None,
                 template_unread: false,
                 host: Vec::new(),
             };
@@ -168,8 +175,8 @@ pub fn decorated_classes(source: &str) -> Vec<DecoratedClass> {
     found.into_iter().map(|(_, dc)| dc).collect()
 }
 
-/// The first-level `template` / `host` keys of the object literal in
-/// `source[start..end]` (a decorator's argument).
+/// The first-level `template` / `templateUrl` / `host` keys of the object
+/// literal in `source[start..end]` (a decorator's argument).
 fn read_metadata(source: &str, start: usize, end: usize, dc: &mut DecoratedClass) {
     let b = source.as_bytes();
     let i = skip_trivia(b, start, end);
@@ -188,6 +195,16 @@ fn read_metadata(source: &str, start: usize, end: usize, dc: &mut DecoratedClass
                 }
                 None => dc.template_unread = dc.template.is_none(),
             },
+            // DT.5b: the external template's path, as written. A repeated key
+            // keeps the last literal, as the object literal itself does.
+            "templateUrl" => {
+                if let Some((s, e)) = single_literal(b, vs, ve) {
+                    dc.template_url = Some((
+                        source[s..e].to_string(),
+                        glia_code_domain::line_of(source, s),
+                    ));
+                }
+            }
             "host" if b.get(vs) == Some(&b'{') => {
                 for (hk, hvs, hve) in object_entries(b, vs + 1, ve) {
                     if let Some((s, e)) = single_literal(b, hvs, hve) {
@@ -682,9 +699,50 @@ RouterModule.forRoot(routes);
             assert!(d.template.is_none() && d.template_unread, "{:?}", d.name);
         }
         assert!(got[3].template.is_none() && !got[3].template_unread);
+        assert_eq!(got[3].template_url, Some(("./four.html".to_string(), 6)));
+        assert!(
+            got.iter()
+                .filter(|d| d.name.as_deref() != Some("Four"))
+                .all(|d| d.template_url.is_none())
+        );
         assert_eq!(got[4].kind, node_kind::DIRECTIVE);
         assert_eq!(got[4].host.len(), 1);
         assert_eq!(got[4].host[0].row, 8);
+    }
+
+    /// DT.5b: a multi-line decorator's `templateUrl:` literal (either quote,
+    /// a bare `<name>.html` with no `./`) and its 0-based row; a non-literal
+    /// value, a nested object's key and a comment's text read as nothing.
+    #[test]
+    fn decorated_classes_read_template_url_and_row() {
+        let src = "import { Component } from '@angular/core';\n\n\
+                   @Component({\n  selector: 'shop-orders',\n  // templateUrl: './old.html',\n  templateUrl: './orders.page.html',\n})\nexport class OrdersPage {}\n\n\
+                   @Component({ selector: 'p', templateUrl: \"user-profile.html\", styleUrl: './p.css' })\nexport class UserProfile {}\n\n\
+                   @Component({ templateUrl: URL, providers: [{ templateUrl: './inner.html' }] })\nexport class Dyn {}\n";
+        let got = decorated_classes(src);
+        let urls: Vec<_> = got
+            .iter()
+            .map(|d| (d.name.clone().unwrap_or_default(), d.template_url.clone()))
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                (
+                    "OrdersPage".to_string(),
+                    Some(("./orders.page.html".to_string(), 5))
+                ),
+                (
+                    "UserProfile".to_string(),
+                    Some(("user-profile.html".to_string(), 9))
+                ),
+                ("Dyn".to_string(), None),
+            ]
+        );
+        // A templateUrl is no inline template.
+        assert!(
+            got.iter()
+                .all(|d| d.template.is_none() && !d.template_unread)
+        );
     }
 
     /// CH.1: `abstract` between the decorator and `class` no longer hides the

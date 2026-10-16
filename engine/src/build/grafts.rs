@@ -20,6 +20,7 @@ use glia_code_extractors::{anchor, cron, eventbus, openapi_annot, queue_topic, q
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
+use super::angular_templates;
 use super::assemble::FileConstTables;
 use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
@@ -40,9 +41,9 @@ use crate::route::ModuleQnames;
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
 /// segment, the CB.24 client-host stamp, the DF.19 annotated OpenAPI base
-/// stamp, the DF.8 external client-site mark, then the A16.4 IMPORTS-cell
-/// filter. `const_table` is the repo's A11.1
-/// table and `file_tables` the per-file scans it was merged from (DC.3: the
+/// stamp, the DF.8 external client-site mark, the DT.5b Angular `templateUrl`
+/// template bindings, then the A16.4 IMPORTS-cell filter. `const_table` is
+/// the repo's A11.1 table and `file_tables` the per-file scans it was merged from (DC.3: the
 /// queue / event const folds read a file's own bindings there instead of
 /// re-scanning it); `roots` are the walk's project roots (A8.4);
 /// `rust_crates` their Cargo packages, whose names the IMPORTS filter treats
@@ -236,6 +237,15 @@ pub(super) fn apply_post_cache(
     // for the channel clients. After the CB.24 stamp, which writes the GraphQL
     // `hosts` it reads; it rewrites payloads only, so the ordering rule holds.
     endpoint_fold::mark_external_clients(parses_by_lang.values_mut().flatten(), const_table)
+        .report(repo_label);
+
+    // DT.5b: a component's `templateUrl` template binds its METHODs (CALLS /
+    // USES from the CLASS, EVIDENCE at the template's file and row). The
+    // template is a second walked file, so the read is post-cache: an edit
+    // to the template alone moves the edges of a cache-served component. It
+    // mints no node, so the ordering rule holds, and it runs after the RPC
+    // needles, so no DC.4 NeedleKey input moves.
+    angular_templates::graft_template_urls(parses_by_lang, files, repo, &modules, parse_errors)
         .report(repo_label);
 
     // A16.4: drop intra-repo names from every IMPORTS cell. It needs the whole

@@ -1,0 +1,8 @@
+<section class="orders">
+  <article *ngFor="let order of orders; trackBy: trackByOrder">
+    <p>{{ totalLabel(order) }} - {{ order.status }}</p>
+    <button (click)="pay(order)" [disabled]="isLocked(order)">Pay</button>
+    <button (click)="cancel(order)">Cancel</button>
+    <!-- archive(order) once the archive endpoint ships -->
+  </article>
+</section>

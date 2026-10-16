@@ -7,6 +7,7 @@
 //!   per-group build, per-repo markers ([`assemble::repo_markers`]).
 //! - [`grafts`] — the post-cache graft sequence (endpoint fold, HTTP owner
 //!   segment, queue const fold, RPC needles and their markers, anchor census,
+//!   the DT.5b Angular `templateUrl` bindings ([`angular_templates`]),
 //!   IMPORTS-cell filter).
 //! - [`rpc_needles`] — the build-wide proto service set and the gRPC
 //!   client / server needle passes.
@@ -40,6 +41,7 @@
 //! file. It is a build option, not an env var, because pyo3 `generate()` may
 //! run on several Python threads at once.
 
+mod angular_templates;
 pub(crate) mod assemble;
 pub(crate) mod c_includes;
 mod grafts;
