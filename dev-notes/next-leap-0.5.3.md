@@ -494,14 +494,20 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
     Hardhat), called from the frontend (ethers, 7+ files) and the backend (`ethclient` in `signer.go` / `indexer.go`);
     no edge joins a TS / Go contract call to the Solidity function, and identity has no ABI rule. A contract-call
     extractor plus an identity rule (Solidity contract <-> its ABI clients) is the cross-stack link a dApp needs.
-  - **The client <-> server contract model is not identified** (James, on Kina's 0 identity classes: *"the frontend
-    talks to backend as a service definition somewhere so thats incorrect"*). Kina has no OpenAPI / proto: its contract
+  - **The client <-> server contract model is not identified - IN 0.5.3** (James, on Kina's 0 identity classes: *"the
+    frontend talks to backend as a service definition somewhere so thats incorrect"*, then *"straight into 0.5.3 for that
+    one"*). Kina has no OpenAPI / proto: its contract
     is code, the Angular services + `core/models` (`export interface Offer`) and the Go handlers + `models.go`
     (`type Offer struct` with `json` tags). glia pairs the calls (108 HTTP_CALLS pairs) but not the models, and on
     quokka-stack the 39 contract_op classes join swagger, the Go annotation and the feature spec, never the web /
     Android client models. Candidate: an identity rule pairing a client model and a server model through the paired
     endpoint <-> route (the client's typed call `http.get<Offer[]>`, the handler's serialised struct) and their JSON
     field names, plus model drift (a field one side has and the other does not serialise) in the contract-fields answer.
+  - quokka-stack's NATS JetStream chat mints **no queue node at all**: `conn.Publish(notifSubject(targetUserID), payload)`
+    on a `*nats.Conn` parameter and JetStream subjects from `config.Appconf.NATS.JetStream.Publish.SubjectTemplate`
+    give 0 QUEUE_PRODUCER / QUEUE_CONSUMER nodes, while the QUEUE_FLOWS caveat says such topics are "extracted as an
+    unresolved framework tag". Either mint the unresolved producer / consumer (so the flow is visible and caveated) or
+    correct the caveat; then fold config-templated subjects through the config keys.
 
 ## 3. Open questions for James
 
