@@ -508,6 +508,8 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
     give 0 QUEUE_PRODUCER / QUEUE_CONSUMER nodes, while the QUEUE_FLOWS caveat says such topics are "extracted as an
     unresolved framework tag". Either mint the unresolved producer / consumer (so the flow is visible and caveated) or
     correct the caveat; then fold config-templated subjects through the config keys.
+  - pyo3 `PyGraph.neighbours(.., categories=[..])` takes category ids only: `["CALLS"]` raises `TypeError: argument
+    'categories': 'str' object cannot be interpreted as an integer`; accept NAMEs as every CLI flag and `glia query` do.
 
 ## 3. Open questions for James
 
