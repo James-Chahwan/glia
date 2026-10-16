@@ -430,6 +430,13 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W9 (DC.10a): the watch group key's `overlay_fp` is redundant with the post-graft parse fingerprints for every overlay
   section today; dropping it would let an overlay change rebuild only the groups it moves.
 - W9 (DC.8): watch debounce has no max-latency cap, so a path whose (len, mtime) moves every tick is never applied.
+- W10 (DC.10b): contracts for any later watch work (no 0.5.2 owner remains): a new language group or High input class
+  needs a `group_of` arm in `engine/tests/watch_parity.rs`'s random oracle (plus a not-a-table-entry exclusion when the
+  input is not a walked file), and a new edit op needs a weight that keeps it in the default 15-card sequences.
+- W10 (DC.10b): `glia delta` and watch rows report no row for an edge whose EVIDENCE changes while its confidence does
+  not (a SCIP CONFIRM of an already-Strong edge); reporting evidence re-stamps is a new row kind and a declared break.
+- W10 (DD.13): `serves` folds identity classes of servers only; if an identity rule ever pairs routes or consumers,
+  decide whether the kept server absorbs the folded rows' handlers.
 
 ## 3. Open questions for James
 
