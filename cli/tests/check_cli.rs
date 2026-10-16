@@ -11,6 +11,14 @@
 //! violation on its tier line, and prints the summary `- violations: <V>
 //! (blocking <B>, advisory <A>)`.
 //!
+//! DT.7b lists the declared rules that check nothing (a stanza the build
+//! anchored nowhere, rejected or does not hold; a rule whose scope no located
+//! node sits in) under `## Rules that check nothing`, never changing the exit
+//! code; `--strict` makes each a rule error, exit 2. The `[check] rules=`
+//! line then ends ` unanchored=<n>`, and `[check] declared not checked:
+//! orphaned=<o> rejected=<r> absent=<a> empty_scope=<e> blocking=<b>`
+//! follows it.
+//!
 //! The `[check]` stderr line is the LE.8 fired_on marker, followed on a
 //! violation by CC.3's `[check] tiers ..` line and DB.3a's `[check] gate
 //! blocking=<B> advisory=<A>` line, then, when a rule printed its caveat
@@ -231,8 +239,12 @@ fn no_rules_exits_0_and_says_how_to_declare_one() {
     );
 }
 
+/// DT.7b: a rule whose scope no located node sits in checks nothing. It is
+/// listed under `## Rules that check nothing` with a fix and does not fail
+/// CI (HEAD exited 2 on it); `--strict` makes it the rule error HEAD printed,
+/// its fix under it, exit 2.
 #[test]
-fn rule_error_exits_2() {
+fn empty_scope_checks_nothing_unless_strict() {
     let fx = Fixture::new(
         "ghost",
         &[
@@ -242,21 +254,51 @@ fn rule_error_exits_2() {
         ],
     );
     let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=1 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0 unanchored=1",
+            "[check] declared not checked: orphaned=0 rejected=0 absent=0 empty_scope=1 blocking=0",
+        ]
+    );
+    assert!(
+        stdout.contains("- rules: 1 (checked 0, unchecked 0, errors 0, checking nothing 1)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("## rule errors"), "{stdout}");
+    let section = &stdout[stdout
+        .find("## Rules that check nothing")
+        .expect("the rules that check nothing")..];
+    assert!(
+        section.contains(
+            "- `web-no-ghost` (constraint, .glia/overlay.toml:3): to scope `ghost` matches no located node (no file sits under it and no PROJECT is at it)\n  fix: check the spelling of `to`"
+        ),
+        "{section}"
+    );
+
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--strict"]);
     assert_eq!(code, 2, "{stdout}");
     assert_eq!(
         markers,
         vec![
-            "[check] rules=1 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=1"
+            "[check] rules=1 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=1 unanchored=1",
+            "[check] declared not checked: orphaned=0 rejected=0 absent=0 empty_scope=1 blocking=1",
         ]
     );
     assert!(stdout.contains("## rule errors"), "{stdout}");
     assert!(
-        stdout.contains("- `web-no-ghost`: to scope `ghost`"),
+        stdout.contains("- `web-no-ghost`: to scope `ghost` matches no located node (no file sits under it and no PROJECT is at it)\n  fix: "),
         "{stdout}"
     );
+    assert!(!stdout.contains("## Rules that check nothing"), "{stdout}");
+}
 
-    // Rule invariants that do not analyse (DB.3a): errors, never checked,
-    // each diagnostic printed verbatim on its own line, in source order.
+/// Rule invariants that do not analyse (DB.3a): errors, never checked, each
+/// diagnostic printed verbatim on its own line, in source order; exit 2 with
+/// or without `--strict`.
+#[test]
+fn rule_error_exits_2() {
     let rotten = r#"version = 2
 
 [[constraint]]
@@ -313,6 +355,164 @@ rule = "violation(r) :- node(r, \"ROUTEE\"), edge(r, _, \"CALLZ\")."
     );
     assert!(
         stdout.contains("- violations: 0 (blocking 0, advisory 0)"),
+        "{stdout}"
+    );
+    let (strict_code, strict_out, _) = glia(&["check", &fx.path(), "--strict"]);
+    assert_eq!((strict_code, strict_out), (code, stdout));
+}
+
+/// DT.7a's substrate-gap fixture, copied: its `stale-anchor` stanza names a
+/// qname no node carries.
+const SUBDIR_FIXTURE: &str = "../bench/substrate-gap/fixtures/overlay-subdir-constraint";
+
+/// `from` copied into `to`, recursively.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for entry in std::fs::read_dir(from).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy fixture file");
+        }
+    }
+}
+
+/// [`SUBDIR_FIXTURE`] under a per-test temp dir (removed on drop), its
+/// overlay replaced by `overlay` when given.
+fn subdir_fixture(tag: &str, overlay: Option<&str>) -> Fixture {
+    let root = std::env::temp_dir().join(format!("glia-check-cli-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SUBDIR_FIXTURE);
+    copy_tree(&src, &root);
+    if let Some(o) = overlay {
+        std::fs::write(root.join(".glia/overlay.toml"), o).expect("write overlay");
+    }
+    Fixture(root)
+}
+
+const STALE_BULLET: &str = "- `stale-anchor` (constraint, .glia/overlay.toml:20): orphaned: anchor=backend::internal::gone::Thing binds no node";
+
+/// DT.7b: a stanza the build anchored nowhere is listed under `## Rules that
+/// check nothing` (HEAD: a stderr `[declared]` line only); the exit code
+/// stays the violations' (1, the forbid_edge). `--strict`: an errors row,
+/// exit 2, the forbid_edge section still printed.
+#[test]
+fn orphaned_stanza_is_listed_not_an_error() {
+    let fx = subdir_fixture("orphan", None);
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=3 checked=3 violations=1 (forbid_edge=1 no_cycle=0) unchecked=0 errors=0 unanchored=1",
+            "[check] declared not checked: orphaned=1 rejected=0 absent=0 empty_scope=0 blocking=0",
+            "[check] tiers fact=1 derived=0 heuristic=0",
+            "[check] gate blocking=1 advisory=0",
+        ]
+    );
+    assert!(
+        stdout.contains("- rules: 3 (checked 3, unchecked 0, errors 0, checking nothing 1)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "### handlers-no-repository (forbid_edge, .glia/overlay.toml:3) - 1 violation(s)"
+        ),
+        "{stdout}"
+    );
+    let section = &stdout[stdout
+        .find("## Rules that check nothing")
+        .expect("the rules that check nothing")..];
+    assert!(
+        section.contains(&format!(
+            "{STALE_BULLET}\n  fix: drop `anchor` to place it by its `scope`"
+        )),
+        "{section}"
+    );
+    assert!(!stdout.contains("## rule errors"), "{stdout}");
+
+    let (code, json, _) = glia(&["check", &fx.path(), "--json"]);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).expect("JSON report");
+    assert_eq!(v["errors"], serde_json::json!([]), "{json}");
+    assert_eq!(v["unanchored"][0]["rule_id"], "stale-anchor", "{json}");
+    assert_eq!(v["unanchored"][0]["status"], "orphaned", "{json}");
+    assert_eq!(v["unanchored"][0]["blocking"], false, "{json}");
+
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--strict"]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(
+        markers.first().map(String::as_str),
+        Some(
+            "[check] rules=3 checked=3 violations=1 (forbid_edge=1 no_cycle=0) unchecked=0 errors=1 unanchored=1"
+        ),
+        "{markers:?}"
+    );
+    assert!(
+        stdout.contains("- rules: 3 (checked 3, unchecked 0, errors 1)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "### handlers-no-repository (forbid_edge, .glia/overlay.toml:3) - 1 violation(s)"
+        ),
+        "{stdout}"
+    );
+    let errors = &stdout[stdout
+        .find("## rule errors (not evaluated)")
+        .expect("the rule errors section")..];
+    assert!(
+        errors.contains(
+            "- `stale-anchor`: constraint .glia/overlay.toml:20: orphaned: anchor=backend::internal::gone::Thing binds no node - not evaluated\n  fix: drop `anchor`"
+        ),
+        "{errors}"
+    );
+    assert!(!stdout.contains("## Rules that check nothing"), "{stdout}");
+    let (code, json, _) = glia(&["check", &fx.path(), "--json", "--strict"]);
+    assert_eq!(code, 2);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).expect("JSON report");
+    assert_eq!(v["errors"][0][0], "stale-anchor", "{json}");
+}
+
+/// DT.7b: an overlay whose only stanza anchors nowhere is not "no rules
+/// declared" (HEAD printed that and exited 0 with the stanza on stderr only):
+/// the stanza is listed, exit 0; `--strict` exits 2.
+#[test]
+fn all_orphaned_overlay_is_not_no_rules() {
+    let overlay = "version = 1
+
+[[constraint]]
+id = \"stale-anchor\"
+kind = \"invariant\"
+anchor = \"backend::internal::gone::Thing\"
+text = \"an anchor no node carries\"
+";
+    let fx = subdir_fixture("allorphan", Some(overlay));
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("no rules declared"), "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=0 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0 unanchored=1",
+            "[check] declared not checked: orphaned=1 rejected=0 absent=0 empty_scope=0 blocking=0",
+        ]
+    );
+    assert!(
+        stdout.contains("- rules: 0 (checked 0, unchecked 0, errors 0, checking nothing 1)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&STALE_BULLET.replace(":20)", ":3)")),
+        "{stdout}"
+    );
+    let (code, stdout, _) = glia(&["check", &fx.path(), "--strict"]);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(!stdout.contains("no rules declared"), "{stdout}");
+    assert!(
+        stdout.contains("- `stale-anchor`: constraint .glia/overlay.toml:3: orphaned: anchor=backend::internal::gone::Thing binds no node - not evaluated"),
         "{stdout}"
     );
 }

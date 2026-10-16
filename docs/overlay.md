@@ -127,7 +127,21 @@ manifest, on the smallest-id MODULE under it. Where a rule hangs only stores it:
 evaluates the rule's own scopes, so a misspelt directory inside a project is reported there (`from
 scope ... matches no located node`), not dropped. A `[[decision]]` without `anchor` hangs on the
 PROJECT at its `scope` only. A stanza that hangs nowhere is orphaned: the build prints
-`[declared] orphaned <section> id=<id> <decl> ...` on stderr, and `glia check` never reads it.
+`[declared] orphaned <section> id=<id> <decl> ...` on stderr and writes no cell.
+
+`glia check` (and `PyGraph.check()`) reads each repo's overlay again and binds its
+`[[constraint]]`, `[[component]]` and `[[layer]]` stanzas through the build's own binder, so a
+declared rule that checks nothing is never silent. A stanza the build anchored nowhere (`orphaned:
+anchor=<qname> binds no node`, `orphaned: scope=<raw> -> <path> (no PROJECT at or above it, no
+MODULE under it)`, `orphaned: component=<name> (...)`), one it rejected (`rejected: <why>`, such as
+a path two components claim), one this graph does not hold (`absent: ...`, a layout older than
+the overlay: rebuild), and a rule whose scope or `via` facade no located node sits in, are listed
+under "Rules that check nothing", each with its reason and a suggested fix (the nearest qname or
+path that would anchor it, or what to declare). They do not change the exit code: `glia check`
+still exits 0 or 1 by its violations. `glia check --strict` (`PyGraph.check(strict=True)`) makes
+each a rule error, so CI that wants every declared rule to run exits 2 on one. Decisions and notes
+are records, not rules, and are not listed (`glia gaps` reports a stale-anchor one as
+`orphaned_rule`).
 
 `origin` is accepted on `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]`, `[[constraint]]` and `[[component]]`.
 Stanza ids are 1-128 characters with no control characters, unique within their section.

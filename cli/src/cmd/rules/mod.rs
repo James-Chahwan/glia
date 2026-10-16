@@ -41,10 +41,16 @@ pub(crate) enum RulesCmd {
     /// its tier is at least its rule's `min_tier` (`fact` or `derived`, the
     /// default derived) and is not heuristic; any other is advisory, marked
     /// and never a CI failure.
+    /// A declared rule that checks nothing - a stanza the build anchored
+    /// nowhere (a stale `anchor`, a scope with no PROJECT at or above it and
+    /// no MODULE under it), rejected (a path two components claim) or does
+    /// not hold, or a rule whose scope or `via` facade no located node sits
+    /// in - is listed under "Rules that check nothing" with its reason and a
+    /// fix, and does not fail CI unless --strict.
     /// Exit codes for CI: 0 nothing blocks, 1 a blocking violation, 2 a
     /// build error or a rule that could not be evaluated (unknown edge
-    /// category, a scope or `via` facade no node sits in, an allow naming an
-    /// undeclared component, a `rule` that does not parse or analyse).
+    /// category, an allow naming an undeclared component, a `rule` that does
+    /// not parse or analyse), or, with --strict, a rule that checks nothing.
     Check(check::Args),
     /// Cycles (LE.6b): cross-service event loops first (a node-level loop
     /// through queue / event hops, with a located witness), then call loops,

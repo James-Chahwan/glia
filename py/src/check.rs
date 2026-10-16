@@ -1,17 +1,33 @@
 //! **check** (LE.8): the declared `[[constraint]]` rules evaluated to
 //! VIOLATION with located evidence, as one native dict.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use pyo3::prelude::*;
 
+use glia_engine::check::{CheckOptions, check_with_roots};
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::check`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p glia-py` covers it (see the crate doc).
-fn check_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&glia_engine::check::check(merged))
+/// `cargo test -p glia-py` covers it (see the crate doc). `repo_roots` is the
+/// graph's (DT.7b: each root's `.glia/overlay.toml` is bound again, as
+/// `gaps` reads it).
+fn check_json(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    strict: bool,
+) -> Result<String, serde_json::Error> {
+    let roots: Vec<(u64, PathBuf)> = repo_roots
+        .iter()
+        .map(|(r, p)| (*r, PathBuf::from(p)))
+        .collect();
+    let mut opts = CheckOptions::default();
+    opts.strict = strict;
+    serde_json::to_string(&check_with_roots(merged, &roots, &opts))
 }
 
 #[pymethods]
@@ -20,16 +36,33 @@ impl PyGraph {
     /// `[[constraint]]` stanzas and cell-API rules, stored as CONSTRAINT
     /// cells) evaluated against this graph.
     ///
-    /// Returns a dict `{rules, checked, unchecked, errors, violations,
-    /// reflexion}`:
+    /// Returns a dict `{rules, checked, unchecked, errors, unanchored,
+    /// violations, reflexion}` (`unanchored` only when it holds a row):
     /// `rules` read, `checked` evaluated (forbid_edge + no_cycle + invariants
     /// with a `rule`, plus the allows of an evaluated model), `unchecked` the
-    /// ids of the rules no query evaluates (an invariant without `rule`, a
-    /// transitive forbid_edge), `errors` `[rule_id, message]` pairs for a
-    /// rule that could not be evaluated (an unknown edge category, a scope no
-    /// node sits in, an allow naming an undeclared component, an invariant
-    /// `rule` that does not parse or analyse: `<id> (<decl>):<line>:<col>:
-    /// error: ...`, line and column 1-based in the rule text).
+    /// ids of the rules no query evaluates (an invariant without `rule`),
+    /// `errors` `[rule_id, message]` pairs for a rule that could not be
+    /// evaluated (an unknown edge category, an allow naming an undeclared
+    /// component, an invariant `rule` that does not parse or analyse: `<id>
+    /// (<decl>):<line>:<col>: error: ...`, line and column 1-based in the
+    /// rule text).
+    ///
+    /// `unanchored` (DT.7b) lists the declared rules that check nothing:
+    /// `{rule_id, section, decl, repo, status, reason, fix, blocking}`, first
+    /// the rules whose scope no located node sits in (`status`
+    /// `empty_scope`, `reason` `<role> scope `<s>` matches no located node
+    /// (..)`, `repo` None), then each repo root's `.glia/overlay.toml`
+    /// `[[constraint]]` / `[[component]]` / `[[layer]]` stanza that reached
+    /// no CONSTRAINT cell, bound again through the build's own binder:
+    /// `orphaned` (`orphaned: anchor=<qname> binds no node`, `orphaned:
+    /// scope=<raw> -> <path> (no PROJECT at or above it, no MODULE under
+    /// it)`, `orphaned: component=<name> (..)`, ..), `rejected` (`rejected:
+    /// <why>`) or `absent` (it binds, but this graph holds no rule for it: a
+    /// layout older than the overlay). `fix` suggests what would anchor it.
+    /// `blocking` is `strict`: by default the rows never fail CI; with
+    /// `strict=True` each is also an `errors` row (an empty scope's message,
+    /// or `<section> <decl>: <reason> - not evaluated`, then a `fix: ..`
+    /// line), as `glia check --strict` exits 2 on it.
     /// `violations`, sorted by rule id: `{rule_id, rule_kind, decl, severity,
     /// tier, blocking, count, evidence}`, plus `subject`, `file`, `line` and
     /// `caveats` when set. `rule_kind` is `forbid_edge` (a rule's direct
@@ -75,8 +108,9 @@ impl PyGraph {
     /// `count` and evidence as forbid_edge's, `blocking` under the default
     /// `min_tier` (the model has no per-rule gate). `glia check` renders the
     /// model as its `## reflexion model` section (CC.5c).
-    fn check(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        to_py(py, check_json(&self.merged))
+    #[pyo3(signature = (strict=false))]
+    fn check(&self, py: Python<'_>, strict: bool) -> PyResult<Py<PyAny>> {
+        to_py(py, check_json(&self.merged, &self.repo_roots, strict))
     }
 }
 
@@ -89,7 +123,8 @@ mod tests {
     /// rule evaluation is covered by `engine/tests/check.rs`.
     #[test]
     fn check_returns_the_engine_report() {
-        let empty = check_json(&MergedGraph::new(Vec::new())).expect("serialises");
+        let empty =
+            check_json(&MergedGraph::new(Vec::new()), &BTreeMap::new(), false).expect("serialises");
         assert_eq!(
             empty,
             r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[],"reflexion":null}"#
@@ -120,7 +155,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
 
-        let json = check_json(&built.merged).expect("serialises");
+        let json = check_json(&built.merged, &built.repo_roots, false).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["rules"], 1, "{json}");
         assert_eq!(v["checked"], 1, "{json}");
@@ -144,5 +179,66 @@ mod tests {
             assert_eq!(hop["tier"], "fact", "{json}");
             assert!(hop["note"].is_null(), "{json}");
         }
+        // DT.7b: every rule anchored, so no `unanchored` key.
+        assert!(v.get("unanchored").is_none(), "{json}");
+    }
+
+    /// `from` copied into `to`, recursively.
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).expect("mkdir");
+        for entry in std::fs::read_dir(from).expect("read fixture dir") {
+            let entry = entry.expect("dir entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).expect("copy fixture file");
+            }
+        }
+    }
+
+    /// DT.7b: `check` reads the graph's repo roots, so DT.7a's
+    /// overlay-subdir-constraint fixture's stale-anchor stanza, which no
+    /// CONSTRAINT cell holds, is an `unanchored` row that does not block;
+    /// with `strict` it is an `errors` row too.
+    #[test]
+    fn check_lists_the_rules_that_check_nothing() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bench/substrate-gap/fixtures/overlay-subdir-constraint");
+        let root = std::env::temp_dir().join(format!("glia-dt7b-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        copy_tree(&src, &root);
+        let built =
+            glia_engine::generate_one(root.to_str().expect("utf-8 temp path")).expect("build");
+        let lax = check_json(&built.merged, &built.repo_roots, false).expect("serialises");
+        let strict = check_json(&built.merged, &built.repo_roots, true).expect("serialises");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let v: serde_json::Value = serde_json::from_str(&lax).expect("valid JSON");
+        assert_eq!(v["errors"], serde_json::json!([]), "{lax}");
+        let rows = v["unanchored"].as_array().expect("unanchored rows");
+        assert_eq!(rows.len(), 1, "{lax}");
+        assert_eq!(rows[0]["rule_id"], "stale-anchor", "{lax}");
+        assert_eq!(rows[0]["section"], "constraint", "{lax}");
+        assert_eq!(rows[0]["decl"], ".glia/overlay.toml:20", "{lax}");
+        assert_eq!(rows[0]["status"], "orphaned", "{lax}");
+        assert_eq!(
+            rows[0]["reason"], "orphaned: anchor=backend::internal::gone::Thing binds no node",
+            "{lax}"
+        );
+        assert_eq!(rows[0]["blocking"], false, "{lax}");
+
+        let v: serde_json::Value = serde_json::from_str(&strict).expect("valid JSON");
+        assert_eq!(v["unanchored"][0]["blocking"], true, "{strict}");
+        let errors = v["errors"].as_array().expect("errors rows");
+        assert_eq!(errors.len(), 1, "{strict}");
+        assert_eq!(errors[0][0], "stale-anchor", "{strict}");
+        let msg = errors[0][1].as_str().unwrap_or_default();
+        assert!(
+            msg.starts_with(
+                "constraint .glia/overlay.toml:20: orphaned: anchor=backend::internal::gone::Thing binds no node - not evaluated\nfix: "
+            ),
+            "{msg}"
+        );
     }
 }

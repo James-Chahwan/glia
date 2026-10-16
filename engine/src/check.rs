@@ -153,7 +153,33 @@
 //! does. A node no file places (a SQL table, a queue topic) is in no scope:
 //! the keep-unlocatable leniency of `node_in_scope` (right for filtering a
 //! blast radius) would accuse every rule that names a data entity's
-//! neighbour. A scope no node sits in is a rule error, not a silent pass.
+//! neighbour. A scope no node sits in is never a silent pass: [`check`]
+//! reports it as a rule error, [`check_with_roots`] as a rule that checks
+//! nothing (below).
+//!
+//! # Rules that check nothing (DT.7b)
+//!
+//! A declared rule can fail to check anything without any rule error: its
+//! stanza hangs on no node (a stale `anchor`; a scope with no PROJECT at or
+//! above it and no MODULE under it; a layer or an allow whose component did
+//! not anchor), the build refuses it (a path two components claim, an entry
+//! `validate_declared_entry` refuses), the graph does not hold it (a layout
+//! older than the overlay), or a scope it names holds no located node. The
+//! build only says so on stderr (`[declared] orphaned ..`), and an orphaned
+//! or rejected stanza writes no cell, so [`declared_constraints`] never sees
+//! it. [`check_with_roots`], the form the CLI and pyo3 surfaces call with
+//! each repo's root, lists every one in [`CheckReport::unanchored`] with its
+//! reason and a suggested fix. It re-reads each root's
+//! `.glia/overlay.toml` and binds its `[[constraint]]`, `[[component]]` and
+//! `[[layer]]` stanzas through the build's own binder
+//! (`external::declared::declared_misses`), so the verdict is the build's;
+//! decisions and notes are records, not rules, and are not listed. The rows
+//! are not errors (James, 2026-10-16: "it seems odd to break with an error"):
+//! `glia check` exits 0 / 1 by its violations, and the rows print under
+//! their own heading. [`CheckOptions::strict`] (`glia check --strict`,
+//! `PyGraph.check(strict=True)`) makes each a blocking errors row, exit 2.
+//! [`check`] and `check_rules` (review, the overlay loop) read no overlay and
+//! keep an empty scope a rule error.
 //!
 //! Multi-repo: scopes are repo-relative, so a rule is evaluated against every
 //! merged repo's nodes at that relative path; a cross-repo edge matches when
@@ -238,7 +264,11 @@
 //!   METHOD that no component owns.
 //!
 //! Fired-on marker, one line per call (three when a rule is violated):
-//! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`,
+//! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`
+//! (+ ` unanchored=<n>` when [`CheckReport::unanchored`] holds a row, then a
+//! line `[check] declared not checked: orphaned=<o> rejected=<r> absent=<a> empty_scope=<e> blocking=<b>`
+//! splitting them by status, `b` the blocking ones, all of them under
+//! strict — grep `^\[check\] declared not checked`),
 //! where `V` counts [`Violation`] records (a forbid_edge rule makes at most
 //! one, a transitive one one per hit, a no_cycle rule one per cycle, a rule
 //! invariant one per row, the reflexion model one per divergent pair) and
@@ -263,7 +293,9 @@
 //! absences=<A> unmapped_files=<U>` (`P` counts dependent component pairs)
 //! — grep `^\[reflexion\]`.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
@@ -278,7 +310,7 @@ use glia_rules::value::Tier;
 
 use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::{ModuleImports, module_import_graph};
-use crate::external::declared::declared_constraints;
+use crate::external::declared::{declared_constraints, declared_misses};
 use crate::profile::CODE_PROFILE;
 use crate::rules::facts::{edge_tier_of, located_edge, tier_name};
 use crate::rules::{CodeFacts, evaluate_rule, reflexion};
@@ -425,8 +457,22 @@ pub struct CheckReport {
     /// naming an undeclared component, a rule invariant's parse / analysis /
     /// evaluation error) is skipped; a model declaration in error (a layer naming an undeclared
     /// component, a component on a path another owns) keeps the rest of its
-    /// entry. Rules first, in rule order; then the model's.
+    /// entry. Rules first, in rule order; then the model's. Under
+    /// [`CheckOptions::strict`] ([`check_with_roots`]) every [`Unanchored`]
+    /// row is an errors row too: an empty scope at its rule's place, as
+    /// [`check`] reports it, with a `fix: ..` second line; then each declared
+    /// miss, after the model's, as `<section> <decl>: <reason> - not
+    /// evaluated` and its `fix: ..` line.
     pub errors: Vec<(String, String)>,
+    /// The declared rules that check nothing ([`check_with_roots`] only;
+    /// module doc "Rules that check nothing"): first the rules the graph holds
+    /// whose scope no located node sits in ([`EMPTY_SCOPE`]), in rule order;
+    /// then each repo's overlay stanzas that reached no CONSTRAINT cell
+    /// ([`ORPHANED`], [`REJECTED`], [`ABSENT`]), in roots order then file
+    /// order. Not serialised when empty, so a report with none keeps its
+    /// 0.5.1 JSON.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unanchored: Vec<Unanchored>,
     /// Sorted by rule id; a rule's cycles in the order of their first member,
     /// a transitive rule's hits by subject, a rule invariant's rows in the
     /// rules layer's rendered order. A closed
@@ -435,6 +481,60 @@ pub struct CheckReport {
     /// The reflexion model, evaluated (module doc "Reflexion model"); `None`
     /// when no component is declared.
     pub reflexion: Option<Reflexion>,
+}
+
+/// [`Unanchored::status`]: the stanza binds no node (a stale `anchor`, a
+/// scope with no PROJECT at or above it and no MODULE under it, a layer or
+/// allow whose component did not anchor).
+pub const ORPHANED: &str = "orphaned";
+/// [`Unanchored::status`]: the build refused the stanza (a path another
+/// component claims, an entry `validate_declared_entry` refuses).
+pub const REJECTED: &str = "rejected";
+/// [`Unanchored::status`]: the stanza binds, but the graph holds no rule for
+/// it (a layout older than the overlay, an entry the build could not merge).
+pub const ABSENT: &str = "absent";
+/// [`Unanchored::status`]: a rule the graph holds whose `from`, `to`, `via`
+/// facade or no_cycle `scope` no located node sits in.
+pub const EMPTY_SCOPE: &str = "empty_scope";
+
+/// One declared rule that checks nothing (DT.7b; module doc "Rules that
+/// check nothing").
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct Unanchored {
+    /// The entry id (`component:<name>` / `layer:<name>` for the model's).
+    pub rule_id: String,
+    /// `constraint` (an allow included), `component` or `layer`.
+    pub section: &'static str,
+    /// `.glia/overlay.toml:<line>` of the stanza; `None` for a cell-API rule.
+    pub decl: Option<String>,
+    /// The root of the repo whose overlay declares it; `None` for an
+    /// [`EMPTY_SCOPE`] row (a rule is evaluated against every merged repo).
+    pub repo: Option<String>,
+    /// [`ORPHANED`], [`REJECTED`], [`ABSENT`] or [`EMPTY_SCOPE`].
+    pub status: &'static str,
+    /// `orphaned: anchor=<qname> binds no node`, `orphaned: scope=<raw> ->
+    /// <path> (no PROJECT at or above it, no MODULE under it)`, `orphaned:
+    /// path=<raw> -> <path> (no PROJECT or MODULE)`, `orphaned:
+    /// component=<name> (no root PROJECT; the component did not anchor)`,
+    /// `rejected: <why>`, `absent: ..`, or an empty scope's `<role> scope
+    /// `<s>` matches no located node (..)`.
+    pub reason: String,
+    /// What would make it check something: the nearest qname or path that
+    /// anchors it, what to declare, or the validator's message to act on.
+    pub fix: String,
+    /// Whether it fails CI: only under [`CheckOptions::strict`].
+    pub blocking: bool,
+}
+
+/// How [`check_with_roots`] gates the rules that check nothing.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct CheckOptions {
+    /// Every [`Unanchored`] row is also a [`CheckReport::errors`] row and
+    /// blocking (`glia check --strict`, `PyGraph.check(strict=True)`: exit
+    /// 2). Off: listed, never a CI failure.
+    pub strict: bool,
 }
 
 /// One declared component of the reflexion model.
@@ -535,9 +635,57 @@ pub fn default_forbid_categories() -> Vec<EdgeCategoryId> {
     out
 }
 
-/// Evaluate every rule [`declared_constraints`] reads from `merged`.
+/// Evaluate every rule [`declared_constraints`] reads from `merged`. A scope
+/// no node sits in is a [`CheckReport::errors`] row, and the overlay is not
+/// read: [`CheckReport::unanchored`] is empty (review and the overlay loop
+/// judge through this form).
 pub fn check(merged: &MergedGraph) -> CheckReport {
     check_rules(merged, &declared_constraints(merged))
+}
+
+/// [`check`] for a surface that knows each repo's root (`glia check`,
+/// `PyGraph.check`): `roots` are `(RepoId.0, repo root)` pairs (a build's
+/// `GenerateResult::repo_roots`). Lists every declared rule that checks
+/// nothing in [`CheckReport::unanchored`] (module doc "Rules that check
+/// nothing"): a rule whose scope no located node sits in, and each repo's
+/// `.glia/overlay.toml` `[[constraint]]` / `[[component]]` / `[[layer]]`
+/// stanza that reached no CONSTRAINT cell, bound again through the build's
+/// own binder. Non-blocking unless `opts.strict`.
+pub fn check_with_roots(
+    merged: &MergedGraph,
+    roots: &[(u64, PathBuf)],
+    opts: &CheckOptions,
+) -> CheckReport {
+    let misses = declared_misses(merged, roots)
+        .into_iter()
+        .map(|m| Unanchored {
+            rule_id: m.id,
+            section: m.section,
+            decl: Some(m.decl),
+            repo: Some(m.root),
+            status: m.status,
+            reason: m.reason,
+            fix: m.fix,
+            blocking: opts.strict,
+        })
+        .collect();
+    let gate = Unanchoring {
+        misses,
+        strict: opts.strict,
+    };
+    run_check(
+        merged,
+        &declared_constraints(merged),
+        reflexion::derive,
+        Some(gate),
+    )
+}
+
+/// What [`check_with_roots`] adds to a check: the overlay stanzas that
+/// reached no rule, and whether every rule that checks nothing blocks.
+struct Unanchoring {
+    misses: Vec<Unanchored>,
+    strict: bool,
 }
 
 /// Evaluate `rules` (as [`declared_constraints`] returns them: anchor node,
@@ -555,6 +703,20 @@ pub(crate) fn check_rules_with(
     rules: &[(NodeId, ConstraintRule)],
     derive: DeriveModel,
 ) -> CheckReport {
+    run_check(merged, rules, derive, None)
+}
+
+/// The one check body. `gate` `None` ([`check`], [`check_rules`]): an empty
+/// scope is an errors row and nothing is unanchored. `Some`
+/// ([`check_with_roots`]): an empty scope is an [`EMPTY_SCOPE`] row, the
+/// misses follow, and under `strict` each is an errors row too; all of it
+/// enters the report before the `[check]` marker, which counts it.
+fn run_check(
+    merged: &MergedGraph,
+    rules: &[(NodeId, ConstraintRule)],
+    derive: DeriveModel,
+    gate: Option<Unanchoring>,
+) -> CheckReport {
     // Component and layer entries declare the model; every other entry, an
     // allow included, is a rule.
     let (decls, rules): (Vec<&ConstraintRule>, Vec<&ConstraintRule>) = rules
@@ -566,9 +728,11 @@ pub(crate) fn check_rules_with(
         checked: 0,
         unchecked: Vec::new(),
         errors: Vec::new(),
+        unanchored: Vec::new(),
         violations: Vec::new(),
         reflexion: None,
     };
+    let strict = gate.as_ref().is_some_and(|g| g.strict);
     let mut stats = RuleStats::default();
     if !rules.is_empty() || !decls.is_empty() {
         let mut ctx = Ctx::new(merged);
@@ -583,7 +747,27 @@ pub(crate) fn check_rules_with(
             }
             match evaluate(&mut ctx, rule) {
                 Outcome::Unchecked => report.unchecked.push(rule.id.clone()),
-                Outcome::Error(msg) => report.errors.push((rule.id.clone(), msg)),
+                Outcome::Error(msg) => match (gate.is_some(), ctx.empty.take()) {
+                    (true, Some((scope, role))) => {
+                        let fix = ctx.scope_fix(&scope, role);
+                        if strict {
+                            report
+                                .errors
+                                .push((rule.id.clone(), format!("{msg}\nfix: {fix}")));
+                        }
+                        report.unanchored.push(Unanchored {
+                            rule_id: rule.id.clone(),
+                            section: "constraint",
+                            decl: rule.decl.clone(),
+                            repo: None,
+                            status: EMPTY_SCOPE,
+                            reason: msg,
+                            fix,
+                            blocking: strict,
+                        });
+                    }
+                    _ => report.errors.push((rule.id.clone(), msg)),
+                },
                 Outcome::Checked(mut found) => {
                     report.checked += 1;
                     if is_rule_invariant(rule) {
@@ -620,6 +804,21 @@ pub(crate) fn check_rules_with(
             }
         }
     }
+    if let Some(gate) = gate {
+        for m in &gate.misses {
+            if gate.strict {
+                let decl = m.decl.as_deref().unwrap_or("cell API");
+                report.errors.push((
+                    m.rule_id.clone(),
+                    format!(
+                        "{} {decl}: {} - not evaluated\nfix: {}",
+                        m.section, m.reason, m.fix
+                    ),
+                ));
+            }
+        }
+        report.unanchored.extend(gate.misses);
+    }
     // Stable: a rule's cycles keep their order.
     report.violations.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     let of = |k: &str| {
@@ -629,8 +828,13 @@ pub(crate) fn check_rules_with(
             .filter(|v| v.rule_kind == k)
             .count()
     };
+    let unanchored = if report.unanchored.is_empty() {
+        String::new()
+    } else {
+        format!(" unanchored={}", report.unanchored.len())
+    };
     eprintln!(
-        "[check] rules={} checked={} violations={} (forbid_edge={} no_cycle={}) unchecked={} errors={}",
+        "[check] rules={} checked={} violations={} (forbid_edge={} no_cycle={}) unchecked={} errors={}{unanchored}",
         report.rules,
         report.checked,
         report.violations.len(),
@@ -639,6 +843,17 @@ pub(crate) fn check_rules_with(
         report.unchecked.len(),
         report.errors.len(),
     );
+    if !report.unanchored.is_empty() {
+        let status = |s: &str| report.unanchored.iter().filter(|u| u.status == s).count();
+        eprintln!(
+            "[check] declared not checked: orphaned={} rejected={} absent={} empty_scope={} blocking={}",
+            status(ORPHANED),
+            status(REJECTED),
+            status(ABSENT),
+            status(EMPTY_SCOPE),
+            report.unanchored.iter().filter(|u| u.blocking).count(),
+        );
+    }
     if !report.violations.is_empty() {
         let tier = |t: &str| report.violations.iter().filter(|v| v.tier == t).count();
         eprintln!(
@@ -821,6 +1036,10 @@ struct Ctx<'a> {
     /// Transitive forbid_edge hits so far, by [`Chain`] (the `[rules]
     /// check` marker's `imports=` / `symbols=` / `mixed=`).
     path_hits: [usize; 3],
+    /// `(scope, role)` of the last [`Self::scope`] that matched no node: the
+    /// rule it failed is one that checks nothing ([`EMPTY_SCOPE`]). Taken
+    /// on each rule error.
+    empty: RefCell<Option<(String, &'static str)>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -830,19 +1049,40 @@ impl<'a> Ctx<'a> {
             facts: CodeFacts::new(merged),
             qnames: HashMap::new(),
             path_hits: [0; 3],
+            empty: RefCell::new(None),
         }
     }
 
     /// The nodes strictly in `scope` (`CodeFacts::members`: literal, no label
-    /// resolution), or the error that names the empty scope.
-    fn scope(&self, scope: &str, role: &str) -> Result<Rc<HashSet<NodeId>>, String> {
+    /// resolution), or the error that names the empty scope (recorded in
+    /// [`Self::empty`]).
+    fn scope(&self, scope: &str, role: &'static str) -> Result<Rc<HashSet<NodeId>>, String> {
         let set = self.facts.members(scope);
         if set.is_empty() {
+            *self.empty.borrow_mut() = Some((scope.to_string(), role));
             return Err(format!(
                 "{role} scope `{scope}` matches no located node (no file sits under it and no PROJECT is at it)"
             ));
         }
         Ok(set)
+    }
+
+    /// An empty scope's fix: the nearest path above it that holds a located
+    /// node, else where the scopes a rule can name are listed.
+    fn scope_fix(&self, scope: &str, role: &str) -> String {
+        let field = if role == NO_CYCLE { "scope" } else { role };
+        let mut p = scope;
+        while let Some((head, _)) = p.rsplit_once('/') {
+            if !self.facts.members(head).is_empty() {
+                return format!(
+                    "check the spelling of `{field}` (the nearest path above it that holds code is `{head}`); `glia projects` lists the paths and labels a scope can name"
+                );
+            }
+            p = head;
+        }
+        format!(
+            "check the spelling of `{field}`; `glia projects` lists the paths and labels a scope can name"
+        )
     }
 
     fn qname(&mut self, id: NodeId) -> String {

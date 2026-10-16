@@ -5,6 +5,7 @@ helpers: test_build.py."""
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -38,7 +39,16 @@ RULE_FILES = (
      'called(f) :- edge(_, f, \\"CALLS\\")."\n'),
 )
 
+# DT.7b: DT.7a's substrate-gap fixture, whose `stale-anchor` stanza names a
+# qname no node carries: a declared rule that checks nothing.
+SUBDIR_FIXTURE = (pathlib.Path(__file__).resolve().parents[3]
+                  / "bench" / "substrate-gap" / "fixtures" / "overlay-subdir-constraint")
+STALE_REASON = "orphaned: anchor=backend::internal::gone::Thing binds no node"
+
 REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations", "reflexion"]
+# `unanchored` is serialised only when it holds a row (DT.7b).
+UNANCHORED_REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "unanchored", "violations", "reflexion"]
+UNANCHORED_KEYS = ["rule_id", "section", "decl", "repo", "status", "reason", "fix", "blocking"]
 VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "blocking", "count", "evidence"]
 RULE_VIOLATION_KEYS = VIOLATION_KEYS + ["subject", "file", "line", "caveats"]
 EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
@@ -52,7 +62,7 @@ def write_tree(root: pathlib.Path, files) -> None:
 
 def main() -> int:
     c = Checks("check")
-    c.check("check signature", params(rg.PyGraph.check) == [], params(rg.PyGraph.check))
+    c.check("check signature", params(rg.PyGraph.check) == [("strict", False)], params(rg.PyGraph.check))
     with tempfile.TemporaryDirectory(prefix="glia-surface-check-") as tmp:
         root = pathlib.Path(tmp) / "shop"
         write_tree(root, FILES)
@@ -120,6 +130,39 @@ def main() -> int:
         c.check("the negation's CALLS caveats (Q5)",
                 bool(rv.get("caveats")) and all(n.get("edge_category") in ("CALLS", "*")
                                                 for n in rv.get("caveats", [])), rv.get("caveats"))
+
+    with tempfile.TemporaryDirectory(prefix="glia-surface-check-unanchored-") as tmp:
+        root = pathlib.Path(tmp) / "fx"
+        shutil.copytree(SUBDIR_FIXTURE, root)
+        g = rg.generate(str(root))
+        report, err = stderr_of(g.check)
+        c.check("unanchored markers (DT.7b)",
+                "[check] rules=3 checked=3 violations=1 (forbid_edge=1 no_cycle=0) unchecked=0 errors=0 "
+                "unanchored=1" in err
+                and "[check] declared not checked: orphaned=1 rejected=0 absent=0 empty_scope=0 blocking=0" in err,
+                err[-600:])
+        c.check("unanchored report keys", list(report) == UNANCHORED_REPORT_KEYS, list(report))
+        c.check("an orphaned stanza is not an error", report.get("errors") == [], report.get("errors"))
+        rows = report.get("unanchored", [])
+        row = rows[0] if rows else {}
+        c.check("one unanchored row", len(rows) == 1, rows)
+        c.check("unanchored keys in engine field order", list(row) == UNANCHORED_KEYS, list(row))
+        c.check("the stale anchor, located and non-blocking",
+                (row.get("rule_id"), row.get("section"), row.get("decl"), row.get("status"), row.get("reason"),
+                 row.get("blocking")) == ("stale-anchor", "constraint", ".glia/overlay.toml:20", "orphaned",
+                                          STALE_REASON, False), row)
+        c.check("a fix is suggested", str(row.get("fix", "")).startswith("drop `anchor`"), row.get("fix"))
+        c.check("the rules the graph holds still checked",
+                [v.get("rule_id") for v in report.get("violations", [])] == ["handlers-no-repository"],
+                report.get("violations"))
+        strict, err = stderr_of(lambda: g.check(strict=True))
+        errors = strict.get("errors", [])
+        c.check("strict: an errors row", len(errors) == 1 and errors[0][0] == "stale-anchor"
+                and errors[0][1].startswith(f"constraint .glia/overlay.toml:20: {STALE_REASON} - not evaluated\nfix: "),
+                errors)
+        c.check("strict: the row blocks", [u.get("blocking") for u in strict.get("unanchored", [])] == [True],
+                strict.get("unanchored"))
+        c.check("strict marker", "unchecked=0 errors=1 unanchored=1" in err and "blocking=1" in err, err[-600:])
     return c.done()
 
 

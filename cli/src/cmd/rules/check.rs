@@ -1,9 +1,11 @@
-//! `glia check` (LE.8) — the CI gate over the engine's `check::check`: every
-//! declared `[[constraint]]` rule evaluated, one section per violated rule
-//! with its located evidence. Exit 0 when nothing blocks, 1 on a BLOCKING
-//! violation, 2 on a build failure or a rule that could not be evaluated
-//! (DB.3d). `--json` is the report. Each evidence row carries the tier `glia
-//! why` gives that edge (CC.3), its note in parentheses.
+//! `glia check` (LE.8) — the CI gate over the engine's
+//! `check::check_with_roots`: every declared `[[constraint]]` rule evaluated,
+//! one section per violated rule with its located evidence. Exit 0 when
+//! nothing blocks, 1 on a BLOCKING violation, 2 on a build failure or a rule
+//! that could not be evaluated (DB.3d), and with `--strict` also on a rule
+//! that checks nothing (DT.7b). `--json` is the report. Each evidence row
+//! carries the tier `glia why` gives that edge (CC.3), its note in
+//! parentheses.
 //!
 //! The exit code reads only [`Violation::blocking`], which the engine sets
 //! from the violation's tier and its rule's `min_tier` (DB.3a; a heuristic
@@ -35,13 +37,26 @@
 //! matrix, the absences with their coverage caveats and the unmapped files.
 //! Its divergences are violations, one per-edge section each like a
 //! forbid_edge rule's, gated at the default `min_tier`.
+//!
+//! Rules that check nothing (DT.7b): the report is `check_with_roots` over
+//! the build's repo roots, so a declared `[[constraint]]` / `[[component]]` /
+//! `[[layer]]` stanza the build anchored nowhere, rejected or does not hold,
+//! and a rule whose scope no located node sits in, print under `## Rules
+//! that check nothing`, each with its reason and a `fix:` line, after the
+//! unchecked list. They never change the exit code, and an overlay of only
+//! such stanzas is not "no rules declared". `--strict` makes each an errors
+//! row (printed under `## rule errors (not evaluated)` with its `fix:` line,
+//! not under the heading above), so it exits 2. The summary line gains `,
+//! checking nothing <n>` (the non-blocking ones) only when there is one.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use glia_engine::CoverageNote;
 use glia_engine::check::{
-    CONVERGENCE, CheckReport, DIVERGENCE, FORBID_EDGE, FORBID_PATH, MAX_EVIDENCE,
-    MAX_UNMAPPED_SAMPLE, NO_CYCLE, RULE, Reflexion, Violation, ViolationEdge, check,
+    CONVERGENCE, CheckOptions, CheckReport, DIVERGENCE, FORBID_EDGE, FORBID_PATH, MAX_EVIDENCE,
+    MAX_UNMAPPED_SAMPLE, NO_CYCLE, RULE, Reflexion, Unanchored, Violation, ViolationEdge,
+    check_with_roots,
 };
 
 use crate::common::generate_for;
@@ -56,6 +71,12 @@ pub(crate) struct Args {
     /// Emit the report as JSON instead of tables (same exit codes).
     #[arg(long)]
     json: bool,
+    /// Fail (exit 2) on a declared rule that checks nothing: a stanza the
+    /// build anchored nowhere, rejected or does not hold, or a rule whose
+    /// scope no located node sits in. Without it they are listed, never a CI
+    /// failure.
+    #[arg(long)]
+    strict: bool,
 }
 
 /// Exit code: 2 when a rule could not be evaluated, else 1 when any
@@ -277,6 +298,31 @@ fn print_rule(group: &[&Violation]) -> CaveatFold {
     fold
 }
 
+/// The `## Rules that check nothing` section (DT.7b): every non-blocking
+/// [`Unanchored`] row, its reason on the bullet and its fix under it; the
+/// repo root too when the build merged several (`with`).
+fn print_unanchored(rows: &[&Unanchored], with: bool) {
+    println!("## Rules that check nothing");
+    println!();
+    println!(
+        "_declared, but nothing is evaluated for them; not a CI failure (--strict makes each a rule error, exit 2)_"
+    );
+    println!();
+    for u in rows {
+        let decl = u.decl.as_deref().unwrap_or("cell API");
+        let repo = match (&u.repo, with) {
+            (Some(r), true) => format!(", {r}"),
+            _ => String::new(),
+        };
+        println!(
+            "- `{}` ({}, {decl}{repo}): {}",
+            u.rule_id, u.section, u.reason
+        );
+        println!("  fix: {}", u.fix);
+    }
+    println!();
+}
+
 /// The `## reflexion model` section: components, the dependency matrix in
 /// `(from, to)` order, the absences with at most [`MAX_ABSENCE_CAVEATS`]
 /// caveats each, and the unmapped files.
@@ -383,7 +429,14 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let report = check(&result.merged);
+    let roots: Vec<(u64, PathBuf)> = result
+        .repo_roots
+        .iter()
+        .map(|(r, p)| (*r, PathBuf::from(p)))
+        .collect();
+    let mut opts = CheckOptions::default();
+    opts.strict = args.strict;
+    let report = check_with_roots(&result.merged, &roots, &opts);
     let code = exit_code(&report);
     if args.json {
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
@@ -391,15 +444,26 @@ pub(crate) fn run(args: Args) -> i32 {
     }
     println!("# glia check `{}`", args.repo);
     println!();
-    if report.rules == 0 && report.reflexion.is_none() {
+    // Under --strict every row is an errors row, printed there.
+    let nothing: Vec<&Unanchored> = report.unanchored.iter().filter(|u| !u.blocking).collect();
+    if report.rules == 0
+        && report.reflexion.is_none()
+        && report.errors.is_empty()
+        && report.unanchored.is_empty()
+    {
         println!("_(no rules declared - add [[constraint]] stanzas to .glia/overlay.toml)_");
         println!(
             "_(or model the architecture: [[component]] stanzas map paths to components; [[layer]] and kind = \"allow\" judge their dependencies)_"
         );
         return code;
     }
+    let checking_nothing = if nothing.is_empty() {
+        String::new()
+    } else {
+        format!(", checking nothing {}", nothing.len())
+    };
     println!(
-        "- rules: {} (checked {}, unchecked {}, errors {})",
+        "- rules: {} (checked {}, unchecked {}, errors {}{checking_nothing})",
         report.rules,
         report.checked,
         report.unchecked.len(),
@@ -446,6 +510,9 @@ pub(crate) fn run(args: Args) -> i32 {
             println!("- `{id}`");
         }
         println!();
+    }
+    if !nothing.is_empty() {
+        print_unanchored(&nothing, !args.with.is_empty());
     }
     if !report.errors.is_empty() {
         println!("## rule errors (not evaluated)");

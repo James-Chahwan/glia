@@ -369,15 +369,18 @@ glia watch <REPO> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]
     a build error, 5 when a persist fails.
 
 # Rules
-glia check <REPO> [--json] [--with <WITH>]...
+glia check <REPO> [--json] [--strict] [--with <WITH>]...
     Evaluate .glia/overlay.toml's [[constraint]] rules (forbid_edge, transitive
     forbid_edge with `via` facades, no_cycle, and version 2's `invariant` with a
     Datalog `rule`) and its reflexion model ([[component]], [[layer]], `allow` rules:
     the component matrix, divergences, absences, unmapped files) to located, tiered
     VIOLATIONs. A violation blocks when its tier is at least its rule's min_tier (fact
-    or derived, default derived); a heuristic one is advisory under any setting. Exits
-    0 when nothing blocks, 1 on a blocking violation, 2 on an error or a rule it
-    cannot evaluate: CI-ready.
+    or derived, default derived); a heuristic one is advisory under any setting. A
+    declared rule that checks nothing (a stanza the build anchored nowhere or
+    rejected, a scope no located node sits in) is listed under "Rules that check
+    nothing" with its reason and a fix; --strict makes each a rule error. Exits 0 when
+    nothing blocks, 1 on a blocking violation, 2 on an error or a rule it cannot
+    evaluate: CI-ready.
 glia flags <REPO> [--json] [--quiet-days <QUIET_DAYS>] [--scope <SCOPE>] [--status dead|undefined|single_site|quiet]... [--with <WITH>]...
     Stale feature flags (LaunchDarkly / OpenFeature / Unleash / Flagsmith / Split
     reads, Flipt definitions), each with its readers and definitions: dead and

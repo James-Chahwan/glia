@@ -8,7 +8,9 @@
 //! The stanzas come from [`RepoInputs::config`], loaded once per build
 //! (LF.1a); this stage never re-reads the file. Declared knowledge is a rule
 //! or a record, not an inferred edge, so `--no-overlay` does not switch it
-//! off.
+//! off. `glia check` re-reads it (DT.7b, [`declared_misses`]): it binds
+//! every rule stanza again through the same [`stanzas`] + [`bind_stanza`]
+//! and lists those that reached no CONSTRAINT cell.
 //!
 //! ANCHOR, shared by the three kinds:
 //! 1. `anchor = "<qname>"` binds through the repo's
@@ -106,22 +108,24 @@
 //! where `r` also counts the allows; component / layer entries are model
 //! declarations, not rules, and are reported on the model line.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 
 use glia_code_domain::external_inputs::{
     ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_declared_entry,
 };
 use glia_code_domain::glia_config::{
-    COMPONENT_ID_PREFIX, LAYER_ID_PREFIX, LoadedConfig, MODEL_KINDS, NOTE_ID_PREFIX, Origin,
+    self, COMPONENT_ID_PREFIX, LAYER_ID_PREFIX, LoadedConfig, MODEL_KINDS, NOTE_ID_PREFIX, Origin,
 };
 use glia_code_domain::{cell_type, node_kind};
-use glia_core::{Cell, CellPayload, CellTypeId, NodeId};
+use glia_core::{Cell, CellPayload, CellTypeId, NodeId, RepoId};
 use glia_graph::MergedGraph;
 use glia_graph::cells::{CellTarget, QnameIndex};
 use serde_json::{Map, Value};
 
 use super::RepoInputs;
 use crate::answers::{ProjectInfo, project_roots, resolve_scope};
+use crate::check::{ABSENT, ORPHANED, REJECTED};
 
 /// Detail lines printed per repo before the rest are summarised.
 const MAX_DETAIL_LINES: usize = 32;
@@ -247,10 +251,13 @@ struct Anchors {
 }
 
 impl Anchors {
-    fn build(merged: &MergedGraph, input: &RepoInputs) -> Self {
+    /// `repo`'s resolvers: only its id is read, so check's re-bind (DT.7b)
+    /// builds them from a `(repo id, root)` pair, as the build does from its
+    /// [`RepoInputs`].
+    fn build(merged: &MergedGraph, repo: RepoId) -> Self {
         let mut at: HashMap<NodeId, Vec<(usize, usize)>> = HashMap::new();
         for (gi, g) in merged.graphs.iter().enumerate() {
-            if g.repo != input.repo {
+            if g.repo != repo {
                 continue;
             }
             for (ni, n) in g.nodes.iter().enumerate() {
@@ -258,7 +265,7 @@ impl Anchors {
             }
         }
         Anchors {
-            idx: QnameIndex::build(merged, Some(input.repo)),
+            idx: QnameIndex::build(merged, Some(repo)),
             projects: project_roots(merged),
             at,
             scopes: BTreeMap::new(),
@@ -629,6 +636,89 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
     out
 }
 
+/// Why a stanza found no node: the build's `[declared] orphaned` detail
+/// ([`Self::detail`]) and `glia check`'s reason ([`Self::reason`], DT.7b).
+enum Unbound {
+    /// `anchor = <qname>` binds nothing in this repo.
+    Anchor(String),
+    /// A decision's scope: no PROJECT of this repo at the path.
+    DecisionScope { raw: String, path: String },
+    /// A constraint's scope: no PROJECT at or above it, no MODULE under it.
+    RuleScope { raw: String, path: String },
+    /// A component's first path: no PROJECT there or at the root, no MODULE
+    /// under it.
+    ComponentPath { raw: String, path: String },
+    /// A layer, or an allow without `anchor`: no root PROJECT, and its
+    /// component did not anchor.
+    Model { component: String },
+}
+
+impl Unbound {
+    /// The `[declared] orphaned <section> id=<id> <decl> <detail>` tail.
+    fn detail(&self) -> String {
+        match self {
+            Unbound::Anchor(q) => format!("anchor={q}"),
+            Unbound::DecisionScope { raw, path } => format!("scope={raw} -> {path} (no PROJECT)"),
+            Unbound::RuleScope { raw, path } => {
+                format!("scope={raw} -> {path} (no PROJECT at or above it, no MODULE under it)")
+            }
+            Unbound::ComponentPath { raw, path } => format!("path={raw} -> {path} (no PROJECT or MODULE)"),
+            Unbound::Model { component } => {
+                format!("component={component} (no root PROJECT; the component did not anchor)")
+            }
+        }
+    }
+
+    /// `glia check`'s reason: `orphaned: <detail>`, an anchor's with ` binds
+    /// no node`.
+    fn reason(&self) -> String {
+        match self {
+            Unbound::Anchor(q) => format!("orphaned: anchor={q} binds no node"),
+            other => format!("orphaned: {}", other.detail()),
+        }
+    }
+}
+
+/// The node `st` hangs on (module docs "ANCHOR" and "THE MODEL'S ANCHORS"),
+/// or why it hangs nowhere. `components` holds where each component already
+/// anchored (a layer's / an allow's fallback). The build's
+/// [`apply_declared_cells`] and check's [`declared_misses`] both bind
+/// through it, so check's verdict is the build's.
+fn bind_stanza(
+    st: &Stanza,
+    merged: &MergedGraph,
+    anchors: &mut Anchors,
+    components: &BTreeMap<String, (NodeId, Via)>,
+) -> Result<(NodeId, Via), Unbound> {
+    match &st.target {
+        Target::Qname(q) => anchors.by_qname(q).map(|id| (id, Via::Qname)).ok_or_else(|| Unbound::Anchor(q.clone())),
+        Target::Scope(scope) => {
+            let raw = scope.clone().unwrap_or_default();
+            let path = anchors.path_of(merged, &raw);
+            match anchors.project_at(&path) {
+                Some(id) => Ok((id, Via::Project)),
+                None => Err(Unbound::DecisionScope { raw, path }),
+            }
+        }
+        Target::RuleScope(scope) => {
+            let raw = scope.clone().unwrap_or_default();
+            let path = anchors.path_of(merged, &raw);
+            match anchors.rule_anchor(merged, &path) {
+                Some(bound) => Ok(bound),
+                None => Err(Unbound::RuleScope { raw, path }),
+            }
+        }
+        Target::Component { raw, path } => anchors
+            .component_anchor(merged, path)
+            .ok_or_else(|| Unbound::ComponentPath { raw: raw.clone(), path: path.clone() }),
+        Target::Model { component } => anchors
+            .project_at(".")
+            .map(|id| (id, Via::Project))
+            .or_else(|| components.get(component).copied())
+            .ok_or_else(|| Unbound::Model { component: component.clone() }),
+    }
+}
+
 /// Apply `input`'s declared stanzas to `merged`. True when a cell was written.
 pub(super) fn apply_declared_cells(
     merged: &mut MergedGraph,
@@ -653,7 +743,7 @@ pub(super) fn apply_declared_cells(
         allow: c.constraint.iter().filter(|s| s.get_ref().kind == "allow").count(),
         ..Tally::default()
     };
-    let mut anchors = Anchors::build(merged, input);
+    let mut anchors = Anchors::build(merged, input.repo);
     // component name -> where it anchored: a layer's / an allow's fallback.
     let mut components: BTreeMap<String, (NodeId, Via)> = BTreeMap::new();
     let mut wrote = false;
@@ -667,38 +757,10 @@ pub(super) fn apply_declared_cells(
             t.rejected(&st, format!("rejected {what}: {e}"));
             continue;
         }
-        let bound = match &st.target {
-            Target::Qname(q) => anchors.by_qname(q).map(|id| (id, Via::Qname)).ok_or_else(|| format!("anchor={q}")),
-            Target::Scope(scope) => {
-                let raw = scope.clone().unwrap_or_default();
-                let path = anchors.path_of(merged, &raw);
-                anchors
-                    .project_at(&path)
-                    .map(|id| (id, Via::Project))
-                    .ok_or_else(|| format!("scope={raw} -> {path} (no PROJECT)"))
-            }
-            Target::RuleScope(scope) => {
-                let raw = scope.clone().unwrap_or_default();
-                let path = anchors.path_of(merged, &raw);
-                anchors.rule_anchor(merged, &path).ok_or_else(|| {
-                    format!("scope={raw} -> {path} (no PROJECT at or above it, no MODULE under it)")
-                })
-            }
-            Target::Component { raw, path } => anchors
-                .component_anchor(merged, path)
-                .ok_or_else(|| format!("path={raw} -> {path} (no PROJECT or MODULE)")),
-            Target::Model { component } => anchors
-                .project_at(".")
-                .map(|id| (id, Via::Project))
-                .or_else(|| components.get(component).copied())
-                .ok_or_else(|| {
-                    format!("component={component} (no root PROJECT; the component did not anchor)")
-                }),
-        };
-        let (id, via) = match bound {
+        let (id, via) = match bind_stanza(&st, merged, &mut anchors, &components) {
             Ok(b) => b,
-            Err(where_) => {
-                t.orphaned(&st, format!("orphaned {what} {where_}"));
+            Err(unbound) => {
+                t.orphaned(&st, format!("orphaned {what} {}", unbound.detail()));
                 continue;
             }
         };
@@ -863,6 +925,229 @@ pub(super) fn report_rules(merged: &MergedGraph) {
         count("no_cycle"),
         count("invariant")
     );
+}
+
+/// One declared rule stanza of a repo's `.glia/overlay.toml` that reached
+/// no CONSTRAINT cell of the graph (DT.7b): `glia check` lists it among the
+/// rules that check nothing ([`crate::check::Unanchored`]).
+#[derive(Debug, Clone)]
+pub(crate) struct DeclaredMiss {
+    /// The root of the repo whose overlay declares it, as the roots list
+    /// gave it.
+    pub(crate) root: String,
+    /// The entry id (`component:<name>` / `layer:<name>` for the model's).
+    pub(crate) id: String,
+    /// `constraint` (an allow included), `component` or `layer`.
+    pub(crate) section: &'static str,
+    /// `.glia/overlay.toml:<line>` of its header.
+    pub(crate) decl: String,
+    /// [`ORPHANED`], [`REJECTED`] or [`ABSENT`].
+    pub(crate) status: &'static str,
+    /// `orphaned: <where>`, `rejected: <why>` or [`ABSENT_REASON`].
+    pub(crate) reason: String,
+    /// What would make it check something.
+    pub(crate) fix: String,
+}
+
+/// The reason of a stanza that binds but whose rule the graph does not hold.
+pub(crate) const ABSENT_REASON: &str = "absent: declared in the overlay but not in this graph \
+     (rebuild; or the build refused to merge it, see its [declared] rejected= line)";
+
+const ABSENT_FIX: &str =
+    "rebuild the graph (`glia build <repo>`); if the row stays, the build's `[declared] rejected` line says why";
+const CLAIM_FIX: &str =
+    "give each path to one component (a project label and its directory are one path)";
+const VALIDATOR_FIX: &str = "correct the stanza as the message says, then rebuild";
+
+/// Every declared rule stanza of each repo's overlay that reached no
+/// CONSTRAINT cell of `merged`, in `roots` order and, per repo, in the
+/// build's stanza order (components, layers, constraints, each in file
+/// order). `roots` are `(RepoId.0, repo root)` pairs (a build's
+/// `GenerateResult::repo_roots`). Each root's `.glia/overlay.toml` is read
+/// again and its stanzas bound against `merged` through the build's own
+/// [`stanzas`] + [`bind_stanza`], so a miss is the build's verdict: a
+/// `reject` (a path two components claim) or a `validate_declared_entry`
+/// refusal is [`REJECTED`], a stanza that binds no node [`ORPHANED`], and one
+/// that binds but whose `(repo, overlay, id)` rule the graph does not hold
+/// [`ABSENT`] (a layout older than the overlay, or an entry the build could
+/// not merge). Decisions and notes are records, not rules: never listed.
+/// Writes no cell and prints no `[declared]` line (resolving a scope label
+/// may print its `[scope]` line again).
+pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) -> Vec<DeclaredMiss> {
+    let mut out = Vec::new();
+    let mut held_rules: Option<BTreeSet<(u64, String)>> = None;
+    for (repo, root) in roots {
+        let Some(cfg) = glia_config::load(root) else { continue };
+        let c = &cfg.config;
+        if c.constraint.is_empty() && c.component.is_empty() && c.layer.is_empty() {
+            continue;
+        }
+        let held = held_rules.get_or_insert_with(|| overlay_rules_held(merged));
+        let mut anchors = Anchors::build(merged, RepoId(*repo));
+        let all = stanzas(&cfg, merged, &mut anchors);
+        let declared: BTreeSet<&str> = all.iter().filter_map(|st| st.component.as_deref()).collect();
+        let mut components: BTreeMap<String, (NodeId, Via)> = BTreeMap::new();
+        for st in &all {
+            if st.cell != cell_type::CONSTRAINT {
+                continue;
+            }
+            let (status, reason, fix) = if let Some(e) = &st.reject {
+                (REJECTED, format!("rejected: {e}"), CLAIM_FIX.to_string())
+            } else if let Err(e) = validate_declared_entry(st.cell, &st.entry) {
+                (REJECTED, format!("rejected: {e}"), VALIDATOR_FIX.to_string())
+            } else {
+                match bind_stanza(st, merged, &mut anchors, &components) {
+                    Err(unbound) => {
+                        let fix = fix_for(st, &unbound, merged, &mut anchors, &declared);
+                        (ORPHANED, unbound.reason(), fix)
+                    }
+                    Ok(bound) => {
+                        if let Some(name) = &st.component {
+                            components.insert(name.clone(), bound);
+                        }
+                        if held.contains(&(*repo, st.id.clone())) {
+                            continue;
+                        }
+                        (ABSENT, ABSENT_REASON.to_string(), ABSENT_FIX.to_string())
+                    }
+                }
+            };
+            out.push(DeclaredMiss {
+                root: root.to_string_lossy().into_owned(),
+                id: st.id.clone(),
+                section: st.section,
+                decl: st.decl.clone(),
+                status,
+                reason,
+                fix,
+            });
+        }
+    }
+    out
+}
+
+/// `(repo, id)` of every overlay CONSTRAINT entry `merged` holds, read as
+/// [`declared_constraints`] reads them (an entry it cannot read is not held).
+fn overlay_rules_held(merged: &MergedGraph) -> BTreeSet<(u64, String)> {
+    let mut out = BTreeSet::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let Some(cell) = n.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT) else {
+                continue;
+            };
+            for r in parse_constraints(&cell.payload) {
+                if r.source == "overlay" {
+                    out.insert((g.repo.0, r.id));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The proper ancestors of a repo-relative path, deepest first, `.` last
+/// (none for `.`).
+fn ancestors(path: &str) -> Vec<String> {
+    if path == "." {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut p = path;
+    while let Some((head, _)) = p.rsplit_once('/') {
+        out.push(head.to_string());
+        p = head;
+    }
+    out.push(".".to_string());
+    out
+}
+
+/// The `::`-prefixes of a qname, longest first.
+fn qname_ancestors(qname: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut q = qname.trim();
+    while let Some((head, _)) = q.rsplit_once("::") {
+        out.push(head);
+        q = head;
+    }
+    out
+}
+
+/// What places `st` once its `anchor` is dropped.
+fn placement(st: &Stanza) -> &'static str {
+    match st.section {
+        "component" => "its first path",
+        _ if st.model => "its `from` component",
+        _ if st.entry.get("kind").and_then(Value::as_str) == Some("forbid_edge") => "its `from` scope",
+        _ => "its `scope`",
+    }
+}
+
+/// A suggested fix for `st`, orphaned as `unbound`: the nearest qname or
+/// path that would anchor it, else what to declare. `declared` names the
+/// overlay's components.
+fn fix_for(
+    st: &Stanza,
+    unbound: &Unbound,
+    merged: &MergedGraph,
+    anchors: &mut Anchors,
+    declared: &BTreeSet<&str>,
+) -> String {
+    match unbound {
+        Unbound::Anchor(q) => {
+            let place = placement(st);
+            match qname_ancestors(q).into_iter().find(|p| anchors.by_qname(p).is_some()) {
+                Some(p) => format!(
+                    "drop `anchor` to place it by {place}, or set anchor = \"{p}\" (the nearest qname above it that this graph holds)"
+                ),
+                None => format!(
+                    "drop `anchor` to place it by {place}, or set it to a qname this graph holds (`glia find <name>` lists them)"
+                ),
+            }
+        }
+        Unbound::RuleScope { path, .. } => {
+            let forbid = st.entry.get("kind").and_then(Value::as_str) == Some("forbid_edge");
+            let field = if forbid { "from" } else { "scope" };
+            match ancestors(path).into_iter().find(|a| anchors.rule_anchor(merged, a).is_some()) {
+                Some(a) if a != "." => format!(
+                    "check the spelling of `{field}` (the nearest path above it that anchors a rule is `{a}`), or declare a [[project]] at `{path}`"
+                ),
+                Some(_) => format!(
+                    "check the spelling of `{field}` (no directory above it holds code; `glia projects` lists the project paths), or declare a [[project]] at `{path}`"
+                ),
+                None => format!(
+                    "this repo has no PROJECT and no located MODULE to hang a rule on: declare a [[project]] at `{path}`"
+                ),
+            }
+        }
+        Unbound::ComponentPath { path, .. } => {
+            let near = ancestors(path)
+                .into_iter()
+                .find(|a| anchors.project_at(a).is_some() || anchors.module_under(merged, a).is_some());
+            match near {
+                Some(a) if a != "." => format!(
+                    "check the spelling of the component's first path (the nearest path above it that holds code is `{a}`), or declare a [[project]] at `{path}`"
+                ),
+                Some(_) => format!(
+                    "check the spelling of the component's first path (no directory above it holds code; `glia projects` lists the project paths), or declare a [[project]] at `{path}`"
+                ),
+                None => format!(
+                    "this repo has no PROJECT and no located MODULE to hang a component on: declare a [[project]] at `{path}`"
+                ),
+            }
+        }
+        Unbound::DecisionScope { path, .. } => {
+            format!("declare a [[project]] at `{path}`, or set `anchor`")
+        }
+        Unbound::Model { component } if !declared.contains(component.as_str()) => {
+            format!("declare a [[component]] named `{component}`, or name a declared component first")
+        }
+        Unbound::Model { component } => {
+            let anchor_too = if st.section == "constraint" { ", or set `anchor` on this stanza" } else { "" };
+            format!(
+                "anchor component `{component}` first (its own row says why), or give the repo a root PROJECT (a root manifest, or a [[project]] at `.`){anchor_too}"
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1122,22 +1407,14 @@ via = [\"./services/api/public/\"]
                 .map(|g| g.repo)
                 .unwrap()
         };
-        let anchors_of = |repo, root: &std::path::Path| {
-            let input = RepoInputs {
-                repo,
-                root: root.to_path_buf(),
-                label: root.to_string_lossy().to_string(),
-                config: None,
-            };
-            Anchors::build(&r.merged, &input)
-        };
+        let anchors_of = |repo| Anchors::build(&r.merged, repo);
         let (repo_a, repo_b) = (repo_with("project:web/admin"), repo_with("project:web/admin/panel"));
         assert_ne!(repo_a, repo_b);
         let qname_in = |repo, id: Option<NodeId>| {
             let id = id?;
             r.merged.graphs.iter().filter(|g| g.repo == repo).find_map(|g| g.nav.qname_by_id.get(&id).cloned())
         };
-        let in_a = anchors_of(repo_a, &a);
+        let in_a = anchors_of(repo_a);
         // Every PROJECT of the build is in the vocabulary, b's included.
         assert!(in_a.projects.iter().any(|p| p.path == "web/admin/panel"));
         for (path, want) in [
@@ -1149,7 +1426,7 @@ via = [\"./services/api/public/\"]
         ] {
             assert_eq!(qname_in(repo_a, in_a.enclosing_project(path)).as_deref(), Some(want), "{path}");
         }
-        let in_b = anchors_of(repo_b, &b);
+        let in_b = anchors_of(repo_b);
         assert_eq!(
             qname_in(repo_b, in_b.enclosing_project("web/admin/panel/x.py")).as_deref(),
             Some("project:web/admin/panel")
@@ -1157,6 +1434,15 @@ via = [\"./services/api/public/\"]
         // b has no root manifest, and a's projects do not bind in b.
         assert_eq!(in_b.enclosing_project("web/admin"), None);
         assert_eq!(in_b.enclosing_project("."), None);
+    }
+
+    #[test]
+    fn ancestors_walk_up_to_the_root() {
+        assert_eq!(ancestors("backend/internal/gone"), ["backend/internal", "backend", "."]);
+        assert_eq!(ancestors("web"), ["."]);
+        assert!(ancestors(".").is_empty());
+        assert_eq!(qname_ancestors("backend::internal::gone::Thing"), ["backend::internal::gone", "backend::internal", "backend"]);
+        assert!(qname_ancestors("Thing").is_empty());
     }
 
     #[test]
