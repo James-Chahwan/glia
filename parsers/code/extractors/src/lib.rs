@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod cron;
 pub mod data_entities;
 pub mod data_sources;
+pub mod evm;
 pub mod iac;
 mod marker_swap;
 pub mod migrations;

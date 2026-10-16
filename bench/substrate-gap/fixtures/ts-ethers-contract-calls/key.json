@@ -1,0 +1,146 @@
+{
+  "framework": "ts-ethers-contract-calls",
+  "language": "typescript",
+  "dirs": [
+    "web",
+    "contracts"
+  ],
+  "note": "DT.10c (T10 client core; examples-glia payIntoEscrow shape). HEAD 3ab10652 (W18 wheel): no RPC_CALL, EVENT_HANDLER or RPC_CALLS; grade.py nodes 0/5, edges 0/8, cells 0/2.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.deposits",
+      "exact": true,
+      "note": "chained new Contract(..).deposits"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ERC20_ABI.decimals",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:ESCROW_ABI.Released",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::escrow-client::EscrowClient::pay",
+      "to": "evm_call:abi:ESCROW_ABI.deposit",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "src::escrow-client::EscrowClient::settle",
+      "to": "evm_call:abi:ESCROW_ABI.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "src::order-notes::releaseNow",
+      "to": "evm_call:abi:ESCROW_ABI.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_event:abi:ESCROW_ABI.Released",
+      "to": "src::escrow-client::EscrowClient::watch",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_ABI.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_ABI.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_ABI.deposits",
+      "to": "evm:Escrow.deposits",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:ESCROW_ABI.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:abi:ESCROW_ABI.deposit",
+      "cell": "POSITION",
+      "contains": "escrow-client.ts"
+    },
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:abi:ESCROW_ABI.deposit",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"f:deposit/1\""
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm_call:abi:ESCROW_ABI.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS",
+      "note": "PRECISION: Vault declares release but not deposit / deposits"
+    },
+    {
+      "from": "contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:ESCROW_ABI.Released",
+      "category": "EVENT_FLOWS",
+      "note": "PRECISION: an event name is not a contract"
+    },
+    {
+      "from": "evm_call:abi:ERC20_ABI.decimals",
+      "to": "evm:MockToken.decimals",
+      "category": "RPC_CALLS",
+      "note": "PRECISION: balanceOf comes from an out-of-repo ERC20; strict containment"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.withdraw",
+      "note": "not in the ABI; Vault has withdraw, so a name-only rule would mint and pair it"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.getAddress",
+      "note": "ethers BaseContract member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.wait"
+    },
+    {
+      "from": "src::order-notes::noteRelease",
+      "to": "evm_call:abi:ESCROW_ABI.release",
+      "category": "USES",
+      "note": "PRECISION: a parameter of another function is not the const bound in releaseNow"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 4,
+      "note": "local-contract.ts (no ethers import) mints nothing"
+    }
+  ]
+}

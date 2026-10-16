@@ -240,7 +240,7 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use glia_code_extractors::{
         anchor, angular, angular_template, cli, config, cron, data_entities, data_sources,
-        eventbus, graphql, grpc, nav_links, nav_routes, openapi_annot, queues, react,
+        eventbus, evm, graphql, grpc, nav_links, nav_routes, openapi_annot, queues, react,
         secrets_flags, services, trpc, ts_routes, vue, websocket,
     };
 
@@ -334,6 +334,17 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(graphql::extract_graphql_operation_nodes(source, path, module_id, repo));
     run_marked!(graphql::extract_graphql_resolver_nodes(source, lang, module_id, repo));
     run_marked!(grpc::extract_grpc_client_nodes(source, path, module_id, repo));
+    // DT.10c: EVM contract clients (ethers `new Contract(addr, ABI, runner)`
+    // calls and `.on` / `.once` subscriptions) as RPC_CALL `evm_call:..` /
+    // EVENT_HANDLER `evm_event:..` markers, anchored by the A5.8 pass below
+    // and paired by `resolver:evm`. Every lang runs it: the module dispatches
+    // on `lang` and gates on an ethers / hardhat import itself. Per-file
+    // `[evm-client]` marker.
+    let evm = evm::extract_evm_clients(source, lang, module_id, repo);
+    for m in evm.markers(path) {
+        eprintln!("{m}");
+    }
+    run_marked!(evm);
     run_with_edges!(
         "data_sources",
         data_sources::extract_data_source_nodes(source, path, module_id, repo)
