@@ -49,3 +49,9 @@ schema calls (not in the repo); `Escrow.deposit` / `release` (called through the
 - gaps: unpaired_endpoint 1 (`GET /api/orders${…}`, also a suspected_edge), unpaired_route 4 (`/live/orders`, `/graphql`,
   `GET /api/orders`, test-only `/boom`), dead_symbol 25 (the Angular lifecycle / template-bound methods, the gqlgen
   resolvers and the Escrow functions among them).
+
+## Measured after the tweak waves
+
+| wave | moved | measured |
+|---|---|---|
+| W15 (`5bf66c91`) | DT.4 (trailing query interpolation dropped), DT.11a (op pairs by its root fields) | HTTP_CALLS 5/5 (`OrderService.list` now pairs `GET /api/orders`); GRAPHQL_CALLS 2/2 (`StockList` pairs `Query.products`) |

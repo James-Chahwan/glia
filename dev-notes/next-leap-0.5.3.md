@@ -536,6 +536,31 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   - pyo3 `PyGraph.neighbours(.., categories=[..])` takes category ids only: `["CALLS"]` raises `TypeError: argument
     'categories': 'str' object cannot be interpreted as an integer`; accept NAMEs as every CLI flag and `glia query` do.
 
+- W15 (DT.1b): TS re-export barrels are not followed: `export * from` / `export { X } from` emit no ImportStmt, so a
+  name imported through a barrel gets the IMPORTS edge to the directory's index module (DT.1b) but no binding.
+  Measured: quokka-stack web imports from `@app/core` in 32 files through two levels of barrel (`core/index.ts` ->
+  `./models` -> `models/index.ts` -> `./user.model`); Kina `import { WalletActionSheet } from '../../wallet'`. Kina's
+  `core/models/index.ts` declares its interfaces itself, so DT.1b already binds those. Candidate for a 0.5.2 tweak if
+  James wants it before the release.
+- W15 (DT.1b): a `'.'`, `'..'` or trailing-slash specifier names only a directory in tsc, but resolve_ts_source maps it to
+  the directory's qname, so a same-stem sibling FILE (`src/app.ts` beside `src/app/`) still wins (0 instances in Kina,
+  quokka-stack, examples-glia).
+- W15 (DT.2a, James's call): drop the first-hit site kept for all-topic-less queue rows (tag_sites, the `if !tag.mixed`
+  line). It removes the spurious USES / HANDLED_BY a tag gets at a call another row named (pika `channel.basic_publish`
+  beside `basic_publish(`) and moves such a tag's POSITION to its first unexplained site; a declared edge_removal.
+- W15 (DT.4): the trailing query-interpolation idiom in Dart (`'$base/smr$q'`), Python f-strings and Go `fmt.Sprintf`
+  clients is not dropped from the endpoint path; DT.4 covers TS / JS only.
+- W15 (DT.5f): gqlgen object resolvers (`orderResolver.Customer` for `type Order { customer: Customer }`) stay unpaired:
+  extract_graphql_sdl_file_nodes mints GRAPHQL_RESOLVERs for root types only (the marker counts them as object_structs).
+  Minting non-root field resolvers (`graphql_resolver:Order.customer`) lets GqlgenResolver's `<Type>.` branch pair them.
+- W15 (DT.12a): engram-export's body hash costs about 100 ns/byte in debug builds; a byte loop with an ASCII fast path
+  must stay exactly equal to `split_whitespace` + `chars().count()` (the hashes are stored in cell rows). Invariant for
+  any later edit: a `nodes.push` in build_gmap_with_nodes also pushes `fact_nodes` (hints_side_v6 (a) fails on drift).
+- DT.1o spec (verifier defaults): an overlay-level opt-in for blocking model breaks (`[contracts] models_min_tier`) changes
+  the overlay schema, so 0.5.2 has only the CLI / pyo3 flag. Not judged by DT.1o: DT.1i's client_contract pairing (a
+  typed client against an OpenAPI op; a server-side op change is already a contract-breaks schema row), DT.1k's TS
+  result model against its own selection, and GraphQL argument / input evolution.
+
 ## 3. Open questions for James
 
 All four answered 2026-10-16 (§0); recorded as rulings:
