@@ -1,10 +1,9 @@
-# glia 0.5.3 - the ask to Engram (DRAFT, not sent)
+# glia 0.5.3 - the ask to Engram (sent 2026-10-16)
 
 **From:** the glia session, 2026-10-16. **To:** an Engram session, once James sends it.
-**Status:** draft. James, 2026-10-16: *"A first and get the hand off to engram ready we may need to decide what
+**Status:** sent 2026-10-16 to the Engram session (engram-34) as a briefing, with an evaluation ask for 0.5.2's DE packets at the wave-5 landed commit. James: *"yeah nice work i think we got engram choice nailed down ... maybe tell the engram session now whats comming and if it works get it to evaluate the changes ?"*. Earlier: James, 2026-10-16: *"A first and get the hand off to engram ready we may need to decide what
 happens to engram soon"*, then, on embeddings: *"well shouldn't we bring parts of engram in if we need the embeddings
-?"* / *"...isn't it locally run in engram i swear"*. glia now embeds itself; this ask goes out when James has decided
-Engram's direction (section 4 lists what depends on Engram either way).
+?"* / *"...isn't it locally run in engram i swear"*. glia now embeds itself; section 4 lists what depends on Engram either way.
 
 Scope source: `dev-notes/next-leap-0.5.3.md` §2 B (embeddings in glia; Engram, data only), §2 F.6 (concept search
 over flows) and §3 (James's rulings). The boundary is unchanged: `engram-core` is the only shared crate, Engram
