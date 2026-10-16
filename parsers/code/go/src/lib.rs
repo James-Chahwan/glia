@@ -30,6 +30,7 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, const_placeholder, join_path, mount_route_qname,
     push_client_endpoint_with,
 };
+use glia_code_domain::wire::{ModelField, ModelSchema, WireFormat};
 use glia_code_domain::{Mount, NavFact};
 
 // ============================================================================
@@ -250,6 +251,14 @@ pub fn parse_file_with_modules(
             mounts.foreign
         );
     }
+    // DT.1c: the structs given a SCHEMA_FIELDS model schema, per file.
+    let ms = &acc.models;
+    if ms.structs > 0 {
+        eprintln!(
+            "[model-schemas] lang=go structs={} fields={} embeds={} skipped={} file={file_rel_path}",
+            ms.structs, ms.fields, ms.embeds, ms.skipped
+        );
+    }
     let gorm = &acc.gorm;
     if !gorm.models.is_empty() || !gorm.tables.is_empty() {
         eprintln!(
@@ -390,6 +399,8 @@ struct Acc {
     file_consts: FileConsts,
     /// A13.12: this file's GORM evidence and the `[orm-gorm]` marker counters.
     gorm: GormFile,
+    /// DT.1c: the `[model-schemas] lang=go` counters.
+    models: ModelStats,
 }
 
 /// A13.12: what one Go file shows of GORM. The two evidence flags gate the
@@ -739,6 +750,13 @@ fn collect_field_types(
         else {
             continue;
         };
+        // DT.1c: the struct's JSON fields, the model a body is compared
+        // against.
+        if let Some(schema) = go_struct_schema(list, src, &mut acc.models)
+            && let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == struct_id)
+        {
+            node.cells.push(schema.cell());
+        }
         // CI.2a: the struct's own type parameters (`type Box[T any] struct {
         // T }`) embed nothing a parse can name.
         let type_params = type_param_names(spec.child_by_field_name("type_parameters"), src);
@@ -753,6 +771,304 @@ fn collect_field_types(
             push_struct_embed(decl, src, struct_id, &type_params, acc);
         }
     }
+}
+
+// ============================================================================
+// DT.1c: declared model fields (SCHEMA_FIELDS, format go)
+// ============================================================================
+
+/// DT.1c: what the file's struct schemas hold, for the `[model-schemas]
+/// lang=go` marker.
+#[derive(Default)]
+struct ModelStats {
+    /// STRUCTs given a SCHEMA_FIELDS cell.
+    structs: usize,
+    /// The fields those cells list.
+    fields: usize,
+    /// Their `extends` entries (untagged embeds).
+    embeds: usize,
+    /// Fields left out: unexported, or tagged `json:"-"`.
+    skipped: usize,
+}
+
+/// DT.1c: a struct's JSON fields as a [`ModelSchema`] (format `go`), named by
+/// encoding/json's rules:
+///
+/// * An exported field travels under its json tag name ([`parse_json_tag`]),
+///   or its Go name when the tag names none; `field` keeps the Go name (the
+///   writer drops it when the two agree). `json:"-"` leaves it off the wire
+///   (skipped); `json:"-,"` names it `-`. `omitempty` / `omitzero` make it
+///   `required: false`; every other field is always written, `required:
+///   true`. `,string` on a bool / numeric / string type (or a pointer to one)
+///   types it `string`: the value travels as a JSON string. Any other type
+///   is its text, whitespace-collapsed.
+/// * An unexported field is never encoded: skipped and counted.
+/// * An embedded field with no json name (untagged, or `json:",omitempty"`)
+///   promotes its fields: `extends` gets its type, pointer stripped,
+///   qualifier kept (`*store.Base` -> `store.Base`). One with a json name is
+///   an ordinary field of that name, its Go name the type's; `json:"-"`
+///   skips it.
+/// * `binding:"required"` (gin) or a `validate:"required,.."` list
+///   (go-playground/validator) sets `bind`: the request binder rejects a body
+///   without the field.
+///
+/// `None` for a struct with no exported field and no embed: nothing of it is
+/// ever encoded. The struct's own name may be unexported (a serialised
+/// `planBody`).
+fn go_struct_schema(list: TsNode, src: &[u8], stats: &mut ModelStats) -> Option<ModelSchema> {
+    let mut schema = ModelSchema::new(WireFormat::Go);
+    let mut encodable = false;
+    let mut skipped = 0;
+    let mut lc = list.walk();
+    for decl in list.named_children(&mut lc) {
+        if decl.kind() != "field_declaration" {
+            continue;
+        }
+        let Some(type_node) = decl.child_by_field_name("type") else {
+            continue;
+        };
+        let tag = decl
+            .child_by_field_name("tag")
+            .and_then(|t| go_tag_text(t, src))
+            .unwrap_or_default();
+        let json = parse_json_tag(&tag);
+        let bind = bind_required(&tag);
+        let ty = collapse_go_ws(text_of(type_node, src));
+        let mut nc = decl.walk();
+        let names: Vec<&str> = decl
+            .children_by_field_name("name", &mut nc)
+            .map(|n| text_of(n, src))
+            .collect();
+        if names.is_empty() {
+            encodable = true;
+            if json.skip {
+                skipped += 1;
+                continue;
+            }
+            let base = ty.trim_start_matches(['*', ' ']).to_string();
+            match &json.name {
+                Some(name) => {
+                    let go_name = embed_go_name(&base);
+                    schema.fields.push(go_field(name, go_name, &ty, &json, bind));
+                }
+                None if !base.is_empty() && !schema.extends.contains(&base) => schema.extends.push(base),
+                None => {}
+            }
+            continue;
+        }
+        for name in names {
+            if !go_exported(name) {
+                skipped += 1;
+                continue;
+            }
+            encodable = true;
+            if json.skip {
+                skipped += 1;
+                continue;
+            }
+            let wire = json.name.as_deref().unwrap_or(name);
+            schema.fields.push(go_field(wire, name, &ty, &json, bind));
+        }
+    }
+    stats.skipped += skipped;
+    if !encodable {
+        return None;
+    }
+    stats.structs += 1;
+    stats.fields += schema.fields.len();
+    stats.embeds += schema.extends.len();
+    Some(schema)
+}
+
+/// One encoded field: JSON name `wire`, Go member `go_name`, type text `ty`.
+fn go_field(wire: &str, go_name: &str, ty: &str, json: &JsonTag, bind: bool) -> ModelField {
+    let quoted = json.as_string && go_quotable(ty);
+    let mut f = ModelField::new(wire, if quoted { "string" } else { ty }, !json.omitempty);
+    f.field = Some(go_name.to_string());
+    f.bind_required = bind;
+    f
+}
+
+/// encoding/json's `,string` applies to bool, integer, float and string
+/// fields, or a pointer to one; it is ignored on every other type.
+fn go_quotable(ty: &str) -> bool {
+    let t = ty.trim_start_matches(['*', ' ']);
+    let bits = |r: &str| matches!(r, "" | "8" | "16" | "32" | "64");
+    matches!(t, "bool" | "string" | "byte" | "rune" | "uintptr" | "float32" | "float64")
+        || t.strip_prefix("uint").is_some_and(bits)
+        || t.strip_prefix("int").is_some_and(bits)
+}
+
+/// The Go name of an embedded field: its type's own name, qualifier and type
+/// arguments dropped (`store.Base[T]` -> `Base`).
+fn embed_go_name(base: &str) -> &str {
+    let t = base.split('[').next().unwrap_or(base);
+    t.rsplit('.').next().unwrap_or(t).trim()
+}
+
+/// Go's `token.IsExported`: the name starts with an upper-case letter.
+fn go_exported(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// `s` with every whitespace run collapsed to one space, trimmed.
+fn collapse_go_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A field's `tag` node as the struct tag it holds: a raw string's text
+/// between the backticks (carriage returns dropped, as Go drops them), an
+/// interpreted string unquoted ([`go_unquote`]).
+fn go_tag_text(tag: TsNode, src: &[u8]) -> Option<String> {
+    let t = text_of(tag, src);
+    match tag.kind() {
+        "raw_string_literal" => {
+            let inner = t.strip_prefix('`')?.strip_suffix('`')?;
+            Some(inner.replace('\r', ""))
+        }
+        "interpreted_string_literal" => go_unquote(t),
+        _ => None,
+    }
+}
+
+/// What a struct tag's `json` key says about the field (encoding/json's
+/// `parseTag` and `typeFields`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct JsonTag {
+    /// The JSON name the tag gives; `None` when it gives none (no tag, an
+    /// empty name, or one encoding/json's `isValidTag` rejects).
+    name: Option<String>,
+    /// `json:"-"`: never encoded.
+    skip: bool,
+    /// `omitempty` (or Go 1.24's `omitzero`): absent when zero.
+    omitempty: bool,
+    /// `,string`: a scalar travels as a JSON string.
+    as_string: bool,
+}
+
+/// The `json` key of the struct tag `raw` (reflect.StructTag rules,
+/// [`struct_tag_lookup`]) as a [`JsonTag`]. `-` alone skips the field; `-,`
+/// names it `-`.
+fn parse_json_tag(raw: &str) -> JsonTag {
+    let Some(value) = struct_tag_lookup(raw, "json") else {
+        return JsonTag::default();
+    };
+    if value == "-" {
+        return JsonTag { skip: true, ..JsonTag::default() };
+    }
+    let (name, opts) = value.split_once(',').unwrap_or((value.as_str(), ""));
+    let has = |o: &str| opts.split(',').any(|x| x == o);
+    JsonTag {
+        name: json_valid_name(name).then(|| name.to_string()),
+        skip: false,
+        omitempty: has("omitempty") || has("omitzero"),
+        as_string: has("string"),
+    }
+}
+
+/// encoding/json's `isValidTag`: non-empty, every char a letter, a digit or
+/// one of ``!#$%&()*+-./:;<=>?@[]^_{|}~ `` (space included).
+fn json_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || "!#$%&()*+-./:;<=>?@[]^_{|}~ ".contains(c))
+}
+
+/// `binding:"required"` (gin) or `validate:"required"` (go-playground), each
+/// as one item of its comma list.
+fn bind_required(raw: &str) -> bool {
+    ["binding", "validate"].into_iter().any(|key| {
+        struct_tag_lookup(raw, key).is_some_and(|v| v.split(',').any(|item| item.trim() == "required"))
+    })
+}
+
+/// reflect.StructTag.Lookup: the value of `key` in a conventional
+/// `key:"value" key2:"value2"` struct tag, or `None` when the key is absent
+/// or the tag is malformed before it (the scan stops at the first syntax
+/// error, as Go's does).
+fn struct_tag_lookup(tag: &str, key: &str) -> Option<String> {
+    let b = tag.as_bytes();
+    let mut i = 0;
+    loop {
+        while i < b.len() && b[i] == b' ' {
+            i += 1;
+        }
+        if i >= b.len() {
+            return None;
+        }
+        let name_start = i;
+        while i < b.len() && b[i] > b' ' && b[i] != b':' && b[i] != b'"' && b[i] != 0x7f {
+            i += 1;
+        }
+        if i == name_start || i + 1 >= b.len() || b[i] != b':' || b[i + 1] != b'"' {
+            return None;
+        }
+        let name = &tag[name_start..i];
+        let q_start = i + 1;
+        i = q_start + 1;
+        while i < b.len() && b[i] != b'"' {
+            if b[i] == b'\\' {
+                i += 1;
+            }
+            i += 1;
+        }
+        if i >= b.len() {
+            return None;
+        }
+        let quoted = tag.get(q_start..=i)?;
+        i += 1;
+        if name == key {
+            return go_unquote(quoted);
+        }
+    }
+}
+
+/// strconv.Unquote for a double-quoted Go string: the simple escapes,
+/// `\xHH`, `\NNN` (octal), `\uHHHH` and `\UHHHHHHHH`. `None` for anything
+/// else, as Go's would fail.
+fn go_unquote(s: &str) -> Option<String> {
+    let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            return None;
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let e = chars.next()?;
+        let hex = |chars: &mut std::str::Chars, n: usize| -> Option<u32> {
+            let digits: String = chars.by_ref().take(n).collect();
+            (digits.len() == n).then(|| u32::from_str_radix(&digits, 16).ok()).flatten()
+        };
+        let decoded = match e {
+            'a' => '\u{07}',
+            'b' => '\u{08}',
+            'f' => '\u{0c}',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\u{0b}',
+            '\\' => '\\',
+            '"' => '"',
+            '\'' => '\'',
+            'x' => char::from_u32(hex(&mut chars, 2)?)?,
+            'u' => char::from_u32(hex(&mut chars, 4)?)?,
+            'U' => char::from_u32(hex(&mut chars, 8)?)?,
+            '0'..='7' => {
+                let rest: String = chars.by_ref().take(2).collect();
+                let digits = format!("{e}{rest}");
+                (digits.len() == 3).then_some(())?;
+                char::from_u32(u32::from_str_radix(&digits, 8).ok()?)?
+            }
+            _ => return None,
+        };
+        out.push(decoded);
+    }
+    Some(out)
 }
 
 /// CI.2a: an embedded field (a `field_declaration` with no `name`) is an
@@ -10135,5 +10451,217 @@ func f() {
             string_consts(&other, "api::consts"),
             vec![pair("OtherFilePrefix", "/other")]
         );
+    }
+}
+
+/// DT.1c: the SCHEMA_FIELDS model schemas of structs, named by
+/// encoding/json's tag rules.
+#[cfg(test)]
+mod model_schema_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://go_models")
+    }
+
+    /// Every SCHEMA_FIELDS payload of the STRUCT `qname`.
+    fn schemas(parse: &FileParse, qname: &str) -> Vec<String> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, qname);
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                other => panic!("SCHEMA_FIELDS must be Json, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn tag(name: Option<&str>, skip: bool, omitempty: bool, as_string: bool) -> JsonTag {
+        JsonTag { name: name.map(str::to_string), skip, omitempty, as_string }
+    }
+
+    #[test]
+    fn json_tag_table() {
+        let cases: &[(&str, JsonTag)] = &[
+            (r#"json:"id""#, tag(Some("id"), false, false, false)),
+            (r#"json:"email,omitempty""#, tag(Some("email"), false, true, false)),
+            (r#"json:",omitempty""#, tag(None, false, true, false)),
+            (r#"json:"-""#, tag(None, true, false, false)),
+            (r#"json:"-,""#, tag(Some("-"), false, false, false)),
+            (r#"json:"n,string""#, tag(Some("n"), false, false, true)),
+            (r#"json:"n,omitempty,string""#, tag(Some("n"), false, true, true)),
+            (r#"json:"z,omitzero""#, tag(Some("z"), false, true, false)),
+            (r#"db:"id" json:"user_id" binding:"required""#, tag(Some("user_id"), false, false, false)),
+            (r#"json:"a\"b""#, tag(None, false, false, false)),
+            (r#"json:"ok name""#, tag(Some("ok name"), false, false, false)),
+            (r#"json:"xé""#, tag(Some("xé"), false, false, false)),
+            ("", JsonTag::default()),
+            (r#"xml:"a""#, JsonTag::default()),
+            // A malformed tag ends the scan before the json key, as Go's does.
+            (r#"bad json:"id""#, JsonTag::default()),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(&parse_json_tag(raw), want, "tag {raw:?}");
+        }
+        assert!(bind_required(r#"json:"a" binding:"required""#));
+        assert!(bind_required(r#"validate:"required,email""#));
+        assert!(bind_required(r#"binding:"omitempty, required""#));
+        assert!(!bind_required(r#"validate:"required_if=X 1""#));
+        assert!(!bind_required(r#"json:"required""#));
+    }
+
+    #[test]
+    fn struct_fields_by_encoding_json_rules() {
+        let src = "package m
+
+type Base struct{ X int }
+
+type Row struct {
+\tBase
+\t*ext.Meta
+\tName     string `json:\"name\" validate:\"required,min=1\"`
+\tA, B     int    `json:\"ab,omitempty\"`
+\tCount    uint32 `json:\"count,string\"`
+\tWhen     *int64 `json:\"when,string\"`
+\tNested   Base   `json:\"nested,string\"`
+\tBlob     []byte `json:\"blob\"`
+\tItems    []*Base
+\tInline   struct {
+\t\tQ string
+\t} `json:\"inline\"`
+\tHidden   string `json:\"-\"`
+\tlower    string `json:\"lower\"`
+\tTagged   `json:\"tagged\"`
+\tGone     `json:\"-\"`
+\tOptBase  `json:\",omitempty\"`
+\tInterp   string \"json:\\\"interp\\\"\"
+}
+
+type private struct {
+\tLeft  string `json:\"left\"`
+\tright string
+}
+
+type onlyHidden struct {
+\ta int
+\tb string
+}
+
+type Empty struct{}
+
+type Outer struct{ *Base }
+";
+        let parse = parse_file(src, "m/m.go", "m::m", "", repo()).unwrap();
+        assert_eq!(
+            schemas(&parse, "m::m::Row"),
+            vec![
+                "{\"extends\":[\"Base\",\"ext.Meta\",\"OptBase\"],\"fields\":[\
+                 {\"bind\":\"required\",\"field\":\"Name\",\"name\":\"name\",\"required\":true,\"type\":\"string\"},\
+                 {\"field\":\"A\",\"name\":\"ab\",\"required\":false,\"type\":\"int\"},\
+                 {\"field\":\"B\",\"name\":\"ab\",\"required\":false,\"type\":\"int\"},\
+                 {\"field\":\"Count\",\"name\":\"count\",\"required\":true,\"type\":\"string\"},\
+                 {\"field\":\"When\",\"name\":\"when\",\"required\":true,\"type\":\"string\"},\
+                 {\"field\":\"Nested\",\"name\":\"nested\",\"required\":true,\"type\":\"Base\"},\
+                 {\"field\":\"Blob\",\"name\":\"blob\",\"required\":true,\"type\":\"[]byte\"},\
+                 {\"array\":true,\"name\":\"Items\",\"required\":true,\"type\":\"[]*Base\"},\
+                 {\"field\":\"Inline\",\"name\":\"inline\",\"required\":true,\"type\":\"struct { Q string }\"},\
+                 {\"field\":\"Tagged\",\"name\":\"tagged\",\"required\":true,\"type\":\"Tagged\"},\
+                 {\"field\":\"Interp\",\"name\":\"interp\",\"required\":true,\"type\":\"string\"}],\
+                 \"format\":\"go\"}"
+                    .to_string()
+            ]
+        );
+        // An unexported struct name is still serialised.
+        let private = ModelSchema::parse(&schemas(&parse, "m::m::private")[0]).expect("schema");
+        assert_eq!(private.fields.len(), 1);
+        assert_eq!(private.fields[0].name, "left");
+        // No exported field and no embed: nothing is ever encoded.
+        assert!(schemas(&parse, "m::m::onlyHidden").is_empty());
+        assert!(schemas(&parse, "m::m::Empty").is_empty());
+        let outer = ModelSchema::parse(&schemas(&parse, "m::m::Outer")[0]).expect("schema");
+        assert_eq!((outer.extends, outer.fields.len()), (vec!["Base".to_string()], 0));
+        let base = ModelSchema::parse(&schemas(&parse, "m::m::Base")[0]).expect("schema");
+        assert_eq!(base.fields[0].member(), "X");
+    }
+
+    #[test]
+    fn struct_counters() {
+        let src = "package m\n\ntype A struct {\n\tB\n\tX int `json:\"x\"`\n\ty int\n\tZ int `json:\"-\"`\n}\n\ntype c struct{ d int }\n";
+        let tree = {
+            let mut p = Parser::new();
+            let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+            p.set_language(&lang).unwrap();
+            p.parse(src, None).unwrap()
+        };
+        let mut stats = ModelStats::default();
+        let mut lists = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "field_declaration_list" {
+                lists.push(n);
+            }
+            let mut c = n.walk();
+            stack.extend(n.named_children(&mut c));
+        }
+        lists.sort_by_key(|n| n.start_byte());
+        let written: Vec<bool> = lists
+            .iter()
+            .map(|l| go_struct_schema(*l, src.as_bytes(), &mut stats).is_some())
+            .collect();
+        assert_eq!(written, vec![true, false]);
+        assert_eq!((stats.structs, stats.fields, stats.embeds, stats.skipped), (1, 1, 1, 3));
+    }
+
+    /// The models-declared-fields fixture's Go file, cell for cell.
+    #[test]
+    fn fixture_models_declared_fields_api() {
+        let src = include_str!(
+            "../../../../bench/substrate-gap/fixtures/models-declared-fields/api/models/account.go"
+        );
+        let parse = parse_file(src, "models/account.go", "models::account", "example.com/fields/api", repo())
+            .unwrap();
+        assert_eq!(
+            schemas(&parse, "models::account::Account"),
+            vec![
+                "{\"extends\":[\"Audit\"],\"fields\":[\
+                 {\"field\":\"ID\",\"name\":\"id\",\"required\":true,\"type\":\"string\"},\
+                 {\"bind\":\"required\",\"field\":\"DisplayName\",\"name\":\"display_name\",\"required\":true,\"type\":\"string\"},\
+                 {\"field\":\"Email\",\"name\":\"email\",\"required\":false,\"type\":\"*string\"},\
+                 {\"array\":true,\"field\":\"Roles\",\"name\":\"roles\",\"required\":true,\"type\":\"[]string\"},\
+                 {\"field\":\"Owner\",\"name\":\"owner\",\"required\":true,\"type\":\"Person\"},\
+                 {\"field\":\"Dash\",\"name\":\"-\",\"required\":true,\"type\":\"string\"},\
+                 {\"field\":\"Balance\",\"name\":\"balance\",\"required\":true,\"type\":\"string\"},\
+                 {\"name\":\"Region\",\"required\":true,\"type\":\"string\"}],\
+                 \"format\":\"go\"}"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            schemas(&parse, "models::account::Audit"),
+            vec![
+                "{\"fields\":[\
+                 {\"field\":\"CreatedAt\",\"name\":\"createdAt\",\"required\":true,\"type\":\"time.Time\"},\
+                 {\"field\":\"UpdatedAt\",\"name\":\"updatedAt\",\"required\":false,\"type\":\"*time.Time\"}],\
+                 \"format\":\"go\"}"
+                    .to_string()
+            ]
+        );
+        assert_eq!(schemas(&parse, "models::account::Person").len(), 1);
+        assert!(schemas(&parse, "models::account::cache").is_empty());
+        for n in &parse.nodes {
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::SCHEMA_FIELDS) {
+                let payload = match &c.payload {
+                    CellPayload::Json(j) => j.as_str(),
+                    _ => "",
+                };
+                assert!(!payload.contains("secret") && !payload.contains("Password"), "{payload}");
+                let schema = ModelSchema::from_cell(c).expect("a wire ModelSchema");
+                assert_eq!(schema.cell(), *c);
+            }
+        }
     }
 }

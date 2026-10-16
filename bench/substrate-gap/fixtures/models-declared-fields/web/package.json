@@ -1,0 +1,8 @@
+{
+  "name": "fields-web",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@angular/core": "^17.0.0"
+  }
+}

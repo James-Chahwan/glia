@@ -1,0 +1,22 @@
+{
+  "framework": "models-declared-fields",
+  "language": "go",
+  "dirs": ["web", "api"],
+  "note": "DT.1c: every TypeScript interface and field-only class and every Go struct with an exported field or embed carries one SCHEMA_FIELDS cell (code-domain wire::ModelSchema, format ts / go) listing its declared fields by their JSON name. TS: a quoted key unquoted, `?` -> required false, an index signature -> open, method signatures skipped, `extends` the base names; a class qualifies only when its body is fields plus at most a constructor (AccountStore, with a private field and a method, gets none). Go: names by encoding/json's tag rules (rename, omitempty, `-` skipped, `-,` named \"-\", `,string` typed string, untagged = the Go name), unexported fields skipped, an untagged embed is `extends`, binding / validate required -> bind; a struct with no exported field and no embed (cache) gets none.",
+  "expect_cells": [
+    {"kind": "INTERFACE", "node": "src::models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"display-name\"", "note": "a quoted property name, unquoted"},
+    {"kind": "INTERFACE", "node": "src::models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"extends\":[\"Audited\"]", "note": "the extends clause, as written"},
+    {"kind": "INTERFACE", "node": "src::models::account::Settings", "cell": "SCHEMA_FIELDS", "contains": "\"open\":true", "note": "an index signature leaves the model open"},
+    {"kind": "CLASS", "node": "src::models::account::Person", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"age\"", "note": "a field-only class (fields plus a constructor) is a model"},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"display_name\"", "note": "the json tag name, not the Go name"},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"Region\"", "note": "no tag -> the Go field name"},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"extends\":[\"Audit\"]", "note": "an untagged embed promotes its fields"},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"field\":\"Balance\",\"name\":\"balance\",\"required\":true,\"type\":\"string\"", "note": "`,string` encodes the int64 as a JSON string"},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"field\":\"Dash\",\"name\":\"-\"", "note": "`json:\"-,\"` names the field \"-\""},
+    {"kind": "STRUCT", "node": "models::account::Account", "cell": "SCHEMA_FIELDS", "contains": "\"bind\":\"required\"", "note": "binding:\"required\""},
+    {"kind": "STRUCT", "node": "models::account::Person", "cell": "SCHEMA_FIELDS", "contains": "\"format\":\"go\"", "note": "the Go format"}
+  ],
+  "forbid": [
+    {"kind": "INTERFACE", "name": "src::models::account::Person", "max_nodes": 0, "note": "a field-only class stays a CLASS"}
+  ]
+}

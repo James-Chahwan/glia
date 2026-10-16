@@ -21,6 +21,7 @@ use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint;
 use glia_code_domain::evidence;
+use glia_code_domain::wire::{ModelField, ModelSchema, WireFormat};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -147,6 +148,16 @@ fn parse_file_stats(
             sf.calls
         );
     }
+    // DT.1c: the interfaces and field-only classes given a SCHEMA_FIELDS
+    // model schema, per file.
+    let ms = acc.models;
+    if ms.interfaces + ms.classes > 0 {
+        eprintln!(
+            "[model-schemas] lang=typescript interfaces={} classes={} fields={} open={} \
+             file={file_rel_path}",
+            ms.interfaces, ms.classes, ms.fields, ms.open
+        );
+    }
     // CH.1: `abstract class` declarations and their bodiless members, per file.
     let ab = acc.abstract_stats;
     if ab.classes + ab.methods > 0 {
@@ -266,6 +277,8 @@ struct Acc {
     abstract_stats: AbstractStats,
     /// CH.2: the `[ts-state]` counters.
     state_fields: StateFieldStats,
+    /// DT.1c: the `[model-schemas] lang=typescript` counters.
+    models: ModelStats,
     /// CH.3b: reads of an API-prefix-named member ([`API_PREFIX_NAMES`]:
     /// `this.apiPrefix`, `cfg.basePath`, `const { apiPrefix } = cfg`), as
     /// `(from, name as written, start byte)`. The call walk pops siblings
@@ -701,11 +714,17 @@ fn visit_class(
     };
     let class_qname = format!("{module_qname}::{name}");
     let class_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &class_qname);
+    let mut cells = build_cells(&n, src, file_rel);
+    // DT.1c: a field-only class is a model like an interface.
+    if let Some(schema) = ts_class_schema(n, src) {
+        acc.models.record(&schema, true);
+        cells.push(schema.cell());
+    }
     acc.nodes.push(Node {
         id: class_id,
         repo,
         confidence: Confidence::Strong,
-        cells: build_cells(&n, src, file_rel),
+        cells,
     });
     acc.edges.push(Edge {
         from: module_id,
@@ -1461,11 +1480,19 @@ fn visit_interface(
     };
     let iface_qname = format!("{module_qname}::{name}");
     let iface_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &iface_qname);
+    let mut cells = build_cells(&n, src, file_rel);
+    // DT.1c: the interface's declared fields, the model a JSON body is
+    // compared against. A merged declaration carries its own cell; the
+    // models pass unions them.
+    if let Some(schema) = ts_interface_schema(n, src) {
+        acc.models.record(&schema, false);
+        cells.push(schema.cell());
+    }
     acc.nodes.push(Node {
         id: iface_id,
         repo,
         confidence: Confidence::Strong,
-        cells: build_cells(&n, src, file_rel),
+        cells,
     });
     acc.edges.push(Edge {
         from: module_id,
@@ -1526,6 +1553,327 @@ fn collect_interface_heritage(
             });
         }
     }
+}
+
+// ============================================================================
+// DT.1c: declared model fields (SCHEMA_FIELDS, format ts)
+// ============================================================================
+
+/// DT.1c: what the file's model schemas hold, for the `[model-schemas]
+/// lang=typescript` marker.
+#[derive(Default, Clone, Copy)]
+struct ModelStats {
+    /// INTERFACE declarations given a SCHEMA_FIELDS cell.
+    interfaces: usize,
+    /// Field-only CLASSes given one.
+    classes: usize,
+    /// The fields those cells list.
+    fields: usize,
+    /// The cells marked `open`.
+    open: usize,
+}
+
+impl ModelStats {
+    fn record(&mut self, schema: &ModelSchema, class: bool) {
+        if class {
+            self.classes += 1;
+        } else {
+            self.interfaces += 1;
+        }
+        self.fields += schema.fields.len();
+        self.open += usize::from(schema.open);
+    }
+}
+
+/// Class decorators beside the DI set ([`DI_DECORATORS`],
+/// [`NEST_DI_DECORATORS`]) that make a class framework wiring, never a wire
+/// model, even when its body is fields only.
+const MODULE_DECORATORS: &[&str] = &["NgModule", "Module"];
+
+/// DT.1c: an interface's declared fields as a [`ModelSchema`] (format `ts`),
+/// the SCHEMA_FIELDS cell the models pass compares a JSON body against.
+///
+/// * A `property_signature` is a field: its key ([`ts_property_key`]: an
+///   identifier as written, a string unquoted, a number as written), its
+///   annotation text whitespace-collapsed (`any` when it has none) and
+///   `required` unless it is marked `?` or its type is a top-level union
+///   with `undefined` ([`ts_optional_type`]). `array` is read off the type
+///   by [`ModelField::new`].
+/// * A computed key (`[K]: T`) is skipped and leaves the model `open`, as
+///   does an `index_signature`.
+/// * Method, call and construct signatures are skipped: they are never on
+///   the wire.
+/// * `extends` holds the simple base names [`collect_interface_heritage`]
+///   reads; a generic or utility base (`Pick<..>`, `Omit<..>`, `Partial<..>`,
+///   any `X<..>`) is not listed and leaves the model `open`, since which of
+///   its fields arrive depends on the arguments.
+///
+/// `None` for an interface with no field, no base and nothing open (a
+/// method-only service contract, an empty marker): it describes no body.
+/// A `type X = {..}` alias mints no node, so it carries no schema.
+fn ts_interface_schema(iface: TsNode, src: &[u8]) -> Option<ModelSchema> {
+    let mut schema = ModelSchema::new(WireFormat::Ts);
+    let mut cursor = iface.walk();
+    for clause in iface.named_children(&mut cursor) {
+        if clause.kind() != "extends_type_clause" {
+            continue;
+        }
+        let mut tc = clause.walk();
+        for ty in clause.children_by_field_name("type", &mut tc) {
+            if ty.kind() == "generic_type" {
+                schema.open = true;
+            } else if let Some(base) = heritage_type_name(ty, src) {
+                push_base(&mut schema, base);
+            }
+        }
+    }
+    let body = iface.child_by_field_name("body")?;
+    let mut bc = body.walk();
+    for member in body.named_children(&mut bc) {
+        match member.kind() {
+            "property_signature" => {
+                let Some(name) = member.child_by_field_name("name") else {
+                    continue;
+                };
+                let Some(key) = ts_property_key(name, src) else {
+                    schema.open |= name.kind() == "computed_property_name";
+                    continue;
+                };
+                let ty = member
+                    .child_by_field_name("type")
+                    .and_then(|t| first_named(t));
+                let ty_text = ty.map_or_else(|| "any".to_string(), |t| collapse_ws(text(t, src)));
+                let optional = has_token(member, "?") || ty.is_some_and(|t| ts_optional_type(t, src));
+                schema.fields.push(ModelField::new(&key, &ty_text, !optional));
+            }
+            "index_signature" => schema.open = true,
+            _ => {}
+        }
+    }
+    let describes = !schema.fields.is_empty() || !schema.extends.is_empty() || schema.open;
+    describes.then_some(schema)
+}
+
+/// DT.1c: a field-only class's declared fields as a [`ModelSchema`] (format
+/// `ts`), the same cell an interface carries.
+///
+/// A class is a model when its body holds only public instance fields and at
+/// most one constructor: every `public_field_definition` without `private`
+/// / `protected` / `static`, a `#name` or a function value, and nothing else
+/// (any other method, accessor, abstract member or static block makes it
+/// behaviour, so it gets no cell: a service with a private cache and a
+/// `get()` is no model). Constructor parameter properties marked `public` or
+/// `readonly` are fields too; a `private` / `protected` one disqualifies the
+/// class like a private field. A class carrying a DI or module decorator
+/// (`@Component`, `@Injectable`, `@Controller`, `@NgModule`, ...) is
+/// framework wiring and gets none. An index signature or a computed key
+/// leaves the model `open`.
+///
+/// A field's type is its annotation text, whitespace-collapsed; an
+/// unannotated field's is read off its initialiser ([`ts_initializer_type`]).
+/// `required` unless marked `?` (a `?` parameter property) or typed with a
+/// top-level `| undefined`. `extends` holds the superclass's simple name; a
+/// generic base (`extends Base<T>`) or a computed one (a mixin call) is not
+/// listed and leaves the model `open`.
+///
+/// `None` unless the class lists at least one field.
+fn ts_class_schema(class: TsNode, src: &[u8]) -> Option<ModelSchema> {
+    let framework = class_decorators(class)
+        .into_iter()
+        .filter_map(|d| decorator_name(d, src))
+        .any(|n| {
+            DI_DECORATORS.contains(&n) || NEST_DI_DECORATORS.contains(&n) || MODULE_DECORATORS.contains(&n)
+        });
+    if framework {
+        return None;
+    }
+    let body = class.child_by_field_name("body")?;
+    let mut schema = ModelSchema::new(WireFormat::Ts);
+    let mut cursor = class.walk();
+    if let Some(heritage) = class.named_children(&mut cursor).find(|c| c.kind() == "class_heritage") {
+        let mut hc = heritage.walk();
+        for clause in heritage.named_children(&mut hc) {
+            if clause.kind() != "extends_clause" {
+                continue;
+            }
+            let mut tc = clause.walk();
+            if clause.children_by_field_name("type_arguments", &mut tc).next().is_some() {
+                schema.open = true;
+                continue;
+            }
+            let mut vc = clause.walk();
+            for value in clause.children_by_field_name("value", &mut vc) {
+                match value.kind() {
+                    "identifier" | "member_expression" => {
+                        if let Some(base) = heritage_type_name(value, src) {
+                            push_base(&mut schema, base);
+                        }
+                    }
+                    _ => schema.open = true,
+                }
+            }
+        }
+    }
+    let mut ctor_seen = false;
+    let mut bc = body.walk();
+    for member in body.named_children(&mut bc) {
+        match member.kind() {
+            "comment" | "decorator" => {}
+            "public_field_definition" => {
+                if !push_class_field(&mut schema, member, src) {
+                    return None;
+                }
+            }
+            "method_definition" if !ctor_seen && child_text(member, "name", src) == Some("constructor") => {
+                ctor_seen = true;
+                if !push_param_properties(&mut schema, member, src) {
+                    return None;
+                }
+            }
+            "index_signature" => schema.open = true,
+            _ => return None,
+        }
+    }
+    (!schema.fields.is_empty()).then_some(schema)
+}
+
+/// One class field into `schema`; `false` when the field makes the class
+/// behaviour rather than a model ([`ts_class_schema`]'s rule).
+fn push_class_field(schema: &mut ModelSchema, field: TsNode, src: &[u8]) -> bool {
+    if !public_member(field, src) || has_token(field, "static") {
+        return false;
+    }
+    let Some(name) = field.child_by_field_name("name") else {
+        return true;
+    };
+    if name.kind() == "private_property_identifier" {
+        return false;
+    }
+    let value = field.child_by_field_name("value");
+    if value.is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression" | "function")) {
+        return false;
+    }
+    let Some(key) = ts_property_key(name, src) else {
+        schema.open |= name.kind() == "computed_property_name";
+        return true;
+    };
+    push_typed_field(schema, &key, field, value, src);
+    true
+}
+
+/// The constructor's `public` / `readonly` parameter properties into
+/// `schema`; `false` when one is `private` / `protected`.
+fn push_param_properties(schema: &mut ModelSchema, ctor: TsNode, src: &[u8]) -> bool {
+    let Some(params) = ctor.child_by_field_name("parameters") else {
+        return true;
+    };
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        if !public_member(param, src) {
+            return false;
+        }
+        let property = accessibility(param, src).is_some() || has_token(param, "readonly");
+        let Some(pattern) = param.child_by_field_name("pattern") else {
+            continue;
+        };
+        if !property || pattern.kind() != "identifier" {
+            continue;
+        }
+        let value = param.child_by_field_name("value");
+        push_typed_field(schema, text(pattern, src), param, value, src);
+    }
+    true
+}
+
+/// A field `key` of `member` (a class field or a parameter property): its
+/// annotation, else its initialiser's type; `required` unless `?` or a
+/// top-level `| undefined`.
+fn push_typed_field(schema: &mut ModelSchema, key: &str, member: TsNode, value: Option<TsNode>, src: &[u8]) {
+    let ty = member.child_by_field_name("type").and_then(|t| first_named(t));
+    let ty_text = match (ty, value) {
+        (Some(t), _) => collapse_ws(text(t, src)),
+        (None, Some(v)) => ts_initializer_type(v, src),
+        (None, None) => "any".to_string(),
+    };
+    let optional = has_token(member, "?") || ty.is_some_and(|t| ts_optional_type(t, src));
+    schema.fields.push(ModelField::new(key, &ty_text, !optional));
+}
+
+/// The member's accessibility modifier text (`public` / `private` /
+/// `protected`), if it has one.
+fn accessibility<'a>(member: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let mut c = member.walk();
+    member
+        .named_children(&mut c)
+        .find(|ch| ch.kind() == "accessibility_modifier")
+        .map(|m| text(m, src).trim())
+}
+
+/// The member is not `private` / `protected`.
+fn public_member(member: TsNode, src: &[u8]) -> bool {
+    !matches!(accessibility(member, src), Some("private" | "protected"))
+}
+
+/// The JSON key a `_property_name` node spells: an identifier as written, a
+/// string unquoted, a number as written; `None` for a computed key or a
+/// `#private` name.
+fn ts_property_key(name: TsNode, src: &[u8]) -> Option<String> {
+    match name.kind() {
+        "property_identifier" | "identifier" | "number" => Some(text(name, src).to_string()),
+        "string" => Some(strip_string_quotes(text(name, src))),
+        _ => None,
+    }
+}
+
+/// The type a field's initialiser gives it when it has no annotation: a
+/// string / template literal `string`, a number `number`, `true` / `false`
+/// `boolean`, `null` `null`, an array literal `any[]`, `new X(..)` the
+/// constructed name as written; anything else `any`.
+fn ts_initializer_type(value: TsNode, src: &[u8]) -> String {
+    match value.kind() {
+        "string" | "template_string" => "string".to_string(),
+        "number" => "number".to_string(),
+        "true" | "false" => "boolean".to_string(),
+        "null" => "null".to_string(),
+        "array" => "any[]".to_string(),
+        "new_expression" => value
+            .child_by_field_name("constructor")
+            .filter(|c| matches!(c.kind(), "identifier" | "member_expression"))
+            .map_or_else(|| "any".to_string(), |c| collapse_ws(text(c, src))),
+        _ => "any".to_string(),
+    }
+}
+
+/// The type is a top-level union one of whose members is `undefined`
+/// (`string | undefined`): the field may be absent.
+fn ts_optional_type(ty: TsNode, src: &[u8]) -> bool {
+    if ty.kind() != "union_type" {
+        return false;
+    }
+    let mut c = ty.walk();
+    ty.named_children(&mut c)
+        .any(|m| text(m, src).trim() == "undefined" || ts_optional_type(m, src))
+}
+
+/// `base` onto `schema.extends`, once.
+fn push_base(schema: &mut ModelSchema, base: &str) {
+    if !schema.extends.iter().any(|b| b == base) {
+        schema.extends.push(base.to_string());
+    }
+}
+
+/// The first named child of `n` (a `type_annotation`'s type).
+fn first_named(n: TsNode) -> Option<TsNode> {
+    let mut c = n.walk();
+    n.named_children(&mut c).find(|ch| ch.kind() != "comment")
+}
+
+/// `s` with every whitespace run collapsed to one space, trimmed.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// LA.30c: `enum E { … }` / `const enum E { … }` → an ENUM node (DEFINES from
@@ -9123,5 +9471,218 @@ export class C {
                      export const guard = () => { const auth = inject(AuthService); return auth.check(); };\n";
         let (_, _, _, _, stats, ..) = parse_file_stats(guard, "src/g.ts", "src::g", repo()).unwrap();
         assert_eq!((stats.typed, stats.inject, stats.unknown), (1, 1, 0));
+    }
+}
+
+/// DT.1c: the SCHEMA_FIELDS model schemas of interfaces and field-only
+/// classes.
+#[cfg(test)]
+mod model_schema_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts_models")
+    }
+
+    /// Every SCHEMA_FIELDS payload of the `kind` node `qname`.
+    fn schemas(parse: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<String> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                other => panic!("SCHEMA_FIELDS must be Json, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn one(parse: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> ModelSchema {
+        let got = schemas(parse, kind, qname);
+        assert_eq!(got.len(), 1, "{qname}: one SCHEMA_FIELDS cell, got {got:?}");
+        ModelSchema::parse(&got[0]).expect("a wire ModelSchema")
+    }
+
+    #[test]
+    fn interface_fields_keys_optionality_and_openness() {
+        let src = "\
+export interface Base { createdAt: string }
+export interface User extends Base, ns.Named {
+  readonly id: string;
+  'display-name': string;
+  0: number;
+  email?: string;
+  nick: string | undefined;
+  tags: Array<string>;
+  meta: {
+    a: string;
+    b:   number
+  };
+  untyped;
+  save(): void;
+  (x: number): string;
+  new (x: string): User;
+}
+export interface Flags { [flag: string]: boolean; on: boolean }
+export interface Computed { [KEY]: string; ok: string }
+export interface Picked extends Pick<User, 'id'> { extra: number }
+export interface Repo { find(id: string): User; }
+export interface Empty {}
+";
+        let parse = parse_file(src, "src/m.ts", "src::m", repo()).unwrap();
+        let user = one(&parse, node_kind::INTERFACE, "src::m::User");
+        assert_eq!(
+            user.to_payload(),
+            "{\"extends\":[\"Base\",\"Named\"],\"fields\":[\
+             {\"name\":\"id\",\"required\":true,\"type\":\"string\"},\
+             {\"name\":\"display-name\",\"required\":true,\"type\":\"string\"},\
+             {\"name\":\"0\",\"required\":true,\"type\":\"number\"},\
+             {\"name\":\"email\",\"required\":false,\"type\":\"string\"},\
+             {\"name\":\"nick\",\"required\":false,\"type\":\"string | undefined\"},\
+             {\"array\":true,\"name\":\"tags\",\"required\":true,\"type\":\"Array<string>\"},\
+             {\"name\":\"meta\",\"required\":true,\"type\":\"{ a: string; b: number }\"},\
+             {\"name\":\"untyped\",\"required\":true,\"type\":\"any\"}],\
+             \"format\":\"ts\"}"
+        );
+        let flags = one(&parse, node_kind::INTERFACE, "src::m::Flags");
+        assert!(flags.open && flags.field("on").is_some());
+        let computed = one(&parse, node_kind::INTERFACE, "src::m::Computed");
+        assert!(computed.open);
+        assert_eq!(computed.fields.len(), 1, "the computed key is skipped");
+        let picked = one(&parse, node_kind::INTERFACE, "src::m::Picked");
+        assert!(picked.open, "a utility base leaves the model open");
+        assert!(picked.extends.is_empty(), "a generic base is not listed");
+        assert_eq!(picked.fields.len(), 1);
+        // A method-only service contract and an empty marker describe no body.
+        assert!(schemas(&parse, node_kind::INTERFACE, "src::m::Repo").is_empty());
+        assert!(schemas(&parse, node_kind::INTERFACE, "src::m::Empty").is_empty());
+        let base = one(&parse, node_kind::INTERFACE, "src::m::Base");
+        assert_eq!(base.format, WireFormat::Ts);
+    }
+
+    #[test]
+    fn a_merged_interface_carries_one_cell_per_declaration() {
+        let src = "interface A { x: string }\ninterface A { y?: number }\n";
+        let parse = parse_file(src, "src/a.ts", "src::a", repo()).unwrap();
+        let got = schemas(&parse, node_kind::INTERFACE, "src::a::A");
+        assert_eq!(got.len(), 2, "the pass unions them: {got:?}");
+    }
+
+    #[test]
+    fn field_only_classes_are_models_and_service_classes_are_not() {
+        let src = "\
+export class Person {
+  name = '';
+  count = 0;
+  active = true;
+  when = new Date();
+  list = [];
+  age?: number;
+  id!: string;
+  maybe: string | undefined;
+  readonly kind: 'p' = 'p';
+  // a comment between members
+  constructor(public nickname: string, readonly code?: number, plain: boolean) {}
+}
+export class Child extends Person { extra: string; }
+export class Generic extends Base<string> { x: number; }
+export class Store {
+  private cache = new Map<string, Person>();
+  get(id: string) { return this.cache.get(id); }
+}
+export class Service { constructor(private http: HttpClient) {} }
+export class Hidden { #secret = 1; shown = 2; }
+export class Statics { static VERSION = 1; x = 2; }
+export class Getter { x = 1; get y() { return this.x; } }
+export class Handler { x = 1; onClick = () => this.x; }
+export class Protected { protected x = 1; }
+export class Bare { constructor() {} }
+@Component({ selector: 'app-x' })
+export class Widget { @Input() label = ''; }
+@Injectable()
+export class Api { base = '/api'; }
+";
+        let parse = parse_file(src, "src/p.ts", "src::p", repo()).unwrap();
+        let person = one(&parse, node_kind::CLASS, "src::p::Person");
+        assert_eq!(
+            person.to_payload(),
+            "{\"fields\":[\
+             {\"name\":\"name\",\"required\":true,\"type\":\"string\"},\
+             {\"name\":\"count\",\"required\":true,\"type\":\"number\"},\
+             {\"name\":\"active\",\"required\":true,\"type\":\"boolean\"},\
+             {\"name\":\"when\",\"required\":true,\"type\":\"Date\"},\
+             {\"array\":true,\"name\":\"list\",\"required\":true,\"type\":\"any[]\"},\
+             {\"name\":\"age\",\"required\":false,\"type\":\"number\"},\
+             {\"name\":\"id\",\"required\":true,\"type\":\"string\"},\
+             {\"name\":\"maybe\",\"required\":false,\"type\":\"string | undefined\"},\
+             {\"name\":\"kind\",\"required\":true,\"type\":\"'p'\"},\
+             {\"name\":\"nickname\",\"required\":true,\"type\":\"string\"},\
+             {\"name\":\"code\",\"required\":false,\"type\":\"number\"}],\
+             \"format\":\"ts\"}"
+        );
+        let child = one(&parse, node_kind::CLASS, "src::p::Child");
+        assert_eq!(child.extends, vec!["Person".to_string()]);
+        let generic = one(&parse, node_kind::CLASS, "src::p::Generic");
+        assert!(generic.open && generic.extends.is_empty());
+        for no_model in [
+            "Store", "Service", "Hidden", "Statics", "Getter", "Handler", "Protected", "Bare", "Widget", "Api",
+        ] {
+            assert!(
+                schemas(&parse, node_kind::CLASS, &format!("src::p::{no_model}")).is_empty(),
+                "{no_model} is no model"
+            );
+        }
+    }
+
+    /// The models-declared-fields fixture's TS file, cell for cell.
+    #[test]
+    fn fixture_models_declared_fields_web() {
+        let src = include_str!(
+            "../../../../bench/substrate-gap/fixtures/models-declared-fields/web/src/models/account.ts"
+        );
+        let parse = parse_file(src, "src/models/account.ts", "src::models::account", repo()).unwrap();
+        let q = |n: &str| format!("src::models::account::{n}");
+        assert_eq!(
+            schemas(&parse, node_kind::INTERFACE, &q("Account")),
+            vec![
+                "{\"extends\":[\"Audited\"],\"fields\":[\
+                 {\"name\":\"id\",\"required\":true,\"type\":\"string\"},\
+                 {\"name\":\"display-name\",\"required\":true,\"type\":\"string\"},\
+                 {\"name\":\"email\",\"required\":false,\"type\":\"string\"},\
+                 {\"array\":true,\"name\":\"roles\",\"required\":true,\"type\":\"string[]\"},\
+                 {\"name\":\"owner\",\"required\":true,\"type\":\"Person\"}],\
+                 \"format\":\"ts\"}"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            schemas(&parse, node_kind::INTERFACE, &q("Settings")),
+            vec![
+                "{\"fields\":[{\"name\":\"theme\",\"required\":true,\"type\":\"'light' | 'dark'\"}],\
+                 \"format\":\"ts\",\"open\":true}"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            schemas(&parse, node_kind::CLASS, &q("Person")),
+            vec![
+                "{\"fields\":[{\"name\":\"name\",\"required\":true,\"type\":\"string\"},\
+                 {\"name\":\"age\",\"required\":false,\"type\":\"number\"},\
+                 {\"name\":\"nickname\",\"required\":true,\"type\":\"string\"}],\"format\":\"ts\"}"
+                    .to_string()
+            ]
+        );
+        assert_eq!(schemas(&parse, node_kind::INTERFACE, &q("Audited")).len(), 1);
+        assert!(schemas(&parse, node_kind::CLASS, &q("AccountStore")).is_empty());
+        // Every payload reads back through the wire vocabulary unchanged.
+        for n in &parse.nodes {
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::SCHEMA_FIELDS) {
+                let schema = ModelSchema::from_cell(c).expect("a wire ModelSchema");
+                assert_eq!(schema.cell(), *c);
+            }
+        }
     }
 }
