@@ -23,16 +23,18 @@ pub fn parse_file(
     let src = source.as_bytes();
     let root = tree.root_node();
 
-    let mut acc = Acc::default();
+    let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     // The file-stem MODULE qname (e.g. `controller`). Elixir `import`/`alias`/`use`
     // forms live *inside* a `defmodule`, so the walk's `parent_qname` at that point
     // is the enclosing PACKAGE qname (`controller::MyAppWeb.UserController`), which
     // `resolve_imports_python` never finds in `module_by_qname` (MODULE nodes only)
     // → every import early-continues. Stash the file MODULE qname so `collect_import`
     // emits `from_module` = the file stem, matching what the graph registers.
-    acc.module_qname = module_qname.to_string();
-
-    let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
+    let mut acc = Acc {
+        module_qname: module_qname.to_string(),
+        module_id: Some(module_id),
+        ..Acc::default()
+    };
     acc.nodes.push(Node {
         id: module_id,
         repo,
@@ -58,6 +60,9 @@ pub fn parse_file(
             acc.endpoint_hits, file_rel_path
         );
     }
+    if let Some(line) = acc.types.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -80,6 +85,13 @@ struct Acc {
     nav: CodeNav,
     /// File-stem MODULE qname; the `from_module` every import resolves against.
     module_qname: String,
+    /// The file MODULE's id: the `from_module` of every IMPLEMENTS / INJECTS
+    /// ref (DH.17b), whose Bare name resolves against that file's bindings.
+    /// Set by `parse_file`; a direct `visit_top` in a test leaves it unset,
+    /// and then no ref is pushed.
+    module_id: Option<NodeId>,
+    /// DH.17b's per-file tallies (the `[elixir-types]` marker).
+    types: TypeCounts,
     /// Per-file dedup for the shared ENDPOINT nodes client calls mint.
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Client HTTP call sites emitted from this file (drives the fired-on marker).
@@ -138,7 +150,8 @@ fn visit_node(
         ),
         "defprotocol" => visit_defprotocol(node, src, file_rel, parent_qname, parent_id, repo, acc),
         "defstruct" => visit_defstruct(node, src, file_rel, parent_qname, parent_id, repo, acc),
-        "import" | "alias" | "use" => collect_import(node, src, acc),
+        "alias" => collect_import(node, src, true, acc),
+        "import" | "use" => collect_import(node, src, false, acc),
         _ => {}
     }
 }
@@ -170,12 +183,21 @@ fn visit_defmodule(
     // and it is the short name the graph's import tail fallback matches against.
     let short = name.rsplit('.').next().unwrap_or(&name).to_string();
     let qname = format!("{parent_qname}::{name}");
-    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
 
     // Elixir documentation is a module attribute in the body, not a comment
     // above the node: `@moduledoc` sits INSIDE the `do_block`, after the node
-    // the PACKAGE is built from, so it is pre-scanned before the push.
+    // the PACKAGE is built from, so it is pre-scanned before the push. So is
+    // the body's shape (DH.17b): a behaviour is an INTERFACE, and only an
+    // ExUnit case module's `test` blocks are test functions.
     let body = do_block_of(node);
+    let shape = body.map_or_else(BodyShape::default, |b| body_shape(b, src));
+    let kind = if shape.is_contract() {
+        acc.types.behaviours += 1;
+        node_kind::INTERFACE
+    } else {
+        node_kind::PACKAGE
+    };
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
     let doc = body.map_or(DocChoice::Leading, |b| moduledoc_choice(b, src));
     acc.count_doc(&doc, true);
     acc.nodes.push(Node {
@@ -191,12 +213,248 @@ fn visit_defmodule(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav
-        .record(id, &short, &qname, node_kind::PACKAGE, Some(parent_id));
+    acc.nav.record(id, &short, &qname, kind, Some(parent_id));
 
     if let Some(body) = body {
-        visit_module_body(body, src, file_rel, &qname, id, repo, acc);
+        let module = ModuleScope { qname: &qname, id, exunit: shape.exunit };
+        visit_module_body(body, src, file_rel, &module, repo, acc);
     }
+}
+
+/// The module a body walk is in: its qname and node id (the parent of every
+/// def, the `from` of every IMPLEMENTS / INJECTS ref), and whether it `use`s
+/// an ExUnit case template, so its `test` blocks are test functions.
+struct ModuleScope<'a> {
+    qname: &'a str,
+    id: NodeId,
+    exunit: bool,
+}
+
+/// What a `defmodule` body declares at its top level, read before the node
+/// is pushed: its kind depends on it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct BodyShape {
+    /// A `@callback` / `@macrocallback` attribute: the module is a behaviour.
+    callbacks: bool,
+    /// A statement that mints a child node: `def` / `defp` / `defmodule` /
+    /// `defprotocol` / `defstruct`, or (in an ExUnit case) a `test` /
+    /// `describe` block.
+    children: bool,
+    /// A `use ExUnit.Case` / `use <..>Case` line (Phoenix's `ConnCase` /
+    /// `DataCase` / `ChannelCase` `use ExUnit.Case` in turn).
+    exunit: bool,
+}
+
+impl BodyShape {
+    /// A behaviour (hexdocs.pm/elixir/typespecs.html#behaviours) that mints
+    /// no child is a pure contract: an INTERFACE, as `defprotocol` is.
+    ///
+    /// A behaviour that also defines functions (default helpers) stays a
+    /// PACKAGE: the graph indexes a module's FUNCTION children for call
+    /// resolution only under a MODULE / PACKAGE (`build_symbol_table`'s
+    /// `module_symbols`, which the Bare `package_symbol` branch and the
+    /// DH.17a full-name hook read), so an INTERFACE would cut every call
+    /// into its helpers. It still takes its `@behaviour` IMPLEMENTS edges;
+    /// only its kind stays. Removal path: once the graph indexes an Elixir
+    /// INTERFACE's FUNCTION children there, drop `!self.children`.
+    fn is_contract(self) -> bool {
+        self.callbacks && !self.children
+    }
+}
+
+/// [`BodyShape`] of a `defmodule` body: its direct children only, so a
+/// nested module's callbacks, defs and `use` lines never leak outward and a
+/// `quote` block inside a `defmacro __using__` (`@behaviour X` + default
+/// `def`s injected into the user) is not read.
+fn body_shape(body: TsNode, src: &[u8]) -> BodyShape {
+    let mut shape = BodyShape::default();
+    let mut cursor = body.walk();
+    let children: Vec<TsNode> = body.named_children(&mut cursor).collect();
+    for child in &children {
+        if let Some(call) = attribute_call(*child) {
+            let attr = call.child_by_field_name("target").map(|t| text_of(t, src));
+            if matches!(attr, Some("callback" | "macrocallback")) {
+                shape.callbacks = true;
+            }
+            continue;
+        }
+        if child.kind() != "call" {
+            continue;
+        }
+        match child.child_by_field_name("target").map(|t| text_of(t, src)) {
+            Some("def" | "defp" | "defmodule" | "defprotocol" | "defstruct") => {
+                shape.children = true;
+            }
+            Some("use")
+                if find_args(*child).is_some_and(|a| is_exunit_case(&first_arg_text(a, src))) =>
+            {
+                shape.exunit = true;
+            }
+            _ => {}
+        }
+    }
+    let tests = |c: &TsNode| {
+        matches!(exunit_block(*c, src), Some(ExUnitBlock::Test | ExUnitBlock::Describe))
+    };
+    if shape.exunit && children.iter().any(tests) {
+        shape.children = true;
+    }
+    shape
+}
+
+/// `use <alias>` names an ExUnit case template: `ExUnit.Case` itself, or an
+/// app's own `..Case` (`MyAppWeb.ConnCase`, `MyApp.DataCase`), which `use
+/// ExUnit.Case` in their `using` block. `ExUnit.CaseTemplate` (the module a
+/// template is built with) is not one.
+fn is_exunit_case(alias: &str) -> bool {
+    alias == "ExUnit.Case"
+        || alias
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.ends_with("Case") && is_module_alias(alias))
+}
+
+/// A dotted Elixir module alias as written (`Shop.PgUserRepo`): capitalised
+/// segments of letters, digits and `_`. An atom (`:gen_server`), a variable
+/// or `__MODULE__` is not one.
+fn is_module_alias(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('.').all(|seg| {
+            let mut chars = seg.chars();
+            chars.next().is_some_and(|c| c.is_ascii_uppercase())
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// The ExUnit block forms of a case module body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExUnitBlock {
+    /// `test "name" [, ctx] [do .. end | , do: ..]`
+    Test,
+    /// `describe "name" do .. end`
+    Describe,
+    /// `setup` / `setup_all`: fixtures, not tests.
+    Setup,
+}
+
+fn exunit_block(node: TsNode, src: &[u8]) -> Option<ExUnitBlock> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let block = match text_of(node.child_by_field_name("target")?, src) {
+        "test" => ExUnitBlock::Test,
+        "describe" => ExUnitBlock::Describe,
+        "setup" | "setup_all" => ExUnitBlock::Setup,
+        _ => return None,
+    };
+    // `test` / `describe` take the name as a string literal first; a call
+    // named `test` with any other first argument is not ExUnit's macro.
+    if block != ExUnitBlock::Setup {
+        let args = find_args(node)?;
+        let mut cursor = args.walk();
+        let first = args.named_children(&mut cursor).next()?;
+        if first.kind() != "string" {
+            return None;
+        }
+    }
+    Some(block)
+}
+
+/// The text of a `test` / `describe` call's leading string argument, as
+/// ExUnit spells it, except that a line break or tab inside a multi-line
+/// literal becomes a space: a qname stays one line.
+fn block_name(node: TsNode, src: &[u8]) -> Option<String> {
+    let args = find_args(node)?;
+    let mut cursor = args.walk();
+    let first = args.named_children(&mut cursor).next()?;
+    (first.kind() == "string").then(|| {
+        quoted_text(first, src)
+            .chars()
+            .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+            .collect()
+    })
+}
+
+/// The value of a call's `do:` keyword argument (`def f(x), do: g(x)`,
+/// `test "x", do: assert f()`): a one-liner's body.
+fn do_keyword_body<'a>(node: TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    keyword_value(find_args(node)?, "do", src)
+}
+
+/// DH.17b per-file tallies, the `[elixir-types]` marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TypeCounts {
+    /// `defmodule`s minted as INTERFACE (a behaviour: `@callback`, no child).
+    behaviours: usize,
+    /// `@behaviour X` IMPLEMENTS refs.
+    implements: usize,
+    /// `Application.compile_env` / `get_env` default-module INJECTS refs.
+    injects: usize,
+    /// ExUnit `test` blocks minted as FUNCTION.
+    exunit_tests: usize,
+}
+
+impl TypeCounts {
+    /// `[elixir-types] behaviours=<n> implements=<n> injects=<n>
+    /// exunit_tests=<n> path=<file>`, when any count is non-zero.
+    fn marker(&self, path: &str) -> Option<String> {
+        (self.behaviours + self.implements + self.injects + self.exunit_tests > 0).then(|| {
+            format!(
+                "[elixir-types] behaviours={} implements={} injects={} exunit_tests={} path={path}",
+                self.behaviours, self.implements, self.injects, self.exunit_tests
+            )
+        })
+    }
+}
+
+/// A module attribute naming another module the graph should link to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModuleRef {
+    /// `@behaviour Shop.Notifier`: the module implements that contract.
+    Behaviour(String),
+    /// `@repo Application.compile_env(:shop, :user_repo, Shop.PgUserRepo)`
+    /// (or `Application.get_env/3`): the default implementation the module
+    /// is configured with, the explicit-contract DI idiom (hexdocs.pm/mox).
+    Injected(String),
+}
+
+/// The [`ModuleRef`] a module-body statement makes, if any. Only a module
+/// alias names a target: `@behaviour :gen_server` (an Erlang module) and a
+/// `compile_env` / `get_env` without a default, or whose default is not a
+/// module alias (`Application.get_env(:shop, :repo)`, `.., nil)`), name
+/// nothing in the repo.
+fn module_ref_attr(node: TsNode, src: &[u8]) -> Option<ModuleRef> {
+    let call = attribute_call(node)?;
+    let attr = text_of(call.child_by_field_name("target")?, src);
+    let args = find_args(call)?;
+    let mut cursor = args.walk();
+    let value = args.named_children(&mut cursor).next()?;
+    if attr == "behaviour" {
+        let target = text_of(value, src).trim();
+        return (value.kind() == "alias" && is_module_alias(target))
+            .then(|| ModuleRef::Behaviour(target.to_string()));
+    }
+    if value.kind() != "call" {
+        return None;
+    }
+    let dot = value.child_by_field_name("target")?;
+    if dot.kind() != "dot" {
+        return None;
+    }
+    let module = text_of(dot.child_by_field_name("left")?, src);
+    let func = text_of(dot.child_by_field_name("right")?, src);
+    if module != "Application" || !matches!(func, "compile_env" | "get_env") {
+        return None;
+    }
+    let env_args = find_args(value)?;
+    let mut cursor = env_args.walk();
+    let parts: Vec<TsNode> = env_args.named_children(&mut cursor).collect();
+    let [_, _, default] = parts.as_slice() else {
+        return None;
+    };
+    let target = text_of(*default, src).trim();
+    (default.kind() == "alias" && is_module_alias(target))
+        .then(|| ModuleRef::Injected(target.to_string()))
 }
 
 /// The `do_block` child of a `defmodule` / `defprotocol` call.
@@ -216,15 +474,22 @@ fn do_block_of(node: TsNode) -> Option<TsNode> {
 /// Multi-clause functions (`def get(1)` / `def get(n)`) share one qname and
 /// `merge_parses` appends cells by id, so once an attribute has decided a
 /// function's doc, its later clauses emit no DOC at all.
+///
+/// DH.17b: `@behaviour X` and an `Application.compile_env` / `get_env`
+/// default-module attribute are module attributes too (they keep a pending
+/// `@doc`) and push their IMPLEMENTS / INJECTS ref ([`module_ref_attr`]).
+/// In an ExUnit case module (`module.exunit`) a `test` block is a test
+/// FUNCTION and a `describe` block's tests are walked with its name as
+/// prefix ([`visit_exunit_test`]); `setup` / `setup_all` emit nothing.
 fn visit_module_body(
     body: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
+    module: &ModuleScope,
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    let (parent_qname, parent_id) = (module.qname, module.id);
     let mut pending: Option<DocAttr> = None;
     let mut decided: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cursor = body.walk();
@@ -238,7 +503,26 @@ fn visit_module_body(
             }
             continue;
         }
+        if let Some(r) = module_ref_attr(child, src) {
+            acc.push_module_ref(parent_id, &r, line_at(child));
+            continue;
+        }
         if module_attribute(child) {
+            continue;
+        }
+        if module.exunit
+            && let Some(block) = exunit_block(child, src)
+        {
+            pending = None;
+            match block {
+                ExUnitBlock::Test => {
+                    visit_exunit_test(child, src, file_rel, module, None, repo, acc);
+                }
+                ExUnitBlock::Describe => {
+                    visit_exunit_describe(child, src, file_rel, module, repo, acc);
+                }
+                ExUnitBlock::Setup => {}
+            }
             continue;
         }
         if let Some(name) = def_call_name(child, src) {
@@ -314,11 +598,125 @@ fn visit_def(
             collect_calls_in(child, src, id, acc);
         }
     }
+    // DH.17b: a one-liner `def f(x), do: Mod.g(x)` carries its body in the
+    // `do:` keyword argument; its calls are the function's too.
+    if let Some(body) = do_keyword_body(node, src) {
+        collect_calls_in(body, src, id, acc);
+    }
     // Scan the WHOLE `def` call, not just its `do_block`: a one-liner
     // `def f(x), do: HTTPoison.get(url)` carries its body in the `do:` keyword
     // argument instead, and the head itself can never contain a client call.
     let hits = collect_client_endpoints_in(node, src, id, repo, file_rel, acc);
     acc.endpoint_hits += hits;
+}
+
+/// One ExUnit `test "<name>" [, ctx] do .. end` (or `, do: ..`, or the
+/// body-less "not implemented" `test "<name>"`) in a case module -> the
+/// FUNCTION ExUnit defines for it, named as ExUnit names it: `test <name>`,
+/// inside `describe "<d>"` `test <d> <name>`
+/// (hexdocs.pm/ex_unit/ExUnit.Case.html#test/3). CODE / POSITION and the
+/// leading-comment DOC, DEFINES from the module, and the calls of its body as
+/// its CallSites, so CL.5b's function-level TESTS pairing sees the test as
+/// a root of its test module.
+fn visit_exunit_test(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module: &ModuleScope,
+    describe: Option<&str>,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name) = block_name(node, src) else {
+        return;
+    };
+    let name = match describe {
+        Some(d) => format!("test {d} {name}"),
+        None => format!("test {name}"),
+    };
+    let qname = format!("{}::{name}", module.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+    acc.types.exunit_tests += 1;
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: entity_cells(&node, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: module.id,
+        to: id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.nav.record(id, &name, &qname, node_kind::FUNCTION, Some(module.id));
+    if let Some(body) = do_block_of(node) {
+        collect_calls_in(body, src, id, acc);
+    }
+    if let Some(body) = do_keyword_body(node, src) {
+        collect_calls_in(body, src, id, acc);
+    }
+}
+
+/// `describe "<d>" do .. end`: each `test` inside is a test FUNCTION named
+/// with the describe prefix; `setup` blocks emit nothing; any other
+/// statement walks as in the module body (ExUnit allows no nested
+/// `describe`).
+fn visit_exunit_describe(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module: &ModuleScope,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let (Some(describe), Some(body)) = (block_name(node, src), do_block_of(node)) else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        match exunit_block(child, src) {
+            Some(ExUnitBlock::Test) => {
+                visit_exunit_test(child, src, file_rel, module, Some(&describe), repo, acc);
+            }
+            Some(ExUnitBlock::Describe | ExUnitBlock::Setup) => {}
+            None => visit_node(child, src, file_rel, module.qname, module.id, repo, acc),
+        }
+    }
+}
+
+impl Acc {
+    /// Push the IMPLEMENTS / INJECTS ref a module attribute makes, `from` the
+    /// module that declares it. The qualifier is the target's last dotted
+    /// segment: Elixir module nodes are named by it (`visit_defmodule`'s
+    /// `short`), so `resolve_refs` binds it through the file's `alias`
+    /// binding, the file's own modules, then the one repo-wide module so
+    /// named; two same-named modules in different namespaces stay
+    /// unresolved.
+    fn push_module_ref(&mut self, from: NodeId, r: &ModuleRef, line: u32) {
+        let Some(from_module) = self.module_id else {
+            return;
+        };
+        let (target, category) = match r {
+            ModuleRef::Behaviour(t) => {
+                self.types.implements += 1;
+                (t, edge_category::IMPLEMENTS)
+            }
+            ModuleRef::Injected(t) => {
+                self.types.injects += 1;
+                (t, edge_category::INJECTS)
+            }
+        };
+        let short = target.rsplit('.').next().unwrap_or(target);
+        self.refs.push(UnresolvedRef {
+            from,
+            from_module,
+            qualifier: CallQualifier::Bare(short.to_string()),
+            category,
+            line,
+        });
+    }
 }
 
 fn visit_defprotocol(
@@ -390,10 +788,14 @@ fn visit_defstruct(
         .record(id, "__struct__", &qname, node_kind::STRUCT, Some(parent_id));
 }
 
-fn collect_import(node: TsNode, src: &[u8], acc: &mut Acc) {
+/// `is_alias`: the line is an `alias`, whose `as: Name` option names the
+/// binding (`alias Shop.Cart, as: C` binds `C`, never `Cart`; DH.17b, the
+/// DH.17a handoff). `import` / `use` take no `as:`.
+fn collect_import(node: TsNode, src: &[u8], is_alias: bool, acc: &mut Acc) {
     let Some(args) = find_args(node) else {
         return;
     };
+    let alias = if is_alias { alias_as(args, src) } else { None };
     // `import Plug.Conn` / `alias MyApp.Repo` / `use Phoenix.Controller`. The first
     // argument is the dotted module path; the graph's tail fallback splits it on
     // `.` and binds the final segment (`Conn`/`Repo`) to a unique in-repo module by
@@ -404,13 +806,38 @@ fn collect_import(node: TsNode, src: &[u8], acc: &mut Acc) {
     if !path.is_empty() {
         acc.imports.push(ImportStmt {
             from_module: acc.module_qname.clone(),
-            target: ImportTarget::Module {
-                path,
-                alias: None,
-            },
+            target: ImportTarget::Module { path, alias },
             line: line_at(node),
         });
     }
+}
+
+/// The module alias an `alias X, as: Y` line's `as:` keyword names (`Y`).
+fn alias_as(args: TsNode, src: &[u8]) -> Option<String> {
+    let value = keyword_value(args, "as", src)?;
+    let name = text_of(value, src).trim();
+    (value.kind() == "alias" && is_module_alias(name)).then(|| name.to_string())
+}
+
+/// The value of the `<key>:` pair among an `arguments` node's keyword
+/// arguments (`do:` of a one-liner, `as:` of an `alias`).
+fn keyword_value<'a>(args: TsNode<'a>, key: &str, src: &[u8]) -> Option<TsNode<'a>> {
+    let mut cursor = args.walk();
+    let keywords: Vec<TsNode<'a>> = args
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "keywords")
+        .collect();
+    keywords.into_iter().find_map(|kw| {
+        let mut pairs = kw.walk();
+        let pairs: Vec<TsNode<'a>> = kw.named_children(&mut pairs).collect();
+        pairs.into_iter().find_map(|pair| {
+            let k = pair.child_by_field_name("key")?;
+            // The `keyword` node's text is `"do: "`: trim the blank first.
+            (text_of(k, src).trim().trim_end_matches(':') == key)
+                .then(|| pair.child_by_field_name("value"))
+                .flatten()
+        })
+    })
 }
 
 fn first_arg_text(args: TsNode, src: &[u8]) -> String {
@@ -1713,6 +2140,387 @@ end
             endpoint_names(&fp).is_empty(),
             "no endpoint may be minted: {:?}",
             endpoint_names(&fp)
+        );
+    }
+
+    // --- DH.17b: behaviours, @behaviour, compile_env DI, ExUnit tests -------
+
+    /// The matrix/elixir/impl probe's two files.
+    const NOTIFIER: &str = "defmodule Shop.Notifier do\n  @callback notify(String.t()) :: :ok\nend\n";
+    const EMAIL_NOTIFIER: &str = "defmodule Shop.EmailNotifier do\n  @behaviour Shop.Notifier\n\n  @impl true\n  def notify(_msg), do: :ok\nend\n";
+    /// The matrix/elixir/injects probe's two files.
+    const ACCOUNTS_DI: &str = "defmodule Shop.Accounts do\n  @repo Application.compile_env(:shop, :user_repo, Shop.PgUserRepo)\n\n  def list_users, do: @repo.all()\nend\n";
+    const USER_REPO: &str = "defmodule Shop.UserRepo do\n  @callback all() :: [map()]\nend\n\ndefmodule Shop.PgUserRepo do\n  @behaviour Shop.UserRepo\n\n  def all, do: []\nend\n";
+    /// The matrix/elixir/tests probe's test file.
+    const CART_TEST: &str = "defmodule CartTest do\n  use ExUnit.Case\n\n  test \"sums\" do\n    assert Cart.total([1, 2]) == 3\n  end\nend\n";
+
+    /// Re-parse `source` with the Acc kept, for the marker counters.
+    fn counts_of(source: &str, file: &str, module_qname: &str) -> TypeCounts {
+        let lang: tree_sitter::Language = tree_sitter_elixir::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_qname);
+        let mut acc = Acc {
+            module_qname: module_qname.to_string(),
+            module_id: Some(module_id),
+            ..Acc::default()
+        };
+        visit_top(tree.root_node(), source.as_bytes(), file, module_qname, module_id, repo(), &mut acc);
+        acc.types
+    }
+
+    /// The kind the nav recorded for `qname`, if any.
+    fn kind_of(fp: &FileParse, qname: &str) -> Option<glia_core::NodeKindId> {
+        fp.nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .and_then(|(id, _)| fp.nav.kind_by_id.get(id).copied())
+    }
+
+    /// `(category, Bare name)` of every ref whose `from` is the node `qname`.
+    fn refs_from(fp: &FileParse, qname: &str) -> Vec<(glia_core::EdgeCategoryId, String)> {
+        let ids: Vec<NodeId> = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
+            .collect();
+        fp.refs
+            .iter()
+            .filter(|r| ids.contains(&r.from))
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some((r.category, n.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The qnames of every FUNCTION in the parse, sorted.
+    fn functions(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::FUNCTION)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The CallSites whose `from` is the FUNCTION `qname`.
+    fn calls_from(fp: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname);
+        fp.calls.iter().filter(|c| c.from == id).map(|c| c.qualifier.clone()).collect()
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+    }
+
+    #[test]
+    fn behaviour_module_is_interface() {
+        let fp = parse_file(NOTIFIER, "lib/notifier.ex", "lib::notifier", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::notifier::Shop.Notifier"), Some(node_kind::INTERFACE));
+        // Same qname, same short name: only the kind (and so the NodeId) moved.
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "lib::notifier::Shop.Notifier");
+        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("Notifier"));
+        assert!(fp.nodes.iter().any(|n| n.id == id));
+        assert!(
+            fp.edges.iter().any(|e| e.to == id && e.category == edge_category::CONTAINS),
+            "the file MODULE still CONTAINS the behaviour"
+        );
+        // `@macrocallback` declares a contract too.
+        let src = "defmodule Shop.Dsl do\n  @macrocallback build(term) :: Macro.t()\nend\n";
+        let fp = parse_file(src, "lib/dsl.ex", "lib::dsl", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::dsl::Shop.Dsl"), Some(node_kind::INTERFACE));
+    }
+
+    #[test]
+    fn plain_module_stays_package() {
+        // Every module of the existing docs tests (no `@callback`) is a PACKAGE.
+        let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::accounts::MyApp.Accounts"), Some(node_kind::PACKAGE));
+        // A module that only implements a behaviour stays a PACKAGE.
+        let fp = parse_file(EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::email_notifier::Shop.EmailNotifier"), Some(node_kind::PACKAGE));
+        // A nested module's `@callback` makes the NESTED module the contract,
+        // never its parent (`body_shape` reads direct children only).
+        let src = "defmodule Outer do\n  defmodule Port do\n    @callback x() :: :ok\n  end\nend\n";
+        let fp = parse_file(src, "lib/outer.ex", "lib::outer", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::outer::Outer"), Some(node_kind::PACKAGE));
+        assert_eq!(kind_of(&fp, "lib::outer::Outer::Port"), Some(node_kind::INTERFACE));
+    }
+
+    #[test]
+    fn behaviour_with_helpers_stays_package() {
+        // Callbacks plus a default helper: the graph indexes FUNCTION children
+        // for call resolution only under a PACKAGE, so this stays one; the
+        // `@behaviour` IMPLEMENTS of its implementations still land on it.
+        let src = r#"
+defmodule Shop.Worker do
+  @callback perform(map) :: :ok
+  def enqueue(args), do: perform_later(args)
+  defp perform_later(args), do: args
+end
+"#;
+        let fp = parse_file(src, "lib/worker.ex", "lib::worker", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::worker::Shop.Worker"), Some(node_kind::PACKAGE));
+        assert_eq!(counts_of(src, "lib/worker.ex", "lib::worker").behaviours, 0);
+        // A `defmacro __using__` that injects `@behaviour` + default defs is
+        // still a pure contract: the `quote` body is not the module's.
+        let src = r#"
+defmodule Shop.Handler do
+  @callback handle(term) :: :ok
+  defmacro __using__(_opts) do
+    quote do
+      @behaviour Shop.Handler
+      def handle(_), do: :ok
+      defoverridable handle: 1
+    end
+  end
+end
+"#;
+        let fp = parse_file(src, "lib/handler.ex", "lib::handler", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::handler::Shop.Handler"), Some(node_kind::INTERFACE));
+        assert!(fp.refs.is_empty(), "a quoted @behaviour is the user's, not this module's");
+    }
+
+    #[test]
+    fn behaviour_attribute_emits_implements_ref() {
+        let fp = parse_file(EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", repo()).unwrap();
+        assert_eq!(
+            refs_from(&fp, "lib::email_notifier::Shop.EmailNotifier"),
+            vec![(edge_category::IMPLEMENTS, "Notifier".to_string())]
+        );
+        let r = &fp.refs[0];
+        assert_eq!(r.from_module, NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::email_notifier"));
+        assert_eq!(r.line, 1, "the @behaviour line, 0-based");
+        // An Erlang behaviour (`:gen_server`) names no in-repo module.
+        let src = "defmodule Shop.Srv do\n  @behaviour :gen_server\n  def init(s), do: {:ok, s}\nend\n";
+        let fp = parse_file(src, "lib/srv.ex", "lib::srv", repo()).unwrap();
+        assert!(fp.refs.is_empty(), "{:?}", fp.refs);
+        // `@behaviour` keeps a pending `@doc`, like any module attribute.
+        let src = "defmodule M do\n  @doc \"Runs.\"\n  @behaviour Shop.Job\n  def run, do: :ok\nend\n";
+        let fp = parse_file(src, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "run"), vec!["Runs."]);
+        assert_eq!(refs_from(&fp, "lib::m::M"), vec![(edge_category::IMPLEMENTS, "Job".to_string())]);
+    }
+
+    #[test]
+    fn compile_env_default_emits_injects_ref() {
+        let fp = parse_file(ACCOUNTS_DI, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(
+            refs_from(&fp, "lib::accounts::Shop.Accounts"),
+            vec![(edge_category::INJECTS, "PgUserRepo".to_string())]
+        );
+        assert_eq!(fp.refs[0].line, 1);
+        // Application.get_env/3 with a module default is the runtime twin.
+        let src = "defmodule Shop.Mailer do\n  @adapter Application.get_env(:shop, :mail_adapter, Shop.SmtpAdapter)\nend\n";
+        let fp = parse_file(src, "lib/mailer.ex", "lib::mailer", repo()).unwrap();
+        assert_eq!(
+            refs_from(&fp, "lib::mailer::Shop.Mailer"),
+            vec![(edge_category::INJECTS, "SmtpAdapter".to_string())]
+        );
+    }
+
+    #[test]
+    fn get_env_without_default_emits_nothing() {
+        let src = r#"
+defmodule Shop.Accounts do
+  @repo Application.get_env(:shop, :user_repo)
+  @strict Application.compile_env!(:shop, :strict_repo)
+  @nothing Application.compile_env(:shop, :maybe, nil)
+  @atom Application.get_env(:shop, :mod, :shop_repo)
+  @other Config.compile_env(:shop, :x, Shop.Repo)
+  def list_users, do: @repo.all()
+end
+"#;
+        let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert!(fp.refs.is_empty(), "{:?}", fp.refs);
+        assert_eq!(counts_of(src, "lib/accounts.ex", "lib::accounts"), TypeCounts::default());
+    }
+
+    #[test]
+    fn exunit_test_block_is_a_function_with_calls() {
+        let fp = parse_file(CART_TEST, "test/cart_test.exs", "test::cart_test", repo()).unwrap();
+        let qname = "test::cart_test::CartTest::test sums";
+        assert_eq!(functions(&fp), vec![qname.to_string()]);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname);
+        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("test sums"));
+        let pkg = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "test::cart_test::CartTest");
+        assert_eq!(fp.nav.parent_of.get(&id), Some(&pkg));
+        assert!(fp.edges.iter().any(|e| e.from == pkg && e.to == id && e.category == edge_category::DEFINES));
+        let node = fp.nodes.iter().find(|n| n.id == id).expect("test FUNCTION node");
+        let pos = node.cells.iter().find(|c| c.kind == cell_type::POSITION).expect("POSITION");
+        assert!(matches!(&pos.payload, CellPayload::Json(j) if j.contains("test/cart_test.exs")));
+        let calls = calls_from(&fp, qname);
+        assert!(calls.contains(&attr("Cart", "total")), "{calls:?}");
+        let site = fp.calls.iter().find(|c| c.qualifier == attr("Cart", "total")).unwrap();
+        assert_eq!(site.line, 4, "the call's own row");
+        // The test module itself is no contract.
+        assert_eq!(kind_of(&fp, "test::cart_test::CartTest"), Some(node_kind::PACKAGE));
+    }
+
+    #[test]
+    fn describe_prefixes_the_test_name() {
+        let src = r#"
+defmodule MyAppWeb.CartControllerTest do
+  use MyAppWeb.ConnCase, async: true
+
+  setup do
+    Cart.reset()
+    :ok
+  end
+
+  describe "total" do
+    setup %{conn: conn} do
+      {:ok, conn: conn}
+    end
+
+    test "sums", %{conn: conn} do
+      Cart.total([1, 2])
+    end
+
+    test "empty is zero", do: Cart.total([])
+  end
+
+  test "pending"
+end
+"#;
+        let fp = parse_file(src, "test/cart_controller_test.exs", "test::cart_controller_test", repo()).unwrap();
+        let m = "test::cart_controller_test::MyAppWeb.CartControllerTest";
+        assert_eq!(
+            functions(&fp),
+            vec![
+                format!("{m}::test pending"),
+                format!("{m}::test total empty is zero"),
+                format!("{m}::test total sums"),
+            ]
+        );
+        assert_eq!(calls_from(&fp, &format!("{m}::test total sums")), vec![attr("Cart", "total")]);
+        // A one-liner `test .., do: ..` carries its body in the `do:` keyword.
+        assert_eq!(calls_from(&fp, &format!("{m}::test total empty is zero")), vec![attr("Cart", "total")]);
+        // `setup` blocks are no tests: `Cart.reset()` belongs to no function.
+        assert!(fp.calls.iter().all(|c| c.qualifier != attr("Cart", "reset")), "{:?}", fp.calls);
+        assert_eq!(counts_of(src, "test/cart_controller_test.exs", "test::cart_controller_test").exunit_tests, 3);
+        // A line break inside the literal is a space in the qname.
+        let src = "defmodule T do\n  use ExUnit.Case\n  test \"two\n  lines\" do\n    :ok\n  end\nend\n";
+        let fp = parse_file(src, "test/t_test.exs", "test::t_test", repo()).unwrap();
+        assert_eq!(functions(&fp), vec!["test::t_test::T::test two   lines".to_string()]);
+    }
+
+    #[test]
+    fn non_case_module_test_call_is_no_function() {
+        // `test` is an ordinary name outside an ExUnit case module.
+        let src = r#"
+defmodule Shop.Lab do
+  use Shop.Experiment
+  test "x" do
+    Cart.total([])
+  end
+end
+"#;
+        let fp = parse_file(src, "lib/lab.ex", "lib::lab", repo()).unwrap();
+        assert!(functions(&fp).is_empty(), "{:?}", functions(&fp));
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+        // `ExUnit.CaseTemplate` builds a template; it is not a case module.
+        let src = "defmodule MyApp.DataCase do\n  use ExUnit.CaseTemplate\n  test \"x\" do\n    :ok\n  end\nend\n";
+        let fp = parse_file(src, "test/support/data_case.ex", "test::support::data_case", repo()).unwrap();
+        assert!(functions(&fp).is_empty(), "{:?}", functions(&fp));
+        // Inside a case module, a `test` call whose first argument is no
+        // string literal is not ExUnit's macro.
+        let src = "defmodule T do\n  use ExUnit.Case\n  test(name, do: :ok)\nend\n";
+        let fp = parse_file(src, "test/t_test.exs", "test::t_test", repo()).unwrap();
+        assert!(functions(&fp).is_empty(), "{:?}", functions(&fp));
+    }
+
+    #[test]
+    fn one_liner_def_body_calls_are_collected() {
+        let src = "defmodule Shop.Api do\n  def total(xs), do: Shop.Cart.total(xs)\n  defp helper(x), do: normalise(x)\nend\n";
+        let fp = parse_file(src, "lib/api.ex", "lib::api", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::api::Shop.Api::total"), vec![attr("Shop.Cart", "total")]);
+        assert_eq!(
+            calls_from(&fp, "lib::api::Shop.Api::helper"),
+            vec![CallQualifier::Bare("normalise".to_string())]
+        );
+        // A `do_block` body is read once, as before.
+        let src = "defmodule M do\n  def f(x) do\n    g(x)\n  end\nend\n";
+        let fp = parse_file(src, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::m::M::f"), vec![CallQualifier::Bare("g".to_string())]);
+    }
+
+    #[test]
+    fn alias_as_names_the_binding() {
+        let src = r#"
+defmodule Shop.Web do
+  alias Shop.Cart, as: C
+  alias Shop.Order
+  import Shop.Helpers
+  use Shop.Schema, as: Ignored
+end
+"#;
+        let fp = parse_file(src, "lib/web.ex", "lib::web", repo()).unwrap();
+        let targets: Vec<(String, Option<String>)> = fp
+            .imports
+            .iter()
+            .filter_map(|i| match &i.target {
+                ImportTarget::Module { path, alias } => Some((path.clone(), alias.clone())),
+                ImportTarget::Symbol { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                ("Shop.Cart".to_string(), Some("C".to_string())),
+                ("Shop.Order".to_string(), None),
+                ("Shop.Helpers".to_string(), None),
+                // `as:` is an `alias` option only; a `use` passes it to `__using__`.
+                ("Shop.Schema".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn type_counters_match_the_fixture_markers() {
+        let cases = [
+            (NOTIFIER, "lib/notifier.ex", "lib::notifier", (1, 0, 0, 0)),
+            (EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", (0, 1, 0, 0)),
+            (USER_REPO, "lib/user_repo.ex", "lib::user_repo", (1, 1, 0, 0)),
+            (ACCOUNTS_DI, "lib/accounts.ex", "lib::accounts", (0, 0, 1, 0)),
+            (CART_TEST, "test/cart_test.exs", "test::cart_test", (0, 0, 0, 1)),
+        ];
+        for (src, file, module, (b, i, j, t)) in cases {
+            let c = counts_of(src, file, module);
+            assert_eq!(
+                (c.behaviours, c.implements, c.injects, c.exunit_tests),
+                (b, i, j, t),
+                "{file}"
+            );
+        }
+        assert_eq!(
+            counts_of(NOTIFIER, "lib/notifier.ex", "lib::notifier").marker("lib/notifier.ex").as_deref(),
+            Some("[elixir-types] behaviours=1 implements=0 injects=0 exunit_tests=0 path=lib/notifier.ex")
+        );
+        assert_eq!(
+            counts_of(USER_REPO, "lib/user_repo.ex", "lib::user_repo").marker("lib/user_repo.ex").as_deref(),
+            Some("[elixir-types] behaviours=1 implements=1 injects=0 exunit_tests=0 path=lib/user_repo.ex")
+        );
+        // A file with none of the four prints nothing.
+        assert_eq!(counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"), None);
+    }
+
+    #[test]
+    fn user_repo_probe_contract_and_implementation() {
+        let fp = parse_file(USER_REPO, "lib/user_repo.ex", "lib::user_repo", repo()).unwrap();
+        assert_eq!(kind_of(&fp, "lib::user_repo::Shop.UserRepo"), Some(node_kind::INTERFACE));
+        assert_eq!(kind_of(&fp, "lib::user_repo::Shop.PgUserRepo"), Some(node_kind::PACKAGE));
+        assert_eq!(
+            refs_from(&fp, "lib::user_repo::Shop.PgUserRepo"),
+            vec![(edge_category::IMPLEMENTS, "UserRepo".to_string())]
         );
     }
 }

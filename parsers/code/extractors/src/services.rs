@@ -55,7 +55,8 @@
 //!     `Phoenix.LiveView` / `Phoenix.Channel` or
 //!     `use <App>Web, :controller` / `:live_view` / `:channel`
 //!     (`phoenix`), `use Oban.Worker` (`oban_worker`). The module is a
-//!     PACKAGE, so only for Elixir the owner index admits PACKAGE.
+//!     PACKAGE (an INTERFACE when it is a behaviour, DH.17b), so only for
+//!     Elixir the owner index admits PACKAGE and INTERFACE.
 //!   - Dart: `@injectable` / `@Injectable()` / `@lazySingleton` /
 //!     `@LazySingleton()` / `@singleton` / `@Singleton()` directly above
 //!     the class (`injectable`); `extends GetxService` /
@@ -111,9 +112,11 @@ pub fn extract_service_nodes(
         nav: CodeNav::default(),
     };
 
-    // An Elixir `defmodule` is a PACKAGE: the unit its `use` lines classify.
-    // Other languages' PACKAGEs (namespaces, Ruby modules) are never owners.
-    let admits_package = lang == "elixir";
+    // An Elixir `defmodule` is a PACKAGE, or an INTERFACE when it is a
+    // behaviour (`@callback`, DH.17b): the unit its `use` lines classify.
+    // Other languages' PACKAGEs (namespaces, Ruby modules) and INTERFACEs are
+    // never owners.
+    let admits_module = lang == "elixir";
     let qname_to_class: HashMap<&str, NodeId> = fp_nav
         .qname_by_id
         .iter()
@@ -121,7 +124,7 @@ pub fn extract_service_nodes(
             let kind = fp_nav.kind_by_id.get(id).copied()?;
             if kind == node_kind::CLASS
                 || kind == node_kind::STRUCT
-                || (admits_package && kind == node_kind::PACKAGE)
+                || (admits_module && (kind == node_kind::PACKAGE || kind == node_kind::INTERFACE))
             {
                 Some((qn.as_str(), *id))
             } else {
@@ -2096,6 +2099,28 @@ class Plain {}
                 .iter()
                 .all(|e| e.category == edge_category::CONTAINS)
         );
+    }
+
+    /// DH.17b: an Elixir behaviour module (`@callback`) is an INTERFACE; a
+    /// `use` line of its own body still classifies it, so it keeps its LB.3
+    /// ROLE through the SERVICE overlay the fold merges into it.
+    #[test]
+    fn elixir_behaviour_module_keeps_role() {
+        let src = "defmodule MyApp.Store do\n  use GenServer\n  @callback fetch(term) :: term\nend\n";
+        let (nav, module_id, _, _) = nav_with_owner(node_kind::INTERFACE, "worker::MyApp.Store", &[]);
+        let out = extract_service_nodes(src, "elixir", &nav, module_id, repo());
+        assert_eq!(out.nodes.len(), 1, "got {:?}", out.nodes);
+        assert_eq!(
+            out.nodes[0].id,
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::SERVICE, "worker::MyApp.Store")
+        );
+        assert_eq!(out.nav.parent_of.get(&out.nodes[0].id), Some(&module_id));
+        // An INTERFACE is an owner for Elixir only: the Java detector names
+        // `Store`, but the only declaration so named is an INTERFACE.
+        let src = "@Service\npublic class Store {}\n";
+        let (nav, module_id, _, _) = nav_with_owner(node_kind::INTERFACE, "m::Store", &[]);
+        let out = extract_service_nodes(src, "java", &nav, module_id, repo());
+        assert!(out.nodes.is_empty(), "got {:?}", out.nodes);
     }
 
     /// PACKAGE is an owner for Elixir only: a Ruby `module` never is.

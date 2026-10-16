@@ -12,18 +12,24 @@
     {
       "kind": "INTERFACE",
       "name": "UserRepo",
-      "note": "the injected contract: a behaviour (@callback), the type the consumer depends on"
+      "note": "the injected contract: a behaviour (@callback)"
     }
   ],
   "expect_edges": [
     {
       "from": "Accounts",
-      "to": "UserRepo",
+      "to": "PgUserRepo",
       "category": "INJECTS",
-      "note": "INTENDED: Shop.Accounts takes its repository from Application.compile_env(:shop, :user_repo, Shop.PgUserRepo), the explicit-contract DI idiom (config picks the implementation, Mox swaps it in tests); the default implementation declares @behaviour Shop.UserRepo"
+      "note": "the default implementation the compile_env site names (DH.17): Shop.Accounts takes its repository from Application.compile_env(:shop, :user_repo, Shop.PgUserRepo), the explicit-contract DI idiom (config picks the implementation, Mox swaps it in tests)"
+    },
+    {
+      "from": "PgUserRepo",
+      "to": "Shop.UserRepo",
+      "category": "IMPLEMENTS",
+      "note": "@behaviour Shop.UserRepo: the contract one hop on"
     }
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "Elixir's DI idiom: a module attribute read from Application.compile_env with a default implementation that declares @behaviour of the contract (Mox 'explicit contracts'). CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Elixir modules are PACKAGE nodes and a behaviour is not an INTERFACE (the elixir/impl probe measures the same gap), and there is no Elixir DI rule reading Application.compile_env / Application.get_env module attributes."
+  "note": "Elixir's DI idiom: a module attribute read from Application.compile_env with a default implementation that declares @behaviour of the contract (Mox 'explicit contracts'). DH.17: INJECTS retargeted to what the source names, as Java / TS INJECTS point at the declared parameter type, and the contract asserted one IMPLEMENTS hop on; before, the grader's substring match accepted PgUserRepo for `UserRepo` by accident. CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None: Elixir modules were PACKAGE nodes, a behaviour was not an INTERFACE, and no Elixir DI rule read Application.compile_env / Application.get_env module attributes (DH.17b)."
 }
