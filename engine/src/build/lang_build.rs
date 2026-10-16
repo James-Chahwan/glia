@@ -733,8 +733,12 @@ const TSCONFIG_FILES: [&str; 2] = ["tsconfig.json", "tsconfig.base.json"];
 /// repo relying on a fallback target does not bind (never mis-binds); an
 /// `extends` chain is not followed (a file takes the aliases of the nearest
 /// enclosing dir whose tsconfig declares `paths`, [`TsAliasSet::scope_of`]);
-/// an alias naming a directory gets no implicit `index.ts` (the relative
-/// resolver has none either); a `baseUrl` with no `paths` maps nothing.
+/// a `baseUrl` with no `paths` maps nothing. An alias naming a directory
+/// maps to the directory's qname, and the graph builder binds it, like a
+/// relative specifier, to the directory's index module when no same-stem
+/// file exists (DT.1b, IMPORTS rule `dir_index`: `@core/models` ->
+/// `src::app::core::models::index`; a file `models.ts` wins, as tsc orders
+/// them).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TsAliases {
     /// The tsconfig's dir, repo-relative, `/`-separated, `""` at the root.
@@ -976,8 +980,9 @@ fn ts_path_qname(path: &str) -> Option<String> {
 /// `paths` of the importer's scope (`@core/auth.service` under
 /// `"@core/*": ["app/core/*"]` with `baseUrl` `./src` ->
 /// `src::app::core::auth.service`). An unmatched bare specifier is a package:
-/// `None`. A mapped qname no module has binds nothing: `resolve_imports_ts`
-/// looks it up strictly.
+/// `None`. A mapped qname no module has binds only its directory's index
+/// module (DT.1b, `<qname>::index`): `resolve_imports_ts` looks both up
+/// strictly, never by a tail guess.
 pub(super) fn resolve_ts_source_aliased(
     from_module: &str,
     specifier: &str,

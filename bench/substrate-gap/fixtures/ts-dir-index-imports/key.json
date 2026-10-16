@@ -1,0 +1,15 @@
+{
+  "framework": "ts-dir-index-imports",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_edges": [
+    {"from": "web::src::app::core::services::account.service", "to": "web::src::app::core::models::index", "category": "IMPORTS", "exact": true, "note": "`from '../models'` names a directory with no models.ts beside it: tsc / Node load models/index.ts (rule dir_index)"},
+    {"from": "web::src::app::core::services::account.service::AccountService::label", "to": "web::src::app::core::models::index::accountLabel", "category": "CALLS", "exact": true, "note": "the named binding `accountLabel` follows the directory import into index.ts"},
+    {"from": "web::src::app::core::services::report.service", "to": "web::src::app::core::format", "category": "IMPORTS", "exact": true, "note": "`from '../format'`: the file format.ts wins over the directory format/ (tsc tries <dir>.ts before <dir>/index.ts)"}
+  ],
+  "forbid": [
+    {"from": "web::src::app::core::services::report.service", "to": "web::src::app::core::format::index", "category": "IMPORTS"},
+    {"from": "web::src::app::core::services::report.service::ReportService::render", "to": "web::src::app::core::format::index::pad", "category": "CALLS"}
+  ],
+  "note": "DT.1b: TypeScript directory imports resolve to the directory's index module. Measured on a Kina 8ac238c copy: 81 frontend files hold 82 import statements of `../models`, `../../core/models` or `../../../core/models` (core/models/index.ts, where every model interface lives), and 0 IMPORTS edges reached frontend::src::app::core::models::index before this packet. format.ts beside format/index.ts pins the file-first order; its forbid rows catch a dir arm that runs before the file lookup."
+}

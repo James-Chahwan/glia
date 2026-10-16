@@ -791,6 +791,14 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
 /// every public top-level name of its library once every statement has run
 /// ([`bind_dart_library_names`]); a TS-family plain import stays a bare
 /// side-effect import that binds nothing.
+///
+/// DT.1b: a source naming a directory with no same-stem file binds the
+/// directory's index module (`from '../models'` -> `models/index.ts`, rule
+/// `dir_index`, [`ts_target`]), relative and tsconfig-alias specifiers
+/// alike, so a named import binds the name `index.ts` declares. A re-export
+/// barrel (`export * from './x'`) emits no import statement, so a name the
+/// index only re-exports binds nothing. Prints the `[imports] dir-index`
+/// marker ([`DirIndexBinds::marker`]).
 pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
@@ -800,6 +808,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     // DF.4b: (importer, library) of each bound `.dart` import without an
     // alias, in statement order.
     let mut plain_dart: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut dir_index = DirIndexBinds::default();
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -819,6 +828,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 else {
                     continue;
                 };
+                dir_index.record(rule, path);
                 import_edge(g, from_mod_id, target_id, rule, stmt.line);
                 // Namespace import alias is the binding; a TS bare side-effect
                 // import has none, a Dart plain import binds its library's
@@ -847,6 +857,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 else {
                     continue;
                 };
+                dir_index.record(rule, module);
                 import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
                 let bound = alias.clone().unwrap_or_else(|| name.clone());
                 // Default import — bind to the module itself.
@@ -871,6 +882,9 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
         }
     }
     if let Some(line) = bind_dart_library_names(g, &plain_dart, same).marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = dir_index.marker() {
         eprintln!("{line}");
     }
 }
@@ -993,10 +1007,21 @@ pub(crate) fn bind_dart_library_names(
     stats
 }
 
-/// The MODULE a TS-family import source names: `target_qname` itself
-/// (`rule`), else the same-stem sibling the specifier or the importer's
-/// language names (LB.13, rule `same_stem`). A refused pick is counted
-/// unresolved; the TS resolver has no tail fallback to try after it.
+/// The MODULE a TS-family import source names, in tsc / Node's order:
+/// `target_qname` itself (`rule`: the file `<q>.ts`), else the same-stem
+/// sibling the specifier or the importer's language names (LB.13, rule
+/// `same_stem`), else the directory's index module `<q>::index` (DT.1b,
+/// rule `dir_index`: `from '../models'` loads `models/index.ts`), itself or
+/// its same-stem sibling (`index.ts` + `index.js`). So a file always beats
+/// the directory of its stem, and a refused pick (a file pair no rule
+/// chooses from) is counted unresolved and never falls through to the
+/// directory: the TS resolver has no tail fallback to try after it.
+///
+/// The directory arm runs only for a specifier that names no file
+/// extension ([`names_a_directory`]) and an importer tsc or Node resolves
+/// ([`DIR_INDEX_IMPORTERS`]), so a Dart `.dart` / Solidity `.sol` import, a
+/// Terraform module `source` directory and a Swift or C/C++ graph built on
+/// this resolver never reach it.
 fn ts_target(
     g: &RepoGraph,
     same: &mut SameStem,
@@ -1009,7 +1034,34 @@ fn ts_target(
         return Some((*id, rule));
     }
     match same.pick(g, target_qname, explicit_ext, importer) {
-        SamePick::Bound(id) => Some((id, "same_stem")),
+        SamePick::Bound(id) => return Some((id, "same_stem")),
+        SamePick::Refused => {
+            same.unresolved();
+            return None;
+        }
+        SamePick::NotAStem => {}
+    }
+    if !names_a_directory(explicit_ext) {
+        return None;
+    }
+    let index = format!("{target_qname}::index");
+    let exact = g.symbols.module_by_qname.get(&index).copied();
+    // No index module: done before the importer's extension is read, so a
+    // graph with no directory import never reads a MODULE POSITION here.
+    if exact.is_none() && !same.by_bare.contains_key(&index) {
+        return None;
+    }
+    if !same
+        .importer_ext(g, importer)
+        .is_some_and(|ext| DIR_INDEX_IMPORTERS.contains(&ext.as_str()))
+    {
+        return None;
+    }
+    if let Some(id) = exact {
+        return Some((id, DIR_INDEX));
+    }
+    match same.pick(g, &index, None, importer) {
+        SamePick::Bound(id) => Some((id, DIR_INDEX)),
         SamePick::Refused => {
             same.unresolved();
             None
@@ -1018,13 +1070,70 @@ fn ts_target(
     }
 }
 
+/// DT.1b: the IMPORTS evidence rule of an import bound to its directory's
+/// index module ([`ts_target`]).
+const DIR_INDEX: &str = "dir_index";
+
+/// DT.1b: the importer file extensions whose resolver (tsc, Node, a
+/// bundler) loads `<dir>/index.*` for a specifier naming a directory.
+const DIR_INDEX_IMPORTERS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue"];
+
+/// DT.1b: the extensions with which a TS-family specifier names a file
+/// (`./util.js`, `./data.json`, `./App.vue`). A specifier ending in one never
+/// loads a directory's index.
+const FILE_SPEC_EXTS: &[&str] =
+    &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "json", "dart", "sol"];
+
+/// DT.1b: whether a specifier whose own extension is `explicit_ext`
+/// ([`spec_ext`]) can name a directory: it has none (`../models`), or its
+/// last dot is no file extension (`./ui.kit`, `./user.service` when no
+/// `user.service.ts` exists: tsc then tries `user.service/index.ts`).
+fn names_a_directory(explicit_ext: Option<&str>) -> bool {
+    explicit_ext.is_none_or(|ext| !FILE_SPEC_EXTS.contains(&ext))
+}
+
+/// What the DT.1b directory arm of [`ts_target`] bound in one graph build:
+/// import statements (a `{ A, B }` import is one per name) bound to a
+/// directory's index module, by specifier form.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirIndexBinds {
+    /// A `.`-leading specifier (`../models`).
+    pub(crate) relative: usize,
+    /// Any other: a tsconfig `paths` alias the source resolver mapped
+    /// (`@core/models`).
+    pub(crate) alias: usize,
+}
+
+impl DirIndexBinds {
+    /// Count one statement of specifier `spec` bound by `rule`.
+    fn record(&mut self, rule: &str, spec: &str) {
+        if rule != DIR_INDEX {
+            return;
+        }
+        if spec.trim().trim_matches(|c| c == '"' || c == '\'').starts_with('.') {
+            self.relative += 1;
+        } else {
+            self.alias += 1;
+        }
+    }
+
+    /// DT.1b fired_on, once per graph build that bound a directory import:
+    ///   `[imports] dir-index binds=<n> (relative=<r> alias=<a>)`
+    pub(crate) fn marker(&self) -> Option<String> {
+        let DirIndexBinds { relative, alias } = *self;
+        let n = relative + alias;
+        (n > 0).then(|| format!("[imports] dir-index binds={n} (relative={relative} alias={alias})"))
+    }
+}
+
 /// Push one IMPORTS edge with its evidence (LC.3d): `graph:imports`, rule the
 /// lookup that bound it: `module` (the import path is a module qname),
 /// `submodule` (`from pkg import mod`), `symbol` (the module holding an
 /// imported name), `package_dir` (a Go package directory, LA.13b),
 /// `same_stem` (the sibling of an ambiguous same-stem pair the importer's
-/// language loads, LB.13), `namespace` (the member of the declared namespace
-/// PACKAGE a symbol import names, DF.2) or `tail_unique` (the repo-unique
+/// language loads, LB.13), `dir_index` (the index module of the directory a
+/// TS-family specifier names, DT.1b), `namespace` (the member of the declared
+/// namespace PACKAGE a symbol import names, DF.2) or `tail_unique` (the repo-unique
 /// short name, a guess the full path could not confirm).
 /// `line` is the import statement's 0-based row (LC.3b, basis site).
 fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str, line: u32) {
@@ -1057,7 +1166,7 @@ fn resolve_module_reference(from_module: &str, module_ref: &str, level: u32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{build_dotted, build_typescript};
+    use crate::build::{build_dotted, build_typescript, build_typescript_family};
     use crate::test_support::repo;
     use glia_code_domain::evidence::Evidence;
     use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, cell_type};
@@ -1899,5 +2008,225 @@ mod tests {
         assert!(!g.symbols.module_import_bindings.contains_key(&module("src::app")));
         let stats = replay_dart(&mut g, &[("src::app", "src::util")], &[]);
         assert_eq!(stats, DartLibraryNames::default());
+    }
+
+    // ---- DT.1b: directory imports bind the directory's index module ---------
+
+    /// Every IMPORTS target of MODULE `importer` with the rule that bound it,
+    /// in edge order.
+    fn imports_from(g: &RepoGraph, importer: &str) -> Vec<(NodeId, String)> {
+        g.edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS && e.from == module(importer))
+            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .collect()
+    }
+
+    /// `(MODULE qname, "dir_index")`: one import bound to a directory's index.
+    fn by_dir(qname: &str) -> (NodeId, String) {
+        (module(qname), DIR_INDEX.to_string())
+    }
+
+    /// The `models/index.ts` of Kina's shape: an interface's stand-in and a
+    /// function every importer calls.
+    fn models_index() -> FileParse {
+        let q = "src::app::core::models::index";
+        file("src/app/core/models/index.ts", q, "index", &["accountLabel", "Account"])
+    }
+
+    /// A service MODULE `src::app::core::services::<name>` with method-like
+    /// FUNCTION `fns`.
+    fn service_ts(name: &str, fns: &[&str]) -> FileParse {
+        let path = format!("src/app/core/services/{name}.ts");
+        file(&path, &format!("src::app::core::services::{name}"), name, fns)
+    }
+
+    /// `import { <name> } from '<spec>'` in MODULE `qname`, and `<caller>`
+    /// calling `<name>()`.
+    fn imports_and_calls(fp: &mut FileParse, qname: &str, spec: &str, name: &str, caller: &str) {
+        import_show(fp, qname, spec, name);
+        call(fp, &format!("{qname}::{caller}"), bare(name));
+    }
+
+    /// `src/<path>` importing `fmt` from `spec` and calling it from `caller`.
+    fn fmt_importer(path: &str, qname: &str, spec: &str, caller: &str) -> FileParse {
+        let name = qname.rsplit("::").next().unwrap_or(qname);
+        imports_fmt(file(path, qname, name, &[caller]), qname, spec, caller)
+    }
+
+    #[test]
+    fn dir_import_binds_index() {
+        let q = "src::app::core::services::account.service";
+        let mut svc = service_ts("account.service", &["label"]);
+        // A namespace import and a bare side-effect import of the same
+        // directory: the MODULE target arm binds the index too.
+        import_module(&mut svc, q, "../models", Some("m"));
+        import_module(&mut svc, q, "../models", None);
+        let g = build_typescript(repo(), vec![models_index(), svc], ts_source).expect("build");
+        let index = "src::app::core::models::index";
+        assert_eq!(imports_from(&g, q), [by_dir(index), by_dir(index)]);
+        assert_eq!(g.symbols.module_import_bindings[&module(q)].get("m"), Some(&module(index)));
+        // The evidence names the import statement's own row.
+        let lines: Vec<Option<u32>> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+            .map(|e| Evidence::of(e).and_then(|ev| ev.line))
+            .collect();
+        assert_eq!(lines, [Some(0), Some(1)]);
+        // A miss with no index module reads no MODULE POSITION; a directory
+        // import reads them once, for the importer's extension.
+        let mut same = same_stem_table(&g);
+        assert_eq!(ts_target(&g, &mut same, "src::app::core::none", None, module(q), "symbol"), None);
+        assert!(same.module_ext.is_none());
+        assert_eq!(
+            ts_target(&g, &mut same, "src::app::core::models", None, module(q), "symbol"),
+            Some((module(index), DIR_INDEX))
+        );
+        assert!(same.module_ext.is_some());
+    }
+
+    #[test]
+    fn named_binding_through_index() {
+        let q = "src::app::core::services::account.service";
+        let mut svc = service_ts("account.service", &["label"]);
+        imports_and_calls(&mut svc, q, "../models", "accountLabel", "label");
+        // A same-named function elsewhere: without the binding a name guess
+        // could take it; with it, the imported one wins.
+        let other = file("src/legacy/labels.ts", "src::legacy::labels", "labels", &["accountLabel"]);
+        let parses = vec![models_index(), svc, other];
+        let g = build_typescript_family(repo(), parses, ts_source).expect("build");
+        let label = func("src::app::core::models::index::accountLabel");
+        assert_eq!(imports_from(&g, q), [by_dir("src::app::core::models::index")]);
+        assert_eq!(g.symbols.module_import_bindings[&module(q)].get("accountLabel"), Some(&label));
+        assert_eq!(calls_from(&g, &format!("{q}::label")), [(label, "import_binding".to_string())]);
+    }
+
+    #[test]
+    fn file_beats_directory() {
+        let q = "src::app::core::services::report.service";
+        let file_fmt = file("src/app/core/format.ts", "src::app::core::format", "format", &["pad"]);
+        let dir_q = "src::app::core::format::index";
+        let dir_fmt = file("src/app/core/format/index.ts", dir_q, "index", &["pad"]);
+        let mut svc = service_ts("report.service", &["render"]);
+        imports_and_calls(&mut svc, q, "../format", "pad", "render");
+        let parses = vec![file_fmt, dir_fmt, svc];
+        let g = build_typescript_family(repo(), parses, ts_source).expect("build");
+        assert_eq!(imports_from(&g, q), [(module("src::app::core::format"), "symbol".to_string())]);
+        assert_eq!(
+            calls_from(&g, &format!("{q}::render")),
+            [(func("src::app::core::format::pad"), "import_binding".to_string())]
+        );
+        // A refused same-stem pair is a file pair too: it never falls through
+        // to the directory (an importer with no extension has no order).
+        let pair = vec![
+            file("src/util.ts", "src::util.ts", "util", &["fmt"]),
+            file("src/util.js", "src::util.js", "util", &["fmt"]),
+            file("src/util/index.ts", "src::util::index", "index", &["fmt"]),
+        ];
+        let g = build_typescript(repo(), pair, ts_source).expect("build");
+        let mut same = same_stem_table(&g);
+        assert_eq!(ts_target(&g, &mut same, "src::util", None, module("src::stray"), "symbol"), None);
+        assert_eq!(same.stats.unresolved, 1);
+    }
+
+    #[test]
+    fn index_pair_picks_the_importers_sibling() {
+        let parses = vec![
+            file("src/models/index.ts", "src::models::index.ts", "index", &["fmt"]),
+            file("src/models/index.js", "src::models::index.js", "index", &["fmt"]),
+            fmt_importer("src/app.ts", "src::app", "./models", "render"),
+            fmt_importer("src/old.js", "src::old", "./models", "draw"),
+        ];
+        let g = build_typescript_family(repo(), parses, ts_source).expect("build");
+        assert_eq!(imports_from(&g, "src::app"), [by_dir("src::models::index.ts")]);
+        assert_eq!(imports_from(&g, "src::old"), [by_dir("src::models::index.js")]);
+        let calls = |caller: &str| edges_of(&g, edge_category::CALLS, func(caller));
+        assert_eq!(calls("src::app::render"), [func("src::models::index.ts::fmt")]);
+        assert_eq!(calls("src::old::draw"), [func("src::models::index.js::fmt")]);
+    }
+
+    /// The engine's A6.8 alias resolver for one tsconfig at the repo root
+    /// with `"@core": ["src/app/core"]` and `"@core/*": ["src/app/core/*"]`
+    /// (`resolve_ts_source_aliased`): a `.`-leading specifier is relative.
+    fn aliased_source(from: &str, spec: &str) -> Option<String> {
+        if spec.starts_with('.') {
+            return ts_source(from, spec);
+        }
+        let rest = spec.strip_prefix("@core")?;
+        let target = match rest.strip_prefix('/') {
+            Some(star) => format!("src/app/core/{star}"),
+            None if rest.is_empty() => "src/app/core".to_string(),
+            None => return None,
+        };
+        Some(target.replace('/', "::"))
+    }
+
+    #[test]
+    fn alias_target_dir_binds_index() {
+        let q = "src::app::pages::home";
+        let core_index = file("src/app/core/index.ts", "src::app::core::index", "index", &["boot"]);
+        let mut page = file("src/app/pages/home.ts", q, "home", &["init"]);
+        imports_and_calls(&mut page, q, "@core", "boot", "init");
+        imports_and_calls(&mut page, q, "@core/models", "accountLabel", "init");
+        imports_and_calls(&mut page, q, "../core/models", "Account", "init");
+        let parses = vec![core_index, models_index(), page];
+        let g = build_typescript_family(repo(), parses, aliased_source).expect("build");
+        let (core, models) = ("src::app::core::index", "src::app::core::models::index");
+        assert_eq!(imports_from(&g, q), [by_dir(core), by_dir(models), by_dir(models)]);
+        let bound = &g.symbols.module_import_bindings[&module(q)];
+        assert_eq!(bound.get("boot"), Some(&func("src::app::core::index::boot")));
+        assert_eq!(bound.get("Account"), Some(&func("src::app::core::models::index::Account")));
+        // The marker's tally of the same statements, plus one bound exactly.
+        let mut binds = DirIndexBinds::default();
+        for spec in ["@core", "'@core/models'", "../core/models"] {
+            binds.record(DIR_INDEX, spec);
+        }
+        binds.record("symbol", "./x");
+        assert_eq!(binds, DirIndexBinds { relative: 1, alias: 2 });
+        let marker = binds.marker();
+        assert_eq!(marker.as_deref(), Some("[imports] dir-index binds=3 (relative=1 alias=2)"));
+        assert_eq!(DirIndexBinds::default().marker(), None);
+    }
+
+    #[test]
+    fn explicit_extension_never_falls_back() {
+        let q = "src::app::core::services::account.service";
+        let mut svc = service_ts("account.service", &["label"]);
+        imports_and_calls(&mut svc, q, "../models.js", "accountLabel", "label");
+        imports_and_calls(&mut svc, q, "../models.ts", "accountLabel", "label");
+        import_module(&mut svc, q, "../models.json", None);
+        let g = build_typescript_family(repo(), vec![models_index(), svc], ts_source).expect("build");
+        assert!(imports_from(&g, q).is_empty());
+        assert!(calls_from(&g, &format!("{q}::label")).is_empty());
+        // A dot that is no file extension can still name a directory.
+        assert!(names_a_directory(None));
+        assert!(names_a_directory(Some("kit")));
+        assert!(!names_a_directory(Some("js")));
+        let kit = file("src/ui.kit/index.ts", "src::ui.kit::index", "index", &["fmt"]);
+        let app = fmt_importer("src/app.ts", "src::app", "./ui.kit", "render");
+        let g = build_typescript_family(repo(), vec![kit, app], ts_source).expect("build");
+        assert_eq!(imports_from(&g, "src::app"), [by_dir("src::ui.kit::index")]);
+    }
+
+    #[test]
+    fn dart_import_unchanged() {
+        let dart_q = "lib::src::models::index";
+        let index = library("lib/src/models/index.dart", dart_q, &["formatPrice"], &[]);
+        let mut cart = library("lib/cart.dart", "lib::cart", &["total"], &[]);
+        // `.dart` names a file; and a `.dart` importer is never resolved
+        // through a directory, extension or not.
+        import_module(&mut cart, "lib::cart", "src/models.dart", None);
+        import_show(&mut cart, "lib::cart", "src/models", "formatPrice");
+        call(&mut cart, "lib::cart::total", bare("formatPrice"));
+        let g = build_typescript(repo(), vec![index, cart], dart_source).expect("build");
+        assert!(imports_from(&g, "lib::cart").is_empty());
+        assert!(!g.symbols.module_import_bindings.contains_key(&module("lib::cart")));
+        // A Terraform module `source` directory: the same gate.
+        let vpc = file("infra/modules/vpc/index.tf", "infra::modules::vpc::index", "index", &[]);
+        let mut main = file("infra/main.tf", "infra::main", "main", &[]);
+        import_module(&mut main, "infra::main", "./modules/vpc", None);
+        let g = build_typescript(repo(), vec![vpc, main], ts_source).expect("build");
+        assert!(imports_from(&g, "infra::main").is_empty());
     }
 }
