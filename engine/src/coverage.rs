@@ -47,8 +47,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         language: "*",
         edge_category: "QUEUE_FLOWS",
         // LA.4 (A11.7): literal constants now fold through the repo const
-        // table after the parse cache; this names what stays blind.
-        note: "topics passed as parameters, runtime variables or env vars - and constants that are ambiguous, or lower-case bindings in another file - are extracted as an unresolved framework tag and never paired; literal constants the repo table resolves are folded",
+        // table after the parse cache; this names what stays blind. DT.11z:
+        // DT.2a (a tag at every unexplained site, also beside a literal of
+        // the same row), DT.2b (nats.go / JetStream calls on any receiver,
+        // typed by the file's own declarations) and DT.2c (the NATS subject
+        // grammar, `*` tokens paired through the wildcard walk), measured on
+        // fixtures/xcut-queue-mixed-topic-sites, xcut-queue-go-nats-receivers
+        // and xcut-queue-nats-subject-fold, plus a kafkajs probe of a call-
+        // built and a concatenated topic beside a literal one.
+        note: "topics passed as parameters, runtime variables or env vars - and constants that are ambiguous, or lower-case bindings in another file - are extracted as an unresolved framework tag (`unresolved:<framework>`, one per framework and direction, anchored at every such call site, also where the same call form names a literal topic elsewhere in the file) and never paired; literal constants the repo table resolves are folded. Outside NATS, a topic built by a call (`topicFor(id)`) in a file that names another topic of the same framework is not recorded, and a concatenation is read as its leading literal (`'audit.' + id` is `audit.`). Go nats.go / JetStream calls are read on any receiver in a file importing the library, except a receiver the file declares with another library's type and, in a file that also imports another broker library, a receiver the file does not declare as NATS; the receiver's type is read from the file's text, so a `type Conn = nats.Conn` alias or an embedded `*nats.Conn` reads as another type, and in a nats.go-only file an undeclared receiver's `.Publish(` reads as NATS; `.Request(` / `.RequestMsg(`, `FilterSubjects`, `ConsumerConfig{FilterSubject}` and the jetstream `Consume` / `Messages` / `Fetch` API are not read. A NATS publish subject built from literal tokens and whole dynamic tokens (`+`, an interpolated literal, Go `fmt.Sprintf`, a same-file Go function whose body only returns it) is read with `*` for each dynamic token (`\"shop.shipments.\" + id` is `shop.shipments.*`) and pairs only wildcard subscriptions (Weak); a dynamic piece inside a token (`\"orders-\" + region`), a concatenation led by a constant (`PREFIX + \".\" + id`), a subject built across statements, a subject function that is a method, lives in another file or does more than return, Java `String.format`, Python `%` / `.format()`, Elixir `<>`, a subscriber subject built at run time and a format read from a struct field or an env default (`fmt.Sprintf(p.template, id)`) are the unresolved tag; an overlay `[constants]` pin of the expression as written (`\"p.template\" = \"shop.orders.%s.placed\"`) folds it",
         verify: "grep the topic constant or env var name",
     },
     // DF.21: DF.14 pairs a subscriber through a Terraform subscription ->
@@ -88,10 +95,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // CB.1 names `.graphqls`; CB.24 adds the client base-URL narrowing rule.
     // DF.21: DF.8 / DF.9's external clients, measured on
     // fixtures/external-channel-clients (`[channel-external] via=graphql`).
+    // DT.11z: DT.11a (pairing by the document's root fields), DT.11b (the
+    // TS client's HTTP transport) and DT.11c (an implied transport is no
+    // unpaired_endpoint), measured on fixtures/xcut-graphql-root-fields and
+    // xcut-graphql-transport, plus a probe of a Subscription-only field, a
+    // spreads-only document and a hook passing a file's second document.
     CoverageCaveat {
         language: "*",
         edge_category: "GRAPHQL_CALLS",
-        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field. An operation whose every client URL is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names (a SCREAMING_CASE or dotted key, a `.glia/overlay.toml [constants]` pin) and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no server, even one declaring the field; a client with one host-less or internal site still pairs.",
+        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. An operation pairs with the resolvers of the root fields its document selects (an alias reads its field, `__typename` is skipped, an inline fragment's fields count, a fragment spread's do not), whatever root type declares them (`query { orders }` pairs an `orders` only Subscription declares); an operation whose document gives no root field (a generated hook, a document built at run time or selecting only fragment spreads) pairs by its operation name; a document that is, or starts with, a `${FRAGMENT}` interpolation mints no operation; and an operation read at a hook or client call (`useQuery(DOC)`) takes the name and fields of the file's first gql document, not necessarily the one it passes. A TS client's http(s) or root-relative `uri` / `url` (Apollo ApolloClient / HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient), or a `${..}` / config-member URL through the endpoint fold, mints the transport `endpoint:POST:<path>` (GET too when the client sends queries by GET) that the HTTP resolver pairs with the server's route; a ws:// URL, a graphql-ws client and apollo-angular's `httpLink.create` mint none; an unpaired transport whose project's operations pair a resolver on a server holding no route at its last path segment is no unpaired_endpoint. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field. An operation whose every client URL is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names (a SCREAMING_CASE or dotted key, a `.glia/overlay.toml [constants]` pin) and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no server, even one declaring the field; a client with one host-less or internal site still pairs.",
         verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it; for an operation paired with several servers, or with none, read the client's uri / url",
     },
     // LA.18b: a path-less upgrade handler (gorilla, nhooyr, raw ASP.NET) pairs
@@ -99,11 +111,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // whose URL the extractor could not read pairs nothing. CB.21: the host
     // narrowing a client's literal URL allows. DF.21: DF.8 / DF.9's external
     // clients, measured on fixtures/external-channel-clients (`[channel-external]
-    // via=ws`; the localhost `/feed` control still pairs).
+    // via=ws`; the localhost `/feed` control still pairs). DT.11z: DT.3a
+    // (the URL read through a local, field, builder or url.URL), DT.3b (a
+    // configured base folded post-cache) and DT.3c (a served route is no
+    // unpaired_route), measured on fixtures/xcut-websocket-route-upgrade-
+    // local-url and xcut-websocket-env-base.
     CoverageCaveat {
         language: "*",
         edge_category: "WS_CONNECTS",
-        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them; a client whose every site dials a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no handler, even one of the same path; a client with one host-less or internal site still pairs",
+        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client URL is read from the call, from a `const` (Dart `final` / `const`, Go `:=` / `const`) of an enclosing scope at most 40 lines above it, from the file's one `readonly` field of that name, from a URL builder given one literal path (`buildWsUrl('api/chat/ws')`, Weak) or from Go `url.URL{Path: ..}`, and a `let` / `var` / reassigned or parameter URL is not read; a `${..}` base or a whole-URL config member the repo const table binds once folds to its path and host, while a base bound per deployment (environment.ts and environment.prod.ts) or read from `process.env` does not; a route whose path a client paired through its upgrade handler is no unpaired_route; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them; a client whose every site dials a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no handler, even one of the same path; a client with one host-less or internal site still pairs",
         verify: "grep the upgrade call and the route registration; for a client paired with several handlers, or with none, read its URL",
     },
     // CB.21: a gRPC stub's dial host narrows same-named services, read only
@@ -1097,5 +1113,64 @@ mod tests {
                 .unwrap_or_default();
             assert!(row.contains("`\"external\":true`"), "DF.9 {cat}: {row}");
         }
+    }
+
+    #[test]
+    fn dt_channel_rows_name_what_remains() {
+        // DT.11z: the QUEUE_FLOWS (LA.4), WS_CONNECTS and GRAPHQL_CALLS rows
+        // name what DT.2a-DT.2c, DT.3a-DT.3c and DT.11a-DT.11c read now and
+        // what stays partial, measured on those packets' fixtures.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let row = |cat: &str, head: &str| -> &'static str {
+            report
+                .iter()
+                .find(|n| n.language == "*" && n.edge_category == cat && n.note.starts_with(head))
+                .map(|n| n.note)
+                .unwrap_or_default()
+        };
+        let queue = row("QUEUE_FLOWS", "topics passed as parameters");
+        for part in [
+            "anchored at every such call site",
+            "`topicFor(id)`",
+            "leading literal",
+            "nats.go / JetStream calls are read on any receiver",
+            "`.Request(`",
+            "`FilterSubjects`",
+            "`*` for each dynamic token",
+            "only wildcard subscriptions (Weak)",
+            "`PREFIX + \".\" + id`",
+            "Java `String.format`",
+            "overlay `[constants]` pin",
+        ] {
+            assert!(queue.contains(part), "{part}: {queue}");
+        }
+        let ws = row("WS_CONNECTS", "a WebSocket upgrade");
+        for part in [
+            "at most 40 lines above it",
+            "`readonly` field",
+            "`url.URL{Path: ..}`",
+            "parameter URL is not read",
+            "per deployment",
+            "no unpaired_route",
+        ] {
+            assert!(ws.contains(part), "{part}: {ws}");
+        }
+        let gql = row("GRAPHQL_CALLS", "GraphQL SDL embedded in code");
+        for part in [
+            "root fields its document selects",
+            "pairs by its operation name",
+            "only Subscription declares",
+            "`${FRAGMENT}`",
+            "file's first gql document",
+            "`endpoint:POST:<path>`",
+            "`httpLink.create`",
+            "no unpaired_endpoint",
+        ] {
+            assert!(gql.contains(part), "{part}: {gql}");
+        }
+        // The rows each packet left unchanged keep their CB.21 / CB.24 /
+        // DF.9 sentences after the new text.
+        assert!(gql.find("root fields") < gql.find("literal absolute URL"), "{gql}");
+        assert!(ws.find("no static path") < ws.find("narrows to one service"), "{ws}");
     }
 }
