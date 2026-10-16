@@ -68,6 +68,12 @@ Not testable here: GraphQL (neither repo uses it).
 7. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md`, its waves, follow-up waves until no followup is
    left, then the combined repo-graph handover.
 
+James, 2026-10-17: *"okay after this we should test kina and quokka-stack again and hopefully we can rul the 0.5.3 answer
+any questions then begin build overnight"*. So after the last tweak wave (DT.13): the Kina + quokka-stack demos are re-run
+on the tweaked glia (step 2), then the 0.5.3 spec run (step 7) with its open questions to James, then the 0.5.3 waves
+overnight. Steps 4-6 do not block the spec run. The 0.5.2 release commit (step 3) has to land before the first 0.5.3 wave,
+so the RC stays a plain main commit with no 0.5.3 code in it.
+
 ## Spec run and rulings (2026-10-16)
 
 Specced by `wf_ba54b0e2-6de` (T1-T11: five clusters, each a spec agent and an adversarial verifier) and `wf_cfa53bab-d42`
