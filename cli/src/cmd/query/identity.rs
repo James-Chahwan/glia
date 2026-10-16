@@ -2,7 +2,8 @@
 //! `identity::identity_classes` (DD.8). Every identity class the build
 //! found: the FACT / DERIVED classes every answer collapses to one row (a
 //! package two repos depend on, one message, one contract op, one SCIP
-//! symbol), then the HEURISTIC same-as candidates no answer collapses
+//! symbol, a client model and the server model its HTTP exchanges carry),
+//! then the HEURISTIC same-as candidates no answer collapses
 //! (vendored copies, overlay guesses; Q18). Each class names its rules and
 //! tier, says whether its copies diverged and how many distinct contents
 //! they hold, and lists every member located and labelled by repo, the
@@ -38,7 +39,7 @@ pub(crate) struct Args {
     #[arg(long, value_parser = ["fact", "derived", "heuristic"])]
     tier: Option<String>,
     /// Only classes this identity rule joined.
-    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(same_as::RULES))]
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(same_as::ALL_RULES))]
     rule: Option<String>,
     /// Only classes whose members' contents differ.
     #[arg(long)]

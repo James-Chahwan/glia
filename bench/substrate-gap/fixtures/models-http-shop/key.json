@@ -2,7 +2,7 @@
   "framework": "models-http-shop",
   "language": "typescript",
   "dirs": ["web", "api"],
-  "note": "DT.1g: the models pass's inputs, read by glia_graph::client_wires. An Angular web client and a gin API exchange invoices and catalog rows over nine routes; every ENDPOINT pairs its ROUTE exactly, every client call site names its response (and the POST / PATCH their request) shape, every handler's 2xx JSON write and JSON bind is a typed server site, and every model carries its declared fields. Names alone would pair wrongly here: the TS Article is the Go CatalogEntry (GET /api/articles writes []models.CatalogEntry), while the Go models.Article of the same name is a stored row that is never serialised; the GET /api/listings envelope carries models.ListingWithSeller, which embeds Listing. The 404 / 400 gin.H bodies are never server sites (skipped by status). engine/tests/model_wire_pairs.rs pins the resolved sides.",
+  "note": "DT.1g: the models pass's inputs, read by glia_graph::client_wires. An Angular web client and a gin API exchange invoices and catalog rows over nine routes; every ENDPOINT pairs its ROUTE exactly, every client call site names its response (and the POST / PATCH their request) shape, every handler's 2xx JSON write and JSON bind is a typed server site, and every model carries its declared fields. Names alone would pair wrongly here: the TS Article is the Go CatalogEntry (GET /api/articles writes []models.CatalogEntry), while the Go models.Article of the same name is a stored row that is never serialised; the GET /api/listings envelope carries models.ListingWithSeller, which embeds Listing. The 404 / 400 gin.H bodies are never server sites (skipped by status). engine/tests/model_wire_pairs.rs pins the resolved sides. DT.1h: the models resolver turns the confirmed model pairs into http_model SAME_AS stars, each client model -> the server model it is one with: the TS Listing pairs both models.Listing and models.ListingWithSeller, and ListingWithSeller embeds Listing, so the embedded base is kept; the TS Summary pairs both DailySummary and WeeklySummary (neither embeds the other), so it joins no class. engine/tests/model_identity.rs pins the classes.",
   "expect_edges": [
     {"from": "endpoint:GET:/api/invoices/${…}", "to": "GET /api/invoices/:id", "category": "HTTP_CALLS", "exact": true, "note": "InvoiceService.get through the class field base"},
     {"from": "endpoint:POST:/api/invoices", "to": "POST /api/invoices", "category": "HTTP_CALLS", "exact": true, "note": "InvoiceService.create, request NewInvoice"},
@@ -12,12 +12,29 @@
     {"from": "endpoint:GET:/api/listings/${…}", "to": "GET /api/listings/:id", "category": "HTTP_CALLS", "exact": true, "note": "TS Listing against *models.Listing"},
     {"from": "endpoint:GET:/api/listings", "to": "GET /api/listings", "category": "HTTP_CALLS", "exact": true, "note": "the listings envelope"},
     {"from": "endpoint:GET:/api/summary/daily", "to": "GET /api/summary/daily", "category": "HTTP_CALLS", "exact": true, "note": "TS Summary against models.DailySummary"},
-    {"from": "endpoint:GET:/api/summary/weekly", "to": "GET /api/summary/weekly", "category": "HTTP_CALLS", "exact": true, "note": "TS Summary against models.WeeklySummary"}
+    {"from": "endpoint:GET:/api/summary/weekly", "to": "GET /api/summary/weekly", "category": "HTTP_CALLS", "exact": true, "note": "TS Summary against models.WeeklySummary"},
+    {"from": "src::app::models::invoice::Invoice", "to": "models::invoice::Invoice", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: diverged: customerName against customer_name, couponCode never written"},
+    {"from": "src::app::models::invoice::InvoiceItem", "to": "models::invoice::InvoiceItem", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: nested under items[] in every invoice exchange"},
+    {"from": "src::app::models::invoice::NewInvoice", "to": "models::invoice::CreateInvoiceRequest", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: the POST request; diverged: couponCode is dropped"},
+    {"from": "src::app::models::catalog::Article", "to": "models::catalog::CatalogEntry", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: GET /api/articles writes []models.CatalogEntry, not models.Article"},
+    {"from": "src::app::models::catalog::Listing", "to": "models::catalog::Listing", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: the embedded base wins over ListingWithSeller; diverged: sellerName optional absent"}
   ],
   "expect_cells": [
     {"kind": "ENDPOINT", "node": "endpoint:GET:/api/invoice-pages/${…}", "cell": "ENDPOINT_HIT", "contains": "\"name\":\"invoices\"", "note": "DT.1d: the inline envelope type argument is an object shape"},
     {"kind": "METHOD", "node": "handlers::handlers::Handlers::InvoicePage", "cell": "MESSAGE_TYPE", "contains": "\"model\":\"models::invoice::Invoice\"", "note": "DT.1f: the envelope's invoices key, h.store.Page(n) -> []models.Invoice"},
     {"kind": "STRUCT", "node": "models::invoice::Invoice", "cell": "SCHEMA_FIELDS", "contains": "\"model\":\"models::invoice::InvoiceItem\"", "note": "DT.1f: the Items field typed to its in-repo STRUCT"},
     {"kind": "INTERFACE", "node": "src::app::models::invoice::Invoice", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"customerName\"", "note": "DT.1c: the client model's declared fields"}
+  ],
+  "forbid": [
+    {"from": "src::app::models::catalog::Article", "to": "models::catalog::Article", "category": "SAME_AS", "note": "DT.1h: same name, never serialised"},
+    {"from": "src::app::models::catalog::Listing", "to": "models::catalog::ListingWithSeller", "category": "SAME_AS", "note": "DT.1h: the embedder is dropped for its embedded base"},
+    {"from": "models::catalog::ListingWithSeller", "to": "models::catalog::Listing", "category": "SAME_AS", "note": "DT.1h: an embed is INHERITS_FROM, never identity"},
+    {"from": "src::app::models::catalog::Summary", "to": "models::catalog::DailySummary", "category": "SAME_AS", "note": "DT.1h: Summary pairs two unrelated server models: ambiguous_client"},
+    {"from": "src::app::models::catalog::Summary", "to": "models::catalog::WeeklySummary", "category": "SAME_AS", "note": "DT.1h: ambiguous_client"},
+    {"from": "models::catalog::DailySummary", "to": "models::catalog::WeeklySummary", "category": "SAME_AS", "note": "DT.1h: two server models are never one class"},
+    {"from": "models::catalog::WeeklySummary", "to": "models::catalog::DailySummary", "category": "SAME_AS", "note": "DT.1h: two server models are never one class"},
+    {"from": "models::invoice::CreateInvoiceRequest", "to": "models::invoice::Invoice", "category": "SAME_AS", "note": "DT.1h: the request and the response are two models"},
+    {"from": "src::app::models::invoice::NewInvoice", "to": "models::invoice::Invoice", "category": "SAME_AS", "note": "DT.1h: the request model never joins the response's class"},
+    {"from": "src::app::models::invoice::Invoice", "to": "models::invoice::InvoiceItem", "category": "SAME_AS", "note": "DT.1h: a nested model is its own class"}
   ]
 }

@@ -57,7 +57,7 @@
 //! line, handler qname, site line), and maps are only probed.
 //!
 //! fired_on, printed by the callers ([`ClientWires::marker`]; the engine test
-//! now, the models resolver from DT.1h):
+//! and the models resolver, [`ModelResolver`]):
 //! `[models] client_wires hits=<h> routed=<r> response=<a> request=<q>
 //! client_models=<m> unresolved_client=<u> server_sites=<s>
 //! server_unknown_status=<k> open=<o> weak_pairing=<w>`.
@@ -91,24 +91,37 @@
 //! nested model level owns its own). Read by DT.1h (identity), DT.1i (drift
 //! rows in contract_fields).
 //!
-//! fired_on ([`WirePairs::marker`], printed by the engine test now, by the
-//! models resolver from DT.1h and by contract_fields from DT.1i):
+//! fired_on ([`WirePairs::marker`], printed by the engine test, by the
+//! models resolver ([`ModelResolver`]) and by contract_fields from DT.1i):
 //! `[models] pairs=<p> response=<r> request=<q> model_pairs=<m> changes=<c>
 //! breaking=<b> ambiguous_server=<a> open=<o>`.
+//!
+//! **DT.1h: identity.** [`ModelResolver`], the `models` Resolve pass, turns
+//! the confirmed model pairs into `http_model` SAME_AS classes, one star per
+//! server model (the center) whose client models it alone pairs: a client
+//! that pairs a struct and its embedder keeps the embedded base, one that
+//! pairs two unrelated structs joins nothing, and two client models of one
+//! project paired with one struct are both dropped ([`ModelResolver`] has the
+//! rules and its marker, `[models] classes=..`).
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use glia_activation::profile::IdentityTier;
 use glia_code_domain::endpoint::{http_node_span, split_owner};
-use glia_code_domain::evidence::{Evidence, locate};
+use glia_code_domain::evidence::{Basis, Evidence, locate};
+use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::same_as;
 use glia_code_domain::wire::{
     JsonKind, ModelField, ModelSchema, ServerWire, Shape, WireForm, WireFormat, element_type,
     hit_shapes, json_kind,
 };
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{CellPayload, NodeId, NodeKindId};
+use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
+use super::host::str_field;
+use super::{CrossGraphResolver, RuleTally, rule_evidence};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -378,6 +391,12 @@ pub fn client_wires(merged: &MergedGraph) -> ClientWires {
         return ClientWires::default();
     }
     let ctx = Ctx::new(merged);
+    wires_in(merged, &ctx, hits)
+}
+
+/// [`client_wires`] over `hits` (never empty) with a built [`Ctx`], so the
+/// models resolver resolves wires and reads model bases through one index.
+fn wires_in(merged: &MergedGraph, ctx: &Ctx<'_>, hits: Vec<Hit>) -> ClientWires {
     let mut stats = ClientWireStats::default();
 
     // HTTP_CALLS (endpoint, route) pairs, strongest kept, `suffix` skipped.
@@ -1028,6 +1047,45 @@ impl<'m> Ctx<'m> {
         Base::Model(bg, base)
     }
 
+    /// DT.1h: every base model `node` flattens in through its schema's
+    /// `extends` ([`Self::extends_base`], as [`Self::fields_in`] reads them),
+    /// transitively, at most [`MAX_EXTENDS`] bases deep, cycle-safe; `node`
+    /// itself is never listed. Read from the first graph holding `node`.
+    fn extends_closure(&self, node: NodeId) -> BTreeSet<u64> {
+        let mut out = BTreeSet::new();
+        let Some(gi) = self.graphs(node).first().copied() else {
+            return out;
+        };
+        let mut frontier = vec![(gi, node)];
+        for _ in 0..MAX_EXTENDS {
+            let mut next = Vec::new();
+            for (g, n) in frontier {
+                let Some(schema) = self.idx.get(g).and_then(|ix| ix.schemas.get(&n)) else {
+                    continue;
+                };
+                for e in &schema.extends {
+                    if let Base::Model(bg, base) = self.extends_base(g, n, e, schema.format)
+                        && base != node
+                        && out.insert(base.0)
+                    {
+                        next.push((bg, base));
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        out
+    }
+
+    /// The kind of `id` in the first graph holding it.
+    fn kind_any(&self, id: NodeId) -> Option<NodeKindId> {
+        let gi = *self.graphs(id).first()?;
+        self.idx.get(gi)?.kind(id)
+    }
+
     /// A model field's value: its model from the builder's `model` qname,
     /// or for a TS / Dart model its element type bound in `module`.
     fn field_value(
@@ -1466,7 +1524,11 @@ impl WirePairs {
 /// Every [`client_wires`] call site compared with the server side of each
 /// handler it reaches, per direction (see the module doc's DT.1m part).
 pub fn wire_pairs(merged: &MergedGraph) -> WirePairs {
-    let cw = client_wires(merged);
+    pairs_of(merged, &client_wires(merged))
+}
+
+/// [`wire_pairs`] over wires already collected.
+fn pairs_of(merged: &MergedGraph, cw: &ClientWires) -> WirePairs {
     let mut pairs: Vec<WirePair> = Vec::new();
     let mut found: Vec<(FoundModel, ModelJoin)> = Vec::new();
     for w in &cw.wires {
@@ -2088,6 +2150,360 @@ impl Compared {
         }
         0
     }
+}
+
+// ---- DT.1h: http_model identity ---------------------------------------------
+
+/// The pass name: the EVIDENCE emitter is `resolver:models`, the stamp of the
+/// engine's `models` Resolve pass.
+const PASS: &str = "models";
+
+/// The `models` Resolve pass (DT.1h): every confirmed client <-> server model
+/// pair [`wire_pairs`] finds becomes an `http_model` SAME_AS class, one star
+/// per server model (see [`model_stars`] for which pairs make a class).
+///
+/// **Rule.** Which kinds a class pairs and how surely are the code domain's
+/// `http_model` row of `CODE_TABLES.identity_rules`, read by name: a client
+/// INTERFACE / CLASS and a server STRUCT, DERIVED (Medium), walked. The
+/// identity resolver never writes it (its rules are `same_as::RULES`), and
+/// this pass writes only `same_as::MODEL_RULES`.
+///
+/// **Star.** The center is the server model: the one side every client of
+/// the exchange agrees on, chosen by content, never by a NodeId. Every client
+/// model of the class gets one `client -> server` SAME_AS edge with ONE
+/// EVIDENCE cell: emitter `resolver:models`, rule `http_model`, or
+/// `http_model/diverged` when any exchange joining the two showed a change at
+/// that model's level ([`ModelPair::diverged`]), located at the first joining
+/// call site (its file, line - 1: EVIDENCE lines are 0-based). No node or
+/// node cell is written.
+///
+/// **Merge-safe and deterministic.** Its inputs are [`wire_pairs`]' (every one
+/// persisted, HTTP_CALLS re-run by a merge before this pass), every list is
+/// sorted by content, and maps are only probed.
+///
+/// fired_on, once per resolve where an ENDPOINT hit has an HTTP_CALLS pair,
+/// in this order: [`ClientWires::marker`], [`WirePairs::marker`], LC.3c's
+/// `[evidence-rules] resolver=models http_model=<n>` (only with an edge), then
+/// `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a>
+/// ambiguous_project=<b> embed_reduced=<r>` (`d` the classes with a diverged
+/// edge; `a`, `b` and `r` count client models, see [`model_stars`]).
+/// grep: `... 2>&1 | grep '^\[models\] classes='`
+pub struct ModelResolver;
+
+impl CrossGraphResolver for ModelResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let (edges, report) = model_identity(merged);
+        if let Some(r) = report {
+            r.print();
+        }
+        merged.cross_edges.extend(edges);
+    }
+}
+
+/// The counts behind the `[models] classes=` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StarStats {
+    /// Client models whose candidate servers held two after the embed rule.
+    ambiguous_client: usize,
+    /// Client models dropped because another client model of their project
+    /// pairs the same server model.
+    ambiguous_project: usize,
+    /// Client models whose candidate servers the embed rule reduced.
+    embed_reduced: usize,
+}
+
+/// One server model's class: the server and the pair of each client model
+/// joining it, clients sorted by (qname, first join).
+struct ModelStar<'p> {
+    server: NodeId,
+    clients: Vec<&'p ModelPair>,
+}
+
+/// The project a client model belongs to: its repo and the path of the
+/// deepest PROJECT of that repo enclosing its file (`None` with no such
+/// PROJECT, or no file: then the repo is the unit).
+type ProjectKey = (u64, Option<String>);
+
+/// The `http_model` classes of `pairs` (sorted as [`WirePairs::model_pairs`]),
+/// keeping a pair only when `takes` holds (its kinds are the rule's):
+///
+/// 1. For each client model c, P(c) is its confirmed server models.
+/// 2. A server model in P(c) that embeds another member of P(c) (`embeds(s,
+///    other)`: one of the bases its schema's `extends` flattens in,
+///    transitively) is dropped: the client reads the shared base, and the
+///    embedder is that base plus an envelope (`Listing` against `Listing`
+///    and `ListingWithSeller`). A client so reduced counts `embed_reduced`.
+/// 3. |P(c)| == 1 pairs c with that server; two or more is `ambiguous_client`
+///    (`Summary` against `DailySummary` and `WeeklySummary`): no class.
+/// 4. Per server model, two or more client models of one project
+///    (`project(c)`) are all dropped (`ambiguous_project`): one project's
+///    client keeps one model per server shape, so two are a request and a
+///    response view, never one model. Client models of different projects
+///    (two web apps of one API) join one class.
+///
+/// One star per server model with a client left, by (server qname, server
+/// id): the id breaks a tie only for totality.
+fn model_stars<'p>(
+    pairs: &'p [ModelPair],
+    takes: impl Fn(&ModelPair) -> bool,
+    embeds: impl Fn(NodeId, NodeId) -> bool,
+    project: impl Fn(NodeId) -> ProjectKey,
+) -> (Vec<ModelStar<'p>>, StarStats) {
+    let mut stats = StarStats::default();
+    let mut order: Vec<(NodeId, Vec<&ModelPair>)> = Vec::new();
+    let mut at: HashMap<NodeId, usize> = HashMap::new();
+    for p in pairs.iter().filter(|p| takes(p)) {
+        let i = *at.entry(p.client).or_insert_with(|| {
+            order.push((p.client, Vec::new()));
+            order.len() - 1
+        });
+        order[i].1.push(p);
+    }
+
+    let mut by_server: BTreeMap<(&str, u64), Vec<&ModelPair>> = BTreeMap::new();
+    for (_, servers) in &order {
+        let kept: Vec<&ModelPair> = servers
+            .iter()
+            .copied()
+            .filter(|s| {
+                !servers
+                    .iter()
+                    .any(|o| o.server != s.server && embeds(s.server, o.server))
+            })
+            .collect();
+        if kept.len() < servers.len() {
+            stats.embed_reduced += 1;
+        }
+        match kept.as_slice() {
+            [one] => by_server
+                .entry((one.server_qname.as_str(), one.server.0))
+                .or_default()
+                .push(one),
+            [] => {}
+            _ => stats.ambiguous_client += 1,
+        }
+    }
+
+    let mut stars = Vec::new();
+    for ((_, server), clients) in by_server {
+        let keys: Vec<ProjectKey> = clients.iter().map(|p| project(p.client)).collect();
+        let mut kept: Vec<&ModelPair> = Vec::new();
+        for (p, key) in clients.iter().zip(&keys) {
+            if keys.iter().filter(|k| *k == key).count() > 1 {
+                stats.ambiguous_project += 1;
+            } else {
+                kept.push(p);
+            }
+        }
+        if kept.is_empty() {
+            continue;
+        }
+        kept.sort_by_cached_key(|p| {
+            (
+                p.client_qname.clone(),
+                p.joins
+                    .first()
+                    .map(|j| (j.route_qname.clone(), j.file.clone(), j.line)),
+                p.client.0,
+            )
+        });
+        stars.push(ModelStar {
+            server: NodeId(server),
+            clients: kept,
+        });
+    }
+    (stars, stats)
+}
+
+/// Every PROJECT's path (its ORIGIN `path`, `""` for the repo root), per
+/// repo. Only looked up, never iterated.
+struct ProjectPaths {
+    rels: HashMap<RepoId, Vec<String>>,
+}
+
+impl ProjectPaths {
+    fn of(m: &MergedGraph) -> Self {
+        let mut rels: HashMap<RepoId, Vec<String>> = HashMap::new();
+        for g in &m.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PROJECT) {
+                    continue;
+                }
+                let origin = n
+                    .cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::ORIGIN)
+                    .find_map(|c| match &c.payload {
+                        CellPayload::Json(j) | CellPayload::Text(j) => str_field(j, "path"),
+                        _ => None,
+                    });
+                let from_qname = || {
+                    g.nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .and_then(|q| q.strip_prefix("project:"))
+                };
+                let Some(rel) = origin.or_else(from_qname) else {
+                    continue;
+                };
+                // The walker names the repo root `project:.`.
+                let rel = if rel == "." {
+                    ""
+                } else {
+                    rel.trim_end_matches('/')
+                };
+                let list = rels.entry(n.repo).or_default();
+                if !list.iter().any(|r| r == rel) {
+                    list.push(rel.to_string());
+                }
+            }
+        }
+        Self { rels }
+    }
+
+    /// The deepest PROJECT path of `repo` enclosing the repo-relative `file`:
+    /// the root (`""`) encloses every file, any other path only files under
+    /// it at a `/` boundary.
+    fn owner_of(&self, repo: RepoId, file: &str) -> Option<&str> {
+        self.rels
+            .get(&repo)?
+            .iter()
+            .map(String::as_str)
+            .filter(|r| {
+                r.is_empty()
+                    || file
+                        .strip_prefix(*r)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)))
+    }
+}
+
+/// What one models resolve found, for its markers.
+struct ModelReport {
+    client_wires: String,
+    wire_pairs: String,
+    tally: RuleTally,
+    classes: usize,
+    edges: usize,
+    diverged: usize,
+    stars: StarStats,
+}
+
+impl ModelReport {
+    fn line(&self) -> String {
+        format!(
+            "[models] classes={} edges={} diverged={} ambiguous_client={} ambiguous_project={} \
+             embed_reduced={}",
+            self.classes,
+            self.edges,
+            self.diverged,
+            self.stars.ambiguous_client,
+            self.stars.ambiguous_project,
+            self.stars.embed_reduced,
+        )
+    }
+
+    fn print(&self) {
+        eprintln!("{}", self.client_wires);
+        eprintln!("{}", self.wire_pairs);
+        self.tally.report();
+        eprintln!("{}", self.line());
+    }
+}
+
+/// The `http_model` SAME_AS edges of `m` and the report behind the markers;
+/// `None` when no ENDPOINT hit has an HTTP_CALLS pair.
+fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
+    let mut edges = Vec::new();
+    if !m
+        .cross_edges
+        .iter()
+        .any(|e| e.category == edge_category::HTTP_CALLS)
+    {
+        return (edges, None);
+    }
+    let hits = shaped_hits(m);
+    if hits.is_empty() {
+        return (edges, None);
+    }
+    let ctx = Ctx::new(m);
+    let cw = wires_in(m, &ctx, hits);
+    if cw.stats.routed == 0 {
+        return (edges, None);
+    }
+    let wp = pairs_of(m, &cw);
+    let mut report = ModelReport {
+        client_wires: cw.marker(),
+        wire_pairs: wp.marker(),
+        tally: RuleTally::new(PASS, &same_as::MODEL_RULES),
+        classes: 0,
+        edges: 0,
+        diverged: 0,
+        stars: StarStats::default(),
+    };
+    let Some(rule) = CODE_TABLES.identity_rule(same_as::RULE_HTTP_MODEL) else {
+        return (edges, Some(report));
+    };
+    let confidence = match rule.tier {
+        IdentityTier::Fact => Confidence::Strong,
+        IdentityTier::Derived => Confidence::Medium,
+        IdentityTier::Heuristic => Confidence::Weak,
+    };
+    let projects = ProjectPaths::of(m);
+    let takes = |p: &ModelPair| {
+        ctx.kind_any(p.client)
+            .is_some_and(|k| rule.from.contains(&k))
+            && ctx.kind_any(p.server).is_some_and(|k| rule.to.contains(&k))
+    };
+    let mut bases: HashMap<NodeId, BTreeSet<u64>> = HashMap::new();
+    for p in wp.model_pairs.iter().filter(|p| takes(p)) {
+        bases
+            .entry(p.server)
+            .or_insert_with(|| ctx.extends_closure(p.server));
+    }
+    let embeds = |s: NodeId, other: NodeId| bases.get(&s).is_some_and(|b| b.contains(&other.0));
+    let project = |c: NodeId| -> ProjectKey {
+        let Some(gi) = ctx.graphs(c).first().copied() else {
+            return (0, None);
+        };
+        let repo = m.graphs[gi].repo;
+        let owner = ctx.idx[gi]
+            .file_of
+            .get(&c)
+            .and_then(|f| projects.owner_of(repo, f))
+            .map(str::to_string);
+        (repo.0, owner)
+    };
+    let (stars, stats) = model_stars(&wp.model_pairs, takes, embeds, project);
+    report.stars = stats;
+    let ev_rule = |diverged: bool| same_as::evidence_rule(rule.name, diverged);
+    for star in &stars {
+        let mut diverged_class = false;
+        for p in &star.clients {
+            diverged_class |= p.diverged;
+            let mut ev = rule_evidence(PASS, &ev_rule(p.diverged));
+            if let Some(j) = p.joins.first() {
+                ev = match j.line.checked_sub(1) {
+                    Some(line) => ev.at(j.file.clone(), line),
+                    None => Evidence {
+                        file: Some(j.file.clone()),
+                        basis: Basis::File,
+                        ..ev
+                    },
+                };
+            }
+            edges.push(
+                Edge::new(p.client, star.server, edge_category::SAME_AS, confidence)
+                    .with_cell(ev.to_cell()),
+            );
+        }
+        report.classes += 1;
+        report.diverged += usize::from(diverged_class);
+    }
+    report.edges = edges.len();
+    report.tally.add(same_as::RULE_HTTP_MODEL, edges.len());
+    (edges, Some(report))
 }
 
 #[cfg(test)]
@@ -3609,5 +4025,282 @@ mod tests {
         let (w, s) = exchange();
         assert_eq!(a, wire_pairs(&merged_of(w, s, true)));
         assert_eq!(wire_pairs(&MergedGraph::new(vec![])), WirePairs::default());
+    }
+
+    // ---- DT.1h: http_model identity ---------------------------------------
+
+    fn join(route: &str, file: &str, line: u32, diverged: bool) -> ModelJoin {
+        ModelJoin {
+            direction: WireDirection::Response,
+            route_qname: route.to_string(),
+            file: file.to_string(),
+            line,
+            handler_qname: "h".to_string(),
+            path: String::new(),
+            overlap: 2,
+            client_fields: 2,
+            server_fields: 2,
+            diverged,
+        }
+    }
+
+    fn mpair(client: (u64, &str), server: (u64, &str), diverged: bool) -> ModelPair {
+        ModelPair {
+            client: NodeId(client.0),
+            client_qname: client.1.to_string(),
+            server: NodeId(server.0),
+            server_qname: server.1.to_string(),
+            overlap: 2,
+            diverged,
+            joins: vec![join("GET /x", "a.ts", 3, diverged)],
+        }
+    }
+
+    /// `(server, [clients])` qnames of each star.
+    fn star_rows(stars: &[ModelStar<'_>], pairs: &[ModelPair]) -> Vec<(String, Vec<String>)> {
+        let q = |id: NodeId| {
+            pairs
+                .iter()
+                .find_map(|p| (p.server == id).then(|| p.server_qname.clone()))
+                .unwrap_or_default()
+        };
+        stars
+            .iter()
+            .map(|s| {
+                (
+                    q(s.server),
+                    s.clients.iter().map(|p| p.client_qname.clone()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// The four rules of [`model_stars`]: the embedded base is kept, two
+    /// unrelated servers refuse the client, two clients of one project
+    /// refuse each other, clients of two projects share a star.
+    #[test]
+    fn model_stars_keep_the_embedded_base_and_refuse_ambiguity() {
+        let pairs = vec![
+            // web: Listing pairs a struct and its embedder.
+            mpair((1, "web::Listing"), (101, "api::Listing"), true),
+            mpair((1, "web::Listing"), (102, "api::ListingWithSeller"), false),
+            // web: Summary pairs two structs neither embeds.
+            mpair((2, "web::Summary"), (103, "api::Daily"), false),
+            mpair((2, "web::Summary"), (104, "api::Weekly"), false),
+            // web: two views of one struct in one project.
+            mpair((3, "web::Order"), (105, "api::Order"), false),
+            mpair((4, "web::OrderView"), (105, "api::Order"), false),
+            // web and admin: one struct, one client model each.
+            mpair((5, "web::Item"), (106, "api::Item"), false),
+            mpair((6, "admin::Item"), (106, "api::Item"), true),
+            // a kind the rule does not pair.
+            mpair((7, "web::Skipped"), (107, "api::Skipped"), false),
+        ];
+        let embeds = |s: NodeId, other: NodeId| (s.0, other.0) == (102, 101);
+        let project = |c: NodeId| -> ProjectKey {
+            let p = if c.0 == 6 { "admin" } else { "web" };
+            (9, Some(p.to_string()))
+        };
+        let takes = |p: &ModelPair| p.client.0 != 7;
+        let (stars, stats) = model_stars(&pairs, takes, embeds, project);
+        let rows = star_rows(&stars, &pairs);
+        assert_eq!(
+            rows,
+            [
+                (
+                    "api::Item".to_string(),
+                    vec!["admin::Item".to_string(), "web::Item".to_string()]
+                ),
+                ("api::Listing".to_string(), vec!["web::Listing".to_string()]),
+            ]
+        );
+        assert_eq!(
+            stats,
+            StarStats {
+                ambiguous_client: 1,
+                ambiguous_project: 2,
+                embed_reduced: 1,
+            }
+        );
+
+        // Order free: the stars do not depend on the pairs' order.
+        let mut rev = pairs.clone();
+        rev.reverse();
+        let (again, stats_again) = model_stars(&rev, takes, embeds, project);
+        assert_eq!((star_rows(&again, &rev), stats_again), (rows, stats));
+
+        // Mutual embeds (a cycle) leave nothing to pair.
+        let cyc = |s: NodeId, o: NodeId| matches!((s.0, o.0), (102, 101) | (101, 102));
+        let (stars, stats) = model_stars(&pairs[..2], |_| true, cyc, project);
+        assert!(stars.is_empty());
+        assert_eq!((stats.embed_reduced, stats.ambiguous_client), (1, 0));
+    }
+
+    /// The deepest enclosing PROJECT by its ORIGIN path; the root encloses
+    /// every file, another path only at a `/` boundary.
+    #[test]
+    fn project_paths_pick_the_deepest_enclosing_project() {
+        let mut p = G::new("projects");
+        let origin = |path: &str| Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(format!(
+                r#"{{"label":"x","path":"{path}","provenance":"project_root"}}"#
+            )),
+        };
+        p.node(node_kind::PROJECT, "project:.", None, vec![origin("")]);
+        p.node(node_kind::PROJECT, "project:web", None, vec![origin("web")]);
+        p.node(
+            node_kind::PROJECT,
+            "project:web/admin",
+            None,
+            vec![origin("web/admin")],
+        );
+        let repo = p.g.repo;
+        let m = MergedGraph::new(vec![p.g]);
+        let paths = ProjectPaths::of(&m);
+        assert_eq!(paths.owner_of(repo, "web/src/a.ts"), Some("web"));
+        assert_eq!(
+            paths.owner_of(repo, "web/admin/src/a.ts"),
+            Some("web/admin")
+        );
+        assert_eq!(
+            paths.owner_of(repo, "webx/a.ts"),
+            Some(""),
+            "not under `web`"
+        );
+        assert_eq!(paths.owner_of(repo, "api/main.go"), Some(""));
+        assert_eq!(paths.owner_of(RepoId(1), "web/a.ts"), None, "another repo");
+    }
+
+    /// `exchange()` plus a second exchange: `GET /base` answers the same
+    /// client `Order` with `models.Base`, the struct `Wide` embeds.
+    fn exchange_with_base(web_first: bool) -> MergedGraph {
+        let (mut w, mut s) = exchange();
+        let e = w.node(
+            node_kind::ENDPOINT,
+            "endpoint:GET:/base",
+            None,
+            vec![hit("a.ts", 15, Some(Shape::named("Order")), None)],
+        );
+        let h = s.module("handlers::b", "handlers/b.go");
+        let base = s.node(
+            node_kind::FUNCTION,
+            "handlers::b::Base",
+            Some(h),
+            vec![
+                pos("handlers/b.go"),
+                site(
+                    WireForm::JsonResponse,
+                    5,
+                    Some(200),
+                    modeled("models.Base", "models::m::Base"),
+                ),
+            ],
+        );
+        let r = s.node(node_kind::ROUTE, "GET /base", None, vec![]);
+        s.edge(r, base, edge_category::HANDLED_BY);
+        let mut m = merged_of(w, s, web_first);
+        m.cross_edges.push(http_edge(e, r, HTTP_EMITTER, "exact"));
+        m
+    }
+
+    /// `(from, to, evidence json, confidence)` of every SAME_AS cross edge.
+    fn same_as_rows(m: &MergedGraph) -> Vec<(String, String, String, Confidence)> {
+        let mut rows: Vec<_> = m
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SAME_AS)
+            .map(|e| {
+                let ev = match e.cells.as_slice() {
+                    [
+                        Cell {
+                            kind,
+                            payload: CellPayload::Json(j),
+                        },
+                    ] if *kind == cell_type::EVIDENCE => j.clone(),
+                    other => panic!("one EVIDENCE cell, got {other:?}"),
+                };
+                (qname_in(m, e.from), qname_in(m, e.to), ev, e.confidence)
+            })
+            .collect();
+        rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+        rows
+    }
+
+    /// One exchange's confirmed pair is one `http_model` star across two
+    /// repos, client -> server, DERIVED (Medium), located at the joining
+    /// call site (0-based line), `/diverged` for a pair with drift.
+    #[test]
+    fn model_resolver_writes_one_star_per_server_model() {
+        let (w, s) = exchange();
+        let mut m = merged_of(w, s, true);
+        let (edges, report) = model_identity(&m);
+        let report = report.expect("an HTTP_CALLS pair: the markers print");
+        assert_eq!(
+            report.line(),
+            "[models] classes=1 edges=1 diverged=1 ambiguous_client=0 ambiguous_project=0 \
+             embed_reduced=0"
+        );
+        assert_eq!(report.wire_pairs, wire_pairs(&m).marker());
+        assert_eq!(report.client_wires, client_wires(&m).marker());
+        assert_eq!(edges.len(), 1);
+        ModelResolver.resolve(&mut m);
+        assert_eq!(
+            same_as_rows(&m),
+            [(
+                "m::Order".to_string(),
+                "models::m::Wide".to_string(),
+                r#"{"emitter":"resolver:models","rule":"http_model/diverged","file":"a.ts","line":6,"basis":"site"}"#
+                    .to_string(),
+                Confidence::Medium,
+            )]
+        );
+    }
+
+    /// The client pairs `Wide` (GET /orders) and `Base` (GET /base), and
+    /// `Wide` embeds `Base`: the embedded base is the class, in either graph
+    /// order.
+    #[test]
+    fn a_client_pairing_a_struct_and_its_embedder_keeps_the_base() {
+        let mut m = exchange_with_base(true);
+        let (_, report) = model_identity(&m);
+        let report = report.expect("markers");
+        assert_eq!(
+            report.line(),
+            "[models] classes=1 edges=1 diverged=1 ambiguous_client=0 ambiguous_project=0 \
+             embed_reduced=1"
+        );
+        ModelResolver.resolve(&mut m);
+        let rows = same_as_rows(&m);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.0.as_str(), r.1.as_str()))
+                .collect::<Vec<_>>(),
+            [("m::Order", "models::m::Base")]
+        );
+        // Order's `items` is never written, Base's `title` never read.
+        assert!(
+            rows[0]
+                .2
+                .contains(r#""rule":"http_model/diverged","file":"a.ts","line":14"#),
+            "{}",
+            rows[0].2
+        );
+
+        let mut flipped = exchange_with_base(false);
+        ModelResolver.resolve(&mut flipped);
+        assert_eq!(same_as_rows(&flipped), rows, "graph order changes nothing");
+    }
+
+    /// No HTTP_CALLS pair, or no shaped hit: no edge and no marker.
+    #[test]
+    fn no_exchange_no_marker() {
+        let (w, s) = exchange();
+        let mut m = merged_of(w, s, true);
+        m.cross_edges.clear();
+        let (edges, report) = model_identity(&m);
+        assert!(edges.is_empty() && report.is_none());
+        let (edges, report) = model_identity(&MergedGraph::new(vec![]));
+        assert!(edges.is_empty() && report.is_none());
     }
 }

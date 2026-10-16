@@ -40,8 +40,10 @@
 //! PROJECT's CONTAINS, a package, a doc, a test, a shared schema / config /
 //! entity, git history) is left out, so weighs 0.
 //!
-//! DD.3: `identity_rules` is the code domain's eight ways two nodes are one
-//! thing, one [`IdentityRule`] per [`same_as::RULES`] name in that order:
+//! DD.3: `identity_rules` is the code domain's ways two nodes are one
+//! thing, one [`IdentityRule`] per [`same_as::ALL_RULES`] name in that order
+//! (the identity resolver's eight [`same_as::RULES`], then DT.1h's
+//! `http_model`, which the models resolver writes):
 //! the kinds each pairs, the key they share, the tier (FACT, DERIVED or
 //! HEURISTIC) and whether a class is contracted in walks. Three consumers
 //! read the rows: the identity resolver (which kinds a rule pairs), the tier
@@ -312,7 +314,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         // CO_CHANGES out: git history is a heuristic, never structure.
         // SAME_AS out: identity reaches a walk only through the quotient (DD.1).
     ],
-    // DD.3: one row per `same_as::RULES` name, in that order (the guard test
+    // DD.3: one row per `same_as::ALL_RULES` name, in that order (the guard test
     // below pins it). `walk` is a ranking-visible dial: a class contracted in
     // a walk joins its members' neighbourhoods into one blast radius.
     identity_rules: &[
@@ -386,6 +388,19 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             key: "path-suffix files under a confirmed vendoring offset, body differs",
             tier: IdentityTier::Heuristic,
             walk: false,
+        },
+        // DT.1h: written by the models resolver, not the identity one. A
+        // client model (a TS / Dart INTERFACE or CLASS) and the server STRUCT
+        // the exchanges carry: DERIVED (a resolver paired the exchange, the
+        // field names confirm it), and contracted in walks, so a client
+        // model's blast radius reaches the handlers writing its struct.
+        IdentityRule {
+            name: same_as::RULE_HTTP_MODEL,
+            from: &[nk::INTERFACE, nk::CLASS],
+            to: &[nk::STRUCT],
+            key: "one HTTP exchange's client and server models, JSON field names confirm",
+            tier: IdentityTier::Derived,
+            walk: true,
         },
     ],
 };
@@ -809,7 +824,7 @@ mod tests {
         assert_eq!(CODE_TABLES.validate(), Ok(()));
         let rules = CODE_TABLES.identity_rules;
         let names: Vec<&str> = rules.iter().map(|r| r.name).collect();
-        assert_eq!(names, same_as::RULES);
+        assert_eq!(names, same_as::ALL_RULES);
         let table: Vec<(&str, IdentityTier, bool)> =
             rules.iter().map(|r| (r.name, r.tier, r.walk)).collect();
         assert_eq!(
@@ -823,6 +838,7 @@ mod tests {
                 ("scip_symbol", Fact, true),
                 ("body_hash", Heuristic, false),
                 ("path_suffix", Heuristic, false),
+                ("http_model", Derived, true),
             ]
         );
 
@@ -846,6 +862,10 @@ mod tests {
         }
         assert_eq!(VENDORED_KINDS[0], nk::MODULE);
         assert_eq!(&VENDORED_KINDS[1..], &SCIP_DEF_KINDS[..6], "a file plus its declared code");
+        const CLIENT: &[NodeKindId] = &[nk::INTERFACE, nk::CLASS];
+        const SERVER: &[NodeKindId] = &[nk::STRUCT];
+        assert_eq!(pairs("http_model"), Some((CLIENT, SERVER)));
+        assert!(rule("http_model").is_some_and(|r| r.tier.collapses()), "http_model collapses");
 
         // Every key is a line, the rule names are the bare EVIDENCE rules.
         for r in rules {

@@ -60,6 +60,8 @@ pub use models::{
 };
 // DT.1m: the models pass's compare (each client side against its server side).
 pub use models::{ModelJoin, ModelPair, WireChange, WirePair, WirePairStats, WirePairs, wire_pairs};
+// DT.1h: the `models` Resolve pass (http_model SAME_AS stars).
+pub use models::ModelResolver;
 pub use http::normalise_http_path;
 // A10.2 — the route index + tiers 1-4 for passes that pair a DECLARED path
 // (a contract operation) with the ROUTE serving it.

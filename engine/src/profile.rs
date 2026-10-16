@@ -52,7 +52,8 @@ use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver,
     GrpcStackResolver, HttpStackResolver, IacResolver, IdentityResolver, MergedGraph,
-    QueueStackResolver, RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
+    ModelResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
+    WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -178,6 +179,18 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("cron", CronResolver),
     resolver!("config", ConfigResolver),
     resolver!("iac", IacResolver),
+    // DT.1h: http_model SAME_AS stars, client model -> server model. It reads
+    // the HTTP_CALLS edges the `http` pass drew (EVIDENCE `resolver:http`)
+    // and the persisted ENDPOINT_HIT / MESSAGE_TYPE / SCHEMA_FIELDS cells, so
+    // it runs after `http`; `graphql` is the other exchange resolver whose
+    // pairs a models rule reads.
+    PassSpec {
+        name: "models",
+        stage: Stage::Resolve,
+        after: &["http", "graphql"],
+        populates: &[],
+        run: |m, _| resolve(m, &ModelResolver, "resolver:models"),
+    },
     // DD.5: SAME_AS identity stars, the last Resolve pass. It reads nodes
     // only (never another resolver's edges), so its place is a convention:
     // last. Its `package_name` and `message_fqname` stars replaced the
@@ -362,7 +375,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 27] = [
+    const HEAD_ORDER: [&str; 28] = [
         "http",
         "grpc",
         "rpc",
@@ -378,6 +391,7 @@ mod tests {
         "cron",
         "config",
         "iac",
+        "models",
         "identity",
         "external_edges",
         "downgrade_test_paths",
@@ -400,7 +414,8 @@ mod tests {
     /// last Resolve pass; DD.16 retired the `message_schema` and `package`
     /// resolvers its stars replaced, leaving fourteen; DT.5f's gqlgen
     /// resolver follows the GraphQL one, making fifteen; DT.10b's evm
-    /// resolver follows the RPC one, making sixteen.
+    /// resolver follows the RPC one, making sixteen; DT.1h's models resolver
+    /// runs just before identity, making seventeen.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -410,7 +425,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (16, 9, 2)
+            (17, 9, 2)
         );
     }
 

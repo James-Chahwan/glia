@@ -18,8 +18,9 @@
 //! # Classes
 //!
 //! One scan of `merged.cross_edges` for SAME_AS (the identity resolver, DD.5,
-//! only ever writes cross edges). Each edge's tier: emitter
-//! `resolver:identity` with a rule the code domain's table declares
+//! only ever writes cross edges; nor does the models resolver, DT.1h). Each
+//! edge's tier: emitter `resolver:identity` or `resolver:models`
+//! (`same_as::is_identity_emitter`) with a rule the code domain's table declares
 //! (`CODE_PROFILE.tables.identity_rules`, DD.3, the base rule read through
 //! `same_as::split_evidence_rule`) takes that rule's [`IdentityTier`]; any
 //! other edge (an overlay `[[edge]]` SAME_AS, a rule the table does not
@@ -91,10 +92,6 @@ use crate::absence::{self, Absence, plural};
 use crate::answers::{Located, Locator};
 use crate::profile::CODE_PROFILE;
 use crate::why;
-
-/// The identity resolver's EVIDENCE emitter (DD.5): the `resolver!` stamp of
-/// its `CODE_PASSES` row.
-const IDENTITY_EMITTER: &str = "resolver:identity";
 
 /// The report's absence primitive and marker surface.
 const PRIMITIVE: &str = "identity";
@@ -629,7 +626,7 @@ fn read_edge(e: &Edge) -> Reading {
     let rules = CODE_PROFILE.tables.identity_rules;
     let declared = ev
         .as_ref()
-        .filter(|ev| ev.emitter == IDENTITY_EMITTER)
+        .filter(|ev| same_as::is_identity_emitter(&ev.emitter))
         .and_then(|_| rules.iter().position(|r| r.name == base));
     let (tier, rule, walk) = match declared {
         Some(i) => (
@@ -804,7 +801,8 @@ pub fn identity_classes(merged: &MergedGraph, q: &IdentityQuery) -> Result<Ident
             .filter(|e| e.category == edge_category::SAME_AS)
             .count();
         let note = if edges == 0 {
-            "no SAME_AS edge: one repo with no shared package, message or contract op".to_string()
+            "no SAME_AS edge: one repo with no shared package, message, contract op or client/server model"
+                .to_string()
         } else if total == 0 {
             format!(
                 "{edges} SAME_AS {} {} no class (each joins a node to itself)",

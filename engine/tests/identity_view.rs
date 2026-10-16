@@ -536,7 +536,7 @@ fn report_filters() {
     assert_eq!(full.counts.by_rule[2], ("message_fqname", 1));
     assert_eq!(
         full.counts.by_rule.len(),
-        8,
+        glia_code_domain::same_as::ALL_RULES.len(),
         "every table rule, in table order"
     );
     assert_eq!(full.omitted, 0);

@@ -29,11 +29,13 @@
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //! | `resolver:evm` rules `abi_hint` / `name_hint` | heuristic — a contract identified by its name key, not by the site or a covering ABI (DT.10b); note `name-matched contract (<rule>)` |
 //!
-//! One emitter is tiered by its rule, not its stage: a SAME_AS edge of the
-//! identity resolver (`resolver:identity`, DD.5) takes the tier of its rule's
-//! row in `CODE_TABLES.identity_rules` (DD.3: `package_name`,
-//! `manifest_name`, `message_fqname` and `scip_symbol` fact, `contract_op`
-//! and `contract_route` derived, the vendored-copy rules heuristic), note
+//! Two emitters are tiered by their rule, not their stage: a SAME_AS edge of
+//! the identity resolver (`resolver:identity`, DD.5) or of the models
+//! resolver (`resolver:models`, DT.1h; `same_as::is_identity_emitter`) takes
+//! the tier of its rule's row in `CODE_TABLES.identity_rules` (DD.3:
+//! `package_name`, `manifest_name`, `message_fqname` and `scip_symbol` fact,
+//! `contract_op`, `contract_route` and `http_model` derived, the
+//! vendored-copy rules heuristic), note
 //! `identity class (<rule>)`, or `identity class (<rule>, diverged)` for a
 //! `<rule>/diverged` edge whose two members' contents differ. A rule the table
 //! does not declare falls back to the stage's tier.
@@ -492,15 +494,11 @@ fn explain_edge(
     }
 }
 
-/// The identity resolver's EVIDENCE emitter (DD.5): the `resolver!` stamp of
-/// its `CODE_PASSES` row.
-const IDENTITY_EMITTER: &str = "resolver:identity";
-
-/// `(tier, note)` of an identity resolver edge, from its rule's
+/// `(tier, note)` of an identity or models resolver edge, from its rule's
 /// `identity_rules` row (module doc); `None` for every other emitter and for
 /// a rule the table does not declare, which fall through to the stage tier.
 fn identity_tier(ev: &Evidence) -> Option<(&'static str, Option<String>)> {
-    if ev.emitter != IDENTITY_EMITTER {
+    if !same_as::is_identity_emitter(&ev.emitter) {
         return None;
     }
     let (base, diverged) = same_as::split_evidence_rule(ev.rule.as_deref()?);
@@ -803,7 +801,13 @@ mod tests {
         assert_eq!(tier("zzz"), (DERIVED, None), "an undeclared rule is the stage's tier");
         let bare = Evidence::emitter("resolver:identity");
         assert_eq!(tier_of(Some(&bare), &edge), (DERIVED, None));
-        // Only the identity emitter reads the table.
+        // DT.1h: the models resolver's rule reads the same table.
+        let model = Evidence::emitter("resolver:models").rule("http_model/diverged");
+        assert_eq!(
+            tier_of(Some(&model), &edge),
+            noted(DERIVED, "identity class (http_model, diverged)")
+        );
+        // Only the two identity emitters read the table.
         let other = Evidence::emitter("resolver:package").rule("package_name");
         assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
     }

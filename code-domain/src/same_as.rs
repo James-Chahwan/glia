@@ -12,7 +12,10 @@
 //! - **Rule names** ([`RULES`]): the EVIDENCE `rule` of a SAME_AS edge is a
 //!   rule name, `/diverged` appended when the two members' contents differ
 //!   ([`evidence_rule`] / [`split_evidence_rule`]; the `confirms:` rule of the
-//!   SCIP stage qualifies with `/` the same way).
+//!   SCIP stage qualifies with `/` the same way). DT.1h adds the models
+//!   resolver's [`MODEL_RULES`] (`http_model`); [`ALL_RULES`] is both lists,
+//!   and [`is_identity_emitter`] names the two resolvers whose SAME_AS rule
+//!   is a table row.
 //! - **Contract ops** ([`contract_op_key`]): an OpenAPI / AsyncAPI / swaggo /
 //!   feature-yaml op DOC_SECTION is keyed from its ORIGIN, `METHOD path` for
 //!   an HTTP op and `[action ]channel` for a channel. `contract_breaks` (CC.8)
@@ -70,6 +73,43 @@ pub const RULES: [&str; 8] = [
     RULE_BODY_HASH,
     RULE_PATH_SUFFIX,
 ];
+
+/// DT.1h: a client model and the server model one HTTP exchange carries,
+/// confirmed by the JSON field names both sides list (the models resolver,
+/// `graph/src/resolvers/models.rs`).
+pub const RULE_HTTP_MODEL: &str = "http_model";
+
+/// The identity rules the models resolver writes (DT.1h), in rule order. The
+/// identity resolver writes [`RULES`] and never these: its classes are read
+/// off nodes, these off the HTTP exchanges another resolver paired.
+pub const MODEL_RULES: [&str; 1] = [RULE_HTTP_MODEL];
+
+/// Every identity rule name, in table order: [`RULES`], then
+/// [`MODEL_RULES`]. The code domain's `identity_rules` table lists exactly
+/// these (`profile::CODE_TABLES`, its guard test pins it), and `glia identity
+/// --rule` takes exactly these.
+pub const ALL_RULES: [&str; 9] = [
+    RULE_PACKAGE_NAME,
+    RULE_MANIFEST_NAME,
+    RULE_MESSAGE_FQNAME,
+    RULE_CONTRACT_OP,
+    RULE_CONTRACT_ROUTE,
+    RULE_SCIP_SYMBOL,
+    RULE_BODY_HASH,
+    RULE_PATH_SUFFIX,
+    RULE_HTTP_MODEL,
+];
+
+/// The EVIDENCE emitters of SAME_AS edges whose rule names an identity
+/// table row: the identity resolver (DD.5, [`RULES`]) and the models
+/// resolver (DT.1h, [`MODEL_RULES`]), each its `resolver!` pass stamp. Any
+/// other SAME_AS (an overlay `[[edge]]`) is tiered by its stage.
+pub const IDENTITY_EMITTERS: [&str; 2] = ["resolver:identity", "resolver:models"];
+
+/// Is `emitter` one of [`IDENTITY_EMITTERS`]?
+pub fn is_identity_emitter(emitter: &str) -> bool {
+    IDENTITY_EMITTERS.contains(&emitter)
+}
 
 /// The qualifier of a SAME_AS edge whose two members' contents differ.
 pub const DIVERGED: &str = "diverged";
@@ -565,5 +605,24 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), RULES.len());
+    }
+
+    /// DT.1h: ALL_RULES is RULES then MODEL_RULES, every name once and
+    /// round-tripping its `/diverged` qualifier; the two identity emitters
+    /// are the two resolvers' pass stamps.
+    #[test]
+    fn all_rules_and_emitters() {
+        let joined: Vec<&str> = RULES.iter().chain(MODEL_RULES.iter()).copied().collect();
+        assert_eq!(ALL_RULES.to_vec(), joined);
+        let mut sorted = ALL_RULES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ALL_RULES.len());
+        assert_eq!(evidence_rule(RULE_HTTP_MODEL, true), "http_model/diverged");
+        assert_eq!(split_evidence_rule("http_model/diverged"), (RULE_HTTP_MODEL, true));
+        assert!(is_identity_emitter("resolver:identity"));
+        assert!(is_identity_emitter("resolver:models"));
+        assert!(!is_identity_emitter("resolver:http"));
+        assert!(!is_identity_emitter("overlay:edge"));
     }
 }

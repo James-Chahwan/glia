@@ -22,7 +22,7 @@ COUNT_KEYS = ["classes", "members", "fact", "derived", "heuristic", "diverged", 
 CLASS_KEYS = ["key", "tier", "rules", "collapses", "walks", "diverged", "variants", "members"]
 MEMBER_KEYS = ["repo", "qname", "kind", "file", "line", "variant"]
 RULES = ["package_name", "manifest_name", "message_fqname", "contract_op", "contract_route",
-         "scip_symbol", "body_hash", "path_suffix"]
+         "scip_symbol", "body_hash", "path_suffix", "http_model"]
 
 
 def copy(fixture: str, top: pathlib.Path) -> pathlib.Path:
