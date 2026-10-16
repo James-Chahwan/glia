@@ -204,6 +204,20 @@ pub enum TopicRule {
     /// expression: an option value held in a variable names nothing the LA.4
     /// fold has a slot for.
     KeyedIn(&'static [&'static str]),
+    // --- DT.2b: nats.go / JetStream, A SUBJECT THAT MAY SIT BEHIND A ctx -----
+    /// DT.2b: a nats.go / JetStream PUBLISH subject: positional argument #0,
+    /// or argument #1 when argument #0 is a context expression
+    /// ([`nats_subject_slot`]: the new jetstream API's `js.Publish(ctx,
+    /// "orders.new", d)`). The slot reads as [`TopicRule::ArgLiteral`] does: its
+    /// first quoted literal, else the identifier expression for the LA.4 fold.
+    /// DT.2c replaces the reading.
+    NatsSubject,
+    /// DT.2b: a nats.go / JetStream SUBSCRIBE filter (`conn.Subscribe("orders.*",
+    /// cb)`, `js.PullSubscribe(subj, durable)`), read exactly as
+    /// [`TopicRule::NatsSubject`] reads a publish subject. Its own variant
+    /// because a filter may hold wildcards a subject never does; DT.2c
+    /// replaces the reading.
+    NatsFilter,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -544,6 +558,11 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
             let region = region?;
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
+        // DT.2b: arg #0, or arg #1 behind a context expression.
+        TopicRule::NatsSubject | TopicRule::NatsFilter => {
+            let region = region?;
+            arg_literal(region, nats_subject_slot(region))
+        }
         // `NoIdentity`, the A2.5 identity rules, DH.1's `Declared` /
         // `BareArg`, DH.3's `CommandArg` and DH.4's `KeyedIn` never read an
         // argument region here; `scan` dispatches them before it gets here.
@@ -590,8 +609,37 @@ fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<
             let region = region?;
             keyed_expr(region, keys).or_else(|| arg_expr(region, 0))
         }
+        TopicRule::NatsSubject | TopicRule::NatsFilter => {
+            let region = region?;
+            arg_expr(region, nats_subject_slot(region))
+        }
         _ => None,
     }
+}
+
+/// DT.2b: the positional slot a [`TopicRule::NatsSubject`] /
+/// [`TopicRule::NatsFilter`] reads: 1 when argument #0 is a Go context
+/// expression (the new jetstream API takes `ctx` first), else 0. A context is
+/// `ctx`, `context.Background()`, `context.TODO()` or `<chain>.Context()`
+/// (`r.Context()`, `c.Request.Context()`); anything else, a literal or a
+/// subject variable included, is the subject itself.
+fn nats_subject_slot(region: &str) -> usize {
+    let first = split_args(region).first().map_or("", |a| a.trim());
+    usize::from(is_go_context_arg(first))
+}
+
+/// DT.2b: is `arg` (one trimmed argument) a Go context expression?
+fn is_go_context_arg(arg: &str) -> bool {
+    if matches!(arg, "ctx" | "context.Background()" | "context.TODO()") {
+        return true;
+    }
+    arg.strip_suffix(".Context()").is_some_and(|chain| {
+        !chain.is_empty()
+            && !chain.starts_with(|c: char| c.is_ascii_digit())
+            && chain
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
+    })
 }
 
 /// The rest of the line starting at `after`, for paren-less calls.

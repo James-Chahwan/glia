@@ -326,6 +326,23 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Go exports Capitalised APIs and several take `ctx` first, so no row above
     // reads a Go call. `.Consume(`, `.Subscription(`, `.Topic(` and `.Publish(`
     // are common Go method names: every gate is the library's IMPORT PATH.
+    // DT.2b: nats.go / JetStream on ANY receiver (`conn.Subscribe(..)`,
+    // `s.JS.PullSubscribe(..)`), FIRST in the block. The HEAD `nc.` rows above
+    // matched the receiver NAME, so `conn.` / `p.conn.` / `s.JS.` minted
+    // nothing. These rows are [`is_go_nats_row`]s: a hit drops when a `nc.` row
+    // already read the same call, and when the file's own declarations type
+    // its receiver as something else ([`go_receiver_type`]). The gate also
+    // admits `.../nats.go/jetstream`. Not rows: `.Request(` (request-reply,
+    // and every HTTP client's verb), `ConsumerConfig{FilterSubject}` (CL.1:
+    // declaring is not consuming) and the jetstream API's `cons.Consume(` /
+    // `.Messages(` / `.Fetch(` (no subject at the call).
+    (".Subscribe(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".QueueSubscribe(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".SubscribeSync(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".QueueSubscribeSync(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".ChanSubscribe(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".ChanQueueSubscribe(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
+    (".PullSubscribe(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsFilter),
     // streadway/amqp + rabbitmq/amqp091-go: `ch.Consume(queue, consumer, ..)`.
     // The tutorial's `ch.Consume(q.Name, ..)` names no queue; CL.1's declare
     // pass binds it to the file's one `ch.QueueDeclare("orders", ..)`.
@@ -851,6 +868,17 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // ---- CL.2: Go broker clients (see the CONSUMER_PATTERNS block) ---------
     // Every row here sits BEFORE the A2.9 block: the MQTT `.Publish(` row there
     // is a generic verb that yields to a call an earlier row already read.
+    // DT.2b: nats.go / JetStream on any receiver, FIRST in the block and so
+    // BEFORE the RabbitMQ / SNS `.Publish(` rows, which yield to a call these
+    // kept ([`yields_to_earlier_rows`]): in a nats + amqp file each `.Publish(`
+    // is read by one broker, its receiver's ([`go_receiver_type`]).
+    // `.PublishMsg(` names its subject in the message, `&nats.Msg{Subject:
+    // "orders"}`: Keyed, never the arg-#0 fallback, which would read the
+    // struct's `Data: []byte("..")` payload as a subject.
+    (".Publish(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsSubject),
+    (".PublishAsync(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::NatsSubject),
+    (".PublishMsg(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::Keyed(&["subject"])),
+    (".PublishMsgAsync(", QueueFramework::Nats, NATS_GO_GATE, TopicRule::Keyed(&["subject"])),
     // streadway/amqp + amqp091-go: `ch.Publish(exchange, key, mandatory,
     // immediate, msg)` reads the routing key; the context-first spellings read
     // it one slot later. An EMPTY key (fanout) falls back to the exchange,
@@ -1318,6 +1346,345 @@ const REDIX_GATE: &[&str] = &["redix"];
 /// ex_aws_sqs: `ExAws.SQS`.
 const EX_AWS_SQS_GATE: &[&str] = &["exaws.sqs"];
 
+// ---- DT.2b: nats.go / JetStream on any receiver --------------------------------
+/// DT.2b: nats.go's import path, which also prefixes `.../nats.go/jetstream`.
+const NATS_GO_GATE: &[&str] = &["nats-io/nats.go"];
+
+/// DT.2b: nats.go's two package import paths, each with the package name an
+/// un-aliased import binds.
+const NATS_GO_PACKAGES: &[(&str, &str)] = &[
+    ("github.com/nats-io/nats.go", "nats"),
+    ("github.com/nats-io/nats.go/jetstream", "jetstream"),
+];
+
+/// DT.2b: the needles of the receiver-agnostic nats.go rows, both tables. With
+/// [`QueueFramework::Nats`] they are [`is_go_nats_row`]s.
+const GO_NATS_NEEDLES: &[&str] = &[
+    ".Subscribe(",
+    ".QueueSubscribe(",
+    ".SubscribeSync(",
+    ".QueueSubscribeSync(",
+    ".ChanSubscribe(",
+    ".ChanQueueSubscribe(",
+    ".PullSubscribe(",
+    ".Publish(",
+    ".PublishAsync(",
+    ".PublishMsg(",
+    ".PublishMsgAsync(",
+];
+
+/// DT.2b: the import paths (lowercase) of every OTHER Go broker client glia
+/// reads. In a file importing nats.go and one of these, a `.Publish(` /
+/// `.Subscribe(` whose receiver the file never declares may be either
+/// library's, so the nats.go rows drop it ([`GoRecv::Undeclared`]).
+const GO_OTHER_BROKER_IMPORTS: &[&str] = &[
+    "streadway/amqp",
+    "amqp091-go",
+    "aws-sdk-go/service/sns",
+    "aws-sdk-go-v2/service/sns",
+    "aws-sdk-go/service/sqs",
+    "aws-sdk-go-v2/service/sqs",
+    "paho.mqtt.golang",
+    "go-redis",
+    "cloud.google.com/go/pubsub",
+    "azservicebus",
+    "confluent-kafka-go",
+    "segmentio/kafka-go",
+    "ibm/sarama",
+    "shopify/sarama",
+    "hibiken/asynq",
+];
+
+/// DT.2b: a receiver-agnostic nats.go row ([`GO_NATS_NEEDLES`] on
+/// [`QueueFramework::Nats`]). Such a row (a) yields a hit whose call a HEAD
+/// `nc.` row already read, and only that call (a claimed span ENDING at this
+/// hit's `(`: `nc.Publish` claims `nc.Publish(`, never `nc.PublishMsg(`), and
+/// (b) keeps a hit by its receiver's declared type ([`go_receiver_type`]).
+fn is_go_nats_row(needle: &str, f: &QueueFramework) -> bool {
+    *f == QueueFramework::Nats && GO_NATS_NEEDLES.contains(&needle)
+}
+
+/// DT.2b: what a Go file's own declarations say a call's receiver is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoRecv {
+    /// Every declaration types it from nats.go / jetstream (or a
+    /// `.JetStream()` call).
+    Nats,
+    /// Every declaration types it from another package or a local type.
+    Other,
+    /// No declaration in this file, or declarations that disagree.
+    Undeclared,
+}
+
+/// DT.2b: the qualifier a Go file uses for `import_path`: its explicit alias,
+/// else `default` (the package name an un-aliased import binds). `None` when
+/// the file does not import it, or imports it blank (`_`) or dot (`.`), where
+/// no qualifier names its types. The import must be written exactly, quotes
+/// included, so `.../nats.go` never matches `.../nats.go/jetstream`.
+fn go_import_alias(source: &str, import_path: &str, default: &str) -> Option<String> {
+    let quoted = format!("\"{import_path}\"");
+    let at = source.find(&quoted)?;
+    let head = source.get(..at)?;
+    let line = head.rsplit('\n').next().unwrap_or(head);
+    let token = line.split_whitespace().last().unwrap_or("");
+    if token.is_empty() || token == "import" || token.ends_with('(') {
+        return Some(default.to_string());
+    }
+    let ident = token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        && !token.starts_with(|c: char| c.is_ascii_digit());
+    (ident && token != "_").then(|| token.to_string())
+}
+
+/// DT.2b: the file's qualifiers for nats.go and jetstream ([`NATS_GO_PACKAGES`]).
+fn nats_go_aliases(source: &str) -> Vec<String> {
+    NATS_GO_PACKAGES
+        .iter()
+        .filter_map(|(path, default)| go_import_alias(source, path, default))
+        .collect()
+}
+
+/// Occurrences of the receiver's name examined per call: a bound on the
+/// declaration scan, which runs once per hit.
+const MAX_RECEIVER_MENTIONS: usize = 256;
+
+/// DT.2b: the type of the receiver of the Go call at `needle_offset` (the
+/// needle's leading `.`), read off THIS file's declarations of the chain's
+/// last segment `x` (`conn` of `conn.`, `conn` of `p.conn.`, `JS` of `s.JS.`):
+/// `x <type>` in a parameter list, a struct field or a `var` (type
+/// `*?(\[\])?*?(<qual>.)?Ident`, whitespace runs allowed for gofmt-aligned
+/// fields), or `x[, ..] :?= <rhs>` with rhs `<qual>.Connect(`,
+/// `<qual>.New(`, `&(<qual>.)?<T>{` or `<y>.JetStream(`. A qualifier in
+/// `aliases` ([`nats_go_aliases`]) or a `.JetStream(` rhs is NATS, any other
+/// qualifier or an unqualified local type is not. Text over one file: no
+/// cross-file typing, no value flow (a `conn := pool.Get()` says nothing).
+fn go_receiver_type(source: &str, needle_offset: usize, aliases: &[String]) -> GoRecv {
+    let Some(head) = source.get(..needle_offset) else {
+        return GoRecv::Undeclared;
+    };
+    let b = head.as_bytes();
+    let mut i = b.len();
+    // ASCII bytes only, so `i` stays on a char boundary.
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'.')) {
+        i -= 1;
+    }
+    let chain = head.get(i..).unwrap_or("");
+    let x = chain.rsplit('.').next().unwrap_or("");
+    if x.is_empty() || x.starts_with(|c: char| c.is_ascii_digit()) {
+        return GoRecv::Undeclared;
+    }
+    let mut verdict: Option<GoRecv> = None;
+    let sb = source.as_bytes();
+    // Only whole-word mentions count toward the cap, so a one-letter
+    // receiver (`s.Publish(`) is not crowded out by the letter inside words.
+    let words = source.match_indices(x).filter(|&(at, _)| {
+        let before = at.checked_sub(1).and_then(|k| sb.get(k));
+        !before.is_some_and(|c| is_go_ident_byte(*c))
+            && !sb.get(at + x.len()).is_some_and(|c| is_go_ident_byte(*c))
+    });
+    for (at, _) in words.take(MAX_RECEIVER_MENTIONS) {
+        let Some(found) = go_declaration_at(source, at, x.len(), aliases) else {
+            continue;
+        };
+        match verdict {
+            None => verdict = Some(found),
+            Some(v) if v == found => {}
+            Some(_) => return GoRecv::Undeclared,
+        }
+    }
+    verdict.unwrap_or(GoRecv::Undeclared)
+}
+
+fn is_go_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// DT.2b: the identifier at the start of `b[j..]`, as its end index.
+fn go_ident_end(b: &[u8], j: usize) -> Option<usize> {
+    let first = *b.get(j)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut k = j + 1;
+    while b.get(k).is_some_and(|c| is_go_ident_byte(*c)) {
+        k += 1;
+    }
+    Some(k)
+}
+
+fn skip_go_blanks(b: &[u8], mut j: usize) -> usize {
+    while matches!(b.get(j), Some(b' ' | b'\t')) {
+        j += 1;
+    }
+    j
+}
+
+/// DT.2b: `<ident>(.<ident>)?` at `b[j..]`: (qualifier, name, end). The
+/// qualifier is `None` for an unqualified name.
+fn go_qualified_at(src: &str, j: usize) -> Option<(Option<&str>, &str, usize)> {
+    let b = src.as_bytes();
+    let e1 = go_ident_end(b, j)?;
+    if b.get(e1) == Some(&b'.')
+        && let Some(e2) = go_ident_end(b, e1 + 1)
+    {
+        return Some((Some(src.get(j..e1)?), src.get(e1 + 1..e2)?, e2));
+    }
+    Some((None, src.get(j..e1)?, e1))
+}
+
+/// DT.2b: the verdict of one declaration of the receiver name `x` at
+/// `src[at..at + len]`, or `None` when that occurrence declares nothing this
+/// rule reads. See [`go_receiver_type`] for the forms.
+fn go_declaration_at(src: &str, at: usize, len: usize, aliases: &[String]) -> Option<GoRecv> {
+    let b = src.as_bytes();
+    let end = at + len;
+    // Word edges; a `.x` is a selector, never a declaration.
+    if at > 0 && (is_go_ident_byte(b[at - 1]) || b[at - 1] == b'.') {
+        return None;
+    }
+    if b.get(end).is_some_and(|c| is_go_ident_byte(*c)) {
+        return None;
+    }
+    let qual_verdict = |q: Option<&str>| match q {
+        Some(q) if aliases.iter().any(|a| a == q) => GoRecv::Nats,
+        _ => GoRecv::Other,
+    };
+    // Form A: `x <type>`, where `x` opens a parameter, a field or a `var`.
+    let mut p = at;
+    while p > 0 && matches!(b[p - 1], b' ' | b'\t') {
+        p -= 1;
+    }
+    let opens = p == 0
+        || matches!(b[p - 1], b'\n' | b'\r' | b'(' | b',' | b'{' | b';')
+        || (p >= 3
+            && src.get(p - 3..p) == Some("var")
+            && (p == 3 || !is_go_ident_byte(b[p - 4])));
+    let j = skip_go_blanks(b, end);
+    if opens && j > end {
+        let mut t = j;
+        if b.get(t) == Some(&b'*') {
+            t += 1;
+        }
+        if b.get(t) == Some(&b'[') && b.get(t + 1) == Some(&b']') {
+            t += 2;
+        }
+        if b.get(t) == Some(&b'*') {
+            t += 1;
+        }
+        if let Some((q, _, _)) = go_qualified_at(src, t) {
+            return Some(qual_verdict(q));
+        }
+    }
+    // Form B: `x[, y..] :?= <rhs>`.
+    let mut j = j;
+    while b.get(j) == Some(&b',') {
+        j = skip_go_blanks(b, j + 1);
+        j = skip_go_blanks(b, go_ident_end(b, j)?);
+    }
+    if b.get(j) == Some(&b':') {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'=') || b.get(j + 1) == Some(&b'=') {
+        return None;
+    }
+    let r = skip_go_blanks(b, j + 1);
+    if b.get(r) == Some(&b'&') {
+        let (q, _, e) = go_qualified_at(src, r + 1)?;
+        return (b.get(e) == Some(&b'{')).then(|| qual_verdict(q));
+    }
+    let rhs = src.get(r..)?;
+    let line = rhs.split('\n').next().unwrap_or(rhs);
+    let call = line.find('(').and_then(|k| line.get(..k))?;
+    let callee_ok = !call.is_empty()
+        && call
+            .bytes()
+            .all(|c| is_go_ident_byte(c) || c == b'.');
+    if !callee_ok {
+        return None;
+    }
+    if call.ends_with(".JetStream") {
+        return Some(GoRecv::Nats);
+    }
+    match call.split_once('.') {
+        Some((q, "Connect" | "New")) => Some(qual_verdict(Some(q))),
+        _ => None,
+    }
+}
+
+/// DT.2b: one file's nats.go context, read once per side by the first nats.go
+/// row that runs ([`emit_queue_nodes`]).
+struct GoNatsFile {
+    /// The file's qualifiers for nats.go and jetstream ([`nats_go_aliases`]).
+    aliases: Vec<String>,
+    /// The file also imports another Go broker client
+    /// ([`GO_OTHER_BROKER_IMPORTS`]), so an undeclared receiver is no site.
+    multi_broker: bool,
+    tally: GoNatsTally,
+}
+
+impl GoNatsFile {
+    fn read(source: &str, lower: &str) -> Self {
+        GoNatsFile {
+            aliases: nats_go_aliases(source),
+            multi_broker: GO_OTHER_BROKER_IMPORTS.iter().any(|p| lower.contains(p)),
+            tally: GoNatsTally::default(),
+        }
+    }
+}
+
+/// DT.2b: the nats.go rows' hits after the same-call yield, by the receiver
+/// rule's verdict.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GoNatsTally {
+    /// Kept: the receiver is declared from nats.go / jetstream.
+    typed: usize,
+    /// Kept: the receiver is undeclared in a file whose only Go broker
+    /// import is nats.go (CL.2's import-gate precedent).
+    untyped: usize,
+    /// Dropped: the receiver is declared with another library's or a local type.
+    foreign: usize,
+    /// Dropped: the receiver is undeclared in a multi-broker file.
+    multi_broker: usize,
+}
+
+impl GoNatsTally {
+    /// Records one hit's verdict and says whether the hit is kept.
+    fn keep(&mut self, recv: GoRecv, multi_broker: bool) -> bool {
+        match recv {
+            GoRecv::Nats => {
+                self.typed += 1;
+                true
+            }
+            GoRecv::Other => {
+                self.foreign += 1;
+                false
+            }
+            GoRecv::Undeclared if multi_broker => {
+                self.multi_broker += 1;
+                false
+            }
+            GoRecv::Undeclared => {
+                self.untyped += 1;
+                true
+            }
+        }
+    }
+
+    /// fired_on (DT.2b, per-file pass only), once per side per file whose
+    /// nats.go rows kept or dropped a hit:
+    ///   `[queues] go-nats side=<producer|consumer> sites=<kept> (typed=<t>
+    ///   untyped=<u>) dropped=<d> (foreign=<f> multi_broker=<m>) path=<file>`
+    fn marker(&self, side: &str, path: &str) -> Option<String> {
+        let kept = self.typed + self.untyped;
+        let dropped = self.foreign + self.multi_broker;
+        (kept + dropped > 0).then(|| {
+            format!(
+                "[queues] go-nats side={side} sites={kept} (typed={} untyped={}) dropped={dropped} (foreign={} multi_broker={}) path={path}",
+                self.typed, self.untyped, self.foreign, self.multi_broker
+            )
+        })
+    }
+}
+
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
 /// `process_order.delay(order_id)`) never mentions `celery`. When such a row's
@@ -1443,9 +1810,14 @@ fn is_generic_verb_row(needle: &str, f: &QueueFramework) -> bool {
 }
 
 /// A2.9: rows that give way when an EARLIER row already read the same call
-/// site, so one call never mints two nodes of different frameworks.
+/// site, so one call never mints two nodes of different frameworks. DT.2b:
+/// CL.2's Go RabbitMQ and SNS `.Publish(` rows too, so a call a nats.go row
+/// kept (its receiver typed or undeclared by [`go_receiver_type`]) is never
+/// also read as RabbitMQ / SNS.
 fn yields_to_earlier_rows(needle: &str, f: &QueueFramework) -> bool {
-    is_generic_verb_row(needle, f) || matches!(f, QueueFramework::Jms)
+    is_generic_verb_row(needle, f)
+        || matches!(f, QueueFramework::Jms)
+        || (needle == ".Publish(" && matches!(f, QueueFramework::RabbitMQ | QueueFramework::Sns))
 }
 
 /// True when the argument region after `after` opens with a quoted literal,
@@ -2053,6 +2425,9 @@ fn emit_queue_nodes(
     let mut spans: Vec<HitSpan<'_>> = Vec::new();
     let mut deferred: Vec<DeferredTag<'_>> = Vec::new();
     let mut imported: Option<BTreeSet<String>> = None;
+    // DT.2b: the file's nats.go qualifiers and receiver tally, read when the
+    // first nats.go row runs.
+    let mut go_nats: Option<GoNatsFile> = None;
     let side = if kind == node_kind::QUEUE_CONSUMER {
         "consumer"
     } else {
@@ -2072,8 +2447,24 @@ fn emit_queue_nodes(
         } else {
             continue;
         };
-        let handler = handler_rule(pattern).filter(|_| kind == node_kind::QUEUE_CONSUMER);
+        let handler =
+            handler_rule(pattern, framework).filter(|_| kind == node_kind::QUEUE_CONSUMER);
         let mut hits = queue_topic::scan_guarded(source, pattern, *rule, &mut guard);
+        // DT.2b: a receiver-agnostic nats.go row reads only the calls no HEAD
+        // `nc.` row read, on receivers the file does not type as another
+        // library's. A dropped hit is never claimed.
+        if is_go_nats_row(pattern, framework) {
+            let paren = pattern.len().saturating_sub(1);
+            hits.retain(|h| !claimed.iter().any(|&(_, e)| e == h.offset + paren));
+            let GoNatsFile {
+                aliases,
+                multi_broker,
+                tally,
+            } = go_nats.get_or_insert_with(|| GoNatsFile::read(source, &lower));
+            hits.retain(|h| {
+                tally.keep(go_receiver_type(source, h.offset, aliases), *multi_broker)
+            });
+        }
         if import_gated {
             let names = imported.get_or_insert_with(|| python_imported_names(source));
             hits.retain(|h| {
@@ -2450,6 +2841,10 @@ fn emit_queue_nodes(
                 "[queues] tag framework={:?} side={side} sites={} (mixed_rows={}) path={path}",
                 t.framework, t.sites, t.mixed_rows
             );
+        }
+        // DT.2b: what the nats.go receiver rule kept and dropped, per side.
+        if let Some(line) = go_nats.as_ref().and_then(|g| g.tally.marker(side, path)) {
+            eprintln!("{line}");
         }
     }
 
@@ -3130,8 +3525,11 @@ fn use_item<'a>(item: &'a str, short: &str) -> Option<&'a str> {
 //   `... 2>&1 | grep '\[queue-callbacks\] consumers='`
 // ---------------------------------------------------------------------------
 
-/// Where a consumer needle's handler sits. Keyed by the SAME needle strings as
-/// [`CONSUMER_PATTERNS`] (`handler_rules_name_consumer_needles` asserts it).
+/// Where a consumer needle's handler sits. Keyed by the SAME (needle,
+/// framework) pairs as [`CONSUMER_PATTERNS`] (`handler_rules_name_consumer_needles`
+/// asserts it): DT.2b's nats.go `.Subscribe(` shares its needle with paho's
+/// `.Subscribe(topic, qos, cb)` and Confluent C#'s `.Subscribe(topic)`, which
+/// keep no rule.
 #[derive(Debug, Clone, Copy)]
 enum HandlerRule {
     /// Positional argument N of the needle's call.
@@ -3145,35 +3543,40 @@ enum HandlerRule {
     RunCallback(&'static [&'static str]),
 }
 
-const HANDLER_RULES: &[(&str, HandlerRule)] = &[
+const HANDLER_RULES: &[(&str, QueueFramework, HandlerRule)] = &[
     // kafkajs: `consumer.subscribe({ topic })` + `consumer.run({ eachMessage })`.
-    ("consumer.subscribe", HandlerRule::RunCallback(&["eachMessage", "eachBatch"])),
+    ("consumer.subscribe", QueueFramework::Kafka, HandlerRule::RunCallback(&["eachMessage", "eachBatch"])),
     // amqplib: `channel.consume(queue, onMessage, options)`.
-    ("channel.consume", HandlerRule::ArgIndex(1)),
+    ("channel.consume", QueueFramework::RabbitMQ, HandlerRule::ArgIndex(1)),
     // BullMQ: `new Worker(queue, processor, options)`.
-    ("new Worker(", HandlerRule::ArgIndex(1)),
+    ("new Worker(", QueueFramework::BullMQ, HandlerRule::ArgIndex(1)),
     // nats.js v2 `nc.subscribe(subject, { callback: (err, msg) => .. })`; v1
     // passed the callback positionally, `nc.subscribe(subject, onMsg)`.
-    ("nc.subscribe", HandlerRule::KeyedOrArg(&["callback"], 1)),
+    ("nc.subscribe", QueueFramework::Nats, HandlerRule::KeyedOrArg(&["callback"], 1)),
     // nats.go: `nc.Subscribe(subj, cb)`, `nc.QueueSubscribe(subj, queue, cb)`.
-    ("nc.Subscribe", HandlerRule::ArgIndex(1)),
-    ("nc.QueueSubscribe", HandlerRule::ArgIndex(2)),
+    ("nc.Subscribe", QueueFramework::Nats, HandlerRule::ArgIndex(1)),
+    ("nc.QueueSubscribe", QueueFramework::Nats, HandlerRule::ArgIndex(2)),
+    // DT.2b: the same calls on any receiver (`conn.Subscribe(subj, s.onX)`,
+    // `js.QueueSubscribe(subj, queue, cb)`).
+    (".Subscribe(", QueueFramework::Nats, HandlerRule::ArgIndex(1)),
+    (".QueueSubscribe(", QueueFramework::Nats, HandlerRule::ArgIndex(2)),
     // pika 1.x: `basic_consume(queue, on_message_callback, ...)`, keyword or positional.
-    ("basic_consume(", HandlerRule::KeyedOrArg(&["on_message_callback"], 1)),
+    ("basic_consume(", QueueFramework::RabbitMQ, HandlerRule::KeyedOrArg(&["on_message_callback"], 1)),
     // CL.4 asynq: `mux.HandleFunc(type, handler)`, `mux.Handle(type, handler)`.
-    (".HandleFunc(", HandlerRule::ArgIndex(1)),
-    (".Handle(", HandlerRule::ArgIndex(1)),
+    (".HandleFunc(", QueueFramework::Asynq, HandlerRule::ArgIndex(1)),
+    (".Handle(", QueueFramework::Asynq, HandlerRule::ArgIndex(1)),
     // DG.1 apalis: `WorkerBuilder::new(..).backend(s).build_fn(send_email)`,
     // the worker's handler fn.
-    (".build_fn(", HandlerRule::ArgIndex(0)),
-    (".build(", HandlerRule::ArgIndex(0)),
+    (".build_fn(", QueueFramework::Apalis, HandlerRule::ArgIndex(0)),
+    (".build(", QueueFramework::Apalis, HandlerRule::ArgIndex(0)),
 ];
 
-fn handler_rule(needle: &str) -> Option<HandlerRule> {
+/// The handler rule of one consumer row, by its (needle, framework) pair.
+fn handler_rule(needle: &str, framework: &QueueFramework) -> Option<HandlerRule> {
     HANDLER_RULES
         .iter()
-        .find(|(n, _)| *n == needle)
-        .map(|(_, r)| *r)
+        .find(|(n, f, _)| *n == needle && f == framework)
+        .map(|(_, _, r)| *r)
 }
 
 /// The handler expression a consumer passes, as written.
@@ -6136,10 +6539,12 @@ public class AuditFunction
 
     #[test]
     fn handler_rules_name_consumer_needles() {
-        for (needle, _) in HANDLER_RULES {
+        for (needle, framework, _) in HANDLER_RULES {
             assert!(
-                CONSUMER_PATTERNS.iter().any(|(n, ..)| n == needle),
-                "{needle} is not a CONSUMER_PATTERNS needle"
+                CONSUMER_PATTERNS
+                    .iter()
+                    .any(|(n, f, ..)| n == needle && f == framework),
+                "({needle}, {framework:?}) is not a CONSUMER_PATTERNS row"
             );
             assert!(
                 !PRODUCER_PATTERNS.iter().any(|(n, ..)| n == needle),
@@ -9134,5 +9539,349 @@ await myconsumer.run({ eachMessage: notMine });\n";
         );
         // A Gnat call does make it a broker file.
         assert!(broker_signal_present("{:ok, _} = gnat.sub(gnat, self(), \"orders\")"));
+    }
+
+    // ---- DT.2b: nats.go / JetStream on any receiver ------------------------
+
+    const NATS_GO_PATH: &str = "events/publisher.go";
+
+    /// `(qname, framework)` per node, in output order.
+    fn go_frameworks(r: &QueueNodes) -> Vec<(String, String)> {
+        r.nodes
+            .iter()
+            .map(|n| {
+                let q = r.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                let code = payload(cell_of(n, cell_type::CODE));
+                let f = code
+                    .split("\"framework\":\"")
+                    .nth(1)
+                    .and_then(|t| t.split('"').next())
+                    .unwrap_or("")
+                    .to_string();
+                (q, f)
+            })
+            .collect()
+    }
+
+    fn go_pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter().map(|(q, f)| (q.to_string(), f.to_string())).collect()
+    }
+
+    const FIXTURE_PUBLISH: &str = "package producer\n\nimport (\n\t\"github.com/nats-io/nats.go\"\n)\n\ntype Publisher struct {\n\tconn *nats.Conn\n}\n\nfunc (p *Publisher) OrderShipped(id string) error {\n\treturn p.conn.Publish(\"shop.orders.shipped\", []byte(id))\n}\n\nfunc Forward(conn *nats.Conn, subject string, b []byte) error {\n\treturn conn.Publish(subject, b)\n}\n";
+    const FIXTURE_BUS: &str = "package producer\n\nimport (\n\t\"github.com/nats-io/nats.go\"\n)\n\ntype Bus struct {\n\tnc *nats.Conn\n}\n\nfunc (b *Bus) Publish(topic string, v any) {}\n\nfunc Local(bus *Bus) {\n\tbus.Publish(\"local.only\", nil)\n}\n";
+    const FIXTURE_BRIDGE: &str = "package producer\n\nimport (\n\t\"github.com/nats-io/nats.go\"\n\tamqp \"github.com/rabbitmq/amqp091-go\"\n)\n\ntype Bridge struct {\n\tch   *amqp.Channel\n\tconn *nats.Conn\n}\n\nfunc (b *Bridge) Relay(body []byte) {\n\t_ = b.ch.Publish(\"shop\", \"orders.relay\", false, false, amqp.Publishing{Body: body})\n\t_ = b.conn.Publish(\"shop.orders.relayed\", body)\n}\n";
+    const FIXTURE_CONSUME: &str = "package consumer\n\nimport (\n\t\"github.com/nats-io/nats.go\"\n)\n\ntype Service struct {\n\tJS nats.JetStreamContext\n}\n\nfunc Start(conn *nats.Conn) {\n\tconn.Subscribe(\"shop.orders.shipped\", func(m *nats.Msg) {})\n}\n\nfunc (s *Service) Listen(conn *nats.Conn) {\n\tconn.Subscribe(\"shop.orders.cancelled\", s.onCancel)\n}\n\nfunc (s *Service) onCancel(m *nats.Msg) {}\n\nfunc (s *Service) Drain(subject string) {\n\ts.JS.PullSubscribe(subject, \"\", nats.ManualAck())\n}\n";
+
+    #[test]
+    fn go_nats_field_param_and_jetstream_receivers() {
+        // A struct field (`p.conn`), a parameter (`conn`) and a gofmt-aligned
+        // JetStreamContext field (`s.JS`): HEAD's `nc.` needles read none.
+        let p = extract_queue_producer_nodes(FIXTURE_PUBLISH, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            go_frameworks(&p),
+            go_pairs(&[
+                ("queue_producer:shop.orders.shipped", "Nats"),
+                ("queue_producer:unresolved:nats", "Nats"),
+            ])
+        );
+        assert_eq!(p.anchors.len(), 2, "one anchor per call site");
+        let c = extract_queue_consumer_nodes(FIXTURE_CONSUME, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&c),
+            strs(&[
+                "queue_consumer:shop.orders.cancelled",
+                "queue_consumer:shop.orders.shipped",
+                "queue_consumer:unresolved:nats",
+            ])
+        );
+        // The new jetstream API's handle, by `jetstream.New(..)` and by a
+        // `js jetstream.JetStream` parameter.
+        let js = "import (\n\t\"github.com/nats-io/nats.go\"\n\t\"github.com/nats-io/nats.go/jetstream\"\n)\n\nfunc run(ctx context.Context, nc *nats.Conn) {\n\tstream, _ := jetstream.New(nc)\n\tstream.Publish(ctx, \"orders.new\", nil)\n}\n\nfunc send(js jetstream.JetStream) {\n\tjs.PublishAsync(\"orders.async\", nil)\n}\n\nfunc legacy(nc *nats.Conn) {\n\tjsc, _ := nc.JetStream()\n\tjsc.PublishAsync(\"orders.legacy\", nil)\n}\n";
+        let p = extract_queue_producer_nodes(js, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            strs(&[
+                "queue_producer:orders.async",
+                "queue_producer:orders.legacy",
+                "queue_producer:orders.new",
+            ])
+        );
+    }
+
+    #[test]
+    fn go_nats_foreign_receiver_is_no_site() {
+        // `bus *Bus` is a local type: its `Publish` is no NATS call, though
+        // the file imports nats.go and a field of Bus is a *nats.Conn.
+        let p = extract_queue_producer_nodes(FIXTURE_BUS, NATS_GO_PATH, module_id(), repo());
+        assert!(p.nodes.is_empty(), "{:?}", qnames(&p));
+        // A receiver the file types from another package is no site either,
+        // and neither is a disagreeing pair of declarations in a
+        // multi-broker file.
+        let other = "import (\n\t\"github.com/nats-io/nats.go\"\n\t\"example.com/shop/bus\"\n)\n\nfunc f(b *bus.Local) {\n\tb.Publish(\"local.too\", nil)\n}\n";
+        let p = extract_queue_producer_nodes(other, NATS_GO_PATH, module_id(), repo());
+        assert!(p.nodes.is_empty(), "{:?}", qnames(&p));
+        // An undeclared receiver in a nats.go-only file is a site (CL.2's
+        // import-gate precedent: `s.JS` declared in another file).
+        let undeclared = "import \"github.com/nats-io/nats.go\"\n\nfunc (s *Service) Notify() {\n\ts.JS.Publish(\"shop.notify\", nil)\n}\n";
+        let p = extract_queue_producer_nodes(undeclared, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:shop.notify"]));
+    }
+
+    #[test]
+    fn go_nats_multi_broker_reads_each_call_once() {
+        let p = extract_queue_producer_nodes(FIXTURE_BRIDGE, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            go_frameworks(&p),
+            go_pairs(&[
+                ("queue_producer:shop.orders.relayed", "Nats"),
+                ("queue_producer:orders.relay", "RabbitMQ"),
+            ]),
+            "no unresolved:rabbitmq (the RabbitMQ row read the NATS call), no `shop` (the NATS row read the amqp call)"
+        );
+        // An undeclared receiver in a nats + amqp file may be either
+        // library's: the NATS rows leave it alone.
+        let src = FIXTURE_BRIDGE.replace(
+            "\t_ = b.conn.Publish",
+            "\t_ = x.Publish(\"a.b\", nil)\n\t_ = b.conn.Publish",
+        );
+        let p = extract_queue_producer_nodes(&src, NATS_GO_PATH, module_id(), repo());
+        assert!(
+            !go_frameworks(&p).contains(&("queue_producer:a.b".to_string(), "Nats".to_string())),
+            "{:?}",
+            go_frameworks(&p)
+        );
+        assert!(go_frameworks(&p).contains(&(
+            "queue_producer:shop.orders.relayed".to_string(),
+            "Nats".to_string()
+        )));
+        // The same holds for SNS: `client *sns.Client` is SNS's call.
+        let sns = "import (\n\t\"github.com/nats-io/nats.go\"\n\t\"github.com/aws/aws-sdk-go-v2/service/sns\"\n)\n\nfunc f(ctx context.Context, client *sns.Client, nc *nats.Conn, conn *nats.Conn) {\n\tclient.Publish(ctx, &sns.PublishInput{TopicArn: aws.String(\"arn:aws:sns:us-east-1:123456789012:orders\")})\n\tconn.Publish(\"orders.mirrored\", nil)\n}\n";
+        let p = extract_queue_producer_nodes(sns, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            go_frameworks(&p),
+            go_pairs(&[
+                ("queue_producer:orders.mirrored", "Nats"),
+                ("queue_producer:orders", "Sns"),
+            ])
+        );
+    }
+
+    #[test]
+    fn go_nats_rows_yield_to_nc_rows() {
+        // A literal `nc.` call keeps exactly its HEAD node, one site, one
+        // anchor: the receiver-agnostic row yields the same call.
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn, d []byte) {\n\tnc.Publish(\"orders\", d)\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert_eq!(p.anchors.len(), 1);
+        assert_eq!(
+            payload(cell_of(&p.nodes[0], cell_type::CODE)).matches("\"line\":").count(),
+            1,
+            "one site"
+        );
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn) {\n\tnc.Subscribe(\"orders\", onOrder)\n\tnc.QueueSubscribe(\"audit\", \"workers\", onAudit)\n\tw.nc.Subscribe(\"refunds\", w.handle)\n}\n";
+        let c = extract_queue_consumer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&c),
+            strs(&["queue_consumer:audit", "queue_consumer:orders", "queue_consumer:refunds"])
+        );
+        assert_eq!(c.anchors.len(), 3);
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:orders", 3, name("onOrder"), false),
+                cb("queue_consumer:refunds", 5, member("w", "handle"), false),
+                cb("queue_consumer:audit", 4, name("onAudit"), false),
+            ],
+            "the HEAD rows' callbacks, read once"
+        );
+        // `nc.Subscribe` prefix-matches `nc.SubscribeSync(`, reading nothing;
+        // the `.SubscribeSync(` row names it and CL.1 rule (i) drops the tag.
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn) {\n\tsub, _ := nc.SubscribeSync(\"orders.sync\")\n\t_ = sub\n}\n";
+        let c = extract_queue_consumer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders.sync"]));
+    }
+
+    #[test]
+    fn nc_publish_msg_reads_the_subject_field() {
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn) {\n\tnc.PublishMsg(&nats.Msg{Subject: \"orders\"})\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]), "no tag beside it");
+        // A subject held in a variable is no payload literal: the message's
+        // `Data` never names the subject.
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn, subj string) {\n\tnc.PublishMsg(&nats.Msg{Subject: subj, Data: []byte(\"hello\")})\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:unresolved:nats"]));
+    }
+
+    #[test]
+    fn jetstream_ctx_first_publish() {
+        let src = "import \"github.com/nats-io/nats.go/jetstream\"\n\nfunc f(ctx context.Context, js jetstream.JetStream, r *http.Request) {\n\tjs.Publish(ctx, \"orders.new\", d)\n\tjs.Publish(context.Background(), \"orders.bg\", d)\n\tjs.PublishMsg(r.Context(), &nats.Msg{Subject: \"orders.msg\"})\n\tjs.Publish(r.Context(), \"orders.req\", d)\n\tjs.PublishAsync(\"orders.async\", d)\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            strs(&[
+                "queue_producer:orders.async",
+                "queue_producer:orders.bg",
+                "queue_producer:orders.msg",
+                "queue_producer:orders.new",
+                "queue_producer:orders.req",
+            ])
+        );
+        // A subject variable behind ctx is the LA.4 fold's expression.
+        let src = "import \"github.com/nats-io/nats.go/jetstream\"\n\nfunc f(ctx context.Context, js jetstream.JetStream) {\n\tjs.Publish(ctx, ORDERS_SUBJECT, d)\n}\n";
+        let fold = extract_queue_nodes_with_consts(src, NATS_GO_PATH, module_id(), repo(), &|e| {
+            (e == "ORDERS_SUBJECT").then(|| "orders.folded".to_string())
+        });
+        assert_eq!(qnames(&fold.producers), strs(&["queue_producer:orders.folded"]));
+        assert_eq!(fold.counts.folded, 1);
+    }
+
+    #[test]
+    fn go_nats_subscribe_callback_binds() {
+        // `conn.Subscribe("x", s.onX)` inside `(s *Svc) Listen` binds the
+        // method value directly, as LA.33 binds `w.nc.Subscribe("refunds",
+        // w.handle)`; `js.QueueSubscribe` reads its handler at arg #2.
+        let src = "import \"github.com/nats-io/nats.go\"\ntype Svc struct {\n\tJS nats.JetStreamContext\n}\nfunc (s *Svc) Listen(conn *nats.Conn) {\n\tconn.Subscribe(\"x\", s.onX)\n\ts.JS.QueueSubscribe(\"y\", \"workers\", s.onY)\n}\nfunc (s *Svc) onX(m *nats.Msg) {}\nfunc (s *Svc) onY(m *nats.Msg) {}\n";
+        let fp = class_parse(
+            src,
+            (1, 9),
+            &[("Listen", (4, 7)), ("onX", (8, 8)), ("onY", (9, 9))],
+        );
+        let x = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:x");
+        let y = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:y");
+        let listen = qid(node_kind::METHOD, "test::Svc::Listen");
+        let on_x = qid(node_kind::METHOD, "test::Svc::onX");
+        let on_y = qid(node_kind::METHOD, "test::Svc::onY");
+        assert_eq!(handled(&fp, x), vec![listen, on_x], "owner edge, then the callback");
+        assert_eq!(handled(&fp, y), vec![listen, on_y]);
+        let ev = fp
+            .edges
+            .iter()
+            .find(|e| e.from == x && e.to == on_x)
+            .and_then(evidence::Evidence::of)
+            .expect("evidence");
+        assert_eq!(ev.emitter, "extractor:queue_callbacks");
+        assert_eq!(ev.rule.as_deref(), Some("method_value"));
+    }
+
+    #[test]
+    fn paho_subscribe_has_no_handler_rule() {
+        assert!(handler_rule(".Subscribe(", &QueueFramework::Mqtt).is_none());
+        assert!(handler_rule(".Subscribe(", &QueueFramework::Kafka).is_none());
+        assert!(matches!(
+            handler_rule(".Subscribe(", &QueueFramework::Nats),
+            Some(HandlerRule::ArgIndex(1))
+        ));
+        let src = "import mqtt \"github.com/eclipse/paho.mqtt.golang\"\n\nfunc f(client mqtt.Client) {\n\tclient.Subscribe(\"sensors/temp\", 0, onTemp)\n}\n";
+        let c = extract_queue_consumer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(go_frameworks(&c), go_pairs(&[("queue_consumer:sensors/temp", "Mqtt")]));
+        assert!(c.callbacks.is_empty());
+        // paho beside nats.go: `client mqtt.Client` is no NATS receiver, and
+        // the MQTT row still reads its call.
+        let both = "import (\n\tmqtt \"github.com/eclipse/paho.mqtt.golang\"\n\t\"github.com/nats-io/nats.go\"\n)\n\nfunc f(client mqtt.Client, nc *nats.Conn) {\n\tclient.Subscribe(\"sensors/temp\", 0, onTemp)\n}\n";
+        let c = extract_queue_consumer_nodes(both, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(go_frameworks(&c), go_pairs(&[("queue_consumer:sensors/temp", "Mqtt")]));
+        assert!(c.callbacks.is_empty());
+    }
+
+    #[test]
+    fn go_receiver_declarations() {
+        let nats = vec!["nats".to_string(), "jetstream".to_string()];
+        let at = |src: &str, call: &str| {
+            let off = src.find(call).expect("call") + call.find('.').unwrap_or(0);
+            go_receiver_type(src, off, &nats)
+        };
+        // Fields (gofmt-aligned too), parameters, `var`, named results.
+        assert_eq!(at("type S struct {\n\tJS   nats.JetStreamContext\n}\ns.JS.Publish(", "JS.Publish("), GoRecv::Nats);
+        assert_eq!(at("var nc *nats.Conn\nnc.Publish(", "nc.Publish("), GoRecv::Nats);
+        assert_eq!(at("func f() (conn *nats.Conn, err error) {\nconn.Publish(", "conn.Publish("), GoRecv::Nats);
+        assert_eq!(at("func f(js jetstream.JetStream) {\njs.Publish(", "js.Publish("), GoRecv::Nats);
+        // Assignments: Connect / New / a `.JetStream()` call.
+        assert_eq!(at("nc, err := nats.Connect(url)\nnc.Publish(", "nc.Publish("), GoRecv::Nats);
+        assert_eq!(at("js, _ := nc.JetStream()\njs.Publish(", "js.Publish("), GoRecv::Nats);
+        assert_eq!(at("js, _ = jetstream.New(nc)\njs.Publish(", "js.Publish("), GoRecv::Nats);
+        assert_eq!(at("if nc, err := nats.Connect(u); err == nil {\nnc.Publish(", "nc.Publish("), GoRecv::Nats);
+        // Another package, a local type, a composite literal.
+        assert_eq!(at("func f(ch *amqp.Channel) {\nch.Publish(", "ch.Publish("), GoRecv::Other);
+        assert_eq!(at("func f(bus *Bus) {\nbus.Publish(", "bus.Publish("), GoRecv::Other);
+        assert_eq!(at("svc := sns.New(sess)\nsvc.Publish(", "svc.Publish("), GoRecv::Other);
+        assert_eq!(at("b := &Bus{}\nb.Publish(", "b.Publish("), GoRecv::Other);
+        // Nothing, prose, an unread rhs, or declarations that disagree.
+        assert_eq!(at("conn.Publish(", "conn.Publish("), GoRecv::Undeclared);
+        assert_eq!(at("// conn is the bus\nfmt.Println(\"conn failed\")\nconn.Publish(", "conn.Publish("), GoRecv::Undeclared);
+        assert_eq!(at("conn := pool.Get()\nconn.Publish(", "conn.Publish("), GoRecv::Undeclared);
+        assert_eq!(at("func a(conn *nats.Conn) {}\nfunc b(conn *amqp.Connection) {}\nconn.Publish(", "conn.Publish("), GoRecv::Undeclared);
+        assert_eq!(at("getConn().Publish(", ".Publish("), GoRecv::Undeclared);
+        // A selector `p.conn = ..` declares nothing; the field does.
+        assert_eq!(at("p.conn = other.Connect()\nconn *nats.Conn\np.conn.Publish(", "conn.Publish("), GoRecv::Nats);
+        // Only whole-word mentions count toward the scan's cap: a one-letter
+        // receiver's declaration after 300 `s` letters inside words is read.
+        let src = format!(
+            "{}func f(s *Bus) {{\ns.Publish(",
+            "fmt.Println(\"ssssss\")\n".repeat(60)
+        );
+        assert!(src.matches('s').count() > MAX_RECEIVER_MENTIONS);
+        assert_eq!(at(&src, "s.Publish("), GoRecv::Other);
+    }
+
+    #[test]
+    fn go_import_aliases() {
+        let block = "import (\n\t\"fmt\"\n\tnatsgo \"github.com/nats-io/nats.go\"\n\t\"github.com/nats-io/nats.go/jetstream\"\n)\n";
+        assert_eq!(nats_go_aliases(block), strs(&["natsgo", "jetstream"]));
+        assert_eq!(nats_go_aliases("import \"github.com/nats-io/nats.go\"\n"), strs(&["nats"]));
+        assert_eq!(nats_go_aliases("import nats \"github.com/nats-io/nats.go\"\n"), strs(&["nats"]));
+        assert!(nats_go_aliases("import _ \"github.com/nats-io/nats.go\"\n").is_empty());
+        assert!(nats_go_aliases("import \"github.com/nats-io/nats.go/micro\"\n").is_empty());
+        // An aliased import types its receivers; the default name then does not.
+        let src = "import natsgo \"github.com/nats-io/nats.go\"\n\nfunc f(a *natsgo.Conn, b *nats.Conn) {\n\ta.Publish(\"x.a\", nil)\n\tb.Publish(\"x.b\", nil)\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:x.a"]));
+    }
+
+    #[test]
+    fn go_nats_rows_are_listed_once_and_gated() {
+        for needle in GO_NATS_NEEDLES {
+            let rows: Vec<_> = CONSUMER_PATTERNS
+                .iter()
+                .chain(PRODUCER_PATTERNS)
+                .filter(|(n, f, ..)| n == needle && *f == QueueFramework::Nats)
+                .collect();
+            assert_eq!(rows.len(), 1, "{needle}");
+            assert_eq!(rows[0].2, NATS_GO_GATE, "{needle}");
+            assert!(is_go_nats_row(needle, &QueueFramework::Nats));
+            assert!(!is_go_nats_row(needle, &QueueFramework::RabbitMQ));
+        }
+        // Every new row sits BEFORE CL.2's RabbitMQ / SNS `.Publish(` rows,
+        // which yield to it.
+        let pos = |f: QueueFramework| {
+            PRODUCER_PATTERNS
+                .iter()
+                .position(|(n, g, ..)| *n == ".Publish(" && *g == f)
+                .expect("row")
+        };
+        assert!(pos(QueueFramework::Nats) < pos(QueueFramework::RabbitMQ));
+        assert!(pos(QueueFramework::Nats) < pos(QueueFramework::Sns));
+        assert!(yields_to_earlier_rows(".Publish(", &QueueFramework::RabbitMQ));
+        assert!(yields_to_earlier_rows(".Publish(", &QueueFramework::Sns));
+        assert!(!yields_to_earlier_rows(".Publish(", &QueueFramework::Nats));
+        assert!(!yields_to_earlier_rows(".PublishWithContext(", &QueueFramework::RabbitMQ));
+        for s in NATS_GO_GATE.iter().chain(GO_OTHER_BROKER_IMPORTS) {
+            assert_eq!(s.to_string(), s.to_ascii_lowercase(), "{s}");
+        }
+    }
+
+    #[test]
+    fn go_nats_marker() {
+        let mut t = GoNatsTally::default();
+        assert!(t.marker("producer", "a.go").is_none());
+        assert!(t.keep(GoRecv::Nats, false));
+        assert!(t.keep(GoRecv::Undeclared, false));
+        assert!(!t.keep(GoRecv::Other, false));
+        assert!(!t.keep(GoRecv::Undeclared, true));
+        assert_eq!(
+            t.marker("producer", "api/internal/events/publisher.go").as_deref(),
+            Some("[queues] go-nats side=producer sites=2 (typed=1 untyped=1) dropped=2 (foreign=1 multi_broker=1) path=api/internal/events/publisher.go")
+        );
     }
 }

@@ -1,0 +1,32 @@
+{
+  "framework": "xcut-queue-go-nats-receivers",
+  "language": "go",
+  "dirs": ["producer", "consumer"],
+  "mechanism": "nats",
+  "note": "DT.2b. nats.go / JetStream calls on any receiver, gated on the nats.go import and typed by the file's own declarations (modelled on examples-glia api/internal/events and quokka turps/Services/chat). The HEAD Go NATS needles matched the receiver NAME `nc.`, so `p.conn.Publish`, `conn.Subscribe` and `s.JS.PullSubscribe` minted nothing. bus.go's `bus *Bus` is a foreign receiver (no site); bridge.go imports nats.go and amqp091-go, so each `.Publish(` call is read by exactly one broker: `b.ch` (*amqp.Channel) by RabbitMQ, `b.conn` (*nats.Conn) by NATS. HEAD BASELINE (DT.2b fixture-first, at a3790825): debug CLI `merge producer consumer` minted two queue nodes, `queue_producer:orders.relay` (USES Bridge::Relay) and `queue_producer:unresolved:rabbitmq` (the RabbitMQ `.Publish(` row reading the NATS call's `body`, DT.2a's mixed-row tag: `[queues] tag framework=RabbitMQ side=producer sites=1 (mixed_rows=1) path=bridge.go`), no QUEUE_CONSUMER, no QUEUE_FLOWS, `[queues] resolver paired=0 skipped_unresolved=1`; grade.py on the W15 wheel: nodes 1/7, edges 0/7 (HANDLED_BY 0/3, QUEUE_FLOWS 0/1, USES 0/3), forbid `unresolved:rabbitmq` matched 1.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:shop.orders.shipped", "exact": true, "note": "p.conn.Publish on a `conn *nats.Conn` struct field"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:shop.orders.relayed", "exact": true, "note": "b.conn.Publish in the nats + amqp file, read by the NATS row only"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders.relay", "exact": true, "note": "RabbitMQ control: b.ch.Publish's routing key, holds at HEAD"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:nats", "exact": true, "note": "conn.Publish(subject, b) on a `conn *nats.Conn` parameter, subject unknown"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:shop.orders.shipped", "exact": true, "note": "conn.Subscribe on a `conn *nats.Conn` parameter"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:shop.orders.cancelled", "exact": true, "note": "conn.Subscribe with a method-value callback"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:nats", "exact": true, "note": "s.JS.PullSubscribe(subject, ..) on a `JS nats.JetStreamContext` field"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:shop.orders.shipped", "to": "queue_consumer:shop.orders.shipped", "category": "QUEUE_FLOWS"},
+    {"from": "Publisher::OrderShipped", "to": "queue_producer:shop.orders.shipped", "category": "USES"},
+    {"from": "publish::Forward", "to": "queue_producer:unresolved:nats", "category": "USES"},
+    {"from": "Bridge::Relay", "to": "queue_producer:shop.orders.relayed", "category": "USES"},
+    {"from": "queue_consumer:shop.orders.shipped", "to": "consume::Start", "category": "HANDLED_BY"},
+    {"from": "queue_consumer:shop.orders.cancelled", "to": "Service::onCancel", "category": "HANDLED_BY", "note": "the Subscribe callback binds like nc.Subscribe's"},
+    {"from": "queue_consumer:unresolved:nats", "to": "Service::Drain", "category": "HANDLED_BY"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "local.only", "note": "bus.Publish on a `bus *Bus` receiver is no NATS site"},
+    {"kind": "QUEUE_PRODUCER", "name": "unresolved:rabbitmq", "note": "the RabbitMQ row read the NATS call"},
+    {"kind": "QUEUE_PRODUCER", "name": "shop", "note": "the NATS row read the amqp call's exchange"},
+    {"kind": "QUEUE_PRODUCER", "name": "shop.orders.shipped", "max_nodes": 1},
+    {"from": "queue_producer:unresolved:nats", "to": "queue_consumer:unresolved:nats", "category": "QUEUE_FLOWS"}
+  ]
+}
