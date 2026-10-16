@@ -37,6 +37,8 @@ writes each fact's v1 hint into a digest-bound `<out>.hints.jsonl` (rows `{key, 
 `.ppr.jsonl`; no GMAP contract change), and `glia cell set --hint` / pyo3 `write_cell` / `PyGraph.set_cell` `hint=` take
 that form, validated, with a reported target when a fresh layout's binding disagrees.
 
+| T13 | **TS re-export barrels are not followed** | quokka-stack web: 32 files import from `@app/core` through two barrel levels (`core/index.ts` `export * from './models'` -> `models/index.ts` `export * from './user.model'`); Kina `import { WalletActionSheet } from '../../wallet'` | after DT.1b (W15) the import reaches the barrel's index module, but `export * from` / `export { X } from` emit no import, so the imported names bind nothing |
+
 Checked and fine: gRPC (quokka's Android client and turps' WS-to-gRPC bridge both pair to `grpc:chat.QuokkaChatService`).
 Not testable here: GraphQL (neither repo uses it).
 
@@ -73,7 +75,7 @@ Specced by `wf_ba54b0e2-6de` (T1-T11: five clusters, each a spec agent and an ad
 `dev-notes/leap-052-packets.json` (W0-W14 unchanged, `schedule_052.py --verify` green). Each verifier's smaller open
 questions take that verifier's recommended default; anything deferred is routed by the close-outs (0.5.3 seed).
 
-James's rulings on the five raised:
+James's rulings (the five the spec run raised, then later ones):
 1. An orphaned / rejected stanza is not an error by default (*"how can we do better it seems odd to break with an
    error"*): `glia check` lists it under "Rules that check nothing" with the reason and a suggested fix, non-blocking;
    `--strict` / `strict=True` makes it exit 2 (correction on DT.7b).
@@ -81,7 +83,9 @@ James's rulings on the five raised:
 3. Contract-model classes collapse in answers (*"i guess so that makes sense"*; DT.1h).
 4. JSON-tag renames in `contract-breaks` / review: IN (James, *"yes ?"*, 2026-10-17), advisory by default - an inferred
    client <-> server model break shows in review / contract-breaks but blocks only for a FACT pairing or on opt-in; one
-   packet DT.1o after DT.1h / DT.1i (specced by `wf_c85572dc-7b3`).
+   packets DT.1o (the engine judge) and DT.1p (contract-breaks / review / CLI / pyo3), specced by `wf_c85572dc-7b3`,
+   scheduled W24 / W25, so DT.13 moved to W26.
 5. Config-templated subjects: noted for later (*"is it nessacary at some point and we should not it for later"*; the
    0.5.3 seed's value-flow item).
-
+6. TS re-export barrels: IN (James, 2026-10-17: *"yeah we should handle the barrel export its such a common web developer
+   trope"*): one packet DT.1q (T13), specced by its own spec + verify run.
