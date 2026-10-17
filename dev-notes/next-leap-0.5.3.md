@@ -689,6 +689,10 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   resolve_calls); member reads in Angular templates (DT.5b) are not covered; `TestBed.inject(T)` locals stay untyped (20 sites
   across Kina and quokka-stack); the static-member fallback keeps LA.30c's Upper.Upper filter, so a lowercase static like
   `Api.baseUrl` stays unbound cross-file; `Promise<T>` / `Observable<T>` return annotations name only the wrapper.
+- W31 (DT.14), for the combined handoffs: repo-graph's `read` labels a parser-read main_guard ENTRYPOINT cell "declared
+  entry point" (server.py:663 / :703; label it "entry point" when source == main_guard, repo-graph handoff 10.1 row 1);
+  neuropil's HUD cell_label (hud.rs:1552-1569) falls back to "CELL" for ROLE and ENTRYPOINT (optional arms, neuropil handoff
+  11.4).
 
 ## 3. Open questions for James
 

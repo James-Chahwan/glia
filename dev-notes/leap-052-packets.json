@@ -12039,7 +12039,7 @@
    "batch": "DT",
    "area": "DT docs close-out (second pass, after the re-demo audit)",
    "loc": 180,
-   "rationale": "James, 2026-10-17: \"lets fix the false positives that counts as closeout i think\" (tweaks-0.5.2.md ruling 7). DT.13 (W26) documented W15-W25; the audit of the re-demo's remaining dead_symbol rows (103 of 177 false positives on Kina / quokka-stack) added DT.5h-DT.5l after it, so their breaks must reach the same docs and the three 0.5.2 handoffs (each the 0.5.2 half of the combined 0.5.1 -> 0.5.3 handoff, no `=0.5.2` pin).",
+   "rationale": "James, 2026-10-17: \"lets fix the false positives that counts as closeout i think\" (tweaks-0.5.2.md ruling 7). DT.13 (W26) documented W15-W25; the audit of the re-demo's remaining dead_symbol rows (103 of 176 false positives on Kina / quokka-stack; 73 distinct truly dead) added DT.5h-DT.5l after it, so their breaks must reach the same docs and the three 0.5.2 handoffs (each the 0.5.2 half of the combined 0.5.1 -> 0.5.3 handoff, no `=0.5.2` pin).",
    "entry_points": [
     "README.md `## Coverage` / dead_symbol prose",
     "CLAUDE.md Parser-vs-Graph bullets (Dart member reads / Riverpod receivers, Go element types / func values / package_function handlers, TS signal queries / inline inject / accessor reads, the runtime-invoked entry rules) and the marker list",

@@ -96,5 +96,5 @@ James's rulings (the five the spec run raised, then later ones):
 7. dead_symbol false positives found by the re-demo: IN as 0.5.2 close-out (James, 2026-10-17: *"lets fix the false
    positives that counts as closeout i think"*). Kina's remaining 52 rows hold about 8 (Go `init()`, Go `Error()` through
    the built-in `error` interface, interface methods called through a range variable, the Transloco loader's
-   `getTranslation`); every remaining row on Kina and quokka-stack is audited first, then each false-positive mechanism
+   `getTranslation`); every remaining row on Kina and quokka-stack is audited first (176 rows: 103 false, 73 truly dead), then each false-positive mechanism
    is specced as a DT.5 packet (spec + adversarial verify) and run as W27+, and `0.5.2-complete` moves to the new end.
