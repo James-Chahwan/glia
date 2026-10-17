@@ -671,6 +671,9 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W26 (DT.13), for the combined repo-graph handoff: optional wrapper fixes - `_dial_text` returns None for an HTTP
   call-site payload (has `method`; DT.11b's GraphQL transport hits end `"via":"graphql"`) and renders `via=evm` hits by
   library / ABI; `_cell_text` could render SCHEMA_FIELDS as `name: type` pairs.
+- W27 (DT.5l, its own risks): gate a Go `init` entry on its package being imported by live code; an ext-gated named-entry
+  row with prefixes would need hubs.rs and duplicate_flows.rs to call accepts_ext; the external-base invoked-member rows miss
+  aliased imports (`import { TranslocoLoader as TL }`) and in-repo intermediate bases.
 
 ## 3. Open questions for James
 
