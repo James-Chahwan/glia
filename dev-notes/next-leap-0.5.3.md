@@ -693,6 +693,14 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   entry point" (server.py:663 / :703; label it "entry point" when source == main_guard, repo-graph handoff 10.1 row 1);
   neuropil's HUD cell_label (hud.rs:1552-1569) falls back to "CELL" for ROLE and ENTRYPOINT (optional arms, neuropil handoff
   11.4).
+- Engram's registered run at `0.5.2-complete` (196728e3, 2026-10-18; Engram 11b3a3c, docs/eval-plan-2026-09.md): nothing
+  broke. PPR as a release pool source FAILS (flat-ppr vs flat-fs pooled: hit 9 wins / 20 losses, strict 12 / 21; guards
+  equal), so Engram does not use `--ppr-candidates`: DE.5's side file stays available but unused (decide keep / drop in
+  0.5.3). DE.5 format clean on 771 steps. Re-keys with X1 on / off: renamed Kina 17/18 vs 4/18, glia 28/40 vs 9/40. `since`
+  pairing summed: Kina words 17, hint 0, hint_refused 14; glia words 39, hint 30, hint_refused 32, name 284 (the
+  hint_refused counts are worth a look: why the export's v1 hint is refused for a re-keyed fact). Headline, Engram on the
+  tag's exports vs 0.5.1's: Kina hit +27 / -23 (flat); glia strict +15 / -2 (p = .0023). Live Kina synced with the tag's
+  exporter; the corrections writer passes `--hint`.
 
 ## 3. Open questions for James
 
