@@ -302,11 +302,14 @@ Not candidates: each becomes packets in the spec run.
    depth; show which hop matched. `find` gains the same view (the flows through its hits). §B's semantic tier feeds
    this too (open question 2, in part).
 
-7. **Remove DE.5 (James 2026-10-18, §0).** engram-export loses `--ppr-candidates`, `src/ppr_side.rs`, exit code 8, its
-   `glia-activation` dependency and tests/ppr_side_v6.rs; `activation::algo::ppr` (push PPR, Andersen-Chung-Lang) goes with
-   it, since ppr_side was its only consumer (glia's own PPR, `glia_activation::activate` / ActivationPlan, stays). The
-   combined handoff drops the 0.5.2 Engram handoff's §3.5, its breaks-table row and the `.ppr.jsonl` .gitignore line;
-   CLAUDE.md / README lose the DE.5 text. Engram removes its reader (flat-ppr, `--ppr`, the release feature).
+7. **Remove DE.5's Engram side file (James 2026-10-18, §0; then *"oh it's diff usecases of ppr btw in engram its recal in
+   glia its walking"*).** engram-export loses `--ppr-candidates`, `<out>.ppr.jsonl`, `src/ppr_side.rs`, exit code 8, its own
+   `glia-activation` dependency and tests/ppr_side_v6.rs; the combined handoff drops the 0.5.2 Engram handoff's §3.5, its
+   breaks-table row and the `.ppr.jsonl` .gitignore line; CLAUDE.md / README lose the export text. glia's PPR for walking
+   stays: `glia_activation::activate` / ActivationPlan (power iteration) in blast-radius / diff-impact / review, resolve /
+   find, pack, hotspots and `PyGraph.activate`. `activation::algo::ppr` (push PPR, Andersen-Chung-Lang, local: touches only
+   nodes near the seeds) stays too, though ppr_side was its only caller: it is a candidate in item 8's ranking test, kept or
+   removed on that result. Engram removes its reader (flat-ppr, `--ppr`, the release feature).
 
 ### E. From the 0.5.2 waves
 
