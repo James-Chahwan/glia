@@ -8703,6 +8703,7 @@
     "fixtures/ts-route-per-method",
     "fixtures/ts-signal-state-fields",
     "fixtures/ts-signal-xfile-reads",
+    "fixtures/ts-typed-receivers",
     "fixtures/ts-url-builder-args",
     "fixtures/ts-value-references",
     "fixtures/ts-viem-web3-contract-calls",

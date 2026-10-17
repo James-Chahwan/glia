@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 418,
+  "fixtures": 419,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2460,6 +2460,15 @@
       "language": "typescript",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "ts-typed-receivers": {
+      "framework": "ts-typed-receivers",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "INJECTS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-typeorm": {
