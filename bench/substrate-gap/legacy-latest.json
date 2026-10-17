@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 416,
+  "fixtures": 417,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -526,6 +526,13 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "dart-riverpod-receivers": {
+      "framework": "dart-riverpod-receivers",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "dart-top-level-bodies": {

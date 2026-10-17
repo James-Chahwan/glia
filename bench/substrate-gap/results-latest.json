@@ -932,19 +932,20 @@
     },
     "dart/calls": {
       "extract": [
-        12,
-        12
+        13,
+        13
       ],
       "fixtures": [
         "fixtures/dart-body-owners",
         "fixtures/dart-field-dispatch",
         "fixtures/dart-member-reads",
+        "fixtures/dart-riverpod-receivers",
         "fixtures/dart-top-level-bodies",
         "matrix/dart/calls"
       ],
       "forbid": [
-        10,
-        10
+        12,
+        12
       ],
       "level": "full",
       "literal": [
@@ -955,8 +956,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        30,
-        30
+        39,
+        39
       ],
       "via": "call"
     },
