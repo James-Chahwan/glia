@@ -901,7 +901,7 @@ fn receiver_field(receiver: &str) -> Option<&str> {
 /// chain `resolve_refs` binds an INJECTS type with: the caller module's import
 /// bindings, then its own symbols, then the repo-unique name
 /// (`unique_global_function`; two distinct same-named types -> `None`).
-fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
+pub(crate) fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
     g.symbols
         .module_import_bindings
         .get(&from_module)
@@ -1000,7 +1000,7 @@ fn resolve_via_receiver_type(
 
 /// The method `method` of the type `type_id`: its own (`class_methods`, a
 /// CLASS / STRUCT / ENUM), else an INTERFACE's (`interface_methods`, A6.6).
-fn type_method(g: &RepoGraph, type_id: NodeId, method: &str) -> Option<NodeId> {
+pub(crate) fn type_method(g: &RepoGraph, type_id: NodeId, method: &str) -> Option<NodeId> {
     g.symbols
         .class_methods
         .get(&type_id)
@@ -1206,11 +1206,23 @@ fn balanced_end(b: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
 /// CL.5a: the type node a constructor call names, by its simple name: the
 /// first scope that has the name decides — the caller module's import
 /// bindings (looking through a bound MODULE to its same-named def, as a TS
-/// default import binds the file), then the module's own top-level symbols,
-/// then the repo-unique type ([`unique_global_type`]; two distinct same-named
-/// types -> `None`). Only a STRUCT / CLASS / INTERFACE / ENUM answers, so a
-/// same-named FUNCTION never does.
+/// default import binds the file), then the module's own top-level symbols
+/// ([`scope_binding`]), then the repo-unique type ([`unique_global_type`];
+/// two distinct same-named types -> `None`). Only a STRUCT / CLASS /
+/// INTERFACE / ENUM answers, so a same-named FUNCTION never does.
 fn constructed_type_id(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
+    scope_binding(g, from_module, name).unwrap_or_else(|| unique_global_type(g, name))
+}
+
+/// The type `name` binds to in `module`'s own scope: the first of the
+/// module's import bindings (looking through a bound MODULE to its
+/// same-named def, [`heritage_through_module`]) and its own top-level
+/// symbols that holds `name` decides, filtered to STRUCT / CLASS / INTERFACE
+/// / ENUM. `Some(None)`: a scope holds the name but it names no type (a
+/// FUNCTION, a STATE_VAR), which shadows any type of that name elsewhere;
+/// `None`: neither scope holds it. CL.5a's [`constructed_type_id`] falls back
+/// to the repo-unique type only on `None`.
+pub(crate) fn scope_binding(g: &RepoGraph, module: NodeId, name: &str) -> Option<Option<NodeId>> {
     let is_type = |id: &NodeId| {
         matches!(
             g.nav.kind_by_id.get(id).copied(),
@@ -1220,15 +1232,22 @@ fn constructed_type_id(g: &RepoGraph, from_module: NodeId, name: &str) -> Option
                 || k == node_kind::ENUM
         )
     };
-    let bound = g.symbols.module_import_bindings.get(&from_module).and_then(|b| b.get(name));
+    let bound = g.symbols.module_import_bindings.get(&module).and_then(|b| b.get(name));
     if let Some(&bound) = bound {
-        return heritage_through_module(g, bound, name).filter(is_type);
+        return Some(heritage_through_module(g, bound, name).filter(is_type));
     }
-    let own = g.symbols.module_symbols.get(&from_module).and_then(|s| s.get(name));
+    let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(name));
     if let Some(&own) = own {
-        return Some(own).filter(is_type);
+        return Some(Some(own).filter(is_type));
     }
-    unique_global_type(g, name)
+    None
+}
+
+/// DT.5h: the type `name` names in `module`'s own scope ([`scope_binding`]),
+/// never a repo-wide name: a Dart `Type.member` read binds only a type its
+/// reader imports or declares.
+pub(crate) fn scope_type(g: &RepoGraph, module: NodeId, name: &str) -> Option<NodeId> {
+    scope_binding(g, module, name).flatten()
 }
 
 /// The simple type name of a call's receiver, innermost scope first (LA.35a),

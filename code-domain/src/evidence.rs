@@ -18,7 +18,9 @@
 //!     graft (`extractor:rpc_needles`);
 //!   - `graph`     — per-repo resolution in the graph crate, one emitter per
 //!     mechanism (LC.3d): `graph:calls`, `graph:refs`, `graph:imports`,
-//!     `graph:iface`, `graph:rust_paths`, `graph:go_packages`, `graph:nav`;
+//!     `graph:iface`, `graph:rust_paths`, `graph:go_packages`, `graph:nav`,
+//!     `graph:reads` (DT.5h: a Dart member read no call follows, a getter's
+//!     CALLS or a tear-off's / static field's USES);
 //!     `graph:build` stamps whatever edge the build added without naming one;
 //!   - `resolver`  — a cross-graph resolver (`resolver:http`, ...);
 //!   - `pass`      — an engine post-pass (`pass:doclink`, `pass:tests`, ...);

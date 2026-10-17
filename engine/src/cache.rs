@@ -1065,6 +1065,11 @@ mod tests {
                 name: "SHOP_ABI".into(),
                 entries: vec!["e:Released/1".into(), "f:release/1".into()],
             },
+            NavFact::MemberRead {
+                receiver: "Env".into(),
+                name: "apiBaseUrl".into(),
+                line: 9,
+            },
         ]
     }
 

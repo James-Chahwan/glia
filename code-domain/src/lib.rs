@@ -1582,6 +1582,16 @@ pub enum NavFact {
     /// these `evm::AbiEntry` keys, sorted and deduplicated. Every file records them, whether or not it calls a
     /// contract, so a client that imports the binding finds them.
     EvmAbi { name: String, entries: Vec<String> },
+    /// Dart (DT.5h), recorded by the Dart parser on the reading scope (a
+    /// METHOD, FUNCTION, CLASS or STATE_VAR), read by the Dart graph build
+    /// (`graph/src/build/dart.rs`, `resolve_member_reads`); build-time only:
+    /// the member `name` is read on `receiver` at 0-based row `line` with no
+    /// call after it (`Env.apiBaseUrl`, `.map(Friend.fromJson)`,
+    /// `_svc.ready`). `receiver` is a capitalised library-scope name (a
+    /// type), `this.<field>` for an owner field, or a local the parser typed
+    /// (`CodeNav::local_types`). Never an edge by itself: the graph binds it
+    /// through the reader's own scope.
+    MemberRead { receiver: String, name: String, line: u32 },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

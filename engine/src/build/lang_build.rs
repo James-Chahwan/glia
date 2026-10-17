@@ -302,9 +302,10 @@ pub(crate) fn fold_groups(
 /// One non-TS build group's graph: the `build_*` its language takes, with
 /// the repo-level inputs of `ctx` it reads. The C/C++ build prints CB.22's
 /// `[c-includes]` line after it ([`IncludeRoots::marker`]), on the thread
-/// that ran it. Dart takes [`resolve_dart_source`] (DF.4a); Solidity,
-/// Terraform and every other `_`-arm language keep
-/// [`resolve_relative_source`].
+/// that ran it. Dart builds through `build_dart` (DT.5h: the shared passes
+/// plus its member reads) and takes [`resolve_dart_source`] (DF.4a);
+/// Solidity, Terraform and every other `_`-arm language keep
+/// `build_typescript` and [`resolve_relative_source`].
 fn build_solo(
     lang: &'static str,
     parses: Vec<FileParse>,
@@ -330,7 +331,7 @@ fn build_solo(
             graph
         }
         "swift" => glia_graph::build_swift(repo, parses, resolve_relative_source),
-        "dart" => glia_graph::build_typescript(repo, parses, |from, spec| {
+        "dart" => glia_graph::build_dart(repo, parses, |from, spec| {
             resolve_dart_source(from, spec, dart_packages)
         }),
         _ => glia_graph::build_typescript(repo, parses, resolve_relative_source),

@@ -63,6 +63,9 @@ pub fn parse_file(
     // DT.5e: every member is declared now, so a name passed by value can be
     // checked against the METHOD / FUNCTION it would name.
     resolve_name_refs(&mut acc, module_qname, repo);
+    // DT.5h: every closure parameter is typed now, so a member read on a
+    // local is kept only when the walk typed that local.
+    finish_member_reads(&mut acc);
     if let Some(line) = acc.di.marker(file_rel_path) {
         eprintln!("{line}");
     }
@@ -90,13 +93,26 @@ pub fn parse_file(
     // LA.34 fired_on marker: this file had an unqualified call that Dart's
     // lexical scope decided (a class member or a local binding); DT.5e: or a
     // closure walked for its member, a `const` / `new` creation site, or a
-    // method / function passed by name.
+    // method / function passed by name; DT.5h: or a getter / setter named, a
+    // constructor tear-off, a field initialiser walked, a member read kept
+    // for the graph or an element-typed closure parameter.
     let s = &acc.bare_calls;
-    if s.self_calls + s.local_skip + s.closures + s.creations + s.method_refs > 0 {
+    if s.fired() {
         eprintln!(
             "[dart-calls] self={} bare={} local_skip={} closures={} creations={} method_refs={} \
+             accessor_refs={} tear_offs={} field_inits={} member_reads={} elements={} \
              file={file_rel_path}",
-            s.self_calls, s.bare, s.local_skip, s.closures, s.creations, s.method_refs
+            s.self_calls,
+            s.bare,
+            s.local_skip,
+            s.closures,
+            s.creations,
+            s.method_refs,
+            s.accessor_refs,
+            s.tear_offs,
+            s.field_inits,
+            s.member_reads,
+            s.elements
         );
     }
 
@@ -152,7 +168,10 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
-        properties: Default::default(),
+        // DT.5h: the getter / setter METHODs and FUNCTIONs, the
+        // property-style channel the Dart graph build reads a member read
+        // through (a getter read is a CALLS, any other METHOD read a tear-off).
+        properties: acc.accessor_ids,
     })
 }
 
@@ -213,6 +232,10 @@ struct Acc {
     /// DT.5e: the names passed by value ([`record_name_ref`]), in walk order,
     /// bound once the whole file is declared ([`resolve_name_refs`]).
     name_refs: Vec<NameRef>,
+    /// DT.5h: the `Type.member` / `x.member` reads no call follows
+    /// ([`push_chain_reads`]), in walk order, recorded for the graph once the
+    /// walk has typed every closure parameter ([`finish_member_reads`]).
+    member_reads: Vec<PendingRead>,
     /// DT.1l: the file is generated ([`dart_generated`]): it writes no model
     /// schema.
     generated: bool,
@@ -224,14 +247,34 @@ struct Acc {
     dio_calls: HashMap<usize, usize>,
 }
 
-/// DT.5e: an identifier passed as a whole argument value (`onPressed:
-/// _save`), as the scope of its body classified it.
+/// DT.5e: an identifier naming a member or same-file function by value
+/// (`onPressed: _save`; DT.5h: in any value position, and `this.x` with no
+/// call after it), as the scope of its body classified it.
 struct NameRef {
-    /// The member / function / variable whose body holds the argument.
+    /// The member / function / variable whose body holds the identifier.
     from: NodeId,
     target: NameTarget,
     /// The identifier's 0-based row.
     line: u32,
+    /// DT.5h: the identifier is the whole left side of an assignment
+    /// (`_mode = 1`, `_n += 1`, [`is_assignment_target`]): a setter runs.
+    write: bool,
+}
+
+/// DT.5h: one member read no call follows, its receiver as the graph will
+/// type it ([`push_chain_reads`]).
+struct PendingRead {
+    /// The scope whose body holds the read.
+    from: NodeId,
+    /// A capitalised library-scope name (a type), `this.<field>` for a
+    /// member of the enclosing type, or a local's name.
+    receiver: String,
+    /// The member read.
+    name: String,
+    /// The member selector's 0-based row.
+    line: u32,
+    /// The receiver is a local: kept only when the walk typed it.
+    local: bool,
 }
 
 enum NameTarget {
@@ -359,6 +402,35 @@ struct BareCallStats {
     creations: usize,
     /// DT.5e: names passed by value that became a USES edge.
     method_refs: usize,
+    /// DT.5h: getter / setter names read or written that became a CALLS
+    /// edge (rule `accessor_read` / `accessor_write`).
+    accessor_refs: usize,
+    /// DT.5h: constructor tear-offs (`T.new`, `T<A>.new`) recorded as a
+    /// call site of T.
+    tear_offs: usize,
+    /// DT.5h: class field initialisers walked for the owner type's calls.
+    field_inits: usize,
+    /// DT.5h: member reads recorded as a `NavFact::MemberRead`.
+    member_reads: usize,
+    /// DT.5h: closure parameters typed as a field's element type.
+    elements: usize,
+}
+
+impl BareCallStats {
+    /// The `[dart-calls]` marker fires when any count but `bare` moved.
+    fn fired(&self) -> bool {
+        self.self_calls
+            + self.local_skip
+            + self.closures
+            + self.creations
+            + self.method_refs
+            + self.accessor_refs
+            + self.tear_offs
+            + self.field_inits
+            + self.member_reads
+            + self.elements
+            > 0
+    }
 }
 
 fn visit_top(
@@ -486,10 +558,12 @@ fn visit_class(
             // LA.34: the names this class declares, which an unqualified call
             // in any of its members reaches before library scope.
             let members = container_member_names(node, child, src);
+            let elems = collect_dart_field_elem_types(child, src);
             let owner = Owner {
                 qname: &qname,
                 id,
                 members: &members,
+                elems: &elems,
             };
             visit_members(child, src, file_rel, &owner, repo, acc);
             // LA.23e: declared / constructor-initialised field types, for
@@ -539,6 +613,11 @@ struct Owner<'a> {
     qname: &'a str,
     id: NodeId,
     members: &'a HashSet<String>,
+    /// DT.5h: the element type of each field declared `List<T>` / `Set<T>` /
+    /// `Iterable<T>` ([`collect_dart_field_elem_types`]), which a
+    /// one-parameter closure over the field's elements types its parameter
+    /// with ([`type_element_closure`]).
+    elems: &'a HashMap<String, String>,
 }
 
 /// A type this file declares (class, mixin, enum, extension type), keyed by
@@ -715,10 +794,12 @@ fn emit_container(
         acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
     }
     let members = container_member_names(node, body, src);
+    let elems = collect_dart_field_elem_types(body, src);
     let owner = Owner {
         qname: &qname,
         id,
         members: &members,
+        elems: &elems,
     };
     visit_members(body, src, file_rel, &owner, repo, acc);
     // LA.23e: a mixin's or extension type's fields (an extension's static
@@ -777,10 +858,13 @@ fn visit_extension(
         .collect();
     members.extend(class_member_names(body, src));
     acc.members.extensions += 1;
+    // DT.5h: an extension declares no instance field, so no element type.
+    let no_elems = HashMap::new();
     let owner = Owner {
         qname: &ty.qname,
         id: ty.id,
         members: &members,
+        elems: &no_elems,
     };
     visit_members(body, src, file_rel, &owner, repo, acc);
 }
@@ -1104,6 +1188,11 @@ fn visit_class_member(
         match child.kind() {
             "method_signature" | "declaration" => {
                 let Some((name, kind)) = member_name(child, src) else {
+                    // DT.5h: a field declaration declares no METHOD; its
+                    // initialisers run as the owner type's code.
+                    if child.kind() == "declaration" {
+                        visit_field_initializers(child, owner, src, repo, file_rel, acc);
+                    }
                     continue;
                 };
                 let id = declare_member(node, &name, owner, repo, file_rel, src, acc);
@@ -1128,6 +1217,7 @@ fn visit_class_member(
                 let scope = CallScope {
                     owner: Some(owner.qname),
                     members: owner.members,
+                    elems: owner.elems,
                     locals: local_names(signature, child, src),
                 };
                 collect_calls_in(child, src, id, &scope, repo, file_rel, acc);
@@ -1193,9 +1283,53 @@ fn visit_initializers(
         let scope = CallScope {
             owner: Some(owner.qname),
             members: owner.members,
+            elems: owner.elems,
             locals: local_names(Some(sig), part, src),
         };
         collect_calls_in(part, src, from, &scope, repo, file_rel, acc);
+    }
+}
+
+/// DT.5h: a class field `declaration`'s initialisers (`static const _tabs =
+/// [_Tab(..)]`, `final _ctrl = Ctrl()`, `late final _r = Repo.open()`): a
+/// code written in a type body is the type's (the DT.5c rule), so each
+/// `initialized_identifier` / `static_final_declaration` with a `value` is
+/// walked for calls, names and client endpoints FROM the owner type
+/// (`owner.id`, the CLASS / ENUM / mixin), under the owner's member scope,
+/// a closure's parameters as locals and the field's own name not one.
+fn visit_field_initializers(
+    decl: TsNode,
+    owner: &Owner,
+    src: &[u8],
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let mut lists = decl.walk();
+    for list in decl.named_children(&mut lists) {
+        if !matches!(list.kind(), "initialized_identifier_list" | "static_final_declaration_list") {
+            continue;
+        }
+        let mut items = list.walk();
+        for item in list.named_children(&mut items) {
+            if !matches!(item.kind(), "initialized_identifier" | "static_final_declaration")
+                || item.child_by_field_name("value").is_none()
+            {
+                continue;
+            }
+            let mut locals = local_names(None, item, src);
+            if let Some(name) = item.child_by_field_name("name") {
+                locals.remove(text_of(name, src));
+            }
+            let scope = CallScope {
+                owner: Some(owner.qname),
+                members: owner.members,
+                elems: owner.elems,
+                locals,
+            };
+            collect_calls_in(item, src, owner.id, &scope, repo, file_rel, acc);
+            acc.bare_calls.field_inits += 1;
+        }
     }
 }
 
@@ -1239,10 +1373,12 @@ fn visit_enum(
     // owns its METHOD children), its constants are members too.
     if let Some(body) = node.child_by_field_name("body") {
         let members = container_member_names(node, body, src);
+        let elems = collect_dart_field_elem_types(body, src);
         let owner = Owner {
             qname: &qname,
             id,
             members: &members,
+            elems: &elems,
         };
         let mut cursor = body.walk();
         for constant in body.named_children(&mut cursor) {
@@ -1305,6 +1441,7 @@ fn visit_enum_constant(
         let scope = CallScope {
             owner: Some(owner.qname),
             members: owner.members,
+            elems: owner.elems,
             locals: local_names(None, args, src),
         };
         collect_calls_in(args, src, id, &scope, repo, file_rel, acc);
@@ -1381,9 +1518,11 @@ fn visit_function(
     };
     acc.top_level.bodies += 1;
     let no_members = HashSet::new();
+    let no_elems = HashMap::new();
     let scope = CallScope {
         owner: None,
         members: &no_members,
+        elems: &no_elems,
         locals: local_names(Some(node), body, src),
     };
     collect_calls_in(body, src, id, &scope, repo, file_rel, acc);
@@ -1558,9 +1697,11 @@ fn emit_top_level_var(
     // the bindings are read over the whole declarator.
     let mut locals = local_names(None, decl, src);
     locals.remove(name);
+    let no_elems = HashMap::new();
     let scope = CallScope {
         owner: None,
         members: &no_members,
+        elems: &no_elems,
         locals,
     };
     collect_calls_in(decl, src, id, &scope, repo, file_rel, acc);
@@ -1743,8 +1884,11 @@ fn shown_names(spec: TsNode, src: &[u8]) -> Option<Vec<String>> {
 /// callback's calls to the enclosing node; `scope.locals` already holds the
 /// closures' parameters. Local functions were always walked (their name is a
 /// local). A `const T(..)` / `new T(..)` is a call of T
-/// ([`push_creation_call`]) and an identifier passed as a whole argument value
-/// is recorded for a USES ([`record_name_ref`]).
+/// ([`push_creation_call`]); DT.5h: so is a constructor tear-off `T.new`
+/// ([`push_tearoff_call`]), and every identifier the walk visits that names
+/// a member or a same-file function is recorded for a reference
+/// ([`record_name_ref`]): an `identifier_dollar_escaped` is `$name` in an
+/// interpolation, its text the bare name.
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
@@ -1765,7 +1909,10 @@ fn collect_calls_in(
             "const_object_expression" | "new_expression" => {
                 push_creation_call(n, src, from, scope, acc);
             }
-            "argument" => record_name_ref(n, src, from, scope, acc),
+            "constructor_tearoff" => push_tearoff_call(n, src, from, scope, acc),
+            "identifier" | "identifier_dollar_escaped" => {
+                record_name_ref(n, src, from, scope, acc);
+            }
             _ => {}
         }
         let mut cursor = n.walk();
@@ -1827,17 +1974,48 @@ fn push_creation_call(n: TsNode, src: &[u8], from: NodeId, scope: &CallScope, ac
     }
 }
 
-/// DT.5e: an `argument` whose whole value is one `identifier` (`f(_save)`,
-/// or a `named_argument`'s value after its `label`: `onPressed: _save`), with
-/// no selector after it, is a name passed by value. Classified by `scope`
-/// ([`CallScope::lookup`], Dart's lexical order) and kept for
-/// [`resolve_name_refs`]: a local binds nothing (`final onTap = ..;
-/// onTap: onTap`); a member is the METHOD `<owner>::<name>` it would be; a
-/// library-scope name is the top-level FUNCTION of this file it would be.
-fn record_name_ref(arg: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
-    let Some(id) = by_name_value(arg) else {
+/// DT.5h: a `constructor_tearoff` (`T.new`, `p.T.new`: a declaration's or
+/// an argument's value) builds a T: the call site Bare(<its last
+/// type_identifier>), the qualifier [`push_creation_call`] builds for
+/// `const T()`, classified by `scope`, at the tear-off's row.
+fn push_tearoff_call(n: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    let mut cursor = n.walk();
+    let Some(class) = n
+        .children(&mut cursor)
+        .filter(|k| k.kind() == "type_identifier")
+        .map(|k| text_of(k, src).trim())
+        .filter(|t| !t.is_empty())
+        .last()
+    else {
         return;
     };
+    if let Some(qualifier) = scope.classify(CallQualifier::Bare(class.to_string()), &mut acc.bare_calls)
+    {
+        acc.calls.push(CallSite {
+            from,
+            qualifier,
+            line: line_at(n),
+        });
+        acc.bare_calls.tear_offs += 1;
+    }
+}
+
+/// DT.5e / DT.5h: an `identifier` the body walk visits that is a name
+/// reference ([`is_name_reference`]: no label, selector or cascade member,
+/// declaration name, constructor name or callee) names something by value:
+/// a conditional's branch or condition, an `??` operand, a list / map /
+/// record element, an initialiser, a return value, an assert, a `case`
+/// constant, an interpolation (`'$_title'`), a whole argument
+/// (`onPressed: _save`). Classified by `scope` ([`CallScope::lookup`],
+/// Dart's lexical order) and kept for [`resolve_name_refs`]: a local binds
+/// nothing (`final onTap = ..; onTap: onTap`); a member is the METHOD
+/// `<owner>::<name>` it would be; a library-scope name is the top-level
+/// FUNCTION of this file it would be. An assignment's whole left side
+/// ([`is_assignment_target`]) is a write.
+fn record_name_ref(id: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    if !is_name_reference(id, src) {
+        return;
+    }
     let name = text_of(id, src).trim();
     if name.is_empty() || name == "_" {
         return;
@@ -1854,51 +2032,107 @@ fn record_name_ref(arg: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc
         from,
         target,
         line: line_at(id),
+        write: is_assignment_target(id),
     });
 }
 
-/// The lone `identifier` an `argument` passes: its only named child, or a
-/// `named_argument`'s value after its `label`. Comments are skipped.
-fn by_name_value(arg: TsNode) -> Option<TsNode> {
-    fn named(n: TsNode) -> Vec<TsNode> {
-        let mut c = n.walk();
-        n.named_children(&mut c).filter(|k| k.kind() != "comment").collect()
-    }
-    let kids = named(arg);
-    let value = match kids.as_slice() {
-        [only] if only.kind() == "named_argument" => match named(*only).as_slice() {
-            [label, value] if label.kind() == "label" => *value,
-            _ => return None,
-        },
-        [only] => *only,
-        _ => return None,
+/// DT.5h: the parents under which an identifier names no value: a label
+/// (`onPressed:`, a record or object-pattern field), a statement label and
+/// a `break` / `continue` target, a member selector (`x._save`, the chain
+/// scan's: [`push_chain_reads`]), a cascade selector (`..text = v`,
+/// `..addListener(f)` set or call a member of the cascade's target, never of
+/// this class), an annotation, a symbol literal's part and a dot shorthand
+/// (`.red` names a static member of the context type). Every shape probed on
+/// tree-sitter-dart 0.1.0.
+const NON_REFERENCE_PARENTS: &[&str] = &[
+    "label",
+    "labeled_statement",
+    "break_statement",
+    "continue_statement",
+    "unconditional_assignable_selector",
+    "conditional_assignable_selector",
+    "cascade_selector",
+    "annotation",
+    "symbol_literal",
+    "static_member_shorthand",
+];
+
+/// DT.5h: whether the identifier `id` is a reference to a value: not under
+/// a [`NON_REFERENCE_PARENTS`] parent, not its parent's `name` field (a
+/// declaration, a field initializer's field, a for-in or pattern variable)
+/// or `constructor` field (`const p.T.named()`), and not a callee (its next
+/// named sibling, comments skipped, a `selector` holding an argument part or
+/// type arguments: `_save()` and `_build<T>()` stay call sites).
+fn is_name_reference(id: TsNode, src: &[u8]) -> bool {
+    let Some(parent) = id.parent() else {
+        return true;
     };
-    (value.kind() == "identifier").then_some(value)
+    if NON_REFERENCE_PARENTS.contains(&parent.kind()) {
+        return false;
+    }
+    for field in ["name", "constructor"] {
+        let mut cursor = parent.walk();
+        if parent
+            .children_by_field_name(field, &mut cursor)
+            .any(|k| k.id() == id.id())
+        {
+            return false;
+        }
+    }
+    let mut next = id.next_named_sibling();
+    while let Some(n) = next.filter(|n| n.kind() == "comment") {
+        next = n.next_named_sibling();
+    }
+    !next.is_some_and(|sel| {
+        sel.kind() == "selector"
+            && matches!(selector_part(sel, src), SelectorPart::Call | SelectorPart::TypeArgs)
+    })
+}
+
+/// DT.5h: the identifier IS the whole `left` side of an assignment
+/// (`_mode = 1`, `_n += 1`, `_x ??= v`): an `assignable_expression` holding
+/// it alone. The head of `_obj.x = v` is a read of `_obj`.
+fn is_assignment_target(id: TsNode) -> bool {
+    let Some(left) = id.parent().filter(|p| p.kind() == "assignable_expression") else {
+        return false;
+    };
+    let mut cursor = left.walk();
+    if left.named_children(&mut cursor).any(|k| k.id() != id.id() && k.kind() != "comment") {
+        return false;
+    }
+    left.parent()
+        .filter(|a| a.kind() == "assignment_expression")
+        .and_then(|a| a.child_by_field_name("left"))
+        .is_some_and(|l| l.id() == left.id())
 }
 
 /// DT.5e: bind every [`NameRef`] of the file once all of it is declared.
 ///
-/// - A member: a USES edge to the METHOD `<owner>::<name>` when this file
+/// - A member: an edge to the METHOD `<owner>::<name>` when this file
 ///   declared it (a field, which `members` holds too, declares none).
-/// - A library-scope name: a USES edge to this file's top-level FUNCTION
+/// - A library-scope name: an edge to this file's top-level FUNCTION
 ///   `<module>::<name>` when it declared one.
 ///
-/// Nothing else binds: a getter / setter (reading state), a variable, class
-/// or other type, a self-reference (a method passing itself,
-/// `removeListener(_onChange)` inside `_onChange`), and a name this file does
-/// not declare. A state read is never a USES (the TS parser's CH.4 rule), and
-/// the graph binds a Bare ref to whatever symbol an import names: on
-/// quokka-stack every imported name passed by value that bound was a Riverpod
-/// provider variable (`ref.watch(cartProvider)`), so an imported name is left
-/// alone rather than made a USES of a STATE_VAR. Each edge carries an
-/// EVIDENCE cell, emitter `parser:dart`, rule `method_ref`, at the
-/// identifier's row; one edge per (from, to), at its earliest row.
+/// DT.5h: a getter / setter target ([`Acc::accessor_ids`]) runs: a CALLS
+/// edge, rule `accessor_read`, or `accessor_write` for an assignment's left
+/// side (a getter + setter pair is one METHOD, so a write counts too). Any
+/// other METHOD / FUNCTION is torn off: a USES edge, rule `method_ref`.
+///
+/// Nothing else binds: a variable, class or other type, a self-reference (a
+/// method passing itself, `removeListener(_onChange)` inside `_onChange`),
+/// and a name this file does not declare. The graph binds a Bare ref to
+/// whatever symbol an import names: on quokka-stack every imported name
+/// passed by value that bound was a Riverpod provider variable
+/// (`ref.watch(cartProvider)`), so an imported name is left alone rather
+/// than made a USES of a STATE_VAR. Each edge carries an EVIDENCE cell,
+/// emitter `parser:dart`, at the identifier's row; one edge per (from, to,
+/// read | write), at its earliest row.
 fn resolve_name_refs(acc: &mut Acc, module_qname: &str, repo: RepoId) {
     // The walk is a stack, so walk order is not source order: the earliest
-    // row of each (from, target) wins.
+    // row of each (from, target, write) wins.
     let mut refs = std::mem::take(&mut acc.name_refs);
-    refs.sort_by_key(|r| r.line);
-    let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
+    refs.sort_by_key(|r| (r.line, r.write));
+    let mut seen: HashSet<(NodeId, NodeId, bool)> = HashSet::new();
     for r in refs {
         let to = match &r.target {
             NameTarget::Member(qname) => {
@@ -1911,20 +2145,62 @@ fn resolve_name_refs(acc: &mut Acc, module_qname: &str, repo: RepoId) {
                 &format!("{module_qname}::{name}"),
             ),
         };
-        if to == r.from
-            || !acc.declared_ids.contains(&to)
-            || acc.accessor_ids.contains(&to)
-            || !seen.insert((r.from, to))
-        {
+        if to == r.from || !acc.declared_ids.contains(&to) {
             continue;
         }
+        let accessor = acc.accessor_ids.contains(&to);
+        let write = accessor && r.write;
+        if !seen.insert((r.from, to, write)) {
+            continue;
+        }
+        let (category, rule) = match (accessor, write) {
+            (true, true) => (edge_category::CALLS, "accessor_write"),
+            (true, false) => (edge_category::CALLS, "accessor_read"),
+            (false, _) => (edge_category::USES, "method_ref"),
+        };
         let ev = glia_code_domain::evidence::Evidence::emitter("parser:dart")
-            .rule("method_ref")
+            .rule(rule)
             .line(r.line);
-        acc.edges.push(
-            Edge::new(r.from, to, edge_category::USES, Confidence::Strong).with_cell(ev.to_cell()),
-        );
-        acc.bare_calls.method_refs += 1;
+        acc.edges.push(Edge::new(r.from, to, category, Confidence::Strong).with_cell(ev.to_cell()));
+        if accessor {
+            acc.bare_calls.accessor_refs += 1;
+        } else {
+            acc.bare_calls.method_refs += 1;
+        }
+    }
+}
+
+/// DT.5h: record each [`PendingRead`] as a `NavFact::MemberRead` on its
+/// scope, in (row, receiver, name) order (the walk is a stack). A read on a
+/// local is kept only when the walk typed that local
+/// (`CodeNav::local_types`, a closure parameter of
+/// [`type_element_closure`]): an untyped local would otherwise be typed
+/// through a same-named field by the graph's receiver typing (`final dynamic
+/// _friends` beside the field `_friends`).
+fn finish_member_reads(acc: &mut Acc) {
+    let mut reads = std::mem::take(&mut acc.member_reads);
+    reads.sort_by(|a, b| (a.line, &a.receiver, &a.name).cmp(&(b.line, &b.receiver, &b.name)));
+    for r in reads {
+        let typed = || {
+            acc.nav
+                .local_types
+                .get(&r.from)
+                .and_then(|t| t.get(&r.receiver))
+                .is_some_and(|t| !t.is_empty())
+        };
+        if r.local && !typed() {
+            continue;
+        }
+        let fact = NavFact::MemberRead {
+            receiver: r.receiver,
+            name: r.name,
+            line: r.line,
+        };
+        if acc.nav.nav_facts.get(&r.from).is_some_and(|f| f.contains(&fact)) {
+            continue;
+        }
+        acc.nav.record_fact(r.from, fact);
+        acc.bare_calls.member_reads += 1;
     }
 }
 
@@ -2022,7 +2298,267 @@ fn push_selector_chain_calls(
                 acc.calls.push(CallSite { from, qualifier, line });
             }
         }
+        push_chain_reads(primary, &selectors, src, from, scope, acc);
+        type_element_closure(primary, &selectors, src, from, scope, acc);
     }
+}
+
+/// DT.5h: the member reads of one primary + selector chain: each `.name`
+/// (`SelectorPart::Member`) no call or type arguments follow.
+///
+/// - `this.<name>` (the first selector): a [`NameRef`] to the member METHOD
+///   `<owner>::<name>`, [`record_name_ref`]'s rules (a getter runs, a method
+///   is torn off, a field binds nothing).
+/// - `T.new` / `T<A>.new` (only type arguments before `.new`, a capitalised
+///   primary: the grammar's shape in a declaration or a return) builds a T:
+///   the call site Bare(T) through `scope.classify`.
+/// - Any other first selector on an identifier primary: a [`PendingRead`]
+///   with the receiver `<head>` for a local, `this.<head>` for a member of
+///   the enclosing type, `<head>` for a capitalised library-scope name (a
+///   type: `Env.apiBaseUrl`, `Friend.fromJson`); a lowercase library-scope
+///   name (an inherited `widget` / `state`, an import prefix) is not read.
+/// - A later selector (`a.b.c`) is not read.
+///
+/// An assignment target's trailing member is a bare
+/// `unconditional_assignable_selector`, never a `selector`, so a write
+/// through a receiver (`obj.x = v`, `this.x = v`) is not read here. In an
+/// argument the grammar parses `f(Box<int>.new)` as a relational expression
+/// ending in a dot shorthand: not read. A plain `T.new` argument is a
+/// `constructor_tearoff` ([`push_tearoff_call`]).
+fn push_chain_reads(
+    primary: TsNode,
+    selectors: &[TsNode],
+    src: &[u8],
+    from: NodeId,
+    scope: &CallScope,
+    acc: &mut Acc,
+) {
+    let parts: Vec<SelectorPart> = selectors.iter().map(|s| selector_part(*s, src)).collect();
+    let is_this = primary.kind() == "this";
+    let head = text_of(primary, src).trim();
+    for (j, part) in parts.iter().enumerate() {
+        let SelectorPart::Member(name) = part else {
+            continue;
+        };
+        if matches!(parts.get(j + 1), Some(SelectorPart::Call | SelectorPart::TypeArgs)) {
+            continue;
+        }
+        let line = selectors.get(j).map_or(line_at(primary), |sel| line_at(*sel));
+        if *name == "new" {
+            let only_type_args = parts[..j].iter().all(|p| matches!(p, SelectorPart::TypeArgs));
+            if !is_this && only_type_args && is_dart_class_name(head) {
+                let bare = CallQualifier::Bare(head.to_string());
+                if let Some(qualifier) = scope.classify(bare, &mut acc.bare_calls) {
+                    acc.calls.push(CallSite {
+                        from,
+                        qualifier,
+                        line: line_at(primary),
+                    });
+                    acc.bare_calls.tear_offs += 1;
+                }
+            }
+            continue;
+        }
+        if j > 0 {
+            continue;
+        }
+        if is_this {
+            if let Some(owner) = scope.owner {
+                acc.name_refs.push(NameRef {
+                    from,
+                    target: NameTarget::Member(format!("{owner}::{name}")),
+                    line,
+                    write: false,
+                });
+            }
+            continue;
+        }
+        let (receiver, local) = match scope.lookup(head) {
+            NameScope::Local => (head.to_string(), true),
+            NameScope::Member => (format!("this.{head}"), false),
+            NameScope::Library if is_dart_class_name(head) => (head.to_string(), false),
+            NameScope::Library => continue,
+        };
+        acc.member_reads.push(PendingRead {
+            from,
+            receiver,
+            name: name.to_string(),
+            line,
+            local,
+        });
+    }
+}
+
+/// DT.5h: the collections whose element type a field declaration keeps
+/// ([`declared_element_type`]).
+const ELEMENT_COLLECTIONS: &[&str] = &["List", "Set", "Iterable"];
+
+/// DT.5h: the collection methods whose callback receives one element.
+const ELEMENT_CALLBACKS: &[&str] = &[
+    "map",
+    "forEach",
+    "where",
+    "any",
+    "every",
+    "firstWhere",
+    "lastWhere",
+    "singleWhere",
+    "expand",
+    "takeWhile",
+    "skipWhile",
+    "indexWhere",
+    "removeWhere",
+    "retainWhere",
+];
+
+/// DT.5h: `<field>.<cb>((p) => ..)` / `this.<field>.<cb>((p) => ..)` over a
+/// field of the enclosing type declared `List<T>` / `Set<T>` / `Iterable<T>`
+/// ([`Owner::elems`]; a bare `<field>` only when no local of that name
+/// shadows it), `cb` an [`ELEMENT_CALLBACKS`] member followed by its call,
+/// the call's first positional argument a closure with exactly one untyped
+/// parameter `p`: records `p` as a local of type T in `from`'s scope
+/// (`CodeNav::record_local_type`), so `p.m()` binds T's METHOD `m` through
+/// the graph's receiver typing, when the closure owns the name
+/// ([`closure_owns_receiver`]). A typed parameter (`(Item j) => ..`) is not
+/// recorded.
+fn type_element_closure(
+    primary: TsNode,
+    selectors: &[TsNode],
+    src: &[u8],
+    from: NodeId,
+    scope: &CallScope,
+    acc: &mut Acc,
+) {
+    let parts: Vec<SelectorPart> = selectors.iter().map(|s| selector_part(*s, src)).collect();
+    let (field, cb_at) = match primary.kind() {
+        "identifier" => {
+            let field = text_of(primary, src).trim();
+            if scope.lookup(field) != NameScope::Member {
+                return;
+            }
+            (field, 0)
+        }
+        "this" => match parts.first() {
+            Some(SelectorPart::Member(field)) => (*field, 1),
+            _ => return,
+        },
+        _ => return,
+    };
+    let Some(elem) = scope.elems.get(field) else {
+        return;
+    };
+    let (Some(SelectorPart::Member(cb)), Some(SelectorPart::Call)) =
+        (parts.get(cb_at), parts.get(cb_at + 1))
+    else {
+        return;
+    };
+    if !ELEMENT_CALLBACKS.contains(cb) {
+        return;
+    }
+    let Some(closure) = selectors.get(cb_at + 1).and_then(|sel| first_positional_closure(*sel)) else {
+        return;
+    };
+    let Some(param) = sole_untyped_parameter(closure, src) else {
+        return;
+    };
+    if !closure_owns_receiver(closure, param, src) {
+        return;
+    }
+    acc.nav.record_local_type(from, param, elem);
+    acc.bare_calls.elements += 1;
+}
+
+/// The `function_expression` a call selector passes as its first positional
+/// argument (a `named_argument` is skipped, comments too), or None.
+fn first_positional_closure(call: TsNode) -> Option<TsNode> {
+    let part = call.named_child(0).filter(|p| p.kind() == "argument_part")?;
+    let mut cursor = part.walk();
+    let args = part.named_children(&mut cursor).find(|k| k.kind() == "arguments")?;
+    let mut cursor = args.walk();
+    let first = args.named_children(&mut cursor).find(|k| {
+        k.kind() == "argument" && k.named_child(0).is_some_and(|v| v.kind() != "named_argument")
+    })?;
+    let mut cursor = first.walk();
+    let kids: Vec<TsNode> = first
+        .named_children(&mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    match kids.as_slice() {
+        [closure] if closure.kind() == "function_expression" => Some(*closure),
+        _ => None,
+    }
+}
+
+/// The one parameter of a closure, when its list holds exactly one
+/// positional `formal_parameter` that is only an identifier (no type, no
+/// `final`), and it is no wildcard.
+fn sole_untyped_parameter<'a>(closure: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let params = closure.child_by_field_name("parameters")?;
+    let mut cursor = params.walk();
+    let list: Vec<TsNode> = params
+        .named_children(&mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let [param] = list.as_slice() else {
+        return None;
+    };
+    if param.kind() != "formal_parameter" {
+        return None;
+    }
+    let mut cursor = param.walk();
+    let kids: Vec<TsNode> = param.children(&mut cursor).collect();
+    let [id] = kids.as_slice() else {
+        return None;
+    };
+    let name = text_of(*id, src).trim();
+    (id.kind() == "identifier" && !name.is_empty() && name != "_").then_some(name)
+}
+
+/// DT.5h: whether the closure parameter `param` is the only `param` its
+/// enclosing declaration reads members of: the closure's body binds no
+/// second `param` ([`local_names`]), and no identifier `param` followed by a
+/// member selector lies in the enclosing declaration (the class member, the
+/// top-level function body or variable holding it) outside the closure. A
+/// local type is recorded per scope, so a second same-named receiver
+/// elsewhere in the method (`for (final i in [1]) { i.isEven }` beside
+/// `.map((i) => ..)`) loses the edge rather than guess.
+fn closure_owns_receiver(closure: TsNode, param: &str, src: &[u8]) -> bool {
+    if let Some(body) = closure.child_by_field_name("body")
+        && local_names(None, body, src).contains(param)
+    {
+        return false;
+    }
+    let mut decl = closure;
+    while let Some(parent) = decl.parent() {
+        if matches!(
+            parent.kind(),
+            "class_body" | "extension_body" | "enum_body" | "extension_type_body" | "source_file"
+        ) {
+            break;
+        }
+        decl = parent;
+    }
+    let inside = closure.start_byte()..closure.end_byte();
+    let mut stack = vec![decl];
+    while let Some(n) = stack.pop() {
+        if n.id() == closure.id() {
+            continue;
+        }
+        if n.kind() == "identifier" && !inside.contains(&n.start_byte()) && text_of(n, src) == param {
+            let mut next = n.next_named_sibling();
+            while let Some(c) = next.filter(|c| c.kind() == "comment") {
+                next = c.next_named_sibling();
+            }
+            if next.is_some_and(|sel| {
+                sel.kind() == "selector" && matches!(selector_part(sel, src), SelectorPart::Member(_))
+            }) {
+                return false;
+            }
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    true
 }
 
 /// CB.9 STOPGAP - `Money.zero()` / `Money.parse(..)` / `Color.pick()` on a
@@ -2150,6 +2686,8 @@ struct CallScope<'a> {
     /// Everything the enclosing class declares: methods, getters, setters and
     /// fields, instance or static ([`class_member_names`]).
     members: &'a HashSet<String>,
+    /// DT.5h: the enclosing type's [`Owner::elems`] (empty outside a type).
+    elems: &'a HashMap<String, String>,
     /// The member's parameters and every name bound in its body
     /// ([`local_names`]).
     locals: HashSet<String>,
@@ -2559,6 +3097,111 @@ fn collect_dart_field_types(class_body: TsNode, src: &[u8], class_id: NodeId, ac
             }
         }
     }
+}
+
+/// DT.5h: the element type of every field of a container body declared
+/// `List<T>` / `Set<T>` / `Iterable<T>` (nullable, `late`, `final`, `static`
+/// alike; [`declared_element_type`]), by field name. Never the field's own
+/// type: `_items.contains(x)` must never bind a method of T. Lookup-only.
+fn collect_dart_field_elem_types(body: TsNode, src: &[u8]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut members = body.walk();
+    for member in body.named_children(&mut members) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let mut decls = member.walk();
+        for decl in member.named_children(&mut decls) {
+            if decl.kind() != "declaration" {
+                continue;
+            }
+            let Some(elem) = declared_element_type(decl, src) else {
+                continue;
+            };
+            let mut lists = decl.walk();
+            for list in decl.named_children(&mut lists) {
+                let mut items = list.walk();
+                for item in list.named_children(&mut items) {
+                    let name = match (list.kind(), item.kind()) {
+                        ("initialized_identifier_list", "initialized_identifier")
+                        | ("static_final_declaration_list", "static_final_declaration") => {
+                            item.child_by_field_name("name")
+                        }
+                        ("identifier_list", "identifier") => Some(item),
+                        _ => None,
+                    };
+                    if let Some(n) = name {
+                        out.insert(text_of(n, src).to_string(), elem.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// DT.5h: T of a field `declaration` typed `List<T>` / `Set<T>` /
+/// `Iterable<T>` ([`ELEMENT_COLLECTIONS`]), T one non-builtin simple name
+/// ([`type_argument_heads`]; a prefix and `?` dropped). A function, record
+/// or `void` type, any other collection and an untyped field -> None.
+fn declared_element_type(decl: TsNode, src: &[u8]) -> Option<String> {
+    let mut collection: Option<&str> = None;
+    let mut args: Option<TsNode> = None;
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => {
+                collection = Some(text_of(child, src).trim());
+                args = None;
+            }
+            "type_arguments" => args = Some(child),
+            "function_type" | "record_type" | "void_type" => return None,
+            "initialized_identifier_list" | "static_final_declaration_list" | "identifier_list" => {
+                break;
+            }
+            _ => {}
+        }
+    }
+    if !ELEMENT_COLLECTIONS.contains(&collection?) {
+        return None;
+    }
+    match type_argument_heads(args?, src).as_slice() {
+        [t] if !t.is_empty() => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// DT.5h: each top-level argument of a `type_arguments` node as its simple
+/// name (`<p.Item?>` -> `Item`), `""` for a builtin ([`DART_BUILTIN_TYPES`]),
+/// generic (`Map<K, V>`), function, record or `void` argument.
+fn type_argument_heads(type_arguments: TsNode, src: &[u8]) -> Vec<String> {
+    let mut heads = Vec::new();
+    // The current argument's simple name; `Some("")` once it is not simple.
+    let mut current: Option<String> = None;
+    let mut cursor = type_arguments.walk();
+    for child in type_arguments.children(&mut cursor) {
+        match child.kind() {
+            "<" | "." | "?" | "comment" => {}
+            "," | ">" => {
+                if let Some(head) = current.take() {
+                    heads.push(head);
+                }
+            }
+            "type_identifier" => {
+                if current.as_deref() != Some("") {
+                    current = Some(text_of(child, src).trim().to_string());
+                }
+            }
+            _ => current = Some(String::new()),
+        }
+    }
+    if let Some(head) = current {
+        heads.push(head);
+    }
+    heads
+        .into_iter()
+        .map(|h| if DART_BUILTIN_TYPES.contains(&h.as_str()) { String::new() } else { h })
+        .collect()
 }
 
 // ============================================================================
@@ -5979,6 +6622,19 @@ class ApiClient {
         out
     }
 
+    /// DT.5h: [`calls_from`] for a CLASS scope (a field initialiser's calls).
+    fn calls_from_class(fp: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname);
+        let mut out: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect();
+        out.sort_by_key(|q| format!("{q:?}"));
+        out
+    }
+
     fn sorted(mut v: Vec<CallQualifier>) -> Vec<CallQualifier> {
         v.sort_by_key(|q| format!("{q:?}"));
         v
@@ -6289,9 +6945,10 @@ class UserService {
             calls_from(&fp, &format!("{q}::viaThis")),
             vec![complex("this.repo", "find")]
         );
-        // The untyped field's initialiser is a class-level expression, not a
-        // method body: it emits no call site.
-        assert_eq!(fp.calls.len(), 3, "{:?}", fp.calls);
+        // DT.5h: the untyped field's initialiser `UserRepo()` is the class's
+        // code: a Bare(UserRepo) call site from the CLASS.
+        assert_eq!(calls_from_class(&fp, q), vec![bare("UserRepo")]);
+        assert_eq!(fp.calls.len(), 4, "{:?}", fp.calls);
     }
 
     // ---- LA.34: Dart lexical scope for unqualified calls ---------------------
@@ -8468,9 +9125,9 @@ class Card {
             .and_then(|e| glia_code_domain::evidence::Evidence::read(&e.cells))
             .expect("evidence");
         assert_eq!(save.emitter, "parser:dart");
-        // `final onLocal = _save;` is no argument: the first argument row is
-        // `use(_save)`.
-        assert_eq!(save.line, Some(18));
+        // DT.5h: `final onLocal = _save;` names `_save` too (an initialiser
+        // is a value position), so its row is the earliest.
+        assert_eq!(save.line, Some(17));
     }
 
     /// A library-scope name this file does not declare (an imported
@@ -8499,9 +9156,15 @@ class Card {
         let relisten = method_id(&format!("{card}::_relisten"));
         assert_eq!(uses_edges(&fp, relisten), vec![], "a self-reference");
         assert!(!targets.contains(&state_var_id("lib::card::kAction")), "a variable");
-        // Exactly the two edges from `wire`: `_save` and `_noop`.
+        // The two edges from `wire` (`_save` and `_noop`), and DT.5h's
+        // `final kAction = _noop;`: a library initialiser names `_noop`, a
+        // USES from the STATE_VAR.
         let uses = fp.edges.iter().filter(|e| e.category == edge_category::USES).count();
-        assert_eq!(uses, 2);
+        assert_eq!(uses, 3);
+        assert_eq!(
+            uses_edges(&fp, state_var_id("lib::card::kAction")),
+            vec![(function_id("lib::card::_noop"), Some("method_ref".to_string()))]
+        );
     }
 
     /// The by-name rule runs in a top-level function's body too: its own
@@ -9084,5 +9747,287 @@ class ChatMessage extends $pb.GeneratedMessage {
         assert_eq!(shapes_of(&fp, "PUT", "/profile").1, Some(named("ProfileDraft", false)));
         assert_eq!(shapes_of(&fp, "POST", "/raw"), (None, None));
         assert_eq!(shapes_of(&fp, "POST", "/form"), (None, None));
+    }
+
+    // ---- DT.5h: names in value positions, member reads, tear-offs ---------
+
+    /// The CALLS edges the parser emitted from `from`, as (to, evidence
+    /// rule), sorted.
+    fn parser_calls_edges(fp: &FileParse, from: NodeId) -> Vec<(NodeId, Option<String>)> {
+        let mut out: Vec<(NodeId, Option<String>)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::CALLS)
+            .map(|e| {
+                let ev = glia_code_domain::evidence::Evidence::read(&e.cells);
+                (e.to, ev.and_then(|ev| ev.rule))
+            })
+            .collect();
+        out.sort_by_key(|(to, rule)| format!("{to:?}{rule:?}"));
+        out
+    }
+
+    /// The MemberRead facts recorded on one scope, as (receiver, name).
+    fn member_reads_of(fp: &FileParse, scope: NodeId) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = fp
+            .nav
+            .nav_facts
+            .get(&scope)
+            .into_iter()
+            .flatten()
+            .filter_map(|f| match f {
+                NavFact::MemberRead { receiver, name, .. } => Some((receiver.clone(), name.clone())),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn local_type_of(fp: &FileParse, scope: NodeId, name: &str) -> Option<String> {
+        fp.nav.local_types.get(&scope).and_then(|t| t.get(name)).cloned()
+    }
+
+    const VALUE_POSITIONS: &str = r#"import 'package:x/p.dart' as p;
+
+class Page {
+  bool _busy = false;
+  bool get _ready => true;
+  int _modeValue = 0;
+  set _mode(int v) => _modeValue = v;
+  String get _title => 'x';
+  Holder get _obj => Holder();
+
+  void _save() {}
+  void _alt() {}
+  void _cancel() {}
+  void _make() {}
+  void onPressed() {}
+  void text() {}
+  void addListener() {}
+  void named() {}
+  void outer() {}
+
+  void wire(Ctrl ctrl, Widget widget) {
+    final a = _busy ? null : _save;
+    final b = _ready ? (_busy ? _cancel : _alt) : null;
+    final c = widget.onTap ?? _make;
+    final d = '$_title';
+    _mode = 2;
+    _obj.x = 1;
+    Button(onPressed: null);
+    ctrl..text = 'v'..addListener(f);
+    const p.T.named();
+    outer: for (;;) { break outer; }
+  }
+
+  void loops() {
+    again: for (;;) { continue again; }
+  }
+
+  void calls() {
+    _save();
+    this._save();
+  }
+
+  void member(Holder x) {
+    x._alt;
+  }
+
+  void shadow() {
+    final _ready = false;
+    if (_ready) {}
+  }
+}
+"#;
+
+    /// DT.5h: a name in any value position is a reference: a conditional's
+    /// branches and condition, a parenthesised nested conditional, `??`, an
+    /// initialiser, an interpolation; a getter read is CALLS accessor_read, a
+    /// setter write CALLS accessor_write, a method a USES method_ref. A label,
+    /// a cascade selector, a constructor name, a statement label, a callee, a
+    /// member selector and a shadowing local name nothing.
+    #[test]
+    fn names_in_value_positions_are_references() {
+        let fp = parse_file(VALUE_POSITIONS, "lib/page.dart", "lib::page", repo()).unwrap();
+        let q = |m: &str| method_id(&format!("lib::page::Page::{m}"));
+        let method_ref = Some("method_ref".to_string());
+        let mut want = vec![
+            (q("_save"), method_ref.clone()),
+            (q("_cancel"), method_ref.clone()),
+            (q("_alt"), method_ref.clone()),
+            (q("_make"), method_ref),
+        ];
+        want.sort_by_key(|(to, _)| format!("{to:?}"));
+        assert_eq!(uses_edges(&fp, q("wire")), want);
+        let mut calls = vec![
+            (q("_ready"), Some("accessor_read".to_string())),
+            (q("_title"), Some("accessor_read".to_string())),
+            (q("_mode"), Some("accessor_write".to_string())),
+            // `_obj.x = 1` reads the getter `_obj`; it writes nothing of it.
+            (q("_obj"), Some("accessor_read".to_string())),
+        ];
+        calls.sort_by_key(|(to, rule)| format!("{to:?}{rule:?}"));
+        assert_eq!(parser_calls_edges(&fp, q("wire")), calls);
+        for m in ["loops", "calls", "member", "shadow"] {
+            assert_eq!(uses_edges(&fp, q(m)), vec![], "{m}");
+            assert_eq!(parser_calls_edges(&fp, q(m)), vec![], "{m}");
+        }
+        // The getters and the setter are the property-style METHODs.
+        let mut props: Vec<NodeId> = fp.properties.iter().copied().collect();
+        props.sort_by_key(|id| format!("{id:?}"));
+        let mut want_props = vec![q("_ready"), q("_mode"), q("_title"), q("_obj")];
+        want_props.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(props, want_props);
+        assert!(!fp.properties.contains(&q("_save")));
+    }
+
+    const MEMBER_READS: &str = r#"import 'env.dart';
+import 'models.dart';
+
+class Svc {
+  bool get ready => true;
+}
+
+class Item {
+  Map<String, dynamic> toJson() => {};
+}
+
+class Box<T> {}
+
+class Factory {}
+
+class Page {
+  final Svc _svc = Svc();
+  final List<Item> _items = [];
+  bool get _ok => true;
+
+  void read(Object local, List<Map<String, dynamic>> raw) {
+    final u = Env.baseUrl;
+    final f = raw.map(Friend.fromJson);
+    final r = _svc.ready;
+    final l = local.ready;
+    final t = widget.title;
+    Env.port();
+    _register(Factory.new);
+    final make = Box<int>.new;
+    final ok = this._ok;
+    _items.map((i) => i.toJson());
+    _items.map((Item j) => j.toJson());
+  }
+}
+"#;
+
+    /// DT.5h: a member read no call follows is recorded for the graph when
+    /// its receiver can be typed (a type name, an owner field), never on an
+    /// untyped local, an inherited lowercase name or a call; `T.new` builds
+    /// a T; `this._ok` is the getter's CALLS; a one-parameter closure over a
+    /// `List<Item>` field types its parameter Item, a typed one records
+    /// nothing.
+    #[test]
+    fn member_reads_and_tear_offs() {
+        let fp = parse_file(MEMBER_READS, "lib/page.dart", "lib::page", repo()).unwrap();
+        let read = method_id("lib::page::Page::read");
+        assert_eq!(
+            member_reads_of(&fp, read),
+            vec![
+                ("Env".to_string(), "baseUrl".to_string()),
+                ("Friend".to_string(), "fromJson".to_string()),
+                ("this._svc".to_string(), "ready".to_string()),
+            ]
+        );
+        let calls = calls_from(&fp, "lib::page::Page::read");
+        assert!(calls.contains(&bare("Factory")), "{calls:?}");
+        assert!(calls.contains(&bare("Box")), "{calls:?}");
+        assert_eq!(
+            parser_calls_edges(&fp, read),
+            vec![(method_id("lib::page::Page::_ok"), Some("accessor_read".to_string()))]
+        );
+        assert_eq!(local_type_of(&fp, read, "i").as_deref(), Some("Item"));
+        assert_eq!(local_type_of(&fp, read, "j"), None);
+    }
+
+    const ELEMENT_CLOSURES: &str = r#"class Tag {
+  String label() => '';
+}
+
+class Item {}
+
+class Page {
+  final List<Item> _items = [];
+  late final Set<Tag>? _tags;
+  final List<int> _nums = [];
+  final Map<String, Item> _byId = {};
+
+  void loop() {
+    for (final i in [1]) {
+      if (i.isEven) {}
+    }
+    _items.map((i) => i.x).toList();
+  }
+
+  void tags() {
+    _tags?.forEach((t) => t.label());
+  }
+
+  void ints() {
+    _nums.map((n) => n.isEven);
+  }
+
+  void byId() {
+    _byId.forEach((k) => k.x);
+  }
+
+  void shadowed() {
+    final _items = <Item>[];
+    _items.map((s) => s.x);
+  }
+
+  void nested() {
+    _items.map((r) => [1].map((r) => r.isEven));
+  }
+
+  void viaThis() {
+    this._items.where((w) => w.ok);
+  }
+}
+"#;
+
+    /// DT.5h: the element type reaches a closure parameter only when the
+    /// closure owns the name and the field holds a non-builtin element type:
+    /// a loop's `i.isEven` beside the closure, `List<int>`, a Map, a local
+    /// shadowing the field and a nested rebinding closure type nothing.
+    #[test]
+    fn element_closures_need_an_exclusive_name() {
+        let fp = parse_file(ELEMENT_CLOSURES, "lib/page.dart", "lib::page", repo()).unwrap();
+        let q = |m: &str| method_id(&format!("lib::page::Page::{m}"));
+        assert_eq!(local_type_of(&fp, q("loop"), "i"), None, "the loop's i");
+        assert_eq!(local_type_of(&fp, q("tags"), "t").as_deref(), Some("Tag"));
+        assert_eq!(local_type_of(&fp, q("ints"), "n"), None, "List<int>");
+        assert_eq!(local_type_of(&fp, q("byId"), "k"), None, "a Map");
+        assert_eq!(local_type_of(&fp, q("shadowed"), "s"), None, "a shadowing local");
+        assert_eq!(local_type_of(&fp, q("nested"), "r"), None, "a nested rebinding");
+        assert_eq!(local_type_of(&fp, q("viaThis"), "w").as_deref(), Some("Item"));
+    }
+
+    /// DT.5h: a class field's initialiser is the class's code: its calls
+    /// come from the CLASS (a list element, a constructor call, a static
+    /// factory), and a field with no initialiser walks nothing.
+    #[test]
+    fn field_initialisers_are_their_class_calls() {
+        let source = r#"class Page {
+  static const _tabs = [_Tab('a')];
+  final _ctrl = Ctrl();
+  late final _r = Repo.open();
+  final int plain;
+
+  Page(this.plain);
+}
+"#;
+        let fp = parse_file(source, "lib/page.dart", "lib::page", repo()).unwrap();
+        assert_eq!(
+            calls_from_class(&fp, "lib::page::Page"),
+            sorted(vec![bare("_Tab"), bare("Ctrl"), attr("Repo", "open")])
+        );
     }
 }

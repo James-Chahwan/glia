@@ -28,6 +28,7 @@ use crate::rust_paths::{
 use crate::swift_scope::{SwiftModuleTypes, implicit_self};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
+mod dart;
 mod go_wire;
 
 // ============================================================================
@@ -312,10 +313,10 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
 /// (`imports::SameStem`); builders print the `[imports] same-stem
 /// picks` marker when any such import was tried.
 ///
-/// This builder also serves the languages without one of their own (Dart,
-/// Solidity, Terraform: `lang_build`'s `_` arm), so it runs no TypeScript
+/// This builder also serves the languages without one of their own
+/// (Solidity, Terraform: `lang_build`'s `_` arm), so it runs no TypeScript
 /// class semantics; the TS family (TS / JS / React / Angular / Vue) builds
-/// through [`build_typescript_family`].
+/// through [`build_typescript_family`], Dart through [`build_dart`].
 pub fn build_typescript<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -338,8 +339,8 @@ where
 /// (DF.22c), a constructor never. Prints the `[ts-inherit]` marker when
 /// either did anything.
 ///
-/// Two entry points because [`build_typescript`] also builds Dart, Solidity
-/// and Terraform, and Solidity writes a bare internal call as a self call:
+/// Two entry points because [`build_typescript`] also builds Solidity and
+/// Terraform, and Solidity writes a bare internal call as a self call:
 /// those graphs keep their output until a packet of their own measures the
 /// walk (it is language-free; adopting it is one flag here).
 pub fn build_typescript_family<R>(
@@ -381,6 +382,54 @@ where
     emit_method_level_implements(&mut g);
     tally.report();
     Ok(g)
+}
+
+/// Build a per-repo Dart graph (DT.5h): [`build_typescript`]'s passes (the
+/// merge, the symbol table, `resolve_imports_ts` with the caller's
+/// `resolve_source`, DF.4a's own-package URIs and DF.4b's plain-import
+/// names among them, `resolve_calls` with no hook, `resolve_refs`), then the
+/// Dart member reads ([`dart::resolve_member_reads`]: a `Type.member` /
+/// `x.member` read no call follows, recorded by the parser as a
+/// `NavFact::MemberRead`, bound through the reader's own scope: a getter's
+/// CALLS, a tear-off's USES, a static field's USES of its CLASS), then the
+/// method-level IMPLEMENTS pairing. Prints `[reads] member reads
+/// accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` once, then
+/// the LC.3d `[evidence-graph]` line.
+pub fn build_dart<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+) -> Result<RepoGraph, GraphError>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let (g, reads, tally) = dart_passes(repo, parses, resolve_source);
+    eprintln!("{}", reads.marker());
+    tally.report();
+    Ok(g)
+}
+
+/// [`build_dart`]'s passes without its two stderr lines; the tests read the
+/// returned [`dart::MemberReads`].
+fn dart_passes<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+) -> (RepoGraph, dart::MemberReads, EvidenceTally)
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
+    same.report();
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
+    let reads = dart::resolve_member_reads(&mut g, |_, _| None);
+    emit_method_level_implements(&mut g);
+    (g, reads, tally)
 }
 
 /// Build a per-repo Swift graph (CB.18): [`build_typescript`]'s passes plus
