@@ -534,8 +534,8 @@ impl<'a> Wire<'a> {
     }
 
     /// What a field chain reads: the last field's declared type text in its
-    /// owner's SCHEMA_FIELDS (a slice field records no `field_types` entry;
-    /// a scalar field is no model), else the whole chain through
+    /// owner's SCHEMA_FIELDS (a slice field's `[]E` text types no chain,
+    /// DT.5j; a scalar field is no model), else the whole chain through
     /// [`GoPackages::chain_type`] (an unexported field, a promoted one).
     fn chain(&self, scope: RecvScope<'a>, chain: &str) -> Field {
         let Some(segs) = receiver_segments(chain) else {
@@ -748,21 +748,28 @@ type H struct {
             .expect("schema cell")
     }
 
-    /// The USES edges as (from, to, confidence, rule, 0-based line).
+    /// The wire USES edges as (from, to, confidence, rule, 0-based line).
+    /// DT.5j: a composite literal of the model (`&Vehicle{..}`) is a USES of
+    /// its own (`graph:go_packages`, rule `composite_literal`) beside the
+    /// wire's; every other USES edge is the wire's.
     fn uses(g: &RepoGraph) -> Vec<(NodeId, NodeId, Confidence, String, Option<u32>)> {
         g.edges
             .iter()
             .filter(|e| e.category == edge_category::USES)
-            .map(|e| {
+            .filter_map(|e| {
                 let ev = Evidence::of(e).expect("evidence");
+                if ev.emitter == "graph:go_packages" {
+                    assert_eq!(ev.rule.as_deref(), Some("composite_literal"));
+                    return None;
+                }
                 assert_eq!(ev.emitter, "graph:go_wire");
-                (
+                Some((
                     e.from,
                     e.to,
                     e.confidence,
                     ev.rule.unwrap_or_default(),
                     ev.line,
-                )
+                ))
             })
             .collect()
     }

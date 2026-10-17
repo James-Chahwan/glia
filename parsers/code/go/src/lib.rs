@@ -277,6 +277,9 @@ pub fn parse_file_with_modules(
             w.slice_results
         );
     }
+    // DT.5j: the func / method value refs, read once the whole file is
+    // (the graph's `[go-values]` line reports what they bound).
+    flush_value_refs(&mut acc);
     let gorm = &acc.gorm;
     if !gorm.models.is_empty() || !gorm.tables.is_empty() {
         eprintln!(
@@ -422,6 +425,36 @@ struct Acc {
     /// DT.1e: the server wire detector's imports, local shapes and the
     /// `[go-wire]` marker counters.
     wire: WireFile,
+    /// DT.5j: the value refs [`record_value_refs`] and [`queue_composite_ref`]
+    /// queued, moved into `refs` by [`flush_value_refs`] once the whole file
+    /// is read.
+    value_refs: Vec<QueuedValue>,
+    /// DT.5j: start byte of every route-handler argument this file's routes
+    /// consumed (an identifier or selector `emit_route_from_call` made a
+    /// HANDLED_BY ref of): never a value ref too.
+    handler_args: std::collections::HashSet<usize>,
+    /// DT.5j: byte ranges of the DI registration calls (A7.6) whose arguments
+    /// are INJECTS, never value refs.
+    value_skip: Vec<(usize, usize)>,
+    /// DT.5j: per fn / METHOD scope, the names its named results (its own
+    /// and its func literals') and body `const` specs declare: they shadow a
+    /// package-level func as a local does, but record no `local_types` entry
+    /// (the receiver pass reads them as before). Read by [`flush_value_refs`].
+    value_shadows: HashMap<NodeId, std::collections::HashSet<String>>,
+}
+
+/// DT.5j: one value ref [`record_value_refs`] or [`queue_composite_ref`]
+/// queued on [`Acc::value_refs`].
+struct QueuedValue {
+    /// The expression's start byte (a route's handler argument or an
+    /// expression inside a DI registration is matched by it).
+    start: usize,
+    /// A composite literal's type ref (the 2026-10-17 correction): kept
+    /// inside a DI registration, whose provider arguments alone are its
+    /// INJECTS (`fx.Supply(&Config{..})` still builds a Config).
+    composite: bool,
+    /// The USES ref.
+    r: UnresolvedRef,
 }
 
 /// A13.12: what one Go file shows of GORM. The two evidence flags gate the
@@ -729,22 +762,22 @@ fn embedded_iface_qualifier(term: TsNode, src: &[u8]) -> Option<CallQualifier> {
 ///
 /// Runs after the types pass, so `type_ids` holds every type this file
 /// declares. `repo *UserRepo` records `repo -> UserRepo`; `a, b *T` records
-/// both names; an embedded field records under its type's own name
-/// (`*UserRepo` / `pkg.UserRepo` -> field `UserRepo`). Interface-typed fields
-/// are recorded too: until an interface fallback exists the lookup finds no
-/// method table on an INTERFACE and stays unresolved. Types
-/// [`go_type_name`] cannot name (slices, maps, channels, funcs, generics)
-/// record nothing.
+/// both names; an embedded field records under its type's own bare name
+/// (`*UserRepo` -> field `UserRepo`, `*pkg.UserRepo` -> field `UserRepo`
+/// typed `pkg.UserRepo`). Interface-typed fields are recorded too. DT.5j: a
+/// qualified type keeps its qualifier (`db store.DB` -> `store.DB`), which no
+/// bare-name lookup matches: the Go call hook reads it through the declaring
+/// file's imports. A slice, array or map of a named type records `[]E`
+/// ([`go_type_name`]); a channel, a func, an anonymous struct or interface, a
+/// nested container and a container of a predeclared type record nothing.
 ///
-/// A qualified `pkg.T` types nothing when the graph's bare-name lookup would
-/// land on the wrong `T`:
-/// * `pkg` is an import outside the repo's go.mod modules (`c net.Conn`): no
-///   repo type is `net.Conn`, but the unique-name fallback would bind a repo's
-///   own `Conn` (LA.18d's `external_pkgs`; with no go.mod every import is
-///   external, so every qualified field is skipped);
-/// * `T` is also a type of this file (the wrapper shape `type Logger struct
-///   { l *zap.Logger }`): the module lookup would turn every delegating call
-///   into a self-call — the same guard as the Python parser's (LA.23a).
+/// A qualified `pkg.T` (a container's element too) whose `pkg` is an import
+/// outside the repo's go.mod modules (`c net.Conn`, `[]*zap.Logger`) records
+/// nothing: no repo type is `net.Conn` (LA.18d's `external_pkgs`; with no
+/// go.mod every import is external, so every qualified field is skipped).
+/// LA.23a's second guard (`T` also a type of this file, the wrapper shape
+/// `type Logger struct { *store.Logger }`) is gone with the bare name it
+/// guarded: `store.Logger` never binds back onto `Logger` itself.
 fn collect_field_types(
     type_decl: TsNode,
     src: &[u8],
@@ -789,7 +822,7 @@ fn collect_field_types(
             if decl.kind() != "field_declaration" {
                 continue;
             }
-            for (field, ty) in field_decl_types(decl, src, type_ids, &acc.external_pkgs) {
+            for (field, ty) in field_decl_types(decl, src, &acc.external_pkgs) {
                 acc.nav.record_field_type(struct_id, &field, &ty);
             }
             push_struct_embed(decl, src, struct_id, &type_params, acc);
@@ -1168,7 +1201,6 @@ fn embedded_struct_qualifier(
 fn field_decl_types(
     decl: TsNode,
     src: &[u8],
-    type_ids: &HashMap<String, NodeId>,
     external_pkgs: &std::collections::HashSet<String>,
 ) -> Vec<(String, String)> {
     let Some(type_node) = decl.child_by_field_name("type") else {
@@ -1179,16 +1211,18 @@ fn field_decl_types(
     };
     // CA.2a: a generic instantiation's guards read its base, so an external
     // `atomic.Pointer[T]` records nothing, as `atomic.Value` never did.
-    let Some(inner) = generic_base(unwrap_pointer(type_node)) else {
+    // DT.5j: a container's guard reads its element (`[]*zap.Logger`).
+    let named = unwrap_pointer(type_node);
+    let named = container_elem(named).unwrap_or(named);
+    let Some(inner) = generic_base(unwrap_pointer(named)) else {
         return Vec::new();
     };
-    if inner.kind() == "qualified_type" {
-        let external = inner
+    if inner.kind() == "qualified_type"
+        && inner
             .child_by_field_name("package")
-            .is_some_and(|p| external_pkgs.contains(text_of(p, src)));
-        if external || type_ids.contains_key(&ty) {
-            return Vec::new();
-        }
+            .is_some_and(|p| external_pkgs.contains(text_of(p, src)))
+    {
+        return Vec::new();
     }
     let mut nc = decl.walk();
     let names: Vec<String> = decl
@@ -1196,26 +1230,64 @@ fn field_decl_types(
         .map(|n| text_of(n, src).to_string())
         .collect();
     if names.is_empty() {
-        // Embedded field: its name is the type's own name.
-        return vec![(ty.clone(), ty)];
+        // Embedded field: its name is the type's own bare name (`*store.Logger`
+        // -> field `Logger`, type text `store.Logger`).
+        let field = ty.rsplit('.').next().unwrap_or(&ty).to_string();
+        return vec![(field, ty)];
     }
     names.into_iter().map(|n| (n, ty.clone())).collect()
 }
 
-/// The bare type name a field's declared type binds by: `*T` -> `T`,
-/// `pkg.T` -> `T`, `T` -> `T`, and a generic instantiation by its base
-/// (`*Collection[User]` -> `Collection`, `pkg.Page[T]` -> `Page`, CA.2a).
-/// Slices, arrays, maps, channels, func types and anonymous struct /
-/// interface types -> `None`: a call through such a field has no single
-/// method table to bind against.
+/// The type text a field's declared type is recorded by (LA.23c): `*T` ->
+/// `T`, `T` -> `T`, a generic instantiation by its base (`*Collection[User]`
+/// -> `Collection`, CA.2a). DT.5j: a package qualifier is kept (`pkg.T` ->
+/// `pkg.T`, `pkg.Page[T]` -> `pkg.Page`), which no bare-name lookup matches,
+/// so the Go call hook resolves it through the declaring file's imports; and
+/// a slice, array or map of a named type records `[]` + its element's (a
+/// map's value's) text (`[]SelfCheck`, `map[string]*pkg.T` -> `[]pkg.T`),
+/// which types a `range` variable. Channels, func types, anonymous struct /
+/// interface types, nested containers and a container of a predeclared type
+/// (`[]string`) -> `None`.
 fn go_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
-    let inner = generic_base(unwrap_pointer(type_node))?;
+    let node = unwrap_pointer(type_node);
+    if let Some(elem) = container_elem(node) {
+        return named_type_text(elem, src)
+            .filter(|e| !is_predeclared_type(e))
+            .map(|e| format!("[]{e}"));
+    }
+    named_type_text(node, src)
+}
+
+/// [`go_type_name`] of one named type: `T`, `pkg.T`, a generic base, pointers
+/// unwrapped; any other shape -> `None`.
+fn named_type_text(node: TsNode, src: &[u8]) -> Option<String> {
+    let inner = generic_base(unwrap_pointer(node))?;
     let name = match inner.kind() {
-        "type_identifier" => text_of(inner, src),
-        "qualified_type" => text_of(inner.child_by_field_name("name")?, src),
+        "type_identifier" => text_of(inner, src).to_string(),
+        "qualified_type" => {
+            let pkg = text_of(inner.child_by_field_name("package")?, src);
+            let name = text_of(inner.child_by_field_name("name")?, src);
+            if pkg.is_empty() || name.is_empty() {
+                return None;
+            }
+            format!("{pkg}.{name}")
+        }
         _ => return None,
     };
-    (!name.is_empty()).then(|| name.to_string())
+    (!name.is_empty()).then_some(name)
+}
+
+/// DT.5j: the element type node of a slice / array (`[]T`, `[N]T`, `[...]T`)
+/// or the value type node of a map (`map[K]V`): what a `range` over it binds
+/// its value variable to. Any other node -> `None`.
+fn container_elem(node: TsNode) -> Option<TsNode> {
+    match node.kind() {
+        "slice_type" | "array_type" | "implicit_length_array_type" => {
+            node.child_by_field_name("element")
+        }
+        "map_type" => node.child_by_field_name("value"),
+        _ => None,
+    }
 }
 
 /// A generic instantiation's base type (`Collection[T]` -> `Collection`,
@@ -1367,6 +1439,9 @@ fn emit_state_var_spec(
         {
             let before = acc.calls.len();
             let mut literals = Vec::new();
+            // DT.5j: the initialiser itself may be a func value (`var h =
+            // handleX`); the walk below sees only the expressions inside it.
+            queue_value_ref(*value, src, id, None, acc);
             collect_calls_at(*value, src, id, None, repo, file_rel, acc, &mut literals);
             let direct = acc.calls.len() - before;
             let (bodies, calls) =
@@ -1464,6 +1539,7 @@ fn visit_function(
     let elem = slice_result_elem(decl.child_by_field_name("result"), src, &acc.type_params);
     record_slice_result(acc, id, elem);
     record_params(decl.child_by_field_name("parameters"), src, id, acc);
+    record_result_names(decl.child_by_field_name("result"), src, id, acc);
 
     if let Some(body) = decl.child_by_field_name("body") {
         let mut closures = Vec::new();
@@ -1558,6 +1634,7 @@ fn visit_method(
         }
     }
     record_params(decl.child_by_field_name("parameters"), src, id, acc);
+    record_result_names(decl.child_by_field_name("result"), src, id, acc);
 
     if let Some(body) = decl.child_by_field_name("body") {
         let receiver_var = receiver_var.as_deref();
@@ -2061,13 +2138,18 @@ fn collect_calls_at<'t>(
         try_detect_gorm_access(node, src, from, repo, acc);
         // DI container registration: `wire.Build(NewA, NewB)` → INJECTS
         // from the injector (`from`) to each provider (A7.6); from a
-        // package var, `var Set = wire.NewSet(..)` (CI.1).
-        try_detect_go_provider_set(node, src, from, acc);
+        // package var, `var Set = wire.NewSet(..)` (CI.1). DT.5j: its
+        // arguments are those INJECTS, never value refs.
+        if try_detect_go_provider_set(node, src, from, acc) {
+            acc.value_skip.push((node.start_byte(), node.end_byte()));
+        }
         // DT.1e: a handler's JSON response write or request bind (`c.JSON(
         // http.StatusOK, v)`, `c.ShouldBindJSON(&req)`) -> a MESSAGE_TYPE
         // cell on `from`.
         try_detect_json_wire(node, src, from, receiver_var, acc);
     }
+    // DT.5j: the func and method values this node passes, assigns or returns.
+    record_value_refs(node, src, from, receiver_var, acc);
     if node.kind() == "func_literal" {
         closures.push(node);
     } else {
@@ -2112,6 +2194,7 @@ fn collect_closure_calls(
         // CA.2a: a drained literal's parameters are locals of `from`, as its
         // calls are `from`'s CallSites.
         record_params(lit.child_by_field_name("parameters"), src, from, acc);
+        record_result_names(lit.child_by_field_name("result"), src, from, acc);
         let Some(body) = lit.child_by_field_name("body") else {
             continue;
         };
@@ -2129,6 +2212,227 @@ fn collect_closure_calls(
         queue.extend(nested);
     }
     (bodies, acc.calls.len() - calls_before)
+}
+
+// ============================================================================
+// DT.5j: func and method values (USES)
+// ============================================================================
+
+/// DT.5j: the expressions `node` passes, assigns or returns by value: a
+/// call's arguments (not `new` / `make`'s type argument), a composite
+/// literal's elements and keyed values (never a key), the right side of `=` /
+/// `:=` / `var x = ..`, and a `return`'s results. Each one that may name a
+/// func or a method ([`value_qualifier`]) is queued on `acc.value_refs` as a
+/// USES ref from `from`; [`flush_value_refs`] drops the ones the file's
+/// routes or DI registrations consumed and the ones that name a local. A
+/// composite literal queues the type it builds ([`queue_composite_ref`]).
+fn record_value_refs(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
+    let values: Vec<TsNode> = match node.kind() {
+        // The 2026-10-17 correction: the literal builds its type (its
+        // elements are read at its `literal_value` child).
+        "composite_literal" => {
+            queue_composite_ref(node, src, from, acc);
+            return;
+        }
+        "call_expression" => {
+            let builtin = node
+                .child_by_field_name("function")
+                .filter(|f| f.kind() == "identifier")
+                .is_some_and(|f| matches!(text_of(f, src), "new" | "make"));
+            if builtin {
+                return;
+            }
+            named_kids(node.child_by_field_name("arguments"))
+        }
+        "literal_value" => {
+            let mut c = node.walk();
+            node.named_children(&mut c)
+                .filter_map(|el| match el.kind() {
+                    "keyed_element" => el.child_by_field_name("value"),
+                    "literal_element" => Some(el),
+                    _ => None,
+                })
+                .filter_map(|el| el.named_child(0))
+                .collect()
+        }
+        "assignment_statement" => {
+            let plain = node
+                .child_by_field_name("operator")
+                .is_some_and(|o| o.kind() == "=");
+            if !plain {
+                return;
+            }
+            named_kids(node.child_by_field_name("right"))
+        }
+        "short_var_declaration" => named_kids(node.child_by_field_name("right")),
+        "var_spec" => named_kids(node.child_by_field_name("value")),
+        "return_statement" => {
+            let mut c = node.walk();
+            let list = node.named_children(&mut c).find(|n| n.kind() == "expression_list");
+            named_kids(list)
+        }
+        _ => return,
+    };
+    for v in values {
+        queue_value_ref(v, src, from, receiver_var, acc);
+    }
+}
+
+/// DT.5j: queue `v` as a USES value ref from `from` when it may name a func
+/// or method ([`value_qualifier`]). [`record_value_refs`]' per-expression
+/// step, also called by CI.1's package-var walk on the initialiser itself
+/// (`var h = handleX`), which starts at the value, never the spec.
+fn queue_value_ref(v: TsNode, src: &[u8], from: NodeId, receiver_var: Option<&str>, acc: &mut Acc) {
+    let Some(from_module) = acc.module_id else {
+        return;
+    };
+    let Some(qualifier) = value_qualifier(v, src, receiver_var) else {
+        return;
+    };
+    acc.value_refs.push(QueuedValue {
+        start: v.start_byte(),
+        composite: false,
+        r: UnresolvedRef {
+            from,
+            from_module,
+            qualifier,
+            category: edge_category::USES,
+            line: line_at(v),
+        },
+    });
+}
+
+/// DT.5j (the 2026-10-17 correction): a composite literal `T{..}` /
+/// `pkg.T{..}` / `G[A]{..}` (`&T{..}` is the same literal) builds a value of
+/// the named type: queued as a USES ref from `from` (`Bare("T")` /
+/// `Attribute { base: "pkg", name: "T" }`) at the literal's row, which the Go
+/// call hook binds only to an in-repo STRUCT of the file, its package or the
+/// import's package (rule `composite_literal`, `GoPackages::value_target`),
+/// never by a repo-wide bare name. A container (`[]T{..}`, `map[K]V{..}`,
+/// whose element literals are composites of their own), an anonymous
+/// `struct{..}{..}`, a predeclared type and a type parameter queue nothing;
+/// a name a fn-local type, local or const shadows is dropped by
+/// [`flush_value_refs`], an external package's type (`gin.H{..}`) too.
+fn queue_composite_ref(lit: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(from_module) = acc.module_id else {
+        return;
+    };
+    let Some(inner) = lit.child_by_field_name("type").and_then(generic_base) else {
+        return;
+    };
+    let qualifier = match inner.kind() {
+        "type_identifier" => {
+            let name = text_of(inner, src);
+            if name.is_empty()
+                || is_predeclared_type(name)
+                || acc.type_params.iter().any(|p| p == name)
+            {
+                return;
+            }
+            CallQualifier::Bare(name.to_string())
+        }
+        "qualified_type" => {
+            let (Some(pkg), Some(name)) =
+                (inner.child_by_field_name("package"), inner.child_by_field_name("name"))
+            else {
+                return;
+            };
+            let (pkg, name) = (text_of(pkg, src), text_of(name, src));
+            if pkg.is_empty() || name.is_empty() {
+                return;
+            }
+            CallQualifier::Attribute { base: pkg.to_string(), name: name.to_string() }
+        }
+        _ => return,
+    };
+    acc.value_refs.push(QueuedValue {
+        start: lit.start_byte(),
+        composite: true,
+        r: UnresolvedRef {
+            from,
+            from_module,
+            qualifier,
+            category: edge_category::USES,
+            line: line_at(lit),
+        },
+    });
+}
+
+/// DT.5j: the ref a value-position expression may name a func or method by:
+/// an identifier `F` -> `Bare("F")` (never `_`, `nil`, `true`, `false`,
+/// `iota`, a predeclared type or builtin, nor the method's receiver); a
+/// selector `x.M` whose operand is a [`chain_text`] chain -> `Attribute {
+/// base: <chain>, name: "M" }` (`h.List`, `s.svc.Handle` -> base
+/// `self.svc`, `pkg.F`); parentheses are looked through. Anything else (a
+/// call, a literal, an index, a func literal) -> `None`. Whether the name is
+/// a func or method at all is the graph's to decide (`GoPackages`): a field
+/// read `u.ID` or a package var binds nothing there.
+fn value_qualifier(v: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<CallQualifier> {
+    match v.kind() {
+        "identifier" => {
+            let name = text_of(v, src);
+            let skip = name.is_empty()
+                || matches!(name, "_" | "nil" | "true" | "false" | "iota" | "new")
+                || is_predeclared_type(name)
+                || is_untyped_builtin(name)
+                || Some(name) == receiver_var;
+            (!skip).then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "selector_expression" => {
+            let base = chain_text(v.child_by_field_name("operand")?, src, receiver_var)?;
+            let name = text_of(v.child_by_field_name("field")?, src);
+            (!name.is_empty()).then(|| CallQualifier::Attribute { base, name: name.to_string() })
+        }
+        "parenthesized_expression" => {
+            let mut c = v.walk();
+            let inner = v.named_children(&mut c).find(|n| n.kind() != "comment")?;
+            value_qualifier(inner, src, receiver_var)
+        }
+        _ => None,
+    }
+}
+
+/// DT.5j: move the queued value refs into `acc.refs`, in source order, once
+/// per (from, qualifier). Dropped: an expression a route consumed as its
+/// handler (its HANDLED_BY) or inside a DI registration (its INJECTS; a
+/// composite literal's type ref is kept there); a `Bare` name that is a
+/// local, parameter, named result, body `const` or fn-local type of `from`
+/// (read after the whole file, so a later declaration in the fn still
+/// shadows); an `Attribute` rooted at such a name, or at a package outside
+/// the repo's go.mod modules (`http.StatusOK`, `os.Stdout`, `gin.H{..}`)
+/// that is no local of `from`.
+fn flush_value_refs(acc: &mut Acc) {
+    let queued = std::mem::take(&mut acc.value_refs);
+    let mut seen: std::collections::HashSet<(NodeId, String)> = std::collections::HashSet::new();
+    for QueuedValue { start, composite, r } in queued {
+        if !composite
+            && (acc.handler_args.contains(&start)
+                || acc.value_skip.iter().any(|&(s, e)| s <= start && start < e))
+        {
+            continue;
+        }
+        let locals = acc.nav.local_types.get(&r.from);
+        let is_local = |n: &str| locals.is_some_and(|l| l.contains_key(n));
+        let shadows = acc.value_shadows.get(&r.from);
+        let is_shadow = |n: &str| shadows.is_some_and(|s| s.contains(n));
+        let keep = match &r.qualifier {
+            CallQualifier::Bare(name) => !is_local(name) && !is_shadow(name),
+            CallQualifier::Attribute { base, .. } => {
+                let root = base.split('.').next().unwrap_or(base);
+                !is_shadow(root) && (is_local(root) || !acc.external_pkgs.contains(root))
+            }
+            _ => false,
+        };
+        if keep && seen.insert((r.from, format!("{:?}", r.qualifier))) {
+            acc.refs.push(r);
+        }
+    }
 }
 
 fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<CallQualifier> {
@@ -2312,17 +2616,72 @@ fn result_type(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> Op
     fact_type(ty, src, type_params)
 }
 
+/// DT.5j: the most distinct type texts one local's declarations may give it
+/// before it is unknown ([`record_local`]).
+const MAX_LOCAL_ALTERNATIVES: usize = 4;
+
 /// Record `name` as a local of `scope` with type text `ty` (`""` = unknown).
 /// `_` binds nothing.
+///
+/// DT.5j: a name declared more than once in one scope keeps every distinct
+/// text, `|`-joined (`NewOXRFree()|src()`): a func literal's body shares its
+/// enclosing fn's scope, so two closures' `o := ..` land in one table. The Go
+/// call hook types such a local only when every alternative names one and
+/// the same type (`GoPackages::type_of_text`). An unknown declaration (`""`)
+/// makes the name unknown for good, as `CodeNav::record_local_type` does, and
+/// so does a text past [`MAX_LOCAL_ALTERNATIVES`].
 fn record_local(acc: &mut Acc, scope: NodeId, name: &str, ty: &str) {
-    if name != "_" {
-        acc.nav.record_local_type(scope, name, ty);
+    if name == "_" || name.is_empty() {
+        return;
     }
+    let locals = acc.nav.local_types.entry(scope).or_default();
+    let Some(existing) = locals.get_mut(name) else {
+        locals.insert(name.to_string(), ty.to_string());
+        return;
+    };
+    if existing.is_empty() || existing.split('|').any(|t| t == ty) {
+        return;
+    }
+    if ty.is_empty() || existing.split('|').count() >= MAX_LOCAL_ALTERNATIVES {
+        existing.clear();
+        return;
+    }
+    existing.push('|');
+    existing.push_str(ty);
+}
+
+/// The type text a declared type gives a parameter or `var`: [`fact_type`]'s
+/// named type, else (DT.5j) a slice / array / map of a named type as `[]` +
+/// its element's text (`[]SelfCheck`, `map[string]*pkg.T` -> `[]pkg.T`, the
+/// field rule of [`go_type_name`]) and a func type as `func() ` + its first
+/// result's text ([`func_value_text`]); anything else -> `""`.
+fn declared_local_type(ty: TsNode, src: &[u8], type_params: &[String]) -> String {
+    if let Some(t) = fact_type(ty, src, type_params) {
+        return t;
+    }
+    let node = unwrap_pointer(ty);
+    if let Some(elem) = container_elem(node) {
+        return fact_type(elem, src, type_params)
+            .map(|e| format!("[]{e}"))
+            .unwrap_or_default();
+    }
+    if node.kind() == "function_type" {
+        return func_value_text(node.child_by_field_name("result"), src, type_params);
+    }
+    String::new()
+}
+
+/// DT.5j: the type text of a func value whose first result is `result` (a
+/// func literal's, or a func type's): `func() ` + that result's
+/// [`result_type`] text, so the Go call hook types `f()`'s result through a
+/// local `f`; no named result -> `""`.
+fn func_value_text(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> String {
+    result_type(result, src, type_params).map_or_else(String::new, |r| format!("func() {r}"))
 }
 
 /// Every parameter of a `parameter_list` as a local of `scope`: grouped names
-/// (`a, b *T`) share the type, a variadic `...T` is a slice (`""`), an
-/// unnamed parameter binds nothing.
+/// (`a, b *T`) share the type ([`declared_local_type`]), a variadic `...T` is
+/// a slice (`[]T`, DT.5j), an unnamed parameter binds nothing.
 fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Acc) {
     let Some(params) = params else {
         return;
@@ -2332,9 +2691,13 @@ fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Ac
         let ty = match param.kind() {
             "parameter_declaration" => param
                 .child_by_field_name("type")
-                .and_then(|t| fact_type(t, src, &acc.type_params))
+                .map(|t| declared_local_type(t, src, &acc.type_params))
                 .unwrap_or_default(),
-            "variadic_parameter_declaration" => String::new(),
+            "variadic_parameter_declaration" => param
+                .child_by_field_name("type")
+                .and_then(|t| fact_type(t, src, &acc.type_params))
+                .map(|e| format!("[]{e}"))
+                .unwrap_or_default(),
             _ => continue,
         };
         let mut nc = param.walk();
@@ -2349,6 +2712,25 @@ fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Ac
             record_local(acc, scope, text_of(name, src), &ty);
             if let Some(shape) = &wire_ty {
                 acc.wire.declare(scope, text_of(name, src), shape.clone());
+            }
+        }
+    }
+}
+
+/// DT.5j: the names a result `parameter_list` declares (`(handler func(),
+/// err error)`) as value shadows of `scope` ([`Acc::value_shadows`]); an
+/// unnamed result list or a bare result type declares none.
+fn record_result_names(result: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    let Some(result) = result.filter(|r| r.kind() == "parameter_list") else {
+        return;
+    };
+    let mut pc = result.walk();
+    for param in result.named_children(&mut pc) {
+        let mut nc = param.walk();
+        for name in param.children_by_field_name("name", &mut nc) {
+            let name = text_of(name, src);
+            if !name.is_empty() && name != "_" {
+                acc.value_shadows.entry(scope).or_default().insert(name.to_string());
             }
         }
     }
@@ -2702,6 +3084,9 @@ fn is_untyped_builtin(name: &str) -> bool {
 /// * `T{..}` / `pkg.T{..}` / `&T{..}` -> the composite's type, `x.(T)` -> `T`;
 /// * `s.repo` inside a method of receiver `s` -> `self.repo`, the alias of
 ///   the enclosing struct's field the receiver pass already follows;
+/// * DT.5j: a slice / array / map literal or `make` of a named element type
+///   -> `[]<elem>` (`[]Check{a, b}`, `make(map[string]*pkg.T)` -> `[]pkg.T`);
+///   a func literal -> `func() <first result>` ([`func_value_text`]);
 /// * anything else -> `""`.
 fn go_value_type(value: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Acc) -> String {
     let tp = acc.type_params.as_slice();
@@ -2710,11 +3095,17 @@ fn go_value_type(value: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Ac
             let func = value.child_by_field_name("function");
             if let Some(f) = func.filter(|f| f.kind() == "identifier") {
                 let name = text_of(f, src);
+                let first_arg = || value.child_by_field_name("arguments").and_then(|a| a.named_child(0));
                 if name == "new" {
-                    return value
-                        .child_by_field_name("arguments")
-                        .and_then(|a| a.named_child(0))
+                    return first_arg()
                         .and_then(|a| type_expr_ref(a, src, tp))
+                        .unwrap_or_default();
+                }
+                if name == "make" {
+                    return first_arg()
+                        .and_then(container_elem)
+                        .and_then(|e| fact_type(e, src, tp))
+                        .map(|e| format!("[]{e}"))
                         .unwrap_or_default();
                 }
                 if is_untyped_builtin(name) {
@@ -2723,7 +3114,18 @@ fn go_value_type(value: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Ac
             }
             chain_text(value, src, receiver_var).unwrap_or_default()
         }
-        "composite_literal" | "type_assertion_expression" => value
+        "composite_literal" => {
+            let Some(ty) = value.child_by_field_name("type") else {
+                return String::new();
+            };
+            match container_elem(ty) {
+                Some(elem) => fact_type(elem, src, tp).map(|e| format!("[]{e}")),
+                None => fact_type(ty, src, tp),
+            }
+            .unwrap_or_default()
+        }
+        "func_literal" => func_value_text(value.child_by_field_name("result"), src, tp),
+        "type_assertion_expression" => value
             .child_by_field_name("type")
             .and_then(|t| fact_type(t, src, tp))
             .unwrap_or_default(),
@@ -2779,8 +3181,11 @@ fn type_expr_ref(node: TsNode, src: &[u8], type_params: &[String]) -> Option<Str
 /// not a name, a field or a call: an identifier is its name (`self` when it
 /// is the method's receiver `receiver_var`), `x.f` joins with `.`, a call
 /// appends `()` with its arguments and type arguments elided (`NewX(a, b)`
-/// -> `NewX()`), parentheses are dropped. An index, slice, type assertion or
-/// literal anywhere in the chain -> `None`.
+/// -> `NewX()`), parentheses are dropped. DT.5j: a composite literal of a
+/// named type, or its address, reads as that type's conversion (`(&pkg.T{..})`
+/// -> `pkg.T()`, `T{}` -> `T()`), a value of the type. An index, slice, type
+/// assertion or any other literal (a container or anonymous composite)
+/// anywhere in the chain -> `None`.
 fn chain_text(node: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<String> {
     match node.kind() {
         "identifier" => {
@@ -2808,6 +3213,24 @@ fn chain_text(node: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<St
                 .named_children(&mut c)
                 .find(|n| n.kind() != "comment")?;
             chain_text(inner, src, receiver_var)
+        }
+        // DT.5j: a composite literal of a named type, or its address, is a
+        // value of that type: it reads as the conversion `T()` / `pkg.T()`,
+        // which the Go call hook types as `T` (`(&pkg.T{..}).M()`).
+        "composite_literal" => {
+            let ty = go_type_ref(node.child_by_field_name("type")?, src)?;
+            Some(format!("{ty}()"))
+        }
+        "unary_expression" => {
+            let is_ref = node
+                .child_by_field_name("operator")
+                .is_some_and(|o| o.kind() == "&");
+            let inner = node.child_by_field_name("operand")?;
+            if is_ref && inner.kind() == "composite_literal" {
+                chain_text(inner, src, receiver_var)
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -2883,7 +3306,7 @@ fn record_body_locals(
             let mut nc = node.walk();
             let names: Vec<TsNode> = node.children_by_field_name("name", &mut nc).collect();
             if let Some(ty) = node.child_by_field_name("type") {
-                let ty = fact_type(ty, src, &acc.type_params).unwrap_or_default();
+                let ty = declared_local_type(ty, src, &acc.type_params);
                 for name in names {
                     record_local(acc, scope, text_of(name, src), &ty);
                 }
@@ -2892,7 +3315,35 @@ fn record_body_locals(
                 pair_values(&names, &values, src, scope, receiver_var, acc);
             }
         }
-        "range_clause" | "receive_statement" if declares(node) => {
+        // DT.5j: `for k, v := range x` binds `v` to an element (a map's
+        // value) of `x` ([`range_value_text`]); the index / key and a lone
+        // name stay unknown.
+        "range_clause" if declares(node) => {
+            let names = named_kids(node.child_by_field_name("left"));
+            let value = node
+                .child_by_field_name("right")
+                .map_or_else(String::new, |r| range_value_text(r, src, receiver_var, acc));
+            for (i, name) in names.iter().enumerate() {
+                if name.kind() == "identifier" {
+                    let ty = if i == 1 { value.as_str() } else { "" };
+                    record_local(acc, scope, text_of(*name, src), ty);
+                }
+            }
+        }
+        // DT.5j: a body `const` names no typed local, but shadows a
+        // package-level func for the value refs ([`Acc::value_shadows`]); a
+        // fn-local type (`type row struct{..}`) shadows a package-level type
+        // for a composite literal's ref ([`queue_composite_ref`]) the same way.
+        "const_spec" | "type_spec" | "type_alias" => {
+            let mut nc = node.walk();
+            for name in node.children_by_field_name("name", &mut nc) {
+                let name = text_of(name, src);
+                if !name.is_empty() && name != "_" {
+                    acc.value_shadows.entry(scope).or_default().insert(name.to_string());
+                }
+            }
+        }
+        "receive_statement" if declares(node) => {
             for name in named_kids(node.child_by_field_name("left")) {
                 if name.kind() == "identifier" {
                     record_local(acc, scope, text_of(name, src), "");
@@ -2910,8 +3361,24 @@ fn record_body_locals(
     }
 }
 
+/// DT.5j: the type text a `range` value variable takes from the ranged
+/// expression `right`: a literal or `make` of a named element type is that
+/// element (`[]Check{a}` -> `Check`); any other chain is `<chain>[]`, an
+/// element of it (`s.checks` -> `self.checks[]`, `repo.List()` ->
+/// `repo.List()[]`), which the Go call hook reads through the chain's
+/// recorded container type (`[]T`) or a callee's slice result; no chain ->
+/// `""`.
+fn range_value_text(right: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Acc) -> String {
+    let direct = go_value_type(right, src, receiver_var, acc);
+    if let Some(elem) = direct.strip_prefix("[]") {
+        return elem.to_string();
+    }
+    chain_text(right, src, receiver_var).map_or_else(String::new, |c| format!("{c}[]"))
+}
+
 /// A package-level `var` spec's names as locals of the file's MODULE scope:
-/// the declared type, else each name's initialiser ([`go_value_type`]).
+/// the declared type ([`declared_local_type`]), else each name's initialiser
+/// ([`go_value_type`]).
 fn record_package_vars(
     spec: TsNode,
     names: &[String],
@@ -2920,7 +3387,7 @@ fn record_package_vars(
     acc: &mut Acc,
 ) {
     if let Some(ty) = spec.child_by_field_name("type") {
-        let ty = go_type_ref(ty, src).unwrap_or_default();
+        let ty = declared_local_type(ty, src, &[]);
         for name in names {
             record_local(acc, module_id, name, &ty);
         }
@@ -3874,27 +4341,27 @@ impl DiContainer {
 /// Honest scope: these edges read "registers a provider", not "consumer
 /// receives a service". Go's idiomatic `func NewX(dep *Dep) *X` constructor
 /// cannot be recognised without return-type inference (area A6).
-fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) -> bool {
     let Some(from_module) = acc.module_id else {
-        return;
+        return false;
     };
     if acc.di_containers.is_empty() {
-        return;
+        return false;
     }
     let Some(func) = call.child_by_field_name("function") else {
-        return;
+        return false;
     };
     if func.kind() != "selector_expression" {
-        return;
+        return false;
     }
     let (Some(operand), Some(field)) = (
         func.child_by_field_name("operand"),
         func.child_by_field_name("field"),
     ) else {
-        return;
+        return false;
     };
     if operand.kind() != "identifier" {
-        return;
+        return false;
     }
     let method = text_of(field, src);
     let registers = match acc.di_containers.get(text_of(operand, src)) {
@@ -3908,10 +4375,10 @@ fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut 
         }
     };
     if !registers {
-        return;
+        return false;
     }
     let Some(args) = call.child_by_field_name("arguments") else {
-        return;
+        return true;
     };
     let mut cursor = args.walk();
     for arg in args.named_children(&mut cursor) {
@@ -3930,6 +4397,7 @@ fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut 
         });
         di_stats::record(DiShape::GoProvider);
     }
+    true
 }
 
 /// The provider one registration argument names. `NewA` gives `Bare`;
@@ -6383,6 +6851,11 @@ fn emit_route_from_call(
     acc.route_qnames.insert(qname);
 
     if let Some(q) = handler_qualifier {
+        // DT.5j: the handler argument is this ROUTE's HANDLED_BY, never a
+        // value ref of the registering callable too.
+        if let Some(h) = handler_arg {
+            acc.handler_args.insert(h.start_byte());
+        }
         acc.refs.push(UnresolvedRef {
             from: route_id,
             from_module: module_id,
@@ -9044,35 +9517,44 @@ type UserService struct {
             // embedded generic instantiation `Base[int]` records its base.
             ("Audit", "Audit"),
             ("Base", "Base"),
-            ("Tx", "Tx"),
+            // DT.5j: an embedded qualified type keys by its bare name and
+            // keeps its qualifier.
+            ("Tx", "store.Tx"),
             ("UserRepo", "UserRepo"),
             // Multi-name: both names.
             ("a", "Audit"),
             ("b", "Audit"),
+            // DT.5j: a map of a named type records its value type as `[]E`.
+            ("byID", "[]UserRepo"),
             // Interface-typed: recorded (A6.6 adds the interface fallback).
             ("cache", "Cache"),
-            // Qualified through an in-module import: the type name side.
-            ("db", "DB"),
+            // DT.5j: qualified through an in-module import, the qualifier
+            // is kept (the Go call hook reads it through this file's import).
+            ("db", "store.DB"),
             // CA.2a: a generic instantiation binds by its base type.
             ("gen", "Box"),
-            ("pdb", "DB"),
+            ("pdb", "store.DB"),
             ("pp", "UserRepo"),
             // Pointer: the pointee.
             ("repo", "UserRepo"),
         ]);
-        // Slices, maps, channels, funcs, anonymous structs and types of
-        // packages outside the module (`net.Conn`, `*zap.Logger`, embedded
-        // `*zap.SugaredLogger`): none.
+        // A slice of a predeclared type (`[]string`), channels, funcs,
+        // anonymous structs and types of packages outside the module
+        // (`net.Conn`, `*zap.Logger`, embedded `*zap.SugaredLogger`): none.
         assert_eq!(struct_fields(&parse, "shop::UserService"), expect);
     }
 
     #[test]
-    fn qualified_field_named_like_a_local_type_records_nothing() {
+    fn qualified_field_keeps_its_qualifier_beside_a_same_named_type() {
         let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
-        // Embedded `*store.Logger` inside `type Logger`: the graph binds types
-        // by bare name, so recording `Logger` would bind every
-        // `l.Logger.Info()` back onto `Logger` itself. `sink` is unaffected.
-        assert_eq!(struct_fields(&parse, "shop::Logger"), pairs(&[("sink", "Sink")]));
+        // DT.5j: embedded `*store.Logger` inside `type Logger` records
+        // `store.Logger`, which no bare-name lookup matches, so it cannot
+        // bind `l.Logger.Info()` back onto `Logger` itself (LA.23a's guard,
+        // now unneeded): the Go call hook reads it through the import.
+        assert_eq!(
+            struct_fields(&parse, "shop::Logger"),
+            pairs(&[("Logger", "store.Logger"), ("sink", "store.Sink")])
+        );
     }
 
     #[test]
@@ -9085,6 +9567,7 @@ type UserService struct {
             ("UserRepo", "UserRepo"),
             ("a", "Audit"),
             ("b", "Audit"),
+            ("byID", "[]UserRepo"),
             ("cache", "Cache"),
             ("gen", "Box"),
             ("pp", "UserRepo"),
@@ -9150,7 +9633,7 @@ type UserService struct {
 
     #[test]
     fn go_type_name_shapes() {
-        let src = "package p\nvar a *T\nvar b pkg.T\nvar c T\nvar d []T\nvar e map[K]T\nvar f chan T\nvar g func()\nvar h G[T]\nvar i **pkg.T\nvar j *pkg.G[T, U]\n";
+        let src = "package p\nvar a *T\nvar b pkg.T\nvar c T\nvar d []T\nvar e map[K]T\nvar f chan T\nvar g func()\nvar h G[T]\nvar i **pkg.T\nvar j *pkg.G[T, U]\nvar k []string\nvar l [4]*pkg.T\nvar m [][]T\nvar n map[string][]T\n";
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
         parser.set_language(&lang).unwrap();
@@ -9169,11 +9652,30 @@ type UserService struct {
             }
         }
         let t = || Some("T".to_string());
-        // CA.2a: a generic instantiation names its base type.
+        let s = |t: &str| Some(t.to_string());
+        // CA.2a: a generic instantiation names its base type. DT.5j: a
+        // qualifier is kept; a slice / array / map of a named type is `[]E`
+        // (a map's value); a container of a predeclared type, a nested
+        // container, a channel and a func type name nothing.
         let g = || Some("G".to_string());
         assert_eq!(
             got,
-            vec![t(), t(), t(), None, None, None, None, g(), t(), g()]
+            vec![
+                t(),
+                s("pkg.T"),
+                t(),
+                s("[]T"),
+                s("[]T"),
+                None,
+                None,
+                g(),
+                s("pkg.T"),
+                s("pkg.G"),
+                None,
+                s("[]pkg.T"),
+                None,
+                None,
+            ]
         );
     }
 
@@ -9295,7 +9797,8 @@ func H(repo *repositories.UserRepository, n int) {
                 ("err", ""),
                 ("n", ""),
                 ("repo", "repositories.UserRepository"),
-                ("u", ""),
+                // DT.5j: a range value is an element of the ranged chain.
+                ("u", "us[]"),
             ]))
         );
     }
@@ -9346,7 +9849,8 @@ func Gen[T any](x T, y *T, h Handler[T]) {}
                 ("m", ""),
                 ("msg", ""),
                 ("ok", ""),
-                ("opts", ""),
+                // DT.5j: a variadic `...T` is a slice of T.
+                ("opts", "[]Option"),
                 ("p", "Repo"),
                 ("q", "Other"),
                 ("r", "self.repo"),
@@ -9431,10 +9935,330 @@ type R struct {
 "#;
         let parse = parse_file(source, "app/r.go", "app", "example.com/app", repo()).unwrap();
         // `atomic` is outside the module: its `Pointer` records nothing.
+        // DT.5j: the qualifier is kept (`store.Page`).
         assert_eq!(
             struct_fields(&parse, "app::R"),
-            pairs(&[("c", "Collection"), ("s", "Page")])
+            pairs(&[("c", "Collection"), ("s", "store.Page")])
         );
+    }
+
+    // ---- DT.5j: range elements, func values, alternatives, composites ----
+
+    #[test]
+    fn range_values_record_an_element_text() {
+        let source = r#"package app
+
+type Svc struct {
+    checks []Check
+}
+
+func (s *Svc) M(repo *Repo, m map[string]Check) {
+    for _, c := range s.checks {
+        _ = c
+    }
+    for k, v := range m {
+        _, _ = k, v
+    }
+    for i := range s.checks {
+        _ = i
+    }
+    for _, r := range repo.List() {
+        _ = r
+    }
+    for _, e := range []Check{a} {
+        _ = e
+    }
+}
+"#;
+        let parse = parse_file(source, "app/m.go", "app", "", repo()).unwrap();
+        assert_eq!(
+            locals_of(&parse, method_id("app::Svc::M")),
+            Some(pairs(&[
+                // A range value over a receiver field: an element of it.
+                ("c", "self.checks[]"),
+                // A literal's element type is the element itself.
+                ("e", "Check"),
+                // An index-only range and a map's key: unknown.
+                ("i", ""),
+                ("k", ""),
+                // A map parameter is a container of its value type.
+                ("m", "[]Check"),
+                ("r", "repo.List()[]"),
+                ("repo", "Repo"),
+                ("v", "m[]"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn func_values_record_their_result() {
+        let source = r#"package app
+
+func F(mk func() (*Repo, error), run func()) {
+    src := func(id string) *OXR {
+        return nil
+    }
+    var f func() *T
+    g := func() {}
+    _, _, _ = src, f, g
+}
+"#;
+        let parse = parse_file(source, "app/f.go", "app", "", repo()).unwrap();
+        assert_eq!(
+            locals_of(&parse, func_id("app::F")),
+            Some(pairs(&[
+                ("f", "func() T"),
+                // A resultless func value types nothing.
+                ("g", ""),
+                // The literal's parameter is a local of F (CA.2a).
+                ("id", ""),
+                ("mk", "func() Repo"),
+                ("run", ""),
+                ("src", "func() OXR"),
+            ]))
+        );
+    }
+
+    #[test]
+    fn redeclared_locals_keep_alternatives() {
+        let mut acc = Acc::default();
+        let f = func_id("app::F");
+        let text = |acc: &Acc, name: &str| acc.nav.local_types[&f][name].clone();
+        record_local(&mut acc, f, "o", "NewA()");
+        record_local(&mut acc, f, "o", "b()");
+        record_local(&mut acc, f, "o", "NewA()");
+        assert_eq!(text(&acc, "o"), "NewA()|b()", "a repeat is a no-op");
+        // An unknown declaration poisons the name, in either order.
+        record_local(&mut acc, f, "p", "A");
+        record_local(&mut acc, f, "p", "");
+        record_local(&mut acc, f, "p", "B");
+        assert_eq!(text(&acc, "p"), "");
+        record_local(&mut acc, f, "q", "");
+        record_local(&mut acc, f, "q", "A");
+        assert_eq!(text(&acc, "q"), "");
+        // Past MAX_LOCAL_ALTERNATIVES distinct texts the name is unknown.
+        for t in ["A", "B", "C", "D"] {
+            record_local(&mut acc, f, "r", t);
+        }
+        assert_eq!(text(&acc, "r"), "A|B|C|D");
+        record_local(&mut acc, f, "r", "E");
+        assert_eq!(text(&acc, "r"), "");
+        record_local(&mut acc, f, "_", "A");
+        assert!(!acc.nav.local_types[&f].contains_key("_"));
+
+        // Two closures of one fn declare `o`: both texts are kept.
+        let source = r#"package fx
+
+func TestOXR(t *testing.T) {
+    src := func(id string) *OXR {
+        o := NewOXR(id)
+        return o
+    }
+    t.Run("x", func(t *testing.T) {
+        o := src("app")
+        o.Provider()
+    })
+}
+"#;
+        let parse = parse_file(source, "fx/oxr_test.go", "fx", "", repo()).unwrap();
+        let locals = parse.nav.local_types.get(&func_id("fx::TestOXR")).expect("locals");
+        assert_eq!(locals["o"], "NewOXR()|src()");
+    }
+
+    /// `chain_text` of the initialiser of `var _ = <expr>`.
+    fn chain_of(expr: &str) -> Option<String> {
+        let src = format!("package p\nvar _ = {expr}\n");
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(&src, None).unwrap();
+        let root = tree.root_node();
+        let decl = root.named_child(1).expect("var_declaration");
+        let spec = decl.named_child(0).expect("var_spec");
+        let value = spec.child_by_field_name("value")?.named_child(0)?;
+        chain_text(value, src.as_bytes(), None)
+    }
+
+    #[test]
+    fn composite_literal_receivers_read_as_conversions() {
+        assert_eq!(chain_of("&pkg.T{X: 1}").as_deref(), Some("pkg.T()"));
+        assert_eq!(chain_of("T{}").as_deref(), Some("T()"));
+        assert_eq!(chain_of("&G[int]{}").as_deref(), Some("G()"));
+        // A container or an anonymous composite is no value of a named type.
+        assert_eq!(chain_of("[]T{}"), None);
+        assert_eq!(chain_of("map[string]T{}"), None);
+        assert_eq!(chain_of("struct{ n int }{n: 1}"), None);
+        assert_eq!(chain_of("&x"), None);
+
+        let source = r#"package app
+
+import "example.com/app/pkg"
+
+func F() {
+    (&pkg.T{X: 1}).M()
+    T{}.N()
+}
+"#;
+        let parse = parse_file(source, "app/f.go", "app", "example.com/app", repo()).unwrap();
+        let calls: Vec<CallQualifier> =
+            calls_from(&parse, func_id("app::F")).into_iter().map(|(q, _)| q).collect();
+        assert_eq!(calls, vec![complex("pkg.T()", "M"), complex("T()", "N")]);
+    }
+
+    /// The USES refs from `from`, in emission order, with their 0-based rows.
+    fn uses_refs(parse: &FileParse, from: NodeId) -> Vec<(CallQualifier, u32)> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == from && r.category == edge_category::USES)
+            .map(|r| (r.qualifier.clone(), r.line))
+            .collect()
+    }
+
+    fn uses_quals(parse: &FileParse, from: NodeId) -> Vec<CallQualifier> {
+        uses_refs(parse, from).into_iter().map(|(q, _)| q).collect()
+    }
+
+    const VALUE_POSITIONS: &str = r#"package app
+
+import (
+    "net/http"
+
+    "example.com/app/store"
+    "github.com/gin-gonic/gin"
+    "github.com/google/wire"
+)
+
+func handle(id string) {}
+
+func other(id string) {}
+
+func register(f func(string)) {}
+
+func Run(r *gin.Engine, svc *Svc, param func(string)) func(string) {
+    register(handle)
+    fs := []func(string){handle, store.F}
+    svc.done = svc.OnDone
+    y := store.G
+    var z = store.H
+    r.GET("/x", store.Handle)
+    wire.Build(store.NewA)
+    register(param)
+    local := other
+    register(local)
+    _ = http.StatusOK
+    _ = new(Svc)
+    _ = make([]int, 3)
+    _, _, _ = fs, y, z
+    return store.Done
+}
+
+func Wrap() (h func(string)) {
+    register(h)
+    return
+}
+
+func Lit() {
+    f := func() (g func(string)) {
+        register(g)
+        return
+    }
+    const k = "x"
+    register(k)
+    _ = f
+}
+
+var hv = handle
+"#;
+
+    #[test]
+    fn value_positions_become_uses_refs() {
+        let src = VALUE_POSITIONS;
+        let parse = parse_file(src, "app/run.go", "app", "example.com/app", repo()).unwrap();
+        let run = func_id("app::Run");
+        // Argument, positional elements, `=`, `:=`, `var`, `return`, and the
+        // `:=` of a local (`local := other`), each once per (from, qualifier).
+        assert_eq!(
+            uses_refs(&parse, run),
+            vec![
+                (bare("handle"), row_of(src, "register(handle)")),
+                (attr("store", "F"), row_of(src, "store.F}")),
+                (attr("svc", "OnDone"), row_of(src, "svc.OnDone")),
+                (attr("store", "G"), row_of(src, "store.G")),
+                (attr("store", "H"), row_of(src, "store.H")),
+                (bare("other"), row_of(src, "local := other")),
+                (attr("store", "Done"), row_of(src, "store.Done")),
+            ]
+        );
+        // The route's handler argument is its HANDLED_BY only, the wire
+        // provider its INJECTS only.
+        assert!(parse.refs.iter().any(|r| r.category == edge_category::HANDLED_BY
+            && r.qualifier == attr("store", "Handle")));
+        assert_eq!(injects_refs(&parse), vec![(run, attr("store", "NewA"))]);
+        // A named result (of a func, of a func literal) and a body `const`
+        // shadow the package scope: no ref.
+        assert!(uses_quals(&parse, func_id("app::Wrap")).is_empty());
+        assert!(uses_quals(&parse, func_id("app::Lit")).is_empty());
+        // A package var initialised to a func value: one ref from its
+        // STATE_VAR.
+        let hv = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::hv");
+        assert_eq!(uses_quals(&parse, hv), vec![bare("handle")]);
+        // No other USES ref anywhere in the file.
+        let total = parse.refs.iter().filter(|r| r.category == edge_category::USES).count();
+        assert_eq!(total, 8);
+    }
+
+    const COMPOSITES: &str = r#"package app
+
+import (
+    "example.com/app/store"
+    "github.com/gin-gonic/gin"
+    "go.uber.org/fx"
+)
+
+type Box[T any] struct{ v T }
+
+func Build[T any]() {
+    _ = Svc{}
+    _ = &store.Repo{}
+    _ = Box[int]{}
+    _ = []Svc{{}}
+    _ = struct{ n int }{n: 1}
+    _ = gin.H{"a": 1}
+    _ = T{}
+    type row struct{}
+    _ = row{}
+    fx.Provide(NewA, func() *Config { return &Config{} })
+    _ = Svc{}
+}
+
+var fallback = &Svc{}
+"#;
+
+    /// The 2026-10-17 correction: a composite literal of a named type is a
+    /// USES ref of that type at the literal's row, in the file's own terms
+    /// (`Bare` / `Attribute`), the graph binding it to a STRUCT.
+    #[test]
+    fn composite_literals_become_uses_refs() {
+        let src = COMPOSITES;
+        let parse = parse_file(src, "app/build.go", "app", "example.com/app", repo()).unwrap();
+        // Once per (from, type): `Svc{}` twice is one ref. A container, an
+        // anonymous struct, a type parameter, a fn-local type and an
+        // external package's type queue or keep nothing; a literal inside a
+        // DI registration's func literal is kept (its provider `NewA` is the
+        // INJECTS).
+        assert_eq!(
+            uses_refs(&parse, func_id("app::Build")),
+            vec![
+                (bare("Svc"), row_of(src, "_ = Svc{}")),
+                (attr("store", "Repo"), row_of(src, "store.Repo{}")),
+                (bare("Box"), row_of(src, "Box[int]{}")),
+                (bare("Config"), row_of(src, "&Config{}")),
+            ]
+        );
+        assert_eq!(injects_refs(&parse), vec![(func_id("app::Build"), bare("NewA"))]);
+        let fallback = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::fallback");
+        assert_eq!(uses_quals(&parse, fallback), vec![bare("Svc")]);
     }
 
     #[test]

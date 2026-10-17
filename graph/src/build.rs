@@ -123,6 +123,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
         handlers,
         aliases,
         wire,
+        values,
     } = build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
@@ -145,6 +146,12 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
         eprintln!("{line}");
     }
     eprintln!("{}", receivers.marker());
+    if let Some(line) = receivers.typed_marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = values.marker() {
+        eprintln!("{line}");
+    }
     if let Some(line) = embeds.marker() {
         eprintln!("{line}");
     }
@@ -229,6 +236,8 @@ struct GoPasses {
     aliases: Option<AliasStats>,
     /// DT.1f: the wire cells and struct schemas typed to in-repo STRUCTs.
     wire: go_wire::WireStats,
+    /// DT.5j: the func / method value USES and package-function handlers.
+    values: ValueStats,
 }
 
 /// [`build_go`]'s passes, returning the stats its markers print.
@@ -264,6 +273,10 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     // package, or whose method is promoted, binds through the package before
     // the generic resolver's repo-unique method name can.
     let handlers = packages.bind_type_handlers(&mut g, &mut refs);
+    // DT.5j: the parser's func / method value refs bind through the package
+    // (or are dropped); the generic resolver never sees a USES ref.
+    let mut values = packages.bind_value_refs(&mut g, &mut refs);
+    values.pkg_handlers = handlers.package_functions;
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
     // DT.1f: the handlers' wire values typed through the facts the calls were
@@ -300,6 +313,7 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
         handlers,
         aliases,
         wire,
+        values,
     }
 }
 
@@ -1751,7 +1765,9 @@ const RECV_MAX_DEPTH: u8 = 4;
 /// EVIDENCE rule of the CALLS edge the hook draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecvSource {
-    /// A call's result type (`return_types`), or a conversion `pkg.T(x)`.
+    /// A call's result type (`return_types`), or a conversion `pkg.T(x)`
+    /// or, DT.5j, a composite literal (`(&pkg.T{..}).M()`, which the Go
+    /// parser reads as the conversion `pkg.T()`).
     Return,
     /// A parameter or local of the caller (`local_types[caller]`).
     Local,
@@ -1802,6 +1818,19 @@ fn receiver_segments(text: &str) -> Option<Vec<Seg<'_>>> {
     Some(segs)
 }
 
+/// DT.5j: what calling a func value whose recorded local text is `text`
+/// yields: `func() R` (the Go parser's text for a func literal or a func-typed
+/// parameter / var) -> `R`; alternatives (`func() A|func() B`) -> `A|B`, which
+/// [`GoPackages::type_of_text`] resolves only when they agree. Any other
+/// text, an unknown one included -> `None`.
+fn func_result_text(text: &str) -> Option<String> {
+    let rets: Option<Vec<&str>> = text
+        .split('|')
+        .map(|t| t.strip_prefix("func() ").filter(|r| !r.is_empty()))
+        .collect();
+    Some(rets?.join("|"))
+}
+
 /// True for a Go exported name (upper-case first letter): the only names
 /// another package can reach.
 fn is_exported(name: &str) -> bool {
@@ -1817,6 +1846,19 @@ struct Typed {
     /// CI.2a: a hop read a field the struct does not declare from the embed
     /// that promotes it: a bind counts as a promoted `field_hops`.
     promoted_field: bool,
+    /// DT.5j: a hop read an element of a container (`for _, c := range
+    /// s.checks`, [`GoPackages::elem_type`]).
+    elem: bool,
+    /// DT.5j: a field hop read a package-qualified field text (`pkg.T`).
+    qualified_field: bool,
+    /// DT.5j: a call link `f()` read a func-value local's `func() R` text.
+    func_value: bool,
+    /// DT.5j: a local's alternative texts (`a|b`) all named one type.
+    alternatives: bool,
+    /// DT.5j: a call link typed a STRUCT / INTERFACE itself: a conversion
+    /// `T(x)` or a composite literal `T{..}` (the Go parser reads `(&T{..})`
+    /// as `T()`).
+    conversion: bool,
 }
 
 /// Where a receiver chain stands after a hop: a type, or an imported package
@@ -1864,6 +1906,13 @@ struct ReceiverTally {
     /// promoted from an embed of another module (`sync.Mutex`'s `Lock`) or
     /// supplied by two embeds at one depth (CI.2a binds the rest).
     typed_unbound: std::cell::Cell<usize>,
+    /// DT.5j: bound sites whose walk read an element, a qualified field
+    /// text, a func-value local or agreeing alternatives ([`Typed`]).
+    elem: std::cell::Cell<usize>,
+    qualified_field: std::cell::Cell<usize>,
+    func_value: std::cell::Cell<usize>,
+    alternatives: std::cell::Cell<usize>,
+    conversion: std::cell::Cell<usize>,
 }
 
 impl ReceiverTally {
@@ -1888,6 +1937,36 @@ impl ReceiverTally {
             r + l + p + f,
             self.typed_unbound.get()
         )
+    }
+
+    /// DT.5j: count a bound site's [`Typed`] flags.
+    fn bound_through(&self, typed: &Typed) {
+        let bump = |c: &std::cell::Cell<usize>, on: bool| c.set(c.get() + usize::from(on));
+        bump(&self.elem, typed.elem);
+        bump(&self.qualified_field, typed.qualified_field);
+        bump(&self.func_value, typed.func_value);
+        bump(&self.alternatives, typed.alternatives);
+        bump(&self.conversion, typed.conversion);
+    }
+
+    /// DT.5j fired_on, after [`ReceiverTally::marker`]: `[go-receivers] typed
+    /// elem=<e> qualified_field=<q> func_value=<f> alternatives=<a>
+    /// conversion=<c>`, the bound sites whose walk read each fact (a site may
+    /// count under several); `None` when all are 0.
+    fn typed_marker(&self) -> Option<String> {
+        let (e, q, f, a, c) = (
+            self.elem.get(),
+            self.qualified_field.get(),
+            self.func_value.get(),
+            self.alternatives.get(),
+            self.conversion.get(),
+        );
+        (e + q + f + a + c > 0).then(|| {
+            format!(
+                "[go-receivers] typed elem={e} qualified_field={q} func_value={f} \
+                 alternatives={a} conversion={c}"
+            )
+        })
     }
 }
 
@@ -1928,6 +2007,7 @@ impl GoPackages {
         match hit {
             Some(((method, promoted), source)) => {
                 self.tally.bound(source);
+                self.tally.bound_through(&typed);
                 if promoted {
                     self.promoted.bump_call();
                 }
@@ -1980,6 +2060,22 @@ impl GoPackages {
         depth: u8,
         typed: &mut Typed,
     ) -> Option<(NodeId, RecvSource)> {
+        match self.chain_hop(g, scope, segs, depth, typed)? {
+            (Hop::Type(ty), source) => Some((ty, source)),
+            (Hop::Package(_), _) => None,
+        }
+    }
+
+    /// [`GoPackages::chain_type`]'s walk, ending at a type or (a one-link
+    /// chain naming an import) a package.
+    fn chain_hop<'a>(
+        &'a self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        segs: &[Seg<'_>],
+        depth: u8,
+        typed: &mut Typed,
+    ) -> Option<(Hop<'a>, RecvSource)> {
         if depth > RECV_MAX_DEPTH || segs.len() > RECV_MAX_SEGS {
             return None;
         }
@@ -1988,10 +2084,7 @@ impl GoPackages {
         for &seg in rest {
             (hop, source) = self.next_hop(g, scope, hop, seg, depth, typed)?;
         }
-        match hop {
-            Hop::Type(ty) => Some((ty, source)),
-            Hop::Package(_) => None,
-        }
+        Some((hop, source))
     }
 
     /// A chain's first link, Go's scoping innermost first:
@@ -2003,7 +2096,10 @@ impl GoPackages {
     /// * `x` a package var of the scope's package ([`GoPackages::package_var_type`]).
     /// * `f()`: the result type of the function `f` of the scope's file,
     ///   else of its package; a type `T(x)` is a conversion to `T`. A local
-    ///   named `f` (a func value) shadows it: unknown.
+    ///   named `f` (a func value) shadows it: DT.5j, its recorded `func() R`
+    ///   text (a func literal's or a func type's first result,
+    ///   [`func_result_text`]) types the call as `R`; any other local text
+    ///   is unknown.
     fn root_hop<'a>(
         &'a self,
         g: &RepoGraph,
@@ -2038,8 +2134,12 @@ impl GoPackages {
                 Some((Hop::Type(ty), RecvSource::PackageVar))
             }
             Seg::Call(f) => {
-                if local(f).is_some() {
-                    return None;
+                if let Some(text) = local(f) {
+                    let ret = func_result_text(text)?;
+                    typed.any = true;
+                    let ty = self.type_of_text(g, scope, &ret, depth + 1, typed)?;
+                    typed.func_value = true;
+                    return Some((Hop::Type(ty), RecvSource::Local));
                 }
                 let dir = self.dir_of.get(&scope.module)?;
                 let callee = g
@@ -2059,10 +2159,12 @@ impl GoPackages {
     /// * package + `F()`: the exported function `F` of that package -> its
     ///   result type; a type `T` -> `T` itself (a conversion `pkg.T(x)`).
     /// * package + `V`: the exported package var `V` of that package.
-    /// * type `T` + `f`: `T`'s field `f` -> its declared type, a bare name
-    ///   (LA.23c) looked up in `T`'s package, else repo-wide
+    /// * type `T` + `f`: `T`'s field `f` -> its declared type text
+    ///   ([`GoPackages::field_text`]) read in the declaring struct's file
+    ///   ([`GoPackages::type_of_text`]): DT.5j, a `pkg.T` through that file's
+    ///   imports; a bare name (LA.23c) in its package, else repo-wide
     ///   ([`GoPackages::global_type`]); a field `T` does not declare, the one
-    ///   an embed promotes, typed in its declaring struct's package (CI.2a).
+    ///   an embed promotes, typed in its declaring struct's file (CI.2a).
     /// * type `T` + `m()`: `T`'s method `m` (promoted too,
     ///   [`GoPackages::method_on`]) -> its result type, read in the method's
     ///   own file.
@@ -2092,24 +2194,13 @@ impl GoPackages {
                 Some((Hop::Type(ty), RecvSource::PackageVar))
             }
             (Hop::Type(owner), Seg::Ident(field)) => {
-                // CI.2a: a field `owner` does not declare is read from the
-                // STRUCT an embed promotes it from, in that struct's package.
-                let (decl, name) = match g.nav.field_types.get(&owner).and_then(|f| f.get(field)) {
-                    Some(name) => (owner, name),
-                    None => {
-                        let decl = self.promoted.field_owner(owner, field)?;
-                        typed.promoted_field = true;
-                        (decl, g.nav.field_types.get(&decl)?.get(field)?)
-                    }
-                };
-                if name.is_empty() {
-                    return None;
-                }
-                typed.any = true;
-                let owner_dir = self.dir_of.get(&enclosing_module(&g.nav, decl)?)?;
-                let ty = self
-                    .unique_type_in(g, owner_dir, name, scope.with_tests(owner_dir))
-                    .or_else(|| self.global_type(g, name, scope.from_test))?;
+                let (at, name) = self.field_text(g, scope, owner, field, typed)?;
+                // DT.5j: the field's text is read in its declaring struct's
+                // file: `pkg.T` through that file's imports (the qualifier
+                // LA.23c used to drop), a bare `T` in its package, else
+                // repo-unique, as before.
+                let ty = self.type_of_text(g, at, name, depth, typed)?;
+                typed.qualified_field |= name.contains('.');
                 Some((Hop::Type(ty), RecvSource::FieldChain))
             }
             (Hop::Type(owner), Seg::Call(m)) => {
@@ -2136,6 +2227,7 @@ impl GoPackages {
     ) -> Option<NodeId> {
         let kind = *g.nav.kind_by_id.get(&callee)?;
         if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
+            typed.conversion = true;
             return Some(callee);
         }
         if kind != node_kind::FUNCTION {
@@ -2194,6 +2286,9 @@ impl GoPackages {
     /// chain; `pkg.T` is the STRUCT / INTERFACE `T` of the package the
     /// scope's file imports as `pkg`; a bare `T` is the one of the scope's
     /// own package, else the repo-unique type ([`GoPackages::global_type`]).
+    /// DT.5j: `a|b` (a local's agreeing alternatives) is the one type every
+    /// alternative names; `<chain>[]` is an element of the chain's container
+    /// ([`GoPackages::elem_type`]).
     fn type_of_text(
         &self,
         g: &RepoGraph,
@@ -2204,6 +2299,25 @@ impl GoPackages {
     ) -> Option<NodeId> {
         if depth > RECV_MAX_DEPTH {
             return None;
+        }
+        // DT.5j: a local several declarations typed (`NewX()|src()`) is the
+        // one type every alternative names; one that differs or types
+        // nothing types nothing.
+        if text.contains('|') {
+            let mut answer: Option<NodeId> = None;
+            for alt in text.split('|') {
+                let ty = self.type_of_text(g, scope, alt, depth + 1, typed)?;
+                match answer {
+                    Some(a) if a != ty => return None,
+                    _ => answer = Some(ty),
+                }
+            }
+            typed.alternatives = true;
+            return answer;
+        }
+        // DT.5j: `<chain>[]` is an element of the container the chain names.
+        if let Some(container) = text.strip_suffix("[]") {
+            return self.elem_type(g, scope, container, depth + 1, typed);
         }
         let segs = receiver_segments(text)?;
         let chain = segs.first() == Some(&Seg::Ident("self"))
@@ -2223,6 +2337,163 @@ impl GoPackages {
             }
             _ => None,
         }
+    }
+
+    /// The recorded type text of field `field` of `owner`, and the scope it
+    /// was written in (the declaring struct's file, `func: None`): `owner`'s
+    /// own field, else (CI.2a) the one an embed promotes. An empty text ->
+    /// `None`. Sets `typed.any`.
+    fn field_text<'a, 'g>(
+        &'a self,
+        g: &'g RepoGraph,
+        scope: RecvScope<'a>,
+        owner: NodeId,
+        field: &str,
+        typed: &mut Typed,
+    ) -> Option<(RecvScope<'a>, &'g str)> {
+        let (decl, name) = match g.nav.field_types.get(&owner).and_then(|f| f.get(field)) {
+            Some(name) => (owner, name),
+            None => {
+                let decl = self.promoted.field_owner(owner, field)?;
+                typed.promoted_field = true;
+                (decl, g.nav.field_types.get(&decl)?.get(field)?)
+            }
+        };
+        if name.is_empty() {
+            return None;
+        }
+        typed.any = true;
+        let module = enclosing_module(&g.nav, decl)?;
+        Some((RecvScope { func: None, module, ..scope }, name.as_str()))
+    }
+
+    /// DT.5j: the type of an element (a map's value) of the container the
+    /// chain `container` names, read in `scope`. The chain's last link holds
+    /// a recorded container text `[]E` (the Go parser writes one for a slice,
+    /// array or map local, parameter, package var or field) or, a call, its
+    /// callee's slice result ([`NavFact::SliceResult`]); `E` is then read
+    /// where that text was written. A local whose text is itself a chain
+    /// (`xs := s.checks`, `xs := repo.List()`) is followed. A package var two
+    /// files declare must name one element type in both.
+    fn elem_type(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'_>,
+        container: &str,
+        depth: u8,
+        typed: &mut Typed,
+    ) -> Option<NodeId> {
+        if depth > RECV_MAX_DEPTH {
+            return None;
+        }
+        let segs = receiver_segments(container)?;
+        let (&last, prefix) = segs.split_last()?;
+        let local = |name: &str| {
+            let f = scope.func?;
+            g.nav.local_types.get(&f)?.get(name).map(String::as_str)
+        };
+        // Where the container's `[]E` text was written, and the text.
+        let sources: Vec<(RecvScope<'_>, String)> = match (prefix.is_empty(), last) {
+            (true, Seg::Ident(x)) => match local(x) {
+                Some(t) if t.starts_with("[]") => vec![(scope, t.to_string())],
+                Some(t) if !t.is_empty() && x != "self" => {
+                    return self.elem_type(g, scope, t, depth + 1, typed);
+                }
+                Some(_) => return None,
+                None => {
+                    let dir = self.dir_of.get(&scope.module)?;
+                    self.package_var_texts(g, scope, dir, x)
+                }
+            },
+            (true, Seg::Call(f)) => {
+                if local(f).is_some() {
+                    return None;
+                }
+                let dir = self.dir_of.get(&scope.module)?;
+                let callee = g
+                    .symbols
+                    .module_symbols
+                    .get(&scope.module)
+                    .and_then(|s| s.get(f).copied())
+                    .or_else(|| self.unique_in(g, dir, f, scope.module, scope.with_tests(dir)))?;
+                vec![self.slice_result(g, scope, callee)?]
+            }
+            (false, Seg::Ident(f)) => match self.chain_hop(g, scope, prefix, depth, typed)?.0 {
+                Hop::Type(owner) => {
+                    let (at, text) = self.field_text(g, scope, owner, f, typed)?;
+                    vec![(at, text.to_string())]
+                }
+                Hop::Package(dir) if is_exported(f) => self.package_var_texts(g, scope, dir, f),
+                Hop::Package(_) => return None,
+            },
+            (false, Seg::Call(m)) => match self.chain_hop(g, scope, prefix, depth, typed)?.0 {
+                Hop::Type(owner) => {
+                    let (method, _) = self.method_on(g, owner, m)?;
+                    vec![self.slice_result(g, scope, method)?]
+                }
+                Hop::Package(dir) if is_exported(m) => {
+                    let callee = self.unique_in(g, dir, m, scope.module, scope.with_tests(dir))?;
+                    vec![self.slice_result(g, scope, callee)?]
+                }
+                Hop::Package(_) => return None,
+            },
+        };
+        let mut answer: Option<NodeId> = None;
+        for (at, text) in &sources {
+            let elem = text.strip_prefix("[]").filter(|e| !e.is_empty())?;
+            typed.any = true;
+            let ty = self.type_of_text(g, *at, elem, depth + 1, typed)?;
+            match answer {
+                Some(a) if a != ty => return None,
+                _ => answer = Some(ty),
+            }
+        }
+        typed.elem |= answer.is_some();
+        answer
+    }
+
+    /// DT.5j: the recorded text of package var `name` of package `dir` in
+    /// each file declaring it, as [`GoPackages::package_var_type`] reads them
+    /// (a test file's only for a test caller of its package); empty when no
+    /// file does, or one records no text.
+    fn package_var_texts<'a>(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        dir: &str,
+        name: &str,
+    ) -> Vec<(RecvScope<'a>, String)> {
+        let with_tests = scope.with_tests(dir);
+        let mut out = Vec::new();
+        for &m in self.by_dir.get(dir).into_iter().flatten() {
+            if !with_tests && self.tests.contains(&m) {
+                continue;
+            }
+            let Some(t) = g.nav.local_types.get(&m).and_then(|vars| vars.get(name)) else {
+                continue;
+            };
+            if t.is_empty() {
+                return Vec::new();
+            }
+            out.push((RecvScope { func: None, module: m, ..scope }, t.clone()));
+        }
+        out
+    }
+
+    /// DT.5j: a callable's slice result (DT.1e's [`NavFact::SliceResult`]) as
+    /// a container text `[]E`, with the callee's own file as its scope.
+    fn slice_result<'a>(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        callee: NodeId,
+    ) -> Option<(RecvScope<'a>, String)> {
+        let elem = g.nav.nav_facts.get(&callee)?.iter().find_map(|f| match f {
+            NavFact::SliceResult { elem } => Some(elem.as_str()),
+            _ => None,
+        })?;
+        let at = RecvScope { func: None, module: self.file_of(g, callee)?, ..scope };
+        Some((at, format!("[]{elem}")))
     }
 
     /// [`GoPackages::unique_in`] for a type: the one STRUCT / INTERFACE
@@ -2271,6 +2542,160 @@ impl GoPackages {
 }
 
 // ============================================================================
+// Go func and method values (DT.5j)
+// ============================================================================
+
+/// What [`GoPackages::bind_value_refs`] did to one Go graph, for the
+/// `[go-values]` marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ValueStats {
+    /// The Go parser's value refs (USES) the graph received.
+    refs: usize,
+    /// Bound to a METHOD (a method value `x.M`, rule `method_value`).
+    methods: usize,
+    /// Bound to a FUNCTION (a func value `F` / `pkg.F`, rule `func_value`).
+    funcs: usize,
+    /// Bound to the in-repo STRUCT a composite literal builds (`T{..}`,
+    /// `&pkg.T{..}`, rule `composite_literal`; the 2026-10-17 correction).
+    composites: usize,
+    /// Named nothing a value can be (a field read, a var, a type, an
+    /// external package's member), or a STRUCT its own METHOD builds:
+    /// dropped.
+    dropped: usize,
+    /// CI.4 rule 1 (DT.5j): package-qualified route handlers `pkg.F` bound
+    /// to a FUNCTION of another file of the imported package (rule
+    /// `package_function`), from [`TypeHandlerStats::package_functions`].
+    pkg_handlers: usize,
+}
+
+impl ValueStats {
+    /// DT.5j fired_on, once per Go graph with a value ref or a
+    /// package-function handler: `[go-values] uses=<u> (method=<m>
+    /// func=<f> composite_literal=<c>) dropped=<d> refs=<r>
+    /// pkg_handlers=<h>`.
+    fn marker(&self) -> Option<String> {
+        (self.refs + self.pkg_handlers > 0).then(|| {
+            format!(
+                "[go-values] uses={} (method={} func={} composite_literal={}) dropped={} refs={} \
+                 pkg_handlers={}",
+                self.methods + self.funcs + self.composites,
+                self.methods,
+                self.funcs,
+                self.composites,
+                self.dropped,
+                self.refs,
+                self.pkg_handlers
+            )
+        })
+    }
+}
+
+impl GoPackages {
+    /// DT.5j: bind the Go parser's value refs, a func or method passed,
+    /// assigned or returned by value (`idx.SetOnCompleted(svc.OnDone)`). Every
+    /// USES ref of a Go graph is one: the Go parser emits USES for nothing
+    /// else and no cross-cutting extractor emits a USES ref. `Attribute {
+    /// base, name }` binds the METHOD `name` of the type `base` evaluates to
+    /// ([`GoPackages::chain_hop`]: a typed local, `self`, a field chain, a
+    /// call result; [`GoPackages::method_on`], an interface's own METHOD and a
+    /// promoted one included), rule `method_value`; with `base` an import, the
+    /// exported FUNCTION `name` of that package, rule `func_value`. `Bare(name)`
+    /// binds the FUNCTION `name` of the ref's file, else the one of its
+    /// package ([`GoPackages::unique_in`]), rule `func_value`. The same two
+    /// lookups that answer a STRUCT read a composite literal's type ref (the
+    /// 2026-10-17 correction: `T{..}` / `&pkg.T{..}`, the Go parser's
+    /// `queue_composite_ref`; a type name is no value in Go, so a STRUCT
+    /// answers only a literal's ref), rule `composite_literal`: the file, its
+    /// package, or the import's package, never a repo-wide bare name. A
+    /// Strong USES, placed at the ref's row as [`resolve_refs`] places a
+    /// ref. A ref naming anything else (a field read `u.ID`, a var, an
+    /// interface, an external package's func or type), its own `from`, or
+    /// the STRUCT whose own METHOD builds it (a type's method building it
+    /// says nothing of who uses the type) is dropped, never left to
+    /// `resolve_refs`, whose module-symbol lookup would bind a package var.
+    ///
+    /// Runs after [`GoPackages::bind_type_handlers`] and before
+    /// `resolve_refs`; the other refs keep their order.
+    fn bind_value_refs(&self, g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> ValueStats {
+        let (values, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+            std::mem::take(refs).into_iter().partition(|r| r.category == edge_category::USES);
+        *refs = rest;
+        let mut stats = ValueStats { refs: values.len(), ..ValueStats::default() };
+        let mut bound: Vec<(UnresolvedRef, NodeId, &'static str)> = Vec::new();
+        for r in values {
+            let own_type = |to: NodeId| g.nav.parent_of.get(&r.from) == Some(&to);
+            match self.value_target(g, &r).filter(|&(to, _)| to != r.from && !own_type(to)) {
+                Some((to, rule)) => bound.push((r, to, rule)),
+                None => stats.dropped += 1,
+            }
+        }
+        if bound.is_empty() {
+            return stats;
+        }
+        let files = SiteFiles::of(g);
+        for (r, to, rule) in bound {
+            let ev = files.place(go_ev(rule), &r);
+            push_edge(g, r.from, to, edge_category::USES, ev);
+            match rule {
+                "method_value" => stats.methods += 1,
+                "composite_literal" => stats.composites += 1,
+                _ => stats.funcs += 1,
+            }
+        }
+        stats
+    }
+
+    /// DT.5j: the FUNCTION / METHOD a value ref names, or the STRUCT a
+    /// composite literal builds, and its EVIDENCE rule
+    /// ([`GoPackages::bind_value_refs`]), read in the ref's file and, unless
+    /// it comes from a package-level initialiser, its fn's locals.
+    fn value_target(&self, g: &RepoGraph, r: &UnresolvedRef) -> Option<(NodeId, &'static str)> {
+        let module = r.from_module;
+        let caller_dir = self.dir_of.get(&module)?;
+        let scope = RecvScope {
+            func: (g.nav.kind_by_id.get(&r.from) != Some(&node_kind::MODULE)).then_some(r.from),
+            module,
+            caller_dir,
+            from_test: self.tests.contains(&module),
+        };
+        // A FUNCTION is a func value; a STRUCT, which no value expression
+        // can name, is a composite literal's type.
+        let rule_of = |id: NodeId| match g.nav.kind_by_id.get(&id) {
+            Some(&node_kind::FUNCTION) => Some((id, "func_value")),
+            Some(&node_kind::STRUCT) => Some((id, "composite_literal")),
+            _ => None,
+        };
+        match &r.qualifier {
+            CallQualifier::Bare(name) => {
+                let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(name)).copied();
+                let hit = own.or_else(|| {
+                    self.unique_in(g, caller_dir, name, module, scope.with_tests(caller_dir))
+                })?;
+                rule_of(hit)
+            }
+            CallQualifier::Attribute { base, name } => {
+                let segs = receiver_segments(base)?;
+                match self.chain_hop(g, scope, &segs, 0, &mut Typed::default())?.0 {
+                    Hop::Type(ty) => {
+                        let (method, _) = self.method_on(g, ty, name)?;
+                        (g.nav.kind_by_id.get(&method) == Some(&node_kind::METHOD))
+                            .then_some((method, "method_value"))
+                    }
+                    Hop::Package(dir) => {
+                        if !is_exported(name) {
+                            return None;
+                        }
+                        let hit = self.unique_in(g, dir, name, module, scope.with_tests(dir))?;
+                        rule_of(hit)
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
 // Go package-type route handlers (CI.4)
 // ============================================================================
 
@@ -2287,6 +2712,10 @@ struct TypeHandlerStats {
     /// Refs whose base named a package STRUCT but whose method did not
     /// resolve on it (left to `resolve_refs`, as before).
     unbound: usize,
+    /// DT.5j: package-qualified handlers bound to a FUNCTION of another file
+    /// of the imported package (rule `package_function`); printed by
+    /// `[go-values]`, not this marker.
+    package_functions: usize,
 }
 
 impl TypeHandlerStats {
@@ -2320,6 +2749,9 @@ enum TypeHandler {
     /// `local_type_method` for another package's `pkg.T` or a call result
     /// `F()` / `pkg.F()` (DF.16).
     Bound { method: NodeId, promoted: bool, other_file: bool, rule: &'static str },
+    /// DT.5j: a package-qualified handler `pkg.F` whose FUNCTION sits in a
+    /// file of the imported package other than the one the import binds.
+    Function(NodeId),
 }
 
 impl GoPackages {
@@ -2356,6 +2788,12 @@ impl GoPackages {
                     stats.other_file += usize::from(other_file);
                     stats.promoted += usize::from(promoted);
                 }
+                TypeHandler::Function(function) => {
+                    let files = files.get_or_insert_with(|| SiteFiles::of(g));
+                    let ev = files.place(go_ev("package_function"), &r);
+                    push_edge(g, r.from, function, edge_category::HANDLED_BY, ev);
+                    stats.package_functions += 1;
+                }
                 TypeHandler::Unbound => {
                     stats.unbound += 1;
                     refs.push(r);
@@ -2370,7 +2808,9 @@ impl GoPackages {
     /// its package (CI.4), Go's rules:
     ///
     /// 1. `base` an import of the registering file is a package-qualified
-    ///    handler (`handlers.List`): generic.
+    ///    handler (`handlers.List`): generic, unless (DT.5j) the file the
+    ///    import binds does not declare `name`; then the one exported FUNCTION
+    ///    `name` of the imported package ([`GoPackages::package_handler`]).
     /// 2. The type: the registering file's own STRUCT `base`, else the one
     ///    STRUCT `base` of its package directory
     ///    ([`GoPackages::unique_type_in`]; test files only for a `_test.go`
@@ -2398,7 +2838,7 @@ impl GoPackages {
         let imported = self.import_path.get(&module).is_some_and(|m| m.contains_key(base))
             || g.symbols.module_import_bindings.get(&module).is_some_and(|m| m.contains_key(base));
         if imported {
-            return TypeHandler::Generic;
+            return self.package_handler(g, module, base, name);
         }
         if base.contains('.') || base.ends_with("()") {
             return self.local_type_handler(g, module, base, name);
@@ -2428,6 +2868,33 @@ impl GoPackages {
                 TypeHandler::Bound { method, promoted, other_file, rule: "package_type_method" }
             }
             _ => TypeHandler::Unbound,
+        }
+    }
+
+    /// DT.5j: a package-qualified route handler `pkg.F` (rule 1 of
+    /// [`GoPackages::type_handler`]). When the file the import binds declares
+    /// `F`, `resolve_refs` binds it there, as before: generic. Otherwise the
+    /// one exported FUNCTION `F` across the imported package's files
+    /// ([`GoPackages::imported_dir`] + [`GoPackages::unique_in`], the lookup a
+    /// `pkg.F(..)` call takes): a Go package is its directory (LA.13b), and
+    /// the import binds only one of its files. None (or two) -> generic.
+    fn package_handler(&self, g: &RepoGraph, module: NodeId, base: &str, name: &str) -> TypeHandler {
+        let bound = g.symbols.module_import_bindings.get(&module).and_then(|b| b.get(base));
+        let declared = bound
+            .and_then(|f| g.symbols.module_symbols.get(f))
+            .is_some_and(|s| s.contains_key(name));
+        if declared || !is_exported(name) {
+            return TypeHandler::Generic;
+        }
+        let Some(dir) = self.imported_dir(g, module, base) else {
+            return TypeHandler::Generic;
+        };
+        let same_dir = self.dir_of.get(&module).is_some_and(|d| d == dir);
+        let with_tests = self.tests.contains(&module) && same_dir;
+        let is_fn = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::FUNCTION);
+        match self.unique_in(g, dir, name, module, with_tests).filter(is_fn) {
+            Some(function) => TypeHandler::Function(function),
+            None => TypeHandler::Generic,
         }
     }
 
@@ -6535,7 +7002,7 @@ mod tests {
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 5, other_file: 5, promoted: 1, unbound: 0 }
+            TypeHandlerStats { bound: 5, other_file: 5, promoted: 1, unbound: 0, package_functions: 0 }
         );
         assert_eq!(
             handlers.marker().as_deref(),
@@ -6591,6 +7058,408 @@ mod tests {
         assert_eq!(handlers.marker(), None);
     }
 
+    // ---- DT.5j: Go receiver typing, func / method values, pkg.F handlers ----
+
+    /// An edge's EVIDENCE as `(emitter, rule, 0-based line)`.
+    type EvRow = (String, Option<String>, Option<u32>);
+
+    /// The [`EvRow`] of the one `category` edge `from -> to`.
+    fn ev_of(g: &RepoGraph, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> EvRow {
+        let ev = Evidence::of(only_edge(g, from, to, category)).expect("EVIDENCE cell");
+        (ev.emitter, ev.rule, ev.line)
+    }
+
+    fn hook_ev(rule: &str, line: u32) -> EvRow {
+        ("graph:go_packages".to_string(), Some(rule.to_string()), Some(line))
+    }
+
+    const TOKENS_GO: &str = "package tokens\n\ntype Registry struct{}\n\n\
+                             func (r *Registry) ActivePair(p string) bool { return false }\n";
+    const SCREENING_GO: &str = "package screening\n\ntype Registry struct{}\n\n\
+                                func (r *Registry) ActivePair(p string) bool { return false }\n\n\
+                                func (r *Registry) Get(n string) bool { return false }\n";
+
+    /// Two packages declare `Registry`: a field typed `*tokens.Registry`
+    /// binds tokens' method through the declaring file's import (rule
+    /// `receiver_field_chain`), never screening's; a method of the struct
+    /// declared in a file whose same alias `reg` names the other package
+    /// still reads the field in the struct's own file.
+    #[test]
+    fn qualified_field_type_binds_through_the_declaring_files_import() {
+        let svc = "package svc\n\nimport (\n\t\"example.com/scope/screening\"\n\
+                   \t\"example.com/scope/tokens\"\n)\n\n\
+                   type Service struct {\n\ttokens *tokens.Registry\n\tlists  *screening.Registry\n}\n\n\
+                   func (s *Service) Create(p string) bool { return s.tokens.ActivePair(p) && s.lists.Get(p) }\n";
+        let ledger = "package svc\n\nimport reg \"example.com/scope/tokens\"\n\n\
+                      type Ledger struct {\n\tpairs *reg.Registry\n}\n";
+        let ops = "package svc\n\nimport reg \"example.com/scope/screening\"\n\n\
+                   func (l *Ledger) Pairs(p string) bool { return l.pairs.ActivePair(p) }\n\n\
+                   var _ *reg.Registry\n";
+        let parses = go_sources(&[
+            ("tokens/registry.go", TOKENS_GO),
+            ("screening/registry.go", SCREENING_GO),
+            ("svc/svc.go", svc),
+            ("svc/ledger.go", ledger),
+            ("svc/ops.go", ops),
+        ]);
+        let GoPasses { g, receivers, .. } = build_go_passes(repo(), parses);
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        let calls = edge_category::CALLS;
+        let (create, pairs) = (m("svc::svc::Service::Create"), m("svc::ops::Ledger::Pairs"));
+        let (tok, scr) = (
+            m("tokens::registry::Registry::ActivePair"),
+            m("screening::registry::Registry::ActivePair"),
+        );
+        assert_eq!(ev_of(&g, create, tok, calls), hook_ev("receiver_field_chain", 12));
+        assert_eq!(
+            ev_of(&g, create, m("screening::registry::Registry::Get"), calls),
+            hook_ev("receiver_field_chain", 12)
+        );
+        assert_eq!(ev_of(&g, pairs, tok, calls), hook_ev("receiver_field_chain", 4));
+        assert!(!has_edge(&g, create, scr, calls));
+        assert!(!has_edge(&g, pairs, scr, calls));
+        assert_eq!(receivers.qualified_field.get(), 3);
+    }
+
+    /// LA.23a's guard case: `type Logger struct { *store.Logger }` records
+    /// its embed as `store.Logger`, so `l.Logger.Info(m)` binds store's
+    /// method through the import and never `Logger` itself.
+    #[test]
+    fn embedded_qualified_field_named_like_its_struct() {
+        let store = "package store\n\ntype Logger struct{}\n\nfunc (l *Logger) Info(m string) {}\n";
+        let app = "package app\n\nimport \"example.com/scope/store\"\n\n\
+                   type Logger struct {\n\t*store.Logger\n}\n\n\
+                   func (l *Logger) Log(m string) { l.Logger.Info(m) }\n";
+        let parses = go_sources(&[("store/logger.go", store), ("app/logger.go", app)]);
+        let g = build_go(repo(), parses).unwrap();
+        let log = gid(node_kind::METHOD, "app::logger::Logger::Log");
+        let info = gid(node_kind::METHOD, "store::logger::Logger::Info");
+        assert_eq!(ev_of(&g, log, info, edge_category::CALLS), hook_ev("receiver_field_chain", 8));
+        let calls: Vec<NodeId> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == log && e.category == edge_category::CALLS)
+            .map(|e| e.to)
+            .collect();
+        assert_eq!(calls, vec![info]);
+    }
+
+    const RANGE_GO: &str = "package p\n\n\
+        type Check interface {\n\tName() string\n}\n\n\
+        type Svc struct {\n\tchecks []Check\n\tbyName map[string]Check\n\tkeyed  map[Check]Other\n}\n\n\
+        type Other struct{}\n\nfunc (Other) Name() string { return \"\" }\n\n\
+        type Repo struct{}\n\nfunc (r *Repo) List() []Check { return nil }\n\n\
+        var all []Check\n\n\
+        func (s *Svc) Field() {\n\tfor _, c := range s.checks {\n\t\tc.Name()\n\t}\n}\n\n\
+        func (s *Svc) Map() {\n\tfor _, c := range s.byName {\n\t\tc.Name()\n\t}\n}\n\n\
+        func Param(cs []Check) {\n\tfor _, c := range cs {\n\t\tc.Name()\n\t}\n}\n\n\
+        func (s *Svc) Local() {\n\txs := s.checks\n\tfor _, c := range xs {\n\t\tc.Name()\n\t}\n}\n\n\
+        func Call(r *Repo) {\n\tfor _, c := range r.List() {\n\t\tc.Name()\n\t}\n}\n\n\
+        func Var() {\n\tfor _, c := range all {\n\t\tc.Name()\n\t}\n}\n\n\
+        func (s *Svc) Index() {\n\tfor c := range s.checks {\n\t\t_ = c\n\t}\n\
+        \tfor k := range s.keyed {\n\t\tk.Name()\n\t}\n}\n";
+
+    /// A range value variable is an element of the ranged container: a
+    /// slice field, a map field's value, a slice parameter, a local aliasing
+    /// a field, a callee's slice result and a package var, each binding the
+    /// interface METHOD; an index-only range and a map's key bind nothing.
+    #[test]
+    fn range_value_binds_the_element_type() {
+        let GoPasses { g, receivers, .. } = build_go_passes(repo(), go_sources(&[("p/p.go", RANGE_GO)]));
+        let name = gid(node_kind::METHOD, "p::p::Check::Name");
+        let calls = edge_category::CALLS;
+        let callers = [
+            gid(node_kind::METHOD, "p::p::Svc::Field"),
+            gid(node_kind::METHOD, "p::p::Svc::Map"),
+            gid(node_kind::FUNCTION, "p::p::Param"),
+            gid(node_kind::METHOD, "p::p::Svc::Local"),
+            gid(node_kind::FUNCTION, "p::p::Call"),
+            gid(node_kind::FUNCTION, "p::p::Var"),
+        ];
+        for from in callers {
+            assert_eq!(rule_of(only_edge(&g, from, name, calls)).1.as_deref(), Some("receiver_local"));
+        }
+        let index = gid(node_kind::METHOD, "p::p::Svc::Index");
+        assert!(!g.edges.iter().any(|e| e.from == index && e.category == calls), "{:?}", g.edges);
+        assert_eq!(receivers.elem.get(), 6);
+    }
+
+    const OXR_GO: &str = "package fx\n\ntype OXR struct{}\n\nfunc NewOXR() *OXR { return &OXR{} }\n\n\
+                          func (o *OXR) Provider() string { return \"\" }\n\n\
+                          type Other struct{}\n\nfunc NewOther() *Other { return &Other{} }\n\n\
+                          func (o *Other) Provider() string { return \"\" }\n";
+
+    /// A local two declarations of one fn scope type binds only when both
+    /// name one type: TestAgree's `o` (`NewOXR()|src()`, src a func literal
+    /// returning `*OXR`) is an OXR; TestMixed's (`NewOXR()|NewOther()`)
+    /// types nothing, so neither Provider is guessed.
+    #[test]
+    fn alternatives_bind_only_when_they_agree() {
+        let test = "package fx\n\nimport \"testing\"\n\n\
+                    func TestAgree(t *testing.T) {\n\tsrc := func() *OXR {\n\t\to := NewOXR()\n\t\treturn o\n\t}\n\
+                    \tt.Run(\"a\", func(t *testing.T) {\n\t\to := src()\n\t\to.Provider()\n\t})\n}\n\n\
+                    func TestMixed(t *testing.T) {\n\to := NewOXR()\n\to.Provider()\n\
+                    \tt.Run(\"b\", func(t *testing.T) {\n\t\to := NewOther()\n\t\t_ = o\n\t})\n}\n";
+        let parses = go_sources(&[("fx/oxr.go", OXR_GO), ("fx/oxr_test.go", test)]);
+        let GoPasses { g, receivers, .. } = build_go_passes(repo(), parses);
+        let (oxr, other) = (
+            gid(node_kind::METHOD, "fx::oxr::OXR::Provider"),
+            gid(node_kind::METHOD, "fx::oxr::Other::Provider"),
+        );
+        let agree = gid(node_kind::FUNCTION, "fx::oxr_test::TestAgree");
+        let mixed = gid(node_kind::FUNCTION, "fx::oxr_test::TestMixed");
+        assert_eq!(ev_of(&g, agree, oxr, edge_category::CALLS), hook_ev("receiver_local", 11));
+        for to in [oxr, other] {
+            assert!(!has_edge(&g, mixed, to, edge_category::CALLS));
+        }
+        assert_eq!((receivers.alternatives.get(), receivers.func_value.get()), (1, 1));
+    }
+
+    /// A func-typed parameter's or func literal's `func() R` types a call
+    /// through it: `r, _ := mk(); r.Find()` and `f().Find()`.
+    #[test]
+    fn func_value_local_types_its_call() {
+        let src = "package app\n\ntype Repo struct{}\n\nfunc (r *Repo) Find() {}\n\n\
+                   func Use(mk func() (*Repo, error)) {\n\tr, _ := mk()\n\tr.Find()\n}\n\n\
+                   func Lit() {\n\tf := func() *Repo { return nil }\n\tf().Find()\n}\n";
+        let GoPasses { g, receivers, .. } = build_go_passes(repo(), go_sources(&[("app/app.go", src)]));
+        let find = gid(node_kind::METHOD, "app::app::Repo::Find");
+        let calls = edge_category::CALLS;
+        assert_eq!(ev_of(&g, gid(node_kind::FUNCTION, "app::app::Use"), find, calls), hook_ev("receiver_local", 8));
+        assert_eq!(ev_of(&g, gid(node_kind::FUNCTION, "app::app::Lit"), find, calls), hook_ev("receiver_local", 13));
+        assert_eq!(receivers.func_value.get(), 2);
+    }
+
+    const SVC_REFUSAL_GO: &str = "package svc\n\ntype Refusal struct{ Reason string }\n\n\
+                                  func (r *Refusal) Error() string { return \"\" }\n";
+    const APPERR_GO: &str = "package apperr\n\ntype Refusal struct{}\n\n\
+                             func (Refusal) Error() string { return \"\" }\n";
+
+    /// `(&svc.Refusal{..}).Error()` and `svc.Refusal{}.Error()` are calls
+    /// on a value of svc's Refusal (the conversion rule, `receiver_return`),
+    /// never on the test directory's own same-named apperr.Refusal.
+    #[test]
+    fn composite_literal_receiver_binds_the_method() {
+        let test = "package apperr_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/scope/svc\"\n)\n\n\
+                    func TestText(t *testing.T) {\n\t_ = (&svc.Refusal{Reason: \"x\"}).Error()\n\
+                    \t_ = svc.Refusal{}.Error()\n}\n";
+        let parses = go_sources(&[
+            ("svc/refusal.go", SVC_REFUSAL_GO),
+            ("apperr/apperr.go", APPERR_GO),
+            ("apperr/apperr_test.go", test),
+        ]);
+        let GoPasses { g, receivers, .. } = build_go_passes(repo(), parses);
+        let from = gid(node_kind::FUNCTION, "apperr::apperr_test::TestText");
+        let (svc_err, own_err) = (
+            gid(node_kind::METHOD, "svc::refusal::Refusal::Error"),
+            gid(node_kind::METHOD, "apperr::apperr::Refusal::Error"),
+        );
+        // One CALLS per call site: `&` and plain, rows 9 and 10.
+        let sites: Vec<EvRow> = g
+            .edges
+            .iter()
+            .filter(|e| (e.from, e.to, e.category) == (from, svc_err, edge_category::CALLS))
+            .filter_map(Evidence::of)
+            .map(|ev| (ev.emitter, ev.rule, ev.line))
+            .collect();
+        assert_eq!(sites, vec![hook_ev("receiver_return", 9), hook_ev("receiver_return", 10)]);
+        assert!(!has_edge(&g, from, own_err, edge_category::CALLS));
+        assert_eq!(receivers.conversion.get(), 2);
+        // The literals build svc's Refusal (the 2026-10-17 correction).
+        let uses = edge_category::USES;
+        let svc_ty = gid(node_kind::STRUCT, "svc::refusal::Refusal");
+        assert_eq!(ev_of(&g, from, svc_ty, uses), hook_ev("composite_literal", 9));
+        assert!(!has_edge(&g, from, gid(node_kind::STRUCT, "apperr::apperr::Refusal"), uses));
+    }
+
+    /// Method and func values: a typed local's and `self`'s method value
+    /// (`method_value`), a same-file, same-package and `pkg.F` func
+    /// (`func_value`), a package var's initialiser from its STATE_VAR; a
+    /// field read, another package's var, a method passing itself and a
+    /// STRUCT its own METHOD builds are dropped. The composite literals
+    /// (`&Indexer{..}`, `&Svc{}`) bind their STRUCTs.
+    #[test]
+    fn method_and_func_values_bind_uses() {
+        let idx = "package idx\n\ntype Indexer struct{ done func(string) }\n\n\
+                   var defaultDone = logDone\n\nfunc logDone(id string) {}\n\n\
+                   func New() *Indexer { return &Indexer{done: defaultDone} }\n\n\
+                   var Global = New()\n\n\
+                   func (i *Indexer) Set(f func(string)) { i.done = f }\n\n\
+                   func (i *Indexer) Self() { i.Set(i.Self2) }\n\n\
+                   func (i *Indexer) Self2(id string) {}\n\n\
+                   func (i *Indexer) Loop(id string) { i.Set(i.Loop) }\n\n\
+                   func Exported(id string) {}\n";
+        let app = "package app\n\nimport \"example.com/scope/idx\"\n\n\
+                   type Svc struct{ id string }\n\n\
+                   func (s *Svc) OnDone(id string) {}\n\n\
+                   func (s *Svc) Clone() *Svc { return &Svc{id: s.id} }\n\n\
+                   func helper(id string) {}\n\n\
+                   func Main() {\n\ts := &Svc{}\n\tx := idx.New()\n\tx.Set(s.OnDone)\n\tx.Set(helper)\n\
+                   \tx.Set(sibling)\n\tx.Set(idx.Exported)\n\t_ = s.id\n\t_ = idx.Global\n}\n";
+        let other = "package app\n\nfunc sibling(id string) {}\n";
+        let parses =
+            go_sources(&[("idx/idx.go", idx), ("app/app.go", app), ("app/other.go", other)]);
+        let GoPasses { g, values, .. } = build_go_passes(repo(), parses);
+        let (f, m, s) = (
+            |q: &str| gid(node_kind::FUNCTION, q),
+            |q: &str| gid(node_kind::METHOD, q),
+            |q: &str| gid(node_kind::STRUCT, q),
+        );
+        let uses = edge_category::USES;
+        let main = f("app::app::Main");
+        assert_eq!(ev_of(&g, main, m("app::app::Svc::OnDone"), uses), hook_ev("method_value", 15));
+        assert_eq!(ev_of(&g, main, f("app::app::helper"), uses), hook_ev("func_value", 16));
+        assert_eq!(ev_of(&g, main, f("app::other::sibling"), uses), hook_ev("func_value", 17));
+        assert_eq!(ev_of(&g, main, f("idx::idx::Exported"), uses), hook_ev("func_value", 18));
+        assert_eq!(ev_of(&g, main, s("app::app::Svc"), uses), hook_ev("composite_literal", 13));
+        assert_eq!(
+            ev_of(&g, m("idx::idx::Indexer::Self"), m("idx::idx::Indexer::Self2"), uses),
+            hook_ev("method_value", 14)
+        );
+        let default_done = gid(node_kind::STATE_VAR, "idx::idx::defaultDone");
+        assert_eq!(ev_of(&g, default_done, f("idx::idx::logDone"), uses), hook_ev("func_value", 4));
+        assert_eq!(ev_of(&g, f("idx::idx::New"), s("idx::idx::Indexer"), uses), hook_ev("composite_literal", 8));
+        let from_uses = |from: NodeId| -> Vec<NodeId> {
+            g.edges.iter().filter(|e| e.from == from && e.category == uses).map(|e| e.to).collect()
+        };
+        assert!(from_uses(m("idx::idx::Indexer::Loop")).is_empty(), "its own method value");
+        assert!(from_uses(m("app::app::Svc::Clone")).is_empty(), "its own STRUCT");
+        assert_eq!(from_uses(main).len(), 5, "s.id and idx.Global bind nothing");
+        assert_eq!(
+            values,
+            ValueStats { refs: 14, methods: 2, funcs: 4, composites: 2, dropped: 6, pkg_handlers: 0 }
+        );
+    }
+
+    /// The 2026-10-17 correction: a composite literal USES the in-repo
+    /// STRUCT it builds, read in its own file, its package and through its
+    /// file's imports (rule `composite_literal`, at the literal's row): never
+    /// a same-named type of the caller's package for `pkg.T{..}`, never a
+    /// repo-wide bare name, never an external type, never from the type's
+    /// own METHOD.
+    #[test]
+    fn composite_literal_uses_bind_the_struct() {
+        let store = "package store\n\ntype Repo struct{}\n\ntype Cfg struct{}\n\ntype Only struct{}\n";
+        let app = "package app\n\nimport (\n\t\"example.com/scope/store\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\n\
+                   type Local struct{}\n\ntype Repo struct{}\n\n\
+                   func Build() {\n\t_ = Local{}\n\t_ = &store.Repo{}\n\t_ = store.Cfg{}\n\t_ = Sibling{}\n\
+                   \t_ = gin.H{}\n\t_ = Only{}\n}\n\n\
+                   func (l Local) Copy() Local { return Local{} }\n\n\
+                   var fallback = &Local{}\n";
+        let sibling = "package app\n\ntype Sibling struct{}\n";
+        let parses = go_sources(&[
+            ("store/store.go", store),
+            ("app/app.go", app),
+            ("app/sibling.go", sibling),
+        ]);
+        let GoPasses { g, values, .. } = build_go_passes(repo(), parses);
+        let s = |q: &str| gid(node_kind::STRUCT, q);
+        let uses = edge_category::USES;
+        let build = gid(node_kind::FUNCTION, "app::app::Build");
+        let to: Vec<(NodeId, EvRow)> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == build && e.category == uses)
+            .map(|e| (e.to, ev_of(&g, build, e.to, uses)))
+            .collect();
+        assert_eq!(
+            to,
+            vec![
+                (s("app::app::Local"), hook_ev("composite_literal", 13)),
+                (s("store::store::Repo"), hook_ev("composite_literal", 14)),
+                (s("store::store::Cfg"), hook_ev("composite_literal", 15)),
+                (s("app::sibling::Sibling"), hook_ev("composite_literal", 16)),
+            ]
+        );
+        let fallback = gid(node_kind::STATE_VAR, "app::app::fallback");
+        assert_eq!(ev_of(&g, fallback, s("app::app::Local"), uses), hook_ev("composite_literal", 23));
+        let copy = gid(node_kind::METHOD, "app::app::Local::Copy");
+        assert!(!g.edges.iter().any(|e| e.from == copy && e.category == uses));
+        // `Only{}` names no type of app (a repo-wide bare name never binds);
+        // `gin.H{}` is dropped by the parser; `Local{}` in Copy is its own.
+        assert_eq!((values.refs, values.composites, values.dropped), (7, 5, 2));
+    }
+
+    /// `controllers.Health` in a file of controllers the import does not
+    /// bind is HANDLED_BY that FUNCTION (rule `package_function`); a handler
+    /// in the bound file stays resolve_refs' `attribute`; a func-typed
+    /// package var in another file (a STATE_VAR) is never bound.
+    #[test]
+    fn package_qualified_handler_binds_a_function_of_another_file() {
+        let activity = "package controllers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                        func Ping(c *gin.Context) {}\n";
+        let health = "package controllers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                      func Health(c *gin.Context) {}\n\n\
+                      // Hook is a func value held in a package var.\n\
+                      var Hook = func(c *gin.Context) {}\n";
+        let server = "package server\n\nimport (\n\t\"example.com/scope/controllers\"\n\n\
+                      \t\"github.com/gin-gonic/gin\"\n)\n\n\
+                      func Setup(r *gin.Engine) {\n\tr.GET(\"/ping\", controllers.Ping)\n\
+                      \tr.GET(\"/health\", controllers.Health)\n\tr.GET(\"/hook\", controllers.Hook)\n}\n";
+        let parses = go_sources(&[
+            ("controllers/activity.go", activity),
+            ("controllers/health.go", health),
+            ("server/server.go", server),
+        ]);
+        let GoPasses { g, handlers, values, .. } = build_go_passes(repo(), parses);
+        let f = |q: &str| gid(node_kind::FUNCTION, q);
+        let (ping, health_r, hook) =
+            (route_id(&g, "GET /ping"), route_id(&g, "GET /health"), route_id(&g, "GET /hook"));
+        let ping_fn = f("controllers::activity::Ping");
+        let health_fn = f("controllers::health::Health");
+        assert_eq!(handled_by(&g, ping), vec![ping_fn]);
+        assert_eq!(handler_ev(&g, ping, ping_fn).1.as_deref(), Some("attribute"));
+        assert_eq!(handled_by(&g, health_r), vec![health_fn]);
+        assert_eq!(
+            handler_ev(&g, health_r, health_fn),
+            (
+                "graph:go_packages".to_string(),
+                Some("package_function".to_string()),
+                Some("server/server.go".to_string()),
+                Some(10)
+            )
+        );
+        assert!(handled_by(&g, hook).is_empty());
+        assert_eq!(handlers.package_functions, 1);
+        assert_eq!(values.pkg_handlers, 1);
+        assert_eq!(handlers.marker(), None, "[go-handlers] counts package types only");
+    }
+
+    /// The two DT.5j markers' shapes, and silence when nothing counted.
+    #[test]
+    fn typed_and_values_marker_shapes() {
+        let tally = ReceiverTally::default();
+        assert_eq!(tally.typed_marker(), None);
+        tally.bound_through(&Typed {
+            elem: true,
+            qualified_field: true,
+            conversion: true,
+            ..Typed::default()
+        });
+        tally.bound_through(&Typed { qualified_field: true, alternatives: true, ..Typed::default() });
+        assert_eq!(
+            tally.typed_marker().as_deref(),
+            Some(
+                "[go-receivers] typed elem=1 qualified_field=2 func_value=0 alternatives=1 \
+                 conversion=1"
+            )
+        );
+        assert_eq!(ValueStats::default().marker(), None);
+        let stats = ValueStats { refs: 9, methods: 1, funcs: 2, composites: 3, dropped: 3, pkg_handlers: 1 };
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[go-values] uses=6 (method=1 func=2 composite_literal=3) dropped=3 refs=9 \
+                 pkg_handlers=1"
+            )
+        );
+        let handlers_only = ValueStats { pkg_handlers: 2, ..ValueStats::default() };
+        assert_eq!(
+            handlers_only.marker().as_deref(),
+            Some("[go-values] uses=0 (method=0 func=0 composite_literal=0) dropped=0 refs=0 pkg_handlers=2")
+        );
+    }
+
     /// DF.16: a local-var base (`h := &TokensHandler{}; r.GET("/x", h.List)`
     /// in a FUNCTION) is written by the parser as the local's type
     /// (`TokensHandler`), which the pre-pass reads like a written type: the
@@ -6628,7 +7497,7 @@ mod tests {
         assert_eq!(handler_ev(&g, r, list), pkg_type_ev(6));
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 1, other_file: 1, promoted: 0, unbound: 0 }
+            TypeHandlerStats { bound: 1, other_file: 1, promoted: 0, unbound: 0, package_functions: 0 }
         );
     }
 
@@ -6699,7 +7568,7 @@ mod tests {
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 2, other_file: 2, promoted: 0, unbound: 0 }
+            TypeHandlerStats { bound: 2, other_file: 2, promoted: 0, unbound: 0, package_functions: 0 }
         );
 
         // The type and its constructor in the registering file itself:
@@ -6716,7 +7585,7 @@ mod tests {
         assert_eq!(handler_ev(&g, r, list).1.as_deref(), Some("local_type_method"));
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 1, other_file: 0, promoted: 0, unbound: 0 }
+            TypeHandlerStats { bound: 1, other_file: 0, promoted: 0, unbound: 0, package_functions: 0 }
         );
     }
 
@@ -6762,7 +7631,7 @@ mod tests {
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 3, other_file: 3, promoted: 0, unbound: 0 }
+            TypeHandlerStats { bound: 3, other_file: 3, promoted: 0, unbound: 0, package_functions: 0 }
         );
     }
 

@@ -1395,6 +1395,12 @@ pub struct CodeNav {
     /// read by `resolve_calls`' receiver-type inference (A6.2a), which binds
     /// `_repo.Find()` / `this.repo.find()` to a method of that type.
     ///
+    /// Go (DT.5j) records two more forms: a field's package qualifier is
+    /// kept (`pkg.T`, which no bare-name lookup matches, so the Go call hook
+    /// reads it through the declaring struct's file imports), and a slice,
+    /// array or map of a named type records `[]E`, its element's (a map's
+    /// value's) text, which types a `range` value variable.
+    ///
     /// Build-time only: deliberately NOT mirrored into the store's
     /// `CodeNavStore`, because resolution finishes before the .gmap is written.
     pub field_types: HashMap<NodeId, HashMap<String, String>>,
@@ -1414,7 +1420,14 @@ pub struct CodeNav {
     /// `repositories.NewX()`, arguments elided): the local holds that call's
     /// result, whose type a language hook reads off [`CodeNav::return_types`].
     /// Go keeps a package qualifier (`repositories.UserRepository`), which no
-    /// bare-name lookup matches.
+    /// bare-name lookup matches. DT.5j adds four Go forms, read by the Go
+    /// call hook only: `[]E` a container (a slice / array / map local,
+    /// parameter, variadic or package var) of element type `E`;
+    /// `<chain>[]` an element of the chain's container (`for _, c := range
+    /// s.checks` records `self.checks[]`); `func() R` a func value whose
+    /// call yields `R` (a func literal, a func-typed parameter or var); and
+    /// `a|b` the agreeing alternatives of a name several declarations in one
+    /// scope type (at most four; an unknown declaration makes it `""`).
     ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub local_types: HashMap<NodeId, HashMap<String, String>>,
