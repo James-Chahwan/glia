@@ -674,6 +674,11 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W27 (DT.5l, its own risks): gate a Go `init` entry on its package being imported by live code; an ext-gated named-entry
   row with prefixes would need hubs.rs and duplicate_flows.rs to call accepts_ext; the external-base invoked-member rows miss
   aliased imports (`import { TranslocoLoader as TL }`) and in-repo intermediate bases.
+- W28 (DT.5i, DT.5e): a Riverpod provider read is still not a USES of its STATE_VAR (the CH.4 / DT.5e decision): a
+  provider initialiser's callees (ActivityService::mine via myActivitiesProvider) get an incoming CALLS but reach the live set
+  only when the provider itself is live. Not read: riverpod_generator `@riverpod` providers (a `.g.dart` part file),
+  `ref.read(p.future)` and FutureProvider / StreamProvider values (AsyncValue, on purpose), AsyncNotifier and bloc Cubit /
+  Bloc state.
 
 ## 3. Open questions for James
 
