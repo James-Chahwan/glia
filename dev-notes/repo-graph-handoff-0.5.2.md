@@ -3,7 +3,8 @@
 **This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
 writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
 version goes 0.5.1 -> 0.5.3 in one bump, and the local tag `0.5.2-complete` marks the commit where 0.5.2
-ends. Section 9 lists the tweaks (DT.1a-DT.13, waves W15-W26) on top of the W0-W14 content below.
+ends. Section 9 lists the tweaks (DT.1a-DT.13, waves W15-W26) on top of the W0-W14 content below, and
+section 10 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves W27-W30, and DT.14).
 
 **Status: held: repo-graph upgrades from 0.5.1 straight to 0.5.3; this file is the 0.5.2 half of that
 handoff.** James, 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. This
@@ -466,7 +467,7 @@ render oddly (rows 2 and 3, optional fixes).
 | 4 | DT.1c declared model fields (`2009dc35`), DT.1l Dart models (`f247e21e`), DT.1j GraphQL types (`a52201dd`) | every TS interface / field-only class, Go struct, Dart `fromJson` / `@JsonSerializable` model and GraphQL SDL type gains SCHEMA_FIELDS `{"extends"?,"fields":[{"name","type","required",..}],"format":"ts\|go\|dart\|graphql","open"?}` (Kina 128 structs + 130 interfaces, quokka-stack 97 + 75); `message:graphql:<T>` MESSAGE_TYPE nodes are new | `read` lists SCHEMA_FIELDS as `fields` (`_CELL_LABEL_OVERRIDES`, `server.py:658`), and `_cell_text`'s dict branch (`:718-719`) prints `fields=[{...}] format=ts`, cut at 400 chars. **Optional:** render `name: type` pairs, `?` when not required. |
 | 5 | DT.1e Go wire cells (`d5e6f011`), DT.1f typed (`4dee0a11`), DT.1j / DT.1k GraphQL cells | Go handlers gain MESSAGE_TYPE cells (form `json_response` / `json_bind`, `model` keys from DT.1f); GraphQL root fields `graphql_returns`, operations `graphql_selection`, TS callables issuing a typed GraphQL call `graphql_result` | orient's dense map (`server.py:296`, `:300`) shows a `:msgtype` line per cell and a model-field line per SCHEMA_FIELDS node, so `DENSE_TEXT_MAX_CHARS` (50,000, `:274-276`) truncates a large repo's full map sooner. No change; raise the cap or scope the map if it bites. |
 | 6 | DT.1d TS wire shapes (`0685f7a4`), DT.1l Dart (`f247e21e`), DT.4 query suffix (`3a830b3f`), DT.3b WS host (`d405c8e6`) | ENDPOINT_HIT payloads gain trailing `response` / `request` (TS / Dart), `query` (after `alias`) and, on a folded WS client, `host` | `_cell_text` prints the first six fields (`:719`); `_dial_text` now shows the WS host where it said `host not named in source`. No change. |
-| 7 | DT.5a-DT.5g dead-symbol precision (`b0856ea5`, `402ca6e6`, `e22c2d21`, `5dd52313`, `787fe464`, `6a8b49c3`, `9d4494af`), DT.10a Solidity procedures (`fb811da7`), DT.1b / DT.1q imports (`f4dd85de`, `e7dfb31d`) | a used owner's framework- and runtime-invoked members and constructors are live (a walk-local hop; the `[live]` line gains `invoked=`); Angular inline / `templateUrl` / host bindings, template receivers and decorator-bound members, Flutter closures / constructions / method refs and widget classes (ROLE COMPONENT, entries), gqlgen resolver methods, TS values passed by reference and getter reads, Solidity external functions are edges or entries; generated code is no `dead_symbol` row. Kina `dead_symbol` 517 -> 52 and quokka-stack 748 -> 124 across the packets (each step measured on its own base; DT.5a alone, the declared break: Kina 517 -> 208, quokka-stack 748 -> 741). DT.5b's walk reads an `.html` beside a same-stem `.ts` (no node or MODULE; the `[parallel] walk .. read <n> files` count grows) and binds it to the component that names it in `templateUrl` | `⊘` (`server.py:981-985`) and the impact note's dead count (`:485`) flip to live for those symbols; `live_only=True` keeps more rows. No change. |
+| 7 | DT.5a-DT.5g dead-symbol precision (`b0856ea5`, `402ca6e6`, `e22c2d21`, `5dd52313`, `787fe464`, `6a8b49c3`, `9d4494af`), DT.10a Solidity procedures (`fb811da7`), DT.1b / DT.1q imports (`f4dd85de`, `e7dfb31d`) | a used owner's framework- and runtime-invoked members and constructors are live (a walk-local hop; the `[live]` line gains `invoked=`); Angular inline / `templateUrl` / host bindings, template receivers and decorator-bound members, Flutter closures / constructions / method refs and widget classes (ROLE COMPONENT, entries), gqlgen resolver methods, TS values passed by reference and getter reads, Solidity external functions are edges or entries; generated code is no `dead_symbol` row. Kina `dead_symbol` 517 -> 52 and quokka-stack 748 -> 124 across the packets (each step measured on its own base; DT.5a alone, the declared break: Kina 517 -> 208, quokka-stack 748 -> 741; the close-out, section 10, then takes them to 32 and 41). DT.5b's walk reads an `.html` beside a same-stem `.ts` (no node or MODULE; the `[parallel] walk .. read <n> files` count grows) and binds it to the component that names it in `templateUrl` | `⊘` (`server.py:981-985`) and the impact note's dead count (`:485`) flip to live for those symbols; `live_only=True` keeps more rows. No change. |
 | 8 | DT.11z channel caveats (`71a13fe2`), DT.10h EVM caveats (`2fc07e62`) | `coverage()` rewrites the `*` QUEUE_FLOWS, WS_CONNECTS and GRAPHQL_CALLS notes, extends the universal RPC_CALLS note and verify with the EVM reading and adds one universal `*` EVENT_FLOWS row (contract-event subscriptions); every absence that reads RPC_CALLS or EVENT_FLOWS carries them | `_coverage_note` (`server.py:1008-1028`) prints `recs[:8]` capped at 200 chars: the footer text changes and the new row may enter the eight. No change. |
 | 9 | DT.9 traversal category names (`b1ecad68`) | `neighbours` / `bfs` / `predecessors` / `reachable_by` / `shortest_path` take `categories=["CALLS", "imports", 9]` (ids or registry names, mixed, case-insensitive); an unknown name is a `ValueError` naming it; rows still carry ids; `py/api_surface/traversal.txt` `Option<Vec<u32>>` -> `Option<Vec<CategoryArg>>` | **Correction to DT.9's note** ("the wrapper may drop its category_names() id lookup before traversal calls"): the wrapper looks no id up before a traversal call; it passes `None` (`graph.py:114`, `:126`, `:137`), and `CATEGORY_NAMES` (`graph.py:22`) decodes the ids the rows carry, so it stays. A future filtered call can pass names. |
 | 10 | DT.6a test-only routes (`5112e840`), DT.6b (`b3537e71`) | HTTP_CALLS into a ROUTE every registration site of which is test code are gone; a product ROUTE no longer carries ORIGIN `test_fixture`; `gaps` withholds test-only routes and `suffix_of` / `suspected_edge` skip them; the prelude's `unhandled_route` excludes them | a client that calls a test-only route loses that hop in `impact` / `trace` (no test-bed pair moved: Kina 6 and examples-glia 1 such routes have no product caller); the wrapper calls no `gaps` / `query`. No change. Rust (additive): `MountedHttpResolver::without_routes`. |
@@ -570,3 +571,101 @@ DT.3a-DT.3c, DT.4, DT.5a-DT.5g, DT.6a, DT.6b, DT.7a-DT.7c, DT.8a, DT.8b, DT.9, D
 DT.11z, DT.12a (engram-export only: `<out>.hints.jsonl`), DT.12b. PARSER_STAMP moved with most of
 them, so the first build after the upgrade reparses everything; FORMAT_VERSION stays 3 and no registry
 id was allocated.
+
+## 10. The close-out: dead_symbol false positives (DT.5h-DT.5l, waves W27-W30, 2026-10-17)
+
+James, 2026-10-17 (`dev-notes/tweaks-0.5.2.md` ruling 7): *"lets fix the false positives that counts
+as closeout i think"*. The re-demo's remaining `dead_symbol` rows were audited by hand: Kina `8ac238c`
+52 and quokka-stack `a77d4cb` 124, 176 rows, 103 false and 73 truly dead (the audit's list has 74
+entries; Kina's names `OnboardingStore::reset` twice). Each false mechanism became one packet, and each
+packet's precision gate kept every truly dead row. Measured by DT.14 at glia HEAD `1212a3be` (debug CLI,
+stamp `0.5.1+p395be331c3dfb5b8`, `glia gaps <copy> --json --top-k 5000 --category dead_symbol` on
+git-archive copies): **Kina 52 -> 32, quokka-stack 124 -> 41, examples-glia `fbfb6c0` 11 -> 11**, and the
+rows left on Kina and quokka-stack are exactly the audit's 32 and 41 truly dead qnames (none missing,
+none extra). The `0.5.2-complete` tag, set after DT.13 at `421af2d8`, moves to the commit after DT.14
+(ruling 7: "`0.5.2-complete` moves to the new end"), so a wheel built at the tag carries this section.
+Sources as in the header: each packet's landed commit body and its routed handoff paragraph in
+`dev-notes/leap-052-corrections.json`. Wrapper sites read at repo-graph HEAD `0f8ecfa` again (the same 12
+modified and 4 untracked paths; nothing at a cited line moved).
+
+**Still no code change.** No pyo3 method changed its signature or return shape (DT.5l's
+`node_record` reads `EntryRule::is_entry_at` inside the engine). What the wrapper shows changes: fewer
+`⊘`, more callers in `impact` / `trace`, more entry flows, and a few new role labels.
+
+### 10.1 Breaks that reach the wrapper
+
+| # | packet (commit) | old -> new | wrapper site and action |
+|---|---|---|---|
+| 1 | DT.5l runtime-invoked entries and members (`b7f4dace`) | entries: a Go `func init()` (the entry table's new `FUNCTION init` row, limited to `.go` files: a TS or Python `init` stays an ordinary name), a Swift `@main` / `@UIApplicationMain` / `@NSApplicationMain` type and a Kotlin FlutterActivity / FlutterFragmentActivity / FlutterFragment / FlutterApplication subclass under an io.flutter import (both new ROLE COMPONENT cells); a Python MODULE with an `if __name__ == "__main__":` guard gains one ENTRYPOINT cell `{"decl":"<file>:<1-based row>","source":"main_guard"}` and is a declared entry. Live members of a live owner: Go methods the runtime calls by signature (`Error` / `String` `()(string)`, `Unwrap` beside an `Error`, the JSON / text / BSON marshalers, `Scan`, `Value`, `ServeHTTP`, `Len` / `Less` / `Swap` together), an `@main` type's app-delegate callbacks and SwiftUI `body`, and members a library base calls (Transloco loaders and handlers, Angular ErrorHandler / Resolve / TitleStrategy / RouteReuseStrategy, dio interceptors). Kina 52 -> 48, quokka-stack 124 -> 116 on its own base | `nodes_json` (`graph.py:58`): `entry` turns true for the Go `init`, `@main` and Flutter-activity nodes (a script MODULE stays `entry: false`, its entry is a declared one) and `live` true for all of them and what they reach, so `_classify_tier` (`server.py:911-924`) tiers them ENTRY (`_effective_kind`, `:898`, now reads `component` for the Swift and Kotlin classes), `_elive` (`:980-985`) drops their `⊘`, and the impact note's dead count (`:474`, `:483-486`) falls. `entry_flows` (`graph.py:64-71`, `flows` `:73-76`) gains flows rooted at Go `init`, `@main` types and Flutter activities (not at a script MODULE), so refresh's entry-point count (`server.py:862`) and trace's "Available entry points" (`:530-534`) grow. **Optional render:** `read` lists a script MODULE's ENTRYPOINT cell under the label "declared entry point" (`_CELL_LABEL_OVERRIDES`, `:663`; `_cell_text`'s ENTRYPOINT branch, `:703`) as `tool.py:12 main_guard`; it is read from the source, not declared, so label it "entry point" when `source == "main_guard"`. |
+| 2 | DT.5i Riverpod receivers and the Dio interceptor ROLE (`bf53a65e`) | a class extending dio's Interceptor / QueuedInterceptor / InterceptorsWrapper / QueuedInterceptorsWrapper in a file importing `package:dio/` gains ROLE SERVICE (services extractor rule `dio_interceptor`, HEURISTIC; quokka-stack `AuthInterceptor`) | `nodes_json` `roles` gains `service`: `_record_kind` (`:886`) / `_effective_kind` label it `service` (was `class`); its tier stays HANDLER (`_HANDLER_KINDS`). No change. |
+| 3 | DT.5h (`332e66e5`), DT.5i, DT.5j (`784d8553`), DT.5k (`aa30014b`) new edges | Dart, Go and TS graphs gain CALLS / USES / INJECTS / HANDLED_BY / TESTS edges (10.3) and lose no edge; no node is added on the measured repos and no qname moves | `impact` (`server.py:437`) and `trace` (`:520`, `:608`, `graph.py:69`) reach the new callers and dependents; `live_only=True` keeps more rows; the `⊘` marks drop (dead_symbol per packet: quokka-stack 124 -> 86 DT.5h, 78 -> 45 DT.5i, 45 -> 43 DT.5j, 43 -> 41 DT.5k; Kina 48 -> 38 DT.5j, 38 -> 32 DT.5k). No change. |
+
+### 10.2 Answers the wrapper does not call (for P4 or a later mode)
+
+The wrapper calls none of these (grep of `repo_graph/` at `0f8ecfa`: 0 hits).
+
+| packet (commit) | old -> new |
+|---|---|
+| all five | `gaps()` `dead_symbol` loses the rows above, and `overlay_propose`'s dead_symbol candidates and `overlay_delta`'s counts drop with them; `PyGraph.query` / `query_gql`'s prelude `live` / `unreached` move; `communities` / `splits` gain entry flags on Go `init`, `@main` types and Flutter activities, and `entry_flows` / `duplicate_flows` gain their flows (DT.5l). |
+| DT.5j (`784d8553`) | EVIDENCE moves on Go calls through a package-qualified field: emitter / rule `graph:calls` `receiver_type` -> `graph:go_packages` `receiver_field_chain`, same target (Kina 305 pairs, examples-glia 8): `why`, `check` / `review` violation tables and `query`'s edge_cell rows show the new emitter. New USES rule `composite_literal` (a fn / METHOD / package var -> the STRUCT a literal builds; Kina 492 edges, quokka-stack 103, examples-glia 14), so a `forbid_edge` over USES can gain rows: Kina's own handlers -> repository rule goes 30 -> 37 (8 CALLS rows now name graph:go_packages, 7 new USES composite_literal rows for handlers building repository filter / record structs; exit 1 before and after). |
+| DT.5k (`aa30014b`) | `glia coverage`'s TypeScript CALLS row and analyze's unresolved counts move (`unresolved_calls` lose the bound sites; `unresolved_refs` gain the inline-inject INJECTS refs whose target is third-party: Kina 15, quokka-stack 3). |
+
+### 10.3 Graph content (no wrapper code parses it)
+
+- **DT.5h Dart names and member reads (`332e66e5`).** A getter / setter named in a body is CALLS
+  `accessor_read` / `accessor_write` (parser:dart), a METHOD / FUNCTION named in any value position
+  (conditionals, `??`, initialisers, interpolations, collection elements, returns) USES `method_ref`;
+  a member read no call follows (`Env.apiBaseUrl`, `.map(Friend.fromJson)`) is CALLS `accessor_read`,
+  USES `tear_off` or USES of the CLASS `static_member`, emitter `graph:reads`; `T.new` and a
+  constructor tear-off CALLS the class; a class field's initialiser is its CLASS's CALLS / USES (a
+  self-loop when a class constructs itself in a static field). quokka-stack +58 unique edges (USES 40,
+  CALLS 18), 0 removed; Kina and examples-glia byte-identical. `RepoGraph.properties` now holds Dart
+  getters / setters. A Dio / http call in a field initialiser would mint its ENDPOINT (none measured).
+- **DT.5i Riverpod (`bf53a65e`).** CALLS `graph:dart` `provider_receiver` for `ref.read(p).m()`,
+  `ref.read(p.notifier).m()` and a local holding the read, bound only to a METHOD of the type the
+  provider declares; `graph:reads` `accessor_read` on provider reads; `graph:calls` `receiver_type` on a
+  StateNotifier / Notifier / ValueNotifier subclass's `state.m()`. quokka-stack +64 unique CALLS, 0
+  removed, `[live] reached=` 1709 -> 1867 of 3455; ROLE SERVICE on Dio interceptors (10.1 row 2).
+- **DT.5j Go (`784d8553`).** CALLS through range-variable elements, package-qualified fields,
+  func-value locals, agreeing alternatives and composite-literal receivers; USES `method_value` /
+  `func_value` (a func or method passed, assigned, returned or initialising a package var) and
+  `composite_literal`, emitter `graph:go_packages`; HANDLED_BY `package_function` (a `pkg.F` handler in
+  another file of the imported package); TESTS follow the new CALLS. Kina +524 pairs (CALLS 29, value
+  USES 4, HANDLED_BY 1, TESTS 1, composite_literal 489 pairs / 492 edges), quokka-stack +4 + 103
+  composite_literal, examples-glia 8 evidence moves + 14 composite_literal; 0 removed anywhere. Go
+  STRUCTs now carry incoming USES from their literals.
+- **DT.5k TypeScript (`aa30014b`).** CALLS `receiver_type` through an Angular signal query field or an
+  inline `inject(T)`, `receiver_return` through a call-result local, `receiver_accessor_read` /
+  `receiver_accessor_write` for a getter / setter on another typed object; INJECTS from each scope that
+  runs an inline `inject(T)` (functional guards and interceptors, InjectionToken factories,
+  call-initialised fields: `graph:refs` `import_binding`, or parser rule `inject_call` in-file); USES
+  `static_member` for `T.X`; USES `value_ref` for an `inject`'s later argument. Kina +51 triples / +127
+  edge rows (CALLS 36, INJECTS 14, USES 1), quokka-stack +18 (CALLS 14, INJECTS 4), examples-glia 0;
+  nothing removed, no node added, no existing edge's cells changed.
+- **DT.5l (`b7f4dace`).** A `__main__` guard's calls are MODULE -> callee CALLS; a bare Python call
+  binds the caller's nested def first (CALLS rule `nested_def`), so an edge that bound a shadowed
+  module-level function moves to the nested def (edge_removal: none on Kina / quokka-stack, one in the
+  new fixture); a guard's HTTP client call can mint an ENDPOINT (none measured); the ROLE and
+  ENTRYPOINT cells of 10.1 row 1.
+
+### 10.4 Stderr (the server relays and parses none)
+
+New: `[reads] member reads ..` (DT.5h), `[dart-scope] provider receivers bound=`, `[dart-riverpod]
+providers= locals= holders= file=`, `[services] dart classified= rules=dio_interceptor:` (DT.5i),
+`[go-receivers] typed elem= qualified_field= func_value= alternatives= conversion=`, `[go-values]
+uses= (method= func= composite_literal=) dropped= refs= pkg_handlers=` (DT.5j), `[ts-receivers] ..`,
+`[recv] ts receivers bound: ..`, `[resolve] static member uses bound: <n>` (DT.5k), `[invoked] rows=
+.. sig_rejected=`, `[py-main] guard module= calls= file=`, `[py-nested] nested-def calls bound=
+file=`, `[swift-app] entry types= file=` (DT.5l). Changed: `[dart-calls]` gains `accessor_refs=
+tear_offs= field_inits= member_reads= elements=` and fires on more files (DT.5h); `[ts-locals]` gains
+`call=` (DT.5k); `[live]` and `[dead-framework]` counts; `[kotlin/retrofit] components=` counts
+Flutter activities (DT.5l); `[go-receivers] bound=`, `[recv]`, `[iface]`, `[go-embeds] .. fields=`
+counts (DT.5j); `[evidence-graph]` extra_hook counts on Dart graphs (DT.5i). CLAUDE.md's marker list
+has every format.
+
+### 10.5 Every close-out packet, for the merge
+
+DT.5h `332e66e5`, DT.5l `b7f4dace` (W27), DT.5i `bf53a65e` (W28), DT.5j `784d8553` (W29), DT.5k
+`aa30014b` (W30): each declared a graph-content break (above) and moved PARSER_STAMP, so the first
+build after the upgrade reparses everything. DT.14 (W31) is these docs: no break. No registry id, no
+FORMAT_VERSION change, no Cargo.lock move.

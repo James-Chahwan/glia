@@ -4,7 +4,8 @@
 writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
 version goes 0.5.1 -> 0.5.3 in one bump, every pin below reads `=0.5.3`, and the local tag
 `0.5.2-complete` marks the commit where 0.5.2 ends. Section 10 adds the tweaks (DT.1a-DT.13, waves
-W15-W26) to the W0-W14 content below.
+W15-W26) to the W0-W14 content below, and section 11 the close-out (DT.5h-DT.5l, the dead_symbol
+false positives, waves W27-W30, and DT.14).
 
 The third glia -> neuropil handoff, after `neuropil-handoff-0.5.0.md` and `neuropil-handoff-0.5.1.md`.
 neuropil is glia's in-process Rust consumer: it path-depends on six glia crates and calls
@@ -477,3 +478,87 @@ annotations on these stop matching once.
 
 Every DT packet: declared no break, DT.1a, DT.1g, DT.1m, DT.1o, DT.13; DT.12a is engram-export only
 (`<out>.hints.jsonl`); the rest are above.
+
+## 11. The close-out: dead_symbol false positives (DT.5h-DT.5l, waves W27-W30, 2026-10-17)
+
+James, 2026-10-17 (`dev-notes/tweaks-0.5.2.md` ruling 7): *"lets fix the false positives that counts
+as closeout i think"*. The re-demo's remaining `dead_symbol` rows on Kina (52) and quokka-stack (124)
+were audited, 103 false and 73 truly dead, and each false mechanism became one packet: DT.5h
+(`332e66e5`) Dart names and member reads, DT.5l (`b7f4dace`) runtime-invoked entries and members,
+DT.5i (`bf53a65e`) Riverpod receivers and the Dio interceptor ROLE, DT.5j (`784d8553`) Go receiver
+typing and values, DT.5k (`aa30014b`) TS receivers. At glia HEAD `1212a3be` Kina reads 32 rows and
+quokka-stack 41, the audit's truly dead set exactly. The `0.5.2-complete` tag moves from `421af2d8`
+(after DT.13) to the commit after DT.14. Sources: each packet's landed commit body and the routed
+handoff paragraphs in `dev-notes/leap-052-corrections.json`; neuropil read read-only at the same
+`b140d1e` with the same 50 dirty paths.
+
+### 11.1 The compile check, re-run
+
+DT.14 re-ran section 1's recipe unchanged against glia HEAD `1212a3be` (the W30 close-out `cc5ac06c`
+plus one plan commit; DT.14's own edits are docs, outside every hashed root), copy and target under
+`~/.cache/glia-DT.14/npcheck/`, deleted afterwards; neuropil's `git status` 50 dirty paths before and
+after:
+
+```
+[rename-0.5.0] rewrote 165 token(s) in 50 file(s) under /home/ivy/.cache/glia-DT.14/npcheck/np (0 unknown token(s) left)
+[neuropil-check] note - neuropil differs from the baseline's (b140d1ede58ff6e77e8e7326a6a4cf21e822959e dirty=50 src=b690b6b4f6db -> unknown src=73b04787b8a9): NEW/FIXED may be neuropil's own edits, not the leap's
+[neuropil-check] ok - new=0 fixed=0 preexisting=0 in 114.5s against glia 0.5.1+p395be331c3dfb5b8 (neuropil unknown, lock drift +40 -26)
+```
+
+`errors.txt` empty; cargo `Finished ... in 1m 54s`; the lock drift is W14's (+40 / -26): the close-out
+adds no crate. A grep of neuropil's `crates/` finds 0 hits for each item 11.3 names (`NamedEntry`,
+`EntryRule`, `is_entry`, `InvokedMembers`, `invoked_member`, `INVOKED_MEMBERS`, `node_ext`,
+`method_signature`, `build_dart`, `NavFact`, `MemberRead`, `RiverpodProvider`, `ReceiverType`,
+`CODE_TABLES`, `entrypoint_reachable`, `roles_in`, `.properties`, `ENTRYPOINT`).
+
+### 11.2 What re-keys
+
+Nothing on the test beds: no packet moved a qname or a kind, and no node was added on Kina,
+quokka-stack, examples-glia or any fixture. Two paths can mint a new node id elsewhere: a Dio / http
+call written in a Dart class field's initialiser now runs the client-call detector and mints its
+ENDPOINT (DT.5h), and an HTTP client call inside a Python `__main__` guard does the same from the
+MODULE (DT.5l).
+
+### 11.3 Engine API changes, against neuropil (0 hits each)
+
+| packet (commit) | item: old -> new |
+|---|---|
+| DT.5l (`b7f4dace`) | `glia_activation::profile::NamedEntry` gains the pub field `exts: &'static [&'static str]` (a struct literal outside activation / code-domain breaks) and `accepts_ext`; `EntryRule::is_entry_at(kind, name, roles, ext)` (additive; `is_entry` keeps its signature and stays extension-blind); `glia_code_domain::profile::InvokedMembers` gains the pub fields `sigs`, `siblings`, `owner_bases` (a struct literal breaks) and `matches_at` / `gates` / `checks_signature`; new `ExternalBase { library, name }`, `invoked_member_at`, `node_ext(cells)`; `INVOKED_MEMBERS` 12 -> 33 rows (`invoked_member`, 4 arguments, never matches the 20 gated ones: go_runtime, transloco, the four Angular bases, dio; the new apple_app row is ungated); `CODE_TABLES.entry.named` gains `FUNCTION init` limited to `.go`; `glia_parser_go::method_signature(code)` |
+| DT.5h (`332e66e5`), DT.5i (`bf53a65e`), DT.5k (`aa30014b`) | `glia_code_domain::NavFact` gains `MemberRead { receiver, name, line }` (DT.5h), `RiverpodProvider { read, notifier }` (DT.5i), `ReceiverType { receiver, ty }`, `MemberWrite { receiver, name, line }`, `Getter`, `Setter` (DT.5k), appended (build-time only, old bincode tags kept); NavFact is not `#[non_exhaustive]`, so an exhaustive `match` outside the workspace stops compiling |
+| DT.5h (`332e66e5`) | new flat `glia_graph::build_dart(repo, parses, resolve_source)` (engine's Dart group calls it); `RepoGraph.properties` holds Dart getters / setters (persisted in each shard's code section) |
+
+### 11.4 Behaviour changes with no required code change
+
+- **Edges** (only additions, but one Python move): Dart CALLS `accessor_read` / `accessor_write`, USES
+  `method_ref` in any value position, `graph:reads` `accessor_read` / `tear_off` / `static_member`, a
+  CLASS's field-initialiser CALLS / USES (DT.5h; quokka-stack +58 unique edges); Dart CALLS
+  `graph:dart` `provider_receiver` (DT.5i; quokka-stack +64 CALLS); Go CALLS through range elements,
+  qualified fields, func values and composite literals, USES `method_value` / `func_value` /
+  `composite_literal`, HANDLED_BY `package_function`, TESTS (DT.5j; Kina +524 pairs, 492 of them
+  composite_literal edges; quokka-stack +107); TS CALLS `receiver_type` / `receiver_return` /
+  `receiver_accessor_read` / `receiver_accessor_write`, INJECTS from inline `inject(T)`, USES
+  `static_member` (DT.5k; Kina +127 edge rows, quokka-stack +18); Python MODULE -> callee CALLS for a
+  `__main__` guard, and CALLS `nested_def`, which moves a bare call off a shadowed module-level def onto
+  the caller's nested def (DT.5l; one edge in the new fixture, none on the test beds). neuropil's
+  `edge_category_name` (`hud.rs:1516-1550`) already names CALLS / USES / INJECTS / HANDLED_BY / TESTS.
+- **Evidence:** 305 Kina CALLS pairs through a package-qualified Go field move from emitter
+  `graph:calls` rule `receiver_type` to `graph:go_packages` `receiver_field_chain` (DT.5j); neuropil
+  reads no EVIDENCE cell (0 hits).
+- **Cells:** ROLE COMPONENT on Swift `@main` types and Kotlin Flutter activities (DT.5l), ROLE SERVICE
+  on Dio interceptor classes (DT.5i), an ENTRYPOINT cell `{"decl":"<file>:<1-based row>",
+  "source":"main_guard"}` on a Python script MODULE (DT.5l). **Correction to DT.5i's and DT.5l's
+  neuropil notes** ("neuropil sees ROLE SERVICE on Dio interceptors (roles_in)", "neuropil's roles_in
+  reads it"): neuropil calls no `roles_in` and reads no ROLE cell (0 hits); its tier lanes key on node
+  kind, so these classes stay in their CLASS lane. The HUD's cell list (`hud.rs:1386-1389`) shows the
+  new cells under `cell_label`'s fallback `CELL` (`hud.rs:1552-1569`) with the raw payload. Optional:
+  `ROLE` / `ENTRYPOINT` arms there.
+- **Liveness:** neuropil computes none (no `entrypoint_reachable`); glia's own answers (`gaps`
+  dead_symbol, the rules prelude's `live`, entry flows) move.
+- **The build:** PARSER_STAMP moved with every packet (the dart, python, swift, kotlin, go and
+  typescript parsers, extractors, graph, code-domain, activation); neuropil's `generate_one` keeps no
+  parse cache. New stderr lines at boot are in CLAUDE.md's marker list (`[reads]`, `[dart-scope]`,
+  `[dart-riverpod]`, `[go-receivers] typed`, `[go-values]`, `[ts-receivers]`, `[recv] ts receivers
+  bound:`, `[resolve] static member uses bound:`, `[invoked]`, `[py-main]`, `[py-nested]`,
+  `[swift-app]`).
+
+Every close-out packet declared a break, all above; DT.14 (these docs) declared none.

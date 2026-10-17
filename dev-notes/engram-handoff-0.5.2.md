@@ -5,7 +5,8 @@ writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1
 version goes 0.5.1 -> 0.5.3 in one bump, so the pin is `=0.5.3`. Meanwhile Engram builds the exporter
 from source at the local tag `0.5.2-complete`, whose binaries print `0.5.1+p<stamp>`. Section 7 adds the
 tweaks (DT.1a-DT.13, waves W15-W26), among them the hints side file and `glia cell set --hint` for the
-corrections writer.
+corrections writer, and section 8 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves
+W27-W30, and DT.14), after which the tag moves.
 
 **From:** the glia session, 2026-10-16, written by the docs packet DZ.2 after glia's last code wave.
 **To:** an engram session.
@@ -66,6 +67,9 @@ landed it.
 10. **The tweaks (section 7):** every export also writes `<out>.hints.jsonl` (each fact's v1 identity
    hint); `glia cell set --hint` / pyo3 `hint=` take it; and more facts and edges for TS / Go / Dart /
    Solidity code, with a few keys re-keyed.
+11. **The close-out (section 8):** more Calls / Imports / Causes / Cooccurs edges in Dart, Go, TS and
+   Python exports, no key moves, no exporter change; `0.5.2-complete` moves from `421af2d8` to the
+   commit after DT.14, so a replay built at the old tag lacks these edges.
 
 ## 2. The pin
 
@@ -541,3 +545,68 @@ pass named below is read from `engram-export/src/diff.rs` (its `alike_paths` rul
 
 Every DT packet: declared no break, DT.1a (`5af245f6`), DT.1g (`eddf53b4`), DT.1m (`62fa15c4`), DT.1o
 and DT.13; the rest are above.
+
+## 8. The close-out: dead_symbol false positives (DT.5h-DT.5l, waves W27-W30, 2026-10-17)
+
+James, 2026-10-17 (`dev-notes/tweaks-0.5.2.md` ruling 7): *"lets fix the false positives that counts
+as closeout i think"*. The re-demo's remaining `dead_symbol` rows on Kina `8ac238c` (52) and
+quokka-stack `a77d4cb` (124) were audited, 103 false and 73 truly dead, and each false mechanism became
+one packet: DT.5h (`332e66e5`) Dart names and member reads, DT.5l (`b7f4dace`) runtime-invoked entries
+and members, DT.5i (`bf53a65e`) Riverpod receivers and the Dio interceptor ROLE, DT.5j (`784d8553`) Go
+receiver typing and values, DT.5k (`aa30014b`) TS receivers. Measured by DT.14 at glia HEAD `1212a3be`
+(stamp `0.5.1+p395be331c3dfb5b8`): Kina 32 rows and quokka-stack 41, the audit's truly dead set exactly.
+Numbers below are the commits' own unless they say HEAD; nothing here was run against an Engram
+checkout.
+
+### 8.1 The tag and the replays
+
+`0.5.2-complete` was set after DT.13 at `421af2d8`; ruling 7 moves it to the commit after DT.14, the
+close-out's last packet. **The Kina + glia replays (section 6) should build at the moved tag**: one
+built at `421af2d8` has none of this section's edges. `git -C /home/ivy/Code/glia rev-parse
+0.5.2-complete` tells them apart; the exporter's `-V` stamp moves too (PARSER_STAMP moved with every
+packet).
+
+### 8.2 What the close-out changes in an export
+
+The exporter is unchanged by every close-out packet (each wave's `scripts/check-engram-export.sh`
+printed `[engram-export] check: ok - build + 102 tests passed against engram-core
+GMAP_FORMAT_VERSION=6`). What moves is the graph it exports.
+
+- **Keys:** none move. No packet changed a qname or a kind, and no node was added on Kina,
+  quokka-stack, examples-glia or any fixture; `<out>.hints.jsonl` rows are unchanged. Two paths can
+  add a fact elsewhere: a Dio / http call in a Dart class field's initialiser (DT.5h) or in a Python
+  `__main__` guard (DT.5l) now mints its ENDPOINT, which arrives with a `null` hint like every ENDPOINT.
+- **Edges** (gmap EdgeKind by `CATEGORY_MAP`):
+  - **Calls 0.8:** Dart getter / setter reads and writes, constructor tear-offs and field
+    initialisers (DT.5h; quokka-stack 18 of +58 unique edges), calls on Riverpod provider reads
+    (DT.5i; quokka-stack +64), Go calls through range elements, package-qualified fields, func values
+    and composite literals (DT.5j; Kina +29), TS calls through signal queries, inline `inject(T)`,
+    call-result locals and accessors on typed objects (DT.5k; Kina +36, quokka-stack +14), and a
+    Python `__main__` guard's calls from its MODULE (DT.5l; the `[py-main]` lines at HEAD: Kina
+    `scripts::gitlab-line-code` calls=8 and `scripts::plan-sync` calls=1, quokka-stack
+    `scripts::generate-repo-map` calls=1).
+  - **Imports 0.5** (from USES): Dart `method_ref` in any value position, `tear_off`, `static_member`
+    (DT.5h; quokka-stack +40), Go `method_value` / `func_value` and `composite_literal` (DT.5j; Kina 4
+    value refs + 492 composite_literal edges, quokka-stack 103, examples-glia 14), TS `static_member`
+    and an `inject`'s later argument (DT.5k; Kina +1).
+  - **Causes:** TS INJECTS from inline `inject(T)` scopes (DT.5k; Kina +14, quokka-stack +4) and Go
+    HANDLED_BY `package_function` (DT.5j; Kina +1).
+  - **Cooccurs:** Go TESTS following the new CALLS (DT.5j; Kina +1).
+  - **One move:** a bare Python call now binds the caller's nested def first (DT.5l, rule
+    `nested_def`), so a Calls edge to a shadowed module-level function is removed and one to the nested
+    def added (none on Kina / quokka-stack; at HEAD `[py-nested] nested-def calls bound=6` on
+    quokka-stack's `scripts/generate-repo-map.py`, all on defs no module-level function shadows).
+- **Not in the gmap:** the new ROLE cells (COMPONENT on Swift `@main` types and Kotlin Flutter
+  activities, DT.5l; SERVICE on Dio interceptors, DT.5i) and the Python script MODULE's ENTRYPOINT
+  cell `{"decl":"<file>:<1-based row>","source":"main_guard"}` (DT.5l): the exporter reads neither
+  cell. EVIDENCE is not in the gmap either, so DT.5j's move of 305 Kina qualified-field CALLS from
+  `graph:calls` `receiver_type` to `graph:go_packages` `receiver_field_chain` changes nothing there.
+  `RepoGraph.properties` (DT.5h: Dart getters / setters) is not exported.
+- **Answers Engram may call:** `glia gaps` `dead_symbol` (the numbers above); `glia query`'s prelude
+  `live` / `unreached`; `glia check`, where a forbid_edge over USES can gain composite_literal rows
+  (Kina's handlers -> repository rule 30 -> 37 rows, exit 1 before and after, DT.5j); entry flows,
+  communities and splits gain entries at Go `init`, `@main` types and Flutter activities (DT.5l).
+- **The build:** PARSER_STAMP moved with every packet, so the first export after the upgrade reparses
+  everything; no registry id, no format change, no Cargo.lock move.
+
+Every close-out packet declared a graph-content break, all above; DT.14 (these docs) declared none.

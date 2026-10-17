@@ -50,7 +50,10 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
                     Andersen-Chung-Lang, over an Adjacency, DE.5); `plan` (one
                     ActivationPlan over the RankingSignal / FilterPredicate / SynthHook
                     hooks) and `profile` (DomainTables / DomainProfile; 0.5.2 adds
-                    IdentityRule / IdentityTier and `DomainTables.identity_rules`, DD.3)
+                    IdentityRule / IdentityTier and `DomainTables.identity_rules`, DD.3;
+                    the close-out's `NamedEntry.exts` / `accepts_ext`, a named entry row
+                    limited to some file extensions, and `EntryRule::is_entry_at`, which
+                    reads a node's extension lazily, DT.5l)
 rules/              glia-rules (0.5.2, DA): the Datalog evaluator. Depends on glia-core and
                     glia-activation ONLY (the `dependency_guard` test in rules/tests/toy.rs
                     pins it), and is query-time: not a HASHED_ROOTS entry, so a rules change
@@ -195,7 +198,8 @@ engine/src/   lib.rs        facade (rules above)
                                            watch.rs hidden_fp destructures it exhaustively, so a
                                            new input fails to compile until it joins a row (DC.7b);
                                            rust_crates (the Cargo packages build_rust resolves
-                                           against), DartPackages (pubspec names, DF.4a)
+                                           against), DartPackages (pubspec names, DF.4a); the
+                                           dart arm calls glia_graph::build_dart (DT.5h)
                             memo.rs        BuildMemo on ParseCache (DC.4): per-file const-table
                                            scans, RPC needle halves and pure non-code routing
                                            outcomes replayed for unchanged files by a caller that
@@ -282,6 +286,11 @@ graph/src/    lib.rs        facade (rules above)
               build/go_wire.rs  (DT.1f) a child of build.rs: types each Go handler wire cell
                             (DT.1e) to its in-repo STRUCT through GoPackages and writes
                             handler -USES-> STRUCT (emitter graph:go_wire)
+              build/dart.rs  (DT.5h, DT.5i) a child of build.rs, the passes of the flat
+                            `build_dart`: resolve_member_reads (a Dart NavFact::MemberRead
+                            bound in the reader's own scope, emitter graph:reads),
+                            provider_type / provider_call (Riverpod provider receivers,
+                            emitter graph:dart)
               imports/reexports.rs  (DT.1q) a child of imports.rs: TS / JS re-export
                             barrels resolved as ECMA-262 ResolveExport (Barrels::read /
                             materialize), IMPORTS rule `reexport`
@@ -323,7 +332,8 @@ graph/src/    lib.rs        facade (rules above)
               the resolvers ModelResolver (DT.1h), EvmContractResolver (DT.10b) and
               GqlgenResolver (DT.5f); WebSocketStackResolver::served_routes (DT.3c);
               MountedHttpResolver::without_routes (DT.6a); and on the identity slot
-              identity::{identities, HINT_VERSION} (DT.12a)
+              identity::{identities, HINT_VERSION} (DT.12a). The close-out adds
+              build_dart (DT.5h, through the build glob)
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
@@ -341,7 +351,10 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     append_hit_fields, json_kind)   evm DT.10a (+DT.10g: the EVM qname
                     prefixes `evm:` / `evm_call:` / `evm_event:`, Scope, AbiEntry, the
                     procedure and client cells, AbiRef / ClientHit); profile gains
-                    INVOKED_MEMBERS / invoked_member (DT.5d, + DT.5e's flutter row);
+                    INVOKED_MEMBERS / invoked_member (DT.5d, + DT.5e's flutter row), and
+                    the close-out's `node_ext` (the one extension reader), ExternalBase,
+                    InvokedMembers.{sigs, siblings, owner_bases} with matches_at / gates /
+                    checks_signature, and invoked_member_at (DT.5l: rows 12-32);
                     glia_config gains Rejection / LoadedConfig.rejections (DT.7c)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
@@ -484,7 +497,7 @@ once per build (a layout merge prints no `external_cells=`; the stage and per-pa
 `PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>` once
 per layout write.
 
-**The 0.5.2 tweaks' markers (DT, waves W15-W25)**, each on stderr, grouped by what they watch:
+**The 0.5.2 tweaks' markers (DT, waves W15-W30)**, each on stderr, grouped by what they watch:
 - *Contract models (T1).* Per file: `[model-schemas] lang=typescript interfaces=<i> classes=<c>
   fields=<f> open=<o> file=<p>` / `[model-schemas] lang=go structs=<s> fields=<f> embeds=<e>
   skipped=<k> file=<p>` (DT.1c); `[ts-wire] responses=<r> requests=<q> (typed= inline= literal=
@@ -534,6 +547,29 @@ per layout write.
   ambiguous=<a>` and `[evidence-rules] resolver=gqlgen gqlgen_field=<n> gqlgen_root=<n>`
   (DT.5f); `[ts-value-refs] refs=<r> in_file=<i> imported=<m> const_inits=<c> decorators=<d>
   accessor_calls=<a> file=<p>` (DT.5g).
+- *The close-out's dead_symbol false positives (DT.5h-DT.5l, W27-W30)*, one marker per line:
+  - Dart, per file (DT.5h adds the last five fields; it fires on more files, any initialised field):
+    `[dart-calls] self=<s> bare=<b> local_skip=<l> closures=<c> creations=<o> method_refs=<m> accessor_refs=<a> tear_offs=<t> field_inits=<f> member_reads=<r> elements=<e> file=<p>`
+  - Dart, per file importing Riverpod, after `[dart-flutter]` (DT.5i):
+    `[dart-riverpod] providers=<p> locals=<l> holders=<h> file=<p>`
+  - Dart, per graph: `[dart-scope] provider receivers bound=<n>` (DT.5i, when the hook bound
+    one), then `[reads] member reads accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` (DT.5h)
+  - Dart, per file holding a Dio interceptor (DT.5i):
+    `[services] dart classified=<n> rules=dio_interceptor:<k> module=<qname>`
+  - Go, once per graph after the existing `[go-receivers] bound=..` line (DT.5j):
+    `[go-receivers] typed elem=<e> qualified_field=<q> func_value=<f> alternatives=<a> conversion=<c>` and
+    `[go-values] uses=<u> (method=<m> func=<f> composite_literal=<c>) dropped=<d> refs=<r> pkg_handlers=<h>`
+  - TypeScript (DT.5k): `[ts-locals]` gains `call=<c>` inside its parenthesis; per TS-family file
+    `[ts-receivers] query_fields=<q> query_receivers=<r> inject_receivers=<i> inject_refs=<j> static_reads=<s> call_locals=<l> member_reads=<m> accessors=<a> file=<p>`;
+    per TS-like graph `[recv] ts receivers bound: expression=<e> returned=<r> accessor_read=<a> accessor_write=<w> member_reads=<m>`
+    and `[resolve] static member uses bound: <n>`
+  - Liveness, once per `entrypoint_reachable`, right after `[live]` (DT.5l; every INVOKED_MEMBERS
+    tag in first-appearance order, zeros included):
+    `[invoked] rows=<n> angular=<a> constructor=<c> flutter=<f> go_runtime=<g> apple_app=<p> transloco=<t> dio=<d> sig_rejected=<r>`
+  - Python / Swift, per file (DT.5l): `[py-main] guard module=<qname> calls=<n> file=<p>`,
+    `[py-nested] nested-def calls bound=<n> file=<p>` and `[swift-app] entry types=<n> file=<p>`;
+    the Kotlin `[kotlin/retrofit] .. components=<c>` counts Flutter activities. A Go `init` entry
+    counts in `[live] kind=`, a `__main__` script MODULE in `[live] declared=`.
 - *Rules and check (T7, T8).* `[declared] .. anchor_enclosing=<e>` (DT.7a); `[check] rules=<R> ..
   errors=<E> unanchored=<n>` and `[check] declared not checked: orphaned=<o> rejected=<r>
   absent=<a> empty_scope=<e> blocking=<b>` (DT.7b); `[check] overlay rejected root=<r>
@@ -599,6 +635,27 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
     FUNCTION / CLASS / STATE_VAR / ENUM it names (rule `value_ref`) or a Bare USES ref the graph
     binds through a named import; a `this.<accessor>` read or write is a CALLS of the accessor
     (rules `accessor_read` / `accessor_write`). `[ts-value-refs] ..`.
+  - **Receivers the graph could not type (DT.5k).** The TS parser states what the AST says about
+    a receiver, and `graph/src/calls.rs` binds through the existing receiver chain, never through
+    a repo-unique name. New NavFacts on the scope: `ReceiverType { receiver, ty }` for an Angular
+    signal query field (`viewChild` / `contentChild` and `.required`, import-gated, alias
+    honoured; a `read` option wins over the type argument and the locator; list queries and
+    string locators type nothing) and an inline `inject(T)` receiver; `MemberRead` (DT.5h's
+    variant, TS its second user) / `MemberWrite { receiver, name, line }` for a member access on
+    a typed this-field, local or fact-typed expression; `Getter` / `Setter` on a `get` / `set`
+    METHOD. `receiver_type` reads a ReceiverType for a ComplexReceiver naming no field (CALLS rule
+    `receiver_type`); `receiver_type_node` types a call-result local (`const store = makeStore()`,
+    the parser recording the call form `f()` unless shadowed, FUNCTION return annotations filling
+    `CodeNav::return_types`) through the callee's declared return type (rule `receiver_return`);
+    `resolve_member_reads` (TS-family scopes only) binds a getter read / setter write on another
+    typed object as CALLS rules `receiver_accessor_read` / `receiver_accessor_write`. An inline
+    `inject(T)` that is no field's whole initialiser is an INJECTS from the scope that runs it
+    (functional guards and interceptors, InjectionToken factories, call-initialised fields; a
+    Bare ref for an import, parser rule `inject_call` in-file, first argument only: a later one
+    is a DT.5g `value_ref` USES); an in-file `T.X` read outside T, or a cross-file one whose
+    member binds nothing, is a USES of the CLASS T (rule `static_member`); Pattern E's
+    repo-unique fallback is skipped for a TS INJECTS ref from a non-CLASS. `[ts-receivers] ..`,
+    `[recv] ts receivers bound: ..`, `[resolve] static member uses bound: <n>`.
   - **Angular templates (DT.5a-DT.5c).** An inline `template:` / `host:` binding, and a
     `templateUrl` .html (the walk admits one beside a same-stem .ts; a post-cache graft binds
     it, `engine/src/build/angular_templates.rs`), that calls or reads a METHOD of its component
@@ -639,7 +696,25 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   handler -USES-> STRUCT per (handler, struct, form), emitter `graph:go_wire`, rules
   `json_response` / `json_bind` (Strong from a written type, Medium through call / chain
   typing); the cell's shapes gain `model` and a STRUCT's SCHEMA_FIELDS fields their nested
-  `model` (DT.1f).
+  `model` (DT.1f). The close-out (DT.5j): `go_type_name` keeps a field's package qualifier
+  (`pkg.T`, read through the declaring struct file's imports by `field_text`, so the qualified
+  text never binds back onto a same-named wrapper) and records a slice / array / map of a named
+  type as `[]E`; a variadic is `[]T`, a range value variable `<chain>[]`, a func literal or
+  func-typed local `func() R`, and a local several declarations of one fn scope type keeps
+  agree-or-unknown alternatives `a|b` (at most 4); a composite literal `T{..}` / `&pkg.T{..}`
+  reads as the conversion `T()`. GoPackages' `type_of_text` resolves them (`chain_hop`,
+  `elem_type`), so `for _, c := range s.checks { c.Check(..) }` binds the interface METHOD
+  CH.1c's dispatch reads; a qualified-field call the generic pass bound by bare name
+  (graph:calls `receiver_type`) is now bound by the hook through the import (graph:go_packages
+  `receiver_field_chain`, same target). The parser queues USES value refs (arguments, literal
+  elements, `=`, `:=`, `var`, `return`, a package var's initialiser; dropped for a route's
+  handler argument, inside a DI registration, rooted at an external package, or shadowed by a
+  local, parameter, named result, body const or fn-local type), and `bind_value_refs` binds a
+  METHOD (rule `method_value`), a FUNCTION (`func_value`) or a STRUCT a composite literal builds
+  (`composite_literal`; file, package or the import's package, never repo-wide), emitter
+  graph:go_packages; so Go STRUCTs carry incoming USES from their literals. CI.4's
+  `package_handler` binds a `pkg.F` route handler to a FUNCTION in another file of the imported
+  package (HANDLED_BY rule `package_function`). `[go-receivers] typed ..`, `[go-values] ..`.
 - Rust: `impl Trait for Type` with an imported or path-qualified trait is IMPLEMENTS, and axum
   `State` / `Extension`, actix-web `web::Data` and Rocket `&State` handler parameters are INJECTS
   to the held type, both bound by Rust path rules through `RustIndex::resolve_type_refs`, never by
@@ -655,10 +730,51 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   entry); `INVOKED_MEMBERS`' flutter row makes `build` / `createState` / `initState` /
   `dispose` .. of a used one live. DT.1l: a `factory C.fromJson` / `@JsonSerializable` class
   writes SCHEMA_FIELDS format dart, and a Dio call's response / request shape joins its
-  ENDPOINT_HIT. Solidity (DT.10a): one RPC_PROCEDURE `evm:<Contract>.<fn>` per external /
+  ENDPOINT_HIT. The close-out: Dart builds through `glia_graph::build_dart` (DT.5h:
+  build_typescript's passes, then `build::dart::resolve_member_reads`, then method-level
+  IMPLEMENTS). Every identifier the body walk visits that is a name reference
+  (`is_name_reference`: not a label, break / continue target, member or cascade selector,
+  annotation, symbol, `name` / `constructor` field or callee; `$name` interpolations included)
+  is a NameRef, in any value position (conditional branches and conditions, `??` operands,
+  initialisers, collection and record elements, returns, asserts, case constants): a getter /
+  setter target is CALLS rule `accessor_read` (`accessor_write` for an assignment's whole left
+  side), another METHOD / FUNCTION USES `method_ref`. `T.new` and a `constructor_tearoff` are a
+  CallSite of T; a class field's initialiser is walked from its CLASS (a self-loop when a class
+  constructs itself in a static field); a one-parameter closure over a `List<T>` / `Set<T>` /
+  `Iterable<T>` field types its parameter T. A `Type.member` / `field.member` / typed-local read
+  no call follows is `NavFact::MemberRead`, bound in the reader's own scope (`calls::scope_type`,
+  factored out of CL.5a's constructed_type_id): a getter is CALLS `accessor_read`, a method USES
+  `tear_off`, a static field USES its CLASS `static_member`, emitter graph:reads. Dart getters /
+  setters fill `RepoGraph.properties`. DT.5i: a top-level provider STATE_VAR of a file importing
+  riverpod / flutter_riverpod / hooks_riverpod / state_notifier records
+  `NavFact::RiverpodProvider { read, notifier }` (`Provider<T>` / `StateProvider` /
+  `ChangeNotifierProvider` read T, `StateNotifierProvider<N, S>` / `NotifierProvider` read S and
+  notifier N, `.autoDispose` / `.family` and a generic-less factory read through; FutureProvider
+  / StreamProvider record nothing); `final svc = ref.read(p);` types svc by the read's text (a
+  name bound twice in its scope is never typed); `provider_call`, resolve_calls' extra hook,
+  binds `ref.read(p).m()`, `ref.read(p.notifier).m()` and `svc.m()` only to a METHOD of that type
+  (CALLS emitter graph:dart rule `provider_receiver`), and `provider_type`, the member reads'
+  hook, makes `ref.watch(p).isReady` a getter read; a StateNotifier<T> / Notifier<T> /
+  ValueNotifier<T> subclass's `state` / `value` field is a T. A class extending a Dio
+  Interceptor / QueuedInterceptor / InterceptorsWrapper / QueuedInterceptorsWrapper in a file
+  importing package:dio/ gets ROLE SERVICE (the services extractor's rule `dio_interceptor`,
+  HEURISTIC, folded into the CLASS by LB.3a). Solidity (DT.10a): one RPC_PROCEDURE `evm:<Contract>.<fn>` per external /
   public function, interface member and public getter, HANDLED_BY its METHOD / STATE_VAR.
+- Runtime-invoked entries (DT.5l, the close-out). Python: an `if __name__ == "__main__":` guard's
+  consequence is walked from the MODULE (its calls are MODULE CALLS, and its client calls run
+  the call-site detectors from the MODULE), which gets one ENTRYPOINT cell
+  `{"decl":"<file>:<1-based row>","source":"main_guard"}`, so `[live] declared=` counts it; a bare
+  call binds the caller's own nested def first, then outwards through enclosing FUNCTIONs, then a
+  module-level def (CALLS rule `nested_def`; the edge that bound a shadowed module-level def
+  moves). Swift: a `@main` / `@UIApplicationMain` / `@NSApplicationMain` type gets ROLE COMPONENT.
+  Kotlin: a class extending FlutterActivity / FlutterFragmentActivity / FlutterFragment /
+  FlutterApplication under an io.flutter import is a COMPONENT. A Go `func init()` is an entry
+  through the entry table's `.go`-limited named row (Activation below); the Go parser's
+  `method_signature(code)` reads CA.3a's normalised signature back from a METHOD's CODE text for
+  the go_runtime INVOKED_MEMBERS rows.
 - An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
-  walker misses; it is consulted only after every generic lookup failed. Five builders use it:
+  walker misses; it is consulted only after every generic lookup failed. Six builders use it
+  (`build_dart` hands it `build::dart::provider_call`, DT.5i; the other five follow):
   `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
   `super::` / `Self::` / workspace-crate paths), fed the walk's Cargo packages as `RustCrate`s by
   `lang_build::rust_crates` (LA.1a); `build_go` hands it `GoPackages` (a package is its
@@ -759,7 +875,8 @@ Personalised PageRank with damping = 0.5 (not custom spreading activation). `Act
 
 The domain sets them in its **profile** (LD.14a/b), and nowhere else. The code domain's
 `DomainTables` is `CODE_TABLES` in `code-domain/src/profile.rs`: the entry rule (the
-kinds, roles and `main` / `test*` names liveness seeds from), `carry_edges` (what blast
+kinds, roles and `main` / `test*` names liveness seeds from, and Go's `init`, a row limited to
+`.go` files, DT.5l), `carry_edges` (what blast
 radius, cross-stack trace and liveness follow), `effect_sinks`, the base
 `activation_weights` and the named `activation_presets` (`repair` / `review` /
 `onboard`). The engine wraps it with the build passes as `CODE_PROFILE`
@@ -782,7 +899,28 @@ GraphQL client call's result model or gqlgen's generated STRUCT -> the SDL MESSA
 differ. Liveness reads one more table (DT.5d): `INVOKED_MEMBERS`, the members a framework or the
 runtime calls (Angular lifecycle hooks, CVA / Validator members, pipe `transform`, interceptors,
 guards, Flutter `build` / `createState` / .., and constructors per language), which a used owner's
-walk-local hop reaches (`invoked_member`, the one matcher). SAME_AS
+walk-local hop reaches (`invoked_member`, the one matcher). The close-out (DT.5l) widens both
+tables. The entry rule gains `FUNCTION init` limited to `.go` (`NamedEntry.exts`, empty = any
+file, compared ignoring ASCII case; `validate` rejects an empty or dotted ext), so a TS or Python
+`init` stays an ordinary name: the entry readers (liveness, trace, communities, splits,
+projection-text and pyo3 records) call `EntryRule::is_entry_at(kind, name, roles, ext)`, which
+reads `code_domain::profile::node_ext(cells)` (the POSITION file's extension) lazily, only when a
+limited row matches kind and name, at most once; `is_entry` stays extension-blind, so a limited
+row never matches there. hubs' and duplicate-flows' test-node checks read only the named rows'
+`prefixes`, which the `init` row has none of (a limited row with prefixes would need them to call
+`accepts_ext`: the 0.5.3 seed). `INVOKED_MEMBERS` gains rows 12-32 and
+three gates on a row, each unchecked when empty and read only by `InvokedMembers::matches_at` /
+`invoked_member_at` (the 4-argument `invoked_member` never matches a gated row): `sigs`, the
+member's CA.3a signature re-read from its CODE (`go_runtime`: `Error` / `String` `()(string)`,
+`Unwrap` beside an `Error`, the JSON / text / BSON marshalers and unmarshalers, `Scan`, `Value`,
+`ServeHTTP`, and `Len` / `Less` / `Swap` only together); `siblings`, the (name, signature) pairs
+the owner must also declare; and `owner_bases`, an `ExternalBase { library, name }` the owner
+extends or implements, read as its heritage ref left unbound, no in-repo type of that name, and
+its file's IMPORTS cell listing the library (`transloco` loaders / handlers / interceptors /
+transpilers / fallback strategies; Angular ErrorHandler `handleError`, Resolve `resolve`,
+TitleStrategy `updateTitle`, RouteReuseStrategy; `dio` interceptors' `onRequest` / `onResponse` /
+`onError`). The `apple_app` row makes an `@main` COMPONENT's app-delegate callbacks and SwiftUI
+`body` live. `[invoked] rows= .. sig_rejected=` follows `[live]`. SAME_AS
 weighs 0 in PPR and is in no carry or community list: identity reaches a walk or a ranking only
 through the quotient (`algo::classes::Quotient`), never as an edge. Answers collapse FACT /
 DERIVED classes to one row carrying `identity {tier, rules, diverged, also_in}` (Q17), and walk
@@ -1035,7 +1173,14 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   `dead_symbol` withholds a used owner's framework- and runtime-invoked members and
   constructors (`INVOKED_MEMBERS`: liveness takes a walk-local owner -> member hop) and every
   ORIGIN `generated` / `generated_proto` node, DT.5d, `[dead-framework] dead_symbol rows
-  withheld: invoked=<i> generated=<g>`, the `[live]` line gaining `invoked=`), `history sync`
+  withheld: invoked=<i> generated=<g>`, the `[live]` line gaining `invoked=`; the close-out:
+  Dart member reads, tear-offs and names in any value position, Riverpod provider receivers,
+  Go range-element / qualified-field / func-value / composite-literal receivers and
+  `package_function` handlers, TS signal-query / inline-inject / call-result / accessor receivers
+  and static reads are edges (DT.5h-DT.5k), and DT.5l's entries (Go `init`, `__main__` script
+  MODULEs, `@main` types, Flutter activities) and gated INVOKED_MEMBERS rows are live, `[invoked]
+  ..`; the re-demo's audit of Kina's 52 and quokka-stack's 124 rows found 103 false: at the close-out
+  (`1212a3be`) Kina reads 32 and quokka-stack 41, exactly the 73 rows it judged truly dead), `history sync`
   (LF.5d), `tests ingest`
   (LF.6d; a rolling window of runs, `--window`, `--reset`, CC.9b). 0.5.1: `overlay
   propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`; 0.5.2,
@@ -1210,16 +1355,19 @@ questions over one graph computes `entrypoint_reachable` once.
   every declared break) cover W0–W19.
 - **0.5.2 — the four bets + the tweaks: landed, never released; ships in 0.5.3.** James,
   2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*: no 0.5.2 bump, tag or publish; the
-  version goes 0.5.1 -> 0.5.3 in one bump at the end of 0.5.3, and the commit after DT.13 gets
-  the local marker tag `0.5.2-complete` (a build there reports `0.5.1+p<stamp>`). Scope in
+  version goes 0.5.1 -> 0.5.3 in one bump at the end of 0.5.3, and the local marker tag
+  `0.5.2-complete` (set after DT.13, at `421af2d8`) moves to the commit after DT.14, the
+  close-out's last packet (tweaks ruling 7; a build there reports `0.5.1+p<stamp>`). Scope in
   `dev-notes/next-leap-0.5.2.md` (§0.1 the binding decisions Q1–Q25, §4.2 the defaults the
   packets took), research `dev-notes/research-0.5.2/`, packets in
   `dev-notes/leap-052-packets.json` (153 packets in W0–W14, the gap run's DB.9a-c and DF.22a-c
-  among them, then the 57 tweak packets DT.1a–DT.13 in W15–W26), overrides in
+  among them, then the 57 tweak packets DT.1a–DT.13 in W15–W26, then the close-out's
+  dead_symbol packets DT.5h–DT.5l in W27–W30 and DT.14 in W31), overrides in
   `dev-notes/leap-052-corrections.json`, schedule and LANDED waves in
-  `dev-notes/wave-runner/schedule_052.py` (27 waves, runner `--release 052`). It may break
-  contracts, each break declared by its packet; the handoffs are
-  `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2, then DT.13 for the tweaks):
+  `dev-notes/wave-runner/schedule_052.py` (32 waves, W0–W31, runner `--release 052`). It may
+  break contracts, each break declared by its packet; the handoffs are
+  `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2, then DT.13 for the tweaks and
+  DT.14 for the close-out):
   the 0.5.2 half of one combined 0.5.1 -> 0.5.3 handoff per consumer, which 0.5.3's release docs
   packet writes (repo-graph is held for it, James 2026-10-16). The tweaks
   (`dev-notes/tweaks-0.5.2.md`, the gaps the Kina and quokka-stack demos showed): T1 contract
@@ -1234,8 +1382,15 @@ questions over one graph computes `entrypoint_reachable` once.
   contracts across the stack (DT.10a-k: Solidity procedures, resolver:evm, ethers / hardhat /
   TypeChain / viem / wagmi / web3.js and go-ethereum clients); T11 GraphQL root fields,
   transports and implied transports (DT.11a-c, DT.11z); T12 one hint format with Engram
-  (DT.12a-b); DT.13 these docs. The version bump is the release step after the docs, never
-  inside a packet. Groups: D0 the
+  (DT.12a-b); DT.13 these docs. The close-out (tweaks ruling 7, James 2026-10-17: *"lets fix the
+  false positives that counts as closeout i think"*): the re-demo's remaining dead_symbol rows on
+  Kina (52) and quokka-stack (124) were audited, 103 false and 73 truly dead, and each false
+  mechanism became a packet: DT.5h Dart names and member reads, DT.5i Riverpod provider
+  receivers and the Dio interceptor ROLE, DT.5j Go receiver typing and func / method /
+  composite-literal values, DT.5k TS signal-query / inline-inject / call-result / accessor
+  receivers, DT.5l runtime-invoked entries and members; at `1212a3be` Kina reads 32 rows and
+  quokka-stack 41, the audit's truly dead set exactly; DT.14 these docs' second pass. The
+  version bump is the release step after the docs, never inside a packet. Groups: D0 the
   wave-0 slots, SAME_AS = edge 37 (the release's only id) and the one dependency commit (the
   glia-rules crate, no external crate); DA the glia-rules Datalog crate; DB rules in the engine
   (`glia query` + GQL, check's rule invariants / transitive forbid / min_tier, review's
@@ -1254,7 +1409,7 @@ questions over one graph computes `entrypoint_reachable` once.
   OpenAPI bases, TS typed receivers / inherited calls / concrete overrides); DG / DH the rest
   of the coverage matrix (Rust and Scala, then Ruby, PHP, Dart, Elixir, Swift, Clojure, C);
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
-  dart/tests), 0 none, 136 unknown, 28 n/a, over 414 graded fixtures. No FORMAT_VERSION change
+  dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
 - **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`): **0.5.3**
   scale — Stack Graphs-style incremental resolution with watch's A2 body-only fast path,

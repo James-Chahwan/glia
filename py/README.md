@@ -144,6 +144,21 @@ contents.
     and host bindings, Flutter widget trees and TypeScript values passed by reference are
     edges; a used class's framework-invoked members and constructors are live, and generated
     code and test-only routes leave `gaps`. Rebuild any stored graph.
+- **The close-out: dead-symbol false positives.** No signature or return shape changes; the
+  graph and every liveness reader move. Dart getter reads, tear-offs and names in any value
+  position, calls on Riverpod provider reads, Go range-element, qualified-field and func-value
+  receivers, func / method values and composite literals (`USES`), `pkg.F` route handlers,
+  TypeScript signal-query, inline-`inject(T)`, call-result and accessor receivers, inline
+  `inject(T)` (`INJECTS`) and static `T.X` reads (`USES`) are edges. A Go `init`, a Swift
+  `@main` type and a Kotlin Flutter activity (ROLE COMPONENT) are entries, so a node record's
+  `entry` flips; a Python module with an `if __name__ == "__main__":` guard is a declared entry
+  (its guard's calls are the module's, `node_cells` shows an ENTRYPOINT cell
+  `{"decl":"<file>:<line>","source":"main_guard"}`, and its record's `live` flips while `entry`
+  stays false); on a used class, Go methods the runtime calls by signature,
+  app-delegate callbacks and the members a library base calls (Transloco, Angular `ErrorHandler` /
+  `Resolve`, dio interceptors) are live; a Dio interceptor class gains ROLE SERVICE. `gaps`
+  drops those `dead_symbol` rows: on the two demo repos 52 -> 32 and 124 -> 41, exactly the
+  rows a hand audit judged truly dead. Rebuild any stored graph.
 
 ## What's new in 0.5.1
 
