@@ -18,6 +18,21 @@
 //! corpus (T*) for a test commit are built from commits strictly older than it
 //! (oldest -> newest replay over `git log --topo-order`). The graph is the
 //! snapshot's for every ranker alike.
+//!
+//! Third run (`--law-impact kina`, 2026-10-18): instead of the replay, does a change
+//! in the law predict the code change through the goal layer? A section-level diff
+//! of two compilations of an Act (pdftotext), the doc units citing the changed
+//! sections, the ids they define and the code citing those ids, all at the reform
+//! implementation's start (`--rev`), scored against the files the reform commits
+//! (`--law-tips`) changed. See `law_impact_main`.
+//!
+//! ```text
+//! GLIA_NO_PERSIST=1 target/release/examples/rank_eval --law-impact kina \
+//!     --repo <git-archive copy at the start> --git <Kina> --rev <start> --wiki <Kina/.wiki> \
+//!     --law-sources <dir of the Act PDFs> --law-cache <scratch dir> --law-out <tables dir> \
+//!     --law-tips main,origin/wave/003-us2-platform-serves,origin/wave/003-us3-registration-records \
+//!     [--law-end <rev>]   # GLIA_LAW_DEBUG=<section> prints that section's reach
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -93,6 +108,18 @@ struct Args {
     wiki: String,
     /// The vertical tables (markdown).
     vmd: String,
+    /// Third run: `kina` runs the law-impact experiment instead of the ranking replay.
+    law_impact: String,
+    /// The directory holding the law PDFs (read-only).
+    law_sources: String,
+    /// Where pdftotext writes its text (a scratch copy).
+    law_cache: String,
+    /// The output directory for the law-impact tables.
+    law_out: String,
+    /// Comma-separated revisions whose commits since `--rev` are the reform-implementation candidates.
+    law_tips: String,
+    /// The revision whose code citations give the leaky END variant (default: the first tip).
+    law_end: String,
 }
 
 fn parse_args() -> Args {
@@ -111,6 +138,12 @@ fn parse_args() -> Args {
         vertical: String::new(),
         wiki: String::new(),
         vmd: "rank_eval_vertical.md".into(),
+        law_impact: String::new(),
+        law_sources: String::new(),
+        law_cache: String::new(),
+        law_out: String::new(),
+        law_tips: String::new(),
+        law_end: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -131,6 +164,12 @@ fn parse_args() -> Args {
             "--vertical" => a.vertical = v,
             "--wiki" => a.wiki = v,
             "--vmd" => a.vmd = v,
+            "--law-impact" => a.law_impact = v,
+            "--law-sources" => a.law_sources = v,
+            "--law-cache" => a.law_cache = v,
+            "--law-out" => a.law_out = v,
+            "--law-tips" => a.law_tips = v,
+            "--law-end" => a.law_end = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -1071,6 +1110,10 @@ fn paired(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usi
 
 fn main() {
     let args = parse_args();
+    if !args.law_impact.is_empty() {
+        law_impact_main(&args);
+        return;
+    }
     let t_start = Instant::now();
     eprintln!("[rank_eval] {}: building {}", args.label, args.repo);
     let t_build = Instant::now();
@@ -3494,4 +3537,2381 @@ fn vertical_report(
         js.insert("contrasts".into(), json!(cj));
     }
     (serde_json::Value::Object(js), md)
+}
+
+// ============================================================================
+// Third run (2026-10-18): law impact. Does a change in the LAW predict which
+// CODE must change, traced down through the goal layer (specs / requirements)?
+//
+//   1. law diff: two compilations of an Act (pdftotext), split by section number
+//      and classified changed / added / repealed / unchanged, whitespace and page
+//      furniture normalised; the amending Act as made is the cross-check;
+//   2. law -> goal: every doc unit (heading section) citing a section of that Act,
+//      the Act resolved from context, and the requirement ids the unit defines;
+//   3. goal -> code: the code files citing those ids;
+//   all read at the reform implementation's start (the code at --rev, the wiki
+//   commit current then); 4-5. scored against the code files the reform commits
+//   changed, beside text (BM25), structure (PPR), random and permuted-map controls;
+//   6. the reverse view: does each reform commit's code trace up to a changed section?
+// ============================================================================
+
+const LAW_ACT_TITLE: &str = "Anti-Money Laundering and Counter-Terrorism Financing Act 2006";
+const LAW_OLD_PDF: &str = "AU_AMLCTF_Act_2006_C2025C00235_compilation59_pre-reform";
+const LAW_NEW_PDF: &str = "AU_AMLCTF_Act_2006_C2026C00274_compilation62_2026-07-01";
+const LAW_AMEND_PDF: &str = "AU_AMLCTF_Amendment_Act_2024_C2024A00110_as_made";
+const LAW_DRAWS: usize = 1000;
+/// Words an amending item heading starts with (an inserted section heading starts with anything else).
+const LAW_ITEM_KW: &[&str] = &[
+    "Section", "Sections", "Subsection", "Subsections", "Paragraph", "Paragraphs", "Subparagraph", "Subparagraphs",
+    "After", "Before", "At", "In", "Part", "Parts", "Division", "Divisions", "Subdivision", "Subdivisions", "Chapter",
+    "Item", "Items", "Table", "The", "Note", "Notes", "Clause", "Schedule", "Definition", "Heading", "Insert", "Add",
+    "Repeal", "Omit", "Further", "Amendments", "Amendment",
+];
+/// AU AML/CTF terms that mark a reform-implementation task or commit as AU-regime work.
+const LAW_AU_WORDS: &[&str] = &["austrac", "smr", "smrs", "ttr", "ifti", "ctr", "tipping", "amlco", "ivts", "amlctf"];
+const LAW_AU_PHRASES: &[&str] = &[
+    "aml/ctf", "travel rule", "travel-rule", "senior manager", "senior_manager", "independent evaluation",
+    "program version", "risk assessment", "reporting entity", "s123", "s.123", "s76", "s.76", "s26", "s.26",
+];
+
+fn law_pdf(args: &Args, stem: &str) -> String {
+    let pdf = format!("{}/{stem}.pdf", args.law_sources);
+    let out = format!("{}/{stem}.txt", args.law_cache);
+    if !std::path::Path::new(&out).exists() {
+        std::fs::create_dir_all(&args.law_cache).expect("law cache dir");
+        let st = Command::new("pdftotext").args(["-layout", &pdf, &out]).status().expect("pdftotext");
+        assert!(st.success(), "pdftotext failed on {pdf}");
+    }
+    std::fs::read_to_string(&out).expect("read pdftotext text")
+}
+
+fn law_id_tok(t: &str) -> bool {
+    !t.is_empty()
+        && t.len() <= 5
+        && t.chars().next().is_some_and(|c| c.is_ascii_digit() || c.is_ascii_uppercase())
+        && t.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// A running page header: `Section 26F`, `Sections 26F and 26G`, `Part 1A AML/CTF programs`,
+/// `AML/CTF programs Part 1A`, `Division 3 ...`, `... Schedule 1`, `Endnotes`.
+fn law_running_header(t: &str) -> bool {
+    if t.contains('\u{2014}') {
+        return false;
+    }
+    let w: Vec<&str> = t.split_whitespace().collect();
+    if w.is_empty() {
+        return false;
+    }
+    if w == ["Endnotes"] {
+        return true;
+    }
+    if matches!(w[0], "Section" | "Sections") {
+        return w.len() >= 2 && w.len() <= 6 && w[1..].iter().all(|x| matches!(*x, "to" | "and") || law_id_tok(x));
+    }
+    const KW: [&str; 5] = ["Part", "Division", "Subdivision", "Schedule", "Chapter"];
+    (w.len() >= 2 && KW.contains(&w[0]) && law_id_tok(w[1]))
+        || (w.len() >= 3 && KW.contains(&w[w.len() - 2]) && law_id_tok(w[w.len() - 1]))
+}
+
+/// The text's lines with page furniture removed: each page's running headers
+/// (its top lines up to the body) and the lines `furniture` names.
+fn law_lines(text: &str, furniture: fn(&str) -> bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for page in text.split('\x0c') {
+        let lines: Vec<&str> = page.lines().collect();
+        let mut start = 0;
+        for (k, l) in lines.iter().enumerate() {
+            let t = l.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if law_running_header(t) {
+                start = k + 1;
+            } else {
+                break;
+            }
+        }
+        for l in &lines[start..] {
+            if !furniture(l.trim()) {
+                out.push(l.trim_end().to_string());
+            }
+        }
+    }
+    out
+}
+
+fn act_furniture(t: &str) -> bool {
+    if t.starts_with("Compilation No.") || t.contains("Authorised Version C20") {
+        return true;
+    }
+    let w: Vec<&str> = t.split_whitespace().collect();
+    let title: Vec<&str> = LAW_ACT_TITLE.split_whitespace().collect();
+    let num = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit() || matches!(c, 'i' | 'v' | 'x'));
+    w.len() == title.len() + 1 && ((num(w[0]) && w[1..] == title[..]) || (num(w[w.len() - 1]) && w[..w.len() - 1] == title[..]))
+}
+
+fn amend_furniture(t: &str) -> bool {
+    t.contains("Authorised Version C20") || t == "Act 2024" || (t.contains("No. 110, 2024") && t.contains("Amendment"))
+}
+
+#[derive(Clone, Default)]
+struct LawSec {
+    num: String,
+    title: String,
+    part: String,
+    div: String,
+    sub: String,
+    ctx: String,
+    text: String,
+}
+
+/// A section heading at the left margin: `26F Reporting entities must ...`.
+fn law_sec_heading(l: &str) -> Option<(String, String)> {
+    let b = l.as_bytes();
+    if b.is_empty() || !b[0].is_ascii_digit() {
+        return None;
+    }
+    let d = digits_at(b, 0, 4);
+    if d > 3 {
+        return None;
+    }
+    let mut e = d;
+    while e < b.len() && e - d < 3 && b[e].is_ascii_uppercase() {
+        e += 1;
+    }
+    if e >= b.len() || b[e] != b' ' {
+        return None;
+    }
+    let rest = l[e..].trim();
+    // a title starts upper-case, or with a number word (`177 2 or more proceedings may be heard together`)
+    let rb = rest.as_bytes();
+    let numeric_title = rb.len() > 2 && rb[0].is_ascii_digit() && rb[1] == b' ' && rb[2].is_ascii_lowercase();
+    if !rest.chars().next().is_some_and(char::is_uppercase) && !numeric_title {
+        return None;
+    }
+    Some((l[..e].to_string(), rest.to_string()))
+}
+
+/// A Part / Division / Subdivision heading at the left margin (`Part 1A—AML/CTF programs`).
+fn law_container(l: &str) -> Option<(char, String, String)> {
+    for (kw, c) in [("Part ", 'P'), ("Division ", 'D'), ("Subdivision ", 'S')] {
+        if let Some(r) = l.strip_prefix(kw)
+            && let Some((id, title)) = r.split_once('\u{2014}')
+            && law_id_tok(id.trim())
+        {
+            return Some((c, id.trim().to_string(), title.trim().to_string()));
+        }
+    }
+    None
+}
+
+fn law_norm(s: &str) -> String {
+    let m: String = s
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+            '\u{00A0}' | '\u{2009}' | '\u{202F}' => ' ',
+            c => c,
+        })
+        .collect();
+    m.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn law_key(n: &str) -> (u32, String) {
+    let d: String = n.chars().take_while(char::is_ascii_digit).collect();
+    (d.parse().unwrap_or(0), n[d.len()..].to_string())
+}
+
+/// The body's sections (from "An Act to combat" to the endnotes), each with its
+/// Part / Division context and its normalised text; repeated numbers are reported.
+fn act_sections(lines: &[String]) -> (Vec<LawSec>, Vec<String>) {
+    let start = lines.iter().position(|l| l.starts_with("An Act to combat")).unwrap_or(0);
+    // the body ends at the Act's own schedules (clauses, not sections) or the endnotes
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, l)| l.trim_end() == "Endnotes" || (l.starts_with("Schedule ") && l.contains('\u{2014}')))
+        .map_or(lines.len(), |(k, _)| k);
+    let (mut part, mut div, mut sub) = (String::new(), String::new(), String::new());
+    let (mut pt, mut dt) = (String::new(), String::new());
+    let mut secs: Vec<LawSec> = Vec::new();
+    let mut dups = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cur: Option<LawSec> = None;
+    let mut raw: Vec<String> = Vec::new();
+    let mut flush = |cur: &mut Option<LawSec>, raw: &mut Vec<String>| {
+        if let Some(mut s) = cur.take() {
+            s.text = law_norm(&raw.join("\n"));
+            raw.clear();
+            if seen.insert(s.num.clone()) {
+                secs.push(s);
+            } else {
+                dups.push(s.num.clone());
+            }
+        }
+    };
+    for l in &lines[start..end] {
+        if let Some((c, id, title)) = law_container(l) {
+            flush(&mut cur, &mut raw);
+            match c {
+                'P' => {
+                    part = id;
+                    pt = title;
+                    div.clear();
+                    dt.clear();
+                    sub.clear();
+                }
+                'D' => {
+                    div = id;
+                    dt = title;
+                    sub.clear();
+                }
+                _ => sub = id,
+            }
+            continue;
+        }
+        if let Some((num, title)) = law_sec_heading(l) {
+            flush(&mut cur, &mut raw);
+            let mut ctx = format!("Part {part} {pt}");
+            if !div.is_empty() {
+                ctx.push_str(&format!(" / Division {div} {dt}"));
+            }
+            raw.push(title.clone());
+            cur = Some(LawSec { num, title, part: part.clone(), div: div.clone(), sub: sub.clone(), ctx, text: String::new() });
+            continue;
+        }
+        if cur.is_some() {
+            raw.push(l.clone());
+        }
+    }
+    flush(&mut cur, &mut raw);
+    (secs, dups)
+}
+
+fn law_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+}
+
+/// Dice over word multisets.
+fn law_dice(a: &str, b: &str) -> f64 {
+    let mut ca: HashMap<String, i64> = HashMap::new();
+    let wa = law_words(a);
+    let wb2 = law_words(b);
+    for w in &wa {
+        *ca.entry(w.clone()).or_default() += 1;
+    }
+    let mut inter = 0i64;
+    for w in &wb2 {
+        if let Some(c) = ca.get_mut(w)
+            && *c > 0
+        {
+            *c -= 1;
+            inter += 1;
+        }
+    }
+    let tot = (wa.len() + wb2.len()) as f64;
+    if tot == 0.0 { 1.0 } else { 2.0 * inter as f64 / tot }
+}
+
+struct LawDiff {
+    old: BTreeMap<String, LawSec>,
+    new: BTreeMap<String, LawSec>,
+    /// Every section number in either compilation, in section order.
+    order: Vec<String>,
+    status: BTreeMap<String, &'static str>,
+    dice: BTreeMap<String, f64>,
+    /// (repealed old number, added new number, Dice) for added sections whose text matches a repealed one.
+    moved: Vec<(String, String, f64)>,
+    dups_old: Vec<String>,
+    dups_new: Vec<String>,
+}
+
+fn law_diff(old: Vec<LawSec>, new: Vec<LawSec>, dups_old: Vec<String>, dups_new: Vec<String>) -> LawDiff {
+    let old: BTreeMap<String, LawSec> = old.into_iter().map(|s| (s.num.clone(), s)).collect();
+    let new: BTreeMap<String, LawSec> = new.into_iter().map(|s| (s.num.clone(), s)).collect();
+    let mut order: Vec<String> = old.keys().chain(new.keys()).cloned().collect::<BTreeSet<_>>().into_iter().collect();
+    order.sort_by_key(|n| law_key(n));
+    let mut status = BTreeMap::new();
+    let mut dice = BTreeMap::new();
+    for n in &order {
+        let st = match (old.get(n), new.get(n)) {
+            (Some(a), Some(b)) => {
+                let dc = law_dice(&a.text, &b.text);
+                dice.insert(n.clone(), dc);
+                if a.text == b.text { "unchanged" } else { "changed" }
+            }
+            (None, Some(_)) => "added",
+            (Some(_), None) => "repealed",
+            (None, None) => unreachable!(),
+        };
+        status.insert(n.clone(), st);
+    }
+    let repealed: Vec<&String> = order.iter().filter(|n| status[*n] == "repealed").collect();
+    let mut moved = Vec::new();
+    for n in order.iter().filter(|n| status[*n] == "added") {
+        let best = repealed
+            .iter()
+            .map(|r| (r, law_dice(&old[*r].text, &new[n].text)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((r, dc)) = best
+            && dc >= 0.6
+        {
+            moved.push(((*r).clone(), n.clone(), dc));
+        }
+    }
+    LawDiff { old, new, order, status, dice, moved, dups_old, dups_new }
+}
+
+/// Section numbers from `key`'s order between `a` and `b` inclusive (a range), or just a and b.
+fn law_range(order: &[String], a: &str, b: &str) -> Vec<String> {
+    let (ka, kb) = (law_key(a), law_key(b));
+    if ka > kb {
+        return vec![a.to_string(), b.to_string()];
+    }
+    let v: Vec<String> = order.iter().filter(|n| law_key(n) >= ka && law_key(n) <= kb).cloned().collect();
+    if v.is_empty() { vec![a.to_string(), b.to_string()] } else { v }
+}
+
+/// Leading `[0-9]{1,3}[A-Z]{0,3}` of a token.
+fn law_num_prefix(t: &str) -> Option<String> {
+    let b = t.as_bytes();
+    if b.is_empty() || !b[0].is_ascii_digit() {
+        return None;
+    }
+    let d = digits_at(b, 0, 4);
+    if d > 3 {
+        return None;
+    }
+    let mut e = d;
+    while e < b.len() && e - d < 3 && b[e].is_ascii_uppercase() {
+        e += 1;
+    }
+    if e < b.len() && b[e].is_ascii_alphanumeric() {
+        return None;
+    }
+    Some(t[..e].to_string())
+}
+
+struct AmendInfo {
+    /// section -> how the amending Act names it (item heading or an inserted section)
+    named: BTreeMap<String, BTreeSet<String>>,
+    items: usize,
+    items_aml: usize,
+    inserted: usize,
+    inserted_unmatched: Vec<String>,
+}
+
+/// Sections the amending Act names: item headings (`22 Section 15`, `7 Divisions 1 to 5 of Part 2`,
+/// `27 Subsection 39(5)`) and the section headings it inserts, within its AML/CTF Act blocks only.
+fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("Schedule 1\u{2014}") && !l.trim_end().ends_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(0);
+    let mut info = AmendInfo { named: BTreeMap::new(), items: 0, items_aml: 0, inserted: 0, inserted_unmatched: Vec::new() };
+    let mut target_aml = false;
+    let mut sched = String::new();
+    let mut k = start;
+    let all_secs: Vec<&LawSec> = d.old.values().chain(d.new.values()).collect();
+    let is_act_line = |t: &str| -> bool {
+        let w: Vec<&str> = t.split_whitespace().collect();
+        w.len() >= 3
+            && w.len() <= 14
+            && w[w.len() - 2] == "Act"
+            && w[w.len() - 1].len() == 4
+            && w[w.len() - 1].chars().all(|c| c.is_ascii_digit())
+            && !t.contains('(')
+            && w[..w.len() - 2].iter().all(|x| x.chars().next().is_some_and(char::is_uppercase) || LAW_CONNECT.contains(x))
+    };
+    while k < lines.len() {
+        let l = &lines[k];
+        k += 1;
+        let t = l.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(r) = l.strip_prefix("Schedule ")
+            && let Some((id, _)) = r.split_once('\u{2014}')
+        {
+            sched = id.trim().to_string();
+            target_aml = false;
+            continue;
+        }
+        if let Some((c, _, title)) = law_container(l) {
+            if c == 'P' && ["Transitional", "Application", "Saving"].iter().any(|w| title.contains(w)) {
+                target_aml = false;
+            }
+            continue;
+        }
+        let indent = l.len() - l.trim_start().len();
+        // the amended Act's name, possibly wrapped before its "Act 2006"
+        let next = lines.get(k).map_or("", |x| x.trim());
+        let year_act = next.len() == 8 && next.starts_with("Act ") && next[4..].chars().all(|c| c.is_ascii_digit());
+        let joined = if year_act { format!("{t} {next}") } else { t.to_string() };
+        if indent <= 12 && is_act_line(&joined) {
+            target_aml = joined == LAW_ACT_TITLE;
+            if year_act {
+                k += 1;
+            }
+            continue;
+        }
+        // item heading at the margin: "<n> <Section ...>"
+        let b = l.as_bytes();
+        if !b.is_empty() && b[0].is_ascii_digit() {
+            let d0 = digits_at(b, 0, 5);
+            let mut e = d0;
+            while e < b.len() && e - d0 < 2 && b[e].is_ascii_uppercase() {
+                e += 1;
+            }
+            if e < b.len() && b[e] == b' ' {
+                let rest = l[e..].trim().to_string();
+                let first = rest.split_whitespace().next().unwrap_or("");
+                if LAW_ITEM_KW.contains(&first) {
+                    info.items += 1;
+                    let mut head = rest.clone();
+                    let mut extra = 0;
+                    while head.matches('(').count() > head.matches(')').count() && k < lines.len() && extra < 3 {
+                        head.push(' ');
+                        head.push_str(lines[k].trim());
+                        k += 1;
+                        extra += 1;
+                    }
+                    if target_aml {
+                        info.items_aml += 1;
+                        let how = format!("Sch {sched} item {}", &l[..e]);
+                        for s in amend_targets(&head, &d.order, &all_secs) {
+                            info.named.entry(s).or_default().insert(how.clone());
+                        }
+                    }
+                    continue;
+                }
+                // an inserted (or substituted) section heading
+                if target_aml && let Some((num, title)) = law_sec_heading(l) {
+                    info.inserted += 1;
+                    let tw = |s: &str| law_words(s).into_iter().take(2).collect::<Vec<_>>();
+                    let matched = [d.new.get(&num), d.old.get(&num)].into_iter().flatten().any(|s| tw(&s.title) == tw(&title));
+                    if matched {
+                        info.named.entry(num).or_default().insert(format!("Sch {sched} inserts"));
+                    } else {
+                        info.inserted_unmatched.push(format!("{num} {title}"));
+                    }
+                }
+            }
+        }
+    }
+    info
+}
+
+/// The sections an amending item heading names. Positional headings (`After section 5`) name a
+/// section only when they insert into it (`After subsection 6(6)`); container headings
+/// (`Divisions 1 to 5 of Part 2`) name every section the container holds in either compilation.
+fn amend_targets(h: &str, order: &[String], secs: &[&LawSec]) -> Vec<String> {
+    let w: Vec<&str> = h.split_whitespace().collect();
+    let mut out = Vec::new();
+    if w.is_empty() {
+        return out;
+    }
+    // `After section 5` / `Before section 26` insert a new section (named by its own heading);
+    // `At the end of section 76Q` and `In the appropriate position in section 5` amend the section
+    let positional = matches!(w[0], "After" | "Before");
+    let clean = |x: &str| x.trim_matches(|c: char| c == ',' || c == ';' || c == ':').to_string();
+    // container headings
+    if !positional && matches!(w[0], "Part" | "Parts" | "Division" | "Divisions" | "Subdivision" | "Subdivisions") {
+        let ids_after = |i: usize| -> (Vec<String>, usize) {
+            let mut ids = Vec::new();
+            let mut j = i;
+            let mut range_from: Option<String> = None;
+            while j < w.len() {
+                let t = clean(w[j]);
+                if law_id_tok(&t) {
+                    if let Some(a) = range_from.take() {
+                        let (ka, kb) = (law_key(&a), law_key(&t));
+                        let mut cand: Vec<String> = secs.iter().flat_map(|s| [s.part.clone(), s.div.clone(), s.sub.clone()]).collect();
+                        cand.sort();
+                        cand.dedup();
+                        for c in cand {
+                            if law_key(&c) > ka && law_key(&c) < kb {
+                                ids.push(c);
+                            }
+                        }
+                    }
+                    ids.push(t);
+                    j += 1;
+                    if j < w.len() && w[j] == "to" {
+                        range_from = ids.last().cloned();
+                        j += 1;
+                        continue;
+                    }
+                    if j < w.len() && (w[j] == "and" || w[j - 1].ends_with(',')) {
+                        if w[j] == "and" {
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                break;
+            }
+            (ids, j)
+        };
+        let (ids0, mut j) = ids_after(1);
+        let (mut parts, mut divs, mut subs): (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
+        match w[0] {
+            "Part" | "Parts" => parts = ids0,
+            "Division" | "Divisions" => divs = ids0,
+            _ => subs = ids0,
+        }
+        while j + 1 < w.len() && w[j] == "of" {
+            let (ids, j2) = ids_after(j + 2);
+            match w[j + 1] {
+                "Division" => divs = ids,
+                "Part" => parts = ids,
+                _ => {}
+            }
+            j = j2;
+        }
+        for s in secs {
+            let ok = (parts.is_empty() || parts.contains(&s.part))
+                && (divs.is_empty() || divs.contains(&s.div))
+                && (subs.is_empty() || subs.contains(&s.sub))
+                && !(parts.is_empty() && divs.is_empty() && subs.is_empty());
+            if ok && !out.contains(&s.num) {
+                out.push(s.num.clone());
+            }
+        }
+        // `Part 2 (heading)` replaces the heading only
+        return if h.contains("(heading)") { Vec::new() } else { out };
+    }
+    let mut i = 0;
+    while i < w.len() {
+        let kw = clean(w[i]).to_ascii_lowercase();
+        if !matches!(
+            kw.as_str(),
+            "section" | "sections" | "subsection" | "subsections" | "paragraph" | "paragraphs" | "subparagraph" | "subparagraphs"
+        ) {
+            i += 1;
+            continue;
+        }
+        let whole = kw == "section" || kw == "sections";
+        let mut j = i + 1;
+        let mut range_from: Option<String> = None;
+        let mut got = Vec::new();
+        while j < w.len() {
+            let Some(n) = law_num_prefix(w[j]) else { break };
+            if let Some(a) = range_from.take() {
+                got.extend(law_range(order, &a, &n));
+            } else {
+                got.push(n.clone());
+            }
+            j += 1;
+            if j < w.len() && w[j] == "to" {
+                range_from = Some(n);
+                j += 1;
+                continue;
+            }
+            if j < w.len() && (w[j] == "and" || w[j] == "or") {
+                j += 1;
+                continue;
+            }
+            if w[j - 1].ends_with(',') {
+                continue;
+            }
+            break;
+        }
+        if !(positional && whole) {
+            for g in got {
+                if !out.contains(&g) {
+                    out.push(g);
+                }
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+// ---- the goal layer: doc units, definition blocks and their Act citations ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LInst {
+    AuAct,
+    PngAct,
+    AmlUnknown,
+    AuRules,
+    TransRules,
+    OtherLaw,
+    TheAct,
+}
+
+struct LMention {
+    start: usize,
+    end: usize,
+    inst: LInst,
+}
+
+/// Abbreviations and instrument words that name a non-AML/CTF-Act instrument.
+const LAW_OTHER_ABBR: &[&str] = &[
+    "CBA", "NPSA", "BAFIA", "CFR", "USC", "BSA", "ITAA", "GENIUS", "MTMA", "Regulation", "Regulations", "Reg",
+    "Directive", "RG", "NCCP", "UCC", "Corps", "Instrument", "Instruments", "Determination", "Bill", "Ordinance",
+];
+
+/// AML/CTF-regime words: a heading or line using them is about the AU AML/CTF regime.
+fn law_aml_words(s: &str) -> bool {
+    [
+        "AUSTRAC", "AML/CTF", "AMLCTF", "tipping", "Tipping", "travel rule", "Travel rule", "Travel Rule", "travel-rule", "SMR",
+        "AMLCO", "reporting entit", "IFTI", "IVTS", "TTR", "CDD", "EDD", "VASP", "designated service", "ML/TF", "PEP",
+        "payer information", "self-hosted",
+    ]
+    .iter()
+    .any(|w| {
+        // short acronyms (TTR, CDD, PEP, ...) only as whole words
+        if w.len() <= 5 && w.chars().all(|c| c.is_ascii_uppercase()) {
+            let b = s.as_bytes();
+            let mut from = 0;
+            while let Some(p) = s[from..].find(w) {
+                let st = from + p;
+                let en = st + w.len();
+                // a trailing plural `s` still counts (SMRs, PEPs)
+                let en2 = if en < b.len() && b[en] == b's' { en + 1 } else { en };
+                if wb(b, st) && we(b, en2) {
+                    return true;
+                }
+                from = en;
+            }
+            false
+        } else {
+            s.contains(w)
+        }
+    })
+}
+
+/// Instrument mentions on a line, with byte spans.
+fn law_mentions(line: &str) -> Vec<LMention> {
+    // file names (`AU_AMLCTF_Transitional_Rules_2026_..pdf`) read as words; '_' -> ' ' keeps byte offsets
+    let spaced = line.replace('_', " ");
+    let line = spaced.as_str();
+    let mut v: Vec<LMention> = Vec::new();
+    let lower = line.to_ascii_lowercase();
+    let lb = lower.as_bytes();
+    let covered = |v: &Vec<LMention>, s: usize| v.iter().any(|m| s >= m.start && s < m.end);
+    for pat in [
+        "anti-money laundering and counter-terrorism financing act",
+        "anti-money laundering and counter-terrorist financing act",
+        "anti-money laundering and counter terrorism financing act",
+        "anti-money laundering/counter-terrorist financing act",
+        "anti-money laundering counter-terrorist financing act",
+        "aml/ctf act",
+        "amlctf act",
+        "aml-ctf act",
+        "aml act",
+    ] {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(pat) {
+            let s = from + p;
+            let e = s + pat.len();
+            from = e;
+            if !wb(lb, s) || !we(lb, e) || covered(&v, s) {
+                continue;
+            }
+            let tail = lower[e..].trim_start_matches([' ', '(']);
+            let skip = lower[e..].len() - tail.len();
+            let (inst, e2) = if tail.starts_with("2006") {
+                (LInst::AuAct, e + skip + 4)
+            } else if tail.starts_with("cth") {
+                (LInst::AuAct, e + skip + 3)
+            } else if tail.starts_with("2015") {
+                (LInst::PngAct, e + skip + 4)
+            } else {
+                (LInst::AmlUnknown, e)
+            };
+            v.push(LMention { start: s, end: e2, inst });
+        }
+    }
+    for (pat, inst) in [("transitional rules", LInst::TransRules), ("aml/ctf rules", LInst::AuRules), ("amlctf rules", LInst::AuRules)] {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(pat) {
+            let s = from + p;
+            from = s + pat.len();
+            if wb(lb, s) && !covered(&v, s) {
+                v.push(LMention { start: s, end: s + pat.len(), inst });
+            }
+        }
+    }
+    for pat in ["U.S.C.", "Criminal Code"] {
+        let mut from = 0;
+        while let Some(p) = line[from..].find(pat) {
+            let s = from + p;
+            from = s + pat.len();
+            if !covered(&v, s) {
+                v.push(LMention { start: s, end: s + pat.len(), inst: LInst::OtherLaw });
+            }
+        }
+    }
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_alphabetic() || !wb(b, i) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        let word = &line[i..j];
+        if !covered(&v, i) {
+            let inst = match word {
+                "Rules" => Some(LInst::AuRules),
+                "Rule" if line[j..].starts_with(' ') && line[j + 1..].starts_with(|c: char| c.is_ascii_digit()) => Some(LInst::AuRules),
+                "Act" | "Acts" => {
+                    let before = line[..i].trim_end();
+                    let pw = before.rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+                    // "the Act", "this Act", and a bare "Act s66A" are the page's Act; "Corporations Act" is another
+                    // "the Principal Act" is the Transitional Rules' name for the Act they amend
+                    if pw.chars().next().is_some_and(char::is_uppercase) && !matches!(pw, "The" | "This" | "Principal") {
+                        Some(LInst::OtherLaw)
+                    } else {
+                        Some(LInst::TheAct)
+                    }
+                }
+                w if LAW_OTHER_ABBR.contains(&w) => Some(LInst::OtherLaw),
+                _ => None,
+            };
+            if let Some(inst) = inst {
+                v.push(LMention { start: i, end: j, inst });
+            }
+        }
+        i = j;
+    }
+    v
+}
+
+/// (AU markers, PNG markers) on a text.
+fn law_marks(s: &str) -> (usize, usize) {
+    let au = ["AUSTRAC", "Cth", "Australia", "A$", "ASIC"].iter().map(|p| s.matches(p).count()).sum();
+    let png = ["PNG", "FASU", "BPNG", "Papua"].iter().map(|p| s.matches(p).count()).sum();
+    (au, png)
+}
+
+/// The instrument class a mention resolves to: AU (the AML/CTF Act 2006), PNG (the AML/CTF Act
+/// 2015), RULES / TRULES (the AML/CTF Rules / Transitional Rules), OTHER, or "" (unresolved).
+fn law_class(inst: LInst, line: &str, page_jur: &'static str, page_def: &'static str) -> &'static str {
+    match inst {
+        LInst::AuAct => "AU",
+        LInst::PngAct => "PNG",
+        LInst::AuRules => "RULES",
+        LInst::TransRules => "TRULES",
+        LInst::OtherLaw => "OTHER",
+        LInst::AmlUnknown => {
+            let (a, p) = law_marks(line);
+            if a > p {
+                "AU"
+            } else if p > a {
+                "PNG"
+            } else if !page_jur.is_empty() {
+                page_jur
+            } else {
+                "AU"
+            }
+        }
+        LInst::TheAct => {
+            if page_def == "AU" || page_def == "PNG" {
+                page_def
+            } else if law_aml_words(line) {
+                let (a, p) = law_marks(line);
+                if p > a { "PNG" } else { "AU" }
+            } else {
+                ""
+            }
+        }
+    }
+}
+
+/// Up to `len` bytes from `i`, ASCII-lowercased (other bytes kept as-is), for prefix tests.
+fn law_lower_at(b: &[u8], i: usize, len: usize) -> String {
+    b[i.min(b.len())..(i + len).min(b.len())].iter().map(|c| c.to_ascii_lowercase() as char).collect()
+}
+
+struct LScan {
+    start: usize,
+    end: usize,
+    secs: Vec<String>,
+}
+
+/// Act-section citations on a line: `s.123`, `s123`, `s 26F(4)(d)`, `ss 80-95`, `s.76A/76B`,
+/// `section 41`, `sections 26F and 26J`, `s5, s12`. Ranges expand over `order` (every section
+/// number either compilation has). Rules numbers (`4-2`), dotted numbers (`3.2`) and years are not
+/// sections.
+fn law_cites(line: &str, order: &[String]) -> Vec<LScan> {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        if !(c == b's' || c == b'S') || !wb(b, i) || (i > 0 && (b[i - 1] == b'\'' || b[i - 1] == b'$')) || line[..i].ends_with('\u{2019}') {
+            i += 1;
+            continue;
+        }
+        let rl = law_lower_at(b, i, 14);
+        let mut start_num = None;
+        for kw in ["subsections", "subsection", "sections", "section", "ss", "s"] {
+            if !rl.starts_with(kw) {
+                continue;
+            }
+            if (kw == "s" || kw == "ss") && c != b's' {
+                break;
+            }
+            let mut p = i + kw.len();
+            let dot = p < n && b[p] == b'.';
+            if dot {
+                p += 1;
+            }
+            let mut sp = 0;
+            while p < n && b[p] == b' ' && sp < 2 {
+                p += 1;
+                sp += 1;
+            }
+            if kw.len() > 2 && sp == 0 {
+                break;
+            }
+            if p < n && b[p].is_ascii_digit() {
+                start_num = Some(p);
+            }
+            break;
+        }
+        let Some(mut p) = start_num else {
+            i += 1;
+            continue;
+        };
+        let mut secs: Vec<String> = Vec::new();
+        let mut range_from: Option<String> = None;
+        let mut end = p;
+        loop {
+            let e = digits_at(b, p, 4);
+            if e == p || e - p > 3 {
+                break;
+            }
+            let mut q = e;
+            while q < n && q - e < 3 && b[q].is_ascii_uppercase() {
+                q += 1;
+            }
+            if q < n && b[q].is_ascii_alphanumeric() {
+                break;
+            }
+            if q + 1 < n && matches!(b[q], b'-' | b'.' | b':') && b[q + 1].is_ascii_digit() {
+                break;
+            }
+            let num = line[p..q].to_string();
+            match range_from.take() {
+                Some(a) => secs.extend(law_range(order, &a, &num)),
+                None => secs.push(num.clone()),
+            }
+            let mut r = q;
+            while r < n && b[r] == b'(' {
+                match line[r..].find(')') {
+                    Some(x) if x <= 8 => r += x + 1,
+                    _ => break,
+                }
+            }
+            end = r;
+            let tail = &line[r..];
+            let mut sep = None;
+            for (s, rg) in [
+                (" \u{2013} ", true),
+                (" - ", true),
+                (" to ", true),
+                (" and ", false),
+                (" or ", false),
+                (" & ", false),
+                (", ", false),
+                ("\u{2013}", true),
+                ("-", true),
+                ("/", false),
+                (",", false),
+            ] {
+                if tail.starts_with(s) {
+                    sep = Some((s.len(), rg));
+                    break;
+                }
+            }
+            let Some((sl, rg)) = sep else { break };
+            let mut p2 = r + sl;
+            let t2 = law_lower_at(b, p2, 10);
+            for kw in ["sections ", "section ", "ss. ", "ss ", "s. ", "s.", "s "] {
+                if t2.starts_with(kw) {
+                    p2 += kw.len();
+                    break;
+                }
+            }
+            if p2 + 1 < n && b[p2] == b's' && b[p2 + 1].is_ascii_digit() {
+                p2 += 1;
+            }
+            if !(p2 < n && b[p2].is_ascii_digit()) {
+                break;
+            }
+            if rg {
+                range_from = Some(num);
+            }
+            p = p2;
+        }
+        if !secs.is_empty() {
+            out.push(LScan { start: i, end, secs });
+        }
+        i = end.max(i + 1);
+    }
+    out
+}
+
+/// The ids a markdown line defines (build_docset's rule), spec-scoped (`specs/<dir>|<id>`) in a spec.
+fn law_line_defs(line: &str, scope: Option<&str>) -> Vec<String> {
+    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let head = line_head(line);
+    let mut defined = Vec::new();
+    if let Some((p, id)) = hyphen_ids(head).into_iter().next()
+        && head.starts_with(&id)
+    {
+        if !KINA_STANDARDS.contains(&p.as_str()) {
+            defined.push(id);
+        }
+        for (p2, id2) in hyphen_ids(head).into_iter().skip(1) {
+            if head[..head.find([' ', '*', '|', ':']).unwrap_or(head.len())].contains(&id2[p2.len() + 1..]) {
+                defined.push(id2);
+            }
+        }
+    } else if let Some((_, id)) = bare_ids(head, &bare).into_iter().next()
+        && head.starts_with(&id)
+    {
+        defined.push(id);
+    }
+    defined.into_iter().map(|id| match scope { Some(u) => format!("{u}|{id}"), None => id }).collect()
+}
+
+struct LBlock {
+    unit: usize,
+    /// a numbered decision row (`| 14 | ...` under a heading naming decisions): `decision|14`
+    drow: Option<String>,
+    /// ids the block's definition line defines, plus those its enclosing headings define
+    ids: BTreeSet<String>,
+    own: Vec<String>,
+    mentions: BTreeSet<String>,
+    files: BTreeSet<u32>,
+    cites: Vec<usize>,
+}
+
+struct LUnit {
+    path: String,
+    name: String,
+    ids: BTreeSet<String>,
+    drows: BTreeSet<String>,
+    mentions: BTreeSet<String>,
+    blocks: Vec<usize>,
+    cites: Vec<usize>,
+}
+
+struct LCite {
+    unit: usize,
+    block: usize,
+    secs: Vec<String>,
+    class: &'static str,
+    route: &'static str,
+    line: String,
+}
+
+#[derive(Default)]
+struct GoalLayer {
+    units: Vec<LUnit>,
+    blocks: Vec<LBlock>,
+    cites: Vec<LCite>,
+    def_blocks: HashMap<String, Vec<usize>>,
+    drow_blocks: HashMap<String, Vec<usize>>,
+    pages: usize,
+    page_defaults: BTreeMap<String, usize>,
+}
+
+/// Every doc page split into units (heading sections, with their enclosing headings' ids) and
+/// definition blocks (a definition line to the next one or the next heading), with the ids each
+/// defines and mentions, the candidate files it names, and its Act citations resolved by context:
+/// the nearest instrument on the line, else the innermost heading naming one, else the page's
+/// dominant instrument ("the Act" counts only on an AML/CTF page).
+fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[String]) -> GoalLayer {
+    let mut gl = GoalLayer::default();
+    let kinds: BTreeSet<u8> = d.vocab_bare.keys().copied().collect();
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (p, l) in docs {
+        if groups.last().is_none_or(|(q, _)| *q != p.as_str()) {
+            groups.push((p.as_str(), Vec::new()));
+        }
+        groups.last_mut().unwrap().1.push(l.as_str());
+    }
+    gl.pages = groups.len();
+    let known: HashSet<&str> = order.iter().map(String::as_str).collect();
+    for (path, lines) in &groups {
+        let page_first_cite = gl.cites.len();
+        let un = kina_unit(path);
+        let scope: Option<String> = un.starts_with("specs/").then(|| un.clone());
+        let own_spec: Vec<u32> = scope
+            .as_ref()
+            .and_then(|u| u["specs/".len()..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
+            .into_iter()
+            .collect();
+        let (mut au, mut png) = (0usize, 0usize);
+        for l in lines {
+            let (a, p) = law_marks(l);
+            au += a;
+            png += p;
+        }
+        let pl = path.to_ascii_lowercase();
+        if pl.contains("png") {
+            png += 5;
+        }
+        if pl.contains("au_") || pl.contains("austrac") {
+            au += 5;
+        }
+        let page_jur: &'static str = if au >= png && au > 0 {
+            "AU"
+        } else if png > au {
+            "PNG"
+        } else {
+            ""
+        };
+        // The page's own Act: an AML/CTF page (by its path or its title) means the AML/CTF Act of its
+        // jurisdiction; any other page, the Act its explicit mentions name most (Rules never: their
+        // provisions are numbered 4-2, and the Transitional Rules' are named on the line).
+        let title = lines.iter().find(|l| l.starts_with("# ")).map_or(String::new(), |l| l.to_lowercase());
+        let aml_page = ["aml", "austrac", "travel-rule", "travel_rule", "ifti", "tipping"].iter().any(|w| pl.contains(w))
+            || (!title.contains("excluding") && ["aml/ctf", "amlctf", "austrac", "travel rule", "tipping-off", "tipping off"].iter().any(|w| title.contains(w)));
+        let mut cnt: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for l in lines {
+            for m in law_mentions(l) {
+                let c = law_class(m.inst, l, page_jur, "");
+                if matches!(c, "AU" | "PNG" | "OTHER") {
+                    *cnt.entry(c).or_default() += 1;
+                }
+            }
+        }
+        let mut page_def: &'static str = "";
+        if aml_page {
+            page_def = if page_jur == "PNG" { "PNG" } else { "AU" };
+        } else {
+            let mut best = 0;
+            for c in ["AU", "PNG", "OTHER"] {
+                let n = cnt.get(c).copied().unwrap_or(0);
+                if n > best {
+                    best = n;
+                    page_def = c;
+                }
+            }
+        }
+        *gl.page_defaults.entry(if page_def.is_empty() { "(none)".into() } else { page_def.to_string() }).or_default() += 1;
+
+        let mut stack: Vec<(usize, Vec<String>, String)> = Vec::new();
+        let mut fence = false;
+        // (line number, class) of the last explicit instrument mention in this unit
+        let mut recent: Option<(usize, &'static str)> = None;
+        let mut unit = gl.units.len();
+        gl.units.push(LUnit {
+            path: path.to_string(),
+            name: format!("{path} \u{a7} (top)"),
+            ids: BTreeSet::new(),
+            drows: BTreeSet::new(),
+            mentions: BTreeSet::new(),
+            blocks: Vec::new(),
+            cites: Vec::new(),
+        });
+        let mut block = gl.blocks.len();
+        gl.blocks.push(LBlock {
+            unit,
+            drow: None,
+            ids: BTreeSet::new(),
+            own: Vec::new(),
+            mentions: BTreeSet::new(),
+            files: BTreeSet::new(),
+            cites: Vec::new(),
+        });
+        gl.units[unit].blocks.push(block);
+        for (ln, l) in lines.iter().enumerate() {
+            let t = l.trim_start();
+            if t.starts_with("```") || t.starts_with("~~~") {
+                fence = !fence;
+            }
+            let lvl = if !fence && t.starts_with('#') {
+                let h = t.bytes().take_while(|&c| c == b'#').count();
+                (h <= 6 && t[h..].starts_with(' ')).then_some(h)
+            } else {
+                None
+            };
+            let defs = if fence { Vec::new() } else { law_line_defs(l, scope.as_deref()) };
+            if let Some(h) = lvl {
+                while stack.last().is_some_and(|s| s.0 >= h) {
+                    stack.pop();
+                }
+                stack.push((h, defs.clone(), l.to_string()));
+                recent = None;
+                let ids: BTreeSet<String> = stack.iter().flat_map(|s| s.1.iter().cloned()).collect();
+                unit = gl.units.len();
+                gl.units.push(LUnit {
+                    path: path.to_string(),
+                    name: format!("{path} \u{a7} {}", t.trim_start_matches('#').trim()),
+                    ids: ids.clone(),
+                    drows: BTreeSet::new(),
+                    mentions: BTreeSet::new(),
+                    blocks: Vec::new(),
+                    cites: Vec::new(),
+                });
+                block = gl.blocks.len();
+                gl.blocks.push(LBlock { unit, drow: None, ids, own: defs, mentions: BTreeSet::new(), files: BTreeSet::new(), cites: Vec::new() });
+                gl.units[unit].blocks.push(block);
+            } else if !fence
+                && t.starts_with('|')
+                && stack.last().is_some_and(|h| h.2.to_lowercase().contains("decision"))
+                && let Some(n) = t[1..].split('|').next().map(str::trim).filter(|c| !c.is_empty() && c.len() <= 3 && c.chars().all(|x| x.is_ascii_digit()))
+            {
+                // a numbered decision row (the legal matrix's decisions 1-36 and the code check's rows 1-33 share it)
+                let tok = format!("decision|{n}");
+                let ids: BTreeSet<String> = stack.iter().flat_map(|s| s.1.iter().cloned()).collect();
+                gl.units[unit].drows.insert(tok.clone());
+                block = gl.blocks.len();
+                gl.blocks.push(LBlock { unit, drow: Some(tok), ids, own: Vec::new(), mentions: BTreeSet::new(), files: BTreeSet::new(), cites: Vec::new() });
+                gl.units[unit].blocks.push(block);
+            } else if !defs.is_empty() {
+                let mut ids: BTreeSet<String> = stack.iter().flat_map(|s| s.1.iter().cloned()).collect();
+                ids.extend(defs.iter().cloned());
+                gl.units[unit].ids.extend(defs.iter().cloned());
+                block = gl.blocks.len();
+                gl.blocks.push(LBlock { unit, drow: None, ids, own: defs, mentions: BTreeSet::new(), files: BTreeSet::new(), cites: Vec::new() });
+                gl.units[unit].blocks.push(block);
+            }
+            // ids mentioned (resolved like a code citation, with the page's own spec in scope)
+            let ls: Vec<u32> = spec_refs(l).into_iter().chain(own_spec.iter().copied()).collect();
+            let mut junk = BTreeMap::new();
+            let mut ment: Vec<String> = Vec::new();
+            for (pfx, id) in hyphen_ids(l) {
+                if d.vocab_hyphen.contains_key(&pfx)
+                    && let Some((tk, _)) = kina_resolve(d, &id, false, &ls, &own_spec, &mut junk)
+                {
+                    ment.push(tk);
+                }
+            }
+            for (_, id) in bare_ids(l, &kinds) {
+                if let Some((tk, _)) = kina_resolve(d, &id, true, &ls, &own_spec, &mut junk) {
+                    ment.push(tk);
+                }
+            }
+            gl.blocks[block].mentions.extend(ment.iter().cloned());
+            gl.units[unit].mentions.extend(ment);
+            gl.blocks[block].files.extend(pr.files(l));
+            // Act citations
+            let ments = law_mentions(l);
+            for sc in law_cites(l, order) {
+                let mut best: Option<(usize, LInst)> = None;
+                // the AML/CTF Rules number their provisions 4-2, 8-3: a plain-number citation is never theirs
+                for m in ments.iter().filter(|m| m.inst != LInst::AuRules) {
+                    let dist = if m.end <= sc.start {
+                        sc.start - m.end
+                    } else if m.start >= sc.end && m.start - sc.end <= 30 {
+                        m.start - sc.end + 20
+                    } else {
+                        continue;
+                    };
+                    if best.is_none_or(|(bd, _)| dist < bd) {
+                        best = Some((dist, m.inst));
+                    }
+                }
+                let (class, route) = match best {
+                    Some((_, inst)) => (law_class(inst, l, page_jur, page_def), "line"),
+                    None if law_aml_words(l) => {
+                        // PNG only when the line names a PNG AML institution or its 2015 Act
+                        let png = ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w));
+                        (if png { "PNG" } else { "AU" }, "line-words")
+                    }
+                    None => {
+                        // the innermost heading naming an instrument, or using AML/CTF-regime words
+                        let mut hc = None;
+                        for (hlv, _, hl) in stack.iter().rev() {
+                            if let Some(m) = law_mentions(hl).iter().rfind(|m| m.inst != LInst::TheAct) {
+                                hc = Some(law_class(m.inst, hl, page_jur, page_def));
+                                break;
+                            }
+                            if *hlv >= 2 && !hl.contains("excluding") && law_aml_words(hl) {
+                                hc = Some("AU");
+                                break;
+                            }
+                        }
+                        // on an AML/CTF page the page's Act outranks a mention a few lines up
+                        match (hc, recent) {
+                            (Some(c), _) => (c, "heading"),
+                            (None, Some((rl, c))) if ln - rl <= 12 && !aml_page => (c, "context"),
+                            _ => (page_def, "page"),
+                        }
+                    }
+                };
+                let class = if class.is_empty() { "UNRESOLVED" } else { class };
+                let ci = gl.cites.len();
+                let lt: String = l.trim().chars().take(240).collect();
+                gl.cites.push(LCite { unit, block, secs: sc.secs, class, route, line: lt });
+                gl.blocks[block].cites.push(ci);
+                gl.units[unit].cites.push(ci);
+            }
+            // (the page validity check follows the line loop)
+            // local context carries Act-level mentions only (the Rules are named on their own lines)
+            if let Some(m) =
+                ments.iter().filter(|m| !matches!(m.inst, LInst::AuRules | LInst::TransRules | LInst::TheAct)).max_by_key(|m| m.start)
+            {
+                recent = Some((ln, law_class(m.inst, l, page_jur, page_def)));
+            }
+        }
+        // Page validity check: when most of a page's AU citations resolved from context (not on
+        // their own line) are numbers the AML/CTF Act does not have, the page is about another
+        // instrument, and those citations are re-read as OTHER.
+        let ctx_au: Vec<usize> = (page_first_cite..gl.cites.len()).filter(|&c| gl.cites[c].class == "AU" && gl.cites[c].route != "line").collect();
+        let valid = ctx_au.iter().filter(|&&c| gl.cites[c].secs.iter().all(|x| known.contains(x.as_str()))).count();
+        if ctx_au.len() >= 3 && (valid as f64) < 0.5 * ctx_au.len() as f64 {
+            for c in ctx_au {
+                gl.cites[c].class = "OTHER";
+                gl.cites[c].route = "page-check";
+            }
+        }
+    }
+    for (bi, b) in gl.blocks.iter().enumerate() {
+        for id in &b.ids {
+            gl.def_blocks.entry(id.clone()).or_default().push(bi);
+        }
+        if let Some(d) = &b.drow {
+            gl.drow_blocks.entry(d.clone()).or_default().push(bi);
+        }
+    }
+    gl
+}
+
+// ---- truth: the reform-implementation commits ----
+
+struct LCommit {
+    sha: String,
+    date: String,
+    subject: String,
+    tids: Vec<String>,
+    spec: String,
+    spec_score: f64,
+    au: bool,
+    paths: usize,
+    code: Vec<u32>,
+    /// code-looking paths created after the start (no candidate can hold them)
+    code_new: Vec<String>,
+    /// code-looking paths present at the start that the graph holds no MODULE for
+    code_noncand: Vec<String>,
+}
+
+/// A truth set: (candidate code files changed, commits, code files created after the start).
+type LTruth = (HashSet<u32>, usize, BTreeSet<String>);
+
+fn law_is_au(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: HashSet<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+    LAW_AU_WORDS.iter().any(|w| words.contains(w)) || LAW_AU_PHRASES.iter().any(|p| lower.contains(p))
+}
+
+/// (spec unit, T-id) -> the task item's text (its line and indented continuation), from every
+/// spec's tasks.md at the wiki's HEAD (labels the truth commits only; never a predictor).
+fn law_tasks(wiki: &str) -> BTreeMap<(String, String), String> {
+    let head = git_text(wiki, &["rev-parse", "HEAD"]).expect("wiki head").trim().to_string();
+    let lines = git_grep(wiki, &head, None, &["specs/*/tasks.md"]);
+    let tk: BTreeSet<u8> = [b'T'].into_iter().collect();
+    let mut out: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut cur: Option<(String, String)> = None;
+    let mut last = String::new();
+    for (p, l) in &lines {
+        if *p != last {
+            cur = None;
+            last = p.clone();
+        }
+        let t = l.trim_start();
+        if t.starts_with('#') {
+            cur = None;
+            continue;
+        }
+        let item = t.starts_with("- ") || t.starts_with("* ");
+        if item {
+            let head = line_head(l);
+            if let Some((_, id)) = bare_ids(head, &tk).into_iter().next()
+                && head.starts_with(&id)
+            {
+                let key = (kina_unit(p), id);
+                let e = out.entry(key.clone()).or_default();
+                e.push_str(l);
+                e.push('\n');
+                cur = Some(key);
+                continue;
+            }
+            if l.len() == t.len() {
+                cur = None;
+            }
+        }
+        if let Some(k) = &cur
+            && let Some(e) = out.get_mut(k)
+        {
+            e.push_str(l);
+            e.push('\n');
+        }
+    }
+    out
+}
+
+/// Every non-merge commit reachable from the tips but not from the start, oldest first, with
+/// its T-ids, the spec whose task text its subject best matches, and its candidate code files.
+/// sha -> spec unit for commits reachable only from a `wave/NNN-*` tip (not from the first tip,
+/// the mainline): the branch names its spec.
+fn law_branch_specs(git: &str, start: &str, tip_names: &[String], tasks: &BTreeMap<(String, String), String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let specs: BTreeSet<&String> = tasks.keys().map(|k| &k.0).collect();
+    for name in tip_names.iter().skip(1) {
+        let Some(pos) = name.find("wave/") else { continue };
+        let num: String = name[pos + 5..].chars().take_while(char::is_ascii_digit).collect();
+        if num.len() != 3 {
+            continue;
+        }
+        let Some(spec) = specs.iter().find(|s| s["specs/".len()..].starts_with(&num)) else { continue };
+        let neg_start = format!("^{start}");
+        let neg_main = format!("^{}", tip_names[0]);
+        let text = git_text(git, &["rev-list", &neg_start, &neg_main, name.as_str()]).unwrap_or_default();
+        for sha in text.lines() {
+            out.insert(sha.trim().to_string(), (*spec).clone());
+        }
+    }
+    out
+}
+
+/// T-id -> the specs whose tasks.md ticked it (`- [ ]` -> `- [x]`) in a wiki commit after the start.
+fn law_ticks(wiki: &str, start_ct: i64) -> HashMap<String, BTreeSet<String>> {
+    let text = git_text(wiki, &["log", "-p", "--format=%x1e%H%x1f%ct", "--", "specs/*/tasks.md"]).unwrap_or_default();
+    let tk: BTreeSet<u8> = [b'T'].into_iter().collect();
+    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for rec in text.split('\x1e').skip(1) {
+        let mut lines = rec.lines();
+        let head = lines.next().unwrap_or("");
+        let ct: i64 = head.split('\x1f').nth(1).and_then(|x| x.trim().parse().ok()).unwrap_or(0);
+        if ct <= start_ct {
+            continue;
+        }
+        let mut spec = String::new();
+        for l in lines {
+            if let Some(r) = l.strip_prefix("+++ b/") {
+                spec = kina_unit(r.trim());
+            } else if let Some(r) = l.strip_prefix('+')
+                && (r.starts_with("- [x] ") || r.starts_with("- [X] "))
+                && let Some((_, id)) = bare_ids(&r[6..], &tk).into_iter().next()
+                && r[6..].starts_with(&id)
+            {
+                out.entry(id).or_default().insert(spec.clone());
+            }
+        }
+    }
+    out
+}
+
+fn law_commits(
+    git: &str,
+    start: &str,
+    tips: &[String],
+    pidx: &HashMap<&str, u32>,
+    tasks: &BTreeMap<(String, String), String>,
+    branch_spec: &HashMap<String, String>,
+    ticks: &HashMap<String, BTreeSet<String>>,
+) -> Vec<LCommit> {
+    let at_start: HashSet<String> =
+        git_text(git, &["ls-tree", "-r", "--name-only", start]).unwrap_or_default().lines().map(str::to_string).collect();
+    let neg = format!("^{start}");
+    let mut a: Vec<&str> = vec!["log", "--no-merges", "--topo-order", "--reverse", "--name-only", "--format=%x1e%H%x1f%ci%x1f%B%x1f", &neg];
+    for t in tips {
+        a.push(t.as_str());
+    }
+    let text = git_text(git, &a).expect("git log reform commits");
+    let tk: BTreeSet<u8> = [b'T'].into_iter().collect();
+    let mut out = Vec::new();
+    for rec in text.split('\x1e').skip(1) {
+        let mut parts = rec.splitn(4, '\x1f');
+        let sha = parts.next().unwrap_or("").trim().to_string();
+        let date = parts.next().unwrap_or("").trim().to_string();
+        let msg = parts.next().unwrap_or("").to_string();
+        let names = parts.next().unwrap_or("");
+        let subject = msg.lines().next().unwrap_or("").to_string();
+        // the subject's T-ids (a body often names neighbouring tasks)
+        let mut tids: Vec<String> = bare_ids(&subject, &tk).into_iter().map(|x| x.1).collect();
+        tids.sort();
+        tids.dedup();
+        let is_tid = |t: &str| t.len() == 4 && t.starts_with('t') && t[1..].chars().all(|c| c.is_ascii_digit());
+        let stoks: BTreeSet<String> = tokens(&subject).into_iter().filter(|t| !is_tid(t)).collect();
+        let msg_specs: BTreeSet<u32> = spec_refs(&msg).into_iter().collect();
+        let mut scores: BTreeMap<String, f64> = BTreeMap::new();
+        for ((spec, tid), txt) in tasks {
+            if tids.contains(tid) {
+                let tt: BTreeSet<String> = tokens(txt).into_iter().collect();
+                let ov = stoks.intersection(&tt).count() as f64 / stoks.len().max(1) as f64;
+                *scores.entry(spec.clone()).or_default() += ov;
+            }
+        }
+        for (spec, s) in scores.iter_mut() {
+            let num: u32 = spec["specs/".len()..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0);
+            if msg_specs.contains(&num) {
+                *s += 1.0;
+            }
+        }
+        let (mut spec, mut best) = (String::new(), 0.0f64);
+        for (s, v) in &scores {
+            if *v > best {
+                best = *v;
+                spec = s.clone();
+            }
+        }
+        // the spec that ticked the subject's tasks after the start, when exactly one did
+        let ticked: BTreeSet<&String> = tids.iter().flat_map(|t| ticks.get(t).into_iter().flatten()).collect();
+        if ticked.len() == 1 {
+            spec = (*ticked.iter().next().unwrap()).clone();
+            best = -1.0;
+        }
+        if let Some(bs) = branch_spec.get(&sha) {
+            spec = bs.clone();
+            best = f64::INFINITY;
+        }
+        let task_text: String = tids.iter().filter_map(|t| tasks.get(&(spec.clone(), t.clone()))).cloned().collect::<Vec<_>>().join("\n");
+        let au = law_is_au(&msg) || law_is_au(&task_text);
+        let mut code = Vec::new();
+        let mut code_new = Vec::new();
+        let mut code_noncand = Vec::new();
+        let mut paths = 0;
+        for l in names.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            paths += 1;
+            match pidx.get(l) {
+                Some(&f) => code.push(f),
+                None => {
+                    let e = ext_of(l);
+                    if !e.is_empty() && !NOT_CODE.contains(&e.as_str()) && e != "sql" {
+                        if at_start.contains(l) {
+                            code_noncand.push(l.to_string());
+                        } else {
+                            code_new.push(l.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        code.sort_unstable();
+        code.dedup();
+        out.push(LCommit { sha, date, subject, tids, spec, spec_score: best, au, paths, code, code_new, code_noncand });
+    }
+    out
+}
+
+// ---- the chain ----
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LChain {
+    Unit,
+    Block,
+    Mention,
+    UnitNamed,
+    UnitHop,
+    Decision,
+}
+
+const LAW_CHAINS: [(LChain, &str, &str); 6] = [
+    (LChain::Unit, "C1", "units citing the section -> the ids they define -> code files citing an id (the specified chain)"),
+    (LChain::Block, "C2", "definition blocks citing the section -> their ids -> code files (finer than a unit)"),
+    (LChain::Mention, "C1m", "C1, plus every id the citing units mention (looser)"),
+    (LChain::UnitNamed, "C3", "C1, plus the files the ids' definition blocks name (doc -> file)"),
+    (LChain::UnitHop, "C4", "C3 after one goal-internal hop: blocks that mention a reached id add their ids"),
+    (LChain::Decision, "C5", "C3, plus the numbered decision rows whose own row cites the section (`decision|N`, a number the report's decisions and the code check's rows share) and the files every row of that number names"),
+];
+
+fn law_chain_ids(kind: LChain, gl: &GoalLayer, units: &BTreeSet<usize>, blocks: &BTreeSet<usize>) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    if kind == LChain::Block {
+        for &b in blocks {
+            ids.extend(gl.blocks[b].ids.iter().cloned());
+        }
+    } else {
+        for &u in units {
+            ids.extend(gl.units[u].ids.iter().cloned());
+            if kind == LChain::Mention {
+                ids.extend(gl.units[u].mentions.iter().cloned());
+            }
+        }
+    }
+    if kind == LChain::Decision {
+        // only the decision rows whose own row cites the section
+        for &b in blocks {
+            if let Some(d) = &gl.blocks[b].drow {
+                ids.insert(d.clone());
+            }
+        }
+    }
+    if kind == LChain::UnitHop {
+        let extra: Vec<String> =
+            gl.blocks.iter().filter(|b| b.mentions.iter().any(|m| ids.contains(m))).flat_map(|b| b.ids.iter().cloned()).collect();
+        ids.extend(extra);
+    }
+    ids
+}
+
+fn law_chain_files(kind: LChain, gl: &GoalLayer, ids: &BTreeSet<String>, files_of: &HashMap<String, Vec<u32>>) -> BTreeSet<u32> {
+    let mut f: BTreeSet<u32> = ids.iter().flat_map(|i| files_of.get(i).into_iter().flatten().copied()).collect();
+    if matches!(kind, LChain::UnitNamed | LChain::UnitHop | LChain::Decision) {
+        for i in ids {
+            for &b in gl.def_blocks.get(i).into_iter().flatten() {
+                f.extend(gl.blocks[b].files.iter().copied());
+            }
+            if kind == LChain::Decision {
+                for &b in gl.drow_blocks.get(i).into_iter().flatten() {
+                    f.extend(gl.blocks[b].files.iter().copied());
+                }
+            }
+        }
+    }
+    f
+}
+
+fn law_files_of(toks: &[BTreeSet<String>]) -> HashMap<String, Vec<u32>> {
+    let mut m: HashMap<String, Vec<u32>> = HashMap::new();
+    for (f, ts) in toks.iter().enumerate() {
+        for t in ts {
+            m.entry(t.clone()).or_default().push(f as u32);
+        }
+    }
+    m
+}
+
+/// score(f) = sum over input sections reaching f of idf = ln(1 + files / files the section reaches).
+fn law_score(sets: &[&BTreeSet<u32>], nf: usize) -> Vec<f64> {
+    let mut s = vec![0.0; nf];
+    for fs in sets {
+        if fs.is_empty() {
+            continue;
+        }
+        let idf = (1.0 + nf as f64 / fs.len() as f64).ln();
+        for &f in fs.iter() {
+            s[f as usize] += idf;
+        }
+    }
+    s
+}
+
+/// Every file, best first (an exact tie goes to the smaller path).
+fn law_rank(score: &[f64]) -> Vec<u32> {
+    let mut ix: Vec<u32> = (0..score.len() as u32).collect();
+    ix.sort_by(|&a, &b| score[b as usize].total_cmp(&score[a as usize]).then(a.cmp(&b)));
+    ix
+}
+
+// ---- metrics ----
+
+/// [set size, hits, precision, recall, F1, hits@10, hits@20, recall@10, recall@20]
+type LMet = [f64; 9];
+
+fn law_met(set: &[u32], ranked: &[u32], truth: &HashSet<u32>) -> LMet {
+    let nt = truth.len().max(1) as f64;
+    let hits = set.iter().filter(|f| truth.contains(f)).count() as f64;
+    let n = set.len() as f64;
+    let p = if n > 0.0 { hits / n } else { 0.0 };
+    let r = hits / nt;
+    let f1 = if p + r > 0.0 { 2.0 * p * r / (p + r) } else { 0.0 };
+    let hk = |k: usize| ranked.iter().take(k).filter(|f| truth.contains(f)).count() as f64;
+    [n, hits, p, r, f1, hk(10), hk(20), hk(10) / nt, hk(20) / nt]
+}
+
+/// A ranked prediction: the positive-score files are the set.
+fn law_met_scores(score: &[f64], truth: &HashSet<u32>) -> LMet {
+    let ranked = law_rank(score);
+    let set: Vec<u32> = ranked.iter().copied().filter(|&f| score[f as usize] > 0.0).collect();
+    law_met(&set, &set, truth)
+}
+
+/// A full ranking cut at k.
+fn law_met_topk(score: &[f64], k: usize, truth: &HashSet<u32>) -> LMet {
+    let ranked = law_rank(score);
+    law_met(&ranked[..k.min(ranked.len())], &ranked, truth)
+}
+
+struct LDist {
+    mean: LMet,
+    lo: LMet,
+    hi: LMet,
+    /// share of draws with F1 at or above the real chain's
+    ge: f64,
+}
+
+fn law_dist(ms: &[LMet], actual_f1: f64) -> LDist {
+    let mut mean = [0.0; 9];
+    let mut lo = [0.0; 9];
+    let mut hi = [0.0; 9];
+    for k in 0..9 {
+        let mut v: Vec<f64> = ms.iter().map(|m| m[k]).collect();
+        v.sort_by(f64::total_cmp);
+        mean[k] = v.iter().sum::<f64>() / v.len().max(1) as f64;
+        lo[k] = v[((v.len() as f64) * 0.025) as usize];
+        hi[k] = v[(((v.len() as f64) * 0.975) as usize).min(v.len() - 1)];
+    }
+    let ge = ms.iter().filter(|m| m[4] >= actual_f1 - 1e-12).count() as f64 / ms.len().max(1) as f64;
+    LDist { mean, lo, hi, ge }
+}
+
+/// F1 of `a` minus F1 of `b` under a commit-cluster bootstrap of the truth (resample the truth
+/// commits with replacement; the truth is the union of their files): (mean, 2.5%, 97.5%).
+fn law_boot(commits: &[&Vec<u32>], a: &[u32], b: &[u32], key: &str) -> (f64, f64, f64) {
+    let mut v: Vec<f64> = (0..LAW_DRAWS)
+        .map(|dr| {
+            let mut rng = Rng(h64(&format!("{key}:{dr}")));
+            let mut t: HashSet<u32> = HashSet::new();
+            for _ in 0..commits.len() {
+                t.extend(commits[(rng.next() % commits.len() as u64) as usize].iter().copied());
+            }
+            law_met(a, a, &t)[4] - law_met(b, b, &t)[4]
+        })
+        .collect();
+    v.sort_by(f64::total_cmp);
+    let mean = v.iter().sum::<f64>() / v.len() as f64;
+    (mean, v[(v.len() as f64 * 0.025) as usize], v[((v.len() as f64 * 0.975) as usize).min(v.len() - 1)])
+}
+
+fn law_random(nf: usize, k: usize, truth: &HashSet<u32>, key: &str, f1: f64) -> LDist {
+    let ms: Vec<LMet> = (0..LAW_DRAWS)
+        .map(|dr| {
+            let mut rng = Rng(h64(&format!("{key}:{dr}")));
+            let mut ix: Vec<u32> = (0..nf as u32).collect();
+            let kk = k.min(nf);
+            for i in 0..kk {
+                let j = i + (rng.next() % (nf - i) as u64) as usize;
+                ix.swap(i, j);
+            }
+            ix.truncate(kk);
+            law_met(&ix, &ix, truth)
+        })
+        .collect();
+    law_dist(&ms, f1)
+}
+
+/// The chain with the section -> unit map permuted over every AU-cited section: each changed cited
+/// section takes the reached files of a random cited section.
+fn law_permuted(cited: &[String], changed: &BTreeSet<String>, files: &BTreeMap<String, BTreeSet<u32>>, nf: usize, truth: &HashSet<u32>, key: &str, f1: f64) -> LDist {
+    let ms: Vec<LMet> = (0..LAW_DRAWS)
+        .map(|dr| {
+            let mut rng = Rng(h64(&format!("{key}:{dr}")));
+            let mut perm: Vec<usize> = (0..cited.len()).collect();
+            for k in (1..perm.len()).rev() {
+                let j = (rng.next() % (k as u64 + 1)) as usize;
+                perm.swap(k, j);
+            }
+            let sets: Vec<&BTreeSet<u32>> =
+                cited.iter().enumerate().filter(|(_, s)| changed.contains(*s)).map(|(i, _)| &files[&cited[perm[i]]]).collect();
+            law_met_scores(&law_score(&sets, nf), truth)
+        })
+        .collect();
+    law_dist(&ms, f1)
+}
+
+/// Code tokens: words split at non-alphanumerics and camelCase / PascalCase boundaries, lower-cased,
+/// at least 3 characters, no stop words or numbers.
+fn law_code_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let push = |w: &str, out: &mut Vec<String>| {
+        let l = w.to_lowercase();
+        if l.chars().count() >= 3 && !STOP.contains(&l.as_str()) && !l.chars().all(|c| c.is_ascii_digit()) {
+            out.push(l);
+        }
+    };
+    for raw in s.split(|c: char| !c.is_alphanumeric()) {
+        let mut cur = String::new();
+        let mut prev_lower = false;
+        for c in raw.chars() {
+            if c.is_uppercase() && prev_lower && !cur.is_empty() {
+                push(&cur, &mut out);
+                cur.clear();
+            }
+            prev_lower = c.is_lowercase() || c.is_ascii_digit();
+            cur.push(c);
+        }
+        if !cur.is_empty() {
+            push(&cur, &mut out);
+        }
+    }
+    out
+}
+
+/// PPR (the production P1 config) restarted at the seed files, each file 1/|seeds| spread over its nodes.
+fn law_ppr(g: &Graph, ppr: &Ppr, seeds: &[u32]) -> Vec<f64> {
+    let sf: Vec<u32> = seeds.iter().copied().filter(|&f| !g.file_nodes[f as usize].is_empty()).collect();
+    let mut pers = Vec::new();
+    for &f in &sf {
+        let ns = &g.file_nodes[f as usize];
+        for &u in ns {
+            pers.push((g.node_ppr[u as usize], 1.0 / sf.len() as f64 / ns.len() as f64));
+        }
+    }
+    if pers.is_empty() {
+        return vec![0.0; g.paths.len()];
+    }
+    let v = ppr.run(&pers);
+    file_pool(g, |u| v[g.node_ppr[u]], false)
+}
+
+fn law_fmt(m: &LMet) -> String {
+    format!(
+        "{:.0} | {:.0} | {:.3} | {:.3} | {:.3} | {:.0} / {:.3} | {:.0} / {:.3}",
+        m[0], m[1], m[2], m[3], m[4], m[5], m[7], m[6], m[8]
+    )
+}
+
+fn law_fmt_dist(d: &LDist) -> String {
+    format!(
+        "{:.0} | {:.1} | {:.3} [{:.3}, {:.3}] | {:.3} [{:.3}, {:.3}] | {:.3} [{:.3}, {:.3}] | {:.1} / {:.3} | {:.1} / {:.3}",
+        d.mean[0], d.mean[1], d.mean[2], d.lo[2], d.hi[2], d.mean[3], d.lo[3], d.hi[3], d.mean[4], d.lo[4], d.hi[4], d.mean[5], d.mean[7], d.mean[6], d.mean[8]
+    )
+}
+
+fn law_json(m: &LMet) -> serde_json::Value {
+    json!({"n": m[0], "hits": m[1], "precision": m[2], "recall": m[3], "f1": m[4], "hits10": m[5], "hits20": m[6], "recall10": m[7], "recall20": m[8]})
+}
+
+fn law_json_dist(d: &LDist) -> serde_json::Value {
+    json!({"mean": law_json(&d.mean), "lo": law_json(&d.lo), "hi": law_json(&d.hi), "share_f1_ge_real": d.ge})
+}
+
+// ---- the run ----
+
+fn law_impact_main(args: &Args) {
+    assert_eq!(args.law_impact, "kina", "--law-impact: only `kina` is wired");
+    for (v, n) in [(&args.wiki, "--wiki"), (&args.law_sources, "--law-sources"), (&args.law_cache, "--law-cache"), (&args.law_out, "--law-out"), (&args.law_tips, "--law-tips")] {
+        assert!(!v.is_empty(), "--law-impact needs {n}");
+    }
+    std::fs::create_dir_all(&args.law_out).expect("law out dir");
+    let outp = |name: &str| format!("{}/{name}", args.law_out);
+    let t0 = Instant::now();
+    let mut js = serde_json::Map::new();
+
+    // ---- 1. law diff ----
+    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, LAW_OLD_PDF), act_furniture));
+    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, LAW_NEW_PDF), act_furniture));
+    let (n_old, n_new) = (old.len(), new.len());
+    let diff = law_diff(old, new, dups_old, dups_new);
+    let amend = amend_parse(&law_lines(&law_pdf(args, LAW_AMEND_PDF), amend_furniture), &diff);
+    let changed: BTreeSet<String> = diff.order.iter().filter(|n| diff.status[*n] != "unchanged").cloned().collect();
+    let count = |st: &str| diff.status.values().filter(|s| **s == st).count();
+    let (n_unch, n_ch, n_add, n_rep) = (count("unchanged"), count("changed"), count("added"), count("repealed"));
+    let minor = diff.order.iter().filter(|n| diff.status[*n] == "changed" && diff.dice[*n] >= 0.97).count();
+    eprintln!(
+        "[law] sections: comp59 {n_old}, comp62 {n_new}; unchanged {n_unch}, changed {n_ch} ({minor} with Dice >= 0.97), added {n_add}, repealed {n_rep}; dup numbers {} / {}",
+        diff.dups_old.len(),
+        diff.dups_new.len()
+    );
+    let named = |n: &str| amend.named.contains_key(n);
+    let mut xc = [[0usize; 2]; 2];
+    for n in &diff.order {
+        xc[usize::from(changed.contains(n))][usize::from(named(n))] += 1;
+    }
+    eprintln!(
+        "[law] amending Act: {} items ({} on the AML/CTF Act), {} inserted headings ({} unmatched); named {} sections; cross-check differ&named {} differ&not {} same&named {} same&not {}",
+        amend.items,
+        amend.items_aml,
+        amend.inserted,
+        amend.inserted_unmatched.len(),
+        amend.named.len(),
+        xc[1][1],
+        xc[1][0],
+        xc[0][1],
+        xc[0][0]
+    );
+    {
+        let mut tsv = String::from("section\tstatus\tdice\tnamed_by_amending_act\ttitle_comp59\ttitle_comp62\tcontext\n");
+        for n in &diff.order {
+            let o = diff.old.get(n);
+            let w = diff.new.get(n);
+            tsv.push_str(&format!(
+                "{n}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                diff.status[n],
+                diff.dice.get(n).map_or("-".into(), |x| format!("{x:.4}")),
+                amend.named.get(n).map_or(String::new(), |s| s.iter().cloned().collect::<Vec<_>>().join("; ")),
+                o.map_or("", |s| s.title.as_str()),
+                w.map_or("", |s| s.title.as_str()),
+                w.or(o).map_or("", |s| s.ctx.as_str())
+            ));
+        }
+        std::fs::write(outp("law_sections.tsv"), tsv).expect("write sections");
+    }
+
+    // ---- the code graph at the start ----
+    let start = git_text(&args.git, &["rev-parse", &args.rev]).expect("rev-parse start").trim().to_string();
+    let res = generate_one(&args.repo).expect("build");
+    let merged = &res.merged;
+    let all_ids = merged.node_ids();
+    let id_to_idx: HashMap<NodeId, usize> = all_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let edges: Vec<&Edge> = merged.all_edges().collect();
+    let g = index_graph(merged, &all_ids, &id_to_idx, &edges);
+    let nf = g.paths.len();
+    let pidx: HashMap<&str, u32> = g.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
+    let mut cfg = CODE_TABLES.activation_config(None);
+    cfg.direction = Direction::Undirected;
+    cfg.top_k = usize::MAX;
+    let ppr = Ppr::build(all_ids.len(), &id_to_idx, &edges, &vec![NONE; edges.len()], &cfg);
+    eprintln!("[law] graph at {start}: nodes={} edges={} candidate_files={nf}", g.ids.len(), edges.len());
+
+    // ---- 2. the goal layer at the start ----
+    let start_ct: i64 = git_text(&args.git, &["log", "-1", "--format=%ct", &start]).expect("start ct").trim().parse().expect("ct");
+    let wlog = git_text(&args.wiki, &["log", "--format=%H%x1f%ct", "HEAD"]).expect("wiki log");
+    let wrev = wlog
+        .lines()
+        .filter_map(|l| l.split_once('\x1f'))
+        .filter_map(|(s, ct)| ct.trim().parse::<i64>().ok().map(|c| (c, s.to_string())))
+        .filter(|(c, _)| *c <= start_ct)
+        .max()
+        .map(|x| x.1)
+        .expect("a wiki commit at or before the start");
+    let mut docs = kina_doc_lines(&args.git, &start);
+    let n_kina_doc_lines = docs.len();
+    docs.extend(git_grep(&args.wiki, &wrev, None, &["*.md"]));
+    let pr = PathRes::new(&g.paths);
+    let d = build_docset(&docs, &pr);
+    let gl = goal_layer(&docs, &d, &pr, &diff.order);
+    eprintln!(
+        "[law] goal layer at wiki {wrev}: {} doc lines ({n_kina_doc_lines} from the code repo), {} pages, {} units, {} blocks, {} Act-section citations",
+        docs.len(),
+        gl.pages,
+        gl.units.len(),
+        gl.blocks.len(),
+        gl.cites.len()
+    );
+
+    // ---- 3. code citations at the start (and the leaky end) ----
+    let mut cstats = BTreeMap::new();
+    let code = group_code(git_grep(&args.git, &start, Some(KINA_CODE_PAT), &[]), &pidx);
+    let (toks, _, _) = kina_cites(&d, &code, nf, &mut cstats);
+    let files_of = law_files_of(&toks);
+    let tips: Vec<String> = args
+        .law_tips
+        .split(',')
+        .map(|t| git_text(&args.git, &["rev-parse", t.trim()]).expect("rev-parse tip").trim().to_string())
+        .collect();
+    let end = if args.law_end.is_empty() {
+        tips[0].clone()
+    } else {
+        git_text(&args.git, &["rev-parse", &args.law_end]).expect("rev-parse end").trim().to_string()
+    };
+    let code_end = group_code(git_grep(&args.git, &end, Some(KINA_CODE_PAT), &[]), &pidx);
+    let (toks_end, _, _) = kina_cites(&d, &code_end, nf, &mut BTreeMap::new());
+    let files_of_end = law_files_of(&toks_end);
+    let compliance: Vec<u32> = (0..nf as u32).filter(|&f| !toks[f as usize].is_empty()).collect();
+    let compliance_end = (0..nf).filter(|&f| !toks_end[f].is_empty()).count();
+
+    // ---- 4. truth ----
+    let tasks = law_tasks(&args.wiki);
+    let tip_names: Vec<String> = args.law_tips.split(',').map(|t| t.trim().to_string()).collect();
+    let branch_spec = law_branch_specs(&args.git, &start, &tip_names, &tasks);
+    let ticks = law_ticks(&args.wiki, start_ct);
+    let commits = law_commits(&args.git, &start, &tips, &pidx, &tasks, &branch_spec, &ticks);
+    let s003 = "specs/003-compliance-codification";
+    let pick = |f: &dyn Fn(&LCommit) -> bool| -> LTruth {
+        let cs: Vec<&LCommit> = commits.iter().filter(|c| f(c)).collect();
+        (cs.iter().flat_map(|c| c.code.iter().copied()).collect(), cs.len(), cs.iter().flat_map(|c| c.code_new.iter().cloned()).collect())
+    };
+    let noncand: BTreeMap<&str, BTreeSet<String>> = [("S003", true), ("ALL", false)]
+        .into_iter()
+        .map(|(n, only)| (n, commits.iter().filter(|c| !only || c.spec == "specs/003-compliance-codification").flat_map(|c| c.code_noncand.iter().cloned()).collect()))
+        .collect();
+    let truths: Vec<(&str, &str, LTruth)> = vec![
+        ("S003", "commits implementing a spec 003 task (compliance codification, the reform-driven spec)", pick(&|c: &LCommit| c.spec == s003)),
+        ("AU", "S003 commits whose task text or message names an AU AML/CTF-regime term", pick(&|c: &LCommit| c.spec == s003 && c.au)),
+        ("ALL", "every commit after the start (the compilation-62 PDF was already in the wiki)", pick(&|_: &LCommit| true)),
+    ];
+    for (n, _, (t, c, nw)) in &truths {
+        eprintln!("[law] truth {n}: {c} commits, {} candidate code files, {} code files created after the start", t.len(), nw.len());
+    }
+
+    // ---- the chain: AU-cited sections -> units / blocks -> ids -> files ----
+    let mut sec_units: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut sec_blocks: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut sec_ncite: BTreeMap<String, usize> = BTreeMap::new();
+    for c in &gl.cites {
+        if c.class != "AU" {
+            continue;
+        }
+        for s in &c.secs {
+            sec_units.entry(s.clone()).or_default().insert(c.unit);
+            sec_blocks.entry(s.clone()).or_default().insert(c.block);
+            *sec_ncite.entry(s.clone()).or_default() += 1;
+        }
+    }
+    let mut cited: Vec<String> = sec_units.keys().filter(|s| diff.status.contains_key(*s)).cloned().collect();
+    cited.sort_by_key(|n| law_key(n));
+    let cited_unknown: Vec<String> = sec_units.keys().filter(|s| !diff.status.contains_key(*s)).cloned().collect();
+    let cited_changed: Vec<String> = cited.iter().filter(|s| changed.contains(*s)).cloned().collect();
+    let cited_unchanged: BTreeSet<String> = cited.iter().filter(|s| !changed.contains(*s)).cloned().collect();
+    let cited_all: BTreeSet<String> = cited.iter().cloned().collect();
+    eprintln!(
+        "[law] AU-cited sections: {} known ({} changed, {} unchanged), {} numbers in neither compilation",
+        cited.len(),
+        cited_changed.len(),
+        cited_unchanged.len(),
+        cited_unknown.len()
+    );
+    struct KindSets {
+        ids: BTreeMap<String, BTreeSet<String>>,
+        files: BTreeMap<String, BTreeSet<u32>>,
+        files_end: BTreeMap<String, BTreeSet<u32>>,
+    }
+    let kinds: Vec<KindSets> = LAW_CHAINS
+        .iter()
+        .map(|(k, _, _)| {
+            let mut ks = KindSets { ids: BTreeMap::new(), files: BTreeMap::new(), files_end: BTreeMap::new() };
+            for s in &cited {
+                let ids = law_chain_ids(*k, &gl, &sec_units[s], &sec_blocks[s]);
+                ks.files.insert(s.clone(), law_chain_files(*k, &gl, &ids, &files_of));
+                ks.files_end.insert(s.clone(), law_chain_files(*k, &gl, &ids, &files_of_end));
+                ks.ids.insert(s.clone(), ids);
+            }
+            ks
+        })
+        .collect();
+    let chain_score = |ki: usize, inputs: &BTreeSet<String>, end: bool| -> Vec<f64> {
+        let ks = &kinds[ki];
+        let sets: Vec<&BTreeSet<u32>> =
+            cited.iter().filter(|s| inputs.contains(*s)).map(|s| if end { &ks.files_end[s] } else { &ks.files[s] }).collect();
+        law_score(&sets, nf)
+    };
+
+    // ---- BM25 over the code files' text ----
+    let mut bm = Bm25::default();
+    for p in &g.paths {
+        let txt = std::fs::read(format!("{}/{p}", args.repo)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        bm.add(law_code_tokens(&txt), Vec::new());
+    }
+    let sec_text = |n: &str| -> String { diff.new.get(n).or_else(|| diff.old.get(n)).map_or(String::new(), |s| s.text.clone()) };
+    let q_all: Vec<String> = changed.iter().flat_map(|n| law_code_tokens(&sec_text(n))).collect();
+    let q_cited: Vec<String> = cited_changed.iter().flat_map(|n| law_code_tokens(&sec_text(n))).collect();
+    let bm_all = bm.scores(&q_all);
+    let bm_cited = bm.scores(&q_cited);
+    // compliance code ranked by its cited ids' idf
+    let mut comp_score = vec![0.0; nf];
+    for &f in &compliance {
+        for t in &toks[f as usize] {
+            comp_score[f as usize] += (1.0 + nf as f64 / files_of[t].len() as f64).ln();
+        }
+    }
+    let ppr_comp = law_ppr(&g, &ppr, &compliance);
+
+    // ---- 5. scores ----
+    let mut md = String::new();
+    let mut js_scores = serde_json::Map::new();
+    let c1 = chain_score(0, &changed, false);
+    let c3 = chain_score(3, &changed, false);
+    let c1_set: Vec<u32> = law_rank(&c1).into_iter().filter(|&f| c1[f as usize] > 0.0).collect();
+    // baselines and controls at the size of these chains: (name, kind index, score, PPR from its files)
+    let focus: Vec<(&str, usize, Vec<f64>, Vec<f64>)> = [("C1", 0usize), ("C3", 3), ("C5", 5)]
+        .into_iter()
+        .map(|(n, ki)| {
+            let sc = chain_score(ki, &changed, false);
+            let set: Vec<u32> = law_rank(&sc).into_iter().filter(|&f| sc[f as usize] > 0.0).collect();
+            let pp = law_ppr(&g, &ppr, &set);
+            (n, ki, sc, pp)
+        })
+        .collect();
+    for (tname, tdesc, (truth, ncommits, tnew)) in &truths {
+        let mut rows: Vec<(String, String, serde_json::Value)> = Vec::new();
+        let row = |name: &str, m: LMet, rows: &mut Vec<(String, String, serde_json::Value)>| {
+            rows.push((name.to_string(), law_fmt(&m), law_json(&m)));
+        };
+        for (ki, (_, cname, _)) in LAW_CHAINS.iter().enumerate() {
+            let m = law_met_scores(&chain_score(ki, &changed, false), truth);
+            row(&format!("{cname} (changed sections)"), m, &mut rows);
+        }
+
+        let mut c1_paths = c1_set.clone();
+        c1_paths.sort_unstable();
+        row("C1 unranked (same set, path order)", law_met(&c1_paths, &c1_paths, truth), &mut rows);
+        row("C1 from UNCHANGED cited sections (control)", law_met_scores(&chain_score(0, &cited_unchanged, false), truth), &mut rows);
+        row("C3 from UNCHANGED cited sections (control)", law_met_scores(&chain_score(3, &cited_unchanged, false), truth), &mut rows);
+        row("C5 from UNCHANGED cited sections (control)", law_met_scores(&chain_score(5, &cited_unchanged, false), truth), &mut rows);
+        row("C1 from ALL cited sections", law_met_scores(&chain_score(0, &cited_all, false), truth), &mut rows);
+        row("C5 from ALL cited sections", law_met_scores(&chain_score(5, &cited_all, false), truth), &mut rows);
+        row("C1 with END code citations (LEAKY)", law_met_scores(&chain_score(0, &changed, true), truth), &mut rows);
+        row("C3 with END code citations (LEAKY)", law_met_scores(&chain_score(3, &changed, true), truth), &mut rows);
+        row("compliance code: every file citing an id (set; ranked by id idf)", law_met_scores(&comp_score, truth), &mut rows);
+        let mut dists: Vec<(String, LDist)> = Vec::new();
+        let tcommits: Vec<&Vec<u32>> = commits
+            .iter()
+            .filter(|c| match *tname {
+                "S003" => c.spec == s003,
+                "AU" => c.spec == s003 && c.au,
+                _ => true,
+            })
+            .map(|c| &c.code)
+            .collect();
+        let mut boots: Vec<(String, (f64, f64, f64))> = Vec::new();
+        for (fname, ki, sc, pp) in &focus {
+            let set: Vec<u32> = law_rank(sc).into_iter().filter(|&f| sc[f as usize] > 0.0).collect();
+            let k = set.len();
+            let top = |v: &[f64]| -> Vec<u32> { law_rank(v).into_iter().take(k).collect() };
+            for (bn, bset) in [
+                ("BM25 (all changed text)", top(&bm_all)),
+                ("PPR from compliance code", top(&ppr_comp)),
+                ("compliance code by id idf", top(&comp_score)),
+                (&format!("PPR from {fname}'s files") as &str, top(pp)),
+            ] {
+                boots.push((format!("{fname} - {bn}, both at {k} files"), law_boot(&tcommits, &set, &bset, &format!("{tname}:{fname}:{bn}"))));
+            }
+            let _ = ki;
+        }
+        for (fname, ki, sc, pp) in &focus {
+            let m = law_met_scores(sc, truth);
+            let k = m[0] as usize;
+            row(&format!("BM25 all changed sections' text, top |{fname}|={k}"), law_met_topk(&bm_all, k, truth), &mut rows);
+            row(&format!("BM25 cited changed sections' text, top |{fname}|={k}"), law_met_topk(&bm_cited, k, truth), &mut rows);
+            row(&format!("PPR from compliance code, top |{fname}|={k}"), law_met_topk(&ppr_comp, k, truth), &mut rows);
+            row(&format!("compliance code by id idf, top |{fname}|={k}"), law_met_topk(&comp_score, k, truth), &mut rows);
+            row(&format!("PPR from {fname}'s files, top |{fname}|={k}"), law_met_topk(pp, k, truth), &mut rows);
+            dists.push((format!("random files, size |{fname}|"), law_random(nf, k, truth, &format!("{tname}:rand:{fname}"), m[4])));
+            dists.push((
+                format!("{fname} with the section -> unit map permuted"),
+                law_permuted(&cited, &changed, &kinds[*ki].files, nf, truth, &format!("{tname}:perm:{fname}"), m[4]),
+            ));
+        }
+        md.push_str(&format!(
+            "\n## Truth {tname}: {tdesc}\n\n{ncommits} commits; {} candidate code files changed (the targets); {} code files created after the start (no ranker over the start's files can name them; not scored); {nf} candidate files.\n\n| ranker | set size | hits | precision | recall | F1 | hits@10 / recall@10 | hits@20 / recall@20 |\n|---|---|---|---|---|---|---|---|\n",
+            truth.len(),
+            tnew.len()
+        ));
+        let mut jr = serde_json::Map::new();
+        for (n, cells, j) in &rows {
+            md.push_str(&format!("| {n} | {cells} |\n"));
+            jr.insert(n.clone(), j.clone());
+        }
+        md.push_str("\nControls, mean [95% interval] over 1000 draws (share of draws with F1 >= the real chain's in the last column):\n\n| control | set size | hits | precision | recall | F1 | hits@10 / recall@10 | hits@20 / recall@20 | share F1 >= real |\n|---|---|---|---|---|---|---|---|---|\n");
+        for (n, dd) in &dists {
+            md.push_str(&format!("| {n} | {} | {:.3} |\n", law_fmt_dist(dd), dd.ge));
+            jr.insert(n.to_string(), law_json_dist(dd));
+        }
+        md.push_str("\nF1 differences, paired commit-cluster bootstrap of the truth (1000 resamples of its commits), mean [95% interval]:\n\n| comparison | F1 difference |\n|---|---|\n");
+        for (n, (m, lo, hi)) in &boots {
+            md.push_str(&format!("| {n} | {m:+.3} [{lo:+.3}, {hi:+.3}] |\n"));
+            jr.insert(format!("boot: {n}"), json!({"mean": m, "lo": lo, "hi": hi}));
+        }
+        js_scores.insert(tname.to_string(), serde_json::Value::Object(jr));
+    }
+
+    // ---- hops ----
+    let mut hop = String::new();
+    let units_changed: BTreeSet<usize> = cited_changed.iter().flat_map(|s| sec_units[s].iter().copied()).collect();
+    let blocks_changed: BTreeSet<usize> = cited_changed.iter().flat_map(|s| sec_blocks[s].iter().copied()).collect();
+    let pages_changed: BTreeSet<&str> = units_changed.iter().map(|&u| gl.units[u].path.as_str()).collect();
+    hop.push_str(&format!(
+        "| hop | count |\n|---|---|\n| Act sections, comp 59 / comp 62 | {n_old} / {n_new} |\n| sections changed / added / repealed (the law change) | {n_ch} / {n_add} / {n_rep} = {} |\n| ... of which cited by the goal layer as the AU AML/CTF Act | {} |\n| cited AU sections, changed or not | {} (+{} numbers in neither compilation) |\n| units (heading sections) citing a changed section | {} on {} pages |\n| definition blocks citing a changed section | {} |\n",
+        changed.len(),
+        cited_changed.len(),
+        cited.len(),
+        cited_unknown.len(),
+        units_changed.len(),
+        pages_changed.len(),
+        blocks_changed.len()
+    ));
+    let units_with_ids = units_changed.iter().filter(|&&u| !gl.units[u].ids.is_empty()).count();
+    let blocks_own = blocks_changed.iter().filter(|&&b| !gl.blocks[b].own.is_empty()).count();
+    let blocks_ids = blocks_changed.iter().filter(|&&b| !gl.blocks[b].ids.is_empty()).count();
+    hop.push_str(&format!("| ... of those units, defining at least one id | {units_with_ids} |\n| ... of those blocks, with an id (own definition line / incl. enclosing headings) | {blocks_own} / {blocks_ids} |\n"));
+    for (ki, (_, cname, _)) in LAW_CHAINS.iter().enumerate() {
+        let ks = &kinds[ki];
+        let ids: BTreeSet<&String> = cited_changed.iter().flat_map(|s| ks.ids[s].iter()).collect();
+        let ids_in_code = ids.iter().filter(|i| files_of.contains_key(i.as_str())).count();
+        let ids_in_code_end = ids.iter().filter(|i| files_of_end.contains_key(i.as_str())).count();
+        let files: BTreeSet<u32> = cited_changed.iter().flat_map(|s| ks.files[s].iter().copied()).collect();
+        let secs_reach = cited_changed.iter().filter(|s| !ks.files[*s].is_empty()).count();
+        hop.push_str(&format!(
+            "| {cname}: ids reached / cited in code at start (at end, leaky) / files reached / changed sections reaching a file | {} / {ids_in_code} ({ids_in_code_end}) / {} / {secs_reach} |\n",
+            ids.len(),
+            files.len()
+        ));
+    }
+    hop.push_str(&format!(
+        "| code files citing any id at the start (compliance code) / at the end | {} / {compliance_end} |\n| candidate code files | {nf} |\n",
+        compliance.len()
+    ));
+    hop.push_str("\nPer changed section cited by the goal layer (C1 and C3 reach):\n\n| section | status | Dice | AU cites | units | blocks | C1 ids | C1 ids in code | C1 files | C3 files | C1 files in S003 truth | title |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    let s003_truth = &truths[0].2.0;
+    for s in &cited_changed {
+        let ids = &kinds[0].ids[s];
+        let in_code = ids.iter().filter(|i| files_of.contains_key(i.as_str())).count();
+        let f1 = &kinds[0].files[s];
+        let hit = f1.iter().filter(|f| s003_truth.contains(f)).count();
+        hop.push_str(&format!(
+            "| {s} | {} | {} | {} | {} | {} | {} | {in_code} | {} | {} | {hit} | {} |\n",
+            diff.status[s],
+            diff.dice.get(s).map_or("-".into(), |x| format!("{x:.3}")),
+            sec_ncite[s],
+            sec_units[s].len(),
+            sec_blocks[s].len(),
+            ids.len(),
+            f1.len(),
+            kinds[3].files[s].len(),
+            diff.new.get(s).or_else(|| diff.old.get(s)).map_or("", |x| x.title.as_str())
+        ));
+    }
+
+    {
+        let mut det = String::from("section\tstatus\tchain\tids_reached\tids_cited_in_code\tfiles\tfiles_in_S003\tfile_paths\n");
+        for s in &cited_changed {
+            for (ki, (_, cname, _)) in LAW_CHAINS.iter().enumerate() {
+                let ks = &kinds[ki];
+                let inc: Vec<&String> = ks.ids[s].iter().filter(|i| files_of.contains_key(i.as_str())).collect();
+                let fs = &ks.files[s];
+                det.push_str(&format!(
+                    "{s}\t{}\t{cname}\t{}\t{}\t{}\t{}\t{}\n",
+                    diff.status[s],
+                    ks.ids[s].len(),
+                    inc.iter().map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
+                    fs.len(),
+                    fs.iter().filter(|f| s003_truth.contains(f)).count(),
+                    fs.iter().map(|&f| g.paths[f as usize].as_str()).collect::<Vec<_>>().join(" ")
+                ));
+            }
+        }
+        std::fs::write(outp("law_chain_detail.tsv"), det).expect("write chain detail");
+    }
+    // GLIA_LAW_DEBUG=<section>: each C3 id of that section with the definition blocks that name files (inspection only)
+    if let Ok(sec) = std::env::var("GLIA_LAW_DEBUG")
+        && let Some(ids) = kinds[3].ids.get(&sec)
+    {
+        for &u in sec_units.get(&sec).into_iter().flatten() {
+            eprintln!("[law-debug] {sec} unit={} ids={:?}", gl.units[u].name, gl.units[u].ids);
+        }
+        for id in ids {
+            for &b in gl.def_blocks.get(id).into_iter().flatten() {
+                let bl = &gl.blocks[b];
+                if !bl.files.is_empty() {
+                    eprintln!(
+                        "[law-debug] {sec} id={id} block_own={:?} unit={} files={}",
+                        bl.own,
+                        gl.units[bl.unit].name,
+                        bl.files.iter().map(|&f| g.paths[f as usize].as_str()).collect::<Vec<_>>().join(" ")
+                    );
+                }
+            }
+        }
+    }
+    for (n, v) in &noncand {
+        hop.push_str(&format!("\nTruth {n}: {} changed code-looking files existed at the start without a graph MODULE (not candidates): {}\n", v.len(), v.iter().take(12).cloned().collect::<Vec<_>>().join(", ")));
+    }
+
+    // ---- citations ----
+    let mut cls: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut cit_tsv = String::from("class\troute\tsections\tunit\tline\n");
+    for c in &gl.cites {
+        *cls.entry((c.class, c.route)).or_default() += 1;
+        cit_tsv.push_str(&format!("{}\t{}\t{}\t{}\t{}\n", c.class, c.route, c.secs.join(","), gl.units[c.unit].name, c.line.replace('\t', " ")));
+    }
+    std::fs::write(outp("law_citations.tsv"), cit_tsv).expect("write citations");
+    let mut cit_md = String::from("| class | route | citations |\n|---|---|---|\n");
+    for ((c, r), n) in &cls {
+        cit_md.push_str(&format!("| {c} | {r} | {n} |\n"));
+    }
+    cit_md.push_str(&format!("\nPage default instruments (pages): {:?}\n", gl.page_defaults));
+    cit_md.push_str("\nMost-cited AU sections (citations, status):\n\n| section | AU citations | status | units |\n|---|---|---|---|\n");
+    let mut by_n: Vec<(&String, &usize)> = sec_ncite.iter().collect();
+    by_n.sort_by(|a, b| b.1.cmp(a.1).then(law_key(a.0).cmp(&law_key(b.0))));
+    for (s, n) in by_n.iter().take(40) {
+        cit_md.push_str(&format!("| {s} | {n} | {} | {} |\n", diff.status.get(*s).copied().unwrap_or("(not a section)"), sec_units[*s].len()));
+    }
+    cit_md.push_str(&format!("\nAU-resolved numbers in neither compilation: {}\n", cited_unknown.join(", ")));
+    // a deterministic audit sample: every 25th citation
+    cit_md.push_str("\nAudit sample (every 25th citation in doc order):\n\n| class | route | sections | unit | line |\n|---|---|---|---|---|\n");
+    for c in gl.cites.iter().step_by(25) {
+        let line: String = c.line.chars().take(160).collect::<String>().replace('|', "/");
+        cit_md.push_str(&format!("| {} | {} | {} | {} | {line} |\n", c.class, c.route, c.secs.join(","), gl.units[c.unit].name.replace('|', "/")));
+    }
+
+    // ---- truth table ----
+    let mut tr = String::from("| # | commit | date | T-ids | spec (score) | AU | files | candidate code | new code | subject |\n|---|---|---|---|---|---|---|---|---|---|\n");
+    for (i, c) in commits.iter().enumerate() {
+        tr.push_str(&format!(
+            "| {} | {} | {} | {} | {} ({}) | {} | {} | {} | {} | {} |\n",
+            i + 1,
+            &c.sha[..8],
+            &c.date[..10.min(c.date.len())],
+            c.tids.join(" "),
+            c.spec.trim_start_matches("specs/"),
+            if c.spec_score.is_infinite() {
+                "branch".to_string()
+            } else if c.spec_score < 0.0 {
+                "ticked".to_string()
+            } else {
+                format!("overlap {:.2}", c.spec_score)
+            },
+            if c.au { "y" } else { "" },
+            c.paths,
+            c.code.len(),
+            c.code_new.len(),
+            c.subject.replace('|', "/")
+        ));
+    }
+
+    // ---- 6. reverse view: does each reform commit's code trace up to a changed section? ----
+    let unit_secs = |u: usize| -> BTreeSet<String> {
+        gl.units[u].cites.iter().filter(|&&ci| gl.cites[ci].class == "AU").flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
+    };
+    let block_secs = |b: usize| -> BTreeSet<String> {
+        gl.blocks[b].cites.iter().filter(|&&ci| gl.cites[ci].class == "AU").flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
+    };
+    let id_secs = |id: &str| -> BTreeSet<String> {
+        let mut s = BTreeSet::new();
+        for &b in gl.def_blocks.get(id).into_iter().flatten() {
+            s.extend(unit_secs(gl.blocks[b].unit));
+        }
+        s
+    };
+    let mut rv = String::from("| commit | T-ids | candidate code files | citing an id | reaching a cited AU section | reaching a changed section | changed sections reached (files) | task block: changed sections (direct / +1 hop) | subject |\n|---|---|---|---|---|---|---|---|---|\n");
+    let (mut tot_files, mut tot_cite, mut tot_any, mut tot_ch, mut tot_task_direct, mut tot_task_hop, mut n_s003) = (0, 0, 0, 0, 0, 0, 0);
+    for c in commits.iter().filter(|c| c.spec == s003) {
+        n_s003 += 1;
+        let mut n_cite = 0;
+        let mut n_any = 0;
+        let mut n_ch = 0;
+        let mut secs_hit: BTreeSet<String> = BTreeSet::new();
+        for &f in &c.code {
+            let ts = &toks[f as usize];
+            if ts.is_empty() {
+                continue;
+            }
+            n_cite += 1;
+            let ss: BTreeSet<String> = ts.iter().flat_map(|t| id_secs(t)).collect();
+            if !ss.is_empty() {
+                n_any += 1;
+            }
+            let ch: Vec<String> = ss.into_iter().filter(|s| changed.contains(s)).collect();
+            if !ch.is_empty() {
+                n_ch += 1;
+                secs_hit.extend(ch);
+            }
+        }
+        // the commit's own task blocks
+        let mut direct: BTreeSet<String> = BTreeSet::new();
+        let mut hop1: BTreeSet<String> = BTreeSet::new();
+        for t in &c.tids {
+            let tok = format!("{s003}|{t}");
+            for &b in gl.def_blocks.get(&tok).into_iter().flatten() {
+                direct.extend(block_secs(b));
+                for m in &gl.blocks[b].mentions {
+                    for &b2 in gl.def_blocks.get(m).into_iter().flatten() {
+                        hop1.extend(block_secs(b2));
+                    }
+                }
+            }
+        }
+        let dch: Vec<&String> = direct.iter().filter(|s| changed.contains(*s)).collect();
+        let hch: BTreeSet<&String> = hop1.iter().chain(direct.iter()).filter(|s| changed.contains(*s)).collect();
+        tot_files += c.code.len();
+        tot_cite += n_cite;
+        tot_any += n_any;
+        tot_ch += n_ch;
+        if !dch.is_empty() {
+            tot_task_direct += 1;
+        }
+        if !hch.is_empty() {
+            tot_task_hop += 1;
+        }
+        let show = |v: Vec<&String>| -> String {
+            let n = v.len();
+            let mut s: Vec<String> = v.into_iter().take(8).cloned().collect();
+            if n > 8 {
+                s.push(format!("+{}", n - 8));
+            }
+            s.join(" ")
+        };
+        rv.push_str(&format!(
+            "| {} | {} | {} | {n_cite} | {n_any} | {n_ch} | {} | {} / {} | {} |\n",
+            &c.sha[..8],
+            c.tids.join(" "),
+            c.code.len(),
+            show(secs_hit.iter().collect()),
+            show(dch),
+            show(hch.into_iter().collect()),
+            c.subject.replace('|', "/")
+        ));
+    }
+    let rv_head = format!(
+        "S003 commits: {n_s003}. Over their candidate code files (counted per commit): {tot_files} files, {tot_cite} cite an id at the start, {tot_any} trace (id -> defining unit -> AU citation) to a cited Act section, {tot_ch} to a changed one. Commits whose own task block cites a changed section directly: {tot_task_direct}; with one hop through the ids the task mentions: {tot_task_hop}.\n\n"
+    );
+
+    // ---- predictions ----
+    let mut ptsv = String::from("rank\tfile\tC1_score\tC3_score\tin_S003\tin_AU\tin_ALL\tids_cited\n");
+    let c3_rank = law_rank(&c3);
+    for (r, &f) in c3_rank.iter().enumerate() {
+        if c3[f as usize] <= 0.0 && c1[f as usize] <= 0.0 {
+            break;
+        }
+        ptsv.push_str(&format!(
+            "{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\n",
+            r + 1,
+            g.paths[f as usize],
+            c1[f as usize],
+            c3[f as usize],
+            u8::from(truths[0].2.0.contains(&f)),
+            u8::from(truths[1].2.0.contains(&f)),
+            u8::from(truths[2].2.0.contains(&f)),
+            toks[f as usize].iter().take(12).cloned().collect::<Vec<_>>().join(" ")
+        ));
+    }
+    std::fs::write(outp("law_predictions.tsv"), ptsv).expect("write predictions");
+
+    // ---- law diff tables ----
+    let mut ld = format!(
+        "Comp 59 (pre-reform, compilation date 31 March 2025): {n_old} sections. Comp 62 (1 July 2026): {n_new} sections. Repeated section numbers dropped as extraction noise: {:?} / {:?}.\n\n| status | sections |\n|---|---|\n| unchanged | {n_unch} |\n| changed | {n_ch} (of which {minor} with word-multiset Dice >= 0.97, minor edits) |\n| added | {n_add} |\n| repealed | {n_rep} |\n\n",
+        diff.dups_old, diff.dups_new
+    );
+    ld.push_str(&format!(
+        "Cross-check with the Amendment Act 2024 as made ({} item headings, {} on the AML/CTF Act; {} inserted section headings, {} not matched to a compilation title; {} sections named):\n\n| | named by the amending Act | not named |\n|---|---|---|\n| differs (changed / added / repealed) | {} | {} |\n| unchanged | {} | {} |\n\n",
+        amend.items,
+        amend.items_aml,
+        amend.inserted,
+        amend.inserted_unmatched.len(),
+        amend.named.len(),
+        xc[1][1],
+        xc[1][0],
+        xc[0][1],
+        xc[0][0]
+    ));
+    let list = |pred: &dyn Fn(&String) -> bool| -> String {
+        diff.order.iter().filter(|n| pred(n)).cloned().collect::<Vec<_>>().join(", ")
+    };
+    ld.push_str(&format!("Differs but not named: {}\n\nNamed but unchanged: {}\n\nUnmatched inserted headings: {}\n\n", list(&|n| changed.contains(n) && !named(n)), list(&|n| !changed.contains(n) && named(n)), amend.inserted_unmatched.join("; ")));
+    ld.push_str(&format!("Added sections whose text matches a repealed one (Dice >= 0.6, likely moved): {}\n\n", diff.moved.iter().map(|(a, b, x)| format!("{a} -> {b} ({x:.2})")).collect::<Vec<_>>().join(", ")));
+    for st in ["changed", "added", "repealed"] {
+        ld.push_str(&format!("**{st}** ({}): {}\n\n", count(st), list(&|n| diff.status[n] == st)));
+    }
+
+    // ---- write ----
+    let chains_md: String = LAW_CHAINS.iter().map(|(_, n, d)| format!("- **{n}**: {d}\n")).collect();
+    let mut all = format!(
+        "# Law impact tables (Kina, AU AML/CTF Act comp 59 -> comp 62)\n\nStart {start} (code), wiki {wrev}; END (leaky) {end}. Generated by `rank_eval --law-impact kina` in {:.1}s.\n\nChains:\n{chains_md}\n## 1. Law diff\n\n{ld}\n## 2-3. Hops\n\n{hop}\n## Citations\n\n{cit_md}\n## 4. Truth commits (after the start; the compilation-62 PDF entered the wiki at 16486da, before the start)\n\n{tr}\n## 5. Scores\n{md}\n## 6. Reverse view (S003 commits)\n\n{rv_head}{rv}",
+        t0.elapsed().as_secs_f64()
+    );
+    all.push('\n');
+    std::fs::write(outp("law_tables.md"), &all).expect("write tables");
+    js.insert("start".into(), json!(start));
+    js.insert("wiki_rev".into(), json!(wrev));
+    js.insert("end_rev".into(), json!(end));
+    js.insert(
+        "law".into(),
+        json!({"comp59": n_old, "comp62": n_new, "unchanged": n_unch, "changed": n_ch, "changed_minor": minor, "added": n_add, "repealed": n_rep,
+               "amend_items": amend.items, "amend_items_aml": amend.items_aml, "amend_named": amend.named.len(),
+               "cross": {"differ_named": xc[1][1], "differ_not": xc[1][0], "same_named": xc[0][1], "same_not": xc[0][0]}}),
+    );
+    js.insert(
+        "goal".into(),
+        json!({"pages": gl.pages, "units": gl.units.len(), "blocks": gl.blocks.len(), "citations": gl.cites.len(),
+               "classes": cls.iter().map(|((c, r), n)| (format!("{c}/{r}"), json!(n))).collect::<serde_json::Map<_, _>>(),
+               "cited_known": cited.len(), "cited_changed": cited_changed.len(), "cited_unknown": cited_unknown.len(),
+               "compliance_files_start": compliance.len(), "compliance_files_end": compliance_end, "candidate_files": nf}),
+    );
+    js.insert("scores".into(), serde_json::Value::Object(js_scores));
+    js.insert("code_cite_stats".into(), json!(cstats));
+    std::fs::write(outp("law_impact.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write json");
+    eprintln!("[law] done in {:.1}s -> {}", t0.elapsed().as_secs_f64(), outp("law_tables.md"));
 }
