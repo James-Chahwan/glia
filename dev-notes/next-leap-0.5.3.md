@@ -679,6 +679,12 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   only when the provider itself is live. Not read: riverpod_generator `@riverpod` providers (a `.g.dart` part file),
   `ref.read(p.future)` and FutureProvider / StreamProvider values (AsyncValue, on purpose), AsyncNotifier and bloc Cubit /
   Bloc state.
+- W29 (DT.5j): a Go value ref or composite type named through a dot-import, or a block-scoped local type in another block of
+  the same fn, is read with the flat per-fn shadow table (conservative: it drops, never binds wrong).
+- W29 (DT.5j; bench): grade.py forbid rows cannot filter by EVIDENCE rule, so DT.5j removed models-go-wire's
+  `Fleet::Get -USES-> models::vehicle::Problem` forbid (written for DT.1f's go_wire edge; Get builds `models.Problem{..}`,
+  so the new composite_literal USES is correct). Add an evidence-rule filter to forbid rows and restore the guard as
+  "no USES rule json_response to Problem".
 
 ## 3. Open questions for James
 
