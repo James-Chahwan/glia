@@ -56,6 +56,9 @@ pub fn parse_file(
     // DT.5e: read before the class walk, which tags a widget / State
     // subclass a COMPONENT only in a file importing a Flutter library.
     acc.flutter_import = imports_any(root, src, FLUTTER_IMPORT_PREFIXES);
+    // DT.5i: read before the walk, which records a provider's value types
+    // and a state holder's `state` type only in a file importing Riverpod.
+    acc.riverpod_import = imports_any(root, src, RIVERPOD_IMPORT_PREFIXES);
     // DT.1l: read before the class walk, which writes no model schema in a
     // generated file.
     acc.generated = dart_generated(file_rel_path, source);
@@ -70,6 +73,9 @@ pub fn parse_file(
         eprintln!("{line}");
     }
     if let Some(line) = acc.flutter.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
+    if let Some(line) = acc.riverpod.marker(file_rel_path) {
         eprintln!("{line}");
     }
     let shelf = scan_dart_routes(source, repo, module_id, &mut acc);
@@ -226,6 +232,13 @@ struct Acc {
     /// DT.5e: the widget / State classes tagged COMPONENT, for the
     /// `[dart-flutter]` marker.
     flutter: FlutterStats,
+    /// DT.5i: this file imports a [`RIVERPOD_IMPORT_PREFIXES`] library, so a
+    /// top-level `Provider<T>(..)` is Riverpod's and a `StateNotifier<T>`
+    /// subclass holds a T `state`.
+    riverpod_import: bool,
+    /// DT.5i: the provider facts, provider-read locals and state holders
+    /// this file recorded, for the `[dart-riverpod]` marker.
+    riverpod: RiverpodStats,
     /// DT.5e: the getter / setter METHODs and FUNCTIONs this file declares,
     /// which a name passed by value reads rather than uses. Lookup-only.
     accessor_ids: HashSet<NodeId>,
@@ -300,6 +313,30 @@ impl FlutterStats {
             format!(
                 "[dart-flutter] components={n} (widgets={} states={}) file={file_rel}",
                 self.widgets, self.states
+            )
+        })
+    }
+}
+
+/// DT.5i: what the Riverpod readers recorded in one file.
+#[derive(Default)]
+struct RiverpodStats {
+    /// Top-level providers given a `NavFact::RiverpodProvider`
+    /// ([`riverpod_provider`]).
+    providers: usize,
+    /// Locals typed as a provider read ([`record_provider_local`]).
+    locals: usize,
+    /// State holder classes given their inherited `state` / `value` field
+    /// type ([`state_holder_field`]).
+    holders: usize,
+}
+
+impl RiverpodStats {
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.providers + self.locals + self.holders > 0).then(|| {
+            format!(
+                "[dart-riverpod] providers={} locals={} holders={} file={file_rel}",
+                self.providers, self.locals, self.holders
             )
         })
     }
@@ -566,6 +603,9 @@ fn visit_class(
                 elems: &elems,
             };
             visit_members(child, src, file_rel, &owner, repo, acc);
+            // DT.5i: a state holder's inherited `state` / `value`, recorded
+            // first so a field the class declares itself wins.
+            state_holder_field(node, src, id, acc);
             // LA.23e: declared / constructor-initialised field types, for
             // A6.2a's receiver-type pass.
             collect_dart_field_types(child, src, id, acc);
@@ -1124,15 +1164,20 @@ const FLUTTER_IMPORT_PREFIXES: &[&str] = &[
     "package:flutter_hooks/",
 ];
 
-/// The [`FLUTTER_COMPONENT_BASES`] entry a `class_declaration` extends: its
-/// `extends` head (the `type_identifier`s directly under `superclass`; a
-/// `with` clause nests in `mixins`, generic arguments in `type_arguments`),
-/// reduced to its simple name.
+/// The [`FLUTTER_COMPONENT_BASES`] entry a `class_declaration` extends
+/// ([`extends_head`]).
 fn flutter_component_base(class: TsNode, src: &[u8]) -> Option<&'static str> {
+    let simple = extends_head(class, src)?;
+    FLUTTER_COMPONENT_BASES.iter().copied().find(|b| *b == simple)
+}
+
+/// A `class_declaration`'s `extends` head (the `type_identifier`s directly
+/// under `superclass`; a `with` clause nests in `mixins`, generic arguments
+/// in `type_arguments`), reduced to its simple name (`p.Base` -> `Base`).
+fn extends_head<'a>(class: TsNode, src: &'a [u8]) -> Option<&'a str> {
     let superclass = class.child_by_field_name("superclass")?;
     let head = heritage_type_heads(superclass, src).into_iter().next()?;
-    let simple = head.rsplit('.').next().unwrap_or(head).trim();
-    FLUTTER_COMPONENT_BASES.iter().copied().find(|b| *b == simple)
+    Some(head.rsplit('.').next().unwrap_or(head).trim())
 }
 
 fn emit_heritage_ref(
@@ -1214,11 +1259,13 @@ fn visit_class_member(
                 if kind == MemberKind::Accessor {
                     acc.members.accessors += 1;
                 }
+                let Bindings { names, rebound } = local_bindings(signature, child, src);
                 let scope = CallScope {
                     owner: Some(owner.qname),
                     members: owner.members,
                     elems: owner.elems,
-                    locals: local_names(signature, child, src),
+                    locals: names,
+                    rebound,
                 };
                 collect_calls_in(child, src, id, &scope, repo, file_rel, acc);
             }
@@ -1280,11 +1327,13 @@ fn visit_initializers(
         if !matches!(part.kind(), "initializers" | "redirection") {
             continue;
         }
+        let Bindings { names, rebound } = local_bindings(Some(sig), part, src);
         let scope = CallScope {
             owner: Some(owner.qname),
             members: owner.members,
             elems: owner.elems,
-            locals: local_names(Some(sig), part, src),
+            locals: names,
+            rebound,
         };
         collect_calls_in(part, src, from, &scope, repo, file_rel, acc);
     }
@@ -1317,7 +1366,7 @@ fn visit_field_initializers(
             {
                 continue;
             }
-            let mut locals = local_names(None, item, src);
+            let Bindings { names: mut locals, rebound } = local_bindings(None, item, src);
             if let Some(name) = item.child_by_field_name("name") {
                 locals.remove(text_of(name, src));
             }
@@ -1326,6 +1375,7 @@ fn visit_field_initializers(
                 members: owner.members,
                 elems: owner.elems,
                 locals,
+                rebound,
             };
             collect_calls_in(item, src, owner.id, &scope, repo, file_rel, acc);
             acc.bare_calls.field_inits += 1;
@@ -1438,11 +1488,13 @@ fn visit_enum_constant(
             continue;
         }
         // DT.5e: a closure in the arguments binds its parameters.
+        let Bindings { names, rebound } = local_bindings(None, args, src);
         let scope = CallScope {
             owner: Some(owner.qname),
             members: owner.members,
             elems: owner.elems,
-            locals: local_names(None, args, src),
+            locals: names,
+            rebound,
         };
         collect_calls_in(args, src, id, &scope, repo, file_rel, acc);
     }
@@ -1519,11 +1571,13 @@ fn visit_function(
     acc.top_level.bodies += 1;
     let no_members = HashSet::new();
     let no_elems = HashMap::new();
+    let Bindings { names, rebound } = local_bindings(Some(node), body, src);
     let scope = CallScope {
         owner: None,
         members: &no_members,
         elems: &no_elems,
-        locals: local_names(Some(node), body, src),
+        locals: names,
+        rebound,
     };
     collect_calls_in(body, src, id, &scope, repo, file_rel, acc);
 }
@@ -1626,7 +1680,9 @@ fn declaration_head(list: TsNode) -> TsNode {
 /// initialiser emits nothing. CB.17: the initialiser is walked for calls and
 /// client ENDPOINTs FROM the STATE_VAR, under library scope (no members;
 /// DT.5e: its closures are entered, as in every body walk, and their
-/// parameters are locals).
+/// parameters are locals). DT.5i: in a file importing Riverpod, a provider
+/// declaration records its value types on the STATE_VAR
+/// ([`riverpod_provider`], `NavFact::RiverpodProvider`).
 #[allow(clippy::too_many_arguments)]
 fn emit_top_level_var(
     decl: TsNode,
@@ -1689,13 +1745,21 @@ fn emit_top_level_var(
     if value.is_none() {
         return;
     }
+    // DT.5i: a Riverpod provider's value types, read off its declaration.
+    if acc.riverpod_import
+        && let Some((read, notifier)) = riverpod_provider(decl, src)
+        && !(read.is_empty() && notifier.is_empty())
+    {
+        acc.nav.record_fact(id, NavFact::RiverpodProvider { read, notifier });
+        acc.riverpod.providers += 1;
+    }
     acc.top_level.initialisers += 1;
     let no_members = HashSet::new();
     // DT.5e: a closure in the initialiser (`StateNotifierProvider((ref) =>
     // ..)`) binds its parameters; the variable's own name is no local.
     // The value is several `value` siblings (a primary and its selectors), so
     // the bindings are read over the whole declarator.
-    let mut locals = local_names(None, decl, src);
+    let Bindings { names: mut locals, rebound } = local_bindings(None, decl, src);
     locals.remove(name);
     let no_elems = HashMap::new();
     let scope = CallScope {
@@ -1703,6 +1767,7 @@ fn emit_top_level_var(
         members: &no_members,
         elems: &no_elems,
         locals,
+        rebound,
     };
     collect_calls_in(decl, src, id, &scope, repo, file_rel, acc);
 }
@@ -1888,7 +1953,8 @@ fn shown_names(spec: TsNode, src: &[u8]) -> Option<Vec<String>> {
 /// ([`push_tearoff_call`]), and every identifier the walk visits that names
 /// a member or a same-file function is recorded for a reference
 /// ([`record_name_ref`]): an `identifier_dollar_escaped` is `$name` in an
-/// interpolation, its text the bare name.
+/// interpolation, its text the bare name. DT.5i: a local bound to a
+/// Riverpod provider read is typed as that read ([`record_provider_local`]).
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
@@ -1913,6 +1979,7 @@ fn collect_calls_in(
             "identifier" | "identifier_dollar_escaped" => {
                 record_name_ref(n, src, from, scope, acc);
             }
+            "initialized_variable_definition" => record_provider_local(n, src, from, scope, acc),
             _ => {}
         }
         let mut cursor = n.walk();
@@ -2317,7 +2384,9 @@ fn push_selector_chain_calls(
 ///   the enclosing type, `<head>` for a capitalised library-scope name (a
 ///   type: `Env.apiBaseUrl`, `Friend.fromJson`); a lowercase library-scope
 ///   name (an inherited `widget` / `state`, an import prefix) is not read.
-/// - A later selector (`a.b.c`) is not read.
+/// - A later selector (`a.b.c`) is not read, but for one right after a
+///   Riverpod provider read (DT.5i: `ref.watch(p).isReady`, receiver
+///   `ref.watch(p)`, [`provider_read_text`]).
 ///
 /// An assignment target's trailing member is a bare
 /// `unconditional_assignable_selector`, never a `selector`, so a write
@@ -2360,6 +2429,17 @@ fn push_chain_reads(
             continue;
         }
         if j > 0 {
+            // DT.5i: a member read on a provider read (`ref.watch(p).isReady`),
+            // its receiver the read's text as a ComplexReceiver spells it.
+            if let Some(receiver) = provider_read_text(primary, &selectors[..j], src) {
+                acc.member_reads.push(PendingRead {
+                    from,
+                    receiver,
+                    name: name.to_string(),
+                    line,
+                    local: false,
+                });
+            }
             continue;
         }
         if is_this {
@@ -2691,6 +2771,11 @@ struct CallScope<'a> {
     /// The member's parameters and every name bound in its body
     /// ([`local_names`]).
     locals: HashSet<String>,
+    /// DT.5i: the [`locals`](Self::locals) bound twice or more in the scope
+    /// (a local and a closure parameter, two closures' parameters;
+    /// [`Bindings::rebound`]): a provider-read local of such a name is typed
+    /// nowhere ([`record_provider_local`]).
+    rebound: HashSet<String>,
 }
 
 /// Where Dart's lexical order finds one unqualified name.
@@ -2795,9 +2880,35 @@ fn class_member_names(class_body: TsNode, src: &[u8]) -> HashSet<String> {
 /// and every name bound anywhere in `body` - local variables (each declarator
 /// of `var a = 1, b = 2;`), local functions, for-in loop variables, catch
 /// parameters, pattern variables, and the parameters of closures and local
-/// functions.
+/// functions ([`local_bindings`]' names).
 fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<String> {
-    let mut names = HashSet::new();
+    local_bindings(signature, body, src).names
+}
+
+/// DT.5i: the names one scope binds ([`local_names`]), and which of them it
+/// binds more than once.
+#[derive(Default)]
+struct Bindings {
+    /// Every name bound once or more.
+    names: HashSet<String>,
+    /// The names bound twice or more: a scope's local types are recorded per
+    /// scope, so such a name has no one binding a type could belong to.
+    rebound: HashSet<String>,
+}
+
+impl Bindings {
+    fn bind(&mut self, name: &str) {
+        if !self.names.insert(name.to_string()) {
+            self.rebound.insert(name.to_string());
+        }
+    }
+}
+
+/// DT.5i: [`local_names`]' walk, counting each binding: a name bound by two
+/// declarations of the scope (a parameter and a local, a local and a closure
+/// parameter, two closures' parameters) is [`Bindings::rebound`].
+fn local_bindings(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> Bindings {
+    let mut names = Bindings::default();
     if let Some(sig) = signature {
         // A class member passes its `method_signature` / `declaration`
         // wrapper; a top-level function / setter (LA.37a) passes the
@@ -2830,9 +2941,9 @@ fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<S
             }
         }
     }
-    let insert_field = |n: TsNode, field: &str, names: &mut HashSet<String>| {
+    let insert_field = |n: TsNode, field: &str, names: &mut Bindings| {
         if let Some(id) = n.child_by_field_name(field) {
-            names.insert(text_of(id, src).to_string());
+            names.bind(text_of(id, src));
         }
     };
     let mut stack = vec![body];
@@ -2882,7 +2993,7 @@ fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<S
 /// A typed parameter (`int x`, `int Function(int) f`) carries a `name` field;
 /// an untyped one (`(x) => ..`) and the old function-typed form
 /// (`int f(int x)`) hold the name as their only direct `identifier` child.
-fn param_names(list: TsNode, src: &[u8], names: &mut HashSet<String>) {
+fn param_names(list: TsNode, src: &[u8], names: &mut Bindings) {
     let mut c = list.walk();
     for p in list.named_children(&mut c) {
         match p.kind() {
@@ -2892,7 +3003,7 @@ fn param_names(list: TsNode, src: &[u8], names: &mut HashSet<String>) {
                     p.named_children(&mut k).find(|n| n.kind() == "identifier")
                 });
                 if let Some(id) = name {
-                    names.insert(text_of(id, src).to_string());
+                    names.bind(text_of(id, src));
                 }
             }
             "optional_formal_parameters" => param_names(p, src, names),
@@ -2904,13 +3015,13 @@ fn param_names(list: TsNode, src: &[u8], names: &mut HashSet<String>) {
 /// Every identifier bound by a declaration pattern: the plain identifiers in
 /// it, descending through nested patterns but not into a `label` (`x:` of a
 /// record / object field) or a type. The wildcard `_` binds nothing.
-fn pattern_identifiers(pattern: TsNode, src: &[u8], names: &mut HashSet<String>) {
+fn pattern_identifiers(pattern: TsNode, src: &[u8], names: &mut Bindings) {
     let mut stack = vec![pattern];
     while let Some(n) = stack.pop() {
         if n.kind() == "identifier" {
             let name = text_of(n, src);
             if name != "_" {
-                names.insert(name.to_string());
+                names.bind(name);
             }
             continue;
         }
@@ -3202,6 +3313,389 @@ fn type_argument_heads(type_arguments: TsNode, src: &[u8]) -> Vec<String> {
         .into_iter()
         .map(|h| if DART_BUILTIN_TYPES.contains(&h.as_str()) { String::new() } else { h })
         .collect()
+}
+
+// ============================================================================
+// DT.5i: Riverpod providers, provider-read locals and state holders
+// ============================================================================
+//
+// A Riverpod provider is a top-level variable whose read is the value its
+// declaration builds: `ref.read(p).m()` / `ref.watch(p).m()` call a method
+// of that value, `ref.read(p.notifier).m()` one of its notifier. No source
+// line names that type at the read, only the provider's declaration, often
+// in another file:
+//
+//   final authServiceProvider =
+//       StateNotifierProvider<AuthService, AuthState>((ref) => AuthService(ref));
+//
+// The parser records what it reads off the declaration and never a target:
+// the provider STATE_VAR gets a `NavFact::RiverpodProvider { read, notifier }`
+// ([`riverpod_provider`]); a local bound to a provider read records the
+// read's text as its type ([`record_provider_local`], the Go CA.2a
+// convention of a normalised call-chain local); a member read right after a
+// provider read keeps the read's text as its receiver ([`push_chain_reads`]).
+// The Dart graph build (`graph/src/build/dart.rs`) binds the provider through
+// the reader's own scope and the type name in the provider's own file.
+//
+// A `StateNotifier<T>` / `Notifier<T>` subclass's inherited `state` and a
+// `ValueNotifier<T>` subclass's `value` are a T ([`state_holder_field`]).
+// AsyncNotifier's state (an AsyncValue) and bloc's Cubit / Bloc state are not
+// read.
+
+/// DT.5i: a file importing one of these declares Riverpod providers and
+/// StateNotifier state holders.
+const RIVERPOD_IMPORT_PREFIXES: &[&str] = &[
+    "package:riverpod/",
+    "package:flutter_riverpod/",
+    "package:hooks_riverpod/",
+    "package:state_notifier/",
+];
+
+/// DT.5i: the Riverpod 2 provider classes whose read has a type its generic
+/// arguments name: (class, the generic index `ref.read(p)` returns, the
+/// generic index `ref.read(p.notifier)` returns). Provider / StateProvider /
+/// ChangeNotifierProvider read T; StateNotifierProvider / NotifierProvider
+/// read S with notifier N; AsyncNotifier / StreamNotifier providers only
+/// their notifier (their read is an AsyncValue). FutureProvider /
+/// StreamProvider (an AsyncValue) are not here: they record nothing. An
+/// `AutoDispose` prefix and a `Family` suffix of a class name are dropped
+/// before the lookup ([`provider_class`]).
+const RIVERPOD_PROVIDERS: &[(&str, Option<usize>, Option<usize>)] = &[
+    ("Provider", Some(0), None),
+    ("StateProvider", Some(0), None),
+    ("ChangeNotifierProvider", Some(0), Some(0)),
+    ("StateNotifierProvider", Some(1), Some(0)),
+    ("NotifierProvider", Some(1), Some(0)),
+    ("AsyncNotifierProvider", None, Some(0)),
+    ("StreamNotifierProvider", None, Some(0)),
+];
+
+/// The [`RIVERPOD_PROVIDERS`] row of a provider class name, its
+/// `AutoDispose` prefix and `Family` suffix dropped.
+fn provider_class(name: &str) -> Option<(Option<usize>, Option<usize>)> {
+    let name = name.strip_prefix("AutoDispose").unwrap_or(name);
+    let name = name.strip_suffix("Family").unwrap_or(name);
+    RIVERPOD_PROVIDERS
+        .iter()
+        .find(|(class, _, _)| *class == name)
+        .map(|&(_, read, notifier)| (read, notifier))
+}
+
+/// DT.5i: the (read, notifier) type names of a top-level provider
+/// declaration `decl` (a `static_final_declaration` / `initialized_identifier`
+/// whose `value` children are the initialiser): `K` [`.autoDispose` |
+/// `.family`]* [`<..>`] `(..)` and nothing after, `K` a
+/// [`RIVERPOD_PROVIDERS`] class. Each type is the generic argument at the
+/// row's index ([`type_argument_heads`]: `""` for a builtin, generic or
+/// function type, or an index the row has not). With no generic arguments
+/// the class the factory builds ([`factory_type`]) stands for argument 0.
+/// tree-sitter-dart 0.1.0 reads a one-argument generic after a modifier
+/// (`Provider.autoDispose<T>((ref) => T())`) as two relational expressions,
+/// read by [`provider_generic_misparse`]. `None`: no provider shape.
+fn riverpod_provider(decl: TsNode, src: &[u8]) -> Option<(String, String)> {
+    let mut cursor = decl.walk();
+    let value: Vec<TsNode> = decl
+        .children_by_field_name("value", &mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let (class, heads) = match value.as_slice() {
+        [rel] if rel.kind() == "relational_expression" => {
+            let (class, ty) = provider_generic_misparse(*rel, src)?;
+            (class, vec![ty])
+        }
+        [head, sels @ ..] if head.kind() == "identifier" => {
+            let mut heads: Option<Vec<String>> = None;
+            let mut call: Option<TsNode> = None;
+            for sel in sels {
+                if sel.kind() != "selector" || call.is_some() {
+                    return None;
+                }
+                match selector_part(*sel, src) {
+                    SelectorPart::Member("autoDispose" | "family") if heads.is_none() => {}
+                    SelectorPart::TypeArgs if heads.is_none() => {
+                        heads = Some(type_argument_heads(sel.named_child(0)?, src));
+                    }
+                    SelectorPart::Call => call = Some(*sel),
+                    _ => return None,
+                }
+            }
+            let call = call?;
+            let heads = match heads {
+                Some(h) => h,
+                None => vec![factory_type(call, src).unwrap_or_default()],
+            };
+            (text_of(*head, src).trim(), heads)
+        }
+        _ => return None,
+    };
+    let (read, notifier) = provider_class(class)?;
+    let at = |i: Option<usize>| i.and_then(|i| heads.get(i)).cloned().unwrap_or_default();
+    Some((at(read), at(notifier)))
+}
+
+/// DT.5i: the class a generic-less provider's factory builds, from the call
+/// selector `call`'s first positional argument: a constructor tear-off
+/// (`Chat.new`), or an arrow closure whose body is `T(..)`, `T.named(..)` or
+/// `const` / `new T(..)`. A builtin, a block body or anything else -> None.
+fn factory_type(call: TsNode, src: &[u8]) -> Option<String> {
+    let part = call.named_child(0).filter(|p| p.kind() == "argument_part")?;
+    let arg = first_positional(part)?;
+    let kids = named_kids(arg);
+    let [value] = kids.as_slice() else {
+        return None;
+    };
+    let class = match value.kind() {
+        "constructor_tearoff" => {
+            let mut cursor = value.walk();
+            value
+                .children(&mut cursor)
+                .filter(|k| k.kind() == "type_identifier")
+                .map(|k| text_of(k, src).trim())
+                .last()?
+        }
+        "function_expression" => {
+            let body = value.child_by_field_name("body")?;
+            if body.child(0).is_none_or(|t| t.kind() != "=>") {
+                return None;
+            }
+            let expr = named_kids(body);
+            match expr.as_slice() {
+                [creation] if matches!(creation.kind(), "const_object_expression" | "new_expression") => {
+                    creation_class(*creation, src)?
+                }
+                [head, sels @ ..]
+                    if head.kind() == "identifier" && sels.iter().all(|s| s.kind() == "selector") =>
+                {
+                    let parts: Vec<SelectorPart> = sels.iter().map(|s| selector_part(*s, src)).collect();
+                    match parts.as_slice() {
+                        [SelectorPart::Call] | [SelectorPart::Member(_), SelectorPart::Call] => {
+                            text_of(*head, src).trim()
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    (is_dart_class_name(class) && !DART_BUILTIN_TYPES.contains(&class)).then(|| class.to_string())
+}
+
+/// The class a `const` / `new` creation builds, as [`push_creation_call`]
+/// splits a prefixed name: a `constructor` field's type is the last part, a
+/// capitalised `A` of `A.b` the class of the named constructor `b`, else the
+/// last part (`p.T`).
+fn creation_class<'a>(n: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = n.walk();
+    let parts: Vec<&str> = n
+        .children_by_field_name("type", &mut cursor)
+        .filter(|k| k.kind() == "type_identifier")
+        .map(|k| text_of(k, src).trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [class, named] if n.child_by_field_name("constructor").is_none()
+            && is_dart_class_name(class)
+            && !is_dart_class_name(named) =>
+        {
+            Some(*class)
+        }
+        [.., class] => Some(*class),
+        [] => None,
+    }
+}
+
+/// DT.5i: tree-sitter-dart 0.1.0's reading of `K.mod<T>(factory)` (one
+/// generic argument after a modifier) as `(K.mod < T) > (factory)`: the
+/// outer `relational_expression`'s named children are exactly [inner `>`
+/// `parenthesized_expression`], the inner's [`K` identifier, `.autoDispose`
+/// / `.family` member selectors, `<`, `T` identifier]. Returns (K, T), T
+/// `""` when a builtin. Any other shape (two arguments, a prefixed T, a
+/// call after it) -> None.
+fn provider_generic_misparse<'a>(rel: TsNode<'a>, src: &'a [u8]) -> Option<(&'a str, String)> {
+    let outer = named_kids(rel);
+    let [inner, close, factory] = outer.as_slice() else {
+        return None;
+    };
+    if inner.kind() != "relational_expression"
+        || close.kind() != "relational_operator"
+        || text_of(*close, src) != ">"
+        || factory.kind() != "parenthesized_expression"
+    {
+        return None;
+    }
+    let inner = named_kids(*inner);
+    let [class, mods @ .., open, ty] = inner.as_slice() else {
+        return None;
+    };
+    if class.kind() != "identifier"
+        || open.kind() != "relational_operator"
+        || text_of(*open, src) != "<"
+        || ty.kind() != "identifier"
+    {
+        return None;
+    }
+    let mods_ok = mods.iter().all(|m| {
+        m.kind() == "selector"
+            && matches!(selector_part(*m, src), SelectorPart::Member("autoDispose" | "family"))
+    });
+    if !mods_ok {
+        return None;
+    }
+    let ty = text_of(*ty, src).trim();
+    let ty = if DART_BUILTIN_TYPES.contains(&ty) || !is_dart_class_name(ty) {
+        String::new()
+    } else {
+        ty.to_string()
+    };
+    Some((text_of(*class, src).trim(), ty))
+}
+
+/// DT.5i: the text of a Riverpod provider read, when `primary` + `sels` is
+/// exactly one: an identifier (`ref`, `_ref`), then `.read` / `.watch` and its
+/// call, whose one positional argument is `p`, `p.notifier`, `alias.p`,
+/// `p(arg)` or `p(arg).notifier` ([`provider_argument`]). The text is the
+/// primary's and the selectors' texts concatenated, the spelling
+/// [`chain_call_sites`] gives a ComplexReceiver (`ref.read(p)`), so a call
+/// on the read and a local bound to it carry one receiver text. `.future` /
+/// `.stream` (an AsyncValue's) and a named argument (`storage.read(key:
+/// 'k')`) -> None.
+fn provider_read_text(primary: TsNode, sels: &[TsNode], src: &[u8]) -> Option<String> {
+    if primary.kind() != "identifier" {
+        return None;
+    }
+    let [read, call] = sels else {
+        return None;
+    };
+    if !matches!(selector_part(*read, src), SelectorPart::Member("read" | "watch"))
+        || !matches!(selector_part(*call, src), SelectorPart::Call)
+    {
+        return None;
+    }
+    let part = call.named_child(0)?;
+    let args = named_kids(part).into_iter().find(|k| k.kind() == "arguments")?;
+    let list: Vec<TsNode> = named_kids(args).into_iter().filter(|k| k.kind() == "argument").collect();
+    let [arg] = list.as_slice() else {
+        return None;
+    };
+    if !provider_argument(*arg, src) {
+        return None;
+    }
+    let mut text = text_of(primary, src).to_string();
+    text.push_str(text_of(*read, src));
+    text.push_str(text_of(*call, src));
+    Some(text)
+}
+
+/// DT.5i: whether a read's `argument` names a provider: an identifier, then
+/// at most an `alias.` member, a family call and a `.notifier`, in that
+/// order (`p`, `p.notifier`, `alias.p`, `p(id)`, `p(id).notifier`,
+/// `alias.p(id).notifier`). `.future` / `.stream` refuse.
+fn provider_argument(arg: TsNode, src: &[u8]) -> bool {
+    let kids = named_kids(arg);
+    let Some((head, sels)) = kids.split_first() else {
+        return false;
+    };
+    if head.kind() != "identifier" || sels.iter().any(|s| s.kind() != "selector") {
+        return false;
+    }
+    let parts: Vec<SelectorPart> = sels.iter().map(|s| selector_part(*s, src)).collect();
+    let plain = |p: &SelectorPart| matches!(p, SelectorPart::Member(m) if !matches!(*m, "future" | "stream"));
+    let notifier = |p: &SelectorPart| matches!(p, SelectorPart::Member("notifier"));
+    let call = |p: &SelectorPart| matches!(p, SelectorPart::Call);
+    match parts.as_slice() {
+        [] => true,
+        [a] => plain(a) || call(a),
+        [a, b] => (plain(a) && (notifier(b) || call(b))) || (call(a) && notifier(b)),
+        [a, b, c] => plain(a) && call(b) && notifier(c),
+        _ => false,
+    }
+}
+
+/// DT.5i: `final svc = ref.read(p);` (an `initialized_variable_definition`
+/// whose `value` children are exactly a provider read,
+/// [`provider_read_text`]) records the read's text as `svc`'s type in
+/// `from`'s scope (`CodeNav::record_local_type`), so the graph types
+/// `svc.m()` and `svc.getter` through the provider's declaration. A name
+/// the scope binds twice or more ([`CallScope::rebound`]) is never typed:
+/// the one local type per scope could belong to either binding.
+fn record_provider_local(def: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    let Some(name) = def.child_by_field_name("name").map(|n| text_of(n, src).trim()) else {
+        return;
+    };
+    if name.is_empty() || scope.rebound.contains(name) {
+        return;
+    }
+    let mut cursor = def.walk();
+    let value: Vec<TsNode> = def
+        .children_by_field_name("value", &mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let Some((primary, sels)) = value.split_first() else {
+        return;
+    };
+    if sels.iter().any(|s| s.kind() != "selector") {
+        return;
+    }
+    if let Some(text) = provider_read_text(*primary, sels, src) {
+        acc.nav.record_local_type(from, name, &text);
+        acc.riverpod.locals += 1;
+    }
+}
+
+/// Which import makes a [`STATE_HOLDER_BASES`] base the framework's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HolderLib {
+    /// A [`RIVERPOD_IMPORT_PREFIXES`] library.
+    Riverpod,
+    /// A [`FLUTTER_IMPORT_PREFIXES`] library.
+    Flutter,
+}
+
+/// DT.5i: the state holder bases whose subclass inherits a field of the
+/// base's generic argument 0: (base, the field, the import that makes it
+/// the framework's).
+const STATE_HOLDER_BASES: &[(&str, &str, HolderLib)] = &[
+    ("StateNotifier", "state", HolderLib::Riverpod),
+    ("Notifier", "state", HolderLib::Riverpod),
+    ("ValueNotifier", "value", HolderLib::Flutter),
+];
+
+/// DT.5i: `class X extends StateNotifier<T>` (a [`STATE_HOLDER_BASES`] base,
+/// its import present) records X's field `state` (or `value`) as a T
+/// (`CodeNav::record_field_type`), T the base's first generic argument
+/// ([`type_argument_heads`]; a builtin, generic or function T records
+/// nothing), so `state.copyWith(..)` binds T's METHOD through the receiver
+/// typing. Recorded before [`collect_dart_field_types`], which replaces it
+/// when X declares that field itself.
+fn state_holder_field(class: TsNode, src: &[u8], id: NodeId, acc: &mut Acc) {
+    let Some(base) = extends_head(class, src) else {
+        return;
+    };
+    let Some(&(_, field, lib)) = STATE_HOLDER_BASES.iter().find(|(b, _, _)| *b == base) else {
+        return;
+    };
+    let imported = match lib {
+        HolderLib::Riverpod => acc.riverpod_import,
+        HolderLib::Flutter => acc.flutter_import,
+    };
+    if !imported {
+        return;
+    }
+    let Some(superclass) = class.child_by_field_name("superclass") else {
+        return;
+    };
+    let mut cursor = superclass.walk();
+    let Some(args) = superclass.named_children(&mut cursor).find(|k| k.kind() == "type_arguments")
+    else {
+        return;
+    };
+    let Some(ty) = type_argument_heads(args, src).into_iter().next().filter(|t| !t.is_empty()) else {
+        return;
+    };
+    acc.nav.record_field_type(id, field, &ty);
+    acc.riverpod.holders += 1;
 }
 
 // ============================================================================
@@ -10029,5 +10523,157 @@ class Page {
             calls_from_class(&fp, "lib::page::Page"),
             sorted(vec![bare("_Tab"), bare("Ctrl"), attr("Repo", "open")])
         );
+    }
+
+    // ---- DT.5i: Riverpod providers, provider-read locals, state holders ---
+
+    /// The (read, notifier) of the RiverpodProvider fact on the top-level
+    /// STATE_VAR `lib::p::<name>`, if any.
+    fn provider_fact(fp: &FileParse, name: &str) -> Option<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, &format!("lib::p::{name}"));
+        fp.nav.nav_facts.get(&id)?.iter().find_map(|f| match f {
+            NavFact::RiverpodProvider { read, notifier } => Some((read.clone(), notifier.clone())),
+            _ => None,
+        })
+    }
+
+    fn pair(read: &str, notifier: &str) -> Option<(String, String)> {
+        Some((read.to_string(), notifier.to_string()))
+    }
+
+    /// A top-level provider records the generic argument its read returns
+    /// and its notifier's (Riverpod 2's value-type table): through
+    /// `.autoDispose` / `.family` (the one-argument misparse included), and
+    /// with no generics the class the factory builds. FutureProvider, a
+    /// builtin StateProvider, a call after the provider and a package:provider
+    /// file record nothing.
+    #[test]
+    fn riverpod_providers_record_their_value_types() {
+        let source = r#"import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+final api = Provider<Api>((ref) => Api());
+final auth = StateNotifierProvider<AuthService, AuthState>((ref) => AuthService(ref));
+final store = Provider.autoDispose<Store>((ref) => Store.open());
+final repo = Provider.family<Repo, String>((ref, id) => Repo());
+final counter = NotifierProvider<Counter, int>(Counter.new);
+final cart = ChangeNotifierProvider<Cart>((ref) => Cart());
+final geo = Provider((ref) => Geo());
+final chat = Provider(Chat.new);
+final constGeo = Provider((ref) => const Geo());
+final named = Provider((ref) => Geo.named());
+final notifierOnly = StateNotifierProvider((ref) => AuthService(ref));
+final loader = AsyncNotifierProvider<Loader, Page>(Loader.new);
+final autoNamed = AutoDisposeProvider<Repo>((ref) => Repo());
+final futures = FutureProvider<Api>((ref) async => Api());
+final count = StateProvider<int>((ref) => 0);
+final selected = Provider<Api>((ref) => Api()).select;
+final block = Provider((ref) {
+  return Geo();
+});
+"#;
+        let fp = parse_file(source, "lib/p.dart", "lib::p", repo()).unwrap();
+        assert_eq!(provider_fact(&fp, "api"), pair("Api", ""));
+        assert_eq!(provider_fact(&fp, "auth"), pair("AuthState", "AuthService"));
+        assert_eq!(provider_fact(&fp, "store"), pair("Store", ""));
+        assert_eq!(provider_fact(&fp, "repo"), pair("Repo", ""));
+        assert_eq!(provider_fact(&fp, "counter"), pair("", "Counter"));
+        assert_eq!(provider_fact(&fp, "cart"), pair("Cart", "Cart"));
+        assert_eq!(provider_fact(&fp, "geo"), pair("Geo", ""));
+        assert_eq!(provider_fact(&fp, "chat"), pair("Chat", ""));
+        assert_eq!(provider_fact(&fp, "constGeo"), pair("Geo", ""));
+        assert_eq!(provider_fact(&fp, "named"), pair("Geo", ""));
+        assert_eq!(provider_fact(&fp, "notifierOnly"), pair("", "AuthService"));
+        assert_eq!(provider_fact(&fp, "loader"), pair("", "Loader"));
+        assert_eq!(provider_fact(&fp, "autoNamed"), pair("Repo", ""));
+        for none in ["futures", "count", "selected", "block"] {
+            assert_eq!(provider_fact(&fp, none), None, "{none}");
+        }
+        assert_eq!(fp.nav.nav_facts.values().flatten().filter(|f| matches!(f, NavFact::RiverpodProvider { .. })).count(), 13);
+
+        // package:provider's `Provider<T>(create: ..)` is no Riverpod provider.
+        let other = "import 'package:provider/provider.dart';\n\nfinal api = Provider<Api>(create: (_) => Api());\n";
+        let fp = parse_file(other, "lib/p.dart", "lib::p", repo()).unwrap();
+        assert_eq!(provider_fact(&fp, "api"), None);
+    }
+
+    /// A local bound to exactly a provider read records the read's text as
+    /// its type (the spelling a ComplexReceiver carries); a member read on it
+    /// and on a provider read itself are kept for the graph. A `.future`
+    /// read, a named-argument `read`, a call after the read and a name the
+    /// scope binds twice record nothing.
+    #[test]
+    fn provider_read_locals_record_the_read() {
+        let source = r#"import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+class Page {
+  void a(WidgetRef ref, Widget widget) {
+    final svc = ref.read(friendServiceProvider);
+    final n = _ref.watch(authProvider.notifier);
+    final f = ref.read(fam(widget.id));
+    final api = ref.read(apiProvider.future);
+    final v = storage.read(key: 'k');
+    final all = ref.read(friendServiceProvider).listAll();
+    if (svc.isReady) {}
+    if (ref.watch(authProvider).isSignedIn) {}
+  }
+
+  void b(WidgetRef ref, List<dynamic> xs) {
+    final svc = ref.read(groupServiceProvider);
+    xs.forEach((svc) => svc.leave());
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/page.dart", "lib::page", repo()).unwrap();
+        let m = |n: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &format!("lib::page::Page::{n}"));
+        let a = m("a");
+        assert_eq!(local_type_of(&fp, a, "svc").as_deref(), Some("ref.read(friendServiceProvider)"));
+        assert_eq!(local_type_of(&fp, a, "n").as_deref(), Some("_ref.watch(authProvider.notifier)"));
+        assert_eq!(local_type_of(&fp, a, "f").as_deref(), Some("ref.read(fam(widget.id))"));
+        for none in ["api", "v", "all"] {
+            assert_eq!(local_type_of(&fp, a, none), None, "{none}");
+        }
+        assert_eq!(local_type_of(&fp, m("b"), "svc"), None, "svc is bound twice in b");
+        assert_eq!(
+            member_reads_of(&fp, a),
+            vec![
+                ("ref.watch(authProvider)".to_string(), "isSignedIn".to_string()),
+                ("svc".to_string(), "isReady".to_string()),
+            ]
+        );
+    }
+
+    /// A StateNotifier / Notifier subclass's `state` and a ValueNotifier
+    /// subclass's `value` are its base's generic argument, unless the class
+    /// declares that field itself; a builtin argument and a file without the
+    /// library's import record nothing.
+    #[test]
+    fn state_holders_type_their_inherited_state() {
+        let source = r#"import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart';
+
+class AuthService extends StateNotifier<AuthState> {}
+class Counter extends Notifier<Count> {}
+class Picker extends ValueNotifier<Choice> {}
+class Own extends StateNotifier<AuthState> {
+  Own() : super(AuthState());
+  final Draft state = Draft();
+}
+class Ints extends StateNotifier<int> {}
+"#;
+        let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
+        let field = |class: &str, f: &str| {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &format!("lib::s::{class}"));
+            fp.nav.field_types.get(&id).and_then(|t| t.get(f)).cloned()
+        };
+        assert_eq!(field("AuthService", "state").as_deref(), Some("AuthState"));
+        assert_eq!(field("Counter", "state").as_deref(), Some("Count"));
+        assert_eq!(field("Picker", "value").as_deref(), Some("Choice"));
+        assert_eq!(field("Own", "state").as_deref(), Some("Draft"), "a declared field wins");
+        assert_eq!(field("Ints", "state"), None, "a builtin state");
+
+        let bare = "class AuthService extends StateNotifier<AuthState> {}\n";
+        let fp = parse_file(bare, "lib/s.dart", "lib::s", repo()).unwrap();
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::s::AuthService");
+        assert_eq!(fp.nav.field_types.get(&id).and_then(|t| t.get("state")), None, "no import");
     }
 }

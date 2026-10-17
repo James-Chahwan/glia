@@ -1592,6 +1592,18 @@ pub enum NavFact {
     /// (`CodeNav::local_types`). Never an edge by itself: the graph binds it
     /// through the reader's own scope.
     MemberRead { receiver: String, name: String, line: u32 },
+    /// Dart (DT.5i), recorded by the Dart parser on a top-level provider
+    /// STATE_VAR of a file importing a Riverpod library (`final p =
+    /// Provider<T>(..)`, `StateNotifierProvider<N, S>(..)`, the `.autoDispose`
+    /// / `.family` forms, a generic-less factory), read by the Dart graph
+    /// build (`graph/src/build/dart.rs`, `provider_type`); build-time only:
+    /// `ref.read(p)` / `ref.watch(p)` returns a `read`, `ref.read(p.notifier)`
+    /// a `notifier`, each the simple type name the declaration writes (`""` =
+    /// unknown: a builtin, generic or function type, or a provider class with
+    /// no such read). A FutureProvider / StreamProvider (whose read is an
+    /// AsyncValue) records no fact. The graph resolves a name in the
+    /// provider's own file.
+    RiverpodProvider { read: String, notifier: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

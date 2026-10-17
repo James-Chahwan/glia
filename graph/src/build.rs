@@ -387,12 +387,16 @@ where
 /// Build a per-repo Dart graph (DT.5h): [`build_typescript`]'s passes (the
 /// merge, the symbol table, `resolve_imports_ts` with the caller's
 /// `resolve_source`, DF.4a's own-package URIs and DF.4b's plain-import
-/// names among them, `resolve_calls` with no hook, `resolve_refs`), then the
-/// Dart member reads ([`dart::resolve_member_reads`]: a `Type.member` /
-/// `x.member` read no call follows, recorded by the parser as a
-/// `NavFact::MemberRead`, bound through the reader's own scope: a getter's
-/// CALLS, a tear-off's USES, a static field's USES of its CLASS), then the
-/// method-level IMPLEMENTS pairing. Prints `[reads] member reads
+/// names among them, `resolve_calls`, `resolve_refs`), then the Dart member
+/// reads ([`dart::resolve_member_reads`]: a `Type.member` / `x.member` read
+/// no call follows, recorded by the parser as a `NavFact::MemberRead`,
+/// bound through the reader's own scope: a getter's CALLS, a tear-off's
+/// USES, a static field's USES of its CLASS), then the method-level
+/// IMPLEMENTS pairing. DT.5i: `resolve_calls`' extra hook is
+/// [`dart::provider_call`] (a call on a Riverpod provider read binds in the
+/// type the provider's declaration names) and the member reads' hook
+/// [`dart::provider_type`]. Prints `[dart-scope] provider receivers
+/// bound=<n>` when the hook bound a call, then `[reads] member reads
 /// accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` once, then
 /// the LC.3d `[evidence-graph]` line.
 pub fn build_dart<R>(
@@ -403,19 +407,22 @@ pub fn build_dart<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (g, reads, tally) = dart_passes(repo, parses, resolve_source);
+    let (g, reads, tally, bound) = dart_passes(repo, parses, resolve_source);
+    if let Some(line) = dart::provider_marker(bound) {
+        eprintln!("{line}");
+    }
     eprintln!("{}", reads.marker());
     tally.report();
     Ok(g)
 }
 
-/// [`build_dart`]'s passes without its two stderr lines; the tests read the
-/// returned [`dart::MemberReads`].
+/// [`build_dart`]'s passes without its stderr lines; the tests read the
+/// returned [`dart::MemberReads`] and the provider receivers bound.
 fn dart_passes<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
     resolve_source: R,
-) -> (RepoGraph, dart::MemberReads, EvidenceTally)
+) -> (RepoGraph, dart::MemberReads, EvidenceTally, usize)
 where
     R: Fn(&str, &str) -> Option<String>,
 {
@@ -425,11 +432,12 @@ where
     resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
     same.report();
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    let bound = std::cell::Cell::new(0usize);
+    resolve_calls(&mut g, &all_calls, |g, site| dart::provider_call(g, site, &bound), &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
-    let reads = dart::resolve_member_reads(&mut g, |_, _| None);
+    let reads = dart::resolve_member_reads(&mut g, dart::provider_type);
     emit_method_level_implements(&mut g);
-    (g, reads, tally)
+    (g, reads, tally, bound.get())
 }
 
 /// Build a per-repo Swift graph (CB.18): [`build_typescript`]'s passes plus

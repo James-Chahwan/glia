@@ -1070,6 +1070,10 @@ mod tests {
                 name: "apiBaseUrl".into(),
                 line: 9,
             },
+            NavFact::RiverpodProvider {
+                read: "AuthState".into(),
+                notifier: "AuthService".into(),
+            },
         ]
     }
 

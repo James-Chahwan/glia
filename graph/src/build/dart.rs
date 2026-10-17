@@ -41,7 +41,27 @@
 //! Dart is this pass's only consumer, so it lives beside the Dart builder
 //! rather than in `calls.rs` (one concrete instance before abstracting); a
 //! second language reading member accesses lifts it there.
+//!
+//! DT.5i: Riverpod provider receivers. `ref.read(p).m()`,
+//! `ref.read(p.notifier).m()` and a local `final svc = ref.read(p);
+//! svc.m()` call a method of the type `p`'s declaration names
+//! (`final p = Provider<T>(..)`, `StateNotifierProvider<N, S>(..)`), a fact
+//! the parser recorded on the provider's STATE_VAR
+//! ([`NavFact::RiverpodProvider`]). The receiver text (a ComplexReceiver's
+//! receiver, or the type the parser recorded for an Attribute base's local)
+//! is parsed by [`provider_read`]; [`provider_type`] binds `p` through the
+//! reader's own scope and resolves the recorded type name in the provider's
+//! own file ([`scope_type`]: nothing repo-wide), and [`provider_call`] binds
+//! only a METHOD of that type: CALLS, EVIDENCE `graph:dart` rule
+//! `provider_receiver`. Two classes declaring one method name never cross.
+//! The build passes [`provider_call`] as `resolve_calls`' extra hook (run
+//! only after every generic lookup missed: the receiver text names no
+//! symbol) and [`provider_type`] as [`resolve_member_reads`]' hook, so a
+//! getter read on a provider read runs (`auth.isAuthenticated`, CALLS rule
+//! `accessor_read`). fired_on, once per Dart graph whose hook bound a call:
+//! `[dart-scope] provider receivers bound=<n>`.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 
 use glia_code_domain::evidence::Evidence;
@@ -49,7 +69,8 @@ use glia_code_domain::{CallQualifier, CallSite, NavFact, edge_category, node_kin
 use glia_core::{EdgeCategoryId, NodeId};
 
 use crate::calls::{
-    enclosing_home_module, push_edge, receiver_type, resolve_type_name, scope_type, type_method,
+    enclosing_home_module, enclosing_module, graph_evidence, push_edge, receiver_type,
+    resolve_type_name, scope_type, type_method,
 };
 use crate::types::RepoGraph;
 
@@ -110,7 +131,7 @@ impl ReadKind {
 /// Bind every [`NavFact::MemberRead`] of `g` (module doc). `hook` types a
 /// receiver the generic receiver typing missed: it returns the receiver's
 /// TYPE node (a CLASS / ENUM / INTERFACE), whose METHOD `name` then binds;
-/// the Dart build passes `|_, _| None`.
+/// the Dart build passes [`provider_type`] (DT.5i).
 pub(crate) fn resolve_member_reads<H>(g: &mut RepoGraph, hook: H) -> MemberReads
 where
     H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,
@@ -229,6 +250,189 @@ fn read_of(g: &RepoGraph, m: NodeId) -> Option<(NodeId, ReadKind)> {
     Some((m, kind))
 }
 
+/// DT.5i: one Riverpod provider read, as [`provider_read`] parses its text.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ProviderRead {
+    /// The import prefix the provider is read through (`alias.p`).
+    pub(crate) alias: Option<String>,
+    /// The provider variable's name.
+    pub(crate) provider: String,
+    /// `p.notifier`: the read returns the provider's notifier.
+    pub(crate) notifier: bool,
+}
+
+/// DT.5i: a provider read's text, as the Dart parser spells a ComplexReceiver
+/// or a provider-read local's type: an identifier head (`ref`, `_ref`, after
+/// an optional `this.`), `.read(` / `.watch(`, one argument, `)`; layout
+/// whitespace and a trailing comma dropped. The argument is `p`,
+/// `p.notifier`, `alias.p`, `p(arg)` (a family's call, any balanced
+/// argument text) or `p(arg).notifier`. `.future` / `.stream` (an
+/// AsyncValue's) and anything else -> None.
+pub(crate) fn provider_read(text: &str) -> Option<ProviderRead> {
+    let t: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let t = t.strip_prefix("this.").unwrap_or(&t);
+    let head = t.find(|c: char| !is_ident_char(c))?;
+    if !is_ident(&t[..head]) {
+        return None;
+    }
+    let rest = &t[head..];
+    let open = rest
+        .strip_prefix(".read(")
+        .or_else(|| rest.strip_prefix(".watch("))
+        .map(|r| t.len() - r.len() - 1)?;
+    if close_of(t.as_bytes(), open)? != t.len() - 1 {
+        return None;
+    }
+    let mut arg = &t[open + 1..t.len() - 1];
+    arg = arg.strip_suffix(',').unwrap_or(arg);
+    if arg.ends_with(".future") || arg.ends_with(".stream") {
+        return None;
+    }
+    let notifier = arg.ends_with(".notifier");
+    if notifier {
+        arg = &arg[..arg.len() - ".notifier".len()];
+    }
+    if arg.ends_with(')') {
+        let open = arg.find('(')?;
+        if close_of(arg.as_bytes(), open)? != arg.len() - 1 {
+            return None;
+        }
+        arg = &arg[..open];
+    }
+    let (alias, provider) = match arg.split_once('.') {
+        Some((alias, provider)) => (Some(alias), provider),
+        None => (None, arg),
+    };
+    if !is_ident(provider) || alias.is_some_and(|a| !is_ident(a)) {
+        return None;
+    }
+    Some(ProviderRead {
+        alias: alias.map(str::to_string),
+        provider: provider.to_string(),
+        notifier,
+    })
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+/// A Dart identifier: `[A-Za-z_$][A-Za-z0-9_$]*`.
+fn is_ident(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && s.chars().all(is_ident_char)
+}
+
+/// The index of the `)` closing the `(` at `open` in `b`, skipping quoted
+/// text.
+fn close_of(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DT.5i: the TYPE node a provider-read receiver of `site` has (module doc):
+/// the receiver text is a ComplexReceiver's receiver, or the type the
+/// parser recorded for an Attribute base's local in `site.from`'s scope
+/// (`final svc = ref.read(p)`). `p` binds in the reader's own file (its
+/// import bindings, then its own declarations; `alias.p` through the alias's
+/// MODULE symbols) to a STATE_VAR carrying a [`NavFact::RiverpodProvider`],
+/// and its read (or `.notifier`) type name resolves in the provider's own
+/// file ([`scope_type`]). Any miss -> None.
+pub(crate) fn provider_type(g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+    let text = match &site.qualifier {
+        CallQualifier::ComplexReceiver { receiver, .. } => receiver.as_str(),
+        CallQualifier::Attribute { base, .. } => {
+            g.nav.local_types.get(&site.from)?.get(base)?.as_str()
+        }
+        _ => return None,
+    };
+    let read = provider_read(text)?;
+    let module = enclosing_home_module(g, site.from)?;
+    let provider = match &read.alias {
+        Some(alias) => {
+            let lib = *g.symbols.module_import_bindings.get(&module)?.get(alias)?;
+            if g.nav.kind_by_id.get(&lib) != Some(&node_kind::MODULE) {
+                return None;
+            }
+            *g.symbols.module_symbols.get(&lib)?.get(&read.provider)?
+        }
+        None => g
+            .symbols
+            .module_import_bindings
+            .get(&module)
+            .and_then(|b| b.get(&read.provider))
+            .or_else(|| g.symbols.module_symbols.get(&module)?.get(&read.provider))
+            .copied()?,
+    };
+    if g.nav.kind_by_id.get(&provider) != Some(&node_kind::STATE_VAR) {
+        return None;
+    }
+    let (value, notifier) = g.nav.nav_facts.get(&provider)?.iter().find_map(|f| match f {
+        NavFact::RiverpodProvider { read, notifier } => Some((read, notifier)),
+        _ => None,
+    })?;
+    let name = if read.notifier { notifier } else { value };
+    if name.is_empty() {
+        return None;
+    }
+    scope_type(g, enclosing_module(&g.nav, provider)?, name)
+}
+
+/// DT.5i: `resolve_calls`' extra hook for the Dart build: a call on a
+/// provider-read receiver ([`provider_type`]) binds the METHOD of its name
+/// on that type (`class_methods`, then `interface_methods`), CALLS, EVIDENCE
+/// `graph:dart` rule `provider_receiver`; a field, a STATE_VAR or a missing
+/// method binds nothing. `bound` counts the hits for the `[dart-scope]`
+/// marker.
+pub(crate) fn provider_call(
+    g: &RepoGraph,
+    site: &CallSite,
+    bound: &Cell<usize>,
+) -> Option<(NodeId, Evidence)> {
+    let name = match &site.qualifier {
+        CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => name,
+        _ => return None,
+    };
+    let method = type_method(g, provider_type(g, site)?, name)?;
+    if g.nav.kind_by_id.get(&method) != Some(&node_kind::METHOD) {
+        return None;
+    }
+    bound.set(bound.get() + 1);
+    Some((method, graph_evidence("graph:dart", "provider_receiver")))
+}
+
+/// DT.5i: the `[dart-scope]` fired_on line, `None` when the hook bound
+/// nothing.
+pub(crate) fn provider_marker(bound: usize) -> Option<String> {
+    (bound > 0).then(|| format!("[dart-scope] provider receivers bound={bound}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,7 +527,8 @@ mod tests {
     }
 
     fn passes(parses: Vec<FileParse>) -> (RepoGraph, MemberReads) {
-        let (g, reads, _) = super::super::dart_passes(repo(), parses, |_, spec| Some(spec.to_string()));
+        let (g, reads, _, _) =
+            super::super::dart_passes(repo(), parses, |_, spec| Some(spec.to_string()));
         (g, reads)
     }
 
@@ -398,5 +603,160 @@ mod tests {
         assert_eq!(edges.len(), 1, "{edges:?}");
         assert_eq!(edges[0].4, Some(3));
         assert_eq!(stats.accessor_read, 1);
+    }
+
+    /// DT.5i: the provider-read texts the parser writes parse to their
+    /// provider, notifier flag and alias; layout whitespace and a trailing
+    /// comma drop; `.future` / `.stream`, a named argument, a chain and a
+    /// non-read refuse.
+    #[test]
+    fn provider_read_texts() {
+        let pr = |alias: Option<&str>, provider: &str, notifier: bool| {
+            Some(ProviderRead {
+                alias: alias.map(str::to_string),
+                provider: provider.to_string(),
+                notifier,
+            })
+        };
+        assert_eq!(provider_read("ref.read(friendServiceProvider)"), pr(None, "friendServiceProvider", false));
+        assert_eq!(provider_read("_ref.watch(authProvider.notifier)"), pr(None, "authProvider", true));
+        assert_eq!(provider_read("this.ref.read(p)"), pr(None, "p", false));
+        assert_eq!(provider_read("ref.read(fs.friendServiceProvider)"), pr(Some("fs"), "friendServiceProvider", false));
+        assert_eq!(provider_read("ref.watch(fam(widget.id))"), pr(None, "fam", false));
+        assert_eq!(provider_read("ref.watch(fam(a, 'x)'))"), pr(None, "fam", false));
+        assert_eq!(provider_read("ref.read(fam(id).notifier)"), pr(None, "fam", true));
+        assert_eq!(
+            provider_read("ref.read(\n      authProvider.notifier,\n    )"),
+            pr(None, "authProvider", true)
+        );
+        for refused in [
+            "ref.read(apiProvider.future)",
+            "ref.watch(feed.stream)",
+            "storage.read(key: 'k')",
+            "ref.read(p).other",
+            "ref.listen(p)",
+            "ref.read(a.b.c)",
+            "ref.read()",
+            "read(p)",
+            "ref.read(p",
+        ] {
+            assert_eq!(provider_read(refused), None, "{refused}");
+        }
+    }
+
+    /// `lib/core/services.dart`: FriendService and GroupService both declare
+    /// `listAll` (FriendService also the getter `isReady`), the provider
+    /// `friendServiceProvider` names FriendService, `plainVar` is a
+    /// STATE_VAR with no provider fact.
+    fn services_parse() -> FileParse {
+        let mut fp = FileParse::default();
+        let module = node(&mut fp, node_kind::MODULE, "lib::core::services", None);
+        let friend = node(&mut fp, node_kind::CLASS, "lib::core::services::FriendService", Some(module));
+        node(&mut fp, node_kind::METHOD, "lib::core::services::FriendService::listAll", Some(friend));
+        let ready = node(&mut fp, node_kind::METHOD, "lib::core::services::FriendService::isReady", Some(friend));
+        fp.properties.insert(ready);
+        let group = node(&mut fp, node_kind::CLASS, "lib::core::services::GroupService", Some(module));
+        node(&mut fp, node_kind::METHOD, "lib::core::services::GroupService::listAll", Some(group));
+        let provider = node(&mut fp, node_kind::STATE_VAR, "lib::core::services::friendServiceProvider", Some(module));
+        fp.nav.record_fact(
+            provider,
+            NavFact::RiverpodProvider {
+                read: "FriendService".into(),
+                notifier: String::new(),
+            },
+        );
+        node(&mut fp, node_kind::STATE_VAR, "lib::core::services::plainVar", Some(module));
+        fp
+    }
+
+    /// DT.5i: a call on a provider read binds the METHOD of the type the
+    /// provider's declaration names (never GroupService's same-named
+    /// listAll), directly, through an import alias and through a typed
+    /// local's getter read; a STATE_VAR with no provider fact and an empty
+    /// notifier type bind nothing.
+    #[test]
+    fn provider_receivers_bind_strictly() {
+        let mut page = FileParse::default();
+        let page_mod = node(&mut page, node_kind::MODULE, "lib::page", None);
+        let cls = node(&mut page, node_kind::CLASS, "lib::page::Page", Some(page_mod));
+        let build = node(&mut page, node_kind::METHOD, "lib::page::Page::build", Some(cls));
+        let show = node(&mut page, node_kind::METHOD, "lib::page::Page::show", Some(cls));
+        for name in ["friendServiceProvider", "plainVar"] {
+            page.imports.push(ImportStmt {
+                from_module: "lib::page".into(),
+                target: ImportTarget::Symbol {
+                    module: "lib::core::services".into(),
+                    name: name.into(),
+                    alias: None,
+                    level: 0,
+                },
+                line: 0,
+            });
+        }
+        page.imports.push(ImportStmt {
+            from_module: "lib::page".into(),
+            target: ImportTarget::Module {
+                path: "lib::core::services".into(),
+                alias: Some("fs".into()),
+            },
+            line: 1,
+        });
+        let complex = |from: NodeId, receiver: &str, line: u32| CallSite {
+            from,
+            qualifier: CallQualifier::ComplexReceiver {
+                receiver: receiver.into(),
+                name: "listAll".into(),
+            },
+            line,
+        };
+        page.calls.push(complex(build, "ref.read(friendServiceProvider)", 5));
+        page.calls.push(complex(build, "ref.read(plainVar)", 6));
+        page.calls.push(complex(build, "ref.read(friendServiceProvider.notifier)", 7));
+        page.calls.push(complex(show, "ref.read(fs.friendServiceProvider)", 9));
+        page.nav.record_local_type(build, "svc", "ref.watch(friendServiceProvider)");
+        page.nav.record_fact(build, read("svc", "isReady", 8));
+
+        let (g, reads, _, bound) =
+            super::super::dart_passes(repo(), vec![services_parse(), page], |_, spec| Some(spec.to_string()));
+        let list_all = id(node_kind::METHOD, "lib::core::services::FriendService::listAll");
+        let mut provider_edges: Vec<(NodeId, NodeId, Option<u32>)> = g
+            .edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::CALLS
+                    && Evidence::of(e).is_some_and(|ev| {
+                        ev.emitter == "graph:dart" && ev.rule.as_deref() == Some("provider_receiver")
+                    })
+            })
+            .map(|e| (e.from, e.to, Evidence::of(e).and_then(|ev| ev.line)))
+            .collect();
+        provider_edges.sort_by_key(|r| format!("{r:?}"));
+        let mut want = vec![(build, list_all, Some(5)), (show, list_all, Some(9))];
+        want.sort_by_key(|r| format!("{r:?}"));
+        assert_eq!(provider_edges, want);
+        let group_list = id(node_kind::METHOD, "lib::core::services::GroupService::listAll");
+        assert!(
+            !g.edges.iter().any(|e| e.to == group_list && e.category == edge_category::CALLS),
+            "GroupService::listAll stays unbound"
+        );
+        assert_eq!(
+            g.unresolved_calls.iter().filter(|c| c.from == build).count(),
+            2,
+            "the plain STATE_VAR and the empty notifier"
+        );
+        assert_eq!(bound, 2);
+        assert_eq!(provider_marker(bound).as_deref(), Some("[dart-scope] provider receivers bound=2"));
+        assert_eq!(provider_marker(0), None);
+        assert_eq!(
+            read_edges(&g),
+            vec![(
+                build,
+                id(node_kind::METHOD, "lib::core::services::FriendService::isReady"),
+                edge_category::CALLS,
+                "accessor_read".to_string(),
+                Some(8),
+            )]
+        );
+        assert_eq!(reads.accessor_read, 1);
     }
 }

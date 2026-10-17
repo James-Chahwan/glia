@@ -60,7 +60,12 @@
 //!   - Dart: `@injectable` / `@Injectable()` / `@lazySingleton` /
 //!     `@LazySingleton()` / `@singleton` / `@Singleton()` directly above
 //!     the class (`injectable`); `extends GetxService` /
-//!     `extends GetxController` (`getx`).
+//!     `extends GetxController` (`getx`); DT.5i: `extends Interceptor` /
+//!     `QueuedInterceptor` / `InterceptorsWrapper` /
+//!     `QueuedInterceptorsWrapper` (a `dio.` prefix allowed) in a file
+//!     importing `package:dio/` (`dio_interceptor`: a Dio interceptor is a
+//!     service as an Angular interceptor is; `implements Interceptor` and
+//!     `with` are not read).
 //!
 //! Every rule is a framework convention (HEURISTIC tier); a name is emitted
 //! only when the per-file nav holds a declaration with that name, so a scan
@@ -823,17 +828,29 @@ fn detect_dart_services(source: &str) -> Vec<RuleHit> {
         "singleton",
         "Singleton",
     ];
+    /// DT.5i: Dio's interceptor bases (package:dio).
+    const DIO_INTERCEPTORS: &[&str] = &[
+        "Interceptor",
+        "QueuedInterceptor",
+        "InterceptorsWrapper",
+        "QueuedInterceptorsWrapper",
+    ];
+    let dio = source.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("import 'package:dio/") || t.starts_with("import \"package:dio/")
+    });
     let mut out = Vec::new();
     for d in class_decls(source, DecoStyle::At, MODIFIERS, true) {
         if d.decos.iter().any(|a| DI.contains(&a.as_str())) {
             out.push((d.name.clone(), "injectable"));
         }
         let toks = header_tokens(&d.header, true);
-        if words_after(&toks, &["extends"])
-            .iter()
-            .any(|p| p == "GetxService" || p == "GetxController")
-        {
+        let bases = words_after(&toks, &["extends"]);
+        if bases.iter().any(|p| p == "GetxService" || p == "GetxController") {
             out.push((d.name.clone(), "getx"));
+        }
+        if dio && bases.iter().any(|p| DIO_INTERCEPTORS.contains(&p.as_str())) {
+            out.push((d.name.clone(), "dio_interceptor"));
         }
     }
     out
@@ -2027,6 +2044,84 @@ class SessionService extends GetxService {}
                 p("Prefs", "injectable"),
                 p("SessionService", "getx"),
             ]
+        );
+    }
+
+    /// DT.5i: a class extending one of Dio's interceptor bases, in a file
+    /// importing package:dio, is a service (rule `dio_interceptor`); an
+    /// `implements` / `with` clause, another base and a Dio-less file are
+    /// not; an `@injectable` interceptor is one name carrying both rules.
+    #[test]
+    fn dart_dio_interceptors_are_services() {
+        let src = r#"
+import 'package:dio/dio.dart' as dio;
+
+class AuthInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions o, RequestInterceptorHandler h) => h.next(o);
+}
+
+class RetryInterceptor extends QueuedInterceptor {}
+
+class LogWrapper extends InterceptorsWrapper {}
+
+class Prefixed extends dio.Interceptor {}
+
+class Implementer implements Interceptor {}
+
+class Mixer extends Base with Interceptor {}
+
+class Other extends Transformer {}
+
+@injectable
+class Injected extends QueuedInterceptorsWrapper {}
+"#;
+        assert_eq!(
+            pairs(detect_dart_services(src)),
+            vec![
+                p("AuthInterceptor", "dio_interceptor"),
+                p("Injected", "dio_interceptor"),
+                p("Injected", "injectable"),
+                p("LogWrapper", "dio_interceptor"),
+                p("Prefixed", "dio_interceptor"),
+                p("RetryInterceptor", "dio_interceptor"),
+            ]
+        );
+        assert_eq!(
+            hit_names(&detect_dart_services(src)),
+            ["AuthInterceptor", "Injected", "LogWrapper", "Prefixed", "RetryInterceptor"]
+        );
+        let no_dio = "import 'package:http/http.dart';\n\nclass AuthInterceptor extends Interceptor {}\n";
+        assert_eq!(detect_dart_services(no_dio), Vec::<RuleHit>::new());
+    }
+
+    /// DT.5i: the Dio interceptor's SERVICE overlay names its CLASS (the
+    /// LB.3a fold makes it ROLE SERVICE) with CONTAINS to its METHODs, and
+    /// the `[services] dart` line tallies the rule.
+    #[test]
+    fn dart_dio_interceptor_marker_and_overlay() {
+        let src = "import 'package:dio/dio.dart';\n\nclass AuthInterceptor extends Interceptor {\n  void onRequest() {}\n}\n";
+        let (nav, module_id, _, kids) = nav_with_owner(
+            node_kind::CLASS,
+            "lib::core::auth_interceptor::AuthInterceptor",
+            &[("onRequest", node_kind::METHOD)],
+        );
+        let out = extract_service_nodes(src, "dart", &nav, module_id, repo());
+        assert_eq!(
+            out.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::SERVICE,
+                "lib::core::auth_interceptor::AuthInterceptor"
+            )]
+        );
+        assert_eq!(out.edges.iter().map(|e| e.to).collect::<Vec<_>>(), kids);
+        let hits = detect_dart_services(src);
+        let owners: HashMap<String, usize> = [("AuthInterceptor".to_string(), 1)].into_iter().collect();
+        assert_eq!(
+            services_marker("dart", 1, &rule_tally(&hits, &owners), "lib::core::auth_interceptor"),
+            "[services] dart classified=1 rules=dio_interceptor:1 module=lib::core::auth_interceptor"
         );
     }
 
