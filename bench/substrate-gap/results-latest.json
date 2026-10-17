@@ -932,18 +932,19 @@
     },
     "dart/calls": {
       "extract": [
-        11,
-        11
+        12,
+        12
       ],
       "fixtures": [
         "fixtures/dart-body-owners",
         "fixtures/dart-field-dispatch",
+        "fixtures/dart-member-reads",
         "fixtures/dart-top-level-bodies",
         "matrix/dart/calls"
       ],
       "forbid": [
-        7,
-        7
+        10,
+        10
       ],
       "level": "full",
       "literal": [
@@ -954,8 +955,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        19,
-        19
+        30,
+        30
       ],
       "via": "call"
     },
@@ -8655,6 +8656,7 @@
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
     "fixtures/ruby-require-in-scope",
+    "fixtures/runtime-invoked-entries",
     "fixtures/rust-queue-precision",
     "fixtures/rust-trait-impl-precision",
     "fixtures/rust-typed-receivers",

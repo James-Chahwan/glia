@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 414,
+  "fixtures": 416,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -502,6 +502,14 @@
       "language": "dart",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "dart-member-reads": {
+      "framework": "dart-member-reads",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "dart-members": {
@@ -1844,6 +1852,14 @@
       "language": "ruby",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "runtime-invoked-entries": {
+      "framework": "runtime-invoked-entries",
+      "language": "go+typescript+dart+kotlin+swift+python",
+      "per_category": {
+        "CALLS": 1.0,
+        "INJECTS": 1.0
       }
     },
     "rust-axum-calls": {
