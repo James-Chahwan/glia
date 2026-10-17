@@ -337,6 +337,16 @@ Not candidates: each becomes packets in the spec run.
    kept hot between calls (~3x), edge weights retuned from the inefficiency map (HTTP_CALLS / HANDLED_BY overpaid, TESTS /
    IMPLEMENTS / INHERITS_FROM underpaid), and task / intent as a first-class domain (commits, PRs, issues as nodes linking
    intent to the files they touched: the "walker" the ranking eval measured).
+   Second run, the vertical layers (`dev-notes/ranking-eval-vertical-2026-10-18.md`, James: *"imagine graphs stacked upon
+   themselves and vertically"*): requirement ids cited in code are real vertical edges (co-change pairs share one 16-19%
+   of the time vs ~1%; V1 beats its random-id control) but add only +0.01-0.04 over PPR and nothing over intent text on
+   Kina; every hop up (spec, law, James's rulings) loses signal, law and rulings sit on their controls; routing a commit
+   message's requirement id to the files that cite it is Kina's largest real gain (+0.039, +0.082 where the message cites
+   one); a plan that names its files is by far the strongest edge (glia packets' `files_touched`: recall@10 0.890). So
+   item 8 also makes requirement / task / plan nodes first-class with two vertical edges at the most specific node (code
+   cites an id; a task or doc row names a file, pending or done), routes PR / commit text's ids through that layer in
+   review, and keeps law / spec / rulings for "why" answers and provenance, not ranking. Ingestion needs scoping rules
+   (spec-kit FR-002 / T014 are per spec; a global D6 is not spec 002's D6; a law key needs at least two doc units).
 9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
    James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
 10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
