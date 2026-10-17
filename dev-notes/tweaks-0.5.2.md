@@ -75,7 +75,8 @@ now". The new order:
    `engram-export/Cargo.toml`), the docs saying released, the gates, the wheel and README numbers re-measured. James
    pushes it, tags `v0.5.2` and lets `wheels-py.yml` publish glia-py 0.5.2 (2026-10-18).
 6. **repo-graph upgrades to 0.5.2 now** from `dev-notes/repo-graph-handoff-0.5.2.md` (`glia-py==0.5.2`; no longer held).
-7. **neuropil** applies `dev-notes/neuropil-handoff-0.5.2.md` after the publish (`=0.5.2` on all six crates).
+7. **neuropil:** deferred to 0.5.3, not notified (James, 2026-10-18: *Don't notify neuropil it's so far behind visual 3d stuff takes much more free time not contracting for work but on the other not committed it can go to 0.5.3*); 0.5.3's neuropil handoff
+   covers 0.5.1 -> 0.5.3, carrying `dev-notes/neuropil-handoff-0.5.2.md` forward.
 8. **Engram:** its replays at `196728e3` stand (step 4); it pins the exporter at `v0.5.2`
    (`dev-notes/engram-handoff-0.5.2.md`).
 9. **glia:** 0.5.3 is paced over the week, a normal 0.5.2 -> 0.5.3 release: the spec run from

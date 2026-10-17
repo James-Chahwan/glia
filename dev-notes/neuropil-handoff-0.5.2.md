@@ -1,5 +1,7 @@
 # neuropil handoff - glia 0.5.2 (the four bets 2026-10-16, the tweaks 2026-10-17)
 
+**Deferred: neuropil skips 0.5.2 and upgrades to 0.5.3** (James, 2026-10-18: *Don't notify neuropil it's so far behind visual 3d stuff takes much more free time not contracting for work but on the other not committed it can go to 0.5.3*). Nobody is notified; this file stays the 0.5.2 part of neuropil's path, and 0.5.3's neuropil handoff covers 0.5.1 -> 0.5.3 by carrying this one forward.
+
 **glia 0.5.2 is released 2026-10-18 (tag `v0.5.2`), and every pin below reads `=0.5.2`.** James,
 2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next week"*. That reverses the
 2026-10-17 plan of no 0.5.2 release (*"can't we just go 0.5.1-> 0.5.3 release"*), under which this file

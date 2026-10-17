@@ -73,6 +73,8 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   run, its waves and follow-ups, then its own release docs packet with its own 0.5.2 -> 0.5.3 handoff per consumer (no
   combined 0.5.1 -> 0.5.3 handoff, no fold of README / py/README's 0.5.2 sections).
 
+- 2026-10-18: *Don't notify neuropil it's so far behind visual 3d stuff takes much more free time not contracting for work but on the other not committed it can go to 0.5.3*. neuropil skips 0.5.2 and is not notified; 0.5.3's release docs write neuropil a
+  0.5.1 -> 0.5.3 handoff that carries `dev-notes/neuropil-handoff-0.5.2.md` forward (repo-graph and Engram get 0.5.2 -> 0.5.3).
 - 2026-10-18, relayed by engram-34 after its registered run at `0.5.2-complete` (PPR candidates: 9 wins / 20 losses):
   *"if it has no benefit and we know of better versions we should tell glia what we learned for this specific choice vs ppr
   and get it removed and changed before 0.5.3 it's a dumb feature to keep then"*. So 0.5.3 REMOVES DE.5 (§F item 7), and
