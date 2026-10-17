@@ -755,6 +755,9 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   hint_refused counts are worth a look: why the export's v1 hint is refused for a re-keyed fact). Headline, Engram on the
   tag's exports vs 0.5.1's: Kina hit +27 / -23 (flat); glia strict +15 / -2 (p = .0023). Live Kina synced with the tag's
   exporter; the corrections writer passes `--hint`.
+- 0.5.2 release CI (wheels-py.yml run 39046742898, 2026-10-18, green): GitHub warns `actions/checkout@v4` and
+  `actions/upload-artifact@v4` target the deprecated Node.js 20 (forced onto Node 24), and `ubuntu-latest` moves to Ubuntu 26
+  from 2026-10-19; bump the actions and pin the runner image before 0.5.3's wheels build.
 
 ## 3. Open questions for James
 
