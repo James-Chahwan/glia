@@ -347,6 +347,13 @@ Not candidates: each becomes packets in the spec run.
    cites an id; a task or doc row names a file, pending or done), routes PR / commit text's ids through that layer in
    review, and keeps law / spec / rulings for "why" answers and provenance, not ranking. Ingestion needs scoping rules
    (spec-kit FR-002 / T014 are per spec; a global D6 is not spec 002's D6; a law key needs at least two doc units).
+   Third run, impact from above (`rank_eval --law-impact`; the detailed report is private, kept outside this repo): a
+   law's section-level diff traced through a regulated app's goal layer (docs citing sections -> the files they name) found
+   the code its implementing commits changed far better than text similarity or structure (F1 0.63-0.66 vs 0.43 / 0.43,
+   random 0.16), but a permuted section map did as well: the docs had been written for that change, so the layer predicts
+   "the compliance surface", not which amendment. The goal layer is a stack (law section -> research finding -> decision
+   row -> spec row -> task -> file); impact from above works through its "names a file" edges; law needs section-level
+   nodes and an instrument resolver (which act / jurisdiction, about 80-85% accurate by context here).
 9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
    James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
 10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
