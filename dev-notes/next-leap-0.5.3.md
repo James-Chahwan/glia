@@ -334,7 +334,7 @@ Not candidates: each becomes packets in the spec run.
    then: H9 for `review` / `find` when text exists, H10 for `impact` / blast-radius, sum pooling to files, the PPR index
    kept hot between calls (~3x), edge weights retuned from the inefficiency map (HTTP_CALLS / HANDLED_BY overpaid, TESTS /
    IMPLEMENTS / INHERITS_FROM underpaid), and task / intent as a first-class domain (commits, PRs, issues as nodes linking
-   intent to the files they touched; [[the missing walker]]).
+   intent to the files they touched: the "walker" the ranking eval measured).
 9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
    James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
 10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
