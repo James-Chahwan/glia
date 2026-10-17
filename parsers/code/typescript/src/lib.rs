@@ -118,12 +118,15 @@ fn parse_file_stats(
     // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
     // A7.1's gate, then the file's local-typed receivers are counted.
     record_inject_locals(&mut acc);
+    // DT.5k: every local of each scope is known now, so a `const x = f(..)`
+    // whose `f` no local shadows takes the call-result type `f()`.
+    record_call_locals(&mut acc);
     let ls = local_stats(&acc);
     if ls.typed > 0 {
         eprintln!(
-            "[ts-locals] typed receivers={} (param={} annotated={} new={} inject={} alias={}) \
-             unknown={} file={file_rel_path}",
-            ls.typed, ls.param, ls.annotated, ls.new, ls.inject, ls.alias, ls.unknown
+            "[ts-locals] typed receivers={} (param={} annotated={} new={} inject={} alias={} \
+             call={}) unknown={} file={file_rel_path}",
+            ls.typed, ls.param, ls.annotated, ls.new, ls.inject, ls.alias, ls.call, ls.unknown
         );
     }
 
@@ -364,6 +367,84 @@ struct Acc {
     /// walk order. Gated and attached to their callables by
     /// [`attach_graphql_results`] once every import of the file is read.
     graphql_results: Vec<GraphqlResultCand>,
+    /// DT.5k: `(class, field)` -> `(factory binding, class)` of each Angular
+    /// signal query field (`form = viewChild(SmrFilingForm)`,
+    /// `viewChild<KsToggle>('ref')`, `contentChild.required(X)`): what a read
+    /// `this.form()` returns. Gated on the factory's import in
+    /// `resolve_intra_file`.
+    signal_queries: HashMap<(NodeId, String), (String, String)>,
+    /// DT.5k: `inject(T)` calls written as a receiver or a member's object
+    /// (`inject(CountriesService).list()`), as `(scope, receiver text,
+    /// callee, T)`, awaiting the `inject` import gate.
+    inject_receivers: Vec<(NodeId, String, String, String)>,
+    /// DT.5k: `const x = f(..)` locals, as `(scope, x, f)`, recorded as the
+    /// call-result type `f()` once every local of the scope is known.
+    call_locals: Vec<(NodeId, String, String)>,
+    /// DT.5k: member accesses `<recv>.<name>` that are no callee, one per
+    /// `(from, recv, name, write)` at its first source row.
+    member_reads: Vec<MemberReadCand>,
+    /// DT.5k: `(from, recv, name, write)` -> its index in `member_reads`.
+    member_read_seen: HashMap<(NodeId, String, String, bool), usize>,
+    /// DT.5k: the `[ts-receivers]` counters.
+    receiver_stats: ReceiverStats,
+}
+
+/// DT.5k: one member access `<receiver>.<name>` awaiting the receiver check
+/// in `resolve_intra_file` ([`Acc::member_reads`]).
+struct MemberReadCand {
+    from: NodeId,
+    class: Option<NodeId>,
+    receiver: String,
+    shape: RecvShape,
+    name: String,
+    row: u32,
+    write: bool,
+}
+
+/// DT.5k: the receiver of a [`MemberReadCand`], by what can type it.
+#[derive(Clone, PartialEq, Eq)]
+enum RecvShape {
+    /// `this.<field>`: the enclosing class's declared field type.
+    ThisField(String),
+    /// A bare identifier: a typed local or parameter of the scope.
+    Local,
+    /// Any other expression: a [`NavFact::ReceiverType`] of the scope.
+    Expr,
+}
+
+/// DT.5k: what one file gave the graph (the `[ts-receivers]` marker).
+#[derive(Default, Clone, Copy)]
+struct ReceiverStats {
+    /// Signal query fields with a class (`query_fields=`).
+    query_fields: usize,
+    /// `this.<query>()` receivers typed ([`NavFact::ReceiverType`]).
+    query_receivers: usize,
+    /// `inject(T)` receivers typed.
+    inject_receivers: usize,
+    /// INJECTS refs / edges from an `inject(T)` that is no field's whole
+    /// initialiser.
+    inject_refs: usize,
+    /// In-file `T.X` static member reads that USE the class `T`.
+    static_reads: usize,
+    /// `const x = f(..)` locals typed as the call's result.
+    call_locals: usize,
+    /// [`NavFact::MemberRead`] / [`NavFact::MemberWrite`] facts recorded.
+    member_reads: usize,
+    /// Accessor METHODs marked ([`NavFact::Getter`] / [`NavFact::Setter`]).
+    accessors: usize,
+}
+
+impl ReceiverStats {
+    fn any(self) -> bool {
+        self.query_fields
+            + self.query_receivers
+            + self.inject_receivers
+            + self.inject_refs
+            + self.static_reads
+            + self.call_locals
+            + self.member_reads
+            > 0
+    }
 }
 
 /// DT.5g: a bare identifier read as a value by `from` (an argument, an array
@@ -372,10 +453,12 @@ struct ValueRef {
     from: NodeId,
     name: String,
     /// Each site as `(0-based row, callee)`: the callee identifier when the
-    /// site is a call's argument (`inject(AuthService)` -> `inject`). An
-    /// `inject` import binding's argument is DI (A7.1 / DF.22a), never a
-    /// value reference, so the edge's row (LC.3b) is the first site that is
-    /// not one.
+    /// site is a call's FIRST argument (`inject(AuthService)` -> `inject`; a
+    /// later argument has none, DT.5k). An `inject` import binding's first
+    /// argument is DI, never a value reference: a whole-initialiser field is
+    /// A7.1's class INJECTS, any other site an INJECTS from its scope
+    /// (DT.5k, `resolve_intra_file`); so the USES edge's row (LC.3b) is the
+    /// first site that is not one.
     sites: Vec<(u32, Option<String>)>,
 }
 
@@ -404,6 +487,10 @@ enum LocalSrc {
     Inject,
     /// A `this.<field>` value: the local aliases the field (`self.<field>`).
     Alias,
+    /// DT.5k: a bare call's result (`const store = makeStore()`): the type
+    /// `makeStore()`, which the graph reads off the callee's declared return
+    /// type.
+    Call,
 }
 
 /// DF.22a: one `const x = <callee>(T)` local awaiting the `inject` import
@@ -433,6 +520,7 @@ struct LocalStats {
     new: usize,
     inject: usize,
     alias: usize,
+    call: usize,
     /// Sites whose local is of unknown type (`""`, a conflict included): it
     /// shadows a same-named field, so nothing binds.
     unknown: usize,
@@ -1594,6 +1682,16 @@ fn visit_state_field(
         Some(class_id),
     );
 
+    // DT.5k: an Angular signal query holds the class a read of it returns
+    // (`this.form()` for `form = viewChild(SmrFilingForm)`); the factory's
+    // import is checked in `resolve_intra_file`.
+    if let Some((binding, ty)) = signal_query_type(inner, src) {
+        acc.signal_queries.insert(
+            (class_id, name.to_string()),
+            (binding.to_string(), ty.to_string()),
+        );
+    }
+
     let before = acc.unresolved.len() + acc.endpoints.len();
     collect_calls_in(value, src, state_id, Some(class_id), acc);
     let after = acc.unresolved.len() + acc.endpoints.len();
@@ -1623,6 +1721,85 @@ fn signal_factory_name<'a>(callee: TsNode, src: &'a [u8]) -> Option<&'a str> {
         }
         _ => None,
     }
+}
+
+/// DT.5k: `(factory binding, class)` of a single-result signal query call,
+/// `viewChild` / `contentChild` or their `.required` forms (the binding is
+/// the identifier the factory is reached through; `resolve_intra_file`
+/// checks it is the Angular import). The class is, first match wins: the
+/// class a `{ read: X }` option names (the query then yields `X`, never its
+/// locator or its first type argument); else the `<T>` argument
+/// (`viewChild<KsToggle>('pushSwitch')`); else the locator when it names a
+/// class (`viewChild(SmrFilingForm)`). A string locator with no `<T>`, a
+/// non-class `read` and a non-class `<T>` yield nothing; the list queries
+/// (`viewChildren`, `contentChildren`) hold an array, and the gate drops
+/// them.
+fn signal_query_type<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    let callee = call.child_by_field_name("function")?;
+    let binding = signal_factory_name(callee, src)?;
+    let upper = |t: &&str| t.starts_with(|c: char| c.is_ascii_uppercase());
+    let args = call.child_by_field_name("arguments")?;
+    let mut ac = args.walk();
+    let mut it = args.named_children(&mut ac).filter(|a| a.kind() != "comment");
+    let locator = it.next()?;
+    // A `read` option decides first: the query yields its token's type
+    // (`viewChild<Cmp, ElementRef>('x', { read: ElementRef })` is an
+    // ElementRef, the SECOND type argument), never the locator's.
+    if let Some(opts) = it.next().filter(|o| o.kind() == "object") {
+        let mut oc = opts.walk();
+        let read = opts.named_children(&mut oc).find(|p| {
+            p.kind() == "pair"
+                && p.child_by_field_name("key").is_some_and(|k| text(k, src) == "read")
+        });
+        if let Some(pair) = read {
+            return pair
+                .child_by_field_name("value")
+                .filter(|v| matches!(v.kind(), "identifier" | "member_expression"))
+                .and_then(|v| heritage_type_name(v, src))
+                .filter(upper)
+                .map(|t| (binding, t));
+        }
+    }
+    if let Some(ta) = call.child_by_field_name("type_arguments") {
+        let mut tc = ta.walk();
+        let first = ta.named_children(&mut tc).next()?;
+        return class_type_name(first, src).map(|t| (binding, t));
+    }
+    if !matches!(locator.kind(), "identifier" | "member_expression") {
+        return None;
+    }
+    heritage_type_name(locator, src).filter(upper).map(|t| (binding, t))
+}
+
+/// DT.5k: the local names bound to an imported single-result signal query
+/// factory (`viewChild` / `contentChild`, or their aliases), A7.1's import
+/// gate for `inject`.
+fn query_import_bindings(imports: &[ImportStmt]) -> HashSet<&str> {
+    imports
+        .iter()
+        .filter_map(|imp| match &imp.target {
+            ImportTarget::Symbol { name, alias, .. }
+                if name == "viewChild" || name == "contentChild" =>
+            {
+                Some(alias.as_deref().unwrap_or(name.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// DT.5k: the field `f` of a signal read receiver `this.f()` (a `!` after
+/// the call allowed: `this.f()!`), the receiver text a CallSite or member
+/// read keeps for `this.form()?.reset()`. Any argument, chain or other
+/// shape names none.
+fn signal_read_field(receiver: &str) -> Option<&str> {
+    let r = receiver.strip_suffix('!').unwrap_or(receiver);
+    let f = r.strip_prefix("this.")?.strip_suffix("()")?;
+    let ident = |s: &str| {
+        let s = s.strip_prefix('#').unwrap_or(s);
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    };
+    ident(f).then_some(f)
 }
 
 /// The leading identifier of a decorator: `@Component({...})` → "Component",
@@ -2240,6 +2417,24 @@ fn is_accessor(n: TsNode) -> bool {
         .any(|ch| !ch.is_named() && matches!(ch.kind(), "get" | "set"))
 }
 
+/// DT.5k: record on an accessor METHOD which keyword declared it, a
+/// [`NavFact::Getter`] for `get`, a [`NavFact::Setter`] for `set` (a getter
+/// and its setter share one METHOD, which then carries both): the graph
+/// binds a member read on another object only to a getter, a write only to a
+/// setter.
+fn mark_accessor(n: TsNode, method_id: NodeId, acc: &mut Acc) {
+    let mut c = n.walk();
+    for ch in n.children(&mut c).filter(|ch| !ch.is_named()) {
+        let fact = match ch.kind() {
+            "get" => NavFact::Getter,
+            "set" => NavFact::Setter,
+            _ => continue,
+        };
+        acc.nav.record_fact(method_id, fact);
+        acc.receiver_stats.accessors += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit_method(
     n: TsNode,
@@ -2274,6 +2469,7 @@ fn visit_method(
         .insert((class_id, name.to_string()), method_id);
     if is_accessor(n) {
         acc.accessors.insert(method_id);
+        mark_accessor(n, method_id, acc);
     }
     acc.nav.record(
         method_id,
@@ -2357,6 +2553,7 @@ fn visit_abstract_method(
         .insert((class_id, name.to_string()), method_id);
     if is_accessor(n) {
         acc.accessors.insert(method_id);
+        mark_accessor(n, method_id, acc);
     }
     acc.nav.record(
         method_id,
@@ -2596,6 +2793,8 @@ fn emit_function(
     record_callable(func_id, n, acc);
     // DF.22a: parameters type the receivers of the body.
     record_param_types(n, src, func_id, acc);
+    // DT.5k: a declared class return type types a caller's result local.
+    record_return_class(n, src, func_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -2640,9 +2839,25 @@ fn emit_function_value(
     // DF.22a: the arrow's / function expression's parameters type the
     // receivers of its body.
     record_param_types(value, src, func_id, acc);
+    // DT.5k: a declared class return type types a caller's result local.
+    record_return_class(value, src, func_id, acc);
 
     if let Some(body) = value.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
+    }
+}
+
+/// DT.5k: record the class a FUNCTION's `return_type` annotation declares
+/// ([`annotated_class_type`]: `ns.Foo` / `Foo<T>` / `Foo | null` -> `Foo`) on
+/// `CodeNav::return_types`, so a caller's `const x = f()` local is of that
+/// class. A primitive, array, union, function or type-predicate annotation,
+/// and no annotation, record nothing.
+fn record_return_class(func: TsNode, src: &[u8], func_id: NodeId, acc: &mut Acc) {
+    if let Some(ty) = func
+        .child_by_field_name("return_type")
+        .and_then(|t| annotated_class_type(t, src))
+    {
+        acc.nav.record_return_type(func_id, ty);
     }
 }
 
@@ -2802,6 +3017,10 @@ fn collect_calls_in(
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
             record_this_ref(node, src, from, enclosing_class, acc);
+            // DT.5k: an `inject(T)` receiver, and a member access a getter
+            // or setter of the receiver's class may serve.
+            record_inject_receiver(node, src, from, acc);
+            record_member_read(node, src, from, enclosing_class, acc);
         }
         if matches!(
             kind,
@@ -2932,6 +3151,125 @@ fn record_this_ref(
     }
 }
 
+/// DT.5k: record the object of a member expression that is an
+/// `inject(T)`-shaped call ([`inject_shape`]; parentheses and `!` peeled
+/// for the test, the receiver text kept as written): the callee
+/// `inject(CountriesService).list()` and the read
+/// `inject(AuthService).isAuthenticated` hold a `T`. The `inject` import
+/// gate is applied in `resolve_intra_file`.
+fn record_inject_receiver(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(object) = node.child_by_field_name("object") else {
+        return;
+    };
+    let mut inner = object;
+    while matches!(inner.kind(), "parenthesized_expression" | "non_null_expression") {
+        let mut c = inner.walk();
+        let Some(next) = inner.named_children(&mut c).find(|n| n.kind() != "comment") else {
+            return;
+        };
+        inner = next;
+    }
+    if inner.kind() != "call_expression" {
+        return;
+    }
+    if let Some((callee, ty)) = inject_shape(inner, src) {
+        acc.inject_receivers.push((
+            from,
+            text(object, src).to_string(),
+            callee.to_string(),
+            ty.to_string(),
+        ));
+    }
+}
+
+/// DT.5k: record a member access `<recv>.<name>` that is no call's callee
+/// (a read, or an assignment's target: `write`), by `from`, once per `(from,
+/// recv, name, write)` at its first source row, when `recv` is a shape a
+/// type can be known for: `this.<field>`, a bare identifier, or another
+/// expression a [`NavFact::ReceiverType`] may type (an `inject(T)` call, a
+/// signal read `this.f()`). `this.<name>` itself is DT.5g's
+/// ([`record_this_ref`]). Which reads are kept is decided in
+/// `resolve_intra_file`, once the file's field, local and receiver types are
+/// known.
+fn record_member_read(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+    acc: &mut Acc,
+) {
+    let (Some(object), Some(property)) = (
+        node.child_by_field_name("object"),
+        node.child_by_field_name("property"),
+    ) else {
+        return;
+    };
+    if !matches!(
+        property.kind(),
+        "property_identifier" | "private_property_identifier"
+    ) {
+        return;
+    }
+    let mut write = false;
+    if let Some(parent) = node.parent() {
+        let is = |field: &str| parent.child_by_field_name(field) == Some(node);
+        match parent.kind() {
+            "call_expression" if is("function") => return,
+            "assignment_expression" | "augmented_assignment_expression" if is("left") => {
+                write = true;
+            }
+            _ => {}
+        }
+    }
+    let shape = match object.kind() {
+        "this" => return,
+        "identifier" => RecvShape::Local,
+        "member_expression" => {
+            let (Some(o), Some(p)) = (
+                object.child_by_field_name("object"),
+                object.child_by_field_name("property"),
+            ) else {
+                return;
+            };
+            if o.kind() != "this"
+                || !matches!(p.kind(), "property_identifier" | "private_property_identifier")
+            {
+                return;
+            }
+            RecvShape::ThisField(text(p, src).to_string())
+        }
+        "call_expression" | "non_null_expression" | "parenthesized_expression" => RecvShape::Expr,
+        _ => return,
+    };
+    let receiver = text(object, src).to_string();
+    let name = text(property, src).to_string();
+    let row = line_at(node);
+    let key = (from, receiver, name, write);
+    match acc.member_read_seen.get(&key) {
+        Some(&i) => {
+            if let Some(r) = acc.member_reads.get_mut(i) {
+                r.row = r.row.min(row);
+            }
+        }
+        None => {
+            let (from, receiver, name, write) = key;
+            acc.member_read_seen.insert(
+                (from, receiver.clone(), name.clone(), write),
+                acc.member_reads.len(),
+            );
+            acc.member_reads.push(MemberReadCand {
+                from,
+                class: enclosing_class,
+                receiver,
+                shape,
+                name,
+                row,
+                write,
+            });
+        }
+    }
+}
+
 /// DT.5g: record a `this.<name>` member read (`write` false) or assignment
 /// target (`write` true) of `class`, by `from`, once per `(from, name,
 /// write)` at its first source row (the call walk pops siblings right to
@@ -2978,8 +3316,13 @@ fn record_value_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     let callee = match (node.kind(), parent.kind()) {
         ("shorthand_property_identifier", "object") | ("identifier", "array") => None,
         ("identifier", "pair") if parent.child_by_field_name("value") == Some(node) => None,
+        // DT.5k: only the first argument is the call's DI token
+        // (`inject(Foo, OPTS)` injects Foo; OPTS is a value passed).
         ("identifier", "arguments") => parent
-            .parent()
+            .named_children(&mut parent.walk())
+            .find(|a| a.kind() != "comment")
+            .filter(|first| *first == node)
+            .and_then(|_| parent.parent())
             .filter(|p| matches!(p.kind(), "call_expression" | "new_expression"))
             .and_then(|p| {
                 p.child_by_field_name("function")
@@ -3283,7 +3626,16 @@ fn record_declarator_type(decl: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc
                 callee: callee.to_string(),
                 ty: ty.to_string(),
             }),
-            None => acc.nav.record_local_type(scope, name, ""),
+            // DT.5k: a bare call `f(..)` holds `f`'s result, typed late
+            // ([`record_call_locals`]); a member call's result stays unknown.
+            None => match value.child_by_field_name("function") {
+                Some(f) if f.kind() == "identifier" => acc.call_locals.push((
+                    scope,
+                    name.to_string(),
+                    text(f, src).to_string(),
+                )),
+                _ => acc.nav.record_local_type(scope, name, ""),
+            },
         },
         _ => acc.nav.record_local_type(scope, name, ""),
     }
@@ -3354,6 +3706,29 @@ fn record_inject_locals(acc: &mut Acc) {
     }
 }
 
+/// DT.5k: record the queued `const x = f(..)` locals ([`Acc::call_locals`])
+/// as the call-result type `f()` (CodeNav's normalised call form, which the
+/// graph types through `f`'s declared return type), once every local of the
+/// file is read: a local or parameter of the scope named `f`, or a nested
+/// `function f` there, shadows the top-level `f`, and the local is of
+/// unknown type.
+fn record_call_locals(acc: &mut Acc) {
+    for (scope, name, callee) in std::mem::take(&mut acc.call_locals) {
+        let shadowed = acc
+            .nav
+            .local_types
+            .get(&scope)
+            .is_some_and(|l| l.contains_key(&callee))
+            || acc.nested_decls.contains(&(scope, callee.clone()));
+        if shadowed || callee == name {
+            acc.nav.record_local_type(scope, &name, "");
+            continue;
+        }
+        record_local(acc, scope, &name, &format!("{callee}()"), LocalSrc::Call);
+        acc.receiver_stats.call_locals += 1;
+    }
+}
+
 /// DF.22a: count the file's `x.m()` call sites (an `Attribute` qualifier)
 /// whose `x` is a recorded local of the caller, typed (by [`LocalSrc`]) or
 /// unknown: the `[ts-locals]` marker's numbers.
@@ -3382,6 +3757,7 @@ fn local_stats(acc: &Acc) -> LocalStats {
             Some(LocalSrc::New) => stats.new += 1,
             Some(LocalSrc::Inject) => stats.inject += 1,
             Some(LocalSrc::Alias) => stats.alias += 1,
+            Some(LocalSrc::Call) => stats.call += 1,
             None => {}
         }
     }
@@ -6243,6 +6619,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         nav: std::mem::take(&mut acc.nav),
         properties: Default::default(),
     };
+    record_receiver_types(&mut acc, &mut out);
     for uc in acc.unresolved {
         let resolved: Option<NodeId> = match &uc.qualifier {
             CallQualifier::Bare(name) => acc.module_functions.get(name).copied(),
@@ -6367,21 +6744,59 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         let inject_bindings = inject_import_bindings(&out.imports);
         let named_imports = named_import_bindings(&out.imports);
         for vr in value_refs {
-            let Some(row) = vr
-                .sites
-                .iter()
-                .filter(|(_, c)| !c.as_deref().is_some_and(|c| inject_bindings.contains(c)))
-                .map(|(r, _)| *r)
-                .min()
-            else {
-                continue;
-            };
+            let is_inject =
+                |c: &Option<String>| c.as_deref().is_some_and(|c| inject_bindings.contains(c));
             let shadowed = out
                 .nav
                 .local_types
                 .get(&vr.from)
                 .is_some_and(|l| l.contains_key(&vr.name))
                 || acc.nested_decls.contains(&(vr.from, vr.name.clone()));
+            // DT.5k: an `inject(T)` that is no field's whole initialiser (a
+            // guard's `const auth = inject(AuthService)`, an inline
+            // `inject(CountriesService).list()`) is DI from the scope that
+            // runs it: an INJECTS of `T`, bound like A7.1's field form.
+            if !shadowed
+                && let Some(row) =
+                    vr.sites.iter().filter(|(_, c)| is_inject(c)).map(|(r, _)| *r).min()
+            {
+                let in_file = acc.classes.get(&vr.name).or_else(|| acc.const_vars.get(&vr.name));
+                if let Some(&to) = in_file {
+                    // A class's own member injecting it vouches for nothing;
+                    // only the INJECTS is skipped, so the scope's non-inject
+                    // sites of the name below keep their USES.
+                    if !within(&out.nav, vr.from, to) {
+                        let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+                            .rule("inject_call")
+                            .line(row);
+                        out.edges.push(
+                            Edge::new(vr.from, to, edge_category::INJECTS, Confidence::Strong)
+                                .with_cell(ev.to_cell()),
+                        );
+                        acc.receiver_stats.inject_refs += 1;
+                    }
+                } else if named_imports.contains(vr.name.as_str())
+                    && let Some(module_id) = acc.module_id
+                {
+                    out.refs.push(UnresolvedRef {
+                        from: vr.from,
+                        from_module: module_id,
+                        qualifier: CallQualifier::Bare(vr.name.clone()),
+                        category: edge_category::INJECTS,
+                        line: row,
+                    });
+                    acc.receiver_stats.inject_refs += 1;
+                }
+            }
+            let Some(row) = vr
+                .sites
+                .iter()
+                .filter(|(_, c)| !is_inject(c))
+                .map(|(r, _)| *r)
+                .min()
+            else {
+                continue;
+            };
             if shadowed {
                 continue;
             }
@@ -6458,6 +6873,22 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         if acc.enums.contains_key(&base) {
             continue;
         }
+        // DT.5k: `T.X` on a CLASS of this file, read outside `T` (its own
+        // members reading a static vouch for nothing), USES `T`.
+        if let Some(&class) = acc.classes.get(&base) {
+            let local = out.nav.local_types.get(&from).is_some_and(|l| l.contains_key(&base));
+            if !local && !within(&out.nav, from, class) {
+                let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+                    .rule("static_member")
+                    .line(line);
+                out.edges.push(
+                    Edge::new(from, class, edge_category::USES, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
+                acc.receiver_stats.static_reads += 1;
+            }
+            continue;
+        }
         let Some(module_id) = acc.module_id else {
             continue;
         };
@@ -6504,6 +6935,42 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             line: cand.line,
         });
         di_stats::record(DiShape::TsInjectFn);
+    }
+
+    // DT.5k: a member access on a receiver of known type may run a getter
+    // or setter of that type's class: kept as a MemberRead fact for the
+    // graph (a MemberWrite for an assignment target), which binds it only
+    // to an accessor. A `this.<field>` needs a
+    // declared field type (A7.1's `inject(T)` fields are recorded above), a
+    // bare name a typed local or parameter of the scope, any other receiver
+    // a ReceiverType fact.
+    for mr in std::mem::take(&mut acc.member_reads) {
+        let typed = match &mr.shape {
+            RecvShape::ThisField(f) => mr.class.is_some_and(|c| {
+                out.nav.field_types.get(&c).and_then(|t| t.get(f)).is_some_and(|t| !t.is_empty())
+            }),
+            RecvShape::Local => out
+                .nav
+                .local_types
+                .get(&mr.from)
+                .and_then(|l| l.get(&mr.receiver))
+                .is_some_and(|t| !t.is_empty()),
+            RecvShape::Expr => out.nav.nav_facts.get(&mr.from).is_some_and(|facts| {
+                facts.iter().any(|f| {
+                    matches!(f, NavFact::ReceiverType { receiver, .. } if *receiver == mr.receiver)
+                })
+            }),
+        };
+        if !typed {
+            continue;
+        }
+        let fact = if mr.write {
+            NavFact::MemberWrite { receiver: mr.receiver, name: mr.name, line: mr.row }
+        } else {
+            NavFact::MemberRead { receiver: mr.receiver, name: mr.name, line: mr.row }
+        };
+        out.nav.record_fact(mr.from, fact);
+        acc.receiver_stats.member_reads += 1;
     }
 
     let mut endpoint_nav_seen: std::collections::HashSet<NodeId> =
@@ -6565,7 +7032,91 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     }
     wire_stats.report(&acc.file_rel);
 
+    let rs = acc.receiver_stats;
+    if rs.any() {
+        eprintln!(
+            "[ts-receivers] query_fields={} query_receivers={} inject_receivers={} \
+             inject_refs={} static_reads={} call_locals={} member_reads={} accessors={} file={}",
+            rs.query_fields,
+            rs.query_receivers,
+            rs.inject_receivers,
+            rs.inject_refs,
+            rs.static_reads,
+            rs.call_locals,
+            rs.member_reads,
+            rs.accessors,
+            acc.file_rel
+        );
+    }
+
     Ok(out)
+}
+
+/// DT.5k: true when `id` is `class` or a node under it (`parent_of`).
+fn within(nav: &CodeNav, mut id: NodeId, class: NodeId) -> bool {
+    loop {
+        if id == class {
+            return true;
+        }
+        match nav.parent_of.get(&id) {
+            Some(&p) => id = p,
+            None => return false,
+        }
+    }
+}
+
+/// DT.5k: the receiver texts this file types for the graph, each a
+/// [`NavFact::ReceiverType`] on the scope that writes it: a read of a
+/// signal query field (`this.form()`, `this.form()!`) whose factory is the
+/// imported `viewChild` / `contentChild`, from a call site's receiver or a
+/// member read's; and an `inject(T)` receiver whose callee is the `inject`
+/// import. Every import is read by now.
+fn record_receiver_types(acc: &mut Acc, out: &mut FileParse) {
+    let queries = query_import_bindings(&out.imports);
+    let injects = inject_import_bindings(&out.imports);
+    let mut sites: Vec<(NodeId, Option<NodeId>, &str)> = Vec::new();
+    for uc in &acc.unresolved {
+        if let CallQualifier::ComplexReceiver { receiver, .. } = &uc.qualifier {
+            sites.push((uc.from, uc.enclosing_class, receiver.as_str()));
+        }
+    }
+    for mr in &acc.member_reads {
+        if mr.shape == RecvShape::Expr {
+            sites.push((mr.from, mr.class, mr.receiver.as_str()));
+        }
+    }
+    for (from, class, receiver) in sites {
+        let Some(field) = signal_read_field(receiver) else {
+            continue;
+        };
+        let Some((binding, ty)) = class.and_then(|c| acc.signal_queries.get(&(c, field.to_string())))
+        else {
+            continue;
+        };
+        if !queries.contains(binding.as_str()) {
+            continue;
+        }
+        let fact = NavFact::ReceiverType { receiver: receiver.to_string(), ty: ty.clone() };
+        if !out.nav.nav_facts.get(&from).is_some_and(|f| f.contains(&fact)) {
+            out.nav.record_fact(from, fact);
+            acc.receiver_stats.query_receivers += 1;
+        }
+    }
+    acc.receiver_stats.query_fields = acc
+        .signal_queries
+        .values()
+        .filter(|(b, _)| queries.contains(b.as_str()))
+        .count();
+    for (scope, receiver, callee, ty) in std::mem::take(&mut acc.inject_receivers) {
+        if !injects.contains(callee.as_str()) {
+            continue;
+        }
+        let fact = NavFact::ReceiverType { receiver, ty };
+        if !out.nav.nav_facts.get(&scope).is_some_and(|f| f.contains(&fact)) {
+            out.nav.record_fact(scope, fact);
+            acc.receiver_stats.inject_receivers += 1;
+        }
+    }
 }
 
 /// DT.5g: the accessor CALLS of one file, one per `(from, accessor, write)`
@@ -8494,7 +9045,9 @@ export class GeoService {
     /// `qname` (empty when none).
     fn facts_of(parse: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<NavFact> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
-        parse.nav.nav_facts.get(&id).cloned().unwrap_or_default()
+        // CH.3b's facts only: DT.5k's MemberRead / MemberWrite facts share the scope.
+        let facts = parse.nav.nav_facts.get(&id).cloned().unwrap_or_default();
+        facts.into_iter().filter(|f| matches!(f, NavFact::UrlPrefixKey { .. })).collect()
     }
 
     fn prefix_key(key: &str) -> Vec<NavFact> {
@@ -11077,6 +11630,7 @@ export class C {
                 new: 1,
                 inject: 0,
                 alias: 1,
+                call: 0,
                 unknown: 1,
             }
         );
@@ -12363,5 +12917,547 @@ mod graphql_result_tests {
         let r = results(&p, node_kind::FUNCTION, &func("both"));
         assert_eq!(r.iter().map(|w| (w.line, w.ty.as_str())).collect::<Vec<_>>(), [(2, "StockList"), (3, "")]);
         assert_eq!(r[0].shape.to_json(), Shape::named("StockList").to_json());
+    }
+}
+
+#[cfg(test)]
+mod typed_receiver_tests {
+    //! DT.5k: what the parser states about a receiver the graph could not
+    //! type: an Angular signal query read (`this.form()`), an inline
+    //! `inject(T)` (a receiver and DI from the scope that runs it), an
+    //! in-file static read `T.X`, a call-result local (`const s = make()`)
+    //! with its callee's declared return type, a member access on a typed
+    //! receiver, and the `get` / `set` accessors it may run.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-typed-receivers")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str, path: &str, qname: &str) -> FileParse {
+        parse_file(src, path, qname, repo()).expect("parse")
+    }
+
+    /// The 0-based row of the first source line containing `needle`.
+    fn row_of(src: &str, needle: &str) -> u32 {
+        src.lines().position(|l| l.contains(needle)).expect("needle in src") as u32
+    }
+
+    /// `scope`'s ReceiverType facts as `(receiver, ty)`, sorted.
+    fn receiver_types(p: &FileParse, scope: NodeId) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = p
+            .nav
+            .nav_facts
+            .get(&scope)
+            .into_iter()
+            .flatten()
+            .filter_map(|f| match f {
+                NavFact::ReceiverType { receiver, ty } => Some((receiver.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every ReceiverType fact of the parse, whoever holds it.
+    fn all_receiver_types(p: &FileParse) -> usize {
+        p.nav
+            .nav_facts
+            .values()
+            .flatten()
+            .filter(|f| matches!(f, NavFact::ReceiverType { .. }))
+            .count()
+    }
+
+    /// `scope`'s member access facts as `(receiver, name, row, write)`,
+    /// sorted.
+    fn member_facts(p: &FileParse, scope: NodeId) -> Vec<(String, String, u32, bool)> {
+        let mut out: Vec<(String, String, u32, bool)> = p
+            .nav
+            .nav_facts
+            .get(&scope)
+            .into_iter()
+            .flatten()
+            .filter_map(|f| match f {
+                NavFact::MemberRead { receiver, name, line } => {
+                    Some((receiver.clone(), name.clone(), *line, false))
+                }
+                NavFact::MemberWrite { receiver, name, line } => {
+                    Some((receiver.clone(), name.clone(), *line, true))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn quad(r: &str, n: &str, row: u32, write: bool) -> (String, String, u32, bool) {
+        (r.to_string(), n.to_string(), row, write)
+    }
+
+    fn pair(r: &str, t: &str) -> (String, String) {
+        (r.to_string(), t.to_string())
+    }
+
+    /// The Bare refs of `category` from `from`, as `(name, row)`, sorted.
+    fn bare_refs(p: &FileParse, from: NodeId, category: glia_core::EdgeCategoryId) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = p
+            .refs
+            .iter()
+            .filter(|r| r.from == from && r.category == category)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some((n.clone(), r.line)),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `(from, to, row)` of every `category` edge whose evidence rule is
+    /// `rule`.
+    fn ruled(p: &FileParse, category: glia_core::EdgeCategoryId, rule: &str) -> Vec<(NodeId, NodeId, u32)> {
+        p.edges
+            .iter()
+            .filter(|e| e.category == category)
+            .filter_map(|e| {
+                let ev = Evidence::of(e)?;
+                (ev.rule.as_deref() == Some(rule)).then(|| (e.from, e.to, ev.line.expect("a site row")))
+            })
+            .collect()
+    }
+
+    const QUERIES: &str = "\
+import { Component, ViewContainerRef, contentChild, contentChildren, viewChild, viewChildren } from '@angular/core';
+import { Form } from './form';
+import { Toggle } from './toggle';
+import { Zone } from './zone';
+import { Panel } from './panel';
+import { Item } from './item';
+
+@Component({ selector: 'app-p', standalone: true, template: '' })
+export class P {
+  private readonly a = viewChild(Form);
+  private readonly b = viewChild<Toggle>('b');
+  private readonly c = viewChild.required(Zone);
+  private readonly d = contentChild(Panel);
+  private readonly e = contentChild.required<Item>('e');
+  private readonly f = viewChild(Zone, { read: ViewContainerRef });
+  private readonly g = viewChild<Zone, ViewContainerRef>('g', { read: ViewContainerRef });
+  private readonly h = viewChildren(Form);
+  private readonly i = contentChildren(Panel);
+  private readonly j = viewChild('j');
+  private readonly k = viewChild(Zone, { read: 'el' });
+
+  run(): void {
+    this.a()?.reset();
+    this.b()?.sync(true);
+    this.c().clear();
+    this.d()?.open();
+    this.e().pick();
+    this.f()?.clear();
+    this.g()?.clear();
+    this.h().forEach((x) => x.reset());
+    this.i().map((x) => x);
+    this.j()?.clear();
+    this.k()?.clear();
+    this.a()!.submit();
+  }
+}
+";
+
+    /// Each single-result query names the class its read returns, on the
+    /// method that reads it: the locator, the `<T>` argument, the `.required`
+    /// forms; a `read` option wins over both (also as a second type
+    /// argument). A list query, a string locator with no `<T>` and a
+    /// non-class `read` type nothing; nor does a project-local `viewChild`.
+    /// An aliased import types.
+    #[test]
+    fn signal_query_fields_type_their_reads() {
+        let p = parse(QUERIES, "src/p.page.ts", "src::p.page");
+        let run = id(node_kind::METHOD, "src::p.page::P::run");
+        assert_eq!(
+            receiver_types(&p, run),
+            [
+                pair("this.a()", "Form"),
+                pair("this.a()!", "Form"),
+                pair("this.b()", "Toggle"),
+                pair("this.c()", "Zone"),
+                pair("this.d()", "Panel"),
+                pair("this.e()", "Item"),
+                pair("this.f()", "ViewContainerRef"),
+                pair("this.g()", "ViewContainerRef"),
+            ]
+        );
+        assert_eq!(all_receiver_types(&p), 8, "nothing for h / i / j / k");
+
+        let local = "\
+import { Form } from './form';
+function viewChild<T>(t: T): () => T { return () => t; }
+export class Q {
+  private readonly a = viewChild(Form);
+  run(): void { this.a()?.reset(); }
+}
+";
+        assert_eq!(all_receiver_types(&parse(local, "src/q.ts", "src::q")), 0);
+
+        let aliased = "\
+import { viewChild as vc } from '@angular/core';
+import { Form } from './form';
+export class R {
+  private readonly a = vc(Form);
+  run(): void { this.a()?.reset(); }
+}
+";
+        let p = parse(aliased, "src/r.ts", "src::r");
+        assert_eq!(
+            receiver_types(&p, id(node_kind::METHOD, "src::r::R::run")),
+            [pair("this.a()", "Form")]
+        );
+    }
+
+    /// `inject(T).m()` and `inject<Api>(TOKEN).m()` type their receiver on
+    /// the scope; a project-local `inject` types nothing.
+    #[test]
+    fn inline_inject_receivers() {
+        let src = "\
+import { inject } from '@angular/core';
+import { Api, Store, TOKEN } from './api';
+export function f(): void {
+  inject(Store).load();
+  inject<Api>(TOKEN).get();
+}
+";
+        let p = parse(src, "src/f.ts", "src::f");
+        assert_eq!(
+            receiver_types(&p, id(node_kind::FUNCTION, "src::f::f")),
+            [pair("inject(Store)", "Store"), pair("inject<Api>(TOKEN)", "Api")]
+        );
+
+        let local = "\
+import { Store } from './api';
+function inject<T>(t: T): T { return t; }
+export function g(): void { inject(Store).load(); }
+";
+        assert_eq!(all_receiver_types(&parse(local, "src/g.ts", "src::g")), 0);
+    }
+
+    /// An `inject(T)` that is no field's whole initialiser is DI from the
+    /// scope that runs it: a Bare INJECTS ref for an import, an INJECTS edge
+    /// (rule `inject_call`) for an in-file class. Only the first argument is
+    /// the token; a whole-initialiser field stays A7.1's class ref; a class
+    /// injecting itself, a shadowed name and a non-import `inject` inject
+    /// nothing.
+    #[test]
+    fn inline_inject_is_injects() {
+        let src = "\
+import { inject } from '@angular/core';
+import { AuthService } from './auth';
+import { OPTS } from './opts';
+export function guard(): boolean {
+  const a = inject(AuthService);
+  return a.ok;
+}
+export function optional(): boolean {
+  const b = inject(AuthService, OPTS);
+  return b.ok;
+}
+";
+        let p = parse(src, "src/guard.ts", "src::guard");
+        let guard = id(node_kind::FUNCTION, "src::guard::guard");
+        let optional = id(node_kind::FUNCTION, "src::guard::optional");
+        assert_eq!(
+            bare_refs(&p, guard, edge_category::INJECTS),
+            [("AuthService".to_string(), row_of(src, "inject(AuthService);"))]
+        );
+        assert!(bare_refs(&p, guard, edge_category::USES).is_empty(), "the token is no value");
+        let row = row_of(src, "inject(AuthService, OPTS)");
+        assert_eq!(
+            bare_refs(&p, optional, edge_category::INJECTS),
+            [("AuthService".to_string(), row)]
+        );
+        assert_eq!(bare_refs(&p, optional, edge_category::USES), [("OPTS".to_string(), row)]);
+
+        let field = "\
+import { Component, inject } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { AuthService } from './auth';
+import { CountriesService } from './countries';
+export class C {
+  private readonly auth = inject(AuthService);
+  readonly countries = toSignal(inject(CountriesService).list());
+}
+";
+        let p = parse(field, "src/c.ts", "src::c");
+        let class = id(node_kind::CLASS, "src::c::C");
+        let countries = id(node_kind::STATE_VAR, "src::c::C::countries");
+        let mut injects: Vec<(NodeId, String)> = p
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some((r.from, n.clone())),
+                _ => None,
+            })
+            .collect();
+        injects.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(
+            injects,
+            [(class, "AuthService".to_string()), (countries, "CountriesService".to_string())],
+            "the whole-initialiser field is A7.1's class ref only"
+        );
+
+        let in_file = "\
+import { inject } from '@angular/core';
+class Local { ping(): void {} }
+export class Self {
+  static make(): unknown {
+    const all = [Self];
+    return inject(Self) ?? all;
+  }
+}
+export function h(): void { inject(Local).ping(); }
+";
+        let p = parse(in_file, "src/h.ts", "src::h");
+        let h = id(node_kind::FUNCTION, "src::h::h");
+        let local = id(node_kind::CLASS, "src::h::Local");
+        let class = id(node_kind::CLASS, "src::h::Self");
+        let make = id(node_kind::METHOD, "src::h::Self::make");
+        assert_eq!(
+            ruled(&p, edge_category::INJECTS, "inject_call"),
+            [(h, local, row_of(in_file, "inject(Local)"))],
+            "a class's own member injecting it vouches for nothing"
+        );
+        assert_eq!(
+            ruled(&p, edge_category::USES, "value_ref"),
+            [(make, class, row_of(in_file, "[Self]"))],
+            "the same member's by-value read keeps its USES"
+        );
+
+        let shadowed = "\
+import { inject } from '@angular/core';
+import { AuthService, Token } from './auth';
+export function s(AuthService: Token): void { inject(AuthService); }
+";
+        let p = parse(shadowed, "src/s.ts", "src::s");
+        let s = id(node_kind::FUNCTION, "src::s::s");
+        assert!(bare_refs(&p, s, edge_category::INJECTS).is_empty());
+        assert!(bare_refs(&p, s, edge_category::USES).is_empty());
+
+        let not_angular = "\
+import { AuthService } from '../core/auth.service';
+function inject<T>(token: T): T { return token; }
+export function probe(): boolean { return inject(AuthService) !== null; }
+";
+        let p = parse(not_angular, "src/probe.ts", "src::probe");
+        let probe = id(node_kind::FUNCTION, "src::probe::probe");
+        assert!(p.refs.iter().all(|r| r.category != edge_category::INJECTS));
+        assert_eq!(
+            bare_refs(&p, probe, edge_category::USES),
+            [("AuthService".to_string(), row_of(not_angular, "inject(AuthService)"))]
+        );
+    }
+
+    /// An in-file `T.X` read from outside `T` USES the class (rule
+    /// `static_member`); `T`'s own members and a local shadow read nothing;
+    /// an imported base keeps LA.30c's Attribute ref.
+    #[test]
+    fn static_member_reads() {
+        let src = "\
+import { Imported } from './imported';
+export class Limits {
+  static readonly MAX = 3;
+  static clamp(n: number): number { return Math.min(n, Limits.MAX); }
+}
+export function f(): number { return Limits.MAX; }
+export function g(): number { const Limits = { MAX: 1 }; return Limits.MAX; }
+export function h(): number { return Imported.MAX; }
+";
+        let p = parse(src, "src/limits.ts", "src::limits");
+        let f = id(node_kind::FUNCTION, "src::limits::f");
+        let limits = id(node_kind::CLASS, "src::limits::Limits");
+        assert_eq!(
+            ruled(&p, edge_category::USES, "static_member"),
+            [(f, limits, row_of(src, "function f()"))]
+        );
+        let h = id(node_kind::FUNCTION, "src::limits::h");
+        let attrs: Vec<(NodeId, String, String)> = p
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, name } => Some((r.from, base.clone(), name.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attrs, [(h, "Imported".to_string(), "MAX".to_string())]);
+    }
+
+    /// `const s = make()` records the call form `make()`; a member call's
+    /// result, a parameter or nested function named like the callee and a
+    /// self-named callee record the empty type. `[ts-locals]` counts the
+    /// call-typed sites. A class-shaped return annotation is a return type.
+    #[test]
+    fn call_result_locals() {
+        let src = "\
+function make(): Store { return new Store(); }
+export class C {
+  run(): void {
+    const s = make();
+    const t = this.make();
+    const u = a.b();
+    s.go(); t.go(); u.go();
+  }
+  make(): Store { return new Store(); }
+}
+export function p(make: () => Store): void { const v = make(); v.go(); }
+export function q(): void { function make(): Store { return new Store(); } const w = make(); w.go(); }
+export function r(): void { const make = make(); make.go(); }
+";
+        let (p, _, _, _, stats, ..) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
+        let local = |scope: NodeId, name: &str| {
+            p.nav.local_types.get(&scope).and_then(|l| l.get(name)).cloned()
+        };
+        let run = id(node_kind::METHOD, "src::c::C::run");
+        assert_eq!(local(run, "s").as_deref(), Some("make()"));
+        assert_eq!(local(run, "t").as_deref(), Some(""));
+        assert_eq!(local(run, "u").as_deref(), Some(""));
+        assert_eq!(local(id(node_kind::FUNCTION, "src::c::p"), "v").as_deref(), Some(""));
+        assert_eq!(local(id(node_kind::FUNCTION, "src::c::q"), "w").as_deref(), Some(""));
+        assert_eq!(local(id(node_kind::FUNCTION, "src::c::r"), "make").as_deref(), Some(""));
+        assert_eq!((stats.call, stats.typed), (1, 1), "{stats:?}");
+
+        let returns = "\
+export function a(): Store { return x; }
+export const b = (): Store => x;
+export function c(): Store | null { return null; }
+export function d(): ns.Foo { return x; }
+export function e(): Box<number> { return x; }
+export function f(): Promise<Store> { return x; }
+export function g(): string { return ''; }
+export function h() { return x; }
+export function i(): Store[] { return []; }
+export function j(): A | B { return x; }
+";
+        let p = parse(returns, "src/r.ts", "src::r");
+        let ret = |name: &str| {
+            p.nav.return_types.get(&id(node_kind::FUNCTION, &format!("src::r::{name}"))).cloned()
+        };
+        let got: Vec<(&str, Option<String>)> =
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].into_iter().map(|n| (n, ret(n))).collect();
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            got,
+            [
+                ("a", some("Store")),
+                ("b", some("Store")),
+                ("c", some("Store")),
+                ("d", some("Foo")),
+                ("e", some("Box")),
+                ("f", some("Promise")),
+                ("g", None),
+                ("h", None),
+                ("i", None),
+                ("j", None),
+            ]
+        );
+    }
+
+    const READS: &str = "\
+import { Component, inject, viewChild } from '@angular/core';
+import { Auth } from './auth';
+import { Form } from './form';
+import { environment } from './env';
+
+@Component({ selector: 'app-c', standalone: true, template: '' })
+export class C {
+  private readonly injected = inject(Auth);
+  private annotated: Auth;
+  private loose;
+  private readonly form = viewChild(Form);
+
+  constructor(private readonly auth: Auth) {}
+
+  run(local: Auth, other): void {
+    const x = this.auth.isIn;
+    const y = this.injected.isIn;
+    const z = this.annotated.isIn;
+    const w = local.isIn;
+    const v = inject(Auth).isIn;
+    const d = this.form()?.dirty;
+    this.auth.session = 't';
+    const n1 = other.isIn;
+    const n2 = this.loose.isIn;
+    const n3 = environment.apiUrl;
+    const n4 = this.isIn;
+    this.auth.check();
+    const again = this.auth.isIn;
+  }
+}
+";
+
+    /// A member access that is no callee is a MemberRead (an assignment
+    /// target a MemberWrite) when the parser types its receiver: a declared
+    /// field (constructor parameter, `inject(T)` field, annotation), a typed
+    /// local, a ReceiverType expression; one per key, at its first row.
+    /// Nothing for an untyped local or field, an import base, `this.x`, a
+    /// callee.
+    #[test]
+    fn member_reads_record_typed_receivers() {
+        let p = parse(READS, "src/c.component.ts", "src::c.component");
+        let run = id(node_kind::METHOD, "src::c.component::C::run");
+        let at = |needle: &str| row_of(READS, needle);
+        let mut want = vec![
+            quad("this.auth", "isIn", at("const x ="), false),
+            quad("this.injected", "isIn", at("const y ="), false),
+            quad("this.annotated", "isIn", at("const z ="), false),
+            quad("local", "isIn", at("const w ="), false),
+            quad("inject(Auth)", "isIn", at("const v ="), false),
+            quad("this.form()", "dirty", at("const d ="), false),
+            quad("this.auth", "session", at("this.auth.session ="), true),
+        ];
+        want.sort();
+        assert_eq!(member_facts(&p, run), want);
+    }
+
+    /// `get` / `set` declare a Getter / Setter on their METHOD (a pair, both;
+    /// `abstract get`, a Getter); a method named `get` declares neither.
+    #[test]
+    fn accessor_facts() {
+        let src = "\
+export abstract class A {
+  get g(): number { return 1; }
+  set s(v: number) {}
+  get both(): number { return 1; }
+  set both(v: number) {}
+  abstract get ab(): number;
+  get(): number { return 0; }
+  set(): void {}
+}
+";
+        let p = parse(src, "src/a.ts", "src::a");
+        let facts = |m: &str| -> Vec<NavFact> {
+            p.nav
+                .nav_facts
+                .get(&id(node_kind::METHOD, &format!("src::a::A::{m}")))
+                .into_iter()
+                .flatten()
+                .filter(|f| matches!(f, NavFact::Getter | NavFact::Setter))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(facts("g"), [NavFact::Getter]);
+        assert_eq!(facts("s"), [NavFact::Setter]);
+        assert_eq!(facts("both"), [NavFact::Getter, NavFact::Setter]);
+        assert_eq!(facts("ab"), [NavFact::Getter]);
+        assert!(facts("get").is_empty());
+        assert!(facts("set").is_empty());
     }
 }

@@ -1074,6 +1074,17 @@ mod tests {
                 read: "AuthState".into(),
                 notifier: "AuthService".into(),
             },
+            NavFact::ReceiverType {
+                receiver: "inject(CountriesService)".into(),
+                ty: "CountriesService".into(),
+            },
+            NavFact::MemberWrite {
+                receiver: "this.auth".into(),
+                name: "session".into(),
+                line: 9,
+            },
+            NavFact::Getter,
+            NavFact::Setter,
         ]
     }
 
@@ -1126,12 +1137,12 @@ mod tests {
             }
             p
         };
-        let fwd: Vec<u64> = (0..24).collect();
-        let rev: Vec<u64> = (0..24).rev().collect();
+        let fwd: Vec<u64> = (0..32).collect();
+        let rev: Vec<u64> = (0..32).rev().collect();
         let parse = fill(&fwd);
         // Scope `500 + i` holds the first `i % len + 1` facts, so scope
-        // `500 + len - 1` holds them all (`fill` covers 24 scopes).
-        assert!(facts.len() <= 24, "every_nav_fact outgrew fill's 24 scopes");
+        // `500 + len - 1` holds them all (`fill` covers 32 scopes).
+        assert!(facts.len() <= 32, "every_nav_fact outgrew fill's 32 scopes");
         assert_eq!(
             parse.nav.nav_facts[&NodeId(500 + facts.len() as u64 - 1)],
             facts,

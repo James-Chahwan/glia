@@ -1429,6 +1429,11 @@ pub struct CodeNav {
     /// `a|b` the agreeing alternatives of a name several declarations in one
     /// scope type (at most four; an unknown declaration makes it `""`).
     ///
+    /// The TS parser (DT.5k) also records the `()` call form for a local
+    /// holding a bare call's result (`const store = makeStore()` records
+    /// `makeStore()`); the generic receiver pass reads it for a TS-family
+    /// caller only, typed by the callee's [`CodeNav::return_types`].
+    ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub local_types: HashMap<NodeId, HashMap<String, String>>,
     /// Per-scope language facts that are neither a node, an edge, an import
@@ -1448,6 +1453,11 @@ pub struct CodeNav {
     /// parameter) records nothing. Filled through
     /// [`CodeNav::record_return_type`] (Go, CA.2a); read by the Go call hook
     /// (CA.2b) to type a receiver that is a call chain.
+    ///
+    /// The TS parser (DT.5k) also fills it for FUNCTIONs with a class-shaped
+    /// return annotation (`function makeStore(): KycFlowStore`, `ns.Foo`,
+    /// `Foo<T>`, `Foo | null` -> the class's simple name), read by the generic
+    /// receiver pass to type a TS caller's call-result local.
     ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub return_types: HashMap<NodeId, String>,
@@ -1604,6 +1614,13 @@ pub enum NavFact {
     /// type), `this.<field>` for an owner field, or a local the parser typed
     /// (`CodeNav::local_types`). Never an edge by itself: the graph binds it
     /// through the reader's own scope.
+    ///
+    /// TypeScript / JavaScript (DT.5k) records it too, on the scope a member
+    /// access `<receiver>.<name>` that is no call's callee is attributed to,
+    /// read by `graph/src/calls.rs` (`resolve_member_reads`): `receiver` is a
+    /// `this.<field>` with a declared type, a typed local or parameter, or a
+    /// [`NavFact::ReceiverType`] receiver; a TS read is a CALLS of `name` only
+    /// when `name` is a [`NavFact::Getter`] of the receiver's class.
     MemberRead { receiver: String, name: String, line: u32 },
     /// Dart (DT.5i), recorded by the Dart parser on a top-level provider
     /// STATE_VAR of a file importing a Riverpod library (`final p =
@@ -1617,6 +1634,31 @@ pub enum NavFact {
     /// AsyncValue) records no fact. The graph resolves a name in the
     /// provider's own file.
     RiverpodProvider { read: String, notifier: String },
+    /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on the
+    /// scope a call or member access is attributed to, read by
+    /// `graph/src/calls.rs` `receiver_type`; build-time only: in this scope the
+    /// receiver written `receiver` (exactly a CallSite's `ComplexReceiver`
+    /// text, or a [`NavFact::MemberRead`]'s / [`NavFact::MemberWrite`]'s)
+    /// holds a value of the class named `ty`, as the scope's file spells it:
+    /// an `inject(T)` call whose callee is the `inject` import
+    /// (`inject(CountriesService).list()`), or a read of an Angular signal
+    /// query field (`this.form()` for `form = viewChild(SmrFilingForm)`).
+    ReceiverType { receiver: String, ty: String },
+    /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on the
+    /// scope, read by `graph/src/calls.rs` (`resolve_member_reads`);
+    /// build-time only: the assignment-target twin of a TS
+    /// [`NavFact::MemberRead`] (`this.auth.session = t` on 0-based row
+    /// `line`), whose receiver the parser types the same way. It is a CALLS of
+    /// `name` only when `name` is a [`NavFact::Setter`] of the receiver's
+    /// class.
+    MemberWrite { receiver: String, name: String, line: u32 },
+    /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on a METHOD:
+    /// it is declared as a `get` accessor (a getter and its setter share one
+    /// METHOD, so one METHOD may carry both facts).
+    Getter,
+    /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on a METHOD:
+    /// it is declared as a `set` accessor.
+    Setter,
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

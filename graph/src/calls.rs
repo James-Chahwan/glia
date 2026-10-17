@@ -47,6 +47,19 @@ impl SiteFiles {
         SiteFiles(files)
     }
 
+    /// DT.5k: true when `r` was read in a TypeScript / JavaScript file (its
+    /// `from_module`'s, else its `from`'s, by extension: [`is_ts_family`]).
+    pub(crate) fn is_ts_family(&self, r: &UnresolvedRef) -> bool {
+        self.0
+            .get(&r.from_module)
+            .or_else(|| self.0.get(&r.from))
+            .and_then(|file| {
+                let base = file.rsplit('/').next().unwrap_or(file);
+                base.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+            })
+            .is_some_and(|ext| is_ts_family(&ext))
+    }
+
     /// `ev` at 0-based `line` of `r`'s file: its `from_module`'s, else its
     /// `from`'s; with neither located, the line alone (the fill pass then
     /// takes the file from the edge's `from`).
@@ -77,10 +90,17 @@ enum Branch {
     /// DF.17: a TS-family read of another class's STATE_VAR through a typed
     /// receiver ([`state_member`]).
     ReceiverState,
+    /// DT.5k: a TS-family call on a call-result local (`const store =
+    /// makeStore(); store.reset()`), typed by the callee's declared return
+    /// type ([`returned_type`]).
+    ReceiverReturn,
+    /// DT.5k: a TS-family static member read `T.X` whose member binds
+    /// nothing USES the CLASS `T`.
+    StaticMember,
 }
 
 impl Branch {
-    const COUNT: usize = 11;
+    const COUNT: usize = 13;
 
     fn rule(self) -> &'static str {
         match self {
@@ -95,6 +115,8 @@ impl Branch {
             Branch::GlobalUniqueMethod => "global_unique_method",
             Branch::TypeMethod => "type_method",
             Branch::ReceiverState => "receiver_state",
+            Branch::ReceiverReturn => "receiver_return",
+            Branch::StaticMember => "static_member",
         }
     }
 }
@@ -171,6 +193,7 @@ pub(crate) fn resolve_calls<H>(
     let mut constructed = ConstructedReceivers::default();
     let mut state_reads = StateReads::default();
     let mut class_scope = ClassScopeReceivers::default();
+    let mut ts_recv = TsReceivers::default();
     // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
     // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
     let (mut iface_recv, mut iface_static) = (0usize, 0usize);
@@ -243,6 +266,11 @@ pub(crate) fn resolve_calls<H>(
             if let Branch::ReceiverState = branch {
                 state_reads.0 += 1;
             }
+            match branch {
+                Branch::ReceiverReturn => ts_recv.returned += 1,
+                _ if is_typed_expression(g, site) => ts_recv.expression += 1,
+                _ => {}
+            }
             Some((to, branch))
         });
         if is_class_scope_receiver(g, site) {
@@ -291,6 +319,132 @@ pub(crate) fn resolve_calls<H>(
     }
     if let Some(line) = class_scope.marker() {
         eprintln!("{line}");
+    }
+    // DT.5k: member reads that run a getter / setter of another object.
+    resolve_member_reads(g, &mut gate, &mut ts_recv);
+    if let Some(line) = ts_recv.marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// DT.5k's per-graph tally of TS-family receivers typed in this packet's
+/// ways: calls bound through a [`NavFact::ReceiverType`] receiver
+/// (`expression`) or a call-result local (`returned`), and the
+/// [`NavFact::MemberRead`]s met and bound to an accessor.
+#[derive(Default)]
+struct TsReceivers {
+    expression: usize,
+    returned: usize,
+    member_reads: usize,
+    accessor_read: usize,
+    accessor_write: usize,
+}
+
+impl TsReceivers {
+    /// fired_on, once per graph that met any:
+    /// `[recv] ts receivers bound: expression=<e> returned=<r>
+    /// accessor_read=<a> accessor_write=<w> member_reads=<m>`.
+    fn marker(&self) -> Option<String> {
+        (self.expression + self.returned + self.member_reads > 0).then(|| {
+            format!(
+                "[recv] ts receivers bound: expression={} returned={} accessor_read={} \
+                 accessor_write={} member_reads={}",
+                self.expression,
+                self.returned,
+                self.accessor_read,
+                self.accessor_write,
+                self.member_reads
+            )
+        })
+    }
+}
+
+/// DT.5k: true when `site`'s receiver is an expression the TS parser typed
+/// ([`typed_receiver`]), not a field or a local.
+fn is_typed_expression(g: &RepoGraph, site: &CallSite) -> bool {
+    matches!(&site.qualifier, CallQualifier::ComplexReceiver { receiver, .. }
+        if receiver_field(receiver).is_none()
+            && typed_receiver(&g.nav, site.from, receiver).is_some())
+}
+
+/// DT.5k: bind each TS member access ([`NavFact::MemberRead`],
+/// [`NavFact::MemberWrite`]) that runs an accessor of its receiver's class: a read of a [`NavFact::Getter`], a
+/// write of a [`NavFact::Setter`], each a CALLS EVIDENCE `graph:calls` rule
+/// `receiver_accessor_read` / `receiver_accessor_write` at the access's row
+/// (`authService.isAuthenticated`, `this.auth.token = t`). The receiver is
+/// typed exactly as a call's is ([`receiver_type`], [`receiver_type_node`]):
+/// `this.<field>` by its declared type, a bare name by the scope's local,
+/// another text by its [`NavFact::ReceiverType`]. A plain field, a method
+/// read by value, an inherited accessor, an unknown or external type bind
+/// nothing. Scopes are taken in `g.nodes` order (each once), each scope's
+/// accesses in the order the parser recorded them, so the edge list is
+/// stable at any thread count.
+fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut TsReceivers) {
+    let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    let mut found: Vec<(NodeId, NodeId, u32, bool)> = Vec::new();
+    for n in &g.nodes {
+        if !seen.insert(n.id) {
+            continue;
+        }
+        let Some(facts) = g.nav.nav_facts.get(&n.id) else {
+            continue;
+        };
+        // Dart records MemberRead too (DT.5h), bound by its own builder
+        // (`build::dart::resolve_member_reads`): only a TS-family scope's
+        // accesses are this pass's.
+        if !facts
+            .iter()
+            .any(|f| matches!(f, NavFact::MemberRead { .. } | NavFact::MemberWrite { .. }))
+            || !gate.ext(g, n.id).as_deref().is_some_and(is_ts_family)
+        {
+            continue;
+        }
+        for fact in facts {
+            let (receiver, name, line, write) = match fact {
+                NavFact::MemberRead { receiver, name, line } => (receiver, name, line, false),
+                NavFact::MemberWrite { receiver, name, line } => (receiver, name, line, true),
+                _ => continue,
+            };
+            stats.member_reads += 1;
+            let plain = !receiver.is_empty()
+                && receiver.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$');
+            let qualifier = if plain {
+                CallQualifier::Attribute { base: receiver.clone(), name: name.clone() }
+            } else {
+                CallQualifier::ComplexReceiver { receiver: receiver.clone(), name: name.clone() }
+            };
+            let site = CallSite { from: n.id, qualifier, line: *line };
+            let Some(from_module) = enclosing_home_module(g, n.id) else {
+                continue;
+            };
+            let Some(type_name) = receiver_type(g, &site) else {
+                continue;
+            };
+            let Some((type_id, _)) =
+                receiver_type_node(g, &site, from_module, type_name, gate, true)
+            else {
+                continue;
+            };
+            let Some(member) = type_method(g, type_id, name) else {
+                continue;
+            };
+            let wanted = if write { NavFact::Setter } else { NavFact::Getter };
+            if member == n.id || !g.nav.nav_facts.get(&member).is_some_and(|f| f.contains(&wanted))
+            {
+                continue;
+            }
+            found.push((n.id, member, *line, write));
+        }
+    }
+    for (from, to, line, write) in found {
+        let rule = if write {
+            stats.accessor_write += 1;
+            "receiver_accessor_write"
+        } else {
+            stats.accessor_read += 1;
+            "receiver_accessor_read"
+        };
+        push_edge(g, from, to, edge_category::CALLS, graph_evidence("graph:calls", rule).line(line));
     }
 }
 
@@ -477,6 +631,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
     let mut iface_extends = IfaceExtends::default();
+    let mut static_member = 0usize;
     for r in refs {
         let extends_iface = extends_interface(g, r);
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
@@ -511,6 +666,17 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                         // often unresolvable via imports (TS/dotted imports are a
                         // separate gap), and `module_symbols` registers top-level
                         // classes by name, so a uniquely-named service binds here.
+                        // DT.5k: an inline `inject(T)` ref (from a function,
+                        // method or field of a TS-family file; A7.1's and
+                        // constructor DI's are the CLASS's) names a named
+                        // import, and one the graph left unbound is
+                        // third-party: no repo-unique name stands in for it.
+                        if r.category == edge_category::INJECTS
+                            && files.is_ts_family(r)
+                            && g.nav.kind_by_id.get(&r.from) != Some(&node_kind::CLASS)
+                        {
+                            return None;
+                        }
                         if r.category == edge_category::HANDLED_BY
                             || r.category == edge_category::INJECTS
                             || r.category == edge_category::INHERITS_FROM
@@ -546,6 +712,20 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                             enum_hits.enums.push(base_id);
                         }
                         member.map(|to| (to, Branch::EnumMember))
+                    }
+                    _ => None,
+                });
+                // DT.5k: a TS-family `T.X` read (a USES ref) whose base binds a
+                // CLASS and whose member bound nothing above (a static data
+                // field, `CountriesService.FALLBACK`) USES the class itself.
+                let hit = hit.or_else(|| match bound_base {
+                    Some((base_id, k))
+                        if k == node_kind::CLASS
+                            && r.category == edge_category::USES
+                            && files.is_ts_family(r) =>
+                    {
+                        static_member += 1;
+                        Some((base_id, Branch::StaticMember))
                     }
                     _ => None,
                 });
@@ -609,6 +789,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     }
     if enum_hits.uses > 0 {
         eprintln!("[resolve] enum member uses bound: {} ext={}", enum_hits.uses, enum_hits.ext(g));
+    }
+    // DT.5k fired_on, once per graph build that bound one:
+    //   `[resolve] static member uses bound: N`
+    if static_member > 0 {
+        eprintln!("[resolve] static member uses bound: {static_member}");
     }
     // LD.7a fired_on marker, once per language graph build:
     //   `[heritage] interface-extends bound=N unresolved=M ext=<ext>`
@@ -975,8 +1160,11 @@ fn resolve_via_receiver_type(
         return hit.map(|to| (to, Branch::ReceiverType));
     }
     let type_name = receiver_type(g, site)?;
-    let type_id = resolve_type_name(g, from_module, type_name)?;
+    let (type_id, returned) = receiver_type_node(g, site, from_module, type_name, gate, false)?;
     let hit = match type_method(g, type_id, method) {
+        // DT.5k: a call-result local's receiver is typed by the callee's
+        // declared return type (rule `receiver_return`, Go's name for it).
+        Some(m) if returned => (m, Branch::ReceiverReturn),
         Some(m) => (m, Branch::ReceiverType),
         None => {
             let state = state_member(g, type_id, method)?;
@@ -1273,7 +1461,12 @@ pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g
         CallQualifier::Attribute { base, .. } => (base.as_str(), false),
         CallQualifier::ComplexReceiver { receiver, .. } => {
             let is_self = receiver.starts_with("this.") || receiver.starts_with("self.");
-            (receiver_field(receiver)?, is_self)
+            match receiver_field(receiver) {
+                Some(field) => (field, is_self),
+                // DT.5k: an expression the parser typed for its scope (an
+                // `inject(T)` call, a signal query read `this.f()`).
+                None => return typed_receiver(&g.nav, site.from, receiver),
+            }
         }
         _ => return None,
     };
@@ -1294,6 +1487,71 @@ pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g
         };
     }
     field_type(g, site.from, name)
+}
+
+/// DT.5k: the class the TS parser recorded for the receiver text `receiver`
+/// in `scope` ([`NavFact::ReceiverType`]: `inject(CountriesService)`,
+/// `this.form()`), as the scope's file spells it.
+fn typed_receiver<'g>(nav: &'g CodeNav, scope: NodeId, receiver: &str) -> Option<&'g str> {
+    nav.nav_facts.get(&scope)?.iter().find_map(|f| match f {
+        NavFact::ReceiverType { receiver: r, ty } if r == receiver => Some(ty.as_str()),
+        _ => None,
+    })
+}
+
+/// DT.5k: the type node a receiver's type text names, from the caller module
+/// `from_module`: [`resolve_type_name`] of the text (with `scoped`, or for a
+/// [`NavFact::ReceiverType`] receiver, [`scope_type`]), except a TS-family
+/// caller's call-result local (`const store = makeStore()`, the text
+/// `makeStore()`), whose type is the declared return type of the FUNCTION
+/// the caller binds `makeStore` to ([`returned_type`]). Any other caller's
+/// call-chain text (Go's `svc.Repo()`, read by the Go hook) names no type
+/// here, as before. The bool is true for a call-result local.
+fn receiver_type_node(
+    g: &RepoGraph,
+    site: &CallSite,
+    from_module: NodeId,
+    type_name: &str,
+    gate: &mut BareFieldGate,
+    scoped: bool,
+) -> Option<(NodeId, bool)> {
+    match type_name.strip_suffix("()") {
+        Some(callee) => {
+            if !gate.ext(g, site.from).as_deref().is_some_and(is_ts_family) {
+                return None;
+            }
+            returned_type(g, from_module, site.from, callee).map(|t| (t, true))
+        }
+        // DT.5k's own readings resolve through the caller's scope only
+        // ([`scope_type`]): an import the graph left unbound names a
+        // third-party module (`Router` from `@angular/router`), and a
+        // same-named repo class is not it.
+        None if scoped || is_typed_expression(g, site) => {
+            scope_type(g, from_module, type_name).map(|t| (t, false))
+        }
+        None => resolve_type_name(g, from_module, type_name).map(|t| (t, false)),
+    }
+}
+
+/// DT.5k: the class a bare call `callee()` from `from` returns: the FUNCTION
+/// the caller binds `callee` to ([`bare_call_target`]: its import binding,
+/// then its own module's def, as the call itself binds), then that
+/// function's declared return type (`CodeNav::return_types`, recorded by the
+/// TS parser from a class-shaped annotation), resolved from the function's
+/// own file as its definition spells it ([`scope_type`]). A callee that is no plain
+/// identifier, binds no FUNCTION or declares no class return type names
+/// nothing.
+fn returned_type(g: &RepoGraph, from_module: NodeId, from: NodeId, callee: &str) -> Option<NodeId> {
+    if callee.is_empty() || !callee.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+        return None;
+    }
+    let bindings = g.symbols.module_import_bindings.get(&from_module);
+    let (f, _) = bare_call_target(g, bindings, from_module, from, callee)?;
+    if g.nav.kind_by_id.get(&f) != Some(&node_kind::FUNCTION) {
+        return None;
+    }
+    let ret = g.nav.return_types.get(&f)?;
+    scope_type(g, enclosing_home_module(g, f)?, ret)
 }
 
 /// True when `id` is a CLASS / STRUCT / ENUM: a type that owns fields and
@@ -1870,7 +2128,8 @@ fn receiver_class(
         return constructed_type_id(g, from_module, ty).filter(is_class).map(|t| (t, true));
     }
     let type_name = receiver_type(g, site)?;
-    let type_id = resolve_type_name(g, from_module, type_name).filter(is_class)?;
+    let (type_id, _) = receiver_type_node(g, site, from_module, type_name, gate, false)
+        .filter(|(t, _)| is_class(t))?;
     if let CallQualifier::Attribute { base, .. } = &site.qualifier
         && local_type(g, site.from, base).is_none()
         && !gate.admits(g, site.from)
@@ -4175,5 +4434,382 @@ mod tests {
         let g = crate::build::build_typescript_family(repo(), vec![file], rel).unwrap();
         assert!(calls_with_rule(&g, "inherited_receiver").is_empty());
         assert_eq!(g.unresolved_calls, vec![receiver_call(f, "new B()", "load", 3)]);
+    }
+
+    // ---- DT.5k: TypeScript receivers typed by the parser ---------------------
+
+    /// `src::api`: `class Api { get() }`, `class Store extends Base { reset();
+    /// patch() }`, `class Base { baseMethod() }`, `class Auth` with accessors
+    /// (`isIn` a getter, `session` a setter, `both` a pair, `token` a setter
+    /// only, `flag` a getter only), a plain METHOD `check` and a STATE_VAR
+    /// `ready`. Returns the parse and `[get, reset, base_method, auth]`.
+    fn dt5k_api() -> (FileParse, [NodeId; 4]) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::api", None);
+        let api = s.add(node_kind::CLASS, "src::api::Api", Some(m));
+        let get = s.add(node_kind::METHOD, "src::api::Api::get", Some(api));
+        let store = s.add(node_kind::CLASS, "src::api::Store", Some(m));
+        let reset = s.add(node_kind::METHOD, "src::api::Store::reset", Some(store));
+        let base = s.add(node_kind::CLASS, "src::api::Base", Some(m));
+        let base_method = s.add(node_kind::METHOD, "src::api::Base::baseMethod", Some(base));
+        let auth = s.add(node_kind::CLASS, "src::api::Auth", Some(m));
+        for (name, facts) in [
+            ("isIn", &[NavFact::Getter][..]),
+            ("session", &[NavFact::Setter][..]),
+            ("both", &[NavFact::Getter, NavFact::Setter][..]),
+            ("token", &[NavFact::Setter][..]),
+            ("flag", &[NavFact::Getter][..]),
+            ("check", &[][..]),
+        ] {
+            let method = s.add(node_kind::METHOD, &format!("src::api::Auth::{name}"), Some(auth));
+            for f in facts {
+                s.nav.record_fact(method, f.clone());
+            }
+        }
+        s.add(node_kind::STATE_VAR, "src::api::Auth::ready", Some(auth));
+        let refs = vec![heritage_ref(store, m, "Base", edge_category::INHERITS_FROM)];
+        (s.file(vec![], vec![], refs), [get, reset, base_method, auth])
+    }
+
+    /// The TS-family caller module `src::<stem>` importing `names` from
+    /// `./api`, with one FUNCTION `f` placed in `path`, its `calls` and its
+    /// nav facts / locals filled by `fill`.
+    fn dt5k_caller(
+        stem: &str,
+        path: &str,
+        names: &[&str],
+        calls: impl FnOnce(NodeId) -> Vec<CallSite>,
+        fill: impl FnOnce(&mut Shape, NodeId, NodeId),
+    ) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let module = format!("src::{stem}");
+        let m = s.add(node_kind::MODULE, &module, None);
+        let f = s.add(node_kind::FUNCTION, &format!("{module}::f"), Some(m));
+        fill(&mut s, m, f);
+        let imports = names.iter().map(|n| import_symbol(&module, "./api", n)).collect();
+        let mut file = s.file(imports, calls(f), vec![]);
+        place(&mut file, f, path);
+        (file, f)
+    }
+
+    fn receiver_fact(receiver: &str, ty: &str) -> NavFact {
+        NavFact::ReceiverType { receiver: receiver.to_string(), ty: ty.to_string() }
+    }
+
+    /// A ComplexReceiver the parser typed (`inject(Api).get()`, a
+    /// ReceiverType fact on the caller) binds the class's method, rule
+    /// `receiver_type`; without the fact, or with it on another scope, the
+    /// site stays unresolved.
+    #[test]
+    fn fact_typed_receiver_binds_its_class_method() {
+        let call = |f| vec![receiver_call(f, "inject(Api)", "get", 3)];
+        let (api, [get, ..]) = dt5k_api();
+        let (caller, f) = dt5k_caller("guard", "src/guard.ts", &["Api"], call, |s, _, f| {
+            s.nav.record_fact(f, receiver_fact("inject(Api)", "Api"));
+        });
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert_eq!(calls_with_rule(&g, "receiver_type"), vec![(f, get, Some(3))]);
+        assert!(g.unresolved_calls.is_empty());
+
+        let (api, _) = dt5k_api();
+        let (caller, _) = dt5k_caller("guard", "src/guard.ts", &["Api"], call, |_, _, _| {});
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+
+        let (api, _) = dt5k_api();
+        let (caller, _) = dt5k_caller("guard", "src/guard.ts", &["Api"], call, |s, m, _| {
+            let other = s.add(node_kind::FUNCTION, "src::guard::other", Some(m));
+            s.nav.record_fact(other, receiver_fact("inject(Api)", "Api"));
+        });
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// DF.22b through a fact-typed receiver: `inject(Store).baseMethod()`,
+    /// Store extending Base, binds Base::baseMethod, rule
+    /// `inherited_receiver`.
+    #[test]
+    fn fact_typed_receiver_walks_superclasses() {
+        let call = |f| vec![receiver_call(f, "inject(Store)", "baseMethod", 4)];
+        let (api, [_, _, base_method, _]) = dt5k_api();
+        let (caller, f) = dt5k_caller("guard", "src/guard.ts", &["Store"], call, |s, _, f| {
+            s.nav.record_fact(f, receiver_fact("inject(Store)", "Store"));
+        });
+        let g = crate::build::build_typescript_family(repo(), vec![api, caller], rel).unwrap();
+        assert_eq!(calls_with_rule(&g, "inherited_receiver"), vec![(f, base_method, Some(4))]);
+    }
+
+    /// `const s = makeStore(); s.reset()` in a TS caller binds Store::reset,
+    /// rule `receiver_return`: for a same-module FUNCTION and for an imported
+    /// one whose return type resolves only in the callee's module. A `.py` /
+    /// `.go` caller with the same local, a CLASS-bound callee and an
+    /// unannotated callee bind nothing.
+    #[test]
+    fn call_result_local_binds_through_the_declared_return_type() {
+        let call = |f| vec![attr_call(f, "s", "reset", 5)];
+        // Same module: `function makeStore(): Store` beside the caller.
+        let same = |path: &str| {
+            let (api, [_, reset, ..]) = dt5k_api();
+            let (caller, f) = dt5k_caller("spec", path, &["Store"], call, |s, m, f| {
+                let make = s.add(node_kind::FUNCTION, "src::spec::makeStore", Some(m));
+                s.nav.record_return_type(make, "Store");
+                s.nav.record_local_type(f, "s", "makeStore()");
+            });
+            (build_typescript(repo(), vec![api, caller], rel).unwrap(), f, reset)
+        };
+        let (g, f, reset) = same("src/spec.spec.ts");
+        assert_eq!(calls_with_rule(&g, "receiver_return"), vec![(f, reset, Some(5))]);
+        for path in ["svc/spec.py", "svc/spec.go"] {
+            let (g, _, _) = same(path);
+            assert!(edges_of(&g, edge_category::CALLS).is_empty(), "{path}");
+        }
+
+        // Imported: `src::testing` declares `makeDraft(): Store`, importing
+        // Store itself; the caller imports only makeDraft.
+        let (api, [_, reset, ..]) = dt5k_api();
+        let mut t = Shape::new();
+        let tm = t.add(node_kind::MODULE, "src::testing", None);
+        let make = t.add(node_kind::FUNCTION, "src::testing::makeDraft", Some(tm));
+        t.nav.record_return_type(make, "Store");
+        let testing = t.file(vec![import_symbol("src::testing", "./api", "Store")], vec![], vec![]);
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::spec", None);
+        let f = s.add(node_kind::FUNCTION, "src::spec::f", Some(m));
+        s.nav.record_local_type(f, "s", "makeDraft()");
+        let mut caller = s.file(
+            vec![import_symbol("src::spec", "./testing", "makeDraft")],
+            call(f),
+            vec![],
+        );
+        place(&mut caller, f, "src/spec.spec.ts");
+        let g = build_typescript(repo(), vec![api, testing, caller], rel).unwrap();
+        assert_eq!(calls_with_rule(&g, "receiver_return"), vec![(f, reset, Some(5))]);
+
+        // A CLASS-bound callee (`Store()`) and an unannotated FUNCTION.
+        for callee in ["Store", "makeAny"] {
+            let (api, _) = dt5k_api();
+            let (caller, _) = dt5k_caller("spec", "src/spec.spec.ts", &["Store"], call, |s, m, f| {
+                if callee == "makeAny" {
+                    s.add(node_kind::FUNCTION, "src::spec::makeAny", Some(m));
+                }
+                s.nav.record_local_type(f, "s", &format!("{callee}()"));
+            });
+            let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+            assert!(edges_of(&g, edge_category::CALLS).is_empty(), "{callee}()");
+            assert_eq!(g.unresolved_calls.len(), 1, "{callee}()");
+        }
+    }
+
+    fn member_read(receiver: &str, name: &str, line: u32) -> NavFact {
+        NavFact::MemberRead { receiver: receiver.to_string(), name: name.to_string(), line }
+    }
+
+    fn member_write(receiver: &str, name: &str, line: u32) -> NavFact {
+        NavFact::MemberWrite { receiver: receiver.to_string(), name: name.to_string(), line }
+    }
+
+    /// Member accesses on a typed local bind a getter read
+    /// (`receiver_accessor_read`) and a setter write
+    /// (`receiver_accessor_write`) only: never a plain METHOD, a setter-only
+    /// read, a getter-only write or a STATE_VAR. A field and a fact-typed
+    /// expression type the receiver too; a scope outside the TS family
+    /// binds nothing.
+    #[test]
+    fn member_reads_bind_accessors_only() {
+        let facts = |s: &mut Shape, f: NodeId| {
+            s.nav.record_local_type(f, "a", "Auth");
+            for fact in [
+                member_read("a", "isIn", 1),
+                member_write("a", "session", 2),
+                member_read("a", "both", 3),
+                member_write("a", "both", 4),
+                member_read("a", "check", 5),
+                member_read("a", "token", 6),
+                member_write("a", "flag", 7),
+                member_read("a", "ready", 8),
+                member_read("inject(Auth)", "isIn", 9),
+            ] {
+                s.nav.record_fact(f, fact);
+            }
+            s.nav.record_fact(f, receiver_fact("inject(Auth)", "Auth"));
+        };
+        let (api, _) = dt5k_api();
+        let method = |name: &str| {
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &format!("src::api::Auth::{name}"))
+        };
+        let (caller, f) =
+            dt5k_caller("guard", "src/guard.ts", &["Auth"], |_| vec![], |s, _, f| facts(s, f));
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert_eq!(
+            calls_with_rule(&g, "receiver_accessor_read"),
+            vec![(f, method("isIn"), Some(1)), (f, method("both"), Some(3)), (f, method("isIn"), Some(9))]
+        );
+        assert_eq!(
+            calls_with_rule(&g, "receiver_accessor_write"),
+            vec![(f, method("session"), Some(2)), (f, method("both"), Some(4))]
+        );
+        assert_eq!(edges_of(&g, edge_category::CALLS).len(), 5, "nothing else binds");
+
+        // `this.auth.isIn` in a method of a class with `auth: Auth`.
+        let (api, _) = dt5k_api();
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::c", None);
+        let c = s.add(node_kind::CLASS, "src::c::C", Some(m));
+        let run = s.add(node_kind::METHOD, "src::c::C::run", Some(c));
+        s.nav.record_field_type(c, "auth", "Auth");
+        s.nav.record_fact(run, member_read("this.auth", "isIn", 2));
+        let mut caller = s.file(vec![import_symbol("src::c", "./api", "Auth")], vec![], vec![]);
+        place(&mut caller, run, "src/c.component.ts");
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert_eq!(calls_with_rule(&g, "receiver_accessor_read"), vec![(run, method("isIn"), Some(2))]);
+
+        let (api, _) = dt5k_api();
+        let (caller, _) =
+            dt5k_caller("guard", "lib/guard.dart", &["Auth"], |_| vec![], |s, _, f| facts(s, f));
+        let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty(), "a Dart scope is its builder's");
+    }
+
+    /// DT.5k's readings resolve a type through the caller's own scope only:
+    /// with `Router` imported from a third-party module (unbound) and one
+    /// repo class `src::legacy::Router`, a ReceiverType receiver, a
+    /// call-result local's declared return type and a member read's local
+    /// type bind nothing; A6.2a's CALLS through a field of that type keeps
+    /// resolve_type_name's repo-unique bind.
+    #[test]
+    fn dt5k_readings_never_bind_a_repo_unique_class() {
+        let mut l = Shape::new();
+        let lm = l.add(node_kind::MODULE, "src::legacy", None);
+        let router = l.add(node_kind::CLASS, "src::legacy::Router", Some(lm));
+        let url = l.add(node_kind::METHOD, "src::legacy::Router::url", Some(router));
+        l.nav.record_fact(url, NavFact::Getter);
+        let go = l.add(node_kind::METHOD, "src::legacy::Router::go", Some(router));
+
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::guard", None);
+        let f = s.add(node_kind::FUNCTION, "src::guard::f", Some(m));
+        let router_of = s.add(node_kind::FUNCTION, "src::guard::routerOf", Some(m));
+        s.nav.record_return_type(router_of, "Router");
+        s.nav.record_fact(f, receiver_fact("inject(Router)", "Router"));
+        s.nav.record_local_type(f, "r", "Router");
+        s.nav.record_local_type(f, "n", "routerOf()");
+        s.nav.record_fact(f, member_read("r", "url", 2));
+        s.nav.record_fact(f, member_read("n", "url", 3));
+        s.nav.record_fact(f, member_read("inject(Router)", "url", 4));
+        let holder = s.add(node_kind::CLASS, "src::guard::Holder", Some(m));
+        let h = s.add(node_kind::METHOD, "src::guard::Holder::h", Some(holder));
+        s.nav.record_field_type(holder, "router", "Router");
+        let third_party = import_symbol("src::guard", "@angular/router", "Router");
+        let mut caller = s.file(
+            vec![third_party],
+            vec![
+                receiver_call(f, "inject(Router)", "go", 1),
+                attr_call(f, "n", "go", 5),
+                receiver_call(h, "this.router", "go", 6),
+            ],
+            vec![],
+        );
+        place(&mut caller, f, "src/guard.ts");
+        place(&mut caller, h, "src/guard.ts");
+        let g = build_typescript(repo(), vec![l.file(vec![], vec![], vec![]), caller], rel).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(h, go)], "A6.2a unchanged");
+        assert_eq!(
+            g.unresolved_calls,
+            vec![receiver_call(f, "inject(Router)", "go", 1), attr_call(f, "n", "go", 5)]
+        );
+    }
+
+    /// Pattern E: a TS-family INJECTS Bare ref from a FUNCTION (an inline
+    /// `inject(T)`) naming an unbound name stays unresolved even with one
+    /// repo-wide same-named CLASS; the same ref from a CLASS (A7.1) and a
+    /// `.java` ref from a METHOD still bind `global_unique`.
+    #[test]
+    fn ts_inline_inject_ref_skips_the_repo_unique_fallback() {
+        let build = |kind: glia_core::NodeKindId, qname: &str, path: &str| {
+            let mut l = Shape::new();
+            let lm = l.add(node_kind::MODULE, "src::legacy", None);
+            let router = l.add(node_kind::CLASS, "src::legacy::Router", Some(lm));
+            let mut s = Shape::new();
+            let m = s.add(node_kind::MODULE, "src::guard", None);
+            let mut parent = m;
+            if kind == node_kind::METHOD {
+                parent = s.add(node_kind::CLASS, "src::guard::Guard", Some(m));
+            }
+            let from = s.add(kind, qname, Some(parent));
+            let injects = UnresolvedRef {
+                from,
+                from_module: m,
+                qualifier: bare("Router"),
+                category: edge_category::INJECTS,
+                line: 2,
+            };
+            let mut file = s.file(vec![], vec![], vec![injects]);
+            place(&mut file, from, path);
+            let g = build_dotted(repo(), vec![l.file(vec![], vec![], vec![]), file]).unwrap();
+            (g, from, router)
+        };
+        let (g, _, _) = build(node_kind::FUNCTION, "src::guard::authGuard", "src/guard.ts");
+        assert!(edges_of(&g, edge_category::INJECTS).is_empty());
+        assert_eq!(g.unresolved_refs.len(), 1);
+        for (kind, qname, path) in [
+            (node_kind::CLASS, "src::guard::Guard", "src/guard.ts"),
+            (node_kind::METHOD, "src::guard::Guard::run", "src/Guard.java"),
+        ] {
+            let (g, from, router) = build(kind, qname, path);
+            assert_eq!(
+                evidence_rule(&g, from, router, edge_category::INJECTS),
+                refs_rule("global_unique"),
+                "{path}"
+            );
+        }
+    }
+
+    /// The TS static-member fallback: `Countries.FALLBACK` (a USES ref whose
+    /// member binds nothing) USES the CLASS, rule `static_member`; an enum
+    /// member and a static METHOD keep their branches; a `.java` ref stays
+    /// unresolved.
+    #[test]
+    fn ts_static_member_read_uses_the_class() {
+        let build = |name: &str, path: &str| {
+            let mut c = Shape::new();
+            let cm = c.add(node_kind::MODULE, "src::svc", None);
+            let class = c.add(node_kind::CLASS, "src::svc::Countries", Some(cm));
+            let make = c.add(node_kind::METHOD, "src::svc::Countries::make", Some(class));
+            let e = c.add(node_kind::ENUM, "src::svc::Kind", Some(cm));
+            let red = c.add(node_kind::ATTRIBUTE, "src::svc::Kind::RED", Some(e));
+            let mut s = Shape::new();
+            let m = s.add(node_kind::MODULE, "src::page", None);
+            let f = s.add(node_kind::FUNCTION, "src::page::f", Some(m));
+            let (base, member) = name.split_once('.').expect("a dotted read");
+            let uses = UnresolvedRef {
+                from: f,
+                from_module: m,
+                qualifier: attr(base, member),
+                category: edge_category::USES,
+                line: 4,
+            };
+            let mut file = s.file(
+                vec![
+                    import_symbol("src::page", "./svc", "Countries"),
+                    import_symbol("src::page", "./svc", "Kind"),
+                ],
+                vec![],
+                vec![uses],
+            );
+            place(&mut file, f, path);
+            let g = build_typescript(repo(), vec![c.file(vec![], vec![], vec![]), file], rel).unwrap();
+            (g, f, [class, make, red])
+        };
+        let (g, f, [class, ..]) = build("Countries.FALLBACK", "src/page.ts");
+        assert_eq!(evidence_rule(&g, f, class, edge_category::USES), refs_rule("static_member"));
+        let (g, f, [_, _, red]) = build("Kind.RED", "src/page.ts");
+        assert_eq!(evidence_rule(&g, f, red, edge_category::USES), refs_rule("enum_member"));
+        let (g, f, [_, make, _]) = build("Countries.make", "src/page.ts");
+        assert_eq!(evidence_rule(&g, f, make, edge_category::USES), refs_rule("attribute"));
+        let (g, _, _) = build("Countries.FALLBACK", "src/Page.java");
+        assert!(edges_of(&g, edge_category::USES).is_empty());
+        assert_eq!(g.unresolved_refs.len(), 1);
     }
 }

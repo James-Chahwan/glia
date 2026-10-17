@@ -1,0 +1,162 @@
+{
+  "framework": "ts-typed-receivers",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DT.5k (Kina / quokka-stack dead_symbol false positives): five TypeScript receiver shapes the graph could not type, each beside the look-alike that must stay unbound. An Angular signal query field (`form = viewChild(FilingForm)`, `viewChild<Toggle>('sw')`, `contentChild.required(Dropzone)`) holds the class a read `this.form()` returns, so `this.form()?.reset()` binds FilingForm::reset; a `{ read: ViewContainerRef }` option yields the read type, never the locator, also with two type arguments (`viewChild<Dropzone, ViewContainerRef>('zone', { read: .. })`); an untyped `viewChild('box')` types nothing (no method-name guess binds `this.box()?.clear()`), and a list query (`viewChildren(Chip)`) holds an array, so `this.chips().filter(..)` is not Chip::filter. An inline `inject(T)` (`inject(CountriesService).list()`, a guard's `const auth = inject(AuthService)`) is DI from the scope that runs it (INJECTS) and a receiver of type T; a project-local `inject` is neither; only the first argument is the token (`inject(AuthService, OPTIONAL)` passes OPTIONAL by value, a USES); and a third-party `inject(Router)` never binds the repo's own same-named `legacy/router::Router` (no repo-unique name stands in for an unbound import). A static member read `CountriesService.FALLBACK` USES the class, but not from the class's own members. A getter or setter read on another object (`auth.isLoggedOut` on an `inject(T)` local, `this.auth.isAuthenticated`, `this.auth.session = ..`) is a CALLS of the accessor (rules receiver_accessor_read / receiver_accessor_write); a method read as a value is not, and `router.url` on the third-party Router is not the legacy Router's getter. A local holding a bare call's result (`const store = makeStore()`) is of the callee's declared return type, same-file or imported; an unannotated factory, a parameter that shadows the factory's name, and a factory declared to return the third-party Router type nothing in the repo. HEAD 621f8213 (debug CLI): CALLS 0/10, INJECTS 0/2, USES 0/2, FORBID VIOLATIONS 0; 26 dead_symbol rows.",
+  "expect_edges": [
+    {
+      "from": "FilingPage::save",
+      "to": "FilingForm::reset",
+      "category": "CALLS",
+      "note": "viewChild(FilingForm); this.form()?.reset()"
+    },
+    {
+      "from": "FilingPage::save",
+      "to": "Toggle::sync",
+      "category": "CALLS",
+      "note": "viewChild<Toggle>('sw'); this.sw()?.sync(true)"
+    },
+    {
+      "from": "FilingPage::save",
+      "to": "Dropzone::clear",
+      "category": "CALLS",
+      "note": "contentChild.required(Dropzone); this.zone().clear()"
+    },
+    {
+      "from": "RegisterPage::countries",
+      "to": "CountriesService::list",
+      "category": "CALLS",
+      "note": "inject(CountriesService).list()"
+    },
+    {
+      "from": "RegisterPage::countries",
+      "to": "CountriesService",
+      "category": "INJECTS",
+      "note": "an inline inject(T) is DI"
+    },
+    {
+      "from": "RegisterPage::countries",
+      "to": "CountriesService",
+      "category": "USES",
+      "note": "CountriesService.FALLBACK, a static member read"
+    },
+    {
+      "from": "auth.guard::authGuard",
+      "to": "AuthService",
+      "category": "INJECTS",
+      "note": "const auth = inject(AuthService) in a functional guard"
+    },
+    {
+      "from": "auth.guard::authGuard",
+      "to": "AuthService::isLoggedOut",
+      "category": "CALLS",
+      "note": "a getter read on an inject(T) local"
+    },
+    {
+      "from": "auth.guard::authGuard",
+      "to": "AuthService::isAuthenticated",
+      "category": "CALLS",
+      "note": "a getter read on an inject(T) local"
+    },
+    {
+      "from": "ConnectComponent::ngOnInit",
+      "to": "AuthService::isAuthenticated",
+      "category": "CALLS",
+      "note": "a getter read on this.<field>"
+    },
+    {
+      "from": "ConnectComponent::ngOnInit",
+      "to": "AuthService::session",
+      "category": "CALLS",
+      "note": "a setter write this.auth.session = .."
+    },
+    {
+      "from": "draft.store.spec",
+      "to": "DraftStore::reset",
+      "category": "CALLS",
+      "note": "const store = makeStore(), a same-file factory declared to return DraftStore"
+    },
+    {
+      "from": "draft.store.spec",
+      "to": "DraftStore::patch",
+      "category": "CALLS",
+      "note": "const other = makeDraft(), an imported factory"
+    },
+    {
+      "from": "auth.guard::authGuard",
+      "to": "auth.guard::OPTIONAL",
+      "category": "USES",
+      "note": "inject's second argument is a value passed (DT.5g's value_ref), not a DI token"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::app::pages::filing.page::FilingPage::reload",
+      "to": "src::app::shared::dropzone.component::Dropzone::clear",
+      "category": "CALLS",
+      "note": "viewChild(Dropzone, { read: ViewContainerRef }) and viewChild<Dropzone, ViewContainerRef>('zone', { read: ViewContainerRef }) yield a ViewContainerRef; viewChild('box') types nothing"
+    },
+    {
+      "from": "src::app::core::countries.service::LegacyCodes::first",
+      "to": "src::app::core::countries.service::LegacyCodes",
+      "category": "USES",
+      "note": "a class's own member reading its static vouches for nothing"
+    },
+    {
+      "from": "src::app::core::auth.guard::describeAuth",
+      "to": "src::app::core::auth.service::AuthService::check",
+      "category": "CALLS",
+      "note": "a method read as a value runs nothing"
+    },
+    {
+      "from": "src::app::features::drafts::draft.store.spec::withFactory",
+      "to": "src::app::features::drafts::draft.store::DraftStore::drop",
+      "category": "CALLS",
+      "note": "the parameter makeStore shadows the factory"
+    },
+    {
+      "from": "src::app::features::drafts::draft.store.spec",
+      "to": "src::app::features::drafts::draft.store::DraftStore::drop",
+      "category": "CALLS",
+      "note": "makeAny declares no return type"
+    },
+    {
+      "from": "src::app::legacy::probe::probe",
+      "to": "src::app::core::auth.service::AuthService",
+      "category": "INJECTS",
+      "note": "a project-local inject is no DI"
+    },
+    {
+      "from": "src::app::pages::filing.page::FilingPage::reload",
+      "to": "src::app::shared::chip.component::Chip::filter",
+      "category": "CALLS",
+      "note": "viewChildren(Chip) holds an array: .filter is Array's"
+    },
+    {
+      "from": "src::app::core::auth.guard::authGuard",
+      "to": "src::app::legacy::router::Router",
+      "category": "INJECTS",
+      "note": "inject(Router) names @angular/router's Router; the repo-unique legacy Router is not it"
+    },
+    {
+      "from": "src::app::core::auth.guard::authGuard",
+      "to": "src::app::legacy::router::Router::url",
+      "category": "CALLS",
+      "note": "router.url on the third-party Router is not the legacy Router's getter"
+    },
+    {
+      "from": "src::app::features::drafts::draft.store.spec",
+      "to": "src::app::legacy::router::Router::url",
+      "category": "CALLS",
+      "note": "routerOf() is declared to return the third-party Router"
+    },
+    {
+      "from": "src::app::core::auth.guard::authGuard",
+      "to": "src::app::core::auth.guard::OPTIONAL",
+      "category": "INJECTS",
+      "note": "only inject's first argument is the DI token; OPTIONAL is a value passed (a USES value reference)"
+    }
+  ]
+}
