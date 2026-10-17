@@ -65,6 +65,12 @@ pub fn parse_file(
         );
     }
 
+    // DT.5l fired_on marker, once per file with an app entry type:
+    //   `[swift-app] entry types=<n> file=<file>`
+    if acc.app_entries > 0 {
+        eprintln!("[swift-app] entry types={} file={file_rel_path}", acc.app_entries);
+    }
+
     scan_vapor_routes(root, src, file_rel_path, module_id, repo, &mut acc);
 
     Ok(FileParse {
@@ -132,6 +138,9 @@ struct Acc {
     properties: HashSet<NodeId>,
     /// CB.10: the `[swift] members` marker's counts.
     members: MemberCounts,
+    /// DT.5l: the `@main` / `@UIApplicationMain` / `@NSApplicationMain` types
+    /// tagged ROLE COMPONENT in this file, for the `[swift-app]` marker.
+    app_entries: usize,
 }
 
 /// LB.7c: a Swift type belongs to its MODULE (the target directory), not its
@@ -267,6 +276,32 @@ fn visit_top(
     top
 }
 
+/// The attributes that make a type the app's entry point (DT.5l).
+const APP_ENTRY_ATTRIBUTES: &[&str] = &["main", "UIApplicationMain", "NSApplicationMain"];
+
+/// DT.5l: does the type declaration `node` carry an [`APP_ENTRY_ATTRIBUTES`]
+/// attribute? tree-sitter-swift 0.7.3 puts `@main` under the declaration's
+/// `modifiers` child as `attribute > user_type` (probed); a direct
+/// `attribute` child is read too. The attribute's name is its `user_type`
+/// text, so `@available(iOS 13, *)` is `available`.
+fn is_app_entry(node: TsNode, src: &[u8]) -> bool {
+    let is_entry_attr = |attr: TsNode| {
+        let mut c = attr.walk();
+        attr.named_children(&mut c)
+            .find(|ch| ch.kind() == "user_type")
+            .is_some_and(|ty| APP_ENTRY_ATTRIBUTES.contains(&text_of(ty, src).trim()))
+    };
+    let mut c = node.walk();
+    node.named_children(&mut c).any(|child| match child.kind() {
+        "attribute" => is_entry_attr(child),
+        "modifiers" => {
+            let mut mc = child.walk();
+            child.named_children(&mut mc).any(|a| a.kind() == "attribute" && is_entry_attr(a))
+        }
+        _ => false,
+    })
+}
+
 /// `extension T { … }` — tree-sitter-swift 0.7 parses it as a
 /// `class_declaration` whose `declaration_kind` field is the `extension`
 /// keyword (actor / class / enum / extension / struct).
@@ -362,6 +397,25 @@ fn visit_type(
             let ext_cells = std::mem::replace(&mut existing.cells, cells);
             existing.cells.extend(ext_cells);
         }
+    }
+    // DT.5l: the app's entry type (`@main`, `@UIApplicationMain`,
+    // `@NSApplicationMain`) is started by the runtime, not by a call: one
+    // ROLE COMPONENT cell on its own node, as an Android activity's (LB.3a's
+    // payload shape), so liveness seeds from it and its app-delegate
+    // callbacks follow it (INVOKED_MEMBERS `apple_app`).
+    if !is_extension(node)
+        && is_app_entry(node, src)
+        && let Some(n) = acc.nodes.iter_mut().find(|n| n.id == id)
+        && !n.cells.iter().any(|c| c.kind == cell_type::ROLE)
+    {
+        n.cells.push(Cell {
+            kind: cell_type::ROLE,
+            payload: CellPayload::Json(format!(
+                "{{\"roles\":[\"{}\"]}}",
+                node_kind::name(node_kind::COMPONENT)
+            )),
+        });
+        acc.app_entries += 1;
     }
 
     // tree-sitter-swift 0.7 uses class_body / enum_class_body — find by suffix.
@@ -1543,6 +1597,48 @@ mod tests {
 
     fn repo() -> RepoId {
         RepoId(1)
+    }
+
+    /// DT.5l: every ROLE cell payload on the type `qname` (any kind).
+    fn app_roles(fp: &FileParse, qname: &str) -> Vec<String> {
+        fp.nodes
+            .iter()
+            .filter(|n| fp.nav.qname_by_id.get(&n.id).map(String::as_str) == Some(qname))
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::ROLE)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn app_entry_types_carry_the_component_role() {
+        const ROLE: &str = r#"{"roles":["COMPONENT"]}"#;
+        for (src, ty) in [
+            ("@main\n@objc class AppDelegate: FlutterAppDelegate {\n  func helper() {}\n}\n", "AppDelegate"),
+            ("@main @objc class AppDelegate: FlutterAppDelegate {}\n", "AppDelegate"),
+            ("@UIApplicationMain\nclass AppDelegate: UIResponder, UIApplicationDelegate {}\n", "AppDelegate"),
+            ("@NSApplicationMain\nclass AppDelegate: NSObject, NSApplicationDelegate {}\n", "AppDelegate"),
+            ("@main\nstruct MyApp: App {\n  var body: some Scene { WindowGroup {} }\n}\n", "MyApp"),
+        ] {
+            let fp = parse_file(src, "Runner/AppDelegate.swift", "Runner::AppDelegate", repo()).unwrap();
+            assert_eq!(app_roles(&fp, &format!("Runner::{ty}")), [ROLE], "{src}");
+        }
+        for src in [
+            "@objc class Plain: NSObject {}\n",
+            "@available(iOS 13, *)\nclass Plain {}\n",
+            "extension Plain {\n  func more() {}\n}\n",
+            "class Plain: UIResponder {\n  func application(_ app: UIApplication) {}\n}\n",
+        ] {
+            let fp = parse_file(src, "Runner/Plain.swift", "Runner::Plain", repo()).unwrap();
+            assert!(app_roles(&fp, "Runner::Plain").is_empty(), "{src}");
+        }
+        // An extension before the @main declaration in one file: one cell.
+        let src = "extension AppDelegate {\n  func more() {}\n}\n\n@main\nclass AppDelegate: NSObject {}\n\nextension AppDelegate {\n  func last() {}\n}\n";
+        let fp = parse_file(src, "Runner/AppDelegate.swift", "Runner::AppDelegate", repo()).unwrap();
+        assert_eq!(app_roles(&fp, "Runner::AppDelegate"), [ROLE]);
     }
 
     #[test]

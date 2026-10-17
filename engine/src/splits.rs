@@ -121,6 +121,7 @@ use glia_activation::algo::cut::{min_st_cut, stoer_wagner};
 use glia_activation::algo::cycles::strongly_connected;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
 use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::profile::node_ext;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -569,7 +570,8 @@ fn scope_nodes<'g>(
                 qname: g.nav.qname_by_id.get(&n.id).map_or("", String::as_str),
                 kind,
                 file,
-                entry: entry_rule.is_entry(kind, name, &roles_in(kind, &n.cells))
+                entry: entry_rule
+                    .is_entry_at(kind, name, &roles_in(kind, &n.cells), || node_ext(&n.cells))
                     || is_declared_entry(&n.cells),
                 community: 0,
             });

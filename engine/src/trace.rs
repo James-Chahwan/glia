@@ -143,6 +143,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_code_domain::profile::node_ext;
 use glia_code_domain::{edge_category, endpoint};
 use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::roles::roles_in;
@@ -672,8 +673,9 @@ pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
                 .get(&n.id)
                 .map(String::as_str)
                 .unwrap_or("");
-            let entry = rule.is_entry(kind, name, &[])
-                || rule.is_entry(kind, name, &roles_in(kind, &n.cells));
+            let ext = || node_ext(&n.cells);
+            let entry = rule.is_entry_at(kind, name, &[], ext)
+                || rule.is_entry_at(kind, name, &roles_in(kind, &n.cells), ext);
             if entry && seen.insert(n.id) {
                 let qname = g
                     .nav

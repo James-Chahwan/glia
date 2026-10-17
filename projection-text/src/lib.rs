@@ -36,7 +36,7 @@ pub mod research;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::profile::{CODE_TABLES, node_ext};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{
     CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
@@ -197,7 +197,7 @@ fn entry_nodes(graphs: &[&RepoGraph]) -> HashSet<NodeId> {
 fn is_entry_node(g: &RepoGraph, n: &Node) -> bool {
     let kind = g.nav.kind_by_id.get(&n.id).copied();
     let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-    CODE_TABLES.entry.is_entry(kind, name, &roles_in(kind, &n.cells))
+    CODE_TABLES.entry.is_entry_at(kind, name, &roles_in(kind, &n.cells), || node_ext(&n.cells))
         || n.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
 }
 

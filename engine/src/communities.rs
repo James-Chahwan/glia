@@ -78,6 +78,7 @@ use glia_activation::algo::GraphSource;
 use glia_activation::algo::community::{
     self as algo, CommunityOptions, Partition, Resolution, WeightedGraph,
 };
+use glia_code_domain::profile::node_ext;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -486,7 +487,8 @@ fn view_nodes<'g>(
             }
             let kind = g.nav.kind_by_id.get(&n.id).copied();
             let name = g.nav.name_by_id.get(&n.id).map_or("", String::as_str);
-            let entry = entry_rule.is_entry(kind, name, &roles_in(kind, &n.cells))
+            let entry = entry_rule
+                .is_entry_at(kind, name, &roles_in(kind, &n.cells), || node_ext(&n.cells))
                 || is_declared_entry(&n.cells);
             nodes.push(ViewNode {
                 id: n.id,

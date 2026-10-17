@@ -108,6 +108,12 @@ pub fn parse_file(
                 // urlpatterns = [ path(...), re_path(...) ] lives here too.
                 scan_django_routes(child, src, repo, &mut acc);
             }
+            // DT.5l: `if __name__ == "__main__":` runs its block when the
+            // file is executed as a script, so its calls are the MODULE's and
+            // the MODULE is an entry.
+            "if_statement" if is_main_guard(child, src) => {
+                visit_main_guard(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+            }
             _ => {}
         }
     }
@@ -127,7 +133,77 @@ pub fn parse_file(
         );
     }
 
-    resolve_intra_file(acc, repo)
+    resolve_intra_file(acc, file_rel_path)
+}
+
+/// DT.5l: is `n` (an `if_statement`) a script's `__main__` guard? Its
+/// condition, one parenthesised wrapper unwrapped, is a comparison of exactly
+/// two operands with one `==`: the identifier `__name__` and a string whose
+/// unquoted text is `__main__`, in either order. `name == "__main__"`, `!=`,
+/// `and` / `or` chains and `a == b == c` are no guard.
+fn is_main_guard(n: TsNode, src: &[u8]) -> bool {
+    let Some(mut cond) = n.child_by_field_name("condition") else {
+        return false;
+    };
+    if cond.kind() == "parenthesized_expression" {
+        let mut c = cond.walk();
+        let inner: Vec<TsNode> = cond.named_children(&mut c).collect();
+        let [only] = inner[..] else {
+            return false;
+        };
+        cond = only;
+    }
+    if cond.kind() != "comparison_operator" {
+        return false;
+    }
+    let mut c = cond.walk();
+    let operands: Vec<TsNode> = cond.named_children(&mut c).collect();
+    let mut c = cond.walk();
+    let operators: Vec<&str> =
+        cond.children(&mut c).filter(|k| !k.is_named()).map(|k| k.kind()).collect();
+    let [a, b] = operands[..] else {
+        return false;
+    };
+    if operators != ["=="] {
+        return false;
+    }
+    let is_name = |x: TsNode| x.kind() == "identifier" && text(x, src) == "__name__";
+    let is_main = |x: TsNode| x.kind() == "string" && strip_string_quotes(text(x, src)) == "__main__";
+    (is_name(a) && is_main(b)) || (is_main(a) && is_name(b))
+}
+
+/// DT.5l: walk a `__main__` guard's block (`consequence` only: an `elif` /
+/// `else` runs when the file is imported) for calls, crediting the MODULE as
+/// any top-level call is; a def inside the block is skipped, as
+/// `collect_calls_in` skips every def. The MODULE (`acc.nodes[0]`) gets one
+/// ENTRYPOINT cell `{"decl":"<file>:<1-based row>","source":"main_guard"}`.
+///
+/// fired_on marker, once per guard:
+///   `[py-main] guard module=<module qname> calls=<call sites recorded from the block> file=<file>`
+fn visit_main_guard(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(body) = n.child_by_field_name("consequence") else {
+        return;
+    };
+    let before = acc.unresolved.len();
+    collect_calls_in(body, src, module_id, None, repo, file_rel, acc);
+    let calls = acc.unresolved.len() - before;
+    let decl = format!("{file_rel}:{}", n.start_position().row + 1);
+    let payload = serde_json::json!({ "decl": decl, "source": "main_guard" }).to_string();
+    if let Some(module) = acc.nodes.first_mut()
+        && module.id == module_id
+        && !module.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
+    {
+        module.cells.push(Cell { kind: cell_type::ENTRYPOINT, payload: CellPayload::Json(payload) });
+    }
+    eprintln!("[py-main] guard module={module_qname} calls={calls} file={file_rel}");
 }
 
 /// Unwrap a top-level `decorated_definition` into its inner def + decorator
@@ -188,6 +264,10 @@ struct Acc {
     refs: Vec<UnresolvedRef>,
     /// module-level functions: bare name → node id
     module_functions: HashMap<String, NodeId>,
+    /// DT.5l: nested defs, (enclosing FUNCTION, name) → the nested FUNCTION.
+    /// A bare call binds the caller's own nested def (then its enclosing
+    /// function's, outwards) before a module-level one: Python's LEGB.
+    nested_functions: HashMap<(NodeId, String), NodeId>,
     /// v0.4.13a — module-level classes: bare name → class node id. Needed for
     /// intra-file super() resolution where the base class is in the same file.
     module_classes: HashMap<String, NodeId>,
@@ -751,10 +831,15 @@ fn visit_function(
         cells: Vec::new(),
     });
     // Only top-level functions go in the module symbol table — nested ones
-    // aren't reachable by bare name from module scope.
-    if parent_func_id.is_none() {
-        acc.module_functions
-            .insert(name.to_string(), func_id);
+    // aren't reachable by bare name from module scope. DT.5l: a nested one is
+    // reachable from its enclosing function (and whatever that encloses).
+    match parent_func_id {
+        None => {
+            acc.module_functions.insert(name.to_string(), func_id);
+        }
+        Some(enclosing) => {
+            acc.nested_functions.insert((enclosing, name.to_string()), func_id);
+        }
     }
     acc.nav
         .record(func_id, name, &func_qname, node_kind::FUNCTION, Some(parent));
@@ -2492,7 +2577,15 @@ fn is_type_noise(s: &str) -> bool {
 // Intra-file resolution
 // ============================================================================
 
-fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseError> {
+/// Bind what one file can: a bare call to the caller's nested def (DT.5l,
+/// innermost enclosing FUNCTION first, rule `nested_def`) or a module-level
+/// function, `self.m()` to the enclosing class's method, `super().m()`
+/// through the file's own base classes; everything else is a cross-file
+/// [`CallSite`].
+///
+/// fired_on marker, once per file that binds one (DT.5l):
+///   `[py-nested] nested-def calls bound=<n> file=<file>`
+fn resolve_intra_file(mut acc: Acc, file_rel: &str) -> Result<FileParse, ParseError> {
     let mut out = FileParse {
         nodes: std::mem::take(&mut acc.nodes),
         edges: std::mem::take(&mut acc.edges),
@@ -2502,7 +2595,19 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
         nav: std::mem::take(&mut acc.nav),
         properties: std::mem::take(&mut acc.properties),
     };
+    let mut nested_bound = 0usize;
     for uc in acc.unresolved {
+        if let CallQualifier::Bare(name) = &uc.qualifier
+            && let Some(to) = nested_def(&out.nav, &acc.nested_functions, uc.from, name)
+        {
+            let ev = evidence::Evidence::emitter("parser:python").rule("nested_def").line(uc.line);
+            out.edges.push(
+                Edge::new(uc.from, to, edge_category::CALLS, Confidence::Strong)
+                    .with_cell(ev.to_cell()),
+            );
+            nested_bound += 1;
+            continue;
+        }
         let resolved: Option<NodeId> = match &uc.qualifier {
             CallQualifier::Bare(name) => acc.module_functions.get(name).copied(),
             CallQualifier::SelfMethod(name) => uc
@@ -2537,7 +2642,38 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
             }),
         }
     }
+    if nested_bound > 0 {
+        eprintln!("[py-nested] nested-def calls bound={nested_bound} file={file_rel}");
+    }
     Ok(out)
+}
+
+/// DT.5l: the nested def a bare call to `name` from `from` binds: walking
+/// out from the caller while the scope is a FUNCTION, the first scope that
+/// declares a nested def called `name`. A METHOD, a MODULE or a class body
+/// stops the walk (`visit_method` mints no nested def), so a method's bare
+/// call still binds a module-level function.
+fn nested_def(
+    nav: &CodeNav,
+    nested: &HashMap<(NodeId, String), NodeId>,
+    from: NodeId,
+    name: &str,
+) -> Option<NodeId> {
+    if nested.is_empty() {
+        return None;
+    }
+    let mut scope = from;
+    // The parent chain is a tree's; the bound only guards a malformed nav.
+    for _ in 0..=nav.parent_of.len() {
+        if nav.kind_by_id.get(&scope) != Some(&node_kind::FUNCTION) {
+            return None;
+        }
+        if let Some(&to) = nested.get(&(scope, name.to_string())) {
+            return Some(to);
+        }
+        scope = *nav.parent_of.get(&scope)?;
+    }
+    None
 }
 
 // ============================================================================
@@ -3040,6 +3176,109 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.from == from && e.to == to && e.category == cat)
+    }
+
+    // ---- DT.5l: `__main__` guards and nested defs ----
+
+    fn fid(q: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q)
+    }
+
+    fn mid(q: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, q)
+    }
+
+    /// The CALLS edge `from -> to` with its EVIDENCE rule, if there is one.
+    fn calls_rule(parse: &FileParse, from: NodeId, to: NodeId) -> Option<String> {
+        parse
+            .edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+            .map(|e| evidence::Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default())
+    }
+
+    /// Every ENTRYPOINT cell payload on the MODULE `m`.
+    fn entry_cells(parse: &FileParse, m: &str) -> Vec<String> {
+        let id = mid(m);
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::ENTRYPOINT)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn main_guard_calls_are_the_modules_and_mark_it_an_entry() {
+        for guard in [
+            "if __name__ == \"__main__\":",
+            "if '__main__' == __name__:",
+            "if __name__ == '__main__':",
+            "if (__name__ == \"__main__\"):",
+        ] {
+            let src = format!("def run():\n    return 1\n\n\n{guard}\n    run()\n");
+            let parse = parse_file(&src, "m.py", "m", repo()).unwrap();
+            assert_eq!(calls_rule(&parse, mid("m"), fid("m::run")).as_deref(), Some("intra_file"), "{guard}");
+            assert_eq!(
+                entry_cells(&parse, "m"),
+                [r#"{"decl":"m.py:5","source":"main_guard"}"#],
+                "{guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn look_alike_guards_record_nothing() {
+        for guard in [
+            "if name == \"__main__\":",
+            "if __name__ != \"__main__\":",
+            "if __name__ == \"__main__\" and x:",
+            "if __name__ == \"__main__\" == y:",
+            "if __name__ == \"main\":",
+        ] {
+            let src = format!("name = 'x'\n\n\ndef run():\n    return 1\n\n\n{guard}\n    run()\n");
+            let parse = parse_file(&src, "m.py", "m", repo()).unwrap();
+            assert!(calls_rule(&parse, mid("m"), fid("m::run")).is_none(), "{guard}");
+            assert!(entry_cells(&parse, "m").is_empty(), "{guard}");
+        }
+        // elif / else run on import; a def inside the guard is not walked.
+        let src = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n\n\n\
+                   if __name__ == \"__main__\":\n    def later():\n        c()\n\n    a()\nelif x:\n    b()\nelse:\n    c()\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert!(calls_rule(&parse, mid("m"), fid("m::a")).is_some(), "the guard's own call");
+        assert!(calls_rule(&parse, mid("m"), fid("m::b")).is_none(), "elif");
+        assert!(calls_rule(&parse, mid("m"), fid("m::c")).is_none(), "else and the inner def");
+        assert_eq!(entry_cells(&parse, "m").len(), 1);
+    }
+
+    #[test]
+    fn a_bare_call_binds_the_callers_nested_def_first() {
+        let src = "def compute(n):\n    def double(x):\n        return x * 2\n\n    return double(n)\n\n\n\
+                   def double(x):\n    return x + x\n\n\n\
+                   def outer():\n    def helper():\n        return 1\n\n    def inner():\n        return helper()\n\n    return inner()\n\n\n\
+                   def helper():\n    return 0\n\n\n\
+                   class K:\n    def m(self):\n        return double(1)\n";
+        let parse = parse_file(src, "tool.py", "tool", repo()).unwrap();
+        let (compute, inner_double, double) =
+            (fid("tool::compute"), fid("tool::compute::double"), fid("tool::double"));
+        assert_eq!(calls_rule(&parse, compute, inner_double).as_deref(), Some("nested_def"));
+        assert!(calls_rule(&parse, compute, double).is_none(), "the nested def shadows it");
+        // Nested-nested: inner's helper() is outer's nested helper.
+        let (inner, outer_helper) = (fid("tool::outer::inner"), fid("tool::outer::helper"));
+        assert_eq!(calls_rule(&parse, inner, outer_helper).as_deref(), Some("nested_def"));
+        assert!(calls_rule(&parse, inner, fid("tool::helper")).is_none());
+        assert_eq!(
+            calls_rule(&parse, fid("tool::outer"), fid("tool::outer::inner")).as_deref(),
+            Some("nested_def")
+        );
+        // A method's bare call still binds the module-level function.
+        let m = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "tool::K::m");
+        assert_eq!(calls_rule(&parse, m, double).as_deref(), Some("intra_file"));
     }
 
     #[test]

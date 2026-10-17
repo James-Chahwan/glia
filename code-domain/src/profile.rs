@@ -62,12 +62,25 @@
 //! `answers::invoked_members`), and `glia gaps` withholds such a member's
 //! dead_symbol row while its owner has an incoming carry edge. Neither
 //! stores an edge. [`invoked_member`] is the one matcher.
+//!
+//! DT.5l: the entry rule's second named row makes a Go `func init()` an
+//! entry, read through [`node_ext`] (the extension of a node's POSITION
+//! file, the one reader every entry caller and the invoked matcher use).
+//! [`INVOKED_MEMBERS`] gains signature-checked Go runtime-interface rows
+//! (`go_runtime`: `error`, `fmt.Stringer`, the marshalers, `sql.Scanner`,
+//! `driver.Valuer`, `http.Handler`, `sort.Interface`), the UIKit / AppKit /
+//! SwiftUI app-delegate row (`apple_app`) and the external-base rows
+//! (`transloco`, Angular's ErrorHandler / Resolve / TitleStrategy /
+//! RouteReuseStrategy, `dio`), whose owner must extend or implement a named
+//! base of a named library ([`ExternalBase`]). [`invoked_member_at`] is the
+//! matcher that reads those gates; [`invoked_member`] never matches such a
+//! row.
 
 use glia_activation::profile::{
     ActivationPreset, DomainTables, EffectSink, EntryRule, IdentityRule, IdentityTier, NamedEntry,
     Registries,
 };
-use glia_core::NodeKindId;
+use glia_core::{Cell, NodeKindId};
 
 use crate::{GRAPH_TYPE, cell_type, edge_category as ec, node_kind as nk, same_as};
 
@@ -113,7 +126,11 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     // framework components; so are `main` and `test*` / `Test*` functions and
     // methods. A COMPONENT role (LB.3a's fold: an Angular `@Component` is a
     // CLASS carrying ROLE COMPONENT) is an entry exactly as the COMPONENT
-    // kind is (LB.3b); the other roles never were.
+    // kind is (LB.3b); the other roles never were. DT.5l: so is a Go
+    // `func init()`, which the runtime calls when its package is linked; the
+    // row is limited to `.go` files, so a TS or Python function named `init`
+    // stays an ordinary name (and a Go METHOD named `init` is no FUNCTION).
+    // The entry readers pass a node's extension through [`node_ext`].
     entry: EntryRule {
         kinds: &[
             nk::ROUTE,
@@ -129,11 +146,15 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             nk::COMPONENT,
         ],
         roles: &[nk::COMPONENT],
-        named: &[NamedEntry {
-            kinds: &[nk::FUNCTION, nk::METHOD],
-            exact: &["main"],
-            prefixes: &["test", "Test"],
-        }],
+        named: &[
+            NamedEntry {
+                kinds: &[nk::FUNCTION, nk::METHOD],
+                exact: &["main"],
+                prefixes: &["test", "Test"],
+                exts: &[],
+            },
+            NamedEntry { kinds: &[nk::FUNCTION], exact: &["init"], prefixes: &[], exts: &["go"] },
+        ],
     },
     // The semantic edges blast radius and liveness follow. Structural
     // containment / import / define edges stay out (every node would reach
@@ -420,6 +441,16 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     ],
 };
 
+/// DT.5l: a base type a library declares, which an [`InvokedMembers`] row's
+/// owner must extend or implement: the owner's file imports `library` (its
+/// IMPORTS cell lists it exactly) and the owner's heritage clause names
+/// `name`, unbound in the repo (no in-repo type of that name took the ref).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalBase {
+    pub library: &'static str,
+    pub name: &'static str,
+}
+
 /// DT.5d: one row of [`INVOKED_MEMBERS`]: METHODs a framework or the runtime
 /// calls on an instance of their owner, so a live owner makes them live.
 ///
@@ -428,19 +459,32 @@ pub const CODE_TABLES: DomainTables = DomainTables {
 /// when that is a role kind, or a ROLE cell; empty = any owner), and its name
 /// is one of `names`, or (`named_like_owner`) exactly its owner's name, the
 /// constructor of Dart, Java, C# and C++.
+///
+/// DT.5l adds three gates, each unchecked when empty, read only by
+/// [`Self::matches_at`]: `sigs`, the CA.3a-normalised signatures the member
+/// must have (`()(string)`); `siblings`, the (name, signature) pairs the
+/// owner must also declare (`sort.Interface` is Len + Less + Swap, and
+/// `errors.Unwrap` calls an `Unwrap` only on an error); `owner_bases`, the
+/// [`ExternalBase`]s of which the owner must extend or implement one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvokedMembers {
-    /// What invokes the member: `angular`, `constructor` or `flutter`.
+    /// What invokes the member: `angular`, `constructor`, `flutter`,
+    /// `go_runtime`, `apple_app`, `transloco` or `dio`.
     pub framework: &'static str,
     pub owner_roles: &'static [NodeKindId],
     pub exts: &'static [&'static str],
     pub names: &'static [&'static str],
     pub named_like_owner: bool,
+    pub sigs: &'static [&'static str],
+    pub siblings: &'static [(&'static str, &'static str)],
+    pub owner_bases: &'static [ExternalBase],
 }
 
 impl InvokedMembers {
     /// Does this row match `member_name` in a file of extension `ext`, owned
-    /// by `owner_name` carrying `owner_roles`?
+    /// by `owner_name` carrying `owner_roles`? The form with nothing to read
+    /// a signature, a sibling or a base from: a row with `sigs`, `siblings`
+    /// or `owner_bases` never matches here.
     pub fn matches(
         &self,
         owner_roles: &[NodeKindId],
@@ -448,10 +492,67 @@ impl InvokedMembers {
         member_name: &str,
         ext: &str,
     ) -> bool {
+        self.matches_at(owner_roles, owner_name, member_name, ext, &|| None, &|_| None, &|_| false)
+    }
+
+    /// DT.5l: [`Self::matches`] with the three readers the new gates need:
+    /// `sig` gives the member's signature, `sibling_sig(n)` the signature of
+    /// the owner's METHOD named `n`, and `has_base(b)` whether the owner
+    /// extends or implements `b`. The cheap gates run first ([`Self::gates`]:
+    /// name, extension, roles, bases); `sig` is called at most once, and the
+    /// siblings only once the member's own signature matched. Every sibling's
+    /// signature must equal its pair's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_at(
+        &self,
+        owner_roles: &[NodeKindId],
+        owner_name: &str,
+        member_name: &str,
+        ext: &str,
+        sig: &dyn Fn() -> Option<String>,
+        sibling_sig: &dyn Fn(&str) -> Option<String>,
+        has_base: &dyn Fn(&ExternalBase) -> bool,
+    ) -> bool {
+        self.gates(owner_roles, owner_name, member_name, ext, has_base)
+            && self.signature_holds(sig, sibling_sig)
+    }
+
+    /// The cheap half of [`Self::matches_at`]: the name ([`Self::names_member`]),
+    /// the extension, the owner's roles and (`owner_bases`) its base. What is
+    /// left, when this passes, is the signature and sibling check.
+    pub fn gates(
+        &self,
+        owner_roles: &[NodeKindId],
+        owner_name: &str,
+        member_name: &str,
+        ext: &str,
+        has_base: &dyn Fn(&ExternalBase) -> bool,
+    ) -> bool {
         self.names_member(owner_name, member_name)
             && self.exts.iter().any(|e| e.eq_ignore_ascii_case(ext))
             && (self.owner_roles.is_empty()
                 || self.owner_roles.iter().any(|r| owner_roles.contains(r)))
+            && (self.owner_bases.is_empty() || self.owner_bases.iter().any(has_base))
+    }
+
+    /// Does this row check a signature or a sibling (a row [`Self::matches`]
+    /// can never match)?
+    pub fn checks_signature(&self) -> bool {
+        !self.sigs.is_empty() || !self.siblings.is_empty()
+    }
+
+    /// The signature half of [`Self::matches_at`]: the member's own
+    /// signature is one of `sigs` (`sig` read once, only when `sigs` is
+    /// non-empty), then every sibling's is its pair's.
+    fn signature_holds(
+        &self,
+        sig: &dyn Fn() -> Option<String>,
+        sibling_sig: &dyn Fn(&str) -> Option<String>,
+    ) -> bool {
+        if !self.sigs.is_empty() && !sig().is_some_and(|s| self.sigs.contains(&s.as_str())) {
+            return false;
+        }
+        self.siblings.iter().all(|(n, want)| sibling_sig(n).is_some_and(|s| s == *want))
     }
 
     /// The name half of [`Self::matches`], cheap enough to test before the
@@ -462,6 +563,77 @@ impl InvokedMembers {
                 || (self.named_like_owner && member_name == owner_name))
     }
 }
+
+/// A DT.5d row: a framework or the runtime invokes `names` (or the member
+/// named like its owner) on an owner of `owner_roles`, in `exts` files.
+const fn row(
+    framework: &'static str,
+    owner_roles: &'static [NodeKindId],
+    exts: &'static [&'static str],
+    names: &'static [&'static str],
+    named_like_owner: bool,
+) -> InvokedMembers {
+    InvokedMembers {
+        framework,
+        owner_roles,
+        exts,
+        names,
+        named_like_owner,
+        sigs: &[],
+        siblings: &[],
+        owner_bases: &[],
+    }
+}
+
+/// A DT.5l `go_runtime` row: the Go runtime or the standard library calls
+/// `names` through an interface the member satisfies, so its signature must
+/// be one of `sigs` and its owner must declare `siblings`.
+const fn go(
+    names: &'static [&'static str],
+    sigs: &'static [&'static str],
+    siblings: &'static [(&'static str, &'static str)],
+) -> InvokedMembers {
+    InvokedMembers {
+        framework: "go_runtime",
+        owner_roles: &[],
+        exts: &["go"],
+        names,
+        named_like_owner: false,
+        sigs,
+        siblings,
+        owner_bases: &[],
+    }
+}
+
+/// A DT.5l external-base row: `framework`'s library calls `names` on an owner
+/// extending or implementing one of `bases`, in `exts` files.
+const fn based(
+    framework: &'static str,
+    exts: &'static [&'static str],
+    bases: &'static [ExternalBase],
+    names: &'static [&'static str],
+) -> InvokedMembers {
+    InvokedMembers {
+        framework,
+        owner_roles: &[],
+        exts,
+        names,
+        named_like_owner: false,
+        sigs: &[],
+        siblings: &[],
+        owner_bases: bases,
+    }
+}
+
+const fn base(library: &'static str, name: &'static str) -> ExternalBase {
+    ExternalBase { library, name }
+}
+
+/// The CA.3a signatures the go rows name, each once.
+const SIG_STRING: &str = "()(string)";
+const SIG_LEN: &str = "()(int)";
+const SIG_LESS: &str = "(int,int)(bool)";
+const SIG_SWAP: &str = "(int,int)()";
 
 /// The TypeScript / JavaScript extensions. The walk routes `.ts` / `.tsx` /
 /// `.js` / `.jsx` to the TS family parser today; `.mts` / `.cts` / `.mjs` /
@@ -486,9 +658,8 @@ const CTOR_LIKE_OWNER: &[&str] = &[
 ///   compiler calls a pipe's `transform`; the HTTP client calls an
 ///   interceptor's `intercept` (a NestJS interceptor's too, an
 ///   `@Injectable` SERVICE in both); the router calls a guard's
-///   `canActivate` family. `resolve` and `handleError` are left out as too
-///   generic a name, and third-party loaders (Transloco's `getTranslation`)
-///   as out of scope.
+///   `canActivate` family. `resolve` and `handleError` are too generic a
+///   name for a role gate: DT.5l's heritage rows below read them.
 /// - DI or `new` runs the constructor of every instance it makes: TS / JS
 ///   `constructor`, Python `__init__`, Ruby `initialize`, PHP `__construct`,
 ///   Swift `init`, and the METHOD named like its class in Dart (CB.9's
@@ -498,16 +669,36 @@ const CTOR_LIKE_OWNER: &[&str] = &[
 ///   `initState` / `build` / `dispose` and the rest of its lifecycle, and an
 ///   InheritedWidget's `updateShouldNotify`, on every Dart class the parser
 ///   tags a COMPONENT (a widget / State subclass in a Flutter file).
+/// - DT.5l `go_runtime`: the Go runtime and standard library call a method
+///   through an interface its type satisfies by signature alone: `Error` /
+///   `String` (`error`, `fmt.Stringer`), `Unwrap` beside an `Error`
+///   (`errors.Unwrap` / `Is` / `As`), the JSON / text / BSON marshalers and
+///   unmarshalers, `Scan` (`sql.Scanner`), `Value` (`driver.Valuer`),
+///   `ServeHTTP` (`http.Handler`), and `Len` / `Less` / `Swap` only together
+///   (`sort.Interface`). The signature, re-read from the METHOD's CODE text,
+///   keeps the look-alikes out (`Scan() bool`, `Value() int64`).
+/// - DT.5l `apple_app`: UIKit / AppKit call the app-delegate callbacks (the
+///   `application(_:..)` overloads fold onto one METHOD) and SwiftUI an
+///   `App`'s `body` on the `@main` type, which the Swift parser tags
+///   COMPONENT.
+/// - DT.5l external bases: Transloco calls its loader's `getTranslation`, a
+///   missing handler's `handle`, an interceptor's `preSaveTranslation*`, a
+///   transpiler's `transpile` and a fallback strategy's `getNextLangs`;
+///   Angular an ErrorHandler's `handleError`, a Resolve's `resolve`, a
+///   TitleStrategy's `updateTitle` and a RouteReuseStrategy's members; dio an
+///   interceptor's `onRequest` / `onResponse` / `onError`. The owner must
+///   extend or implement the library's base: its heritage ref left unbound
+///   and its file importing the library (the engine's `has_base`).
 ///
 /// engine/tests/dead_framework.rs builds a one-file graph per constructor
 /// language and asserts its parser mints the constructor METHOD this table
-/// names.
+/// names; engine/tests/dead_runtime.rs covers the DT.5l rows.
 pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
-    InvokedMembers {
-        framework: "angular",
-        owner_roles: &[nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD],
-        exts: TS_ONLY,
-        names: &[
+    row(
+        "angular",
+        &[nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD],
+        TS_ONLY,
+        &[
             "ngOnInit",
             "ngOnChanges",
             "ngDoCheck",
@@ -517,13 +708,13 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
             "ngAfterViewChecked",
             "ngOnDestroy",
         ],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "angular",
-        owner_roles: &[nk::COMPONENT, nk::DIRECTIVE],
-        exts: TS_ONLY,
-        names: &[
+        false,
+    ),
+    row(
+        "angular",
+        &[nk::COMPONENT, nk::DIRECTIVE],
+        TS_ONLY,
+        &[
             "writeValue",
             "registerOnChange",
             "registerOnTouched",
@@ -531,76 +722,28 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
             "validate",
             "registerOnValidatorChange",
         ],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "angular",
-        owner_roles: &[nk::PIPE],
-        exts: TS_ONLY,
-        names: &["transform"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "angular",
-        owner_roles: &[nk::SERVICE],
-        exts: TS_ONLY,
-        names: &["intercept"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "angular",
-        owner_roles: &[nk::SERVICE, nk::GUARD],
-        exts: TS_ONLY,
-        names: &["canActivate", "canActivateChild", "canDeactivate", "canMatch", "canLoad"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: JS_FAMILY,
-        names: &["constructor"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: &["py", "pyi"],
-        names: &["__init__"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: &["rb"],
-        names: &["initialize"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: &["php"],
-        names: &["__construct"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: &["swift"],
-        names: &["init"],
-        named_like_owner: false,
-    },
-    InvokedMembers {
-        framework: "constructor",
-        owner_roles: &[],
-        exts: CTOR_LIKE_OWNER,
-        names: &[],
-        named_like_owner: true,
-    },
-    InvokedMembers {
-        framework: "flutter",
-        owner_roles: &[nk::COMPONENT],
-        exts: &["dart"],
-        names: &[
+        false,
+    ),
+    row("angular", &[nk::PIPE], TS_ONLY, &["transform"], false),
+    row("angular", &[nk::SERVICE], TS_ONLY, &["intercept"], false),
+    row(
+        "angular",
+        &[nk::SERVICE, nk::GUARD],
+        TS_ONLY,
+        &["canActivate", "canActivateChild", "canDeactivate", "canMatch", "canLoad"],
+        false,
+    ),
+    row("constructor", &[], JS_FAMILY, &["constructor"], false),
+    row("constructor", &[], &["py", "pyi"], &["__init__"], false),
+    row("constructor", &[], &["rb"], &["initialize"], false),
+    row("constructor", &[], &["php"], &["__construct"], false),
+    row("constructor", &[], &["swift"], &["init"], false),
+    row("constructor", &[], CTOR_LIKE_OWNER, &[], true),
+    row(
+        "flutter",
+        &[nk::COMPONENT],
+        &["dart"],
+        &[
             "build",
             "createState",
             "initState",
@@ -612,14 +755,81 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
             "reassemble",
             "updateShouldNotify",
         ],
-        named_like_owner: false,
-    },
+        false,
+    ),
+    go(&["Error", "String"], &[SIG_STRING], &[]),
+    go(&["Unwrap"], &["()(error)", "()([]error)"], &[("Error", SIG_STRING)]),
+    go(&["MarshalJSON", "MarshalText", "MarshalBSON"], &["()([]byte,error)"], &[]),
+    go(&["UnmarshalJSON", "UnmarshalText", "UnmarshalBSON"], &["([]byte)(error)"], &[]),
+    go(&["Scan"], &["(any)(error)"], &[]),
+    go(&["Value"], &["()(Value,error)"], &[]),
+    go(&["ServeHTTP"], &["(ResponseWriter,*Request)()"], &[]),
+    go(&["Len"], &[SIG_LEN], &[("Less", SIG_LESS), ("Swap", SIG_SWAP)]),
+    go(&["Less"], &[SIG_LESS], &[("Len", SIG_LEN), ("Swap", SIG_SWAP)]),
+    go(&["Swap"], &[SIG_SWAP], &[("Len", SIG_LEN), ("Less", SIG_LESS)]),
+    row(
+        "apple_app",
+        &[nk::COMPONENT],
+        &["swift"],
+        &[
+            "application",
+            "applicationDidBecomeActive",
+            "applicationWillResignActive",
+            "applicationDidEnterBackground",
+            "applicationWillEnterForeground",
+            "applicationWillTerminate",
+            "applicationDidReceiveMemoryWarning",
+            "applicationSignificantTimeChange",
+            "applicationWillFinishLaunching",
+            "applicationDidFinishLaunching",
+            "applicationShouldTerminate",
+            "applicationShouldTerminateAfterLastWindowClosed",
+            "applicationShouldHandleReopen",
+            "body",
+        ],
+        false,
+    ),
+    based("transloco", TS_ONLY, &transloco("TranslocoLoader"), &["getTranslation"]),
+    based("transloco", TS_ONLY, &transloco("TranslocoMissingHandler"), &["handle"]),
+    based(
+        "transloco",
+        TS_ONLY,
+        &transloco("TranslocoInterceptor"),
+        &["preSaveTranslation", "preSaveTranslationKey"],
+    ),
+    based("transloco", TS_ONLY, &transloco("TranslocoTranspiler"), &["transpile"]),
+    based("transloco", TS_ONLY, &transloco("TranslocoFallbackStrategy"), &["getNextLangs"]),
+    based("angular", TS_ONLY, &[base("@angular/core", "ErrorHandler")], &["handleError"]),
+    based("angular", TS_ONLY, &[base("@angular/router", "Resolve")], &["resolve"]),
+    based("angular", TS_ONLY, &[base("@angular/router", "TitleStrategy")], &["updateTitle"]),
+    based(
+        "angular",
+        TS_ONLY,
+        &[
+            base("@angular/router", "RouteReuseStrategy"),
+            base("@angular/router", "BaseRouteReuseStrategy"),
+        ],
+        &["shouldDetach", "store", "shouldAttach", "retrieve", "shouldReuseRoute"],
+    ),
+    based(
+        "dio",
+        &["dart"],
+        &[base("dio", "Interceptor"), base("dio", "QueuedInterceptor"), base("dio", "InterceptorsWrapper")],
+        &["onRequest", "onResponse", "onError"],
+    ),
 ];
 
-/// DT.5d: the framework tag (`angular`, `constructor`, `flutter`) of the first
-/// [`INVOKED_MEMBERS`] row matching a METHOD called `member_name`, in a file
-/// of extension `ext` (no dot), owned by `owner_name` carrying
-/// `owner_roles`; `None` when none does.
+/// Transloco's base `name`, from either of its package names (`@jsverse`
+/// since v7, `@ngneat` before).
+const fn transloco(name: &'static str) -> [ExternalBase; 2] {
+    [base("@jsverse/transloco", name), base("@ngneat/transloco", name)]
+}
+
+/// DT.5d: the framework tag (`angular`, `constructor`, `flutter`, ...) of the
+/// first [`INVOKED_MEMBERS`] row matching a METHOD called `member_name`, in a
+/// file of extension `ext` (no dot), owned by `owner_name` carrying
+/// `owner_roles`; `None` when none does. A row with `sigs`, `siblings` or
+/// `owner_bases` never matches here: [`invoked_member_at`] reads them.
 pub fn invoked_member(
     owner_roles: &[NodeKindId],
     owner_name: &str,
@@ -630,6 +840,39 @@ pub fn invoked_member(
         .iter()
         .find(|r| r.matches(owner_roles, owner_name, member_name, ext))
         .map(|r| r.framework)
+}
+
+/// DT.5l: [`invoked_member`] through [`InvokedMembers::matches_at`], first
+/// match wins. `sig` is called at most once over every row (the result is
+/// kept for the next row that needs it).
+#[allow(clippy::too_many_arguments)]
+pub fn invoked_member_at(
+    owner_roles: &[NodeKindId],
+    owner_name: &str,
+    member_name: &str,
+    ext: &str,
+    sig: &dyn Fn() -> Option<String>,
+    sibling_sig: &dyn Fn(&str) -> Option<String>,
+    has_base: &dyn Fn(&ExternalBase) -> bool,
+) -> Option<&'static str> {
+    let memo: std::cell::OnceCell<Option<String>> = std::cell::OnceCell::new();
+    let once = || memo.get_or_init(sig).clone();
+    INVOKED_MEMBERS
+        .iter()
+        .find(|r| {
+            r.matches_at(owner_roles, owner_name, member_name, ext, &once, sibling_sig, has_base)
+        })
+        .map(|r| r.framework)
+}
+
+/// DT.5l: the extension (no dot, as written) of the file a node's POSITION
+/// cell names (`glia_code_domain::evidence::locate`, so an HTTP node's span
+/// fallback too); `None` with no file or a file with no extension. The one
+/// reader every entry caller (`EntryRule::is_entry_at`) and the invoked
+/// matcher use.
+pub fn node_ext(cells: &[Cell]) -> Option<String> {
+    let (file, _) = crate::evidence::locate(cells)?;
+    std::path::Path::new(&file).extension().and_then(|e| e.to_str()).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -717,41 +960,57 @@ mod tests {
         assert_eq!(m(comp, "CardPage", "CardPage", "dart"), Some("constructor"));
     }
 
-    /// The table's shape: Angular rows are TypeScript only and role-gated,
-    /// constructor rows take any owner; `names_member` is the name half.
+    /// The table's shape: Angular rows are TypeScript only and role- or
+    /// heritage-gated, constructor rows take any owner, go_runtime rows are
+    /// signature-checked Go, apple_app is the Swift COMPONENT, transloco and
+    /// dio are heritage-gated; `names_member` is the name half.
     #[test]
     fn invoked_members_table_shape() {
         let frameworks: Vec<&str> = INVOKED_MEMBERS.iter().map(|r| r.framework).collect();
-        assert_eq!(frameworks, [
-            "angular",
-            "angular",
-            "angular",
-            "angular",
-            "angular",
-            "constructor",
-            "constructor",
-            "constructor",
-            "constructor",
-            "constructor",
-            "constructor",
-            "flutter",
-        ]);
+        let mut want = vec!["angular"; 5];
+        want.extend(["constructor"; 6]);
+        want.push("flutter");
+        want.extend(["go_runtime"; 10]);
+        want.push("apple_app");
+        want.extend(["transloco"; 5]);
+        want.extend(["angular"; 4]);
+        want.push("dio");
+        assert_eq!(frameworks, want);
         for r in INVOKED_MEMBERS {
+            assert!(!r.names.is_empty() || r.named_like_owner, "{}", r.framework);
             match r.framework {
                 "angular" => {
                     assert_eq!(r.exts, TS_ONLY);
-                    assert!(!r.owner_roles.is_empty() && !r.names.is_empty());
-                    assert!(!r.named_like_owner);
+                    assert!(!r.owner_roles.is_empty() || !r.owner_bases.is_empty());
+                    assert!(!r.names.is_empty() && !r.named_like_owner);
+                    assert!(!r.checks_signature());
                 }
                 "flutter" => {
                     assert_eq!(r.exts, ["dart"]);
                     assert_eq!(r.owner_roles, [nk::COMPONENT]);
                     assert!(!r.names.is_empty() && !r.named_like_owner);
                 }
-                _ => {
+                "go_runtime" => {
+                    assert_eq!(r.exts, ["go"]);
+                    assert!(!r.sigs.is_empty());
+                    assert!(r.owner_roles.is_empty() && r.owner_bases.is_empty());
+                    assert!(!r.named_like_owner);
+                }
+                "apple_app" => {
+                    assert_eq!(r.exts, ["swift"]);
+                    assert_eq!(r.owner_roles, [nk::COMPONENT]);
+                    assert!(r.owner_bases.is_empty() && !r.checks_signature());
+                }
+                "transloco" | "dio" => {
+                    assert!(!r.owner_bases.is_empty() && r.owner_roles.is_empty());
+                    assert!(!r.checks_signature() && !r.named_like_owner);
+                }
+                "constructor" => {
                     assert!(r.owner_roles.is_empty());
                     assert!(r.names.is_empty() == r.named_like_owner, "names or named_like_owner");
+                    assert!(r.owner_bases.is_empty() && !r.checks_signature());
                 }
+                other => panic!("an unknown framework tag {other:?}"),
             }
             for e in r.exts {
                 assert!(!e.starts_with('.') && e.to_ascii_lowercase() == *e, "{e}");
@@ -760,6 +1019,203 @@ mod tests {
         let ctor = INVOKED_MEMBERS[10];
         assert!(ctor.names_member("Foo", "Foo") && !ctor.names_member("Foo", "foo"));
         assert!(!INVOKED_MEMBERS[0].names_member("Page", "Page"));
+    }
+
+    /// DT.5l: the rows with a signature, sibling or base gate and their
+    /// invariants: signature rows are Go; every sibling's signature is one a
+    /// row lists; every base names a library and a type; the framework tags
+    /// first appear in the `[invoked]` marker's order.
+    #[test]
+    fn dt5l_rows_hold_their_invariants() {
+        let all_sigs: Vec<&str> = INVOKED_MEMBERS.iter().flat_map(|r| r.sigs.iter().copied()).collect();
+        for r in INVOKED_MEMBERS {
+            if r.checks_signature() {
+                assert_eq!(r.exts, ["go"], "{:?}", r.names);
+            }
+            for (n, sig) in r.siblings {
+                assert!(all_sigs.contains(sig), "{n} {sig}");
+                let row = INVOKED_MEMBERS.iter().find(|x| x.names.contains(n));
+                assert!(row.is_some_and(|x| x.sigs.contains(sig)), "{n}'s own row lists {sig}");
+            }
+            for b in r.owner_bases {
+                assert!(!b.library.is_empty() && !b.name.is_empty(), "{b:?}");
+            }
+        }
+        let mut order: Vec<&str> = Vec::new();
+        for r in INVOKED_MEMBERS {
+            if !order.contains(&r.framework) {
+                order.push(r.framework);
+            }
+        }
+        assert_eq!(
+            order,
+            ["angular", "constructor", "flutter", "go_runtime", "apple_app", "transloco", "dio"]
+        );
+    }
+
+    /// DT.5l: what `matches_at` reads. A signature reader, a sibling reader
+    /// and a base predicate, each from a fixed table.
+    fn at(
+        roles: &[NodeKindId],
+        member: &str,
+        ext: &str,
+        sig: Option<&str>,
+        siblings: &[(&str, &str)],
+        bases: &[ExternalBase],
+    ) -> Option<&'static str> {
+        let sig = sig.map(str::to_string);
+        let sib: Vec<(String, String)> =
+            siblings.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
+        let bases = bases.to_vec();
+        invoked_member_at(
+            roles,
+            "Owner",
+            member,
+            ext,
+            &|| sig.clone(),
+            &|n: &str| sib.iter().find(|(m, _)| m == n).map(|(_, s)| s.clone()),
+            &|b: &ExternalBase| bases.contains(b),
+        )
+    }
+
+    #[test]
+    fn go_runtime_rows_check_signatures_and_siblings() {
+        let none: &[NodeKindId] = &[];
+        for (member, sig) in [
+            ("String", "()(string)"),
+            ("Error", "()(string)"),
+            ("MarshalJSON", "()([]byte,error)"),
+            ("MarshalText", "()([]byte,error)"),
+            ("UnmarshalJSON", "([]byte)(error)"),
+            ("Scan", "(any)(error)"),
+            ("Value", "()(Value,error)"),
+            ("ServeHTTP", "(ResponseWriter,*Request)()"),
+        ] {
+            assert_eq!(at(none, member, "go", Some(sig), &[], &[]), Some("go_runtime"), "{member}");
+        }
+        assert_eq!(at(none, "Scan", "go", Some("()(bool)"), &[], &[]), None, "Scan() bool");
+        assert_eq!(at(none, "Value", "go", Some("()(int64)"), &[], &[]), None);
+        assert_eq!(at(none, "String", "go", Some("(string)(string)"), &[], &[]), None);
+        assert_eq!(at(none, "String", "go", None, &[], &[]), None, "an unreadable signature");
+        assert_eq!(at(none, "String", "ts", Some("()(string)"), &[], &[]), None, "a .ts file");
+        assert_eq!(at(none, "Len", "go", Some("(int,int)(bool)"), &[], &[]), None);
+        assert_eq!(at(none, "Stringify", "go", Some("()(string)"), &[], &[]), None);
+
+        // sort.Interface is all three.
+        let sorted: &[(&str, &str)] = &[("Less", "(int,int)(bool)"), ("Swap", "(int,int)()")];
+        assert_eq!(at(none, "Len", "go", Some("()(int)"), sorted, &[]), Some("go_runtime"));
+        assert_eq!(at(none, "Len", "go", Some("()(int)"), &[], &[]), None, "a lone Len");
+        let wrong: &[(&str, &str)] = &[("Less", "(int,int)(int)"), ("Swap", "(int,int)()")];
+        assert_eq!(at(none, "Len", "go", Some("()(int)"), wrong, &[]), None);
+        let full: &[(&str, &str)] =
+            &[("Len", "()(int)"), ("Less", "(int,int)(bool)"), ("Swap", "(int,int)()")];
+        assert_eq!(at(none, "Less", "go", Some("(int,int)(bool)"), full, &[]), Some("go_runtime"));
+        assert_eq!(at(none, "Swap", "go", Some("(int,int)()"), full, &[]), Some("go_runtime"));
+        // An Unwrap is an error's.
+        let err: &[(&str, &str)] = &[("Error", "()(string)")];
+        assert_eq!(at(none, "Unwrap", "go", Some("()(error)"), err, &[]), Some("go_runtime"));
+        assert_eq!(at(none, "Unwrap", "go", Some("()([]error)"), err, &[]), Some("go_runtime"));
+        assert_eq!(at(none, "Unwrap", "go", Some("()(error)"), &[], &[]), None, "no Error");
+
+        // The signature reader runs at most once, and never past a cheap gate.
+        let calls = std::cell::Cell::new(0);
+        let count = || {
+            calls.set(calls.get() + 1);
+            Some("()(string)".to_string())
+        };
+        let m = |member: &str, ext: &str| {
+            invoked_member_at(none, "O", member, ext, &count, &|_| None, &|_| false)
+        };
+        assert_eq!(m("String", "go"), Some("go_runtime"));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(m("String", "ts"), None);
+        assert_eq!(m("Stringify", "go"), None);
+        assert_eq!(m("constructor", "ts"), Some("constructor"));
+        assert_eq!(calls.get(), 1, "a failed cheap gate reads no signature");
+        assert_eq!(m("Scan", "go"), None);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn apple_app_and_external_base_rows() {
+        let comp: &[NodeKindId] = &[nk::COMPONENT];
+        let none: &[NodeKindId] = &[];
+        assert_eq!(at(comp, "application", "swift", None, &[], &[]), Some("apple_app"));
+        assert_eq!(at(comp, "body", "swift", None, &[], &[]), Some("apple_app"));
+        assert_eq!(at(none, "application", "swift", None, &[], &[]), None, "no @main role");
+        assert_eq!(at(comp, "application", "ts", None, &[], &[]), None);
+        assert_eq!(at(comp, "applicationLater", "swift", None, &[], &[]), None);
+        // A Swift constructor is still the constructor row's.
+        assert_eq!(at(comp, "init", "swift", None, &[], &[]), Some("constructor"));
+
+        let loader = base("@jsverse/transloco", "TranslocoLoader");
+        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[loader]), Some("transloco"));
+        let old = base("@ngneat/transloco", "TranslocoLoader");
+        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[old]), Some("transloco"));
+        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[]), None, "no base");
+        let other = base("@jsverse/transloco", "TranslocoMissingHandler");
+        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[other]), None, "another base");
+        assert_eq!(at(none, "handle", "ts", None, &[], &[other]), Some("transloco"));
+        assert_eq!(at(none, "getTranslation", "dart", None, &[], &[loader]), None);
+
+        let handler = base("@angular/core", "ErrorHandler");
+        assert_eq!(at(none, "handleError", "ts", None, &[], &[handler]), Some("angular"));
+        assert_eq!(at(none, "handleError", "ts", None, &[], &[]), None);
+        let reuse = base("@angular/router", "BaseRouteReuseStrategy");
+        assert_eq!(at(none, "shouldReuseRoute", "ts", None, &[], &[reuse]), Some("angular"));
+        let resolve = base("@angular/router", "Resolve");
+        assert_eq!(at(none, "resolve", "ts", None, &[], &[resolve]), Some("angular"));
+
+        let dio = base("dio", "Interceptor");
+        assert_eq!(at(none, "onRequest", "dart", None, &[], &[dio]), Some("dio"));
+        assert_eq!(at(none, "onError", "dart", None, &[], &[base("dio", "QueuedInterceptor")]), Some("dio"));
+        assert_eq!(at(none, "onRequest", "ts", None, &[], &[dio]), None, "dio is Dart");
+        assert_eq!(at(none, "onRequest", "dart", None, &[], &[]), None);
+    }
+
+    /// The 4-argument matcher never returns a row with a signature, sibling
+    /// or base gate, whatever the member's name; DT.5d's rows are unchanged.
+    #[test]
+    fn invoked_member_never_reads_a_dt5l_gate() {
+        let roles: &[NodeKindId] = &[nk::COMPONENT];
+        for r in INVOKED_MEMBERS.iter().filter(|r| r.checks_signature() || !r.owner_bases.is_empty()) {
+            for name in r.names {
+                for ext in r.exts {
+                    let tag = invoked_member(roles, "Owner", name, ext);
+                    assert!(
+                        tag.is_none_or(|t| !["go_runtime", "transloco", "dio"].contains(&t)),
+                        "{name} {ext}: {tag:?}"
+                    );
+                    assert!(!r.matches(roles, "Owner", name, ext), "{name} {ext}");
+                }
+            }
+        }
+        assert_eq!(invoked_member(roles, "AppDelegate", "application", "swift"), Some("apple_app"));
+    }
+
+    /// DT.5l: Go `init` is an entry in a .go file only, and node_ext reads
+    /// the POSITION file's extension.
+    #[test]
+    fn go_init_entry_and_node_ext() {
+        use glia_core::CellPayload;
+        let e = &CODE_TABLES.entry;
+        let f = Some(nk::FUNCTION);
+        assert!(e.is_entry_at(f, "init", &[], || Some("go".into())));
+        assert!(!e.is_entry_at(f, "init", &[], || Some("ts".into())));
+        assert!(!e.is_entry_at(f, "init", &[], || Some("py".into())));
+        assert!(!e.is_entry_at(Some(nk::METHOD), "init", &[], || Some("go".into())));
+        assert!(!e.is_entry(f, "init", &[]), "the extension-blind form never matches init");
+        assert!(e.is_entry(f, "main", &[]) && e.is_entry_at(f, "main", &[], || None));
+        assert!(e.is_entry_at(f, "TestX", &[], || Some("ts".into())));
+
+        let pos = |file: &str| Cell {
+            kind: crate::cell_type::POSITION,
+            payload: CellPayload::Json(format!("{{\"file\":\"{file}\",\"start_line\":3}}")),
+        };
+        assert_eq!(node_ext(&[pos("a/b.go")]).as_deref(), Some("go"));
+        assert_eq!(node_ext(&[pos("src/x.component.TS")]).as_deref(), Some("TS"));
+        assert_eq!(node_ext(&[pos("Makefile")]), None);
+        assert_eq!(node_ext(&[]), None);
     }
 
     #[test]

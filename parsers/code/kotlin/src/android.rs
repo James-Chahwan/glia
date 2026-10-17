@@ -23,7 +23,11 @@
 //!   `{"roles":["COMPONENT"]}` on its CLASS node — the LB.3a canonical shape
 //!   (never a same-qname COMPONENT twin), which `roles_in` reads and the
 //!   engine's liveness treats as an entrypoint, so an Activity and everything
-//!   it reaches is no longer flagged dead.
+//!   it reaches is no longer flagged dead. DT.5l: so is a class extending one
+//!   of the Flutter embedding's Android bases (`FlutterActivity`,
+//!   `FlutterFragmentActivity`, `FlutterFragment`, `FlutterApplication`) in a
+//!   file importing anything under `io.flutter` — a Flutter app's
+//!   `MainActivity` — counted in the same `components=`.
 //!
 //! # Retrofit vs JAX-RS
 //!
@@ -103,6 +107,13 @@ const ANDROID_BASES: &[&str] = &[
     "ContentProvider",
     "Application",
 ];
+
+/// DT.5l: the Flutter embedding's Android entry types, as simple names; each
+/// counts only in a file importing anything under `io.flutter`
+/// ([`imports_flutter`]), so a same-named class imported from elsewhere is
+/// not Flutter's.
+const FLUTTER_ANDROID_BASES: &[&str] =
+    &["FlutterActivity", "FlutterFragmentActivity", "FlutterFragment", "FlutterApplication"];
 
 /// Hilt annotations that mark a class as a framework entry point, anywhere.
 const HILT_ENTRY_ANNOTATIONS: &[&str] = &["AndroidEntryPoint", "HiltViewModel", "HiltAndroidApp"];
@@ -232,8 +243,9 @@ fn base_relative_path(tmpl: &str) -> String {
 
 /// A class declaration's Android component classification: a ROLE COMPONENT
 /// cell on its CLASS node `id` when it extends an [`ANDROID_BASES`] type in a
-/// file importing Android, or carries a [`HILT_ENTRY_ANNOTATIONS`] marker.
-/// An interface, enum or `object` is never a component.
+/// file importing Android, a [`FLUTTER_ANDROID_BASES`] type in a file
+/// importing `io.flutter` (DT.5l), or carries a [`HILT_ENTRY_ANNOTATIONS`]
+/// marker. An interface, enum or `object` is never a component.
 pub(crate) fn on_type(
     node: TsNode,
     kind: glia_core::NodeKindId,
@@ -247,7 +259,9 @@ pub(crate) fn on_type(
     let hilt = spring::own_annotations(node, file.src)
         .iter()
         .any(|(n, _)| HILT_ENTRY_ANNOTATIONS.contains(&n.as_str()));
-    let is_component = hilt || (imports_android(acc) && extends_android_base(node, file.src));
+    let is_component = hilt
+        || (imports_android(acc) && extends_base(node, file.src, ANDROID_BASES))
+        || (imports_flutter(acc) && extends_base(node, file.src, FLUTTER_ANDROID_BASES));
     if !is_component {
         return;
     }
@@ -286,6 +300,21 @@ fn imports_android(acc: &Acc) -> bool {
     })
 }
 
+/// DT.5l: whether the file imports anything under `io.flutter` (the Flutter
+/// engine's Android embedding: `io.flutter.embedding.android.FlutterActivity`,
+/// `io.flutter.app.FlutterApplication`, `io.flutter.*`), the gate of
+/// [`FLUTTER_ANDROID_BASES`].
+fn imports_flutter(acc: &Acc) -> bool {
+    acc.imports.iter().any(|i| {
+        let (path, last) = match &i.target {
+            ImportTarget::Symbol { module, name, .. } => (module.as_str(), Some(name.as_str())),
+            ImportTarget::Module { path, .. } => (path.as_str(), None),
+        };
+        let mut segments = path.split("::").chain(last);
+        segments.next() == Some("io") && segments.next() == Some("flutter")
+    })
+}
+
 /// Whether the file imports anything under `io.ktor.client` — the Ktor client
 /// artifact's namespace (the server DSL lives in `io.ktor.server`), the gate
 /// every Ktor-client call detector ([`crate::calls`]) sits behind. Imports
@@ -306,9 +335,10 @@ pub(crate) fn imports_ktor_client(acc: &Acc) -> bool {
     })
 }
 
-/// Whether a supertype of `node` is named in [`ANDROID_BASES`] — a superclass
-/// call (`: AppCompatActivity()`) or a call-less supertype.
-fn extends_android_base(node: TsNode, src: &[u8]) -> bool {
+/// Whether a supertype of `node` is named in `bases` ([`ANDROID_BASES`],
+/// [`FLUTTER_ANDROID_BASES`]) — a superclass call (`: AppCompatActivity()`)
+/// or a call-less supertype.
+fn extends_base(node: TsNode, src: &[u8], bases: &[&str]) -> bool {
     let Some(specs) = named_child_of_kind(node, &["delegation_specifiers"]) else {
         return false;
     };
@@ -327,7 +357,7 @@ fn extends_android_base(node: TsNode, src: &[u8]) -> bool {
             ty.named_children(&mut c)
                 .filter(|p| p.kind() == "identifier")
                 .last()
-                .is_some_and(|name| ANDROID_BASES.contains(&text_of(name, src)))
+                .is_some_and(|name| bases.contains(&text_of(name, src)))
         })
 }
 
@@ -699,6 +729,30 @@ interface Screen : Activity
         .unwrap()
         .clients;
         assert_eq!(counts.components, 1);
+    }
+
+    /// DT.5l: a Flutter app's Android activity is a component under an
+    /// `io.flutter` import only, and the Flutter gate admits only the Flutter
+    /// bases.
+    #[test]
+    fn flutter_activity_is_component() {
+        let counts = |src: &str| crate::parse_all(src, "m.kt", "m", repo()).unwrap().clients;
+        for (import, class, base) in [
+            ("io.flutter.embedding.android.FlutterActivity", "MainActivity", "FlutterActivity"),
+            ("io.flutter.embedding.android.FlutterFragmentActivity", "MainActivity", "FlutterFragmentActivity"),
+            ("io.flutter.app.FlutterApplication", "App", "FlutterApplication"),
+            ("io.flutter.embedding.android.FlutterFragment", "Screen", "FlutterFragment"),
+        ] {
+            let src = format!("package com.example.app\n\nimport {import}\n\nclass {class} : {base}()\n");
+            let fp = parse(&src);
+            assert_eq!(roles_of(&fp, class), vec![r#"{"roles":["COMPONENT"]}"#], "{import}");
+            assert_eq!(counts(&src).components, 1, "{import}");
+        }
+        let shadow = "package com.example.app\n\nimport com.example.fake.FlutterActivity\n\nclass Shadow : FlutterActivity()\n";
+        assert!(roles_of(&parse(shadow), "Shadow").is_empty(), "FlutterActivity from elsewhere");
+        assert_eq!(counts(shadow).components, 0);
+        let service = "import io.flutter.embedding.android.FlutterActivity\n\nclass W : Service()\n";
+        assert!(roles_of(&parse(service), "W").is_empty(), "the Flutter gate admits Flutter bases only");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use std::collections::HashSet;
 
 use glia_code_domain::node_kind;
+use glia_code_domain::profile::node_ext;
 use glia_core::{Confidence, Node, NodeId};
 use glia_engine::profile::CODE_PROFILE;
 use glia_graph::roles::roles_in;
@@ -110,7 +111,8 @@ fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
         None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
     };
     let role_kinds = roles_in(kind, &n.cells);
-    let entry = CODE_PROFILE.tables.entry.is_entry(kind, name, &role_kinds);
+    let entry =
+        CODE_PROFILE.tables.entry.is_entry_at(kind, name, &role_kinds, || node_ext(&n.cells));
     let roles: Vec<String> = role_kinds
         .into_iter()
         .map(|r| format!("\"{}\"", escape_json(node_kind::name(r))))

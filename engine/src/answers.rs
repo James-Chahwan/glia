@@ -77,14 +77,15 @@ const OWNER_KINDS: [glia_core::NodeKindId; 3] =
     [node_kind::CLASS, node_kind::STRUCT, node_kind::INTERFACE];
 
 /// One liveness walk: the live set plus how each part of it got there, for
-/// the `[live]` marker and the unit tests.
+/// the `[live]` / `[invoked]` markers and the unit tests.
 struct LiveWalk {
     live: std::collections::HashSet<NodeId>,
     /// Entries by kind / name.
     by_kind: usize,
     /// Entries only a ROLE cell made (LB.3b).
     by_role: usize,
-    /// Entries only a declared ENTRYPOINT cell made (LF.3b).
+    /// Entries only an ENTRYPOINT cell made: a declared one (LF.3b) or one a
+    /// parser read (DT.5l, a Python `__main__` guard's MODULE).
     by_decl: usize,
     /// Types made live by a live METHOD they declare.
     owners: usize,
@@ -93,6 +94,13 @@ struct LiveWalk {
     /// Members first reached over an invoked-member hop from their live
     /// owner (DT.5d): lifecycle hooks, framework-bound members, constructors.
     invoked: usize,
+    /// DT.5l: the [`invoked_members`] rows per framework tag, every tag of
+    /// `INVOKED_MEMBERS` in first-appearance order (zeros included), and
+    /// their total.
+    invoked_rows: Vec<(&'static str, usize)>,
+    /// DT.5l: METHODs a signature-checked row named whose signature or
+    /// siblings refused them ([`invoked_members_counted`]).
+    sig_rejected: usize,
     /// Every node in the merged graph.
     total: usize,
 }
@@ -100,24 +108,62 @@ struct LiveWalk {
 /// DT.5d: every METHOD a framework or the runtime invokes on an instance of
 /// its owner, as `(member, owner, framework)`: a METHOD whose direct
 /// `parent_of` is an [`OWNER_KINDS`] node and that
-/// [`glia_code_domain::profile::invoked_member`] matches, given the owner's
-/// roles (`glia_graph::roles::roles_in` of its kind and cells), both names
-/// and the extension of the METHOD's POSITION file
-/// (`glia_code_domain::evidence::locate`). A METHOD with no POSITION file
+/// [`glia_code_domain::profile::invoked_member_at`] matches, given the
+/// owner's roles (`glia_graph::roles::roles_in` of its kind and cells), both
+/// names and the extension of the METHOD's POSITION file
+/// ([`glia_code_domain::profile::node_ext`]). A METHOD with no POSITION file
 /// matches nothing.
 ///
 /// The one matcher [`live_walk`] (the invoked hop) and `gaps` (the
 /// follows-its-owner rule) share. Built in `merged.graphs` / `g.nodes` order,
 /// each METHOD once (its first instance); the name gate runs before the file
 /// and the roles are read, so a graph pays the JSON reads only for the few
-/// METHODs a row names.
+/// METHODs a row names. [`invoked_members_counted`] is the same list with the
+/// signature rejections counted.
 pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'static str)> {
-    use glia_code_domain::profile::{INVOKED_MEMBERS, invoked_member};
+    invoked_members_counted(merged).0
+}
+
+/// DT.5l: [`invoked_members`], plus how many METHODs a signature-checked row
+/// (`go_runtime`) names, with the name, extension and owner gates passing,
+/// that no row matched because their own signature is unreadable or not one
+/// the row accepts, or their owner lacks a required sibling (the `[invoked]`
+/// marker's `sig_rejected=`).
+///
+/// The DT.5l readers [`invoked_member_at`](glia_code_domain::profile::invoked_member_at)
+/// takes, every one read from what the layout persists, never from
+/// build-time nav:
+/// - `sig`: the CA.3a signature of the METHOD's CODE text
+///   ([`glia_parser_go::method_signature`]); a `.go` METHOD only, at most once
+///   per METHOD, and only once a signature row's cheap gates passed. A CODE
+///   cell that is a `code_span` JSON (its source moved) reads as none.
+/// - `sibling_sig(n)`: the same of the owner's first child METHOD (in
+///   `children_of` order) whose name is `n`, read only after the member's own
+///   signature matched.
+/// - `has_base(b)`: the owner's own graph holds an unbound heritage ref
+///   (IMPLEMENTS / INHERITS_FROM in `unresolved_refs`) from the owner whose
+///   qualifier names `b.name` (`Bare(n)` or `Attribute { name: n, .. }`), the
+///   graph declares no CLASS / INTERFACE / STRUCT / ENUM of that name, and
+///   the owner's IMPORTS cell lists `b.library` exactly. Both indexes are
+///   built per graph on the first base a METHOD reaches, in
+///   `unresolved_refs` / `g.nodes` order, and only looked up.
+pub(crate) fn invoked_members_counted(
+    merged: &MergedGraph,
+) -> (Vec<(NodeId, NodeId, &'static str)>, usize) {
+    use glia_code_domain::profile::{ExternalBase, INVOKED_MEMBERS, invoked_member_at, node_ext};
+    use std::cell::OnceCell;
     let mut out = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut rejected: HashSet<NodeId> = HashSet::new();
     for g in &merged.graphs {
         // The owners' cells, looked up only, filled on first need.
         let mut cells_of: Option<HashMap<NodeId, &[Cell]>> = None;
+        // Every node's cells (a sibling METHOD's CODE), filled on first need.
+        let all_cells: OnceCell<HashMap<NodeId, &[Cell]>> = OnceCell::new();
+        // Owner -> the names its unbound heritage refs give, in ref order.
+        let heritage: OnceCell<HashMap<NodeId, Vec<&str>>> = OnceCell::new();
+        // The type names this graph declares.
+        let declared: OnceCell<HashSet<&str>> = OnceCell::new();
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::METHOD) {
                 continue;
@@ -132,9 +178,7 @@ pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'st
             if !INVOKED_MEMBERS.iter().any(|r| r.names_member(owner_name, name)) {
                 continue;
             }
-            let Some((file, _)) = glia_code_domain::evidence::locate(&n.cells) else { continue };
-            let ext =
-                std::path::Path::new(&file).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let Some(ext) = node_ext(&n.cells) else { continue };
             let cells = cells_of
                 .get_or_insert_with(|| {
                     g.nodes
@@ -149,14 +193,100 @@ pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'st
                 .copied()
                 .unwrap_or(&[]);
             let roles = glia_graph::roles::roles_in(Some(owner_kind), cells);
-            if let Some(framework) = invoked_member(&roles, owner_name, name, ext)
-                && seen.insert(n.id)
+            let is_go = ext.eq_ignore_ascii_case("go");
+            let sig = || if is_go { go_code_signature(&n.cells) } else { None };
+            let sibling_sig = |sibling: &str| -> Option<String> {
+                if !is_go {
+                    return None;
+                }
+                let child = g.nav.children_of.get(&owner)?.iter().find(|c| {
+                    g.nav.kind_by_id.get(c) == Some(&node_kind::METHOD)
+                        && g.nav.name_by_id.get(c).map(String::as_str) == Some(sibling)
+                })?;
+                let index = all_cells
+                    .get_or_init(|| g.nodes.iter().map(|o| (o.id, o.cells.as_slice())).collect());
+                go_code_signature(index.get(child)?)
+            };
+            let has_base = |b: &ExternalBase| -> bool {
+                let refs = heritage.get_or_init(|| unbound_heritage(g));
+                if !refs.get(&owner).is_some_and(|names| names.contains(&b.name)) {
+                    return false;
+                }
+                if declared.get_or_init(|| declared_type_names(g)).contains(b.name) {
+                    return false;
+                }
+                imports_library(cells, b.library)
+            };
+            match invoked_member_at(&roles, owner_name, name, &ext, &sig, &sibling_sig, &has_base)
             {
-                out.push((n.id, owner, framework));
+                Some(framework) => {
+                    if seen.insert(n.id) {
+                        out.push((n.id, owner, framework));
+                    }
+                }
+                None => {
+                    if INVOKED_MEMBERS.iter().any(|r| {
+                        r.checks_signature() && r.gates(&roles, owner_name, name, &ext, &has_base)
+                    }) {
+                        rejected.insert(n.id);
+                    }
+                }
             }
         }
     }
+    let sig_rejected = rejected.iter().filter(|id| !seen.contains(id)).count();
+    (out, sig_rejected)
+}
+
+/// DT.5l: the CA.3a signature of a Go METHOD's CODE text, or `None` when the
+/// node has no CODE text (a `code_span` JSON payload is none).
+fn go_code_signature(cells: &[Cell]) -> Option<String> {
+    cells.iter().find(|c| c.kind == cell_type::CODE).and_then(|c| match &c.payload {
+        CellPayload::Text(code) => glia_parser_go::method_signature(code),
+        _ => None,
+    })
+}
+
+/// DT.5l: per node, the base names of its heritage refs (IMPLEMENTS /
+/// INHERITS_FROM) the build left unbound in `g.unresolved_refs`, in ref
+/// order: a base no in-repo type took, so a library's.
+fn unbound_heritage(g: &RepoGraph) -> HashMap<NodeId, Vec<&str>> {
+    use glia_code_domain::CallQualifier;
+    let mut out: HashMap<NodeId, Vec<&str>> = HashMap::new();
+    for r in &g.unresolved_refs {
+        if r.category != edge_category::IMPLEMENTS && r.category != edge_category::INHERITS_FROM {
+            continue;
+        }
+        let name = match &r.qualifier {
+            CallQualifier::Bare(n) | CallQualifier::Attribute { name: n, .. } => n.as_str(),
+            _ => continue,
+        };
+        out.entry(r.from).or_default().push(name);
+    }
     out
+}
+
+/// DT.5l: the names of the CLASS / INTERFACE / STRUCT / ENUM nodes `g`
+/// declares, the in-repo types a library base name must not be.
+fn declared_type_names(g: &RepoGraph) -> HashSet<&str> {
+    const TYPES: [glia_core::NodeKindId; 4] =
+        [node_kind::CLASS, node_kind::INTERFACE, node_kind::STRUCT, node_kind::ENUM];
+    g.nodes
+        .iter()
+        .filter(|n| g.nav.kind_by_id.get(&n.id).is_some_and(|k| TYPES.contains(k)))
+        .filter_map(|n| g.nav.name_by_id.get(&n.id).map(String::as_str))
+        .collect()
+}
+
+/// DT.5l: does a node's IMPORTS cell (a JSON array of library names) list
+/// `library` exactly?
+fn imports_library(cells: &[Cell], library: &str) -> bool {
+    cells.iter().filter(|c| c.kind == cell_type::IMPORTS).any(|c| {
+        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+            return false;
+        };
+        serde_json::from_str::<Vec<String>>(s).is_ok_and(|libs| libs.iter().any(|l| l == library))
+    })
 }
 
 /// The entrypoint-reachable ("live") node set: every entrypoint plus everything
@@ -169,14 +299,19 @@ pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'st
 /// servers, Connect / Twirp procedures, queue consumers, GraphQL resolvers,
 /// WS / event handlers, CLI commands, cron jobs (the inbound handler kinds,
 /// reconciled by LD.6 and listed by `profile::entry_kinds`), framework
-/// components, `main` / `test*` / `Test*` functions and methods, and (LB.3b)
+/// components, `main` / `test*` / `Test*` functions and methods, a Go
+/// `func init()` (DT.5l: a FUNCTION named `init` in a `.go` file, the
+/// extension read through `glia_code_domain::profile::node_ext`), and (LB.3b)
 /// any node carrying the COMPONENT role:
 /// since the LB.3a fold an Angular `@Component` is a CLASS with ROLE
-/// COMPONENT, not a COMPONENT node. Besides the table, any node carrying an
+/// COMPONENT, not a COMPONENT node (DT.5l: so is a Swift `@main` type and a
+/// Kotlin Flutter activity). Besides the table, any node carrying an
 /// ENTRYPOINT cell ([`is_declared_entry`]) is an entrypoint whatever its kind
 /// (LF.3b): the user declared it in `.glia/overlay.toml` `[entrypoints]`, for
 /// code the graph cannot see a trigger for (a job a scheduler wires by a
-/// string, a plugin hook loaded by reflection, a library's public API). The
+/// string, a plugin hook loaded by reflection, a library's public API), or
+/// (DT.5l) the Python parser read it, a script MODULE whose
+/// `if __name__ == "__main__":` guard runs it (`source` `main_guard`). The
 /// walk carries on `CODE_PROFILE.tables.carry_edges`.
 ///
 /// Three steps besides the forward carry walk (A7.8, DT.5d), each applied as
@@ -204,8 +339,15 @@ pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'st
 ///   a service's `intercept`, a guard's or service's `canActivate` family, and the
 ///   constructor (TS / JS `constructor`, Python `__init__`, Ruby
 ///   `initialize`, PHP `__construct`, Swift `init`, the METHOD named like
-///   its class in Dart, Java, C# and C++). Only from a live owner, and still
-///   no walk down to any other sibling method.
+///   its class in Dart, Java, C# and C++). DT.5l adds the Go methods the
+///   runtime calls through an interface their signature satisfies (`Error`,
+///   `String`, `Unwrap` beside an `Error`, the marshalers, `Scan`, `Value`,
+///   `ServeHTTP`, `Len` / `Less` / `Swap` together), an `@main` type's
+///   app-delegate callbacks, and the members a library calls on a class that
+///   extends or implements its base (Transloco's loader family, Angular's
+///   ErrorHandler / Resolve / TitleStrategy / RouteReuseStrategy, dio's
+///   interceptors). Only from a live owner, and still no walk down to any
+///   other sibling method.
 ///
 /// Every step is a walk-local hop: no edge is stored or returned.
 ///
@@ -217,7 +359,11 @@ pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'st
 /// (LB.3b), `declared` the ones only an ENTRYPOINT cell made entries (LF.3b),
 /// `owners` / `implementers` / `invoked` the nodes each step made live (a
 /// member a carry edge reached first counts in none), `N` the live set and
-/// `M` every node.
+/// `M` every node. Right after it (DT.5l), `[invoked] rows=<n>
+/// angular=<a> constructor=<c> flutter=<f> go_runtime=<g> apple_app=<p>
+/// transloco=<t> dio=<d> sig_rejected=<r>`: the [`invoked_members`] rows per
+/// framework tag, live owner or not, and the METHODs a signature-checked row
+/// refused ([`invoked_members_counted`]).
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
     let w = live_walk(merged);
     eprintln!(
@@ -233,13 +379,25 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
         w.live.len(),
         w.total
     );
+    eprintln!("{}", invoked_marker(&w));
     w.live
+}
+
+/// DT.5l: `[invoked] rows=<n> <framework>=<count>.. sig_rejected=<r>`, every
+/// framework tag of `INVOKED_MEMBERS` in first-appearance order, zeros
+/// included.
+fn invoked_marker(w: &LiveWalk) -> String {
+    let total: usize = w.invoked_rows.iter().map(|(_, n)| n).sum();
+    let tags: Vec<String> = w.invoked_rows.iter().map(|(t, n)| format!("{t}={n}")).collect();
+    format!("[invoked] rows={total} {} sig_rejected={}", tags.join(" "), w.sig_rejected)
 }
 
 /// Did the user declare this node an entrypoint (LF.3b)? True when it
 /// carries an ENTRYPOINT cell, which the build's `[entrypoints]` stage writes
 /// from `.glia/overlay.toml` and the `.gmap` persists. Liveness seeds from it
-/// beside `CODE_PROFILE.tables.entry`.
+/// beside `CODE_PROFILE.tables.entry`. DT.5l: the Python parser writes one
+/// too, on a MODULE with an `if __name__ == "__main__":` guard (`source`
+/// `main_guard`); it counts as declared alike.
 pub(crate) fn is_declared_entry(cells: &[Cell]) -> bool {
     cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
 }
@@ -294,6 +452,12 @@ fn live_hop(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Ed
 /// deterministic.
 fn live_walk(merged: &MergedGraph) -> LiveWalk {
     let t = &CODE_PROFILE.tables;
+    let mut invoked_rows: Vec<(&'static str, usize)> = Vec::new();
+    for r in glia_code_domain::profile::INVOKED_MEMBERS {
+        if !invoked_rows.iter().any(|(tag, _)| *tag == r.framework) {
+            invoked_rows.push((r.framework, 0));
+        }
+    }
     let mut w = LiveWalk {
         live: HashSet::new(),
         by_kind: 0,
@@ -302,6 +466,8 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
         owners: 0,
         implementers: 0,
         invoked: 0,
+        invoked_rows,
+        sig_rejected: 0,
         total: 0,
     };
     let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
@@ -320,10 +486,15 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
                 owned.push(n.id);
             }
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-            let seeded = if t.entry.is_entry(kind, name, &[]) {
+            let ext = || glia_code_domain::profile::node_ext(&n.cells);
+            let seeded = if t.entry.is_entry_at(kind, name, &[], ext) {
                 &mut w.by_kind
-            } else if t.entry.is_entry(kind, name, &glia_graph::roles::roles_in(kind, &n.cells))
-            {
+            } else if t.entry.is_entry_at(
+                kind,
+                name,
+                &glia_graph::roles::roles_in(kind, &n.cells),
+                ext,
+            ) {
                 &mut w.by_role
             } else if is_declared_entry(&n.cells) {
                 &mut w.by_decl
@@ -351,7 +522,12 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
     }
     // DT.5d: live owner -> each member a framework or the runtime invokes.
     let mut invoked_hops: HashSet<(NodeId, NodeId)> = HashSet::new();
-    for (member, owner, _) in invoked_members(merged) {
+    let (members, sig_rejected) = invoked_members_counted(merged);
+    w.sig_rejected = sig_rejected;
+    for (member, owner, framework) in members {
+        if let Some((_, n)) = w.invoked_rows.iter_mut().find(|(tag, _)| *tag == framework) {
+            *n += 1;
+        }
         if invoked_hops.insert((owner, member)) {
             hops.push(live_hop(owner, member, edge_category::DEFINES));
         }

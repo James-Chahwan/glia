@@ -105,19 +105,38 @@ fn check_registry(
 // ============================================================================
 
 /// Nodes of `kinds` that are entrypoints by name: the name equals one of
-/// `exact`, or starts with one of `prefixes` (case-sensitive).
+/// `exact`, or starts with one of `prefixes` (case-sensitive), in a source
+/// file whose extension is one of `exts`.
+///
+/// `exts` (DT.5l) limits a row to the files of some languages, compared
+/// ignoring ASCII case and written without the dot; empty is any file. A
+/// name that is an entry in one language and an ordinary name in another
+/// (Go's `init`, which the runtime calls when the package is linked, beside
+/// a TypeScript or Python `init` nothing does) needs it. The domain reports
+/// a node's extension; this crate only compares strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NamedEntry {
     pub kinds: &'static [NodeKindId],
     pub exact: &'static [&'static str],
     pub prefixes: &'static [&'static str],
+    pub exts: &'static [&'static str],
 }
 
 impl NamedEntry {
-    /// Does this rule make a `kind` node called `name` an entrypoint?
+    /// Does this rule's kind and name half make a `kind` node called `name`
+    /// an entrypoint? The extension half is [`Self::accepts_ext`].
     pub fn matches(&self, kind: NodeKindId, name: &str) -> bool {
         self.kinds.contains(&kind)
             && (self.exact.contains(&name) || self.prefixes.iter().any(|p| name.starts_with(p)))
+    }
+
+    /// Does this rule accept a node whose source file has extension `ext`
+    /// (no dot; `None` when the node has no file)? A row with no `exts`
+    /// accepts every node, a file or not; a row with `exts` accepts only a
+    /// file whose extension is one of them, ignoring ASCII case.
+    pub fn accepts_ext(&self, ext: Option<&str>) -> bool {
+        self.exts.is_empty()
+            || ext.is_some_and(|e| self.exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
     }
 }
 
@@ -137,17 +156,51 @@ pub struct EntryRule {
 }
 
 impl EntryRule {
-    /// Is a node of `kind` called `name`, carrying `roles`, an entrypoint?
-    /// Pass `&[]` for `roles` to ask whether kind and name alone make it one.
-    /// A node with no known kind is an entry only through a role.
+    /// Is a node of `kind` called `name`, carrying `roles`, an entrypoint,
+    /// judged without its file? Pass `&[]` for `roles` to ask whether kind
+    /// and name alone make it one. A node with no known kind is an entry only
+    /// through a role. The extension-blind form of [`Self::is_entry_at`]: a
+    /// [`NamedEntry`] limited to some `exts` never matches here.
     pub fn is_entry(&self, kind: Option<NodeKindId>, name: &str, roles: &[NodeKindId]) -> bool {
+        self.is_entry_at(kind, name, roles, || None)
+    }
+
+    /// Is a node of `kind` called `name`, carrying `roles`, whose source file
+    /// has the extension `ext()` returns (no dot; `None` for no file), an
+    /// entrypoint (DT.5l)?
+    ///
+    /// Roles first, then kinds, then the named rows. `ext` is called lazily:
+    /// only when a named row limited to some `exts` matches the kind and the
+    /// name, and at most once per call, so the common node (no row names it)
+    /// never pays for reading its file.
+    pub fn is_entry_at(
+        &self,
+        kind: Option<NodeKindId>,
+        name: &str,
+        roles: &[NodeKindId],
+        ext: impl FnOnce() -> Option<String>,
+    ) -> bool {
         if roles.iter().any(|r| self.roles.contains(r)) {
             return true;
         }
         let Some(kind) = kind else {
             return false;
         };
-        self.kinds.contains(&kind) || self.named.iter().any(|n| n.matches(kind, name))
+        if self.kinds.contains(&kind) {
+            return true;
+        }
+        let mut ext = Some(ext);
+        let mut read: Option<Option<String>> = None;
+        self.named.iter().any(|n| {
+            if !n.matches(kind, name) {
+                return false;
+            }
+            if n.exts.is_empty() {
+                return true;
+            }
+            let e = read.get_or_insert_with(|| ext.take().and_then(|f| f()));
+            n.accepts_ext(e.as_deref())
+        })
     }
 }
 
@@ -339,7 +392,8 @@ impl DomainTables {
     /// and names; every id the entry rule, carry edges, effect sinks, weights
     /// and presets name is registered, and none is listed twice in one list;
     /// every weight is finite and `>= 0`; preset names are non-empty and
-    /// unique; a named entry can match something; effect sink classes are
+    /// unique; a named entry can match something, and its `exts` hold no
+    /// empty extension and none with a dot; effect sink classes are
     /// non-empty and unique, each sink names a kind and a category, and no
     /// (kind, category) pair belongs to two sinks (the first would hide the
     /// second); every `community_weights` row names a registered category
@@ -380,6 +434,12 @@ impl DomainTables {
                 errors.push(format!(
                     "entry.named[{i}] has an empty prefix, which matches every name: list its kinds in entry.kinds"
                 ));
+            }
+            if n.exts.contains(&"") {
+                errors.push(format!("entry.named[{i}].exts holds an empty extension"));
+            }
+            if n.exts.iter().any(|e| e.contains('.')) {
+                errors.push(format!("entry.named[{i}].exts holds an extension with a dot"));
             }
         }
 
@@ -615,6 +675,7 @@ mod tests {
                 kinds: &[FUNCTION, METHOD],
                 exact: &["main"],
                 prefixes: &["test"],
+                exts: &[],
             }],
         },
         carry_edges: &[CALLS],
@@ -662,6 +723,64 @@ mod tests {
         assert!(!e.is_entry(None, "main", &[]));
     }
 
+    /// DT.5l: a named row limited to some extensions matches only a node in
+    /// such a file, ignoring ASCII case; the extension-blind `is_entry` never
+    /// matches it; the extension is read only for a name a limited row names.
+    #[test]
+    fn entry_rule_ext_gate() {
+        const GO_INIT: &[NamedEntry] = &[
+            NamedEntry { kinds: &[FUNCTION, METHOD], exact: &["main"], prefixes: &[], exts: &[] },
+            NamedEntry { kinds: &[FUNCTION], exact: &["init"], prefixes: &[], exts: &["go"] },
+        ];
+        let e = EntryRule { kinds: &[ROUTE], roles: &[COMPONENT], named: GO_INIT };
+        let at = |kind, name: &str, ext: Option<&str>| {
+            let ext = ext.map(str::to_string);
+            e.is_entry_at(Some(kind), name, &[], || ext)
+        };
+        assert!(at(FUNCTION, "init", Some("go")));
+        assert!(at(FUNCTION, "init", Some("GO")), "the extension ignores ASCII case");
+        assert!(!at(FUNCTION, "init", Some("ts")));
+        assert!(!at(FUNCTION, "init", Some("py")));
+        assert!(!at(FUNCTION, "init", None), "no file, no limited row");
+        assert!(!at(METHOD, "init", Some("go")), "a Go METHOD named init is no entry");
+        assert!(!e.is_entry(Some(FUNCTION), "init", &[]), "is_entry is extension-blind");
+        // An unlimited row matches with or without a file.
+        assert!(at(FUNCTION, "main", None) && at(FUNCTION, "main", Some("rs")));
+        assert!(e.is_entry(Some(FUNCTION), "main", &[]));
+
+        // The closure runs only for a name a limited row names, and once.
+        let calls = std::cell::Cell::new(0);
+        let counted = || {
+            calls.set(calls.get() + 1);
+            Some("go".to_string())
+        };
+        assert!(!e.is_entry_at(Some(FUNCTION), "helper", &[], counted));
+        assert!(e.is_entry_at(Some(FUNCTION), "main", &[], counted));
+        assert!(e.is_entry_at(Some(ROUTE), "GET /x", &[], counted));
+        assert!(e.is_entry_at(Some(CLASS), "Page", &[COMPONENT], counted));
+        assert_eq!(calls.get(), 0, "no limited row named those");
+        assert!(e.is_entry_at(Some(FUNCTION), "init", &[], counted));
+        assert_eq!(calls.get(), 1);
+
+        assert!(GO_INIT[0].accepts_ext(None) && GO_INIT[0].accepts_ext(Some("x")));
+        assert!(GO_INIT[1].accepts_ext(Some("Go")) && !GO_INIT[1].accepts_ext(Some("gox")));
+        assert!(!GO_INIT[1].accepts_ext(None));
+
+        const INIT: NamedEntry = NamedEntry { kinds: &[FUNCTION], exact: &["init"], prefixes: &[], exts: &[] };
+        const EMPTY: &[NamedEntry] = &[NamedEntry { exts: &[""], ..INIT }];
+        const DOTTED: &[NamedEntry] = &[NamedEntry { exts: &[".go"], ..INIT }];
+        let with = |named| DomainTables { entry: EntryRule { kinds: &[], roles: &[], named }, ..TABLES };
+        assert_eq!(with(GO_INIT).validate(), Ok(()));
+        assert_eq!(
+            with(EMPTY).validate().unwrap_err(),
+            ["entry.named[0].exts holds an empty extension"]
+        );
+        assert_eq!(
+            with(DOTTED).validate().unwrap_err(),
+            ["entry.named[0].exts holds an extension with a dot"]
+        );
+    }
+
     #[test]
     fn activation_config_applies_weights_then_preset() {
         let base = TABLES.activation_config(None);
@@ -706,7 +825,7 @@ mod tests {
             entry: EntryRule {
                 kinds: &[ROUTE, NodeKindId(77), ROUTE],
                 roles: &[NodeKindId(78)],
-                named: &[NamedEntry { kinds: &[FUNCTION], exact: &[], prefixes: &[""] }],
+                named: &[NamedEntry { kinds: &[FUNCTION], exact: &[], prefixes: &[""], exts: &[] }],
             },
             effect_sinks: &[EffectSink { class: "db", kinds: &[ROUTE], via: &[EdgeCategoryId(55)] }],
             activation_weights: &[(CALLS, -1.0), (IMPORTS, f64::NAN), (CALLS, 2.0)],

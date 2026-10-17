@@ -2377,6 +2377,33 @@ fn go_signature(params: TsNode, result: Option<TsNode>, src: &[u8]) -> Option<St
     Some(format!("({})({})", params.join(","), results.join(",")))
 }
 
+/// DT.5l: the CA.3a signature of the Go method whose declaration text is
+/// `source` (a METHOD's CODE cell), read at query time: `source` is parsed as
+/// the one declaration of a `package p` file, and the first
+/// `method_declaration` of that file gives [`go_signature`] of its
+/// `parameters` and `result`, the text `CodeNav::method_sigs` records for the
+/// method at build time (which liveness cannot read: the store keeps no
+/// signature). Computed for a generic receiver too: a runtime-interface
+/// signature (`()(string)`) names no type parameter.
+///
+/// `None` when the text holds no method declaration (a `func` with no
+/// receiver, an interface method element such as `Scan(dest ...any) error`,
+/// any other text) or when [`go_signature`] refuses its parameters or result
+/// (a parse error there, its own rule). A parse error elsewhere, in the body,
+/// does not reject.
+pub fn method_signature(source: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+    parser.set_language(&lang).ok()?;
+    let text = format!("package p\n{source}");
+    let tree = parser.parse(&text, None)?;
+    let root = tree.root_node();
+    let mut c = root.walk();
+    let decl = root.named_children(&mut c).find(|n| n.kind() == "method_declaration")?;
+    let params = decl.child_by_field_name("parameters")?;
+    go_signature(params, decl.child_by_field_name("result"), text.as_bytes())
+}
+
 /// The result entries of a callable whose `result` field is `result`: a
 /// parameter list's entries ([`type_list`]), one type, or none.
 fn result_list(result: Option<TsNode>, src: &[u8]) -> Vec<String> {
@@ -9759,6 +9786,56 @@ func (b *bb) Build(info base.PickerBuildInfo) balancer.Picker { return nil }
             assert_eq!(sig(imp), sig(iface), "{imp} vs {iface}");
         }
         assert_ne!(sig("app::R::Build"), sig("app::PickerBuilder::Build"));
+    }
+
+    /// DT.5l: the signature read back from a METHOD's CODE text is CA.3a's,
+    /// generic receivers included; a function, an interface element and a
+    /// code_span JSON read as none, a body parse error does not reject.
+    #[test]
+    fn method_signature_reads_a_declarations_text() {
+        for (code, want) in [
+            ("func (e *Error) Error() string { return e.Message }", "()(string)"),
+            (
+                "func (g GeoCoordinates) MarshalJSON() ([]byte, error) { return nil, nil }",
+                "()([]byte,error)",
+            ),
+            ("func (s *S) Scan(src interface{}) error { return nil }", "(any)(error)"),
+            (
+                "func (h *H) ServeHTTP(w http.ResponseWriter, r *http.Request) {}",
+                "(ResponseWriter,*Request)()",
+            ),
+            ("func (b byAge) Less(i, j int) bool { return b[i] < b[j] }", "(int,int)(bool)"),
+            ("func (s Set[T]) String() string { return \"\" }", "()(string)"),
+            ("func (p P) String() string { return ) }", "()(string)"),
+            ("// String is a doc comment.\nfunc (p P) String() string { return \"\" }", "()(string)"),
+        ] {
+            assert_eq!(method_signature(code).as_deref(), Some(want), "{code}");
+        }
+        for code in [
+            "func Free() string { return \"\" }",
+            "Scan(dest ...any) error",
+            r#"{"code_span":{"file":"a.go","start":0,"end":10,"xxh64":"0"}}"#,
+            "",
+            "func (p P) Bad(x [) string { return \"\" }",
+        ] {
+            assert_eq!(method_signature(code), None, "{code}");
+        }
+        // The text the build records for the same method.
+        let source = "package app\n\ntype Q struct{}\n\nfunc (q *Q) Len() int { return 0 }\n";
+        let parse = parse_file(source, "app/q.go", "app", "example.com/app", repo()).unwrap();
+        let id = method_id("app::Q::Len");
+        let code = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::CODE))
+            .map(|c| match &c.payload {
+                CellPayload::Text(t) => t.clone(),
+                other => panic!("CODE is text: {other:?}"),
+            })
+            .expect("a CODE cell");
+        assert_eq!(method_signature(&code).as_deref(), Some(parse.nav.method_sigs[&id].as_str()));
+        assert_eq!(parse.nav.method_sigs[&id], "()(int)");
     }
 
     #[test]

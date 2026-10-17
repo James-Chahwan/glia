@@ -1,0 +1,132 @@
+{
+  "framework": "runtime-invoked-entries",
+  "language": "go+typescript+dart+kotlin+swift+python",
+  "dirs": [
+    "go",
+    "web",
+    "admin",
+    "mobile",
+    "scripts"
+  ],
+  "note": "DT.5l: entries and runtime-invoked members no source line calls, each beside a look-alike that must stay dead or unbound. Go: a top-level `func init()` is an entry (a NamedEntry gated to .go files: a TS or Python function named init stays an ordinary name, as does a Go METHOD named init); String / MarshalJSON of a live Point are invoked through fmt.Stringer / json.Marshaler, signature-checked (Point::Scan() bool is no sql.Scanner), never for a dead owner (Orphan::String); a live Queue's lone Len() int stays dead (sort.Interface is Len + Less + Swap). TS: getTranslation of a class implementing @jsverse/transloco's TranslocoLoader, and handleError of an @angular/core ErrorHandler, read off the class's unbound heritage ref plus the library its file imports; FakeLoader (imports the library, no heritage) and admin's LocalLoader (imports the library, implements an in-repo look-alike interface the ref binds to) stay dead. Dart: onRequest of a dio Interceptor subclass; Logger::onRequest (imports dio, no heritage) stays dead. Kotlin: `class MainActivity : FlutterActivity()` under an io.flutter import is a ROLE COMPONENT entry; Shadow (FlutterActivity imported from elsewhere) is not. Swift: an `@main` type is a ROLE COMPONENT entry and UIKit calls its application(..); SceneHelper (no @main) stays dead. Python: a call in `if __name__ == \"__main__\":` is the MODULE's, and the MODULE carries an ENTRYPOINT cell (source main_guard); a def inside the guard is not walked; a bare call binds the caller's own nested def before a module-level one (LEGB), so the module-level double loses its only caller; `if name == \"__main__\":` is no guard. Liveness is not graph content, so the rows are asserted by engine/tests/dead_runtime.rs; this key pins the edges and cells the fix adds and that no hop is stored as an edge. Tag 0.5.2-complete (debug CLI, `glia gaps go --with web --with admin --with mobile --with scripts --category dead_symbol`): 30 dead_symbol rows, `[live] profile=code entrypoints=4 (kind=2 role=2 declared=0) owners=2 implementers=0 invoked=3 reached=19/80`.",
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "geo::geo::init",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "geo::geo::Point::MarshalJSON",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::app::i18n::http.loader::HttpLoader::getTranslation",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::http::auth_interceptor::AuthInterceptor::onRequest",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "ios::Runner::AppDelegate::application",
+      "exact": true
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "tool::compute::double",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "tool",
+      "to": "tool::compute",
+      "category": "CALLS",
+      "exact": true,
+      "note": "a call inside the __main__ guard is the MODULE's"
+    },
+    {
+      "from": "tool::compute",
+      "to": "tool::compute::double",
+      "category": "CALLS",
+      "exact": true,
+      "note": "the caller's own nested def wins (Python LEGB), parser:python rule nested_def"
+    },
+    {
+      "from": "src::app::app.component::AppComponent",
+      "to": "src::app::i18n::http.loader::HttpLoader",
+      "category": "INJECTS",
+      "note": "what makes the loader's owner live"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "ios::Runner::AppDelegate",
+      "cell": "ROLE",
+      "contains": "COMPONENT",
+      "note": "@main"
+    },
+    {
+      "kind": "CLASS",
+      "node": "com::example::app::MainActivity",
+      "cell": "ROLE",
+      "contains": "COMPONENT",
+      "note": "FlutterActivity under an io.flutter import"
+    },
+    {
+      "kind": "MODULE",
+      "node": "tool",
+      "cell": "ENTRYPOINT",
+      "contains": "\"source\":\"main_guard\""
+    }
+  ],
+  "forbid": [
+    {
+      "from": "tool::compute",
+      "to": "tool::double",
+      "category": "CALLS",
+      "note": "the nested def shadows the module-level double (violated at the tag: the parser bound module_functions first)"
+    },
+    {
+      "from": "notmain",
+      "to": "notmain::work",
+      "category": "CALLS",
+      "note": "`name == \"__main__\"` is no __main__ guard"
+    },
+    {
+      "from": "geo::geo::Point",
+      "to": "geo::geo::Point::String",
+      "category": "CALLS",
+      "note": "the runtime-invoked hop is walk-local, never an edge"
+    },
+    {
+      "from": "src::app::i18n::http.loader::HttpLoader",
+      "to": "src::app::i18n::http.loader::HttpLoader::getTranslation",
+      "category": "CALLS",
+      "note": "the external-base hop is walk-local, never an edge"
+    },
+    {
+      "from": "ios::Runner::AppDelegate",
+      "to": "ios::Runner::AppDelegate::application",
+      "category": "CALLS",
+      "note": "the app-delegate hop is walk-local, never an edge"
+    },
+    {
+      "from": "lib::http::auth_interceptor::AuthInterceptor",
+      "to": "lib::http::auth_interceptor::AuthInterceptor::onRequest",
+      "category": "CALLS",
+      "note": "the dio hop is walk-local, never an edge"
+    },
+    {
+      "from": "tool",
+      "to": "tool::helper",
+      "category": "CALLS",
+      "note": "a def inside the guard (`later`) is not walked: its call to helper is never the MODULE's"
+    }
+  ]
+}

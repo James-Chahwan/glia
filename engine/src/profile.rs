@@ -621,6 +621,17 @@ mod tests {
         // 11 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
         // `main` / `test*` / `Test*` match.
         assert_eq!(entries_without_roles, 11 * 8 + 2 * 5);
+        // DT.5l: a Go `func init()` is an entry through the file's extension
+        // only; the extension-blind pin above never sees it, a TS / Python
+        // `init` and a Go METHOD `init` are no entries.
+        let init = |kind, ext: &str| {
+            let ext = ext.to_string();
+            t.entry.is_entry_at(Some(kind), "init", &[], || Some(ext))
+        };
+        assert!(init(nk::FUNCTION, "go"));
+        assert!(!init(nk::FUNCTION, "ts") && !init(nk::FUNCTION, "py"));
+        assert!(!init(nk::METHOD, "go"));
+        assert!(!t.entry.is_entry_at(Some(nk::FUNCTION), "init", &[], || None));
 
         assert_eq!(CODE_PROFILE.validate(), Ok(()));
         assert_eq!(
