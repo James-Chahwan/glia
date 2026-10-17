@@ -685,6 +685,10 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   `Fleet::Get -USES-> models::vehicle::Problem` forbid (written for DT.1f's go_wire edge; Get builds `models.Problem{..}`,
   so the new composite_literal USES is correct). Add an evidence-rule filter to forbid rows and restore the guard as
   "no USES rule json_response to Problem".
+- W30 (DT.5k, its own risks): an accessor inherited from a superclass is not bound (heritage edges are drawn after
+  resolve_calls); member reads in Angular templates (DT.5b) are not covered; `TestBed.inject(T)` locals stay untyped (20 sites
+  across Kina and quokka-stack); the static-member fallback keeps LA.30c's Upper.Upper filter, so a lowercase static like
+  `Api.baseUrl` stays unbound cross-file; `Promise<T>` / `Observable<T>` return annotations name only the wrapper.
 
 ## 3. Open questions for James
 
