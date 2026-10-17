@@ -298,6 +298,8 @@ Not candidates: each becomes packets in the spec run.
    every ROUTE 87,788 kB, one direct forbid 99,388 kB. The representation work is in `rules/src/{relation,value,eval,
    closure}.rs`; 0.5.3 sets one memory budget for watch and rules together; when it lands, `X10_RSS_GATE_KB` in `rules/tests/cost.rs`
    comes back down toward 153,600 kB (x10 peak at 0.5.2 W7: 287,236 kB).
+   Data point (repo-graph-8d, 2026-10-18, its 0.5.2 port; VmRSS steady over six edits): a held WatchSession vs a rebuild
+   loop is quokka-stack 164 vs 138 MB (0.12 vs 0.17 s / update) and glia 940 vs 500 MB (1.93 vs 2.33 s).
 4. **One tier vocabulary.** `rules::value::Tier`, the string consts in `why.rs` / `check.rs` and `implementors.rs`'s
    enum become one code-domain type (§E W1, DA.3), before Engram's HEURISTIC rows add a fifth reading.
 5. **Runner fixes** (the 0.5.2 waves found both; the session landed them for the remaining 0.5.2 waves too):
@@ -321,6 +323,23 @@ Not candidates: each becomes packets in the spec run.
    find, pack, hotspots and `PyGraph.activate`. `activation::algo::ppr` (push PPR, Andersen-Chung-Lang, local: touches only
    nodes near the seeds) stays too, though ppr_side was its only caller: it is a candidate in item 8's ranking test, kept or
    removed on that result. Engram removes its reader (flat-ppr, `--ppr`, the release feature).
+
+8. **Ranking: intent + structure (James 2026-10-18: *"we probably should test also ppr or a form of hybrid ppr is probably
+   what we want like ppr pooled clusters"*, *"i knew ppr for walking + hybridsation from engram would slap"*, *"yeah that
+   goes into 0.5.3 here"*).** Evidence: `dev-notes/ranking-eval-2026-10-18.md` (harness `engine/examples/rank_eval.rs`):
+   on held-out commits, H9 = minmax(BM25 over past commit messages -> the files they touched) blended with PPR beats PPR
+   alone (glia recall@10 0.294 -> 0.411, Kina +0.08-0.11, quokka +0.06 n.s.); PPR beats BFS only on glia; co-change helps
+   only as a tie-break (H10, +0.10 MRR); use-weighted edges raise MRR, not recall (84-93% of co-changing file pairs share
+   no direct edge). First re-run the eval with real PR / issue text as the intent (the commit's own message is optimistic),
+   then: H9 for `review` / `find` when text exists, H10 for `impact` / blast-radius, sum pooling to files, the PPR index
+   kept hot between calls (~3x), edge weights retuned from the inefficiency map (HTTP_CALLS / HANDLED_BY overpaid, TESTS /
+   IMPLEMENTS / INHERITS_FROM underpaid), and task / intent as a first-class domain (commits, PRs, issues as nodes linking
+   intent to the files they touched; [[the missing walker]]).
+9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
+   James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
+10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
+    call, the `glia` CLI and `uvx mcp-repo-graph` as alternate transports, once item 9 ships (James via repo-graph-8d);
+    until then repo-graph keeps its six. Licence (PolyForm NC + overlay) is James's to confirm.
 
 ### E. From the 0.5.2 waves
 
