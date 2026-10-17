@@ -63,6 +63,18 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   again and hopefully we can rul the 0.5.3 answer any questions then begin build overnight"*: after DT.13, the Kina +
   quokka-stack demos re-run, then this spec run, then 0.5.3's waves.
 
+- 2026-10-18, relayed by engram-34 after its registered run at `0.5.2-complete` (PPR candidates: 9 wins / 20 losses):
+  *"if it has no benefit and we know of better versions we should tell glia what we learned for this specific choice vs ppr
+  and get it removed and changed before 0.5.3 it's a dumb feature to keep then"*. So 0.5.3 REMOVES DE.5 (§F item 7), and
+  glia builds nothing for Engram's ranking on spec (glia's vectors and flow search as Engram recall candidates included):
+  Engram registers a test with a reason from its own record first, then asks. Engram's lessons, for the spec run: ranking
+  by static code structure did not help Engram's recall three times (spreading inside the read, a negative learned weight
+  -0.13, PPR pool candidates 9/20); what carries value is learning from use, the session's work neighbourhood / per-file
+  evidence, rename / move identity (DE.3 / DE.4: 13 of Kina's 18 and 19 of glia's 40 renamed questions answered only with
+  old addresses) and accurate edges / fewer false dead symbols (glia stream strict +15 / -2 at the tag). This covers
+  Engram's recall only, not glia's own PPR in find / activation (judged by glia's gates). Anchoring memories on flows
+  (Kina corrections with no code node) is a separate question, open with James.
+
 ## 1. The train
 
 | release | contents |
@@ -289,6 +301,12 @@ Not candidates: each becomes packets in the spec run.
    DATA_ENTITY kinds, mechanisms, external hosts, docs governing a hop. Rank by match tier, then the matching hop's
    depth; show which hop matched. `find` gains the same view (the flows through its hits). §B's semantic tier feeds
    this too (open question 2, in part).
+
+7. **Remove DE.5 (James 2026-10-18, §0).** engram-export loses `--ppr-candidates`, `src/ppr_side.rs`, exit code 8, its
+   `glia-activation` dependency and tests/ppr_side_v6.rs; `activation::algo::ppr` (push PPR, Andersen-Chung-Lang) goes with
+   it, since ppr_side was its only consumer (glia's own PPR, `glia_activation::activate` / ActivationPlan, stays). The
+   combined handoff drops the 0.5.2 Engram handoff's §3.5, its breaks-table row and the `.ppr.jsonl` .gitignore line;
+   CLAUDE.md / README lose the DE.5 text. Engram removes its reader (flat-ppr, `--ppr`, the release feature).
 
 ### E. From the 0.5.2 waves
 
