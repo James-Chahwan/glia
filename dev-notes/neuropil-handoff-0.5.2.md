@@ -1,11 +1,13 @@
 # neuropil handoff - glia 0.5.2 (the four bets 2026-10-16, the tweaks 2026-10-17)
 
-**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
-writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
-version goes 0.5.1 -> 0.5.3 in one bump, every pin below reads `=0.5.3`, and the local tag
-`0.5.2-complete` marks the commit where 0.5.2 ends. Section 10 adds the tweaks (DT.1a-DT.13, waves
-W15-W26) to the W0-W14 content below, and section 11 the close-out (DT.5h-DT.5l, the dead_symbol
-false positives, waves W27-W30, and DT.14).
+**glia 0.5.2 is released 2026-10-18 (tag `v0.5.2`), and every pin below reads `=0.5.2`.** James,
+2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next week"*. That reverses the
+2026-10-17 plan of no 0.5.2 release (*"can't we just go 0.5.1-> 0.5.3 release"*), under which this file
+was written as the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff; it is now the whole 0.5.2 handoff,
+and neuropil applies it after the publish. 0.5.3, paced over the week, is a normal 0.5.2 -> 0.5.3
+release with its own handoff. Section 10 adds the tweaks (DT.1a-DT.13, waves W15-W26) to the W0-W14
+content below, and section 11 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves
+W27-W30, and DT.14).
 
 The third glia -> neuropil handoff, after `neuropil-handoff-0.5.0.md` and `neuropil-handoff-0.5.1.md`.
 neuropil is glia's in-process Rust consumer: it path-depends on six glia crates and calls
@@ -46,7 +48,7 @@ an id is the glia commit that landed it.
    **new=0 errors** under `--all-targets` against glia `12f58844` (section 1), and again with the
    tweaks, against glia `9a8e56e0` + DT.13 (section 10.1). Every 0.5.2 api_signature
    break (section 4) is on an item neuropil never names: grep of `crates/` finds 0 hits for each.
-3. **Pin exactly, all six crates:** `version = "=0.5.3"` on every glia path dependency (section 2).
+3. **Pin exactly, all six crates:** `version = "=0.5.2"` on every glia path dependency (section 2).
    Since 0.5.1 every glia crate takes the workspace version, so the 0.5.1 handoff's "only glia-engine
    carries the release version" no longer holds.
 4. **Persisted state re-keys once for the nodes whose qname or kind moved** (section 3): Go ROUTEs on
@@ -61,14 +63,14 @@ an id is the glia commit that landed it.
 6. **Optional, in-process:** `glia_engine::watch::WatchSession` is the "per-shard incremental rebuild
    path" `watcher.rs:1-7` waits for (v1.1); `glia_engine::memory::release_freed_memory` after dropping
    a `GenerateResult` (section 7).
-7. **Reinstall the `glia` binary from the v0.5.3 tag** with neuropil's move: the hooks prompt
+7. **Reinstall the `glia` binary from the v0.5.2 tag** with neuropil's move: the hooks prompt
    (`hooks_install_prompt.rs`) installs hooks that run `glia build .`, and two glia versions writing one
    `.glia/graph/` rebuild each other's layout ("written by another glia build").
 
 Bump order:
-1. glia is bumped and tagged by James at the end of 0.5.3 (`[workspace.package].version` in
-   `Cargo.toml:74`, `py/pyproject.toml:7`, the excluded `engram-export/Cargo.toml:3`, all 0.5.1 ->
-   0.5.3 together, tag `v0.5.3`). 0.5.2 is never released; `0.5.2-complete` is a local marker tag.
+1. glia is bumped in the release commit (`[workspace.package].version` in `Cargo.toml:74`,
+   `py/pyproject.toml:7`, the excluded `engram-export/Cargo.toml:3`, all 0.5.1 -> 0.5.2 together);
+   James pushes it and tags `v0.5.2` (2026-10-18).
 2. In neuropil: the 0.5.0 handoff sections 2-3, the pin (section 2 here), `cargo check --workspace
    --all-targets`, then the re-test (section 8), re-setting state for this doc's section 3 and the
    0.5.1 handoff's section 3 together.
@@ -115,14 +117,14 @@ error until neuropil renames. The `NEUROPIL_DIR` recipe above stands in for it, 
 
 | where | 0.5.0 handoff asked | 0.5.2 adds |
 |---|---|---|
-| `Cargo.toml:112-117` | `repo-graph-<x> = { path = "../glia/<dir>" }` -> `glia-<x> = { path = ... }`; projection-text feature `driver` -> `research` | `version = "=0.5.3"` on all six: `glia-core`, `glia-code-domain`, `glia-graph`, `glia-engine`, `glia-activation`, `glia-projection-text` (e.g. `glia-engine = { path = "../glia/engine", version = "=0.5.3" }`) |
+| `Cargo.toml:112-117` | `repo-graph-<x> = { path = "../glia/<dir>" }` -> `glia-<x> = { path = ... }`; projection-text feature `driver` -> `research` | `version = "=0.5.2"` on all six: `glia-core`, `glia-code-domain`, `glia-graph`, `glia-engine`, `glia-activation`, `glia-projection-text` (e.g. `glia-engine = { path = "../glia/engine", version = "=0.5.2" }`) |
 | `crates/neuropil-app/Cargo.toml:86-94` | `repo-graph-<x>.workspace = true` -> `glia-<x>.workspace = true` | nothing |
 | `crates/**/*.rs` | 165 `repo_graph_*` path tokens -> `glia_*` (0.5.0 handoff section 2) | nothing |
 
 All six crates read `version.workspace = true` (checked: the copy's lock lists every glia package at
 0.5.1, the workspace version). A `version` on a path dependency must match the crate's own version, so
-add the pin after James's 0.5.3 bump: until then glia HEAD (and `0.5.2-complete`) reads 0.5.1 and
-`=0.5.3` fails resolution.
+check out glia at the `v0.5.2` tag before adding it: a glia checkout before the release commit reads
+0.5.1, and there `=0.5.2` fails resolution.
 
 ## 3. What re-keys: qname-keyed state and NodeId anchors
 
@@ -308,7 +310,7 @@ and is not `#[non_exhaustive]`: an exhaustive `match` outside glia would break (
 - **DE.8** ("neuropil state keyed by a removed `grpc_client:` qname goes stale"): correct, section 3.
 - **The 0.5.1 handoff, section 2** ("only glia-engine takes `=0.5.1`; the other five keep their own
   crate versions"): superseded. The 0.5.1 bump moved every glia crate to the workspace version, so all
-  six take `=0.5.3` (there is no 0.5.2 release).
+  six take `=0.5.2`.
 
 ## 7. Optional: new in-process primitives
 
@@ -355,8 +357,8 @@ python3 tools/visual_regression.py compare
   section 8 (with the 0.5.1 and 0.5.2 re-keys).
 - **Landed after this doc was first written:** the tweaks, W15-W26 (section 10); DT.13 re-ran section
   1's check at the tweaks' last code commit: `new=0`.
-- **Pending, James:** testing, the one 0.5.1 -> 0.5.3 bump and tag at the end of 0.5.3, then `cargo
-  install --path cli --locked` from the tag so the `glia` on PATH matches.
+- **Released 2026-10-18:** the 0.5.1 -> 0.5.2 bump is the release commit; James pushes it and tags
+  `v0.5.2`. Then `cargo install --path cli --locked` from the tag, so the `glia` on PATH matches.
 - **Pending, glia (not owned by a packet):** `check-neuropil.sh` still copies neuropil verbatim (the
   0.5.0 handoff's open item).
 - **Checked, no neuropil change:** D0.3-D0.8 (empty module slots); DA.1-DA.20 (the `glia-rules`
@@ -487,8 +489,7 @@ were audited, 103 false and 73 truly dead, and each false mechanism became one p
 (`332e66e5`) Dart names and member reads, DT.5l (`b7f4dace`) runtime-invoked entries and members,
 DT.5i (`bf53a65e`) Riverpod receivers and the Dio interceptor ROLE, DT.5j (`784d8553`) Go receiver
 typing and values, DT.5k (`aa30014b`) TS receivers. At glia HEAD `1212a3be` Kina reads 32 rows and
-quokka-stack 41, the audit's truly dead set exactly. The `0.5.2-complete` tag moves from `421af2d8`
-(after DT.13) to the commit after DT.14. Sources: each packet's landed commit body and the routed
+quokka-stack 41, the audit's truly dead set exactly; the released 0.5.2 carries all of it. Sources: each packet's landed commit body and the routed
 handoff paragraphs in `dev-notes/leap-052-corrections.json`; neuropil read read-only at the same
 `b140d1e` with the same 50 dirty paths.
 

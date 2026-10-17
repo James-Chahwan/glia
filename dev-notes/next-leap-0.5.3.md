@@ -1,7 +1,7 @@
 # glia 0.5.3 — scale, plus the Engram sidecars (scope seed)
 
 Seeded 2026-10-15 at `6da2965`, before any 0.5.2 wave ran. This is a scope list, not a spec: the packet spec run
-happens after 0.5.2 lands (its repo-graph handover is held until after 0.5.3, §0), so every packet is verified against what 0.5.2
+happens after the 0.5.2 release (2026-10-18, §0), so every packet is verified against what 0.5.2
 actually built. Items join this list as 0.5.2's waves surface them (close-out followups with no 0.5.2 owner).
 
 ## 0. Decisions (verbatim)
@@ -36,8 +36,9 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   determinism check runs now at 0.5.2 wave 5 (`3921a636`); the Kina + glia replays (re-keys with X1 off and on,
   `flat-ppr` vs `flat-fs`) run once at the 0.5.2 release candidate after W14; the 8 public streams only if those pass.
   Corrections: James then, *"no still in 0.5.3"* - the Engram corrections writer stays in 0.5.3 (§B).
-- 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. The repo-graph handover moves after
-  0.5.3: repo-graph takes 0.5.2 and 0.5.3 together, from one combined handoff written by 0.5.3's release docs packet.
+- 2026-10-16 (reversed 2026-10-18, below): *"Hold repo graph for post 0.5.3 better to do all changes at once"*. The
+  repo-graph handover moves after 0.5.3: repo-graph takes 0.5.2 and 0.5.3 together, from one combined handoff written
+  by 0.5.3's release docs packet.
   New order: 0.5.2 waves -> DZ.1 / DZ.2 (the 0.5.2 handoffs are written and committed; the repo-graph one is not
   sent) -> Engram's Kina + glia replays at the 0.5.2 release candidate -> this spec run -> 0.5.3 waves -> the combined
   repo-graph handover.
@@ -53,15 +54,24 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   (T8), pyo3 category names (T9), smart contracts across the stack (T10), GraphQL root-field pairing (T11), and one hint
   format with `glia cell set --hint` (T12, the §B "caller hint" and "one hint format" items). The 0.5.3 spec run reads
   this seed minus those, and re-measures after the tweaks land.
-- 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*, then *"yeah sounds fine"*. **0.5.2 is never released.** The
-  commit where the 0.5.2 tweaks end (DT.13) gets a local marker tag `0.5.2-complete` (no bump, no publish); Engram's Kina
-  + glia replays and its `--hint` writer switch run at that tag, built from source (binaries there print
-  `0.5.1+p<stamp>`). The version goes 0.5.1 -> 0.5.3 in one bump (Cargo workspace, `py/pyproject.toml`,
+- 2026-10-17 (reversed 2026-10-18, below): *"can't we just go 0.5.1-> 0.5.3 release"*, then *"yeah sounds fine"*.
+  **0.5.2 is never released.** The commit where the 0.5.2 tweaks end (DT.13) gets a local marker tag
+  `0.5.2-complete` (no bump, no publish); Engram's Kina + glia replays and its `--hint` writer switch run at that tag,
+  built from source (binaries there print `0.5.1+p<stamp>`). The version goes 0.5.1 -> 0.5.3 in one bump (Cargo workspace, `py/pyproject.toml`,
   `engram-export/Cargo.toml`) at the end of 0.5.3. 0.5.3's release docs packet merges all three 0.5.2 handoffs
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md`) into one combined 0.5.1 -> 0.5.3 handoff per consumer,
   and folds README / py/README's 0.5.2 sections into 0.5.3's. Also *"okay after this we should test kina and quokka-stack
   again and hopefully we can rul the 0.5.3 answer any questions then begin build overnight"*: after DT.13, the Kina +
   quokka-stack demos re-run, then this spec run, then 0.5.3's waves.
+- 2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next week"*, then "I prep, you push" and
+  "repo-graph upgrades to 0.5.2 now". **0.5.2 is released** (2026-10-18, tag `v0.5.2`, glia-py 0.5.2 on PyPI; the
+  session prepares the release commit, James pushes, tags and publishes), reversing the two entries above: the version
+  goes 0.5.1 -> 0.5.2 now (Cargo workspace, `py/pyproject.toml`, `engram-export/Cargo.toml`), the three 0.5.2 handoffs
+  are each consumer's whole 0.5.2 handoff with exact `=0.5.2` / `glia-py==0.5.2` pins, and repo-graph upgrades to 0.5.2
+  now (no longer held). Engram's registered replays at `0.5.2-complete` (`196728e3`, below and §E) stand: no source file
+  changes between that tag and `v0.5.2`. **0.5.3 is a normal 0.5.2 -> 0.5.3 release**, paced over the week: this spec
+  run, its waves and follow-ups, then its own release docs packet with its own 0.5.2 -> 0.5.3 handoff per consumer (no
+  combined 0.5.1 -> 0.5.3 handoff, no fold of README / py/README's 0.5.2 sections).
 
 - 2026-10-18, relayed by engram-34 after its registered run at `0.5.2-complete` (PPR candidates: 9 wins / 20 losses):
   *"if it has no benefit and we know of better versions we should tell glia what we learned for this specific choice vs ppr
@@ -304,8 +314,9 @@ Not candidates: each becomes packets in the spec run.
 
 7. **Remove DE.5's Engram side file (James 2026-10-18, §0; then *"oh it's diff usecases of ppr btw in engram its recal in
    glia its walking"*).** engram-export loses `--ppr-candidates`, `<out>.ppr.jsonl`, `src/ppr_side.rs`, exit code 8, its own
-   `glia-activation` dependency and tests/ppr_side_v6.rs; the combined handoff drops the 0.5.2 Engram handoff's §3.5, its
-   breaks-table row and the `.ppr.jsonl` .gitignore line; CLAUDE.md / README lose the export text. glia's PPR for walking
+   `glia-activation` dependency and tests/ppr_side_v6.rs; 0.5.3's Engram handoff declares the removal as a break (it
+   undoes the 0.5.2 Engram handoff's §3.5, its breaks-table row and the `.ppr.jsonl` .gitignore line); CLAUDE.md /
+   README lose the export text. glia's PPR for walking
    stays: `glia_activation::activate` / ActivationPlan (power iteration) in blast-radius / diff-impact / review, resolve /
    find, pack, hotspots and `PyGraph.activate`. `activation::algo::ppr` (push PPR, Andersen-Chung-Lang, local: touches only
    nodes near the seeds) stays too, though ppr_side was its only caller: it is a candidate in item 8's ranking test, kept or
@@ -525,9 +536,10 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W14 (DZ.2): the header comment of `engine/src/rules/reflexion.dl` still calls the native functions the parity oracle
   "until DB.8b deletes them"; the goldens (`engine/tests/data/reflexion/`) are the oracle now (comment-only; engine is a
   PARSER_STAMP root, so the first 0.5.3 packet in `engine/src/rules` or the release docs packet makes it).
-- W14 (DZ.2): **0.5.3's release docs packet merges `dev-notes/repo-graph-handoff-0.5.2.md`** (held, the 0.5.2 half) into
-  one combined repo-graph handoff with the `glia-py==0.5.3` pin; each row already names packet, commit, old -> new and the
-  wrapper site at repo-graph 0f8ecfa, but re-read the wrapper's line numbers at its HEAD then.
+- W14 (DZ.2), superseded 2026-10-18 (§0): `dev-notes/repo-graph-handoff-0.5.2.md` is the active 0.5.2 handoff
+  (`glia-py==0.5.2`), and **0.5.3's release docs packet writes its own 0.5.2 -> 0.5.3 repo-graph handoff** with the
+  `glia-py==0.5.3` pin; the 0.5.2 rows name the wrapper sites at repo-graph 0f8ecfa, so re-read the wrapper's line
+  numbers at its HEAD then.
 - W14 (DZ.2): `scripts/check-neuropil.sh` still copies neuropil verbatim (open since the 0.5.0 handoff); the neuropil
   handoff's NEUROPIL_DIR copy recipe stands in until neuropil renames.
 - W14 (DZ.1, DD.16): `scripts/eval_substrate.py:229` keeps a PackageResolver row for category 31, and
@@ -689,7 +701,7 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   port endpoint_fold::deployment_hosts to WS_CLIENT.
 - W26 (DT.13, DT.5g): a getter read through a typed receiver or injected field (`this.authService.isAuthenticated`)
   should be a CALLS of the other class's accessor in graph/src/calls.rs's receiver pass (quokka-stack has 2).
-- W26 (DT.13), for the combined repo-graph handoff: optional wrapper fixes - `_dial_text` returns None for an HTTP
+- W26 (DT.13), for the repo-graph handoff (0.5.2's §9 lists them; 0.5.3's carries any still open): optional wrapper fixes - `_dial_text` returns None for an HTTP
   call-site payload (has `method`; DT.11b's GraphQL transport hits end `"via":"graphql"`) and renders `via=evm` hits by
   library / ABI; `_cell_text` could render SCHEMA_FIELDS as `name: type` pairs.
 - W27 (DT.5l, its own risks): gate a Go `init` entry on its package being imported by live code; an ext-gated named-entry
@@ -710,7 +722,7 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   resolve_calls); member reads in Angular templates (DT.5b) are not covered; `TestBed.inject(T)` locals stay untyped (20 sites
   across Kina and quokka-stack); the static-member fallback keeps LA.30c's Upper.Upper filter, so a lowercase static like
   `Api.baseUrl` stays unbound cross-file; `Promise<T>` / `Observable<T>` return annotations name only the wrapper.
-- W31 (DT.14), for the combined handoffs: repo-graph's `read` labels a parser-read main_guard ENTRYPOINT cell "declared
+- W31 (DT.14), for the consumer handoffs (0.5.2's list them; 0.5.3's carry any still open): repo-graph's `read` labels a parser-read main_guard ENTRYPOINT cell "declared
   entry point" (server.py:663 / :703; label it "entry point" when source == main_guard, repo-graph handoff 10.1 row 1);
   neuropil's HUD cell_label (hud.rs:1552-1569) falls back to "CELL" for ROLE and ENTRYPOINT (optional arms, neuropil handoff
   11.4).
@@ -742,7 +754,7 @@ All four answered 2026-10-16 (§0); recorded as rulings:
 
 ## 4. Spec run
 
-After 0.5.2's DZ.2 (the repo-graph handover waits for 0.5.3, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
+After the 0.5.2 release (2026-10-18, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
 adversarial verifier, one integrator for wave 0 and the release docs), packet ids `E<group>.<n>[letter]` with `E0.*`
 as wave 0, packets in `dev-notes/leap-053-packets.json`, the runner's `--release 053` mode.
 

@@ -1353,11 +1353,15 @@ questions over one graph computes `entrypoint_reachable` once.
   every crate can be pinned `=0.5.1`. The handoff docs
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
   every declared break) cover W0–W19.
-- **0.5.2 — the four bets + the tweaks: landed, never released; ships in 0.5.3.** James,
-  2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*: no 0.5.2 bump, tag or publish; the
-  version goes 0.5.1 -> 0.5.3 in one bump at the end of 0.5.3, and the local marker tag
-  `0.5.2-complete` (set after DT.13, at `421af2d8`) moves to the commit after DT.14, the
-  close-out's last packet (tweaks ruling 7; a build there reports `0.5.1+p<stamp>`). Scope in
+- **0.5.2 — the four bets + the tweaks: complete on local `main`, version bumped, awaiting the
+  tag.** James, 2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next
+  week"*, then "I prep, you push" and "repo-graph upgrades to 0.5.2 now": 0.5.2 is released
+  2026-10-18 as tag `v0.5.2` and `glia-py` 0.5.2 on PyPI (his 2026-10-17 ruling, *"can't we just
+  go 0.5.1-> 0.5.3 release"*, is reversed), and 0.5.3 is paced over the week as a normal 0.5.2 ->
+  0.5.3 release. What remains is James's: push → tag `v0.5.2` → PyPI. The bump is done: the Cargo
+  workspace, `py/pyproject.toml` and the excluded engram-export read 0.5.2, so every crate can be
+  pinned `=0.5.2`. The code is the code at `196728e3`, where Engram ran its registered replays
+  (results in the 0.5.3 seed §E): only plan commits and the bump follow it. Scope in
   `dev-notes/next-leap-0.5.2.md` (§0.1 the binding decisions Q1–Q25, §4.2 the defaults the
   packets took), research `dev-notes/research-0.5.2/`, packets in
   `dev-notes/leap-052-packets.json` (153 packets in W0–W14, the gap run's DB.9a-c and DF.22a-c
@@ -1367,9 +1371,8 @@ questions over one graph computes `entrypoint_reachable` once.
   `dev-notes/wave-runner/schedule_052.py` (32 waves, W0–W31, runner `--release 052`). It may
   break contracts, each break declared by its packet; the handoffs are
   `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2, then DT.13 for the tweaks and
-  DT.14 for the close-out):
-  the 0.5.2 half of one combined 0.5.1 -> 0.5.3 handoff per consumer, which 0.5.3's release docs
-  packet writes (repo-graph is held for it, James 2026-10-16). The tweaks
+  DT.14 for the close-out), each with the exact pin (`glia-py==0.5.2`, `=0.5.2`) and every
+  declared break; repo-graph's is active, no longer held (James 2026-10-18). The tweaks
   (`dev-notes/tweaks-0.5.2.md`, the gaps the Kina and quokka-stack demos showed): T1 contract
   models (DT.1a-DT.1q: SCHEMA_FIELDS on TS / Go / Dart / GraphQL models, client wire shapes, Go
   server wire cells, the `models` pass with http_model / graphql_model identity, contract_fields
@@ -1411,7 +1414,8 @@ questions over one graph computes `entrypoint_reachable` once.
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
   dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
-- **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`): **0.5.3**
+- **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`, paced over the
+  week after the 0.5.2 release; a normal 0.5.2 -> 0.5.3 release with its own handoffs): **0.5.3**
   scale — Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
   build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,
   org-internal package routing on SAME_AS; plus James's 2026-10-16 additions there (local

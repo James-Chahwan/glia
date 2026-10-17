@@ -1,5 +1,5 @@
 {
-  "engine": "0.5.1",
+  "engine": "0.5.2",
   "fixtures": 419,
   "recall": {
     "angular-base-url": {

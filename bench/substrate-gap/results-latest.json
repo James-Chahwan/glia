@@ -8495,7 +8495,7 @@
       "via": "websocket"
     }
   },
-  "engine": "0.5.1",
+  "engine": "0.5.2",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/angular-inline-template-bindings",

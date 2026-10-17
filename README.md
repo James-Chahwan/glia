@@ -10,30 +10,32 @@ Rust engine. CLI `glia`, Python wheel `glia-py` (`import glia_py`; formerly `rep
 
 ## What it answers
 
-Real output, glia 0.5.1 on [grpc-go](https://github.com/grpc/grpc-go) (14,303 nodes, built in about a second):
+Real output, glia 0.5.2 on [grpc-go](https://github.com/grpc/grpc-go) (14,296 nodes, built in about a second):
 
 ```
 $ glia find grpc-go Invoke
-| match       | live | kind     | qname                                   | location          |
-| exact_name  | ●    | METHOD   | `clientconn::ClientConnInterface::Invoke` | clientconn.go:573 |
-| exact_name  | ●    | METHOD   | `call::ClientConn::Invoke`              | call.go:29        |
-| exact_name  | ⊘    | FUNCTION | `call::Invoke`                          | call.go:59        |
+| match       | live | kind     | qname                                         | location                |
+| exact_name  | ●    | METHOD   | `clientconn::ClientConnInterface::Invoke`     | clientconn.go:573       |
+| exact_name  | ●    | METHOD   | `call::ClientConn::Invoke`                    | call.go:29              |
+| exact_name  | ●    | METHOD   | `balancer_wrapper::acBalancerWrapper::Invoke` | balancer_wrapper.go:320 |
+| exact_name  | ⊘    | FUNCTION | `call::Invoke`                                | call.go:59              |
 ...
 
 $ glia blast-radius grpc-go call::ClientConn::Invoke --depth 2
-| score  | depth | live | via        | kind     | qname                                         | location          |
-| 0.0352 | 1     | ⊘    | CALLS      | FUNCTION | `call::Invoke`                                | call.go:59        |
-| 0.0329 | 1     | ●    | CALLS      | FUNCTION | `call::invoke`                                | call.go:65        |
-| 0.0316 | 1     | ●    | CALLS      | METHOD   | `test::end2end_test::s::TestMethodFromServerStream` | test/end2end_test.go:4921 |
-| 0.0071 | 1     | ●    | IMPLEMENTS | METHOD   | `clientconn::ClientConnInterface::Invoke`     | clientconn.go:573 |
+| score  | depth | live | via   | kind     | qname                                               | location                  |
+| 0.0310 | 1     | ●    | CALLS | FUNCTION | `call::invoke`                                      | call.go:65                |
+| 0.0211 | 1     | ⊘    | CALLS | FUNCTION | `call::Invoke`                                      | call.go:59                |
+| 0.0197 | 1     | ●    | CALLS | FUNCTION | `call::combine`                                     | call.go:40                |
+| 0.0190 | 1     | ●    | CALLS | METHOD   | `test::end2end_test::s::TestMethodFromServerStream` | test/end2end_test.go:4921 |
 ...
 
 $ glia why grpc-go call::ClientConn::Invoke call::invoke
-| category | confidence | tier | emitter     | rule          | site       |
-| CALLS    | strong     | fact | graph:calls | module_symbol | call.go:37 |
+| category | confidence | tier | emitter           | rule          | site       |
+| USES     | strong     | fact | graph:go_packages | func_value    | call.go:35 |
+| CALLS    | strong     | fact | graph:calls       | module_symbol | call.go:37 |
 
 $ glia tests-for grpc-go call::invoke
-- tests: 5 (fact 0, derived 5, heuristic 0) in 4 files
+- tests: 10 (fact 0, derived 10, heuristic 0) in 5 files
 | # | tier    | test                                              | at                              | via |
 | 1 | derived | `...grpclb_test::s::TestGRPCLBStatsUnaryFailedToSend` | balancer/grpclb/grpclb_test.go:1498 | `TestGRPCLBStatsUnaryFailedToSend` -[CALLS]-> `Invoke` -[CALLS]-> `invoke` |
 ...
@@ -96,18 +98,18 @@ HTTP (frontend Endpoint ↔ backend Route), gRPC (client ↔ proto service), RPC
 
 ## Numbers
 
-Measured on 2026-10-02 at v0.5.1, release build, 16 cores, best of 3 (`glia analyze`, nothing persisted):
+Measured on 2026-10-18 at v0.5.2, release build, 16 cores, best of 3 (`glia analyze`, nothing persisted):
 
 | repo | files | nodes | intra-repo edges | cross-edges | build (16 threads) | build (`GLIA_THREADS=1`) |
 |---|--:|--:|--:|--:|--:|--:|
-| [glia](https://github.com/James-Chahwan/glia) itself | 3,403 | 25,990 | 80,626 | 1,182 | 1.35s | 6.14s |
-| [flutter/samples](https://github.com/flutter/samples) | 4,845 | 19,287 | 30,065 | 120 | 1.77s | |
-| [grpc-go](https://github.com/grpc/grpc-go) | 1,150 | 14,303 | 44,741 | 1,426 | 1.07s | 3.76s |
-| [microservices-demo](https://github.com/GoogleCloudPlatform/microservices-demo) (11 services, 5 languages) | 393 | 3,083 | 4,749 | 106 | 0.08s | |
+| [glia](https://github.com/James-Chahwan/glia) itself | 4,136 | 36,721 | 122,591 | 1,742 | 2.16s | 10.24s |
+| [flutter/samples](https://github.com/flutter/samples) | 4,845 | 19,292 | 33,245 | 121 | 2.27s | |
+| [grpc-go](https://github.com/grpc/grpc-go) | 1,150 | 14,296 | 51,755 | 1,460 | 1.11s | 4.22s |
+| [microservices-demo](https://github.com/GoogleCloudPlatform/microservices-demo) (11 services, 5 languages) | 363 | 3,060 | 4,908 | 78 | 0.09s | |
 
 The graph is byte-identical at any thread count. A rebuild reuses a per-file parse cache, so only changed files are parsed again.
 
-**`glia watch` (0.5.2 code, unreleased: it ships in 0.5.3).** A held session re-reads only the edited file, rebuilds only the language group whose inputs moved and computes the delta over the rebuilt graphs. Measured 2026-10-16 after 0.5.2's code waves W0-W13 (`9de9114b`, before the tweaks), release build, 16 cores, default threads, on an otherwise idle machine, with `bench_one_line_edit`: three one-line edits of one file, each `[watch] update took=` beside a disk-incremental `glia build` of the same tree run right after it (`generate_one_incremental`: cache load, build, save):
+**`glia watch` (0.5.2).** A held session re-reads only the edited file, rebuilds only the language group whose inputs moved and computes the delta over the rebuilt graphs. Measured 2026-10-16 after 0.5.2's code waves W0-W13 (`9de9114b`, before the tweaks), release build, 16 cores, default threads, on an otherwise idle machine, with `bench_one_line_edit`: three one-line edits of one file, each `[watch] update took=` beside a disk-incremental `glia build` of the same tree run right after it (`generate_one_incremental`: cache load, build, save):
 
 | repo, edited file | groups rebuilt | watch update | incremental build |
 |---|--:|--:|--:|
@@ -117,7 +119,7 @@ The graph is byte-identical at any thread count. A rebuild reuses a per-file par
 
 Opening the session (one full build) took 1.22-1.27 s on glia and 0.81 s on grpc-go. A first run minutes earlier read within 8% of these, and its phase times show where an update goes: the Rust and Go updates are mostly that one group's rebuild (531-560 ms for glia's Rust group, 601-614 ms for grpc-go's Go group), while the Python update rebuilds a small group (25-27 ms), so the passes (resolve + post + finalize, about 175 ms), the grafts (67-74 ms) and cloning the reused groups out of the cache (47-129 ms) dominate it. Earlier numbers under sibling-build load, in the DC.7a / DC.7b commit bodies, read higher (glia Python 601-731 ms, Rust 1685-3101 ms, grpc-go 1035-1337 ms).
 
-**Memory (0.5.2 code, unreleased: it ships in 0.5.3).** A Python process that calls `generate()` repeatedly no longer grows: a PyGraph drop returns freed heap to the OS (glibc `malloc_trim`). `bench/rss/rss_loop.py`, 15 rebuilds in one process (Linux glibc, three runs agree): glia 410 -> 1,017 MB before, 404 -> 265 MB after; grpc-go 223 -> 520 MB before, 219 -> 170 MB after. A held pyo3 `WatchSession` over 12 updates: glia 668 -> 748 MB, grpc-go 290 -> 327 MB.
+**Memory (0.5.2).** A Python process that calls `generate()` repeatedly no longer grows: a PyGraph drop returns freed heap to the OS (glibc `malloc_trim`). `bench/rss/rss_loop.py`, 15 rebuilds in one process (Linux glibc, three runs agree): glia 410 -> 1,017 MB before, 404 -> 265 MB after; grpc-go 223 -> 520 MB before, 219 -> 170 MB after. A held pyo3 `WatchSession` over 12 updates: glia 668 -> 748 MB, grpc-go 290 -> 327 MB.
 
 ## Install
 
@@ -634,7 +636,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
   - **L. The matrix slice.** A queue framework tag only for an unexplained call, and a RabbitMQ declare is no consumer (CL.1). Go broker rows (CL.2). JVM / .NET broker rows (CL.3). JobRunr / Hangfire / asynq jobs (CL.4). Calls on a constructed object (CL.5a). Function-level TESTS (CL.5b). Go / C# GraphQL client requests (CL.6a) and HotChocolate resolvers (CL.6b). C# environment reads (CL.7a) and .NET `appsettings*.json` with the env cross-define (CL.7b). The Go asaskevich/EventBus (CL.8). NestJS `@Cron` / `@Interval` (CL.9). JVM process launches (CL.10). Two probe fixes (CL.11).
 - **Z. This refresh.** README `## CLI` held to `cli/surface/` by `cli/tests/readme_surface.rs` (CZ.1); CLAUDE.md and the `glia` skill (CZ.2); the finishing batch's docs and the three consumer handoffs (CZ.3).
 
-**0.5.2, the four bets and the tweaks (landed, never released: it ships in 0.5.3):** a Datalog rule layer with a GQL read front end, `glia watch`, cross-repo identity and Engram anchors, plus every 0.5.1 deferral and the rest of the coverage matrix (153 packets in waves W0–W14), then the tweaks the first real-repo demos asked for (57 packets in W15–W26), then the close-out: the dead-symbol false positives the re-demo's audit found (five packets in W27–W30) and a second docs pass (W31). There is no glia-py 0.5.2 on PyPI and no `v0.5.2` tag: the version goes 0.5.1 -> 0.5.3 in one bump at the end of 0.5.3, and the local tag `0.5.2-complete` marks where 0.5.2 ends (a build there reports `0.5.1+p<stamp>`). It may break contracts: each break is declared by its packet and listed in the repo-graph, neuropil and Engram handoff docs (`dev-notes/*-handoff-0.5.2.md`), the 0.5.2 half of each consumer's combined 0.5.1 -> 0.5.3 handoff. One registry id is allocated, edge category 37 SAME_AS, and the store format stays 3. Scope and the 25 resolved questions: [`dev-notes/next-leap-0.5.2.md`](./dev-notes/next-leap-0.5.2.md) §0.1; every packet: [`dev-notes/leap-052-packets.json`](./dev-notes/leap-052-packets.json), with [`dev-notes/leap-052-corrections.json`](./dev-notes/leap-052-corrections.json).
+**0.5.2, the four bets and the tweaks (complete on `main` and version-bumped; the tag and publish are the release gate, 2026-10-18):** a Datalog rule layer with a GQL read front end, `glia watch`, cross-repo identity and Engram anchors, plus every 0.5.1 deferral and the rest of the coverage matrix (153 packets in waves W0–W14), then the tweaks the first real-repo demos asked for (57 packets in W15–W26), then the close-out: the dead-symbol false positives the re-demo's audit found (five packets in W27–W30) and a second docs pass (W31). It keeps the name 0.5.2 and consumers pin it exactly (`glia-py==0.5.2`, `=0.5.2`), so it may break contracts: each break is declared by its packet and listed in the repo-graph, neuropil and Engram handoff docs (`dev-notes/*-handoff-0.5.2.md`). One registry id is allocated, edge category 37 SAME_AS, and the store format stays 3. Scope and the 25 resolved questions: [`dev-notes/next-leap-0.5.2.md`](./dev-notes/next-leap-0.5.2.md) §0.1; every packet: [`dev-notes/leap-052-packets.json`](./dev-notes/leap-052-packets.json), with [`dev-notes/leap-052-corrections.json`](./dev-notes/leap-052-corrections.json).
 - **0. Wave 0.** SAME_AS = edge 37 and the `same_as` slot (D0.1); the `glia-rules` crate, the release's one dependency commit and no external crate (D0.2); the module, pyo3 and CLI slots every later packet fills (D0.3–D0.8).
 - **A. The rules crate (`glia-rules`).** Levelled multi-source BFS in `activation::algo::reach` (DA.1); the rule IR and diagnostics (DA.2); the tier lattice and value table (DA.3); one lexer for Datalog and GQL (DA.4); stratification and analysis (DA.5a, DA.5b); the `FactSource` seam and the lazy EDB loader (DA.6); relation storage with (height, rule) provenance (DA.7); grouped count / min / max / sum (DA.8); the Datalog parser (DA.9); per-stratum plans (DA.10); `reaches` / `scc` over `activation::algo` (DA.11); magic sets for unseeded recursion (DA.12); a deterministic test kit (DA.13); the step interpreter and the levelled semi-naive evaluator with the row budget (DA.14a, DA.14b); `explain`, a row's minimal-height witness (DA.15); gates: every diagnostic by its text (DA.16), cost over glia's own graph (DA.17), an oracle (DA.18), determinism and budget (DA.19), and the toy proof, a nameless domain implementing `FactSource` inline (DA.20).
 - **B. Rules in the engine.** Overlay `version = 2`: `rule`, `transitive`, `via`, `min_tier` on `[[constraint]]` (DB.1); `CodeFacts`, `rules::query` / `validate` and the predicate prelude, which reads structure only (DB.2a–c, SECURITY.md); `glia check` evaluates rule invariants (DB.3a) and transitive forbids (DB.3b), gates on `min_tier` (DB.3d), and `glia review` blocks only on a new blocking violation (DB.3c); `rotted_rule` gaps (DB.4); `glia query` and `PyGraph.query` / `query_gql` (DB.5, DB.6); the GQL read subset parsed, lowered and answered (DB.7a–c); the reflexion model as rules, byte-identical to the native code it then replaced (DB.8a, DB.8b); rules through the overlay loop: `[[constraint]]` candidates, judged by the check delta, shown in the try report (DB.9a–c).
@@ -648,7 +650,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
 - **T. The tweaks** (W15–W26, [`dev-notes/tweaks-0.5.2.md`](./dev-notes/tweaks-0.5.2.md): the gaps the Kina and quokka-stack demos showed). T1 contract models: the wire vocabulary (DT.1a), TS directory imports (DT.1b) and re-export barrels (DT.1q), declared model fields (DT.1c), TS client wire shapes (DT.1d), Go server wire cells typed to their structs (DT.1e, DT.1f), the models pass's inputs and compare (DT.1g, DT.1m), `http_model` identity (DT.1h), model drift in `contracts --fields` (DT.1i), GraphQL schema types and selections (DT.1j), `graphql_model` identity (DT.1k), Dart client models (DT.1l), GraphQL selection drift (DT.1n), inferred-model breaks in `contract-breaks` and `review` (DT.1o, DT.1p). T2 NATS: mixed queue rows' tags (DT.2a), nats.go on any receiver (DT.2b), the subject grammar (DT.2c). T3 WebSockets: URLs read through locals, fields and builders (DT.3a), config bases folded (DT.3b), served routes out of `gaps` (DT.3c). T4 query-string suffixes (DT.4). T5 dead-symbol precision: Angular inline (DT.5a) and `templateUrl` templates (DT.5b), template receivers and decorated members (DT.5c), framework-invoked members and generated code (DT.5d), Flutter widget trees (DT.5e), gqlgen resolvers (DT.5f), TS value references and getter reads (DT.5g). T6 test-file routes out of the HTTP pool (DT.6a) and the route answers (DT.6b). T7 sub-project constraints (DT.7a), rules that check nothing (DT.7b, DT.7c). T8 check caveats once (DT.8a), located GQL rows (DT.8b). T9 traversal category names (DT.9). T10 smart contracts: Solidity procedures (DT.10a), the EVM resolver (DT.10b), ethers (DT.10c, DT.10i), hardhat / TypeChain / artifacts (DT.10d), go-ethereum calls (DT.10e), wrappers (DT.10f) and events / abigen (DT.10k), the cross-file ABI join (DT.10g), viem / wagmi / web3.js (DT.10j), the end-to-end fixture and caveats (DT.10h). T11 GraphQL root fields (DT.11a), transports (DT.11b), implied transports in `gaps` (DT.11c), the channel caveats (DT.11z). T12 one hint format with Engram: the hints side file (DT.12a) and `glia cell set --hint` (DT.12b). DT.13 this refresh.
 - **The close-out** (W27–W31, tweaks ruling 7: Kina 52 -> 32 and quokka-stack 124 -> 41 `dead_symbol` rows, the audit's truly dead set exactly). Dart names, tear-offs and member reads, and `glia_graph::build_dart` (DT.5h); Riverpod provider receivers and the Dio interceptor ROLE (DT.5i); Go element types, qualified fields, func / method values, composite literals and `pkg.F` handlers (DT.5j); TS signal queries, inline `inject(T)`, call-result locals and accessor reads (DT.5k); runtime-invoked entries and members: Go `init`, signature-checked Go runtime interfaces, `@main` app delegates, Flutter activities, external-base members, Python `__main__` guards and nested defs (DT.5l). DT.14 this refresh's second pass.
 
-**Next: 0.5.3, scale** (seed: [`dev-notes/next-leap-0.5.3.md`](./dev-notes/next-leap-0.5.3.md); its packets start from `0.5.2-complete`, and 0.5.3 is the next release): Stack Graphs-style incremental resolution with watch's body-only fast path, build-target graphs, multi-repo `glia watch --with`, org-internal package routing on SAME_AS; local embeddings (`glia embed`) feeding a semantic tier in `find` and the flow search; a clarification queue; one tier vocabulary; one memory budget for watch sessions and the rules evaluator; concept search over flows. The gaps 0.5.2 measured and left go there too:
+**Next: 0.5.3, scale** (seed: [`dev-notes/next-leap-0.5.3.md`](./dev-notes/next-leap-0.5.3.md); paced over the week after the 0.5.2 release, James 2026-10-18; a normal 0.5.2 -> 0.5.3 release with its own handoffs): Stack Graphs-style incremental resolution with watch's body-only fast path, build-target graphs, multi-repo `glia watch --with`, org-internal package routing on SAME_AS; local embeddings (`glia embed`) feeding a semantic tier in `find` and the flow search; a clarification queue; one tier vocabulary; one memory budget for watch sessions and the rules evaluator; concept search over flows. The gaps 0.5.2 measured and left go there too:
 - Go generic instantiation calls (`F[T](..)`); TS interface members as METHOD nodes, module-level instances, statics inherited through a subclass, superclass STATE_VARs and accessors, default-imported class types, `TestBed.inject(T)` locals, `Promise<T>` / `Observable<T>` return types, member reads in Angular templates, a lowercase static (`Api.baseUrl`) read across files.
 - From the tweaks: a WebSocket base bound once per deployment (`environment.ts` + `environment.prod.ts`) stays unfolded; `contracts --fields` reads an envelope-or-array client union (`{ activities: C[] } | C[]`) as no kind, so such a pair stays `client_type_unresolved` though the models pass pairs it; the residuals in the seed's §E (TS barrels for the ABI join, config-templated NATS subjects, a Riverpod provider read as a use of the provider, `@riverpod` generated providers, Dart key-alias helpers, hardhat-deploy and waffle forms, and more). From the close-out: a Go `init` is an entry even when nothing live imports its package, an external base imported under an alias (`import { TranslocoLoader as TL }`) or reached through an in-repo intermediate base is not read, and a Go value or composite type named through a dot-import is dropped (conservatively: never bound wrong).
 - PACKAGE_DEPs from Maven, Gradle, pubspec, mix and csproj manifests; rows that do not collapse yet (`pack`, `hubs`, `hotspots`, `communities`, `duplicate-flows`, `effects`, `implementors`, `why`, `gaps`); a vendored library inside a vendor region.

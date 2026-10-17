@@ -59,18 +59,28 @@ Not testable here: GraphQL (neither repo uses it).
    clean, matrix 346 full / 0 partial / 0 none). The tweak packets T1-T13 ran as 0.5.2 waves W15+ with the usual close-outs, then a closing
    docs packet that also updates the three DZ.2 handoffs with every new break. 0.5.2 is then code-complete again.
 2. **James:** tests 0.5.2 (Kina, quokka-stack, examples-glia); any tweak he finds lands on main first.
-3. **No 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*, *"yeah sounds fine"*). The
-   commit after DT.13 gets the local marker tag `0.5.2-complete` (no bump, no publish).
-4. **glia + James:** the Kina + quokka-stack demos re-run on the tweaked glia (*"okay after this we should test kina and
-   quokka-stack again and hopefully we can rul the 0.5.3 answer any questions then begin build overnight"*).
-5. **Engram session:** builds glia at `0.5.2-complete` from source, runs the Kina + glia replays there (flat-ppr vs
-   flat-fs, X1 off / on, the `since` pairing totals) and switches its corrections writer to `--hint` with the v1 hints
-   from `<out>.hints.jsonl`.
-6. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md` (open questions to James), then its waves (overnight),
-   follow-up waves until no followup is left, then the release: one bump 0.5.1 -> 0.5.3 (workspace, `py/pyproject.toml`,
-   `engram-export/Cargo.toml`), wheel, README numbers, tag, push, publish.
-7. **Consumers:** repo-graph, neuropil and Engram each take ONE combined 0.5.1 -> 0.5.3 handoff written by 0.5.3's release
-   docs packet (it merges the three 0.5.2 handoffs). Never message the repo-graph session before then.
+3. **DONE: the Kina + quokka-stack demos re-ran** on the tweaked glia (James, 2026-10-17: *"okay after this we should
+   test kina and quokka-stack again and hopefully we can rul the 0.5.3 answer any questions then begin build
+   overnight"*); their dead_symbol false positives became the close-out (ruling 7, DT.5h-DT.5l and DT.14, W27-W31).
+4. **DONE: Engram's registered replays** at the local tag `0.5.2-complete` (`196728e3`, 2026-10-18), built from source
+   (flat-ppr vs flat-fs, X1 off / on, the `since` pairing totals; the corrections writer passes `--hint`). They stand
+   for the release: no source file changes between the tag and `v0.5.2`. Results: `dev-notes/next-leap-0.5.3.md` §E.
+
+The 2026-10-17 plan (*"can't we just go 0.5.1-> 0.5.3 release"*, *"yeah sounds fine"*: no 0.5.2 release, one 0.5.1 ->
+0.5.3 bump, one combined handoff per consumer, repo-graph held until then) is **reversed**. James, 2026-10-18: *"maybe we
+just do the 0.5.2 and slowly work on 0.5.3 over the next week"*, then "I prep, you push" and "repo-graph upgrades to 0.5.2
+now". The new order:
+
+5. **Release 0.5.2 now.** glia prepares the release commit: the bump 0.5.1 -> 0.5.2 (workspace, `py/pyproject.toml`,
+   `engram-export/Cargo.toml`), the docs saying released, the gates, the wheel and README numbers re-measured. James
+   pushes it, tags `v0.5.2` and lets `wheels-py.yml` publish glia-py 0.5.2 (2026-10-18).
+6. **repo-graph upgrades to 0.5.2 now** from `dev-notes/repo-graph-handoff-0.5.2.md` (`glia-py==0.5.2`; no longer held).
+7. **neuropil** applies `dev-notes/neuropil-handoff-0.5.2.md` after the publish (`=0.5.2` on all six crates).
+8. **Engram:** its replays at `196728e3` stand (step 4); it pins the exporter at `v0.5.2`
+   (`dev-notes/engram-handoff-0.5.2.md`).
+9. **glia:** 0.5.3 is paced over the week, a normal 0.5.2 -> 0.5.3 release: the spec run from
+   `dev-notes/next-leap-0.5.3.md` (open questions to James), its waves, follow-up waves until no followup is left, then
+   its own release with its own 0.5.2 -> 0.5.3 handoffs.
 
 ## Spec run and rulings (2026-10-16)
 
@@ -97,4 +107,5 @@ James's rulings (the five the spec run raised, then later ones):
    positives that counts as closeout i think"*). Kina's remaining 52 rows hold about 8 (Go `init()`, Go `Error()` through
    the built-in `error` interface, interface methods called through a range variable, the Transloco loader's
    `getTranslation`); every remaining row on Kina and quokka-stack is audited first (176 rows: 103 false, 73 truly dead), then each false-positive mechanism
-   is specced as a DT.5 packet (spec + adversarial verify) and run as W27+, and `0.5.2-complete` moves to the new end.
+   is specced as a DT.5 packet (spec + adversarial verify) and run as W27+, and `0.5.2-complete` moves to the new end
+   (it did: `196728e3`, where Engram replayed).

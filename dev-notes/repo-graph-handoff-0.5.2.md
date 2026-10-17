@@ -1,17 +1,15 @@
 # repo-graph handoff - glia 0.5.2 (the four bets 2026-10-16, the tweaks 2026-10-17)
 
-**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
-writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
-version goes 0.5.1 -> 0.5.3 in one bump, and the local tag `0.5.2-complete` marks the commit where 0.5.2
-ends. Section 9 lists the tweaks (DT.1a-DT.13, waves W15-W26) on top of the W0-W14 content below, and
-section 10 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves W27-W30, and DT.14).
-
-**Status: held: repo-graph upgrades from 0.5.1 straight to 0.5.3; this file is the 0.5.2 half of that
-handoff.** James, 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. This
-file is committed and not sent. 0.5.3's release docs packet merges it with the 0.5.3 half into one
-combined handoff. So that the merge needs no re-derivation, every row below names the glia packet and
-commit, the change (old -> new) and the wrapper site, and the pin in section 1 is the one the combined
-handoff replaces with 0.5.3's.
+**Status: active. glia 0.5.2 is released 2026-10-18 (tag `v0.5.2`, `glia-py` 0.5.2 on PyPI), and
+repo-graph upgrades to it now, pinned `glia-py==0.5.2`.** James, 2026-10-18: *"maybe we just do the 0.5.2
+and slowly work on 0.5.3 over the next week"*, then "repo-graph upgrades to 0.5.2 now". That lifts the
+hold (2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*) and reverses the
+2026-10-17 plan of no 0.5.2 release (*"can't we just go 0.5.1-> 0.5.3 release"*), under which this file
+was written as the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff. It is now the whole 0.5.2 handoff;
+0.5.3, paced over the week, is a normal 0.5.2 -> 0.5.3 release with its own handoff. Section 9 lists the
+tweaks (DT.1a-DT.13, waves W15-W26) on top of the W0-W14 content below, and section 10 the close-out
+(DT.5h-DT.5l, the dead_symbol false positives, waves W27-W30, and DT.14). Every row names the glia
+packet and commit, the change (old -> new) and the wrapper site.
 
 The fifth glia -> repo-graph handoff, after `repo-graph-handoff-0.5.1.md`. 0.5.2 is "the four bets":
 153 packets in `dev-notes/leap-052-packets.json` (plan: `dev-notes/next-leap-0.5.2.md`), 151 landed in
@@ -51,8 +49,8 @@ the wrapper's positional calls (`graph.py:155`, `server.py:437`, `:520`, `:608`,
 before. One registry id was allocated: edge category 37, SAME_AS (D0.1, `9d180f01`). No node kind or
 cell type was added.
 
-What repo-graph has to do, in the combined 0.5.3 handoff:
-1. **Pin exactly** (section 1): `glia-py==0.5.3`. There is no glia-py 0.5.2.
+What repo-graph has to do:
+1. **Pin exactly** (section 1): `glia-py==0.5.2`.
 2. **Adopt `WatchSession`** (Q14, section 3): one session per repo instead of a full
    `generate(incremental=True)` per change in `_watch_rebuild` (`server.py:165-172`). Seven steps,
    with the measured memory cost.
@@ -69,35 +67,38 @@ PyGraph, which makes `_release_freed_memory` (`server.py:120-134`) redundant (ke
 New primitives worth an MCP mode (section 5): `PyGraph.query` / `query_gql` (a candidate single
 `query` tool for P4), `PyGraph.identity_classes`, `glia_py.WatchSession`.
 
-Bump order. Nothing is pushed before James says go, and 0.5.2 is never released:
-1. **glia (James):** at the end of 0.5.3, one bump of `[workspace.package].version` (`Cargo.toml:74`),
-   `py/pyproject.toml:7` and the excluded `engram-export/Cargo.toml:3` from 0.5.1 to 0.5.3 together,
-   tag `v0.5.3`, let `wheels-py.yml` publish `glia-py` 0.5.3. The 0.5.2 code is marked by the local tag
-   `0.5.2-complete` (no bump, no publish).
-2. **repo-graph:** held; it takes 0.5.2 and 0.5.3 together from the combined handoff.
+Bump order:
+1. **glia (James):** `[workspace.package].version` (`Cargo.toml:74`), `py/pyproject.toml:7` and the
+   excluded `engram-export/Cargo.toml:3` are bumped 0.5.1 -> 0.5.2 together in the release commit;
+   James pushes it, tags `v0.5.2` and lets `wheels-py.yml` publish `glia-py` 0.5.2 (2026-10-18).
+2. **repo-graph:** pin `glia-py==0.5.2` (section 1), run section 7 against a local wheel, port
+   `WatchSession` (section 3), then release after glia-py 0.5.2 is on PyPI.
 
 Tell builds apart with `glia_py.build_stamp()`: the W13 close-out wheel reads `0.5.1+p0c104fe6f8df1704`,
-a wheel built at `0.5.2-complete` reads `0.5.1+p<hash>` (the version field says 0.5.1 until the 0.5.3
-bump), and the released wheel reads `0.5.3+p<hash>`.
+a wheel built at `196728e3` (0.5.2's last code commit, before the bump) reads
+`0.5.1+p395be331c3dfb5b8`, and the released wheel reads `0.5.2+p90f604c450633cf4`. The release commit changes no
+source file after `196728e3`; the stamp's hex half moves only because PARSER_STAMP hashes
+every `Cargo.toml` and `Cargo.lock`, which the bump edits.
 
 ## 1. The pin
 
 | file:line (HEAD `0f8ecfa`) | now | change to |
 |---|---|---|
-| `pyproject.toml:31` | `"glia-py==0.5.1",  # glia pins consumers exactly per release (0.5.1 breaks the graph contents)` | `"glia-py==0.5.3",` |
+| `pyproject.toml:31` | `"glia-py==0.5.1",  # glia pins consumers exactly per release (0.5.1 breaks the graph contents)` | `"glia-py==0.5.2",` |
 | `CLAUDE.md:24` | runtime deps `glia-py==0.5.1` | the same pin |
-| `CLAUDE.md:105-109` | "glia 0.5.1 boundary notes", "Exact pin `glia-py==0.5.1`" | a 0.5.3 boundary note from sections 2-3 and 9 (and the 0.5.3 half) |
-| `README.md:26-30` | "engine (glia 0.5.1, pinned exactly) ... Reinstall the CLI from the `v0.5.1` tag" | `glia 0.5.3`, the `v0.5.3` tag |
+| `CLAUDE.md:105-109` | "glia 0.5.1 boundary notes", "Exact pin `glia-py==0.5.1`" | a 0.5.2 boundary note from sections 2-3, 9 and 10 |
+| `README.md:26-30` | "engine (glia 0.5.1, pinned exactly) ... Reinstall the CLI from the `v0.5.1` tag" | `glia 0.5.2`, the `v0.5.2` tag |
 
 `tests/test_packaging.py` already counts `==` as capped (`CLAUDE.md:109`), so the pin needs no test
 change. The exact pin also means the published wrapper does not pick up glia-py 0.5.3 on its own.
 
-**Mixed versions while repo-graph is held.** FORMAT_VERSION stays 3, so a 0.5.1 layout is not an old
-format, but its build stamp differs: whichever of the MCP server (glia-py 0.5.1) and a `glia` CLI built
-from `0.5.2-complete` or later (`glia build`, the `install-hooks` hooks, `glia watch`) loads the other's `.glia/graph/` rebuilds it
+**Mixed versions until both sides move.** FORMAT_VERSION stays 3, so a 0.5.1 layout is not an old
+format, but its build stamp differs: whichever of the MCP server (glia-py 0.5.1) and a 0.5.2 `glia`
+CLI (`glia build`, the `install-hooks` hooks, `glia watch`) loads the other's `.glia/graph/` rebuilds it
 first (`[gmap] rebuilt <dir> (written by another glia build (...))`), on every alternation. And a 0.5.1
 engine ignores a version-2 `.glia/overlay.toml` whole (DB.1, row 9), so the MCP graph then lacks that
-file's entrypoints, wrappers and edges. Use one glia version per repo during the hold.
+file's entrypoints, wrappers and edges. Move the MCP server and the `glia` CLI (reinstall it from the
+`v0.5.2` tag) to 0.5.2 together, one glia version per repo.
 
 ## 2. Breaks that reach the wrapper
 
@@ -389,7 +390,7 @@ The engine's `memory::release_freed_memory` runs on its own (DE.10, section 2 ro
 ## 7. Re-test
 
 ```
-# a wheel built at the 0.5.2-complete tag (before the 0.5.3 release), in a throwaway venv (never ~/.venvs/glia-leap or the user site)
+# the released wheel (pip install glia-py==0.5.2) or one built at the v0.5.2 tag, in a throwaway venv (never ~/.venvs/glia-leap or the user site)
 python3 -m venv /tmp/rg-052 && /tmp/rg-052/bin/pip install /home/ivy/Code/glia/target/wheels/glia_py-*.whl
 /tmp/rg-052/bin/python -c "import glia_py as g; print(g.version(), g.build_stamp(), len(g.category_names()))"
 #   expect the stamp of the wheel you built and 37 categories
@@ -425,9 +426,9 @@ repo from the glia session).
 - **Landed after this doc was first written:** the tweaks, W15-W26 (DT.1a-DT.13, section 9). The W25
   close-out (`8293cb00`) measured 6,217 workspace tests passing, 414 substrate-gap fixtures with 0 blind
   spots and the matrix at 346 full / 0 partial / 0 none / 136 unknown / 28 n/a.
-- **Held:** this handoff (repo-graph takes 0.5.2 and 0.5.3 together). Release steps (not packets):
-  James's testing, then at the end of 0.5.3 the one 0.5.1 -> 0.5.3 bump of every version field
-  (section 0), the tag, the PyPI publish.
+- **Released 2026-10-18:** the bump of every version field is the release commit (section 0); James
+  pushes it, tags `v0.5.2` and publishes glia-py 0.5.2. This handoff is active: repo-graph upgrades now
+  (James, 2026-10-18), no longer held for 0.5.3.
 - **Open on glia's side, for the wrapper's benefit (0.5.3):** multi-repo watch (Q13, a `--with` option
   for `glia watch`); watch's body-only fast path (Q15); a memory budget for long-lived sessions (0.5.3
   seed section F.3); org-internal package routing (Q19).
@@ -582,8 +583,7 @@ packet's precision gate kept every truly dead row. Measured by DT.14 at glia HEA
 stamp `0.5.1+p395be331c3dfb5b8`, `glia gaps <copy> --json --top-k 5000 --category dead_symbol` on
 git-archive copies): **Kina 52 -> 32, quokka-stack 124 -> 41, examples-glia `fbfb6c0` 11 -> 11**, and the
 rows left on Kina and quokka-stack are exactly the audit's 32 and 41 truly dead qnames (none missing,
-none extra). The `0.5.2-complete` tag, set after DT.13 at `421af2d8`, moves to the commit after DT.14
-(ruling 7: "`0.5.2-complete` moves to the new end"), so a wheel built at the tag carries this section.
+none extra). The released 0.5.2 carries this section.
 Sources as in the header: each packet's landed commit body and its routed handoff paragraph in
 `dev-notes/leap-052-corrections.json`. Wrapper sites read at repo-graph HEAD `0f8ecfa` again (the same 12
 modified and 4 untracked paths; nothing at a cited line moved).

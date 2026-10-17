@@ -30,16 +30,18 @@ is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
 content hash of every graph-shaping source file, so two builds of one release
 that parse differently report different stamps.
 
-## Coming in 0.5.3: the 0.5.2 work (unreleased)
+## What's new in 0.5.2
 
-**There is no glia-py 0.5.2.** The 0.5.2 work below was never published: it ships in 0.5.3,
-and the version goes from 0.5.1 to 0.5.3 in one step. Pin that release exactly when it is out
-(`glia-py==0.5.3`); until then the latest on PyPI is 0.5.1, and a wheel built from source at
-the `0.5.2-complete` tag still reports `version()` 0.5.1 (`build_stamp()` `0.5.1+p<hex>`).
-It keeps the API conventions below, but it adds answers, changes graph contents and removes
-two deprecated names. The store format is unchanged (format 3); `load_from_gmap` rebuilds a
-layout another glia build wrote, so a 0.5.1 layout is rebuilt once, with the new graph
-contents.
+**Pin exactly: `glia-py==0.5.2`.**
+
+```bash
+pip install glia-py==0.5.2
+```
+
+0.5.2 keeps the API conventions below, but it adds answers, changes graph contents and removes
+two deprecated names, and each glia release is pinned exactly. The store format is unchanged
+(format 3); `load_from_gmap` rebuilds a layout another glia build wrote, so a 0.5.1 layout is
+rebuilt once, with the new graph contents.
 
 - **Rules and queries.** `PyGraph.query(program, outputs=None, limit=None, explain=False,
   max_rows=None)` evaluates a Datalog program over the graph, with the predicate prelude
@@ -168,7 +170,7 @@ graph contents and the store format, and each glia release is pinned exactly.
 - **New `PyGraph` answers.** `pack` / `pack_ids` (the context for a query, packed to
   a token budget), `hotspots`, `cochange`, `flags` (stale feature flags),
   `communities`, `splits`, `hubs`, `duplicate_flows`, and `patterns`, out of
-  experimental (the `_experimental` name warned in 0.5.1 and is gone in 0.5.3). `tests_for` /
+  experimental (the `_experimental` name warned in 0.5.1 and was removed in 0.5.2). `tests_for` /
   `tests_for_diff` gain `limit=` and `signals=` (rank by recent failures and
   co-change).
 - **New module functions.** `review_vs_rev` is the PR report for a change against
@@ -176,8 +178,8 @@ graph contents and the store format, and each glia release is pinned exactly.
   and `cochange_vs_rev`. `timeline_build` / `timeline_history` / `timeline_as_of`
   say when each edge appeared and went over recent commits. `overlay_propose` /
   `overlay_try` / `overlay_accept` run the overlay loop in-process. `patterns_vs_rev`
-  is new; its deprecated `_experimental` alias was kept through 0.5.1 and is gone in
-  0.5.3. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
+  is new; its deprecated `_experimental` alias was kept through 0.5.1 and removed in
+  0.5.2. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
   window of runs.
 - **Answer shapes.** `effects` and `serves` rows gain `external_hosts`, the
   third-party hosts a sink calls (`[]` for in-repo rows). `serves` lists such an
@@ -217,7 +219,7 @@ every contract at once.
 - **Answers, not just a graph.** `blast_radius` (multi-seed), `diff_impact`,
   `graph_delta`, `tests_for`, `effects`, `why`, `cycles`, `check`, `spec_status`,
   `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns` (shipped as
-  an `_experimental` name, deprecated in 0.5.1 and gone in 0.5.3),
+  an `_experimental` name, deprecated in 0.5.1 and removed in 0.5.2),
   `gaps` and `page_flow`. Each returns located rows with a confidence tier, a
   `live` flag, and an `absence` that says what the graph could not see.
 - **Evidence on every edge.** Each edge records the extractor, parser, resolver

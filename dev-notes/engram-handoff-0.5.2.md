@@ -1,12 +1,15 @@
 # glia 0.5.2 has landed - engram read-side handoff
 
-**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
-writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
-version goes 0.5.1 -> 0.5.3 in one bump, so the pin is `=0.5.3`. Meanwhile Engram builds the exporter
-from source at the local tag `0.5.2-complete`, whose binaries print `0.5.1+p<stamp>`. Section 7 adds the
-tweaks (DT.1a-DT.13, waves W15-W26), among them the hints side file and `glia cell set --hint` for the
-corrections writer, and section 8 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves
-W27-W30, and DT.14), after which the tag moves.
+**glia 0.5.2 is released 2026-10-18 (tag `v0.5.2`), so the pin is `=0.5.2`.** James, 2026-10-18:
+*"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next week"*. That reverses the 2026-10-17
+plan of no 0.5.2 release (*"can't we just go 0.5.1-> 0.5.3 release"*), under which this file was written
+as the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff; it is now the whole 0.5.2 handoff, and 0.5.3,
+paced over the week, is a normal 0.5.2 -> 0.5.3 release with its own handoff. **Engram's registered
+replays stand:** Engram ran them at the local tag `0.5.2-complete` (`196728e3`, 2026-10-18; results in
+section 6), and no source file changes between that tag and `v0.5.2` (section 2). Section 7 adds
+the tweaks (DT.1a-DT.13, waves W15-W26), among them the hints side file and `glia cell set --hint` for
+the corrections writer, and section 8 the close-out (DT.5h-DT.5l, the dead_symbol false positives, waves
+W27-W30, and DT.14), after which the tag moved.
 
 **From:** the glia session, 2026-10-16, written by the docs packet DZ.2 after glia's last code wave.
 **To:** an engram session.
@@ -23,12 +26,12 @@ determinism and re-key pairing, `dev-notes/research-0.5.2/R2-engram.md`).
 **This doc re-measures nothing.** Every number comes from the landed packet's commit body or report
 (cited by commit), or from Engram's own determinism check at glia `3921a636` (recorded in glia's
 `dev-notes/engram-ask-0.5.3.md` section 5). The Kina + glia replays (re-keys with X1 off and on, and
-`flat-ppr` vs `flat-fs`) run once at `0.5.2-complete`, after the tweaks (James, 2026-10-16 and
-2026-10-17); they are Engram's measurement of all of this.
+`flat-ppr` vs `flat-fs`) ran once at `0.5.2-complete` (`196728e3`), after the tweaks and the
+close-out (James, 2026-10-16 and 2026-10-17); they are Engram's measurement of all of this (section 6).
 
 0.5.2 is glia's "four bets": 153 packets (`dev-notes/leap-052-packets.json` in glia), 151 landed in
 waves W0-W13 since v0.5.1 (`84e2e71`), and W14 is the two docs packets; the tweaks followed in W15-W26
-(section 7). It is never released (it ships in 0.5.3) and nothing is pushed: sections 1-6 come from the
+(section 7). It is released 2026-10-18 as `v0.5.2`: sections 1-6 come from the
 local `/home/ivy/Code/glia` checkout at `12f58844`, section 7 from the tweaks' commits up to `9a8e56e0`. Packet ids are glossed in words; the hash after an id is the glia commit that
 landed it.
 
@@ -36,11 +39,11 @@ landed it.
 
 ## 1. TL;DR
 
-1. **Pin `=0.5.3`; until then build at `0.5.2-complete`** (section 2). The excluded
-   `glia-engram-export` crate carries the release version (`engram-export/Cargo.toml:3` reads 0.5.1
-   until the one 0.5.1 -> 0.5.3 bump), so at `0.5.2-complete` `glia-export-engram -V`,
-   `<out>.meta.json`'s `glia_version` and its `exporter_version` read 0.5.1 (build `0.5.1+p<stamp>`),
-   and 0.5.3 after the release.
+1. **Pin `=0.5.2`: build the exporter at the `v0.5.2` tag** (section 2). The excluded
+   `glia-engram-export` crate carries the release version (`engram-export/Cargo.toml:3` moved 0.5.1 ->
+   0.5.2 in the release commit), so at `v0.5.2` `glia-export-engram -V`, `<out>.meta.json`'s
+   `glia_version` and its `exporter_version` read 0.5.2; at `0.5.2-complete`, where Engram replayed,
+   they read 0.5.1 (build `0.5.1+p395be331c3dfb5b8`).
 2. **Every clone of one commit exports the same bytes** (DE.2, `f2d12c54`). The eval's single-clone
    determinism check and its one cached export series (`docs/eval-plan-2026-09.md:582-592`, "Organ
    verdict v3, first attempt: blocked by its determinism check", and `:622`, "every run reads one cached
@@ -68,21 +71,29 @@ landed it.
    hint); `glia cell set --hint` / pyo3 `hint=` take it; and more facts and edges for TS / Go / Dart /
    Solidity code, with a few keys re-keyed.
 11. **The close-out (section 8):** more Calls / Imports / Causes / Cooccurs edges in Dart, Go, TS and
-   Python exports, no key moves, no exporter change; `0.5.2-complete` moves from `421af2d8` to the
-   commit after DT.14, so a replay built at the old tag lacks these edges.
+   Python exports, no key moves, no exporter change; `0.5.2-complete` moved from `421af2d8` to
+   `196728e3`, after DT.14, so a replay built at the old tag lacks these edges (Engram's ran at
+   `196728e3`, and `v0.5.2` has them).
 
 ## 2. The pin
 
 Engram links no glia crate: `engram-core` is the only thing the two repos share, and 0.5.2 did not
 touch it. The exporter is glia's `engram-export` crate, built by glia's `scripts/check-engram-export.sh`.
-The exact pin is the exporter built at the `v0.5.3` tag, `glia-engram-export =0.5.3`. There is no
-`v0.5.2`; until 0.5.3 is released, build at the local marker tag `0.5.2-complete`:
+The exact pin is the exporter built at the `v0.5.2` tag, `glia-engram-export =0.5.2`:
 
 ```
-git -C /home/ivy/Code/glia describe --tags --exact-match      # expect 0.5.2-complete (v0.5.3 once released)
+git -C /home/ivy/Code/glia describe --tags --exact-match      # expect v0.5.2
 /home/ivy/Code/glia/engram-export/target/debug/glia-export-engram -V
-#   glia-export-engram 0.5.1 (build 0.5.1+p<16 hex>) at 0.5.2-complete; 0.5.3 (build 0.5.3+p<16 hex>) at v0.5.3
+#   glia-export-engram 0.5.2 (build 0.5.2+p90f604c450633cf4)
 ```
+
+Engram's replays ran at the local tag `0.5.2-complete` (`196728e3`), whose binaries print `0.5.1
+(build 0.5.1+p395be331c3dfb5b8)`. Between that tag and `v0.5.2` only plan files, docs, the bench
+artefacts' engine version string, the three version fields and the glia package versions in the two
+lockfiles change: no source file, and the version and stamp are written only to `<out>.meta.json`,
+never into the gmap. So the replays' results stand for the release.
+The stamp's hex half still moves (PARSER_STAMP hashes every `Cargo.toml` and `Cargo.lock`), so the
+first export at `v0.5.2` reparses from scratch.
 
 A gmap already written names its glia in `<out>.meta.json` (`glia_version`, `exporter_version`,
 `build_stamp`, `parser_stamp`, `gmap_digest`, `meta_version` 1); every run prints `[engram-export] glia
@@ -366,7 +377,7 @@ files' facts; DG.1 / DG.2 / DH.1 / DH.2 / DH.4's eventbus verb-fallback `event_e
 | DE.5 PPR side file (`4504f2d6`) | `--ppr-candidates <K>`, `ppr_side` module, `<out>.ppr.jsonl`, exit 8; `Cargo.toml` gains `glia-activation` | optional reader; `.gitignore` line |
 | DE.6 keep pins (`cc67f519`) | `engram-export/tests/keep_v6.rs` is the one place pinning the three kept behaviours: `leading_doc` reaching `Symbol.doc` in 8 languages (Python, Go, TypeScript, Rust, Java, Dart, Solidity `@notice`, C# `<summary>`), the 500-byte `cap_prose`, and `--since` accuracy through CK.2's `diff.rs` tests and `since_v6.rs`'s `B_COUNTS` | none |
 | DE.7 generated provenance (`db774107`) | `generated` nodes drop through `DROP_PROVENANCE`; the `[provenance]` group | section 3.6 |
-| version | the crate version moved to the release (0.4.13 at the 0.5.1 handoff, 0.5.1 now and at `0.5.2-complete`, 0.5.3 at the one bump), so `exporter=` in the `glia build=` line and `exporter_version` in meta.json read the release | none |
+| version | the crate version moved to the release (0.4.13 at the 0.5.1 handoff, 0.5.1 at `0.5.2-complete`, 0.5.2 at the release), so `exporter=` in the `glia build=` line and `exporter_version` in meta.json read the release | none |
 
 Every other exporter marker is unchanged in shape.
 
@@ -394,8 +405,12 @@ Engram calls none of them.
 - **Not measured:** SAME_AS on a single-repo Engram export; CK.2's 0.5.1 trade-off (a root route
   re-registered under a mount prefix, or a route whose method changed, is removed + added); glia's own
   repo under DE.7 / DE.8 beyond "unchanged".
-- **Engram's replays at `0.5.2-complete`** (James, 2026-10-16 / 2026-10-17): Kina + glia, re-keys with X1 off
-  and on, `flat-ppr` vs `flat-fs`; the 8 public streams only if those pass.
+- **Done, Engram's registered replays at `0.5.2-complete`** (`196728e3`, 2026-10-18; Engram `11b3a3c`,
+  `docs/eval-plan-2026-09.md`; recorded in glia's `dev-notes/next-leap-0.5.3.md` §E): nothing broke.
+  Re-keys with X1 on / off: renamed Kina 17/18 vs 4/18, glia 28/40 vs 9/40. Engram on the tag's exports
+  vs 0.5.1's: Kina hit +27 / -23 (flat), glia strict +15 / -2 (p = .0023). DE.5's format clean on 771
+  steps, but PPR as a release pool source fails (flat-ppr vs flat-fs pooled: hit 9 wins / 20 losses), so
+  Engram does not use `--ppr-candidates`, and 0.5.3 removes DE.5's side file (James, 2026-10-18).
 - **Closed:** cross-clone determinism (DE.2, and Engram's PASS at `3921a636`); endpoint hints (DE.3);
   the hint pass's cross-pairs (DE.4). Q20-25 are answered by Engram (no v7, `cap_prose` stays 500 bytes,
   side files as data only, no PPR default read path).
@@ -560,9 +575,10 @@ checkout.
 
 ### 8.1 The tag and the replays
 
-`0.5.2-complete` was set after DT.13 at `421af2d8`; ruling 7 moves it to the commit after DT.14, the
-close-out's last packet. **The Kina + glia replays (section 6) should build at the moved tag**: one
-built at `421af2d8` has none of this section's edges. `git -C /home/ivy/Code/glia rev-parse
+`0.5.2-complete` was set after DT.13 at `421af2d8`; ruling 7 moved it to `196728e3`, after DT.14, the
+close-out's last packet. **The Kina + glia replays (section 6) built at the moved tag** (Engram's
+registered run, 2026-10-18); one built at `421af2d8` has none of this section's edges, and `v0.5.2`
+has all of them. `git -C /home/ivy/Code/glia rev-parse
 0.5.2-complete` tells them apart; the exporter's `-V` stamp moves too (PARSER_STAMP moved with every
 packet).
 
