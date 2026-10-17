@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 417,
+  "fixtures": 418,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -750,6 +750,15 @@
       "language": "go",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-dispatch-values": {
+      "framework": "go-dispatch-values",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "USES": 1.0
       }
     },
     "go-embedded-implements": {

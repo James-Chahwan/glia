@@ -8567,6 +8567,7 @@
     "fixtures/framework-invoked-members",
     "fixtures/generated-provenance",
     "fixtures/go-closure-handled_by",
+    "fixtures/go-dispatch-values",
     "fixtures/go-ethereum-contract-calls",
     "fixtures/go-ethereum-events-abigen",
     "fixtures/go-ethereum-method-wrappers",
