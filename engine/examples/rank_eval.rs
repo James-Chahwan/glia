@@ -33,6 +33,15 @@
 //!     --law-tips main,origin/wave/003-us2-platform-serves,origin/wave/003-us3-registration-records \
 //!     [--law-end <rev>]   # GLIA_LAW_DEBUG=<section> prints that section's reach
 //! ```
+//!
+//! Fourth run (`--keys on`, 2026-10-18): the cross-layer links resolved instead of
+//! matched as raw text. Each layer emits key mentions; one resolver per key type
+//! (path, scoped id, id lineage, citation, table row, text) normalises them; one
+//! joiner links the mentions of one resolved key. Added to `--vertical kina|glia`
+//! (the VR* rankers, with ablations and controls) and to `--law-impact kina` (the
+//! R* chains); `--keys-out <dir>` gets the audit samples and the law tables. Kina's
+//! vertical mode also needs `--law-sources` / `--law-cache` (each instrument's
+//! section list). See `key_sig_names` and `keys_law`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -120,6 +129,10 @@ struct Args {
     law_tips: String,
     /// The revision whose code citations give the leaky END variant (default: the first tip).
     law_end: String,
+    /// Fourth run: `on` adds the resolved-key rankers (vertical) or chains (law impact).
+    keys: String,
+    /// Where the keyed run writes its audit samples and law tables.
+    keys_out: String,
 }
 
 fn parse_args() -> Args {
@@ -144,6 +157,8 @@ fn parse_args() -> Args {
         law_out: String::new(),
         law_tips: String::new(),
         law_end: String::new(),
+        keys: String::new(),
+        keys_out: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -170,6 +185,8 @@ fn parse_args() -> Args {
             "--law-out" => a.law_out = v,
             "--law-tips" => a.law_tips = v,
             "--law-end" => a.law_end = v,
+            "--keys" => a.keys = v,
+            "--keys-out" => a.keys_out = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -733,6 +750,9 @@ struct Out {
     /// Per vertical signal: [linked targets, targets, linked targets with no direct edge, targets with no direct
     /// edge, linked other candidates, other candidates].
     vdiag: Vec<(String, [f64; 6])>,
+    /// Per (resolved, raw) signal pair: [co-change targets linked by the resolved signal, by
+    /// the raw one, by the resolved only, by the raw only, co-change targets].
+    vgain: Vec<(String, [f64; 5])>,
 }
 
 impl Out {
@@ -1331,6 +1351,11 @@ fn main() {
                 test_idx.iter().map(|&k| (commits[k].sha.clone(), commits[k].msg.clone())).collect();
             let l = build_layers(m, &args, &g.paths, &pidx, &tests);
             eprintln!("[rank_eval] {}: vertical layers ({m:?}) for {} test commits in {:.1}s", args.label, l.len(), t_layers.elapsed().as_secs_f64());
+            if !args.keys.is_empty()
+                && let Some(last) = l.last()
+            {
+                write_audit(&args.keys_out, &format!("vertical_{}", args.label), &last.kaudit);
+            }
             // GLIA_RANK_VDUMP=<file>: the newest test commit's layer, file -> nodes per signal (inspection only).
             if let (Ok(path), Some(last)) = (std::env::var("GLIA_RANK_VDUMP"), l.last()) {
                 let mut d = serde_json::Map::new();
@@ -1850,6 +1875,10 @@ struct VLayer {
     vm_cov: bool,
     info: BTreeMap<String, f64>,
     vocab: Vec<String>,
+    /// Fourth run: resolved links with their text (the newest test commit only), for the audit.
+    kaudit: Vec<KAudit>,
+    /// Fourth run: (resolved, raw) signal pairs whose co-change links are compared.
+    gains: Vec<(String, String)>,
 }
 
 // ---- git ----
@@ -2871,6 +2900,18 @@ struct VEnv<'a> {
     wiki_head_docs: Vec<(String, String)>,
     wiki_lines: std::sync::Mutex<HashMap<String, DocLines>>,
     cache: BlobCache,
+    /// Fourth run: the resolvers' shared state (None without `--keys`).
+    keys: Option<KEnv>,
+}
+
+/// The keyed run's state shared by every test commit's layer.
+struct KEnv {
+    kp: KPaths,
+    known: Option<LawKnown>,
+    blobs: KBlobs,
+    /// the test commit whose layer is written for the hand audit (the newest)
+    last_sha: String,
+    pkc: std::sync::Mutex<HashMap<String, std::sync::Arc<GPkFile>>>,
 }
 
 fn controls(name: &str, sig: &Sig, sha: &str, ctrls: &mut Vec<(String, Sig)>) {
@@ -2911,8 +2952,17 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
                 ctrls.push((n.into(), Sig::build(&empty)));
             }
         }
+        let mut sigs = sigs;
+        if env.keys.is_some() {
+            match env.mode {
+                VMode::Kina => key_sigs_kina(None, nf, sha, &mut sigs, &mut ctrls),
+                VMode::Glia => key_sigs_glia(None, nf, sha, &mut sigs, &mut ctrls),
+                VMode::Quokka => {}
+            }
+        }
         let vm = (env.mode != VMode::Quokka).then(|| vec![0.0; nf]);
-        return VLayer { sigs, ctrls, vm, vm_cov: false, info, vocab: Vec::new() };
+        let gains = if env.keys.is_some() { key_gain_pairs(env.mode) } else { Vec::new() };
+        return VLayer { sigs, ctrls, vm, vm_cov: false, info, vocab: Vec::new(), kaudit: Vec::new(), gains };
     };
     match env.mode {
         VMode::Kina => {
@@ -2936,7 +2986,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             let mut junk = BTreeMap::new();
             let kw = kina_signals(&dw, &code, nf, &mut junk);
             let r: Vec<BTreeSet<String>> = ks.i.iter().zip(&ks.m).map(|(a, b)| a.union(b).cloned().collect()).collect();
-            let sigs = vec![
+            let mut sigs = vec![
                 ("V1".to_string(), Sig::build(&ks.i)),
                 ("V2".to_string(), Sig::build(&ks.s)),
                 ("V3".to_string(), Sig::build(&ks.l)),
@@ -2982,7 +3032,19 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             let mut vocab: Vec<String> = d.vocab_hyphen.iter().map(|(k, v)| format!("{k}-* ({v} defs)")).collect();
             vocab.extend(d.vocab_bare.iter().map(|(k, v)| format!("{}### ({v} defs)", *k as char)));
             vocab.push(format!("laws: {}", d.law_vocab.iter().cloned().collect::<Vec<_>>().join(", ")));
-            VLayer { sigs, ctrls, vm: Some(vm), vm_cov, info, vocab }
+            let mut kaudit = Vec::new();
+            if let Some(ke) = &env.keys {
+                let code_lines = git_grep(env.git, &p, Some(KEYS_CODE_PAT), &[]);
+                let bm = ke.blobs.index(&p, nf);
+                let km = kina_model(&docs, &code_lines, &ke.kp, &env.pr, ke.known.as_ref().expect("--keys kina needs the law"), Some(&bm), nf, sha == ke.last_sha);
+                for (k, v) in &km.stats {
+                    *info.entry(k.clone()).or_default() += v;
+                }
+                key_sigs_kina(Some(&km), nf, sha, &mut sigs, &mut ctrls);
+                kaudit = km.audit;
+            }
+            let gains = if env.keys.is_some() { key_gain_pairs(env.mode) } else { Vec::new() };
+            VLayer { sigs, ctrls, vm: Some(vm), vm_cov, info, vocab, kaudit, gains }
         }
         VMode::Glia => {
             let gd = glia_docs(env.git, &p, &env.cache);
@@ -3068,7 +3130,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             let union = |a: &[BTreeSet<String>], b: &[BTreeSet<String>]| -> Vec<BTreeSet<String>> {
                 a.iter().zip(b).map(|(x, y)| x.union(y).cloned().collect()).collect()
             };
-            let sigs = vec![
+            let mut sigs = vec![
                 ("V1".to_string(), Sig::build(&i)),
                 ("V2fam".to_string(), Sig::build(&fam)),
                 ("V2bat".to_string(), Sig::build(&bat)),
@@ -3100,7 +3162,19 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             let mut rk: Vec<String> = gd.rulings.iter().map(|(k, v)| format!("{k} -> {}", v.len())).collect();
             rk.truncate(400);
             vocab.push(format!("rulings: {}", rk.join("; ")));
-            VLayer { sigs, ctrls, vm: Some(vm), vm_cov, info, vocab }
+            let mut kaudit = Vec::new();
+            if let Some(ke) = &env.keys {
+                let code_lines = git_grep(env.git, &p, Some("[A-Z][A-Z0-9]{0,4}[.][0-9]|Q[0-9]"), &[]);
+                let bm = ke.blobs.index(&p, nf);
+                let gm = glia_model(env.git, &p, &env.cache, &ke.pkc, &code_lines, &ke.kp, &env.pr, Some(&bm), nf, sha == ke.last_sha);
+                for (k, v) in &gm.stats {
+                    *info.entry(k.clone()).or_default() += v;
+                }
+                key_sigs_glia(Some(&gm), nf, sha, &mut sigs, &mut ctrls);
+                kaudit = gm.audit;
+            }
+            let gains = if env.keys.is_some() { key_gain_pairs(env.mode) } else { Vec::new() };
+            VLayer { sigs, ctrls, vm: Some(vm), vm_cov, info, vocab, kaudit, gains }
         }
         VMode::Quokka => {
             let lines = git_grep(env.git, &p, None, &["features", "docs", ".ai", "*.md", ":!**/node_modules/**"]);
@@ -3120,7 +3194,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
                 controls(n, s, sha, &mut ctrls);
             }
             info.insert("doc_units_naming_files".into(), units.len() as f64);
-            VLayer { sigs, ctrls, vm: None, vm_cov: false, info, vocab: units.into_iter().collect() }
+            VLayer { sigs, ctrls, vm: None, vm_cov: false, info, vocab: units.into_iter().collect(), kaudit: Vec::new(), gains: Vec::new() }
         }
     }
 }
@@ -3149,6 +3223,25 @@ fn build_layers(mode: VMode, args: &Args, paths: &[String], pidx: &HashMap<&str,
         wiki_head_docs = git_grep(&args.wiki, &head, None, &["*.md"]);
         eprintln!("[rank_eval] vertical: wiki {} commits, HEAD {head}, {} doc lines", wiki_revs.len(), wiki_head_docs.len());
     }
+    let parents = git_parents(&args.git, &args.rev);
+    let keys = (!args.keys.is_empty() && mode != VMode::Quokka).then(|| {
+        let t = Instant::now();
+        let renames = git_renames(&args.git, &args.rev);
+        let kp = KPaths::new(paths, &renames);
+        let known = (mode == VMode::Kina).then(|| law_known(args));
+        let revs: Vec<String> =
+            tests.iter().filter_map(|(s, _)| parents.get(s).and_then(|p| p.0.clone())).collect::<BTreeSet<_>>().into_iter().collect();
+        let blobs = KBlobs::load(&args.git, &revs, &kp);
+        eprintln!(
+            "[keys] {} renames ({} historical paths now candidates), {} revisions, {} blobs read in {:.1}s",
+            kp.renames,
+            kp.hist.len(),
+            revs.len(),
+            blobs.tf.len(),
+            t.elapsed().as_secs_f64()
+        );
+        KEnv { kp, known, blobs, last_sha: tests.last().map(|x| x.0.clone()).unwrap_or_default(), pkc: std::sync::Mutex::new(HashMap::new()) }
+    });
     let env = VEnv {
         mode,
         git: &args.git,
@@ -3156,11 +3249,12 @@ fn build_layers(mode: VMode, args: &Args, paths: &[String], pidx: &HashMap<&str,
         paths,
         pidx,
         pr: PathRes::new(paths),
-        parents: git_parents(&args.git, &args.rev),
+        parents,
         wiki_revs,
         wiki_head_docs,
         wiki_lines: std::sync::Mutex::new(HashMap::new()),
         cache: BlobCache { text: std::sync::Mutex::new(HashMap::new()), packets: std::sync::Mutex::new(HashMap::new()) },
+        keys,
     };
     tests.par_iter().map(|(sha, msg)| build_layer(&env, sha, msg)).collect()
 }
@@ -3195,15 +3289,23 @@ fn vertical_rankers(out: &mut Out, vl: &VLayer, seed: usize, t: &[u32], p1: &[f6
         let v = sig.score(seed);
         out.push(name.clone(), &scalar(&v), seed, t);
         let mm_v = minmax(&v, seed);
-        for a in [0.25, 0.5] {
+        // an ablated keyed signal (`VR1h-path`, `VR1h+text`) gets the two fixed blends only
+        let lite = name.contains('-') || name.contains('+');
+        if lite {
+            out.push(format!("HP25[{name}]"), &scalar(&blend(0.25, &mm_v, &mm_p1)), seed, t);
+            out.push(format!("HR25[{name}]"), &scalar(&blend(0.25, &mm_v, &mm_h9)), seed, t);
+        }
+        for a in [0.25, 0.5].into_iter().filter(|_| !lite) {
             out.push(format!("HP{}[{name}]", (a * 100.0) as u32), &scalar(&blend(a, &mm_v, &mm_p1)), seed, t);
         }
-        out.push(format!("HPlex[{name}]"), &lex2(&v, p1), seed, t);
-        for b in [0.25, 0.5] {
-            out.push(format!("HR{}[{name}]", (b * 100.0) as u32), &scalar(&blend(b, &mm_v, &mm_h9)), seed, t);
+        if !lite {
+            out.push(format!("HPlex[{name}]"), &lex2(&v, p1), seed, t);
+            for b in [0.25, 0.5] {
+                out.push(format!("HR{}[{name}]", (b * 100.0) as u32), &scalar(&blend(b, &mm_v, &mm_h9)), seed, t);
+            }
+            out.push(format!("HRlex[{name}]"), &lex2(&v, &h9), seed, t);
         }
-        out.push(format!("HRlex[{name}]"), &lex2(&v, &h9), seed, t);
-        for (tag, a, b, c) in HT_GRID {
+        for (tag, a, b, c) in HT_GRID.into_iter().filter(|_| !lite) {
             let s: Vec<f64> = (0..nf).map(|f| a * mm_t1[f] + b * mm_v[f] + c * mm_p1[f]).collect();
             out.push(format!("HT{tag}[{name}]"), &scalar(&s), seed, t);
         }
@@ -3233,6 +3335,20 @@ fn vertical_rankers(out: &mut Out, vl: &VLayer, seed: usize, t: &[u32], p1: &[f6
             }
         }
         out.vdiag.push((name.clone(), d));
+    }
+    for (a, b) in &vl.gains {
+        let (Some(sa), Some(sb)) = (vl.sigs.iter().find(|x| &x.0 == a), vl.sigs.iter().find(|x| &x.0 == b)) else { continue };
+        let (va, vb) = (sa.1.score(seed), sb.1.score(seed));
+        let mut g = [0.0; 5];
+        for &x in t {
+            let (la, lb) = (va[x as usize] > 0.0, vb[x as usize] > 0.0);
+            g[0] += f64::from(u8::from(la));
+            g[1] += f64::from(u8::from(lb));
+            g[2] += f64::from(u8::from(la && !lb));
+            g[3] += f64::from(u8::from(lb && !la));
+            g[4] += 1.0;
+        }
+        out.vgain.push((format!("{a}|{b}"), g));
     }
     if let Some(vm) = &vl.vm {
         out.push("VM", &scalar(vm), seed, t);
@@ -3299,7 +3415,11 @@ fn vertical_report(
     let nq = queries.len();
     let pos = |n: &str| names.iter().position(|x| x == n);
     let col = |ri: usize, mi: usize| -> Vec<f64> { results.iter().map(|r| r.m[ri][mi]).collect() };
-    let sig_names: Vec<String> = vertical_names(mode).iter().map(|s| s.to_string()).collect();
+    // every layer carries the same signals in the same order (the keyed run appends its own)
+    let sig_names: Vec<String> = match layers.first() {
+        Some(l) => l.sigs.iter().map(|(n, _)| n.clone()).collect(),
+        None => vertical_names(mode).iter().map(|s| s.to_string()).collect(),
+    };
     // coverage per family
     let mut cov: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (k, n) in sig_names.iter().enumerate() {
@@ -3386,6 +3506,28 @@ fn vertical_report(
         direct_pairs / all_pairs.max(1.0)
     ));
     js.insert("coverage".into(), serde_json::Value::Object(cov_js));
+
+    // ---- fourth run: co-change pairs that gain a resolved upper link ----
+    let mut gsum: BTreeMap<String, [f64; 5]> = BTreeMap::new();
+    for r in results {
+        for (k, g) in &r.vgain {
+            let e = gsum.entry(k.clone()).or_default();
+            for i in 0..5 {
+                e[i] += g[i];
+            }
+        }
+    }
+    if !gsum.is_empty() {
+        md.push_str("Co-change pairs (seed, co-changed file) linked by a resolved signal vs the earlier raw one, summed over queries:\n\n| resolved | raw | pairs | linked resolved | linked raw | resolved only (gained) | raw only (lost) |\n|---|---|---|---|---|---|---|\n");
+        let mut gj = serde_json::Map::new();
+        for (k, g) in &gsum {
+            let (a, b) = k.split_once('|').unwrap_or((k, ""));
+            md.push_str(&format!("| {a} | {b} | {} | {} ({:.3}) | {} ({:.3}) | {} | {} |\n", g[4], g[0], g[0] / g[4].max(1.0), g[1], g[1] / g[4].max(1.0), g[2], g[3]));
+            gj.insert(k.clone(), json!({"pairs": g[4], "linked_resolved": g[0], "linked_raw": g[1], "gained": g[2], "lost": g[3]}));
+        }
+        md.push('\n');
+        js.insert("gains".into(), serde_json::Value::Object(gj));
+    }
 
     // ---- layer facts ----
     let mut info: BTreeMap<String, f64> = BTreeMap::new();
@@ -3511,6 +3653,61 @@ fn vertical_report(
             }
         }
         VMode::Quokka => {}
+    }
+    // fourth run: resolved against raw, against the layer below, against the permuted map,
+    // and each ablation against the full keyed signal
+    if sig_names.iter().any(|n| n.starts_with("VR")) {
+        let (pairs, plain, abl_of): (&[(&str, &str, &str)], &[(&str, &str, &str)], &[&str]) = match mode {
+            VMode::Kina => (
+                &[
+                    ("VR1h", "V1m", "VR1h"),
+                    ("VR1", "V1", "VR1"),
+                    ("VR2u", "V2", "VR2u"),
+                    ("VR2d", "V2", "VR2d"),
+                    ("VR3h", "V3", "VR3h"),
+                    ("VR3a", "V3", "VR3a"),
+                    ("VR3b", "V3", "VR3b"),
+                    ("VR2u", "VR1h", "VR2u"),
+                    ("VR3h", "VR2u", "VR3h"),
+                    ("VR3h", "VR3b", "VR3h"),
+                ],
+                &[("VR3h", "VR3hperm", "VR3h")],
+                &["VR1h", "VR2u", "VR3h"],
+            ),
+            VMode::Glia => (
+                &[
+                    ("VR1", "V1m", "VR1"),
+                    ("VR1c", "V1", "VR1c"),
+                    ("VR4c", "V4", "VR4c"),
+                    ("VR4a", "V4", "VR4a"),
+                    ("VR14", "V14", "VR14"),
+                    ("VR4", "VR1", "VR4"),
+                    ("VR4a", "VR1", "VR4a"),
+                    ("VR4c", "VR1c", "VR4c"),
+                    ("VR14", "VR1", "VR1"),
+                ],
+                &[("VR4c", "VR4cperm", "VR4c"), ("VR4", "VR4perm", "VR4")],
+                &["VR1", "VR4a"],
+            ),
+            VMode::Quokka => (&[], &[], &[]),
+        };
+        for (hi, lo, fam) in pairs {
+            for sh in shapes {
+                let (a, b) = if sh.is_empty() { (hi.to_string(), lo.to_string()) } else { (format!("{sh}[{hi}]"), format!("{sh}[{lo}]")) };
+                contrasts.push((a, b, fam.to_string()));
+            }
+        }
+        for (a, b, f) in plain {
+            contrasts.push((a.to_string(), b.to_string(), f.to_string()));
+        }
+        for base in abl_of {
+            for n in sig_names.iter().filter(|n| n.starts_with(base) && n.len() > base.len() && matches!(n.as_bytes()[base.len()], b'-' | b'+')) {
+                for sh in ["", "HP25", "HR25"] {
+                    let (x, y) = if sh.is_empty() { (base.to_string(), n.clone()) } else { (format!("{sh}[{base}]"), format!("{sh}[{n}]")) };
+                    contrasts.push((x, y, base.to_string()));
+                }
+            }
+        }
     }
     if !contrasts.is_empty() {
         md.push_str("\nContrasts (a minus b; recall@10 and MRR; 95% commit-cluster bootstrap CI; on ALL queries and on the named covered subset):\n\n| a | b | subset | n | recall@10 ALL | recall@10 COVERED | MRR ALL | MRR COVERED |\n|---|---|---|---|---|---|---|---|\n");
@@ -5912,6 +6109,3793 @@ fn law_impact_main(args: &Args) {
     );
     js.insert("scores".into(), serde_json::Value::Object(js_scores));
     js.insert("code_cite_stats".into(), json!(cstats));
+    if !args.keys.is_empty() {
+        let set = |ki: usize| -> Vec<u32> {
+            let sc = chain_score(ki, &changed, false);
+            law_rank(&sc).into_iter().filter(|&f| sc[f as usize] > 0.0).collect()
+        };
+        keys_law(&KLawIn {
+            args,
+            g: &g,
+            ppr: &ppr,
+            docs: &docs,
+            start: &start,
+            truths: &truths,
+            commits: &commits,
+            s003,
+            changed: &changed,
+            status: &diff.status,
+            bm_all: &bm_all,
+            ppr_comp: &ppr_comp,
+            comp_score: &comp_score,
+            raw_sets: vec![("C1", set(0)), ("C1m", set(2)), ("C3", set(3)), ("C5", set(5))],
+            raw_cited: (cited.len(), cited_changed.len()),
+        });
+    }
     std::fs::write(outp("law_impact.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write json");
     eprintln!("[law] done in {:.1}s -> {}", t0.elapsed().as_secs_f64(), outp("law_tables.md"));
+}
+
+// ============================================================================
+// Fourth run (2026-10-18): resolved cross-layer keys (`--keys`).
+//
+// The earlier runs joined the layers by raw text matches: an id string, a
+// capitalised Act name, a path that happens to be a unique suffix. Here every
+// layer emits KEY MENTIONS ("unit U cites / defines key K of type T"); one
+// resolver per KEY TYPE normalises, scopes and versions them; one generic
+// joiner links the mentions of one resolved key, or of one lineage class of
+// keys, tiered FACT / DERIVED / HEURISTIC like glia's identity pass. No
+// resolver knows which layer a mention came from, and no pair of layers has a
+// resolver of its own.
+//
+// Key types:
+//   path     files, directories and globs a unit names; relative and short
+//            paths normalised; git renames followed to the file's name now;
+//   scoped   spec-kit ids (FR-002, T014, R4, C#, D#, US#) scoped to the spec or
+//            doc that defines them; ids numbered once (ABC-03) stay global;
+//   lineage  old id -> new id (an id column of a numbered table, "was",
+//            "formerly", "supersedes", "split from"): one identity class,
+//            capped, so a citation of the old id reaches the new row;
+//   cite     instrument + jurisdiction + section, resolved from context and
+//            validated against each instrument's own section list;
+//   row      numbered table rows as units ("decision 13", "rows 5, 6");
+//   text     BM25 between a unit's text and code files' identifiers and
+//            comments: the HEURISTIC fallback, top 3, only for units no other
+//            key links to code.
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+enum KT {
+    Path,
+    Scoped,
+    Lineage,
+    Cite,
+    Row,
+    Text,
+}
+
+const KTS: [KT; 6] = [KT::Path, KT::Scoped, KT::Lineage, KT::Cite, KT::Row, KT::Text];
+
+impl KT {
+    fn name(self) -> &'static str {
+        match self {
+            KT::Path => "path",
+            KT::Scoped => "scoped",
+            KT::Lineage => "lineage",
+            KT::Cite => "cite",
+            KT::Row => "row",
+            KT::Text => "text",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+enum Tier {
+    Fact,
+    Derived,
+    Heuristic,
+}
+
+impl Tier {
+    fn name(self) -> &'static str {
+        match self {
+            Tier::Fact => "FACT",
+            Tier::Derived => "DERIVED",
+            Tier::Heuristic => "HEURISTIC",
+        }
+    }
+}
+
+/// A resolution: the key, its tier and the route that resolved it.
+type KRes = (String, Tier, &'static str);
+
+/// One resolved key reference.
+#[derive(Clone, Debug)]
+struct KRef {
+    kt: KT,
+    key: String,
+    tier: Tier,
+    route: &'static str,
+}
+
+/// One resolved link with the text it came from (written for the hand audit only).
+#[derive(Clone)]
+struct KAudit {
+    kt: KT,
+    tier: Tier,
+    route: &'static str,
+    at: String,
+    mention: String,
+    target: String,
+}
+
+/// A joiner variant: key types dropped, or a type read through its raw (pre-resolution) form.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct KMask {
+    drop: [bool; 6],
+    raw_path: bool,
+    raw_scoped: bool,
+    raw_cite: bool,
+    /// the weakest tier a link may have (HEURISTIC keeps every link)
+    max_tier: Tier,
+}
+
+impl KMask {
+    const FULL: KMask = KMask { drop: [false; 6], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic };
+    fn on(&self, kt: KT) -> bool {
+        !self.drop[kt as usize]
+    }
+    fn keeps(&self, r: &KRef) -> bool {
+        self.on(r.kt) && r.tier <= self.max_tier
+    }
+}
+
+/// The base joiner: every key type except the text fallback.
+const KBASE: KMask = KMask { drop: [false, false, false, false, false, true], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic };
+
+/// The ablations against the base: (name suffix, joiner variant). `-<type>` drops the type's
+/// links; `-raw<type>` reads the type through the earlier runs' raw matching instead;
+/// `-heuristic` keeps FACT and DERIVED links only; `+text` adds the BM25 fallback.
+fn kvariants() -> Vec<(&'static str, KMask)> {
+    let drop = |kt: KT| {
+        let mut m = KBASE;
+        m.drop[kt as usize] = true;
+        m
+    };
+    vec![
+        ("-path", drop(KT::Path)),
+        ("-rawpath", KMask { raw_path: true, ..KBASE }),
+        ("-scoped", drop(KT::Scoped)),
+        ("-rawscoped", KMask { raw_scoped: true, ..KBASE }),
+        ("-lineage", drop(KT::Lineage)),
+        ("-rawcite", KMask { raw_cite: true, ..KBASE }),
+        ("-row", drop(KT::Row)),
+        ("-heuristic", KMask { max_tier: Tier::Derived, ..KBASE }),
+        ("+text", KMask::FULL),
+    ]
+}
+
+/// The links a model resolved, counted by key type, tier and route.
+fn ktally<'a>(refs: impl Iterator<Item = &'a KRef>, stats: &mut BTreeMap<String, f64>) {
+    for r in refs {
+        kbump(stats, format!("k_link_{}_{}", r.kt.name(), r.tier.name()));
+        kbump(stats, format!("k_link_{}_{}_{}", r.kt.name(), r.tier.name(), r.route));
+    }
+}
+
+fn kbump(stats: &mut BTreeMap<String, f64>, k: impl Into<String>) {
+    *stats.entry(k.into()).or_default() += 1.0;
+}
+
+/// Identity classes over keys from lineage edges: union-find, FACT edges first, and a
+/// merge that would make a class larger than `cap` is refused (a class that large is a
+/// grouping, not one thing). A class is named by its least key.
+struct KClasses {
+    rep: HashMap<String, String>,
+}
+
+impl KClasses {
+    fn build(edges: &[(String, String, Tier)], cap: usize, stats: &mut BTreeMap<String, f64>) -> KClasses {
+        let mut ix: HashMap<String, usize> = HashMap::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut parent: Vec<usize> = Vec::new();
+        let mut size: Vec<usize> = Vec::new();
+        let mut order: Vec<&(String, String, Tier)> = edges.iter().collect();
+        order.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1)));
+        fn find(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            x
+        }
+        for (a, b, _) in order {
+            if a == b {
+                continue;
+            }
+            let mut id = |k: &String| -> usize {
+                if let Some(&i) = ix.get(k) {
+                    return i;
+                }
+                let i = names.len();
+                ix.insert(k.clone(), i);
+                names.push(k.clone());
+                parent.push(i);
+                size.push(1);
+                i
+            };
+            let (ia, ib) = (id(a), id(b));
+            let (ra, rb) = (find(&mut parent, ia), find(&mut parent, ib));
+            if ra == rb {
+                continue;
+            }
+            if size[ra] + size[rb] > cap {
+                kbump(stats, "k_lineage_merge_refused_cap");
+                continue;
+            }
+            let (big, small) = if size[ra] >= size[rb] { (ra, rb) } else { (rb, ra) };
+            parent[small] = big;
+            size[big] += size[small];
+            kbump(stats, "k_lineage_merges");
+        }
+        let mut least: HashMap<usize, String> = HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            let r = find(&mut parent, i);
+            let e = least.entry(r).or_insert_with(|| name.clone());
+            if name < e {
+                *e = name.clone();
+            }
+        }
+        let mut rep = HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            let r = find(&mut parent, i);
+            if least[&r] != *name {
+                rep.insert(name.clone(), least[&r].clone());
+            }
+        }
+        KClasses { rep }
+    }
+
+    fn of<'a>(&'a self, k: &'a str) -> &'a str {
+        self.rep.get(k).map_or(k, String::as_str)
+    }
+}
+
+/// Id lineage over oriented edges (new, old): an edge whose ends have no other lineage
+/// partner is a rename and merges into one identity class; an old id several new ids
+/// absorb, or a new row that lists several old ids, redirects each old id to its new id(s)
+/// without making the siblings one thing.
+struct KLin {
+    cl: KClasses,
+    redirect: HashMap<String, Vec<String>>,
+}
+
+impl KLin {
+    /// `edges`: (new, old, tier, always merge). A restated row or a moved section is one thing
+    /// whatever its other partners; any other edge merges only when it is one-to-one.
+    fn build(edges: &[(String, String, Tier, bool)], cap: usize, stats: &mut BTreeMap<String, f64>) -> KLin {
+        let always: HashSet<(&String, &String)> = edges.iter().filter(|e| e.3).map(|e| (&e.0, &e.1)).collect();
+        let pairs: BTreeSet<(&String, &String, Tier)> = edges.iter().filter(|e| e.0 != e.1).map(|e| (&e.0, &e.1, e.2)).collect();
+        let mut part: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        for (n, o, _) in &pairs {
+            part.entry(n.as_str()).or_default().insert(o.as_str());
+            part.entry(o.as_str()).or_default().insert(n.as_str());
+        }
+        let mut merge = Vec::new();
+        let mut redirect: HashMap<String, Vec<String>> = HashMap::new();
+        for (n, o, t) in pairs {
+            if always.contains(&(n, o)) || part[n.as_str()].len() == 1 && part[o.as_str()].len() == 1 {
+                merge.push((n.clone(), o.clone(), t));
+                kbump(stats, "k_lineage_merge_one_to_one");
+            } else {
+                redirect.entry(o.clone()).or_default().push(n.clone());
+                kbump(stats, "k_lineage_redirect");
+            }
+        }
+        KLin { cl: KClasses::build(&merge, cap, stats), redirect }
+    }
+
+    /// A key's class, plus the classes of the new ids an old one redirects to.
+    fn exp(&self, k: &str) -> Vec<String> {
+        let mut v = vec![self.cl.of(k).to_string()];
+        for n in self.redirect.get(k).into_iter().flatten() {
+            let c = self.cl.of(n).to_string();
+            if !v.contains(&c) {
+                v.push(c);
+            }
+        }
+        v
+    }
+}
+
+// ---- the path resolver ----
+
+/// `(old, new)` for every rename git detects (-M) in non-merge history to `rev`, oldest first.
+fn git_renames(git: &str, rev: &str) -> Vec<(String, String)> {
+    let text = git_text(git, &["log", "--no-merges", "-M", "--diff-filter=R", "--name-status", "--format=%x1e", rev]).unwrap_or_default();
+    let mut out = Vec::new();
+    for rec in text.split('\x1e').skip(1) {
+        for l in rec.lines() {
+            let mut p = l.split('\t');
+            if p.next().is_some_and(|st| st.starts_with('R'))
+                && let (Some(a), Some(b)) = (p.next(), p.next())
+            {
+                out.push((a.to_string(), b.to_string()));
+            }
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// Candidate files (the snapshot's), every historical path git renamed into one, and the
+/// suffix / directory indexes over both.
+struct KPaths {
+    cand: Vec<String>,
+    exact: HashMap<String, u32>,
+    hist: HashMap<String, u32>,
+    suffix: HashMap<String, Vec<u32>>,
+    hsuffix: HashMap<String, Vec<u32>>,
+    dir_files: HashMap<String, Vec<u32>>,
+    dir_suffix: HashMap<String, Vec<String>>,
+    exts: HashSet<String>,
+    renames: usize,
+}
+
+const KDIR_CAP: usize = 30;
+
+impl KPaths {
+    fn new(cand: &[String], renames: &[(String, String)]) -> KPaths {
+        let exact: HashMap<String, u32> = cand.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect();
+        let mut fwd: HashMap<&str, &str> = HashMap::new();
+        for (a, b) in renames {
+            fwd.insert(a.as_str(), b.as_str());
+        }
+        let mut hist: HashMap<String, u32> = HashMap::new();
+        for &old in fwd.keys() {
+            if exact.contains_key(old) {
+                continue;
+            }
+            let mut p = old;
+            for _ in 0..64 {
+                match fwd.get(p) {
+                    Some(&n) => {
+                        p = n;
+                        if exact.contains_key(p) {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if let Some(&f) = exact.get(p) {
+                hist.insert(old.to_string(), f);
+            }
+        }
+        let mut suffix: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut dir_files: HashMap<String, Vec<u32>> = HashMap::new();
+        let add_dirs = |segs: &[&str], f: u32, dir_files: &mut HashMap<String, Vec<u32>>| {
+            for end in 1..segs.len() {
+                dir_files.entry(segs[..end].join("/")).or_default().push(f);
+            }
+        };
+        for (f, p) in cand.iter().enumerate() {
+            let segs: Vec<&str> = p.split('/').collect();
+            for k in 0..segs.len() {
+                suffix.entry(segs[k..].join("/")).or_default().push(f as u32);
+            }
+            add_dirs(&segs, f as u32, &mut dir_files);
+        }
+        let mut hsuffix: HashMap<String, Vec<u32>> = HashMap::new();
+        for (old, &f) in &hist {
+            let segs: Vec<&str> = old.split('/').collect();
+            for k in 0..segs.len() {
+                hsuffix.entry(segs[k..].join("/")).or_default().push(f);
+            }
+            add_dirs(&segs, f, &mut dir_files);
+        }
+        for v in suffix.values_mut().chain(hsuffix.values_mut()).chain(dir_files.values_mut()) {
+            v.sort_unstable();
+            v.dedup();
+        }
+        let mut dir_suffix: HashMap<String, Vec<String>> = HashMap::new();
+        for d in dir_files.keys() {
+            let segs: Vec<&str> = d.split('/').collect();
+            for k in 0..segs.len() {
+                dir_suffix.entry(segs[k..].join("/")).or_default().push(d.clone());
+            }
+        }
+        for v in dir_suffix.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        let exts = cand.iter().map(|p| ext_of(p)).filter(|e| !e.is_empty()).collect();
+        KPaths { cand: cand.to_vec(), exact, hist, suffix, hsuffix, dir_files, dir_suffix, exts, renames: renames.len() }
+    }
+
+    /// The candidate a path at some revision is now: itself, or the file git renamed it into.
+    fn map(&self, p: &str) -> Option<u32> {
+        self.exact.get(p).or_else(|| self.hist.get(p)).copied()
+    }
+}
+
+#[derive(Debug)]
+enum PTok {
+    File(String),
+    Dir(String),
+    Glob(String),
+}
+
+/// Path-like tokens on a line: split at whitespace and at quoting, bracket and separator
+/// characters outside `{..}`, so a brace glob keeps its commas.
+fn kpath_tokens(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in line.chars() {
+        let sep = c.is_whitespace()
+            || matches!(c, '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>' | ';' | '|' | '=')
+            || (c == ',' && depth == 0);
+        if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            depth = depth.saturating_sub(1);
+        }
+        if sep && depth == 0 {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        if depth > 0 {
+            out.extend(cur.split_whitespace().map(str::to_string));
+        } else {
+            out.push(cur);
+        }
+    }
+    out
+}
+
+/// A token normalised to a path mention: emphasis, line ranges (`:12-40`, `#L12`), `./`,
+/// `../` and a leading `/` removed; URLs dropped.
+fn kpath_norm(raw: &str, exts: &HashSet<String>) -> Option<PTok> {
+    let mut t: &str = raw;
+    for _ in 0..2 {
+        t = t.trim_end_matches(['.', ',', ':', ';', '!', '?']);
+        if let Some(x) = t.strip_prefix("**").filter(|x| !x.starts_with('/')) {
+            t = x;
+        }
+        if let Some(x) = t.strip_suffix("**").filter(|x| !x.ends_with('/')) {
+            t = x;
+        }
+        t = t.trim_matches(|c: char| c == '_' || c == '~');
+    }
+    if t.contains("://") || t.starts_with("http") || t.starts_with("www.") || t.contains('@') && !t.contains('/') {
+        return None;
+    }
+    let mut s = t.to_string();
+    if let Some(i) = s.find("#L") {
+        s.truncate(i);
+    }
+    if let Some(i) = s.char_indices().find(|&(i, c)| c == ':' && s[i + 1..].starts_with(|d: char| d.is_ascii_digit())).map(|x| x.0) {
+        s.truncate(i);
+    }
+    let mut s = s.as_str();
+    loop {
+        if let Some(x) = s.strip_prefix("./") {
+            s = x;
+        } else if let Some(x) = s.strip_prefix("../") {
+            s = x;
+        } else if let Some(x) = s.strip_prefix('/') {
+            s = x;
+        } else {
+            break;
+        }
+    }
+    let s = s.trim_end_matches(['.', ',', ':']);
+    if s.len() < 3 || !s.chars().any(|c| c.is_ascii_alphabetic()) || s.contains("..") {
+        return None;
+    }
+    if s.contains('{') || s.contains('*') {
+        return (s.contains('/') || s.contains('.')).then(|| PTok::Glob(s.to_string()));
+    }
+    if let Some(d) = s.strip_suffix('/') {
+        return (!d.is_empty()).then(|| PTok::Dir(d.to_string()));
+    }
+    let e = ext_of(s);
+    if !e.is_empty() && exts.contains(&e) {
+        return Some(PTok::File(s.to_string()));
+    }
+    if s.contains('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '@' | '+')) {
+        return Some(PTok::Dir(s.to_string()));
+    }
+    None
+}
+
+/// `{a,b}` alternatives expanded (cartesian, capped at 64 patterns).
+fn kbraces(p: &str) -> Vec<String> {
+    let Some(o) = p.find('{') else { return vec![p.to_string()] };
+    let Some(c) = p[o..].find('}').map(|x| o + x) else { return vec![p.replace('{', "")] };
+    let (head, alts, tail) = (&p[..o], &p[o + 1..c], &p[c + 1..]);
+    let mut out = Vec::new();
+    for t in kbraces(tail) {
+        for a in alts.split(',') {
+            out.push(format!("{head}{}{t}", a.trim()));
+            if out.len() >= 64 {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Glob match: `*` and `?` stay inside a segment, `**` crosses segments.
+fn kglob(p: &[u8], s: &[u8]) -> bool {
+    if p.is_empty() {
+        return s.is_empty();
+    }
+    if p.starts_with(b"**") {
+        let rest = if p.len() > 2 && p[2] == b'/' { &p[3..] } else { &p[2..] };
+        return (0..=s.len()).any(|k| (k == 0 || s[k - 1] == b'/') && kglob(rest, &s[k..])) || kglob(rest, s);
+    }
+    match p[0] {
+        b'*' => (0..=s.len()).take_while(|&k| k == 0 || s[k - 1] != b'/').any(|k| kglob(&p[1..], &s[k..])),
+        b'?' => !s.is_empty() && s[0] != b'/' && kglob(&p[1..], &s[1..]),
+        c => !s.is_empty() && s[0] == c && kglob(&p[1..], &s[1..]),
+    }
+}
+
+impl KPaths {
+    /// The candidates under one directory (a full directory or a suffix naming exactly one).
+    fn dir(&self, d: &str, stats: &mut BTreeMap<String, f64>) -> Option<(Vec<u32>, &'static str)> {
+        let full: Vec<&String> = match self.dir_files.get_key_value(d) {
+            Some((k, _)) => vec![k],
+            None => self.dir_suffix.get(d).map(|v| v.iter().collect()).unwrap_or_default(),
+        };
+        if full.len() != 1 {
+            if full.len() > 1 {
+                kbump(stats, "k_path_dir_ambiguous");
+            }
+            return None;
+        }
+        let files = &self.dir_files[full[0]];
+        if files.len() > KDIR_CAP {
+            kbump(stats, "k_path_dir_over_cap");
+            return None;
+        }
+        Some((files.clone(), if full[0] == d { "dir" } else { "dir-suffix" }))
+    }
+
+    /// One file mention resolved: exact, renamed, a unique suffix or bare name, a suffix the
+    /// block's other paths disambiguate, or a unique suffix of a renamed path.
+    fn file(&self, t: &str, ctx: &[String], stats: &mut BTreeMap<String, f64>) -> Option<(u32, Tier, &'static str)> {
+        if let Some(&f) = self.exact.get(t) {
+            return Some((f, Tier::Fact, "exact"));
+        }
+        if let Some(&f) = self.hist.get(t) {
+            return Some((f, Tier::Derived, "rename"));
+        }
+        if let Some(v) = self.suffix.get(t) {
+            if v.len() == 1 {
+                return Some((v[0], Tier::Derived, if t.contains('/') { "suffix" } else { "name" }));
+            }
+            // the block's other paths pick the candidate in their directory tree
+            let mut best = (0usize, Vec::new());
+            for &f in v {
+                let fd: Vec<&str> = dir_of(&self.cand[f as usize]).split('/').collect();
+                let mut s = 0;
+                for c in ctx {
+                    let cd: Vec<&str> = c.split('/').collect();
+                    s = s.max(fd.iter().zip(&cd).take_while(|(a, b)| a == b).count());
+                }
+                if s > best.0 {
+                    best = (s, vec![f]);
+                } else if s == best.0 && s > 0 {
+                    best.1.push(f);
+                }
+            }
+            if best.1.len() == 1 {
+                return Some((best.1[0], Tier::Derived, "context"));
+            }
+            kbump(stats, "k_path_ambiguous");
+            return None;
+        }
+        if let Some(v) = self.hsuffix.get(t)
+            && v.len() == 1
+        {
+            return Some((v[0], Tier::Derived, "rename-suffix"));
+        }
+        None
+    }
+
+    /// Every path mention on the lines of one block, resolved (tokens in block order; the
+    /// block's own unique paths are the context that disambiguates a short suffix).
+    fn block(&self, toks: &[String], stats: &mut BTreeMap<String, f64>) -> Vec<(u32, Tier, &'static str, String)> {
+        let cand = &self.cand;
+        let mut out: Vec<(u32, Tier, &'static str, String)> = Vec::new();
+        let mut pending: Vec<&String> = Vec::new();
+        let mut ctx: Vec<String> = Vec::new();
+        for raw in toks {
+            let Some(pt) = kpath_norm(raw, &self.exts) else { continue };
+            match pt {
+                PTok::File(t) => match self.file(&t, &[], stats) {
+                    Some((f, tier, route)) => {
+                        ctx.push(dir_of(&cand[f as usize]).to_string());
+                        out.push((f, tier, route, raw.clone()));
+                    }
+                    None if self.suffix.get(&t).is_some_and(|v| v.len() > 1) => pending.push(raw),
+                    None => kbump(stats, "k_path_unresolved_file"),
+                },
+                PTok::Dir(d) => {
+                    if let Some((fs, route)) = self.dir(&d, stats) {
+                        for f in fs {
+                            out.push((f, Tier::Derived, route, raw.clone()));
+                        }
+                    }
+                }
+                PTok::Glob(g) => {
+                    let mut got: BTreeSet<u32> = BTreeSet::new();
+                    for p in kbraces(&g) {
+                        if !p.contains('*') {
+                            match kpath_norm(&p, &self.exts) {
+                                Some(PTok::File(t)) => got.extend(self.file(&t, &[], stats).map(|x| x.0)),
+                                Some(PTok::Dir(d)) => got.extend(self.dir(&d, stats).map(|x| x.0).unwrap_or_default()),
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        // a glob with no directory part (`client.*`) names no particular place
+                        if !p.contains('/') {
+                            kbump(stats, "k_path_glob_no_dir");
+                            continue;
+                        }
+                        let anchored = cand.iter().any(|c| c.split('/').next() == p.split('/').next());
+                        let pat = if anchored { p.clone() } else { format!("**/{p}") };
+                        for (f, c) in cand.iter().enumerate() {
+                            if kglob(pat.as_bytes(), c.as_bytes()) {
+                                got.insert(f as u32);
+                            }
+                        }
+                    }
+                    if got.len() > KDIR_CAP {
+                        kbump(stats, "k_path_glob_over_cap");
+                    } else {
+                        for f in got {
+                            out.push((f, Tier::Derived, "glob", raw.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        for raw in pending {
+            if let Some(PTok::File(t)) = kpath_norm(raw, &self.exts)
+                && let Some((f, tier, route)) = self.file(&t, &ctx, stats)
+            {
+                out.push((f, tier, route, raw.clone()));
+            }
+        }
+        out
+    }
+}
+
+// ---- the code text index (BM25 over each candidate's text at a revision) ----
+
+/// One blob's hashed terms with their counts, and its length in tokens.
+type KTf = std::sync::Arc<(Vec<(u64, u32)>, u32)>;
+
+/// Term-frequency vectors per blob (terms hashed), read once per blob for every revision.
+#[derive(Default)]
+struct KBlobs {
+    tf: HashMap<String, KTf>,
+    /// revision -> (candidate, blob) for the candidates present at it
+    trees: HashMap<String, Vec<(u32, String)>>,
+}
+
+fn ktf(text: &str) -> (Vec<(u64, u32)>, u32) {
+    let toks = law_code_tokens(text);
+    let mut m: HashMap<u64, u32> = HashMap::new();
+    for t in &toks {
+        *m.entry(h64(t)).or_default() += 1;
+    }
+    let mut v: Vec<(u64, u32)> = m.into_iter().collect();
+    v.sort_unstable();
+    (v, toks.len() as u32)
+}
+
+impl KBlobs {
+    /// `git ls-tree` at every revision, then one `git cat-file --batch` over the blobs not yet read.
+    fn load(git: &str, revs: &[String], kp: &KPaths) -> KBlobs {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let mut kb = KBlobs::default();
+        let trees: Vec<(String, Vec<(u32, String)>)> = revs
+            .par_iter()
+            .map(|r| {
+                let text = git_text(git, &["ls-tree", "-r", r]).unwrap_or_default();
+                let mut v: Vec<(u32, String)> = Vec::new();
+                let mut seen: HashSet<u32> = HashSet::new();
+                for l in text.lines() {
+                    let Some((meta, path)) = l.split_once('\t') else { continue };
+                    let Some(blob) = meta.split_whitespace().nth(2) else { continue };
+                    if let Some(f) = kp.map(path)
+                        && seen.insert(f)
+                    {
+                        v.push((f, blob.to_string()));
+                    }
+                }
+                (r.clone(), v)
+            })
+            .collect();
+        let mut need: BTreeSet<String> = BTreeSet::new();
+        for (_, v) in &trees {
+            need.extend(v.iter().map(|x| x.1.clone()));
+        }
+        kb.trees = trees.into_iter().collect();
+        let need: Vec<String> = need.into_iter().collect();
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(git)
+            .args(["cat-file", "--batch"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("git cat-file --batch");
+        let mut stdin = child.stdin.take().expect("stdin");
+        let input: String = need.iter().map(|s| format!("{s}\n")).collect();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+        let mut r = BufReader::new(child.stdout.take().expect("stdout"));
+        let mut raw: Vec<(String, Vec<u8>)> = Vec::with_capacity(need.len());
+        for _ in &need {
+            let mut head = String::new();
+            if r.read_line(&mut head).unwrap_or(0) == 0 {
+                break;
+            }
+            let parts: Vec<&str> = head.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let size: usize = parts[2].parse().unwrap_or(0);
+            let mut buf = vec![0u8; size];
+            if r.read_exact(&mut buf).is_err() {
+                break;
+            }
+            let mut nl = [0u8; 1];
+            let _ = r.read_exact(&mut nl);
+            raw.push((parts[0].to_string(), buf));
+        }
+        let _ = writer.join();
+        let _ = child.wait();
+        kb.tf = raw
+            .into_par_iter()
+            .map(|(s, b)| (s, std::sync::Arc::new(ktf(&String::from_utf8_lossy(&b)))))
+            .collect();
+        kb
+    }
+
+    fn index(&self, rev: &str, nf: usize) -> KBm {
+        let mut post: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
+        let mut dl = vec![0u32; nf];
+        for (f, blob) in self.trees.get(rev).into_iter().flatten() {
+            if let Some(t) = self.tf.get(blob) {
+                dl[*f as usize] = t.1;
+                for &(term, c) in &t.0 {
+                    post.entry(term).or_default().push((*f, c));
+                }
+            }
+        }
+        let n = dl.iter().filter(|&&d| d > 0).count();
+        let avg = dl.iter().map(|&d| f64::from(d)).sum::<f64>() / n.max(1) as f64;
+        KBm { post, dl, avg: avg.max(1e-9), n }
+    }
+}
+
+struct KBm {
+    post: HashMap<u64, Vec<(u32, u32)>>,
+    dl: Vec<u32>,
+    avg: f64,
+    n: usize,
+}
+
+impl KBm {
+    /// The top `k` files by BM25 of a unit's text (score > 0), best first.
+    fn top(&self, text: &str, k: usize) -> Vec<(u32, f64)> {
+        let mut q: Vec<u64> = law_code_tokens(text).iter().map(|t| h64(t)).collect();
+        q.sort_unstable();
+        q.dedup();
+        if q.len() < 8 || self.n == 0 {
+            return Vec::new();
+        }
+        let mut s: HashMap<u32, f64> = HashMap::new();
+        for t in q {
+            let Some(pl) = self.post.get(&t) else { continue };
+            let df = pl.len() as f64;
+            let idf = (1.0 + (self.n as f64 - df + 0.5) / (df + 0.5)).ln();
+            for &(d, tf) in pl {
+                let tf = f64::from(tf);
+                let dl = f64::from(self.dl[d as usize]);
+                *s.entry(d).or_default() += idf * tf * (BM25_K1 + 1.0) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / self.avg));
+            }
+        }
+        let mut v: Vec<(u32, f64)> = s.into_iter().filter(|x| x.1 > 0.0).collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.truncate(k);
+        v
+    }
+}
+
+// ---- law knowledge: each instrument's own section list ----
+
+const LAW_RULES_PDF: &str = "AU_AMLCTF_Rules_2025_F2026C00274_compilation1_2026-03-31";
+const LAW_TRULES_PDF: &str = "AU_AMLCTF_Transitional_Rules_2026_F2026C00452_compilation1_2026-05-14";
+
+struct LawKnown {
+    act: HashSet<String>,
+    act59: HashSet<String>,
+    act62: HashSet<String>,
+    rules: HashSet<String>,
+    trules: HashSet<String>,
+    moved: Vec<(String, String)>,
+    order: Vec<String>,
+}
+
+/// A Rules provision heading at the margin: `6-12 Customer due diligence`.
+fn rules_head(l: &str) -> Option<String> {
+    let b = l.as_bytes();
+    let d = digits_at(b, 0, 3);
+    if d == 0 || d > 2 || d >= b.len() || b[d] != b'-' {
+        return None;
+    }
+    let d2 = digits_at(b, d + 1, 4);
+    if d2 == d + 1 || d2 - d - 1 > 3 {
+        return None;
+    }
+    let mut q = d2;
+    if q < b.len() && b[q].is_ascii_uppercase() {
+        q += 1;
+    }
+    (q + 1 < b.len() && b[q] == b' ' && b[q + 1].is_ascii_uppercase()).then(|| l[..q].to_string())
+}
+
+fn law_known(args: &Args) -> LawKnown {
+    let (old, dold) = act_sections(&law_lines(&law_pdf(args, LAW_OLD_PDF), act_furniture));
+    let (new, dnew) = act_sections(&law_lines(&law_pdf(args, LAW_NEW_PDF), act_furniture));
+    let act59: HashSet<String> = old.iter().map(|s| s.num.clone()).collect();
+    let act62: HashSet<String> = new.iter().map(|s| s.num.clone()).collect();
+    let diff = law_diff(old, new, dold, dnew);
+    let rules: HashSet<String> = law_pdf(args, LAW_RULES_PDF).lines().filter_map(rules_head).collect();
+    let trules: HashSet<String> = law_lines(&law_pdf(args, LAW_TRULES_PDF), |_| false).iter().filter_map(|l| law_sec_heading(l).map(|x| x.0)).collect();
+    eprintln!(
+        "[keys] law: AU Act {} sections (comp 59 {}, comp 62 {}), Rules {} provisions, Transitional Rules {} sections, {} moved",
+        diff.order.len(),
+        act59.len(),
+        act62.len(),
+        rules.len(),
+        trules.len(),
+        diff.moved.len()
+    );
+    LawKnown {
+        act: diff.order.iter().cloned().collect(),
+        act59,
+        act62,
+        rules,
+        trules,
+        moved: diff.moved.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect(),
+        order: diff.order.clone(),
+    }
+}
+
+/// AML/CTF Rules provisions a line cites: `Rule 6-12(4)`, `Rules 5-17(6)(c), 5-18(3)(c)`.
+fn rules_cites(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    let lower = line.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(p) = lower[from..].find("rule") {
+        let s = from + p;
+        from = s + 4;
+        if !wb(b, s) {
+            continue;
+        }
+        let mut e = s + 4;
+        if e < b.len() && b[e] == b's' {
+            e += 1;
+        }
+        if !(e < b.len() && b[e] == b' ') {
+            continue;
+        }
+        e += 1;
+        loop {
+            let d = digits_at(b, e, 3);
+            if d == e || d - e > 2 || d >= b.len() || b[d] != b'-' {
+                break;
+            }
+            let d2 = digits_at(b, d + 1, 4);
+            if d2 == d + 1 || d2 - d - 1 > 3 {
+                break;
+            }
+            let mut q = d2;
+            if q < b.len() && b[q].is_ascii_uppercase() {
+                q += 1;
+            }
+            out.push(line[e..q].to_string());
+            let mut r = q;
+            while r < b.len() && b[r] == b'(' {
+                match line[r..].find(')') {
+                    Some(x) if x <= 8 => r += x + 1,
+                    _ => break,
+                }
+            }
+            match [", ", " and ", " or "].iter().find(|s| line[r..].starts_with(**s)) {
+                Some(sp) => e = r + sp.len(),
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+/// The page-level instrument context of a doc page (or a code file): the earlier run's
+/// jurisdiction, AML/CTF-page and page-default reading, plus a Transitional Rules title.
+struct KCiteCtx {
+    page_jur: &'static str,
+    page_def: &'static str,
+    aml_page: bool,
+    tr_page: bool,
+    /// the other instrument the page names most (for a bare number on a page about it)
+    page_other: String,
+}
+
+fn kcite_ctx(path: &str, lines: &[&str]) -> KCiteCtx {
+    let (mut au, mut png) = (0usize, 0usize);
+    for l in lines {
+        let (a, p) = law_marks(l);
+        au += a;
+        png += p;
+    }
+    let pl = path.to_ascii_lowercase();
+    if pl.contains("png") {
+        png += 5;
+    }
+    if pl.contains("au_") || pl.contains("austrac") {
+        au += 5;
+    }
+    let page_jur: &'static str = if au >= png && au > 0 {
+        "AU"
+    } else if png > au {
+        "PNG"
+    } else {
+        ""
+    };
+    let title = lines.iter().find(|l| l.starts_with("# ")).map_or(String::new(), |l| l.to_lowercase());
+    let aml_page = ["aml", "austrac", "travel-rule", "travel_rule", "ifti", "tipping"].iter().any(|w| pl.contains(w))
+        || (!title.contains("excluding") && ["aml/ctf", "amlctf", "austrac", "travel rule", "tipping-off", "tipping off"].iter().any(|w| title.contains(w)));
+    let mut cnt: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut others: BTreeMap<String, usize> = BTreeMap::new();
+    for l in lines {
+        for m in law_mentions(l) {
+            let c = law_class(m.inst, l, page_jur, "");
+            if matches!(c, "AU" | "PNG" | "OTHER") {
+                *cnt.entry(c).or_default() += 1;
+            }
+            if c == "OTHER" {
+                let n = kother_name(l, &m);
+                if n.len() > 3 {
+                    *others.entry(n).or_default() += 1;
+                }
+            }
+        }
+    }
+    // a page's bare numbers belong to its other instrument only when one instrument dominates it
+    let total: usize = others.values().sum();
+    let page_other = others
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .filter(|x| x.1 * 10 >= total * 7)
+        .map(|x| x.0)
+        .unwrap_or_default();
+    let mut page_def: &'static str = "";
+    if aml_page {
+        page_def = if page_jur == "PNG" { "PNG" } else { "AU" };
+    } else {
+        let mut best = 0;
+        for c in ["AU", "PNG", "OTHER"] {
+            let n = cnt.get(c).copied().unwrap_or(0);
+            if n > best {
+                best = n;
+                page_def = c;
+            }
+        }
+    }
+    KCiteCtx { page_jur, page_def, aml_page, tr_page: title.contains("transitional") || pl.contains("transitional"), page_other }
+}
+
+/// The name an "other instrument" mention gives (`Corporations Act`, `CBA`), normalised.
+fn kother_name(l: &str, m: &LMention) -> String {
+    let spaced = l.replace('_', " ");
+    let word = &spaced[m.start..m.end];
+    let mut name = word.to_string();
+    if matches!(word, "Act" | "Acts") {
+        // the capitalised run just before "Act", stopping at punctuation (`PDF; Corporations Act`)
+        let before: Vec<&str> = spaced[..m.start]
+            .split_whitespace()
+            .rev()
+            .take_while(|w| w.chars().next().is_some_and(char::is_uppercase) && !w.ends_with([',', ';', ':', '.', ')', '|']))
+            .take(5)
+            .collect();
+        name = before.into_iter().rev().chain(std::iter::once("Act")).collect::<Vec<_>>().join(" ");
+    }
+    name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase()
+}
+
+/// One line's Act-section citations, read twice: the earlier run's way (`raw`: an AU
+/// AML/CTF Act class, numbers unchecked) and this run's (every number checked against the
+/// instrument's own section list; the Transitional Rules from the line, a heading or the
+/// page title; another instrument keyed by its name; no instrument read across a `;`;
+/// a code file's bare number defaults to the AU Act, HEURISTIC).
+/// Where on its page a line sits, for the citation resolver: the page context, the heading
+/// stack above it, and the last instrument named a few lines up.
+struct KCiteAt<'a> {
+    cx: &'a KCiteCtx,
+    stack: &'a [(usize, String)],
+    recent: Option<(usize, &'static str)>,
+}
+
+fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, stats: &mut BTreeMap<String, f64>) -> (Vec<KRes>, Vec<String>) {
+    let (cx, stack, recent) = (at.cx, at.stack, at.recent);
+    let ments = law_mentions(l);
+    let mut res: Vec<(String, Tier, &'static str)> = Vec::new();
+    let mut raw: Vec<String> = Vec::new();
+    let tr_ctx = l.to_ascii_lowercase().contains("transitional") || stack.iter().any(|(_, h)| h.to_ascii_lowercase().contains("transitional")) || cx.tr_page;
+    for sc in law_cites(l, &known.order) {
+        let pick = |clause: bool| -> Option<(usize, &LMention)> {
+            let mut best: Option<(usize, &LMention)> = None;
+            for m in ments.iter().filter(|m| m.inst != LInst::AuRules) {
+                let dist = if m.end <= sc.start {
+                    sc.start - m.end
+                } else if m.start >= sc.end && m.start - sc.end <= 30 {
+                    m.start - sc.end + 20
+                } else {
+                    continue;
+                };
+                if clause {
+                    let (a, b) = if m.end <= sc.start { (m.end, sc.start) } else { (sc.end, m.start) };
+                    if l.get(a..b).is_some_and(|x| x.contains(';')) {
+                        continue;
+                    }
+                }
+                if best.is_none_or(|(bd, _)| dist < bd) {
+                    best = Some((dist, m));
+                }
+            }
+            best
+        };
+        let fallback = || -> (&'static str, &'static str, Option<String>) {
+            if law_aml_words(l) {
+                let png = ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w));
+                return (if png { "PNG" } else { "AU" }, "line-words", None);
+            }
+            let mut hc = None;
+            for (hlv, hl) in stack.iter().rev() {
+                if let Some(m) = law_mentions(hl).iter().rfind(|m| m.inst != LInst::TheAct) {
+                    let c = law_class(m.inst, hl, cx.page_jur, cx.page_def);
+                    hc = Some((c, (c == "OTHER").then(|| kother_name(hl, m))));
+                    break;
+                }
+                if *hlv >= 2 && !hl.contains("excluding") && law_aml_words(hl) {
+                    hc = Some(("AU", None));
+                    break;
+                }
+            }
+            match (hc, recent) {
+                (Some((c, n)), _) => (c, "heading", n),
+                (None, Some((rl, c))) if ln - rl <= 12 && !cx.aml_page => (c, "context", None),
+                _ => (cx.page_def, "page", (cx.page_def == "OTHER" && !cx.page_other.is_empty()).then(|| cx.page_other.clone())),
+            }
+        };
+        let c_old = match pick(false) {
+            Some((_, m)) => law_class(m.inst, l, cx.page_jur, cx.page_def),
+            None => fallback().0,
+        };
+        if c_old == "AU" {
+            raw.extend(sc.secs.iter().map(|s| format!("law:AU-ACT:{s}")));
+        }
+        // an instrument inside the citation's clause first, then one across a `;`, then context
+        let (class, route, other) = match pick(true).or_else(|| pick(false)) {
+            Some((_, m)) => {
+                let c = law_class(m.inst, l, cx.page_jur, cx.page_def);
+                (c, "line", (c == "OTHER").then(|| kother_name(l, m)))
+            }
+            None => fallback(),
+        };
+        // the PNG Act's own section list cannot be read (no text layer): a number the AU Act has
+        // is the AU Act's unless the line itself marks PNG
+        let png_line = ["FASU", "BPNG", "PNG", "Papua", "2015"].iter().any(|w| l.contains(w));
+        let tier = if route == "line" { Tier::Fact } else { Tier::Derived };
+        for s in &sc.secs {
+            match class {
+                "AU" if known.act.contains(s) => res.push((format!("law:AU-ACT:{s}"), tier, route)),
+                "AU" | "TRULES" if tr_ctx && known.trules.contains(s) => res.push((format!("law:AU-TRULES:{s}"), Tier::Derived, "tr-context")),
+                "TRULES" if known.trules.contains(s) => res.push((format!("law:AU-TRULES:{s}"), tier, route)),
+                "PNG" if !png_line && known.act.contains(s) => res.push((format!("law:AU-ACT:{s}"), Tier::Derived, "au-valid-over-png")),
+                "PNG" => res.push((format!("law:PNG-ACT:{s}"), Tier::Derived, if route == "line" { "png-line-unvalidated" } else { "png-unvalidated" })),
+                // an AML/CTF Act spelling the earlier pattern list lacks (`... Counter Terrorist
+                // Financing Act`) is the AU or PNG Act by the line's jurisdiction marks
+                "OTHER" if other.as_ref().is_some_and(|n| n.contains("counterterror") || n.contains("moneylaunder")) => {
+                    let (a, p) = law_marks(l);
+                    if p > a || (p == a && cx.page_jur == "PNG") || ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w)) {
+                        res.push((format!("law:PNG-ACT:{s}"), Tier::Derived, "aml-name-png"));
+                    } else if known.act.contains(s) {
+                        res.push((format!("law:AU-ACT:{s}"), Tier::Derived, "aml-name-au"));
+                    }
+                }
+                "OTHER" => match &other {
+                    Some(n) if !n.is_empty() => res.push((format!("law:OTHER:{n}:{s}"), tier, "other-named")),
+                    _ => kbump(stats, "k_cite_other_unnamed_dropped"),
+                },
+                // in a code comment a bare `s123` defaults to the AU Act; a bare "section 6" is a
+                // section of some doc (`contracts/README.md section 6`), never read as the Act's
+                "" | "UNRESOLVED" if code && known.act.contains(s) && !l[sc.start..].to_ascii_lowercase().starts_with("section") => {
+                    res.push((format!("law:AU-ACT:{s}"), Tier::Heuristic, "code-default"))
+                }
+                "AU" => kbump(stats, "k_cite_au_not_a_section_dropped"),
+                _ => kbump(stats, format!("k_cite_{}_dropped", if class.is_empty() { "unresolved" } else { class })),
+            }
+        }
+    }
+    for p in rules_cites(l) {
+        if known.rules.contains(&p) {
+            res.push((format!("law:AU-RULES:{p}"), Tier::Fact, "rules-line"));
+        } else {
+            kbump(stats, "k_cite_rules_unknown_dropped");
+        }
+    }
+    (res, raw)
+}
+
+// ---- the Kina goal layer as key mentions ----
+
+/// Spec-kit user stories a line names: `US1`, `[US2]`, `User Story 3`.
+fn us_ids(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    for i in 0..b.len() {
+        if b[i] == b'U' && i + 2 < b.len() && b[i + 1] == b'S' && wb(b, i) {
+            let e = digits_at(b, i + 2, 3);
+            if e > i + 2 && e - i - 2 <= 2 && we(b, e) {
+                out.push(format!("US{}", &s[i + 2..e]));
+            }
+        }
+    }
+    let mut from = 0;
+    while let Some(p) = s[from..].find("User Story ") {
+        let st = from + p + "User Story ".len();
+        let e = digits_at(b, st, 3);
+        if e > st && we(b, e) {
+            out.push(format!("US{}", &s[st..e]));
+        }
+        from = st;
+    }
+    out
+}
+
+/// Id mentions on a line with byte positions: (start, end, id, bare).
+fn kid_mentions(l: &str, vocab_free: bool) -> Vec<(usize, usize, String, bool)> {
+    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let mut v: Vec<(String, bool)> = hyphen_ids(l).into_iter().filter(|(p, _)| vocab_free || !KINA_STANDARDS.contains(&p.as_str())).map(|(_, id)| (id, false)).collect();
+    v.extend(bare_ids(l, &bare).into_iter().map(|(_, id)| (id, true)));
+    v.extend(us_ids(l).into_iter().map(|id| (id, true)));
+    let mut out = Vec::new();
+    let mut used: HashSet<usize> = HashSet::new();
+    for (id, b) in v {
+        let mut from = 0;
+        while let Some(p) = l[from..].find(&id) {
+            let s = from + p;
+            from = s + id.len();
+            if used.insert(s) {
+                out.push((s, s + id.len(), id.clone(), b));
+                break;
+            }
+        }
+    }
+    out.sort_by_key(|x| x.0);
+    out
+}
+
+/// Identity lineage phrases (an absorption such as "folded into" is not one): the phrase,
+/// its name, and whether the id it names is the NEW one (`superseded by X`) rather than the
+/// old one (`supersedes X`).
+const KLIN_PHRASES: &[(&str, &str, bool)] = &[
+    ("(was ", "was", false),
+    ("formerly ", "formerly", false),
+    ("previously ", "previously", false),
+    ("renamed from ", "renamed", false),
+    ("renumbered from ", "renumbered", false),
+    ("supersedes ", "supersedes", false),
+    ("replaces ", "replaces", false),
+    ("split from ", "split-from", false),
+    ("superseded by ", "superseded-by", true),
+    ("replaced by ", "replaced-by", true),
+    ("(now ", "now", true),
+    (" is now ", "now", true),
+    ("split into ", "split-into", true),
+];
+
+/// Id lineage phrases on a line: (the id just before the phrase, or None for the block's
+/// own definition; the id the phrase names; the phrase).
+/// A raw lineage mention: (the id before the phrase, or None for the block's own definition;
+/// the id the phrase names; the phrase). Ids are (id, bare).
+type KLinRaw = (Option<(String, bool)>, (String, bool), &'static str);
+
+fn klin_phrases(l: &str, ids: &[(usize, usize, String, bool)]) -> Vec<KLinRaw> {
+    let lower = l.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (ph, name, _) in KLIN_PHRASES {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(ph) {
+            let s = from + p;
+            let e = s + ph.len();
+            from = e;
+            let Some(obj) = ids.iter().find(|x| x.0 >= e && x.0 <= e + 3) else { continue };
+            let subj = ids.iter().rev().find(|x| x.1 <= s && s - x.1 <= 40).map(|x| (x.2.clone(), x.3));
+            out.push((subj, (obj.2.clone(), obj.3), *name));
+        }
+    }
+    out
+}
+
+/// The section tag a numbered table's rows are keyed under: its heading's kind word.
+fn row_tag(head: &str) -> &'static str {
+    let h = head.to_lowercase();
+    // whole words, singular or plural (`screening` is not `screen`)
+    let words: Vec<&str> = h.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    for (w, t) in [
+        ("decision", "decision"),
+        ("question", "question"),
+        ("finding", "finding"),
+        ("gap", "gap"),
+        ("claim", "claim"),
+        ("check", "check"),
+        ("risk", "risk"),
+        ("requirement", "requirement"),
+        ("screen", "screen"),
+        ("step", "step"),
+    ] {
+        if words.iter().any(|x| *x == w || x.strip_suffix('s') == Some(w)) {
+            return t;
+        }
+    }
+    "table"
+}
+
+/// Row references in running text: `decision 13`, `decisions 3 and 4`, `rows 5, 6, 16`,
+/// `row #14`, ranges `1 to 33` (tag `*` = any numbered table).
+fn row_refs(line: &str) -> Vec<(&'static str, Vec<u32>)> {
+    let lower = line.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut out = Vec::new();
+    for (w, tag) in [("decisions", "decision"), ("decision", "decision"), ("rows", "*"), ("row", "*")] {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(w) {
+            let s = from + p;
+            let mut e = s + w.len();
+            from = e;
+            if !wb(b, s) || e >= b.len() || b[e] != b' ' {
+                continue;
+            }
+            e += 1;
+            if e < b.len() && b[e] == b'#' {
+                e += 1;
+            }
+            let ns = knum_list(&lower, e);
+            if !ns.is_empty() {
+                out.push((tag, ns));
+            }
+        }
+    }
+    out
+}
+
+/// A list of small numbers from byte `e`: `5, 6, 16 and 18`, `1 to 33`, `3-4`, `#8 and #9`.
+fn knum_list(s: &str, mut e: usize) -> Vec<u32> {
+    let b = s.as_bytes();
+    let mut nums = Vec::new();
+    let mut range_from: Option<u32> = None;
+    loop {
+        let d = digits_at(b, e, 3);
+        if d == e || d - e > 2 || (d < b.len() && (b[d].is_ascii_alphanumeric() || b[d] == b'.' && d + 1 < b.len() && b[d + 1].is_ascii_digit())) {
+            break;
+        }
+        let n: u32 = s[e..d].parse().unwrap_or(0);
+        match range_from.take() {
+            Some(a) if n > a && n - a <= 40 => nums.extend(a + 1..=n),
+            _ => nums.push(n),
+        }
+        let rest = &s[d..];
+        let Some((len, rg)) = [(", ", false), (" and ", false), (" & ", false), ("/", false), (" to ", true), ("\u{2013}", true), ("-", true), (",", false)]
+            .iter()
+            .find(|(x, _)| rest.starts_with(x))
+            .map(|(x, r)| (x.len(), *r))
+        else {
+            break;
+        };
+        if rg {
+            range_from = Some(n);
+        }
+        e = d + len;
+        if e < b.len() && b[e] == b'#' {
+            e += 1;
+        }
+    }
+    nums
+}
+
+/// A numbered table's id letter, from the text between its heading and the table:
+/// `Q1–19 were put to ...` makes rows `| 1 |` .. define Q1 ..; None when nothing names one.
+fn row_letter(intro: &str, rows: &[u32]) -> Option<char> {
+    let b = intro.as_bytes();
+    let mut hits: BTreeMap<char, usize> = BTreeMap::new();
+    for i in 0..b.len() {
+        if !b[i].is_ascii_uppercase() || !wb(b, i) {
+            continue;
+        }
+        let d = digits_at(b, i + 1, 3);
+        if d == i + 1 {
+            continue;
+        }
+        let lo: u32 = intro[i + 1..d].parse().unwrap_or(0);
+        let mut hi = lo;
+        let rest = &intro[d..];
+        for sep in ["\u{2013}", "-", " to "] {
+            if let Some(r) = rest.strip_prefix(sep) {
+                let rb = r.as_bytes();
+                let mut k = 0;
+                if !rb.is_empty() && rb[0] == b[i] {
+                    k = 1;
+                }
+                let e = digits_at(rb, k, 3);
+                if e > k {
+                    hi = r[k..e].parse().unwrap_or(lo);
+                }
+                break;
+            }
+        }
+        if d < b.len() && b[d].is_ascii_alphanumeric() {
+            continue;
+        }
+        let n = rows.iter().filter(|&&r| r >= lo && r <= hi.max(lo)).count();
+        if n > 0 {
+            *hits.entry(b[i] as char).or_default() += n;
+        }
+    }
+    hits.into_iter().max_by_key(|x| x.1).map(|x| x.0)
+}
+
+/// Doc references a line makes that whitespace splitting breaks: backtick spans and markdown
+/// link targets (`%20` read as a space), so `reports/A B.md` is one reference.
+fn kdoc_refs(l: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = l.split('`');
+    it.next();
+    while let Some(span) = it.next() {
+        out.push(span.to_string());
+        it.next();
+    }
+    let mut from = 0;
+    while let Some(p) = l[from..].find("](") {
+        let st = from + p + 2;
+        let Some(e) = l[st..].find(')') else { break };
+        out.push(l[st..st + e].split('#').next().unwrap_or("").replace("%20", " "));
+        from = st + e;
+    }
+    out
+}
+
+/// The spec numbers that qualify the id at bytes `s..e` of a line: only those written next to it
+/// (`003 FR-060`, `spec 004 T011`), not any spec the line happens to name.
+fn kqualifier(l: &str, s: usize, e: usize) -> Vec<u32> {
+    let mut a = s.saturating_sub(16);
+    while !l.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = (e + 5).min(l.len());
+    while !l.is_char_boundary(b) {
+        b += 1;
+    }
+    spec_refs(&l[a..b])
+}
+
+/// Whether a line's leading id is a definition. A list item defines one only when the id is
+/// bold, a checkbox task or followed by a colon (spec-kit's `- **FR-001**:`, `- [ ] T001`); a
+/// plain item that starts with an id (`- D4 / L-A4 "..." Verdict: ...`) reviews it.
+fn kdef_list_ok(l: &str) -> bool {
+    let t = l.trim_start();
+    let body = if let Some(r) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("+ ")) {
+        r
+    } else {
+        let d = t.bytes().take_while(u8::is_ascii_digit).count();
+        if d > 0 && t[d..].starts_with(". ") {
+            &t[d + 2..]
+        } else {
+            return true;
+        }
+    };
+    let body = body.trim_start();
+    if body.starts_with("[ ]") || body.starts_with("[x]") || body.starts_with("[X]") || body.starts_with("**") || body.starts_with('`') {
+        return true;
+    }
+    let head: String = body.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let rest = &body[head.len()..];
+    rest.starts_with(':') || rest.starts_with(" \u{2014}")
+}
+
+/// Raw (unresolved) id mention.
+#[derive(Clone)]
+struct KRawId {
+    id: String,
+    bare: bool,
+    specs: Vec<u32>,
+    line: u32,
+}
+
+/// One block of a doc page: a heading, a definition line to the next one, a table row, or
+/// the text that follows a table. Raw mentions first (pass A), resolved keys after (pass C).
+#[derive(Default)]
+struct KBlock {
+    page: u32,
+    unit: u32,
+    kind: u8,
+    line: u32,
+    raw_defs: Vec<(String, bool)>,
+    row: Option<String>,
+    raw_ids: Vec<KRawId>,
+    raw_rows: Vec<(&'static str, Vec<u32>, u32)>,
+    /// raw lineage mentions and the line each is on
+    raw_lin: Vec<(KLinRaw, u32)>,
+    ptoks: Vec<(String, u32)>,
+    files_raw: Vec<u32>,
+    cites: Vec<(String, Tier, &'static str, u32)>,
+    cites_raw: Vec<String>,
+    text: String,
+    defs: Vec<(KT, String)>,
+    refs: Vec<KRef>,
+    raw_id_keys: Vec<String>,
+    files: Vec<(u32, Tier, &'static str)>,
+    text_files: Vec<(u32, f64)>,
+}
+
+struct KPage {
+    path: String,
+    scope: String,
+    family: String,
+    start: usize,
+}
+
+struct KinaModel {
+    pages: Vec<KPage>,
+    heads: Vec<(u32, String)>,
+    head_parent: Vec<Option<u32>>,
+    blocks: Vec<KBlock>,
+    code_refs: Vec<Vec<KRef>>,
+    code_raw_ids: Vec<Vec<String>>,
+    code_cites_raw: Vec<Vec<String>>,
+    code_specs: Vec<Vec<String>>,
+    lineage: Vec<(String, String, Tier, &'static str)>,
+    /// ids a doc's title heading defines (`# ABC-03 ...`): they name a document, so a table
+    /// cell or phrase naming one cites the document, never an id the row supersedes
+    doc_ids: HashSet<String>,
+    stats: BTreeMap<String, f64>,
+    audit: Vec<KAudit>,
+}
+
+const KEYS_CODE_PAT: &str = "[A-Z][A-Z0-9]{1,6}-[0-9]|[TRCD][0-9]|US[0-9]|User Story|[Ss][Pp][Ee][Cc]|[0-9]{3}[ -]|Act|Rules?|Regulation|Directive|(^|[^A-Za-z0-9_'$])s{1,2}[.]? ?[0-9]|[Ss]ections? [0-9]|[Dd]ecisions? [0-9]|[Rr]ows? [0-9]";
+
+/// The comment part of a code line (`//`, `/*`, `*`, `#`, `--`, `<!--`), where a citation
+/// can sit; a code line's own text (`s1 := ..`) is never read as one.
+fn kcomment(l: &str) -> Option<&str> {
+    let t = l.trim_start();
+    if t.starts_with("* ") || t.starts_with('#') || t.starts_with("--") || t.starts_with("*/") {
+        return Some(t);
+    }
+    ["//", "/*", "<!--", " -- ", " # "].iter().filter_map(|m| l.find(m)).min().map(|i| &l[i..])
+}
+
+fn kexcerpt(s: &str) -> String {
+    let t: String = s.trim().chars().take(220).collect();
+    t.replace(['\t', '\n'], " ")
+}
+
+/// Id scopes: where each id is defined, which hyphen prefixes are numbered per spec or doc
+/// (an id of the prefix is defined in two scopes), and the spec scopes by number.
+struct KIds {
+    defs: HashMap<String, BTreeSet<String>>,
+    scoped: HashSet<String>,
+    vocab: HashSet<String>,
+    spec_scope: BTreeMap<u32, String>,
+}
+
+impl KIds {
+    fn prefix(id: &str) -> &str {
+        id.split('-').next().unwrap_or(id)
+    }
+
+    fn accepts(&self, id: &str, bare: bool) -> bool {
+        bare || self.vocab.contains(KIds::prefix(id))
+    }
+
+    fn is_scoped(&self, id: &str, bare: bool) -> bool {
+        bare || self.scoped.contains(KIds::prefix(id))
+    }
+
+    /// The scope a definition on a page lives in: its spec, or outside specs its doc (a plan's
+    /// D4 and another review's D4 are two things).
+    fn def_scope(page: &str, _bare: bool) -> &str {
+        page
+    }
+
+    /// The rules that need nothing beyond the mention: a global id is itself; a scoped one is
+    /// fixed by a spec written next to it, its own scope, or its only defining scope.
+    /// `Ok(None)`: scoped and still ambiguous.
+    fn resolve_direct(&self, id: &str, bare: bool, own: Option<&str>, qual: &[u32]) -> Result<Option<(String, Tier, &'static str)>, &'static str> {
+        let own = own.map(|p| KIds::def_scope(p, bare));
+        let defs = self.defs.get(id);
+        if !self.is_scoped(id, bare) {
+            return Ok(Some(match defs {
+                Some(_) => (format!("id:{id}"), Tier::Fact, "global"),
+                None => (format!("id:{id}"), Tier::Derived, "global-undefined"),
+            }));
+        }
+        let key = |s: &str| format!("id:{s}|{id}");
+        let empty = BTreeSet::new();
+        let defs = defs.unwrap_or(&empty);
+        let ls: BTreeSet<&String> = qual.iter().filter_map(|n| self.spec_scope.get(n)).collect();
+        if ls.len() == 1 {
+            let s = *ls.iter().next().unwrap();
+            return Ok(Some(if defs.contains(s) { (key(s), Tier::Fact, "line-spec") } else { (key(s), Tier::Derived, "line-spec-undefined") }));
+        }
+        if defs.is_empty() {
+            return match own {
+                Some(o) if !bare => Ok(Some((key(o), Tier::Derived, "own-undefined"))),
+                _ => Err("undefined"),
+            };
+        }
+        if let Some(o) = own
+            && defs.contains(o)
+        {
+            return Ok(Some((key(o), Tier::Fact, "own-scope")));
+        }
+        if defs.len() == 1 {
+            return Ok(Some((key(defs.iter().next().unwrap()), Tier::Derived, "unique")));
+        }
+        Ok(None)
+    }
+
+    /// The context cascade for a scoped id still ambiguous: each step's hint scopes in order
+    /// (a defining scope that is a hint; else the one defining doc in a hint doc's directory),
+    /// then a spec the file names, then (HEURISTIC) the newest defining spec.
+    fn resolve_hints(&self, id: &str, steps: &[(&[String], &'static str, &'static str)], file_specs: &[u32]) -> Result<(String, Tier, &'static str), &'static str> {
+        let Some(defs) = self.defs.get(id) else { return Err("undefined") };
+        let key = |s: &str| format!("id:{s}|{id}");
+        for (hints, route, near_route) in steps {
+            if let Some(h) = hints.iter().find(|h| defs.contains(*h)) {
+                return Ok((key(h), Tier::Derived, route));
+            }
+            let dirs: BTreeSet<&str> = hints.iter().filter(|h| !h.starts_with("specs/")).map(|h| dir_of(h)).collect();
+            let near: Vec<&String> = defs.iter().filter(|d| !d.starts_with("specs/") && dirs.contains(dir_of(d))).collect();
+            if near.len() == 1 {
+                return Ok((key(near[0]), Tier::Derived, near_route));
+            }
+        }
+        let fs: Vec<&String> = file_specs.iter().filter_map(|n| self.spec_scope.get(n)).filter(|s| defs.contains(*s)).collect::<BTreeSet<_>>().into_iter().collect();
+        if fs.len() == 1 {
+            return Ok((key(fs[0]), Tier::Derived, "file-spec"));
+        }
+        match defs.iter().filter(|s| s.starts_with("specs/")).max() {
+            Some(s) => Ok((key(s), Tier::Heuristic, "newest-spec")),
+            None => Err("ambiguous"),
+        }
+    }
+
+    /// Every id mention of one context (a doc page or a code file): the direct rules first; the
+    /// direct resolutions (and global ids' defining docs) are then the hints for the rest, in
+    /// order: the same line's, the specs whose tasks name the file (`extra`), the file's.
+    fn resolve_all(&self, ments: &[&KRawId], own: Option<&str>, file_specs: &[u32], extra: &[String], extra_route: &'static str) -> Vec<Result<(String, Tier, &'static str), &'static str>> {
+        let first: Vec<Result<Option<KRes>, &'static str>> = ments.iter().map(|m| self.resolve_direct(&m.id, m.bare, own, &m.specs)).collect();
+        let mut line_h: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        let mut file_h: BTreeMap<String, usize> = BTreeMap::new();
+        for (m, r) in ments.iter().zip(&first) {
+            if let Ok(Some((k, _, rt))) = r {
+                let scopes: Vec<String> = if rt.starts_with("global") {
+                    self.defs.get(&m.id).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+                } else {
+                    k.strip_prefix("id:").and_then(|x| x.rsplit_once('|')).map(|x| vec![x.0.to_string()]).unwrap_or_default()
+                };
+                for s in scopes {
+                    line_h.entry(m.line).or_default().push(s.clone());
+                    *file_h.entry(s).or_default() += 1;
+                }
+            }
+        }
+        let mut fh: Vec<(String, usize)> = file_h.into_iter().collect();
+        fh.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let fh: Vec<String> = fh.into_iter().map(|x| x.0).collect();
+        let none: Vec<String> = Vec::new();
+        ments
+            .iter()
+            .zip(first)
+            .map(|(m, r)| match r {
+                Ok(Some(x)) => Ok(x),
+                Err(e) => Err(e),
+                Ok(None) => {
+                    let lh = line_h.get(&m.line).unwrap_or(&none);
+                    self.resolve_hints(&m.id, &[(lh, "cocite", "cocite-dir"), (extra, extra_route, extra_route), (&fh, "cocite-file", "cocite-file-dir")], file_specs)
+                }
+            })
+            .collect()
+    }
+}
+
+fn kraw_id(k: &str) -> String {
+    match k.strip_prefix("id:").and_then(|x| x.rsplit_once('|')) {
+        Some((_, id)) => format!("id:{id}"),
+        None => k.to_string(),
+    }
+}
+
+/// The family a doc's numbered tables belong to: a doc in a directory named after another
+/// doc (`reports/X.md` and `notes/X/a.md`) shares that doc's family; otherwise the doc itself.
+fn kfamily(path: &str, stems: &HashSet<String>, dirs: &HashSet<String>) -> String {
+    let parent = dir_of(path).rsplit('/').next().unwrap_or("");
+    let stem = path.rsplit('/').next().unwrap_or("").trim_end_matches(".md");
+    if !parent.is_empty() && stems.contains(parent) {
+        format!("fam:{parent}")
+    } else if dirs.contains(stem) {
+        format!("fam:{stem}")
+    } else {
+        path.to_string()
+    }
+}
+
+struct KTable {
+    header: Vec<String>,
+    tag: &'static str,
+    intro: String,
+    rows: Vec<(usize, Vec<String>, Option<u32>)>,
+}
+
+fn kcells(t: &str) -> Vec<String> {
+    let t = t.trim().trim_start_matches('|').trim_end_matches('|');
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Pass A over one page: blocks, tables and raw key mentions.
+fn kina_page(
+    m: &mut KinaModel,
+    pi: usize,
+    lines: &[&str],
+    known: &LawKnown,
+    pr: &PathRes,
+) {
+    let path = m.pages[pi].path.clone();
+    let family = m.pages[pi].family.clone();
+    let cx = kcite_ctx(&path, lines);
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut fence = false;
+    let mut recent: Option<(usize, &'static str)> = None;
+    let new_block = |m: &mut KinaModel, unit: u32, kind: u8, ln: usize| -> usize {
+        m.blocks.push(KBlock { page: pi as u32, unit, kind, line: ln as u32, ..Default::default() });
+        m.blocks.len() - 1
+    };
+    m.heads.push((pi as u32, format!("{path} \u{a7} (top)")));
+    m.head_parent.push(None);
+    let mut unit = (m.heads.len() - 1) as u32;
+    let top = unit;
+    let mut ustack: Vec<(usize, u32)> = Vec::new();
+    let mut cur = new_block(m, unit, b'h', 0);
+    let mut table: Option<KTable> = None;
+    let mut group: Option<String> = None;
+    let mut intro = String::new();
+    let close = |m: &mut KinaModel, table: &mut Option<KTable>| {
+        let Some(t) = table.take() else { return };
+        let numbered: Vec<u32> = t.rows.iter().filter_map(|r| r.2).collect();
+        if numbered.len() >= 2 {
+            let letter = row_letter(&t.intro, &numbered);
+            for (b, _, n) in &t.rows {
+                if let Some(n) = n {
+                    m.blocks[*b].row = Some(format!("row:{family}|{}|{n}", t.tag));
+                    if let Some(c) = letter {
+                        m.blocks[*b].raw_defs.push((format!("{c}{n}"), true));
+                    }
+                }
+            }
+        }
+        // lineage columns: a header naming an earlier id, or (numbered rows) a column whose
+        // cells mostly hold ids; at most 3 ids per cell (more is a list, not an identity)
+        let ncol = t.header.len();
+        for j in 1..ncol {
+            let h = t.header[j].to_ascii_lowercase();
+            let named = ["old", "was", "previous", "formerly", "former", "legacy", "replaces", "supersedes"].iter().any(|w| h.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w));
+            let filled: Vec<&(usize, Vec<String>, Option<u32>)> = t.rows.iter().filter(|r| r.1.get(j).is_some_and(|c| !c.is_empty())).collect();
+            let with_ids = filled.iter().filter(|r| !kid_mentions(&r.1[j], false).iter().all(|x| x.3)).count();
+            let id_col = numbered.len() >= 2 && filled.len() >= 2 && with_ids * 2 >= filled.len();
+            if !(named || id_col) {
+                continue;
+            }
+            for (b, cells, _) in &t.rows {
+                let Some(cell) = cells.get(j) else { continue };
+                // an id cell, not prose that cites ids (a review row quoting the doc it reviews)
+                if cell.chars().count() > 60 {
+                    continue;
+                }
+                let ids: Vec<(String, bool)> = kid_mentions(cell, false).into_iter().filter(|x| named || !x.3).map(|x| (x.2, x.3)).collect();
+                if ids.is_empty() || ids.len() > 3 {
+                    continue;
+                }
+                let ln = m.blocks[*b].line;
+                for id in ids {
+                    m.blocks[*b].raw_lin.push(((None, id, if named { "lineage-column" } else { "id-column" }), ln));
+                }
+            }
+        }
+        // a `Rows` / `Decisions` first column references rows of another table
+        if t.header.first().is_some_and(|h| matches!(h.to_ascii_lowercase().as_str(), "rows" | "row" | "decisions" | "decision")) {
+            for (b, cells, _) in &t.rows {
+                let c0 = cells.first().map_or("", |c| c.split(';').next().unwrap_or(""));
+                let cb = c0.as_bytes();
+                let ln = m.blocks[*b].line;
+                let mut ns = Vec::new();
+                for i in 0..cb.len() {
+                    if cb[i].is_ascii_digit() && wb(cb, i) && (i == 0 || cb[i - 1] != b'#') {
+                        let e = digits_at(cb, i, 3);
+                        if e - i <= 2 && we(cb, e) {
+                            ns.push(c0[i..e].parse().unwrap_or(0));
+                        }
+                    }
+                }
+                if !ns.is_empty() {
+                    m.blocks[*b].raw_rows.push(("*", ns, ln));
+                }
+            }
+        }
+    };
+    for (ln, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fence = !fence;
+        }
+        let lvl = if !fence && t.starts_with('#') {
+            let h = t.bytes().take_while(|&c| c == b'#').count();
+            (h <= 6 && t[h..].starts_with(' ')).then_some(h)
+        } else {
+            None
+        };
+        let is_sep = |x: &str| x.trim().starts_with('|') && x.trim().chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
+        if let Some(h) = lvl {
+            close(m, &mut table);
+            while stack.last().is_some_and(|s| s.0 >= h) {
+                stack.pop();
+            }
+            stack.push((h, l.to_string()));
+            recent = None;
+            while ustack.last().is_some_and(|s| s.0 >= h) {
+                ustack.pop();
+            }
+            m.heads.push((pi as u32, format!("{path} \u{a7} {}", t.trim_start_matches('#').trim())));
+            m.head_parent.push(Some(ustack.last().map_or(top, |s| s.1)));
+            unit = (m.heads.len() - 1) as u32;
+            ustack.push((h, unit));
+            cur = new_block(m, unit, b'h', ln);
+            let mut defs: Vec<(String, bool)> = law_line_defs(l, None).into_iter().map(|id| {
+                let bare = !id.contains('-');
+                (id, bare)
+            }).collect();
+            if let Some(r) = t.trim_start_matches('#').trim().strip_prefix("User Story ") {
+                let n: String = r.chars().take_while(char::is_ascii_digit).collect();
+                if !n.is_empty() {
+                    defs.push((format!("US{n}"), true));
+                }
+            }
+            if h == 1 {
+                m.doc_ids.extend(defs.iter().map(|d| d.0.clone()));
+            }
+            m.blocks[cur].raw_defs = defs;
+            // `### 12. <title>` under `## Decisions` is decision row 12
+            let ht = t.trim_start_matches('#').trim();
+            let d = ht.bytes().take_while(u8::is_ascii_digit).count();
+            if (1..=2).contains(&d) && ht[d..].starts_with(". ") && stack.len() >= 2 {
+                let tag = row_tag(&stack[stack.len() - 2].1);
+                if tag != "table" {
+                    m.blocks[cur].row = Some(format!("row:{family}|{tag}|{}", &ht[..d]));
+                }
+            }
+            intro.clear();
+        } else if !fence && t.starts_with('|') {
+            if is_sep(t) {
+                continue;
+            }
+            let next_sep = lines.get(ln + 1).is_some_and(|x| is_sep(x));
+            if next_sep {
+                close(m, &mut table);
+                let tag = stack.last().map_or("table", |s| row_tag(&s.1));
+                table = Some(KTable { header: kcells(t), tag, intro: intro.clone(), rows: Vec::new() });
+                continue;
+            }
+            if let Some(tb) = table.as_mut() {
+                cur = new_block(m, unit, b'r', ln);
+                let cells = kcells(t);
+                // a group row (bold first cell, the rest empty) heads the rows after it
+                if cells.first().is_some_and(|c| c.starts_with("**")) && cells.iter().skip(1).all(|c| c.is_empty()) {
+                    group = Some(cells[0].trim_matches('*').to_string());
+                }
+                let n = cells.first().filter(|c| !c.is_empty() && c.len() <= 3 && c.chars().all(|x| x.is_ascii_digit())).and_then(|c| c.parse().ok());
+                tb.rows.push((cur, cells, n));
+                let defs = law_line_defs(l, None);
+                m.blocks[cur].raw_defs = defs.into_iter().map(|id| {
+                    let bare = !id.contains('-');
+                    (id, bare)
+                }).collect();
+            }
+        } else {
+            close(m, &mut table);
+            let defs = if fence || !kdef_list_ok(l) { Vec::new() } else { law_line_defs(l, None) };
+            // a numbered item at the margin under a decisions-type heading is a row
+            let d = l.bytes().take_while(u8::is_ascii_digit).count();
+            let item_tag = stack.last().map_or("table", |s| row_tag(&s.1));
+            if !fence && (1..=2).contains(&d) && l[d..].starts_with(". ") && item_tag != "table" {
+                cur = new_block(m, unit, b'r', ln);
+                m.blocks[cur].row = Some(format!("row:{family}|{item_tag}|{}", &l[..d]));
+                m.blocks[cur].raw_defs = defs.iter().map(|id| (id.clone(), !id.contains('-'))).collect();
+            } else if !defs.is_empty() {
+                cur = new_block(m, unit, b'd', ln);
+                m.blocks[cur].raw_defs = defs.into_iter().map(|id| {
+                    let bare = !id.contains('-');
+                    (id, bare)
+                }).collect();
+            } else if m.blocks[cur].kind == b'r' {
+                cur = new_block(m, unit, b't', ln);
+            }
+            if intro.len() < 4000 {
+                intro.push_str(l);
+                intro.push('\n');
+            }
+        }
+        // raw mentions on this line, into the current block
+        let b = &mut m.blocks[cur];
+        let ids = kid_mentions(l, false);
+        for (st, en, id, bare) in &ids {
+            b.raw_ids.push(KRawId { id: id.clone(), bare: *bare, specs: kqualifier(l, *st, *en), line: ln as u32 });
+        }
+        for x in klin_phrases(l, &ids) {
+            b.raw_lin.push((x, ln as u32));
+        }
+        for (tag, ns) in row_refs(l) {
+            b.raw_rows.push((tag, ns, ln as u32));
+        }
+        for tok in kpath_tokens(l) {
+            b.ptoks.push((tok, ln as u32));
+        }
+        b.files_raw.extend(pr.files(l));
+        if !t.starts_with('|') {
+            group = None;
+        }
+        let ctx_stack: Vec<(usize, String)> = match &group {
+            Some(g) => stack.iter().cloned().chain(std::iter::once((7, format!("####### {g}")))).collect(),
+            None => stack.clone(),
+        };
+        let (res, raw) = kcite_line(l, ln, &KCiteAt { cx: &cx, stack: &ctx_stack, recent }, known, false, &mut m.stats);
+        for (k, tier, route) in res {
+            m.blocks[cur].cites.push((k, tier, route, ln as u32));
+        }
+        m.blocks[cur].cites_raw.extend(raw);
+        if m.blocks[cur].text.len() < 4000 {
+            m.blocks[cur].text.push_str(l);
+            m.blocks[cur].text.push('\n');
+        }
+        let ments = law_mentions(l);
+        if let Some(mm) = ments.iter().filter(|x| !matches!(x.inst, LInst::AuRules | LInst::TransRules | LInst::TheAct)).max_by_key(|x| x.start) {
+            recent = Some((ln, law_class(mm.inst, l, cx.page_jur, cx.page_def)));
+        }
+    }
+    close(m, &mut table);
+}
+
+/// Builds the key model of one revision: pass A over every doc page and code file, pass B
+/// the id scopes, pass C every mention resolved, pass D the text fallback.
+#[allow(clippy::too_many_arguments)]
+fn kina_model(
+    docs: &[(String, String)],
+    code_lines: &[(String, String)],
+    kp: &KPaths,
+    pr: &PathRes,
+    known: &LawKnown,
+    bm: Option<&KBm>,
+    nf: usize,
+    audit: bool,
+) -> KinaModel {
+    let mut m = KinaModel {
+        pages: Vec::new(),
+        heads: Vec::new(),
+        head_parent: Vec::new(),
+        blocks: Vec::new(),
+        code_refs: vec![Vec::new(); nf],
+        code_raw_ids: vec![Vec::new(); nf],
+        code_cites_raw: vec![Vec::new(); nf],
+        code_specs: vec![Vec::new(); nf],
+        lineage: Vec::new(),
+        doc_ids: HashSet::new(),
+        stats: BTreeMap::new(),
+        audit: Vec::new(),
+    };
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for (i, (p, _)) in docs.iter().enumerate() {
+        if groups.last().is_none_or(|g| docs[g.0].0 != *p) {
+            groups.push((i, i));
+        }
+        groups.last_mut().unwrap().1 = i + 1;
+    }
+    let stems: HashSet<String> = groups.iter().map(|g| docs[g.0].0.rsplit('/').next().unwrap_or("").trim_end_matches(".md").to_string()).collect();
+    let dirs: HashSet<String> = groups.iter().map(|g| dir_of(&docs[g.0].0).rsplit('/').next().unwrap_or("").to_string()).filter(|d| !d.is_empty()).collect();
+    for &(s, e) in &groups {
+        let path = docs[s].0.clone();
+        m.pages.push(KPage { scope: kina_unit(&path), family: kfamily(&path, &stems, &dirs), path, start: s });
+        let lines: Vec<&str> = docs[s..e].iter().map(|x| x.1.as_str()).collect();
+        let pi = m.pages.len() - 1;
+        kina_page(&mut m, pi, &lines, known, pr);
+    }
+    // ---- pass B: id scopes ----
+    let mut ids = KIds { defs: HashMap::new(), scoped: HashSet::new(), vocab: HashSet::new(), spec_scope: BTreeMap::new() };
+    for b in &m.blocks {
+        let sc = &m.pages[b.page as usize].scope;
+        for (id, bare) in &b.raw_defs {
+            ids.defs.entry(id.clone()).or_default().insert(KIds::def_scope(sc, *bare).to_string());
+            if !bare {
+                ids.vocab.insert(KIds::prefix(id).to_string());
+            }
+        }
+    }
+    for p in &m.pages {
+        if let Some(r) = p.scope.strip_prefix("specs/") {
+            let num: String = r.chars().take_while(char::is_ascii_digit).collect();
+            if num.len() == 3 {
+                ids.spec_scope.insert(num.parse().unwrap_or(0), p.scope.clone());
+            }
+        }
+    }
+    // a hyphen prefix is numbered per spec (spec-kit's FR-002) when one id of it is defined in
+    // two specs; restated in several plan docs, it stays one global id
+    for (id, scopes) in &ids.defs {
+        if id.contains('-') && scopes.iter().filter(|x| x.starts_with("specs/")).count() >= 2 {
+            ids.scoped.insert(KIds::prefix(id).to_string());
+        }
+    }
+    for p in ["FR", "SC"] {
+        ids.scoped.insert(p.to_string());
+    }
+    // ---- pass C: resolve ----
+    let line_of = |m: &KinaModel, b: &KBlock, ln: u32| -> String {
+        let p = &m.pages[b.page as usize];
+        docs.get(p.start + ln as usize).map_or(String::new(), |x| kexcerpt(&x.1))
+    };
+    let at_of = |m: &KinaModel, b: &KBlock, ln: u32| format!("{}:{}", m.pages[b.page as usize].path, ln + 1);
+    // rows index: (family, tag) -> numbers; and row key -> defining block
+    let mut rows: HashMap<(String, String), BTreeSet<u32>> = HashMap::new();
+    let mut row_pages: HashMap<(String, String), BTreeSet<usize>> = HashMap::new();
+    let mut row_def: HashMap<String, usize> = HashMap::new();
+    for (bi, b) in m.blocks.iter().enumerate() {
+        if let Some(r) = &b.row
+            && let Some(rest) = r.strip_prefix("row:")
+            && let Some((ft, n)) = rest.rsplit_once('|')
+            && let Some((f, t)) = ft.rsplit_once('|')
+        {
+            rows.entry((f.to_string(), t.to_string())).or_default().insert(n.parse().unwrap_or(0));
+            row_pages.entry((f.to_string(), t.to_string())).or_default().insert(b.page as usize);
+            row_def.entry(r.clone()).or_insert(bi);
+        }
+    }
+    // the families of the docs each page names (`see reports/X.md`): an untyped "rows 5, 6"
+    // means the rows of a doc the page points at before its own
+    let mut page_suffix: HashMap<String, Vec<usize>> = HashMap::new();
+    for (pi, pg) in m.pages.iter().enumerate() {
+        let segs: Vec<&str> = pg.path.split('/').collect();
+        for k in 0..segs.len() {
+            page_suffix.entry(segs[k..].join("/")).or_default().push(pi);
+        }
+    }
+    let mut named_fams: Vec<BTreeSet<String>> = vec![BTreeSet::new(); m.pages.len()];
+    let mut named_pages: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); m.pages.len()];
+    for b in &m.blocks {
+        for tok in b.ptoks.iter().map(|x| x.0.clone()).chain(b.text.lines().flat_map(kdoc_refs)) {
+            let t = tok.trim_matches(|c: char| matches!(c, '*' | '_' | ',' | ':')).trim_start_matches("./").trim_start_matches(".wiki/").trim_start_matches('/');
+            let t = if t.ends_with(".md") { t.to_string() } else { format!("{t}.md") };
+            let t = t.as_str();
+            if t.ends_with(".md")
+                && let Some(v) = page_suffix.get(t)
+                && v.len() == 1
+                && v[0] != b.page as usize
+            {
+                named_fams[b.page as usize].insert(m.pages[v[0]].family.clone());
+                named_pages[b.page as usize].insert(v[0]);
+            }
+        }
+    }
+    // one reference list (`rows 5, 6, 16`, `decisions 1-36`) belongs to one table: the one
+    // holding the most of its numbers, among the docs the page names, then its own family,
+    // then any; a tie is no resolution
+    let resolve_rows = |tag: &str, nums: &[u32], fam: &str, named: &BTreeSet<String>, npages: &BTreeSet<usize>| -> Option<((String, String), Tier, &'static str)> {
+        let best = |f: &dyn Fn(&(String, String)) -> bool| -> Option<(String, String)> {
+            let mut sc: Vec<(usize, &(String, String))> = rows
+                .iter()
+                .filter(|(k, _)| f(k) && (tag == "*" || k.1 == tag))
+                .map(|(k, ns)| (nums.iter().filter(|n| ns.contains(n)).count(), k))
+                .filter(|x| x.0 > 0)
+                .collect();
+            sc.sort_by_key(|x| std::cmp::Reverse(x.0));
+            match sc.as_slice() {
+                [] => None,
+                [a] => Some(a.1.clone()),
+                [a, b, ..] if a.0 > b.0 => Some(a.1.clone()),
+                _ => None,
+            }
+        };
+        if tag != "*"
+            && let Some(k) = best(&|k| k.0 == fam)
+        {
+            return Some((k, Tier::Fact, "own-family"));
+        }
+        // the tables on a page this page names, then the rest of its family
+        if let Some(k) = best(&|k| row_pages.get(k).is_some_and(|ps| ps.iter().any(|p| npages.contains(p)))) {
+            return Some((k, Tier::Derived, "named-page"));
+        }
+        if let Some(k) = best(&|k| named.contains(&k.0)) {
+            return Some((k, Tier::Derived, "named-family"));
+        }
+        if tag == "*"
+            && let Some(k) = best(&|k| k.0 == fam)
+        {
+            return Some((k, Tier::Derived, "own-family"));
+        }
+        best(&|_| true).map(|k| (k, Tier::Derived, "unique-family"))
+    };
+    let mut audit_v: Vec<KAudit> = Vec::new();
+    let pages_n = m.pages.len();
+    let mut by_page: Vec<Vec<usize>> = vec![Vec::new(); pages_n];
+    for (bi, b) in m.blocks.iter().enumerate() {
+        by_page[b.page as usize].push(bi);
+    }
+    for pi in 0..pages_n {
+        let scope = m.pages[pi].scope.clone();
+        let family = m.pages[pi].family.clone();
+        let own: Option<&str> = Some(scope.as_str());
+        let page_specs: Vec<u32> = by_page[pi].iter().flat_map(|&bi| m.blocks[bi].text.lines().flat_map(spec_refs).collect::<Vec<_>>()).collect();
+        // ids: definitions are keys in the page scope (global prefixes stay global)
+        let ments: Vec<(usize, KRawId)> = by_page[pi]
+            .iter()
+            .flat_map(|&bi| m.blocks[bi].raw_ids.iter().filter(|r| ids.accepts(&r.id, r.bare)).map(move |r| (bi, r.clone())))
+            .collect();
+        let refs: Vec<&KRawId> = ments.iter().map(|x| &x.1).collect();
+        // the docs the page names (`[DECISIONS](plans/decisions)`) scope the ids it reviews
+        let named_scopes: Vec<String> = named_pages[pi].iter().map(|&q| m.pages[q].scope.clone()).collect();
+        let res = ids.resolve_all(&refs, own, &page_specs, &named_scopes, "named-doc");
+        for ((bi, rm), r) in ments.iter().zip(res) {
+            m.blocks[*bi].raw_id_keys.push(format!("id:{}", rm.id));
+            match r {
+                Ok((k, tier, route)) => {
+                    if audit {
+                        let b = &m.blocks[*bi];
+                        audit_v.push(KAudit { kt: KT::Scoped, tier, route, at: at_of(&m, b, rm.line), mention: format!("{} :: {}", rm.id, line_of(&m, b, rm.line)), target: k.clone() });
+                    }
+                    kbump(&mut m.stats, format!("k_scoped_doc_{route}"));
+                    m.blocks[*bi].refs.push(KRef { kt: KT::Scoped, key: k, tier, route });
+                }
+                Err(e) => kbump(&mut m.stats, format!("k_scoped_doc_{e}")),
+            }
+        }
+        for &bi in &by_page[pi] {
+            let defs: Vec<(String, bool)> = m.blocks[bi].raw_defs.clone();
+            for (id, bare) in defs {
+                let k = if ids.is_scoped(&id, bare) { format!("id:{}|{id}", KIds::def_scope(&scope, bare)) } else { format!("id:{id}") };
+                m.blocks[bi].defs.push((KT::Scoped, k));
+            }
+            if let Some(r) = m.blocks[bi].row.clone() {
+                m.blocks[bi].defs.push((KT::Row, r));
+            }
+            // rows referenced
+            let rr = m.blocks[bi].raw_rows.clone();
+            for (tag, nums, ln) in rr {
+                let Some(((fa, tg), tier, route)) = resolve_rows(tag, &nums, &family, &named_fams[pi], &named_pages[pi]) else {
+                    kbump(&mut m.stats, "k_row_ref_unresolved");
+                    continue;
+                };
+                let have = &rows[&(fa.clone(), tg.clone())];
+                for n in nums.iter().filter(|n| have.contains(n)) {
+                    let k = format!("row:{fa}|{tg}|{n}");
+                    {
+                        if Some(&k) == m.blocks[bi].row.as_ref() {
+                            continue;
+                        }
+                        if audit {
+                            let b = &m.blocks[bi];
+                            let def = row_def.get(&k).map(|&d| line_of(&m, &m.blocks[d], m.blocks[d].line)).unwrap_or_default();
+                            audit_v.push(KAudit { kt: KT::Row, tier, route, at: at_of(&m, b, ln), mention: line_of(&m, b, ln), target: format!("{k} :: {def}") });
+                        }
+                        kbump(&mut m.stats, format!("k_row_ref_{route}"));
+                        m.blocks[bi].refs.push(KRef { kt: KT::Row, key: k, tier, route });
+                    }
+                }
+            }
+            // citations (resolved during pass A, where the heading context was)
+            let cites = m.blocks[bi].cites.clone();
+            if audit && let Ok(want) = std::env::var("GLIA_KEYS_CITE") {
+                for (k, _, route, ln) in &cites {
+                    if *k == want {
+                        eprintln!("[keys-cite] {k} {route} {} :: {}", at_of(&m, &m.blocks[bi], *ln), line_of(&m, &m.blocks[bi], *ln));
+                    }
+                }
+            }
+            for (k, tier, route, ln) in cites {
+                if audit {
+                    let b = &m.blocks[bi];
+                    let sec = k.rsplit(':').next().unwrap_or("");
+                    let ver = if !k.starts_with("law:AU-ACT:") {
+                        ""
+                    } else if known.act59.contains(sec) && known.act62.contains(sec) {
+                        " (comp 59 and 62)"
+                    } else if known.act62.contains(sec) {
+                        " (comp 62 only)"
+                    } else {
+                        " (comp 59 only)"
+                    };
+                    audit_v.push(KAudit { kt: KT::Cite, tier, route, at: at_of(&m, b, ln), mention: line_of(&m, b, ln), target: format!("{k}{ver}") });
+                }
+                kbump(&mut m.stats, format!("k_cite_{route}"));
+                m.blocks[bi].refs.push(KRef { kt: KT::Cite, key: k, tier, route });
+            }
+            // paths
+            let toks: Vec<String> = m.blocks[bi].ptoks.iter().map(|x| x.0.clone()).collect();
+            let got = kp.block(&toks, &mut m.stats);
+            let mut seen: HashMap<u32, usize> = HashMap::new();
+            for (f, tier, route, raw) in got {
+                kbump(&mut m.stats, format!("k_path_{route}"));
+                if audit {
+                    let b = &m.blocks[bi];
+                    let ln = b.ptoks.iter().find(|x| x.0 == raw).map_or(b.line, |x| x.1);
+                    audit_v.push(KAudit { kt: KT::Path, tier, route, at: at_of(&m, b, ln), mention: format!("{raw} :: {}", line_of(&m, b, ln)), target: kp.cand[f as usize].clone() });
+                }
+                match seen.get(&f) {
+                    Some(&i) if m.blocks[bi].files[i].1 <= tier => {}
+                    Some(&i) => m.blocks[bi].files[i] = (f, tier, route),
+                    None => {
+                        seen.insert(f, m.blocks[bi].files.len());
+                        m.blocks[bi].files.push((f, tier, route));
+                    }
+                }
+            }
+            let fr = &mut m.blocks[bi].files_raw;
+            fr.sort_unstable();
+            fr.dedup();
+        }
+        // lineage (needs the page's resolved ids)
+        for &bi in &by_page[pi] {
+            let lin = m.blocks[bi].raw_lin.clone();
+            for ((subj, (oid, obare), route), ln) in lin {
+                if !ids.accepts(&oid, obare) {
+                    continue;
+                }
+                if m.doc_ids.contains(&oid) {
+                    kbump(&mut m.stats, "k_lineage_doc_id_skipped");
+                    continue;
+                }
+                let lspecs = spec_refs(&line_of(&m, &m.blocks[bi], ln));
+                let r = |id: &str, bare: bool| match ids.resolve_direct(id, bare, own, &lspecs) {
+                    Ok(Some(x)) => Some(x.0),
+                    Ok(None) => ids.resolve_hints(id, &[], &page_specs).ok().map(|x| x.0),
+                    Err(_) => None,
+                };
+                let old = r(&oid, obare);
+                let news: Vec<String> = match &subj {
+                    Some((sid, sb)) if ids.accepts(sid, *sb) => r(sid, *sb).into_iter().collect(),
+                    Some(_) => Vec::new(),
+                    None => m.blocks[bi].defs.iter().map(|d| d.1.clone()).collect(),
+                };
+                let Some(old) = old else {
+                    kbump(&mut m.stats, "k_lineage_unresolved");
+                    continue;
+                };
+                // the phrase names the new id (`superseded by X`): the subject is the old one
+                let names_new = KLIN_PHRASES.iter().any(|p| p.1 == route && p.2);
+                for nk in news {
+                    if nk == old {
+                        continue;
+                    }
+                    let (new, old) = if names_new { (old.clone(), nk) } else { (nk, old.clone()) };
+                    let tier = if route == "lineage-column" { Tier::Fact } else { Tier::Derived };
+                    if audit {
+                        let b = &m.blocks[bi];
+                        audit_v.push(KAudit { kt: KT::Lineage, tier, route, at: at_of(&m, b, ln), mention: line_of(&m, b, ln), target: format!("new {new} <- old {old}") });
+                    }
+                    kbump(&mut m.stats, format!("k_lineage_{route}"));
+                    m.lineage.push((new, old, tier, route));
+                }
+            }
+        }
+    }
+    // a restated id: the same id defined in two docs (outside specs, whose numbering is per spec
+    // by design) where one definition quotes the other (a review note quoting a plan's row):
+    // a quoted or bold span of four or more words of one, its words all in the other
+    {
+        let spans = |t: &str| -> Vec<BTreeSet<String>> {
+            let mut out = Vec::new();
+            for sep in ["**", "\"", "\u{201c}"] {
+                let close = if sep == "\u{201c}" { "\u{201d}" } else { sep };
+                let mut rest = t;
+                while let Some(a) = rest.find(sep) {
+                    let after = &rest[a + sep.len()..];
+                    let Some(b) = after.find(close) else { break };
+                    let w: BTreeSet<String> = law_words(&after[..b]).into_iter().collect();
+                    if w.len() >= 4 {
+                        out.push(w);
+                    }
+                    rest = &after[b + close.len()..];
+                }
+            }
+            out
+        };
+        let mut by_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for b in &m.blocks {
+            let p = &m.pages[b.page as usize];
+            if p.scope.starts_with("specs/") {
+                continue;
+            }
+            let line = docs.get(p.start + b.line as usize).map_or("", |x| x.1.as_str());
+            for (kt, k) in &b.defs {
+                if *kt != KT::Scoped || !k.contains('|') {
+                    continue;
+                }
+                let id = k.rsplit('|').next().unwrap_or("");
+                by_id.entry(id.to_string()).or_default().entry(k.clone()).or_insert_with(|| line.replace(id, " "));
+            }
+        }
+        for (_, defs) in by_id {
+            let v: Vec<(&String, &String)> = defs.iter().collect();
+            for i in 0..v.len() {
+                for j in i + 1..v.len() {
+                    let (wi, wj): (BTreeSet<String>, BTreeSet<String>) = (law_words(v[i].1).into_iter().collect(), law_words(v[j].1).into_iter().collect());
+                    let quotes = spans(v[i].1).iter().any(|sp| sp.is_subset(&wj)) || spans(v[j].1).iter().any(|sp| sp.is_subset(&wi));
+                    if quotes {
+                        if audit {
+                            audit_v.push(KAudit { kt: KT::Lineage, tier: Tier::Derived, route: "restated", at: v[j].0.clone(), mention: kexcerpt(v[j].1), target: format!("{} == {} :: {}", v[j].0, v[i].0, kexcerpt(v[i].1)) });
+                        }
+                        kbump(&mut m.stats, "k_lineage_restated");
+                        m.lineage.push((v[j].0.clone(), v[i].0.clone(), Tier::Derived, "restated"));
+                    }
+                }
+            }
+        }
+    }
+    for (a, b) in &known.moved {
+        m.lineage.push((format!("law:AU-ACT:{b}"), format!("law:AU-ACT:{a}"), Tier::Derived, "moved-section"));
+        kbump(&mut m.stats, "k_lineage_moved-section");
+    }
+    // ---- code files ----
+    let mut by_file: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    let mut code_path: HashMap<u32, String> = HashMap::new();
+    for (p, l) in code_lines {
+        if let Some(f) = kp.map(p) {
+            if !kp.exact.contains_key(p) {
+                kbump(&mut m.stats, "k_code_lines_via_rename");
+            }
+            by_file.entry(f).or_default().push(l.as_str());
+            code_path.entry(f).or_insert_with(|| p.clone());
+        }
+    }
+    let spec_of_num = ids.spec_scope.clone();
+    // per code file, the spec scopes of the blocks that name it (most blocks first)
+    let mut path_scope: HashMap<u32, BTreeMap<String, usize>> = HashMap::new();
+    for b in &m.blocks {
+        let sc = &m.pages[b.page as usize].scope;
+        if sc.starts_with("specs/") {
+            for &(f, tier, _) in &b.files {
+                if tier <= Tier::Derived {
+                    *path_scope.entry(f).or_default().entry(sc.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+    for (&f, lines) in &by_file {
+        let path = &code_path[&f];
+        let cx = kcite_ctx(path, lines);
+        let mut raw: Vec<KRawId> = Vec::new();
+        for (ln, l) in lines.iter().enumerate() {
+            let specs = spec_refs(l);
+            for n in &specs {
+                if let Some(s) = spec_of_num.get(n) {
+                    m.code_specs[f as usize].push(s.clone());
+                }
+            }
+            for (st, en, id, bare) in kid_mentions(l, false) {
+                if ids.accepts(&id, bare) {
+                    raw.push(KRawId { id, bare, specs: kqualifier(l, st, en), line: ln as u32 });
+                }
+            }
+            let Some(cm) = kcomment(l) else { continue };
+            let (res, rawc) = kcite_line(cm, ln, &KCiteAt { cx: &cx, stack: &[], recent: None }, known, true, &mut m.stats);
+            for (k, tier, route) in res {
+                if audit {
+                    audit_v.push(KAudit { kt: KT::Cite, tier, route, at: format!("{path}:{}", ln + 1), mention: kexcerpt(l), target: k.clone() });
+                }
+                kbump(&mut m.stats, format!("k_cite_code_{route}"));
+                m.code_refs[f as usize].push(KRef { kt: KT::Cite, key: k, tier, route });
+            }
+            m.code_cites_raw[f as usize].extend(rawc);
+        }
+        let file_specs: Vec<u32> = lines.iter().flat_map(|l| spec_refs(l)).collect();
+        let refs: Vec<&KRawId> = raw.iter().collect();
+        // the file's own documented scope: the specs naming it, then its non-test sibling
+        // (`x_test.go` -> `x.go`, `x.spec.ts` -> `x.ts`), then its directory
+        let cp = &kp.cand[f as usize];
+        let sib: Option<u32> = [("_test.go", ".go"), (".spec.ts", ".ts"), (".test.ts", ".ts"), (".test.js", ".js"), ("_test.py", ".py")]
+            .iter()
+            .find_map(|(a, b)| cp.strip_suffix(a).and_then(|st| kp.exact.get(&format!("{st}{b}")).copied()));
+        let mut extra: Vec<String> = Vec::new();
+        let push = |sc: Option<&BTreeMap<String, usize>>, extra: &mut Vec<String>| {
+            let mut v: Vec<(&String, &usize)> = sc.map(|x| x.iter().collect()).unwrap_or_default();
+            v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            for (k, _) in v {
+                if !extra.contains(k) {
+                    extra.push(k.clone());
+                }
+            }
+        };
+        push(path_scope.get(&f), &mut extra);
+        if let Some(sf) = sib {
+            push(path_scope.get(&sf), &mut extra);
+        }
+        let mut dir_sc: BTreeMap<String, usize> = BTreeMap::new();
+        for (&g, sc) in &path_scope {
+            if dir_of(&kp.cand[g as usize]) == dir_of(cp) {
+                for (k, v) in sc {
+                    *dir_sc.entry(k.clone()).or_default() += v;
+                }
+            }
+        }
+        push(Some(&dir_sc), &mut extra);
+        let res = ids.resolve_all(&refs, None, &file_specs, &extra, "path-scope");
+        if audit && std::env::var("GLIA_KEYS_DEBUG").is_ok() {
+            for (rm, r) in raw.iter().zip(&res) {
+                if let Err(e) = r {
+                    eprintln!("[keys-debug] code {e} {} defs={:?} at {path}:{}", rm.id, ids.defs.get(&rm.id), rm.line + 1);
+                }
+            }
+        }
+        for (rm, r) in raw.iter().zip(res) {
+            m.code_raw_ids[f as usize].push(format!("id:{}", rm.id));
+            match r {
+                Ok((k, tier, route)) => {
+                    if audit {
+                        audit_v.push(KAudit { kt: KT::Scoped, tier, route, at: format!("{path}:{}", rm.line + 1), mention: format!("{} :: {}", rm.id, kexcerpt(lines[rm.line as usize])), target: k.clone() });
+                    }
+                    kbump(&mut m.stats, format!("k_scoped_code_{route}"));
+                    m.code_refs[f as usize].push(KRef { kt: KT::Scoped, key: k, tier, route });
+                }
+                Err(e) => kbump(&mut m.stats, format!("k_scoped_code_{e}")),
+            }
+        }
+        m.code_specs[f as usize].sort();
+        m.code_specs[f as usize].dedup();
+    }
+    // ---- pass D: text fallback for definition and row blocks no other key links to code ----
+    if let Some(bm) = bm {
+        let cited: HashSet<&str> = m.code_refs.iter().flatten().map(|r| r.key.as_str()).collect();
+        let want: Vec<usize> = (0..m.blocks.len())
+            .filter(|&bi| {
+                let b = &m.blocks[bi];
+                !b.defs.is_empty() && b.files.is_empty() && !b.defs.iter().any(|d| cited.contains(d.1.as_str()))
+            })
+            .collect();
+        let tops: Vec<(usize, Vec<(u32, f64)>)> = want.par_iter().map(|&bi| (bi, bm.top(&m.blocks[bi].text, 3))).collect();
+        for (bi, top) in tops {
+            for &(f, s) in &top {
+                kbump(&mut m.stats, "k_text_links");
+                if audit {
+                    let b = &m.blocks[bi];
+                    audit_v.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: at_of(&m, b, b.line), mention: line_of(&m, b, b.line), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
+                }
+            }
+            m.blocks[bi].text_files = top;
+        }
+    }
+    let mut tally = BTreeMap::new();
+    ktally(m.blocks.iter().flat_map(|b| b.refs.iter()).chain(m.code_refs.iter().flatten()), &mut tally);
+    m.stats.extend(tally);
+    m.stats.insert("k_blocks".into(), m.blocks.len() as f64);
+    m.stats.insert("k_pages".into(), m.pages.len() as f64);
+    m.stats.insert("k_lineage_edges".into(), m.lineage.len() as f64);
+    m.stats.insert("k_scoped_prefixes".into(), ids.scoped.len() as f64);
+    m.audit = audit_v;
+    m
+}
+
+// ---- the joiner (Kina) ----
+
+/// Per candidate file, the upper-layer nodes it reaches through resolved keys.
+#[derive(Default)]
+struct KSets {
+    /// requirement level: the key classes it cites or the blocks that name it define
+    r1: Vec<BTreeSet<String>>,
+    /// r1 plus the classes those naming blocks mention (one hop)
+    r1h: Vec<BTreeSet<String>>,
+    /// spec level: the heading units of its related blocks
+    r2u: Vec<BTreeSet<String>>,
+    /// spec level, coarse: the spec dir or doc of its related blocks, plus `spec NNN` in code
+    r2d: Vec<BTreeSet<String>>,
+    /// law: the sections its related blocks (or its own comments) cite
+    r3b: Vec<BTreeSet<String>>,
+    /// law: r3b after one goal-internal hop
+    r3h: Vec<BTreeSet<String>>,
+    /// law at the instrument level (r3h's instruments)
+    r3a: Vec<BTreeSet<String>>,
+}
+
+const KHUB: usize = 40;
+
+/// Per-block resolved keys under one joiner variant.
+struct KBk {
+    defs: Vec<(KT, String)>,
+    refs: Vec<String>,
+    cites: Vec<String>,
+}
+
+/// One joiner variant's keys: the lineage classes, each block's keys, each code file's id and
+/// citation classes, and the blocks that name each code file.
+type KKeys = (KLin, Vec<KBk>, Vec<Vec<String>>, Vec<Vec<String>>, Vec<Vec<u32>>);
+
+fn kina_keys(m: &KinaModel, mask: KMask) -> KKeys {
+    let idk = |k: &str| -> String { if mask.raw_scoped { kraw_id(k) } else { k.to_string() } };
+    let mut edges: Vec<(String, String, Tier, bool)> = Vec::new();
+    if mask.on(KT::Lineage) {
+        for (a, b, t, r) in &m.lineage {
+            if a.starts_with("law:") && !mask.on(KT::Cite) {
+                continue;
+            }
+            let both_rows = a.starts_with("row:") && b.starts_with("row:");
+            if !a.starts_with("law:") && !mask.on(KT::Scoped) && !both_rows {
+                continue;
+            }
+            edges.push((idk(a), idk(b), *t, matches!(*r, "restated" | "moved-section")));
+        }
+    }
+    let mut st = BTreeMap::new();
+    let cl = KLin::build(&edges, 8, &mut st);
+    let c = |k: &str| cl.exp(k);
+    let mut bks = Vec::with_capacity(m.blocks.len());
+    let mut names: Vec<Vec<u32>> = vec![Vec::new(); m.code_refs.len()];
+    for (bi, b) in m.blocks.iter().enumerate() {
+        let defs: Vec<(KT, String)> = b.defs.iter().filter(|d| mask.on(d.0)).flat_map(|d| c(&idk(&d.1)).into_iter().map(move |x| (d.0, x))).collect();
+        let refs: Vec<String> = b.refs.iter().filter(|r| matches!(r.kt, KT::Scoped | KT::Row) && mask.keeps(r)).flat_map(|r| c(&idk(&r.key))).collect();
+        let cites: Vec<String> = if !mask.on(KT::Cite) {
+            Vec::new()
+        } else if mask.raw_cite {
+            b.cites_raw.iter().flat_map(|k| c(k)).collect()
+        } else {
+            b.refs.iter().filter(|r| r.kt == KT::Cite && mask.keeps(r)).flat_map(|r| c(&r.key)).collect()
+        };
+        if mask.on(KT::Path) {
+            if mask.raw_path {
+                for &f in &b.files_raw {
+                    names[f as usize].push(bi as u32);
+                }
+            } else {
+                for &(f, tier, _) in &b.files {
+                    if tier <= mask.max_tier {
+                        names[f as usize].push(bi as u32);
+                    }
+                }
+            }
+        }
+        if mask.on(KT::Text) && mask.max_tier >= Tier::Heuristic {
+            for &(f, _) in &b.text_files {
+                names[f as usize].push(bi as u32);
+            }
+        }
+        bks.push(KBk { defs, refs, cites });
+    }
+    for v in names.iter_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+    let code_ids: Vec<Vec<String>> = (0..m.code_refs.len())
+        .map(|f| {
+            if !mask.on(KT::Scoped) {
+                return m.code_refs[f].iter().filter(|r| r.kt == KT::Row && mask.keeps(r)).flat_map(|r| c(&r.key)).collect();
+            }
+            if mask.raw_scoped {
+                let mut v: Vec<String> = m.code_raw_ids[f].iter().flat_map(|k| c(k)).collect();
+                v.extend(m.code_refs[f].iter().filter(|r| r.kt == KT::Row && mask.keeps(r)).flat_map(|r| c(&r.key)));
+                return v;
+            }
+            m.code_refs[f].iter().filter(|r| matches!(r.kt, KT::Scoped | KT::Row) && mask.keeps(r)).flat_map(|r| c(&r.key)).collect()
+        })
+        .collect();
+    let code_cites: Vec<Vec<String>> = (0..m.code_refs.len())
+        .map(|f| {
+            if !mask.on(KT::Cite) {
+                Vec::new()
+            } else if mask.raw_cite {
+                m.code_cites_raw[f].iter().flat_map(|k| c(k)).collect()
+            } else {
+                m.code_refs[f].iter().filter(|r| r.kt == KT::Cite && mask.keeps(r)).flat_map(|r| c(&r.key)).collect()
+            }
+        })
+        .collect();
+    (cl, bks, code_ids, code_cites, names)
+}
+
+fn kina_join(m: &KinaModel, mask: KMask, perm: Option<&HashMap<usize, usize>>) -> KSets {
+    let nf = m.code_refs.len();
+    let (_, mut bks, code_ids, code_cites, names) = kina_keys(m, mask);
+    if let Some(p) = perm {
+        let orig: Vec<Vec<String>> = bks.iter().map(|b| b.cites.clone()).collect();
+        for (&a, &b) in p {
+            bks[a].cites = orig[b].clone();
+        }
+    }
+    let mut def_blocks: HashMap<&str, Vec<u32>> = HashMap::new();
+    let mut ref_blocks: HashMap<&str, Vec<u32>> = HashMap::new();
+    for (bi, b) in bks.iter().enumerate() {
+        for d in &b.defs {
+            def_blocks.entry(d.1.as_str()).or_default().push(bi as u32);
+        }
+        for r in &b.refs {
+            ref_blocks.entry(r.as_str()).or_default().push(bi as u32);
+        }
+    }
+    let inst = |k: &str| -> String {
+        let parts: Vec<&str> = k.split(':').collect();
+        if parts.len() >= 4 && parts[1] == "OTHER" { format!("law:OTHER:{}", parts[2]) } else { parts[..parts.len().min(2)].join(":") }
+    };
+    let mut out = KSets::default();
+    for f in 0..nf {
+        let named = &names[f];
+        let mut r1: BTreeSet<String> = code_ids[f].iter().cloned().collect();
+        for &b in named {
+            let bk = &bks[b as usize];
+            if bk.defs.is_empty() {
+                r1.insert(format!("blk:{b}"));
+            } else {
+                r1.extend(bk.defs.iter().map(|d| d.1.clone()));
+            }
+        }
+        let mut r1h = r1.clone();
+        for &b in named {
+            r1h.extend(bks[b as usize].refs.iter().cloned());
+        }
+        let mut related: BTreeSet<u32> = named.iter().copied().collect();
+        for k in &code_ids[f] {
+            related.extend(def_blocks.get(k.as_str()).into_iter().flatten().copied());
+        }
+        let r2u: BTreeSet<String> = related.iter().map(|&b| format!("u:{}", m.blocks[b as usize].unit)).collect();
+        let mut r2d: BTreeSet<String> = related.iter().map(|&b| kina_unit(&m.pages[m.blocks[b as usize].page as usize].path)).collect();
+        r2d.extend(m.code_specs[f].iter().cloned());
+        let mut r3b: BTreeSet<String> = code_cites[f].iter().cloned().collect();
+        for &b in &related {
+            r3b.extend(bks[b as usize].cites.iter().cloned());
+        }
+        let mut related1 = related.clone();
+        for &b in &related {
+            let bk = &bks[b as usize];
+            for k in bk.defs.iter().map(|d| &d.1).chain(&bk.refs) {
+                let d = def_blocks.get(k.as_str()).map_or(0, Vec::len);
+                let r = ref_blocks.get(k.as_str()).map_or(0, Vec::len);
+                if d + r > KHUB {
+                    continue;
+                }
+                related1.extend(def_blocks.get(k.as_str()).into_iter().flatten().copied());
+                related1.extend(ref_blocks.get(k.as_str()).into_iter().flatten().copied());
+            }
+        }
+        let mut r3h = r3b.clone();
+        for &b in &related1 {
+            r3h.extend(bks[b as usize].cites.iter().cloned());
+        }
+        let r3a: BTreeSet<String> = r3h.iter().map(|k| inst(k)).collect();
+        out.r1.push(r1);
+        out.r1h.push(r1h);
+        out.r2u.push(r2u);
+        out.r2d.push(r2d);
+        out.r3b.push(r3b);
+        out.r3h.push(r3h);
+        out.r3a.push(r3a);
+    }
+    out
+}
+
+// ---- the glia goal layer as key mentions ----
+
+/// A packet with its typed path column and its prose.
+#[derive(Clone)]
+struct GPk {
+    id: String,
+    files: Vec<String>,
+    text: String,
+}
+
+/// The packets of one packets file, and its split remaps (packet -> files a wave-0 split
+/// moved the packet's claim to).
+type GPkFile = (Vec<GPk>, Vec<(String, Vec<String>)>);
+
+fn glia_pk_full(text: &str) -> GPkFile {
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+    let mut out = Vec::new();
+    for p in v.get("packets").and_then(|p| p.as_array()).into_iter().flatten() {
+        let Some(id) = p.get("id").and_then(|x| x.as_str()) else { continue };
+        let files = p
+            .get("files_touched")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let mut t = String::new();
+        for k in ["title", "rationale", "implementation", "acceptance", "risks", "research", "fixtures"] {
+            match p.get(k) {
+                Some(serde_json::Value::String(s)) => t.push_str(s),
+                Some(x) if !x.is_null() => t.push_str(&x.to_string()),
+                _ => {}
+            }
+            t.push('\n');
+        }
+        out.push(GPk { id: id.to_string(), files, text: t });
+    }
+    let mut remap = Vec::new();
+    for (_, arr) in v.get("splits").and_then(|x| x.as_object()).into_iter().flatten() {
+        let items: Vec<&serde_json::Value> = match arr {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            x => vec![x],
+        };
+        for e in items {
+            for (pk, fs) in e.get("remap").and_then(|x| x.as_object()).into_iter().flatten() {
+                let files: Vec<String> = fs.as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                if !files.is_empty() {
+                    remap.push((pk.clone(), files));
+                }
+            }
+        }
+    }
+    (out, remap)
+}
+
+/// Ruling units of a plan doc: inside a heading naming decisions or rulings, each numbered
+/// item and table row (the earlier run's sections), and tweaks-0.5.2.md's T rows. A numbered
+/// table whose intro names `Q1–19` keys its rows `Q<n>`, the key the packets and code cite.
+fn glia_ruling_units(doc: &str, text: &str) -> Vec<(String, String, &'static str)> {
+    let tweaks = doc.ends_with("tweaks-0.5.2.md");
+    let lines: Vec<&str> = text.lines().collect();
+    let mut heads: Vec<(usize, String)> = Vec::new();
+    let mut out: Vec<(String, String, &'static str)> = Vec::new();
+    let mut cur: Option<(String, String, &'static str)> = None;
+    let mut intro = String::new();
+    let mut letter: Option<char> = None;
+    let flush = |cur: &mut Option<(String, String, &'static str)>, out: &mut Vec<(String, String, &'static str)>| {
+        if let Some((k, t, r)) = cur.take() {
+            out.push((format!("{doc}#{k}"), t, r));
+        }
+    };
+    let is_sep = |x: &str| x.trim().starts_with('|') && x.trim().chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            flush(&mut cur, &mut out);
+            let level = t.bytes().take_while(|&c| c == b'#').count();
+            heads.retain(|(l, _)| *l < level);
+            heads.push((level, t.trim_start_matches('#').trim().to_string()));
+            intro.clear();
+            letter = None;
+            continue;
+        }
+        let in_rulings = heads.iter().any(|(_, h)| {
+            let h = h.to_ascii_lowercase();
+            h.contains("decision") || h.contains("ruling")
+        });
+        let section: String = heads.last().map_or(String::new(), |(_, h)| h.chars().take(40).collect());
+        let gap_row = tweaks && t.starts_with("| T") && t[3..].starts_with(|c: char| c.is_ascii_digit());
+        let gap_para = tweaks && t.starts_with('T') && t[1..].starts_with(|c: char| c.is_ascii_digit()) && t.contains(" (James");
+        if gap_row || gap_para {
+            flush(&mut cur, &mut out);
+            let n: String = t.trim_start_matches(['|', ' ', 'T']).chars().take_while(char::is_ascii_digit).collect();
+            cur = Some((format!("T{n}"), t.to_string(), "t-row"));
+            flush(&mut cur, &mut out);
+            continue;
+        }
+        if !t.starts_with('|') && intro.len() < 4000 {
+            intro.push_str(t);
+            intro.push('\n');
+        }
+        if !in_rulings {
+            flush(&mut cur, &mut out);
+            continue;
+        }
+        let d = t.bytes().take_while(u8::is_ascii_digit).count();
+        if d > 0 && t[d..].starts_with(". ") {
+            flush(&mut cur, &mut out);
+            cur = Some((format!("{section}/{}", &t[..d]), t.to_string(), "item"));
+        } else if t.starts_with('|') {
+            flush(&mut cur, &mut out);
+            if is_sep(t) {
+                continue;
+            }
+            if lines.get(i + 1).is_some_and(|x| is_sep(x)) {
+                // a header: read ahead the table's numbered first cells for its id letter
+                let nums: Vec<u32> = lines[i + 2..]
+                    .iter()
+                    .take_while(|x| x.trim_start().starts_with('|'))
+                    .filter_map(|x| kcells(x).first().and_then(|c| c.parse().ok()))
+                    .collect();
+                letter = row_letter(&intro, &nums);
+                continue;
+            }
+            let cell = kcells(t).first().cloned().unwrap_or_default();
+            if !cell.is_empty() && !cell.starts_with("---") && cell != "#" && cell != "decision" {
+                match (letter, cell.parse::<u32>()) {
+                    (Some(c), Ok(n)) => cur = Some((format!("{c}{n}"), t.to_string(), "lettered-row")),
+                    _ => cur = Some((format!("{section}/{cell}"), t.to_string(), "row")),
+                }
+                flush(&mut cur, &mut out);
+            }
+        } else if t.is_empty() {
+            flush(&mut cur, &mut out);
+        } else if let Some((_, buf, _)) = cur.as_mut() {
+            buf.push(' ');
+            buf.push_str(t);
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// Packet lineage phrases (identity only: a claim "moved to" another packet, or work "folded
+/// into" one, is not), and whether the id the phrase names is the NEW packet.
+const GLIN_PHRASES: &[(&str, &str, bool)] = &[
+    ("split from ", "split-from", false),
+    ("supersedes ", "supersedes", false),
+    ("renamed from ", "renamed", false),
+    ("formerly ", "formerly", false),
+    ("(was ", "was", false),
+    ("replaces ", "replaces", false),
+    ("split into ", "split-into", true),
+    ("superseded by ", "superseded-by", true),
+];
+
+/// Packet lineage phrases in a packet's prose: the packet id a phrase names (`Split from the
+/// first DT.10c`, `moved to CZ.1`), skipping a `the first` / `the original` / `the`.
+fn glia_lin(text: &str) -> Vec<(String, &'static str, bool)> {
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (ph, name, names_new) in GLIN_PHRASES {
+        let mut from = 0;
+        while let Some(p) = lower[from..].find(ph) {
+            let mut e = from + p + ph.len();
+            from = e;
+            for skip in ["the first ", "the original ", "the "] {
+                if lower[e..].starts_with(skip) {
+                    e += skip.len();
+                    break;
+                }
+            }
+            let w: String = text[e..].chars().take(14).collect();
+            if let Some((_, id)) = dot_ids(&w).into_iter().next()
+                && w.starts_with(&id)
+            {
+                out.push((id, *name, *names_new));
+            }
+        }
+    }
+    out
+}
+
+/// `Q<n>` mentions (Q1..Q99), word-bounded.
+fn q_ids(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    for i in 0..b.len() {
+        if b[i] == b'Q' && wb(b, i) {
+            let e = digits_at(b, i + 1, 3);
+            if e > i + 1 && e - i - 1 <= 2 && we(b, e) {
+                out.push(s[i..e].to_string());
+            }
+        }
+    }
+    out
+}
+
+struct GliaModel {
+    pk_ids: Vec<String>,
+    pk_files: Vec<Vec<(u32, Tier, &'static str)>>,
+    pk_files_raw: Vec<Vec<u32>>,
+    pk_text: Vec<Vec<(u32, f64)>>,
+    pk_q: Vec<Vec<KRef>>,
+    rul: Vec<String>,
+    rul_pk: Vec<Vec<KRef>>,
+    rul_files: Vec<Vec<(u32, Tier, &'static str)>>,
+    rul_files_raw: Vec<Vec<u32>>,
+    rul_text: Vec<Vec<(u32, f64)>>,
+    code_pk: Vec<Vec<KRef>>,
+    code_pk_raw: Vec<Vec<String>>,
+    code_q: Vec<Vec<KRef>>,
+    lineage: Vec<(String, String, Tier, &'static str)>,
+    stats: BTreeMap<String, f64>,
+    audit: Vec<KAudit>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn glia_model(
+    git: &str,
+    rev: &str,
+    cache: &BlobCache,
+    pkc: &std::sync::Mutex<HashMap<String, std::sync::Arc<GPkFile>>>,
+    code_lines: &[(String, String)],
+    kp: &KPaths,
+    pr: &PathRes,
+    bm: Option<&KBm>,
+    nf: usize,
+    audit: bool,
+) -> GliaModel {
+    let mut stats: BTreeMap<String, f64> = BTreeMap::new();
+    let mut au: Vec<KAudit> = Vec::new();
+    let mut all: Vec<&str> = Vec::new();
+    for g in [GLIA_PACKETS, GLIA_PLANS, GLIA_CORRECTIONS] {
+        all.extend_from_slice(g);
+    }
+    let blobs = ls_tree(git, rev, &all);
+    // packets (first definition wins, as in the earlier run), with their file's release plan
+    let mut pks: BTreeMap<String, (GPk, &'static str)> = BTreeMap::new();
+    let mut remaps: Vec<(String, Vec<String>)> = Vec::new();
+    for &p in GLIA_PACKETS {
+        let Some(b) = blobs.get(p) else { continue };
+        let got = {
+            let hit = pkc.lock().unwrap().get(b).cloned();
+            hit.unwrap_or_else(|| {
+                let a = std::sync::Arc::new(glia_pk_full(&cache.get(git, b)));
+                pkc.lock().unwrap().insert(b.clone(), a.clone());
+                a
+            })
+        };
+        let plan: &'static str = match p {
+            "dev-notes/leap-052-packets.json" => "next-leap-0.5.2.md",
+            "dev-notes/leap-051-packets.json" => "next-leap-0.5.1.md",
+            "dev-notes/leap-packets.json" => "next-leap-0.5.0.md",
+            _ => "",
+        };
+        for pk in &got.0 {
+            pks.entry(pk.id.clone()).or_insert_with(|| (pk.clone(), plan));
+        }
+        remaps.extend(got.1.iter().cloned());
+    }
+    let pk_ids: Vec<String> = pks.keys().cloned().collect();
+    let pix: HashMap<&str, usize> = pk_ids.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+    let prefixes: BTreeSet<String> = pk_ids.iter().map(|id| id.split('.').next().unwrap_or("").to_string()).collect();
+    let mut fams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for id in &pk_ids {
+        fams.entry(family(id)).or_default().push(id.clone());
+    }
+    // rulings
+    let mut rul: Vec<String> = Vec::new();
+    let mut rul_text: Vec<String> = Vec::new();
+    let mut rul_route: Vec<&'static str> = Vec::new();
+    for &d in GLIA_PLANS {
+        if let Some(b) = blobs.get(d) {
+            let name = d.rsplit('/').next().unwrap_or(d);
+            for (k, t, r) in glia_ruling_units(name, &cache.get(git, b)) {
+                rul.push(k);
+                rul_text.push(t);
+                rul_route.push(r);
+            }
+        }
+    }
+    let mut corr_key: Vec<Option<String>> = vec![None; rul.len()];
+    for &c in GLIA_CORRECTIONS {
+        let Some(b) = blobs.get(c) else { continue };
+        let v: serde_json::Value = serde_json::from_str(&cache.get(git, b)).unwrap_or(serde_json::Value::Null);
+        let name = c.rsplit('/').next().unwrap_or(c);
+        for (k, val) in v.get("corrections").and_then(|x| x.as_object()).into_iter().flatten() {
+            let text = val.as_str().map_or_else(|| val.to_string(), str::to_string);
+            if !text.contains("James") {
+                continue;
+            }
+            rul.push(format!("{name}#{k}"));
+            rul_text.push(text);
+            rul_route.push("correction");
+            corr_key.push(Some(k.clone()));
+        }
+    }
+    let rix: HashMap<&str, usize> = rul.iter().enumerate().map(|(i, r)| (r.as_str(), i)).collect();
+    // where each Q<n> is defined (a lettered row of a plan doc)
+    let mut q_def: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (i, k) in rul.iter().enumerate() {
+        if rul_route[i] == "lettered-row"
+            && let Some((doc, q)) = k.split_once('#')
+        {
+            q_def.entry(q.to_string()).or_default().push(doc.to_string());
+            if audit {
+                au.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "lettered-row", at: doc.to_string(), mention: kexcerpt(&rul_text[i]), target: format!("rul:{k}") });
+            }
+            kbump(&mut stats, "k_row_lettered");
+        }
+    }
+    let resolve_q = |q: &str, own_plan: &str, line_release: bool| -> Option<(String, Tier, &'static str)> {
+        let docs = q_def.get(q)?;
+        if docs.iter().any(|d| d == own_plan) {
+            return Some((format!("rul:{own_plan}#{q}"), Tier::Fact, "own-release"));
+        }
+        if docs.len() == 1 {
+            return Some((format!("rul:{}#{q}", docs[0]), if line_release { Tier::Fact } else { Tier::Derived }, if line_release { "line-release" } else { "unique-doc" }));
+        }
+        None
+    };
+    // a packet mention (an id, a family, a `P-n` shorthand) -> packet keys
+    let pk_mentions = |t: &str| -> Vec<(String, Tier, &'static str, String)> {
+        let mut v = Vec::new();
+        for (p, id) in dot_ids(t) {
+            if !prefixes.contains(&p) {
+                continue;
+            }
+            if pix.contains_key(id.as_str()) {
+                v.push((format!("pk:{id}"), Tier::Fact, "packet-id", id));
+            } else if let Some(ms) = fams.get(&id) {
+                v.extend(ms.iter().map(|x| (format!("pk:{x}"), Tier::Derived, "family", id.clone())));
+            }
+        }
+        for (p, id) in hyphen_ids(t) {
+            if prefixes.contains(&p) {
+                let fam = format!("{p}.{}", &id[p.len() + 1..]);
+                if let Some(ms) = fams.get(&fam) {
+                    v.extend(ms.iter().map(|x| (format!("pk:{x}"), Tier::Derived, "family-shorthand", id.clone())));
+                }
+            }
+        }
+        v
+    };
+    // packets: typed paths, Q citations, lineage phrases
+    let n = pk_ids.len();
+    let mut pk_files = vec![Vec::new(); n];
+    let mut pk_files_raw = vec![Vec::new(); n];
+    let mut pk_q: Vec<Vec<KRef>> = vec![Vec::new(); n];
+    let mut lineage = Vec::new();
+    for (i, id) in pk_ids.iter().enumerate() {
+        let (pk, plan) = &pks[id];
+        for entry in &pk.files {
+            pk_files_raw[i].extend(pr.files(entry));
+            for (f, tier, route, _) in kp.block(&kpath_tokens(entry), &mut stats) {
+                kbump(&mut stats, format!("k_path_{route}"));
+                if audit {
+                    au.push(KAudit { kt: KT::Path, tier, route, at: format!("{id} files_touched"), mention: kexcerpt(entry), target: kp.cand[f as usize].clone() });
+                }
+                pk_files[i].push((f, tier, route));
+            }
+        }
+        for q in q_ids(&pk.text) {
+            if let Some((k, tier, route)) = resolve_q(&q, plan, false) {
+                kbump(&mut stats, format!("k_scoped_pkq_{route}"));
+                pk_q[i].push(KRef { kt: KT::Scoped, key: k, tier, route });
+            }
+        }
+        for (other, verb, names_new) in glia_lin(&pk.text) {
+            if other != *id && pix.contains_key(other.as_str()) {
+                let (new, old) = if names_new { (other.clone(), id.clone()) } else { (id.clone(), other.clone()) };
+                if audit {
+                    let pos = pk.text.find(&other).unwrap_or(0);
+                    let st = pk.text[..pos].char_indices().rev().nth(120).map_or(0, |x| x.0);
+                    let ctx: String = pk.text[st..].chars().take(220).collect();
+                    au.push(KAudit { kt: KT::Lineage, tier: Tier::Derived, route: verb, at: id.clone(), mention: kexcerpt(&ctx), target: format!("new pk:{new} <- old pk:{old}") });
+                }
+                kbump(&mut stats, format!("k_lineage_{verb}"));
+                lineage.push((format!("pk:{new}"), format!("pk:{old}"), Tier::Derived, verb));
+            }
+        }
+    }
+    for (pk, files) in &remaps {
+        let Some(&i) = pix.get(pk.as_str()) else { continue };
+        for fs in files {
+            for (f, _, route, _) in kp.block(&kpath_tokens(fs), &mut stats) {
+                kbump(&mut stats, "k_path_split-remap");
+                if audit {
+                    au.push(KAudit { kt: KT::Path, tier: Tier::Derived, route: "split-remap", at: format!("{pk} split remap ({route})"), mention: kexcerpt(fs), target: kp.cand[f as usize].clone() });
+                }
+                pk_files[i].push((f, Tier::Derived, "split-remap"));
+            }
+        }
+    }
+    // rulings: packets, T-row families, paths
+    let nr = rul.len();
+    let mut rul_pk: Vec<Vec<KRef>> = vec![Vec::new(); nr];
+    let mut rul_files = vec![Vec::new(); nr];
+    let mut rul_files_raw = vec![Vec::new(); nr];
+    for r in 0..nr {
+        let t = &rul_text[r];
+        let mut got = pk_mentions(t);
+        if let Some(k) = &corr_key[r]
+            && pix.contains_key(k.as_str())
+        {
+            got.push((format!("pk:{k}"), Tier::Fact, "correction-key", k.clone()));
+        }
+        for (k, tier, route, raw) in got {
+            kbump(&mut stats, format!("k_scoped_ruling_{route}"));
+            if audit {
+                au.push(KAudit { kt: KT::Scoped, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: k.clone() });
+            }
+            rul_pk[r].push(KRef { kt: KT::Scoped, key: k, tier, route });
+        }
+        if rul_route[r] == "t-row"
+            && let Some(tn) = rul[r].rsplit('#').next()
+            && let Some(ms) = fams.get(&format!("DT.{}", &tn[1..]))
+        {
+            for x in ms {
+                kbump(&mut stats, "k_row_t-row-family");
+                if audit {
+                    au.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "t-row-family", at: format!("rul:{}", rul[r]), mention: kexcerpt(t), target: format!("pk:{x}") });
+                }
+                rul_pk[r].push(KRef { kt: KT::Row, key: format!("pk:{x}"), tier: Tier::Derived, route: "t-row-family" });
+            }
+        }
+        rul_files_raw[r] = t.lines().flat_map(|l| pr.files(l)).collect();
+        for (f, tier, route, raw) in kp.block(&kpath_tokens(t), &mut stats) {
+            kbump(&mut stats, format!("k_path_ruling_{route}"));
+            if audit {
+                au.push(KAudit { kt: KT::Path, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: kp.cand[f as usize].clone() });
+            }
+            rul_files[r].push((f, tier, route));
+        }
+    }
+    // code: packet citations and Q citations
+    let mut code_pk: Vec<Vec<KRef>> = vec![Vec::new(); nf];
+    let mut code_pk_raw: Vec<Vec<String>> = vec![Vec::new(); nf];
+    let mut code_q: Vec<Vec<KRef>> = vec![Vec::new(); nf];
+    for (p, l) in code_lines {
+        let Some(f) = kp.map(p) else { continue };
+        if !kp.exact.contains_key(p) {
+            kbump(&mut stats, "k_code_lines_via_rename");
+        }
+        let f = f as usize;
+        for (pfx, id) in dot_ids(l) {
+            if prefixes.contains(&pfx) {
+                code_pk_raw[f].push(format!("pk:{id}"));
+            }
+        }
+        for (k, tier, route, raw) in pk_mentions(l) {
+            kbump(&mut stats, format!("k_scoped_code_{route}"));
+            if audit {
+                au.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{raw} :: {}", kexcerpt(l)), target: k.clone() });
+            }
+            code_pk[f].push(KRef { kt: KT::Scoped, key: k, tier, route });
+        }
+        let release = l.contains("0.5.2");
+        for q in q_ids(l) {
+            match resolve_q(&q, "", release) {
+                Some((k, tier, route)) => {
+                    kbump(&mut stats, format!("k_scoped_codeq_{route}"));
+                    if audit {
+                        au.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{q} :: {}", kexcerpt(l)), target: k.clone() });
+                    }
+                    code_q[f].push(KRef { kt: KT::Scoped, key: k, tier, route });
+                }
+                None => kbump(&mut stats, "k_scoped_codeq_unresolved"),
+            }
+        }
+    }
+    // text fallback: rulings linked to no packet and no file; packets with no file and no citing code
+    let mut rul_tl = vec![Vec::new(); nr];
+    let mut pk_tl = vec![Vec::new(); n];
+    if let Some(bm) = bm {
+        let cited: HashSet<&str> = code_pk.iter().flatten().map(|r| r.key.as_str()).collect();
+        let rq: HashSet<usize> = pk_q.iter().flatten().filter_map(|q| rix.get(q.key.trim_start_matches("rul:")).copied()).collect();
+        let rw: Vec<usize> = (0..nr).filter(|&r| rul_pk[r].is_empty() && rul_files[r].is_empty() && !rq.contains(&r)).collect();
+        let rt: Vec<(usize, Vec<(u32, f64)>)> = rw.par_iter().map(|&r| (r, bm.top(&rul_text[r], 3))).collect();
+        for (r, top) in rt {
+            for &(f, s) in &top {
+                kbump(&mut stats, "k_text_ruling_links");
+                if audit {
+                    au.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: format!("rul:{}", rul[r]), mention: kexcerpt(&rul_text[r]), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
+                }
+            }
+            rul_tl[r] = top;
+        }
+        let pw: Vec<usize> = (0..n).filter(|&i| pk_files[i].is_empty() && !cited.contains(format!("pk:{}", pk_ids[i]).as_str())).collect();
+        let pt: Vec<(usize, Vec<(u32, f64)>)> = pw.par_iter().map(|&i| (i, bm.top(&pks[&pk_ids[i]].0.text, 3))).collect();
+        for (i, top) in pt {
+            for &(f, s) in &top {
+                kbump(&mut stats, "k_text_packet_links");
+                if audit {
+                    au.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: pk_ids[i].clone(), mention: kexcerpt(&pks[&pk_ids[i]].0.text), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
+                }
+            }
+            pk_tl[i] = top;
+        }
+    }
+    ktally(code_pk.iter().flatten().chain(code_q.iter().flatten()).chain(rul_pk.iter().flatten()).chain(pk_q.iter().flatten()), &mut stats);
+    stats.insert("k_packets".into(), n as f64);
+    stats.insert("k_rulings".into(), nr as f64);
+    stats.insert("k_lineage_edges".into(), lineage.len() as f64);
+    GliaModel {
+        pk_ids,
+        pk_files,
+        pk_files_raw,
+        pk_text: pk_tl,
+        pk_q,
+        rul,
+        rul_pk,
+        rul_files,
+        rul_files_raw,
+        rul_text: rul_tl,
+        code_pk,
+        code_pk_raw,
+        code_q,
+        lineage,
+        stats,
+        audit: au,
+    }
+}
+
+#[derive(Default)]
+struct GSets {
+    /// packet classes the file cites
+    r1c: Vec<BTreeSet<String>>,
+    /// r1c plus the packet classes whose typed path column names it
+    r1: Vec<BTreeSet<String>>,
+    /// rulings of r1c's packets (the earlier V4's route)
+    r4c: Vec<BTreeSet<String>>,
+    /// rulings of r1's packets
+    r4: Vec<BTreeSet<String>>,
+    /// rulings linked directly: their text names the file, or the file cites them (Q<n>)
+    r4d: Vec<BTreeSet<String>>,
+    r4a: Vec<BTreeSet<String>>,
+    r14: Vec<BTreeSet<String>>,
+}
+
+/// The joiner over the glia model. `perm` (the control): packet classes, in sorted order,
+/// take the rulings of the class at the permuted position, as the earlier V4perm did.
+fn glia_join(m: &GliaModel, mask: KMask, perm_seed: Option<&str>) -> GSets {
+    let nf = m.code_pk.len();
+    let mut edges = Vec::new();
+    if mask.on(KT::Lineage) {
+        for (a, b, t, _) in &m.lineage {
+            edges.push((a.clone(), b.clone(), *t, false));
+        }
+    }
+    let mut st = BTreeMap::new();
+    let cl = KLin::build(&edges, 6, &mut st);
+    let c = |k: &str| cl.exp(k);
+    let mut names: Vec<BTreeSet<String>> = vec![BTreeSet::new(); nf];
+    for (i, id) in m.pk_ids.iter().enumerate() {
+        let k = c(&format!("pk:{id}"));
+        if mask.on(KT::Path) {
+            if mask.raw_path {
+                for &f in &m.pk_files_raw[i] {
+                    names[f as usize].extend(k.iter().cloned());
+                }
+            } else {
+                for &(f, tier, _) in &m.pk_files[i] {
+                    if tier <= mask.max_tier {
+                        names[f as usize].extend(k.iter().cloned());
+                    }
+                }
+            }
+        }
+        if mask.on(KT::Text) && mask.max_tier >= Tier::Heuristic {
+            for &(f, _) in &m.pk_text[i] {
+                names[f as usize].extend(k.iter().cloned());
+            }
+        }
+    }
+    let rix: HashMap<&str, usize> = m.rul.iter().enumerate().map(|(i, r)| (r.as_str(), i)).collect();
+    let mut rul_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (r, refs) in m.rul_pk.iter().enumerate() {
+        for x in refs {
+            if mask.keeps(x) {
+                for k in c(&x.key) {
+                    rul_of.entry(k).or_default().insert(format!("rul:{}", m.rul[r]));
+                }
+            }
+        }
+    }
+    if mask.on(KT::Scoped) {
+        for (i, qs) in m.pk_q.iter().enumerate() {
+            for q in qs {
+                if mask.keeps(q) && rix.contains_key(q.key.trim_start_matches("rul:")) {
+                    for k in c(&format!("pk:{}", m.pk_ids[i])) {
+                        rul_of.entry(k).or_default().insert(q.key.clone());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(seed) = perm_seed {
+        let classes: Vec<String> = m.pk_ids.iter().map(|id| cl.cl.of(&format!("pk:{id}")).to_string()).collect::<BTreeSet<_>>().into_iter().collect();
+        let mut perm: Vec<usize> = (0..classes.len()).collect();
+        let mut rng = Rng(h64(&format!("{seed}:VR4perm")));
+        for k in (1..perm.len()).rev() {
+            let j = (rng.next() % (k as u64 + 1)) as usize;
+            perm.swap(k, j);
+        }
+        let old = rul_of.clone();
+        rul_of.clear();
+        for (k, cls) in classes.iter().enumerate() {
+            if let Some(rs) = old.get(&classes[perm[k]]) {
+                rul_of.insert(cls.clone(), rs.clone());
+            }
+        }
+    }
+    let mut direct: Vec<BTreeSet<String>> = vec![BTreeSet::new(); nf];
+    for r in 0..m.rul.len() {
+        let rk = format!("rul:{}", m.rul[r]);
+        if mask.on(KT::Path) {
+            if mask.raw_path {
+                for &f in &m.rul_files_raw[r] {
+                    direct[f as usize].insert(rk.clone());
+                }
+            } else {
+                for &(f, tier, _) in &m.rul_files[r] {
+                    if tier <= mask.max_tier {
+                        direct[f as usize].insert(rk.clone());
+                    }
+                }
+            }
+        }
+        if mask.on(KT::Text) && mask.max_tier >= Tier::Heuristic {
+            for &(f, _) in &m.rul_text[r] {
+                direct[f as usize].insert(rk.clone());
+            }
+        }
+    }
+    let mut out = GSets::default();
+    for f in 0..nf {
+        let r1c: BTreeSet<String> = if !mask.on(KT::Scoped) {
+            BTreeSet::new()
+        } else if mask.raw_scoped {
+            m.code_pk_raw[f].iter().flat_map(|k| c(k)).collect()
+        } else {
+            m.code_pk[f].iter().filter(|r| mask.keeps(r)).flat_map(|r| c(&r.key)).collect()
+        };
+        let mut r1 = r1c.clone();
+        r1.extend(names[f].iter().cloned());
+        let via = |s: &BTreeSet<String>| -> BTreeSet<String> { s.iter().flat_map(|k| rul_of.get(k).into_iter().flatten().cloned()).collect() };
+        let r4c = via(&r1c);
+        let r4 = via(&r1);
+        let mut r4d = direct[f].clone();
+        if mask.on(KT::Scoped) {
+            r4d.extend(m.code_q[f].iter().filter(|q| mask.keeps(q)).map(|q| q.key.clone()));
+        }
+        let mut r4a = r4.clone();
+        r4a.extend(r4d.iter().cloned());
+        let mut r14 = r1.clone();
+        r14.extend(r4a.iter().cloned());
+        out.r1c.push(r1c);
+        out.r1.push(r1);
+        out.r4c.push(r4c);
+        out.r4.push(r4);
+        out.r4d.push(r4d);
+        out.r4a.push(r4a);
+        out.r14.push(r14);
+    }
+    out
+}
+
+// ---- the keyed signals of one revision (appended after the earlier run's) ----
+
+/// The keyed signals and controls a mode adds, in order: (full signals, ablated signals,
+/// permutation controls). Every test commit's layer carries exactly these names.
+fn key_sig_names(mode: VMode) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let vars: Vec<&str> = kvariants().iter().map(|v| v.0).collect();
+    match mode {
+        VMode::Kina => {
+            let full: Vec<String> = ["VR1", "VR1h", "VR2u", "VR2d", "VR3b", "VR3h", "VR3a"].iter().map(|s| s.to_string()).collect();
+            let mut abl = Vec::new();
+            for v in &vars {
+                if *v != "-rawcite" {
+                    abl.push(format!("VR1h{v}"));
+                    abl.push(format!("VR2u{v}"));
+                }
+                abl.push(format!("VR3h{v}"));
+            }
+            (full, abl, vec!["VR3hperm".into()])
+        }
+        VMode::Glia => {
+            let full: Vec<String> = ["VR1c", "VR1", "VR4c", "VR4", "VR4d", "VR4a", "VR14"].iter().map(|s| s.to_string()).collect();
+            let mut abl = Vec::new();
+            for v in &vars {
+                if *v != "-rawcite" {
+                    abl.push(format!("VR1{v}"));
+                    abl.push(format!("VR4a{v}"));
+                }
+            }
+            (full, abl, vec!["VR4cperm".into(), "VR4perm".into()])
+        }
+        VMode::Quokka => (Vec::new(), Vec::new(), Vec::new()),
+    }
+}
+
+/// (resolved signal, the earlier run's raw signal) pairs whose co-change links are compared.
+fn key_gain_pairs(mode: VMode) -> Vec<(String, String)> {
+    let p: &[(&str, &str)] = match mode {
+        VMode::Kina => &[("VR1h", "V1m"), ("VR1", "V1"), ("VR2u", "V2"), ("VR2d", "V2"), ("VR3h", "V3"), ("VR3a", "V3"), ("VR3b", "V3")],
+        VMode::Glia => &[("VR1", "V1m"), ("VR1c", "V1"), ("VR4c", "V4"), ("VR4a", "V4"), ("VR14", "V14")],
+        VMode::Quokka => &[],
+    };
+    p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+}
+
+/// Appends the keyed signals (and their V0df and permutation controls) to a layer. With no
+/// model (a commit with no parent) every set is empty, so the ranker list stays the same.
+fn key_sigs_kina(m: Option<&KinaModel>, nf: usize, sha: &str, sigs: &mut Vec<(String, Sig)>, ctrls: &mut Vec<(String, Sig)>) {
+    let (full_n, abl_n, perm_n) = key_sig_names(VMode::Kina);
+    let empty = vec![BTreeSet::<String>::new(); nf];
+    let mut full: Vec<(String, Sig)> = Vec::new();
+    let mut abl: Vec<(String, Sig)> = Vec::new();
+    let mut perm: Vec<(String, Sig)> = Vec::new();
+    match m {
+        None => {
+            full = full_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+            abl = abl_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+            perm = perm_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+        }
+        Some(m) => {
+            let base = KBASE;
+            let j = kina_join(m, base, None);
+            for (n, s) in [("VR1", &j.r1), ("VR1h", &j.r1h), ("VR2u", &j.r2u), ("VR2d", &j.r2d), ("VR3b", &j.r3b), ("VR3h", &j.r3h), ("VR3a", &j.r3a)] {
+                full.push((n.to_string(), Sig::build(s)));
+            }
+            // control: the block -> citations map permuted among the blocks that cite
+            let (_, bks, _, _, _) = kina_keys(m, base);
+            let citing: Vec<usize> = (0..bks.len()).filter(|&b| !bks[b].cites.is_empty()).collect();
+            let mut order: Vec<usize> = (0..citing.len()).collect();
+            let mut rng = Rng(h64(&format!("{sha}:VR3hperm")));
+            for k in (1..order.len()).rev() {
+                let x = (rng.next() % (k as u64 + 1)) as usize;
+                order.swap(k, x);
+            }
+            let pm: HashMap<usize, usize> = citing.iter().enumerate().map(|(i, &b)| (b, citing[order[i]])).collect();
+            perm.push(("VR3hperm".into(), Sig::build(&kina_join(m, base, Some(&pm)).r3h)));
+            for (v, mask) in kvariants() {
+                let jv = kina_join(m, mask, None);
+                if v != "-rawcite" {
+                    abl.push((format!("VR1h{v}"), Sig::build(&jv.r1h)));
+                    abl.push((format!("VR2u{v}"), Sig::build(&jv.r2u)));
+                }
+                abl.push((format!("VR3h{v}"), Sig::build(&jv.r3h)));
+            }
+            // abl was pushed per variant; reorder to key_sig_names' order
+            let pos: HashMap<&String, usize> = abl_n.iter().enumerate().map(|(i, n)| (n, i)).collect();
+            abl.sort_by_key(|(n, _)| pos[n]);
+        }
+    }
+    for (n, s) in &full {
+        controls(n, s, sha, ctrls);
+    }
+    sigs.extend(full);
+    sigs.extend(abl);
+    ctrls.extend(perm);
+}
+
+fn key_sigs_glia(m: Option<&GliaModel>, nf: usize, sha: &str, sigs: &mut Vec<(String, Sig)>, ctrls: &mut Vec<(String, Sig)>) {
+    let (full_n, abl_n, perm_n) = key_sig_names(VMode::Glia);
+    let empty = vec![BTreeSet::<String>::new(); nf];
+    let mut full: Vec<(String, Sig)> = Vec::new();
+    let mut abl: Vec<(String, Sig)> = Vec::new();
+    let mut perm: Vec<(String, Sig)> = Vec::new();
+    match m {
+        None => {
+            full = full_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+            abl = abl_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+            perm = perm_n.iter().map(|n| (n.clone(), Sig::build(&empty))).collect();
+        }
+        Some(m) => {
+            let base = KBASE;
+            let j = glia_join(m, base, None);
+            for (n, s) in [("VR1c", &j.r1c), ("VR1", &j.r1), ("VR4c", &j.r4c), ("VR4", &j.r4), ("VR4d", &j.r4d), ("VR4a", &j.r4a), ("VR14", &j.r14)] {
+                full.push((n.to_string(), Sig::build(s)));
+            }
+            let jp = glia_join(m, base, Some(sha));
+            perm.push(("VR4cperm".into(), Sig::build(&jp.r4c)));
+            perm.push(("VR4perm".into(), Sig::build(&jp.r4)));
+            for (v, mask) in kvariants() {
+                if v == "-rawcite" {
+                    continue;
+                }
+                let jv = glia_join(m, mask, None);
+                abl.push((format!("VR1{v}"), Sig::build(&jv.r1)));
+                abl.push((format!("VR4a{v}"), Sig::build(&jv.r4a)));
+            }
+        }
+    }
+    for (n, s) in &full {
+        controls(n, s, sha, ctrls);
+    }
+    sigs.extend(full);
+    sigs.extend(abl);
+    ctrls.extend(perm);
+}
+
+/// Writes one audit file per key type: up to 80 resolved links in a deterministic hash order.
+/// Writes one audit file per key type: up to 80 resolved links, drawn round-robin over the
+/// routes (each route in a deterministic hash order), with each route's share of all links so
+/// a per-route precision can be weighted back to the whole.
+fn write_audit(dir: &str, tag: &str, au: &[KAudit]) {
+    std::fs::create_dir_all(dir).expect("keys out dir");
+    for kt in KTS {
+        let all: Vec<&KAudit> = au.iter().filter(|a| a.kt == kt).collect();
+        let mut by: BTreeMap<&str, Vec<&KAudit>> = BTreeMap::new();
+        for a in &all {
+            by.entry(a.route).or_default().push(a);
+        }
+        for v in by.values_mut() {
+            v.sort_by_key(|a| h64(&format!("{}|{}|{}", a.at, a.mention, a.target)));
+            v.dedup_by(|a, b| a.at == b.at && a.mention == b.mention && a.target == b.target);
+        }
+        let mut pick: Vec<&KAudit> = Vec::new();
+        let mut k = 0;
+        while pick.len() < 80 && by.values().any(|v| v.len() > k) {
+            for v in by.values() {
+                if let Some(a) = v.get(k)
+                    && pick.len() < 80
+                {
+                    pick.push(a);
+                }
+            }
+            k += 1;
+        }
+        let mut s = String::from("n\ttier\troute\troute_share\tat\tmention\ttarget\tverdict\n");
+        for (i, a) in pick.iter().enumerate() {
+            let share = all.iter().filter(|x| x.route == a.route).count() as f64 / all.len().max(1) as f64;
+            s.push_str(&format!("{}\t{}\t{}\t{share:.4}\t{}\t{}\t{}\t\n", i + 1, a.tier.name(), a.route, a.at, a.mention, a.target));
+        }
+        std::fs::write(format!("{dir}/audit_{tag}_{}.tsv", kt.name()), s).expect("write audit");
+    }
+}
+
+// ---- (b) the law-impact chains on resolved keys ----
+
+/// The resolved chains, in order: R1 (units citing the section -> the ids they and their
+/// enclosing headings define -> code citing one of the ids' classes), R3 (R1 plus the files
+/// the ids' defining blocks name), R5 (R3 plus the rows whose own row cites the section, their
+/// lineage classes, the code citing them and the files every row of the class names), R5h (R5
+/// after one goal-internal hop: blocks that mention a reached class add the classes they
+/// define), R5u (R5h plus the files the citing units name themselves).
+const KLAW_CHAINS: [&str; 6] = ["R1", "R1m", "R3", "R5", "R5h", "R5u"];
+const KR1: usize = 0;
+const KR1M: usize = 1;
+const KR3: usize = 2;
+const KR5: usize = 3;
+const KR5H: usize = 4;
+
+/// Per resolved AU-Act section, the files each resolved chain reaches.
+type KReach = BTreeMap<String, [BTreeSet<u32>; 6]>;
+
+fn klaw_reach(m: &KinaModel, mask: KMask) -> KReach {
+    let (cl, bks, code_ids, _, names) = kina_keys(m, mask);
+    let mut members: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for b in &m.blocks {
+        let keys: Vec<&str> = if mask.raw_cite {
+            b.cites_raw.iter().map(String::as_str).collect()
+        } else {
+            b.refs.iter().filter(|r| r.kt == KT::Cite).map(|r| r.key.as_str()).collect()
+        };
+        for k in keys {
+            if let Some(s) = k.strip_prefix("law:AU-ACT:") {
+                for c in cl.exp(k) {
+                    members.entry(c).or_default().insert(s.to_string());
+                }
+            }
+        }
+    }
+    let nb = bks.len();
+    let mut bfiles: Vec<Vec<u32>> = vec![Vec::new(); nb];
+    for (f, bs) in names.iter().enumerate() {
+        for &b in bs {
+            bfiles[b as usize].push(f as u32);
+        }
+    }
+    let mut citing: HashMap<&str, Vec<u32>> = HashMap::new();
+    for (f, ks) in code_ids.iter().enumerate() {
+        for k in ks {
+            citing.entry(k.as_str()).or_default().push(f as u32);
+        }
+    }
+    let mut def_b: HashMap<&str, Vec<u32>> = HashMap::new();
+    let mut ref_b: HashMap<&str, Vec<u32>> = HashMap::new();
+    let mut unit_b: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut cite_b: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    for (bi, b) in bks.iter().enumerate() {
+        for d in &b.defs {
+            def_b.entry(d.1.as_str()).or_default().push(bi as u32);
+        }
+        for r in &b.refs {
+            ref_b.entry(r.as_str()).or_default().push(bi as u32);
+        }
+        unit_b.entry(m.blocks[bi].unit).or_default().push(bi as u32);
+        for c in &b.cites {
+            for s in members.get(c).into_iter().flatten() {
+                cite_b.entry(s.clone()).or_default().insert(bi as u32);
+            }
+        }
+    }
+    let files_of = |ks: &BTreeSet<String>, named: bool| -> BTreeSet<u32> {
+        let mut out = BTreeSet::new();
+        for k in ks {
+            out.extend(citing.get(k.as_str()).into_iter().flatten().copied());
+            if named {
+                for &b in def_b.get(k.as_str()).into_iter().flatten() {
+                    out.extend(bfiles[b as usize].iter().copied());
+                }
+            }
+        }
+        out
+    };
+    let mut out = BTreeMap::new();
+    for (s, cb) in &cite_b {
+        let units: BTreeSet<u32> = cb.iter().map(|&b| m.blocks[b as usize].unit).collect();
+        let mut ids1: BTreeSet<String> = BTreeSet::new();
+        for &u in &units {
+            for &b in unit_b.get(&u).into_iter().flatten() {
+                ids1.extend(bks[b as usize].defs.iter().filter(|d| d.0 == KT::Scoped).map(|d| d.1.clone()));
+            }
+            // the enclosing headings' ids (a unit under `## ABC-03` carries ABC-03)
+            let mut a = m.head_parent[u as usize];
+            while let Some(p) = a {
+                for &b in unit_b.get(&p).into_iter().flatten() {
+                    if m.blocks[b as usize].kind == b'h' {
+                        ids1.extend(bks[b as usize].defs.iter().filter(|d| d.0 == KT::Scoped).map(|d| d.1.clone()));
+                    }
+                }
+                a = m.head_parent[p as usize];
+            }
+        }
+        let k1 = files_of(&ids1, false);
+        // R1m: plus the classes the citing units mention (C1m's resolved form)
+        let mut ment: BTreeSet<String> = ids1.clone();
+        for &u in &units {
+            for &b in unit_b.get(&u).into_iter().flatten() {
+                ment.extend(bks[b as usize].refs.iter().cloned());
+            }
+        }
+        let k1m = files_of(&ment, false);
+        let k3 = files_of(&ids1, true);
+        let mut rows: BTreeSet<String> = BTreeSet::new();
+        for &b in cb {
+            rows.extend(bks[b as usize].defs.iter().filter(|d| d.0 == KT::Row).map(|d| d.1.clone()));
+        }
+        let mut k5 = k3.clone();
+        k5.extend(files_of(&rows, true));
+        let ids5: BTreeSet<String> = ids1.union(&rows).cloned().collect();
+        let mut hop: BTreeSet<String> = BTreeSet::new();
+        for k in &ids5 {
+            let rb: &[u32] = ref_b.get(k.as_str()).map_or(&[], |v| &v[..]);
+            let nd = def_b.get(k.as_str()).map_or(0, Vec::len);
+            if rb.len() + nd > KHUB {
+                continue;
+            }
+            for &b in rb {
+                hop.extend(bks[b as usize].defs.iter().map(|d| d.1.clone()));
+            }
+        }
+        let mut k5h = k5.clone();
+        k5h.extend(files_of(&hop, true));
+        let mut k5u = k5h.clone();
+        for &u in &units {
+            for &b in unit_b.get(&u).into_iter().flatten() {
+                k5u.extend(bfiles[b as usize].iter().copied());
+            }
+        }
+        out.insert(s.clone(), [k1, k1m, k3, k5, k5h, k5u]);
+    }
+    out
+}
+
+/// The law-impact run's inputs the keyed chains are scored with.
+struct KLawIn<'a> {
+    args: &'a Args,
+    g: &'a Graph,
+    ppr: &'a Ppr,
+    docs: &'a [(String, String)],
+    start: &'a str,
+    truths: &'a [(&'a str, &'a str, LTruth)],
+    commits: &'a [LCommit],
+    s003: &'a str,
+    changed: &'a BTreeSet<String>,
+    status: &'a BTreeMap<String, &'static str>,
+    bm_all: &'a [f64],
+    ppr_comp: &'a [f64],
+    comp_score: &'a [f64],
+    /// the earlier chains (C1, C1m, C3, C5) from the changed sections, as file sets
+    raw_sets: Vec<(&'static str, Vec<u32>)>,
+    /// the earlier run's AU-cited sections (known to a compilation) and how many changed
+    raw_cited: (usize, usize),
+}
+
+fn keys_law(x: &KLawIn) {
+    let t0 = Instant::now();
+    let dir = &x.args.keys_out;
+    std::fs::create_dir_all(dir).expect("keys out dir");
+    let nf = x.g.paths.len();
+    let known = law_known(x.args);
+    let renames = git_renames(&x.args.git, x.start);
+    let kp = KPaths::new(&x.g.paths, &renames);
+    let pr = PathRes::new(&x.g.paths);
+    let code_lines = git_grep(&x.args.git, x.start, Some(KEYS_CODE_PAT), &[]);
+    let blobs = KBlobs::load(&x.args.git, &[x.start.to_string()], &kp);
+    let bm = blobs.index(x.start, nf);
+    let km = kina_model(x.docs, &code_lines, &kp, &pr, &known, Some(&bm), nf, true);
+    write_audit(dir, "law", &km.audit);
+    let base = KBASE;
+    let mut variants: Vec<(String, KMask)> = vec![("R (resolved, no text)".to_string(), base)];
+    variants.extend(kvariants().into_iter().map(|(n, m)| (n.to_string(), m)));
+    let reaches: Vec<(String, KReach)> = variants.par_iter().map(|(n, m)| (n.clone(), klaw_reach(&km, *m))).collect();
+    let reach = &reaches[0].1;
+    let cited: Vec<String> = {
+        let mut v: Vec<String> = reach.keys().filter(|s| x.status.contains_key(*s)).cloned().collect();
+        v.sort_by_key(|n| law_key(n));
+        v
+    };
+    let cited_changed: BTreeSet<String> = cited.iter().filter(|s| x.changed.contains(*s)).cloned().collect();
+    let cited_unchanged: BTreeSet<String> = cited.iter().filter(|s| !x.changed.contains(*s)).cloned().collect();
+    let cited_all: BTreeSet<String> = cited.iter().cloned().collect();
+    let kind_files = |r: &KReach, ki: usize| -> BTreeMap<String, BTreeSet<u32>> {
+        cited.iter().map(|s| (s.clone(), r.get(s).map(|a| a[ki].clone()).unwrap_or_default())).collect()
+    };
+    let score_of = |r: &KReach, ki: usize, inputs: &BTreeSet<String>| -> Vec<f64> {
+        let sets: Vec<&BTreeSet<u32>> = inputs.iter().filter_map(|s| r.get(s).map(|a| &a[ki])).collect();
+        law_score(&sets, nf)
+    };
+    let set_of = |sc: &[f64]| -> Vec<u32> { law_rank(sc).into_iter().filter(|&f| sc[f as usize] > 0.0).collect() };
+    let mut md = String::new();
+    let mut js = serde_json::Map::new();
+    // ---- coverage of the hops ----
+    let cite_stats: BTreeMap<&String, &f64> = km.stats.iter().filter(|(k, _)| k.starts_with("k_cite") || k.starts_with("k_lineage") || k.starts_with("k_row") || k.starts_with("k_text") || k.starts_with("k_path") || k.starts_with("k_scoped")).collect();
+    md.push_str(&format!(
+        "# Law impact on resolved keys\n\nStart {}; generated by `rank_eval --law-impact kina --keys on` in {:.1}s. Blocks {}, pages {}, lineage edges {}, code files with a resolved key {}.\n\n",
+        x.start,
+        t0.elapsed().as_secs_f64(),
+        km.blocks.len(),
+        km.pages.len(),
+        km.lineage.len(),
+        km.code_refs.iter().filter(|v| !v.is_empty()).count()
+    ));
+    md.push_str(&format!(
+        "AU AML/CTF Act sections cited by the goal layer: resolved {} ({} changed, {} unchanged); the earlier resolver {} ({} changed).\n\n",
+        cited.len(),
+        cited_changed.len(),
+        cited_unchanged.len(),
+        x.raw_cited.0,
+        x.raw_cited.1
+    ));
+    md.push_str("Key-mention counts at the start (by route):\n\n| counter | n |\n|---|---|\n");
+    for (k, v) in &cite_stats {
+        md.push_str(&format!("| {k} | {v} |\n"));
+    }
+    js.insert("stats".into(), json!(km.stats));
+    js.insert("cited".into(), json!({"resolved": cited.len(), "changed": cited_changed.len(), "unchanged": cited_unchanged.len(), "raw": x.raw_cited.0, "raw_changed": x.raw_cited.1}));
+    md.push_str("\nReach per chain (changed cited sections reaching a file / files reached):\n\n| chain | sections reaching | files |\n|---|---|---|\n");
+    for (ki, cn) in KLAW_CHAINS.iter().enumerate() {
+        let secs = cited_changed.iter().filter(|s| reach.get(*s).is_some_and(|a| !a[ki].is_empty())).count();
+        let files: BTreeSet<u32> = cited_changed.iter().flat_map(|s| reach.get(s).map(|a| a[ki].clone()).unwrap_or_default()).collect();
+        md.push_str(&format!("| {cn} | {secs} / {} | {} |\n", cited_changed.len(), files.len()));
+    }
+    // ---- scores per truth ----
+    let mut jt = serde_json::Map::new();
+    for (tname, tdesc, (truth, ncommits, _)) in x.truths {
+        let tcommits: Vec<&Vec<u32>> = x
+            .commits
+            .iter()
+            .filter(|c| match *tname {
+                "S003" => c.spec == x.s003,
+                "AU" => c.spec == x.s003 && c.au,
+                _ => true,
+            })
+            .map(|c| &c.code)
+            .collect();
+        md.push_str(&format!("\n## Truth {tname}: {tdesc}\n\n{ncommits} commits, {} targets, {nf} candidates.\n\n| ranker | set size | hits | precision | recall | F1 | hits@10 / recall@10 | hits@20 / recall@20 |\n|---|---|---|---|---|---|---|---|\n", truth.len()));
+        let mut rows: Vec<(String, LMet)> = Vec::new();
+        for (n, s) in &x.raw_sets {
+            rows.push((format!("{n} (earlier, raw keys)"), law_met(s, s, truth)));
+        }
+        let mut sets: Vec<(usize, Vec<u32>, Vec<f64>)> = Vec::new();
+        for (ki, cn) in KLAW_CHAINS.iter().enumerate() {
+            let sc = score_of(reach, ki, &cited_changed);
+            rows.push((format!("{cn} (resolved, changed sections)"), law_met_scores(&sc, truth)));
+            sets.push((ki, set_of(&sc), sc));
+        }
+        for (ki, cn) in KLAW_CHAINS.iter().enumerate() {
+            rows.push((format!("{cn} from UNCHANGED cited sections (control)"), law_met_scores(&score_of(reach, ki, &cited_unchanged), truth)));
+            rows.push((format!("{cn} from ALL cited sections"), law_met_scores(&score_of(reach, ki, &cited_all), truth)));
+        }
+        let plus_text = reaches.iter().find(|r| r.0 == "+text").map(|r| &r.1);
+        if let Some(rt) = plus_text {
+            for (ki, cn) in KLAW_CHAINS.iter().enumerate().skip(KR5H) {
+                rows.push((format!("{cn} +text (HEURISTIC BM25 fallback)"), law_met_scores(&score_of(rt, ki, &cited_changed), truth)));
+            }
+        }
+        let mut dists: Vec<(String, LDist)> = Vec::new();
+        let mut boots: Vec<(String, (f64, f64, f64))> = Vec::new();
+        for (ki, set, sc) in &sets {
+            let cn = KLAW_CHAINS[*ki];
+            let k = set.len();
+            let f1 = law_met_scores(sc, truth)[4];
+            let top = |v: &[f64]| -> Vec<u32> { law_rank(v).into_iter().take(k).collect() };
+            let pp = law_ppr(x.g, x.ppr, set);
+            for (bn, bv) in [("BM25 all changed text", x.bm_all), ("PPR from compliance code", x.ppr_comp), ("compliance code by id idf", x.comp_score), ("PPR from the chain's own files", &pp[..])] {
+                rows.push((format!("{bn}, top |{cn}|={k}"), law_met_topk(bv, k, truth)));
+                boots.push((format!("{cn} - {bn}, both at {k}"), law_boot(&tcommits, set, &top(bv), &format!("{tname}:k:{cn}:{bn}"))));
+            }
+            dists.push((format!("random files, size |{cn}|"), law_random(nf, k, truth, &format!("{tname}:krand:{cn}"), f1)));
+            dists.push((format!("{cn}, section -> reach map permuted over the resolved cited sections"), law_permuted(&cited, &cited_changed, &kind_files(reach, *ki), nf, truth, &format!("{tname}:kperm:{cn}"), f1)));
+        }
+        for (rn, rset) in &x.raw_sets {
+            let ki = match *rn {
+                "C1" => KR1,
+                "C1m" => KR1M,
+                "C3" => KR3,
+                _ => KR5,
+            };
+            boots.push((format!("{} - {rn} (resolved minus raw)", KLAW_CHAINS[ki]), law_boot(&tcommits, &sets[ki].1, rset, &format!("{tname}:kr:{rn}"))));
+            if *rn == "C5" {
+                boots.push((format!("R5h - {rn} (resolved minus raw)"), law_boot(&tcommits, &sets[KR5H].1, rset, &format!("{tname}:kr:R5h"))));
+            }
+        }
+        let mut jr = serde_json::Map::new();
+        for (n, m) in &rows {
+            md.push_str(&format!("| {n} | {} |\n", law_fmt(m)));
+            jr.insert(n.clone(), law_json(m));
+        }
+        md.push_str("\nControls, mean [95% interval] over 1000 draws (last column: share of draws with F1 >= the real chain's):\n\n| control | set size | hits | precision | recall | F1 | hits@10 / recall@10 | hits@20 / recall@20 | share F1 >= real |\n|---|---|---|---|---|---|---|---|---|\n");
+        for (n, d) in &dists {
+            md.push_str(&format!("| {n} | {} | {:.3} |\n", law_fmt_dist(d), d.ge));
+            jr.insert(n.clone(), law_json_dist(d));
+        }
+        md.push_str("\nF1 differences, paired commit-cluster bootstrap (1000 resamples), mean [95% interval]:\n\n| comparison | F1 difference |\n|---|---|\n");
+        for (n, (mm, lo, hi)) in &boots {
+            md.push_str(&format!("| {n} | {mm:+.3} [{lo:+.3}, {hi:+.3}] |\n"));
+            jr.insert(format!("boot: {n}"), json!({"mean": mm, "lo": lo, "hi": hi}));
+        }
+        // ablation: which resolvers matter (R5h, and R1 / R3)
+        md.push_str("\nAblation (from the changed sections; each row drops one key type, or reads it raw):\n\n| variant | cited sections | R1 F1 (size) | R1m F1 (size) | R3 F1 (size) | R5 F1 (size) | R5h P / R / F1 (size) |\n|---|---|---|---|---|---|---|\n");
+        let mut ja = serde_json::Map::new();
+        for (vn, r) in &reaches {
+            let cc: BTreeSet<String> = r.keys().filter(|s| x.changed.contains(*s)).cloned().collect();
+            let m1 = law_met_scores(&score_of(r, KR1, &cc), truth);
+            let m1m = law_met_scores(&score_of(r, KR1M, &cc), truth);
+            let m3 = law_met_scores(&score_of(r, KR3, &cc), truth);
+            let m5r = law_met_scores(&score_of(r, KR5, &cc), truth);
+            let m5 = law_met_scores(&score_of(r, KR5H, &cc), truth);
+            md.push_str(&format!(
+                "| {vn} | {} | {:.3} ({:.0}) | {:.3} ({:.0}) | {:.3} ({:.0}) | {:.3} ({:.0}) | {:.3} / {:.3} / {:.3} ({:.0}) |\n",
+                r.keys().filter(|s| x.status.contains_key(*s)).count(),
+                m1[4],
+                m1[0],
+                m1m[4],
+                m1m[0],
+                m3[4],
+                m3[0],
+                m5r[4],
+                m5r[0],
+                m5[2],
+                m5[3],
+                m5[4],
+                m5[0]
+            ));
+            ja.insert(vn.clone(), json!({"R1": law_json(&m1), "R1m": law_json(&m1m), "R3": law_json(&m3), "R5": law_json(&m5r), "R5h": law_json(&m5)}));
+        }
+        jr.insert("ablation".into(), serde_json::Value::Object(ja));
+        jt.insert(tname.to_string(), serde_json::Value::Object(jr));
+    }
+    js.insert("scores".into(), serde_json::Value::Object(jt));
+    // ---- specificity: are the files changed sections reach different from the unchanged ones'? ----
+    let s3 = &x.truths[0].2.0;
+    md.push_str("\n## Section specificity (S003 truth)\n\n| chain | files reached only by changed sections: n / precision | only by unchanged: n / precision | by both: n / precision |\n|---|---|---|---|\n");
+    for (ki, cn) in KLAW_CHAINS.iter().enumerate() {
+        let a: BTreeSet<u32> = cited_changed.iter().flat_map(|s| reach[s][ki].clone()).collect();
+        let b: BTreeSet<u32> = cited_unchanged.iter().flat_map(|s| reach[s][ki].clone()).collect();
+        let p = |v: Vec<&u32>| -> String { format!("{} / {:.3}", v.len(), v.iter().filter(|f| s3.contains(f)).count() as f64 / v.len().max(1) as f64) };
+        md.push_str(&format!("| {cn} | {} | {} | {} |\n", p(a.difference(&b).collect()), p(b.difference(&a).collect()), p(a.intersection(&b).collect())));
+    }
+    std::fs::write(format!("{dir}/keys_law_tables.md"), &md).expect("write keys law md");
+    std::fs::write(format!("{dir}/keys_law.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write keys law json");
+    eprintln!("[keys] law: {} resolved cited sections ({} changed) in {:.1}s -> {dir}/keys_law_tables.md", cited.len(), cited_changed.len(), t0.elapsed().as_secs_f64());
 }

@@ -354,6 +354,17 @@ Not candidates: each becomes packets in the spec run.
    "the compliance surface", not which amendment. The goal layer is a stack (law section -> research finding -> decision
    row -> spec row -> task -> file); impact from above works through its "names a file" edges; law needs section-level
    nodes and an instrument resolver (which act / jurisdiction, about 80-85% accurate by context here).
+   Fourth run, resolved cross-layer keys (`rank_eval --keys on`; James: *"Then we haven't made the connections between
+   layers or links like we resolve services"*, *"there could be N to n amount of domains and links required"*): per-domain
+   key extractors + one resolver per key type (path with renames, scoped id, id lineage, citation / instrument, table row,
+   BM25 text fallback) + one tiered joiner, run over two domains with only the extractors differing. Verdict: the law
+   nulls were real absences (resolution doubles the links, no co-change signal, law-impact chains unchanged); the spec
+   layer was a resolution / granularity gap (resolved at heading units it beats its control by +0.134 recall@10, raw
+   +0.014, mostly through doc -> file paths); glia's rulings, reached through resolved packet links, now beat their
+   permutation control (+0.105) and add +0.027 over intent + structure. Typed keys resolve precisely (paths 0.94-0.97,
+   scoped ids 0.98 route-weighted, table rows 47/48); reused bare ids (D1-D12 in four series) are the weak spot; the BM25
+   text linker hurts everywhere (precision 0.33). The joiner buys coverage, not signal: co-change pairs with no code
+   edge that have an upper link rise to 48-51% (16-27% raw). Results: `dev-notes/keys-eval-glia-2026-10-18.md` (glia).
 9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
    James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
 10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
