@@ -787,6 +787,45 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   `actions/upload-artifact@v4` target the deprecated Node.js 20 (forced onto Node 24), and `ubuntu-latest` moves to Ubuntu 26
   from 2026-10-19; bump the actions and pin the runner image before 0.5.3's wheels build.
 
+### G. Shape rules from the 2026-10-18 experiments (James: *"we need a generalized intermediate connector between higher layers also predictions for what's to change isn't the only benefits here"*)
+
+The four runs (`dev-notes/ranking-eval-2026-10-18.md`, `ranking-eval-vertical-2026-10-18.md`, `keys-eval-glia-2026-10-18.md`
+and a private regulated-app law-impact run, summarised in §F item 8) say the idea is right and the weak spots are shape.
+
+**One generalized intermediate connector** between the real-world layers (law, regulation, product goals, rulings) and code,
+not a resolver per domain pair:
+- A **unit** is any goal-layer node: a requirement, task, decision row, spec section, ruling or packet.
+- Each domain contributes an **extractor** that emits key mentions for its units and nodes.
+- Each **key type** has one resolver: path (with renames), scoped id, id lineage, citation / instrument (act + jurisdiction
+  + version + section), table row, URL / endpoint, qname.
+- **One joiner** turns resolved keys into tiered links (FACT / DERIVED / HEURISTIC), reusing the 0.5.2 identity machinery:
+  lineage = identity classes, collapse / expand in answers, the quotient for walking at a coarser level.
+- Cost is N extractors + K resolvers, never N x N.
+
+**Shape rules** (each from a measured weak spot):
+1. **Keys are namespaced**, never bare: "series X's D6", "spec-003/FR-002" (reused bare D1-D12 across four series was the
+   weakest route).
+2. **Mentions carry a role**: defines, cites, names-file, supersedes, implements, requires (a key alone confused "names a
+   document" with "names a requirement").
+3. **Text similarity is never a linker**: it ranks candidates behind typed links, HEURISTIC only (the BM25 linker's precision
+   was 0.33 and it made every result worse).
+4. **Link at the most specific node** (requirement / task / row, not spec folder or whole act): the spec layer went from noise
+   to +0.134 over its control when resolved at heading units.
+5. **Version-aware**: citations carry the instrument version; old -> new ids join one identity class through lineage rows.
+6. **"Names a file" edges carry state** (pending / done): a plan that names its files was the strongest link measured.
+7. **Every key type is gated** like the code resolvers: fixtures with expect and forbid rows, an audited precision floor,
+   measured on a repo it was not tuned on.
+
+**Benefits beyond predicting what changes:**
+- **Why answers:** why does this code exist (code -> requirement -> decision -> law), with the path as evidence.
+- **Impact from above:** a law, regulation, policy or ruling changes -> the requirements now wrong -> the compliance surface
+  in code.
+- **Traceability and gaps:** requirements with no implementing code, code with no requirement, decisions never carried out.
+- **Review:** does this PR touch what its cited requirement says, and only that?
+- **Drift:** a spec row and the code it names disagree, or a superseded id is still cited.
+- **Onboarding and agents:** the what / why around any node, located and tiered, as context.
+- **Provenance:** which ruling caused which packet, commit and file (glia's own history already resolves this way).
+
 ## 3. Open questions for James
 
 All four answered 2026-10-16 (§0); recorded as rulings:
