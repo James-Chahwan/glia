@@ -205,7 +205,7 @@ The seven steps:
    | glia@9c7c6faa (edit in `engine/src/watch.rs`) | 658 MB | 668 -> 748 MB | 1118 MB | 2.69 (apply 1.81, persist 0.73) | 510 -> 391 MB (rebuild 2: 301), 2.45 s |
    | grpc-go@6f50403 (edit in `server.go`) | 278 MB | 290 -> 327 MB | 482 MB | 1.32 (apply 1.02, persist 0.25) | 240 -> 173 MB (rebuild 2: 142), 2.49 s |
 
-   It levels off (DC.8, W9, `dev-notes/next-leap-0.5.3.md` section F.3): 100 watch-only updates on a
+   It levels off (DC.8, W9, `dev-notes/next-leap-0.5.4.md` section F.3): 100 watch-only updates on a
    glia copy rose about 75 MB over the first ~12 updates, then stayed flat at 615-685 MB. The snapshot
    costs what a fresh `generate` costs; the engine trims freed heap after each update (site
    `watch_update`) and when the old PyGraph drops (`pygraph_drop`), so `_release_freed_memory()` after

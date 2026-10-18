@@ -25,7 +25,7 @@ determinism and re-key pairing, `dev-notes/research-0.5.2/R2-engram.md`).
 
 **This doc re-measures nothing.** Every number comes from the landed packet's commit body or report
 (cited by commit), or from Engram's own determinism check at glia `3921a636` (recorded in glia's
-`dev-notes/engram-ask-0.5.3.md` section 5). The Kina + glia replays (re-keys with X1 off and on, and
+`dev-notes/engram-ask-0.5.4.md` section 5). The Kina + glia replays (re-keys with X1 off and on, and
 `flat-ppr` vs `flat-fs`) ran once at `0.5.2-complete` (`196728e3`), after the tweaks and the
 close-out (James, 2026-10-16 and 2026-10-17); they are Engram's measurement of all of this (section 6).
 
@@ -406,7 +406,7 @@ Engram calls none of them.
   re-registered under a mount prefix, or a route whose method changed, is removed + added); glia's own
   repo under DE.7 / DE.8 beyond "unchanged".
 - **Done, Engram's registered replays at `0.5.2-complete`** (`196728e3`, 2026-10-18; Engram `11b3a3c`,
-  `docs/eval-plan-2026-09.md`; recorded in glia's `dev-notes/next-leap-0.5.3.md` §E): nothing broke.
+  `docs/eval-plan-2026-09.md`; recorded in glia's `dev-notes/next-leap-0.5.4.md` §E): nothing broke.
   Re-keys with X1 on / off: renamed Kina 17/18 vs 4/18, glia 28/40 vs 9/40. Engram on the tag's exports
   vs 0.5.1's: Kina hit +27 / -23 (flat), glia strict +15 / -2 (p = .0023). DE.5's format clean on 771
   steps, but PPR as a release pool source fails (flat-ppr vs flat-fs pooled: hit 9 wins / 20 losses), so

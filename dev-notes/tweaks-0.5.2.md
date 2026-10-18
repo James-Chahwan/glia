@@ -64,7 +64,7 @@ Not testable here: GraphQL (neither repo uses it).
    overnight"*); their dead_symbol false positives became the close-out (ruling 7, DT.5h-DT.5l and DT.14, W27-W31).
 4. **DONE: Engram's registered replays** at the local tag `0.5.2-complete` (`196728e3`, 2026-10-18), built from source
    (flat-ppr vs flat-fs, X1 off / on, the `since` pairing totals; the corrections writer passes `--hint`). They stand
-   for the release: no source file changes between the tag and `v0.5.2`. Results: `dev-notes/next-leap-0.5.3.md` §E.
+   for the release: no source file changes between the tag and `v0.5.2`. Results: `dev-notes/next-leap-0.5.4.md` §E.
 
 The 2026-10-17 plan (*"can't we just go 0.5.1-> 0.5.3 release"*, *"yeah sounds fine"*: no 0.5.2 release, one 0.5.1 ->
 0.5.3 bump, one combined handoff per consumer, repo-graph held until then) is **reversed**. James, 2026-10-18: *"maybe we
@@ -80,7 +80,7 @@ now". The new order:
 8. **Engram:** its replays at `196728e3` stand (step 4); it pins the exporter at `v0.5.2`
    (`dev-notes/engram-handoff-0.5.2.md`).
 9. **glia:** 0.5.3 is paced over the week, a normal 0.5.2 -> 0.5.3 release: the spec run from
-   `dev-notes/next-leap-0.5.3.md` (open questions to James), its waves, follow-up waves until no followup is left, then
+   `dev-notes/next-leap-0.5.4.md` (open questions to James), its waves, follow-up waves until no followup is left, then
    its own release with its own 0.5.2 -> 0.5.3 handoffs.
 
 ## Spec run and rulings (2026-10-16)

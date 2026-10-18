@@ -447,7 +447,7 @@ qname, never by the RepoId-derived NodeId, so two clones of one commit (another 
 directory name) build the same qname-level graph (DE.1, `engine/tests/repo_id_invariance.rs`;
 `[doclink] tie-break by qname: qualified=<q> bare=<b>`). A node id still hashes the RepoId, and
 RepoId-ordered tie-breaks remain in pick_primary, cochange, overlay bind, declared and cells
-(the 0.5.3 seed, §D).
+(the 0.5.4 seed, §D).
 
 **Watch (DC.1-DC.10b).** `engine::watch::WatchSession` keeps one repo's build open: the walk
 table with stat stamps (DC.1), one ParseCache with its in-memory build memos (DC.4) and the last
@@ -908,7 +908,7 @@ reads `code_domain::profile::node_ext(cells)` (the POSITION file's extension) la
 limited row matches kind and name, at most once; `is_entry` stays extension-blind, so a limited
 row never matches there. hubs' and duplicate-flows' test-node checks read only the named rows'
 `prefixes`, which the `init` row has none of (a limited row with prefixes would need them to call
-`accepts_ext`: the 0.5.3 seed). `INVOKED_MEMBERS` gains rows 12-32 and
+`accepts_ext`: the 0.5.4 seed). `INVOKED_MEMBERS` gains rows 12-32 and
 three gates on a row, each unchecked when empty and read only by `InvokedMembers::matches_at` /
 `invoked_member_at` (the 4-argument `invoked_member` never matches a gated row): `sigs`, the
 member's CA.3a signature re-read from its CODE (`go_runtime`: `Error` / `String` `()(string)`,
@@ -1361,7 +1361,7 @@ questions over one graph computes `entrypoint_reachable` once.
   0.5.3 release. What remains is James's: push → tag `v0.5.2` → PyPI. The bump is done: the Cargo
   workspace, `py/pyproject.toml` and the excluded engram-export read 0.5.2, so every crate can be
   pinned `=0.5.2`. The code is the code at `196728e3`, where Engram ran its registered replays
-  (results in the 0.5.3 seed §E): only plan commits and the bump follow it. Scope in
+  (results in the 0.5.4 seed §E): only plan commits and the bump follow it. Scope in
   `dev-notes/next-leap-0.5.2.md` (§0.1 the binding decisions Q1–Q25, §4.2 the defaults the
   packets took), research `dev-notes/research-0.5.2/`, packets in
   `dev-notes/leap-052-packets.json` (153 packets in W0–W14, the gap run's DB.9a-c and DF.22a-c
@@ -1414,14 +1414,17 @@ questions over one graph computes `entrypoint_reachable` once.
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
   dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
-- **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`, paced over the
-  week after the 0.5.2 release; a normal 0.5.2 -> 0.5.3 release with its own handoffs): **0.5.3**
-  scale — Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
+- **After 0.5.2** (James, 2026-10-18: the ranking release takes the 0.5.3 name and the scale leap moves one version):
+  **0.5.3** ranking (seed `dev-notes/next-leap-0.5.3.md`): PPR damping 0.85 with sum pooling, co-change as the
+  tie-break in impact / review / pack, the intent blend in review / find, per-repo calibrated selection over each
+  repo's own history, and the PPR index kept between calls, measured by `engine/examples/rank_eval.rs` (the
+  `dev-notes/ranking-eval*.md` reports). **0.5.4** scale (seed `dev-notes/next-leap-0.5.4.md`, the old 0.5.3 seed) —
+  Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
   build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,
   org-internal package routing on SAME_AS; plus James's 2026-10-16 additions there (local
   embeddings and `glia embed`, a clarification queue, one tier vocabulary, a watch / rules
-  memory budget, concept search over flows, the self-graph hygiene cluster) and the 0.5.2
-  waves' leftovers (§D, §E). **0.5.4** proof — precision rate on real repos, agent
+  memory budget, concept search over flows, the self-graph hygiene cluster), the goal-layer connector
+  (§G) and the 0.5.2 waves' leftovers (§D, §E). **0.5.5** proof — precision rate on real repos, agent
   before/after, big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge`
   on our own model. Still later from the 0.5.0 list: dominators (once middleware is extracted
   and the security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6
