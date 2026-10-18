@@ -1,0 +1,47 @@
+# Ranking scoreboard: every weak spot from the six reports (recall@10 unless noted; private repos aggregate)
+
+The reports: `dev-notes/ranking-eval-2026-10-18.md` (first run), `ranking-eval-vertical-2026-10-18.md` (second run), `keys-eval-glia-2026-10-18.md` (keys run), the Kina law run (kept outside this repo), `ranking-eval-round1-2026-10-18.md`, `ranking-eval-round2-2026-10-18.md`, `ranking-eval-round3-2026-10-19.md`.
+
+Round 2's scoreboard extended in place: a "round 3" column, the status as of round 3, and rows 27-38 for
+what round 3 measured or found. "-" = not retested in round 3.
+
+| # | weak spot (report) | before | round 2 | round 3 | status |
+|---|---|---|---|---|---|
+| 1 | Kina: the subject keeps only 71% of the optimistic gain (round 1) | H9s50 0.501 vs H9a50 0.531 | LX[IDR,H9s50] 0.595, +0.064 [+0.032, +0.097] over H9a50 (160%); SELt2 164% | reproduced exactly (0 rows differ) | fixed |
+| 2 | Kina: task rows as BM25 text keep 20% (round 1) | T1pre / H9pre50 20% | rows used as typed links (IDR) instead of text | - | fixed (superseded) |
+| 3 | Kina: SELt below the optimistic H9a50 (round 1) | -0.024 [-0.042, -0.006] | SELt2 +0.068 [+0.036, +0.101] | SELt3 = SELt2 (0.599) | fixed |
+| 4 | Kina: open tasks name the seed's files for 10.5% of seeds (second run) | V2mP coverage 10.5% | IDR reaches a file for 46% of queries (355 / 764; 87 / 199 commits) | IDH (id history) reaches 8 commits, all already IDR-reached: 87 / 121 id subjects reach a file with or without it | improved (round 2); unchanged by IDH |
+| 5 | Kina: message ids routed through the layer (VM) used the full, optimistic message (second run) | HM50 +0.039 over H9a50 | subject only: +0.064 over H9a50 | - | improved |
+| 6 | Reused bare ids, four series (keys run) | path-scope 2/7, cocite-file 2/7, newest-spec 0/2 | 54 judged bare-id links: namespaced 0.963, base 0.667; ranking +0.000 | - | fixed (precision); unchanged (ranking) |
+| 7 | "names a document vs names a requirement" (keys run) | title ids, URL routes | label rows are not definitions (namespaced model only) | - | partly addressed |
+| 8 | BM25 text linker hurts (keys run) | +text precision 0.33; HR25[VR1h] -0.004 | text as a ranker: VR1h -0.031, HR25 -0.011; IDR level +0.001 (Kina), -0.013 (glia) | - | unchanged (text is not a lever) |
+| 9 | Law: changedness cannot select, 78% of cited sections changed (law run) | permuted share 0.36 (R3) / 0.23 (R5) | second law event: 1 of 9 cited changed (11%); R5 separates (8 files changed-only, P 0.875, vs 3 unchanged-only, P 0.667); permuted share 0.10-0.12, the floor | - | improved (testable, directional); not significant |
+| 10 | Law: the specified id chain (R1) reaches code from one section (law run) | R1 10 files | +ns 11 files; second event: 0 files | - | unchanged |
+| 11 | Law: one unit cites many sections, so all reach the same files (law run) | C3 one unit wide | second event R1m: 35 of 37 files shared by changed and unchanged sections | - | unchanged |
+| 12 | Law in the replay at its control (second run, keys run) | VR3h - perm -0.002 | +ns +0.000; +roles -0.019 [-0.033, -0.004] | - | unchanged / worse with roles |
+| 13 | Spec layer adds nothing over intent + structure (keys run) | HR25[VR2u] - H9a50 +0.009 n.s. | +ns -0.000; +roles -0.003; +trank -0.001 (HR25) | - | unchanged |
+| 14 | Requirement layer beyond intent (second run, keys run) | HR25[VR1h] +0.015 | +roles HR25 -0.006 [-0.013, -0.001]; standalone VR1h +0.024 [+0.009, +0.040] | - | mixed |
+| 15 | Rows / lineage cannot move the replay (keys run) | 36 test commits | not retested | - | unchanged |
+| 16 | quokka-stack: text and SELt not significant (first run, round 1) | SELt +0.028 n.s. | SELt2 +0.050 [-0.026, +0.125] | pre-merge histories (C): co-change up (C0 +0.096 [+0.015, +0.175]) and real (true map - shuffled map, H10 +0.101 [+0.015, +0.201]), but the rankings fall: H10 -0.071 [-0.140, -0.004], SELt2 -0.050 [-0.123, +0.016] | unchanged (C does not lift) |
+| 17 | flutter/samples: every text signal hurts (round 1) | H9s50 - P1 -0.062 | same; SELt2 +0.068 over P1 by selection | text gating (B) learns to switch text off (on-rate 0.12-0.18; +0.058 [+0.032, +0.088] over always-on H9s50) but no better than a random gate at the same rate (+0.008 [-0.005, +0.021]); text also hurts in every review shape (-0.087 to -0.128) | unchanged (covered by selection; confidence carries nothing) |
+| 18 | glia: W5 at chance (file-disjoint waves) (round 1) | W5 - Wr5 -0.004 | not retested; IDR routes the plan instead (0.920) | - | unchanged (bypassed) |
+| 19 | flutter/samples: HWa25[W5] -0.131 (round 1) | -0.131 | same | - | unchanged |
+| 20 | PT* below BFS on shell / slurpngulp (round 1) | -0.073 / -0.034 | same | SELt3 (adds B0, H10[B0], H18s[B0]) = SELt2, already +0.124 / +0.161 over B0; structure-only selection SELs0 (P1 / PT* / B0) +0.071 [+0.051, +0.092] / +0.033 [+0.006, +0.061] over PT* | fixed for the text-free answer (SELs0, single seed); moot for the text answer |
+| 21 | Edge weights not a lever (first run, round 1) | <= 0.004 | not retested | - | unchanged |
+| 22 | PPR beats BFS only on glia (first run) | Kina -0.017 n.s. | not retested | single seed: B0 above P1 on 5 of 12 (both commons repos +0.058 / +0.057), below on 3; in review shapes BFS collapses (Kina k3 -0.187 [-0.253, -0.125]) | mixed (shape-dependent); SELs0 picks per repo |
+| 23 | Co-change cold start, 33-49% of seeds (first run) | 47% / 33% / 49% | not retested | - | unchanged |
+| 24 | Idf hub damping (P2) hurts Kina (first run) | -0.054 | not retested | - | unchanged |
+| 25 | Kina: 58% of the law-driven change's code is new (law run) | 128 / 222 | unscorable by construction | - | unchanged |
+| 26 | Any repo below P1 or the optimistic H9a50 (round 1 / E) | SELt 0.024 below on Kina | SELt2: none below P1 (10 / 10, CI > 0 on 8), none below H9a50 (10 / 10, CI > 0 on 4) | SELt3 on 12 repos: none below P1 (CI > 0 on 10), none below SELt2 | fixed |
+| 27 | Kina: id subjects whose tracker row names no file route nowhere (round 2) | - | 34 of 121 | IDH routes 0 of the 34 (scoped ids rarely recur in earlier subjects) | unchanged |
+| 28 | Ticket ids on ordinary repos (round 3, new) | - | - | commons-lang / commons-io: IDH real (IDH - IDH~ +0.688 / +0.405 on the queries it reaches) but LX[IDH,H9s50] - H9s50 +0.000 / -0.002: the subject's BM25 already matches the ticket number (H9s50 - H9s50-nd +0.143 on lang's IDH queries, the same as IDH adds over the digit-free text) | not a gap: BM25 covers it (keep digit tokens) |
+| 29 | IDH dilutes IDR where both fire (round 3, new) | - | - | glia, on IDH's 69 queries: LX[IDRH,H9s50] - LX[IDR,H9s50] -0.107 [-0.209, -0.029] | new negative (IDH stays out) |
+| 30 | Per-query text confidence (round 3, new) | - | - | 4 confidence features x 4 text / no-text pairs on 12 repos: no gate beats its random-gate control at the same rate; gates cost up to -0.012 where text helps (Engram, slurpngulp); bucket selection SELb - SELt2 between -0.026 and +0.015, the CI off 0 only on Engram (-0.008 [-0.015, -0.001]) and turps (+0.007 [+0.000, +0.015]) | new negative (not a lever) |
+| 31 | PPR d85 + sum pooling on unseen repos (round 3, new) | - | - | commons-lang PT* - P1 -0.035 [-0.052, -0.019] (d85 hurts there; BFS best); commons-io +0.019 [+0.008, +0.031] | new negative on 1 of 2 new repos (item 1 needs item 4's selection) |
+| 32 | Review shape (several seed files) (round 3, new) | - | - | selection SELt2 - P1: CI > 0 on 9 / 12 (k2), 6 / 12 (k3, half), none below; IDR first holds on every id repo | holds |
+| 33 | Find shape: co-change first (round 3, new) | - | - | H10x1 - PX1 below 0 on 6 of 12 (glia -0.040, Kina -0.063, Engram -0.099, commons -0.045 / -0.053, shell -0.035) | new negative (no co-change-first in find) |
+| 34 | Find shape: PPR seeded from the text's top files (round 3, new) | - | - | PXT - T1s below 0 on 4 of 12, above on 1 | new negative (PPR adds nothing to find's text ranking) |
+| 35 | Find shape: selection (round 3, new) | - | - | SELf2t (find's fusions plus the text ranking) - T1s: CI > 0 on 6 of 12, none below; the work-neighbourhood blend ALL5x is the best fixed find fusion on 7 of 12 repos (over T1s: quokka_web +0.171, turps +0.152) | holds |
+| 36 | quokka-stack's history across its monorepo import (round 3, new) | - | - | mapping verified (turps 87 / 87 files by blob; quokka_web 125 / 134 paths, 88 blobs; quokka_app 73 / 114 paths); no ranking lift (row 16) | not a history-sync option yet |
+| 37 | SELt3's BFS candidates (round 3, new) | - | - | SELt3 - SELt2 recall@10 ±0.004 on all 12; MRR +0.030 [+0.003, +0.059] on commons-io (B0-based picks on 197 / 300 commits) | no-op for recall |
+| 38 | Structure-only selection in review shapes (round 3, new) | - | - | SELs0 - P1: k2 CI > 0 on 2, below on 1 (glia -0.019 [-0.033, -0.007]); k3 / half mostly n.s. | caveat for SELs0 outside the single-seed shape |

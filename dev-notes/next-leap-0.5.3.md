@@ -12,7 +12,7 @@ must be completed within it"*): follow-up waves until a close-out lists none.
 
 ## Evidence
 
-All five are produced by `engine/examples/rank_eval.rs`. Ground truth is held-out git commits: seed one changed file and
+All six are produced by `engine/examples/rank_eval.rs`. Ground truth is held-out git commits: seed one changed file and
 score the commit's other files. Private repos are reported as aggregate numbers only.
 
 - `dev-notes/ranking-eval-2026-10-18.md`: 132 rankers on glia, Kina and quokka-stack.
@@ -20,6 +20,9 @@ score the commit's other files. Private repos are reported as aggregate numbers 
 - `dev-notes/keys-eval-glia-2026-10-18.md`: resolved cross-layer keys.
 - `dev-notes/ranking-eval-round1-2026-10-18.md`: realistic intent and milestones, on 9 repos, 6 of them untuned.
 - `dev-notes/ranking-eval-round2-2026-10-18.md`: typed id routing, resolver variants and selection v2, on 10 repos.
+- `dev-notes/ranking-eval-round3-2026-10-19.md`: id history, per-query text gating, history across a monorepo import, BFS in
+  selection, and the review / find shapes, on 12 repos (two new Apache Commons repos with ticket ids).
+- `dev-notes/ranking-scoreboard.md`: every weak spot across the six reports, with its status per round.
 
 ## Scope
 
@@ -47,6 +50,30 @@ Measured as losses, so they stay out: mention roles as a hop restriction (roles 
 a ranker behind typed links; an extra hop through a defining row's mentions. The instrument-generic law diff is a small
 win for the law layer, which predicts nothing, so it goes to 0.5.4 with the goal-layer connector.
 
+**From round 3** (`dev-notes/ranking-eval-round3-2026-10-19.md`). It reproduces round 2 exactly (0 differing values on 10
+repos). Items 6-9 hold in every shape tested and need no change. Scope notes for the agreed items:
+- **Item 1:** PPR d0.85 is not a win on every new repo (commons-lang -0.035 recall@10), so it reaches the answers through
+  item 4's selection, not as a fixed default alone.
+- **Item 2:** co-change first stays out of `find`; seeded from the text's top files it is below PPR on 6 of 12 repos.
+- **Item 3:** the intent BM25 keeps digit tokens. On ticket-id repos the number is what routes an id to its history (+0.143
+  on commons-lang's id queries).
+- **Items 4 and 8** hold in the review shape (2, 3 or half of the changed files as seeds): CI above 0 on 9 / 6 / 6 of 12
+  repos, below on none.
+
+Two more small items are proposed, for James to confirm:
+
+| # | mechanism | measured | effort | where |
+|---|---|---|---|---|
+| 10 | structure-only selection for the answers with no text: item 4's online pick over {PPR, PPR d0.85 + sum, BFS}, calibrated on the answer's own shape | single seed: never below PPR, CI above 0 on 7 of 12; beats tuned PPR on the 4 repos where BFS wins (shell +0.071, commons-lang +0.092); in the review shape mostly n.s., one loss (glia, 2 seeds, -0.019) | small | `blast_radius`, `impact`, `pack` |
+| 11 | find's selection set: find's fusions plus the text ranking itself, typed links first | above the text ranking alone on 6 of 12 repos, below on none; the work-neighbourhood blend is its most frequent pick (7 of 12) | small | `find` |
+
+Measured and kept out: id history, an id -> earlier commits naming it. It is real on ticket-id repos (+0.688 over its
+control), but the subject's BM25 already matches the ticket number, and it dilutes IDR on glia (-0.107 where both fire).
+Also kept out:
+- per-query text gating: no confidence feature beats a random gate at the same rate;
+- quokka-stack's pre-merge history: the co-change is real, but it outranks the graph (H10 -0.071);
+- BFS candidates in the text answers' selection: within ±0.004 on all 12 repos.
+
 **Proposed small hygiene, for James to confirm.**
 - **Remove engram-export's DE.5 side file** (`--ppr-candidates`, `.ppr.jsonl`, `ppr_side.rs`, exit 8; 0.5.4 seed §F item
   7). Engram asked for it gone "before 0.5.3 ships".
@@ -62,7 +89,7 @@ win for the law layer, which predicts nothing, so it goes to 0.5.4 with the goal
 
 ## Order
 
-1. Round 2 finished; its wins are proposed above (items 6-9), for James to confirm.
+1. Rounds 2 and 3 finished; their wins are proposed above (items 6-11), for James to confirm.
 2. A small spec run (spec + adversarial verify per mechanism).
 3. Waves with close-outs, `rank_eval` as a gate.
 4. The release docs and handoffs.

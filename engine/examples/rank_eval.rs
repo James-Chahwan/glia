@@ -51,6 +51,12 @@
 //! `+trank` (text as a ranker behind the typed links) variants, and the law run their
 //! chains. `--law-impact kina --law-event tr --keys on` traces a second law event (the
 //! Transitional Rules 2026, as made -> compilation 1); see `law_event_tr`.
+//!
+//! Round 3 (2026-10-19): `--round3 on` (with `--round1 on --round2 on`) adds id history (IDH),
+//! per-query text gating, SELt3 / SELs0 and the review / find transfer shapes;
+//! `--r3-anc dir@rev=prefix@import,..` prepends pre-merge histories (`--r3-anc-map` controls),
+//! `--r3-perq on` dumps per-query metrics and `--r3-compare a.json,b.json` pairs two such runs.
+//! See the "Round 3" section near the end of this file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -157,6 +163,20 @@ struct Args {
     /// Round 2: the law event of `--law-impact`: `act` (the AML/CTF Act, comp 59 -> 62) or `tr` (the
     /// Transitional Rules 2026, as made -> compilation 1), traced through the resolved goal layer.
     law_event: String,
+    /// Round 3: `on` adds id history (IDH), text gating, SELt3 and the transfer shapes (needs `--round2 on`).
+    round3: String,
+    /// Round 3: the round-3 tables (markdown).
+    r3md: String,
+    /// Round 3 (C): pre-merge histories, `dir@rev=prefix@import,..`, prepended by author time.
+    r3_anc: String,
+    /// Round 3 (C): the ancestor path map, `true` (default), `within` or `perm:<i,j,..>` (controls).
+    r3_anc_map: String,
+    /// Round 3: `on` writes every query's recall@10 / MRR per ranker (for `--r3-compare`).
+    r3_perq: String,
+    /// Round 3: `<a.json>,<b.json>` compares two `--r3-perq on` runs of the same queries (b - a).
+    r3_compare: String,
+    /// Round 3: extra SELt3x candidates (comma-separated; chosen after a first run, so post-hoc).
+    r3_selx: String,
 }
 
 fn parse_args() -> Args {
@@ -190,6 +210,13 @@ fn parse_args() -> Args {
         pick: String::new(),
         round2: String::new(),
         law_event: "act".into(),
+        round3: String::new(),
+        r3md: "rank_eval_round3.md".into(),
+        r3_anc: String::new(),
+        r3_anc_map: "true".into(),
+        r3_perq: String::new(),
+        r3_compare: String::new(),
+        r3_selx: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -225,11 +252,18 @@ fn parse_args() -> Args {
             "--pick" => a.pick = v,
             "--round2" => a.round2 = v,
             "--law-event" => a.law_event = v,
+            "--round3" => a.round3 = v,
+            "--r3md" => a.r3md = v,
+            "--r3-anc" => a.r3_anc = v,
+            "--r3-anc-map" => a.r3_anc_map = v,
+            "--r3-perq" => a.r3_perq = v,
+            "--r3-compare" => a.r3_compare = v,
+            "--r3-selx" => a.r3_selx = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
     }
-    assert!(!a.repo.is_empty() && !a.git.is_empty(), "--repo and --git are required");
+    assert!(!a.r3_compare.is_empty() || (!a.repo.is_empty() && !a.git.is_empty()), "--repo and --git are required");
     a
 }
 
@@ -797,6 +831,8 @@ struct Out {
     vgain: Vec<(String, [f64; 5])>,
     /// Round 1: per signal, whether this query's seed has it (the covered subsets).
     r1cov: Vec<(String, bool)>,
+    /// Round 3: earlier rankers the round-3 bank recomputed differently (must stay 0).
+    r3_bad: f64,
 }
 
 impl Out {
@@ -1097,7 +1133,7 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
 
     // ---- round 1 (appended, so every ranker above is unchanged) ----
     if let Some(r1) = r1 {
-        round1_rankers(&mut out, ctx, r1, q, t, &p1, &p1sum_v, &c0, &t1, &pers);
+        round1_rankers(&mut out, ctx, r1, q, t, &p1, &p1sum_v, &c0, &t1, &pers, &structural[0].1);
     }
 
     // ---- hub flooding ----
@@ -1187,6 +1223,10 @@ fn main() {
             "tr" => law_event_tr(&args),
             other => panic!("--law-event {other}: expected act or tr"),
         }
+        return;
+    }
+    if !args.r3_compare.is_empty() {
+        r3_compare_main(&args);
         return;
     }
     let t_start = Instant::now();
@@ -1325,18 +1365,42 @@ fn main() {
 
     // ---- history replay ----
     let (commits, raw_commits) = git_log(&args.git, &args.rev, &pidx);
+    // round 3 (C): pre-merge histories prepended by author time (their commits only warm selection up)
+    let (commits, r3anc) = if args.r3_anc.is_empty() {
+        (commits, None)
+    } else {
+        let (c, a) = r3_ancestors(&args, commits, &g.paths, &pidx);
+        (c, Some(a))
+    };
     let r1_on = args.round1 == "on";
     assert!(!(r1_on && !args.vertical.is_empty()), "--round1 and --vertical are separate runs");
     let train_ok = |c: &Commit| !c.files.is_empty() && c.files.len() <= MAX_FILES;
     let test_ok = |c: &Commit| c.files.len() >= 2 && c.files.len() <= MAX_FILES;
     let eligible: Vec<usize> = (0..commits.len()).filter(|&k| test_ok(&commits[k])).collect();
-    let test_idx: Vec<usize> = eligible[eligible.len().saturating_sub(args.max_commits)..].to_vec();
+    let mut warm_k: HashSet<usize> = HashSet::new();
+    let test_idx: Vec<usize> = match &r3anc {
+        None => eligible[eligible.len().saturating_sub(args.max_commits)..].to_vec(),
+        Some(a) => {
+            let own_el: Vec<usize> = eligible.iter().copied().filter(|&k| a.own[k]).collect();
+            let mut v: Vec<usize> = eligible.iter().copied().filter(|&k| !a.own[k]).collect();
+            warm_k.extend(v.iter().copied());
+            v.extend(own_el[own_el.len().saturating_sub(args.max_commits)..].iter().copied());
+            v.sort_unstable();
+            v
+        }
+    };
     let mut test_ord: HashMap<usize, usize> = HashMap::new();
     for (o, &k) in test_idx.iter().enumerate() {
         test_ord.insert(k, o);
     }
-    let mut hist: Option<R1Hist> = r1_on.then(|| r1_hist(&args, &commits, &test_idx.iter().copied().collect()));
+    let mut hist: Option<R1Hist> = r1_on.then(|| r1_hist(&args, &commits, &test_idx.iter().copied().collect(), r3anc.as_ref().map(|a| &a.at)));
     assert!(args.round2.is_empty() || r1_on, "--round2 needs --round1 on");
+    let r3_on = args.round3 == "on";
+    assert!(!r3_on || args.round2 == "on", "--round3 needs --round1 on --round2 on");
+    let mut r3stats: BTreeMap<String, f64> = BTreeMap::new();
+    let r3keys: Vec<BTreeSet<String>> = if r3_on { r3_keys(&args, &commits, &g.paths, &mut r3stats) } else { Vec::new() };
+    let mut r3idh = R3Idh::default();
+    let mut tqs: Vec<TQuery> = Vec::new();
     let mut r1 = R1State::default();
     let mut r1s: Vec<R1Commit> = Vec::new();
     let mut bm_s = Bm25::default();
@@ -1398,6 +1462,12 @@ fn main() {
                 }
                 let sp: Vec<String> = stoks.iter().chain(ptoks.iter()).cloned().collect();
                 rc.t1sp = bm.file_scores(&bm.scores(&sp), |_| true);
+                if r3_on {
+                    let (idh, idh_c, idh_u, n_hist) = r3idh.test(&r3keys[k], &c.sha);
+                    let conf = r3_conf(&bm, &stoks, &rc.t1s);
+                    rc.r3 = Some(R3Commit { n_keys: r3keys[k].len(), n_hist, idh, idh_c, idh_u, conf, warm: warm_k.contains(&k) });
+                    r3_tqueries(o, c, &g.paths, &co, &cnt, &rc.t1s, &mut tqs);
+                }
                 r1s.push(rc);
             }
             t_task += t0i.elapsed().as_secs_f64();
@@ -1416,6 +1486,9 @@ fn main() {
             if let Some(h) = &hist {
                 r1.train(h, k, c);
                 bm_s.add(tokens(subject(&c.msg)), c.files.clone());
+            }
+            if r3_on {
+                r3idh.train(&r3keys[k], &c.files);
             }
         }
         if let Some(h) = &hist {
@@ -1511,7 +1584,131 @@ fn main() {
         .map_init(|| PushPpr::new(&ctx.adj_push, &wf), |push, q| run_query(&ctx, q, &tcs[q.tc], push, layers.get(q.tc), r1s.get(q.tc)))
         .collect();
     let eval_s = t_eval.elapsed().as_secs_f64();
+    // ---- round 3: the gates (B), the transfer shapes (T) ----
+    let tc_of_main: Vec<usize> = queries.iter().map(|q| q.tc).collect();
+    let mut tc_sha: Vec<String> = test_idx.iter().map(|&k| commits[k].sha.clone()).collect();
+    let mut tc_files: Vec<Vec<u32>> = test_idx.iter().map(|&k| commits[k].files.clone()).collect();
+    let mut r3_info = serde_json::Map::new();
+    let mut transfer: Vec<(Vec<Out>, Vec<usize>)> = Vec::new();
+    let r3_conf_tc: Vec<[f64; 4]> = r1s.iter().map(|r| r.r3.as_ref().map_or([0.0; 4], |x| x.conf)).collect();
+    let r3_cands_b: Vec<String> = R3_SELT2.iter().chain(["P1", "PT*"].iter()).map(|s| s.to_string()).collect();
+    if r3_on {
+        let t3 = Instant::now();
+        r3_info.insert("gates".into(), r3_gates(&mut results, &tc_of_main, &r3_conf_tc, &tc_sha, &R3_GATE_PAIRS, &r3_cands_b));
+        transfer = r3_transfer(&ctx, &tqs, &r1s);
+        let mut tinfo = serde_json::Map::new();
+        for (si, (outs, tc_of)) in transfer.iter_mut().enumerate() {
+            if outs.is_empty() {
+                continue;
+            }
+            if si == 3 {
+                let f2: Vec<String> = R3_SELF2.iter().map(|s| s.to_string()).collect();
+                let mut f3 = f2.clone();
+                f3.extend(R3_SELF3.iter().map(|s| s.to_string()));
+                let mut f2t = f2.clone();
+                f2t.extend(["T1s", "PXT"].iter().map(|s| s.to_string()));
+                tinfo.insert(R3_SHAPES[si].into(), r3_select(outs, tc_of, r1s.len(), &[("SELf2".to_string(), f2), ("SELf3".to_string(), f3), ("SELf2t".to_string(), f2t)]));
+            } else {
+                let gi = r3_gates(outs, tc_of, &r3_conf_tc, &tc_sha, &R3_GATE_PAIRS, &r3_cands_b);
+                let mut sets: Vec<(String, Vec<String>)> = R1_SEL.iter().map(|(n, c)| (n.to_string(), c.iter().map(|x| x.to_string()).collect())).collect();
+                sets.extend(r3_sets(&args));
+                let si_ = r3_select(outs, tc_of, r1s.len(), &sets);
+                tinfo.insert(R3_SHAPES[si].into(), json!({"gates": gi, "select": si_}));
+            }
+        }
+        r3_info.insert("transfer".into(), serde_json::Value::Object(tinfo));
+        eprintln!("[round3] gates and {} transfer queries in {:.1}s", tqs.len(), t3.elapsed().as_secs_f64());
+    }
     let r1_sel = if r1_on { round1_select(&mut results, &queries, tcs.len()) } else { serde_json::Value::Null };
+    if r3_on {
+        r3_info.insert("select".into(), r3_select(&mut results, &tc_of_main, tcs.len(), &r3_sets(&args)));
+        // facts (test commits that are scored, i.e. not ancestor warm-ups)
+        let live: Vec<usize> = (0..r1s.len()).filter(|&o| !r1s[o].r3.as_ref().is_some_and(|x| x.warm)).collect();
+        let mut f = r3stats.clone();
+        let cnt = |p: &dyn Fn(usize) -> bool| live.iter().filter(|&&o| p(o)).count() as f64;
+        let x3 = |o: usize| r1s[o].r3.clone().unwrap_or_default();
+        let hit = |v: &[(u32, f64)], o: usize, top: usize| -> bool {
+            let mut s: Vec<(u32, f64)> = v.iter().copied().filter(|x| x.1 > 0.0).collect();
+            s.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            s.iter().take(top).any(|x| tc_files[o].contains(&x.0))
+        };
+        let idr_id = |o: usize| r1s[o].r2.as_ref().is_some_and(|x| x.has_id);
+        let idr_reach = |o: usize| r1s[o].r2.as_ref().is_some_and(|x| !x.idr.is_empty());
+        let idh_reach = |o: usize| !x3(o).idh.is_empty();
+        f.insert("r3_test_commits".into(), live.len() as f64);
+        f.insert("r3_test_commits_warmup_only".into(), (r1s.len() - live.len()) as f64);
+        f.insert("r3_test_commits_with_keys".into(), cnt(&|o| x3(o).n_keys > 0));
+        f.insert("r3_test_commits_with_key_history".into(), cnt(&|o| x3(o).n_hist > 0));
+        f.insert("r3_test_commits_idh_reach".into(), cnt(&|o| idh_reach(o)));
+        f.insert("r3_idh_any_changed_file".into(), cnt(&|o| hit(&x3(o).idh, o, usize::MAX)));
+        f.insert("r3_idh_top10_changed_file".into(), cnt(&|o| hit(&x3(o).idh, o, 10)));
+        f.insert("r3_idh~_any_changed_file".into(), cnt(&|o| hit(&x3(o).idh_c, o, usize::MAX)));
+        f.insert("r3_idh~_top10_changed_file".into(), cnt(&|o| hit(&x3(o).idh_c, o, 10)));
+        f.insert("r3_idh~u_top10_changed_file".into(), cnt(&|o| hit(&x3(o).idh_u, o, 10)));
+        f.insert("r3_idr_id".into(), cnt(&|o| idr_id(o)));
+        f.insert("r3_idr_id_idr_reach".into(), cnt(&|o| idr_id(o) && idr_reach(o)));
+        f.insert("r3_idr_id_idh_reach".into(), cnt(&|o| idr_id(o) && idh_reach(o)));
+        f.insert("r3_idr_id_either_reach".into(), cnt(&|o| idr_id(o) && (idr_reach(o) || idh_reach(o))));
+        f.insert("r3_idr_id_idh_only".into(), cnt(&|o| idr_id(o) && !idr_reach(o) && idh_reach(o)));
+        f.insert("r3_idr_id_idh_only_top10_changed_file".into(), cnt(&|o| idr_id(o) && !idr_reach(o) && hit(&x3(o).idh, o, 10)));
+        for (i, nm) in R3_CONF.iter().enumerate() {
+            f.insert(format!("r3_conf_mean_{nm}"), live.iter().map(|&o| x3(o).conf[i]).sum::<f64>() / live.len().max(1) as f64);
+        }
+        f.insert("r3_bank_mismatches".into(), results.iter().map(|r| r.r3_bad).sum());
+        for (si, (outs, _)) in transfer.iter().enumerate() {
+            f.insert(format!("r3_transfer_queries_{}", R3_SHAPES[si]), outs.len() as f64);
+        }
+        if let Some(a) = &r3anc {
+            f.extend(a.facts.clone());
+            r3_info.insert("ancestor_verify".into(), json!(a.verify));
+        }
+        r3_info.insert("facts".into(), json!(f));
+        // GLIA_R3_DUMP=<file>: per scored test commit, the subject's IDH keys and what IDH / IDR reach (inspection only)
+        if let Ok(path) = std::env::var("GLIA_R3_DUMP") {
+            let mut s = String::new();
+            for &o in &live {
+                let k = test_idx[o];
+                let x = x3(o);
+                let mut top = x.idh.clone();
+                top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                let tops: Vec<String> = top.iter().take(8).map(|(fi, w)| format!("{}{}:{w:.2}", if tc_files[o].contains(fi) { "*" } else { "" }, g.paths[*fi as usize])).collect();
+                let keys: Vec<&String> = r3keys[k].iter().collect();
+                let idr_n = r1s[o].r2.as_ref().map_or(0, |y| y.idr.len());
+                s.push_str(&format!("{}\t{}\t{:?}\thist={}\tidr_files={}\t{}\n", &commits[k].sha[..8], subject(&commits[k].msg), keys, x.n_hist, idr_n, tops.join(" ")));
+            }
+            std::fs::write(path, s).expect("r3 dump");
+        }
+    }
+    // ---- round 3 (C): the ancestor warm-up commits are dropped before anything is scored ----
+    if r3anc.is_some() {
+        let keep: Vec<bool> = r1s.iter().map(|r| !r.r3.as_ref().is_some_and(|x| x.warm)).collect();
+        let mut newo = vec![usize::MAX; keep.len()];
+        let mut nk = 0;
+        for (o, &k) in keep.iter().enumerate() {
+            if k {
+                newo[o] = nk;
+                nk += 1;
+            }
+        }
+        let kept: Vec<(Out, Query)> = results.into_iter().zip(queries).filter(|(_, q)| keep[q.tc]).map(|(r, q)| (r, Query { tc: newo[q.tc], ..q })).collect();
+        (results, queries) = kept.into_iter().unzip();
+        tcs = tcs.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
+        r1s = r1s.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
+        tc_sha = tc_sha.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
+        tc_files = tc_files.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
+        for (outs, tc_of) in transfer.iter_mut() {
+            let (mut no, mut nt) = (Vec::new(), Vec::new());
+            for (o, &t) in outs.drain(..).zip(tc_of.iter()) {
+                if keep[t] {
+                    no.push(o);
+                    nt.push(newo[t]);
+                }
+            }
+            *outs = no;
+            *tc_of = nt;
+        }
+    }
+    let _ = &tc_files;
     let names = results[0].names.clone();
     for r in &results {
         assert_eq!(r.names, names, "ranker order differs between queries");
@@ -1648,6 +1845,27 @@ fn main() {
         doc["round1"] = rj;
         doc["round1"]["select"] = r1_sel;
         std::fs::write(&args.r1md, rmd).expect("write round1 md");
+    }
+    if r3_on {
+        let bi = BootIn { commit_of: &commit_of, boot: args.boot, lf: &lf };
+        let facts: BTreeMap<String, f64> = r3_info
+            .get("facts")
+            .and_then(|v| v.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(f64::NAN))).collect())
+            .unwrap_or_default();
+        let (rj, rmd) = round3_report(&args.label, &names, &results, &bi, &transfer, &facts, serde_json::Value::Object(r3_info));
+        doc["round3"] = rj;
+        std::fs::write(&args.r3md, rmd).expect("write round3 md");
+    }
+    if args.r3_perq == "on" {
+        let ids: Vec<String> = queries.iter().map(|q| format!("{}:{}", tc_sha[q.tc], g.paths[q.seed as usize])).collect();
+        let mut r10 = serde_json::Map::new();
+        let mut mrr = serde_json::Map::new();
+        for (ri, n) in names.iter().enumerate() {
+            r10.insert(n.clone(), json!(col(ri, 1)));
+            mrr.insert(n.clone(), json!(col(ri, 3)));
+        }
+        doc["perq"] = json!({"ids": ids, "commit_of": commit_of, "r10": r10, "mrr": mrr});
     }
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write json");
     let md = render_md(&args.label, &doc, &names, &metrics, &paired_all);
@@ -10959,12 +11177,13 @@ struct R1Hist {
     stats: BTreeMap<String, f64>,
 }
 
-fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>) -> R1Hist {
+fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: Option<&HashMap<String, i64>>) -> R1Hist {
     let t = Instant::now();
     let at_map = git_author_times(&args.git, &args.rev);
     let br_map = branch_labels(&args.git, &args.rev);
     let n = commits.len();
-    let at: Vec<i64> = commits.iter().map(|c| at_map.get(&c.sha).copied().unwrap_or(0)).collect();
+    let at: Vec<i64> =
+        commits.iter().map(|c| at_map.get(&c.sha).or_else(|| extra_at.and_then(|m| m.get(&c.sha))).copied().unwrap_or(0)).collect();
     let br: Vec<Option<String>> = commits.iter().map(|c| br_map.get(&c.sha).cloned()).collect();
     let mut ids = vec![BTreeSet::new(); n];
     let mut pfx = vec![BTreeSet::new(); n];
@@ -11087,6 +11306,8 @@ struct R1Commit {
     t1sp: Vec<(u32, f64)>,
     /// Round 2: the subject's ids routed through the typed links
     r2: Option<R2Idr>,
+    /// Round 3: id history, text confidence, ancestor warm-up flag
+    r3: Option<R3Commit>,
 }
 
 /// C0r's decay per training commit: a co-change k training commits ago weighs R1_GAMMA^k.
@@ -11335,7 +11556,7 @@ fn r1_cov(v: &[f64], seed: usize) -> bool {
 
 /// The round-1 rankers for one query (appended after every earlier ranker, so those are unchanged).
 #[allow(clippy::too_many_arguments)]
-fn round1_rankers(out: &mut Out, ctx: &Ctx, r: &R1Commit, q: &Query, t: &[u32], p1: &[f64], p1sum: &[f64], c0: &[f64], t1: &[f64], pers: &[(usize, f64)]) {
+fn round1_rankers(out: &mut Out, ctx: &Ctx, r: &R1Commit, q: &Query, t: &[u32], p1: &[f64], p1sum: &[f64], c0: &[f64], t1: &[f64], pers: &[(usize, f64)], b0: &[Key]) {
     let g = ctx.g;
     let seed = q.seed as usize;
     let nf = p1.len();
@@ -11494,6 +11715,11 @@ fn round1_rankers(out: &mut Out, ctx: &Ctx, r: &R1Commit, q: &Query, t: &[u32], 
     if let Some(x) = &r.r2 {
         let pt = bases.iter().find(|b| b.0 == "PT*").map(|b| b.1.as_slice());
         round2_rankers(out, x, seed, t, p1, c0, &t1s, pt);
+    }
+    // ---- round 3 (appended, so every round-2 ranker above is unchanged) ----
+    if let Some(x3) = &r.r3 {
+        let pt = bases.iter().find(|b| b.0 == "PT*").map_or_else(|| p1sum.to_vec(), |b| b.1.clone());
+        round3_rankers(out, r, x3, seed, t, p1, &pt, c0, &t1s, &ws[2], b0);
     }
 }
 
@@ -12700,4 +12926,1283 @@ fn round2_rankers(out: &mut Out, x: &R2Idr, seed: usize, t: &[u32], p1: &[f64], 
         out.push("LX[IDRh,H18s[PT*]]", &lex2(&hop, &h18), seed, t);
         out.push("LX[IDR~roles,H18s[PT*]]", &lex2(&nor, &h18), seed, t);
     }
+}
+
+// ============================================================================
+// Round 3 (2026-10-19): `--round3 on` (with `--round1 on --round2 on`).
+//
+// A. IDH, id history: the subject's ids -> the earlier training commits whose subjects named the
+//    same id -> the files they touched, weighted by recency and count. Ids: the scoped ids round 2
+//    resolves (Kina: the resolved spec-scoped keys; glia: packet ids) plus ticket ids
+//    `[A-Z][A-Z0-9]+-N` and `#N` references (a `#N` carries only once another commit names the
+//    same number, so a squash-merge PR number is a no-op). Controls: each key with history
+//    swapped for another key seen by then (one of the 5 most recently active, IDH~; any, IDH~u).
+// B. Per-query text gating: the subject's BM25 match enters only when its confidence (top-score
+//    margin, informative matched terms, top-file peakedness, top score) clears a threshold picked
+//    online from earlier test commits; control: a random gate at the same rate. Per-bucket online
+//    selection over confidence tertiles (SELb), with a random-bucket control.
+// C. History across a monorepo import (`--r3-anc`): the pre-merge repos' histories, their paths
+//    mapped onto the import's subdirectories (verified by blob match at the import), merged by
+//    author time before the repo's own; their eligible commits warm online selection up and are
+//    never scored. Controls: `--r3-anc-map perm:<i,j,..>` (ancestor i lands on ancestor j's
+//    subdirectory, files permuted) and `within` (files permuted inside the right subdirectory).
+// D. SELt3: SELt2's candidates plus B0, H10[B0] and H18s[B0] (SELt3a adds IDH's fusions; SELt3x
+//    adds `--r3-selx`, chosen after the first run and so post-hoc).
+// T. Transfer shapes: review (seed 2, 3 or half of the changed files, score the rest) and find
+//    (no seed: the subject's BM25 over history, PPR seeded from its top files, IDR / IDH).
+// Every ranker is appended after round 2's, so every earlier ranker is unchanged.
+// ============================================================================
+
+/// IDH: the j-th newest earlier commit naming a key weighs R3_IDH_DECAY^j (recency and count).
+const R3_IDH_DECAY: f64 = 0.7;
+/// A hyphenated id with one of these prefixes names an encoding, digest or standard, not a ticket.
+const R3_TICKET_STOP: &[&str] = &[
+    "UTF", "UCS", "SHA", "MD", "ISO", "IEC", "CRC", "AES", "RSA", "DES", "TLS", "SSL", "HTTP", "IPV", "ES", "EC",
+    "ECMA", "HMAC", "PKCS", "JSR", "JEP", "RFC", "PEP", "ANSI", "IEEE", "CP", "KOI", "GB", "WIN", "IBM", "JDK", "JRE",
+    "JLS", "API", "CSS", "HTML",
+];
+/// B: a matched query term is informative when its BM25 idf is at least this (df under about 5%).
+const R3_IDF_MIN: f64 = 3.0;
+/// The find shape: PPR and co-change are seeded from the text ranking's top this-many files.
+const R3_FIND_TOP: usize = 10;
+/// SELb: buckets open after this many earlier test commits; a bucket needs this many to pick.
+const R3_BUCKET_WARM: usize = 30;
+const R3_BUCKET_MIN: usize = 10;
+const R3_CONF: [&str; 4] = ["mg", "tm", "pk", "s1"];
+const R3_SHAPES: [&str; 4] = ["k2", "k3", "half", "find"];
+/// B: (text ranker, its text-free fallback).
+const R3_GATE_PAIRS: [(&str, &str); 4] = [("H9s50", "P1"), ("H9s25[PT*]", "PT*"), ("H18s[PT*]", "H10[PT*]"), ("LX[IDR,H9s50]", "LX[IDR,P1]")];
+const R3_SELT2: [&str; 14] = [
+    "H18s[PT*]",
+    "H9s25[PT*]",
+    "H9s50",
+    "H10[PT*]",
+    "HTsa[W5]",
+    "HTsc[W5]",
+    "HTsd[W5]",
+    "HTsc[M]",
+    "HTsd[M]",
+    "ALL5",
+    "LX[IDR,H18s[PT*]]",
+    "LX[IDR,H9s25[PT*]]",
+    "H18si[PT*]",
+    "LX[IDR,C0,PT*]",
+];
+const R3_BFS: [&str; 3] = ["B0", "H10[B0]", "H18s[B0]"];
+const R3_IDH_FUSIONS: [&str; 2] = ["LX[IDRH,H18s[PT*]]", "LX[IDRH,C0,PT*]"];
+/// The find shape's SELt2 (the same fusions with the text-seeded PPR and co-change) and SELt3a.
+const R3_SELF2: [&str; 9] = ["H18x", "H9x25T", "H9x", "H10x", "ALL5x", "LX[IDR,H18x]", "LX[IDR,H9x25T]", "H18xi", "LX[IDR,C0x,PXT]"];
+const R3_SELF3: [&str; 2] = ["LX[IDRH,H18x]", "LX[IDRH,C0x,PXT]"];
+
+/// Ticket ids in a subject: `[A-Z][A-Z0-9]+-N` (not an encoding or standard) and `#N`.
+fn r3_tickets(subj: &str) -> Vec<String> {
+    let mut v: Vec<String> = hyphen_ids(subj).into_iter().filter(|(p, _)| !R3_TICKET_STOP.contains(&p.as_str())).map(|x| x.1).collect();
+    let b = subj.as_bytes();
+    for i in 0..b.len() {
+        if b[i] == b'#' && (i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+            let e = digits_at(b, i + 1, 6);
+            if e > i + 1 && we(b, e) {
+                v.push(subj[i..e].to_string());
+            }
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Every commit's IDH keys, read from its subject, in replay order. Kina: the scoped keys round 2's
+/// resolvers give at the commit's parent (the ambiguity cascade replayed over every commit);
+/// glia: packet ids of a defined prefix, plus tickets; other repos: tickets.
+fn r3_keys(args: &Args, commits: &[Commit], paths: &[String], stats: &mut BTreeMap<String, f64>) -> Vec<BTreeSet<String>> {
+    let t = Instant::now();
+    let n = commits.len();
+    let mut keys: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    match args.pre.as_str() {
+        "kina" => {
+            assert!(!args.wiki.is_empty() && !args.law_sources.is_empty() && !args.law_cache.is_empty(), "--round3 with --pre kina needs --wiki, --law-sources and --law-cache");
+            let parents = git_parents(&args.git, &args.rev);
+            let renames = git_renames(&args.git, &args.rev);
+            let kp = KPaths::new(paths, &renames);
+            let pr = PathRes::new(paths);
+            let known = law_known(args);
+            let wtext = git_text(&args.wiki, &["log", "--format=%H%x1f%ct", "HEAD"]).expect("wiki log");
+            let mut wiki_revs: Vec<(i64, String)> =
+                wtext.lines().filter_map(|l| l.split_once('\x1f').map(|(s, ct)| (ct.trim().parse().unwrap_or(0), s.to_string()))).collect();
+            wiki_revs.sort();
+            let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
+            let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+            let idx: Vec<usize> = (0..n)
+                .filter(|&k| {
+                    let s = subject(&commits[k].msg);
+                    !hyphen_ids(s).is_empty() || !bare_ids(s, &bare).is_empty()
+                })
+                .collect();
+            let got: Vec<Vec<R2Cand>> = idx
+                .par_iter()
+                .map(|&k| {
+                    let Some(p) = parents.get(&commits[k].sha).and_then(|x| x.0.clone()) else { return Vec::new() };
+                    let pct = parents.get(&p).map_or(0, |x| x.1);
+                    let mut docs = kina_doc_lines(&args.git, &p);
+                    if let Some((_, w)) = wiki_revs.iter().rev().find(|(ct, _)| *ct <= pct) {
+                        let cached = wcache.lock().unwrap().get(w).cloned();
+                        let lines = cached.unwrap_or_else(|| {
+                            let l = std::sync::Arc::new(git_grep(&args.wiki, w, None, &["*.md"]));
+                            wcache.lock().unwrap().insert(w.clone(), l.clone());
+                            l
+                        });
+                        docs.extend(lines.iter().cloned());
+                    }
+                    let code_lines = git_grep(&args.git, &p, Some(KEYS_CODE_PAT), &[]);
+                    let m = kina_model(&docs, &code_lines, &kp, &pr, &known, None, paths.len(), false, false);
+                    r2_kina_commit(&m, subject(&commits[k].msg)).0
+                })
+                .collect();
+            let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            let mut junk = BTreeMap::new();
+            for (&k, c) in idx.iter().zip(got) {
+                let (ks, scopes) = r2_pick(&c, &recent, &mut junk);
+                for s in scopes {
+                    recent.retain(|x| *x != s);
+                    recent.push_front(s);
+                    recent.truncate(R2_RECENT);
+                }
+                keys[k].extend(ks);
+            }
+            stats.insert("r3_commits_scanned_for_scoped_ids".into(), idx.len() as f64);
+        }
+        "glia" => {
+            let cache = PreCache::default();
+            let blobs = ls_tree(&args.git, &args.rev, GLIA_PACKETS);
+            let prefixes: BTreeSet<String> = GLIA_PACKETS
+                .iter()
+                .filter_map(|p| blobs.get(*p))
+                .flat_map(|b| cache.get(&args.git, b).keys().map(|id| id.split('.').next().unwrap_or("").to_string()).collect::<Vec<_>>())
+                .collect();
+            for (k, c) in commits.iter().enumerate() {
+                let s = subject(&c.msg);
+                for (p, id) in dot_ids(s) {
+                    if prefixes.contains(&p) {
+                        keys[k].insert(format!("pk:{id}"));
+                    }
+                }
+                keys[k].extend(r3_tickets(s));
+            }
+        }
+        _ => {
+            for (k, c) in commits.iter().enumerate() {
+                keys[k].extend(r3_tickets(subject(&c.msg)));
+            }
+        }
+    }
+    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+    for ks in &keys {
+        for key in ks {
+            let kind = if key.starts_with("id:") {
+                "scoped"
+            } else if key.starts_with("pk:") {
+                "packet"
+            } else if key.starts_with('#') {
+                "issue"
+            } else {
+                "ticket"
+            };
+            *kinds.entry(kind.to_string()).or_default() += 1;
+        }
+    }
+    for (kd, c) in kinds {
+        stats.insert(format!("r3_key_mentions_{kd}"), c as f64);
+    }
+    stats.insert("r3_commits_with_keys".into(), keys.iter().filter(|k| !k.is_empty()).count() as f64);
+    eprintln!("[round3] subject keys for {n} commits in {:.1}s", t.elapsed().as_secs_f64());
+    keys
+}
+
+/// IDH's replay state: per key, the files of every earlier training commit naming it.
+#[derive(Default)]
+struct R3Idh {
+    hist: HashMap<String, Vec<Vec<u32>>>,
+    last: HashMap<String, usize>,
+    pos: usize,
+}
+
+impl R3Idh {
+    /// One key's signal, normalised to max 1: the j-th newest commit's files weigh R3_IDH_DECAY^j.
+    fn sig(&self, key: &str, acc: &mut BTreeMap<u32, f64>) {
+        let Some(l) = self.hist.get(key) else { return };
+        let mut one: BTreeMap<u32, f64> = BTreeMap::new();
+        for (j, fs) in l.iter().rev().enumerate() {
+            let w = R3_IDH_DECAY.powi(j as i32);
+            for &f in fs {
+                *one.entry(f).or_default() += w;
+            }
+        }
+        let mx = one.values().fold(0.0f64, |a, &b| a.max(b));
+        if mx > 0.0 {
+            for (f, v) in one {
+                *acc.entry(f).or_default() += v / mx;
+            }
+        }
+    }
+
+    /// (IDH, IDH~ recent-5 control, IDH~u uniform control, keys with history).
+    fn test(&self, keys: &BTreeSet<String>, sha: &str) -> (Vec<(u32, f64)>, Vec<(u32, f64)>, Vec<(u32, f64)>, usize) {
+        let (mut a, mut c, mut u) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        let mut recent: Vec<(&String, usize)> = self.last.iter().filter(|(k, _)| !keys.contains(*k)).map(|(k, &p)| (k, p)).collect();
+        recent.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(y.0)));
+        let mut all: Vec<&String> = recent.iter().map(|x| x.0).collect();
+        all.sort();
+        recent.truncate(R1_SHUF_RECENT);
+        let mut hit = 0;
+        for key in keys {
+            if !self.hist.contains_key(key) {
+                continue;
+            }
+            hit += 1;
+            self.sig(key, &mut a);
+            if !recent.is_empty() {
+                let pick = recent[(h64(&format!("{sha}:{key}:idh~")) % recent.len() as u64) as usize].0;
+                self.sig(pick, &mut c);
+            }
+            if !all.is_empty() {
+                let pick = all[(h64(&format!("{sha}:{key}:idh~u")) % all.len() as u64) as usize];
+                self.sig(pick, &mut u);
+            }
+        }
+        let v = |m: BTreeMap<u32, f64>| m.into_iter().collect::<Vec<_>>();
+        (v(a), v(c), v(u), hit)
+    }
+
+    fn train(&mut self, keys: &BTreeSet<String>, files: &[u32]) {
+        for k in keys {
+            self.hist.entry(k.clone()).or_default().push(files.to_vec());
+            self.last.insert(k.clone(), self.pos);
+        }
+        self.pos += 1;
+    }
+}
+
+/// One test commit's round-3 signals.
+#[derive(Default, Clone)]
+struct R3Commit {
+    n_keys: usize,
+    n_hist: usize,
+    idh: Vec<(u32, f64)>,
+    idh_c: Vec<(u32, f64)>,
+    idh_u: Vec<(u32, f64)>,
+    /// B: [margin, informative matched terms, top-file peakedness, top score] of the subject's BM25
+    conf: [f64; 4],
+    /// C: an ancestor commit that only warms online selection up (never scored)
+    warm: bool,
+}
+
+/// B's confidence of the subject's BM25 match over the history (`bm`, every earlier message).
+fn r3_conf(bm: &Bm25, stoks: &[String], t1s: &[(u32, f64)]) -> [f64; 4] {
+    let sc = bm.scores(stoks);
+    let (mut s1, mut s2) = (0.0f64, 0.0f64);
+    for &v in &sc {
+        if v > s1 {
+            s2 = s1;
+            s1 = v;
+        } else if v > s2 {
+            s2 = v;
+        }
+    }
+    let mg = if s1 > 0.0 { (s1 - s2) / s1 } else { 0.0 };
+    let n = bm.dl.len() as f64;
+    let uniq: BTreeSet<&String> = stoks.iter().collect();
+    let tm = uniq
+        .iter()
+        .filter(|t| {
+            bm.post.get(**t).is_some_and(|pl| {
+                let df = pl.len() as f64;
+                (1.0 + (n - df + 0.5) / (df + 0.5)).ln() >= R3_IDF_MIN
+            })
+        })
+        .count() as f64;
+    let mut v: Vec<f64> = t1s.iter().map(|x| x.1).filter(|&x| x > 0.0).collect();
+    v.sort_by(|a, b| b.total_cmp(a));
+    let top: f64 = v.iter().take(10).sum();
+    let pk = if top > 0.0 { v[0] / top } else { 0.0 };
+    [mg, tm, pk, s1]
+}
+
+/// A transfer-shape query: review (several changed files seed, the rest are targets) or find (no
+/// seed file; `seeds` are the text ranking's top files with their weights, every changed file a target).
+struct TQuery {
+    tc: usize,
+    shape: usize,
+    seeds: Vec<u32>,
+    w: Vec<f64>,
+    targets: Vec<u32>,
+    c0: Vec<(u32, f64)>,
+}
+
+/// The transfer queries of one test commit, with co-change read before it.
+fn r3_tqueries(o: usize, c: &Commit, paths: &[String], co: &[HashMap<u32, u32>], cnt: &[u32], t1s: &[(u32, f64)], out: &mut Vec<TQuery>) {
+    let mut ord = c.files.clone();
+    ord.sort_by_key(|&f| h64(&format!("{}:{}", c.sha, paths[f as usize])));
+    let n = ord.len();
+    for (shape, k) in [(0usize, 2usize), (1, 3), (2, n / 2)] {
+        let need = if shape == 2 { 4 } else { k + 1 };
+        if n < need {
+            continue;
+        }
+        let seeds = ord[..k].to_vec();
+        let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+        for &s in &seeds {
+            let d = f64::from(cnt[s as usize]) + 1.0;
+            for (&f, &x) in &co[s as usize] {
+                *acc.entry(f).or_default() += f64::from(x) / d;
+            }
+        }
+        out.push(TQuery { tc: o, shape, seeds, w: vec![1.0; k], targets: ord[k..].to_vec(), c0: acc.into_iter().collect() });
+    }
+    let mut top: Vec<(u32, f64)> = t1s.iter().copied().filter(|x| x.1 > 0.0).collect();
+    top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    top.truncate(R3_FIND_TOP);
+    let tot: f64 = top.iter().map(|x| x.1).sum();
+    let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+    for &(g, wg) in &top {
+        let d = f64::from(cnt[g as usize]) + 1.0;
+        for (&f, &x) in &co[g as usize] {
+            *acc.entry(f).or_default() += wg / tot * f64::from(x) / d;
+        }
+    }
+    out.push(TQuery {
+        tc: o,
+        shape: 3,
+        seeds: top.iter().map(|x| x.0).collect(),
+        w: top.iter().map(|x| x.1 / tot).collect(),
+        targets: c.files.clone(),
+        c0: acc.into_iter().collect(),
+    });
+}
+
+/// recall@5/10/20, MRR, nDCG@20 with every excluded file (the seeds) left out of the ranking.
+fn eval_ex(key: &[Key], excl: &[bool], targets: &[u32]) -> [f64; 5] {
+    let mut ranks: Vec<usize> = targets
+        .iter()
+        .map(|&t| {
+            let t = t as usize;
+            let kt = key[t];
+            let mut r = 1;
+            for (f, kf) in key.iter().enumerate() {
+                if !excl[f] && f != t && better(kf, f, &kt, t) {
+                    r += 1;
+                }
+            }
+            r
+        })
+        .collect();
+    ranks.sort_unstable();
+    let nt = targets.len() as f64;
+    let rec = |k: usize| ranks.iter().filter(|&&r| r <= k).count() as f64 / nt;
+    let mrr = 1.0 / ranks[0] as f64;
+    let dcg: f64 = ranks.iter().filter(|&&r| r <= 20).map(|&r| 1.0 / ((r + 1) as f64).log2()).sum();
+    let idcg: f64 = (1..=targets.len().min(20)).map(|i| 1.0 / ((i + 1) as f64).log2()).sum();
+    [rec(5), rec(10), rec(20), mrr, dcg / idcg]
+}
+
+/// Min-max over the non-excluded files (as `minmax` with one seed); a flat vector is 0.
+fn mm_ex(v: &[f64], excl: &[bool]) -> Vec<f64> {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (f, &s) in v.iter().enumerate() {
+        if !excl[f] {
+            lo = lo.min(s);
+            hi = hi.max(s);
+        }
+    }
+    if !(hi > lo) {
+        return vec![0.0; v.len()];
+    }
+    v.iter().map(|&s| (s - lo) / (hi - lo)).collect()
+}
+
+/// Rank normalisation over the non-excluded files (as `ranknorm` with one seed).
+fn rn_ex(key: &[Key], excl: &[bool]) -> Vec<f64> {
+    let mut ix: Vec<usize> = (0..key.len()).filter(|&f| !excl[f]).collect();
+    ix.sort_by(|&a, &b| {
+        if better(&key[a], a, &key[b], b) {
+            std::cmp::Ordering::Less
+        } else if a == b {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+    let m = ix.len().max(2) as f64 - 1.0;
+    let mut out = vec![0.0; key.len()];
+    for (pos, &f) in ix.iter().enumerate() {
+        out[f] = (m - pos as f64) / m;
+    }
+    out
+}
+
+fn r3_eq(parts: &[&[f64]]) -> Vec<f64> {
+    let nf = parts[0].len();
+    (0..nf).map(|f| parts.iter().map(|p| p[f]).sum::<f64>() / parts.len() as f64).collect()
+}
+
+/// The inputs of the seeded bank (dense, per file; the seeds excluded).
+struct R3In<'a> {
+    excl: &'a [bool],
+    p1: &'a [f64],
+    pt: &'a [f64],
+    c0: &'a [f64],
+    t1s: &'a [f64],
+    w5: &'a [f64],
+    m: &'a [f64],
+    idr: &'a [f64],
+    idh: &'a [f64],
+    idh_c: &'a [f64],
+    idh_u: &'a [f64],
+    b0: Option<&'a [Key]>,
+}
+
+/// The seeded-shape rankers. `full` adds the earlier rounds' rankers the transfer shapes need (the
+/// single-seed shape already has them; there they are recomputed only to check this code).
+fn r3_bank_seed(x: &R3In, full: bool) -> Vec<(String, Vec<Key>)> {
+    let nf = x.p1.len();
+    let mm = |v: &[f64]| mm_ex(v, x.excl);
+    let (mm_p1, mm_pt, mm_c0, mm_t1s, mm_w5, mm_m, mm_idr) = (mm(x.p1), mm(x.pt), mm(x.c0), mm(x.t1s), mm(x.w5), mm(x.m), mm(x.idr));
+    let h9s50 = blend(0.5, &mm_t1s, &mm_p1);
+    let h9s25 = blend(0.25, &mm_t1s, &mm_pt);
+    let h18 = r3_eq(&[&mm_t1s, &mm_c0, &mm_pt]);
+    let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<Key> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
+    let mut out: Vec<(String, Vec<Key>)> = Vec::new();
+    let mut push = |n: &str, k: Vec<Key>| out.push((n.to_string(), k));
+    if full {
+        push("P1", scalar(x.p1));
+        push("PT*", scalar(x.pt));
+        push("C0", scalar(x.c0));
+        push("T1s", scalar(x.t1s));
+        push("H10", lx3(x.c0, x.p1, &vec![0.0; nf]));
+        push("H10[PT*]", lex2(x.c0, x.pt));
+        push("H9s50", scalar(&h9s50));
+        push("H9s25[PT*]", scalar(&h9s25));
+        push("H18s[PT*]", scalar(&h18));
+        for (tag, a, b, c) in HT_GRID {
+            let s: Vec<f64> = (0..nf).map(|f| a * mm_t1s[f] + b * mm_w5[f] + c * mm_p1[f]).collect();
+            push(&format!("HTs{tag}[W5]"), scalar(&s));
+            let s: Vec<f64> = (0..nf).map(|f| a * mm_t1s[f] + b * mm_m[f] + c * mm_p1[f]).collect();
+            push(&format!("HTs{tag}[M]"), scalar(&s));
+        }
+        push("ALL5", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0, &mm_p1])));
+        push("IDR", scalar(x.idr));
+        push("LX[IDR,P1]", lex2(x.idr, x.p1));
+        push("LX[IDR,H9s50]", lex2(x.idr, &h9s50));
+        push("H9si", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_p1])));
+        push("LX[IDR,C0,P1]", lx3(x.idr, x.c0, x.p1));
+        push("LX[IDR,H18s[PT*]]", lex2(x.idr, &h18));
+        push("LX[IDR,H9s25[PT*]]", lex2(x.idr, &h9s25));
+        push("H18si[PT*]", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0, &mm_pt])));
+        push("LX[IDR,C0,PT*]", lx3(x.idr, x.c0, x.pt));
+        if let Some(b0) = x.b0 {
+            push("B0", b0.to_vec());
+        }
+    }
+    // ---- A: id history ----
+    let idrh: Vec<f64> = (0..nf).map(|f| x.idr[f] + x.idh[f]).collect();
+    let idrh_c: Vec<f64> = (0..nf).map(|f| x.idr[f] + x.idh_c[f]).collect();
+    push("IDH", scalar(x.idh));
+    push("IDH~", scalar(x.idh_c));
+    push("IDH~u", scalar(x.idh_u));
+    push("IDRH", scalar(&idrh));
+    push("LX[IDH,P1]", lex2(x.idh, x.p1));
+    push("LX[IDH,H9s50]", lex2(x.idh, &h9s50));
+    push("LX[IDH~,H9s50]", lex2(x.idh_c, &h9s50));
+    push("LX[IDH~u,H9s50]", lex2(x.idh_u, &h9s50));
+    push("LX[IDH,H18s[PT*]]", lex2(x.idh, &h18));
+    push("LX[IDRH,P1]", lex2(&idrh, x.p1));
+    push("LX[IDRH,H9s50]", lex2(&idrh, &h9s50));
+    push("LX[IDRH~,H9s50]", lex2(&idrh_c, &h9s50));
+    push("LX[IDRH,H18s[PT*]]", lex2(&idrh, &h18));
+    push("LX[IDRH~,H18s[PT*]]", lex2(&idrh_c, &h18));
+    push("LX[IDRH,H9s25[PT*]]", lex2(&idrh, &h9s25));
+    push("LX[IDRH,C0,PT*]", lx3(&idrh, x.c0, x.pt));
+    push("LX[IDRH~,C0,PT*]", lx3(&idrh_c, x.c0, x.pt));
+    push("LX[IDR,IDH,H9s50]", lx3(x.idr, x.idh, &h9s50));
+    push("H18sih[PT*]", scalar(&r3_eq(&[&mm(&idrh), &mm_t1s, &mm_c0, &mm_pt])));
+    // ---- D: BFS bases ----
+    if let Some(b0) = x.b0 {
+        let rn_b0 = rn_ex(b0, x.excl);
+        push("H10[B0]", (0..nf).map(|f| [x.c0[f], b0[f][0], b0[f][1]]).collect());
+        let h18b = r3_eq(&[&mm_t1s, &mm_c0, &rn_b0]);
+        push("H18s[B0]", scalar(&h18b));
+        push("H9s25[B0]", scalar(&blend(0.25, &mm_t1s, &rn_b0)));
+        push("LX[IDRH,H18s[B0]]", lex2(&idrh, &h18b));
+    }
+    out
+}
+
+/// The find shape's inputs (no seed file).
+struct R3Find<'a> {
+    t1s: &'a [f64],
+    t1ss: &'a [f64],
+    px1: &'a [f64],
+    pxt: &'a [f64],
+    c0x: &'a [f64],
+    w5: &'a [f64],
+    m: &'a [f64],
+    idr: &'a [f64],
+    idh: &'a [f64],
+    idh_c: &'a [f64],
+    deg: &'a [f64],
+}
+
+/// The find-shape rankers: the subject's text ranking, PPR seeded from its top files (PX1 the
+/// base config max-pooled, PXT the picked config sum-pooled), co-change from them, IDR / IDH.
+fn r3_bank_find(x: &R3Find) -> Vec<(String, Vec<Key>)> {
+    let nf = x.t1s.len();
+    let none = vec![false; nf];
+    let mm = |v: &[f64]| mm_ex(v, &none);
+    let (mm_t1s, mm_px1, mm_pxt, mm_c0x, mm_w5, mm_m, mm_idr) = (mm(x.t1s), mm(x.px1), mm(x.pxt), mm(x.c0x), mm(x.w5), mm(x.m), mm(x.idr));
+    let idrh: Vec<f64> = (0..nf).map(|f| x.idr[f] + x.idh[f]).collect();
+    let idrh_c: Vec<f64> = (0..nf).map(|f| x.idr[f] + x.idh_c[f]).collect();
+    let h9x = blend(0.5, &mm_t1s, &mm_px1);
+    let h9x25 = blend(0.25, &mm_t1s, &mm_pxt);
+    let h18x = r3_eq(&[&mm_t1s, &mm_c0x, &mm_pxt]);
+    let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<Key> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
+    let mut out: Vec<(String, Vec<Key>)> = Vec::new();
+    let mut push = |n: &str, k: Vec<Key>| out.push((n.to_string(), k));
+    push("B1", scalar(x.deg));
+    push("T1s", scalar(x.t1s));
+    push("T1ss", scalar(x.t1ss));
+    push("PX1", scalar(x.px1));
+    push("PXT", scalar(x.pxt));
+    push("C0x", scalar(x.c0x));
+    push("IDR", scalar(x.idr));
+    push("IDH", scalar(x.idh));
+    push("IDRH", scalar(&idrh));
+    push("H9x", scalar(&h9x));
+    push("H9x25T", scalar(&h9x25));
+    push("H18x", scalar(&h18x));
+    push("H10x", lex2(x.c0x, x.pxt));
+    push("H10x1", lex2(x.c0x, x.px1));
+    push("ALL5x", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0x, &mm_pxt])));
+    push("LX[IDR,T1s]", lex2(x.idr, x.t1s));
+    push("LX[IDR,H9x]", lex2(x.idr, &h9x));
+    push("H9xi", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_px1])));
+    push("LX[IDR,H18x]", lex2(x.idr, &h18x));
+    push("LX[IDR,H9x25T]", lex2(x.idr, &h9x25));
+    push("H18xi", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0x, &mm_pxt])));
+    push("LX[IDR,C0x,PXT]", lx3(x.idr, x.c0x, x.pxt));
+    push("LX[IDH,H9x]", lex2(x.idh, &h9x));
+    push("LX[IDRH,T1s]", lex2(&idrh, x.t1s));
+    push("LX[IDRH,H9x]", lex2(&idrh, &h9x));
+    push("LX[IDRH,H18x]", lex2(&idrh, &h18x));
+    push("LX[IDRH~,H18x]", lex2(&idrh_c, &h18x));
+    push("LX[IDRH,C0x,PXT]", lx3(&idrh, x.c0x, x.pxt));
+    // ties in the first keys go to the file's degree (most files score 0 without a seed)
+    for (_, k) in out.iter_mut() {
+        if k.iter().all(|v| v[2] == 0.0) {
+            for (f, v) in k.iter_mut().enumerate() {
+                v[2] = x.deg[f];
+            }
+        }
+    }
+    out
+}
+
+/// The single-seed shape's round-3 rankers (appended after round 2's). The earlier rankers the
+/// bank recomputes are checked against the ones already in `out` (they must be identical).
+#[allow(clippy::too_many_arguments)]
+fn round3_rankers(out: &mut Out, r: &R1Commit, x3: &R3Commit, seed: usize, t: &[u32], p1: &[f64], pt: &[f64], c0: &[f64], t1s: &[f64], w5: &[f64], b0: &[Key]) {
+    let nf = p1.len();
+    let d = |v: &[(u32, f64)]| dense(nf, v, seed);
+    let mut excl = vec![false; nf];
+    excl[seed] = true;
+    let m = d(&r.ms[0].1);
+    let idr = r.r2.as_ref().map_or_else(|| vec![0.0; nf], |x| d(&x.idr));
+    let (idh, idh_c, idh_u) = (d(&x3.idh), d(&x3.idh_c), d(&x3.idh_u));
+    out.r1cov.push(("idh_id".into(), x3.n_keys > 0));
+    out.r1cov.push(("idh".into(), r1_cov(&idh, seed)));
+    let x = R3In { excl: &excl, p1, pt, c0, t1s, w5, m: &m, idr: &idr, idh: &idh, idh_c: &idh_c, idh_u: &idh_u, b0: Some(b0) };
+    let mut bad = 0.0;
+    for (name, key) in r3_bank_seed(&x, true) {
+        let mv = evaluate(&key, seed, t);
+        if let Some(i) = out.names.iter().position(|n| *n == name) {
+            if out.m[i] != mv {
+                bad += 1.0;
+            }
+            continue;
+        }
+        out.names.push(name);
+        out.m.push(mv);
+    }
+    out.r3_bad += bad;
+    // attribution: IDH first over the subject's BM25 with its digit-bearing tokens (ticket numbers) removed
+    let mm_p1 = minmax(p1, seed);
+    let h9nd = blend(0.5, &minmax(&d(&r.t1s_nd), seed), &mm_p1);
+    out.push("LX[IDH,H9s50-nd]", &lex2(&idh, &h9nd), seed, t);
+    out.push("LX[IDH~,H9s50-nd]", &lex2(&idh_c, &h9nd), seed, t);
+}
+
+/// Runs the transfer queries; per shape, the queries' results (in test order) and their test commits.
+fn r3_transfer(ctx: &Ctx, tqs: &[TQuery], r1s: &[R1Commit]) -> Vec<(Vec<Out>, Vec<usize>)> {
+    let g = ctx.g;
+    let nf = g.paths.len();
+    let res: Vec<Out> = tqs
+        .par_iter()
+        .map(|q| {
+            let r = &r1s[q.tc];
+            let find = q.shape == 3;
+            let mut excl = vec![false; nf];
+            let mut pers: Vec<(usize, f64)> = Vec::new();
+            if find {
+                for (i, &f) in q.seeds.iter().enumerate() {
+                    let ns = &g.file_nodes[f as usize];
+                    for &u in ns {
+                        pers.push((g.node_ppr[u as usize], q.w[i] / ns.len() as f64));
+                    }
+                }
+            } else {
+                for &s in &q.seeds {
+                    excl[s as usize] = true;
+                }
+                let nodes: Vec<usize> = q.seeds.iter().flat_map(|&f| g.file_nodes[f as usize].iter().map(|&u| g.node_ppr[u as usize])).collect();
+                pers = Ppr::uniform(&nodes);
+            }
+            let run = |idx: &Ppr, sum: bool| -> Vec<f64> {
+                if pers.is_empty() {
+                    return vec![0.0; nf];
+                }
+                let v = idx.run(&pers);
+                file_pool(g, |u| v[g.node_ppr[u]], sum)
+            };
+            let p1 = run(&ctx.ppr[0].1, false);
+            let pt = match ctx.pick {
+                Some(i) => run(&ctx.tune[i].1, true),
+                None => run(&ctx.ppr[0].1, true),
+            };
+            let d = |v: &[(u32, f64)]| {
+                let mut x = vec![0.0; nf];
+                for &(f, s) in v {
+                    x[f as usize] = s;
+                }
+                x
+            };
+            let x3 = r.r3.clone().unwrap_or_default();
+            let (c0, t1s, t1ss, w5, m) = (d(&q.c0), d(&r.t1s), d(&r.t1ss), d(&r.w[2]), d(&r.ms[0].1));
+            let idr = r.r2.as_ref().map_or_else(|| vec![0.0; nf], |x| d(&x.idr));
+            let (idh, idh_c, idh_u) = (d(&x3.idh), d(&x3.idh_c), d(&x3.idh_u));
+            let bank = if find {
+                r3_bank_find(&R3Find { t1s: &t1s, t1ss: &t1ss, px1: &p1, pxt: &pt, c0x: &c0, w5: &w5, m: &m, idr: &idr, idh: &idh, idh_c: &idh_c, deg: &g.file_deg })
+            } else {
+                let seed_ids: Vec<NodeId> = q.seeds.iter().flat_map(|&f| g.file_nodes[f as usize].iter().map(|&u| g.ids[u as usize])).collect();
+                let (b0, _) = bfs_key(ctx, &ctx.adj_carry, &seed_ids);
+                r3_bank_seed(&R3In { excl: &excl, p1: &p1, pt: &pt, c0: &c0, t1s: &t1s, w5: &w5, m: &m, idr: &idr, idh: &idh, idh_c: &idh_c, idh_u: &idh_u, b0: Some(&b0) }, true)
+            };
+            let mut out = Out::default();
+            for (name, key) in bank {
+                out.names.push(name);
+                out.m.push(eval_ex(&key, &excl, &q.targets));
+            }
+            out
+        })
+        .collect();
+    let mut shapes: Vec<(Vec<Out>, Vec<usize>)> = (0..R3_SHAPES.len()).map(|_| (Vec::new(), Vec::new())).collect();
+    for (q, o) in tqs.iter().zip(res) {
+        shapes[q.shape].0.push(o);
+        shapes[q.shape].1.push(q.tc);
+    }
+    shapes
+}
+
+/// Online selection over dynamic candidate sets (round 1's rule: at each test commit, the candidate
+/// with the best summed recall@10 over every earlier test commit's queries; the first before any).
+fn r3_select(results: &mut [Out], tc_of: &[usize], ntc: usize, sets: &[(String, Vec<String>)]) -> serde_json::Value {
+    let names = results[0].names.clone();
+    let pos = |n: &str| names.iter().position(|x| x == n);
+    let mut by_tc: Vec<Vec<usize>> = vec![Vec::new(); ntc];
+    for (q, &t) in tc_of.iter().enumerate() {
+        by_tc[t].push(q);
+    }
+    let mut info = serde_json::Map::new();
+    for (sname, cands) in sets {
+        let ix: Vec<usize> = cands.iter().filter_map(|c| pos(c)).collect();
+        if ix.len() != cands.len() {
+            let miss: Vec<&String> = cands.iter().filter(|c| pos(c).is_none()).collect();
+            info.insert(sname.clone(), json!({ "skipped_missing": miss }));
+            continue;
+        }
+        let mut sum: Vec<f64> = vec![0.0; ix.len()];
+        let mut seen = 0usize;
+        let mut picks: BTreeMap<String, usize> = BTreeMap::new();
+        let mut per_q: Vec<[f64; 5]> = vec![[0.0; 5]; tc_of.len()];
+        let mut last = String::new();
+        for qs in &by_tc {
+            if qs.is_empty() {
+                continue;
+            }
+            let best = if seen == 0 { 0 } else { (0..ix.len()).max_by(|&a, &b| sum[a].total_cmp(&sum[b]).then(b.cmp(&a))).unwrap_or(0) };
+            last = names[ix[best]].clone();
+            *picks.entry(last.clone()).or_default() += 1;
+            for &q in qs {
+                per_q[q] = results[q].m[ix[best]];
+            }
+            for &q in qs {
+                for (j, &ri) in ix.iter().enumerate() {
+                    sum[j] += results[q].m[ri][1];
+                }
+                seen += 1;
+            }
+        }
+        for (q, r) in results.iter_mut().enumerate() {
+            r.names.push(sname.clone());
+            r.m.push(per_q[q]);
+        }
+        info.insert(sname.clone(), json!({"picks_per_test_commit": picks, "pick_at_the_last_test_commit": last}));
+    }
+    serde_json::Value::Object(info)
+}
+
+/// B: the gated rankers G<conf>[X|Y] (X while the commit's confidence clears the threshold picked
+/// online, else Y), their random-gate controls G<conf>r[X|Y] at the same on-rate, and the
+/// confidence-bucket selections SELb<conf> (with the random-bucket control SELb<conf>r).
+fn r3_gates(results: &mut [Out], tc_of: &[usize], conf: &[[f64; 4]], shas: &[String], pairs: &[(&str, &str)], cands_b: &[String]) -> serde_json::Value {
+    let ntc = conf.len();
+    let names = results[0].names.clone();
+    let pos = |n: &str| names.iter().position(|x| x == n);
+    let mut by_tc: Vec<Vec<usize>> = vec![Vec::new(); ntc];
+    for (q, &t) in tc_of.iter().enumerate() {
+        by_tc[t].push(q);
+    }
+    let unif = |s: &str| (h64(s) >> 11) as f64 / (1u64 << 53) as f64;
+    let mut info = serde_json::Map::new();
+    let mut cols: Vec<(String, Vec<[f64; 5]>)> = Vec::new();
+    let live: Vec<usize> = (0..ntc).filter(|&t| !by_tc[t].is_empty()).collect();
+    for (fi, fname) in R3_CONF.iter().enumerate() {
+        for &(xn, yn) in pairs {
+            let (Some(ix), Some(iy)) = (pos(xn), pos(yn)) else { continue };
+            let dsum: Vec<f64> = (0..ntc).map(|t| by_tc[t].iter().map(|&q| results[q].m[ix][1] - results[q].m[iy][1]).sum()).collect();
+            let mut on = vec![false; ntc];
+            let mut thr = f64::NEG_INFINITY;
+            for (j, &t) in live.iter().enumerate() {
+                let earlier = &live[..j];
+                let mut cands: Vec<f64> = earlier.iter().map(|&c| conf[c][fi]).collect();
+                cands.sort_by(f64::total_cmp);
+                cands.dedup();
+                let mut best = (f64::NEG_INFINITY, earlier.iter().map(|&c| dsum[c]).sum::<f64>());
+                for &th in &cands {
+                    let s: f64 = earlier.iter().filter(|&&c| conf[c][fi] >= th).map(|&c| dsum[c]).sum();
+                    if s > best.1 {
+                        best = (th, s);
+                    }
+                }
+                if 0.0 > best.1 {
+                    best = (f64::INFINITY, 0.0);
+                }
+                thr = best.0;
+                on[t] = conf[t][fi] >= best.0;
+            }
+            let rate = live.iter().filter(|&&t| on[t]).count() as f64 / live.len().max(1) as f64;
+            let on_r: Vec<bool> = (0..ntc).map(|t| unif(&format!("{}:gate:{fname}:{xn}", shas[t])) < rate).collect();
+            let rate_r = live.iter().filter(|&&t| on_r[t]).count() as f64 / live.len().max(1) as f64;
+            let col = |gate: &[bool]| -> Vec<[f64; 5]> { tc_of.iter().enumerate().map(|(q, &t)| if gate[t] { results[q].m[ix] } else { results[q].m[iy] }).collect() };
+            cols.push((format!("G{fname}[{xn}|{yn}]"), col(&on)));
+            cols.push((format!("G{fname}r[{xn}|{yn}]"), col(&on_r)));
+            info.insert(format!("G{fname}[{xn}|{yn}]"), json!({"on_rate": rate, "control_on_rate": rate_r, "last_threshold": if thr.is_finite() { json!(thr) } else { json!(format!("{thr}")) }}));
+        }
+        let cix: Vec<usize> = cands_b.iter().filter_map(|c| pos(c)).collect();
+        if cix.len() != cands_b.len() {
+            continue;
+        }
+        let csum: Vec<Vec<f64>> = (0..ntc).map(|t| cix.iter().map(|&i| by_tc[t].iter().map(|&q| results[q].m[i][1]).sum()).collect()).collect();
+        for variant in ["", "r"] {
+            let vals: Vec<f64> = (0..ntc).map(|t| if variant.is_empty() { conf[t][fi] } else { unif(&format!("{}:bucket:{fname}", shas[t])) }).collect();
+            let mut pick = vec![0usize; ntc];
+            let mut bucketed = 0usize;
+            for (j, &t) in live.iter().enumerate() {
+                let earlier = &live[..j];
+                let mut members: Vec<usize> = earlier.to_vec();
+                if earlier.len() >= R3_BUCKET_WARM {
+                    let mut e: Vec<f64> = earlier.iter().map(|&c| vals[c]).collect();
+                    e.sort_by(f64::total_cmp);
+                    let (c1, c2) = (e[e.len() / 3], e[2 * e.len() / 3]);
+                    let b = |x: f64| if x < c1 { 0 } else if x < c2 { 1 } else { 2 };
+                    let bt = b(vals[t]);
+                    let mem: Vec<usize> = earlier.iter().copied().filter(|&c| b(vals[c]) == bt).collect();
+                    if mem.len() >= R3_BUCKET_MIN {
+                        members = mem;
+                        bucketed += 1;
+                    }
+                }
+                if members.is_empty() {
+                    continue;
+                }
+                let s: Vec<f64> = (0..cix.len()).map(|a| members.iter().map(|&c| csum[c][a]).sum()).collect();
+                pick[t] = (0..cix.len()).max_by(|&a, &b2| s[a].total_cmp(&s[b2]).then(b2.cmp(&a))).unwrap_or(0);
+            }
+            let name = format!("SELb{fname}{variant}");
+            cols.push((name.clone(), tc_of.iter().enumerate().map(|(q, &t)| results[q].m[cix[pick[t]]]).collect()));
+            let mut picks: BTreeMap<String, usize> = BTreeMap::new();
+            for &t in &live {
+                *picks.entry(names[cix[pick[t]]].clone()).or_default() += 1;
+            }
+            info.insert(name, json!({"bucketed_commits": bucketed, "picks_per_test_commit": picks}));
+        }
+    }
+    for (n, col) in cols {
+        for (q, r) in results.iter_mut().enumerate() {
+            r.names.push(n.clone());
+            r.m.push(col[q]);
+        }
+    }
+    serde_json::Value::Object(info)
+}
+
+/// The selection sets of round 3 (main and review shapes; find has its own).
+fn r3_sets(args: &Args) -> Vec<(String, Vec<String>)> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    let t3: Vec<String> = R3_SELT2.iter().chain(R3_BFS.iter()).map(|x| x.to_string()).collect();
+    let mut t3a = t3.clone();
+    t3a.extend(s(&R3_IDH_FUSIONS));
+    let mut out = vec![("SELt3".to_string(), t3.clone()), ("SELt3a".to_string(), t3a)];
+    // the text-free answers (impact, blast radius): structure alone, and co-change first then structure
+    out.push(("SELs0".to_string(), s(&["P1", "PT*", "B0"])));
+    out.push(("SELh0".to_string(), s(&["H10", "H10[PT*]", "H10[B0]"])));
+    if !args.r3_selx.is_empty() {
+        let mut x = t3;
+        x.extend(args.r3_selx.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()));
+        out.push(("SELt3x".to_string(), x));
+    }
+    out
+}
+
+/// The main shape's round-3 contrasts: (a, b, subset).
+fn r3_contrasts() -> Vec<(String, String, &'static str)> {
+    let mut v: Vec<(String, String, &'static str)> = Vec::new();
+    let mut add = |a: &str, b: &str, s: &'static str| v.push((a.to_string(), b.to_string(), s));
+    // A
+    for s in ["all", "idh", "idh_id"] {
+        add("IDH", "IDH~", s);
+        add("IDH", "IDH~u", s);
+        add("IDH", "P1", s);
+        add("LX[IDH,H9s50]", "H9s50", s);
+        add("LX[IDH,H9s50]", "LX[IDH~,H9s50]", s);
+        add("LX[IDH,H9s50]", "LX[IDH~u,H9s50]", s);
+        add("LX[IDH,H18s[PT*]]", "H18s[PT*]", s);
+        add("LX[IDRH,H9s50]", "LX[IDR,H9s50]", s);
+        add("LX[IDRH,H9s50]", "LX[IDRH~,H9s50]", s);
+        add("LX[IDRH,H18s[PT*]]", "LX[IDR,H18s[PT*]]", s);
+        add("LX[IDRH,H18s[PT*]]", "LX[IDRH~,H18s[PT*]]", s);
+        add("LX[IDRH,C0,PT*]", "LX[IDR,C0,PT*]", s);
+        add("LX[IDRH,C0,PT*]", "LX[IDRH~,C0,PT*]", s);
+        add("LX[IDR,IDH,H9s50]", "LX[IDR,H9s50]", s);
+        add("H18sih[PT*]", "H18si[PT*]", s);
+        add("LX[IDRH,P1]", "LX[IDR,P1]", s);
+        add("LX[IDH,H9s50-nd]", "H9s50-nd", s);
+        add("LX[IDH,H9s50-nd]", "LX[IDH~,H9s50-nd]", s);
+        add("H9s50", "H9s50-nd", s);
+    }
+    for (x, y) in R3_GATE_PAIRS {
+        add(x, y, "all");
+    }
+    for s in ["all", "idr_id", "idr_miss", "idh"] {
+        add("LX[IDRH,H9s50]", "H9a50[P1]", s);
+        add("LX[IDR,H9s50]", "H9a50[P1]", s);
+        add("LX[IDRH,H9s50]", "P1", s);
+        add("LX[IDRH,H18s[PT*]]", "H9a50[P1]", s);
+        add("LX[IDRH,H9s50]", "LX[IDR,H9s50]", s);
+        add("LX[IDRH,H18s[PT*]]", "LX[IDR,H18s[PT*]]", s);
+    }
+    // B
+    for (fname, _) in R3_CONF.iter().zip(0..) {
+        for (x, y) in R3_GATE_PAIRS {
+            let g = format!("G{fname}[{x}|{y}]");
+            let gr = format!("G{fname}r[{x}|{y}]");
+            v.push((g.clone(), x.to_string(), "all"));
+            v.push((g.clone(), y.to_string(), "all"));
+            v.push((g, gr, "all"));
+        }
+        v.push((format!("SELb{fname}"), "SELt2".into(), "all"));
+        v.push((format!("SELb{fname}"), format!("SELb{fname}r"), "all"));
+        v.push((format!("SELb{fname}"), "P1".into(), "all"));
+    }
+    // D
+    let mut add = |a: &str, b: &str, s: &'static str| v.push((a.to_string(), b.to_string(), s));
+    for (a, b) in [
+        ("SELt3", "SELt2"),
+        ("SELt3", "P1"),
+        ("SELt3", "B0"),
+        ("SELt3", "H9a50[P1]"),
+        ("SELt3", "PT*"),
+        ("SELt2", "B0"),
+        ("SELt2", "P1"),
+        ("PT*", "B0"),
+        ("H10[B0]", "H10[PT*]"),
+        ("H18s[B0]", "H18s[PT*]"),
+        ("H18s[B0]", "B0"),
+        ("SELt3a", "SELt3"),
+        ("SELt3a", "SELt2"),
+        ("SELt3a", "P1"),
+        ("SELt3x", "SELt3"),
+        ("SELt3x", "SELt2"),
+        ("SELt3x", "P1"),
+        ("SELt3x", "B0"),
+        ("SELt3x", "H9a50[P1]"),
+        ("SELs0", "P1"),
+        ("SELs0", "B0"),
+        ("SELs0", "PT*"),
+        ("SELh0", "H10"),
+        ("SELh0", "H10[PT*]"),
+        ("SELh0", "H10[B0]"),
+        ("H10[B0]", "H10"),
+        // the 0.5.3 mechanisms in the single-seed shape (for the transfer table)
+        ("H10", "P1"),
+        ("H10[PT*]", "PT*"),
+        ("H9s50", "P1"),
+        ("H18s[PT*]", "P1"),
+        ("LX[IDR,H9s50]", "H9s50"),
+        ("LX[IDR,H9s50]", "H9si"),
+        ("LX[IDR,H9s50]", "P1"),
+        ("LX[IDR,H18s[PT*]]", "P1"),
+        ("SELt2", "H18s[PT*]"),
+        ("B0", "P1"),
+        ("T1s", "P1"),
+    ] {
+        add(a, b, "all");
+    }
+    v
+}
+
+/// The transfer shapes' contrasts.
+fn r3_tcontrasts(find: bool) -> Vec<(&'static str, &'static str)> {
+    if find {
+        vec![
+            ("PXT", "PX1"),
+            ("PX1", "B1"),
+            ("T1s", "B1"),
+            ("H10x", "PXT"),
+            ("H10x1", "PX1"),
+            ("H9x", "PX1"),
+            ("H9x", "T1s"),
+            ("H18x", "PXT"),
+            ("H18x", "T1s"),
+            ("H18x", "H9x"),
+            ("LX[IDR,H9x]", "H9x"),
+            ("LX[IDR,H9x]", "H9xi"),
+            ("LX[IDR,T1s]", "T1s"),
+            ("LX[IDR,H18x]", "H18x"),
+            ("SELf2", "H9x"),
+            ("SELf2", "T1s"),
+            ("SELf2", "H18x"),
+            ("ALL5x", "H18x"),
+            ("ALL5x", "T1s"),
+            ("PX1", "T1s"),
+            ("PXT", "T1s"),
+            ("SELf2t", "T1s"),
+            ("SELf2t", "SELf2"),
+            ("SELf2t", "ALL5x"),
+            ("SELf3", "SELf2"),
+            ("LX[IDRH,H18x]", "LX[IDR,H18x]"),
+            ("LX[IDRH,H18x]", "LX[IDRH~,H18x]"),
+            ("LX[IDRH,H9x]", "LX[IDR,H9x]"),
+            ("LX[IDH,H9x]", "H9x"),
+        ]
+    } else {
+        vec![
+            ("PT*", "P1"),
+            ("H10", "P1"),
+            ("H10[PT*]", "PT*"),
+            ("H9s50", "P1"),
+            ("H18s[PT*]", "P1"),
+            ("LX[IDR,H9s50]", "H9s50"),
+            ("LX[IDR,H9s50]", "H9si"),
+            ("LX[IDR,H9s50]", "P1"),
+            ("LX[IDR,H18s[PT*]]", "P1"),
+            ("SELt2", "P1"),
+            ("SELt2", "H18s[PT*]"),
+            ("SELt3", "SELt2"),
+            ("SELt3", "P1"),
+            ("SELt3", "B0"),
+            ("SELt3a", "SELt3"),
+            ("SELt3x", "SELt3"),
+            ("SELt3x", "P1"),
+            ("B0", "P1"),
+            ("PT*", "B0"),
+            ("SELs0", "P1"),
+            ("SELs0", "B0"),
+            ("SELs0", "PT*"),
+            ("SELh0", "H10"),
+            ("SELh0", "H10[B0]"),
+            ("H10[B0]", "H10"),
+            ("LX[IDRH,H18s[PT*]]", "LX[IDR,H18s[PT*]]"),
+            ("LX[IDRH,H18s[PT*]]", "LX[IDRH~,H18s[PT*]]"),
+            ("LX[IDRH,H9s50]", "LX[IDR,H9s50]"),
+            ("Gmg[H18s[PT*]|H10[PT*]]", "H18s[PT*]"),
+            ("Gtm[H18s[PT*]|H10[PT*]]", "H18s[PT*]"),
+            ("Gpk[H18s[PT*]|H10[PT*]]", "H18s[PT*]"),
+            ("Gs1[H18s[PT*]|H10[PT*]]", "H18s[PT*]"),
+            ("Gmg[H9s50|P1]", "H9s50"),
+            ("Gtm[H9s50|P1]", "H9s50"),
+            ("Gpk[H9s50|P1]", "H9s50"),
+            ("Gs1[H9s50|P1]", "H9s50"),
+        ]
+    }
+}
+
+/// Mean metrics of every ranker over `idx` (NaN when empty).
+fn r3_means(results: &[Out], names: &[String], idx: &[usize]) -> serde_json::Map<String, serde_json::Value> {
+    let mut sj = serde_json::Map::new();
+    for (ri, n) in names.iter().enumerate() {
+        let mut m = [0.0; 5];
+        for &q in idx {
+            for (acc, x) in m.iter_mut().zip(results[q].m[ri]) {
+                *acc += x;
+            }
+        }
+        let m = m.map(|x| if idx.is_empty() { f64::NAN } else { x / idx.len() as f64 });
+        sj.insert(n.clone(), json!({"r5": m[0], "r10": m[1], "r20": m[2], "mrr": m[3], "ndcg20": m[4]}));
+    }
+    sj
+}
+
+#[allow(clippy::too_many_arguments)]
+fn r3_contrast_rows(results: &[Out], names: &[String], cs: &[(String, String, String)], subsets: &BTreeMap<String, Vec<usize>>, commit_of: &[usize], boot: usize, lf: &[f64], md: &mut String) -> Vec<serde_json::Value> {
+    let pos = |n: &str| names.iter().position(|x| x == n);
+    let col = |ri: usize, mi: usize| -> Vec<f64> { results.iter().map(|r| r.m[ri][mi]).collect() };
+    let mut cj = Vec::new();
+    for (a, b, s) in cs {
+        let (Some(ia), Some(ib)) = (pos(a), pos(b)) else { continue };
+        let Some(idx) = subsets.get(s) else { continue };
+        let mut cells = Vec::new();
+        for mi in [1usize, 3] {
+            match paired_sub(&col(ia, mi), &col(ib, mi), idx, commit_of, boot, lf) {
+                Some(p) => {
+                    cells.push(format!("{:+.3} [{:+.3}, {:+.3}]", p.mean, p.lo, p.hi));
+                    cj.push(json!({"a": a, "b": b, "metric": if mi == 1 { "r10" } else { "mrr" }, "subset": s, "n": idx.len(),
+                        "diff": p.mean, "lo": p.lo, "hi": p.hi, "p_sign": p.p, "wins": p.wins, "losses": p.losses}));
+                }
+                None => cells.push("-".into()),
+            }
+        }
+        md.push_str(&format!("| {a} | {b} | {s} | {} | {} |\n", idx.len(), cells.join(" | ")));
+    }
+    cj
+}
+
+/// The round-3 report: facts, metrics on the round-3 subsets, contrasts, and the transfer shapes.
+#[allow(clippy::too_many_arguments)]
+fn round3_report(
+    label: &str,
+    names: &[String],
+    results: &[Out],
+    bi: &BootIn,
+    transfer: &[(Vec<Out>, Vec<usize>)],
+    facts: &BTreeMap<String, f64>,
+    info: serde_json::Value,
+) -> (serde_json::Value, String) {
+    let (commit_of, boot, lf) = (bi.commit_of, bi.boot, bi.lf);
+    let nq = results.len();
+    let mut cov: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    cov.insert("all".into(), (0..nq).collect());
+    let mut flag: BTreeMap<String, Vec<bool>> = BTreeMap::new();
+    for (q, r) in results.iter().enumerate() {
+        for (k, on) in &r.r1cov {
+            flag.entry(k.clone()).or_insert_with(|| vec![false; nq])[q] = *on;
+        }
+    }
+    let get = |k: &str| flag.get(k).cloned().unwrap_or_else(|| vec![false; nq]);
+    let (idr_id, idr, idh_id, idh) = (get("idr_id"), get("idr"), get("idh_id"), get("idh"));
+    let sel = |f: &dyn Fn(usize) -> bool| -> Vec<usize> { (0..nq).filter(|&q| f(q)).collect() };
+    cov.insert("idr_id".into(), sel(&|q| idr_id[q]));
+    cov.insert("idr".into(), sel(&|q| idr[q]));
+    cov.insert("idh_id".into(), sel(&|q| idh_id[q]));
+    cov.insert("idh".into(), sel(&|q| idh[q]));
+    cov.insert("idr_miss".into(), sel(&|q| idr_id[q] && !idr[q]));
+    cov.insert("idh_new".into(), sel(&|q| idh[q] && !idr[q]));
+    let mut md = format!("### {label}: round 3\n\nFacts:\n\n");
+    for (k, v) in facts {
+        md.push_str(&format!("- {k}: {v}\n"));
+    }
+    let mut js = serde_json::Map::new();
+    js.insert("facts".into(), json!(facts));
+    js.insert("info".into(), info);
+    js.insert("subset_sizes".into(), json!(cov.iter().map(|(k, v)| (k.clone(), v.len())).collect::<BTreeMap<_, _>>()));
+    let mut mj = serde_json::Map::new();
+    for (s, idx) in &cov {
+        mj.insert(s.clone(), serde_json::Value::Object(r3_means(results, names, idx)));
+    }
+    js.insert("metrics".into(), serde_json::Value::Object(mj));
+    md.push_str("\nContrasts, single-seed shape (a - b; recall@10 and MRR; 95% commit-cluster CI):\n\n| a | b | subset | n | recall@10 | MRR |\n|---|---|---|---|---|---|\n");
+    let cs: Vec<(String, String, String)> = r3_contrasts().into_iter().map(|(a, b, s)| (a, b, s.to_string())).collect();
+    let cj = r3_contrast_rows(results, names, &cs, &cov, commit_of, boot, lf, &mut md);
+    js.insert("contrasts".into(), json!(cj));
+    // ---- transfer shapes ----
+    let mut tj = serde_json::Map::new();
+    for (si, (outs, tc_of)) in transfer.iter().enumerate() {
+        let shape = R3_SHAPES[si];
+        if outs.is_empty() {
+            continue;
+        }
+        let tnames = outs[0].names.clone();
+        let mut sub = BTreeMap::new();
+        sub.insert("all".to_string(), (0..outs.len()).collect::<Vec<usize>>());
+        md.push_str(&format!("\nTransfer shape {shape} ({} queries):\n\n| a | b | subset | n | recall@10 | MRR |\n|---|---|---|---|---|---|\n", outs.len()));
+        let cs: Vec<(String, String, String)> = r3_tcontrasts(si == 3).into_iter().map(|(a, b)| (a.to_string(), b.to_string(), "all".to_string())).collect();
+        let cj = r3_contrast_rows(outs, &tnames, &cs, &sub, tc_of, boot, lf, &mut md);
+        tj.insert(shape.to_string(), json!({"queries": outs.len(), "metrics": r3_means(outs, &tnames, &sub["all"]), "contrasts": cj}));
+    }
+    js.insert("transfer".into(), serde_json::Value::Object(tj));
+    (serde_json::Value::Object(js), md)
+}
+
+/// C: the merged history (ancestors first by author time, then interleaved with the repo's own
+/// commits by author time) and, per commit, whether it is the repo's own.
+struct R3Anc {
+    own: Vec<bool>,
+    at: HashMap<String, i64>,
+    facts: BTreeMap<String, f64>,
+    verify: Vec<serde_json::Value>,
+}
+
+/// `--r3-anc dir@rev=prefix@import,..`: each pre-merge repo's history at `rev`, its paths mapped onto
+/// `prefix/` (the true map, or a control: `--r3-anc-map perm:<j0,j1,..>` sends ancestor i onto ancestor
+/// j_i's subdirectory with its files permuted; `within` permutes files inside the right one). The map
+/// is verified by matching the ancestor's tree at `rev` against the import commit's `prefix/` tree.
+fn r3_ancestors(args: &Args, own: Vec<Commit>, paths: &[String], pidx: &HashMap<&str, u32>) -> (Vec<Commit>, R3Anc) {
+    let specs: Vec<(String, String, String, String)> = args
+        .r3_anc
+        .split(',')
+        .map(|s| {
+            let (a, b) = s.split_once('=').expect("--r3-anc dir@rev=prefix@import");
+            let (dir, rev) = a.rsplit_once('@').expect("--r3-anc dir@rev");
+            let (prefix, imp) = b.rsplit_once('@').expect("--r3-anc prefix@import");
+            (dir.to_string(), rev.to_string(), prefix.trim_end_matches('/').to_string(), imp.to_string())
+        })
+        .collect();
+    let mode = args.r3_anc_map.as_str();
+    let perm: Vec<usize> = match mode.strip_prefix("perm:") {
+        Some(p) => p.split(',').map(|x| x.trim().parse().expect("--r3-anc-map perm:<indices>")).collect(),
+        None => (0..specs.len()).collect(),
+    };
+    assert_eq!(perm.len(), specs.len(), "--r3-anc-map perm needs one index per ancestor");
+    let shuffle = !(mode.is_empty() || mode == "true");
+    let under = |p: &str| -> Vec<u32> {
+        let pre = format!("{p}/");
+        (0..paths.len() as u32).filter(|&f| paths[f as usize].starts_with(&pre)).collect()
+    };
+    let mut facts: BTreeMap<String, f64> = BTreeMap::new();
+    let mut verify = Vec::new();
+    let mut anc: Vec<(i64, usize, Commit)> = Vec::new();
+    let mut at: HashMap<String, i64> = HashMap::new();
+    for (i, (dir, rev, prefix, imp)) in specs.iter().enumerate() {
+        let parse = |t: &str, strip: &str| -> HashMap<String, String> {
+            t.lines()
+                .filter_map(|l| {
+                    let (meta, p) = l.split_once('\t')?;
+                    let blob = meta.split_whitespace().nth(2)?;
+                    Some((p.strip_prefix(strip).unwrap_or(p).to_string(), blob.to_string()))
+                })
+                .collect()
+        };
+        let ta = git_text(dir, &["ls-tree", "-r", rev]).unwrap_or_default();
+        let tb = git_text(&args.git, &["ls-tree", "-r", imp, "--", &format!("{prefix}/")]).unwrap_or_default();
+        let (ma, mb) = (parse(&ta, ""), parse(&tb, &format!("{prefix}/")));
+        let same_path = ma.keys().filter(|k| mb.contains_key(*k)).count();
+        let same_blob = ma.iter().filter(|(k, v)| mb.get(*k) == Some(*v)).count();
+        verify.push(json!({"ancestor": i, "prefix": prefix, "ancestor_files": ma.len(), "import_files": mb.len(),
+            "same_path": same_path, "same_path_and_blob": same_blob}));
+        let dom = under(prefix);
+        let mut range = under(&specs[perm[i]].2);
+        let mut rng = Rng(h64(&format!("r3anc:{mode}:{i}")));
+        for j in (1..range.len()).rev() {
+            let k = (rng.next() % (j as u64 + 1)) as usize;
+            range.swap(j, k);
+        }
+        let fmap: HashMap<u32, u32> =
+            if shuffle && !range.is_empty() { dom.iter().enumerate().map(|(j, &f)| (f, range[j % range.len()])).collect() } else { HashMap::new() };
+        let times = git_author_times(dir, rev);
+        let out = Command::new("git")
+            .args(["-C", dir, "log", "--topo-order", "--no-merges", "--no-renames", "--name-only", "--format=%x1e%H%x1f%B%x1f", rev])
+            .output()
+            .expect("git log (ancestor)");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (mut mentions, mut mapped) = (0usize, 0usize);
+        let mut list = Vec::new();
+        for rec in text.split('\x1e').skip(1) {
+            let mut parts = rec.splitn(3, '\x1f');
+            let sha = parts.next().unwrap_or("").trim().to_string();
+            let msg = parts.next().unwrap_or("").to_string();
+            let names = parts.next().unwrap_or("");
+            let mut files: Vec<u32> = Vec::new();
+            for l in names.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                mentions += 1;
+                if let Some(&f) = pidx.get(format!("{prefix}/{l}").as_str()) {
+                    mapped += 1;
+                    files.push(if shuffle { fmap.get(&f).copied().unwrap_or(f) } else { f });
+                }
+            }
+            files.sort_unstable();
+            files.dedup();
+            list.push(Commit { sha, msg, files });
+        }
+        list.reverse();
+        facts.insert(format!("r3_anc{i}_commits"), list.len() as f64);
+        facts.insert(format!("r3_anc{i}_file_mentions"), mentions as f64);
+        facts.insert(format!("r3_anc{i}_file_mentions_mapped"), mapped as f64);
+        for c in list {
+            let t = times.get(&c.sha).copied().unwrap_or(0);
+            at.insert(c.sha.clone(), t);
+            anc.push((t, i, c));
+        }
+    }
+    anc.sort_by_key(|x| (x.0, x.1));
+    let own_at = git_author_times(&args.git, &args.rev);
+    let mut merged = Vec::new();
+    let mut flag = Vec::new();
+    let mut ai = anc.into_iter().peekable();
+    for c in own {
+        let t = own_at.get(&c.sha).copied().unwrap_or(0);
+        while ai.peek().is_some_and(|x| x.0 <= t) {
+            merged.push(ai.next().expect("peeked").2);
+            flag.push(false);
+        }
+        merged.push(c);
+        flag.push(true);
+    }
+    for x in ai {
+        merged.push(x.2);
+        flag.push(false);
+    }
+    facts.insert("r3_anc_commits_before_first_own".into(), flag.iter().take_while(|&&o| !o).count() as f64);
+    eprintln!("[round3] ancestors ({mode}): {facts:?} verify={verify:?}");
+    (merged, R3Anc { own: flag, at, facts, verify })
+}
+
+/// `--r3-compare <a.json>,<b.json>`: paired b - a for every ranker the two runs' per-query dumps
+/// (`--r3-perq on`) share; the runs must have scored the same queries.
+fn r3_compare_main(args: &Args) {
+    let p: Vec<&str> = args.r3_compare.split(',').collect();
+    assert_eq!(p.len(), 2, "--r3-compare a.json,b.json");
+    let load = |f: &str| -> serde_json::Value { serde_json::from_str(&std::fs::read_to_string(f).expect("read json")).expect("parse json") };
+    let (a, b) = (load(p[0]), load(p[1]));
+    let (pa, pb) = (&a["perq"], &b["perq"]);
+    assert_eq!(pa["ids"], pb["ids"], "the two runs scored different queries");
+    let commit_of: Vec<usize> = pa["commit_of"].as_array().expect("commit_of").iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect();
+    let nc = commit_of.iter().max().map_or(0, |m| m + 1);
+    let lf = ln_fact_table(commit_of.len() + 1);
+    let col = |v: &serde_json::Value| -> Vec<f64> { v.as_array().map(|x| x.iter().map(|y| y.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default() };
+    let mut rows = Vec::new();
+    let mut md = format!("| ranker | a r@10 | b r@10 | b - a recall@10 | b - a MRR |\n|---|---|---|---|---|\n");
+    if let Some(ra) = pa["r10"].as_object() {
+        for (name, va) in ra {
+            let (Some(vb), Some(ma), Some(mb)) = (pb["r10"].get(name), pa["mrr"].get(name), pb["mrr"].get(name)) else { continue };
+            let (xa, xb, ya, yb) = (col(va), col(vb), col(ma), col(mb));
+            let r = paired(&xb, &xa, &commit_of, nc, args.boot, &lf);
+            let m = paired(&yb, &ya, &commit_of, nc, args.boot, &lf);
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+            md.push_str(&format!("| {name} | {:.3} | {:.3} | {:+.3} [{:+.3}, {:+.3}] | {:+.3} [{:+.3}, {:+.3}] |\n", mean(&xa), mean(&xb), r.mean, r.lo, r.hi, m.mean, m.lo, m.hi));
+            rows.push(json!({"ranker": name, "a_r10": mean(&xa), "b_r10": mean(&xb), "r10": {"diff": r.mean, "lo": r.lo, "hi": r.hi},
+                "a_mrr": mean(&ya), "b_mrr": mean(&yb), "mrr": {"diff": m.mean, "lo": m.lo, "hi": m.hi}}));
+        }
+    }
+    let doc = json!({"a": p[0], "b": p[1], "queries": commit_of.len(), "test_commits": nc,
+        "a_facts": a["round3"]["facts"], "b_facts": b["round3"]["facts"], "rows": rows});
+    std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write compare json");
+    std::fs::write(&args.md, md).expect("write compare md");
+    eprintln!("[rank_eval] compare {} -> {} rows -> {} {}", args.r3_compare, rows.len(), args.out, args.md);
 }
