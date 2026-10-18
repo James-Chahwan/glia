@@ -42,6 +42,15 @@
 //! R* chains); `--keys-out <dir>` gets the audit samples and the law tables. Kina's
 //! vertical mode also needs `--law-sources` / `--law-cache` (each instrument's
 //! section list). See `key_sig_names` and `keys_law`.
+//!
+//! Round 2 (2026-10-18): `--round2 on` (with `--round1 on`) routes each test commit's
+//! SUBJECT ids through the keyed resolvers at the parent revision (IDR: the defining
+//! units' names-file edges, pending / done, and the code citing the id; glia: packet ->
+//! files_touched) and adds SELt v2; see `r2_build`. The keyed vertical run gains the
+//! `+ns` (namespaced bare ids, `KNs`), `+roles` (role-aware joining, `KROLES`) and
+//! `+trank` (text as a ranker behind the typed links) variants, and the law run their
+//! chains. `--law-impact kina --law-event tr --keys on` traces a second law event (the
+//! Transitional Rules 2026, as made -> compilation 1); see `law_event_tr`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -143,6 +152,11 @@ struct Args {
     r1md: String,
     /// Round 1: the PPR config picked on the tuning repos (`<weights>,d<damping>`, sum-pooled), for the hybrids.
     pick: String,
+    /// Round 2: `on` adds the subject's ids as typed links (IDR) and SELt v2 (needs `--round1 on`).
+    round2: String,
+    /// Round 2: the law event of `--law-impact`: `act` (the AML/CTF Act, comp 59 -> 62) or `tr` (the
+    /// Transitional Rules 2026, as made -> compilation 1), traced through the resolved goal layer.
+    law_event: String,
 }
 
 fn parse_args() -> Args {
@@ -174,6 +188,8 @@ fn parse_args() -> Args {
         tune: String::new(),
         r1md: "rank_eval_round1.md".into(),
         pick: String::new(),
+        round2: String::new(),
+        law_event: "act".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -207,6 +223,8 @@ fn parse_args() -> Args {
             "--tune" => a.tune = v,
             "--r1md" => a.r1md = v,
             "--pick" => a.pick = v,
+            "--round2" => a.round2 = v,
+            "--law-event" => a.law_event = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -1164,7 +1182,11 @@ fn paired(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usi
 fn main() {
     let args = parse_args();
     if !args.law_impact.is_empty() {
-        law_impact_main(&args);
+        match args.law_event.as_str() {
+            "act" => law_impact_main(&args),
+            "tr" => law_event_tr(&args),
+            other => panic!("--law-event {other}: expected act or tr"),
+        }
         return;
     }
     let t_start = Instant::now();
@@ -1313,7 +1335,8 @@ fn main() {
     for (o, &k) in test_idx.iter().enumerate() {
         test_ord.insert(k, o);
     }
-    let hist: Option<R1Hist> = r1_on.then(|| r1_hist(&args, &commits, &test_idx.iter().copied().collect()));
+    let mut hist: Option<R1Hist> = r1_on.then(|| r1_hist(&args, &commits, &test_idx.iter().copied().collect()));
+    assert!(args.round2.is_empty() || r1_on, "--round2 needs --round1 on");
     let mut r1 = R1State::default();
     let mut r1s: Vec<R1Commit> = Vec::new();
     let mut bm_s = Bm25::default();
@@ -1397,6 +1420,15 @@ fn main() {
         }
         if let Some(h) = &hist {
             r1.step(h, k);
+        }
+    }
+    if args.round2 == "on" {
+        let (r2, st) = r2_build(&args, &commits, &test_idx, &g.paths, &pidx);
+        for (o, x) in r2.into_iter().enumerate() {
+            r1s[o].r2 = Some(x);
+        }
+        if let Some(h) = hist.as_mut() {
+            h.stats.extend(st);
         }
     }
     eprintln!(
@@ -1871,6 +1903,11 @@ struct Sig {
     post: Vec<Vec<u32>>,
     idf: Vec<f64>,
     names: Vec<String>,
+    /// Round 2: a weight per (file, node) link, aligned with `sets` (empty = every link 1.0)
+    wts: Vec<Vec<f32>>,
+    /// Round 2: a text weight per (node, file) posting, aligned with `post` (empty = none); the
+    /// `+trank` ranker orders the typed-link candidates by it
+    tw: Vec<Vec<f32>>,
 }
 
 impl Sig {
@@ -1894,18 +1931,61 @@ impl Sig {
             }
         }
         let idf = post.iter().map(|p| if p.is_empty() { 0.0 } else { (1.0 + nf as f64 / p.len() as f64).ln() }).collect();
-        Sig { sets, post, idf, names }
+        Sig { sets, post, idf, names, wts: Vec::new(), tw: Vec::new() }
+    }
+
+    /// Round 2: a set signal whose links carry weights (a names-file link from a done unit 0.5).
+    fn build_w(keyed: &[BTreeMap<String, f64>]) -> Sig {
+        let sets: Vec<BTreeSet<String>> = keyed.iter().map(|m| m.keys().cloned().collect()).collect();
+        let mut sig = Sig::build(&sets);
+        sig.wts = sig.sets.iter().enumerate().map(|(f, s)| s.iter().map(|&x| keyed[f][&sig.names[x as usize]] as f32).collect()).collect();
+        sig
+    }
+
+    fn weight(&self, f: usize, x: u32) -> f64 {
+        if self.wts.is_empty() {
+            return 1.0;
+        }
+        let i = self.sets[f].binary_search(&x).unwrap_or(0);
+        f64::from(self.wts[f].get(i).copied().unwrap_or(1.0))
     }
 
     fn score(&self, seed: usize) -> Vec<f64> {
         let mut s = vec![0.0; self.sets.len()];
-        for &x in &self.sets[seed] {
+        for (i, &x) in self.sets[seed].iter().enumerate() {
+            let ws = if self.wts.is_empty() { 1.0 } else { f64::from(self.wts[seed][i]) };
             for &f in &self.post[x as usize] {
-                s[f as usize] += self.idf[x as usize];
+                s[f as usize] += self.idf[x as usize] * ws * if self.wts.is_empty() { 1.0 } else { self.weight(f as usize, x) };
             }
         }
         s[seed] = 0.0;
         s
+    }
+
+    /// Round 2 (`+trank`): the typed-link candidates (score > 0) ordered by the text weight of the
+    /// nodes they share with the seed (min-max over the candidates), ties by the link score; a
+    /// file with no typed link scores 0, so text adds no candidate.
+    fn score_trank(&self, seed: usize) -> Vec<f64> {
+        let base = self.score(seed);
+        let mut t = vec![0.0f64; self.sets.len()];
+        if !self.tw.is_empty() {
+            for &x in &self.sets[seed] {
+                for (j, &f) in self.post[x as usize].iter().enumerate() {
+                    t[f as usize] += f64::from(self.tw[x as usize][j]);
+                }
+            }
+        }
+        let tmax = (0..base.len()).filter(|&f| f != seed && base[f] > 0.0).map(|f| t[f]).fold(0.0f64, f64::max);
+        let bmax = base.iter().copied().fold(0.0f64, f64::max);
+        (0..base.len())
+            .map(|f| {
+                if f == seed || base[f] <= 0.0 {
+                    0.0
+                } else {
+                    1.0 + if tmax > 0.0 { t[f] / tmax } else { 0.0 } + 1e-3 * base[f] / bmax.max(1e-12)
+                }
+            })
+            .collect()
     }
 
     /// The control: each file keeps its NUMBER of upper-layer links, but they are
@@ -1944,6 +2024,11 @@ impl Sig {
             .collect();
         Sig::from_sets(self.sets.len(), sets, self.names.clone())
     }
+}
+
+/// Round 2: a signal scored through `score_trank` in the vertical rankers (`<name>+trank`).
+fn is_trank(name: &str) -> bool {
+    name.ends_with("+trank")
 }
 
 struct VLayer {
@@ -2984,6 +3069,8 @@ struct VEnv<'a> {
     cache: BlobCache,
     /// Fourth run: the resolvers' shared state (None without `--keys`).
     keys: Option<KEnv>,
+    /// Round 2: where the keyed run writes its audits
+    keys_out: String,
 }
 
 /// The keyed run's state shared by every test commit's layer.
@@ -3037,7 +3124,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
         let mut sigs = sigs;
         if env.keys.is_some() {
             match env.mode {
-                VMode::Kina => key_sigs_kina(None, nf, sha, &mut sigs, &mut ctrls),
+                VMode::Kina => key_sigs_kina(None, None, None, nf, sha, &mut sigs, &mut ctrls),
                 VMode::Glia => key_sigs_glia(None, nf, sha, &mut sigs, &mut ctrls),
                 VMode::Quokka => {}
             }
@@ -3118,12 +3205,18 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             if let Some(ke) = &env.keys {
                 let code_lines = git_grep(env.git, &p, Some(KEYS_CODE_PAT), &[]);
                 let bm = ke.blobs.index(&p, nf);
-                let km = kina_model(&docs, &code_lines, &ke.kp, &env.pr, ke.known.as_ref().expect("--keys kina needs the law"), Some(&bm), nf, sha == ke.last_sha);
+                let known = ke.known.as_ref().expect("--keys kina needs the law");
+                let km = kina_model(&docs, &code_lines, &ke.kp, &env.pr, known, Some(&bm), nf, sha == ke.last_sha, false);
+                // round 2: the same revision with namespaced bare ids
+                let km_ns = kina_model(&docs, &code_lines, &ke.kp, &env.pr, known, Some(&bm), nf, sha == ke.last_sha, true);
                 for (k, v) in &km.stats {
                     *info.entry(k.clone()).or_default() += v;
                 }
-                key_sigs_kina(Some(&km), nf, sha, &mut sigs, &mut ctrls);
+                key_sigs_kina(Some(&km), Some(&km_ns), Some(&bm), nf, sha, &mut sigs, &mut ctrls);
                 kaudit = km.audit;
+                if sha == ke.last_sha {
+                    write_ns_audit(&ke_dir(env), &km_ns.ns_audit);
+                }
             }
             let gains = if env.keys.is_some() { key_gain_pairs(env.mode) } else { Vec::new() };
             VLayer { sigs, ctrls, vm: Some(vm), vm_cov, info, vocab, kaudit, gains }
@@ -3337,6 +3430,7 @@ fn build_layers(mode: VMode, args: &Args, paths: &[String], pidx: &HashMap<&str,
         wiki_lines: std::sync::Mutex::new(HashMap::new()),
         cache: BlobCache { text: std::sync::Mutex::new(HashMap::new()), packets: std::sync::Mutex::new(HashMap::new()) },
         keys,
+        keys_out: args.keys_out.clone(),
     };
     tests.par_iter().map(|(sha, msg)| build_layer(&env, sha, msg)).collect()
 }
@@ -3368,7 +3462,7 @@ fn vertical_rankers(out: &mut Out, vl: &VLayer, seed: usize, t: &[u32], p1: &[f6
         v
     };
     for (name, sig) in &vl.sigs {
-        let v = sig.score(seed);
+        let v = if is_trank(name) { sig.score_trank(seed) } else { sig.score(seed) };
         out.push(name.clone(), &scalar(&v), seed, t);
         let mm_v = minmax(&v, seed);
         // an ablated keyed signal (`VR1h-path`, `VR1h+text`) gets the two fixed blends only
@@ -6212,6 +6306,9 @@ fn law_impact_main(args: &Args) {
             comp_score: &comp_score,
             raw_sets: vec![("C1", set(0)), ("C1m", set(2)), ("C3", set(3)), ("C5", set(5))],
             raw_cited: (cited.len(), cited_changed.len()),
+            prefix: "law:AU-ACT:",
+            inst: "AU AML/CTF Act",
+            extra_secs: Vec::new(),
         });
     }
     std::fs::write(outp("law_impact.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write json");
@@ -6320,10 +6417,13 @@ struct KMask {
     raw_cite: bool,
     /// the weakest tier a link may have (HEURISTIC keeps every link)
     max_tier: Tier,
+    /// Round 2: role-aware joining (hops only along `implements` mentions, names-file links weighted
+    /// by the naming unit's state)
+    roles: bool,
 }
 
 impl KMask {
-    const FULL: KMask = KMask { drop: [false; 6], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic };
+    const FULL: KMask = KMask { drop: [false; 6], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic, roles: false };
     fn on(&self, kt: KT) -> bool {
         !self.drop[kt as usize]
     }
@@ -6333,7 +6433,9 @@ impl KMask {
 }
 
 /// The base joiner: every key type except the text fallback.
-const KBASE: KMask = KMask { drop: [false, false, false, false, false, true], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic };
+const KBASE: KMask = KMask { drop: [false, false, false, false, false, true], raw_path: false, raw_scoped: false, raw_cite: false, max_tier: Tier::Heuristic, roles: false };
+/// Round 2: the base joiner with roles on.
+const KROLES: KMask = KMask { roles: true, ..KBASE };
 
 /// The ablations against the base: (name suffix, joiner variant). `-<type>` drops the type's
 /// links; `-raw<type>` reads the type through the earlier runs' raw matching instead;
@@ -6983,6 +7085,31 @@ struct KBm {
 }
 
 impl KBm {
+    /// Round 2: BM25 of a unit's text against each of the given files (0 when nothing matches).
+    fn score_files(&self, text: &str, files: &[u32]) -> Vec<f64> {
+        let mut q: Vec<u64> = law_code_tokens(text).iter().map(|t| h64(t)).collect();
+        q.sort_unstable();
+        q.dedup();
+        let want: HashMap<u32, usize> = files.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+        let mut out = vec![0.0; files.len()];
+        if self.n == 0 {
+            return out;
+        }
+        for t in q {
+            let Some(pl) = self.post.get(&t) else { continue };
+            let df = pl.len() as f64;
+            let idf = (1.0 + (self.n as f64 - df + 0.5) / (df + 0.5)).ln();
+            for &(d, tf) in pl {
+                if let Some(&i) = want.get(&d) {
+                    let tf = f64::from(tf);
+                    let dl = f64::from(self.dl[d as usize]);
+                    out[i] += idf * tf * (BM25_K1 + 1.0) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / self.avg));
+                }
+            }
+        }
+        out
+    }
+
     /// The top `k` files by BM25 of a unit's text (score > 0), best first.
     fn top(&self, text: &str, k: usize) -> Vec<(u32, f64)> {
         let mut q: Vec<u64> = law_code_tokens(text).iter().map(|t| h64(t)).collect();
@@ -7647,6 +7774,26 @@ struct KBlock {
     raw_id_keys: Vec<String>,
     files: Vec<(u32, Tier, &'static str)>,
     text_files: Vec<(u32, f64)>,
+    /// Round 2: the resolved keys this block mentions in the `implements` role
+    impl_keys: Vec<String>,
+}
+
+/// Round 2: a doc mention's role is `implements` when its block is a checkbox task, or an
+/// implementing verb stands just before it (`implements FR-002`, `per D4`); otherwise `cites`.
+fn krole_implements(b: &KBlock, line: &str, id: &str) -> bool {
+    if kblock_state(b).is_some() {
+        return true;
+    }
+    let Some(p) = line.find(id) else { return false };
+    let mut a = p.saturating_sub(24);
+    while !line.is_char_boundary(a) {
+        a -= 1;
+    }
+    let before = line[a..p].to_ascii_lowercase();
+    let before = before.trim_end_matches(['(', '[', ' ', '*', '`']);
+    ["implements", "implementing", "implement", "satisfies", "covers", "addresses", "fixes", "closes", "resolves", "per", "delivers"]
+        .iter()
+        .any(|v| before.ends_with(v) && before[..before.len() - v.len()].chars().last().is_none_or(|c| !c.is_alphanumeric()))
 }
 
 struct KPage {
@@ -7671,6 +7818,275 @@ struct KinaModel {
     doc_ids: HashSet<String>,
     stats: BTreeMap<String, f64>,
     audit: Vec<KAudit>,
+    /// Round 2: the id scopes pass B built (the subject's ids resolve against them).
+    kids: Option<KIds>,
+    /// Round 2 (`ns`): every bare-id mention's (at, mention, base key, ns key, ns route), for the audit
+    ns_audit: Vec<(String, String, String, String, &'static str)>,
+}
+
+/// Round 2 (`ns`): a bare-id series is the ids one page defines under one letter; its namespace
+/// is the page (in a spec, `<spec>/<file>`), so "series X's D6" is a key, never a bare D6. A
+/// findings series (the page or the headings over it name an analysis / review, none of them a
+/// decision) is local to its page; a series restated on another page (3+ shared ids whose rows
+/// share words) is one namespace with it.
+struct KNs {
+    /// (page, id) -> the namespace of that page's definition
+    def: HashMap<(usize, String), String>,
+    /// id -> its series: (namespace, page-local, spec scope, defining page)
+    by_id: HashMap<String, Vec<KSer>>,
+    /// namespace -> the page scopes it spans
+    scopes: HashMap<String, BTreeSet<String>>,
+    /// (namespace, id) -> the defining row's text (the text-rank step reads it)
+    rows: HashMap<(String, String), String>,
+    stats: BTreeMap<String, f64>,
+}
+
+/// One bare-id series: (namespace, page-local findings series, spec scope, defining page).
+type KSer = (String, bool, Option<String>, usize);
+
+/// A mention's (base, namespaced) resolutions.
+type KResPair = (Result<KRes, &'static str>, Result<KRes, &'static str>);
+
+/// The context of one bare mention, strongest evidence first.
+struct KNsCtx<'a> {
+    own_page: Option<usize>,
+    /// specs written next to the id
+    line: Vec<String>,
+    /// the page's own spec (a doc page inside a spec)
+    own_spec: Option<String>,
+    /// the doc pages this page names
+    named: Vec<String>,
+    /// specs the page (or the code file) names
+    file: Vec<String>,
+    /// code: the specs whose docs name the file
+    path: Vec<String>,
+    text: &'a str,
+}
+
+const KNS_LOCAL: &[&str] = &["analysis", "finding", "remediation", "review", "audit"];
+
+impl KNs {
+    fn build(m: &KinaModel) -> KNs {
+        let mut stats0: BTreeMap<String, f64> = BTreeMap::new();
+        let mut ser: BTreeMap<(usize, u8), BTreeMap<String, String>> = BTreeMap::new();
+        let mut local: HashMap<(usize, u8), bool> = HashMap::new();
+        for b in &m.blocks {
+            // a table row defines an id only when its key cell is the id alone (`| D7 |`); a cell
+            // such as `D7 rollout` labels an item about D7
+            let first = b.text.lines().next().unwrap_or("");
+            let key_cell = first.trim_start().starts_with('|').then(|| kcells(first).into_iter().next().unwrap_or_default());
+            for (id, bare) in &b.raw_defs {
+                if !*bare || id.is_empty() {
+                    continue;
+                }
+                if let Some(c) = &key_cell
+                    && c.trim_matches(|x: char| x == '*' || x == '`' || x == ' ') != id
+                {
+                    kbump(&mut stats0, "k_ns_label_row_not_a_definition");
+                    continue;
+                }
+                let (pi, letter) = (b.page as usize, id.as_bytes()[0]);
+                let row = b.text.lines().next().unwrap_or("").replace(id.as_str(), " ");
+                ser.entry((pi, letter)).or_default().entry(id.clone()).or_insert(row);
+                let mut chain = String::new();
+                let mut nearest: Option<String> = None;
+                let mut u = Some(b.unit);
+                while let Some(x) = u {
+                    let h = m.heads[x as usize].1.rsplit(" \u{a7} ").next().unwrap_or("").to_ascii_lowercase();
+                    if nearest.is_none() && h != "(top)" {
+                        nearest = Some(h.clone());
+                    }
+                    chain.push_str(&h);
+                    chain.push(' ');
+                    u = m.head_parent[x as usize];
+                }
+                let file = m.pages[pi].path.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+                let words = format!("{file} {chain}");
+                let is_local = KNS_LOCAL.iter().any(|w| words.contains(w)) && !nearest.as_deref().unwrap_or("").contains("decision");
+                let e = local.entry((pi, letter)).or_insert(is_local);
+                *e = *e && is_local;
+            }
+        }
+        let keys: Vec<(usize, u8)> = ser.keys().copied().collect();
+        let name0 = |pi: usize| -> String {
+            let p = &m.pages[pi];
+            if p.scope.starts_with("specs/") { format!("{}/{}", p.scope, p.path.rsplit('/').next().unwrap_or("")) } else { p.path.clone() }
+        };
+        let mut parent: Vec<usize> = (0..keys.len()).collect();
+        fn find(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x];
+            }
+            x
+        }
+        let mut stats = stats0;
+        for i in 0..keys.len() {
+            for j in i + 1..keys.len() {
+                let (a, b) = (keys[i], keys[j]);
+                if a.1 != b.1 || a.0 == b.0 || local[&a] || local[&b] {
+                    continue;
+                }
+                let (sa, sb) = (&ser[&a], &ser[&b]);
+                let shared: Vec<&String> = sa.keys().filter(|k| sb.contains_key(*k)).collect();
+                if shared.len() < 3 {
+                    continue;
+                }
+                let dice: f64 = shared.iter().map(|k| law_dice(&sa[*k], &sb[*k])).sum::<f64>() / shared.len() as f64;
+                if dice >= 0.3 {
+                    let (ra, rb) = (find(&mut parent, i), find(&mut parent, j));
+                    if ra != rb {
+                        parent[rb] = ra;
+                        kbump(&mut stats, "k_ns_restated_merges");
+                    }
+                }
+            }
+        }
+        // a component's namespace: its spec member's (least), else its least name
+        let mut comp: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..keys.len() {
+            let r = find(&mut parent, i);
+            comp.entry(r).or_default().push(i);
+        }
+        let mut def = HashMap::new();
+        let mut rows: HashMap<(String, String), String> = HashMap::new();
+        let mut by_id: HashMap<String, Vec<KSer>> = HashMap::new();
+        let mut scopes: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for members in comp.values() {
+            let spec_m: Option<&usize> = members.iter().filter(|&&i| m.pages[keys[i].0].scope.starts_with("specs/")).min_by_key(|&&i| name0(keys[i].0));
+            let name = match spec_m {
+                Some(&i) => name0(keys[i].0),
+                None => members.iter().map(|&i| name0(keys[i].0)).min().unwrap_or_default(),
+            };
+            let spec = spec_m.map(|&i| m.pages[keys[i].0].scope.clone());
+            for &i in members {
+                let (pi, _) = keys[i];
+                scopes.entry(name.clone()).or_default().insert(m.pages[pi].scope.clone());
+                for (id, row) in &ser[&keys[i]] {
+                    rows.entry((name.clone(), id.clone())).or_insert_with(|| row.clone());
+                    def.insert((pi, id.clone()), name.clone());
+                    let v = by_id.entry(id.clone()).or_default();
+                    if !v.iter().any(|x| x.0 == name) {
+                        v.push((name.clone(), local[&keys[i]], spec.clone(), pi));
+                    }
+                }
+            }
+            kbump(&mut stats, if members.iter().all(|&i| local[&keys[i]]) { "k_ns_series_local" } else { "k_ns_series_exported" });
+        }
+        if let Ok(want) = std::env::var("GLIA_NS_DEBUG") {
+            eprintln!("[ns-debug] {want}: {:?}", by_id.get(&want));
+        }
+        KNs { def, by_id, scopes, rows, stats }
+    }
+
+    /// Same-line siblings: `D2/D5` names one series. A mention resolved by a weak route takes the
+    /// namespace a strongly resolved sibling (same letter, same line) got, when it defines the id.
+    fn siblings(&self, ments: &[(u32, &str)], res: &mut [Result<KRes, &'static str>]) {
+        let weak = |r: &str| matches!(r, "ns-path-scope" | "ns-text-rank");
+        let ns_of = |k: &str| k.strip_prefix("id:").and_then(|x| x.rsplit_once('|')).map(|x| x.0.to_string());
+        for i in 0..ments.len() {
+            let Ok((_, _, r)) = &res[i] else { continue };
+            if !weak(r) {
+                continue;
+            }
+            let (line, id) = ments[i];
+            let mut got: Option<String> = None;
+            for j in 0..ments.len() {
+                if j == i || ments[j].0 != line || ments[j].1.as_bytes().first() != id.as_bytes().first() {
+                    continue;
+                }
+                if let Ok((k, _, rj)) = &res[j]
+                    && !weak(rj)
+                    && rj.starts_with("ns-")
+                    && let Some(n) = ns_of(k)
+                    && self.by_id.get(id).is_some_and(|v| v.iter().any(|x| x.0 == n))
+                {
+                    got = Some(n);
+                    break;
+                }
+            }
+            if let Some(n) = got {
+                res[i] = Ok((format!("id:{n}|{id}"), Tier::Derived, "ns-sibling"));
+            }
+        }
+    }
+
+    /// A bare mention under the namespace rules, strongest evidence first: its own page's series;
+    /// else among the series visible here (a local findings series only on its page): one in a spec
+    /// written next to it, the base resolution when it came from the same line (`cocite*`), the
+    /// page's own spec, a doc the page names, a spec the page or file names, the one global
+    /// (non-spec) series, a spec whose docs name the file; else (HEURISTIC) the candidate whose
+    /// defining row shares the most words with the mention's line.
+    fn resolve(&self, id: &str, cx: &KNsCtx, base: Result<KRes, &'static str>) -> Result<KRes, &'static str> {
+        let key = |n: &str| format!("id:{n}|{id}");
+        if let Some(pi) = cx.own_page
+            && let Some(n) = self.def.get(&(pi, id.to_string()))
+        {
+            return Ok((key(n), Tier::Fact, "ns-own-page"));
+        }
+        let Some(all) = self.by_id.get(id) else { return base };
+        // a findings series is visible on its page and the other pages of its spec
+        let vis: Vec<&KSer> =
+            all.iter().filter(|x| !x.1 || Some(x.3) == cx.own_page || (x.2.is_some() && x.2 == cx.own_spec)).collect();
+        if vis.is_empty() {
+            return Err("ns-local-only");
+        }
+        if vis.len() == 1 {
+            return Ok((key(&vis[0].0), Tier::Derived, "ns-unique"));
+        }
+        let in_scope = |x: &KSer, c: &str| x.2.as_deref() == Some(c) || self.scopes.get(&x.0).is_some_and(|s| s.contains(c));
+        // one series in the first context scope that has any; a decision series before a findings one
+        let pick = |list: &[String]| -> Option<String> {
+            for c in list {
+                let hit: Vec<&&KSer> = vis.iter().filter(|x| in_scope(x, c)).collect();
+                if hit.len() == 1 {
+                    return Some(hit[0].0.clone());
+                }
+                let exported: Vec<&&&KSer> = hit.iter().filter(|x| !x.1).collect();
+                if exported.len() == 1 {
+                    return Some(exported[0].0.clone());
+                }
+            }
+            None
+        };
+        if let Some(n) = pick(&cx.line) {
+            return Ok((key(&n), Tier::Derived, "ns-line-spec"));
+        }
+        if let Ok((k, t, r)) = &base
+            && (*r == "cocite" || *r == "cocite-dir")
+            && let Some((sc, _)) = k.strip_prefix("id:").and_then(|x| x.rsplit_once('|'))
+            && let Some(n) = pick(&[sc.to_string()])
+        {
+            return Ok((key(&n), *t, "ns-cocite"));
+        }
+        if let Some(n) = cx.own_spec.as_ref().and_then(|s| pick(std::slice::from_ref(s))) {
+            return Ok((key(&n), Tier::Derived, "ns-own-spec"));
+        }
+        if let Some(n) = pick(&cx.named) {
+            return Ok((key(&n), Tier::Derived, "ns-named-doc"));
+        }
+        if let Some(n) = pick(&cx.file) {
+            return Ok((key(&n), Tier::Derived, "ns-file-spec"));
+        }
+        let global: Vec<&&KSer> = vis.iter().filter(|x| x.2.is_none()).collect();
+        if global.len() == 1 {
+            return Ok((key(&global[0].0), Tier::Derived, "ns-global"));
+        }
+        if let Some(n) = pick(&cx.path) {
+            return Ok((key(&n), Tier::Derived, "ns-path-scope"));
+        }
+        // text as a ranker among the typed candidates (never a new candidate)
+        let mut best: Option<(f64, String)> = None;
+        for x in &vis {
+            let row = self.rows.get(&(x.0.clone(), id.to_string())).map_or("", String::as_str);
+            let d = law_dice(row, cx.text);
+            if best.as_ref().is_none_or(|b| d > b.0 || (d == b.0 && x.0 < b.1)) {
+                best = Some((d, x.0.clone()));
+            }
+        }
+        let (_, n) = best.expect("two or more visible series");
+        Ok((key(&n), Tier::Heuristic, "ns-text-rank"))
+    }
 }
 
 const KEYS_CODE_PAT: &str = "[A-Z][A-Z0-9]{1,6}-[0-9]|[TRCD][0-9]|US[0-9]|User Story|[Ss][Pp][Ee][Cc]|[0-9]{3}[ -]|Act|Rules?|Regulation|Directive|(^|[^A-Za-z0-9_'$])s{1,2}[.]? ?[0-9]|[Ss]ections? [0-9]|[Dd]ecisions? [0-9]|[Rr]ows? [0-9]";
@@ -8096,6 +8512,7 @@ fn kina_model(
     bm: Option<&KBm>,
     nf: usize,
     audit: bool,
+    ns: bool,
 ) -> KinaModel {
     let mut m = KinaModel {
         pages: Vec::new(),
@@ -8110,6 +8527,8 @@ fn kina_model(
         doc_ids: HashSet::new(),
         stats: BTreeMap::new(),
         audit: Vec::new(),
+        kids: None,
+        ns_audit: Vec::new(),
     };
     let mut groups: Vec<(usize, usize)> = Vec::new();
     for (i, (p, _)) in docs.iter().enumerate() {
@@ -8155,6 +8574,13 @@ fn kina_model(
     }
     for p in ["FR", "SC"] {
         ids.scoped.insert(p.to_string());
+    }
+    // ---- pass B2 (round 2, `ns`): bare-id series namespaces ----
+    let kns: Option<KNs> = ns.then(|| KNs::build(&m));
+    if let Some(k) = &kns {
+        for (a, b) in &k.stats {
+            *m.stats.entry(a.clone()).or_default() += b;
+        }
     }
     // ---- pass C: resolve ----
     let line_of = |m: &KinaModel, b: &KBlock, ln: u32| -> String {
@@ -8261,6 +8687,45 @@ fn kina_model(
         // the docs the page names (`[DECISIONS](plans/decisions)`) scope the ids it reviews
         let named_scopes: Vec<String> = named_pages[pi].iter().map(|&q| m.pages[q].scope.clone()).collect();
         let res = ids.resolve_all(&refs, own, &page_specs, &named_scopes, "named-doc");
+        let res: Vec<Result<KRes, &'static str>> = match &kns {
+            None => res,
+            Some(kn) => {
+                let pairs: Vec<KResPair> = ments
+                    .iter()
+                    .zip(res)
+                    .map(|((bi, rm), r)| {
+                        if !rm.bare {
+                            return (r.clone(), r);
+                        }
+                        let text = line_of(&m, &m.blocks[*bi], rm.line);
+                        let cx = KNsCtx {
+                            own_page: Some(pi),
+                            line: rm.specs.iter().filter_map(|n| ids.spec_scope.get(n).cloned()).collect(),
+                            own_spec: scope.starts_with("specs/").then(|| scope.clone()),
+                            named: named_scopes.clone(),
+                            file: page_specs.iter().filter_map(|n| ids.spec_scope.get(n).cloned()).collect(),
+                            path: Vec::new(),
+                            text: &text,
+                        };
+                        (r.clone(), kn.resolve(&rm.id, &cx, r))
+                    })
+                    .collect();
+                let (base_v, mut ns_v): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+                let keys: Vec<(u32, &str)> = ments.iter().map(|(_, rm)| (rm.line, rm.id.as_str())).collect();
+                kn.siblings(&keys, &mut ns_v);
+                if audit {
+                    let show = |x: &Result<KRes, &'static str>| x.as_ref().map_or_else(|e| format!("ERR:{e}"), |v| format!("{} [{}]", v.0, v.2));
+                    for (k, (bi, rm)) in ments.iter().enumerate() {
+                        if rm.bare {
+                            let b = &m.blocks[*bi];
+                            let row = (at_of(&m, b, rm.line), format!("{} :: {}", rm.id, line_of(&m, b, rm.line)), show(&base_v[k]), show(&ns_v[k]), ns_v[k].as_ref().map_or("unresolved", |v| v.2));
+                            m.ns_audit.push(row);
+                        }
+                    }
+                }
+                ns_v
+            }
+        };
         for ((bi, rm), r) in ments.iter().zip(res) {
             m.blocks[*bi].raw_id_keys.push(format!("id:{}", rm.id));
             match r {
@@ -8270,6 +8735,13 @@ fn kina_model(
                         audit_v.push(KAudit { kt: KT::Scoped, tier, route, at: at_of(&m, b, rm.line), mention: format!("{} :: {}", rm.id, line_of(&m, b, rm.line)), target: k.clone() });
                     }
                     kbump(&mut m.stats, format!("k_scoped_doc_{route}"));
+                    let line = docs.get(m.pages[pi].start + rm.line as usize).map_or("", |x| x.1.as_str());
+                    if krole_implements(&m.blocks[*bi], line, &rm.id) {
+                        kbump(&mut m.stats, "k_role_implements");
+                        m.blocks[*bi].impl_keys.push(k.clone());
+                    } else {
+                        kbump(&mut m.stats, "k_role_cites");
+                    }
                     m.blocks[*bi].refs.push(KRef { kt: KT::Scoped, key: k, tier, route });
                 }
                 Err(e) => kbump(&mut m.stats, format!("k_scoped_doc_{e}")),
@@ -8278,7 +8750,11 @@ fn kina_model(
         for &bi in &by_page[pi] {
             let defs: Vec<(String, bool)> = m.blocks[bi].raw_defs.clone();
             for (id, bare) in defs {
-                let k = if ids.is_scoped(&id, bare) { format!("id:{}|{id}", KIds::def_scope(&scope, bare)) } else { format!("id:{id}") };
+                let k = match kns.as_ref().and_then(|kn| bare.then(|| kn.def.get(&(pi, id.clone()))).flatten()) {
+                    Some(n) => format!("id:{n}|{id}"),
+                    None if ids.is_scoped(&id, bare) => format!("id:{}|{id}", KIds::def_scope(&scope, bare)),
+                    None => format!("id:{id}"),
+                };
                 m.blocks[bi].defs.push((KT::Scoped, k));
             }
             if let Some(r) = m.blocks[bi].row.clone() {
@@ -8304,6 +8780,9 @@ fn kina_model(
                             audit_v.push(KAudit { kt: KT::Row, tier, route, at: at_of(&m, b, ln), mention: line_of(&m, b, ln), target: format!("{k} :: {def}") });
                         }
                         kbump(&mut m.stats, format!("k_row_ref_{route}"));
+                        if kblock_state(&m.blocks[bi]).is_some() {
+                            m.blocks[bi].impl_keys.push(k.clone());
+                        }
                         m.blocks[bi].refs.push(KRef { kt: KT::Row, key: k, tier, route });
                     }
                 }
@@ -8545,6 +9024,42 @@ fn kina_model(
         }
         push(Some(&dir_sc), &mut extra);
         let res = ids.resolve_all(&refs, None, &file_specs, &extra, "path-scope");
+        let res: Vec<Result<KRes, &'static str>> = match &kns {
+            None => res,
+            Some(kn) => {
+                let pairs: Vec<KResPair> = raw
+                    .iter()
+                    .zip(res)
+                    .map(|(rm, r)| {
+                        if !rm.bare {
+                            return (r.clone(), r);
+                        }
+                        let cx = KNsCtx {
+                            own_page: None,
+                            line: rm.specs.iter().filter_map(|n| ids.spec_scope.get(n).cloned()).collect(),
+                            own_spec: None,
+                            named: Vec::new(),
+                            file: file_specs.iter().filter_map(|n| ids.spec_scope.get(n).cloned()).collect(),
+                            path: extra.clone(),
+                            text: lines[rm.line as usize],
+                        };
+                        (r.clone(), kn.resolve(&rm.id, &cx, r))
+                    })
+                    .collect();
+                let (base_v, mut ns_v): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+                let keys: Vec<(u32, &str)> = raw.iter().map(|rm| (rm.line, rm.id.as_str())).collect();
+                kn.siblings(&keys, &mut ns_v);
+                if audit {
+                    let show = |x: &Result<KRes, &'static str>| x.as_ref().map_or_else(|e| format!("ERR:{e}"), |v| format!("{} [{}]", v.0, v.2));
+                    for (k, rm) in raw.iter().enumerate() {
+                        if rm.bare {
+                            m.ns_audit.push((format!("{path}:{}", rm.line + 1), format!("{} :: {}", rm.id, kexcerpt(lines[rm.line as usize])), show(&base_v[k]), show(&ns_v[k]), ns_v[k].as_ref().map_or("unresolved", |v| v.2)));
+                        }
+                    }
+                }
+                ns_v
+            }
+        };
         if audit && std::env::var("GLIA_KEYS_DEBUG").is_ok() {
             for (rm, r) in raw.iter().zip(&res) {
                 if let Err(e) = r {
@@ -8597,6 +9112,7 @@ fn kina_model(
     m.stats.insert("k_lineage_edges".into(), m.lineage.len() as f64);
     m.stats.insert("k_scoped_prefixes".into(), ids.scoped.len() as f64);
     m.audit = audit_v;
+    m.kids = Some(ids);
     m
 }
 
@@ -8619,6 +9135,9 @@ struct KSets {
     r3h: Vec<BTreeSet<String>>,
     /// law at the instrument level (r3h's instruments)
     r3a: Vec<BTreeSet<String>>,
+    /// Round 2 (roles on): r1h and r2u with each link's weight (a names-file link from a done unit 0.5)
+    r1hw: Vec<BTreeMap<String, f64>>,
+    r2uw: Vec<BTreeMap<String, f64>>,
 }
 
 const KHUB: usize = 40;
@@ -8628,6 +9147,8 @@ struct KBk {
     defs: Vec<(KT, String)>,
     refs: Vec<String>,
     cites: Vec<String>,
+    /// Round 2: the classes of the refs in the `implements` role
+    impl_refs: Vec<String>,
 }
 
 /// One joiner variant's keys: the lineage classes, each block's keys, each code file's id and
@@ -8657,6 +9178,12 @@ fn kina_keys(m: &KinaModel, mask: KMask) -> KKeys {
     for (bi, b) in m.blocks.iter().enumerate() {
         let defs: Vec<(KT, String)> = b.defs.iter().filter(|d| mask.on(d.0)).flat_map(|d| c(&idk(&d.1)).into_iter().map(move |x| (d.0, x))).collect();
         let refs: Vec<String> = b.refs.iter().filter(|r| matches!(r.kt, KT::Scoped | KT::Row) && mask.keeps(r)).flat_map(|r| c(&idk(&r.key))).collect();
+        let impl_refs: Vec<String> = b
+            .refs
+            .iter()
+            .filter(|r| matches!(r.kt, KT::Scoped | KT::Row) && mask.keeps(r) && b.impl_keys.contains(&r.key))
+            .flat_map(|r| c(&idk(&r.key)))
+            .collect();
         let cites: Vec<String> = if !mask.on(KT::Cite) {
             Vec::new()
         } else if mask.raw_cite {
@@ -8682,7 +9209,7 @@ fn kina_keys(m: &KinaModel, mask: KMask) -> KKeys {
                 names[f as usize].push(bi as u32);
             }
         }
-        bks.push(KBk { defs, refs, cites });
+        bks.push(KBk { defs, refs, cites, impl_refs });
     }
     for v in names.iter_mut() {
         v.sort_unstable();
@@ -8730,10 +9257,12 @@ fn kina_join(m: &KinaModel, mask: KMask, perm: Option<&HashMap<usize, usize>>) -
         for d in &b.defs {
             def_blocks.entry(d.1.as_str()).or_default().push(bi as u32);
         }
-        for r in &b.refs {
+        // roles on: only an `implements` mention links a block to a key it does not define
+        for r in if mask.roles { &b.impl_refs } else { &b.refs } {
             ref_blocks.entry(r.as_str()).or_default().push(bi as u32);
         }
     }
+    let w_of = |b: u32| if mask.roles && kblock_state(&m.blocks[b as usize]) == Some(false) { R2_W_DONE } else { 1.0 };
     let inst = |k: &str| -> String {
         let parts: Vec<&str> = k.split(':').collect();
         if parts.len() >= 4 && parts[1] == "OTHER" { format!("law:OTHER:{}", parts[2]) } else { parts[..parts.len().min(2)].join(":") }
@@ -8752,13 +9281,34 @@ fn kina_join(m: &KinaModel, mask: KMask, perm: Option<&HashMap<usize, usize>>) -
         }
         let mut r1h = r1.clone();
         for &b in named {
-            r1h.extend(bks[b as usize].refs.iter().cloned());
+            r1h.extend(if mask.roles { bks[b as usize].impl_refs.iter() } else { bks[b as usize].refs.iter() }.cloned());
+        }
+        if mask.roles {
+            let mut w: BTreeMap<String, f64> = code_ids[f].iter().map(|k| (k.clone(), 1.0)).collect();
+            for &b in named {
+                let bk = &bks[b as usize];
+                let keys: Vec<String> = if bk.defs.is_empty() { vec![format!("blk:{b}")] } else { bk.defs.iter().map(|d| d.1.clone()).collect() };
+                for k in keys.into_iter().chain(bk.impl_refs.iter().cloned()) {
+                    let e = w.entry(k).or_insert(0.0);
+                    *e = e.max(w_of(b));
+                }
+            }
+            out.r1hw.push(w);
         }
         let mut related: BTreeSet<u32> = named.iter().copied().collect();
         for k in &code_ids[f] {
             related.extend(def_blocks.get(k.as_str()).into_iter().flatten().copied());
         }
         let r2u: BTreeSet<String> = related.iter().map(|&b| format!("u:{}", m.blocks[b as usize].unit)).collect();
+        if mask.roles {
+            let mut w: BTreeMap<String, f64> = BTreeMap::new();
+            for &b in &related {
+                let wb = if named.contains(&b) { w_of(b) } else { 1.0 };
+                let e = w.entry(format!("u:{}", m.blocks[b as usize].unit)).or_insert(0.0);
+                *e = e.max(wb);
+            }
+            out.r2uw.push(w);
+        }
         let mut r2d: BTreeSet<String> = related.iter().map(|&b| kina_unit(&m.pages[m.blocks[b as usize].page as usize].path)).collect();
         r2d.extend(m.code_specs[f].iter().cloned());
         let mut r3b: BTreeSet<String> = code_cites[f].iter().cloned().collect();
@@ -8768,7 +9318,7 @@ fn kina_join(m: &KinaModel, mask: KMask, perm: Option<&HashMap<usize, usize>>) -
         let mut related1 = related.clone();
         for &b in &related {
             let bk = &bks[b as usize];
-            for k in bk.defs.iter().map(|d| &d.1).chain(&bk.refs) {
+            for k in bk.defs.iter().map(|d| &d.1).chain(if mask.roles { &bk.impl_refs } else { &bk.refs }) {
                 let d = def_blocks.get(k.as_str()).map_or(0, Vec::len);
                 let r = ref_blocks.get(k.as_str()).map_or(0, Vec::len);
                 if d + r > KHUB {
@@ -9007,6 +9557,8 @@ struct GliaModel {
     lineage: Vec<(String, String, Tier, &'static str)>,
     stats: BTreeMap<String, f64>,
     audit: Vec<KAudit>,
+    /// Round 2: the defined packets each packet's prose names (a mention, not a definition).
+    pk_ment: Vec<Vec<String>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9142,9 +9694,17 @@ fn glia_model(
     let mut pk_files = vec![Vec::new(); n];
     let mut pk_files_raw = vec![Vec::new(); n];
     let mut pk_q: Vec<Vec<KRef>> = vec![Vec::new(); n];
+    let mut pk_ment: Vec<Vec<String>> = vec![Vec::new(); n];
     let mut lineage = Vec::new();
     for (i, id) in pk_ids.iter().enumerate() {
         let (pk, plan) = &pks[id];
+        let mut mset: BTreeSet<String> = BTreeSet::new();
+        for (p, other) in dot_ids(&pk.text) {
+            if prefixes.contains(&p) && other != *id && pix.contains_key(other.as_str()) {
+                mset.insert(other);
+            }
+        }
+        pk_ment[i] = mset.into_iter().collect();
         for entry in &pk.files {
             pk_files_raw[i].extend(pr.files(entry));
             for (f, tier, route, _) in kp.block(&kpath_tokens(entry), &mut stats) {
@@ -9314,6 +9874,7 @@ fn glia_model(
         lineage,
         stats,
         audit: au,
+        pk_ment,
     }
 }
 
@@ -9478,6 +10039,14 @@ fn key_sig_names(mode: VMode) -> (Vec<String>, Vec<String>, Vec<String>) {
                 }
                 abl.push(format!("VR3h{v}"));
             }
+            // round 2: namespaced bare ids, role-aware joining, text as a ranker behind the typed links
+            for v in ["+ns", "+roles"] {
+                for b in ["VR1h", "VR2u", "VR3h"] {
+                    abl.push(format!("{b}{v}"));
+                }
+            }
+            abl.push("VR1h+trank".into());
+            abl.push("VR2u+trank".into());
             (full, abl, vec!["VR3hperm".into()])
         }
         VMode::Glia => {
@@ -9507,7 +10076,50 @@ fn key_gain_pairs(mode: VMode) -> Vec<(String, String)> {
 
 /// Appends the keyed signals (and their V0df and permutation controls) to a layer. With no
 /// model (a commit with no parent) every set is empty, so the ranker list stays the same.
-fn key_sigs_kina(m: Option<&KinaModel>, nf: usize, sha: &str, sigs: &mut Vec<(String, Sig)>, ctrls: &mut Vec<(String, Sig)>) {
+/// Round 2 (`+trank`): each node's text (the blocks defining a key class, the block itself for
+/// `blk:N`, the unit's blocks for `u:N`) scored by BM25 against each file linking the node.
+fn trank_weights(sig: &mut Sig, m: &KinaModel, bks: &[KBk], bm: &KBm) {
+    let mut def_text: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (bi, b) in bks.iter().enumerate() {
+        for d in &b.defs {
+            def_text.entry(d.1.as_str()).or_default().push(bi);
+        }
+    }
+    let mut unit_blocks: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (bi, b) in m.blocks.iter().enumerate() {
+        unit_blocks.entry(b.unit).or_default().push(bi);
+    }
+    let tw: Vec<Vec<f32>> = (0..sig.names.len())
+        .into_par_iter()
+        .map(|x| {
+            let post = &sig.post[x];
+            if post.len() < 2 {
+                return vec![0.0; post.len()];
+            }
+            let n = &sig.names[x];
+            let blocks: Vec<usize> = if let Some(r) = n.strip_prefix("blk:") {
+                r.parse().ok().into_iter().collect()
+            } else if let Some(r) = n.strip_prefix("u:") {
+                r.parse::<u32>().ok().and_then(|u| unit_blocks.get(&u).cloned()).unwrap_or_default()
+            } else {
+                def_text.get(n.as_str()).cloned().unwrap_or_default()
+            };
+            let mut text = String::new();
+            for b in blocks {
+                if text.len() > 8000 {
+                    break;
+                }
+                text.push_str(&m.blocks[b].text);
+                text.push('\n');
+            }
+            bm.score_files(&text, post).into_iter().map(|v| v as f32).collect()
+        })
+        .collect();
+    sig.tw = tw;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn key_sigs_kina(m: Option<&KinaModel>, m_ns: Option<&KinaModel>, bm: Option<&KBm>, nf: usize, sha: &str, sigs: &mut Vec<(String, Sig)>, ctrls: &mut Vec<(String, Sig)>) {
     let (full_n, abl_n, perm_n) = key_sig_names(VMode::Kina);
     let empty = vec![BTreeSet::<String>::new(); nf];
     let mut full: Vec<(String, Sig)> = Vec::new();
@@ -9544,6 +10156,23 @@ fn key_sigs_kina(m: Option<&KinaModel>, nf: usize, sha: &str, sigs: &mut Vec<(St
                 }
                 abl.push((format!("VR3h{v}"), Sig::build(&jv.r3h)));
             }
+            // round 2
+            let jn = kina_join(m_ns.expect("the namespaced model"), base, None);
+            abl.push(("VR1h+ns".into(), Sig::build(&jn.r1h)));
+            abl.push(("VR2u+ns".into(), Sig::build(&jn.r2u)));
+            abl.push(("VR3h+ns".into(), Sig::build(&jn.r3h)));
+            let jr = kina_join(m, KROLES, None);
+            abl.push(("VR1h+roles".into(), Sig::build_w(&jr.r1hw)));
+            abl.push(("VR2u+roles".into(), Sig::build_w(&jr.r2uw)));
+            abl.push(("VR3h+roles".into(), Sig::build(&jr.r3h)));
+            let mut t1 = Sig::build(&j.r1h);
+            let mut t2 = Sig::build(&j.r2u);
+            if let Some(bm) = bm {
+                trank_weights(&mut t1, m, &bks, bm);
+                trank_weights(&mut t2, m, &bks, bm);
+            }
+            abl.push(("VR1h+trank".into(), t1));
+            abl.push(("VR2u+trank".into(), t2));
             // abl was pushed per variant; reorder to key_sig_names' order
             let pos: HashMap<&String, usize> = abl_n.iter().enumerate().map(|(i, n)| (n, i)).collect();
             abl.sort_by_key(|(n, _)| pos[n]);
@@ -9594,6 +10223,24 @@ fn key_sigs_glia(m: Option<&GliaModel>, nf: usize, sha: &str, sigs: &mut Vec<(St
     sigs.extend(full);
     sigs.extend(abl);
     ctrls.extend(perm);
+}
+
+fn ke_dir(env: &VEnv) -> String {
+    env.keys_out.clone()
+}
+
+/// Round 2: every bare-id mention at the newest test commit's parent, its base and namespaced
+/// resolution (`ns_audit.tsv`, D-ids first; judged by hand).
+fn write_ns_audit(dir: &str, rows: &[(String, String, String, String, &'static str)]) {
+    std::fs::create_dir_all(dir).expect("keys out dir");
+    let mut v: Vec<&(String, String, String, String, &'static str)> = rows.iter().collect();
+    v.sort_by_key(|a| (!a.1.starts_with('D'), h64(&a.0)));
+    let mut out = String::from("n\tat\tmention\tbase\tns\tns_route\tchanged\tverdict_ns\tverdict_base\n");
+    for (i, (at, men, b, n, r)) in v.iter().enumerate() {
+        let changed = b.split(' ').next() != n.split(' ').next();
+        out.push_str(&format!("{}\t{at}\t{}\t{b}\t{n}\t{r}\t{}\t\t\n", i + 1, men.replace('\t', " "), if changed { "yes" } else { "no" }));
+    }
+    std::fs::write(format!("{dir}/ns_audit.tsv"), out).expect("write ns audit");
 }
 
 /// Writes one audit file per key type: up to 80 resolved links in a deterministic hash order.
@@ -9651,7 +10298,7 @@ const KR5H: usize = 4;
 /// Per resolved AU-Act section, the files each resolved chain reaches.
 type KReach = BTreeMap<String, [BTreeSet<u32>; 6]>;
 
-fn klaw_reach(m: &KinaModel, mask: KMask) -> KReach {
+fn klaw_reach(m: &KinaModel, mask: KMask, prefix: &str) -> KReach {
     let (cl, bks, code_ids, _, names) = kina_keys(m, mask);
     let mut members: HashMap<String, BTreeSet<String>> = HashMap::new();
     for b in &m.blocks {
@@ -9661,7 +10308,7 @@ fn klaw_reach(m: &KinaModel, mask: KMask) -> KReach {
             b.refs.iter().filter(|r| r.kt == KT::Cite).map(|r| r.key.as_str()).collect()
         };
         for k in keys {
-            if let Some(s) = k.strip_prefix("law:AU-ACT:") {
+            if let Some(s) = k.strip_prefix(prefix) {
                 for c in cl.exp(k) {
                     members.entry(c).or_default().insert(s.to_string());
                 }
@@ -9689,7 +10336,7 @@ fn klaw_reach(m: &KinaModel, mask: KMask) -> KReach {
         for d in &b.defs {
             def_b.entry(d.1.as_str()).or_default().push(bi as u32);
         }
-        for r in &b.refs {
+        for r in if mask.roles { &b.impl_refs } else { &b.refs } {
             ref_b.entry(r.as_str()).or_default().push(bi as u32);
         }
         unit_b.entry(m.blocks[bi].unit).or_default().push(bi as u32);
@@ -9735,7 +10382,7 @@ fn klaw_reach(m: &KinaModel, mask: KMask) -> KReach {
         let mut ment: BTreeSet<String> = ids1.clone();
         for &u in &units {
             for &b in unit_b.get(&u).into_iter().flatten() {
-                ment.extend(bks[b as usize].refs.iter().cloned());
+                ment.extend(if mask.roles { bks[b as usize].impl_refs.iter() } else { bks[b as usize].refs.iter() }.cloned());
             }
         }
         let k1m = files_of(&ment, false);
@@ -9790,6 +10437,11 @@ struct KLawIn<'a> {
     raw_sets: Vec<(&'static str, Vec<u32>)>,
     /// the earlier run's AU-cited sections (known to a compilation) and how many changed
     raw_cited: (usize, usize),
+    /// Round 2: the instrument the event is about: its key prefix and name, and the section numbers
+    /// of its other version the citation resolver should also accept
+    prefix: &'static str,
+    inst: &'static str,
+    extra_secs: Vec<String>,
 }
 
 fn keys_law(x: &KLawIn) {
@@ -9797,19 +10449,28 @@ fn keys_law(x: &KLawIn) {
     let dir = &x.args.keys_out;
     std::fs::create_dir_all(dir).expect("keys out dir");
     let nf = x.g.paths.len();
-    let known = law_known(x.args);
+    let mut known = law_known(x.args);
+    if x.prefix == "law:AU-TRULES:" {
+        known.trules.extend(x.extra_secs.iter().cloned());
+    }
     let renames = git_renames(&x.args.git, x.start);
     let kp = KPaths::new(&x.g.paths, &renames);
     let pr = PathRes::new(&x.g.paths);
     let code_lines = git_grep(&x.args.git, x.start, Some(KEYS_CODE_PAT), &[]);
     let blobs = KBlobs::load(&x.args.git, &[x.start.to_string()], &kp);
     let bm = blobs.index(x.start, nf);
-    let km = kina_model(x.docs, &code_lines, &kp, &pr, &known, Some(&bm), nf, true);
+    let km = kina_model(x.docs, &code_lines, &kp, &pr, &known, Some(&bm), nf, true, false);
+    let km_ns = kina_model(x.docs, &code_lines, &kp, &pr, &known, Some(&bm), nf, true, true);
     write_audit(dir, "law", &km.audit);
     let base = KBASE;
     let mut variants: Vec<(String, KMask)> = vec![("R (resolved, no text)".to_string(), base)];
     variants.extend(kvariants().into_iter().map(|(n, m)| (n.to_string(), m)));
-    let reaches: Vec<(String, KReach)> = variants.par_iter().map(|(n, m)| (n.clone(), klaw_reach(&km, *m))).collect();
+    let mut reaches: Vec<(String, KReach)> = variants.par_iter().map(|(n, m)| (n.clone(), klaw_reach(&km, *m, x.prefix))).collect();
+    // round 2: namespaced bare ids, role-aware joining, both
+    reaches.push(("+ns".into(), klaw_reach(&km_ns, KBASE, x.prefix)));
+    reaches.push(("+roles".into(), klaw_reach(&km, KROLES, x.prefix)));
+    reaches.push(("+ns+roles".into(), klaw_reach(&km_ns, KROLES, x.prefix)));
+    write_ns_audit(&format!("{dir}/law_ns"), &km_ns.ns_audit);
     let reach = &reaches[0].1;
     let cited: Vec<String> = {
         let mut v: Vec<String> = reach.keys().filter(|s| x.status.contains_key(*s)).cloned().collect();
@@ -9841,7 +10502,8 @@ fn keys_law(x: &KLawIn) {
         km.code_refs.iter().filter(|v| !v.is_empty()).count()
     ));
     md.push_str(&format!(
-        "AU AML/CTF Act sections cited by the goal layer: resolved {} ({} changed, {} unchanged); the earlier resolver {} ({} changed).\n\n",
+        "{} sections cited by the goal layer: resolved {} ({} changed, {} unchanged); the earlier resolver {} ({} changed).\n\n",
+        x.inst,
         cited.len(),
         cited_changed.len(),
         cited_unchanged.len(),
@@ -9965,6 +10627,28 @@ fn keys_law(x: &KLawIn) {
             ja.insert(vn.clone(), json!({"R1": law_json(&m1), "R1m": law_json(&m1m), "R3": law_json(&m3), "R5": law_json(&m5r), "R5h": law_json(&m5)}));
         }
         jr.insert("ablation".into(), serde_json::Value::Object(ja));
+        // round 2: each variant against the base chains (paired commit bootstrap) and its permuted map
+        md.push_str("\nRound 2 variants against the base chains (from the changed sections; F1, variant minus base with a paired commit-cluster bootstrap, and the variant's own permuted-map control: mean F1, share of draws >= the real chain):\n\n| variant | chain | files | F1 | minus base | permuted mean F1 | share >= real |\n|---|---|---|---|---|---|---|\n");
+        let mut jv = serde_json::Map::new();
+        for (vn, r) in reaches.iter().filter(|(n, _)| n.starts_with("+ns") || n == "+roles") {
+            let cited_v: Vec<String> = {
+                let mut v: Vec<String> = r.keys().filter(|s| x.status.contains_key(*s)).cloned().collect();
+                v.sort_by_key(|n| law_key(n));
+                v
+            };
+            let cc: BTreeSet<String> = cited_v.iter().filter(|s| x.changed.contains(*s)).cloned().collect();
+            for (ki, cn) in KLAW_CHAINS.iter().enumerate().take(KR5H + 1) {
+                let sc = score_of(r, ki, &cc);
+                let set = set_of(&sc);
+                let mt = law_met_scores(&sc, truth);
+                let b = law_boot(&tcommits, &set, &sets[ki].1, &format!("{tname}:r2:{vn}:{cn}"));
+                let kf: BTreeMap<String, BTreeSet<u32>> = cited_v.iter().map(|s| (s.clone(), r.get(s).map(|a| a[ki].clone()).unwrap_or_default())).collect();
+                let d = law_permuted(&cited_v, &cc, &kf, nf, truth, &format!("{tname}:r2perm:{vn}:{cn}"), mt[4]);
+                md.push_str(&format!("| {vn} | {cn} | {} | {:.3} | {:+.3} [{:+.3}, {:+.3}] | {:.3} | {:.3} |\n", set.len(), mt[4], b.0, b.1, b.2, d.mean[4], d.ge));
+                jv.insert(format!("{vn} {cn}"), json!({"files": set.len(), "f1": mt[4], "minus_base": [b.0, b.1, b.2], "perm_mean_f1": d.mean[4], "perm_share_ge": d.ge}));
+            }
+        }
+        jr.insert("round2_variants".into(), serde_json::Value::Object(jv));
         jt.insert(tname.to_string(), serde_json::Value::Object(jr));
     }
     js.insert("scores".into(), serde_json::Value::Object(jt));
@@ -10401,6 +11085,8 @@ struct R1Commit {
     gate_m: f64,
     /// T1sp: the subject and the pre-change plan text as one query
     t1sp: Vec<(u32, f64)>,
+    /// Round 2: the subject's ids routed through the typed links
+    r2: Option<R2Idr>,
 }
 
 /// C0r's decay per training commit: a co-change k training commits ago weighs R1_GAMMA^k.
@@ -10804,18 +11490,43 @@ fn round1_rankers(out: &mut Out, ctx: &Ctx, r: &R1Commit, q: &Query, t: &[u32], 
         out.push(format!("PT[{name},max]"), &scalar(&file_pool(g, |u| v[g.node_ppr[u]], false)), seed, t);
         out.push(format!("PT[{name},sum]"), &scalar(&file_pool(g, |u| v[g.node_ppr[u]], true)), seed, t);
     }
+    // ---- round 2 (appended, so every round-1 ranker above is unchanged) ----
+    if let Some(x) = &r.r2 {
+        let pt = bases.iter().find(|b| b.0 == "PT*").map(|b| b.1.as_slice());
+        round2_rankers(out, x, seed, t, p1, c0, &t1s, pt);
+    }
 }
 
 /// Online selection (leak-free, prequential): at each test commit, the candidate with the best mean recall@10
 /// over every EARLIER test commit's queries (their changed files are known by then); the first candidate
 /// before any. The candidate sets are fixed; the `0` sets leave out the work-neighbourhood / milestone ones.
-const R1_SEL: [(&str, &[&str]); 4] = [
+const R1_SEL: [(&str, &[&str]); 5] = [
     ("SELnt0", &["H10[PT*]", "H10", "PT*"]),
     ("SELnt", &["H10[PT*]", "H10", "PT*", "HWa25[W5]", "HWa25[W10]", "HMa25[M]", "LX[C0,W5,P1]"]),
     ("SELt0", &["H18s[PT*]", "H9s25[PT*]", "H9s50", "H10[PT*]"]),
     (
         "SELt",
         &["H18s[PT*]", "H9s25[PT*]", "H9s50", "H10[PT*]", "HTsa[W5]", "HTsc[W5]", "HTsd[W5]", "HTsc[M]", "HTsd[M]", "ALL5"],
+    ),
+    // Round 2: SELt plus the id-routed hybrids (role-aware IDR), fixed a priori
+    (
+        "SELt2",
+        &[
+            "H18s[PT*]",
+            "H9s25[PT*]",
+            "H9s50",
+            "H10[PT*]",
+            "HTsa[W5]",
+            "HTsc[W5]",
+            "HTsd[W5]",
+            "HTsc[M]",
+            "HTsd[M]",
+            "ALL5",
+            "LX[IDR,H18s[PT*]]",
+            "LX[IDR,H9s25[PT*]]",
+            "H18si[PT*]",
+            "LX[IDR,C0,PT*]",
+        ],
     ),
 ];
 
@@ -10952,7 +11663,7 @@ fn round1_report(label: &str, names: &[String], results: &[Out], queries: &[Quer
     rows.extend(r1_rows.iter().cloned());
     let mut mj = serde_json::Map::new();
     let mut subsets: Vec<(String, Vec<usize>)> = vec![("all".into(), all.clone())];
-    for k in ["pre", "M", "Mid", "Mbr", "Mgap", "W1", "W5", "C0m"] {
+    for k in ["pre", "M", "Mid", "Mbr", "Mgap", "W1", "W5", "C0m", "idr_id", "idr"] {
         if let Some(idx) = cov.get(k)
             && !idx.is_empty()
         {
@@ -11138,6 +11849,51 @@ fn round1_report(label: &str, names: &[String], results: &[Out], queries: &[Quer
     ] {
         cs.push((a.into(), b.into(), s));
     }
+    // round 2: the subject's ids as typed links
+    for (a, b) in [
+        ("IDR", "P1"),
+        ("IDR", "T1s"),
+        ("LX[IDR,P1]", "P1"),
+        ("HI50[P1]", "P1"),
+        ("HI25[P1]", "P1"),
+        ("LX[IDR,H9s50]", "H9s50"),
+        ("LX[IDR,H9s50]", "H9a50[P1]"),
+        ("LX[IDR,H9s50]", "P1"),
+        ("H9si", "H9s50"),
+        ("H9si", "H9a50[P1]"),
+        ("H9si", "P1"),
+        ("LX[IDR,C0,P1]", "H10"),
+        ("LX[IDR,C0,P1]", "P1"),
+        ("HCi", "P1"),
+        ("HCi", "H1a50"),
+        ("IDRt", "IDR"),
+        ("IDRt", "LX[IDR,P1]"),
+        ("LX[IDRt,H9s50]", "LX[IDR,H9s50]"),
+        ("IDRh", "IDR"),
+        ("LX[IDRh,H9s50]", "LX[IDR,H9s50]"),
+        ("IDR~roles", "IDR"),
+        ("LX[IDR~roles,H9s50]", "LX[IDR,H9s50]"),
+        ("H9si~roles", "H9si"),
+        ("H9sih", "H9si"),
+        ("IDRn", "IDRc"),
+        ("LX[IDR,H18s[PT*]]", "H18s[PT*]"),
+        ("LX[IDR,H18s[PT*]]", "H9a50[P1]"),
+        ("LX[IDR,H18s[PT*]]", "P1"),
+        ("LX[IDR,H9s25[PT*]]", "H9s25[PT*]"),
+        ("H18si[PT*]", "H18s[PT*]"),
+        ("H18si[PT*]", "H9a50[P1]"),
+        ("LX[IDR,C0,PT*]", "H10[PT*]"),
+        ("LX[IDRh,H18s[PT*]]", "LX[IDR,H18s[PT*]]"),
+        ("LX[IDR~roles,H18s[PT*]]", "LX[IDR,H18s[PT*]]"),
+        ("H9a50[P1]", "P1"),
+        ("H9s50", "P1"),
+        ("H18s[PT*]", "P1"),
+    ] {
+        cs.push((a.into(), b.into(), "idr_id"));
+    }
+    for (a, b) in [("SELt2", "SELt"), ("SELt2", "P1"), ("SELt2", "H9a50[P1]"), ("SELt2", "H9s50"), ("SELt2", "B0"), ("SELt2", "H18s[PT*]")] {
+        cs.push((a.into(), b.into(), "all"));
+    }
     md.push_str("Contrasts (a minus b; recall@10 and MRR; mean, 95% commit-cluster bootstrap CI; on ALL queries and on the named covered subset):\n\n| a | b | subset | n | recall@10 ALL | recall@10 COVERED | MRR ALL | MRR COVERED |\n|---|---|---|---|---|---|---|---|\n");
     let mut cj = Vec::new();
     for (a, b, s) in &cs {
@@ -11188,4 +11944,760 @@ fn round1_report(label: &str, names: &[String], results: &[Out], queries: &[Quer
         js.insert("tune".into(), json!(gj));
     }
     (serde_json::Value::Object(js), md)
+}
+
+// ============================================================================
+// Round 2 (2026-10-18), C: a second law event, the AML/CTF Transitional Rules 2026 as made
+// (F2026L00393) -> compilation 1 (F2026C00452, 14 May 2026), traced through the resolved goal
+// layer (the keyed chains, `law:AU-TRULES:<n>`) to the code (`--law-impact kina --law-event tr
+// --keys on`). Truths as the first event's (the reform implementation; there is no commit that
+// implements this amendment itself, see the report).
+// ============================================================================
+
+const LAW_TR_MADE_PDF: &str = "AU_AMLCTF_Transitional_Rules_2026_F2026L00393_as_made";
+const LAW_TR_TITLE: &str = "Anti-Money Laundering and Counter-Terrorism Financing Transitional Rules 2026";
+
+/// Page furniture of the Transitional Rules PDFs: the authorised-version line, the drafter's code,
+/// the compilation line, the running title (with its page number) and the contents' dot leaders.
+fn tr_furniture(t: &str) -> bool {
+    let tn = t.replace(['\u{2011}', '\u{2010}'], "-");
+    let t = tn.as_str();
+    if t.contains("Authorised Version F20") || t.starts_with("Compilation No.") || t.contains(".....") {
+        return true;
+    }
+    if t.starts_with("OPC") && t.len() <= 16 && t.contains(" - ") {
+        return true;
+    }
+    let ws: Vec<&str> = t.split_whitespace().collect();
+    let title: Vec<&str> = LAW_TR_TITLE.split_whitespace().collect();
+    let page = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit() || matches!(c, 'i' | 'v' | 'x'));
+    if ws == title
+        || (ws.len() == title.len() + 1 && ((page(ws[ws.len() - 1]) && ws[..ws.len() - 1] == title[..]) || (page(ws[0]) && ws[1..] == title[..])))
+    {
+        return true;
+    }
+    // running headers anywhere on the page (a wrapped Part title ends the top-of-page run), bare
+    // page numbers, and the one- or two-word lower-case tail of a wrapped header
+    law_running_header(t)
+        || (ws.len() >= 3 && matches!(ws[ws.len() - 1], "Part" | "Division") && !t.contains('\u{2014}'))
+        || (!ws.is_empty() && ws.iter().all(|x| x.chars().all(|c| c.is_ascii_digit())))
+        || (!ws.is_empty() && ws.len() <= 2 && ws.iter().all(|x| x.chars().all(|c| c.is_ascii_lowercase())) && !t.ends_with('.') && !t.ends_with(';'))
+}
+
+fn law_event_tr(args: &Args) {
+    assert_eq!(args.law_impact, "kina", "--law-impact: only `kina` is wired");
+    for (v, n) in [(&args.wiki, "--wiki"), (&args.law_sources, "--law-sources"), (&args.law_cache, "--law-cache"), (&args.law_out, "--law-out"), (&args.law_tips, "--law-tips"), (&args.keys_out, "--keys-out")] {
+        assert!(!v.is_empty(), "--law-event tr needs {n}");
+    }
+    std::fs::create_dir_all(&args.law_out).expect("law out dir");
+    let t0 = Instant::now();
+    // ---- the diff ----
+    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, LAW_TR_MADE_PDF), tr_furniture));
+    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, LAW_TRULES_PDF), tr_furniture));
+    let (n_old, n_new) = (old.len(), new.len());
+    let made: Vec<String> = old.iter().map(|s| s.num.clone()).collect();
+    if let Ok(want) = std::env::var("GLIA_TR_DEBUG") {
+        for (tag, v) in [("as made", &old), ("comp 1", &new)] {
+            if let Some(x) = v.iter().find(|x| x.num == want) {
+                eprintln!("[tr-debug] {tag} {want}: {}", x.text);
+            }
+        }
+    }
+    let diff = law_diff(old, new, dups_old, dups_new);
+    let changed: BTreeSet<String> = diff.order.iter().filter(|n| diff.status[*n] != "unchanged").cloned().collect();
+    let count = |st: &str| diff.status.values().filter(|s| **s == st).count();
+    eprintln!(
+        "[law-tr] sections: as made {n_old}, compilation 1 {n_new}; unchanged {}, changed {}, added {}, repealed {}; dup numbers {} / {}",
+        count("unchanged"),
+        count("changed"),
+        count("added"),
+        count("repealed"),
+        diff.dups_old.len(),
+        diff.dups_new.len()
+    );
+    let mut tsv = String::from("section\tstatus\tdice\ttitle_as_made\ttitle_comp1\tcontext\n");
+    for n in &diff.order {
+        let (o, w) = (diff.old.get(n), diff.new.get(n));
+        tsv.push_str(&format!(
+            "{n}\t{}\t{}\t{}\t{}\t{}\n",
+            diff.status[n],
+            diff.dice.get(n).map_or("-".into(), |x| format!("{x:.4}")),
+            o.map_or("", |s| s.title.as_str()),
+            w.map_or("", |s| s.title.as_str()),
+            w.or(o).map_or("", |s| s.ctx.as_str())
+        ));
+    }
+    std::fs::write(format!("{}/law_sections_tr.tsv", args.law_out), tsv).expect("write tr sections");
+    // ---- the code graph and the goal layer at the start ----
+    let start = git_text(&args.git, &["rev-parse", &args.rev]).expect("rev-parse start").trim().to_string();
+    let res = generate_one(&args.repo).expect("build");
+    let merged = &res.merged;
+    let all_ids = merged.node_ids();
+    let id_to_idx: HashMap<NodeId, usize> = all_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let edges: Vec<&Edge> = merged.all_edges().collect();
+    let g = index_graph(merged, &all_ids, &id_to_idx, &edges);
+    let nf = g.paths.len();
+    let pidx: HashMap<&str, u32> = g.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
+    let mut cfg = CODE_TABLES.activation_config(None);
+    cfg.direction = Direction::Undirected;
+    cfg.top_k = usize::MAX;
+    let ppr = Ppr::build(all_ids.len(), &id_to_idx, &edges, &vec![NONE; edges.len()], &cfg);
+    let start_ct: i64 = git_text(&args.git, &["log", "-1", "--format=%ct", &start]).expect("start ct").trim().parse().expect("ct");
+    let wlog = git_text(&args.wiki, &["log", "--format=%H%x1f%ct", "HEAD"]).expect("wiki log");
+    let wrev = wlog
+        .lines()
+        .filter_map(|l| l.split_once('\x1f'))
+        .filter_map(|(s, ct)| ct.trim().parse::<i64>().ok().map(|c| (c, s.to_string())))
+        .filter(|(c, _)| *c <= start_ct)
+        .max()
+        .map(|x| x.1)
+        .expect("a wiki commit at or before the start");
+    let mut docs = kina_doc_lines(&args.git, &start);
+    docs.extend(git_grep(&args.wiki, &wrev, None, &["*.md"]));
+    let pr = PathRes::new(&g.paths);
+    let d = build_docset(&docs, &pr);
+    let mut cstats = BTreeMap::new();
+    let code = group_code(git_grep(&args.git, &start, Some(KINA_CODE_PAT), &[]), &pidx);
+    let (toks, _, _) = kina_cites(&d, &code, nf, &mut cstats);
+    let files_of = law_files_of(&toks);
+    let compliance: Vec<u32> = (0..nf as u32).filter(|&f| !toks[f as usize].is_empty()).collect();
+    let mut comp_score = vec![0.0; nf];
+    for &f in &compliance {
+        for t in &toks[f as usize] {
+            comp_score[f as usize] += (1.0 + nf as f64 / files_of[t].len() as f64).ln();
+        }
+    }
+    let ppr_comp = law_ppr(&g, &ppr, &compliance);
+    let mut bm = Bm25::default();
+    for p in &g.paths {
+        let txt = std::fs::read(format!("{}/{p}", args.repo)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        bm.add(law_code_tokens(&txt), Vec::new());
+    }
+    let sec_text = |n: &str| -> String { diff.new.get(n).or_else(|| diff.old.get(n)).map_or(String::new(), |s| s.text.clone()) };
+    let q_all: Vec<String> = changed.iter().flat_map(|n| law_code_tokens(&sec_text(n))).collect();
+    let bm_all = bm.scores(&q_all);
+    // ---- truth (as the first event's) ----
+    let tasks = law_tasks(&args.wiki);
+    let tip_names: Vec<String> = args.law_tips.split(',').map(|t| t.trim().to_string()).collect();
+    let tips: Vec<String> = tip_names.iter().map(|t| git_text(&args.git, &["rev-parse", t]).expect("rev-parse tip").trim().to_string()).collect();
+    let branch_spec = law_branch_specs(&args.git, &start, &tip_names, &tasks);
+    let ticks = law_ticks(&args.wiki, start_ct);
+    let commits = law_commits(&args.git, &start, &tips, &pidx, &tasks, &branch_spec, &ticks);
+    let s003 = "specs/003-compliance-codification";
+    let pick = |f: &dyn Fn(&LCommit) -> bool| -> LTruth {
+        let cs: Vec<&LCommit> = commits.iter().filter(|c| f(c)).collect();
+        (cs.iter().flat_map(|c| c.code.iter().copied()).collect(), cs.len(), cs.iter().flat_map(|c| c.code_new.iter().cloned()).collect())
+    };
+    let truths: Vec<(&str, &str, LTruth)> = vec![
+        ("S003", "PROXY: the spec 003 commits (the reform implementation); no commit implements this amendment", pick(&|c: &LCommit| c.spec == s003)),
+        ("AU", "PROXY: S003 commits whose task text or message names an AU AML/CTF-regime term", pick(&|c: &LCommit| c.spec == s003 && c.au)),
+        ("ALL", "PROXY: every commit after the start", pick(&|_: &LCommit| true)),
+    ];
+    eprintln!("[law-tr] goal layer at wiki {wrev}; {} reform commits; built in {:.1}s", commits.len(), t0.elapsed().as_secs_f64());
+    keys_law(&KLawIn {
+        args,
+        g: &g,
+        ppr: &ppr,
+        docs: &docs,
+        start: &start,
+        truths: &truths,
+        commits: &commits,
+        s003,
+        changed: &changed,
+        status: &diff.status,
+        bm_all: &bm_all,
+        ppr_comp: &ppr_comp,
+        comp_score: &comp_score,
+        raw_sets: Vec::new(),
+        raw_cited: (0, 0),
+        prefix: "law:AU-TRULES:",
+        inst: "AU AML/CTF Transitional Rules 2026",
+        extra_secs: made,
+    });
+    eprintln!("[law-tr] done in {:.1}s -> {}/keys_law_tables.md", t0.elapsed().as_secs_f64(), args.keys_out);
+}
+
+// ============================================================================
+// Round 2 (2026-10-18): the subject's ids as typed links (IDR)
+// ============================================================================
+//
+// `--round2 on` (with `--round1 on`): each test commit's SUBJECT ids are resolved, at the
+// parent revision, with the keyed resolvers (scoped id + lineage) to the units that define
+// them; the files those units name (a "names-file" edge, pending / done by its checkbox) and
+// the code files citing the id are the IDR signal. glia: packet ids -> files_touched (pending
+// = no LANDED wave yet) and code citing the packet. Other repos: a conventional-commit scope
+// that names a doc directory (`feat(billing): ..` -> `features/billing/*.md`) -> the files those
+// docs name. The rankers are appended after round 1's, so every earlier ranker is unchanged.
+
+/// IDR weights, fixed a priori: a file a defining unit names (pending or no checkbox), one a done
+/// unit names, a code file citing the id, and the one-hop factor.
+const R2_W_NAMED: f64 = 1.0;
+const R2_W_DONE: f64 = 0.5;
+const R2_W_CITED: f64 = 0.5;
+const R2_W_HOP: f64 = 0.5;
+/// How many earlier test commits' resolved scopes the "recent-scope" rule reads.
+const R2_RECENT: usize = 5;
+
+/// One test commit's id routing (sparse file scores; the seed is excluded per query).
+#[derive(Default, Clone)]
+struct R2Idr {
+    /// the subject names an id of the repo's vocabulary (glia: a defined packet prefix; other
+    /// repos: a scope naming a doc directory)
+    has_id: bool,
+    /// IDR = named + cited, summed over the subject's resolved ids
+    idr: Vec<(u32, f64)>,
+    named: Vec<(u32, f64)>,
+    cited: Vec<(u32, f64)>,
+    /// IDR plus one hop (the ids the defining unit mentions; glia: the packets its prose names)
+    hop: Vec<(u32, f64)>,
+    /// the control without roles: files named by ANY unit mentioning the id, no state
+    noroles: Vec<(u32, f64)>,
+}
+
+/// What one resolved key reaches.
+#[derive(Default, Clone)]
+struct R2Reach {
+    named: BTreeMap<u32, f64>,
+    cited: BTreeMap<u32, f64>,
+    hop: BTreeMap<u32, f64>,
+    noroles: BTreeMap<u32, f64>,
+}
+
+fn r2_max(m: &mut BTreeMap<u32, f64>, f: u32, w: f64) {
+    let e = m.entry(f).or_default();
+    *e = e.max(w);
+}
+
+fn r2_finish(reach: &[&R2Reach], has_id: bool) -> R2Idr {
+    let mut acc: [BTreeMap<u32, f64>; 5] = Default::default();
+    for r in reach {
+        for (f, w) in &r.named {
+            *acc[0].entry(*f).or_default() += w;
+            *acc[1].entry(*f).or_default() += w;
+            *acc[3].entry(*f).or_default() += w;
+        }
+        for (f, w) in &r.cited {
+            *acc[0].entry(*f).or_default() += w;
+            *acc[2].entry(*f).or_default() += w;
+            *acc[3].entry(*f).or_default() += w;
+        }
+        for (f, w) in &r.hop {
+            *acc[3].entry(*f).or_default() += w;
+        }
+        for (f, w) in &r.noroles {
+            *acc[4].entry(*f).or_default() += w;
+        }
+    }
+    let v = |m: &BTreeMap<u32, f64>| m.iter().map(|(&f, &w)| (f, w)).collect::<Vec<_>>();
+    R2Idr { has_id, idr: v(&acc[0]), named: v(&acc[1]), cited: v(&acc[2]), hop: v(&acc[3]), noroles: v(&acc[4]) }
+}
+
+/// A doc block's checkbox state: Some(true) pending (`- [ ]`), Some(false) done (`- [x]`), None none.
+fn kblock_state(b: &KBlock) -> Option<bool> {
+    let first = b.text.lines().next().unwrap_or("").trim_start();
+    let body = first.strip_prefix("- ").or_else(|| first.strip_prefix("* "))?.trim_start();
+    if body.starts_with("[ ]") {
+        Some(true)
+    } else if body.starts_with("[x]") || body.starts_with("[X]") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The Kina key model's lookups IDR reads: lineage classes, blocks defining / mentioning each
+/// class, code files citing each class.
+struct R2KIdx {
+    cl: KLin,
+    bks: Vec<KBk>,
+    def_b: HashMap<String, Vec<u32>>,
+    ref_b: HashMap<String, Vec<u32>>,
+    citing: HashMap<String, Vec<u32>>,
+}
+
+fn r2_kidx(m: &KinaModel) -> R2KIdx {
+    let (cl, bks, code_ids, _, _) = kina_keys(m, KBASE);
+    let mut def_b: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut ref_b: HashMap<String, Vec<u32>> = HashMap::new();
+    for (bi, b) in bks.iter().enumerate() {
+        for d in &b.defs {
+            def_b.entry(d.1.clone()).or_default().push(bi as u32);
+        }
+        for r in &b.refs {
+            ref_b.entry(r.clone()).or_default().push(bi as u32);
+        }
+    }
+    let mut citing: HashMap<String, Vec<u32>> = HashMap::new();
+    for (f, ks) in code_ids.iter().enumerate() {
+        for k in ks {
+            citing.entry(k.clone()).or_default().push(f as u32);
+        }
+    }
+    for v in def_b.values_mut().chain(ref_b.values_mut()).chain(citing.values_mut()) {
+        v.sort_unstable();
+        v.dedup();
+    }
+    R2KIdx { cl, bks, def_b, ref_b, citing }
+}
+
+fn r2_kina_reach(m: &KinaModel, ix: &R2KIdx, key: &str) -> R2Reach {
+    let classes = ix.cl.exp(key);
+    let mut r = R2Reach::default();
+    let none: Vec<u32> = Vec::new();
+    let w_of = |b: u32| if kblock_state(&m.blocks[b as usize]) == Some(false) { R2_W_DONE } else { R2_W_NAMED };
+    for c in &classes {
+        for &b in ix.def_b.get(c).unwrap_or(&none) {
+            let w = w_of(b);
+            for &(f, _, _) in &m.blocks[b as usize].files {
+                r2_max(&mut r.named, f, w);
+            }
+            // one hop: the ids the defining unit mentions (not hubs)
+            for k2 in &ix.bks[b as usize].refs {
+                if classes.contains(k2) {
+                    continue;
+                }
+                let (nd, nr) = (ix.def_b.get(k2).map_or(0, Vec::len), ix.ref_b.get(k2).map_or(0, Vec::len));
+                if nd + nr > KHUB {
+                    continue;
+                }
+                for &b2 in ix.def_b.get(k2).unwrap_or(&none) {
+                    let w2 = w_of(b2);
+                    for &(f, _, _) in &m.blocks[b2 as usize].files {
+                        r2_max(&mut r.hop, f, R2_W_HOP * w2);
+                    }
+                }
+                for &f in ix.citing.get(k2).unwrap_or(&none) {
+                    r2_max(&mut r.hop, f, R2_W_HOP * R2_W_CITED);
+                }
+            }
+        }
+        for &f in ix.citing.get(c).unwrap_or(&none) {
+            r2_max(&mut r.cited, f, R2_W_CITED);
+            r2_max(&mut r.noroles, f, R2_W_CITED);
+        }
+        // the control without roles: any unit that defines OR merely mentions the id names files
+        for &b in ix.def_b.get(c).unwrap_or(&none).iter().chain(ix.ref_b.get(c).unwrap_or(&none)) {
+            for &(f, _, _) in &m.blocks[b as usize].files {
+                r2_max(&mut r.noroles, f, R2_W_NAMED);
+            }
+        }
+    }
+    r
+}
+
+/// One subject id mention at the parent: resolved by the direct rules, or the scopes still
+/// defining it (with whether that scope's defining row is still pending), or unresolvable.
+enum R2Cand {
+    Done(String, Tier, &'static str),
+    Amb(String, Vec<(String, bool)>),
+    Fail(&'static str),
+}
+
+/// Phase 1 of one Kina test commit: candidates, their reach, whether the subject names an id, stats.
+type R2Phase1 = (Vec<R2Cand>, HashMap<String, R2Reach>, bool, BTreeMap<String, f64>);
+
+/// Phase 1 for one Kina test commit: the subject's id mentions and what each candidate key reaches.
+fn r2_kina_commit(m: &KinaModel, subj: &str) -> (Vec<R2Cand>, HashMap<String, R2Reach>, bool) {
+    let Some(ids) = m.kids.as_ref() else { return (Vec::new(), HashMap::new(), false) };
+    let ix = r2_kidx(m);
+    let qual = spec_refs(subj);
+    let ments: Vec<(String, bool)> =
+        kid_mentions(subj, false).into_iter().filter(|x| ids.accepts(&x.2, x.3)).map(|x| (x.2, x.3)).collect::<BTreeSet<_>>().into_iter().collect();
+    let has_id = !ments.is_empty();
+    let mut cands = Vec::new();
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for (id, bare) in &ments {
+        match ids.resolve_direct(id, *bare, None, &qual) {
+            Ok(Some((k, tier, route))) => {
+                keys.insert(k.clone());
+                cands.push(R2Cand::Done(k, tier, route));
+            }
+            Ok(None) => {
+                let scopes: Vec<(String, bool)> = ids
+                    .defs
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .map(|s| {
+                        let k = format!("id:{s}|{id}");
+                        let pending = ix.def_b.get(&k).is_some_and(|bs| bs.iter().any(|&b| kblock_state(&m.blocks[b as usize]) == Some(true)));
+                        keys.insert(k);
+                        (s.clone(), pending)
+                    })
+                    .collect();
+                cands.push(R2Cand::Amb(id.clone(), scopes));
+            }
+            Err(e) => cands.push(R2Cand::Fail(e)),
+        }
+    }
+    let reach: HashMap<String, R2Reach> = keys.into_iter().map(|k| (k.clone(), r2_kina_reach(m, &ix, &k))).collect();
+    (cands, reach, has_id)
+}
+
+/// Phase 2 (sequential, oldest test commit first): an ambiguous id takes the one scope whose row is
+/// still pending, else a scope an earlier test commit resolved to (newest first), else the newest
+/// spec (HEURISTIC). Returns the keys picked, and the scopes for the recent list.
+fn r2_pick(cands: &[R2Cand], recent: &std::collections::VecDeque<String>, stats: &mut BTreeMap<String, f64>) -> (Vec<String>, Vec<String>) {
+    let mut keys = Vec::new();
+    let mut scopes = Vec::new();
+    for c in cands {
+        match c {
+            R2Cand::Done(k, tier, route) => {
+                kbump(stats, format!("r2_route_{route}_{}", tier.name()));
+                kbump(stats, format!("r2_route_last={route}"));
+                keys.push(k.clone());
+                if let Some((s, _)) = k.strip_prefix("id:").and_then(|x| x.rsplit_once('|')) {
+                    scopes.push(s.to_string());
+                }
+            }
+            R2Cand::Fail(e) => kbump(stats, format!("r2_unresolved_{e}")),
+            R2Cand::Amb(id, sc) => {
+                let pend: Vec<&(String, bool)> = sc.iter().filter(|x| x.1).collect();
+                let pool: Vec<&(String, bool)> = if pend.is_empty() { sc.iter().collect() } else { pend };
+                let (s, route) = if pool.len() == 1 {
+                    (pool[0].0.clone(), if sc.len() > 1 && sc.iter().filter(|x| x.1).count() == 1 { "open-row" } else { "one-left" })
+                } else if let Some(r) = recent.iter().find(|r| pool.iter().any(|p| &p.0 == *r)) {
+                    (r.clone(), "recent-scope")
+                } else {
+                    let best = pool.iter().filter(|p| p.0.starts_with("specs/")).map(|p| p.0.clone()).max().unwrap_or_else(|| pool[0].0.clone());
+                    (best, "newest-spec")
+                };
+                kbump(stats, format!("r2_route_{route}"));
+                kbump(stats, format!("r2_route_last={route}"));
+                keys.push(format!("id:{s}|{id}"));
+                scopes.push(s);
+            }
+        }
+    }
+    (keys, scopes)
+}
+
+/// glia: the subject's packets (a defined id, or a family of defined ids) -> their lineage class ->
+/// files_touched (pending = no LANDED wave at the parent) and the code citing them.
+fn r2_glia_commit(gm: &GliaModel, wave: &BTreeMap<String, String>, subj: &str, stats: &mut BTreeMap<String, f64>) -> R2Idr {
+    let pix: HashMap<&str, usize> = gm.pk_ids.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+    let prefixes: BTreeSet<&str> = gm.pk_ids.iter().map(|id| id.split('.').next().unwrap_or("")).collect();
+    let mut fams: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, id) in gm.pk_ids.iter().enumerate() {
+        fams.entry(family(id)).or_default().push(i);
+    }
+    let mut edges = Vec::new();
+    for (a, b, t, _) in &gm.lineage {
+        edges.push((a.clone(), b.clone(), *t, false));
+    }
+    let mut st = BTreeMap::new();
+    let cl = KLin::build(&edges, 6, &mut st);
+    let mut members: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, id) in gm.pk_ids.iter().enumerate() {
+        members.entry(cl.cl.of(&format!("pk:{id}")).to_string()).or_default().push(i);
+    }
+    let mut has_id = false;
+    let mut start: BTreeSet<usize> = BTreeSet::new();
+    for (p, id) in dot_ids(subj) {
+        if !prefixes.contains(p.as_str()) {
+            continue;
+        }
+        has_id = true;
+        if let Some(&i) = pix.get(id.as_str()) {
+            start.insert(i);
+            kbump(stats, "r2_route_packet-id");
+        } else if let Some(ms) = fams.get(&id) {
+            start.extend(ms.iter().copied());
+            kbump(stats, "r2_route_family");
+        } else {
+            kbump(stats, "r2_unresolved_undefined");
+        }
+    }
+    let mut reach = Vec::new();
+    for &i in &start {
+        let mut r = R2Reach::default();
+        let classes = cl.exp(&format!("pk:{}", gm.pk_ids[i]));
+        let mem: BTreeSet<usize> = classes.iter().flat_map(|c| members.get(c).into_iter().flatten().copied()).collect();
+        let w_of = |j: usize| if wave.contains_key(&gm.pk_ids[j]) { R2_W_DONE } else { R2_W_NAMED };
+        for &j in &mem {
+            for &(f, _, _) in &gm.pk_files[j] {
+                r2_max(&mut r.named, f, w_of(j));
+                r2_max(&mut r.noroles, f, R2_W_NAMED);
+            }
+            for other in &gm.pk_ment[j] {
+                if let Some(&k) = pix.get(other.as_str())
+                    && !mem.contains(&k)
+                {
+                    for &(f, _, _) in &gm.pk_files[k] {
+                        r2_max(&mut r.hop, f, R2_W_HOP * w_of(k));
+                    }
+                }
+            }
+        }
+        // the control without roles: every packet whose prose merely names one of the class's packets
+        for (k, ms) in gm.pk_ment.iter().enumerate() {
+            if ms.iter().any(|x| pix.get(x.as_str()).is_some_and(|j| mem.contains(j))) {
+                for &(f, _, _) in &gm.pk_files[k] {
+                    r2_max(&mut r.noroles, f, R2_W_NAMED);
+                }
+            }
+        }
+        for (f, refs) in gm.code_pk.iter().enumerate() {
+            if refs.iter().any(|x| cl.exp(&x.key).iter().any(|c| classes.contains(c))) {
+                r2_max(&mut r.cited, f as u32, R2_W_CITED);
+                r2_max(&mut r.noroles, f as u32, R2_W_CITED);
+            }
+        }
+        reach.push(r);
+    }
+    r2_finish(&reach.iter().collect::<Vec<_>>(), has_id)
+}
+
+/// The conventional-commit scopes of a subject: `feat(a,b): ..` -> [a, b].
+fn r2_scopes(subj: &str) -> Vec<String> {
+    let Some(open) = subj.find('(') else { return Vec::new() };
+    let head = &subj[..open];
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Vec::new();
+    }
+    let Some(close) = subj[open..].find(')') else { return Vec::new() };
+    let after = &subj[open + close + 1..];
+    if !(after.starts_with(':') || after.starts_with("!:")) {
+        return Vec::new();
+    }
+    subj[open + 1..open + close]
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s.len() >= 3 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .collect()
+}
+
+/// Other repos: a scope that names a doc directory (`features/<scope>/`, `specs/NNN-<scope>/`) ->
+/// the files those docs name (path resolver), pending / done by the line's checkbox.
+fn r2_scope_commit(git: &str, parent: &str, subj: &str, kp: &KPaths, stats: &mut BTreeMap<String, f64>) -> R2Idr {
+    let scopes = r2_scopes(subj);
+    if scopes.is_empty() {
+        return R2Idr::default();
+    }
+    let mut specs: Vec<String> = Vec::new();
+    for s in &scopes {
+        specs.push(format!(":(glob)**/{s}/**/*.md"));
+        specs.push(format!(":(glob)**/[0-9][0-9][0-9]-{s}/**/*.md"));
+    }
+    specs.push(":!**/node_modules/**".into());
+    let spec_refs: Vec<&str> = specs.iter().map(String::as_str).collect();
+    let lines = git_grep(git, parent, None, &spec_refs);
+    let mut reach = Vec::new();
+    let mut has_id = false;
+    for s in &scopes {
+        let mut r = R2Reach::default();
+        let mine = |p: &str| p.split('/').any(|seg| seg == s || seg.len() > 4 && seg[..3].bytes().all(|b| b.is_ascii_digit()) && &seg[4..] == s.as_str());
+        let mut any = false;
+        for (p, l) in lines.iter().filter(|(p, _)| mine(dir_of(p))) {
+            let _ = p;
+            any = true;
+            let t = l.trim_start();
+            let done = t.starts_with("- [x]") || t.starts_with("- [X]") || t.starts_with("* [x]");
+            for (f, _, _, _) in kp.block(&kpath_tokens(l), stats) {
+                r2_max(&mut r.named, f, if done { R2_W_DONE } else { R2_W_NAMED });
+                r2_max(&mut r.noroles, f, R2_W_NAMED);
+            }
+        }
+        if any {
+            has_id = true;
+            kbump(stats, "r2_route_scope-dir");
+            reach.push(r);
+        }
+    }
+    r2_finish(&reach.iter().collect::<Vec<_>>(), has_id)
+}
+
+/// IDR for every test commit (in test order), read at each parent revision.
+fn r2_build(args: &Args, commits: &[Commit], test_idx: &[usize], paths: &[String], pidx: &HashMap<&str, u32>) -> (Vec<R2Idr>, BTreeMap<String, f64>) {
+    let t = Instant::now();
+    let nf = paths.len();
+    let parents = git_parents(&args.git, &args.rev);
+    let renames = git_renames(&args.git, &args.rev);
+    let kp = KPaths::new(paths, &renames);
+    let pr = PathRes::new(paths);
+    let _ = pidx;
+    let mut stats: BTreeMap<String, f64> = BTreeMap::new();
+    let parent_of = |k: usize| parents.get(&commits[k].sha).and_then(|x| x.0.clone());
+    let out: Vec<R2Idr> = match args.pre.as_str() {
+        "kina" => {
+            assert!(!args.wiki.is_empty() && !args.law_sources.is_empty() && !args.law_cache.is_empty(), "--round2 with --pre kina needs --wiki, --law-sources and --law-cache");
+            let known = law_known(args);
+            let wtext = git_text(&args.wiki, &["log", "--format=%H%x1f%ct", "HEAD"]).expect("wiki log");
+            let mut wiki_revs: Vec<(i64, String)> = wtext.lines().filter_map(|l| l.split_once('\x1f').map(|(s, ct)| (ct.trim().parse().unwrap_or(0), s.to_string()))).collect();
+            wiki_revs.sort();
+            let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
+            let phase1: Vec<R2Phase1> = test_idx
+                .par_iter()
+                .map(|&k| {
+                    let mut st = BTreeMap::new();
+                    let Some(p) = parent_of(k) else { return (Vec::new(), HashMap::new(), false, st) };
+                    let pct = parents.get(&p).map_or(0, |x| x.1);
+                    let mut docs = kina_doc_lines(&args.git, &p);
+                    if let Some((_, w)) = wiki_revs.iter().rev().find(|(ct, _)| *ct <= pct) {
+                        let cached = wcache.lock().unwrap().get(w).cloned();
+                        let lines = cached.unwrap_or_else(|| {
+                            let l = std::sync::Arc::new(git_grep(&args.wiki, w, None, &["*.md"]));
+                            wcache.lock().unwrap().insert(w.clone(), l.clone());
+                            l
+                        });
+                        docs.extend(lines.iter().cloned());
+                    }
+                    let code_lines = git_grep(&args.git, &p, Some(KEYS_CODE_PAT), &[]);
+                    let m = kina_model(&docs, &code_lines, &kp, &pr, &known, None, nf, false, false);
+                    let (c, r, h) = r2_kina_commit(&m, subject(&commits[k].msg));
+                    kbump(&mut st, if h { "r2_test_commits_with_subject_id" } else { "r2_test_commits_without_subject_id" });
+                    (c, r, h, st)
+                })
+                .collect();
+            let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            let mut out = Vec::new();
+            // GLIA_R2_DUMP=<file>: per test commit, the subject's keys, routes and reach (inspection only)
+            let mut dump = String::new();
+            for (o, (cands, reach, has_id, st)) in phase1.into_iter().enumerate() {
+                for (a, b) in st {
+                    *stats.entry(a).or_default() += b;
+                }
+                let before = stats.clone();
+                let (keys, scopes) = r2_pick(&cands, &recent, &mut stats);
+                if std::env::var("GLIA_R2_DUMP").is_ok() {
+                    let routes: Vec<String> = stats.iter().filter(|(k, v)| k.starts_with("r2_route_last=") && **v > before.get(*k).copied().unwrap_or(0.0)).map(|(k, _)| k[14..].to_string()).collect();
+                    let c = &commits[test_idx[o]];
+                    let rs: Vec<&R2Reach> = keys.iter().filter_map(|k| reach.get(k)).collect();
+                    let x = r2_finish(&rs, has_id);
+                    let truth: BTreeSet<u32> = c.files.iter().copied().collect();
+                    let mut top = x.idr.clone();
+                    top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                    let hits = x.idr.iter().filter(|(f, _)| truth.contains(f)).count();
+                    let tops: Vec<String> = top.iter().take(12).map(|(f, w)| format!("{}{}:{w}", if truth.contains(f) { "*" } else { "" }, paths[*f as usize])).collect();
+                    dump.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}/{}\t{}\n", &c.sha[..8], subject(&c.msg), keys.join(" "), routes.join(" "), x.idr.len(), hits, c.files.len(), tops.join(" ")));
+                }
+                for s in scopes {
+                    recent.retain(|x| *x != s);
+                    recent.push_front(s);
+                    recent.truncate(R2_RECENT);
+                }
+                let rs: Vec<&R2Reach> = keys.iter().filter_map(|k| reach.get(k)).collect();
+                let x = r2_finish(&rs, has_id);
+                if !x.idr.is_empty() {
+                    kbump(&mut stats, "r2_test_commits_reaching_files");
+                }
+                out.push(x);
+            }
+            if let Ok(f) = std::env::var("GLIA_R2_DUMP") {
+                std::fs::write(f, dump).expect("r2 dump");
+            }
+            stats.retain(|k, _| !k.starts_with("r2_route_last="));
+            out
+        }
+        "glia" => {
+            let cache = BlobCache { text: std::sync::Mutex::new(HashMap::new()), packets: std::sync::Mutex::new(HashMap::new()) };
+            let pkc: std::sync::Mutex<HashMap<String, std::sync::Arc<GPkFile>>> = std::sync::Mutex::new(HashMap::new());
+            let got: Vec<(R2Idr, BTreeMap<String, f64>)> = test_idx
+                .par_iter()
+                .map(|&k| {
+                    let mut st = BTreeMap::new();
+                    let Some(p) = parent_of(k) else { return (R2Idr::default(), st) };
+                    let gd = glia_docs(&args.git, &p, &cache);
+                    let code_lines = git_grep(&args.git, &p, Some("[A-Z][A-Z0-9]{0,4}[.][0-9]|Q[0-9]"), &[]);
+                    let gm = glia_model(&args.git, &p, &cache, &pkc, &code_lines, &kp, &pr, None, nf, false);
+                    let x = r2_glia_commit(&gm, &gd.wave, subject(&commits[k].msg), &mut st);
+                    kbump(&mut st, if x.has_id { "r2_test_commits_with_subject_id" } else { "r2_test_commits_without_subject_id" });
+                    if !x.idr.is_empty() {
+                        kbump(&mut st, "r2_test_commits_reaching_files");
+                    }
+                    (x, st)
+                })
+                .collect();
+            got.into_iter()
+                .map(|(x, st)| {
+                    for (a, b) in st {
+                        *stats.entry(a).or_default() += b;
+                    }
+                    x
+                })
+                .collect()
+        }
+        _ => {
+            let got: Vec<(R2Idr, BTreeMap<String, f64>)> = test_idx
+                .par_iter()
+                .map(|&k| {
+                    let mut st = BTreeMap::new();
+                    let Some(p) = parent_of(k) else { return (R2Idr::default(), st) };
+                    let x = r2_scope_commit(&args.git, &p, subject(&commits[k].msg), &kp, &mut st);
+                    kbump(&mut st, if x.has_id { "r2_test_commits_with_subject_id" } else { "r2_test_commits_without_subject_id" });
+                    if !x.idr.is_empty() {
+                        kbump(&mut st, "r2_test_commits_reaching_files");
+                    }
+                    (x, st)
+                })
+                .collect();
+            got.into_iter()
+                .map(|(x, st)| {
+                    for (a, b) in st {
+                        *stats.entry(a).or_default() += b;
+                    }
+                    x
+                })
+                .collect()
+        }
+    };
+    eprintln!("[round2] id routing for {} test commits in {:.1}s: {stats:?}", out.len(), t.elapsed().as_secs_f64());
+    (out, stats)
+}
+
+/// The round-2 rankers for one query (appended after every round-1 ranker).
+#[allow(clippy::too_many_arguments)]
+fn round2_rankers(out: &mut Out, x: &R2Idr, seed: usize, t: &[u32], p1: &[f64], c0: &[f64], t1s: &[f64], pt: Option<&[f64]>) {
+    let nf = p1.len();
+    let d = |v: &[(u32, f64)]| dense(nf, v, seed);
+    let (idr, named, cited, hop, nor) = (d(&x.idr), d(&x.named), d(&x.cited), d(&x.hop), d(&x.noroles));
+    out.r1cov.push(("idr_id".into(), x.has_id));
+    out.r1cov.push(("idr".into(), r1_cov(&idr, seed)));
+    let mm = |v: &[f64]| minmax(v, seed);
+    let (mm_idr, mm_p1, mm_c0, mm_t1s, mm_hop, mm_nor) = (mm(&idr), mm(p1), mm(c0), mm(t1s), mm(&hop), mm(&nor));
+    out.push("IDR", &scalar(&idr), seed, t);
+    out.push("IDRn", &scalar(&named), seed, t);
+    out.push("IDRc", &scalar(&cited), seed, t);
+    out.push("IDRh", &scalar(&hop), seed, t);
+    out.push("IDR~roles", &scalar(&nor), seed, t);
+    // typed links first, structure second; and the min-max blends
+    out.push("LX[IDR,P1]", &lex2(&idr, p1), seed, t);
+    out.push("HI50[P1]", &scalar(&blend(0.5, &mm_idr, &mm_p1)), seed, t);
+    out.push("HI25[P1]", &scalar(&blend(0.25, &mm_idr, &mm_p1)), seed, t);
+    // with the subject's text (H9s50 = 0.5 mm(T1s) + 0.5 mm(P1))
+    let h9s50 = blend(0.5, &mm_t1s, &mm_p1);
+    let eq = |parts: &[&[f64]]| -> Vec<f64> { (0..nf).map(|f| parts.iter().map(|p| p[f]).sum::<f64>() / parts.len() as f64).collect() };
+    out.push("LX[IDR,H9s50]", &lex2(&idr, &h9s50), seed, t);
+    out.push("H9si", &scalar(&eq(&[&mm_idr, &mm_t1s, &mm_p1])), seed, t);
+    // with co-change
+    let lx: Vec<Key> = (0..nf).map(|f| [idr[f], c0[f], p1[f]]).collect();
+    out.push("LX[IDR,C0,P1]", &lx, seed, t);
+    out.push("HCi", &scalar(&eq(&[&mm_idr, &mm_c0, &mm_p1])), seed, t);
+    // text as a ranker behind the typed links: IDR's files ordered by the subject's BM25 (then IDR),
+    // every other file by P1 after them; text adds no candidate
+    let it: Vec<Key> = (0..nf)
+        .map(|f| if idr[f] > 0.0 { [1.0, mm_t1s[f] + 1e-3 * mm_idr[f], p1[f]] } else { [0.0, 0.0, p1[f]] })
+        .collect();
+    out.push("IDRt", &it, seed, t);
+    let it: Vec<Key> = (0..nf)
+        .map(|f| if idr[f] > 0.0 { [1.0, mm_t1s[f] + 1e-3 * mm_idr[f], h9s50[f]] } else { [0.0, 0.0, h9s50[f]] })
+        .collect();
+    out.push("LX[IDRt,H9s50]", &it, seed, t);
+    // roles off / one hop, in the main text hybrid
+    out.push("LX[IDRh,H9s50]", &lex2(&hop, &h9s50), seed, t);
+    out.push("LX[IDR~roles,H9s50]", &lex2(&nor, &h9s50), seed, t);
+    out.push("H9si~roles", &scalar(&eq(&[&mm_nor, &mm_t1s, &mm_p1])), seed, t);
+    out.push("H9sih", &scalar(&eq(&[&mm_hop, &mm_t1s, &mm_p1])), seed, t);
+    if let Some(pt) = pt {
+        let mm_pt = mm(pt);
+        let h18 = eq(&[&mm_t1s, &mm_c0, &mm_pt]);
+        let h9s25 = blend(0.25, &mm_t1s, &mm_pt);
+        out.push("LX[IDR,H18s[PT*]]", &lex2(&idr, &h18), seed, t);
+        out.push("LX[IDR,H9s25[PT*]]", &lex2(&idr, &h9s25), seed, t);
+        out.push("H18si[PT*]", &scalar(&eq(&[&mm_idr, &mm_t1s, &mm_c0, &mm_pt])), seed, t);
+        let lx: Vec<Key> = (0..nf).map(|f| [idr[f], c0[f], pt[f]]).collect();
+        out.push("LX[IDR,C0,PT*]", &lx, seed, t);
+        out.push("LX[IDRh,H18s[PT*]]", &lex2(&hop, &h18), seed, t);
+        out.push("LX[IDR~roles,H18s[PT*]]", &lex2(&nor, &h18), seed, t);
+    }
 }

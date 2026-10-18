@@ -12,13 +12,14 @@ must be completed within it"*): follow-up waves until a close-out lists none.
 
 ## Evidence
 
-All four are produced by `engine/examples/rank_eval.rs`. Ground truth is held-out git commits: seed one changed file and
+All five are produced by `engine/examples/rank_eval.rs`. Ground truth is held-out git commits: seed one changed file and
 score the commit's other files. Private repos are reported as aggregate numbers only.
 
 - `dev-notes/ranking-eval-2026-10-18.md`: 132 rankers on glia, Kina and quokka-stack.
 - `dev-notes/ranking-eval-vertical-2026-10-18.md`: the upper layers.
 - `dev-notes/keys-eval-glia-2026-10-18.md`: resolved cross-layer keys.
 - `dev-notes/ranking-eval-round1-2026-10-18.md`: realistic intent and milestones, on 9 repos, 6 of them untuned.
+- `dev-notes/ranking-eval-round2-2026-10-18.md`: typed id routing, resolver variants and selection v2, on 10 repos.
 
 ## Scope
 
@@ -33,10 +34,18 @@ score the commit's other files. Private repos are reported as aggregate numbers 
 **Gate.** `rank_eval` runs as a release check on fixed repo snapshots (glia plus the open-source shell / websocket /
 samples). A ranking change that lowers recall@10 or MRR beyond its CI fails the close-out.
 
-**From round 2** (pending): any small or medium mechanism it measures as a win joins here. Candidates are:
-- Kina's subject task-id routing (id -> task row -> the files it names);
-- role-aware mention joining;
-- text as a ranker behind typed links.
+**From round 2** (`dev-notes/ranking-eval-round2-2026-10-18.md`): these wins are proposed to join, for James to confirm.
+
+| # | mechanism | measured | effort | where |
+|---|---|---|---|---|
+| 6 | IDR, typed id routing: a subject's ids -> the scoped-id resolver -> the defining task / requirement row -> the files it names (pending / done state), plus the code citing the id, read at the parent revision | Kina 0.595 recall@10 vs 0.531 for the optimistic full-message blend (160% of its gain); glia 0.920 | medium | `review` (the PR title), `find` (the query) |
+| 7 | typed links first: the lexicographic fusion LX[IDR, ...] | beats min-max blending IDR on glia | small | the fusion in 3 / 6 |
+| 8 | item 4's candidate set gains the 4 id-routed fusions (SELt v2) | never below PPR or the optimistic blend on 10 repos; a no-op where subjects carry no id | small | item 4 |
+| 9 | bare-id namespacing in the key resolver: a findings series stays local, a restated series merges, label rows don't define, siblings share, the default is global | link precision 0.667 -> 0.963; no ranking effect | small | the scoped-id resolver of 6 |
+
+Measured as losses, so they stay out: mention roles as a hop restriction (roles stay for ownership, where they help); text as
+a ranker behind typed links; an extra hop through a defining row's mentions. The instrument-generic law diff is a small
+win for the law layer, which predicts nothing, so it goes to 0.5.4 with the goal-layer connector.
 
 **Proposed small hygiene, for James to confirm.**
 - **Remove engram-export's DE.5 side file** (`--ppr-candidates`, `.ppr.jsonl`, `ppr_side.rs`, exit 8; 0.5.4 seed §F item
@@ -53,7 +62,7 @@ samples). A ranking change that lowers recall@10 or MRR beyond its CI fails the 
 
 ## Order
 
-1. Round 2 finishes; its small / medium wins are added above.
+1. Round 2 finished; its wins are proposed above (items 6-9), for James to confirm.
 2. A small spec run (spec + adversarial verify per mechanism).
 3. Waves with close-outs, `rank_eval` as a gate.
 4. The release docs and handoffs.
