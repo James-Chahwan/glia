@@ -133,6 +133,16 @@ struct Args {
     keys: String,
     /// Where the keyed run writes its audit samples and law tables.
     keys_out: String,
+    /// Round 1 (2026-10-18): `on` adds the realistic-intent, work-neighbourhood and milestone rankers.
+    round1: String,
+    /// Round 1: the pre-change intent text source, `glia` (packet title + rationale) or `kina` (task rows).
+    pre: String,
+    /// Round 1: `on` adds the PPR tuning grid (edge weights x damping x pooling).
+    tune: String,
+    /// Round 1: the round-1 tables (markdown).
+    r1md: String,
+    /// Round 1: the PPR config picked on the tuning repos (`<weights>,d<damping>`, sum-pooled), for the hybrids.
+    pick: String,
 }
 
 fn parse_args() -> Args {
@@ -159,6 +169,11 @@ fn parse_args() -> Args {
         law_end: String::new(),
         keys: String::new(),
         keys_out: String::new(),
+        round1: String::new(),
+        pre: String::new(),
+        tune: String::new(),
+        r1md: "rank_eval_round1.md".into(),
+        pick: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -187,6 +202,11 @@ fn parse_args() -> Args {
             "--law-end" => a.law_end = v,
             "--keys" => a.keys = v,
             "--keys-out" => a.keys_out = v,
+            "--round1" => a.round1 = v,
+            "--pre" => a.pre = v,
+            "--tune" => a.tune = v,
+            "--r1md" => a.r1md = v,
+            "--pick" => a.pick = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -740,6 +760,10 @@ struct Ctx<'a> {
     push_eps: f64,
     /// Inter-file pairs joined by any edge (the vertical pair diagnostics).
     direct: HashSet<(u32, u32)>,
+    /// Round 1: the PPR tuning grid (weight set x damping), empty without `--tune on`.
+    tune: Vec<(String, Ppr)>,
+    /// Round 1: the picked config's position in `tune`.
+    pick: Option<usize>,
 }
 
 #[derive(Default)]
@@ -753,6 +777,8 @@ struct Out {
     /// Per (resolved, raw) signal pair: [co-change targets linked by the resolved signal, by
     /// the raw one, by the resolved only, by the raw only, co-change targets].
     vgain: Vec<(String, [f64; 5])>,
+    /// Round 1: per signal, whether this query's seed has it (the covered subsets).
+    r1cov: Vec<(String, bool)>,
 }
 
 impl Out {
@@ -842,7 +868,7 @@ fn pooled(base: &[f64], cl: &[u32], m: usize) -> Vec<Key> {
     base.iter().enumerate().map(|(f, &s)| [cs[cl[f] as usize], s, 0.0]).collect()
 }
 
-fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Option<&VLayer>) -> Out {
+fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Option<&VLayer>, r1: Option<&R1Commit>) -> Out {
     let g = ctx.g;
     let nf = g.paths.len();
     let seed = q.seed as usize;
@@ -866,6 +892,7 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
 
     let pers = Ppr::uniform(&seed_ppr);
     let mut p1 = Vec::new();
+    let mut p1sum_v = Vec::new();
     let mut p1_vec = Vec::new();
     for (name, idx) in &ctx.ppr {
         let v = idx.run(&pers);
@@ -874,6 +901,7 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
             let fsum = file_pool(g, |u| v[g.node_ppr[u]], true);
             structural.push(("P1".into(), scalar(&fs), true));
             structural.push(("P1sum".into(), scalar(&fsum), true));
+            p1sum_v = fsum;
             p1 = fs;
             p1_vec = v;
         } else {
@@ -1047,6 +1075,11 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
     // ---- vertical layers (second run; appended, so every ranker above is unchanged) ----
     if let Some(vl) = vl {
         vertical_rankers(&mut out, vl, seed, t, &p1, &t1, &ctx.direct);
+    }
+
+    // ---- round 1 (appended, so every ranker above is unchanged) ----
+    if let Some(r1) = r1 {
+        round1_rankers(&mut out, ctx, r1, q, t, &p1, &p1sum_v, &c0, &t1, &pers);
     }
 
     // ---- hub flooding ----
@@ -1270,6 +1303,8 @@ fn main() {
 
     // ---- history replay ----
     let (commits, raw_commits) = git_log(&args.git, &args.rev, &pidx);
+    let r1_on = args.round1 == "on";
+    assert!(!(r1_on && !args.vertical.is_empty()), "--round1 and --vertical are separate runs");
     let train_ok = |c: &Commit| !c.files.is_empty() && c.files.len() <= MAX_FILES;
     let test_ok = |c: &Commit| c.files.len() >= 2 && c.files.len() <= MAX_FILES;
     let eligible: Vec<usize> = (0..commits.len()).filter(|&k| test_ok(&commits[k])).collect();
@@ -1278,6 +1313,10 @@ fn main() {
     for (o, &k) in test_idx.iter().enumerate() {
         test_ord.insert(k, o);
     }
+    let hist: Option<R1Hist> = r1_on.then(|| r1_hist(&args, &commits, &test_idx.iter().copied().collect()));
+    let mut r1 = R1State::default();
+    let mut r1s: Vec<R1Commit> = Vec::new();
+    let mut bm_s = Bm25::default();
     let mut cnt = vec![0u32; nf];
     let mut co: Vec<HashMap<u32, u32>> = vec![HashMap::new(); nf];
     let mut bm = Bm25::default();
@@ -1317,6 +1356,27 @@ fn main() {
                 queries.push(Query { tc: o, seed: sd, targets, c0, t2 });
             }
             tcs.push(TestCommit { t1, t0, s_pairs });
+            if let Some(h) = &hist {
+                let mut rc = r1.test(h, k, &c.sha);
+                for q in queries.iter().filter(|q| q.tc == o) {
+                    let (cr, cm) = r1.seed_sigs(q.seed, &rc.m_keys);
+                    rc.c0r.push((q.seed, cr));
+                    rc.c0m.push((q.seed, cm));
+                }
+                let stoks = tokens(subject(&c.msg));
+                rc.t1s = bm.file_scores(&bm.scores(&stoks), |_| true);
+                rc.t1ss = bm_s.file_scores(&bm_s.scores(&stoks), |_| true);
+                rc.t1s_nd = bm.file_scores(&bm.scores(&no_digits(&stoks)), |_| true);
+                let ptoks = h.pre[k].as_deref().map(tokens).unwrap_or_default();
+                rc.pre_cov = !ptoks.is_empty();
+                if rc.pre_cov {
+                    rc.t1pre = bm.file_scores(&bm.scores(&ptoks), |_| true);
+                    rc.t1pre_nd = bm.file_scores(&bm.scores(&no_digits(&ptoks)), |_| true);
+                }
+                let sp: Vec<String> = stoks.iter().chain(ptoks.iter()).cloned().collect();
+                rc.t1sp = bm.file_scores(&bm.scores(&sp), |_| true);
+                r1s.push(rc);
+            }
             t_task += t0i.elapsed().as_secs_f64();
         }
         if train_ok(c) {
@@ -1330,6 +1390,13 @@ fn main() {
                 }
             }
             bm.add(tokens(&c.msg), c.files.clone());
+            if let Some(h) = &hist {
+                r1.train(h, k, c);
+                bm_s.add(tokens(subject(&c.msg)), c.files.clone());
+            }
+        }
+        if let Some(h) = &hist {
+            r1.step(h, k);
         }
     }
     eprintln!(
@@ -1392,7 +1459,14 @@ fn main() {
         n_pairs: pair_list.len(),
         direct: pair_list.iter().copied().collect(),
         push_eps: args.push_eps,
+        tune: if args.tune == "on" { r1_tune_indexes(n_all, &id_to_idx, &edges, &edge_pair) } else { Vec::new() },
+        pick: None,
     };
+    let mut ctx = ctx;
+    if !args.pick.is_empty() {
+        ctx.pick = Some(ctx.tune.iter().position(|(n, _)| *n == args.pick).unwrap_or_else(|| panic!("--pick {}: not in the grid", args.pick)));
+    }
+    let ctx = ctx;
 
     // ---- timing pass (sequential) + replica check against production ----
     let timing = timing_pass(&ctx, &queries, args.timing, &base_cfg);
@@ -1400,11 +1474,12 @@ fn main() {
     // ---- the evaluation (parallel over queries) ----
     let t_eval = Instant::now();
     let wf = |c: EdgeCategoryId| ctx.push_w.get(&c).copied().unwrap_or(1.0);
-    let results: Vec<Out> = queries
+    let mut results: Vec<Out> = queries
         .par_iter()
-        .map_init(|| PushPpr::new(&ctx.adj_push, &wf), |push, q| run_query(&ctx, q, &tcs[q.tc], push, layers.get(q.tc)))
+        .map_init(|| PushPpr::new(&ctx.adj_push, &wf), |push, q| run_query(&ctx, q, &tcs[q.tc], push, layers.get(q.tc), r1s.get(q.tc)))
         .collect();
     let eval_s = t_eval.elapsed().as_secs_f64();
+    let r1_sel = if r1_on { round1_select(&mut results, &queries, tcs.len()) } else { serde_json::Value::Null };
     let names = results[0].names.clone();
     for r in &results {
         assert_eq!(r.names, names, "ranker order differs between queries");
@@ -1534,6 +1609,13 @@ fn main() {
         let (vj, vmd) = vertical_report(&args.label, m, &names, &results, &queries, &layers, &bi);
         doc["vertical"] = vj;
         std::fs::write(&args.vmd, vmd).expect("write vertical md");
+    }
+    if let Some(h) = &hist {
+        let bi = BootIn { commit_of: &commit_of, boot: args.boot, lf: &lf };
+        let (rj, rmd) = round1_report(&args.label, &names, &results, &queries, &r1s, &h.stats, &bi);
+        doc["round1"] = rj;
+        doc["round1"]["select"] = r1_sel;
+        std::fs::write(&args.r1md, rmd).expect("write round1 md");
     }
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write json");
     let md = render_md(&args.label, &doc, &names, &metrics, &paired_all);
@@ -9898,4 +9980,1212 @@ fn keys_law(x: &KLawIn) {
     std::fs::write(format!("{dir}/keys_law_tables.md"), &md).expect("write keys law md");
     std::fs::write(format!("{dir}/keys_law.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write keys law json");
     eprintln!("[keys] law: {} resolved cited sections ({} changed) in {:.1}s -> {dir}/keys_law_tables.md", cited.len(), cited_changed.len(), t0.elapsed().as_secs_f64());
+}
+
+// ============================================================================
+// Round 1 (2026-10-18): realistic intent, the work neighbourhood, milestones,
+// and PPR tuning with a hold-out (`--round1 on [--pre glia|kina] [--tune on]`).
+//
+// James: "intent comes from people's purpose to create ... sometimes it's a
+// general idea made up of little milestones and ideas". The first run's T1 read
+// each test commit's own message, written AFTER the change. Every signal here is
+// something that exists BEFORE the change:
+// - T1s: BM25 over older commits (full messages) with only the subject line as
+//   the query; T1ss: the same over older commits' subject lines.
+// - T1pre: the plan text the commit names, read at its parent: glia, the named
+//   packets' title + rationale (leap-*-packets.json); Kina, the task / requirement
+//   rows the commit's ids name (Kina's docs + the wiki current at the parent).
+// - W_k: the files the last k training commits touched, recency-decayed.
+// - M: the files earlier commits of the same milestone touched; the milestone is
+//   a label known before the change (glia: the named packet's family; a merged
+//   branch), else a time-gap + file-overlap segmentation of the history.
+// Each has a control: W with the window moved to a random earlier point, M with
+// the milestone swapped for one of the recently active other milestones.
+// ============================================================================
+
+const R1_KS: [usize; 4] = [1, 3, 5, 10];
+/// W_k: the j-th most recent training commit (j = 1 the newest) weighs R1_DECAY^(j-1).
+const R1_DECAY: f64 = 0.75;
+/// Mgap: a commit continues the current milestone only within this gap (author time, seconds) ...
+const R1_GAP_S: i64 = 24 * 3600;
+/// ... and only when it shares a file with the milestone's last this-many commits.
+const R1_OVERLAP_LAST: usize = 3;
+/// The milestone controls draw one of this many most recently active other milestones.
+const R1_SHUF_RECENT: usize = 5;
+/// The PPR tuning grid's edge-weight sets, from the first run's inefficiency map (overrides on the base table).
+const R1_WSETS: [(&str, &[(EdgeCategoryId, f64)]); 4] = [
+    ("base", &[]),
+    ("WA", &[(ec::HTTP_CALLS, 2.0), (ec::HANDLED_BY, 2.0), (ec::TESTS, 4.0), (ec::IMPLEMENTS, 3.0), (ec::INHERITS_FROM, 3.0)]),
+    ("WB", &[(ec::HTTP_CALLS, 1.0), (ec::HANDLED_BY, 1.0), (ec::TESTS, 6.0), (ec::IMPLEMENTS, 5.0), (ec::INHERITS_FROM, 5.0)]),
+    (
+        "WC",
+        &[
+            (ec::HTTP_CALLS, 1.0),
+            (ec::HANDLED_BY, 1.0),
+            (ec::TESTS, 6.0),
+            (ec::IMPLEMENTS, 5.0),
+            (ec::INHERITS_FROM, 5.0),
+            (ec::INJECTS, 1.0),
+            (ec::NAVIGATES_TO, 1.0),
+        ],
+    ),
+];
+const R1_DAMP: [f64; 4] = [0.3, 0.5, 0.7, 0.85];
+
+/// A query without its digit-bearing tokens (reused bare ids such as T019, migration and version numbers).
+fn no_digits(toks: &[String]) -> Vec<String> {
+    toks.iter().filter(|t| !t.bytes().any(|b| b.is_ascii_digit())).cloned().collect()
+}
+
+fn subject(msg: &str) -> &str {
+    msg.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
+}
+
+/// The id-bearing part of a message: its subject when the subject names an id, else the whole message.
+fn id_text<'a>(msg: &'a str, has: impl Fn(&str) -> bool) -> &'a str {
+    let s = subject(msg);
+    if has(s) { s } else { msg }
+}
+
+fn git_author_times(git: &str, rev: &str) -> HashMap<String, i64> {
+    let text = git_text(git, &["log", "--format=%H %at", rev]).expect("git log author times");
+    text.lines()
+        .filter_map(|l| {
+            let (s, t) = l.split_once(' ')?;
+            Some((s.to_string(), t.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// The branch a merge commit's subject names (None for a subtree import of another repository).
+fn merge_label(subj: &str) -> Option<String> {
+    if subj.starts_with("Merge commit '") && subj.contains("' as '") {
+        return None;
+    }
+    if let Some(r) = subj.strip_prefix("Merge pull request #") {
+        let num: String = r.chars().take_while(char::is_ascii_digit).collect();
+        return Some(format!("pr#{num}"));
+    }
+    for pre in ["Merge branch '", "Merge remote-tracking branch '"] {
+        if let Some(r) = subj.strip_prefix(pre) {
+            return r.split('\'').next().map(str::to_string);
+        }
+    }
+    let r = subj.strip_prefix("Merge ")?;
+    let (head, into) = match r.rsplit_once(" into ") {
+        Some((h, i)) => (h, Some(i.trim().trim_matches('\''))),
+        None => (r, None),
+    };
+    let head = head.split(" (").next().unwrap_or(head).trim().trim_matches('\'');
+    if head.is_empty() {
+        return None;
+    }
+    Some(match into {
+        Some(i) if !matches!(i, "main" | "master") => format!("{head}@{i}"),
+        _ => head.to_string(),
+    })
+}
+
+/// sha -> the branch it came in on: the smallest second-parent side of a merge whose
+/// subject names a branch (so a lane merged into a wave branch keeps the lane).
+fn branch_labels(git: &str, rev: &str) -> HashMap<String, String> {
+    let text = git_text(git, &["log", "--merges", "--format=%H%x1f%P%x1f%s", rev]).unwrap_or_default();
+    let mut best: HashMap<String, (usize, String)> = HashMap::new();
+    for l in text.lines() {
+        let mut p = l.split('\x1f');
+        let (Some(_), Some(ps), Some(subj)) = (p.next(), p.next(), p.next()) else { continue };
+        let ps: Vec<&str> = ps.split_whitespace().collect();
+        if ps.len() < 2 {
+            continue;
+        }
+        let Some(lab) = merge_label(subj) else { continue };
+        let side = git_text(git, &["rev-list", "--no-merges", ps[1], &format!("^{}", ps[0])]).unwrap_or_default();
+        let shas: Vec<&str> = side.lines().collect();
+        let n = shas.len();
+        for s in shas {
+            let e = best.entry(s.to_string()).or_insert((usize::MAX, String::new()));
+            if n < e.0 {
+                *e = (n, lab.clone());
+            }
+        }
+    }
+    best.into_iter().map(|(k, (_, l))| (k, l)).collect()
+}
+
+/// A glia wave-runner landing commit: "wave W12 landed", "leap wave W3 landed", "wave 7 landed".
+fn wave_landing(subj: &str) -> bool {
+    let b = subj.as_bytes();
+    let mut i = 0;
+    while let Some(off) = subj[i..].find("wave ") {
+        let j = i + off + 5;
+        let k = if subj[j..].starts_with('W') { j + 1 } else { j };
+        let e = digits_at(b, k, 4);
+        if e > k && subj[e..].starts_with(" landed") {
+            return true;
+        }
+        i = j;
+    }
+    false
+}
+
+/// glia: packet id -> "title\nrationale", per packets-JSON blob.
+#[derive(Default)]
+struct PreCache {
+    m: std::sync::Mutex<HashMap<String, std::sync::Arc<HashMap<String, String>>>>,
+}
+
+impl PreCache {
+    fn get(&self, git: &str, blob: &str) -> std::sync::Arc<HashMap<String, String>> {
+        if let Some(x) = self.m.lock().unwrap().get(blob) {
+            return x.clone();
+        }
+        let text = git_text(git, &["cat-file", "-p", blob]).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let mut out = HashMap::new();
+        for p in v.get("packets").and_then(|p| p.as_array()).into_iter().flatten() {
+            let Some(id) = p.get("id").and_then(|x| x.as_str()) else { continue };
+            let f = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            out.insert(id.to_string(), format!("{}\n{}", f("title"), f("rationale")));
+        }
+        let a = std::sync::Arc::new(out);
+        self.m.lock().unwrap().insert(blob.to_string(), a.clone());
+        a
+    }
+}
+
+/// glia: the title + rationale, at `parent`, of the packets the message names (its subject's ids, else the
+/// whole message's); returns (text, ids named, ids found at the parent).
+fn glia_pre_text(git: &str, parent: &str, msg: &str, cache: &PreCache) -> (Option<String>, usize, usize) {
+    let blobs = ls_tree(git, parent, GLIA_PACKETS);
+    let maps: Vec<_> = GLIA_PACKETS.iter().filter_map(|p| blobs.get(*p)).map(|b| cache.get(git, b)).collect();
+    let part = id_text(msg, |s| !dot_ids(s).is_empty());
+    let mut seen = BTreeSet::new();
+    let (mut text, mut found) = (String::new(), 0);
+    for (_, id) in dot_ids(part) {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(t) = maps.iter().find_map(|m| m.get(&id)) {
+            found += 1;
+            text.push_str(t);
+            text.push('\n');
+        }
+    }
+    ((!text.trim().is_empty()).then_some(text), seen.len(), found)
+}
+
+/// Kina: the definition rows, in `docs`, of the ids `text` names, and the units (spec dir or doc) defining
+/// them. A row is the line whose head defines the id (as in the vertical run). An id defined in several
+/// units is narrowed by a spec number on its own message line, then to the rows still open (`- [ ]`, the
+/// task about to be done), then to the newest spec (highest number) when only spec units remain.
+fn kina_rows(docs: &[(String, String)], text: &str, stats: &mut BTreeMap<String, f64>) -> (Option<String>, BTreeSet<String>) {
+    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let mut defs: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    let mut vocab_h: BTreeSet<String> = BTreeSet::new();
+    let mut kinds: BTreeSet<u8> = BTreeSet::new();
+    for (path, line) in docs {
+        let head = line_head(line);
+        let mut defined: Vec<String> = Vec::new();
+        if let Some((p, id)) = hyphen_ids(head).into_iter().next()
+            && head.starts_with(&id)
+        {
+            if !KINA_STANDARDS.contains(&p.as_str()) {
+                vocab_h.insert(p);
+                defined.push(id);
+            }
+        } else if let Some((k, id)) = bare_ids(head, &bare).into_iter().next()
+            && head.starts_with(&id)
+        {
+            kinds.insert(k);
+            defined.push(id);
+        }
+        if defined.is_empty() {
+            continue;
+        }
+        let t = line.trim_start();
+        let open = t.starts_with("- [ ]") || t.starts_with("* [ ]");
+        let unit = kina_unit(path);
+        for id in defined {
+            defs.entry(id).or_default().push((unit.clone(), line.clone(), open));
+        }
+    }
+    let unit_spec = |u: &str| -> Option<u32> {
+        let r = u.strip_prefix("specs/")?;
+        let d: String = r.chars().take_while(char::is_ascii_digit).collect();
+        (d.len() == 3).then(|| d.parse().ok()).flatten()
+    };
+    let mut rows: BTreeSet<String> = BTreeSet::new();
+    let mut units: BTreeSet<String> = BTreeSet::new();
+    let mut bump = |k: &str| *stats.entry(format!("pre_{k}")).or_default() += 1.0;
+    for l in text.lines() {
+        let lt = l.trim_start().to_ascii_lowercase();
+        if lt.starts_with("co-authored-by:") || lt.starts_with("claude-session:") || lt.starts_with("signed-off-by:") {
+            continue;
+        }
+        let ls = spec_refs(l);
+        let mut found: Vec<String> = hyphen_ids(l).into_iter().filter(|(p, _)| vocab_h.contains(p)).map(|x| x.1).collect();
+        found.extend(bare_ids(l, &kinds).into_iter().map(|x| x.1));
+        for id in found {
+            let Some(cands) = defs.get(&id) else {
+                bump("id_undefined");
+                continue;
+            };
+            let mut c: Vec<&(String, String, bool)> = cands.iter().collect();
+            let multi = c.iter().map(|x| &x.0).collect::<BTreeSet<_>>().len() > 1;
+            if !ls.is_empty() {
+                let r: Vec<_> = c.iter().copied().filter(|x| unit_spec(&x.0).is_some_and(|n| ls.contains(&n))).collect();
+                if !r.is_empty() {
+                    c = r;
+                    bump("by_line_spec");
+                }
+            }
+            if c.iter().any(|x| x.2) && c.iter().any(|x| !x.2) {
+                c.retain(|x| x.2);
+                bump("by_open_row");
+            }
+            let us: BTreeSet<&String> = c.iter().map(|x| &x.0).collect();
+            if us.len() > 1 && us.iter().all(|u| unit_spec(u).is_some()) {
+                let newest = us.iter().map(|u| unit_spec(u).unwrap_or(0)).max().unwrap_or(0);
+                c.retain(|x| unit_spec(&x.0) == Some(newest));
+                bump("by_newest_spec");
+            }
+            bump(if multi { "id_multi_unit" } else { "id_one_unit" });
+            for (u, line, _) in c {
+                rows.insert(line.clone());
+                units.insert(u.clone());
+            }
+        }
+    }
+    let text: String = rows.into_iter().collect::<Vec<_>>().join("\n");
+    ((!text.trim().is_empty()).then_some(text), units)
+}
+
+/// Per commit, what is known before it: author time, merged branch, milestone ids, wave landings, and
+/// (test commits only) the pre-change intent text.
+struct R1Hist {
+    at: Vec<i64>,
+    br: Vec<Option<String>>,
+    /// Mid labels: glia, the families of the packets the commit names; Kina, the units of its rows.
+    ids: Vec<BTreeSet<String>>,
+    /// glia: the packet prefixes the commit names (DT, DA, ...).
+    pfx: Vec<BTreeSet<String>>,
+    wave_end: Vec<bool>,
+    pre: Vec<Option<String>>,
+    glia: bool,
+    stats: BTreeMap<String, f64>,
+}
+
+fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>) -> R1Hist {
+    let t = Instant::now();
+    let at_map = git_author_times(&args.git, &args.rev);
+    let br_map = branch_labels(&args.git, &args.rev);
+    let n = commits.len();
+    let at: Vec<i64> = commits.iter().map(|c| at_map.get(&c.sha).copied().unwrap_or(0)).collect();
+    let br: Vec<Option<String>> = commits.iter().map(|c| br_map.get(&c.sha).cloned()).collect();
+    let mut ids = vec![BTreeSet::new(); n];
+    let mut pfx = vec![BTreeSet::new(); n];
+    let mut wave_end = vec![false; n];
+    let mut pre: Vec<Option<String>> = vec![None; n];
+    let mut stats: BTreeMap<String, f64> = BTreeMap::new();
+    stats.insert("commits_on_a_merged_branch".into(), br.iter().filter(|b| b.is_some()).count() as f64);
+    stats.insert("merged_branches".into(), br.iter().flatten().collect::<BTreeSet<_>>().len() as f64);
+    let parents = git_parents(&args.git, &args.rev);
+    match args.pre.as_str() {
+        "" => {}
+        "glia" => {
+            // the packet prefixes defined at the snapshot (A1-A16, L0, LA-LG, C0, CA-CL, D0, DA-DH, DT, DZ)
+            let cache = PreCache::default();
+            let blobs = ls_tree(&args.git, &args.rev, GLIA_PACKETS);
+            let prefixes: BTreeSet<String> = GLIA_PACKETS
+                .iter()
+                .filter_map(|p| blobs.get(*p))
+                .flat_map(|b| cache.get(&args.git, b).keys().map(|id| id.split('.').next().unwrap_or("").to_string()).collect::<Vec<_>>())
+                .collect();
+            for (k, c) in commits.iter().enumerate() {
+                let part = id_text(&c.msg, |s| dot_ids(s).iter().any(|(p, _)| prefixes.contains(p)));
+                for (p, id) in dot_ids(part) {
+                    if prefixes.contains(&p) {
+                        ids[k].insert(family(&id));
+                        pfx[k].insert(p);
+                    }
+                }
+                wave_end[k] = wave_landing(subject(&c.msg));
+            }
+            let got: Vec<(usize, (Option<String>, usize, usize))> = tests
+                .par_iter()
+                .map(|&k| {
+                    let p = parents.get(&commits[k].sha).and_then(|x| x.0.clone());
+                    (k, p.map_or((None, 0, 0), |p| glia_pre_text(&args.git, &p, &commits[k].msg, &cache)))
+                })
+                .collect();
+            for (k, (text, named, found)) in got {
+                *stats.entry("pre_ids_named".into()).or_default() += named as f64;
+                *stats.entry("pre_ids_found_at_parent".into()).or_default() += found as f64;
+                pre[k] = text;
+            }
+            stats.insert("wave_landings".into(), wave_end.iter().filter(|&&w| w).count() as f64);
+        }
+        "kina" => {
+            assert!(!args.wiki.is_empty(), "--pre kina needs --wiki");
+            let wtext = git_text(&args.wiki, &["log", "--format=%H%x1f%ct", "HEAD"]).expect("wiki log");
+            let mut wiki_revs: Vec<(i64, String)> = wtext
+                .lines()
+                .filter_map(|l| l.split_once('\x1f').map(|(s, ct)| (ct.trim().parse().unwrap_or(0), s.to_string())))
+                .collect();
+            wiki_revs.sort();
+            let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
+            let maybe = |m: &str| !hyphen_ids(m).is_empty() || !bare_ids(m, &KINA_BARE.iter().copied().collect()).is_empty();
+            let got: Vec<(usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>)> = (0..n)
+                .into_par_iter()
+                .filter(|&k| maybe(&commits[k].msg))
+                .map(|k| {
+                    let c = &commits[k];
+                    let mut st = BTreeMap::new();
+                    let Some(p) = parents.get(&c.sha).and_then(|x| x.0.clone()) else { return (k, None, BTreeSet::new(), st) };
+                    let pct = parents.get(&p).map_or(0, |x| x.1);
+                    let mut docs = kina_doc_lines(&args.git, &p);
+                    if let Some((_, w)) = wiki_revs.iter().rev().find(|(ct, _)| *ct <= pct) {
+                        let cached = wcache.lock().unwrap().get(w).cloned();
+                        let lines = cached.unwrap_or_else(|| {
+                            let l = std::sync::Arc::new(git_grep(&args.wiki, w, None, &["*.md"]));
+                            wcache.lock().unwrap().insert(w.clone(), l.clone());
+                            l
+                        });
+                        docs.extend(lines.iter().cloned());
+                    }
+                    let part = id_text(&c.msg, maybe);
+                    let (text, units) = kina_rows(&docs, part, &mut st);
+                    (k, text, units, st)
+                })
+                .collect();
+            for (k, text, units, st) in got {
+                ids[k] = units;
+                if tests.contains(&k) {
+                    pre[k] = text;
+                    for (a, b) in st {
+                        *stats.entry(a).or_default() += b;
+                    }
+                }
+            }
+        }
+        other => panic!("--pre {other}: expected glia or kina"),
+    }
+    stats.insert("commits_with_milestone_ids".into(), ids.iter().filter(|s| !s.is_empty()).count() as f64);
+    stats.insert("test_commits_with_pre_text".into(), tests.iter().filter(|&&k| pre[k].is_some()).count() as f64);
+    eprintln!("[round1] history labels and pre-change text in {:.1}s: {stats:?}", t.elapsed().as_secs_f64());
+    R1Hist { at, br, ids, pfx, wave_end, pre, glia: args.pre == "glia", stats }
+}
+
+/// One test commit's round-1 signals (sparse file scores; the seed is excluded per query).
+#[derive(Default)]
+struct R1Commit {
+    t1s: Vec<(u32, f64)>,
+    t1ss: Vec<(u32, f64)>,
+    t1pre: Vec<(u32, f64)>,
+    t1s_nd: Vec<(u32, f64)>,
+    t1pre_nd: Vec<(u32, f64)>,
+    pre_cov: bool,
+    w: Vec<Vec<(u32, f64)>>,
+    wr: Vec<Vec<(u32, f64)>>,
+    /// (milestone variant, signal, its control)
+    ms: Vec<(&'static str, Vec<(u32, f64)>, Vec<(u32, f64)>)>,
+    /// which variant M took: Mid, Mbr, Mgap or none
+    m_src: &'static str,
+    /// the milestone keys M read (for C0m)
+    m_keys: Vec<String>,
+    /// per seed: recency-decayed co-change (C0r) and co-change within the current milestone (C0m)
+    c0r: Vec<(u32, Vec<(u32, f64)>)>,
+    c0m: Vec<(u32, Vec<(u32, f64)>)>,
+    /// the gate at this commit: mean (W5 - Wr5) and (M - M~) pseudo recall@10 over the last R1_GATE_N commits
+    gate_w: f64,
+    gate_m: f64,
+    /// T1sp: the subject and the pre-change plan text as one query
+    t1sp: Vec<(u32, f64)>,
+}
+
+/// C0r's decay per training commit: a co-change k training commits ago weighs R1_GAMMA^k.
+const R1_GAMMA: f64 = 0.98;
+/// The gate (post-hoc, parameters fixed a priori): W5 / M enter a blend only when, over the last
+/// R1_GATE_N training commits replayed as pseudo-queries (each against the state before it), their
+/// recall@10 beat their own control's (Wr5 / M~) on average.
+const R1_GATE_N: usize = 30;
+
+/// recall@10 of a sparse score (score desc, then file index) over `targets`.
+fn r1_pseudo_r10(v: &[(u32, f64)], targets: &[u32]) -> f64 {
+    let mut s: Vec<(u32, f64)> = v.iter().copied().filter(|x| x.1 > 0.0).collect();
+    s.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top: BTreeSet<u32> = s.iter().take(10).map(|x| x.0).collect();
+    targets.iter().filter(|f| top.contains(f)).count() as f64 / targets.len().max(1) as f64
+}
+
+/// The replay's round-1 state: training commits so far, the Mgap segments, label milestones.
+#[derive(Default)]
+struct R1State {
+    /// C0r: co-change and per-file counts, each commit weighted R1_GAMMA^-i (i = its training index), so a
+    /// ratio read at any later time equals the decayed one
+    co_r: HashMap<u32, HashMap<u32, f64>>,
+    cnt_r: HashMap<u32, f64>,
+    /// C0m: co-change and counts per milestone key ("seg:N", "id:..", "br:..")
+    co_key: HashMap<String, HashMap<u32, HashMap<u32, f64>>>,
+    cnt_key: HashMap<String, HashMap<u32, f64>>,
+    /// the gate's pseudo-query history: (W5, Wr5, M, M~) recall@10 per recent training commit
+    gate: std::collections::VecDeque<[f64; 4]>,
+    /// (commit index, files) of every training commit so far, oldest first
+    recent: Vec<(usize, Vec<u32>)>,
+    seg_pos: Vec<Vec<usize>>,
+    seg_files: Vec<BTreeMap<u32, f64>>,
+    lab_files: HashMap<String, BTreeMap<u32, f64>>,
+    lab_last: HashMap<String, usize>,
+    wave: usize,
+}
+
+fn r1_window(recent: &[(usize, Vec<u32>)], a: usize, b: usize) -> Vec<(u32, f64)> {
+    let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+    for (j, p) in (a..b).rev().enumerate() {
+        let w = R1_DECAY.powi(j as i32);
+        for &f in &recent[p].1 {
+            *acc.entry(f).or_default() += w;
+        }
+    }
+    acc.into_iter().collect()
+}
+
+impl R1State {
+    fn labels(&self, h: &R1Hist, k: usize) -> Vec<String> {
+        let mut v = Vec::new();
+        if let Some(b) = &h.br[k] {
+            v.push(format!("br:{b}"));
+        }
+        v.extend(h.ids[k].iter().map(|u| format!("id:{u}")));
+        v.extend(h.pfx[k].iter().map(|p| format!("pfx:{p}")));
+        if h.glia {
+            v.push(format!("wave:{}", self.wave));
+        }
+        v
+    }
+
+    fn train(&mut self, h: &R1Hist, k: usize, c: &Commit) {
+        // the gate: this commit as a pseudo-query against the state before it
+        {
+            let r = self.test(h, k, &c.sha);
+            let i5 = R1_KS.iter().position(|&x| x == 5).unwrap();
+            let m = &r.ms[0];
+            let row = [
+                r1_pseudo_r10(&r.w[i5], &c.files),
+                r1_pseudo_r10(&r.wr[i5], &c.files),
+                r1_pseudo_r10(&m.1, &c.files),
+                r1_pseudo_r10(&m.2, &c.files),
+            ];
+            self.gate.push_back(row);
+            if self.gate.len() > R1_GATE_N {
+                self.gate.pop_front();
+            }
+        }
+        let pos = self.recent.len();
+        let cont = match self.recent.last() {
+            None => false,
+            Some((prev, _)) => {
+                let s = self.seg_pos.len() - 1;
+                let last: BTreeSet<u32> =
+                    self.seg_pos[s].iter().rev().take(R1_OVERLAP_LAST).flat_map(|&p| self.recent[p].1.iter().copied()).collect();
+                h.at[k] - h.at[*prev] <= R1_GAP_S && c.files.iter().any(|f| last.contains(f))
+            }
+        };
+        if !cont {
+            self.seg_pos.push(Vec::new());
+            self.seg_files.push(BTreeMap::new());
+        }
+        let s = self.seg_pos.len() - 1;
+        self.seg_pos[s].push(pos);
+        for &f in &c.files {
+            *self.seg_files[s].entry(f).or_default() += 1.0;
+        }
+        let wgt = R1_GAMMA.powi(-(pos as i32));
+        let mut ckeys: Vec<String> = self.labels(h, k).into_iter().filter(|x| x.starts_with("id:") || x.starts_with("br:")).collect();
+        ckeys.push(format!("seg:{s}"));
+        for &a in &c.files {
+            *self.cnt_r.entry(a).or_default() += wgt;
+            for key in &ckeys {
+                *self.cnt_key.entry(key.clone()).or_default().entry(a).or_default() += 1.0;
+            }
+            for &b in &c.files {
+                if a != b {
+                    *self.co_r.entry(a).or_default().entry(b).or_default() += wgt;
+                    for key in &ckeys {
+                        *self.co_key.entry(key.clone()).or_default().entry(a).or_default().entry(b).or_default() += 1.0;
+                    }
+                }
+            }
+        }
+        for key in self.labels(h, k) {
+            let e = self.lab_files.entry(key.clone()).or_default();
+            for &f in &c.files {
+                *e.entry(f).or_default() += 1.0;
+            }
+            self.lab_last.insert(key, pos);
+        }
+        self.recent.push((k, c.files.clone()));
+    }
+
+    /// After every commit (training or not): a landing commit closes its wave.
+    fn step(&mut self, h: &R1Hist, k: usize) {
+        if h.wave_end[k] {
+            self.wave += 1;
+        }
+    }
+
+    fn lab_sig(&self, keys: &[String], kind: &str, sha: &str) -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+        let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+        let mut hit = false;
+        for key in keys.iter().filter(|x| x.starts_with(kind)) {
+            if let Some(m) = self.lab_files.get(key) {
+                hit = true;
+                for (f, v) in m {
+                    *acc.entry(*f).or_default() += v;
+                }
+            }
+        }
+        if !hit {
+            return (Vec::new(), Vec::new());
+        }
+        let mut others: Vec<(&String, usize)> =
+            self.lab_last.iter().filter(|(l, _)| l.starts_with(kind) && !keys.contains(l)).map(|(l, &p)| (l, p)).collect();
+        others.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        others.truncate(R1_SHUF_RECENT);
+        let sh = if others.is_empty() {
+            Vec::new()
+        } else {
+            let pick = others[(h64(&format!("{sha}:{kind}~")) % others.len() as u64) as usize].0;
+            self.lab_files[pick].iter().map(|(&f, &v)| (f, v)).collect()
+        };
+        (acc.into_iter().collect(), sh)
+    }
+
+    /// C0r and C0m for one seed (as C0: c(seed, f) / (c(seed) + 1), the 1 weighted as a commit made now).
+    fn seed_sigs(&self, seed: u32, m_keys: &[String]) -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+        let now = R1_GAMMA.powi(-(self.recent.len() as i32));
+        let denom = self.cnt_r.get(&seed).copied().unwrap_or(0.0) + now;
+        let mut r: Vec<(u32, f64)> = self.co_r.get(&seed).map(|m| m.iter().map(|(&f, &v)| (f, v / denom)).collect()).unwrap_or_default();
+        r.sort_unstable_by_key(|x| x.0);
+        let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+        for key in m_keys {
+            let n = self.cnt_key.get(key).and_then(|m| m.get(&seed)).copied().unwrap_or(0.0) + 1.0;
+            if let Some(m) = self.co_key.get(key).and_then(|m| m.get(&seed)) {
+                for (&f, &v) in m {
+                    *acc.entry(f).or_default() += v / n;
+                }
+            }
+        }
+        (r, acc.into_iter().collect())
+    }
+
+    fn test(&self, h: &R1Hist, k: usize, sha: &str) -> R1Commit {
+        let n = self.recent.len();
+        let mut r = R1Commit::default();
+        for &kk in &R1_KS {
+            r.w.push(r1_window(&self.recent, n.saturating_sub(kk), n));
+            r.wr.push(if n >= 2 * kk {
+                let span = (n - 2 * kk + 1) as u64;
+                let e = kk + (h64(&format!("{sha}:wr{kk}")) % span) as usize;
+                r1_window(&self.recent, e - kk, e)
+            } else {
+                Vec::new()
+            });
+        }
+        // Mgap: the test commit's files are unknown, so it joins the current milestone on time alone.
+        let joined = self.recent.last().is_some_and(|(prev, _)| h.at[k] - h.at[*prev] <= R1_GAP_S);
+        let (mgap, mgap_sh) = if joined && !self.seg_pos.is_empty() {
+            let s = self.seg_pos.len() - 1;
+            let others: Vec<usize> = (s.saturating_sub(R1_SHUF_RECENT)..s).collect();
+            let sh = if others.is_empty() {
+                Vec::new()
+            } else {
+                let o = others[(h64(&format!("{sha}:mgap~")) % others.len() as u64) as usize];
+                self.seg_files[o].iter().map(|(&f, &v)| (f, v)).collect()
+            };
+            (self.seg_files[s].iter().map(|(&f, &v)| (f, v)).collect(), sh)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let keys = self.labels(h, k);
+        let (mbr, mbr_sh) = self.lab_sig(&keys, "br:", sha);
+        let (mid, mid_sh) = self.lab_sig(&keys, "id:", sha);
+        let (m, m_sh, src) = if !mid.is_empty() {
+            (mid.clone(), mid_sh.clone(), "Mid")
+        } else if !mbr.is_empty() {
+            (mbr.clone(), mbr_sh.clone(), "Mbr")
+        } else if !mgap.is_empty() {
+            (mgap.clone(), mgap_sh.clone(), "Mgap")
+        } else {
+            (Vec::new(), Vec::new(), "none")
+        };
+        r.m_keys = match src {
+            "Mid" => keys.iter().filter(|x| x.starts_with("id:")).cloned().collect(),
+            "Mbr" => keys.iter().filter(|x| x.starts_with("br:")).cloned().collect(),
+            "Mgap" => vec![format!("seg:{}", self.seg_pos.len() - 1)],
+            _ => Vec::new(),
+        };
+        r.ms.push(("M", m, m_sh));
+        r.ms.push(("Mgap", mgap, mgap_sh));
+        r.ms.push(("Mbr", mbr, mbr_sh));
+        r.ms.push(("Mid", mid, mid_sh));
+        if h.glia {
+            let (mw, mw_sh) = self.lab_sig(&keys, "wave:", sha);
+            let (mp, mp_sh) = self.lab_sig(&keys, "pfx:", sha);
+            r.ms.push(("Mwave", mw, mw_sh));
+            r.ms.push(("Mpfx", mp, mp_sh));
+        }
+        r.m_src = src;
+        let n = self.gate.len().max(1) as f64;
+        r.gate_w = self.gate.iter().map(|x| x[0] - x[1]).sum::<f64>() / n;
+        r.gate_m = self.gate.iter().map(|x| x[2] - x[3]).sum::<f64>() / n;
+        r
+    }
+}
+
+fn r1_cov(v: &[f64], seed: usize) -> bool {
+    v.iter().enumerate().any(|(f, &s)| f != seed && s > 0.0)
+}
+
+/// The round-1 rankers for one query (appended after every earlier ranker, so those are unchanged).
+#[allow(clippy::too_many_arguments)]
+fn round1_rankers(out: &mut Out, ctx: &Ctx, r: &R1Commit, q: &Query, t: &[u32], p1: &[f64], p1sum: &[f64], c0: &[f64], t1: &[f64], pers: &[(usize, f64)]) {
+    let g = ctx.g;
+    let seed = q.seed as usize;
+    let nf = p1.len();
+    let d = |v: &[(u32, f64)]| dense(nf, v, seed);
+    let mm_p1 = minmax(p1, seed);
+    let mm_c0 = minmax(c0, seed);
+    let mm_t1 = minmax(t1, seed);
+    let (t1s, t1ss, t1pre) = (d(&r.t1s), d(&r.t1ss), d(&r.t1pre));
+    let (mm_t1s, mm_t1ss, mm_t1pre) = (minmax(&t1s, seed), minmax(&t1ss, seed), minmax(&t1pre, seed));
+    out.push("T1s", &scalar(&t1s), seed, t);
+    out.push("T1ss", &scalar(&t1ss), seed, t);
+    out.push("T1pre", &scalar(&t1pre), seed, t);
+    let (t1s_nd, t1pre_nd) = (d(&r.t1s_nd), d(&r.t1pre_nd));
+    out.push("T1s-nd", &scalar(&t1s_nd), seed, t);
+    out.push("T1pre-nd", &scalar(&t1pre_nd), seed, t);
+    out.r1cov.push(("pre".into(), r.pre_cov));
+    for a in [0.25, 0.5] {
+        let tag = (a * 100.0) as u32;
+        out.push(format!("H9s{tag}"), &scalar(&blend(a, &mm_t1s, &mm_p1)), seed, t);
+        out.push(format!("H9ss{tag}"), &scalar(&blend(a, &mm_t1ss, &mm_p1)), seed, t);
+        out.push(format!("H9pre{tag}"), &scalar(&blend(a, &mm_t1pre, &mm_p1)), seed, t);
+    }
+    out.push("H9s50-nd", &scalar(&blend(0.5, &minmax(&t1s_nd, seed), &mm_p1)), seed, t);
+    out.push("H9pre50-nd", &scalar(&blend(0.5, &minmax(&t1pre_nd, seed), &mm_p1)), seed, t);
+    // the first run's H18 (equal min-max blend of T1, C0 and P1) with the realistic intent
+    let eq3 = |x: &[f64]| -> Vec<f64> { (0..nf).map(|f| (x[f] + mm_c0[f] + mm_p1[f]) / 3.0).collect() };
+    out.push("H18s", &scalar(&eq3(&mm_t1s)), seed, t);
+    out.push("H18pre", &scalar(&eq3(&mm_t1pre)), seed, t);
+    // ---- the work neighbourhood ----
+    let ws: Vec<Vec<f64>> = r.w.iter().map(|v| d(v)).collect();
+    let wrs: Vec<Vec<f64>> = r.wr.iter().map(|v| d(v)).collect();
+    let mut mm_w5 = vec![0.0; nf];
+    for (i, &k) in R1_KS.iter().enumerate() {
+        out.push(format!("W{k}"), &scalar(&ws[i]), seed, t);
+        out.push(format!("Wr{k}"), &scalar(&wrs[i]), seed, t);
+        out.r1cov.push((format!("W{k}"), r1_cov(&ws[i], seed)));
+        let mm_w = minmax(&ws[i], seed);
+        let mm_wr = minmax(&wrs[i], seed);
+        for a in [0.25, 0.5] {
+            let tag = (a * 100.0) as u32;
+            out.push(format!("HWa{tag}[W{k}]"), &scalar(&blend(a, &mm_w, &mm_p1)), seed, t);
+        }
+        out.push(format!("HWa25[Wr{k}]"), &scalar(&blend(0.25, &mm_wr, &mm_p1)), seed, t);
+        for (tag, a, b, c) in HT_GRID {
+            let s: Vec<f64> = (0..nf).map(|f| a * mm_t1s[f] + b * mm_w[f] + c * mm_p1[f]).collect();
+            out.push(format!("HTs{tag}[W{k}]"), &scalar(&s), seed, t);
+            let s: Vec<f64> = (0..nf).map(|f| a * mm_t1pre[f] + b * mm_w[f] + c * mm_p1[f]).collect();
+            out.push(format!("HTpre{tag}[W{k}]"), &scalar(&s), seed, t);
+        }
+        out.push(format!("LX[W{k},P1]"), &lex2(&ws[i], p1), seed, t);
+        let lx: Vec<Key> = (0..nf).map(|f| [ws[i][f], c0[f], p1[f]]).collect();
+        out.push(format!("LX[W{k},C0,P1]"), &lx, seed, t);
+        // co-change first (H10's order), the work neighbourhood second
+        let lx: Vec<Key> = (0..nf).map(|f| [c0[f], ws[i][f], p1[f]]).collect();
+        out.push(format!("LX[C0,W{k},P1]"), &lx, seed, t);
+        if k == 5 {
+            mm_w5 = mm_w;
+        }
+    }
+    // ---- milestones ----
+    let mut mm_m = vec![0.0; nf];
+    for (name, sig, ctl) in &r.ms {
+        let (v, vc) = (d(sig), d(ctl));
+        out.push(*name, &scalar(&v), seed, t);
+        out.push(format!("{name}~"), &scalar(&vc), seed, t);
+        out.r1cov.push(((*name).to_string(), r1_cov(&v, seed)));
+        let mm_v = minmax(&v, seed);
+        let mm_vc = minmax(&vc, seed);
+        for a in [0.25, 0.5] {
+            let tag = (a * 100.0) as u32;
+            out.push(format!("HMa{tag}[{name}]"), &scalar(&blend(a, &mm_v, &mm_p1)), seed, t);
+        }
+        out.push(format!("HMa25[{name}~]"), &scalar(&blend(0.25, &mm_vc, &mm_p1)), seed, t);
+        out.push(format!("LX[{name},P1]"), &lex2(&v, p1), seed, t);
+        if *name == "M" {
+            for (tag, a, b, c) in HT_GRID {
+                let s: Vec<f64> = (0..nf).map(|f| a * mm_t1s[f] + b * mm_v[f] + c * mm_p1[f]).collect();
+                out.push(format!("HTs{tag}[M]"), &scalar(&s), seed, t);
+                let s: Vec<f64> = (0..nf).map(|f| a * mm_t1pre[f] + b * mm_v[f] + c * mm_p1[f]).collect();
+                out.push(format!("HTpre{tag}[M]"), &scalar(&s), seed, t);
+            }
+            let lx: Vec<Key> = (0..nf).map(|f| [v[f], c0[f], p1[f]]).collect();
+            out.push("LX[M,C0,P1]", &lx, seed, t);
+            let lx: Vec<Key> = (0..nf).map(|f| [c0[f], v[f], p1[f]]).collect();
+            out.push("LX[C0,M,P1]", &lx, seed, t);
+            mm_m = mm_v;
+        }
+    }
+    // ---- seed-conditional work signals: recency-decayed co-change, co-change inside the milestone ----
+    let find = |v: &[(u32, Vec<(u32, f64)>)]| v.iter().find(|x| x.0 == q.seed).map(|x| d(&x.1)).unwrap_or_else(|| vec![0.0; nf]);
+    let (c0r, c0m) = (find(&r.c0r), find(&r.c0m));
+    out.push("C0r", &scalar(&c0r), seed, t);
+    out.push("C0m", &scalar(&c0m), seed, t);
+    out.r1cov.push(("C0m".into(), r1_cov(&c0m, seed)));
+    out.r1cov.push(("C0".into(), r1_cov(c0, seed)));
+    out.push("H10r", &lex2(&c0r, p1), seed, t);
+    let lx: Vec<Key> = (0..nf).map(|f| [c0m[f], c0[f], p1[f]]).collect();
+    out.push("H10m", &lx, seed, t);
+    let mm_c0r = minmax(&c0r, seed);
+    out.push("H1a25r", &scalar(&blend(0.25, &mm_p1, &mm_c0r)), seed, t);
+    out.push("H18sr", &scalar(&(0..nf).map(|f| (mm_t1s[f] + mm_c0r[f] + mm_p1[f]) / 3.0).collect::<Vec<_>>()), seed, t);
+    // ---- the realistic hybrids on other structural bases: P1sum, and the PPR config picked on the tuning repos ----
+    let mut bases: Vec<(&str, Vec<f64>)> = vec![("P1sum", p1sum.to_vec())];
+    if let Some(i) = ctx.pick {
+        let v = ctx.tune[i].1.run(pers);
+        let pt = file_pool(g, |u| v[g.node_ppr[u]], true);
+        out.push("PT*", &scalar(&pt), seed, t);
+        out.hub_share.push(("PT*".into(), hub_share(&pt, &ctx.hubs, seed)));
+        out.hub_share.push(("P1sum".into(), hub_share(p1sum, &ctx.hubs, seed)));
+        bases.push(("PT*", pt));
+    }
+    for (bname, b) in &bases {
+        let mm_b = minmax(b, seed);
+        out.push(format!("H9s50[{bname}]"), &scalar(&blend(0.5, &mm_t1s, &mm_b)), seed, t);
+        out.push(format!("H9s25[{bname}]"), &scalar(&blend(0.25, &mm_t1s, &mm_b)), seed, t);
+        out.push(format!("H9pre50[{bname}]"), &scalar(&blend(0.5, &mm_t1pre, &mm_b)), seed, t);
+        out.push(format!("H18s[{bname}]"), &scalar(&(0..nf).map(|f| (mm_t1s[f] + mm_c0[f] + mm_b[f]) / 3.0).collect::<Vec<_>>()), seed, t);
+        out.push(format!("H10[{bname}]"), &lex2(c0, b), seed, t);
+        out.push(format!("H10r[{bname}]"), &lex2(&c0r, b), seed, t);
+        out.push(format!("H9a50[{bname}]"), &scalar(&blend(0.5, &mm_t1, &mm_b)), seed, t);
+    }
+    // ---- the gated blends (post-hoc): W5 / M only when they beat their own control on the repo's recent past ----
+    let (gw, gm) = (if r.gate_w > 0.0 { 1.0 } else { 0.0 }, if r.gate_m > 0.0 { 1.0 } else { 0.0 });
+    out.r1cov.push(("gateW".into(), gw > 0.0));
+    out.r1cov.push(("gateM".into(), gm > 0.0));
+    let t1sp = d(&r.t1sp);
+    let mm_t1sp = minmax(&t1sp, seed);
+    out.push("T1sp", &scalar(&t1sp), seed, t);
+    out.push("H9sp50", &scalar(&blend(0.5, &mm_t1sp, &mm_p1)), seed, t);
+    out.push("HWg", &scalar(&blend(0.25 * gw, &mm_w5, &mm_p1)), seed, t);
+    out.push("HMg", &scalar(&blend(0.25 * gm, &mm_m, &mm_p1)), seed, t);
+    for (bname, b) in &bases {
+        let mm_b = minmax(b, seed);
+        let (aw, am) = (0.25 * gw, 0.25 * gm);
+        let s: Vec<f64> = (0..nf).map(|f| 0.25 * mm_t1s[f] + aw * mm_w5[f] + am * mm_m[f] + (0.75 - aw - am) * mm_b[f]).collect();
+        out.push(format!("HG[{bname}]"), &scalar(&s), seed, t);
+        let s: Vec<f64> = (0..nf).map(|f| aw * mm_w5[f] + am * mm_m[f] + (1.0 - aw - am) * mm_b[f]).collect();
+        out.push(format!("HG0[{bname}]"), &scalar(&s), seed, t);
+        let lx: Vec<Key> = (0..nf).map(|f| [c0[f], aw * mm_w5[f] + am * mm_m[f], b[f]]).collect();
+        out.push(format!("H10g[{bname}]"), &lx, seed, t);
+        out.push(format!("H9sp25[{bname}]"), &scalar(&blend(0.25, &mm_t1sp, &mm_b)), seed, t);
+    }
+    // ---- equal-weight blends of the realistic signals (W5 and M fixed a priori) ----
+    let eq = |parts: &[&[f64]]| -> Vec<f64> { (0..nf).map(|f| parts.iter().map(|p| p[f]).sum::<f64>() / parts.len() as f64).collect() };
+    out.push("ALL4", &scalar(&eq(&[&mm_w5, &mm_m, &mm_c0, &mm_p1])), seed, t);
+    out.push("ALL5", &scalar(&eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0, &mm_p1])), seed, t);
+    out.push("ALL5pre", &scalar(&eq(&[&mm_t1pre, &mm_w5, &mm_m, &mm_c0, &mm_p1])), seed, t);
+    out.push("ALL5T1", &scalar(&eq(&[&mm_t1, &mm_w5, &mm_m, &mm_c0, &mm_p1])), seed, t);
+    // ---- the PPR tuning grid ----
+    for (name, idx) in &ctx.tune {
+        let v = idx.run(pers);
+        out.push(format!("PT[{name},max]"), &scalar(&file_pool(g, |u| v[g.node_ppr[u]], false)), seed, t);
+        out.push(format!("PT[{name},sum]"), &scalar(&file_pool(g, |u| v[g.node_ppr[u]], true)), seed, t);
+    }
+}
+
+/// Online selection (leak-free, prequential): at each test commit, the candidate with the best mean recall@10
+/// over every EARLIER test commit's queries (their changed files are known by then); the first candidate
+/// before any. The candidate sets are fixed; the `0` sets leave out the work-neighbourhood / milestone ones.
+const R1_SEL: [(&str, &[&str]); 4] = [
+    ("SELnt0", &["H10[PT*]", "H10", "PT*"]),
+    ("SELnt", &["H10[PT*]", "H10", "PT*", "HWa25[W5]", "HWa25[W10]", "HMa25[M]", "LX[C0,W5,P1]"]),
+    ("SELt0", &["H18s[PT*]", "H9s25[PT*]", "H9s50", "H10[PT*]"]),
+    (
+        "SELt",
+        &["H18s[PT*]", "H9s25[PT*]", "H9s50", "H10[PT*]", "HTsa[W5]", "HTsc[W5]", "HTsd[W5]", "HTsc[M]", "HTsd[M]", "ALL5"],
+    ),
+];
+
+/// Appends the SEL* rankers to every query's results; returns, per set, how often each candidate was picked.
+fn round1_select(results: &mut [Out], queries: &[Query], ntc: usize) -> serde_json::Value {
+    let names = results[0].names.clone();
+    let pos = |n: &str| names.iter().position(|x| x == n);
+    let mut by_tc: Vec<Vec<usize>> = vec![Vec::new(); ntc];
+    for (q, x) in queries.iter().enumerate() {
+        by_tc[x.tc].push(q);
+    }
+    let mut info = serde_json::Map::new();
+    for (sname, cands) in R1_SEL {
+        let ix: Vec<usize> = cands.iter().filter_map(|c| pos(c)).collect();
+        if ix.len() != cands.len() {
+            continue;
+        }
+        let mut sum: Vec<f64> = vec![0.0; ix.len()];
+        let mut seen = 0usize;
+        let mut picks: BTreeMap<String, usize> = BTreeMap::new();
+        let mut per_q: Vec<[f64; 5]> = vec![[0.0; 5]; queries.len()];
+        let mut last = String::new();
+        for qs in &by_tc {
+            let best = if seen == 0 {
+                0
+            } else {
+                (0..ix.len()).max_by(|&a, &b| sum[a].total_cmp(&sum[b]).then(b.cmp(&a))).unwrap_or(0)
+            };
+            last = names[ix[best]].clone();
+            *picks.entry(last.clone()).or_default() += 1;
+            for &q in qs {
+                per_q[q] = results[q].m[ix[best]];
+            }
+            for &q in qs {
+                for (j, &ri) in ix.iter().enumerate() {
+                    sum[j] += results[q].m[ri][1];
+                }
+                seen += 1;
+            }
+        }
+        for (q, r) in results.iter_mut().enumerate() {
+            r.names.push(sname.to_string());
+            r.m.push(per_q[q]);
+        }
+        info.insert(sname.into(), json!({"picks_per_test_commit": picks, "pick_at_the_last_test_commit": last}));
+    }
+    serde_json::Value::Object(info)
+}
+
+/// The PPR tuning grid's indexes: weight set x damping (pooling is applied per query).
+fn r1_tune_indexes(n: usize, id_to_idx: &HashMap<NodeId, usize>, edges: &[&Edge], edge_pair: &[u32]) -> Vec<(String, Ppr)> {
+    let mut out = Vec::new();
+    for (wname, over) in R1_WSETS {
+        for dmp in R1_DAMP {
+            let mut c = CODE_TABLES.activation_config(None);
+            c.direction = Direction::Undirected;
+            c.top_k = usize::MAX;
+            c.damping = dmp;
+            c.edge_weights.extend(over.iter().copied());
+            out.push((format!("{wname},d{}", (dmp * 100.0).round() as u32), Ppr::build(n, id_to_idx, edges, edge_pair, &c)));
+        }
+    }
+    out
+}
+
+/// The round-1 report: facts, metrics (ALL and covered subsets), contrasts with commit-cluster CIs.
+fn round1_report(label: &str, names: &[String], results: &[Out], queries: &[Query], r1s: &[R1Commit], hist_stats: &BTreeMap<String, f64>, bi: &BootIn) -> (serde_json::Value, String) {
+    let (commit_of, boot, lf) = (bi.commit_of, bi.boot, bi.lf);
+    let nq = queries.len();
+    let pos = |n: &str| names.iter().position(|x| x == n);
+    let col = |ri: usize, mi: usize| -> Vec<f64> { results.iter().map(|r| r.m[ri][mi]).collect() };
+    let all: Vec<usize> = (0..nq).collect();
+    let mut cov: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (q, r) in results.iter().enumerate() {
+        for (k, on) in &r.r1cov {
+            let e = cov.entry(k.clone()).or_default();
+            if *on {
+                e.push(q);
+            }
+        }
+    }
+    let mean_on = |ri: usize, idx: &[usize]| -> [f64; 5] {
+        let mut m = [0.0; 5];
+        for &q in idx {
+            for (acc, x) in m.iter_mut().zip(results[q].m[ri]) {
+                *acc += x;
+            }
+        }
+        m.map(|x| if idx.is_empty() { f64::NAN } else { x / idx.len() as f64 })
+    };
+    let fmt5 = |m: [f64; 5]| m.iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>().join(" | ");
+    let mut md = String::new();
+    let mut js = serde_json::Map::new();
+    md.push_str(&format!("### {label}: round 1\n\n"));
+
+    // ---- facts ----
+    let ntc = r1s.len();
+    let mut src: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in r1s {
+        *src.entry(r.m_src).or_default() += 1;
+    }
+    let mut facts: BTreeMap<String, f64> = hist_stats.clone();
+    facts.insert("test_commits".into(), ntc as f64);
+    facts.insert("test_commits_pre_covered".into(), r1s.iter().filter(|r| r.pre_cov).count() as f64);
+    facts.insert("test_commits_gate_w_on".into(), r1s.iter().filter(|r| r.gate_w > 0.0).count() as f64);
+    facts.insert("test_commits_gate_m_on".into(), r1s.iter().filter(|r| r.gate_m > 0.0).count() as f64);
+    facts.insert("mean_gate_w".into(), r1s.iter().map(|r| r.gate_w).sum::<f64>() / r1s.len().max(1) as f64);
+    facts.insert("mean_gate_m".into(), r1s.iter().map(|r| r.gate_m).sum::<f64>() / r1s.len().max(1) as f64);
+    for (s, n) in &src {
+        facts.insert(format!("test_commits_M_from_{s}"), *n as f64);
+    }
+    for (k, idx) in &cov {
+        facts.insert(format!("queries_covered_{k}"), idx.len() as f64);
+    }
+    md.push_str("Facts (test commits, queries covered per signal, history labels):\n\n");
+    for (k, v) in &facts {
+        md.push_str(&format!("- {k}: {v}\n"));
+    }
+    md.push('\n');
+    js.insert("facts".into(), json!(facts));
+
+    // ---- metric tables ----
+    let r1_rows: Vec<String> = names
+        .iter()
+        .skip_while(|n| *n != "T1s")
+        .filter(|n| !n.starts_with("PT["))
+        .cloned()
+        .collect();
+    let mut rows: Vec<String> = ["B0", "B1", "C0", "P1", "P1sum", "H10", "T0", "T1", "H9a25[P1]", "H9a50[P1]", "H18"]
+        .iter()
+        .filter(|n| pos(n).is_some())
+        .map(|s| s.to_string())
+        .collect();
+    rows.extend(r1_rows.iter().cloned());
+    let mut mj = serde_json::Map::new();
+    let mut subsets: Vec<(String, Vec<usize>)> = vec![("all".into(), all.clone())];
+    for k in ["pre", "M", "Mid", "Mbr", "Mgap", "W1", "W5", "C0m"] {
+        if let Some(idx) = cov.get(k)
+            && !idx.is_empty()
+        {
+            subsets.push((k.to_string(), idx.clone()));
+        }
+    }
+    // cold starts: the seed has no earlier co-change
+    if let Some(warm) = cov.get("C0") {
+        let warm: HashSet<usize> = warm.iter().copied().collect();
+        let cold: Vec<usize> = (0..nq).filter(|q| !warm.contains(q)).collect();
+        if !cold.is_empty() {
+            cov.insert("cold".into(), cold.clone());
+            subsets.push(("cold".into(), cold));
+        }
+    }
+    for (sname, idx) in &subsets {
+        md.push_str(&format!(
+            "{} ({} queries):\n\n| ranker | recall@5 | recall@10 | recall@20 | MRR | nDCG@20 |\n|---|---|---|---|---|---|\n",
+            if sname == "all" { "ALL queries".to_string() } else { format!("COVERED by {sname}") },
+            idx.len()
+        ));
+        let mut sj = serde_json::Map::new();
+        let show: Vec<&String> = if sname == "all" {
+            rows.iter().collect()
+        } else {
+            rows.iter().filter(|r| (!r.starts_with("HTs") && !r.starts_with("HTpre")) || r.ends_with("[M]") || r.ends_with("[W5]")).collect()
+        };
+        for r in show {
+            let m = mean_on(pos(r).unwrap(), idx);
+            md.push_str(&format!("| {r} | {} |\n", fmt5(m)));
+            sj.insert(r.clone(), json!({"r5": m[0], "r10": m[1], "r20": m[2], "mrr": m[3], "ndcg20": m[4]}));
+        }
+        // every ranker's mean on this subset goes to the JSON (the PT grid included)
+        for (ri, n) in names.iter().enumerate() {
+            if !sj.contains_key(n) {
+                let m = mean_on(ri, idx);
+                sj.insert(n.clone(), json!({"r5": m[0], "r10": m[1], "r20": m[2], "mrr": m[3], "ndcg20": m[4]}));
+            }
+        }
+        md.push('\n');
+        mj.insert(sname.clone(), serde_json::Value::Object(sj));
+    }
+    js.insert("metrics".into(), serde_json::Value::Object(mj));
+    js.insert("subset_sizes".into(), json!(subsets.iter().map(|(s, i)| (s.clone(), i.len())).collect::<BTreeMap<_, _>>()));
+
+    // ---- contrasts ----
+    let mut cs: Vec<(String, String, &str)> = Vec::new();
+    let mut add = |a: &str, b: &str, s: &'static str| cs.push((a.to_string(), b.to_string(), s));
+    // realistic intent vs the optimistic T1
+    for (a, b) in [
+        ("T1", "P1"),
+        ("T1s", "P1"),
+        ("T1ss", "P1"),
+        ("T1pre", "P1"),
+        ("T1s", "T1"),
+        ("T1ss", "T1"),
+        ("T1pre", "T1"),
+        ("T1s", "T0"),
+        ("T1pre", "T1s"),
+        ("H9a50[P1]", "P1"),
+        ("H9s50", "P1"),
+        ("H9s25", "P1"),
+        ("H9ss50", "P1"),
+        ("H9pre50", "P1"),
+        ("H9pre25", "P1"),
+        ("H9s50", "H9a50[P1]"),
+        ("H9pre50", "H9a50[P1]"),
+        ("H9pre50", "H9s50"),
+        ("T1s-nd", "T1s"),
+        ("T1pre-nd", "T1pre"),
+        ("H9s50-nd", "H9s50"),
+        ("H9pre50-nd", "H9pre50"),
+        ("H18", "P1"),
+        ("H18s", "P1"),
+        ("H18pre", "P1"),
+        ("H18s", "H18"),
+        ("H18s", "H10"),
+    ] {
+        add(a, b, "pre");
+    }
+    // the work neighbourhood and its random-window control
+    for k in R1_KS {
+        let (w, wr) = (format!("W{k}"), format!("Wr{k}"));
+        cs.push((w.clone(), wr.clone(), "all"));
+        cs.push((w.clone(), "P1".into(), "all"));
+        cs.push((w.clone(), "C0".into(), "all"));
+        cs.push((format!("HWa25[W{k}]"), "P1".into(), "all"));
+        cs.push((format!("HWa50[W{k}]"), "P1".into(), "all"));
+        cs.push((format!("HWa25[W{k}]"), format!("HWa25[Wr{k}]"), "all"));
+        cs.push((format!("HWa25[W{k}]"), "H10".into(), "all"));
+        cs.push((format!("LX[W{k},C0,P1]"), "H10".into(), "all"));
+        cs.push((format!("LX[C0,W{k},P1]"), "H10".into(), "all"));
+        cs.push((format!("HTsd[W{k}]"), "H9s50".into(), "all"));
+        cs.push((format!("HTsd[W{k}]"), "H9a50[P1]".into(), "all"));
+        cs.push((format!("HTpred[W{k}]"), "H9pre50".into(), "all"));
+    }
+    // milestones and their shuffled controls
+    for m in ["M", "Mgap", "Mbr", "Mid", "Mwave", "Mpfx"] {
+        let sub: &'static str = match m {
+            "M" => "M",
+            "Mgap" => "Mgap",
+            "Mbr" => "Mbr",
+            "Mid" => "Mid",
+            _ => "all",
+        };
+        cs.push((m.into(), format!("{m}~"), sub));
+        cs.push((m.into(), "P1".into(), sub));
+        cs.push((format!("HMa25[{m}]"), "P1".into(), sub));
+        cs.push((format!("HMa50[{m}]"), "P1".into(), sub));
+        cs.push((format!("HMa25[{m}]"), format!("HMa25[{m}~]"), sub));
+        cs.push((format!("HMa25[{m}]"), "H10".into(), sub));
+        cs.push((format!("LX[{m},P1]"), "P1".into(), sub));
+    }
+    for (a, b, s) in [
+        ("SELnt0", "H10[PT*]", "all"),
+        ("SELnt0", "P1", "all"),
+        ("SELnt0", "H10", "all"),
+        ("SELnt", "SELnt0", "all"),
+        ("SELnt", "H10[PT*]", "all"),
+        ("SELnt", "P1", "all"),
+        ("SELt0", "H18s[PT*]", "all"),
+        ("SELt0", "P1", "all"),
+        ("SELt", "SELt0", "all"),
+        ("SELt", "H18s[PT*]", "all"),
+        ("SELt", "P1", "all"),
+        ("SELt", "H9a50[P1]", "all"),
+        ("SELt0", "H9a50[P1]", "all"),
+        ("H9s25[PT*]", "H9a50[P1]", "all"),
+        ("H18s[PT*]", "H9a50[P1]", "all"),
+        ("H18s[PT*]", "B0", "all"),
+        ("SELt", "B0", "all"),
+        ("SELnt", "B0", "all"),
+        ("HWg", "P1", "all"),
+        ("HMg", "P1", "all"),
+        ("HG[PT*]", "H9s25[PT*]", "all"),
+        ("HG[PT*]", "P1", "all"),
+        ("HG0[PT*]", "PT*", "all"),
+        ("H10g[PT*]", "H10[PT*]", "all"),
+        ("T1sp", "T1s", "pre"),
+        ("H9sp50", "H9s50", "pre"),
+        ("H9sp25[PT*]", "H9s25[PT*]", "pre"),
+        ("H10", "P1", "cold"),
+        ("H9s50", "P1", "cold"),
+        ("HWa25[W5]", "P1", "cold"),
+        ("HMa25[M]", "P1", "cold"),
+        ("PT*", "P1", "cold"),
+        ("C0r", "C0", "C0"),
+        ("C0m", "C0", "C0m"),
+        ("C0r", "C0", "all"),
+        ("H10r", "H10", "all"),
+        ("H10m", "H10", "all"),
+        ("H10m", "H10", "C0m"),
+        ("H1a25r", "H1a25", "all"),
+        ("H18sr", "H18s", "all"),
+        ("H9s50[P1sum]", "H9s50", "all"),
+        ("H9s50[PT*]", "H9s50", "all"),
+        ("H9s50[PT*]", "P1", "all"),
+        ("H9s50[PT*]", "H9a50[P1]", "all"),
+        ("H18s[PT*]", "P1", "all"),
+        ("H10[PT*]", "H10", "all"),
+        ("H10r[PT*]", "H10", "all"),
+        ("PT*", "P1", "all"),
+        ("PT*", "B0", "all"),
+        ("PT*", "P1sum", "all"),
+        ("M", "W5", "M"),
+        ("HMa25[M]", "HWa25[W5]", "M"),
+        ("LX[M,C0,P1]", "H10", "M"),
+        ("LX[C0,M,P1]", "H10", "M"),
+        ("HTsd[M]", "H9s50", "all"),
+        ("HTsd[M]", "H9a50[P1]", "all"),
+        ("HTpred[M]", "H9pre50", "pre"),
+        ("HTpred[M]", "P1", "pre"),
+        ("HTpred[M]", "H9a50[P1]", "pre"),
+        ("ALL4", "P1", "all"),
+        ("ALL4", "H10", "all"),
+        ("ALL5", "P1", "all"),
+        ("ALL5", "H9s50", "all"),
+        ("ALL5", "H9a50[P1]", "all"),
+        ("ALL5pre", "P1", "pre"),
+        ("ALL5pre", "H9a50[P1]", "pre"),
+        ("ALL5T1", "H9a50[P1]", "all"),
+        ("ALL5", "ALL5T1", "all"),
+    ] {
+        cs.push((a.into(), b.into(), s));
+    }
+    md.push_str("Contrasts (a minus b; recall@10 and MRR; mean, 95% commit-cluster bootstrap CI; on ALL queries and on the named covered subset):\n\n| a | b | subset | n | recall@10 ALL | recall@10 COVERED | MRR ALL | MRR COVERED |\n|---|---|---|---|---|---|---|---|\n");
+    let mut cj = Vec::new();
+    for (a, b, s) in &cs {
+        let (Some(ia), Some(ib)) = (pos(a), pos(b)) else { continue };
+        let sub: &[usize] = if *s == "all" { &all } else { cov.get(*s).map_or(&[][..], |v| &v[..]) };
+        let mut cells = Vec::new();
+        for mi in [1usize, 3] {
+            for (idx, sname) in [(&all[..], "all"), (sub, *s)] {
+                if sname == "all" && idx.len() == sub.len() && *s == "all" && cells.len() % 2 == 1 {
+                    cells.push("=".into());
+                    continue;
+                }
+                match paired_sub(&col(ia, mi), &col(ib, mi), idx, commit_of, boot, lf) {
+                    Some(p) => {
+                        cells.push(format!("{:+.3} [{:+.3}, {:+.3}]", p.mean, p.lo, p.hi));
+                        cj.push(json!({"a": a, "b": b, "metric": if mi == 1 { "r10" } else { "mrr" }, "subset": sname, "n": idx.len(),
+                            "diff": p.mean, "lo": p.lo, "hi": p.hi, "p_sign": p.p, "wins": p.wins, "losses": p.losses}));
+                    }
+                    None => cells.push("-".into()),
+                }
+            }
+        }
+        md.push_str(&format!("| {a} | {b} | {s} | {} | {} |\n", sub.len(), cells.join(" | ")));
+    }
+    js.insert("contrasts".into(), json!(cj));
+
+    // ---- the PPR tuning grid ----
+    let pt: Vec<&String> = names.iter().filter(|n| n.starts_with("PT[")).collect();
+    if !pt.is_empty() {
+        md.push_str("\nPPR tuning grid (ALL queries; each config minus P1 and minus B0, recall@10 and MRR, 95% commit-cluster bootstrap CI):\n\n| config | recall@10 | MRR | r10 - P1 | r10 - B0 | MRR - P1 | MRR - B0 |\n|---|---|---|---|---|---|---|\n");
+        let mut gj = Vec::new();
+        for n in pt {
+            let ri = pos(n).unwrap();
+            let m = mean_on(ri, &all);
+            let mut cells = Vec::new();
+            let mut row = json!({"config": n, "r10": m[1], "mrr": m[3]});
+            for (mi, mname) in [(1usize, "r10"), (3, "mrr")] {
+                for bl in ["P1", "B0"] {
+                    let Some(bi) = pos(bl) else { continue };
+                    let p = paired(&col(ri, mi), &col(bi, mi), commit_of, r1s.len(), boot, lf);
+                    cells.push(format!("{:+.3} [{:+.3}, {:+.3}]", p.mean, p.lo, p.hi));
+                    row[format!("{mname}_vs_{bl}")] = json!({"diff": p.mean, "lo": p.lo, "hi": p.hi});
+                }
+            }
+            md.push_str(&format!("| {n} | {:.3} | {:.3} | {} | {} | {} | {} |\n", m[1], m[3], cells[0], cells[1], cells[2], cells[3]));
+            gj.push(row);
+        }
+        js.insert("tune".into(), json!(gj));
+    }
+    (serde_json::Value::Object(js), md)
 }

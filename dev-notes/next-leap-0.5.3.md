@@ -365,6 +365,16 @@ Not candidates: each becomes packets in the spec run.
    scoped ids 0.98 route-weighted, table rows 47/48); reused bare ids (D1-D12 in four series) are the weak spot; the BM25
    text linker hurts everywhere (precision 0.33). The joiner buys coverage, not signal: co-change pairs with no code
    edge that have an upper link rise to 48-51% (16-27% raw). Results: `dev-notes/keys-eval-glia-2026-10-18.md` (glia).
+   Round 1 (`dev-notes/ranking-eval-round1-2026-10-18.md`; James: *"intent comes from people's purpose to create ... a
+   general idea made up of little milestones and ideas"*), on 9 repos, 6 never tuned on (pop-os/shell, gorilla/websocket,
+   flutter/samples and three private ones, aggregate only): realistic intent holds (the subject line alone keeps 89-106%
+   of the gain on six repos, 71% on Kina; glia's pre-change packet text 93%); the subject + co-change + PPR blend beats
+   PPR on all 7 untuned repos (significant on 5); ONLINE per-repo selection among fixed fusions, scored on each repo's own
+   earlier commits (leak-free), beats PPR on all 9 (8 significant) and removed the remaining negatives (flutter/samples,
+   where text hurts). Milestone / work-neighbourhood signals are real on sequential histories (M beats its control on 5 of
+   9) and at chance under glia's file-disjoint parallel waves. Base ranker: PPR damping 0.85 + sum pooling; edge weights
+   are not a lever (<= 0.004). So the connector calibrates its fusion per repo from that repo's own history, and gains
+   milestone / work-unit nodes with a "does this history overlap its predecessors" diagnostic.
 9. **A zero-install `glia` CLI on PyPI** (a maturin `bindings = "bin"` package, so `uvx --from <pkg> glia find ..` works;
    James via repo-graph-8d, 2026-10-18), with its CI workflow and install tests.
 10. **repo-graph's six skills move into glia** (orient / find / debug / impact / trace / init) as one family with the MCP
