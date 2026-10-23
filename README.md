@@ -279,9 +279,11 @@ glia identity <REPO> [--diverged-only] [--json] [--limit <N>] [--rule <RULE>] [-
     with none (the absence says why), 2 on an error.
 
 # One symbol, channel or signal
-glia find <REPO> <QUERY> [--json] [--kind <KIND>]... [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
+glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     The ranked, located nodes a symbol, qname or fragment names, with the match tier.
-    One row per identity class, folded before the --top-k cut.
+    One row per identity class, folded before the --top-k cut. --files ranks one repo's
+    files for the query text instead: ids in the text first (through its task / requirement
+    rows and trackers), then past commits whose messages match it (glia history sync).
 glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]

@@ -49,7 +49,10 @@ fn glia(args: &[&str]) -> Output {
         .output()
         .expect("glia runs");
     for line in String::from_utf8_lossy(&out.stderr).lines() {
-        if line.starts_with("[find] ") || line.starts_with("[identity] collapse ") {
+        if line.starts_with("[find] ")
+            || line.starts_with("[identity] collapse ")
+            || line.starts_with("[find-files] ")
+        {
             eprintln!("{line}");
         }
     }
@@ -216,4 +219,118 @@ fn identity_table_lists_located_members() {
     assert!(row.contains(" (also in: "), "{row}");
     assert!(row.contains("features/orders/feature.yaml:"), "the feature op: {row}");
     assert!(!row.contains("diverged"), "{row}");
+}
+
+// ---- EB.8: `glia find --files` ----
+
+const ORDERS_PY: &str = "def place_order(uid):\n    return uid\n";
+const TASKS_MD: &str = "# Tasks\n\n- [ ] T012 user lookup in users.py\n";
+
+/// The `files` fixture: `users.py`, `orders.py` and a spec-kit task naming
+/// `users.py`; with `history`, a history snapshot whose one subject
+/// (`order cache warmup`) touched `orders.py`.
+fn files_fixture(fx: &Fixture, history: bool) -> String {
+    let root = fx.0.join("files");
+    std::fs::create_dir_all(root.join("specs/001-users")).unwrap();
+    std::fs::write(root.join("users.py"), USERS_PY).unwrap();
+    std::fs::write(root.join("orders.py"), ORDERS_PY).unwrap();
+    std::fs::write(root.join("specs/001-users/tasks.md"), TASKS_MD).unwrap();
+    // The working tree's definitions are read through git (`intent::defs::Tree::Work`).
+    for args in [["init", "-q"].as_slice(), &["add", "-A"], &["commit", "-q", "-m", "init"]] {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git");
+        assert!(st.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&st.stderr));
+    }
+    if history {
+        use glia_code_domain::snapshots::{
+            HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, write_history_with_messages,
+        };
+        let c = format!("01{}", "0".repeat(38));
+        let commits = [HistoryCommit {
+            c: c.clone(),
+            t: 1_767_225_601,
+            files: vec![HistoryFile { p: "orders.py".into(), a: Some(1), d: Some(0), from: None }],
+        }];
+        let messages = [HistoryMessage {
+            c: c.clone(),
+            at: 1_767_225_601,
+            s: "order cache warmup".into(),
+            b: String::new(),
+            br: None,
+        }];
+        let meta = HistoryMeta::new(c, 2000, None, String::new());
+        write_history_with_messages(&root, meta, &commits, &[], Some(&messages)).expect("snapshot");
+    }
+    root.to_string_lossy().into_owned()
+}
+
+#[test]
+fn files_ranks_the_id_first_then_the_text() {
+    let fx = Fixture::new("files");
+    let repo = files_fixture(&fx, true);
+    let out = ok(&["find", &repo, "T012 order cache", "--files"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[find-files] repo=files surface=cli fusion=LX[IDR,T1s] ids=1 idr_files=1 text=present text_files=1 rows=2"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[intent] text repo=files surface=cli "), "{stderr}");
+    assert!(stderr.contains("[idr] repo=files surface=cli "), "{stderr}");
+    assert!(stdout.starts_with("# files for `T012 order cache`\n"), "{stdout}");
+    assert!(stdout.contains("| id | namespace | tier | route | defined at | state |"), "{stdout}");
+    assert!(stdout.contains("| `T012` |"), "{stdout}");
+    let at = |s: &str| stdout.find(s).unwrap_or_else(|| panic!("{s} in {stdout}"));
+    assert!(at("| 1 | `users.py` | 1 |") < at("| 2 | `orders.py` | 0 |"), "{stdout}");
+
+    let json = ok(&["find", &repo, "T012 order cache", "--files", "--json"]).stdout;
+    let text = String::from_utf8_lossy(&json);
+    // the envelope, then each row's keys in the engine's field order
+    assert!(text.starts_with("{\"results\":[{\"rank\":1,\"file\":\"users.py\",\"idr\":1.0,\"text\":0.0,\"degree\":"), "{text}");
+    assert!(text.contains(",\"ids\":[\"T012\"]},{\"rank\":2,"), "{text}");
+    let v: serde_json::Value = serde_json::from_slice(&json).expect("json");
+    let rows = v["results"].as_array().expect("results");
+    assert!(v["absence"].is_null(), "{v}");
+    assert_eq!((rows[0]["file"].as_str(), rows[1]["file"].as_str()), (Some("users.py"), Some("orders.py")));
+    assert_eq!(rows[0]["ids"], serde_json::json!(["T012"]));
+}
+
+#[test]
+fn files_absence_names_the_missing_inputs() {
+    let fx = Fixture::new("files-none");
+    let repo = files_fixture(&fx, false);
+    let out = glia(&["find", &repo, "warm the cache", "--files", "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v["results"], serde_json::json!([]));
+    let note = v["absence"]["note"].as_str().expect("note");
+    assert!(note.contains("no id in the query resolved to a defining row"), "{note}");
+    assert!(note.contains("no history messages (run glia history sync)"), "{note}");
+    assert_eq!(v["absence"]["reason"], "no_match");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("text=absent text_files=0 rows=0"), "{stderr}");
+}
+
+#[test]
+fn files_refuses_with_and_node_flags() {
+    let fx = Fixture::new("files-with");
+    let (api, web) = (fx.repo("api"), fx.repo("web"));
+    let out = glia(&["find", &api, "user", "--with", &web, "--files"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("error: find --files ranks one repo's files; got 2 repos"), "{stderr}");
+    for flag in [["--kind", "FUNCTION"].as_slice(), &["--no-collapse"], &["--scope", "x"]] {
+        let mut args = vec!["find", api.as_str(), "user", "--files"];
+        args.extend_from_slice(flag);
+        let out = glia(&args);
+        assert_eq!(out.status.code(), Some(2), "{flag:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"), "{flag:?}");
+    }
 }

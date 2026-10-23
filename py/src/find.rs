@@ -1,17 +1,23 @@
 //! Text → nodes: `find` (LD.3b's ranked fuzzy find, the one name / qname
-//! lookup) and `resolve` (P3: a failure / change signal → located records).
-//! Both return the LD.8a envelope `{results, absence}` as a native `dict`.
+//! lookup) and `resolve` (P3: a failure / change signal → located records);
+//! text → files: `find_files` (EB.8, the files a free-text query is about,
+//! LX[IDR,T1s]). Each returns the LD.8a envelope `{results, absence}` as a
+//! native `dict`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use glia_code_domain::node_kind;
 use glia_core::{NodeId, NodeKindId};
 use glia_engine::absence::Answer;
-use glia_engine::find::{FindOptions, FoundNode, find_nodes_with_live};
+use glia_engine::find::{
+    FindFilesOptions, FindOptions, FoundFile, FoundNode, find_files, find_nodes_with_live,
+};
 use glia_engine::identity::Collapse;
+use glia_engine::rank::RankCache;
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -69,8 +75,58 @@ fn find_answer(
     Ok(answer)
 }
 
+/// The whole body of [`PyGraph::find_files`], minus pyo3: the engine's
+/// `find_files` on surface `py` over the PyGraph's held [`RankCache`] (EA.7),
+/// the absence counting the build's parse errors. Err when the graph holds
+/// more than one repo.
+fn find_files_answer(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    cache: Arc<RankCache>,
+    query: &str,
+    top_k: usize,
+    unparsed_files: usize,
+) -> Result<Answer<FoundFile>, String> {
+    let mut opts = FindFilesOptions::default();
+    opts.top_k = top_k;
+    opts.surface = "py";
+    opts.rank_cache = Some(cache);
+    let mut answer = find_files(merged, repo_roots, query, &opts)?;
+    if let Some(a) = answer.absence.as_mut() {
+        a.unparsed_files = unparsed_files;
+    }
+    Ok(answer)
+}
+
 #[pymethods]
 impl PyGraph {
+    /// **find_files** (EB.8): the files of this graph's one repo that the
+    /// free-text `query` (a task title, a ticket line) is about, ranked
+    /// `LX[IDR,T1s]`: files the query's ids reach first (typed id routing
+    /// through the repo's task / requirement rows, trackers and citing
+    /// comments, read from the working tree), then the query's BM25 over past
+    /// commit messages (the `.glia/history-snapshot/` `glia history sync`
+    /// writes), ties by the file's degree, then path. Returns a dict
+    /// `{results, absence}`: `results` is the records `{rank, file, idr,
+    /// text, degree, ids}` (`rank` 1-based; `ids` the routed ids that reached
+    /// the file); `absence` is `None` when there are results, else a
+    /// `no_match` dict whose `note` names what was missing (no id resolved,
+    /// no history messages, no matching message). `top_k` keeps the first
+    /// rows (0 keeps all). A graph of several repos raises ValueError.
+    #[pyo3(signature = (query, top_k=20))]
+    fn find_files(&self, py: Python<'_>, query: &str, top_k: usize) -> PyResult<Py<PyAny>> {
+        let answer = find_files_answer(
+            &self.merged,
+            &self.repo_roots,
+            self.rank.clone(),
+            query,
+            top_k,
+            self.parse_errors.len(),
+        )
+        .map_err(PyValueError::new_err)?;
+        to_py(py, serde_json::to_string(&answer))
+    }
+
     /// **find** (LD.3b): the ranked, located nodes whose name or qname
     /// `query` names, in one call — the one lookup (it replaced `find_node`
     /// and `find_nodes_by_qname`). Returns a dict `{results, absence}`:
@@ -268,5 +324,48 @@ mod tests {
         let two = find_answer(&built.merged, &live, q, 20, &[], None, Collapse::off(), 0).expect("answer");
         assert_eq!(two.results.len(), 2, "{:?}", two.results);
         assert!(!serde_json::to_string(&two).expect("json").contains("\"identity\""));
+
+        // EB.8: find_files ranks one repo's files; two repos are refused.
+        let cache = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let err = find_files_answer(&built.merged, &built.repo_roots, cache, "T012", 20, 0)
+            .expect_err("two repos");
+        assert_eq!(err, "find --files ranks one repo's files; got 2 repos");
+    }
+
+    fn engine_with_errors(built: &glia_engine::GenerateResult, n: usize) -> Answer<FoundFile> {
+        let opts = FindFilesOptions::default();
+        let mut x = find_files(&built.merged, &built.repo_roots, "export the ledger", &opts).expect("answer");
+        if let Some(a) = x.absence.as_mut() {
+            a.unparsed_files = n;
+        }
+        x
+    }
+
+    /// EB.8: `find_files` on the held cache is the engine's answer; with no
+    /// history snapshot and no id it is an absence naming both, with the
+    /// parse-error count.
+    #[test]
+    fn find_files_is_the_engine_answer_on_the_held_cache() {
+        let root = std::env::temp_dir().join(format!("glia-eb8-find-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(root.join("app.py"), "def helper(x):\n    return x\n").expect("write fixture");
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let _ = std::fs::remove_dir_all(&root);
+        let built = built.expect("build");
+        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let a = find_files_answer(&built.merged, &built.repo_roots, held.clone(), "export the ledger", 20, 3)
+            .expect("answer");
+        assert!(a.results.is_empty());
+        let ab = a.absence.expect("absence");
+        assert_eq!((ab.reason, ab.unparsed_files), ("no_match", 3));
+        assert!(ab.note.contains("no id in the query resolved to a defining row"), "{}", ab.note);
+        assert!(ab.note.contains("no history messages (run glia history sync)"), "{}", ab.note);
+        let again = find_files_answer(&built.merged, &built.repo_roots, held, "export the ledger", 20, 3)
+            .expect("answer");
+        assert_eq!(
+            serde_json::to_string(&again).expect("json"),
+            serde_json::to_string(&engine_with_errors(&built, 3)).expect("json")
+        );
     }
 }

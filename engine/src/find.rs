@@ -51,16 +51,44 @@
 //! [`FindOptions::collapse`] `Collapse::off()` is the raw per-member answer
 //! (`glia find --no-collapse`). The seed resolvers (trace, tests-for,
 //! governing docs, absence suggestions) call [`search`], which never folds.
+//!
+//! # Files for a free-text query (EB.8)
+//!
+//! [`find_files`] (`glia find --files`, `PyGraph.find_files`) is a separate
+//! answer over FILES, not nodes: the files a free-text query (a task title,
+//! a ticket line) is about, in one repo, ranked [`FIND_FILES_FUSION`] =
+//! `LX[IDR,T1s]`, round 3's find table: typed id links first (the query's ids
+//! routed through the working tree's task / requirement rows and trackers,
+//! `intent::idr`), then the query's BM25 over past commit messages
+//! (`intent::text`, from `glia history sync`'s snapshot), then the file's
+//! degree, then path (rank_eval's find-shape tie rule). The node answer
+//! above is untouched by it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
+use glia_activation::algo::fuse;
 use glia_code_domain::node_kind;
-use glia_core::{NodeId, NodeKindId};
+use glia_code_domain::snapshots::{read_history, read_history_messages};
+use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
-use crate::answers::{Locator, entrypoint_reachable, in_scope, live_marker, resolve_scope};
+use crate::answers::{
+    Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
+};
+use crate::arch::{repo_label_for, repo_label_map};
+use crate::git_rev::grep_words_at;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
+use crate::intent::defs::{Namespaces, Tree, read_defs};
+use crate::intent::idr::{
+    Idr, IdrInputs, RoutedId, comment_part, recent_scopes, recent_subjects, route,
+};
+use crate::intent::ids::IdVocab;
+use crate::intent::paths::{PathResolver, rename_pairs};
+use crate::intent::text::{Candidates, TextIndex, subject};
+use crate::rank::RankCache;
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -563,6 +591,308 @@ fn log_marker(query: &str, cands: &[Candidate], top_k: usize) {
         "[find] query='{query}' matched={} tiers={tiers} top_k={top_k}",
         cands.len()
     );
+}
+
+// ---- EB.8: the files a free-text query is about -------------------------
+
+/// The fusion [`find_files`] ranks by (round 3's find table): typed id links
+/// first, then the query's BM25 over past commit messages, then the file's
+/// degree, then path.
+pub const FIND_FILES_FUSION: &str = "LX[IDR,T1s]";
+
+/// What [`find_files`] keeps and how it reports. Start from `default()` and
+/// set fields: `#[non_exhaustive]` rules out a struct literal outside this
+/// crate.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct FindFilesOptions {
+    /// Keep the first `top_k` rows ([`DEFAULT_TOP_K`]); `0` keeps every row.
+    pub top_k: usize,
+    /// The surface the markers name (`cli`, `py`, `lib`).
+    pub surface: &'static str,
+    /// The holder's ranking cache (EA.7: a PyGraph's, the CLI's); `None`
+    /// builds a transient one over the call's repo roots. Only its
+    /// [`crate::rank::FileIndex`] is read.
+    pub rank_cache: Option<Arc<RankCache>>,
+}
+
+impl Default for FindFilesOptions {
+    fn default() -> Self {
+        FindFilesOptions {
+            top_k: DEFAULT_TOP_K,
+            surface: "lib",
+            rank_cache: None,
+        }
+    }
+}
+
+/// One ranked file of [`find_files`].
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct FoundFile {
+    /// 1-based.
+    pub rank: usize,
+    /// Repo-relative path.
+    pub file: String,
+    /// Typed id routing over the working tree (`intent::idr`): named + cited.
+    pub idr: f64,
+    /// BM25 of the query's subject over past commit messages
+    /// (`intent::text`), 0 when the history has no messages.
+    pub text: f64,
+    /// [`crate::rank::FileIndex::degree`]: the tie key after the two scores.
+    pub degree: f64,
+    /// The routed ids that reached the file, in query order.
+    pub ids: Vec<String>,
+}
+
+/// The files `query` is about, in one repo: [`FIND_FILES_FUSION`] (rank_eval's
+/// find shape `LX[IDR,T1s]` with its tie rule, keys `[idr, text, degree]`
+/// descending, then path). See [`find_files_with_ids`]; this drops the
+/// routed ids.
+pub fn find_files(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    query: &str,
+    opts: &FindFilesOptions,
+) -> Result<Answer<FoundFile>, String> {
+    find_files_with_ids(merged, repo_roots, query, opts).map(|(a, _)| a)
+}
+
+/// [`find_files`] plus the ids the query routed (`intent::idr::RoutedId`,
+/// one row per resolved key, unresolved mentions with their reason), what
+/// `glia find --files` prints above the files.
+///
+/// - Candidates: the repo's slice of the [`crate::rank::FileIndex`]
+///   (`intent::text::Candidates`, paths ascending).
+/// - IDR: `intent::idr::route` of the whole query over the WORKING tree's
+///   definitions (its docs, trackers and Tier-4 sections, the repo's
+///   `[ids]` vocabulary, the history's rename pairs), the recent scopes read
+///   from the history snapshot's subjects.
+/// - Text: `TextIndex::scores(subject(query))` over the snapshot's messages
+///   (zeros when there is none).
+/// - Order: `fuse::lex_order([idr, text, degree], tie = path position)`.
+///   Rows are the files with `idr > 0` or `text > 0`, cut at `top_k`.
+///
+/// Err unless `repo_roots` has exactly one repo (no multi-repo text ranking
+/// was measured). An empty answer is a FACT `no_match` absence whose note
+/// names the missing inputs; it walked no mechanism, so it has no caveats.
+/// Query-time: reads `.glia/history-snapshot/`, writes nothing. Prints
+/// `[find-files] repo=<label> surface=<s> fusion=LX[IDR,T1s] ids=<n>
+/// idr_files=<i> text=<present|absent> text_files=<t> rows=<r>`, after the
+/// `[intent] text`, `[ids] vocab`, `[id-defs]`, `[id-ns]`, `[id-paths]` and
+/// `[idr]` lines of the same surface.
+pub fn find_files_with_ids(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    query: &str,
+    opts: &FindFilesOptions,
+) -> Result<(Answer<FoundFile>, Vec<RoutedId>), String> {
+    let (repo, root) = match (repo_roots.len(), repo_roots.iter().next()) {
+        (1, Some((r, p))) => (*r, p.clone()),
+        (n, _) => return Err(format!("find --files ranks one repo's files; got {n} repos")),
+    };
+    let surface = opts.surface;
+    let cache = opts.rank_cache.clone().unwrap_or_else(|| {
+        let labels = repo_label_map(&[(repo, root.clone())]);
+        Arc::new(RankCache::new("answer", repo_roots, &labels))
+    });
+    cache.guard(merged);
+    let label = cache
+        .repo_labels()
+        .get(&repo)
+        .cloned()
+        .unwrap_or_else(|| repo_label_for(&root));
+    let files = cache.files(merged);
+    let cands = Candidates::of(&files, repo);
+    let n = cands.len();
+    let root_path = Path::new(&root);
+
+    // T1s: the subject's BM25 over past commit messages, nothing excluded.
+    let subj = subject(query).to_string();
+    let (text, text_state) = match TextIndex::load(root_path, &cands, &BTreeSet::new()) {
+        Ok(idx) => {
+            idx.report(&label, surface, &subj);
+            (idx.scores(&subj), "present")
+        }
+        Err(why) => {
+            why.report(&label, surface);
+            (vec![0.0; n], "absent")
+        }
+    };
+
+    // IDR over the working tree.
+    let tree = Tree::Work(root_path);
+    let projects = project_roots(merged);
+    let dirs: Vec<&str> = projects
+        .iter()
+        .map(|p| p.path.as_str())
+        .filter(|p| *p != ".")
+        .collect();
+    let vocab = IdVocab::for_root(root_path);
+    let snap = read_history(root_path);
+    let msgs = snap
+        .as_ref()
+        .and_then(|s| read_history_messages(root_path, s));
+    let renames = snap.as_ref().map(rename_pairs).unwrap_or_default();
+    let defs = read_defs(&tree, &dirs, &vocab, Some((merged, RepoId(repo))));
+    let ns = defs.namespaces(&vocab.local_words);
+    let inputs = IdrInputs {
+        defs,
+        ns,
+        paths: PathResolver::new(&cands, &renames),
+    };
+    let side = inputs.side(&cands, &vocab, &tree).labelled(&label, surface);
+    let recent = match (&snap, &msgs) {
+        (Some(s), Some(m)) => recent_scopes(
+            &recent_subjects(s, m, &cands, &BTreeSet::new()),
+            &inputs.ns,
+            &vocab,
+        ),
+        _ => Vec::new(),
+    };
+    let routed = route(query, &side, &recent);
+    let idr: Vec<f64> = (0..n).map(|i| routed.idr.get(i).copied().unwrap_or(0.0)).collect();
+    let ids_of = ids_by_file(&routed, &inputs, &vocab, &tree, &cands);
+
+    // LX[IDR,T1s], rank_eval's find-shape tie rule: the degree, then path.
+    let tie: Vec<u32> = (0..n as u32).collect();
+    let none = vec![false; n];
+    let order = fuse::lex_order(&[&idr, &text, &cands.deg], &tie, &none);
+    let mut rows: Vec<FoundFile> = Vec::new();
+    for i in order {
+        if !(idr[i] > 0.0 || text[i] > 0.0) {
+            continue;
+        }
+        if opts.top_k > 0 && rows.len() >= opts.top_k {
+            break;
+        }
+        rows.push(FoundFile {
+            rank: rows.len() + 1,
+            file: cands.paths[i].clone(),
+            idr: idr[i],
+            text: text[i],
+            degree: cands.deg[i],
+            ids: ids_of.get(i).cloned().unwrap_or_default(),
+        });
+    }
+    let nz = |v: &[f64]| v.iter().filter(|&&w| w > 0.0).count();
+    let (idr_files, text_files) = (nz(&idr), nz(&text));
+    eprintln!(
+        "[find-files] repo={label} surface={surface} fusion={FIND_FILES_FUSION} ids={} idr_files={idr_files} text={text_state} text_files={text_files} rows={}",
+        routed.ids.len(),
+        rows.len()
+    );
+    let answer = Answer::from_results(rows, || {
+        let mut why: Vec<&str> = Vec::new();
+        if idr_files == 0 {
+            why.push(if routed.has_id {
+                "the query's ids reach no file of this repo"
+            } else {
+                "no id in the query resolved to a defining row"
+            });
+        }
+        if text_files == 0 {
+            why.push(if text_state == "absent" {
+                "no history messages (run glia history sync)"
+            } else {
+                "no past commit message matches the query"
+            });
+        }
+        let note = format!("no file of `{label}` ranks for `{}`: {}", query.trim(), why.join("; "));
+        absence::empty(merged, "find_files", query, "no_match", note, &[], None)
+    });
+    Ok((answer, routed.ids))
+}
+
+/// Per candidate, the routed ids that reached it, in query order: an id whose
+/// defining rows (its lineage class included) name the file, an id a comment
+/// of the file cites (one `git grep` over the cited files, the comment's
+/// mentions matched against the class's member ids), and, when only the
+/// conventional-commit scope route ran, every scope for every routed file.
+/// The same reading as `review`'s intent table (`review::ids_by_file`, which
+/// is private to that module; both are candidates for one `intent::idr`
+/// helper).
+fn ids_by_file(
+    routed: &Idr,
+    inputs: &IdrInputs,
+    vocab: &IdVocab,
+    tree: &Tree,
+    cands: &Candidates,
+) -> Vec<Vec<String>> {
+    let n = cands.len();
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); n];
+    let add = |out: &mut Vec<Vec<String>>, f: usize, id: &str| {
+        if let Some(v) = out.get_mut(f)
+            && !v.iter().any(|x| x == id)
+        {
+            v.push(id.to_string());
+        }
+    };
+    let mut members_of: Vec<(&str, BTreeSet<String>)> = Vec::new();
+    for r in &routed.ids {
+        let Some(rns) = &r.ns else { continue };
+        let mut mids: BTreeSet<String> = BTreeSet::new();
+        for k in inputs.ns.expand(&Namespaces::key(rns, &r.id)) {
+            let Some((mns, mid)) = k.rsplit_once('|') else {
+                continue;
+            };
+            mids.insert(mid.to_string());
+            for &ri in inputs
+                .ns
+                .rows
+                .get(&(mns.to_string(), mid.to_string()))
+                .into_iter()
+                .flatten()
+            {
+                let Some(row) = inputs.defs.rows.get(ri) else {
+                    continue;
+                };
+                for (f, _, _) in inputs.paths.block(&row.names) {
+                    if routed.named.get(f).is_some_and(|&w| w > 0.0) {
+                        add(&mut out, f, &r.id);
+                    }
+                }
+            }
+        }
+        members_of.push((r.id.as_str(), mids));
+    }
+    let cited: Vec<String> = (0..n)
+        .filter(|&f| routed.cited.get(f).is_some_and(|&w| w > 0.0))
+        .map(|f| cands.paths[f].clone())
+        .collect();
+    if !cited.is_empty() {
+        let words: Vec<String> = members_of
+            .iter()
+            .flat_map(|(_, m)| m.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for (p, l) in grep_words_at(tree, &words, &cited).unwrap_or_default() {
+            let Some(f) = inputs.paths.map(&p) else {
+                continue;
+            };
+            if !routed.cited.get(f).is_some_and(|&w| w > 0.0) {
+                continue;
+            }
+            let Some(c) = comment_part(&l) else { continue };
+            let said: BTreeSet<String> = vocab.mentions(c).into_iter().map(|m| m.id).collect();
+            for (id, mids) in &members_of {
+                if mids.iter().any(|m| said.contains(m)) {
+                    add(&mut out, f, id);
+                }
+            }
+        }
+    }
+    if members_of.is_empty() {
+        for r in routed.ids.iter().filter(|r| r.id.starts_with("scope:")) {
+            for f in 0..n {
+                if routed.idr.get(f).is_some_and(|&w| w > 0.0) {
+                    add(&mut out, f, &r.id);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -9,14 +9,24 @@
 //! <file>:<line>, ...)` and `; diverged` when the members' contents differ,
 //! and `--json` carries the row's `identity`. `--no-collapse` is one row per
 //! member.
+//!
+//! EB.8: `--files` is a separate answer over FILES (`find::find_files_with_ids`):
+//! the repo's files the query text is about, LX[IDR,T1s] (typed id links
+//! first, then past commits whose messages match it, ties by degree then
+//! path). It prints the routed ids (when any) and the ranked files; `--json`
+//! is the `{results, absence}` envelope of the files. One repo only: with
+//! `--with` the engine refuses (exit 2).
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
-use glia_engine::find::{DEFAULT_TOP_K, FindOptions, FoundNode, find_nodes};
+use glia_engine::find::{
+    DEFAULT_TOP_K, FindFilesOptions, FindOptions, FoundNode, find_files_with_ids, find_nodes,
+};
 use glia_engine::identity::Collapse;
+use glia_engine::GenerateResult;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
-use crate::common::generate_for;
+use crate::common::{generate_for, rank_cache};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -45,6 +55,11 @@ pub(crate) struct Args {
     /// SAME_AS class) is one row naming the other places (`also in`).
     #[arg(long)]
     no_collapse: bool,
+    /// Rank the repo's files for this text instead of matching node names:
+    /// ids in the text first (through the repo's task / requirement rows and
+    /// trackers), then past commits whose messages match it.
+    #[arg(long, conflicts_with_all = ["kind", "no_collapse", "scope"])]
+    files: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -83,6 +98,9 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
+    if args.files {
+        return run_files(&args, &result);
+    }
     let mut opts = FindOptions::default();
     opts.top_k = args.top_k;
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
@@ -117,6 +135,71 @@ pub(crate) fn run(args: Args) -> i32 {
             r.kind,
             r.qname,
             location_cell(r)
+        );
+    }
+    0
+}
+
+/// `glia find --files`: the routed ids, then the ranked files. Exit 0 with
+/// rows and on the absence (as the node answer), 2 on an engine error.
+fn run_files(args: &Args, result: &GenerateResult) -> i32 {
+    let mut opts = FindFilesOptions::default();
+    opts.top_k = args.top_k;
+    opts.surface = "cli";
+    opts.rank_cache = Some(rank_cache(result));
+    let (mut answer, ids) =
+        match find_files_with_ids(&result.merged, &result.repo_roots, &args.query, &opts) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+    if let Some(a) = answer.absence.as_mut() {
+        a.unparsed_files = result.parse_errors.len();
+    }
+    if args.json {
+        println!("{}", serde_json::to_string(&answer).unwrap_or_default());
+        return 0;
+    }
+    let cell = |s: Option<&str>| s.unwrap_or("—").to_string();
+    println!("# files for `{}`", args.query);
+    println!();
+    if !ids.is_empty() {
+        println!("| id | namespace | tier | route | defined at | state |");
+        println!("|---|---|---|---|---|---|");
+        for d in &ids {
+            let at = d
+                .defined_at
+                .as_ref()
+                .map_or_else(|| "—".to_string(), |(p, l)| format!("{p}:{l}"));
+            println!(
+                "| `{}` | {} | {} | {} | {at} | {} |",
+                d.id,
+                cell(d.ns.as_deref()),
+                cell(d.tier),
+                d.route,
+                cell(d.state)
+            );
+        }
+        println!();
+    }
+    if let Some(a) = &answer.absence {
+        println!("_(no match)_");
+        print_absence(a);
+        return 0;
+    }
+    println!("| # | file | idr | text | ids |");
+    println!("|--:|---|--:|--:|---|");
+    for r in &answer.results {
+        let ids = if r.ids.is_empty() {
+            "—".to_string()
+        } else {
+            r.ids.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(", ")
+        };
+        println!(
+            "| {} | `{}` | {} | {:.3} | {ids} |",
+            r.rank, r.file, r.idr, r.text
         );
     }
     0

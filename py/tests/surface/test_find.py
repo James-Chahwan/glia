@@ -6,10 +6,14 @@ row carries a bool `live`, read off one liveness walk per graph (PyGraph caches
 it, so only the first answer prints the `[live] profile=` walk line). DD.9:
 `find(..., collapse=True)` folds a FACT / DERIVED identity class (a package two
 repos declare) to one row carrying `identity`; `collapse=False` is the raw rows.
-Shared helpers: test_build.py."""
+EB.8: `find_files(query, top_k=20)` is the files a free-text query is about
+(LX[IDR,T1s]), the same envelope over `{rank, file, idr, text, degree, ids}`
+rows. Shared helpers: test_build.py."""
 from __future__ import annotations
 
+import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -24,6 +28,13 @@ def manifest(repo: str, extra: str) -> str:
     return ('{"name": "%s", "dependencies": {"react": "^18.2.0", "%s": "1.0.0"}}\n'
             % (repo, extra))
 RESOLVE_KEYS = ["id", "qname", "name", "kind", "score", "live", "file", "line"]
+FILE_KEYS = ["rank", "file", "idr", "text", "degree", "ids"]
+
+
+def git(root: pathlib.Path, *args: str) -> None:
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", *args], check=True, env=env, capture_output=True)
 
 
 def main() -> int:
@@ -116,6 +127,37 @@ def main() -> int:
         c.check("collapse=False rows carry no identity", all("identity" not in r for r in raw), raw)
         c.check("the collapsed row is the best-ranked member", raw and row.get("id") == raw[0]["id"],
                 (row.get("id"), raw[:1]))
+    # EB.8: find_files over one repo whose spec-kit task names app.py.
+    c.check("find_files signature", params(rg.PyGraph.find_files) == [("query", None), ("top_k", 20)],
+            params(rg.PyGraph.find_files))
+    with tempfile.TemporaryDirectory(prefix="glia-surface-find-files-") as tmp:
+        root = pathlib.Path(tmp) / "shop"
+        (root / "specs" / "001-shop").mkdir(parents=True)
+        (root / "app.py").write_text("def helper(x):\n    return x\n")
+        (root / "specs" / "001-shop" / "tasks.md").write_text("# Tasks\n\n- [ ] T012 helper in app.py\n")
+        git(root, "init", "-q")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "init")
+        g = rg.generate(str(root))
+        a, err = stderr_of(lambda: g.find_files("T012 helper"))
+        c.check("find_files marker", "[find-files] repo=shop surface=py fusion=LX[IDR,T1s] ids=1 idr_files=1 "
+                "text=absent text_files=0 rows=1" in err, err[-600:])
+        c.check("find_files -> dict", type(a) is dict and list(a) == ["results", "absence"], a)
+        rows = a["results"] if type(a) is dict else []
+        c.check("find_files row keys", rows and list(rows[0]) == FILE_KEYS, rows[:1])
+        c.check("find_files T012 file first", rows and (rows[0]["rank"], rows[0]["file"], rows[0]["ids"])
+                == (1, "app.py", ["T012"]), rows[:1])
+        none = g.find_files("warm the ledger cache")
+        ab = none["absence"]
+        c.check("find_files absence names both causes", type(ab) is dict and ab.get("reason") == "no_match"
+                and "no id in the query resolved" in ab.get("note", "")
+                and "run glia history sync" in ab.get("note", ""), ab)
+        other = pathlib.Path(tmp) / "other"
+        other.mkdir()
+        (other / "lib.py").write_text("def f():\n    return 1\n")
+        g2 = rg.generate_many([str(root), str(other)])
+        c.raises("find_files refuses two repos", ValueError, lambda: g2.find_files("T012"),
+                 "ranks one repo's files")
     return c.done()
 
 

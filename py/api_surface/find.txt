@@ -1,3 +1,4 @@
 # pyo3 surface of py/src/find.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
 method PyGraph.find(query: &str, top_k: usize = 20, kinds: Option<Vec<String>> = None, scope: Option<String> = None, collapse: bool = true) -> PyResult<Py<PyAny>>
+method PyGraph.find_files(query: &str, top_k: usize = 20) -> PyResult<Py<PyAny>>
 method PyGraph.resolve(text: &str, kind: &str = "auto", top_k: Option<usize> = None, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
