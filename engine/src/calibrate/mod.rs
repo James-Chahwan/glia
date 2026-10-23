@@ -23,3 +23,14 @@ pub use candidate::{Candidate, Memo, QueryCtx, RankKey, ReplayState, StateHook};
 
 pub mod select;
 pub use select::{SetSpec, better, eval_query, run_sets};
+
+pub mod bank;
+pub use bank::{
+    StructIndex, bfs_files, ppr_files, structure_keys, uniform_seed_nodes, weighted_seed_nodes,
+};
+
+pub mod sets;
+pub use sets::{
+    COCHANGE_CANDIDATES, COCHANGE_FALLBACK, COCHANGE_SET, Named, SEEDED_SHAPES,
+    STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK, STRUCTURE_SET, specs,
+};
