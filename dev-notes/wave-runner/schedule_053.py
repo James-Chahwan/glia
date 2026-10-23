@@ -44,6 +44,7 @@ LANDED = {
     2: "EA.2 EB.4 EG.2",
     3: "EA.3 EG.3",
     4: "EA.4 EB.3",
+    5: "EA.5 EA.6 EB.5a EB.5c EC.2",
 }
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "G": 4, "Z": 9}
 
