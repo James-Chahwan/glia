@@ -72,13 +72,15 @@
 //! — grep `^\[diff-impact\] mode=`.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use glia_code_domain::node_kind;
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
 
 use crate::absence;
-use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded};
+use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded_on};
+use crate::rank::RankCache;
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
 use crate::profile::CODE_PROFILE;
 use crate::tests_for::CodeText;
@@ -139,7 +141,27 @@ pub fn diff_impact_vs_rev(repo_path: &str, base: &str, opts: &BlastOptions) -> R
 /// `base` is `rev.answer.base`, the rev as `graph_delta_vs_rev` was given it.
 /// `rev` holds both sides' graphs, so a caller that keeps it alive to ask
 /// more questions (`tests_for::tests_for_delta`) holds two graphs in memory.
+///
+/// 0.5.3 (EA.5): with no `opts.rank_cache`, the radius ranks through a
+/// transient cache over the working tree's repo roots and labels, so its
+/// history snapshot (`glia history sync`) orders the impact rows and fills
+/// `impact.files` with no new parameter.
 pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact {
+    diff_impact_from_delta_on(rev, opts, "diff_impact")
+}
+
+/// [`diff_impact_from_delta`] for an outer answer: `surface` names it in the
+/// `[rank]` marker (`review`).
+pub(crate) fn diff_impact_from_delta_on(rev: &RevDelta, opts: &BlastOptions, surface: &'static str) -> DiffImpact {
+    let opts_owned;
+    let opts = if opts.rank_cache.is_none() {
+        let mut o = opts.clone();
+        o.rank_cache = Some(Arc::new(RankCache::new("answer", &rev.after.repo_roots, &rev.after.repo_labels)));
+        opts_owned = o;
+        &opts_owned
+    } else {
+        opts
+    };
     let after = &rev.after.merged;
     let loc = Locator::new(after);
     let candidates = present(after, rev_candidates(rev));
@@ -187,7 +209,7 @@ pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact
         };
         no_seed(after, &format!("rev {given}"), note)
     } else {
-        blast_radius_seeded(after, &seeds, opts)
+        blast_radius_seeded_on(after, &seeds, opts, surface)
     };
     if let Some(a) = impact.absence.as_mut() {
         a.unparsed_files = rev.after.parse_errors.len();
@@ -253,7 +275,7 @@ pub fn diff_impact_from_diff(merged: &MergedGraph, diff_text: &str, opts: &Blast
         };
         no_seed(merged, &query, note)
     } else {
-        blast_radius_seeded(merged, &seeds, opts)
+        blast_radius_seeded_on(merged, &seeds, opts, "diff_impact")
     };
     let answer = DiffImpact {
         base: None,
@@ -343,6 +365,7 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
         seeds: Vec::new(),
         unresolved: Vec::new(),
         results: Vec::new(),
+        files: Vec::new(),
         absence: Some(absence::empty(merged, PRIMITIVE, query, "no_match", note, &[], None)),
     }
 }

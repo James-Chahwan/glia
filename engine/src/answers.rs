@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_activation::plan::{ActivationPlan, FilterPredicate};
@@ -17,6 +18,7 @@ use crate::absence::{self, Absence, Answer};
 use crate::find::{self, FindOptions};
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
+use crate::rank::{FileIndex, FileRanking, RankCache, RankedFile, Ranking, SourceKey, order_rows, rank_files};
 
 /// One node in a blast-radius answer: identity, kind, why it is here
 /// (`reason`), PPR `score`, `file`:`line`, `live`, the `seed` whose wave
@@ -613,6 +615,20 @@ pub struct BlastOptions {
     /// the walk and the ranking, and a FACT / DERIVED class is one row with
     /// its `identity`. [`Collapse::off`] is the raw per-member answer.
     pub collapse: Collapse,
+    /// 0.5.3 (EA.5): the measured file ranking that orders the rows
+    /// ([`crate::rank::rank_files`] from the seeds' files, then
+    /// [`crate::rank::order_rows`]) and fills [`BlastRadius::files`]. The
+    /// default is `H10` (co-change first, P1 under it); with no history
+    /// snapshot, or under [`Ranking::head`], the rows keep the 0.5.2 order.
+    /// The closure's own PPR scores never change with it.
+    pub ranking: Ranking,
+    /// 0.5.3 (EA.5): the caller's held [`RankCache`] (its repo roots name the
+    /// history snapshots co-change reads). `None` builds a transient cache
+    /// with no repo roots and no labels (so no co-change, and `repo#<n>` in
+    /// `files`), per call.
+    pub rank_cache: Option<Arc<RankCache>>,
+    /// 0.5.3 (EA.5): how many files [`BlastRadius::files`] lists.
+    pub top_files: usize,
 }
 
 impl Default for BlastOptions {
@@ -624,6 +640,9 @@ impl Default for BlastOptions {
             live_only: false,
             scope: None,
             collapse: Collapse::default(),
+            ranking: Ranking::default(),
+            rank_cache: None,
+            top_files: 10,
         }
     }
 }
@@ -665,6 +684,13 @@ pub struct BlastRadius {
     /// Queries no node answers to, in query order, each once. Never an error.
     pub unresolved: Vec<String>,
     pub results: Vec<BlastAnswer>,
+    /// 0.5.3 (EA.5): the measured file ranking from the seeds' files
+    /// ([`BlastOptions::ranking`]), best first, at most
+    /// [`BlastOptions::top_files`], seed files never listed: a file is listed
+    /// whether or not the closure reached it (`rows` counts the answer's rows
+    /// in it, 0 when none). Under `scope` only files under it are listed.
+    /// Empty when no seed has a candidate file.
+    pub files: Vec<RankedFile>,
     /// `Some` iff `results` is empty.
     pub absence: Option<Absence>,
 }
@@ -724,7 +750,7 @@ pub fn blast_radius(merged: &MergedGraph, queries: &[&str], opts: &BlastOptions)
     if unresolved.is_empty() {
         return blast_radius_seeded(merged, &seeds, opts);
     }
-    radius(merged, &seeds, unresolved, opts)
+    radius(merged, &seeds, unresolved, opts, "blast_radius")
 }
 
 /// [`blast_radius`] from node ids the caller already holds — `(display
@@ -738,7 +764,18 @@ pub(crate) fn blast_radius_seeded(
     seeds: &[(String, NodeId)],
     opts: &BlastOptions,
 ) -> BlastRadius {
-    radius(merged, seeds, Vec::new(), opts)
+    blast_radius_seeded_on(merged, seeds, opts, "blast_radius")
+}
+
+/// [`blast_radius_seeded`] for an outer answer (`diff_impact`, `review`):
+/// `surface` names it in the `[rank]` marker.
+pub(crate) fn blast_radius_seeded_on(
+    merged: &MergedGraph,
+    seeds: &[(String, NodeId)],
+    opts: &BlastOptions,
+    surface: &'static str,
+) -> BlastRadius {
+    radius(merged, seeds, Vec::new(), opts, surface)
 }
 
 /// The one multi-seed answer behind [`blast_radius`] and
@@ -767,6 +804,19 @@ pub(crate) fn blast_radius_seeded(
 ///   (one `package:npm:react` reached in two repos) keeps its best-scored row
 ///   and never spends two `top_k` slots. `scope` reads the shown node's file.
 ///
+/// 0.5.3 (EA.5), ranking: the closure is ranked over `opts.rank_cache`'s
+/// PPR index of the walk's source (the quotient or the merged graph) under
+/// [`glia_graph::closure_config`], scores unchanged. The measured file
+/// ranking ([`crate::rank::rank_files`] under `opts.ranking`, from the
+/// display seeds' files in seed order) reorders the rows through
+/// [`crate::rank::order_rows`] BEFORE the identity fold, `scope` and `top_k`,
+/// and its first `top_files` files (under `scope`) are `files`. fired_on,
+/// right after `[blast] seeds=`, once per answer: `[rank] surface=<s>
+/// ranking=<harness name> seed_files=<s> cochange_files=<c> files=<f>
+/// lifted=<l> closure_index=<hit|built>` (`lifted`: rows placed earlier
+/// than in the closure's order), or `[rank] surface=<s> files=0
+/// reason=no_seed_file` when no seed has a candidate file.
+///
 /// fired_on, beside the `[blast] seeds=` line and only when the view has a
 /// collapse class: `[identity] collapse surface=blast_radius classes=<c>
 /// walk_classes=<w> folded=<f> rows=<n>`, `f` the rows the fold dropped, `n`
@@ -776,6 +826,7 @@ fn radius(
     seeds: &[(String, NodeId)],
     unresolved: Vec<String>,
     opts: &BlastOptions,
+    surface: &'static str,
 ) -> BlastRadius {
     let view = IdentityView::new(merged, &opts.collapse);
     // One seed per walk node (a node, or a whole walk class), the first
@@ -795,10 +846,47 @@ fn radius(
     let mut folded = 0usize;
     let mut kept_in_scope = 0usize;
     let mut blast_seeds: Vec<BlastSeed> = Vec::with_capacity(seeds.len());
+    let mut ranked_files: Vec<RankedFile> = Vec::new();
+    let mut rank_line: Option<String> = None;
     if !ids.is_empty() {
         let loc = Locator::new(merged);
         let live = entrypoint_reachable(merged);
         let quotient = view.quotient(merged);
+        // EA.5: the caller's RankCache, or a transient one with no repo
+        // roots (no co-change) and no labels: `opts.collapse.repo_labels` is
+        // empty under `Collapse::off()`, and a label is a file tie-break, so
+        // reading it would make the collapse switch move `files` with no
+        // class in the graph (identity_collapse_blast's byte-identity). A
+        // labelled answer passes a cache. Guarded before any index is read
+        // (EA.2).
+        let cache = opts.rank_cache.clone().unwrap_or_else(|| {
+            Arc::new(RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new()))
+        });
+        cache.guard(merged);
+        // The closure's own PPR over a cached index (item 5): scores are the
+        // unindexed walk's in f64 bits (EA.1).
+        let closure_cfg = glia_graph::closure_config(&CODE_PROFILE.tables, opts.direction);
+        let built_before = cache.stats().built;
+        let closure_ix = match &quotient {
+            Some(q) => cache.ppr_index(q, SourceKey::Quotient, &closure_cfg),
+            None => cache.ppr_index(merged, SourceKey::Merged, &closure_cfg),
+        };
+        let closure_how = if cache.stats().built > built_before { "built" } else { "hit" };
+        // The measured file ranking from the DISPLAY seeds' files, in seed
+        // order (the harness's order, so C0 sums as it does); a seed whose
+        // node maps to no candidate file seeds the ranking by its node.
+        let files = cache.files(merged);
+        let mut seed_files: Vec<u32> = Vec::new();
+        let mut extra: Vec<NodeId> = Vec::new();
+        for &id in &ids {
+            match files.file_of_node(id) {
+                Some(f) if !seed_files.contains(&f) => seed_files.push(f),
+                Some(_) => {}
+                None => extra.push(id),
+            }
+        }
+        let fr: Option<FileRanking> = (!seed_files.is_empty())
+            .then(|| rank_files(merged, &cache, &seed_files, &extra, opts.ranking));
         // A walk class is live when any member is: the live set mapped onto
         // the walk's nodes (the raw set itself when nothing is contracted).
         let (walk_live, class_reps): (Cow<'_, HashSet<NodeId>>, HashSet<NodeId>) =
@@ -813,8 +901,8 @@ fn radius(
         // below see what the post-sort filter they replaced saw.
         let live_filter = LiveFilter::new(&walk_live);
         let hits = match &quotient {
-            Some(q) => blast_walk(q, &walk_seeds, opts, &live_filter),
-            None => blast_walk(merged, &walk_seeds, opts, &live_filter),
+            Some(q) => blast_walk(q, &walk_seeds, opts, &live_filter, &closure_ix),
+            None => blast_walk(merged, &walk_seeds, opts, &live_filter, &closure_ix),
         };
         dead = live_filter.dropped.get();
         reached = hits.len() + dead;
@@ -869,6 +957,19 @@ fn radius(
                 }
             })
             .collect();
+        // EA.5: the file ranking's row order, BEFORE the fold, scope and the
+        // cut, so each sees the final order. None is the identity (always
+        // under Ranking::head() and with no co-change).
+        let mut lifted = 0usize;
+        if let Some(fr) = &fr {
+            let row_files: Vec<Option<u32>> =
+                out.iter().map(|a| files.file_of_node(NodeId(a.id))).collect();
+            if let Some(perm) = order_rows(&row_files, &seed_files, fr) {
+                lifted = perm.iter().enumerate().filter(|&(to, &from)| to < from).count();
+                let mut slots: Vec<Option<BlastAnswer>> = out.into_iter().map(Some).collect();
+                out = perm.iter().filter_map(|&i| slots.get_mut(i).and_then(Option::take)).collect();
+            }
+        }
         // Fold BEFORE scope and the cut: a class never spends two slots.
         let ranked = out.len();
         out = view.fold(out, |a| NodeId(a.id), |a, identity| a.identity = Some(identity));
@@ -881,6 +982,28 @@ fn radius(
         if let Some(k) = opts.top_k {
             out.truncate(k);
         }
+        // EA.5: the ranked file list, rows counted over the final rows.
+        if let Some(fr) = &fr {
+            let mut rows_per_file: BTreeMap<u32, usize> = BTreeMap::new();
+            for a in &out {
+                if let Some(f) = files.file_of_node(NodeId(a.id)) {
+                    *rows_per_file.entry(f).or_default() += 1;
+                }
+            }
+            ranked_files = top_files(merged, &files, fr, opts, &rows_per_file);
+            let cochange_files = fr
+                .c0
+                .iter()
+                .enumerate()
+                .filter(|&(f, &c)| c > 0.0 && !seed_files.contains(&(f as u32)))
+                .count();
+            rank_line = Some(format!(
+                "[rank] surface={surface} ranking={} seed_files={} cochange_files={cochange_files} files={} lifted={lifted} closure_index={closure_how}",
+                opts.ranking.harness_name(),
+                seed_files.len(),
+                ranked_files.len(),
+            ));
+        }
     }
 
     let links: usize = blast_seeds.iter().map(|s| s.linked_seeds.len()).sum();
@@ -891,6 +1014,11 @@ fn radius(
         unresolved.len(),
         opts.direction
     );
+    // fired_on marker (EA.5), once per answer, after the `[blast]` line.
+    match rank_line {
+        Some(line) => eprintln!("{line}"),
+        None => eprintln!("[rank] surface={surface} files=0 reason=no_seed_file"),
+    }
     // fired_on marker (DD.10), only with a collapse class.
     view.collapse_marker("blast_radius", out.len() + folded, out.len());
 
@@ -901,8 +1029,36 @@ fn radius(
         seeds: blast_seeds,
         unresolved,
         results: out,
+        files: ranked_files,
         absence,
     }
+}
+
+/// [`BlastRadius::files`]: the first `opts.top_files` files of `fr`'s order.
+/// Under `opts.scope` a file outside it is skipped (the rows' rule,
+/// [`in_scope`] on the repo-relative path) and the walk continues down the
+/// order; `rank` is then the place in the listed files.
+fn top_files(
+    merged: &MergedGraph,
+    files: &FileIndex,
+    fr: &FileRanking,
+    opts: &BlastOptions,
+    rows_per_file: &BTreeMap<u32, usize>,
+) -> Vec<RankedFile> {
+    let Some(raw) = opts.scope.as_deref() else {
+        return fr.top(files, opts.top_files, rows_per_file);
+    };
+    let path = resolve_scope(merged, raw);
+    let mut listed: Vec<RankedFile> = fr
+        .top(files, usize::MAX, rows_per_file)
+        .into_iter()
+        .filter(|f| in_scope(&f.file, &path))
+        .take(opts.top_files)
+        .collect();
+    for (i, f) in listed.iter_mut().enumerate() {
+        f.rank = i + 1;
+    }
+    listed
 }
 
 /// One blast walk over `g` (the merged graph, or its identity quotient):
@@ -913,9 +1069,18 @@ fn blast_walk<G: GraphSource + ?Sized>(
     seeds: &[NodeId],
     opts: &BlastOptions,
     live: &LiveFilter<'_>,
+    index: &glia_activation::PprIndex,
 ) -> Vec<glia_graph::BlastHit> {
     let filters: Vec<&dyn FilterPredicate<G>> = if opts.live_only { vec![live] } else { Vec::new() };
-    glia_graph::blast_radius_over(g, seeds, opts.direction, opts.depth, &CODE_PROFILE.tables, &filters)
+    glia_graph::blast_radius_over_with(
+        g,
+        seeds,
+        opts.direction,
+        opts.depth,
+        &CODE_PROFILE.tables,
+        &filters,
+        Some(index),
+    )
 }
 
 /// The representatives of `view`'s walk classes: the ids a walk over its

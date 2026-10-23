@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use glia_activation::algo::{self, Adjacency, GraphSource, Walk};
 use glia_activation::plan::{ActivationPlan, FilterPredicate};
 use glia_activation::profile::DomainTables;
+use glia_activation::{ActivationConfig, PprIndex};
 use glia_core::{EdgeCategoryId, NodeId};
 
 use crate::merged::MergedGraph;
@@ -140,7 +141,41 @@ pub fn blast_radius_over<G: GraphSource + ?Sized>(
     tables: &DomainTables,
     filters: &[&dyn FilterPredicate<G>],
 ) -> Vec<BlastHit> {
+    blast_radius_over_with(g, seeds, reach, max_depth, tables, filters, None)
+}
+
+/// The PPR config a blast closure is ranked under (0.5.3, EA.5): the
+/// domain's `activation_config(None)`, its direction the walk's (`Forward`,
+/// `Backward`, or `Undirected` for `Both`), and `top_k` unbounded so the
+/// whole closure is scored. A caller that caches a [`PprIndex`] for the
+/// closure builds it under this config.
+pub fn closure_config(tables: &DomainTables, reach: Reach) -> ActivationConfig {
     use glia_activation::Direction;
+    let mut config = tables.activation_config(None);
+    config.direction = match reach {
+        Reach::Forward => Direction::Forward,
+        Reach::Backward => Direction::Backward,
+        Reach::Both => Direction::Undirected,
+    };
+    config.top_k = usize::MAX; // score the whole closure, no truncation
+    config
+}
+
+/// [`blast_radius_over`] over a prebuilt [`PprIndex`] of `g` (0.5.3, EA.5,
+/// item 5): with `index` Some the closure is ranked by
+/// [`ActivationPlan::rank_indexed`], whose scores are bit-identical to the
+/// unindexed run's (EA.1); an index built for another config than
+/// [`closure_config`] falls back inside the plan to a fresh run (with its
+/// marker). `None` is [`blast_radius_over`] exactly.
+pub fn blast_radius_over_with<G: GraphSource + ?Sized>(
+    g: &G,
+    seeds: &[NodeId],
+    reach: Reach,
+    max_depth: usize,
+    tables: &DomainTables,
+    filters: &[&dyn FilterPredicate<G>],
+    index: Option<&PprIndex>,
+) -> Vec<BlastHit> {
     use std::collections::{HashMap, HashSet};
 
     // Deduplicated, first occurrence kept: the walk's start order and the
@@ -191,18 +226,14 @@ pub fn blast_radius_over<G: GraphSource + ?Sized>(
 
     // Rank the closure by one PPR over every seed, then filter it: one
     // plan. A closure node PPR never scored stays in at 0.0.
-    let mut config = tables.activation_config(None);
-    config.direction = match reach {
-        Reach::Forward => Direction::Forward,
-        Reach::Backward => Direction::Backward,
-        Reach::Both => Direction::Undirected,
-    };
-    config.top_k = usize::MAX; // score the whole closure, no truncation
-    let mut plan = ActivationPlan::new(config);
+    let mut plan = ActivationPlan::new(closure_config(tables, reach));
     for f in filters {
         plan = plan.filter(*f);
     }
-    let view = plan.rank(g, &seeds, &closure);
+    let view = match index {
+        Some(ix) => plan.rank_indexed(g, ix, &seeds, &closure),
+        None => plan.rank(g, &seeds, &closure),
+    };
 
     // The view's order (score desc, id asc) is the answer's order.
     view.scores
@@ -431,6 +462,32 @@ mod tests {
             rows(&blast_radius_over(&merged, &[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
             rows(&merged.blast_radius_filtered(&[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
         );
+    }
+
+    /// EA.5: the closure ranked over a prebuilt index of [`closure_config`]
+    /// is the unindexed answer with every score equal in f64 bits; an index
+    /// of another config falls back to a fresh run, same answer.
+    #[test]
+    fn blast_radius_over_with_an_index_is_bit_identical() {
+        let merged = MergedGraph::new(vec![flow_graph()]);
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
+        let b = id("m::b");
+        let bits = |h: &[BlastHit]| -> Vec<(NodeId, usize, u64, NodeId)> {
+            h.iter().map(|x| (x.id, x.depth, x.score.to_bits(), x.seed)).collect()
+        };
+        for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
+            let plain = blast_radius_over(&merged, &[b], reach, 4, &CODE_TABLES, &[]);
+            let cfg = closure_config(&CODE_TABLES, reach);
+            let ix = PprIndex::build(&merged.node_ids(), merged.edges(), &cfg);
+            let with = blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&ix));
+            assert!(!plain.is_empty(), "{reach:?}");
+            assert_eq!(bits(&with), bits(&plain), "{reach:?}");
+            let mut other = cfg.clone();
+            other.damping = 0.85;
+            let wrong = PprIndex::build(&merged.node_ids(), merged.edges(), &other);
+            let fell = blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&wrong));
+            assert_eq!(bits(&fell), bits(&plain), "{reach:?} mismatched index");
+        }
     }
 
     /// Drops one named node from a walk over any source.

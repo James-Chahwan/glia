@@ -9,7 +9,7 @@ import tempfile
 
 from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
-TOP = ["seeds", "unresolved", "results", "absence"]
+TOP = ["seeds", "unresolved", "results", "files", "absence"]
 KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line", "seed"]
 SEED_KEYS = ["query", "id", "qname", "kind", "file", "line", "linked_seeds"]
 

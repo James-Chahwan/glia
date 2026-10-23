@@ -190,6 +190,9 @@ fn diff_file_json() {
     assert_eq!(rows(&v), price_rows());
     assert_eq!(v["impact"]["results"][0]["line"].as_i64().map(|l| l >= 1), Some(true));
     assert!(v["impact"]["absence"].is_null());
+    let impact_keys: Vec<&str> =
+        v["impact"].as_object().expect("impact").keys().map(String::as_str).collect();
+    assert_eq!(impact_keys, ["absence", "files", "results", "seeds", "unresolved"]);
     assert!(stderr(&out).lines().any(|l| l == DIFF_MARKER), "{}", stderr(&out));
 }
 

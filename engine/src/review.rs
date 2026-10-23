@@ -213,7 +213,7 @@ use crate::contract_fields::FieldSide;
 use crate::coverage::CoverageNote;
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
-use crate::diff_impact::{ChangedNode, diff_impact_from_delta};
+use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
 use crate::external::declared::declared_constraints;
 use crate::identity::Collapse;
 use crate::tests_for::{TestsFor, TestsForArgs, tests_for_delta};
@@ -381,7 +381,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     } else {
         &args.blast
     };
-    let di = diff_impact_from_delta(rev, blast);
+    let di = diff_impact_from_delta_on(rev, blast, "review");
     let mut impact = di.impact;
     let impact_total = impact.results.len();
     impact.results.truncate(args.max_impact);

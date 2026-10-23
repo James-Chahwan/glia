@@ -69,6 +69,12 @@ fn several_qnames_are_one_radius() {
     assert_eq!(seeds, ["app::save", "app::publish"], "{v}");
     assert_eq!(v["unresolved"], serde_json::json!([]), "{v}");
     assert!(v["absence"].is_null(), "{v}");
+    // EA.5: the answer's keys (sorted: serde_json without preserve_order)
+    // gain `files`, the measured file ranking;
+    // the seeds' own file is never listed.
+    let keys: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
+    assert_eq!(keys, ["absence", "files", "results", "seeds", "unresolved"], "{v}");
+    assert!(v["files"].as_array().expect("files").iter().all(|f| f["file"] != "app.py"), "{v}");
     let rows = v["results"].as_array().expect("results");
     let create = rows.iter().find(|r| r["qname"] == "app::create_order").expect("the shared caller");
     assert_eq!(create["seed"], "app::save", "the first seed's wave reaches it first: {v}");

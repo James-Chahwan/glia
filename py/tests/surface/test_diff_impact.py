@@ -27,7 +27,7 @@ PLACE = "shop::a::place"
 CHECKOUT = "shop::b::checkout"
 KEYS = ["base", "changed", "edges_added", "edges_removed", "impact", "unresolved_diff_files"]
 CHANGED_KEYS = ["id", "qname", "kind", "file", "line", "change", "seed"]
-IMPACT_KEYS = ["seeds", "unresolved", "results", "absence"]
+IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "absence"]
 ROWS = [(PLACE, 1, PRICE), (CHECKOUT, 2, PRICE)]
 DIFF = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,2 +1,2 @@\n"
         " def price(o):\n"
