@@ -29,6 +29,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 RELEASES = ("051", "052", "053")
 RELEASE_PREFIX = {"051": "C", "052": "D", "053": "E"}   # packet-id family per release
+WF = Path("/tmp/claude-1000/-home-ivy-Code-glia/wf")  # wave logs / next-wave scripts; /tmp is cleared on reboot
 SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
 # Since LD.11b the wheel is glia_py-<ver>-cp311-abi3-*.whl (dist glia-py, import glia_py);
@@ -177,7 +178,8 @@ def main():
     # every other and the passed count is a fraction of the suite (0.5.1 W2: 262 of ~3,400 ran).
     out, _ = sh("cargo test --workspace --no-fail-fast --quiet 2>&1", timeout=2400)
     # Keep the full output: a one-line count cannot say which test or crate failed.
-    (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{f'r{release}-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
+    WF.mkdir(parents=True, exist_ok=True)
+    (WF / f"ws-test-{f'r{release}-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
     passed = sum(int(m) for m in re.findall(r"test result: ok\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
     comp = len(re.findall(r"^error(\[E\d+\])?:", out, re.M))
