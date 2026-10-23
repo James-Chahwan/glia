@@ -782,7 +782,7 @@ moved recall@10 by under 0.01, so reweighting will not move the ranking much: CA
 
 | repo | 5 hubs | P1 | P1f | P1b | P1review | P2 | U1b5 |
 |---|---|---|---|---|---|---|---|
-| Kina | admin.component.ts, listing-flow.store.ts, trade-view.component.ts, EscrowManager.sol, wallet-action-sheet.component.ts | .016 | .006 | .027 | .015 | .018 | .017 |
+| Kina | four Angular components / stores and one Solidity contract (names kept private) | .016 | .006 | .027 | .015 | .018 | .017 |
 | quokka | groups.component.ts, activity.service.ts, user-profile.service.ts, auth_controller.go, auth.go | .107 | .115 | .053 | .107 | .120 | .103 |
 | glia | extractors/queues.rs, core/lib.rs, typescript/lib.rs, go/lib.rs, dart/lib.rs | .081 | .141 | .003 | .080 | .017 | .075 |
 

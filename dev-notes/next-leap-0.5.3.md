@@ -37,7 +37,7 @@ score the commit's other files. Private repos are reported as aggregate numbers 
 **Gate.** `rank_eval` runs as a release check on fixed repo snapshots (glia plus the open-source shell / websocket /
 samples). A ranking change that lowers recall@10 or MRR beyond its CI fails the close-out.
 
-**From round 2** (`dev-notes/ranking-eval-round2-2026-10-18.md`): these wins are proposed to join, for James to confirm.
+**From round 2** (`dev-notes/ranking-eval-round2-2026-10-18.md`): these wins join (James confirmed 2026-10-23, *"yes to all"*).
 
 | # | mechanism | measured | effort | where |
 |---|---|---|---|---|
@@ -60,7 +60,7 @@ repos). Items 6-9 hold in every shape tested and need no change. Scope notes for
 - **Items 4 and 8** hold in the review shape (2, 3 or half of the changed files as seeds): CI above 0 on 9 / 6 / 6 of 12
   repos, below on none.
 
-Two more small items are proposed, for James to confirm:
+Two more small items join (confirmed 2026-10-23):
 
 | # | mechanism | measured | effort | where |
 |---|---|---|---|---|
@@ -74,7 +74,7 @@ Also kept out:
 - quokka-stack's pre-merge history: the co-change is real, but it outranks the graph (H10 -0.071);
 - BFS candidates in the text answers' selection: within ±0.004 on all 12 repos.
 
-**Proposed small hygiene, for James to confirm.**
+**Small hygiene (confirmed 2026-10-23).**
 - **Remove engram-export's DE.5 side file** (`--ppr-candidates`, `.ppr.jsonl`, `ppr_side.rs`, exit 8; 0.5.4 seed §F item
   7). Engram asked for it gone "before 0.5.3 ships".
 - **Fix the wheels workflow:** bump the Node 20 actions and pin the runner image (0.5.4 seed §E). Needed before 0.5.3's
@@ -89,7 +89,8 @@ Also kept out:
 
 ## Order
 
-1. Rounds 2 and 3 finished; their wins are proposed above (items 6-11), for James to confirm.
+1. Rounds 2 and 3 finished; items 6-11 and the hygiene confirmed (James 2026-10-23). Also confirmed: the public harness
+   and reports drop the Kina domain specifics; they move to `~/Code/kina-extras/` and the harness reads them from there.
 2. A small spec run (spec + adversarial verify per mechanism).
 3. Waves with close-outs, `rank_eval` as a gate.
 4. The release docs and handoffs.

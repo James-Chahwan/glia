@@ -52,15 +52,16 @@ no measurable predictive signal for which files change together.
 
 **Kina vocabulary** (derived from definition lines: the first token of a heading, a table row's first cell, or a list /
 checkbox item, at each parent; listed here at the newest test commit's parent):
-- hyphenated prefixes AD, AUD, BE, CFG, CHN, DOC, FE, FR, KYC, L3, L4, L7, LEG, MON, NPSA, RGM, RP, SC, SCR, SOP;
+- 20 hyphenated prefixes: spec-kit's FR and SC and 18 project prefixes (names kept private);
 - spec-kit's hyphen-less T### (tasks), R# (research), C# (analysis), D# (decisions);
 - excluded look-alikes: SHA, AES, ERC, UTF, ISO, RFC, EIP, BIP, CVE, MIT, BSD, GPL, LGPL, AGPL, MPL, CC0.
 
 **Spec scoping (Kina).** Spec-kit numbers FR-002, T014, etc. per spec, so an id defined in a spec is qualified as
 `specs/<dir>|<id>`:
-- by a spec number on the same line (`spec 003`, `003 T014`);
+- by a spec number on the same line (`spec NNN`, `NNN T014`);
 - else, if no global doc also defines it, by its only defining spec or the one spec the file names;
-- an id a global doc defines (Phase B's D6, KYC-01, BE-13) keeps its bare form unless its own line qualifies it.
+- an id a global doc defines (a plan doc's D6, a project-prefix id such as ABC-01) keeps its bare form unless its own line
+  qualifies it.
 
 Citations summed over commits: 78,538 global, 3,503 line-qualified, 1,991 global over spec, 1,127 by the file's spec,
 463 by the unique spec, 286 ambiguous (kept as `*|id`), 392 bare and ambiguous (dropped).
@@ -86,7 +87,8 @@ files linking the node).
 | VM | the test commit's message ids, routed through V1m's nodes (seed-independent) |
 
 Law keys are capitalised runs ending in Act / Rules / Regulations / Directive(s). They are normalised: jurisdiction words
-and the year are dropped (so the AU 2006 and PNG 2015 AML/CTF Acts are one key), and AML/CTF spellings are unified. A key
+and the year are dropped (so two jurisdictions' same-named Acts of different years are one key), and the spellings of the
+regime's main instrument are unified. A key
 is kept only when two doc units name it; 45 survive.
 
 Rulings, at the newest parent, number 89 (median 3 packets, max 133):
@@ -278,8 +280,8 @@ docs (and `docs/`, `.ai/`) name file paths.
 - **Beyond intent text:** no on Kina (-0.010 to -0.001); +0.018 on glia.
 - **Where it fails:**
   - Coverage: half the seeds cite no id at the parent revision.
-  - Coarse upper nodes: spec 003 and Phase B's two plan docs each reach about 90 of the roughly 160 citing files, and
-    `amlctf_act` reaches 113. A shared spec or law therefore says only "both are compliance code".
+  - Coarse upper nodes: one spec and two plan docs each reach about 90 of the roughly 160 citing files, and the main
+    law key reaches 113. A shared spec or law therefore says only that both files sit in the same broad area.
   - Spec-kit's per-spec numbering: FR-002 exists in every spec, so ids need scoping.
 - **Rulings and law (the "why"):** no predictive signal.
   - V4 equals its permutation control, and adding rulings to packets lowers recall.
@@ -327,7 +329,7 @@ docs (and `docs/`, `.ai/`) name file paths.
 4. **Heuristic extraction.**
    - Definitions come from line shape: the first token of a heading, table cell or list item.
    - Law keys come from capitalised runs. No section-level law keys were built.
-   - The AU and PNG AML/CTF Acts share one key.
+   - Two jurisdictions' same-named Acts share one key.
 5. **The message is the intent.** VM, like T1, uses the commit message, which is written after the change.
 6. **Multiple comparisons.** About 170 vertical rankers per repo. HP25 / HR25 are the fixed rows; the "best blend" rows
    are selected on the test set.

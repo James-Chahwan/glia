@@ -21,18 +21,24 @@
 //!
 //! Third run (`--law-impact kina`, 2026-10-18): instead of the replay, does a change
 //! in the law predict the code change through the goal layer? A section-level diff
-//! of two compilations of an Act (pdftotext), the doc units citing the changed
-//! sections, the ids they define and the code citing those ids, all at the reform
-//! implementation's start (`--rev`), scored against the files the reform commits
-//! (`--law-tips`) changed. See `law_impact_main`.
+//! of two versions of one instrument (pdftotext), the doc units citing the changed
+//! sections, the ids they define and the code citing those ids, all at the start of
+//! the work implementing the change (`--rev`), scored against the files the
+//! implementing commits (`--law-tips`) changed. See `law_impact_main`.
 //!
 //! ```text
-//! GLIA_NO_PERSIST=1 target/release/examples/rank_eval --law-impact kina \
+//! GLIA_NO_PERSIST=1 target/release/examples/rank_eval --law-impact kina --private <private.json> \
 //!     --repo <git-archive copy at the start> --git <Kina> --rev <start> --wiki <Kina/.wiki> \
-//!     --law-sources <dir of the Act PDFs> --law-cache <scratch dir> --law-out <tables dir> \
-//!     --law-tips main,origin/wave/003-us2-platform-serves,origin/wave/003-us3-registration-records \
-//!     [--law-end <rev>]   # GLIA_LAW_DEBUG=<section> prints that section's reach
+//!     --law-sources <dir of the instrument PDFs> --law-cache <scratch dir> --law-out <tables dir> \
+//!     --law-tips <mainline>,<branch>,.. [--law-end <rev>]   # GLIA_LAW_DEBUG=<section> prints that section's reach
 //! ```
+//!
+//! The private config: Kina's domain data (the instruments' titles and file stems, the
+//! regime's vocabulary and jurisdiction marks, the id patterns, the target spec and the
+//! report labels) is not in this public file. The Kina-only modes (`--vertical kina`,
+//! `--law-impact kina`, `--pre kina`) read it from a JSON file named by `--private <path>`
+//! or `GLIA_RANK_PRIVATE`, and refuse to run without one; every other mode never reads
+//! it. See `Private`.
 //!
 //! Fourth run (`--keys on`, 2026-10-18): the cross-layer links resolved instead of
 //! matched as raw text. Each layer emits key mentions; one resolver per key type
@@ -49,8 +55,8 @@
 //! files_touched) and adds SELt v2; see `r2_build`. The keyed vertical run gains the
 //! `+ns` (namespaced bare ids, `KNs`), `+roles` (role-aware joining, `KROLES`) and
 //! `+trank` (text as a ranker behind the typed links) variants, and the law run their
-//! chains. `--law-impact kina --law-event tr --keys on` traces a second law event (the
-//! Transitional Rules 2026, as made -> compilation 1); see `law_event_tr`.
+//! chains. `--law-impact kina --law-event tr --keys on` traces a second law event (a
+//! second instrument, as made -> its first consolidated version); see `law_event_tr`.
 //!
 //! Round 3 (2026-10-19): `--round3 on` (with `--round1 on --round2 on`) adds id history (IDH),
 //! per-query text gating, SELt3 / SELs0 and the review / find transfer shapes;
@@ -140,7 +146,7 @@ struct Args {
     law_cache: String,
     /// The output directory for the law-impact tables.
     law_out: String,
-    /// Comma-separated revisions whose commits since `--rev` are the reform-implementation candidates.
+    /// Comma-separated revisions whose commits since `--rev` are the implementing-commit candidates.
     law_tips: String,
     /// The revision whose code citations give the leaky END variant (default: the first tip).
     law_end: String,
@@ -160,8 +166,9 @@ struct Args {
     pick: String,
     /// Round 2: `on` adds the subject's ids as typed links (IDR) and SELt v2 (needs `--round1 on`).
     round2: String,
-    /// Round 2: the law event of `--law-impact`: `act` (the AML/CTF Act, comp 59 -> 62) or `tr` (the
-    /// Transitional Rules 2026, as made -> compilation 1), traced through the resolved goal layer.
+    /// Round 2: the law event of `--law-impact`: `act` (the primary instrument, its old version ->
+    /// its new one) or `tr` (a second instrument, as made -> its first consolidated version), traced
+    /// through the resolved goal layer.
     law_event: String,
     /// Round 3: `on` adds id history (IDH), text gating, SELt3 and the transfer shapes (needs `--round2 on`).
     round3: String,
@@ -177,6 +184,8 @@ struct Args {
     r3_compare: String,
     /// Round 3: extra SELt3x candidates (comma-separated; chosen after a first run, so post-hoc).
     r3_selx: String,
+    /// The private config (JSON) the Kina-only modes read; `GLIA_RANK_PRIVATE` when unset.
+    private: String,
 }
 
 fn parse_args() -> Args {
@@ -217,6 +226,7 @@ fn parse_args() -> Args {
         r3_perq: String::new(),
         r3_compare: String::new(),
         r3_selx: String::new(),
+        private: std::env::var("GLIA_RANK_PRIVATE").unwrap_or_default(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -259,12 +269,190 @@ fn parse_args() -> Args {
             "--r3-perq" => a.r3_perq = v,
             "--r3-compare" => a.r3_compare = v,
             "--r3-selx" => a.r3_selx = v,
+            "--private" => a.private = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
     }
     assert!(!a.r3_compare.is_empty() || (!a.repo.is_empty() && !a.git.is_empty()), "--repo and --git are required");
     a
+}
+
+// ============================================================================
+// The private config (the Kina-only modes)
+// ============================================================================
+
+/// Kina's domain data, kept out of this public repository: the id patterns, the instruments
+/// the law runs diff (titles, file stems, page furniture), the regime's vocabulary, the two
+/// jurisdictions' marks, the key prefixes and route names of the citation resolver, the target
+/// spec of the truth sets, and the report labels (`text`). Read once from the JSON file named
+/// by `--private` (or `GLIA_RANK_PRIVATE`) when a Kina-only mode runs; no other mode touches it.
+#[derive(serde::Deserialize)]
+struct Private {
+    /// Hyphenated prefixes that name a standard, not an id (`ISO-8601`).
+    id_standards: Vec<String>,
+    /// The hyphen-less id letters (`T014`, `R4`, ...).
+    id_bare: String,
+    /// The `git grep` pattern for code lines that may cite an id or an instrument.
+    code_pat: String,
+    /// The same for the keyed model (ids, user stories, sections, numbered rows).
+    keys_code_pat: String,
+    /// Spellings of the regime instrument's name a law key unifies to `law_unify_to`.
+    law_unify: Vec<String>,
+    law_unify_to: String,
+    /// Substrings removed from a law key.
+    law_strip: Vec<String>,
+    /// Jurisdiction words dropped from a law name (beside the generic `LAW_DROP`).
+    law_drop: Vec<String>,
+    /// The primary instrument's title, and the words its long title (the body) starts with.
+    act_title: String,
+    act_body_start: String,
+    /// File stems (no `.pdf`) under `--law-sources`: the primary instrument's old and new
+    /// versions, its amending instrument, the rules, the second instrument (consolidated, as made).
+    pdf_act_old: String,
+    pdf_act_new: String,
+    pdf_amend: String,
+    pdf_rules: String,
+    pdf_trules: String,
+    pdf_trules_made: String,
+    /// The second instrument's title (its running page title).
+    trules_title: String,
+    /// Page furniture: line prefixes, line substrings (primary / second instrument), whole lines
+    /// and substring groups (the amending instrument), and the drafter-code prefix.
+    furn_prefix: Vec<String>,
+    furn_act_contains: Vec<String>,
+    furn_trules_contains: Vec<String>,
+    furn_amend_equals: Vec<String>,
+    furn_amend_all: Vec<Vec<String>>,
+    furn_drafter_prefix: String,
+    /// Words and phrases that mark an implementing task or commit as work for the regime.
+    regime_words: Vec<String>,
+    regime_phrases: Vec<String>,
+    /// Words that mark a heading or line as about the regime (short all-caps ones whole-word).
+    regime_line_words: Vec<String>,
+    /// Path and title words that make a page a regime page.
+    regime_page_path: Vec<String>,
+    regime_page_title: Vec<String>,
+    /// Name fragments of the regime instrument under a spelling the name list lacks.
+    regime_name_frags: Vec<String>,
+    /// Lower-case spellings of the regime instrument's name, and the tails (year, jurisdiction)
+    /// that make a mention the home or the other jurisdiction's instrument.
+    act_names: Vec<String>,
+    act_home_tails: Vec<String>,
+    act_other_tails: Vec<String>,
+    /// Lower-case rules names, each with its class (`RULES` or `TRULES`).
+    rules_names: Vec<(String, String)>,
+    /// The word that puts a line, heading or page in the second instrument's context.
+    trules_word: String,
+    /// Abbreviations and words that name some other instrument.
+    other_abbr: Vec<String>,
+    /// The two jurisdictions' class labels, and the marks that count for each on a text, on a
+    /// line (narrow / wide) and in a page path.
+    jur_home: String,
+    jur_other: String,
+    marks_home: Vec<String>,
+    marks_other: Vec<String>,
+    other_line_marks: Vec<String>,
+    other_line_marks_wide: Vec<String>,
+    path_home: Vec<String>,
+    path_other: Vec<String>,
+    /// Resolved key prefixes: the primary instrument, the rules, the second instrument, the other
+    /// jurisdiction's instrument.
+    key_act: String,
+    key_rules: String,
+    key_trules: String,
+    key_other_act: String,
+    /// The spec unit the law runs' truth implements, and the truth labels (that spec; its
+    /// regime-work subset).
+    target_spec: String,
+    truth_spec: String,
+    truth_regime: String,
+    /// Labels and report text: `t(key)` reads one; `tx` fills each `«key»` in a finished text.
+    text: BTreeMap<String, String>,
+}
+
+static PRIVATE: std::sync::OnceLock<Private> = std::sync::OnceLock::new();
+
+fn load_private(path: &str, why: &str) {
+    assert!(
+        !path.is_empty(),
+        "{why} reads Kina's private config (kept outside this public repository): pass --private <path> or set GLIA_RANK_PRIVATE"
+    );
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("--private {path}: {e}"));
+    let p: Private = serde_json::from_str(&text).unwrap_or_else(|e| panic!("--private {path}: {e}"));
+    let _ = PRIVATE.set(p);
+}
+
+fn prv() -> &'static Private {
+    PRIVATE.get().expect("the private config is not loaded (a Kina-only path ran without --private)")
+}
+
+/// One label or report phrase from the private config.
+fn t(key: &str) -> &'static str {
+    prv().text.get(key).map_or_else(|| panic!("private config: no text `{key}`"), String::as_str)
+}
+
+/// A finished text with each `«key»` filled from the private config: a `text` entry, or one of
+/// `home` / `other` (the jurisdictions), `ts` / `tr` (the truth labels).
+fn tx(s: &str) -> String {
+    let p = prv();
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(a) = rest.find('\u{ab}') {
+        out.push_str(&rest[..a]);
+        let after = &rest[a + '\u{ab}'.len_utf8()..];
+        let val = after.find('\u{bb}').and_then(|b| {
+            let key = &after[..b];
+            let v = match key {
+                "home" => Some(p.jur_home.as_str()),
+                "other" => Some(p.jur_other.as_str()),
+                "ts" => Some(p.truth_spec.as_str()),
+                "tr" => Some(p.truth_regime.as_str()),
+                _ => p.text.get(key).map(String::as_str),
+            };
+            v.map(|v| (v, b))
+        });
+        match val {
+            Some((v, b)) => {
+                out.push_str(v);
+                rest = &after[b + '\u{bb}'.len_utf8()..];
+            }
+            None => {
+                out.push('\u{ab}');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `eprintln!` through `tx`.
+macro_rules! keprintln {
+    ($($a:tt)*) => {
+        eprintln!("{}", tx(&format!($($a)*)))
+    };
+}
+
+/// Write a private-mode output file through `tx`.
+fn kwrite(path: impl AsRef<std::path::Path>, s: &str) -> std::io::Result<()> {
+    std::fs::write(path, tx(s))
+}
+
+fn any_eq(v: &[String], x: &str) -> bool {
+    v.iter().any(|w| w == x)
+}
+
+fn home() -> &'static str {
+    prv().jur_home.as_str()
+}
+
+fn oth() -> &'static str {
+    prv().jur_other.as_str()
+}
+
+fn bare_kinds() -> BTreeSet<u8> {
+    prv().id_bare.bytes().collect()
 }
 
 // ============================================================================
@@ -1217,6 +1405,10 @@ fn paired(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usi
 
 fn main() {
     let args = parse_args();
+    let kina = [(args.vertical == "kina", "--vertical kina"), (!args.law_impact.is_empty(), "--law-impact"), (args.pre == "kina", "--pre kina")];
+    if let Some((_, why)) = kina.iter().find(|x| x.0) {
+        load_private(&args.private, why);
+    }
     if !args.law_impact.is_empty() {
         match args.law_event.as_str() {
             "act" => law_impact_main(&args),
@@ -2494,8 +2686,8 @@ fn dot_ids(s: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Kina spec numbers a line names: `spec 003`, `Spec 003`, `specs/003-..`,
-/// `003 T014`, `003 FR-057`, `003-US2`.
+/// Spec-kit spec numbers a line names: `spec 012`, `Spec 012`, `specs/012-..`,
+/// `012 T014`, `012 FR-057`, `012-US2`.
 fn spec_refs(s: &str) -> Vec<u32> {
     let b = s.as_bytes();
     let n = b.len();
@@ -2527,8 +2719,9 @@ fn spec_refs(s: &str) -> Vec<u32> {
 
 const LAW_HEADS: &[&str] = &["Act", "Acts", "Rules", "Regulations", "Regulation", "Directives", "Directive"];
 const LAW_CONNECT: &[&str] = &["and", "of", "the", "for", "on", "to", "&", "in"];
-const LAW_DROP: &[&str] = &["the", "au", "png", "us", "cth", "(cth)", "australia", "vanuatu"];
-/// Sentence fillers a capitalised run can start with ("Nothing in this Act", "Reach of the AML/CTF Act").
+/// Words dropped from a law name (the private config's `law_drop` adds the jurisdictions').
+const LAW_DROP: &[&str] = &["the", "us"];
+/// Sentence fillers a capitalised run can start with ("Nothing in this Act", "Reach of the Privacy Act").
 const LAW_LEAD: &[&str] = &[
     "neither", "nothing", "none", "no", "add", "adds", "amend", "amends", "amending", "enacted", "assent", "principal",
     "statute", "explanatory", "commentary", "reach", "division", "part", "under", "see", "per", "with", "from", "by",
@@ -2542,10 +2735,13 @@ const LAW_GENERIC: &[&str] = &[
 
 /// Law keys a line names: a run of capitalised words, acronyms and connectors
 /// ending in Act / Rules / Regulations / Directive(s). Normalised: lower-case,
-/// alphanumerics only, jurisdiction words dropped, the AML/CTF spellings unified;
-/// the year is not part of the key (so the AU 2006 and PNG 2015 AML/CTF Acts are
-/// one key). LegalSources-style file names (`AU_AMLCTF_Act_2006_..pdf`) read the same.
+/// alphanumerics only, jurisdiction words dropped, the regime instrument's spellings
+/// unified (the private config); the year is not part of the key (so two
+/// jurisdictions' same-named Acts of different years are one key). File names
+/// (`XX_Some_Act_2006_..pdf`) read the same.
 fn law_keys(s: &str) -> Vec<String> {
+    let p = prv();
+    let dropped = |l: &str| LAW_DROP.contains(&l) || any_eq(&p.law_drop, l);
     let mut words: Vec<String> = Vec::new();
     for raw in s.split_whitespace() {
         let t = raw.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '*');
@@ -2596,11 +2792,11 @@ fn law_keys(s: &str) -> Vec<String> {
         }
         while name.first().is_some_and(|w| {
             let l = w.to_ascii_lowercase();
-            LAW_CONNECT.contains(&l.as_str()) || LAW_LEAD.contains(&l.as_str()) || LAW_DROP.contains(&l.as_str())
+            LAW_CONNECT.contains(&l.as_str()) || LAW_LEAD.contains(&l.as_str()) || dropped(&l)
         }) {
             name.remove(0);
         }
-        let kept: Vec<&String> = name.iter().filter(|w| !LAW_DROP.contains(&w.to_ascii_lowercase().as_str())).collect();
+        let kept: Vec<&String> = name.iter().filter(|w| !dropped(&w.to_ascii_lowercase())).collect();
         if kept.is_empty() {
             continue;
         }
@@ -2613,19 +2809,15 @@ fn law_keys(s: &str) -> Vec<String> {
         }
         let mut compact: String =
             kept.iter().flat_map(|w| w.chars()).filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
-        for pat in [
-            "antimoneylaunderingandcounterterrorismfinancing",
-            "antimoneylaunderingandcounterterroristfinancing",
-            "antimoneylaunderingcounterterroristfinancing",
-            "antimoneylaunderingcounterterrorismfinancing",
-            "amlctf",
-        ] {
-            if compact.contains(pat) {
-                compact = compact.replace(pat, "amlctf");
+        for pat in &p.law_unify {
+            if compact.contains(pat.as_str()) {
+                compact = compact.replace(pat.as_str(), &p.law_unify_to);
                 break;
             }
         }
-        compact = compact.replace("papuanewguinea", "");
+        for x in &p.law_strip {
+            compact = compact.replace(x.as_str(), "");
+        }
         if compact.len() < 3 {
             continue;
         }
@@ -2712,13 +2904,7 @@ fn line_head(line: &str) -> &str {
     t.trim_start_matches(['*', '`', '_', '~', ' '])
 }
 
-// ---- Kina ----
-
-const KINA_STANDARDS: &[&str] = &[
-    "SHA", "AES", "ERC", "UTF", "ISO", "RFC", "EIP", "BIP", "CVE", "MIT", "BSD", "GPL", "LGPL", "AGPL", "MPL", "CC0",
-];
-const KINA_BARE: &[u8] = b"TRCD";
-const KINA_CODE_PAT: &str = "[A-Z][A-Z0-9]{1,6}-[0-9]|[TRCD][0-9]|[Ss][Pp][Ee][Cc]|[0-9]{3}[ -]|Act|Rules|Regulation|Directive";
+// ---- Kina (its id patterns are in the private config: `id_standards`, `id_bare`, `code_pat`) ----
 
 #[derive(Default)]
 struct DocSet {
@@ -2742,7 +2928,7 @@ fn kina_unit(path: &str) -> String {
 fn build_docset(lines: &[(String, String)], pr: &PathRes) -> DocSet {
     let mut d = DocSet::default();
     let mut uix: HashMap<String, u32> = HashMap::new();
-    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let bare: BTreeSet<u8> = bare_kinds();
     for (path, line) in lines {
         let un = kina_unit(path);
         let u = *uix.entry(un.clone()).or_insert_with(|| {
@@ -2764,11 +2950,11 @@ fn build_docset(lines: &[(String, String)], pr: &PathRes) -> DocSet {
         if let Some((p, id)) = hyphen_ids(head).into_iter().next()
             && head.starts_with(&id)
         {
-            if !KINA_STANDARDS.contains(&p.as_str()) {
+            if !any_eq(&prv().id_standards, &p) {
                 *d.vocab_hyphen.entry(p).or_default() += 1;
                 defined.push(id);
             }
-            // `| RGM-01/02 |`: the shorthand siblings are defined too
+            // `| ABC-01/02 |`: the shorthand siblings are defined too
             for (p2, id2) in hyphen_ids(head).into_iter().skip(1) {
                 if head[..head.find([' ', '*', '|', ':']).unwrap_or(head.len())].contains(&id2[p2.len() + 1..]) {
                     defined.push(id2);
@@ -2814,7 +3000,7 @@ fn build_docset(lines: &[(String, String)], pr: &PathRes) -> DocSet {
 /// One cited id resolved to its upper-layer token and the units that define it.
 /// Spec-kit ids (FR-002, T014, ...) are numbered per spec, so a spec-scoped id is
 /// qualified `specs/<dir>|<id>` by a spec number on the same line, its only
-/// defining spec, or the one spec the file names; global ids (KYC-01, BE-13, ...)
+/// defining spec, or the one spec the file names; global ids (ABC-01, XY-13, ...)
 /// keep their bare form.
 fn kina_resolve(
     d: &DocSet,
@@ -2858,7 +3044,7 @@ fn kina_resolve(
         bump("line_spec");
         return Some((tok(q[0]), q));
     }
-    // An id a global doc also defines (Phase B's D6 vs spec 002's D6) is scoped to
+    // An id a global doc also defines (a plan's D6 vs a spec's D6) is scoped to
     // a spec only by a qualifier on its own line.
     if !glob_defs.is_empty() {
         bump("global_over_spec");
@@ -3367,7 +3553,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
                 info.insert("wiki_aligned".into(), 1.0);
             }
             let d = build_docset(&docs, &env.pr);
-            let code = group_code(git_grep(env.git, &p, Some(KINA_CODE_PAT), &[]), env.pidx);
+            let code = group_code(git_grep(env.git, &p, Some(&prv().code_pat), &[]), env.pidx);
             let ks = kina_signals(&d, &code, nf, &mut info);
             let dw = build_docset(&env.wiki_head_docs, &env.pr);
             let mut junk = BTreeMap::new();
@@ -3421,7 +3607,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
             vocab.push(format!("laws: {}", d.law_vocab.iter().cloned().collect::<Vec<_>>().join(", ")));
             let mut kaudit = Vec::new();
             if let Some(ke) = &env.keys {
-                let code_lines = git_grep(env.git, &p, Some(KEYS_CODE_PAT), &[]);
+                let code_lines = git_grep(env.git, &p, Some(&prv().keys_code_pat), &[]);
                 let bm = ke.blobs.index(&p, nf);
                 let known = ke.known.as_ref().expect("--keys kina needs the law");
                 let km = kina_model(&docs, &code_lines, &ke.kp, &env.pr, known, Some(&bm), nf, sha == ke.last_sha, false);
@@ -4134,22 +4320,21 @@ fn vertical_report(
 // Third run (2026-10-18): law impact. Does a change in the LAW predict which
 // CODE must change, traced down through the goal layer (specs / requirements)?
 //
-//   1. law diff: two compilations of an Act (pdftotext), split by section number
+//   1. law diff: two versions of an instrument (pdftotext), split by section number
 //      and classified changed / added / repealed / unchanged, whitespace and page
-//      furniture normalised; the amending Act as made is the cross-check;
-//   2. law -> goal: every doc unit (heading section) citing a section of that Act,
-//      the Act resolved from context, and the requirement ids the unit defines;
+//      furniture normalised; the amending instrument as made is the cross-check;
+//   2. law -> goal: every doc unit (heading section) citing a section of that
+//      instrument, the instrument resolved from context, and the requirement ids the
+//      unit defines;
 //   3. goal -> code: the code files citing those ids;
-//   all read at the reform implementation's start (the code at --rev, the wiki
-//   commit current then); 4-5. scored against the code files the reform commits
-//   changed, beside text (BM25), structure (PPR), random and permuted-map controls;
-//   6. the reverse view: does each reform commit's code trace up to a changed section?
+//   all read at the start of the implementing work (the code at --rev, the wiki
+//   commit current then); 4-5. scored against the code files the implementing
+//   commits changed, beside text (BM25), structure (PPR), random and permuted-map
+//   controls; 6. the reverse view: does each implementing commit's code trace up to
+//   a changed section? The instruments, their file stems and the regime's vocabulary
+//   are the private config's.
 // ============================================================================
 
-const LAW_ACT_TITLE: &str = "Anti-Money Laundering and Counter-Terrorism Financing Act 2006";
-const LAW_OLD_PDF: &str = "AU_AMLCTF_Act_2006_C2025C00235_compilation59_pre-reform";
-const LAW_NEW_PDF: &str = "AU_AMLCTF_Act_2006_C2026C00274_compilation62_2026-07-01";
-const LAW_AMEND_PDF: &str = "AU_AMLCTF_Amendment_Act_2024_C2024A00110_as_made";
 const LAW_DRAWS: usize = 1000;
 /// Words an amending item heading starts with (an inserted section heading starts with anything else).
 const LAW_ITEM_KW: &[&str] = &[
@@ -4158,13 +4343,6 @@ const LAW_ITEM_KW: &[&str] = &[
     "Item", "Items", "Table", "The", "Note", "Notes", "Clause", "Schedule", "Definition", "Heading", "Insert", "Add",
     "Repeal", "Omit", "Further", "Amendments", "Amendment",
 ];
-/// AU AML/CTF terms that mark a reform-implementation task or commit as AU-regime work.
-const LAW_AU_WORDS: &[&str] = &["austrac", "smr", "smrs", "ttr", "ifti", "ctr", "tipping", "amlco", "ivts", "amlctf"];
-const LAW_AU_PHRASES: &[&str] = &[
-    "aml/ctf", "travel rule", "travel-rule", "senior manager", "senior_manager", "independent evaluation",
-    "program version", "risk assessment", "reporting entity", "s123", "s.123", "s76", "s.76", "s26", "s.26",
-];
-
 fn law_pdf(args: &Args, stem: &str) -> String {
     let pdf = format!("{}/{stem}.pdf", args.law_sources);
     let out = format!("{}/{stem}.txt", args.law_cache);
@@ -4183,8 +4361,8 @@ fn law_id_tok(t: &str) -> bool {
         && t.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
-/// A running page header: `Section 26F`, `Sections 26F and 26G`, `Part 1A AML/CTF programs`,
-/// `AML/CTF programs Part 1A`, `Division 3 ...`, `... Schedule 1`, `Endnotes`.
+/// A running page header: `Section 26F`, `Sections 26F and 26G`, `Part 1A Some programs`,
+/// `Some programs Part 1A`, `Division 3 ...`, `... Schedule 1`, `Endnotes`.
 fn law_running_header(t: &str) -> bool {
     if t.contains('\u{2014}') {
         return false;
@@ -4232,17 +4410,21 @@ fn law_lines(text: &str, furniture: fn(&str) -> bool) -> Vec<String> {
 }
 
 fn act_furniture(t: &str) -> bool {
-    if t.starts_with("Compilation No.") || t.contains("Authorised Version C20") {
+    let p = prv();
+    if p.furn_prefix.iter().any(|x| t.starts_with(x.as_str())) || p.furn_act_contains.iter().any(|x| t.contains(x.as_str())) {
         return true;
     }
     let w: Vec<&str> = t.split_whitespace().collect();
-    let title: Vec<&str> = LAW_ACT_TITLE.split_whitespace().collect();
+    let title: Vec<&str> = p.act_title.split_whitespace().collect();
     let num = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit() || matches!(c, 'i' | 'v' | 'x'));
     w.len() == title.len() + 1 && ((num(w[0]) && w[1..] == title[..]) || (num(w[w.len() - 1]) && w[..w.len() - 1] == title[..]))
 }
 
 fn amend_furniture(t: &str) -> bool {
-    t.contains("Authorised Version C20") || t == "Act 2024" || (t.contains("No. 110, 2024") && t.contains("Amendment"))
+    let p = prv();
+    p.furn_act_contains.iter().any(|x| t.contains(x.as_str()))
+        || any_eq(&p.furn_amend_equals, t)
+        || p.furn_amend_all.iter().any(|g| g.iter().all(|x| t.contains(x.as_str())))
 }
 
 #[derive(Clone, Default)]
@@ -4283,7 +4465,7 @@ fn law_sec_heading(l: &str) -> Option<(String, String)> {
     Some((l[..e].to_string(), rest.to_string()))
 }
 
-/// A Part / Division / Subdivision heading at the left margin (`Part 1A—AML/CTF programs`).
+/// A Part / Division / Subdivision heading at the left margin (`Part 1A—Some programs`).
 fn law_container(l: &str) -> Option<(char, String, String)> {
     for (kw, c) in [("Part ", 'P'), ("Division ", 'D'), ("Subdivision ", 'S')] {
         if let Some(r) = l.strip_prefix(kw)
@@ -4315,10 +4497,11 @@ fn law_key(n: &str) -> (u32, String) {
     (d.parse().unwrap_or(0), n[d.len()..].to_string())
 }
 
-/// The body's sections (from "An Act to combat" to the endnotes), each with its
-/// Part / Division context and its normalised text; repeated numbers are reported.
+/// The body's sections (from the long title, whose first words are the private config's
+/// `act_body_start`, to the endnotes), each with its Part / Division context and its
+/// normalised text; repeated numbers are reported.
 fn act_sections(lines: &[String]) -> (Vec<LawSec>, Vec<String>) {
-    let start = lines.iter().position(|l| l.starts_with("An Act to combat")).unwrap_or(0);
+    let start = lines.iter().position(|l| l.starts_with(prv().act_body_start.as_str())).unwrap_or(0);
     // the body ends at the Act's own schedules (clauses, not sections) or the endnotes
     let end = lines
         .iter()
@@ -4410,7 +4593,7 @@ fn law_dice(a: &str, b: &str) -> f64 {
 struct LawDiff {
     old: BTreeMap<String, LawSec>,
     new: BTreeMap<String, LawSec>,
-    /// Every section number in either compilation, in section order.
+    /// Every section number in either version, in section order.
     order: Vec<String>,
     status: BTreeMap<String, &'static str>,
     dice: BTreeMap<String, f64>,
@@ -4490,20 +4673,21 @@ struct AmendInfo {
     /// section -> how the amending Act names it (item heading or an inserted section)
     named: BTreeMap<String, BTreeSet<String>>,
     items: usize,
-    items_aml: usize,
+    items_target: usize,
     inserted: usize,
     inserted_unmatched: Vec<String>,
 }
 
 /// Sections the amending Act names: item headings (`22 Section 15`, `7 Divisions 1 to 5 of Part 2`,
-/// `27 Subsection 39(5)`) and the section headings it inserts, within its AML/CTF Act blocks only.
+/// `27 Subsection 39(5)`) and the section headings it inserts, within its blocks amending the
+/// primary instrument only.
 fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
     let start = lines
         .iter()
         .position(|l| l.starts_with("Schedule 1\u{2014}") && !l.trim_end().ends_with(|c: char| c.is_ascii_digit()))
         .unwrap_or(0);
-    let mut info = AmendInfo { named: BTreeMap::new(), items: 0, items_aml: 0, inserted: 0, inserted_unmatched: Vec::new() };
-    let mut target_aml = false;
+    let mut info = AmendInfo { named: BTreeMap::new(), items: 0, items_target: 0, inserted: 0, inserted_unmatched: Vec::new() };
+    let mut target_act = false;
     let mut sched = String::new();
     let mut k = start;
     let all_secs: Vec<&LawSec> = d.old.values().chain(d.new.values()).collect();
@@ -4528,12 +4712,12 @@ fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
             && let Some((id, _)) = r.split_once('\u{2014}')
         {
             sched = id.trim().to_string();
-            target_aml = false;
+            target_act = false;
             continue;
         }
         if let Some((c, _, title)) = law_container(l) {
             if c == 'P' && ["Transitional", "Application", "Saving"].iter().any(|w| title.contains(w)) {
-                target_aml = false;
+                target_act = false;
             }
             continue;
         }
@@ -4543,7 +4727,7 @@ fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
         let year_act = next.len() == 8 && next.starts_with("Act ") && next[4..].chars().all(|c| c.is_ascii_digit());
         let joined = if year_act { format!("{t} {next}") } else { t.to_string() };
         if indent <= 12 && is_act_line(&joined) {
-            target_aml = joined == LAW_ACT_TITLE;
+            target_act = joined == prv().act_title;
             if year_act {
                 k += 1;
             }
@@ -4570,8 +4754,8 @@ fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
                         k += 1;
                         extra += 1;
                     }
-                    if target_aml {
-                        info.items_aml += 1;
+                    if target_act {
+                        info.items_target += 1;
                         let how = format!("Sch {sched} item {}", &l[..e]);
                         for s in amend_targets(&head, &d.order, &all_secs) {
                             info.named.entry(s).or_default().insert(how.clone());
@@ -4580,7 +4764,7 @@ fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
                     continue;
                 }
                 // an inserted (or substituted) section heading
-                if target_aml && let Some((num, title)) = law_sec_heading(l) {
+                if target_act && let Some((num, title)) = law_sec_heading(l) {
                     info.inserted += 1;
                     let tw = |s: &str| law_words(s).into_iter().take(2).collect::<Vec<_>>();
                     let matched = [d.new.get(&num), d.old.get(&num)].into_iter().flatten().any(|s| tw(&s.title) == tw(&title));
@@ -4598,7 +4782,7 @@ fn amend_parse(lines: &[String], d: &LawDiff) -> AmendInfo {
 
 /// The sections an amending item heading names. Positional headings (`After section 5`) name a
 /// section only when they insert into it (`After subsection 6(6)`); container headings
-/// (`Divisions 1 to 5 of Part 2`) name every section the container holds in either compilation.
+/// (`Divisions 1 to 5 of Part 2`) name every section the container holds in either version.
 fn amend_targets(h: &str, order: &[String], secs: &[&LawSec]) -> Vec<String> {
     let w: Vec<&str> = h.split_whitespace().collect();
     let mut out = Vec::new();
@@ -4728,11 +4912,13 @@ fn amend_targets(h: &str, order: &[String], secs: &[&LawSec]) -> Vec<String> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LInst {
-    AuAct,
-    PngAct,
-    AmlUnknown,
-    AuRules,
-    TransRules,
+    /// the regime instrument of the home jurisdiction / of the other jurisdiction / of one not yet known
+    HomeAct,
+    OtherAct,
+    ActUnknown,
+    /// the rules / the second instrument
+    Rules,
+    TRules,
     OtherLaw,
     TheAct,
 }
@@ -4743,29 +4929,18 @@ struct LMention {
     inst: LInst,
 }
 
-/// Abbreviations and instrument words that name a non-AML/CTF-Act instrument.
-const LAW_OTHER_ABBR: &[&str] = &[
-    "CBA", "NPSA", "BAFIA", "CFR", "USC", "BSA", "ITAA", "GENIUS", "MTMA", "Regulation", "Regulations", "Reg",
-    "Directive", "RG", "NCCP", "UCC", "Corps", "Instrument", "Instruments", "Determination", "Bill", "Ordinance",
-];
-
-/// AML/CTF-regime words: a heading or line using them is about the AU AML/CTF regime.
-fn law_aml_words(s: &str) -> bool {
-    [
-        "AUSTRAC", "AML/CTF", "AMLCTF", "tipping", "Tipping", "travel rule", "Travel rule", "Travel Rule", "travel-rule", "SMR",
-        "AMLCO", "reporting entit", "IFTI", "IVTS", "TTR", "CDD", "EDD", "VASP", "designated service", "ML/TF", "PEP",
-        "payer information", "self-hosted",
-    ]
-    .iter()
-    .any(|w| {
-        // short acronyms (TTR, CDD, PEP, ...) only as whole words
+/// Regime words (the private config's `regime_line_words`): a heading or line using them is about
+/// the regime of the primary instrument.
+fn law_regime_words(s: &str) -> bool {
+    prv().regime_line_words.iter().map(String::as_str).any(|w| {
+        // short acronyms only as whole words
         if w.len() <= 5 && w.chars().all(|c| c.is_ascii_uppercase()) {
             let b = s.as_bytes();
             let mut from = 0;
             while let Some(p) = s[from..].find(w) {
                 let st = from + p;
                 let en = st + w.len();
-                // a trailing plural `s` still counts (SMRs, PEPs)
+                // a trailing plural `s` still counts (ABCs)
                 let en2 = if en < b.len() && b[en] == b's' { en + 1 } else { en };
                 if wb(b, st) && we(b, en2) {
                     return true;
@@ -4781,24 +4956,15 @@ fn law_aml_words(s: &str) -> bool {
 
 /// Instrument mentions on a line, with byte spans.
 fn law_mentions(line: &str) -> Vec<LMention> {
-    // file names (`AU_AMLCTF_Transitional_Rules_2026_..pdf`) read as words; '_' -> ' ' keeps byte offsets
+    // file names (`XX_Some_Rules_2026_..pdf`) read as words; '_' -> ' ' keeps byte offsets
     let spaced = line.replace('_', " ");
     let line = spaced.as_str();
     let mut v: Vec<LMention> = Vec::new();
     let lower = line.to_ascii_lowercase();
     let lb = lower.as_bytes();
     let covered = |v: &Vec<LMention>, s: usize| v.iter().any(|m| s >= m.start && s < m.end);
-    for pat in [
-        "anti-money laundering and counter-terrorism financing act",
-        "anti-money laundering and counter-terrorist financing act",
-        "anti-money laundering and counter terrorism financing act",
-        "anti-money laundering/counter-terrorist financing act",
-        "anti-money laundering counter-terrorist financing act",
-        "aml/ctf act",
-        "amlctf act",
-        "aml-ctf act",
-        "aml act",
-    ] {
+    let pv = prv();
+    for pat in pv.act_names.iter().map(String::as_str) {
         let mut from = 0;
         while let Some(p) = lower[from..].find(pat) {
             let s = from + p;
@@ -4809,19 +4975,21 @@ fn law_mentions(line: &str) -> Vec<LMention> {
             }
             let tail = lower[e..].trim_start_matches([' ', '(']);
             let skip = lower[e..].len() - tail.len();
-            let (inst, e2) = if tail.starts_with("2006") {
-                (LInst::AuAct, e + skip + 4)
-            } else if tail.starts_with("cth") {
-                (LInst::AuAct, e + skip + 3)
-            } else if tail.starts_with("2015") {
-                (LInst::PngAct, e + skip + 4)
+            let home_tail = pv.act_home_tails.iter().find(|x| tail.starts_with(x.as_str()));
+            let other_tail = pv.act_other_tails.iter().find(|x| tail.starts_with(x.as_str()));
+            let (inst, e2) = if let Some(x) = home_tail {
+                (LInst::HomeAct, e + skip + x.len())
+            } else if let Some(x) = other_tail {
+                (LInst::OtherAct, e + skip + x.len())
             } else {
-                (LInst::AmlUnknown, e)
+                (LInst::ActUnknown, e)
             };
             v.push(LMention { start: s, end: e2, inst });
         }
     }
-    for (pat, inst) in [("transitional rules", LInst::TransRules), ("aml/ctf rules", LInst::AuRules), ("amlctf rules", LInst::AuRules)] {
+    for (pat, class) in &pv.rules_names {
+        let pat = pat.as_str();
+        let inst = if class == "TRULES" { LInst::TRules } else { LInst::Rules };
         let mut from = 0;
         while let Some(p) = lower[from..].find(pat) {
             let s = from + p;
@@ -4855,20 +5023,20 @@ fn law_mentions(line: &str) -> Vec<LMention> {
         let word = &line[i..j];
         if !covered(&v, i) {
             let inst = match word {
-                "Rules" => Some(LInst::AuRules),
-                "Rule" if line[j..].starts_with(' ') && line[j + 1..].starts_with(|c: char| c.is_ascii_digit()) => Some(LInst::AuRules),
+                "Rules" => Some(LInst::Rules),
+                "Rule" if line[j..].starts_with(' ') && line[j + 1..].starts_with(|c: char| c.is_ascii_digit()) => Some(LInst::Rules),
                 "Act" | "Acts" => {
                     let before = line[..i].trim_end();
                     let pw = before.rsplit(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
                     // "the Act", "this Act", and a bare "Act s66A" are the page's Act; "Corporations Act" is another
-                    // "the Principal Act" is the Transitional Rules' name for the Act they amend
+                    // "the Principal Act" is an amending instrument's name for the Act it amends
                     if pw.chars().next().is_some_and(char::is_uppercase) && !matches!(pw, "The" | "This" | "Principal") {
                         Some(LInst::OtherLaw)
                     } else {
                         Some(LInst::TheAct)
                     }
                 }
-                w if LAW_OTHER_ABBR.contains(&w) => Some(LInst::OtherLaw),
+                w if any_eq(&pv.other_abbr, w) => Some(LInst::OtherLaw),
                 _ => None,
             };
             if let Some(inst) = inst {
@@ -4880,40 +5048,42 @@ fn law_mentions(line: &str) -> Vec<LMention> {
     v
 }
 
-/// (AU markers, PNG markers) on a text.
+/// (home-jurisdiction marks, other-jurisdiction marks) on a text.
 fn law_marks(s: &str) -> (usize, usize) {
-    let au = ["AUSTRAC", "Cth", "Australia", "A$", "ASIC"].iter().map(|p| s.matches(p).count()).sum();
-    let png = ["PNG", "FASU", "BPNG", "Papua"].iter().map(|p| s.matches(p).count()).sum();
-    (au, png)
+    let p = prv();
+    let home = p.marks_home.iter().map(|m| s.matches(m.as_str()).count()).sum();
+    let other = p.marks_other.iter().map(|m| s.matches(m.as_str()).count()).sum();
+    (home, other)
 }
 
-/// The instrument class a mention resolves to: AU (the AML/CTF Act 2006), PNG (the AML/CTF Act
-/// 2015), RULES / TRULES (the AML/CTF Rules / Transitional Rules), OTHER, or "" (unresolved).
+/// The instrument class a mention resolves to: the home jurisdiction's label (its regime
+/// instrument), the other jurisdiction's, RULES / TRULES (the rules / the second instrument),
+/// OTHER, or "" (unresolved).
 fn law_class(inst: LInst, line: &str, page_jur: &'static str, page_def: &'static str) -> &'static str {
     match inst {
-        LInst::AuAct => "AU",
-        LInst::PngAct => "PNG",
-        LInst::AuRules => "RULES",
-        LInst::TransRules => "TRULES",
+        LInst::HomeAct => home(),
+        LInst::OtherAct => oth(),
+        LInst::Rules => "RULES",
+        LInst::TRules => "TRULES",
         LInst::OtherLaw => "OTHER",
-        LInst::AmlUnknown => {
+        LInst::ActUnknown => {
             let (a, p) = law_marks(line);
             if a > p {
-                "AU"
+                home()
             } else if p > a {
-                "PNG"
+                oth()
             } else if !page_jur.is_empty() {
                 page_jur
             } else {
-                "AU"
+                home()
             }
         }
         LInst::TheAct => {
-            if page_def == "AU" || page_def == "PNG" {
+            if page_def == home() || page_def == oth() {
                 page_def
-            } else if law_aml_words(line) {
+            } else if law_regime_words(line) {
                 let (a, p) = law_marks(line);
-                if p > a { "PNG" } else { "AU" }
+                if p > a { oth() } else { home() }
             } else {
                 ""
             }
@@ -4934,7 +5104,7 @@ struct LScan {
 
 /// Act-section citations on a line: `s.123`, `s123`, `s 26F(4)(d)`, `ss 80-95`, `s.76A/76B`,
 /// `section 41`, `sections 26F and 26J`, `s5, s12`. Ranges expand over `order` (every section
-/// number either compilation has). Rules numbers (`4-2`), dotted numbers (`3.2`) and years are not
+/// number either version has). Rules numbers (`4-2`), dotted numbers (`3.2`) and years are not
 /// sections.
 fn law_cites(line: &str, order: &[String]) -> Vec<LScan> {
     let b = line.as_bytes();
@@ -5059,13 +5229,13 @@ fn law_cites(line: &str, order: &[String]) -> Vec<LScan> {
 
 /// The ids a markdown line defines (build_docset's rule), spec-scoped (`specs/<dir>|<id>`) in a spec.
 fn law_line_defs(line: &str, scope: Option<&str>) -> Vec<String> {
-    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let bare: BTreeSet<u8> = bare_kinds();
     let head = line_head(line);
     let mut defined = Vec::new();
     if let Some((p, id)) = hyphen_ids(head).into_iter().next()
         && head.starts_with(&id)
     {
-        if !KINA_STANDARDS.contains(&p.as_str()) {
+        if !any_eq(&prv().id_standards, &p) {
             defined.push(id);
         }
         for (p2, id2) in hyphen_ids(head).into_iter().skip(1) {
@@ -5123,11 +5293,48 @@ struct GoalLayer {
     page_defaults: BTreeMap<String, usize>,
 }
 
+/// A page's jurisdiction reading: the jurisdiction its marks (and its path) name most, or "";
+/// whether it is a regime page (by its path or its title); its lower-cased `# ` title and path.
+struct PageJur {
+    jur: &'static str,
+    regime: bool,
+    title: String,
+    pl: String,
+}
+
+fn page_jur_of(path: &str, lines: &[&str]) -> PageJur {
+    let p = prv();
+    let (mut hm, mut ot) = (0usize, 0usize);
+    for l in lines {
+        let (a, b) = law_marks(l);
+        hm += a;
+        ot += b;
+    }
+    let pl = path.to_ascii_lowercase();
+    if p.path_other.iter().any(|w| pl.contains(w.as_str())) {
+        ot += 5;
+    }
+    if p.path_home.iter().any(|w| pl.contains(w.as_str())) {
+        hm += 5;
+    }
+    let jur: &'static str = if hm >= ot && hm > 0 {
+        home()
+    } else if ot > hm {
+        oth()
+    } else {
+        ""
+    };
+    let title = lines.iter().find(|l| l.starts_with("# ")).map_or(String::new(), |l| l.to_lowercase());
+    let regime = p.regime_page_path.iter().any(|w| pl.contains(w.as_str()))
+        || (!title.contains("excluding") && p.regime_page_title.iter().any(|w| title.contains(w.as_str())));
+    PageJur { jur, regime, title, pl }
+}
+
 /// Every doc page split into units (heading sections, with their enclosing headings' ids) and
 /// definition blocks (a definition line to the next one or the next heading), with the ids each
 /// defines and mentions, the candidate files it names, and its Act citations resolved by context:
 /// the nearest instrument on the line, else the innermost heading naming one, else the page's
-/// dominant instrument ("the Act" counts only on an AML/CTF page).
+/// dominant instrument ("the Act" counts only on a regime page).
 fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[String]) -> GoalLayer {
     let mut gl = GoalLayer::default();
     let kinds: BTreeSet<u8> = d.vocab_bare.keys().copied().collect();
@@ -5149,47 +5356,25 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
             .and_then(|u| u["specs/".len()..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok())
             .into_iter()
             .collect();
-        let (mut au, mut png) = (0usize, 0usize);
-        for l in lines {
-            let (a, p) = law_marks(l);
-            au += a;
-            png += p;
-        }
-        let pl = path.to_ascii_lowercase();
-        if pl.contains("png") {
-            png += 5;
-        }
-        if pl.contains("au_") || pl.contains("austrac") {
-            au += 5;
-        }
-        let page_jur: &'static str = if au >= png && au > 0 {
-            "AU"
-        } else if png > au {
-            "PNG"
-        } else {
-            ""
-        };
-        // The page's own Act: an AML/CTF page (by its path or its title) means the AML/CTF Act of its
-        // jurisdiction; any other page, the Act its explicit mentions name most (Rules never: their
-        // provisions are numbered 4-2, and the Transitional Rules' are named on the line).
-        let title = lines.iter().find(|l| l.starts_with("# ")).map_or(String::new(), |l| l.to_lowercase());
-        let aml_page = ["aml", "austrac", "travel-rule", "travel_rule", "ifti", "tipping"].iter().any(|w| pl.contains(w))
-            || (!title.contains("excluding") && ["aml/ctf", "amlctf", "austrac", "travel rule", "tipping-off", "tipping off"].iter().any(|w| title.contains(w)));
+        // The page's own Act: a regime page (by its path or its title) means the regime instrument of
+        // its jurisdiction; any other page, the Act its explicit mentions name most (Rules never: their
+        // provisions are numbered 4-2, and the second instrument's are named on the line).
+        let PageJur { jur: page_jur, regime: regime_page, .. } = page_jur_of(path, lines);
         let mut cnt: BTreeMap<&'static str, usize> = BTreeMap::new();
         for l in lines {
             for m in law_mentions(l) {
                 let c = law_class(m.inst, l, page_jur, "");
-                if matches!(c, "AU" | "PNG" | "OTHER") {
+                if c == home() || c == oth() || c == "OTHER" {
                     *cnt.entry(c).or_default() += 1;
                 }
             }
         }
         let mut page_def: &'static str = "";
-        if aml_page {
-            page_def = if page_jur == "PNG" { "PNG" } else { "AU" };
+        if regime_page {
+            page_def = if page_jur == oth() { oth() } else { home() };
         } else {
             let mut best = 0;
-            for c in ["AU", "PNG", "OTHER"] {
+            for c in [home(), oth(), "OTHER"] {
                 let n = cnt.get(c).copied().unwrap_or(0);
                 if n > best {
                     best = n;
@@ -5261,7 +5446,7 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
                 && stack.last().is_some_and(|h| h.2.to_lowercase().contains("decision"))
                 && let Some(n) = t[1..].split('|').next().map(str::trim).filter(|c| !c.is_empty() && c.len() <= 3 && c.chars().all(|x| x.is_ascii_digit()))
             {
-                // a numbered decision row (the legal matrix's decisions 1-36 and the code check's rows 1-33 share it)
+                // a numbered decision row (two pages' numbered decision tables share the numbers)
                 let tok = format!("decision|{n}");
                 let ids: BTreeSet<String> = stack.iter().flat_map(|s| s.1.iter().cloned()).collect();
                 gl.units[unit].drows.insert(tok.clone());
@@ -5299,8 +5484,8 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
             let ments = law_mentions(l);
             for sc in law_cites(l, order) {
                 let mut best: Option<(usize, LInst)> = None;
-                // the AML/CTF Rules number their provisions 4-2, 8-3: a plain-number citation is never theirs
-                for m in ments.iter().filter(|m| m.inst != LInst::AuRules) {
+                // the rules number their provisions 4-2, 8-3: a plain-number citation is never theirs
+                for m in ments.iter().filter(|m| m.inst != LInst::Rules) {
                     let dist = if m.end <= sc.start {
                         sc.start - m.end
                     } else if m.start >= sc.end && m.start - sc.end <= 30 {
@@ -5314,28 +5499,28 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
                 }
                 let (class, route) = match best {
                     Some((_, inst)) => (law_class(inst, l, page_jur, page_def), "line"),
-                    None if law_aml_words(l) => {
-                        // PNG only when the line names a PNG AML institution or its 2015 Act
-                        let png = ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w));
-                        (if png { "PNG" } else { "AU" }, "line-words")
+                    None if law_regime_words(l) => {
+                        // the other jurisdiction only when the line carries one of its narrow marks
+                        let other = prv().other_line_marks.iter().any(|w| l.contains(w.as_str()));
+                        (if other { oth() } else { home() }, "line-words")
                     }
                     None => {
-                        // the innermost heading naming an instrument, or using AML/CTF-regime words
+                        // the innermost heading naming an instrument, or using regime words
                         let mut hc = None;
                         for (hlv, _, hl) in stack.iter().rev() {
                             if let Some(m) = law_mentions(hl).iter().rfind(|m| m.inst != LInst::TheAct) {
                                 hc = Some(law_class(m.inst, hl, page_jur, page_def));
                                 break;
                             }
-                            if *hlv >= 2 && !hl.contains("excluding") && law_aml_words(hl) {
-                                hc = Some("AU");
+                            if *hlv >= 2 && !hl.contains("excluding") && law_regime_words(hl) {
+                                hc = Some(home());
                                 break;
                             }
                         }
-                        // on an AML/CTF page the page's Act outranks a mention a few lines up
+                        // on a regime page the page's Act outranks a mention a few lines up
                         match (hc, recent) {
                             (Some(c), _) => (c, "heading"),
-                            (None, Some((rl, c))) if ln - rl <= 12 && !aml_page => (c, "context"),
+                            (None, Some((rl, c))) if ln - rl <= 12 && !regime_page => (c, "context"),
                             _ => (page_def, "page"),
                         }
                     }
@@ -5350,18 +5535,18 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
             // (the page validity check follows the line loop)
             // local context carries Act-level mentions only (the Rules are named on their own lines)
             if let Some(m) =
-                ments.iter().filter(|m| !matches!(m.inst, LInst::AuRules | LInst::TransRules | LInst::TheAct)).max_by_key(|m| m.start)
+                ments.iter().filter(|m| !matches!(m.inst, LInst::Rules | LInst::TRules | LInst::TheAct)).max_by_key(|m| m.start)
             {
                 recent = Some((ln, law_class(m.inst, l, page_jur, page_def)));
             }
         }
-        // Page validity check: when most of a page's AU citations resolved from context (not on
-        // their own line) are numbers the AML/CTF Act does not have, the page is about another
-        // instrument, and those citations are re-read as OTHER.
-        let ctx_au: Vec<usize> = (page_first_cite..gl.cites.len()).filter(|&c| gl.cites[c].class == "AU" && gl.cites[c].route != "line").collect();
-        let valid = ctx_au.iter().filter(|&&c| gl.cites[c].secs.iter().all(|x| known.contains(x.as_str()))).count();
-        if ctx_au.len() >= 3 && (valid as f64) < 0.5 * ctx_au.len() as f64 {
-            for c in ctx_au {
+        // Page validity check: when most of a page's home-jurisdiction citations resolved from
+        // context (not on their own line) are numbers the primary instrument does not have, the page
+        // is about another instrument, and those citations are re-read as OTHER.
+        let ctx_home: Vec<usize> = (page_first_cite..gl.cites.len()).filter(|&c| gl.cites[c].class == home() && gl.cites[c].route != "line").collect();
+        let valid = ctx_home.iter().filter(|&&c| gl.cites[c].secs.iter().all(|x| known.contains(x.as_str()))).count();
+        if ctx_home.len() >= 3 && (valid as f64) < 0.5 * ctx_home.len() as f64 {
+            for c in ctx_home {
                 gl.cites[c].class = "OTHER";
                 gl.cites[c].route = "page-check";
             }
@@ -5378,7 +5563,7 @@ fn goal_layer(docs: &[(String, String)], d: &DocSet, pr: &PathRes, order: &[Stri
     gl
 }
 
-// ---- truth: the reform-implementation commits ----
+// ---- truth: the implementing commits ----
 
 struct LCommit {
     sha: String,
@@ -5387,7 +5572,8 @@ struct LCommit {
     tids: Vec<String>,
     spec: String,
     spec_score: f64,
-    au: bool,
+    /// the task text or the message names a regime word (the private config's)
+    regime: bool,
     paths: usize,
     code: Vec<u32>,
     /// code-looking paths created after the start (no candidate can hold them)
@@ -5399,10 +5585,23 @@ struct LCommit {
 /// A truth set: (candidate code files changed, commits, code files created after the start).
 type LTruth = (HashSet<u32>, usize, BTreeSet<String>);
 
-fn law_is_au(text: &str) -> bool {
+fn law_is_regime(text: &str) -> bool {
+    let p = prv();
     let lower = text.to_lowercase();
     let words: HashSet<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
-    LAW_AU_WORDS.iter().any(|w| words.contains(w)) || LAW_AU_PHRASES.iter().any(|p| lower.contains(p))
+    p.regime_words.iter().any(|w| words.contains(w.as_str())) || p.regime_phrases.iter().any(|x| lower.contains(x.as_str()))
+}
+
+/// Whether an implementing commit belongs to the truth named `tname` (the target spec's commits,
+/// their regime-work subset, or every commit).
+fn law_in_truth(tname: &str, c: &LCommit, tspec: &str) -> bool {
+    if tname == prv().truth_spec {
+        c.spec == tspec
+    } else if tname == prv().truth_regime {
+        c.spec == tspec && c.regime
+    } else {
+        true
+    }
 }
 
 /// (spec unit, T-id) -> the task item's text (its line and indented continuation), from every
@@ -5519,7 +5718,7 @@ fn law_commits(
     for t in tips {
         a.push(t.as_str());
     }
-    let text = git_text(git, &a).expect("git log reform commits");
+    let text = git_text(git, &a).expect("git log implementing commits");
     let tk: BTreeSet<u8> = [b'T'].into_iter().collect();
     let mut out = Vec::new();
     for rec in text.split('\x1e').skip(1) {
@@ -5568,7 +5767,7 @@ fn law_commits(
             best = f64::INFINITY;
         }
         let task_text: String = tids.iter().filter_map(|t| tasks.get(&(spec.clone(), t.clone()))).cloned().collect::<Vec<_>>().join("\n");
-        let au = law_is_au(&msg) || law_is_au(&task_text);
+        let regime = law_is_regime(&msg) || law_is_regime(&task_text);
         let mut code = Vec::new();
         let mut code_new = Vec::new();
         let mut code_noncand = Vec::new();
@@ -5591,7 +5790,7 @@ fn law_commits(
         }
         code.sort_unstable();
         code.dedup();
-        out.push(LCommit { sha, date, subject, tids, spec, spec_score: best, au, paths, code, code_new, code_noncand });
+        out.push(LCommit { sha, date, subject, tids, spec, spec_score: best, regime, paths, code, code_new, code_noncand });
     }
     out
 }
@@ -5783,7 +5982,7 @@ fn law_random(nf: usize, k: usize, truth: &HashSet<u32>, key: &str, f1: f64) -> 
     law_dist(&ms, f1)
 }
 
-/// The chain with the section -> unit map permuted over every AU-cited section: each changed cited
+/// The chain with the section -> unit map permuted over every home-cited section: each changed cited
 /// section takes the reached files of a random cited section.
 fn law_permuted(cited: &[String], changed: &BTreeSet<String>, files: &BTreeMap<String, BTreeSet<u32>>, nf: usize, truth: &HashSet<u32>, key: &str, f1: f64) -> LDist {
     let ms: Vec<LMet> = (0..LAW_DRAWS)
@@ -5882,17 +6081,18 @@ fn law_impact_main(args: &Args) {
     let mut js = serde_json::Map::new();
 
     // ---- 1. law diff ----
-    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, LAW_OLD_PDF), act_furniture));
-    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, LAW_NEW_PDF), act_furniture));
+    let pv = prv();
+    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_act_old), act_furniture));
+    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_act_new), act_furniture));
     let (n_old, n_new) = (old.len(), new.len());
     let diff = law_diff(old, new, dups_old, dups_new);
-    let amend = amend_parse(&law_lines(&law_pdf(args, LAW_AMEND_PDF), amend_furniture), &diff);
+    let amend = amend_parse(&law_lines(&law_pdf(args, &pv.pdf_amend), amend_furniture), &diff);
     let changed: BTreeSet<String> = diff.order.iter().filter(|n| diff.status[*n] != "unchanged").cloned().collect();
     let count = |st: &str| diff.status.values().filter(|s| **s == st).count();
     let (n_unch, n_ch, n_add, n_rep) = (count("unchanged"), count("changed"), count("added"), count("repealed"));
     let minor = diff.order.iter().filter(|n| diff.status[*n] == "changed" && diff.dice[*n] >= 0.97).count();
-    eprintln!(
-        "[law] sections: comp59 {n_old}, comp62 {n_new}; unchanged {n_unch}, changed {n_ch} ({minor} with Dice >= 0.97), added {n_add}, repealed {n_rep}; dup numbers {} / {}",
+    keprintln!(
+        "[law] sections: «old» {n_old}, «new» {n_new}; unchanged {n_unch}, changed {n_ch} ({minor} with Dice >= 0.97), added {n_add}, repealed {n_rep}; dup numbers {} / {}",
         diff.dups_old.len(),
         diff.dups_new.len()
     );
@@ -5901,10 +6101,10 @@ fn law_impact_main(args: &Args) {
     for n in &diff.order {
         xc[usize::from(changed.contains(n))][usize::from(named(n))] += 1;
     }
-    eprintln!(
-        "[law] amending Act: {} items ({} on the AML/CTF Act), {} inserted headings ({} unmatched); named {} sections; cross-check differ&named {} differ&not {} same&named {} same&not {}",
+    keprintln!(
+        "[law] amending Act: {} items ({} on the «act»), {} inserted headings ({} unmatched); named {} sections; cross-check differ&named {} differ&not {} same&named {} same&not {}",
         amend.items,
-        amend.items_aml,
+        amend.items_target,
         amend.inserted,
         amend.inserted_unmatched.len(),
         amend.named.len(),
@@ -5914,7 +6114,7 @@ fn law_impact_main(args: &Args) {
         xc[0][0]
     );
     {
-        let mut tsv = String::from("section\tstatus\tdice\tnamed_by_amending_act\ttitle_comp59\ttitle_comp62\tcontext\n");
+        let mut tsv = String::from("section\tstatus\tdice\tnamed_by_amending_act\ttitle_«old»\ttitle_«new»\tcontext\n");
         for n in &diff.order {
             let o = diff.old.get(n);
             let w = diff.new.get(n);
@@ -5928,7 +6128,7 @@ fn law_impact_main(args: &Args) {
                 w.or(o).map_or("", |s| s.ctx.as_str())
             ));
         }
-        std::fs::write(outp("law_sections.tsv"), tsv).expect("write sections");
+        kwrite(outp("law_sections.tsv"), &tsv).expect("write sections");
     }
 
     // ---- the code graph at the start ----
@@ -5975,7 +6175,7 @@ fn law_impact_main(args: &Args) {
 
     // ---- 3. code citations at the start (and the leaky end) ----
     let mut cstats = BTreeMap::new();
-    let code = group_code(git_grep(&args.git, &start, Some(KINA_CODE_PAT), &[]), &pidx);
+    let code = group_code(git_grep(&args.git, &start, Some(&prv().code_pat), &[]), &pidx);
     let (toks, _, _) = kina_cites(&d, &code, nf, &mut cstats);
     let files_of = law_files_of(&toks);
     let tips: Vec<String> = args
@@ -5988,7 +6188,7 @@ fn law_impact_main(args: &Args) {
     } else {
         git_text(&args.git, &["rev-parse", &args.law_end]).expect("rev-parse end").trim().to_string()
     };
-    let code_end = group_code(git_grep(&args.git, &end, Some(KINA_CODE_PAT), &[]), &pidx);
+    let code_end = group_code(git_grep(&args.git, &end, Some(&prv().code_pat), &[]), &pidx);
     let (toks_end, _, _) = kina_cites(&d, &code_end, nf, &mut BTreeMap::new());
     let files_of_end = law_files_of(&toks_end);
     let compliance: Vec<u32> = (0..nf as u32).filter(|&f| !toks[f as usize].is_empty()).collect();
@@ -6000,30 +6200,30 @@ fn law_impact_main(args: &Args) {
     let branch_spec = law_branch_specs(&args.git, &start, &tip_names, &tasks);
     let ticks = law_ticks(&args.wiki, start_ct);
     let commits = law_commits(&args.git, &start, &tips, &pidx, &tasks, &branch_spec, &ticks);
-    let s003 = "specs/003-compliance-codification";
+    let tspec = pv.target_spec.as_str();
     let pick = |f: &dyn Fn(&LCommit) -> bool| -> LTruth {
         let cs: Vec<&LCommit> = commits.iter().filter(|c| f(c)).collect();
         (cs.iter().flat_map(|c| c.code.iter().copied()).collect(), cs.len(), cs.iter().flat_map(|c| c.code_new.iter().cloned()).collect())
     };
-    let noncand: BTreeMap<&str, BTreeSet<String>> = [("S003", true), ("ALL", false)]
+    let noncand: BTreeMap<&str, BTreeSet<String>> = [(pv.truth_spec.as_str(), true), ("ALL", false)]
         .into_iter()
-        .map(|(n, only)| (n, commits.iter().filter(|c| !only || c.spec == "specs/003-compliance-codification").flat_map(|c| c.code_noncand.iter().cloned()).collect()))
+        .map(|(n, only)| (n, commits.iter().filter(|c| !only || c.spec == tspec).flat_map(|c| c.code_noncand.iter().cloned()).collect()))
         .collect();
     let truths: Vec<(&str, &str, LTruth)> = vec![
-        ("S003", "commits implementing a spec 003 task (compliance codification, the reform-driven spec)", pick(&|c: &LCommit| c.spec == s003)),
-        ("AU", "S003 commits whose task text or message names an AU AML/CTF-regime term", pick(&|c: &LCommit| c.spec == s003 && c.au)),
-        ("ALL", "every commit after the start (the compilation-62 PDF was already in the wiki)", pick(&|_: &LCommit| true)),
+        (pv.truth_spec.as_str(), t("truth_spec_desc"), pick(&|c: &LCommit| c.spec == tspec)),
+        (pv.truth_regime.as_str(), t("truth_regime_desc"), pick(&|c: &LCommit| c.spec == tspec && c.regime)),
+        ("ALL", t("truth_all_desc"), pick(&|_: &LCommit| true)),
     ];
     for (n, _, (t, c, nw)) in &truths {
         eprintln!("[law] truth {n}: {c} commits, {} candidate code files, {} code files created after the start", t.len(), nw.len());
     }
 
-    // ---- the chain: AU-cited sections -> units / blocks -> ids -> files ----
+    // ---- the chain: home-cited sections -> units / blocks -> ids -> files ----
     let mut sec_units: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     let mut sec_blocks: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     let mut sec_ncite: BTreeMap<String, usize> = BTreeMap::new();
     for c in &gl.cites {
-        if c.class != "AU" {
+        if c.class != home() {
             continue;
         }
         for s in &c.secs {
@@ -6038,8 +6238,8 @@ fn law_impact_main(args: &Args) {
     let cited_changed: Vec<String> = cited.iter().filter(|s| changed.contains(*s)).cloned().collect();
     let cited_unchanged: BTreeSet<String> = cited.iter().filter(|s| !changed.contains(*s)).cloned().collect();
     let cited_all: BTreeSet<String> = cited.iter().cloned().collect();
-    eprintln!(
-        "[law] AU-cited sections: {} known ({} changed, {} unchanged), {} numbers in neither compilation",
+    keprintln!(
+        "[law] «home»-cited sections: {} known ({} changed, {} unchanged), {} numbers in neither «ver»",
         cited.len(),
         cited_changed.len(),
         cited_unchanged.len(),
@@ -6130,11 +6330,7 @@ fn law_impact_main(args: &Args) {
         let mut dists: Vec<(String, LDist)> = Vec::new();
         let tcommits: Vec<&Vec<u32>> = commits
             .iter()
-            .filter(|c| match *tname {
-                "S003" => c.spec == s003,
-                "AU" => c.spec == s003 && c.au,
-                _ => true,
-            })
+            .filter(|c| law_in_truth(tname, c, tspec))
             .map(|c| &c.code)
             .collect();
         let mut boots: Vec<(String, (f64, f64, f64))> = Vec::new();
@@ -6195,7 +6391,7 @@ fn law_impact_main(args: &Args) {
     let blocks_changed: BTreeSet<usize> = cited_changed.iter().flat_map(|s| sec_blocks[s].iter().copied()).collect();
     let pages_changed: BTreeSet<&str> = units_changed.iter().map(|&u| gl.units[u].path.as_str()).collect();
     hop.push_str(&format!(
-        "| hop | count |\n|---|---|\n| Act sections, comp 59 / comp 62 | {n_old} / {n_new} |\n| sections changed / added / repealed (the law change) | {n_ch} / {n_add} / {n_rep} = {} |\n| ... of which cited by the goal layer as the AU AML/CTF Act | {} |\n| cited AU sections, changed or not | {} (+{} numbers in neither compilation) |\n| units (heading sections) citing a changed section | {} on {} pages |\n| definition blocks citing a changed section | {} |\n",
+        "| hop | count |\n|---|---|\n| Act sections, «old_sp» / «new_sp» | {n_old} / {n_new} |\n| sections changed / added / repealed (the law change) | {n_ch} / {n_add} / {n_rep} = {} |\n| ... of which cited by the goal layer as the «act_full» | {} |\n| cited «home» sections, changed or not | {} (+{} numbers in neither «ver») |\n| units (heading sections) citing a changed section | {} on {} pages |\n| definition blocks citing a changed section | {} |\n",
         changed.len(),
         cited_changed.len(),
         cited.len(),
@@ -6225,13 +6421,13 @@ fn law_impact_main(args: &Args) {
         "| code files citing any id at the start (compliance code) / at the end | {} / {compliance_end} |\n| candidate code files | {nf} |\n",
         compliance.len()
     ));
-    hop.push_str("\nPer changed section cited by the goal layer (C1 and C3 reach):\n\n| section | status | Dice | AU cites | units | blocks | C1 ids | C1 ids in code | C1 files | C3 files | C1 files in S003 truth | title |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
-    let s003_truth = &truths[0].2.0;
+    hop.push_str("\nPer changed section cited by the goal layer (C1 and C3 reach):\n\n| section | status | Dice | «home» cites | units | blocks | C1 ids | C1 ids in code | C1 files | C3 files | C1 files in «ts» truth | title |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    let tspec_truth = &truths[0].2.0;
     for s in &cited_changed {
         let ids = &kinds[0].ids[s];
         let in_code = ids.iter().filter(|i| files_of.contains_key(i.as_str())).count();
         let f1 = &kinds[0].files[s];
-        let hit = f1.iter().filter(|f| s003_truth.contains(f)).count();
+        let hit = f1.iter().filter(|f| tspec_truth.contains(f)).count();
         hop.push_str(&format!(
             "| {s} | {} | {} | {} | {} | {} | {} | {in_code} | {} | {} | {hit} | {} |\n",
             diff.status[s],
@@ -6247,7 +6443,7 @@ fn law_impact_main(args: &Args) {
     }
 
     {
-        let mut det = String::from("section\tstatus\tchain\tids_reached\tids_cited_in_code\tfiles\tfiles_in_S003\tfile_paths\n");
+        let mut det = String::from("section\tstatus\tchain\tids_reached\tids_cited_in_code\tfiles\tfiles_in_«ts»\tfile_paths\n");
         for s in &cited_changed {
             for (ki, (_, cname, _)) in LAW_CHAINS.iter().enumerate() {
                 let ks = &kinds[ki];
@@ -6259,12 +6455,12 @@ fn law_impact_main(args: &Args) {
                     ks.ids[s].len(),
                     inc.iter().map(|x| x.as_str()).collect::<Vec<_>>().join(" "),
                     fs.len(),
-                    fs.iter().filter(|f| s003_truth.contains(f)).count(),
+                    fs.iter().filter(|f| tspec_truth.contains(f)).count(),
                     fs.iter().map(|&f| g.paths[f as usize].as_str()).collect::<Vec<_>>().join(" ")
                 ));
             }
         }
-        std::fs::write(outp("law_chain_detail.tsv"), det).expect("write chain detail");
+        kwrite(outp("law_chain_detail.tsv"), &det).expect("write chain detail");
     }
     // GLIA_LAW_DEBUG=<section>: each C3 id of that section with the definition blocks that name files (inspection only)
     if let Ok(sec) = std::env::var("GLIA_LAW_DEBUG")
@@ -6298,19 +6494,19 @@ fn law_impact_main(args: &Args) {
         *cls.entry((c.class, c.route)).or_default() += 1;
         cit_tsv.push_str(&format!("{}\t{}\t{}\t{}\t{}\n", c.class, c.route, c.secs.join(","), gl.units[c.unit].name, c.line.replace('\t', " ")));
     }
-    std::fs::write(outp("law_citations.tsv"), cit_tsv).expect("write citations");
+    kwrite(outp("law_citations.tsv"), &cit_tsv).expect("write citations");
     let mut cit_md = String::from("| class | route | citations |\n|---|---|---|\n");
     for ((c, r), n) in &cls {
         cit_md.push_str(&format!("| {c} | {r} | {n} |\n"));
     }
     cit_md.push_str(&format!("\nPage default instruments (pages): {:?}\n", gl.page_defaults));
-    cit_md.push_str("\nMost-cited AU sections (citations, status):\n\n| section | AU citations | status | units |\n|---|---|---|---|\n");
+    cit_md.push_str("\nMost-cited «home» sections (citations, status):\n\n| section | «home» citations | status | units |\n|---|---|---|---|\n");
     let mut by_n: Vec<(&String, &usize)> = sec_ncite.iter().collect();
     by_n.sort_by(|a, b| b.1.cmp(a.1).then(law_key(a.0).cmp(&law_key(b.0))));
     for (s, n) in by_n.iter().take(40) {
         cit_md.push_str(&format!("| {s} | {n} | {} | {} |\n", diff.status.get(*s).copied().unwrap_or("(not a section)"), sec_units[*s].len()));
     }
-    cit_md.push_str(&format!("\nAU-resolved numbers in neither compilation: {}\n", cited_unknown.join(", ")));
+    cit_md.push_str(&format!("\n«home»-resolved numbers in neither «ver»: {}\n", cited_unknown.join(", ")));
     // a deterministic audit sample: every 25th citation
     cit_md.push_str("\nAudit sample (every 25th citation in doc order):\n\n| class | route | sections | unit | line |\n|---|---|---|---|---|\n");
     for c in gl.cites.iter().step_by(25) {
@@ -6319,7 +6515,7 @@ fn law_impact_main(args: &Args) {
     }
 
     // ---- truth table ----
-    let mut tr = String::from("| # | commit | date | T-ids | spec (score) | AU | files | candidate code | new code | subject |\n|---|---|---|---|---|---|---|---|---|---|\n");
+    let mut tr = String::from("| # | commit | date | T-ids | spec (score) | «tr» | files | candidate code | new code | subject |\n|---|---|---|---|---|---|---|---|---|---|\n");
     for (i, c) in commits.iter().enumerate() {
         tr.push_str(&format!(
             "| {} | {} | {} | {} | {} ({}) | {} | {} | {} | {} | {} |\n",
@@ -6335,7 +6531,7 @@ fn law_impact_main(args: &Args) {
             } else {
                 format!("overlap {:.2}", c.spec_score)
             },
-            if c.au { "y" } else { "" },
+            if c.regime { "y" } else { "" },
             c.paths,
             c.code.len(),
             c.code_new.len(),
@@ -6343,12 +6539,12 @@ fn law_impact_main(args: &Args) {
         ));
     }
 
-    // ---- 6. reverse view: does each reform commit's code trace up to a changed section? ----
+    // ---- 6. reverse view: does each implementing commit's code trace up to a changed section? ----
     let unit_secs = |u: usize| -> BTreeSet<String> {
-        gl.units[u].cites.iter().filter(|&&ci| gl.cites[ci].class == "AU").flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
+        gl.units[u].cites.iter().filter(|&&ci| gl.cites[ci].class == home()).flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
     };
     let block_secs = |b: usize| -> BTreeSet<String> {
-        gl.blocks[b].cites.iter().filter(|&&ci| gl.cites[ci].class == "AU").flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
+        gl.blocks[b].cites.iter().filter(|&&ci| gl.cites[ci].class == home()).flat_map(|&ci| gl.cites[ci].secs.iter().cloned()).filter(|s| diff.status.contains_key(s)).collect()
     };
     let id_secs = |id: &str| -> BTreeSet<String> {
         let mut s = BTreeSet::new();
@@ -6357,10 +6553,10 @@ fn law_impact_main(args: &Args) {
         }
         s
     };
-    let mut rv = String::from("| commit | T-ids | candidate code files | citing an id | reaching a cited AU section | reaching a changed section | changed sections reached (files) | task block: changed sections (direct / +1 hop) | subject |\n|---|---|---|---|---|---|---|---|---|\n");
-    let (mut tot_files, mut tot_cite, mut tot_any, mut tot_ch, mut tot_task_direct, mut tot_task_hop, mut n_s003) = (0, 0, 0, 0, 0, 0, 0);
-    for c in commits.iter().filter(|c| c.spec == s003) {
-        n_s003 += 1;
+    let mut rv = String::from("| commit | T-ids | candidate code files | citing an id | reaching a cited «home» section | reaching a changed section | changed sections reached (files) | task block: changed sections (direct / +1 hop) | subject |\n|---|---|---|---|---|---|---|---|---|\n");
+    let (mut tot_files, mut tot_cite, mut tot_any, mut tot_ch, mut tot_task_direct, mut tot_task_hop, mut n_tspec) = (0, 0, 0, 0, 0, 0, 0);
+    for c in commits.iter().filter(|c| c.spec == tspec) {
+        n_tspec += 1;
         let mut n_cite = 0;
         let mut n_any = 0;
         let mut n_ch = 0;
@@ -6385,7 +6581,7 @@ fn law_impact_main(args: &Args) {
         let mut direct: BTreeSet<String> = BTreeSet::new();
         let mut hop1: BTreeSet<String> = BTreeSet::new();
         for t in &c.tids {
-            let tok = format!("{s003}|{t}");
+            let tok = format!("{tspec}|{t}");
             for &b in gl.def_blocks.get(&tok).into_iter().flatten() {
                 direct.extend(block_secs(b));
                 for m in &gl.blocks[b].mentions {
@@ -6427,11 +6623,11 @@ fn law_impact_main(args: &Args) {
         ));
     }
     let rv_head = format!(
-        "S003 commits: {n_s003}. Over their candidate code files (counted per commit): {tot_files} files, {tot_cite} cite an id at the start, {tot_any} trace (id -> defining unit -> AU citation) to a cited Act section, {tot_ch} to a changed one. Commits whose own task block cites a changed section directly: {tot_task_direct}; with one hop through the ids the task mentions: {tot_task_hop}.\n\n"
+        "«ts» commits: {n_tspec}. Over their candidate code files (counted per commit): {tot_files} files, {tot_cite} cite an id at the start, {tot_any} trace (id -> defining unit -> «home» citation) to a cited Act section, {tot_ch} to a changed one. Commits whose own task block cites a changed section directly: {tot_task_direct}; with one hop through the ids the task mentions: {tot_task_hop}.\n\n"
     );
 
     // ---- predictions ----
-    let mut ptsv = String::from("rank\tfile\tC1_score\tC3_score\tin_S003\tin_AU\tin_ALL\tids_cited\n");
+    let mut ptsv = String::from("rank\tfile\tC1_score\tC3_score\tin_«ts»\tin_«tr»\tin_ALL\tids_cited\n");
     let c3_rank = law_rank(&c3);
     for (r, &f) in c3_rank.iter().enumerate() {
         if c3[f as usize] <= 0.0 && c1[f as usize] <= 0.0 {
@@ -6449,17 +6645,17 @@ fn law_impact_main(args: &Args) {
             toks[f as usize].iter().take(12).cloned().collect::<Vec<_>>().join(" ")
         ));
     }
-    std::fs::write(outp("law_predictions.tsv"), ptsv).expect("write predictions");
+    kwrite(outp("law_predictions.tsv"), &ptsv).expect("write predictions");
 
     // ---- law diff tables ----
     let mut ld = format!(
-        "Comp 59 (pre-reform, compilation date 31 March 2025): {n_old} sections. Comp 62 (1 July 2026): {n_new} sections. Repeated section numbers dropped as extraction noise: {:?} / {:?}.\n\n| status | sections |\n|---|---|\n| unchanged | {n_unch} |\n| changed | {n_ch} (of which {minor} with word-multiset Dice >= 0.97, minor edits) |\n| added | {n_add} |\n| repealed | {n_rep} |\n\n",
+        "«old_desc»: {n_old} sections. «new_desc»: {n_new} sections. Repeated section numbers dropped as extraction noise: {:?} / {:?}.\n\n| status | sections |\n|---|---|\n| unchanged | {n_unch} |\n| changed | {n_ch} (of which {minor} with word-multiset Dice >= 0.97, minor edits) |\n| added | {n_add} |\n| repealed | {n_rep} |\n\n",
         diff.dups_old, diff.dups_new
     );
     ld.push_str(&format!(
-        "Cross-check with the Amendment Act 2024 as made ({} item headings, {} on the AML/CTF Act; {} inserted section headings, {} not matched to a compilation title; {} sections named):\n\n| | named by the amending Act | not named |\n|---|---|---|\n| differs (changed / added / repealed) | {} | {} |\n| unchanged | {} | {} |\n\n",
+        "Cross-check with «amend_desc» ({} item headings, {} on the «act»; {} inserted section headings, {} not matched to a «ver» title; {} sections named):\n\n| | named by the amending Act | not named |\n|---|---|---|\n| differs (changed / added / repealed) | {} | {} |\n| unchanged | {} | {} |\n\n",
         amend.items,
-        amend.items_aml,
+        amend.items_target,
         amend.inserted,
         amend.inserted_unmatched.len(),
         amend.named.len(),
@@ -6480,18 +6676,18 @@ fn law_impact_main(args: &Args) {
     // ---- write ----
     let chains_md: String = LAW_CHAINS.iter().map(|(_, n, d)| format!("- **{n}**: {d}\n")).collect();
     let mut all = format!(
-        "# Law impact tables (Kina, AU AML/CTF Act comp 59 -> comp 62)\n\nStart {start} (code), wiki {wrev}; END (leaky) {end}. Generated by `rank_eval --law-impact kina` in {:.1}s.\n\nChains:\n{chains_md}\n## 1. Law diff\n\n{ld}\n## 2-3. Hops\n\n{hop}\n## Citations\n\n{cit_md}\n## 4. Truth commits (after the start; the compilation-62 PDF entered the wiki at 16486da, before the start)\n\n{tr}\n## 5. Scores\n{md}\n## 6. Reverse view (S003 commits)\n\n{rv_head}{rv}",
+        "# Law impact tables (Kina, «act_full» «old_sp» -> «new_sp»)\n\nStart {start} (code), wiki {wrev}; END (leaky) {end}. Generated by `rank_eval --law-impact kina` in {:.1}s.\n\nChains:\n{chains_md}\n## 1. Law diff\n\n{ld}\n## 2-3. Hops\n\n{hop}\n## Citations\n\n{cit_md}\n## 4. Truth commits (after the start; «new_pdf_note»)\n\n{tr}\n## 5. Scores\n{md}\n## 6. Reverse view («ts» commits)\n\n{rv_head}{rv}",
         t0.elapsed().as_secs_f64()
     );
     all.push('\n');
-    std::fs::write(outp("law_tables.md"), &all).expect("write tables");
+    kwrite(outp("law_tables.md"), &all).expect("write tables");
     js.insert("start".into(), json!(start));
     js.insert("wiki_rev".into(), json!(wrev));
     js.insert("end_rev".into(), json!(end));
     js.insert(
         "law".into(),
-        json!({"comp59": n_old, "comp62": n_new, "unchanged": n_unch, "changed": n_ch, "changed_minor": minor, "added": n_add, "repealed": n_rep,
-               "amend_items": amend.items, "amend_items_aml": amend.items_aml, "amend_named": amend.named.len(),
+        json!({t("old"): n_old, t("new"): n_new, "unchanged": n_unch, "changed": n_ch, "changed_minor": minor, "added": n_add, "repealed": n_rep,
+               "amend_items": amend.items, t("amend_items_target_key"): amend.items_target, "amend_named": amend.named.len(),
                "cross": {"differ_named": xc[1][1], "differ_not": xc[1][0], "same_named": xc[0][1], "same_not": xc[0][0]}}),
     );
     js.insert(
@@ -6516,7 +6712,7 @@ fn law_impact_main(args: &Args) {
             start: &start,
             truths: &truths,
             commits: &commits,
-            s003,
+            tspec,
             changed: &changed,
             status: &diff.status,
             bm_all: &bm_all,
@@ -6524,12 +6720,12 @@ fn law_impact_main(args: &Args) {
             comp_score: &comp_score,
             raw_sets: vec![("C1", set(0)), ("C1m", set(2)), ("C3", set(3)), ("C5", set(5))],
             raw_cited: (cited.len(), cited_changed.len()),
-            prefix: "law:AU-ACT:",
-            inst: "AU AML/CTF Act",
+            prefix: pv.key_act.as_str(),
+            inst: t("act_full"),
             extra_secs: Vec::new(),
         });
     }
-    std::fs::write(outp("law_impact.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write json");
+    kwrite(outp("law_impact.json"), &serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write json");
     eprintln!("[law] done in {:.1}s -> {}", t0.elapsed().as_secs_f64(), outp("law_tables.md"));
 }
 
@@ -7356,20 +7552,19 @@ impl KBm {
 
 // ---- law knowledge: each instrument's own section list ----
 
-const LAW_RULES_PDF: &str = "AU_AMLCTF_Rules_2025_F2026C00274_compilation1_2026-03-31";
-const LAW_TRULES_PDF: &str = "AU_AMLCTF_Transitional_Rules_2026_F2026C00452_compilation1_2026-05-14";
-
+/// Each instrument's section list (file stems in the private config): the primary instrument
+/// (either version, and each), the rules' provisions, the second instrument's sections.
 struct LawKnown {
     act: HashSet<String>,
-    act59: HashSet<String>,
-    act62: HashSet<String>,
+    act_old: HashSet<String>,
+    act_new: HashSet<String>,
     rules: HashSet<String>,
     trules: HashSet<String>,
     moved: Vec<(String, String)>,
     order: Vec<String>,
 }
 
-/// A Rules provision heading at the margin: `6-12 Customer due diligence`.
+/// A rules provision heading at the margin: `6-12 Some obligation`.
 fn rules_head(l: &str) -> Option<String> {
     let b = l.as_bytes();
     let d = digits_at(b, 0, 3);
@@ -7388,26 +7583,27 @@ fn rules_head(l: &str) -> Option<String> {
 }
 
 fn law_known(args: &Args) -> LawKnown {
-    let (old, dold) = act_sections(&law_lines(&law_pdf(args, LAW_OLD_PDF), act_furniture));
-    let (new, dnew) = act_sections(&law_lines(&law_pdf(args, LAW_NEW_PDF), act_furniture));
-    let act59: HashSet<String> = old.iter().map(|s| s.num.clone()).collect();
-    let act62: HashSet<String> = new.iter().map(|s| s.num.clone()).collect();
+    let pv = prv();
+    let (old, dold) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_act_old), act_furniture));
+    let (new, dnew) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_act_new), act_furniture));
+    let act_old: HashSet<String> = old.iter().map(|s| s.num.clone()).collect();
+    let act_new: HashSet<String> = new.iter().map(|s| s.num.clone()).collect();
     let diff = law_diff(old, new, dold, dnew);
-    let rules: HashSet<String> = law_pdf(args, LAW_RULES_PDF).lines().filter_map(rules_head).collect();
-    let trules: HashSet<String> = law_lines(&law_pdf(args, LAW_TRULES_PDF), |_| false).iter().filter_map(|l| law_sec_heading(l).map(|x| x.0)).collect();
-    eprintln!(
-        "[keys] law: AU Act {} sections (comp 59 {}, comp 62 {}), Rules {} provisions, Transitional Rules {} sections, {} moved",
+    let rules: HashSet<String> = law_pdf(args, &pv.pdf_rules).lines().filter_map(rules_head).collect();
+    let trules: HashSet<String> = law_lines(&law_pdf(args, &pv.pdf_trules), |_| false).iter().filter_map(|l| law_sec_heading(l).map(|x| x.0)).collect();
+    keprintln!(
+        "[keys] law: «home» Act {} sections («old_sp» {}, «new_sp» {}), Rules {} provisions, «trules_name» {} sections, {} moved",
         diff.order.len(),
-        act59.len(),
-        act62.len(),
+        act_old.len(),
+        act_new.len(),
         rules.len(),
         trules.len(),
         diff.moved.len()
     );
     LawKnown {
         act: diff.order.iter().cloned().collect(),
-        act59,
-        act62,
+        act_old,
+        act_new,
         rules,
         trules,
         moved: diff.moved.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect(),
@@ -7415,7 +7611,7 @@ fn law_known(args: &Args) -> LawKnown {
     }
 }
 
-/// AML/CTF Rules provisions a line cites: `Rule 6-12(4)`, `Rules 5-17(6)(c), 5-18(3)(c)`.
+/// Rules provisions a line cites: `Rule 6-12(4)`, `Rules 5-17(6)(c), 5-18(3)(c)`.
 fn rules_cites(line: &str) -> Vec<String> {
     let b = line.as_bytes();
     let lower = line.to_ascii_lowercase();
@@ -7466,46 +7662,24 @@ fn rules_cites(line: &str) -> Vec<String> {
 }
 
 /// The page-level instrument context of a doc page (or a code file): the earlier run's
-/// jurisdiction, AML/CTF-page and page-default reading, plus a Transitional Rules title.
+/// jurisdiction, regime-page and page-default reading, plus a second-instrument title.
 struct KCiteCtx {
     page_jur: &'static str,
     page_def: &'static str,
-    aml_page: bool,
+    regime_page: bool,
     tr_page: bool,
     /// the other instrument the page names most (for a bare number on a page about it)
     page_other: String,
 }
 
 fn kcite_ctx(path: &str, lines: &[&str]) -> KCiteCtx {
-    let (mut au, mut png) = (0usize, 0usize);
-    for l in lines {
-        let (a, p) = law_marks(l);
-        au += a;
-        png += p;
-    }
-    let pl = path.to_ascii_lowercase();
-    if pl.contains("png") {
-        png += 5;
-    }
-    if pl.contains("au_") || pl.contains("austrac") {
-        au += 5;
-    }
-    let page_jur: &'static str = if au >= png && au > 0 {
-        "AU"
-    } else if png > au {
-        "PNG"
-    } else {
-        ""
-    };
-    let title = lines.iter().find(|l| l.starts_with("# ")).map_or(String::new(), |l| l.to_lowercase());
-    let aml_page = ["aml", "austrac", "travel-rule", "travel_rule", "ifti", "tipping"].iter().any(|w| pl.contains(w))
-        || (!title.contains("excluding") && ["aml/ctf", "amlctf", "austrac", "travel rule", "tipping-off", "tipping off"].iter().any(|w| title.contains(w)));
+    let PageJur { jur: page_jur, regime: regime_page, title, pl } = page_jur_of(path, lines);
     let mut cnt: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut others: BTreeMap<String, usize> = BTreeMap::new();
     for l in lines {
         for m in law_mentions(l) {
             let c = law_class(m.inst, l, page_jur, "");
-            if matches!(c, "AU" | "PNG" | "OTHER") {
+            if c == home() || c == oth() || c == "OTHER" {
                 *cnt.entry(c).or_default() += 1;
             }
             if c == "OTHER" {
@@ -7525,11 +7699,11 @@ fn kcite_ctx(path: &str, lines: &[&str]) -> KCiteCtx {
         .map(|x| x.0)
         .unwrap_or_default();
     let mut page_def: &'static str = "";
-    if aml_page {
-        page_def = if page_jur == "PNG" { "PNG" } else { "AU" };
+    if regime_page {
+        page_def = if page_jur == oth() { oth() } else { home() };
     } else {
         let mut best = 0;
-        for c in ["AU", "PNG", "OTHER"] {
+        for c in [home(), oth(), "OTHER"] {
             let n = cnt.get(c).copied().unwrap_or(0);
             if n > best {
                 best = n;
@@ -7537,7 +7711,8 @@ fn kcite_ctx(path: &str, lines: &[&str]) -> KCiteCtx {
             }
         }
     }
-    KCiteCtx { page_jur, page_def, aml_page, tr_page: title.contains("transitional") || pl.contains("transitional"), page_other }
+    let tw = prv().trules_word.as_str();
+    KCiteCtx { page_jur, page_def, regime_page, tr_page: title.contains(tw) || pl.contains(tw), page_other }
 }
 
 /// The name an "other instrument" mention gives (`Corporations Act`, `CBA`), normalised.
@@ -7558,11 +7733,11 @@ fn kother_name(l: &str, m: &LMention) -> String {
     name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_lowercase()
 }
 
-/// One line's Act-section citations, read twice: the earlier run's way (`raw`: an AU
-/// AML/CTF Act class, numbers unchecked) and this run's (every number checked against the
-/// instrument's own section list; the Transitional Rules from the line, a heading or the
+/// One line's Act-section citations, read twice: the earlier run's way (`raw`: the home
+/// jurisdiction's class, numbers unchecked) and this run's (every number checked against the
+/// instrument's own section list; the second instrument from the line, a heading or the
 /// page title; another instrument keyed by its name; no instrument read across a `;`;
-/// a code file's bare number defaults to the AU Act, HEURISTIC).
+/// a code file's bare number defaults to the primary instrument, HEURISTIC).
 /// Where on its page a line sits, for the citation resolver: the page context, the heading
 /// stack above it, and the last instrument named a few lines up.
 struct KCiteAt<'a> {
@@ -7576,11 +7751,13 @@ fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, st
     let ments = law_mentions(l);
     let mut res: Vec<(String, Tier, &'static str)> = Vec::new();
     let mut raw: Vec<String> = Vec::new();
-    let tr_ctx = l.to_ascii_lowercase().contains("transitional") || stack.iter().any(|(_, h)| h.to_ascii_lowercase().contains("transitional")) || cx.tr_page;
+    let pv = prv();
+    let tw = pv.trules_word.as_str();
+    let tr_ctx = l.to_ascii_lowercase().contains(tw) || stack.iter().any(|(_, h)| h.to_ascii_lowercase().contains(tw)) || cx.tr_page;
     for sc in law_cites(l, &known.order) {
         let pick = |clause: bool| -> Option<(usize, &LMention)> {
             let mut best: Option<(usize, &LMention)> = None;
-            for m in ments.iter().filter(|m| m.inst != LInst::AuRules) {
+            for m in ments.iter().filter(|m| m.inst != LInst::Rules) {
                 let dist = if m.end <= sc.start {
                     sc.start - m.end
                 } else if m.start >= sc.end && m.start - sc.end <= 30 {
@@ -7601,9 +7778,9 @@ fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, st
             best
         };
         let fallback = || -> (&'static str, &'static str, Option<String>) {
-            if law_aml_words(l) {
-                let png = ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w));
-                return (if png { "PNG" } else { "AU" }, "line-words", None);
+            if law_regime_words(l) {
+                let other = pv.other_line_marks.iter().any(|w| l.contains(w.as_str()));
+                return (if other { oth() } else { home() }, "line-words", None);
             }
             let mut hc = None;
             for (hlv, hl) in stack.iter().rev() {
@@ -7612,14 +7789,14 @@ fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, st
                     hc = Some((c, (c == "OTHER").then(|| kother_name(hl, m))));
                     break;
                 }
-                if *hlv >= 2 && !hl.contains("excluding") && law_aml_words(hl) {
-                    hc = Some(("AU", None));
+                if *hlv >= 2 && !hl.contains("excluding") && law_regime_words(hl) {
+                    hc = Some((home(), None));
                     break;
                 }
             }
             match (hc, recent) {
                 (Some((c, n)), _) => (c, "heading", n),
-                (None, Some((rl, c))) if ln - rl <= 12 && !cx.aml_page => (c, "context", None),
+                (None, Some((rl, c))) if ln - rl <= 12 && !cx.regime_page => (c, "context", None),
                 _ => (cx.page_def, "page", (cx.page_def == "OTHER" && !cx.page_other.is_empty()).then(|| cx.page_other.clone())),
             }
         };
@@ -7627,8 +7804,8 @@ fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, st
             Some((_, m)) => law_class(m.inst, l, cx.page_jur, cx.page_def),
             None => fallback().0,
         };
-        if c_old == "AU" {
-            raw.extend(sc.secs.iter().map(|s| format!("law:AU-ACT:{s}")));
+        if c_old == home() {
+            raw.extend(sc.secs.iter().map(|s| format!("{}{s}", pv.key_act)));
         }
         // an instrument inside the citation's clause first, then one across a `;`, then context
         let (class, route, other) = match pick(true).or_else(|| pick(false)) {
@@ -7638,44 +7815,52 @@ fn kcite_line(l: &str, ln: usize, at: &KCiteAt, known: &LawKnown, code: bool, st
             }
             None => fallback(),
         };
-        // the PNG Act's own section list cannot be read (no text layer): a number the AU Act has
-        // is the AU Act's unless the line itself marks PNG
-        let png_line = ["FASU", "BPNG", "PNG", "Papua", "2015"].iter().any(|w| l.contains(w));
+        // the other jurisdiction's instrument has no readable section list (no text layer): a number
+        // the primary instrument has is the primary instrument's unless the line itself marks the
+        // other jurisdiction
+        let other_line = pv.other_line_marks_wide.iter().any(|w| l.contains(w.as_str()));
         let tier = if route == "line" { Tier::Fact } else { Tier::Derived };
+        let (is_home, is_oth) = (class == home(), class == oth());
         for s in &sc.secs {
-            match class {
-                "AU" if known.act.contains(s) => res.push((format!("law:AU-ACT:{s}"), tier, route)),
-                "AU" | "TRULES" if tr_ctx && known.trules.contains(s) => res.push((format!("law:AU-TRULES:{s}"), Tier::Derived, "tr-context")),
-                "TRULES" if known.trules.contains(s) => res.push((format!("law:AU-TRULES:{s}"), tier, route)),
-                "PNG" if !png_line && known.act.contains(s) => res.push((format!("law:AU-ACT:{s}"), Tier::Derived, "au-valid-over-png")),
-                "PNG" => res.push((format!("law:PNG-ACT:{s}"), Tier::Derived, if route == "line" { "png-line-unvalidated" } else { "png-unvalidated" })),
-                // an AML/CTF Act spelling the earlier pattern list lacks (`... Counter Terrorist
-                // Financing Act`) is the AU or PNG Act by the line's jurisdiction marks
-                "OTHER" if other.as_ref().is_some_and(|n| n.contains("counterterror") || n.contains("moneylaunder")) => {
-                    let (a, p) = law_marks(l);
-                    if p > a || (p == a && cx.page_jur == "PNG") || ["FASU", "BPNG", "2015"].iter().any(|w| l.contains(w)) {
-                        res.push((format!("law:PNG-ACT:{s}"), Tier::Derived, "aml-name-png"));
-                    } else if known.act.contains(s) {
-                        res.push((format!("law:AU-ACT:{s}"), Tier::Derived, "aml-name-au"));
-                    }
+            if is_home && known.act.contains(s) {
+                res.push((format!("{}{s}", pv.key_act), tier, route));
+            } else if (is_home || class == "TRULES") && tr_ctx && known.trules.contains(s) {
+                res.push((format!("{}{s}", pv.key_trules), Tier::Derived, "tr-context"));
+            } else if class == "TRULES" && known.trules.contains(s) {
+                res.push((format!("{}{s}", pv.key_trules), tier, route));
+            } else if is_oth && !other_line && known.act.contains(s) {
+                res.push((format!("{}{s}", pv.key_act), Tier::Derived, t("route_home_valid_over_other")));
+            } else if is_oth {
+                res.push((format!("{}{s}", pv.key_other_act), Tier::Derived, if route == "line" { t("route_other_line_unvalidated") } else { t("route_other_unvalidated") }));
+            } else if class == "OTHER" && other.as_ref().is_some_and(|n| pv.regime_name_frags.iter().any(|f| n.contains(f.as_str()))) {
+                // a regime-instrument spelling the earlier pattern list lacks is the home or the
+                // other jurisdiction's instrument by the line's jurisdiction marks
+                let (a, p) = law_marks(l);
+                if p > a || (p == a && cx.page_jur == oth()) || pv.other_line_marks.iter().any(|w| l.contains(w.as_str())) {
+                    res.push((format!("{}{s}", pv.key_other_act), Tier::Derived, t("route_name_other")));
+                } else if known.act.contains(s) {
+                    res.push((format!("{}{s}", pv.key_act), Tier::Derived, t("route_name_home")));
                 }
-                "OTHER" => match &other {
+            } else if class == "OTHER" {
+                match &other {
                     Some(n) if !n.is_empty() => res.push((format!("law:OTHER:{n}:{s}"), tier, "other-named")),
                     _ => kbump(stats, "k_cite_other_unnamed_dropped"),
-                },
-                // in a code comment a bare `s123` defaults to the AU Act; a bare "section 6" is a
-                // section of some doc (`contracts/README.md section 6`), never read as the Act's
-                "" | "UNRESOLVED" if code && known.act.contains(s) && !l[sc.start..].to_ascii_lowercase().starts_with("section") => {
-                    res.push((format!("law:AU-ACT:{s}"), Tier::Heuristic, "code-default"))
                 }
-                "AU" => kbump(stats, "k_cite_au_not_a_section_dropped"),
-                _ => kbump(stats, format!("k_cite_{}_dropped", if class.is_empty() { "unresolved" } else { class })),
+            } else if (class.is_empty() || class == "UNRESOLVED") && code && known.act.contains(s) && !l[sc.start..].to_ascii_lowercase().starts_with("section") {
+                // in a code comment a bare `s123` defaults to the primary instrument; a bare
+                // "section 6" is a section of some doc (`contracts/README.md section 6`), never read
+                // as the instrument's
+                res.push((format!("{}{s}", pv.key_act), Tier::Heuristic, "code-default"))
+            } else if is_home {
+                kbump(stats, t("stat_home_not_a_section"));
+            } else {
+                kbump(stats, format!("k_cite_{}_dropped", if class.is_empty() { "unresolved" } else { class }));
             }
         }
     }
     for p in rules_cites(l) {
         if known.rules.contains(&p) {
-            res.push((format!("law:AU-RULES:{p}"), Tier::Fact, "rules-line"));
+            res.push((format!("{}{p}", pv.key_rules), Tier::Fact, "rules-line"));
         } else {
             kbump(stats, "k_cite_rules_unknown_dropped");
         }
@@ -7711,8 +7896,8 @@ fn us_ids(s: &str) -> Vec<String> {
 
 /// Id mentions on a line with byte positions: (start, end, id, bare).
 fn kid_mentions(l: &str, vocab_free: bool) -> Vec<(usize, usize, String, bool)> {
-    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
-    let mut v: Vec<(String, bool)> = hyphen_ids(l).into_iter().filter(|(p, _)| vocab_free || !KINA_STANDARDS.contains(&p.as_str())).map(|(_, id)| (id, false)).collect();
+    let bare: BTreeSet<u8> = bare_kinds();
+    let mut v: Vec<(String, bool)> = hyphen_ids(l).into_iter().filter(|(p, _)| vocab_free || !any_eq(&prv().id_standards, p)).map(|(_, id)| (id, false)).collect();
     v.extend(bare_ids(l, &bare).into_iter().map(|(_, id)| (id, true)));
     v.extend(us_ids(l).into_iter().map(|id| (id, true)));
     let mut out = Vec::new();
@@ -7922,7 +8107,7 @@ fn kdoc_refs(l: &str) -> Vec<String> {
 }
 
 /// The spec numbers that qualify the id at bytes `s..e` of a line: only those written next to it
-/// (`003 FR-060`, `spec 004 T011`), not any spec the line happens to name.
+/// (`012 FR-060`, `spec 013 T011`), not any spec the line happens to name.
 fn kqualifier(l: &str, s: usize, e: usize) -> Vec<u32> {
     let mut a = s.saturating_sub(16);
     while !l.is_char_boundary(a) {
@@ -8306,8 +8491,6 @@ impl KNs {
         Ok((key(&n), Tier::Heuristic, "ns-text-rank"))
     }
 }
-
-const KEYS_CODE_PAT: &str = "[A-Z][A-Z0-9]{1,6}-[0-9]|[TRCD][0-9]|US[0-9]|User Story|[Ss][Pp][Ee][Cc]|[0-9]{3}[ -]|Act|Rules?|Regulation|Directive|(^|[^A-Za-z0-9_'$])s{1,2}[.]? ?[0-9]|[Ss]ections? [0-9]|[Dd]ecisions? [0-9]|[Rr]ows? [0-9]";
 
 /// The comment part of a code line (`//`, `/*`, `*`, `#`, `--`, `<!--`), where a citation
 /// can sit; a code line's own text (`s1 := ..`) is never read as one.
@@ -8711,7 +8894,7 @@ fn kina_page(
             m.blocks[cur].text.push('\n');
         }
         let ments = law_mentions(l);
-        if let Some(mm) = ments.iter().filter(|x| !matches!(x.inst, LInst::AuRules | LInst::TransRules | LInst::TheAct)).max_by_key(|x| x.start) {
+        if let Some(mm) = ments.iter().filter(|x| !matches!(x.inst, LInst::Rules | LInst::TRules | LInst::TheAct)).max_by_key(|x| x.start) {
             recent = Some((ln, law_class(mm.inst, l, cx.page_jur, cx.page_def)));
         }
     }
@@ -9018,14 +9201,14 @@ fn kina_model(
                 if audit {
                     let b = &m.blocks[bi];
                     let sec = k.rsplit(':').next().unwrap_or("");
-                    let ver = if !k.starts_with("law:AU-ACT:") {
+                    let ver = if !k.starts_with(prv().key_act.as_str()) {
                         ""
-                    } else if known.act59.contains(sec) && known.act62.contains(sec) {
-                        " (comp 59 and 62)"
-                    } else if known.act62.contains(sec) {
-                        " (comp 62 only)"
+                    } else if known.act_old.contains(sec) && known.act_new.contains(sec) {
+                        t("ver_both")
+                    } else if known.act_new.contains(sec) {
+                        t("ver_new_only")
                     } else {
-                        " (comp 59 only)"
+                        t("ver_old_only")
                     };
                     audit_v.push(KAudit { kt: KT::Cite, tier, route, at: at_of(&m, b, ln), mention: line_of(&m, b, ln), target: format!("{k}{ver}") });
                 }
@@ -9155,7 +9338,8 @@ fn kina_model(
         }
     }
     for (a, b) in &known.moved {
-        m.lineage.push((format!("law:AU-ACT:{b}"), format!("law:AU-ACT:{a}"), Tier::Derived, "moved-section"));
+        let ka = &prv().key_act;
+        m.lineage.push((format!("{ka}{b}"), format!("{ka}{a}"), Tier::Derived, "moved-section"));
         kbump(&mut m.stats, "k_lineage_moved-section");
     }
     // ---- code files ----
@@ -9793,7 +9977,7 @@ fn glia_model(
     audit: bool,
 ) -> GliaModel {
     let mut stats: BTreeMap<String, f64> = BTreeMap::new();
-    let mut au: Vec<KAudit> = Vec::new();
+    let mut aud: Vec<KAudit> = Vec::new();
     let mut all: Vec<&str> = Vec::new();
     for g in [GLIA_PACKETS, GLIA_PLANS, GLIA_CORRECTIONS] {
         all.extend_from_slice(g);
@@ -9869,7 +10053,7 @@ fn glia_model(
         {
             q_def.entry(q.to_string()).or_default().push(doc.to_string());
             if audit {
-                au.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "lettered-row", at: doc.to_string(), mention: kexcerpt(&rul_text[i]), target: format!("rul:{k}") });
+                aud.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "lettered-row", at: doc.to_string(), mention: kexcerpt(&rul_text[i]), target: format!("rul:{k}") });
             }
             kbump(&mut stats, "k_row_lettered");
         }
@@ -9928,7 +10112,7 @@ fn glia_model(
             for (f, tier, route, _) in kp.block(&kpath_tokens(entry), &mut stats) {
                 kbump(&mut stats, format!("k_path_{route}"));
                 if audit {
-                    au.push(KAudit { kt: KT::Path, tier, route, at: format!("{id} files_touched"), mention: kexcerpt(entry), target: kp.cand[f as usize].clone() });
+                    aud.push(KAudit { kt: KT::Path, tier, route, at: format!("{id} files_touched"), mention: kexcerpt(entry), target: kp.cand[f as usize].clone() });
                 }
                 pk_files[i].push((f, tier, route));
             }
@@ -9946,7 +10130,7 @@ fn glia_model(
                     let pos = pk.text.find(&other).unwrap_or(0);
                     let st = pk.text[..pos].char_indices().rev().nth(120).map_or(0, |x| x.0);
                     let ctx: String = pk.text[st..].chars().take(220).collect();
-                    au.push(KAudit { kt: KT::Lineage, tier: Tier::Derived, route: verb, at: id.clone(), mention: kexcerpt(&ctx), target: format!("new pk:{new} <- old pk:{old}") });
+                    aud.push(KAudit { kt: KT::Lineage, tier: Tier::Derived, route: verb, at: id.clone(), mention: kexcerpt(&ctx), target: format!("new pk:{new} <- old pk:{old}") });
                 }
                 kbump(&mut stats, format!("k_lineage_{verb}"));
                 lineage.push((format!("pk:{new}"), format!("pk:{old}"), Tier::Derived, verb));
@@ -9959,7 +10143,7 @@ fn glia_model(
             for (f, _, route, _) in kp.block(&kpath_tokens(fs), &mut stats) {
                 kbump(&mut stats, "k_path_split-remap");
                 if audit {
-                    au.push(KAudit { kt: KT::Path, tier: Tier::Derived, route: "split-remap", at: format!("{pk} split remap ({route})"), mention: kexcerpt(fs), target: kp.cand[f as usize].clone() });
+                    aud.push(KAudit { kt: KT::Path, tier: Tier::Derived, route: "split-remap", at: format!("{pk} split remap ({route})"), mention: kexcerpt(fs), target: kp.cand[f as usize].clone() });
                 }
                 pk_files[i].push((f, Tier::Derived, "split-remap"));
             }
@@ -9981,7 +10165,7 @@ fn glia_model(
         for (k, tier, route, raw) in got {
             kbump(&mut stats, format!("k_scoped_ruling_{route}"));
             if audit {
-                au.push(KAudit { kt: KT::Scoped, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: k.clone() });
+                aud.push(KAudit { kt: KT::Scoped, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: k.clone() });
             }
             rul_pk[r].push(KRef { kt: KT::Scoped, key: k, tier, route });
         }
@@ -9992,7 +10176,7 @@ fn glia_model(
             for x in ms {
                 kbump(&mut stats, "k_row_t-row-family");
                 if audit {
-                    au.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "t-row-family", at: format!("rul:{}", rul[r]), mention: kexcerpt(t), target: format!("pk:{x}") });
+                    aud.push(KAudit { kt: KT::Row, tier: Tier::Derived, route: "t-row-family", at: format!("rul:{}", rul[r]), mention: kexcerpt(t), target: format!("pk:{x}") });
                 }
                 rul_pk[r].push(KRef { kt: KT::Row, key: format!("pk:{x}"), tier: Tier::Derived, route: "t-row-family" });
             }
@@ -10001,7 +10185,7 @@ fn glia_model(
         for (f, tier, route, raw) in kp.block(&kpath_tokens(t), &mut stats) {
             kbump(&mut stats, format!("k_path_ruling_{route}"));
             if audit {
-                au.push(KAudit { kt: KT::Path, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: kp.cand[f as usize].clone() });
+                aud.push(KAudit { kt: KT::Path, tier, route, at: format!("rul:{}", rul[r]), mention: format!("{raw} :: {}", kexcerpt(t)), target: kp.cand[f as usize].clone() });
             }
             rul_files[r].push((f, tier, route));
         }
@@ -10024,7 +10208,7 @@ fn glia_model(
         for (k, tier, route, raw) in pk_mentions(l) {
             kbump(&mut stats, format!("k_scoped_code_{route}"));
             if audit {
-                au.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{raw} :: {}", kexcerpt(l)), target: k.clone() });
+                aud.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{raw} :: {}", kexcerpt(l)), target: k.clone() });
             }
             code_pk[f].push(KRef { kt: KT::Scoped, key: k, tier, route });
         }
@@ -10034,7 +10218,7 @@ fn glia_model(
                 Some((k, tier, route)) => {
                     kbump(&mut stats, format!("k_scoped_codeq_{route}"));
                     if audit {
-                        au.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{q} :: {}", kexcerpt(l)), target: k.clone() });
+                        aud.push(KAudit { kt: KT::Scoped, tier, route, at: p.clone(), mention: format!("{q} :: {}", kexcerpt(l)), target: k.clone() });
                     }
                     code_q[f].push(KRef { kt: KT::Scoped, key: k, tier, route });
                 }
@@ -10054,7 +10238,7 @@ fn glia_model(
             for &(f, s) in &top {
                 kbump(&mut stats, "k_text_ruling_links");
                 if audit {
-                    au.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: format!("rul:{}", rul[r]), mention: kexcerpt(&rul_text[r]), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
+                    aud.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: format!("rul:{}", rul[r]), mention: kexcerpt(&rul_text[r]), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
                 }
             }
             rul_tl[r] = top;
@@ -10065,7 +10249,7 @@ fn glia_model(
             for &(f, s) in &top {
                 kbump(&mut stats, "k_text_packet_links");
                 if audit {
-                    au.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: pk_ids[i].clone(), mention: kexcerpt(&pks[&pk_ids[i]].0.text), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
+                    aud.push(KAudit { kt: KT::Text, tier: Tier::Heuristic, route: "bm25-top3", at: pk_ids[i].clone(), mention: kexcerpt(&pks[&pk_ids[i]].0.text), target: format!("{} (bm25 {s:.1})", kp.cand[f as usize]) });
                 }
             }
             pk_tl[i] = top;
@@ -10091,7 +10275,7 @@ fn glia_model(
         code_q,
         lineage,
         stats,
-        audit: au,
+        audit: aud,
         pk_ment,
     }
 }
@@ -10465,10 +10649,10 @@ fn write_ns_audit(dir: &str, rows: &[(String, String, String, String, &'static s
 /// Writes one audit file per key type: up to 80 resolved links, drawn round-robin over the
 /// routes (each route in a deterministic hash order), with each route's share of all links so
 /// a per-route precision can be weighted back to the whole.
-fn write_audit(dir: &str, tag: &str, au: &[KAudit]) {
+fn write_audit(dir: &str, tag: &str, rows: &[KAudit]) {
     std::fs::create_dir_all(dir).expect("keys out dir");
     for kt in KTS {
-        let all: Vec<&KAudit> = au.iter().filter(|a| a.kt == kt).collect();
+        let all: Vec<&KAudit> = rows.iter().filter(|a| a.kt == kt).collect();
         let mut by: BTreeMap<&str, Vec<&KAudit>> = BTreeMap::new();
         for a in &all {
             by.entry(a.route).or_default().push(a);
@@ -10513,7 +10697,7 @@ const KR3: usize = 2;
 const KR5: usize = 3;
 const KR5H: usize = 4;
 
-/// Per resolved AU-Act section, the files each resolved chain reaches.
+/// Per resolved section of the event's instrument, the files each resolved chain reaches.
 type KReach = BTreeMap<String, [BTreeSet<u32>; 6]>;
 
 fn klaw_reach(m: &KinaModel, mask: KMask, prefix: &str) -> KReach {
@@ -10645,7 +10829,8 @@ struct KLawIn<'a> {
     start: &'a str,
     truths: &'a [(&'a str, &'a str, LTruth)],
     commits: &'a [LCommit],
-    s003: &'a str,
+    /// the target spec (the truths' spec unit)
+    tspec: &'a str,
     changed: &'a BTreeSet<String>,
     status: &'a BTreeMap<String, &'static str>,
     bm_all: &'a [f64],
@@ -10653,7 +10838,7 @@ struct KLawIn<'a> {
     comp_score: &'a [f64],
     /// the earlier chains (C1, C1m, C3, C5) from the changed sections, as file sets
     raw_sets: Vec<(&'static str, Vec<u32>)>,
-    /// the earlier run's AU-cited sections (known to a compilation) and how many changed
+    /// the earlier run's home-cited sections (known to either version) and how many changed
     raw_cited: (usize, usize),
     /// Round 2: the instrument the event is about: its key prefix and name, and the section numbers
     /// of its other version the citation resolver should also accept
@@ -10668,13 +10853,13 @@ fn keys_law(x: &KLawIn) {
     std::fs::create_dir_all(dir).expect("keys out dir");
     let nf = x.g.paths.len();
     let mut known = law_known(x.args);
-    if x.prefix == "law:AU-TRULES:" {
+    if x.prefix == prv().key_trules {
         known.trules.extend(x.extra_secs.iter().cloned());
     }
     let renames = git_renames(&x.args.git, x.start);
     let kp = KPaths::new(&x.g.paths, &renames);
     let pr = PathRes::new(&x.g.paths);
-    let code_lines = git_grep(&x.args.git, x.start, Some(KEYS_CODE_PAT), &[]);
+    let code_lines = git_grep(&x.args.git, x.start, Some(&prv().keys_code_pat), &[]);
     let blobs = KBlobs::load(&x.args.git, &[x.start.to_string()], &kp);
     let bm = blobs.index(x.start, nf);
     let km = kina_model(x.docs, &code_lines, &kp, &pr, &known, Some(&bm), nf, true, false);
@@ -10746,11 +10931,7 @@ fn keys_law(x: &KLawIn) {
         let tcommits: Vec<&Vec<u32>> = x
             .commits
             .iter()
-            .filter(|c| match *tname {
-                "S003" => c.spec == x.s003,
-                "AU" => c.spec == x.s003 && c.au,
-                _ => true,
-            })
+            .filter(|c| law_in_truth(tname, c, x.tspec))
             .map(|c| &c.code)
             .collect();
         md.push_str(&format!("\n## Truth {tname}: {tdesc}\n\n{ncommits} commits, {} targets, {nf} candidates.\n\n| ranker | set size | hits | precision | recall | F1 | hits@10 / recall@10 | hits@20 / recall@20 |\n|---|---|---|---|---|---|---|---|\n", truth.len()));
@@ -10872,15 +11053,15 @@ fn keys_law(x: &KLawIn) {
     js.insert("scores".into(), serde_json::Value::Object(jt));
     // ---- specificity: are the files changed sections reach different from the unchanged ones'? ----
     let s3 = &x.truths[0].2.0;
-    md.push_str("\n## Section specificity (S003 truth)\n\n| chain | files reached only by changed sections: n / precision | only by unchanged: n / precision | by both: n / precision |\n|---|---|---|---|\n");
+    md.push_str("\n## Section specificity («ts» truth)\n\n| chain | files reached only by changed sections: n / precision | only by unchanged: n / precision | by both: n / precision |\n|---|---|---|---|\n");
     for (ki, cn) in KLAW_CHAINS.iter().enumerate() {
         let a: BTreeSet<u32> = cited_changed.iter().flat_map(|s| reach[s][ki].clone()).collect();
         let b: BTreeSet<u32> = cited_unchanged.iter().flat_map(|s| reach[s][ki].clone()).collect();
         let p = |v: Vec<&u32>| -> String { format!("{} / {:.3}", v.len(), v.iter().filter(|f| s3.contains(f)).count() as f64 / v.len().max(1) as f64) };
         md.push_str(&format!("| {cn} | {} | {} | {} |\n", p(a.difference(&b).collect()), p(b.difference(&a).collect()), p(a.intersection(&b).collect())));
     }
-    std::fs::write(format!("{dir}/keys_law_tables.md"), &md).expect("write keys law md");
-    std::fs::write(format!("{dir}/keys_law.json"), serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write keys law json");
+    kwrite(format!("{dir}/keys_law_tables.md"), &md).expect("write keys law md");
+    kwrite(format!("{dir}/keys_law.json"), &serde_json::to_string_pretty(&serde_json::Value::Object(js)).unwrap()).expect("write keys law json");
     eprintln!("[keys] law: {} resolved cited sections ({} changed) in {:.1}s -> {dir}/keys_law_tables.md", cited.len(), cited_changed.len(), t0.elapsed().as_secs_f64());
 }
 
@@ -11081,7 +11262,7 @@ fn glia_pre_text(git: &str, parent: &str, msg: &str, cache: &PreCache) -> (Optio
 /// units is narrowed by a spec number on its own message line, then to the rows still open (`- [ ]`, the
 /// task about to be done), then to the newest spec (highest number) when only spec units remain.
 fn kina_rows(docs: &[(String, String)], text: &str, stats: &mut BTreeMap<String, f64>) -> (Option<String>, BTreeSet<String>) {
-    let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+    let bare: BTreeSet<u8> = bare_kinds();
     let mut defs: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
     let mut vocab_h: BTreeSet<String> = BTreeSet::new();
     let mut kinds: BTreeSet<u8> = BTreeSet::new();
@@ -11091,7 +11272,7 @@ fn kina_rows(docs: &[(String, String)], text: &str, stats: &mut BTreeMap<String,
         if let Some((p, id)) = hyphen_ids(head).into_iter().next()
             && head.starts_with(&id)
         {
-            if !KINA_STANDARDS.contains(&p.as_str()) {
+            if !any_eq(&prv().id_standards, &p) {
                 vocab_h.insert(p);
                 defined.push(id);
             }
@@ -11237,7 +11418,7 @@ fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: O
                 .collect();
             wiki_revs.sort();
             let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
-            let maybe = |m: &str| !hyphen_ids(m).is_empty() || !bare_ids(m, &KINA_BARE.iter().copied().collect()).is_empty();
+            let maybe = |m: &str| !hyphen_ids(m).is_empty() || !bare_ids(m, &bare_kinds()).is_empty();
             let got: Vec<(usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>)> = (0..n)
                 .into_par_iter()
                 .filter(|&k| maybe(&commits[k].msg))
@@ -12173,29 +12354,27 @@ fn round1_report(label: &str, names: &[String], results: &[Out], queries: &[Quer
 }
 
 // ============================================================================
-// Round 2 (2026-10-18), C: a second law event, the AML/CTF Transitional Rules 2026 as made
-// (F2026L00393) -> compilation 1 (F2026C00452, 14 May 2026), traced through the resolved goal
-// layer (the keyed chains, `law:AU-TRULES:<n>`) to the code (`--law-impact kina --law-event tr
-// --keys on`). Truths as the first event's (the reform implementation; there is no commit that
-// implements this amendment itself, see the report).
+// Round 2 (2026-10-18), C: a second law event, a second instrument as made -> its first
+// consolidated version (both file stems in the private config), traced through the resolved goal
+// layer (the keyed chains, the private config's `key_trules` prefix) to the code
+// (`--law-impact kina --law-event tr --keys on`). Truths as the first event's (the first event's
+// implementing commits; no commit implements this amendment itself, see the report).
 // ============================================================================
 
-const LAW_TR_MADE_PDF: &str = "AU_AMLCTF_Transitional_Rules_2026_F2026L00393_as_made";
-const LAW_TR_TITLE: &str = "Anti-Money Laundering and Counter-Terrorism Financing Transitional Rules 2026";
-
-/// Page furniture of the Transitional Rules PDFs: the authorised-version line, the drafter's code,
-/// the compilation line, the running title (with its page number) and the contents' dot leaders.
+/// Page furniture of the second instrument's PDFs: the version line, the drafter's code, the
+/// consolidation line, the running title (with its page number) and the contents' dot leaders.
 fn tr_furniture(t: &str) -> bool {
+    let p = prv();
     let tn = t.replace(['\u{2011}', '\u{2010}'], "-");
     let t = tn.as_str();
-    if t.contains("Authorised Version F20") || t.starts_with("Compilation No.") || t.contains(".....") {
+    if p.furn_trules_contains.iter().any(|x| t.contains(x.as_str())) || p.furn_prefix.iter().any(|x| t.starts_with(x.as_str())) || t.contains(".....") {
         return true;
     }
-    if t.starts_with("OPC") && t.len() <= 16 && t.contains(" - ") {
+    if t.starts_with(p.furn_drafter_prefix.as_str()) && t.len() <= 16 && t.contains(" - ") {
         return true;
     }
     let ws: Vec<&str> = t.split_whitespace().collect();
-    let title: Vec<&str> = LAW_TR_TITLE.split_whitespace().collect();
+    let title: Vec<&str> = p.trules_title.split_whitespace().collect();
     let page = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit() || matches!(c, 'i' | 'v' | 'x'));
     if ws == title
         || (ws.len() == title.len() + 1 && ((page(ws[ws.len() - 1]) && ws[..ws.len() - 1] == title[..]) || (page(ws[0]) && ws[1..] == title[..])))
@@ -12218,22 +12397,23 @@ fn law_event_tr(args: &Args) {
     std::fs::create_dir_all(&args.law_out).expect("law out dir");
     let t0 = Instant::now();
     // ---- the diff ----
-    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, LAW_TR_MADE_PDF), tr_furniture));
-    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, LAW_TRULES_PDF), tr_furniture));
+    let pv = prv();
+    let (old, dups_old) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_trules_made), tr_furniture));
+    let (new, dups_new) = act_sections(&law_lines(&law_pdf(args, &pv.pdf_trules), tr_furniture));
     let (n_old, n_new) = (old.len(), new.len());
     let made: Vec<String> = old.iter().map(|s| s.num.clone()).collect();
     if let Ok(want) = std::env::var("GLIA_TR_DEBUG") {
-        for (tag, v) in [("as made", &old), ("comp 1", &new)] {
+        for (tag, v) in [("as made", &old), ("«tr_new_sp»", &new)] {
             if let Some(x) = v.iter().find(|x| x.num == want) {
-                eprintln!("[tr-debug] {tag} {want}: {}", x.text);
+                keprintln!("[tr-debug] {tag} {want}: {}", x.text);
             }
         }
     }
     let diff = law_diff(old, new, dups_old, dups_new);
     let changed: BTreeSet<String> = diff.order.iter().filter(|n| diff.status[*n] != "unchanged").cloned().collect();
     let count = |st: &str| diff.status.values().filter(|s| **s == st).count();
-    eprintln!(
-        "[law-tr] sections: as made {n_old}, compilation 1 {n_new}; unchanged {}, changed {}, added {}, repealed {}; dup numbers {} / {}",
+    keprintln!(
+        "[law-tr] sections: as made {n_old}, «tr_new» {n_new}; unchanged {}, changed {}, added {}, repealed {}; dup numbers {} / {}",
         count("unchanged"),
         count("changed"),
         count("added"),
@@ -12241,7 +12421,7 @@ fn law_event_tr(args: &Args) {
         diff.dups_old.len(),
         diff.dups_new.len()
     );
-    let mut tsv = String::from("section\tstatus\tdice\ttitle_as_made\ttitle_comp1\tcontext\n");
+    let mut tsv = String::from("section\tstatus\tdice\ttitle_as_made\ttitle_«tr_new_key»\tcontext\n");
     for n in &diff.order {
         let (o, w) = (diff.old.get(n), diff.new.get(n));
         tsv.push_str(&format!(
@@ -12253,7 +12433,7 @@ fn law_event_tr(args: &Args) {
             w.or(o).map_or("", |s| s.ctx.as_str())
         ));
     }
-    std::fs::write(format!("{}/law_sections_tr.tsv", args.law_out), tsv).expect("write tr sections");
+    kwrite(format!("{}/law_sections_tr.tsv", args.law_out), &tsv).expect("write tr sections");
     // ---- the code graph and the goal layer at the start ----
     let start = git_text(&args.git, &["rev-parse", &args.rev]).expect("rev-parse start").trim().to_string();
     let res = generate_one(&args.repo).expect("build");
@@ -12283,7 +12463,7 @@ fn law_event_tr(args: &Args) {
     let pr = PathRes::new(&g.paths);
     let d = build_docset(&docs, &pr);
     let mut cstats = BTreeMap::new();
-    let code = group_code(git_grep(&args.git, &start, Some(KINA_CODE_PAT), &[]), &pidx);
+    let code = group_code(git_grep(&args.git, &start, Some(&prv().code_pat), &[]), &pidx);
     let (toks, _, _) = kina_cites(&d, &code, nf, &mut cstats);
     let files_of = law_files_of(&toks);
     let compliance: Vec<u32> = (0..nf as u32).filter(|&f| !toks[f as usize].is_empty()).collect();
@@ -12309,17 +12489,17 @@ fn law_event_tr(args: &Args) {
     let branch_spec = law_branch_specs(&args.git, &start, &tip_names, &tasks);
     let ticks = law_ticks(&args.wiki, start_ct);
     let commits = law_commits(&args.git, &start, &tips, &pidx, &tasks, &branch_spec, &ticks);
-    let s003 = "specs/003-compliance-codification";
+    let tspec = pv.target_spec.as_str();
     let pick = |f: &dyn Fn(&LCommit) -> bool| -> LTruth {
         let cs: Vec<&LCommit> = commits.iter().filter(|c| f(c)).collect();
         (cs.iter().flat_map(|c| c.code.iter().copied()).collect(), cs.len(), cs.iter().flat_map(|c| c.code_new.iter().cloned()).collect())
     };
     let truths: Vec<(&str, &str, LTruth)> = vec![
-        ("S003", "PROXY: the spec 003 commits (the reform implementation); no commit implements this amendment", pick(&|c: &LCommit| c.spec == s003)),
-        ("AU", "PROXY: S003 commits whose task text or message names an AU AML/CTF-regime term", pick(&|c: &LCommit| c.spec == s003 && c.au)),
+        (pv.truth_spec.as_str(), t("tr_truth_spec_desc"), pick(&|c: &LCommit| c.spec == tspec)),
+        (pv.truth_regime.as_str(), t("tr_truth_regime_desc"), pick(&|c: &LCommit| c.spec == tspec && c.regime)),
         ("ALL", "PROXY: every commit after the start", pick(&|_: &LCommit| true)),
     ];
-    eprintln!("[law-tr] goal layer at wiki {wrev}; {} reform commits; built in {:.1}s", commits.len(), t0.elapsed().as_secs_f64());
+    keprintln!("[law-tr] goal layer at wiki {wrev}; {} «impl» commits; built in {:.1}s", commits.len(), t0.elapsed().as_secs_f64());
     keys_law(&KLawIn {
         args,
         g: &g,
@@ -12328,7 +12508,7 @@ fn law_event_tr(args: &Args) {
         start: &start,
         truths: &truths,
         commits: &commits,
-        s003,
+        tspec,
         changed: &changed,
         status: &diff.status,
         bm_all: &bm_all,
@@ -12336,8 +12516,8 @@ fn law_event_tr(args: &Args) {
         comp_score: &comp_score,
         raw_sets: Vec::new(),
         raw_cited: (0, 0),
-        prefix: "law:AU-TRULES:",
-        inst: "AU AML/CTF Transitional Rules 2026",
+        prefix: pv.key_trules.as_str(),
+        inst: t("trules_full"),
         extra_secs: made,
     });
     eprintln!("[law-tr] done in {:.1}s -> {}/keys_law_tables.md", t0.elapsed().as_secs_f64(), args.keys_out);
@@ -12768,7 +12948,7 @@ fn r2_build(args: &Args, commits: &[Commit], test_idx: &[usize], paths: &[String
                         });
                         docs.extend(lines.iter().cloned());
                     }
-                    let code_lines = git_grep(&args.git, &p, Some(KEYS_CODE_PAT), &[]);
+                    let code_lines = git_grep(&args.git, &p, Some(&prv().keys_code_pat), &[]);
                     let m = kina_model(&docs, &code_lines, &kp, &pr, &known, None, nf, false, false);
                     let (c, r, h) = r2_kina_commit(&m, subject(&commits[k].msg));
                     kbump(&mut st, if h { "r2_test_commits_with_subject_id" } else { "r2_test_commits_without_subject_id" });
@@ -13031,7 +13211,7 @@ fn r3_keys(args: &Args, commits: &[Commit], paths: &[String], stats: &mut BTreeM
                 wtext.lines().filter_map(|l| l.split_once('\x1f').map(|(s, ct)| (ct.trim().parse().unwrap_or(0), s.to_string()))).collect();
             wiki_revs.sort();
             let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
-            let bare: BTreeSet<u8> = KINA_BARE.iter().copied().collect();
+            let bare: BTreeSet<u8> = bare_kinds();
             let idx: Vec<usize> = (0..n)
                 .filter(|&k| {
                     let s = subject(&commits[k].msg);
@@ -13053,7 +13233,7 @@ fn r3_keys(args: &Args, commits: &[Commit], paths: &[String], stats: &mut BTreeM
                         });
                         docs.extend(lines.iter().cloned());
                     }
-                    let code_lines = git_grep(&args.git, &p, Some(KEYS_CODE_PAT), &[]);
+                    let code_lines = git_grep(&args.git, &p, Some(&prv().keys_code_pat), &[]);
                     let m = kina_model(&docs, &code_lines, &kp, &pr, &known, None, paths.len(), false, false);
                     r2_kina_commit(&m, subject(&commits[k].msg)).0
                 })
