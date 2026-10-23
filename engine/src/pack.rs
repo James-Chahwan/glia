@@ -26,13 +26,15 @@
 //!    [`PackArgs::candidates`], and are tier `derived` (a walk over extracted
 //!    edges). The PPR runs over the [`PackArgs::rank_cache`]'s `PprIndex`
 //!    for that config (bit-identical to a fresh walk; a transient cache when
-//!    none is given). **Ranking (EA.6).** Before the cut, the neighbours are
-//!    reordered by [`order_rows`] over the measured file ranking
+//!    none is given). **Ranking (EA.6, EA.6b).** Before the cut, the
+//!    neighbours are reordered over the measured file ranking
 //!    ([`rank_files`], [`PackArgs::ranking`]) of the seeds' files: under the
-//!    default `H10` the neighbours in files that co-changed with the seeds'
-//!    (the history snapshot under a repo root the cache knows) come first, by
-//!    the file ranking, the rest keep the score order; `PT*` / `B0` group the
-//!    neighbours by file. With `Ranking::head()`, no snapshot or no seed
+//!    default `H10` each file that co-changed with the seeds' (the history
+//!    snapshot under a repo root the cache knows) lifts its best (first PPR)
+//!    row to the front, by the file ranking, and every other row keeps the
+//!    score order (ruling EA-2b: pack lifts FILES, not all their rows, so one
+//!    big co-changed file cannot crowd the others out of the cut); `PT*` /
+//!    `B0` group the other rows by file ([`order_rows`]' tier 1). With `Ranking::head()`, no snapshot or no seed
 //!    file, nothing moves. Every candidate carries an integer weight: a seed
 //!    `2_000_000_000 - rank`, a neighbour `round(s_i * 1e9)` where `s_i` is
 //!    the i-th largest neighbour score (the 0.5.2 weight profile, assigned
@@ -96,15 +98,15 @@
 //! seed_files=<s> cochange_files=<c> files=0 lifted=<l>
 //! closure_index=<hit|built> lifted_files=<f> max_file_share=<m>/<k>` (or
 //! `[rank] surface=pack ranking=<r> files=0 reason=no_seed_file
-//! closure_index=<..>`), where `lifted` counts the rows the ranking moved
-//! earlier, and `max_file_share` is the most of the `k` cut neighbours one
-//! co-changed file took (ruling EA-2: no per-file cap, the share recorded) —
+//! closure_index=<..>`), where `lifted` counts the lifted rows (one per
+//! lifted file), `lifted_files` those inside the cut, and `max_file_share`
+//! the most of the `k` cut neighbours any one file holds (EA.6b) —
 //! grep `^\[rank\] surface=pack`; then
 //! `[pack] query=<q> seeds=<S> candidates=<C> packed=<P> (full=<F> preview=<V>
 //! outline=<O> qname=<Q>) tokens=<U>/<B> bytes=<N> bpt=<x.y> rerenders=<R>`
 //! (one line) — grep `^\[pack\] query=`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use glia_activation::{Direction, Specificity};
@@ -117,7 +119,7 @@ use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::find::{FindOptions, find_nodes};
 use crate::identity::Collapse;
-use crate::rank::{RankCache, Ranking, SourceKey, order_rows, rank_files};
+use crate::rank::{FileRanking, RankBase, RankCache, Ranking, SourceKey, order_rows, rank_files};
 
 /// `PackArgs::default().budget_tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8000;
@@ -549,15 +551,15 @@ struct RankedRows {
     /// None: no seed has a candidate file, the order is kept.
     seed_files: Option<usize>,
     cochange_files: usize,
-    /// Rows that moved earlier than the score order put them.
+    /// Lifted rows: one per co-changed file (EA.6b).
     lifted: usize,
     /// Per neighbour row (in the final order), its candidate file and whether
-    /// it was lifted (tier 0: a co-changed file under co-change first).
+    /// it was lifted (its co-changed file's best row).
     rows: Vec<(Option<u32>, bool)>,
 }
 
 /// Step 2b: the measured file ranking of the seeds' files (EA.4) and the
-/// permutation [`order_rows`] gives for `scored`'s rows, applied in place.
+/// permutation [`lift_files`] gives for `scored`'s rows, applied in place.
 /// Seed files are the seeds' distinct candidate files in seed order; a seed
 /// with no candidate file is an extra seed node. With no seed file, nothing
 /// moves.
@@ -598,29 +600,16 @@ fn rank_rows(
             && fr.c0.get(f as usize).is_some_and(|&c| c > 0.0)
     };
     let cochange_files = (0..fr.c0.len() as u32).filter(|&f| cochanged(f)).count();
-    let perm = order_rows(&row_files, &seed_files, &fr);
-    let (rows, lifted) = match perm {
-        None => (
-            row_files
-                .iter()
-                .map(|&f| (f, f.is_some_and(cochanged)))
-                .collect(),
-            0,
-        ),
-        Some(perm) => {
-            let lifted = perm.iter().enumerate().filter(|&(to, &from)| to < from).count();
-            let mut taken: Vec<Option<(NodeId, f64)>> = scored.drain(..).map(Some).collect();
-            let mut rows = Vec::with_capacity(perm.len());
-            for &i in &perm {
-                if let Some(row) = taken.get_mut(i).and_then(Option::take) {
-                    scored.push(row);
-                    let f = row_files.get(i).copied().flatten();
-                    rows.push((f, f.is_some_and(cochanged)));
-                }
-            }
-            (rows, lifted)
+    let (perm, lift) = lift_files(&row_files, &seed_files, &fr, &cochanged);
+    let lifted = lift.len();
+    let mut taken: Vec<Option<(NodeId, f64)>> = scored.drain(..).map(Some).collect();
+    let mut rows = Vec::with_capacity(perm.len());
+    for (to, &i) in perm.iter().enumerate() {
+        if let Some(row) = taken.get_mut(i).and_then(Option::take) {
+            scored.push(row);
+            rows.push((row_files.get(i).copied().flatten(), to < lifted));
         }
-    };
+    }
     RankedRows {
         ranking,
         seed_files: Some(seed_files.len()),
@@ -630,10 +619,65 @@ fn rank_rows(
     }
 }
 
+/// Step 2b's permutation (EA.6b, ruling EA-2b: pack lifts co-changed FILES,
+/// not their rows), as row indices in the new order, and the lifted rows.
+///
+/// - Lifted: each co-changed file's (the same predicate as [`order_rows`]'
+///   tier 0: co-change first, C0 > 0, no seed file, a place in `fr.order`)
+///   FIRST row in the input (PPR) order, by the file's place.
+/// - Every other row, a lifted file's later rows included: the input order
+///   for base `P1`; for a grouped base (`PT*` / `B0`), [`order_rows`]' tier 1
+///   grouping by the same file order, co-change left out (EA.6's, unchanged).
+///
+/// So pack's file roll-up (first appearance) reads the H10 file order while
+/// the rest of the budget keeps PPR's row order.
+fn lift_files(
+    row_files: &[Option<u32>],
+    seed_files: &[u32],
+    fr: &FileRanking,
+    cochanged: &dyn Fn(u32) -> bool,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut pos: Vec<usize> = vec![usize::MAX; fr.keys.len().max(fr.c0.len())];
+    for (p, &f) in fr.order.iter().enumerate() {
+        if let Some(slot) = pos.get_mut(f as usize) {
+            *slot = p;
+        }
+    }
+    let place = |f: u32| pos.get(f as usize).copied().filter(|&p| p != usize::MAX);
+    let mut firsts: Vec<(usize, usize)> = Vec::new();
+    let mut done: BTreeSet<u32> = BTreeSet::new();
+    for (i, f) in row_files.iter().enumerate() {
+        if let Some(f) = *f
+            && cochanged(f)
+            && let Some(p) = place(f)
+            && done.insert(f)
+        {
+            firsts.push((p, i));
+        }
+    }
+    firsts.sort_unstable();
+    let lift: Vec<usize> = firsts.into_iter().map(|(_, i)| i).collect();
+    let lifted: BTreeSet<usize> = lift.iter().copied().collect();
+    let rest: Vec<usize> = (0..row_files.len()).filter(|i| !lifted.contains(i)).collect();
+    let rest = if matches!(fr.ranking.base, RankBase::Ppr) {
+        rest
+    } else {
+        let mut tier1 = fr.clone();
+        tier1.ranking.cochange_first = false;
+        let rest_files: Vec<Option<u32>> = rest.iter().map(|&i| row_files[i]).collect();
+        match order_rows(&rest_files, seed_files, &tier1) {
+            Some(p) => p.into_iter().map(|j| rest[j]).collect(),
+            None => rest,
+        }
+    };
+    let mut perm = lift.clone();
+    perm.extend(rest);
+    (perm, lift)
+}
+
 /// The `[rank] surface=pack` line: once per call, before `[pack] query=`.
-/// `lifted_files` / `max_file_share` record how many of the cut candidates
-/// the co-changed files took (ruling EA-2: no per-file cap; the share is
-/// recorded so the gate can show whether one is needed).
+/// `lifted_files` counts the lifted rows inside the cut, `max_file_share` the
+/// most of the cut any one file holds in the final order (EA.6b).
 fn rank_marker(r: &RankedRows, kept: &[(NodeId, f64)], closure_index: &str) {
     let Some(seed_files) = r.seed_files else {
         eprintln!(
@@ -643,9 +687,11 @@ fn rank_marker(r: &RankedRows, kept: &[(NodeId, f64)], closure_index: &str) {
         return;
     };
     let mut per_file: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut lifted_files = 0usize;
     for (f, lifted) in r.rows.iter().take(kept.len()) {
-        if let (Some(f), true) = (f, lifted) {
+        if let Some(f) = f {
             *per_file.entry(*f).or_insert(0) += 1;
+            lifted_files += usize::from(*lifted);
         }
     }
     let max_share = per_file.values().copied().max().unwrap_or(0);
@@ -654,7 +700,7 @@ fn rank_marker(r: &RankedRows, kept: &[(NodeId, f64)], closure_index: &str) {
         r.ranking.harness_name(),
         r.cochange_files,
         r.lifted,
-        per_file.len(),
+        lifted_files,
         kept.len(),
     );
 }

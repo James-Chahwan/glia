@@ -1,4 +1,4 @@
-//! EA.6: pack / pack_ids ranked by the selected `Ranking`.
+//! EA.6 / EA.6b: pack / pack_ids ranked by the selected `Ranking`.
 //!
 //! The tree: `svc/core.py` defines `core(x)`; `svc/a.py`, `b.py`, `c.py`
 //! each define one function calling it; `svc/d.py` defines `d1` and `d2`,
@@ -9,9 +9,10 @@
 //! Without history, or under `Ranking::head()`, the pack is the 0.5.2 pack
 //! byte for byte (the PPR scores come from a cached `PprIndex`, bit-identical,
 //! and every neighbour keeps its 0.5.2 weight). Under the default `H10` with a
-//! cache that knows the repo root, the neighbours of co-changed files come
+//! cache that knows the repo root, each co-changed file's best row comes
 //! first, in the file ranking's order (c.py, then b.py; page.ts is never
-//! reached by the PPR so adds no node), then the rest in the 0.5.2 order.
+//! reached by the PPR so adds no node), then every other row in the 0.5.2
+//! order (EA.6b, ruling EA-2b: pack lifts FILES, not all their rows).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -65,12 +66,16 @@ fn file(p: &str) -> HistoryFile {
 
 /// Commits from `groups` given oldest first, returned newest first.
 fn history() -> Vec<HistoryCommit> {
-    let groups: Vec<(Vec<&str>, usize)> = vec![
+    commits(vec![
         (vec![CORE, C], 5),
         (vec![CORE, PAGE], 4),
         (vec![CORE, B], 2),
         (vec![CORE], 3),
-    ];
+    ])
+}
+
+/// Commits from `groups` given oldest first, returned newest first.
+fn commits(groups: Vec<(Vec<&str>, usize)>) -> Vec<HistoryCommit> {
     let mut out = Vec::new();
     let mut i = 0usize;
     for (paths, n) in groups {
@@ -95,15 +100,18 @@ struct Built {
 }
 
 fn build(with_history: bool) -> Built {
+    build_with(tree(), if with_history { Some(history()) } else { None })
+}
+
+fn build_with(files: Vec<(&'static str, String)>, hist: Option<Vec<HistoryCommit>>) -> Built {
     let d = tempfile::tempdir().expect("tempdir");
     let root: &Path = d.path();
-    for (p, text) in tree() {
+    for (p, text) in files {
         let path = root.join(p);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(path, text).expect("write");
     }
-    if with_history {
-        let h = history();
+    if let Some(h) = hist {
         let head = h.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
         write_history(root, HistoryMeta::new(head, 2000, None, String::new()), &h, &[])
             .expect("write snapshot");
@@ -209,8 +217,45 @@ fn head_ranking_without_a_cache_is_the_0_5_2_pack() {
     assert_eq!(json(&with_cache), json(&p));
 }
 
+/// (file, qname) per neighbour row.
+fn neighbours(p: &Pack) -> Vec<(String, String)> {
+    p.nodes
+        .iter()
+        .filter(|n| n.reason == "neighbour")
+        .map(|n| (n.file.clone().unwrap_or_default(), n.qname.clone()))
+        .collect()
+}
+
+/// The 0.5.2 order with each lifted file's first row moved to the front, in
+/// `lift` order (EA.6b, ruling EA-2b: pack lifts FILES, one best row each).
+fn file_lift(head: &[(String, String)], lift: &[&str]) -> Vec<String> {
+    let mut front: Vec<usize> = Vec::new();
+    for f in lift {
+        if let Some(i) = head.iter().position(|(hf, _)| hf == f) {
+            front.push(i);
+        }
+    }
+    let mut want: Vec<String> = front.iter().map(|&i| head[i].1.clone()).collect();
+    want.extend(
+        head.iter()
+            .enumerate()
+            .filter(|(i, _)| !front.contains(i))
+            .map(|(_, (_, q))| q.clone()),
+    );
+    want
+}
+
+/// The most neighbour rows one file holds.
+fn max_share(p: &Pack) -> usize {
+    let mut per: BTreeMap<String, usize> = BTreeMap::new();
+    for f in files_of(p) {
+        *per.entry(f).or_insert(0) += 1;
+    }
+    per.values().copied().max().unwrap_or(0)
+}
+
 #[test]
-fn cochange_first_lifts_the_cochanged_files_neighbours() {
+fn cochange_first_lifts_the_cochanged_files_best_rows() {
     let b = build(true);
     let head_all = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, usize::MAX));
     let ranked = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(b.cache()), 6));
@@ -219,23 +264,9 @@ fn cochange_first_lifts_the_cochanged_files_neighbours() {
     let all = files_of(&head_all);
     assert!(all.iter().any(|f| f == C) && all.iter().any(|f| f == B), "{all:?}");
     assert!(!all.iter().any(|f| f == PAGE), "page.ts is not PPR-reached: {all:?}");
-    // c.py's rows, then b.py's, then the rest, each in head order.
-    let head_q: Vec<(String, String)> = head_all
-        .nodes
-        .iter()
-        .filter(|n| n.reason == "neighbour")
-        .map(|n| (n.file.clone().unwrap_or_default(), n.qname.clone()))
-        .collect();
-    let mut want: Vec<String> = Vec::new();
-    for lift in [C, B] {
-        want.extend(head_q.iter().filter(|(f, _)| f == lift).map(|(_, q)| q.clone()));
-    }
-    want.extend(
-        head_q
-            .iter()
-            .filter(|(f, _)| f != C && f != B)
-            .map(|(_, q)| q.clone()),
-    );
+    // c.py's best row, then b.py's best row, then every other row (c.py's and
+    // b.py's later rows included) in head order.
+    let mut want = file_lift(&neighbours(&head_all), &[C, B]);
     want.truncate(5);
 
     let got: Vec<String> = ranked
@@ -248,17 +279,9 @@ fn cochange_first_lifts_the_cochanged_files_neighbours() {
     assert_eq!(ranked.nodes[0].reason, "seed");
     let ranks: Vec<usize> = ranked.nodes.iter().map(|n| n.rank).collect();
     assert_eq!(ranks, (1..=ranks.len()).collect::<Vec<_>>(), "every candidate packs");
-    // The d.py tier's first row by the 0.5.2 tie rule (id asc).
-    let d1 = b.merged.node_id_by_qname("svc::d::d1").expect("d1");
-    let d2 = b.merged.node_id_by_qname("svc::d::d2").expect("d2");
-    let d_first = if d1.0 < d2.0 { "svc::d::d1" } else { "svc::d::d2" };
-    assert_eq!(
-        got,
-        ["svc::c::c", "svc::c", "svc::b::b", "svc::b", d_first],
-        "measured at landing"
-    );
     let f = files_of(&ranked);
-    assert_eq!(f[0], C, "{f:?}");
+    assert_eq!(&f[..2], [C, B], "{f:?}");
+    assert_eq!(got[..2], ["svc::c::c", "svc::b::b"], "measured at landing");
     assert_ne!(json(&ranked), json(&pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, 6))));
 }
 
@@ -321,4 +344,66 @@ fn ppr_wide_groups_neighbours_by_the_file_order() {
             seen.push(*w);
         }
     }
+}
+
+const BIG: &str = "svc/big.py";
+
+/// (6): one co-changed file holds more rows than the candidate cut (its
+/// rows past big0 sit two hops from the seed). EA.6 put
+/// every one of its rows first and crowded the other files out; the file lift
+/// moves only its best row, so every file the 0.5.2 pack reaches stays, and no
+/// file takes more of the cut than under PPR alone.
+#[test]
+fn a_big_cochanged_file_does_not_crowd_out_the_others() {
+    let mut files = tree();
+    // big0 calls core; big1..big8 call big0, two hops out, so PPR ranks them
+    // below a / b / c / d.
+    let mut big = String::from("from svc.core import core\n\n\ndef big0():\n    return core(0)\n");
+    for i in 1..9 {
+        big.push_str(&format!("\n\ndef big{i}():\n    return big0() + {i}\n"));
+    }
+    files.push((BIG, big));
+    let hist = commits(vec![(vec![CORE, BIG], 5), (vec![CORE], 2)]);
+    let b = build_with(files, Some(hist));
+    let cut = 6;
+    let head = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, cut));
+    let head_all = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, usize::MAX));
+    let ranked = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(b.cache()), cut));
+
+    let big_rows = files_of(&head_all).iter().filter(|f| *f == BIG).count();
+    assert!(big_rows > cut, "big.py holds more rows than the cut: {big_rows}");
+
+    let mut want = file_lift(&neighbours(&head_all), &[BIG]);
+    want.truncate(cut - 1);
+    let got: Vec<String> = neighbours(&ranked).into_iter().map(|(_, q)| q).collect();
+    assert_eq!(got, want, "{}", json(&ranked));
+    assert_eq!(files_of(&ranked)[0], BIG);
+
+    let kept = files_of(&ranked);
+    for f in files_of(&head) {
+        assert!(kept.contains(&f), "{f} dropped: head {:?} ranked {kept:?}", files_of(&head));
+    }
+    assert!(
+        max_share(&ranked) <= max_share(&head),
+        "max_file_share {} > PPR's {}",
+        max_share(&ranked),
+        max_share(&head)
+    );
+
+    // EA.6's row lift (order_rows' tier 0) on the same rows would have given
+    // big.py the whole cut: the fixture tells the two rules apart.
+    let cache = b.cache();
+    let fi = cache.files(&b.merged);
+    let core_file = fi.file_of_node(b.core()).expect("core's file");
+    let fr = rank_files(&b.merged, &cache, &[core_file], &[], Ranking::default());
+    let neigh: Vec<NodeId> = head_all
+        .nodes
+        .iter()
+        .filter(|n| n.reason == "neighbour")
+        .map(|n| NodeId(n.id))
+        .collect();
+    let row_files: Vec<Option<u32>> = neigh.iter().map(|&id| fi.file_of_node(id)).collect();
+    let perm = order_rows(&row_files, &[core_file], &fr).expect("EA.6 lifts");
+    let big_file = fi.file_of_node(neigh[perm[0]]);
+    assert!(perm.iter().take(cut - 1).all(|&i| row_files[i] == big_file), "EA.6 crowds");
 }
