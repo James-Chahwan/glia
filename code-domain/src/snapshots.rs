@@ -11,11 +11,21 @@
 //!   blame was not requested;
 //! - `meta.json` — the [`HistoryMeta`], written LAST. Its `data_hash` covers
 //!   `commits.jsonl` then `blame.jsonl`, so a reader that finds a meta whose
-//!   hash matches has complete data ([`read_history`] checks it).
+//!   hash matches has complete data ([`read_history`] checks it);
+//! - `messages.jsonl` (version 2, EB.1) — one [`HistoryMessage`] per commit
+//!   row, in commit order: the subject and body ([`clean_message`]: trailers
+//!   dropped, redacted, capped), the author time and the merged-branch label.
+//!   It is optional (`glia history sync --no-messages`), is outside
+//!   `data_hash` (its own `messages_hash` in the meta), and the build never
+//!   reads it: only query-time answers do, through [`read_history_messages`].
+//!
+//! A version 1 snapshot (0.5.2) has no messages keys and reads as before.
 //!
 //! Neither a wall-clock timestamp nor an author identity is ever stored: a
 //! re-sync at the same HEAD writes identical bytes, and per-person attribution
-//! (team ownership) is out of scope. Every file is written `<file>.tmp` then
+//! (team ownership) is out of scope. Commit messages are untrusted text: every
+//! subject, body and branch label passes [`redact_untrusted`] when it is
+//! written AND when it is read back. Every file is written `<file>.tmp` then
 //! renamed; the store's input fingerprint (LF.1d) skips `*.tmp`.
 //!
 //! The test-report snapshot (LF.6a) is `<repo>/.glia/test-snapshot/`. Since
@@ -72,8 +82,18 @@ pub const HISTORY_COMMITS_FILE: &str = "commits.jsonl";
 pub const HISTORY_BLAME_FILE: &str = "blame.jsonl";
 /// A snapshot's metadata file, written after its data files.
 pub const META_FILE: &str = "meta.json";
-/// [`HistoryMeta::version`] this module writes and accepts.
-pub const HISTORY_VERSION: u32 = 1;
+/// `messages.jsonl`: one [`HistoryMessage`] per commit row, in commit order (EB.1).
+pub const HISTORY_MESSAGES_FILE: &str = "messages.jsonl";
+/// Longest [`HistoryMessage::b`] kept, in chars.
+pub const MESSAGE_BODY_CAP: usize = 4096;
+/// Longest [`HistoryMessage::s`] kept, in chars.
+pub const SUBJECT_CAP: usize = 300;
+/// [`HistoryMeta::version`] this module writes: 2 adds the optional
+/// `messages.jsonl` sidecar and the meta's `messages` / `messages_hash` (EB.1).
+pub const HISTORY_VERSION: u32 = 2;
+/// Every [`HistoryMeta::version`] [`read_history`] accepts: a version 1
+/// snapshot (0.5.2) reads exactly as before.
+pub const HISTORY_VERSIONS: &[u32] = &[1, 2];
 /// [`HistoryMeta::generator`] of `glia history sync`.
 pub const HISTORY_GENERATOR: &str = "glia history sync";
 
@@ -81,7 +101,8 @@ pub const HISTORY_GENERATOR: &str = "glia history sync";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryMeta {
-    /// [`HISTORY_VERSION`]; any other value reads as an incomplete snapshot.
+    /// [`HISTORY_VERSION`] (or 1, as read from a 0.5.2 snapshot); a value
+    /// outside [`HISTORY_VERSIONS`] reads as an incomplete snapshot.
     pub version: u32,
     /// Who wrote it ([`HISTORY_GENERATOR`]).
     pub generator: String,
@@ -102,6 +123,12 @@ pub struct HistoryMeta {
     pub blame_files: usize,
     /// [`data_hash`] over `commits.jsonl` then `blame.jsonl`.
     pub data_hash: String,
+    /// Rows of `messages.jsonl`; `None` when the sync kept no messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<usize>,
+    /// [`data_hash`] over `messages.jsonl` alone; `None` with `messages`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_hash: Option<String>,
 }
 
 impl HistoryMeta {
@@ -119,8 +146,111 @@ impl HistoryMeta {
             relative_to,
             blame_files: 0,
             data_hash: String::new(),
+            messages: None,
+            messages_hash: None,
         }
     }
+}
+
+/// One commit's message (EB.1), a row of `messages.jsonl`: row i belongs to
+/// row i of `commits.jsonl`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryMessage {
+    /// Full commit sha, the same as its commit row's `c`.
+    pub c: String,
+    /// Author time, unix seconds (`%at`).
+    #[serde(default)]
+    pub at: i64,
+    /// The subject: the first non-empty line, trimmed, at most
+    /// [`SUBJECT_CAP`] chars, redacted. `""` when git gave no message.
+    pub s: String,
+    /// The body: the lines after the subject, trailers dropped, trimmed, at
+    /// most [`MESSAGE_BODY_CAP`] chars, redacted ([`clean_message`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub b: String,
+    /// The branch the commit was merged in on, as its merge's subject names
+    /// it (`pr#12`, `feat-x`, `lane@wave`), redacted; `None` for a commit no
+    /// labelled merge brought in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub br: Option<String>,
+}
+
+/// Line prefixes (compared trimmed and ASCII-lowercased) [`clean_message`]
+/// drops wherever they sit: the identity-bearing trailers.
+pub const MESSAGE_TRAILER_PREFIXES: &[&str] = &[
+    "co-authored-by:",
+    "signed-off-by:",
+    "claude-session:",
+    "reviewed-by:",
+    "acked-by:",
+    "tested-by:",
+    "reported-by:",
+    "helped-by:",
+    "cc:",
+];
+
+/// Normalise a raw commit message (`%B`) into (subject, body, trailer lines
+/// dropped):
+/// - every line whose trimmed, ASCII-lowercased text starts with one of
+///   [`MESSAGE_TRAILER_PREFIXES`] is dropped;
+/// - then the final paragraph is dropped when every non-empty line of it is
+///   `<token>: <value>` with token `[A-Za-z][A-Za-z0-9-]*` (git's trailer
+///   block), unless it is the subject's own paragraph;
+/// - the subject is the first non-empty line, trimmed; the body the lines
+///   after it joined with `\n`, trimmed;
+/// - both pass [`redact_untrusted`] whole, then are cut to [`SUBJECT_CAP`] /
+///   [`MESSAGE_BODY_CAP`] chars on a char boundary (redaction first, so a
+///   token the cap would split is still recognised).
+pub fn clean_message(raw: &str) -> (String, String, usize) {
+    let (s, b, trailers, _) = clean_message_counted(raw);
+    (s, b, trailers)
+}
+
+/// [`clean_message`], plus how many spans [`redact_untrusted`] replaced.
+pub fn clean_message_counted(raw: &str) -> (String, String, usize, usize) {
+    let mut trailers = 0;
+    let mut lines: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let low = line.trim().to_ascii_lowercase();
+        if MESSAGE_TRAILER_PREFIXES.iter().any(|p| low.starts_with(p)) {
+            trailers += 1;
+        } else {
+            lines.push(line);
+        }
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    // The final paragraph: after the last blank line.
+    if let Some(blank) = lines.iter().rposition(|l| l.trim().is_empty()) {
+        let para = &lines[blank + 1..];
+        let subject_before = lines[..blank].iter().any(|l| !l.trim().is_empty());
+        if subject_before && !para.is_empty() && para.iter().all(|l| is_trailer_line(l)) {
+            trailers += para.len();
+            lines.truncate(blank);
+        }
+    }
+    let first = lines.iter().position(|l| !l.trim().is_empty());
+    let (subject, body) = match first {
+        Some(i) => (lines[i].trim().to_string(), lines[i + 1..].join("\n").trim().to_string()),
+        None => (String::new(), String::new()),
+    };
+    let (mut subject, n1) = redact_untrusted(&subject);
+    let (mut body, n2) = redact_untrusted(&body);
+    truncate_chars(&mut subject, SUBJECT_CAP);
+    truncate_chars(&mut body, MESSAGE_BODY_CAP);
+    (subject, body, trailers, n1 + n2)
+}
+
+/// `<token>: <value>`, token `[A-Za-z][A-Za-z0-9-]*`, value non-empty.
+fn is_trailer_line(line: &str) -> bool {
+    let line = line.trim();
+    let Some((token, value)) = line.split_once(": ") else { return false };
+    let mut chars = token.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !value.trim().is_empty()
 }
 
 /// One non-merge commit: its sha, committer time and the files it touched.
@@ -194,12 +324,31 @@ pub fn history_dir(root: &Path) -> PathBuf {
 /// one that pairs an old meta with new data.
 ///
 /// `meta.commits`, `meta.blame_files` and `meta.data_hash` are derived here
-/// from the rows, whatever the caller set. Returns the meta as written.
+/// from the rows, whatever the caller set. Returns the meta as written. Keeps
+/// no messages (and removes a stale `messages.jsonl`): it is
+/// [`write_history_with_messages`] with `None`.
 pub fn write_history(
+    root: &Path,
+    meta: HistoryMeta,
+    commits: &[HistoryCommit],
+    blame: &[BlameFile],
+) -> Result<HistoryMeta, String> {
+    write_history_with_messages(root, meta, commits, blame, None)
+}
+
+/// [`write_history`], plus the `messages.jsonl` sidecar (EB.1) when
+/// `messages` is `Some`: rows in the order given (one per commit row, in
+/// commit order), written before `meta.json`, with `meta.messages` and
+/// `meta.messages_hash` derived from them. With `None` a stale
+/// `messages.jsonl` is removed and both meta fields are `None`. `data_hash`
+/// covers `commits.jsonl` then `blame.jsonl` only, so the build's inputs are
+/// the same bytes with or without messages.
+pub fn write_history_with_messages(
     root: &Path,
     mut meta: HistoryMeta,
     commits: &[HistoryCommit],
     blame: &[BlameFile],
+    messages: Option<&[HistoryMessage]>,
 ) -> Result<HistoryMeta, String> {
     let dir = history_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -212,12 +361,79 @@ pub fn write_history(
     let blame_bytes = jsonl(blame_sorted.iter().copied())?;
     write_atomic(&dir.join(HISTORY_COMMITS_FILE), &commits_bytes)?;
     write_atomic(&dir.join(HISTORY_BLAME_FILE), &blame_bytes)?;
+    let messages_path = dir.join(HISTORY_MESSAGES_FILE);
+    match messages {
+        Some(rows) => {
+            let bytes = jsonl(rows.iter())?;
+            write_atomic(&messages_path, &bytes)?;
+            meta.messages = Some(rows.len());
+            meta.messages_hash = Some(data_hash(&[&bytes]));
+        }
+        None => {
+            remove_if_present(&messages_path)?;
+            meta.messages = None;
+            meta.messages_hash = None;
+        }
+    }
 
+    meta.version = HISTORY_VERSION;
     meta.commits = commits.len();
     meta.blame_files = blame.len();
     meta.data_hash = data_hash(&[&commits_bytes, &blame_bytes]);
     write_atomic(&meta_path, &meta_bytes(&meta)?)?;
     Ok(meta)
+}
+
+/// The commit messages of `snap` (EB.1), read from
+/// `<root>/.glia/history-snapshot/messages.jsonl`, row i belonging to
+/// `snap.commits[i]`. `None`, silently, when the sync kept no messages
+/// (`meta.messages` is `None`: `--no-messages`, or a version 1 snapshot).
+/// A sidecar that is absent, does not hash to `meta.messages_hash`, does not
+/// parse, has another row count, or whose row i names another sha than
+/// commit i is `None` plus one `[history] messages incomplete` stderr line.
+/// Every subject, body and label is redacted again as it is read, so a
+/// hand-edited sidecar cannot carry a secret in.
+pub fn read_history_messages(root: &Path, snap: &HistorySnapshot) -> Option<Vec<HistoryMessage>> {
+    let expected = snap.meta.messages?;
+    let dir = history_dir(root);
+    match load_history_messages(&dir, snap, expected) {
+        Ok(rows) => Some(rows),
+        Err(reason) => {
+            eprintln!("[history] messages incomplete dir={} reason={reason}", dir.display());
+            None
+        }
+    }
+}
+
+fn load_history_messages(dir: &Path, snap: &HistorySnapshot, expected: usize) -> Result<Vec<HistoryMessage>, String> {
+    let bytes = read_required(&dir.join(HISTORY_MESSAGES_FILE))?;
+    let got = data_hash(&[&bytes]);
+    if snap.meta.messages_hash.as_deref() != Some(got.as_str()) {
+        return Err(format!(
+            "messages_hash {got} != meta {}",
+            snap.meta.messages_hash.as_deref().unwrap_or("none")
+        ));
+    }
+    let mut rows: Vec<HistoryMessage> = parse_jsonl(&bytes, HISTORY_MESSAGES_FILE)?;
+    if rows.len() != expected || rows.len() != snap.commits.len() {
+        return Err(format!(
+            "row count messages={} != meta messages={expected} commits={}",
+            rows.len(),
+            snap.commits.len()
+        ));
+    }
+    if let Some(i) = rows.iter().zip(&snap.commits).position(|(m, c)| m.c != c.c) {
+        return Err(format!("row {} names commit {} not {}", i + 1, rows[i].c, snap.commits[i].c));
+    }
+    for row in &mut rows {
+        for field in [&mut row.s, &mut row.b].into_iter().chain(row.br.as_mut()) {
+            let (clean, n) = redact_untrusted(field);
+            if n > 0 {
+                *field = clean;
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// The history snapshot under `<root>/.glia/history-snapshot/`, or `None`.
@@ -246,8 +462,8 @@ fn load_history(dir: &Path) -> Result<HistorySnapshot, String> {
     let meta_bytes = read_required(&dir.join(META_FILE))?;
     let meta: HistoryMeta =
         serde_json::from_slice(&meta_bytes).map_err(|e| format!("{META_FILE}: {e}"))?;
-    if meta.version != HISTORY_VERSION {
-        return Err(format!("{META_FILE}: version {} (reader wants {HISTORY_VERSION})", meta.version));
+    if !HISTORY_VERSIONS.contains(&meta.version) {
+        return Err(format!("{META_FILE}: version {} (reader wants one of {HISTORY_VERSIONS:?})", meta.version));
     }
     let commits_bytes = read_required(&dir.join(HISTORY_COMMITS_FILE))?;
     let blame_bytes = match std::fs::read(dir.join(HISTORY_BLAME_FILE)) {
@@ -1537,6 +1753,174 @@ mod tests {
         let snap = read_history(&root).expect("blame-less snapshot");
         assert!(snap.blame.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- history messages (EB.1) ---
+
+    fn messages_for(commits: &[HistoryCommit]) -> Vec<HistoryMessage> {
+        commits
+            .iter()
+            .enumerate()
+            .map(|(i, c)| HistoryMessage {
+                c: c.c.clone(),
+                at: c.t - 5,
+                s: format!("subject {i}"),
+                b: if i == 0 { "body line".into() } else { String::new() },
+                br: if i == 0 { Some("feat-x".into()) } else { None },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn load_history_accepts_versions_1_and_2_and_rejects_3() {
+        let root = tmp_root("versions");
+        let (meta, commits, blame) = sample();
+        let dir = history_dir(&root);
+        let written = write_history(&root, meta, &commits, &blame).unwrap();
+        assert_eq!(written.version, 2);
+        assert_eq!(HISTORY_VERSIONS, &[1, 2]);
+        for (version, ok) in [(1, true), (2, true), (3, false)] {
+            let other = HistoryMeta { version, ..written.clone() };
+            std::fs::write(dir.join(META_FILE), serde_json::to_vec(&other).unwrap()).unwrap();
+            assert_eq!(load_history(&dir).is_ok(), ok, "version {version}");
+        }
+        // A 0.5.2 (version 1) meta has no messages keys: it reads as before.
+        let v1 = format!(
+            r#"{{"version":1,"generator":"glia history sync","head":"{}","commits":2,"max_commits":2000,"since":null,"relative_to":"","blame_files":2,"data_hash":"{}"}}"#,
+            written.head, written.data_hash
+        );
+        std::fs::write(dir.join(META_FILE), v1).unwrap();
+        let snap = read_history(&root).expect("v1 snapshot reads");
+        assert_eq!((snap.meta.messages, snap.meta.messages_hash.as_deref()), (None, None));
+        assert_eq!(read_history_messages(&root, &snap), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn messages_sidecar_round_trips_and_never_moves_the_build_inputs() {
+        let root = tmp_root("messages");
+        let (meta, commits, blame) = sample();
+        let dir = history_dir(&root);
+        let plain = write_history(&root, meta.clone(), &commits, &blame).unwrap();
+        let read_inputs = || {
+            [HISTORY_COMMITS_FILE, HISTORY_BLAME_FILE].map(|f| std::fs::read(dir.join(f)).unwrap())
+        };
+        let inputs = read_inputs();
+        assert!(!dir.join(HISTORY_MESSAGES_FILE).exists());
+        assert_eq!((plain.messages, plain.messages_hash.as_deref()), (None, None));
+
+        let msgs = messages_for(&commits);
+        let with = write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs)).unwrap();
+        assert_eq!(read_inputs(), inputs, "the build's inputs are byte-identical");
+        assert_eq!(with.data_hash, plain.data_hash);
+        assert_eq!(with.messages, Some(2));
+        let bytes = std::fs::read(dir.join(HISTORY_MESSAGES_FILE)).unwrap();
+        assert_eq!(with.messages_hash.as_deref(), Some(data_hash(&[&bytes]).as_str()));
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with(&format!(r#"{{"c":"{}","at":195,"s":"subject 0","b":"body line","br":"feat-x"}}"#, "cd".repeat(20))), "{text}");
+        assert!(text.contains(r#""s":"subject 1"}"#), "empty body and no branch are omitted: {text}");
+        let snap = read_history(&root).expect("snapshot");
+        assert_eq!(snap.meta, with);
+        assert_eq!(read_history_messages(&root, &snap), Some(msgs));
+
+        // A write without messages removes the stale sidecar.
+        write_history(&root, meta, &commits, &blame).unwrap();
+        assert!(!dir.join(HISTORY_MESSAGES_FILE).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bad_messages_sidecars_read_as_none() {
+        let root = tmp_root("badmessages");
+        let (meta, commits, blame) = sample();
+        let dir = history_dir(&root);
+        let msgs = messages_for(&commits);
+        let rewrite = |rows: &[HistoryMessage]| {
+            write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs)).unwrap();
+            let bytes = jsonl(rows.iter()).unwrap();
+            // Keep the meta's hash in step, so only the alignment check can catch it.
+            let mut m: HistoryMeta =
+                serde_json::from_slice(&std::fs::read(dir.join(META_FILE)).unwrap()).unwrap();
+            m.messages_hash = Some(data_hash(&[&bytes]));
+            std::fs::write(dir.join(HISTORY_MESSAGES_FILE), bytes).unwrap();
+            std::fs::write(dir.join(META_FILE), meta_bytes(&m).unwrap()).unwrap();
+            read_history(&root).expect("the build's snapshot is untouched")
+        };
+        // Swapped shas.
+        let mut swapped = msgs.clone();
+        swapped.swap(0, 1);
+        let snap = rewrite(&swapped);
+        assert_eq!(read_history_messages(&root, &snap), None);
+        // A missing row.
+        let snap = rewrite(&msgs[..1]);
+        assert_eq!(read_history_messages(&root, &snap), None);
+        // Edited after the meta: hash mismatch.
+        write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs)).unwrap();
+        std::fs::write(dir.join(HISTORY_MESSAGES_FILE), b"{}\n").unwrap();
+        let snap = read_history(&root).expect("snapshot");
+        assert_eq!(read_history_messages(&root, &snap), None);
+        // Absent file.
+        std::fs::remove_file(dir.join(HISTORY_MESSAGES_FILE)).unwrap();
+        assert_eq!(read_history_messages(&root, &snap), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn messages_are_redacted_again_on_read() {
+        let root = tmp_root("rereadact");
+        let (meta, commits, blame) = sample();
+        let dir = history_dir(&root);
+        let mut msgs = messages_for(&commits);
+        msgs[1].b = "token=sk-abcdefghijklmnopqrstuv".into();
+        // Written as-is (a hand-edited sidecar), with a consistent hash.
+        write_history_with_messages(&root, meta, &commits, &blame, Some(&msgs)).unwrap();
+        assert!(std::fs::read_to_string(dir.join(HISTORY_MESSAGES_FILE)).unwrap().contains("sk-abcdef"));
+        let snap = read_history(&root).expect("snapshot");
+        let back = read_history_messages(&root, &snap).expect("aligned");
+        assert!(!back[1].b.contains("sk-abcdef"), "{:?}", back[1].b);
+        assert!(back[1].b.contains(REDACTED));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_message_drops_trailers_and_keeps_prose() {
+        // A git trailer block of three `Token: value` lines goes whole.
+        let raw = "fix(x): the thing\n\nWhy it broke.\nMore prose.\n\nFixes: #12\nRefs: abc\nLink: https://e.invalid/1\n";
+        let (s, b, t) = clean_message(raw);
+        assert_eq!((s.as_str(), b.as_str()), ("fix(x): the thing", "Why it broke.\nMore prose."));
+        assert_eq!(t, 3);
+        // Identity-bearing trailer lines go wherever they sit, any case.
+        let raw = "subj\n\nbody\nsigned-off-by: A <a@b.invalid>\n\nCo-Authored-By: C <c@d.invalid>\nClaude-Session: https://x.invalid/s\n";
+        let (s, b, t) = clean_message(raw);
+        assert_eq!((s.as_str(), b.as_str(), t), ("subj", "body", 3));
+        // A `Note: see below` paragraph followed by prose is kept.
+        let raw = "subj\n\nNote: see below\nthe prose that follows it\n";
+        let (_, b, t) = clean_message(raw);
+        assert_eq!((b.as_str(), t), ("Note: see below\nthe prose that follows it", 0));
+        // A subject that looks like a trailer is never the trailer block.
+        let (s, b, t) = clean_message("feat: add x\n");
+        assert_eq!((s.as_str(), b.as_str(), t), ("feat: add x", "", 0));
+        // An empty message.
+        assert_eq!(clean_message("\n\n"), (String::new(), String::new(), 0));
+    }
+
+    #[test]
+    fn clean_message_caps_on_char_boundaries_and_redacts() {
+        let raw = format!("subj\n\n{}", "a".repeat(5000));
+        let (_, b, _) = clean_message(&raw);
+        assert_eq!(b.chars().count(), MESSAGE_BODY_CAP);
+        // An emoji straddling the cut does not panic.
+        let raw = format!("{}\n\n{}", "é".repeat(SUBJECT_CAP + 9), "😀".repeat(MESSAGE_BODY_CAP + 3));
+        let (s, b, _) = clean_message(&raw);
+        assert_eq!(s.chars().count(), SUBJECT_CAP);
+        assert_eq!(b.chars().count(), MESSAGE_BODY_CAP);
+        let raw = format!("x\n\n{}😀tail", "a".repeat(MESSAGE_BODY_CAP - 1));
+        let (_, b, _) = clean_message(&raw);
+        assert!(b.ends_with('😀'), "{}", b.len());
+        // A secret in a subject or body is redacted; the count is returned.
+        let (s, b, t, r) = clean_message_counted("deploy token=sk-abcdefghijklmnopqrstuv\n\napi_key: hunter2hunter2\n");
+        assert!(!s.contains("sk-abc") && !b.contains("hunter2"), "{s} / {b}");
+        assert_eq!((t, r), (0, 2));
     }
 
     // --- test-report snapshot (LF.6a) ---

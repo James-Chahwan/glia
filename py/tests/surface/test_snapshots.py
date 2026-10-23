@@ -2,10 +2,11 @@
 """pyo3 surface, py/src/snapshots.rs (LF.5d, LF.6d).
 
 `history_sync(repo_path, max_commits=2000, since=None, blame=False,
-blame_max_files=300)` reads a repo's local git, writes
+blame_max_files=300, messages=True)` reads a repo's local git, writes
 `<repo>/.glia/history-snapshot/` and returns a native dict {head, commits,
-files, renames, binary, blame_files, runs}; it raises ValueError when the sync
-fails. The next generate() ingests the snapshot (CO_CHANGES). Needs a `git`
+files, renames, binary, blame_files, runs, messages, redacted,
+trailers_dropped, branch_labels}; it raises ValueError when the sync fails.
+`messages=False` (EB.1) keeps no `messages.jsonl` sidecar. The next generate() ingests the snapshot (CO_CHANGES). Needs a `git`
 binary.
 
 `tests_ingest(repo_path, junit=None, logs=None, lcov=None, run=None,
@@ -156,7 +157,7 @@ def main() -> int:
     c.check("history_sync signature",
             getattr(rg, "history_sync", None) is not None
             and rg.history_sync.__text_signature__
-            == "(repo_path, max_commits=2000, since=None, blame=False, blame_max_files=300)",
+            == "(repo_path, max_commits=2000, since=None, blame=False, blame_max_files=300, messages=True)",
             getattr(getattr(rg, "history_sync", None), "__text_signature__", "missing"))
     if getattr(rg, "history_sync", None) is None:
         return c.done()
@@ -176,7 +177,8 @@ def main() -> int:
         c.check("history_sync -> dict", type(s) is dict, type(s))
         c.check("keys in field order",
                 type(s) is dict and list(s) == ["head", "commits", "files", "renames", "binary",
-                                                "blame_files", "runs"],
+                                                "blame_files", "runs", "messages", "redacted",
+                                                "trailers_dropped", "branch_labels"],
                 type(s) is dict and list(s))
         c.check("summary counts",
                 type(s) is dict and (s.get("head"), s.get("commits"), s.get("files"), s.get("renames"))
@@ -185,14 +187,26 @@ def main() -> int:
                 sorted(p.name for p in snap.glob("*")) if snap.is_dir() else "no snapshot dir")
         c.check("fired_on marker",
                 f"head={head[:12]} commits=5 files=3 renames=1 binary=0 blame_files=0 runs=0 "
-                "window=max:2000 surface=pyo3" in err, err[-400:])
+                "window=max:2000 messages=5 redacted=0 branch_labels=0 trailers_dropped=0 surface=pyo3"
+                in err, err[-400:])
+        c.check("messages summary", type(s) is dict
+                and (s.get("messages"), s.get("redacted"), s.get("trailers_dropped"), s.get("branch_labels"))
+                == (5, 0, 0, 0), s)
+        c.check("messages.jsonl written",
+                len((snap / "messages.jsonl").read_text().splitlines()) == 5
+                if (snap / "messages.jsonl").is_file() else False)
 
         s, err = stderr_of(lambda: rg.history_sync(str(top), max_commits=2, blame=True, blame_max_files=2))
         c.check("options reach the capture",
                 type(s) is dict and (s.get("commits"), s.get("blame_files")) == (2, 2), s)
         c.check("blame rows written",
                 len((snap / "blame.jsonl").read_text().splitlines()) == 2 if snap.is_dir() else False)
-        c.check("window in the marker", " window=max:2 surface=pyo3" in err, err[-400:])
+        c.check("window in the marker", " window=max:2 messages=2 " in err, err[-400:])
+
+        s, err = stderr_of(lambda: rg.history_sync(str(top), messages=False))
+        c.check("messages=False keeps none",
+                type(s) is dict and s.get("messages") == 0 and not (snap / "messages.jsonl").exists(), s)
+        c.check("messages=off in the marker", " window=max:2000 messages=off surface=pyo3" in err, err[-400:])
 
         rg.history_sync(str(top))
         g, err = stderr_of(lambda: rg.generate(str(top)))

@@ -1,7 +1,9 @@
 //! `glia history sync` (LF.5d) — the CLI surface of the history snapshot step,
 //! `glia_snapshots::history_sync`: read the repo's local git (no fetch, no
 //! remote, no author or committer identity) and write
-//! `<repo>/.glia/history-snapshot/` (commits.jsonl, blame.jsonl, meta.json).
+//! `<repo>/.glia/history-snapshot/` (commits.jsonl, blame.jsonl, meta.json,
+//! and messages.jsonl: each commit's redacted, trailer-stripped message, its
+//! author time and merged-branch label, EB.1; `--no-messages` keeps none).
 //! The next `glia build` ingests it (LF.5b): churn and blame-recency ATTN
 //! cells, and CO_CHANGES edges between modules that change together.
 //!
@@ -44,6 +46,9 @@ enum HistoryCmd {
         /// How many files `--blame` blames, most-changed first.
         #[arg(long, default_value_t = HistoryOptions::default().blame_max_files)]
         blame_max_files: usize,
+        /// Do not keep commit messages (the intent ranking of review / find --files then has no text)
+        #[arg(long)]
+        no_messages: bool,
     },
 }
 
@@ -55,12 +60,14 @@ pub(crate) fn run(args: Args) -> i32 {
             since,
             blame,
             blame_max_files,
+            no_messages,
         } => {
             let opts = HistoryOptions {
                 max_commits,
                 since,
                 blame,
                 blame_max_files,
+                messages: !no_messages,
                 surface: "cli",
             };
             sync(&repo, &opts)

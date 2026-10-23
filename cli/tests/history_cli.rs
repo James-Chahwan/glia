@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use glia_code_domain::snapshots::{
-    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_GENERATOR, META_FILE, history_dir,
+    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_GENERATOR, HISTORY_MESSAGES_FILE, META_FILE, history_dir,
 };
 use serde_json::Value;
 
@@ -197,12 +197,13 @@ fn sync_writes_the_snapshot_and_names_the_cli_surface() {
     let marker = sync_marker(&stderr);
     assert!(
         marker.ends_with(&format!(
-            " head={head12} commits=5 files=3 renames=1 binary=0 blame_files=0 runs=0 window=max:2000 surface=cli"
+            " head={head12} commits=5 files=3 renames=1 binary=0 blame_files=0 runs=0 window=max:2000 \
+             messages=5 redacted=0 branch_labels=0 trailers_dropped=0 surface=cli"
         )),
         "{marker}"
     );
 
-    for file in [HISTORY_COMMITS_FILE, HISTORY_BLAME_FILE, META_FILE] {
+    for file in [HISTORY_COMMITS_FILE, HISTORY_BLAME_FILE, HISTORY_MESSAGES_FILE, META_FILE] {
         assert!(
             snapshot.join(file).is_file(),
             "{file} not written under {}",
@@ -215,8 +216,27 @@ fn sync_writes_the_snapshot_and_names_the_cli_surface() {
         "",
         "no --blame, no blame rows"
     );
+    assert_eq!(r.snapshot_file(HISTORY_MESSAGES_FILE).lines().count(), 5);
     let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
     assert_eq!(meta["generator"], HISTORY_GENERATOR, "{meta}");
+    assert_eq!((meta["version"].as_u64(), meta["messages"].as_u64()), (Some(2), Some(5)), "{meta}");
+}
+
+#[test]
+fn no_messages_flag_keeps_no_sidecar() {
+    let r = probe_g1("nomessages");
+    let out = r.glia(&["history", "sync", r.path()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let commits = r.snapshot_file(HISTORY_COMMITS_FILE);
+    let out = r.glia(&["history", "sync", r.path(), "--no-messages"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let marker = sync_marker(&stderr);
+    assert!(marker.ends_with(" window=max:2000 messages=off surface=cli"), "{marker}");
+    assert!(!history_dir(&r.top).join(HISTORY_MESSAGES_FILE).exists(), "--no-messages removes the sidecar");
+    assert_eq!(r.snapshot_file(HISTORY_COMMITS_FILE), commits, "the build's input is unchanged");
+    let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
+    assert!(meta.get("messages").is_none() && meta.get("messages_hash").is_none(), "{meta}");
 }
 
 #[test]
@@ -269,7 +289,7 @@ fn window_flags_reach_the_capture() {
     assert!(stdout.starts_with("synced 2 commits (head "), "{stdout}");
     let marker = sync_marker(&stderr);
     assert!(
-        marker.contains(" commits=2 ") && marker.ends_with(" window=max:2 surface=cli"),
+        marker.contains(" commits=2 ") && marker.contains(" window=max:2 messages=2 ") && marker.ends_with(" surface=cli"),
         "{marker}"
     );
     assert_eq!(r.snapshot_file(HISTORY_COMMITS_FILE).lines().count(), 2);
@@ -288,7 +308,8 @@ fn window_flags_reach_the_capture() {
     let marker = sync_marker(&stderr);
     assert!(
         marker.contains(" commits=3 ")
-            && marker.ends_with(" window=max:2000,since:2026-01-02T12:00:00Z surface=cli"),
+            && marker.contains(" window=max:2000,since:2026-01-02T12:00:00Z messages=3 ")
+            && marker.ends_with(" surface=cli"),
         "{marker}"
     );
     assert_eq!(r.snapshot_file(HISTORY_COMMITS_FILE).lines().count(), 3);

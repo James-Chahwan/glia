@@ -446,9 +446,11 @@ glia docs sync <REPO> --source notion --database <ID> | --page <ID> [--api <URL>
     Markdown; the integration token from --token or NOTION_TOKEN.
 glia docs push --file <FILE> --space <SPACE> --title <TITLE> [--email <EMAIL>] [--markdown] [--page-id <PAGE_ID>] [--site <SITE>] [--token <TOKEN>]
     Create or update (--page-id) a Confluence page; --markdown converts the file first.
-glia history sync <REPO> [--blame] [--blame-max-files <BLAME_MAX_FILES>] [--max-commits <MAX_COMMITS>] [--since <SINCE>]
+glia history sync <REPO> [--blame] [--blame-max-files <BLAME_MAX_FILES>] [--max-commits <MAX_COMMITS>] [--no-messages] [--since <SINCE>]
     Read the local git history into <repo>/.glia/history-snapshot/: churn and blame
-    ATTN cells, CO_CHANGES edges. No author identities are stored.
+    ATTN cells, CO_CHANGES edges, and messages.jsonl (each commit's redacted,
+    trailer-stripped message, author time and merged-branch label, read only by
+    query-time ranking; --no-messages keeps none). No author identities are stored.
 glia tests ingest <REPO> [--junit <PATH>...] [--lcov <PATH>...] [--log <PATH>...] [--reset] [--run <LABEL>] [--window <N>]
     Add one CI run's JUnit XML, CI logs and lcov to <repo>/.glia/test-snapshot/ as
     its newest run; the snapshot keeps the last --window runs (default 10; --reset

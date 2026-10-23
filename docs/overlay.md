@@ -659,9 +659,25 @@ moves. Flags: `--max-commits N` (default 2000), `--since <date>` (passed to `git
 `--blame`, `--blame-max-files N` (default 300). The snapshot is local and regenerable: when
 `.glia/.gitignore` is absent, the sync creates one that lists it.
 
+Since 0.5.3 (snapshot version 2; a version 1 snapshot still reads) the sync also keeps each
+commit's message in `messages.jsonl`, one row per `commits.jsonl` row in the same order: the
+subject (first non-empty line, at most 300 chars), the body (at most 4096 chars), the author time
+and, when a merge whose subject names a branch (`Merge pull request #N`, `Merge branch 'x'`,
+`Merge x into y`) brought the commit in, that branch's label. Trailer lines (`Co-Authored-By:`,
+`Signed-off-by:`, `Reviewed-by:` .. and a final block of `Token: value` lines) are dropped, so no
+author or committer identity is kept, and every subject, body and label goes through the same
+secret redaction as test output, when written and again when read. The build never reads the
+file and `data_hash` does not cover it (it has its own `messages_hash`), so churn and
+`CO_CHANGES` are the same with or without it; only query-time ranking reads it (the intent
+ranking of `review` and `find --files`). `--no-messages` (pyo3: `messages=False`) keeps none and
+removes an earlier one.
+
 The sync prints `[history] sync repo=<label> head=<12 hex> commits=N files=N renames=N binary=N
-blame_files=N runs=N window=max:N[,since:<date>] surface=cli|pyo3` on stderr (one line), and a
-build that reads the snapshot prints `[history] ingest repo=<label> ...`.
+blame_files=N runs=N window=max:N[,since:<date>] messages=N redacted=N branch_labels=N
+trailers_dropped=N surface=cli|pyo3` on stderr (one line; `messages=off` with `--no-messages`),
+and a build that reads the snapshot prints `[history] ingest repo=<label> ...`. A message
+sidecar that does not match its snapshot is ignored with one `[history] messages incomplete
+dir=<d> reason=<r>` line.
 
 ## SCIP snapshot
 

@@ -7,11 +7,23 @@
 //!   and a binary file's counts are `-\t-`;
 //! - `git blame --porcelain -w <head> -- <path>` (only when blame is asked for)
 //!   gives, per final line, a `<sha> <orig> <final> [<n>]` header, the commit's
-//!   key lines the first time a sha appears, and the line itself after a TAB.
+//!   key lines the first time a sha appears, and the line itself after a TAB;
+//! - when messages are kept (EB.1, the default; `--no-messages` turns all of
+//!   this off), `git log -z --no-merges --format=%x1e%H%x1f%at%x1f%B` over the
+//!   same window gives each commit's author time and raw message, and
+//!   `git log --merges --format=%H%x1f%P%x1f%s` plus one
+//!   `git rev-list --no-merges <second parent> ^<first parent>` per labelled
+//!   merge gives the branch each commit came in on (rank_eval's
+//!   `branch_labels` / `merge_label`).
 //!
-//! Only shas, committer times, paths and line counts are read. Author and
-//! committer names and emails, commit messages and file contents are never
-//! parsed: every porcelain key line but `committer-time` is skipped unread.
+//! Shas, committer and author times, paths, line counts, and commit messages
+//! and merge subjects are read. Messages go only into `messages.jsonl`, never
+//! into the build's inputs: [`clean_message_counted`] drops the trailer lines
+//! (`Co-Authored-By:`, `Signed-off-by:` .. and a final git trailer block, the
+//! identity-bearing lines), and every subject, body and branch label passes
+//! `redact_untrusted`. Author and committer names and emails and file
+//! contents are never read: the formats name no identity placeholder, and
+//! every porcelain key line but `committer-time` is skipped unread.
 //! Parsing splits on delimiters only (never slices by a computed index) and
 //! converts paths with `from_utf8_lossy`, so odd bytes degrade, never panic.
 
@@ -19,7 +31,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta};
+use glia_code_domain::snapshots::{
+    BlameFile, HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, clean_message_counted, redact_untrusted,
+};
 use serde::Serialize;
 
 /// Options for [`crate::history_sync`].
@@ -33,13 +47,16 @@ pub struct HistoryOptions {
     pub blame: bool,
     /// How many files to blame when `blame` is on (default 300).
     pub blame_max_files: usize,
+    /// Keep each commit's message, author time and merged-branch label in
+    /// `messages.jsonl` (default true, EB.1); false writes no sidecar.
+    pub messages: bool,
     /// Which surface called the sync (`lib`, `cli`, `pyo3`); the marker names it.
     pub surface: &'static str,
 }
 
 impl Default for HistoryOptions {
     fn default() -> Self {
-        Self { max_commits: 2000, since: None, blame: false, blame_max_files: 300, surface: "lib" }
+        Self { max_commits: 2000, since: None, blame: false, blame_max_files: 300, messages: true, surface: "lib" }
     }
 }
 
@@ -60,6 +77,14 @@ pub struct HistorySummary {
     pub blame_files: usize,
     /// Blame runs across those files.
     pub runs: usize,
+    /// Rows of `messages.jsonl` (one per commit); 0 with messages off.
+    pub messages: usize,
+    /// Secret spans `redact_untrusted` replaced in subjects, bodies and labels.
+    pub redacted: usize,
+    /// Trailer lines [`clean_message_counted`] dropped.
+    pub trailers_dropped: usize,
+    /// Commits that carry a merged-branch label.
+    pub branch_labels: usize,
 }
 
 /// Everything one sync read, before it is written.
@@ -67,6 +92,10 @@ pub(crate) struct Capture {
     pub(crate) meta: HistoryMeta,
     pub(crate) commits: Vec<HistoryCommit>,
     pub(crate) blame: Vec<BlameFile>,
+    /// One row per commit, in commit order; `None` with messages off.
+    pub(crate) messages: Option<Vec<HistoryMessage>>,
+    pub(crate) redacted: usize,
+    pub(crate) trailers_dropped: usize,
 }
 
 /// Environment variables that would point git at another repository than the
@@ -100,39 +129,223 @@ pub(crate) fn capture(root: &Path, opts: &HistoryOptions) -> Result<Capture, Str
         return Err(format!("git rev-parse HEAD printed {head:?}, not a commit sha"));
     }
 
-    let max_count = format!("--max-count={}", opts.max_commits);
-    let since = opts.since.as_ref().map(|s| format!("--since={s}"));
-    let mut args: Vec<&str> = vec![
-        "log",
-        "-z",
-        "--numstat",
-        "-M",
-        "--no-merges",
-        "--relative",
-        "--no-color",
-        "--no-ext-diff",
-        "--format=%x1e%H%x1f%ct",
-        &max_count,
-    ];
-    if let Some(since) = &since {
-        args.push(since);
-    }
-    // The resolved sha, not `HEAD`: the log, the blame and meta.head name one
-    // commit even if HEAD moves mid-sync.
-    args.push(&head);
-    if !relative_to.is_empty() {
-        // A root below the git top level: only commits that touch it. Without
-        // the pathspec, `--relative` still lists every commit (those touching
-        // only other directories with an empty file list), and they would eat
-        // the `-n` window. At the top level the pathspec would only turn on
-        // history simplification, so it is left off there.
-        args.extend(["--", "."]);
-    }
-    let log = run_git(root, &args)?;
+    let window = Window::new(opts, &head, !relative_to.is_empty());
+    let log = run_git(
+        root,
+        &window.args(&[
+            "log",
+            "-z",
+            "--numstat",
+            "-M",
+            "--no-merges",
+            "--relative",
+            "--no-color",
+            "--no-ext-diff",
+            "--format=%x1e%H%x1f%ct",
+        ]),
+    )?;
     let commits = parse_log(&log)?;
     let blame = if opts.blame { blame_top_files(root, &head, &commits, opts.blame_max_files)? } else { Vec::new() };
+    let (messages, redacted, trailers_dropped) = if opts.messages {
+        let (rows, redacted, trailers) = capture_messages(root, &window, &commits)?;
+        (Some(rows), redacted, trailers)
+    } else {
+        (None, 0, 0)
+    };
     let meta = HistoryMeta::new(head, opts.max_commits, opts.since.clone(), relative_to);
-    Ok(Capture { meta, commits, blame })
+    Ok(Capture { meta, commits, blame, messages, redacted, trailers_dropped })
+}
+
+/// The window arguments every log of one sync shares: `--max-count`, the
+/// optional `--since`, the resolved head sha and the pathspec rule.
+struct Window {
+    max_count: String,
+    since: Option<String>,
+    head: String,
+    below_top: bool,
+}
+
+impl Window {
+    fn new(opts: &HistoryOptions, head: &str, below_top: bool) -> Self {
+        Self {
+            max_count: format!("--max-count={}", opts.max_commits),
+            since: opts.since.as_ref().map(|s| format!("--since={s}")),
+            head: head.to_string(),
+            below_top,
+        }
+    }
+
+    /// `lead` then the window: `--max-count`, `--since`, the head sha, and
+    /// `-- .` below the top level.
+    fn args<'a>(&'a self, lead: &[&'a str]) -> Vec<&'a str> {
+        let mut args: Vec<&str> = lead.to_vec();
+        args.push(&self.max_count);
+        if let Some(since) = &self.since {
+            args.push(since);
+        }
+        // The resolved sha, not `HEAD`: the log, the blame and meta.head name
+        // one commit even if HEAD moves mid-sync.
+        args.push(&self.head);
+        if self.below_top {
+            // A root below the git top level: only commits that touch it.
+            // Without the pathspec, `--relative` still lists every commit
+            // (those touching only other directories with an empty file list),
+            // and they would eat the `-n` window. At the top level the
+            // pathspec would only turn on history simplification, so it is
+            // left off there.
+            args.extend(["--", "."]);
+        }
+        args
+    }
+}
+
+/// Each commit's message row (EB.1), in commit order, plus the redaction and
+/// trailer counts. A commit the message log did not list gets an empty row
+/// and is counted on a `[history] messages unmatched=<n>` line.
+fn capture_messages(
+    root: &Path,
+    window: &Window,
+    commits: &[HistoryCommit],
+) -> Result<(Vec<HistoryMessage>, usize, usize), String> {
+    let log = run_git(root, &window.args(&["log", "-z", "--no-merges", "--no-color", "--format=%x1e%H%x1f%at%x1f%B"]))?;
+    let raw = parse_message_log(&log)?;
+    let (labels, label_redactions) = branch_labels(root, window);
+    let (mut redacted, mut trailers, mut unmatched) = (label_redactions, 0, 0);
+    let mut rows = Vec::with_capacity(commits.len());
+    for commit in commits {
+        let br = labels.get(&commit.c).map(|(_, label)| label.clone());
+        let Some((at, message)) = raw.get(&commit.c) else {
+            unmatched += 1;
+            rows.push(HistoryMessage { c: commit.c.clone(), at: 0, s: String::new(), b: String::new(), br });
+            continue;
+        };
+        let (s, b, dropped, n) = clean_message_counted(message);
+        trailers += dropped;
+        redacted += n;
+        rows.push(HistoryMessage { c: commit.c.clone(), at: *at, s, b, br });
+    }
+    if unmatched > 0 {
+        eprintln!("[history] messages unmatched={unmatched} of {}", commits.len());
+    }
+    Ok((rows, redacted, trailers))
+}
+
+/// Parse `git log -z --format=%x1e%H%x1f%at%x1f%B`: sha -> (author time, raw
+/// message). Split on the record and field delimiters only.
+pub(crate) fn parse_message_log(bytes: &[u8]) -> Result<BTreeMap<String, (i64, String)>, String> {
+    let mut records = bytes.split(|b| *b == 0x1e);
+    let lead = records.next().unwrap_or_default();
+    if !lead.iter().all(u8::is_ascii_whitespace) {
+        return Err(format!(
+            "git log (messages): unexpected output before the first commit record: {:?}",
+            lossy(&lead[..lead.len().min(80)])
+        ));
+    }
+    let mut out = BTreeMap::new();
+    for record in records {
+        let mut fields = record.splitn(3, |b| *b == 0x1f);
+        let sha = fields.next().unwrap_or_default();
+        let time = fields.next().unwrap_or_default();
+        let Some(message) = fields.next() else {
+            return Err(format!("git log (messages): malformed record {:?}", lossy(&record[..record.len().min(80)])));
+        };
+        if !is_sha(sha) {
+            return Err(format!("git log (messages): malformed commit sha {:?}", lossy(sha)));
+        }
+        let c = lossy(sha);
+        let at: i64 = lossy(time)
+            .trim()
+            .parse()
+            .map_err(|_| format!("git log (messages): commit {c} has author time {:?}", lossy(time)))?;
+        // `-z` ends each record with a NUL.
+        let mut message = message;
+        while let Some(rest) = message.strip_suffix(b"\0") {
+            message = rest;
+        }
+        out.insert(c, (at, lossy(message)));
+    }
+    Ok(out)
+}
+
+/// sha -> (side size, branch label): rank_eval's `branch_labels`. For each
+/// merge of the window (log order) whose subject [`merge_label`] names, every
+/// commit `git rev-list --no-merges <second parent> ^<first parent>` lists
+/// takes the label when that side is strictly smaller than the one it holds,
+/// so a lane merged into a wave branch keeps the lane, and the first merge
+/// wins a tie. A merge whose side git cannot list (a parent object missing in
+/// a shallow clone) is skipped and counted on a `[history] branch labels
+/// skipped merges=<n>` line. Labels are redacted; the second value is how
+/// many spans were.
+fn branch_labels(root: &Path, window: &Window) -> (BTreeMap<String, (usize, String)>, usize) {
+    let mut best: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let (mut redacted, mut skipped) = (0, 0);
+    let log = match run_git(root, &window.args(&["log", "--merges", "--no-color", "--format=%H%x1f%P%x1f%s"])) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("[history] branch labels skipped reason={e}");
+            return (best, 0);
+        }
+    };
+    for line in lossy(&log).lines() {
+        let mut p = line.split('\x1f');
+        let (Some(_), Some(ps), Some(subj)) = (p.next(), p.next(), p.next()) else { continue };
+        let ps: Vec<&str> = ps.split_whitespace().collect();
+        if ps.len() < 2 {
+            continue;
+        }
+        let Some(label) = merge_label(subj) else { continue };
+        let side = match run_git(root, &["rev-list", "--no-merges", ps[1], &format!("^{}", ps[0])]) {
+            Ok(side) => lossy(&side),
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let (label, n) = redact_untrusted(&label);
+        redacted += n;
+        let shas: Vec<&str> = side.lines().collect();
+        let n = shas.len();
+        for s in shas {
+            let e = best.entry(s.to_string()).or_insert((usize::MAX, String::new()));
+            if n < e.0 {
+                *e = (n, label.clone());
+            }
+        }
+    }
+    if skipped > 0 {
+        eprintln!("[history] branch labels skipped merges={skipped} reason=a parent object is missing");
+    }
+    (best, redacted)
+}
+
+/// The branch a merge commit's subject names (None for a subtree import of
+/// another repository): rank_eval's `merge_label`, verbatim.
+pub(crate) fn merge_label(subj: &str) -> Option<String> {
+    if subj.starts_with("Merge commit '") && subj.contains("' as '") {
+        return None;
+    }
+    if let Some(r) = subj.strip_prefix("Merge pull request #") {
+        let num: String = r.chars().take_while(char::is_ascii_digit).collect();
+        return Some(format!("pr#{num}"));
+    }
+    for pre in ["Merge branch '", "Merge remote-tracking branch '"] {
+        if let Some(r) = subj.strip_prefix(pre) {
+            return r.split('\'').next().map(str::to_string);
+        }
+    }
+    let r = subj.strip_prefix("Merge ")?;
+    let (head, into) = match r.rsplit_once(" into ") {
+        Some((h, i)) => (h, Some(i.trim().trim_matches('\''))),
+        None => (r, None),
+    };
+    let head = head.split(" (").next().unwrap_or(head).trim().trim_matches('\'');
+    if head.is_empty() {
+        return None;
+    }
+    Some(match into {
+        Some(i) if !matches!(i, "main" | "master") => format!("{head}@{i}"),
+        _ => head.to_string(),
+    })
 }
 
 /// The counts a sync reports. `files` follows renames newest to oldest, the
@@ -162,6 +375,10 @@ pub(crate) fn summarize(cap: &Capture) -> HistorySummary {
         binary,
         blame_files: cap.blame.len(),
         runs: cap.blame.iter().map(|b| b.runs.len()).sum(),
+        messages: cap.messages.as_ref().map_or(0, Vec::len),
+        redacted: cap.redacted,
+        trailers_dropped: cap.trailers_dropped,
+        branch_labels: cap.messages.as_ref().map_or(0, |m| m.iter().filter(|r| r.br.is_some()).count()),
     }
 }
 
@@ -462,5 +679,39 @@ mod tests {
         let runs = parse_blame(porcelain.as_bytes()).unwrap();
         assert_eq!(runs, [[1, 2, 100], [3, 4, 200], [5, 5, 100]]);
         assert!(parse_blame(format!("{SHA_A} 1 1 1\n\tx\n").as_bytes()).is_err());
+    }
+
+    #[test]
+    fn merge_label_rules() {
+        for (subject, want) in [
+            ("Merge pull request #123 from org/feature-y", Some("pr#123")),
+            ("Merge branch 'feat-x'", Some("feat-x")),
+            ("Merge branch 'feat-x' into main", Some("feat-x")),
+            ("Merge branch 'lane' into wave", Some("lane")),
+            ("Merge remote-tracking branch 'origin/fix-z'", Some("origin/fix-z")),
+            ("Merge lane-3 into wave-2", Some("lane-3@wave-2")),
+            ("Merge lane-3 into main", Some("lane-3")),
+            ("Merge lane-3 into 'master'", Some("lane-3")),
+            ("Merge lane-3 (squashed) into dev", Some("lane-3@dev")),
+            ("Merge feature-q", Some("feature-q")),
+            ("Merge commit 'abc123' as 'vendor/lib'", None),
+            ("Merge ", None),
+            ("Update readme", None),
+        ] {
+            assert_eq!(merge_label(subject).as_deref(), want, "{subject:?}");
+        }
+    }
+
+    #[test]
+    fn message_log_parses_records_and_degrades_without_panicking() {
+        let raw = format!("\x1e{SHA_A}\x1f1700\x1fsubj\n\nbody\n\0\x1e{SHA_B}\x1f1600\x1f\0");
+        let got = parse_message_log(raw.as_bytes()).unwrap();
+        assert_eq!(got.get(SHA_A), Some(&(1700, "subj\n\nbody\n".to_string())));
+        assert_eq!(got.get(SHA_B), Some(&(1600, String::new())));
+        let odd = [format!("\x1e{SHA_A}\x1f1\x1fcaf").into_bytes(), b"\xe9\0".to_vec()].concat();
+        assert_eq!(parse_message_log(&odd).unwrap()[SHA_A].1, "caf\u{fffd}");
+        for bad in ["junk\x1e".to_string(), format!("\x1e{SHA_A}\x1f1"), "\x1enope\x1f1\x1fm".to_string(), format!("\x1e{SHA_A}\x1fx\x1fm")] {
+            assert!(parse_message_log(bad.as_bytes()).is_err(), "{bad:?}");
+        }
     }
 }

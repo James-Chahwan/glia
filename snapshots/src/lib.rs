@@ -9,7 +9,8 @@
 //!
 //! [`history_sync`] reads the local git (no fetch, no remote, no other repo)
 //! and writes `<repo>/.glia/history-snapshot/`. Author and committer names and
-//! emails are never captured.
+//! emails are never captured; commit messages (trailers dropped, redacted) go
+//! only into its `messages.jsonl` sidecar, which the build never reads (EB.1).
 //!
 //! [`tests_ingest`] reads test reports a CI run produced — JUnit XML, CI logs,
 //! lcov — and adds them as one run to `<repo>/.glia/test-snapshot/`, which
@@ -32,7 +33,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use glia_code_domain::snapshots::{
-    TESTS_DEFAULT_WINDOW, TestCaseRecord, TestsMeta, append_tests_run, write_history,
+    TESTS_DEFAULT_WINDOW, TestCaseRecord, TestsMeta, append_tests_run, write_history_with_messages,
 };
 use glia_code_domain::walk_gating::CONTROL_DIR;
 use serde::Serialize;
@@ -65,8 +66,8 @@ scip-snapshot/
 ";
 
 /// Read the git history of the repo at `repo_root` and write it to
-/// `<repo_root>/.glia/history-snapshot/` (commits.jsonl, blame.jsonl, then
-/// meta.json). Creates `.glia/.gitignore` when absent, never overwriting one.
+/// `<repo_root>/.glia/history-snapshot/` (commits.jsonl, blame.jsonl,
+/// messages.jsonl when [`HistoryOptions::messages`], then meta.json). Creates `.glia/.gitignore` when absent, never overwriting one.
 ///
 /// Capture errors (not a directory, not in a git work tree, no commits, git
 /// missing or failing) come back as a plain message before anything is
@@ -74,7 +75,13 @@ scip-snapshot/
 pub fn history_sync(repo_root: &Path, opts: &HistoryOptions) -> Result<HistorySummary, String> {
     let capture = git_history::capture(repo_root, opts)?;
     let summary = git_history::summarize(&capture);
-    write_history(repo_root, capture.meta, &capture.commits, &capture.blame)?;
+    write_history_with_messages(
+        repo_root,
+        capture.meta,
+        &capture.commits,
+        &capture.blame,
+        capture.messages.as_deref(),
+    )?;
     ensure_glia_gitignore(repo_root)?;
     eprintln!("{}", sync_marker(&repo_label(repo_root), &summary, opts));
     Ok(summary)
@@ -88,7 +95,9 @@ fn repo_label(root: &Path) -> String {
 }
 
 /// `[history] sync repo=<label> head=<12> commits=N files=N renames=N binary=N
-/// blame_files=N runs=N window=max:N[,since:<since>] surface=<surface>`.
+/// blame_files=N runs=N window=max:N[,since:<since>] messages=N redacted=N
+/// branch_labels=N trailers_dropped=N surface=<surface>` (`messages=off` with
+/// messages off).
 fn sync_marker(label: &str, s: &HistorySummary, opts: &HistoryOptions) -> String {
     let head: String = s.head.chars().take(12).collect();
     let mut window = format!("max:{}", opts.max_commits);
@@ -96,8 +105,16 @@ fn sync_marker(label: &str, s: &HistorySummary, opts: &HistoryOptions) -> String
         let since: String = since.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
         window.push_str(&format!(",since:{since}"));
     }
+    let messages = if opts.messages {
+        format!(
+            "messages={} redacted={} branch_labels={} trailers_dropped={}",
+            s.messages, s.redacted, s.branch_labels, s.trailers_dropped
+        )
+    } else {
+        "messages=off".to_string()
+    };
     format!(
-        "[history] sync repo={label} head={head} commits={} files={} renames={} binary={} blame_files={} runs={} window={window} surface={}",
+        "[history] sync repo={label} head={head} commits={} files={} renames={} binary={} blame_files={} runs={} window={window} {messages} surface={}",
         s.commits, s.files, s.renames, s.binary, s.blame_files, s.runs, opts.surface
     )
 }
@@ -334,14 +351,22 @@ mod tests {
             binary: 0,
             blame_files: 0,
             runs: 0,
+            messages: 5,
+            redacted: 1,
+            trailers_dropped: 4,
+            branch_labels: 2,
         };
         assert_eq!(
             sync_marker("g1", &summary, &HistoryOptions::default()),
             "[history] sync repo=g1 head=3bd47ffe34bc commits=5 files=3 renames=1 binary=0 \
-             blame_files=0 runs=0 window=max:2000 surface=lib"
+             blame_files=0 runs=0 window=max:2000 messages=5 redacted=1 branch_labels=2 trailers_dropped=4 surface=lib"
         );
         let opts = HistoryOptions { since: Some("2 weeks ago".into()), surface: "cli", ..HistoryOptions::default() };
-        assert!(sync_marker("g1", &summary, &opts).ends_with("window=max:2000,since:2_weeks_ago surface=cli"));
+        assert!(sync_marker("g1", &summary, &opts).ends_with(
+            "window=max:2000,since:2_weeks_ago messages=5 redacted=1 branch_labels=2 trailers_dropped=4 surface=cli"
+        ));
+        let off = HistoryOptions { messages: false, ..HistoryOptions::default() };
+        assert!(sync_marker("g1", &summary, &off).ends_with("window=max:2000 messages=off surface=lib"));
     }
 
     #[test]

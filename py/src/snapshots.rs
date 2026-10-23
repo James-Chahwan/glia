@@ -34,12 +34,14 @@ fn history_options(
     since: Option<String>,
     blame: bool,
     blame_max_files: usize,
+    messages: bool,
 ) -> HistoryOptions {
     HistoryOptions {
         max_commits,
         since,
         blame,
         blame_max_files,
+        messages,
         surface: "pyo3",
     }
 }
@@ -61,13 +63,17 @@ fn history_of(repo_path: &str, opts: &HistoryOptions) -> Result<HistorySummary, 
 /// `max_commits`: the newest this many non-merge commits (`git log -n`).
 /// `since`: only commits newer than this date, passed to `git log --since`
 /// verbatim. `blame`: also blame the `blame_max_files` most-changed files
-/// (slower). Returns `{head, commits, files, renames, binary, blame_files,
-/// runs}` (`head` the full sha). Raises `ValueError` when the sync fails, and
+/// (slower). `messages`: keep each commit's message (trailers dropped,
+/// redacted), author time and merged-branch label in the snapshot's
+/// `messages.jsonl`, which only query-time answers read (EB.1); `False` keeps
+/// none. Returns `{head, commits, files, renames, binary, blame_files, runs,
+/// messages, redacted, trailers_dropped, branch_labels}` (`head` the full
+/// sha). Raises `ValueError` when the sync fails, and
 /// writes nothing then. Prints `[history] sync ... surface=pyo3` on stderr.
 #[pyfunction]
 #[pyo3(
     name = "history_sync",
-    signature = (repo_path, max_commits=2000, since=None, blame=false, blame_max_files=300)
+    signature = (repo_path, max_commits=2000, since=None, blame=false, blame_max_files=300, messages=true)
 )]
 fn history_sync_py(
     py: Python<'_>,
@@ -76,8 +82,9 @@ fn history_sync_py(
     since: Option<String>,
     blame: bool,
     blame_max_files: usize,
+    messages: bool,
 ) -> PyResult<Py<PyAny>> {
-    let opts = history_options(max_commits, since, blame, blame_max_files);
+    let opts = history_options(max_commits, since, blame, blame_max_files, messages);
     let summary = history_of(repo_path, &opts).map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&summary))
 }
@@ -234,23 +241,24 @@ mod tests {
     fn history_options_default_like_the_library_and_name_pyo3() {
         let lib = HistoryOptions::default();
         assert_eq!(
-            history_options(2000, None, false, 300),
+            history_options(2000, None, false, 300, true),
             HistoryOptions {
                 surface: "pyo3",
                 ..lib
             },
             "the #[pyo3(signature)] literals must track HistoryOptions::default()"
         );
-        let opts = history_options(7, Some("2 weeks ago".into()), true, 9);
+        let opts = history_options(7, Some("2 weeks ago".into()), true, 9, false);
         assert_eq!(
             (
                 opts.max_commits,
                 opts.since.as_deref(),
                 opts.blame,
                 opts.blame_max_files,
+                opts.messages,
                 opts.surface
             ),
-            (7, Some("2 weeks ago"), true, 9, "pyo3")
+            (7, Some("2 weeks ago"), true, 9, false, "pyo3")
         );
     }
 
@@ -261,13 +269,13 @@ mod tests {
     fn history_sync_returns_the_summary_json_or_the_error() {
         let (_scratch, top) = git_repo("ok");
         let repo = top.to_str().expect("utf-8 scratch path");
-        let opts = history_options(2000, None, false, 300);
+        let opts = history_options(2000, None, false, 300, true);
         let summary = history_of(repo, &opts).expect("sync");
         let json = serde_json::to_string(&summary).expect("json");
         assert!(
             json.starts_with(r#"{"head":""#)
                 && json.ends_with(
-                    r#"","commits":2,"files":1,"renames":0,"binary":0,"blame_files":0,"runs":0}"#
+                    r#"","commits":2,"files":1,"renames":0,"binary":0,"blame_files":0,"runs":0,"messages":2,"redacted":0,"trailers_dropped":0,"branch_labels":0}"#
                 ),
             "{json}"
         );
