@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(v["commits"], 30);
         assert_eq!(v["test_commits"], 10, "max_commits reaches the replay");
         let sets = v["sets"].as_array().expect("sets");
-        assert_eq!(sets.len(), 8);
+        assert_eq!(sets.len(), 12, "default groups structure + review (EC.11)");
         assert_eq!(
             (sets[0]["set"].as_str(), sets[0]["shape"].as_str()),
             (Some("SELh0"), Some("k1"))
