@@ -350,10 +350,11 @@ fn render_params(sig: &syn::Signature, opts: &[(String, TokenStream)], drop_firs
                 let head_text = tokens_text(head.iter().cloned().collect());
                 let name = head_text.trim_start_matches('*');
                 let mut part = head_text.clone();
-                if !name.is_empty() && name != "/" {
-                    if let Some(t) = type_of(name) {
-                        let _ = write!(part, ": {t}");
-                    }
+                if !name.is_empty()
+                    && name != "/"
+                    && let Some(t) = type_of(name)
+                {
+                    let _ = write!(part, ": {t}");
                 }
                 if let Some(d) = default {
                     let _ = write!(part, " = {d}");

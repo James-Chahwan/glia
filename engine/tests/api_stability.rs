@@ -312,12 +312,12 @@ impl Scan {
                 if exported == name {
                     return self.follow(m, &top.mods, &segs, depth);
                 }
-                if exported == "*" {
-                    if let Some((base, rest)) = Self::base(m, &top.mods, &segs) {
-                        let glob = [base.as_slice(), &rest[..rest.len() - 1]].concat();
-                        if self.item(&glob, name, depth + 1) {
-                            return true;
-                        }
+                if exported == "*"
+                    && let Some((base, rest)) = Self::base(m, &top.mods, &segs)
+                {
+                    let glob = [base.as_slice(), &rest[..rest.len() - 1]].concat();
+                    if self.item(&glob, name, depth + 1) {
+                        return true;
                     }
                 }
             }

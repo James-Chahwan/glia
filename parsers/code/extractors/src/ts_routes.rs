@@ -654,11 +654,11 @@ fn extract_hapi_configs(body: &str) -> Vec<(&'static str, String, usize)> {
             let obj = &body[i + 1..i + 1 + close];
             let path = obj_string_field(obj, "path");
             let methods = obj_method_field(obj);
-            if let Some(p) = path {
-                if looks_like_url_path(&p) {
-                    for m in methods {
-                        out.push((m, p.clone(), i));
-                    }
+            if let Some(p) = path
+                && looks_like_url_path(&p)
+            {
+                for m in methods {
+                    out.push((m, p.clone(), i));
                 }
             }
             i += 1 + close + 1;
@@ -756,10 +756,10 @@ fn obj_method_field(obj: &str) -> Vec<&'static str> {
             while j < bytes.len() && bytes[j] != delim {
                 j += 1;
             }
-            if j < bytes.len() {
-                if let Some(m) = canonical_http_method(&after[1..j]) {
-                    return vec![m];
-                }
+            if j < bytes.len()
+                && let Some(m) = canonical_http_method(&after[1..j])
+            {
+                return vec![m];
             }
         }
     }

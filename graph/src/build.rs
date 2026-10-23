@@ -4765,7 +4765,7 @@ pub(crate) fn rename_nodes(
         .map(|(i, n)| (n.id, i))
         .collect();
     let mut dropped = vec![false; g.nodes.len()];
-    for i in 0..g.nodes.len() {
+    for (i, drop) in dropped.iter_mut().enumerate() {
         let old = g.nodes[i].id;
         let Some(&new) = remap.get(&old) else {
             continue;
@@ -4775,7 +4775,7 @@ pub(crate) fn rename_nodes(
                 let cells = std::mem::take(&mut g.nodes[i].cells);
                 append_cells(&mut g.nodes[j].cells, cells);
                 absorbed.insert(old);
-                dropped[i] = true;
+                *drop = true;
             }
             None => {
                 g.nodes[i].id = new;
@@ -8280,12 +8280,12 @@ mod tests {
         bind_out_of_line(&mut g, &mut calls, &mut refs).1
     }
 
-    fn only_edge<'g>(
-        g: &'g RepoGraph,
+    fn only_edge(
+        g: &RepoGraph,
         from: NodeId,
         to: NodeId,
         category: glia_core::EdgeCategoryId,
-    ) -> &'g Edge {
+    ) -> &Edge {
         let hits: Vec<&Edge> = g
             .edges
             .iter()

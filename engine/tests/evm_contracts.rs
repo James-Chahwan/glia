@@ -484,15 +484,17 @@ fn deleting_a_called_function_orphans_its_clients() {
 
     let b = contract_breaks_vs_rev(repo.path(), "HEAD", &ContractBreakArgs::default())
         .unwrap_or_else(|e| panic!("contract breaks vs HEAD: {e}"));
-    let rows: Vec<(
+    // (client, category, target, reason, tier, file, line).
+    type Orphan<'a> = (
         String,
-        &str,
+        &'a str,
         String,
-        &str,
-        &str,
+        &'a str,
+        &'a str,
         Option<String>,
         Option<i64>,
-    )> = b
+    );
+    let rows: Vec<Orphan<'_>> = b
         .orphaned_clients
         .iter()
         .map(|o| {

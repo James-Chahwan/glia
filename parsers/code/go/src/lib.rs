@@ -8152,12 +8152,11 @@ func setupRoutes(r *mux.Router) {
                         }
                         had_route = true;
                         total_routes += 1;
-                        if let CellPayload::Json(s) = &cell.payload {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                                if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
-                                    *by_method.entry(m.to_string()).or_insert(0) += 1;
-                                }
-                            }
+                        if let CellPayload::Json(s) = &cell.payload
+                            && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+                            && let Some(m) = v.get("method").and_then(|m| m.as_str())
+                        {
+                            *by_method.entry(m.to_string()).or_insert(0) += 1;
                         }
                     }
                 }

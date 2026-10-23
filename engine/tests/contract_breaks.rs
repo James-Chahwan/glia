@@ -528,6 +528,24 @@ fn route_removed_orphans_its_client() {
 }
 
 #[test]
+fn moved_route_file_orphans_nothing() {
+    let repo = GitRepo::init();
+    repo.write("web/pyproject.toml", "[project]\nname = \"web\"\n");
+    repo.write("web/client.py", CLIENT_PY);
+    repo.write("services/api/pyproject.toml", "[project]\nname = \"api\"\n");
+    repo.write("services/api/app.py", APP_PY);
+    repo.commit("client + service");
+    repo.git_mv("services/api/app.py", "services/api/server.py");
+    let b = breaks(&repo, &backward());
+    assert!(
+        b.orphaned_clients.is_empty(),
+        "the route moved with its file, so the client is still served:\n{}",
+        dump(&b)
+    );
+    assert_eq!(b.breaking, 0);
+}
+
+#[test]
 fn removed_client_is_not_an_orphan() {
     let repo = GitRepo::init();
     repo.write("web/pyproject.toml", "[project]\nname = \"web\"\n");

@@ -3095,10 +3095,10 @@ pub fn extract_cli_invocation_nodes(
         let mut search_from = 0;
         while let Some(rel_idx) = source[search_from..].find(pattern) {
             let args_at = search_from + rel_idx + pattern.len();
-            if !sites.contains_key(&args_at) {
+            if let std::collections::btree_map::Entry::Vacant(e) = sites.entry(args_at) {
                 let tokens = scan_argv(&source[args_at..]);
                 if !tokens.is_empty() {
-                    sites.insert(args_at, tokens);
+                    e.insert(tokens);
                 }
             }
             search_from = args_at;

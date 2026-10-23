@@ -198,14 +198,17 @@ const CSHARP: &[(&str, &str)] = &[(
      \x20           return \"ok\";\n        }\n    }\n}\n",
 )];
 
-/// `(label, sources, qnames that MUST be present)`. The must-list keeps each
-/// directory from passing vacuously; an empty list marks a parser that drops
-/// the relative literal (a recall gap outside LB.5).
-fn cases() -> Vec<(
+/// One case: `(label, sources as (path, text), qnames that MUST be present)`.
+type Case = (
     &'static str,
     &'static [(&'static str, &'static str)],
     Vec<&'static str>,
-)> {
+);
+
+/// `(label, sources, qnames that MUST be present)`. The must-list keeps each
+/// directory from passing vacuously; an empty list marks a parser that drops
+/// the relative literal (a recall gap outside LB.5).
+fn cases() -> Vec<Case> {
     vec![
         // LB.11a: a Go ROUTE is `<METHOD> <path>`, one node per method.
         ("go gin + echo", GO, vec!["GET /items", "GET /parts"]),

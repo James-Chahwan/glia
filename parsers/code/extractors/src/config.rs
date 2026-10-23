@@ -1327,7 +1327,7 @@ fn scan_dockerfile_env(source: &str) -> Vec<ConfigDef> {
 }
 
 fn strip_dockerfile_comment(s: &str) -> &str {
-    s.splitn(2, '#').next().unwrap_or(s).trim()
+    s.split('#').next().unwrap_or(s).trim()
 }
 
 /// Split `KEY=value KEY2="quoted value" KEY3=value3` into KEY/value pairs.

@@ -150,7 +150,7 @@ pub(crate) fn plan_groups(
                 .flat_map(|fp| &fp.refs)
                 .filter(|r| r.category == edge_category::INJECTS)
                 .count();
-            (matrix_row(*lang), n)
+            (matrix_row(lang), n)
         })
         .collect();
     // A6.2a `[recv]` marker input: declared field types per matrix row, counted
@@ -165,7 +165,7 @@ pub(crate) fn plan_groups(
                 .flat_map(|fp| fp.nav.field_types.values())
                 .map(HashMap::len)
                 .sum();
-            (matrix_row(*lang), n)
+            (matrix_row(lang), n)
         })
         .collect();
     // The per-language marker inputs above keep `kotlin` as its own row; the
@@ -670,7 +670,7 @@ fn join_jvm_family(parses_by_lang: &mut Vec<(&'static str, Vec<FileParse>)>) {
 
 /// The matrix row a parse-language tag reports under: the TS-family tags
 /// (angular / react / vue) are the `typescript` row.
-fn matrix_row<'a>(lang: &'a str) -> &'a str {
+fn matrix_row(lang: &str) -> &str {
     if TS_FAMILY.contains(&lang) {
         "typescript"
     } else {

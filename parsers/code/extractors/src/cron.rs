@@ -374,17 +374,16 @@ fn extract_github_actions(source: &str, path: &str) -> Vec<CronJob> {
         // Match `cron: '* * * * *'` and `cron: "..."`. Indented under `schedule:`
         // — we don't validate the parent key (cheap; false-positives elsewhere
         // require the literal `cron:` key which is rare outside this context).
-        if let Some(rest) = t.strip_prefix("- cron:").or_else(|| t.strip_prefix("cron:")) {
-            if let Some(schedule) = first_yaml_string(rest) {
-                if looks_like_cron_expr(&schedule) {
-                    out.push(CronJob {
-                        schedule,
-                        target: target.clone(),
-                        source: "github_actions",
-                        handler: None,
-                    });
-                }
-            }
+        if let Some(rest) = t.strip_prefix("- cron:").or_else(|| t.strip_prefix("cron:"))
+            && let Some(schedule) = first_yaml_string(rest)
+            && looks_like_cron_expr(&schedule)
+        {
+            out.push(CronJob {
+                schedule,
+                target: target.clone(),
+                source: "github_actions",
+                handler: None,
+            });
         }
     }
     out
@@ -481,24 +480,23 @@ fn extract_k8s_cronjob_doc(doc: &str) -> Option<CronJob> {
         // bar` both arrive trimmed-but-prefixed.
         let t = line.trim();
         let t = t.strip_prefix("- ").unwrap_or(t);
-        if let Some(rest) = t.strip_prefix("schedule:") {
-            if let Some(s) = first_yaml_string(rest) {
-                if looks_like_cron_expr(&s) {
-                    current_schedule = Some(s);
-                }
-            }
+        if let Some(rest) = t.strip_prefix("schedule:")
+            && let Some(s) = first_yaml_string(rest)
+            && looks_like_cron_expr(&s)
+        {
+            current_schedule = Some(s);
         }
-        if let Some(rest) = t.strip_prefix("image:") {
-            if let Some(img) = first_yaml_string(rest) {
-                current_image = Some(image_basename(&img));
-            }
+        if let Some(rest) = t.strip_prefix("image:")
+            && let Some(img) = first_yaml_string(rest)
+        {
+            current_image = Some(image_basename(&img));
         }
         // `command: ['/usr/bin/x']` and `command: [/usr/bin/x]` and
         // `args: ["--once"]` — pick the first list element as a hint.
-        if let Some(rest) = t.strip_prefix("command:") {
-            if let Some(cmd) = first_list_element(rest) {
-                current_command = Some(basename(&cmd));
-            }
+        if let Some(rest) = t.strip_prefix("command:")
+            && let Some(cmd) = first_list_element(rest)
+        {
+            current_command = Some(basename(&cmd));
         }
     }
     let schedule = current_schedule?;
@@ -541,16 +539,16 @@ fn extract_node_cron(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
             continue;
         }
         let after = &source[pos + "cron.schedule(".len()..];
-        if let Some(schedule) = first_quoted(after) {
-            if looks_like_cron_expr(&schedule) {
-                let target = handler_after_first_arg(after).unwrap_or_else(|| "anon".to_string());
-                out.push(CronJob {
-                    schedule,
-                    target,
-                    source: "node_cron",
-                    handler: None,
-                });
-            }
+        if let Some(schedule) = first_quoted(after)
+            && looks_like_cron_expr(&schedule)
+        {
+            let target = handler_after_first_arg(after).unwrap_or_else(|| "anon".to_string());
+            out.push(CronJob {
+                schedule,
+                target,
+                source: "node_cron",
+                handler: None,
+            });
         }
     }
     // Class form: `new CronJob({ cronTime: '...', onTick: handler })`
@@ -562,25 +560,25 @@ fn extract_node_cron(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
             continue;
         }
         let after = &source[pos + "cronTime:".len()..];
-        if let Some(schedule) = first_quoted(after) {
-            if looks_like_cron_expr(&schedule) {
-                // Look for `onTick:` within the next ~256 bytes for the target,
-                // snapped DOWN so a multibyte char on the cut can't panic.
-                let win_end = source.floor_char_boundary((pos + 256).min(source.len()));
-                let win = &source[pos..win_end];
-                let target = if let Some(tick) = win.find("onTick:") {
-                    let after_tick = &win[tick + "onTick:".len()..];
-                    handler_identifier(after_tick).unwrap_or_else(|| "anon".to_string())
-                } else {
-                    "anon".to_string()
-                };
-                out.push(CronJob {
-                    schedule,
-                    target,
-                    source: "node_cron",
-                    handler: None,
-                });
-            }
+        if let Some(schedule) = first_quoted(after)
+            && looks_like_cron_expr(&schedule)
+        {
+            // Look for `onTick:` within the next ~256 bytes for the target,
+            // snapped DOWN so a multibyte char on the cut can't panic.
+            let win_end = source.floor_char_boundary((pos + 256).min(source.len()));
+            let win = &source[pos..win_end];
+            let target = if let Some(tick) = win.find("onTick:") {
+                let after_tick = &win[tick + "onTick:".len()..];
+                handler_identifier(after_tick).unwrap_or_else(|| "anon".to_string())
+            } else {
+                "anon".to_string()
+            };
+            out.push(CronJob {
+                schedule,
+                target,
+                source: "node_cron",
+                handler: None,
+            });
         }
     }
     out
@@ -715,27 +713,27 @@ fn extract_scheduled_annotation(source: &str, guard: &mut LazyGuard<'_>) -> Vec<
             // Permit `cron = "..."` and `cron="..."` alike.
             if let Some(eq) = tail.find('=') {
                 let after_eq = &tail[eq + 1..];
-                if let Some(schedule) = first_quoted(after_eq) {
-                    if looks_like_cron_expr(&schedule) {
-                        // `j` sits on the annotation's `)`.
-                        let method =
-                            method_name_after_annotation(source.get(j + 1..).unwrap_or_default());
-                        // LA.19a: the annotated method, scoped by the class
-                        // the annotation sits in, is the job's handler.
-                        let handler = method.as_ref().and_then(|m| {
-                            let class = enclosing_class_name(source.get(..pos)?)?;
-                            Some(CallQualifier::Attribute {
-                                base: class,
-                                name: m.clone(),
-                            })
-                        });
-                        out.push(CronJob {
-                            schedule,
-                            target: method.unwrap_or_else(|| "anon".to_string()),
-                            source: "scheduled_annot",
-                            handler: at_row(handler, source, pos),
-                        });
-                    }
+                if let Some(schedule) = first_quoted(after_eq)
+                    && looks_like_cron_expr(&schedule)
+                {
+                    // `j` sits on the annotation's `)`.
+                    let method =
+                        method_name_after_annotation(source.get(j + 1..).unwrap_or_default());
+                    // LA.19a: the annotated method, scoped by the class
+                    // the annotation sits in, is the job's handler.
+                    let handler = method.as_ref().and_then(|m| {
+                        let class = enclosing_class_name(source.get(..pos)?)?;
+                        Some(CallQualifier::Attribute {
+                            base: class,
+                            name: m.clone(),
+                        })
+                    });
+                    out.push(CronJob {
+                        schedule,
+                        target: method.unwrap_or_else(|| "anon".to_string()),
+                        source: "scheduled_annot",
+                        handler: at_row(handler, source, pos),
+                    });
                 }
             }
         }
@@ -793,14 +791,13 @@ fn method_name_after_annotation(after_close: &str) -> Option<String> {
             }
             return None;
         }
-        if c.is_ascii_alphanumeric() || c == b'_' {
-            if last_ident_start.is_none() || {
+        if (c.is_ascii_alphanumeric() || c == b'_')
+            && (last_ident_start.is_none() || {
                 let prev = if i == 0 { 0 } else { bytes[i - 1] };
                 !(prev.is_ascii_alphanumeric() || prev == b'_')
-            } {
+            }) {
                 last_ident_start = Some(i);
             }
-        }
         i += 1;
     }
     None
@@ -3794,7 +3791,7 @@ fn first_yaml_string(s: &str) -> Option<String> {
     }
     // Bare scalar — take to end of line / comment.
     let end = s
-        .find(|c: char| c == '#' || c == '\n')
+        .find(['#', '\n'])
         .unwrap_or(s.len());
     let v = s[..end].trim().to_string();
     if v.is_empty() { None } else { Some(v) }

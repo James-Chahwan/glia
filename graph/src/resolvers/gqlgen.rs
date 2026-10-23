@@ -725,7 +725,7 @@ mod tests {
         go_side(&mut go, "api", &["UserID", "UserId"], &[], true);
         let mut gql = G::new(r);
         sdl_side(&mut gql, &["userId"], "api/graph/schema.graphqls", "api");
-        let graphs = vec![go.g, gql.g];
+        let graphs = [go.g, gql.g];
         let refs: Vec<&RepoGraph> = graphs.iter().collect();
         let mut stats = Stats::default();
         let mut pairs = Vec::new();

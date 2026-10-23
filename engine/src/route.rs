@@ -2098,8 +2098,10 @@ mod tests {
             .values()
             .flatten()
             .flat_map(|fp| {
-                fp.nodes.iter().filter_map(move |n| {
-                    (fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION)).then(|| {
+                fp.nodes
+                    .iter()
+                    .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION))
+                    .map(|n| {
                         let origin = n
                             .cells
                             .iter()
@@ -2110,7 +2112,6 @@ mod tests {
                             .unwrap_or_default();
                         (fp.nav.qname_by_id[&n.id].clone(), origin)
                     })
-                })
             })
             .collect();
         ops.sort();

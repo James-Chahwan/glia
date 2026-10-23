@@ -719,7 +719,7 @@ struct View<'a> {
     /// GRAPHQL_RESOLVER, the (repo, owner) of each resolver it reaches, in
     /// edge order: the server projects a project's operations pair. Only
     /// looked up, never iterated.
-    gql_paired: HashMap<(u64, Option<&'a str>), Vec<(u64, Option<&'a str>)>>,
+    gql_paired: HashMap<RepoOwner<'a>, Vec<RepoOwner<'a>>>,
     /// DT.11c: per (repo, owner, last normalised path segment, [`path_tail`])
     /// of a server ROUTE (no client-router page, no route only test code
     /// registers), the least (qname, id) such route: where glia reads a
@@ -999,6 +999,9 @@ fn label_of(labels: &BTreeMap<u64, String>, repo: u64) -> String {
 /// `call` (after its last `.` / `::`) -> the `call` as written, first stanza
 /// first.
 type Wrapped = BTreeMap<u64, BTreeMap<String, String>>;
+
+/// A (repo, LB.8 owner from [`split_owner`]) pair: the project a node sits in.
+type RepoOwner<'a> = (u64, Option<&'a str>);
 
 /// The http `[[wrapper]]` stanzas of each root's `.glia/overlay.toml`.
 fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
@@ -2568,10 +2571,13 @@ mod tests {
         MergedGraph::new(vec![g.build()])
     }
 
+    /// An `unpaired_endpoint` row: (qname, detail, tier).
+    type EndpointRow = (String, String, &'static str);
+
     /// The `unpaired_endpoint` rows of `m` as (qname, detail, tier), and the
     /// (implied, unpaired) transport counts `[gaps] graphql transports`
     /// prints.
-    fn endpoint_rows(m: &MergedGraph) -> (Vec<(String, String, &'static str)>, (usize, usize)) {
+    fn endpoint_rows(m: &MergedGraph) -> (Vec<EndpointRow>, (usize, usize)) {
         let o = GapsOptions {
             category: Some(UNPAIRED_ENDPOINT.into()),
             ..GapsOptions::default()

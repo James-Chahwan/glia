@@ -349,16 +349,16 @@ fn parse_stack_frames(text: &str) -> Vec<(String, u32)> {
     let mut frames = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("File \"") {
-            if let Some(end) = rest.find('"') {
-                let file = &rest[..end];
-                if let Some(lpos) = rest[end..].find("line ") {
-                    let after = &rest[end + lpos + 5..];
-                    let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-                    if let Ok(n) = num.parse::<u32>() {
-                        frames.push((file.to_string(), n));
-                        continue;
-                    }
+        if let Some(rest) = trimmed.strip_prefix("File \"")
+            && let Some(end) = rest.find('"')
+        {
+            let file = &rest[..end];
+            if let Some(lpos) = rest[end..].find("line ") {
+                let after = &rest[end + lpos + 5..];
+                let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = num.parse::<u32>() {
+                    frames.push((file.to_string(), n));
+                    continue;
                 }
             }
         }
@@ -428,13 +428,13 @@ fn parse_diff_frames(text: &str) -> Vec<(String, u32)> {
 /// rows), or `None`. Hand-rolled so the graph crate stays serde-free.
 fn position_of(node: &Node) -> Option<(String, u32, u32)> {
     for c in &node.cells {
-        if c.kind == cell_type::POSITION {
-            if let glia_core::CellPayload::Json(j) = &c.payload {
-                let file = json_str_field(j, "file")?;
-                let start = json_num_field(j, "start_line")?;
-                let end = json_num_field(j, "end_line")?;
-                return Some((file, start, end));
-            }
+        if c.kind == cell_type::POSITION
+            && let glia_core::CellPayload::Json(j) = &c.payload
+        {
+            let file = json_str_field(j, "file")?;
+            let start = json_num_field(j, "start_line")?;
+            let end = json_num_field(j, "end_line")?;
+            return Some((file, start, end));
         }
     }
     None
@@ -455,7 +455,7 @@ fn json_num_field(json: &str, key: &str) -> Option<u32> {
 }
 
 fn basename(path: &str) -> &str {
-    path.rsplit(|c: char| c == '/' || c == '\\').next().unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Normalise a caller-supplied path for matching: trim, `\` → `/`, drop a

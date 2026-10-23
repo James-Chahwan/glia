@@ -1306,7 +1306,7 @@ fn backtick_identifiers(text: &str) -> Vec<String> {
 /// last `.`/`::` segment, require an identifier ≥3 chars. `None` if not one.
 fn identifier_from_span(span: &str) -> Option<String> {
     let s = span.trim().trim_end_matches("()");
-    let s = s.rsplit(|c| c == '.' || c == ':').next().unwrap_or(s);
+    let s = s.rsplit(['.', ':']).next().unwrap_or(s);
     is_identifier(s).then(|| s.to_string())
 }
 

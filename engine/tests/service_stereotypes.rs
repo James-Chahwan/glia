@@ -129,10 +129,10 @@ fn six_languages_carry_the_service_role_on_their_declarations() {
         .graphs
         .iter()
         .flat_map(|g| {
-            g.nodes.iter().filter_map(|n| {
-                (g.nav.kind_by_id.get(&n.id) == Some(&node_kind::SERVICE))
-                    .then(|| g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default())
-            })
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::SERVICE))
+                .map(|n| g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default())
         })
         .collect();
     assert!(

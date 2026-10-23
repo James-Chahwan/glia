@@ -55,7 +55,15 @@ fn graphql_pairs_over_the_stock_fixture() {
         gp.marker(),
         "[models] graphql pairs=2 undefined_fields=1 open=0 refused=0"
     );
-    let rows: Vec<(String, &str, &str, Option<&str>, Vec<(&str, &str, &str)>)> = gp
+    // (operation, op qname, resolver qname, schema type, (path, type, rule) changes).
+    type Row<'a> = (
+        String,
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+        Vec<(&'a str, &'a str, &'a str)>,
+    );
+    let rows: Vec<Row<'_>> = gp
         .pairs
         .iter()
         .map(|p| {

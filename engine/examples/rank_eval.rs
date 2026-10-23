@@ -566,7 +566,7 @@ fn minmax(v: &[f64], seed: usize) -> Vec<f64> {
             hi = hi.max(s);
         }
     }
-    if !(hi > lo) {
+    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
         return vec![0.0; v.len()];
     }
     v.iter().map(|&s| (s - lo) / (hi - lo)).collect()
@@ -1565,7 +1565,7 @@ fn main() {
         (c, Some(a))
     };
     let r1_on = args.round1 == "on";
-    assert!(!(r1_on && !args.vertical.is_empty()), "--round1 and --vertical are separate runs");
+    assert!(!r1_on || args.vertical.is_empty(), "--round1 and --vertical are separate runs");
     let train_ok = |c: &Commit| !c.files.is_empty() && c.files.len() <= MAX_FILES;
     let test_ok = |c: &Commit| c.files.len() >= 2 && c.files.len() <= MAX_FILES;
     let eligible: Vec<usize> = (0..commits.len()).filter(|&k| test_ok(&commits[k])).collect();
@@ -4237,7 +4237,9 @@ fn vertical_report(
     // fourth run: resolved against raw, against the layer below, against the permuted map,
     // and each ablation against the full keyed signal
     if sig_names.iter().any(|n| n.starts_with("VR")) {
-        let (pairs, plain, abl_of): (&[(&str, &str, &str)], &[(&str, &str, &str)], &[&str]) = match mode {
+        // A comparison: (higher signal, lower signal, family).
+        type Triple = (&'static str, &'static str, &'static str);
+        let (pairs, plain, abl_of): (&[Triple], &[Triple], &[&str]) = match mode {
             VMode::Kina => (
                 &[
                     ("VR1h", "V1m", "VR1h"),
@@ -11125,7 +11127,7 @@ fn subject(msg: &str) -> &str {
 }
 
 /// The id-bearing part of a message: its subject when the subject names an id, else the whole message.
-fn id_text<'a>(msg: &'a str, has: impl Fn(&str) -> bool) -> &'a str {
+fn id_text(msg: &str, has: impl Fn(&str) -> bool) -> &str {
     let s = subject(msg);
     if has(s) { s } else { msg }
 }
@@ -11236,9 +11238,13 @@ impl PreCache {
     }
 }
 
+/// A test commit's pre-change text, and how many ids its message named and
+/// how many of those the parent held.
+type PreText = (Option<String>, usize, usize);
+
 /// glia: the title + rationale, at `parent`, of the packets the message names (its subject's ids, else the
 /// whole message's); returns (text, ids named, ids found at the parent).
-fn glia_pre_text(git: &str, parent: &str, msg: &str, cache: &PreCache) -> (Option<String>, usize, usize) {
+fn glia_pre_text(git: &str, parent: &str, msg: &str, cache: &PreCache) -> PreText {
     let blobs = ls_tree(git, parent, GLIA_PACKETS);
     let maps: Vec<_> = GLIA_PACKETS.iter().filter_map(|p| blobs.get(*p)).map(|b| cache.get(git, b)).collect();
     let part = id_text(msg, |s| !dot_ids(s).is_empty());
@@ -11395,7 +11401,7 @@ fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: O
                 }
                 wave_end[k] = wave_landing(subject(&c.msg));
             }
-            let got: Vec<(usize, (Option<String>, usize, usize))> = tests
+            let got: Vec<(usize, PreText)> = tests
                 .par_iter()
                 .map(|&k| {
                     let p = parents.get(&commits[k].sha).and_then(|x| x.0.clone());
@@ -11419,7 +11425,9 @@ fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: O
             wiki_revs.sort();
             let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
             let maybe = |m: &str| !hyphen_ids(m).is_empty() || !bare_ids(m, &bare_kinds()).is_empty();
-            let got: Vec<(usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>)> = (0..n)
+            // (commit, pre-change text, its units, per-commit stats).
+            type KinaPre = (usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>);
+            let got: Vec<KinaPre> = (0..n)
                 .into_par_iter()
                 .filter(|&k| maybe(&commits[k].msg))
                 .map(|k| {
@@ -11460,6 +11468,9 @@ fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: O
     R1Hist { at, br, ids, pfx, wave_end, pre, glia: args.pre == "glia", stats }
 }
 
+/// Sparse file scores: `(file, score)`.
+type FileScores = Vec<(u32, f64)>;
+
 /// One test commit's round-1 signals (sparse file scores; the seed is excluded per query).
 #[derive(Default)]
 struct R1Commit {
@@ -11472,7 +11483,7 @@ struct R1Commit {
     w: Vec<Vec<(u32, f64)>>,
     wr: Vec<Vec<(u32, f64)>>,
     /// (milestone variant, signal, its control)
-    ms: Vec<(&'static str, Vec<(u32, f64)>, Vec<(u32, f64)>)>,
+    ms: Vec<(&'static str, FileScores, FileScores)>,
     /// which variant M took: Mid, Mbr, Mgap or none
     m_src: &'static str,
     /// the milestone keys M read (for C0m)
@@ -11622,7 +11633,7 @@ impl R1State {
         }
     }
 
-    fn lab_sig(&self, keys: &[String], kind: &str, sha: &str) -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+    fn lab_sig(&self, keys: &[String], kind: &str, sha: &str) -> (FileScores, FileScores) {
         let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
         let mut hit = false;
         for key in keys.iter().filter(|x| x.starts_with(kind)) {
@@ -11650,7 +11661,7 @@ impl R1State {
     }
 
     /// C0r and C0m for one seed (as C0: c(seed, f) / (c(seed) + 1), the 1 weighted as a commit made now).
-    fn seed_sigs(&self, seed: u32, m_keys: &[String]) -> (Vec<(u32, f64)>, Vec<(u32, f64)>) {
+    fn seed_sigs(&self, seed: u32, m_keys: &[String]) -> (FileScores, FileScores) {
         let now = R1_GAMMA.powi(-(self.recent.len() as i32));
         let denom = self.cnt_r.get(&seed).copied().unwrap_or(0.0) + now;
         let mut r: Vec<(u32, f64)> = self.co_r.get(&seed).map(|m| m.iter().map(|(&f, &v)| (f, v / denom)).collect()).unwrap_or_default();
@@ -13326,7 +13337,7 @@ impl R3Idh {
     }
 
     /// (IDH, IDH~ recent-5 control, IDH~u uniform control, keys with history).
-    fn test(&self, keys: &BTreeSet<String>, sha: &str) -> (Vec<(u32, f64)>, Vec<(u32, f64)>, Vec<(u32, f64)>, usize) {
+    fn test(&self, keys: &BTreeSet<String>, sha: &str) -> (FileScores, FileScores, FileScores, usize) {
         let (mut a, mut c, mut u) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
         let mut recent: Vec<(&String, usize)> = self.last.iter().filter(|(k, _)| !keys.contains(*k)).map(|(k, &p)| (k, p)).collect();
         recent.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(y.0)));
@@ -13493,7 +13504,7 @@ fn mm_ex(v: &[f64], excl: &[bool]) -> Vec<f64> {
             hi = hi.max(s);
         }
     }
-    if !(hi > lo) {
+    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) {
         return vec![0.0; v.len()];
     }
     v.iter().map(|&s| (s - lo) / (hi - lo)).collect()
@@ -14367,7 +14378,7 @@ fn r3_compare_main(args: &Args) {
     let lf = ln_fact_table(commit_of.len() + 1);
     let col = |v: &serde_json::Value| -> Vec<f64> { v.as_array().map(|x| x.iter().map(|y| y.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default() };
     let mut rows = Vec::new();
-    let mut md = format!("| ranker | a r@10 | b r@10 | b - a recall@10 | b - a MRR |\n|---|---|---|---|---|\n");
+    let mut md = "| ranker | a r@10 | b r@10 | b - a recall@10 | b - a MRR |\n|---|---|---|---|---|\n".to_string();
     if let Some(ra) = pa["r10"].as_object() {
         for (name, va) in ra {
             let (Some(vb), Some(ma), Some(mb)) = (pb["r10"].get(name), pa["mrr"].get(name), pb["mrr"].get(name)) else { continue };

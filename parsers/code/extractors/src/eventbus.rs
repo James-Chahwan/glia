@@ -1911,7 +1911,7 @@ fn scan_type_needles<'a>(
 fn extract_type_token(after: &str, close: Option<char>) -> Option<String> {
     let trimmed = after.trim_start();
     let end = match close {
-        Some(c) => trimmed.find(|ch: char| ch == c || ch == ',')?,
+        Some(c) => trimmed.find([c, ','])?,
         None => trimmed
             .find(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == ':'))
             .unwrap_or(trimmed.len()),
@@ -1941,8 +1941,8 @@ fn extract_type_token(after: &str, close: Option<char>) -> Option<String> {
 /// directly; the bare form needs the next signature, bounded to a few lines so
 /// a dangling annotation captures nothing.
 fn extract_listener_param_type(after: &str) -> Option<String> {
-    let rest = if after.starts_with('(') {
-        if let Some(token) = extract_type_token(&after[1..], Some(')')) {
+    let rest = if let Some(inner) = after.strip_prefix('(') {
+        if let Some(token) = extract_type_token(inner, Some(')')) {
             return Some(token);
         }
         match after.find(')') {
@@ -2404,11 +2404,10 @@ fn in_let_pattern(source: &str, at: usize, guard: &mut LazyGuard<'_>) -> bool {
                 && i >= 2
                 && &b[i - 2..=i] == b"let"
                 && (i == 2 || !is_ident_byte(b[i - 3]))
-                && !b.get(i + 1).is_some_and(|&c| is_ident_byte(c)) =>
+                && !b.get(i + 1).is_some_and(|&c| is_ident_byte(c))
+                && guard.admits(i - 2) =>
             {
-                if guard.admits(i - 2) {
-                    return true;
-                }
+                return true;
             }
             _ => {}
         }

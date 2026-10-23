@@ -768,7 +768,7 @@ fn anchors_every_rule(program: &Program, output: &str, var: &str) -> bool {
 
 /// A location as a fold compares it: located before unlocated, then by file, then
 /// by line.
-fn location_key(at: &(Option<String>, Option<i64>)) -> (bool, &str, bool, i64) {
+fn location_key(at: &RowLocation) -> (bool, &str, bool, i64) {
     (
         at.0.is_none(),
         at.0.as_deref().unwrap_or_default(),
@@ -843,7 +843,7 @@ impl GqlShape {
     fn anchor(out: &mut EvalOutput, a: &Anchor, nodes: &mut Nodes<'_, '_>) {
         let evaluated = std::mem::take(&mut out.rows);
         let before = evaluated.len();
-        let mut folded: Vec<(EvalRow, (Option<String>, Option<i64>))> = Vec::with_capacity(before);
+        let mut folded: Vec<(EvalRow, RowLocation)> = Vec::with_capacity(before);
         let mut index: BTreeMap<Vec<Key>, usize> = BTreeMap::new();
         for mut r in evaluated {
             let at = match r.values.get(a.column) {
@@ -923,6 +923,9 @@ fn edge_segments(w: &Witness) -> Vec<Vec<EdgeHop>> {
 
 /// One step of a rendered path: the hop and whether it is walked in edge direction.
 type Step = (EdgeHop, bool);
+
+/// A row's `(file, 1-based line)`, each `None` when unlocated.
+type RowLocation = (Option<String>, Option<i64>);
 
 /// `seg` walked from `at`: in edge direction when its first hop leaves `at`, else
 /// against it when its last hop enters `at`; every hop must continue the walk. The
@@ -1153,7 +1156,7 @@ impl<'f, 'a> Nodes<'f, 'a> {
     }
 
     /// The first node value's `(file, line)`.
-    fn first_location(&mut self, values: &[Value]) -> (Option<String>, Option<i64>) {
+    fn first_location(&mut self, values: &[Value]) -> RowLocation {
         match values.iter().find_map(|v| match v {
             Value::Node(id) => Some(*id),
             _ => None,

@@ -72,7 +72,7 @@ fn wire<'a>(cw: &'a ClientWires, route: &str) -> &'a ClientWire {
     of[0]
 }
 
-fn only_handler<'a>(w: &'a ClientWire) -> &'a RouteHandler {
+fn only_handler(w: &ClientWire) -> &RouteHandler {
     assert_eq!(w.routes.len(), 1, "{w:#?}");
     assert_eq!(w.routes[0].rule, "exact", "{w:#?}");
     assert_eq!(w.routes[0].handlers.len(), 1, "{w:#?}");
@@ -80,7 +80,7 @@ fn only_handler<'a>(w: &'a ClientWire) -> &'a RouteHandler {
 }
 
 /// The one server site of `w`'s handler in `dir`.
-fn server<'a>(w: &'a ClientWire, dir: WireDirection) -> &'a ResolvedShape {
+fn server(w: &ClientWire, dir: WireDirection) -> &ResolvedShape {
     let sites = only_handler(w).sites(dir);
     assert_eq!(sites.len(), 1, "{dir:?} sites of {w:#?}");
     &sites[0].shape

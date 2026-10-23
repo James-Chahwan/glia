@@ -278,22 +278,21 @@ fn canonical_entity_name(name: &str) -> String {
 /// letter), or is the unchanged input. The "after a letter" guard keeps
 /// `ab's` from folding to `ab'`, which step (1) of the fold would then trim.
 fn singularise(word: &str) -> String {
-    if let Some(stem) = word.strip_suffix("ies") {
-        if !stem.is_empty() {
-            return format!("{stem}y");
-        }
+    if let Some(stem) = word.strip_suffix("ies")
+        && !stem.is_empty()
+    {
+        return format!("{stem}y");
     }
-    if ["sses", "shes", "ches", "xes", "zes"].iter().any(|s| word.ends_with(s)) {
-        if let Some(stem) = word.strip_suffix("es") {
-            return stem.to_owned();
-        }
+    if ["sses", "shes", "ches", "xes", "zes"].iter().any(|s| word.ends_with(s))
+        && let Some(stem) = word.strip_suffix("es")
+    {
+        return stem.to_owned();
     }
-    if let Some(stem) = word.strip_suffix('s') {
-        if let Some(prev) = stem.chars().last() {
-            if prev.is_ascii_alphabetic() && !matches!(prev, 's' | 'u' | 'i') {
-                return stem.to_owned();
-            }
-        }
+    if let Some(stem) = word.strip_suffix('s')
+        && let Some(prev) = stem.chars().last()
+        && prev.is_ascii_alphabetic() && !matches!(prev, 's' | 'u' | 'i')
+    {
+        return stem.to_owned();
     }
     word.to_owned()
 }

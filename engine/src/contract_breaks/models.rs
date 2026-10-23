@@ -1744,10 +1744,10 @@ fn go_member(line: &str, member: &str) -> bool {
 /// A TS property line declaring `name`.
 fn ts_member(line: &str, name: &str) -> bool {
     let mut l = line.trim_start();
-    if let Some(r) = l.strip_prefix("readonly") {
-        if r.starts_with(char::is_whitespace) {
-            l = r.trim_start();
-        }
+    if let Some(r) = l.strip_prefix("readonly")
+        && r.starts_with(char::is_whitespace)
+    {
+        l = r.trim_start();
     }
     let l = l.strip_prefix(['\'', '"']).unwrap_or(l);
     let Some(r) = l.strip_prefix(name) else {

@@ -191,7 +191,9 @@ fn assert_all_equal(what: &str, per_copy: Vec<(&str, Vec<u8>)>) {
 fn two_clones_export_identical_bytes() {
     let s = Scratch::new("bytes");
     let errs: Vec<(&str, String)> = COPIES.iter().map(|c| (*c, s.export(c, "a", None))).collect();
-    let artefacts: [(&str, fn(&Path) -> PathBuf); 4] = [
+    // (label, the artefact's path for an export at a path).
+    type Artefact = (&'static str, fn(&Path) -> PathBuf);
+    let artefacts: [Artefact; 4] = [
         ("gmap", |p: &Path| p.to_path_buf()),
         ("files.json", sidecar_path),
         ("meta.json", meta_path),

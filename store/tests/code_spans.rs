@@ -324,9 +324,9 @@ fn edit_inside<'a>(g: &RepoGraph, repo: &Path, all: &'a [Slice], kind: NodeKindI
     let mut best: Option<(usize, &Slice, usize)> = None;
     for s in all.iter().filter(|s| g.nav.kind_by_id.get(&s.node) == Some(&kind)) {
         let src = std::fs::read(repo.join(&s.file)).unwrap();
-        for k in s.start..s.start + s.text.len() {
+        for (k, byte) in src.iter().enumerate().skip(s.start).take(s.text.len()) {
             let covering = all.iter().filter(|o| covers(o, &s.file, k)).count();
-            if src[k].is_ascii_lowercase() && best.as_ref().is_none_or(|(c, _, _)| covering < *c) {
+            if byte.is_ascii_lowercase() && best.as_ref().is_none_or(|(c, _, _)| covering < *c) {
                 best = Some((covering, s, k));
             }
         }

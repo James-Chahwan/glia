@@ -460,8 +460,8 @@ fn visit_class(
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
-                composed +=
-                    visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
+                let parent = MethodParent { qname: &qname, id, class_prefix: &class_prefix };
+                composed += visit_method(child, src, file_rel, &parent, repo, acc);
                 if is_di && is_constructor(child, src) {
                     // `parent_id` is the file MODULE (semicolon namespace, the
                     // PSR-4 norm) or the namespace PACKAGE (brace form); the
@@ -529,7 +529,8 @@ fn visit_interface(
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
-                visit_method(child, src, file_rel, &qname, id, repo, "", acc);
+                let parent = MethodParent { qname: &qname, id, class_prefix: "" };
+                visit_method(child, src, file_rel, &parent, repo, acc);
             }
         }
     }
@@ -747,18 +748,25 @@ fn visit_function(
     }
 }
 
+/// The class or interface a method is declared in: its qname, its node, and
+/// the class-level `#[Route]` prefix (`""` for an interface).
+struct MethodParent<'a> {
+    qname: &'a str,
+    id: NodeId,
+    class_prefix: &'a str,
+}
+
 /// Returns how many `#[Route]` attribute routes this method contributed, so
 /// `visit_class` can report the composition in its `[php-routes]` marker.
 fn visit_method(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
+    parent: &MethodParent<'_>,
     repo: RepoId,
-    class_prefix: &str,
     acc: &mut Acc,
 ) -> usize {
+    let MethodParent { qname: parent_qname, id: parent_id, class_prefix } = *parent;
     let Some(name_node) = node.child_by_field_name("name") else {
         return 0;
     };
@@ -1873,22 +1881,18 @@ fn local_receiver_types(func: TsNode, src: &[u8]) -> HashMap<String, String> {
                 if let (Some(lhs), Some(rhs)) = (
                     n.child_by_field_name("left"),
                     n.child_by_field_name("right"),
-                ) {
-                    if lhs.kind() == "variable_name" && rhs.kind() == "object_creation_expression" {
-                        if let Some(cls) = created_class_name(rhs, src) {
+                )
+                    && lhs.kind() == "variable_name" && rhs.kind() == "object_creation_expression"
+                        && let Some(cls) = created_class_name(rhs, src) {
                             types.insert(text_of(lhs, src).to_string(), cls);
                         }
-                    }
-                }
             }
             "simple_parameter" | "property_promotion_parameter" => {
                 if let (Some(ty), Some(nm)) =
                     (n.child_by_field_name("type"), n.child_by_field_name("name"))
-                {
-                    if let Some(cls) = class_type_name(text_of(ty, src)) {
+                    && let Some(cls) = class_type_name(text_of(ty, src)) {
                         types.insert(text_of(nm, src).to_string(), cls);
                     }
-                }
             }
             _ => {}
         }

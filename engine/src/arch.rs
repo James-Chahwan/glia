@@ -59,17 +59,17 @@ use crate::identity::{Collapse, IdentityView};
 /// escape in the path — a silent miss traded for a clone.
 pub fn node_file(n: &Node) -> Option<String> {
     for c in &n.cells {
-        if c.kind == cell_type::POSITION {
-            if let Some(f) = json_file(&c.payload) {
-                return Some(f);
-            }
+        if c.kind == cell_type::POSITION
+            && let Some(f) = json_file(&c.payload)
+        {
+            return Some(f);
         }
     }
     for c in &n.cells {
-        if c.kind == cell_type::ENDPOINT_HIT || c.kind == cell_type::ROUTE_METHOD {
-            if let Some(f) = json_file(&c.payload) {
-                return Some(f);
-            }
+        if (c.kind == cell_type::ENDPOINT_HIT || c.kind == cell_type::ROUTE_METHOD)
+            && let Some(f) = json_file(&c.payload)
+        {
+            return Some(f);
         }
     }
     None
@@ -119,10 +119,10 @@ fn file_index(merged: &MergedGraph) -> (HashMap<NodeId, String>, usize) {
                 continue;
             }
             all.insert(n.id);
-            if !idx.contains_key(&n.id) {
-                if let Some(f) = node_file(n) {
-                    idx.insert(n.id, f);
-                }
+            if !idx.contains_key(&n.id)
+                && let Some(f) = node_file(n)
+            {
+                idx.insert(n.id, f);
             }
         }
     }
@@ -370,10 +370,10 @@ fn top_level_dir(file: &str) -> String {
 }
 
 fn prefixed(key: String, repo: u64, labels: &BTreeMap<u64, String>) -> String {
-    if labels.len() >= 2 {
-        if let Some(l) = labels.get(&repo) {
-            return format!("{l}/{key}");
-        }
+    if labels.len() >= 2
+        && let Some(l) = labels.get(&repo)
+    {
+        return format!("{l}/{key}");
     }
     key
 }

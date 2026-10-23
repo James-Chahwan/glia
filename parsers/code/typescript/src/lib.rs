@@ -2684,10 +2684,10 @@ fn visit_exported_const(
         }
         let value = declarator.child_by_field_name("value");
         // Arrow/function consts are hoisted to Function nodes by visit_lexical.
-        if let Some(v) = value {
-            if matches!(v.kind(), "arrow_function" | "function_expression") {
-                continue;
-            }
+        if let Some(v) = value
+            && matches!(v.kind(), "arrow_function" | "function_expression")
+        {
+            continue;
         }
         // Noise gate: drop undocumented literal-primitive consts.
         if doc.is_none() && value.map(|v| is_literal_primitive(v, src)).unwrap_or(true) {

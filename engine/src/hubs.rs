@@ -420,7 +420,9 @@ impl HubIndex {
         // An edge whose end is no node sorts after every node, by id.
         let key = |id: NodeId| pos.get(&id).map_or((1u8, id.0), |&p| (0u8, p as u64));
         let touches_scope = |id: NodeId| pos.get(&id).is_some_and(|&p| infos[p].scoped);
-        let mut edges: Vec<((u8, u64), (u8, u64), u32, &Edge)> = merged
+        // (from key, to key, category id, the edge).
+        type Keyed<'e> = ((u8, u64), (u8, u64), u32, &'e Edge);
+        let mut edges: Vec<Keyed<'_>> = merged
             .all_edges()
             .filter(|e| count.contains(e.category))
             .filter(|e| !tests.contains(&e.from) && !tests.contains(&e.to))
@@ -428,7 +430,7 @@ impl HubIndex {
             .map(|e| (key(e.from), key(e.to), e.category.0, e))
             .collect();
         // Stable: same-key edges are interchangeable for every count and score.
-        edges.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+        edges.sort_by_key(|a| (a.0, a.1, a.2));
 
         let source = HubSource {
             nodes: infos.iter().map(|i| i.id).collect(),

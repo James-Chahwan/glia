@@ -54,16 +54,8 @@ pub fn parse_file(
             "import_declaration" => collect_import(child, src, module_qname, &mut acc),
             "class_declaration" | "interface_declaration" | "enum_declaration"
             | "record_declaration" => {
-                top_level_types += usize::from(visit_type_decl(
-                    child,
-                    src,
-                    file_rel_path,
-                    scope,
-                    module_id,
-                    module_id,
-                    repo,
-                    &mut acc,
-                ));
+                let at = TypeScope { scope, parent_id: module_id, module_id };
+                top_level_types += usize::from(visit_type_decl(child, src, file_rel_path, at, repo, &mut acc));
             }
             _ => {}
         }
@@ -688,20 +680,21 @@ fn would_mint_routes(
     check_route_annotations(node, src, file_rel, handler_id, repo, class_prefix, &mut scratch)
 }
 
+/// Where a type declaration hangs ([`visit_type_decl`]): the qname scope it
+/// takes, the node that DEFINES it and the file MODULE its refs resolve from.
+#[derive(Clone, Copy)]
+struct TypeScope<'a> {
+    scope: &'a str,
+    parent_id: NodeId,
+    module_id: NodeId,
+}
+
 /// Emit one type declaration and everything under it. `scope` is the qname the
 /// type hangs off: the package scope ([`type_scope`]) for a top-level type,
 /// the outer type's qname for a nested one. Returns whether a type node was
 /// emitted (the `[qname] java:` marker counts them).
-fn visit_type_decl(
-    node: TsNode,
-    src: &[u8],
-    file_rel: &str,
-    scope: &str,
-    parent_id: NodeId,
-    module_id: NodeId,
-    repo: RepoId,
-    acc: &mut Acc,
-) -> bool {
+fn visit_type_decl(node: TsNode, src: &[u8], file_rel: &str, at: TypeScope<'_>, repo: RepoId, acc: &mut Acc) -> bool {
+    let TypeScope { scope, parent_id, module_id } = at;
     let Some(name_node) = node.child_by_field_name("name") else {
         return false;
     };
@@ -944,16 +937,8 @@ fn visit_type_member(
         | "interface_declaration"
         | "enum_declaration"
         | "record_declaration" => {
-            visit_type_decl(
-                child,
-                src,
-                file_rel,
-                owner.qname,
-                owner.id,
-                owner.module_id,
-                repo,
-                acc,
-            );
+            let at = TypeScope { scope: owner.qname, parent_id: owner.id, module_id: owner.module_id };
+            visit_type_decl(child, src, file_rel, at, repo, acc);
             0
         }
         _ => 0,
@@ -1378,12 +1363,11 @@ fn visit_field_decl(
             continue;
         };
         // Noise gate: undocumented + literal-primitive initializer → skip.
-        if !has_doc {
-            if let Some(value) = declarator.child_by_field_name("value") {
-                if is_primitive_literal(value.kind()) {
-                    continue;
-                }
-            }
+        if !has_doc
+            && let Some(value) = declarator.child_by_field_name("value")
+            && is_primitive_literal(value.kind())
+        {
+            continue;
         }
         let name = text_of(name_node, src);
         let qname = format!("{parent_qname}::{name}");

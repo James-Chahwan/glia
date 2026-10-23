@@ -763,8 +763,11 @@ fn window_snapshot(root: &Path, runs: &[&[(&str, &str)]]) {
     }
 }
 
+/// A [`fail_shape`] row: `(qname, signals, fails, window)`.
+type FailRow = (String, Vec<&'static str>, Option<u32>, Option<u32>);
+
 /// `(qname, signals, fails, window)` per row, in answer order.
-fn fail_shape(a: &TestsFor) -> Vec<(String, Vec<&'static str>, Option<u32>, Option<u32>)> {
+fn fail_shape(a: &TestsFor) -> Vec<FailRow> {
     a.tests
         .iter()
         .map(|t| (t.qname.clone(), t.signals.clone(), t.fails, t.window))

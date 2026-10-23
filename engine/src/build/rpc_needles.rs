@@ -209,6 +209,9 @@ pub(super) fn apply_rpc_needles(
     added
 }
 
+/// A parse's key in [`parse_index`]: its language and its MODULE id.
+type ParseKey = (&'static str, NodeId);
+
 /// LG.1b: `(language, MODULE id)` -> the parse's slot in
 /// `parses_by_lang[language]`, keyed by each parse's first node (every code
 /// parser emits the file's MODULE first). The first parse of a language wins
@@ -217,19 +220,17 @@ pub(super) fn apply_rpc_needles(
 /// DC.4: also the repeated keys. A file under one of them may be paired with
 /// ANOTHER file's parse, a cross-file input the needle memo's key cannot
 /// see, so the memo skips it.
-fn parse_index(
-    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
-) -> (HashMap<(&'static str, NodeId), usize>, HashSet<(&'static str, NodeId)>) {
+fn parse_index(parses_by_lang: &HashMap<&'static str, Vec<FileParse>>) -> (HashMap<ParseKey, usize>, HashSet<ParseKey>) {
     let mut index = HashMap::new();
     let mut shared = HashSet::new();
     for (lang, parses) in parses_by_lang {
         for (slot, fp) in parses.iter().enumerate() {
             if let Some(first) = fp.nodes.first() {
                 let key = (*lang, first.id);
-                if index.contains_key(&key) {
-                    shared.insert(key);
+                if let std::collections::hash_map::Entry::Vacant(e) = index.entry(key) {
+                    e.insert(slot);
                 } else {
-                    index.insert(key, slot);
+                    shared.insert(key);
                 }
             }
         }
@@ -266,7 +267,7 @@ struct MemoLookup<'a> {
     content_hash: u64,
     services_fp: u64,
     /// [`parse_index`]'s repeated keys: never memoised.
-    shared: &'a HashSet<(&'static str, NodeId)>,
+    shared: &'a HashSet<ParseKey>,
 }
 
 /// One file's needle step (DC.4). A file is ELIGIBLE when a needle text gate
@@ -295,7 +296,7 @@ enum NeedleStep {
 fn needle_one(
     file: &NeedleFile<'_>,
     modules: &ModuleQnames,
-    index: &HashMap<(&'static str, NodeId), usize>,
+    index: &HashMap<ParseKey, usize>,
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
     memo: Option<MemoLookup<'_>>,
 ) -> NeedleStep {

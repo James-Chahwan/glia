@@ -998,7 +998,10 @@ struct Measured {
 /// How a variant is built: one repo on one in-memory parse cache, or
 /// several repos, each on its own sidecar.
 enum Builder<'a> {
-    One { repo: &'a str, cache: ParseCache },
+    One {
+        repo: &'a str,
+        cache: Box<ParseCache>,
+    },
     Many(&'a [String]),
 }
 
@@ -1016,7 +1019,7 @@ impl<'a> Trial<'a> {
         let builder = match repo_paths {
             [one] => Builder::One {
                 repo: one,
-                cache: ParseCache::load(one),
+                cache: Box::new(ParseCache::load(one)),
             },
             many => Builder::Many(many),
         };

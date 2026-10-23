@@ -63,13 +63,16 @@ fn ws_qnames(m: &MergedGraph) -> Vec<String> {
         .graphs
         .iter()
         .flat_map(|g| {
-            g.nav.qname_by_id.iter().filter_map(|(id, q)| {
-                matches!(
-                    g.nav.kind_by_id.get(id),
-                    Some(&k) if k == node_kind::WS_HANDLER || k == node_kind::WS_CLIENT
-                )
-                .then(|| q.clone())
-            })
+            g.nav
+                .qname_by_id
+                .iter()
+                .filter(|&(id, _)| {
+                    matches!(
+                        g.nav.kind_by_id.get(id),
+                        Some(&k) if k == node_kind::WS_HANDLER || k == node_kind::WS_CLIENT
+                    )
+                })
+                .map(|(_, q)| q.clone())
         })
         .collect();
     out.sort();

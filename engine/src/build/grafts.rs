@@ -2386,10 +2386,11 @@ mod const_fold_tests {
             .values()
             .flatten()
             .flat_map(|fp| {
-                fp.nav.qname_by_id.iter().filter_map(|(id, q)| {
-                    (is_queue_node(&fp.nav, *id) || is_event_site_node(&fp.nav, *id))
-                        .then(|| q.clone())
-                })
+                fp.nav
+                    .qname_by_id
+                    .iter()
+                    .filter(|&(id, _)| is_queue_node(&fp.nav, *id) || is_event_site_node(&fp.nav, *id))
+                    .map(|(_, q)| q.clone())
             })
             .collect()
     }
@@ -2465,7 +2466,7 @@ mod const_fold_tests {
                 let repo = RepoId::from_canonical(&repo_identity(&root).key);
                 let (files, _regions, _md, roots) = walk_source_files(&root);
                 let opts = BuildOptions::default();
-                let inputs = vec![repo_inputs(repo, root.clone(), label.clone(), None)];
+                let inputs = [repo_inputs(repo, root.clone(), label.clone(), None)];
                 let go = go_modules_for(&root, &roots, &label);
                 let ts_aliases = TsAliasSet::read(&root, &roots, &label);
                 let c_includes = IncludeRoots::read(&root, &files, &roots, &label);

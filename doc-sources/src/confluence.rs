@@ -5,10 +5,10 @@
 //!   - `<h1>`…`<h6>`                → `#`…`######` (drives DOC_SECTION chunking)
 //!   - inline `<code>`             → `` `…` ``  (so the backtick linker fires)
 //!   - `<ac:structured-macro ac:name="code">` + `<ac:plain-text-body>` (CDATA)
-//!                                 → fenced ```lang block (language from the
-//!                                   `language` `<ac:parameter>`)
+//!     → fenced ```lang block (language from the
+//!     `language` `<ac:parameter>`)
 //!   - `<a href>` / `<ac:link>`    → `[text](href)` (source-file links = a Strong
-//!                                   doc→code signal)
+//!     doc→code signal)
 //!   - `<p>` / `<li>` / `<strong>` / `<em>` / `<br>`
 //!
 //! The point is **fidelity of code spans** — a `` `OrderService` `` in a
@@ -104,12 +104,10 @@ pub fn storage_to_markdown(xhtml: &str) -> String {
                 b"strong" | b"b" => out.push_str("**"),
                 b"em" | b"i" => out.push('*'),
                 b"li" => out.push_str("\n- "),
-                b"structured-macro" => {
-                    if attr(&e, b"ac:name").as_deref() == Some("code") {
-                        in_code_macro = true;
-                        code_lang.clear();
-                        code_body.clear();
-                    }
+                b"structured-macro" if attr(&e, b"ac:name").as_deref() == Some("code") => {
+                    in_code_macro = true;
+                    code_lang.clear();
+                    code_body.clear();
                 }
                 b"parameter" if in_code_macro => {
                     in_param = true;

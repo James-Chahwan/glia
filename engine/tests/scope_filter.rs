@@ -9,6 +9,7 @@
 //!     scores themselves change. `resolve_frame` matches POSITION files by
 //!     BASENAME ONLY, so an unscoped frame naming `utils.py` seeds every
 //!     same-named file in a monorepo and skews the ranking of the real one.
+//!
 //! Plus the `/`-boundary rule and the keep-unlocatable policy.
 //!
 //! A8.6 extends it: a scope may also be a PROJECT label (`@shop/web`), which

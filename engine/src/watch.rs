@@ -456,7 +456,7 @@ struct CachedGroup {
 /// a clone of this update's build.
 enum Slot {
     Kept(usize),
-    Fresh(CachedGroup),
+    Fresh(Box<CachedGroup>),
 }
 
 /// The repo-level inputs a build reads besides the walked files, and the
@@ -1642,11 +1642,11 @@ fn cache_slots(builds: &[LangBuild], fingerprints: &[Option<u64>], kept: &[Optio
         .filter_map(|((build, fp), kept)| match kept {
             Some(i) => Some(Slot::Kept(*i)),
             None => fp.map(|fingerprint| {
-                Slot::Fresh(CachedGroup {
+                Slot::Fresh(Box::new(CachedGroup {
                     key: build.key(),
                     fingerprint,
                     build: build.clone(),
-                })
+                }))
             }),
         })
         .collect()
@@ -1661,7 +1661,7 @@ fn refresh_groups(old: Vec<CachedGroup>, slots: Vec<Slot>) -> Vec<CachedGroup> {
         .into_iter()
         .filter_map(|slot| match slot {
             Slot::Kept(i) => old.get_mut(i).and_then(Option::take),
-            Slot::Fresh(group) => Some(group),
+            Slot::Fresh(group) => Some(*group),
         })
         .collect()
 }

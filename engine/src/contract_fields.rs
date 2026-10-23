@@ -2583,7 +2583,7 @@ mod tests {
         let (merged, _) = graph(false);
         let holders = collect_holders(&merged);
         assert!(holders.is_empty(), "a GraphQL type alone is no holder");
-        assert!(message_types_by_name(&holders).get(&(repo.0, "Item")).is_none());
+        assert!(!message_types_by_name(&holders).contains_key(&(repo.0, "Item")));
     }
 
     #[test]

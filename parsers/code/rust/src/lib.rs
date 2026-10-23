@@ -459,8 +459,7 @@ fn trait_impl_ref(trait_node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 /// the trait, so it draws no IMPLEMENTS ref.
 fn is_negative_impl(node: TsNode) -> bool {
     let mut cursor = node.walk();
-    let negative = node.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "!");
-    negative
+    node.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "!")
 }
 
 // ============================================================================
@@ -605,10 +604,9 @@ fn type_params<'a>(item: TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
 fn first_type_arg(generic: TsNode) -> Option<TsNode> {
     let args = generic.child_by_field_name("type_arguments")?;
     let mut cursor = args.walk();
-    let first = args
+    args
         .named_children(&mut cursor)
-        .find(|a| !matches!(a.kind(), "lifetime" | "line_comment" | "block_comment"));
-    first
+        .find(|a| !matches!(a.kind(), "lifetime" | "line_comment" | "block_comment"))
 }
 
 /// `a::b::C` -> (`[a, b]`, `C`), a leading `::` dropped.

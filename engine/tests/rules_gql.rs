@@ -111,9 +111,12 @@ fn located(a: &QueryAnswer) -> Vec<(Option<String>, Option<i64>)> {
     a.results.iter().map(|r| (r.file.clone(), r.line)).collect()
 }
 
+/// A row as [`shown`] renders it: (values, tier, file, line).
+type ShownRow = (Vec<String>, &'static str, Option<String>, Option<i64>);
+
 /// Every row's values as text, tier and location: what a GQL property row and its
 /// Datalog twin (node values, rendered as qnames) must agree on.
-fn shown(a: &QueryAnswer) -> Vec<(Vec<String>, &'static str, Option<String>, Option<i64>)> {
+fn shown(a: &QueryAnswer) -> Vec<ShownRow> {
     a.results
         .iter()
         .map(|r| (texts(r), r.tier, r.file.clone(), r.line))

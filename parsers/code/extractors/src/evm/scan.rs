@@ -325,8 +325,8 @@ pub(crate) fn split_args(view: &str, open: usize, close: usize) -> Vec<(usize, u
             out.push((s, e));
         }
     };
-    for k in open + 1..close {
-        match b[k] {
+    for (k, &c) in b.iter().enumerate().take(close).skip(open + 1) {
+        match c {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {

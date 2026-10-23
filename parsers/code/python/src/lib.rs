@@ -526,71 +526,70 @@ fn visit_class(
             "expression_statement" => {
                 let mut ec = member.walk();
                 for child in member.named_children(&mut ec) {
-                    if matches!(child.kind(), "assignment") {
-                        if let Some(lhs) = child.child_by_field_name("left")
+                    if matches!(child.kind(), "assignment")
+                        && let Some(lhs) = child.child_by_field_name("left")
                             && lhs.kind() == "identifier"
                         {
-                            let attr_name = text(lhs, src);
-                            emit_class_attribute(
-                                class_id,
-                                &class_qname,
-                                attr_name,
-                                file_rel,
-                                module_id,
+                        let attr_name = text(lhs, src);
+                        emit_class_attribute(
+                            class_id,
+                            &class_qname,
+                            attr_name,
+                            file_rel,
+                            module_id,
+                            repo,
+                            acc,
+                        );
+                        // v0.4.13b — typed class attribute `x: T = …` / `x: T`.
+                        // Emit USES refs from the attribute node to each
+                        // class name in the annotation; enables cross-file
+                        // type surfacing for typed attrs even without RHS
+                        // inference.
+                        if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
+                            let attr_qname = format!("{class_qname}::{attr_name}");
+                            let attr_id = NodeId::from_parts(
+                                GRAPH_TYPE,
                                 repo,
-                                acc,
+                                node_kind::ATTRIBUTE,
+                                &attr_qname,
                             );
-                            // v0.4.13b — typed class attribute `x: T = …` / `x: T`.
-                            // Emit USES refs from the attribute node to each
-                            // class name in the annotation; enables cross-file
-                            // type surfacing for typed attrs even without RHS
-                            // inference.
-                            if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
-                                let attr_qname = format!("{class_qname}::{attr_name}");
-                                let attr_id = NodeId::from_parts(
-                                    GRAPH_TYPE,
-                                    repo,
-                                    node_kind::ATTRIBUTE,
-                                    &attr_qname,
+                            let ty = child.child_by_field_name("type");
+                            if let Some(ty) = ty {
+                                collect_attr_type_ref(ty, src, attr_id, module_id, acc);
+                            }
+                            // v0.4.13b — RHS constructor inference for
+                            // class-level `x = Target(...)`.
+                            let rhs = child.child_by_field_name("right");
+                            if let Some(rhs) = rhs {
+                                emit_rhs_constructor_refs(
+                                    rhs, src, attr_id, module_id, acc,
                                 );
-                                let ty = child.child_by_field_name("type");
-                                if let Some(ty) = ty {
-                                    collect_attr_type_ref(ty, src, attr_id, module_id, acc);
-                                }
-                                // v0.4.13b — RHS constructor inference for
-                                // class-level `x = Target(...)`.
-                                let rhs = child.child_by_field_name("right");
-                                if let Some(rhs) = rhs {
-                                    emit_rhs_constructor_refs(
-                                        rhs, src, attr_id, module_id, acc,
-                                    );
-                                }
-                                // LA.23a — the field's type for receiver-typed
-                                // calls: the annotation (dataclass / pydantic /
-                                // attrs fields), else an untyped RHS constructor.
-                                match ty {
-                                    Some(ty) => {
-                                        if let Some(t) = py_type_name(ty, src) {
-                                            record_field_type(
-                                                acc,
-                                                class_id,
-                                                attr_name,
-                                                &t,
-                                                FieldTypeSource::Annotation,
-                                            );
-                                        }
+                            }
+                            // LA.23a — the field's type for receiver-typed
+                            // calls: the annotation (dataclass / pydantic /
+                            // attrs fields), else an untyped RHS constructor.
+                            match ty {
+                                Some(ty) => {
+                                    if let Some(t) = py_type_name(ty, src) {
+                                        record_field_type(
+                                            acc,
+                                            class_id,
+                                            attr_name,
+                                            &t,
+                                            FieldTypeSource::Annotation,
+                                        );
                                     }
-                                    None => {
-                                        if let Some(t) = rhs.and_then(|r| constructor_type(r, src))
-                                        {
-                                            record_field_type(
-                                                acc,
-                                                class_id,
-                                                attr_name,
-                                                &t,
-                                                FieldTypeSource::Constructor,
-                                            );
-                                        }
+                                }
+                                None => {
+                                    if let Some(t) = rhs.and_then(|r| constructor_type(r, src))
+                                    {
+                                        record_field_type(
+                                            acc,
+                                            class_id,
+                                            attr_name,
+                                            &t,
+                                            FieldTypeSource::Constructor,
+                                        );
                                     }
                                 }
                             }
@@ -662,6 +661,17 @@ fn emit_class_attribute(
     let _ = module_id;
 }
 
+/// The class whose `self.<attr>` accesses [`collect_self_attr_assignments`]
+/// turns into ATTRIBUTE nodes, and where it is declared.
+#[derive(Clone, Copy)]
+struct AttrClass<'a> {
+    class_id: NodeId,
+    class_qname: &'a str,
+    file_rel: &'a str,
+    module_id: NodeId,
+    repo: RepoId,
+}
+
 /// v0.4.13 — walk a method body scanning for every `self.<attr>` access
 /// (assignment LHS or plain read), and for each, emit ATTRIBUTE + HAS_ATTRIBUTE
 /// via `emit_class_attribute`. Dedupe is handled downstream.
@@ -672,18 +682,11 @@ fn emit_class_attribute(
 ///      via `klass.opts = ...` inside `SchemaMeta.__new__` (line 112 of
 ///      schema.py), never through `self.`. But every Schema method reads
 ///      `self.opts.X` — so scanning reads surfaces the attribute on Schema.
+///
 /// The read-based signal matches what any reader (human or LLM) infers:
 /// if a class's methods read `self.foo`, the class has an attribute `foo`.
-fn collect_self_attr_assignments(
-    body: TsNode,
-    src: &[u8],
-    class_id: NodeId,
-    class_qname: &str,
-    file_rel: &str,
-    module_id: NodeId,
-    repo: RepoId,
-    acc: &mut Acc,
-) {
+fn collect_self_attr_assignments(body: TsNode, src: &[u8], class: &AttrClass<'_>, acc: &mut Acc) {
+    let AttrClass { class_id, class_qname, file_rel, module_id, repo } = *class;
     let mut stack = vec![body];
     while let Some(node) = stack.pop() {
         // Don't descend into nested function/class bodies — `self` there is a
@@ -776,9 +779,8 @@ fn visit_method(
         collect_calls_in(body, src, method_id, Some(class_id), repo, file_rel, acc);
         // v0.4.13 — scan for `self.<attr> = …` assignments that define class
         // attributes via instance-side `__init__`-style initialisation.
-        collect_self_attr_assignments(
-            body, src, class_id, class_qname, file_rel, module_id, repo, acc,
-        );
+        let class = AttrClass { class_id, class_qname, file_rel, module_id, repo };
+        collect_self_attr_assignments(body, src, &class, acc);
         // v0.4.13b — RHS constructor inference: `self.<attr> = Target(...)`
         // emits USES ref from ATTRIBUTE to Target so PPR can surface the
         // concrete type when the attribute is activated.

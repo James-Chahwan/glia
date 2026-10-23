@@ -333,12 +333,15 @@ struct Frame {
     lits: usize,
 }
 
+/// An unbound reaches' rows: `(from, to, tier)`, every pair once per run.
+type ReachRows = Vec<(Handle, Handle, Tier)>;
+
 /// Per-run caches, by step index: a Lookup's cursor (reused across bindings, so keys
 /// fed in order gallop) and an unbound reaches' rows.
 struct Run<'e> {
     vis: Vis,
     cursors: Vec<Option<Cursor<'e>>>,
-    all: Vec<Option<Vec<(Handle, Handle, Tier)>>>,
+    all: Vec<Option<ReachRows>>,
 }
 
 /// The interpreter loop: generate a step's alternatives, take the next one, emit at
@@ -803,7 +806,7 @@ fn scc(
 /// reaches nothing. `Ok(false)`: the budget tripped.
 fn reach<S: FactSource + ?Sized>(
     ctx: &mut Ctx<'_, '_, S>,
-    cache: Option<&mut Option<Vec<(Handle, Handle, Tier)>>>,
+    cache: Option<&mut Option<ReachRows>>,
     (cats, depth): (&CatSet, Option<u32>),
     (from, to): (Option<Handle>, Option<Handle>),
     wants: &[(usize, Want)],

@@ -342,7 +342,7 @@ pub fn procedure_cell(facts: &ProcedureFacts) -> Cell {
 pub fn read_procedure_cell(cells: &[Cell]) -> Option<ProcedureFacts> {
     cells.iter().filter(|c| c.kind == cell_type::CODE).find_map(|c| {
         let p: ProcedureIn = serde_json::from_str(payload_text(c)?).ok()?;
-        (p.via == VIA).then(|| ProcedureFacts {
+        (p.via == VIA).then_some(ProcedureFacts {
             arities: p.arities,
             mutability: p.mutability,
             getter: p.getter,

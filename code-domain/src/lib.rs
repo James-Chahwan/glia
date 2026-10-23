@@ -912,7 +912,7 @@ pub fn library_name(path: &str, lang: &str) -> Option<String> {
         // module path (host/org/repo). Parser stores paths `::`- or `/`-joined.
         "go" => {
             let segs: Vec<&str> =
-                p.split(|c| c == '/' || c == ':').filter(|s| !s.is_empty()).collect();
+                p.split(['/', ':']).filter(|s| !s.is_empty()).collect();
             match segs.first() {
                 Some(first) if first.contains('.') => {
                     Some(segs.iter().take(3).copied().collect::<Vec<_>>().join("/"))
@@ -953,7 +953,7 @@ pub fn library_name(path: &str, lang: &str) -> Option<String> {
             if p.starts_with('.') {
                 return None;
             }
-            p.split(|c| c == '/' || c == ':')
+            p.split(['/', ':'])
                 .find(|s| !s.is_empty())
                 .map(str::to_string)
         }
@@ -1051,7 +1051,7 @@ pub struct LocalModuleIndex {
 /// Split an import path or qname on every separator the parsers use (`::`,
 /// `.`, `/`, `\`), dropping empty segments.
 fn import_segments(s: &str) -> Vec<&str> {
-    s.split(|c| matches!(c, ':' | '.' | '/' | '\\'))
+    s.split([':', '.', '/', '\\'])
         .filter(|seg| !seg.is_empty())
         .collect()
 }
@@ -1117,12 +1117,12 @@ impl LocalModuleIndex {
             self.paths.insert(segs[..i].join("::"));
             self.paths.insert(segs[segs.len() - i..].join("::"));
         }
-        if is_package {
-            if let Some(declared) = qname.rsplit("::").next() {
-                let segs = import_segments(declared);
-                for i in 1..=segs.len() {
-                    self.paths.insert(segs[..i].join("::"));
-                }
+        if is_package
+            && let Some(declared) = qname.rsplit("::").next()
+        {
+            let segs = import_segments(declared);
+            for i in 1..=segs.len() {
+                self.paths.insert(segs[..i].join("::"));
             }
         }
     }
@@ -1205,15 +1205,15 @@ fn ts_alias_applies(lang: &str) -> bool {
 /// name, so the index holds LB.9b's bare form (`c::mathutil`) and the
 /// candidate is looked up by its stem.
 fn local_lookup_key<'a>(lib: &'a str, lang: &str) -> &'a str {
-    if lang == "c_cpp" {
-        if let Some((stem, ext)) = lib.rsplit_once('.') {
-            let header_or_source = matches!(
-                ext,
-                "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" | "c" | "cc" | "cpp" | "cxx"
-            );
-            if header_or_source && !stem.is_empty() {
-                return stem;
-            }
+    if lang == "c_cpp"
+        && let Some((stem, ext)) = lib.rsplit_once('.')
+    {
+        let header_or_source = matches!(
+            ext,
+            "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" | "c" | "cc" | "cpp" | "cxx"
+        );
+        if header_or_source && !stem.is_empty() {
+            return stem;
         }
     }
     lib
@@ -5078,7 +5078,9 @@ mod tests {
         let rm = cell_type::ROUTE_METHOD;
         let span = |f: &str, l: Option<i64>| Some((f.to_string(), l));
 
-        let table: Vec<(&str, Vec<Cell>, Option<(String, Option<i64>)>)> = vec![
+        // (case, the node's cells, the (file, line) it locates to).
+        type Case = (&'static str, Vec<Cell>, Option<(String, Option<i64>)>);
+        let table: Vec<Case> = vec![
             (
                 "ENDPOINT_HIT, as endpoint_hit_json writes it",
                 vec![json(hit, r#"{"method":"GET","path":"/users","file":"web/api.ts","line":2,"col":21,"confidence":"strong"}"#)],

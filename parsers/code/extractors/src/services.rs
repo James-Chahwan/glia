@@ -16,15 +16,15 @@
 //! build:
 //!
 //!   - Go: `type Foo struct { ... }` with name ending in `Service` / `Server`,
-//!         OR ≥3 method-receivers across the module + a `New<Name>` constructor.
+//!     OR ≥3 method-receivers across the module + a `New<Name>` constructor.
 //!   - Python: class decorated with `@dataclass` + ≥1 def, OR an explicit
-//!             `# @service` opt-in line above the class declaration.
+//!     `# @service` opt-in line above the class declaration.
 //!   - Rust: `impl Foo { ... }` with ≥2 `pub fn` and ≥1 `async fn`.
 //!   - Java/Kotlin: class annotated with `@Service` or `@RestController`.
 //!   - TypeScript: class decorated with `@Injectable(...)` (NestJS;
-//!                 Angular's case is handled by `angular.rs` for the SERVICE
-//!                 *node*, but CONTAINS edges to its methods land here so the
-//!                 logic stays in one place).
+//!     Angular's case is handled by `angular.rs` for the SERVICE
+//!     *node*, but CONTAINS edges to its methods land here so the
+//!     logic stays in one place).
 //!
 //! LA.21a: six more languages, each rule named so the per-file marker counts
 //! it. The controller rules also accept a `*Controller` class whose parent's
@@ -193,18 +193,17 @@ pub fn extract_service_nodes(
             if let Some(children) = fp_nav.children_of.get(&class_id) {
                 for &child_id in children {
                     let child_kind = fp_nav.kind_by_id.get(&child_id).copied();
-                    if child_kind == Some(node_kind::METHOD)
-                        || child_kind == Some(node_kind::FUNCTION)
+                    if (child_kind == Some(node_kind::METHOD)
+                        || child_kind == Some(node_kind::FUNCTION))
+                        && seen_edges.insert((service_id, child_id))
                     {
-                        if seen_edges.insert((service_id, child_id)) {
-                            out.edges.push(Edge {
-                                from: service_id,
-                                to: child_id,
-                                category: edge_category::CONTAINS,
-                                confidence: Confidence::Medium,
-                                cells: Vec::new(),
-                            });
-                        }
+                        out.edges.push(Edge {
+                            from: service_id,
+                            to: child_id,
+                            category: edge_category::CONTAINS,
+                            confidence: Confidence::Medium,
+                            cells: Vec::new(),
+                        });
                     }
                 }
             }

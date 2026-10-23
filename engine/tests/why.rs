@@ -36,8 +36,17 @@ fn why(m: &MergedGraph, from: &str, to: &str, category: Option<&str>) -> WhyAnsw
     why_edge(m, from, to, category).expect("why answers")
 }
 
+/// `(category, tier, emitter, site file, site line)` of one row.
+type WhyRow<'a> = (
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<i64>,
+);
+
 /// `(category, tier, emitter, site file, site line)` of each row.
-fn rows(rs: &[EdgeWhy]) -> Vec<(&str, &str, Option<&str>, Option<&str>, Option<i64>)> {
+fn rows(rs: &[EdgeWhy]) -> Vec<WhyRow<'_>> {
     rs.iter()
         .map(|r| {
             (

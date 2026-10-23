@@ -8,7 +8,7 @@
 //!
 //! Single qname shape: `infra:<kind>:<name>`. Kinds:
 //!   - `image`         — Dockerfile build target (basename of Dockerfile dir)
-//!                       or compose/k8s image-ref (image name without tag)
+//!     or compose/k8s image-ref (image name without tag)
 //!   - `deployment`    — k8s Deployment / ReplicaSet (treated identically)
 //!   - `statefulset`   — k8s StatefulSet
 //!   - `daemonset`     — k8s DaemonSet
@@ -174,7 +174,7 @@ fn dockerfile_from_base(source: &str) -> Option<String> {
     for line in source.lines() {
         let trimmed = line.trim_start();
         // Strip inline comments.
-        let trimmed = trimmed.splitn(2, '#').next().unwrap_or(trimmed).trim();
+        let trimmed = trimmed.split('#').next().unwrap_or(trimmed).trim();
         let upper = trimmed.get(..5).unwrap_or("").to_ascii_uppercase();
         if upper == "FROM " {
             // `FROM image[:tag] [AS alias]` — first token after FROM.
@@ -259,7 +259,7 @@ fn read_k8s_kind(doc: &str) -> Option<String> {
         }
         if let Some(rest) = t.strip_prefix("kind:") {
             let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-            if K8S_KINDS.iter().any(|k| *k == v) {
+            if K8S_KINDS.contains(&v) {
                 return Some(v.to_string());
             }
         }
@@ -375,33 +375,33 @@ fn extract_compose_services(
         }
 
         // Image ref inside the current service block.
-        if let Some(rest) = trimmed.strip_prefix("image:") {
-            if let Some(svc) = &current_svc {
-                let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-                if !v.is_empty() && !v.starts_with('$') {
-                    let basename = image_basename(v);
-                    if !basename.is_empty() {
-                        emit_resource(out, "image", &basename, module_id, repo);
-                        let from_id = NodeId::from_parts(
-                            GRAPH_TYPE,
-                            repo,
-                            node_kind::INFRA_RESOURCE,
-                            &infra::qname("service", svc),
-                        );
-                        let to_id = NodeId::from_parts(
-                            GRAPH_TYPE,
-                            repo,
-                            node_kind::INFRA_RESOURCE,
-                            &infra::qname("image", &basename),
-                        );
-                        out.edges.push(Edge {
-                            from: from_id,
-                            to: to_id,
-                            category: edge_category::INFRA_REFERENCES,
-                            confidence: Confidence::Medium,
-                            cells: Vec::new(),
-                        });
-                    }
+        if let Some(rest) = trimmed.strip_prefix("image:")
+            && let Some(svc) = &current_svc
+        {
+            let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !v.is_empty() && !v.starts_with('$') {
+                let basename = image_basename(v);
+                if !basename.is_empty() {
+                    emit_resource(out, "image", &basename, module_id, repo);
+                    let from_id = NodeId::from_parts(
+                        GRAPH_TYPE,
+                        repo,
+                        node_kind::INFRA_RESOURCE,
+                        &infra::qname("service", svc),
+                    );
+                    let to_id = NodeId::from_parts(
+                        GRAPH_TYPE,
+                        repo,
+                        node_kind::INFRA_RESOURCE,
+                        &infra::qname("image", &basename),
+                    );
+                    out.edges.push(Edge {
+                        from: from_id,
+                        to: to_id,
+                        category: edge_category::INFRA_REFERENCES,
+                        confidence: Confidence::Medium,
+                        cells: Vec::new(),
+                    });
                 }
             }
         }

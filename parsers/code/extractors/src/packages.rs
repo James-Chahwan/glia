@@ -8,11 +8,11 @@
 //!
 //! Single qname shape: `package:<ecosystem>:<name>`. Ecosystems:
 //!   - `npm`        — package.json `dependencies` / `devDependencies` /
-//!                    `peerDependencies`
+//!     `peerDependencies`
 //!   - `pypi`       — pyproject.toml `[project.dependencies]`,
-//!                    `[tool.poetry.dependencies]`, requirements.txt
+//!     `[tool.poetry.dependencies]`, requirements.txt
 //!   - `cargo`      — Cargo.toml `[dependencies]` / `[dev-dependencies]` /
-//!                    `[build-dependencies]`
+//!     `[build-dependencies]`
 //!   - `gomod`      — go.mod `require <name> <version>`
 //!   - `rubygems`   — Gemfile `gem '<name>', ...`
 //!   - `composer`   — composer.json `require` / `require-dev`

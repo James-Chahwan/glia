@@ -177,11 +177,10 @@ pub fn parse_proto(source: &str, from: NodeId) -> ProtoFile {
             }
         } else if current.is_some()
             && let Some(rpc) = parse_rpc_decl(trimmed, line_no)
+            && let Some(svc) = current.as_mut()
         {
-            if let Some(svc) = current.as_mut() {
-                svc.methods.push(rpc.name.clone());
-                svc.rpcs.push(rpc);
-            }
+            svc.methods.push(rpc.name.clone());
+            svc.rpcs.push(rpc);
         }
 
         if current.is_some() {
@@ -388,19 +387,19 @@ pub fn extract_grpc_service_nodes(
 ///
 /// Examples:
 ///   - Go     `pb.NewCartServiceClient(conn)` → needle `ServiceClient(`,
-///            walks back from needle start to find `Cart`, drops leading `New`,
-///            emits `CartService`.
+///     walks back from needle start to find `Cart`, drops leading `New`,
+///     emits `CartService`.
 ///   - Python `cart_service_pb2_grpc.CartServiceStub(channel)` → needle
-///            `ServiceStub(`, prefix `Cart`, emits `CartService`.
+///     `ServiceStub(`, prefix `Cart`, emits `CartService`.
 ///   - Java   `CartServiceGrpc.newBlockingStub(channel)` → needle
-///            `ServiceGrpc.newBlockingStub(`, prefix `Cart`, emits `CartService`.
+///     `ServiceGrpc.newBlockingStub(`, prefix `Cart`, emits `CartService`.
 ///   - C#     `new Cart.CartServiceClient(channel)` → needle `ServiceClient(`,
-///            prefix `Cart`, emits `CartService`.
+///     prefix `Cart`, emits `CartService`.
 ///   - Node   `new pb.CartServiceClient(addr, ...)` → same as C#/Go shape.
 ///   - Elixir `Shop.CartService.Stub.get_cart(channel, req)` → needle
-///            `Service.Stub.`, prefix `Cart` (the ident walk stops at the
-///            `.` before it, so the `Shop.` namespace is no part of the
-///            name), emits `CartService` (DH.12, elixir-grpc).
+///     `Service.Stub.`, prefix `Cart` (the ident walk stops at the
+///     `.` before it, so the `Shop.` namespace is no part of the
+///     name), emits `CartService` (DH.12, elixir-grpc).
 const GRPC_CLIENT_PATTERNS: &[(&str, &str)] = &[
     ("ServiceClient(", "Service"),
     ("SvcClient(", "Svc"),

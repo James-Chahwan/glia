@@ -26,18 +26,18 @@ pub fn extract_vue_nodes(
     let mut nav = CodeNav::default();
 
     // --- Component: one per .vue file, keyed by basename.
-    if path.ends_with(".vue") {
-        if let Some(name) = vue_component_name_from_path(path) {
-            let qname = format!("{module_qname}::{name}");
-            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::COMPONENT, &qname);
-            nodes.push(Node {
-                id,
-                repo,
-                confidence: Confidence::Medium,
-                cells: Vec::new(),
-            });
-            nav.record(id, &name, &qname, node_kind::COMPONENT, Some(module_id));
-        }
+    if path.ends_with(".vue")
+        && let Some(name) = vue_component_name_from_path(path)
+    {
+        let qname = format!("{module_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::COMPONENT, &qname);
+        nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Medium,
+            cells: Vec::new(),
+        });
+        nav.record(id, &name, &qname, node_kind::COMPONENT, Some(module_id));
     }
     // `defineComponent` usage (in any .ts / .vue <script> content).
     for name in scan_define_component_names(source) {
@@ -88,17 +88,16 @@ fn scan_define_component_names(source: &str) -> Vec<String> {
         // Pattern of interest: `const X = defineComponent({...})` or
         // `export const X = defineComponent(`
         if let Some(rest) = t.strip_prefix("export const ") {
-            if let Some(name) = take_ident(rest) {
-                if line.contains("defineComponent(") {
-                    out.push(name);
-                }
+            if let Some(name) = take_ident(rest)
+                && line.contains("defineComponent(")
+            {
+                out.push(name);
             }
-        } else if let Some(rest) = t.strip_prefix("const ") {
-            if let Some(name) = take_ident(rest) {
-                if line.contains("defineComponent(") {
-                    out.push(name);
-                }
-            }
+        } else if let Some(rest) = t.strip_prefix("const ")
+            && let Some(name) = take_ident(rest)
+            && line.contains("defineComponent(")
+        {
+            out.push(name);
         }
     }
     dedup(out)
@@ -119,10 +118,10 @@ fn scan_composable_names(source: &str) -> Vec<String> {
         } else {
             None
         };
-        if let Some(name) = candidate {
-            if is_composable_name(&name) {
-                out.push(name);
-            }
+        if let Some(name) = candidate
+            && is_composable_name(&name)
+        {
+            out.push(name);
         }
     }
     dedup(out)

@@ -487,7 +487,7 @@ pub fn apply_cell_removal(merged: &mut MergedGraph, idx: &QnameIndex, r: &CellRe
 // ---------------------------------------------------------------------------
 
 enum LayoutState {
-    Fresh { dir: PathBuf, merged: MergedGraph, meta: LayoutMeta, idx: QnameIndex },
+    Fresh { dir: PathBuf, merged: Box<MergedGraph>, meta: LayoutMeta, idx: Box<QnameIndex> },
     Skip(WriteThrough),
 }
 
@@ -515,7 +515,8 @@ impl<'a> Layout<'a> {
                     match scope {
                         None => LayoutState::Skip(WriteThrough::MultiRepo),
                         Some(scope) => {
-                            let idx = QnameIndex::build(&merged, scope);
+                            let idx = Box::new(QnameIndex::build(&merged, scope));
+                            let merged = Box::new(merged);
                             LayoutState::Fresh { dir: dir.to_path_buf(), merged, meta, idx }
                         }
                     }

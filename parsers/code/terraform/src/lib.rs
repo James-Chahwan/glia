@@ -479,16 +479,16 @@ fn emit_resource_edges(node: TsNode, src: &[u8], from: NodeId, self_address: &st
                 if address == self_address {
                     continue;
                 }
-                if let Some(&to) = acc.resource_ids.get(&address) {
-                    if seen.insert((to, category.0)) {
-                        acc.edges.push(Edge {
-                            from,
-                            to,
-                            category,
-                            confidence: Confidence::Strong,
-                            cells: Vec::new(),
-                        });
-                    }
+                if let Some(&to) = acc.resource_ids.get(&address)
+                    && seen.insert((to, category.0))
+                {
+                    acc.edges.push(Edge {
+                        from,
+                        to,
+                        category,
+                        confidence: Confidence::Strong,
+                        cells: Vec::new(),
+                    });
                 }
             }
         }
@@ -499,10 +499,10 @@ fn emit_resource_edges(node: TsNode, src: &[u8], from: NodeId, self_address: &st
 /// resource-style reference (an `expression` beginning with
 /// `variable_expr` + `get_attr`, e.g. `aws_vpc.main` in `aws_vpc.main.id`).
 fn collect_ref_addresses(node: TsNode, src: &[u8], out: &mut Vec<String>) {
-    if node.kind() == "expression" {
-        if let Some(address) = ref_address_of(node, src) {
-            out.push(address);
-        }
+    if node.kind() == "expression"
+        && let Some(address) = ref_address_of(node, src)
+    {
+        out.push(address);
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {

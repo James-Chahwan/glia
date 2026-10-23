@@ -633,7 +633,7 @@ impl Scanner<'_> {
             j += 1;
         }
         let ne = j;
-        let mut attrs: Vec<(usize, usize, Option<(usize, usize)>)> = Vec::new();
+        let mut attrs: Vec<AttrSpan> = Vec::new();
         let mut self_closing = false;
         loop {
             while j < n && b[j].is_ascii_whitespace() {
@@ -652,11 +652,7 @@ impl Scanner<'_> {
                 break;
             }
             let as_ = j;
-            while j < n
-                && !b[j].is_ascii_whitespace()
-                && !matches!(b[j], b'=' | b'>' | b'"' | b'\'')
-                && !(b[j] == b'/' && b.get(j + 1) == Some(&b'>'))
-            {
+            while j < n && !ends_attr_name(b, j) {
                 j += 1;
             }
             if j == as_ {
@@ -700,7 +696,7 @@ impl Scanner<'_> {
         &mut self,
         open: usize,
         (ns, ne): (usize, usize),
-        attrs: &[(usize, usize, Option<(usize, usize)>)],
+        attrs: &[AttrSpan],
         self_closing: bool,
         tag_end: usize,
     ) {
@@ -1221,6 +1217,18 @@ fn mask_comments(src: &[u8]) -> Vec<u8> {
 
 fn is_ident_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+}
+
+/// One attribute of an open tag: its name's byte range, then its value's
+/// byte range when it has one.
+type AttrSpan = (usize, usize, Option<(usize, usize)>);
+
+/// Whether `b[j]` ends an attribute name: whitespace, `=`, `>`, a quote, or
+/// the `/>` of a self-closing tag.
+fn ends_attr_name(b: &[u8], j: usize) -> bool {
+    b[j].is_ascii_whitespace()
+        || matches!(b[j], b'=' | b'>' | b'"' | b'\'')
+        || (b[j] == b'/' && b.get(j + 1) == Some(&b'>'))
 }
 
 fn is_tag_name(c: u8) -> bool {

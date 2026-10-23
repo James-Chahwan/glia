@@ -241,7 +241,8 @@ fn visit_type_def(
     emit_class_injects(node, src, name, id, module_id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
-        visit_body_members(body, src, file_rel, &qname, id, module_id, repo, acc);
+        let owner = BodyOwner { qname: &qname, id, module_id };
+        visit_body_members(body, src, file_rel, owner, repo, acc);
         if is_test_suite(node, src) {
             acc.tests.suites += 1;
             let mut suite = Suite::new(src, file_rel, &qname, id, repo);
@@ -288,16 +289,17 @@ fn emit_heritage_refs(node: &TsNode, src: &[u8], from_id: NodeId, module_id: Nod
     }
 }
 
-fn visit_body_members(
-    body: TsNode,
-    src: &[u8],
-    file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
+/// The type whose template body [`visit_body_members`] walks: its qname, its
+/// node and the file MODULE its members' refs resolve from.
+#[derive(Clone, Copy)]
+struct BodyOwner<'a> {
+    qname: &'a str,
+    id: NodeId,
     module_id: NodeId,
-    repo: RepoId,
-    acc: &mut Acc,
-) {
+}
+
+fn visit_body_members(body: TsNode, src: &[u8], file_rel: &str, owner: BodyOwner<'_>, repo: RepoId, acc: &mut Acc) {
+    let BodyOwner { qname: parent_qname, id: parent_id, module_id } = owner;
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
         match child.kind() {

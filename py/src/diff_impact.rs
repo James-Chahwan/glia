@@ -115,7 +115,6 @@ impl PyGraph {
     #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None))]
     fn diff_impact(
         &self,
-        py: Python<'_>,
         diff_text: &str,
         direction: &str,
         depth: usize,
@@ -125,7 +124,9 @@ impl PyGraph {
     ) -> PyResult<Py<PyAny>> {
         let answer = diff_answer(&self.merged, &self.repo_labels, diff_text, direction, depth, top_k, live_only, scope)
             .map_err(PyValueError::new_err)?;
-        to_py(py, serde_json::to_string(&answer))
+        // The token comes from `attach` (the GIL is already held), not a
+        // parameter: the keyword list is the Python surface.
+        Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
     }
 }
 
@@ -145,7 +146,6 @@ impl PyGraph {
 #[pyfunction]
 #[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None))]
 fn diff_impact_vs_rev_py(
-    py: Python<'_>,
     repo_path: &str,
     base: &str,
     direction: &str,
@@ -156,7 +156,7 @@ fn diff_impact_vs_rev_py(
 ) -> PyResult<Py<PyAny>> {
     let answer = rev_answer(repo_path, base, direction, depth, top_k, live_only, scope)
         .map_err(PyValueError::new_err)?;
-    to_py(py, serde_json::to_string(&answer))
+    Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

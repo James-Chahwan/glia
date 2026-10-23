@@ -1855,15 +1855,13 @@ fn collect_client_endpoints_in(
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
         match n.kind() {
-            "invocation_expression" => {
-                if client_call_endpoint(n, src, from, repo, file_rel, acc) {
-                    emitted += 1;
-                }
+            "invocation_expression" if client_call_endpoint(n, src, from, repo, file_rel, acc) => {
+                emitted += 1;
             }
-            "object_creation_expression" => {
-                if request_message_endpoint(n, src, from, repo, file_rel, acc) {
-                    emitted += 1;
-                }
+            "object_creation_expression"
+                if request_message_endpoint(n, src, from, repo, file_rel, acc) =>
+            {
+                emitted += 1;
             }
             _ => {}
         }
@@ -2735,7 +2733,7 @@ namespace Shop.Services
             node_kind::INTERFACE,
             "Shop::Services::IUserService",
         );
-        assert!(fp.nav.field_types.get(&iface).is_none(), "interface properties are not fields");
+        assert!(!fp.nav.field_types.contains_key(&iface), "interface properties are not fields");
         assert_eq!(fp.nav.field_types.len(), 3);
     }
 

@@ -1676,16 +1676,16 @@ fn emit_phoenix_route(
     // is a bare `def` in the controller module; resolve_refs binds it via the
     // global-by-name fallback (Elixir modules are MODULE/PACKAGE nodes, not
     // CLASS, so the Attribute/class-method path can't resolve them).
-    if let Some(action) = action {
-        if !action.is_empty() {
-            acc.refs.push(UnresolvedRef {
-                from: route_id,
-                from_module: module_id,
-                qualifier: CallQualifier::Bare(action.to_string()),
-                category: edge_category::HANDLED_BY,
-                line,
-            });
-        }
+    if let Some(action) = action
+        && !action.is_empty()
+    {
+        acc.refs.push(UnresolvedRef {
+            from: route_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(action.to_string()),
+            category: edge_category::HANDLED_BY,
+            line,
+        });
     }
 }
 

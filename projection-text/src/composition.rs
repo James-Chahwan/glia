@@ -10,12 +10,12 @@
 //! hardcoded class names, or per-library hooks. It walks:
 //!
 //!   * `HAS_ATTRIBUTE`   — class → attribute (used as the final hop and as
-//!                         the anchor of the target side)
+//!     the anchor of the target side)
 //!   * `INHERITS_FROM`   — class → superclass (MRO-style attribute resolution)
 //!   * `DEFINES`         — class → method (to identify intermediate callable
-//!                         hops when the method carries a return-type edge)
+//!     hops when the method carries a return-type edge)
 //!   * `RETURNS_TYPE`    — method → class (explicit return-type annotations,
-//!                         typically emitted from `def m() -> T:` signatures)
+//!     typically emitted from `def m() -> T:` signatures)
 //!
 //! Additionally a **general** docstring-fallback heuristic is applied: when a
 //! method has a `DOC` cell whose first sentence contains backtick-quoted
@@ -313,10 +313,10 @@ impl EdgeIndex {
                 c if c == edge_category::INHERITS_FROM => {
                     parents_of.entry(e.from).or_default().push(e.to);
                 }
-                c if c == edge_category::DEFINES => {
-                    if graph.nav.kind_by_id.get(&e.to).copied() == Some(node_kind::METHOD) {
-                        methods_of.entry(e.from).or_default().push(e.to);
-                    }
+                c if c == edge_category::DEFINES
+                    && graph.nav.kind_by_id.get(&e.to).copied() == Some(node_kind::METHOD) =>
+                {
+                    methods_of.entry(e.from).or_default().push(e.to);
                 }
                 _ => {}
             }

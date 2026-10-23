@@ -133,7 +133,9 @@ fn barrels_bind_the_declaring_symbols() {
         ("core::services::index", "core::services::audit", 1),
         ("shared::index", "shared::badge", 0),
     ];
-    let mut want: Vec<(EdgeCategoryId, String, String, &str, &str, Option<u32>)> = imports
+    // (category, from, to, emitter, rule, line).
+    type Want<'a> = (EdgeCategoryId, String, String, &'a str, &'a str, Option<u32>);
+    let mut want: Vec<Want<'_>> = imports
         .iter()
         .map(|(f, t, line)| {
             (edge_category::IMPORTS, q(f), q(t), "graph:imports", "reexport", Some(*line))

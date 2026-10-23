@@ -527,7 +527,7 @@ pub(crate) fn resolve_imports_python(
                     // Foo.java + Foo.kt binds CLASS Foo) but never the module
                     // one: a lone `core` elsewhere is not the pair's `core`.
                     let tail = path
-                        .rsplit(|c| c == '.' || c == ':' || c == '/')
+                        .rsplit(['.', ':', '/'])
                         .next()
                         .unwrap_or(path);
                     let refused = same_pick == SamePick::Refused;
@@ -2396,9 +2396,7 @@ mod tests {
             ("src/shared/index.js", "export * from './badge';\n"),
             (
                 "src/shared/badge.ts",
-                concat!(
-                    "export function badgeLabel(n: number): string { return ''; }\n",
-                ),
+                "export function badgeLabel(n: number): string { return ''; }\n",
             ),
             (
                 "src/legacy/user.service.ts",
@@ -2993,7 +2991,9 @@ mod tests {
     #[test]
     fn parse_order_does_not_move_the_result() {
         type Rows = Vec<(u64, u64, u32, String, Option<u32>)>;
-        let view = |g: &RepoGraph| -> (Rows, Vec<(u64, Vec<(String, u64)>)>, Vec<(u64, Vec<(String, u64)>)>) {
+        // Per node id, its (name, id) table, sorted.
+        type Tables = Vec<(u64, Vec<(String, u64)>)>;
+        let view = |g: &RepoGraph| -> (Rows, Tables, Tables) {
             let mut edges: Rows = g
                 .edges
                 .iter()

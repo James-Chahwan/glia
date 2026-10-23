@@ -195,10 +195,10 @@ fn list_item(t: &str) -> Option<(ListKind, &str)> {
         }
     }
     let digits = t.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits > 0 {
-        if let Some(rest) = t.get(digits..).and_then(|r| r.strip_prefix(". ")) {
-            return Some((ListKind::Ol, rest.trim()));
-        }
+    if digits > 0
+        && let Some(rest) = t.get(digits..).and_then(|r| r.strip_prefix(". "))
+    {
+        return Some((ListKind::Ol, rest.trim()));
     }
     None
 }
@@ -238,27 +238,27 @@ fn inline(s: &str, st: &mut StorageStats) -> String {
             }
             // 3a. **x**  (checked before single-`*` emphasis)
             b'*' if b.get(i + 1) == Some(&b'*') => {
-                if let Some(end) = find_from(s, i + 2, "**") {
-                    if end > i + 2 {
-                        out.push_str("<strong>");
-                        out.push_str(&inline(&s[i + 2..end], st));
-                        out.push_str("</strong>");
-                        i = end + 2;
-                        continue;
-                    }
+                if let Some(end) = find_from(s, i + 2, "**")
+                    && end > i + 2
+                {
+                    out.push_str("<strong>");
+                    out.push_str(&inline(&s[i + 2..end], st));
+                    out.push_str("</strong>");
+                    i = end + 2;
+                    continue;
                 }
             }
             // 3b. *x* / _x_
             b'*' | b'_' => {
                 let marker = if b[i] == b'*' { "*" } else { "_" };
-                if let Some(end) = find_from(s, i + 1, marker) {
-                    if end > i + 1 {
-                        out.push_str("<em>");
-                        out.push_str(&inline(&s[i + 1..end], st));
-                        out.push_str("</em>");
-                        i = end + 1;
-                        continue;
-                    }
+                if let Some(end) = find_from(s, i + 1, marker)
+                    && end > i + 1
+                {
+                    out.push_str("<em>");
+                    out.push_str(&inline(&s[i + 1..end], st));
+                    out.push_str("</em>");
+                    i = end + 1;
+                    continue;
                 }
             }
             _ => {}

@@ -1,7 +1,7 @@
 //! LB.13 acceptance: code files of ONE build group that share a directory and
 //! a stem (`src/util.ts` + `src/util.js` in the TS-family graph,
-//! `clj/app/core.clj` + `core.cljs` in the Clojure graph, `jvm/shop/Foo.java`
-//! + `Foo.kt` in the JVM graph) name their MODULE by file name, as LB.9b does
+//! `clj/app/core.clj` + `core.cljs` in the Clojure graph, `jvm/shop/Foo.java` +
+//! `Foo.kt` in the JVM graph) name their MODULE by file name, as LB.9b does
 //! across groups, and a bare import of the stem binds the sibling the
 //! importer's language loads (a `.ts` importer `util.ts`, a `.js` importer
 //! `util.js`, a JVM Clojure require `core.clj`, a ClojureScript one

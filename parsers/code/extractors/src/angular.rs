@@ -82,10 +82,11 @@ fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
     // get GUARD kind.
     for line in source.lines() {
         let t = line.trim_start();
-        if let Some(name) = extract_class_name(t) {
-            if name.ends_with("Guard") && !out.iter().any(|(n, _)| n == &name) {
-                out.push((name, node_kind::GUARD));
-            }
+        if let Some(name) = extract_class_name(t)
+            && name.ends_with("Guard")
+            && !out.iter().any(|(n, _)| n == &name)
+        {
+            out.push((name, node_kind::GUARD));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));

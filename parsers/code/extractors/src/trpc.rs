@@ -520,15 +520,14 @@ fn parse_router_body(body: &str, map: &[usize], prefix: &str, decl: &mut RouterD
         let path = join_path(prefix, &key);
         let vscan = Scan::new(value);
         if let Some(open) = router_call_open(value) {
-            if depth < MAX_DEPTH {
-                if let (Some(close), Some(vstart)) =
+            if depth < MAX_DEPTH
+                && let (Some(close), Some(vstart)) =
                     (vscan.close_of(open), offset_in(&entry, value))
-                {
-                    let sub = emap
-                        .get(vstart + open + 1..vstart + close)
-                        .unwrap_or_default();
-                    parse_router_body(&value[open + 1..close], sub, &path, decl, depth + 1);
-                }
+            {
+                let sub = emap
+                    .get(vstart + open + 1..vstart + close)
+                    .unwrap_or_default();
+                parse_router_body(&value[open + 1..close], sub, &path, decl, depth + 1);
             }
         } else if PROCEDURE_NEEDLES.iter().any(|n| vscan.has_top(n)) {
             // The entry is trimmed, so its first byte is the key's (or the

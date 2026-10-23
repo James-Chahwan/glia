@@ -5750,7 +5750,9 @@ mod tests {
             "[models] pairs=4 response=3 request=1 model_pairs=1 changes=7 breaking=1 \
              ambiguous_server=0 open=2"
         );
-        let rows: Vec<(&str, &str, u32, Vec<(&str, &'static str, bool)>, Vec<&str>)> = wp
+        // (route, direction, line, (path, rule, breaking) changes, notes).
+        type PairRow<'a> = (&'a str, &'a str, u32, Vec<(&'a str, &'static str, bool)>, Vec<&'a str>);
+        let rows: Vec<PairRow<'_>> = wp
             .pairs
             .iter()
             .map(|p| {
@@ -6364,14 +6366,11 @@ mod tests {
         merged
     }
 
-    fn gql_rows(
-        gp: &GraphqlPairs,
-    ) -> Vec<(
-        String,
-        Vec<(String, String, String)>,
-        Vec<&'static str>,
-        Option<&'static str>,
-    )> {
+    /// A [`gql_rows`] row: (operation, its (path, key, type) changes, notes,
+    /// refusal).
+    type GqlRow = (String, Vec<(String, String, String)>, Vec<&'static str>, Option<&'static str>);
+
+    fn gql_rows(gp: &GraphqlPairs) -> Vec<GqlRow> {
         gp.pairs
             .iter()
             .map(|p| {
@@ -7742,7 +7741,7 @@ mod tests {
             ),
             (Some("array"), true, "[Item!]!")
         );
-        assert_eq!(served.fields["tags"].required, false, "nullable");
+        assert!(!served.fields["tags"].required, "nullable");
         assert!(sel.open.is_empty() && served.open.is_empty());
         assert_eq!(
             graphql_fields(&m, aliased),

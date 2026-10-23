@@ -220,7 +220,9 @@ fn a_container_without_the_timeline_section_is_corrupt() {
 fn an_invalid_store_is_refused_and_nothing_is_written() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().to_path_buf();
-    let cases: Vec<(&str, Box<dyn Fn(&mut TimelineStore)>)> = vec![
+    // (what the corruption breaks, the corruption).
+    type Corrupt = Box<dyn Fn(&mut TimelineStore)>;
+    let cases: Vec<(&str, Corrupt)> = vec![
         ("qname index", Box::new(|t| t.nodes[0].qname = 4)),
         ("file index", Box::new(|t| t.nodes[0].file = 5)),
         ("from_rev", Box::new(|t| t.edges[0].from_rev = 3)),

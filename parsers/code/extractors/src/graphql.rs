@@ -319,6 +319,10 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
     }
 }
 
+/// One GraphQL needle line: (operation name, 0-indexed line, the document the
+/// name was read from).
+type NeedleHit<'s> = (String, u32, Option<&'s str>);
+
 /// The needle lines that carry GraphQL evidence, as (operation name, 0-indexed
 /// line, the document the name was read from) in source order, and the tally
 /// for the `[graphql-ops]` marker. DT.11a: a line named by its needle text
@@ -331,10 +335,7 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
 /// graphql_flutter) the kept call's own `gql(..)` document names it first
 /// ([`dart_document_name`]): `client.query(QueryOptions(document:
 /// gql(listOrders)))` is the operation its `listOrders` constant declares.
-fn scan_operation_needles<'s>(
-    source: &'s str,
-    guard: &mut LazyGuard<'_>,
-) -> (Vec<(String, u32, Option<&'s str>)>, NeedleTally) {
+fn scan_operation_needles<'s>(source: &'s str, guard: &mut LazyGuard<'_>) -> (Vec<NeedleHit<'s>>, NeedleTally) {
     let mut hits = Vec::new();
     let mut tally = NeedleTally::default();
     let b = source.as_bytes();
@@ -8446,7 +8447,10 @@ mod tests {
 
     /// `(name, field, required)` of a selection object's fields, and its
     /// `open` flag.
-    fn keys(shape: &Shape) -> (Vec<(&str, Option<&str>, bool)>, bool) {
+    /// One selection field: `(name, field, required)`.
+    type Key<'a> = (&'a str, Option<&'a str>, bool);
+
+    fn keys(shape: &Shape) -> (Vec<Key<'_>>, bool) {
         match shape {
             Shape::Object { fields, open } => {
                 (fields.iter().map(|f| (f.name.as_str(), f.field.as_deref(), f.required)).collect(), *open)

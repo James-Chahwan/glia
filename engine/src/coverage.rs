@@ -442,14 +442,12 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
                 if c.kind != glia_code_domain::cell_type::POSITION {
                     continue;
                 }
-                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                        if let Some(file) = v.get("file").and_then(|f| f.as_str()) {
-                            if let Some(lang) = ext_to_language(file) {
-                                langs.insert(lang);
-                            }
-                        }
-                    }
+                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+                    && let Some(file) = v.get("file").and_then(|f| f.as_str())
+                    && let Some(lang) = ext_to_language(file)
+                {
+                    langs.insert(lang);
                 }
             }
         }

@@ -54,11 +54,11 @@ fn main() {
     println!("  propositions : {propositions} (docs)");
     println!("  files map    : {} entries", g.files.len());
     for x in &g.nodes {
-        if let Content::Symbol { imports: Some(v), .. } = &x.content {
-            if !v.is_empty() {
-                println!("    e.g. imports {:?} on {}", v, x.key.rsplit("::").next().unwrap_or(""));
-                break;
-            }
+        if let Content::Symbol { imports: Some(v), .. } = &x.content
+            && !v.is_empty()
+        {
+            println!("    e.g. imports {:?} on {}", v, x.key.rsplit("::").next().unwrap_or(""));
+            break;
         }
     }
     for x in g.nodes.iter().take(400) {

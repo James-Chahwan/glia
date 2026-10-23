@@ -94,39 +94,36 @@ fn scan_component_names(source: &str) -> Vec<String> {
         let t = line.trim_start();
         // function Foo(
         if let Some(rest) = t.strip_prefix("export default function ") {
-            if let Some(name) = take_ident(rest) {
-                if is_capitalized(&name) {
-                    out.push(name);
-                }
+            if let Some(name) = take_ident(rest)
+                && is_capitalized(&name)
+            {
+                out.push(name);
             }
         } else if let Some(rest) = t.strip_prefix("export function ") {
-            if let Some(name) = take_ident(rest) {
-                if is_capitalized(&name) {
-                    out.push(name);
-                }
+            if let Some(name) = take_ident(rest)
+                && is_capitalized(&name)
+            {
+                out.push(name);
             }
         } else if let Some(rest) = t.strip_prefix("function ") {
-            if let Some(name) = take_ident(rest) {
-                if is_capitalized(&name) {
-                    out.push(name);
-                }
+            if let Some(name) = take_ident(rest)
+                && is_capitalized(&name)
+            {
+                out.push(name);
             }
         } else if let Some(rest) = t.strip_prefix("export const ") {
-            if let Some(name) = take_ident(rest) {
-                if is_capitalized(&name)
-                    && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
-                {
-                    out.push(name);
-                }
+            if let Some(name) = take_ident(rest)
+                && is_capitalized(&name)
+                && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
+            {
+                out.push(name);
             }
-        } else if let Some(rest) = t.strip_prefix("const ") {
-            if let Some(name) = take_ident(rest) {
-                if is_capitalized(&name)
-                    && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
-                {
-                    out.push(name);
-                }
-            }
+        } else if let Some(rest) = t.strip_prefix("const ")
+            && let Some(name) = take_ident(rest)
+            && is_capitalized(&name)
+            && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
+        {
+            out.push(name);
         }
     }
     dedup(out)
@@ -147,10 +144,10 @@ fn scan_hook_names(source: &str) -> Vec<String> {
         } else {
             None
         };
-        if let Some(name) = candidate {
-            if is_hook_name(&name) {
-                out.push(name);
-            }
+        if let Some(name) = candidate
+            && is_hook_name(&name)
+        {
+            out.push(name);
         }
     }
     dedup(out)
