@@ -29,7 +29,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use glia_code_domain::snapshots::HistorySnapshot;
 
 use super::text::Candidates;
 
@@ -41,27 +40,10 @@ const MAX_HOPS: usize = 64;
 /// rank_eval `kbraces`' pattern cap.
 const MAX_BRACES: usize = 64;
 
-/// `(old, new)` for every file entry of `snapshot` with a rename source,
-/// oldest commit first: rank_eval's `git_renames` order (git log newest
-/// first, every entry, then the whole list reversed). The same data
-/// `external::history`'s rename fold (`current_paths`) reads.
-///
-/// The spec placed this in `engine/src/external/history.rs` as a
-/// `pub(crate)` fn, but `external/mod.rs` declares `history` private and
-/// re-exports nothing of it, so no `intent` module could call it there; it
-/// lives here, beside its one consumer, and history.rs's tests cross-check
-/// it against the fold. Removal path: move it into history.rs once
-/// `external/mod.rs` re-exports it (`pub(crate) use history::rename_pairs`).
-pub fn rename_pairs(snapshot: &HistorySnapshot) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = snapshot
-        .commits
-        .iter()
-        .flat_map(|c| c.files.iter())
-        .filter_map(|f| f.from.as_ref().map(|old| (old.clone(), f.p.clone())))
-        .collect();
-    out.reverse();
-    out
-}
+/// The history snapshot's rename pairs `(old, new)`, oldest first (a later
+/// rename of one old path wins when they are followed forward). It lives in
+/// `external::history` beside the fold it mirrors and is re-exported here.
+pub use crate::external::rename_pairs;
 
 /// One normalised path mention ([`norm`]).
 #[non_exhaustive]

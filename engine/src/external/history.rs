@@ -240,6 +240,21 @@ fn current_paths(snapshot: &HistorySnapshot) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// `(old, new)` for every file entry of `snapshot` with a rename source,
+/// oldest commit first: rank_eval's `git_renames` order (git log newest
+/// first, every entry, then the whole list reversed). The same data
+/// `current_paths`' rename fold reads; `intent::paths` re-exports it (EB.5c).
+pub fn rename_pairs(snapshot: &HistorySnapshot) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = snapshot
+        .commits
+        .iter()
+        .flat_map(|c| c.files.iter())
+        .filter_map(|f| f.from.as_ref().map(|old| (old.clone(), f.p.clone())))
+        .collect();
+    out.reverse();
+    out
+}
+
 /// Each commit's files under their current paths (the rename fold of
 /// [`current_paths`]), one set per commit, newest first. Every path is kept,
 /// MODULE or not (a deleted file included): the consumer filters. Read by the
@@ -576,7 +591,7 @@ mod tests {
         assert_eq!(names, [vec!["z.py"], vec!["docs/x.md", "z.py"], vec!["Cargo.lock", "z.py"]]);
     }
 
-    /// EB.5c: `intent::paths::rename_pairs` reads the data this fold reads,
+    /// EB.5c: `rename_pairs` reads the data this fold reads,
     /// oldest first, and following its pairs forward lands every old path
     /// where `current_paths` puts it.
     #[test]
@@ -588,7 +603,7 @@ mod tests {
             commit("c1", 1, &[("x.py", 5, None), ("b1.py", 1, None)]),
         ];
         let snap = snapshot(commits, vec![]);
-        let pairs = crate::intent::paths::rename_pairs(&snap);
+        let pairs = rename_pairs(&snap);
         let want: Vec<(String, String)> = [("x.py", "y.py"), ("y.py", "z.py"), ("b1.py", "b2.py"), ("z.py", "w.py")]
             .iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))

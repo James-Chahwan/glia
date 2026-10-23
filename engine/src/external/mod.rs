@@ -76,6 +76,7 @@ mod test_reports;
 mod wrappers;
 
 pub(crate) use history::{MAX_COMMIT_FILES, commit_file_sets};
+pub use history::rename_pairs;
 pub(crate) use infer_wrappers::infer_entity_wrappers;
 pub(crate) use scip::identity_symbols;
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
