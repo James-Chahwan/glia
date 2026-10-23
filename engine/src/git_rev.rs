@@ -822,6 +822,113 @@ pub(crate) fn read_paths_at(tree: &Tree, keep: &dyn Fn(&str) -> bool) -> Result<
     Ok(out)
 }
 
+/// The largest working-tree file [`grep_words_at`] reads.
+const GREP_FILE_CAP: usize = 1024 * 1024;
+
+/// A byte of an id word, `[A-Za-z0-9_]` (glia_config's `IdPattern` rule).
+fn grep_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// True when `line` holds `word` word-bounded by `IdPattern`'s rule: the byte
+/// before is no word byte, the byte after is no word byte, and a following
+/// `.` / `-` is a boundary only when no digit follows it (`DT.5` is not in
+/// `DT.5h` nor in `DT.5.1`).
+pub(crate) fn has_id_word(line: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let b = line.as_bytes();
+    let mut from = 0;
+    while let Some(i) = line.get(from..).and_then(|rest| rest.find(word)).map(|i| from + i) {
+        let e = i + word.len();
+        let before = i == 0 || !grep_word_byte(b[i - 1]);
+        let after = match b.get(e) {
+            None => true,
+            Some(&c) if grep_word_byte(c) => false,
+            Some(&c) if c == b'.' || c == b'-' => !b.get(e + 1).is_some_and(u8::is_ascii_digit),
+            Some(_) => true,
+        };
+        if before && after {
+            return true;
+        }
+        from = i + 1;
+        while from < line.len() && !line.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    false
+}
+
+/// Every line of `tree` holding one of `words` word-bounded ([`has_id_word`]),
+/// as `(path, line)`, sorted by path, a file's lines in file order. `paths`
+/// limits the files read (empty: every file). `Rev` runs `git grep -I -n -z
+/// --no-color -w -F -e <w>.. <sha>` and filters by `paths` itself (git grep
+/// takes no pathspec file); `Work` reads each listed file (at most 1 MiB, no
+/// NUL in its first 8000 bytes, as `-I`), lossily as UTF-8. Every hit is
+/// re-checked with the id boundary rule, since `git grep -w` treats `.` / `-`
+/// as non-word bytes (`DT.5` would hit `DT.5h`). EB.6.
+pub(crate) fn grep_words_at(tree: &Tree, words: &[String], paths: &[String]) -> Result<Vec<(String, String)>, String> {
+    let words: Vec<&String> = words.iter().filter(|w| !w.is_empty()).collect();
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+    let only: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let listed = |p: &str| only.is_empty() || only.contains(p);
+    let hit = |l: &str| words.iter().any(|w| has_id_word(l, w));
+    let mut out: Vec<(String, String)> = Vec::new();
+    match tree {
+        Tree::Work(_) => {
+            let read = read_paths_at(tree, &|p: &str| listed(p))?;
+            for (path, bytes) in read.files {
+                if bytes.len() > GREP_FILE_CAP || bytes[..bytes.len().min(8000)].contains(&0) {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&bytes);
+                for l in text.split_terminator('\n') {
+                    if hit(l) {
+                        out.push((path.clone(), l.to_string()));
+                    }
+                }
+            }
+        }
+        Tree::Rev { repo, sha } => {
+            if object_id(sha).is_none() {
+                return Err(format!("not a commit id: {sha:?}"));
+            }
+            let mut c = git(repo);
+            c.args(["grep", "-I", "-n", "-z", "--no-color", "-w", "-F"]);
+            for w in &words {
+                c.arg("-e").arg(w.as_str());
+            }
+            c.arg(sha.as_str());
+            let res = c.stderr(Stdio::null()).output().map_err(|e| format!("git not found on PATH: {e}"))?;
+            match res.status.code() {
+                Some(0) => {}
+                // 1: no line matched
+                Some(1) => return Ok(out),
+                _ => return Err(format!("git grep {sha} failed in {}", repo.display())),
+            }
+            let prefix = format!("{sha}:");
+            for rec in res.stdout.split(|b| *b == b'\n') {
+                let mut parts = rec.splitn(3, |b| *b == 0);
+                let (Some(head), Some(_n), Some(line)) = (parts.next(), parts.next(), parts.next()) else { continue };
+                let head = String::from_utf8_lossy(head);
+                let Some(path) = head.strip_prefix(prefix.as_str()) else { continue };
+                if !listed(path) || path.starts_with(&format!("{CONTROL_DIR}/")) {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(line);
+                if hit(&line) {
+                    out.push((path.to_string(), line.into_owned()));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
@@ -1158,6 +1265,43 @@ mod tests {
         assert_eq!(Tree::Rev { repo: d, sha: sha.clone() }.label(), sha[..12]);
         assert_eq!(Tree::Work(d).label(), "worktree");
         assert!(read_paths_at(&Tree::Rev { repo: d, sha: "--all".into() }, &md).is_err());
+    }
+
+    /// EB.6: the id boundary rule, and `grep_words_at` reading the working tree
+    /// and a commit alike (a word added after the commit is in Work only).
+    #[test]
+    fn grep_words_at_reads_work_and_rev_with_the_id_boundary() {
+        assert!(has_id_word("see DT.5 here", "DT.5"));
+        assert!(has_id_word("DT.5.", "DT.5"));
+        assert!(!has_id_word("see DT.5h", "DT.5"));
+        assert!(!has_id_word("DT.5.1", "DT.5"));
+        assert!(!has_id_word("xT012", "T012"));
+        assert!(has_id_word("é T012", "T012"));
+        assert!(has_id_word("T0123 T012", "T012"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        run_git(d, &["init", "-q", "-b", "main"]);
+        put(d, "src/a.rs", "// T012 here\nfn a() {}\n// T012x no\n");
+        put(d, "src/b.rs", "let x = \"DT.5h\";\n// DT.5: yes\n");
+        put(d, "src/c.rs", "nothing\n");
+        run_git(d, &["add", "-A"]);
+        run_git(d, &["commit", "-q", "-m", "init"]);
+        let sha = run_git(d, &["rev-parse", "HEAD"]);
+        put(d, "src/c.rs", "// T012 later\n");
+        let words = vec!["T012".to_string(), "DT.5".to_string()];
+        let rev = grep_words_at(&Tree::Rev { repo: d, sha: sha.clone() }, &words, &[]).expect("rev");
+        let want = vec![
+            ("src/a.rs".to_string(), "// T012 here".to_string()),
+            ("src/b.rs".to_string(), "// DT.5: yes".to_string()),
+        ];
+        assert_eq!(rev, want);
+        let work = grep_words_at(&Tree::Work(d), &words, &[]).expect("work");
+        assert_eq!(work.len(), 3);
+        assert_eq!(work[2], ("src/c.rs".to_string(), "// T012 later".to_string()));
+        let only = grep_words_at(&Tree::Rev { repo: d, sha: sha.clone() }, &words, &["src/b.rs".to_string()]).expect("rev");
+        assert_eq!(only, want[1..]);
+        assert!(grep_words_at(&Tree::Rev { repo: d, sha }, &["absent".to_string()], &[]).expect("none").is_empty());
+        assert!(grep_words_at(&Tree::Rev { repo: d, sha: "--all".into() }, &words, &[]).is_err());
     }
 
     #[test]
