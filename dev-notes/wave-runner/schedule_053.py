@@ -41,6 +41,7 @@ CAP = 26
 LANDED = {
     0: "E0.1 E0.2",
     1: "EA.1 EB.1 EB.2 EC.1 EG.1 EG.4 EG.5",
+    2: "EA.2 EB.4 EG.2",
 }
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "G": 4, "Z": 9}
 
