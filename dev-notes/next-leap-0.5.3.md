@@ -78,7 +78,8 @@ Also kept out:
 - **Remove engram-export's DE.5 side file** (`--ppr-candidates`, `.ppr.jsonl`, `ppr_side.rs`, exit 8; 0.5.4 seed §F item
   7). Engram asked for it gone "before 0.5.3 ships".
 - **Fix the wheels workflow:** bump the Node 20 actions and pin the runner image (0.5.4 seed §E). Needed before 0.5.3's
-  wheels build.
+  wheels build. Rehearsed 2026-10-23 on draft PR #1 (`ci/wheels-node24` at 6b03413d): run 39946342215 green, 6 builds
+  plus sdist, publish skipped, no Node 20 deprecation in the logs, runner images ubuntu-24.04 / macos-14-arm64 as pinned.
 
 ## Consumers
 
