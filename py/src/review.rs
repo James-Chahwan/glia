@@ -4,12 +4,13 @@
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
 //! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
-//! models_min_tier="fact", ranking="ppr", cochange=True)` builds the repo's
+//! models_min_tier="fact", ranking="ppr", cochange=True, title=None)` builds the repo's
 //! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
 //! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
 //! `{base, counts, changed, impact, tests, edges, new_violations,
 //! resolved_violations, model_breaks, check_errors, blocking}` (plus
-//! `unanchored` when a rule checks nothing); `format="markdown"` returns the
+//! `unanchored` when a rule checks nothing, and `intent` with a title or a
+//! commit in `<base>..HEAD`, EB.7); `format="markdown"` returns the
 //! markdown PR report `glia review` prints, as a `str`. Any other `format`, a
 //! `models_min_tier` outside the engine's `contract_breaks::MODEL_MIN_TIERS`,
 //! an unknown `ranking`, or an engine `Err` (not a git work tree, an unknown
@@ -55,6 +56,7 @@ fn engine_args(
     models_min_tier: &str,
     ranking: &str,
     cochange: bool,
+    title: Option<&str>,
 ) -> Result<ReviewArgs, String> {
     let ranking = ranking_named(ranking, cochange)?;
     let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
@@ -69,6 +71,7 @@ fn engine_args(
     args.max_impact = max_impact;
     args.models_min_tier = tier;
     args.blast.ranking = ranking;
+    args.title = title.map(str::to_string);
     Ok(args)
 }
 
@@ -97,6 +100,7 @@ struct Kw<'a> {
     models_min_tier: &'a str,
     ranking: &'a str,
     cochange: bool,
+    title: Option<&'a str>,
 }
 
 impl Default for Kw<'_> {
@@ -111,6 +115,7 @@ impl Default for Kw<'_> {
             models_min_tier: MODEL_MIN_TIERS[0],
             ranking: "ppr",
             cochange: true,
+            title: None,
         }
     }
 }
@@ -119,7 +124,7 @@ impl Default for Kw<'_> {
 /// checked before anything is built.
 fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String> {
     let format = check_format(kw.format)?;
-    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier, kw.ranking, kw.cochange)?;
+    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier, kw.ranking, kw.cochange, kw.title)?;
     let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
@@ -173,8 +178,17 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// `cochange` (default `True`: co-change from the working tree's history
 /// snapshot first) order the impact rows and fill `impact.files`, as in
 /// `blast_radius`; an unknown `ranking` raises ValueError before any build.
+///
+/// `title` (0.5.3, EB.7; default None: the newest commit subject of
+/// `base..HEAD`, and no intent when that range is empty) is the PR's
+/// purpose: its ids route at the base through the repo's task / requirement
+/// rows and its words rank past commit messages. The dict gains `intent`
+/// `{title, title_source, fusion, ids, files, text}` (`fusion` is
+/// `"LX[IDR,P1]"`; `files` rows `{rank, file, idr, text, ppr, ids,
+/// in_impact}`), the markdown `### Intent`, and the impact rows in
+/// id-routed files come first (text never reorders them).
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr", cochange=true))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr", cochange=true, title=None))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -188,6 +202,7 @@ fn review_vs_rev_py(
     models_min_tier: &str,
     ranking: &str,
     cochange: bool,
+    title: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
     let kw = Kw {
         format,
@@ -198,6 +213,7 @@ fn review_vs_rev_py(
         models_min_tier,
         ranking,
         cochange,
+        title,
     };
     let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
@@ -412,19 +428,20 @@ mod tests {
 
     #[test]
     fn engine_args_carry_the_keywords() {
-        let a = engine_args(2, 7, 9, "derived", "ppr-wide", false).expect("a tier");
+        let a = engine_args(2, 7, 9, "derived", "ppr-wide", false, Some("T012 export")).expect("a tier");
         assert_eq!(
             (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking.harness_name()),
             (2, 7, 9, "derived", "PT*")
         );
+        assert_eq!(a.title.as_deref(), Some("T012 export"), "EB.7: title reaches the engine");
         let d = ReviewArgs::default();
         assert_eq!(d.blast.depth, 4, "the signature's depth default");
         assert_eq!(d.models_min_tier, "fact", "the signature's models_min_tier default");
         assert_eq!(d.blast.ranking.harness_name(), "H10", "the signature's ranking / cochange defaults");
         let k = Kw::default();
         assert_eq!(
-            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier, k.ranking, k.cochange),
-            ("dict", 20, 4, 50, 50, "fact", "ppr", true),
+            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier, k.ranking, k.cochange, k.title),
+            ("dict", 20, 4, 50, 50, "fact", "ppr", true, None),
             "Kw::default is the pyo3 signature's"
         );
     }

@@ -357,7 +357,7 @@ glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min
     --min-support sighted handlers is the convention, and every handler off it a
     located DIVERGENCE. Blind handlers are listed, never counted. Counts, not rules;
     --base keeps the divergences the change touched.
-glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--ranking ppr|ppr-wide|bfs]
+glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--ranking ppr|ppr-wide|bfs] [--title <TEXT>]
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, the declared rules checked on both sides, and the inferred-model
@@ -365,7 +365,10 @@ glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [
     whose scope holds no node is listed under "Rules that check nothing", and a
     rule's coverage caveats print once per section. A CI gate: exits 1 only on a new
     BLOCKING violation (at or above its rule's min_tier; an advisory one is listed
-    under its own heading, not failed) or a blocking model break.
+    under its own heading, not failed) or a blocking model break. --title (default:
+    the newest commit subject of <base>..HEAD) adds the PR's intent: its ids routed
+    at the base through task / requirement rows, past commits ranked by its words,
+    and the impact rows in id-routed files listed first.
 glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--models-min-tier fact|derived] [--with <REPO>]...
     Did the change against a rev (default HEAD) break a client? Every OpenAPI /
     AsyncAPI op and proto / Avro / JSON Schema type paired old -> new and judged by

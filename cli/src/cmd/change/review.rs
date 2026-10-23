@@ -10,7 +10,8 @@
 //! tables cut at `--markdown-rows` with `_(<shown> of <total>)_`. `--json`
 //! prints the engine's `Review` (`{base, counts, changed, impact, tests,
 //! edges, new_violations, resolved_violations, model_breaks, check_errors,
-//! blocking}`, plus `unanchored` when a rule checks nothing).
+//! blocking}`, plus `unanchored` when a rule checks nothing and `intent`
+//! with a title).
 //! `--depth` bounds the impact radius; `--max-impact` / `--max-tests` cut
 //! the engine's lists (the counts stay uncut). Every `file:line` is 1-based
 //! (LD.1).
@@ -45,6 +46,16 @@
 //! co-change from the working tree's `.glia/history-snapshot` first by
 //! default). The markdown is unchanged: its impact table follows the rows'
 //! order. `[rank] surface=review ranking=<r> ..` once per run.
+//!
+//! 0.5.3 (EB.7): `--title <TEXT>` is the PR's purpose (default: the newest
+//! commit subject of `<base>..HEAD`; none when the range is empty). Its ids
+//! route at the base through the repo's task / requirement rows (typed id
+//! routing) and its words rank past commit messages; the JSON gains `intent`
+//! and the markdown `### Intent` (the routed ids, the files ranked
+//! LX[IDR,P1]), and the impact rows in id-routed files move first (the rest
+//! keep their order; text never moves a row). `[review-intent] base=<rev>
+//! title_source=<arg|commit|none> fusion=LX[IDR,P1] ..` after `[review]
+//! base=`.
 //!
 //! Fired-on markers: the engine's
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
@@ -105,6 +116,11 @@ pub(crate) struct Args {
         value_parser = clap::builder::PossibleValuesParser::new(MODEL_MIN_TIERS),
     )]
     models_min_tier: String,
+    /// The PR title: its ids route through the repo's task / requirement rows
+    /// and its words rank past commits; default: the newest commit subject of
+    /// <base>..HEAD
+    #[arg(long, value_name = "TEXT")]
+    title: Option<String>,
     #[command(flatten)]
     ranking: RankingArgs,
 }
@@ -118,6 +134,7 @@ fn engine_args(
     max_impact: usize,
     models_min_tier: &str,
     ranking: Ranking,
+    title: Option<String>,
 ) -> Result<ReviewArgs, String> {
     let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
         return Err(format!(
@@ -131,6 +148,7 @@ fn engine_args(
     args.max_tests = max_tests;
     args.max_impact = max_impact;
     args.models_min_tier = tier;
+    args.title = title;
     Ok(args)
 }
 
@@ -148,6 +166,7 @@ pub(crate) fn run(args: Args) -> i32 {
         args.max_impact,
         &args.models_min_tier,
         args.ranking.ranking(),
+        args.title.clone(),
     ) {
         Ok(a) => a,
         Err(e) => {
@@ -195,20 +214,21 @@ mod tests {
     #[test]
     fn engine_args_carry_the_flags() {
         let bfs = Ranking::new(glia_engine::rank::RankBase::Bfs, false);
-        let a = engine_args(2, 7, 9, "derived", bfs).expect("a tier");
+        let a = engine_args(2, 7, 9, "derived", bfs, Some("T012 export".to_string())).expect("a tier");
         assert_eq!(
             (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking),
             (2, 7, 9, "derived", bfs)
         );
+        assert_eq!(a.title.as_deref(), Some("T012 export"));
         let e = ReviewArgs::default();
-        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact", Ranking::default())
+        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact", Ranking::default(), None)
             .expect("the default tier");
         assert_eq!(
-            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier, d.blast.ranking),
-            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier, e.blast.ranking)
+            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier, d.blast.ranking, d.title),
+            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier, e.blast.ranking, e.title)
         );
         assert_eq!(e.models_min_tier, "fact", "the ruling's default");
-        let err = engine_args(4, 50, 50, "heuristic", Ranking::default()).expect_err("no such gate");
+        let err = engine_args(4, 50, 50, "heuristic", Ranking::default(), None).expect_err("no such gate");
         assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
     }
 }

@@ -124,6 +124,38 @@
 //! forbidden edge uncapped, a cycle's member set), read that and delete
 //! `RuleIndex`, `Scopes` and `Sub`.
 //!
+//! # Intent (EB.7, 0.5.3 items 3, 6, 7)
+//!
+//! [`review_vs_rev`] reads what the PR says it is about: its title
+//! ([`ReviewArgs::title`], `glia review --title`), else the subject of the
+//! newest non-merge commit of `<base>..HEAD` (redacted as untrusted text),
+//! else nothing (no `intent`; the review is exactly the one without EB.7).
+//! Leak-free: the PR's own commits (`git rev-list --no-merges
+//! <base>..HEAD`) are never text documents, and the ids route through the
+//! BASE tree. Over the working tree's candidate files of its repo
+//! (`intent::text::Candidates`, path order, the changed files excluded):
+//!
+//! - `idr`: typed id routing (`intent::idr::route`) of the title at the
+//!   base: its docs and trackers (`Tree::Rev`), the base build's PROJECT dirs
+//!   and Tier-4 snapshot sections, the base candidates (mapped onto the
+//!   working tree's by path; a file new in the working tree has 0), the
+//!   history snapshot's renames, the recent scopes of its subjects; the
+//!   `[ids]` vocabulary is the working tree's, as check's rules are;
+//! - `text`: BM25 of the title's subject over past commit messages
+//!   (`intent::text::TextIndex`), zeros and `text: absent` without the
+//!   snapshot's messages;
+//! - `ppr`: rank_eval's P1 from every node of the changed files, max-pooled
+//!   (`rank::rank_files` under `Ranking::head`, over the review's RankCache).
+//!
+//! `intent.files` are the candidates with any signal in LX[IDR,P1] order
+//! ([`INTENT_FUSION_REVIEW`]), at most `max_impact`. The impact rows take
+//! LX[IDR, their existing order]: when some file has IDR > 0, rows in such
+//! files move first by the file's IDR descending, every other row keeps its
+//! relative order after them; text never moves a row, and with no routed id
+//! the order is byte-identical to the review without a title. H9s50 and
+//! LX[IDR,H9s50] are computed only for the calibrated selection (a fixed
+//! H9s50 order loses on a gate snapshot), never shipped as an order here.
+//!
 //! # Markdown (CC.6b)
 //!
 //! [`render_markdown`] is the PR report `glia review` prints and pyo3
@@ -146,7 +178,12 @@
 //! from the rev, a dash for none), `### Check errors` (when any: the working
 //! tree's rule errors and the rules only partly compared), `### Rules that
 //! check nothing` (when any: one bullet per `unanchored` row, its reason,
-//! then its `fix:`), `### Tests to run`, `### Impact`, `### Edge changes`
+//! then its `fix:`), `### Tests to run`, `### Impact`, `### Intent` (EB.7,
+//! with an intent: `_title (<source>): <title>_`, the routed-ids table `| id
+//! | namespace | tier | route | defined at | state | files |` when an id
+//! routed, the files table `| # | file | idr | text | ppr | ids | in impact
+//! |`, and `_(no history messages: run glia history sync)_` when the text is
+//! absent; after the sentence of a review with no graph change), `### Edge changes`
 //! (grouped by tier, facts first), `### Changed nodes` and `### Resolved
 //! violations` (when any). A rule or forbid_path violation renders its
 //! identity first, ``_subject: `<a>`, `<b>` - tier <t> at <file:line>_`` (no
@@ -187,8 +224,24 @@
 //! `[check] rules=` lines (the working tree's first, then the base's), and
 //! one `[model-breaks] base=<rev> min_tier=<t> ..` line, after the `[check]`
 //! lines and before `[review] base=`.
+//!
+//! EB.7, from [`review_vs_rev`] only, right after `[review] base=`:
+//! `[review-intent] base=<rev> title_source=<arg|commit|none>
+//! fusion=LX[IDR,P1] ids=<n> idr_files=<i> text=<present|absent>
+//! text_files=<t> candidates=<c> reordered=<r>` (`r` the impact rows whose
+//! position moved), after the intent's own `[rank-files] .. ranking=P1`,
+//! `[intent] text`, `[ids] vocab`, `[id-defs]`, `[id-ns]`, `[id-paths]` and
+//! `[idr]` lines (`surface=review`), which a title prints and `none` does
+//! not.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+
+use glia_activation::algo::fuse;
+use glia_code_domain::snapshots::{read_history, read_history_messages, redact_untrusted};
+use glia_core::RepoId;
 
 use glia_activation::algo::cycles::strongly_connected;
 use glia_activation::algo::delta::EdgeKey;
@@ -199,15 +252,14 @@ use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
-use crate::answers::{BlastOptions, BlastRadius, Locator, in_scope, project_roots};
+use crate::answers::{BlastAnswer, BlastOptions, BlastRadius, Locator, in_scope, project_roots};
 use crate::check::{
     self, CheckOptions, CheckReport, DEFAULT_MIN_TIER, DERIVED, EMPTY_SCOPE, FACT, FORBID_EDGE,
     FORBID_PATH, HEURISTIC, NO_CYCLE, RULE, Unanchored, Violation, ViolationEdge,
     check_rules_gated, default_forbid_categories,
 };
 use crate::contract_breaks::{
-    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier,
-    model_breaks_of,
+    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier, model_breaks_of,
 };
 use crate::contract_fields::FieldSide;
 use crate::coverage::CoverageNote;
@@ -215,7 +267,16 @@ use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
 use crate::external::declared::declared_constraints;
+use crate::git_rev::{self, grep_words_at};
 use crate::identity::Collapse;
+use crate::intent::defs::{Namespaces, Tree, read_defs};
+use crate::intent::idr::{
+    Idr, IdrInputs, RoutedId, comment_part, recent_scopes, recent_subjects, route,
+};
+use crate::intent::ids::IdVocab;
+use crate::intent::paths::{PathResolver, rename_pairs};
+use crate::intent::text::{Candidates, TextIndex, exclude_range, subject};
+use crate::rank::{FileIndex, RankCache, Ranking, rank_files};
 use crate::tests_for::{TestsFor, TestsForArgs, tests_for_delta};
 use crate::why::tier_of;
 
@@ -248,6 +309,11 @@ pub struct ReviewArgs {
     /// its rows are advisory) or `derived`. [`review_vs_rev`] refuses any
     /// other value before building; [`review`] judges one as `fact`.
     pub models_min_tier: &'static str,
+    /// 0.5.3 (EB.7): the PR title, the intent [`review_vs_rev`] ranks by
+    /// (module docs "Intent"). `None` (the default) takes the subject of the
+    /// newest non-merge commit of `<base>..HEAD`, and no intent when there is
+    /// none. [`review`] over a caller's delta reads no title.
+    pub title: Option<String>,
 }
 
 impl Default for ReviewArgs {
@@ -258,6 +324,7 @@ impl Default for ReviewArgs {
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
             models_min_tier: MODEL_MIN_TIERS[0],
+            title: None,
         }
     }
 }
@@ -346,6 +413,12 @@ pub struct Review {
     /// "New and resolved violations"), or a blocking model row
     /// (`ModelBreak::blocking`, module docs "Model breaks"). The CI gate.
     pub blocking: bool,
+    /// 0.5.3 (EB.7): what the PR says it is about (module docs "Intent"):
+    /// its title, the ids it routes, and the files ranked LX[IDR,P1]. Only
+    /// from [`review_vs_rev`] with a title or a commit in `<base>..HEAD`;
+    /// not serialised when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ReviewIntent>,
 }
 
 /// The review of the working tree's change against git rev `base` (module
@@ -358,12 +431,20 @@ pub struct Review {
 pub fn review_vs_rev(repo_path: &str, base: &str, args: &ReviewArgs) -> Result<Review, String> {
     check_models_min_tier(args.models_min_tier)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
-    review(&rev, args)
+    let ask = intent_request(Path::new(repo_path), base, args.title.as_deref());
+    review_with_intent(&rev, args, ask)
 }
 
 /// The review of an already computed rev delta (module docs). Nothing is
-/// built. `Err` beyond `tests_for::MAX_SEEDS` seeds only.
+/// built. `Err` beyond `tests_for::MAX_SEEDS` seeds only. No intent: a
+/// delta carries no repo path to read a title or a base tree from
+/// ([`ReviewArgs::title`] is read by [`review_vs_rev`] only).
 pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
+    review_with_intent(rev, args, IntentAsk::Off)
+}
+
+/// [`review`] with the intent section [`review_vs_rev`] asked for.
+fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Result<Review, String> {
     let (before, after) = (&rev.before.merged, &rev.after.merged);
 
     // DD.10: an enabled collapse with no repo labels takes the working
@@ -381,8 +462,28 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     } else {
         &args.blast
     };
+    // EB.7: one RankCache for the impact walk and the intent's P1, built as
+    // `diff_impact_from_delta_on` builds its transient one (so the impact
+    // rows are unchanged by it).
+    let cached;
+    let blast = if blast.rank_cache.is_none() {
+        let mut with = blast.clone();
+        with.rank_cache = Some(Arc::new(RankCache::new(
+            "answer",
+            &rev.after.repo_roots,
+            &rev.after.repo_labels,
+        )));
+        cached = with;
+        &cached
+    } else {
+        blast
+    };
     let di = diff_impact_from_delta_on(rev, blast, "review");
     let mut impact = di.impact;
+    let (intent, intent_line) = match blast.rank_cache.as_deref() {
+        Some(cache) => review_intent(rev, cache, &mut impact, args.max_impact, ask),
+        None => (None, None),
+    };
     let impact_total = impact.results.len();
     impact.results.truncate(args.max_impact);
 
@@ -503,8 +604,12 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
         model_breaks,
         check_errors,
         unanchored,
+        intent,
     };
     marker(&answer);
+    if let Some(line) = intent_line {
+        eprintln!("{line}");
+    }
     Ok(answer)
 }
 
@@ -528,6 +633,543 @@ fn marker(r: &Review) {
         c.resolved_violations,
         r.blocking,
     );
+}
+
+// ============================================================================
+// intent (module docs "Intent", EB.7)
+// ============================================================================
+
+/// The fusion that orders `intent.files` and moves the impact rows (EB.7):
+/// the typed links first (IDR), then rank_eval's P1 (module docs "Intent").
+/// The calibrated selection (EC.11) keeps it as its uncalibrated fallback.
+pub const INTENT_FUSION_REVIEW: &str = "LX[IDR,P1]";
+
+/// What the PR says it is about (module docs "Intent").
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ReviewIntent {
+    /// The title ranked by: the caller's, or the newest commit subject of
+    /// `<base>..HEAD` (redacted as untrusted text).
+    pub title: String,
+    /// `arg` | `commit`.
+    pub title_source: &'static str,
+    /// The fusion `files` and the impact order follow: [`INTENT_FUSION_REVIEW`].
+    pub fusion: &'static str,
+    /// Every id (or conventional-commit scope) the title routed, read at the
+    /// base, unresolved ones included with their reason.
+    pub ids: Vec<RoutedId>,
+    /// The candidate files with any signal, `fusion`'s order, at most
+    /// `max_impact`; the changed files are never listed.
+    pub files: Vec<IntentFile>,
+    /// `present` | `absent`: whether the history snapshot's messages were read.
+    pub text: &'static str,
+    /// The per-candidate signals the measured fusions read (crate API for
+    /// the calibrated selection).
+    #[serde(skip)]
+    pub(crate) signals: IntentSignals,
+}
+
+impl ReviewIntent {
+    /// [`ReviewIntent::files`] from the signals: the candidates with any
+    /// signal in [`ReviewIntent::fusion`]'s order (the first of
+    /// [`IntentSignals::fusions`]), at most `max`.
+    fn listed(
+        &self,
+        paths: &[String],
+        ids_of: &[Vec<String>],
+        with_rows: &BTreeSet<usize>,
+        max: usize,
+    ) -> Vec<IntentFile> {
+        let s = &self.signals;
+        let [(fusion, order), _, _] = s.fusions();
+        debug_assert_eq!(fusion, self.fusion);
+        order
+            .into_iter()
+            .filter(|&i| s.idr[i] > 0.0 || s.text[i] > 0.0 || s.ppr[i] > 0.0)
+            .take(max)
+            .enumerate()
+            .map(|(k, i)| IntentFile {
+                rank: k + 1,
+                file: paths.get(i).cloned().unwrap_or_default(),
+                idr: s.idr[i],
+                text: s.text[i],
+                ppr: s.ppr[i],
+                ids: ids_of.get(i).cloned().unwrap_or_default(),
+                in_impact: with_rows.contains(&i),
+            })
+            .collect()
+    }
+}
+
+/// One file of [`ReviewIntent::files`].
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct IntentFile {
+    /// 1-based.
+    pub rank: usize,
+    pub file: String,
+    /// Typed id routing at the base (`intent::idr`): named + cited weight.
+    pub idr: f64,
+    /// BM25 over past commit messages (`intent::text`), 0 when absent.
+    pub text: f64,
+    /// rank_eval's P1 from the changed files, max-pooled.
+    pub ppr: f64,
+    /// The routed ids that reached the file, in title order.
+    pub ids: Vec<String>,
+    /// An impact row sits in the file (the uncut impact).
+    pub in_impact: bool,
+}
+
+/// The signals per candidate (one repo's [`Candidates`], path order) the
+/// review's intent fuses; `excluded` are the changed files, `tie` the
+/// candidate position.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct IntentSignals {
+    pub(crate) idr: Vec<f64>,
+    pub(crate) text: Vec<f64>,
+    pub(crate) ppr: Vec<f64>,
+    pub(crate) excluded: Vec<bool>,
+    pub(crate) tie: Vec<u32>,
+}
+
+impl IntentSignals {
+    /// The three measured fusions, rank_eval `r3_bank_seed`'s arithmetic:
+    /// LX[IDR,P1] (shipped), H9s50 = `blend(0.5, minmax(text), minmax(ppr))`
+    /// and LX[IDR,H9s50] (raw IDR first). The last two are candidates for the
+    /// calibrated selection (items 4 / 8), never a fixed order here.
+    pub(crate) fn fusions(&self) -> [(&'static str, Vec<usize>); 3] {
+        let (tie, ex) = (&self.tie, &self.excluded);
+        let h9 = fuse::blend(
+            0.5,
+            &fuse::minmax(&self.text, ex),
+            &fuse::minmax(&self.ppr, ex),
+        );
+        [
+            (
+                INTENT_FUSION_REVIEW,
+                fuse::lx(&self.idr, &[&self.ppr], tie, ex),
+            ),
+            ("H9s50", fuse::order(&h9, tie, ex)),
+            ("LX[IDR,H9s50]", fuse::lx(&self.idr, &[&h9], tie, ex)),
+        ]
+    }
+}
+
+/// Whether and how a review computes its intent.
+enum IntentAsk {
+    /// [`review`] over a caller's delta: no intent, no marker.
+    Off,
+    /// No title and no commit in `<base>..HEAD`: no intent, the marker says so.
+    NoTitle,
+    Title(IntentIn),
+}
+
+/// The intent's inputs [`review_vs_rev`] reads from the repo.
+struct IntentIn {
+    title: String,
+    source: &'static str,
+    repo: PathBuf,
+    /// The base commit, full (a `Tree::Rev` needs one).
+    base_sha: String,
+    /// The PR's own commits (`base..HEAD`), never text documents.
+    exclude: BTreeSet<String>,
+}
+
+/// The title and the base of a [`review_vs_rev`] (module docs "Intent").
+fn intent_request(repo: &Path, base: &str, title: Option<&str>) -> IntentAsk {
+    let Ok(rev) = git_rev::resolve_rev(repo, base) else {
+        return IntentAsk::NoTitle;
+    };
+    let exclude = exclude_range(repo, &rev.sha, "HEAD").unwrap_or_default();
+    let (title, source) = match title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => (t.to_string(), "arg"),
+        None => match newest_subject(repo, &rev.sha) {
+            Some(s) => (s, "commit"),
+            None => return IntentAsk::NoTitle,
+        },
+    };
+    IntentAsk::Title(IntentIn {
+        title,
+        source,
+        repo: repo.to_path_buf(),
+        base_sha: rev.sha,
+        exclude,
+    })
+}
+
+/// `git log -1 --no-merges --format=%s <base>..HEAD`, redacted
+/// (`redact_untrusted`); None when the range has no commit or git fails.
+fn newest_subject(repo: &Path, base_sha: &str) -> Option<String> {
+    let range = format!("{base_sha}..HEAD");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "log",
+            "-1",
+            "--no-merges",
+            "--no-show-signature",
+            "--no-color",
+            "--format=%s",
+            &range,
+            "--",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let subject = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!subject.is_empty()).then(|| redact_untrusted(&subject).0)
+}
+
+/// The intent of a review and its `[review-intent]` line (module docs
+/// "Intent"); moves `impact.results` (uncut) typed-links-first.
+fn review_intent(
+    rev: &RevDelta,
+    cache: &RankCache,
+    impact: &mut BlastRadius,
+    max_files: usize,
+    ask: IntentAsk,
+) -> (Option<ReviewIntent>, Option<String>) {
+    let x = match ask {
+        IntentAsk::Off => return (None, None),
+        IntentAsk::NoTitle => {
+            let files = cache.files(&rev.after.merged);
+            let n = primary_repo(rev, &files).map_or(0, |r| Candidates::of(&files, r).len());
+            let line = format!(
+                "[review-intent] base={} title_source=none fusion={INTENT_FUSION_REVIEW} ids=0 idr_files=0 text=absent text_files=0 candidates={n} reordered=0",
+                rev.answer.base
+            );
+            return (None, Some(line));
+        }
+        IntentAsk::Title(x) => x,
+    };
+    let (before, after) = (&rev.before.merged, &rev.after.merged);
+    let files = cache.files(after);
+    let primary = primary_repo(rev, &files);
+    let label = primary
+        .and_then(|r| rev.after.repo_labels.get(&r).cloned())
+        .unwrap_or_else(|| "-".to_string());
+    let cands = primary
+        .map(|r| Candidates::of(&files, r))
+        .unwrap_or_default();
+    let n = cands.len();
+
+    // The changed files: the impact's seeds' files (EA.5's seed rule).
+    let mut seed_files: Vec<u32> = Vec::new();
+    let mut extra: Vec<NodeId> = Vec::new();
+    for s in &impact.seeds {
+        match files.file_of_node(NodeId(s.id)) {
+            Some(f) if !seed_files.contains(&f) => seed_files.push(f),
+            Some(_) => {}
+            None => extra.push(NodeId(s.id)),
+        }
+    }
+    // P1: rank_eval's base PPR from every node of the changed files,
+    // max-pooled per file (`rank_files` under `Ranking::head`).
+    let ppr: Vec<f64> = if seed_files.is_empty() && extra.is_empty() {
+        vec![0.0; n]
+    } else {
+        let fr = rank_files(after, cache, &seed_files, &extra, Ranking::head());
+        cands
+            .files
+            .iter()
+            .map(|&f| fr.keys.get(f as usize).map_or(0.0, |k| k[0]))
+            .collect()
+    };
+    let excluded: Vec<bool> = cands.files.iter().map(|f| seed_files.contains(f)).collect();
+
+    // The title's BM25 text over past messages, the PR's own left out.
+    let query = subject(&x.title).to_string();
+    let (text, text_state) = match TextIndex::load(&x.repo, &cands, &x.exclude) {
+        Ok(idx) => {
+            idx.report(&label, "review", &query);
+            (idx.scores(&query), "present")
+        }
+        Err(why) => {
+            why.report(&label, "review");
+            (vec![0.0; n], "absent")
+        }
+    };
+
+    // IDR, read at the base: its docs and trackers, its Tier-4 sections, its
+    // candidates; the rules (`[ids]`) are the working tree's.
+    let tree = Tree::Rev {
+        repo: &x.repo,
+        sha: x.base_sha.clone(),
+    };
+    let base_repo = primary
+        .filter(|r| rev.before.repo_roots.contains_key(r))
+        .or_else(|| rev.before.repo_roots.keys().next().copied())
+        .or(primary);
+    let base_files = FileIndex::of(before, &rev.before.repo_labels);
+    let base_cands = base_repo
+        .map(|r| Candidates::of(&base_files, r))
+        .unwrap_or_default();
+    let projects = project_roots(before);
+    let dirs: Vec<&str> = projects
+        .iter()
+        .map(|p| p.path.as_str())
+        .filter(|p| *p != ".")
+        .collect();
+    let vocab = IdVocab::for_root(&x.repo);
+    let snap = read_history(&x.repo);
+    let msgs = snap
+        .as_ref()
+        .and_then(|s| read_history_messages(&x.repo, s));
+    let renames = snap.as_ref().map(rename_pairs).unwrap_or_default();
+    let defs = read_defs(&tree, &dirs, &vocab, base_repo.map(|r| (before, RepoId(r))));
+    let ns = defs.namespaces(&vocab.local_words);
+    let inputs = IdrInputs {
+        defs,
+        ns,
+        paths: PathResolver::new(&base_cands, &renames),
+    };
+    let side = inputs
+        .side(&base_cands, &vocab, &tree)
+        .labelled(&label, "review");
+    let recent = match (&snap, &msgs) {
+        (Some(s), Some(m)) => recent_scopes(
+            &recent_subjects(s, m, &base_cands, &x.exclude),
+            &inputs.ns,
+            &vocab,
+        ),
+        _ => Vec::new(),
+    };
+    let routed = route(&x.title, &side, &recent);
+    let base_ids = ids_by_file(&routed, &inputs, &vocab, &tree, &base_cands);
+    let mut idr = vec![0.0; n];
+    let mut ids_of: Vec<Vec<String>> = vec![Vec::new(); n];
+    for (i, p) in cands.paths.iter().enumerate() {
+        if let Some(b) = base_cands.position(p) {
+            idr[i] = routed.idr.get(b).copied().unwrap_or(0.0);
+            ids_of[i] = base_ids.get(b).cloned().unwrap_or_default();
+        }
+    }
+
+    let signals = IntentSignals {
+        idr,
+        text,
+        ppr,
+        excluded,
+        tie: (0..n as u32).collect(),
+    };
+
+    // LX[IDR, the existing order]: rows in id-routed files first, by the
+    // file's IDR descending, then their previous place; text moves nothing.
+    let row_pos: Vec<Option<usize>> = impact
+        .results
+        .iter()
+        .map(|b| b.file.as_deref().and_then(|p| cands.position(p)))
+        .collect();
+    let mut reordered = 0usize;
+    if signals.idr.iter().any(|&v| v > 0.0) {
+        let key: Vec<f64> = row_pos
+            .iter()
+            .map(|p| p.map_or(0.0, |i| signals.idr[i]))
+            .collect();
+        let mut ix: Vec<usize> = (0..key.len()).collect();
+        ix.sort_by(|&a, &b| key[b].total_cmp(&key[a]).then(a.cmp(&b)));
+        reordered = ix.iter().enumerate().filter(|&(p, &i)| p != i).count();
+        if reordered > 0 {
+            let mut old: Vec<Option<BlastAnswer>> = std::mem::take(&mut impact.results)
+                .into_iter()
+                .map(Some)
+                .collect();
+            impact.results = ix.iter().filter_map(|&i| old[i].take()).collect();
+        }
+    }
+    let with_rows: BTreeSet<usize> = row_pos.iter().flatten().copied().collect();
+
+    let mut intent = ReviewIntent {
+        title: x.title,
+        title_source: x.source,
+        fusion: INTENT_FUSION_REVIEW,
+        ids: routed.ids.clone(),
+        files: Vec::new(),
+        text: text_state,
+        signals,
+    };
+    intent.files = intent.listed(&cands.paths, &ids_of, &with_rows, max_files);
+    let nz = |v: &[f64]| v.iter().filter(|&&w| w > 0.0).count();
+    let line = format!(
+        "[review-intent] base={} title_source={} fusion={} ids={} idr_files={} text={text_state} text_files={} candidates={n} reordered={reordered}",
+        rev.answer.base,
+        intent.title_source,
+        intent.fusion,
+        intent.ids.len(),
+        nz(&intent.signals.idr),
+        nz(&intent.signals.text),
+    );
+    (Some(intent), Some(line))
+}
+
+/// The working tree's primary repo: the one repo of a review's build (its
+/// first root), else the first candidate file's.
+fn primary_repo(rev: &RevDelta, files: &FileIndex) -> Option<u64> {
+    rev.after
+        .repo_roots
+        .keys()
+        .next()
+        .copied()
+        .or_else(|| (!files.is_empty()).then(|| files.repo(0)))
+}
+
+/// Per base candidate, the routed ids that reached it, in title order: an id
+/// whose defining rows (its lineage class included) name the file, an id a
+/// comment of the file cites (one `git grep` at the base over the cited
+/// files, the comment's mentions matched against the class's member ids; the
+/// display does not repeat route's namespace check), and, when only the
+/// conventional-commit scope route ran, every scope for every routed file.
+fn ids_by_file(
+    routed: &Idr,
+    inputs: &IdrInputs,
+    vocab: &IdVocab,
+    tree: &Tree,
+    cands: &Candidates,
+) -> Vec<Vec<String>> {
+    let n = cands.len();
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); n];
+    let add = |out: &mut Vec<Vec<String>>, f: usize, id: &str| {
+        if let Some(v) = out.get_mut(f)
+            && !v.iter().any(|x| x == id)
+        {
+            v.push(id.to_string());
+        }
+    };
+    let mut members_of: Vec<(&str, BTreeSet<String>)> = Vec::new();
+    for r in &routed.ids {
+        let Some(rns) = &r.ns else { continue };
+        let mut mids: BTreeSet<String> = BTreeSet::new();
+        for k in inputs.ns.expand(&Namespaces::key(rns, &r.id)) {
+            let Some((mns, mid)) = k.rsplit_once('|') else {
+                continue;
+            };
+            mids.insert(mid.to_string());
+            for &ri in inputs
+                .ns
+                .rows
+                .get(&(mns.to_string(), mid.to_string()))
+                .into_iter()
+                .flatten()
+            {
+                let Some(row) = inputs.defs.rows.get(ri) else {
+                    continue;
+                };
+                for (f, _, _) in inputs.paths.block(&row.names) {
+                    if routed.named.get(f).is_some_and(|&w| w > 0.0) {
+                        add(&mut out, f, &r.id);
+                    }
+                }
+            }
+        }
+        members_of.push((r.id.as_str(), mids));
+    }
+    let cited: Vec<String> = (0..n)
+        .filter(|&f| routed.cited.get(f).is_some_and(|&w| w > 0.0))
+        .map(|f| cands.paths[f].clone())
+        .collect();
+    if !cited.is_empty() {
+        let words: Vec<String> = members_of
+            .iter()
+            .flat_map(|(_, m)| m.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for (p, l) in grep_words_at(tree, &words, &cited).unwrap_or_default() {
+            let Some(f) = inputs.paths.map(&p) else {
+                continue;
+            };
+            if !routed.cited.get(f).is_some_and(|&w| w > 0.0) {
+                continue;
+            }
+            let Some(c) = comment_part(&l) else { continue };
+            let said: BTreeSet<String> = vocab.mentions(c).into_iter().map(|m| m.id).collect();
+            for (id, mids) in &members_of {
+                if mids.iter().any(|m| said.contains(m)) {
+                    add(&mut out, f, id);
+                }
+            }
+        }
+    }
+    if members_of.is_empty() {
+        for r in routed.ids.iter().filter(|r| r.id.starts_with("scope:")) {
+            for f in 0..n {
+                if routed.idr.get(f).is_some_and(|&w| w > 0.0) {
+                    add(&mut out, f, &r.id);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `### Intent` (module docs "Markdown"): the title, the routed ids, the
+/// ranked files.
+fn intent_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    let Some(i) = &r.intent else { return };
+    blocks.push("### Intent".to_string());
+    blocks.push(format!("_title ({}): {}_", i.title_source, text(&i.title)));
+    let opt = |s: Option<&str>| s.map_or_else(|| DASH.to_string(), text);
+    push_table(
+        blocks,
+        &[
+            "id",
+            "namespace",
+            "tier",
+            "route",
+            "defined at",
+            "state",
+            "files",
+        ],
+        i.ids.iter().map(|d| {
+            vec![
+                code(&d.id),
+                opt(d.ns.as_deref()),
+                opt(d.tier),
+                text(d.route),
+                d.defined_at
+                    .as_ref()
+                    .map_or_else(|| DASH.to_string(), |(p, l)| at(Some(p), Some(*l))),
+                opt(d.state),
+                (d.named_files + d.cited_files).to_string(),
+            ]
+        }),
+        i.ids.len(),
+        max,
+    );
+    if i.files.is_empty() {
+        blocks.push(none(None));
+    }
+    push_table(
+        blocks,
+        &["#", "file", "idr", "text", "ppr", "ids", "in impact"],
+        i.files.iter().map(|f| {
+            let ids: Vec<String> = f.ids.iter().map(|x| code(x)).collect();
+            vec![
+                f.rank.to_string(),
+                text(&f.file),
+                format!("{:.2}", f.idr),
+                format!("{:.3}", f.text),
+                format!("{:.4}", f.ppr),
+                if ids.is_empty() {
+                    DASH.to_string()
+                } else {
+                    ids.join(", ")
+                },
+                yes_no(f.in_impact),
+            ]
+        }),
+        i.files.len(),
+        max,
+    );
+    if i.text == "absent" {
+        blocks.push("_(no history messages: run glia history sync)_".to_string());
+    }
 }
 
 // ============================================================================
@@ -598,6 +1240,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
             |a| a.note.clone(),
         );
         blocks.push(sentence(&note));
+        intent_md(&mut blocks, r, max);
         check_errors_md(&mut blocks, r, max);
         unanchored_md(&mut blocks, r);
         return finish(blocks);
@@ -669,6 +1312,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         c.impact,
         max,
     );
+    intent_md(&mut blocks, r, max);
 
     blocks.push("### Edge changes".to_string());
     edges_md(&mut blocks, r, max);
@@ -1745,4 +2389,41 @@ fn components(
         .into_iter()
         .map(|comp| comp.into_iter().map(|id| loc.locate(id).qname).collect())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// EB.7 (1c): the three measured fusions on a fixed 5-file set equal
+    /// rank_eval `r3_bank_seed`'s arithmetic (file 4 is the changed file).
+    /// minmax(text) over files 0..3 = [1, 0, 1/3, 0]; minmax(ppr) over
+    /// 0.05..0.4 = [3/7, 1/7, 1, 0]; H9s50 = [0.714, 0.071, 0.667, 0].
+    #[test]
+    fn fusions_are_the_harness_arithmetic() {
+        let s = IntentSignals {
+            idr: vec![0.0, 1.0, 0.0, 0.5, 0.0],
+            text: vec![3.0, 0.0, 1.0, 0.0, 9.0],
+            ppr: vec![0.2, 0.1, 0.4, 0.05, 0.9],
+            excluded: vec![false, false, false, false, true],
+            tie: vec![0, 1, 2, 3, 4],
+        };
+        let [(a, lx_p1), (b, h9), (c, lx_h9)] = s.fusions();
+        assert_eq!((a, b, c), ("LX[IDR,P1]", "H9s50", "LX[IDR,H9s50]"));
+        assert_eq!(lx_p1, [1, 3, 2, 0]);
+        assert_eq!(h9, [0, 2, 1, 3]);
+        assert_eq!(lx_h9, [1, 3, 0, 2]);
+        // ties go by candidate position
+        let flat = IntentSignals {
+            idr: vec![0.0; 3],
+            text: vec![0.0; 3],
+            ppr: vec![0.0; 3],
+            excluded: vec![false; 3],
+            tie: vec![0, 1, 2],
+        };
+        assert_eq!(
+            flat.fusions().map(|(_, o)| o),
+            [vec![0, 1, 2], vec![0, 1, 2], vec![0, 1, 2]]
+        );
+    }
 }

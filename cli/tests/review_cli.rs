@@ -63,6 +63,23 @@ const KEYS: [&str; 11] = [
     "blocking",
 ];
 
+/// [`KEYS`] then `intent` (EB.7): a review with a `--title`, or with a
+/// commit in `<base>..HEAD` (its newest subject is the default title).
+const KEYS_WITH_INTENT: [&str; 12] = [
+    "base",
+    "counts",
+    "changed",
+    "impact",
+    "tests",
+    "edges",
+    "new_violations",
+    "resolved_violations",
+    "model_breaks",
+    "check_errors",
+    "blocking",
+    "intent",
+];
+
 /// A scratch dir holding a git work tree (`repo/`), an empty global git
 /// config and a `HOME`; removed on drop.
 struct Scratch {
@@ -532,8 +549,10 @@ fn an_inferred_model_break_is_advisory_and_blocks_under_derived() {
 
     let o = s.review(&["--base", "HEAD~1", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", show(&o));
-    assert_eq!(top_level_keys(&stdout(&o)), KEYS, "{}", show(&o));
+    // EB.7: HEAD~1..HEAD holds `v2`, the default title
+    assert_eq!(top_level_keys(&stdout(&o)), KEYS_WITH_INTENT, "{}", show(&o));
     let v = json(&o);
+    assert_eq!((v["intent"]["title"].as_str(), v["intent"]["title_source"].as_str()), (Some("v2"), Some("commit")), "{v}");
     assert_eq!(
         (v["model_breaks"][0]["pairing"].as_str(), v["counts"]["model_breaks"].as_u64(), v["blocking"].as_bool()),
         (Some("http_model"), Some(1), Some(false)),
@@ -631,4 +650,49 @@ fn ranking_flags_reach_the_impact() {
     assert_eq!(base.status.code(), Some(1), "{}", show(&base));
     let bad = s.review(&["--ranking", "pagerank"]);
     assert_eq!(bad.status.code(), Some(2), "{}", show(&bad));
+}
+
+/// EB.7: `--title` names the PR's purpose: its spec-kit task id routes at the
+/// base to the file its row names (`intent.files`, LX[IDR,P1]), the JSON
+/// gains `intent` and the markdown `### Intent`; `[review-intent]` follows
+/// `[review] base=`. Without a title and with an empty `<base>..HEAD` the
+/// line says `title_source=none` and the JSON has no `intent`.
+#[test]
+fn title_routes_its_ids_into_the_intent() {
+    let s = Scratch::committed("title", WEB_APP_CLEAN);
+    s.write(
+        "specs/001-pay/tasks.md",
+        "# Tasks\n\n- [ ] T007 cover the payment in tests/test_pay.py\n",
+    );
+    s.commit("tasks");
+    s.write("web/app.py", WEB_APP);
+    let o = s.review(&["--json", "--title", "T007 charge hardening"]);
+    assert_eq!(o.status.code(), Some(1), "{}", show(&o));
+    assert_eq!(top_level_keys(&stdout(&o)), KEYS_WITH_INTENT, "{}", show(&o));
+    let v = json(&o);
+    assert_eq!(v["intent"]["title_source"], "arg", "{v}");
+    assert_eq!(v["intent"]["fusion"], "LX[IDR,P1]", "{v}");
+    assert_eq!(v["intent"]["ids"][0]["id"], "T007", "{v}");
+    assert_eq!(v["intent"]["files"][0]["file"], "tests/test_pay.py", "{v}");
+    assert_eq!(v["intent"]["files"][0]["in_impact"], true, "{v}");
+    assert_eq!(v["intent"]["files"][0]["idr"].as_f64(), Some(1.0), "{v}");
+    let err = stderr(&o);
+    let review = err.lines().position(|l| l.starts_with("[review] base=")).expect("review marker");
+    let intent = err
+        .lines()
+        .position(|l| l.starts_with("[review-intent] base=HEAD title_source=arg fusion=LX[IDR,P1] ids=1 idr_files=1 "))
+        .unwrap_or_else(|| panic!("the intent marker\n{}", show(&o)));
+    assert_eq!(intent, review + 1, "{}", show(&o));
+    assert!(err.lines().any(|l| l.starts_with("[idr] ") && l.contains(" surface=review ")), "{}", show(&o));
+
+    let md = s.review(&["--title", "T007 charge hardening"]);
+    assert!(stdout(&md).contains("### Intent\n\n_title (arg): T007 charge hardening_"), "{}", show(&md));
+
+    let plain = s.review(&["--json"]);
+    assert_eq!(top_level_keys(&stdout(&plain)), KEYS, "{}", show(&plain));
+    assert!(
+        stderr(&plain).lines().any(|l| l.starts_with("[review-intent] base=HEAD title_source=none ")),
+        "{}",
+        show(&plain)
+    );
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
-depth=4, max_tests=50, max_impact=50, models_min_tier="fact")` builds the git
+depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr",
+cochange=True, title=None)` builds the git
 rev `base` and the working tree of the repo at `repo_path` and returns the
 engine's review as a native dict {base, counts, changed, impact, tests, edges,
 new_violations, resolved_violations, model_breaks, check_errors, blocking}
@@ -9,7 +10,10 @@ new_violations, resolved_violations, model_breaks, check_errors, blocking}
 model break (DT.1p) whose pairing is at or above `models_min_tier`: by
 default none in 0.5.2), or with format="markdown" the markdown PR report
 `glia review` prints, as a str. Any other format or tier, or an engine error,
-raises ValueError. Needs a `git` binary. Shared helpers: test_build.py."""
+raises ValueError. EB.7: `intent` (the PR title's routed ids and the files
+ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
+(its newest subject is the default title). Needs a `git` binary. Shared
+helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -34,7 +38,7 @@ RULES = ("version = 1\n\n[[constraint]]\nid = \"web-no-api-internals\"\nkind = \
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", "ppr"), ("cochange", True)]
+      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", "ppr"), ("cochange", True), ("title", None)]
 # DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
 MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
 TAG = '`json:"customerName"`'
@@ -130,6 +134,28 @@ def main() -> int:
         c.raises("bad ranking raises before any build", ValueError,
                  lambda: rg.review_vs_rev(str(pathlib.Path(tmp) / "nowhere"), ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
 
+        # EB.7: a title adds `intent` (last key); its spec-kit id routes at the base
+        tasks = top / "specs" / "001-pay" / "tasks.md"
+        tasks.parent.mkdir(parents=True, exist_ok=True)
+        tasks.write_text("# Tasks\n\n- [ ] T007 cover the payment in tests/test_pay.py\n")
+        git(top, "add", "specs")
+        git(top, "commit", "-q", "-m", "tasks")
+        t, err = stderr_of(lambda: rg.review_vs_rev(str(top), title="T007 payment"))
+        t = t if type(t) is dict else {}
+        c.check("title -> intent key last", list(t) == KEYS + ["intent"], list(t))
+        intent = t.get("intent") or {}
+        c.check("intent fields", (intent.get("title"), intent.get("title_source"), intent.get("fusion"),
+                                  intent.get("text")) == ("T007 payment", "arg", "LX[IDR,P1]", "absent"), intent)
+        files = intent.get("files") or [{}]
+        c.check("T007 routes to its file", (files[0].get("file"), files[0].get("idr"), files[0].get("ids"))
+                == ("tests/test_pay.py", 1.0, ["T007"]), files)
+        c.check("[review-intent] marker",
+                "[review-intent] base=HEAD title_source=arg fusion=LX[IDR,P1] ids=1 idr_files=1 " in err, err[-800:])
+        c.check("no title, empty base..HEAD: no intent", "intent" not in rg.review_vs_rev(str(top)),
+                "intent present")
+        md = rg.review_vs_rev(str(top), format="markdown", title="T007 payment")
+        c.check("markdown: ### Intent", "### Intent\n\n_title (arg): T007 payment_" in md, md[-800:])
+
         old = pathlib.Path(tmp) / "old"
         committed(old, WEB_APP)
         (old / "services/api/internal.py").write_text(INTERNAL_EDITED)
@@ -158,6 +184,9 @@ def main() -> int:
         git(shop, "commit", "-q", "-am", "v2")
         r = rg.review_vs_rev(str(shop), base="HEAD~1")
         breaks = r.get("model_breaks") or [{}]
+        c.check("a commit in base..HEAD is the default title",
+                ((r.get("intent") or {}).get("title"), (r.get("intent") or {}).get("title_source"))
+                == ("v2", "commit"), r.get("intent"))
         c.check("an inferred model break is listed and advisory",
                 (r.get("blocking"), len(r.get("model_breaks") or []), breaks[0].get("pairing"),
                  (r.get("counts") or {}).get("model_breaks"))
