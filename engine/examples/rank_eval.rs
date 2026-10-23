@@ -1457,9 +1457,11 @@ fn ans_history(args: &Args, paths: &[String], commits: &[Commit], leak_drop: Opt
 /// EG.6 / EG.7: the engine's own calibration (EC.5's `calibrate_snapshot`, groups `structure`,
 /// `review` and `find`: SELh0 / SELs0 on k1 / k2 / k3 / half for the structural answers, SELt2 on
 /// the same shapes for review's intent and SELf2t on `find` for `find --files`), run once in
-/// memory over [`ans_history`]. Its root (`ans_calibration_root`) reaches the `--git` bare clone,
-/// which the review and find groups' IDR reads each test commit's parent from (EC.12; the
-/// `--repo` copy has no git); the structure sets read no tree.
+/// memory over [`ans_history`]. Its root is the `--git` bare clone, which the review and find
+/// groups' IDR reads each test commit's parent from (EC.12; the `--repo` copy has no git); the
+/// structure sets read no tree. The IDR's `[ids]` vocabulary is the one the intent rankers fall
+/// back to (`ans_fallback_overlay`), handed over as `CalibrateOptions.vocab` (EC.14): the bare
+/// clone holds no `.glia/overlay.toml`, so `IdVocab::for_root` would read the defaults.
 ///
 /// Why the ANS:*@sel rankers are leak-free: at test commit c the pick is the record's online
 /// pick (`CommitScore.pick`), which EC.3's rule makes from test commits strictly older than c
@@ -1478,12 +1480,9 @@ fn ans_calibration(args: &Args, merged: &MergedGraph, h: &AnsHistory) -> Option<
     opts.params.max_seeds = args.max_seeds;
     opts.params.max_files = MAX_FILES;
     opts.groups = vec!["structure", "review", "find"];
-    let root = ans_calibration_root(args);
-    let got = calibrate_snapshot(merged, &root, &h.snap, Some(&h.msgs), &opts);
-    if root.as_path() != std::path::Path::new(&args.git) {
-        let _ = std::fs::remove_dir_all(&root);
-    }
-    match got {
+    opts.vocab = ans_fallback_overlay(args).map(|text| IdVocab::from_config(Some(&parse_str(&text))));
+    let root = std::path::Path::new(&args.git);
+    match calibrate_snapshot(merged, root, &h.snap, Some(&h.msgs), &opts) {
         Ok((cal, sum)) => {
             eprintln!("[rank_eval] ans calibration sets={} test_commits={} ms={}", sum.sets.len(), sum.test_commits, t0.elapsed().as_millis());
             Some(cal)
@@ -1503,27 +1502,6 @@ fn ans_fallback_overlay(args: &Args) -> Option<String> {
     } else {
         (args.pre == "glia").then(|| GLIA_OVERLAY.to_string())
     }
-}
-
-/// The calibration's root: the `--git` bare clone, or, when the intent rankers fall back to an
-/// `[ids]` overlay (`ans_fallback_overlay`), a scratch directory beside `--out`
-/// (`<out>.calroot/`, removed after the calibration) holding that overlay as
-/// `.glia/overlay.toml` and a `.git` file naming the bare clone. The replay's IDR reads its
-/// vocabulary from the root (`IdVocab::for_root`) and each parent through the root's git, so the
-/// calibration routes ids with the vocabulary the answers route with, as on a real checkout
-/// whose root holds the overlay.
-fn ans_calibration_root(args: &Args) -> std::path::PathBuf {
-    let git = std::path::PathBuf::from(&args.git);
-    let Some(text) = ans_fallback_overlay(args) else {
-        return git;
-    };
-    let abs = std::fs::canonicalize(&git).expect("--git: canonicalize");
-    let root = std::path::PathBuf::from(format!("{}.calroot", args.out));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join(".glia")).expect("calibration root: mkdir");
-    std::fs::write(root.join(".git"), format!("gitdir: {}\n", abs.display())).expect("calibration root: .git");
-    std::fs::write(root.join(".glia/overlay.toml"), text).expect("calibration root: overlay");
-    root
 }
 
 /// EG.6: per test commit (`tc_sha`, oldest first, positions `tc_pos` in `commits`), SELh0's

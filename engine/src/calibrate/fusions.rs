@@ -60,7 +60,7 @@
 use std::any::Any;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use glia_activation::algo::fuse;
@@ -444,8 +444,9 @@ impl StateHook for TextState {
 /// (rank_eval `MAX_FILES`, EB.6's `recent_subjects` shape: 2..=30 files).
 const RECENT_MAX_FILES: usize = 30;
 
-/// What every routed test commit shares: the working tree's `[ids]`
-/// vocabulary (EB.4, as EB.7 reads it), the graph's PROJECT dirs, and the
+/// What every routed test commit shares: the `[ids]` vocabulary (the
+/// caller's override, `CalibrateOptions.vocab`, EC.14, else the working
+/// tree's, EB.4, as EB.7 reads it), the graph's PROJECT dirs, and the
 /// path resolver over the candidates and the history snapshot's renames.
 struct IdrCtx {
     label: String,
@@ -456,18 +457,36 @@ struct IdrCtx {
 
 impl IdrCtx {
     /// The context of `root`'s repo over `cands`. The renames are the
-    /// on-disk history snapshot's ([`rename_pairs`]), none without one.
-    fn new(root: &Path, merged: &MergedGraph, cands: &Candidates) -> IdrCtx {
+    /// on-disk history snapshot's ([`rename_pairs`]), none without one. The
+    /// vocabulary is `vocab` when given (EC.14), printing once
+    /// `[ids] vocab repo=<r> surface=calibrate patterns=<n> source=override
+    /// trackers=<t> rejected=<x> markdown=<m>`, else [`IdVocab::for_root`]
+    /// (no line: the replay's routes are quiet, EC.13).
+    fn new(root: &Path, merged: &MergedGraph, cands: &Candidates, vocab: Option<IdVocab>) -> IdrCtx {
         let renames = read_history(root)
             .as_ref()
             .map(rename_pairs)
             .unwrap_or_default();
+        let label = root.file_name().map_or_else(
+            || root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let vocab = match vocab {
+            Some(v) => {
+                eprintln!(
+                    "[ids] vocab repo={label} surface=calibrate patterns={} source=override trackers={} rejected={} markdown={}",
+                    v.patterns.len(),
+                    v.trackers.len(),
+                    v.rejected,
+                    v.markdown.len()
+                );
+                v
+            }
+            None => IdVocab::for_root(root),
+        };
         IdrCtx {
-            label: root.file_name().map_or_else(
-                || root.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
-            vocab: IdVocab::for_root(root),
+            label,
+            vocab,
             dirs: project_roots(merged)
                 .into_iter()
                 .map(|p| p.path)
@@ -533,7 +552,7 @@ pub fn idr_at_parent(
     subj: &str,
     older_subjects_newest_first: &[&str],
 ) -> Result<Vec<f64>, String> {
-    IdrCtx::new(root, merged, cands)
+    IdrCtx::new(root, merged, cands, None)
         .route_at_parent(root, cands, sha, subj, older_subjects_newest_first, false)
         .map(|r| r.idr)
 }
@@ -556,6 +575,9 @@ pub struct IdrState {
     cur: Mutex<Option<Arc<Vec<f64>>>>,
     /// Built by the first routed commit.
     ctx: Mutex<Option<IdrCtx>>,
+    /// The caller's `[ids]` vocabulary (`CalibrateOptions.vocab`, EC.14),
+    /// read when `ctx` is built; unset reads the root's.
+    vocab: OnceLock<IdVocab>,
     /// (routed, unavailable) test commits.
     counts: Mutex<(usize, usize)>,
     /// (sides read, subjects whose id or scope resolved, milliseconds).
@@ -585,9 +607,17 @@ impl IdrState {
             cur_older: Vec::new(),
             cur: Mutex::new(None),
             ctx: Mutex::new(None),
+            vocab: OnceLock::new(),
             counts: Mutex::new((0, 0)),
             work: Mutex::new((0, 0, 0.0)),
         }
+    }
+
+    /// Route with `vocab` instead of the root's `[ids]` vocabulary (EC.14,
+    /// `CalibrateOptions.vocab`). Set before the replay; a second call, or one
+    /// after the first routed commit built the context, changes nothing.
+    pub(crate) fn set_vocab(&self, vocab: IdVocab) {
+        let _ = self.vocab.set(vocab);
     }
 
     /// (test commits routed at a readable parent, test commits whose parent
@@ -629,7 +659,9 @@ impl IdrState {
         let t0 = Instant::now();
         let got = {
             let mut ctx = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
-            let ctx = ctx.get_or_insert_with(|| IdrCtx::new(q.repo_root, q.merged, q.cands));
+            let ctx = ctx.get_or_insert_with(|| {
+                IdrCtx::new(q.repo_root, q.merged, q.cands, self.vocab.get().cloned())
+            });
             let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
             ctx.route_at_parent(q.repo_root, q.cands, &self.cur_sha, &self.cur_subject, &older, true)
         };

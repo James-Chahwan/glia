@@ -36,6 +36,7 @@ use serde::Serialize;
 
 use super::bank::StructIndex;
 use super::candidate::ReplayState;
+use super::fusions::IdrState;
 use super::record::{
     Calibration, CalibrationMeta, CommitScore, ReplayParamsRecord, Shape, calibration_dir,
     write_calibration,
@@ -43,6 +44,7 @@ use super::record::{
 use super::replay::{ReplayParams, build_replay};
 use super::select::run_sets;
 use super::sets::{log_hooks, register_hooks, specs};
+use crate::intent::ids::IdVocab;
 use crate::intent::text::Candidates;
 use crate::rank::RankCache;
 
@@ -65,6 +67,10 @@ pub struct CalibrateOptions {
     pub groups: Vec<&'static str>,
     /// Who ran it: `lib`, `cli` or `pyo3` (the marker's `surface=`).
     pub surface: &'static str,
+    /// The `[ids]` vocabulary the replay's IDR routes with (EC.14), built by
+    /// the caller with [`IdVocab`]'s constructors; `None` reads the root's
+    /// `.glia/overlay.toml` ([`IdVocab::for_root`]), else the defaults.
+    pub vocab: Option<IdVocab>,
 }
 
 impl Default for CalibrateOptions {
@@ -73,6 +79,7 @@ impl Default for CalibrateOptions {
             params: ReplayParams::default(),
             groups: DEFAULT_GROUPS.to_vec(),
             surface: "lib",
+            vocab: None,
         }
     }
 }
@@ -232,6 +239,9 @@ pub fn calibrate_snapshot(
         opts.params.max_files,
         &opts.groups,
     );
+    if let (Some(v), Some(idr)) = (&opts.vocab, state.hook::<IdrState>()) {
+        idr.set_vocab(v.clone());
+    }
     let rows = run_sets(merged, &cands, root, &replay, &mut state, &set_specs);
     log_hooks(&state);
 

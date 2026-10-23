@@ -709,3 +709,103 @@ fn replay_routes_print_one_aggregate_idr_line() {
     eprintln!("{}", summary[0]);
     assert!(summary[0].contains(" built=") && summary[0].contains(" hits=") && summary[0].contains(" build_ms="), "{}", summary[0]);
 }
+
+const VOCAB_CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_VOCAB_CHILD";
+
+/// The tree of `an_override_vocabulary_routes_ids_the_root_does_not_declare`:
+/// `idr_tree`'s, its task named by an id (`PX7`) no default `[ids]` shape
+/// matches, and no `.glia/overlay.toml` at the root.
+fn vocab_tree() -> (git_fixture::GitRepo, String, String) {
+    let g = git_fixture::GitRepo::init();
+    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill()\n");
+    g.write("pkg/b.py", "def bill():\n    return 1\n");
+    g.write("pkg/c.py", "def other():\n    return 2\n");
+    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] PX7 billing export in pkg/b.py\n");
+    let first = g.commit("initial skeleton");
+    g.write("pkg/b.py", "def bill():\n    return 3\n");
+    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n");
+    let second = g.commit("PX7 billing export");
+    (g, first, second)
+}
+
+/// Child half of `an_override_vocabulary_routes_ids_the_root_does_not_declare`:
+/// calibrates [`VOCAB_CHILD_ENV`]'s tree over `review`, with the override
+/// vocabulary `PX{N}` when `<env>_OVERRIDE` is set; a no-op in a normal run.
+#[test]
+fn child_calibrate_vocab() {
+    if let Ok(dir) = std::env::var(VOCAB_CHILD_ENV) {
+        let root = PathBuf::from(dir);
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8")).expect("build");
+        let mut opts = CalibrateOptions::default();
+        opts.groups = vec!["review"];
+        if std::env::var_os(format!("{VOCAB_CHILD_ENV}_OVERRIDE")).is_some() {
+            opts.vocab = Some(
+                glia_engine::intent::ids::IdVocab::from_patterns(&["PX{N}"]).expect("shape"),
+            );
+        }
+        calibrate(&root, &built.merged, &opts).expect("calibrate");
+    }
+}
+
+/// EC.14: `CalibrateOptions.vocab` is the replay's `[ids]` vocabulary. A root
+/// with no overlay reads the defaults, which do not match `PX7`, so nothing
+/// resolves; the same run handed a vocabulary naming the shape routes the
+/// subject at its parent, and says so once: `[ids] vocab .. surface=calibrate
+/// .. source=override`.
+#[test]
+fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
+    let (g, first, second) = vocab_tree();
+    assert!(!g.root().join(".glia/overlay.toml").exists());
+    let files = |ps: &[&str]| -> Vec<HistoryFile> {
+        ps.iter()
+            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .collect()
+    };
+    let commits = vec![
+        HistoryCommit { c: second.clone(), t: 1_700_000_100, files: files(&["pkg/a.py", "pkg/b.py"]) },
+        HistoryCommit { c: first.clone(), t: 1_700_000_000, files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]) },
+    ];
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let messages = vec![
+        msg(&second, 1_700_000_100, "PX7 billing export"),
+        msg(&first, 1_700_000_000, "initial skeleton"),
+    ];
+    let meta = HistoryMeta::new(second.clone(), 2, None, String::new());
+    write_history_with_messages(g.root(), meta, &commits, &[], Some(&messages)).expect("history");
+
+    let run = |overlay: bool| -> String {
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(["--exact", "child_calibrate_vocab", "--nocapture", "--test-threads=1"])
+            .env(VOCAB_CHILD_ENV, g.root());
+        if overlay {
+            cmd.env(format!("{VOCAB_CHILD_ENV}_OVERRIDE"), "1");
+        }
+        let out = cmd.output().expect("re-run the test binary");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "child failed: {stderr}");
+        stderr
+    };
+    let lines = |s: &str, p: &str| s.lines().filter(|l| l.starts_with(p)).map(str::to_string).collect::<Vec<_>>();
+
+    let plain = run(false);
+    let agg = lines(&plain, "[idr] replay ");
+    assert_eq!(agg.len(), 1, "{plain}");
+    eprintln!("without: {}", agg[0]);
+    assert!(agg[0].contains(" resolved=0 "), "{}", agg[0]);
+    assert!(lines(&plain, "[ids] vocab").is_empty(), "no override, no vocab line: {plain}");
+
+    let over = run(true);
+    let agg = lines(&over, "[idr] replay ");
+    assert_eq!(agg.len(), 1, "{over}");
+    eprintln!("with: {}", agg[0]);
+    assert!(
+        agg[0].starts_with("[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="),
+        "{}",
+        agg[0]
+    );
+    let vocab = lines(&over, "[ids] vocab ");
+    assert_eq!(vocab.len(), 1, "one override line: {over}");
+    eprintln!("{}", vocab[0]);
+    assert!(vocab[0].contains(" surface=calibrate patterns=1 source=override trackers=0 rejected=0 markdown=0"), "{}", vocab[0]);
+}

@@ -97,10 +97,8 @@ queries; `ans_intent` in rank_eval):
   rank_eval (the pinned glia snapshot `9837b1ff` predates the file, so without it the engine's IDR
   resolved nothing there: EB.9, EC.12). This replaces passing `--eng-overlay .glia/overlay.toml` from
   the script: the gate's glia row carries only `--pre glia`. The calibration reads the same
-  vocabulary: its root (`ans_calibration_root`) is then a scratch `<out>.calroot/` holding that
-  overlay and a `.git` file naming the bare clone, removed after the run, so the replay's IDR
-  (`IdVocab::for_root`, each parent through the root's git) routes as a checkout whose root holds the
-  overlay would. Without it the glia replay resolved 27 of 300 subjects and SELt2 picked a fusion
+  vocabulary, handed to it as `CalibrateOptions.vocab` (EC.14) with its root the bare clone itself,
+  so the replay's IDR routes as a checkout whose root holds the overlay would. Without it the glia replay resolved 27 of 300 subjects and SELt2 picked a fusion
   with no IDR (ANS:review@sel - ANS:review r10 -0.42 on glia single); with it 247 of 300. A glia run whose test commits route no
   id at all panics (`idr_commits=0`), so the IDR rows cannot silently measure nothing.
 - **ANS:review** (`single`, `k2`, `k3`, `half`): `intent_files_with(title = c's subject, changed = the
