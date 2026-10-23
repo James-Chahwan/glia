@@ -77,6 +77,14 @@ grep -qF "path = \"$ROOT/" "$CACHE/Cargo.toml.new" || { say "FAIL - no path = \"
 stray=$(find "$SRC/crates" -name Cargo.toml -exec grep -lE 'path[[:space:]]*=[[:space:]]*"[^"]*glia' {} + 2>/dev/null)
 [ -z "$stray" ] || { say "FAIL - member manifest path-depends on glia directly (extend the rewrite): $stray"; exit 1; }
 cmp -s "$CACHE/Cargo.toml.new" "$SRC/Cargo.toml" || cp "$CACHE/Cargo.toml.new" "$SRC/Cargo.toml"
+# A neuropil that has not applied the 0.5.0 rename (repo-graph-* / repo_graph_*) cannot resolve
+# the glia-* crates: rename the COPY with the leap's own table, and the projection-text feature
+# driver -> research (the handoffs' recipe). The copy is renamed, never neuropil.
+if grep -rqE 'repo-graph-|repo_graph_' "$SRC/Cargo.toml" "$SRC/crates" 2>/dev/null; then
+  python3 "$ROOT/dev-notes/rename-0.5.0.py" --apply --quiet --root "$SRC" || { say "FAIL - rename-0.5.0.py on the copy"; exit 1; }
+  sed -i '/^glia-projection-text = /s/"driver"/"research"/' "$SRC/Cargo.toml"
+  say "note - neuropil still uses the pre-0.5.0 names; checked a renamed copy"
+fi
 
 # rust-toolchain.toml in $SRC selects neuropil's pin; RUSTUP_TOOLCHAIN would override it.
 (cd "$SRC" && env -u RUSTUP_TOOLCHAIN CARGO_TARGET_DIR="$TARGET" \

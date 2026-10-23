@@ -68,8 +68,17 @@ NEUROPIL_DIR="$C/np" GLIA_CONSUMER_CACHE="$C/cc" bash scripts/check-neuropil.sh 
   0.5.1's nine. **0.5.3 adds no crate** (its workspace `Cargo.lock` did not move).
 - The `note` line is expected: the copy is not a git checkout.
 
-`check-neuropil.sh` still copies neuropil verbatim, so run as-is it reports only the cargo resolution
-error until neuropil renames; the recipe above stands in for it, as at 0.5.0-0.5.2.
+Since the close-out (after EZ.2), `check-neuropil.sh` applies that recipe itself: when the copy still
+holds `repo-graph-*` / `repo_graph_*` names it runs `rename-0.5.0.py` and the `driver` -> `research`
+feature edit on the copy (never on neuropil) and prints a `note`. Run as-is against `../neuropil`:
+
+```
+[rename-0.5.0] rewrote 165 token(s) in 50 file(s) under /home/ivy/.cache/glia-consumer-check/neuropil/src (0 unknown token(s) left)
+[neuropil-check] note - neuropil still uses the pre-0.5.0 names; checked a renamed copy
+[neuropil-check] ok - new=0 fixed=0 preexisting=0 in 115.5s against glia 0.5.2+pc8a36ab4b747722a (neuropil b140d1e, lock drift +40 -26)
+```
+
+Once neuropil renames, the rename step finds nothing and is skipped.
 
 ## 2. Cargo: the pin
 
