@@ -592,3 +592,93 @@ pub fn recent_subjects<'m>(
         .filter_map(|c| by_sha.get(c.c.as_str()).map(|m| m.s.as_str()))
         .collect()
 }
+
+/// Per candidate, the routed ids that reached it, in text order (review's
+/// intent table and `find --files`, one reading for both): an id whose
+/// defining rows (its lineage class included) name the file, an id a
+/// comment of the file cites (one `git grep` at `tree` over the cited
+/// files, the comment's mentions matched against the class's member ids; the
+/// display does not repeat route's namespace check), and, when only the
+/// conventional-commit scope route ran, every scope for every routed file.
+pub(crate) fn ids_by_file(
+    routed: &Idr,
+    inputs: &IdrInputs,
+    vocab: &IdVocab,
+    tree: &Tree,
+    cands: &Candidates,
+) -> Vec<Vec<String>> {
+    let n = cands.len();
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); n];
+    let add = |out: &mut Vec<Vec<String>>, f: usize, id: &str| {
+        if let Some(v) = out.get_mut(f)
+            && !v.iter().any(|x| x == id)
+        {
+            v.push(id.to_string());
+        }
+    };
+    let mut members_of: Vec<(&str, BTreeSet<String>)> = Vec::new();
+    for r in &routed.ids {
+        let Some(rns) = &r.ns else { continue };
+        let mut mids: BTreeSet<String> = BTreeSet::new();
+        for k in inputs.ns.expand(&Namespaces::key(rns, &r.id)) {
+            let Some((mns, mid)) = k.rsplit_once('|') else {
+                continue;
+            };
+            mids.insert(mid.to_string());
+            for &ri in inputs
+                .ns
+                .rows
+                .get(&(mns.to_string(), mid.to_string()))
+                .into_iter()
+                .flatten()
+            {
+                let Some(row) = inputs.defs.rows.get(ri) else {
+                    continue;
+                };
+                for (f, _, _) in inputs.paths.block(&row.names) {
+                    if routed.named.get(f).is_some_and(|&w| w > 0.0) {
+                        add(&mut out, f, &r.id);
+                    }
+                }
+            }
+        }
+        members_of.push((r.id.as_str(), mids));
+    }
+    let cited: Vec<String> = (0..n)
+        .filter(|&f| routed.cited.get(f).is_some_and(|&w| w > 0.0))
+        .map(|f| cands.paths[f].clone())
+        .collect();
+    if !cited.is_empty() {
+        let words: Vec<String> = members_of
+            .iter()
+            .flat_map(|(_, m)| m.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for (p, l) in grep_words_at(tree, &words, &cited).unwrap_or_default() {
+            let Some(f) = inputs.paths.map(&p) else {
+                continue;
+            };
+            if !routed.cited.get(f).is_some_and(|&w| w > 0.0) {
+                continue;
+            }
+            let Some(c) = comment_part(&l) else { continue };
+            let said: BTreeSet<String> = vocab.mentions(c).into_iter().map(|m| m.id).collect();
+            for (id, mids) in &members_of {
+                if mids.iter().any(|m| said.contains(m)) {
+                    add(&mut out, f, id);
+                }
+            }
+        }
+    }
+    if members_of.is_empty() {
+        for r in routed.ids.iter().filter(|r| r.id.starts_with("scope:")) {
+            for f in 0..n {
+                if routed.idr.get(f).is_some_and(|&w| w > 0.0) {
+                    add(&mut out, f, &r.id);
+                }
+            }
+        }
+    }
+    out
+}

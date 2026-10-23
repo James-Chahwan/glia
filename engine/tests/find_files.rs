@@ -29,7 +29,7 @@ use glia_code_domain::snapshots::{
 };
 use glia_engine::GenerateResult;
 use glia_engine::find::{
-    FIND_FILES_FUSION, FindFilesOptions, FoundFile, find_files, find_files_with_ids,
+    FIND_FILES_FUSION, FindFilesOptions, FoundFile, find_files, find_files_with, find_files_with_ids,
 };
 
 const CARGO: &str = "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
@@ -283,4 +283,64 @@ fn the_answer_carries_its_selection() {
     let none = ask(&b, "zebra quagga");
     assert!(none.results.is_empty() && none.absence.is_some());
     assert_eq!(none.selection.as_ref().map(|s| s.source), Some("fallback"));
+}
+
+// ---- EG.7: the rank gate's seam `find_files_with` ---------------------------
+
+fn history_of(repo: &GitRepo) -> glia_engine::review::IntentHistory {
+    let snap = glia_code_domain::snapshots::read_history(repo.root()).expect("snapshot");
+    let msgs = glia_code_domain::snapshots::read_history_messages(repo.root(), &snap);
+    glia_engine::review::IntentHistory::new(snap, msgs, std::collections::BTreeSet::new())
+}
+
+/// (8) `find_files_with(.., None, None)` is `find_files`, byte for byte; the
+/// root's own snapshot given in memory answers the same rows; a forced pick
+/// is the same order as `select = false`'s explicit choice.
+#[test]
+fn the_seam_is_find_files() {
+    let repo = fixture();
+    snapshot(&repo);
+    let b = build(&repo);
+    let opts = FindFilesOptions::default();
+    for q in ["T012 export", "export ledger", "nothing here"] {
+        let live = find_files(&b.merged, &b.repo_roots, q, &opts).expect("answer");
+        let seam = find_files_with(&b.merged, &b.repo_roots, q, &opts, None, None).expect("answer");
+        assert_eq!(
+            serde_json::to_string(&live).expect("json"),
+            serde_json::to_string(&seam).expect("json"),
+            "{q}"
+        );
+        let hist = history_of(&repo);
+        let mem = find_files_with(&b.merged, &b.repo_roots, q, &opts, Some(&hist), None).expect("answer");
+        assert_eq!(live.results, mem.results, "{q}");
+        let forced =
+            find_files_with(&b.merged, &b.repo_roots, q, &opts, Some(&hist), Some(FIND_FILES_FUSION)).expect("answer");
+        assert_eq!(live.results, forced.results, "{q}");
+        assert_eq!(forced.selection.as_ref().map(|s| s.source), Some("explicit"));
+    }
+}
+
+/// (9) Leak-free: a history whose `exclude` names a commit answers exactly as
+/// the history with that commit (and its message) removed.
+#[test]
+fn an_excluded_commit_reads_as_absent() {
+    let repo = fixture();
+    snapshot(&repo);
+    let b = build(&repo);
+    let opts = FindFilesOptions::default();
+    let mut excl = history_of(&repo);
+    excl.exclude.insert(sha(2));
+    let mut cut = history_of(&repo);
+    let i = cut.snapshot.commits.iter().position(|c| c.c == sha(2)).expect("sha 2");
+    cut.snapshot.commits.remove(i);
+    if let Some(m) = cut.messages.as_mut() {
+        m.remove(i);
+    }
+    let a = find_files_with(&b.merged, &b.repo_roots, "export ledger", &opts, Some(&excl), None).expect("answer");
+    let c = find_files_with(&b.merged, &b.repo_roots, "export ledger", &opts, Some(&cut), None).expect("answer");
+    assert_eq!(a.results, c.results);
+    // and the excluded commit's files lose its text
+    let full = find_files_with(&b.merged, &b.repo_roots, "export ledger", &opts, Some(&history_of(&repo)), None)
+        .expect("answer");
+    assert_ne!(files(&full.results), files(&a.results));
 }

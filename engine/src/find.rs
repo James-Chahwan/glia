@@ -77,7 +77,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
-use glia_code_domain::snapshots::{read_history, read_history_messages};
+use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot, read_history, read_history_messages};
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
@@ -89,16 +89,15 @@ use crate::answers::{
     Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
 };
 use crate::arch::{repo_label_for, repo_label_map};
-use crate::git_rev::grep_words_at;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
-use crate::intent::defs::{Namespaces, Tree, read_defs};
+use crate::intent::defs::{Tree, read_defs};
 use crate::intent::idr::{
-    Idr, IdrInputs, RoutedId, comment_part, recent_scopes, recent_subjects, route,
+    IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route,
 };
-use crate::intent::ids::IdVocab;
 use crate::intent::paths::{PathResolver, rename_pairs};
-use crate::intent::text::{Candidates, TextIndex, subject};
+use crate::intent::text::{Candidates, TextAbsent, TextIndex, subject};
 use crate::rank::RankCache;
+use crate::review::IntentHistory;
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -670,7 +669,28 @@ pub fn find_files(
     query: &str,
     opts: &FindFilesOptions,
 ) -> Result<Answer<FoundFile>, String> {
-    find_files_with_ids(merged, repo_roots, query, opts).map(|(a, _)| a)
+    find_files_with(merged, repo_roots, query, opts, None, None)
+}
+
+/// [`find_files`] over a caller's history and with a forced pick (EG.7):
+/// `history` replaces every read of the root's `.glia/history-snapshot/`
+/// (its `exclude`d commits dropped from the snapshot before any signal reads
+/// it; `rev` / `git` route the ids at that revision instead of the working
+/// tree; `vocab` replaces the root's `[ids]`), and `pick: Some(name)` ranks
+/// that `SELf2t` candidate (source `explicit`) whatever `opts.select` says.
+/// `find_files_with(.., None, None)` is [`find_files`].
+///
+/// For the rank gate's harness (`engine/examples/rank_eval.rs`); unstable.
+#[doc(hidden)]
+pub fn find_files_with(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    query: &str,
+    opts: &FindFilesOptions,
+    history: Option<&IntentHistory>,
+    pick: Option<&str>,
+) -> Result<Answer<FoundFile>, String> {
+    find_files_core(merged, repo_roots, query, opts, history, pick).map(|(a, _)| a)
 }
 
 /// [`find_files`] plus the ids the query routed (`intent::idr::RoutedId`,
@@ -708,6 +728,52 @@ pub fn find_files_with_ids(
     query: &str,
     opts: &FindFilesOptions,
 ) -> Result<(Answer<FoundFile>, Vec<RoutedId>), String> {
+    find_files_core(merged, repo_roots, query, opts, None, None)
+}
+
+/// The history a [`find_files_with`] call reads: `history`'s snapshot with
+/// its `exclude`d commits dropped (messages kept row-aligned), else the
+/// root's on disk.
+fn find_history(root: &Path, history: Option<&IntentHistory>) -> Option<(HistorySnapshot, Option<Vec<HistoryMessage>>)> {
+    let Some(h) = history else {
+        let snap = read_history(root)?;
+        let msgs = read_history_messages(root, &snap);
+        return Some((snap, msgs));
+    };
+    if h.exclude.is_empty() {
+        return Some((h.snapshot.clone(), h.messages.clone()));
+    }
+    let keep: Vec<bool> = h.snapshot.commits.iter().map(|c| !h.exclude.contains(&c.c)).collect();
+    let commits = h
+        .snapshot
+        .commits
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(c, _)| c.clone())
+        .collect();
+    let snap = HistorySnapshot {
+        meta: h.snapshot.meta.clone(),
+        commits,
+        blame: h.snapshot.blame.clone(),
+    };
+    let msgs = h.messages.as_ref().map(|m| {
+        m.iter()
+            .filter(|r| !h.exclude.contains(&r.c))
+            .cloned()
+            .collect()
+    });
+    Some((snap, msgs))
+}
+
+fn find_files_core(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    query: &str,
+    opts: &FindFilesOptions,
+    history: Option<&IntentHistory>,
+    pick: Option<&str>,
+) -> Result<(Answer<FoundFile>, Vec<RoutedId>), String> {
     let (repo, root) = match (repo_roots.len(), repo_roots.iter().next()) {
         (1, Some((r, p))) => (*r, p.clone()),
         (n, _) => return Err(format!("find --files ranks one repo's files; got {n} repos")),
@@ -728,56 +794,76 @@ pub fn find_files_with_ids(
     let n = cands.len();
     let root_path = Path::new(&root);
 
+    // The history: the caller's (its excluded commits dropped), else the root's.
+    let held = find_history(root_path, history);
+    let snap = held.as_ref().map(|h| &h.0);
+    let msgs = held.as_ref().and_then(|h| h.1.as_deref());
+
     // T1s: the subject's BM25 over past commit messages, nothing excluded.
     let subj = subject(query).to_string();
-    let (text, text_state) = match TextIndex::load(root_path, &cands, &BTreeSet::new()) {
-        Ok(idx) => {
+    let (text, text_state) = match (snap, msgs) {
+        (Some(s), Some(m)) => {
+            let idx = TextIndex::build(s, m, &cands, &BTreeSet::new());
             idx.report(&label, surface, &subj);
             (idx.scores(&subj), "present")
         }
-        Err(why) => {
+        (s, _) => {
+            let why = if s.is_none() { TextAbsent::History } else { TextAbsent::Messages };
             why.report(&label, surface);
             (vec![0.0; n], "absent")
         }
     };
 
-    // IDR over the working tree.
-    let tree = Tree::Work(root_path);
-    let projects = project_roots(merged);
-    let dirs: Vec<&str> = projects
-        .iter()
-        .map(|p| p.path.as_str())
-        .filter(|p| *p != ".")
-        .collect();
-    let vocab = IdVocab::for_root(root_path);
-    let snap = read_history(root_path);
-    let msgs = snap
-        .as_ref()
-        .and_then(|s| read_history_messages(root_path, s));
-    let renames = snap.as_ref().map(rename_pairs).unwrap_or_default();
-    let defs = read_defs(&tree, &dirs, &vocab, Some((merged, RepoId(repo))));
-    let ns = defs.namespaces(&vocab.local_words);
-    let inputs = IdrInputs {
-        defs,
-        ns,
-        paths: PathResolver::new(&cands, &renames),
+    // IDR over the working tree (or the caller's revision).
+    let git: &Path = history.and_then(|h| h.git.as_deref()).unwrap_or(root_path);
+    let tree = match history.and_then(|h| h.rev.as_deref()) {
+        Some(rev) => Tree::Rev {
+            repo: git,
+            sha: rev.to_string(),
+        },
+        None => Tree::Work(root_path),
     };
-    let side = inputs.side(&cands, &vocab, &tree).labelled(&label, surface);
-    let recent = match (&snap, &msgs) {
-        (Some(s), Some(m)) => recent_scopes(
-            &recent_subjects(s, m, &cands, &BTreeSet::new()),
-            &inputs.ns,
-            &vocab,
-        ),
-        _ => Vec::new(),
+    let at = match &tree {
+        Tree::Rev { sha, .. } => format!("{}@{sha}", git.display()),
+        _ => "worktree".to_string(),
     };
-    let routed = route(query, &side, &recent);
+    let vocab = IntentHistory::vocab_for(history, root_path);
+    let routed = IntentHistory::routed(history, ("find", at, query.to_string(), n), || {
+        let projects = project_roots(merged);
+        let dirs: Vec<&str> = projects
+            .iter()
+            .map(|p| p.path.as_str())
+            .filter(|p| *p != ".")
+            .collect();
+        let renames = snap.map(rename_pairs).unwrap_or_default();
+        let defs = read_defs(&tree, &dirs, &vocab, Some((merged, RepoId(repo))));
+        let ns = defs.namespaces(&vocab.local_words);
+        let inputs = IdrInputs {
+            defs,
+            ns,
+            paths: PathResolver::new(&cands, &renames),
+        };
+        let side = inputs.side(&cands, &vocab, &tree).labelled(&label, surface);
+        let recent = match (snap, msgs) {
+            (Some(s), Some(m)) => recent_scopes(
+                &recent_subjects(s, m, &cands, &BTreeSet::new()),
+                &inputs.ns,
+                &vocab,
+            ),
+            _ => Vec::new(),
+        };
+        let routed = route(query, &side, &recent);
+        let ids_of = ids_by_file(&routed, &inputs, &vocab, &tree, &cands);
+        (routed, ids_of)
+    });
+    let (routed, ids_of) = (&routed.0, &routed.1);
     let idr: Vec<f64> = (0..n).map(|i| routed.idr.get(i).copied().unwrap_or(0.0)).collect();
-    let ids_of = ids_by_file(&routed, &inputs, &vocab, &tree, &cands);
 
     // EC.13: SELf2t's calibrated pick, else LX[IDR,T1s]; the find shape's
     // tie rule (the degree in an unused third key), then path.
-    let selection = if opts.select {
+    let selection = if let Some(name) = pick {
+        explicit(FIND_SET, Shape::Find, name)
+    } else if opts.select {
         select(
             cache.calibration().read(),
             FIND_SET,
@@ -789,10 +875,7 @@ pub fn find_files_with_ids(
         explicit(FIND_SET, Shape::Find, FIND_FILES_FUSION)
     };
     log_selection("find_files", &selection);
-    let history = snap
-        .as_ref()
-        .map(|s| (s, msgs.as_deref().unwrap_or(&[])));
-    let head = FindHead::new(merged, &cache, &cands, history);
+    let head = FindHead::new(merged, &cache, &cands, snap.map(|s| (s, msgs.unwrap_or(&[]))));
     let keyed = |name: &str| {
         let sig = find_signals_at_head(&head, name, text.clone(), idr.clone());
         find_keys(name, &sig)
@@ -845,98 +928,7 @@ pub fn find_files_with_ids(
         absence::empty(merged, "find_files", query, "no_match", note, &[], None)
     });
     answer.selection = Some(selection);
-    Ok((answer, routed.ids))
-}
-
-/// Per candidate, the routed ids that reached it, in query order: an id whose
-/// defining rows (its lineage class included) name the file, an id a comment
-/// of the file cites (one `git grep` over the cited files, the comment's
-/// mentions matched against the class's member ids), and, when only the
-/// conventional-commit scope route ran, every scope for every routed file.
-/// The same reading as `review`'s intent table (`review::ids_by_file`, which
-/// is private to that module; both are candidates for one `intent::idr`
-/// helper).
-fn ids_by_file(
-    routed: &Idr,
-    inputs: &IdrInputs,
-    vocab: &IdVocab,
-    tree: &Tree,
-    cands: &Candidates,
-) -> Vec<Vec<String>> {
-    let n = cands.len();
-    let mut out: Vec<Vec<String>> = vec![Vec::new(); n];
-    let add = |out: &mut Vec<Vec<String>>, f: usize, id: &str| {
-        if let Some(v) = out.get_mut(f)
-            && !v.iter().any(|x| x == id)
-        {
-            v.push(id.to_string());
-        }
-    };
-    let mut members_of: Vec<(&str, BTreeSet<String>)> = Vec::new();
-    for r in &routed.ids {
-        let Some(rns) = &r.ns else { continue };
-        let mut mids: BTreeSet<String> = BTreeSet::new();
-        for k in inputs.ns.expand(&Namespaces::key(rns, &r.id)) {
-            let Some((mns, mid)) = k.rsplit_once('|') else {
-                continue;
-            };
-            mids.insert(mid.to_string());
-            for &ri in inputs
-                .ns
-                .rows
-                .get(&(mns.to_string(), mid.to_string()))
-                .into_iter()
-                .flatten()
-            {
-                let Some(row) = inputs.defs.rows.get(ri) else {
-                    continue;
-                };
-                for (f, _, _) in inputs.paths.block(&row.names) {
-                    if routed.named.get(f).is_some_and(|&w| w > 0.0) {
-                        add(&mut out, f, &r.id);
-                    }
-                }
-            }
-        }
-        members_of.push((r.id.as_str(), mids));
-    }
-    let cited: Vec<String> = (0..n)
-        .filter(|&f| routed.cited.get(f).is_some_and(|&w| w > 0.0))
-        .map(|f| cands.paths[f].clone())
-        .collect();
-    if !cited.is_empty() {
-        let words: Vec<String> = members_of
-            .iter()
-            .flat_map(|(_, m)| m.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        for (p, l) in grep_words_at(tree, &words, &cited).unwrap_or_default() {
-            let Some(f) = inputs.paths.map(&p) else {
-                continue;
-            };
-            if !routed.cited.get(f).is_some_and(|&w| w > 0.0) {
-                continue;
-            }
-            let Some(c) = comment_part(&l) else { continue };
-            let said: BTreeSet<String> = vocab.mentions(c).into_iter().map(|m| m.id).collect();
-            for (id, mids) in &members_of {
-                if mids.iter().any(|m| said.contains(m)) {
-                    add(&mut out, f, id);
-                }
-            }
-        }
-    }
-    if members_of.is_empty() {
-        for r in routed.ids.iter().filter(|r| r.id.starts_with("scope:")) {
-            for f in 0..n {
-                if routed.idr.get(f).is_some_and(|&w| w > 0.0) {
-                    add(&mut out, f, &r.id);
-                }
-            }
-        }
-    }
-    out
+    Ok((answer, routed.ids.clone()))
 }
 
 #[cfg(test)]

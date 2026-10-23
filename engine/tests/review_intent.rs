@@ -40,10 +40,12 @@ use glia_code_domain::snapshots::{
 };
 use glia_engine::calibrate::{CalibrateOptions, CalibrationRead, calibrate, read_calibration};
 use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::rank::RankCache;
 use glia_engine::review::{
-    INTENT_FUSION_REVIEW, MarkdownOptions, Review, ReviewArgs, render_markdown, review,
-    review_vs_rev,
+    INTENT_FUSION_REVIEW, IntentHistory, MarkdownOptions, Review, ReviewArgs, intent_files_with,
+    render_markdown, review, review_vs_rev,
 };
+use std::sync::Arc;
 
 const CARGO: &str = "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
 const LIB: &str = "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n";
@@ -483,4 +485,66 @@ fn review_intent_follows_the_selt_pick() {
         serde_json::to_value(&u.impact.results).expect("json"),
         serde_json::to_value(&c.impact.results).expect("json")
     );
+}
+
+// ---- EG.7: the rank gate's seam `intent_files_with` -------------------------
+
+fn history_of(repo: &GitRepo) -> IntentHistory {
+    let snap = glia_code_domain::snapshots::read_history(repo.root()).expect("snapshot");
+    let msgs = glia_code_domain::snapshots::read_history_messages(repo.root(), &snap);
+    IntentHistory::new(snap, msgs, std::collections::BTreeSet::new())
+}
+
+/// The seam over the working tree's graph, changed file `src/a.rs`, as file
+/// paths.
+fn seam_files(repo: &GitRepo, title: &str, history: &IntentHistory, pick: Option<&str>) -> Vec<String> {
+    let rev = graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
+    let base = String::from_utf8(repo.git(&["rev-parse", "HEAD"]).stdout).expect("utf-8");
+    let merged = &rev.after.merged;
+    let cache = Arc::new(RankCache::new("answer", &rev.after.repo_roots, &rev.after.repo_labels));
+    let files = cache.files(merged);
+    let a = files.index_of(files.repo(0), "src/a.rs").expect("src/a.rs");
+    intent_files_with(merged, repo.root(), base.trim(), title, &[a], &cache, history, pick)
+        .into_iter()
+        .map(|f| files.path(f).to_string())
+        .collect()
+}
+
+/// (7) EG.7: `intent_files_with` with the root's own snapshot lists the
+/// files review's `intent.files` lists, in its order (review cuts it at
+/// `max_files`); a forced LX[IDR,P1] is the uncalibrated order.
+#[test]
+fn the_seam_is_review_intent_order() {
+    let repo = fixture();
+    snapshot(&repo, old_rows());
+    repo.write("src/a.rs", A_EDITED);
+    for title in ["T012 billing export", "invoice ledger rounding"] {
+        let r = review_vs_rev(repo.path(), "HEAD", &with_title(Some(title))).expect("review");
+        let intent = r.intent.expect("intent");
+        let want: Vec<String> = intent.files.iter().map(|f| f.file.clone()).collect();
+        assert!(!want.is_empty(), "{title}");
+        let got = seam_files(&repo, title, &history_of(&repo), None);
+        assert!(got.len() >= want.len(), "{title}: {got:?} vs {want:?}");
+        assert_eq!(got[..want.len()], want[..], "{title}");
+        let forced = seam_files(&repo, title, &history_of(&repo), Some(INTENT_FUSION_REVIEW));
+        assert_eq!(forced, got, "{title}");
+    }
+}
+
+/// (8) Leak-free: an excluded commit reads as one the snapshot never held.
+#[test]
+fn the_seams_excluded_commit_reads_as_absent() {
+    let repo = fixture();
+    snapshot(&repo, old_rows());
+    repo.write("src/a.rs", A_EDITED);
+    let title = "invoice ledger rounding";
+    let mut excl = history_of(&repo);
+    excl.exclude.insert(sha(2));
+    let mut cut = history_of(&repo);
+    let i = cut.snapshot.commits.iter().position(|c| c.c == sha(2)).expect("sha 2");
+    cut.snapshot.commits.remove(i);
+    if let Some(m) = cut.messages.as_mut() {
+        m.remove(i);
+    }
+    assert_eq!(seam_files(&repo, title, &excl, None), seam_files(&repo, title, &cut, None));
 }

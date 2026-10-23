@@ -701,4 +701,11 @@ fn replay_routes_print_one_aggregate_idr_line() {
     assert_eq!(find.len(), 1, "{stderr}");
     eprintln!("{}", find[0]);
     assert_eq!(lines("[calibrate] idr unavailable commits=1").len(), 1, "{stderr}");
+    // EG.7 (routed from EC.13): the calibration's rank cache prints no
+    // per-lookup line, one summary after the replay.
+    assert!(lines("[rank-cache] holder=calibrate source=").is_empty(), "per-lookup line: {stderr}");
+    let summary = lines("[rank-cache] holder=calibrate summary lookups=");
+    assert_eq!(summary.len(), 1, "one calibrate summary: {stderr}");
+    eprintln!("{}", summary[0]);
+    assert!(summary[0].contains(" built=") && summary[0].contains(" hits=") && summary[0].contains(" build_ms="), "{}", summary[0]);
 }

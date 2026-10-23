@@ -81,6 +81,15 @@
 //! `--ans-leak on` is their leak test (see `ans_calibration`). Fired_on, once per run:
 //! `[rank_eval] ans calibration sets=<n> test_commits=<t> ms=<ms>`.
 //!
+//! The intent answers (0.5.3, EG.7): with `--ans on`, four more held rows after EG.6's.
+//! `ANS:review` / `ANS:review@sel` (single and review shapes) are review's intent file order
+//! (`review::intent_files_with`: title = the test commit's subject, changed = the seeds, base =
+//! its parent) with LX[IDR,P1] or SELt2's online pick; `ANS:find_files` / `ANS:find_files@sel`
+//! (find shape) are `find --files` on the subject (`find::find_files_with`) with LX[IDR,T1s] or
+//! SELf2t's pick. Each reads a leak-free in-memory history (`ans_intent`); the calibration now
+//! runs groups structure, review and find. Fired_on, once per run: `[rank_eval] ans intent
+//! review=<q> find=<f> idr_parent_reads=<p> idr_commits=<i> ms=<ms>`.
+//!
 //! The rank gate (0.5.3, EG.2): `--gate-trim <gate.json> --gate-new <run.json> --out <base.json>`
 //! keeps only a gate's rankers of a `--r3-perq on` run (compact JSON, the committed baseline);
 //! `--gate-check <gate.json> --gate-base <base.json> --gate-new <run.json> --out .. --md ..`
@@ -119,15 +128,16 @@ use glia_code_domain::snapshots::{
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId};
 use glia_engine::calibrate::{CalibrateOptions, Calibration, calibrate_snapshot};
-use glia_engine::find::FindOptions;
+use glia_engine::find::{FIND_FILES_FUSION, FindFilesOptions, FindOptions, find_files_with};
 use glia_engine::intent::defs::{Tree, read_defs};
 use glia_engine::intent::idr as eidr;
 use glia_engine::intent::ids::IdVocab;
 use glia_engine::intent::paths::PathResolver;
 use glia_engine::intent::text::{Candidates, TextIndex};
 use glia_engine::pack::PackArgs;
+use glia_engine::review::{INTENT_FUSION_REVIEW, IntentHistory, intent_files_with};
 use glia_engine::rank::{CochangeIndex, FileIndex, NOT_CODE_EXTS, RankCache, Ranking, STRUCTURE_CANDIDATES};
-use glia_engine::{BlastOptions, Locator, default_keying, entrypoint_reachable, generate_one, service_of};
+use glia_engine::{BlastOptions, GenerateResult, Locator, default_keying, entrypoint_reachable, generate_one, service_of};
 use glia_graph::MergedGraph;
 use rayon::prelude::*;
 use serde_json::json;
@@ -1391,28 +1401,22 @@ fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKey
 /// sync`'s default `git log -n` bound (`snapshots::git_history`, 2000 non-merge commits).
 const ANS_HISTORY_WINDOW: usize = 2000;
 
-/// EG.6: the engine's own calibration (EC.5's `calibrate_snapshot`, group `structure` only: SELh0 and
-/// SELs0 on k1 / k2 / k3 / half), run once in memory over the history the shipped answers read.
-///
-/// The snapshot is the one `glia history sync` would write at `--rev`, built from this harness's
-/// own commit list: the newest [`ANS_HISTORY_WINDOW`] non-merge commits, newest first, each
+/// The in-memory history the shipped answers read (EG.6, shared by EG.7's intent rankers): the
+/// snapshot `glia history sync` would write at `--rev`, built from this harness's own commit
+/// list: the newest [`ANS_HISTORY_WINDOW`] non-merge commits, newest first, each
 /// `HistoryCommit { c, t: %ct, files }` with the candidate paths the `--no-renames` log read
 /// (`HistoryFile.p`, no rename fold, `a` / `d` / `from` None), and one `HistoryMessage` per commit
 /// (`clean_message` of the raw `%B`, so redacted and trailer-free; `%at`; the harness's
-/// `branch_labels`, redacted). Replay bounds: `--max-commits`, `--max-seeds`, MAX_FILES.
-///
-/// Why the ANS:*@sel rankers are leak-free: at test commit c the pick is the record's online
-/// pick (`CommitScore.pick`), which EC.3's rule makes from test commits strictly older than c
-/// (unit-tested in calibrate::select); the C0 the H10* picks read is EA.9's prefix, from
-/// training commits strictly older than c (`ans_cache`); and the replay scores every query
-/// before its own commit is observed (EC.2's forward pass), so no commit's own pairs reach
-/// its own queries. `--ans-leak on` checks it: the newest test commit's files are dropped from
-/// the snapshot (it then has no CommitScore, and `ans_picks` falls back to the pick made from
-/// the strictly older commits), so none of that commit's ANS:*@sel values may move.
-///
-/// Fired_on, stderr, once: `[rank_eval] ans calibration sets=<n> test_commits=<t> ms=<ms>`.
-fn ans_calibration(args: &Args, merged: &MergedGraph, paths: &[String], commits: &[Commit], leak_drop: Option<&str>) -> Option<Calibration> {
-    let t0 = Instant::now();
+/// `branch_labels`, redacted). `leak_drop` (`--ans-leak on`) empties that commit's files and its
+/// message.
+struct AnsHistory {
+    snap: HistorySnapshot,
+    msgs: Vec<HistoryMessage>,
+    /// Every commit's author time (`%at`), looked up only.
+    at: HashMap<String, i64>,
+}
+
+fn ans_history(args: &Args, paths: &[String], commits: &[Commit], leak_drop: Option<&str>) -> AnsHistory {
     let times: HashMap<String, (i64, i64)> = git_text(&args.git, &["log", "--no-merges", "--format=%H %ct %at", &args.rev])
         .unwrap_or_default()
         .lines()
@@ -1428,26 +1432,58 @@ fn ans_calibration(args: &Args, merged: &MergedGraph, paths: &[String], commits:
     let mut hm: Vec<HistoryMessage> = Vec::with_capacity(window.len());
     for c in window.iter().rev() {
         let (t, at) = times.get(&c.sha).copied().unwrap_or((0, 0));
-        let files = if leak_drop == Some(c.sha.as_str()) {
+        let dropped = leak_drop == Some(c.sha.as_str());
+        let files = if dropped {
             Vec::new()
         } else {
             c.files.iter().map(|&f| HistoryFile { p: paths[f as usize].clone(), a: None, d: None, from: None }).collect()
         };
         hc.push(HistoryCommit { c: c.sha.clone(), t, files });
-        let (s, b, _) = clean_message(&c.msg);
+        let (s, b) = if dropped {
+            (String::new(), String::new())
+        } else {
+            let (s, b, _) = clean_message(&c.msg);
+            (s, b)
+        };
         hm.push(HistoryMessage { c: c.sha.clone(), at, s, b, br: br.get(&c.sha).map(|l| redact_untrusted(l).0) });
     }
     let mut meta = HistoryMeta::new(args.rev.clone(), ANS_HISTORY_WINDOW, None, String::new());
     meta.commits = hc.len();
     meta.messages = Some(hm.len());
-    let snap = HistorySnapshot { meta, commits: hc, blame: Vec::new() };
+    let at = times.into_iter().map(|(k, (_, at))| (k, at)).collect();
+    AnsHistory { snap: HistorySnapshot { meta, commits: hc, blame: Vec::new() }, msgs: hm, at }
+}
+
+/// EG.6 / EG.7: the engine's own calibration (EC.5's `calibrate_snapshot`, groups `structure`,
+/// `review` and `find`: SELh0 / SELs0 on k1 / k2 / k3 / half for the structural answers, SELt2 on
+/// the same shapes for review's intent and SELf2t on `find` for `find --files`), run once in
+/// memory over [`ans_history`]. Its root (`ans_calibration_root`) reaches the `--git` bare clone,
+/// which the review and find groups' IDR reads each test commit's parent from (EC.12; the
+/// `--repo` copy has no git); the structure sets read no tree.
+///
+/// Why the ANS:*@sel rankers are leak-free: at test commit c the pick is the record's online
+/// pick (`CommitScore.pick`), which EC.3's rule makes from test commits strictly older than c
+/// (unit-tested in calibrate::select); the C0 the H10* picks read is EA.9's prefix, from
+/// training commits strictly older than c (`ans_cache`); and the replay scores every query
+/// before its own commit is observed (EC.2's forward pass), so no commit's own pairs reach
+/// its own queries. `--ans-leak on` checks it: the newest test commit's files (and message) are
+/// dropped from the snapshot (it then has no CommitScore, and `ans_picks` falls back to the pick
+/// made from the strictly older commits), so none of that commit's ANS:*@sel values may move.
+///
+/// Fired_on, stderr, once: `[rank_eval] ans calibration sets=<n> test_commits=<t> ms=<ms>`.
+fn ans_calibration(args: &Args, merged: &MergedGraph, h: &AnsHistory) -> Option<Calibration> {
+    let t0 = Instant::now();
     let mut opts = CalibrateOptions::default();
     opts.params.max_commits = args.max_commits;
     opts.params.max_seeds = args.max_seeds;
     opts.params.max_files = MAX_FILES;
-    // SELh0 / SELs0 only, whatever groups a later packet adds to the default.
-    opts.groups = vec!["structure"];
-    match calibrate_snapshot(merged, std::path::Path::new(&args.repo), &snap, Some(&hm), &opts) {
+    opts.groups = vec!["structure", "review", "find"];
+    let root = ans_calibration_root(args);
+    let got = calibrate_snapshot(merged, &root, &h.snap, Some(&h.msgs), &opts);
+    if root.as_path() != std::path::Path::new(&args.git) {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    match got {
         Ok((cal, sum)) => {
             eprintln!("[rank_eval] ans calibration sets={} test_commits={} ms={}", sum.sets.len(), sum.test_commits, t0.elapsed().as_millis());
             Some(cal)
@@ -1459,6 +1495,37 @@ fn ans_calibration(args: &Args, merged: &MergedGraph, paths: &[String], commits:
     }
 }
 
+/// The `[ids]` vocabulary the intent rankers fall back to at a parent with no `.glia/overlay.toml`
+/// (`ans_intent`): `--eng-overlay`'s file, else under `--pre glia` [`GLIA_OVERLAY`], else none.
+fn ans_fallback_overlay(args: &Args) -> Option<String> {
+    if !args.eng_overlay.is_empty() {
+        Some(std::fs::read_to_string(&args.eng_overlay).expect("--eng-overlay: read"))
+    } else {
+        (args.pre == "glia").then(|| GLIA_OVERLAY.to_string())
+    }
+}
+
+/// The calibration's root: the `--git` bare clone, or, when the intent rankers fall back to an
+/// `[ids]` overlay (`ans_fallback_overlay`), a scratch directory beside `--out`
+/// (`<out>.calroot/`, removed after the calibration) holding that overlay as
+/// `.glia/overlay.toml` and a `.git` file naming the bare clone. The replay's IDR reads its
+/// vocabulary from the root (`IdVocab::for_root`) and each parent through the root's git, so the
+/// calibration routes ids with the vocabulary the answers route with, as on a real checkout
+/// whose root holds the overlay.
+fn ans_calibration_root(args: &Args) -> std::path::PathBuf {
+    let git = std::path::PathBuf::from(&args.git);
+    let Some(text) = ans_fallback_overlay(args) else {
+        return git;
+    };
+    let abs = std::fs::canonicalize(&git).expect("--git: canonicalize");
+    let root = std::path::PathBuf::from(format!("{}.calroot", args.out));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".glia")).expect("calibration root: mkdir");
+    std::fs::write(root.join(".git"), format!("gitdir: {}\n", abs.display())).expect("calibration root: .git");
+    std::fs::write(root.join(".glia/overlay.toml"), text).expect("calibration root: overlay");
+    root
+}
+
 /// EG.6: per test commit (`tc_sha`, oldest first, positions `tc_pos` in `commits`), SELh0's
 /// online pick per seeded shape (k1, k2, k3, half) from `cal`. A commit with a `CommitScore` of
 /// the shape takes its `pick`. One without (outside the window, dropped by `--ans-leak`, or no
@@ -1468,32 +1535,43 @@ fn ans_calibration(args: &Args, merged: &MergedGraph, paths: &[String], commits:
 /// argmax of the row's summed recall@10 with ties to the earlier candidate (candidate 0 with no
 /// query). With no SELh0 row, the fallback H10.
 fn ans_picks(cal: Option<&Calibration>, tc_sha: &[String], pos: &HashMap<&str, usize>, tc_pos: &[usize]) -> Vec<[Ranking; 4]> {
-    let shapes = ["k1", "k2", "k3", "half"];
-    let per_shape: Vec<Vec<Ranking>> = shapes
+    let rank = |n: &str| Ranking::from_harness_name(n).unwrap_or_default();
+    let per_shape: Vec<Vec<Ranking>> = SEEDED_SHAPE_KEYS
         .iter()
-        .map(|sh| {
-            let Some(row) = cal.and_then(|c| c.sets.iter().find(|r| r.set == "SELh0" && r.shape == *sh)) else {
-                return vec![Ranking::default(); tc_sha.len()];
-            };
-            let rank = |n: &str| Ranking::from_harness_name(n).unwrap_or_default();
-            let scored: Vec<(usize, Ranking)> =
-                row.online.per_commit.iter().filter_map(|c| pos.get(c.sha.as_str()).map(|&k| (k, rank(&c.pick)))).collect();
-            let next = if row.queries == 0 || row.recall10.is_empty() {
-                0
-            } else {
-                (0..row.recall10.len()).max_by(|&a, &b| row.recall10[a].total_cmp(&row.recall10[b]).then(b.cmp(&a))).unwrap_or(0)
-            };
-            let last = row.candidates.get(next).map_or_else(Ranking::default, |n| rank(n));
-            tc_pos
-                .iter()
-                .map(|&k| match scored.iter().find(|&&(p, _)| p >= k) {
-                    Some(&(_, r)) => r,
-                    None => last,
-                })
-                .collect()
+        .map(|sh| match ans_set_picks(cal, "SELh0", sh, pos, tc_pos) {
+            Some(names) => names.iter().map(|n| n.as_deref().map_or_else(Ranking::default, rank)).collect(),
+            None => vec![Ranking::default(); tc_sha.len()],
         })
         .collect();
     (0..tc_sha.len()).map(|o| [per_shape[0][o], per_shape[1][o], per_shape[2][o], per_shape[3][o]]).collect()
+}
+
+/// The calibration's seeded shapes, in the order `ans_keys_seed`'s `shape` indexes them.
+const SEEDED_SHAPE_KEYS: [&str; 4] = ["k1", "k2", "k3", "half"];
+
+/// Set `set`'s online pick on shape `shape` per test commit (`ans_picks`' rule, any set): a
+/// commit with a `CommitScore` takes its `pick`; one without takes the next newer CommitScore's
+/// pick, or after the newest one the argmax of the row's summed recall@10 (ties to the earlier
+/// candidate; candidate 0 with no query), None when that candidate index has no name. None for
+/// the whole shape when the calibration has no row of (set, shape).
+fn ans_set_picks(cal: Option<&Calibration>, set: &str, shape: &str, pos: &HashMap<&str, usize>, tc_pos: &[usize]) -> Option<Vec<Option<String>>> {
+    let row = cal.and_then(|c| c.sets.iter().find(|r| r.set == set && r.shape == shape))?;
+    let scored: Vec<(usize, &str)> = row.online.per_commit.iter().filter_map(|c| pos.get(c.sha.as_str()).map(|&k| (k, c.pick.as_str()))).collect();
+    let next = if row.queries == 0 || row.recall10.is_empty() {
+        0
+    } else {
+        (0..row.recall10.len()).max_by(|&a, &b| row.recall10[a].total_cmp(&row.recall10[b]).then(b.cmp(&a))).unwrap_or(0)
+    };
+    let last = row.candidates.get(next).map(String::as_str);
+    Some(
+        tc_pos
+            .iter()
+            .map(|&k| match scored.iter().find(|&&(p, _)| p >= k) {
+                Some(&(_, n)) => Some(n.to_string()),
+                None => last.map(str::to_string),
+            })
+            .collect(),
+    )
 }
 
 /// ANS:find for a test commit's subject: the engine's find over the whole subject, every match
@@ -1506,6 +1584,261 @@ fn ans_keys_find(ctx: &Ctx, subject: &str) -> Vec<(String, Vec<Key>)> {
     let keys = rows_to_keys(ctx.g, &ctx.path_ix, a.results.into_iter().map(|r| r.file));
     ctx.ans_ns.fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
     vec![("ANS:find".into(), keys)]
+}
+
+// ============================================================================
+// EG.7: the intent answers (review's intent order, find --files)
+// ============================================================================
+
+/// glia's own `[ids]` vocabulary (`.glia/overlay.toml`, EB.9), applied under `--pre glia` at every
+/// parent revision that has none and when `--eng-overlay` names no file: the gate's glia snapshot
+/// predates the file, so without it the engine's IDR there resolves nothing (EB.9 / EC.12).
+const GLIA_OVERLAY: &str = include_str!("../../.glia/overlay.toml");
+
+/// EG.7's per-run inputs (`--ans on`): the shipped answers' in-memory history (`ans_history`)
+/// and, per test commit (oldest first), the calibration's online picks of SELt2 per seeded shape
+/// (k1, k2, k3, half) and of SELf2t on `find` (`ans_set_picks`; with no row of the set, its
+/// fallback LX[IDR,P1] / LX[IDR,T1s]).
+struct AnsIntentIn {
+    hist: AnsHistory,
+    review_sel: Vec<[String; 4]>,
+    find_sel: Vec<String>,
+}
+
+impl AnsIntentIn {
+    fn new(cal: Option<&Calibration>, hist: AnsHistory, tc_sha: &[String], pos: &HashMap<&str, usize>, tc_pos: &[usize]) -> AnsIntentIn {
+        let names = |set: &str, shape: &str, fallback: &str| -> Vec<String> {
+            match ans_set_picks(cal, set, shape, pos, tc_pos) {
+                Some(v) => v.into_iter().map(|n| n.unwrap_or_else(|| fallback.to_string())).collect(),
+                None => vec![fallback.to_string(); tc_sha.len()],
+            }
+        };
+        let per: Vec<Vec<String>> = SEEDED_SHAPE_KEYS.iter().map(|sh| names("SELt2", sh, INTENT_FUSION_REVIEW)).collect();
+        let review_sel = (0..tc_sha.len()).map(|o| [0, 1, 2, 3].map(|s| per[s][o].clone())).collect();
+        AnsIntentIn { hist, review_sel, find_sel: names("SELf2t", "find", FIND_FILES_FUSION) }
+    }
+}
+
+/// One query an intent ranker answers: a single-seed query (its index in `queries`) or a
+/// transfer query (its shape, its position among that shape's outs, its index in `tqs`).
+#[derive(Clone, Copy)]
+enum AnsSlot {
+    Single(usize),
+    Transfer(usize, usize, usize),
+}
+
+/// EG.7: ANS:review / ANS:review@sel on the seeded shapes and ANS:find_files /
+/// ANS:find_files@sel on the find shape, appended to each query's held EG.6 rows (`Out::late`), so
+/// no earlier row's value or position moves.
+///
+/// Per test commit c (in parallel over commits; one history, rank cache and id route serve all of
+/// c's queries), the engine's own answers over a leak-free in-memory history: `IntentHistory` is
+/// `ans_history`'s snapshot (`history sync`'s newest-2000 window, ruling EA-1) with c and every
+/// newer commit excluded, `now` c's author time (review's newest PR commit), the `[ids]`
+/// vocabulary of c's parent (its `.glia/overlay.toml`, else `--eng-overlay`'s file, else under
+/// `--pre glia` [`GLIA_OVERLAY`], else the defaults), ids routed at c's parent through the `--git`
+/// bare clone; the RankCache (transient, as the answers' own) holds the window's co-change of the
+/// commits strictly older than c (`CochangeIndex::read`'s counting: candidate files, 1..=30).
+/// ANS:review is `review::intent_files_with(title = c's subject, changed = the seeds, base = c's
+/// parent, pick = LX[IDR,P1])`, the shipped uncalibrated intent order; ANS:review@sel forces
+/// SELt2's online pick at (shape, c). ANS:find_files is `find::find_files_with(query = c's
+/// subject, pick = LX[IDR,T1s])` with every row kept; @sel forces SELf2t's pick at c. Ranked
+/// files key by position (`rows_to_keys`); every other file keys -inf. A commit with no parent
+/// answers nothing (every file -inf).
+///
+/// Fired_on, stderr, once: `[rank_eval] ans intent review=<q> find=<f> idr_parent_reads=<p>
+/// idr_commits=<i> ms=<ms>`, `idr_parent_reads` the test commits answered at a parent,
+/// `idr_commits` those whose find --files answer has a row with idr > 0. Under `--pre glia` a run
+/// with `idr_commits=0` panics: the IDR rows would measure nothing.
+#[allow(clippy::too_many_arguments)]
+fn ans_intent(
+    ctx: &Ctx,
+    args: &Args,
+    res: &GenerateResult,
+    ai: &AnsIntentIn,
+    commits: &[Commit],
+    test_idx: &[usize],
+    queries: &[Query],
+    results: &mut [Out],
+    tqs: &[TQuery],
+    transfer: &mut [(Vec<Out>, Vec<usize>)],
+) {
+    let t0 = Instant::now();
+    let g = ctx.g;
+    let nf = g.paths.len();
+    let merged = ctx.merged;
+    let ntc = test_idx.len();
+    let parents = git_parents(&args.git, &args.rev);
+    let fallback = ans_fallback_overlay(args);
+    let mut per_tc: Vec<Vec<AnsSlot>> = vec![Vec::new(); ntc];
+    for (i, q) in queries.iter().enumerate() {
+        per_tc[q.tc].push(AnsSlot::Single(i));
+    }
+    let mut seen = vec![0usize; R3_SHAPES.len()];
+    for (ti, q) in tqs.iter().enumerate() {
+        per_tc[q.tc].push(AnsSlot::Transfer(q.shape, seen[q.shape], ti));
+        seen[q.shape] += 1;
+    }
+    let pos_of: HashMap<&str, usize> = commits.iter().enumerate().map(|(k, c)| (c.sha.as_str(), k)).collect();
+    let root = std::path::Path::new(&args.repo);
+    type Rows = Vec<(AnsSlot, Vec<(String, [f64; 5])>)>;
+    let per: Vec<(Rows, bool, bool)> = (0..ntc)
+        .into_par_iter()
+        .map(|o| {
+            let k = test_idx[o];
+            let c = &commits[k];
+            let subj = subject(&c.msg);
+            let parent = parents.get(&c.sha).and_then(|x| x.0.clone());
+            let none: Vec<Key> = vec![[f64::NEG_INFINITY; 3]; nf];
+            let mut keys: Vec<(AnsSlot, [Vec<Key>; 2])> = Vec::new();
+            let mut idr_hit = false;
+            if let Some(p) = &parent {
+                let exclude: BTreeSet<String> = commits[k..].iter().map(|x| x.sha.clone()).collect();
+                let vocab = match git_text(&args.git, &["show", &format!("{p}:.glia/overlay.toml")]).or_else(|| fallback.clone()) {
+                    Some(text) => IdVocab::from_config(Some(&parse_str(&text))),
+                    None => IdVocab::default(),
+                };
+                let now = ai.hist.at.get(&c.sha).copied().unwrap_or(0);
+                let history = IntentHistory::new(ai.hist.snap.clone(), Some(ai.hist.msgs.clone()), exclude)
+                    .with_now(now)
+                    .with_vocab(vocab)
+                    .at_rev(&args.git, p.clone());
+                let cache = RankCache::new("answer", &res.repo_roots, &res.repo_labels);
+                cache.guard(merged);
+                let files = cache.files(merged);
+                let repo = files.repo(0);
+                let co = ans_window_cochange(&ai.hist.snap, &history.exclude, &files, repo, &pos_of, k);
+                let cache = Arc::new(cache.with_cochange(co));
+                let to_keys = |order: &[u32]| rows_to_keys(g, &ctx.path_ix, order.iter().map(|&f| Some(files.path(f).to_string())));
+                let review = |seeds: &[u32], pick: &str| -> Vec<Key> {
+                    let changed: Vec<u32> = seeds.iter().filter_map(|&s| files.index_of(repo, &g.paths[s as usize])).collect();
+                    to_keys(&intent_files_with(merged, root, p, subj, &changed, &cache, &history, Some(pick)))
+                };
+                let find = |pick: &str| -> (Vec<Key>, bool) {
+                    let mut fo = FindFilesOptions::default();
+                    fo.top_k = 0;
+                    fo.rank_cache = Some(Arc::clone(&cache));
+                    match find_files_with(merged, &res.repo_roots, subj, &fo, Some(&history), Some(pick)) {
+                        Ok(a) => {
+                            let hit = a.results.iter().any(|r| r.idr > 0.0);
+                            (rows_to_keys(g, &ctx.path_ix, a.results.into_iter().map(|r| Some(r.file))), hit)
+                        }
+                        Err(_) => (none.clone(), false),
+                    }
+                };
+                for &slot in &per_tc[o] {
+                    let (seeds, si): (Vec<u32>, usize) = match slot {
+                        AnsSlot::Single(i) => (vec![queries[i].seed], 0),
+                        AnsSlot::Transfer(s, _, ti) => (tqs[ti].seeds.clone(), s + 1),
+                    };
+                    if si == 4 {
+                        let (base, hit) = find(FIND_FILES_FUSION);
+                        idr_hit |= hit;
+                        let pick = &ai.find_sel[o];
+                        let sel = if pick == FIND_FILES_FUSION { base.clone() } else { find(pick).0 };
+                        keys.push((slot, [base, sel]));
+                    } else {
+                        let base = review(&seeds, INTENT_FUSION_REVIEW);
+                        let pick = &ai.review_sel[o][si];
+                        let sel = if pick == INTENT_FUSION_REVIEW { base.clone() } else { review(&seeds, pick) };
+                        keys.push((slot, [base, sel]));
+                    }
+                }
+            } else {
+                for &slot in &per_tc[o] {
+                    keys.push((slot, [none.clone(), none.clone()]));
+                }
+            }
+            let rows: Rows = keys
+                .into_iter()
+                .map(|(slot, [base, sel])| {
+                    let (names, m) = match slot {
+                        AnsSlot::Single(i) => {
+                            let q = &queries[i];
+                            let ev = |k: &[Key]| evaluate(k, q.seed as usize, &q.targets);
+                            (["ANS:review", "ANS:review@sel"], [ev(&base), ev(&sel)])
+                        }
+                        AnsSlot::Transfer(s, _, ti) => {
+                            let q = &tqs[ti];
+                            let mut excl = vec![false; nf];
+                            if s != 3 {
+                                for &f in &q.seeds {
+                                    excl[f as usize] = true;
+                                }
+                            }
+                            let ev = |k: &[Key]| eval_ex(k, &excl, &q.targets);
+                            let names = if s == 3 { ["ANS:find_files", "ANS:find_files@sel"] } else { ["ANS:review", "ANS:review@sel"] };
+                            (names, [ev(&base), ev(&sel)])
+                        }
+                    };
+                    (slot, vec![(names[0].to_string(), m[0]), (names[1].to_string(), m[1])])
+                })
+                .collect();
+            (rows, parent.is_some(), idr_hit)
+        })
+        .collect();
+    let (mut n_review, mut n_find, mut reads, mut idr_commits) = (0usize, 0usize, 0usize, 0usize);
+    for (rows, read, hit) in per {
+        reads += usize::from(read);
+        idr_commits += usize::from(hit);
+        for (slot, r) in rows {
+            match slot {
+                AnsSlot::Single(i) => {
+                    n_review += 1;
+                    results[i].late.extend(r);
+                }
+                AnsSlot::Transfer(s, j, _) => {
+                    if s == 3 {
+                        n_find += 1;
+                    } else {
+                        n_review += 1;
+                    }
+                    if let Some(out) = transfer.get_mut(s).and_then(|t| t.0.get_mut(j)) {
+                        out.late.extend(r);
+                    }
+                }
+            }
+        }
+    }
+    let ms = t0.elapsed().as_millis();
+    ctx.ans_ns.fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    eprintln!("[rank_eval] ans intent review={n_review} find={n_find} idr_parent_reads={reads} idr_commits={idr_commits} ms={ms}");
+    assert!(
+        args.pre != "glia" || idr_commits > 0,
+        "[rank_eval] ans intent: no test commit's IDR resolved on glia (the [ids] vocabulary reached nothing)"
+    );
+}
+
+/// The co-change of `snap`'s commits strictly older than commit `k` (`pos`: sha -> its index in
+/// the harness's commit list, oldest first) and not in `exclude`, counted as
+/// `CochangeIndex::read` counts a snapshot: each commit's distinct candidate files (`files`,
+/// repo `repo`, `HistoryFile.p`), a commit of 0 or more than 30 skipped.
+fn ans_window_cochange(snap: &HistorySnapshot, exclude: &BTreeSet<String>, files: &FileIndex, repo: u64, pos: &HashMap<&str, usize>, k: usize) -> CochangeIndex {
+    let n = files.len();
+    let mut count = vec![0u32; n];
+    let mut pair: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for c in &snap.commits {
+        if exclude.contains(&c.c) || pos.get(c.c.as_str()).is_none_or(|&p| p >= k) {
+            continue;
+        }
+        let mapped: BTreeSet<u32> = c.files.iter().filter_map(|hf| files.index_of(repo, &hf.p)).collect();
+        if mapped.is_empty() || mapped.len() > MAX_FILES {
+            continue;
+        }
+        for &a in &mapped {
+            count[a as usize] += 1;
+            for &b in &mapped {
+                if a != b {
+                    *pair.entry((a, b)).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut pairs: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n];
+    for ((a, b), x) in pair {
+        pairs[a as usize].push((b, x));
+    }
+    CochangeIndex::from_counts(count, pairs)
 }
 
 // ============================================================================
@@ -2701,12 +3034,16 @@ fn main() {
 
     // EG.6: the engine's own calibration over the shipped history window, then each test commit's
     // SELh0 pick per seeded shape (`--ans on` only).
+    let mut ans_intent_in: Option<AnsIntentIn> = None;
     let sel: Vec<[Ranking; 4]> = if args.ans == "on" {
         let tc_sha: Vec<String> = test_idx.iter().map(|&k| commits[k].sha.clone()).collect();
         let leak = (args.ans_leak == "on").then(|| tc_sha.last().cloned()).flatten();
-        let cal = ans_calibration(&args, merged, &g.paths, &commits, leak.as_deref());
+        let hist = ans_history(&args, &g.paths, &commits, leak.as_deref());
+        let cal = ans_calibration(&args, merged, &hist);
         let pos: HashMap<&str, usize> = commits.iter().enumerate().map(|(k, c)| (c.sha.as_str(), k)).collect();
-        ans_picks(cal.as_ref(), &tc_sha, &pos, &test_idx)
+        let picks = ans_picks(cal.as_ref(), &tc_sha, &pos, &test_idx);
+        ans_intent_in = Some(AnsIntentIn::new(cal.as_ref(), hist, &tc_sha, &pos, &test_idx));
+        picks
     } else {
         Vec::new()
     };
@@ -2807,6 +3144,9 @@ fn main() {
     }
     // ---- engine parity (EA.9), on the queries as replayed (before any warm-up commit is dropped) ----
     let parity = parity_on.then(|| engine_parity(&ctx, &queries, &tqs, &tc_sha, &args.label));
+    if let Some(ai) = &ans_intent_in {
+        ans_intent(&ctx, &args, &res, ai, &commits, &test_idx, &queries, &mut results, &tqs, &mut transfer);
+    }
     if ctx.ans {
         let n_transfer: usize = transfer.iter().take(3).map(|(o, _)| o.len()).sum();
         let n_find = transfer.get(3).map_or(0, |(o, _)| o.len());

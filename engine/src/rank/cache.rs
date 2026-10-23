@@ -15,7 +15,10 @@
 //! damping=<d> direction=<forward|backward|undirected> index=<hit|built>
 //! nodes=<n> incidences=<i> build_ms=<b> entries=<e>` once per index lookup,
 //! `[rank-cache] reset holder=<h> reason=graph_changed nodes=<a>-><b>
-//! edges=<c>-><d>` on a guard reset.
+//! edges=<c>-><d>` on a guard reset. A calibration's cache (holder
+//! `calibrate`, thousands of lookups per replay) prints no per-lookup line:
+//! one `[rank-cache] holder=calibrate summary lookups=<l> built=<b> hits=<h>
+//! build_ms=<ms>` when it is dropped, after the replay (EG.7).
 //!
 //! EC.8: the cache also holds the repo's calibration record
 //! ([`RankCache::calibration`], `load_for_roots` over its roots, read once
@@ -24,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -108,6 +111,8 @@ pub struct RankCache {
     calibration: Mutex<Option<CalibrationHandle>>,
     hits: AtomicUsize,
     built: AtomicUsize,
+    /// Microseconds spent building PPR indexes (the calibrate summary).
+    build_us: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -128,6 +133,7 @@ impl RankCache {
             calibration: Mutex::new(None),
             hits: AtomicUsize::new(0),
             built: AtomicUsize::new(0),
+            build_us: AtomicU64::new(0),
         }
     }
 
@@ -149,6 +155,7 @@ impl RankCache {
         let built = Arc::new(PprIndex::build(&g.node_ids(), g.edges(), config));
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.built.fetch_add(1, Ordering::Relaxed);
+        self.build_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         let (ix, entries) = {
             let mut slots = lock(&self.slots);
             let raced = slots.indexes.iter().find(|(s, ix)| *s == source && ix.matches(config)).map(|(_, ix)| Arc::clone(ix));
@@ -169,6 +176,9 @@ impl RankCache {
     }
 
     fn mark(&self, source: SourceKey, config: &ActivationConfig, how: &str, ix: &PprIndex, ms: f64, entries: usize) {
+        if self.holder == CALIBRATE_HOLDER {
+            return;
+        }
         eprintln!(
             "[rank-cache] holder={} source={} damping={} direction={} index={how} nodes={} incidences={} build_ms={:.1} entries={entries}",
             self.holder,
@@ -334,6 +344,30 @@ impl RankCache {
             hits: self.hits.load(Ordering::Relaxed),
             built: self.built.load(Ordering::Relaxed),
         }
+    }
+}
+
+/// The holder whose lookups print one summary on drop.
+const CALIBRATE_HOLDER: &str = "calibrate";
+
+impl Drop for RankCache {
+    /// `[rank-cache] holder=calibrate summary ..` (module docs), once per
+    /// calibration cache that looked an index up.
+    fn drop(&mut self) {
+        if self.holder != CALIBRATE_HOLDER {
+            return;
+        }
+        let (hits, built) = (self.hits.load(Ordering::Relaxed), self.built.load(Ordering::Relaxed));
+        if hits + built == 0 {
+            return;
+        }
+        let ms = self.build_us.load(Ordering::Relaxed) as f64 / 1000.0;
+        eprintln!(
+            "[rank-cache] holder={} summary lookups={} built={built} hits={hits} build_ms={:.1}",
+            self.holder,
+            hits + built,
+            (ms * 10.0).trunc() / 10.0
+        );
     }
 }
 

@@ -21,14 +21,14 @@ lowers recall@10 or MRR of a gated ranker fails the wave close-out
   1's harness line: without it PT* is not the tuned PPR the reports measured.
 - **Gated rankers** (`gate.json`, EG.2's format), per query shape:
   - `single`: ANS:impact, ANS:pack, P1, PT*, B0, H10[PT*], H9s50, SELt2, SELs0, ANS:impact@sel,
-    ANS:pack@sel, ANS:impact.files
+    ANS:pack@sel, ANS:impact.files, ANS:review, ANS:review@sel
   - `k2` / `k3` / `half` (the review shapes): ANS:impact, ANS:pack, P1, SELt2, SELs0, ANS:impact@sel,
-    ANS:pack@sel, ANS:impact.files
-  - `find`: ANS:find, T1s, SELf2t
+    ANS:pack@sel, ANS:impact.files, ANS:review, ANS:review@sel
+  - `find`: ANS:find, T1s, SELf2t, ANS:find_files, ANS:find_files@sel
 
   Every name was checked present in every snapshot's run. No Leiden-pooled ranker is gated: those
   move with the checkout path (round 2's note). The ANS rankers are the engine's own answers
-  (`diff_impact`, `pack`, `find`; EG.1); the others are the harness references they are compared to.
+  (`diff_impact`, `pack`, `find`; EG.1; review's intent order and `find --files`, EG.7); the others are the harness references they are compared to.
   By ruling EA-1 the ANS rankers read the same history window the shipped answers read.
 
 ## The ANS rankers
@@ -41,7 +41,7 @@ Each is the engine's own answer, its node rows rolled up to files by first appea
   commits strictly older than c), so the default ranking H10 reads C0. Item 2 (co-change first).
 - **ANS:impact@sel / ANS:pack@sel** (EG.6): the same two answers with `select = false` and the ranking
   forced to the engine's own calibrated pick at c. Once per run, `calibrate::calibrate_snapshot`
-  (EC.5, group `structure`) replays a history snapshot built in memory from rank_eval's commit list:
+  (EC.5, group `structure`; EG.7 adds `review` and `find`) replays a history snapshot built in memory from rank_eval's commit list:
   the newest 2000 non-merge commits (`history sync`'s window, ruling EA-1), candidate paths with no
   rename fold, messages through `clean_message`; then a query of shape s at c answers with SELh0's
   `CommitScore.pick` for (s, c) (H10, H10[PT*] or H10[B0]), over the same prefix co-change as
@@ -77,6 +77,87 @@ the close-out's 7200 s.
 
 The @sel rankers and ANS:impact.files entered the gate with `baseline-add`: their 0.5.2 column is
 their own first value, so the ratchet protects them from EG.6 on, not against 0.5.2.
+
+### The intent answers (EG.7)
+
+Items 3 (intent text), 4 (calibrated selection in the text answers), 6 (IDR), 7 (LX), 8 (SELt2) and
+11 (find's selection) change two answers EG.1 / EG.6 never called: review's intent file order and
+`find --files`. Both read history from the repo root and the copies hold no `.glia/`, so each is
+called through a seam that takes the history in memory (`review::intent_files_with`,
+`find::find_files_with`, `#[doc(hidden)]`, unstable; the live answers route through the same code,
+byte for byte). Per test commit c (one history, one rank cache and one id route serve all of c's
+queries; `ans_intent` in rank_eval):
+
+- **History**: `review::IntentHistory` over EG.6's in-memory snapshot (`ans_history`: the newest 2000
+  non-merge commits, ruling EA-1) with c and every newer commit in `exclude`, `now` c's author time,
+  and the rank cache's co-change counted over the window's commits strictly older than c
+  (`CochangeIndex::read`'s rule). IDR routes c's subject at c's **parent** through the `--git` bare
+  clone (`IntentHistory::at_rev`), with the parent's `.glia/overlay.toml` `[ids]`, else
+  `--eng-overlay`'s file, else, under `--pre glia`, glia's own `.glia/overlay.toml` compiled into
+  rank_eval (the pinned glia snapshot `9837b1ff` predates the file, so without it the engine's IDR
+  resolved nothing there: EB.9, EC.12). This replaces passing `--eng-overlay .glia/overlay.toml` from
+  the script: the gate's glia row carries only `--pre glia`. The calibration reads the same
+  vocabulary: its root (`ans_calibration_root`) is then a scratch `<out>.calroot/` holding that
+  overlay and a `.git` file naming the bare clone, removed after the run, so the replay's IDR
+  (`IdVocab::for_root`, each parent through the root's git) routes as a checkout whose root holds the
+  overlay would. Without it the glia replay resolved 27 of 300 subjects and SELt2 picked a fusion
+  with no IDR (ANS:review@sel - ANS:review r10 -0.42 on glia single); with it 247 of 300. A glia run whose test commits route no
+  id at all panics (`idr_commits=0`), so the IDR rows cannot silently measure nothing.
+- **ANS:review** (`single`, `k2`, `k3`, `half`): `intent_files_with(title = c's subject, changed = the
+  query's seed files, base = c's parent, pick = LX[IDR,P1])`, the uncalibrated order review's
+  `### Intent` table lists (files with a positive signal, uncut), keyed by position. Items 6 and 7.
+- **ANS:review@sel**: the same with the pick forced to set SELt2's online pick at (shape, c) from the
+  in-memory calibration (EG.6's `calibrate_snapshot` run, now over groups `structure`, `review` and
+  `find`, rooted at the bare clone so the replay's IDR reads each parent; EC.12). Items 3, 4 and 8.
+- **ANS:find_files** (`find`): `find_files_with(query = c's subject, pick = LX[IDR,T1s])`, every row
+  kept. Items 3, 6 and 7.
+- **ANS:find_files@sel**: the pick forced to SELf2t's online pick at (find, c) (EC.13). Item 11.
+
+Unranked files key -inf (`rows_to_keys`). Review's full answer (its RevDelta, impact rows and
+markdown) is not built: the ranker measures the intent order, which is what EB.7 / EC.11 / EC.12
+change; the impact rows' IDR lift is a function of that order and their structural part is
+ANS:impact@sel's.
+
+**Why the intent rankers are leak-free.** Every signal reads the snapshot with c and every newer
+commit excluded (text, recent scopes, W5 / M; `find_files_with` drops them from the snapshot before
+FindHead reads it, as an engine test pins); co-change counts only strictly older commits; ids route at
+c's parent; the @sel picks are the calibration's online picks (made from strictly older test
+commits). `engine/tests/{review_intent,find_files}.rs` pin that an excluded commit reads exactly as one
+the snapshot never held; `rank_eval --ans-leak on` also empties the newest test commit's files and
+message, and none of the intent rankers' values move (EG.7 checked it on websocket: 3244 values, 0
+moved).
+
+**Known difference, not a drop.** The engine's IDR is EB.6's: it reads neither packet lineage nor the
+wave schedule the harness's glia mode reads, so an engine fusion over IDR sits below the harness's
+same-named row on glia (EC.12: LX[IDR,H18s[PT*]] k1 0.839 in the engine against 0.934 in the harness).
+The gate compares each ANS row with its own baseline, never with the harness's.
+
+Measured at EG.7 (`paired` commit-cluster bootstrap, B = 1000, test commits resampled, the harness's
+seed), recall@10 [95% CI], ANS:review@sel minus ANS:review (single / k2 / k3 / half) and
+ANS:find_files@sel minus ANS:find_files (find):
+
+| snapshot | single | k2 | k3 | half | find |
+|---|---|---|---|---|---|
+| glia | +0.0039 [-0.0056, +0.0118] | -0.0033 [-0.0154, +0.0057] | -0.0032 [-0.0170, +0.0073] | -0.0019 [-0.0164, +0.0095] | -0.0034 [-0.0107, +0.0011] |
+| shell | +0.1310 [+0.1023, +0.1604] | +0.1505 [+0.0838, +0.2185] | +0.1950 [+0.1057, +0.3005] | +0.1504 [+0.0792, +0.2202] | +0.0038 [-0.0163, +0.0247] |
+| websocket | +0.1207 [+0.0641, +0.1764] | +0.0811 [-0.0764, +0.2288] | +0.1196 [-0.0207, +0.2719] | +0.0482 [-0.0719, +0.1711] | +0.0073 [-0.0394, +0.0527] |
+| samples | +0.0515 [+0.0305, +0.0744] | +0.0251 [-0.0142, +0.0656] | -0.0105 [-0.0566, +0.0370] | +0.0016 [-0.0455, +0.0475] | +0.0100 [-0.0038, +0.0255] |
+| commons-lang | +0.1428 [+0.1065, +0.1796] | +0.1196 [+0.0461, +0.1930] | +0.1513 [+0.0642, +0.2357] | +0.1412 [+0.0690, +0.2193] | +0.0448 [+0.0193, +0.0693] |
+| commons-io | +0.0884 [+0.0540, +0.1227] | +0.0642 [-0.0007, +0.1257] | +0.1182 [+0.0466, +0.1931] | +0.1334 [+0.0736, +0.1918] | +0.0419 [+0.0201, +0.0672] |
+
+No CI lies wholly below 0. The uncalibrated values (r10): ANS:review single glia 0.924, shell 0.672,
+websocket 0.690, samples 0.473, commons-lang 0.449, commons-io 0.412; ANS:find_files glia 0.930, shell
+0.793, websocket 0.722, samples 0.297, commons-lang 0.515, commons-io 0.369. On samples (no id routes:
+LX[IDR,P1] reduces to P1) ANS:review equals the harness's P1 on 999 of 1111 single queries' recall@10
+and is above it, +0.0269 [+0.0128, +0.0410]: review lists only files with a positive signal and orders
+the zero-P1 text matches by candidate index, where the harness's P1 keys every file. Every pre-existing
+metric of every snapshot's run is unchanged by EG.7 (each run's JSON diffed against the W13 run: only
+`stats.task_replay_ms_per_test_commit`, a timing, differs).
+
+Cost: the calibration now runs groups structure, review and find (glia 116.6 s, with the IDR replay
+reading 297 parent trees; samples 5.9 s, the rest under 5 s), and the intent pass answers 1942 review
+and 300 find queries on glia in 84 s (`[rank_eval] ans intent ..`). A whole `check` took 10 min 25 s
+with rank_eval built (glia's run 454 s), against 456 s unloaded at EG.6.
 - **Metrics**: recall@10 and MRR, per query, for every gated (shape, ranker).
 
 ## The fail rule
