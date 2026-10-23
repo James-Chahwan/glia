@@ -1,0 +1,6 @@
+//! The per-repo calibration (0.5.3 items 4, 8, 10 and 11): a leak-free online
+//! replay of the repo's own history over fixed candidate rankings, persisted
+//! as `.glia/calibration-snapshot/` by `glia history calibrate` and read by
+//! the ranked answers through `select`. A snapshot step, never part of a
+//! build. Owners: EC.1-EC.6, EC.10-EC.13; each adds its own `pub mod` and
+//! `pub use` lines here.

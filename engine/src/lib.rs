@@ -81,6 +81,13 @@ pub mod memory;
 pub mod rules;
 pub mod watch;
 
+// 0.5.3 public slots (E0.2): rank (EA), intent (EB), calibrate (EC). Each is a
+// directory module reached by module path (`glia_engine::rank::RankCache`);
+// owners add their child files and `mod` / `pub use` lines to its mod.rs.
+pub mod calibrate;
+pub mod intent;
+pub mod rank;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
