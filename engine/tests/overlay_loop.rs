@@ -446,6 +446,18 @@ fn candidate_sections_are_limited() {
         walk.contains("a candidate carries only overlay sections, entrypoints and rules"),
         "{walk}"
     );
+    // EB.4: `[ids]` is user config like `[walk]`: never a loop candidate.
+    for ids in [
+        "[ids]\npatterns = [\"{U}-{N}\"]\n",
+        "[[ids.tracker]]\npath = \"t.json\"\nfiles = \"files\"\n",
+    ] {
+        let e = parse_candidate(ids).expect_err("[ids] is user config");
+        assert!(e.contains("[ids]"), "{e}");
+        assert!(
+            e.contains("a candidate carries only overlay sections, entrypoints and rules"),
+            "{e}"
+        );
+    }
     // DB.9a: a rule is a candidate stanza, a prose invariant is not (try
     // cannot judge it): a person declares one by hand.
     let rule = parse_candidate("[[constraint]]\nid = \"r\"\nkind = \"invariant\"\ntext = \"t\"\n")

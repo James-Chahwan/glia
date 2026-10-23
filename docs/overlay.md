@@ -16,6 +16,7 @@ Check the file in. It is an input, not a cache.
 | sections | kind | applied | `--no-overlay` |
 |---|---|---|---|
 | `[walk]`, `[[project]]`, `[entrypoints]` | user config | always | still applied |
+| `[ids]` | user config, read at query time (no graph change) | always | still applied |
 | `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
 | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay: inference written by a model or a person | by default | skipped |
 
@@ -200,6 +201,85 @@ A build whose overlay declares `tests` prints, per repo,
 node entries only a declared pattern tagged (modules included); the
 `[provenance] test_fixture=<n> (path=<p> qname=<q>) ...` total counts them too.
 
+## `[ids]`: the id vocabulary
+
+The ids a repo's PR titles, commit subjects and task docs name: ticket ids, spec-kit
+requirement and task ids, a plan's packet ids. `review` and `find --files` read them to route a
+text's ids to the files that define them. `[ids]` is user config like `[walk]`: legal in versions 1
+and 2, applied with or without `--no-overlay`, never an overlay-loop candidate, and it changes no
+graph (nothing is built from it; it is read at query time by `glia_engine::intent::ids::IdVocab`).
+
+| key | what |
+|---|---|
+| `patterns` | id shapes, at most 16. Set, they **replace** the defaults; `patterns = []` turns id routing off |
+| `local_words` | the findings words (lowercase ASCII `a-z`), replacing the defaults when set |
+| `markdown` | markdown tracker globs (gitignore syntax, repo-root anchored): a matching file defines ids like an ingested doc, even outside the doc include rules (a `TODO.md` in a source dir, a plan under `dev-notes/`) |
+| `[[ids.tracker]]` | a JSON task tracker: `path` (a glob), `list` (the key of the task array; absent = the top-level array), `id` (the id field, default `id`), `files` (the field listing a task's files: a string or an array of strings), `state` / `done` (the state field and the values that mean done) |
+
+The shape grammar (one implementation, `code-domain/src/glia_config.rs` `IdPattern`):
+
+| token | matches |
+|---|---|
+| `{U}` | one ASCII uppercase letter, then zero or more ASCII uppercase letters / digits (greedy, backtracking) |
+| `{N}` | one or more ASCII digits |
+| `{N<k>}` (k 1..=9) | exactly k ASCII digits |
+| `{l?}` | an optional single ASCII lowercase letter |
+| any other char | itself, case-sensitively |
+
+A shape is 1..=64 chars, holds at least one `{N}` / `{N<k>}` and names no other `{..}`. A match
+is word-bounded: the byte before it and the byte after it are not `[A-Za-z0-9_]`, and a following
+`.` or `-` is a boundary only when no digit follows it (`DT.5h` is found in `DT.5h:`; `{U}-{N}`
+finds nothing in `UTF-8x` or `LANG-12.3`). An id's family is the text before the digit group of
+its shape's first `{N}`: `LANG-`, `T`, `DT.`, `E0.`. Where shapes overlap, the longest match
+wins, then the earliest. A shape ending in `{l?}` also reads letter shorthands: `X.5a/b` names
+`X.5a` and `X.5b`; `X.5a-c`, `X.5a–c` and `X.5a-X.5c` name every letter from a to c (at most 20
+past the start).
+
+Defaults, used when `patterns` is not set: `{U}-{N}` (tickets, spec-kit requirement and success
+ids: `LANG-1234`, `FR-001`, `SC-002`) and `T{N3}` (spec-kit task ids: `T012`); findings words
+`analysis`, `finding`, `remediation`, `review`, `audit`. `{U}-{N}` also matches `UTF-8`,
+`SHA-256` or `ISO-8601`: such a mention has no defining row, so it routes nowhere; narrow
+`patterns` if the count bothers you.
+
+A ticket repo:
+
+```toml
+version = 1
+
+[ids]
+patterns = ["{U}-{N}"]                    # LANG-1234, HTTPCLIENT-77
+```
+
+spec-kit, with a task list kept outside `specs/`:
+
+```toml
+version = 1
+
+[ids]
+patterns = ["{U}-{N}", "T{N3}"]           # FR-001, SC-002, T012
+markdown = ["TODO.md", "planning/*.md"]
+local_words = ["analysis", "audit"]
+```
+
+A JSON task tracker, shaped like a leap packet file (`{"packets": [{"id": "DT.5h",
+"files_touched": [..]}, ..]}`):
+
+```toml
+version = 1
+
+[ids]
+patterns = ["{U}.{N}{l?}"]                # DT.5h, E0.1, LA.25a/b, DT.5h-DT.5l
+
+[[ids.tracker]]
+path = "dev-notes/leap-*-packets.json"
+list = "packets"
+files = "files_touched"
+```
+
+Whatever reads the vocabulary prints `[ids] vocab repo=<label> surface=<s> patterns=<n>
+source=<config|default|off> trackers=<t> rejected=<r> markdown=<m>` on stderr, and the
+`[overlay] loaded` line counts the section as `ids=<n>` (patterns, words, globs and trackers).
+
 ## `[[wrapper]]`: call sites of a project's own helpers
 
 A wrapper stanza names a callee (`call`: a bare or dotted name such as `request`,
@@ -307,6 +387,9 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
   - a duplicate id, or a duplicate component or layer name
   - a constant name outside `[A-Za-z_][A-Za-z0-9_.]*`
   - an invalid (or empty) `[walk] skip` or `tests` pattern, which drops that pattern only
+  - in `[ids]`, each on its own: a shape that breaks the grammar, a 17th shape, a
+    `local_words` entry that is empty or not lowercase ASCII, an invalid `markdown` glob, and an
+    `[[ids.tracker]]` with an empty `path`, `files`, `id`, `list` or `state`
   - a project path that is the repo root or leaves it
 
 ## Rule invariants, transitive forbid and min_tier (version 2)

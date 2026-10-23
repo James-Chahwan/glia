@@ -9,6 +9,7 @@
 //! | `[walk]`, `[[project]]`, `[entrypoints]` | user config | LF.3a / LF.3b (+CJ.4: `[walk] tests`) | still applied |
 //! | `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge | LF.4a (+CC.5a) | still applied |
 //! | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay (inference) | LF.2d / LF.2e (+LG.3d) / LF.2b | skipped |
+//! | `[ids]` | user config | EB.4 | still applied |
 //!
 //! Loading never panics and never bails a build (pipeline stages emit empty):
 //! - file absent -> `None`;
@@ -75,10 +76,16 @@ pub const MAX_ID_CHARS: usize = 128;
 /// `[[note]] text`: 1..=4096 chars (the CONV entry rule).
 pub const MAX_NOTE_CHARS: usize = 4096;
 /// Section names in `section_counts` / marker order.
-pub const SECTIONS: [&str; 12] = [
+pub const SECTIONS: [&str; 13] = [
     "walk", "project", "entrypoints", "constants", "route_prefix", "wrapper", "edge", "constraint",
-    "decision", "note", "component", "layer",
+    "decision", "note", "component", "layer", "ids",
 ];
+/// `[ids] patterns`: at most this many shapes (EB.4).
+pub const MAX_ID_PATTERNS: usize = 16;
+/// An `[ids]` shape string is 1..=64 chars (EB.4).
+pub const MAX_ID_PATTERN_CHARS: usize = 64;
+/// A letter shorthand (`X.5a-c`) expands at most this many letters past its start (EB.4).
+pub const MAX_SHORTHAND_LETTERS: u8 = 20;
 /// Edge categories an `[[edge]]` may never declare: structural (DEFINES /
 /// CONTAINS) or owned by the git-history snapshot (CO_CHANGES).
 pub const REJECTED_EDGE_CATEGORIES: &[EdgeCategoryId] =
@@ -153,6 +160,10 @@ pub struct GliaConfig {
     /// Reflexion-model layers, top first -> CONSTRAINT `layer` entries (CC.5a).
     #[serde(default)]
     pub layer: Vec<Spanned<LayerDecl>>,
+    /// The repo's id vocabulary (EB.4): query-time user config, read by
+    /// `glia_engine::intent::ids`; it changes no graph.
+    #[serde(default)]
+    pub ids: IdsConfig,
 }
 
 /// `[walk]`: gitignore-syntax patterns anchored at the repo root. They only
@@ -176,35 +187,43 @@ impl WalkConfig {
     /// The `[walk] tests` matcher, `None` when no pattern is declared (or,
     /// past the loader's per-line check, the set fails to build).
     pub fn tests_matcher(&self) -> Option<TestPaths> {
-        if self.tests.is_empty() {
+        PathGlobs::new(&self.tests).map(|globs| TestPaths { globs })
+    }
+}
+
+/// A compiled list of gitignore-syntax patterns anchored at the repo root
+/// (the matcher `[walk] tests` builds, EB.4 factored out so `[ids]` trackers
+/// and markdown globs read paths the same way): `legacy/` matches that
+/// directory at any depth, `/qa/` only at the root, `qa/**/*.py` the Python
+/// files below it, and a `!pattern` re-includes a path against the earlier
+/// patterns of the same list.
+#[derive(Debug, Clone)]
+pub struct PathGlobs {
+    matcher: ignore::gitignore::Gitignore,
+}
+
+impl PathGlobs {
+    /// The matcher for `patterns`, `None` when there is none (or, past the
+    /// loader's per-line check, the set fails to build). A line that does not
+    /// parse is dropped.
+    pub fn new(patterns: &[String]) -> Option<PathGlobs> {
+        if patterns.is_empty() {
             return None;
         }
         // The root `check_skip_pattern` validates against: a pattern is
         // matched against a repo-relative path, so the root is never stripped.
         let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
-        for pattern in &self.tests {
+        for pattern in patterns {
             // Already validated by the loader; a failure here drops the line.
             let _ = builder.add_line(None, pattern);
         }
         let matcher = builder.build().ok()?;
-        (!matcher.is_empty()).then_some(TestPaths { matcher })
+        (!matcher.is_empty()).then_some(PathGlobs { matcher })
     }
-}
 
-/// A repo's compiled `[walk] tests` patterns (CJ.4), from
-/// [`WalkConfig::tests_matcher`]. Gitignore syntax, anchored at the repo root:
-/// `playwright/` matches that directory at any depth, `/qa/` only at the root,
-/// `qa/**/*.py` the Python files below it, and a `!pattern` re-includes a path
-/// against the earlier `tests` patterns only.
-#[derive(Debug, Clone)]
-pub struct TestPaths {
-    matcher: ignore::gitignore::Gitignore,
-}
-
-impl TestPaths {
-    /// True when `rel_file` (a repo-relative file path, as a POSITION cell
-    /// records it; `\` separators accepted) or one of its parent directories
-    /// matches. An empty path never matches.
+    /// True when `rel_file` (a repo-relative file path; `\` separators
+    /// accepted) or one of its parent directories matches. An empty path
+    /// never matches.
     pub fn matches(&self, rel_file: &str) -> bool {
         let rel = rel_file.replace('\\', "/");
         let rel = rel.trim_start_matches("./").trim_start_matches('/');
@@ -217,6 +236,30 @@ impl TestPaths {
     /// How many patterns the matcher holds (ignores plus `!` whitelists).
     pub fn patterns(&self) -> usize {
         self.matcher.num_ignores() as usize + self.matcher.num_whitelists() as usize
+    }
+}
+
+/// A repo's compiled `[walk] tests` patterns (CJ.4), from
+/// [`WalkConfig::tests_matcher`]. Gitignore syntax, anchored at the repo root:
+/// `playwright/` matches that directory at any depth, `/qa/` only at the root,
+/// `qa/**/*.py` the Python files below it, and a `!pattern` re-includes a path
+/// against the earlier `tests` patterns only.
+#[derive(Debug, Clone)]
+pub struct TestPaths {
+    globs: PathGlobs,
+}
+
+impl TestPaths {
+    /// True when `rel_file` (a repo-relative file path, as a POSITION cell
+    /// records it; `\` separators accepted) or one of its parent directories
+    /// matches. An empty path never matches.
+    pub fn matches(&self, rel_file: &str) -> bool {
+        self.globs.matches(rel_file)
+    }
+
+    /// How many patterns the matcher holds (ignores plus `!` whitelists).
+    pub fn patterns(&self) -> usize {
+        self.globs.patterns()
     }
 }
 
@@ -479,6 +522,345 @@ pub struct LayerDecl {
     pub strict: bool,
 }
 
+/// `[ids]`: the repo's id vocabulary (EB.4). Query-time user config like
+/// `[walk]`: legal in versions 1 and 2, applied under `--no-overlay`, never
+/// an overlay-loop candidate, and it changes no graph (`review` and
+/// `find --files` read it through `glia_engine::intent::ids::IdVocab`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdsConfig {
+    /// Id shapes ([`IdPattern`] grammar). Set, they REPLACE the engine's
+    /// defaults; `patterns = []` turns id routing off. At most
+    /// [`MAX_ID_PATTERNS`].
+    #[serde(default)]
+    pub patterns: Option<Vec<Spanned<String>>>,
+    /// The findings words (`analysis`, `audit`, ..): lowercase ASCII, they
+    /// replace the engine's defaults when set.
+    #[serde(default)]
+    pub local_words: Option<Vec<Spanned<String>>>,
+    /// JSON task trackers whose objects define ids (`[[ids.tracker]]`).
+    #[serde(default)]
+    pub tracker: Vec<Spanned<TrackerDecl>>,
+    /// Markdown tracker globs (EB-5 ruling, James 2026-10-23): gitignore
+    /// syntax, repo-root anchored. A matching markdown file defines ids like
+    /// a doc the build ingests, even outside the doc include rules (a
+    /// `TODO.md` in a source dir, a plan under `dev-notes/`).
+    #[serde(default)]
+    pub markdown: Vec<Spanned<String>>,
+}
+
+impl IdsConfig {
+    /// `markdown` as plain patterns, for [`PathGlobs::new`].
+    pub fn markdown_patterns(&self) -> Vec<String> {
+        self.markdown.iter().map(|p| p.get_ref().clone()).collect()
+    }
+}
+
+/// `[[ids.tracker]]`: a JSON file (or files) listing tasks with ids.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerDecl {
+    /// Gitignore-syntax glob, repo-root anchored (`dev-notes/leap-*-packets.json`).
+    pub path: String,
+    /// Key of the array of task objects; absent = the top-level array.
+    #[serde(default)]
+    pub list: Option<String>,
+    /// The id field of each object (default `id`).
+    #[serde(default = "default_tracker_id")]
+    pub id: String,
+    /// The field naming the files a task touches (a string or an array of strings).
+    pub files: String,
+    /// The field holding a task's state, if any.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// The `state` values that mean done.
+    #[serde(default)]
+    pub done: Vec<String>,
+}
+
+fn default_tracker_id() -> String {
+    "id".to_string()
+}
+
+/// One element of an [`IdPattern`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdTok {
+    /// `{U}`: an ASCII uppercase letter, then ASCII uppercase letters / digits.
+    Upper,
+    /// `{N}` (None) or `{N<k>}` (exactly k digits).
+    Digits(Option<usize>),
+    /// `{l?}`: an optional ASCII lowercase letter.
+    Letter,
+    /// Any other byte, matched exactly.
+    Lit(u8),
+}
+
+/// Recursion steps one match attempt may take: patterns are tiny, so this
+/// only bounds a pathological shape (`{U}{U}{U}..` over a long capital run).
+const ID_MATCH_STEPS: usize = 4096;
+/// A `{U}` / `{N}` run never extends past this many bytes: an id is short.
+const ID_RUN_CAP: usize = 32;
+
+/// An `[ids]` id shape (EB.4): THE grammar, here once, so the loader and the
+/// engine never disagree.
+///
+/// | token | matches |
+/// |---|---|
+/// | `{U}` | one ASCII uppercase letter, then zero or more ASCII uppercase letters / digits (greedy, backtracking) |
+/// | `{N}` | one or more ASCII digits |
+/// | `{N<k>}` (k 1..=9) | exactly k ASCII digits |
+/// | `{l?}` | an optional single ASCII lowercase letter |
+/// | any other char | itself, case-sensitively |
+///
+/// A shape is 1..=[`MAX_ID_PATTERN_CHARS`] chars, holds at least one `{N}` /
+/// `{N<k>}` and names no other `{..}`. A match is word-bounded: the byte
+/// before it and the byte after it are not `[A-Za-z0-9_]`, and a following
+/// `.` or `-` is a boundary only when no digit follows it (`DT.5h` is found
+/// in `DT.5h:`, `{U}-{N}` nothing in `UTF-8x` or `LANG-12.3`). A shape
+/// ending in `{l?}` whose match ends in a lowercase letter also reads the
+/// letter shorthands (rank_eval `dot_ids`): `X.5a/b` adds `X.5b`, and
+/// `X.5a-c` / `X.5a–c` / `X.5a-X.5c` add every letter up to the end letter
+/// (at most [`MAX_SHORTHAND_LETTERS`] past the start).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdPattern {
+    text: String,
+    toks: Vec<IdTok>,
+}
+
+/// One match of one [`IdPattern`] (byte offsets into the text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdMatch {
+    pub start: usize,
+    pub end: usize,
+    /// End of the family: the text before the digit group the shape's first
+    /// `{N}` / `{N<k>}` matched (`DT.` of `DT.5h`, `E0.` of `E0.1`, `T` of `T012`).
+    pub family_end: usize,
+    /// End of every byte the match claims, its letter shorthand included
+    /// (`end` when there is none): overlap resolution compares these spans.
+    pub claim_end: usize,
+    /// The ids a letter shorthand adds, each `(id, start, end)` at the
+    /// shorthand's bytes, in letter order, none repeating the match's own id.
+    pub extra: Vec<(String, usize, usize)>,
+}
+
+/// A byte of an id word: `[A-Za-z0-9_]`.
+fn id_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// True when position `e` ends a word-bounded id.
+fn id_boundary_after(b: &[u8], e: usize) -> bool {
+    match b.get(e) {
+        None => true,
+        Some(&c) if id_word(c) => false,
+        Some(&c) if c == b'.' || c == b'-' => !b.get(e + 1).is_some_and(u8::is_ascii_digit),
+        Some(_) => true,
+    }
+}
+
+/// rank_eval `we`: position `j` is a word end.
+fn id_word_end(b: &[u8], j: usize) -> bool {
+    b.get(j).is_none_or(|c| !id_word(*c))
+}
+
+impl IdPattern {
+    /// Parse a shape string; the error says what is wrong.
+    pub fn parse(text: &str) -> Result<IdPattern, String> {
+        let chars = text.chars().count();
+        if chars == 0 || chars > MAX_ID_PATTERN_CHARS {
+            return Err(format!("a pattern is 1..={MAX_ID_PATTERN_CHARS} chars (got {chars})"));
+        }
+        let mut toks = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(body) = rest.strip_prefix('{') {
+                let Some(close) = body.find('}') else {
+                    return Err(format!("unclosed `{{` in {text:?}"));
+                };
+                let name = &body[..close];
+                let tok = match name {
+                    "U" => IdTok::Upper,
+                    "N" => IdTok::Digits(None),
+                    "l?" => IdTok::Letter,
+                    _ => match name.strip_prefix('N').and_then(|k| k.parse::<usize>().ok()) {
+                        Some(k) if (1..=9).contains(&k) && name.len() == 2 => IdTok::Digits(Some(k)),
+                        _ => {
+                            return Err(format!(
+                                "unknown token `{{{name}}}` (the grammar is {{U}}, {{N}}, {{N1}}..{{N9}}, {{l?}})"
+                            ));
+                        }
+                    },
+                };
+                toks.push(tok);
+                rest = &body[close + 1..];
+            } else {
+                let mut it = rest.char_indices();
+                let width = it.nth(1).map_or(rest.len(), |(i, _)| i);
+                toks.extend(rest.as_bytes()[..width].iter().map(|b| IdTok::Lit(*b)));
+                rest = &rest[width..];
+            }
+        }
+        if !toks.iter().any(|t| matches!(t, IdTok::Digits(_))) {
+            return Err(format!("{text:?} holds no {{N}} / {{N<k>}}: an id needs a number"));
+        }
+        Ok(IdPattern { text: text.to_string(), toks })
+    }
+
+    /// The shape string as written.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// True when the shape ends in `{l?}` (it reads letter shorthands).
+    pub fn has_letter_suffix(&self) -> bool {
+        self.toks.last() == Some(&IdTok::Letter)
+    }
+
+    /// Every word-bounded match in `text`, by start. Matches of one shape may
+    /// overlap (`DT.5h-DT.5l` matches at 0 and 6); the caller resolves them.
+    pub fn find_all(&self, text: &str) -> Vec<IdMatch> {
+        let b = text.as_bytes();
+        let mut out = Vec::new();
+        for start in 0..b.len() {
+            if start > 0 && id_word(b[start - 1]) {
+                continue;
+            }
+            if let Some(m) = self.match_at(text, start) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// The match starting at `start` (its word boundary before is the
+    /// caller's), with its letter shorthand read.
+    fn match_at(&self, text: &str, start: usize) -> Option<IdMatch> {
+        let b = text.as_bytes();
+        let mut steps = 0usize;
+        let st = self.step(b, 0, start, MatchState::default(), &mut steps)?;
+        let end = st.end;
+        let family_end = st.first_n?;
+        text.get(start..end)?;
+        let mut m = IdMatch { start, end, family_end, claim_end: end, extra: Vec::new() };
+        if let Some(letter_at) = st.letter
+            && letter_at + 1 == end
+            && self.has_letter_suffix()
+        {
+            shorthand(text, start, &mut m);
+        }
+        Some(m)
+    }
+
+    fn step(&self, b: &[u8], ti: usize, pos: usize, st: MatchState, steps: &mut usize) -> Option<MatchState> {
+        *steps += 1;
+        if *steps > ID_MATCH_STEPS {
+            return None;
+        }
+        let Some(tok) = self.toks.get(ti) else {
+            return id_boundary_after(b, pos).then_some(MatchState { end: pos, ..st });
+        };
+        let run = |ok: fn(&u8) -> bool, from: usize| {
+            b.get(from..).map_or(0, |r| r.iter().take(ID_RUN_CAP).take_while(|c| ok(c)).count())
+        };
+        match *tok {
+            IdTok::Upper => {
+                if !b.get(pos).is_some_and(u8::is_ascii_uppercase) {
+                    return None;
+                }
+                let tail = run(|c| c.is_ascii_uppercase() || c.is_ascii_digit(), pos + 1).min(ID_RUN_CAP - 1);
+                (1..=1 + tail).rev().find_map(|len| self.step(b, ti + 1, pos + len, st, steps))
+            }
+            IdTok::Digits(k) => {
+                let st = MatchState { first_n: st.first_n.or(Some(pos)), ..st };
+                let d = run(u8::is_ascii_digit, pos);
+                match k {
+                    Some(k) if d >= k => self.step(b, ti + 1, pos + k, st, steps),
+                    Some(_) => None,
+                    None => (1..=d).rev().find_map(|len| self.step(b, ti + 1, pos + len, st, steps)),
+                }
+            }
+            IdTok::Letter => {
+                if b.get(pos).is_some_and(u8::is_ascii_lowercase)
+                    && let Some(s) = self.step(b, ti + 1, pos + 1, MatchState { letter: Some(pos), ..st }, steps)
+                {
+                    return Some(s);
+                }
+                self.step(b, ti + 1, pos, st, steps)
+            }
+            IdTok::Lit(c) => {
+                if b.get(pos) == Some(&c) {
+                    self.step(b, ti + 1, pos + 1, st, steps)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// The recursion's state: where the first digit group and the `{l?}` letter
+/// sat on this path, and (on success) the match end.
+#[derive(Debug, Clone, Copy, Default)]
+struct MatchState {
+    first_n: Option<usize>,
+    letter: Option<usize>,
+    end: usize,
+}
+
+/// rank_eval `dot_ids`' shorthands after a match ending in a lowercase
+/// letter: `/b` (repeatable), then `-c`, `–c` or `-<base>c`.
+fn shorthand(text: &str, start: usize, m: &mut IdMatch) {
+    let b = text.as_bytes();
+    let n = b.len();
+    let end = m.end;
+    let Some(base) = text.get(start..end - 1) else {
+        return;
+    };
+    let last = b[end - 1];
+    let mut seen = vec![last];
+    let mut push = |letter: u8, s: usize, e: usize, extra: &mut Vec<(String, usize, usize)>| {
+        if !seen.contains(&letter) {
+            seen.push(letter);
+            extra.push((format!("{base}{}", letter as char), s, e));
+        }
+    };
+    let mut at = end;
+    while at + 1 < n && b[at] == b'/' && b[at + 1].is_ascii_lowercase() && id_word_end(b, at + 2) {
+        push(b[at + 1], at, at + 2, &mut m.extra);
+        at += 2;
+    }
+    m.claim_end = at;
+    let dash = if b.get(at) == Some(&b'-') {
+        1
+    } else if text.get(at..).is_some_and(|r| r.starts_with('\u{2013}')) {
+        3
+    } else {
+        0
+    };
+    if dash == 0 {
+        return;
+    }
+    let r = at + dash;
+    let to = if b.get(r).is_some_and(u8::is_ascii_lowercase) && id_word_end(b, r + 1) {
+        Some((b[r], r + 1))
+    } else if text.get(r..).is_some_and(|t| t.starts_with(base)) {
+        let q = r + base.len();
+        (b.get(q).is_some_and(u8::is_ascii_lowercase) && id_word_end(b, q + 1)).then(|| (b[q], q + 1))
+    } else {
+        None
+    };
+    if let Some((to, claim)) = to
+        && to > last
+        && to - last <= MAX_SHORTHAND_LETTERS
+    {
+        for c in last + 1..=to {
+            push(c, at, claim, &mut m.extra);
+        }
+        m.claim_end = claim;
+    }
+}
+
 /// Who authored a stanza. Defaults to `llm`: an unmarked stanza is inference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -595,6 +977,8 @@ pub struct LoadedConfig {
     /// note; each in file order), or the one whole-file rejection.
     pub rejections: Vec<Rejection>,
     line_starts: Vec<usize>,
+    /// `[ids]` entries the loader dropped (EB.4), read by [`Self::ids_rejected`].
+    ids_rejected: usize,
 }
 
 impl LoadedConfig {
@@ -614,8 +998,9 @@ impl LoadedConfig {
 
     /// Per-section entry counts in [`SECTIONS`] order: `walk` counts skip
     /// plus tests patterns, `entrypoints` qname patterns, `constants` keys,
-    /// every other section its stanzas. Feeds the `[overlay] loaded` marker.
-    pub fn section_counts(&self) -> [(&'static str, usize); 12] {
+    /// `ids` its patterns, local words, markdown globs and trackers, every
+    /// other section its stanzas. Feeds the `[overlay] loaded` marker.
+    pub fn section_counts(&self) -> [(&'static str, usize); 13] {
         let c = &self.config;
         let n = [
             c.walk.skip.len() + c.walk.tests.len(),
@@ -630,8 +1015,18 @@ impl LoadedConfig {
             c.note.len(),
             c.component.len(),
             c.layer.len(),
+            c.ids.patterns.as_ref().map_or(0, Vec::len)
+                + c.ids.local_words.as_ref().map_or(0, Vec::len)
+                + c.ids.markdown.len()
+                + c.ids.tracker.len(),
         ];
         std::array::from_fn(|i| (SECTIONS[i], n[i]))
+    }
+
+    /// How many `[ids]` entries (patterns, local words, markdown globs,
+    /// trackers) the loader dropped, each with its own errors line (EB.4).
+    pub fn ids_rejected(&self) -> usize {
+        self.ids_rejected
     }
 
     /// True when no overlay (inference) section has an entry, so `--no-overlay`
@@ -646,6 +1041,78 @@ impl LoadedConfig {
             Some(l) => format!("{OVERLAY_FILE}:{l}: {msg}"),
             None => format!("{OVERLAY_FILE}: {msg}"),
         }
+    }
+
+    /// `[ids]` (EB.4): each bad pattern, local word, markdown glob or tracker
+    /// is dropped on its own with an errors line naming its line.
+    fn validate_ids(&self, mut ids: IdsConfig, errors: &mut Vec<String>, rejections: &mut Vec<Rejection>) -> IdsConfig {
+        if let Some(patterns) = ids.patterns.take() {
+            let mut kept = Vec::with_capacity(patterns.len().min(MAX_ID_PATTERNS));
+            for p in patterns {
+                let line = self.line_of(p.span());
+                let verdict = if kept.len() >= MAX_ID_PATTERNS {
+                    Err(format!("more than {MAX_ID_PATTERNS} patterns"))
+                } else {
+                    IdPattern::parse(p.get_ref()).map(|_| ())
+                };
+                match verdict {
+                    Ok(()) => kept.push(p),
+                    Err(e) => errors.push(
+                        self.at(Some(line), &format!("[ids] patterns {:?}: {e} (pattern dropped)", p.get_ref())),
+                    ),
+                }
+            }
+            ids.patterns = Some(kept);
+        }
+        if let Some(words) = ids.local_words.take() {
+            let mut kept = Vec::with_capacity(words.len());
+            for w in words {
+                let word = w.get_ref();
+                if !word.is_empty() && word.bytes().all(|b| b.is_ascii_lowercase()) {
+                    kept.push(w);
+                } else {
+                    let line = self.line_of(w.span());
+                    errors.push(self.at(
+                        Some(line),
+                        &format!("[ids] local_words {word:?}: a word is non-empty lowercase ASCII (a-z) (word dropped)"),
+                    ));
+                }
+            }
+            ids.local_words = Some(kept);
+        }
+        let mut kept = Vec::with_capacity(ids.markdown.len());
+        for g in std::mem::take(&mut ids.markdown) {
+            match check_skip_pattern(g.get_ref()) {
+                Ok(()) => kept.push(g),
+                Err(e) => {
+                    let line = self.line_of(g.span());
+                    errors.push(
+                        self.at(Some(line), &format!("[ids] markdown {:?}: {e} (pattern dropped)", g.get_ref())),
+                    );
+                }
+            }
+        }
+        ids.markdown = kept;
+        ids.tracker = self.keep("ids.tracker", std::mem::take(&mut ids.tracker), errors, rejections, |_| None, |t| {
+            if t.path.trim().is_empty() {
+                return Err("path must name a JSON file glob".into());
+            }
+            check_skip_pattern(&t.path).map_err(|e| format!("path {:?}: {e}", t.path))?;
+            if t.files.trim().is_empty() {
+                return Err("files must name the field listing a task's files".into());
+            }
+            if t.id.trim().is_empty() {
+                return Err("id must name the field holding a task's id".into());
+            }
+            if t.list.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                return Err("list is empty (omit it for a top-level array)".into());
+            }
+            if t.state.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                return Err("state is empty (omit it when tasks carry no state)".into());
+            }
+            Ok(())
+        });
+        ids
     }
 
     /// Drop every stanza whose check fails, recording one error and one
@@ -722,6 +1189,10 @@ impl LoadedConfig {
                 false
             }
         });
+
+        let ids_errors = errors.len();
+        cfg.ids = self.validate_ids(std::mem::take(&mut cfg.ids), &mut errors, &mut rejections);
+        self.ids_rejected = errors.len() - ids_errors;
 
         let mut paths = BTreeSet::new();
         cfg.project = self.keep("project", cfg.project, &mut errors, &mut rejections, |_| None, |p| {
@@ -941,7 +1412,13 @@ pub fn parse_str(text: &str) -> LoadedConfig {
     let mut line_starts = vec![0];
     line_starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
     let mut loaded =
-        LoadedConfig { config: GliaConfig::default(), errors: Vec::new(), rejections: Vec::new(), line_starts };
+        LoadedConfig {
+        config: GliaConfig::default(),
+        errors: Vec::new(),
+        rejections: Vec::new(),
+        line_starts,
+        ids_rejected: 0,
+    };
     match toml::from_str::<GliaConfig>(text) {
         Ok(cfg) => {
             loaded.config = cfg;
@@ -960,7 +1437,13 @@ pub fn parse_str(text: &str) -> LoadedConfig {
 /// after its `.glia/overlay.toml: ` prefix.
 fn failed(message: String) -> LoadedConfig {
     let mut loaded =
-        LoadedConfig { config: GliaConfig::default(), errors: Vec::new(), rejections: Vec::new(), line_starts: vec![0] };
+        LoadedConfig {
+        config: GliaConfig::default(),
+        errors: Vec::new(),
+        rejections: Vec::new(),
+        line_starts: vec![0],
+        ids_rejected: 0,
+    };
     loaded.reject_file(None, message);
     loaded
 }
@@ -1319,6 +1802,9 @@ paths = ["services/api"]
 [[layer]]
 name = "core"
 components = ["api"]
+
+[ids]
+patterns = ["{U}.{N}{l?}"]
 "#;
 
     fn edge_at_line(line: usize, category: &str) -> String {
@@ -1351,8 +1837,88 @@ components = ["api"]
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1]);
+        assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1, 0]);
         assert_eq!(l.config.walk.tests, ["playwright/", "qa/**/*.py"], "CJ.4: the example declares tests");
+    }
+
+    /// EB.4: SECTIONS names 13 sections, `ids` last.
+    #[test]
+    fn sections_end_with_ids() {
+        assert_eq!(SECTIONS.len(), 13);
+        assert_eq!(SECTIONS[12], "ids");
+        let l = parse_str(FULL);
+        assert_eq!(l.section_counts()[12], ("ids", 1));
+    }
+
+    /// EB.4: `[ids]` parses in versions 1 and 2, every key.
+    #[test]
+    fn ids_section_parses() {
+        for version in [1, 2] {
+            let text = format!(
+                "version = {version}\n[ids]\npatterns = [\"{{U}}-{{N}}\", \"T{{N3}}\"]\nlocal_words = [\"audit\"]\nmarkdown = [\"TODO.md\"]\n\
+                 [[ids.tracker]]\npath = \"plans/*.json\"\nlist = \"packets\"\nfiles = \"files_touched\"\nstate = \"status\"\ndone = [\"done\"]\n"
+            );
+            let l = parse_str(&text);
+            assert!(l.errors.is_empty(), "{version}: {:?}", l.errors);
+            assert_eq!(l.ids_rejected(), 0);
+            let ids = &l.config.ids;
+            assert_eq!(ids.patterns.as_ref().map(Vec::len), Some(2));
+            assert_eq!(ids.markdown_patterns(), ["TODO.md"]);
+            let t = ids.tracker[0].get_ref();
+            assert_eq!((t.id.as_str(), t.files.as_str(), t.list.as_deref()), ("id", "files_touched", Some("packets")));
+            assert_eq!(l.section_counts()[12], ("ids", 5));
+        }
+        // No [ids]: patterns unset (the engine's defaults), nothing counted.
+        let l = parse_str("version = 1\n");
+        assert!(l.config.ids.patterns.is_none() && l.config.ids.local_words.is_none());
+        // An unknown key in [ids] is a schema error like any section's.
+        let l = parse_str("version = 1\n[ids]\npattern = [\"{U}-{N}\"]\n");
+        assert_eq!(l.rejections.len(), 1);
+        assert!(l.rejections[0].whole_file(), "{:?}", l.errors);
+    }
+
+    /// EB.4: a bad `[ids]` entry is dropped on its own, its line named.
+    #[test]
+    fn ids_bad_entries_drop_with_a_line() {
+        let mut text = String::from("version = 1\n[ids]\npatterns = [\n  \"{Q}\",\n");
+        for i in 0..17 {
+            text.push_str(&format!("  \"P{i}-{{N}}\",\n"));
+        }
+        text.push_str("]\nlocal_words = [\"ok\", \"Bad\", \"\"]\nmarkdown = [\"  \"]\n");
+        text.push_str("[[ids.tracker]]\npath = \"\"\nfiles = \"f\"\n");
+        text.push_str("[[ids.tracker]]\npath = \"t.json\"\nfiles = \"\"\n");
+        text.push_str("[[ids.tracker]]\npath = \"t.json\"\nfiles = \"files\"\n");
+        let l = parse_str(&text);
+        // patterns: `{Q}` (line 4) and the 17th valid one (line 21); words: 2; markdown: 1; trackers: 2.
+        assert_eq!(l.errors.len(), 7, "{:?}", l.errors);
+        assert_eq!(l.ids_rejected(), 7);
+        assert!(l.errors[0].starts_with(".glia/overlay.toml:4: [ids] patterns \"{Q}\": unknown token"), "{}", l.errors[0]);
+        assert!(l.errors[1].starts_with(".glia/overlay.toml:21: [ids] patterns \"P16-{N}\": more than 16"), "{}", l.errors[1]);
+        assert!(l.errors[2].starts_with(".glia/overlay.toml:23: [ids] local_words \"Bad\""), "{}", l.errors[2]);
+        assert!(l.errors[4].starts_with(".glia/overlay.toml:24: [ids] markdown"), "{}", l.errors[4]);
+        assert!(l.errors[5].starts_with(".glia/overlay.toml:25: [[ids.tracker]] path"), "{}", l.errors[5]);
+        assert!(l.errors[6].starts_with(".glia/overlay.toml:28: [[ids.tracker]] files"), "{}", l.errors[6]);
+        let ids = &l.config.ids;
+        assert_eq!(ids.patterns.as_ref().map(Vec::len), Some(16));
+        assert_eq!(ids.local_words.as_ref().map(|w| w.iter().map(|x| x.get_ref().clone()).collect::<Vec<_>>()), Some(vec!["ok".to_string()]));
+        assert!(ids.markdown.is_empty());
+        assert_eq!(ids.tracker.len(), 1);
+        // The rest of the file still applies.
+        assert_eq!(l.config.version, 1);
+    }
+
+    /// EB.4: every toml block of docs/overlay.md's `[ids]` section loads clean.
+    #[test]
+    fn docs_ids_examples_parse_cleanly() {
+        let doc = include_str!("../../docs/overlay.md");
+        let section = doc.split("\n## `[ids]`").nth(1).and_then(|s| s.split("\n## ").next()).expect("an [ids] section");
+        let blocks: Vec<&str> = section.split("```toml\n").skip(1).filter_map(|b| b.split("```").next()).collect();
+        assert_eq!(blocks.len(), 3, "a ticket repo, spec-kit, a JSON tracker");
+        for b in blocks {
+            let l = parse_str(b);
+            assert!(l.errors.is_empty(), "{b}: {:?}", l.errors);
+            assert!(l.section_counts()[12].1 > 0, "{b}");
+        }
     }
 
     /// DB.1: the version-2 example of docs/overlay.md loads clean.
@@ -1779,7 +2345,7 @@ to = "ghost"
         let ids: Vec<&str> = l.config.constraint.iter().map(|c| c.get_ref().id.as_str()).collect();
         assert_eq!(ids, ["web-uses-api"]);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1]);
+        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1, 0]);
 
         // One stanza at a time: each is dropped with one line at its header.
         let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\".\"]\n";
