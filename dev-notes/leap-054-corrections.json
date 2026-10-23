@@ -1,0 +1,6 @@
+{
+ "generated": "2026-10-23",
+ "applies_to": "dev-notes/leap-054-packets.json (glia 0.5.4: scale, embeddings, the goal layer, precision)",
+ "rule": "A correction OVERRIDES its packet's spec wherever they disagree. closeout.py --release 054 folds each landed packet's followups that name a later F*.* packet in here; the re-verify pass (reverify_054.md) writes its rewrites here or into the packet file before W0.",
+ "corrections": {}
+}

@@ -894,6 +894,13 @@ All four answered 2026-10-16 (§0); recorded as rulings:
 
 ## 4. Spec run
 
+**Specced 2026-10-23** (run wf_2a837486-a3e): 169 packets, ~54,230 LOC, in `dev-notes/leap-054-packets.json` (42 open
+questions in `integration_report.open_questions`, some due before a given wave: `rulings_needed_before_wave`), schedule
+`dev-notes/wave-runner/schedule_054.py` (17 waves as one leap). James: *"We may not build 0.5.4 straight away then but having
+it specced lets me chunk at it"* -> `dev-notes/wave-runner/tracks_054.py` cuts it into 12 tracks plus T0 / TZ, each
+buildable alone once its prerequisite tracks landed (`--track <T>` prints its own waves). Before any 0.5.4 wave:
+`dev-notes/reverify_054.md` (re-check every packet against the landed 0.5.3).
+
 **Specced early (James 2026-10-23: *"get it ready for build so whenever all these waves finish we have 0.5.4 done if we
 need to modify post 0.5.3"*):** the spec run runs while 0.5.3's waves land, against a moving HEAD. After 0.5.3's last
 close-out, a re-verify pass (one agent per group) checks every packet against the landed 0.5.3 tree and rewrites what

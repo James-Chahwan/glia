@@ -1,0 +1,86 @@
+You are IMPLEMENTING exactly one work-packet of glia 0.5.4 (scale, embeddings, the goal layer, precision), in the Rust engine at /home/ivy/Code/glia. Work in that tree directly. Other agents are implementing DIFFERENT packets in the SAME tree concurrently, on disjoint files.
+
+THE RELEASE. dev-notes/next-leap-0.5.4.md is the agreed scope (§0 James's verbatim decisions, §2 A-G, §F items 1-15 committed by James, §3 rulings, §4 the spec-run rules incl. "followups finish inside 0.5.4"). dev-notes/leap-054-packets.json holds the packet specs: wave 0 F0 (registry ids, the three new crates and the release's one Cargo.lock move, the engine / py slots, then the whole-tree rustfmt), then FA scale (Stack Graphs-style per-file re-stitching + watch's body-only fast path, multi-repo watch, one memory budget for watch and rules, build-target graphs from `bazel query`, org-internal package routing), FB embeddings in glia (glia-embed / fastembed bge-small, `glia embed`, the VectorRow contract, the embedding gate and - only on PASS - the semantic tiers, corrections and conventions in answers, the identifier vocabulary), FC the goal-layer connector (units, key extractors, one resolver per key type, the tiered joiner, why / impact / drift / review / pack-context answers), the clarification queue, concept search over flows, PR / issue intent and placement (measured, then built only on PASS), FD the precision group (rustfmt / rustdoc, the edge-precision audit, self-graph hygiene and the zero-phantom gate, one tier vocabulary, the per-language §D / §E residuals), FE the agent before / after harness, the zero-install `glia-cli` PyPI package, the skills move and the use-signal proposal, FZ the release docs + handoffs. dev-notes/leap-054-corrections.json holds corrections that OVERRIDE a spec wherever they disagree. 0.5.3 (the ranking release, E* packets) is LANDED under you: build on its APIs (engine::rank, engine::intent, engine::calibrate, activation algo::fuse / PprIndex, the history snapshot's messages, scripts/rank-gate.sh) and never re-implement what an E* packet owns. The 0.5.0-0.5.3 packet files are landed history. This is WAVE {{WAVE}} of W0..W{{LAST}}. CLAUDE.md is architecture; where it disagrees with the layout below, the layout below is newer.
+
+{{BASELINE}}
+
+=== WHAT THIS RELEASE IS ===
+- MEASURED EXPERIMENT, THEN BUILD. FA.1 (surface replay), FB.6 (embedding gate), FC.19 (PR intent), FC.21 (placement), FC.6 and FD.2-FD.3c (audits) are (a) packets with a pass rule committed before the run. A (b) packet whose acceptance starts "only if <a>'s report says PASS" reads that committed report FIRST: on FAIL it commits nothing and returns `not-needed` quoting the report's verdict line - a correct outcome, and the scheduler counts it done. Never re-run an experiment to get a different verdict, never widen a pass rule.
+- SNAPSHOT STEPS never run inside a build: `glia embed`, `vocab sync`, `gh sync`, `targets sync`, `history sync / calibrate` write `.glia/*` only when called; a build may READ a snapshot (FC.18 reads gh-snapshot) but never refreshes one.
+- RANK, NEVER DECIDE: embedding / similarity rows and the goal layer rank or annotate; they never promote, hide or create a FACT / DERIVED row, never seed blast-radius, and a semantic tier always sits beside the lexical absence. TRACES weighs 0 and is in no carry / community list; GOAL_UNIT is no entry and no find row.
+- Ties go by qname / (repo label, path) / candidate index. Never a NodeId, never HashMap order: a HashMap may be looked up, never iterated into an output.
+- The repo is PUBLIC. Never write a private project's specifics (law / regime / spec-number text, id vocabularies, file paths, symbol names of Kina, quokka-stack or any private repo) into code, tests, fixtures, harnesses, commit messages or docs; private repos appear only as aggregate numbers. Never touch ~/Code/webplatform.
+
+=== THE GATES THAT ARE ALREADY LIVE ===
+- RANK GATE (0.5.3's EG.3): `bash scripts/rank-gate.sh check` runs at every close-out of a wave touching a ranked path, and every packet that can change an answer's order names it: its last line must be `[rank-gate] check: ok - ...`. A FAILED line is your packet's failure (the harness is deterministic). Never edit bench/rank-gate/baseline/ by hand; only `baseline` / `baseline-add` / `ratchet` as your packet says. Work dir `$HOME/.cache/glia-rank-gate` (shared; never delete it). rank_eval writes into the cwd by default: pass `--out/--md/..` under your own cache dir and check `git status --short` is clean of them.
+- FMT GATE (F0.5): the close-out runs `cargo fmt --all --check`; run `cargo fmt` on your files before committing (if rustfmt touches a file outside your files_touched, revert that file).
+- RUSTDOC GATE (once FD.23b lands): `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` stays clean: a broken intra-doc link in your docs fails the wave.
+- CLIPPY: `cargo clippy --workspace --all-targets -- -D warnings` is clean at HEAD (rustc 1.95) and stays clean; a warning is unfinished wiring, never `#[allow]`.
+
+=== BREAKS ARE ALLOWED WHEN DECLARED ===
+0.5.4 is pinned exactly by its consumers, so it may break contracts. Nothing is pushed, tagged or published by a packet — James is the release gate. Breaks are ALLOWED when your packet declares them:
+- Make exactly the breaks your packet's `breaking` block declares, and move every in-repo consumer (tests, fixture key.json, callers, snapshots) in the SAME commit.
+- A break your packet does NOT declare is a defect: stop, report it in `surprises`, and do not ship it. A ranking change that a consumer sees (row order, a new key, a kwarg) is a break.
+- Out-of-repo consumers (repo-graph wrapper, neuropil, Engram) are NOT yours to edit unless your files_touched names their paths. List what they must change in your result's `breaking` field — that list becomes the 0.5.4 handoff docs (FZ.2: 0.5.3 -> 0.5.4 for all three consumers).
+- Any pyo3 or CLI surface change also updates the matching snapshot files (py/api_surface/<module>.txt, cli/surface/<command>.txt) and, for a CLI command or flag, its README `## CLI` usage line (cli/tests/readme_surface.rs). A surface change without them fails the gate.
+
+=== USE THE GRAPH FIRST (standing user rule) ===
+The repo-graph MCP server indexes THIS repo. Load its tools with ToolSearch (`select:mcp__repo-graph__find,mcp__repo-graph__impact,mcp__repo-graph__trace,mcp__repo-graph__read,mcp__repo-graph__orient`) and use them BEFORE grepping for any structural question: `find <symbol>` (returns path:line), `impact <node>` for what your change affects, `trace` for a flow. Grep is the fallback, not the default. Report which graph queries you ran. The MCP answers from an installed older build, so it lags the tree by the waves landed since; `orient` lists its blind spots — grep for those. rank_eval.rs is an example (about 15k lines): grep it by function name.
+
+=== COMMITTED ARTEFACTS ARE NOT YOURS ===
+`bench/substrate-gap/results-latest.json`, `COVERAGE.md` and `legacy-latest.json` are committed and guarded by `matrix.py --check` / `run.py --check`. Never run `matrix.py --emit` or `run.py --emit`; they are regenerated once, after the end-of-wave wheel rebuild. The same holds for bench/rank-gate/baseline/current/ (the close-out's ratchet writes it) and bench/edge-audit/report.* (FD.3c writes them once).
+
+=== THE TREE HAS MOVED UNDER YOUR SPEC ===
+Specs were written at 37fb9384 .. 42215a67 while 0.5.3 was mid-flight, then re-verified after 0.5.3's last close-out (the rewrites are in the packet file or the corrections). Every landed wave moves code again. NEVER trust a line number: find symbols by name.
+- engine/src/lib.rs, graph/src/lib.rs, py/src/lib.rs and code-domain/src/lib.rs's registries are wave-0 territory (CLAUDE.md "Module layout"). F0 declared 0.5.4's slots: engine `semantic/` (FB.4 adds its own `mod` lines in semantic/mod.rs), `goal/` (F0.3 already declared extract / resolve / join / why / impact / drift / check: fill your file, never edit goal/mod.rs), `clarify/` (questions / answer declared: fill your file) and `targets.rs`; py `clarify`, `embed`, `goal`, `targets`; code-domain `goal`; the crates embed/ (glia-embed), build-domain/ (glia-build-domain) and parsers/build/bazel/ (glia-parser-bazel). Reach them by module path; never flatten into a crate root. Only F0.* packets edit a facade, a workspace manifest or Cargo.lock.
+- engine/src/build/ is a directory; py/src/ has one module per primitive; cli/src/cmd/<area>/ has one file per command (a new command adds its file + one variant and arm in its area mod.rs).
+- To widen something across a module boundary use pub(crate), NEVER pub. A `#[doc(hidden)] pub` seam exists only where a packet names it.
+- Counts other packets also move (the `[passes] domain=code resolve= post=` line, gaps CATEGORIES / GRAPH_CATEGORIES, registry row counts) are HEAD-relative: pin "HEAD's count + your delta" at your base, never the literal your spec quotes.
+
+=== CONSTRAINTS ===
+- LOCKED IDS: F0.1 allocated the release's only ids - node GOAL_UNIT 50, edge TRACES 38, cells UNIT 26 and IMPORT_BINDINGS 27 (next free 51 / 39 / 28). Use every kind / category / cell by constant NAME. If you believe you need another id, report `blocked`.
+- FORMAT: FORMAT_VERSION stays 3, MANIFEST_VERSION 2. Appending a NavFact variant is not a format change (it lives only in the parse cache). New side files are only the ones your packet names (targets.gmap, the vocab / gh / targets snapshots, vectors.jsonl's text_hash, `<out>.vocab.jsonl`).
+- DEPENDENCIES: F0.2 is the release's one Cargo.lock move. A packet that needs another crate or feature reports `blocked`. Never add fastembed / ort as a dev-dependency anywhere; the engine reaches the model only through feature `sem-eval` (gate scripts), py through `embed`, the CLI through its default `embed`.
+- EMBEDDINGS: CPU only; set FASTEMBED_CACHE_DIR to a user cache (never a repo dir); never embed concurrently with a build's rayon pool; tests use the deterministic `test-hash` model unless the packet names an `#[ignore]` bge test.
+- PARSER_STAMP: every activation / engine/src / code-domain / graph / store / parsers / build-domain / core edit moves it and invalidates parse caches once; engine/examples is not hashed. Say it in your commit body.
+- PUBLIC API (LD.9): a new pub struct / enum on a facade or in a `pub mod` slot is `#[non_exhaustive]` (Default or a constructor when built outside the crate); `engine/tests/api_stability.rs` enforces it.
+- Parsers EXTRACT, the graph crate RESOLVES. Generic graph / ranking math lives in activation, never in engine. No unwrap()/panic!() in non-test code. Scope in LOC, never time. No stubs, no TODOs, no deferrals: build it or report `blocked`.
+- Ship a grep-able fired_on marker: a literal stderr line with the stable prefix your packet names.
+- SECURITY GATES (locked, SECURITY.md): no taint or value data-flow, no vulnerability feeds, no crawling. PR / issue / commit text is untrusted: it goes through `redact_untrusted` before it is stored, author identities are dropped, and `gh` output lives under a self-gitignored `.glia/gh-snapshot/`.
+- TIERS: once FD.7d lands, every answer prints tier words lowercase (`fact` / `derived` / `heuristic`) through `glia_activation::profile::Tier` (FD.7a); write new tests that way.
+
+=== OTHER REPOS ARE READ-ONLY ===
+Never write under /home/ivy/Code/{repo-graph,neuropil,Engram,quokka-stack,quokka_web,lapse,grpc-go,Kina,kina-extras,samples,shell,websocket,webplatform} — no 0.5.4 packet edits another repo (FE.7 reads repo-graph's skills; it never writes there). Real-repo acceptance runs on a `git archive` copy under /home/ivy/.cache/glia-<YOUR-PACKET-ID>/ or on the rank gate's pinned copies (scripts/rank-gate.sh fetch). Every snapshot step (`history sync`, `history calibrate`, `embed`, `vocab sync`, `gh sync`, `targets sync`) writes `.glia/` into the tree it runs on: run them only on such a copy (a worktree of the rank gate's bare clone at the pinned rev). The agent run (FE.2-FE.4) uses its own disposable checkouts and a fresh CLAUDE_CONFIG_DIR.
+Probing another repo: use `GLIA_NO_PERSIST=1 ./target/debug/glia <cmd> <copy>` on that copy only. NEVER call the wheel's `glia_py.generate(...)` on another repo: it writes into `<repo>/.ai/repo-graph/` even with GLIA_NO_PERSIST.
+
+=== ORDER OF WORK ===
+1. Verify your anchors by symbol name (an E* API in the landed 0.5.3 code; a harness function in rank_eval.rs). If your spec is wrong, say so and work from reality.
+2. A gated (b) packet reads its (a) report first. Otherwise write the parity or behaviour test first and RECORD ITS FAILING BASELINE (paste it). A test that already passes proves nothing.
+3. Implement.
+4. Run your gate. Paste verbatim output.
+
+=== GATES ===
+- `cargo test -p <crate>` for the crates you touch IS your gate — use the package name in that crate's Cargo.toml (glia-*). `cargo test --workspace` is NOT your gate: it fails to compile mid-wave on siblings' half-written crates. The workspace gate runs once, at end of wave.
+- cargo serialises on the target-dir lock; a build that blocks is NORMAL — wait, do not kill it.
+- ISOLATED TREES AND TARGET DIRS GO ON DISK, NOT /tmp: /tmp is a RAM disk shared by every agent. Put any `git archive` tree, `CARGO_TARGET_DIR` or `TMPDIR` you create under `/home/ivy/.cache/glia-<YOUR-PACKET-ID>/`, build it with `CARGO_INCREMENTAL=0`, test only the crates your gate names, and `rm -rf` its target dir as soon as the gate output is captured. A release build of the rank_eval example is large: build it once, in the main tree's target/ (`cargo build --release -p glia-engine --example rank_eval`), unless your packet says otherwise.
+- If you touch engine or graph: the engine `byte_identical` test must stay green (`cargo test -p glia-engine --test byte_identical`). With no snapshot of any kind, no `[ids]` overlay and no vectors, every answer must stay byte-identical to what your packet's spec names: existing fixtures hold no `.glia/` snapshot, so their pins move only where your packet declares it.
+- A substrate-gap fixture is proved with the debug CLI on a copy inside the packet, then `~/.venvs/glia-leap/bin/python bench/substrate-gap/grade.py <fixture dir>` once the wave-end wheel exists (report that step as verified at close-out if the wheel predates your change).
+- If your packet changes an answer a CLI or pyo3 test pins, also run `cargo test -p glia-cli` and `cargo test --manifest-path py/Cargo.toml --test api_surface`: they pin outputs your own crate's tests never see.
+- engram-export/ is excluded from the workspace but it is an in-repo consumer. Build and test it ONLY with `bash scripts/check-engram-export.sh` (F0.2 with `--update-lock`) — never `cargo build/check/test --manifest-path engram-export/Cargo.toml` in place. The end-of-wave gate blocks on any last line but `[engram-export] check: ok`.
+- THE LEAP WHEEL LIVES IN ITS OWN VENV: run every Python command that imports glia_py with `~/.venvs/glia-leap/bin/python`, never bare `python3` (bare python3 imports the user-site wheel James's repo-graph MCP server runs on: never reinstall or modify it). The venv's wheel is rebuilt only at end of wave; to see your Rust change use the CLI (`cargo run -q -p glia-cli -- ...`) or report the pytest step as verified at close-out.
+- Gate on a CAPTURED BEFORE-FILE AND A DIFF, never a literal count.
+
+=== COMMIT PROTOCOL (concurrent agents) ===
+When green: `git add <your paths by name>` then `git commit --only <your paths> -F /tmp/<YOUR-PACKET-ID>.commitmsg`.
+The message path MUST contain your packet id and nothing else may write to it. `--only` is REQUIRED so a sibling's staged files cannot ride along. NEVER `git add -A` or `git add .`.
+`.git/index.lock` contention is EXPECTED — on "Unable to create '.git/index.lock'", sleep 2-5s and retry up to ~10 times. Never delete the lock.
+Subject `<type>(<scope>): <what>`; a body saying what changed, what the gate was (the `[rank-gate]` last line when your packet names it), every declared break (old -> new), and any measured number your acceptance asks you to record; then these exact last two lines:
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HeSHno5K3wK4b3U5tYBKt6
+Do NOT push, tag, rebase, reset, amend, or touch any commit that is not yours.
+
+=== WHEN YOUR SPEC OR CORRECTION IS WRONG ===
+It happens; catching it beats complying. Verify, report in `surprises`, work from what is there, and never edit outside your files_touched. If a prerequisite is missing, build a documented private stopgap inside your own files with its removal path in a doc comment, and report it. If the harness and your spec disagree on a measured rule, the harness wins: say so.
+
+=== HONESTY ===
+If you cannot make the gate green, commit NOTHING and report the exact failing output. If your packet is unnecessary, already done, or duplicated by a sibling, say so and commit nothing — `not-needed` is a correct outcome. Report exact counts, never "mostly working". A parity mismatch is a number to report, never a tolerance to widen silently. Contradictions go in `surprises`; anything a later packet must know goes in `followups`, naming that packet's id.
