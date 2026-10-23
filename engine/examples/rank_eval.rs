@@ -63,20 +63,30 @@
 //! `--r3-anc dir@rev=prefix@import,..` prepends pre-merge histories (`--r3-anc-map` controls),
 //! `--r3-perq on` dumps per-query metrics and `--r3-compare a.json,b.json` pairs two such runs.
 //! See the "Round 3" section near the end of this file.
+//!
+//! The shipped answers (0.5.3, EG.1): `--ans on` adds the ANS rankers, which call the engine's
+//! own answers instead of harness code: `ANS:impact` (`diff_impact::diff_impact_from_diff` over
+//! the seed files as a changed-file list) and `ANS:pack` (`pack::pack_ids` over the seed files'
+//! nodes) on the single-seed and review shapes, `ANS:find` (`find::find_nodes` on the test
+//! commit's subject) on the find shape. With `--r3-perq on` the JSON also gains `perq_shapes`,
+//! every round-3 transfer shape per query. The reference rankers' PPR is pinned (`REF_DAMPING`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use glia_activation::algo::community::{self as comm, CommunityOptions, WeightedGraph};
 use glia_activation::algo::ppr::PushPpr;
 use glia_activation::algo::reach;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
-use glia_activation::{ActivationConfig, ActivationPlan, Direction};
+use glia_activation::{ActivationConfig, ActivationPlan, Direction, Specificity};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId};
-use glia_engine::{Locator, default_keying, generate_one, service_of};
+use glia_engine::find::FindOptions;
+use glia_engine::pack::PackArgs;
+use glia_engine::{BlastOptions, Locator, default_keying, entrypoint_reachable, generate_one, service_of};
 use glia_graph::MergedGraph;
 use rayon::prelude::*;
 use serde_json::json;
@@ -94,6 +104,26 @@ const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 const U_BETAS: [f64; 2] = [1.0, 5.0];
 const ALPHAS: [f64; 3] = [0.25, 0.5, 0.75];
+
+/// The 0.5.2 PPR the reference rankers measure (damping, iteration cap, convergence epsilon,
+/// node specificity): pinned so an engine default change never moves the reference the rank
+/// gate compares against. They equal `ActivationConfig::default()` at 0.5.2, so pinning moves
+/// no ranker. Edge weights stay `CODE_TABLES`': a weight change is a graph-ranking change the
+/// gate is meant to see, on the ANS rankers and the reference alike.
+const REF_DAMPING: f64 = 0.5;
+const REF_MAX_ITER: usize = 100;
+const REF_EPS: f64 = 1e-6;
+const REF_SPECIFICITY: Specificity = Specificity::None;
+
+/// `CODE_TABLES.activation_config(preset)` with the reference pin applied (`REF_DAMPING`).
+fn ref_config(preset: Option<&str>) -> ActivationConfig {
+    let mut c = CODE_TABLES.activation_config(preset);
+    c.damping = REF_DAMPING;
+    c.max_iterations = REF_MAX_ITER;
+    c.epsilon = REF_EPS;
+    c.node_specificity = REF_SPECIFICITY;
+    c
+}
 
 /// Extensions a MODULE node may sit on that are not code (docs, data,
 /// lockfiles, manifests). Everything else with a MODULE node is a candidate.
@@ -180,6 +210,8 @@ struct Args {
     r3_anc_map: String,
     /// Round 3: `on` writes every query's recall@10 / MRR per ranker (for `--r3-compare`).
     r3_perq: String,
+    /// `on` adds the ANS rankers (the engine's own answers, EG.1); empty (default) leaves them out.
+    ans: String,
     /// Round 3: `<a.json>,<b.json>` compares two `--r3-perq on` runs of the same queries (b - a).
     r3_compare: String,
     /// Round 3: extra SELt3x candidates (comma-separated; chosen after a first run, so post-hoc).
@@ -224,6 +256,7 @@ fn parse_args() -> Args {
         r3_anc: String::new(),
         r3_anc_map: "true".into(),
         r3_perq: String::new(),
+        ans: String::new(),
         r3_compare: String::new(),
         r3_selx: String::new(),
         private: std::env::var("GLIA_RANK_PRIVATE").unwrap_or_default(),
@@ -267,6 +300,7 @@ fn parse_args() -> Args {
             "--r3-anc" => a.r3_anc = v,
             "--r3-anc-map" => a.r3_anc_map = v,
             "--r3-perq" => a.r3_perq = v,
+            "--ans" => a.ans = v,
             "--r3-compare" => a.r3_compare = v,
             "--r3-selx" => a.r3_selx = v,
             "--private" => a.private = v,
@@ -1004,6 +1038,15 @@ struct Ctx<'a> {
     tune: Vec<(String, Ppr)>,
     /// Round 1: the picked config's position in `tune`.
     pick: Option<usize>,
+    /// `--ans on`: the ANS rankers run (EG.1).
+    ans: bool,
+    /// Candidate file path -> its index (ANS rankers); only ever looked up, never iterated.
+    path_ix: HashMap<String, u32>,
+    /// `entrypoint_reachable` of the graph, computed once for `find_nodes_with_live` (empty
+    /// without `--ans on`).
+    live: HashSet<NodeId>,
+    /// Wall nanoseconds spent inside the engine answers' calls, summed over every thread.
+    ans_ns: AtomicU64,
 }
 
 #[derive(Default)]
@@ -1108,6 +1151,59 @@ fn pooled(base: &[f64], cl: &[u32], m: usize) -> Vec<Key> {
         cs[cl[f] as usize] += s;
     }
     base.iter().enumerate().map(|(f, &s)| [cs[cl[f] as usize], s, 0.0]).collect()
+}
+
+/// The ANS rankers' file keys from an answer's node rows, given in the answer's rank order.
+/// The first row whose `file` is a candidate gives that file key `[-k, 0, 0]`, k its order of
+/// first appearance (0, 1, ...): a max-style roll-up of node rows to files, since no 0.5.2
+/// answer exposes a file-level ranking (BlastAnswer / PackedNode / FoundNode are node rows).
+/// Every file no row reaches keys `[-inf; 3]`, so the harness's tie rule orders those by path.
+///
+/// Contract for the porting packets: a packet that adds a file-level roll-up to an answer
+/// (item 1's sum pooling in blast radius / pack) switches that answer's ANS ranker to read the
+/// roll-up in the same packet.
+fn rows_to_keys(g: &Graph, path_ix: &HashMap<String, u32>, files: impl Iterator<Item = Option<String>>) -> Vec<Key> {
+    let mut key: Vec<Key> = vec![[f64::NEG_INFINITY; 3]; g.paths.len()];
+    let mut k = 0usize;
+    for f in files.flatten() {
+        if let Some(&ix) = path_ix.get(&f) {
+            let slot = &mut key[ix as usize];
+            if slot[0] == f64::NEG_INFINITY {
+                *slot = [-(k as f64), 0.0, 0.0];
+                k += 1;
+            }
+        }
+    }
+    key
+}
+
+/// ANS:impact and ANS:pack for seed files `seeds`: the engine's diff impact over the seed files
+/// as a changed-file list (its seeds are the answer's own: every node of each file) and its pack
+/// over every node of the seed files, each with default options.
+fn ans_keys_seed(ctx: &Ctx, seeds: &[u32]) -> Vec<(String, Vec<Key>)> {
+    let g = ctx.g;
+    let t0 = Instant::now();
+    let text = seeds.iter().map(|&f| g.paths[f as usize].as_str()).collect::<Vec<_>>().join("\n");
+    let d = glia_engine::diff_impact::diff_impact_from_diff(ctx.merged, &text, &BlastOptions::default());
+    let impact = rows_to_keys(g, &ctx.path_ix, d.impact.results.into_iter().map(|r| r.file));
+    let seed_ids: Vec<NodeId> = seeds.iter().flat_map(|&f| g.file_nodes[f as usize].iter().map(|&u| g.ids[u as usize])).collect();
+    let mut p = glia_engine::pack::pack_ids(ctx.merged, &seed_ids, &PackArgs::default());
+    p.nodes.sort_by_key(|n| n.rank);
+    let pack = rows_to_keys(g, &ctx.path_ix, p.nodes.into_iter().map(|n| n.file));
+    ctx.ans_ns.fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    vec![("ANS:impact".into(), impact), ("ANS:pack".into(), pack)]
+}
+
+/// ANS:find for a test commit's subject: the engine's find over the whole subject, every match
+/// kept (`top_k = 0`). `find_nodes_with_live` is `find_nodes` over the live set computed once.
+fn ans_keys_find(ctx: &Ctx, subject: &str) -> Vec<(String, Vec<Key>)> {
+    let t0 = Instant::now();
+    let mut o = FindOptions::default();
+    o.top_k = 0;
+    let a = glia_engine::find::find_nodes_with_live(ctx.merged, &ctx.live, subject, &o);
+    let keys = rows_to_keys(ctx.g, &ctx.path_ix, a.results.into_iter().map(|r| r.file));
+    ctx.ans_ns.fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    vec![("ANS:find".into(), keys)]
 }
 
 fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Option<&VLayer>, r1: Option<&R1Commit>) -> Out {
@@ -1324,6 +1420,13 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
         round1_rankers(&mut out, ctx, r1, q, t, &p1, &p1sum_v, &c0, &t1, &pers, &structural[0].1);
     }
 
+    // ---- the shipped answers (`--ans on`, appended last, so every ranker above is unchanged) ----
+    if ctx.ans {
+        for (name, key) in ans_keys_seed(ctx, &[q.seed]) {
+            out.push(name, &key, seed, t);
+        }
+    }
+
     // ---- hub flooding ----
     out.hub_share.push(("P1".into(), hub_share(&p1, &ctx.hubs, seed)));
     out.hub_share.push(("P2".into(), hub_share(&p2, &ctx.hubs, seed)));
@@ -1469,7 +1572,7 @@ fn main() {
     // ---- PPR indexes ----
     let n_all = all_ids.len();
     let undirected = |preset: Option<&str>, dir: Direction| {
-        let mut c = CODE_TABLES.activation_config(preset);
+        let mut c = ref_config(preset);
         c.direction = dir;
         c.top_k = usize::MAX;
         c
@@ -1758,6 +1861,10 @@ fn main() {
         push_eps: args.push_eps,
         tune: if args.tune == "on" { r1_tune_indexes(n_all, &id_to_idx, &edges, &edge_pair) } else { Vec::new() },
         pick: None,
+        ans: args.ans == "on",
+        path_ix: g.paths.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect(),
+        live: if args.ans == "on" { entrypoint_reachable(merged) } else { HashSet::new() },
+        ans_ns: AtomicU64::new(0),
     };
     let mut ctx = ctx;
     if !args.pick.is_empty() {
@@ -1782,12 +1889,27 @@ fn main() {
     let mut tc_files: Vec<Vec<u32>> = test_idx.iter().map(|&k| commits[k].files.clone()).collect();
     let mut r3_info = serde_json::Map::new();
     let mut transfer: Vec<(Vec<Out>, Vec<usize>)> = Vec::new();
+    // per shape, each transfer query's id (`--r3-perq on`'s `perq_shapes`), aligned with `transfer`
+    let mut transfer_ids: Vec<Vec<String>> = Vec::new();
     let r3_conf_tc: Vec<[f64; 4]> = r1s.iter().map(|r| r.r3.as_ref().map_or([0.0; 4], |x| x.conf)).collect();
     let r3_cands_b: Vec<String> = R3_SELT2.iter().chain(["P1", "PT*"].iter()).map(|s| s.to_string()).collect();
     if r3_on {
         let t3 = Instant::now();
         r3_info.insert("gates".into(), r3_gates(&mut results, &tc_of_main, &r3_conf_tc, &tc_sha, &R3_GATE_PAIRS, &r3_cands_b));
-        transfer = r3_transfer(&ctx, &tqs, &r1s);
+        let subjects: Vec<String> = test_idx.iter().map(|&k| subject(&commits[k].msg).to_string()).collect();
+        transfer = r3_transfer(&ctx, &tqs, &r1s, &subjects);
+        transfer_ids = vec![Vec::new(); R3_SHAPES.len()];
+        for q in &tqs {
+            let sha = &commits[test_idx[q.tc]].sha;
+            let id = if q.shape == 3 {
+                format!("{sha}:find")
+            } else {
+                let mut ps: Vec<&str> = q.seeds.iter().map(|&f| g.paths[f as usize].as_str()).collect();
+                ps.sort_unstable();
+                format!("{sha}:{}:{}", R3_SHAPES[q.shape], ps.join("+"))
+            };
+            transfer_ids[q.shape].push(id);
+        }
         let mut tinfo = serde_json::Map::new();
         for (si, (outs, tc_of)) in transfer.iter_mut().enumerate() {
             if outs.is_empty() {
@@ -1810,6 +1932,15 @@ fn main() {
         }
         r3_info.insert("transfer".into(), serde_json::Value::Object(tinfo));
         eprintln!("[round3] gates and {} transfer queries in {:.1}s", tqs.len(), t3.elapsed().as_secs_f64());
+    }
+    if ctx.ans {
+        let n_transfer: usize = transfer.iter().take(3).map(|(o, _)| o.len()).sum();
+        let n_find = transfer.get(3).map_or(0, |(o, _)| o.len());
+        eprintln!(
+            "[rank_eval] ans rankers=3 single={} transfer={n_transfer} find={n_find} ms={}",
+            results.len(),
+            ctx.ans_ns.load(AtomicOrdering::Relaxed) / 1_000_000
+        );
     }
     let r1_sel = if r1_on { round1_select(&mut results, &queries, tcs.len()) } else { serde_json::Value::Null };
     if r3_on {
@@ -1888,16 +2019,23 @@ fn main() {
         r1s = r1s.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
         tc_sha = tc_sha.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
         tc_files = tc_files.into_iter().enumerate().filter(|(o, _)| keep[*o]).map(|x| x.1).collect();
-        for (outs, tc_of) in transfer.iter_mut() {
+        for (si, (outs, tc_of)) in transfer.iter_mut().enumerate() {
             let (mut no, mut nt) = (Vec::new(), Vec::new());
-            for (o, &t) in outs.drain(..).zip(tc_of.iter()) {
+            let mut ni = Vec::new();
+            for (j, (o, &t)) in outs.drain(..).zip(tc_of.iter()).enumerate() {
                 if keep[t] {
                     no.push(o);
                     nt.push(newo[t]);
+                    if let Some(id) = transfer_ids.get(si).and_then(|v| v.get(j)) {
+                        ni.push(id.clone());
+                    }
                 }
             }
             *outs = no;
             *tc_of = nt;
+            if let Some(v) = transfer_ids.get_mut(si) {
+                *v = ni;
+            }
         }
     }
     let _ = &tc_files;
@@ -2058,6 +2196,20 @@ fn main() {
             mrr.insert(n.clone(), json!(col(ri, 3)));
         }
         doc["perq"] = json!({"ids": ids, "commit_of": commit_of, "r10": r10, "mrr": mrr});
+        let mut shapes = serde_json::Map::new();
+        for (si, (outs, tc_of)) in transfer.iter().enumerate() {
+            if outs.is_empty() {
+                continue;
+            }
+            let mut r10 = serde_json::Map::new();
+            let mut mrr = serde_json::Map::new();
+            for (ri, n) in outs[0].names.iter().enumerate() {
+                r10.insert(n.clone(), json!(outs.iter().map(|o| o.m[ri][1]).collect::<Vec<f64>>()));
+                mrr.insert(n.clone(), json!(outs.iter().map(|o| o.m[ri][3]).collect::<Vec<f64>>()));
+            }
+            shapes.insert(R3_SHAPES[si].into(), json!({"ids": transfer_ids[si], "commit_of": tc_of, "r10": r10, "mrr": mrr}));
+        }
+        doc["perq_shapes"] = serde_json::Value::Object(shapes);
     }
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write json");
     let md = render_md(&args.label, &doc, &names, &metrics, &paired_all);
@@ -6143,7 +6295,7 @@ fn law_impact_main(args: &Args) {
     let g = index_graph(merged, &all_ids, &id_to_idx, &edges);
     let nf = g.paths.len();
     let pidx: HashMap<&str, u32> = g.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
-    let mut cfg = CODE_TABLES.activation_config(None);
+    let mut cfg = ref_config(None);
     cfg.direction = Direction::Undirected;
     cfg.top_k = usize::MAX;
     let ppr = Ppr::build(all_ids.len(), &id_to_idx, &edges, &vec![NONE; edges.len()], &cfg);
@@ -11999,7 +12151,7 @@ fn r1_tune_indexes(n: usize, id_to_idx: &HashMap<NodeId, usize>, edges: &[&Edge]
     let mut out = Vec::new();
     for (wname, over) in R1_WSETS {
         for dmp in R1_DAMP {
-            let mut c = CODE_TABLES.activation_config(None);
+            let mut c = ref_config(None);
             c.direction = Direction::Undirected;
             c.top_k = usize::MAX;
             c.damping = dmp;
@@ -12455,7 +12607,7 @@ fn law_event_tr(args: &Args) {
     let g = index_graph(merged, &all_ids, &id_to_idx, &edges);
     let nf = g.paths.len();
     let pidx: HashMap<&str, u32> = g.paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as u32)).collect();
-    let mut cfg = CODE_TABLES.activation_config(None);
+    let mut cfg = ref_config(None);
     cfg.direction = Direction::Undirected;
     cfg.top_k = usize::MAX;
     let ppr = Ppr::build(all_ids.len(), &id_to_idx, &edges, &vec![NONE; edges.len()], &cfg);
@@ -13731,7 +13883,9 @@ fn round3_rankers(out: &mut Out, r: &R1Commit, x3: &R3Commit, seed: usize, t: &[
 }
 
 /// Runs the transfer queries; per shape, the queries' results (in test order) and their test commits.
-fn r3_transfer(ctx: &Ctx, tqs: &[TQuery], r1s: &[R1Commit]) -> Vec<(Vec<Out>, Vec<usize>)> {
+/// With `ctx.ans`, each query's bank gains the ANS rankers last (ANS:impact / ANS:pack on the
+/// seed shapes, ANS:find on the find shape, over `subjects[q.tc]`, the test commit's subject).
+fn r3_transfer(ctx: &Ctx, tqs: &[TQuery], r1s: &[R1Commit], subjects: &[String]) -> Vec<(Vec<Out>, Vec<usize>)> {
     let g = ctx.g;
     let nf = g.paths.len();
     let res: Vec<Out> = tqs
@@ -13778,13 +13932,16 @@ fn r3_transfer(ctx: &Ctx, tqs: &[TQuery], r1s: &[R1Commit]) -> Vec<(Vec<Out>, Ve
             let (c0, t1s, t1ss, w5, m) = (d(&q.c0), d(&r.t1s), d(&r.t1ss), d(&r.w[2]), d(&r.ms[0].1));
             let idr = r.r2.as_ref().map_or_else(|| vec![0.0; nf], |x| d(&x.idr));
             let (idh, idh_c, idh_u) = (d(&x3.idh), d(&x3.idh_c), d(&x3.idh_u));
-            let bank = if find {
+            let mut bank = if find {
                 r3_bank_find(&R3Find { t1s: &t1s, t1ss: &t1ss, px1: &p1, pxt: &pt, c0x: &c0, w5: &w5, m: &m, idr: &idr, idh: &idh, idh_c: &idh_c, deg: &g.file_deg })
             } else {
                 let seed_ids: Vec<NodeId> = q.seeds.iter().flat_map(|&f| g.file_nodes[f as usize].iter().map(|&u| g.ids[u as usize])).collect();
                 let (b0, _) = bfs_key(ctx, &ctx.adj_carry, &seed_ids);
                 r3_bank_seed(&R3In { excl: &excl, p1: &p1, pt: &pt, c0: &c0, t1s: &t1s, w5: &w5, m: &m, idr: &idr, idh: &idh, idh_c: &idh_c, idh_u: &idh_u, b0: Some(&b0) }, true)
             };
+            if ctx.ans {
+                bank.extend(if find { ans_keys_find(ctx, &subjects[q.tc]) } else { ans_keys_seed(ctx, &q.seeds) });
+            }
             let mut out = Out::default();
             for (name, key) in bank {
                 out.names.push(name);
