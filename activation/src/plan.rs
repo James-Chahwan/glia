@@ -44,7 +44,7 @@ use std::sync::OnceLock;
 use glia_core::{Edge, NodeId};
 
 use crate::algo::GraphSource;
-use crate::{ActivationConfig, Specificity};
+use crate::{ActivationConfig, PprIndex, Specificity};
 
 // ============================================================================
 // Hook traits
@@ -279,7 +279,18 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// [`crate::activate`] ranks them. No seeds or no nodes: an empty view,
     /// no hook run.
     pub fn run(&self, g: &G, seeds: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, Universe::Reached, "run")
+        self.pass().execute(g, seeds, None, Universe::Reached, "run")
+    }
+
+    /// [`Self::run`] over a prebuilt [`PprIndex`] (EA.1): the node list is
+    /// `index.node_ids()` (`g.node_ids()` is not called) and the PPR vector
+    /// `index.vector(seeds)`; signals, filters, synth hooks and the degree
+    /// specificity still read `g`. Bit-identical to [`Self::run`] when
+    /// `index` was built from `g` under this plan's config. An index built
+    /// for another config ([`PprIndex::matches`] false) is ignored, and
+    /// `[activation] index mismatch mode=run` printed on stderr.
+    pub fn run_indexed(&self, g: &G, index: &PprIndex, seeds: &[NodeId]) -> ActivatedView {
+        self.pass().execute(g, seeds, Some(index), Universe::Reached, "run")
     }
 
     /// The whole pass over `candidates` (first occurrence kept): each at its
@@ -288,7 +299,13 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// over `activate()`'s scores. No seeds or no nodes: an empty view, no
     /// hook run.
     pub fn rank(&self, g: &G, seeds: &[NodeId], candidates: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, Universe::Candidates(candidates), "rank")
+        self.pass().execute(g, seeds, None, Universe::Candidates(candidates), "rank")
+    }
+
+    /// [`Self::rank`] over a prebuilt [`PprIndex`], as [`Self::run_indexed`]
+    /// is [`Self::run`] over one.
+    pub fn rank_indexed(&self, g: &G, index: &PprIndex, seeds: &[NodeId], candidates: &[NodeId]) -> ActivatedView {
+        self.pass().execute(g, seeds, Some(index), Universe::Candidates(candidates), "rank")
     }
 
     /// Only the synth hooks, over a view built elsewhere
@@ -308,6 +325,7 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
                 kept: n,
                 dropped: &[],
                 synth_cells: added,
+                index: "none",
             };
             eprintln!("{marker}");
         }
@@ -347,8 +365,32 @@ impl<G: ?Sized> Pass<'_, '_, G> {
 }
 
 impl<G: GraphSource + ?Sized> Pass<'_, '_, G> {
-    fn execute(&self, g: &G, seeds: &[NodeId], universe: Universe<'_>, mode: &'static str) -> ActivatedView {
-        let node_ids = g.node_ids();
+    fn execute(
+        &self,
+        g: &G,
+        seeds: &[NodeId],
+        index: Option<&PprIndex>,
+        universe: Universe<'_>,
+        mode: &'static str,
+    ) -> ActivatedView {
+        let config = self.config;
+        // An index built for another config is a caller bug: never a wrong
+        // score, so it is ignored, and visible.
+        let index = index.filter(|ix| {
+            let ok = ix.matches(config);
+            if !ok {
+                eprintln!("[activation] index mismatch mode={mode}");
+            }
+            ok
+        });
+        let owned;
+        let node_ids: &[NodeId] = match index {
+            Some(ix) => ix.node_ids(),
+            None => {
+                owned = g.node_ids();
+                &owned
+            }
+        };
         if node_ids.is_empty() || seeds.is_empty() {
             if activation_debug() {
                 let marker = Marker {
@@ -360,13 +402,16 @@ impl<G: GraphSource + ?Sized> Pass<'_, '_, G> {
                     kept: 0,
                     dropped: &[],
                     synth_cells: 0,
+                    index: "none",
                 };
                 eprintln!("{marker}");
             }
             return ActivatedView::default();
         }
-        let config = self.config;
-        let (vector, iterations) = crate::ppr_vector(&node_ids, g.edges(), seeds, config);
+        let (vector, iterations) = match index {
+            Some(ix) => ix.vector(seeds),
+            None => crate::ppr_vector(node_ids, g.edges(), seeds, config),
+        };
         let mut applied: Vec<&'static str> = Vec::new();
 
         // Over the whole vector, before the universe: an underflow to 0 must
@@ -417,6 +462,7 @@ impl<G: GraphSource + ?Sized> Pass<'_, '_, G> {
                 kept: view.scores.len(),
                 dropped: &view.dropped,
                 synth_cells: added,
+                index: if index.is_some() { "prebuilt" } else { "built" },
             };
             eprintln!("{marker}");
         }
@@ -466,7 +512,17 @@ fn sort_ranked(ranked: &mut [(NodeId, f64)]) {
 
 /// [`crate::activate`]: the pass with no hooks over two slices.
 pub(crate) fn activate_view(g: &SliceGraph<'_>, seeds: &[NodeId], config: &ActivationConfig) -> ActivatedView {
-    Pass { config, signals: &[], filters: &[], synths: &[] }.execute(g, seeds, Universe::Reached, "activate")
+    Pass { config, signals: &[], filters: &[], synths: &[] }.execute(g, seeds, None, Universe::Reached, "activate")
+}
+
+/// [`crate::activate_indexed`]: the pass with no hooks over a prebuilt index.
+pub(crate) fn activate_view_indexed(
+    g: &SliceGraph<'_>,
+    index: &PprIndex,
+    seeds: &[NodeId],
+    config: &ActivationConfig,
+) -> ActivatedView {
+    Pass { config, signals: &[], filters: &[], synths: &[] }.execute(g, seeds, Some(index), Universe::Reached, "activate")
 }
 
 // ============================================================================
@@ -481,8 +537,12 @@ fn activation_debug() -> bool {
 
 /// The debug line: `[activation] plan mode=<activate|run|rank|synthesize>
 /// signals=[..] filters=[..] synth=[..] universe=N kept=N dropped=[name:N,..]
-/// synth_cells=N`. `universe` is the ranked set before the filters, `kept` the
-/// view after `top_k`, `synth_cells` the cells this pass added.
+/// synth_cells=N index=<prebuilt|built|none>`. `universe` is the ranked set
+/// before the filters, `kept` the view after `top_k`, `synth_cells` the cells
+/// this pass added, `index` whether PPR ran over a caller's [`PprIndex`]
+/// (`prebuilt`), one the pass built (`built`), or no PPR ran (`none`: the
+/// synthesize mode and a pass with no nodes or no seeds). Printed last, so
+/// the line's prefix is the pre-EA.1 line.
 struct Marker<'a> {
     mode: &'a str,
     signals: Vec<&'a str>,
@@ -492,6 +552,7 @@ struct Marker<'a> {
     kept: usize,
     dropped: &'a [(&'a str, usize)],
     synth_cells: usize,
+    index: &'a str,
 }
 
 impl fmt::Display for Marker<'_> {
@@ -499,7 +560,7 @@ impl fmt::Display for Marker<'_> {
         let dropped: Vec<String> = self.dropped.iter().map(|(n, c)| format!("{n}:{c}")).collect();
         write!(
             f,
-            "[activation] plan mode={} signals=[{}] filters=[{}] synth=[{}] universe={} kept={} dropped=[{}] synth_cells={}",
+            "[activation] plan mode={} signals=[{}] filters=[{}] synth=[{}] universe={} kept={} dropped=[{}] synth_cells={} index={}",
             self.mode,
             self.signals.join(","),
             self.filters.join(","),
@@ -508,6 +569,7 @@ impl fmt::Display for Marker<'_> {
             self.kept,
             dropped.join(","),
             self.synth_cells,
+            self.index,
         )
     }
 }
@@ -879,6 +941,99 @@ mod tests {
         assert!(checked > 500, "only {checked} ranked views held a positive score");
     }
 
+    /// (EA.1 a) Over 300 LCG graphs (repeated ids, non-node endpoints,
+    /// zero and negative weights, damping outside (0, 1)): the index's vector
+    /// equals HEAD's ppr_vector in f64 bits and rounds, and one index reused
+    /// for a second seed set equals a fresh build.
+    #[test]
+    fn ppr_index_equals_head_ppr_vector() {
+        let mut rng = Lcg(0xea1);
+        let mut nonempty = 0usize;
+        for_each_config(0xea1, |i, c, config| {
+            if config.node_specificity != Specificity::None || config.top_k != 1 {
+                return; // post-PPR dials: one run per (case, direction)
+            }
+            let old = crate::ppr_index::ppr_vector_head(&c.nodes, c.edges.iter(), &c.seeds, config);
+            let ix = PprIndex::build(&c.nodes, c.edges.iter(), config);
+            let new = ix.vector(&c.seeds);
+            let fb = |v: &(Vec<f64>, usize)| (v.0.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), v.1);
+            assert_eq!(fb(&old), fb(&new), "case {i} {config:?}");
+            assert_eq!(fb(&old), fb(&crate::ppr_vector(&c.nodes, c.edges.iter(), &c.seeds, config)), "case {i}");
+            nonempty += usize::from(!new.0.is_empty());
+            let other: Vec<NodeId> = (0..3).map(|_| some_id(&mut rng, &c.nodes)).collect();
+            let again = crate::ppr_index::ppr_vector_head(&c.nodes, c.edges.iter(), &other, config);
+            assert_eq!(fb(&again), fb(&ix.vector(&other)), "case {i} reuse");
+        });
+        assert!(nonempty > 300, "only {nonempty} non-empty vectors compared");
+    }
+
+    fn same_view(a: &ActivatedView, b: &ActivatedView) -> bool {
+        bits(&a.scores) == bits(&b.scores)
+            && a.iterations == b.iterations
+            && a.dropped == b.dropped
+            && a.applied == b.applied
+            && a.synth == b.synth
+    }
+
+    /// (EA.1 c) run_indexed / rank_indexed / activate_indexed equal run /
+    /// rank / activate, with a signal and a filter registered.
+    #[test]
+    fn indexed_views_equal_unindexed() {
+        let mut rng = Lcg(0x1dc);
+        let mut checked = 0usize;
+        for_each_config(0x1dc, |i, c, config| {
+            let g = SliceGraph { nodes: &c.nodes, edges: &c.edges };
+            let drop = DropIds("drop", c.nodes.iter().copied().take(2).collect());
+            let plan = ActivationPlan::new(config.clone()).signal(&AddOne).filter(&drop);
+            let ix = PprIndex::build(&c.nodes, c.edges.iter(), config);
+            let a = plan.run(&g, &c.seeds);
+            let b = plan.run_indexed(&g, &ix, &c.seeds);
+            assert!(same_view(&a, &b), "case {i} run {config:?}\n{a:?}\n{b:?}");
+            let n = rng.below(12);
+            let candidates: Vec<NodeId> = (0..n).map(|_| some_id(&mut rng, &c.nodes)).collect();
+            let a = plan.rank(&g, &c.seeds, &candidates);
+            let b = plan.rank_indexed(&g, &ix, &c.seeds, &candidates);
+            assert!(same_view(&a, &b), "case {i} rank {config:?}");
+            let old = activate(&c.nodes, &c.edges, &c.seeds, config);
+            let new = crate::activate_indexed(&ix, &c.edges, &c.seeds, config);
+            assert!(same(&old, &new), "case {i} activate {config:?}");
+            if config.node_specificity == Specificity::None {
+                let bare = crate::activate_indexed(&ix, &[], &c.seeds, config);
+                assert!(same(&old, &bare), "case {i} activate, no edges");
+            }
+            checked += usize::from(!a.scores.is_empty());
+        });
+        assert!(checked > 1000, "only {checked} non-empty views compared");
+    }
+
+    /// (EA.1 d) An index built for another config is ignored: the answer is
+    /// the unindexed one.
+    #[test]
+    fn mismatched_index_gives_unindexed_answer() {
+        let (nodes, edges) = star();
+        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let config = ActivationConfig { direction: Direction::Undirected, ..Default::default() };
+        let others = [
+            ActivationConfig { damping: 0.85, ..config.clone() },
+            ActivationConfig { direction: Direction::Forward, ..config.clone() },
+            ActivationConfig { edge_weights: HashMap::from([(EdgeCategoryId(1), 0.0)]), ..config.clone() },
+        ];
+        let plan: ActivationPlan<'_, SliceGraph<'_>> = ActivationPlan::new(config.clone());
+        let seeds = ids(&[2]);
+        let want = plan.run(&g, &seeds);
+        for other in &others {
+            let ix = PprIndex::build(&nodes, edges.iter(), other);
+            assert!(!ix.matches(&config));
+            // The wrong index alone would answer differently.
+            let wrong = ActivationPlan::<SliceGraph<'_>>::new(other.clone()).run_indexed(&g, &ix, &seeds);
+            assert!(!same_view(&want, &wrong), "{other:?}");
+            assert!(same_view(&want, &plan.run_indexed(&g, &ix, &seeds)), "{other:?}");
+            assert!(same_view(&plan.rank(&g, &seeds, &nodes), &plan.rank_indexed(&g, &ix, &seeds, &nodes)));
+            let a = activate(&nodes, &edges, &seeds, &config);
+            assert!(same(&a, &crate::activate_indexed(&ix, &edges, &seeds, &config)));
+        }
+    }
+
     /// Star 1 -> {2, 3, 4, 5}, seed 1: node 1 ranks first.
     fn star() -> (Vec<NodeId>, Vec<Edge>) {
         (ids(&[1, 2, 3, 4, 5]), vec![edge(1, 2, 1), edge(1, 3, 1), edge(1, 4, 1), edge(1, 5, 1)])
@@ -1181,10 +1336,11 @@ mod tests {
             kept: 812,
             dropped: &dropped,
             synth_cells: 0,
+            index: "built",
         };
         assert_eq!(
             marker.to_string(),
-            "[activation] plan mode=rank signals=[degree_specificity] filters=[live] synth=[] universe=5712 kept=812 dropped=[live:37] synth_cells=0"
+            "[activation] plan mode=rank signals=[degree_specificity] filters=[live] synth=[] universe=5712 kept=812 dropped=[live:37] synth_cells=0 index=built"
         );
         let plan: ActivationPlan<'_, SliceGraph<'_>> = ActivationPlan::new(ActivationConfig::default()).signal(&AddOne);
         let debug = format!("{plan:?}");

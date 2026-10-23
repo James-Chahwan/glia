@@ -38,6 +38,12 @@ pub mod algo;
 /// [`plan::ActivatedView`]. [`activate`] is that pass with no hooks.
 pub mod plan;
 
+/// The PPR index (EA.1): [`PprIndex`], built once per (graph, config) and
+/// run per seed set, bit-identical to a fresh build.
+pub mod ppr_index;
+
+pub use ppr_index::PprIndex;
+
 pub use plan::{
     ActivatedView, ActivationPlan, DegreeSpecificity, FilterPredicate, RankingSignal, SliceGraph, SynthCell,
     SynthHook,
@@ -159,126 +165,46 @@ pub fn activate(
 /// iteration rounds that produced it. Empty, after 0 rounds, when there are
 /// no nodes, no seeds, or no seed is a node.
 ///
-/// This is the pre-plan `activate()`'s arithmetic verbatim, in the same
-/// operation order: `plan`'s oracle test compares f64 bits, so do not
-/// "simplify" the dangling-mass sum or reorder the update. A repeated node id
-/// is indexed at its last occurrence; an earlier one scores 0.
+/// [`PprIndex::build`] then [`PprIndex::vector`]: the pre-plan `activate()`'s
+/// arithmetic verbatim, in the same operation order (`plan`'s oracle test
+/// compares f64 bits). A repeated node id is indexed at its last occurrence;
+/// an earlier one scores 0.
 pub(crate) fn ppr_vector<'e>(
     node_ids: &[NodeId],
     edges: impl Iterator<Item = &'e Edge>,
     seeds: &[NodeId],
     config: &ActivationConfig,
 ) -> (Vec<f64>, usize) {
-    let n = node_ids.len();
-    if n == 0 || seeds.is_empty() {
+    if node_ids.is_empty() || seeds.is_empty() {
         return (Vec::new(), 0);
     }
+    PprIndex::build(node_ids, edges, config).vector(seeds)
+}
 
-    let id_to_idx: HashMap<NodeId, usize> =
-        node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-
-    // Build adjacency: incoming[i] = [(source_idx, weight)] — who can send
-    // activation to node i. out_weight[j] = total outgoing weight from j.
-    let mut incoming: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
-    let mut out_weight: Vec<f64> = vec![0.0; n];
-
-    for edge in edges {
-        let w = config
-            .edge_weights
-            .get(&edge.category)
-            .copied()
-            .unwrap_or(1.0);
-        if w <= 0.0 {
-            continue;
-        }
-
-        let from_idx = id_to_idx.get(&edge.from).copied();
-        let to_idx = id_to_idx.get(&edge.to).copied();
-
-        match (from_idx, to_idx) {
-            (Some(fi), Some(ti)) => match config.direction {
-                Direction::Forward => {
-                    incoming[ti].push((fi, w));
-                    out_weight[fi] += w;
-                }
-                Direction::Backward => {
-                    incoming[fi].push((ti, w));
-                    out_weight[ti] += w;
-                }
-                Direction::Undirected => {
-                    incoming[ti].push((fi, w));
-                    incoming[fi].push((ti, w));
-                    out_weight[fi] += w;
-                    out_weight[ti] += w;
-                }
-            },
-            _ => continue,
-        }
+/// [`activate`] over a prebuilt [`PprIndex`]: the same answer, the PPR
+/// vector from `index` instead of a fresh build. `edges` is read only when
+/// `config.node_specificity` is not [`Specificity::None`] (the degree
+/// specificity counts them) and is the slice [`activate`] would have been
+/// given; with `Specificity::None` a caller may pass `&[]`. An index built
+/// for another config ([`PprIndex::matches`] false) is ignored, the vector
+/// built afresh from `index.node_ids()` and `edges`, and
+/// `[activation] index mismatch mode=activate` printed on stderr.
+pub fn activate_indexed(
+    index: &PprIndex,
+    edges: &[Edge],
+    seeds: &[NodeId],
+    config: &ActivationConfig,
+) -> ActivationResult {
+    let view = plan::activate_view_indexed(
+        &SliceGraph { nodes: index.node_ids(), edges },
+        index,
+        seeds,
+        config,
+    );
+    ActivationResult {
+        scores: view.scores,
+        iterations: view.iterations,
     }
-
-    // Personalization vector: equal weight on seed nodes.
-    let mut personalization = vec![0.0; n];
-    let seed_count = seeds
-        .iter()
-        .filter(|s| id_to_idx.contains_key(s))
-        .count();
-    if seed_count == 0 {
-        return (Vec::new(), 0);
-    }
-    let seed_weight = 1.0 / seed_count as f64;
-    for seed in seeds {
-        if let Some(&idx) = id_to_idx.get(seed) {
-            personalization[idx] = seed_weight;
-        }
-    }
-
-    // Power iteration: v = (1-d) * p + d * M * v
-    let d = config.damping.clamp(0.01, 0.99);
-    let mut scores = personalization.clone();
-    let mut iterations = 0;
-
-    for _ in 0..config.max_iterations {
-        let mut new_scores = vec![0.0; n];
-
-        // Dangling nodes (no outgoing edges) would lose activation into the
-        // void. Standard PPR redistributes their mass back to the
-        // personalization vector — keeps scores summing to 1.0.
-        let dangling_sum: f64 = (0..n)
-            .filter(|&j| out_weight[j] == 0.0)
-            .map(|j| scores[j])
-            .sum();
-
-        for i in 0..n {
-            let propagated: f64 = incoming[i]
-                .iter()
-                .map(|&(j, w)| {
-                    if out_weight[j] > 0.0 {
-                        scores[j] * w / out_weight[j]
-                    } else {
-                        0.0
-                    }
-                })
-                .sum();
-
-            new_scores[i] =
-                (1.0 - d) * personalization[i] + d * (propagated + dangling_sum * personalization[i]);
-        }
-
-        let diff: f64 = scores
-            .iter()
-            .zip(new_scores.iter())
-            .map(|(a, b)| (a - b).abs())
-            .sum();
-
-        scores = new_scores;
-        iterations += 1;
-
-        if diff < config.epsilon {
-            break;
-        }
-    }
-
-    (scores, iterations)
 }
 
 // ============================================================================
