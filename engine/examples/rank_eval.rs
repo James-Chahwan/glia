@@ -1345,7 +1345,9 @@ fn rows_to_keys(g: &Graph, path_ix: &HashMap<String, u32>, files: impl Iterator<
 /// half), and `ANS:impact.files`, the default diff impact's file roll-up (`BlastRadius::files`
 /// with `top_files = usize::MAX`, rank 1 first) instead of its rows. `top_files` cuts only the
 /// roll-up, never the rows, so ANS:impact reads the same rows as before.
-fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (Vec<(String, Vec<Key>)>, Vec<(String, Vec<Key>)>) {
+type NamedKeys = Vec<(String, Vec<Key>)>;
+
+fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKeys, NamedKeys) {
     let g = ctx.g;
     let t0 = Instant::now();
     let cache = ans_cache(ctx, tc);
