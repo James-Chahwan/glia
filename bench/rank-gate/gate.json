@@ -2,15 +2,15 @@
  "gate": 1,
  "metrics": ["r10", "mrr"],
  "rankers": {
-  "single": ["ANS:impact", "ANS:pack", "P1", "PT*", "B0", "H10[PT*]", "H9s50", "SELt2", "SELs0"],
-  "k2": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0"],
-  "k3": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0"],
-  "half": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0"],
+  "single": ["ANS:impact", "ANS:pack", "P1", "PT*", "B0", "H10[PT*]", "H9s50", "SELt2", "SELs0", "ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
+  "k2": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0", "ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
+  "k3": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0", "ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
+  "half": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0", "ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
   "find": ["ANS:find", "T1s", "SELf2t"]
  },
  "items": {
-  "1": [],
-  "2": [],
+  "1": ["ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
+  "2": ["ANS:impact", "ANS:pack"],
   "3": [],
   "4": [],
   "5": {"exempt": "bit-identical scores: every existing ANS row diffing exactly 0 is its gate"},
@@ -18,7 +18,7 @@
   "7": [],
   "8": [],
   "9": {"exempt": "link precision only, no ranking effect (round 2)"},
-  "10": [],
+  "10": ["ANS:impact@sel", "ANS:pack@sel"],
   "11": []
  }
 }

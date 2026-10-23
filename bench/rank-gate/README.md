@@ -20,14 +20,63 @@ lowers recall@10 or MRR of a gated ranker fails the wave close-out
   --max-commits 300 --max-seeds 5 --boot 1000` (plus the row's own `flags`). `--pick base,d85` is round
   1's harness line: without it PT* is not the tuned PPR the reports measured.
 - **Gated rankers** (`gate.json`, EG.2's format), per query shape:
-  - `single`: ANS:impact, ANS:pack, P1, PT*, B0, H10[PT*], H9s50, SELt2, SELs0
-  - `k2` / `k3` / `half` (the review shapes): ANS:impact, ANS:pack, P1, SELt2, SELs0
+  - `single`: ANS:impact, ANS:pack, P1, PT*, B0, H10[PT*], H9s50, SELt2, SELs0, ANS:impact@sel,
+    ANS:pack@sel, ANS:impact.files
+  - `k2` / `k3` / `half` (the review shapes): ANS:impact, ANS:pack, P1, SELt2, SELs0, ANS:impact@sel,
+    ANS:pack@sel, ANS:impact.files
   - `find`: ANS:find, T1s, SELf2t
 
   Every name was checked present in every snapshot's run. No Leiden-pooled ranker is gated: those
   move with the checkout path (round 2's note). The ANS rankers are the engine's own answers
   (`diff_impact`, `pack`, `find`; EG.1); the others are the harness references they are compared to.
   By ruling EA-1 the ANS rankers read the same history window the shipped answers read.
+
+## The ANS rankers
+
+Each is the engine's own answer, its node rows rolled up to files by first appearance
+(`rows_to_keys`), run on the snapshot copy (no `.glia/`) with an in-memory history:
+
+- **ANS:impact / ANS:pack** (EG.1, EA.9): `diff_impact_from_diff` over the seed files and `pack_ids`
+  over their nodes, default options, the RankCache given test commit c's prefix co-change (training
+  commits strictly older than c), so the default ranking H10 reads C0. Item 2 (co-change first).
+- **ANS:impact@sel / ANS:pack@sel** (EG.6): the same two answers with `select = false` and the ranking
+  forced to the engine's own calibrated pick at c. Once per run, `calibrate::calibrate_snapshot`
+  (EC.5, group `structure`) replays a history snapshot built in memory from rank_eval's commit list:
+  the newest 2000 non-merge commits (`history sync`'s window, ruling EA-1), candidate paths with no
+  rename fold, messages through `clean_message`; then a query of shape s at c answers with SELh0's
+  `CommitScore.pick` for (s, c) (H10, H10[PT*] or H10[B0]), over the same prefix co-change as
+  ANS:impact (EA.9's, from every older commit: on commons-io and commons-lang, the two snapshots with
+  more than 2000 commits, that C0 sees more history than a 2000-commit sync would). Items 1 (PT* / sum pooling reaches an
+  answer only through this pick) and 10 (structure-only selection). Fired_on, once per run:
+  `[rank_eval] ans calibration sets=<n> test_commits=<t> ms=<ms>`.
+- **ANS:impact.files** (EG.6): the default diff impact's file roll-up (`BlastRadius::files`, EA.5,
+  `top_files = usize::MAX`, rank 1 first) instead of its rows: EG.1's contract that an answer's
+  file-level roll-up gets a ranker reading it. ANS:impact keeps reading rows, so its 0.5.2 column
+  stays comparable. Item 1.
+
+**Why @sel is leak-free.** The pick at c is made by EC.3's online rule from test commits strictly
+older than c (unit-tested in `calibrate::select`); the C0 an H10* pick reads is the prefix of training
+commits strictly older than c (EA.9); and the replay scores every query before its own commit is
+observed (EC.2's forward pass). A test commit with no `CommitScore` of its shape (outside the window,
+or no replay query of that shape) takes the pick the rule makes from the strictly older commits: the
+next newer `CommitScore`'s pick, or after the newest one the argmax of the row's summed recall@10.
+`rank_eval --ans-leak on` drops the newest test commit's files from the in-memory snapshot; none of
+that commit's ANS:*@sel values may move (EG.6 checked it on websocket: 20 values, 0 moved).
+
+Measured at EG.6 (`paired` commit-cluster bootstrap, B = 1000, test commits resampled), ANS:impact@sel
+minus ANS:impact, recall@10 [95% CI]: glia single +0.0007 [-0.0006, +0.0029], k2 +0.0020 [0, +0.0059],
+k3 +0.0028 [0, +0.0067], half +0.0023 [0, +0.0069]; shell single +0.0008 [-0.0015, +0.0035], k2 -0.0018
+[-0.0054, 0]; websocket single -0.0022 [-0.0128, +0.0053]; samples single +0.0020 [+0.0001, +0.0045], k2
+-0.0020 [-0.0095, +0.0028], k3 -0.0005 [-0.0091, +0.0065]; commons-lang single -0.0006 [-0.0015, 0];
+commons-io single +0.0031 [-0.0004, +0.0074], k2 -0.0010 [-0.0224, +0.0199], k3 +0.0037 [-0.0033,
++0.0116], half +0.0016 [-0.0043, +0.0084]; every other (snapshot, shape) row exactly 0. No row's CI lies
+wholly below 0. The in-memory calibration costs one `calibrate_snapshot` per run (on the loaded
+second check: glia 28.5 s, samples 22.7 s, commons-lang 2.6 s, the rest under 2 s) and the ANS calls two more answers per seeded
+query; a whole `check` took 456 s with rank_eval built (760 s on a loaded machine), still far below
+the close-out's 7200 s.
+
+The @sel rankers and ANS:impact.files entered the gate with `baseline-add`: their 0.5.2 column is
+their own first value, so the ratchet protects them from EG.6 on, not against 0.5.2.
 - **Metrics**: recall@10 and MRR, per query, for every gated (shape, ranker).
 
 ## The fail rule
