@@ -70,6 +70,13 @@
 //! nodes) on the single-seed and review shapes, `ANS:find` (`find::find_nodes` on the test
 //! commit's subject) on the find shape. With `--r3-perq on` the JSON also gains `perq_shapes`,
 //! every round-3 transfer shape per query. The reference rankers' PPR is pinned (`REF_DAMPING`).
+//!
+//! The rank gate (0.5.3, EG.2): `--gate-trim <gate.json> --gate-new <run.json> --out <base.json>`
+//! keeps only a gate's rankers of a `--r3-perq on` run (compact JSON, the committed baseline);
+//! `--gate-check <gate.json> --gate-base <base.json> --gate-new <run.json> --out .. --md ..`
+//! judges every gated (shape, ranker, metric) row new - base with the commit-cluster bootstrap
+//! of `paired` and Holm over the changed rows (exit 1 on a drop, 2 on drift or a missing
+//! ranker); see `gate_check_main`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -214,6 +221,14 @@ struct Args {
     ans: String,
     /// Round 3: `<a.json>,<b.json>` compares two `--r3-perq on` runs of the same queries (b - a).
     r3_compare: String,
+    /// Rank gate (EG.2): `--gate-check <gate.json>` judges `--gate-new` against `--gate-base`.
+    gate_check: String,
+    /// Rank gate: the trimmed baseline `--gate-check` reads (`--gate-base`).
+    gate_base: String,
+    /// Rank gate: the new `--r3-perq on` run (`--gate-new`), checked or trimmed.
+    gate_new: String,
+    /// Rank gate: `--gate-trim <gate.json>` writes `--gate-new` trimmed to the gate's rankers to `--out`.
+    gate_trim: String,
     /// Round 3: extra SELt3x candidates (comma-separated; chosen after a first run, so post-hoc).
     r3_selx: String,
     /// The private config (JSON) the Kina-only modes read; `GLIA_RANK_PRIVATE` when unset.
@@ -258,6 +273,10 @@ fn parse_args() -> Args {
         r3_perq: String::new(),
         ans: String::new(),
         r3_compare: String::new(),
+        gate_check: String::new(),
+        gate_base: String::new(),
+        gate_new: String::new(),
+        gate_trim: String::new(),
         r3_selx: String::new(),
         private: std::env::var("GLIA_RANK_PRIVATE").unwrap_or_default(),
     };
@@ -303,12 +322,17 @@ fn parse_args() -> Args {
             "--ans" => a.ans = v,
             "--r3-compare" => a.r3_compare = v,
             "--r3-selx" => a.r3_selx = v,
+            "--gate-check" => a.gate_check = v,
+            "--gate-base" => a.gate_base = v,
+            "--gate-new" => a.gate_new = v,
+            "--gate-trim" => a.gate_trim = v,
             "--private" => a.private = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
     }
-    assert!(!a.r3_compare.is_empty() || (!a.repo.is_empty() && !a.git.is_empty()), "--repo and --git are required");
+    let offline = !a.r3_compare.is_empty() || !a.gate_check.is_empty() || !a.gate_trim.is_empty();
+    assert!(offline || (!a.repo.is_empty() && !a.git.is_empty()), "--repo and --git are required");
     a
 }
 
@@ -1475,6 +1499,11 @@ fn sign_test(w: usize, l: usize, lf: &[f64]) -> f64 {
 }
 
 fn paired(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usize, lf: &[f64]) -> Paired {
+    paired_boot(a, b, commit_of, n_commits, boot, lf).0
+}
+
+/// `paired` with its sorted bootstrap means (the rank gate's one-sided p-values read them).
+fn paired_boot(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usize, lf: &[f64]) -> (Paired, Vec<f64>) {
     let diffs: Vec<f64> = a.iter().zip(b).map(|(x, y)| x - y).collect();
     let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
     let wins = diffs.iter().filter(|&&d| d > 1e-12).count();
@@ -1499,7 +1528,7 @@ fn paired(a: &[f64], b: &[f64], commit_of: &[usize], n_commits: usize, boot: usi
     means.sort_by(f64::total_cmp);
     let lo = means[((boot as f64) * 0.025) as usize];
     let hi = means[(((boot as f64) * 0.975) as usize).min(boot - 1)];
-    Paired { mean, lo, hi, p: sign_test(wins, losses, lf), wins, losses }
+    (Paired { mean, lo, hi, p: sign_test(wins, losses, lf), wins, losses }, means)
 }
 
 // ============================================================================
@@ -1519,6 +1548,12 @@ fn main() {
             other => panic!("--law-event {other}: expected act or tr"),
         }
         return;
+    }
+    if !args.gate_trim.is_empty() {
+        std::process::exit(gate_trim_main(&args));
+    }
+    if !args.gate_check.is_empty() {
+        std::process::exit(gate_check_main(&args));
     }
     if !args.r3_compare.is_empty() {
         r3_compare_main(&args);
@@ -14533,7 +14568,7 @@ fn r3_compare_main(args: &Args) {
     let commit_of: Vec<usize> = pa["commit_of"].as_array().expect("commit_of").iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect();
     let nc = commit_of.iter().max().map_or(0, |m| m + 1);
     let lf = ln_fact_table(commit_of.len() + 1);
-    let col = |v: &serde_json::Value| -> Vec<f64> { v.as_array().map(|x| x.iter().map(|y| y.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default() };
+    let col = json_col;
     let mut rows = Vec::new();
     let mut md = "| ranker | a r@10 | b r@10 | b - a recall@10 | b - a MRR |\n|---|---|---|---|---|\n".to_string();
     if let Some(ra) = pa["r10"].as_object() {
@@ -14553,4 +14588,359 @@ fn r3_compare_main(args: &Args) {
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write compare json");
     std::fs::write(&args.md, md).expect("write compare md");
     eprintln!("[rank_eval] compare {} -> {} rows -> {} {}", args.r3_compare, rows.len(), args.out, args.md);
+}
+
+/// One per-query JSON column (`perq`'s r10 / mrr arrays) as f64s; a null (a NaN written by
+/// serde_json) reads back as NaN.
+fn json_col(v: &serde_json::Value) -> Vec<f64> {
+    v.as_array().map(|x| x.iter().map(|y| y.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()
+}
+
+// ============================================================================
+// The rank gate (0.5.3, EG.2)
+// ============================================================================
+
+/// The shapes a gate may name, in gate order: `single` is the single-seed `perq`, the rest the
+/// round-3 `perq_shapes`.
+const GATE_SHAPES: [&str; 5] = ["single", "k2", "k3", "half", "find"];
+/// The metrics a gate may name (`perq`'s two per-query columns).
+const GATE_METRICS: [&str; 2] = ["r10", "mrr"];
+/// The family-wise error rate of one check, per direction (James 2026-10-23, ruling EG-2:
+/// Holm over the changed rows of one check, one-sided, family alpha 0.05).
+const GATE_ALPHA: f64 = 0.05;
+
+/// A parsed gate.json: its metrics and, in gate order, each shape's gated rankers.
+struct Gate {
+    metrics: Vec<String>,
+    shapes: Vec<(String, Vec<String>)>,
+}
+
+fn gate_load(path: &str) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("[rank-gate] read {path}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("[rank-gate] parse {path}: {e}"))
+}
+
+/// Reads gate.json: `{"gate":1, "metrics":[..], "rankers":{<shape>:[..]}, "items":{..}}`. Every
+/// ranker an `items` array names must be gated in some shape (an `{"exempt": ..}` item names none).
+fn gate_read(path: &str) -> Result<Gate, String> {
+    let g = gate_load(path)?;
+    if g["gate"].as_u64() != Some(1) {
+        return Err(format!("[rank-gate] gate {path}: expected \"gate\":1"));
+    }
+    let mut metrics = Vec::new();
+    for m in g["metrics"].as_array().ok_or_else(|| format!("[rank-gate] gate {path}: no metrics list"))? {
+        match m.as_str() {
+            Some(m) if GATE_METRICS.contains(&m) => metrics.push(m.to_string()),
+            _ => return Err(format!("[rank-gate] gate {path}: unknown metric={m}")),
+        }
+    }
+    let rankers = g["rankers"].as_object().ok_or_else(|| format!("[rank-gate] gate {path}: no rankers object"))?;
+    if let Some(s) = rankers.keys().find(|k| !GATE_SHAPES.contains(&k.as_str())) {
+        return Err(format!("[rank-gate] gate {path}: unknown shape={s}"));
+    }
+    let mut shapes = Vec::new();
+    let mut gated = BTreeSet::new();
+    for s in GATE_SHAPES {
+        let Some(list) = rankers.get(s) else { continue };
+        let list = list.as_array().ok_or_else(|| format!("[rank-gate] gate {path}: shape={s} is not a list"))?;
+        let mut names = Vec::new();
+        for r in list {
+            let r = r.as_str().ok_or_else(|| format!("[rank-gate] gate {path}: shape={s} names a non-string ranker"))?;
+            if !names.iter().any(|x: &String| x == r) {
+                names.push(r.to_string());
+            }
+            gated.insert(r.to_string());
+        }
+        shapes.push((s.to_string(), names));
+    }
+    let mut ungated = Vec::new();
+    if let Some(items) = g["items"].as_object() {
+        for (item, v) in items {
+            for r in v.as_array().map(Vec::as_slice).unwrap_or_default() {
+                let r = r.as_str().unwrap_or_default();
+                if !gated.contains(r) {
+                    ungated.push(format!("[rank-gate] items name ungated ranker={r} item={item}"));
+                }
+            }
+        }
+    }
+    if !ungated.is_empty() {
+        return Err(ungated.join("\n"));
+    }
+    Ok(Gate { metrics, shapes })
+}
+
+/// A run's (or a baseline's) per-query block for one gate shape.
+fn gate_run_shape<'a>(run: &'a serde_json::Value, shape: &str) -> Option<&'a serde_json::Value> {
+    let v = if shape == "single" { &run["perq"] } else { &run["perq_shapes"][shape] };
+    v.as_object().map(|_| v)
+}
+
+/// `--gate-trim <gate.json> --gate-new <run.json> --out <baseline.json>`: the run reduced to the
+/// gate's rankers, per shape `ids`, `commit_of` and each metric's arrays (the run's own f64s,
+/// never rounded), plus `label` / `rev` from `stats` and `glia_head` (env `GLIA_RANK_GATE_HEAD`).
+/// Compact JSON over BTreeMaps, so one run always trims to the same bytes.
+fn gate_trim_main(args: &Args) -> i32 {
+    let gate = match gate_read(&args.gate_trim) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if args.gate_new.is_empty() {
+        eprintln!("[rank-gate] --gate-trim needs --gate-new <run.json>");
+        return 2;
+    }
+    let run = match gate_load(&args.gate_new) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let label = run["stats"]["label"].as_str().unwrap_or_default().to_string();
+    let mut code = 0;
+    let mut shapes: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut kept = 0usize;
+    for (shape, rankers) in &gate.shapes {
+        let Some(s) = gate_run_shape(&run, shape) else {
+            eprintln!("[rank-gate] missing shape={shape} label={label}");
+            code = 2;
+            continue;
+        };
+        let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        out.insert("ids".into(), s["ids"].clone());
+        out.insert("commit_of".into(), s["commit_of"].clone());
+        for m in &gate.metrics {
+            let mut cols: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+            for r in rankers {
+                match s[m.as_str()].get(r) {
+                    Some(v) if v.is_array() => {
+                        cols.insert(r.clone(), v.clone());
+                    }
+                    _ => {
+                        if m == &gate.metrics[0] {
+                            eprintln!("[rank-gate] missing ranker={r} shape={shape} label={label}");
+                        }
+                        code = 2;
+                    }
+                }
+            }
+            out.insert(m.clone(), json!(cols));
+        }
+        kept += rankers.len();
+        shapes.insert(shape.clone(), json!(out));
+    }
+    if code != 0 {
+        return code;
+    }
+    let mut doc: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    doc.insert("label".into(), json!(label));
+    doc.insert("rev".into(), run["stats"]["rev"].clone());
+    doc.insert("glia_head".into(), json!(std::env::var("GLIA_RANK_GATE_HEAD").unwrap_or_default()));
+    doc.insert("shapes".into(), json!(shapes));
+    let text = match serde_json::to_string(&doc) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[rank-gate] serialise {}: {e}", args.out);
+            return 2;
+        }
+    };
+    if let Err(e) = std::fs::write(&args.out, text) {
+        eprintln!("[rank-gate] write {}: {e}", args.out);
+        return 2;
+    }
+    eprintln!("[rank-gate] trim label={label} shapes={} rankers={kept} -> {}", shapes.len(), args.out);
+    0
+}
+
+/// One judged row of a check.
+struct GateRow {
+    shape: String,
+    ranker: String,
+    metric: String,
+    base: f64,
+    new: f64,
+    p: Paired,
+    /// Some row value differs (bit for bit, NaN equal to NaN): only these rows form Holm's family.
+    changed: bool,
+    /// One-sided bootstrap p-values: the share of bootstrap means >= 0 (drop) / <= 0 (gain).
+    p_drop: f64,
+    p_gain: f64,
+    verdict: &'static str,
+}
+
+/// Holm's step-down over `(row, p)`: the rows rejected at family-wise `alpha` (ties by row index).
+fn holm(mut ps: Vec<(usize, f64)>, alpha: f64) -> BTreeSet<usize> {
+    ps.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    let m = ps.len();
+    let mut out = BTreeSet::new();
+    for (i, (row, p)) in ps.into_iter().enumerate() {
+        if p > alpha / (m - i) as f64 {
+            break;
+        }
+        out.insert(row);
+    }
+    out
+}
+
+/// `--gate-check <gate.json> --gate-base <baseline.json> --gate-new <run.json> --out <v.json>
+/// --md <v.md>`: per gated (shape, ranker, metric), `paired(new, base)` over the shape's queries
+/// with the commit-cluster bootstrap (B = `--boot`), so diff = new - base and the CI its 2.5 /
+/// 97.5 percentiles. The verdict follows ruling EG-2 (James 2026-10-23): the rows whose values
+/// changed form one family per direction, each row's one-sided p is the share of its bootstrap
+/// means on the wrong side of 0 (>= 0 for a drop, <= 0 for a gain), and Holm at family alpha
+/// 0.05 decides `drop` / `gain`; every other row is `same` (an unchanged row diffs exactly 0).
+/// A shape whose ids or commit clusters moved is drift (exit 2, only a declared re-baseline fixes
+/// it); a gated ranker missing from the run exits 2; one in the run but not the baseline is
+/// `new`, unjudged. Exit 1 on any drop when nothing else failed, else 0.
+fn gate_check_main(args: &Args) -> i32 {
+    let loaded = gate_read(&args.gate_check).and_then(|g| {
+        if args.gate_base.is_empty() || args.gate_new.is_empty() {
+            return Err("[rank-gate] --gate-check needs --gate-base <baseline.json> and --gate-new <run.json>".to_string());
+        }
+        Ok((g, gate_load(&args.gate_base)?, gate_load(&args.gate_new)?))
+    });
+    let (gate, base, run) = match loaded {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let label = base["label"].as_str().or_else(|| run["stats"]["label"].as_str()).unwrap_or_default().to_string();
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let mut rows: Vec<GateRow> = Vec::new();
+    let (mut missing, mut drift, mut fresh) = (Vec::new(), Vec::new(), Vec::new());
+    for (shape, rankers) in &gate.shapes {
+        let Some(n) = gate_run_shape(&run, shape) else {
+            eprintln!("[rank-gate] missing shape={shape} label={label}");
+            missing.push(format!("{shape}:*"));
+            continue;
+        };
+        let present: Vec<&String> = rankers
+            .iter()
+            .filter(|r| {
+                let ok = gate.metrics.iter().all(|m| n[m.as_str()].get(r.as_str()).is_some_and(serde_json::Value::is_array));
+                if !ok {
+                    eprintln!("[rank-gate] missing ranker={r} shape={shape} label={label}");
+                    missing.push(format!("{shape}:{r}"));
+                }
+                ok
+            })
+            .collect();
+        let b = &base["shapes"][shape.as_str()];
+        let (ids_b, ids_n) = (b["ids"].as_array(), n["ids"].as_array());
+        if ids_b.is_none() || ids_b != ids_n || b["commit_of"] != n["commit_of"] {
+            let nb: Vec<&serde_json::Value> = ids_b.map(|v| v.iter().collect()).unwrap_or_default();
+            let nn: BTreeSet<String> = ids_n.map(|v| v.iter().map(|x| x.to_string()).collect()).unwrap_or_default();
+            let common = nb.iter().filter(|x| nn.contains(&x.to_string())).count();
+            eprintln!(
+                "[rank-gate] drift label={label} shape={shape} base_queries={} new_queries={} common={common}",
+                nb.len(),
+                ids_n.map_or(0, Vec::len)
+            );
+            drift.push(shape.clone());
+            continue;
+        }
+        let commit_of: Vec<usize> = b["commit_of"].as_array().map(|v| v.iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect()).unwrap_or_default();
+        let nq = commit_of.len();
+        let nc = commit_of.iter().max().map_or(0, |m| m + 1);
+        let lf = ln_fact_table(nq + 1);
+        for r in present {
+            let in_base = gate.metrics.iter().all(|m| b[m.as_str()].get(r.as_str()).is_some_and(serde_json::Value::is_array));
+            if !in_base {
+                let nm = |m: &str| n[m].get(r.as_str()).map(json_col).map_or(f64::NAN, |v| mean(&v));
+                eprintln!("[rank-gate] new label={label} shape={shape} ranker={r} new_r10={:.4} new_mrr={:.4}", nm("r10"), nm("mrr"));
+                fresh.push(format!("{shape}:{r}"));
+                continue;
+            }
+            for m in &gate.metrics {
+                let (xa, xb) = (json_col(&b[m.as_str()][r.as_str()]), json_col(&n[m.as_str()][r.as_str()]));
+                if xa.len() != nq || xb.len() != nq || nq == 0 {
+                    eprintln!("[rank-gate] drift label={label} shape={shape} ranker={r} metric={m} base_values={} new_values={} queries={nq}", xa.len(), xb.len());
+                    drift.push(format!("{shape}:{r}:{m}"));
+                    continue;
+                }
+                let (p, means) = paired_boot(&xb, &xa, &commit_of, nc, args.boot, &lf);
+                let share = |f: &dyn Fn(f64) -> bool| means.iter().filter(|&&x| f(x)).count() as f64 / means.len() as f64;
+                let changed = xa.iter().zip(&xb).any(|(x, y)| !(x == y || (x.is_nan() && y.is_nan())));
+                rows.push(GateRow {
+                    shape: shape.clone(),
+                    ranker: r.clone(),
+                    metric: m.clone(),
+                    base: mean(&xa),
+                    new: mean(&xb),
+                    changed,
+                    p_drop: share(&|x| x >= 0.0),
+                    p_gain: share(&|x| x <= 0.0),
+                    p,
+                    verdict: "same",
+                });
+            }
+        }
+    }
+    let changed: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].changed).collect();
+    let drops = holm(changed.iter().map(|&i| (i, rows[i].p_drop)).collect(), GATE_ALPHA);
+    let gains = holm(changed.iter().map(|&i| (i, rows[i].p_gain)).collect(), GATE_ALPHA);
+    for (i, row) in rows.iter_mut().enumerate() {
+        row.verdict = if drops.contains(&i) {
+            "drop"
+        } else if gains.contains(&i) {
+            "gain"
+        } else {
+            "same"
+        };
+    }
+    let mut json_rows: BTreeMap<String, BTreeMap<String, BTreeMap<String, serde_json::Value>>> = BTreeMap::new();
+    let mut md = format!("## rank gate: {label}\n\nnew - base, commit-cluster bootstrap 95% CI (B = {}); Holm over the {} changed rows, one-sided, family alpha {GATE_ALPHA}.\n", args.boot, changed.len());
+    let mut md_shape = String::new();
+    for row in &rows {
+        eprintln!(
+            "[rank-gate] label={label} shape={} ranker={} metric={} base={:.4} new={:.4} diff={:+.4} ci=[{:+.4}, {:+.4}] verdict={} p_drop={:.4} p_gain={:.4} changed={}",
+            row.shape, row.ranker, row.metric, row.base, row.new, row.p.mean, row.p.lo, row.p.hi, row.verdict, row.p_drop, row.p_gain, u8::from(row.changed)
+        );
+        if md_shape != row.shape {
+            md_shape = row.shape.clone();
+            md.push_str(&format!("\n### {}\n\n| ranker | metric | base | new | diff [CI] | verdict |\n|---|---|---|---|---|---|\n", row.shape));
+        }
+        md.push_str(&format!(
+            "| {} | {} | {:.4} | {:.4} | {:+.4} [{:+.4}, {:+.4}] | {} |\n",
+            row.ranker, row.metric, row.base, row.new, row.p.mean, row.p.lo, row.p.hi, row.verdict
+        ));
+        json_rows.entry(row.shape.clone()).or_default().entry(row.ranker.clone()).or_default().insert(
+            row.metric.clone(),
+            json!({"base": row.base, "new": row.new, "diff": row.p.mean, "lo": row.p.lo, "hi": row.p.hi, "changed": row.changed,
+                "p_drop": row.p_drop, "p_gain": row.p_gain, "wins": row.p.wins, "losses": row.p.losses, "verdict": row.verdict}),
+        );
+    }
+    let n_drop = rows.iter().filter(|r| r.verdict == "drop").count();
+    let n_gain = rows.iter().filter(|r| r.verdict == "gain").count();
+    let doc = json!({"label": label, "base_head": base["glia_head"], "base_rev": base["rev"], "new_rev": run["stats"]["rev"],
+        "boot": args.boot, "alpha": GATE_ALPHA, "correction": "holm", "rows": json_rows, "changed": changed.len(),
+        "drops": n_drop, "gains": n_gain, "new": fresh, "drift": drift, "missing": missing});
+    let wrote = serde_json::to_string_pretty(&doc)
+        .map_err(|e| e.to_string())
+        .and_then(|t| std::fs::write(&args.out, t).map_err(|e| e.to_string()))
+        .and_then(|()| std::fs::write(&args.md, &md).map_err(|e| e.to_string()));
+    if let Err(e) = wrote {
+        eprintln!("[rank-gate] write {} / {}: {e}", args.out, args.md);
+        return 2;
+    }
+    eprintln!(
+        "[rank-gate] verdict label={label} rows={} drops={n_drop} gains={n_gain} new={} drift={} missing={} changed={} correction=holm alpha={GATE_ALPHA}",
+        rows.len(),
+        fresh.len(),
+        drift.len(),
+        missing.len(),
+        changed.len()
+    );
+    if !missing.is_empty() || !drift.is_empty() {
+        2
+    } else if n_drop > 0 {
+        1
+    } else {
+        0
+    }
 }
