@@ -1,6 +1,6 @@
 ---
 name: glia
-description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, whether a frontend's model of an API matches what the backend sends, what usually changes with a change, the context for a task packed to a token budget, where the churning, load-bearing or tightly coupled code is, what is one thing across repos, and any structural question a Datalog or GQL query can ask. Reach for it before grep when the question is about structure, not text.
+description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, whether a frontend's model of an API matches what the backend sends, what usually changes with a change, which files a task, ticket or PR title is about, the context for a task packed to a token budget, where the churning, load-bearing or tightly coupled code is, what is one thing across repos, and any structural question a Datalog or GQL query can ask. Reach for it before grep when the question is about structure, not text.
 ---
 
 # glia from the command line
@@ -13,6 +13,7 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 |---|---|
 | What services are there, and how do they talk? | `glia arch <repo> --json` |
 | Where is X? (a name, qname or fragment) | `glia find <repo> X --json` |
+| Which files is this task, ticket or PR title about? | `glia find <repo> "<text>" --files --json` |
 | What should I read for task T, within a token budget? | `glia pack <repo> "<T>" --budget 4000 --json` |
 | What does this stacktrace / failing test id / diff point at? | `glia resolve <repo> "<signal>" --json` |
 | What does changing X affect? | `glia blast-radius <repo> X --json` |
@@ -42,6 +43,8 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 | Which docs govern X? | `glia docs-for <repo> X --json` |
 
 `hotspots`, `cochange` and the `quiet` finding of `flags` read git history from a snapshot, never from git itself: run `glia history sync <repo> --blame` once first (it writes `<repo>/.glia/history-snapshot/`). Without one, `hotspots` and `cochange` come back empty with the absence reason `no_history` (exit 1), and `flags` reports `quiet_evaluated: false`.
+
+The ranked answers read the same snapshot. With one, `blast-radius`, `diff-impact`, `review` and `pack` put the files that usually change with the seeds' files first (co-change first, then PageRank), and `review` / `find --files` rank by past commit messages too. Then `glia history calibrate <repo> --json` replays the repo's own history and records, per answer and seed shape, which ranking predicted its past commits best (`<repo>/.glia/calibration-snapshot/`); each ranked answer then uses that pick and says so in `selection` (`source: calibrated`, or `fallback` with the reason, e.g. `absent` before any calibration, `build_stamp` after a glia upgrade: calibrate again). So, once per repo and again after an upgrade: `glia history sync <repo>`, then `glia history calibrate <repo>`. Neither runs inside a build, and without them every answer keeps its structural order. `--ranking ppr|ppr-wide|bfs` forces one ranking instead of the calibrated pick, `--no-cochange` drops the co-change tier, and `--top-files <N>` (blast-radius, diff-impact) sizes the ranked `files` list.
 
 The rest of the CLI:
 - `glia pages <repo>`: frontend router pages and dead links.
@@ -76,6 +79,7 @@ Flags most commands share:
 - **Docs.** `docs-for` and the `DOCUMENTS` edges read only the markdown the build ingests. That is the well-known files (`README*.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced docs (`glia docs sync`). A section documents a symbol only when it names it in single backticks. A README inside a source directory is not read. `glia coverage` states this as a `DOCUMENTS` row.
 - **Dead symbols.** A `gaps` `dead_symbol` row is a function, method or class with no entry point reaching it and no incoming call or use. Never a row: a method that IMPLEMENTS a called method (an interface method, an abstract member: dispatch reaches it); the members a framework or the runtime calls on a class something uses (Angular lifecycle hooks, form-control and validator members, pipe `transform`, interceptors, guards, Flutter `build` / `createState` / `dispose`, ...) and its constructor; generated code (ORIGIN `generated` / `generated_proto`). stderr counts what it held back: `[dead-framework] dead_symbol rows withheld: invoked=<i> generated=<g>`. A method an Angular template or `host:` binding calls (inline or through `templateUrl`), a member a decorator binds (`@HostListener`, an `@Input` setter), what a Flutter widget's closures call and a TypeScript function passed by value (a route guard, a provider, a comparator) are reached through real edges, so they are not dead either. So are a Dart getter read, tear-off or member named in any value position, a call on a Riverpod provider read (`ref.read(p).m()`), a Go method called on a range variable's element or a package-qualified field, a Go func or method passed by value and a struct a composite literal builds, a `pkg.F` route handler, and a TypeScript call through an Angular signal query (`viewChild(T)`), an inline `inject(T)`, a `const x = f()` local or a getter on another typed object. Entry points in their own right: a Go `init`, an iOS `@main` type, a Flutter Android activity, and a Python script with an `if __name__ == "__main__":` guard (the guard's calls are the module's). Live when their class is used: a Go method the runtime calls through an interface, checked by signature (`Error`, `String`, `MarshalJSON`, `Scan`, `Value`, `ServeHTTP`, `Len` / `Less` / `Swap` together); an `@main` app delegate's callbacks; the members a library base calls on a class extending it (a Transloco loader's `getTranslation`, an Angular `ErrorHandler`'s `handleError` or `Resolve`'s `resolve`, a dio interceptor's `onRequest`). stderr counts the invoked members by framework: `[invoked] rows=<n> angular=.. constructor=.. flutter=.. go_runtime=.. apple_app=.. transloco=.. dio=.. sig_rejected=<r>` (`sig_rejected`: methods named like a runtime method whose own signature or owner's sibling does not match, `Scan() bool`; they are not withheld). On two audited full-stack repos, every remaining row was truly dead.
 - **Unpaired routes and endpoints.** `unpaired_route` leaves out a route a WebSocket client connects through (`[gaps] ws-served routes=<n>`) and a route only test code registers (`[gaps] unpaired_route rows withheld: <n> (test-file routes)`). A GraphQL client's HTTP transport (`endpoint:POST:/graphql`) is no `unpaired_endpoint` when its project's operations pair a resolver on a server with no route at that path; any other unpaired transport's `detail` starts `graphql transport; ` (`[gaps] graphql transports implied=<n> unpaired=<m>`).
+- **Ranking.** `blast-radius` and `diff-impact` list `files` after the rows: the most relevant files ranked (`rank`, `file`, `repo`, `cochange`, `ppr`, `depth` under bfs, `rows`: how many result rows sit in it, 0 for a file the walk never reached, which co-change alone put there). `selection` (`set`, `shape`, `pick`, `source`, `reason`, `test_commits`) names the ranking an answer used; the table form prints it as one `ranking:` line. `review` with a title (`--title`, or by default the newest commit subject of `<base>..HEAD`) adds `intent`: the ids the title names (a ticket `LANG-12`, a spec-kit `FR-001` / `T012`, or the shapes `.glia/overlay.toml [ids]` declares) routed to the task or requirement rows defining them and the files those rows name, past commits ranked by the title's words, and `intent.files` ranked by the repo's pick (`selection_intent`); impact rows in files an id routes to are listed first. `find --files` answers the same question for a query: files with `idr` (an id in the text routes there) or `text` (past commit messages match) above 0, ranked; with neither it is an absence whose note says which input was missing (no id resolved, no history messages, no past message matches), exit 0.
 - **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange`, `splits`, `query` and `identity` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a BLOCKING violation: one whose tier is at least its rule's `min_tier` (default `derived`). A `heuristic` violation never blocks; it is listed as advisory. A declared rule that checks nothing (a stanza anchored nowhere or rejected, one the graph does not hold, a scope no node sits in) is listed under `unanchored` ("Rules that check nothing") with its reason and a fix, and changes the exit code only with `--strict` (then 2). `review` exits 1 when the change adds a blocking violation or a blocking model break, and `contract-breaks` when a change is breaking, leaves a client with no provider, or is a blocking model break. A model break (a client / server model drifted across the change) blocks only at or above `--models-min-tier` (default `fact`, so the resolver-paired `derived` rows are advisory: counted in `advisory`, not `breaking`). `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, a query that does not parse or analyse, or a rule `check` could not evaluate.
 
 ## Cost, and what gets written
@@ -84,7 +88,7 @@ Flags most commands share:
 - The query commands write nothing to the repo.
 - Five commands save a parse cache at `<repo>/.glia/graph/parse_cache.bin` (self-gitignored): `delta`, `diff-impact` against a rev (its default), `tests-for --base`, `review` and `contract-breaks`. The `--diff` forms write nothing, and `cochange --base` persists nothing.
 - `flows --features` without `--json` writes `<repo>/.glia/graph/flows/`.
-- `glia history sync` writes `<repo>/.glia/history-snapshot/`. `glia timeline build` writes `<repo>/.glia/graph/timeline.gmap`, and `timeline history` rebuilds and rewrites a stale `.glia/graph/` layout.
+- `glia history sync` writes `<repo>/.glia/history-snapshot/` (with each commit's redacted message; `--no-messages` keeps none), and `glia history calibrate` writes `<repo>/.glia/calibration-snapshot/`. `glia timeline build` writes `<repo>/.glia/graph/timeline.gmap`, and `timeline history` rebuilds and rewrites a stale `.glia/graph/` layout.
 - `glia build <repo>` writes the `.glia/graph/` layout that the MCP server and Python bindings load. The CLI does not need it.
 - `glia watch <repo>` writes the same layout and the parse cache on exit and every `--persist-every` seconds (60 by default). It does not read `GLIA_NO_PERSIST`: writing the layout is what it is for, so never run it on a repo you must not write to.
 - **`GLIA_NO_PERSIST=1`** is for probing a repo you must not write to: set it on every call. It stops glia rewriting a stale layout (`glia merge --gmap`, `timeline history`) and `timeline build` writing its sidecar. It does not stop the parse cache, the flows files or the history snapshot above. On such a repo, use the `--diff` forms and `flows --features --json` instead: `git -C <repo> diff | GLIA_NO_PERSIST=1 glia diff-impact <repo> --diff - --json`.
@@ -98,6 +102,7 @@ Every example below was run from the root of the repo its comment names. Most ar
 - `orders-proto`: `proto/orders.proto` declares `message OrderCreated { string order_id = 1; int64 total_cents = 2; repeated string sku = 3; }` on `main`. The change makes `total_cents` a `string` and adds `string currency = 4`.
 - `shop`: a Python git repo whose `orders/service.py` and `orders/models.py` changed together in all five of their commits, and `util/money.py` together with `billing/charge.py` in three of its four. `glia history sync . --blame` has been run.
 - `identity-proto-diverged`: `orders/`, `billing/` and `shipping/` each hold `proto/orders.proto` with `message OrderCreated`; shipping's copy has an extra field.
+- `shop-ranked`: a Python git repo of ten commits: `orders/models.py` and `orders/service.py` changed together in six (one subject is `SHOP-12 orders: round totals`), `util/money.py` and `billing/charge.py` in four, and `docs/tasks.md` holds `- [ ] SHOP-12 round order totals in \`orders/models.py\` and \`orders/service.py\``. `glia history sync . --blame` has been run.
 - `models-http-contract`: an Angular `portal/` reads `GET /api/plans/:id` as its `Plan` interface (id, name, priceCents, trialDays); the gin handler in `billing/` writes `planBody` (id, name, priceCents), and the `swagger.json` op documenting the route declares the same three.
 
 ```bash
@@ -129,6 +134,36 @@ glia blast-radius . client::client::FetchUsers --direction forward --json
  "results":[{"qname":"endpoint:GET:/users","kind":"ENDPOINT","reason":"CALLS","depth":1,"score":0.267,"live":false,"file":"client/client.go","line":9,"seed":"client::client::FetchUsers"},
             {"qname":"GET /users","kind":"ROUTE","reason":"HTTP_CALLS","depth":2,"file":"server/main.go","line":13,…},
             {"qname":"server::main::listUsers","reason":"HANDLED_BY","depth":3,"file":"server/main.go","line":9,…}],"absence":null}
+
+# shop-ranked, after `glia history sync .`: the calibration step; one row per (set, shape), the record under .glia/calibration-snapshot/
+glia history calibrate . --json
+{"dir":"./.glia/calibration-snapshot","history_head":"318a924af42f…","commits":10,"test_commits":9,"messages":true,"ms":36,
+ "sets":[{"set":"SELf2t","shape":"find","pick":"H18x","last_online_pick":"H18x","fallback":"LX[IDR,T1s]","test_commits":9,"queries":9,"selection_recall10":1.0,"fallback_recall10":1.0,"delta_recall10":0.0,"ci_low":0.0,"ci_high":0.0},
+         {"set":"SELh0","shape":"k1","pick":"H10","last_online_pick":"H10","fallback":"H10","test_commits":9,"queries":20,…},…]}
+# SELh0 ranks blast-radius / diff-impact / review's impact / pack (SELs0 under --no-cochange), SELt2 review's intent, SELf2t find --files;
+# a pick whose online recall@10 falls below its fallback's is refused and recorded as the fallback
+
+# shop-ranked, calibrated: "files" ranks co-changed files first; "selection" names the ranking the answer used
+glia blast-radius . orders::models::Order --json
+{"seeds":[{"qname":"orders::models::Order","kind":"CLASS","file":"orders/models.py","line":1,…}],"unresolved":[],
+ "results":[{"qname":"orders::service::place","kind":"FUNCTION","reason":"CALLS","depth":1,"score":0.201,"file":"orders/service.py","line":4,…}],
+ "files":[{"rank":1,"file":"orders/service.py","repo":"shop","cochange":0.857,"ppr":0.116,"depth":null,"rows":1},
+          {"rank":2,"file":"billing/charge.py","repo":"shop","cochange":0.143,"ppr":0.0,"depth":null,"rows":0},…],
+ "selection":{"set":"SELh0","shape":"k1","pick":"H10","source":"calibrated","reason":null,"test_commits":9},"absence":null}
+
+# shop-ranked: the files a ticket is about; SHOP-12 routes through docs/tasks.md's row (idr), the words through past subjects (text)
+glia find . "SHOP-12 round totals" --files --json
+{"results":[{"rank":1,"file":"orders/models.py","idr":1.0,"text":8.628,"degree":9.0,"ids":["SHOP-12"]},
+            {"rank":2,"file":"orders/service.py","idr":1.0,"text":8.628,"degree":5.0,"ids":["SHOP-12"]},
+            {"rank":3,"file":"util/money.py","idr":0.0,"text":1.874,"degree":5.0,"ids":[]}],
+ "absence":null,"selection":{"set":"SELf2t","shape":"find","pick":"H18x","source":"calibrated","reason":null,"test_commits":9}}
+
+# shop-ranked with orders/models.py edited: the PR's intent; without --title it is the newest commit subject of <base>..HEAD
+glia review . --title "SHOP-12 round order totals" --json
+{…,"intent":{"title":"SHOP-12 round order totals","title_source":"arg","fusion":"H18s[PT*]",
+   "ids":[{"id":"SHOP-12","ns":"docs/tasks.md","tier":"derived","route":"unique","defined_at":["docs/tasks.md",3],"state":"pending","named_files":2,"cited_files":0}],
+   "files":[{"rank":1,"file":"orders/service.py","idr":1.0,"text":11.908,"ppr":0.116,"ids":["SHOP-12"],"in_impact":false},…],"text":"present"},
+ "selection_intent":{"set":"SELt2","shape":"k1","pick":"H18s[PT*]","source":"calibrated","reason":null,"test_commits":9}}
 
 # loop, with the audit() change uncommitted
 glia diff-impact . --json

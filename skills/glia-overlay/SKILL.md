@@ -36,6 +36,24 @@ Many rows need no stanza. Read the code, then leave the row alone when:
   ```
 
   The patterns use gitignore syntax and are anchored at the repo root. They only add: nothing un-tags a path. Every node in a matching file gets ORIGIN provenance `test_fixture`, so `tests-for` lists it as a test case, `gaps` leaves it out of `dead_symbol`, `patterns` leaves it out, and Engram drops it by default. A build prints `[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`. It also feeds the TESTS pass: a declared test module is paired with the app module of its stem, a test affix stripped when it has one (`qa/cart.py` or `playwright/cart.spec.ts` with the app's `cart`; rule `declared_name`), and its functions get function-level TESTS edges, so `tests-for` finds them. Like `[walk] skip`, it is the person's setting. It is never a candidate section, so `overlay try` cannot measure it, and `--overlay-delta` does not see it either: `[walk]` applies under `--no-overlay` too.
+- it is not a gap at all but an id glia does not route: `glia review --title` or `glia find --files` lists a ticket, task or plan id under `intent.ids` with no files (`[idr] .. unresolved=<n>`), or finds none in a title that has one. glia reads ids by shape: by default `{U}-{N}` (`LANG-1234`, spec-kit `FR-001`) and `T{N3}` (`T012`), each defined by a list item, table row or heading in an ingested markdown doc that names the id. A repo with other shapes, or with its tasks in a plan file or a JSON tracker, declares them in `.glia/overlay.toml`; ask the person first:
+
+  ```toml
+  [ids]
+  patterns = ["{U}.{N}{l?}"]                 # replaces the defaults; DT.5h, DT.5a-c; patterns = [] turns routing off
+  markdown = ["dev-notes/plan-*.md"]         # task docs outside the ingested markdown
+  local_words = ["finding", "review"]        # a series under a heading with one of these stays local to its page
+
+  [[ids.tracker]]                            # a JSON task tracker
+  path = "dev-notes/packets-*.json"
+  list = "packets"                           # the key of the task array (absent: the top-level array)
+  id = "id"
+  files = "files_touched"                    # a string or an array of repo paths
+  state = "status"                           # optional, with done = ["landed"]
+  done = ["landed"]
+  ```
+
+  At most 16 shapes: `{U}` an uppercase run, `{N}` digits, `{N3}` exactly three digits, `{l?}` an optional lowercase letter, anything else literal. A match is word-bounded. `[ids]` is user config like `[walk]`: legal in versions 1 and 2, applied under `--no-overlay`, never a candidate section, and it changes no graph (the answers read it at query time; a build's `[overlay] loaded ..` line counts it as `ids=<n>`). Its full schema is the `[ids]` section of docs/overlay.md. After editing it, run `glia history calibrate <repo>` again: the calibration replays id routing with the vocabulary it finds.
 - it is a `wrapped_sink` (informational) or an `orphaned_cell` (repaired by `glia cell ls --check --rekey`, not by the overlay).
 
 ## The loop

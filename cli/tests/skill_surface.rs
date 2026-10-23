@@ -33,7 +33,8 @@ const SKILLS_REL: &str = "skills";
 
 /// Per skill directory, the commands its worked examples show with `--json`:
 /// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added, 0.5.2's `query` /
-/// `identity`, DZ.1, and the tweaks' `contracts --fields` model drift, DT.13)
+/// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, and 0.5.3's
+/// `history calibrate`, EZ.1)
 /// and `glia-overlay` (CE.3f). A subcommand is its surface section path, `overlay propose`.
 const EXAMPLED: [(&str, &[&str]); 2] = [
     (
@@ -72,6 +73,9 @@ const EXAMPLED: [(&str, &[&str]); 2] = [
             // 0.5.2 tweaks (DT.13): client / server contract-model drift, `contracts
             // --fields` (DT.1i, DT.1n).
             "contracts",
+            // 0.5.3 (EZ.1): the calibration step (EC.6). `find --files` (EB.8) is a
+            // flag of `find`, already listed: its `--json` example sits in the skill.
+            "history calibrate",
         ],
     ),
     (

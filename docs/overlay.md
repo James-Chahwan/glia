@@ -792,8 +792,11 @@ test_commits=<t>` line, and ignores the record, falling back to its uncalibrated
 the reason: `absent` (no record), `not_loaded`, `multi_repo` (a merge: a calibration is per
 repo), `incomplete` / `version` (a damaged or foreign record), `build_stamp` (written by another
 glia build: any upgrade or parser change needs a recalibration), `ranker_revision`, `no_set` (no
-row for the set and shape), `candidate_set` (the row was measured over other candidates) or
-`no_queries` (the row scored nothing). A ranking chosen by flag is `source=explicit`. The step
+row for the set and shape), `candidate_set` (the row was measured over other candidates),
+`refused` (the replay refused the selection: its online recall@10 fell below a fallback that is
+not one of the set's candidates, review's `LX[IDR,P1]` or find's `LX[IDR,T1s]`, so the answer
+uses that fallback, ruling EC-3; a refused `SELh0` / `SELs0` row records its fallback as the pick
+and reads `calibrated`) or `no_queries` (the row scored nothing). A ranking chosen by flag is `source=explicit`. The step
 prints `[calibrate] done surface=cli|pyo3 sets=<n> test_commits=<t> ms=<ms>` on stderr.
 
 ## SCIP snapshot

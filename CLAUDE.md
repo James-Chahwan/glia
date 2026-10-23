@@ -47,7 +47,15 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
                     CD.5a), and 0.5.2's `algo::classes` (identity classes: UnionFind
                     with min-id roots, Classes, and the Quotient GraphSource a walk
                     over a class runs on, DD.1) and `algo::ppr` (push PPR,
-                    Andersen-Chung-Lang, over an Adjacency, DE.5); `plan` (one
+                    Andersen-Chung-Lang, over an Adjacency, DE.5; kept in 0.5.3 for
+                    rank_eval's PushPpr), and 0.5.3's `algo::fuse` (EB.2: minmax, blend,
+                    mean, lex_order, order, lx: rank_eval's min-max / blends / LX fusion,
+                    ties by candidate index; `[algo] fuse ..` under GLIA_ALGO_DEBUG=1);
+                    `ppr_index` (0.5.3, EA.1: `PprIndex`, the CSR incidences, out-weights,
+                    dangling list and PPR dials built once and run per seed set, `vector` /
+                    `vector_weighted`; `ActivationPlan::run_indexed` / `rank_indexed` and
+                    `activate_indexed` take it, a config mismatch falls back to the
+                    unindexed answer); `plan` (one
                     ActivationPlan over the RankingSignal / FilterPredicate / SynthHook
                     hooks) and `profile` (DomainTables / DomainProfile; 0.5.2 adds
                     IdentityRule / IdentityTier and `DomainTables.identity_rules`, DD.3;
@@ -102,7 +110,9 @@ engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engr
                     `-V` prints glia's version line. 0.5.2: every clone of one commit exports the
                     same bytes (DE.2); ENDPOINTs and `page:` ROUTEs anchor identity hints and
                     `--since` pairs re-keyed endpoints and renamed symbols (DE.3, DE.4);
-                    0.5.3 removes the DE.5 PPR side file (EG.4); every run writes
+                    0.5.3 removes the DE.5 PPR side file and its flag (EG.4: exit 8 is
+                    retired, a stale side file from a 0.5.2 run is deleted, the
+                    glia-activation dependency is gone); every run writes
                     `<out>.hints.jsonl` (DT.12a), each fact's LB.6 `Identity::hint` v1 form (or
                     null), bound to the gmap by `gmap_digest`, the key `glia cell set --hint`
                     takes (DT.12b; `[engram-export] hints side: ..`, exit 9 when unwritten)
@@ -126,7 +136,7 @@ The facade rules:
    items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
    `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
    `pub mod` with an explicit, partial flat list.
-2. **Every new 0.5.0 / 0.5.1 / 0.5.2 primitive is a public module slot**, reached by
+2. **Every new 0.5.0 / 0.5.1 / 0.5.2 / 0.5.3 primitive is a public module slot**, reached by
    module path — `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
    `::profile::CODE_PROFILE`, `::pack::pack`, `::rules::query`, `::watch::WatchSession`,
    `::identity::identity_classes`, `glia_graph::roles::roles_in` — never flattened into
@@ -136,16 +146,21 @@ The facade rules:
    wave-0 D0.* packets touched a facade, the workspace Cargo.toml or Cargo.lock, until the
    tweaks: DT.1a and DT.10a declared code-domain's `wire` / `evm` slots in its lib.rs, which
    also holds `NavFact` (DT.1a, DT.1q, DT.10g appended variants), and DT.1g, DT.5f and DT.10b
-   added their resolvers' `mod` lines; no tweak touched Cargo.toml or Cargo.lock).
+   added their resolvers' `mod` lines; no tweak touched Cargo.toml or Cargo.lock; in 0.5.3
+   only the wave-0 E0.* packets touched a facade (E0.1 `algo::fuse`, E0.2 the engine's
+   `rank` / `intent` / `calibrate`) beside EA.1's `ppr_index` lines in activation's lib.rs, and
+   no packet touched Cargo.toml or the workspace Cargo.lock).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
    never `#[allow]`. A slot still doc-only at release is dead weight: the release docs
-   packet (LG.4b in 0.5.0, CZ.2 in 0.5.1, DZ.1 in 0.5.2) fails on any slot file whose
+   packet (LG.4b in 0.5.0, CZ.2 in 0.5.1, DZ.1 in 0.5.2, EZ.1 in 0.5.3) fails on any slot file whose
    only lines are `//!` (`grep -v '^//!' <file> | grep -c .` is 0), and a dropped owner's
    slot is deleted with its `mod` line. At 0.5.2 every tracked `.rs` file has code, the
    34 D0 slot files included (none was dropped; D0.8's `cmd/query/query.rs` became
-   `rules_query.rs` in DB.5).
+   `rules_query.rs` in DB.5). At 0.5.3 too: the 8 E0 slot files with a body
+   (`activation/src/algo/fuse.rs`, `engine/src/{rank,calibrate}/mod.rs`,
+   `engine/src/intent/{text,ids,defs,paths,idr}.rs`) and every other tracked `.rs` (EZ.1's scan).
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -270,6 +285,48 @@ engine/src/   lib.rs        facade (rules above)
               memory   DE.10 — release_freed_memory (glibc malloc_trim(0) after a big drop;
                        GLIA_MALLOC_TRIM=0 turns it off, `[memory] malloc_trim site=<s>
                        rss_mb=<before>-><after>`)
+  0.5.3 public slots (E0.2), owner (+ extenders); all query-time, read by the answers:
+              rank/    EA.2 (+EA.3, EA.4) — directory module: ranking.rs (RankBase Ppr /
+                       PprWide / Bfs = rank_eval's P1 / PT* / B0; Ranking { base,
+                       cochange_first }, default H10 = co-change then P1, head() = P1, the 0.5.2
+                       order; the harness names P1, PT*, B0, H10, H10[PT*], H10[B0];
+                       WIDE_DAMPING 0.85, kept out of CODE_TABLES; STRUCTURE_CANDIDATES),
+                       cache.rs (RankCache: one holder's repo roots / labels, at most 8
+                       PprIndexes by SourceKey Merged | Quotient + PprIndex::matches, oldest
+                       evicted, the carry Adjacency, the FileIndex, the CochangeIndex and the
+                       calibration record, all reset by guard() on a (nodes, edges) change),
+                       files.rs (FileIndex: rank_eval's index_graph candidate rule, located
+                       MODULE files, no ORIGIN generated, NOT_CODE_EXTS out, sorted by (repo
+                       label, path): the ONE file space co-change, text, IDR and the replay
+                       index through), cochange.rs (CochangeIndex from each root's
+                       .glia/history-snapshot/ through HistoryFile.p with NO rename fold, a
+                       commit training iff it maps 1..=30 files; c0), order.rs (rank_files /
+                       rank_files_with_c0 / base_keys -> FileRanking, rank_eval's keys and
+                       `better` order verbatim; order_rows, the row permutation)
+              intent/  EB.3 (+EB.4, EB.5a-c, EB.6) — text.rs (TextIndex, BM25 over the history
+                       snapshot's messages, rank_eval's T1s: k1 1.2, b 0.75, digit tokens kept,
+                       Candidates over the FileIndex, exclude_range for a PR's own commits),
+                       ids.rs (IdVocab from `.glia/overlay.toml [ids]`, DEFAULT_PATTERNS
+                       `{U}-{N}` / `T{N3}`; the shape grammar is code-domain
+                       glia_config::IdPattern), defs.rs (read_defs at a Tree::Work | Rev: list
+                       items, table rows, headings of the admitted docs, `[ids] markdown`
+                       globs, `[[ids.tracker]]` JSON, Tier-4 sections; Namespaces, item 9),
+                       paths.rs (PathResolver, rank_eval's KPaths; rename_pairs re-exported
+                       from external::history), idr.rs (route: typed id routing, NAMED 1.0
+                       pending / 0.5 done, CITED 0.5 per comment, the conventional-commit scope
+                       route, recent scopes; IdrSide::quiet for the replay)
+              calibrate/ EC.1 (+EC.2-EC.6, EC.10-EC.14) — record.rs (the
+                       .glia/calibration-snapshot/ record: CALIBRATION_VERSION 1, the writing
+                       BUILD_STAMP strictly, RANKER_REVISION 1, candidate-set digests; select /
+                       explicit -> Selection), replay.rs (the leak-free replay: commits oldest
+                       first, train 1..=30 files, test the newest 300 of 2..=30, the k1 / k2 /
+                       k3 / half / find queries), candidate.rs, select.rs (run_sets:
+                       rank_eval's r3_select online pick; ruling EC-3, a pick below the
+                       fallback is refused), bank.rs (the structure bank), sets.rs (SELh0,
+                       SELs0, SELt2, SELf2t; GROUPS structure / review / find), fusions.rs
+                       (the seeded and find banks over algo::fuse), work.rs (W5 / M),
+                       step.rs (calibrate / calibrate_snapshot, CalibrateOptions { params,
+                       groups, surface, vocab }, the bootstrap CI)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -438,6 +495,17 @@ source files
    → [optional] activation (PPR) / projection-text / pyo3 → Python
    → [query time] rules (glia-rules over engine::rules::CodeFacts): `glia query`, check's rule
      invariants and reflexion model; identity collapse (engine::identity) on the answers
+   → [query time] ranking (0.5.3, engine::rank / intent / calibrate over one holder's RankCache):
+     the answer's seed files -> FileIndex -> co-change (the history snapshot) + PPR / BFS
+     (a cached PprIndex) -> the calibrated pick, else H10 -> row order and `files`; review's
+     title and find --files' query -> IDR (ids routed at a revision) + BM25 over the stored
+     messages -> LX[IDR, ..] or the calibrated pick
+
+snapshot steps (CLI / pyo3, never a build, never a .gmap):
+   git log -> `glia history sync` -> .glia/history-snapshot/ (commits, blame, CO_CHANGES;
+     0.5.3: version 2 + messages.jsonl, redacted, trailers dropped)
+   history snapshot + a built graph -> `glia history calibrate` (0.5.3) -> the leak-free
+     online replay -> .glia/calibration-snapshot/ (meta.json written last, bound to BUILD_STAMP)
 ```
 
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
@@ -590,6 +658,74 @@ per layout write.
   skipped_ws=<w> path=<f>` (DT.11b); `[gaps] graphql transports implied=<n> unpaired=<m>` (DT.11c).
 - *Hints (T12).* `[cells] write .. target=hint_differs .. differs=<fields>` (DT.12b) and
   `[engram-export] hints side: <facts> facts, <hinted> v1 hints, <ms> ms -> <path>` (DT.12a).
+
+**The 0.5.3 markers (E0-EG, waves W0-W15)**, each on stderr unless noted, grouped by what they watch:
+- *The PPR index and its cache (EA.1, EA.2, EA.7, EA.8).* GLIA_ACTIVATION_DEBUG=1's `[activation] plan
+  mode=<m> .. index=<prebuilt|built|none>` (the field is new), and `[activation] index mismatch mode=<m>`
+  unconditionally when a caller's index was built for another config; `[rank-cache] holder=<pygraph|watch|
+  cli|..> source=<merged|quotient> damping=<d> direction=<dir> index=hit|built nodes=<n> incidences=<i>
+  build_ms=<ms> entries=<e>` per lookup, `[rank-cache] reset holder=<h> reason=graph_changed nodes=<a>-><b>
+  edges=<c>-><d>`, and for the calibration's own cache one `[rank-cache] holder=calibrate summary
+  lookups=<l> built=<b> hits=<h> build_ms=<ms>` on drop (EG.7).
+- *The file space and co-change (EA.3, EA.4).* `[rank-files] holder=<h> repos=<r> files=<f> generated=<g>
+  not_code=<n> ms=<ms>`; `[rank-cochange] holder=<h> source=<snapshot|given> repos= snapshots= commits=
+  train_commits= files= pairs= ms=` or `[rank-cochange] holder=<h> none reason=<no_roots|no_snapshot>`;
+  `[rank-files] rank ranking=<harness name> seed_files=<s> extra_seeds=<e> candidates=<n>
+  cochange_files=<c> index=<hit|built|bfs> ms=<ms>` once per rank_files.
+- *The ranked answers (EA.5, EA.6, EA.6b).* After `[blast] seeds=`: `[rank] surface=<blast_radius|
+  diff_impact|review> ranking=<P1|PT*|B0|H10|H10[PT*]|H10[B0]> seed_files=<s> cochange_files=<c> files=<f>
+  lifted=<l> closure_index=<hit|built>` (`files=0 reason=no_seed_file` with no seed file); before
+  `[pack] query=`: `[rank] surface=pack ranking=.. seed_files= cochange_files= files=0 lifted=<l>
+  closure_index= lifted_files=<f> max_file_share=<m>/<k>` (lifted = one best row per co-changed file).
+- *History messages (EB.1).* `[history] sync repo=<l> head=<12> commits=<n> .. window=.. messages=<n>
+  redacted=<r> branch_labels=<b> trailers_dropped=<t> surface=<s>` (`messages=off` with --no-messages);
+  `[history] messages incomplete dir=<d> reason=<r>` on a bad sidecar.
+- *Intent (EB.2-EB.8).* `[algo] fuse keys=<k> candidates=<n> excluded=<e> zero_first_key=<z>` under
+  GLIA_ALGO_DEBUG=1; `[intent] text repo=<l> surface=<s> docs=<d> skipped_wide=<w> excluded=<e>
+  tokens=<q> matched_docs=<m> files=<f>` (or `history=absent|messages=absent`); `[ids] vocab repo=<l>
+  surface=<s> patterns=<n> source=<config|default|off|override> trackers=<t> rejected=<r> markdown=<m>`
+  (`override`: CalibrateOptions.vocab, EC.14); `[id-defs] repo=<l> rev=<sha12|worktree> ..`; `[id-ns]
+  repo=<l> series=<s> local=<l> merged=<m> multi_series_ids=<x> namespaces=<n> lineage_merges=<g>
+  lineage_redirects=<r> lineage_capped=<c>`; `[id-paths] repo=<l> surface=<s> candidates=<c>
+  renamed=<h> resolved=<n> routes=<route:n,..> ambiguous=<a> over_cap=<o> unresolved=<u>`; `[idr]
+  repo=<l> surface=<s> rev=<r> ids= resolved= unresolved= routes= lineage_keys= scopes= named_files=
+  cited_files= files= recent=`, and the replay's one `[idr] replay surface=calibrate sides=<s>
+  routed=<r> resolved=<x> unavailable=<u> ms=<t>` (EC.13); `[review-intent] base=<rev>
+  title_source=<arg|commit|none> fusion=<pick> ids=<n> idr_files=<i> text=<present|absent>
+  text_files=<t> candidates=<c> reordered=<r>` after `[review] base=`; `[find-files] repo=<l>
+  surface=<cli|py|lib> fusion=<pick> ids=<n> idr_files=<i> text=<present|absent> text_files=<t>
+  rows=<r>`.
+- *Calibration and selection (EC.1-EC.14).* `[calibration] read root=<r> status=<s> reason=<r>
+  sets=<n> history_head=<h>`, `[calibration] wrote dir=<d> sets=<n> build_stamp=<b>
+  history_head=<h>`; `[calibrate] replay commits=<c> train=<t> test_eligible=<e> test=<n>
+  messages=<yes|no> queries k1= k2= k3= half= find=`, `[calibrate] bank structure files=<f> nodes=<n>
+  ppr_indexes=2 carry_edges=<e>`, `[calibrate] text builds=<b> docs_max=<d> messages=<yes|no> ms=<ms>`,
+  `[calibrate] work trained= segments= labels= m_src mbr= mgap= none= work=<author_time|committer_time>`,
+  `[calibrate] idr unavailable commits=<n>`, per row `[calibrate] set=<SET> shape=<k> candidates=<n>
+  test_commits=<t> queries=<q> pick=<name> last_online_pick=<name> selection_r10=<x> fallback_r10=<y>
+  refused=<no|below_fallback>`, `[calibrate] candidate <name> returned <n> keys of <m>` (drops that
+  set's rows), and `[calibrate] done surface=<cli|pyo3|..> sets=<n> test_commits=<t> ms=<ms>`;
+  `[work] head w5_files= m_files= m_src= surface= work=`; per answer `[select] surface=<blast_radius|
+  diff_impact|review|pack|review_intent|find_files> set=<SELh0|SELs0|SELt2|SELf2t> shape=<k1|k2|k3|half|
+  find> pick=<name> source=<calibrated|fallback|explicit> reason=<r|-> test_commits=<n>`.
+- *The harness and the gate (EA.9, EB.9, EG.1-EG.7; engine/examples, not hashed).* `[rank_eval] ans
+  rankers=<n> single=<q> transfer=<t> find=<f> ms=<ms>`, `[rank_eval] ans calibration sets=<n>
+  test_commits=<t> ms=<ms>`, `[rank_eval] ans intent review=<q> find=<f> idr_parent_reads=<p>
+  idr_commits=<i> ms=<ms>`; `[rank-parity] files ..` and `[rank-parity] label=<l> shape=<s>
+  ranking=<r> queries=<q> key_mismatch=<k> order_mismatch=<o>` (`--engine-parity on`); `[rank-eval]
+  engine parity repo=<l> t1s_raw_mismatch=<q>/<n> ..` (`--engine on`); `[rank-gate] verdict label=<l>
+  rows=<n> drops=<d> gains=<g> new=<w> drift=<k> missing=<m> changed=<c> correction=holm alpha=0.05`
+  per check, `[rank-gate] drift ..` / `missing ranker=..` / `new ..` / `refused <name>: not a public
+  https snapshot`, and scripts/rank-gate.sh's last lines `[rank-gate] check: ok - <n> rows, <g> gains,
+  <d> drops on <s> snapshots` (or `check: FAILED (<k> drops: ..)`) and `[rank-gate] coverage: ok -
+  <n> items measured, <e> exempt`.
+- *Hygiene (EG.4, EG.5).* engram-export prints no PPR side line any more; scripts/check-engram-export.sh
+  ends `[engram-export] check: ok - build + <N> tests passed against engram-core
+  GMAP_FORMAT_VERSION=<V>`. The wheels workflow's `[wheels-ci]` check is a PR run's log: no
+  `Node.js 20 is deprecated` annotation, runner lines `Image: ubuntu-24.04` / `windows-2025-vs2026` /
+  `macos-14-arm64`. The release-docs packets' own: `[readme-surface] commands=<n> usage_lines=<u>
+  flags_checked=<f>` and `[skill] <name>: <n> invocations checked against cli/surface (<k> stale)`
+  (EZ.1), `[check-neuropil]` (scripts/check-neuropil.sh, EZ.2).
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
@@ -884,6 +1020,21 @@ Some(preset))`; `MergedGraph::blast_radius` takes `&DomainTables`. The graph, st
 projection crates read `CODE_TABLES` directly (they cannot depend on the engine); a new
 entry kind, carry edge or weight is one table row there, never a list in a consumer.
 
+0.5.3 keeps every table and default above: damping stays 0.5 in `CODE_TABLES`, so hotspots,
+communities and every unranked PPR read are unchanged. What moves is how a computed PPR is kept
+and read. `glia_activation::PprIndex` (EA.1) is the index `ppr_vector` used to rebuild per call
+(`ppr_vector` is now `PprIndex::build(..).vector(..)`, pinned bit for bit by an oracle copy of the
+0.5.2 code); the engine keeps up to 8 of them per holder in `rank::RankCache` (one per `PyGraph`,
+one per `WatchSession`, replaced after an update that changed the graph, one per CLI call; found by
+`SourceKey` and `PprIndex::matches` on the dials), so a long-lived holder builds each once. The
+ranked answers read three structural bases (`rank::RankBase`): `P1` (undirected PPR at the code
+domain's damping over CODE_TABLES' weights, max-pooled per file), `PT*` (the same at
+`rank::WIDE_DAMPING` = 0.85, sum-pooled: rank_eval's picked `base,d85`, kept out of CODE_TABLES
+because round 3 measured it -0.035 on one repo and +0.019 on another, so it reaches an answer only as
+a calibrated candidate) and `B0` (carry-edge BFS both ways, `[-depth, file degree]`), each optionally
+behind co-change first (`H10..`). The text and fusion math is domain-free too: `algo::fuse` (EB.2);
+the code-domain readings (FileIndex, co-change, IDR, the calibration replay) live in the engine.
+
 Identity is a table too (DD.3): `CODE_TABLES.identity_rules` holds the ten ways two nodes are
 one thing, one `IdentityRule` per `same_as::ALL_RULES` name (the kinds it pairs, the key, the tier
 and whether a class walks): `package_name` (FACT, never walks: a registry package would join every
@@ -970,7 +1121,7 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
 - **Tree-sitter, not regex.** 0.4.x moved to AST extraction; 0.2.0 regex is not a ceiling.
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
-- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a; `bfs_levels`, DA.1), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); 0.5.2 adds identity classes and the quotient (`algo::classes`, DD.1) and push PPR (`algo::ppr`, DE.5); 0.5.1 adds label propagation and seeded Leiden with `modularity` (`algo::community`, CD.1a/b), Stoer-Wagner and the minimum s-t cut (`algo::cut`, CD.2a), neighbourhood pair scoring (`algo::linkpred::score_pairs`, CD.3a), degree tables and HITS (`algo::hubs`, CD.4a), MinHash + LSH (`algo::minhash`, CD.4d) and validity spans over consecutive snapshots (`algo::timeline::TimelineBuilder`, CD.5a). A graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node; the engine answers that use them (`communities`, `splits`, `hubs`, `duplicate_flows`, `timeline`, the `suspected_edge` gap) add the code-domain reading on top: labels, services, located rows, tiers.
+- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a; `bfs_levels`, DA.1), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); 0.5.2 adds identity classes and the quotient (`algo::classes`, DD.1) and push PPR (`algo::ppr`, DE.5); 0.5.1 adds label propagation and seeded Leiden with `modularity` (`algo::community`, CD.1a/b), Stoer-Wagner and the minimum s-t cut (`algo::cut`, CD.2a), neighbourhood pair scoring (`algo::linkpred::score_pairs`, CD.3a), degree tables and HITS (`algo::hubs`, CD.4a), MinHash + LSH (`algo::minhash`, CD.4d) and validity spans over consecutive snapshots (`algo::timeline::TimelineBuilder`, CD.5a); 0.5.3 adds rank fusion (`algo::fuse`, EB.2) and the kept PPR index (`PprIndex`, EA.1, beside `plan`). A graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node; the engine answers that use them (`communities`, `splits`, `hubs`, `duplicate_flows`, `timeline`, the `suspected_edge` gap) add the code-domain reading on top: labels, services, located rows, tiers.
 - **Rules are query-time (0.5.2, Q8).** Datalog runs over the built graph when asked (`glia
   query`, check's rule invariants and reflexion model); it stores no derived edge, and glia-rules
   is not a HASHED_ROOTS entry, so a rules change never invalidates a parse cache. Every row carries
@@ -993,10 +1144,22 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   prelude's `unhandled_route` skips a ROUTE stamped ORIGIN `test_fixture` (`origin/2` reads no
   edge, so the caveats stay HANDLED_BY's, DT.6b); a row through a `resolver:evm` `abi_hint` /
   `name_hint` edge tiers heuristic.
+- **Rankings are query-time (0.5.3).** Whatever a ranking reads from history is a snapshot step
+  (`glia history sync`, `glia history calibrate`), never a build pass and never a `.gmap`: the
+  build's inputs are byte-identical with or without messages or a calibration record. Each port
+  reproduces `engine/examples/rank_eval.rs`'s arithmetic (float accumulation order, tie rules) and
+  is pinned by a parity test against it; ties go by (repo label, path) or candidate index, never a
+  NodeId or HashMap order. Commit messages and branch labels are untrusted text, redacted
+  (`redact_untrusted`) before they are stored, author identities never read. A calibration record
+  is read only by the BUILD_STAMP that wrote it, at RANKER_REVISION 1 and with its candidate-set
+  digests; anything else falls back with a reason. The rank gate (`bash scripts/rank-gate.sh check`,
+  six pinned public snapshots, judged against `bench/rank-gate/baseline/0.5.2/` and `current/`,
+  each its own Holm family, one-sided, alpha 0.05) is part of every close-out that touches a ranked
+  path; a drop fails it, and only `baseline` / `baseline-add` / `ratchet` write the baselines.
 - **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -1021,6 +1184,27 @@ pack, hubs, hotspots, communities, duplicate-flows, effects, implementors, why a
 tweaks the classes include client <-> server models (`http_model`, DT.1h) and GraphQL result /
 generated models with their schema type (`graphql_model`, DT.1k), both DERIVED and walking; `why`
 reads a SAME_AS edge of either emitter as an identity edge.
+
+Ranking (0.5.3, EA.5-EA.8, EB.7, EB.8, EC.8-EC.13). The text-free ranked answers (`blast-radius`,
+`diff-impact`, `review`'s impact, `pack`) rank every candidate file from the seeds' distinct files
+(`rank::rank_files`) and reorder their rows by it (`rank::order_rows`, before the identity fold,
+scope and top_k; pack lifts each co-changed file's best row only, EA.6b, ruling EA-2b): with a
+history snapshot under the holder's repo roots, co-change first (H10), else the 0.5.2 order byte
+for byte. Blast-radius answers gain `files` (the `--top-files` / `top_files` first: rank, file,
+repo, cochange, ppr, depth, rows; seed files never), every ranked answer `selection` {set, shape,
+pick, source calibrated | fallback | explicit, reason, test_commits}. The set is SELh0 (H10,
+H10[PT*], H10[B0]) when co-change ranks first, else SELs0 (P1, PT*, B0); the shape is the seeds'
+distinct files (k1 one, k2 two, k3 three, half more); the repo's calibration record picks within
+the set (one repo only: a merge reads `multi_repo`), and an explicit `--ranking` / `ranking=` is
+`source=explicit`. Text answers: `review` with a title (`--title`, else the newest non-merge
+subject of `<base>..HEAD`, redacted) gains `intent` {title, title_source, fusion, ids, files,
+text} and `selection_intent` (SELt2, the fallback LX[IDR,P1]); IDR is routed at the BASE tree,
+BM25 excludes the PR's own commits, and impact rows in id-routed files move first (text never
+moves a row). `find --files` / `PyGraph.find_files` rank one repo's files for a free-text query
+(IDR over the working tree, BM25 with nothing excluded; SELf2t, fallback LX[IDR,T1s]); its
+empty answer is a FACT `no_match` absence naming the missing inputs, exit 0, and the `Answer`
+carries `selection` (serialized for this answer only). Not ranked by this: `find`'s node answer,
+`trace`, `tests-for`, `hotspots` and every other answer.
 
 CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surface/`
 (regenerate: `GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface`). Most take
@@ -1205,6 +1389,20 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   config like `[walk] skip`: applied under `--no-overlay` and never a candidate section, so
   neither `overlay try` nor `--overlay-delta` measures it.
 - hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
+- 0.5.3 (ranking): `blast-radius`, `diff-impact`, `review` and `pack` take `--ranking
+  ppr|ppr-wide|bfs` (no default: absent = the calibrated pick, else ppr) and `--no-cochange`
+  (common::CalibratedRankingArgs), `blast-radius` / `diff-impact` `--top-files <N>` (10) with a
+  `## files` table after the rows; each table gains one `ranking: <pick> (<source>[: <reason>],
+  shape <k>[, <t> commits])` line, and each command holds one RankCache (holder `cli`) built from
+  the build's repo roots and labels, `--with` repos included (EA.8, EC.8, EC.9). `review --title
+  <TEXT>` adds `### Intent` after the impact table with a `_ranked by <pick> (..)_` line (EB.7,
+  EC.11, EC.12). `find --files` (EB.8, EC.13; conflicts with --kind / --no-collapse / --scope,
+  `--with` exits 2): the routed-id table, then `| # | file | idr | text | ids |`, ending `ranked by
+  <pick> (..)`. inputs: `history sync --no-messages` (EB.1); `history calibrate <repo>
+  [--max-commits <n>] [--max-seeds <n>] [--sets <group,..>] [--json]` (EC.6; groups structure,
+  review, find, every one by default; one line per (set, shape), then `wrote <dir>`; exits 0
+  written, 1 on no history snapshot or an unknown group (checked before the build), 2 on a
+  build error).
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
@@ -1248,7 +1446,17 @@ it unless `strict=True`, DT.7b, DT.7c); `contract_breaks_vs_rev(.., models_min_t
 outcome's `node_hint` / `hint_differs` (DT.12b); `contract_fields` returns the `http_model`,
 `client_contract` and `graphql_selection` rows (DT.1i, DT.1n); `query_gql` property rows carry
 `file` / `line` (DT.8b); `overlay_try`'s rule status may read `checks_nothing` with `reason` /
-`fix` (DT.7c).
+`fix` (DT.7c). 0.5.3: `blast_radius(.., collapse=True, ranking=None, cochange=True,
+top_files=10)`, `diff_impact` / `diff_impact_vs_rev(.., scope=None, ranking=None, cochange=True,
+top_files=10)`, `pack` / `pack_ids(.., scope=None, ranking=None, cochange=True)` and
+`review_vs_rev(.., models_min_tier="fact", ranking=None, cochange=True, title=None)` (EA.7, EC.8,
+EC.9, EB.7; `ranking` None = calibrated, else ppr, a bad name a `ValueError` before any work);
+their dicts gain `files` / `selection` (and review's `intent` / `selection_intent`);
+`PyGraph.find_files(query, top_k=20)` (EB.8); `history_sync(.., messages=True)` (EB.1) and
+`history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None)` (EC.6, the GIL released).
+A PyGraph holds one `Arc<RankCache>` (holder `pygraph`) for its lifetime and reads
+`.glia/history-snapshot/` / `.glia/calibration-snapshot/` under its repo roots; a WatchSession's
+`snapshot()` shares the session's.
 Classes: `PyGraph`, and 0.5.2's `WatchSession(repo, overlay=True)` (DC.9: `apply(paths)` /
 `poll()` return a WatchUpdate dict (`poll` None when nothing changed), `snapshot()` a PyGraph of
 the current build, `persist()` writes the layout and cache; the GIL is released while the engine
@@ -1293,6 +1501,18 @@ ModelBreakArgs, ModelChange, ModelExchange, ModelSite, MODEL_MIN_TIERS}` (DT.1o)
 `Review.{model_breaks, unanchored}` and `review::{caveat_fold, CaveatFold}` (DT.1p),
 `overlay_loop::RULE_CHECKS_NOTHING` and `RuleTrial.{reason, fix}` (DT.7c), and the graph
 facade's contract-model items (Module layout above).
+0.5.3, by module path: `rank::{RankCache, SourceKey, FileIndex, CochangeIndex, c0, rank_files,
+rank_files_with_c0, base_keys, order_rows, FileRanking, Ranking, RankBase, WIDE_DAMPING}`;
+`intent::{text::TextIndex, ids::IdVocab, defs::read_defs, paths::PathResolver, idr::route}`;
+`calibrate::{calibrate, calibrate_snapshot, CalibrateOptions, select, explicit, Selection,
+load_for_roots, specs, run_sets}`; `find::{find_files, find_files_with_ids, FindFilesOptions,
+FoundFile, FIND_FILES_FUSION}`; `review::{ReviewIntent, IntentFile, INTENT_FUSION_REVIEW}` with
+`ReviewArgs.title`, `Review.{intent, selection_intent}`; `BlastOptions.{ranking, rank_cache,
+top_files, select}`, `BlastRadius.{files, selection}`, `PackArgs.{ranking, rank_cache, select}`,
+`Pack.selection`, `Answer.selection`, `watch::WatchSession::rank_cache()`; on the graph facade
+`blast_radius_over_with` (a prebuilt PprIndex) and `closure_config`; the #[doc(hidden)] seams
+`review::intent_files_with` / `IntentHistory` and `find::find_files_with` that rank_eval's gate
+calls with leak-free history (EG.7).
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -1352,12 +1572,12 @@ questions over one graph computes `entrypoint_reachable` once.
   every crate can be pinned `=0.5.1`. The handoff docs
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
   every declared break) cover W0–W19.
-- **0.5.2 — the four bets + the tweaks: complete on local `main`, version bumped, awaiting the
-  tag.** James, 2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next
+- **0.5.2 — the four bets + the tweaks: released 2026-10-18 (tag `v0.5.2`, `glia-py` 0.5.2 on
+  PyPI).** James, 2026-10-18: *"maybe we just do the 0.5.2 and slowly work on 0.5.3 over the next
   week"*, then "I prep, you push" and "repo-graph upgrades to 0.5.2 now": 0.5.2 is released
   2026-10-18 as tag `v0.5.2` and `glia-py` 0.5.2 on PyPI (his 2026-10-17 ruling, *"can't we just
   go 0.5.1-> 0.5.3 release"*, is reversed), and 0.5.3 is paced over the week as a normal 0.5.2 ->
-  0.5.3 release. What remains is James's: push → tag `v0.5.2` → PyPI. The bump is done: the Cargo
+  0.5.3 release. The bump was done: the Cargo
   workspace, `py/pyproject.toml` and the excluded engram-export read 0.5.2, so every crate can be
   pinned `=0.5.2`. The code is the code at `196728e3`, where Engram ran its registered replays
   (results in the 0.5.4 seed §E): only plan commits and the bump follow it. Scope in
@@ -1413,11 +1633,35 @@ questions over one graph computes `entrypoint_reachable` once.
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
   dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
-- **After 0.5.2** (James, 2026-10-18: the ranking release takes the 0.5.3 name and the scale leap moves one version):
-  **0.5.3** ranking (seed `dev-notes/next-leap-0.5.3.md`): PPR damping 0.85 with sum pooling, co-change as the
-  tie-break in impact / review / pack, the intent blend in review / find, per-repo calibrated selection over each
-  repo's own history, and the PPR index kept between calls, measured by `engine/examples/rank_eval.rs` (the
-  `dev-notes/ranking-eval*.md` reports). **0.5.4** scale (seed `dev-notes/next-leap-0.5.4.md`, the old 0.5.3 seed) —
+- **0.5.3 — ranking: complete on local `main`, awaiting the version bump.** James, 2026-10-18:
+  the ranking experiments' table becomes 0.5.3, *"it's a small lay up step and has the
+  biggest generalised wins"*; items 6-11 and the hygiene confirmed 2026-10-23 (*"yes to all"*). Scope in
+  `dev-notes/next-leap-0.5.3.md` (items 1-11, the gate, the hygiene), evidence
+  `dev-notes/ranking-scoreboard.md` and the `dev-notes/ranking-eval-*.md` round reports, all from
+  `engine/examples/rank_eval.rs`; packets in `dev-notes/leap-053-packets.json` (its `rulings`:
+  James's 23), overrides in `dev-notes/leap-053-corrections.json`, schedule and LANDED waves in
+  `dev-notes/wave-runner/schedule_053.py` (runner `--release 053`, ids E*, waves W0-W16). Groups:
+  E0 the module slots (`algo::fuse`; the engine's `rank`, `intent`, `calibrate`); EA structural
+  ranking (`PprIndex` and its `RankCache`, the FileIndex candidate space, co-change first from the
+  history snapshot, PPR d0.85 + sum pooling and BFS as candidates, in blast-radius / diff-impact /
+  review / pack, `files`, the CLI and pyo3 kwargs); EB intent (messages in the history snapshot,
+  BM25, the `[ids]` vocabulary, id definitions / namespaces / paths, IDR, `review --title`, `find
+  --files`); EC per-repo calibrated selection (the `.glia/calibration-snapshot/` record, the
+  leak-free online replay, `glia history calibrate`, SELh0 / SELs0 / SELt2 / SELf2t, `selection` on
+  every ranked answer, `--ranking` absent = calibrated); EG the rank gate (rank_eval's ANS rankers
+  over the shipped answers, `--gate-check` with Holm, `bench/rank-gate/` and `scripts/rank-gate.sh`
+  on six pinned public snapshots, against 0.5.2 and current; the close-out check reads `[rank-gate]
+  check: ok - 1176 rows, 47 gains, 0 drops on 6 snapshots` and `coverage: ok - 9 items measured, 2
+  exempt`), the DE.5 side-file removal (EG.4) and the wheels workflow on Node 24 actions pinned by
+  commit with pinned runner images (EG.5; macos-14 is deprecated upstream, a later move to macos-15
+  is deliberate); EZ these docs and the handoffs (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.3.md`;
+  neuropil skipped 0.5.2, so its handoff runs 0.5.1 -> 0.5.3). No registry id, no
+  FORMAT_VERSION / MANIFEST_VERSION change, no crate added and the workspace Cargo.lock unmoved;
+  the on-disk changes are the history snapshot's version 2 (`messages.jsonl`) and the calibration
+  record. A calibrated answer depends on the glia build that calibrated (BUILD_STAMP strict), so
+  every repo recalibrates after the upgrade. The version bump is the release step after EZ, never
+  inside a packet.
+- **After 0.5.3:** **0.5.4** scale (seed `dev-notes/next-leap-0.5.4.md`, the old 0.5.3 seed) —
   Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
   build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,
   org-internal package routing on SAME_AS; plus James's 2026-10-16 additions there (local

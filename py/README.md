@@ -30,6 +30,60 @@ is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
 content hash of every graph-shaping source file, so two builds of one release
 that parse differently report different stamps.
 
+## What's new in 0.5.3
+
+0.5.3 is the ranking release: the API conventions below stay, the ranked answers take a few
+keywords and gain a few keys, and their row order can change. Pin it exactly, as every glia
+release. The store format is unchanged (format 3) and so is every graph a build writes: the
+rankings are computed when you ask, from snapshots that `history_sync` and `history_calibrate`
+write beside the graph.
+
+- **Co-change first.** When a repo holds `.glia/history-snapshot/` (`glia_py.history_sync`),
+  `PyGraph.blast_radius`, `PyGraph.diff_impact`, `diff_impact_vs_rev`, `review_vs_rev`'s impact,
+  `PyGraph.pack` and `pack_ids` rank the files that usually change with the seeds' files first,
+  then by PageRank. Without a snapshot the order is 0.5.2's. A `PyGraph` reads the snapshot
+  under its own repo roots and keeps its ranking indexes (PageRank, files, co-change) for its
+  lifetime, so a long-lived graph answers repeated questions faster: 202.5 ms against 561.7 ms
+  for the first `blast_radius` on a 1231-commit clone of glia, scores bit-identical.
+  `WatchSession.snapshot()` shares the session's indexes.
+- **New keywords**, appended last, so positional calls still bind: `ranking=None, cochange=True,
+  top_files=10` on `blast_radius`, `diff_impact` and `diff_impact_vs_rev`; `ranking=None,
+  cochange=True` on `pack`, `pack_ids` and `review_vs_rev` (then `title=None` on
+  `review_vs_rev`). `ranking` is `"ppr"`, `"ppr-wide"` (damping 0.85, sum-pooled per file) or
+  `"bfs"`, and any other string raises `ValueError` before any work. `None` uses the repo's
+  calibrated pick (below), else `"ppr"`. `cochange=False` drops the co-change tier.
+- **New keys.** Every blast-radius dict (also `diff_impact`'s `impact` and the review's) gains
+  `files` after `results`: the `top_files` most relevant files, each with `rank`, `file`,
+  `repo`, `cochange`, `ppr`, `depth` (under bfs) and `rows` (result rows in that file, 0 for one
+  only co-change reached), and `selection` (`set`, `shape`, `pick`, `source`: calibrated /
+  fallback / explicit, `reason`, `test_commits`) naming the ranking it used. The `pack` /
+  `pack_ids` dicts gain `selection` too, absent on an empty pack.
+- **`glia_py.history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None)`.** Replays
+  the history snapshot over the graph, leak-free (each commit scored with only the commits
+  before it), and writes `.glia/calibration-snapshot/`: per answer and seed shape, the ranking
+  that predicted the repo's own past commits best. Returns the summary dict (`sets`: one row per
+  set and shape with its pick, fallback, online recall@10 of both and a bootstrap 95% CI);
+  `ValueError` with no history snapshot. Call it after `history_sync`. A record is read only by
+  the glia build that wrote it (`reason` `build_stamp` otherwise), so calibrate again after
+  upgrading; until then, and on a merge of several repos, answers fall back to their
+  uncalibrated order.
+- **`history_sync(.., messages=True)`.** The snapshot also keeps each commit's message
+  (`messages.jsonl`: subject, body with trailers and author identities dropped, both redacted
+  for secrets, author time, merged-branch label), which the intent ranking reads; the summary
+  dict gains `messages`, `redacted`, `trailers_dropped` and `branch_labels`.
+  `messages=False` keeps none. The snapshot's format version is 2, which a 0.5.2 reader
+  rejects: sync again after downgrading.
+- **`review_vs_rev(.., title=None)`: the PR's intent.** With a title, or by default the newest
+  commit subject of `<base>..HEAD`, the dict gains `intent` (`title`, `title_source`,
+  `fusion`, `ids`: each id the title names routed through the task or requirement row defining
+  it, `files`: the files it is about with their `idr`, `text` and `ppr` scores, `text`) and
+  `selection_intent`; impact rows in files an id routes to move first. Ids are matched by shape
+  (`LANG-12`, `FR-001`, `T012` by default, or `.glia/overlay.toml [ids]`).
+- **`PyGraph.find_files(query, top_k=20)`.** The files a free-text query is about: ids in it
+  routed to their defining rows, then past commit messages that match it, ranked by the repo's
+  calibrated pick. Returns `{results, absence, selection}`; each row has `rank`, `file`, `idr`,
+  `text`, `degree` and `ids`. One repo only. `PyGraph.find` is unchanged.
+
 ## What's new in 0.5.2
 
 **Pin exactly: `glia-py==0.5.2`.**

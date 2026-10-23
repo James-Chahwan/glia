@@ -12,7 +12,9 @@
 //! ([`classes`](crate::algo::classes): a union-find with min-id
 //! representatives and a Quotient GraphSource adapter, DD.1) and push
 //! personalised PageRank ([`ppr`](crate::algo::ppr): Andersen-Chung-Lang push
-//! over an Adjacency, DE.5).
+//! over an Adjacency, DE.5). 0.5.3 adds rank fusion
+//! ([`fuse`](crate::algo::fuse): min-max over candidates, blends, equal means
+//! and the lexicographic order LX, ties by candidate index, EB.2).
 //!
 //! This crate depends on `core` only, so nothing here can name a domain's
 //! node kind or edge category: an algorithm takes the categories it follows
