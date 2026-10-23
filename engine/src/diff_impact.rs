@@ -366,6 +366,7 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
         unresolved: Vec::new(),
         results: Vec::new(),
         files: Vec::new(),
+        selection: None,
         absence: Some(absence::empty(merged, PRIMITIVE, query, "no_match", note, &[], None)),
     }
 }

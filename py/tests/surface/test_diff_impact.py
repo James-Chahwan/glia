@@ -27,7 +27,7 @@ PLACE = "shop::a::place"
 CHECKOUT = "shop::b::checkout"
 KEYS = ["base", "changed", "edges_added", "edges_removed", "impact", "unresolved_diff_files"]
 CHANGED_KEYS = ["id", "qname", "kind", "file", "line", "change", "seed"]
-IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "absence"]
+IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "selection", "absence"]
 ROWS = [(PLACE, 1, PRICE), (CHECKOUT, 2, PRICE)]
 DIFF = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,2 +1,2 @@\n"
         " def price(o):\n"
@@ -38,7 +38,7 @@ DELETION = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,3 +1,2 @@\n"
             "-    o = o\n"
             "     return o\n")
 KW = [("direction", "both"), ("depth", 4), ("top_k", None), ("live_only", False), ("scope", None),
-      ("ranking", "ppr"), ("cochange", True), ("top_files", 10)]
+      ("ranking", None), ("cochange", True), ("top_files", 10)]
 DIFF_MARKER = "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 REV_MARKER = "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 

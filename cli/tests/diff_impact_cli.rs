@@ -192,7 +192,14 @@ fn diff_file_json() {
     assert!(v["impact"]["absence"].is_null());
     let impact_keys: Vec<&str> =
         v["impact"].as_object().expect("impact").keys().map(String::as_str).collect();
-    assert_eq!(impact_keys, ["absence", "files", "results", "seeds", "unresolved"]);
+    assert_eq!(impact_keys, ["absence", "files", "results", "seeds", "selection", "unresolved"]);
+    // EC.8: no record in the scratch repo: SELh0's fallback, logged once.
+    assert_eq!(
+        (&v["impact"]["selection"]["source"], &v["impact"]["selection"]["reason"]),
+        (&Value::from("fallback"), &Value::from("absent")),
+        "{v}"
+    );
+    assert!(stderr(&out).lines().any(|l| l.starts_with("[select] surface=diff_impact set=SELh0 ")), "{}", stderr(&out));
     assert!(stderr(&out).lines().any(|l| l == DIFF_MARKER), "{}", stderr(&out));
 }
 
@@ -349,7 +356,13 @@ fn ranking_flags_reach_the_radius() {
         err.lines().any(|l| l.starts_with("[rank] surface=diff_impact ranking=P1 ")),
         "{err}"
     );
+    // EC.8: no `--ranking`, no calibration record: SELs0's fallback.
+    assert!(
+        err.lines().any(|l| l == "[select] surface=diff_impact set=SELs0 shape=k1 pick=P1 source=fallback reason=absent test_commits=0"),
+        "{err}"
+    );
     let text = stdout(&out);
+    assert!(text.contains("\nranking: P1 (fallback: absent, shape k1)\n"), "{text}");
     assert!(text.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"), "{text}");
     assert!(text.contains("| 1 | shop/b.py | 1 | 0.000 |"), "{text}");
 
@@ -364,7 +377,13 @@ fn ranking_flags_reach_the_radius() {
         "{}",
         stderr(&json)
     );
+    assert!(
+        stderr(&json).lines().any(|l| l.starts_with("[select] surface=diff_impact set=SELs0 shape=k1 pick=B0 source=explicit ")),
+        "{}",
+        stderr(&json)
+    );
     let v: Value = serde_json::from_str(&stdout(&json)).expect("valid JSON");
     assert_eq!(rows(&v), price_rows());
+    assert_eq!(v["impact"]["selection"]["source"], "explicit", "{v}");
     assert_eq!(v["impact"]["files"].as_array().map(Vec::len), Some(1), "{v}");
 }

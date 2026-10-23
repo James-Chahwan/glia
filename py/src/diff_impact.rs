@@ -30,35 +30,37 @@ use glia_engine::identity::Collapse;
 use glia_engine::rank::{RankCache, Ranking};
 use glia_graph::MergedGraph;
 
-use crate::blast::{ranking_named, reach_named};
+use crate::blast::{ranking_selected, reach_named};
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// The 0.5.3 ranking keywords of both entry points (EA.7): the file ranking
-/// ([`ranking_named`]), how many files `impact.files` lists, and the held
+/// and whether the calibration selects it ([`ranking_selected`], EC.8), how many files `impact.files` lists, and the held
 /// ranking cache (`PyGraph`'s; `None` for `diff_impact_vs_rev`, whose engine
 /// call builds one over the working tree's roots, EA.5).
 #[derive(Clone)]
 struct RankKw {
     ranking: Ranking,
+    select: bool,
     top_files: usize,
     cache: Option<Arc<RankCache>>,
 }
 
 impl Default for RankKw {
-    /// The pyo3 signature's defaults: `ranking="ppr", cochange=True,
-    /// top_files=10`, no held cache.
+    /// The pyo3 signature's defaults: `ranking=None, cochange=True,
+    /// top_files=10` (the calibrated pick, else `ppr`), no held cache.
     fn default() -> Self {
         let blast = BlastOptions::default();
-        RankKw { ranking: blast.ranking, top_files: blast.top_files, cache: None }
+        RankKw { ranking: blast.ranking, select: blast.select, top_files: blast.top_files, cache: None }
     }
 }
 
 impl RankKw {
     /// The keywords as given; `Err` names an unknown `ranking`.
-    fn named(ranking: &str, cochange: bool, top_files: usize, cache: Option<Arc<RankCache>>) -> Result<Self, String> {
-        Ok(RankKw { ranking: ranking_named(ranking, cochange)?, top_files, cache })
+    fn named(ranking: Option<&str>, cochange: bool, top_files: usize, cache: Option<Arc<RankCache>>) -> Result<Self, String> {
+        let (ranking, select) = ranking_selected(ranking, cochange)?;
+        Ok(RankKw { ranking, select, top_files, cache })
     }
 }
 
@@ -80,6 +82,7 @@ fn options(
     opts.live_only = live_only;
     opts.scope = scope.map(str::to_string);
     opts.ranking = rank.ranking;
+    opts.select = rank.select;
     opts.top_files = rank.top_files;
     opts.rank_cache = rank.cache.clone();
     Ok(opts)
@@ -149,9 +152,10 @@ impl PyGraph {
     /// file, an unparsed file). The edge lists are empty in this mode. Lines
     /// are 1-based. `ranking`, `cochange` and `top_files` (0.5.3) order the
     /// impact rows and fill `impact.files` as in `blast_radius`, over this
-    /// PyGraph's held ranking indexes. Raises ValueError on a bad `direction`
-    /// or `ranking`.
-    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking="ppr", cochange=true, top_files=10))]
+    /// PyGraph's held ranking indexes; `ranking=None` (the default, EC.8)
+    /// applies the repo's calibrated pick, else `ppr`, and `impact` gains
+    /// `selection`. Raises ValueError on a bad `direction` or `ranking`.
+    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10))]
     #[allow(clippy::too_many_arguments)]
     fn diff_impact(
         &self,
@@ -161,7 +165,7 @@ impl PyGraph {
         top_k: Option<usize>,
         live_only: bool,
         scope: Option<&str>,
-        ranking: &str,
+        ranking: Option<&str>,
         cochange: bool,
         top_files: usize,
     ) -> PyResult<Py<PyAny>> {
@@ -190,7 +194,7 @@ impl PyGraph {
 /// raises ValueError on a bad `direction` or `ranking` (before any build) or
 /// a git or build failure.
 #[pyfunction]
-#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking="ppr", cochange=true, top_files=10))]
+#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10))]
 #[allow(clippy::too_many_arguments)]
 fn diff_impact_vs_rev_py(
     repo_path: &str,
@@ -200,7 +204,7 @@ fn diff_impact_vs_rev_py(
     top_k: Option<usize>,
     live_only: bool,
     scope: Option<&str>,
-    ranking: &str,
+    ranking: Option<&str>,
     cochange: bool,
     top_files: usize,
 ) -> PyResult<Py<PyAny>> {
@@ -333,14 +337,14 @@ mod tests {
         assert!(err.contains("sideways"), "{err}");
         let o = options("both", 2, Some(3), true, Some("shop"), &RankKw::default()).expect("options");
         assert_eq!((o.depth, o.top_k, o.live_only, o.scope.as_deref()), (2, Some(3), true, Some("shop")));
-        assert_eq!((o.ranking, o.top_files, o.rank_cache.is_none()), (Ranking::default(), 10, true));
+        assert_eq!((o.ranking, o.select, o.top_files, o.rank_cache.is_none()), (Ranking::default(), true, 10, true));
         // EA.7: the ranking keywords reach the engine's options.
         let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
-        let rank = RankKw::named("bfs", false, 3, Some(held.clone())).expect("bfs");
+        let rank = RankKw::named(Some("bfs"), false, 3, Some(held.clone())).expect("bfs");
         let o = options("both", 2, None, false, None, &rank).expect("options");
-        assert_eq!((o.ranking.harness_name(), o.top_files), ("B0", 3));
+        assert_eq!((o.ranking.harness_name(), o.select, o.top_files), ("B0", false, 3));
         assert!(o.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
-        let err = RankKw::named("x", true, 10, None).err().expect("x is no ranking");
+        let err = RankKw::named(Some("x"), true, 10, None).err().expect("x is no ranking");
         assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
     }
 

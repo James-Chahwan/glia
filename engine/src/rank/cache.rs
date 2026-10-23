@@ -16,6 +16,11 @@
 //! nodes=<n> incidences=<i> build_ms=<b> entries=<e>` once per index lookup,
 //! `[rank-cache] reset holder=<h> reason=graph_changed nodes=<a>-><b>
 //! edges=<c>-><d>` on a guard reset.
+//!
+//! EC.8: the cache also holds the repo's calibration record
+//! ([`RankCache::calibration`], `load_for_roots` over its roots, read once
+//! per cache and dropped by a guard reset), so a ranked answer selects its
+//! ranking without re-reading a file per call.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -28,6 +33,8 @@ use glia_activation::{ActivationConfig, Direction, PprIndex};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_graph::MergedGraph;
 use serde::Serialize;
+
+use crate::calibrate::{CalibrationHandle, load_for_roots};
 
 use super::cochange::CochangeIndex;
 use super::files::FileIndex;
@@ -96,6 +103,9 @@ pub struct RankCache {
     /// `(nodes, edges)` of the graph the slots were built over.
     shape: Mutex<Option<(usize, usize)>>,
     slots: Mutex<Slots>,
+    /// The calibration record of `roots` (EC.8), read on first use under
+    /// this lock, so one cache reads it once.
+    calibration: Mutex<Option<CalibrationHandle>>,
     hits: AtomicUsize,
     built: AtomicUsize,
 }
@@ -115,6 +125,7 @@ impl RankCache {
             labels: repo_labels.clone(),
             shape: Mutex::new(None),
             slots: Mutex::new(Slots::default()),
+            calibration: Mutex::new(None),
             hits: AtomicUsize::new(0),
             built: AtomicUsize::new(0),
         }
@@ -272,6 +283,16 @@ impl RankCache {
         );
     }
 
+    /// The calibration record of this cache's repo roots (EC.8):
+    /// [`load_for_roots`] on first use (`NotLoaded` with no root,
+    /// `Rejected("multi_repo")` for a merge, else the one root's
+    /// `.glia/calibration-snapshot/`, with its `[calibration] read` line),
+    /// then the held handle. A guard reset drops it.
+    pub fn calibration(&self) -> CalibrationHandle {
+        let mut held = lock(&self.calibration);
+        held.get_or_insert_with(|| CalibrationHandle::new(load_for_roots(&self.roots))).clone()
+    }
+
     /// Record `merged`'s shape on the first call; on a later call with
     /// another shape, empty every slot and print the reset line. Every answer
     /// that takes a RankCache calls this first. A defence, not the
@@ -285,6 +306,7 @@ impl RankCache {
             None => *shape = Some((nodes, edges)),
             Some((n0, e0)) if (n0, e0) != (nodes, edges) => {
                 *lock(&self.slots) = Slots::default();
+                *lock(&self.calibration) = None;
                 *shape = Some((nodes, edges));
                 eprintln!(
                     "[rank-cache] reset holder={} reason=graph_changed nodes={n0}->{nodes} edges={e0}->{edges}",

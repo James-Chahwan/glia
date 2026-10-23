@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
-depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr",
+depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None,
 cochange=True, title=None)` builds the git
 rev `base` and the working tree of the repo at `repo_path` and returns the
 engine's review as a native dict {base, counts, changed, impact, tests, edges,
@@ -38,7 +38,7 @@ RULES = ("version = 1\n\n[[constraint]]\nid = \"web-no-api-internals\"\nkind = \
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", "ppr"), ("cochange", True), ("title", None)]
+      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None)]
 # DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
 MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
 TAG = '`json:"customerName"`'

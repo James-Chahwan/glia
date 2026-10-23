@@ -18,13 +18,22 @@
 //! `## files` table of the `--top-files` best files (`--json`: `files`).
 //! Fired_on, stderr: `[rank-cache] holder=cli ..` and the engine's `[rank]
 //! surface=blast_radius ranking=<P1|PT*|B0|H10|H10[PT*]|H10[B0]> ..`.
+//!
+//! EC.8: `--ranking` has no default. Absent, the rows follow the repo's
+//! calibrated pick (`glia history calibrate`; SELh0, or SELs0 under
+//! `--no-cochange`), else `ppr`; given, it is explicit. A `ranking: <pick>
+//! (<source>[: <reason>], shape <k>)` line follows the table, `--json`
+//! carries `selection`, and stderr the engine's `[select]
+//! surface=blast_radius ..` line.
 
 use glia_engine::identity::{Collapse, RowIdentity};
 use glia_engine::{BlastAnswer, BlastOptions, BlastRadius};
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
-use crate::common::{ImpactDirection, RankingArgs, generate_for, rank_cache, render_files};
+use crate::common::{
+    CalibratedRankingArgs, ImpactDirection, applied_ranking, generate_for, rank_cache, render_files, render_selection,
+};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -64,7 +73,7 @@ pub(crate) struct Args {
     #[arg(long)]
     no_collapse: bool,
     #[command(flatten)]
-    ranking: RankingArgs,
+    ranking: CalibratedRankingArgs,
     /// How many ranked files the `## files` table (`--json`: `files`) lists.
     #[arg(long, value_name = "N", default_value_t = BlastOptions::default().top_files)]
     top_files: usize,
@@ -100,8 +109,7 @@ pub(crate) fn run(args: Args) -> i32 {
     } else {
         Collapse::with_labels(&result.repo_labels)
     };
-    let ranking = args.ranking.ranking();
-    opts.ranking = ranking;
+    args.ranking.apply(&mut opts);
     opts.top_files = args.top_files;
     opts.rank_cache = Some(rank_cache(&result));
     let queries: Vec<&str> = args.qnames.iter().map(String::as_str).collect();
@@ -120,7 +128,9 @@ pub(crate) fn run(args: Args) -> i32 {
         return code;
     }
     render(&answer, &queries, dir, args.depth);
+    render_selection(answer.selection.as_ref());
     if answer.absence.is_none() {
+        let ranking = applied_ranking(answer.selection.as_ref(), opts.ranking);
         render_files(&answer.files, ranking, result.repo_labels.len() > 1);
     }
     code

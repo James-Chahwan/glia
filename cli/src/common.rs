@@ -3,7 +3,9 @@
 //! table and JSON dumps (`analyze`, `merge`), node lookups and pretty names,
 //! `ImpactDirection` (`impact`, `blast-radius`), and 0.5.3's `RankingArgs`
 //! with the `## files` table (EA.8: `blast-radius`, `diff-impact`, `review`,
-//! `pack`).
+//! `pack`); EC.8's `CalibratedRankingArgs` (no `--ranking` default: the repo's
+//! calibrated pick) and the `ranking:` line for `blast-radius`, `diff-impact`
+//! and `review`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -11,6 +13,8 @@ use std::sync::{Arc, OnceLock};
 use clap::ValueEnum;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{NodeId, NodeKindId};
+use glia_engine::BlastOptions;
+use glia_engine::calibrate::Selection;
 use glia_engine::rank::{RankBase, RankCache, RankedFile, Ranking};
 use glia_engine::{BuildOptions, GenerateResult, generate_many_opts, generate_one_opts};
 use glia_graph::MergedGraph;
@@ -57,6 +61,74 @@ impl RankingArgs {
         let base = RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr);
         Ranking::new(base, !self.no_cochange)
     }
+}
+
+/// 0.5.3 (EC.8): the file-ranking flags of the calibrated answers,
+/// flattened into `blast-radius`, `diff-impact` and `review`. Unlike
+/// [`RankingArgs`], `--ranking` has no default: absent, the answer applies the
+/// repo's calibrated pick (`glia history calibrate`), else `ppr`.
+#[derive(clap::Args, Debug, Clone)]
+pub(crate) struct CalibratedRankingArgs {
+    /// The structural file ranking: ppr (PPR damping 0.5, a file ranks by
+    /// its best node), ppr-wide (damping 0.85, a file ranks by the sum of its
+    /// nodes) or bfs (carry-edge distance, then file degree); default: the
+    /// repo's calibrated pick (glia history calibrate), else ppr.
+    #[arg(
+        long,
+        value_name = "RANKING",
+        value_parser = clap::builder::PossibleValuesParser::new(RANKINGS),
+    )]
+    ranking: Option<String>,
+    /// Do not rank files that changed together with the seeds first (read
+    /// from .glia/history-snapshot, written by `glia history sync`).
+    #[arg(long)]
+    no_cochange: bool,
+}
+
+impl CalibratedRankingArgs {
+    /// The engine's `Ranking`: the base `--ranking` names (`ppr` when absent),
+    /// co-change first unless `--no-cochange`. clap has already refused any
+    /// other name; one that slipped through is the default base.
+    pub(crate) fn ranking(&self) -> Ranking {
+        let base = self.ranking.as_deref().map_or(Ok(RankBase::Ppr), RankBase::parse).unwrap_or(RankBase::Ppr);
+        Ranking::new(base, !self.no_cochange)
+    }
+
+    /// Whether the answer applies the calibration: `--ranking` absent.
+    pub(crate) fn selects(&self) -> bool {
+        self.ranking.is_none()
+    }
+
+    /// Set `opts.ranking` and `opts.select` from the flags.
+    pub(crate) fn apply(&self, opts: &mut BlastOptions) {
+        opts.ranking = self.ranking();
+        opts.select = self.selects();
+    }
+}
+
+/// The ranking an answer applied: its selection's pick, else `asked`.
+pub(crate) fn applied_ranking(selection: Option<&Selection>, asked: Ranking) -> Ranking {
+    selection.and_then(|s| Ranking::from_harness_name(&s.pick)).unwrap_or(asked)
+}
+
+/// EC.8: the line under an impact table naming the ranking that ordered it:
+/// `ranking: <pick> (calibrated, shape <k>, <t> commits)`, `ranking: <pick>
+/// (fallback: <reason>, shape <k>)` or `ranking: <pick> (explicit, shape
+/// <k>)`. Prints nothing without a selection (no seed resolved).
+pub(crate) fn render_selection(selection: Option<&Selection>) {
+    if let Some(line) = selection.map(selection_line) {
+        println!();
+        println!("{line}");
+    }
+}
+
+fn selection_line(s: &Selection) -> String {
+    let how = match (s.source, s.reason) {
+        ("calibrated", _) => format!("calibrated, shape {}, {} commits", s.shape, s.test_commits),
+        (source, Some(reason)) => format!("{source}: {reason}, shape {}", s.shape),
+        (source, None) => format!("{source}, shape {}", s.shape),
+    };
+    format!("ranking: {} ({how})", s.pick)
 }
 
 /// The CLI's held ranking cache over a build: its repo roots name the history

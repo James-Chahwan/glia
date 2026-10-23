@@ -35,6 +35,13 @@
 //! files` table of the `--top-files` best files follows the impact table
 //! (`--json`: `impact.files`); `[rank] surface=diff_impact ranking=<r> ..`.
 //!
+//! EC.8: `--ranking` has no default. Absent, the impact rows follow the
+//! repo's calibrated pick (`glia history calibrate`, read through the same
+//! `RankCache`; SELh0, or SELs0 under `--no-cochange`), else `ppr`; given, it
+//! is explicit. A `ranking: <pick> (<source>[: <reason>], shape <k>)` line
+//! follows the impact table, `--json` carries `impact.selection`, and stderr
+//! the engine's `[select] surface=diff_impact ..` line.
+//!
 //! Fired-on marker: the engine's
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`.
 
@@ -48,7 +55,10 @@ use glia_engine::identity::Collapse;
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
-use crate::common::{ImpactDirection, RankingArgs, build_options, generate_for, rank_cache, render_files};
+use crate::common::{
+    CalibratedRankingArgs, ImpactDirection, applied_ranking, build_options, generate_for, rank_cache, render_files,
+    render_selection,
+};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -83,7 +93,7 @@ pub(crate) struct Args {
     #[arg(long)]
     with: Vec<String>,
     #[command(flatten)]
-    ranking: RankingArgs,
+    ranking: CalibratedRankingArgs,
     /// How many ranked files the `## files` table (`--json`: `impact.files`)
     /// lists.
     #[arg(long, value_name = "N", default_value_t = BlastOptions::default().top_files)]
@@ -161,8 +171,7 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.top_k = args.top_k;
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
-    let ranking = args.ranking.ranking();
-    opts.ranking = ranking;
+    args.ranking.apply(&mut opts);
     opts.top_files = args.top_files;
     let (a, repos) = match answer(&args, &opts) {
         Ok(a) => a,
@@ -180,7 +189,9 @@ pub(crate) fn run(args: Args) -> i32 {
             (None, None) => "diff".to_string(),
         };
         render(&args.repo, &source, &a, dir, args.depth);
+        render_selection(a.impact.selection.as_ref());
         if a.impact.absence.is_none() {
+            let ranking = applied_ranking(a.impact.selection.as_ref(), opts.ranking);
             render_files(&a.impact.files, ranking, repos > 1);
         }
     }

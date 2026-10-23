@@ -18,6 +18,10 @@ use crate::absence::{self, Absence, Answer};
 use crate::find::{self, FindOptions};
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
+use crate::calibrate::{
+    COCHANGE_CANDIDATES, COCHANGE_SET, STRUCTURE_CANDIDATES, STRUCTURE_SET, Selection, Shape, explicit,
+    log_selection, select as select_ranking,
+};
 use crate::rank::{FileIndex, FileRanking, RankCache, RankedFile, Ranking, SourceKey, order_rows, rank_files};
 
 /// One node in a blast-radius answer: identity, kind, why it is here
@@ -629,6 +633,15 @@ pub struct BlastOptions {
     pub rank_cache: Option<Arc<RankCache>>,
     /// 0.5.3 (EA.5): how many files [`BlastRadius::files`] lists.
     pub top_files: usize,
+    /// 0.5.3 (EC.8, item 10): apply the repo's calibration record when
+    /// `rank_cache` holds one. On (the default), the answer's ranking is the
+    /// record's pick for the seeds' shape from SELh0 (H10 / H10[PT*] /
+    /// H10[B0]) when `ranking.cochange_first`, else from SELs0 (P1 / PT* /
+    /// B0), with `ranking` itself the fallback when the record has no
+    /// applicable row (so with no record the rows are EA's). Off, `ranking`
+    /// is the caller's explicit choice and is never overridden. Either way
+    /// [`BlastRadius::selection`] says which ranking ordered the rows.
+    pub select: bool,
 }
 
 impl Default for BlastOptions {
@@ -643,6 +656,7 @@ impl Default for BlastOptions {
             ranking: Ranking::default(),
             rank_cache: None,
             top_files: 10,
+            select: true,
         }
     }
 }
@@ -691,6 +705,13 @@ pub struct BlastRadius {
     /// in it, 0 when none). Under `scope` only files under it are listed.
     /// Empty when no seed has a candidate file.
     pub files: Vec<RankedFile>,
+    /// 0.5.3 (EC.8): which ranking ordered the rows and why: `{set, shape,
+    /// pick, source, reason, test_commits}`, `source` `calibrated` (the
+    /// record's pick), `fallback` (no applicable record, `reason` naming why)
+    /// or `explicit` (`BlastOptions::select` off, or no rank cache). `None`
+    /// (absent from the JSON) when no seed resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
     /// `Some` iff `results` is empty.
     pub absence: Option<Absence>,
 }
@@ -817,6 +838,17 @@ pub(crate) fn blast_radius_seeded_on(
 /// than in the closure's order), or `[rank] surface=<s> files=0
 /// reason=no_seed_file` when no seed has a candidate file.
 ///
+/// 0.5.3 (EC.8), selection: before the file ranking, the shape of the
+/// seeds' distinct located files ([`Shape::from_seed_files`]) and
+/// `opts.ranking.cochange_first` (SELh0, else SELs0) select the ranking:
+/// the record `opts.rank_cache` holds ([`RankCache::calibration`]) when
+/// `opts.select`, else `opts.ranking` as an explicit choice. The selected
+/// ranking replaces `opts.ranking` for the file ranking, the row order and
+/// the `[rank]` line; depth, scope, live_only and top_k keep filtering the
+/// rows. fired_on, once per answer with a seed: `[select] surface=<s>
+/// set=<SELh0|SELs0> shape=<k1|k2|k3|half> pick=<name>
+/// source=<calibrated|fallback|explicit> reason=<r|-> test_commits=<n>`.
+///
 /// fired_on, beside the `[blast] seeds=` line and only when the view has a
 /// collapse class: `[identity] collapse surface=blast_radius classes=<c>
 /// walk_classes=<w> folded=<f> rows=<n>`, `f` the rows the fold dropped, `n`
@@ -848,8 +880,14 @@ fn radius(
     let mut blast_seeds: Vec<BlastSeed> = Vec::with_capacity(seeds.len());
     let mut ranked_files: Vec<RankedFile> = Vec::new();
     let mut rank_line: Option<String> = None;
+    let mut selection: Option<Selection> = None;
     if !ids.is_empty() {
         let loc = Locator::new(merged);
+        // EC.8: the ranking this answer applies, chosen before the cache's
+        // transient stand-in exists: only a caller's cache holds the record.
+        let (sel, ranking) = select_for(&loc, &ids, opts);
+        log_selection(surface, &sel);
+        selection = Some(sel);
         let live = entrypoint_reachable(merged);
         let quotient = view.quotient(merged);
         // EA.5: the caller's RankCache, or a transient one with no repo
@@ -886,7 +924,7 @@ fn radius(
             }
         }
         let fr: Option<FileRanking> = (!seed_files.is_empty())
-            .then(|| rank_files(merged, &cache, &seed_files, &extra, opts.ranking));
+            .then(|| rank_files(merged, &cache, &seed_files, &extra, ranking));
         // A walk class is live when any member is: the live set mapped onto
         // the walk's nodes (the raw set itself when nothing is contracted).
         let (walk_live, class_reps): (Cow<'_, HashSet<NodeId>>, HashSet<NodeId>) =
@@ -999,7 +1037,7 @@ fn radius(
                 .count();
             rank_line = Some(format!(
                 "[rank] surface={surface} ranking={} seed_files={} cochange_files={cochange_files} files={} lifted={lifted} closure_index={closure_how}",
-                opts.ranking.harness_name(),
+                ranking.harness_name(),
                 seed_files.len(),
                 ranked_files.len(),
             ));
@@ -1030,8 +1068,36 @@ fn radius(
         unresolved,
         results: out,
         files: ranked_files,
+        selection,
         absence,
     }
+}
+
+/// EC.8: one answer's [`Selection`] and the [`Ranking`] it names. The set is
+/// SELh0 when `opts.ranking` ranks co-change first (the default), else SELs0;
+/// the shape counts the seeds' distinct located files. With `opts.select`
+/// and a caller's rank cache, [`select_ranking`] reads the cache's record,
+/// `opts.ranking` the fallback (SELh0's H10 / SELs0's P1 under the defaults);
+/// otherwise the caller's ranking is explicit.
+fn select_for(loc: &Locator<'_>, ids: &[NodeId], opts: &BlastOptions) -> (Selection, Ranking) {
+    let seed_files: BTreeSet<String> = ids.iter().filter_map(|&id| loc.locate(id).file).collect();
+    let shape = Shape::from_seed_files(seed_files.len());
+    let (set, candidates): (&str, &[&str]) = if opts.ranking.cochange_first {
+        (COCHANGE_SET, &COCHANGE_CANDIDATES)
+    } else {
+        (STRUCTURE_SET, &STRUCTURE_CANDIDATES)
+    };
+    let asked = opts.ranking.harness_name();
+    let sel = match opts.rank_cache.as_deref() {
+        Some(cache) if opts.select => {
+            select_ranking(cache.calibration().read(), set, shape, candidates, asked)
+        }
+        _ => explicit(set, shape, asked),
+    };
+    // Every candidate and fallback name is one of the six harness names.
+    let picked = Ranking::from_harness_name(&sel.pick);
+    debug_assert!(picked.is_some(), "selection picked `{}`, no ranking", sel.pick);
+    (sel, picked.unwrap_or(opts.ranking))
 }
 
 /// [`BlastRadius::files`]: the first `opts.top_files` files of `fr`'s order.

@@ -70,10 +70,11 @@ fn several_qnames_are_one_radius() {
     assert_eq!(v["unresolved"], serde_json::json!([]), "{v}");
     assert!(v["absence"].is_null(), "{v}");
     // EA.5: the answer's keys (sorted: serde_json without preserve_order)
-    // gain `files`, the measured file ranking;
-    // the seeds' own file is never listed.
+    // gain `files`, the measured file ranking, and (EC.8) `selection`, the
+    // ranking that ordered the rows; the seeds' own file is never listed.
     let keys: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
-    assert_eq!(keys, ["absence", "files", "results", "seeds", "unresolved"], "{v}");
+    assert_eq!(keys, ["absence", "files", "results", "seeds", "selection", "unresolved"], "{v}");
+    assert_eq!(v["selection"]["shape"], "k1", "both seeds are in app.py: {v}");
     assert!(v["files"].as_array().expect("files").iter().all(|f| f["file"] != "app.py"), "{v}");
     let rows = v["results"].as_array().expect("results");
     let create = rows.iter().find(|r| r["qname"] == "app::create_order").expect("the shared caller");
@@ -324,6 +325,17 @@ mod ranked {
         assert!(line(&out, "[rank] surface=blast_radius").contains(" ranking=H10 "));
         let cochange = line(&out, "[rank] surface=blast_radius");
         assert!(!cochange.contains(" cochange_files=0 "), "{cochange}");
+        // EC.8: no `--ranking` and no calibration record: SELh0's fallback.
+        assert_eq!(v["selection"]["source"], "fallback", "{v}");
+        assert_eq!(
+            (&v["selection"]["set"], &v["selection"]["pick"], &v["selection"]["reason"], &v["selection"]["shape"]),
+            (&"SELh0".into(), &"H10".into(), &"absent".into(), &"k1".into()),
+            "{v}"
+        );
+        assert_eq!(
+            line(&out, "[select] surface=blast_radius"),
+            "[select] surface=blast_radius set=SELh0 shape=k1 pick=H10 source=fallback reason=absent test_commits=0"
+        );
     }
 
     #[test]
@@ -342,6 +354,9 @@ mod ranked {
         let out = blast(&t, &["--ranking", "ppr-wide", "--no-cochange", "--json"]);
         let v = json(&out);
         assert!(line(&out, "[rank] surface=blast_radius").contains(" ranking=PT* "));
+        // EC.8: a given `--ranking` is explicit, under SELs0 with --no-cochange.
+        assert_eq!((&v["selection"]["source"], &v["selection"]["set"]), (&"explicit".into(), &"SELs0".into()), "{v}");
+        assert!(line(&out, "[select] surface=blast_radius").contains(" pick=PT* source=explicit reason=- "));
 
         let built = glia_engine::generate_one(&path_of(&t.root())).expect("build");
         let cache = Arc::new(RankCache::new("test", &built.repo_roots, &built.repo_labels));
@@ -367,10 +382,12 @@ mod ranked {
         let md = String::from_utf8_lossy(&out.stdout);
         assert!(md.contains("\n## files\n\n| # | file | rows | co-change | depth |\n"), "{md}");
         assert!(md.contains(&format!("| 1 | {C} | 1 | 0.294 | 1 |")), "{md}");
+        assert!(md.contains("\nranking: H10[B0] (explicit, shape k1)\n\n## files\n"), "{md}");
 
         let ppr = blast(&t, &[]);
         let md = String::from_utf8_lossy(&ppr.stdout);
         assert!(md.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"), "{md}");
+        assert!(md.contains("\nranking: H10 (fallback: absent, shape k1)\n"), "{md}");
     }
 
     #[test]

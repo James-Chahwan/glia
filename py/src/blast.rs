@@ -58,9 +58,8 @@ impl PyGraph {
     /// seeds outside a class have no `identity` key. `collapse=False` is the
     /// per-member walk and rows.
     ///
-    /// `ranking` (0.5.3, EA.5 / EA.7; `ppr`, `ppr-wide` or `bfs`, default
-    /// `ppr`) is the structural file ranking that orders the rows by their
-    /// files, and `cochange` (default `True`) puts co-change from the history
+    /// `ranking` (0.5.3, EA.5 / EA.7; `ppr`, `ppr-wide` or `bfs`) is the
+    /// structural file ranking that orders the rows by their files, and `cochange` (default `True`) puts co-change from the history
     /// snapshot (`glia history sync`, `.glia/history-snapshot/` under a repo
     /// root) first, the structural ranking breaking its ties; with no
     /// snapshot the order is the structural one. `files` lists the top
@@ -69,7 +68,16 @@ impl PyGraph {
     /// expected one of ppr, ppr-wide, bfs``) before any work. The indexes
     /// behind the ranking are held by this PyGraph and reused by later calls
     /// (`[rank-cache] holder=pygraph .. index=hit`).
-    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking="ppr", cochange=true, top_files=10))]
+    ///
+    /// `ranking=None` (the default, EC.8) applies the repo's calibration
+    /// (`history_calibrate`, `.glia/calibration-snapshot/` under the repo
+    /// root): the record's pick for the seeds' shape from SELh0 (H10 /
+    /// H10[PT*] / H10[B0]), or SELs0 (P1 / PT* / B0) with `cochange=False`;
+    /// with no applicable record it is `ppr`. A given `ranking` is explicit and
+    /// never overridden. The dict gains `selection` `{set, shape, pick,
+    /// source, reason, test_commits}` (`source` `calibrated`, `fallback` or
+    /// `explicit`) whenever a seed resolved.
+    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking=None, cochange=true, top_files=10))]
     #[allow(clippy::too_many_arguments)]
     fn blast_radius(
         &self,
@@ -81,14 +89,15 @@ impl PyGraph {
         live_only: bool,
         scope: Option<&str>,
         collapse: bool,
-        ranking: &str,
+        ranking: Option<&str>,
         cochange: bool,
         top_files: usize,
     ) -> PyResult<Py<PyAny>> {
-        let ranking = ranking_named(ranking, cochange).map_err(PyValueError::new_err)?;
+        let (ranking, select) = ranking_selected(ranking, cochange).map_err(PyValueError::new_err)?;
         let queries = seed_queries(qnames)?;
         let mut opts = BlastOptions::default();
         opts.ranking = ranking;
+        opts.select = select;
         opts.top_files = top_files;
         opts.rank_cache = Some(self.rank.clone());
         opts.direction = reach_named(direction).map_err(PyValueError::new_err)?;
@@ -127,6 +136,17 @@ pub(crate) fn ranking_named(ranking: &str, cochange: bool) -> Result<Ranking, St
     Ranking::parse(ranking, cochange)
 }
 
+/// EC.8: the optional `ranking` keyword of the calibrated answers
+/// (`blast_radius`, `diff_impact`, `diff_impact_vs_rev`, `review_vs_rev`):
+/// `None` is `ppr` with the calibration applied (`BlastOptions.select`), a
+/// name is [`ranking_named`]'s ranking, explicit. Returns (ranking, select).
+pub(crate) fn ranking_selected(ranking: Option<&str>, cochange: bool) -> Result<(Ranking, bool), String> {
+    match ranking {
+        None => Ok((ranking_named("ppr", cochange)?, true)),
+        Some(name) => Ok((ranking_named(name, cochange)?, false)),
+    }
+}
+
 /// The `direction` argument: `forward` | `backward` | `both`. Shared with
 /// `diff_impact`, which takes the same keyword.
 pub(crate) fn reach_named(direction: &str) -> Result<Reach, String> {
@@ -151,6 +171,18 @@ mod tests {
         assert_eq!(
             ranking_named("x", true).expect_err("x is no ranking"),
             "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
+    }
+
+    #[test]
+    fn an_absent_ranking_selects() {
+        assert_eq!(ranking_selected(None, true), Ok((Ranking::default(), true)));
+        assert_eq!(ranking_selected(None, false), Ok((Ranking::head(), true)));
+        let (r, select) = ranking_selected(Some("bfs"), true).expect("bfs");
+        assert_eq!((r.harness_name(), select), ("H10[B0]", false));
+        assert_eq!(
+            ranking_selected(Some("x"), true),
+            Err("unknown ranking `x`: expected one of ppr, ppr-wide, bfs".to_string())
         );
     }
 }

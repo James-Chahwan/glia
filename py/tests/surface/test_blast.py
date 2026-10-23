@@ -9,7 +9,7 @@ import tempfile
 
 from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
-TOP = ["seeds", "unresolved", "results", "files", "absence"]
+TOP = ["seeds", "unresolved", "results", "files", "selection", "absence"]
 KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line", "seed"]
 SEED_KEYS = ["query", "id", "qname", "kind", "file", "line", "linked_seeds"]
 
@@ -27,7 +27,7 @@ def main() -> int:
         ids = node_ids(g)
         c.check("signature", params(rg.PyGraph.blast_radius) == [
             ("qnames", None), ("direction", "both"), ("depth", 4), ("top_k", None),
-            ("live_only", False), ("scope", None), ("collapse", True), ("ranking", "ppr"),
+            ("live_only", False), ("scope", None), ("collapse", True), ("ranking", None),
             ("cochange", True), ("top_files", 10)], params(rg.PyGraph.blast_radius))
 
         a = g.blast_radius("app::helper")
@@ -88,6 +88,14 @@ def main() -> int:
                 cache_marks(err2, "pygraph") and set(cache_marks(err2, "pygraph")) == {"index=hit"},
                 (cache_marks(err1, "pygraph"), cache_marks(err2, "pygraph")))
         c.check("top_files cuts files", len(g.blast_radius("app::helper", top_files=1)["files"]) <= 1)
+        # EC.8: ranking=None applies the repo's calibration (none here: the
+        # fallback); a given ranking is explicit.
+        sel = first.get("selection") or {}
+        c.check("ranking=None: SELh0's fallback", (sel.get("set"), sel.get("pick"), sel.get("source"))
+                == ("SELh0", "H10", "fallback"), sel)
+        exp = g.blast_radius("app::helper", ranking="ppr").get("selection") or {}
+        c.check("a given ranking is explicit", exp.get("source") == "explicit", exp)
+        c.check("no seed: no selection", "selection" not in u, list(u))
         for ranking in ("ppr-wide", "bfs"):
             r = g.blast_radius("app::helper", ranking=ranking, cochange=False)
             c.check(f"ranking={ranking} keeps the closure",

@@ -4,7 +4,7 @@
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
 //! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
-//! models_min_tier="fact", ranking="ppr", cochange=True, title=None)` builds the repo's
+//! models_min_tier="fact", ranking=None, cochange=True, title=None)` builds the repo's
 //! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
 //! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
 //! `{base, counts, changed, impact, tests, edges, new_violations,
@@ -32,7 +32,7 @@ use glia_engine::review::{
     ReviewArgs, render_markdown, review_vs_rev,
 };
 
-use crate::blast::ranking_named;
+use crate::blast::ranking_selected;
 use crate::convert::to_py;
 use crate::registry::ModuleFns;
 
@@ -48,17 +48,18 @@ enum Answer {
 
 /// The engine's arguments from the keyword arguments; `Err` names a
 /// `models_min_tier` outside [`MODEL_MIN_TIERS`] in the engine's own words,
-/// or an unknown `ranking` ([`ranking_named`], EA.7).
+/// or an unknown `ranking` ([`ranking_selected`], EA.7 / EC.8: `None`
+/// applies the calibration).
 fn engine_args(
     depth: usize,
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &str,
-    ranking: &str,
+    ranking: Option<&str>,
     cochange: bool,
     title: Option<&str>,
 ) -> Result<ReviewArgs, String> {
-    let ranking = ranking_named(ranking, cochange)?;
+    let (ranking, select) = ranking_selected(ranking, cochange)?;
     let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
@@ -71,6 +72,7 @@ fn engine_args(
     args.max_impact = max_impact;
     args.models_min_tier = tier;
     args.blast.ranking = ranking;
+    args.blast.select = select;
     args.title = title.map(str::to_string);
     Ok(args)
 }
@@ -98,7 +100,7 @@ struct Kw<'a> {
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &'a str,
-    ranking: &'a str,
+    ranking: Option<&'a str>,
     cochange: bool,
     title: Option<&'a str>,
 }
@@ -113,7 +115,7 @@ impl Default for Kw<'_> {
             max_tests: DEFAULT_MAX_TESTS,
             max_impact: DEFAULT_MAX_IMPACT,
             models_min_tier: MODEL_MIN_TIERS[0],
-            ranking: "ppr",
+            ranking: None,
             cochange: true,
             title: None,
         }
@@ -174,10 +176,12 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// than `"fact"` / `"derived"` (`unknown models min tier `x`: expected one of
 /// fact, derived`, before any build), or a git or build failure.
 ///
-/// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`, default `ppr`) and
-/// `cochange` (default `True`: co-change from the working tree's history
-/// snapshot first) order the impact rows and fill `impact.files`, as in
-/// `blast_radius`; an unknown `ranking` raises ValueError before any build.
+/// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`) and `cochange` (default
+/// `True`: co-change from the working tree's history snapshot first) order
+/// the impact rows and fill `impact.files`, as in `blast_radius`; an unknown
+/// `ranking` raises ValueError before any build. `ranking=None` (the
+/// default, EC.8) applies the working tree's calibrated pick, else `ppr`,
+/// and `impact` gains `selection`.
 ///
 /// `title` (0.5.3, EB.7; default None: the newest commit subject of
 /// `base..HEAD`, and no intent when that range is empty) is the PR's
@@ -188,7 +192,7 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// in_impact}`), the markdown `### Intent`, and the impact rows in
 /// id-routed files come first (text never reorders them).
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr", cochange=true, title=None))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None, cochange=true, title=None))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -200,7 +204,7 @@ fn review_vs_rev_py(
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &str,
-    ranking: &str,
+    ranking: Option<&str>,
     cochange: bool,
     title: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
@@ -416,7 +420,7 @@ mod tests {
             "refused before any build: the path is never read"
         );
         let bad = Kw {
-            ranking: "x",
+            ranking: Some("x"),
             ..Kw::default()
         };
         let err = rev_answer("/nonexistent/ea7", "HEAD", &bad).expect_err("bad ranking");
@@ -428,11 +432,13 @@ mod tests {
 
     #[test]
     fn engine_args_carry_the_keywords() {
-        let a = engine_args(2, 7, 9, "derived", "ppr-wide", false, Some("T012 export")).expect("a tier");
+        let a = engine_args(2, 7, 9, "derived", Some("ppr-wide"), false, Some("T012 export")).expect("a tier");
         assert_eq!(
-            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking.harness_name()),
-            (2, 7, 9, "derived", "PT*")
+            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking.harness_name(), a.blast.select),
+            (2, 7, 9, "derived", "PT*", false)
         );
+        let c = engine_args(4, 50, 50, "fact", None, true, None).expect("calibrated");
+        assert_eq!((c.blast.ranking.harness_name(), c.blast.select), ("H10", true), "EC.8: None selects");
         assert_eq!(a.title.as_deref(), Some("T012 export"), "EB.7: title reaches the engine");
         let d = ReviewArgs::default();
         assert_eq!(d.blast.depth, 4, "the signature's depth default");
@@ -441,7 +447,7 @@ mod tests {
         let k = Kw::default();
         assert_eq!(
             (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier, k.ranking, k.cochange, k.title),
-            ("dict", 20, 4, 50, 50, "fact", "ppr", true, None),
+            ("dict", 20, 4, 50, 50, "fact", None, true, None),
             "Kw::default is the pyo3 signature's"
         );
     }

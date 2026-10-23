@@ -80,6 +80,12 @@ fn two_seeds_backward_are_one_walk_attributed_to_the_first_seed() {
     );
     assert_eq!((r.seeds[0].file.as_deref(), r.seeds[0].line), (Some("app.py"), Some(16)));
     assert!(r.seeds.iter().all(|s| s.linked_seeds.is_empty()), "neither calls the other");
+    // EC.8: no rank cache, so no record: the default ranking, explicit.
+    let sel = r.selection.as_ref().expect("a selection");
+    assert_eq!(
+        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        ("SELh0", "k1", "H10", "explicit", None)
+    );
 
     // Both seeds' only caller is create_order; save is listed first and the
     // multi-source walk expands seeds in input order, so save reached it.
