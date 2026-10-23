@@ -31,8 +31,15 @@ pub use bank::{
 
 pub mod sets;
 pub use sets::{
-    COCHANGE_CANDIDATES, COCHANGE_FALLBACK, COCHANGE_SET, Named, SEEDED_SHAPES,
-    STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK, STRUCTURE_SET, specs,
+    COCHANGE_CANDIDATES, COCHANGE_FALLBACK, COCHANGE_SET, GROUPS, Named, REVIEW_CANDIDATES,
+    REVIEW_FALLBACK, REVIEW_SET, SEEDED_SHAPES, STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK,
+    STRUCTURE_SET, log_hooks, register_hooks, specs,
+};
+
+pub mod fusions;
+pub use fusions::{
+    AnswerInputs, HT_GRID, LX_IDR_H9S50, MEMO_T1S, Needs, SEEDED_NAMES, Seeded, Signals,
+    TextState, answer_signals, needs, replay_signals, seeded_keys, seeded_order,
 };
 
 pub mod step;

@@ -25,6 +25,12 @@
 //!
 //! (1c), the three fusions' arithmetic, is a unit test in
 //! `engine/src/review.rs` (`IntentSignals` is crate API).
+//!
+//! (6) EC.11: the intent fusion is set SELt's calibrated pick (a record
+//!     written by `calibrate::calibrate` over EC.5's two-cluster fixture with
+//!     commit messages); with no record it is LX[IDR,P1], `selection_intent`
+//!     saying which. Every fixture above has no record, so (1)-(5) pin EB.7's
+//!     uncalibrated order unchanged.
 
 mod git_fixture;
 
@@ -32,6 +38,7 @@ use git_fixture::GitRepo;
 use glia_code_domain::snapshots::{
     HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, write_history_with_messages,
 };
+use glia_engine::calibrate::{CalibrateOptions, CalibrationRead, calibrate, read_calibration};
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::review::{
     INTENT_FUSION_REVIEW, MarkdownOptions, Review, ReviewArgs, render_markdown, review,
@@ -345,5 +352,135 @@ fn idr_reads_the_base_tree() {
     assert_eq!(
         (intent.files[0].file.as_str(), intent.files[0].idr),
         ("src/b.rs", 1.0)
+    );
+}
+
+// ---- (6) EC.11: EC.5's two-cluster fixture (engine/tests/calibrate_step.rs) ----
+
+/// Files per cluster.
+const N: usize = 12;
+/// Commits in the synthetic history.
+const COMMITS: usize = 60;
+/// Hub functions that call `h`.
+const FILLERS: usize = 1000;
+
+fn cluster_path(c: &str, i: usize) -> String {
+    format!("{c}/{c}{i:02}.py")
+}
+
+/// Two clusters of `N` Python modules (`alpha/`, `zeta/`) around one hub.
+fn clusters(repo: &GitRepo) {
+    let mut hub = String::from("def h():\n    return 0\n\n");
+    for i in 0..N {
+        hub.push_str(&format!("from alpha.alpha{i:02} import alpha{i:02}_f\n"));
+    }
+    hub.push_str("\ndef r2():\n");
+    for i in 0..N {
+        hub.push_str(&format!("    alpha{i:02}_f()\n"));
+    }
+    hub.push_str("    return 0\n\n");
+    for i in 0..N {
+        hub.push_str(&format!("def g{i:02}():\n    return r2()\n\n"));
+    }
+    for i in 0..FILLERS {
+        hub.push_str(&format!("def p{i:04}():\n    return h()\n\n"));
+    }
+    repo.write("hub.py", &hub);
+    for c in ["alpha", "zeta"] {
+        repo.write(&format!("{c}/__init__.py"), "");
+    }
+    for i in 0..N {
+        repo.write(
+            &cluster_path("alpha", i),
+            &format!("import hub\n\ndef alpha{i:02}_f():\n    return {i}\n"),
+        );
+        repo.write(
+            &cluster_path("zeta", i),
+            &format!("from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"),
+        );
+    }
+}
+
+
+/// The clusters fixture's history with messages: even commits touch alpha
+/// modules, odd ones zeta modules, each subject naming its cluster.
+fn text_history(root: &std::path::Path) {
+    let mut commits = Vec::new();
+    let mut messages = Vec::new();
+    for i in 0..COMMITS {
+        let c = if i.is_multiple_of(2) { "alpha" } else { "zeta" };
+        let size = 2 + (i / 2) % 5;
+        let start = (i * 5) % N;
+        let sha = format!("{:040x}", i + 1);
+        let t = 1_700_000_000 + i as i64 * 3600;
+        commits.push(HistoryCommit {
+            c: sha.clone(),
+            t,
+            files: (0..size)
+                .map(|j| HistoryFile { p: cluster_path(c, (start + j) % N), a: Some(1), d: Some(0), from: None })
+                .collect(),
+        });
+        messages.push(HistoryMessage { c: sha, at: t, s: format!("{c} cluster work {i}"), b: String::new(), br: None });
+    }
+    commits.reverse();
+    messages.reverse();
+    let meta = HistoryMeta::new(format!("{:040x}", COMMITS), COMMITS, None, String::new());
+    write_history_with_messages(root, meta, &commits, &[], Some(&messages)).expect("write history");
+}
+
+#[test]
+fn review_intent_follows_the_selt_pick() {
+    let g = GitRepo::init();
+    clusters(&g);
+    g.commit("clean");
+    text_history(g.root());
+    let built = glia_engine::generate_one(g.path()).expect("build");
+    g.write("alpha/alpha03.py", "import hub\n\ndef alpha03_f():\n    return 33\n");
+    let mut args = ReviewArgs::default();
+    args.title = Some("alpha cluster work".into());
+
+    // Uncalibrated: EB.7's LX[IDR,P1], the fallback with its reason.
+    let u = review_vs_rev(g.path(), "HEAD", &args).expect("review");
+    let sel = u.selection_intent.as_ref().expect("selection_intent");
+    assert_eq!(
+        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        ("SELt", "k1", "LX[IDR,P1]", "fallback", Some("absent"))
+    );
+    let ui = u.intent.as_ref().expect("intent");
+    assert_eq!(ui.fusion, "LX[IDR,P1]");
+    let md = render_markdown(&u, &MarkdownOptions::default());
+    assert!(md.contains("_title (arg): alpha cluster work_\n\n_ranked by LX[IDR,P1] (uncalibrated: absent)_"), "{md}");
+
+    // Calibrated: the record's SELt k1 pick orders the intent files.
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["review"];
+    calibrate(g.root(), &built.merged, &opts).expect("calibrate");
+    let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
+        panic!("record not loaded");
+    };
+    let want = cal.sets.iter().find(|s| s.set == "SELt" && s.shape == "k1").map(|s| s.pick.clone()).expect("SELt k1");
+    let c = review_vs_rev(g.path(), "HEAD", &args).expect("review");
+    let sel = c.selection_intent.as_ref().expect("selection_intent");
+    assert_eq!(
+        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        ("SELt", "k1", want.as_str(), "calibrated", None)
+    );
+    assert_eq!(sel.test_commits, COMMITS);
+    let ci = c.intent.as_ref().expect("intent");
+    assert_eq!(ci.fusion, want);
+    assert!(!ci.files.is_empty());
+    assert!(ci.files.iter().all(|f| f.file != "alpha/alpha03.py"), "the changed file is no candidate");
+    // the title's cluster leads the calibrated list
+    assert!(ci.files[0].file.starts_with("alpha/"), "{:?}", ci.files);
+    let v = serde_json::to_value(&c).expect("json");
+    assert_eq!(v["selection_intent"]["source"], "calibrated", "{v}");
+    assert_eq!(v["intent"]["fusion"], want.as_str());
+    let md = render_markdown(&c, &MarkdownOptions::default());
+    let line = format!("_ranked by {} (calibrated on {COMMITS} commits, shape k1)_", want.replace('*', "\\*"));
+    assert!(md.contains(&line), "{line}\n{md}");
+    // The impact rows: EB.7's re-sort (IDR only), unchanged by the pick.
+    assert_eq!(
+        serde_json::to_value(&u.impact.results).expect("json"),
+        serde_json::to_value(&c.impact.results).expect("json")
     );
 }

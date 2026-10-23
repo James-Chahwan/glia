@@ -6,15 +6,16 @@
 use std::path::{Path, PathBuf};
 
 use glia_code_domain::snapshots::{
-    HistoryCommit, HistoryFile, HistoryMeta, read_history, write_history,
+    HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, read_history, read_history_messages,
+    write_history, write_history_with_messages,
 };
 use glia_engine::calibrate::record::{
     CALIBRATION_FILE, CalibrationRead, calibration_dir, read_calibration,
 };
 use glia_engine::calibrate::{
     COCHANGE_CANDIDATES, COCHANGE_FALLBACK, CalibrateOptions, CalibrationSummary,
-    STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK, SetSummary, Shape, bootstrap_ci, calibrate,
-    calibrate_snapshot, select,
+    REVIEW_CANDIDATES, REVIEW_FALLBACK, STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK, SetSummary,
+    Shape, bootstrap_ci, calibrate, calibrate_snapshot, select,
 };
 
 /// Files per cluster.
@@ -146,7 +147,9 @@ fn calibrate_writes_a_loaded_record_and_measures_the_selection() {
         .iter()
         .map(|r| (r.set.clone(), r.shape.clone()))
         .collect();
-    let want: Vec<(String, String)> = ["SELh0", "SELs0"]
+    // EC.11: the default groups are `structure` then `review`; the record
+    // sorts its rows by set name.
+    let want: Vec<(String, String)> = ["SELh0", "SELs0", "SELt"]
         .iter()
         .flat_map(|set| ["k1", "k2", "k3", "half"].map(|sh| (set.to_string(), sh.to_string())))
         .collect();
@@ -254,7 +257,7 @@ fn no_test_commit_writes_zero_query_rows() {
     let r = build(&root);
     let s = calibrate(&root, &r.merged, &CalibrateOptions::default()).expect("calibrate");
     assert_eq!(s.test_commits, 0);
-    assert_eq!(s.sets.len(), 8);
+    assert_eq!(s.sets.len(), 12);
     assert!(
         s.sets
             .iter()
@@ -294,4 +297,112 @@ fn a_merge_of_two_repos_is_refused() {
     let err = calibrate(&a, &r.merged, &CalibrateOptions::default()).expect_err("multi repo");
     assert_eq!(err, "calibration is per repo: got 2 repos");
     assert!(!calibration_dir(&a).exists());
+}
+
+/// The files of commit `i` of the message history: even commits touch the
+/// alpha cluster, odd ones the zeta cluster, 2..=6 neighbouring modules.
+fn text_commit_files(i: usize) -> (&'static str, Vec<String>) {
+    let c = if i.is_multiple_of(2) { "alpha" } else { "zeta" };
+    let size = 2 + (i / 2) % 5;
+    let start = (i * 5) % N;
+    (c, (0..size).map(|j| cluster_path(c, (start + j) % N)).collect())
+}
+
+/// `COMMITS` commits alternating between the clusters, each subject naming
+/// its cluster (EB.1's messages sidecar), written newest first.
+fn text_history(root: &Path) {
+    let mut commits = Vec::new();
+    let mut messages = Vec::new();
+    for i in 0..COMMITS {
+        let (c, files) = text_commit_files(i);
+        let sha = format!("{:040x}", i + 1);
+        let t = 1_700_000_000 + i as i64 * 3600;
+        commits.push(HistoryCommit {
+            c: sha.clone(),
+            t,
+            files: files
+                .into_iter()
+                .map(|p| HistoryFile {
+                    p,
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
+                .collect(),
+        });
+        messages.push(HistoryMessage {
+            c: sha,
+            at: t,
+            s: format!("{c} cluster work {i}"),
+            b: String::new(),
+            br: None,
+        });
+    }
+    commits.reverse();
+    messages.reverse();
+    let meta = HistoryMeta::new(format!("{:040x}", COMMITS), COMMITS, None, String::new());
+    write_history_with_messages(root, meta, &commits, &[], Some(&messages))
+        .expect("write history");
+}
+
+/// EC.11: with commit messages, the review group's SELt rows are written
+/// for every seeded shape; the text corpus makes a text fusion the k1 pick,
+/// at least as good as the fallback LX[IDR,P1] (P1 in the replay: no router).
+#[test]
+fn review_text_selection_calibrates_on_messages() {
+    let (_tmp, root) = fixture();
+    text_history(&root);
+    let r = build(&root);
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["review"];
+    let s = calibrate(&root, &r.merged, &opts).expect("calibrate");
+    assert!(s.messages);
+    let rows: Vec<(&str, &str)> = s
+        .sets
+        .iter()
+        .map(|x| (x.set.as_str(), x.shape.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [("SELt", "k1"), ("SELt", "k2"), ("SELt", "k3"), ("SELt", "half")]
+    );
+    let k1 = row(&s, "SELt", "k1");
+    assert_eq!(k1.fallback, REVIEW_FALLBACK);
+    assert!(k1.queries > 0);
+    assert!(REVIEW_CANDIDATES.contains(&k1.pick.as_str()), "{k1:?}");
+    assert_ne!(k1.pick, "H10[PT*]", "a text fusion is the k1 pick: {k1:?}");
+    assert!(
+        k1.selection_recall10 >= k1.fallback_recall10,
+        "{k1:?}"
+    );
+    let CalibrationRead::Loaded(cal) = read_calibration(&root) else {
+        panic!("record not loaded");
+    };
+    let sel = select(
+        &CalibrationRead::Loaded(cal.clone()),
+        "SELt",
+        Shape::K1,
+        &REVIEW_CANDIDATES,
+        REVIEW_FALLBACK,
+    );
+    assert_eq!((sel.pick.as_str(), sel.source), (k1.pick.as_str(), "calibrated"));
+
+    // Without the messages every T1s is 0: the replay still writes the rows.
+    let snap = read_history(&root).expect("snapshot");
+    let msgs = read_history_messages(&root, &snap).expect("messages");
+    let (_, bare) = calibrate_snapshot(&r.merged, &root, &snap, None, &opts).expect("bare");
+    assert!(!bare.messages);
+    assert_eq!(bare.sets.len(), 4);
+    let bare_k1 = bare.sets.iter().find(|x| x.shape == "k1").expect("bare k1");
+    assert!(
+        k1.selection_recall10 > bare_k1.selection_recall10,
+        "the messages help: {k1:?} vs {bare_k1:?}"
+    );
+    // The in-memory step with the messages is the file step.
+    let (_, again) =
+        calibrate_snapshot(&r.merged, &root, &snap, Some(&msgs), &opts).expect("again");
+    assert_eq!(
+        again.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>(),
+        s.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>()
+    );
 }

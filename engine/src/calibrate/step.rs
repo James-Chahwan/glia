@@ -42,13 +42,13 @@ use super::record::{
 };
 use super::replay::{ReplayParams, build_replay};
 use super::select::run_sets;
-use super::sets::specs;
+use super::sets::{log_hooks, register_hooks, specs};
 use crate::intent::text::Candidates;
 use crate::rank::RankCache;
 
 /// The candidate groups a default run replays: every group `sets::specs`
-/// registers (EC.11 / EC.13 append theirs here with their group).
-pub const DEFAULT_GROUPS: [&str; 1] = ["structure"];
+/// registers (`sets::GROUPS`; EC.13 appends `find` there).
+pub const DEFAULT_GROUPS: [&str; 2] = super::sets::GROUPS;
 
 /// rank_eval's bootstrap resamples (`--boot`'s default).
 pub const BOOTSTRAP_RESAMPLES: usize = 2000;
@@ -225,7 +225,15 @@ pub fn calibrate_snapshot(
         &cands,
         Arc::clone(&cache),
     )));
+    register_hooks(
+        &mut state,
+        &replay,
+        cands.len(),
+        opts.params.max_files,
+        &opts.groups,
+    );
     let rows = run_sets(merged, &cands, root, &replay, &mut state, &set_specs);
+    log_hooks(&state);
 
     let train = replay.train.iter().filter(|&&t| t).count();
     let mut cal = Calibration {

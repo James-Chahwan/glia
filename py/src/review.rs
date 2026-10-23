@@ -187,10 +187,14 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// `base..HEAD`, and no intent when that range is empty) is the PR's
 /// purpose: its ids route at the base through the repo's task / requirement
 /// rows and its words rank past commit messages. The dict gains `intent`
-/// `{title, title_source, fusion, ids, files, text}` (`fusion` is
-/// `"LX[IDR,P1]"`; `files` rows `{rank, file, idr, text, ppr, ids,
-/// in_impact}`), the markdown `### Intent`, and the impact rows in
-/// id-routed files come first (text never reorders them).
+/// `{title, title_source, fusion, ids, files, text}` (`files` rows `{rank,
+/// file, idr, text, ppr, ids, in_impact}`) and then `selection_intent`
+/// `{set, shape, pick, source, reason, test_commits}` (EC.11): `fusion` is
+/// set `SELt`'s pick, the repo's calibrated text fusion for the shape of the
+/// changed files (`glia history calibrate`), else `"LX[IDR,P1]"` with the
+/// reason; the markdown gains `### Intent` with its `_ranked by .._` line,
+/// and the impact rows in id-routed files come first (text never reorders
+/// them).
 #[pyfunction]
 #[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None, cochange=true, title=None))]
 #[allow(clippy::too_many_arguments)]

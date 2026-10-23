@@ -12,7 +12,8 @@ default none in 0.5.2), or with format="markdown" the markdown PR report
 `glia review` prints, as a str. Any other format or tier, or an engine error,
 raises ValueError. EB.7: `intent` (the PR title's routed ids and the files
 ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
-(its newest subject is the default title). Needs a `git` binary. Shared
+(its newest subject is the default title); EC.11: `selection_intent`
+follows it (set SELt's calibrated pick, else LX[IDR,P1]). Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -142,7 +143,12 @@ def main() -> int:
         git(top, "commit", "-q", "-m", "tasks")
         t, err = stderr_of(lambda: rg.review_vs_rev(str(top), title="T007 payment"))
         t = t if type(t) is dict else {}
-        c.check("title -> intent key last", list(t) == KEYS + ["intent"], list(t))
+        c.check("title -> intent then selection_intent last", list(t) == KEYS + ["intent", "selection_intent"],
+                list(t))
+        sel = t.get("selection_intent") or {}
+        c.check("EC.11: uncalibrated selection_intent",
+                (sel.get("set"), sel.get("pick"), sel.get("source"), sel.get("reason"))
+                == ("SELt", "LX[IDR,P1]", "fallback", "absent"), sel)
         intent = t.get("intent") or {}
         c.check("intent fields", (intent.get("title"), intent.get("title_source"), intent.get("fusion"),
                                   intent.get("text")) == ("T007 payment", "arg", "LX[IDR,P1]", "absent"), intent)

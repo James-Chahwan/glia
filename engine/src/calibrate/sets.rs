@@ -8,14 +8,25 @@
 //! - `SELs0` = {P1, PT*, B0}, fallback P1: read only under `--no-cochange` /
 //!   `cochange=False`.
 //!
-//! [`specs`] returns the named groups' sets in registration order; EC.11 /
-//! EC.13 append the `review` / `find` groups. A candidate here is [`Named`]:
-//! its keys come from the structure bank ([`super::bank::structure_keys`]).
+//! Group `review` (EC.11, item 4), review's text selection on the same
+//! seeded shapes:
+//! - `SELt` = rank_eval `R1_SEL`'s SELt, same order ([`REVIEW_CANDIDATES`]),
+//!   each a [`super::fusions::Seeded`] fusion of T1s, P1, PT*, C0, W5 and M;
+//!   its fallback, EB.7's `LX[IDR,P1]`, is scored only (not selectable).
+//!
+//! [`specs`] returns the named groups' sets in registration order; EC.13
+//! appends the `find` group. A structure candidate is [`Named`]: its keys
+//! come from the structure bank ([`super::bank::structure_keys`]).
+//! [`register_hooks`] registers the parts of the replay state a group reads
+//! beyond the bank (the text corpus and the work state for `review`).
 
 use super::bank::structure_keys;
-use super::candidate::{Candidate, QueryCtx, RankKey};
+use super::candidate::{Candidate, QueryCtx, RankKey, ReplayState};
+use super::fusions::{Seeded, TextState};
 use super::record::Shape;
+use super::replay::Replay;
 use super::select::SetSpec;
+use super::work::WorkState;
 
 /// The structure-only set (item 10).
 pub const STRUCTURE_SET: &str = "SELs0";
@@ -32,8 +43,26 @@ pub const COCHANGE_FALLBACK: &str = "H10";
 /// The seeded query shapes both sets are calibrated on.
 pub const SEEDED_SHAPES: [Shape; 4] = [Shape::K1, Shape::K2, Shape::K3, Shape::Half];
 
+/// Review's text selection set (item 4).
+pub const REVIEW_SET: &str = "SELt";
+/// SELt's candidates, rank_eval `R1_SEL` order.
+pub const REVIEW_CANDIDATES: [&str; 10] = [
+    "H18s[PT*]",
+    "H9s25[PT*]",
+    "H9s50",
+    "H10[PT*]",
+    "HTsa[W5]",
+    "HTsc[W5]",
+    "HTsd[W5]",
+    "HTsc[M]",
+    "HTsd[M]",
+    "ALL5",
+];
+/// SELt's fallback: EB.7's shipped review intent order (scored only).
+pub const REVIEW_FALLBACK: &str = crate::review::INTENT_FUSION_REVIEW;
+
 /// The candidate groups [`specs`] knows, in registration order.
-const GROUPS: [&str; 1] = ["structure"];
+pub const GROUPS: [&str; 2] = ["structure", "review"];
 
 /// A structure-bank ranker by its harness name.
 #[non_exhaustive]
@@ -50,6 +79,13 @@ impl Candidate for Named {
     fn rank(&self, q: &QueryCtx<'_>) -> Vec<RankKey> {
         structure_keys(self.0, q).unwrap_or_default()
     }
+}
+
+fn seeded(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
+    names
+        .iter()
+        .map(|&n| Box::new(Seeded(n)) as Box<dyn Candidate>)
+        .collect()
 }
 
 fn named(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
@@ -76,7 +112,43 @@ fn group(name: &str) -> Option<Vec<SetSpec>> {
                 named(&STRUCTURE_CANDIDATES),
             ),
         ]),
+        "review" => Some(vec![
+            SetSpec::new(
+                REVIEW_SET,
+                &SEEDED_SHAPES,
+                REVIEW_FALLBACK,
+                seeded(&REVIEW_CANDIDATES),
+            )
+            .with_fallback_candidate(Box::new(Seeded(REVIEW_FALLBACK))),
+        ]),
         _ => None,
+    }
+}
+
+/// Register the replay-state parts `groups` read beyond the structure bank:
+/// for `review`, the text corpus ([`TextState`]) and the work state
+/// ([`WorkState`]), in that order. `n_files` is the candidate count.
+pub fn register_hooks(
+    state: &mut ReplayState,
+    replay: &Replay,
+    n_files: usize,
+    max_files: usize,
+    groups: &[&str],
+) {
+    if groups.contains(&"review") {
+        state.register(Box::new(TextState::for_replay(replay, n_files)));
+        state.register(Box::new(WorkState::for_replay(replay, n_files, max_files)));
+    }
+}
+
+/// The registered parts' once-per-run markers (`[calibrate] text ..`,
+/// `[calibrate] work ..`), after the replay.
+pub fn log_hooks(state: &ReplayState) {
+    if let Some(t) = state.hook::<TextState>() {
+        t.log_summary();
+    }
+    if let Some(w) = state.hook::<WorkState>() {
+        w.log_summary();
     }
 }
 
@@ -133,13 +205,48 @@ mod tests {
     fn set_digests_are_pinned() {
         assert_eq!(set_digest(&COCHANGE_CANDIDATES), "3017fcbd3b38fc59");
         assert_eq!(set_digest(&STRUCTURE_CANDIDATES), "b8d25cb5c9150854");
+        assert_eq!(set_digest(&REVIEW_CANDIDATES), "80ce9c8a8a207f2f");
+    }
+
+    /// EC.11: SELt is rank_eval's R1_SEL `SELt`, literally and in order, its
+    /// fallback EB.7's scored-only LX[IDR,P1].
+    #[test]
+    fn review_group_is_selt() {
+        assert_eq!(
+            REVIEW_CANDIDATES,
+            [
+                "H18s[PT*]",
+                "H9s25[PT*]",
+                "H9s50",
+                "H10[PT*]",
+                "HTsa[W5]",
+                "HTsc[W5]",
+                "HTsd[W5]",
+                "HTsc[M]",
+                "HTsd[M]",
+                "ALL5"
+            ]
+        );
+        assert_eq!(REVIEW_FALLBACK, "LX[IDR,P1]");
+        let s = specs(&["review"]).expect("review");
+        assert_eq!(s.len(), 1);
+        let x = &s[0];
+        assert_eq!((x.set, x.fallback), ("SELt", "LX[IDR,P1]"));
+        assert_eq!(x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(), REVIEW_CANDIDATES);
+        assert_eq!(x.shapes, SEEDED_SHAPES);
+        assert_eq!(x.fallback_candidate.as_ref().map(|c| c.name()), Some("LX[IDR,P1]"));
+        assert!(!REVIEW_CANDIDATES.contains(&REVIEW_FALLBACK));
+        for n in REVIEW_CANDIDATES {
+            assert!(crate::calibrate::fusions::needs(n).is_some(), "{n}");
+        }
+        assert_eq!(GROUPS, crate::calibrate::DEFAULT_GROUPS);
     }
 
     #[test]
     fn unknown_group_names_the_known() {
         assert_eq!(
             specs(&["structure", "nope"]).err(),
-            Some("unknown candidate group `nope`: expected one of structure".to_string())
+            Some("unknown candidate group `nope`: expected one of structure, review".to_string())
         );
         assert!(specs(&[]).expect("empty").is_empty());
     }

@@ -63,9 +63,10 @@ const KEYS: [&str; 11] = [
     "blocking",
 ];
 
-/// [`KEYS`] then `intent` (EB.7): a review with a `--title`, or with a
-/// commit in `<base>..HEAD` (its newest subject is the default title).
-const KEYS_WITH_INTENT: [&str; 12] = [
+/// [`KEYS`] then `intent` (EB.7) and `selection_intent` (EC.11): a review
+/// with a `--title`, or with a commit in `<base>..HEAD` (its newest subject
+/// is the default title).
+const KEYS_WITH_INTENT: [&str; 13] = [
     "base",
     "counts",
     "changed",
@@ -78,6 +79,7 @@ const KEYS_WITH_INTENT: [&str; 12] = [
     "check_errors",
     "blocking",
     "intent",
+    "selection_intent",
 ];
 
 /// A scratch dir holding a git work tree (`repo/`), an empty global git
@@ -676,7 +678,25 @@ fn title_routes_its_ids_into_the_intent() {
     assert_eq!(v["intent"]["files"][0]["file"], "tests/test_pay.py", "{v}");
     assert_eq!(v["intent"]["files"][0]["in_impact"], true, "{v}");
     assert_eq!(v["intent"]["files"][0]["idr"].as_f64(), Some(1.0), "{v}");
+    // EC.11: no calibration record: set SELt's fallback, EB.7's order.
+    assert_eq!(
+        (
+            v["selection_intent"]["set"].as_str(),
+            v["selection_intent"]["pick"].as_str(),
+            v["selection_intent"]["source"].as_str(),
+            v["selection_intent"]["reason"].as_str()
+        ),
+        (Some("SELt"), Some("LX[IDR,P1]"), Some("fallback"), Some("absent")),
+        "{v}"
+    );
     let err = stderr(&o);
+    assert!(
+        err.lines().any(|l| l.starts_with(
+            "[select] surface=review_intent set=SELt shape=k2 pick=LX[IDR,P1] source=fallback reason=absent "
+        )),
+        "{}",
+        show(&o)
+    );
     let review = err.lines().position(|l| l.starts_with("[review] base=")).expect("review marker");
     let intent = err
         .lines()
@@ -686,7 +706,13 @@ fn title_routes_its_ids_into_the_intent() {
     assert!(err.lines().any(|l| l.starts_with("[idr] ") && l.contains(" surface=review ")), "{}", show(&o));
 
     let md = s.review(&["--title", "T007 charge hardening"]);
-    assert!(stdout(&md).contains("### Intent\n\n_title (arg): T007 charge hardening_"), "{}", show(&md));
+    assert!(
+        stdout(&md).contains(
+            "### Intent\n\n_title (arg): T007 charge hardening_\n\n_ranked by LX[IDR,P1] (uncalibrated: absent)_"
+        ),
+        "{}",
+        show(&md)
+    );
 
     let plain = s.review(&["--json"]);
     assert_eq!(top_level_keys(&stdout(&plain)), KEYS, "{}", show(&plain));
