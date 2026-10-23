@@ -632,6 +632,20 @@ pub(crate) fn first_parent_log(repo: &Path, head: &Rev, n: usize) -> Result<Vec<
     Ok(revs)
 }
 
+/// The commits of `base..head` (`rev-list --no-merges`), full shas, in the
+/// repository `repo` sits in (EB.3: the change a review ranks, left out of
+/// the text index so it never reads its own messages). Both revs are
+/// resolved first, so neither can be read as an option. `Err` when git is
+/// missing, a rev is unknown or the listing fails.
+pub(crate) fn rev_list(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<String>, String> {
+    let base = resolve_rev(repo, base)?;
+    let head = resolve_rev(repo, head)?;
+    let range = format!("{}..{}", base.sha, head.sha);
+    let out = git_output(repo, &["rev-list", "--no-merges", &range, "--"])?
+        .ok_or_else(|| format!("git rev-list {}..{} failed in {}", base.given, head.given, repo.display()))?;
+    Ok(String::from_utf8_lossy(&out).lines().filter_map(|l| object_id(l.trim())).collect())
+}
+
 /// The `%H NUL %ct NUL %s` records of a `log -z` listing (records NUL
 /// terminated too), in listing order. A record whose id is not an object id
 /// or whose time is not an integer is dropped, so its commit reads as
@@ -973,6 +987,48 @@ mod tests {
         assert!(parse_log_records(b"nothex\x00x\x00s\x00").is_empty());
         assert!(parse_log_records(format!("{SHA_A}\x00soon\x00s\x00").as_bytes()).is_empty());
         assert!(parse_log_records(b"").is_empty());
+    }
+
+    /// `git` in `dir` with a fixed identity and no user config.
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn rev_list_lists_the_range_without_merges() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        run_git(d, &["init", "-q", "-b", "main"]);
+        let commit = |name: &str| {
+            std::fs::write(d.join(name), name).expect("write");
+            run_git(d, &["add", name]);
+            run_git(d, &["commit", "-q", "-m", name]);
+            run_git(d, &["rev-parse", "HEAD"])
+        };
+        let base = commit("a");
+        run_git(d, &["checkout", "-q", "-b", "side"]);
+        let side = commit("b");
+        run_git(d, &["checkout", "-q", "main"]);
+        let main2 = commit("c");
+        run_git(d, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let merge = run_git(d, &["rev-parse", "HEAD"]);
+        let got = rev_list(d, &base, "HEAD").expect("rev-list");
+        let want: BTreeSet<String> = [side, main2].into_iter().collect();
+        assert_eq!(got, want);
+        assert!(!got.contains(&merge) && !got.contains(&base));
+        assert!(rev_list(d, "HEAD", "HEAD").expect("empty range").is_empty());
+        assert!(rev_list(d, "--all", "HEAD").is_err());
+        assert!(rev_list(d, &base, "no-such-rev").is_err());
     }
 
     #[test]
