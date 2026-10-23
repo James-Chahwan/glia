@@ -729,6 +729,99 @@ pub(crate) fn tracked_paths(repo: &Path) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
+/// A tree whose files a query-time reader reads (EB.5a): the working tree under
+/// a root, or the tree of one commit (review: the base sha; rank_eval: a test
+/// commit's parent). Re-exported as `glia_engine::intent::defs::Tree`, the
+/// one public path; [`read_paths_at`] reads either the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Tree<'a> {
+    /// The files under this root: tracked, plus untracked ones git's ignore
+    /// rules (`.gitignore`, `.git/info/exclude`, the global excludes) keep.
+    Work(&'a Path),
+    /// The tree of commit `sha` in the repository `repo` sits in.
+    Rev { repo: &'a Path, sha: String },
+}
+
+impl Tree<'_> {
+    /// The marker's `rev=` value: the commit's first 12 hex digits, or `worktree`.
+    pub fn label(&self) -> String {
+        match self {
+            Tree::Work(_) => "worktree".to_string(),
+            Tree::Rev { sha, .. } => sha.chars().take(12).collect(),
+        }
+    }
+}
+
+/// The largest file [`read_paths_at`] reads; a larger one is skipped and counted.
+pub(crate) const TREE_FILE_CAP: usize = 4 * 1024 * 1024;
+
+/// What [`read_paths_at`] read: `(path, bytes)` sorted by path, and how many
+/// kept files were over [`TREE_FILE_CAP`].
+#[derive(Debug, Default)]
+pub(crate) struct TreeFiles {
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+    pub(crate) too_large: usize,
+}
+
+/// Every regular file of `tree` whose `/`-separated path `keep` accepts, read
+/// whole. Symlinks and submodules are never read, nor anything under `.glia/`
+/// (the walk never enters it). `Work` lists `ls-files --cached --others
+/// --exclude-standard` (a tracked file deleted from disk is skipped); `Rev`
+/// lists `ls-tree -r --full-tree` and reads the kept blobs through one
+/// `cat-file --batch`. Local objects only, no lock taken.
+pub(crate) fn read_paths_at(tree: &Tree, keep: &dyn Fn(&str) -> bool) -> Result<TreeFiles, String> {
+    let wanted = |p: &str| !p.starts_with(&format!("{CONTROL_DIR}/")) && keep(p);
+    let mut out = TreeFiles::default();
+    match tree {
+        Tree::Work(root) => {
+            let listed = git_output(root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?
+                .ok_or_else(|| format!("git ls-files failed in {}", root.display()))?;
+            let paths: BTreeSet<String> = listed
+                .split(|b| *b == 0)
+                .filter(|p| !p.is_empty() && is_safe_rel(p))
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+            for rel in paths.into_iter().filter(|p| wanted(p)) {
+                let abs = root.join(&rel);
+                let Ok(meta) = std::fs::symlink_metadata(&abs) else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
+                if meta.len() > TREE_FILE_CAP as u64 {
+                    out.too_large += 1;
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&abs) {
+                    out.files.push((rel, bytes));
+                }
+            }
+        }
+        Tree::Rev { repo, sha } => {
+            if object_id(sha).is_none() {
+                return Err(format!("not a commit id: {sha:?}"));
+            }
+            let listing = git_output(repo, &["ls-tree", "-r", "--full-tree", "-z", sha])?
+                .ok_or_else(|| format!("git ls-tree {sha} failed in {}", repo.display()))?;
+            let entries = parse_ls_tree(&listing)?;
+            let kept: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| e.kind == EntryKind::File && std::str::from_utf8(&e.path).is_ok_and(&wanted))
+                .collect();
+            stream_blobs(repo, &kept, |entry, bytes| {
+                if bytes.len() > TREE_FILE_CAP {
+                    out.too_large += 1;
+                } else {
+                    out.files.push((String::from_utf8_lossy(&entry.path).into_owned(), bytes.to_vec()));
+                }
+                Ok(())
+            })?;
+        }
+    }
+    out.files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
@@ -1029,6 +1122,42 @@ mod tests {
         assert!(rev_list(d, "HEAD", "HEAD").expect("empty range").is_empty());
         assert!(rev_list(d, "--all", "HEAD").is_err());
         assert!(rev_list(d, &base, "no-such-rev").is_err());
+    }
+
+    /// EB.5a: on a clean checkout the working tree and its HEAD commit read the
+    /// same files with the same bytes; `.glia/`, symlinks, ignored files and
+    /// files over the cap are never read.
+    #[test]
+    fn tree_work_and_rev_read_the_same_files_on_a_clean_checkout() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let d = tmp.path();
+        run_git(d, &["init", "-q", "-b", "main"]);
+        put(d, "README.md", "# r\n");
+        put(d, "docs/a.md", "a\n");
+        put(d, "src/x.rs", "fn x() {}\n");
+        put(d, ".glia/overlay.toml", "version = 1\n");
+        put(d, ".gitignore", "build/\n");
+        put(d, "big.md", &"x".repeat(TREE_FILE_CAP + 1));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("README.md", d.join("link.md")).expect("symlink");
+        run_git(d, &["add", "-A"]);
+        run_git(d, &["commit", "-q", "-m", "init"]);
+        put(d, "build/out.md", "ignored\n");
+        let sha = run_git(d, &["rev-parse", "HEAD"]);
+        let md = |p: &str| p.ends_with(".md") || p.ends_with(".toml");
+        let work = read_paths_at(&Tree::Work(d), &md).expect("work");
+        let rev = read_paths_at(&Tree::Rev { repo: d, sha: sha.clone() }, &md).expect("rev");
+        let names: Vec<&str> = work.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, ["README.md", "docs/a.md"]);
+        assert_eq!(work.files, rev.files);
+        assert_eq!((work.too_large, rev.too_large), (1, 1));
+        // An untracked, unignored file is read from the working tree only.
+        put(d, "docs/new.md", "n\n");
+        let work = read_paths_at(&Tree::Work(d), &md).expect("work");
+        assert!(work.files.iter().any(|(p, _)| p == "docs/new.md"));
+        assert_eq!(Tree::Rev { repo: d, sha: sha.clone() }.label(), sha[..12]);
+        assert_eq!(Tree::Work(d).label(), "worktree");
+        assert!(read_paths_at(&Tree::Rev { repo: d, sha: "--all".into() }, &md).is_err());
     }
 
     #[test]

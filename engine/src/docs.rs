@@ -107,6 +107,33 @@ fn include_doc(rel: &str, project_dirs: &[&str]) -> Option<DocRule> {
     std::iter::once(rel.as_str()).chain(below_roots()).find_map(sdd_rule)
 }
 
+/// EB.5a: does a build of this tree ingest the markdown file `rel`
+/// ([`include_doc`] admits it)? The id-definition reader
+/// (`intent::defs`) reads exactly the files this admits.
+pub(crate) fn admits_doc(rel: &str, project_dirs: &[&str]) -> bool {
+    include_doc(rel, project_dirs).is_some()
+}
+
+/// EB.5a: the SDD directory [`sdd_rule`] admits `rel` under, the same
+/// candidates in the same order as [`include_doc`] (the repo root first, then
+/// each PROJECT root that prefixes it): `features/<f>` or `specs/<NNN-slug>`,
+/// prefixed by the PROJECT root's directory when the doc sits under one
+/// (`app/specs/003-billing`). `None` for any other path.
+pub(crate) fn sdd_scope(rel: &str, project_dirs: &[&str]) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    let scope_at = |prefix: &str, rest: &str| -> Option<String> {
+        sdd_rule(rest)?;
+        let mut segments = rest.split('/');
+        let (top, dir) = (segments.next()?, segments.next()?);
+        Some(if prefix.is_empty() { format!("{top}/{dir}") } else { format!("{prefix}/{top}/{dir}") })
+    };
+    scope_at("", &rel).or_else(|| {
+        project_dirs
+            .iter()
+            .find_map(|d| rel.strip_prefix(d).and_then(|r| r.strip_prefix('/')).and_then(|rest| scope_at(d, rest)))
+    })
+}
+
 /// CJ.2: an SDD feature doc, `rest` relative to the repo root or a PROJECT
 /// root. [`DocRule::Feature`]: exactly `features/<feature>/<file>.md`.
 /// [`DocRule::SpecKit`]: `specs/<NNN-slug>/...` with at least one more
@@ -258,7 +285,7 @@ impl SlugDedupe {
 /// The fence marker a line opens or closes: its trimmed start is ```` ``` ````
 /// or `~~~` (CommonMark's rule, simplified to the fence char - neither the
 /// fence length nor the info string is checked).
-fn fence_marker(line: &str) -> Option<&'static str> {
+pub(crate) fn fence_marker(line: &str) -> Option<&'static str> {
     let t = line.trim_start();
     if t.starts_with("```") {
         Some("```")
@@ -902,6 +929,32 @@ mod docs_tests {
         assert_eq!(include_doc("app/android/README.md", &nested), Some(ProjectWellKnown));
         assert_eq!(include_doc("app/android/docs/x.md", &nested), Some(ProjectDocsTree));
         assert_eq!(include_doc("app/features/f/x.md", &nested), Some(Feature));
+    }
+
+    /// EB.5a: `sdd_scope` names the SDD directory `include_doc` admits a doc
+    /// under (a PROJECT root's directory leading), and nothing else.
+    #[test]
+    fn sdd_scope_names_the_feature_or_spec_dir() {
+        let dirs = ["services/orders", "web", "svc"];
+        for (rel, want) in [
+            ("specs/003-billing/tasks.md", Some("specs/003-billing")),
+            ("specs/001-refunds/contracts/api.md", Some("specs/001-refunds")),
+            ("features/checkout/backend.md", Some("features/checkout")),
+            ("web/features/checkout/ui.md", Some("web/features/checkout")),
+            ("svc/specs/002-x/plan.md", Some("svc/specs/002-x")),
+            ("svc\\specs\\002-x\\plan.md", Some("svc/specs/002-x")),
+            ("docs/architecture.md", None),
+            ("README.md", None),
+            ("specs/drafts/ideas.md", None),
+            ("features/a/b/c.md", None),
+            ("src/specs/001-x/spec.md", None),
+        ] {
+            assert_eq!(sdd_scope(rel, &dirs).as_deref(), want, "{rel}");
+            if want.is_some() {
+                assert!(admits_doc(rel, &dirs), "{rel}: a scoped doc is an ingested doc");
+            }
+        }
+        assert!(!admits_doc("src/notes.md", &dirs));
     }
 
     /// CJ.2: `build_docs_graph` reads the PROJECT roots it is handed; the
