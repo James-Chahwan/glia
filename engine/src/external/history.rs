@@ -576,6 +576,39 @@ mod tests {
         assert_eq!(names, [vec!["z.py"], vec!["docs/x.md", "z.py"], vec!["Cargo.lock", "z.py"]]);
     }
 
+    /// EB.5c: `intent::paths::rename_pairs` reads the data this fold reads,
+    /// oldest first, and following its pairs forward lands every old path
+    /// where `current_paths` puts it.
+    #[test]
+    fn rename_pairs_are_the_fold_oldest_first() {
+        let commits = vec![
+            commit("c4", 4, &[("w.py", 1, Some("z.py")), ("b2.py", 1, Some("b1.py"))]),
+            commit("c3", 3, &[("z.py", 1, Some("y.py"))]),
+            commit("c2", 2, &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)]),
+            commit("c1", 1, &[("x.py", 5, None), ("b1.py", 1, None)]),
+        ];
+        let snap = snapshot(commits, vec![]);
+        let pairs = crate::intent::paths::rename_pairs(&snap);
+        let want: Vec<(String, String)> = [("x.py", "y.py"), ("y.py", "z.py"), ("b1.py", "b2.py"), ("z.py", "w.py")]
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
+        assert_eq!(pairs, want);
+        let fwd: BTreeMap<&str, &str> = pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let follow = |p: &str| {
+            let mut p = p.to_string();
+            while let Some(n) = fwd.get(p.as_str()) {
+                p = n.to_string();
+            }
+            p
+        };
+        for (commit, paths) in snap.commits.iter().zip(current_paths(&snap)) {
+            for (f, current) in commit.files.iter().zip(paths) {
+                assert_eq!(follow(&f.p), current, "{}", f.p);
+            }
+        }
+    }
+
     /// DE.1: two MODULEs positioned at one file bind the least qname, not the
     /// lowest NodeId (which a different RepoId may reorder). The ids run
     /// opposite to the qnames; a third MODULE with no qname sorts last.
