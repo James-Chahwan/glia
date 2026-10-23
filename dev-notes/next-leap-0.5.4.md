@@ -321,7 +321,7 @@ Not candidates: each becomes packets in the spec run.
    depth; show which hop matched. `find` gains the same view (the flows through its hits). §B's semantic tier feeds
    this too (open question 2, in part).
 
-7. **Remove DE.5's Engram side file (James 2026-10-18, §0; then *"oh it's diff usecases of ppr btw in engram its recal in
+7. **MOVED TO 0.5.3 (packet EG.4, confirmed 2026-10-23); kept here as history.** **Remove DE.5's Engram side file (James 2026-10-18, §0; then *"oh it's diff usecases of ppr btw in engram its recal in
    glia its walking"*).** engram-export loses `--ppr-candidates`, `<out>.ppr.jsonl`, `src/ppr_side.rs`, exit code 8, its own
    `glia-activation` dependency and tests/ppr_side_v6.rs; 0.5.4's Engram handoff declares the removal as a break (it
    undoes the 0.5.2 Engram handoff's §3.5, its breaks-table row and the `.ppr.jsonl` .gitignore line); CLAUDE.md /
@@ -331,7 +331,9 @@ Not candidates: each becomes packets in the spec run.
    nodes near the seeds) stays too, though ppr_side was its only caller: it is a candidate in item 8's ranking test, kept or
    removed on that result. Engram removes its reader (flat-ppr, `--ppr`, the release feature).
 
-8. **Ranking: intent + structure (James 2026-10-18: *"we probably should test also ppr or a form of hybrid ppr is probably
+8. **Its ranking mechanisms MOVED TO 0.5.3 (items 1-11, `dev-notes/next-leap-0.5.3.md`, in waves since 2026-10-23); what
+   stays here is the goal-layer connector half: requirement / task / plan nodes as first-class units, the vertical edges,
+   law / spec / rulings for why answers (§G). The evidence below is kept as history.** **Ranking: intent + structure (James 2026-10-18: *"we probably should test also ppr or a form of hybrid ppr is probably
    what we want like ppr pooled clusters"*, *"i knew ppr for walking + hybridsation from engram would slap"*, *"yeah that
    goes into 0.5.3 here"*).** Evidence: `dev-notes/ranking-eval-2026-10-18.md` (harness `engine/examples/rank_eval.rs`):
    on held-out commits, H9 = minmax(BM25 over past commit messages -> the files they touched) blended with PPR beats PPR
@@ -861,11 +863,12 @@ All four answered 2026-10-16 (§0); recorded as rulings:
 ## 4. Spec run
 
 After the 0.5.2 release (2026-10-18, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
-adversarial verifier, one integrator for wave 0 and the release docs), packet ids `E<group>.<n>[letter]` with `E0.*`
-as wave 0, packets in `dev-notes/leap-053-packets.json`, the runner's `--release 053` mode.
+adversarial verifier, one integrator for wave 0 and the release docs), packet ids `F<group>.<n>[letter]` with `F0.*`
+as wave 0, packets in `dev-notes/leap-054-packets.json`, the runner's `--release 054` mode (0.5.3, the ranking release, took
+the `E` ids and `--release 053`; 2026-10-23).
 
 **Followups finish inside 0.5.4** (James, 2026-10-16, §0). The 0.5.2 runner routed a followup to a later packet or to the
 next leap's seed; 0.5.4 does not defer. After the last scheduled wave (and after each wave whose close-out lists
-unrouted followups with no remaining owner), the session clusters them by file, specs each cluster as an `E<group>.<n>`
+unrouted followups with no remaining owner), the session clusters them by file, specs each cluster as an `F<group>.<n>`
 packet with a fixture or test, schedules a follow-up wave, and repeats until a close-out lists none. The release docs
 packet runs last, after the final follow-up wave.
