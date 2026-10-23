@@ -20,12 +20,13 @@ use glia_engine::generate_one;
 use glia_engine::persist::{load_layout, persist_graph};
 use glia_engram_export::hints_side::hint_rows;
 use glia_engram_export::{
-    ExportOptions, build_gmap, build_gmap_with_nodes, hints_side_path, meta_path, ppr_side_path, sidecar_path,
+    ExportOptions, build_gmap, build_gmap_with_nodes, hints_side_path, meta_path, sidecar_path,
 };
 use glia_graph::cells::{CellTarget, QnameIndex};
 use glia_graph::identity::{Identity, identity_of};
 
-/// ppr_side_v6's call chain, plus a class whose method body is long enough
+/// A call chain `a -> b -> c` beside an unreached `d`, plus a class whose
+/// method body is long enough
 /// (>= 40 whitespace-collapsed chars) to carry a body hash.
 const CHAIN_PY: &str = "def a():
     return b()
@@ -292,16 +293,24 @@ fn rerun_and_flags_change_nothing() {
     let first = read(&s.hints("a"));
     s.export("a", &[]);
     assert_eq!(read(&s.hints("a")), first, "a rerun writes the same hints bytes");
-    s.export("ppr", &["--ppr-candidates", "3"]);
-    assert!(ppr_side_path(&s.out("ppr")).exists());
-    assert_eq!(read(&s.hints("ppr")), first, "--ppr-candidates moves no hint");
-    // A stale hints file is replaced, never appended to or kept.
+    // 0.5.2's `--ppr-candidates` (DE.5) is gone (EG.4): clap refuses it.
+    let refused = s.run("ppr", &["--ppr-candidates", "3"]);
+    assert_eq!(refused.status.code(), Some(2), "--ppr-candidates is an unexpected argument");
+    // A stale hints file is replaced, never appended to or kept; a stale
+    // `.ppr.jsonl` a 0.5.2 run left beside the gmap is deleted.
+    let stale_ppr = {
+        let mut p = s.out("stale").into_os_string();
+        p.push(".ppr.jsonl");
+        PathBuf::from(p)
+    };
     std::fs::write(s.hints("stale"), b"garbage\n").unwrap();
+    std::fs::write(&stale_ppr, b"{\"stale\":true}\n").unwrap();
     s.export("stale", &[]);
     assert_eq!(read(&s.hints("stale")), first);
+    assert!(!stale_ppr.exists(), "a stale {} is removed", stale_ppr.display());
     // The gmap and its sidecars are the same bytes whatever the flags.
     let files = |name: &str| [s.out(name), sidecar_path(&s.out(name)), meta_path(&s.out(name))];
-    for name in ["ppr", "stale"] {
+    for name in ["stale"] {
         for (a, b) in files("a").into_iter().zip(files(name)) {
             assert_eq!(read(&a), read(&b), "{} differs from {}", b.display(), a.display());
         }

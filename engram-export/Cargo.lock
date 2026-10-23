@@ -391,7 +391,6 @@ dependencies = [
  "bincode",
  "clap",
  "engram-core",
- "glia-activation",
  "glia-code-domain",
  "glia-core",
  "glia-engine",

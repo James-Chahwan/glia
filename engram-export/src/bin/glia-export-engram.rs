@@ -29,8 +29,7 @@
 //! bash scripts/check-engram-export.sh
 //! engram-export/target/debug/glia-export-engram <repo> --out <file> \
 //!     [--since <prior>] [--no-persist] [--include-noise] \
-//!     [--exclude <glob>]... [--exclude-path <glob>]... \
-//!     [--ppr-candidates <K>]
+//!     [--exclude <glob>]... [--exclude-path <glob>]...
 //! ```
 //!
 //! `--exclude` drops nodes by KEY (the qname); `--exclude-path` drops every
@@ -62,11 +61,11 @@
 //! an untouched node keeps its bytes, and `<out>.diff` gets the bincode
 //! `GmapDiff` from the prior (base) to this export (target), named by both
 //! gmaps' content digests; with no change it is still written, with every list
-//! empty. Write order: `<out>.diff`, `<out>.ppr.jsonl` and `<out>.hints.jsonl`
-//! beside `--out` are deleted first on every run, then the full gmap,
+//! empty. Write order: `<out>.diff`, `<out>.hints.jsonl` and a stale
+//! `<out>.ppr.jsonl` (written by 0.5.2's removed `--ppr-candidates`) beside
+//! `--out` are deleted first on every run, then the full gmap,
 //! `<out>.files.json` and `<out>.meta.json` are written (the next run's base),
-//! then the diff, then the hints side file, then (with `--ppr-candidates`) the
-//! PPR side file, then `<out>.glia/`. A run refused (exit 6) or failing before
+//! then the diff, then the hints side file, then `<out>.glia/`. A run refused (exit 6) or failing before
 //! the gmap write writes no meta. A run that stops between the gmap and the
 //! diff leaves a full gmap and no diff (Engram re-seeds from it); a diff that
 //! cannot be written is exit 7.
@@ -77,20 +76,12 @@
 //! content alone. `[engram-export] v6 order: <e> edges sorted by key; hint row
 //! ties by qname=<t>; key ties by kind=<k>` reports the content tie-breaks.
 //!
-//! `--ppr-candidates <K>` (1..=200; DE.5) also writes `<out>.ppr.jsonl`: each
-//! Symbol and Proposition fact's top-K approximate personalised PageRank
-//! neighbours over the exported edges (`glia_engram_export::ppr_side`), its
-//! header naming the gmap's content digest, and prints `[engram-export] ppr
-//! side: <facts> facts, k=<K>, <pushes> pushes, <ms> ms -> <path>` after the
-//! `glia build=` line. It is data for Engram, never read by glia, and the
-//! gmap, sidecar, meta and diff bytes are the same with or without it. A run
-//! without the flag leaves no side file: the stale one named another digest.
-//! A side file that cannot be removed is exit 5, one that cannot be written
-//! exit 8 (the gmap, its sidecars and the diff are already complete).
+//! Exit 8 is retired: 0.5.2's `--ppr-candidates` (DE.5) side file was removed
+//! in 0.5.3 (EG.4); exit codes are not renumbered (hints is still 9).
 //!
 //! Every run also writes `<out>.hints.jsonl` (T12; no flag): a header binding
-//! it to the gmap by its content digest (`gmap_digest`, as `.ppr.jsonl` and
-//! `meta.json` name it), then one `{"hint","key"}` row per exported fact,
+//! it to the gmap by its content digest (`gmap_digest`, as `meta.json` names
+//! it), then one `{"hint","key"}` row per exported fact,
 //! sorted by key, where `hint` is the LB.6 `Identity::hint` v1 string of the
 //! fact's glia node (the form glia's cell store keys a row by) or null when the
 //! node has none (`glia_engram_export::hints_side`). It prints
@@ -112,10 +103,9 @@ use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
 use glia_engram_export::hints_side::{HintsSideStats, write_hints_side_with};
-use glia_engram_export::ppr_side::{PprSideStats, write_ppr_side};
 use glia_engram_export::{
     ExportOptions, build_gmap_with_nodes, hints_side_path, history_dir, meta_path, position_paths,
-    ppr_side_path, prior_tokens, sidecar_path, write_engram_gmap,
+    prior_tokens, sidecar_path, write_engram_gmap,
 };
 use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves, identities};
 
@@ -153,16 +143,20 @@ struct Args {
     /// Repeatable.
     #[arg(long = "exclude-path")]
     exclude_path: Vec<String>,
-    /// Also write `<out>.ppr.jsonl`: each fact's top-K personalised PageRank
-    /// neighbours over the exported edges, bound to the gmap by its digest
-    /// (data for Engram; the gmap is unchanged). K is 1..=200.
-    #[arg(long = "ppr-candidates", value_name = "K", value_parser = clap::value_parser!(u16).range(1..=200))]
-    ppr_candidates: Option<u16>,
 }
 
 fn main() {
     let args = Args::parse();
     std::process::exit(run(&args));
+}
+
+/// `<out>.ppr.jsonl`, the PPR candidate side file 0.5.2's `--ppr-candidates`
+/// (DE.5) wrote beside a gmap. 0.5.3 removed the flag and the writer (EG.4);
+/// a run still deletes a stale one, since it names another gmap's digest.
+fn stale_ppr_side(out: &Path) -> PathBuf {
+    let mut s = out.as_os_str().to_os_string();
+    s.push(".ppr.jsonl");
+    PathBuf::from(s)
 }
 
 /// What `--since` read before anything was written.
@@ -302,13 +296,14 @@ fn run(args: &Args) -> i32 {
         eprintln!("error removing the stale diff {}: {e}", diff_out.display());
         return 5;
     }
-    // The PPR side file names the gmap it was computed from: the same rule.
-    // Without --ppr-candidates nothing writes it back, so none is left.
-    let side_out = ppr_side_path(&out_path);
-    if let Err(e) = std::fs::remove_file(&side_out)
+    // A `<out>.ppr.jsonl` left by a 0.5.2 run (its removed `--ppr-candidates`,
+    // DE.5; EG.4) names another gmap's digest: the same rule. Nothing writes
+    // one any more, so none is left.
+    let stale_ppr = stale_ppr_side(&out_path);
+    if let Err(e) = std::fs::remove_file(&stale_ppr)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!("error removing the stale PPR side file {}: {e}", side_out.display());
+        eprintln!("error removing the stale PPR side file {}: {e}", stale_ppr.display());
         return 5;
     }
     // The hints side file names the gmap its rows describe: the same rule, so
@@ -374,24 +369,6 @@ fn run(args: &Args) -> i32 {
             }
         }
     };
-    // The PPR candidate side file (DE.5), after the gmap whose digest its
-    // header names. Opt-in, so a failure is its own exit code.
-    let side: Option<(PprSideStats, u128)> = match args.ppr_candidates {
-        Some(k) => {
-            let started = Instant::now();
-            match write_ppr_side(&gmap, stats.digest, usize::from(k), &side_out) {
-                Ok(s) => Some((s, started.elapsed().as_millis())),
-                Err(e) => {
-                    eprintln!("error writing the PPR side file {}: {e}", side_out.display());
-                    if code == 0 {
-                        code = 8;
-                    }
-                    None
-                }
-            }
-        }
-        None => None,
-    };
     // The graph this gmap was exported from, for the next `--since` run. The
     // gmap is complete without it, so a failure is a warning. Written with NO
     // repo root: a layout that records its root stores CODE as spans into the
@@ -446,18 +423,6 @@ fn run(args: &Args) -> i32 {
             s.facts,
             s.hinted,
             hints_out.display(),
-        );
-    }
-    // The DE.5 marker, only with --ppr-candidates: the rows written (one per
-    // Symbol / Proposition fact), K, the pushes over every fact's run, and the
-    // wall time of computing and writing them.
-    if let Some((s, ms)) = side {
-        eprintln!(
-            "[engram-export] ppr side: {} facts, k={}, {} pushes, {ms} ms -> {}",
-            s.facts,
-            s.k,
-            s.pushes,
-            side_out.display(),
         );
     }
     // The v6 since marker (LG.8a): the diff just written, by digest and

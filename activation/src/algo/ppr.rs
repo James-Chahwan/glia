@@ -1,9 +1,10 @@
 //! Approximate personalised PageRank by push (Andersen, Chung and Lang,
 //! "Local graph partitioning using PageRank vectors", FOCS 2006) over an
 //! [`Adjacency`] (DE.5): one seed's PPR vector computed locally, with work
-//! bounded by the push tolerance instead of the graph's size. It feeds the
-//! Engram candidate side file (`glia-export-engram --ppr-candidates`); no glia
-//! read path calls it, and the whole-graph power iteration behind
+//! bounded by the push tolerance instead of the graph's size. Its caller is
+//! the ranking harness (engine/examples/rank_eval.rs, the P3 ranker); 0.5.2's
+//! Engram side file that used it was removed in 0.5.3. No glia read path
+//! calls it, and the whole-graph power iteration behind
 //! [`activate`](crate::activate) is untouched.
 //!
 //! The walk is the **undirected** view of the index: a node's kept outgoing

@@ -119,15 +119,6 @@
 //! the code it describes) export as `Documents`, counted in
 //! [`ExportStats::documents_edges`] apart from the NatSpec ones.
 //!
-//! ## The PPR candidate side file (DE.5)
-//!
-//! With `--ppr-candidates <K>` the bin also writes `<out>.ppr.jsonl`
-//! ([`ppr_side_path`], [`ppr_side`]): each exported fact's top-K approximate
-//! personalised PageRank neighbours over the exported edges, bound to the
-//! gmap by its content digest. It is data for Engram to evaluate as one
-//! optional candidate source; no glia code reads it, and the gmap and its
-//! sidecars are the same bytes with or without it.
-//!
 //! ## The hints side file (T12)
 //!
 //! One hint format between glia and Engram. A fact's `identity_hint` in the
@@ -137,7 +128,7 @@
 //! `glia_graph::identity::Identity::hint` (`v1|<kind>|<file>|<body>|<local>`).
 //! Every bin run therefore also writes `<out>.hints.jsonl`
 //! ([`hints_side_path`], [`hints_side`]): a header binding it to the gmap by
-//! its [`content_digest`] (the `.ppr.jsonl` rule), then one
+//! its [`content_digest`] (the meta.json rule), then one
 //! `{"hint", "key"}` row per exported fact, sorted by key, `hint` being the
 //! v1 string of the fact's glia node, or null when it has none (ENDPOINTs,
 //! ROUTEs, config, doc sections, non-code files, NatSpec tag facts). Engram
@@ -159,7 +150,6 @@ use glia_graph::MergedGraph;
 pub mod diff;
 pub mod hints_side;
 mod natspec;
-pub mod ppr_side;
 
 /// Counts surfaced after an export so callers can flag lossy runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1542,16 +1532,6 @@ pub fn meta_path(out_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// `<out_path>.ppr.jsonl` — the optional PPR candidate side file
-/// ([`ppr_side`], DE.5): written only with `--ppr-candidates`, its header
-/// names the [`content_digest`] of the gmap it was computed from, and a run
-/// without the flag removes a stale one.
-pub fn ppr_side_path(out_path: &Path) -> PathBuf {
-    let mut s = out_path.as_os_str().to_os_string();
-    s.push(".ppr.jsonl");
-    PathBuf::from(s)
-}
-
 /// `<out_path>.hints.jsonl` — the hints side file ([`hints_side`], T12):
 /// written on every bin run, its header names the [`content_digest`] of the
 /// gmap its rows describe, and a run removes the stale one before it writes
@@ -1577,8 +1557,8 @@ pub fn history_dir(out_path: &Path) -> PathBuf {
 }
 
 /// Write to `<path>.tmp` then rename over `path` so readers never see a
-/// half-written file. `pub(crate)` for [`diff::write_diff`],
-/// [`ppr_side::write_ppr_side`] and [`hints_side::write_hints_side_with`].
+/// half-written file. `pub(crate)` for [`diff::write_diff`] and
+/// [`hints_side::write_hints_side_with`].
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");

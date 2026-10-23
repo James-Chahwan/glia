@@ -102,8 +102,7 @@ engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engr
                     `-V` prints glia's version line. 0.5.2: every clone of one commit exports the
                     same bytes (DE.2); ENDPOINTs and `page:` ROUTEs anchor identity hints and
                     `--since` pairs re-keyed endpoints and renamed symbols (DE.3, DE.4);
-                    `--ppr-candidates <K>` writes `<out>.ppr.jsonl`, each fact's top-K push-PPR
-                    neighbours, bound to the gmap by its digest (DE.5); every run writes
+                    0.5.3 removes the DE.5 PPR side file (EG.4); every run writes
                     `<out>.hints.jsonl` (DT.12a), each fact's LB.6 `Identity::hint` v1 form (or
                     null), bound to the gmap by `gmap_digest`, the key `glia cell set --hint`
                     takes (DT.12b; `[engram-export] hints side: ..`, exit 9 when unwritten)
