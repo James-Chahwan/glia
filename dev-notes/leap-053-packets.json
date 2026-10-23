@@ -362,6 +362,49 @@
    "risks": "Pack's universe is every PPR-reached node, so under co-change first a co-changed file with many nodes can take many of the `candidates` slots (default 200) and the top weights: the token budget then packs that file's nodes first. The file ranking is measured; this per-node lift is not (open question 2 for James: lift at most N nodes per co-changed file?). The weight transplant keeps the climb identical without history; weights from c0 would change every pack. Unreached co-changed files add no node to pack (pack has no `files` list). EC.9 hands its selected base through PackArgs.ranking.base, adding no ordering of its own."
   },
   {
+   "id": "EA.6b",
+   "title": "pack lifts co-changed FILES, not their rows: each lifted file's best PPR row moves to the front in the H10 file order, every other row keeps its PPR position (James 2026-10-23, the EA-2 follow-up)",
+   "batch": "EA",
+   "area": "EA pack ranking (items 1, 2, 5)",
+   "loc": 140,
+   "rationale": "EA.9's gate run (W6) showed EA.6's row lift costs pack recall@10: order_rows puts EVERY row of a co-changed file in tier 0, so on shell one file took 120 of 195 cut candidates (`lifted=254 lifted_files=3 max_file_share=120/195`) and crowded the other files out of the top-10: ANS:pack r10 0.3710 -> 0.2968, drops on glia single/k2, shell single/k2, samples single/k2/k3/half, while ANS:impact gained (MRR 0.5371 -> 0.6567). Ruling EA-2 deferred a cap until the gate showed one was needed; it now has. James 2026-10-23 picked the file-level lift over a per-file row cap or a rollback. H10 is measured as a FILE ranking (co-change first, then PPR); lifting one row per co-changed file makes pack's file roll-up (first appearance) read exactly that order while the rest of the budget keeps PPR's row order.",
+   "entry_points": [
+    "engine/src/pack.rs - fn run step 3 (the order_rows permutation before the candidate cut) and the `[rank] surface=pack` marker",
+    "engine/tests/rank_pack.rs - new cases"
+   ],
+   "files_touched": [
+    "engine/src/pack.rs",
+    "engine/tests/rank_pack.rs"
+   ],
+   "implementation": "In pack.rs run(), replace the use of rank::order_rows for pack only (blast radius keeps EA.5's order_rows; engine/src/rank/ is not touched):\n1. Keep EA.6's steps 1-2 and the file ranking `fr` exactly as landed.\n2. Lifted files = the non-seed files f with cochange_first && fr.c0[f] > 0 && a place in fr.order, sorted by that place (the same predicate as order_rows' tier 0).\n3. For each lifted file in that order, take its FIRST row in today's PPR order (score desc, id asc, after the seen and scope filters) and move it to the front, in lifted-file order. Every other row, including the lifted files' later rows, keeps its PPR relative order behind them.\n4. Ranking::head(), no snapshot or no lifted file: no permutation (byte-identical pack, as EA.6). For a grouped base (ppr-wide / bfs) without co-change, keep EA.6's order_rows grouping unchanged (the defect is the co-change tier only).\n5. Weights: unchanged rule (EA.6 step 4: the PPR weight profile assigned in the new order).\n6. Marker: `[rank] surface=pack ..` keeps its fields; `lifted=` now counts lifted ROWS (= lifted files), `lifted_files=<n>` and `max_file_share=<m>/<k>` stay (max_file_share now reads the largest single file's share of the cut in the new order).\n7. rank_pack.rs: update EA.6's case (2) to the new order (the first neighbours are svc/c.py's best row, then svc/b.py's best row, then the PPR order); add (6) a fixture where one co-changed file holds more rows than the candidate cut: assert every file PPR places in its top files still appears in the pack, and max_file_share is no higher than under PPR alone; (1), (3), (4), (5) unchanged.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-engine --test rank_pack --test pack` green; `cargo test -p glia-cli --test pack_cli` and the py test_pack surface green unchanged; `cargo clippy -p glia-engine --all-targets -- -D warnings` clean. Gate proof: in a scratch copy of the tree (never committed by this packet), apply EA.9's saved harness patch (`git apply` of dev-notes' path given in EA.9's correction) and run `bash scripts/rank-gate.sh check` with a private GLIA_RANK_GATE_DIR: it must report 0 drops on all six snapshots (ANS:pack r10 no lower than baseline on glia / shell / samples) and print the ANS:impact gains; paste the verdict lines. The committed tree's own `bash scripts/rank-gate.sh check` ends `check: ok`.",
+   "fired_on_marker": "[rank] surface=pack ranking=<harness name> seed_files=<s> cochange_files=<c> files=0 lifted=<l> lifted_files=<n> max_file_share=<m>/<k> closure_index=<hit|built>  (lifted == lifted_files once this lands)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "out_of_repo"
+    ],
+    "what_changes": "pack / pack_ids with a history snapshot: the packed candidate order changes from 'every row of each co-changed file first' (EA.6, unreleased) to 'each co-changed file's best row first, then PPR order'. Without a snapshot the pack is byte-identical to 0.5.2 (unchanged).",
+    "in_repo_consumers": [
+     "engine/tests/rank_pack.rs (this packet)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph: pack on a repo with a history snapshot (the EA.6 handoff entry already covers it; EZ.2 describes the file-level lift)"
+    ]
+   },
+   "depends_on": [
+    "EA.6",
+    "EA.7",
+    "EA.8"
+   ],
+   "risks": [
+    "Moving only one row per lifted file may leave some of EA.6's ANS:pack gains on the table where a co-changed file's second row matters; the gate decides, and a drop means a ruling, not a quiet cap.",
+    "EC.9 later edits pack.rs (calibrated selection): it builds on this order, not EA.6's."
+   ]
+  },
+  {
    "id": "EA.7",
    "title": "the long-lived holders: PyGraph and WatchSession each hold one Arc<RankCache> (repo roots and labels known); PyGraph.blast_radius / diff_impact / pack / pack_ids, diff_impact_vs_rev and review_vs_rev gain last kwargs ranking=\"ppr\", cochange=True (blast / diff-impact also top_files=10); WatchSession.snapshot shares the session's cache; the measured repeated-call speed-up",
    "batch": "EA",
@@ -512,6 +555,7 @@
    "depends_on": [
     "EA.5",
     "EA.6",
+    "EA.6b",
     "EG.1",
     "EG.3"
    ],
@@ -2663,6 +2707,7 @@
   "EG-5": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): yes: delete a stale .ppr.jsonl; keep the ppr.rs doc edit",
   "EG-6": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): pin actions by full commit SHA with the version tag in a trailing comment",
   "INT-1": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): add commons-lang (cee7cc6b) and commons-io (11f0abe7) to the gate snapshots: six repos",
-  "INT-2": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): EG.7's #[doc(hidden)] pub seams are acceptable"
+  "INT-2": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): EG.7's #[doc(hidden)] pub seams are acceptable",
+  "EA-2b": "James 2026-10-23 (picked 'File-level lift' after the W6 gate showed the EA.6 row lift costs ANS:pack recall@10): pack lifts co-changed files, one best row each in H10 file order (EA.6b); no per-file row cap, no rollback"
  }
 }

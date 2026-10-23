@@ -835,6 +835,9 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - 0.5.2 release CI (wheels-py.yml run 39046742898, 2026-10-18, green): GitHub warns `actions/checkout@v4` and
   `actions/upload-artifact@v4` target the deprecated Node.js 20 (forced onto Node 24), and `ubuntu-latest` moves to Ubuntu 26
   from 2026-10-19; bump the actions and pin the runner image before 0.5.4's wheels build.
+- From 0.5.3 W6 (EA.7, held out of 0.5.3 by the packet's risks): `entrypoint_reachable` is recomputed on every
+  `blast_radius` call although `PyGraph.live` caches it; the engine path does not take the cached set. With the PPR and file
+  indexes now held (a reused PyGraph answers in 202.5 ms vs 561.7 ms cold on glia), liveness is the next-largest per-call cost.
 
 ### G. Shape rules from the 2026-10-18 experiments (James: *"we need a generalized intermediate connector between higher layers also predictions for what's to change isn't the only benefits here"*)
 
