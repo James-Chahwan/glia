@@ -15,7 +15,7 @@ packet-corrections.json entry, then its leap re-verification correction, then
 its leap-corrections.json entry. Wave 0 (the serial splits) and any wave the
 scheduler gives a single packet render as a sequential script.
 
---release <r> (051, 052) reads leap-<r>-packets.json through schedule_<r>.py, briefs agents
+--release <r> (051, 052, 053) reads leap-<r>-packets.json through schedule_<r>.py, briefs agents
 with shared_brief_<r>.md, and takes each packet's CORRECTION from leap-<r>-corrections.json.
 Wave 0 (the serial C0 packets) and single-packet waves render sequentially.
 
@@ -102,7 +102,7 @@ def leap_inputs(wave):
     return P, claims, waves, ids, corr, brief, serial_run
 
 
-RELEASES = ("051", "052")
+RELEASES = ("051", "052", "053")
 
 
 def release_inputs(release, wave):

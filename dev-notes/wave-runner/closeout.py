@@ -27,8 +27,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-RELEASES = ("051", "052")
-RELEASE_PREFIX = {"051": "C", "052": "D"}   # packet-id family per release
+RELEASES = ("051", "052", "053")
+RELEASE_PREFIX = {"051": "C", "052": "D", "053": "E"}   # packet-id family per release
 SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
 # Since LD.11b the wheel is glia_py-<ver>-cp311-abi3-*.whl (dist glia-py, import glia_py);

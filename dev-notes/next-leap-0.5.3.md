@@ -91,7 +91,10 @@ Also kept out:
 
 1. Rounds 2 and 3 finished; items 6-11 and the hygiene confirmed (James 2026-10-23). Also confirmed: the public harness
    and reports drop the Kina domain specifics; they move to `~/Code/kina-extras/` and the harness reads them from there.
-2. A small spec run (spec + adversarial verify per mechanism).
+2. The spec run (2026-10-23, four groups, spec + adversarial verify each, one integrator): 43 packets, ~13,640 LOC,
+   16 waves (W0-W15) in `dev-notes/leap-053-packets.json` (its `rulings`: James's 23 rulings), corrections
+   `dev-notes/leap-053-corrections.json`, schedule `dev-notes/wave-runner/schedule_053.py` (runner `--release 053`, ids E*).
+   Larger than the seed's estimate: exact harness parity per port, the id-routing machinery, and gate coverage of every item.
 3. Waves with close-outs, `rank_eval` as a gate.
 4. The release docs and handoffs.
 
