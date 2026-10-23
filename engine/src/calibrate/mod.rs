@@ -17,3 +17,9 @@ pub use replay::{
     CoState, FIND_TOP, Replay, ReplayCommit, ReplayParams, ReplayQuery, build_replay, find_top,
     find_top_scores, seed_order_hash,
 };
+
+pub mod candidate;
+pub use candidate::{Candidate, Memo, QueryCtx, RankKey, ReplayState, StateHook};
+
+pub mod select;
+pub use select::{SetSpec, better, eval_query, run_sets};
