@@ -63,18 +63,28 @@
 //! (`intent::text`, from `glia history sync`'s snapshot), then the file's
 //! degree, then path (rank_eval's find-shape tie rule). The node answer
 //! above is untouched by it.
+//!
+//! EC.13 (item 11): that order is the uncalibrated one. With a calibration
+//! record (`glia history calibrate`, group `find`) the files follow set
+//! `SELf2t`'s pick for the repo (`calibrate::FIND_CANDIDATES`: the find
+//! fusions of text, PPR from the text's top files, co-change from them, the
+//! work signals and IDR, rank_eval `r3_bank_find`), ranked through the same
+//! `calibrate::fusions::find_keys` the replay measured; the answer carries
+//! its `selection`. `FindFilesOptions::select = false` keeps LX[IDR,T1s].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use glia_activation::algo::fuse;
 use glia_code_domain::node_kind;
 use glia_code_domain::snapshots::{read_history, read_history_messages};
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
+use crate::calibrate::fusions::{FindHead, find_keys, find_order, find_signals_at_head};
+use crate::calibrate::record::{Shape, explicit, log_selection, select};
+use crate::calibrate::sets::{FIND_CANDIDATES, FIND_FALLBACK, FIND_SET};
 use crate::answers::{
     Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
 };
@@ -612,8 +622,12 @@ pub struct FindFilesOptions {
     pub surface: &'static str,
     /// The holder's ranking cache (EA.7: a PyGraph's, the CLI's); `None`
     /// builds a transient one over the call's repo roots. Only its
-    /// [`crate::rank::FileIndex`] is read.
+    /// [`crate::rank::FileIndex`], its co-change, PPR indexes and
+    /// calibration record are read.
     pub rank_cache: Option<Arc<RankCache>>,
+    /// Rank by the repo's calibrated `SELf2t` pick (EC.13; the default);
+    /// false ranks [`FIND_FILES_FUSION`] as an explicit choice.
+    pub select: bool,
 }
 
 impl Default for FindFilesOptions {
@@ -622,6 +636,7 @@ impl Default for FindFilesOptions {
             top_k: DEFAULT_TOP_K,
             surface: "lib",
             rank_cache: None,
+            select: true,
         }
     }
 }
@@ -670,14 +685,20 @@ pub fn find_files(
 ///   from the history snapshot's subjects.
 /// - Text: `TextIndex::scores(subject(query))` over the snapshot's messages
 ///   (zeros when there is none).
-/// - Order: `fuse::lex_order([idr, text, degree], tie = path position)`.
-///   Rows are the files with `idr > 0` or `text > 0`, cut at `top_k`.
+/// - Order (EC.13): the selected fusion's keys
+///   (`calibrate::fusions::find_keys`, set `SELf2t` on shape `find`, the
+///   record of the repo's root; [`FIND_FILES_FUSION`] uncalibrated or with
+///   `select` off), `fuse::lex_order` with tie = path position. Rows are the
+///   files with a positive first or second key, cut at `top_k`; uncalibrated
+///   that is `[idr, text, degree]`, the files with `idr > 0` or `text > 0`.
 ///
 /// Err unless `repo_roots` has exactly one repo (no multi-repo text ranking
 /// was measured). An empty answer is a FACT `no_match` absence whose note
 /// names the missing inputs; it walked no mechanism, so it has no caveats.
-/// Query-time: reads `.glia/history-snapshot/`, writes nothing. Prints
-/// `[find-files] repo=<label> surface=<s> fusion=LX[IDR,T1s] ids=<n>
+/// Query-time: reads `.glia/history-snapshot/` and
+/// `.glia/calibration-snapshot/`, writes nothing. Prints `[select]
+/// surface=find_files set=SELf2t shape=find pick=<name> source=<s> ..`, then
+/// `[find-files] repo=<label> surface=<s> fusion=<pick> ids=<n>
 /// idr_files=<i> text=<present|absent> text_files=<t> rows=<r>`, after the
 /// `[intent] text`, `[ids] vocab`, `[id-defs]`, `[id-ns]`, `[id-paths]` and
 /// `[idr]` lines of the same surface.
@@ -754,15 +775,37 @@ pub fn find_files_with_ids(
     let idr: Vec<f64> = (0..n).map(|i| routed.idr.get(i).copied().unwrap_or(0.0)).collect();
     let ids_of = ids_by_file(&routed, &inputs, &vocab, &tree, &cands);
 
-    // LX[IDR,T1s], rank_eval's find-shape tie rule: the degree, then path.
-    let tie: Vec<u32> = (0..n as u32).collect();
-    let none = vec![false; n];
-    let order = fuse::lex_order(&[&idr, &text, &cands.deg], &tie, &none);
+    // EC.13: SELf2t's calibrated pick, else LX[IDR,T1s]; the find shape's
+    // tie rule (the degree in an unused third key), then path.
+    let selection = if opts.select {
+        select(
+            cache.calibration().read(),
+            FIND_SET,
+            Shape::Find,
+            &FIND_CANDIDATES,
+            FIND_FALLBACK,
+        )
+    } else {
+        explicit(FIND_SET, Shape::Find, FIND_FILES_FUSION)
+    };
+    log_selection("find_files", &selection);
+    let history = snap
+        .as_ref()
+        .map(|s| (s, msgs.as_deref().unwrap_or(&[])));
+    let head = FindHead::new(merged, &cache, &cands, history);
+    let keyed = |name: &str| {
+        let sig = find_signals_at_head(&head, name, text.clone(), idr.clone());
+        find_keys(name, &sig)
+    };
+    let (fusion, keys) = match keyed(&selection.pick) {
+        Some(k) if k.len() == n => (selection.pick.clone(), k),
+        _ => (
+            FIND_FILES_FUSION.to_string(),
+            keyed(FIND_FILES_FUSION).unwrap_or_default(),
+        ),
+    };
     let mut rows: Vec<FoundFile> = Vec::new();
-    for i in order {
-        if !(idr[i] > 0.0 || text[i] > 0.0) {
-            continue;
-        }
+    for i in find_order(&keys) {
         if opts.top_k > 0 && rows.len() >= opts.top_k {
             break;
         }
@@ -778,11 +821,11 @@ pub fn find_files_with_ids(
     let nz = |v: &[f64]| v.iter().filter(|&&w| w > 0.0).count();
     let (idr_files, text_files) = (nz(&idr), nz(&text));
     eprintln!(
-        "[find-files] repo={label} surface={surface} fusion={FIND_FILES_FUSION} ids={} idr_files={idr_files} text={text_state} text_files={text_files} rows={}",
+        "[find-files] repo={label} surface={surface} fusion={fusion} ids={} idr_files={idr_files} text={text_state} text_files={text_files} rows={}",
         routed.ids.len(),
         rows.len()
     );
-    let answer = Answer::from_results(rows, || {
+    let mut answer = Answer::from_results(rows, || {
         let mut why: Vec<&str> = Vec::new();
         if idr_files == 0 {
             why.push(if routed.has_id {
@@ -801,6 +844,7 @@ pub fn find_files_with_ids(
         let note = format!("no file of `{label}` ranks for `{}`: {}", query.trim(), why.join("; "));
         absence::empty(merged, "find_files", query, "no_match", note, &[], None)
     });
+    answer.selection = Some(selection);
     Ok((answer, routed.ids))
 }
 

@@ -52,6 +52,7 @@ fn glia(args: &[&str]) -> Output {
         if line.starts_with("[find] ")
             || line.starts_with("[identity] collapse ")
             || line.starts_with("[find-files] ")
+            || line.starts_with("[select] surface=find_files ")
         {
             eprintln!("{line}");
         }
@@ -284,6 +285,12 @@ fn files_ranks_the_id_first_then_the_text() {
     );
     assert!(stderr.contains("[intent] text repo=files surface=cli "), "{stderr}");
     assert!(stderr.contains("[idr] repo=files surface=cli "), "{stderr}");
+    // EC.13: no calibration record: SELf2t's fallback, named under the table
+    assert!(
+        stderr.contains("[select] surface=find_files set=SELf2t shape=find pick=LX[IDR,T1s] source=fallback reason=absent test_commits=0"),
+        "{stderr}"
+    );
+    assert!(stdout.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"), "{stdout}");
     assert!(stdout.starts_with("# files for `T012 order cache`\n"), "{stdout}");
     assert!(stdout.contains("| id | namespace | tier | route | defined at | state |"), "{stdout}");
     assert!(stdout.contains("| `T012` |"), "{stdout}");
@@ -300,6 +307,10 @@ fn files_ranks_the_id_first_then_the_text() {
     assert!(v["absence"].is_null(), "{v}");
     assert_eq!((rows[0]["file"].as_str(), rows[1]["file"].as_str()), (Some("users.py"), Some("orders.py")));
     assert_eq!(rows[0]["ids"], serde_json::json!(["T012"]));
+    assert_eq!(
+        v["selection"],
+        serde_json::json!({"set": "SELf2t", "shape": "find", "pick": "LX[IDR,T1s]", "source": "fallback", "reason": "absent", "test_commits": 0})
+    );
 }
 
 #[test]
@@ -316,6 +327,10 @@ fn files_absence_names_the_missing_inputs() {
     assert_eq!(v["absence"]["reason"], "no_match");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("text=absent text_files=0 rows=0"), "{stderr}");
+    assert_eq!(v["selection"]["source"], "fallback");
+    let plain = ok(&["find", &repo, "warm the cache", "--files"]).stdout;
+    let plain = String::from_utf8_lossy(&plain);
+    assert!(plain.contains("_(no match)_") && plain.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"), "{plain}");
 }
 
 #[test]

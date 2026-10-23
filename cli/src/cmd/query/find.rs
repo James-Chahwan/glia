@@ -16,12 +16,18 @@
 //! path). It prints the routed ids (when any) and the ranked files; `--json`
 //! is the `{results, absence}` envelope of the files. One repo only: with
 //! `--with` the engine refuses (exit 2).
+//!
+//! EC.13: the files follow the repo's calibrated `SELf2t` pick (`glia history
+//! calibrate`), else LX[IDR,T1s]; the table ends with `ranked by <pick>
+//! (calibrated on <t> commits | fallback: <reason>)` and `--json` carries the
+//! `selection` (stderr: `[select] surface=find_files set=SELf2t ..`).
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
 use glia_engine::find::{
     DEFAULT_TOP_K, FindFilesOptions, FindOptions, FoundNode, find_files_with_ids, find_nodes,
 };
+use glia_engine::calibrate::Selection;
 use glia_engine::identity::Collapse;
 use glia_engine::GenerateResult;
 
@@ -187,6 +193,7 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
     if let Some(a) = &answer.absence {
         println!("_(no match)_");
         print_absence(a);
+        print_ranked_by(answer.selection.as_ref());
         return 0;
     }
     println!("| # | file | idr | text | ids |");
@@ -202,7 +209,21 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
             r.rank, r.file, r.idr, r.text
         );
     }
+    print_ranked_by(answer.selection.as_ref());
     0
+}
+
+/// The `ranked by <pick> (..)` line under the files: what the order is and
+/// where it came from (EC.13).
+fn print_ranked_by(sel: Option<&Selection>) {
+    let Some(s) = sel else { return };
+    let why = match (s.source, s.reason) {
+        ("calibrated", _) => format!("calibrated on {} commits", s.test_commits),
+        ("explicit", _) => "explicit".to_string(),
+        (_, r) => format!("fallback: {}", r.unwrap_or("-")),
+    };
+    println!();
+    println!("ranked by {} ({why})", s.pick);
 }
 
 /// `file:line`, `file` or `—`.

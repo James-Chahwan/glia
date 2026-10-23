@@ -41,15 +41,24 @@
 //! query and candidate of it through memo key [`MEMO_T1S`]; it is also the
 //! find shape's [`StateHook::subject_scores`].
 //!
+//! The find shape's bank (EC.13, item 11; set `SELf2t`) is [`find_keys`]
+//! over [`FindSignals`] (rank_eval `r3_bank_find`): the query has no seed
+//! file, so nothing is excluded, and its text's top files seed PX1 / PXT /
+//! C0x. The replay ranks it through [`FindSeeded`], the `find --files`
+//! answer through [`find_signals_at_head`]; both through [`find_keys`].
+//!
 //! Fired_on, stderr: `[calibrate] text builds=<b> docs_max=<d>
 //! messages=<yes|no> ms=<ms>` once per calibrate run that replays the
-//! `review` group ([`TextState::log_summary`]); `[calibrate] idr unavailable
-//! commits=<n>` after it when n test commits had no readable parent (no git,
-//! an unknown sha, a root commit; [`IdrState::log_summary`]); and EB.6's
-//! `[idr] repo=<label> surface=calibrate rev=<parent12> ..` per routed subject.
+//! `review` or `find` group ([`TextState::log_summary`]); then (EC.13) one
+//! `[idr] replay surface=calibrate sides=<s> routed=<r> resolved=<x>
+//! unavailable=<u> ms=<t>` ([`IdrState::log_summary`]: the replay routes
+//! each subject through a quiet side, so no per-commit `[ids]` / `[id-defs]`
+//! / `[id-ns]` / `[id-paths]` / `[idr]` line prints), and `[calibrate] idr
+//! unavailable commits=<n>` when n test commits had no readable parent (no
+//! git, an unknown sha, a root commit).
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
@@ -61,7 +70,7 @@ use glia_graph::MergedGraph;
 
 use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, StateHook};
-use super::replay::{Replay, ReplayCommit};
+use super::replay::{Replay, ReplayCommit, find_top, find_top_scores};
 use super::work::{m_scores, w5_scores, work_at_head};
 use crate::answers::project_roots;
 use crate::git_rev::{Tree, resolve_rev};
@@ -70,7 +79,7 @@ use crate::intent::idr::{IdrSide, conventional_scopes, recent_scopes, route};
 use crate::intent::ids::IdVocab;
 use crate::intent::paths::{PathResolver, rename_pairs};
 use crate::intent::text::{Candidates, TextIndex, subject};
-use crate::rank::{RankBase, RankCache, Ranking, c0, rank_files};
+use crate::rank::{CochangeHistory, RankBase, RankCache, Ranking, base_keys, c0, rank_files};
 
 /// The memo key of a query's dense T1s vector.
 pub const MEMO_T1S: &str = "t1s";
@@ -472,6 +481,8 @@ impl IdrCtx {
     /// cannot be resolved (no git, an unknown sha, a root commit). A subject
     /// with no id mention and no conventional-commit scope routes nothing
     /// (all zeros) without reading the tree, exactly as [`route`] would.
+    /// `quiet` routes through a quiet side ([`IdrSide::quiet`]: the replay's
+    /// one aggregate line replaces the per-side markers).
     fn route_at_parent(
         &self,
         root: &Path,
@@ -479,10 +490,11 @@ impl IdrCtx {
         sha: &str,
         subj: &str,
         older_newest_first: &[&str],
-    ) -> Result<Vec<f64>, String> {
+        quiet: bool,
+    ) -> Result<ParentRoute, String> {
         let parent = resolve_rev(root, &format!("{sha}^"))?;
         if self.vocab.mentions(subj).is_empty() && conventional_scopes(subj).is_empty() {
-            return Ok(vec![0.0; cands.len()]);
+            return Ok(ParentRoute { idr: vec![0.0; cands.len()], side: false, has_id: false });
         }
         let tree = Tree::Rev { repo: root, sha: parent.sha };
         let dirs: Vec<&str> = self.dirs.iter().map(String::as_str).collect();
@@ -490,9 +502,20 @@ impl IdrCtx {
         let ns = defs.namespaces(&self.vocab.local_words);
         let side = IdrSide::new(cands, &self.paths, &defs, &ns, &self.vocab, &tree)
             .labelled(&self.label, "calibrate");
+        let side = if quiet { side.quiet() } else { side };
         let recent = recent_scopes(older_newest_first, &ns, &self.vocab);
-        Ok(route(subj, &side, &recent).idr)
+        let routed = route(subj, &side, &recent);
+        Ok(ParentRoute { idr: routed.idr, side: true, has_id: routed.has_id })
     }
+}
+
+/// One subject routed at a parent revision.
+struct ParentRoute {
+    idr: Vec<f64>,
+    /// The parent's tree was read (the subject named an id or a scope).
+    side: bool,
+    /// An id resolved or a scope had docs.
+    has_id: bool,
 }
 
 /// The IDR of `subj` for test commit `sha`, read leak-free at the commit's
@@ -510,7 +533,9 @@ pub fn idr_at_parent(
     subj: &str,
     older_subjects_newest_first: &[&str],
 ) -> Result<Vec<f64>, String> {
-    IdrCtx::new(root, merged, cands).route_at_parent(root, cands, sha, subj, older_subjects_newest_first)
+    IdrCtx::new(root, merged, cands)
+        .route_at_parent(root, cands, sha, subj, older_subjects_newest_first, false)
+        .map(|r| r.idr)
 }
 
 /// The replay's id router (EC.12, module docs): per test commit, the subject
@@ -533,6 +558,8 @@ pub struct IdrState {
     ctx: Mutex<Option<IdrCtx>>,
     /// (routed, unavailable) test commits.
     counts: Mutex<(usize, usize)>,
+    /// (sides read, subjects whose id or scope resolved, milliseconds).
+    work: Mutex<(usize, usize, f64)>,
 }
 
 impl std::fmt::Debug for IdrState {
@@ -559,6 +586,7 @@ impl IdrState {
             cur: Mutex::new(None),
             ctx: Mutex::new(None),
             counts: Mutex::new((0, 0)),
+            work: Mutex::new((0, 0, 0.0)),
         }
     }
 
@@ -568,10 +596,20 @@ impl IdrState {
         *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The `[calibrate] idr unavailable commits=<n>` marker, once after the
-    /// replay, only when n > 0.
+    /// The replay's routing in one line, once after it (EC.13; the routes
+    /// themselves are quiet): `[idr] replay surface=calibrate sides=<s>
+    /// routed=<r> resolved=<x> unavailable=<u> ms=<t>`, `sides` the parent
+    /// trees read (a subject with no id and no scope reads none), `routed`
+    /// the test commits routed at a readable parent, `resolved` those whose
+    /// id or scope resolved. Then `[calibrate] idr unavailable commits=<n>`
+    /// when n > 0.
     pub fn log_summary(&self) {
-        let (_, unavailable) = self.counts();
+        let (routed, unavailable) = self.counts();
+        let (sides, resolved, ms) = *self.work.lock().unwrap_or_else(PoisonError::into_inner);
+        eprintln!(
+            "[idr] replay surface=calibrate sides={sides} routed={routed} resolved={resolved} unavailable={unavailable} ms={:.1}",
+            (ms * 10.0).trunc() / 10.0
+        );
         if unavailable > 0 {
             eprintln!("[calibrate] idr unavailable commits={unavailable}");
         }
@@ -588,18 +626,27 @@ impl IdrState {
         if let Some(v) = cur.as_ref() {
             return v.to_vec();
         }
+        let t0 = Instant::now();
         let got = {
             let mut ctx = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
             let ctx = ctx.get_or_insert_with(|| IdrCtx::new(q.repo_root, q.merged, q.cands));
             let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
-            ctx.route_at_parent(q.repo_root, q.cands, &self.cur_sha, &self.cur_subject, &older)
+            ctx.route_at_parent(q.repo_root, q.cands, &self.cur_sha, &self.cur_subject, &older, true)
         };
+        {
+            let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Ok(r) = &got {
+                work.0 += usize::from(r.side);
+                work.1 += usize::from(r.has_id);
+            }
+            work.2 += t0.elapsed().as_secs_f64() * 1000.0;
+        }
         let v = {
             let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
             match got {
-                Ok(v) if v.len() == m => {
+                Ok(r) if r.idr.len() == m => {
                     counts.0 += 1;
-                    v
+                    r.idr
                 }
                 _ => {
                     counts.1 += 1;
@@ -704,6 +751,349 @@ pub fn answer_signals(
     s
 }
 
+// ---- EC.13: the find shape's bank (item 11) -------------------------------
+
+/// Every name [`find_keys`] ranks (rank_eval `r3_bank_find`'s): set
+/// `SELf2t`'s candidates, its fallback `LX[IDR,T1s]` (EB.8's shipped order)
+/// and the parts PX1 / C0x.
+pub const FIND_NAMES: [&str; 14] = [
+    "T1s",
+    "PX1",
+    "PXT",
+    "C0x",
+    "H9x",
+    "H9x25T",
+    "H18x",
+    "H10x",
+    "ALL5x",
+    "LX[IDR,H18x]",
+    "LX[IDR,H9x25T]",
+    "H18xi",
+    "LX[IDR,C0x,PXT]",
+    "LX[IDR,T1s]",
+];
+
+/// The find shape's per-candidate signals, dense over the repo's candidate
+/// files (no seed file, nothing excluded); a signal a fusion does not read
+/// may be left empty (it then reads 0).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FindSignals {
+    /// T1s: BM25 of the query's subject over past commit messages.
+    pub t1s: Vec<f64>,
+    /// PX1: PPR d0.5 from T1s's top files ([`super::replay::find_top`],
+    /// each file's nodes weighted `w / |nodes|`), max-pooled.
+    pub px1: Vec<f64>,
+    /// PXT: the same at d0.85, sum-pooled.
+    pub pxt: Vec<f64>,
+    /// C0x: co-change from the top files, weighted by their raw scores
+    /// (`CoState::c0_weighted`).
+    pub c0x: Vec<f64>,
+    /// W5: the last five training commits' files, decayed.
+    pub w5: Vec<f64>,
+    /// M: the milestone's files.
+    pub m: Vec<f64>,
+    /// Typed id routing of the query.
+    pub idr: Vec<f64>,
+    /// Per candidate, `FileIndex::degree` (rank_eval `file_deg`): every key
+    /// whose third slot is unused gets it there.
+    pub deg: Vec<f64>,
+}
+
+/// What a find fusion reads beyond T1s and the degree.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FindNeeds {
+    pub px1: bool,
+    pub pxt: bool,
+    pub c0x: bool,
+    pub w5: bool,
+    pub m: bool,
+    pub idr: bool,
+}
+
+/// What the find fusion `name` reads; None for a name [`find_keys`] does not
+/// rank.
+pub fn find_needs(name: &str) -> Option<FindNeeds> {
+    let n = |px1, pxt, c0x, idr| Some(FindNeeds { px1, pxt, c0x, w5: false, m: false, idr });
+    match name {
+        "T1s" => n(false, false, false, false),
+        "PX1" | "H9x" => n(true, false, false, false),
+        "PXT" | "H9x25T" => n(false, true, false, false),
+        "C0x" => n(false, false, true, false),
+        "H18x" | "H10x" => n(false, true, true, false),
+        "ALL5x" => Some(FindNeeds { px1: false, pxt: true, c0x: true, w5: true, m: true, idr: false }),
+        "LX[IDR,T1s]" => n(false, false, false, true),
+        "LX[IDR,H9x25T]" => n(false, true, false, true),
+        "LX[IDR,H18x]" | "H18xi" | "LX[IDR,C0x,PXT]" => n(false, true, true, true),
+        _ => None,
+    }
+}
+
+/// The keys of the find fusion `name` over `s`, one per candidate
+/// (`s.deg.len()` of them), rank_eval `r3_bank_find`'s arithmetic; every
+/// min-max is over every file (nothing excluded):
+///
+/// - `T1s`, `PX1`, `PXT`, `C0x`: the signal, `[s, 0, 0]`;
+/// - `H9x` = `blend(0.5, mm(T1s), mm(PX1))`; `H9x25T` = `blend(0.25,
+///   mm(T1s), mm(PXT))`; `H18x` = `mean(mm(T1s), mm(C0x), mm(PXT))`;
+///   `H10x` = `[C0x, PXT, 0]`;
+/// - `ALL5x` = `mean(mm(T1s), mm(W5), mm(M), mm(C0x), mm(PXT))`;
+/// - `LX[IDR,T1s]` = `[IDR, T1s, 0]`, `LX[IDR,H18x]` = `[IDR, H18x, 0]`,
+///   `LX[IDR,H9x25T]` = `[IDR, H9x25T, 0]`, `H18xi` = `mean(mm(IDR),
+///   mm(T1s), mm(C0x), mm(PXT))`, `LX[IDR,C0x,PXT]` = `[IDR, C0x, PXT]`;
+///
+/// then, when every key's third slot is 0, the file degree goes there ("ties
+/// in the first keys go to the file's degree"), so a query matching nothing
+/// orders by degree, then position. None for a name it does not rank.
+pub fn find_keys(name: &str, s: &FindSignals) -> Option<Vec<RankKey>> {
+    find_needs(name)?;
+    let n = s.deg.len();
+    let none = vec![false; n];
+    let d = |v: &[f64]| dense(v, n);
+    let mm = |v: &[f64]| fuse::minmax(&d(v), &none);
+    let (t1s, px1, pxt, c0x, idr) = (d(&s.t1s), d(&s.px1), d(&s.pxt), d(&s.c0x), d(&s.idr));
+    let h9x25 = || fuse::blend(0.25, &mm(&t1s), &mm(&pxt));
+    let h18x = || fuse::mean(&[&mm(&t1s), &mm(&c0x), &mm(&pxt)]);
+    let mut keys = match name {
+        "T1s" => scalar(&t1s),
+        "PX1" => scalar(&px1),
+        "PXT" => scalar(&pxt),
+        "C0x" => scalar(&c0x),
+        "H9x" => scalar(&fuse::blend(0.5, &mm(&t1s), &mm(&px1))),
+        "H9x25T" => scalar(&h9x25()),
+        "H18x" => scalar(&h18x()),
+        "H10x" => lex2(&c0x, &pxt),
+        "ALL5x" => scalar(&fuse::mean(&[&mm(&t1s), &mm(&s.w5), &mm(&s.m), &mm(&c0x), &mm(&pxt)])),
+        "LX[IDR,T1s]" => lex2(&idr, &t1s),
+        "LX[IDR,H18x]" => lex2(&idr, &h18x()),
+        "LX[IDR,H9x25T]" => lex2(&idr, &h9x25()),
+        "H18xi" => scalar(&fuse::mean(&[&mm(&idr), &mm(&t1s), &mm(&c0x), &mm(&pxt)])),
+        "LX[IDR,C0x,PXT]" => (0..n).map(|f| [idr[f], c0x[f], pxt[f]]).collect(),
+        _ => return None,
+    };
+    if keys.iter().all(|k| k[2] == 0.0) {
+        for (k, &g) in keys.iter_mut().zip(&s.deg) {
+            k[2] = g;
+        }
+    }
+    Some(keys)
+}
+
+/// A find fusion of set `SELf2t`, ranked from the replay's prefix state.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub struct FindSeeded(pub &'static str);
+
+/// The replay's find signals for `name` (EC.13): the query's seeds and C0x
+/// are the driver's (its text's top files, `select::run_sets`), so PX1 / PXT
+/// are the structure bank's `P1` / `PT*` of the find query (its weighted
+/// seeding; memo `p1` / `pt`), C0x the query's C0 (memo `c0`), T1s from
+/// [`TextState`] (memo [`MEMO_T1S`]), W5 / M from the work state and IDR
+/// from [`IdrState`] (memo [`MEMO_IDR`]). None when a needed PPR has no
+/// structure bank registered.
+pub fn replay_find_signals(name: &str, q: &QueryCtx<'_>) -> Option<FindSignals> {
+    let need = find_needs(name)?;
+    let m = q.cands.len();
+    let col0 = |n: &str| -> Option<Vec<f64>> {
+        Some(structure_keys(n, q)?.into_iter().map(|k| k[0]).collect())
+    };
+    let mut s = FindSignals {
+        deg: q.cands.deg.clone(),
+        ..FindSignals::default()
+    };
+    if need.px1 {
+        s.px1 = col0("P1")?;
+    }
+    if need.pxt {
+        s.pxt = col0("PT*")?;
+    }
+    if need.c0x {
+        s.c0x = q
+            .memo
+            .get_or("c0", || {
+                let mut v = vec![0.0; m];
+                for &(f, x) in &q.query.c0 {
+                    if let Some(slot) = v.get_mut(f as usize) {
+                        *slot = x;
+                    }
+                }
+                v
+            })
+            .to_vec();
+    }
+    s.t1s = q
+        .memo
+        .get_or(MEMO_T1S, || match q.state.hook::<TextState>() {
+            Some(t) if t.cur_sha == q.commit.sha => t.cur.to_vec(),
+            _ => vec![0.0; m],
+        })
+        .to_vec();
+    if need.w5 {
+        s.w5 = w5_scores(q).to_vec();
+    }
+    if need.m {
+        s.m = m_scores(q).to_vec();
+    }
+    if need.idr {
+        s.idr = q
+            .memo
+            .get_or(MEMO_IDR, || match q.state.hook::<IdrState>() {
+                Some(r) => r.scores(q),
+                None => vec![0.0; m],
+            })
+            .to_vec();
+    }
+    Some(s)
+}
+
+impl Candidate for FindSeeded {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+
+    /// The fusion's keys over the replay's find signals; an empty vector
+    /// (the driver then drops the set) with no structure bank or an unknown
+    /// name.
+    fn rank(&self, q: &QueryCtx<'_>) -> Vec<RankKey> {
+        replay_find_signals(self.0, q)
+            .and_then(|s| find_keys(self.0, &s))
+            .unwrap_or_default()
+    }
+}
+
+/// What [`find_signals_at_head`] reads besides the query's own T1s and IDR.
+#[non_exhaustive]
+pub struct FindHead<'a> {
+    pub merged: &'a MergedGraph,
+    pub cache: &'a RankCache,
+    /// The repo's candidate files.
+    pub cands: &'a Candidates,
+    /// The history snapshot and its messages (`&[]` without the sidecar),
+    /// for W5 / M; None without a snapshot.
+    pub history: Option<(&'a HistorySnapshot, &'a [HistoryMessage])>,
+}
+
+impl<'a> FindHead<'a> {
+    pub fn new(
+        merged: &'a MergedGraph,
+        cache: &'a RankCache,
+        cands: &'a Candidates,
+        history: Option<(&'a HistorySnapshot, &'a [HistoryMessage])>,
+    ) -> FindHead<'a> {
+        FindHead { merged, cache, cands, history }
+    }
+}
+
+/// The find answer's signals for the fusion `name` at the working tree
+/// (EB.8's `find --files`, EC.13), one code path with the replay through
+/// [`find_keys`]: `t1s` and `idr` are the answer's own (EB.8's text and
+/// route); the top files are [`super::replay::find_top`] of `t1s`; only when
+/// `name` reads them, C0x is the same weighted formula over the rank cache's
+/// co-change counts (EA.3's index over the whole snapshot), PX1 / PXT the
+/// rank cache's PPR (`rank::base_keys`) from the top files' nodes weighted
+/// `w / |nodes|` (an empty top scores 0), W5 / M [`work_at_head`] with
+/// nothing excluded, `now` the newest snapshot commit's author time (its
+/// committer time without the messages sidecar), surface `find_files`.
+pub fn find_signals_at_head(x: &FindHead<'_>, name: &str, t1s: Vec<f64>, idr: Vec<f64>) -> FindSignals {
+    let n = x.cands.len();
+    let need = find_needs(name).unwrap_or_default();
+    let t1s = dense(&t1s, n);
+    let mut s = FindSignals {
+        deg: x.cands.deg.clone(),
+        idr: dense(&idr, n),
+        ..FindSignals::default()
+    };
+    let files = x.cache.files(x.merged);
+    if need.c0x {
+        let raw = find_top_scores(&t1s);
+        let co = x.cache.cochange(x.merged);
+        let mut pos: Vec<Option<usize>> = vec![None; files.len()];
+        for (p, &f) in x.cands.files.iter().enumerate() {
+            if let Some(slot) = pos.get_mut(f as usize) {
+                *slot = Some(p);
+            }
+        }
+        let tot: f64 = raw.iter().map(|t| t.1).sum();
+        let mut c0x = vec![0.0; n];
+        for &(g, wg) in &raw {
+            let Some(&gf) = x.cands.files.get(g as usize) else {
+                continue;
+            };
+            let d = f64::from(co.count(gf)) + 1.0;
+            for &(f, c) in co.cochanged(gf) {
+                if let Some(Some(p)) = pos.get(f as usize) {
+                    c0x[*p] += wg / tot * f64::from(c) / d;
+                }
+            }
+        }
+        s.c0x = c0x;
+    }
+    if need.px1 || need.pxt {
+        let top = find_top(&t1s);
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut pers: Vec<(NodeId, f64)> = Vec::new();
+        for &(p, w) in &top {
+            let Some(&f) = x.cands.files.get(p as usize) else {
+                continue;
+            };
+            let ns = files.nodes(f);
+            if ns.is_empty() {
+                continue;
+            }
+            let each = w / ns.len() as f64;
+            for &u in ns {
+                if seen.insert(u) {
+                    pers.push((u, each));
+                }
+            }
+        }
+        let ppr = |base: RankBase| -> Vec<f64> {
+            if pers.is_empty() {
+                return vec![0.0; n];
+            }
+            let keys = base_keys(x.merged, x.cache, &pers, base);
+            x.cands
+                .files
+                .iter()
+                .map(|&f| keys.get(f as usize).map_or(0.0, |k| k[0]))
+                .collect()
+        };
+        if need.px1 {
+            s.px1 = ppr(RankBase::Ppr);
+        }
+        if need.pxt {
+            s.pxt = ppr(RankBase::PprWide);
+        }
+    }
+    if (need.w5 || need.m)
+        && let Some((snap, msgs)) = x.history
+    {
+        let aligned = msgs.len() == snap.commits.len() && !msgs.is_empty();
+        let now = snap
+            .commits
+            .first()
+            .map_or(0, |c| if aligned { msgs[0].at } else { c.t });
+        let (w5, m) = work_at_head(snap, msgs, x.cands, &BTreeSet::new(), now, None, "find_files");
+        s.w5 = w5;
+        s.m = m;
+    }
+    s.t1s = t1s;
+    s
+}
+
+/// The candidates of `keys` best first (`fuse::lex_order` over the three
+/// slots, tie = position, nothing excluded) that have a positive first or
+/// second slot: the rows `find --files` keeps.
+pub fn find_order(keys: &[RankKey]) -> Vec<usize> {
+    let n = keys.len();
+    let tie: Vec<u32> = (0..n as u32).collect();
+    seeded_order(keys, &tie, &vec![false; n])
+        .into_iter()
+        .filter(|&i| keys[i][0] > 0.0 || keys[i][1] > 0.0)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +1175,117 @@ mod tests {
 
     fn bits(k: &[RankKey]) -> Vec<[u64; 3]> {
         k.iter().map(|x| x.map(f64::to_bits)).collect()
+    }
+
+    // ---- EC.13: r3_bank_find, verbatim (the names SELf2t and its
+    // fallback read), for the find parity test ----
+    #[allow(clippy::too_many_arguments)]
+    fn r3_bank_find(
+        t1s: &[f64],
+        px1: &[f64],
+        pxt: &[f64],
+        c0x: &[f64],
+        w5: &[f64],
+        m: &[f64],
+        idr: &[f64],
+        deg: &[f64],
+    ) -> Vec<(String, Vec<RankKey>)> {
+        let nf = t1s.len();
+        let none = vec![false; nf];
+        let mm = |v: &[f64]| mm_ex(v, &none);
+        let (mm_t1s, mm_px1, mm_pxt, mm_c0x, mm_w5, mm_m, mm_idr) =
+            (mm(t1s), mm(px1), mm(pxt), mm(c0x), mm(w5), mm(m), mm(idr));
+        let h9x = blend(0.5, &mm_t1s, &mm_px1);
+        let h9x25 = blend(0.25, &mm_t1s, &mm_pxt);
+        let h18x = r3_eq(&[&mm_t1s, &mm_c0x, &mm_pxt]);
+        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
+        let mut out: Vec<(String, Vec<RankKey>)> = Vec::new();
+        let mut push = |n: &str, k: Vec<RankKey>| out.push((n.to_string(), k));
+        push("T1s", scalar(t1s));
+        push("PX1", scalar(px1));
+        push("PXT", scalar(pxt));
+        push("C0x", scalar(c0x));
+        push("H9x", scalar(&h9x));
+        push("H9x25T", scalar(&h9x25));
+        push("H18x", scalar(&h18x));
+        push("H10x", lex2(c0x, pxt));
+        push("ALL5x", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0x, &mm_pxt])));
+        push("LX[IDR,T1s]", lex2(idr, t1s));
+        push("LX[IDR,H18x]", lex2(idr, &h18x));
+        push("LX[IDR,H9x25T]", lex2(idr, &h9x25));
+        push("H18xi", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0x, &mm_pxt])));
+        push("LX[IDR,C0x,PXT]", lx3(idr, c0x, pxt));
+        for (_, k) in out.iter_mut() {
+            if k.iter().all(|v| v[2] == 0.0) {
+                for (f, v) in k.iter_mut().enumerate() {
+                    v[2] = deg[f];
+                }
+            }
+        }
+        out
+    }
+
+    fn find_sig() -> FindSignals {
+        FindSignals {
+            t1s: vec![0.0, 3.2, 0.0, 7.9, 1.1, 0.0],
+            px1: vec![0.30, 0.02, 0.11, 0.0, 0.07, 0.11],
+            pxt: vec![1.10, 0.05, 0.40, 0.003, 0.21, 0.33],
+            c0x: vec![0.5, 0.0, 1.25, 0.0, 0.0, 0.75],
+            w5: vec![1.0, 0.0, 0.75, 0.0, 1.3125, 0.0],
+            m: vec![0.0, 0.0, 2.0, 1.0, 0.0, 1.0],
+            idr: vec![0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+            deg: vec![4.0, 9.0, 1.0, 9.0, 2.0, 0.0],
+        }
+    }
+
+    /// EC.13: find_keys on fixed 6-file vectors is r3_bank_find's
+    /// arithmetic, bit for bit, for every SELf2t name, its fallback and the
+    /// parts, the degree rule included; with every signal flat the keys tie
+    /// on the first two slots and order by degree, then position.
+    #[test]
+    fn find_keys_are_the_harness_arithmetic() {
+        let s = find_sig();
+        let bank = r3_bank_find(&s.t1s, &s.px1, &s.pxt, &s.c0x, &s.w5, &s.m, &s.idr, &s.deg);
+        let mut names: Vec<&str> = bank.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        let mut want: Vec<&str> = FIND_NAMES.to_vec();
+        want.sort_unstable();
+        assert_eq!(names, want);
+        for (name, keys) in &bank {
+            let got = find_keys(name, &s).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(bits(&got), bits(keys), "{name}");
+        }
+        for n in crate::calibrate::sets::FIND_CANDIDATES {
+            assert!(bank.iter().any(|(b, _)| b == n), "{n}");
+        }
+        // LX[IDR,C0x,PXT] uses its third slot: no degree there
+        let lx3 = find_keys("LX[IDR,C0x,PXT]", &s).expect("lx3");
+        assert_eq!(lx3[0][2], 1.10);
+        // the degree rule: T1s is [t1s, 0, deg]
+        let t = find_keys("T1s", &s).expect("t1s");
+        assert_eq!(t[1], [3.2, 0.0, 9.0]);
+        assert!(find_keys("H9s50", &s).is_none());
+        assert!(find_needs("H9s50").is_none());
+
+        // nothing matched: degree, then position; no row kept
+        let z = FindSignals { deg: s.deg.clone(), ..FindSignals::default() };
+        for name in FIND_NAMES {
+            let k = find_keys(name, &z).expect(name);
+            let tie: Vec<u32> = (0..6).collect();
+            assert_eq!(seeded_order(&k, &tie, &[false; 6]), [1, 3, 0, 4, 2, 5], "{name}");
+            assert!(find_order(&k).is_empty(), "{name}");
+        }
+    }
+
+    /// The rows find --files keeps: a positive first or second slot, in key
+    /// order; the fallback's are EB.8's (idr > 0 or text > 0, then degree).
+    #[test]
+    fn find_order_keeps_scored_files() {
+        let s = find_sig();
+        let k = find_keys("LX[IDR,T1s]", &s).expect("lx");
+        assert_eq!(find_order(&k), [2, 4, 3, 1]);
+        let k = find_keys("H10x", &s).expect("h10x");
+        assert_eq!(find_order(&k), [2, 5, 0, 4, 1, 3]);
     }
 
     #[test]
@@ -903,7 +1404,7 @@ mod tests {
             dirs: Vec::new(),
             paths: PathResolver::new(&cands, &[]),
         };
-        assert!(ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[]).is_err());
+        assert!(ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[], true).is_err());
     }
 
     #[test]

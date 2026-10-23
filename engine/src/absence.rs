@@ -76,6 +76,10 @@ pub struct Answer<T> {
     pub results: Vec<T>,
     /// `Some` iff `results` is empty.
     pub absence: Option<Absence>,
+    /// The calibrated ranking the rows follow (EC.13): set only by
+    /// `find::find_files`; None, and never serialized, for every other answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::calibrate::Selection>,
 }
 
 impl<T> Answer<T> {
@@ -83,7 +87,7 @@ impl<T> Answer<T> {
     /// is built (and its marker printed) only when `results` is empty.
     pub(crate) fn from_results(results: Vec<T>, absence: impl FnOnce() -> Absence) -> Self {
         let absence = results.is_empty().then(absence);
-        Answer { results, absence }
+        Answer { results, absence, selection: None }
     }
 }
 

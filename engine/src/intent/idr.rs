@@ -113,6 +113,7 @@ pub struct IdrSide<'a> {
     pub vocab: &'a IdVocab,
     pub tree: &'a Tree<'a>,
     reported: Cell<bool>,
+    quiet: bool,
     scope_of: RefCell<Option<BTreeMap<usize, String>>>,
 }
 
@@ -136,6 +137,7 @@ impl<'a> IdrSide<'a> {
             vocab,
             tree,
             reported: Cell::new(false),
+            quiet: false,
             scope_of: RefCell::new(None),
         }
     }
@@ -147,9 +149,18 @@ impl<'a> IdrSide<'a> {
         self
     }
 
+    /// A side that prints no per-side marker: no `[ids] vocab`, `[id-defs]`,
+    /// `[id-ns]`, `[id-paths]` or `[idr]` line (EC.13). The calibration
+    /// replay routes one side per test commit and prints one aggregate
+    /// `[idr] replay ..` line instead; error lines still print.
+    pub fn quiet(mut self) -> IdrSide<'a> {
+        self.quiet = true;
+        self
+    }
+
     /// The side's `[ids] vocab`, `[id-defs]` and `[id-ns]` markers, once.
     fn report_once(&self) {
-        if self.reported.replace(true) {
+        if self.quiet || self.reported.replace(true) {
             return;
         }
         self.vocab.report(self.label, self.surface);
@@ -445,6 +456,9 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
     if keys.is_empty() {
         scopes_with_docs = scope_route(text, side, &mut out, &mut counts);
         out.has_id = scopes_with_docs > 0;
+    }
+    if side.quiet {
+        return out;
     }
     side.paths.report(side.label, side.surface);
     let nz = |v: &[f64]| v.iter().filter(|w| **w > 0.0).count();

@@ -18,16 +18,23 @@
 //!   answer reads it, so a record written before EC.12 answers review `no_set`
 //!   until recalibrated.
 //!
-//! [`specs`] returns the named groups' sets in registration order; EC.13
-//! appends the `find` group. A structure candidate is [`Named`]: its keys
-//! come from the structure bank ([`super::bank::structure_keys`]).
-//! [`register_hooks`] registers the parts of the replay state a group reads
-//! beyond the bank (the text corpus, the work state and the id router for
-//! `review`).
+//! Group `find` (EC.13, item 11), `find --files`' selection on the find
+//! shape (a query with no seed file; the replay's stand-in is each test
+//! commit's subject):
+//! - `SELf2t` = rank_eval `R3_SELF2` + `["T1s", "PXT"]` (main's `f2t`), same
+//!   order ([`FIND_CANDIDATES`]), ranked by [`super::fusions::find_keys`]
+//!   (rank_eval `r3_bank_find`); its fallback, EB.8's `LX[IDR,T1s]`, is
+//!   scored only (not selectable).
+//!
+//! [`specs`] returns the named groups' sets in registration order. A
+//! structure candidate is [`Named`]: its keys come from the structure bank
+//! ([`super::bank::structure_keys`]). [`register_hooks`] registers the parts
+//! of the replay state a group reads beyond the bank (the text corpus, the
+//! work state and the id router, once, for `review` or `find`).
 
 use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, ReplayState};
-use super::fusions::{IdrState, Seeded, TextState};
+use super::fusions::{FindSeeded, IdrState, Seeded, TextState};
 use super::record::Shape;
 use super::replay::Replay;
 use super::select::SetSpec;
@@ -70,8 +77,29 @@ pub const REVIEW_CANDIDATES: [&str; 14] = [
 /// SELt2's fallback: EB.7's shipped review intent order (scored only).
 pub const REVIEW_FALLBACK: &str = crate::review::INTENT_FUSION_REVIEW;
 
+/// `find --files`' selection set (item 11).
+pub const FIND_SET: &str = "SELf2t";
+/// SELf2t's candidates: rank_eval `R3_SELF2`, then `T1s` and `PXT`.
+pub const FIND_CANDIDATES: [&str; 11] = [
+    "H18x",
+    "H9x25T",
+    "H9x",
+    "H10x",
+    "ALL5x",
+    "LX[IDR,H18x]",
+    "LX[IDR,H9x25T]",
+    "H18xi",
+    "LX[IDR,C0x,PXT]",
+    "T1s",
+    "PXT",
+];
+/// SELf2t's fallback: EB.8's shipped `find --files` order (scored only).
+pub const FIND_FALLBACK: &str = crate::find::FIND_FILES_FUSION;
+/// The shape SELf2t is calibrated on.
+pub const FIND_SHAPES: [Shape; 1] = [Shape::Find];
+
 /// The candidate groups [`specs`] knows, in registration order.
-pub const GROUPS: [&str; 2] = ["structure", "review"];
+pub const GROUPS: [&str; 3] = ["structure", "review", "find"];
 
 /// A structure-bank ranker by its harness name.
 #[non_exhaustive]
@@ -94,6 +122,13 @@ fn seeded(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
     names
         .iter()
         .map(|&n| Box::new(Seeded(n)) as Box<dyn Candidate>)
+        .collect()
+}
+
+fn find_seeded(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
+    names
+        .iter()
+        .map(|&n| Box::new(FindSeeded(n)) as Box<dyn Candidate>)
         .collect()
 }
 
@@ -130,14 +165,24 @@ fn group(name: &str) -> Option<Vec<SetSpec>> {
             )
             .with_fallback_candidate(Box::new(Seeded(REVIEW_FALLBACK))),
         ]),
+        "find" => Some(vec![
+            SetSpec::new(
+                FIND_SET,
+                &FIND_SHAPES,
+                FIND_FALLBACK,
+                find_seeded(&FIND_CANDIDATES),
+            )
+            .with_fallback_candidate(Box::new(FindSeeded(FIND_FALLBACK))),
+        ]),
         _ => None,
     }
 }
 
 /// Register the replay-state parts `groups` read beyond the structure bank:
-/// for `review`, the text corpus ([`TextState`]), the work state
-/// ([`WorkState`]) and the id router ([`IdrState`]), in that order. `n_files`
-/// is the candidate count.
+/// for `review` or `find` (once for both), the text corpus ([`TextState`],
+/// also the find queries' seeds through `subject_scores`), the work state
+/// ([`WorkState`]) and the id router ([`IdrState`]), in that order.
+/// `n_files` is the candidate count.
 pub fn register_hooks(
     state: &mut ReplayState,
     replay: &Replay,
@@ -145,7 +190,7 @@ pub fn register_hooks(
     max_files: usize,
     groups: &[&str],
 ) {
-    if groups.contains(&"review") {
+    if groups.contains(&"review") || groups.contains(&"find") {
         state.register(Box::new(TextState::for_replay(replay, n_files)));
         state.register(Box::new(WorkState::for_replay(replay, n_files, max_files)));
         state.register(Box::new(IdrState::for_replay(replay, n_files)));
@@ -221,6 +266,43 @@ mod tests {
         assert_eq!(set_digest(&COCHANGE_CANDIDATES), "3017fcbd3b38fc59");
         assert_eq!(set_digest(&STRUCTURE_CANDIDATES), "b8d25cb5c9150854");
         assert_eq!(set_digest(&REVIEW_CANDIDATES), "ca79a93f8e2d0576");
+        assert_eq!(set_digest(&FIND_CANDIDATES), "e682add57de8c8cd");
+    }
+
+    /// EC.13: SELf2t is rank_eval's `R3_SELF2` then `T1s`, `PXT` (main's
+    /// `f2t`), literally and in order, on the find shape; its fallback EB.8's
+    /// scored-only LX[IDR,T1s].
+    #[test]
+    fn find_group_is_self2t() {
+        assert_eq!(
+            FIND_CANDIDATES,
+            [
+                "H18x",
+                "H9x25T",
+                "H9x",
+                "H10x",
+                "ALL5x",
+                "LX[IDR,H18x]",
+                "LX[IDR,H9x25T]",
+                "H18xi",
+                "LX[IDR,C0x,PXT]",
+                "T1s",
+                "PXT"
+            ]
+        );
+        assert_eq!((FIND_SET, FIND_FALLBACK), ("SELf2t", "LX[IDR,T1s]"));
+        let s = specs(&["find"]).expect("find");
+        assert_eq!(s.len(), 1);
+        let x = &s[0];
+        assert_eq!((x.set, x.fallback), ("SELf2t", "LX[IDR,T1s]"));
+        assert_eq!(x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(), FIND_CANDIDATES);
+        assert_eq!(x.shapes, [Shape::Find]);
+        assert_eq!(x.fallback_candidate.as_ref().map(|c| c.name()), Some("LX[IDR,T1s]"));
+        assert!(!FIND_CANDIDATES.contains(&FIND_FALLBACK));
+        for n in FIND_CANDIDATES.iter().chain([&FIND_FALLBACK]) {
+            assert!(crate::calibrate::fusions::find_needs(n).is_some(), "{n}");
+        }
+        assert_eq!(GROUPS, ["structure", "review", "find"]);
     }
 
     /// EC.12: SELt2 is rank_eval's R1_SEL `SELt2`, literally and in order
@@ -266,7 +348,7 @@ mod tests {
     fn unknown_group_names_the_known() {
         assert_eq!(
             specs(&["structure", "nope"]).err(),
-            Some("unknown candidate group `nope`: expected one of structure, review".to_string())
+            Some("unknown candidate group `nope`: expected one of structure, review, find".to_string())
         );
         assert!(specs(&[]).expect("empty").is_empty());
     }

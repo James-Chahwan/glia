@@ -431,3 +431,128 @@ fn review_selects_from_selt2() {
     let old = review_vs_rev(g.path(), "HEAD", &args).expect("review");
     assert_eq!(sel(&old), ("SELt2".into(), "LX[IDR,P1]".into(), "fallback", Some("no_set")));
 }
+
+/// Two clusters of `N` stand-alone modules (EC.13; calibrate_step's
+/// `isolated`): a find query's PPR stays on its seed files.
+fn isolated(root: &Path) {
+    for c in ["alpha", "zeta"] {
+        write(root, &format!("{c}/__init__.py"), "");
+        for i in 0..N {
+            write(root, &cluster_path(c, i), &format!("def {c}{i:02}_f():\n    return {i}\n"));
+        }
+    }
+}
+
+/// calibrate_step's `text_history`: commits alternating between the
+/// clusters, 2..=6 neighbouring modules each, every subject naming only its
+/// cluster.
+fn cluster_history(root: &Path) {
+    use glia_code_domain::snapshots::{HistoryMessage, write_history_with_messages};
+    let mut commits = Vec::new();
+    let mut messages = Vec::new();
+    for i in 0..COMMITS {
+        let c = if i.is_multiple_of(2) { "alpha" } else { "zeta" };
+        let size = 2 + (i / 2) % 5;
+        let start = (i * 5) % N;
+        let sha = format!("{:040x}", i + 1);
+        let t = 1_700_000_000 + i as i64 * 3600;
+        commits.push(HistoryCommit {
+            c: sha.clone(),
+            t,
+            files: (0..size)
+                .map(|j| HistoryFile { p: cluster_path(c, (start + j) % N), a: Some(1), d: Some(0), from: None })
+                .collect(),
+        });
+        messages.push(HistoryMessage { c: sha, at: t, s: format!("{c} cluster work {i}"), b: String::new(), br: None });
+    }
+    commits.reverse();
+    messages.reverse();
+    let meta = HistoryMeta::new(format!("{:040x}", COMMITS), COMMITS, None, String::new());
+    write_history_with_messages(root, meta, &commits, &[], Some(&messages)).expect("write history");
+}
+
+/// EC.13: `find_files` selects from SELf2t on the find shape. With no record
+/// it answers its fallback LX[IDR,T1s] (EB.8's order, `absent`), and
+/// `select = false` is the same order as an explicit choice; calibrated, the
+/// record's pick (H10x on this tree: the co-change of the text's top files),
+/// its rows exactly `find_keys(pick)` over the head signals
+/// (`find_signals_at_head`, the replay's arithmetic). A query matching
+/// nothing is still EB.8's absence, carrying the selection.
+#[test]
+fn find_files_selects_from_self2t() {
+    use std::collections::BTreeSet;
+
+    use glia_code_domain::snapshots::{read_history, read_history_messages};
+    use glia_engine::calibrate::{FindHead, find_keys, find_order, find_signals_at_head};
+    use glia_engine::find::{FindFilesOptions, FoundFile, find_files};
+    use glia_engine::intent::text::{Candidates, TextIndex, subject};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("modules");
+    isolated(&root);
+    cluster_history(&root);
+    let r = glia_engine::generate_one(root.to_str().expect("utf-8")).expect("build");
+    let q = "alpha cluster work";
+    let ask = |q: &str, select: bool| {
+        let mut o = FindFilesOptions::default();
+        o.select = select;
+        o.rank_cache = Some(cache(&r));
+        find_files(&r.merged, &r.repo_roots, q, &o).expect("answer")
+    };
+    let sel = |a: &glia_engine::absence::Answer<FoundFile>| {
+        let s = a.selection.as_ref().expect("a selection");
+        (s.set.clone(), s.shape.clone(), s.pick.clone(), s.source, s.reason, s.test_commits)
+    };
+    let files = |a: &glia_engine::absence::Answer<FoundFile>| -> Vec<String> {
+        a.results.iter().map(|x| x.file.clone()).collect()
+    };
+
+    // uncalibrated: EB.8's LX[IDR,T1s] (no id here: text desc, degree desc, path)
+    let u = ask(q, true);
+    assert_eq!(sel(&u), ("SELf2t".into(), "find".into(), "LX[IDR,T1s]".into(), "fallback", Some("absent"), 0));
+    assert!(!u.results.is_empty());
+    let mut eb8 = u.results.clone();
+    eb8.sort_by(|x, y| {
+        y.idr
+            .total_cmp(&x.idr)
+            .then(y.text.total_cmp(&x.text))
+            .then(y.degree.total_cmp(&x.degree))
+            .then(x.file.cmp(&y.file))
+    });
+    assert_eq!(files(&u), eb8.iter().map(|x| x.file.clone()).collect::<Vec<_>>());
+    assert!(u.results.iter().all(|x| x.text > 0.0));
+    let e = ask(q, false);
+    assert_eq!(sel(&e), ("SELf2t".into(), "find".into(), "LX[IDR,T1s]".into(), "explicit", None, 0));
+    assert_eq!(serde_json::to_value(&e.results).ok(), serde_json::to_value(&u.results).ok());
+
+    // calibrated
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["find"];
+    calibrate(&root, &r.merged, &opts).expect("calibrate");
+    let c = ask(q, true);
+    assert_eq!(sel(&c), ("SELf2t".into(), "find".into(), "H10x".into(), "calibrated", None, COMMITS));
+    let rc = cache(&r);
+    let fi = rc.files(&r.merged);
+    let repo = *r.repo_roots.keys().next().expect("repo");
+    let cands = Candidates::of(&fi, repo);
+    let t1s = TextIndex::load(&root, &cands, &BTreeSet::new()).expect("text").scores(subject(q));
+    let snap = read_history(&root).expect("snapshot");
+    let msgs = read_history_messages(&root, &snap).expect("messages");
+    let head = FindHead::new(&r.merged, &rc, &cands, Some((&snap, &msgs)));
+    let keys = find_keys("H10x", &find_signals_at_head(&head, "H10x", t1s, vec![0.0; cands.len()])).expect("keys");
+    let want: Vec<String> = find_order(&keys).into_iter().take(20).map(|i| cands.paths[i].clone()).collect();
+    assert_eq!(files(&c), want);
+    assert_ne!(files(&c), files(&u), "the calibrated pick moves the order");
+    assert!(c.results.iter().enumerate().all(|(i, x)| x.rank == i + 1));
+    // select = false keeps EB.8's order on a calibrated tree
+    assert_eq!(files(&ask(q, false)), files(&u));
+
+    // nothing matches: no seed, every key ties to degree, no row is kept
+    let none = ask("quagga zebra", true);
+    assert!(none.results.is_empty());
+    assert_eq!(none.absence.as_ref().map(|a| a.reason), Some("no_match"));
+    assert_eq!(sel(&none).2, "H10x");
+    let v = serde_json::to_value(&none).expect("json");
+    assert_eq!(v["selection"]["set"], "SELf2t");
+    assert_eq!(v["selection"]["source"], "calibrated");
+}

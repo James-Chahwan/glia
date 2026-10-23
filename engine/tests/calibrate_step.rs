@@ -8,6 +8,12 @@
 //! (`fusions::idr_at_parent`), so an id the commit itself defines routes
 //! nowhere, and a tree with no git (the synthetic fixtures) routes nothing:
 //! each LX[IDR, X] then scores exactly as X.
+//!
+//! EC.13: the default groups gain `find` (set SELf2t, 11 candidates, on the
+//! find shape: each test commit's subject seeds the text's top files); the
+//! record sorts it first. The replay's routes are quiet: one `[idr] replay
+//! surface=calibrate ..` line per calibration replaces the per-commit
+//! `[ids]` / `[id-defs]` / `[id-ns]` / `[id-paths]` / `[idr]` lines.
 
 mod git_fixture;
 
@@ -22,8 +28,8 @@ use glia_engine::calibrate::record::{
 };
 use glia_engine::calibrate::{
     COCHANGE_CANDIDATES, COCHANGE_FALLBACK, CalibrateOptions, CalibrationSummary,
-    REVIEW_CANDIDATES, REVIEW_FALLBACK, STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK, SetSummary,
-    Shape, bootstrap_ci, calibrate, calibrate_snapshot, select,
+    FIND_CANDIDATES, FIND_FALLBACK, REVIEW_CANDIDATES, REVIEW_FALLBACK, STRUCTURE_CANDIDATES,
+    STRUCTURE_FALLBACK, SetSummary, Shape, bootstrap_ci, calibrate, calibrate_snapshot, select,
 };
 
 /// Files per cluster.
@@ -155,12 +161,14 @@ fn calibrate_writes_a_loaded_record_and_measures_the_selection() {
         .iter()
         .map(|r| (r.set.clone(), r.shape.clone()))
         .collect();
-    // EC.11: the default groups are `structure` then `review`; the record
-    // sorts its rows by set name.
-    let want: Vec<(String, String)> = ["SELh0", "SELs0", "SELt2"]
-        .iter()
-        .flat_map(|set| ["k1", "k2", "k3", "half"].map(|sh| (set.to_string(), sh.to_string())))
-        .collect();
+    // EC.11 / EC.13: the default groups are `structure`, `review`, `find`;
+    // the record sorts its rows by set name (SELf2t first, its one shape).
+    let mut want: Vec<(String, String)> = vec![("SELf2t".to_string(), "find".to_string())];
+    want.extend(
+        ["SELh0", "SELs0", "SELt2"]
+            .iter()
+            .flat_map(|set| ["k1", "k2", "k3", "half"].map(|sh| (set.to_string(), sh.to_string()))),
+    );
     assert_eq!(rows, want);
     assert_eq!(
         s.sets
@@ -265,7 +273,7 @@ fn no_test_commit_writes_zero_query_rows() {
     let r = build(&root);
     let s = calibrate(&root, &r.merged, &CalibrateOptions::default()).expect("calibrate");
     assert_eq!(s.test_commits, 0);
-    assert_eq!(s.sets.len(), 12);
+    assert_eq!(s.sets.len(), 13);
     assert!(
         s.sets
             .iter()
@@ -539,4 +547,158 @@ fn idr_routes_each_test_commit_at_its_parent() {
     };
     assert!(!cal.sets.is_empty());
     assert!(cal.sets.iter().all(|r| r.candidates == REVIEW_CANDIDATES));
+}
+
+
+/// Two clusters of `N` stand-alone modules (no import, no call): a find
+/// query's PPR stays on its seed files, so only the text and the co-change
+/// of its top files rank.
+fn isolated(root: &Path) {
+    for c in ["alpha", "zeta"] {
+        write(root, &format!("{c}/__init__.py"), "");
+        for i in 0..N {
+            write(root, &cluster_path(c, i), &format!("def {c}{i:02}_f():\n    return {i}\n"));
+        }
+    }
+}
+
+/// EC.13: with commit messages, the `find` group writes one SELf2t row on the
+/// find shape (each test commit's subject is the query; its text's top files
+/// seed PX1 / PXT / C0x), over the 11 candidates in rank_eval's order. The
+/// subjects name only their cluster ([`text_history`]), so the text alone
+/// ranks a cluster's busiest files; the co-change of its top files (H10x)
+/// finds the window and is the calibrated pick, above the fallback
+/// LX[IDR,T1s] (scored only). The pick is what `select` reads for
+/// find_files.
+#[test]
+fn find_selection_calibrates_on_messages() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("modules");
+    isolated(&root);
+    text_history(&root);
+    let r = build(&root);
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["find"];
+    let s = calibrate(&root, &r.merged, &opts).expect("calibrate");
+    let rows: Vec<(&str, &str)> = s.sets.iter().map(|x| (x.set.as_str(), x.shape.as_str())).collect();
+    assert_eq!(rows, [("SELf2t", "find")]);
+    let f = row(&s, "SELf2t", "find");
+    assert_eq!(f.fallback, FIND_FALLBACK);
+    assert_eq!(f.test_commits, COMMITS);
+    assert_eq!(f.queries as usize, COMMITS, "one find query per test commit");
+    assert!(FIND_CANDIDATES.contains(&f.pick.as_str()), "{f:?}");
+    assert_eq!(f.pick, "H10x", "co-change from the text's top files: {f:?}");
+    assert!(f.selection_recall10 >= f.fallback_recall10, "{f:?}");
+    assert!(f.selection_recall10 > 0.0, "{f:?}");
+    let CalibrationRead::Loaded(cal) = read_calibration(&root) else {
+        panic!("record not loaded");
+    };
+    assert_eq!(cal.sets.len(), 1);
+    let rec = &cal.sets[0];
+    assert_eq!(rec.candidates, FIND_CANDIDATES);
+    assert_eq!(rec.recall10.len(), 11);
+    // no git: IDR routes nothing, so each LX[IDR, X] scores exactly as X
+    let sum = |n: &str| {
+        let i = rec.candidates.iter().position(|c| c == n).unwrap_or_else(|| panic!("{n}"));
+        rec.recall10[i].to_bits()
+    };
+    assert_eq!(sum("LX[IDR,H18x]"), sum("H18x"));
+    assert_eq!(sum("LX[IDR,H9x25T]"), sum("H9x25T"));
+    assert_eq!(sum("LX[IDR,C0x,PXT]"), sum("H10x"));
+    let sel = select(
+        &CalibrationRead::Loaded(cal.clone()),
+        "SELf2t",
+        Shape::Find,
+        &FIND_CANDIDATES,
+        FIND_FALLBACK,
+    );
+    assert_eq!((sel.pick.as_str(), sel.source), (f.pick.as_str(), "calibrated"));
+
+    // Without the messages there is no text, hence no seed: every candidate
+    // ranks by degree and the rows are still written.
+    let snap = read_history(&root).expect("snapshot");
+    let (_, bare) = calibrate_snapshot(&r.merged, &root, &snap, None, &opts).expect("bare");
+    assert_eq!(bare.sets.len(), 1);
+    assert!(f.selection_recall10 > bare.sets[0].selection_recall10, "{f:?} vs {:?}", bare.sets[0]);
+}
+
+const CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_IDR_CHILD";
+
+/// The git tree of `idr_routes_each_test_commit_at_its_parent` with its
+/// snapshot: two commits, the second's subject naming T012.
+fn idr_tree() -> (git_fixture::GitRepo, String, String) {
+    let g = git_fixture::GitRepo::init();
+    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill()\n");
+    g.write("pkg/b.py", "def bill():\n    return 1\n");
+    g.write("pkg/c.py", "def other():\n    return 2\n");
+    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n");
+    let first = g.commit("initial skeleton");
+    g.write("pkg/b.py", "def bill():\n    return 3\n");
+    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n");
+    let second = g.commit("T012 billing export");
+    (g, first, second)
+}
+
+/// Child half of `replay_routes_print_one_aggregate_idr_line`: calibrates
+/// [`CHILD_ENV`]'s tree over `review` and `find`; a no-op in a normal run.
+#[test]
+fn child_calibrate_idr() {
+    if let Ok(dir) = std::env::var(CHILD_ENV) {
+        let root = PathBuf::from(dir);
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8")).expect("build");
+        let mut opts = CalibrateOptions::default();
+        opts.groups = vec!["review", "find"];
+        calibrate(&root, &built.merged, &opts).expect("calibrate");
+    }
+}
+
+/// EC.13 (routed from EC.12): the replay routes each test commit's subject
+/// through a quiet side, so no per-commit `[idr] repo=..`, `[ids] vocab`,
+/// `[id-defs]`, `[id-ns]` or `[id-paths]` line prints; one `[idr] replay
+/// surface=calibrate ..` line does, after the replay. Here the newer commit's
+/// T012 resolves at its parent and the root commit has no parent.
+#[test]
+fn replay_routes_print_one_aggregate_idr_line() {
+    let (g, first, second) = idr_tree();
+    let files = |ps: &[&str]| -> Vec<HistoryFile> {
+        ps.iter()
+            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .collect()
+    };
+    let commits = vec![
+        HistoryCommit { c: second.clone(), t: 1_700_000_100, files: files(&["pkg/a.py", "pkg/b.py"]) },
+        HistoryCommit { c: first.clone(), t: 1_700_000_000, files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]) },
+    ];
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let messages = vec![
+        msg(&second, 1_700_000_100, "T012 billing export"),
+        msg(&first, 1_700_000_000, "initial skeleton"),
+    ];
+    let meta = HistoryMeta::new(second.clone(), 2, None, String::new());
+    write_history_with_messages(g.root(), meta, &commits, &[], Some(&messages)).expect("history");
+
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "child_calibrate_idr", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, g.root())
+        .output()
+        .expect("re-run the test binary");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "child failed: {stderr}");
+    let lines = |p: &str| stderr.lines().filter(|l| l.starts_with(p)).collect::<Vec<_>>();
+    let agg = lines("[idr] replay ");
+    assert_eq!(agg.len(), 1, "one aggregate line: {stderr}");
+    eprintln!("{}", agg[0]);
+    assert!(
+        agg[0].starts_with("[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="),
+        "{}",
+        agg[0]
+    );
+    for quiet in ["[idr] repo=", "[ids] vocab", "[id-defs]", "[id-ns]", "[id-paths]"] {
+        assert!(lines(quiet).is_empty(), "{quiet} printed by the replay: {stderr}");
+    }
+    let find = lines("[calibrate] set=SELf2t shape=find candidates=11 ");
+    assert_eq!(find.len(), 1, "{stderr}");
+    eprintln!("{}", find[0]);
+    assert_eq!(lines("[calibrate] idr unavailable commits=1").len(), 1, "{stderr}");
 }

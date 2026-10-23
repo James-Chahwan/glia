@@ -47,8 +47,8 @@ use crate::intent::text::Candidates;
 use crate::rank::RankCache;
 
 /// The candidate groups a default run replays: every group `sets::specs`
-/// registers (`sets::GROUPS`; EC.13 appends `find` there).
-pub const DEFAULT_GROUPS: [&str; 2] = super::sets::GROUPS;
+/// registers (`sets::GROUPS`: `structure`, `review`, `find`).
+pub const DEFAULT_GROUPS: [&str; 3] = super::sets::GROUPS;
 
 /// rank_eval's bootstrap resamples (`--boot`'s default).
 pub const BOOTSTRAP_RESAMPLES: usize = 2000;

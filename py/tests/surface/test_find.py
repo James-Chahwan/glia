@@ -142,7 +142,13 @@ def main() -> int:
         a, err = stderr_of(lambda: g.find_files("T012 helper"))
         c.check("find_files marker", "[find-files] repo=shop surface=py fusion=LX[IDR,T1s] ids=1 idr_files=1 "
                 "text=absent text_files=0 rows=1" in err, err[-600:])
-        c.check("find_files -> dict", type(a) is dict and list(a) == ["results", "absence"], a)
+        c.check("find_files -> dict", type(a) is dict and list(a) == ["results", "absence", "selection"], a)
+        c.check("find_files selection (EC.13: no record, SELf2t's fallback)",
+                type(a) is dict and a.get("selection") == {"set": "SELf2t", "shape": "find", "pick": "LX[IDR,T1s]",
+                                                           "source": "fallback", "reason": "absent", "test_commits": 0},
+                type(a) is dict and a.get("selection"))
+        c.check("[select] marker", "[select] surface=find_files set=SELf2t shape=find pick=LX[IDR,T1s] source=fallback" in err,
+                err[-600:])
         rows = a["results"] if type(a) is dict else []
         c.check("find_files row keys", rows and list(rows[0]) == FILE_KEYS, rows[:1])
         c.check("find_files T012 file first", rows and (rows[0]["rank"], rows[0]["file"], rows[0]["ids"])

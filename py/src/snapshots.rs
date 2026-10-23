@@ -599,13 +599,19 @@ mod tests {
         assert_eq!(v["commits"], 30);
         assert_eq!(v["test_commits"], 10, "max_commits reaches the replay");
         let sets = v["sets"].as_array().expect("sets");
-        assert_eq!(sets.len(), 12, "default groups structure + review (EC.11)");
+        assert_eq!(sets.len(), 13, "default groups structure + review (EC.11) + find (EC.13)");
+        // EC.13: the record sorts SELf2t (one find query per test commit) first
         assert_eq!(
             (sets[0]["set"].as_str(), sets[0]["shape"].as_str()),
+            (Some("SELf2t"), Some("find"))
+        );
+        assert_eq!(sets[0]["queries"], 10);
+        assert_eq!(
+            (sets[1]["set"].as_str(), sets[1]["shape"].as_str()),
             (Some("SELh0"), Some("k1"))
         );
         assert_eq!(
-            sets[0]["queries"], 20,
+            sets[1]["queries"], 20,
             "max_seeds reaches the replay: 2 per test commit"
         );
         assert!(glia_engine::calibrate::record::calibration_dir(&top).is_dir());

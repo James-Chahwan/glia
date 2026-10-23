@@ -176,7 +176,7 @@ def check_history_calibrate(c: Checks, top: pathlib.Path, tmp: str) -> None:
     c.check("calibration keys in field order", type(s) is dict and list(s) == CALIBRATION_KEYS,
             type(s) is dict and list(s))
     c.check("one row per (set, shape)",
-            type(s) is dict and [(r.get("set"), r.get("shape")) for r in s.get("sets", [])][:1] == [("SELh0", "k1")],
+            type(s) is dict and [(r.get("set"), r.get("shape")) for r in s.get("sets", [])][:2] == [("SELf2t", "find"), ("SELh0", "k1")],
             s)
     c.check("record written", record.is_dir())
     c.check("fired_on marker", "[calibrate] done surface=pyo3 sets=" in err, err[-400:])

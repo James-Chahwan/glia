@@ -529,6 +529,8 @@ fn calibrate_writes_the_record_and_prints_each_pick() {
     assert!(stdout.contains("SELs0 half: pick "), "{stdout}");
     // EC.11: the default groups include `review` (set SELt2, EC.12).
     assert!(stdout.contains("SELt2 k1: pick "), "{stdout}");
+    // EC.13: and `find` (set SELf2t, the find shape).
+    assert!(stdout.contains("SELf2t find: pick "), "{stdout}");
     assert!(stdout.contains(" queries (online recall@10 "), "{stdout}");
     assert!(
         stdout.lines().last().is_some_and(|l| l.starts_with("wrote ")
@@ -542,7 +544,7 @@ fn calibrate_writes_the_record_and_prints_each_pick() {
     eprintln!("{marker}");
     assert!(
         marker.starts_with(&format!(
-            "[calibrate] done surface=cli sets=12 test_commits={CAL_COMMITS} ms="
+            "[calibrate] done surface=cli sets=13 test_commits={CAL_COMMITS} ms="
         )),
         "{marker}"
     );

@@ -15,7 +15,11 @@
 //! (4) no snapshot and no id: a FACT `no_match` absence naming both causes,
 //!     no caveats; a snapshot whose messages do not match says so;
 //! (5) two repos: an error;
-//! (6) two builds give the same answer, byte for byte.
+//! (6) two builds give the same answer, byte for byte;
+//! (7) EC.13: the answer carries its `selection` (set SELf2t, shape `find`):
+//!     with no calibration record the fallback LX[IDR,T1s] (`absent`), rows
+//!     unchanged; `select = false` is the same order as an explicit choice;
+//!     the JSON gains `selection` after `absence`.
 
 mod git_fixture;
 
@@ -251,4 +255,32 @@ fn the_working_tree_is_read_and_renames_are_not_folded() {
     let got = files(&a.results);
     assert!(!got.contains(&"src/g.rs") && !got.contains(&"src/f.rs"), "{got:?}");
     assert!(got.contains(&"src/e.rs"), "{got:?}");
+}
+
+#[test]
+fn the_answer_carries_its_selection() {
+    let repo = fixture();
+    snapshot(&repo);
+    let b = build(&repo);
+    let a = ask(&b, "T012 export");
+    let s = a.selection.as_ref().expect("selection");
+    assert_eq!(
+        (s.set.as_str(), s.shape.as_str(), s.pick.as_str(), s.source, s.reason, s.test_commits),
+        ("SELf2t", "find", FIND_FILES_FUSION, "fallback", Some("absent"), 0)
+    );
+    let mut o = FindFilesOptions::default();
+    o.select = false;
+    let e = find_files(&b.merged, &b.repo_roots, "T012 export", &o).expect("answer");
+    let es = e.selection.as_ref().expect("selection");
+    assert_eq!((es.pick.as_str(), es.source, es.reason), (FIND_FILES_FUSION, "explicit", None));
+    assert_eq!(e.results, a.results);
+    let json = serde_json::to_string(&a).expect("json");
+    assert!(
+        json.contains("\"absence\":null,\"selection\":{\"set\":\"SELf2t\",\"shape\":\"find\",\"pick\":\"LX[IDR,T1s]\",\"source\":\"fallback\",\"reason\":\"absent\",\"test_commits\":0}}"),
+        "{json}"
+    );
+    // an absence carries it too
+    let none = ask(&b, "zebra quagga");
+    assert!(none.results.is_empty() && none.absence.is_some());
+    assert_eq!(none.selection.as_ref().map(|s| s.source), Some("fallback"));
 }

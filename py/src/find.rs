@@ -113,6 +113,12 @@ impl PyGraph {
     /// `no_match` dict whose `note` names what was missing (no id resolved,
     /// no history messages, no matching message). `top_k` keeps the first
     /// rows (0 keeps all). A graph of several repos raises ValueError.
+    ///
+    /// EC.13: with a calibration record (`history_calibrate`, group `find`)
+    /// the files follow the repo's `SELf2t` pick instead of `LX[IDR,T1s]`;
+    /// the dict gains `selection` `{set, shape, pick, source, reason,
+    /// test_commits}` (`source` `calibrated` or `fallback` with its
+    /// `reason`).
     #[pyo3(signature = (query, top_k=20))]
     fn find_files(&self, py: Python<'_>, query: &str, top_k: usize) -> PyResult<Py<PyAny>> {
         let answer = find_files_answer(
