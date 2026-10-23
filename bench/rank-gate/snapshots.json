@@ -1,0 +1,10 @@
+{
+ "snapshots": [
+  {"name": "glia", "url": "https://github.com/James-Chahwan/glia.git", "rev": "9837b1ff20bd17268db50190c91befa31227963e", "label": "glia", "public": true, "flags": ["--pre", "glia"]},
+  {"name": "shell", "url": "https://github.com/pop-os/shell.git", "rev": "9616931a2f8da33ff60d6332cbb1e4036c9ae2b3", "label": "shell", "public": true, "flags": []},
+  {"name": "websocket", "url": "https://github.com/gorilla/websocket.git", "rev": "dcea2f088ce10b1b0722c4eb995a4e145b5e9047", "label": "websocket", "public": true, "flags": []},
+  {"name": "samples", "url": "https://github.com/flutter/samples.git", "rev": "291ba126bfc1279d074b91e61ad44919768ebe7f", "label": "samples", "public": true, "flags": []},
+  {"name": "commons-lang", "url": "https://github.com/apache/commons-lang.git", "rev": "cee7cc6b6470362b12c134b4ed3f3b9bdcd4e465", "label": "commons-lang", "public": true, "flags": []},
+  {"name": "commons-io", "url": "https://github.com/apache/commons-io.git", "rev": "11f0abe7a3fb6954b2985ca4ab0697b2fb489e84", "label": "commons-io", "public": true, "flags": []}
+ ]
+}

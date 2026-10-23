@@ -45,6 +45,10 @@ WHEEL_GLOB = "glia_py-*.whl"
 # frozen W32 build.
 LEAP_PY = os.path.expanduser(os.environ.get("GLIA_LEAP_PY", "~/.venvs/glia-leap/bin/python"))
 CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
+# EG.3: a wave whose packet commits touch one of these runs the rank gate (scripts/rank-gate.sh check).
+RANKED_PATHS = ("core/", "code-domain/", "graph/", "parsers/", "engine/", "activation/",
+                "bench/rank-gate/", "scripts/rank-gate.sh")
+RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 snapshots); 2x that, at least 7200
 
 
 def sh(cmd, cwd=ROOT, timeout=1800):
@@ -199,6 +203,38 @@ def main():
     say(f"== {last}")
     if not last.startswith("[engram-export] check: ok"):
         gates.append("engram-export (out-of-workspace)")
+    # EG.3: the rank gate (scripts/rank-gate.sh, bench/rank-gate/), in every wave of a release that
+    # has bench/rank-gate/gate.json. A wave whose packet commits touch no ranked path skips it; the
+    # release's last close-out (nothing remaining) always checks, then requires full coverage.
+    # closeout's sh lets TimeoutExpired escape: catch it so a slow check is a failed gate, not a crash.
+    rank_gate_ok = False
+    if (ROOT / "bench/rank-gate/gate.json").exists():
+        touched = set()
+        for r in res:
+            for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
+                o, _ = sh(f"git show --name-only --format= {c}")
+                touched.update(l.strip() for l in o.splitlines() if l.strip())
+        ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
+        if remaining and not ranked:
+            say("== [rank-gate] check: skipped - wave touched no ranked path")
+        else:
+            try:
+                out, _ = sh("bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
+                (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+                last = (out.strip().splitlines() or [""])[-1]
+                say(f"== {last}")
+                rank_gate_ok = last.startswith("[rank-gate] check: ok")
+                if not rank_gate_ok:
+                    gates.append("rank gate")
+            except subprocess.TimeoutExpired:
+                say(f"== [rank-gate] check: FAILED (timeout after {RANK_GATE_TIMEOUT}s)")
+                gates.append("rank gate (timeout)")
+            if not remaining:
+                out, _ = sh("bash scripts/rank-gate.sh coverage 2>&1")
+                last = (out.strip().splitlines() or [""])[-1]
+                say(f"== {last}")
+                if not last.startswith("[rank-gate] coverage: ok"):
+                    gates.append("rank gate coverage")
 
     sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
@@ -349,6 +385,12 @@ def main():
         out, _ = sh("python3 dev-notes/wave-runner/usage_gate.py")
         say("== usage for the next wave: " + out.strip().replace("\n", " | "))
 
+    if not gates and rank_gate_ok:
+        # The ratchet: the green check's trims become baseline/current (only the moved ones).
+        out, rc = sh("bash scripts/rank-gate.sh ratchet 2>&1")
+        say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
+        if rc:
+            gates.append("rank gate ratchet")
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")
         sys.exit(1)
@@ -360,7 +402,9 @@ def main():
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)
     out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md bench/substrate-gap/legacy-latest.json "
                  "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/leap-051-corrections.json "
-                 + (f"dev-notes/leap-{release}-corrections.json " if release else "") + "dev-notes/wave-runner && "
+                 + (f"dev-notes/leap-{release}-corrections.json " if release else "")
+                 + ("bench/rank-gate/baseline/current " if (ROOT / "bench/rank-gate/baseline/current").exists() else "")
+                 + "dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
     # Build caches grow by tens of GB a wave (0.5.1: target/ reached 219G and engram-export/target 59G,
