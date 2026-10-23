@@ -217,3 +217,5 @@
 {"wave": "R053-W11", "event": "end", "pct": 3, "resets_at": 1792794600, "ts": 1792780433}
 {"wave": "W12", "event": "start", "pct": 3, "resets_at": 1792794600, "ts": 1792780484}
 {"wave": "R053-W12", "event": "end", "pct": 6, "resets_at": 1792794600, "ts": 1792787363}
+{"wave": "W13", "event": "start", "pct": 6, "resets_at": 1792794600, "ts": 1792787390}
+{"wave": "R053-W13", "event": "end", "pct": 8, "resets_at": 1792794600, "ts": 1792789967}
