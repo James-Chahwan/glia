@@ -41,6 +41,7 @@ pub mod community;
 pub mod cut;
 pub mod cycles;
 pub mod delta;
+pub mod fuse;
 pub mod hubs;
 pub mod linkpred;
 pub mod minhash;
