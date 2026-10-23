@@ -61,6 +61,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use glia_code_domain::snapshots::{
@@ -430,6 +431,7 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
         let at = format!("{sequence}/{}", step.name);
         (step.edit)(&repo);
         let seq = s.seq();
+        let rank_before = s.rank_cache();
         let u = match step.via {
             Via::Apply(paths) => {
                 let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
@@ -439,6 +441,13 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
         };
         let want_seq = if step.expect.noop { seq } else { seq + 1 };
         assert_eq!((u.seq, s.seq()), (want_seq, want_seq), "{at}: seq");
+        // EA.7: an update that changed the graph replaces the ranking cache
+        // (a fresh Arc, no index of the old graph); a noop keeps the same one.
+        assert_eq!(
+            Arc::ptr_eq(&rank_before, &s.rank_cache()),
+            step.expect.noop,
+            "{at}: the rank cache is kept exactly when the update is a noop"
+        );
         let clean = generate_one(root).expect("clean build");
         let out = tmp.path().join("out").join(format!("{}-{}", i + 1, step.name));
         assert_parity(&s, &clean, &out, &at);

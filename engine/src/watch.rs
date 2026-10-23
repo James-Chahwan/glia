@@ -84,7 +84,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::hash::Hasher as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use glia_code_domain::FileParse;
@@ -116,6 +116,7 @@ use crate::delta::{
 use crate::external::{RepoInputs, repo_inputs};
 use crate::extract::{GoModules, TS_FAMILY, detect_language};
 use crate::passes::GroupFill;
+use crate::rank::RankCache;
 use crate::walk::{
     FileStamp, Pending, Read, ReadRecord, RegionAnchor, Reuse, WalkPlan, WalkedDir, plan_walk,
     read_one, read_walk,
@@ -348,6 +349,12 @@ pub struct WatchSession {
     /// unchecked. Behind a lock because [`WatchSession::changed_paths`]
     /// takes `&self`.
     scanned_at: Mutex<SystemTime>,
+    /// 0.5.3 (EA.7): the ranking indexes of `result`'s graph (holder
+    /// `watch`), shared with every snapshot of it ([`WatchSession::rank_cache`]).
+    /// Built empty at open and replaced by a fresh one right after an update
+    /// swaps `result`, so it never serves an index of an older graph; a noop
+    /// update keeps it, since the graph did not change.
+    rank: Arc<RankCache>,
 }
 
 /// DC.7c: which update re-reads a watched input.
@@ -661,6 +668,7 @@ impl WatchSession {
             built.result.total_edges,
             timing::ms(started.elapsed())
         );
+        let rank = Arc::new(RankCache::new("watch", &built.result.repo_roots, &built.result.repo_labels));
         let mut session = Self {
             abs_roots: abs_roots(&root_path),
             index: index_of(&records),
@@ -681,6 +689,7 @@ impl WatchSession {
             watched: BTreeMap::new(),
             baselines: BTreeMap::new(),
             scanned_at: Mutex::new(scanned_at),
+            rank,
         };
         session.refresh_watch(Consumed::ALL, BTreeMap::new());
         Ok(session)
@@ -832,6 +841,7 @@ impl WatchSession {
         self.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
+        self.rank = Arc::new(RankCache::new("watch", &self.result.repo_roots, &self.result.repo_labels));
         crate::memory::release_freed_memory("watch_update");
         let stats = self.cache.stats;
         let update = WatchUpdate {
@@ -875,6 +885,15 @@ impl WatchSession {
     /// The session's current build.
     pub fn result(&self) -> &GenerateResult {
         &self.result
+    }
+
+    /// 0.5.3 (EA.7): the ranking cache of the current build (holder `watch`):
+    /// a ranked answer over [`Self::result`]'s graph, or over a clone of it
+    /// (pyo3's `snapshot()`), reuses its PPR, file and co-change indexes. A
+    /// new `Arc` after every update that changed the graph, the same one
+    /// after a noop.
+    pub fn rank_cache(&self) -> Arc<RankCache> {
+        Arc::clone(&self.rank)
     }
 
     /// Write the current build as the layout at `dir` (`persist::persist_result`,

@@ -7,13 +7,17 @@
 //! glia-py` covers them; the engine prints its `[pack] query=...` fired_on
 //! line once per call.
 
+use std::sync::Arc;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_core::NodeId;
 use glia_engine::pack::{Pack, PackArgs, pack, pack_ids};
+use glia_engine::rank::RankCache;
 use glia_graph::MergedGraph;
 
+use crate::blast::ranking_named;
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
@@ -53,6 +57,16 @@ fn pack_args(
     args.candidates = candidates;
     args.preset = preset;
     args.scope = scope;
+    Ok(args)
+}
+
+/// `args` ranked by the `ranking` / `cochange` keywords over the PyGraph's
+/// held ranking cache (EA.7: the neighbours' file order, co-change first
+/// where a history snapshot exists; the PPR index reused across calls). `Err`
+/// names an unknown `ranking`.
+fn ranked(mut args: PackArgs, ranking: &str, cochange: bool, cache: Arc<RankCache>) -> Result<PackArgs, String> {
+    args.ranking = ranking_named(ranking, cochange)?;
+    args.rank_cache = Some(cache);
     Ok(args)
 }
 
@@ -100,7 +114,14 @@ impl PyGraph {
     /// `line` 1-based and `fidelity` `full` / `preview` / `outline` /
     /// `qname`. `absence` is `None` when a node is packed, else a dict whose
     /// `reason` is `no_match` or `budget_too_small`.
-    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None))]
+    ///
+    /// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`, default `ppr`) and
+    /// `cochange` (default `True`: co-change from the history snapshot
+    /// first) order the neighbours by their files; with no snapshot the
+    /// order is the structural one. Any other `ranking` raises ValueError
+    /// before any work. The PPR and file indexes are held by this PyGraph
+    /// and reused by later calls.
+    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking="ppr", cochange=true))]
     #[allow(clippy::too_many_arguments)]
     fn pack(
         &self,
@@ -112,8 +133,11 @@ impl PyGraph {
         candidates: usize,
         preset: Option<String>,
         scope: Option<String>,
+        ranking: &str,
+        cochange: bool,
     ) -> PyResult<Py<PyAny>> {
         let args = pack_args(budget, bytes_per_token, seeds, candidates, preset, scope)
+            .and_then(|a| ranked(a, ranking, cochange, self.rank.clone()))
             .map_err(PyValueError::new_err)?;
         let p = pack_query(&self.merged, query, &args, self.parse_errors.len());
         to_py(py, serde_json::to_string(&p))
@@ -124,8 +148,9 @@ impl PyGraph {
     /// given, a repeated id counted once, one no graph holds skipped. Explicit
     /// seeds are kept whatever `scope` says; their neighbours are scoped. The
     /// dict's `query` names the first three seeds' qnames (`" +N more"`
-    /// after). No seed left is an absence `no_match`. Same dict as `pack`.
-    #[pyo3(signature = (node_ids, budget=8000, bytes_per_token=3.7, candidates=200, preset=None, scope=None))]
+    /// after). No seed left is an absence `no_match`. Same dict as `pack`,
+    /// and the same `ranking` / `cochange` keywords.
+    #[pyo3(signature = (node_ids, budget=8000, bytes_per_token=3.7, candidates=200, preset=None, scope=None, ranking="ppr", cochange=true))]
     #[allow(clippy::too_many_arguments)]
     fn pack_ids(
         &self,
@@ -136,9 +161,12 @@ impl PyGraph {
         candidates: usize,
         preset: Option<String>,
         scope: Option<String>,
+        ranking: &str,
+        cochange: bool,
     ) -> PyResult<Py<PyAny>> {
         let seeds = glia_engine::pack::DEFAULT_SEEDS;
         let args = pack_args(budget, bytes_per_token, seeds, candidates, preset, scope)
+            .and_then(|a| ranked(a, ranking, cochange, self.rank.clone()))
             .map_err(PyValueError::new_err)?;
         let p = pack_seeds(&self.merged, &node_ids, &args, self.parse_errors.len());
         to_py(py, serde_json::to_string(&p))
@@ -257,5 +285,20 @@ mod tests {
         assert!(none.nodes.is_empty() && none.text.is_empty());
         let missing = pack_seeds(m, &[1, 2], &args, 0);
         assert_eq!(missing.absence.map(|a| a.reason), Some("no_match"));
+
+        // EA.7: the ranking keywords and the held cache reach the engine;
+        // a pack through a held cache equals the engine's through the same
+        // cache, and a second call over it equals the first.
+        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let r = ranked(args.clone(), "bfs", false, held.clone()).expect("bfs");
+        assert_eq!(r.ranking.harness_name(), "B0");
+        assert!(r.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
+        let d = ranked(args.clone(), "ppr", true, held.clone()).expect("ppr");
+        let first = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
+        let again = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
+        assert_eq!(first, again, "a warm cache packs what a cold one did");
+        assert_eq!(first, ours, "no history snapshot: the held cache packs the 0.5.2 order");
+        let err = ranked(args.clone(), "x", true, held).expect_err("x is no ranking");
+        assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
     }
 }

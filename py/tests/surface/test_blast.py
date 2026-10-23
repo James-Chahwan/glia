@@ -14,6 +14,12 @@ KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file
 SEED_KEYS = ["query", "id", "qname", "kind", "file", "line", "linked_seeds"]
 
 
+def cache_marks(err: str, holder: str) -> list[str]:
+    """The `index=<hit|built>` of every `[rank-cache] holder=<holder>` line (EA.7)."""
+    return [w for line in err.splitlines() if line.startswith(f"[rank-cache] holder={holder} ")
+            for w in line.split() if w.startswith("index=")]
+
+
 def main() -> int:
     c = Checks("blast")
     with tempfile.TemporaryDirectory(prefix="glia-surface-blast-") as tmp:
@@ -21,7 +27,8 @@ def main() -> int:
         ids = node_ids(g)
         c.check("signature", params(rg.PyGraph.blast_radius) == [
             ("qnames", None), ("direction", "both"), ("depth", 4), ("top_k", None),
-            ("live_only", False), ("scope", None), ("collapse", True)], params(rg.PyGraph.blast_radius))
+            ("live_only", False), ("scope", None), ("collapse", True), ("ranking", "ppr"),
+            ("cochange", True), ("top_files", 10)], params(rg.PyGraph.blast_radius))
 
         a = g.blast_radius("app::helper")
         c.check("blast_radius -> dict", type(a) is dict, type(a))
@@ -68,6 +75,23 @@ def main() -> int:
         c.raises("qnames of the wrong type", TypeError, lambda: g.blast_radius(5), "str or a list of str")
         c.raises("bad direction", ValueError, lambda: g.blast_radius("app::helper", "sideways"),
                  "forward|backward|both")
+
+        # EA.7: the ranking keywords, last; the PyGraph holds its ranking
+        # indexes (built by the first call above), so a repeated call reads
+        # every index warm and answers identically.
+        c.raises("bad ranking", ValueError, lambda: g.blast_radius("app::helper", ranking="x"),
+                 "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
+        (first, _) = stderr_of(lambda: g.blast_radius("app::helper", top_k=50))
+        (again, err2) = stderr_of(lambda: g.blast_radius("app::helper", top_k=50))
+        c.check("a warm index answers identically", first == again)
+        c.check("[rank-cache] holder=pygraph .. index=hit on the second call",
+                cache_marks(err2, "pygraph") and set(cache_marks(err2, "pygraph")) == {"index=hit"},
+                (cache_marks(err1, "pygraph"), cache_marks(err2, "pygraph")))
+        c.check("top_files cuts files", len(g.blast_radius("app::helper", top_files=1)["files"]) <= 1)
+        for ranking in ("ppr-wide", "bfs"):
+            r = g.blast_radius("app::helper", ranking=ranking, cochange=False)
+            c.check(f"ranking={ranking} keeps the closure",
+                    sorted(x["qname"] for x in r["results"]) == sorted(x["qname"] for x in first["results"]))
     return c.done()
 
 

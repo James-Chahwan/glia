@@ -4,16 +4,17 @@
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
 //! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
-//! models_min_tier="fact")` builds the repo's working tree and the rev itself
-//! (LE.1b's graph delta), so it takes a path. `format="dict"` returns the
-//! engine's `Review` as a native dict (LD.2): `{base, counts, changed,
-//! impact, tests, edges, new_violations, resolved_violations, model_breaks,
-//! check_errors, blocking}` (plus `unanchored` when a rule checks nothing);
-//! `format="markdown"` returns the markdown PR report `glia review` prints,
-//! as a `str`. Any other `format`, a `models_min_tier` outside the engine's
-//! `contract_breaks::MODEL_MIN_TIERS`, or an engine `Err` (not a git work
-//! tree, an unknown rev, a failed build), raises `ValueError`; the format and
-//! the tier are checked before anything is built.
+//! models_min_tier="fact", ranking="ppr", cochange=True)` builds the repo's
+//! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
+//! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
+//! `{base, counts, changed, impact, tests, edges, new_violations,
+//! resolved_violations, model_breaks, check_errors, blocking}` (plus
+//! `unanchored` when a rule checks nothing); `format="markdown"` returns the
+//! markdown PR report `glia review` prints, as a `str`. Any other `format`, a
+//! `models_min_tier` outside the engine's `contract_breaks::MODEL_MIN_TIERS`,
+//! an unknown `ranking`, or an engine `Err` (not a git work tree, an unknown
+//! rev, a failed build), raises `ValueError`; the format, the tier and the
+//! ranking are checked before anything is built.
 //!
 //! Transport only: the review, the renderer, the location of every row and
 //! the `[review] base=..` marker live in the engine; this module adds one
@@ -30,6 +31,7 @@ use glia_engine::review::{
     ReviewArgs, render_markdown, review_vs_rev,
 };
 
+use crate::blast::ranking_named;
 use crate::convert::to_py;
 use crate::registry::ModuleFns;
 
@@ -44,13 +46,17 @@ enum Answer {
 }
 
 /// The engine's arguments from the keyword arguments; `Err` names a
-/// `models_min_tier` outside [`MODEL_MIN_TIERS`] in the engine's own words.
+/// `models_min_tier` outside [`MODEL_MIN_TIERS`] in the engine's own words,
+/// or an unknown `ranking` ([`ranking_named`], EA.7).
 fn engine_args(
     depth: usize,
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &str,
+    ranking: &str,
+    cochange: bool,
 ) -> Result<ReviewArgs, String> {
+    let ranking = ranking_named(ranking, cochange)?;
     let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
@@ -62,6 +68,7 @@ fn engine_args(
     args.max_tests = max_tests;
     args.max_impact = max_impact;
     args.models_min_tier = tier;
+    args.blast.ranking = ranking;
     Ok(args)
 }
 
@@ -88,6 +95,8 @@ struct Kw<'a> {
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &'a str,
+    ranking: &'a str,
+    cochange: bool,
 }
 
 impl Default for Kw<'_> {
@@ -100,6 +109,8 @@ impl Default for Kw<'_> {
             max_tests: DEFAULT_MAX_TESTS,
             max_impact: DEFAULT_MAX_IMPACT,
             models_min_tier: MODEL_MIN_TIERS[0],
+            ranking: "ppr",
+            cochange: true,
         }
     }
 }
@@ -108,7 +119,7 @@ impl Default for Kw<'_> {
 /// checked before anything is built.
 fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String> {
     let format = check_format(kw.format)?;
-    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier)?;
+    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier, kw.ranking, kw.cochange)?;
     let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
@@ -157,8 +168,13 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// layout. Raises ValueError on another `format`, a `models_min_tier` other
 /// than `"fact"` / `"derived"` (`unknown models min tier `x`: expected one of
 /// fact, derived`, before any build), or a git or build failure.
+///
+/// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`, default `ppr`) and
+/// `cochange` (default `True`: co-change from the working tree's history
+/// snapshot first) order the impact rows and fill `impact.files`, as in
+/// `blast_radius`; an unknown `ranking` raises ValueError before any build.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact"))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking="ppr", cochange=true))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -170,6 +186,8 @@ fn review_vs_rev_py(
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &str,
+    ranking: &str,
+    cochange: bool,
 ) -> PyResult<Py<PyAny>> {
     let kw = Kw {
         format,
@@ -178,6 +196,8 @@ fn review_vs_rev_py(
         max_tests,
         max_impact,
         models_min_tier,
+        ranking,
+        cochange,
     };
     let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
@@ -379,22 +399,32 @@ mod tests {
             err, "unknown models min tier `x`: expected one of fact, derived",
             "refused before any build: the path is never read"
         );
+        let bad = Kw {
+            ranking: "x",
+            ..Kw::default()
+        };
+        let err = rev_answer("/nonexistent/ea7", "HEAD", &bad).expect_err("bad ranking");
+        assert_eq!(
+            err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs",
+            "refused before any build: the path is never read"
+        );
     }
 
     #[test]
     fn engine_args_carry_the_keywords() {
-        let a = engine_args(2, 7, 9, "derived").expect("a tier");
+        let a = engine_args(2, 7, 9, "derived", "ppr-wide", false).expect("a tier");
         assert_eq!(
-            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier),
-            (2, 7, 9, "derived")
+            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking.harness_name()),
+            (2, 7, 9, "derived", "PT*")
         );
         let d = ReviewArgs::default();
         assert_eq!(d.blast.depth, 4, "the signature's depth default");
         assert_eq!(d.models_min_tier, "fact", "the signature's models_min_tier default");
+        assert_eq!(d.blast.ranking.harness_name(), "H10", "the signature's ranking / cochange defaults");
         let k = Kw::default();
         assert_eq!(
-            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier),
-            ("dict", 20, 4, 50, 50, "fact"),
+            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier, k.ranking, k.cochange),
+            ("dict", 20, 4, 50, 50, "fact", "ppr", true),
             "Kw::default is the pyo3 signature's"
         );
     }

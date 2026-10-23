@@ -7,7 +7,8 @@ incremental build held open over `glia_engine::watch` (DC.7a-c).
   reused}, groups_rebuilt, full_rebuild, total_nodes, total_edges, counts,
   nodes, edges, phase_ms}; an unchanged file keeps `seq`, with no rows.
 - `poll()` -> dict | None (None when quiet).
-- `snapshot()` -> PyGraph, independent of later updates.
+- `snapshot()` -> PyGraph, independent of later updates; it shares the
+  session's ranking cache (EA.7, `[rank-cache] holder=watch`).
 - `persist()` writes `<repo>/.glia/graph/` (manifest + parse cache);
   ValueError, writing nothing, for an `overlay=False` session.
 
@@ -31,6 +32,12 @@ A_PY = "def foo():\n    return bar()\n\ndef bar():\n    return 1\n"
 # One more function: the graph gains nodes, so a snapshot's count can tell.
 A_EDIT = A_PY + "\ndef baz():\n    return foo() + 2\n"
 A_POLL = A_EDIT + "\ndef qux():\n    return baz()\n"
+
+
+def cache_marks(err: str, holder: str) -> list[str]:
+    """The `index=<hit|built>` of every `[rank-cache] holder=<holder>` line (EA.7)."""
+    return [w for line in err.splitlines() if line.startswith(f"[rank-cache] holder={holder} ")
+            for w in line.split() if w.startswith("index=")]
 
 
 def watch_repo(tmp: str, name: str = "dc9app") -> str:
@@ -69,6 +76,17 @@ def main() -> int:
                 ((first.node_count(), first.edge_count()), (clean.node_count(), clean.edge_count())))
         c.check("snapshot is overlay-applied", first.overlay_applied is True, first.overlay_applied)
         n0 = first.node_count()
+        # EA.7: a snapshot shares the session's ranking cache (holder
+        # `watch`): two snapshots of one unchanged session answer
+        # blast_radius identically, the second reading the PPR index warm.
+        one, err1 = stderr_of(lambda: first.blast_radius("foo", top_k=50))
+        two, err2 = stderr_of(lambda: s.snapshot().blast_radius("foo", top_k=50))
+        c.check("two snapshots of one session answer blast_radius identically", one == two)
+        c.check("the first snapshot builds the session's index",
+                cache_marks(err1, "watch")[:1] == ["index=built"], cache_marks(err1, "watch"))
+        c.check("the second snapshot reads it: [rank-cache] holder=watch .. index=hit",
+                cache_marks(err2, "watch") and set(cache_marks(err2, "watch")) == {"index=hit"},
+                cache_marks(err2, "watch"))
         c.check("poll() is None when quiet", s.poll() is None)
 
         (pathlib.Path(repo) / "a.py").write_text(A_EDIT)

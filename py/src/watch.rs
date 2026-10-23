@@ -182,11 +182,16 @@ impl PyWatchSession {
 
     /// The session's current graph as an independent `PyGraph` (a copy:
     /// later updates do not change it), `overlay_applied` as the session's
-    /// `overlay`.
+    /// `overlay`. It shares the session's ranking cache (holder `watch`), so
+    /// a ranked answer on two snapshots of one unchanged session builds its
+    /// indexes once.
     fn snapshot(&self, py: Python<'_>) -> PyGraph {
         let session = &self.session;
         let result = py.detach(|| session.result().clone());
-        PyGraph::from_result(result).with_overlay_applied(self.overlay)
+        // The clone's graph is the session's, so the session's ranking
+        // indexes serve it (EA.7): a second snapshot's first ranked answer
+        // reads them warm.
+        PyGraph::from_result_with_rank(result, session.rank_cache()).with_overlay_applied(self.overlay)
     }
 
     /// Write the current graph as the repo's layout `<repo>/.glia/graph/`

@@ -54,6 +54,12 @@ UTIL_PY = '''def format_report():
 '''
 
 
+def cache_marks(err: str, holder: str) -> list[str]:
+    """The `index=<hit|built>` of every `[rank-cache] holder=<holder>` line (EA.7)."""
+    return [w for line in err.splitlines() if line.startswith(f"[rank-cache] holder={holder} ")
+            for w in line.split() if w.startswith("index=")]
+
+
 def fixture(top: pathlib.Path) -> None:
     files = {
         "shop/a.py": A_PY,
@@ -72,12 +78,14 @@ def main() -> int:
     c.check("pack signature",
             params(rg.PyGraph.pack)
             == [("query", None), ("budget", 8000), ("bytes_per_token", 3.7), ("seeds", 5),
-                ("candidates", 200), ("preset", None), ("scope", None)],
+                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", "ppr"),
+                ("cochange", True)],
             params(rg.PyGraph.pack))
     c.check("pack_ids signature",
             params(rg.PyGraph.pack_ids)
             == [("node_ids", None), ("budget", 8000), ("bytes_per_token", 3.7),
-                ("candidates", 200), ("preset", None), ("scope", None)],
+                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", "ppr"),
+                ("cochange", True)],
             params(rg.PyGraph.pack_ids))
     with tempfile.TemporaryDirectory(prefix="glia-surface-pack-") as tmp:
         top = pathlib.Path(tmp) / "shopapp"
@@ -117,6 +125,19 @@ def main() -> int:
                 == (price, "seed", "fact", None), seed)
         c.check("pack_ids query is the seed qnames", by_id.get("query") == "shop::a::price", by_id.get("query"))
         c.check("pack_ids marker", "[pack] query=shop::a::price seeds=1 " in err, err[-400:])
+
+        # EA.7: the ranking keywords; the PyGraph's held PPR index serves
+        # the second call, which packs what the first did.
+        c.raises("bad ranking", ValueError, lambda: g.pack("price", ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
+        c.raises("bad ranking (pack_ids)", ValueError, lambda: g.pack_ids([price], ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
+        again, err = stderr_of(lambda: g.pack("price", budget=100000))
+        c.check("a warm index packs identically", again == p)
+        c.check("[rank-cache] holder=pygraph .. index=hit",
+                cache_marks(err, "pygraph") and set(cache_marks(err, "pygraph")) == {"index=hit"},
+                cache_marks(err, "pygraph"))
+        c.check("ranking=bfs packs the seed first",
+                g.pack("price", budget=100000, ranking="bfs", cochange=False)["nodes"][0]["qname"]
+                == "shop::a::price")
 
         rate = g.pack("price", bytes_per_token=4.04, candidates=2, preset="repair", scope="shop")
         c.check("bytes_per_token rounded to tenths", rate["bytes_per_token"] == "4.0", rate["bytes_per_token"])

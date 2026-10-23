@@ -18,6 +18,7 @@
 //! covers them (see the crate doc).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -26,12 +27,40 @@ use glia_engine::BlastOptions;
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::diff_impact::{DiffImpact, diff_impact_from_delta, diff_impact_from_diff};
 use glia_engine::identity::Collapse;
+use glia_engine::rank::{RankCache, Ranking};
 use glia_graph::MergedGraph;
 
-use crate::blast::reach_named;
+use crate::blast::{ranking_named, reach_named};
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
+
+/// The 0.5.3 ranking keywords of both entry points (EA.7): the file ranking
+/// ([`ranking_named`]), how many files `impact.files` lists, and the held
+/// ranking cache (`PyGraph`'s; `None` for `diff_impact_vs_rev`, whose engine
+/// call builds one over the working tree's roots, EA.5).
+#[derive(Clone)]
+struct RankKw {
+    ranking: Ranking,
+    top_files: usize,
+    cache: Option<Arc<RankCache>>,
+}
+
+impl Default for RankKw {
+    /// The pyo3 signature's defaults: `ranking="ppr", cochange=True,
+    /// top_files=10`, no held cache.
+    fn default() -> Self {
+        let blast = BlastOptions::default();
+        RankKw { ranking: blast.ranking, top_files: blast.top_files, cache: None }
+    }
+}
+
+impl RankKw {
+    /// The keywords as given; `Err` names an unknown `ranking`.
+    fn named(ranking: &str, cochange: bool, top_files: usize, cache: Option<Arc<RankCache>>) -> Result<Self, String> {
+        Ok(RankKw { ranking: ranking_named(ranking, cochange)?, top_files, cache })
+    }
+}
 
 /// The engine's options from the keyword arguments both entry points take;
 /// `Err` names a bad `direction`. The caller sets the collapse's repo labels
@@ -42,6 +71,7 @@ fn options(
     top_k: Option<usize>,
     live_only: bool,
     scope: Option<&str>,
+    rank: &RankKw,
 ) -> Result<BlastOptions, String> {
     let mut opts = BlastOptions::default();
     opts.direction = reach_named(direction)?;
@@ -49,6 +79,9 @@ fn options(
     opts.top_k = top_k;
     opts.live_only = live_only;
     opts.scope = scope.map(str::to_string);
+    opts.ranking = rank.ranking;
+    opts.top_files = rank.top_files;
+    opts.rank_cache = rank.cache.clone();
     Ok(opts)
 }
 
@@ -71,14 +104,16 @@ fn diff_answer(
     top_k: Option<usize>,
     live_only: bool,
     scope: Option<&str>,
+    rank: &RankKw,
 ) -> Result<DiffImpact, String> {
-    let opts = labelled(options(direction, depth, top_k, live_only, scope)?, labels);
+    let opts = labelled(options(direction, depth, top_k, live_only, scope, rank)?, labels);
     Ok(diff_impact_from_diff(merged, diff_text, &opts))
 }
 
 /// The body of [`diff_impact_vs_rev_py`], minus pyo3: the engine's
 /// `diff_impact_vs_rev` in its two steps, so the radius gets the working
 /// tree's labels between them.
+#[allow(clippy::too_many_arguments)]
 fn rev_answer(
     repo_path: &str,
     base: &str,
@@ -87,8 +122,9 @@ fn rev_answer(
     top_k: Option<usize>,
     live_only: bool,
     scope: Option<&str>,
+    rank: &RankKw,
 ) -> Result<DiffImpact, String> {
-    let opts = options(direction, depth, top_k, live_only, scope)?;
+    let opts = options(direction, depth, top_k, live_only, scope, rank)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
     Ok(diff_impact_from_delta(&rev, &labelled(opts, &rev.after.repo_labels)))
 }
@@ -111,8 +147,12 @@ impl PyGraph {
     /// whose wave reached it first; `unresolved_diff_files` names the diff's
     /// files that place no node (a hunk that only deletes lines, a deleted
     /// file, an unparsed file). The edge lists are empty in this mode. Lines
-    /// are 1-based. Raises ValueError on a bad `direction`.
-    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None))]
+    /// are 1-based. `ranking`, `cochange` and `top_files` (0.5.3) order the
+    /// impact rows and fill `impact.files` as in `blast_radius`, over this
+    /// PyGraph's held ranking indexes. Raises ValueError on a bad `direction`
+    /// or `ranking`.
+    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking="ppr", cochange=true, top_files=10))]
+    #[allow(clippy::too_many_arguments)]
     fn diff_impact(
         &self,
         diff_text: &str,
@@ -121,8 +161,12 @@ impl PyGraph {
         top_k: Option<usize>,
         live_only: bool,
         scope: Option<&str>,
+        ranking: &str,
+        cochange: bool,
+        top_files: usize,
     ) -> PyResult<Py<PyAny>> {
-        let answer = diff_answer(&self.merged, &self.repo_labels, diff_text, direction, depth, top_k, live_only, scope)
+        let rank = RankKw::named(ranking, cochange, top_files, Some(self.rank.clone())).map_err(PyValueError::new_err)?;
+        let answer = diff_answer(&self.merged, &self.repo_labels, diff_text, direction, depth, top_k, live_only, scope, &rank)
             .map_err(PyValueError::new_err)?;
         // The token comes from `attach` (the GIL is already held), not a
         // parameter: the keyword list is the Python surface.
@@ -141,10 +185,13 @@ impl PyGraph {
 /// rows. Builds both sides itself and saves the parse-cache sidecar
 /// (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as
 /// `generate(incremental=True)` does, never a `.gmap` layout. Same keywords
-/// and dict as `PyGraph.diff_impact`; raises ValueError on a bad `direction`
-/// or a git or build failure.
+/// and dict as `PyGraph.diff_impact` (its ranking indexes built per call over
+/// the working tree's repo roots, so its history snapshot orders the impact);
+/// raises ValueError on a bad `direction` or `ranking` (before any build) or
+/// a git or build failure.
 #[pyfunction]
-#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None))]
+#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking="ppr", cochange=true, top_files=10))]
+#[allow(clippy::too_many_arguments)]
 fn diff_impact_vs_rev_py(
     repo_path: &str,
     base: &str,
@@ -153,8 +200,12 @@ fn diff_impact_vs_rev_py(
     top_k: Option<usize>,
     live_only: bool,
     scope: Option<&str>,
+    ranking: &str,
+    cochange: bool,
+    top_files: usize,
 ) -> PyResult<Py<PyAny>> {
-    let answer = rev_answer(repo_path, base, direction, depth, top_k, live_only, scope)
+    let rank = RankKw::named(ranking, cochange, top_files, None).map_err(PyValueError::new_err)?;
+    let answer = rev_answer(repo_path, base, direction, depth, top_k, live_only, scope, &rank)
         .map_err(PyValueError::new_err)?;
     Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
 }
@@ -249,7 +300,7 @@ mod tests {
     fn diff_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("diff");
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let a = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 4, None, false, None).expect("answer");
+        let a = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 4, None, false, None, &RankKw::default()).expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [
             "\"base\":",
@@ -274,14 +325,23 @@ mod tests {
                 ("shop::b::checkout".to_string(), 2, "shop::a::price".to_string()),
             ]
         );
-        let cut = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 1, None, false, None).expect("depth 1");
+        let cut = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 1, None, false, None, &RankKw::default()).expect("depth 1");
         assert_eq!(rows(&value(&cut)), [("shop::a::place".to_string(), 1, "shop::a::price".to_string())]);
-        let fwd = diff_answer(&built.merged, &built.repo_labels, DIFF, "forward", 4, None, false, None).expect("forward");
+        let fwd = diff_answer(&built.merged, &built.repo_labels, DIFF, "forward", 4, None, false, None, &RankKw::default()).expect("forward");
         assert!(fwd.impact.results.is_empty() && fwd.impact.absence.is_some());
-        let err = diff_answer(&built.merged, &built.repo_labels, DIFF, "sideways", 4, None, false, None).expect_err("bad direction");
+        let err = diff_answer(&built.merged, &built.repo_labels, DIFF, "sideways", 4, None, false, None, &RankKw::default()).expect_err("bad direction");
         assert!(err.contains("sideways"), "{err}");
-        let o = options("both", 2, Some(3), true, Some("shop")).expect("options");
+        let o = options("both", 2, Some(3), true, Some("shop"), &RankKw::default()).expect("options");
         assert_eq!((o.depth, o.top_k, o.live_only, o.scope.as_deref()), (2, Some(3), true, Some("shop")));
+        assert_eq!((o.ranking, o.top_files, o.rank_cache.is_none()), (Ranking::default(), 10, true));
+        // EA.7: the ranking keywords reach the engine's options.
+        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let rank = RankKw::named("bfs", false, 3, Some(held.clone())).expect("bfs");
+        let o = options("both", 2, None, false, None, &rank).expect("options");
+        assert_eq!((o.ranking.harness_name(), o.top_files), ("B0", 3));
+        assert!(o.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
+        let err = RankKw::named("x", true, 10, None).err().expect("x is no ranking");
+        assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
     }
 
     /// LE.2: the helper behind the module function `diff_impact_vs_rev`
@@ -297,7 +357,7 @@ mod tests {
         git(&top, &gitconfig, &["commit", "-q", "-m", "shop"]);
         std::fs::write(top.join("shop/a.py"), A_PY.replace("return o\n", "return o or 0\n")).expect("edit");
         let repo = top.to_str().expect("utf-8");
-        let a = rev_answer(repo, "HEAD", "backward", 4, None, false, None).expect("answer");
+        let a = rev_answer(repo, "HEAD", "backward", 4, None, false, None, &RankKw::default()).expect("answer");
         let v = value(&a);
         assert_eq!(v["base"], "HEAD");
         assert_eq!(
@@ -307,7 +367,7 @@ mod tests {
                 ("shop::b::checkout".to_string(), 2, "shop::a::price".to_string()),
             ]
         );
-        let err = rev_answer(repo, "no-such-rev", "both", 4, None, false, None).expect_err("unknown rev");
+        let err = rev_answer(repo, "no-such-rev", "both", 4, None, false, None, &RankKw::default()).expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
     }
 
@@ -351,7 +411,7 @@ mod tests {
         let repo = top.to_str().expect("utf-8");
 
         let built = glia_engine::generate_one(repo).expect("build");
-        let a = diff_answer(&built.merged, &built.repo_labels, &hunk, "both", 4, None, false, None).expect("answer");
+        let a = diff_answer(&built.merged, &built.repo_labels, &hunk, "both", 4, None, false, None, &RankKw::default()).expect("answer");
         assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
 
         let gitconfig = scratch.0.join("gitconfig");
@@ -360,7 +420,7 @@ mod tests {
         git(&top, &gitconfig, &["add", "-A"]);
         git(&top, &gitconfig, &["commit", "-q", "-m", "orders"]);
         std::fs::write(top.join("main.go"), format!("{}{added}{}", &main[..at], &main[at..])).expect("edit");
-        let a = rev_answer(repo, "HEAD", "both", 4, None, false, None).expect("answer");
+        let a = rev_answer(repo, "HEAD", "both", 4, None, false, None, &RankKw::default()).expect("answer");
         assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
     }
 }

@@ -5,6 +5,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use glia_engine::BlastOptions;
 use glia_engine::identity::Collapse;
+use glia_engine::rank::Ranking;
 use glia_graph::Reach;
 
 use crate::convert::to_py;
@@ -56,7 +57,19 @@ impl PyGraph {
     /// a build label). A seed in a class carries its `identity` too. Rows and
     /// seeds outside a class have no `identity` key. `collapse=False` is the
     /// per-member walk and rows.
-    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true))]
+    ///
+    /// `ranking` (0.5.3, EA.5 / EA.7; `ppr`, `ppr-wide` or `bfs`, default
+    /// `ppr`) is the structural file ranking that orders the rows by their
+    /// files, and `cochange` (default `True`) puts co-change from the history
+    /// snapshot (`glia history sync`, `.glia/history-snapshot/` under a repo
+    /// root) first, the structural ranking breaking its ties; with no
+    /// snapshot the order is the structural one. `files` lists the top
+    /// `top_files` ranked files. The rows' PPR `score`s never change with the
+    /// ranking. Any other `ranking` raises ValueError (``unknown ranking `x`:
+    /// expected one of ppr, ppr-wide, bfs``) before any work. The indexes
+    /// behind the ranking are held by this PyGraph and reused by later calls
+    /// (`[rank-cache] holder=pygraph .. index=hit`).
+    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking="ppr", cochange=true, top_files=10))]
     #[allow(clippy::too_many_arguments)]
     fn blast_radius(
         &self,
@@ -68,9 +81,16 @@ impl PyGraph {
         live_only: bool,
         scope: Option<&str>,
         collapse: bool,
+        ranking: &str,
+        cochange: bool,
+        top_files: usize,
     ) -> PyResult<Py<PyAny>> {
+        let ranking = ranking_named(ranking, cochange).map_err(PyValueError::new_err)?;
         let queries = seed_queries(qnames)?;
         let mut opts = BlastOptions::default();
+        opts.ranking = ranking;
+        opts.top_files = top_files;
+        opts.rank_cache = Some(self.rank.clone());
         opts.direction = reach_named(direction).map_err(PyValueError::new_err)?;
         opts.depth = depth;
         opts.top_k = top_k;
@@ -98,6 +118,15 @@ fn seed_queries(qnames: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     })
 }
 
+/// The `ranking` / `cochange` keyword arguments of every ranked answer
+/// (`blast_radius`, `diff_impact`, `diff_impact_vs_rev`, `review_vs_rev`,
+/// `pack`, `pack_ids`): `ranking` a structural base name, `cochange` whether
+/// co-change ranks first. `Err` is the engine's parse message (``unknown
+/// ranking `x`: expected one of ppr, ppr-wide, bfs``).
+pub(crate) fn ranking_named(ranking: &str, cochange: bool) -> Result<Ranking, String> {
+    Ranking::parse(ranking, cochange)
+}
+
 /// The `direction` argument: `forward` | `backward` | `both`. Shared with
 /// `diff_impact`, which takes the same keyword.
 pub(crate) fn reach_named(direction: &str) -> Result<Reach, String> {
@@ -106,5 +135,22 @@ pub(crate) fn reach_named(direction: &str) -> Result<Reach, String> {
         "backward" => Ok(Reach::Backward),
         "both" => Ok(Reach::Both),
         o => Err(format!("direction must be forward|backward|both, got `{o}`")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranking_names() {
+        assert_eq!(ranking_named("ppr", true).expect("ppr"), Ranking::default());
+        assert_eq!(ranking_named("ppr", false).expect("ppr"), Ranking::head());
+        assert_eq!(ranking_named("ppr-wide", true).expect("wide").harness_name(), "H10[PT*]");
+        assert_eq!(ranking_named("bfs", false).expect("bfs").harness_name(), "B0");
+        assert_eq!(
+            ranking_named("x", true).expect_err("x is no ranking"),
+            "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
     }
 }

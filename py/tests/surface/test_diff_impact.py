@@ -37,7 +37,8 @@ DELETION = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,3 +1,2 @@\n"
             " def price(o):\n"
             "-    o = o\n"
             "     return o\n")
-KW = [("direction", "both"), ("depth", 4), ("top_k", None), ("live_only", False), ("scope", None)]
+KW = [("direction", "both"), ("depth", 4), ("top_k", None), ("live_only", False), ("scope", None),
+      ("ranking", "ppr"), ("cochange", True), ("top_files", 10)]
 DIFF_MARKER = "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 REV_MARKER = "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 
@@ -106,6 +107,12 @@ def main() -> int:
                 and (gone.get("impact", {}).get("absence") or {}).get("reason") == "no_match", gone)
         c.raises("bad direction raises", ValueError, lambda: g.diff_impact(DIFF, direction="sideways"),
                  "sideways")
+        c.raises("bad ranking raises", ValueError, lambda: g.diff_impact(DIFF, ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
+        c.check("top_files cuts impact.files",
+                len(g.diff_impact(DIFF, direction="backward", top_files=1)["impact"]["files"]) <= 1)
+        c.check("ranking=bfs keeps the rows' set",
+                sorted(rows(g.diff_impact(DIFF, direction="backward", ranking="bfs", cochange=False)))
+                == sorted(ROWS))
 
         (top / "shop/a.py").write_text(A_PY)
         git(top, "init", "-q")
@@ -124,6 +131,8 @@ def main() -> int:
         c.check("its caller is still in radius", (CHECKOUT, 1, PLACE) in rows(lost), rows(lost))
         c.raises("unknown rev raises", ValueError, lambda: rg.diff_impact_vs_rev(str(top), base="no-such-rev"),
                  "no-such-rev")
+        c.raises("bad ranking raises before any build", ValueError,
+                 lambda: rg.diff_impact_vs_rev(str(pathlib.Path(tmp) / "nowhere"), ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
     return c.done()
 
 

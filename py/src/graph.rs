@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 use glia_core::{CellPayload, NodeId};
 use glia_engine::GenerateResult;
 use glia_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
+use glia_engine::rank::RankCache;
 use glia_graph::MergedGraph;
 use glia_store::write_merged_sharded_for_repo;
 
@@ -56,6 +57,15 @@ pub(crate) struct PyGraph {
     /// DECISION, CONV, VECTOR), none of which it reads; a method that changes
     /// what it does read must reset this cell.
     live: OnceLock<HashSet<NodeId>>,
+    /// 0.5.3 (EA.7): the ranking indexes of this graph (holder `pygraph`):
+    /// the PPR indexes, the candidate file space and the co-change index of
+    /// the history snapshots under `repo_roots`, built on a ranked answer's
+    /// first need and reused by every later `blast_radius` / `diff_impact` /
+    /// `pack` / `pack_ids` call. Valid for this PyGraph's merged graph:
+    /// `set_cell` / `remove_cell` change no edge, and `RankCache::guard`,
+    /// which every ranked answer calls first, resets it if the graph's shape
+    /// ever moves. A `WatchSession.snapshot()` shares the session's cache.
+    pub(crate) rank: Arc<RankCache>,
     /// Declared LAST: fields drop in declaration order, so this guard's drop
     /// runs once the graph above is freed and hands that memory back (DE.10).
     /// A field added to `PyGraph` goes above it.
@@ -94,6 +104,14 @@ impl PyGraph {
     /// The one constructor: every field from an engine result, fresh or
     /// loaded (`glia_engine::persist::load_layout`), overlay applied.
     pub(crate) fn from_result(r: GenerateResult) -> Self {
+        let rank = Arc::new(RankCache::new("pygraph", &r.repo_roots, &r.repo_labels));
+        Self::from_result_with_rank(r, rank)
+    }
+
+    /// [`Self::from_result`] holding a ranking cache built for `r`'s graph
+    /// elsewhere: a `WatchSession.snapshot()` passes the session's, whose
+    /// indexes are valid for the cloned graph (EA.7).
+    pub(crate) fn from_result_with_rank(r: GenerateResult, rank: Arc<RankCache>) -> Self {
         Self {
             merged: r.merged,
             parse_errors: r.parse_errors,
@@ -101,6 +119,7 @@ impl PyGraph {
             repo_roots: r.repo_roots,
             overlay_applied: true,
             live: OnceLock::new(),
+            rank,
             _trim: TrimOnDrop,
         }
     }
