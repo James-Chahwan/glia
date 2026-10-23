@@ -4,6 +4,13 @@
 //! ranking of SELh0 (co-change first) or SELs0 (`cochange_first` off) for the
 //! shape of the seeds' distinct files; an explicit ranking (`select = false`)
 //! is never overridden, and with no record the rows are EA's.
+//!
+//! EC.12: review's intent selection reads set SELt2 (SELt's ten fusions plus
+//! the four id-routed ones); a record written before EC.12 holds SELt rows
+//! only, so review answers its fallback with reason `no_set` until the repo
+//! is recalibrated.
+
+mod git_fixture;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -352,4 +359,75 @@ fn pack_applies_the_calibrated_pick() {
     let k2 = glia_engine::pack::pack_ids(&r.merged, &ids, &args);
     assert_eq!(pack_summary(&k2).1, "k2");
     assert_eq!(pack_summary(&k2).2, pick_of("SELh0", "k2"));
+}
+
+/// EC.12: `review --title` selects from SELt2: with no record its fallback
+/// (`absent`); calibrated, SELt2's pick (or its fallback when the replay
+/// refused the set); a record whose review rows are pre-EC.12 SELt answers
+/// the fallback with `no_set`.
+#[test]
+fn review_selects_from_selt2() {
+    use glia_code_domain::snapshots::read_history;
+    use glia_engine::calibrate::{CalibrationMeta, set_digest, write_calibration};
+    use glia_engine::review::{ReviewArgs, review_vs_rev};
+
+    let g = git_fixture::GitRepo::init();
+    repo(g.root());
+    g.commit("clean");
+    history(g.root());
+    let built = glia_engine::generate_one(g.path()).expect("build");
+    // The PR: an edit, a rename and a deletion in the zeta cluster.
+    g.write("zeta/zeta03.py", "from hub import h, g03\n\ndef zeta03_f():\n    h()\n    return 33\n");
+    g.git_mv("zeta/zeta04.py", "zeta/zeta24.py");
+    g.remove("zeta/zeta05.py");
+    let mut args = ReviewArgs::default();
+    args.title = Some("zeta cluster work".into());
+    let sel = |r: &glia_engine::review::Review| {
+        let s = r.selection_intent.as_ref().expect("selection_intent");
+        (s.set.clone(), s.pick.clone(), s.source, s.reason)
+    };
+
+    let u = review_vs_rev(g.path(), "HEAD", &args).expect("review");
+    assert_eq!(sel(&u), ("SELt2".into(), "LX[IDR,P1]".into(), "fallback", Some("absent")));
+    let shape = u.selection_intent.as_ref().map(|s| s.shape.clone()).expect("shape");
+
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["review"];
+    calibrate(g.root(), &built.merged, &opts).expect("calibrate");
+    let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
+        panic!("record not loaded");
+    };
+    let k1 = cal.sets.iter().find(|r| r.set == "SELt2" && r.shape == shape).expect("SELt2 row");
+    let c = review_vs_rev(g.path(), "HEAD", &args).expect("review");
+    let (set, pick, source, reason) = sel(&c);
+    assert_eq!((set.as_str(), pick.as_str()), ("SELt2", k1.pick.as_str()));
+    if k1.candidates.contains(&k1.pick) {
+        assert_eq!((source, reason), ("calibrated", None));
+    } else {
+        assert_eq!((pick.as_str(), source, reason), ("LX[IDR,P1]", "fallback", Some("refused")));
+    }
+
+    // A pre-EC.12 record: its review rows are set SELt over SELt's ten.
+    let mut old_cal = cal.clone();
+    for r in &mut old_cal.sets {
+        r.set = "SELt".into();
+        r.candidates.truncate(10);
+        r.recall10.truncate(10);
+        r.mrr.truncate(10);
+        let names: Vec<&str> = r.candidates.iter().map(String::as_str).collect();
+        r.digest = set_digest(&names);
+    }
+    let snap = read_history(g.root()).expect("snapshot");
+    let meta = CalibrationMeta::new(
+        snap.meta.head.clone(),
+        snap.meta.data_hash.clone(),
+        snap.meta.messages_hash.clone(),
+    );
+    write_calibration(g.root(), meta, &old_cal).expect("write");
+    let CalibrationRead::Loaded(reread) = read_calibration(g.root()) else {
+        panic!("old record not loaded");
+    };
+    assert!(reread.sets.iter().all(|r| r.set == "SELt" && r.candidates.len() == 10));
+    let old = review_vs_rev(g.path(), "HEAD", &args).expect("review");
+    assert_eq!(sel(&old), ("SELt2".into(), "LX[IDR,P1]".into(), "fallback", Some("no_set")));
 }

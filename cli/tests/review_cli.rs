@@ -678,7 +678,7 @@ fn title_routes_its_ids_into_the_intent() {
     assert_eq!(v["intent"]["files"][0]["file"], "tests/test_pay.py", "{v}");
     assert_eq!(v["intent"]["files"][0]["in_impact"], true, "{v}");
     assert_eq!(v["intent"]["files"][0]["idr"].as_f64(), Some(1.0), "{v}");
-    // EC.11: no calibration record: set SELt's fallback, EB.7's order.
+    // EC.11: no calibration record: set SELt2's fallback (EC.12), EB.7's order.
     assert_eq!(
         (
             v["selection_intent"]["set"].as_str(),
@@ -686,13 +686,13 @@ fn title_routes_its_ids_into_the_intent() {
             v["selection_intent"]["source"].as_str(),
             v["selection_intent"]["reason"].as_str()
         ),
-        (Some("SELt"), Some("LX[IDR,P1]"), Some("fallback"), Some("absent")),
+        (Some("SELt2"), Some("LX[IDR,P1]"), Some("fallback"), Some("absent")),
         "{v}"
     );
     let err = stderr(&o);
     assert!(
         err.lines().any(|l| l.starts_with(
-            "[select] surface=review_intent set=SELt shape=k2 pick=LX[IDR,P1] source=fallback reason=absent "
+            "[select] surface=review_intent set=SELt2 shape=k2 pick=LX[IDR,P1] source=fallback reason=absent "
         )),
         "{}",
         show(&o)

@@ -148,7 +148,7 @@
 //!   (`rank::rank_files` under `Ranking::head`, over the review's RankCache).
 //!
 //! `intent.files` are the candidates with any signal in the intent fusion's
-//! order, at most `max_impact`. The fusion (EC.11) is set `SELt`'s pick for
+//! order, at most `max_impact`. The fusion (EC.11) is set `SELt2`'s pick (EC.12) for
 //! the shape of the changed files (`Shape::from_seed_files`) from the repo's
 //! `.glia/calibration-snapshot/` (`glia history calibrate`), ranked through
 //! the same bank the replay ranks (`calibrate::fusions::seeded_keys`, the
@@ -240,7 +240,7 @@
 //! position moved), after the intent's own `[rank-files] .. ranking=P1`,
 //! `[intent] text`, `[ids] vocab`, `[id-defs]`, `[id-ns]`, `[id-paths]` and
 //! `[idr]` lines (`surface=review`) and EC.11's `[select]
-//! surface=review_intent set=SELt shape=<k> pick=<name>
+//! surface=review_intent set=SELt2 shape=<k> pick=<name>
 //! source=calibrated|fallback reason=<r|-> test_commits=<n>` (with `[work]
 //! head ..` when the pick reads W5 / M), which a title prints and `none`
 //! does not.
@@ -435,7 +435,7 @@ pub struct Review {
     /// `<base>..HEAD`; not serialised when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent: Option<ReviewIntent>,
-    /// 0.5.3 (EC.11): the intent's ranking choice, set `SELt` at the shape of
+    /// 0.5.3 (EC.11): the intent's ranking choice, set `SELt2` (EC.12) at the shape of
     /// the changed files: the repo's calibrated pick, else the fallback
     /// LX[IDR,P1] with the reason. Present exactly when `intent` is.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -676,7 +676,7 @@ pub struct ReviewIntent {
     pub title: String,
     /// `arg` | `commit`.
     pub title_source: &'static str,
-    /// The fusion `files` follow: set SELt's pick for the repo (EC.11),
+    /// The fusion `files` follow: set SELt2's pick for the repo (EC.11),
     /// [`INTENT_FUSION_REVIEW`] when uncalibrated.
     pub fusion: String,
     /// Every id (or conventional-commit scope) the title routed, read at the
@@ -1010,7 +1010,7 @@ fn review_intent(
         }
     }
 
-    // EC.11: the intent fusion is set SELt's calibrated pick at the shape of
+    // EC.11: the intent fusion is set SELt2's (EC.12) calibrated pick at the shape of
     // the changed files, else EB.7's LX[IDR,P1]; its signals come from the
     // same bank the calibration replay ranks through.
     let shape = Shape::from_seed_files(seed_files.len());

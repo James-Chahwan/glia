@@ -459,7 +459,8 @@ pub fn load_for_roots(roots: &BTreeMap<u64, String>) -> CalibrationRead {
 /// One answer's ranking: the record's pick for (set, shape) when the record is
 /// loaded and its row was measured over exactly `candidates`, else `fallback`
 /// with the reason (`not_loaded`, `absent`, the rejection, `no_set`,
-/// `candidate_set`, `no_queries`).
+/// `candidate_set`, `refused` (EC.12: the replay refused the set, ruling
+/// EC-3, its pick a scored-only fallback), `no_queries`).
 pub fn select(
     read: &CalibrationRead,
     set: &str,
@@ -488,8 +489,14 @@ pub fn select(
     else {
         return fall("no_set");
     };
-    if row.digest != set_digest(candidates) || !candidates.contains(&row.pick.as_str()) {
+    if row.digest != set_digest(candidates) {
         return fall("candidate_set");
+    }
+    if !candidates.contains(&row.pick.as_str()) {
+        // Ruling EC-3: the replay refused the selection (online recall below
+        // a scored-only fallback), so the record's pick is that fallback.
+        let refused = row.pick == row.fallback && row.pick == fallback;
+        return fall(if refused { "refused" } else { "candidate_set" });
     }
     if row.queries == 0 {
         return fall("no_queries");
@@ -527,4 +534,51 @@ pub fn log_selection(surface: &str, s: &Selection) {
         s.reason.unwrap_or("-"),
         s.test_commits
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(pick: &str, sel: f64, fb: f64) -> CalibratedSet {
+        let cands = ["A", "B"];
+        CalibratedSet {
+            set: "S".into(),
+            shape: "k1".into(),
+            candidates: cands.iter().map(|s| s.to_string()).collect(),
+            digest: set_digest(&cands),
+            fallback: "F".into(),
+            test_commits: 3,
+            queries: 4,
+            pick: pick.into(),
+            last_online_pick: "A".into(),
+            online: OnlineReplay {
+                selection_recall10: sel,
+                fallback_recall10: fb,
+                ..OnlineReplay::default()
+            },
+            ..CalibratedSet::default()
+        }
+    }
+
+    fn sel(r: CalibratedSet) -> (String, &'static str, Option<&'static str>) {
+        let read = CalibrationRead::Loaded(Box::new(Calibration { sets: vec![r], ..Calibration::default() }));
+        let s = select(&read, "S", Shape::K1, &["A", "B"], "F");
+        (s.pick, s.source, s.reason)
+    }
+
+    /// EC.12: a row the replay refused (ruling EC-3: the online selection
+    /// below a scored-only fallback, so the record's pick IS that fallback)
+    /// answers the fallback with reason `refused`, not `candidate_set`.
+    #[test]
+    fn a_refused_row_answers_refused() {
+        assert_eq!(sel(row("F", 0.25, 0.5)), ("F".into(), "fallback", Some("refused")));
+        assert_eq!(sel(row("B", 0.5, 0.25)), ("B".into(), "calibrated", None));
+        // a pick that is neither a candidate nor the fallback: another set
+        assert_eq!(sel(row("Z", 0.5, 0.25)), ("F".into(), "fallback", Some("candidate_set")));
+        // another candidate list: candidate_set even when refused
+        let mut other = row("F", 0.25, 0.5);
+        other.digest = set_digest(&["A"]);
+        assert_eq!(sel(other), ("F".into(), "fallback", Some("candidate_set")));
+    }
 }

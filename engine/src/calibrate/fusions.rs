@@ -1,7 +1,8 @@
-//! Review's text selection (EC.11, item 4): the seeded fusion bank of rank_eval
-//! `r3_bank_seed` / `round1_rankers` over text (T1s), structure (P1, PT*),
-//! co-change (C0) and the work signals (W5, M), the candidates of set `SELt`
-//! (rank_eval `R1_SEL`), and the replay's text corpus.
+//! Review's text selection (EC.11, item 4; EC.12, item 8): the seeded fusion
+//! bank of rank_eval `r3_bank_seed` / `round1_rankers` over text (T1s),
+//! structure (P1, PT*), co-change (C0), the work signals (W5, M) and typed id
+//! routing (IDR), the candidates of set `SELt2` (rank_eval `R1_SEL`), the
+//! replay's text corpus and its id router.
 //!
 //! One code path: the calibration replay and the review answer both rank
 //! through [`seeded_keys`], so the record measures exactly what the answer
@@ -18,7 +19,19 @@
 //! - `ALL5` = `mean(mm(T1s), mm(W5), mm(M), mm(C0), mm(P1))`;
 //! - `LX[IDR,P1]` = `[IDR, P1, 0]` (EB.7's shipped order, the set's
 //!   scored-only fallback) and `LX[IDR,H9s50]` = `[IDR, H9s50, 0]`, raw IDR
-//!   first. The replay has no router yet (EC.12): its IDR is all zeros.
+//!   first;
+//! - EC.12's id-routed fusions (SELt2's last four): `LX[IDR,H18s[PT*]]` =
+//!   `[IDR, H18s[PT*], 0]`, `LX[IDR,H9s25[PT*]]` = `[IDR, H9s25[PT*], 0]`,
+//!   `H18si[PT*]` = `mean(mm(IDR), mm(T1s), mm(C0), mm(PT*))` and
+//!   `LX[IDR,C0,PT*]` = `[IDR, C0, PT*]`. A subject with no id routes nothing:
+//!   IDR is all zero, so each `LX[IDR, X]` orders exactly as X and
+//!   `H18si[PT*]` (its `mm(IDR)` flat 0) as `H18s[PT*]`.
+//!
+//! [`IdrState`] is the replay's router (EC.12): each test commit's subject is
+//! routed by EB.6's [`route`] over the tree of the commit's PARENT (rank_eval
+//! `r2_build`), since the rows an id names are edited by that very commit
+//! (pending -> done); the recent scopes are [`recent_scopes`] over the
+//! strictly older subjects. The answer's IDR stays EB.7's (the review base).
 //!
 //! [`TextState`] is the replay's BM25 corpus: at each test commit one EB.3
 //! [`TextIndex`] over the full messages of the strictly older commits (the
@@ -30,15 +43,19 @@
 //!
 //! Fired_on, stderr: `[calibrate] text builds=<b> docs_max=<d>
 //! messages=<yes|no> ms=<ms>` once per calibrate run that replays the
-//! `review` group ([`TextState::log_summary`]).
+//! `review` group ([`TextState::log_summary`]); `[calibrate] idr unavailable
+//! commits=<n>` after it when n test commits had no readable parent (no git,
+//! an unknown sha, a root commit; [`IdrState::log_summary`]); and EB.6's
+//! `[idr] repo=<label> surface=calibrate rev=<parent12> ..` per routed subject.
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use glia_activation::algo::fuse;
-use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot};
+use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot, read_history};
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
 
@@ -46,11 +63,19 @@ use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, StateHook};
 use super::replay::{Replay, ReplayCommit};
 use super::work::{m_scores, w5_scores, work_at_head};
+use crate::answers::project_roots;
+use crate::git_rev::{Tree, resolve_rev};
+use crate::intent::defs::read_defs;
+use crate::intent::idr::{IdrSide, conventional_scopes, recent_scopes, route};
+use crate::intent::ids::IdVocab;
+use crate::intent::paths::{PathResolver, rename_pairs};
 use crate::intent::text::{Candidates, TextIndex, subject};
 use crate::rank::{RankBase, RankCache, Ranking, c0, rank_files};
 
 /// The memo key of a query's dense T1s vector.
 pub const MEMO_T1S: &str = "t1s";
+/// The memo key of a query's dense IDR vector (EC.12).
+pub const MEMO_IDR: &str = "idr";
 
 /// rank_eval's `HT_GRID` rows SELt reads: (tag, a T1s, b W, c P1).
 pub const HT_GRID: [(&str, f64, f64, f64); 4] = [
@@ -61,7 +86,7 @@ pub const HT_GRID: [(&str, f64, f64, f64); 4] = [
 ];
 
 /// Every name [`seeded_keys`] ranks, in this order.
-pub const SEEDED_NAMES: [&str; 18] = [
+pub const SEEDED_NAMES: [&str; 22] = [
     "T1s",
     "P1",
     "PT*",
@@ -80,6 +105,10 @@ pub const SEEDED_NAMES: [&str; 18] = [
     "HTsd[M]",
     "ALL5",
     "LX[IDR,P1]",
+    "LX[IDR,H18s[PT*]]",
+    "LX[IDR,H9s25[PT*]]",
+    "H18si[PT*]",
+    "LX[IDR,C0,PT*]",
 ];
 
 /// The one more name [`seeded_keys`] ranks: EB.7's measured alternative.
@@ -103,7 +132,8 @@ pub struct Signals {
     pub w5: Vec<f64>,
     /// M: the milestone's files.
     pub m: Vec<f64>,
-    /// Typed id routing; None (all zeros) in the replay until EC.12.
+    /// Typed id routing: EB.7's at the review base in an answer, the
+    /// parent revision's ([`IdrState`]) in the replay; None reads all zeros.
     pub idr: Option<Vec<f64>>,
 }
 
@@ -122,8 +152,9 @@ impl Signals {
     }
 }
 
-/// The signals a fusion reads beyond P1 / T1s / IDR (which an answer always
-/// has): PT*, C0, W5, M.
+/// The signals a fusion reads beyond P1 / T1s (which an answer always has):
+/// PT*, C0, W5, M, and IDR (an answer always has it too; the replay routes a
+/// subject only for a fusion that reads it).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Needs {
@@ -131,13 +162,18 @@ pub struct Needs {
     pub c0: bool,
     pub w5: bool,
     pub m: bool,
+    pub idr: bool,
 }
 
 /// What `name` reads; None for a name [`seeded_keys`] does not rank.
 pub fn needs(name: &str) -> Option<Needs> {
-    let n = |pt, c0, w5, m| Some(Needs { pt, c0, w5, m });
+    let n = |pt, c0, w5, m| Some(Needs { pt, c0, w5, m, idr: false });
+    let i = |pt, c0| Some(Needs { pt, c0, w5: false, m: false, idr: true });
     match name {
-        "T1s" | "P1" | "H9s50" | "LX[IDR,P1]" | LX_IDR_H9S50 => n(false, false, false, false),
+        "T1s" | "P1" | "H9s50" => n(false, false, false, false),
+        "LX[IDR,P1]" | LX_IDR_H9S50 => i(false, false),
+        "LX[IDR,H9s25[PT*]]" => i(true, false),
+        "LX[IDR,H18s[PT*]]" | "H18si[PT*]" | "LX[IDR,C0,PT*]" => i(true, true),
         "PT*" | "H9s25[PT*]" => n(true, false, false, false),
         "C0" => n(false, true, false, false),
         "H18s[PT*]" | "H10[PT*]" => n(true, true, false, false),
@@ -184,14 +220,16 @@ pub fn seeded_keys(name: &str, s: &Signals, excluded: &[bool]) -> Option<Vec<Ran
     };
     let idr = || s.idr.as_deref().map_or_else(|| vec![0.0; n], |v| dense(v, n));
     let h9s50 = || fuse::blend(0.5, &mm(&t1s), &mm(&p1));
+    let h9s25 = || fuse::blend(0.25, &mm(&t1s), &mm(&s.pt));
+    let h18 = || fuse::mean(&[&mm(&t1s), &mm(&s.c0), &mm(&s.pt)]);
     let keys = match name {
         "T1s" => scalar(&t1s),
         "P1" => scalar(&p1),
         "PT*" => scalar(&dense(&s.pt, n)),
         "C0" => scalar(&dense(&s.c0, n)),
         "H9s50" => scalar(&h9s50()),
-        "H9s25[PT*]" => scalar(&fuse::blend(0.25, &mm(&t1s), &mm(&s.pt))),
-        "H18s[PT*]" => scalar(&fuse::mean(&[&mm(&t1s), &mm(&s.c0), &mm(&s.pt)])),
+        "H9s25[PT*]" => scalar(&h9s25()),
+        "H18s[PT*]" => scalar(&h18()),
         "H10[PT*]" => lex2(&dense(&s.c0, n), &dense(&s.pt, n)),
         "ALL5" => scalar(&fuse::mean(&[
             &mm(&t1s),
@@ -202,6 +240,13 @@ pub fn seeded_keys(name: &str, s: &Signals, excluded: &[bool]) -> Option<Vec<Ran
         ])),
         "LX[IDR,P1]" => lex2(&idr(), &p1),
         LX_IDR_H9S50 => lex2(&idr(), &h9s50()),
+        "LX[IDR,H18s[PT*]]" => lex2(&idr(), &h18()),
+        "LX[IDR,H9s25[PT*]]" => lex2(&idr(), &h9s25()),
+        "H18si[PT*]" => scalar(&fuse::mean(&[&mm(&idr()), &mm(&t1s), &mm(&s.c0), &mm(&s.pt)])),
+        "LX[IDR,C0,PT*]" => {
+            let (i, c0, pt) = (idr(), dense(&s.c0, n), dense(&s.pt, n));
+            (0..n).map(|f| [i[f], c0[f], pt[f]]).collect()
+        }
         other => {
             let rest = other.strip_prefix("HTs")?;
             let (tag, w) = (rest.get(..1)?, rest.get(1..)?);
@@ -230,7 +275,8 @@ pub struct Seeded(pub &'static str);
 
 /// The replay's signals for `name`: P1 / PT* from the structure bank
 /// (memo `p1` / `pt`), C0 from the query (memo `c0`, the bank's), T1s from
-/// [`TextState`] (memo [`MEMO_T1S`]), W5 / M from the work state; IDR none.
+/// [`TextState`] (memo [`MEMO_T1S`]), W5 / M from the work state, IDR from
+/// [`IdrState`] (memo [`MEMO_IDR`]; all zeros with no router registered).
 /// None with no structure bank registered.
 pub fn replay_signals(name: &str, q: &QueryCtx<'_>) -> Option<Signals> {
     let need = needs(name)?;
@@ -269,6 +315,16 @@ pub fn replay_signals(name: &str, q: &QueryCtx<'_>) -> Option<Signals> {
     }
     if need.m {
         s.m = m_scores(q).to_vec();
+    }
+    if need.idr {
+        s.idr = Some(
+            q.memo
+                .get_or(MEMO_IDR, || match q.state.hook::<IdrState>() {
+                    Some(r) => r.scores(q),
+                    None => vec![0.0; m],
+                })
+                .to_vec(),
+        );
     }
     Some(s)
 }
@@ -372,6 +428,210 @@ impl StateHook for TextState {
 
     fn subject_scores(&self, c: &ReplayCommit) -> Option<Vec<f64>> {
         (self.messages && c.sha == self.cur_sha).then(|| self.cur.to_vec())
+    }
+}
+
+/// A subject's recent-scope list: at most this many files per older commit
+/// (rank_eval `MAX_FILES`, EB.6's `recent_subjects` shape: 2..=30 files).
+const RECENT_MAX_FILES: usize = 30;
+
+/// What every routed test commit shares: the working tree's `[ids]`
+/// vocabulary (EB.4, as EB.7 reads it), the graph's PROJECT dirs, and the
+/// path resolver over the candidates and the history snapshot's renames.
+struct IdrCtx {
+    label: String,
+    vocab: IdVocab,
+    dirs: Vec<String>,
+    paths: PathResolver,
+}
+
+impl IdrCtx {
+    /// The context of `root`'s repo over `cands`. The renames are the
+    /// on-disk history snapshot's ([`rename_pairs`]), none without one.
+    fn new(root: &Path, merged: &MergedGraph, cands: &Candidates) -> IdrCtx {
+        let renames = read_history(root)
+            .as_ref()
+            .map(rename_pairs)
+            .unwrap_or_default();
+        IdrCtx {
+            label: root.file_name().map_or_else(
+                || root.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            vocab: IdVocab::for_root(root),
+            dirs: project_roots(merged)
+                .into_iter()
+                .map(|p| p.path)
+                .filter(|p| p != ".")
+                .collect(),
+            paths: PathResolver::new(cands, &renames),
+        }
+    }
+
+    /// The IDR of `subj` read at commit `sha`'s parent: Err when the parent
+    /// cannot be resolved (no git, an unknown sha, a root commit). A subject
+    /// with no id mention and no conventional-commit scope routes nothing
+    /// (all zeros) without reading the tree, exactly as [`route`] would.
+    fn route_at_parent(
+        &self,
+        root: &Path,
+        cands: &Candidates,
+        sha: &str,
+        subj: &str,
+        older_newest_first: &[&str],
+    ) -> Result<Vec<f64>, String> {
+        let parent = resolve_rev(root, &format!("{sha}^"))?;
+        if self.vocab.mentions(subj).is_empty() && conventional_scopes(subj).is_empty() {
+            return Ok(vec![0.0; cands.len()]);
+        }
+        let tree = Tree::Rev { repo: root, sha: parent.sha };
+        let dirs: Vec<&str> = self.dirs.iter().map(String::as_str).collect();
+        let defs = read_defs(&tree, &dirs, &self.vocab, None);
+        let ns = defs.namespaces(&self.vocab.local_words);
+        let side = IdrSide::new(cands, &self.paths, &defs, &ns, &self.vocab, &tree)
+            .labelled(&self.label, "calibrate");
+        let recent = recent_scopes(older_newest_first, &ns, &self.vocab);
+        Ok(route(subj, &side, &recent).idr)
+    }
+}
+
+/// The IDR of `subj` for test commit `sha`, read leak-free at the commit's
+/// PARENT revision (rank_eval `r2_build`): EB.6's [`route`] over that tree's
+/// definitions (no Tier-4 snapshot), the working tree's `[ids]` vocabulary,
+/// `merged`'s PROJECT dirs and the path resolver over `cands` (renames from
+/// `root`'s history snapshot), with [`recent_scopes`] over
+/// `older_subjects_newest_first`. Err when the parent cannot be resolved.
+/// The replay's [`IdrState`] reads exactly this, once per test commit.
+pub fn idr_at_parent(
+    root: &Path,
+    merged: &MergedGraph,
+    cands: &Candidates,
+    sha: &str,
+    subj: &str,
+    older_subjects_newest_first: &[&str],
+) -> Result<Vec<f64>, String> {
+    IdrCtx::new(root, merged, cands).route_at_parent(root, cands, sha, subj, older_subjects_newest_first)
+}
+
+/// The replay's id router (EC.12, module docs): per test commit, the subject
+/// routed at the parent revision ([`idr_at_parent`]), computed by the first
+/// query that reads IDR and shared by the commit's every query and candidate
+/// (memo [`MEMO_IDR`]).
+#[non_exhaustive]
+pub struct IdrState {
+    n_files: usize,
+    /// The observed commits' subjects shaped like a test commit (2..=30
+    /// files, a subject), oldest first.
+    subjects: Vec<String>,
+    cur_sha: String,
+    cur_subject: String,
+    /// The subjects strictly older than the current test commit, newest first.
+    cur_older: Vec<String>,
+    /// The current test commit's IDR, once computed.
+    cur: Mutex<Option<Arc<Vec<f64>>>>,
+    /// Built by the first routed commit.
+    ctx: Mutex<Option<IdrCtx>>,
+    /// (routed, unavailable) test commits.
+    counts: Mutex<(usize, usize)>,
+}
+
+impl std::fmt::Debug for IdrState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (routed, unavailable) = self.counts();
+        f.debug_struct("IdrState")
+            .field("n_files", &self.n_files)
+            .field("subjects", &self.subjects.len())
+            .field("routed", &routed)
+            .field("unavailable", &unavailable)
+            .finish()
+    }
+}
+
+impl IdrState {
+    /// The router of `replay` over `n_files` candidates.
+    pub fn for_replay(_replay: &Replay, n_files: usize) -> IdrState {
+        IdrState {
+            n_files,
+            subjects: Vec::new(),
+            cur_sha: String::new(),
+            cur_subject: String::new(),
+            cur_older: Vec::new(),
+            cur: Mutex::new(None),
+            ctx: Mutex::new(None),
+            counts: Mutex::new((0, 0)),
+        }
+    }
+
+    /// (test commits routed at a readable parent, test commits whose parent
+    /// could not be read).
+    pub fn counts(&self) -> (usize, usize) {
+        *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The `[calibrate] idr unavailable commits=<n>` marker, once after the
+    /// replay, only when n > 0.
+    pub fn log_summary(&self) {
+        let (_, unavailable) = self.counts();
+        if unavailable > 0 {
+            eprintln!("[calibrate] idr unavailable commits={unavailable}");
+        }
+    }
+
+    /// The current test commit's IDR over `q.cands` (zeros when its parent
+    /// cannot be read, or for a query of another commit).
+    pub fn scores(&self, q: &QueryCtx<'_>) -> Vec<f64> {
+        let m = q.cands.len();
+        if q.commit.sha != self.cur_sha {
+            return vec![0.0; m];
+        }
+        let mut cur = self.cur.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(v) = cur.as_ref() {
+            return v.to_vec();
+        }
+        let got = {
+            let mut ctx = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
+            let ctx = ctx.get_or_insert_with(|| IdrCtx::new(q.repo_root, q.merged, q.cands));
+            let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
+            ctx.route_at_parent(q.repo_root, q.cands, &self.cur_sha, &self.cur_subject, &older)
+        };
+        let v = {
+            let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+            match got {
+                Ok(v) if v.len() == m => {
+                    counts.0 += 1;
+                    v
+                }
+                _ => {
+                    counts.1 += 1;
+                    vec![0.0; m]
+                }
+            }
+        };
+        let v = Arc::new(v);
+        *cur = Some(Arc::clone(&v));
+        v.to_vec()
+    }
+}
+
+impl StateHook for IdrState {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn begin_test_commit(&mut self, replay: &Replay, k: usize) {
+        let Some(c) = replay.commits.get(k) else {
+            return;
+        };
+        self.cur_sha = c.sha.clone();
+        self.cur_subject = c.subject.clone();
+        self.cur_older = self.subjects.iter().rev().cloned().collect();
+        *self.cur.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    fn observe(&mut self, c: &ReplayCommit, _train: bool) {
+        if !c.subject.is_empty() && (2..=RECENT_MAX_FILES).contains(&c.files.len()) {
+            self.subjects.push(c.subject.clone());
+        }
     }
 }
 
@@ -485,7 +745,7 @@ mod tests {
         (s, vec![true, false, false, false, false, false])
     }
 
-    /// The harness arithmetic of every SELt name, the fallback and
+    /// The harness arithmetic of every SELt2 name, the fallback and
     /// LX[IDR,H9s50] (r3_bank_seed's `full` bank and round1_rankers').
     fn harness(s: &Signals, ex: &[bool]) -> Vec<(&'static str, Vec<RankKey>)> {
         let nf = s.p1.len();
@@ -494,6 +754,10 @@ mod tests {
             (mm(&s.p1), mm(&s.pt), mm(&s.c0), mm(&s.t1s), mm(&s.w5), mm(&s.m));
         let h9s50 = blend(0.5, &mm_t1s, &mm_p1);
         let idr = s.idr.clone().unwrap_or_default();
+        let mm_idr = mm(&idr);
+        let h9s25 = blend(0.25, &mm_t1s, &mm_pt);
+        let h18 = r3_eq(&[&mm_t1s, &mm_c0, &mm_pt]);
+        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
         let ht = |w: &[f64], i: usize| {
             let (_, a, b, c) = HT_GRID[i];
             scalar(&(0..nf).map(|f| a * mm_t1s[f] + b * w[f] + c * mm_p1[f]).collect::<Vec<_>>())
@@ -511,6 +775,11 @@ mod tests {
             ("ALL5", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0, &mm_p1]))),
             ("LX[IDR,P1]", lex2(&idr, &s.p1)),
             ("LX[IDR,H9s50]", lex2(&idr, &h9s50)),
+            // EC.12: r3_bank_seed's id-routed fusions, SELt2's last four
+            ("LX[IDR,H18s[PT*]]", lex2(&idr, &h18)),
+            ("LX[IDR,H9s25[PT*]]", lex2(&idr, &h9s25)),
+            ("H18si[PT*]", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0, &mm_pt]))),
+            ("LX[IDR,C0,PT*]", lx3(&idr, &s.c0, &s.pt)),
         ]
     }
 
@@ -563,6 +832,78 @@ mod tests {
             fuse::lx(&idr, &[&s.p1], &tie, &ex)
         );
         assert_eq!(seeded_order(&k, &tie, &ex), [2, 4, 5, 1, 3]);
+    }
+
+    /// EC.12 (item 8's measured no-op): with no id routed (IDR all zero or
+    /// absent) each LX[IDR, X] orders exactly as X, and H18si[PT*] as
+    /// H18s[PT*] (its mm(IDR) is flat 0, so it is 3/4 of H18s[PT*]).
+    #[test]
+    fn idr_fusions_without_an_id_order_as_their_base() {
+        let (mut s, ex) = sig();
+        let tie: Vec<u32> = (0..6).collect();
+        for idr in [None, Some(vec![0.0; 6])] {
+            s.idr = idr;
+            let ord = |n: &str| seeded_order(&seeded_keys(n, &s, &ex).expect(n), &tie, &ex);
+            for (a, b) in [
+                ("LX[IDR,H18s[PT*]]", "H18s[PT*]"),
+                ("LX[IDR,H9s25[PT*]]", "H9s25[PT*]"),
+                ("H18si[PT*]", "H18s[PT*]"),
+                ("LX[IDR,C0,PT*]", "H10[PT*]"),
+                ("LX[IDR,P1]", "P1"),
+            ] {
+                assert_eq!(ord(a), ord(b), "{a} vs {b}");
+            }
+        }
+        // a routed id leads: file 2 (idr 1.0), then 4 (idr 0.5)
+        let (s, ex) = sig();
+        for n in ["LX[IDR,H18s[PT*]]", "LX[IDR,H9s25[PT*]]", "LX[IDR,C0,PT*]"] {
+            let k = seeded_keys(n, &s, &ex).expect(n);
+            assert_eq!(seeded_order(&k, &tie, &ex)[..2], [2, 4], "{n}");
+        }
+        for n in ["LX[IDR,H18s[PT*]]", "LX[IDR,H9s25[PT*]]", "H18si[PT*]", "LX[IDR,C0,PT*]", "LX[IDR,P1]"] {
+            assert!(needs(n).is_some_and(|x| x.idr), "{n}");
+        }
+        assert!(needs("H18s[PT*]").is_some_and(|x| !x.idr));
+    }
+
+    /// The router's prefix bookkeeping: older test-shaped subjects only,
+    /// newest first; a tree that is no git repo leaves IDR unavailable.
+    #[test]
+    fn idr_state_keeps_older_subjects_and_counts_unavailable() {
+        let commit = |sha: &str, subj: &str, files: Vec<u32>| ReplayCommit {
+            sha: sha.to_string(),
+            subject: subj.to_string(),
+            message: format!("{subj}\n"),
+            files,
+            ..ReplayCommit::default()
+        };
+        let commits = vec![
+            commit("a", "T001 first", vec![0, 1]),
+            commit("b", "one file", vec![2]),
+            commit("c", "", vec![1, 2]),
+            commit("d", "T002 second", vec![0, 2]),
+            commit("e", "T003 third", vec![1, 3]),
+        ];
+        let replay = Replay { train: vec![true; 5], tests: vec![4], messages: true, commits, ..Replay::default() };
+        let mut r = IdrState::for_replay(&replay, 4);
+        for c in &replay.commits[..4] {
+            r.observe(c, true);
+        }
+        r.begin_test_commit(&replay, 4);
+        assert_eq!(r.cur_older, ["T002 second", "T001 first"]);
+        assert_eq!(r.cur_subject, "T003 third");
+        let dir = tempfile::tempdir().expect("tmp");
+        let cands = Candidates {
+            paths: (0..4).map(|i| format!("f{i}.py")).collect(),
+            ..Candidates::default()
+        };
+        let ctx = IdrCtx {
+            label: "t".into(),
+            vocab: IdVocab::default(),
+            dirs: Vec::new(),
+            paths: PathResolver::new(&cands, &[]),
+        };
+        assert!(ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[]).is_err());
     }
 
     #[test]

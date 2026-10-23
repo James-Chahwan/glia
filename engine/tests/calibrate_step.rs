@@ -2,6 +2,14 @@
 //! snapshot, replays it over the layout's graph, writes
 //! `.glia/calibration-snapshot/` and returns the online selection against the
 //! fallback with a commit-cluster bootstrap CI.
+//!
+//! EC.12: review's set is SELt2 (SELt's ten fusions plus four id-routed ones);
+//! the replay routes each test commit's subject at its PARENT revision
+//! (`fusions::idr_at_parent`), so an id the commit itself defines routes
+//! nowhere, and a tree with no git (the synthetic fixtures) routes nothing:
+//! each LX[IDR, X] then scores exactly as X.
+
+mod git_fixture;
 
 use std::path::{Path, PathBuf};
 
@@ -149,7 +157,7 @@ fn calibrate_writes_a_loaded_record_and_measures_the_selection() {
         .collect();
     // EC.11: the default groups are `structure` then `review`; the record
     // sorts its rows by set name.
-    let want: Vec<(String, String)> = ["SELh0", "SELs0", "SELt"]
+    let want: Vec<(String, String)> = ["SELh0", "SELs0", "SELt2"]
         .iter()
         .flat_map(|set| ["k1", "k2", "k3", "half"].map(|sh| (set.to_string(), sh.to_string())))
         .collect();
@@ -345,9 +353,12 @@ fn text_history(root: &Path) {
         .expect("write history");
 }
 
-/// EC.11: with commit messages, the review group's SELt rows are written
-/// for every seeded shape; the text corpus makes a text fusion the k1 pick,
-/// at least as good as the fallback LX[IDR,P1] (P1 in the replay: no router).
+/// EC.11 / EC.12: with commit messages, the review group's SELt2 rows (14
+/// candidates) are written for every seeded shape; the text corpus makes a
+/// text fusion the k1 pick, at least as good as the fallback LX[IDR,P1]. The
+/// fixture is no git tree, so no parent is readable (`[calibrate] idr
+/// unavailable commits=<every test commit>`): IDR is all zero and each
+/// id-routed fusion's recall sums equal its base's.
 #[test]
 fn review_text_selection_calibrates_on_messages() {
     let (_tmp, root) = fixture();
@@ -364,9 +375,9 @@ fn review_text_selection_calibrates_on_messages() {
         .collect();
     assert_eq!(
         rows,
-        [("SELt", "k1"), ("SELt", "k2"), ("SELt", "k3"), ("SELt", "half")]
+        [("SELt2", "k1"), ("SELt2", "k2"), ("SELt2", "k3"), ("SELt2", "half")]
     );
-    let k1 = row(&s, "SELt", "k1");
+    let k1 = row(&s, "SELt2", "k1");
     assert_eq!(k1.fallback, REVIEW_FALLBACK);
     assert!(k1.queries > 0);
     assert!(REVIEW_CANDIDATES.contains(&k1.pick.as_str()), "{k1:?}");
@@ -378,9 +389,25 @@ fn review_text_selection_calibrates_on_messages() {
     let CalibrationRead::Loaded(cal) = read_calibration(&root) else {
         panic!("record not loaded");
     };
+    for r in &cal.sets {
+        assert_eq!(r.candidates, REVIEW_CANDIDATES, "{} {}", r.set, r.shape);
+        assert_eq!(r.recall10.len(), 14);
+        let sum = |n: &str| {
+            let i = r.candidates.iter().position(|c| c == n).unwrap_or_else(|| panic!("{n}"));
+            r.recall10[i].to_bits()
+        };
+        for (a, b) in [
+            ("LX[IDR,H18s[PT*]]", "H18s[PT*]"),
+            ("LX[IDR,H9s25[PT*]]", "H9s25[PT*]"),
+            ("H18si[PT*]", "H18s[PT*]"),
+            ("LX[IDR,C0,PT*]", "H10[PT*]"),
+        ] {
+            assert_eq!(sum(a), sum(b), "{} {}: {a} vs {b}", r.set, r.shape);
+        }
+    }
     let sel = select(
         &CalibrationRead::Loaded(cal.clone()),
-        "SELt",
+        "SELt2",
         Shape::K1,
         &REVIEW_CANDIDATES,
         REVIEW_FALLBACK,
@@ -405,4 +432,111 @@ fn review_text_selection_calibrates_on_messages() {
         again.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>(),
         s.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>()
     );
+}
+
+/// EC.12: the replay's IDR is read at each test commit's PARENT revision. A
+/// git tree whose spec-kit task list defines T012 (pending, naming
+/// `pkg/b.py`) before the commit that does T012 (marking it done and adding
+/// T020): routed at that commit's parent, T012 leads with `pkg/b.py` under
+/// LX[IDR,H18s[PT*]]; T020, which only the commit itself defines, routes
+/// nowhere (no leak); the root commit has no parent. The working tree has
+/// since deleted the task list, which changes nothing. The calibration over
+/// the same tree writes 14-candidate SELt2 rows.
+#[test]
+fn idr_routes_each_test_commit_at_its_parent() {
+    use glia_engine::calibrate::fusions::{Signals, idr_at_parent};
+    use glia_engine::calibrate::{seeded_keys, seeded_order};
+    use glia_engine::intent::text::Candidates;
+    use glia_engine::rank::FileIndex;
+
+    let g = git_fixture::GitRepo::init();
+    g.write("pkg/a.py", "from pkg.b import bill\nfrom pkg.c import other\n\ndef run():\n    other()\n    return bill()\n");
+    g.write("pkg/b.py", "def bill():\n    return 1\n");
+    g.write("pkg/c.py", "def other():\n    return 2\n");
+    g.write("pkg/d.py", "from pkg.c import other\n\ndef misc():\n    return other()\n");
+    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n");
+    let first = g.commit("initial skeleton");
+    g.write("pkg/b.py", "def bill():\n    return 3\n");
+    g.write("pkg/a.py", "from pkg.b import bill\nfrom pkg.c import other\n\ndef run():\n    other()\n    return bill() + 1\n");
+    g.write(
+        "specs/001-billing/tasks.md",
+        "# Tasks\n\n- [x] T012 billing export in pkg/b.py\n- [ ] T020 new work in pkg/d.py\n",
+    );
+    let second = g.commit("T012 billing export");
+    // The working tree moves on: the task list is gone and a module renamed.
+    // The router reads the parent's tree, never the working tree's.
+    g.remove("specs/001-billing/tasks.md");
+    g.git_mv("pkg/d.py", "pkg/e.py");
+
+    let built = glia_engine::generate_one(g.path()).expect("build");
+    let repo = built.merged.graphs[0].repo.0;
+    let labels = std::collections::BTreeMap::from([(repo, "repo".to_string())]);
+    let cands = Candidates::of(&FileIndex::of(&built.merged, &labels), repo);
+    let pos = |p: &str| cands.position(p).unwrap_or_else(|| panic!("{p} in {:?}", cands.paths));
+    let (a, b) = (pos("pkg/a.py"), pos("pkg/b.py"));
+
+    let idr = idr_at_parent(g.root(), &built.merged, &cands, &second, "T012 billing export", &[])
+        .expect("parent");
+    assert_eq!(idr.len(), cands.len());
+    assert_eq!(idr[b], 1.0, "pending at the parent: {idr:?}");
+    assert_eq!(idr.iter().filter(|&&x| x > 0.0).count(), 1, "{idr:?}");
+
+    // LX[IDR,H18s[PT*]] from the changed pkg/a.py: the routed file leads.
+    let n = cands.len();
+    let mut excluded = vec![false; n];
+    excluded[a] = true;
+    let mut s = Signals::zeros(n);
+    s.pt = (0..n).map(|i| if i == b { 0.1 } else { 0.5 }).collect();
+    s.idr = Some(idr);
+    let tie: Vec<u32> = (0..n as u32).collect();
+    let keys = seeded_keys("LX[IDR,H18s[PT*]]", &s, &excluded).expect("keys");
+    assert_eq!(seeded_order(&keys, &tie, &excluded)[0], b);
+    let base = seeded_keys("H18s[PT*]", &s, &excluded).expect("keys");
+    assert_ne!(seeded_order(&base, &tie, &excluded)[0], b, "without IDR another file leads");
+
+    // T020 exists only in the commit itself: nothing at its parent.
+    let leak = idr_at_parent(g.root(), &built.merged, &cands, &second, "T020 new work", &[])
+        .expect("parent");
+    assert!(leak.iter().all(|&x| x == 0.0), "{leak:?}");
+    // no id, no scope: nothing
+    let none = idr_at_parent(g.root(), &built.merged, &cands, &second, "billing export", &[])
+        .expect("parent");
+    assert!(none.iter().all(|&x| x == 0.0));
+    // the root commit has no parent
+    assert!(idr_at_parent(g.root(), &built.merged, &cands, &first, "T012 billing export", &[]).is_err());
+
+    // The calibration over this tree's real history.
+    let files = |ps: &[&str]| -> Vec<HistoryFile> {
+        ps.iter()
+            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .collect()
+    };
+    let commits = vec![
+        HistoryCommit {
+            c: second.clone(),
+            t: 1_700_000_100,
+            files: files(&["pkg/a.py", "pkg/b.py", "specs/001-billing/tasks.md"]),
+        },
+        HistoryCommit {
+            c: first.clone(),
+            t: 1_700_000_000,
+            files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py", "pkg/d.py", "specs/001-billing/tasks.md"]),
+        },
+    ];
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let messages = vec![
+        msg(&second, 1_700_000_100, "T012 billing export"),
+        msg(&first, 1_700_000_000, "initial skeleton"),
+    ];
+    let meta = HistoryMeta::new(second.clone(), 2, None, String::new());
+    write_history_with_messages(g.root(), meta, &commits, &[], Some(&messages)).expect("history");
+    let mut opts = CalibrateOptions::default();
+    opts.groups = vec!["review"];
+    let summary = calibrate(g.root(), &built.merged, &opts).expect("calibrate");
+    assert!(summary.sets.iter().all(|r| r.set == "SELt2"), "{summary:?}");
+    let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
+        panic!("record not loaded");
+    };
+    assert!(!cal.sets.is_empty());
+    assert!(cal.sets.iter().all(|r| r.candidates == REVIEW_CANDIDATES));
 }

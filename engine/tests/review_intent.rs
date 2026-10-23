@@ -26,7 +26,7 @@
 //! (1c), the three fusions' arithmetic, is a unit test in
 //! `engine/src/review.rs` (`IntentSignals` is crate API).
 //!
-//! (6) EC.11: the intent fusion is set SELt's calibrated pick (a record
+//! (6) EC.11: the intent fusion is set SELt2's calibrated pick (a record
 //!     written by `calibrate::calibrate` over EC.5's two-cluster fixture with
 //!     commit messages); with no record it is LX[IDR,P1], `selection_intent`
 //!     saying which. Every fixture above has no record, so (1)-(5) pin EB.7's
@@ -444,26 +444,26 @@ fn review_intent_follows_the_selt_pick() {
     let sel = u.selection_intent.as_ref().expect("selection_intent");
     assert_eq!(
         (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
-        ("SELt", "k1", "LX[IDR,P1]", "fallback", Some("absent"))
+        ("SELt2", "k1", "LX[IDR,P1]", "fallback", Some("absent"))
     );
     let ui = u.intent.as_ref().expect("intent");
     assert_eq!(ui.fusion, "LX[IDR,P1]");
     let md = render_markdown(&u, &MarkdownOptions::default());
     assert!(md.contains("_title (arg): alpha cluster work_\n\n_ranked by LX[IDR,P1] (uncalibrated: absent)_"), "{md}");
 
-    // Calibrated: the record's SELt k1 pick orders the intent files.
+    // Calibrated: the record's SELt2 k1 pick orders the intent files.
     let mut opts = CalibrateOptions::default();
     opts.groups = vec!["review"];
     calibrate(g.root(), &built.merged, &opts).expect("calibrate");
     let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
         panic!("record not loaded");
     };
-    let want = cal.sets.iter().find(|s| s.set == "SELt" && s.shape == "k1").map(|s| s.pick.clone()).expect("SELt k1");
+    let want = cal.sets.iter().find(|s| s.set == "SELt2" && s.shape == "k1").map(|s| s.pick.clone()).expect("SELt2 k1");
     let c = review_vs_rev(g.path(), "HEAD", &args).expect("review");
     let sel = c.selection_intent.as_ref().expect("selection_intent");
     assert_eq!(
         (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
-        ("SELt", "k1", want.as_str(), "calibrated", None)
+        ("SELt2", "k1", want.as_str(), "calibrated", None)
     );
     assert_eq!(sel.test_commits, COMMITS);
     let ci = c.intent.as_ref().expect("intent");

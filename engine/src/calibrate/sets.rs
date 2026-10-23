@@ -8,21 +8,26 @@
 //! - `SELs0` = {P1, PT*, B0}, fallback P1: read only under `--no-cochange` /
 //!   `cochange=False`.
 //!
-//! Group `review` (EC.11, item 4), review's text selection on the same
-//! seeded shapes:
-//! - `SELt` = rank_eval `R1_SEL`'s SELt, same order ([`REVIEW_CANDIDATES`]),
-//!   each a [`super::fusions::Seeded`] fusion of T1s, P1, PT*, C0, W5 and M;
-//!   its fallback, EB.7's `LX[IDR,P1]`, is scored only (not selectable).
+//! Group `review` (EC.11, item 4; EC.12, item 8), review's text selection on
+//! the same seeded shapes:
+//! - `SELt2` = rank_eval `R1_SEL`'s SELt2, same order ([`REVIEW_CANDIDATES`]):
+//!   SELt's ten [`super::fusions::Seeded`] fusions of T1s, P1, PT*, C0, W5 and
+//!   M, then the four id-routed ones (IDR read at each test commit's parent,
+//!   [`super::fusions::IdrState`]); its fallback, EB.7's `LX[IDR,P1]`, is
+//!   scored only (not selectable). SELt itself is no longer replayed: no
+//!   answer reads it, so a record written before EC.12 answers review `no_set`
+//!   until recalibrated.
 //!
 //! [`specs`] returns the named groups' sets in registration order; EC.13
 //! appends the `find` group. A structure candidate is [`Named`]: its keys
 //! come from the structure bank ([`super::bank::structure_keys`]).
 //! [`register_hooks`] registers the parts of the replay state a group reads
-//! beyond the bank (the text corpus and the work state for `review`).
+//! beyond the bank (the text corpus, the work state and the id router for
+//! `review`).
 
 use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, ReplayState};
-use super::fusions::{Seeded, TextState};
+use super::fusions::{IdrState, Seeded, TextState};
 use super::record::Shape;
 use super::replay::Replay;
 use super::select::SetSpec;
@@ -43,10 +48,10 @@ pub const COCHANGE_FALLBACK: &str = "H10";
 /// The seeded query shapes both sets are calibrated on.
 pub const SEEDED_SHAPES: [Shape; 4] = [Shape::K1, Shape::K2, Shape::K3, Shape::Half];
 
-/// Review's text selection set (item 4).
-pub const REVIEW_SET: &str = "SELt";
-/// SELt's candidates, rank_eval `R1_SEL` order.
-pub const REVIEW_CANDIDATES: [&str; 10] = [
+/// Review's text selection set (items 4 and 8).
+pub const REVIEW_SET: &str = "SELt2";
+/// SELt2's candidates, rank_eval `R1_SEL` order.
+pub const REVIEW_CANDIDATES: [&str; 14] = [
     "H18s[PT*]",
     "H9s25[PT*]",
     "H9s50",
@@ -57,8 +62,12 @@ pub const REVIEW_CANDIDATES: [&str; 10] = [
     "HTsc[M]",
     "HTsd[M]",
     "ALL5",
+    "LX[IDR,H18s[PT*]]",
+    "LX[IDR,H9s25[PT*]]",
+    "H18si[PT*]",
+    "LX[IDR,C0,PT*]",
 ];
-/// SELt's fallback: EB.7's shipped review intent order (scored only).
+/// SELt2's fallback: EB.7's shipped review intent order (scored only).
 pub const REVIEW_FALLBACK: &str = crate::review::INTENT_FUSION_REVIEW;
 
 /// The candidate groups [`specs`] knows, in registration order.
@@ -126,8 +135,9 @@ fn group(name: &str) -> Option<Vec<SetSpec>> {
 }
 
 /// Register the replay-state parts `groups` read beyond the structure bank:
-/// for `review`, the text corpus ([`TextState`]) and the work state
-/// ([`WorkState`]), in that order. `n_files` is the candidate count.
+/// for `review`, the text corpus ([`TextState`]), the work state
+/// ([`WorkState`]) and the id router ([`IdrState`]), in that order. `n_files`
+/// is the candidate count.
 pub fn register_hooks(
     state: &mut ReplayState,
     replay: &Replay,
@@ -138,17 +148,22 @@ pub fn register_hooks(
     if groups.contains(&"review") {
         state.register(Box::new(TextState::for_replay(replay, n_files)));
         state.register(Box::new(WorkState::for_replay(replay, n_files, max_files)));
+        state.register(Box::new(IdrState::for_replay(replay, n_files)));
     }
 }
 
 /// The registered parts' once-per-run markers (`[calibrate] text ..`,
-/// `[calibrate] work ..`), after the replay.
+/// `[calibrate] work ..`, `[calibrate] idr unavailable ..` when any), after
+/// the replay.
 pub fn log_hooks(state: &ReplayState) {
     if let Some(t) = state.hook::<TextState>() {
         t.log_summary();
     }
     if let Some(w) = state.hook::<WorkState>() {
         w.log_summary();
+    }
+    if let Some(r) = state.hook::<IdrState>() {
+        r.log_summary();
     }
 }
 
@@ -205,13 +220,14 @@ mod tests {
     fn set_digests_are_pinned() {
         assert_eq!(set_digest(&COCHANGE_CANDIDATES), "3017fcbd3b38fc59");
         assert_eq!(set_digest(&STRUCTURE_CANDIDATES), "b8d25cb5c9150854");
-        assert_eq!(set_digest(&REVIEW_CANDIDATES), "80ce9c8a8a207f2f");
+        assert_eq!(set_digest(&REVIEW_CANDIDATES), "ca79a93f8e2d0576");
     }
 
-    /// EC.11: SELt is rank_eval's R1_SEL `SELt`, literally and in order, its
-    /// fallback EB.7's scored-only LX[IDR,P1].
+    /// EC.12: SELt2 is rank_eval's R1_SEL `SELt2`, literally and in order
+    /// (SELt's ten, then the four id-routed fusions), its fallback EB.7's
+    /// scored-only LX[IDR,P1].
     #[test]
-    fn review_group_is_selt() {
+    fn review_group_is_selt2() {
         assert_eq!(
             REVIEW_CANDIDATES,
             [
@@ -224,14 +240,18 @@ mod tests {
                 "HTsd[W5]",
                 "HTsc[M]",
                 "HTsd[M]",
-                "ALL5"
+                "ALL5",
+                "LX[IDR,H18s[PT*]]",
+                "LX[IDR,H9s25[PT*]]",
+                "H18si[PT*]",
+                "LX[IDR,C0,PT*]"
             ]
         );
         assert_eq!(REVIEW_FALLBACK, "LX[IDR,P1]");
         let s = specs(&["review"]).expect("review");
         assert_eq!(s.len(), 1);
         let x = &s[0];
-        assert_eq!((x.set, x.fallback), ("SELt", "LX[IDR,P1]"));
+        assert_eq!((x.set, x.fallback), ("SELt2", "LX[IDR,P1]"));
         assert_eq!(x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(), REVIEW_CANDIDATES);
         assert_eq!(x.shapes, SEEDED_SHAPES);
         assert_eq!(x.fallback_candidate.as_ref().map(|c| c.name()), Some("LX[IDR,P1]"));

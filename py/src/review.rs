@@ -190,7 +190,7 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// `{title, title_source, fusion, ids, files, text}` (`files` rows `{rank,
 /// file, idr, text, ppr, ids, in_impact}`) and then `selection_intent`
 /// `{set, shape, pick, source, reason, test_commits}` (EC.11): `fusion` is
-/// set `SELt`'s pick, the repo's calibrated text fusion for the shape of the
+/// set `SELt2`'s pick (EC.12), the repo's calibrated text fusion for the shape of the
 /// changed files (`glia history calibrate`), else `"LX[IDR,P1]"` with the
 /// reason; the markdown gains `### Intent` with its `_ranked by .._` line,
 /// and the impact rows in id-routed files come first (text never reorders

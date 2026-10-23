@@ -13,7 +13,7 @@ default none in 0.5.2), or with format="markdown" the markdown PR report
 raises ValueError. EB.7: `intent` (the PR title's routed ids and the files
 ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
 (its newest subject is the default title); EC.11: `selection_intent`
-follows it (set SELt's calibrated pick, else LX[IDR,P1]). Needs a `git` binary. Shared
+follows it (set SELt2's calibrated pick, EC.12, else LX[IDR,P1]). Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -148,7 +148,7 @@ def main() -> int:
         sel = t.get("selection_intent") or {}
         c.check("EC.11: uncalibrated selection_intent",
                 (sel.get("set"), sel.get("pick"), sel.get("source"), sel.get("reason"))
-                == ("SELt", "LX[IDR,P1]", "fallback", "absent"), sel)
+                == ("SELt2", "LX[IDR,P1]", "fallback", "absent"), sel)
         intent = t.get("intent") or {}
         c.check("intent fields", (intent.get("title"), intent.get("title_source"), intent.get("fusion"),
                                   intent.get("text")) == ("T007 payment", "arg", "LX[IDR,P1]", "absent"), intent)

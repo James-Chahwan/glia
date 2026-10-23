@@ -527,8 +527,8 @@ fn calibrate_writes_the_record_and_prints_each_pick() {
     assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
     assert!(stdout.contains("SELh0 k1: pick "), "{stdout}");
     assert!(stdout.contains("SELs0 half: pick "), "{stdout}");
-    // EC.11: the default groups include `review` (set SELt).
-    assert!(stdout.contains("SELt k1: pick "), "{stdout}");
+    // EC.11: the default groups include `review` (set SELt2, EC.12).
+    assert!(stdout.contains("SELt2 k1: pick "), "{stdout}");
     assert!(stdout.contains(" queries (online recall@10 "), "{stdout}");
     assert!(
         stdout.lines().last().is_some_and(|l| l.starts_with("wrote ")
