@@ -1,6 +1,7 @@
 //! The long-lived holder of what a ranked answer rebuilds per call otherwise
 //! (EA.2, item 5): PPR indexes, the carry adjacency (B0's walk) and, from
-//! EA.3, the file index and the co-change index.
+//! EA.3, the file index and the co-change index (`[rank-files]` /
+//! `[rank-cochange]`, see those modules).
 //!
 //! An index is found by its [`SourceKey`] and [`PprIndex::matches`] (damping,
 //! direction, iteration cap, epsilon and every edge weight, bit for bit;
@@ -27,6 +28,9 @@ use glia_activation::{ActivationConfig, Direction, PprIndex};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_graph::MergedGraph;
 use serde::Serialize;
+
+use super::cochange::CochangeIndex;
+use super::files::FileIndex;
 
 /// The PPR indexes kept at once; the oldest inserted goes first.
 const MAX_INDEXES: usize = 8;
@@ -72,11 +76,16 @@ pub struct RankCacheStats {
     pub built: usize,
 }
 
-/// What a guard reset clears; EA.3 adds its slots here.
+/// What a guard reset clears.
 #[derive(Default)]
 struct Slots {
     indexes: Vec<(SourceKey, Arc<PprIndex>)>,
     carry: Option<Arc<Adjacency>>,
+    /// The candidate file space (EA.3).
+    files: Option<Arc<FileIndex>>,
+    /// The co-change index over `files` (EA.3): read from the snapshots, or
+    /// given by [`RankCache::with_cochange`].
+    cochange: Option<Arc<CochangeIndex>>,
 }
 
 /// One graph's ranking indexes, shared across calls and threads.
@@ -170,6 +179,97 @@ impl RankCache {
         let adj = Arc::new(Adjacency::carry(merged, &CODE_TABLES));
         let mut slots = lock(&self.slots);
         Arc::clone(slots.carry.get_or_insert(adj))
+    }
+
+    /// The candidate file space of `merged` ([`FileIndex::of`] under this
+    /// cache's repo labels), built once; prints `[rank-files]` when built.
+    pub fn files(&self, merged: &MergedGraph) -> Arc<FileIndex> {
+        if let Some(f) = lock(&self.slots).files.as_ref() {
+            return Arc::clone(f);
+        }
+        let t0 = Instant::now();
+        let built = Arc::new(FileIndex::of(merged, &self.labels));
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let (ix, fresh) = {
+            let mut slots = lock(&self.slots);
+            match slots.files.as_ref() {
+                Some(first) => (Arc::clone(first), false),
+                None => {
+                    slots.files = Some(Arc::clone(&built));
+                    (built, true)
+                }
+            }
+        };
+        if fresh {
+            eprintln!(
+                "[rank-files] holder={} repos={} files={} generated={} not_code={} ms={:.1}",
+                self.holder,
+                ix.repos(),
+                ix.len(),
+                ix.generated(),
+                ix.not_code(),
+                (ms * 10.0).trunc() / 10.0,
+            );
+        }
+        ix
+    }
+
+    /// The co-change index of `merged`'s file space: a given one
+    /// ([`Self::with_cochange`]), else read from each repo root's history
+    /// snapshot once; prints `[rank-cochange]` when it is first built.
+    pub fn cochange(&self, merged: &MergedGraph) -> Arc<CochangeIndex> {
+        if let Some(c) = lock(&self.slots).cochange.as_ref() {
+            return Arc::clone(c);
+        }
+        let files = self.files(merged);
+        let t0 = Instant::now();
+        let built = Arc::new(CochangeIndex::read(&files, &self.roots));
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let (ix, fresh) = {
+            let mut slots = lock(&self.slots);
+            match slots.cochange.as_ref() {
+                Some(first) => (Arc::clone(first), false),
+                None => {
+                    slots.cochange = Some(Arc::clone(&built));
+                    (built, true)
+                }
+            }
+        };
+        if fresh {
+            let s = ix.stats();
+            if self.roots.is_empty() {
+                eprintln!("[rank-cochange] holder={} none reason=no_roots", self.holder);
+            } else if s.snapshots == 0 {
+                eprintln!("[rank-cochange] holder={} none reason=no_snapshot", self.holder);
+            } else {
+                self.mark_cochange("snapshot", &ix, ms);
+            }
+        }
+        ix
+    }
+
+    /// This cache with a caller-supplied co-change index (EA.9's replay, EC's
+    /// calibration) in place of the snapshot read. A guard reset drops it.
+    pub fn with_cochange(self, idx: CochangeIndex) -> Self {
+        let ix = Arc::new(idx);
+        self.mark_cochange("given", &ix, 0.0);
+        lock(&self.slots).cochange = Some(ix);
+        self
+    }
+
+    fn mark_cochange(&self, source: &str, ix: &CochangeIndex, ms: f64) {
+        let s = ix.stats();
+        eprintln!(
+            "[rank-cochange] holder={} source={source} repos={} snapshots={} commits={} train_commits={} files={} pairs={} ms={:.1}",
+            self.holder,
+            s.repos,
+            s.snapshots,
+            s.commits,
+            s.train_commits,
+            s.files,
+            s.pairs,
+            (ms * 10.0).trunc() / 10.0,
+        );
     }
 
     /// Record `merged`'s shape on the first call; on a later call with

@@ -8,7 +8,11 @@
 //! cochange), EA.4 (order); each adds its own `mod` and `pub use` lines here.
 
 mod cache;
+mod cochange;
+mod files;
 mod ranking;
 
 pub use cache::{RankCache, RankCacheStats, SourceKey};
+pub use cochange::{CochangeHistory, CochangeIndex, CochangeStats, c0};
+pub use files::{FileIndex, NOT_CODE_EXTS};
 pub use ranking::{RankBase, Ranking, STRUCTURE_CANDIDATES, WIDE_DAMPING};
