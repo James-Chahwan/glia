@@ -608,6 +608,579 @@ fn id_field_at(text: &str, from: usize, field: &str, id: &str) -> Option<(usize,
     None
 }
 
+// ---------------------------------------------------------------------------
+// Bare-id namespaces and the IDR resolution cascade (EB.5b)
+// ---------------------------------------------------------------------------
+
+/// The size limit of one lineage class (rank_eval `KLin::build(.., 6, ..)`).
+const LINEAGE_CAP: usize = 6;
+
+/// One series an id is defined in, under its namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Series {
+    /// The namespace: `<scope>/<file name>`, or the page path when no member has a scope.
+    pub ns: String,
+    /// A findings series: visible only on its page and from its scope.
+    pub local: bool,
+    /// The namespace's scope (the named member's), if any.
+    pub scope: Option<String>,
+    /// The first member page (in page order) defining the id.
+    pub page: String,
+}
+
+/// Bare ids separated by the page and family that define them (rank_eval
+/// `KNs`), plus the lineage classes over namespaced keys (`KLin`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Namespaces {
+    /// id -> its series, one per namespace, in namespace-component order.
+    pub by_id: BTreeMap<String, Vec<Series>>,
+    /// (page, id) -> the namespace of that page's definition.
+    pub def: BTreeMap<(String, String), String>,
+    /// namespace -> the scopes its member pages sit in.
+    pub scopes: BTreeMap<String, BTreeSet<String>>,
+    /// (namespace, id) -> the defining [`DefRow`] indices (into [`IdDefs::rows`]).
+    pub rows: BTreeMap<(String, String), Vec<usize>>,
+    /// Series (page, family) read.
+    pub series: usize,
+    /// Of them, findings (local) series.
+    pub local: usize,
+    /// Restated-series unions.
+    pub merges: usize,
+    /// Ids defined in more than one namespace.
+    pub multi_series_ids: usize,
+    /// Namespaces (merged components).
+    pub namespaces: usize,
+    /// Lineage unions done.
+    pub lineage_merges: usize,
+    /// Lineage pairs that redirect an old key to a new one.
+    pub lineage_redirects: usize,
+    /// Lineage unions refused for passing the class cap.
+    pub lineage_capped: usize,
+    /// (namespace, id) holding a pending row.
+    pending: BTreeSet<(String, String)>,
+    /// Every scope a namespace spans.
+    all_scopes: BTreeSet<String>,
+    /// key -> its lineage class representative (the least key), class members only.
+    lineage_rep: BTreeMap<String, String>,
+    /// representative -> the class's keys, sorted.
+    lineage_members: BTreeMap<String, Vec<String>>,
+    /// old key -> the new keys it redirects to, in pair order.
+    lineage_redirect: BTreeMap<String, Vec<String>>,
+}
+
+/// The context of one bare mention, strongest evidence first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Ctx<'a> {
+    /// The page the mention sits on, when it is a doc page.
+    pub own_page: Option<&'a str>,
+    /// That page's scope.
+    pub own_scope: Option<&'a str>,
+    /// The scopes the mention's line names ([`line_scopes`]), in line order.
+    pub line_scopes: Vec<String>,
+    /// Scopes earlier commits resolved to, newest first.
+    pub recent: &'a [String],
+    /// The mention's text (its line or subject).
+    pub text: &'a str,
+}
+
+/// One resolved bare mention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Resolved {
+    pub id: String,
+    pub ns: String,
+    /// `fact` / `derived` / `heuristic`.
+    pub tier: &'static str,
+    /// own-page, unique, line-scope, own-scope, global, open-row, one-left,
+    /// recent-scope, newest-scope, sibling.
+    pub route: &'static str,
+}
+
+/// Resolution routes counted for a caller's marker (`routes=<route>:<n>,..`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RouteCounts {
+    /// route (or Err reason) -> count.
+    pub counts: BTreeMap<&'static str, usize>,
+}
+
+impl RouteCounts {
+    /// Count one resolution's route, or its Err reason.
+    pub fn add(&mut self, r: &Result<Resolved, &'static str>) {
+        let k = match r {
+            Ok(r) => r.route,
+            Err(e) => e,
+        };
+        *self.counts.entry(k).or_default() += 1;
+    }
+
+    /// `<route>:<n>,..` in route-name order.
+    pub fn render(&self) -> String {
+        self.counts.iter().map(|(k, n)| format!("{k}:{n}")).collect::<Vec<_>>().join(",")
+    }
+}
+
+/// rank_eval `law_words`: alphanumeric runs, lowercased.
+fn dice_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+}
+
+/// rank_eval `law_dice`: Dice over word multisets; empty against empty is 1.0.
+fn word_dice(a: &str, b: &str) -> f64 {
+    let wa = dice_words(a);
+    let wb = dice_words(b);
+    let mut ca: BTreeMap<&str, i64> = BTreeMap::new();
+    for w in &wa {
+        *ca.entry(w.as_str()).or_default() += 1;
+    }
+    let mut inter = 0i64;
+    for w in &wb {
+        if let Some(c) = ca.get_mut(w.as_str())
+            && *c > 0
+        {
+            *c -= 1;
+            inter += 1;
+        }
+    }
+    let tot = (wa.len() + wb.len()) as f64;
+    if tot == 0.0 { 1.0 } else { 2.0 * inter as f64 / tot }
+}
+
+fn uf_find(p: &mut [usize], mut x: usize) -> usize {
+    while p[x] != x {
+        p[x] = p[p[x]];
+        x = p[x];
+    }
+    x
+}
+
+/// A spec-kit scope: its last two segments are `specs/<NNN-slug>`.
+fn is_spec_scope(scope: &str) -> bool {
+    let mut seg = scope.rsplit('/');
+    seg.next().is_some_and(|d| !d.is_empty()) && seg.next() == Some("specs")
+}
+
+/// One series being read: (page, family) -> its ids' rows.
+struct SerAcc {
+    tracker: bool,
+    local: bool,
+    scope: Option<String>,
+    ids: BTreeMap<String, Vec<usize>>,
+}
+
+impl IdDefs {
+    /// The bare-id namespaces of these rows (rank_eval `KNs::build`) and their
+    /// lineage classes (`KLin::build`). `local_words` are `[ids] local_words`
+    /// (compared lowercased). The result does not depend on row order.
+    pub fn namespaces(&self, local_words: &[String]) -> Namespaces {
+        let words: Vec<String> =
+            local_words.iter().map(|w| w.to_lowercase()).filter(|w| !w.is_empty()).collect();
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        order.sort_by(|&a, &b| {
+            let (ra, rb) = (&self.rows[a], &self.rows[b]);
+            (&ra.page, ra.line, &ra.id, &ra.family, &ra.head).cmp(&(&rb.page, rb.line, &rb.id, &rb.family, &rb.head))
+        });
+        let mut ser: BTreeMap<(String, String), SerAcc> = BTreeMap::new();
+        for &i in &order {
+            let r = &self.rows[i];
+            // a tracker row (no heading words): one series per file, never local
+            let tracker = r.heading_words.is_empty();
+            let is_local = !tracker
+                && words.iter().any(|w| r.heading_words.contains(w.as_str()))
+                && !r.nearest_heading.contains("decision");
+            let e = ser.entry((r.page.clone(), r.family.clone())).or_insert_with(|| SerAcc {
+                tracker,
+                local: is_local,
+                scope: r.scope.clone(),
+                ids: BTreeMap::new(),
+            });
+            e.local = e.local && is_local;
+            e.ids.entry(r.id.clone()).or_default().push(i);
+        }
+        let keys: Vec<&(String, String)> = ser.keys().collect();
+        let accs: Vec<&SerAcc> = ser.values().collect();
+        let mut out = Namespaces { series: keys.len(), ..Namespaces::default() };
+        out.local = accs.iter().filter(|a| a.local).count();
+        let mut parent: Vec<usize> = (0..keys.len()).collect();
+        let head = |a: &SerAcc, id: &str| -> String {
+            a.ids.get(id).and_then(|v| v.first()).map(|&i| self.rows[i].head.clone()).unwrap_or_default()
+        };
+        for i in 0..keys.len() {
+            for j in i + 1..keys.len() {
+                let (a, b) = (accs[i], accs[j]);
+                if keys[i].1 != keys[j].1 || keys[i].0 == keys[j].0 || a.local || b.local || a.tracker || b.tracker {
+                    continue;
+                }
+                let shared: Vec<&String> = a.ids.keys().filter(|k| b.ids.contains_key(*k)).collect();
+                if shared.len() < 3 {
+                    continue;
+                }
+                let dice: f64 =
+                    shared.iter().map(|k| word_dice(&head(a, k), &head(b, k))).sum::<f64>() / shared.len() as f64;
+                if dice >= 0.3 {
+                    let (ra, rb) = (uf_find(&mut parent, i), uf_find(&mut parent, j));
+                    if ra != rb {
+                        parent[rb] = ra;
+                        out.merges += 1;
+                    }
+                }
+            }
+        }
+        let mut comp: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..keys.len() {
+            let r = uf_find(&mut parent, i);
+            comp.entry(r).or_default().push(i);
+        }
+        out.namespaces = comp.len();
+        let name0 = |i: usize| -> String {
+            let page = &keys[i].0;
+            match &accs[i].scope {
+                Some(s) => format!("{s}/{}", page.rsplit('/').next().unwrap_or(page)),
+                None => page.clone(),
+            }
+        };
+        for members in comp.values() {
+            let scoped = members.iter().filter(|&&i| accs[i].scope.is_some()).min_by_key(|&&i| name0(i));
+            let (name, scope) = match scoped {
+                Some(&i) => (name0(i), accs[i].scope.clone()),
+                None => (members.iter().map(|&i| name0(i)).min().unwrap_or_default(), None),
+            };
+            for &i in members {
+                let acc = accs[i];
+                let page = &keys[i].0;
+                if let Some(s) = &acc.scope {
+                    out.scopes.entry(name.clone()).or_default().insert(s.clone());
+                    out.all_scopes.insert(s.clone());
+                }
+                for (id, idxs) in &acc.ids {
+                    out.rows.entry((name.clone(), id.clone())).or_default().extend(idxs.iter().copied());
+                    if idxs.iter().any(|&x| self.rows[x].state == RowState::Pending) {
+                        out.pending.insert((name.clone(), id.clone()));
+                    }
+                    out.def.insert((page.clone(), id.clone()), name.clone());
+                    let v = out.by_id.entry(id.clone()).or_default();
+                    if !v.iter().any(|x| x.ns == name) {
+                        v.push(Series { ns: name.clone(), local: acc.local, scope: scope.clone(), page: page.clone() });
+                    }
+                }
+            }
+        }
+        out.multi_series_ids = out.by_id.values().filter(|v| v.len() > 1).count();
+        out.build_lineage(self, &order);
+        out
+    }
+}
+
+impl Namespaces {
+    /// A namespaced key, `<ns>|<id>`.
+    pub fn key(ns: &str, id: &str) -> String {
+        format!("{ns}|{id}")
+    }
+
+    /// rank_eval `KLin::build` over EB.5a's lineage pairs, each id resolved in
+    /// its row's own page context: a pair whose ends have no other partner
+    /// merges into one class (union-find in key order, capped at
+    /// [`LINEAGE_CAP`]); any other pair redirects the old key to the new one.
+    fn build_lineage(&mut self, defs: &IdDefs, order: &[usize]) {
+        let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
+        for &i in order {
+            let r = &defs.rows[i];
+            if r.lineage.is_empty() {
+                continue;
+            }
+            let cx = Ctx { own_page: Some(r.page.as_str()), own_scope: r.scope.as_deref(), ..Ctx::default() };
+            for (new, old, _) in &r.lineage {
+                let (Ok(n), Ok(o)) = (self.resolve(new, &cx), self.resolve(old, &cx)) else { continue };
+                let (kn, ko) = (Namespaces::key(&n.ns, new), Namespaces::key(&o.ns, old));
+                if kn != ko {
+                    pairs.insert((kn, ko));
+                }
+            }
+        }
+        let mut part: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (n, o) in &pairs {
+            part.entry(n.as_str()).or_default().insert(o.as_str());
+            part.entry(o.as_str()).or_default().insert(n.as_str());
+        }
+        let one = |k: &str| part.get(k).is_some_and(|s| s.len() == 1);
+        let mut merge: Vec<(&String, &String)> = Vec::new();
+        let mut redirect: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (n, o) in &pairs {
+            if one(n) && one(o) {
+                merge.push((n, o));
+            } else {
+                redirect.entry(o.clone()).or_default().push(n.clone());
+                self.lineage_redirects += 1;
+            }
+        }
+        let mut ix: BTreeMap<String, usize> = BTreeMap::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut parent: Vec<usize> = Vec::new();
+        let mut size: Vec<usize> = Vec::new();
+        for (a, b) in merge {
+            let mut id = |k: &String| -> usize {
+                if let Some(&i) = ix.get(k) {
+                    return i;
+                }
+                let i = names.len();
+                ix.insert(k.clone(), i);
+                names.push(k.clone());
+                parent.push(i);
+                size.push(1);
+                i
+            };
+            let (ia, ib) = (id(a), id(b));
+            let (ra, rb) = (uf_find(&mut parent, ia), uf_find(&mut parent, ib));
+            if ra == rb {
+                continue;
+            }
+            if size[ra] + size[rb] > LINEAGE_CAP {
+                self.lineage_capped += 1;
+                continue;
+            }
+            let (big, small) = if size[ra] >= size[rb] { (ra, rb) } else { (rb, ra) };
+            parent[small] = big;
+            size[big] += size[small];
+            self.lineage_merges += 1;
+        }
+        let mut classes: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (i, name) in names.iter().enumerate() {
+            let r = uf_find(&mut parent, i);
+            classes.entry(r).or_default().push(name.clone());
+        }
+        for mut members in classes.into_values() {
+            if members.len() < 2 {
+                continue;
+            }
+            members.sort();
+            let rep = members[0].clone();
+            for m in &members {
+                self.lineage_rep.insert(m.clone(), rep.clone());
+            }
+            self.lineage_members.insert(rep, members);
+        }
+        self.lineage_redirect = redirect;
+    }
+
+    fn class_of<'a>(&'a self, k: &'a str) -> &'a str {
+        self.lineage_rep.get(k).map_or(k, String::as_str)
+    }
+
+    /// rank_eval `KLin::exp`, as keys: every member of `key`'s lineage class,
+    /// then of the classes it redirects to, in insertion order (members sorted
+    /// within a class). A key with no lineage expands to itself.
+    pub fn expand(&self, key: &str) -> Vec<String> {
+        let mut reps: Vec<&str> = vec![self.class_of(key)];
+        for n in self.lineage_redirect.get(key).into_iter().flatten() {
+            let c = self.class_of(n);
+            if !reps.contains(&c) {
+                reps.push(c);
+            }
+        }
+        let mut out = Vec::new();
+        for r in reps {
+            match self.lineage_members.get(r) {
+                Some(ms) => out.extend(ms.iter().cloned()),
+                None => out.push(r.to_string()),
+            }
+        }
+        out
+    }
+
+    fn in_scope(&self, x: &Series, c: &str) -> bool {
+        x.scope.as_deref() == Some(c) || self.scopes.get(&x.ns).is_some_and(|s| s.contains(c))
+    }
+
+    /// rank_eval `KNs::resolve`'s pick: one visible series in the first scope
+    /// of `list` that has any; an exported one when several.
+    fn pick(&self, vis: &[&Series], list: &[&str]) -> Option<String> {
+        for c in list {
+            let hit: Vec<&&Series> = vis.iter().filter(|x| self.in_scope(x, c)).collect();
+            if hit.len() == 1 {
+                return Some(hit[0].ns.clone());
+            }
+            let exported: Vec<&&&Series> = hit.iter().filter(|x| !x.local).collect();
+            if exported.len() == 1 {
+                return Some(exported[0].ns.clone());
+            }
+        }
+        None
+    }
+
+    /// Resolve a bare mention of `id`, first rule that applies: own page,
+    /// undefined, local-only, unique, line-scope, own-scope, global, then
+    /// rank_eval `r2_pick` over the pending pool (open-row / one-left,
+    /// recent-scope, newest-scope).
+    pub fn resolve(&self, id: &str, cx: &Ctx) -> Result<Resolved, &'static str> {
+        let ok = |ns: String, tier: &'static str, route: &'static str| {
+            Ok(Resolved { id: id.to_string(), ns, tier, route })
+        };
+        if let Some(p) = cx.own_page
+            && let Some(n) = self.def.get(&(p.to_string(), id.to_string()))
+        {
+            return ok(n.clone(), "fact", "own-page");
+        }
+        let Some(all) = self.by_id.get(id) else { return Err("undefined") };
+        let vis: Vec<&Series> = all
+            .iter()
+            .filter(|x| {
+                !x.local || Some(x.page.as_str()) == cx.own_page || (x.scope.is_some() && x.scope.as_deref() == cx.own_scope)
+            })
+            .collect();
+        match vis.len() {
+            0 => return Err("local-only"),
+            1 => return ok(vis[0].ns.clone(), "derived", "unique"),
+            _ => {}
+        }
+        let line: Vec<&str> = cx.line_scopes.iter().map(String::as_str).collect();
+        if let Some(n) = self.pick(&vis, &line) {
+            return ok(n, "derived", "line-scope");
+        }
+        if let Some(n) = cx.own_scope.and_then(|s| self.pick(&vis, &[s])) {
+            return ok(n, "derived", "own-scope");
+        }
+        let global: Vec<&&Series> = vis.iter().filter(|x| x.scope.is_none()).collect();
+        if global.len() == 1 {
+            return ok(global[0].ns.clone(), "derived", "global");
+        }
+        let pend: Vec<&Series> =
+            vis.iter().copied().filter(|x| self.pending.contains(&(x.ns.clone(), id.to_string()))).collect();
+        let pool: Vec<&Series> = if pend.is_empty() { vis.clone() } else { pend.clone() };
+        if pool.len() == 1 {
+            let route = if vis.len() > 1 && pend.len() == 1 { "open-row" } else { "one-left" };
+            return ok(pool[0].ns.clone(), "derived", route);
+        }
+        for r in cx.recent {
+            let mut hit: Vec<&Series> = pool.iter().copied().filter(|p| self.in_scope(p, r)).collect();
+            hit.sort_by(|a, b| (a.local, &a.ns).cmp(&(b.local, &b.ns)));
+            if let Some(h) = hit.first() {
+                return ok(h.ns.clone(), "heuristic", "recent-scope");
+            }
+        }
+        let newest = pool
+            .iter()
+            .filter_map(|p| p.scope.as_deref().filter(|s| is_spec_scope(s)).map(|s| (s, p)))
+            .max_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| b.ns.cmp(&a.ns)));
+        let n = match newest {
+            Some((_, p)) => p.ns.clone(),
+            None => pool.iter().map(|p| p.ns.clone()).min().unwrap_or_default(),
+        };
+        ok(n, "heuristic", "newest-scope")
+    }
+
+    /// Resolve every mention of one line, then rank_eval `KNs::siblings`: a
+    /// mention resolved by `recent-scope` / `newest-scope` takes the namespace
+    /// a same-family mention of the line got by another route, when that
+    /// namespace defines it (route `sibling`, derived). When `cx.line_scopes`
+    /// is empty the line's own [`line_scopes`] are read.
+    pub fn resolve_line(&self, line: &str, mentions: &[IdMention], cx: &Ctx) -> Vec<Result<Resolved, &'static str>> {
+        let own;
+        let cx = if cx.line_scopes.is_empty() {
+            let mut c = cx.clone();
+            c.line_scopes = line_scopes(line, self);
+            own = c;
+            &own
+        } else {
+            cx
+        };
+        let mut res: Vec<Result<Resolved, &'static str>> = mentions.iter().map(|m| self.resolve(&m.id, cx)).collect();
+        let weak = |r: &str| matches!(r, "recent-scope" | "newest-scope");
+        for i in 0..mentions.len() {
+            let Ok(ri) = &res[i] else { continue };
+            if !weak(ri.route) {
+                continue;
+            }
+            let id = &mentions[i].id;
+            let mut got: Option<String> = None;
+            for j in 0..mentions.len() {
+                if j == i || mentions[j].family != mentions[i].family {
+                    continue;
+                }
+                if let Ok(rj) = &res[j]
+                    && !weak(rj.route)
+                    && self.by_id.get(id).is_some_and(|v| v.iter().any(|x| x.ns == rj.ns))
+                {
+                    got = Some(rj.ns.clone());
+                    break;
+                }
+            }
+            if let Some(n) = got {
+                res[i] = Ok(Resolved { id: id.clone(), ns: n, tier: "derived", route: "sibling" });
+            }
+        }
+        res
+    }
+
+    /// Print the `[id-ns]` marker for repo `label`.
+    pub fn report(&self, label: &str) {
+        eprintln!(
+            "[id-ns] repo={label} series={} local={} merged={} multi_series_ids={} namespaces={} lineage_merges={} lineage_redirects={} lineage_capped={}",
+            self.series,
+            self.local,
+            self.merges,
+            self.multi_series_ids,
+            self.namespaces,
+            self.lineage_merges,
+            self.lineage_redirects,
+            self.lineage_capped
+        );
+    }
+}
+
+/// The scopes `line` names, in line order, each once: a path token under a
+/// scope dir (or the dir itself), a token equal to a scope dir's last segment,
+/// or a spec-kit number (>= 3 digits) within one token of the word `spec` /
+/// `specs` that names exactly one `specs/<NNN-..>` scope of `ns`.
+pub fn line_scopes(line: &str, ns: &Namespaces) -> Vec<String> {
+    let toks: Vec<&str> = line
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))))
+        .map(|t| t.trim_end_matches('.'))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let push = |s: &String, out: &mut Vec<String>| {
+        if !out.contains(s) {
+            out.push(s.clone());
+        }
+    };
+    for (t, tok) in toks.iter().enumerate() {
+        if tok.is_empty() {
+            continue;
+        }
+        for s in &ns.all_scopes {
+            let under = *tok == s.as_str() || tok.strip_prefix(s.as_str()).is_some_and(|r| r.starts_with('/'));
+            let last = s.rsplit('/').next() == Some(*tok);
+            if under || last {
+                push(s, &mut out);
+            }
+        }
+        let lower = tok.to_ascii_lowercase();
+        if lower != "spec" && lower != "specs" {
+            continue;
+        }
+        let near = toks.iter().enumerate().skip(t.saturating_sub(2)).take(t + 3 - t.saturating_sub(2)).filter(|(j, _)| *j != t);
+        for (_, near_tok) in near {
+            let digits: String = near_tok.chars().take_while(char::is_ascii_digit).collect();
+            if digits.len() < 3 {
+                continue;
+            }
+            let prefix = format!("{digits}-");
+            let named: Vec<&String> = ns
+                .all_scopes
+                .iter()
+                .filter(|s| is_spec_scope(s) && s.rsplit('/').next().is_some_and(|d| d.starts_with(&prefix)))
+                .collect();
+            if let [one] = named.as_slice() {
+                push(one, &mut out);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
