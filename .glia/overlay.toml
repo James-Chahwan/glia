@@ -1,0 +1,18 @@
+# glia's own overlay (EB.9). Only `[ids]` so far: the vocabulary typed id routing (IDR,
+# glia_engine::intent) reads. Packet ids are `<UPPER>.<N><letter?>` (EB.9, DT.5h, E0.1); the
+# leap packet files define them, each packet naming the files it touches. The packet files
+# carry no state field, so every packet row reads as pending (no `state`).
+version = 2
+
+[ids]
+patterns = ["{U}.{N}{l?}"]
+
+[[ids.tracker]]
+path = "dev-notes/leap-*-packets.json"
+list = "packets"
+files = "files_touched"
+
+[[ids.tracker]]
+path = "dev-notes/leap-packets.json"
+list = "packets"
+files = "files_touched"

@@ -77,6 +77,17 @@
 //! judges every gated (shape, ranker, metric) row new - base with the commit-cluster bootstrap
 //! of `paired` and Holm over the changed rows (exit 1 on a drop, 2 on drift or a missing
 //! ranker); see `gate_check_main`.
+//!
+//! Engine intent parity (0.5.3, EB.9): `--engine on` (with `--round1 on --round2 on`) adds the
+//! ENG-* rows, held apart and appended after every other row (selections and gates included),
+//! so no earlier row's value or position moves: ENG-T1s-raw (`intent::text::TextIndex::from_docs`
+//! over the strictly older commits' raw `%B`, which must equal T1s bit for bit), ENG-T1s (the
+//! messages `clean_message`ed as `history sync` stores them), ENG-T1s-plain (plain `git log`
+//! order), ENG-IDR (`intent::idr::route` at each parent, the parent's `[ids]` or
+//! `--eng-overlay <file>`'s), and the `algo::fuse` LX fusions over the harness's own P1 / T1s
+//! (single, review and find shapes). Fired_on: `[rank-eval] engine parity repo=<label>
+//! t1s_raw_mismatch=<q>/<n> ..`; the round-1 md gains `### Engine parity`, the JSON
+//! `engine_intent_parity`. Parity rows, not gated.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -85,14 +96,22 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 
 use glia_activation::algo::community::{self as comm, CommunityOptions, WeightedGraph};
+use glia_activation::algo::fuse;
 use glia_activation::algo::ppr::PushPpr;
 use glia_activation::algo::reach;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
 use glia_activation::{ActivationConfig, ActivationPlan, Direction, Specificity};
+use glia_code_domain::glia_config::parse_str;
 use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::snapshots::clean_message;
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId};
 use glia_engine::find::FindOptions;
+use glia_engine::intent::defs::{Tree, read_defs};
+use glia_engine::intent::idr as eidr;
+use glia_engine::intent::ids::IdVocab;
+use glia_engine::intent::paths::PathResolver;
+use glia_engine::intent::text::{Candidates, TextIndex};
 use glia_engine::pack::PackArgs;
 use glia_engine::rank::{CochangeIndex, FileIndex, NOT_CODE_EXTS, RankCache, Ranking, STRUCTURE_CANDIDATES};
 use glia_engine::{BlastOptions, Locator, default_keying, entrypoint_reachable, generate_one, service_of};
@@ -237,6 +256,12 @@ struct Args {
     /// harness's candidate files and P1 / PT* / B0 / H10 / H10[PT*] / H10[B0] per query, fed the
     /// replay's leak-free prefix co-change counts (needs `--pick base,d85`); default off.
     engine_parity: String,
+    /// `on` (EB.9, needs `--round1 on --round2 on`): the ENG-* rankers, T1s, IDR and the LX
+    /// fusions recomputed through `glia_engine::intent` + `algo::fuse` (parity rows, not gated).
+    engine: String,
+    /// `--engine on`: an overlay.toml whose `[ids]` ENG-IDR reads at a parent with none of its
+    /// own (default: none, the engine's default vocabulary).
+    eng_overlay: String,
     /// The private config (JSON) the Kina-only modes read; `GLIA_RANK_PRIVATE` when unset.
     private: String,
 }
@@ -285,6 +310,8 @@ fn parse_args() -> Args {
         gate_trim: String::new(),
         r3_selx: String::new(),
         engine_parity: "off".into(),
+        engine: "off".into(),
+        eng_overlay: String::new(),
         private: std::env::var("GLIA_RANK_PRIVATE").unwrap_or_default(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -330,6 +357,8 @@ fn parse_args() -> Args {
             "--r3-compare" => a.r3_compare = v,
             "--r3-selx" => a.r3_selx = v,
             "--engine-parity" => a.engine_parity = v,
+            "--engine" => a.engine = v,
+            "--eng-overlay" => a.eng_overlay = v,
             "--gate-check" => a.gate_check = v,
             "--gate-base" => a.gate_base = v,
             "--gate-new" => a.gate_new = v,
@@ -340,6 +369,8 @@ fn parse_args() -> Args {
         i += 2;
     }
     assert!(a.engine_parity == "on" || a.engine_parity == "off", "--engine-parity: expected on or off");
+    assert!(a.engine == "on" || a.engine == "off", "--engine: expected on or off");
+    assert!(a.engine == "off" || (a.round1 == "on" && a.round2 == "on"), "--engine on needs --round1 on --round2 on");
     let offline = !a.r3_compare.is_empty() || !a.gate_check.is_empty() || !a.gate_trim.is_empty();
     assert!(offline || (!a.repo.is_empty() && !a.git.is_empty()), "--repo and --git are required");
     a
@@ -1148,12 +1179,29 @@ struct Out {
     r1cov: Vec<(String, bool)>,
     /// Round 3: earlier rankers the round-3 bank recomputed differently (must stay 0).
     r3_bad: f64,
+    /// `--engine on` (EB.9): the ENG-* rows, held apart until `eng_append` puts them after every
+    /// other row (the selections and gates included), so no earlier row's position moves.
+    eng: Vec<(String, [f64; 5])>,
 }
 
 impl Out {
     fn push(&mut self, name: impl Into<String>, key: &[Key], seed: usize, targets: &[u32]) {
         self.names.push(name.into());
         self.m.push(evaluate(key, seed, targets));
+    }
+
+    fn push_eng(&mut self, name: &str, key: &[Key], seed: usize, targets: &[u32]) {
+        self.eng.push((name.to_string(), evaluate(key, seed, targets)));
+    }
+}
+
+/// Moves every held ENG-* row (`Out::eng`) after the last row of each query.
+fn eng_append(outs: &mut [Out]) {
+    for o in outs {
+        for (n, m) in std::mem::take(&mut o.eng) {
+            o.names.push(n);
+            o.m.push(m);
+        }
     }
 }
 
@@ -1517,6 +1565,303 @@ fn engine_parity(ctx: &Ctx, queries: &[Query], tqs: &[TQuery], tc_sha: &[String]
     ParityReport { json: serde_json::Value::Object(js), md, first_single }
 }
 
+// ============================================================================
+// Engine intent parity (EB.9): `--engine on`
+// ============================================================================
+
+/// `glia history sync`'s default `--max-commits`: the history snapshot holds only the newest
+/// this-many non-merge commits, so the engine's rename map (`intent::paths::rename_pairs`) covers
+/// only their renames, where `git_renames` reads all history. ENG-LX[IDRw,..] measures that.
+const ENG_RENAME_WINDOW: usize = 2000;
+
+/// One test commit's intent signals computed by the engine (`glia_engine::intent`), dense over
+/// the candidate files, from inputs this harness already reads (the strictly older commits, the
+/// test commit's parent): the ENG-* rankers of `--engine on`.
+struct EngCommit {
+    /// `TextIndex::from_docs` over the older commits' raw `%B`, `--topo-order` (T1s' own corpus).
+    t1s_raw: Vec<f64>,
+    /// The same docs as `history sync` stores them (`clean_message`: subject `\n` body).
+    t1s_clean: Vec<f64>,
+    /// The raw docs in plain `git log` order (the snapshot's), not `--topo-order`.
+    t1s_plain: Vec<f64>,
+    /// `intent::idr::route` of the subject at the parent, renames over all history.
+    idr: Vec<f64>,
+    /// The same with only the snapshot window's renames (`ENG_RENAME_WINDOW`).
+    idr_win: Vec<f64>,
+    /// The route of every id row `route` returned (`RoutedId::route`).
+    routes: Vec<&'static str>,
+    has_id: bool,
+    /// ENG-T1s-raw's top 20 files or their score bits differ from the harness's T1s.
+    mismatch: bool,
+}
+
+/// The positive scores' top 20 as (file, score bits), by score then file: the parity unit.
+fn eng_top20(v: &[(u32, f64)]) -> Vec<(u32, u64)> {
+    let mut s: Vec<(u32, f64)> = v.iter().copied().filter(|x| x.1 > 0.0).collect();
+    s.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    s.truncate(20);
+    s.into_iter().map(|(f, x)| (f, x.to_bits())).collect()
+}
+
+/// A fused order (`algo::fuse`, best first) as harness keys: position i of n keys n - i, so
+/// `better` reproduces the order; a file outside it (an excluded seed) keys 0.
+fn eng_keys(order: &[usize], nf: usize) -> Vec<Key> {
+    let mut k = vec![[0.0; 3]; nf];
+    for (pos, &f) in order.iter().enumerate() {
+        k[f] = [(order.len() - pos) as f64, 0.0, 0.0];
+    }
+    k
+}
+
+/// `(old, new)` renames, oldest first, as `git_renames`, kept only from commits in `win`.
+fn git_renames_in(git: &str, rev: &str, win: &HashSet<String>) -> Vec<(String, String)> {
+    let text = git_text(git, &["log", "--no-merges", "-M", "--diff-filter=R", "--name-status", "--format=%x1e%H", rev]).unwrap_or_default();
+    let mut out = Vec::new();
+    for rec in text.split('\x1e').skip(1) {
+        let mut lines = rec.lines();
+        if !lines.next().is_some_and(|sha| win.contains(sha.trim())) {
+            continue;
+        }
+        for l in lines {
+            let mut p = l.split('\t');
+            if p.next().is_some_and(|st| st.starts_with('R'))
+                && let (Some(a), Some(b)) = (p.next(), p.next())
+            {
+                out.push((a.to_string(), b.to_string()));
+            }
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// `TextIndex::from_docs` over `commits[ix]` in that order (oldest first), the text of commit
+/// `j` `text(j)`, scored for `q`.
+fn eng_t1s<'a>(nf: usize, commits: &'a [Commit], ix: &[usize], text: impl Fn(usize) -> &'a str, q: &str) -> Vec<f64> {
+    TextIndex::from_docs(nf, ix.iter().map(|&j| (commits[j].sha.as_str(), text(j), commits[j].files.clone()))).scores(q)
+}
+
+/// The ENG-* inputs of every test commit (aligned with `test_idx`). Text: `TextIndex::from_docs`
+/// over `commits[..k]` (from_docs skips what `train_ok` skips), queried with the subject. IDR:
+/// `read_defs` at the parent with the vocabulary of the parent's `.glia/overlay.toml` (else
+/// `--eng-overlay`'s file, else the defaults), `PathResolver` over the engine's `Candidates`
+/// and `git_renames`, recent scopes over the earlier test commits' subjects.
+fn eng_build(args: &Args, merged: &MergedGraph, g: &Graph, commits: &[Commit], test_idx: &[usize]) -> Vec<EngCommit> {
+    let t0 = Instant::now();
+    let nf = g.paths.len();
+    let fi = FileIndex::of(merged, &BTreeMap::new());
+    let repo = merged.graphs.first().map_or(0, |gr| gr.repo.0);
+    let cands = Candidates::of(&fi, repo);
+    assert!(cands.paths == g.paths, "[rank-eval] engine parity: Candidates differ from the harness's candidate files");
+    let deg_differ = cands.deg.iter().zip(&g.file_deg).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    let cleaned: Vec<String> = commits
+        .par_iter()
+        .map(|c| {
+            let (s, b, _) = clean_message(&c.msg);
+            format!("{s}\n{b}")
+        })
+        .collect();
+    let plain = git_text(&args.git, &["log", "--no-merges", "--format=%H", &args.rev]).expect("git log plain order");
+    let plain_pos: HashMap<&str, usize> = plain.lines().enumerate().map(|(i, s)| (s, i)).collect();
+    let parents = git_parents(&args.git, &args.rev);
+    let renames = git_renames(&args.git, &args.rev);
+    let win: HashSet<String> = git_text(&args.git, &["rev-list", "--no-merges", &format!("--max-count={ENG_RENAME_WINDOW}"), &args.rev])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let renames_win = git_renames_in(&args.git, &args.rev, &win);
+    let fallback: Option<String> =
+        (!args.eng_overlay.is_empty()).then(|| std::fs::read_to_string(&args.eng_overlay).expect("--eng-overlay: read"));
+    let vocab_at = |p: &str| -> IdVocab {
+        match git_text(&args.git, &["show", &format!("{p}:.glia/overlay.toml")]).or_else(|| fallback.clone()) {
+            Some(text) => IdVocab::from_config(Some(&parse_str(&text))),
+            None => IdVocab::default(),
+        }
+    };
+    let out: Vec<EngCommit> = (0..test_idx.len())
+        .into_par_iter()
+        .map(|o| {
+            let k = test_idx[o];
+            let c = &commits[k];
+            let q = subject(&c.msg);
+            let topo: Vec<usize> = (0..k).collect();
+            let mut by_plain = topo.clone();
+            by_plain.sort_by_key(|&j| std::cmp::Reverse(plain_pos.get(commits[j].sha.as_str()).copied().unwrap_or(usize::MAX)));
+            let t1s_raw = eng_t1s(nf, commits, &topo, |j| commits[j].msg.as_str(), q);
+            let t1s_clean = eng_t1s(nf, commits, &topo, |j| cleaned[j].as_str(), q);
+            let t1s_plain = eng_t1s(nf, commits, &by_plain, |j| commits[j].msg.as_str(), q);
+            let Some(p) = parents.get(&c.sha).and_then(|x| x.0.clone()) else {
+                let z = vec![0.0; nf];
+                return EngCommit { t1s_raw, t1s_clean, t1s_plain, idr: z.clone(), idr_win: z, routes: Vec::new(), has_id: false, mismatch: false };
+            };
+            let tree = Tree::Rev { repo: std::path::Path::new(&args.git), sha: p.clone() };
+            let vocab = vocab_at(&p);
+            let defs = read_defs(&tree, &[], &vocab, None);
+            let ns = defs.namespaces(&vocab.local_words);
+            let earlier: Vec<&str> = test_idx[..o].iter().rev().map(|&j| subject(&commits[j].msg)).collect();
+            let recent = eidr::recent_scopes(&earlier, &ns, &vocab);
+            let paths = PathResolver::new(&cands, &renames);
+            let side = eidr::IdrSide::new(&cands, &paths, &defs, &ns, &vocab, &tree).labelled(&args.label, "rank_eval");
+            let x = eidr::route(q, &side, &recent);
+            let idr_win = if renames_win == renames {
+                x.idr.clone()
+            } else {
+                let pw = PathResolver::new(&cands, &renames_win);
+                let sw = eidr::IdrSide::new(&cands, &pw, &defs, &ns, &vocab, &tree).labelled(&args.label, "rank_eval-window");
+                eidr::route(q, &sw, &recent).idr
+            };
+            let routes = x.ids.iter().map(|r| r.route).collect();
+            EngCommit { t1s_raw, t1s_clean, t1s_plain, idr: x.idr, idr_win, routes, has_id: x.has_id, mismatch: false }
+        })
+        .collect();
+    eprintln!(
+        "[rank-eval] engine inputs repo={} test_commits={} degree_differ={deg_differ} renames={} window_renames={} s={:.1}",
+        args.label,
+        out.len(),
+        renames.len(),
+        renames_win.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    out
+}
+
+/// ENG-* rankers of the single-seed shape (appended after every other ranker): the engine's
+/// T1s variants and IDR, and the LX fusions through `algo::fuse` over the harness's own P1 and
+/// T1s, so a difference from LX[IDR,P1] / LX[IDR,H9s50] isolates IDR.
+fn eng_rankers_single(out: &mut Out, e: &EngCommit, r: &R1Commit, seed: usize, t: &[u32], p1: &[f64]) {
+    let nf = p1.len();
+    let tie: Vec<u32> = (0..nf as u32).collect();
+    let mut excl = vec![false; nf];
+    excl[seed] = true;
+    let z = |v: &[f64]| -> Vec<f64> {
+        let mut x = v.to_vec();
+        x[seed] = 0.0;
+        x
+    };
+    let t1s = dense(nf, &r.t1s, seed);
+    let (idr, idr_win) = (z(&e.idr), z(&e.idr_win));
+    let h9s50 = fuse::blend(0.5, &fuse::minmax(&t1s, &excl), &fuse::minmax(p1, &excl));
+    out.push_eng("ENG-T1s-raw", &scalar(&z(&e.t1s_raw)), seed, t);
+    out.push_eng("ENG-T1s", &scalar(&z(&e.t1s_clean)), seed, t);
+    out.push_eng("ENG-T1s-plain", &scalar(&z(&e.t1s_plain)), seed, t);
+    out.push_eng("ENG-IDR", &scalar(&idr), seed, t);
+    out.push_eng("ENG-LX[IDR,P1]", &eng_keys(&fuse::lx(&idr, &[p1], &tie, &excl), nf), seed, t);
+    out.push_eng("ENG-LX[IDR,H9s50]", &eng_keys(&fuse::lx(&idr, &[&h9s50], &tie, &excl), nf), seed, t);
+    out.push_eng("ENG-LX[IDRw,H9s50]", &eng_keys(&fuse::lx(&idr_win, &[&h9s50], &tie, &excl), nf), seed, t);
+}
+
+/// ENG-* rankers of a transfer query (appended after the ANS rankers): review shapes
+/// ENG-LX[IDR,P1] / ENG-LX[IDR,H9s50], the find shape ENG-T1s and ENG-LX[IDR,T1s] with the
+/// find shape's tie rule (`r3_bank_find`: the file's degree after the last key; the engine's
+/// `find_files` is `lex_order([idr, text, degree])`).
+fn eng_bank_transfer(e: &EngCommit, excl: &[bool], p1: &[f64], t1s: &[f64], deg: &[f64], find: bool) -> Vec<(String, Vec<Key>)> {
+    let nf = p1.len();
+    let tie: Vec<u32> = (0..nf as u32).collect();
+    if find {
+        return vec![
+            ("ENG-T1s".into(), eng_keys(&fuse::lex_order(&[&e.t1s_clean, deg], &tie, excl), nf)),
+            ("ENG-LX[IDR,T1s]".into(), eng_keys(&fuse::lex_order(&[&e.idr, t1s, deg], &tie, excl), nf)),
+        ];
+    }
+    let h9s50 = fuse::blend(0.5, &fuse::minmax(t1s, excl), &fuse::minmax(p1, excl));
+    vec![
+        ("ENG-LX[IDR,P1]".into(), eng_keys(&fuse::lx(&e.idr, &[p1], &tie, excl), nf)),
+        ("ENG-LX[IDR,H9s50]".into(), eng_keys(&fuse::lx(&e.idr, &[&h9s50], &tie, excl), nf)),
+    ]
+}
+
+/// The contrasts `--engine on` reports, per shape: (ranker, against).
+const ENG_CONTRASTS: [(&str, &[(&str, &str)]); 3] = [
+    (
+        "single",
+        &[
+            ("ENG-T1s-raw", "T1s"),
+            ("ENG-T1s", "T1s"),
+            ("ENG-T1s-plain", "T1s"),
+            ("ENG-IDR", "IDR"),
+            ("ENG-LX[IDR,P1]", "LX[IDR,P1]"),
+            ("ENG-LX[IDR,P1]", "P1"),
+            ("ENG-LX[IDR,H9s50]", "LX[IDR,H9s50]"),
+            ("ENG-LX[IDR,H9s50]", "H9s50"),
+            ("ENG-LX[IDRw,H9s50]", "ENG-LX[IDR,H9s50]"),
+        ],
+    ),
+    ("review", &[("ENG-LX[IDR,P1]", "LX[IDR,P1]"), ("ENG-LX[IDR,P1]", "P1"), ("ENG-LX[IDR,H9s50]", "LX[IDR,H9s50]"), ("ENG-LX[IDR,H9s50]", "H9s50")]),
+    ("find", &[("ENG-T1s", "T1s"), ("ENG-LX[IDR,T1s]", "LX[IDR,T1s]"), ("ENG-LX[IDR,T1s]", "T1s")]),
+];
+
+/// The `--engine on` report: the fired_on line, the JSON and the round-1 md's
+/// `### Engine parity` table (each contrast's r10 and MRR difference with its commit-cluster CI,
+/// and the queries where the two differ at all).
+fn eng_report(label: &str, results: &[Out], r1s: &[R1Commit], transfer: &[(Vec<Out>, Vec<usize>)], bi: &BootIn) -> (serde_json::Value, String) {
+    let ntc = r1s.len();
+    let eng: Vec<&EngCommit> = r1s.iter().filter_map(|r| r.eng.as_ref()).collect();
+    let mismatch = eng.iter().filter(|e| e.mismatch).count();
+    let mut routes: BTreeMap<&str, usize> = BTreeMap::new();
+    for e in &eng {
+        for r in &e.routes {
+            *routes.entry(r).or_default() += 1;
+        }
+    }
+    let routes_s = if routes.is_empty() { "none".to_string() } else { routes.iter().map(|(r, n)| format!("{r}:{n}")).collect::<Vec<_>>().join(",") };
+    let has_id = eng.iter().filter(|e| e.has_id).count();
+    let mean_of = |outs: &[Out], n: &str, mi: usize| -> Option<f64> {
+        let i = outs.first()?.names.iter().position(|x| x == n)?;
+        Some(outs.iter().map(|o| o.m[i][mi]).sum::<f64>() / outs.len() as f64)
+    };
+    let fmt = |v: Option<f64>| v.map_or_else(|| "-".to_string(), |x| format!("{x:.4}"));
+    eprintln!(
+        "[rank-eval] engine parity repo={label} t1s_raw_mismatch={mismatch}/{} t1s_clean_r10={} t1s_r10={} idr_r10={} harness_idr_r10={} routes={routes_s}",
+        eng.len(),
+        fmt(mean_of(results, "ENG-T1s", 1)),
+        fmt(mean_of(results, "T1s", 1)),
+        fmt(mean_of(results, "ENG-IDR", 1)),
+        fmt(mean_of(results, "IDR", 1)),
+    );
+    let mut md = format!(
+        "\n### Engine parity\n\n`--engine on` (EB.9): T1s, IDR and the LX fusions recomputed through `glia_engine::intent` and `algo::fuse` from the replay's own inputs. ENG-T1s-raw is `TextIndex::from_docs` over the strictly older commits' raw `%B`: its top 20 files and score bits differ from T1s on **{mismatch} of {} test commits**. ENG-T1s indexes the messages as `history sync` stores them (`clean_message`), ENG-T1s-plain the raw messages in plain `git log` order; ENG-IDR is `intent::idr::route` at each parent (the parent's `[ids]`, {has_id} test commits with a routed id or scope; routes {routes_s}); ENG-LX[IDRw,..] reads only the newest {ENG_RENAME_WINDOW} commits' renames. Each row: the ranker's mean, then ranker - against with its commit-cluster bootstrap 95% CI, and the queries where they differ.\n\n| shape | ranker | against | queries | r10 | d r10 [CI] | d MRR [CI] | differ |\n|---|---|---|---:|---:|---|---|---:|\n",
+        eng.len()
+    );
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut emit = |shape: &str, outs: &[Out], commit_of: &[usize], a: &str, b: &str| {
+        let Some(first) = outs.first() else { return };
+        let (Some(ia), Some(ib)) = (first.names.iter().position(|x| x == a), first.names.iter().position(|x| x == b)) else { return };
+        let col = |i: usize, mi: usize| -> Vec<f64> { outs.iter().map(|o| o.m[i][mi]).collect() };
+        let p10 = paired(&col(ia, 1), &col(ib, 1), commit_of, ntc, bi.boot, bi.lf);
+        let pm = paired(&col(ia, 3), &col(ib, 3), commit_of, ntc, bi.boot, bi.lf);
+        let differ = outs.iter().filter(|o| o.m[ia] != o.m[ib]).count();
+        let r10 = col(ia, 1).iter().sum::<f64>() / outs.len() as f64;
+        md.push_str(&format!(
+            "| {shape} | {a} | {b} | {} | {r10:.4} | {:+.4} [{:+.4}, {:+.4}] | {:+.4} [{:+.4}, {:+.4}] | {differ} |\n",
+            outs.len(),
+            p10.mean,
+            p10.lo,
+            p10.hi,
+            pm.mean,
+            pm.lo,
+            pm.hi
+        ));
+        rows.push(json!({"shape": shape, "ranker": a, "vs": b, "queries": outs.len(), "r10": r10,
+            "d_r10": p10.mean, "d_r10_lo": p10.lo, "d_r10_hi": p10.hi, "d_mrr": pm.mean, "d_mrr_lo": pm.lo, "d_mrr_hi": pm.hi, "differ": differ}));
+    };
+    for (shape, pairs) in ENG_CONTRASTS {
+        let sets: Vec<(&str, &[Out], &[usize])> = match shape {
+            "single" => vec![("single", results, bi.commit_of)],
+            "review" => (0..3).filter_map(|si| transfer.get(si).map(|(o, c)| (R3_SHAPES[si], o.as_slice(), c.as_slice()))).collect(),
+            "find" => transfer.get(3).map(|(o, c)| ("find", o.as_slice(), c.as_slice())).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        for (sname, outs, commit_of) in sets {
+            for (a, b) in pairs.iter() {
+                emit(sname, outs, commit_of, a, b);
+            }
+        }
+    }
+    let js = json!({"test_commits": eng.len(), "t1s_raw_mismatch": mismatch, "with_id": has_id, "routes": routes, "rename_window": ENG_RENAME_WINDOW, "contrasts": rows});
+    (js, md)
+}
+
 fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Option<&VLayer>, r1: Option<&R1Commit>) -> Out {
     let g = ctx.g;
     let nf = g.paths.len();
@@ -1736,6 +2081,13 @@ fn run_query(ctx: &Ctx, q: &Query, tc: &TestCommit, push: &mut PushPpr, vl: Opti
         for (name, key) in ans_keys_seed(ctx, q.tc, &[q.seed]) {
             out.push(name, &key, seed, t);
         }
+    }
+
+    // ---- the engine's intent signals (`--engine on`, EB.9; after the ANS rankers) ----
+    if let Some(r) = r1
+        && let Some(e) = &r.eng
+    {
+        eng_rankers_single(&mut out, e, r, seed, t, &p1);
     }
 
     // ---- hub flooding ----
@@ -2129,6 +2481,13 @@ fn main() {
             h.stats.extend(st);
         }
     }
+    if args.engine == "on" {
+        for (o, mut e) in eng_build(&args, merged, &g, &commits, &test_idx).into_iter().enumerate() {
+            let raw: Vec<(u32, f64)> = e.t1s_raw.iter().enumerate().map(|(f, &x)| (f as u32, x)).collect();
+            e.mismatch = eng_top20(&raw) != eng_top20(&r1s[o].t1s);
+            r1s[o].eng = Some(e);
+        }
+    }
     eprintln!(
         "[rank_eval] {}: commits={} train={} test_eligible={} test={} queries={}",
         args.label,
@@ -2376,6 +2735,11 @@ fn main() {
         }
     }
     let _ = &tc_files;
+    // ---- `--engine on` (EB.9): the ENG-* rows go last, after every selection and gate ----
+    eng_append(&mut results);
+    for (outs, _) in transfer.iter_mut() {
+        eng_append(outs);
+    }
     let names = results[0].names.clone();
     for r in &results {
         assert_eq!(r.names, names, "ranker order differs between queries");
@@ -2509,9 +2873,14 @@ fn main() {
     }
     if let Some(h) = &hist {
         let bi = BootIn { commit_of: &commit_of, boot: args.boot, lf: &lf };
-        let (rj, rmd) = round1_report(&args.label, &names, &results, &queries, &r1s, &h.stats, &bi);
+        let (rj, mut rmd) = round1_report(&args.label, &names, &results, &queries, &r1s, &h.stats, &bi);
         doc["round1"] = rj;
         doc["round1"]["select"] = r1_sel;
+        if args.engine == "on" {
+            let (ej, emd) = eng_report(&args.label, &results, &r1s, &transfer, &bi);
+            doc["engine_intent_parity"] = ej;
+            rmd.push_str(&emd);
+        }
         std::fs::write(&args.r1md, rmd).expect("write round1 md");
     }
     if r3_on {
@@ -11999,6 +12368,8 @@ struct R1Commit {
     r2: Option<R2Idr>,
     /// Round 3: id history, text confidence, ancestor warm-up flag
     r3: Option<R3Commit>,
+    /// `--engine on` (EB.9): the engine's intent signals for this test commit
+    eng: Option<EngCommit>,
 }
 
 /// C0r's decay per training commit: a co-change k training commits ago weighs R1_GAMMA^k.
@@ -14289,11 +14660,13 @@ fn r3_transfer(ctx: &Ctx, tqs: &[TQuery], r1s: &[R1Commit], subjects: &[String])
             if ctx.ans {
                 bank.extend(if find { ans_keys_find(ctx, &subjects[q.tc]) } else { ans_keys_seed(ctx, q.tc, &q.seeds) });
             }
+            let eng = r.eng.as_ref().map(|e| eng_bank_transfer(e, &excl, &p1, &t1s, &g.file_deg, find)).unwrap_or_default();
             let mut out = Out::default();
             for (name, key) in bank {
                 out.names.push(name);
                 out.m.push(eval_ex(&key, &excl, &q.targets));
             }
+            out.eng = eng.into_iter().map(|(name, key)| (name, eval_ex(&key, &excl, &q.targets))).collect();
             out
         })
         .collect();
