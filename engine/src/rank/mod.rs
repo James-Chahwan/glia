@@ -6,3 +6,9 @@
 //! (`order_rows`). Nothing here runs inside a build; ties go by (repo label,
 //! path), never a NodeId. Owners: EA.2 (ranking, cache), EA.3 (files,
 //! cochange), EA.4 (order); each adds its own `mod` and `pub use` lines here.
+
+mod cache;
+mod ranking;
+
+pub use cache::{RankCache, RankCacheStats, SourceKey};
+pub use ranking::{RankBase, Ranking, STRUCTURE_CANDIDATES, WIDE_DAMPING};
