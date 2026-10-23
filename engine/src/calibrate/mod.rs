@@ -11,3 +11,9 @@ pub use record::{
     OnlineReplay, ReplayParamsRecord, Selection, Shape, explicit, load_for_roots, log_selection,
     read_calibration, select, set_digest, write_calibration,
 };
+
+pub mod replay;
+pub use replay::{
+    CoState, FIND_TOP, Replay, ReplayCommit, ReplayParams, ReplayQuery, build_replay, find_top,
+    find_top_scores, seed_order_hash,
+};
