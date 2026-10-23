@@ -98,7 +98,7 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
 |---|---|
 | **0.5.2** bets | Datalog rules + GQL, `glia watch`, cross-repo identity, Engram anchors, deferrals, the matrix rest (`next-leap-0.5.2.md`) |
 | **0.5.4** scale | this doc |
-| **0.5.5** proof | precision rate, agent before / after, big-repo timings, calibrated confidence, `decide/` a–e, `glia judge` |
+| **0.5.5** proof | precision rate, agent before / after, big-repo timings, calibrated confidence, `decide/` a–e, `glia judge`; candidate after it (James 2026-10-23: *"That might entail another run pod maybe after 0.5.5 things we learn from the 2 new in progress. But considering the issues for latent injection and model swe bench I think it could seriously help"*): a RunPod rerun of the SWE-bench Lite / latent-injection arms on 0.5.3 + 0.5.4 rankings, extending item 11's API-agent harness to local models |
 
 ## 2. Scope seeds
 
