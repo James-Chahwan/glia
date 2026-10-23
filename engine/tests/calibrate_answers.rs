@@ -231,3 +231,125 @@ fn no_seed_has_no_selection() {
     let v = serde_json::to_value(&a).expect("json");
     assert!(v.get("selection").is_none(), "skipped when None");
 }
+
+// EC.9: pack / pack_ids read the same record. The shape is the seeds'
+// distinct located files; SELh0 / SELs0 by `PackArgs.ranking.cochange_first`;
+// the pick orders the neighbours through EA.6's file lift (a B0 pick groups
+// them by carry-BFS depth from the seed files, then file degree).
+
+fn pack_args(c: &Arc<RankCache>, ranking: Ranking, select: bool) -> glia_engine::pack::PackArgs {
+    let mut a = glia_engine::pack::PackArgs::default();
+    a.budget_tokens = 1_000_000;
+    a.ranking = ranking;
+    a.select = select;
+    a.rank_cache = Some(Arc::clone(c));
+    a
+}
+
+fn packed(r: &GenerateResult, c: &Arc<RankCache>, seed: &str, ranking: Ranking, select: bool) -> glia_engine::pack::Pack {
+    let id = r.merged.node_id_by_qname(seed).expect(seed);
+    glia_engine::pack::pack_ids(&r.merged, &[id], &pack_args(c, ranking, select))
+}
+
+fn pack_summary(p: &glia_engine::pack::Pack) -> (String, String, String, &'static str, Option<&'static str>) {
+    let s = p.selection.as_ref().expect("a pack selection");
+    (s.set.clone(), s.shape.clone(), s.pick.clone(), s.source, s.reason)
+}
+
+/// The packed nodes in rank order, as (qname, rank): what the pick moves.
+fn pack_rows(p: &glia_engine::pack::Pack) -> Vec<(String, usize)> {
+    p.nodes.iter().map(|n| (n.qname.clone(), n.rank)).collect()
+}
+
+const ZETA00: &str = "zeta::zeta00::zeta00_f";
+
+#[test]
+fn pack_without_a_record_is_eas_pack() {
+    let (_tmp, _root, r) = fixture();
+    let c = cache(&r);
+    let p = packed(&r, &c, ZETA00, Ranking::default(), true);
+    assert_eq!(pack_summary(&p), ("SELh0".into(), "k1".into(), "H10".into(), "fallback", Some("absent")));
+    let ea = packed(&r, &cache(&r), ZETA00, h("H10"), false);
+    assert!(p.nodes.len() > 1);
+    assert_eq!((pack_rows(&p), &p.text), (pack_rows(&ea), &ea.text), "no record: EA.6's pack");
+    assert_eq!(pack_summary(&ea), ("SELh0".into(), "k1".into(), "H10".into(), "explicit", None));
+    // No cache: explicit, as EA left it.
+    let mut bare = glia_engine::pack::PackArgs::default();
+    bare.budget_tokens = 1_000_000;
+    let id = r.merged.node_id_by_qname(ZETA00).expect("zeta00");
+    let b = glia_engine::pack::pack_ids(&r.merged, &[id], &bare);
+    assert_eq!(pack_summary(&b).3, "explicit");
+    // An empty pack has no selection, and the key is skipped.
+    let none = glia_engine::pack::pack(&r.merged, "no_such_symbol_anywhere", &pack_args(&c, Ranking::default(), true));
+    assert!(none.absence.is_some() && none.selection.is_none());
+    let v = serde_json::to_value(&none).expect("json");
+    assert!(v.get("selection").is_none(), "skipped when None");
+}
+
+#[test]
+fn pack_applies_the_calibrated_pick() {
+    use glia_activation::algo::{Walk, reach};
+    let (_tmp, root, r) = fixture();
+    calibrate(&root, &r.merged, &CalibrateOptions::default()).expect("calibrate");
+    let CalibrationRead::Loaded(cal) = read_calibration(&root) else {
+        panic!("record not loaded");
+    };
+    let pick_of = |set: &str, shape: &str| -> String {
+        cal.sets.iter().find(|s| s.set == set && s.shape == shape).map(|s| s.pick.clone()).expect("row")
+    };
+    let c = cache(&r);
+
+    // Co-change off: SELs0 at k1 picks B0 here.
+    let s = packed(&r, &c, ZETA00, Ranking::head(), true);
+    assert_eq!(pack_summary(&s), ("SELs0".into(), "k1".into(), "B0".into(), "calibrated", None));
+    assert_eq!(s.selection.as_ref().map(|x| x.test_commits), Some(COMMITS));
+    let b0 = packed(&r, &cache(&r), ZETA00, h("B0"), false);
+    let p1 = packed(&r, &cache(&r), ZETA00, h("P1"), false);
+    assert_eq!((pack_rows(&s), &s.text), (pack_rows(&b0), &b0.text), "neighbours in B0's order");
+    assert_ne!(pack_rows(&s), pack_rows(&p1), "the pick moved the order");
+    // The seed first, then the neighbours' candidate files by carry-BFS depth
+    // from the seed file's nodes (non-decreasing down the pack).
+    assert_eq!(s.nodes[0].qname, ZETA00);
+    let files = c.files(&r.merged);
+    let seed_file = files.file_of_node(r.merged.node_id_by_qname(ZETA00).expect("zeta00")).expect("seed file");
+    let adj = c.carry(&r.merged);
+    let walk = reach::bfs(&adj, files.nodes(seed_file), Walk::Both, usize::MAX);
+    let mut depth: BTreeMap<u32, usize> = BTreeMap::new();
+    for hit in &walk.reached {
+        if let Some(f) = files.file_of_node(hit.id) {
+            let d = depth.entry(f).or_insert(usize::MAX);
+            *d = (*d).min(hit.depth);
+        }
+    }
+    let seen: Vec<usize> = s
+        .nodes
+        .iter()
+        .skip(1)
+        .filter_map(|n| files.file_of_node(glia_core::NodeId(n.id)))
+        .filter(|&f| f != seed_file)
+        .map(|f| depth.get(&f).copied().unwrap_or(usize::MAX))
+        .collect();
+    assert!(seen.len() > 1, "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "carry-depth order: {seen:?}");
+
+    // Co-change on: SELh0.
+    let a = packed(&r, &c, ZETA00, Ranking::default(), true);
+    let want = pick_of("SELh0", "k1");
+    assert_eq!(pack_summary(&a), ("SELh0".into(), "k1".into(), want.clone(), "calibrated", None));
+    let explicit = packed(&r, &cache(&r), ZETA00, h(&want), false);
+    assert_eq!((pack_rows(&a), &a.text), (pack_rows(&explicit), &explicit.text));
+
+    // An explicit ranking is never overridden.
+    let e = packed(&r, &c, ZETA00, h("PT*"), false);
+    assert_eq!(pack_summary(&e), ("SELs0".into(), "k1".into(), "PT*".into(), "explicit", None));
+
+    // Seeds in two files are shape k2.
+    let args = pack_args(&c, Ranking::default(), true);
+    let ids = [
+        r.merged.node_id_by_qname(ZETA00).expect("zeta00"),
+        r.merged.node_id_by_qname("zeta::zeta01::zeta01_f").expect("zeta01"),
+    ];
+    let k2 = glia_engine::pack::pack_ids(&r.merged, &ids, &args);
+    assert_eq!(pack_summary(&k2).1, "k2");
+    assert_eq!(pack_summary(&k2).2, pick_of("SELh0", "k2"));
+}

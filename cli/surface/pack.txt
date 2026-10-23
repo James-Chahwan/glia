@@ -9,7 +9,7 @@ cmd glia pack
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg preset pos=- long=preset short=- required=false num_args=1 action=Set default=- value_names=PRESET global=false hidden=false values=repair,review,onboard,centrality
   arg query pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=QUERY global=false hidden=false
-  arg ranking pos=- long=ranking short=- required=false num_args=1 action=Set default=ppr value_names=RANKING global=false hidden=false values=ppr,ppr-wide,bfs
+  arg ranking pos=- long=ranking short=- required=false num_args=1 action=Set default=- value_names=RANKING global=false hidden=false values=ppr,ppr-wide,bfs
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg scope pos=- long=scope short=- required=false num_args=1 action=Set default=- value_names=SCOPE global=false hidden=false
   arg seeds pos=- long=seeds short=- required=false num_args=1 action=Set default=5 value_names=SEEDS global=false hidden=false

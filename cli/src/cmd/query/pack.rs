@@ -9,7 +9,7 @@
 //!
 //! `--json` prints the whole `Pack` instead — `{query, text, budget_tokens,
 //! used_tokens, bytes, bytes_per_token, candidates, nodes, dropped,
-//! rerenders, absence}` — with the same stderr lines. `--bytes-per-token`
+//! rerenders, selection, absence}` (`selection` only with a seed) — with the same stderr lines. `--bytes-per-token`
 //! takes `N` or `N.D` (one decimal) between 1.0 and 20.0, held in tenths as
 //! the engine counts it; `--preset` takes a preset name of the code domain's
 //! `CODE_TABLES` (read from the table, so a new preset needs no edit here).
@@ -22,6 +22,13 @@
 //! (holder `cli`) holding the build's repo roots. The engine's `[rank]
 //! surface=pack ranking=<r> .. max_file_share=<s>/<n>` carries the per-file
 //! share (ruling EA-2).
+//!
+//! 0.5.3 (EC.9): `--ranking` has no default: absent, the pack applies the
+//! repo's calibrated pick (`glia history calibrate`; `PackArgs.select`),
+//! else `ppr`; given, it is explicit. stdout stays the pack text alone; the
+//! engine's `[select] surface=pack set=<s> shape=<k> pick=<p> source=<c>
+//! ..` line names the pick on stderr, and `--json` carries it as the Pack's
+//! `selection`.
 
 use glia_code_domain::profile::CODE_TABLES;
 use glia_engine::absence::Absence;
@@ -29,7 +36,7 @@ use glia_engine::pack::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CANDIDATES, DEFAULT_SEEDS, Pack, PackArgs, pack,
 };
 
-use crate::common::{RankingArgs, generate_for, rank_cache};
+use crate::common::{CalibratedRankingArgs, generate_for, rank_cache};
 
 // `--bytes-per-token`'s default is the literal "3.7" (clap's `default_value`
 // is a `&'static str`); this keeps it the engine's default.
@@ -74,7 +81,7 @@ pub(crate) struct Args {
     #[arg(long)]
     scope: Option<String>,
     #[command(flatten)]
-    ranking: RankingArgs,
+    ranking: CalibratedRankingArgs,
     /// Emit the whole pack (text and manifest) as JSON.
     #[arg(long)]
     json: bool,
@@ -96,6 +103,7 @@ pub(crate) fn run(args: Args) -> i32 {
     query.preset = args.preset;
     query.scope = args.scope;
     query.ranking = args.ranking.ranking();
+    query.select = args.ranking.selects();
     query.rank_cache = Some(rank_cache(&result));
     let mut packed = pack(&result.merged, &args.query, &query);
     if let Some(a) = packed.absence.as_mut() {

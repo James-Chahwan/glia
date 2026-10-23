@@ -41,6 +41,17 @@
 //!    down the ranked order, so an unmoved order is the 0.5.2 pack byte for
 //!    byte; scores lie in [0, 1], so every seed outweighs every neighbour).
 //!    Floats stop there: every comparison below is integer.
+//!    **Selection (EC.9).** The ranking step 2b applies is chosen first: the
+//!    shape is the seeds' distinct located files (k1 / k2 / k3 / half), the
+//!    set SELh0 when [`PackArgs::ranking`] ranks co-change first, else SELs0;
+//!    with [`PackArgs::select`] and a caller's rank cache, the repo's
+//!    calibration record (`glia history calibrate`) picks, `ranking` the
+//!    fallback (no record, a rejected one, a merge); otherwise `ranking` is
+//!    explicit. The pick replaces `ranking` for step 2b and the `[rank]`
+//!    line, and is [`Pack::selection`]. The candidates themselves are always
+//!    the PPR walk above (a preset keeps its weights there); a `B0` /
+//!    `H10[B0]` pick orders their files by carry-BFS depth from the seed
+//!    files' nodes, then file degree, and ignores the preset's weights.
 //! 3. **Greedy climb.** Rung values are Qname 1, Outline 3, Preview 6,
 //!    Full 10; a node's cost at a rung is [`estimate_tokens`] of its
 //!    [`render_node`] text plus one separator byte. A rung that renders as a
@@ -93,8 +104,11 @@
 //! 4 x candidates steps of 4 x candidates comparisons. Query-time, no pool,
 //! no `HashMap` order reaches the output: the pack is byte-stable.
 //!
-//! fired_on markers, one line each per call (the first only once seeds are
-//! resolved): `[rank] surface=pack ranking=<P1|PT*|B0|H10|H10[PT*]|H10[B0]>
+//! fired_on markers, one line each per call (the first two only once seeds
+//! are resolved): `[select] surface=pack set=<SELh0|SELs0>
+//! shape=<k1|k2|k3|half> pick=<name> source=<calibrated|fallback|explicit>
+//! reason=<r|-> test_commits=<n>` — grep `^\[select\] surface=pack`; then
+//! `[rank] surface=pack ranking=<P1|PT*|B0|H10|H10[PT*]|H10[B0]>
 //! seed_files=<s> cochange_files=<c> files=0 lifted=<l>
 //! closure_index=<hit|built> lifted_files=<f> max_file_share=<m>/<k>` (or
 //! `[rank] surface=pack ranking=<r> files=0 reason=no_seed_file
@@ -117,6 +131,10 @@ use glia_projection_text::ladder::{Fidelity, Pick, render_node, render_pack, ren
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
+use crate::calibrate::{
+    COCHANGE_CANDIDATES, COCHANGE_SET, STRUCTURE_CANDIDATES, STRUCTURE_SET, Selection, Shape, explicit,
+    log_selection, select as select_ranking,
+};
 use crate::find::{FindOptions, find_nodes};
 use crate::identity::Collapse;
 use crate::rank::{FileRanking, RankBase, RankCache, Ranking, SourceKey, order_rows, rank_files};
@@ -172,6 +190,12 @@ pub struct PackArgs {
     /// The ranking indexes to reuse across calls (EA.2). `None`: a transient
     /// cache that knows no repo root, so no co-change is read.
     pub rank_cache: Option<Arc<RankCache>>,
+    /// EC.9: apply the repo's calibrated pick (`glia history calibrate`,
+    /// read through `rank_cache`) in place of `ranking`'s base; `ranking`
+    /// still chooses the set (co-change first: SELh0, else SELs0) and is the
+    /// fallback. `false`: `ranking` is an explicit choice. Default `true`;
+    /// with no `rank_cache` there is no record, so the choice is explicit.
+    pub select: bool,
 }
 
 impl Default for PackArgs {
@@ -185,6 +209,7 @@ impl Default for PackArgs {
             scope: None,
             ranking: Ranking::default(),
             rank_cache: None,
+            select: true,
         }
     }
 }
@@ -239,6 +264,11 @@ pub struct Pack {
     pub dropped: usize,
     /// How many times the text was rendered again to fit the budget.
     pub rerenders: usize,
+    /// EC.9: the ranking that ordered the neighbours and why (calibrated,
+    /// fallback or explicit). `None` for an empty pack (an absence); skipped
+    /// in JSON then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
     /// Why `nodes` is empty (`Some` exactly then): find's `no_match`, or
     /// `budget_too_small`.
     pub absence: Option<Absence>,
@@ -397,6 +427,10 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     // Step 2: the PPR neighbourhood. `top_k` stays open so the scope filter
     // runs before the cut (A8.3 rule 1); the cut is `args.candidates`.
     let seed_ids: Vec<NodeId> = seeds.iter().map(|s| s.id).collect();
+    // Step 2a (EC.9): the ranking this pack applies, chosen before the
+    // transient cache stand-in exists: only a caller's cache holds a record.
+    let (selection, ranking) = select_for(&loc, &seed_ids, args);
+    log_selection("pack", &selection);
     let cache = args.rank_cache.clone().unwrap_or_else(|| {
         Arc::new(RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new()))
     });
@@ -444,7 +478,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     // measured file ranking then permutes the rows, and neighbour i of the
     // new order takes weight i of the profile (`transplant`).
     let profile: Vec<f64> = scored.iter().map(|(_, s)| *s).collect();
-    let ranked = rank_rows(merged, &cache, &seed_ids, &mut scored, args.ranking);
+    let ranked = rank_rows(merged, &cache, &seed_ids, &mut scored, ranking);
     scored.truncate(args.candidates.saturating_sub(seeds.len()));
     rank_marker(&ranked, &scored, closure_index);
 
@@ -539,10 +573,36 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
         dropped: cands.len() - nodes.len(),
         nodes,
         rerenders,
+        selection: Some(selection),
         absence: None,
     };
     marker(&pack, seeds.len());
     pack
+}
+
+/// Step 2a (EC.9), [`crate::answers`]' `select_for` for a pack: the set is
+/// SELh0 when `args.ranking` ranks co-change first, else SELs0; the shape
+/// counts the seeds' distinct located files. With `args.select` and a
+/// caller's rank cache, the cache's calibration record picks, `args.ranking`
+/// the fallback; otherwise `args.ranking` is explicit.
+fn select_for(loc: &Locator<'_>, ids: &[NodeId], args: &PackArgs) -> (Selection, Ranking) {
+    let seed_files: BTreeSet<String> = ids.iter().filter_map(|&id| loc.locate(id).file).collect();
+    let shape = Shape::from_seed_files(seed_files.len());
+    let (set, candidates): (&str, &[&str]) = if args.ranking.cochange_first {
+        (COCHANGE_SET, &COCHANGE_CANDIDATES)
+    } else {
+        (STRUCTURE_SET, &STRUCTURE_CANDIDATES)
+    };
+    let asked = args.ranking.harness_name();
+    let sel = match args.rank_cache.as_deref() {
+        Some(cache) if args.select => {
+            select_ranking(cache.calibration().read(), set, shape, candidates, asked)
+        }
+        _ => explicit(set, shape, asked),
+    };
+    // Every candidate and fallback name is one of the six harness names.
+    let picked = Ranking::from_harness_name(&sel.pick).unwrap_or(args.ranking);
+    (sel, picked)
 }
 
 /// What step 2b did, for the `[rank] surface=pack` line.
@@ -885,6 +945,7 @@ fn empty(
         nodes: Vec::new(),
         dropped: candidates,
         rerenders: 0,
+        selection: None,
         absence: Some(absence),
     };
     marker(&pack, seeds);

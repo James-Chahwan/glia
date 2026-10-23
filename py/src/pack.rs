@@ -17,7 +17,7 @@ use glia_engine::pack::{Pack, PackArgs, pack, pack_ids};
 use glia_engine::rank::RankCache;
 use glia_graph::MergedGraph;
 
-use crate::blast::ranking_named;
+use crate::blast::ranking_selected;
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
@@ -62,10 +62,14 @@ fn pack_args(
 
 /// `args` ranked by the `ranking` / `cochange` keywords over the PyGraph's
 /// held ranking cache (EA.7: the neighbours' file order, co-change first
-/// where a history snapshot exists; the PPR index reused across calls). `Err`
-/// names an unknown `ranking`.
-fn ranked(mut args: PackArgs, ranking: &str, cochange: bool, cache: Arc<RankCache>) -> Result<PackArgs, String> {
-    args.ranking = ranking_named(ranking, cochange)?;
+/// where a history snapshot exists; the PPR index reused across calls).
+/// EC.9: `ranking=None` applies the repo's calibrated pick through the cache
+/// (`PackArgs.select`), `ppr` the fallback; a name is explicit. `Err` names
+/// an unknown `ranking`.
+fn ranked(mut args: PackArgs, ranking: Option<&str>, cochange: bool, cache: Arc<RankCache>) -> Result<PackArgs, String> {
+    let (r, select) = ranking_selected(ranking, cochange)?;
+    args.ranking = r;
+    args.select = select;
     args.rank_cache = Some(cache);
     Ok(args)
 }
@@ -107,7 +111,8 @@ impl PyGraph {
     /// rounded to tenths; `ValueError` outside).
     ///
     /// Returns a dict `{query, text, budget_tokens, used_tokens, bytes,
-    /// bytes_per_token, candidates, nodes, dropped, rerenders, absence}`:
+    /// bytes_per_token, candidates, nodes, dropped, rerenders, selection,
+    /// absence}` (`selection` absent from an empty pack):
     /// `text` the pack (`""` when empty), `bytes_per_token` the rate as text
     /// (`"3.7"`), `nodes` the packed nodes in rank order, each `{id, qname,
     /// kind, file, line, fidelity, tokens, rank, tier, reason, matched}` with
@@ -115,13 +120,15 @@ impl PyGraph {
     /// `qname`. `absence` is `None` when a node is packed, else a dict whose
     /// `reason` is `no_match` or `budget_too_small`.
     ///
-    /// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`, default `ppr`) and
+    /// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`; default `None`, the
+    /// repo's calibrated pick from `glia history calibrate`, else `ppr`) and
     /// `cochange` (default `True`: co-change from the history snapshot
     /// first) order the neighbours by their files; with no snapshot the
-    /// order is the structural one. Any other `ranking` raises ValueError
-    /// before any work. The PPR and file indexes are held by this PyGraph
+    /// order is the structural one. `selection` names the ranking applied
+    /// `{set, shape, pick, source, reason, test_commits}`. Any other
+    /// `ranking` raises ValueError before any work. The PPR and file indexes are held by this PyGraph
     /// and reused by later calls.
-    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking="ppr", cochange=true))]
+    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking=None, cochange=true))]
     #[allow(clippy::too_many_arguments)]
     fn pack(
         &self,
@@ -133,7 +140,7 @@ impl PyGraph {
         candidates: usize,
         preset: Option<String>,
         scope: Option<String>,
-        ranking: &str,
+        ranking: Option<&str>,
         cochange: bool,
     ) -> PyResult<Py<PyAny>> {
         let args = pack_args(budget, bytes_per_token, seeds, candidates, preset, scope)
@@ -150,7 +157,7 @@ impl PyGraph {
     /// dict's `query` names the first three seeds' qnames (`" +N more"`
     /// after). No seed left is an absence `no_match`. Same dict as `pack`,
     /// and the same `ranking` / `cochange` keywords.
-    #[pyo3(signature = (node_ids, budget=8000, bytes_per_token=3.7, candidates=200, preset=None, scope=None, ranking="ppr", cochange=true))]
+    #[pyo3(signature = (node_ids, budget=8000, bytes_per_token=3.7, candidates=200, preset=None, scope=None, ranking=None, cochange=true))]
     #[allow(clippy::too_many_arguments)]
     fn pack_ids(
         &self,
@@ -161,7 +168,7 @@ impl PyGraph {
         candidates: usize,
         preset: Option<String>,
         scope: Option<String>,
-        ranking: &str,
+        ranking: Option<&str>,
         cochange: bool,
     ) -> PyResult<Py<PyAny>> {
         let seeds = glia_engine::pack::DEFAULT_SEEDS;
@@ -290,15 +297,26 @@ mod tests {
         // a pack through a held cache equals the engine's through the same
         // cache, and a second call over it equals the first.
         let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
-        let r = ranked(args.clone(), "bfs", false, held.clone()).expect("bfs");
+        let r = ranked(args.clone(), Some("bfs"), false, held.clone()).expect("bfs");
         assert_eq!(r.ranking.harness_name(), "B0");
         assert!(r.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
-        let d = ranked(args.clone(), "ppr", true, held.clone()).expect("ppr");
+        assert!(!r.select, "a named ranking is explicit");
+        let d = ranked(args.clone(), Some("ppr"), true, held.clone()).expect("ppr");
         let first = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         let again = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         assert_eq!(first, again, "a warm cache packs what a cold one did");
         assert_eq!(first, ours, "no history snapshot: the held cache packs the 0.5.2 order");
-        let err = ranked(args.clone(), "x", true, held).expect_err("x is no ranking");
+        // EC.9: no ranking selects (no record here: the fallback, the same
+        // pack as `ppr`, its selection naming the fallback).
+        let sel = ranked(args.clone(), None, true, held.clone()).expect("None");
+        assert!(sel.select && sel.ranking == d.ranking);
+        let mut fell = pack_query(m, "price", &sel, 0);
+        let why = fell.selection.take().expect("a selection");
+        assert_eq!((why.pick.as_str(), why.source), ("H10", "fallback"));
+        let mut asked = pack_query(m, "price", &d, 0);
+        asked.selection = None;
+        assert_eq!(serde_json::to_string(&fell).expect("json"), serde_json::to_string(&asked).expect("json"));
+        let err = ranked(args.clone(), Some("x"), true, held).expect_err("x is no ranking");
         assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
     }
 }

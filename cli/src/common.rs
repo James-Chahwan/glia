@@ -1,11 +1,12 @@
 //! Helpers shared by more than one command: the build options of the
 //! global flags, graph generation for the `--with` commands, the summary
 //! table and JSON dumps (`analyze`, `merge`), node lookups and pretty names,
-//! `ImpactDirection` (`impact`, `blast-radius`), and 0.5.3's `RankingArgs`
-//! with the `## files` table (EA.8: `blast-radius`, `diff-impact`, `review`,
-//! `pack`); EC.8's `CalibratedRankingArgs` (no `--ranking` default: the repo's
-//! calibrated pick) and the `ranking:` line for `blast-radius`, `diff-impact`
-//! and `review`.
+//! `ImpactDirection` (`impact`, `blast-radius`), and 0.5.3's `## files`
+//! table (EA.8: `blast-radius`, `diff-impact`, `review`); EC.8's
+//! `CalibratedRankingArgs`, the file-ranking flags of every ranked answer
+//! (no `--ranking` default: the repo's calibrated pick; `pack` since EC.9,
+//! which retired EA.8's `RankingArgs`) and the `ranking:` line for
+//! `blast-radius`, `diff-impact` and `review`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
@@ -33,40 +34,10 @@ pub(crate) enum ImpactDirection {
 /// The CLI names of the structural file rankings (`RankBase::name`).
 const RANKINGS: [&str; 3] = ["ppr", "ppr-wide", "bfs"];
 
-/// 0.5.3 (EA.8): the file-ranking flags of the ranked answers, flattened
-/// into `blast-radius`, `diff-impact`, `review` and `pack`.
-#[derive(clap::Args, Debug, Clone)]
-pub(crate) struct RankingArgs {
-    /// The structural file ranking: ppr (PPR damping 0.5, a file ranks by
-    /// its best node), ppr-wide (damping 0.85, a file ranks by the sum of its
-    /// nodes) or bfs (carry-edge distance, then file degree).
-    #[arg(
-        long,
-        value_name = "RANKING",
-        default_value = RANKINGS[0],
-        value_parser = clap::builder::PossibleValuesParser::new(RANKINGS),
-    )]
-    ranking: String,
-    /// Do not rank files that changed together with the seeds first (read
-    /// from .glia/history-snapshot, written by `glia history sync`).
-    #[arg(long)]
-    no_cochange: bool,
-}
-
-impl RankingArgs {
-    /// The engine's `Ranking`: the base the flag names, co-change first
-    /// unless `--no-cochange`. clap has already refused any other name; one
-    /// that slipped through is the default base.
-    pub(crate) fn ranking(&self) -> Ranking {
-        let base = RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr);
-        Ranking::new(base, !self.no_cochange)
-    }
-}
-
 /// 0.5.3 (EC.8): the file-ranking flags of the calibrated answers,
-/// flattened into `blast-radius`, `diff-impact` and `review`. Unlike
-/// [`RankingArgs`], `--ranking` has no default: absent, the answer applies the
-/// repo's calibrated pick (`glia history calibrate`), else `ppr`.
+/// flattened into `blast-radius`, `diff-impact`, `review` and (EC.9) `pack`.
+/// `--ranking` has no default: absent, the answer applies the repo's
+/// calibrated pick (`glia history calibrate`), else `ppr`.
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct CalibratedRankingArgs {
     /// The structural file ranking: ppr (PPR damping 0.5, a file ranks by

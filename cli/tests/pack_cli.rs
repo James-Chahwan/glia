@@ -42,7 +42,7 @@ const UTIL_PY: &str = "def format_report():
 ";
 
 /// The `--json` keys, in the engine's field order.
-const PACK_KEYS: [&str; 11] = [
+const PACK_KEYS: [&str; 12] = [
     "query",
     "text",
     "budget_tokens",
@@ -53,6 +53,8 @@ const PACK_KEYS: [&str; 11] = [
     "nodes",
     "dropped",
     "rerenders",
+    // EC.9: only with a seed (skipped on an empty pack).
+    "selection",
     "absence",
 ];
 
@@ -315,4 +317,34 @@ fn ranking_flags_reach_the_pack() {
     let rank = lines_with(&dflt, "[rank] surface=pack ");
     assert!(rank[0].starts_with("[rank] surface=pack ranking=H10 "), "{}", rank[0]);
     glia(&[root.path(), "price", "--ranking", "x"], 2);
+}
+
+/// EC.9: `--ranking` absent applies the repo's calibration (none here: the
+/// fallback, reason `absent`); given, it is explicit. One `[select]
+/// surface=pack` line on stderr; stdout is the pack text alone; `--json`
+/// carries `selection`.
+#[test]
+fn select_line_names_the_pick() {
+    let root = Root::new("select");
+    let dflt = glia(&[root.path(), "price"], 0);
+    let sel = lines_with(&dflt, "[select] surface=pack ");
+    assert_eq!(sel.len(), 1, "{}", stderr(&dflt));
+    assert_eq!(
+        sel[0],
+        "[select] surface=pack set=SELh0 shape=k1 pick=H10 source=fallback reason=absent test_commits=0"
+    );
+    let text = String::from_utf8_lossy(&dflt.stdout);
+    assert!(text.starts_with("# context for price\n") && !text.contains("[select]"), "{text}");
+
+    let explicit = glia(&[root.path(), "price", "--no-cochange", "--ranking", "bfs"], 0);
+    let sel = lines_with(&explicit, "[select] surface=pack ");
+    assert_eq!(
+        sel,
+        ["[select] surface=pack set=SELs0 shape=k1 pick=B0 source=explicit reason=- test_commits=0"]
+    );
+
+    let out = glia(&[root.path(), "price", "--json"], 0);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("--json parses");
+    assert_eq!(json["selection"]["pick"], "H10", "{json}");
+    assert_eq!(json["selection"]["source"], "fallback", "{json}");
 }

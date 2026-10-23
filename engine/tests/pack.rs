@@ -334,8 +334,15 @@ fn ranking_without_history_keeps_the_pack() {
         head.ranking = Ranking::head();
         let mut cached = budget(tokens);
         cached.rank_cache = Some(cache.clone());
-        let want = serde_json::to_string(&pack(m, "price", &head)).unwrap();
-        assert_eq!(serde_json::to_string(&pack(m, "price", &budget(tokens))).unwrap(), want);
-        assert_eq!(serde_json::to_string(&pack(m, "price", &cached)).unwrap(), want);
+        // EC.9: `selection` names the ranking asked (SELs0 / SELh0, explicit
+        // or a fallback); everything else is the 0.5.2 pack.
+        let packed = |a: &PackArgs| {
+            let mut p = pack(m, "price", a);
+            p.selection = None;
+            serde_json::to_string(&p).unwrap()
+        };
+        let want = packed(&head);
+        assert_eq!(packed(&budget(tokens)), want);
+        assert_eq!(packed(&cached), want);
     }
 }

@@ -147,8 +147,13 @@ fn args(ranking: Ranking, cache: Option<Arc<RankCache>>, candidates: usize) -> P
     a
 }
 
+/// The pack's JSON without `selection` (EC.9), which names the ranking asked
+/// and how it was chosen (explicit, or a fallback with no record): these
+/// tests compare the packs the rankings give.
 fn json(p: &Pack) -> String {
-    serde_json::to_string(p).expect("pack json")
+    let mut p = p.clone();
+    p.selection = None;
+    serde_json::to_string(&p).expect("pack json")
 }
 
 /// (rank, qname, fidelity) per packed node.

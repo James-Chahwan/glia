@@ -4,7 +4,9 @@ bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None)` and
 `pack_ids(node_ids, budget=8000, bytes_per_token=3.7, candidates=200,
 preset=None, scope=None)` return the whole context pack `{query, text,
 budget_tokens, used_tokens, bytes, bytes_per_token, candidates, nodes,
-dropped, rerenders, absence}` as a native dict, keys in engine field order;
+dropped, rerenders, selection, absence}` as a native dict, keys in engine
+field order (`selection`, EC.9, only with a seed; `ranking=None` applies the
+repo's calibrated pick);
 `bytes_per_token` outside 1.0..=20.0 raises ValueError. The fixture is CC.4b's
 acceptance tree (engine/tests/pack.rs): `shop/a.py` `price` and `place`
 (which calls it), `shop/b.py` `checkout` (which calls `place`), an unrelated
@@ -18,7 +20,7 @@ import tempfile
 from test_build import Checks, params, rg, stderr_of
 
 PACK_KEYS = ["query", "text", "budget_tokens", "used_tokens", "bytes", "bytes_per_token",
-             "candidates", "nodes", "dropped", "rerenders", "absence"]
+             "candidates", "nodes", "dropped", "rerenders", "selection", "absence"]
 NODE_KEYS = ["id", "qname", "kind", "file", "line", "fidelity", "tokens", "rank", "tier",
              "reason", "matched"]
 
@@ -78,13 +80,13 @@ def main() -> int:
     c.check("pack signature",
             params(rg.PyGraph.pack)
             == [("query", None), ("budget", 8000), ("bytes_per_token", 3.7), ("seeds", 5),
-                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", "ppr"),
+                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", None),
                 ("cochange", True)],
             params(rg.PyGraph.pack))
     c.check("pack_ids signature",
             params(rg.PyGraph.pack_ids)
             == [("node_ids", None), ("budget", 8000), ("bytes_per_token", 3.7),
-                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", "ppr"),
+                ("candidates", 200), ("preset", None), ("scope", None), ("ranking", None),
                 ("cochange", True)],
             params(rg.PyGraph.pack_ids))
     with tempfile.TemporaryDirectory(prefix="glia-surface-pack-") as tmp:
@@ -135,6 +137,15 @@ def main() -> int:
         c.check("[rank-cache] holder=pygraph .. index=hit",
                 cache_marks(err, "pygraph") and set(cache_marks(err, "pygraph")) == {"index=hit"},
                 cache_marks(err, "pygraph"))
+        # EC.9: ranking=None selects; no calibration record here, so the
+        # fallback (ppr, co-change first: H10); a named ranking is explicit.
+        sel = p.get("selection") or {}
+        c.check("selection: fallback H10 (no record)",
+                (sel.get("set"), sel.get("shape"), sel.get("pick"), sel.get("source"), sel.get("reason"))
+                == ("SELh0", "k1", "H10", "fallback", "absent"), sel)
+        exp = g.pack("price", budget=100000, ranking="bfs", cochange=False).get("selection") or {}
+        c.check("selection: explicit B0", (exp.get("set"), exp.get("pick"), exp.get("source"))
+                == ("SELs0", "B0", "explicit"), exp)
         c.check("ranking=bfs packs the seed first",
                 g.pack("price", budget=100000, ranking="bfs", cochange=False)["nodes"][0]["qname"]
                 == "shop::a::price")
@@ -151,7 +162,8 @@ def main() -> int:
         none = g.pack("zzz_nothing")
         c.check("no match -> absence no_match, empty pack",
                 (none.get("absence") or {}).get("reason") == "no_match"
-                and none["nodes"] == [] and none["text"] == "" and none["used_tokens"] == 0, none)
+                and none["nodes"] == [] and none["text"] == "" and none["used_tokens"] == 0
+                and "selection" not in none, none)
         missing = g.pack_ids([1, 2])
         c.check("unheld ids -> absence no_match", (missing.get("absence") or {}).get("reason") == "no_match",
                 missing)
