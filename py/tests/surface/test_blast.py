@@ -81,7 +81,7 @@ def main() -> int:
         # every index warm and answers identically.
         c.raises("bad ranking", ValueError, lambda: g.blast_radius("app::helper", ranking="x"),
                  "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
-        (first, _) = stderr_of(lambda: g.blast_radius("app::helper", top_k=50))
+        (first, err1) = stderr_of(lambda: g.blast_radius("app::helper", top_k=50))
         (again, err2) = stderr_of(lambda: g.blast_radius("app::helper", top_k=50))
         c.check("a warm index answers identically", first == again)
         c.check("[rank-cache] holder=pygraph .. index=hit on the second call",
