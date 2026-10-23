@@ -24,10 +24,21 @@
 //!    first, in seed order; the rest follow by (score desc, id asc), are
 //!    scoped (a node with no locatable file is kept, A8.3) BEFORE the cut to
 //!    [`PackArgs::candidates`], and are tier `derived` (a walk over extracted
-//!    edges). Every candidate carries an integer weight: a seed
-//!    `2_000_000_000 - rank`, a neighbour `round(score * 1e9)` (scores lie in
-//!    [0, 1], so every seed outweighs every neighbour). Floats stop there:
-//!    every comparison below is integer.
+//!    edges). The PPR runs over the [`PackArgs::rank_cache`]'s `PprIndex`
+//!    for that config (bit-identical to a fresh walk; a transient cache when
+//!    none is given). **Ranking (EA.6).** Before the cut, the neighbours are
+//!    reordered by [`order_rows`] over the measured file ranking
+//!    ([`rank_files`], [`PackArgs::ranking`]) of the seeds' files: under the
+//!    default `H10` the neighbours in files that co-changed with the seeds'
+//!    (the history snapshot under a repo root the cache knows) come first, by
+//!    the file ranking, the rest keep the score order; `PT*` / `B0` group the
+//!    neighbours by file. With `Ranking::head()`, no snapshot or no seed
+//!    file, nothing moves. Every candidate carries an integer weight: a seed
+//!    `2_000_000_000 - rank`, a neighbour `round(s_i * 1e9)` where `s_i` is
+//!    the i-th largest neighbour score (the 0.5.2 weight profile, assigned
+//!    down the ranked order, so an unmoved order is the 0.5.2 pack byte for
+//!    byte; scores lie in [0, 1], so every seed outweighs every neighbour).
+//!    Floats stop there: every comparison below is integer.
 //! 3. **Greedy climb.** Rung values are Qname 1, Outline 3, Preview 6,
 //!    Full 10; a node's cost at a rung is [`estimate_tokens`] of its
 //!    [`render_node`] text plus one separator byte. A rung that renders as a
@@ -80,14 +91,23 @@
 //! 4 x candidates steps of 4 x candidates comparisons. Query-time, no pool,
 //! no `HashMap` order reaches the output: the pack is byte-stable.
 //!
-//! fired_on marker, one line per call:
+//! fired_on markers, one line each per call (the first only once seeds are
+//! resolved): `[rank] surface=pack ranking=<P1|PT*|B0|H10|H10[PT*]|H10[B0]>
+//! seed_files=<s> cochange_files=<c> files=0 lifted=<l>
+//! closure_index=<hit|built> lifted_files=<f> max_file_share=<m>/<k>` (or
+//! `[rank] surface=pack ranking=<r> files=0 reason=no_seed_file
+//! closure_index=<..>`), where `lifted` counts the rows the ranking moved
+//! earlier, and `max_file_share` is the most of the `k` cut neighbours one
+//! co-changed file took (ruling EA-2: no per-file cap, the share recorded) —
+//! grep `^\[rank\] surface=pack`; then
 //! `[pack] query=<q> seeds=<S> candidates=<C> packed=<P> (full=<F> preview=<V>
 //! outline=<O> qname=<Q>) tokens=<U>/<B> bytes=<N> bpt=<x.y> rerenders=<R>`
 //! (one line) — grep `^\[pack\] query=`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
-use glia_activation::Direction;
+use glia_activation::{Direction, Specificity};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
@@ -97,6 +117,7 @@ use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::find::{FindOptions, find_nodes};
 use crate::identity::Collapse;
+use crate::rank::{RankCache, Ranking, SourceKey, order_rows, rank_files};
 
 /// `PackArgs::default().budget_tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8000;
@@ -142,6 +163,13 @@ pub struct PackArgs {
     /// neighbours are kept under it; a node with no locatable file is kept.
     /// [`pack_ids`] keeps its explicit seeds regardless.
     pub scope: Option<String>,
+    /// The file ranking the neighbours are ordered by (step 2b, EA.6);
+    /// `Ranking::default()` is `H10` (co-change first), `Ranking::head()` the
+    /// 0.5.2 order. Without a history snapshot the two give the same pack.
+    pub ranking: Ranking,
+    /// The ranking indexes to reuse across calls (EA.2). `None`: a transient
+    /// cache that knows no repo root, so no co-change is read.
+    pub rank_cache: Option<Arc<RankCache>>,
 }
 
 impl Default for PackArgs {
@@ -153,6 +181,8 @@ impl Default for PackArgs {
             candidates: DEFAULT_CANDIDATES,
             preset: None,
             scope: None,
+            ranking: Ranking::default(),
+            rank_cache: None,
         }
     }
 }
@@ -365,10 +395,30 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     // Step 2: the PPR neighbourhood. `top_k` stays open so the scope filter
     // runs before the cut (A8.3 rule 1); the cut is `args.candidates`.
     let seed_ids: Vec<NodeId> = seeds.iter().map(|s| s.id).collect();
+    let cache = args.rank_cache.clone().unwrap_or_else(|| {
+        Arc::new(RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new()))
+    });
+    cache.guard(merged);
     let mut cfg = CODE_TABLES.activation_config(args.preset.as_deref());
     cfg.direction = Direction::Undirected;
     cfg.top_k = usize::MAX;
-    let mut scored = merged.activate(&seed_ids, &cfg).scores;
+    // The cached index gives MergedGraph::activate's scores bit for bit (same
+    // node list, same edge order, EA.1); the edges are read only for a
+    // degree specificity, which the code tables never set.
+    debug_assert!(matches!(cfg.node_specificity, Specificity::None));
+    let built_before = cache.stats().built;
+    let index = cache.ppr_index(merged, SourceKey::Merged, &cfg);
+    let closure_index = if cache.stats().built > built_before {
+        "built"
+    } else {
+        "hit"
+    };
+    let mut scored = if matches!(cfg.node_specificity, Specificity::None) {
+        glia_activation::activate_indexed(&index, &[], &seed_ids, &cfg).scores
+    } else {
+        let edges: Vec<glia_core::Edge> = merged.all_edges().cloned().collect();
+        glia_activation::activate_indexed(&index, &edges, &seed_ids, &cfg).scores
+    };
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.0.cmp(&b.0.0)));
     let mut seen: HashSet<NodeId> = seed_ids.iter().copied().collect();
     scored.retain(|(id, s)| *s > 0.0 && seen.insert(*id));
@@ -388,7 +438,13 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
             scored.len()
         );
     }
+    // Step 2b: the 0.5.2 weight profile, in today's (score desc) order; the
+    // measured file ranking then permutes the rows, and neighbour i of the
+    // new order takes weight i of the profile (`transplant`).
+    let profile: Vec<f64> = scored.iter().map(|(_, s)| *s).collect();
+    let ranked = rank_rows(merged, &cache, &seed_ids, &mut scored, args.ranking);
     scored.truncate(args.candidates.saturating_sub(seeds.len()));
+    rank_marker(&ranked, &scored, closure_index);
 
     let mut ids: Vec<NodeId> = seed_ids.clone();
     ids.extend(scored.iter().map(|(id, _)| *id));
@@ -408,7 +464,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
             });
         }
     }
-    for (id, score) in &scored {
+    for ((id, _), score) in scored.iter().zip(&profile) {
         // `as` saturates: a score in [0, 1] maps into [0, SCORE_SCALE].
         let w = (score.clamp(0.0, 1.0) * SCORE_SCALE).round() as u64;
         if let Some(cost) = costs(&view, *id, x10) {
@@ -485,6 +541,122 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     };
     marker(&pack, seeds.len());
     pack
+}
+
+/// What step 2b did, for the `[rank] surface=pack` line.
+struct RankedRows {
+    ranking: Ranking,
+    /// None: no seed has a candidate file, the order is kept.
+    seed_files: Option<usize>,
+    cochange_files: usize,
+    /// Rows that moved earlier than the score order put them.
+    lifted: usize,
+    /// Per neighbour row (in the final order), its candidate file and whether
+    /// it was lifted (tier 0: a co-changed file under co-change first).
+    rows: Vec<(Option<u32>, bool)>,
+}
+
+/// Step 2b: the measured file ranking of the seeds' files (EA.4) and the
+/// permutation [`order_rows`] gives for `scored`'s rows, applied in place.
+/// Seed files are the seeds' distinct candidate files in seed order; a seed
+/// with no candidate file is an extra seed node. With no seed file, nothing
+/// moves.
+fn rank_rows(
+    merged: &MergedGraph,
+    cache: &RankCache,
+    seed_ids: &[NodeId],
+    scored: &mut Vec<(NodeId, f64)>,
+    ranking: Ranking,
+) -> RankedRows {
+    let files = cache.files(merged);
+    let mut seed_files: Vec<u32> = Vec::new();
+    let mut extra: Vec<NodeId> = Vec::new();
+    for &id in seed_ids {
+        match files.file_of_node(id) {
+            Some(f) => {
+                if !seed_files.contains(&f) {
+                    seed_files.push(f);
+                }
+            }
+            None => extra.push(id),
+        }
+    }
+    let row_files: Vec<Option<u32>> = scored.iter().map(|(id, _)| files.file_of_node(*id)).collect();
+    if seed_files.is_empty() {
+        return RankedRows {
+            ranking,
+            seed_files: None,
+            cochange_files: 0,
+            lifted: 0,
+            rows: row_files.into_iter().map(|f| (f, false)).collect(),
+        };
+    }
+    let fr = rank_files(merged, cache, &seed_files, &extra, ranking);
+    let cochanged = |f: u32| {
+        ranking.cochange_first
+            && !seed_files.contains(&f)
+            && fr.c0.get(f as usize).is_some_and(|&c| c > 0.0)
+    };
+    let cochange_files = (0..fr.c0.len() as u32).filter(|&f| cochanged(f)).count();
+    let perm = order_rows(&row_files, &seed_files, &fr);
+    let (rows, lifted) = match perm {
+        None => (
+            row_files
+                .iter()
+                .map(|&f| (f, f.is_some_and(cochanged)))
+                .collect(),
+            0,
+        ),
+        Some(perm) => {
+            let lifted = perm.iter().enumerate().filter(|&(to, &from)| to < from).count();
+            let mut taken: Vec<Option<(NodeId, f64)>> = scored.drain(..).map(Some).collect();
+            let mut rows = Vec::with_capacity(perm.len());
+            for &i in &perm {
+                if let Some(row) = taken.get_mut(i).and_then(Option::take) {
+                    scored.push(row);
+                    let f = row_files.get(i).copied().flatten();
+                    rows.push((f, f.is_some_and(cochanged)));
+                }
+            }
+            (rows, lifted)
+        }
+    };
+    RankedRows {
+        ranking,
+        seed_files: Some(seed_files.len()),
+        cochange_files,
+        lifted,
+        rows,
+    }
+}
+
+/// The `[rank] surface=pack` line: once per call, before `[pack] query=`.
+/// `lifted_files` / `max_file_share` record how many of the cut candidates
+/// the co-changed files took (ruling EA-2: no per-file cap; the share is
+/// recorded so the gate can show whether one is needed).
+fn rank_marker(r: &RankedRows, kept: &[(NodeId, f64)], closure_index: &str) {
+    let Some(seed_files) = r.seed_files else {
+        eprintln!(
+            "[rank] surface=pack ranking={} files=0 reason=no_seed_file closure_index={closure_index}",
+            r.ranking.harness_name()
+        );
+        return;
+    };
+    let mut per_file: BTreeMap<u32, usize> = BTreeMap::new();
+    for (f, lifted) in r.rows.iter().take(kept.len()) {
+        if let (Some(f), true) = (f, lifted) {
+            *per_file.entry(*f).or_insert(0) += 1;
+        }
+    }
+    let max_share = per_file.values().copied().max().unwrap_or(0);
+    eprintln!(
+        "[rank] surface=pack ranking={} seed_files={seed_files} cochange_files={} files=0 lifted={} closure_index={closure_index} lifted_files={} max_file_share={max_share}/{}",
+        r.ranking.harness_name(),
+        r.cochange_files,
+        r.lifted,
+        per_file.len(),
+        kept.len(),
+    );
 }
 
 /// Each rung's estimated cost for `id` over the candidate `view`: the rung's

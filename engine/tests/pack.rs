@@ -311,3 +311,31 @@ fn deterministic() {
     let t2 = pack(&again, "price", &args).text;
     assert_eq!(t1, t2);
 }
+
+/// EA.6: the default ranking is `H10` with no cache; with no history snapshot
+/// in the tree, `H10`, `Ranking::head()` and a cache that knows the root all
+/// give the 0.5.2 pack, byte for byte, at every budget.
+#[test]
+fn ranking_without_history_keeps_the_pack() {
+    use std::sync::Arc;
+
+    use glia_engine::rank::{RankCache, Ranking};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_shop(dir.path());
+    let r = generate_one(&dir.path().to_string_lossy()).expect("generate_one");
+    let m = &r.merged;
+    let d = PackArgs::default();
+    assert_eq!(d.ranking, Ranking::default());
+    assert!(d.rank_cache.is_none());
+    let cache = Arc::new(RankCache::new("answer", &r.repo_roots, &r.repo_labels));
+    for tokens in [40, 120, 256, 100_000] {
+        let mut head = budget(tokens);
+        head.ranking = Ranking::head();
+        let mut cached = budget(tokens);
+        cached.rank_cache = Some(cache.clone());
+        let want = serde_json::to_string(&pack(m, "price", &head)).unwrap();
+        assert_eq!(serde_json::to_string(&pack(m, "price", &budget(tokens))).unwrap(), want);
+        assert_eq!(serde_json::to_string(&pack(m, "price", &cached)).unwrap(), want);
+    }
+}
