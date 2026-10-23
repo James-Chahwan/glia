@@ -1,5 +1,5 @@
 //! The PPR index (EA.1): the incidence lists, out-weights and dangling list
-//! [`crate::ppr_vector`] used to rebuild per call, built once per (graph,
+//! `crate::ppr_vector` used to rebuild per call, built once per (graph,
 //! config) and run per seed set.
 //!
 //! [`PprIndex::vector`] is the pre-index `ppr_vector` arithmetic verbatim, in

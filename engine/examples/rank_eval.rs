@@ -12790,8 +12790,8 @@ fn r1_hist(args: &Args, commits: &[Commit], tests: &BTreeSet<usize>, extra_at: O
             let wcache: std::sync::Mutex<HashMap<String, DocLines>> = std::sync::Mutex::new(HashMap::new());
             let maybe = |m: &str| !hyphen_ids(m).is_empty() || !bare_ids(m, &bare_kinds()).is_empty();
             // (commit, pre-change text, its units, per-commit stats).
-            type KinaPre = (usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>);
-            let got: Vec<KinaPre> = (0..n)
+            type VerticalPre = (usize, Option<String>, BTreeSet<String>, BTreeMap<String, f64>);
+            let got: Vec<VerticalPre> = (0..n)
                 .into_par_iter()
                 .filter(|&k| maybe(&commits[k].msg))
                 .map(|k| {
