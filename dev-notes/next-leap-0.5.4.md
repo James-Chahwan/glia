@@ -388,6 +388,38 @@ Not candidates: each becomes packets in the spec run.
     call, the `glia` CLI and `uvx mcp-repo-graph` as alternate transports, once item 9 ships (James via repo-graph-8d);
     until then repo-graph keeps its six. Licence (PolyForm NC + overlay) is James's to confirm.
 
+11. **Agent before / after, first (James 2026-10-23: *"It should go into 0.5.4"*; must).** Every ranking result so far is
+    one proxy, "predict the commit's other files", which partly favours history signals by construction (co-change and the
+    subject text come from the same commits as the truth). Before 0.5.4's new layers, measure what the rankings do for an
+    agent: the same task set (held-out commits' tasks on public repos, the commit subject / issue as the prompt) run by an
+    agent through glia answers at 0.5.2 vs 0.5.3 rankings, scoring files opened, tokens, task success against the
+    commit's diff, with a no-glia control. A committed harness (Rust driver or the repo's bench conventions), a report,
+    and it becomes the baseline 0.5.5's proof extends. Not a gate on 0.5.3's release; it informs 0.5.4's ranking work.
+12. **Early edge-precision audit (must).** "Accurate edges pay every consumer" (Engram glia strict +15/-2) yet no edge
+    precision rate exists; the 0.5.2 dead_symbol audit found 103 / 176 rows false. At the start of 0.5.4, before the
+    connector and embeddings build on the graph: a sampled, stratified audit per edge category x tier on glia + 3 public
+    repos (judged against source, a committed sample file and verdicts), a precision table with CIs, and every category
+    under its floor becomes a packet in the precision group. It is 0.5.5's precision baseline.
+13. **Embedding gate before `glia embed` ships (must).** Text as a linker made every ranking worse (precision 0.33) and
+    Engram's rule is "never decide presence by cosine". `rank_eval` gains semantic rankers (find shape: query text ->
+    nearest node vectors -> files; and BM25 + vectors fused) with a random-vector control, on the gate's repos. The
+    semantic tier reaches `find` / flow search / pack's fallback only if it beats BM25 alone on the gate; otherwise
+    `glia embed` ships as a sidecar with no answer reading it, and the report says so.
+14. **Where new code goes (measured experiment, then build).** The rankings can only name existing files: 128 of 222 files
+    of the law-driven change were new; co-change is cold for 33-49% of seeds. Score, on held-out commits that add files,
+    the directory a new file lands in and the sibling it was patterned on (structure, co-change, intent, calibration as in
+    0.5.3), against controls. If a ranker beats them on the gate repos, it ships as an answer (`glia place <intent>` or a
+    `review` / `find` section) in a follow-up wave of this leap; if not, the report closes it.
+15. **PR / issue text as intent (measured experiment, then build).** Round 1 measured commit subjects; review's real
+    intent is the PR description, a task's the issue. A `snapshots/` step ingests PR and issue title / body / linked
+    commits through `gh` (never inside a build; cached; public repos for the eval), and `rank_eval` compares PR text vs
+    subject on the gate repos. If PR text wins, `review` reads it (`--pr <n>`), in a follow-up wave of this leap.
+
+Candidate, joint with repo-graph (not glia alone): **the use signal.** Engram's largest win was learning from use; glia
+learns only from commits. Which answer rows an agent actually opened or acted on (repo-graph's MCP logs) and the
+clarification queue's answers are live signal. Per the registered-test rule, glia builds nothing for it until repo-graph
+logs usage and a test is registered.
+
 ### E. From the 0.5.2 waves
 
 Close-out followups that name no 0.5.2 packet are appended here as each wave lands.
@@ -861,6 +893,11 @@ All four answered 2026-10-16 (§0); recorded as rulings:
    spec time how many of glia's 240 / quokka-stack's 193 / Kina's 4 proximity settles.
 
 ## 4. Spec run
+
+**Specced early (James 2026-10-23: *"get it ready for build so whenever all these waves finish we have 0.5.4 done if we
+need to modify post 0.5.3"*):** the spec run runs while 0.5.3's waves land, against a moving HEAD. After 0.5.3's last
+close-out, a re-verify pass (one agent per group) checks every packet against the landed 0.5.3 tree and rewrites what
+moved; only then do 0.5.4's waves start.
 
 After the 0.5.2 release (2026-10-18, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
 adversarial verifier, one integrator for wave 0 and the release docs), packet ids `F<group>.<n>[letter]` with `F0.*`
