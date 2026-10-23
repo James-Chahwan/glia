@@ -27,6 +27,14 @@
 //! self-gitignored) as an incremental build does, under `GLIA_NO_PERSIST=1`
 //! too; never a `.gmap` layout.
 //!
+//! 0.5.3 (EA.8): `--ranking ppr|ppr-wide|bfs` and `--no-cochange` pick the
+//! file ranking that orders the impact rows (co-change from the working
+//! tree's `.glia/history-snapshot` first by default), over one `RankCache`
+//! (holder `cli`) holding the build's repo roots: the working tree's in rev
+//! mode, the build's (the `--with` repos' included) for `--diff`. A `##
+//! files` table of the `--top-files` best files follows the impact table
+//! (`--json`: `impact.files`); `[rank] surface=diff_impact ranking=<r> ..`.
+//!
 //! Fired-on marker: the engine's
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`.
 
@@ -40,7 +48,7 @@ use glia_engine::identity::Collapse;
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
-use crate::common::{ImpactDirection, build_options, generate_for};
+use crate::common::{ImpactDirection, RankingArgs, build_options, generate_for, rank_cache, render_files};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -74,6 +82,12 @@ pub(crate) struct Args {
     /// only.
     #[arg(long)]
     with: Vec<String>,
+    #[command(flatten)]
+    ranking: RankingArgs,
+    /// How many ranked files the `## files` table (`--json`: `impact.files`)
+    /// lists.
+    #[arg(long, value_name = "N", default_value_t = BlastOptions::default().top_files)]
+    top_files: usize,
     /// Emit JSON instead of tables.
     #[arg(long)]
     json: bool,
@@ -91,20 +105,22 @@ fn read_diff(src: &str) -> Result<String, String> {
     std::fs::read_to_string(src).map_err(|e| format!("reading the diff {src}: {e}"))
 }
 
-/// The answer for whichever change source `args` names.
-fn answer(args: &Args, opts: &BlastOptions) -> Result<DiffImpact, String> {
+/// The answer for whichever change source `args` names, and how many repos
+/// its build holds.
+fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), String> {
     if let Some(src) = &args.diff {
         if args.base.is_some() {
             return Err("give one change source: --base <rev> or --diff <file|->, not both".to_string());
         }
         let text = read_diff(src)?;
         let built = generate_for(&args.repo, &args.with)?;
-        let opts = labelled(opts, &built.repo_labels);
+        let mut opts = labelled(opts, &built.repo_labels);
+        opts.rank_cache = Some(rank_cache(&built));
         let mut a = diff_impact_from_diff(&built.merged, &text, &opts);
         if let Some(x) = a.impact.absence.as_mut() {
             x.unparsed_files = built.parse_errors.len();
         }
-        return Ok(a);
+        return Ok((a, built.repo_labels.len()));
     }
     if !args.with.is_empty() {
         return Err("--base builds the one repo against its git rev; --with needs --diff".to_string());
@@ -115,9 +131,11 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<DiffImpact, String> {
         );
     }
     // `diff_impact_vs_rev`'s two steps, so the radius gets the working
-    // tree's labels between them.
+    // tree's labels and a CLI-held rank cache over its roots between them.
     let rev = graph_delta_vs_rev(&args.repo, args.base.as_deref().unwrap_or("HEAD"))?;
-    Ok(diff_impact_from_delta(&rev, &labelled(opts, &rev.after.repo_labels)))
+    let mut opts = labelled(opts, &rev.after.repo_labels);
+    opts.rank_cache = Some(rank_cache(&rev.after));
+    Ok((diff_impact_from_delta(&rev, &opts), rev.after.repo_labels.len()))
 }
 
 /// `opts` with the build's repo labels when its collapse is on and has none
@@ -143,7 +161,10 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.top_k = args.top_k;
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
-    let a = match answer(&args, &opts) {
+    let ranking = args.ranking.ranking();
+    opts.ranking = ranking;
+    opts.top_files = args.top_files;
+    let (a, repos) = match answer(&args, &opts) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: {e}");
@@ -159,6 +180,9 @@ pub(crate) fn run(args: Args) -> i32 {
             (None, None) => "diff".to_string(),
         };
         render(&args.repo, &source, &a, dir, args.depth);
+        if a.impact.absence.is_none() {
+            render_files(&a.impact.files, ranking, repos > 1);
+        }
     }
     0
 }

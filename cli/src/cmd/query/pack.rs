@@ -15,6 +15,13 @@
 //! `CODE_TABLES` (read from the table, so a new preset needs no edit here).
 //! Exit 0 with nodes; 1 when the pack is empty (no match, or a budget too
 //! small for the title and one qname); 2 on a usage or build error.
+//!
+//! 0.5.3 (EA.8): `--ranking ppr|ppr-wide|bfs` and `--no-cochange` pick the
+//! file ranking the neighbours are ordered by (`PackArgs.ranking`; co-change
+//! from `.glia/history-snapshot` first by default), over one `RankCache`
+//! (holder `cli`) holding the build's repo roots. The engine's `[rank]
+//! surface=pack ranking=<r> .. max_file_share=<s>/<n>` carries the per-file
+//! share (ruling EA-2).
 
 use glia_code_domain::profile::CODE_TABLES;
 use glia_engine::absence::Absence;
@@ -22,7 +29,7 @@ use glia_engine::pack::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CANDIDATES, DEFAULT_SEEDS, Pack, PackArgs, pack,
 };
 
-use crate::common::generate_for;
+use crate::common::{RankingArgs, generate_for, rank_cache};
 
 // `--bytes-per-token`'s default is the literal "3.7" (clap's `default_value`
 // is a `&'static str`); this keeps it the engine's default.
@@ -66,6 +73,8 @@ pub(crate) struct Args {
     /// label (see `glia projects`); a node with no file is kept.
     #[arg(long)]
     scope: Option<String>,
+    #[command(flatten)]
+    ranking: RankingArgs,
     /// Emit the whole pack (text and manifest) as JSON.
     #[arg(long)]
     json: bool,
@@ -86,6 +95,8 @@ pub(crate) fn run(args: Args) -> i32 {
     query.candidates = args.candidates;
     query.preset = args.preset;
     query.scope = args.scope;
+    query.ranking = args.ranking.ranking();
+    query.rank_cache = Some(rank_cache(&result));
     let mut packed = pack(&result.merged, &args.query, &query);
     if let Some(a) = packed.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();

@@ -1,14 +1,17 @@
 //! Helpers shared by more than one command: the build options of the
 //! global flags, graph generation for the `--with` commands, the summary
 //! table and JSON dumps (`analyze`, `merge`), node lookups and pretty names,
-//! and `ImpactDirection` (`impact`, `blast-radius`).
+//! `ImpactDirection` (`impact`, `blast-radius`), and 0.5.3's `RankingArgs`
+//! with the `## files` table (EA.8: `blast-radius`, `diff-impact`, `review`,
+//! `pack`).
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use clap::ValueEnum;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{NodeId, NodeKindId};
+use glia_engine::rank::{RankBase, RankCache, RankedFile, Ranking};
 use glia_engine::{BuildOptions, GenerateResult, generate_many_opts, generate_one_opts};
 use glia_graph::MergedGraph;
 use glia_graph::roles::roles_in;
@@ -21,6 +24,77 @@ pub(crate) enum ImpactDirection {
     Backward,
     /// Both directions in one pass.
     Both,
+}
+
+/// The CLI names of the structural file rankings (`RankBase::name`).
+const RANKINGS: [&str; 3] = ["ppr", "ppr-wide", "bfs"];
+
+/// 0.5.3 (EA.8): the file-ranking flags of the ranked answers, flattened
+/// into `blast-radius`, `diff-impact`, `review` and `pack`.
+#[derive(clap::Args, Debug, Clone)]
+pub(crate) struct RankingArgs {
+    /// The structural file ranking: ppr (PPR damping 0.5, a file ranks by
+    /// its best node), ppr-wide (damping 0.85, a file ranks by the sum of its
+    /// nodes) or bfs (carry-edge distance, then file degree).
+    #[arg(
+        long,
+        value_name = "RANKING",
+        default_value = RANKINGS[0],
+        value_parser = clap::builder::PossibleValuesParser::new(RANKINGS),
+    )]
+    ranking: String,
+    /// Do not rank files that changed together with the seeds first (read
+    /// from .glia/history-snapshot, written by `glia history sync`).
+    #[arg(long)]
+    no_cochange: bool,
+}
+
+impl RankingArgs {
+    /// The engine's `Ranking`: the base the flag names, co-change first
+    /// unless `--no-cochange`. clap has already refused any other name; one
+    /// that slipped through is the default base.
+    pub(crate) fn ranking(&self) -> Ranking {
+        let base = RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr);
+        Ranking::new(base, !self.no_cochange)
+    }
+}
+
+/// The CLI's held ranking cache over a build: its repo roots name the history
+/// snapshots co-change reads, its labels the `files` rows' repos. One per
+/// command run (`[rank-cache] holder=cli`).
+pub(crate) fn rank_cache(result: &GenerateResult) -> Arc<RankCache> {
+    Arc::new(RankCache::new("cli", &result.repo_roots, &result.repo_labels))
+}
+
+/// The `## files` markdown table under a ranked answer: rank, file, the repo
+/// when the build holds more than one, the answer's rows in the file, its
+/// co-change share, then its pooled PPR score (`depth` under `bfs`). Prints
+/// nothing for an empty list.
+pub(crate) fn render_files(files: &[RankedFile], ranking: Ranking, many_repos: bool) {
+    if files.is_empty() {
+        return;
+    }
+    let bfs = ranking.base == RankBase::Bfs;
+    let last = if bfs { "depth" } else { "ppr" };
+    println!();
+    println!("## files");
+    println!();
+    if many_repos {
+        println!("| # | file | repo | rows | co-change | {last} |");
+        println!("|--:|---|---|--:|--:|--:|");
+    } else {
+        println!("| # | file | rows | co-change | {last} |");
+        println!("|--:|---|--:|--:|--:|");
+    }
+    for f in files {
+        let score = if bfs {
+            f.depth.map_or_else(|| "—".to_string(), |d| d.to_string())
+        } else {
+            f.ppr.map_or_else(|| "—".to_string(), |p| format!("{p:.3}"))
+        };
+        let repo = if many_repos { format!(" {} |", f.repo) } else { String::new() };
+        println!("| {} | {} |{repo} {} | {:.3} | {score} |", f.rank, f.file, f.rows, f.cochange);
+    }
 }
 
 /// The build options the global flags ask for (`--no-overlay`), set once by

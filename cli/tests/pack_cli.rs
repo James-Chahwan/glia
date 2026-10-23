@@ -300,3 +300,19 @@ fn no_match_exits_1_with_the_absence() {
     assert_eq!(json["text"], "");
     assert_eq!(json["nodes"].as_array().map(Vec::len), Some(0));
 }
+
+/// EA.8: `--no-cochange` and `--ranking` reach the pack over a CLI-held rank
+/// cache (`[rank-cache] holder=cli`, `[rank] surface=pack ranking=<r>`).
+#[test]
+fn ranking_flags_reach_the_pack() {
+    let root = Root::new("ranking");
+    let out = glia(&[root.path(), "price", "--no-cochange", "--ranking", "bfs"], 0);
+    assert!(!lines_with(&out, "[rank-cache] holder=cli ").is_empty(), "{}", stderr(&out));
+    let rank = lines_with(&out, "[rank] surface=pack ");
+    assert_eq!(rank.len(), 1, "{}", stderr(&out));
+    assert!(rank[0].starts_with("[rank] surface=pack ranking=B0 "), "{}", rank[0]);
+    let dflt = glia(&[root.path(), "price"], 0);
+    let rank = lines_with(&dflt, "[rank] surface=pack ");
+    assert!(rank[0].starts_with("[rank] surface=pack ranking=H10 "), "{}", rank[0]);
+    glia(&[root.path(), "price", "--ranking", "x"], 2);
+}

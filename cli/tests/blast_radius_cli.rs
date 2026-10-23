@@ -172,3 +172,214 @@ fn identity_classes_collapse_unless_no_collapse() {
     assert!(row.contains(" (also in: "), "{table}");
     assert_eq!(table.lines().filter(|l| l.contains("| DOC_SECTION |")).count(), 1, "{table}");
 }
+
+// ---- EA.8: `--ranking`, `--no-cochange`, `--top-files` and `## files` ----
+//
+// EA.5's tree (engine/tests/rank_blast.rs): `svc/core.py` defines `core`;
+// `svc/a.py`, `b.py`, `c.py` each call it once, `svc/d.py` twice; `web/page.ts`
+// is unrelated code. The history snapshot: core changed with c 5 times, with
+// page 4 times, with b twice and alone 5 times (C0: c 5/17, page 4/17, b 2/17).
+
+mod ranked {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+    use std::sync::Arc;
+
+    use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
+    use glia_engine::rank::{RankBase, RankCache, Ranking, rank_files};
+
+    const T0: i64 = 1_767_225_600;
+    const CORE: &str = "svc/core.py";
+    const B: &str = "svc/b.py";
+    const C: &str = "svc/c.py";
+    const PAGE: &str = "web/page.ts";
+
+    /// EA.5's HEAD (0.5.2) backward depth-1 rows from `core` over a tree
+    /// directory named `tree` (the repo id, so the node-id ties, follow it).
+    const HEAD_ROWS: [&str; 5] = ["svc::a::a", "svc::d::d2", "svc::b::b", "svc::d::d1", "svc::c::c"];
+
+    fn sources() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (CORE, "def core(x):\n    return x\n"),
+            ("svc/a.py", "from svc.core import core\n\n\ndef a():\n    return core(1)\n"),
+            (B, "from svc.core import core\n\n\ndef b():\n    return core(1)\n"),
+            (C, "from svc.core import core\n\n\ndef c():\n    return core(1)\n"),
+            (
+                "svc/d.py",
+                "from svc.core import core\n\n\ndef d1():\n    return core(1)\n\n\ndef d2():\n    return core(2)\n",
+            ),
+            (PAGE, "export function renderPage(t: string): string {\n  return t;\n}\n"),
+        ]
+    }
+
+    fn history() -> Vec<HistoryCommit> {
+        let groups: Vec<(Vec<&str>, usize)> =
+            vec![(vec![CORE, C], 5), (vec![CORE, PAGE], 4), (vec![CORE, B], 2), (vec![CORE], 5)];
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        for (paths, n) in groups {
+            for _ in 0..n {
+                i += 1;
+                out.push(HistoryCommit {
+                    c: format!("{i:04}{}", "0".repeat(36)),
+                    t: T0 + i64::try_from(i).expect("small") * 3_600,
+                    files: paths
+                        .iter()
+                        .map(|p| HistoryFile { p: (*p).to_string(), a: Some(1), d: Some(0), from: None })
+                        .collect(),
+                });
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    /// `<tmp>/glia-ea8-<tag>-<pid>/tree`, with the snapshot when asked;
+    /// removed on drop.
+    pub(super) struct Tree(PathBuf);
+
+    impl Tree {
+        pub(super) fn new(tag: &str, snapshot: bool) -> Self {
+            let base = std::env::temp_dir().join(format!("glia-ea8-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let root = base.join("tree");
+            for (p, text) in sources() {
+                let path = root.join(p);
+                std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+                std::fs::write(path, text).expect("write");
+            }
+            if snapshot {
+                let h = history();
+                let head = h.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
+                write_history(&root, HistoryMeta::new(head, 2000, None, String::new()), &h, &[])
+                    .expect("write snapshot");
+            }
+            Tree(base)
+        }
+
+        pub(super) fn root(&self) -> PathBuf {
+            self.0.join("tree")
+        }
+
+        pub(super) fn path(&self) -> String {
+            self.root().to_str().expect("utf-8").to_string()
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(super) fn glia(args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_glia")).env("GLIA_NO_PERSIST", "1").args(args).output().expect("glia")
+    }
+
+    fn json(out: &Output) -> serde_json::Value {
+        assert!(out.status.success(), "exit {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).expect("stdout is JSON")
+    }
+
+    fn rows(v: &serde_json::Value) -> Vec<String> {
+        v["results"].as_array().expect("results").iter().map(|r| r["qname"].as_str().expect("q").to_string()).collect()
+    }
+
+    fn files(v: &serde_json::Value) -> Vec<String> {
+        v["files"].as_array().expect("files").iter().map(|f| f["file"].as_str().expect("f").to_string()).collect()
+    }
+
+    /// The one line of stderr starting with `prefix`, relayed for grep.
+    pub(super) fn line(out: &Output, prefix: &str) -> String {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let ls: Vec<&str> = stderr.lines().filter(|l| l.starts_with(prefix)).collect();
+        assert!(!ls.is_empty(), "no `{prefix}` line:\n{stderr}");
+        eprintln!("{}", ls[0]);
+        ls[0].to_string()
+    }
+
+    fn blast(t: &Tree, extra: &[&str]) -> Output {
+        let p = t.path();
+        let mut a = vec!["blast-radius", p.as_str(), "core", "--direction", "backward", "--depth", "1"];
+        a.extend_from_slice(extra);
+        glia(&a)
+    }
+
+    pub(super) fn path_of(root: &Path) -> String {
+        root.to_str().expect("utf-8").to_string()
+    }
+
+    #[test]
+    fn default_ranks_cochanged_files_first() {
+        let t = Tree::new("h10", true);
+        let out = blast(&t, &["--json"]);
+        let v = json(&out);
+        let r = rows(&v);
+        assert_eq!(r, ["svc::c::c", "svc::b::b", "svc::a::a", "svc::d::d2", "svc::d::d1"], "{v}");
+        assert_eq!(v["results"][0]["file"], C, "{v}");
+        assert_eq!(files(&v)[0], C, "{v}");
+        assert_eq!(&files(&v)[..3], [C, PAGE, B], "{v}");
+        assert!(line(&out, "[rank-cache] holder=").starts_with("[rank-cache] holder=cli "));
+        assert!(line(&out, "[rank] surface=blast_radius").contains(" ranking=H10 "));
+        let cochange = line(&out, "[rank] surface=blast_radius");
+        assert!(!cochange.contains(" cochange_files=0 "), "{cochange}");
+    }
+
+    #[test]
+    fn no_cochange_is_the_head_order() {
+        let t = Tree::new("p1", true);
+        let v = json(&blast(&t, &["--no-cochange", "--json"]));
+        assert_eq!(rows(&v), HEAD_ROWS, "{v}");
+        let bare = Tree::new("p1-bare", false);
+        let w = json(&blast(&bare, &["--json"]));
+        assert_eq!(rows(&w), HEAD_ROWS, "no snapshot: the default is the head order: {w}");
+    }
+
+    #[test]
+    fn ppr_wide_lists_files_in_pt_star_order() {
+        let t = Tree::new("ptstar", true);
+        let out = blast(&t, &["--ranking", "ppr-wide", "--no-cochange", "--json"]);
+        let v = json(&out);
+        assert!(line(&out, "[rank] surface=blast_radius").contains(" ranking=PT* "));
+
+        let built = glia_engine::generate_one(&path_of(&t.root())).expect("build");
+        let cache = Arc::new(RankCache::new("test", &built.repo_roots, &built.repo_labels));
+        let fi = cache.files(&built.merged);
+        let seed = fi.index_of(fi.repo(0), CORE).expect("core.py is a candidate");
+        let wide = Ranking::new(RankBase::PprWide, false);
+        let fr = rank_files(&built.merged, &cache, &[seed], &[], wide);
+        let mut per: BTreeMap<u32, usize> = BTreeMap::new();
+        for r in v["results"].as_array().expect("results") {
+            let f = fi.file_of_node(glia_core::NodeId(r["id"].as_u64().expect("id"))).expect("candidate");
+            *per.entry(f).or_default() += 1;
+        }
+        let want: Vec<String> = fr.top(&fi, 10, &per).iter().map(|f| f.file.clone()).collect();
+        assert_eq!(files(&v), want, "{v}");
+    }
+
+    #[test]
+    fn bfs_marker_and_markdown_table() {
+        let t = Tree::new("bfs", true);
+        let out = blast(&t, &["--ranking", "bfs"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(line(&out, "[rank] surface=blast_radius").contains(" ranking=H10[B0] "));
+        let md = String::from_utf8_lossy(&out.stdout);
+        assert!(md.contains("\n## files\n\n| # | file | rows | co-change | depth |\n"), "{md}");
+        assert!(md.contains(&format!("| 1 | {C} | 1 | 0.294 | 1 |")), "{md}");
+
+        let ppr = blast(&t, &[]);
+        let md = String::from_utf8_lossy(&ppr.stdout);
+        assert!(md.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"), "{md}");
+    }
+
+    #[test]
+    fn top_files_cuts_the_list_and_a_bad_ranking_is_clap() {
+        let t = Tree::new("top", true);
+        let v = json(&blast(&t, &["--top-files", "3", "--json"]));
+        assert_eq!(files(&v).len(), 3, "{v}");
+        let bad = blast(&t, &["--ranking", "x"]);
+        assert_eq!(bad.status.code(), Some(2), "{}", String::from_utf8_lossy(&bad.stderr));
+        assert!(String::from_utf8_lossy(&bad.stderr).contains("[possible values: ppr, ppr-wide, bfs]"));
+    }
+}

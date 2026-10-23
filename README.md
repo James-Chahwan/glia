@@ -286,7 +286,7 @@ glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]
     Reachability walk from one entity: forward, backward or both.
-glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backward|both] [--json] [--live-only] [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
+glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backward|both] [--json] [--live-only] [--no-cochange] [--no-collapse] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <TOP_K>] [--with <WITH>]...
     Edge-category-aware, PPR-ranked, located closure around one or more seeds, each
     row naming its seed, edge reason and `live` flag; import / contain edges excluded.
     A shared message, contract op or SCIP symbol is one node of the walk, so the radius
@@ -318,7 +318,7 @@ glia docs-for <REPO> <QNAME> [--json] [--scope <SCOPE>] [--with <WITH>]...
     well-known files and docs/ trees at the repo root and every project root, .ai/,
     ADR dirs, SDD feature docs (features/<f>/*.md, spec-kit specs/<NNN-slug>/) and
     synced docs (`glia docs sync`).
-glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN>] [--candidates <CANDIDATES>] [--json] [--preset repair|review|onboard|centrality] [--scope <SCOPE>] [--seeds <SEEDS>] [--with <WITH>]...
+glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN>] [--candidates <CANDIDATES>] [--json] [--no-cochange] [--preset repair|review|onboard|centrality] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--seeds <SEEDS>] [--with <WITH>]...
     The context for a query packed to a token budget (default 8000), ready to paste:
     the seeds `glia find` matches, then their callers and callees by personalised
     PageRank, each at the most detail the budget buys (full source, a preview, an
@@ -341,7 +341,7 @@ glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>
 glia delta <REPO> [--base <BASE>] [--category <CATEGORY>]... [--edges-only] [--json]
     What the working tree's change did to the graph against a git rev (default HEAD):
     nodes and edges added, removed, modified or moved, located.
-glia diff-impact <REPO> [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--direction forward|backward|both] [--json] [--live-only] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
+glia diff-impact <REPO> [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--direction forward|backward|both] [--json] [--live-only] [--no-cochange] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <TOP_K>] [--with <WITH>]...
     The changed nodes (--base rev or --diff file) and one ranked blast radius around
     them, each row naming the change that reached it.
 glia tests-for <REPO> [QNAMES]... [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--files-only] [--json] [--limit <N>] [--no-collapse] [--no-module-level] [--no-signals] [--scope <SCOPE>] [--with <WITH>]...
@@ -357,7 +357,7 @@ glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min
     --min-support sighted handlers is the convention, and every handler off it a
     located DIVERGENCE. Blind handlers are listed, never counted. Counts, not rules;
     --base keeps the divergences the change touched.
-glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived]
+glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--ranking ppr|ppr-wide|bfs]
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, the declared rules checked on both sides, and the inferred-model

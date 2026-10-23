@@ -40,6 +40,12 @@
 //! (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored), as `glia delta`
 //! does, under `GLIA_NO_PERSIST=1` too; never a `.gmap` layout.
 //!
+//! 0.5.3 (EA.8): `--ranking ppr|ppr-wide|bfs` and `--no-cochange` pick the
+//! file ranking that orders the impact rows (`ReviewArgs.blast.ranking`;
+//! co-change from the working tree's `.glia/history-snapshot` first by
+//! default). The markdown is unchanged: its impact table follows the rows'
+//! order. `[rank] surface=review ranking=<r> ..` once per run.
+//!
 //! Fired-on markers: the engine's
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
 //! and
@@ -58,7 +64,9 @@ use glia_engine::review::{
     caveat_fold, render_markdown, review_vs_rev,
 };
 
-use crate::common::build_options;
+use glia_engine::rank::Ranking;
+
+use crate::common::{RankingArgs, build_options};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -97,6 +105,8 @@ pub(crate) struct Args {
         value_parser = clap::builder::PossibleValuesParser::new(MODEL_MIN_TIERS),
     )]
     models_min_tier: String,
+    #[command(flatten)]
+    ranking: RankingArgs,
 }
 
 /// The engine's arguments from the flags; `Err` names a tier outside
@@ -107,6 +117,7 @@ fn engine_args(
     max_tests: usize,
     max_impact: usize,
     models_min_tier: &str,
+    ranking: Ranking,
 ) -> Result<ReviewArgs, String> {
     let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
         return Err(format!(
@@ -116,6 +127,7 @@ fn engine_args(
     };
     let mut args = ReviewArgs::default();
     args.blast.depth = depth;
+    args.blast.ranking = ranking;
     args.max_tests = max_tests;
     args.max_impact = max_impact;
     args.models_min_tier = tier;
@@ -135,6 +147,7 @@ pub(crate) fn run(args: Args) -> i32 {
         args.max_tests,
         args.max_impact,
         &args.models_min_tier,
+        args.ranking.ranking(),
     ) {
         Ok(a) => a,
         Err(e) => {
@@ -181,20 +194,21 @@ mod tests {
 
     #[test]
     fn engine_args_carry_the_flags() {
-        let a = engine_args(2, 7, 9, "derived").expect("a tier");
+        let bfs = Ranking::new(glia_engine::rank::RankBase::Bfs, false);
+        let a = engine_args(2, 7, 9, "derived", bfs).expect("a tier");
         assert_eq!(
-            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier),
-            (2, 7, 9, "derived")
+            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking),
+            (2, 7, 9, "derived", bfs)
         );
         let e = ReviewArgs::default();
-        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact")
+        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact", Ranking::default())
             .expect("the default tier");
         assert_eq!(
-            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier),
-            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier)
+            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier, d.blast.ranking),
+            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier, e.blast.ranking)
         );
         assert_eq!(e.models_min_tier, "fact", "the ruling's default");
-        let err = engine_args(4, 50, 50, "heuristic").expect_err("no such gate");
+        let err = engine_args(4, 50, 50, "heuristic", Ranking::default()).expect_err("no such gate");
         assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
     }
 }

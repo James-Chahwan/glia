@@ -612,3 +612,23 @@ kind = "invariant"
 text = "every api handler is called"
 rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handlers.py\"), !called(f). called(f) :- edge(_, f, \"CALLS\")."
 "#;
+
+/// EA.8: `--no-cochange` and `--ranking` reach the impact radius
+/// (`[rank] surface=review ranking=<r>`); the report is otherwise the same.
+#[test]
+fn ranking_flags_reach_the_impact() {
+    let s = Scratch::committed("ranking", WEB_APP_CLEAN);
+    s.write("web/app.py", WEB_APP);
+    let base = s.review(&[]);
+    let o = s.review(&["--no-cochange", "--ranking", "ppr-wide"]);
+    assert_eq!(o.status.code(), Some(1), "{}", show(&o));
+    assert!(
+        stderr(&o).lines().any(|l| l.starts_with("[rank] surface=review ranking=PT* ")),
+        "{}",
+        show(&o)
+    );
+    assert!(stdout(&o).starts_with("## glia review vs `HEAD`\n**1 new violation(s)**"), "{}", show(&o));
+    assert_eq!(base.status.code(), Some(1), "{}", show(&base));
+    let bad = s.review(&["--ranking", "pagerank"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", show(&bad));
+}

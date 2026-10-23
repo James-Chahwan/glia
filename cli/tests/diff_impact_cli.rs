@@ -331,3 +331,40 @@ fn identity_rows_name_the_repo() {
     let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(also_in_repos(&v), ["repo", "repo"], "{v}");
 }
+
+/// EA.8: `--no-cochange`, `--ranking` and `--top-files` reach the radius in
+/// both modes, over a CLI-held rank cache; the table gains `## files`.
+#[test]
+fn ranking_flags_reach_the_radius() {
+    let s = Scratch::shop("ranking");
+    s.git(&["init", "-q"]);
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-q", "-m", "shop"]);
+    s.write("shop/a.py", A_PY_EDITED);
+    let out = s.diff_impact(&["--direction", "backward", "--no-cochange"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.lines().any(|l| l.starts_with("[rank-cache] holder=cli ")), "{err}");
+    assert!(
+        err.lines().any(|l| l.starts_with("[rank] surface=diff_impact ranking=P1 ")),
+        "{err}"
+    );
+    let text = stdout(&out);
+    assert!(text.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"), "{text}");
+    assert!(text.contains("| 1 | shop/b.py | 1 | 0.000 |"), "{text}");
+
+    let diff = s.outside("price.diff", PRICE_DIFF);
+    let json = s.diff_impact(&[
+        "--diff", &diff, "--direction", "backward", "--ranking", "bfs", "--no-cochange",
+        "--top-files", "1", "--json",
+    ]);
+    assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
+    assert!(
+        stderr(&json).lines().any(|l| l.starts_with("[rank] surface=diff_impact ranking=B0 ")),
+        "{}",
+        stderr(&json)
+    );
+    let v: Value = serde_json::from_str(&stdout(&json)).expect("valid JSON");
+    assert_eq!(rows(&v), price_rows());
+    assert_eq!(v["impact"]["files"].as_array().map(Vec::len), Some(1), "{v}");
+}
