@@ -456,6 +456,10 @@ glia history sync <REPO> [--blame] [--blame-max-files <BLAME_MAX_FILES>] [--max-
     ATTN cells, CO_CHANGES edges, and messages.jsonl (each commit's redacted,
     trailer-stripped message, author time and merged-branch label, read only by
     query-time ranking; --no-messages keeps none). No author identities are stored.
+glia history calibrate <REPO> [--json] [--max-commits <N>] [--max-seeds <N>] [--sets <SETS>]
+    Replay the history snapshot over the graph and write <repo>/.glia/calibration-snapshot/:
+    the per-repo ranking each ranked answer picks. Run after `glia history sync`; a
+    build never calibrates.
 glia tests ingest <REPO> [--junit <PATH>...] [--lcov <PATH>...] [--log <PATH>...] [--reset] [--run <LABEL>] [--window <N>]
     Add one CI run's JUnit XML, CI logs and lcov to <repo>/.glia/test-snapshot/ as
     its newest run; the snapshot keeps the last --window runs (default 10; --reset

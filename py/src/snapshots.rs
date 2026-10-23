@@ -10,14 +10,20 @@
 //! `tests_ingest` (LF.6d) reads one CI run's test reports (JUnit XML, CI logs,
 //! lcov) and adds them as the newest run of `<repo>/.glia/test-snapshot/`,
 //! which keeps the last `window` runs (CC.9b).
+//! `history_calibrate` (EC.6) builds the repo's graph and replays the history
+//! snapshot over it, writing `<repo>/.glia/calibration-snapshot/`: the
+//! per-repo ranking each ranked answer picks (docs/overlay.md, "Calibration
+//! snapshot"). It never syncs; run `history_sync` first.
 //!
 //! Transport only: the capture, the parsing, the redaction, the snapshot
 //! formats and the `[history] sync` / `[tests] ingest` markers live in
-//! `glia_snapshots`. The helper each pyfunction delegates to is pyo3-free, so
+//! `glia_snapshots`, the replay, the record and the `[calibrate] done` marker
+//! in `glia_engine::calibrate`. The helper each pyfunction delegates to is pyo3-free, so
 //! `cargo test -p glia-py` covers it (see the crate doc).
 
 use std::path::{Path, PathBuf};
 
+use glia_engine::calibrate::{CalibrateOptions, DEFAULT_GROUPS, ReplayParams, calibrate, specs};
 use glia_snapshots::{
     HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, history_sync, tests_ingest,
 };
@@ -164,8 +170,95 @@ fn tests_ingest_py(
     to_py(py, serde_json::to_string(&summary))
 }
 
+/// The registered group each `sets` name names; `None` (or an empty list) is
+/// every registered group, an unknown name the engine's error listing the
+/// known ones.
+fn calibrate_groups(sets: Option<&[String]>) -> Result<Vec<&'static str>, String> {
+    let names = sets.unwrap_or_default();
+    if names.is_empty() {
+        return Ok(DEFAULT_GROUPS.to_vec());
+    }
+    names
+        .iter()
+        .map(
+            |name| match DEFAULT_GROUPS.iter().find(|g| **g == name.as_str()) {
+                Some(g) => Ok(*g),
+                // DEFAULT_GROUPS is every group `specs` registers, so `specs`
+                // refuses this name with its list of the known ones.
+                None => match specs(&[name.as_str()]) {
+                    Err(e) => Err(e),
+                    Ok(_) => Err(format!(
+                        "unknown candidate group `{name}`: expected one of {}",
+                        DEFAULT_GROUPS.join(", ")
+                    )),
+                },
+            },
+        )
+        .collect()
+}
+
+/// The calibration behind [`history_calibrate_py`], minus pyo3: build the
+/// repo at `repo_path` (`generate_one`), run `calibrate::calibrate` with
+/// surface `pyo3` and return the summary as JSON. `Err` is a bad group name,
+/// the build's error or the step's (no snapshot names `glia history sync`);
+/// nothing is written then.
+fn calibrate_json(
+    repo_path: &str,
+    max_commits: usize,
+    max_seeds: usize,
+    sets: Option<&[String]>,
+) -> Result<String, String> {
+    let groups = calibrate_groups(sets)?;
+    let mut params = ReplayParams::default();
+    params.max_commits = max_commits;
+    params.max_seeds = max_seeds;
+    let mut opts = CalibrateOptions::default();
+    opts.params = params;
+    opts.groups = groups;
+    opts.surface = "pyo3";
+    let built = glia_engine::generate_one(repo_path)?;
+    let summary = calibrate(Path::new(repo_path), &built.merged, &opts)?;
+    serde_json::to_string(&summary).map_err(|e| e.to_string())
+}
+
+/// **history_calibrate** (EC.6): build the repo at `repo_path`, replay its
+/// history snapshot (`history_sync`) over the graph, leak-free and online,
+/// across the fixed candidate rankings, and write
+/// `<repo>/.glia/calibration-snapshot/`: the per-repo pick each ranked answer
+/// reads. Never syncs; `generate()` never calibrates.
+///
+/// `max_commits`: the newest this many test commits are scored.
+/// `max_seeds`: seed queries per test commit. `sets`: the candidate groups to
+/// replay (`["structure"]`); `None` is every registered group.
+///
+/// Returns `{dir, history_head, commits, test_commits, messages, ms, sets}`,
+/// `sets` one `{set, shape, pick, last_online_pick, fallback, test_commits,
+/// queries, selection_recall10, fallback_recall10, delta_recall10, ci_low,
+/// ci_high}` per (set, shape). Raises `ValueError` with no history snapshot
+/// (naming `glia history sync`), an unknown group or a build error. Prints
+/// `[calibrate] done surface=pyo3 sets=<n> test_commits=<t> ms=<ms>` on
+/// stderr.
+#[pyfunction]
+#[pyo3(
+    name = "history_calibrate",
+    signature = (repo_path, max_commits=300, max_seeds=5, sets=None)
+)]
+fn history_calibrate_py(
+    py: Python<'_>,
+    repo_path: &str,
+    max_commits: usize,
+    max_seeds: usize,
+    sets: Option<Vec<String>>,
+) -> PyResult<Py<PyAny>> {
+    let text = py
+        .detach(|| calibrate_json(repo_path, max_commits, max_seeds, sets.as_deref()))
+        .map_err(PyValueError::new_err)?;
+    to_py(py, Ok::<String, serde_json::Error>(text))
+}
+
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(history_sync_py, m)?)?;
+    m.add_function(wrap_pyfunction!(history_calibrate_py, m)?)?;
     m.add_function(wrap_pyfunction!(tests_ingest_py, m)?)?;
     Ok(())
 }
@@ -341,7 +434,15 @@ mod tests {
             true,
         );
         assert_eq!(
-            (opts.junit.len(), opts.logs.len(), opts.lcov.len(), opts.run.as_deref(), opts.window, opts.reset, opts.surface),
+            (
+                opts.junit.len(),
+                opts.logs.len(),
+                opts.lcov.len(),
+                opts.run.as_deref(),
+                opts.window,
+                opts.reset,
+                opts.surface
+            ),
             (1, 1, 2, Some("ci-42"), 3, true, "pyo3")
         );
     }
@@ -380,7 +481,10 @@ mod tests {
         );
         let dir = glia_code_domain::snapshots::tests_dir(&top);
         let meta = std::fs::read_to_string(dir.join("meta.json")).expect("meta.json written");
-        assert!(meta.contains(r#""run": "ci-42""#) && meta.contains(r#""window": 3"#), "{meta}");
+        assert!(
+            meta.contains(r#""run": "ci-42""#) && meta.contains(r#""window": 3"#),
+            "{meta}"
+        );
         // CC.9b: the next ingest is run seq 1 of the window.
         let again = tests_options(Some(vec![junit.clone()]), None, None, None, 3, false);
         let summary = tests_of(repo, &again).expect("second ingest");
@@ -390,12 +494,132 @@ mod tests {
         let repo = top.to_str().expect("utf-8 scratch path");
         let cut = reports.join("cut.xml");
         std::fs::write(&cut, "<testsuite>").expect("write");
-        let err =
-            tests_of(repo, &tests_options(Some(vec![cut]), None, None, None, 10, false)).expect_err("nothing readable");
+        let err = tests_of(
+            repo,
+            &tests_options(Some(vec![cut]), None, None, None, 10, false),
+        )
+        .expect_err("nothing readable");
         assert!(err.starts_with("no report could be read ("), "{err}");
-        let err =
-            tests_of(repo, &tests_options(None, Some(Vec::new()), None, None, 10, false)).expect_err("no reports");
+        let err = tests_of(
+            repo,
+            &tests_options(None, Some(Vec::new()), None, None, 10, false),
+        )
+        .expect_err("no reports");
         assert!(err.starts_with("no test reports given"), "{err}");
-        assert!(!top.join(".glia").exists(), "a failed ingest writes nothing");
+        assert!(
+            !top.join(".glia").exists(),
+            "a failed ingest writes nothing"
+        );
+    }
+
+    /// EC.5's cluster repo (smaller hub) with a synthetic 30-commit history
+    /// snapshot, written by `write_history`: no git.
+    fn calibrate_repo(name: &str, with_history: bool) -> (Scratch, PathBuf) {
+        use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
+        const N: usize = 8;
+        const COMMITS: usize = 30;
+        let root = std::env::temp_dir().join(format!("glia-ec6-py-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let top = root.join("repo");
+        let write = |rel: &str, body: &str| {
+            let p = top.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+            std::fs::write(p, body).expect("write");
+        };
+        let mut hub = String::from("def h():\n    return 0\n\n");
+        for i in 0..N {
+            hub.push_str(&format!("def g{i:02}():\n    return h()\n\n"));
+        }
+        write("hub.py", &hub);
+        write("zeta/__init__.py", "");
+        let file = |i: usize| format!("zeta/zeta{i:02}.py");
+        for i in 0..N {
+            write(
+                &file(i),
+                &format!(
+                    "from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"
+                ),
+            );
+        }
+        if with_history {
+            let mut commits: Vec<HistoryCommit> = (0..COMMITS)
+                .map(|i| HistoryCommit {
+                    c: format!("{:040x}", i + 1),
+                    t: 1_700_000_000 + i as i64 * 3600,
+                    files: (0..2 + i % 3)
+                        .map(|j| HistoryFile {
+                            p: file(((i * 3) % N + j) % N),
+                            a: Some(1),
+                            d: Some(0),
+                            from: None,
+                        })
+                        .collect(),
+                })
+                .collect();
+            commits.reverse();
+            let meta = HistoryMeta::new(format!("{COMMITS:040x}"), COMMITS, None, String::new());
+            write_history(&top, meta, &commits, &[]).expect("write history");
+        }
+        (Scratch(root), top)
+    }
+
+    /// EC.6: the summary as JSON with the options applied; no snapshot, an
+    /// unknown group and a missing repo are the plain errors, nothing written.
+    #[test]
+    fn calibrate_json_returns_the_summary_or_the_error() {
+        let lib = ReplayParams::default();
+        assert_eq!(
+            (lib.max_commits, lib.max_seeds),
+            (300, 5),
+            "the #[pyo3(signature)] literals must track ReplayParams::default()"
+        );
+        let (_scratch, top) = calibrate_repo("ok", true);
+        let repo = top.to_str().expect("utf-8 scratch path");
+        let json = calibrate_json(repo, 10, 2, None).expect("calibrate");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let keys: Vec<&str> = v
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut want = vec![
+            "dir",
+            "history_head",
+            "commits",
+            "test_commits",
+            "messages",
+            "ms",
+            "sets",
+        ];
+        want.sort_unstable();
+        let mut got = keys.clone();
+        got.sort_unstable();
+        assert_eq!(got, want, "{json}");
+        assert_eq!(v["commits"], 30);
+        assert_eq!(v["test_commits"], 10, "max_commits reaches the replay");
+        let sets = v["sets"].as_array().expect("sets");
+        assert_eq!(sets.len(), 8);
+        assert_eq!(
+            (sets[0]["set"].as_str(), sets[0]["shape"].as_str()),
+            (Some("SELh0"), Some("k1"))
+        );
+        assert_eq!(
+            sets[0]["queries"], 20,
+            "max_seeds reaches the replay: 2 per test commit"
+        );
+        assert!(glia_engine::calibrate::record::calibration_dir(&top).is_dir());
+
+        let structure = vec!["structure".to_string()];
+        assert!(calibrate_json(repo, 10, 2, Some(&structure)).is_ok());
+        let nope = vec!["nope".to_string()];
+        let err = calibrate_json(repo, 10, 2, Some(&nope)).expect_err("unknown group");
+        assert!(err.contains("nope") && err.contains("structure"), "{err}");
+
+        let (_scratch, top) = calibrate_repo("nosnap", false);
+        let err =
+            calibrate_json(top.to_str().expect("utf-8"), 300, 5, None).expect_err("no snapshot");
+        assert!(err.contains("glia history sync"), "{err}");
+        assert!(!glia_engine::calibrate::record::calibration_dir(&top).exists());
     }
 }

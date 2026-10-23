@@ -762,6 +762,40 @@ and a build that reads the snapshot prints `[history] ingest repo=<label> ...`. 
 sidecar that does not match its snapshot is ignored with one `[history] messages incomplete
 dir=<d> reason=<r>` line.
 
+## Calibration snapshot
+
+Since 0.5.3 the ranked answers can read one more snapshot, `.glia/calibration-snapshot/`
+(`calibration.json` and `meta.json`, written last), made by `glia history calibrate <repo>`
+(pyo3: `history_calibrate(repo_path)`). It holds the repo's own pick among a fixed set of
+rankings per answer and query shape: the step builds the graph, replays the history snapshot
+over it oldest commit first, and at each test commit scores every candidate ranking on
+queries made from that commit's files, choosing with only the commits before it (leak-free and
+online). The record keeps each (set, shape) row's pick, its fallback, the online selection's
+mean recall@10 against the fallback's and the commit-cluster bootstrap 95% CI of that gain; a
+pick that does not beat the fallback is recorded as the fallback.
+
+The order is `glia history sync <repo>`, then `glia history calibrate <repo>`. Neither runs in a
+build, calibrate never syncs (with no history snapshot it exits 1 naming `glia history sync`),
+and a build never reads the record: only the ranked answers do, at query time. Flags:
+`--max-commits N` (default 300, the newest test commits scored), `--max-seeds N` (default 5,
+seed queries per test commit), `--sets <group,..>` (the candidate groups replayed, default every
+registered group; an unknown name exits 1 listing the known ones), `--json` (the summary). Plain
+output is one line per row, `<set> <shape>: pick <name> over <q> queries (online recall@10 <x>
+vs fallback <y>, delta <d> [<lo>, <hi>])`, then `wrote <dir>`; a build error exits 2.
+
+The sets: `SELh0` (co-change first, the default) and `SELs0` (under `--no-cochange` /
+`cochange=False`), the `structure` group, rank `impact` / `blast-radius`, `diff-impact`,
+`review` without a title and `pack`; `SELt2` ranks `review --title` and `SELf2t` ranks
+`find --files` (the `review` and `find` groups). An answer prints one `[select] surface=<s>
+set=<set> shape=<shape> pick=<name> source=calibrated|fallback|explicit reason=<r>
+test_commits=<t>` line, and ignores the record, falling back to its uncalibrated ranking, with
+the reason: `absent` (no record), `not_loaded`, `multi_repo` (a merge: a calibration is per
+repo), `incomplete` / `version` (a damaged or foreign record), `build_stamp` (written by another
+glia build: any upgrade or parser change needs a recalibration), `ranker_revision`, `no_set` (no
+row for the set and shape), `candidate_set` (the row was measured over other candidates) or
+`no_queries` (the row scored nothing). A ranking chosen by flag is `source=explicit`. The step
+prints `[calibrate] done surface=cli|pyo3 sets=<n> test_commits=<t> ms=<ms>` on stderr.
+
 ## SCIP snapshot
 
 A compiler-grade SCIP index is a build input the same way: read once by a CLI step, stored as a

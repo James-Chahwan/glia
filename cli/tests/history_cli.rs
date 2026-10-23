@@ -433,3 +433,174 @@ fn without_a_sync_the_build_has_no_history() {
     );
     assert!(!history_dir(&r.top).exists(), "analyze never syncs");
 }
+
+// ---------------------------------------------------------------------------
+// EC.6 — `glia history calibrate`: the calibration step's CLI transport over
+// `glia_engine::calibrate::calibrate`. The fixture is EC.5's (two clusters of
+// Python modules around a hub; engine/tests/calibrate_step.rs), smaller hub,
+// with a synthetic history snapshot written by `write_history`: no git.
+// The fired_on marker is `[calibrate] done surface=cli sets=<n>
+// test_commits=<t> ms=<ms>` (`cargo test -p glia-cli --test history_cli --
+// --nocapture 2>&1 | grep '^\[calibrate\] done surface=cli'`).
+
+/// Files per cluster.
+const CAL_N: usize = 12;
+/// Commits in the synthetic history.
+const CAL_COMMITS: usize = 40;
+/// Hub functions that call `h`.
+const CAL_FILLERS: usize = 60;
+
+fn cal_cluster(c: &str, i: usize) -> String {
+    format!("{c}/{c}{i:02}.py")
+}
+
+/// EC.5's cluster repo under `<scratch>/repo`.
+fn calibrate_repo(name: &str) -> Scratch {
+    let s = Scratch::new(name);
+    let mut hub = String::from("def h():\n    return 0\n\n");
+    for i in 0..CAL_N {
+        hub.push_str(&format!("from alpha.alpha{i:02} import alpha{i:02}_f\n"));
+    }
+    hub.push_str("\ndef r2():\n");
+    for i in 0..CAL_N {
+        hub.push_str(&format!("    alpha{i:02}_f()\n"));
+    }
+    hub.push_str("    return 0\n\n");
+    for i in 0..CAL_N {
+        hub.push_str(&format!("def g{i:02}():\n    return r2()\n\n"));
+    }
+    for i in 0..CAL_FILLERS {
+        hub.push_str(&format!("def p{i:04}():\n    return h()\n\n"));
+    }
+    s.write("hub.py", &hub);
+    for c in ["alpha", "zeta"] {
+        s.write(&format!("{c}/__init__.py"), "");
+    }
+    for i in 0..CAL_N {
+        s.write(
+            &cal_cluster("alpha", i),
+            &format!("import hub\n\ndef alpha{i:02}_f():\n    return {i}\n"),
+        );
+        s.write(
+            &cal_cluster("zeta", i),
+            &format!(
+                "from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"
+            ),
+        );
+    }
+    s
+}
+
+/// The synthetic history snapshot: commit i touches 2..=6 neighbouring zeta
+/// modules; written newest first, no messages.
+fn calibrate_history(s: &Scratch) {
+    use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
+    let mut commits: Vec<HistoryCommit> = (0..CAL_COMMITS)
+        .map(|i| HistoryCommit {
+            c: format!("{:040x}", i + 1),
+            t: 1_700_000_000 + i as i64 * 3600,
+            files: (0..2 + i % 5)
+                .map(|j| HistoryFile {
+                    p: cal_cluster("zeta", ((i * 5) % CAL_N + j) % CAL_N),
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
+                .collect(),
+        })
+        .collect();
+    commits.reverse();
+    let meta = HistoryMeta::new(format!("{:040x}", CAL_COMMITS), CAL_COMMITS, None, String::new());
+    write_history(&s.top, meta, &commits, &[]).expect("write history");
+}
+
+fn calibration_record(s: &Scratch) -> PathBuf {
+    s.top.join(".glia").join("calibration-snapshot")
+}
+
+#[test]
+fn calibrate_writes_the_record_and_prints_each_pick() {
+    let s = calibrate_repo("cal-ok");
+    calibrate_history(&s);
+    let out = s.glia(&["history", "calibrate", s.path()]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(stdout.contains("SELh0 k1: pick "), "{stdout}");
+    assert!(stdout.contains("SELs0 half: pick "), "{stdout}");
+    assert!(stdout.contains(" queries (online recall@10 "), "{stdout}");
+    assert!(
+        stdout.lines().last().is_some_and(|l| l.starts_with("wrote ")
+            && l.ends_with("calibration-snapshot")),
+        "{stdout}"
+    );
+    let marker = stderr
+        .lines()
+        .find(|l| l.starts_with("[calibrate] done "))
+        .unwrap_or_else(|| panic!("no `[calibrate] done` marker:\n{stderr}"));
+    eprintln!("{marker}");
+    assert!(
+        marker.starts_with(&format!(
+            "[calibrate] done surface=cli sets=8 test_commits={CAL_COMMITS} ms="
+        )),
+        "{marker}"
+    );
+    assert!(calibration_record(&s).is_dir(), "the record is written");
+}
+
+#[test]
+fn calibrate_json_prints_the_summary() {
+    let s = calibrate_repo("cal-json");
+    calibrate_history(&s);
+    let out = s.glia(&[
+        "history",
+        "calibrate",
+        s.path(),
+        "--json",
+        "--max-commits",
+        "20",
+        "--max-seeds",
+        "2",
+        "--sets",
+        "structure",
+    ]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let sets = v["sets"].as_array().expect("sets");
+    assert_eq!(sets.len(), 8, "{v}");
+    assert_eq!(sets[0]["set"], "SELh0");
+    assert_eq!(sets[0]["shape"], "k1");
+    assert_eq!(v["test_commits"], 20, "--max-commits reaches the replay");
+    // --max-seeds 2: every commit maps at least 2 files, so 2 k1 queries each.
+    assert_eq!(sets[0]["queries"], 40, "--max-seeds reaches the replay");
+    assert_eq!(v["commits"], CAL_COMMITS);
+}
+
+#[test]
+fn calibrate_without_a_snapshot_exits_1_naming_sync() {
+    let s = calibrate_repo("cal-nosnap");
+    let out = s.glia(&["history", "calibrate", s.path()]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("glia history sync"), "{stderr}");
+    assert!(!calibration_record(&s).exists(), "nothing written");
+}
+
+#[test]
+fn calibrate_an_unknown_set_exits_1_listing_the_known_ones() {
+    let s = calibrate_repo("cal-nope");
+    calibrate_history(&s);
+    let out = s.glia(&["history", "calibrate", s.path(), "--sets", "nope"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("nope") && stderr.contains("structure"), "{stderr}");
+    assert!(!calibration_record(&s).exists(), "nothing written");
+}
+
+#[test]
+fn calibrate_a_missing_repo_exits_2() {
+    let s = Scratch::new("cal-missing");
+    let gone = s.top.join("no-such-dir");
+    let out = s.glia(&["history", "calibrate", gone.to_str().expect("utf-8")]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+}

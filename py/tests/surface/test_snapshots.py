@@ -15,7 +15,14 @@ adds it as the newest run of `<repo>/.glia/test-snapshot/`, which keeps the
 last `window` runs (CC.9b; `reset` starts over at seq 0); it returns a native
 dict (the TestsSummary, `runs` / `seq` for the window, skipped reports in
 `report_errors`) and raises ValueError when no report is given, none could be
-read or `window` is 0. Shared helpers: test_build.py."""
+read or `window` is 0.
+
+`history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None)` (EC.6)
+builds the repo, replays its history snapshot over the graph and writes
+`<repo>/.glia/calibration-snapshot/`; it returns a native dict {dir,
+history_head, commits, test_commits, messages, ms, sets} and raises ValueError
+with no snapshot (naming `glia history sync`) or an unknown group. Shared
+helpers: test_build.py."""
 from __future__ import annotations
 
 import json
@@ -151,6 +158,38 @@ def check_tests_ingest(c: Checks) -> None:
         c.raises("a str is not a list of paths", TypeError, lambda: rg.tests_ingest(str(bare), junit=str(junit)))
 
 
+CALIBRATION_KEYS = ["dir", "history_head", "commits", "test_commits", "messages", "ms", "sets"]
+
+
+def check_history_calibrate(c: Checks, top: pathlib.Path, tmp: str) -> None:
+    """EC.6: history_calibrate over a synced scratch repo, and without a snapshot."""
+    c.check("history_calibrate signature",
+            getattr(rg, "history_calibrate", None) is not None
+            and rg.history_calibrate.__text_signature__
+            == "(repo_path, max_commits=300, max_seeds=5, sets=None)",
+            getattr(getattr(rg, "history_calibrate", None), "__text_signature__", "missing"))
+    if getattr(rg, "history_calibrate", None) is None:
+        return
+    record = top / ".glia" / "calibration-snapshot"
+    s, err = stderr_of(lambda: rg.history_calibrate(str(top)))
+    c.check("history_calibrate -> dict", type(s) is dict, type(s))
+    c.check("calibration keys in field order", type(s) is dict and list(s) == CALIBRATION_KEYS,
+            type(s) is dict and list(s))
+    c.check("one row per (set, shape)",
+            type(s) is dict and [(r.get("set"), r.get("shape")) for r in s.get("sets", [])][:1] == [("SELh0", "k1")],
+            s)
+    c.check("record written", record.is_dir())
+    c.check("fired_on marker", "[calibrate] done surface=pyo3 sets=" in err, err[-400:])
+    c.raises("unknown group raises", ValueError, lambda: rg.history_calibrate(str(top), sets=["nope"]),
+             "structure")
+
+    bare = pathlib.Path(tmp) / "calibrate-bare"
+    bare.mkdir()
+    (bare / "app.py").write_text("def f():\n    return 1\n")
+    c.raises("no snapshot raises", ValueError, lambda: rg.history_calibrate(str(bare)), "glia history sync")
+    c.check("a failed calibrate writes no record", not (bare / ".glia" / "calibration-snapshot").exists())
+
+
 def main() -> int:
     c = Checks("snapshots")
     check_tests_ingest(c)
@@ -216,6 +255,8 @@ def main() -> int:
         pairs = [(qnames.get(e["from"]), qnames.get(e["to"])) for e in json.loads(g.edges_json())
                  if e["category"] == co_changes]
         c.check("CO_CHANGES for the co-changed pair", pairs == [("svc::a", "svc::b")], pairs)
+
+        check_history_calibrate(c, top, tmp)
 
         plain = pathlib.Path(tmp) / "plain"
         plain.mkdir()
