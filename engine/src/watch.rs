@@ -109,6 +109,7 @@ use crate::build::{
     BuildOptions, Finished, GenerateResult, aux_graphs, finish_build, go_modules_for,
 };
 use crate::cache::{ParseCache, parse_fingerprint};
+use crate::calibrate::record::CALIBRATION_DIR;
 use crate::delta::{
     DeltaCounts, DeltaEdge, DeltaNode, DeltaScope, located_delta_counted, located_delta_scoped,
 };
@@ -152,8 +153,9 @@ pub enum Durability {
 }
 
 /// The durability of the repo-relative path `rel` (`/`-separated):
-/// - `glia_inputs`: `.glia` and everything under it but `.glia/graph/**` (the
-///   overlay, the `[walk]` / `[[project]]` config, the snapshots passes read);
+/// - `glia_inputs`: `.glia` and everything under it but `.glia/graph/**` and
+///   `.glia/calibration-snapshot/**`, which no build reads (the overlay, the
+///   `[walk]` / `[[project]]` config, the snapshots passes read);
 /// - `gitignore`: any `.gitignore`;
 /// - `go_mod`: any `go.mod` (the module set, so the parse cache's context);
 /// - `tsconfig`: `tsconfig.json` / `tsconfig.base.json` (the TS path aliases);
@@ -177,7 +179,13 @@ pub fn durability(rel: &str) -> Durability {
         && (rest.is_empty() || rest.starts_with('/'))
     {
         let rest = rest.trim_start_matches('/');
-        return if rest == "graph" || rest.starts_with("graph/") {
+        return if rest == "graph"
+            || rest.starts_with("graph/")
+            || rest == CALIBRATION_DIR
+            || rest
+                .strip_prefix(CALIBRATION_DIR)
+                .is_some_and(|r| r.starts_with('/'))
+        {
             Durability::Low
         } else {
             Durability::High("glia_inputs")
@@ -680,7 +688,8 @@ impl WatchSession {
 
     /// Bring the session up to date with `changed`, the paths the caller saw
     /// change (absolute under the root, or repo-relative). A path the caller
-    /// does not name is not re-read. Paths under `.glia/graph/`, under a
+    /// does not name is not re-read. Paths under `.glia/graph/` or
+    /// `.glia/calibration-snapshot/`, under a
     /// hard-skipped directory (`.git/`, but `.git/HEAD` and `.git/config`,
     /// `.idea/`, a nested `.glia/`, ...) and two or more levels below a
     /// collapsed region root are dropped: their content never reaches the
@@ -954,7 +963,8 @@ impl WatchSession {
         Some(parts.join("/"))
     }
 
-    /// Whether a changed `rel` cannot reach the graph: the layout dir, a path
+    /// Whether a changed `rel` cannot reach the graph: the layout dir, the
+    /// ranking calibration (`.glia/calibration-snapshot/`), a path
     /// under a hard-skipped directory (the root's `.git/HEAD` / `.git/config`
     /// and `.glia/` inputs aside), the 0.4.x layout `.ai/repo-graph`, or a path
     /// two or more levels below a region root.
@@ -964,7 +974,7 @@ impl WatchSession {
         }
         let parts: Vec<&str> = rel.split('/').collect();
         if parts.first() == Some(&CONTROL_DIR) && parts.len() > 1 {
-            return parts.get(1) == Some(&"graph");
+            return matches!(parts.get(1), Some(&"graph") | Some(&CALIBRATION_DIR));
         }
         if rel == ".ai/repo-graph" || rel.starts_with(".ai/repo-graph/") {
             return true;
@@ -1836,7 +1846,8 @@ fn glia_inputs_fp(root: &Path) -> u64 {
     h.finish()
 }
 
-/// Every file under `<root>/.glia` but the layout dir `.glia/graph`, by
+/// Every file under `<root>/.glia` but the layout dir `.glia/graph` and the
+/// ranking calibration `.glia/calibration-snapshot` (no build reads it), by
 /// sorted path relative to `.glia`: what [`glia_inputs_fp`] hashes and the
 /// stat poll watches ([`Input::Glia`]).
 fn glia_files(root: &Path) -> Vec<(String, PathBuf)> {
@@ -1853,7 +1864,7 @@ fn glia_files(root: &Path) -> Vec<(String, PathBuf)> {
             } else {
                 format!("{rel}/{name}")
             };
-            if rel == "graph" {
+            if rel == "graph" || rel == CALIBRATION_DIR {
                 continue;
             }
             let path = entry.path();
@@ -2297,11 +2308,27 @@ mod tests {
         // `.git` is written, which would move the clean build's identity), one
         // outside the root, nothing.
         write(&dir, "debug.log", "noise\n");
+        // EC.1: the ranking calibration is no build input: the stat poll
+        // never lists it and naming it is a noop.
+        write(&dir, ".glia/calibration-snapshot/calibration.json", "{}\n");
+        // (Creating `.glia/` moves the root's mtime, and the racy-mtime rule
+        // may list fresh files: only the calibration path is pinned.)
+        let listed = s.changed_paths();
+        assert!(
+            !listed
+                .iter()
+                .any(|p| p.to_string_lossy().contains("calibration-snapshot")),
+            "{listed:?}"
+        );
         write(&dir, ".idea/workspace.xml", "<x/>");
         for paths in [
             vec![PathBuf::from("a.py")],
             vec![PathBuf::from("debug.log")],
             vec![PathBuf::from(".glia/graph/manifest.json")],
+            vec![
+                PathBuf::from(".glia/calibration-snapshot/calibration.json"),
+                PathBuf::from(".glia/calibration-snapshot"),
+            ],
             vec![
                 PathBuf::from(".idea/workspace.xml"),
                 PathBuf::from(".git/objects/ab"),
@@ -2350,6 +2377,7 @@ mod tests {
             "a.py",
             "docs/guide.md",
             ".glia/graph/manifest.json",
+            ".glia/calibration-snapshot/calibration.json",
             "report.sql",
         ] {
             assert_eq!(durability(rel), Durability::Low, "{rel}");

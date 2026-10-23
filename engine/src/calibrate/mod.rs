@@ -4,3 +4,10 @@
 //! the ranked answers through `select`. A snapshot step, never part of a
 //! build. Owners: EC.1-EC.6, EC.10-EC.13; each adds its own `pub mod` and
 //! `pub use` lines here.
+
+pub mod record;
+pub use record::{
+    CalibratedSet, Calibration, CalibrationHandle, CalibrationMeta, CalibrationRead, CommitScore,
+    OnlineReplay, ReplayParamsRecord, Selection, Shape, explicit, load_for_roots, log_selection,
+    read_calibration, select, set_digest, write_calibration,
+};
