@@ -40,3 +40,9 @@ pub use step::{
     BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CalibrateOptions, CalibrationSummary, DEFAULT_GROUPS,
     SetSummary, bootstrap_ci, calibrate, calibrate_snapshot,
 };
+
+pub mod work;
+pub use work::{
+    GAP_S, MEMO_M, MEMO_W5, OVERLAP_LAST, W_DECAY, W_K, WorkState, m_scores, w5_scores,
+    work_at_head,
+};
