@@ -160,6 +160,13 @@ pub struct VectorRow {
     /// a writer that does not record one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_hash: Option<String>,
+    /// The device that computed the vector (FB.14): `cpu` | `webgpu` |
+    /// `cuda`, as `glia_embed::Device::as_str` spells it. Absent reads as
+    /// `cpu` (rows written before 0.5.4's devices, and the cell API's), and
+    /// the test model writes none. Annotation only: the devices agree to
+    /// 4e-7, so no reader decides freshness or staleness by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// Standard padded base64 of the payload bytes.
     pub b64: String,
 }
@@ -1611,6 +1618,7 @@ mod tests {
             model: None,
             dims,
             text_hash: None,
+            device: None,
             b64: "AACAPwAAAEA=".into(),
         };
         let w = CellWrite::try_from(&row(Some(2))).unwrap();
@@ -1664,6 +1672,7 @@ mod tests {
             model: model.map(Into::into),
             dims,
             text_hash: None,
+            device: None,
             b64,
         }
     }
@@ -1781,6 +1790,22 @@ mod tests {
         assert_eq!(row.text_hash.as_deref(), Some("t1:0123456789abcdef"));
         let old: VectorRow =
             serde_json::from_str(r#"{"qname":"a","dims":1,"b64":"AACAPw=="}"#).unwrap();
-        assert!(old.model.is_none() && old.text_hash.is_none());
+        assert!(old.model.is_none() && old.text_hash.is_none() && old.device.is_none());
+        // FB.14: a row names its device; serialised before the payload and
+        // dropped when absent, so a device-less row is byte-identical to a
+        // pre-0.5.4 one.
+        let on: VectorRow = serde_json::from_str(
+            r#"{"qname":"a","model":"m","dims":1,"device":"webgpu","b64":"AACAPw=="}"#,
+        )
+        .unwrap();
+        assert_eq!(on.device.as_deref(), Some("webgpu"));
+        assert_eq!(
+            serde_json::to_string(&on).unwrap(),
+            r#"{"qname":"a","model":"m","dims":1,"device":"webgpu","b64":"AACAPw=="}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"qname":"a","dims":1,"b64":"AACAPw=="}"#
+        );
     }
 }

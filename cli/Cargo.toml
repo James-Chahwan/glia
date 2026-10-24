@@ -40,5 +40,18 @@ ureq = "2"
 glia-embed = { path = "../embed" }
 
 [features]
-default = ["embed"]
+default = ["embed", "gpu-webgpu"]
+# bge-small through ONNX Runtime's CPU provider, in-process (FB.1, FB.5b).
 embed = ["glia-embed/fastembed"]
+# FB.14: bge-small on the GPU by default (ORT's WebGPU provider, Dawn), its
+# session in this binary's hidden `glia embed-worker` child. The binary then
+# links libwebgpu_dawn (beside it, build.rs's rpath), whose prebuilt needs
+# glibc >= 2.38: on an older glibc build `--no-default-features --features
+# embed`. On a target ORT ships no WebGPU build for (aarch64 Linux) the
+# provider is absent and the CPU runs; on x86_64 macOS there is no ORT at all
+# (INTEL-MAC-NO-EMBED). The glia-cli wheel builds `embed` only and ships
+# glia-embed's `glia-embed-worker` + Dawn beside `glia` (pyproject.toml).
+gpu-webgpu = ["embed", "glia-embed/gpu-webgpu"]
+# The CUDA provider, opt-in only (GLIA_EMBED_DEVICE=cuda; never a published
+# wheel): needs the CUDA 13 runtime and cuDNN 9 on the library path.
+gpu-cuda = ["embed", "glia-embed/gpu-cuda"]

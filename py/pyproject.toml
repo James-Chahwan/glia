@@ -33,4 +33,11 @@ Issues = "https://github.com/James-Chahwan/glia/issues"
 # Must equal py/Cargo.toml's [lib] name and the #[pymodule] fn in py/src/lib.rs
 # (pyo3 exports PyInit_<name>); the three move together.
 module-name = "glia_py"
-features = ["pyo3/extension-module"]
+# `embed` (ruling FB-3, FB.14): bge-small in every wheel, the extension linking ONNX
+# Runtime's CPU provider only; on x86_64 macOS glia-embed builds no ORT at all and
+# bge-small refuses (INTEL-MAC-NO-EMBED). The GPU session runs in glia-embed's
+# `glia-embed-worker`, which the wheels workflow builds with `gpu-webgpu` and ships
+# in the scripts directory with the Dawn library, appending `data = "glia_py.data"`
+# here in its checkout (a fixed `data` key fails every build without the directory,
+# the sdist's among them, which therefore embeds on the CPU, fallback no_worker).
+features = ["pyo3/extension-module", "embed"]

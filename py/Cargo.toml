@@ -44,8 +44,12 @@ inventory = "0.3"
 glia-embed = { path = "../embed" }
 
 [features]
-# The real model runtime. OFF by default; whether the wheel turns it on (in
-# pyproject.toml's maturin features) is James's ruling, FB.5c.
+# The real model runtime, the ONNX Runtime CPU provider only. OFF by default
+# (so `cargo test -p glia-py` never builds ORT); the published wheels turn it
+# on in pyproject.toml's maturin features (ruling FB-3, FB.14). The GPU
+# session never runs in the extension: the wheel ships glia-embed's
+# `glia-embed-worker` executable (built with glia-embed/gpu-webgpu by the
+# wheels workflow) and the extension spawns it (src/embed.rs).
 embed = ["glia-embed/fastembed"]
 
 [dev-dependencies]

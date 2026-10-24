@@ -3,16 +3,55 @@ name = "glia-embed"
 version.workspace = true
 edition = "2024"
 publish = false
-description = "Query-time text embeddings for glia (fastembed bge-small behind the `fastembed` feature, a deterministic test model without it). Never a build input and never hashed into PARSER_STAMP."
+description = "Query-time text embeddings for glia (fastembed bge-small behind the `fastembed` feature, on the GPU through a crash-isolated worker process when a GPU provider is built in, a deterministic test model without it). Never a build input and never hashed into PARSER_STAMP."
 
 [features]
-# The real model runtime (ONNX Runtime through ort). Off by default: the engine
-# turns it on only under its `sem-eval` feature, py under `embed`, the CLI by
-# its default `embed`. Never enable it from a [dev-dependencies] edge.
+# The real model runtime (ONNX Runtime through ort), CPU. Off by default: the
+# engine turns it on only under its `sem-eval` feature, py under `embed`, the
+# CLI by its default `embed`. Never enable it from a [dev-dependencies] edge.
+# On x86_64 macOS the ORT stack is target-gated out below (no ONNX Runtime
+# >= 1.24 build exists for x86_64-apple-darwin, ruling INTEL-MAC-NO-EMBED):
+# there the feature builds the refusal, and only `test-hash` embeds.
 fastembed = ["dep:fastembed"]
+# The ORT WebGPU execution provider (Dawn over Vulkan / Metal / D3D12, FB.14).
+# Its `ort-webgpu` dependency exists only on the targets ORT ships WebGPU
+# binaries for (x86_64 Linux, x86_64 Windows, aarch64 macOS with coreml); on
+# every other target the feature builds CPU-only. It links libwebgpu_dawn
+# dynamically, so every binary carrying it needs an $ORIGIN / @loader_path
+# rpath and the library bundled beside it (docs/embeddings.md).
+gpu-webgpu = ["fastembed", "dep:ort-gpu", "ort-gpu?/webgpu", "dep:ash"]
+# The ORT CUDA execution provider: opt-in only (GLIA_EMBED_DEVICE=cuda), never
+# in a published wheel (the provider libraries plus the user's CUDA / cuDNN).
+gpu-cuda = ["fastembed", "dep:ort-gpu", "ort-gpu?/cuda", "dep:ash"]
+
+[[bin]]
+# The crash-isolated GPU worker (src/worker.rs) for hosts that are not the
+# `glia` binary: glia-py's wheel ships it. The CLI's worker is `glia
+# embed-worker`, the same `worker_main`.
+name = "glia-embed-worker"
+path = "src/bin/glia-embed-worker.rs"
 
 [dependencies]
-# Exactly pinned: 4.9.1 pins ort / ort-sys =2.0.0-rc.9, Engram's measured
-# runtime. rustls for the model download, so no system OpenSSL enters a wheel.
-# Hashing for text_hash is inline FNV-1a (FB.1), so there is no other dependency.
-fastembed = { version = "=4.9.1", optional = true, default-features = false, features = ["ort-download-binaries", "hf-hub-rustls-tls"] }
+# Hashing for text_hash is inline FNV-1a (FB.1); the worker's frames are plain
+# std I/O (FB.14). Every other dependency is the ORT stack below.
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
+# Exactly pinned: 6.0.0 pins ort / ort-sys =2.0.0-rc.13 (ONNX Runtime 1.28).
+# rustls for both downloads (the ORT binaries and the model), so no system
+# OpenSSL enters a wheel: fastembed 6's plain `ort-download-binaries` is
+# native-tls.
+fastembed = { version = "=6.0.0", optional = true, default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
+# The adapter name / driver probe (device.rs): Vulkan through a dlopen'ed
+# loader (`loaded`), so no binary links libvulkan.
+ash = { version = "=0.38.0", optional = true, default-features = false, features = ["loaded", "std"] }
+
+# The GPU providers, as their own dependency name so a CPU-only fastembed build
+# never links Dawn or CUDA: the same ort package fastembed links (one locked
+# copy), present only on the targets ORT ships a GPU build for (x86_64 Linux
+# and Windows: webgpu, cuda13; aarch64 macOS: coreml + webgpu). gpu-webgpu /
+# gpu-cuda turn the provider on; on any other target both build CPU-only.
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "windows", target_arch = "x86_64")))'.dependencies]
+ort-gpu = { package = "ort", version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "api-24", "copy-dylibs"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ort-gpu = { package = "ort", version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "api-24", "coreml", "copy-dylibs"] }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use glia_code_domain::external_inputs::{VectorRow, b64_encode, read_rows, write_rows};
 use glia_core::RepoId;
-use glia_embed::{HashEmbedder, MODEL_TEST_HASH, codec};
+use glia_embed::{Device, Embedder, HashEmbedder, MODEL_TEST_HASH, codec};
 use glia_engine::semantic::{
     EmbedOptions, EmbedRecipe, EmbedReport, VECTORS_FILE, VectorIndex, embed_repo, embed_text,
     text_hash,
@@ -233,6 +233,7 @@ fn another_models_file_is_refused_unless_replace() {
         model: Some("Xenova/bge-small-en-v1.5".to_string()),
         dims: Some(v.len() as u32),
         text_hash: None,
+        device: None,
         b64: b64_encode(&codec::to_le_bytes(&v)),
     };
     write_rows(&repo.vectors(), &[other]).expect("seed");
@@ -267,6 +268,7 @@ fn a_foreign_row_of_this_model_is_kept_byte_identical() {
         model: Some(MODEL_TEST_HASH.to_string()),
         dims: Some(v.len() as u32),
         text_hash: None,
+        device: None,
         b64: b64_encode(&codec::to_le_bytes(&v)),
     };
     write_rows(&repo.vectors(), std::slice::from_ref(&foreign)).expect("seed");
@@ -369,4 +371,89 @@ fn a_run_inside_a_rayon_worker_is_refused() {
     let err = out.expect("ran").unwrap_err();
     assert!(err.contains("rayon worker"), "{err}");
     assert!(!repo.vectors().exists());
+}
+
+/// The test model reporting a GPU device, as a worker embedder on WebGPU
+/// does (FB.14): its vectors are HashEmbedder's, tagged `webgpu`.
+struct OnWebGpu;
+
+impl Embedder for OnWebGpu {
+    fn model(&self) -> &str {
+        MODEL_TEST_HASH
+    }
+
+    fn dims(&self) -> u32 {
+        HashEmbedder.dims()
+    }
+
+    fn device(&self) -> Option<Device> {
+        Some(Device::WebGpu)
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        HashEmbedder.embed(texts)
+    }
+}
+
+/// FB.14: every new row records the device its vector came from; the test
+/// model records none (its rows stay byte-identical to FB.5a's); a row of
+/// another device is fresh, and a reused vector keeps its row's device.
+#[test]
+fn rows_record_their_device_and_the_device_never_decides_freshness() {
+    let repo = Repo::new("app.py", &app_py("Fetch one invoice.", "render_chart"));
+    let r = repo.build();
+    let first = embed_repo(
+        repo.root(),
+        &r.merged,
+        repo_of(&r),
+        &OnWebGpu,
+        &EmbedOptions::default(),
+    )
+    .expect("embed_repo");
+    assert_eq!(first.embedded, first.nodes);
+    let written = rows(&repo.vectors());
+    assert!(
+        written
+            .iter()
+            .all(|row| row.device.as_deref() == Some("webgpu")),
+        "{written:?}"
+    );
+    let body = repo.body();
+    assert!(body.contains(r#""device":"webgpu""#), "{body}");
+
+    // The device-less test model finds every webgpu row fresh.
+    let second = repo.run();
+    assert_eq!(
+        (second.embedded, second.cached),
+        (0, first.nodes),
+        "{second:?}"
+    );
+    assert_eq!(
+        repo.body(),
+        body,
+        "rows of another device kept as they were"
+    );
+
+    // A vector reused by its text hash keeps its device.
+    let mut moved = rows(&repo.vectors());
+    let at = moved
+        .iter()
+        .position(|row| row.qname == "app::fetch_invoice")
+        .expect("row");
+    moved[at].qname = "app::old_name".to_string();
+    moved[at].hint = None;
+    write_rows(&repo.vectors(), &moved).expect("rewrite");
+    let third = repo.run();
+    assert_eq!((third.reused, third.embedded), (1, 0), "{third:?}");
+    let back = rows(&repo.vectors());
+    let row = back
+        .iter()
+        .find(|row| row.qname == "app::fetch_invoice")
+        .expect("re-keyed row");
+    assert_eq!(row.device.as_deref(), Some("webgpu"));
+
+    // A fresh repo embedded by the test model writes no device at all.
+    let plain = Repo::new("app.py", &app_py("Fetch one invoice.", "render_chart"));
+    plain.run();
+    assert!(!plain.body().contains("\"device\""), "{}", plain.body());
 }

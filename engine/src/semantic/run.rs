@@ -17,7 +17,12 @@
 //!    embed text hashes to a cached vector reuses its bytes (a moved or
 //!    renamed node whose text did not change); the rest are queued.
 //! 5. The queue (at most [`EmbedOptions::limit`] nodes) is embedded in
-//!    sequential [`glia_embed::CHUNK`]-text chunks, one model call each.
+//!    sequential [`glia_embed::CHUNK`]-text chunks, one model call each
+//!    (`Embedder::embed_tagged`: a GPU embedder feeds each chunk to its device
+//!    in smaller sub-batches, FB.14). Every new row records the device its
+//!    vector came from (`device`, absent for the test model); a reused vector
+//!    keeps its row's. The device never decides freshness: the devices agree
+//!    to 4e-7, so a row of another device whose text hash matches is fresh.
 //! 6. The file becomes: the fresh rows (bytes unchanged), the new rows, and
 //!    the foreign rows (this model, no `text_hash`: written by something
 //!    other than glia, kept untouched unless a glia row now holds their
@@ -238,7 +243,7 @@ pub fn embed_repo(
 
     // (c) Classify the rows and seed the cache.
     let binder = QnameIndex::build(merged, Some(repo));
-    let mut cache: HashMap<String, (String, Option<u32>)> = HashMap::new();
+    let mut cache: HashMap<String, (String, Option<String>)> = HashMap::new();
     let mut fresh: Vec<VectorRow> = Vec::new();
     let mut fresh_ids: HashSet<NodeId> = HashSet::new();
     let mut foreign: Vec<VectorRow> = Vec::new();
@@ -256,7 +261,7 @@ pub fn embed_repo(
         if row_dims_ok(&row, dims) {
             cache
                 .entry(hash.clone())
-                .or_insert_with(|| (row.b64.clone(), row.dims));
+                .or_insert_with(|| (row.b64.clone(), row.device.clone()));
         }
         let id = match binder.resolve(&row.qname, row.kind.as_deref(), row.hint.as_deref()) {
             CellTarget::Bound(id) | CellTarget::Rekeyed { id, .. } => Some(id),
@@ -296,9 +301,13 @@ pub fn embed_repo(
         }
         let hash = text_hash(recipe, &info.text);
         match cache.get(&hash) {
-            Some((b64, _)) => {
+            Some((b64, device)) => {
                 reused += 1;
-                new_rows.push(new_row(merged, *id, info, &model, dims, hash, b64.clone()));
+                let row = new_row(merged, *id, info, &model, dims, hash, b64.clone());
+                new_rows.push(VectorRow {
+                    device: device.clone(),
+                    ..row
+                });
             }
             None => queue.push((*id, info.text.clone(), hash)),
         }
@@ -314,7 +323,7 @@ pub fn embed_repo(
             let tc = Instant::now();
             let texts: Vec<String> = chunk.iter().map(|(_, t, _)| t.clone()).collect();
             let vectors = embedder
-                .embed(&texts)
+                .embed_tagged(&texts)
                 .map_err(|e| format!("embedding chunk {}/{chunks}: {e}", i + 1))?;
             if vectors.len() != chunk.len() {
                 return Err(format!(
@@ -324,7 +333,7 @@ pub fn embed_repo(
                     chunk.len()
                 ));
             }
-            for ((id, _, hash), v) in chunk.iter().zip(vectors) {
+            for ((id, _, hash), (v, device)) in chunk.iter().zip(vectors) {
                 if v.len() != dims as usize {
                     return Err(format!(
                         "embedding chunk {}/{chunks}: a vector of {} dims, model {model} has {dims}",
@@ -336,7 +345,11 @@ pub fn embed_repo(
                     continue;
                 };
                 let b64 = b64_encode(&codec::to_le_bytes(&v));
-                new_rows.push(new_row(merged, *id, info, &model, dims, hash.clone(), b64));
+                let row = new_row(merged, *id, info, &model, dims, hash.clone(), b64);
+                new_rows.push(VectorRow {
+                    device: device.map(|d| d.as_str().to_string()),
+                    ..row
+                });
             }
             eprintln!(
                 "[embed] chunk {}/{chunks} texts={} ms={}",
@@ -435,6 +448,7 @@ fn new_row(
         model: Some(model.to_string()),
         dims: Some(dims),
         text_hash: Some(hash),
+        device: None,
         b64,
     }
 }

@@ -117,6 +117,11 @@ enum Cmd {
 }
 
 fn main() {
+    // `glia embed-worker` (FB.14) serves a parent's GPU session and exits
+    // before clap: it is no command a person types.
+    if let Some(code) = cmd::embed_worker::intercept() {
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
     // The global options reach the commands through `common`, set once here
     // before any command runs (the only place that sees `Cli`).

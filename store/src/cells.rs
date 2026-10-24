@@ -703,6 +703,8 @@ impl Sidecar {
                     dims: *dims,
                     // The cell API carries no text hash; FB.5a's bulk writer does.
                     text_hash: None,
+                    // Nor a device: absent reads as cpu (FB.14).
+                    device: None,
                     b64: b64_encode(bytes),
                 };
                 let key = vector_key(&row);
@@ -1192,6 +1194,7 @@ mod tests {
             model: model.map(str::to_string),
             dims: Some(2),
             text_hash: text_hash.map(str::to_string),
+            device: None,
             b64: b64_encode(&bytes),
         }
     }

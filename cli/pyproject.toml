@@ -35,7 +35,17 @@ Issues = "https://github.com/James-Chahwan/glia/issues"
 
 [tool.maturin]
 # A bin package: maturin compiles cli/Cargo.toml's [[bin]] `glia` and puts it in the
-# wheel's scripts. No `module-name` and no `features` (there is no Python module); the
-# binary's default features (the `embed` model path among them) are the CLI's own.
+# wheel's scripts. No `module-name` (there is no Python module).
 bindings = "bin"
 strip = true
+# FB.14: the wheel's `glia` carries the CPU embedding path only (`embed`, no
+# `gpu-webgpu`), so it links no Dawn and starts on every glibc the manylinux tag
+# promises (the Dawn prebuilt needs glibc >= 2.38). The GPU runs in glia-embed's
+# `glia-embed-worker`, which the wheels workflow builds with `gpu-webgpu` and ships
+# beside `glia` in the scripts directory with the Dawn library, appending
+# `data = "glia_cli.data"` here in its checkout (a fixed `data` key fails every build
+# without the directory, the sdist's among them, which therefore embeds on the CPU).
+# `glia` finds the worker beside itself (cmd/inputs/embed.rs); without one it embeds
+# on the CPU, fallback no_worker / not_built.
+no-default-features = true
+features = ["embed"]

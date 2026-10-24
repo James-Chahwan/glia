@@ -6,25 +6,31 @@
 //! The run, in order:
 //! 1. The model: `--model`, else `semantic::surface_model()` (bge-small unless
 //!    `GLIA_EMBED_MODEL=test-hash`). For bge-small the model cache directory is
-//!    checked against the repo BEFORE the model loads (or downloads), so a
-//!    `FASTEMBED_CACHE_DIR` inside the tree exits 2 having fetched nothing.
+//!    checked against the repo BEFORE the model loads (or downloads),
+//!    `glia_embed::refuse_repo_cache`, so a `FASTEMBED_CACHE_DIR` inside the
+//!    tree exits 2 having fetched nothing.
 //! 2. The graph: the repo's default layout through `persist::load_or_rebuild`
 //!    (vectors are not a build input, so a fresh layout stays fresh after an
 //!    embed); a layout of more than one repo exits 2. The build has returned,
 //!    so its rayon pool is idle, before any model session exists.
 //! 3. `--check` counts the work and writes nothing: it never loads a model
 //!    (a name-only embedder carries the model's name and dims), and exits 1
-//!    when any node needs a vector. Otherwise the model loads (bge-small:
-//!    `FastEmbedder::refuse_repo_dir` once more on the resolved cache) and
-//!    `embed_repo` runs.
+//!    when any node needs a vector. Otherwise `embed_repo` runs; bge-small
+//!    runs on the device `GLIA_EMBED_DEVICE` selects (`glia_embed::bge_small`,
+//!    FB.14: the GPU by default, its session in a `glia embed-worker` child of
+//!    this binary, the CPU in-process on any GPU failure), and the model loads
+//!    on the first chunk in whichever process embeds.
 //!
 //! Never part of a build: find, flows and pack read the sidecar. Exits 0 on a
 //! written (or, under `--check`, already fresh) sidecar, 1 when `--check`
-//! found work, 2 on any error. fired_on, on stderr: the engine's `[embed]
-//! repo=<label> model=<m> recipe=<t> nodes=.. embedded=<e> ..` line, then
-//! `[embed] cli repo=<label> exit=<code>` on every exit.
+//! found work, 2 on any error (an explicit `GLIA_EMBED_DEVICE` whose device
+//! does not start among them). fired_on, on stderr: bge-small's `[embed]
+//! device=<adapter> backend=<cpu|webgpu|cuda> driver=<v> fallback=<reason|none>
+//! batch=<n>` line, the engine's `[embed] repo=<label> model=<m> recipe=<t>
+//! nodes=.. embedded=<e> ..` line, then `[embed] cli repo=<label>
+//! exit=<code>` on every exit.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use clap::builder::PossibleValuesParser;
 use glia_core::RepoId;
@@ -110,7 +116,7 @@ fn embed(a: &Args, label: &mut String) -> Result<i32, String> {
         None => DEFAULT_RECIPE,
     };
     if model == "bge-small" {
-        refuse_cache_in_repo(root)?;
+        glia_embed::refuse_repo_cache(root)?;
     }
 
     let (result, _outcome) = load_or_rebuild(&default_layout_dir(root), Some(root), true)
@@ -136,7 +142,7 @@ fn embed(a: &Args, label: &mut String) -> Result<i32, String> {
         let check = check_embedder(model)?;
         embed_repo(root, &result.merged, RepoId(repo), &check, &opts)?
     } else {
-        let embedder = load_embedder(model, root)?;
+        let embedder = load_embedder(model)?;
         embed_repo(root, &result.merged, RepoId(repo), embedder.as_ref(), &opts)?
     };
     label.clone_from(&report.repo);
@@ -160,18 +166,24 @@ fn check_embedder(model: &str) -> Result<CheckOnly, String> {
     }
 }
 
-#[cfg(feature = "embed")]
-fn load_embedder(model: &str, root: &Path) -> Result<Box<dyn Embedder>, String> {
+/// The embedder `model` names. bge-small's GPU worker is this binary as
+/// `glia embed-worker` (cmd/embed_worker.rs) when it carries a GPU provider
+/// (a source build's default `gpu-webgpu`); else the `glia-embed-worker`
+/// installed beside it (the glia-cli wheel builds `glia` without the provider,
+/// so it starts on any glibc, and ships the worker with the Dawn library);
+/// else this binary again, which answers `not_built` (the CPU). A build
+/// without the `embed` feature refuses bge-small with glia-embed's message.
+fn load_embedder(model: &str) -> Result<Box<dyn Embedder>, String> {
+    use glia_embed::worker::WorkerProgram;
     if model == "bge-small" {
-        let fast = glia_embed::FastEmbedder::new()?;
-        fast.refuse_repo_dir(root)?;
-        return Ok(Box::new(fast));
+        let this = || WorkerProgram::this_binary(&[crate::cmd::embed_worker::SUBCOMMAND]);
+        let gpu_built = glia_embed::device::WEBGPU_BUILT || glia_embed::device::CUDA_BUILT;
+        let worker = match WorkerProgram::beside_current_exe() {
+            Some(external) if !gpu_built => external,
+            _ => this()?,
+        };
+        return glia_embed::bge_small(Some(worker));
     }
-    glia_embed::named(model)
-}
-
-#[cfg(not(feature = "embed"))]
-fn load_embedder(model: &str, _root: &Path) -> Result<Box<dyn Embedder>, String> {
     glia_embed::named(model)
 }
 
@@ -211,82 +223,4 @@ fn render(r: &EmbedReport, a: &Args) -> Result<i32, String> {
     } else {
         EXIT_OK
     })
-}
-
-/// Err when the bge-small model cache would sit inside `root`, checked before
-/// the model loads so a refused run downloads nothing.
-///
-/// STOPGAP (FB.5b): `glia_embed::FastEmbedder::refuse_repo_dir` needs a loaded
-/// model and the crate's cache-dir rule is private, so this mirrors it
-/// (`FASTEMBED_CACHE_DIR`, else `$XDG_CACHE_HOME/glia/fastembed`, else
-/// `$HOME/.cache/glia/fastembed`). Removal path: once glia-embed exposes a
-/// pre-load check (a free `refuse_repo_cache(root)` beside `cache_dir`), call
-/// it here and delete this fn and [`absolute`]. `load_embedder` re-checks
-/// with the crate's own rule after the load, so a drift between the two can
-/// only refuse late, never write the model into the repo unnoticed.
-fn refuse_cache_in_repo(root: &Path) -> Result<(), String> {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    let cache = if let Some(dir) = env("FASTEMBED_CACHE_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(xdg) = env("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("glia").join("fastembed")
-    } else if let Some(home) = env("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("glia")
-            .join("fastembed")
-    } else {
-        return Err(
-            "no embedding model cache: set FASTEMBED_CACHE_DIR, XDG_CACHE_HOME or HOME".to_string(),
-        );
-    };
-    let cache = absolute(&cache)?;
-    let repo = root
-        .canonicalize()
-        .map_err(|e| format!("repo root {}: {e}", root.display()))?;
-    if cache.starts_with(&repo) {
-        return Err(format!(
-            "the embedding model cache {} is inside the repository {}: set \
-             FASTEMBED_CACHE_DIR to a user cache directory",
-            cache.display(),
-            repo.display()
-        ));
-    }
-    Ok(())
-}
-
-/// `p` made absolute with its longest existing prefix canonicalised (the
-/// cache directory may not exist yet) and the rest joined lexically.
-fn absolute(p: &Path) -> Result<PathBuf, String> {
-    let p = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| format!("current directory: {e}"))?
-            .join(p)
-    };
-    let mut existing = p.as_path();
-    let mut rest: Vec<Component> = Vec::new();
-    loop {
-        if let Ok(c) = existing.canonicalize() {
-            let mut out = c;
-            for comp in rest.iter().rev() {
-                match comp {
-                    Component::ParentDir => {
-                        out.pop();
-                    }
-                    Component::CurDir => {}
-                    other => out.push(other.as_os_str()),
-                }
-            }
-            return Ok(out);
-        }
-        let Some(parent) = existing.parent() else {
-            return Ok(p.clone());
-        };
-        if let Some(last) = existing.components().next_back() {
-            rest.push(last);
-        }
-        existing = parent;
-    }
 }

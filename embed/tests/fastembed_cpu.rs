@@ -1,11 +1,16 @@
 //! The CPU determinism gate for bge-small (FB.1, next-leap-0.5.4.md §B).
 //! Needs the model download, so every test is `#[ignore]`:
-//! `cargo test -p glia-embed --features fastembed -- --ignored`.
-#![cfg(feature = "fastembed")]
+//! `cargo test -p glia-embed --features fastembed -- --ignored`. The CPU
+//! session in-process (`FastEmbedder::new(Device::Cpu)`, FB.14): the device
+//! comparisons live in tests/device.rs.
+#![cfg(all(
+    feature = "fastembed",
+    not(all(target_os = "macos", target_arch = "x86_64"))
+))]
 
 use std::sync::{Mutex, MutexGuard};
 
-use glia_embed::{DIMS_BGE_SMALL, Embedder, FastEmbedder, MODEL_BGE_SMALL, codec};
+use glia_embed::{DIMS_BGE_SMALL, Device, Embedder, FastEmbedder, MODEL_BGE_SMALL, codec};
 
 fn texts() -> Vec<String> {
     let words = [
@@ -50,7 +55,7 @@ fn bits(v: &[f32]) -> Vec<u32> {
 fn cpu_vectors_are_bit_identical_across_batching() {
     let _one = serial();
     let texts = texts();
-    let first = FastEmbedder::new().unwrap();
+    let first = FastEmbedder::new(Device::Cpu).unwrap();
     assert_eq!(first.model(), MODEL_BGE_SMALL);
     assert_eq!(first.dims(), DIMS_BGE_SMALL);
     let batch = first.embed(&texts).unwrap();
@@ -71,7 +76,7 @@ fn cpu_vectors_are_bit_identical_across_batching() {
     }
     drop(first);
     // A second session, in sequence (never concurrent): each text alone.
-    let second = FastEmbedder::new().unwrap();
+    let second = FastEmbedder::new(Device::Cpu).unwrap();
     for (i, t) in texts.iter().enumerate() {
         let alone = second.embed(std::slice::from_ref(t)).unwrap().remove(0);
         assert_eq!(bits(&alone), bits(&batch[i]), "alone vs batch: {t:?}");
@@ -87,7 +92,7 @@ fn cpu_vectors_are_bit_identical_across_batching() {
 #[ignore = "downloads the bge-small model"]
 fn cache_inside_a_repo_is_refused() {
     let _one = serial();
-    let e = FastEmbedder::new().unwrap();
+    let e = FastEmbedder::new(Device::Cpu).unwrap();
     let cache = e.cache_dir().to_path_buf();
     assert!(e.refuse_repo_dir(&cache).is_err());
     let elsewhere = std::env::temp_dir();

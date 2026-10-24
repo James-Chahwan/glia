@@ -12,14 +12,27 @@
 #   (f) uvx      `uvx --from <wheel> glia --version` (skipped when uvx is not installed)
 #   (g) sdist    `maturin sdist` from cli/ gives glia_cli-<ver>.tar.gz holding cli/Cargo.toml,
 #                engine/Cargo.toml and stamp/build.rs (the path dependencies travel)
+#   (w) worker   (FB.14) on x86_64 Linux / aarch64 macOS: glia-embed's `glia-embed-worker` is
+#                built with `gpu-webgpu` and staged with its Dawn library in the scratch copy's
+#                cli/glia_cli.data/scripts/ (+ `data = "glia_cli.data"`), as the wheels workflow
+#                does; the wheel's `glia` itself is built `embed` only (cli/pyproject.toml), so
+#                it links no Dawn. The build runs in a scratch COPY of the tree (target/, .git,
+#                bench excluded), so the staging writes nothing inside the repo.
+#   (i) embed    `glia embed <copy> --model test-hash` writes vectors; where a worker ships it is
+#                installed beside `glia`, `readelf` (Linux) finds no Dawn in `glia`'s NEEDED, and
+#                bge-small runs twice: with no Vulkan ICD (VK_DRIVER_FILES=/nonexistent.json) the
+#                `[embed] device=` line reads `backend=cpu .. fallback=no_adapter:..` and the run
+#                completes; with the host's devices it completes on whatever backend it reports.
+#                Skip the two bge-small runs (they download the model once) with --no-model.
 #   (h) sdist build  `uv pip install --no-binary glia-cli <sdist>` into a second venv; its
 #                `glia --version` line must equal (d)'s byte for byte. glia-stamp's build.rs hashes
 #                HASHED_ROOTS + Cargo.lock relative to the workspace root, so a pruned or rewritten
 #                sdist prints another PARSER_STAMP (and keys every cache differently). A
 #                `uvx --from glia-cli` user on a platform with no wheel builds from this sdist.
 #
-#   bash scripts/check-cli-wheel.sh            all steps (two release compiles: minutes)
-#   bash scripts/check-cli-wheel.sh --no-sdist (a)-(f) only
+#   bash scripts/check-cli-wheel.sh            all steps (three release compiles: minutes)
+#   bash scripts/check-cli-wheel.sh --no-sdist (a)-(f), (w), (i) only
+#   bash scripts/check-cli-wheel.sh --no-model (i) without the bge-small runs
 #
 # Env: GLIA_ROOT (glia tree to package, default this checkout; mid-wave point it at a coherent tree,
 # e.g. a `git archive HEAD` copy); CLI_WHEEL_TMP (parent of the scratch dir, default $TMPDIR or /tmp;
@@ -33,10 +46,12 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ROOT=$(cd "${GLIA_ROOT:-$HERE}" 2>/dev/null && pwd) || { echo "[cli-wheel] check: FAILED (GLIA_ROOT=${GLIA_ROOT:-} does not exist)"; exit 1; }
 SDIST=1
+MODEL=1
 for a in "$@"; do
   case "$a" in
     --no-sdist) SDIST=0 ;;
-    *) echo "usage: $0 [--no-sdist]" >&2; exit 2 ;;
+    --no-model) MODEL=0 ;;
+    *) echo "usage: $0 [--no-sdist] [--no-model]" >&2; exit 2 ;;
   esac
 done
 
@@ -62,11 +77,44 @@ VER=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
   || fail "version: cargo metadata found no glia-cli package"
 echo "[cli-wheel] version: glia-cli $VER"
 
+# The scratch copy every build below runs in (the staging writes into its cli/).
+SRC=$T/src
+mkdir -p "$SRC"
+tar -C "$ROOT" --exclude=./target --exclude=./.git --exclude=./bench --exclude='./*/target' \
+  --exclude=./engram-export/target -cf - . | tar -x -C "$SRC" || fail "copy: the tree into $SRC"
+TARGET_DIR=${CARGO_TARGET_DIR:-$SRC/target}
+
+# (w) the WebGPU embedding worker, on the platforms ORT ships a WebGPU build for.
+WORKER=0
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) DAWN=libwebgpu_dawn.so; WORKER=1 ;;
+  Darwin-arm64) DAWN=libwebgpu_dawn.dylib; WORKER=1 ;;
+esac
+if [ "$WORKER" = 1 ]; then
+  if ! (cd "$SRC" && cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker) >"$LOG" 2>&1; then
+    tail -30 "$LOG"
+    fail "worker: cargo build glia-embed-worker"
+  fi
+  mkdir -p "$SRC/cli/glia_cli.data/scripts"
+  cp "$TARGET_DIR/release/glia-embed-worker" "$SRC/cli/glia_cli.data/scripts/" || fail "worker: copy the worker"
+  strip "$SRC/cli/glia_cli.data/scripts/glia-embed-worker" 2>/dev/null || true
+  cp -L "$TARGET_DIR/release/$DAWN" "$SRC/cli/glia_cli.data/scripts/" || fail "worker: copy $DAWN"
+  cp "$SRC/cli/pyproject.toml" "$T/pyproject.clean"
+  echo 'data = "glia_cli.data"' >>"$SRC/cli/pyproject.toml"
+  echo "[cli-wheel] worker: staged glia-embed-worker + $DAWN"
+else
+  echo "[cli-wheel] worker: none on $(uname -s)-$(uname -m) (ORT ships no WebGPU build): the CPU"
+fi
+
 # (b) the wheel.
 mkdir -p "$T/dist"
-if ! (cd "$ROOT/cli" && maturin build --release --out "$T/dist") >"$LOG" 2>&1; then
+if ! (cd "$SRC/cli" && maturin build --release --out "$T/dist") >>"$LOG" 2>&1; then
   tail -30 "$LOG"
   fail "wheel: maturin build"
+fi
+# The sdist (g) is the published one: no staged worker, no `data` key (it embeds on the CPU).
+if [ "$WORKER" = 1 ]; then
+  cp "$T/pyproject.clean" "$SRC/cli/pyproject.toml" && rm -rf "$SRC/cli/glia_cli.data"
 fi
 
 # (c) exactly one wheel, named for the workspace version.
@@ -104,6 +152,35 @@ if not hits:
 print(f"[cli-wheel] find: rows={len(rows)} hit={hits[0]}")
 PY
 
+# (i) embeddings from the installed wheel.
+cp -r "$ROOT/tests/go_smoke" "$T/embed" || fail "embed: copy tests/go_smoke"
+GLIA_NO_PERSIST=1 "$T/venv/bin/glia" embed "$T/embed" --model test-hash >>"$LOG" 2>&1 || fail "embed: glia embed --model test-hash"
+[ -s "$T/embed/.glia/vectors.jsonl" ] || fail "embed: no vectors written"
+echo "[cli-wheel] embed: test-hash rows=$(wc -l <"$T/embed/.glia/vectors.jsonl")"
+if [ "$WORKER" = 1 ]; then
+  [ -x "$T/venv/bin/glia-embed-worker" ] || fail "embed: no glia-embed-worker beside glia"
+  [ -f "$T/venv/bin/$DAWN" ] || fail "embed: no $DAWN beside glia"
+  if command -v readelf >/dev/null 2>&1 && readelf -d "$T/venv/bin/glia" | grep -q 'NEEDED.*webgpu_dawn'; then
+    fail "embed: the wheel's glia links Dawn"
+  fi
+  if [ "$MODEL" = 1 ]; then
+    cp -r "$ROOT/tests/go_smoke" "$T/embed_icd"
+    GLIA_NO_PERSIST=1 VK_DRIVER_FILES=/nonexistent.json "$T/venv/bin/glia" embed "$T/embed_icd" --model bge-small \
+      >/dev/null 2>"$T/embed_icd.err" || { tail -20 "$T/embed_icd.err"; fail "embed: bge-small without a Vulkan ICD"; }
+    ICD=$(grep '^\[embed\] device=' "$T/embed_icd.err" | tail -1)
+    case "$ICD" in
+      *" backend=cpu "*" fallback=no_adapter:"*) echo "[cli-wheel] embed: no ICD -> $ICD" ;;
+      *) tail -20 "$T/embed_icd.err"; fail "embed: no ICD gave '$ICD', expected backend=cpu fallback=no_adapter:" ;;
+    esac
+    cp -r "$ROOT/tests/go_smoke" "$T/embed_gpu"
+    GLIA_NO_PERSIST=1 "$T/venv/bin/glia" embed "$T/embed_gpu" --model bge-small \
+      >/dev/null 2>"$T/embed_gpu.err" || { tail -20 "$T/embed_gpu.err"; fail "embed: bge-small on the default device"; }
+    echo "[cli-wheel] embed: default -> $(grep '^\[embed\] device=' "$T/embed_gpu.err" | tail -1)"
+  else
+    echo "[cli-wheel] embed: bge-small runs skipped (--no-model)"
+  fi
+fi
+
 # (f) zero-install: uvx straight from the wheel file.
 if command -v uvx >/dev/null 2>&1; then
   UVX_LINE=$(UV_TOOL_DIR="$T/uv-tools" uvx -q --from "$WHEEL" glia --version 2>>"$LOG") || fail "uvx: uvx --from <wheel> glia --version"
@@ -115,7 +192,7 @@ fi
 
 if [ "$SDIST" = 1 ]; then
   # (g) the sdist carries the path dependencies.
-  if ! (cd "$ROOT/cli" && maturin sdist --out "$T/dist") >>"$LOG" 2>&1; then
+  if ! (cd "$SRC/cli" && maturin sdist --out "$T/dist") >>"$LOG" 2>&1; then
     tail -20 "$LOG"
     fail "sdist: maturin sdist"
   fi

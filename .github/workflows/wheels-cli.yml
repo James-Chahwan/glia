@@ -7,6 +7,17 @@ name: build wheels - glia-cli
 # py3-none-<platform>, so there is no Python version matrix: one wheel per platform, on
 # glia-py's platform matrix (wheels-py.yml).
 #
+# Embeddings (0.5.4 FB.14): the wheel's `glia` is built with the CPU embedding path only
+# (cli/pyproject.toml: `embed`, no `gpu-webgpu`), so it links no Dawn and starts on every
+# glibc its manylinux tag promises. On the platforms ORT ships a WebGPU build for (x86_64
+# Linux, aarch64 macOS, x86_64 Windows) the job first builds glia-embed's
+# `glia-embed-worker` with `gpu-webgpu` and stages it, with the Dawn library ORT links it
+# against, in cli/glia_cli.data/scripts/ (appending `data = "glia_cli.data"` to
+# cli/pyproject.toml in the job's checkout): pip installs both beside `glia`, which spawns
+# the worker for the GPU session and embeds on the CPU when it cannot (no adapter, a glibc
+# older than Dawn's 2.38, a crash). aarch64 Linux and x86_64 macOS ship no worker: the CPU
+# (x86_64 macOS: no embeddings at all, INTEL-MAC-NO-EMBED).
+#
 # Triggers: `v*` tag pushes (build, install-test, publish); workflow_dispatch (build and
 # install-test only, unless the `publish` input is ticked; unlike wheels-py.yml, so the
 # workflow can be proven on main without uploading); PRs that touch a crate the binary
@@ -59,6 +70,7 @@ on:
       - "Cargo.lock"
       - "scripts/check-cli-wheel.sh"
       - ".github/workflows/wheels-cli.yml"
+      - "cli/pyproject.toml"
 
 permissions:
   contents: read
@@ -84,12 +96,25 @@ jobs:
       # manylinux 2_28 pins the published tag (a local build tags the host's glibc,
       # manylinux_2_39). The container's C toolchain builds tree-sitter's C, ring and
       # tokenizers' onig; aarch64 is cross-built in maturin-action's cross image.
+      # before-script-linux runs in the same container, in cli/: on x86_64 it builds and
+      # stages the WebGPU embedding worker (FB.14, header); aarch64 ships none.
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
           working-directory: cli
           manylinux: "2_28"
+          before-script-linux: |
+            set -eux
+            if [ "${{ matrix.target }}" = "x86_64" ]; then
+              cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
+              mkdir -p glia_cli.data/scripts
+              cp ../target/release/glia-embed-worker glia_cli.data/scripts/
+              strip glia_cli.data/scripts/glia-embed-worker || true
+              cp -L ../target/release/libwebgpu_dawn.so glia_cli.data/scripts/
+              echo 'data = "glia_cli.data"' >> pyproject.toml
+              echo "[cli-wheel-ci] linux-x86_64 worker staged"
+            fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cli-wheels-linux-${{ matrix.target }}
@@ -114,6 +139,23 @@ jobs:
             deployment_target: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # FB.14: the WebGPU embedding worker (ORT's aarch64-apple-darwin coreml + webgpu
+      # build) beside `glia`, with its Dawn dylib (the worker's rpath is @loader_path).
+      # The x86_64 (Intel) wheel ships no worker and no ORT (INTEL-MAC-NO-EMBED).
+      - name: stage the embedding worker
+        if: matrix.target == 'aarch64'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+        run: |
+          set -eux
+          cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
+          mkdir -p glia_cli.data/scripts
+          cp ../target/release/glia-embed-worker glia_cli.data/scripts/
+          strip glia_cli.data/scripts/glia-embed-worker || true
+          cp -L ../target/release/libwebgpu_dawn.dylib glia_cli.data/scripts/
+          echo 'data = "glia_cli.data"' >> pyproject.toml
+          echo "[cli-wheel-ci] macos-aarch64 worker staged"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
@@ -131,6 +173,18 @@ jobs:
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # FB.14: the WebGPU embedding worker and every DLL ORT's webgpu build copied beside
+      # it (Dawn): Windows loads a DLL from the executable's directory, the Scripts dir.
+      - name: stage the embedding worker
+        shell: bash
+        run: |
+          set -eux
+          cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
+          mkdir -p glia_cli.data/scripts
+          cp ../target/release/glia-embed-worker.exe glia_cli.data/scripts/
+          cp -L ../target/release/*.dll glia_cli.data/scripts/
+          echo 'data = "glia_cli.data"' >> pyproject.toml
+          echo "[cli-wheel-ci] windows-x86_64 worker staged"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: x86_64
@@ -171,12 +225,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             artifact: cli-wheels-linux-x86_64
+            worker: true
           - runner: ubuntu-24.04-arm
             artifact: cli-wheels-linux-aarch64
+            worker: false
           - runner: macos-15
             artifact: cli-wheels-macos-aarch64
+            worker: true
           - runner: windows-2025-vs2026
             artifact: cli-wheels-windows-x86_64
+            worker: true
     defaults:
       run:
         shell: bash
@@ -241,6 +299,37 @@ jobs:
           print(f"rows={len(rows)} hit={hits[0]}")
           PY
           echo "[cli-wheel-ci] $RUNNER_LABEL find ok"
+      # FB.14: the embedding worker ships beside `glia` where ORT has a WebGPU build, and
+      # `glia embed` runs end to end with the deterministic test model everywhere.
+      - name: embed
+        env:
+          GLIA_NO_PERSIST: "1"
+          SHIPS_WORKER: ${{ matrix.worker }}
+        run: |
+          set -euo pipefail
+          bin=$(dirname "$GLIA_BIN")
+          if [ "$SHIPS_WORKER" = "true" ]; then
+            ls "$bin" | grep -q '^glia-embed-worker' || { echo "no glia-embed-worker in $bin"; ls "$bin"; exit 1; }
+            ls "$bin" | grep -q 'webgpu_dawn' || { echo "no Dawn library in $bin"; ls "$bin"; exit 1; }
+          fi
+          cp -r tests/go_smoke "$RUNNER_TEMP/embed_smoke"
+          "$GLIA_BIN" embed "$RUNNER_TEMP/embed_smoke" --model test-hash
+          [ -s "$RUNNER_TEMP/embed_smoke/.glia/vectors.jsonl" ] || { echo "no vectors written"; exit 1; }
+          echo "[cli-wheel-ci] $RUNNER_LABEL embed ok"
+      # No Vulkan ICD: the worker's WebGPU session cannot commit and the run completes on
+      # the CPU, `fallback=no_adapter:..`, never a load failure (downloads bge-small once).
+      - name: embed without a Vulkan ICD
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          GLIA_NO_PERSIST: "1"
+          VK_DRIVER_FILES: /nonexistent.json
+        run: |
+          set -euo pipefail
+          cp -r tests/go_smoke "$RUNNER_TEMP/embed_icd"
+          "$GLIA_BIN" embed "$RUNNER_TEMP/embed_icd" --model bge-small 2> "$RUNNER_TEMP/embed_icd.err"
+          cat "$RUNNER_TEMP/embed_icd.err" | grep '^\[embed\] device=' || true
+          grep -q '^\[embed\] device=.* backend=cpu .* fallback=no_adapter:' "$RUNNER_TEMP/embed_icd.err" || { cat "$RUNNER_TEMP/embed_icd.err"; exit 1; }
+          echo "[cli-wheel-ci] $RUNNER_LABEL embed-no-icd ok"
       - name: pipx
         if: matrix.runner == 'ubuntu-24.04'
         run: |

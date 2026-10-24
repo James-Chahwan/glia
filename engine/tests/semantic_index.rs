@@ -74,6 +74,7 @@ fn row(qname: &str, model: &str, text_hash: Option<String>, v: &[f32]) -> Vector
         model: Some(model.to_string()),
         dims: Some(v.len() as u32),
         text_hash,
+        device: None,
         b64: b64_encode(&codec::to_le_bytes(v)),
     }
 }
@@ -313,5 +314,38 @@ fn two_loads_are_identical() {
     assert_eq!(
         a.search(&q, 10, &HashSet::new()),
         b.search(&q, 10, &HashSet::new())
+    );
+}
+
+/// FB.14: a row's device never decides freshness. A fresh row stays fresh
+/// whichever device wrote it (the devices agree to 4e-7), and a stale one
+/// stays stale.
+#[test]
+fn a_rows_device_never_decides_freshness() {
+    let (td, r) = build(&app_py("Fetch one invoice."));
+    let m = &r.merged;
+    let roots = roots(&r);
+    let mut rows = vec![
+        fresh(m, "app::fetch_invoice", DEFAULT_RECIPE),
+        fresh(m, "app::render_chart", DEFAULT_RECIPE),
+    ];
+    write_rows(td.path(), &rows);
+    let before = VectorIndex::load(m, &roots, MODEL_TEST_HASH, DEFAULT_RECIPE).missing_ids();
+    rows[0].device = Some("webgpu".to_string());
+    rows[1].device = Some("cuda".to_string());
+    write_rows(td.path(), &rows);
+    let index = VectorIndex::load(m, &roots, MODEL_TEST_HASH, DEFAULT_RECIPE);
+    assert_eq!(index.missing_ids(), before, "a device changes nothing");
+    for q in ["app::fetch_invoice", "app::render_chart"] {
+        assert!(!index.missing_ids().contains(&id_of(m, q)), "{q} is fresh");
+    }
+    // A stale hash stays stale on any device.
+    rows[0].text_hash = Some(text_hash(DEFAULT_RECIPE, "another text"));
+    write_rows(td.path(), &rows);
+    let index = VectorIndex::load(m, &roots, MODEL_TEST_HASH, DEFAULT_RECIPE);
+    assert!(
+        index
+            .missing_ids()
+            .contains(&id_of(m, "app::fetch_invoice"))
     );
 }

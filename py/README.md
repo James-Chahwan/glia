@@ -34,19 +34,20 @@ that parse differently report different stamps.
 recipe=None, replace=False, limit=None, check=False)` writes
 `<repo>/.glia/vectors.jsonl`, the vectors the semantic tiers read (a snapshot
 step: `generate()` never embeds). `model="test-hash"` is a deterministic test
-model in every wheel. `model="bge-small"` needs a wheel built with the py
-crate's `embed` feature (fastembed, the ONNX Runtime linked statically); a
-wheel without it raises `ValueError`. The model downloads once into
-`FASTEMBED_CACHE_DIR`, else `$XDG_CACHE_HOME/glia/fastembed`, else
-`~/.cache/glia/fastembed`, never into the repo. Measured on Linux x86_64
-(`maturin build --release`, abi3): the wheel is 15,778,762 bytes without
-`embed` and 26,378,730 with it (+10.6 MB; the extension module 65.0 MB ->
-95.9 MB, and it adds `libstdc++.so.6` to its needed libraries); `import
-glia_py` takes 1.9 ms -> 4.2 ms (fastest of 6, warm); the first bge-small
-call loads the model in 1.7 s and the process keeps that one session for
-later calls. The published wheels do not turn `embed` on yet: the x86_64
-macOS wheel is tagged for macOS 10.12, and the ONNX Runtime it would link is
-built for 10.15.
+model in every wheel. `model="bge-small"` (fastembed, the ONNX Runtime linked
+statically) is in every published wheel but the x86_64 macOS one, which
+refuses it: no ONNX Runtime >= 1.24 build exists for x86_64-apple-darwin. The
+model downloads once into `FASTEMBED_CACHE_DIR`, else
+`$XDG_CACHE_HOME/glia/fastembed`, else `~/.cache/glia/fastembed`, never into
+the repo. It runs on the GPU by default: on x86_64 Linux, aarch64 macOS and
+x86_64 Windows the wheel installs a `glia-embed-worker` executable (with the
+Dawn WebGPU library, about 12 MB) into the environment's scripts directory,
+and the GPU session runs in that child process, never in Python's; any GPU
+failure (no adapter, a glibc older than 2.38, a crash) finishes the run on the
+CPU. `GLIA_EMBED_DEVICE=cpu|webgpu` overrides the choice, every vector row
+records its `device`, and stderr names the device on one `[embed] device=..
+backend=.. driver=.. fallback=.. batch=..` line. The devices, fallbacks and
+measured speeds are in docs/embeddings.md.
 
 ## What's new in 0.5.3
 

@@ -5,11 +5,20 @@
 //!
 //! The model: `test-hash` (glia-embed's deterministic test model) always;
 //! `bge-small` only in a wheel built with this crate's `embed` feature
-//! (`glia-embed/fastembed`, which links the ONNX Runtime), which
-//! `py/pyproject.toml` turns on for the published wheels. A wheel without it
-//! refuses `bge-small` with glia-embed's `named()` message. One bge-small
-//! session is held per process (`bge_small`): every
-//! `FastEmbedder::new()` is a fresh ORT session and model load.
+//! (`glia-embed/fastembed`, which links the ONNX Runtime's CPU provider),
+//! which `py/pyproject.toml` turns on for the published wheels; on x86_64
+//! macOS there is no ONNX Runtime (INTEL-MAC-NO-EMBED) and bge-small refuses.
+//!
+//! THE DEVICE (FB.14): bge-small runs where `GLIA_EMBED_DEVICE` says
+//! (`glia_embed::bge_small`): the GPU by default. The GPU session runs in the
+//! `glia-embed-worker` executable the wheel installs into the environment's
+//! scripts directory, found from the interpreter's directory and the
+//! ancestors of this module's `__file__` (`glia_embed::worker::worker_dirs`)
+//! and checked by a version handshake; the extension itself links only the
+//! CPU provider, so neither Dawn nor a GPU driver is ever loaded into the
+//! Python process. No worker (an sdist build, a deleted script): the CPU,
+//! fallback `no_worker`. One bge-small embedder is held per process
+//! (`bge_small`): one worker child, or one CPU session.
 //!
 //! Transport only: the run, the sidecar format and the per-run `[embed]
 //! repo=..` line are the engine's. This surface adds one `[embed] repo=<label>
@@ -83,35 +92,36 @@ fn repo_of(built: &GenerateResult, root: &Path) -> Result<RepoId, String> {
         .ok_or_else(|| format!("the graph of {} holds no repo rooted there", root.display()))
 }
 
-/// The process's one bge-small session, loaded on first use.
+/// The process's one bge-small embedder (a worker on the GPU, or the CPU),
+/// made on first use with the worker found in `dirs`.
 #[cfg(feature = "embed")]
-fn bge_small() -> Result<&'static glia_embed::FastEmbedder, String> {
+fn bge_small(dirs: &[PathBuf]) -> Result<&'static dyn Embedder, String> {
     use std::sync::{Mutex, OnceLock};
-    static MODEL: OnceLock<glia_embed::FastEmbedder> = OnceLock::new();
+    static MODEL: OnceLock<Box<dyn Embedder>> = OnceLock::new();
     static LOADING: Mutex<()> = Mutex::new(());
     if let Some(m) = MODEL.get() {
-        return Ok(m);
+        return Ok(m.as_ref());
     }
     let _guard = LOADING.lock().map_err(|e| e.to_string())?;
     if let Some(m) = MODEL.get() {
-        return Ok(m);
+        return Ok(m.as_ref());
     }
-    let loaded = glia_embed::FastEmbedder::new()?;
-    Ok(MODEL.get_or_init(|| loaded))
+    let loaded = glia_embed::bge_small(glia_embed::worker::WorkerProgram::locate(dirs))?;
+    Ok(MODEL.get_or_init(|| loaded).as_ref())
 }
 
-/// Run `f` with the embedder `model` names, after checking (bge-small) that
-/// its model cache is not inside `root`.
+/// Run `f` with the embedder `model` names, after checking (bge-small),
+/// before any model loads, that its model cache is not inside `root`.
 fn with_embedder<T>(
     model: &str,
     root: &Path,
+    worker_dirs: &[PathBuf],
     f: impl FnOnce(&dyn Embedder) -> Result<T, String>,
 ) -> Result<T, String> {
     #[cfg(feature = "embed")]
     if model == "bge-small" {
-        let e = bge_small()?;
-        e.refuse_repo_dir(root)?;
-        return f(e);
+        glia_embed::refuse_repo_cache(root)?;
+        return f(bge_small(worker_dirs)?);
     }
     // Without `embed` this wheel holds no bge-small session, even when
     // feature unification (a workspace build with the CLI) turns
@@ -125,13 +135,14 @@ fn with_embedder<T>(
                 .to_string(),
         );
     }
-    let _ = root;
+    let _ = (root, worker_dirs);
     let e = glia_embed::named(model)?;
     f(e.as_ref())
 }
 
 /// The run behind [`embed_py`], minus pyo3: check the model name and the
-/// recipe, take the graph ([`graph_of`]), embed, print the surface line.
+/// recipe, take the graph ([`graph_of`]), embed (bge-small's worker looked
+/// for in `worker_dirs`), print the surface line.
 /// `Err` is plain text: an unknown model or recipe (before any build), a
 /// model this build lacks, a path that is not a directory, a build or layout
 /// error, or the run's own (a sidecar of another model without `replace`).
@@ -142,6 +153,7 @@ fn embed_report(
     replace: bool,
     limit: Option<usize>,
     check: bool,
+    worker_dirs: &[PathBuf],
 ) -> Result<EmbedReport, String> {
     if !glia_embed::MODEL_NAMES.contains(&model) {
         // named() refuses it, with the one message listing the known names.
@@ -162,7 +174,7 @@ fn embed_report(
         .with_replace(replace)
         .with_limit(limit)
         .with_check_only(check);
-    let report = with_embedder(model, root, |e| {
+    let report = with_embedder(model, root, worker_dirs, |e| {
         embed_repo(root, &built.merged, repo, e, &opts)
     })?;
     eprintln!(
@@ -191,8 +203,11 @@ fn embed_report(
 ///
 /// `model`: `"bge-small"` (fastembed, downloaded once into
 /// `FASTEMBED_CACHE_DIR`, else `$XDG_CACHE_HOME/glia/fastembed`, else
-/// `~/.cache/glia/fastembed`; never inside the repo) or `"test-hash"` (the
-/// deterministic test model). `recipe`: the node text embedded, `"t1"` or
+/// `~/.cache/glia/fastembed`; never inside the repo; on the GPU by default
+/// through the wheel's `glia-embed-worker`, else the CPU, as
+/// `GLIA_EMBED_DEVICE` = `cpu` | `webgpu` | `cuda` overrides; the device is
+/// recorded on every row and printed on an `[embed] device=.. backend=..
+/// fallback=..` stderr line) or `"test-hash"` (the deterministic test model). `recipe`: the node text embedded, `"t1"` or
 /// `"t2"`; None is the engine's default. `replace`: rewrite a sidecar holding
 /// another model's rows. `limit`: embed at most this many nodes this call.
 /// `check`: count the work and write nothing at all (the model is never
@@ -218,10 +233,40 @@ fn embed_py(
     limit: Option<usize>,
     check: bool,
 ) -> PyResult<Py<PyAny>> {
+    let dirs = worker_dirs(py);
     let report = py
-        .detach(|| embed_report(repo_path, model, recipe.as_deref(), replace, limit, check))
+        .detach(|| {
+            embed_report(
+                repo_path,
+                model,
+                recipe.as_deref(),
+                replace,
+                limit,
+                check,
+                &dirs,
+            )
+        })
         .map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&report))
+}
+
+/// Where this wheel's `glia-embed-worker` may be: the interpreter's
+/// directory, then the scripts directories above this module's `__file__`
+/// (read with the GIL held, before the run detaches).
+fn worker_dirs(py: Python<'_>) -> Vec<PathBuf> {
+    let attr = |module: &str, name: &str| -> Option<PathBuf> {
+        py.import(module)
+            .ok()?
+            .getattr(name)
+            .ok()?
+            .extract::<String>()
+            .ok()
+            .map(PathBuf::from)
+    };
+    glia_embed::worker::worker_dirs(
+        attr("glia_py", "__file__").as_deref(),
+        attr("sys", "executable").as_deref(),
+    )
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -269,12 +314,14 @@ mod tests {
     #[test]
     fn embeds_then_keeps_fresh_rows() {
         let (_s, top) = repo("twice");
-        let first = embed_report(&top, "test-hash", None, false, None, false).expect("first run");
+        let first =
+            embed_report(&top, "test-hash", None, false, None, false, &[]).expect("first run");
         assert!(first.embedded > 0, "{first:?}");
         assert_eq!(first.model, glia_embed::MODEL_TEST_HASH);
         assert_eq!(first.rows_written, first.embedded);
         let body = std::fs::read_to_string(Path::new(&top).join(VECTORS_FILE)).expect("sidecar");
-        let second = embed_report(&top, "test-hash", None, false, None, false).expect("second");
+        let second =
+            embed_report(&top, "test-hash", None, false, None, false, &[]).expect("second");
         assert_eq!(second.embedded, 0, "{second:?}");
         assert_eq!(second.cached, first.embedded);
         assert_eq!(
@@ -288,7 +335,7 @@ mod tests {
     #[test]
     fn check_writes_nothing() {
         let (_s, top) = repo("check");
-        let r = embed_report(&top, "test-hash", Some("t2"), false, None, true).expect("check");
+        let r = embed_report(&top, "test-hash", Some("t2"), false, None, true, &[]).expect("check");
         assert!(r.embedded > 0, "{r:?}");
         assert_eq!(r.rows_written, 0);
         assert_eq!(r.recipe, EmbedRecipe::T2);
@@ -302,7 +349,7 @@ mod tests {
     #[test]
     fn limit_defers() {
         let (_s, top) = repo("limit");
-        let r = embed_report(&top, "test-hash", None, false, Some(1), false).expect("limited");
+        let r = embed_report(&top, "test-hash", None, false, Some(1), false, &[]).expect("limited");
         assert_eq!(r.embedded, 1, "{r:?}");
         assert!(r.deferred > 0, "{r:?}");
     }
@@ -311,10 +358,11 @@ mod tests {
     #[test]
     fn refuses_unknown_names_before_building() {
         let (_s, top) = repo("names");
-        let e = embed_report(&top, "nope", None, false, None, false).expect_err("model");
+        let e = embed_report(&top, "nope", None, false, None, false, &[]).expect_err("model");
         assert!(e.contains("unknown embedding model `nope`"), "{e}");
         assert!(e.contains("bge-small, test-hash"), "{e}");
-        let e = embed_report(&top, "test-hash", Some("t9"), false, None, false).expect_err("r");
+        let e =
+            embed_report(&top, "test-hash", Some("t9"), false, None, false, &[]).expect_err("r");
         assert_eq!(e, "unknown embed recipe `t9`: expected one of t1, t2");
         assert!(!Path::new(&top).join(".glia").exists());
         let e = embed_report(
@@ -324,6 +372,7 @@ mod tests {
             false,
             None,
             false,
+            &[],
         )
         .expect_err("dir");
         assert!(e.ends_with("is not a directory"), "{e}");
@@ -334,7 +383,7 @@ mod tests {
     #[test]
     fn bge_small_needs_the_feature() {
         let (_s, top) = repo("bge");
-        let e = embed_report(&top, "bge-small", None, false, None, false).expect_err("bge");
+        let e = embed_report(&top, "bge-small", None, false, None, false, &[]).expect_err("bge");
         assert!(e.contains("without the embedding model"), "{e}");
     }
 }
