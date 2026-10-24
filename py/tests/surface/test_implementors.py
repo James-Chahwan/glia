@@ -2,8 +2,8 @@
 """pyo3 surface, py/src/implementors.rs (LD.7c): `implementors(qname,
 direction="down", transitive=True)` answers who implements or extends a type
 (or what it implements with direction="up") with the LD.8a envelope
-{results, absence} as a native dict, each row tiered FACT / DERIVED /
-HEURISTIC; an unknown direction raises ValueError. Shared helpers:
+{results, absence} as a native dict, each row tiered fact / derived /
+heuristic (read from evidence, FD.7b); an unknown direction raises ValueError. Shared helpers:
 test_build.py."""
 from __future__ import annotations
 
@@ -37,8 +37,9 @@ def main() -> int:
 
         a, err = stderr_of(lambda: g.implementors("Shop::IRepo"))
         c.check("marker",
-                "[implementors] target=Shop::IRepo direction=Down transitive=true found=2 fact=2 derived=0 heuristic=0"
-                in err, err[-400:])
+                "[implementors] target=Shop::IRepo direction=Down transitive=true found=2 fact=0 derived=0 heuristic=2"
+                in err
+                and "[implementors] tiers fact=0 derived=0 heuristic=2 source=evidence" in err, err[-400:])
         c.check("implementors -> dict", type(a) is dict, type(a))
         c.check("envelope keys", type(a) is dict and list(a) == ["results", "absence"],
                 type(a) is dict and list(a))
@@ -48,7 +49,10 @@ def main() -> int:
                 [(r["qname"], r["depth"], r["relation"], r["via"]) for r in rows]
                 == [("Shop::IUserRepo", 1, "IMPLEMENTS", None),
                     ("Shop::PgUserRepo", 2, "IMPLEMENTS", "Shop::IUserRepo")], rows)
-        c.check("declared heritage is FACT", rows and rows[0]["tier"] == "FACT", rows[:1])
+        # C# heritage binds its base by name alone (graph:refs global_unique):
+        # read from evidence, as `glia why` reads it, that is heuristic (FD.7b).
+        c.check("name-bound heritage is heuristic, lowercase",
+                [r["tier"] for r in rows] == ["heuristic", "heuristic"], rows)
         ids = node_ids(g)
         c.check("ids are ints of the graph, live a bool",
                 all(type(r["id"]) is int and r["id"] in ids and type(r["live"]) is bool for r in rows), rows)

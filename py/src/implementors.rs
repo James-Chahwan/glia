@@ -1,5 +1,5 @@
 //! **implementors** (LD.7c): who implements or extends a type (or overrides a
-//! method), and its supertypes, tiered FACT / DERIVED / HEURISTIC — the LD.8a
+//! method), and its supertypes, tiered fact / derived / heuristic — the LD.8a
 //! envelope `{results, absence}` in a native `dict`.
 
 use std::collections::HashSet;
@@ -59,8 +59,10 @@ impl PyGraph {
     /// `{id, qname, name, kind, file, line, live, relation, depth, via, tier}`
     /// in discovery order — `relation` the edge category that entered the
     /// row, `via` the node it was reached through when `depth > 1`, `tier`
-    /// `FACT` (declared) / `DERIVED` (inferred by a rule, e.g. Go method
-    /// sets) / `HEURISTIC`, the weakest edge on its path; lines 1-based.
+    /// `fact` (read at a site) / `derived` (inferred by a rule, e.g. Go
+    /// method sets) / `heuristic` (a name-only binding), the weakest edge on
+    /// its path, each edge read from its EVIDENCE as `glia why` reads it
+    /// (FD.7b); lines 1-based.
     /// `absence` is `None` when a row was found, else the FACT-tier dict
     /// (`unknown_symbol` with suggestions, or `no_edges` with the heritage
     /// caveat rows of the target's language) with `unparsed_files` set to
@@ -118,7 +120,9 @@ mod tests {
         let json = serde_json::to_string(&down).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["results"][0]["qname"], "Shop::IUserRepo", "{json}");
-        assert_eq!(v["results"][0]["tier"], "FACT", "{json}");
+        // C# heritage binds `IRepo` by name alone (graph:refs global_unique),
+        // so its evidence tier is heuristic (FD.7b), whatever its confidence.
+        assert_eq!(v["results"][0]["tier"], "heuristic", "{json}");
         assert_eq!(v["results"][1]["via"], "Shop::IUserRepo", "{json}");
         assert!(v["absence"].is_null(), "{json}");
 

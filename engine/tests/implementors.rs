@@ -1,10 +1,14 @@
 //! LD.7c — `implementors`: who implements or extends a type (or overrides a
 //! method), transitively, and its supertypes, each row tiered by the weakest
-//! heritage edge on its path. The graph has held the edges since LD.7a / LD.7b
+//! heritage edge on its path, every edge read by its EVIDENCE as `glia why`
+//! reads it (FD.7b). The graph has held the edges since LD.7a / LD.7b
 //! / A6.6; before this the only route was a blast radius, which mixes them
 //! with CALLS / INJECTS rows and gives no tier. PHP heritage clauses are
 //! extracted since DH.14.
 
+use glia_code_domain::edge_category;
+use glia_code_domain::evidence::{Evidence, attach};
+use glia_core::Confidence;
 use glia_engine::generate_one;
 use glia_engine::implementors::{HierarchyDirection, Implementor, implementors};
 use glia_graph::MergedGraph;
@@ -87,16 +91,17 @@ fn csharp_interface_chain_down_up_and_direct() {
     assert_eq!(
         rows(&down.results),
         [
-            ("Shop::IUserRepo", 1, "IMPLEMENTS", "FACT", None),
+            ("Shop::IUserRepo", 1, "IMPLEMENTS", "heuristic", None),
             (
                 "Shop::PgUserRepo",
                 2,
                 "IMPLEMENTS",
-                "FACT",
+                "heuristic",
                 Some("Shop::IUserRepo")
             ),
         ],
-        "C# emits interface-to-interface heritage as IMPLEMENTS; both are declared"
+        "C# emits interface-to-interface heritage as IMPLEMENTS; both bases bind by name alone \
+         (graph:refs global_unique), heuristic as `glia why` reads them (FD.7b)"
     );
     let pg = &down.results[1];
     assert_eq!(
@@ -125,7 +130,7 @@ fn csharp_method_target_walks_its_owner_hierarchy() {
             "Shop::PgUserRepo::Get",
             2,
             "IMPLEMENTS",
-            "FACT",
+            "heuristic",
             Some("Shop::IUserRepo")
         )]
     );
@@ -150,19 +155,19 @@ fn typescript_class_chain_and_override() {
     let sub = implementors(&m, "repo::PgUserRepo", Down, true);
     assert_eq!(
         rows(&sub.results),
-        [("repo::CachedPgUserRepo", 1, "INHERITS_FROM", "FACT", None)]
+        [("repo::CachedPgUserRepo", 1, "INHERITS_FROM", "fact", None)]
     );
 
     let user = implementors(&m, "repo::UserRepo", Down, true);
     assert_eq!(
         rows(&user.results),
         [
-            ("repo::PgUserRepo", 1, "IMPLEMENTS", "FACT", None),
+            ("repo::PgUserRepo", 1, "IMPLEMENTS", "fact", None),
             (
                 "repo::CachedPgUserRepo",
                 2,
                 "INHERITS_FROM",
-                "FACT",
+                "fact",
                 Some("repo::PgUserRepo")
             ),
         ]
@@ -186,7 +191,7 @@ fn typescript_class_chain_and_override() {
             "repo::CachedPgUserRepo::get",
             1,
             "INHERITS_FROM",
-            "FACT",
+            "fact",
             None
         )]
     );
@@ -197,12 +202,13 @@ fn java_target_resolves_the_interface_not_its_file_module() {
     let (_tmp, m) = build(&JAVA);
     // `Readable` names both Readable.java's MODULE and the INTERFACE; the
     // MODULE has no heritage edge, so rows prove the INTERFACE was taken.
+    // Both bases bind by name alone (graph:refs global_unique): heuristic.
     let a = implementors(&m, "Readable", Down, true);
     assert_eq!(
         rows(&a.results),
         [
-            ("Catalog", 1, "INHERITS_FROM", "FACT", None),
-            ("PgCatalog", 2, "IMPLEMENTS", "FACT", Some("Catalog")),
+            ("Catalog", 1, "INHERITS_FROM", "heuristic", None),
+            ("PgCatalog", 2, "IMPLEMENTS", "heuristic", Some("Catalog")),
         ]
     );
     assert!(a.results.iter().all(|r| r.kind != "MODULE"));
@@ -216,7 +222,7 @@ fn go_implicit_satisfaction_is_derived() {
     let store = implementors(&m, "store::Store", Down, true);
     assert_eq!(
         rows(&store.results),
-        [("mem::MemStore", 1, "IMPLEMENTS", "DERIVED", None)],
+        [("mem::MemStore", 1, "IMPLEMENTS", "derived", None)],
         "inferred by method-name set (Medium); ReadOnly lacks Put"
     );
 
@@ -225,11 +231,11 @@ fn go_implicit_satisfaction_is_derived() {
     let get = implementors(&m, "store::Store::Get", Down, true);
     assert_eq!(
         rows(&get.results),
-        [("mem::MemStore::Get", 1, "IMPLEMENTS", "DERIVED", None)]
+        [("mem::MemStore::Get", 1, "IMPLEMENTS", "derived", None)]
     );
     let up = implementors(&m, "mem::MemStore::Get", Up, true);
     assert_eq!(qnames(&up.results), ["store::Store::Get"]);
-    assert_eq!(up.results[0].tier, "DERIVED");
+    assert_eq!(up.results[0].tier, "derived");
     let read_only = implementors(&m, "mem::ReadOnly", Up, true);
     assert!(read_only.results.is_empty());
 }
@@ -265,10 +271,10 @@ fn go_promoted_methods_satisfy_an_interface() {
                 "greeter::UnimplementedGreeterServer",
                 1,
                 "IMPLEMENTS",
-                "DERIVED",
+                "derived",
                 None
             ),
-            ("server::server", 1, "IMPLEMENTS", "DERIVED", None),
+            ("server::server", 1, "IMPLEMENTS", "derived", None),
         ],
         "server implements GreeterServer with its own SayHello and the promoted mustEmbed"
     );
@@ -277,7 +283,7 @@ fn go_promoted_methods_satisfy_an_interface() {
     let unimplemented = implementors(&m, "greeter::UnimplementedGreeterServer", Down, true);
     assert_eq!(
         rows(&unimplemented.results),
-        [("server::server", 1, "INHERITS_FROM", "FACT", None)]
+        [("server::server", 1, "INHERITS_FROM", "fact", None)]
     );
 }
 
@@ -295,8 +301,8 @@ fn php_heritage_is_extracted() {
     assert_eq!(
         rows(&a.results),
         [
-            ("Catalog", 1, "INHERITS_FROM", "FACT", None),
-            ("PgCatalog", 2, "IMPLEMENTS", "FACT", Some("Catalog")),
+            ("Catalog", 1, "INHERITS_FROM", "fact", None),
+            ("PgCatalog", 2, "IMPLEMENTS", "fact", Some("Catalog")),
         ]
     );
     assert!(a.results.iter().all(|r| r.kind != "MODULE"));
@@ -306,7 +312,7 @@ fn php_heritage_is_extracted() {
     assert!(catalog.absence.is_none(), "{:?}", catalog.absence);
     assert_eq!(
         rows(&catalog.results),
-        [("PgCatalog", 1, "IMPLEMENTS", "FACT", None)]
+        [("PgCatalog", 1, "IMPLEMENTS", "fact", None)]
     );
 
     // The interface's own method declarations are nodes, so A6.6 pairs the
@@ -314,7 +320,7 @@ fn php_heritage_is_extracted() {
     let search = implementors(&m, "Catalog::search", Down, true);
     assert_eq!(
         rows(&search.results),
-        [("PgCatalog::search", 1, "IMPLEMENTS", "FACT", None)]
+        [("PgCatalog::search", 1, "IMPLEMENTS", "fact", None)]
     );
 }
 
@@ -337,4 +343,76 @@ fn an_unknown_symbol_is_unknown_and_another_kind_is_walked() {
     let absence = module.absence.expect("absence");
     assert_eq!(absence.reason, "no_edges");
     assert!(absence.note.contains("(MODULE)"), "{}", absence.note);
+}
+
+/// FD.7b: a walked edge is tiered by its EVIDENCE (`why::edge_tier`), never
+/// by its Confidence. A Strong heritage edge whose evidence is a name-only
+/// binding (`graph:refs` / `global_unique`) is heuristic; a Medium one a
+/// parser read at a site is fact; a row is the weakest edge on its path.
+#[test]
+fn tiers_are_read_from_evidence_not_confidence() {
+    let (_tmp, mut m) = build(&[("repo.ts", TS)]);
+    // Both ids from the unmodified answer: PgUserRepo is UserRepo's direct
+    // implementor, CachedPgUserRepo its subclass.
+    let before = implementors(&m, "repo::UserRepo", Down, true);
+    let id = |q: &str| {
+        before
+            .results
+            .iter()
+            .find(|r| r.qname == q)
+            .map(|r| glia_core::NodeId(r.id))
+            .expect(q)
+    };
+    let (pg, cached) = (id("repo::PgUserRepo"), id("repo::CachedPgUserRepo"));
+    let mut touched = (0, 0);
+    for e in m.graphs.iter_mut().flat_map(|g| g.edges.iter_mut()) {
+        if e.category == edge_category::INHERITS_FROM && e.from == cached && e.to == pg {
+            e.confidence = Confidence::Strong;
+            attach(
+                e,
+                Evidence::emitter("graph:refs")
+                    .rule("global_unique")
+                    .at("repo.ts", 13),
+            );
+            touched.0 += 1;
+        } else if e.category == edge_category::IMPLEMENTS && e.from == pg {
+            e.confidence = Confidence::Medium;
+            attach(
+                e,
+                Evidence::emitter("parser:typescript")
+                    .rule("implements")
+                    .at("repo.ts", 8),
+            );
+            touched.1 += 1;
+        }
+    }
+    assert!(touched.0 > 0 && touched.1 > 0, "{touched:?}");
+
+    let sub = implementors(&m, "repo::PgUserRepo", Down, true);
+    assert_eq!(
+        rows(&sub.results),
+        [(
+            "repo::CachedPgUserRepo",
+            1,
+            "INHERITS_FROM",
+            "heuristic",
+            None
+        )],
+        "Strong, but a name-only binding"
+    );
+    let user = implementors(&m, "repo::UserRepo", Down, true);
+    assert_eq!(
+        rows(&user.results),
+        [
+            ("repo::PgUserRepo", 1, "IMPLEMENTS", "fact", None),
+            (
+                "repo::CachedPgUserRepo",
+                2,
+                "INHERITS_FROM",
+                "heuristic",
+                Some("repo::PgUserRepo")
+            ),
+        ],
+        "Medium, but read by the parser at a site; the row below takes the weakest"
+    );
 }

@@ -1,6 +1,7 @@
 //! Who implements or extends X, and what X implements or extends (LD.7c): the
 //! type hierarchy over IMPLEMENTS and INHERITS_FROM, transitive by default,
-//! each row tiered FACT / DERIVED / HEURISTIC by the weakest edge on its path.
+//! each row tiered `fact` / `derived` / `heuristic` by the weakest edge on its
+//! path.
 //!
 //! Before this, "who implements X" meant a blast radius, which mixes the
 //! heritage edges with every other carry edge (CALLS, INJECTS, ...) and says
@@ -19,12 +20,16 @@
 //!
 //! # Tiers
 //!
-//! A row's tier is the weakest edge confidence on its BFS path from the
-//! target: Strong -> `FACT` (declared in source), Medium -> `DERIVED`
-//! (inferred by a rule, e.g. LD.7b's Go method-set match), Weak ->
-//! `HEURISTIC`. It is computed from each reached node's parent during the
-//! walk, with an edge's confidence read off the first edge in `all_edges`
-//! order with its `(from, to, category)`.
+//! A row's tier ([`Tier`], printed lowercase) is the weakest edge tier on its
+//! BFS path from the target, and an edge's tier is read from its EVIDENCE by
+//! [`why::edge_tier`], the reading `glia why`, `check`
+//! and `glia query` share (FD.7b), never from its Confidence: a heritage
+//! clause a parser read is `fact` whatever confidence it carries, an
+//! inferred graph binding (LD.7b's Go method-set match, Medium) `derived`,
+//! a name-only binding (`global_unique`, even Strong) `heuristic`, an edge
+//! with no evidence `derived`. It is computed from each reached node's parent
+//! during the walk, with an edge's tier read off the first edge in
+//! `all_edges` order with its `(from, to, category)`.
 //!
 //! # METHOD targets
 //!
@@ -55,7 +60,9 @@
 //!
 //! fired_on marker, once per call:
 //! `[implementors] target=<q> direction=<Down|Up> transitive=<b> found=<n> fact=<f> derived=<d> heuristic=<h>`
-//! — grep token `[implementors] target=`.
+//! — grep token `[implementors] target=` — then
+//! `[implementors] tiers fact=<f> derived=<d> heuristic=<h> source=evidence`
+//! (FD.7b), grep token `[implementors] tiers`.
 //!
 //! Module slot declared by L0.2; its API is reached as
 //! `glia_engine::implementors::<item>`, never flattened into the crate
@@ -65,13 +72,15 @@ use std::collections::{HashMap, HashSet};
 
 use glia_activation::algo::reach::bfs;
 use glia_activation::algo::{Adjacency, CategorySet, Walk};
+use glia_activation::profile::Tier;
 use glia_code_domain::{edge_category, node_kind};
-use glia_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
+use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
 use crate::answers::{Locator, entrypoint_reachable, live_marker};
 use crate::find::{self, FindOptions, FoundNode};
+use crate::why;
 
 /// The categories the walk follows, by `edge_category::name` spelling: the
 /// absence's mechanisms and the caveat rows it carries.
@@ -122,34 +131,9 @@ pub struct Implementor {
     /// The node this row was reached through, when `depth > 1` (for a METHOD
     /// target's rows, the type the owner walk reached it through).
     pub via: Option<String>,
-    /// `FACT` | `DERIVED` | `HEURISTIC`: the weakest edge on the path.
+    /// `fact` | `derived` | `heuristic` ([`Tier::as_str`]): the weakest
+    /// edge on the path, each edge read from its EVIDENCE (module doc).
     pub tier: &'static str,
-}
-
-/// Evidence tiers, strongest first: the derived `Ord` makes `max` the weakest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Tier {
-    Fact,
-    Derived,
-    Heuristic,
-}
-
-impl Tier {
-    fn of(c: Confidence) -> Tier {
-        match c {
-            Confidence::Strong => Tier::Fact,
-            Confidence::Medium => Tier::Derived,
-            Confidence::Weak => Tier::Heuristic,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Tier::Fact => "FACT",
-            Tier::Derived => "DERIVED",
-            Tier::Heuristic => "HEURISTIC",
-        }
-    }
 }
 
 /// A walked row before it is located.
@@ -206,13 +190,24 @@ pub fn implementors_with_live(
         }
         Ok(target) => walk(merged, live, qname, target, direction, transitive),
     };
-    let count = |t: Tier| answer.results.iter().filter(|r| r.tier == t.name()).count();
-    eprintln!(
-        "[implementors] target={q} direction={direction:?} transitive={transitive} found={} fact={} derived={} heuristic={}",
-        answer.results.len(),
+    let count = |t: Tier| {
+        answer
+            .results
+            .iter()
+            .filter(|r| r.tier == t.as_str())
+            .count()
+    };
+    let (fact, derived, heuristic) = (
         count(Tier::Fact),
         count(Tier::Derived),
-        count(Tier::Heuristic)
+        count(Tier::Heuristic),
+    );
+    eprintln!(
+        "[implementors] target={q} direction={direction:?} transitive={transitive} found={} fact={fact} derived={derived} heuristic={heuristic}",
+        answer.results.len(),
+    );
+    eprintln!(
+        "[implementors] tiers fact={fact} derived={derived} heuristic={heuristic} source=evidence"
     );
     answer
 }
@@ -261,15 +256,14 @@ fn walk(
     };
     let max_depth = if transitive { usize::MAX } else { 1 };
 
-    let mut confidence: HashMap<(NodeId, NodeId, EdgeCategoryId), Confidence> = HashMap::new();
+    let mut tier: HashMap<(NodeId, NodeId, EdgeCategoryId), Tier> = HashMap::new();
     let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
     let mut methods_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let target_kind = kind_of(merged, target);
     for e in merged.all_edges() {
         if heritage.contains(&e.category) {
-            confidence
-                .entry((e.from, e.to, e.category))
-                .or_insert(e.confidence);
+            tier.entry((e.from, e.to, e.category))
+                .or_insert_with(|| why::edge_tier(e).0);
         } else if target_kind == Some(node_kind::METHOD)
             && e.category == edge_category::DEFINES
             && kind_of(merged, e.to) == Some(node_kind::METHOD)
@@ -282,7 +276,7 @@ fn walk(
             }
         }
     }
-    let hierarchy = |seed: NodeId| rows(&adj, &confidence, seed, dir, max_depth);
+    let hierarchy = |seed: NodeId| rows(&adj, &tier, seed, dir, max_depth);
 
     let owner = owner_of.get(&target).copied();
     let mut found: Vec<Row> = Vec::new();
@@ -325,7 +319,7 @@ fn walk(
                 relation: edge_category::name(r.relation),
                 depth: r.depth,
                 via,
-                tier: r.tier.name(),
+                tier: r.tier.as_str(),
             })
         })
         .collect();
@@ -367,11 +361,11 @@ fn walk(
 }
 
 /// The BFS rows from `seed`, in discovery order, each tiered by the weakest
-/// edge on its path: its parent's tier (the seed's is FACT) and the entering
-/// edge's confidence.
+/// edge on its path: its parent's tier (the seed's is fact) and the entering
+/// edge's evidence tier.
 fn rows(
     adj: &Adjacency,
-    confidence: &HashMap<(NodeId, NodeId, EdgeCategoryId), Confidence>,
+    tiers: &HashMap<(NodeId, NodeId, EdgeCategoryId), Tier>,
     seed: NodeId,
     dir: Walk,
     max_depth: usize,
@@ -382,14 +376,14 @@ fn rows(
         .into_iter()
         .map(|r| {
             // Down walks an edge backwards: it runs from the reached node to
-            // its parent. Every walked edge is in the map; a miss is Weak.
+            // its parent. Every walked edge is in the map; a miss is heuristic.
             let key = match dir {
                 Walk::Backward => (r.id, r.parent, r.via),
                 _ => (r.parent, r.id, r.via),
             };
-            let edge = Tier::of(confidence.get(&key).copied().unwrap_or(Confidence::Weak));
+            let edge = tiers.get(&key).copied().unwrap_or(Tier::Heuristic);
             let parent = tier_of.get(&r.parent).copied().unwrap_or(Tier::Fact);
-            let tier = parent.max(edge);
+            let tier = parent.weakest(edge);
             tier_of.insert(r.id, tier);
             Row {
                 id: r.id,
@@ -421,15 +415,37 @@ fn name_of(merged: &MergedGraph, id: NodeId) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glia_code_domain::evidence::{Evidence, attach};
+    use glia_core::{Confidence, Edge};
 
+    fn heritage(c: Confidence, ev: Evidence) -> Edge {
+        let mut e = Edge::new(NodeId(1), NodeId(2), edge_category::IMPLEMENTS, c);
+        attach(&mut e, ev);
+        e
+    }
+
+    /// FD.7b: the edge tier is why's evidence reading, not the confidence.
     #[test]
-    fn the_weakest_confidence_names_the_tier() {
-        assert_eq!(Tier::Fact.max(Tier::of(Confidence::Medium)), Tier::Derived);
-        assert_eq!(
-            Tier::Derived.max(Tier::of(Confidence::Strong)),
-            Tier::Derived
+    fn an_edge_is_tiered_by_its_evidence() {
+        let name_only = heritage(
+            Confidence::Strong,
+            Evidence::emitter("graph:refs")
+                .rule("global_unique")
+                .at("a.ts", 3),
         );
-        assert_eq!(Tier::of(Confidence::Weak).name(), "HEURISTIC");
-        assert_eq!(Tier::of(Confidence::Strong).name(), "FACT");
+        assert_eq!(why::edge_tier(&name_only).0, Tier::Heuristic);
+        let parsed = heritage(
+            Confidence::Medium,
+            Evidence::emitter("parser:typescript")
+                .rule("implements")
+                .at("a.ts", 3),
+        );
+        assert_eq!(why::edge_tier(&parsed).0, Tier::Fact);
+        assert_eq!(Tier::Fact.weakest(Tier::Derived).as_str(), "derived");
+        assert_eq!(
+            Tier::Derived.weakest(Tier::Fact),
+            Tier::Derived,
+            "a row is as weak as its weakest edge"
+        );
     }
 }
