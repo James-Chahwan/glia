@@ -1646,6 +1646,61 @@
    ]
   },
   {
+   "id": "EC.9b",
+   "title": "pack ignores the calibration record (ruling EC-9b): pack / pack_ids rank with PackArgs.ranking only, and the rank gate gains an @sel-vs-default contrast so a calibrated answer below its default fails",
+   "batch": "EC",
+   "area": "EC calibrated selection (item 10)",
+   "loc": 260,
+   "rationale": "EC.9 (W10) made pack follow the repo's calibrated SELh0 / SELs0 pick. The 0.5.3 release-candidate measurement showed that pick lowers pack's recall@10: paired commit-cluster bootstrap of ANS:pack@sel - ANS:pack r10 is below 0 on the private Kina run (single -0.048 [-0.061, -0.038], k2 -0.042, half -0.023) and on the public gate snapshots (commons-io single -0.030 [-0.042, -0.018], samples -0.021 [-0.029, -0.014], shell -0.009 [-0.016, -0.003], glia -0.002 [-0.004, -0.001]). The selection sets are scored by the impact replay's file recall, not by pack's budget cut and file roll-up, so a pick good for impact is not one for pack. The gate passed because it judges each ranker against its own baseline, never a calibrated answer against its default. Calibrated impact is flat to positive (Kina +0.016 [+0.008, +0.024]) and calibrated review strongly positive (+0.06 to +0.15 on 5 of 6 public snapshots and Kina), so only pack changes. James 2026-10-24 ruled 'Pack ignores calibration'.",
+   "entry_points": [
+    "engine/src/pack.rs - select_for (step 2a), PackArgs.select, Pack.selection, the `[select] surface=pack` line and the module doc",
+    "engine/tests/calibrate_answers.rs - EC.9's pack cases",
+    "engine/examples/rank_eval.rs - gate_check_main: the new contrast",
+    "bench/rank-gate/gate.json, bench/rank-gate/README.md - the contrast list and its prose",
+    "cli/src/cmd/query/pack.rs, py/src/pack.rs - the --ranking / ranking= docs"
+   ],
+   "files_touched": [
+    "engine/src/pack.rs",
+    "engine/tests/calibrate_answers.rs",
+    "engine/tests/rank_pack.rs",
+    "cli/src/cmd/query/pack.rs",
+    "cli/surface/pack.txt",
+    "cli/tests/pack_cli.rs",
+    "py/src/pack.rs",
+    "py/api_surface/pack.txt",
+    "py/tests/surface/test_pack.py",
+    "engine/examples/rank_eval.rs",
+    "bench/rank-gate/gate.json",
+    "bench/rank-gate/README.md",
+    "README.md",
+    "CLAUDE.md",
+    "skills/glia/SKILL.md",
+    "dev-notes/repo-graph-handoff-0.5.3.md",
+    "dev-notes/neuropil-handoff-0.5.3.md"
+   ],
+   "implementation": "1. pack.rs: pack / pack_ids never read the calibration record. Remove PackArgs.select (added by EC.9 in this unreleased version, so no released consumer has it) and the record branch of select_for; the ranking is PackArgs.ranking (default EA.6b's H10 file lift, unchanged). Keep Pack.selection and the `[select] surface=pack ..` line so the answer still says what ranked it: source=explicit when the caller named a ranking, else source=fallback reason=pack_uncalibrated (ruling EC-9b), test_commits=0. Keep the shape / set fields as today. A repo with a calibration record and one without now pack byte-identically for the same PackArgs.ranking.\n2. CLI `glia pack`: --ranking absent means the default ranking (not 'calibrated'); fix its help text, regenerate cli/surface/pack.txt, and the README `## CLI` line. If common::CalibratedRankingArgs then has a field only pack used, keep the type correct for its other users; never leave a dead field.\n3. pyo3 pack / pack_ids: `ranking=None` is the default ranking; the dict keeps `selection`. Doc + api_surface + test_pack.py.\n4. Tests: replace EC.9's 'pack follows the calibrated pick' cases with 'pack ignores a calibration record' (a fixture whose record picks a non-default ranking packs identically with and without the record; selection.source == fallback, reason == pack_uncalibrated). blast_radius / diff_impact / review calibrated cases unchanged.\n5. rank gate: a contrast check in gate_check_main, read from a new gate.json key `contrasts`: [[\"ANS:impact@sel\",\"ANS:impact\"],[\"ANS:review@sel\",\"ANS:review\"],[\"ANS:find_files@sel\",\"ANS:find_files\"]] on every shape each pair is measured on. Per (snapshot, shape, pair) the paired commit-cluster bootstrap of r10 new - default (the `paired` machinery), Holm over the contrasts of one snapshot; a contrast whose Holm-adjusted CI lies wholly below 0 fails the check (exit 1, `[rank-gate] contrast drop label=<l> shape=<s> <a> - <b> r10 <d> [<lo>, <hi>]`). Report ANS:pack@sel - ANS:pack as an informational row (not gated: pack no longer uses the pick; the ANS:pack@sel ranker stays as the harness measurement of the pick applied to pack). One summary line: `[rank-gate] contrasts: ok|FAILED - <n> pairs, <d> below default`.\n6. Docs: README (CLI prose for pack), CLAUDE.md (any line saying pack follows the calibrated pick; the roadmap's 0.5.3 line), skills/glia/SKILL.md, and the repo-graph / neuropil handoffs' pack entries: pack's order is unchanged by calibration in 0.5.3; history_calibrate does not change pack. State ruling EC-9b.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-engine --test calibrate_answers --test rank_pack --test pack --test byte_identical` green; `cargo test -p glia-engine`, `cargo test -p glia-cli` (pack_cli, readme_surface, skill_surface, cli_surface) and py api_surface green; clippy -D warnings clean (engine all-targets incl. examples, cli, py). `bash scripts/rank-gate.sh check`: 0 drops, and the new `[rank-gate] contrasts: ok` with every pair listed (state the per-snapshot rows); ANS:pack's own rows unchanged against current (pack on the gate snapshots never had a record in the harness answer path, so state it if any moved). The informational pack@sel - pack rows reproduce the numbers above within bootstrap noise.",
+   "fired_on_marker": "[select] surface=pack set=<SELh0|SELs0> shape=<k> pick=<ranking> source=fallback reason=pack_uncalibrated test_commits=0  /  [rank-gate] contrasts: ok - <n> pairs, 0 below default",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "api_signature",
+     "out_of_repo"
+    ],
+    "what_changes": "Against EC.9 (unreleased): on a calibrated repo pack / pack_ids order neighbours by PackArgs.ranking again, not the record's pick; Pack.selection reads source=fallback reason=pack_uncalibrated; PackArgs.select is removed. Against 0.5.2 the only pack change is EA.6's / EA.6b's ranking. The repo-graph wrapper's pack dict keeps `selection`."
+   },
+   "depends_on": [
+    "EC.14",
+    "EZ.1",
+    "EZ.2"
+   ],
+   "risks": [
+    "The contrast gate could fail on an existing pair at the snapshot level (shell impact@sel k2 -0.002 [-0.007, +0.000] is close). Holm over each snapshot's pairs is the rule; if a pair still fails, report it and stop: that is a ruling, not a threshold to loosen."
+   ]
+  },
+  {
    "id": "EG.1",
    "title": "rank_eval measures the shipped answers: `--ans on` adds ANS:impact / ANS:pack (single-seed and review shapes) and ANS:find (find shape) rankers that call the engine's own diff_impact_from_diff / pack_ids / find_nodes, pins the harness's reference PPR config, and `--r3-perq on` dumps every round-3 shape per query",
    "batch": "EG",
@@ -2747,6 +2802,7 @@
   "EG-6": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): pin actions by full commit SHA with the version tag in a trailing comment",
   "INT-1": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): add commons-lang (cee7cc6b) and commons-io (11f0abe7) to the gate snapshots: six repos",
   "INT-2": "James 2026-10-23 (\"yeah sounds good\" to the ruling table): EG.7's #[doc(hidden)] pub seams are acceptable",
-  "EA-2b": "James 2026-10-23 (picked 'File-level lift' after the W6 gate showed the EA.6 row lift costs ANS:pack recall@10): pack lifts co-changed files, one best row each in H10 file order (EA.6b); no per-file row cap, no rollback"
+  "EA-2b": "James 2026-10-23 (picked 'File-level lift' after the W6 gate showed the EA.6 row lift costs ANS:pack recall@10): pack lifts co-changed files, one best row each in H10 file order (EA.6b); no per-file row cap, no rollback",
+  "EC-9b": "James 2026-10-24 (picked 'Pack ignores calibration' after the release-candidate Kina run and the public gate runs showed ANS:pack@sel below ANS:pack: Kina single -0.048 [-0.061,-0.038], commons-io -0.030, samples -0.021, shell -0.009, CIs below 0): pack / pack_ids never read the calibration record and rank with PackArgs.ranking (default the EA.6b H10 file lift); blast_radius / diff_impact / review keep their calibrated picks; the gate gains an @sel-vs-default contrast (EC.9b)"
  }
 }
