@@ -80,6 +80,9 @@ Also kept out:
 - **Fix the wheels workflow:** bump the Node 20 actions and pin the runner image (0.5.4 seed §E). Needed before 0.5.3's
   wheels build. Rehearsed 2026-10-23 on draft PR #1 (`ci/wheels-node24` at 6b03413d): run 39946342215 green, 6 builds
   plus sdist, publish skipped, no Node 20 deprecation in the logs, runner images ubuntu-24.04 / macos-14-arm64 as pinned.
+  macOS moved to macos-15 (macos-14 deprecated upstream; f80cfab7, deployment targets pinned 10.12 / 11.0) and rehearsed
+  2026-10-24 on draft PR #2 (`ci/wheels-macos15`): run 40046233797 green, 6 builds plus sdist, publish skipped, macOS
+  wheels `macosx_10_12_x86_64` / `macosx_11_0_arm64`, the same tags as 0.5.2 on PyPI.
 
 ## Consumers
 
