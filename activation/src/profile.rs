@@ -28,7 +28,7 @@
 //!
 //! # Tiers
 //!
-//! [`Tier`] is the three evidence tiers, strongest first: `fact` (read at a
+//! [`Tier`](crate::profile::Tier) is the three evidence tiers, strongest first: `fact` (read at a
 //! site), `derived` (paired by a resolver or pass) and `heuristic` (a guess:
 //! a name match, an overlay, git history, a clustering). It is the one tier
 //! type every crate reads (FD.7a): the identity rules here, the rules
