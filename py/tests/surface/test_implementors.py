@@ -75,7 +75,7 @@ def main() -> int:
         c.check("nothing extends it: empty results", none["results"] == [], none["results"])
         c.check("no_edges FACT with the heritage mechanisms",
                 type(ab) is dict and (ab.get("tier"), ab.get("reason"), ab.get("mechanisms"))
-                == ("FACT", "no_edges", ["IMPLEMENTS", "INHERITS_FROM"]), ab)
+                == ("fact", "no_edges", ["IMPLEMENTS", "INHERITS_FROM"]), ab)
         c.check("absence counts unparsed files",
                 type(ab) is dict and ab.get("unparsed_files") == len(g.parse_errors), ab)
         unknown = g.implementors("IUsrRepo")["absence"]

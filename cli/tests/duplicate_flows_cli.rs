@@ -398,7 +398,7 @@ fn no_groups_is_an_absence() {
     let v = json(&glia(&[root.path(), "--json", "--scope", "tests"], 0));
     assert_eq!(v["groups"], serde_json::json!([]));
     assert_eq!(v["absence"]["reason"], "no_match", "{v}");
-    assert_eq!(v["absence"]["tier"], "FACT", "{v}");
+    assert_eq!(v["absence"]["tier"], "fact", "{v}");
 }
 
 #[test]

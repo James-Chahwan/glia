@@ -173,7 +173,7 @@ fn openapi_response_field_added_is_compatible_and_clean_tree_lists_nothing() {
         dump(&clean)
     );
     let a = clean.absence.as_ref().expect("an empty answer says why");
-    assert_eq!((a.tier, a.reason), ("FACT", "no_match"));
+    assert_eq!((a.tier, a.reason), ("fact", "no_match"));
 
     repo.write(
         "openapi.yaml",
@@ -580,7 +580,7 @@ fn no_contracts_absence() {
         .absence
         .as_ref()
         .expect("no contract on either side: an absence");
-    assert_eq!((a.tier, a.reason), ("FACT", "no_match"));
+    assert_eq!((a.tier, a.reason), ("fact", "no_match"));
     assert!(a.note.contains("no contract"), "{}", a.note);
 }
 

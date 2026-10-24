@@ -219,7 +219,7 @@ fn no_history_absence() {
     assert!(h.modules.is_empty() && h.symbols.is_empty());
     assert_eq!(h.history_head, None);
     let a = h.absence.expect("absence");
-    assert_eq!((a.tier, a.reason), ("FACT", "no_history"));
+    assert_eq!((a.tier, a.reason), ("fact", "no_history"));
     assert!(a.note.contains("glia history sync"), "{}", a.note);
 
     // History that leaves every row below min_churn is a different absence.

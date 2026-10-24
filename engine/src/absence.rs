@@ -8,7 +8,7 @@
 //! come back empty returns `Answer { results, absence }`, and `absence` is
 //! `Some` exactly when `results` is empty (`Answer::from_results` enforces
 //! it). The absence is a FACT about the graph as built — `tier` is always
-//! `"FACT"` — and carries the coverage caveat rows (`coverage_report`'s table)
+//! `"fact"` ([`Tier::Fact`]) — and carries the coverage caveat rows (`coverage_report`'s table)
 //! of the edge categories the answer depended on, so a consumer never reads "no edge"
 //! as "no code" without the row that says where the graph may be blind.
 //!
@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
 use glia_graph::MergedGraph;
@@ -47,7 +48,7 @@ pub(crate) const SUGGESTIONS: usize = 3;
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct Absence {
-    /// Always `"FACT"`: a statement about the graph as built, not about the code.
+    /// Always `"fact"` ([`Tier::Fact`]): a statement about the graph as built, not about the code.
     pub tier: &'static str,
     /// `unknown_symbol` | `no_edges` | `no_match` | `no_signal_match` |
     /// `unserved_channel`.
@@ -190,7 +191,7 @@ fn build(
     let seed_lang = seed_file.and_then(ext_to_language);
     let langs = seed_lang.as_ref().map(std::slice::from_ref);
     Absence {
-        tier: "FACT",
+        tier: Tier::Fact.as_str(),
         reason,
         query: query.to_string(),
         note,
@@ -323,7 +324,7 @@ mod tests {
         let a = none.absence.expect("empty answer carries an absence");
         assert_eq!(
             (a.tier, a.reason, a.nodes_searched),
-            ("FACT", "no_match", 0)
+            ("fact", "no_match", 0)
         );
         // A `.py` seed keeps `*` and python rows only: the universal CALLS row.
         assert_eq!(a.caveats.len(), 1, "{:?}", a.caveats);

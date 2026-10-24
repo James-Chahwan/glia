@@ -504,7 +504,7 @@ fn not_pattern_has_caveats() {
     );
     assert!(e.results.is_empty());
     let absence = e.absence.expect("no route in fx1");
-    assert_eq!((absence.reason, absence.tier), ("no_match", "FACT"));
+    assert_eq!((absence.reason, absence.tier), ("no_match", "fact"));
     assert_eq!(absence.note, "no row of result/1 in this graph");
     assert_eq!(absence.mechanisms, ["HANDLED_BY"]);
 

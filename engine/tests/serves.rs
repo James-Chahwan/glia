@@ -110,7 +110,7 @@ fn an_unserved_verb_suggests_the_route_under_another_verb() {
     let a = serves(&m, "DELETE /orders", "auto").expect("http is a mechanism");
     assert!(a.results.is_empty(), "{:?}", a.results);
     let ab = a.absence.expect("an empty answer carries its absence");
-    assert_eq!((ab.tier, ab.reason), ("FACT", "unserved_channel"));
+    assert_eq!((ab.tier, ab.reason), ("fact", "unserved_channel"));
     assert_eq!(ab.query, "DELETE /orders");
     assert_eq!(ab.mechanisms, ["HTTP_CALLS", "HANDLED_BY"]);
     assert!(ab.suggestions.contains(&post), "{:?}", ab.suggestions);

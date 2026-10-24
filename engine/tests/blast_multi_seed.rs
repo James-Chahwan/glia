@@ -248,7 +248,7 @@ fn every_query_unresolved_is_an_unknown_symbol_absence() {
     let a = r.absence.expect("an empty answer says why");
     assert_eq!(
         (a.reason, a.query.as_str(), a.tier),
-        ("unknown_symbol", "nope", "FACT")
+        ("unknown_symbol", "nope", "fact")
     );
 
     // A near miss is suggested.

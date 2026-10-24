@@ -177,11 +177,11 @@ fn orders_feature_joins_web_caller_api_handler_and_table() {
         [
             (
                 "data_entity:sql:orders",
-                "FACT",
+                "fact",
                 "ACCESSES_DATA",
                 "orders::ListOrders"
             ),
-            ("data_source:database_sql", "HEURISTIC", "DEFINES", "orders"),
+            ("data_source:database_sql", "heuristic", "DEFINES", "orders"),
         ]
     );
     assert_eq!(orders.data_sources[0].kind, "DATA_ENTITY");
@@ -511,7 +511,7 @@ fn writer_is_byte_stable_and_prunes_only_its_own_files() {
         "{yaml}"
     );
     assert!(
-        yaml.contains("\n  - {\"qname\":\"data_entity:sql:orders\",\"kind\":\"DATA_ENTITY\",\"via\":\"ACCESSES_DATA\",\"tier\":\"FACT\",\"from\":\"orders::ListOrders\"}\n"),
+        yaml.contains("\n  - {\"qname\":\"data_entity:sql:orders\",\"kind\":\"DATA_ENTITY\",\"via\":\"ACCESSES_DATA\",\"tier\":\"fact\",\"from\":\"orders::ListOrders\"}\n"),
         "{yaml}"
     );
     // Every record line is one JSON object.

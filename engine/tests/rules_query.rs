@@ -346,7 +346,7 @@ fn empty_is_an_absence() {
     assert!(a.results.is_empty());
     assert_eq!((a.outputs[0].total, a.outputs[0].shown), (0, 0));
     let absence = a.absence.expect("an empty answer is an absence");
-    assert_eq!((absence.reason, absence.tier), ("no_match", "FACT"));
+    assert_eq!((absence.reason, absence.tier), ("no_match", "fact"));
     assert_eq!(absence.note, "no row of x/1 in this graph");
     assert_eq!(absence.query, text);
     assert!(absence.mechanisms.is_empty(), "node/2 reads no edge");

@@ -69,7 +69,7 @@ def main() -> int:
         ab = miss["absence"]
         c.check("unserved verb: empty results", miss["results"] == [], miss["results"])
         c.check("unserved verb: unserved_channel FACT",
-                type(ab) is dict and (ab.get("tier"), ab.get("reason")) == ("FACT", "unserved_channel"), ab)
+                type(ab) is dict and (ab.get("tier"), ab.get("reason")) == ("fact", "unserved_channel"), ab)
         c.check("near miss names the POST route",
                 type(ab) is dict and any(s.split(" @")[0] == "POST /orders" for s in ab.get("suggestions", [])),
                 ab)

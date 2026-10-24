@@ -355,7 +355,7 @@ fn no_duplicates_is_an_absence() {
     let ans = run(&b, |a| a.scope = Some("tests".into()));
     assert!(ans.groups.is_empty(), "{:#?}", ans.groups);
     let absence = ans.absence.expect("an empty answer carries an absence");
-    assert_eq!((absence.tier, absence.reason), ("FACT", "no_match"));
+    assert_eq!((absence.tier, absence.reason), ("fact", "no_match"));
     assert!(absence.note.contains("0.8"), "{}", absence.note);
 }
 

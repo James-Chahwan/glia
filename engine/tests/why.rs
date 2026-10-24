@@ -101,7 +101,7 @@ fn call_edge_is_fact_with_site() {
     let other = why(&m, "shop::a::place", "shop::a::price", Some("IMPORTS"));
     assert!(!other.found && other.edges.is_empty(), "{other:?}");
     let ab = other.absence.as_ref().expect("absence when not found");
-    assert_eq!((ab.tier, ab.reason), ("FACT", "no_edges"), "{ab:?}");
+    assert_eq!((ab.tier, ab.reason), ("fact", "no_edges"), "{ab:?}");
     assert_eq!(ab.mechanisms, ["IMPORTS"], "{ab:?}");
 }
 
@@ -212,7 +212,7 @@ fn no_direct_edge_gives_path() {
         .collect();
     assert_eq!(lines, [Some(10), Some(6)], "{a:?}");
     let ab = a.absence.as_ref().expect("absence when not found");
-    assert_eq!((ab.tier, ab.reason), ("FACT", "no_edges"), "{ab:?}");
+    assert_eq!((ab.tier, ab.reason), ("fact", "no_edges"), "{ab:?}");
     assert!(
         ab.mechanisms.contains(&"CALLS"),
         "every carry category: {ab:?}"

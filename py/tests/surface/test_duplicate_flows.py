@@ -115,7 +115,7 @@ def main() -> int:
         none = g.duplicate_flows(scope="tests")
         c.check("no groups -> no_match absence",
                 none["groups"] == [] and (none.get("absence") or {}).get("reason") == "no_match"
-                and (none.get("absence") or {}).get("tier") == "FACT", none)
+                and (none.get("absence") or {}).get("tier") == "fact", none)
         for bad in (1.5, 0.0, -0.2, float("nan")):
             c.raises(f"threshold={bad}", ValueError, lambda bad=bad: g.duplicate_flows(threshold=bad),
                      "threshold must be in (0, 1]")

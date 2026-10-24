@@ -43,7 +43,7 @@ fn unknown_symbol_is_an_absence_with_suggestions_not_an_error() {
     let (_td, r) = build();
     let docs = governing_docs(&r.merged, "nope", None);
     let a = absence_of(&docs);
-    assert_eq!((a.tier, a.reason), ("FACT", "unknown_symbol"), "{a:?}");
+    assert_eq!((a.tier, a.reason), ("fact", "unknown_symbol"), "{a:?}");
     assert_eq!(a.mechanisms, ["DOCUMENTS"]);
     assert_eq!(a.query, "nope");
     assert!(a.note.contains("`nope`"), "{}", a.note);
@@ -67,7 +67,7 @@ fn a_known_symbol_with_no_doc_edge_is_no_edges_with_its_caveat() {
     let (_td, r) = build();
     let docs = governing_docs(&r.merged, "app::helper", None);
     let a = absence_of(&docs);
-    assert_eq!((a.tier, a.reason), ("FACT", "no_edges"), "{a:?}");
+    assert_eq!((a.tier, a.reason), ("fact", "no_edges"), "{a:?}");
     assert_eq!(a.mechanisms, ["DOCUMENTS"]);
     assert_eq!(
         a.note,
@@ -115,7 +115,7 @@ fn a_signal_that_resolves_to_nothing_is_no_signal_match() {
     let (_td, r) = build();
     let res = resolve_signal_located(&r.merged, "zzz.py", "diff", None, None);
     let a = absence_of(&res);
-    assert_eq!((a.tier, a.reason), ("FACT", "no_signal_match"), "{a:?}");
+    assert_eq!((a.tier, a.reason), ("fact", "no_signal_match"), "{a:?}");
     assert!(a.mechanisms.is_empty(), "resolution follows no edge");
     assert!(a.caveats.is_empty());
     assert_eq!(
@@ -142,7 +142,7 @@ fn find_with_no_candidate_is_no_match() {
     let (_td, r) = build();
     let found = find_nodes(&r.merged, "qqqq", &FindOptions::default());
     let a = absence_of(&found);
-    assert_eq!((a.tier, a.reason), ("FACT", "no_match"), "{a:?}");
+    assert_eq!((a.tier, a.reason), ("fact", "no_match"), "{a:?}");
     assert!(a.suggestions.is_empty(), "the subsequence tier already ran");
     assert!(a.mechanisms.is_empty() && a.caveats.is_empty());
     assert_eq!(
@@ -169,7 +169,7 @@ fn a_scope_that_empties_the_answer_is_no_match_naming_the_scope() {
     let (_td, r) = build();
     let res = resolve_signal_located(&r.merged, "app.py", "diff", None, Some("nowhere"));
     let a = absence_of(&res);
-    assert_eq!((a.tier, a.reason), ("FACT", "no_match"), "{a:?}");
+    assert_eq!((a.tier, a.reason), ("fact", "no_match"), "{a:?}");
     assert_eq!(a.note, "3 results outside scope `nowhere`");
 
     let mut opts = FindOptions::default();
@@ -207,7 +207,7 @@ fn the_absence_serialises_every_field() {
     ] {
         assert!(a.get(key).is_some(), "absence lacks `{key}`: {a}");
     }
-    assert_eq!(a["tier"], "FACT");
+    assert_eq!(a["tier"], "fact");
     let row = &a["caveats"][0];
     for key in ["language", "edge_category", "note", "verify", "edges_found"] {
         assert!(row.get(key).is_some(), "caveat lacks `{key}`: {row}");

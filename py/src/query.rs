@@ -205,7 +205,7 @@ mod tests {
             json,
             concat!(
                 r#"{"language":"datalog","outputs":[{"predicate":"x","arity":1,"columns":["a"],"total":0,"shown":0}],"#,
-                r#""results":[],"absence":{"tier":"FACT","reason":"no_match","query":"x(a) :- node(a, \"MODULE\").","#,
+                r#""results":[],"absence":{"tier":"fact","reason":"no_match","query":"x(a) :- node(a, \"MODULE\").","#,
                 r#""note":"no row of x/1 in this graph","mechanisms":[],"caveats":[],"suggestions":[],"#,
                 r#""nodes_searched":0,"unparsed_files":2}}"#
             )

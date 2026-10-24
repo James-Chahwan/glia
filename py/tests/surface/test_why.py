@@ -67,7 +67,7 @@ def main() -> int:
                     ("shop::a::place", "shop::a::price", "CALLS", 6)], miss["path"])
         ab = miss["absence"]
         c.check("no_edges FACT absence",
-                type(ab) is dict and (ab.get("tier"), ab.get("reason")) == ("FACT", "no_edges"), ab)
+                type(ab) is dict and (ab.get("tier"), ab.get("reason")) == ("fact", "no_edges"), ab)
         c.check("absence counts unparsed files",
                 type(ab) is dict and ab.get("unparsed_files") == len(g.parse_errors), ab)
 

@@ -244,7 +244,7 @@ fn no_snapshot_and_no_id_is_an_absence_naming_both() {
     let a = ask(&b, "rounding of the ledger");
     assert!(a.results.is_empty());
     let ab = a.absence.expect("absence");
-    assert_eq!((ab.tier, ab.reason), ("FACT", "no_match"));
+    assert_eq!((ab.tier, ab.reason), ("fact", "no_match"));
     assert!(
         ab.note
             .contains("no id in the query resolved to a defining row"),

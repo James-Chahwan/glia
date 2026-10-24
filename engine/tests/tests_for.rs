@@ -365,7 +365,7 @@ fn untested_seed_is_listed_and_absence_set() {
         .absence
         .as_ref()
         .expect("an empty answer carries its absence");
-    assert_eq!((absence.tier, absence.reason), ("FACT", "no_edges"));
+    assert_eq!((absence.tier, absence.reason), ("fact", "no_edges"));
     assert_eq!(absence.mechanisms, ["TESTS", "CALLS", "HTTP_CALLS"]);
     assert!(absence.note.contains(REFUND), "{}", absence.note);
 

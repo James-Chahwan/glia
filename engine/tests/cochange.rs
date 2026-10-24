@@ -243,7 +243,7 @@ fn no_history_absence() {
     assert!(r.rows.is_empty());
     assert!(r.unmapped.is_empty(), "admin.py is still a MODULE");
     let a = r.absence.expect("absence");
-    assert_eq!((a.tier, a.reason), ("FACT", "no_history"));
+    assert_eq!((a.tier, a.reason), ("fact", "no_history"));
     assert!(a.note.contains("glia history sync"), "{}", a.note);
     assert_eq!(a.mechanisms, ["CO_CHANGES"]);
 }

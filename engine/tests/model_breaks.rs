@@ -398,7 +398,7 @@ fn g_no_change_is_an_absence_that_counts_the_judged_exchanges() {
         (a.reason, a.tier, a.note.as_str()),
         (
             "no_match",
-            "FACT",
+            "fact",
             "7 client <-> server model exchanges judged vs HEAD, none changed what a client reads or sends"
         )
     );

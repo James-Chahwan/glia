@@ -118,7 +118,7 @@ def main() -> int:
         ab = none["absence"]
         c.check("a pure helper: no_edges FACT absence",
                 none["effects"] == [] and type(ab) is dict
-                and (ab.get("tier"), ab.get("reason")) == ("FACT", "no_edges"), none)
+                and (ab.get("tier"), ab.get("reason")) == ("fact", "no_edges"), none)
         c.check("absence counts unparsed files",
                 type(ab) is dict and ab.get("unparsed_files") == len(g.parse_errors), ab)
         miss = g.effects(["svc::orders::nope"])

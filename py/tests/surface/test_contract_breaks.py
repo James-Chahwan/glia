@@ -136,7 +136,7 @@ def main() -> int:
         clean = rg.contract_breaks_vs_rev(str(top), base="HEAD")
         c.check("a clean tree lists nothing and says why",
                 clean.get("schemas") == [] and clean.get("breaking") == 0
-                and (clean.get("absence") or {}).get("tier") == "FACT", clean)
+                and (clean.get("absence") or {}).get("tier") == "fact", clean)
 
         c.raises("bad avro mode raises", ValueError, lambda: rg.contract_breaks_vs_rev(str(top), avro="x"),
                  "unknown avro mode `x`")

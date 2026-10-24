@@ -181,7 +181,7 @@ fn empty_answers_carry_their_absence() {
     let out = glia(&repo.0, &["docs-for", d, "nope", "--json"]);
     let v = json(&out);
     assert_eq!(v["results"], serde_json::json!([]), "{v}");
-    assert_eq!(v["absence"]["tier"], "FACT", "{v}");
+    assert_eq!(v["absence"]["tier"], "fact", "{v}");
     assert_eq!(v["absence"]["reason"], "unknown_symbol", "{v}");
     assert_eq!(
         v["absence"]["mechanisms"],

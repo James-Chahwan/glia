@@ -273,7 +273,7 @@ fn unknown_query_has_find_absence() {
     assert!(p.text.is_empty(), "{}", p.text);
     let a = p.absence.expect("absence");
     assert_eq!(a.reason, "no_match");
-    assert_eq!(a.tier, "FACT");
+    assert_eq!(a.tier, "fact");
 }
 
 #[test]

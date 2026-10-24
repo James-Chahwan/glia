@@ -60,10 +60,10 @@
 //!   HTTP_CALLS the route, the method that CALLS the endpoint, the component
 //!   method that CALLS that. Same record, same order.
 //! - `data_sources` (per feature): the targets of ACCESSES_DATA edges leaving
-//!   a flow node (the entry or a step) — tier `FACT`, `via` `ACCESSES_DATA` —
+//!   a flow node (the entry or a step) — tier `fact`, `via` `ACCESSES_DATA` —
 //!   or leaving the MODULE that holds a flow node through DEFINES / CONTAINS
 //!   (climbing a class to its file), where the cross-cutting data extractor
-//!   anchors its edges today — tier `HEURISTIC` ("the file holding this step
+//!   anchors its edges today — tier `heuristic` ("the file holding this step
 //!   touches X"), `via` the structural edge the module holds it by. `from`
 //!   names the node the ACCESSES_DATA edge leaves. Deduped by qname keeping
 //!   the strongest tier (then the smaller `from`, `via`), sorted by qname.
@@ -115,6 +115,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_activation::profile::Tier;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{edge_category as ec, node_kind as nk};
 use glia_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
@@ -301,7 +302,8 @@ pub struct FlowSink {
     /// `ACCESSES_DATA` for a FACT; for a HEURISTIC, the structural edge
     /// (`DEFINES` / `CONTAINS`) the module holds the step by.
     pub via: &'static str,
-    /// `FACT` (a flow node's own edge) or `HEURISTIC` (its module's edge).
+    /// `fact` (a flow node's own edge) or `heuristic` (its module's edge),
+    /// [`Tier::as_str`].
     pub tier: &'static str,
     /// Qname of the node the ACCESSES_DATA edge leaves.
     pub from: String,
@@ -412,7 +414,10 @@ pub fn feature_flows(
         .map(|e| e.callers.len())
         .sum();
     let sinks: Vec<&FlowSink> = flows.iter().flat_map(|f| &f.data_sources).collect();
-    let fact = sinks.iter().filter(|s| s.tier == TIER_FACT).count();
+    let fact = sinks
+        .iter()
+        .filter(|s| s.tier == Tier::Fact.as_str())
+        .count();
     eprintln!(
         "[feature-flows] features={} entries={entries} steps={steps} callers={callers} sinks={} (fact={fact} heuristic={}) grouping={}",
         flows.len(),
@@ -422,9 +427,6 @@ pub fn feature_flows(
     );
     flows
 }
-
-const TIER_FACT: &str = "FACT";
-const TIER_HEURISTIC: &str = "HEURISTIC";
 
 /// A feature key for an entry of `kind` — see the module doc's "Feature
 /// keys". Pure: reads the qname and name only.
@@ -994,13 +996,13 @@ impl<'a> Ctx<'a> {
                 kind: at.kind,
                 via: held.map_or(ec::name(ec::ACCESSES_DATA), ec::name),
                 tier: if held.is_none() {
-                    TIER_FACT
+                    Tier::Fact.as_str()
                 } else {
-                    TIER_HEURISTIC
+                    Tier::Heuristic.as_str()
                 },
                 from: from_q,
             };
-            let order = |s: &FlowSink| (s.tier != TIER_FACT, s.from.clone(), s.via);
+            let order = |s: &FlowSink| (s.tier != Tier::Fact.as_str(), s.from.clone(), s.via);
             match best.get(&sink.qname) {
                 Some(have) if order(have) <= order(&sink) => {}
                 _ => {

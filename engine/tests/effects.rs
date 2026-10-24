@@ -430,7 +430,7 @@ fn no_effect_has_absence() {
     assert!(a.effects.is_empty(), "{a:#?}");
     assert_eq!(a.writes, 0);
     let absence = a.absence.expect("a pure helper has no effect");
-    assert_eq!((absence.tier, absence.reason), ("FACT", "no_edges"));
+    assert_eq!((absence.tier, absence.reason), ("fact", "no_edges"));
     assert_eq!(absence.mechanisms, ["ACCESSES_DATA", "USES", "CALLS"]);
     assert_eq!(
         absence.note,
