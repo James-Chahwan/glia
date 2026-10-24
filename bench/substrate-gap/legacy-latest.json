@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 423,
+  "fixtures": 424,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1061,6 +1061,11 @@
       "per_category": {
         "GRPC_CALLS": 1.0
       }
+    },
+    "guard-script-literals": {
+      "framework": "guard-script-literals",
+      "language": "ruby",
+      "per_category": {}
     },
     "history-cochange": {
       "framework": "history-cochange",
