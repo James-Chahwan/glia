@@ -1,0 +1,13 @@
+[package]
+name = "glia-build-domain"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "The build-target domain: registries and tables for build-target graphs (targets.gmap). Knows nothing of code; hashed into PARSER_STAMP because it shapes targets.gmap."
+
+[dependencies]
+glia-core = { path = "../core" }
+glia-activation = { path = "../activation" }
+glia-store = { path = "../store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

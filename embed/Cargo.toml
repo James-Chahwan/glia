@@ -1,0 +1,18 @@
+[package]
+name = "glia-embed"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Query-time text embeddings for glia (fastembed bge-small behind the `fastembed` feature, a deterministic test model without it). Never a build input and never hashed into PARSER_STAMP."
+
+[features]
+# The real model runtime (ONNX Runtime through ort). Off by default: the engine
+# turns it on only under its `sem-eval` feature, py under `embed`, the CLI by
+# its default `embed`. Never enable it from a [dev-dependencies] edge.
+fastembed = ["dep:fastembed"]
+
+[dependencies]
+# Exactly pinned: 4.9.1 pins ort / ort-sys =2.0.0-rc.9, Engram's measured
+# runtime. rustls for the model download, so no system OpenSSL enters a wheel.
+# Hashing for text_hash is inline FNV-1a (FB.1), so there is no other dependency.
+fastembed = { version = "=4.9.1", optional = true, default-features = false, features = ["ort-download-binaries", "hf-hub-rustls-tls"] }

@@ -299,6 +299,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia-build-domain"
+version = "0.5.3"
+dependencies = [
+ "glia-activation",
+ "glia-core",
+ "glia-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "glia-code-domain"
 version = "0.5.3"
 dependencies = [
@@ -342,17 +353,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia-embed"
+version = "0.5.3"
+
+[[package]]
 name = "glia-engine"
 version = "0.5.3"
 dependencies = [
  "bincode",
  "blake3",
  "glia-activation",
+ "glia-build-domain",
  "glia-code-domain",
  "glia-code-extractors",
  "glia-core",
+ "glia-embed",
  "glia-graph",
  "glia-parser-angular",
+ "glia-parser-bazel",
  "glia-parser-c-cpp",
  "glia-parser-clojure",
  "glia-parser-csharp",
@@ -421,6 +439,14 @@ dependencies = [
  "thiserror",
  "tree-sitter",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-bazel"
+version = "0.5.3"
+dependencies = [
+ "glia-build-domain",
+ "glia-core",
 ]
 
 [[package]]

@@ -69,6 +69,19 @@ blake3 = { version = "1", features = ["pure"] }
 # CE.3b: the format-preserving overlay writer. The same 0.22 line toml's parser
 # already locks (code-domain); `display` adds toml_write.
 toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
+# 0.5.4 dependencies, added together by F0.2 so Cargo.lock and PARSER_STAMP move
+# once; each owner packet only `use`s its crate.
+# FB.*: query-time embeddings. No features here: the model runtime enters the
+# engine only under `sem-eval` below, so the engine's tests never build ORT.
+glia-embed = { path = "../embed" }
+# FA.16 / FA.18: the build-target domain and its Bazel reader (targets.gmap).
+glia-build-domain = { path = "../build-domain" }
+glia-parser-bazel = { path = "../parsers/build/bazel" }
+
+[features]
+# The real embedding model, for the gate scripts (scripts/embedding-gate.sh and
+# the rank gate build rank_eval with `--features sem-eval`). Off by default.
+sem-eval = ["glia-embed/fastembed"]
 
 [dev-dependencies]
 tempfile = "3"

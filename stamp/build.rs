@@ -25,9 +25,11 @@ use std::path::{Component, Path, PathBuf};
 /// orchestration wrappers that cannot change stored bytes, and including `cli`
 /// would invalidate every user's parse cache on a CLI tweak. Deliberately NOT
 /// `projection-text`: a query-time projection over an already-built graph,
-/// not an input to it.
+/// not an input to it. The build-target domain crate is hashed since 0.5.4 (F0.2): it shapes
+/// `targets.gmap`. Deliberately NOT `embed`: embeddings are query-time and never
+/// a build input.
 const HASHED_ROOTS: &[&str] =
-    &["core", "code-domain", "graph", "engine", "store", "parsers", "activation"];
+    &["core", "code-domain", "graph", "engine", "store", "parsers", "activation", "build-domain"];
 
 /// Committed files outside any crate `src` that still change parse output.
 /// `Cargo.lock` is the only thing that captures a tree-sitter GRAMMAR bump —

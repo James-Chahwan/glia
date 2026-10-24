@@ -1,0 +1,10 @@
+[package]
+name = "glia-parser-bazel"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Reads `bazel query` output rows into build-target graph items. Never runs bazel: the snapshot step in glia-snapshots does."
+
+[dependencies]
+glia-core = { path = "../../../core" }
+glia-build-domain = { path = "../../../build-domain" }

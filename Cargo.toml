@@ -62,6 +62,12 @@ members = [
     # Test-only second domain (publish = false) proving the domain seam; no
     # crate may depend on it (its end_to_end test guards that).
     "toy-domain",
+    # 0.5.4 (F0.2): glia-embed, query-time embeddings; never a build input, so not in stamp's HASHED_ROOTS
+    "embed",
+    # 0.5.4 (F0.2): glia-build-domain, the build-target domain; shapes targets.gmap, so hashed
+    "build-domain",
+    # 0.5.4 (F0.2): glia-parser-bazel, `bazel query` rows; under the hashed `parsers` root
+    "parsers/build/bazel",
 ]
 
 # Single release version for the crates that must move in lockstep: the wheel

@@ -35,3 +35,10 @@ blake3 = { version = "1", features = ["pure"] }
 # CE.2e: the https store transport. Default features, as doc-sources; already
 # locked through glia-doc-sources.
 ureq = "2"
+# 0.5.4 (F0.2): `glia embed` (FB.*). The CLI embeds by default through its
+# `embed` feature; `--no-default-features` builds the lean binary without ORT.
+glia-embed = { path = "../embed" }
+
+[features]
+default = ["embed"]
+embed = ["glia-embed/fastembed"]

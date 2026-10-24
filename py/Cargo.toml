@@ -39,6 +39,14 @@ serde_json = "1"
 # same crate backs pyo3's `multiple-pymethods`, so it adds no new class of
 # dependency.
 inventory = "0.3"
+# 0.5.4 (F0.2): query-time embeddings (FB.5c). No features here, so the default
+# build, `cargo test -p glia-py` and the wheel never build ORT.
+glia-embed = { path = "../embed" }
+
+[features]
+# The real model runtime. OFF by default; whether the wheel turns it on (in
+# pyproject.toml's maturin features) is James's ruling, FB.5c.
+embed = ["glia-embed/fastembed"]
 
 [dev-dependencies]
 # `tests/api_surface.rs` (LG.6a) parses every `src/**/*.rs` and pins the
