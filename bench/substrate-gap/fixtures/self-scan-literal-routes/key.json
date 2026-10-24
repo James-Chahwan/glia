@@ -1,0 +1,37 @@
+{
+  "framework": "self-scan-literal-routes",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.4c. An axum `.route(` needle whose first byte sits in a Rust string literal or comment is no router; the real Router::new().route(..) is. Baseline (installed wave-0 wheel, HEAD 2a3667ec): expect 1/1 nodes, 1/1 edges, FORBID VIOLATIONS 2 (the test literal's garbage `GET /ghost\\\", get(chat))`, the comment's `GET /comment`). The ghost forbid is written as grade.py --dump spells it on HEAD; plain `GET /ghost` guards the clean spelling.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/items"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/items",
+      "to": "list",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /ghost\\\", get(chat))",
+      "note": "a test literal quoting Rust source; its escaped quote ended the path late"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /ghost"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /comment",
+      "note": "a `//` comment"
+    }
+  ]
+}

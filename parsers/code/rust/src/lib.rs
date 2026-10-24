@@ -54,14 +54,24 @@ pub fn parse_file(
     };
     visit_items(root, &file_scope, src, file_rel_path, repo, &mut acc);
 
-    scan_axum_routes(source, module_id, repo, &mut acc);
-    scan_at_path_chains(source, repo, &mut acc);
-    scan_salvo_routes(source, repo, &mut acc);
+    // FD.4c: the route scans below read raw text, so a needle that starts
+    // inside a string literal or comment (a test holding Rust source) is
+    // refused through the tree's own literal / comment spans.
+    let literals = LiteralRanges::of(root);
+    scan_axum_routes(source, &literals, module_id, repo, &mut acc);
+    scan_at_path_chains(source, &literals, repo, &mut acc);
+    scan_salvo_routes(source, &literals, repo, &mut acc);
 
     if acc.client_endpoints > 0 {
         eprintln!(
             "[rust-http-client] {} endpoints in {}",
             acc.client_endpoints, file_rel_path
+        );
+    }
+    if acc.literal_skipped > 0 {
+        eprintln!(
+            "[rust-routes] literal_skipped={} path={}",
+            acc.literal_skipped, file_rel_path
         );
     }
     if acc.window_snaps > 0 {
@@ -107,6 +117,9 @@ struct Acc {
     /// Verb-chain windows whose end fell inside a multibyte char and was
     /// snapped down to a char boundary (LA.25b `[rust-routes]` marker).
     window_snaps: usize,
+    /// Route-scan needles refused because their first byte sits in a string
+    /// literal or comment (FD.4c `[rust-routes] literal_skipped=` marker).
+    literal_skipped: usize,
     /// The file MODULE: the `from_module` of every enum-variant USES ref
     /// (LA.3). `None` only when a test drives `collect_calls_in` directly.
     file_module: Option<NodeId>,
@@ -891,7 +904,62 @@ fn visit_route_attr(
     }
 }
 
-fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+/// The byte spans of every string literal, raw string, char literal and
+/// comment in one file, sorted and disjoint (FD.4c). The text route scans
+/// ask [`LiteralRanges::contains`] for a needle's first byte, so text that
+/// only quotes Rust source (a test literal, a doc comment) is never a router.
+struct LiteralRanges {
+    spans: Vec<(usize, usize)>,
+}
+
+impl LiteralRanges {
+    const KINDS: [&'static str; 5] = [
+        "string_literal",
+        "raw_string_literal",
+        "char_literal",
+        "line_comment",
+        "block_comment",
+    ];
+
+    /// One iterative pre-order walk; a literal or comment node is recorded
+    /// whole and never descended into, so the spans come out sorted.
+    fn of(root: TsNode) -> Self {
+        let mut spans = Vec::new();
+        let mut cursor = root.walk();
+        loop {
+            let node = cursor.node();
+            let literal = Self::KINDS.contains(&node.kind());
+            if literal {
+                spans.push((node.start_byte(), node.end_byte()));
+            }
+            if !literal && cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return Self { spans };
+                }
+            }
+        }
+    }
+
+    /// Whether byte `pos` lies inside a recorded span (half-open).
+    fn contains(&self, pos: usize) -> bool {
+        let i = self.spans.partition_point(|&(start, _)| start <= pos);
+        i > 0 && pos < self.spans[i - 1].1
+    }
+}
+
+fn scan_axum_routes(
+    source: &str,
+    literals: &LiteralRanges,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     // Axum: Router::new().route("/path", get(handler).post(handler2))
     //                    .route("/users/:id", get(get_user))
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -900,6 +968,11 @@ fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
     let bytes = source.as_bytes();
     while let Some(rel) = source[search_from..].find(needle) {
         let start = search_from + rel + needle.len();
+        if literals.contains(search_from + rel) {
+            acc.literal_skipped += 1;
+            search_from = start;
+            continue;
+        }
         let Some(path_end) = source[start..].find('"') else {
             search_from = start;
             continue;
@@ -1066,15 +1139,21 @@ const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "
 /// into the next statement.
 const VERB_CHAIN_WINDOW: usize = 256;
 
-fn scan_at_path_chains(source: &str, repo: RepoId, acc: &mut Acc) {
-    scan_path_anchor_chain(source, ".at(", repo, acc);
+fn scan_at_path_chains(source: &str, literals: &LiteralRanges, repo: RepoId, acc: &mut Acc) {
+    scan_path_anchor_chain(source, literals, ".at(", repo, acc);
 }
 
-fn scan_salvo_routes(source: &str, repo: RepoId, acc: &mut Acc) {
-    scan_path_anchor_chain(source, "Router::with_path(", repo, acc);
+fn scan_salvo_routes(source: &str, literals: &LiteralRanges, repo: RepoId, acc: &mut Acc) {
+    scan_path_anchor_chain(source, literals, "Router::with_path(", repo, acc);
 }
 
-fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_path_anchor_chain(
+    source: &str,
+    literals: &LiteralRanges,
+    needle: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     // Suppress duplicate (method, path) entries within a single source pass so
     // that nested `.at(...)` calls in a builder chain don't double-emit.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1082,6 +1161,11 @@ fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Ac
     let bytes = source.as_bytes();
     while let Some(rel) = source[search_from..].find(needle) {
         let arg_start = search_from + rel + needle.len();
+        if literals.contains(search_from + rel) {
+            acc.literal_skipped += 1;
+            search_from = arg_start;
+            continue;
+        }
         // First arg must be a string literal beginning with `/` to qualify as a
         // URL path (rejects e.g. `slice.at(0)` or `Router::with_path(name)`).
         let Some(quote_off) = source[arg_start..].find('"') else {
@@ -3057,6 +3141,80 @@ fn app() -> Router {
             .collect()
     }
 
+    /// FD.4c — a `.route(` / `.at(` / `Router::with_path(` needle whose
+    /// first byte sits in a string literal, raw string, char literal or
+    /// comment is no router: only the real call mints a ROUTE.
+    #[test]
+    fn route_needles_in_literals_and_comments_mint_nothing() {
+        let source = r##"
+use axum::{Router, routing::get};
+
+async fn list() -> &'static str { "" }
+
+pub fn app() -> Router {
+    Router::new().route("/items", get(list))
+}
+
+#[cfg(test)]
+mod t {
+    const SRC: &str = "Router::new().route(\"/ghost\", get(chat))";
+    const RAW: &str = r#"Router::new().route("/raw", get(chat))"#;
+    const AT: &str = "app.at(\"/tide\").get(h)";
+    const SALVO: &str = "Router::with_path(\"/salvo\").get(h)";
+}
+// .route("/comment", get(list))
+/* .route("/block", get(list)) */
+"##;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let mut names = route_names(&fp);
+        names.sort_unstable();
+        assert_eq!(names, vec!["GET /items"]);
+        let items = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /items");
+        assert!(
+            fp.refs
+                .iter()
+                .any(|r| r.category == edge_category::HANDLED_BY
+                    && r.from == items
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "list"))
+        );
+    }
+
+    /// FD.4c — each literal / comment kind alone suppresses the route, and
+    /// the same text as code still mints it.
+    #[test]
+    fn route_needle_per_literal_kind() {
+        let code = r#"fn app() -> Router { Router::new().route("/x", get(h)) }"#;
+        assert_eq!(
+            route_names(&parse_file(code, "src/a.rs", "a", repo()).unwrap()),
+            vec!["GET /x"]
+        );
+        for source in [
+            r#"const S: &str = "Router::new().route(\"/x\", get(h))";"#,
+            r##"const S: &str = r#"Router::new().route("/x", get(h))"#;"##,
+            r#"/* Router::new().route("/x", get(h)) */ fn f() {}"#,
+            r#"// Router::new().route("/x", get(h))
+fn f() {}"#,
+            r#"/// Router::new().route("/x", get(h))
+fn f() {}"#,
+        ] {
+            let fp = parse_file(source, "src/a.rs", "a", repo()).unwrap();
+            assert!(route_names(&fp).is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn literal_ranges_contains_is_half_open() {
+        let r = LiteralRanges {
+            spans: vec![(2, 5), (9, 12)],
+        };
+        assert!(!r.contains(1));
+        assert!(r.contains(2));
+        assert!(r.contains(4));
+        assert!(!r.contains(5));
+        assert!(r.contains(11));
+        assert!(!r.contains(12));
+    }
+
     /// LB.5 — relative axum / actix path literals get the one canonical
     /// leading `/`, the HANDLED_BY ref hangs off that canonical node, and a
     /// relative + slashed registration of one path is one node.
@@ -3193,8 +3351,9 @@ fn run(items: &[&str]) {
             );
 
             let mut acc = Acc::default();
-            scan_at_path_chains(&source, repo(), &mut acc);
-            scan_salvo_routes(&source, repo(), &mut acc);
+            let none = LiteralRanges { spans: Vec::new() };
+            scan_at_path_chains(&source, &none, repo(), &mut acc);
+            scan_salvo_routes(&source, &none, repo(), &mut acc);
             assert_eq!(acc.window_snaps, 1, "{anchor}: one window snapped");
         }
     }
