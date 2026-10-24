@@ -1,14 +1,14 @@
-//! Name and type resolution against the [`Catalog`], safety / range restriction,
+//! Name and type resolution against the [`Catalog`](crate::ir::Catalog), safety / range restriction,
 //! arity, negation and aggregate checks through the strata (DA.5a), the
 //! unseeded-recursion and singleton warnings, the negation cones behind Q5's absence
 //! caveats, the one sideways-information-passing order the planner (DA.10) and the
 //! magic rewrite (DA.12) both read (`sips_order`), and the message table (DA.5b).
 //!
-//! [`analyse`] turns a string-named [`Program`] into an [`Analysis`]: every predicate
+//! [`analyse`](crate::analysis::analyse) turns a string-named [`Program`](crate::ir::Program) into an [`Analysis`](crate::analysis::Analysis): every predicate
 //! resolved to a `PredId`, every rule compiled to a `CRule` whose variables are
 //! `u16` slots and whose typed constants are checked against the domain's registries,
 //! and the IDB predicates stratified. Any error makes the result
-//! `RulesError::Invalid(errors)`, each an Error [`Diagnostic`] at the offending span
+//! `RulesError::Invalid(errors)`, each an Error [`Diagnostic`](crate::diag::Diagnostic) at the offending span
 //! naming the rule's head `name/arity`, in the order recorded (rule order, then the
 //! check order within a rule, then the stratification errors); warnings ride an `Ok`
 //! (`Analysis::warnings`: the singleton warnings in rule order, then the unseeded ones

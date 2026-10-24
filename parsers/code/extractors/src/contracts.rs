@@ -1452,7 +1452,7 @@ fn key_pos(hay: &str, quoted: &str) -> Option<usize> {
 /// Cheap content gate for a `.json`: is it an API contract, and which kind? No
 /// JSON parse. The format marker (`"openapi"` / `"swagger"` / `"asyncapi"`,
 /// or Pact's `"interactions"` + `"consumer"` + `"provider"`) must sit in the
-/// first or last [`JSON_SNIFF_BYTES`], so a miss costs at most 16 KiB of
+/// first or last `JSON_SNIFF_BYTES`, so a miss costs at most 16 KiB of
 /// scanning. Only a file that carries an OpenAPI/AsyncAPI marker is searched
 /// in full for its companion key (`"paths"` / `"channels"`), because a long
 /// `info.description` can push it out of the head.

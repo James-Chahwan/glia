@@ -14,19 +14,19 @@
 //! the layering — so the shared gate lives here, in the domain crate both
 //! already depend on.
 //!
-//! [`gate_dir`] never reads `.gitignore` itself: the caller supplies the
-//! verdict from an [`IgnoreStack`], so the matcher and the precedence rules stay
+//! [`gate_dir`](crate::walk_gating::gate_dir) never reads `.gitignore` itself: the caller supplies the
+//! verdict from an [`IgnoreStack`](crate::walk_gating::IgnoreStack), so the matcher and the precedence rules stay
 //! independent. Both consumers push/pop the same per-directory layers, so they
 //! agree on nested `.gitignore` files, negation, anchoring and globs too (A8.2).
 //!
 //! The user's `[walk] skip` patterns (`.glia/overlay.toml`, LF.3a) ride the same
-//! stack: both consumers build it through [`IgnoreStack::with_config`] (the
-//! store via [`IgnoreStack::for_repo`]), so a user skip gates the freshness scan
+//! stack: both consumers build it through [`IgnoreStack::with_config`](crate::walk_gating::IgnoreStack::with_config) (the
+//! store via [`IgnoreStack::for_repo`](crate::walk_gating::IgnoreStack::for_repo)), so a user skip gates the freshness scan
 //! exactly as it gates the walk. A skipped directory is a REGION with the
 //! `excluded` provenance; a skipped file is simply not read.
 //!
 //! The same `.git` reading also answers "which repository is this?" for the
-//! build: [`repo_identity`] turns a checkout into a path-independent key (its
+//! build: [`repo_identity`](crate::walk_gating::repo_identity) turns a checkout into a path-independent key (its
 //! normalised git remote, its git dir, or its directory name) that the engine
 //! hashes into the `RepoId`, so every NodeId survives a re-spelled path, a
 //! second clone, a linked worktree or a moved checkout (LB.1).

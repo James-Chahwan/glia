@@ -1,7 +1,7 @@
-//! The fact seam: [`FactSource`] (a [`GraphSource`] plus what a rule reads of a domain),
-//! the [`Builtin`] trait for named native predicates, [`catalog_of`], the lazy EDB
+//! The fact seam: [`FactSource`](crate::source::FactSource) (a [`GraphSource`](glia_activation::algo::GraphSource) plus what a rule reads of a domain),
+//! the [`Builtin`](crate::source::Builtin) trait for named native predicates, [`catalog_of`](crate::source::catalog_of), the lazy EDB
 //! loader the evaluator calls once per referenced predicate, the string builtins, and
-//! [`MemSource`], a plain-vector source for tests and domain prototypes.
+//! [`MemSource`](crate::source::MemSource), a plain-vector source for tests and domain prototypes.
 //!
 //! A domain gives the core predicates every domain has (`node`, `edge`, `edge_conf`,
 //! `cell`, `edge_cell`, `kind`, `category`, `carry_category`; `ir::Catalog::core`)
@@ -13,7 +13,7 @@
 //!
 //! Loading is lazy: `load_edb` reads one predicate, so a program that never names an
 //! attribute never asks for its column, and a program that names only `edge` never
-//! walks a cell. The evaluator narrows further with [`Restrict`]: the categories /
+//! walks a cell. The evaluator narrows further with `Restrict`: the categories /
 //! cell types every atom of a family names.
 //!
 //! Set semantics: edges have no id and two call sites of one callee are two edges

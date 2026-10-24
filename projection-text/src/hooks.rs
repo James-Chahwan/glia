@@ -1,14 +1,14 @@
-//! The synth passes as [`SynthHook`]s over a [`RepoGraph`] (LD.12b).
+//! The synth passes as [`SynthHook`](glia_activation::plan::SynthHook)s over a [`RepoGraph`] (LD.12b).
 //!
 //! Each hook wraps a pass that used to run only inside its own research bin,
 //! so one `activation::plan::ActivationPlan` can run several of them over one
 //! graph and one ranked view, each hook seeing the cells the earlier ones
 //! emitted:
 //!
-//! * [`AccessPathSynth`] (ungated): [`synth_paths`] + [`render_cells`], the
+//! * [`AccessPathSynth`](crate::hooks::AccessPathSynth) (ungated): [`synth_paths`](crate::composition::synth_paths) + [`render_cells`](crate::composition::render_cells), the
 //!   A+ access-path cells behind the `synth_composition` bin;
-//! * [`CallsiteArgflowSynth`] (`research`):
-//!   [`crate::synth_callsite_argflow::run`], the polymorphic call-site cells
+//! * `CallsiteArgflowSynth` (`research`):
+//!   `crate::synth_callsite_argflow::run`, the polymorphic call-site cells
 //!   behind the `synth_callsite_argflow` bin.
 //!
 //! A hook maps its pass's output 1:1, in the pass's order, so a bin that runs

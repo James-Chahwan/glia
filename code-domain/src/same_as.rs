@@ -9,28 +9,28 @@
 //! module decides nothing about stars, tiers or walks (the tiers are
 //! `profile::CODE_TABLES`' identity rules, DD.3).
 //!
-//! - **Rule names** ([`RULES`]): the EVIDENCE `rule` of a SAME_AS edge is a
+//! - **Rule names** ([`RULES`](crate::same_as::RULES)): the EVIDENCE `rule` of a SAME_AS edge is a
 //!   rule name, `/diverged` appended when the two members' contents differ
-//!   ([`evidence_rule`] / [`split_evidence_rule`]; the `confirms:` rule of the
+//!   ([`evidence_rule`](crate::same_as::evidence_rule) / [`split_evidence_rule`](crate::same_as::split_evidence_rule); the `confirms:` rule of the
 //!   SCIP stage qualifies with `/` the same way). DT.1h adds the models
-//!   resolver's [`MODEL_RULES`] (`http_model`, DT.1k's `graphql_model`);
-//!   [`ALL_RULES`] is both lists,
-//!   and [`is_identity_emitter`] names the two resolvers whose SAME_AS rule
+//!   resolver's [`MODEL_RULES`](crate::same_as::MODEL_RULES) (`http_model`, DT.1k's `graphql_model`);
+//!   [`ALL_RULES`](crate::same_as::ALL_RULES) is both lists,
+//!   and [`is_identity_emitter`](crate::same_as::is_identity_emitter) names the two resolvers whose SAME_AS rule
 //!   is a table row.
-//! - **Contract ops** ([`contract_op_key`]): an OpenAPI / AsyncAPI / swaggo /
+//! - **Contract ops** ([`contract_op_key`](crate::same_as::contract_op_key)): an OpenAPI / AsyncAPI / swaggo /
 //!   feature-yaml op DOC_SECTION is keyed from its ORIGIN, `METHOD path` for
 //!   an HTTP op and `[action ]channel` for a channel. `contract_breaks` (CC.8)
 //!   renders its row keys with the same function, so the two never disagree.
-//! - **Packages** ([`dep_identity_key`] / [`project_dep_key`]): a PACKAGE_DEP
+//! - **Packages** ([`dep_identity_key`](crate::same_as::dep_identity_key) / [`project_dep_key`](crate::same_as::project_dep_key)): a PACKAGE_DEP
 //!   `package:<eco>:<name>` and the PROJECT whose manifest names that package
 //!   reduce to one `<eco>:<name>` key under the ecosystem's own name rules -
 //!   PEP 503 for PyPI, `-` == `_` for crates.io, case-folding for Composer,
 //!   verbatim for npm and Go modules. Spike S1 measured every pair.
-//! - **SCIP** ([`scip_identity_key`]): a SCIP symbol is `scheme manager
+//! - **SCIP** ([`scip_identity_key`](crate::same_as::scip_identity_key)): a SCIP symbol is `scheme manager
 //!   package version descriptor...`; package + descriptor is the identity, the
 //!   version is not (two releases of one symbol are one identity whose bodies
 //!   may differ).
-//! - **Content** ([`code_digest`] / [`content_key`]): xxh64 (seed 0) of a CODE
+//! - **Content** ([`code_digest`](crate::same_as::code_digest) / [`content_key`](crate::same_as::content_key)): xxh64 (seed 0) of a CODE
 //!   cell's bytes, or of a MESSAGE_TYPE / DOC_SECTION's SCHEMA_FIELDS payload.
 //!   A CODE cell loaded as an unresolved span (CD.7c, `{"code_span":..}`)
 //!   carries the xxh64 of exactly those bytes, so the digest is one answer

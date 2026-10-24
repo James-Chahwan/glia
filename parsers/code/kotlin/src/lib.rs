@@ -3,17 +3,17 @@
 //! Extracts the declarations of one `.kt` file — its MODULE, every class /
 //! interface / enum / object (nested ones included), member and top-level
 //! functions, the properties worth a node, and its imports — plus the
-//! non-annotation routes ([`routes`]: Ktor DSL routes off the AST, each bound
+//! non-annotation routes (`routes`: Ktor DSL routes off the AST, each bound
 //! HANDLED_BY to its enclosing function, and the WebFlux / Javalin text scans
 //! ported from the Java parser) and the
-//! Spring / Micronaut / JAX-RS / JPA annotation needles ([`spring`]: routes
+//! Spring / Micronaut / JAX-RS / JPA annotation needles (`spring`: routes
 //! with HANDLED_BY, stereotype and `@Inject` constructor / property INJECTS,
 //! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA), and the
-//! call sites, supertypes and field types of [`calls`] (A14.3: every call in
+//! call sites, supertypes and field types of `calls` (A14.3: every call in
 //! a declared function's body, `: Base()` INHERITS_FROM / `: Iface`
 //! IMPLEMENTS refs, primary-constructor and typed properties as field types;
 //! CA.6a: parameter / `val` / `var` receiver types as local types),
-//! and the client ENDPOINTs and Android components of [`android`] (A14.6:
+//! and the client ENDPOINTs and Android components of `android` (A14.6:
 //! Retrofit interface methods and Spring RestTemplate / WebClient calls as
 //! ENDPOINT + CALLS, Android framework classes as a ROLE COMPONENT cell;
 //! CA.6b: Ktor-client verb calls in a file importing `io.ktor.client`).
@@ -198,7 +198,7 @@ fn parse_all(
 /// packets add their own lines HERE, so the engine's call site never moves.
 ///
 /// A14.4 adds the Spring line, from the detectors that ran in this process
-/// since the last repo's line (a cache-served file ran none — see [`spring`]):
+/// since the last repo's line (a cache-served file ran none — see `spring`):
 ///   `[kotlin/spring] stereotypes=S routes=R composed=C injects=J entities=E repos=P repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/spring\]'`.
 ///
@@ -207,31 +207,31 @@ fn parse_all(
 ///   `[kotlin] refs: calls=C self=S inherits=A implements=B field_types=F repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin\] refs:'` — `C` CallSites, `S` of
 /// them receiver-less member calls (`SelfMethod`), `A` / `B` INHERITS_FROM /
-/// IMPLEMENTS refs, `F` recorded property types (see [`calls`]).
+/// IMPLEMENTS refs, `F` recorded property types (see `calls`).
 ///
 /// CA.6a adds the local-types line right after it, off the same parses:
 ///   `[kotlin] local types: scopes=S typed=T unknown=U repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin\] local types:'` — `S` function
 /// bodies that bind a local, `T` locals with a receiver type (a typed
 /// parameter / `val`, a constructor `val`, a property alias), `U` locals of
-/// unknown type, which shadow a same-named property (see [`calls`]).
+/// unknown type, which shadow a same-named property (see `calls`).
 ///
 /// A14.5 adds the Ktor line, from the same kind of process-global bank:
 ///   `[kotlin/ktor] ast routes=R handled_by=H (text_scan_would_find=N) repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/ktor\]'` — `N` is the retired
-/// Ktor text scan's count over the same files (see [`routes`]).
+/// Ktor text scan's count over the same files (see `routes`).
 ///
 /// A14.6 adds the client line, from the same kind of process-global bank:
 ///   `[kotlin/retrofit] endpoints=E components=C spring_clients=K repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/retrofit\]'` — `E` Retrofit
 /// ENDPOINTs, `C` Android component classes, `K` Spring RestTemplate /
-/// WebClient ENDPOINTs (see [`android`]).
+/// WebClient ENDPOINTs (see `android`).
 ///
 /// CA.6b adds the Ktor-client line right after it, from the same bank read:
 ///   `[kotlin-ktor-client] endpoints=M repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '^\[kotlin-ktor-client\]'` — `M` Ktor-client
 /// ENDPOINT emissions (`client.get(url)`, `client.request(url) { method = .. }`
-/// in a file importing `io.ktor.client`, see [`calls`]).
+/// in a file importing `io.ktor.client`, see `calls`).
 pub fn trace(parses: &[FileParse], repo_label: &str) {
     let (mut types, mut fns, mut props, mut routes) = (0usize, 0usize, 0usize, 0usize);
     for fp in parses {
@@ -272,23 +272,23 @@ struct Acc {
     /// Declarations emitted so far: an overload reuses its first node.
     declared: HashSet<NodeId>,
     /// `METHOD path` keys of the ROUTEs emitted so far — the annotation
-    /// routes ([`spring`]) first, then the Ktor AST scan, then the text scans.
+    /// routes (`spring`) first, then the Ktor AST scan, then the text scans.
     routes_seen: HashSet<String>,
     /// Every declared FUNCTION / METHOD, keyed on its `function_declaration`'s
-    /// tree-sitter node id: the handler a Ktor route inside it binds ([`routes`]).
+    /// tree-sitter node id: the handler a Ktor route inside it binds (`routes`).
     fn_ids: HashMap<usize, NodeId>,
-    /// INJECTS refs ([`spring`]) and INHERITS_FROM / IMPLEMENTS refs
-    /// ([`calls`]); `resolve_refs` binds each `Bare(TypeName)`.
+    /// INJECTS refs (`spring`) and INHERITS_FROM / IMPLEMENTS refs
+    /// (`calls`); `resolve_refs` binds each `Bare(TypeName)`.
     refs: Vec<UnresolvedRef>,
-    /// The call sites of every declared function's body ([`calls`]).
+    /// The call sites of every declared function's body (`calls`).
     calls: Vec<CallSite>,
-    /// What the [`spring`] detectors did in this file.
+    /// What the `spring` detectors did in this file.
     spring: spring::SpringCounts,
-    /// What the Ktor pass ([`routes`]) did in this file.
+    /// What the Ktor pass (`routes`) did in this file.
     ktor: routes::KtorCounts,
-    /// Dedups client ENDPOINT nodes across the file ([`android`]).
+    /// Dedups client ENDPOINT nodes across the file (`android`).
     seen_endpoints: HashSet<NodeId>,
-    /// What the client / component detectors ([`android`]) did in this file.
+    /// What the client / component detectors (`android`) did in this file.
     clients: android::ClientCounts,
 }
 

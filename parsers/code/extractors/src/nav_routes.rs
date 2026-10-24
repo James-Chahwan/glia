@@ -15,10 +15,10 @@
 //! code), comments and regex literals, and records every object literal's
 //! TOP-LEVEL keys with their value spans. The pass is linear, so no per-record
 //! cap is needed to bound it (a cap would drop a large parent table and break
-//! composition); the per-value readers are clipped instead ([`MAX_VALUE`]).
+//! composition); the per-value readers are clipped instead (`MAX_VALUE`).
 //!
 //! An object with a literal `path` is a route RECORD only when it also has a
-//! router key ([`ROUTER_KEYS`]); otherwise it is counted `rejected` (Hapi
+//! router key (`ROUTER_KEYS`); otherwise it is counted `rejected` (Hapi
 //! `{ method, path, handler }`, mongoose `{ path, select }`, cookie options,
 //! form configs). A React `{ index: true, element }` record takes its parent's
 //! path. A record's parent is the smallest enclosing record whose `children`

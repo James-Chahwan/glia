@@ -2,7 +2,7 @@
 //! levelled semi-naive evaluation per stratum over exec (DA.14a), aggregate strata, the
 //! row budget, absence caveats and rows sorted by rendered values (DA.14b).
 //!
-//! **Order of work.** [`evaluate`] analyses the program against the source's catalog
+//! **Order of work.** [`evaluate`](crate::eval::evaluate) analyses the program against the source's catalog
 //! (its declaration conflicts become warnings), resolves the outputs, and, with
 //! `Options::magic`, applies the demand rewrite (DA.12, which prints its own `[rules]
 //! magic` lines) and re-analyses it, keeping the original program when that fails. It
@@ -58,7 +58,7 @@
 //! values=<h> warnings=<w> ms=<t>`, then one `[rules] closure cats=<..> mode=<..>
 //! bfs=<n> rows=<r>` per category set a closure builtin walked.
 //!
-//! **Answers.** [`Evaluation::rows`] answers the outputs only: magic keeps the answers
+//! **Answers.** [`Evaluation::rows`](crate::eval::Evaluation::rows) answers the outputs only: magic keeps the answers
 //! of the predicates that read a rewritten one, never the rewritten predicate's full
 //! extension, and outputs are never rewritten. Rows sort by rendered values column by
 //! column (type rank, then the value, a node by `render_node`), never by handle or id.

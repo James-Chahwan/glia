@@ -550,7 +550,7 @@ struct Folded {
 /// DF.20: a span `<path>.replace('<a>', '<b>')` resolves `<path>` by the same
 /// rule, then replaces the first `<a>` by `<b>`. A span bound to a config
 /// expression (`ADMIN_BASE` -> `${environment.apiUrl.replace('/api',
-/// '')}/admin`) is folded in turn, at most [`MAX_FOLD_DEPTH`] levels deep,
+/// '')}/admin`) is folded in turn, at most `MAX_FOLD_DEPTH` levels deep,
 /// each value's own first span leading; it resolves only when every span of
 /// it does, and a key already being folded (a cycle) never does.
 pub fn fold_interpolations(raw: &str, table: &ConstTable) -> Option<String> {

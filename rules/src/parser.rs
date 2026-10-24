@@ -1,7 +1,7 @@
 //! The Datalog surface parser: rule text into the IR (`ir::Program`), with a span on
 //! every node and diagnostics that name the line, column and predicate.
 //!
-//! [`parse_program`] lexes the text with the shared lexer (`lexer::lex`; a lexical
+//! [`parse_program`](crate::parser::parse_program) lexes the text with the shared lexer (`lexer::lex`; a lexical
 //! error comes back as its `RulesError::Parse`, unchanged) and reads the tokens by
 //! recursive descent over this grammar:
 //!

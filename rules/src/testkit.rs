@@ -1,32 +1,32 @@
-//! Deterministic [`MemSource`] graph builders for the crate's tests, benchmarks and
+//! Deterministic [`MemSource`](crate::source::MemSource) graph builders for the crate's tests, benchmarks and
 //! gates, and for engine-side tests that want the same graphs. A test and benchmark
-//! kit, not a domain: [`tables`] registers four kinds and six categories with
+//! kit, not a domain: [`tables`](crate::testkit::tables) registers four kinds and six categories with
 //! test-local ids that mean nothing outside this module, and no shipped answer reads
 //! it. It is public API only so every test target (and DB's engine tests) can share
 //! it; it promises nothing beyond 0.5.2's exact pin.
 //!
 //! Every builder numbers its nodes `0..n`: node `i` is
-//! `NodeId::from_parts("rules-test", RepoId(salt), kind, "n<i>")` ([`node_id`]), of
+//! `NodeId::from_parts("rules-test", RepoId(salt), kind, "n<i>")` ([`node_id`](crate::testkit::node_id)), of
 //! kind `KINDS[i % 4]`, rendered `n<i:05>` (`n00042`), with the Int attribute
-//! `index` = `i` (attribute 0, [`INDEX`]), so a rule seeds by `index(x, 0)` and rows
-//! sort by node number. Randomness is one [`Lcg`] stream per builder, never the
+//! `index` = `i` (attribute 0, [`INDEX`](crate::testkit::INDEX)), so a rule seeds by `index(x, 0)` and rows
+//! sort by node number. Randomness is one [`Lcg`](crate::testkit::Lcg) stream per builder, never the
 //! clock or an address, so a graph is the same on every run and every machine.
 //!
-//! - [`lcg_graph`]: `nodes` nodes and `edges` random edges over the named categories
-//!   at a FACT / DERIVED / HEURISTIC mix ([`GraphSpec`]).
-//! - [`chain`]: `0 -> 1 -> .. -> n-1`, hop `i` at `tiers[i % len]`.
-//! - [`clique_ring`]: a ring plus random chords, so one strongly connected component
+//! - [`lcg_graph`](crate::testkit::lcg_graph): `nodes` nodes and `edges` random edges over the named categories
+//!   at a FACT / DERIVED / HEURISTIC mix ([`GraphSpec`](crate::testkit::GraphSpec)).
+//! - [`chain`](crate::testkit::chain): `0 -> 1 -> .. -> n-1`, hop `i` at `tiers[i % len]`.
+//! - [`clique_ring`](crate::testkit::clique_ring): a ring plus random chords, so one strongly connected component
 //!   and an unseeded transitive closure of exactly `n^2` rows.
-//! - [`resalted`]: the same rendered graph under new NodeIds with node and edge order
+//! - [`resalted`](crate::testkit::resalted): the same rendered graph under new NodeIds with node and edge order
 //!   reversed: a checkout at another path (code NodeIds hash a path-derived RepoId,
 //!   and edge order follows the ids), for the determinism gate.
-//! - [`scaled`]: the R1 spike's `x k` scaler, restated exactly (k copies plus
-//!   `edges * k / 100` random cross CALLS edges, [`scaled_size`]), so cost numbers
+//! - [`scaled`](crate::testkit::scaled): the R1 spike's `x k` scaler, restated exactly (k copies plus
+//!   `edges * k / 100` random cross CALLS edges, [`scaled_size`](crate::testkit::scaled_size)), so cost numbers
 //!   compare with R1 section 1.4.
 //!
 //! A builder's tier also sets the edge's confidence (FACT strong, DERIVED medium,
 //! HEURISTIC weak), so `edge_conf/4` rows follow the tier. A category name that is no
-//! [`CATEGORIES`] row is `EdgeCategoryId(0)`, which no registry names (it renders
+//! [`CATEGORIES`](crate::testkit::CATEGORIES) row is `EdgeCategoryId(0)`, which no registry names (it renders
 //! `#0`).
 
 use glia_activation::algo::GraphSource;

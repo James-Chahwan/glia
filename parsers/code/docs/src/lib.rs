@@ -240,7 +240,7 @@ impl DocTag {
 /// of the line starts its text. Any other line — including one starting with
 /// an `@` that is not a valid tag — continues the open tag's text, or opens
 /// `default_tag` when no tag is open yet (NatSpec: untagged text is `@notice`).
-/// An `@` anywhere but the start of a line is text. For [`NAMED_TAGS`] the first
+/// An `@` anywhere but the start of a line is text. For `NAMED_TAGS` the first
 /// word of the collected text becomes [`DocTag::name`]. Tags keep source order.
 pub fn split_doc_tags(lines: &[String], default_tag: &str) -> Vec<DocTag> {
     let mut open: Vec<(String, String)> = Vec::new();

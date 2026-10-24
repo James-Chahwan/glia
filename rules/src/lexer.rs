@@ -1,6 +1,6 @@
 //! The one tokenizer for the Datalog surface and the GQL read subset (R1 §5: one
-//! shared lexer for both surfaces, hand-rolled for span control). [`lex`] turns a
-//! rule or query text into [`Token`]s ending with [`TokenKind::Eof`]; the Datalog
+//! shared lexer for both surfaces, hand-rolled for span control). [`lex`](crate::lexer::lex) turns a
+//! rule or query text into [`Token`](crate::lexer::Token)s ending with [`TokenKind::Eof`](crate::lexer::TokenKind::Eof); the Datalog
 //! parser (`parser`) and the GQL parser (`gql`) both read that stream.
 //!
 //! **Tokens.** Identifiers are `[A-Za-z_][A-Za-z0-9_]*`. Keywords are identifiers:
@@ -30,7 +30,7 @@
 //! input reports the same lines and columns as LF. A leading byte-order mark is
 //! skipped without counting a column.
 //!
-//! **Errors.** Every lexical error is collected, up to 20, before [`lex`] returns
+//! **Errors.** Every lexical error is collected, up to 20, before [`lex`](crate::lexer::lex) returns
 //! `RulesError::Parse`, so one bad character does not hide the next: `unexpected
 //! character `@``, `unterminated string`, `unknown escape `\q` in string`,
 //! `unterminated block comment` and `integer out of range`. A string error is

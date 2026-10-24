@@ -1,5 +1,5 @@
 //! The string-named rule IR (Program / Rule / Atom / Term / Aggregate / Comparison)
-//! and the [`Catalog`] of the predicates and builtins a program may read.
+//! and the [`Catalog`](crate::ir::Catalog) of the predicates and builtins a program may read.
 //!
 //! The IR is the contract two front ends build: the Datalog parser
 //! (`parser::parse_program`) and the GQL read subset's lowering (`gql`). Every name
@@ -21,7 +21,7 @@
 //! double-quoted with `\\`, `\"`, `\n` and `\t` escaped. Variable names render as
 //! given, so the round trip holds for names that are identifiers.
 //!
-//! The [`Catalog`] is the analysis-time declaration set, built without a graph so a
+//! The [`Catalog`](crate::ir::Catalog) is the analysis-time declaration set, built without a graph so a
 //! rule can be checked at load: the core EDB predicates every domain gets, the
 //! domain's attributes (`name(Node, ty)`) and the builtins (the core `reaches` /
 //! `scc` / string tests, plus the domain's own).

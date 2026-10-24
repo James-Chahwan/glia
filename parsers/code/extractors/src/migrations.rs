@@ -134,7 +134,7 @@ impl SqlMigration {
 /// mode: every statement is SQL, so the table scan reads the file itself, not
 /// only string literals as a code file's scan does (LG.3b), one `;` statement
 /// at a time so a CTE name is dropped from its own statement
-/// ([`sql_file_tables`]). Only the SQL scanners run: a Postgres cast
+/// (`sql_file_tables`). Only the SQL scanners run: a Postgres cast
 /// (`'a'::text`) is not a Cypher label. Two precision steps a code file does
 /// not need, both measured on real migration dirs: comments and string values
 /// are blanked first (`-- copied from the old schema`, a seed row's

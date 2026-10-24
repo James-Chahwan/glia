@@ -1,7 +1,7 @@
 //! Externally supplied node cells: the `.glia/cells.jsonl` and
 //! `.glia/vectors.jsonl` sidecars, their row shapes, the entry rules every
 //! writer shares (LF.1a), and the typed reader of CONSTRAINT entries (LF.4a:
-//! [`ConstraintRule`], [`parse_constraints`]).
+//! [`ConstraintRule`](crate::external_inputs::ConstraintRule), [`parse_constraints`](crate::external_inputs::parse_constraints)).
 //!
 //! LAYOUT. `.glia/` is glia's control dir: the walk never enters it (LF.1d)
 //! and readers open their files directly.
@@ -29,13 +29,13 @@
 //!
 //! PAYLOADS. A CONSTRAINT, DECISION or CONV cell is a JSON array of entry
 //! objects, one per `(source, id)`, sorted by `(source, id)`, serialized
-//! compactly with sorted keys ([`merge_entry`]). A VECTOR cell is
+//! compactly with sorted keys ([`merge_entry`](crate::external_inputs::merge_entry)). A VECTOR cell is
 //! `CellPayload::Bytes`. The one resolver and apply function live in the graph
 //! crate (`glia_graph::cells`), so the build, a live in-memory write and
 //! a persisted write-through bind a row to the same node.
 //!
 //! CONSTRAINT ENTRIES (the rule schema `glia check`, LE.8, reads through
-//! [`parse_constraints`] and nowhere else). The overlay's `[[constraint]]`
+//! [`parse_constraints`](crate::external_inputs::parse_constraints) and nowhere else). The overlay's `[[constraint]]`
 //! stanzas (LF.4a) are stored as
 //! `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"transitive"?,"via"?,"via_raw"?,"rule"?,"min_tier"?,"origin":"human|llm","decl":".glia/overlay.toml:<line>"}`:
 //! `from` / `to` / `scope` / `via` hold the scope RESOLVED to a repo-relative
@@ -48,9 +48,9 @@
 //! so a version-1 stanza's entry is what 0.5.1 stored: `transitive` (`true`)
 //! and `via` on a forbid_edge, `rule` (Datalog text) on an invariant,
 //! `min_tier` (`fact | derived`, `glia_config::MIN_TIERS`). A `rule` is
-//! declared only in `.glia/overlay.toml` (0.5.2 Q9): [`validate_entry`], the
+//! declared only in `.glia/overlay.toml` (0.5.2 Q9): [`validate_entry`](crate::external_inputs::validate_entry), the
 //! cell API's check, refuses the key whatever `source` says, and only the
-//! overlay stage checks its entries through [`validate_declared_entry`].
+//! overlay stage checks its entries through [`validate_declared_entry`](crate::external_inputs::validate_declared_entry).
 //!
 //! THE REFLEXION MODEL (CC.5a) is stored the same way, so a loaded `.gmap` can
 //! be checked without the overlay file:

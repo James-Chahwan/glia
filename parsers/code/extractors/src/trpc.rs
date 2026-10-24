@@ -32,11 +32,11 @@
 //! function USES an `RPC_CALL`. A procedure anchors at its own key — a router
 //! mounted in the same file anchors at its declaration, not at the mount — and
 //! the key offset survives comment stripping and inline-router nesting
-//! ([`Scan::text_mapped`]). Every call site is an anchor (the gRPC-client
+//! (`Scan::text_mapped`). Every call site is an anchor (the gRPC-client
 //! density rule), so each calling function gets its own USES edge.
 //!
-//! Client side: a receiver root in [`CLIENT_ROOTS`] followed by 1-3 dotted
-//! identifier segments and a hook in [`CLIENT_HOOKS`] is an `RPC_CALL` node,
+//! Client side: a receiver root in `CLIENT_ROOTS` followed by 1-3 dotted
+//! identifier segments and a hook in `CLIENT_HOOKS` is an `RPC_CALL` node,
 //! qname `rpc_call:<path>`, Confidence::Medium (the root is a convention, not a
 //! proof). Cache operations (`.invalidate(`, `.setData(`) are not hooks and so
 //! never match. The same recogniser backs [`is_trpc_client_line`], which the
@@ -48,7 +48,7 @@
 //! or a `createCallerFactory(..)` product called with a context (v11) — invokes
 //! a procedure directly, with no hook: `await caller.post.all()` is an
 //! `RPC_CALL` `rpc_call:post.all`, every dotted segment part of the path (see
-//! [`caller_roots`]). The binding is a `const` / `let` / `var` declaration
+//! `caller_roots`). The binding is a `const` / `let` / `var` declaration
 //! (with or without a `: Type`) or a bare assignment (`caller = ..` in a
 //! `beforeEach`), optionally `await`ed. A caller passed in as a parameter or
 //! imported from another module is not read: the extractor sees one file.
@@ -200,7 +200,7 @@ const TRPC_LINKS: &[&str] = &[
 
 /// CB.24: the literal authority (`host[:port]`) of every tRPC client base URL
 /// `source` builds, with the 0-based row of its literal, in source order: the
-/// `url:` of a [`TRPC_LINKS`] call's options object, when it is ONE string
+/// `url:` of a `TRPC_LINKS` call's options object, when it is ONE string
 /// literal (a template without `${`) with a literal `scheme://authority`. A
 /// relative `/api/trpc` (a same-origin Next.js app) or a computed
 /// `getBaseUrl() + ..` names no service and yields nothing. The object scan is

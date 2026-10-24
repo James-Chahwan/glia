@@ -2,25 +2,25 @@
 //!
 //! A CODE cell holds an entity's source text, and almost every one is a
 //! verbatim slice of the file its POSITION cell names, starting on the
-//! POSITION start line. The store writes such a cell as a [`CodeSpan`] - the
+//! POSITION start line. The store writes such a cell as a [`CodeSpan`](crate::code_span::CodeSpan) - the
 //! repo-relative file, the byte range and the xxh64 of the slice - instead of
 //! a second copy of the text, and a reader with the repo at hand reads the
 //! slice back out of the file. This module is the span and its two forms:
 //!
-//! - **On disk** ([`CodeSpan::encode`] / [`CodeSpan::decode`]): a `Bytes`
+//! - **On disk** ([`CodeSpan::encode`](crate::code_span::CodeSpan::encode) / [`CodeSpan::decode`](crate::code_span::CodeSpan::decode)): a `Bytes`
 //!   payload `[0x02, varint(file_ix), varint(start), varint(len), xxh64 as 8 LE
 //!   bytes]` (unsigned LEB128 varints). `file_ix` indexes the file's `"strings"`
 //!   section, the table interned EVIDENCE (tag `0x01`) already uses, so the
 //!   store owns the table and hands the codec an index / a lookup.
-//! - **In memory, when the text cannot be read back** ([`CodeSpan::to_json`] /
-//!   [`CodeSpan::from_payload`]): a `Json` payload
+//! - **In memory, when the text cannot be read back** ([`CodeSpan::to_json`](crate::code_span::CodeSpan::to_json) /
+//!   [`CodeSpan::from_payload`](crate::code_span::CodeSpan::from_payload)): a `Json` payload
 //!   `{"code_span":{"file":"src/a.rs","start":120,"end":480,"xxh64":"<16 hex>"}}`
 //!   that a consumer can fetch itself: read `file` under the repo root and
-//!   [`CodeSpan::slice`] it. The store hands this out when the source moved,
+//!   [`CodeSpan::slice`](crate::code_span::CodeSpan::slice) it. The store hands this out when the source moved,
 //!   changed or is absent, and from a decode given no source at all.
 //!
 //! Offsets are BYTE offsets, `end` exclusive; a slice is text only when its
-//! bytes hash to `xxh64` and are valid UTF-8 ([`CodeSpan::slice`]). The hash is
+//! bytes hash to `xxh64` and are valid UTF-8 ([`CodeSpan::slice`](crate::code_span::CodeSpan::slice)). The hash is
 //! xxhash64 seed 0, the store's shard and fingerprint hash.
 
 use glia_core::CellPayload;

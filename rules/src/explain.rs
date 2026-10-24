@@ -1,5 +1,5 @@
 //! Evaluation::explain (DA.15): a row's minimal-height derivation at its tier, as a
-//! [`Witness`] tree, after Souffle's provenance (Zhao, Subotic, Scholz, TOPLAS 2020).
+//! [`Witness`](crate::explain::Witness) tree, after Souffle's provenance (Zhao, Subotic, Scholz, TOPLAS 2020).
 //! Every derived row records the (rule, height) of its lowest-height derivation at its
 //! level (eval.rs, "Minimal heights"). A proof is found by searching over those records. Nothing is evaluated
 //! again.
@@ -10,7 +10,7 @@
 //! }`. The levelled evaluation inserts a row once, at the first derivation of its
 //! level, and never updates it, so the recorded derivation is always among them. The
 //! body runs from one of three plans:
-//! - [`plan_bound`] with the head's variables bound (no hoist: every literal is
+//! - `plan_bound` with the head's variables bound (no hoist: every literal is
 //!   instantiated). Its index permutations are built with `Relation::ensure_index` the
 //!   first time they are needed and kept for later explains.
 //! - When the evaluation plan hoisted a `reaches` into a ReachMulti, the evaluation's own
@@ -19,7 +19,7 @@
 //!   multi-source path (`Closure::path`) at the reached row's tier, from the kept seeds
 //!   of level <= that tier. The seed prefix is then instantiated with the path's first
 //!   node bound (its last node for a backward walk).
-//! - For an aggregate row, [`plan_aggregate`] (the same plan evaluation ran; when the
+//! - For an aggregate row, `plan_aggregate` (the same plan evaluation ran; when the
 //!   two differ the ReachMulti states are filled afresh). The body runs once and is
 //!   filtered to the row's group key. The row's support is one Witness per DISTINCT
 //!   projected binding (the group columns, then the aggregated variables: DA.8's set
@@ -30,20 +30,20 @@
 //! body order, compared as rows sort (`ValueTable::cmp_rendered`). The order never
 //! reads a handle or edge order, so the witness survives a checkout that re-salts
 //! NodeIds and reverses the edge list. Every instantiation counts against
-//! [`ExplainLimits::max_candidates`] for the tuple being searched. Passing the cap is
+//! [`ExplainLimits::max_candidates`](crate::explain::ExplainLimits::max_candidates) for the tuple being searched. Passing the cap is
 //! `RulesError::Budget` for that tuple's predicate, never a silent partial choice.
 //! The chosen derivation of a tuple is memoised, so a tuple that recurs in one proof
 //! is searched once.
 //!
 //! **Leaves.** An edge-family row (`edge`, `edge_conf`, `edge_cell`) becomes
-//! [`Leaf::Edge`] with its stored witness ordinal: the GLOBAL position in
+//! [`Leaf::Edge`](crate::explain::Leaf::Edge) with its stored witness ordinal: the GLOBAL position in
 //! `FactSource::edges()` of the first edge with that key at its level (DA.6). DB maps
 //! it back to its `&Edge` and reads EVIDENCE there; this crate never parses evidence.
-//! `node`, an attribute, `cell` and the registry predicates become [`Leaf::Node`] /
-//! [`Leaf::Attr`] / [`Leaf::Cell`] / [`Leaf::Registry`]. A domain or string builtin call
-//! becomes [`Leaf::Builtin`]. A `reaches` row becomes [`Leaf::Path`]: a shortest path at
+//! `node`, an attribute, `cell` and the registry predicates become [`Leaf::Node`](crate::explain::Leaf::Node) /
+//! [`Leaf::Attr`](crate::explain::Leaf::Attr) / [`Leaf::Cell`](crate::explain::Leaf::Cell) / [`Leaf::Registry`](crate::explain::Leaf::Registry). A domain or string builtin call
+//! becomes [`Leaf::Builtin`](crate::explain::Leaf::Builtin). A `reaches` row becomes [`Leaf::Path`](crate::explain::Leaf::Path): a shortest path at
 //! the row's tier from its source, parents ranked by rendered key (DA.11). An `scc` row
-//! becomes [`Leaf::Path`] of `Closure::cycle`, a shortest cycle that starts and ends at
+//! becomes [`Leaf::Path`](crate::explain::Leaf::Path) of `Closure::cycle`, a shortest cycle that starts and ends at
 //! the representative and passes the member. A negated literal is a child Witness with
 //! `negated = true`, no support and no tier of its own (Q5: negation adds none). Its
 //! values are the literal's arguments, and a wildcard is `Str("_")`. Comparisons and
@@ -55,12 +55,12 @@
 //! predicate, and the leaf edges are the unrewritten program's.
 //!
 //! **The leaf cap.** Children are taken depth-first, left to right. Once
-//! [`ExplainLimits::max_leaves`] leaves are kept, every child still waiting is dropped
+//! [`ExplainLimits::max_leaves`](crate::explain::ExplainLimits::max_leaves) leaves are kept, every child still waiting is dropped
 //! and `truncated` is set on the node that lost it. DB reports the count beyond the
 //! cap as check does with `MAX_EVIDENCE`. Each leaf counts once, a path included.
 //!
-//! **No recursion over the proof.** The search, the tree build, [`Witness`]'s Clone,
-//! PartialEq, Debug and Drop, and [`Witness::leaf_edges`] all run on explicit stacks,
+//! **No recursion over the proof.** The search, the tree build, [`Witness`](crate::explain::Witness)'s Clone,
+//! PartialEq, Debug and Drop, and [`Witness::leaf_edges`](crate::explain::Witness::leaf_edges) all run on explicit stacks,
 //! so a 20,000-hop derivation explains on a 2 MiB thread. Only nested hoists recurse,
 //! once per nesting level, which the rule's length bounds.
 //!

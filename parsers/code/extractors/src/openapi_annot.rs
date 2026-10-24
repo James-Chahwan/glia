@@ -7,7 +7,7 @@
 //! `@ApiResponse`, `@ApiOkResponse`, ...) declare an API operation in code, on
 //! the handler that implements it. Each such block becomes the A10.1 contract
 //! op — DOC_SECTION + CODE / POSITION / ORIGIN{provenance:contract}, built by
-//! [`push_op`] — so the engine's `link_contract_routes` pairs it with its ROUTE
+//! `push_op` — so the engine's `link_contract_routes` pairs it with its ROUTE
 //! unchanged and `glia docs-for` answers with it.
 //!
 //! Method + path are never guessed. Java / C# read them off the ROUTE the

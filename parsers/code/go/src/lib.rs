@@ -2821,7 +2821,7 @@ fn go_signature(params: TsNode, result: Option<TsNode>, src: &[u8]) -> Option<St
 /// DT.5l: the CA.3a signature of the Go method whose declaration text is
 /// `source` (a METHOD's CODE cell), read at query time: `source` is parsed as
 /// the one declaration of a `package p` file, and the first
-/// `method_declaration` of that file gives [`go_signature`] of its
+/// `method_declaration` of that file gives `go_signature` of its
 /// `parameters` and `result`, the text `CodeNav::method_sigs` records for the
 /// method at build time (which liveness cannot read: the store keeps no
 /// signature). Computed for a generic receiver too: a runtime-interface
@@ -2829,7 +2829,7 @@ fn go_signature(params: TsNode, result: Option<TsNode>, src: &[u8]) -> Option<St
 ///
 /// `None` when the text holds no method declaration (a `func` with no
 /// receiver, an interface method element such as `Scan(dest ...any) error`,
-/// any other text) or when [`go_signature`] refuses its parameters or result
+/// any other text) or when `go_signature` refuses its parameters or result
 /// (a parse error there, its own rule). A parse error elsewhere, in the body,
 /// does not reject.
 pub fn method_signature(source: &str) -> Option<String> {

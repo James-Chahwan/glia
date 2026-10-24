@@ -89,7 +89,7 @@ pub enum QueueFramework {
     /// precedent. The worker runs `class SendWelcomeEmail implements
     /// ShouldQueue`'s `handle()`; the dispatch site names the class,
     /// `SendWelcomeEmail::dispatch($user)` or `dispatch(new
-    /// SendWelcomeEmail($user))`. See [`laravel_job_at`].
+    /// SendWelcomeEmail($user))`. See `laravel_job_at`.
     Laravel,
     // --- DH.3: a task queue whose job is a TYPE STRING -----------------------
     /// redis_task_queue (Dart): the task TYPE string, the CL.4 asynq shape:
@@ -101,7 +101,7 @@ pub enum QueueFramework {
 impl QueueFramework {
     /// Broker family, for grouping frameworks that share a wire identity (an
     /// SQS queue URL and an SQS ARN name the same queue). Stable lowercase
-    /// tags — also what [`framework_tag`] falls back to.
+    /// tags — also what `framework_tag` falls back to.
     pub fn family(&self) -> &'static str {
         match self {
             QueueFramework::Celery => "celery",
@@ -3459,7 +3459,7 @@ pub struct QueueNodes {
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
     /// LE.4c: one (node, 0-indexed line) per call site that minted or re-used
-    /// a topic node, uncapped (unlike the [`MAX_SITES`] provenance list), so a
+    /// a topic node, uncapped (unlike the `MAX_SITES` provenance list), so a
     /// topic published from two functions of one file anchors in both.
     /// [`anchor::attach`] turns them into the owner edges: the enclosing
     /// function USES a QUEUE_PRODUCER, a QUEUE_CONSUMER is HANDLED_BY it. The
@@ -3628,7 +3628,7 @@ pub fn extract_queue_nodes_with_consts(
 /// for `fold`'s, consumers then producers. Only this module mints those kinds.
 ///
 /// The swap itself is kind-agnostic and shared with CB.3b's event fold
-/// ([`marker_swap::swap`]): the old nodes, their module CONTAINS edges, nav
+/// (`marker_swap::swap`): the old nodes, their module CONTAINS edges, nav
 /// entries, owner edges and every edge / ref naming a gone id (a sentinel
 /// whose sites all folded) go; the fold's nodes, CONTAINS edges and child ids
 /// go back IN PLACE, so a folded file's parse is laid out exactly as the
@@ -4837,7 +4837,7 @@ fn framework_tag(f: &QueueFramework) -> String {
 }
 
 /// A12.1: is `topic` (the part of a queue qname after `queue_producer:` /
-/// `queue_consumer:`) a [`framework_tag`] rather than a real topic?
+/// `queue_consumer:`) a `framework_tag` rather than a real topic?
 ///
 /// The packet spec asked for a hand-listed `FRAMEWORK_TAGS` table. Since A2.3
 /// every tag carries [`UNRESOLVED_PREFIX`], which no legal topic can

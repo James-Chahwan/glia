@@ -12,7 +12,7 @@
 //! distinctive (`pg.` not `pg`, `sqlx::` not `sqlx`, etc.).
 //!
 //! CJ.1c: in a Rust or Python file a pattern counts only at an occurrence
-//! whose first byte is code ([`LazyGuard`]): a scanner's own needle table, a
+//! whose first byte is code (`LazyGuard`): a scanner's own needle table, a
 //! doc comment or a test's embedded sample source names a client, it does not
 //! use one. Inside code the match stays a substring
 //! (`QueueFramework::RedisList` still reads as redis); every other language

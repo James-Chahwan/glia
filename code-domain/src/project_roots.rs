@@ -5,7 +5,7 @@
 //! vocabulary below `RepoId` for them. This module is that vocabulary: which
 //! manifest roots a directory, and the human label it names.
 //!
-//! Detection rides the builder's walk (`engine::walk`), which hands [`detect_root`]
+//! Detection rides the builder's walk (`engine::walk`), which hands [`detect_root`](crate::project_roots::detect_root)
 //! the directory's already-sorted entry names. That is what makes it correct as
 //! well as cheap: the walker has already collapsed `node_modules`, build output
 //! and nested repos to REGION anchors, so a vendored

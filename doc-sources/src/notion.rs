@@ -279,7 +279,7 @@ impl NotionStats {
 /// Errors: `max_pages` 0; a database or listed id that is not an id; an origin
 /// [`Config::resolve`] would refuse; a non-2xx answer (`"<status>: <code> -
 /// <message>"`, from Notion's error JSON); a redirect; a database with no data
-/// source; `has_more` without a new cursor, or [`MAX_IDLE`] responses in a
+/// source; `has_more` without a new cursor, or `MAX_IDLE` responses in a
 /// row that bring nothing new; a 429 or 502 / 503 / 504 still answered after
 /// [`MAX_RETRIES`] retries.
 pub fn pull_database(

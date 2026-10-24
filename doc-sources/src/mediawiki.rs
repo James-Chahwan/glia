@@ -249,7 +249,7 @@ impl PullStats {
 /// Errors: `max_pages` 0; an api [`Config::resolve`] would refuse; an API
 /// `error` other than `maxlag` (`"<code>: <info>"`); an HTTP error or
 /// redirect; a throttle still in place after [`MAX_RETRIES`] retries; a
-/// `continue` that does not move, or [`MAX_IDLE`] responses in a row that
+/// `continue` that does not move, or `MAX_IDLE` responses in a row that
 /// bring no new page.
 pub fn pull(
     cfg: &Config,

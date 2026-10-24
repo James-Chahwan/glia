@@ -6,61 +6,61 @@
 //! back through this module. Nothing here spawns a process or touches git.
 //!
 //! The history snapshot (LF.5a) is `<repo>/.glia/history-snapshot/`:
-//! - `commits.jsonl` — one [`HistoryCommit`] per line, newest first (git's order);
-//! - `blame.jsonl` — one [`BlameFile`] per line, sorted by path; empty when
+//! - `commits.jsonl` — one [`HistoryCommit`](crate::snapshots::HistoryCommit) per line, newest first (git's order);
+//! - `blame.jsonl` — one [`BlameFile`](crate::snapshots::BlameFile) per line, sorted by path; empty when
 //!   blame was not requested;
-//! - `meta.json` — the [`HistoryMeta`], written LAST. Its `data_hash` covers
+//! - `meta.json` — the [`HistoryMeta`](crate::snapshots::HistoryMeta), written LAST. Its `data_hash` covers
 //!   `commits.jsonl` then `blame.jsonl`, so a reader that finds a meta whose
-//!   hash matches has complete data ([`read_history`] checks it);
-//! - `messages.jsonl` (version 2, EB.1) — one [`HistoryMessage`] per commit
-//!   row, in commit order: the subject and body ([`clean_message`]: trailers
+//!   hash matches has complete data ([`read_history`](crate::snapshots::read_history) checks it);
+//! - `messages.jsonl` (version 2, EB.1) — one [`HistoryMessage`](crate::snapshots::HistoryMessage) per commit
+//!   row, in commit order: the subject and body ([`clean_message`](crate::snapshots::clean_message): trailers
 //!   dropped, redacted, capped), the author time and the merged-branch label.
 //!   It is optional (`glia history sync --no-messages`), is outside
 //!   `data_hash` (its own `messages_hash` in the meta), and the build never
-//!   reads it: only query-time answers do, through [`read_history_messages`].
+//!   reads it: only query-time answers do, through [`read_history_messages`](crate::snapshots::read_history_messages).
 //!
 //! A version 1 snapshot (0.5.2) has no messages keys and reads as before.
 //!
 //! Neither a wall-clock timestamp nor an author identity is ever stored: a
 //! re-sync at the same HEAD writes identical bytes, and per-person attribution
 //! (team ownership) is out of scope. Commit messages are untrusted text: every
-//! subject, body and branch label passes [`redact_untrusted`] when it is
+//! subject, body and branch label passes [`redact_untrusted`](crate::snapshots::redact_untrusted) when it is
 //! written AND when it is read back. Every file is written `<file>.tmp` then
 //! renamed; the store's input fingerprint (LF.1d) skips `*.tmp`.
 //!
 //! The test-report snapshot (LF.6a) is `<repo>/.glia/test-snapshot/`. Since
 //! CC.9b (version 2) it is a rolling window of runs: each ingest is one
-//! [`TestRun`] with the next `seq`, and runs older than the window are dropped
-//! ([`append_tests_run`]).
-//! - `cases.jsonl` — one [`TestCaseRecord`] per failed or errored test case of
+//! [`TestRun`](crate::snapshots::TestRun) with the next `seq`, and runs older than the window are dropped
+//! ([`append_tests_run`](crate::snapshots::append_tests_run)).
+//! - `cases.jsonl` — one [`TestCaseRecord`](crate::snapshots::TestCaseRecord) per failed or errored test case of
 //!   every run in the window, each with its run's `seq`, sorted by (seq,
 //!   report, suite, classname, name);
 //! - `lcov.jsonl` — the newest run's coverage only (coverage is a snapshot,
-//!   not a history): one [`LcovFileRecord`] per covered source file, sorted by
+//!   not a history): one [`LcovFileRecord`](crate::snapshots::LcovFileRecord) per covered source file, sorted by
 //!   its repo-relative path (else its `SF:` path);
-//! - `meta.json` — the [`TestsMeta`], written LAST: the runs, oldest first,
+//! - `meta.json` — the [`TestsMeta`](crate::snapshots::TestsMeta), written LAST: the runs, oldest first,
 //!   the newest run's fields at the top level, and `data_hash` over
-//!   `cases.jsonl` then `lcov.jsonl` ([`read_tests`] checks it, and every
+//!   `cases.jsonl` then `lcov.jsonl` ([`read_tests`](crate::snapshots::read_tests) checks it, and every
 //!   run's counts against its rows).
 //!
 //! A version 1 snapshot (0.5.0: one run, no `runs`, no `seq`) reads as one run,
 //! seq 0; the next ingest appends to it and writes version 2.
 //!
 //! Test output is untrusted text: a failing assertion can print a token. Every
-//! free-text field of a case passes through [`redact_untrusted`] (A13.7's key
+//! free-text field of a case passes through [`redact_untrusted`](crate::snapshots::redact_untrusted) (A13.7's key
 //! denylist plus secret-shaped values) when it is written AND when it is read
 //! back, so a hand-edited snapshot cannot carry a secret into the graph either.
 //!
 //! The SCIP snapshot (CE.1a) is `<repo>/.glia/scip-snapshot/`: the facts the
 //! build takes from a compiler-grade SCIP index, decoded once at import
 //! (`glia scip import`) so the build never decodes protobuf.
-//! - `documents.jsonl` — one [`ScipDocumentRecord`] per kept source file,
-//!   sorted by path, its rows sorted by [`ScipDefRow::sort_key`] /
-//!   [`ScipRefRow::sort_key`];
-//! - `symbols.jsonl` — one [`ScipSymbolRecord`] per symbol a row names, ids
+//! - `documents.jsonl` — one [`ScipDocumentRecord`](crate::snapshots::ScipDocumentRecord) per kept source file,
+//!   sorted by path, its rows sorted by [`ScipDefRow::sort_key`](crate::snapshots::ScipDefRow::sort_key) /
+//!   [`ScipRefRow::sort_key`](crate::snapshots::ScipRefRow::sort_key);
+//! - `symbols.jsonl` — one [`ScipSymbolRecord`](crate::snapshots::ScipSymbolRecord) per symbol a row names, ids
 //!   `0..n` in symbol-string order;
-//! - `meta.json` — the [`ScipMeta`], written LAST, `data_hash` over
-//!   `documents.jsonl` then `symbols.jsonl` ([`read_scip`] checks it, the row
+//! - `meta.json` — the [`ScipMeta`](crate::snapshots::ScipMeta), written LAST, `data_hash` over
+//!   `documents.jsonl` then `symbols.jsonl` ([`read_scip`](crate::snapshots::read_scip) checks it, the row
 //!   order and every symbol id).
 //!
 //! It holds indexer-generated symbol strings, identifier text sliced at
@@ -1575,7 +1575,7 @@ const SECRET_PREFIXES: [(&str, usize); 24] = [
 ///   line) go whole;
 /// - URL userinfo with a password is masked by [`mask_userinfo`], host kept;
 /// - secret-shaped tokens go whole: a JWT (`eyJ….….…`) or a known credential
-///   prefix ([`SECRET_PREFIXES`]: Stripe, GitHub, GitLab, Slack, AWS, Google,
+///   prefix (`SECRET_PREFIXES`: Stripe, GitHub, GitLab, Slack, AWS, Google,
 ///   npm, PyPI, `sk-` API keys);
 /// - the credential after `Bearer ` / `Basic ` goes;
 /// - the value of a key the A13.7 denylist names ([`is_secret_name`], `-` read

@@ -2,34 +2,34 @@
 //! (`ws_client:<path>`) marker nodes, paired across repos by
 //! `WebSocketStackResolver` in the graph crate.
 //!
-//! LA.18a (programme A5.9) rewrote the scan. Each needle is a [`WsRow`]: a
+//! LA.18a (programme A5.9) rewrote the scan. Each needle is a `WsRow`: a
 //! call-shaped needle, a framework gate (any-of substrings of the file, so a
 //! broad needle such as Go's `.Upgrade(` only fires in a file that imports
-//! gorilla), how the path is read ([`PathRead`]) and where the site is
-//! anchored ([`AnchorAt`]). Every occurrence of every gated row is examined
+//! gorilla), how the path is read (`PathRead`) and where the site is
+//! anchored (`AnchorAt`). Every occurrence of every gated row is examined
 //! (at most [`MAX_HITS_PER_NEEDLE`] per row per file), not only the first, so
 //! a second `@app.websocket(...)` or `new WebSocket(...)` in a file is no
 //! longer invisible. A needle that starts with an identifier byte must not be
 //! preceded by one, so Dart's `Dio()` is not socket.io's `io(`.
 //!
 //! Names: a server path is kept verbatim (`/chat/{room}` stays templated); a
-//! client argument goes through [`path_of_text`], which reads the static tail
+//! client argument goes through `path_of_text`, which reads the static tail
 //! of a concatenation or template literal and strips `ws(s)://` /
 //! `http(s)://` + authority. Anything unreadable falls back to `ws`
 //! (`default` for the path-less NestJS row), exactly as before the rewrite,
-//! unless the row's [`Accept`] says an unreadable site mints nothing. A name
+//! unless the row's `Accept` says an unreadable site mints nothing. A name
 //! is never multi-line: whitespace and control characters reject it.
 //!
 //! Channel-keyed frameworks (LA.18c) join on a channel name or topic, not a
 //! URL path, so the name IS that key and never falls back:
 //! - ActionCable: the server's channel is the class inheriting
-//!   `ApplicationCable::Channel` (`ws:ChatChannel`, [`PathRead::ClassBeforeLt`]);
+//!   `ApplicationCable::Channel` (`ws:ChatChannel`, `PathRead::ClassBeforeLt`);
 //!   the JS consumer names it in `subscriptions.create({ channel: "..." })`,
 //!   accepted only in the `...Channel` class-name shape
-//!   ([`Accept::ChannelClass`]), so Stripe's `subscriptions.create(` never
+//!   (`Accept::ChannelClass`), so Stripe's `subscriptions.create(` never
 //!   mints.
 //! - Phoenix: the endpoint's `socket "/socket", ...` mount and the socket's
-//!   `channel "room:*", ...` topic pattern ([`PathRead::LineLiteral`], gated on
+//!   `channel "room:*", ...` topic pattern (`PathRead::LineLiteral`, gated on
 //!   `Phoenix.Endpoint` / `Phoenix.Socket`); phoenix.js's `new Socket("/socket")`
 //!   and `socket.channel("room:lobby")` on the client. `use Phoenix.Channel` is
 //!   a module attribute, not a handler, and mints nothing. The resolver pairs
@@ -39,16 +39,16 @@
 //! arguments:
 //! - axum: `ws.on_upgrade(..)` sits in the handler fn F; its path is the
 //!   first in-file `.route("/p", get(F))` whose method router names F
-//!   ([`PathRead::AxumRoute`]). No in-file route names F: the name is `ws`,
+//!   (`PathRead::AxumRoute`). No in-file route names F: the name is `ws`,
 //!   and the graph crate's ws resolver lends it the paths of every ROUTE
 //!   HANDLED_BY F, as for a gorilla upgrade.
 //! - Akka / Pekko HTTP: `handleWebSocketMessages(..)` is routed by the
 //!   `path(..)` / `pathPrefix(..)` directives whose blocks enclose it,
 //!   composed outer to inner (`pathPrefix("api") { path("ws" / Segment) {..} }`
-//!   -> `/api/ws/:segment`, [`PathRead::AkkaDirective`]); a matcher outside
-//!   [`AKKA_MATCHERS`] makes the name `ws`.
+//!   -> `/api/ws/:segment`, `PathRead::AkkaDirective`); a matcher outside
+//!   `AKKA_MATCHERS` makes the name `ws`.
 //!
-//! Both scan blocks over code bytes only ([`Blocks`], CodeMap's C-family
+//! Both scan blocks over code bytes only (`Blocks`, CodeMap's C-family
 //! lexing, which covers Rust and Scala).
 //!
 //! DH.9: Ratchet's `$app->route('/chat', new MyChat, ..)` is a PHP server
@@ -56,18 +56,18 @@
 //! web_socket_channel (`WebSocketChannel` / `IOWebSocketChannel` /
 //! `HtmlWebSocketChannel.connect(..)`) and dart:io's `WebSocket.connect(..)`
 //! are clients whose URL may sit in a `Uri.parse(..)` / `Uri.tryParse(..)`
-//! ([`PathRead::ClientUri`]); a Dart literal's `$name` / `${expr}` is a
-//! dynamic piece of it ([`Interp::Dart`]).
+//! (`PathRead::ClientUri`); a Dart literal's `$name` / `${expr}` is a
+//! dynamic piece of it (`Interp::Dart`).
 //!
 //! DT.3a: a client URL is read through the code that builds it
-//! ([`client_url`], depth one): a bare identifier through the `const` /
-//! `final` / Go `:=` binding in a scope enclosing the call ([`local_binding`],
+//! (`client_url`, depth one): a bare identifier through the `const` /
+//! `final` / Go `:=` binding in a scope enclosing the call (`local_binding`,
 //! an indentation walk; a `let` / `var` / reassignment or a parameter of that
 //! name reads nothing), `this.<m>` through the file's one `readonly` field
-//! ([`class_field_init`]), Go's `u.String()` through `u := url.URL{.. Path: ..}`
-//! ([`go_url_struct_path`]), and a URL builder call with one literal
+//! (`class_field_init`), Go's `u.String()` through `u := url.URL{.. Path: ..}`
+//! (`go_url_struct_path`), and a URL builder call with one literal
 //! (`this.urls.buildWsUrl('api/chat/ws')` -> `/api/chat/ws`,
-//! [`builder_literal`]). A node every one of whose sites read it through a
+//! `builder_literal`). A node every one of whose sites read it through a
 //! builder is Weak; the resolver's WS_CONNECTS takes the weakest side.
 //!
 //! DT.3b: a client URL whose base sits in the repo's configuration folds
@@ -76,28 +76,28 @@
 //! the engine re-runs the client scan post-cache through
 //! [`extract_ws_client_nodes_with_consts`] with the repo table as a resolver,
 //! and swaps a file's WS_CLIENT nodes ([`replace_ws_client_nodes`]) when a
-//! site folded. The fold changes the one per-site reading ([`ClientUrl::path`]
-//! / [`ClientUrl::host`], through [`client_text`]): a member chain in a
+//! site folded. The fold changes the one per-site reading (`ClientUrl::path`
+//! / `ClientUrl::host`, through `client_text`): a member chain in a
 //! template's `${..}`, a Dart `$name` / `${..}`, a `+` piece or the whole
 //! argument is replaced by the literal the resolver binds it to, so
 //! `new WebSocket(environment.feedUrl)` reads `ws://feed-svc:8080/rt/feed`
 //! (`/rt/feed`, host `feed-svc:8080`) and `` `${environment.wsBase}/prices` ``
 //! with `wsBase = 'ws://feed-svc:8080/rt'` reads `/rt/prices`, never the tail
 //! alone. A bare lower-case identifier or `this.<m>` that is the whole
-//! argument is DT.3a's scoped read ([`client_url`]), not the file-wide
-//! table's ([`ClientUrl::foldable`]); a folded text that no longer reads a
-//! path where the plain one did is refused ([`ClientUrl::url_text`]). With no
+//! argument is DT.3a's scoped read (`client_url`), not the file-wide
+//! table's (`ClientUrl::foldable`); a folded text that no longer reads a
+//! path where the plain one did is refused (`ClientUrl::url_text`). With no
 //! resolver the scan is byte for byte the per-file one.
 //!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
 //! (client) edge. Python decorators anchor at the decorated `def` line
-//! ([`AnchorAt::NextDef`]), because a Python FUNCTION span starts at its
+//! (`AnchorAt::NextDef`), because a Python FUNCTION span starts at its
 //! `def`, not at the decorator above it.
 //!
 //! Hosts (CB.21): every CLIENT site stacks one ENDPOINT_HIT on its node,
 //! `{"via":"ws","host":"chat-svc:8080"}` when the URL's static head names a
-//! literal authority ([`host_of_text`]), `{"via":"ws"}` otherwise. The graph
+//! literal authority (`host_of_text`), `{"via":"ws"}` otherwise. The graph
 //! crate's ws resolver narrows a client's same-path handlers to the service
 //! its hosts name; one hostless site blocks that, as on the HTTP side.
 //!
@@ -121,14 +121,14 @@
 //!   `[ws] client urls read=1 (local=1 field=0 builder=0 url_struct=0) unread=0 in web/src/app/core/live/order-feed.service.ts`
 //!
 //! Self-scan precision (CJ.1b): in a Rust or Python file a needle whose first
-//! byte sits in a string literal or comment is no site ([`LazyGuard`], CJ.1a's
+//! byte sits in a string literal or comment is no site (`LazyGuard`, CJ.1a's
 //! guard), so a doc line or a test's sample source mints nothing. Only the
 //! NEEDLE offset is tested, never the anchor line: a FastAPI handler's
 //! `@app.websocket(` needle is code and anchors on the `def` below it. One
 //! line per scan that refused an occurrence:
 //!   `[code-guard] ws_client lang=rust dropped=2 path=src/x.rs`
 //!
-//! The call-argument reader here ([`call_region`], [`split_top`]) is a local
+//! The call-argument reader here (`call_region`, `split_top`) is a local
 //! copy of the shape `queue_topic.rs` keeps private (that file belongs to
 //! another packet's file set, the rule A2.8 followed for `escape_json`).
 //! Follow-up: one shared call-argument reader for both.
@@ -629,7 +629,7 @@ pub fn extract_ws_client_nodes_with_consts(
 
 /// DT.3b: swap every WS_CLIENT node of one file's parse for `fold`'s, through
 /// the swap the LA.4 queue and CB.3b event folds share
-/// ([`marker_swap::swap`]): the old nodes, their owner edges (`function
+/// (`marker_swap::swap`): the old nodes, their owner edges (`function
 /// -USES-> ws_client:..`, the anchor pass's), nav entries and every edge /
 /// ref naming a gone id (a client whose path moved) go; the fold's nodes go
 /// back in place, each site's ENDPOINT_HIT as the scan wrote it, re-anchored

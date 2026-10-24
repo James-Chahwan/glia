@@ -3,11 +3,11 @@
 //! `glia_code_domain::evm` (DT.10a), which `resolver:evm` (DT.10b) pairs to
 //! the Solidity procedures and events.
 //!
-//! A language reader (TypeScript / JavaScript ethers: [`ts`]; Go
-//! go-ethereum, DT.10e: [`go`]) scans the file's code view
-//! ([`scan::code_view`]: comments, regex literals and the contents of string,
+//! A language reader (TypeScript / JavaScript ethers: `ts`; Go
+//! go-ethereum, DT.10e: `go`) scans the file's code view
+//! (`scan::code_view`: comments, regex literals and the contents of string,
 //! template, rune and raw-string literals blanked, offsets kept) and returns
-//! one [`Site`] per call or subscription it can name. [`mint`] then
+//! one `Site` per call or subscription it can name. `mint` then
 //! groups the sites by `(side, scope, member)`, one node per group:
 //! - a call is an RPC_CALL `evm_call:<scope>.<member>` and a subscription an
 //!   EVENT_HANDLER `evm_event:<scope>.<event>`, Confidence::Medium, nav name
@@ -44,7 +44,7 @@
 //! not_in_abi=<i> dynamic=<d> path=<file>`; c / e count the file's nodes, s
 //! its sites (split by library in the parenthesis), a the ABI bindings read.
 //! Grep `^\[evm-client\] `. A Go file with a method-name wrapper (DT.10f)
-//! adds the reader's `[evm-wrappers]` line ([`go`] step 9).
+//! adds the reader's `[evm-wrappers]` line (`go` step 9).
 
 mod abi;
 mod go;

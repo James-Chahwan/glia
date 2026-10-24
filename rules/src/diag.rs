@@ -1,15 +1,15 @@
-//! Spans, diagnostics and [`RulesError`]: the one error type every module of the
+//! Spans, diagnostics and [`RulesError`](crate::diag::RulesError): the one error type every module of the
 //! crate returns, and the located text a rule author reads.
 //!
-//! A [`Span`] is a byte range in one source plus the 1-based line and column of its
+//! A [`Span`](crate::diag::Span) is a byte range in one source plus the 1-based line and column of its
 //! start. Offsets count BYTES and columns count CHARS, so a column is for display
-//! only: text is never sliced by column (UTF-8). A [`Diagnostic`] names its source,
+//! only: text is never sliced by column (UTF-8). A [`Diagnostic`](crate::diag::Diagnostic) names its source,
 //! its position and, once the parser has read a clause's head, the predicate of the
 //! rule it sits in as `name/arity`; it renders as
 //! `<source>:<line>:<col>: error: <message> (in the rule for `p/2`)`, with no suffix
 //! for a lexical diagnostic (no predicate).
 //!
-//! [`RulesError`]'s Display is the text the engine's `check` / `query` surfaces print
+//! [`RulesError`](crate::diag::RulesError)'s Display is the text the engine's `check` / `query` surfaces print
 //! verbatim, so every variant's wording is pinned by tests here and in
 //! rules/tests/errors.rs (DA.16): a wording change moves both. The crate has no
 //! external dependency, so Display and `std::error::Error` are written by hand.

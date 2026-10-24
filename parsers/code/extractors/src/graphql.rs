@@ -625,13 +625,13 @@ const METHOD_MODIFIERS: &[&str] = &[
 ];
 
 /// Client-side GRAPHQL_OPERATION nodes: the operation needles
-/// ([`scan_operation_needles`]), the operations of `` gql` `` templates
-/// ([`extract_gql_template_operations`]) and the literal documents of Go
-/// machinebox / C# GraphQL.Client requests ([`client_request_operations`],
+/// (`scan_operation_needles`), the operations of `` gql` `` templates
+/// (`extract_gql_template_operations`) and the literal documents of Go
+/// machinebox / C# GraphQL.Client requests (`client_request_operations`,
 /// CL.6a).
 ///
 /// DT.11a: every node minted from a document carries that document as its
-/// CODE cell ([`document_cells`]), the one carrier of the document: the
+/// CODE cell (`document_cells`), the one carrier of the document: the
 /// GraphQL resolver pairs the operation by the root fields it selects
 /// ([`operation_root_fields`]). A needle named by its needle text read no
 /// document and carries none.
@@ -743,8 +743,8 @@ fn document_cells(doc: Option<&str>, line: u32) -> Vec<Cell> {
 
 /// CODE mode, for every code file of every language
 /// (`engine::extract::apply_cross_cutting_extractors`, `lang` from
-/// `detect_language`): the decorator family ([`decorator_scan`], LA.38) and
-/// SDL only inside a GraphQL-marked literal ([`gql_literal_regions`], LA.27).
+/// `detect_language`): the decorator family (`decorator_scan`, LA.38) and
+/// SDL only inside a GraphQL-marked literal (`gql_literal_regions`, LA.27).
 /// A comment or an unmarked string that holds `type Query {` mints nothing,
 /// and neither does a decorator needle outside a TypeScript / Python / C# /
 /// Rust / Scala / Ruby / Elixir file that imports a GraphQL server package. A `.graphql` / `.gql` body goes
@@ -5010,7 +5010,7 @@ pub struct GraphqlTypes {
 
 /// DT.1j, WHOLE-FILE mode for a routed `.graphql` / `.graphqls` / `.gql`
 /// schema (`engine::route`): every object / input / interface type the file
-/// declares ([`sdl_defs`]) as a MESSAGE_TYPE ([`type_nodes`]).
+/// declares (`sdl_defs`) as a MESSAGE_TYPE (`type_nodes`).
 pub fn extract_graphql_sdl_file_types(
     source: &str,
     path: &str,
@@ -5021,7 +5021,7 @@ pub fn extract_graphql_sdl_file_types(
 }
 
 /// DT.1j, CODE mode: the types of the SDL held in the file's GraphQL-marked
-/// literals ([`gql_literal_regions`], the regions
+/// literals (`gql_literal_regions`, the regions
 /// [`extract_graphql_resolver_nodes`] reads its root fields from), every
 /// literal's blocks of one name merged as within one schema file. A file
 /// with no marked literal mints nothing.
@@ -6230,7 +6230,7 @@ const GQL_URL_KEYS: &[&str] = &["uri", "url"];
 /// CB.24: the literal authority (`host[:port]`) of every GraphQL client base
 /// URL `source` builds, with the 0-based row of its literal, in source order.
 ///
-/// A site is a [`GQL_CLIENT_CTORS`] call whose first argument is an object
+/// A site is a `GQL_CLIENT_CTORS` call whose first argument is an object
 /// literal holding a top-level `uri:` / `url:` key, or `new GraphQLClient(..)`
 /// with a first positional argument, whose value is ONE string literal (a
 /// template without `${`) with a literal `scheme://authority`
@@ -6238,7 +6238,7 @@ const GQL_URL_KEYS: &[&str] = &["uri", "url"];
 /// env var, a concatenation or an interpolated host names no service and
 /// yields nothing. `createClient` and `Client` are everyday names (a Redis
 /// client is built as `createClient({ url })` too), so nothing is read from a
-/// file that imports no GraphQL client package ([`gql_context`]).
+/// file that imports no GraphQL client package (`gql_context`).
 pub fn graphql_client_hosts(source: &str) -> Vec<(String, u32)> {
     let named = GQL_CLIENT_CTORS.iter().any(|(c, _)| source.contains(c))
         || source.contains(GQL_REQUEST_CTOR);
@@ -7103,7 +7103,7 @@ fn append_transport_fields(node: &mut Node, template: Option<&str>) {
 /// `createHttpLink({ uri })`, urql `createClient({ url })` / `new Client({
 /// url })` and graphql-request `new GraphQLClient(url, ..)` whose URL is an
 /// `http(s)://` or root-relative literal, a template or an identifier chain
-/// ([`transport_target`]) mints `endpoint:POST:<path>` through the one
+/// (`transport_target`) mints `endpoint:POST:<path>` through the one
 /// client-ENDPOINT writer (`endpoint::push_client_endpoint_with`, `raw` /
 /// `host` as for any client), its ENDPOINT_HIT ending in `"template"` (a
 /// non-literal URL, which the engine's endpoint fold resolves) and
@@ -7113,7 +7113,7 @@ fn append_transport_fields(node: &mut Node, template: Option<&str>) {
 /// graphql-request `method: 'GET'`).
 ///
 /// A constructor counts only in a file importing its own package
-/// ([`ctor_for`]): `createClient` and `Client` are everyday names (a Redis
+/// (`ctor_for`): `createClient` and `Client` are everyday names (a Redis
 /// client is `createClient({ url })`), and graphql-ws's `createClient({ url:
 /// 'ws://..' })` sits beside Apollo in the canonical subscription setup. A
 /// `ws://` / `wss://` URL or a graphql-ws client mints nothing and is

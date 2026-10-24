@@ -6,10 +6,10 @@
 //! **Procedures** (the server side). A contract function an ABI client can
 //! reach (an `external` / `public` function, an interface member, a public
 //! state-variable getter) is an RPC_PROCEDURE `evm:<Contract>.<member>`
-//! ([`procedure_qname`] / [`split_procedure`]). The `evm:` prefix keeps it
+//! ([`procedure_qname`](crate::evm::procedure_qname) / [`split_procedure`](crate::evm::split_procedure)). The `evm:` prefix keeps it
 //! away from the JSON-RPC family's `rpc:` (RpcStackResolver and the owner
 //! pass key on that prefix). Its facts are a JSON CODE cell
-//! ([`procedure_cell`] / [`read_procedure_cell`]):
+//! ([`procedure_cell`](crate::evm::procedure_cell) / [`read_procedure_cell`](crate::evm::read_procedure_cell)):
 //!
 //! ```text
 //! {"via":"evm","arities":[1,2],"mutability":"nonpayable","getter":false,"abstract":false}
@@ -17,11 +17,11 @@
 //!
 //! **Clients.** A contract call site is an RPC_CALL `evm_call:<scope>.<member>`
 //! and an event subscription an EVENT_HANDLER `evm_event:<scope>.<event>`
-//! ([`call_qname`] / [`event_qname`] / [`split_client`]). The [`Scope`] says
+//! ([`call_qname`](crate::evm::call_qname) / [`event_qname`](crate::evm::event_qname) / [`split_client`](crate::evm::split_client)). The [`Scope`](crate::evm::Scope) says
 //! what the site knows of the contract: its name (`Escrow`), the ABI binding it
 //! was built from (`abi:ESCROW_ABI`) or only the receiver it was called on
 //! (`recv:escrow`). Its facts are an ENDPOINT_HIT cell
-//! ([`client_cell`] / [`read_client_cells`]):
+//! ([`client_cell`](crate::evm::client_cell) / [`read_client_cells`](crate::evm::read_client_cells)):
 //!
 //! ```text
 //! {"via":"evm","lib":"ethers","args":[2],"abi":["e:Released/2","f:deposit/1"]}
@@ -32,18 +32,18 @@
 //!
 //! **Cross-file ABIs (DT.10g).** A site whose ABI binding another file
 //! declares (a TS import, a Go package constant of another file) carries an
-//! [`AbiRef`] (`abi_ref`: the exported name and the import specifier, `"."`
+//! [`AbiRef`](crate::evm::AbiRef) (`abi_ref`: the exported name and the import specifier, `"."`
 //! for the Go package) and no `abi`. The engine's post-cache join fills `abi`
 //! with the declaring file's entries and `abi_from` with that file, so the
-//! resolver identifies the call by ABI ([`ClientHit`], [`client_hit_cell`],
-//! [`read_client_hits`]):
+//! resolver identifies the call by ABI ([`ClientHit`](crate::evm::ClientHit), [`client_hit_cell`](crate::evm::client_hit_cell),
+//! [`read_client_hits`](crate::evm::read_client_hits)):
 //!
 //! ```text
 //! {"via":"evm","lib":"ethers","args":[1],"abi":["f:deposit/1","f:release/1"],
 //!  "abi_ref":{"name":"SHOP_ABI","from":"./abi"},"abi_from":"src/abi.ts"}
 //! ```
 //!
-//! **Names.** [`name_key`] is the one normal form a client hint (an ABI const,
+//! **Names.** [`name_key`](crate::evm::name_key) is the one normal form a client hint (an ABI const,
 //! a receiver, an address const) and a contract name are compared in.
 //!
 //! **Byte stability.** Both cells are written from derived structs in the
@@ -191,7 +191,7 @@ const NAME_FLOOR: usize = 3;
 
 /// The normal form a client hint and a contract name are compared in: the
 /// ASCII alphanumerics of `ident`, lower-cased, then ONE trailing suffix of
-/// [`NAME_SUFFIXES`] stripped when at least three characters remain.
+/// `NAME_SUFFIXES` stripped when at least three characters remain.
 /// `ESCROW_ABI`, `escrowContract`, `EscrowMetaData` and `ESCROW_ADDRESS` are
 /// all `escrow`; `escrowManagerABI` is `escrowmanager`; `ERC20_ABI` is
 /// `erc20`; `contract` stays `contract`.

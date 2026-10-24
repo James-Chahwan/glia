@@ -2866,7 +2866,7 @@ pub mod endpoint {
     /// (A3.6). The reader for the two JSON payloads this crate's writers and
     /// its parsers produce:
     ///
-    /// - `ENDPOINT_HIT` — every client language, via [`endpoint_hit_json`];
+    /// - `ENDPOINT_HIT` — every client language, via `endpoint_hit_json`;
     /// - `ROUTE_METHOD` as JSON — parser-go's `route_method_cell` and
     ///   ts_routes. The other ROUTE_METHOD writers store the bare verb
     ///   (`Text("GET")`), which fails to parse and is skipped.
@@ -2989,7 +2989,7 @@ pub mod infra {
 /// refuse the same value types as injected beans. Each parser keeps its own
 /// AST walk; only these strings are shared, so the two cannot drift apart by
 /// a copied table. The annotation-route recipe lives beside the other route
-/// helpers, in [`endpoint`](super::endpoint) (`jvm_annotation_routes`).
+/// helpers, in [`endpoint`] (`jvm_annotation_routes`).
 pub mod jvm {
     /// DATA_ENTITY flavor of a relational model (JPA `@Entity`) — the
     /// `<flavor>` segment of `data_entity:<flavor>:<Model>`, the vocabulary
@@ -3113,12 +3113,12 @@ pub mod jvm {
 ///
 /// * **Language tokens** count the INJECTS `UnresolvedRef`s the repo's parses
 ///   carry. The engine counts them off the `FileParse`s, so they stay right
-///   for cache-served files and for emitters that never call [`record`].
-///   Every [`LANGS`] entry is printed, zero or not, so ` go=[1-9]` is an
+///   for cache-served files and for emitters that never call [`record`](crate::di_stats::record).
+///   Every [`LANGS`](crate::di_stats::LANGS) entry is printed, zero or not, so ` go=[1-9]` is an
 ///   unambiguous grep. Any other language appears only when non-zero. The
 ///   spellings are the matrix row names (`bench/substrate-gap/matrix_vocab.py`),
 ///   so `go=` lines up with the `go/injects` cell.
-/// * **Shape tokens** are what detectors reported through [`record`] while
+/// * **Shape tokens** are what detectors reported through [`record`](crate::di_stats::record) while
 ///   THIS build ran. A file served from the parse cache ran no detector, so
 ///   shapes can undercount the language totals. A gap means "cached", not
 ///   "broken".

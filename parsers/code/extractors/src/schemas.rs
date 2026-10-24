@@ -195,7 +195,7 @@ pub struct ProtoTypeDecl {
     /// `local_name` of the enclosing message, when nested.
     pub parent: Option<String>,
     /// A message's own fields in declaration order, `oneof` members included,
-    /// capped at [`SCHEMA_MAX_FIELDS`]. A nested message's fields are its own;
+    /// capped at `SCHEMA_MAX_FIELDS`. A nested message's fields are its own;
     /// `option`, `extensions`, `extend` bodies and proto2 `group` bodies are
     /// not fields of the message. Always empty for an enum.
     pub fields: Vec<ProtoField>,
@@ -1103,7 +1103,7 @@ fn key_values<'a>(hay: &'a str, quoted: &'a str) -> impl Iterator<Item = &'a str
 }
 
 /// Cheap content gate for a `.json`: could it be a JSON Schema? No parse.
-/// Within the first [`JSON_SCHEMA_SNIFF_BYTES`] of an object document, either
+/// Within the first `JSON_SCHEMA_SNIFF_BYTES` of an object document, either
 /// a `"$schema"` key whose string value names `json-schema.org`, or a
 /// `"type": "object"` key together with a `"properties"` key.
 ///

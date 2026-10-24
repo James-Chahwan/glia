@@ -14,14 +14,14 @@
 //! Loading never panics and never bails a build (pipeline stages emit empty):
 //! - file absent -> `None`;
 //! - TOML syntax error, schema error (unknown key, wrong type, missing
-//!   required field) or a `version` outside [`SUPPORTED_VERSIONS`] -> the
+//!   required field) or a `version` outside [`SUPPORTED_VERSIONS`](crate::glia_config::SUPPORTED_VERSIONS) -> the
 //!   WHOLE config is defaulted and one error is recorded;
 //! - a validation error drops ONLY the offending stanza (or list entry) and
 //!   records an error naming its line.
 //!
 //! VERSIONS (0.5.2 Q7). Version 1 is the 0.5.1 schema and keeps loading
 //! exactly as it did. Version 2 adds the `[[constraint]]` fields of
-//! [`V2_CONSTRAINT_FIELDS`] (DB.1): `rule` (an invariant's Datalog text),
+//! [`V2_CONSTRAINT_FIELDS`](crate::glia_config::V2_CONSTRAINT_FIELDS) (DB.1): `rule` (an invariant's Datalog text),
 //! `transitive` + `via` (a transitive forbid_edge and its facades) and
 //! `min_tier`. A version-1 file that sets one of them loses that stanza, not
 //! the file. The loader checks their SHAPE only: a rule's text is parsed at
@@ -29,11 +29,11 @@
 //! on the rules parser (R1 §3, Q8).
 //!
 //! REJECTIONS (DT.7c). Every `[[section]]` stanza the loader drops, and the
-//! whole file when it is ignored, is also one [`Rejection`] in
-//! [`LoadedConfig::rejections`], beside its unchanged `errors` line: the
+//! whole file when it is ignored, is also one [`Rejection`](crate::glia_config::Rejection) in
+//! [`LoadedConfig::rejections`](crate::glia_config::LoadedConfig::rejections), beside its unchanged `errors` line: the
 //! section, the header line, the stanza's id (`component:<name>` /
 //! `layer:<name>` for the model's) and the message as the errors line spells
-//! it, with [`Rejection::fix`] saying what to change. `glia check` reads them
+//! it, with [`Rejection::fix`](crate::glia_config::Rejection::fix) saying what to change. `glia check` reads them
 //! (DT.7c, `external::declared::declared_misses`) to list a dropped rule
 //! stanza, or an ignored file holding one, under "Rules that check nothing".
 //! A `[walk]`, `[entrypoints]` or `[constants]` entry drop is not a stanza and

@@ -111,7 +111,7 @@ pub enum TopicRule {
     /// Keyed form first, falling back to argument #0 (APIs that accept both).
     KeyedOrArg(&'static [&'static str]),
     /// CL.3: builder-method keys read in the fluent chain that FOLLOWS the
-    /// needle, up to the end of its statement ([`chain_region`]): Azure's
+    /// needle, up to the end of its statement (`chain_region`): Azure's
     /// `new ServiceBusClientBuilder().sender().queueName("orders")`, the AWS
     /// SDK v2 `ReceiveMessageRequest.builder().queueUrl("..")` built on its
     /// own statement, MQTTnet's `new MqttApplicationMessageBuilder()
@@ -142,20 +142,20 @@ pub enum TopicRule {
     /// CL.4: the method a job LAMBDA calls, for task queues whose job is a
     /// method (JobRunr, Hangfire): `BackgroundJob.enqueue(() ->
     /// emailJobs.sendWelcome(id))` -> `sendWelcome`, `Enqueue<T>(x =>
-    /// x.SendWelcome(id))` -> `SendWelcome`. See [`lambda_callee`]. A call
+    /// x.SendWelcome(id))` -> `SendWelcome`. See `lambda_callee`. A call
     /// with no lambda (`queue.Enqueue(item)`, a method reference) reads
     /// nothing, and the extractor treats that hit as no site at all.
     LambdaCallee,
     // --- DG.1: TYPED-JOB IDENTITY. apalis (Rust) names a job by its TYPE. ----
     /// DG.1: an apalis storage push, `storage.push(Email { .. })`. The
-    /// receiver must be declared in the file as a storage ([`storage_job_type`]);
+    /// receiver must be declared in the file as a storage (`storage_job_type`);
     /// the job is the storage's type argument, else the pushed value's type.
     /// `.push(` is every `Vec`'s method, so an occurrence the rule cannot
-    /// prove is no site at all ([`scan_guarded`] drops it).
+    /// prove is no site at all (`scan_guarded` drops it).
     StorageJobType,
     /// DG.1: an apalis worker, `WorkerBuilder::new(..).backend(s)
     /// .build_fn(send_email)`. The statement must hold `WorkerBuilder`
-    /// ([`worker_job_type`]); the job is the handler's first parameter type,
+    /// (`worker_job_type`); the job is the handler's first parameter type,
     /// else the backend storage's type argument. `.build(` is every builder's
     /// method, so an occurrence the rule cannot prove is no site at all.
     WorkerJobType,
@@ -167,51 +167,51 @@ pub enum TopicRule {
     /// bind, and an unbound one keeps the deferred framework tag.
     Declared,
     /// DH.1: the first argument of a call written with or without parentheses,
-    /// a quoted literal or a Ruby / Elixir `:symbol` ([`bare_arg`]): Karafka's
+    /// a quoted literal or a Ruby / Elixir `:symbol` (`bare_arg`): Karafka's
     /// routing DSL `topic :orders do .. end`, google-cloud-pubsub's
     /// `pubsub.topic "orders"`. A bare-word needle (`topic `) reads only at a
-    /// word edge ([`bare_word_ok`]), and an occurrence that reads no literal is
-    /// no site at all ([`scan_guarded`] drops it), so `topic = x`, a prose
+    /// word edge (`bare_word_ok`), and an occurrence that reads no literal is
+    /// no site at all (`scan_guarded` drops it), so `topic = x`, a prose
     /// `topic name` and `topic Topics::ORDERS` mint nothing. Never an
     /// expression: the LA.4 fold has no slot to read here.
     BareArg,
     // --- DG.2: A CONSTRUCTOR WHOSE FIRST ARGUMENT IS THE TOPIC ---------------
     /// DG.2: a dotless TYPE needle read only where it is CONSTRUCTED, arg #0's
-    /// literal ([`ctor_region`]): Kafka's `ProducerRecord(topic, ..)` in every
+    /// literal (`ctor_region`): Kafka's `ProducerRecord(topic, ..)` in every
     /// JVM spelling, Java `new ProducerRecord<String, String>("orders", v)`
     /// and its diamond `<>`, Scala `new ProducerRecord[String, String](
     /// "orders", v)`, Kotlin `ProducerRecord<String, String>("orders", v)`
     /// with no `new`. One optional type-argument list (`<..>` or `[..]`) is
     /// stepped over, then a `(` must follow: a declaration
     /// (`ProducerRecord<K, V> r = ..`), an import line and `classOf[
-    /// ProducerRecord[..]]` are no site at all ([`scan_guarded`] drops them).
+    /// ProducerRecord[..]]` are no site at all (`scan_guarded` drops them).
     /// A non-literal arg #0 goes to the LA.4 fold. The needle reads only at a
-    /// word edge ([`bare_word_ok`]), so `MyProducerRecord(` and
+    /// word edge (`bare_word_ok`), so `MyProducerRecord(` and
     /// `ProducerRecords` are not it.
     CtorArgLiteral,
     // --- DH.3: A COMMAND VECTOR WHOSE VERB IS A LITERAL ---------------------
     /// DH.3: a raw command vector in the argument region, the quoted literal
     /// right after the element equal (ASCII case-insensitive) to the command
-    /// ([`command_arg`]): package:redis's `cmd.send_object(['PUBLISH',
+    /// (`command_arg`): package:redis's `cmd.send_object(['PUBLISH',
     /// 'orders', payload])`. The command must OPEN its vector (the region's
     /// first argument, or the first element of a list inside it), the way a
     /// Redis command always does, so `['SET', 'publish', v]` is no publish. A
     /// call whose vector names another command (`['SET', k, v]`) is no site at
-    /// all ([`scan_guarded`] drops it); the command with no literal after it
+    /// all (`scan_guarded` drops it); the command with no literal after it
     /// (`['PUBLISH', channel, m]`) is a site that reads no topic, so it keeps
     /// the framework tag. Never an expression: the LA.4 fold has no slot here.
     CommandArg(&'static str),
     // --- DH.4: A KEYWORD OPTION INSIDE THE ENCLOSING TUPLE ------------------
     /// DH.4: `<key>: <value>` read in the bracket the needle opens, else in the
-    /// innermost bracket group ENCLOSING the needle ([`enclosing_region`]):
+    /// innermost bracket group ENCLOSING the needle (`enclosing_region`):
     /// Elixir's Broadway producer tuple `{BroadwayKafka.Producer, hosts: [..],
     /// topics: ["orders"]}`, often spread over several lines, and Tortoise's
     /// `Tortoise311.Supervisor.start_child(.., subscriptions: [{"sensors/temp",
     /// 0}])`. Keys are tried in table order with [`TopicRule::Keyed`]'s key
     /// search (word edges; `:` / `=>` / `=` separators); the value is a
     /// literal, or the first literal inside up to two opening `[` / `{`
-    /// ([`keyed_in`]). No region, or a region where no key is followed by a
-    /// separator, is no site at all ([`scan_guarded`] drops it): an `alias
+    /// (`keyed_in`). No region, or a region where no key is followed by a
+    /// separator, is no site at all (`scan_guarded` drops it): an `alias
     /// BroadwayKafka.Producer` line, a `{Gnat.ConsumerSupervisor, settings}`
     /// tuple and a Tortoise connection that subscribes to nothing mint no
     /// consumer. A key whose value is no literal (`topics: @topics`) is a site
@@ -221,9 +221,9 @@ pub enum TopicRule {
     KeyedIn(&'static [&'static str]),
     // --- DT.2b: nats.go / JetStream, A SUBJECT THAT MAY SIT BEHIND A ctx -----
     /// DT.2b: a NATS PUBLISH subject: positional argument #0, or argument #1
-    /// when argument #0 is a context expression ([`nats_subject_slot`]: the
+    /// when argument #0 is a context expression (`nats_subject_slot`: the
     /// new jetstream API's `js.Publish(ctx, "orders.new", d)`). DT.2c: the slot
-    /// reads on the subject grammar ([`nats_subject`]): a literal is the
+    /// reads on the subject grammar (`nats_subject`): a literal is the
     /// subject; a concatenation, an interpolated literal, a `fmt.Sprintf`
     /// with a literal format or a same-file one-return subject function folds
     /// each WHOLE dynamic token to `*` (`"shop.shipments." + id` ->
@@ -234,7 +234,7 @@ pub enum TopicRule {
     NatsSubject,
     /// DT.2b: a NATS SUBSCRIBE filter (`conn.Subscribe("orders.*", cb)`,
     /// `js.PullSubscribe(subj, durable)`), in the slot
-    /// [`TopicRule::NatsSubject`] reads. DT.2c ([`nats_filter`]): a literal
+    /// [`TopicRule::NatsSubject`] reads. DT.2c (`nats_filter`): a literal
     /// or an identifier chain reads as before; a concatenation,
     /// interpolation, format or call is dynamic, never folded, because a
     /// filter's `*` is a real wildcard and a runtime token is not one.
@@ -311,7 +311,7 @@ pub fn clip(s: &str, n: usize) -> &str {
 
 /// Every occurrence of `needle` in `source`, each with the topic its argument
 /// region names under `rule` (or `None` when the rule cannot read one).
-/// No literal / comment guard: [`scan_guarded`] with a file that has none.
+/// No literal / comment guard: `scan_guarded` with a file that has none.
 pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
     scan_guarded(source, needle, rule, &mut LazyGuard::new("", source))
 }
@@ -2738,7 +2738,7 @@ fn subject_from_pieces(pieces: &[Piece<'_>]) -> Option<String> {
     (topic == out).then_some(topic)
 }
 
-/// DT.2c: the subject a `fmt.Sprintf` format spells ([`subject_from_pieces`]):
+/// DT.2c: the subject a `fmt.Sprintf` format spells (`subject_from_pieces`):
 /// `%s %d %v %x %X %o %b %t` are dynamic pieces and `%%` a literal `%`; any
 /// other verb (`%q`), a flag or a width (`%05d`, `%-8s`) or an explicit
 /// argument index is `None`, so the call is dynamic. `shop.orders.%s.placed`

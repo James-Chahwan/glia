@@ -4,7 +4,7 @@
 //! Module slot declared by L0.1 so its owner edits only this file. Filled by
 //! LD.14a; LD.14b, LD.6 and LE.4d extend it.
 //!
-//! LD.14a: [`CODE_TABLES`] is the code domain's [`DomainTables`] — the data
+//! LD.14a: [`CODE_TABLES`](crate::profile::CODE_TABLES) is the code domain's [`DomainTables`](glia_activation::profile::DomainTables) — the data
 //! half of the engine's `profile::CODE_PROFILE`, here beside the ids it names
 //! so the graph, store and projection crates (which cannot depend on the
 //! engine) read the same tables. Every list is the hardcoding it replaced,
@@ -25,7 +25,7 @@
 //! seeded it with four categories.
 //!
 //! LE.4d: `effect_sinks` is the table `effects` classifies with, one
-//! [`EffectSink`] per (target kind, reaching category) class: the data kinds
+//! [`EffectSink`](glia_activation::profile::EffectSink) per (target kind, reaching category) class: the data kinds
 //! over ACCESSES_DATA, every OUTBOUND marker the anchor pass
 //! (`extractors::anchor`) ties to the function that owns it (QUEUE_PRODUCER,
 //! EVENT_EMITTER, GRPC_CLIENT, RPC_CALL, WS_CLIENT, GRAPHQL_OPERATION, reached
@@ -41,7 +41,7 @@
 //! entity, git history) is left out, so weighs 0.
 //!
 //! DD.3: `identity_rules` is the code domain's ways two nodes are one
-//! thing, one [`IdentityRule`] per [`same_as::ALL_RULES`] name in that order
+//! thing, one [`IdentityRule`](glia_activation::profile::IdentityRule) per [`same_as::ALL_RULES`] name in that order
 //! (the identity resolver's eight [`same_as::RULES`], then DT.1h's
 //! `http_model` and DT.1k's `graphql_model`, which the models resolver
 //! writes):
@@ -53,7 +53,7 @@
 //! carry or community list: identity reaches a walk or a ranking only through
 //! the quotient (`glia_activation::algo::classes`, DD.1), never as an edge.
 //!
-//! DT.5d: [`INVOKED_MEMBERS`] is the code domain's table of members a
+//! DT.5d: [`INVOKED_MEMBERS`](crate::profile::INVOKED_MEMBERS) is the code domain's table of members a
 //! framework or the runtime invokes on an instance of their owner, with no
 //! source line spelling the call: Angular's lifecycle hooks, the
 //! ControlValueAccessor / Validator, PipeTransform, HttpInterceptor and
@@ -61,19 +61,19 @@
 //! as a walk-local hop from a live owner to such a member (engine
 //! `answers::invoked_members`), and `glia gaps` withholds such a member's
 //! dead_symbol row while its owner has an incoming carry edge. Neither
-//! stores an edge. [`invoked_member`] is the one matcher.
+//! stores an edge. [`invoked_member`](crate::profile::invoked_member) is the one matcher.
 //!
 //! DT.5l: the entry rule's second named row makes a Go `func init()` an
-//! entry, read through [`node_ext`] (the extension of a node's POSITION
+//! entry, read through [`node_ext`](crate::profile::node_ext) (the extension of a node's POSITION
 //! file, the one reader every entry caller and the invoked matcher use).
-//! [`INVOKED_MEMBERS`] gains signature-checked Go runtime-interface rows
+//! [`INVOKED_MEMBERS`](crate::profile::INVOKED_MEMBERS) gains signature-checked Go runtime-interface rows
 //! (`go_runtime`: `error`, `fmt.Stringer`, the marshalers, `sql.Scanner`,
 //! `driver.Valuer`, `http.Handler`, `sort.Interface`), the UIKit / AppKit /
 //! SwiftUI app-delegate row (`apple_app`) and the external-base rows
 //! (`transloco`, Angular's ErrorHandler / Resolve / TitleStrategy /
 //! RouteReuseStrategy, `dio`), whose owner must extend or implement a named
-//! base of a named library ([`ExternalBase`]). [`invoked_member_at`] is the
-//! matcher that reads those gates; [`invoked_member`] never matches such a
+//! base of a named library ([`ExternalBase`](crate::profile::ExternalBase)). [`invoked_member_at`](crate::profile::invoked_member_at) is the
+//! matcher that reads those gates; [`invoked_member`](crate::profile::invoked_member) never matches such a
 //! row.
 
 use glia_activation::profile::{

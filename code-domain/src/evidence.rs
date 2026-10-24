@@ -9,7 +9,7 @@
 //! ```
 //!
 //! - `emitter` — `<stage>:<name>`, the stage and the component inside it that
-//!   put the edge in the graph. The stage vocabulary is closed ([`STAGES`]):
+//!   put the edge in the graph. The stage vocabulary is closed ([`STAGES`](crate::evidence::STAGES)):
 //!   - `parser`    — a language parser's own `FileParse.edges`
 //!     (`parser:<lang tag>`);
 //!   - `extractor` — a cross-cutting extractor run on a parsed file
@@ -36,7 +36,7 @@
 //! - `file` — repo-relative, `/` separators.
 //! - `line` — 0-based, the POSITION `start_line` convention; the record
 //!   boundary (LD.1) converts to an editor line.
-//! - `basis` — how `file` / `line` were obtained ([`Basis`]).
+//! - `basis` — how `file` / `line` were obtained ([`Basis`](crate::evidence::Basis)).
 //!
 //! A CALLS / IMPORTS edge, and an edge resolved from an `UnresolvedRef`, is a
 //! `site`: its line is the call / import / reference row the parser recorded
@@ -46,7 +46,7 @@
 //!
 //! Emitters that know no location stamp the emitter alone; the engine's fill
 //! pass (`passes::fill_evidence_sites`) then completes `file` / `line` from the
-//! edge's endpoints through [`Evidence::fill`], never overwriting a location an
+//! edge's endpoints through [`Evidence::fill`](crate::evidence::Evidence::fill), never overwriting a location an
 //! emitter recorded.
 
 use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};

@@ -209,8 +209,8 @@ pub struct HostEntry {
 }
 
 /// Every `@Component(` / `@Directive(` decorator of `source`, in source order
-/// (DT.5a). The argument is balanced through [`find_balanced_paren`] and the
-/// class named by [`find_next_class_name`], as [`scan_decorated_classes`]
+/// (DT.5a). The argument is balanced through `find_balanced_paren` and the
+/// class named by `find_next_class_name`, as `scan_decorated_classes`
 /// does; inside the argument's object only first-level `template` / `host`
 /// keys are read. Text-level, UTF-8 safe: every slice is cut at an ASCII
 /// delimiter.

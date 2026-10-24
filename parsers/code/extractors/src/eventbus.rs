@@ -543,9 +543,9 @@ pub struct EventFold {
 
 /// CB.3b: the file's event nodes, both sides, emitted exactly as
 /// [`extract_event_emitter_nodes`] + [`extract_event_handler_nodes`] emit
-/// them, except that a site keyed by a constant ([`SiteName::Constant`]) is
+/// them, except that a site keyed by a constant (`SiteName::Constant`) is
 /// named by the value `resolve` turns its path into, when the LA.41 name rule
-/// ([`is_event_name`]) accepts it. So `emit(OrderEvents.Created, ..)` mints
+/// (`is_event_name`) accepts it. So `emit(OrderEvents.Created, ..)` mints
 /// `event_emit:order.created` and pairs with `@OnEvent("order.created")`.
 ///
 /// Resolution needs the whole repo's const table, which is not a function of
@@ -596,7 +596,7 @@ pub fn is_event_site(kind: NodeKindId, qname: &str) -> bool {
 
 /// CB.3b: swap every event site of one file's parse ([`is_event_site`]) for
 /// `fold`'s, emitters then handlers — the order the per-file pass adds them —
-/// through the swap LA.4's queue fold shares ([`marker_swap::swap`]): the old
+/// through the swap LA.4's queue fold shares (`marker_swap::swap`): the old
 /// nodes, their module CONTAINS and owner edges, nav entries and every edge /
 /// ref naming a gone id (a constant path that resolved) go; the fold's nodes
 /// go back in place, carrying their transport marks as the per-file pass sets
@@ -3708,7 +3708,7 @@ fn receiver_sites(source: &str) -> Vec<(usize, &str)> {
 /// each `(side, identity, at)` the caller resolved a [`PySignalSite`] to — in
 /// offset order, Medium, deduplicated per side on the identity, every site
 /// anchored ([`crate::anchor`]). An identity the LA.41 name rule
-/// ([`is_event_name`]) refuses mints nothing. No ORIGIN: blinker and Django
+/// (`is_event_name`) refuses mints nothing. No ORIGIN: blinker and Django
 /// signals are in-process buses. Nothing for a non-`.py` path.
 pub fn python_signal_nodes(
     source: &str,

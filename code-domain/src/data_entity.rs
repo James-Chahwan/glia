@@ -15,11 +15,11 @@
 //! `@Entity('x')`, `@@map`, `db_table`, Ecto's `schema "x"`), or derives by
 //! a rule that is not a plain plural of the model (Django's
 //! `<app_label>_<model>`), rides a CODE
-//! cell built by [`table_cell`] and emitted ONLY at the declaration site.
+//! cell built by [`table_cell`](crate::data_entity::table_cell) and emitted ONLY at the declaration site.
 //! Duplicate-id nodes stack their cells when the graph builder merges file
 //! parses, so query-site files never need to know the table.
 //!
-//! The graph crate's `DbResolver` reads the cell back through [`table_of`] and
+//! The graph crate's `DbResolver` reads the cell back through [`table_of`](crate::data_entity::table_of) and
 //! joins the model to the table other services name directly. It lives here,
 //! not in the graph crate or the extractors crate, because every writer (the
 //! language parsers and the prisma extractor) and the one reader share only

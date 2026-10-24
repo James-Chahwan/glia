@@ -8,18 +8,18 @@
 //! whole body, its callers' signatures, the far neighbourhood as one line or
 //! only a name. The rungs, cheapest first:
 //!
-//! - [`Fidelity::Qname`]: the bare qname.
-//! - [`Fidelity::Outline`]: one located line, `- <qname> (<KIND> <file>:<line>)`.
-//! - [`Fidelity::Preview`]: a `### ` header, the DOC's first line and the
+//! - [`Fidelity::Qname`](crate::ladder::Fidelity::Qname): the bare qname.
+//! - [`Fidelity::Outline`](crate::ladder::Fidelity::Outline): one located line, `- <qname> (<KIND> <file>:<line>)`.
+//! - [`Fidelity::Preview`](crate::ladder::Fidelity::Preview): a `### ` header, the DOC's first line and the
 //!   SIGNATURE (the CODE lines up to the first one that opens a body, at most
-//!   [`PREVIEW_LINES`]), fenced.
-//! - [`Fidelity::Full`]: the header, the DOC's first paragraph and the whole
+//!   [`PREVIEW_LINES`](crate::ladder::PREVIEW_LINES)), fenced.
+//! - [`Fidelity::Full`](crate::ladder::Fidelity::Full): the header, the DOC's first paragraph and the whole
 //!   CODE text, fenced.
 //!
 //! Full and Preview show a body, so they need one: a node with no CODE text
 //! (a ROUTE, an ENDPOINT, or a CODE cell that came back from the store as
 //! `code_span` JSON because its source moved or is gone, CD.7c) renders at
-//! Outline when asked for either ([`rendered_as`] says which rung a pick
+//! Outline when asked for either ([`rendered_as`](crate::ladder::rendered_as) says which rung a pick
 //! really renders at).
 //!
 //! Locations are 1-based (an editor's line): [`crate::node_position`]'s

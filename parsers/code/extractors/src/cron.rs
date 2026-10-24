@@ -49,7 +49,7 @@
 //! cron expression (or a normalised rate marker). `<target_id>` is the script
 //! basename / handler symbol when extractable, else `anon`. The full qname is
 //! the join key for `CronResolver` — drift detection rather than schedule
-//! overlap. The code sources run their schedule through [`normalise_schedule`]
+//! overlap. The code sources run their schedule through `normalise_schedule`
 //! (descriptors such as `@daily` become their 5-field expansion) so a robfig
 //! `@hourly` job and a manifest's `0 * * * *` share one identity.
 
@@ -2007,7 +2007,7 @@ enum HoconValue {
 /// quoted or not. HOCON's later-definition-wins rule holds within the text: a
 /// redefinition replaces the entry (and its line); a required substitution
 /// (`${X}`), a concatenation or a value that is no cron expression
-/// ([`normalise_schedule`]) clears it; a lone `${?X}` leaves it. An `include`
+/// (`normalise_schedule`) clears it; a lone `${?X}` leaves it. An `include`
 /// is not followed. Entries are in the order of their winning definition.
 pub fn hocon_quartz_schedules(text: &str) -> Vec<(String, String, u32)> {
     let bytes = text.as_bytes();

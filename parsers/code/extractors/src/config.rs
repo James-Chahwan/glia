@@ -11,7 +11,7 @@
 //!   - `DEFINES_CONFIG` — source module → key (Dockerfile `ENV`, `.env`, k8s)
 //!
 //! Single qname per name across the merged graph: `config:<flavor>:<rest>`.
-//! [`Flavor`] picks the segment and the name validator:
+//! `Flavor` picks the segment and the name validator:
 //!
 //!   - `config:env:<NAME>` — an environment variable (everything below).
 //!   - `config:secret:<provider>/<ref>` — a secrets-manager reference (A13.8):
@@ -44,7 +44,7 @@
 //!       `.envOrNone` / `.envOrSome` (DG.6; `sys.props` is JVM system
 //!       properties, not the environment)
 //!     - PHP:    `getenv('X')`, `$_ENV['X']`; Laravel's `env('X')` helper
-//!       in a `.php` file, at a word edge (DH.5, [`scan_laravel_env`])
+//!       in a `.php` file, at a word edge (DH.5, `scan_laravel_env`)
 //!     - Dart:   `Platform.environment['X']` (DH.5)
 //!     - Elixir: `System.get_env("X")`, `System.fetch_env!("X")`,
 //!       `System.fetch_env("X")` (DH.5)
@@ -55,7 +55,7 @@
 //!       `.GetValue<T>("A:B")`, `.GetSection("A")` / `.GetRequiredSection`,
 //!       `.GetConnectionString("Db")` (= `ConnectionStrings:Db`); a
 //!       `GetSection("A")` chain prefixes the key it is read through. See
-//!       [`scan_dotnet_config_reads`].
+//!       `scan_dotnet_config_reads`.
 //!
 //!   **Defines (separate file types via pipeline bypass):**
 //!     - Dockerfile `ENV KEY=value` / `ENV KEY value`
@@ -63,7 +63,7 @@
 //!     - k8s YAML `env: - name: KEY`
 //!     - docker-compose `environment: - KEY=value`
 //!     - every one of the four above, for a name `A__B[__C..]`, ALSO defines
-//!       `config:setting:A:B[:C..]` (CL.7b, [`dotnet_env_override`])
+//!       `config:setting:A:B[:C..]` (CL.7b, `dotnet_env_override`)
 //!     - .NET `appsettings.json` / `appsettings.<Env>.json` leaves
 //!       (CL.7b, [`extract_settings_json_defs`])
 //!
@@ -228,7 +228,7 @@ impl ConfigDef {
 /// [`ConfigNodes::sites`] entry per valid read so the engine can re-home the
 /// edge to the reading function (LE.4b).
 ///
-/// CJ.1c: `path` picks the literal / comment guard ([`LazyGuard`]; `""` = no
+/// CJ.1c: `path` picks the literal / comment guard (`LazyGuard`; `""` = no
 /// guard). In a Rust or Python file a read whose needle starts inside a string
 /// literal or comment (a scanner's own test source, a doc line) is dropped
 /// before any node, edge or site is built; a Python f-string's replacement
@@ -378,14 +378,14 @@ pub fn is_dotnet_settings_path(path: &str) -> bool {
 /// defines — every scalar leaf, its object path joined with `:` and an array
 /// element indexed `:0`, `:1` (the .NET binder's spelling), in the parsed
 /// map's iteration order (deterministic per file). A leaf's value rides an
-/// ENV cell through the A13.7 redaction ([`env_cell`], with the setting rules
-/// of [`is_secret_setting`]); a `null` or empty-string leaf is valueless. The
+/// ENV cell through the A13.7 redaction (`env_cell`, with the setting rules
+/// of `is_secret_setting`); a `null` or empty-string leaf is valueless. The
 /// value never reaches a name or qname.
 ///
 /// The text is read the way .NET's JSON configuration provider reads it: a
 /// leading BOM, `//` / `/* */` comments and trailing commas are allowed
-/// ([`strip_jsonc`]). Anything else serde_json rejects, or a root that is not
-/// an object, mints nothing (`parse_error=1`). At most [`SETTINGS_KEY_CAP`]
+/// (`strip_jsonc`). Anything else serde_json rejects, or a root that is not
+/// an object, mints nothing (`parse_error=1`). At most `SETTINGS_KEY_CAP`
 /// keys per file.
 ///
 /// fired_on, once per settings file:

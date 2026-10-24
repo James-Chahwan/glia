@@ -12,7 +12,7 @@
 //!
 //! Recognised shapes (intentionally narrow for v1 — long tail in v0.5+):
 //!   - Raw SQL (any language with a string literal): `FROM/JOIN/INTO/UPDATE`,
-//!     read only from SQL-shaped string literals (LG.3b, [`sql_statements`]):
+//!     read only from SQL-shaped string literals (LG.3b, `sql_statements`):
 //!     adjacent literals joined across one concatenation token, the joined
 //!     text must open with a statement verb, CTE names, SQL keywords and
 //!     function calls are never tables. Comments and prose are never scanned.
@@ -33,17 +33,17 @@
 //!     (Java), `.GetCollection<T>("x" | nameof(T))` (C# MongoDB.Driver)
 //!   - sqflite (DH.11): the table-named helpers `db.query('users')`,
 //!     `.queryCursor`, `.insert`, `.update`, `.delete` in a Dart file importing
-//!     `package:sqflite/` or `package:sqflite_common` ([`sqflite_table_calls`])
+//!     `package:sqflite/` or `package:sqflite_common` (`sqflite_table_calls`)
 //!   - Cypher: `MATCH (x:<Label>)` / `MERGE (x:<Label>)` (label-only; query
 //!     parsing punted), read only from Cypher-shaped string literals joined
-//!     like SQL (LA.28, [`scan_cypher_labels`]): a Rust `match`, SQL `MERGE
+//!     like SQL (LA.28, `scan_cypher_labels`): a Rust `match`, SQL `MERGE
 //!     INTO`, prose and comments are not Cypher; `::` and property-map values
 //!     are never labels.
 //!
 //! A declaration (ORM table, Slick table, Mongoose, DynamoDB, Beanie) is named
 //! only by the single-line literal that starts its argument or assignment
-//! ([`leading_literal`] / [`inline_literal`], LA.42), never by a later string,
-//! and every scanner's name must be [`entity_shaped`] at the emit funnel.
+//! (`leading_literal` / `inline_literal`, LA.42), never by a later string,
+//! and every scanner's name must be `entity_shaped` at the emit funnel.
 //!
 //! LE.4a — access sites. Every statement-shaped hit (a SQL FROM / JOIN / INTO /
 //! UPDATE table, a driver collection call, a Cypher node label) is also
@@ -2530,10 +2530,10 @@ fn collection_calls(source: &str) -> Vec<CollectionHit> {
     hits
 }
 
-/// CA.4: every driver collection call ([`COLLECTION_NEEDLES`]) whose first
+/// CA.4: every driver collection call (`COLLECTION_NEEDLES`) whose first
 /// argument is a bare identifier (`client.Database(db).Collection(name)`),
 /// as `(needle offset, identifier)` in source order: the calls
-/// [`collection_arg`] reads no name from because the name arrives as a
+/// `collection_arg` reads no name from because the name arrives as a
 /// variable. The engine's wrapper inference (`external::infer_wrappers`)
 /// keeps those whose identifier is a parameter of the enclosing function,
 /// which makes that function a collection constructor whose call sites carry

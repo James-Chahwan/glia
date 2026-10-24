@@ -52,7 +52,7 @@
 //! `ROUTER_NEEDLES`) or `location.origin`, so a backend `.ts` costs one
 //! `contains` pass per needle. Comments are blanked first (`//`, `/* */`,
 //! `<!-- -->`), so commented-out navigation is not a link. Every argument read
-//! is capped at [`MAX_ARG`] bytes and every tag at [`MAX_TAG`]; literal
+//! is capped at `MAX_ARG` bytes and every tag at `MAX_TAG`; literal
 //! skipping is depth-bounded; every slice goes through `str::get`.
 
 use std::borrow::Cow;

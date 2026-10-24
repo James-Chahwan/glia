@@ -32,7 +32,7 @@
 //!
 //! CJ.1c: in a Rust or Python file an occurrence whose needle starts inside
 //! a string literal or comment (a scanner's own test source, a doc line) is
-//! no reference ([`LazyGuard`]); every other language is unchanged. fired_on:
+//! no reference (`LazyGuard`); every other language is unchanged. fired_on:
 //! `[code-guard] <secrets|flags> lang=.. dropped=..`.
 //!
 //! The yaml side — k8s `secretKeyRef:` reads, `kind: Secret` and Flipt

@@ -5,7 +5,7 @@
 //!
 //! Three payloads, all written here and nowhere else:
 //!
-//! - **A model's declared fields** ([`ModelSchema`]): a SCHEMA_FIELDS cell
+//! - **A model's declared fields** ([`ModelSchema`](crate::wire::ModelSchema)): a SCHEMA_FIELDS cell
 //!   ([`crate::cell_type::SCHEMA_FIELDS`]) on an INTERFACE / CLASS / STRUCT, or
 //!   a GraphQL MESSAGE_TYPE node:
 //!
@@ -20,34 +20,34 @@
 //!   from `name` (the JSON name). `model` is written by a builder that typed
 //!   the field to an in-repo model. Every field keeps `name` / `type` /
 //!   `required`, so `contract_fields`' field reader reads it unchanged.
-//! - **A wire shape** ([`Shape`]): the value a call site sends or receives, as
+//! - **A wire shape** ([`Shape`](crate::wire::Shape)): the value a call site sends or receives, as
 //!   written (a type, a call chain, a field chain, an inline object, a union)
 //!   or open. On an ENDPOINT_HIT it is the `response` / `request` key
-//!   ([`append_hit_fields`] / [`hit_shapes`]); on a server site it is
-//!   [`ServerWire::shape`].
-//! - **A server site** ([`ServerWire`]): a MESSAGE_TYPE cell
+//!   ([`append_hit_fields`](crate::wire::append_hit_fields) / [`hit_shapes`](crate::wire::hit_shapes)); on a server site it is
+//!   [`ServerWire::shape`](crate::wire::ServerWire::shape).
+//! - **A server site** ([`ServerWire`](crate::wire::ServerWire)): a MESSAGE_TYPE cell
 //!   ([`crate::cell_type::MESSAGE_TYPE`]) on a handler or a GraphQL resolver /
 //!   operation. It keeps A12.1's leading keys (`type`, `raw`, `form`,
 //!   `window`; the queue extractor's MESSAGE_TYPE cell), with `window`
-//!   `site`, which no queue cell writes, so [`ServerWire::parse`] never
+//!   `site`, which no queue cell writes, so [`ServerWire::parse`](crate::wire::ServerWire::parse) never
 //!   mistakes one for the other.
 //!
-//! **Sorted keys.** [`ModelSchema`] and [`Shape`] write their keys in sorted
+//! **Sorted keys.** [`ModelSchema`](crate::wire::ModelSchema) and [`Shape`](crate::wire::Shape) write their keys in sorted
 //! (byte) order at every level, so a `serde_json::Value` round trip, which
 //! sorts keys when serde_json is built without `preserve_order` and keeps them
 //! when it is built with it, gives back the same bytes either way. That is
 //! what keeps an ENDPOINT_HIT byte-stable through the endpoint fold, which
 //! keeps the payload's top-level order and re-serialises nested objects
 //! through `serde_json::Value` (`engine/src/endpoint_fold.rs` `Fields`).
-//! [`ServerWire`]'s top-level order is fixed by hand (A12.1's leading keys);
-//! its builder rewrite goes through [`ServerWire::to_payload`], never a
+//! [`ServerWire`](crate::wire::ServerWire)'s top-level order is fixed by hand (A12.1's leading keys);
+//! its builder rewrite goes through [`ServerWire::to_payload`](crate::wire::ServerWire::to_payload), never a
 //! `Value` round trip. A later packet that needs a new key adds it here and
 //! keeps the sorted rule.
 //!
-//! **Kinds.** [`json_kind`] reads a field's declared type text as the JSON
-//! kind its value takes on the wire, per source [`WireFormat`];
-//! [`json_schema_kind`] reads an OpenAPI / JSON-Schema type as
-//! `contracts.rs` renders it. [`element_type`] peels pointers, nullability and
+//! **Kinds.** [`json_kind`](crate::wire::json_kind) reads a field's declared type text as the JSON
+//! kind its value takes on the wire, per source [`WireFormat`](crate::wire::WireFormat);
+//! [`json_schema_kind`](crate::wire::json_schema_kind) reads an OpenAPI / JSON-Schema type as
+//! `contracts.rs` renders it. [`element_type`](crate::wire::element_type) peels pointers, nullability and
 //! one array layer off a type text to the model name a builder resolves.
 //!
 //! Strings are escaped through `serde_json::to_string`. Readers are strict

@@ -1057,7 +1057,7 @@ impl RpcPackageCell {
 /// for repos whose contract lives outside the build; the data-driven pass is
 /// [`extract_known_grpc_client_nodes`].
 ///
-/// Each client carries its file's package evidence ([`client_evidence_cell`]),
+/// Each client carries its file's package evidence (`client_evidence_cell`),
 /// which the resolver uses to pick one service when a bare name is declared in
 /// more than one proto package (A5.4).
 ///
@@ -1218,7 +1218,7 @@ const GRPC_CONTEXT_NEEDLES: &[&str] = &[
     "GRPC.Stub",
 ];
 
-/// True when `source` carries any [`GRPC_CONTEXT_NEEDLES`] entry.
+/// True when `source` carries any `GRPC_CONTEXT_NEEDLES` entry.
 pub fn file_has_grpc_context(source: &str) -> bool {
     GRPC_CONTEXT_NEEDLES.iter().any(|n| source.contains(n))
 }
@@ -1752,10 +1752,10 @@ fn fold_rpc_name(name: &str) -> String {
 ///
 /// `nodes` / `nav` are the file's own parse. They locate:
 /// - the implementing type: the innermost CLASS / STRUCT holding a
-///   [`ServerShape::Base`] needle (via [`anchor::build_span_index`]), or the
+///   `ServerShape::Base` needle (via [`anchor::build_span_index`]), or the
 ///   type a Rust `impl <Service> for <Type>` names;
 /// - the methods that implement the service's rpcs: methods of that type whose
-///   name folds to an rpc name ([`fold_rpc_name`]). With no implementing type
+///   name folds to an rpc name (`fold_rpc_name`). With no implementing type
 ///   (a registration-only file such as Node's `addService`), any METHOD /
 ///   FUNCTION in the file whose name folds to an rpc counts.
 ///
