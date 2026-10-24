@@ -9,6 +9,8 @@
 #   bash scripts/rank-gate.sh baseline-add        merge the last check's `new` gated rankers into baseline/0.5.2 and current
 #   bash scripts/rank-gate.sh ratchet             copy the last green check's trims over baseline/current (HEAD must match)
 #   bash scripts/rank-gate.sh coverage            every scope item of gate.json `items` is measured or exempt
+#   bash scripts/rank-gate.sh flags               print the common rank_eval flags (COMMON), one per line (read-only;
+#                                                 scripts/embedding-gate.sh reads them, FB.6)
 #
 # Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the clones, the copies and run/), CARGO_TARGET_DIR
 # (where rank_eval is built; default <this checkout>/target). GLIA_RANK_PRIVATE is unset: the gate runs public
@@ -32,6 +34,10 @@ BIN=$TARGET/release/examples/rank_eval
 COMMON=(--round1 on --tune on --pick base,d85 --round2 on --round3 on --r3-perq on --ans on
         --max-commits 300 --max-seeds 5 --boot 1000)
 say() { echo "[rank-gate] $*"; }
+
+# `flags`: the one shared definition of the common flags, read by scripts/embedding-gate.sh. Read-only:
+# it touches no directory and fetches nothing.
+if [ "${1:-}" = flags ]; then printf '%s\n' "${COMMON[@]}"; exit 0; fi
 
 mkdir -p "$DIR" "$RUN" || { say "check: FAILED (mkdir $DIR)"; exit 2; }
 
@@ -293,5 +299,5 @@ case "${1:-}" in
   baseline-add) exec 9>"$DIR/.run.lock"; flock 9; do_baseline_add ;;
   ratchet) exec 9>"$DIR/.run.lock"; flock 9; do_ratchet ;;
   coverage) do_coverage ;;
-  *) echo "usage: $0 fetch|run|check|baseline <release>|baseline-add|ratchet|coverage" >&2; exit 2 ;;
+  *) echo "usage: $0 fetch|run|check|baseline <release>|baseline-add|ratchet|coverage|flags" >&2; exit 2 ;;
 esac

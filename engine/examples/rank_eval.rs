@@ -108,6 +108,19 @@
 //! (single, review and find shapes). Fired_on: `[rank-eval] engine parity repo=<label>
 //! t1s_raw_mismatch=<q>/<n> ..`; the round-1 md gains `### Engine parity`, the JSON
 //! `engine_intent_parity`. Parity rows, not gated.
+//!
+//! The embedding gate (0.5.4, FB.6): `--sem on` (needs `--round3 on`) appends the find shape's
+//! semantic rankers after every other find-bank row: SEM:t1 / SEM:t2 (per file the max cosine of
+//! the test commit's subject over its nodes' `semantic::embed_text` vectors, recipe t1 or t2),
+//! SEMp:t1 / SEMp:t2 (the subject with the BGE query prefix), SEMrand:t1 (a fixed random unit
+//! vector per node, the control) and FUSE[T1s,<each>] (`blend` 0.5 of the min-maxed T1s and
+//! semantic scores). `--sem-model bge-small|test-hash` (bge-small needs `--features sem-eval`),
+//! `--sem-cache <dir>` (`<label>-<model>.jsonl`, `{"h","b64"}` rows: a re-run embeds only new
+//! texts). Fired_on, per recipe: `[sem-eval] label=<l> recipe=<r> nodes=<n> embedded=<e>
+//! cached=<c> queries=<q> ms=<t>`; the JSON gains `sem`. Without `--sem on` no output moves.
+//! `--gate-pair "<a>,<b>;.." --gate-new <run.json> [--gate-shape find]` prints each pair's paired
+//! r10 diff and bootstrap CI (`[rank-gate] pair label=<l> shape=find a=<a> b=<b> metric=r10
+//! diff=.. ci=[..]`); scripts/embedding-gate.sh runs both and judges.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -121,6 +134,7 @@ use glia_activation::algo::ppr::PushPpr;
 use glia_activation::algo::reach;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
 use glia_activation::{ActivationConfig, ActivationPlan, Direction, Specificity};
+use glia_code_domain::external_inputs::{b64_decode, b64_encode};
 use glia_code_domain::glia_config::parse_str;
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::snapshots::{
@@ -129,6 +143,8 @@ use glia_code_domain::snapshots::{
 };
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId};
+use glia_embed::Embedder;
+use glia_embed::codec::{cosine, from_le_bytes, l2_normalise, to_le_bytes};
 use glia_engine::calibrate::{CalibrateOptions, Calibration, calibrate_snapshot};
 use glia_engine::find::{FIND_FILES_FUSION, FindFilesOptions, FindOptions, find_files_with};
 use glia_engine::intent::defs::{Tree, read_defs};
@@ -141,6 +157,7 @@ use glia_engine::rank::{
     CochangeIndex, FileIndex, NOT_CODE_EXTS, RankCache, Ranking, STRUCTURE_CANDIDATES,
 };
 use glia_engine::review::{INTENT_FUSION_REVIEW, IntentHistory, intent_files_with};
+use glia_engine::semantic::{EmbedRecipe, RECIPES, embed_text, text_hash};
 use glia_engine::{
     BlastOptions, GenerateResult, Locator, default_keying, entrypoint_reachable, generate_one,
     service_of,
@@ -298,6 +315,19 @@ struct Args {
     eng_overlay: String,
     /// The private config (JSON) the Kina-only modes read; `GLIA_RANK_PRIVATE` when unset.
     private: String,
+    /// `on` (FB.6, needs `--round3 on`): the embedding gate's semantic rankers join the find
+    /// shape's bank (SEM:t1 / SEM:t2 / SEMp:t1 / SEMp:t2 / SEMrand:t1 / FUSE[T1s,SEM*:*]).
+    sem: String,
+    /// `--sem on`: the embedding model, `bge-small` (default; needs `--features sem-eval`) or
+    /// `test-hash` (offline, deterministic, numbers meaningless).
+    sem_model: String,
+    /// `--sem on`: the directory of the vector cache (`<label>-<model>.jsonl`).
+    sem_cache: String,
+    /// FB.6: `--gate-pair "<a>,<b>;<c>,<d>" --gate-new <run.json>` prints each pair's paired
+    /// r10 diff (a - b) and its commit-cluster bootstrap CI over `--gate-shape`'s queries.
+    gate_pair: String,
+    /// `--gate-pair`'s shape (default `find`).
+    gate_shape: String,
 }
 
 fn parse_args() -> Args {
@@ -348,6 +378,11 @@ fn parse_args() -> Args {
         engine: "off".into(),
         eng_overlay: String::new(),
         private: std::env::var("GLIA_RANK_PRIVATE").unwrap_or_default(),
+        sem: "off".into(),
+        sem_model: "bge-small".into(),
+        sem_cache: "rank_eval_sem".into(),
+        gate_pair: String::new(),
+        gate_shape: "find".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -400,6 +435,11 @@ fn parse_args() -> Args {
             "--gate-new" => a.gate_new = v,
             "--gate-trim" => a.gate_trim = v,
             "--private" => a.private = v,
+            "--sem" => a.sem = v,
+            "--sem-model" => a.sem_model = v,
+            "--sem-cache" => a.sem_cache = v,
+            "--gate-pair" => a.gate_pair = v,
+            "--gate-shape" => a.gate_shape = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -416,7 +456,15 @@ fn parse_args() -> Args {
         a.engine == "off" || (a.round1 == "on" && a.round2 == "on"),
         "--engine on needs --round1 on --round2 on"
     );
-    let offline = !a.r3_compare.is_empty() || !a.gate_check.is_empty() || !a.gate_trim.is_empty();
+    assert!(a.sem == "on" || a.sem == "off", "--sem: expected on or off");
+    assert!(
+        a.sem == "off" || a.round3 == "on",
+        "--sem on needs --round3 on (the find shape)"
+    );
+    let offline = !a.r3_compare.is_empty()
+        || !a.gate_check.is_empty()
+        || !a.gate_trim.is_empty()
+        || !a.gate_pair.is_empty();
     assert!(
         offline || (!a.repo.is_empty() && !a.git.is_empty()),
         "--repo and --git are required"
@@ -1791,6 +1839,382 @@ fn ans_keys_find(ctx: &Ctx, subject: &str) -> Vec<(String, Vec<Key>)> {
     ctx.ans_ns
         .fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
     vec![("ANS:find".into(), keys)]
+}
+
+// ============================================================================
+// FB.6: the embedding gate's semantic rankers (`--sem on`)
+// ============================================================================
+
+/// The BGE retrieval instruction a query is prefixed with for the SEMp:* rankers (BGE's
+/// documented query form; Engram embeds queries raw, so this is the A/B).
+const SEM_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+/// Texts per embed call: each chunk is appended to the cache before the next, so an interrupted
+/// run keeps what it embedded.
+const SEM_CHUNK: usize = 512;
+
+/// One recipe's vectors over the candidate graph's nodes (`Graph::ids` order): `has[u]` when
+/// node u is an EMBED_KINDS node of a candidate file with a text, its unit vector at
+/// `v[u * dims..(u + 1) * dims]`.
+struct NodeVecs {
+    dims: usize,
+    has: Vec<bool>,
+    v: Vec<f32>,
+}
+
+impl NodeVecs {
+    fn empty(n: usize, dims: usize) -> NodeVecs {
+        NodeVecs {
+            dims,
+            has: vec![false; n],
+            v: vec![0.0; n * dims],
+        }
+    }
+
+    fn set(&mut self, u: usize, vec: &[f32]) {
+        self.has[u] = true;
+        self.v[u * self.dims..(u + 1) * self.dims].copy_from_slice(vec);
+    }
+
+    /// Per candidate file, the max cosine (`glia_embed::codec::cosine`, the shipped reading)
+    /// between `q` and its embedded nodes; None for a file with no embedded node.
+    fn file_max(&self, g: &Graph, q: &[f32]) -> Vec<Option<f64>> {
+        g.file_nodes
+            .iter()
+            .map(|ns| {
+                let mut best: Option<f64> = None;
+                for &u in ns {
+                    let u = u as usize;
+                    if !self.has[u] {
+                        continue;
+                    }
+                    let c = f64::from(cosine(q, &self.v[u * self.dims..(u + 1) * self.dims]));
+                    best = Some(best.map_or(c, |b: f64| b.max(c)));
+                }
+                best
+            })
+            .collect()
+    }
+}
+
+/// The semantic rankers' inputs, built once per run (`sem_ctx`): per recipe (`t1`, `t2`) the
+/// node vectors, the random-vector control over t1's nodes, and per test commit (its ordinal)
+/// the subject's vector raw and BGE-prefixed.
+struct SemCtx {
+    by_recipe: BTreeMap<&'static str, NodeVecs>,
+    rand: NodeVecs,
+    q_raw: Vec<Vec<f32>>,
+    q_pre: Vec<Vec<f32>>,
+}
+
+/// One cached vector: `h` the text's key (a node's `semantic::text_hash`, a query's `q:<hex>`),
+/// `b64` its little-endian f32s (the vectors.jsonl payload form).
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SemRow {
+    h: String,
+    b64: String,
+}
+
+/// A query text's cache key: `q:` + the first 16 hex of its blake3 (`text_hash`'s digest).
+fn sem_query_key(text: &str) -> String {
+    let h = text_hash(EmbedRecipe::T1, text);
+    format!("q:{}", h.split_once(':').map_or(h.as_str(), |(_, x)| x))
+}
+
+/// The control's vector for a node: `dims` standard normals (Box-Muller over the harness's
+/// `Rng` seeded with `h64(qname)`), L2-normalised, so identical across runs and machines.
+fn sem_rand_vec(qname: &str, dims: usize) -> Vec<f32> {
+    let mut rng = Rng(h64(qname));
+    let mut unit = || ((rng.next() >> 11) as f64 + 0.5) / (1u64 << 53) as f64;
+    let mut v: Vec<f32> = Vec::with_capacity(dims);
+    while v.len() < dims {
+        let (a, b) = (unit(), unit());
+        let r = (-2.0 * a.ln()).sqrt();
+        let t = 2.0 * std::f64::consts::PI * b;
+        v.push((r * t.cos()) as f32);
+        if v.len() < dims {
+            v.push((r * t.sin()) as f32);
+        }
+    }
+    l2_normalise(&mut v);
+    v
+}
+
+/// The vector cache: every row of `<dir>/<label>-<model>.jsonl` whose payload decodes to `dims`
+/// floats (looked up only, never iterated into an output), plus the open file new rows append to.
+struct SemCache {
+    rows: HashMap<String, Vec<f32>>,
+    path: std::path::PathBuf,
+}
+
+impl SemCache {
+    fn open(dir: &str, label: &str, model: &str, dims: u32) -> Result<SemCache, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("--sem-cache {dir}: {e}"))?;
+        let slug: String = model
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = std::path::Path::new(dir).join(format!("{label}-{slug}.jsonl"));
+        let mut rows = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                let Ok(r) = serde_json::from_str::<SemRow>(line) else {
+                    continue;
+                };
+                let Ok(bytes) = b64_decode(&r.b64) else {
+                    continue;
+                };
+                if let Ok(v) = from_le_bytes(&bytes, dims) {
+                    rows.insert(r.h, v);
+                }
+            }
+        }
+        Ok(SemCache { rows, path })
+    }
+
+    /// Embeds every key of `want` the cache lacks (sorted by key, `SEM_CHUNK` texts per call,
+    /// each chunk appended to the file before the next) and returns how many it embedded.
+    fn fill(
+        &mut self,
+        emb: &dyn Embedder,
+        want: &BTreeMap<String, String>,
+        what: &str,
+        label: &str,
+    ) -> Result<usize, String> {
+        use std::io::Write as _;
+        let miss: Vec<(&String, &String)> = want
+            .iter()
+            .filter(|(h, _)| !self.rows.contains_key(*h))
+            .collect();
+        if miss.is_empty() {
+            return Ok(0);
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let t0 = Instant::now();
+        let mut done = 0usize;
+        for chunk in miss.chunks(SEM_CHUNK) {
+            let texts: Vec<String> = chunk.iter().map(|(_, t)| (*t).clone()).collect();
+            let vecs = emb.embed(&texts)?;
+            if vecs.len() != texts.len() {
+                return Err(format!(
+                    "the model returned {} vectors for {} texts",
+                    vecs.len(),
+                    texts.len()
+                ));
+            }
+            let mut buf = String::new();
+            for ((h, _), v) in chunk.iter().zip(vecs) {
+                if v.len() != emb.dims() as usize {
+                    return Err(format!("the model returned a vector of {} dims", v.len()));
+                }
+                let row = SemRow {
+                    h: (*h).clone(),
+                    b64: b64_encode(&to_le_bytes(&v)),
+                };
+                buf.push_str(&serde_json::to_string(&row).map_err(|e| e.to_string())?);
+                buf.push('\n');
+                self.rows.insert((*h).clone(), v);
+            }
+            f.write_all(buf.as_bytes())
+                .map_err(|e| format!("{}: {e}", self.path.display()))?;
+            done += chunk.len();
+            eprintln!(
+                "[sem-eval] label={label} progress {what} embedded={done}/{} ms={}",
+                miss.len(),
+                t0.elapsed().as_millis()
+            );
+        }
+        Ok(done)
+    }
+}
+
+/// Builds the semantic rankers' inputs (`--sem on`): the node texts of every candidate file's
+/// EMBED_KINDS nodes per recipe (`semantic::embed_text`, the shipped text), each embedded once
+/// into the cache (`--sem-cache`), the control vectors, and the test commits' subjects (raw and
+/// prefixed). Runs on the main thread before the query loop. Fired_on, per recipe:
+/// `[sem-eval] label=<l> recipe=<r> nodes=<n> embedded=<e> cached=<c> queries=<q> ms=<t>`, then
+/// `[sem-eval] label=<l> recipe=query nodes=0 embedded=<e> cached=<c> queries=<q> ms=<t>`.
+/// The JSON's `sem` block carries the same counts and wall times.
+fn sem_ctx(
+    args: &Args,
+    merged: &MergedGraph,
+    g: &Graph,
+    subjects: &[String],
+) -> Result<(SemCtx, serde_json::Value), String> {
+    let t_load = Instant::now();
+    let emb = glia_embed::named(&args.sem_model)
+        .map_err(|e| format!("{e} (build rank_eval with `--features sem-eval` for bge-small)"))?;
+    let model_load_ms = t_load.elapsed().as_millis();
+    let dims = emb.dims();
+    let d = dims as usize;
+    let label = args.label.as_str();
+    let t_cache = Instant::now();
+    let mut cache = SemCache::open(&args.sem_cache, label, &args.sem_model, dims)?;
+    let cache_load_ms = t_cache.elapsed().as_millis();
+    let n = g.ids.len();
+    let mut nodes_of_file: Vec<usize> =
+        g.file_nodes.iter().flatten().map(|&u| u as usize).collect();
+    nodes_of_file.sort_unstable();
+    let nq_texts = 2 * subjects.len();
+    let mut by_recipe: BTreeMap<&'static str, NodeVecs> = BTreeMap::new();
+    let mut info = serde_json::Map::new();
+    info.insert("model".into(), json!(emb.model()));
+    info.insert("dims".into(), json!(dims));
+    info.insert("model_load_ms".into(), json!(model_load_ms));
+    info.insert("cache_load_ms".into(), json!(cache_load_ms));
+    let mut recipes = serde_json::Map::new();
+    for r in RECIPES {
+        let t0 = Instant::now();
+        let mut want: BTreeMap<String, String> = BTreeMap::new();
+        let mut keyed: Vec<(usize, String)> = Vec::new();
+        for &u in &nodes_of_file {
+            if let Some(t) = embed_text(merged, g.ids[u], r) {
+                let h = text_hash(r, &t);
+                keyed.push((u, h.clone()));
+                want.entry(h).or_insert(t);
+            }
+        }
+        let text_ms = t0.elapsed().as_millis();
+        let t_embed = Instant::now();
+        let embedded = cache.fill(emb.as_ref(), &want, r.as_str(), label)?;
+        let embed_ms = t_embed.elapsed().as_millis();
+        let t_fill = Instant::now();
+        let mut nv = NodeVecs::empty(n, d);
+        for (u, h) in &keyed {
+            let v = cache
+                .rows
+                .get(h)
+                .ok_or_else(|| format!("no vector for {h} after embedding"))?;
+            nv.set(*u, v);
+        }
+        let fill_ms = t_fill.elapsed().as_millis();
+        let ms = t0.elapsed().as_millis();
+        eprintln!(
+            "[sem-eval] label={label} recipe={r} nodes={} embedded={embedded} cached={} queries={nq_texts} ms={ms}",
+            keyed.len(),
+            want.len() - embedded
+        );
+        recipes.insert(
+            r.as_str().into(),
+            json!({"nodes": keyed.len(), "texts": want.len(), "embedded": embedded,
+                "cached": want.len() - embedded, "text_ms": text_ms, "embed_ms": embed_ms,
+                "index_ms": fill_ms, "ms": ms}),
+        );
+        by_recipe.insert(r.as_str(), nv);
+    }
+    info.insert("recipes".into(), json!(recipes));
+    // the control: t1's nodes, a fixed random unit vector each
+    let mut rand = NodeVecs::empty(n, d);
+    if let Some(t1) = by_recipe.get("t1") {
+        for &u in &nodes_of_file {
+            if t1.has[u] {
+                let qn = merged
+                    .graphs
+                    .iter()
+                    .find_map(|gr| gr.nav.qname_by_id.get(&g.ids[u]))
+                    .map_or("", String::as_str);
+                rand.set(u, &sem_rand_vec(qn, d));
+            }
+        }
+    }
+    // the queries: each test commit's subject, raw and prefixed
+    let t0 = Instant::now();
+    let mut want: BTreeMap<String, String> = BTreeMap::new();
+    let mut keys: Vec<(String, String)> = Vec::with_capacity(subjects.len());
+    for s in subjects {
+        let pre = format!("{SEM_QUERY_PREFIX}{s}");
+        let (kr, kp) = (sem_query_key(s), sem_query_key(&pre));
+        want.entry(kr.clone()).or_insert_with(|| s.clone());
+        want.entry(kp.clone()).or_insert(pre);
+        keys.push((kr, kp));
+    }
+    let embedded = cache.fill(emb.as_ref(), &want, "query", label)?;
+    let get = |k: &str| -> Result<Vec<f32>, String> {
+        cache
+            .rows
+            .get(k)
+            .cloned()
+            .ok_or_else(|| format!("no vector for {k} after embedding"))
+    };
+    let mut q_raw = Vec::with_capacity(keys.len());
+    let mut q_pre = Vec::with_capacity(keys.len());
+    for (kr, kp) in &keys {
+        q_raw.push(get(kr)?);
+        q_pre.push(get(kp)?);
+    }
+    let ms = t0.elapsed().as_millis();
+    eprintln!(
+        "[sem-eval] label={label} recipe=query nodes=0 embedded={embedded} cached={} queries={nq_texts} ms={ms}",
+        want.len() - embedded
+    );
+    info.insert(
+        "queries".into(),
+        json!({"subjects": subjects.len(), "texts": want.len(), "embedded": embedded,
+            "cached": want.len() - embedded, "ms": ms}),
+    );
+    Ok((
+        SemCtx {
+            by_recipe,
+            rand,
+            q_raw,
+            q_pre,
+        },
+        serde_json::Value::Object(info),
+    ))
+}
+
+/// The semantic rankers of one find-shape query (test commit `tc`; `t1s` its BM25 file scores),
+/// appended to the find bank: SEM:<r> (per file the max cosine of the raw subject over its nodes'
+/// recipe-r vectors, key `[max, 0, 0]`, a file with no embedded node `[-inf; 3]`, ties by path),
+/// SEMp:<r> (the same, BGE-prefixed subject), SEMrand:t1 (the raw subject over the control's
+/// random node vectors) and FUSE[T1s,<sem>] = 0.5 minmax(T1s) + 0.5 minmax(<sem>) (`blend` over
+/// `mm_ex`, the find bank's own fusion; a file with no embedded node takes the lowest score
+/// present, so its min-max is 0; ties go to the file's degree, as the bank's scalar fusions'
+/// do). No seed is excluded: the find shape has none.
+fn sem_keys_find(ctx: &Ctx, sem: &SemCtx, tc: usize, t1s: &[f64]) -> NamedKeys {
+    let g = ctx.g;
+    let nf = g.paths.len();
+    let none = vec![false; nf];
+    let mm_t1s = mm_ex(t1s, &none);
+    let key = |s: &[Option<f64>]| -> Vec<Key> {
+        s.iter()
+            .map(|x| x.map_or([f64::NEG_INFINITY; 3], |c| [c, 0.0, 0.0]))
+            .collect()
+    };
+    let fuse = |s: &[Option<f64>]| -> Vec<Key> {
+        let lo = s.iter().flatten().copied().fold(f64::INFINITY, f64::min);
+        let lo = if lo.is_finite() { lo } else { 0.0 };
+        let filled: Vec<f64> = s.iter().map(|x| x.unwrap_or(lo)).collect();
+        blend(0.5, &mm_t1s, &mm_ex(&filled, &none))
+            .into_iter()
+            .zip(&g.file_deg)
+            .map(|(b, &dg)| [b, 0.0, dg])
+            .collect()
+    };
+    let (Some(qr), Some(qp)) = (sem.q_raw.get(tc), sem.q_pre.get(tc)) else {
+        return Vec::new();
+    };
+    let mut out: NamedKeys = Vec::new();
+    let mut fused: NamedKeys = Vec::new();
+    for (name, recipe, q) in [
+        ("SEM:t1", "t1", qr),
+        ("SEM:t2", "t2", qr),
+        ("SEMp:t1", "t1", qp),
+        ("SEMp:t2", "t2", qp),
+    ] {
+        let Some(nv) = sem.by_recipe.get(recipe) else {
+            continue;
+        };
+        let s = nv.file_max(g, q);
+        out.push((name.to_string(), key(&s)));
+        fused.push((format!("FUSE[T1s,{name}]"), fuse(&s)));
+    }
+    out.push(("SEMrand:t1".to_string(), key(&sem.rand.file_max(g, qr))));
+    out.extend(fused);
+    out
 }
 
 // ============================================================================
@@ -3403,6 +3827,9 @@ fn main() {
     if !args.gate_check.is_empty() {
         std::process::exit(gate_check_main(&args));
     }
+    if !args.gate_pair.is_empty() {
+        std::process::exit(gate_pair_main(&args));
+    }
     if !args.r3_compare.is_empty() {
         r3_compare_main(&args);
         return;
@@ -3996,6 +4423,7 @@ fn main() {
     let mut tc_sha: Vec<String> = test_idx.iter().map(|&k| commits[k].sha.clone()).collect();
     let mut tc_files: Vec<Vec<u32>> = test_idx.iter().map(|&k| commits[k].files.clone()).collect();
     let mut r3_info = serde_json::Map::new();
+    let mut sem_info: Option<serde_json::Value> = None;
     let mut transfer: Vec<(Vec<Out>, Vec<usize>)> = Vec::new();
     // per shape, each transfer query's id (`--r3-perq on`'s `perq_shapes`), aligned with `transfer`
     let mut transfer_ids: Vec<Vec<String>> = Vec::new();
@@ -4025,7 +4453,22 @@ fn main() {
             .iter()
             .map(|&k| subject(&commits[k].msg).to_string())
             .collect();
-        transfer = r3_transfer(&ctx, &tqs, &r1s, &subjects);
+        // FB.6: the vectors are embedded here, on the main thread, before the query loop's pool.
+        let sem = if args.sem == "on" {
+            match sem_ctx(&args, merged, &g, &subjects) {
+                Ok((s, info)) => {
+                    sem_info = Some(info);
+                    Some(s)
+                }
+                Err(e) => {
+                    eprintln!("[sem-eval] label={} error: {e}", args.label);
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            None
+        };
+        transfer = r3_transfer(&ctx, &tqs, &r1s, &subjects, sem.as_ref());
         transfer_ids = vec![Vec::new(); R3_SHAPES.len()];
         for q in &tqs {
             let sha = &commits[test_idx[q.tc]].sha;
@@ -4483,6 +4926,9 @@ fn main() {
         "hub_share_top20_mass_on_top5_degree_files": hub,
         "timing_ms_per_query": timing,
     });
+    if let Some(info) = sem_info {
+        doc["sem"] = info;
+    }
     if let Some(m) = vmode {
         let bi = BootIn {
             commit_of: &commit_of,
@@ -20621,6 +21067,7 @@ fn r3_transfer(
     tqs: &[TQuery],
     r1s: &[R1Commit],
     subjects: &[String],
+    sem: Option<&SemCtx>,
 ) -> Vec<(Vec<Out>, Vec<usize>)> {
     let g = ctx.g;
     let nf = g.paths.len();
@@ -20725,6 +21172,10 @@ fn r3_transfer(
                     bank.extend(keys);
                     late = l;
                 }
+            }
+            // FB.6: the semantic rankers after every other find-bank row (`--sem on` only).
+            if find && let Some(sem) = sem {
+                bank.extend(sem_keys_find(ctx, sem, q.tc, &t1s));
             }
             let eng = r
                 .eng
@@ -21922,6 +22373,98 @@ fn gate_trim_main(args: &Args) -> i32 {
         args.out
     );
     0
+}
+
+/// Splits `a,b` at its one comma outside brackets (`FUSE[T1s,SEM:t1],T1s`).
+fn gate_pair_split(pair: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    let mut at = None;
+    for (i, c) in pair.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            ',' if depth == 0 => {
+                if at.is_some() {
+                    return None;
+                }
+                at = Some(i);
+            }
+            _ => {}
+        }
+    }
+    let i = at?;
+    let (a, b) = (pair[..i].trim(), pair[i + 1..].trim());
+    (!a.is_empty() && !b.is_empty()).then_some((a, b))
+}
+
+/// FB.6: `--gate-pair "<a>,<b>;<c>,<d>;.." --gate-new <run.json> [--gate-shape find] [--boot B]`:
+/// per pair, `paired(a, b)` over the shape's queries' recall@10 with the commit-cluster
+/// bootstrap (B = `--boot`), so diff = a - b and the CI its 2.5 / 97.5 percentiles. Fired_on, one
+/// line per pair (diff and CI bounds printed in full, never rounded, so a judge reads them
+/// exactly): `[rank-gate] pair label=<l> shape=<s> a=<a> b=<b> metric=r10 diff=<d> ci=[<lo>,<hi>]
+/// a_r10=<x> b_r10=<y> queries=<q> commits=<c>`. Exit 2 on a missing shape, ranker or bad pair.
+fn gate_pair_main(args: &Args) -> i32 {
+    if args.gate_new.is_empty() {
+        eprintln!("[rank-gate] --gate-pair needs --gate-new <run.json>");
+        return 2;
+    }
+    let run = match gate_load(&args.gate_new) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let label = run["stats"]["label"].as_str().unwrap_or_default();
+    let shape = args.gate_shape.as_str();
+    let Some(s) = gate_run_shape(&run, shape) else {
+        eprintln!("[rank-gate] missing shape={shape} label={label}");
+        return 2;
+    };
+    let commit_of: Vec<usize> = s["commit_of"]
+        .as_array()
+        .map(|v| v.iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect())
+        .unwrap_or_default();
+    let nq = commit_of.len();
+    let nc = commit_of.iter().max().map_or(0, |m| m + 1);
+    if nq == 0 || args.boot == 0 {
+        eprintln!("[rank-gate] pair label={label} shape={shape}: no queries");
+        return 2;
+    }
+    let lf = ln_fact_table(nq + 1);
+    let mut code = 0;
+    for pair in args.gate_pair.split(';').filter(|p| !p.trim().is_empty()) {
+        let Some((a, b)) = gate_pair_split(pair) else {
+            eprintln!("[rank-gate] bad pair `{pair}`: expected <a>,<b>");
+            code = 2;
+            continue;
+        };
+        let (Some(va), Some(vb)) = (s["r10"].get(a), s["r10"].get(b)) else {
+            for r in [a, b] {
+                if s["r10"].get(r).is_none() {
+                    eprintln!("[rank-gate] missing ranker={r} shape={shape} label={label}");
+                }
+            }
+            code = 2;
+            continue;
+        };
+        let (xa, xb) = (json_col(va), json_col(vb));
+        if xa.len() != nq || xb.len() != nq {
+            eprintln!("[rank-gate] pair {a},{b}: column length differs from the shape's queries");
+            code = 2;
+            continue;
+        }
+        let p = paired(&xa, &xb, &commit_of, nc, args.boot, &lf);
+        eprintln!(
+            "[rank-gate] pair label={label} shape={shape} a={a} b={b} metric=r10 diff={} ci=[{},{}] a_r10={} b_r10={} queries={nq} commits={nc}",
+            p.mean,
+            p.lo,
+            p.hi,
+            xa.iter().sum::<f64>() / nq as f64,
+            xb.iter().sum::<f64>() / nq as f64
+        );
+    }
+    code
 }
 
 /// One judged row of a check.
