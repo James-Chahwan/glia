@@ -34,7 +34,15 @@
 //! hint's candidates when it names several) or `rejected`. Re-applying a row
 //! the build already applied is an upsert of the same entry, so the outcome is
 //! the build's. Marker:
-//! `[cells] ls rows=R bound=B rekeyed=K ambiguous=A orphaned=O rejected=X surface=cli`.
+//! `[cells] ls rows=R bound=B rekeyed=K ambiguous=A orphaned=O rejected=X vector_issues=<n> models=<m> surface=cli`.
+//!
+//! `ls --check` also audits `.glia/vectors.jsonl` against the vector-row
+//! contract (FB.2, `external_inputs::audit_vectors`): one
+//! `issue <kind> .glia/vectors.jsonl:<line> qname=<q> <detail>` line per
+//! issue (`no_model`, `no_dims`, `mixed_model`, `dims_disagree`,
+//! `duplicate_key`, `bad_payload`), `vector_audit {models, issues}` in
+//! `--json`; the marker's `models` is the number of distinct models. The audit
+//! reads the whole file whatever `--qname` names.
 //!
 //! `--rekey` rewrites each rekeyed row to its node's current qname and hint:
 //! the new row is written, then the old one removed, each by the store under
@@ -47,7 +55,8 @@
 //! `[cells] rekey conflict ...`.
 //!
 //! Exit codes: 0 ok; 1 when `--check` finds a row that does not apply
-//! (ambiguous, orphaned or rejected), or `rm` finds no such row; 2 for a
+//! (ambiguous, orphaned or rejected) or a vector audit issue, or `rm` finds
+//! no such row; 2 for a
 //! usage or I/O error (nothing is written).
 
 use std::collections::BTreeMap;
@@ -55,8 +64,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Subcommand};
 use glia_code_domain::external_inputs::{
-    CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, b64_decode, canonical, cell_type_id,
-    read_rows,
+    CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorAudit, VectorRow, audit_vectors,
+    b64_decode, canonical, cell_type_id, read_numbered_rows, read_rows,
 };
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::NodeId;
@@ -71,7 +80,8 @@ use serde_json::{Value, json};
 use crate::common::build_options;
 
 const EXIT_OK: i32 = 0;
-/// `--check` found a row that does not apply, or `rm` found no such row.
+/// `--check` found a row that does not apply or a vector audit issue, or `rm`
+/// found no such row.
 const EXIT_FAILED: i32 = 1;
 /// A usage or I/O error (clap's own usage errors exit 2 as well).
 const EXIT_USAGE: i32 = 2;
@@ -97,8 +107,8 @@ enum Action {
     Rm(RmArgs),
     /// List the `.glia/cells.jsonl` and `.glia/vectors.jsonl` rows.
     /// `--check` binds each row against a fresh build (bound / rekeyed /
-    /// ambiguous / orphaned / rejected) and exits 1 when one does not apply;
-    /// `--rekey` rewrites rekeyed rows to their node's current qname.
+    /// ambiguous / orphaned / rejected), audits the vector rows (FB.2), and
+    /// exits 1 when a row does not apply or the audit finds an issue; `--rekey` rewrites rekeyed rows to their node's current qname.
     Ls(LsArgs),
 }
 
@@ -165,7 +175,8 @@ struct LsArgs {
     /// of this qname).
     #[arg(long)]
     qname: Option<String>,
-    /// Emit JSON: `{"rows": [...]}`, plus `check` counts under `--check`.
+    /// Emit JSON: `{"rows": [...]}`, plus `check` counts and `vector_audit`
+    /// under `--check`.
     #[arg(long)]
     json: bool,
     /// Bind every row against a fresh build of the repo.
@@ -538,14 +549,18 @@ fn ls(a: LsArgs) -> Result<i32, String> {
             .map(|(c, _)| c)
             .collect::<Vec<_>>(),
     );
+    let (numbered, _) = read_numbered_rows::<VectorRow>(&root.join(VECTORS_FILE));
+    let audit = audit_vectors(&numbered);
     eprintln!(
-        "[cells] ls rows={} bound={} rekeyed={} ambiguous={} orphaned={} rejected={} surface={SURFACE}",
+        "[cells] ls rows={} bound={} rekeyed={} ambiguous={} orphaned={} rejected={} vector_issues={} models={} surface={SURFACE}",
         counts.rows,
         counts.bound,
         counts.rekeyed,
         counts.ambiguous,
         counts.orphaned,
-        counts.rejected
+        counts.rejected,
+        audit.issues.len(),
+        audit.models.len()
     );
     let rekey = if a.rekey {
         Some(rekey_rows(&root, &merged, &rows, &mut checked, &keep)?)
@@ -580,7 +595,11 @@ fn ls(a: LsArgs) -> Result<i32, String> {
                 v
             })
             .collect();
-        let mut doc = json!({ "rows": out, "check": counts.json() });
+        let mut doc = json!({
+            "rows": out,
+            "check": counts.json(),
+            "vector_audit": audit_json(&audit),
+        });
         if let (Some((rewritten, conflicts)), Some(o)) = (rekey, doc.as_object_mut()) {
             o.insert(
                 "rekey".into(),
@@ -592,8 +611,14 @@ fn ls(a: LsArgs) -> Result<i32, String> {
         for (r, c) in listed {
             println!("{} {}{}", c.status, r.label(), c.detail());
         }
+        for i in &audit.issues {
+            println!(
+                "issue {} {VECTORS_FILE}:{} qname={} {}",
+                i.kind, i.line, i.qname, i.detail
+            );
+        }
     }
-    let failed = counts.ambiguous + counts.orphaned + counts.rejected;
+    let failed = counts.ambiguous + counts.orphaned + counts.rejected + audit.issues.len();
     Ok(if failed > 0 { EXIT_FAILED } else { EXIT_OK })
 }
 
@@ -888,6 +913,18 @@ fn field(entry: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// `{models: {<model>: <rows>}, issues: [{line, qname, kind, detail}]}`.
+fn audit_json(a: &VectorAudit) -> Value {
+    json!({
+        "models": a.models,
+        "issues": a
+            .issues
+            .iter()
+            .map(|i| json!({ "line": i.line, "qname": i.qname, "kind": i.kind, "detail": i.detail }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn vector_size(r: &VectorRow) -> String {

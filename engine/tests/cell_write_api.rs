@@ -734,3 +734,72 @@ fn a_hint_singles_out_one_of_two_twins() {
         "{err}"
     );
 }
+
+/// FB.2: vectors are keyed by (qname, kind). Two nodes sharing a qname each
+/// keep their own VECTOR row through two writes, both rows bind, and removing
+/// the METHOD's row keeps the ATTRIBUTE's.
+#[test]
+fn twins_keep_their_own_vector_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("twin");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("app.py"), CART).unwrap();
+    let dir = persist(&root);
+    let q = "app::Cart::total";
+    let method_vec: Vec<u8> = 1.0f32.to_le_bytes().to_vec();
+    let attr_vec: Vec<u8> = (-1.0f32).to_le_bytes().to_vec();
+    for (kind, bytes) in [("METHOD", &method_vec), ("ATTRIBUTE", &attr_vec)] {
+        let w = CellWrite::vector(q, bytes.clone(), Some("m1".into()), Some(1))
+            .with_kind(Some(kind.into()));
+        let out = write_cell(&root, Some(&dir), None, &w).unwrap();
+        assert_eq!(out.target, "bound", "{kind}");
+    }
+    let (rows, errors) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
+    assert!(errors.is_empty(), "{errors:?}");
+    let kinds: Vec<Option<&str>> = rows.iter().map(|r| r.kind.as_deref()).collect();
+    assert_eq!(
+        kinds,
+        vec![Some("ATTRIBUTE"), Some("METHOD")],
+        "sorted by (qname, kind)"
+    );
+    assert!(rows.iter().all(|r| r.text_hash.is_none()));
+
+    let m = build(&root);
+    let vector_of = |m: &MergedGraph, kind: NodeKindId| -> Option<CellPayload> {
+        let id = node_of(m, q, kind);
+        m.graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter())
+            .find(|n| n.id == id)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::VECTOR))
+            .map(|c| c.payload.clone())
+    };
+    assert_eq!(
+        vector_of(&m, node_kind::METHOD),
+        Some(CellPayload::Bytes(method_vec.clone()))
+    );
+    assert_eq!(
+        vector_of(&m, node_kind::ATTRIBUTE),
+        Some(CellPayload::Bytes(attr_vec.clone()))
+    );
+
+    // A kind-less removal matches only a kind-less row: both stay.
+    assert!(
+        remove_cell_entry(&root, None, None, &CellRemoval::vector(q))
+            .unwrap()
+            .is_none()
+    );
+    let removed = remove_cell_entry(
+        &root,
+        None,
+        None,
+        &CellRemoval::vector(q).with_kind(Some("METHOD".into())),
+    )
+    .unwrap();
+    assert!(removed.is_some());
+    let (rows, _) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
+    assert_eq!(
+        rows.iter().map(|r| r.kind.as_deref()).collect::<Vec<_>>(),
+        vec![Some("ATTRIBUTE")]
+    );
+}

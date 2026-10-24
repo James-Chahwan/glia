@@ -23,9 +23,27 @@
 //! optionally `kind` (a NodeKind NAME, to split a CLASS / SERVICE pair that
 //! share a qname) and `hint` (the node's move-stable identity hint,
 //! `graph::identity::Identity::hint`, captured by the writer so a moved node
-//! still binds). A vector row carries the little-endian bytes of one embedding
-//! in standard padded base64: `{"qname":"app::charge","dims":2,"b64":"AACAPwAAAEA="}`,
-//! optionally `model`.
+//! still binds).
+//!
+//! THE VECTOR-ROW CONTRACT (FB.2), for any writer (glia's `embed`, Engram, a
+//! script): a row is
+//! `{"qname","kind"?,"hint"?,"model","dims","text_hash"?,"b64"}`, e.g.
+//! `{"qname":"app::charge","model":"Xenova/bge-small-en-v1.5","dims":2,"b64":"AACAPwAAAAA="}`.
+//! - `b64` is standard padded base64 of `dims` little-endian f32 values, the
+//!   vector unit-norm (`|L2 - 1| <= 1e-3`, [`VECTOR_NORM_TOLERANCE`](crate::external_inputs::VECTOR_NORM_TOLERANCE)) and finite.
+//! - `model` names the exact artifact and `dims` its width; both are required
+//!   for a written row. One model per file: a reader skips rows of another
+//!   model.
+//! - The key is `(qname, kind)` ([`vector_key`](crate::external_inputs::vector_key), kind `""` when absent), so a
+//!   CLASS and a SERVICE sharing a qname keep a row each.
+//! - `text_hash` is `<recipe>:<16 lowercase hex>` ([`text_hash_ok`](crate::external_inputs::text_hash_ok); recipes
+//!   `t1` / `t2` are glia's embed text recipes). A row without one is valid
+//!   (another writer) and is never fresh to glia's embed cache.
+//!
+//! Reading stays lenient for old rows (`model` / `dims` are `Option`, so a
+//! 0.5.2 file loads and binds); [`audit_vectors`](crate::external_inputs::audit_vectors), read by `glia cell ls
+//! --check`, reports every departure from the contract, one of
+//! [`VECTOR_ISSUES`](crate::external_inputs::VECTOR_ISSUES).
 //!
 //! PAYLOADS. A CONSTRAINT, DECISION or CONV cell is a JSON array of entry
 //! objects, one per `(source, id)`, sorted by `(source, id)`, serialized
@@ -126,8 +144,173 @@ pub struct VectorRow {
     /// When given, the payload must be exactly `dims * 4` bytes (f32).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dims: Option<u32>,
+    /// `<recipe>:<16 lowercase hex>` of the text embedded (FB.2); absent for
+    /// a writer that does not record one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_hash: Option<String>,
     /// Standard padded base64 of the payload bytes.
     pub b64: String,
+}
+
+/// The audit's issue kinds, in [`VectorIssue::kind`] spelling: a row with no
+/// `model`, with no `dims`, of a model other than the file's majority, whose
+/// dims differ from its model's first row, a second row of one
+/// [`vector_key`], and a payload that is not a finite unit-norm f32 vector of
+/// `dims` (or a malformed `text_hash`).
+pub const VECTOR_ISSUES: [&str; 6] = [
+    "no_model",
+    "no_dims",
+    "mixed_model",
+    "dims_disagree",
+    "duplicate_key",
+    "bad_payload",
+];
+
+/// How far a vector's L2 norm may be from 1 (fp16-rounded writers pass).
+pub const VECTOR_NORM_TOLERANCE: f64 = 1e-3;
+
+/// One contract departure of one vector row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VectorIssue {
+    /// 1-based line of the row in its file.
+    pub line: u32,
+    pub qname: String,
+    /// One of [`VECTOR_ISSUES`].
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+/// What [`audit_vectors`] found in one vector sidecar.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VectorAudit {
+    /// Rows per named model.
+    pub models: BTreeMap<String, usize>,
+    /// Sorted by `(line, kind)`.
+    pub issues: Vec<VectorIssue>,
+}
+
+/// The key a vector row is stored, replaced and sorted by: `(qname, kind)`,
+/// kind `""` when the row names none.
+pub fn vector_key(r: &VectorRow) -> (String, String) {
+    (r.qname.clone(), r.kind.clone().unwrap_or_default())
+}
+
+/// `t<digits>:<16 lowercase hex>`, the `text_hash` form.
+pub fn text_hash_ok(s: &str) -> bool {
+    let Some((recipe, hex)) = s.split_once(':') else {
+        return false;
+    };
+    let digits = recipe.strip_prefix('t').unwrap_or("");
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && hex.len() == 16
+        && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Audit `(line, row)` pairs of one vector file, in file order, against the
+/// vector-row contract (module doc). The majority model is the one most rows
+/// name, the lexicographically smallest on a tie, so the verdict is
+/// deterministic.
+pub fn audit_vectors(rows: &[(u32, VectorRow)]) -> VectorAudit {
+    let mut models: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, r) in rows {
+        if let Some(m) = &r.model {
+            *models.entry(m.clone()).or_default() += 1;
+        }
+    }
+    let mut majority: Option<(&str, usize)> = None;
+    for (m, n) in &models {
+        if majority.is_none_or(|(_, best)| *n > best) {
+            majority = Some((m.as_str(), *n));
+        }
+    }
+    let named: usize = models.values().sum();
+    let mut issues = Vec::new();
+    let mut first_dims: BTreeMap<Option<&str>, (u32, u32)> = BTreeMap::new();
+    let mut first_key: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for (line, r) in rows {
+        let mut issue = |kind: &'static str, detail: String| {
+            issues.push(VectorIssue {
+                line: *line,
+                qname: r.qname.clone(),
+                kind,
+                detail,
+            });
+        };
+        match (&r.model, majority) {
+            (None, _) => issue("no_model", "the row names no model".into()),
+            (Some(m), Some((maj, n))) if m != maj => issue(
+                "mixed_model",
+                format!("model {m:?} is not the file's model {maj:?} ({n} of {named} rows)"),
+            ),
+            _ => {}
+        }
+        match r.dims {
+            None => issue("no_dims", "the row names no dims".into()),
+            Some(d) => match first_dims.get(&r.model.as_deref()) {
+                Some(&(d0, l0)) if d0 != d => issue(
+                    "dims_disagree",
+                    format!("dims={d} but the model's first row (line {l0}) has dims={d0}"),
+                ),
+                Some(_) => {}
+                None => {
+                    first_dims.insert(r.model.as_deref(), (d, *line));
+                }
+            },
+        }
+        let key = vector_key(r);
+        match first_key.get(&key) {
+            Some(l0) => issue(
+                "duplicate_key",
+                format!(
+                    "key ({}, {}) is first at line {l0}",
+                    key.0,
+                    if key.1.is_empty() { "-" } else { &key.1 }
+                ),
+            ),
+            None => {
+                first_key.insert(key, *line);
+            }
+        }
+        if let Err(e) = payload_ok(r) {
+            issue("bad_payload", e);
+        }
+        if let Some(h) = &r.text_hash
+            && !text_hash_ok(h)
+        {
+            issue(
+                "bad_payload",
+                format!("text_hash {h:?} is not <recipe>:<16 hex>"),
+            );
+        }
+    }
+    issues.sort_by_key(|i| (i.line, i.kind));
+    VectorAudit { models, issues }
+}
+
+/// Decodes `r`'s payload as `dims` little-endian f32 and checks it is finite
+/// and unit-norm.
+fn payload_ok(r: &VectorRow) -> Result<(), String> {
+    let bytes = b64_decode(&r.b64)?;
+    check_vector(&bytes, r.dims)?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!("payload is {} bytes, not whole f32s", bytes.len()));
+    }
+    let mut sum = 0f64;
+    for (i, c) in bytes.chunks_exact(4).enumerate() {
+        let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        if !v.is_finite() {
+            return Err(format!("value {i} is {v}"));
+        }
+        sum += f64::from(v) * f64::from(v);
+    }
+    let norm = sum.sqrt();
+    if (norm - 1.0).abs() > VECTOR_NORM_TOLERANCE {
+        return Err(format!("L2 norm is {norm:.6}, not 1"));
+    }
+    Ok(())
 }
 
 /// What one write puts on its node.
@@ -270,6 +453,12 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 /// that is not a row becomes `"<file>:<line>: <error>"` and the rest still
 /// load; a missing file is empty. Never panics.
 pub fn read_rows<T: DeserializeOwned>(path: &Path) -> (Vec<T>, Vec<String>) {
+    let (rows, errors) = read_numbered_rows(path);
+    (rows.into_iter().map(|(_, r)| r).collect(), errors)
+}
+
+/// [`read_rows`] with each row's 1-based line number, in the same order.
+pub fn read_numbered_rows<T: DeserializeOwned>(path: &Path) -> (Vec<(u32, T)>, Vec<String>) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
@@ -297,7 +486,7 @@ pub fn read_rows<T: DeserializeOwned>(path: &Path) -> (Vec<T>, Vec<String>) {
                 }
             });
         match parsed {
-            Ok(Some(row)) => rows.push(row),
+            Ok(Some(row)) => rows.push((u32::try_from(i + 1).unwrap_or(u32::MAX), row)),
             Ok(None) => {}
             Err(e) => errors.push(format!("{}:{}: {e}", path.display(), i + 1)),
         }
@@ -1354,6 +1543,7 @@ mod tests {
             hint: None,
             model: None,
             dims,
+            text_hash: None,
             b64: "AACAPwAAAEA=".into(),
         };
         let w = CellWrite::try_from(&row(Some(2))).unwrap();
@@ -1382,5 +1572,148 @@ mod tests {
             entry: json!({}),
         };
         assert!(CellWrite::try_from(&unknown).is_err());
+    }
+
+    fn unit(vals: &[f32]) -> String {
+        b64_encode(
+            &vals
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    fn vrow(
+        qname: &str,
+        kind: Option<&str>,
+        model: Option<&str>,
+        dims: Option<u32>,
+        b64: String,
+    ) -> VectorRow {
+        VectorRow {
+            qname: qname.into(),
+            kind: kind.map(Into::into),
+            hint: None,
+            model: model.map(Into::into),
+            dims,
+            text_hash: None,
+            b64,
+        }
+    }
+
+    fn kinds(a: &VectorAudit) -> Vec<(u32, &'static str)> {
+        a.issues.iter().map(|i| (i.line, i.kind)).collect()
+    }
+
+    #[test]
+    fn a_clean_vector_file_has_no_issue() {
+        let rows = vec![
+            (1, vrow("a::f", None, Some("m"), Some(2), unit(&[1.0, 0.0]))),
+            (
+                2,
+                vrow("a::g", Some("CLASS"), Some("m"), Some(2), unit(&[0.6, 0.8])),
+            ),
+            (
+                3,
+                vrow(
+                    "a::g",
+                    Some("SERVICE"),
+                    Some("m"),
+                    Some(2),
+                    unit(&[0.0, -1.0]),
+                ),
+            ),
+        ];
+        let a = audit_vectors(&rows);
+        assert!(a.issues.is_empty(), "{:?}", a.issues);
+        assert_eq!(a.models, BTreeMap::from([("m".to_string(), 3)]));
+    }
+
+    #[test]
+    fn each_issue_kind_is_reported() {
+        let mut hashed = vrow("a::h", None, Some("m"), Some(2), unit(&[1.0, 0.0]));
+        hashed.text_hash = Some("t1:XYZ".into());
+        let rows = vec![
+            (1, vrow("a::a", None, Some("m"), Some(2), unit(&[1.0, 0.0]))),
+            (2, vrow("a::b", None, None, Some(2), unit(&[1.0, 0.0]))),
+            (3, vrow("a::c", None, Some("m"), None, unit(&[1.0, 0.0]))),
+            (
+                4,
+                vrow("a::d", None, Some("other"), Some(2), unit(&[1.0, 0.0])),
+            ),
+            (5, vrow("a::e", None, Some("m"), Some(1), unit(&[1.0]))),
+            (6, vrow("a::a", None, Some("m"), Some(2), unit(&[0.0, 1.0]))),
+            (7, vrow("a::f", None, Some("m"), Some(2), unit(&[1.0, 1.0]))),
+            (
+                8,
+                vrow("a::g", None, Some("m"), Some(2), unit(&[f32::NAN, 0.0])),
+            ),
+            (9, vrow("a::i", None, Some("m"), Some(2), "***".into())),
+            (10, hashed),
+        ];
+        let a = audit_vectors(&rows);
+        assert_eq!(
+            kinds(&a),
+            vec![
+                (2, "no_model"),
+                (3, "no_dims"),
+                (4, "mixed_model"),
+                (5, "dims_disagree"),
+                (6, "duplicate_key"),
+                (7, "bad_payload"),
+                (8, "bad_payload"),
+                (9, "bad_payload"),
+                (10, "bad_payload"),
+            ]
+        );
+        let seen: std::collections::BTreeSet<&str> = a.issues.iter().map(|i| i.kind).collect();
+        assert_eq!(seen.len(), VECTOR_ISSUES.len());
+        assert!(
+            a.issues[3].detail.contains("first row (line 1)"),
+            "{:?}",
+            a.issues[3]
+        );
+        assert!(
+            a.issues[4].detail.contains("first at line 1"),
+            "{:?}",
+            a.issues[4]
+        );
+        assert!(a.issues[5].detail.contains("L2 norm"), "{:?}", a.issues[5]);
+    }
+
+    #[test]
+    fn a_model_tie_picks_the_smallest_name() {
+        let rows = vec![
+            (1, vrow("a::a", None, Some("zeta"), Some(1), unit(&[1.0]))),
+            (2, vrow("a::b", None, Some("alpha"), Some(1), unit(&[1.0]))),
+        ];
+        let a = audit_vectors(&rows);
+        assert_eq!(kinds(&a), vec![(1, "mixed_model")]);
+        assert!(a.issues[0].detail.contains("\"alpha\""), "{:?}", a.issues);
+    }
+
+    #[test]
+    fn text_hash_form_and_vector_key() {
+        assert!(text_hash_ok("t1:0123456789abcdef"));
+        assert!(text_hash_ok("t12:0123456789abcdef"));
+        for bad in [
+            "t1:0123456789ABCDEF",
+            "t:0123456789abcdef",
+            "x1:0123456789abcdef",
+            "t1:0123",
+            "t1",
+        ] {
+            assert!(!text_hash_ok(bad), "{bad}");
+        }
+        let r = vrow("a::f", None, None, None, String::new());
+        assert_eq!(vector_key(&r), ("a::f".to_string(), String::new()));
+        let row: VectorRow = serde_json::from_str(
+            r#"{"qname":"a","model":"m","dims":1,"text_hash":"t1:0123456789abcdef","b64":"AACAPw=="}"#,
+        )
+        .unwrap();
+        assert_eq!(row.text_hash.as_deref(), Some("t1:0123456789abcdef"));
+        let old: VectorRow =
+            serde_json::from_str(r#"{"qname":"a","dims":1,"b64":"AACAPw=="}"#).unwrap();
+        assert!(old.model.is_none() && old.text_hash.is_none());
     }
 }

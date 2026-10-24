@@ -392,6 +392,59 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
     `[[ids.tracker]]` with an empty `path`, `files`, `id`, `list` or `state`
   - a project path that is the repo root or leaves it
 
+## Cell sidecars
+
+Two JSONL files beside the overlay carry cells an outside writer sets on nodes: one JSON object
+per non-empty line, compact, sorted keys.
+
+- `.glia/cells.jsonl`: CONSTRAINT / DECISION / CONV entries, keyed by `(qname, cell, source,
+  id)`. Checked in: it is curated knowledge.
+- `.glia/vectors.jsonl`: one VECTOR row per `(qname, kind)`. Local and gitignored: it is
+  regenerable.
+
+The writers are `glia cell set|rm` (CLI), `PyGraph.set_cell` / `write_cell` (pyo3) and any
+outside tool that writes the files itself. glia's own writers take `.glia/cells.lock` for one
+write (a lock older than 30 s is a crashed writer's and is removed), upsert the row, sort the
+file by its key and replace it through a `.tmp` and a rename. Lifetime: a sidecar is an input,
+fingerprinted into the layout's staleness check, so editing it rebuilds the layout on its next
+load; the build is what applies it, and a cell written into a `.gmap` directly would be dropped
+by the next rebuild. `glia cell ls --check` binds every row against a fresh build and audits the
+vector file.
+
+### The vector-row contract
+
+Any writer (glia, Engram, a script) writes rows of this shape:
+
+| key | required | meaning |
+|---|---|---|
+| `qname` | yes | the node's qname |
+| `kind` | no | its NodeKind name (`SERVICE`), to split nodes sharing a qname |
+| `hint` | no | its move-stable v1 identity hint, the form `glia cell set --hint` takes |
+| `model` | yes | the exact model artifact (`Xenova/bge-small-en-v1.5`) |
+| `dims` | yes | the vector's width |
+| `text_hash` | no | `<recipe>:<16 lowercase hex>` of the text embedded (`t1:0123456789abcdef`) |
+| `b64` | yes | standard padded base64 of `dims` little-endian f32 values |
+
+The vector is finite and unit-norm (its L2 norm within 1e-3 of 1). A file holds one model: a
+reader skips rows of another. The key is `(qname, kind)`, `kind` empty when absent, so a CLASS
+and a SERVICE sharing a qname keep one row each. A row without `text_hash` is valid (another
+writer's) and is never fresh to glia's embed cache. Reading stays lenient: a 0.5.2 row with no
+`model` or `dims` still loads and binds, and the audit reports it.
+
+`glia cell ls --check` prints one `issue <kind> .glia/vectors.jsonl:<line> qname=<q> <detail>`
+line per departure (in `--json`, `vector_audit: {models, issues}`), the marker
+`[cells] ls rows=.. rejected=<x> vector_issues=<n> models=<m> surface=cli`, and exits 1 on any
+issue. The six kinds:
+
+| issue | the row |
+|---|---|
+| `no_model` | names no `model` |
+| `no_dims` | names no `dims` |
+| `mixed_model` | names a model other than the file's majority model (on a tie, the lexicographically smallest) |
+| `dims_disagree` | has `dims` other than the first row of its model |
+| `duplicate_key` | repeats an earlier row's `(qname, kind)` |
+| `bad_payload` | has undecodable base64, a size that is not `dims` f32s, a non-finite value, a norm off 1 by more than 1e-3, or a malformed `text_hash` |
+
 ## Rule invariants, transitive forbid and min_tier (version 2)
 
 `version = 2` adds four `[[constraint]]` fields. Everything else in the file reads as in version 1,

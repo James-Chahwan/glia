@@ -198,7 +198,7 @@ fn set_ls_rm_then_a_rename_orphans_the_row() {
     let bound = ok(&["cell", "ls", root, "--check"]);
     assert!(
         bound.stderr.contains(
-            "[cells] ls rows=1 bound=1 rekeyed=0 ambiguous=0 orphaned=0 rejected=0 surface=cli"
+            "[cells] ls rows=1 bound=1 rekeyed=0 ambiguous=0 orphaned=0 rejected=0 vector_issues=0 models=0 surface=cli"
         ),
         "{}",
         bound.stderr
@@ -220,7 +220,7 @@ fn set_ls_rm_then_a_rename_orphans_the_row() {
     );
     assert!(
         orphaned.stderr.contains(
-            "[cells] ls rows=1 bound=0 rekeyed=0 ambiguous=0 orphaned=1 rejected=0 surface=cli"
+            "[cells] ls rows=1 bound=0 rekeyed=0 ambiguous=0 orphaned=1 rejected=0 vector_issues=0 models=0 surface=cli"
         ),
         "{}",
         orphaned.stderr
@@ -450,7 +450,7 @@ fn check_lists_ambiguous_candidates() {
     );
     assert!(
         r.stderr.contains(
-            "[cells] ls rows=2 bound=1 rekeyed=0 ambiguous=1 orphaned=0 rejected=0 surface=cli"
+            "[cells] ls rows=2 bound=1 rekeyed=0 ambiguous=1 orphaned=0 rejected=0 vector_issues=0 models=0 surface=cli"
         ),
         "{}",
         r.stderr
@@ -790,4 +790,69 @@ fn set_hint_binds_reports_and_refuses() {
         Some(function.as_str()),
         "{check}"
     );
+}
+
+/// The source the committed `data/vectors/foreign_writer.jsonl` rows bind in.
+const FOREIGN: &str = "def charge(order_id):\n    total = order_id * 2\n    return total + len(str(order_id))\n\n\ndef refund(order_id):\n    return charge(order_id)\n\n\ndef audit(order_id):\n    return refund(order_id)\n\n\ndef settle(order_id):\n    return audit(order_id)\n";
+
+/// FB.2: a vector sidecar another writer wrote (no text_hash, one row with
+/// `kind`, one with `hint`) passes the contract audit; a row of another model
+/// appended to it is `issue mixed_model` and exits 1.
+#[test]
+fn ls_check_audits_the_vector_contract() {
+    let repo = Scratch::new("vector-audit");
+    repo.write("a.py", FOREIGN);
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/vectors/foreign_writer.jsonl"
+    );
+    let rows = std::fs::read_to_string(fixture).expect("the committed fixture");
+    repo.write(".glia/vectors.jsonl", &rows);
+    let root = repo.path();
+
+    let clean = ok(&["cell", "ls", root, "--check"]);
+    assert!(
+        clean
+            .stderr
+            .contains("rejected=0 vector_issues=0 models=1 surface=cli"),
+        "{}",
+        clean.stderr
+    );
+    assert!(!clean.stdout.contains("issue "), "{}", clean.stdout);
+    let json = ok(&["cell", "ls", root, "--check", "--json"]).json();
+    assert_eq!(
+        json["vector_audit"]["models"]["Xenova/bge-small-en-v1.5"], 3,
+        "{json}"
+    );
+    assert!(
+        json["vector_audit"]["issues"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{json}"
+    );
+
+    let other = r#"{"b64":"AACAPwAAAAAAAAAAAAAAAA==","dims":4,"model":"another/model","qname":"a::settle"}"#;
+    repo.write(".glia/vectors.jsonl", &format!("{rows}{other}\n"));
+    let mixed = glia(&["cell", "ls", root, "--check"]);
+    assert_eq!(mixed.code, 1, "{}\n{}", mixed.stdout, mixed.stderr);
+    assert!(
+        mixed.stdout.contains(
+            "issue mixed_model .glia/vectors.jsonl:4 qname=a::settle model \"another/model\""
+        ),
+        "{}",
+        mixed.stdout
+    );
+    assert!(
+        mixed
+            .stderr
+            .contains("vector_issues=1 models=2 surface=cli"),
+        "{}",
+        mixed.stderr
+    );
+    let json = glia(&["cell", "ls", root, "--check", "--json"]).json();
+    assert_eq!(
+        json["vector_audit"]["issues"][0]["kind"], "mixed_model",
+        "{json}"
+    );
+    assert_eq!(json["vector_audit"]["issues"][0]["line"], 4, "{json}");
 }

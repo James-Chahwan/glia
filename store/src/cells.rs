@@ -25,7 +25,8 @@
 //! when fresh, read the layout, bind the row through `graph::cells` (its
 //! `hint` is the caller's, else the bound node's move-stable
 //! `identity::Identity::hint`) and apply it; upsert the row (cells keyed by
-//! `(qname, cell, source, id)`, vectors by `qname`), rows sorted by that key;
+//! `(qname, cell, source, id)`, vectors by `(qname, kind)`, FB.2), rows
+//! sorted by that key;
 //! then rewrite the layout (only the touched shard's bytes change).
 //!
 //! Where the write lands is reported, never guessed: `target` is `bound`,
@@ -59,7 +60,8 @@ use std::time::{Duration, SystemTime};
 
 use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, ENTRY_SOURCES, VECTORS_FILE, VectorRow, WRITABLE, WritePayload,
-    b64_encode, canonical, check_vector, read_rows, remove_entry, validate_entry, write_rows,
+    b64_encode, canonical, check_vector, read_rows, remove_entry, validate_entry, vector_key,
+    write_rows,
 };
 use glia_code_domain::snapshots::redact_untrusted;
 use glia_code_domain::{cell_type, node_kind};
@@ -295,7 +297,8 @@ impl CellRemoval {
         }
     }
 
-    /// The VECTOR of `qname`.
+    /// The VECTOR row of `qname`; with [`CellRemoval::with_kind`], the row of
+    /// that kind (a kind-less removal matches only a kind-less row, FB.2).
     pub fn vector(qname: impl Into<String>) -> Self {
         CellRemoval::entry(qname, cell_type::VECTOR, "", "")
     }
@@ -630,7 +633,7 @@ fn hint_of(
 enum Sidecar {
     /// `.glia/cells.jsonl`: CONSTRAINT / DECISION / CONV entry rows.
     Cells(PathBuf, Vec<CellRow>),
-    /// `.glia/vectors.jsonl`: one VECTOR row per qname.
+    /// `.glia/vectors.jsonl`: one VECTOR row per `(qname, kind)` (FB.2).
     Vectors(PathBuf, Vec<VectorRow>),
 }
 
@@ -665,15 +668,19 @@ impl Sidecar {
                 rows.push(row);
             }
             (Sidecar::Vectors(_, rows), WritePayload::Vector { bytes, model, dims }) => {
-                rows.retain(|r| r.qname != w.qname);
-                rows.push(VectorRow {
+                let row = VectorRow {
                     qname: w.qname.clone(),
                     kind: w.kind.clone(),
                     hint: w.hint.clone(),
                     model: model.clone(),
                     dims: *dims,
+                    // The cell API carries no text hash; FB.5a's bulk writer does.
+                    text_hash: None,
                     b64: b64_encode(bytes),
-                });
+                };
+                let key = vector_key(&row);
+                rows.retain(|r| vector_key(r) != key);
+                rows.push(row);
             }
             _ => {
                 return Err(invalid(
@@ -700,7 +707,9 @@ impl Sidecar {
                 Some((row.kind, row.hint, Some(row.entry)))
             }
             Sidecar::Vectors(_, rows) => {
-                let at = rows.iter().position(|x| x.qname == r.qname)?;
+                // (qname, kind): a kind-less removal keeps rows that carry a kind.
+                let key = (r.qname.clone(), r.kind.clone().unwrap_or_default());
+                let at = rows.iter().position(|x| vector_key(x) == key)?;
                 let row = rows.remove(at);
                 Some((row.kind, row.hint, None))
             }
@@ -717,7 +726,7 @@ impl Sidecar {
                 Ok(rows.len())
             }
             Sidecar::Vectors(path, rows) => {
-                rows.sort_by(|a, b| a.qname.cmp(&b.qname));
+                rows.sort_by_key(vector_key);
                 write_rows(path, rows)?;
                 Ok(rows.len())
             }
