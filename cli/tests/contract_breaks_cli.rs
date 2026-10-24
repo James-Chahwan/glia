@@ -705,6 +705,7 @@ fn inferred_model_break_is_advisory() {
     assert_eq!(
         lines,
         [
+            "[contract-breaks] moved_files=0 paired_ops=0",
             "[contract-breaks] base=HEAD~1 pairs=0 breaking=0 compatible=0 unknown=0 removed=0 added=0 orphaned_clients=0",
             "[model-breaks] base=HEAD~1 min_tier=fact exchanges=7 http=5 graphql=2 rows=1 breaking=1 blocking=0 advisory=1 compatible=0 new_pairings=0 lost=0 unjudged=0",
         ],
