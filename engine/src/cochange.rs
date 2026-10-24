@@ -540,12 +540,23 @@ fn answer(
             (r, q)
         })
         .collect();
+    // FD.22: two repos with one file and one qname tie on every key above;
+    // the repo's first graph index (the merge's input order) breaks it, not
+    // `best`'s RepoId-hashed key order.
+    let repo_at = |repo: u64| {
+        merged
+            .graphs
+            .iter()
+            .position(|g| g.repo.0 == repo)
+            .unwrap_or(usize::MAX)
+    };
     ranked.sort_by(|(x, xq), (y, yq)| {
         y.confidence_permille
             .cmp(&x.confidence_permille)
             .then_with(|| y.support.cmp(&x.support))
             .then_with(|| x.file.cmp(&y.file))
             .then_with(|| xq.cmp(yq))
+            .then_with(|| repo_at(x.repo).cmp(&repo_at(y.repo)))
     });
 
     let mut rows: Vec<CochangeRow> = Vec::new();
@@ -664,15 +675,19 @@ fn normalise(files: &[String]) -> Vec<String> {
 }
 
 /// Per (repo, file), the MODULE whose first POSITION names the file, the
-/// smallest NodeId on a tie (the history stage's rule), for every file `keep`
-/// accepts.
+/// least (qname, graph index, node index) on a tie (FD.22: the history
+/// stage's least-qname rule, DE.1; never the NodeId, which hashes the RepoId),
+/// for every file `keep` accepts. Each tie prints once per call as
+/// `[tie-break] by qname site=cochange ties=<n>`.
 fn modules_by_file<'g>(
     merged: &'g MergedGraph,
     keep: impl Fn(&str) -> bool,
 ) -> BTreeMap<(u64, String), &'g Node> {
-    let mut by_file: BTreeMap<(u64, String), &'g Node> = BTreeMap::new();
-    for g in &merged.graphs {
-        for n in &g.nodes {
+    type Slot<'g> = ((&'g str, usize, usize), &'g Node);
+    let mut by_file: BTreeMap<(u64, String), Slot<'g>> = BTreeMap::new();
+    let mut ties = 0usize;
+    for (gi, g) in merged.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
                 continue;
             }
@@ -682,17 +697,28 @@ fn modules_by_file<'g>(
             if !keep(&file) {
                 continue;
             }
+            let key = (
+                g.nav.qname_by_id.get(&n.id).map_or("", String::as_str),
+                gi,
+                ni,
+            );
             by_file
                 .entry((g.repo.0, file))
                 .and_modify(|slot| {
-                    if n.id.0 < slot.id.0 {
-                        *slot = n;
+                    if slot.1.id != n.id {
+                        ties += 1;
+                        if key < slot.0 {
+                            *slot = (key, n);
+                        }
                     }
                 })
-                .or_insert(n);
+                .or_insert((key, n));
         }
     }
-    by_file
+    if ties > 0 {
+        eprintln!("[tie-break] by qname site=cochange ties={ties}");
+    }
+    by_file.into_iter().map(|(k, (_, n))| (k, n)).collect()
 }
 
 /// Node id -> the query MODULE it is: per (repo, query file), the MODULE of
@@ -757,6 +783,7 @@ fn better(rule: &Rule, slot: &Rule) -> bool {
 fn qnames_of(merged: &MergedGraph, ids: impl Iterator<Item = NodeId>) -> HashMap<u64, String> {
     let mut out: HashMap<u64, String> = HashMap::new();
     for id in ids {
+        // KEEP (FD.22): a lookup-only map keyed by id; nothing iterates it.
         if out.contains_key(&id.0) {
             continue;
         }

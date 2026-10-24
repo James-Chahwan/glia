@@ -334,17 +334,18 @@ pub(crate) fn search_with(
     cands.sort_by(|a, b| {
         a.tier.cmp(&b.tier).then_with(|| {
             if a.tier.is_exact() {
-                // pick_primary's key: (is_declaration, degree, Reverse(id)) max.
+                // pick_primary's key: (is_declaration, degree) max, then the
+                // least tie key (qname, kind, graph index; FD.22).
                 b.declaration
                     .cmp(&a.declaration)
                     .then_with(|| deg(b.id).cmp(&deg(a.id)))
-                    .then_with(|| a.id.0.cmp(&b.id.0))
+                    .then_with(|| merged.tie_cmp(a.id, b.id))
             } else {
                 deg(b.id)
                     .cmp(&deg(a.id))
                     .then_with(|| a.qname_len.cmp(&b.qname_len))
                     .then_with(|| a.qname.cmp(&b.qname))
-                    .then_with(|| a.id.0.cmp(&b.id.0))
+                    .then_with(|| merged.tie_cmp(a.id, b.id))
             }
         })
     });

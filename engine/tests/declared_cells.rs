@@ -2,7 +2,7 @@
 //! `[[note]]` stanzas land as CONSTRAINT / DECISION / CONV entries on the node
 //! each anchors on - an `anchor` qname, else the PROJECT node its scope names
 //! (for a constraint, DT.7a: else the deepest PROJECT above its scope, else
-//! the smallest-id MODULE under it) - and a build with them is as
+//! the least-qname MODULE under it) - and a build with them is as
 //! byte-reproducible as one without.
 //!
 //! The layout and overlay file are the substrate-gap fixture
@@ -198,9 +198,9 @@ fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
         })
 }
 
-/// The smallest-id MODULE of the build whose POSITION file lies under `dir`
+/// The least-qname MODULE (FD.22) of the build whose POSITION file lies under `dir`
 /// (`.` = any), as the CC.5a component fallback picks it, and its qname.
-fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
+fn least_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
     let under = |f: &str| {
         dir == "."
             || f == dir
@@ -222,7 +222,8 @@ fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
                     )
                 })
         })
-        .min_by_key(|(id, _)| id.0)
+        // FD.22: the least qname (graph order on a tie), never the NodeId.
+        .min_by(|a, b| a.1.cmp(&b.1))
         .expect("a MODULE under the path")
 }
 
@@ -288,7 +289,7 @@ fn subdir_scope_anchors_on_the_enclosing_project() {
 }
 
 /// DT.7a: an unscoped rule in a repo with no root manifest (no PROJECT at
-/// or above `.`) hangs on the smallest-id MODULE of the repo, as a
+/// or above `.`) hangs on the least-qname MODULE of the repo (FD.22), as a
 /// component does (CC.5a), and `glia check` reads it. Pre-fix baseline (HEAD
 /// a584c98a): no CONSTRAINT cell, `scope= -> . (no PROJECT)`.
 #[test]
@@ -297,7 +298,7 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
     let overlay = "version = 1\n\n[[constraint]]\nid = \"acyclic\"\nkind = \"no_cycle\"\n";
     let dir = repo(tmp.path(), Some(overlay), None);
     let r = generate_one(&dir).unwrap();
-    let (module, qname) = smallest_module_under(&r, ".");
+    let (module, qname) = least_module_under(&r, ".");
     assert_eq!(
         cell(&r, &qname, cell_type::CONSTRAINT),
         [
@@ -332,7 +333,7 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
 /// A constraint scope with no PROJECT at or above it and no MODULE under it,
 /// a decision scope no PROJECT sits at, and an anchor no node carries are
 /// orphaned; the unscoped rule in this repo without a root manifest is not
-/// (DT.7a: it hangs on the smallest-id MODULE, and is the one cell written).
+/// (DT.7a: it hangs on the least-qname MODULE (FD.22), and is the one cell written).
 #[test]
 fn orphan_scope_is_counted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -366,7 +367,7 @@ text = \"stale anchor\"
             all_of(&r, t)
         );
     }
-    let (_, module) = smallest_module_under(&r, ".");
+    let (_, module) = least_module_under(&r, ".");
     assert_eq!(
         cell(&r, &module, cell_type::CONSTRAINT),
         [

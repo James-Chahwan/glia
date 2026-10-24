@@ -171,30 +171,108 @@ impl MergedGraph {
     /// bare-name collisions (two `User`s in different modules), suffix matches
     /// across repos, and a declaration sharing its file module's qname.
     ///
-    /// Rule, as one key `(is_declaration, degree, Reverse(id))`:
+    /// Rule, as one key `(is_declaration, degree, Reverse(tie key))`:
     /// 1. a declaration beats a MODULE / PACKAGE / PROJECT / REGION / DOC_SPACE
     ///    container — `blast-radius Foo` means the symbol, not the file that
     ///    happens to share its key, however many IMPORTS the file carries;
     /// 2. then the highest total degree — the node that participates in the
     ///    graph is what traversal, `impact` and span resolution want, not an
     ///    edgeless marker;
-    /// 3. ties break on the lowest `NodeId`.
+    /// 3. ties break on the least [`Self::tie_cmp`] key `(qname, kind, graph
+    ///    index)` (FD.22), the identity center rule. Before FD.22 they broke on
+    ///    the lowest `NodeId`, which hashes the RepoId, so two clones of one
+    ///    commit could pick different nodes.
     ///
-    /// Every key is stable across processes, so the choice never rides on
-    /// `HashMap` iteration order — that randomness was the root of the
-    /// intermittent-empty `impact` / `trace` results.
+    /// Every key is stable across processes and checkouts, so the choice never
+    /// rides on `HashMap` iteration order (the root of the intermittent-empty
+    /// `impact` / `trace` results) or on where the tree is checked out. A pick
+    /// that reached step 3 prints `[tie-break] by qname site=pick_primary
+    /// ties=<n>` (n = the candidates tied on steps 1 and 2).
     pub fn pick_primary(&self, candidates: &[NodeId]) -> Option<NodeId> {
-        match candidates {
-            [] => None,
-            [only] => Some(*only),
-            many => many.iter().copied().max_by_key(|&id| {
-                (
-                    self.is_declaration(id),
-                    self.degree(id),
-                    std::cmp::Reverse(id.0),
-                )
-            }),
+        let (pick, ties) = self.pick_primary_tied(candidates);
+        if ties > 1 {
+            eprintln!("[tie-break] by qname site=pick_primary ties={ties}");
         }
+        pick
+    }
+
+    /// [`Self::pick_primary`] without its marker: the pick and how many
+    /// candidates tied on (is_declaration, degree) at the top (`0` or `1` =
+    /// no tie-break ran). A caller that picks in a loop counts the ties and
+    /// prints its own `[tie-break]` site once.
+    pub fn pick_primary_tied(&self, candidates: &[NodeId]) -> (Option<NodeId>, usize) {
+        match candidates {
+            [] => (None, 0),
+            [only] => (Some(*only), 0),
+            many => {
+                let keyed: Vec<(bool, usize, NodeId)> = many
+                    .iter()
+                    .map(|&id| (self.is_declaration(id), self.degree(id), id))
+                    .collect();
+                let Some(top) = keyed.iter().map(|&(d, g, _)| (d, g)).max() else {
+                    return (None, 0);
+                };
+                let mut tied: Vec<NodeId> = keyed
+                    .iter()
+                    .filter(|&&(d, g, _)| (d, g) == top)
+                    .map(|&(_, _, id)| id)
+                    .collect();
+                tied.sort_by(|a, b| self.tie_cmp(*a, *b));
+                tied.dedup();
+                let n = tied.len();
+                (tied.first().copied(), if n > 1 { n } else { 0 })
+            }
+        }
+    }
+
+    /// The head of [`Self::tie_cmp`]'s key: the qname (`""` when no nav names
+    /// it), the kind id (`u32::MAX` when none) and the index of the first
+    /// graph whose nav knows the id (`usize::MAX` when none), each read from
+    /// the first graph that has it. `merged.graphs` follows the build's group
+    /// and input order, never the RepoId.
+    fn tie_head(&self, id: NodeId) -> (&str, u32, usize) {
+        let qname = self
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.qname_by_id.get(&id))
+            .map_or("", String::as_str);
+        let kind = self
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.kind_by_id.get(&id))
+            .map_or(u32::MAX, |k| k.0);
+        let gi = self
+            .graphs
+            .iter()
+            .position(|g| g.nav.kind_by_id.contains_key(&id) || g.nav.qname_by_id.contains_key(&id))
+            .unwrap_or(usize::MAX);
+        (qname, kind, gi)
+    }
+
+    /// FD.22: the checkout-independent order of two nodes, least first:
+    /// `(qname, kind id, graph index)`, then the node index inside that graph
+    /// (read only when the head ties: one same-kind qname twice in a graph).
+    /// Every tie between equal candidates (pick_primary, the exact-name lists,
+    /// find's exact rows) goes through it, never through the NodeId, which
+    /// hashes the RepoId (the remote URL, or the directory name outside git).
+    pub fn tie_cmp(&self, a: NodeId, b: NodeId) -> std::cmp::Ordering {
+        if a == b {
+            return std::cmp::Ordering::Equal;
+        }
+        let (ha, hb) = (self.tie_head(a), self.tie_head(b));
+        ha.cmp(&hb).then_with(|| {
+            let at = |id: NodeId| {
+                self.graphs
+                    .get(ha.2)
+                    .and_then(|g| g.nodes.iter().position(|n| n.id == id))
+                    .unwrap_or(usize::MAX)
+            };
+            // KEEP (FD.22): the NodeId compare is reached only for two ids no
+            // node list of their shared graph holds (nav-only entries with one
+            // qname and kind); it keeps the order total, so a sort cannot
+            // fall back to its HashMap-fed input order.
+            at(a).cmp(&at(b)).then(a.0.cmp(&b.0))
+        })
     }
 
     /// Resolve a simple name (`"GroupsComponent"`) to a single `NodeId`,
@@ -205,7 +283,8 @@ impl MergedGraph {
         self.pick_primary(&self.names_exact(name))
     }
 
-    /// Every node whose simple name is exactly `name`, sorted by `NodeId` — the
+    /// Every node whose simple name is exactly `name`, sorted by
+    /// [`Self::tie_cmp`] (qname, kind, graph index; FD.22) — the
     /// [`Self::qnames_exact`] twin. Use when the candidate set matters (the
     /// engine's scoped seed prefers the in-scope ones before
     /// [`Self::pick_primary`]); use [`Self::resolve_name`] for the single
@@ -219,7 +298,7 @@ impl MergedGraph {
                 }
             }
         }
-        out.sort_by_key(|id| id.0);
+        out.sort_by(|a, b| self.tie_cmp(*a, *b));
         out
     }
 
@@ -235,8 +314,9 @@ impl MergedGraph {
         self.pick_primary(&self.qnames_exact(qname))
     }
 
-    /// Every node whose qname matches `qname` exactly, sorted by `NodeId` for a
-    /// stable, reproducible iteration order. Use when each match matters (e.g.
+    /// Every node whose qname matches `qname` exactly, sorted by
+    /// [`Self::tie_cmp`] (kind, then graph index; FD.22) for an order that is
+    /// the same in every process and every checkout. Use when each match matters (e.g.
     /// `impact` walks them all); use [`Self::node_id_by_qname`] for the single
     /// primary node.
     pub fn qnames_exact(&self, qname: &str) -> Vec<NodeId> {
@@ -248,13 +328,14 @@ impl MergedGraph {
                 }
             }
         }
-        out.sort_by_key(|id| id.0);
+        out.sort_by(|a, b| self.tie_cmp(*a, *b));
         out
     }
 
-    /// Every node whose qname *contains* `pattern`, sorted by `NodeId`. Backs
-    /// the pyo3 `find_nodes_by_qname` substring search; sorting keeps the result
-    /// reproducible across processes.
+    /// Every node whose qname *contains* `pattern`, sorted by
+    /// [`Self::tie_cmp`] (qname, kind, graph index; FD.22). Backs the pyo3
+    /// `find_nodes_by_qname` substring search; sorting keeps the result
+    /// reproducible across processes and checkouts.
     pub fn qnames_containing(&self, pattern: &str) -> Vec<NodeId> {
         let mut out = Vec::new();
         for g in &self.graphs {
@@ -264,7 +345,7 @@ impl MergedGraph {
                 }
             }
         }
-        out.sort_by_key(|id| id.0);
+        out.sort_by(|a, b| self.tie_cmp(*a, *b));
         out
     }
 
@@ -939,23 +1020,62 @@ mod tests {
     }
 
     #[test]
-    fn qname_matches_are_sorted_by_node_id() {
+    fn qname_matches_are_sorted_by_the_tie_key() {
         let m = dupe_name_graph();
         let got = m.qnames_exact("pkg::Dup");
         assert_eq!(got.len(), 2, "both same-qname nodes returned");
-        let mut want = got.clone();
-        want.sort_by_key(|id| id.0);
-        assert_eq!(
-            got, want,
-            "qnames_exact must return a stable id-sorted order"
-        );
+        // FD.22: (qname, kind, graph index), never the NodeId: CLASS (kind
+        // id) before COMPONENT.
+        let kinds: Vec<u32> = got
+            .iter()
+            .map(|id| m.graphs[0].nav.kind_by_id[id].0)
+            .collect();
+        let mut sorted = kinds.clone();
+        sorted.sort();
+        assert_eq!(kinds, sorted, "qnames_exact orders by kind on one qname");
 
-        // Substring search reaches all three (Dup, Dup marker, Dup::run).
+        // Substring search reaches all three (Dup, Dup marker, Dup::run),
+        // least qname first.
         let sub = m.qnames_containing("pkg::Dup");
         assert_eq!(sub.len(), 3);
-        let mut want_sub = sub.clone();
-        want_sub.sort_by_key(|id| id.0);
-        assert_eq!(sub, want_sub);
+        let qnames: Vec<&str> = sub
+            .iter()
+            .map(|id| m.graphs[0].nav.qname_by_id[id].as_str())
+            .collect();
+        assert_eq!(qnames, ["pkg::Dup", "pkg::Dup", "pkg::Dup::run"]);
+    }
+
+    /// FD.22: two equal-degree declarations of one simple name pick the least
+    /// qname in either id order, and report the tie.
+    #[test]
+    fn pick_primary_breaks_ties_by_qname_not_node_id() {
+        let r = repo();
+        let a = NodeId(900);
+        let b = NodeId(100);
+        let mut nav = CodeNav::default();
+        nav.record(a, "User", "a::User", node_kind::CLASS, None);
+        nav.record(b, "User", "b::User", node_kind::CLASS, None);
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
+        let m = MergedGraph::new(vec![RepoGraph {
+            repo: r,
+            nodes: vec![node(b), node(a)],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }]);
+        assert_eq!(m.pick_primary(&[a, b]), Some(a), "a::User < b::User");
+        assert_eq!(m.pick_primary(&[b, a]), Some(a));
+        assert_eq!(m.pick_primary_tied(&[a, b]), (Some(a), 2));
+        assert_eq!(m.resolve_name("User"), Some(a));
+        assert_eq!(m.names_exact("User"), vec![a, b]);
     }
 
     // ------------------------------------------------------------------------

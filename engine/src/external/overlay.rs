@@ -5,10 +5,12 @@
 //!
 //! Per stanza, in file order:
 //! - `from` / `to` bind by EXACT qname: in the stanza's own repo first, else in
-//!   any other repo of the build. Several hits bind the smallest NodeId (both
-//!   indexes are `graph::cells::QnameIndex`, which keeps hits smallest-first and
-//!   never iterates a HashMap), so the choice is deterministic. No hit on
-//!   either side leaves the stanza `orphaned`.
+//!   any other repo of the build. Several hits bind the least (kind, graph
+//!   index) hit (both indexes are `graph::cells::QnameIndex`, which keeps hits
+//!   in that order and never iterates a HashMap; FD.22: never the NodeId,
+//!   which hashes the RepoId), so the choice is the same in every clone; each
+//!   such tie counts in `[tie-break] by qname site=overlay_bind ties=<n>`. No
+//!   hit on either side leaves the stanza `orphaned`.
 //! - A stanza whose `(from, to, category)` is already an edge of the graph (an
 //!   extracted one, or an earlier stanza) is `redundant`: the extractor caught
 //!   up, and nothing is added (LF.2c reports it).
@@ -137,12 +139,13 @@ pub(super) fn apply_overlay_edges(
     let mut bound: Vec<Bound> = Vec::with_capacity(stanzas.len());
     if !stanzas.is_empty() {
         let own = QnameIndex::build(merged, Some(input.repo));
+        let mut ties = 0usize;
         for (kept, stanza) in stanzas.iter().enumerate() {
             let decl = stanza.get_ref();
             let line = cfg.line_of(stanza.span());
             let ordinal = 1 + kept + rejected_lines.iter().filter(|l| **l < line).count();
-            let from = bind(merged, &own, &mut stage.all_repos, &decl.from);
-            let to = bind(merged, &own, &mut stage.all_repos, &decl.to);
+            let from = bind(merged, &own, &mut stage.all_repos, &decl.from, &mut ties);
+            let to = bind(merged, &own, &mut stage.all_repos, &decl.to, &mut ties);
             let Some(category) = decl.category_id() else {
                 // The loader drops an unknown category; counted here too so a
                 // loader change cannot slip an unnamed edge through.
@@ -172,6 +175,9 @@ pub(super) fn apply_overlay_edges(
                     ));
                 }
             }
+        }
+        if ties > 0 {
+            eprintln!("[tie-break] by qname site=overlay_bind ties={ties}");
         }
     }
 
@@ -234,15 +240,21 @@ pub(super) fn apply_overlay_edges(
 }
 
 /// Bind `qname`: the stanza's own repo first, then every repo of the build.
-/// Several hits bind the smallest NodeId.
+/// Several hits bind the least (kind, graph index) one (FD.22), counted in
+/// `ties`.
 fn bind(
     merged: &MergedGraph,
     own: &QnameIndex,
     all: &mut Option<QnameIndex>,
     qname: &str,
+    ties: &mut usize,
 ) -> Option<NodeId> {
-    let pick = |t: CellTarget| match t {
-        CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some(id),
+    let mut pick = |t: CellTarget| match t {
+        CellTarget::Bound(id) => Some(id),
+        CellTarget::Ambiguous(id) => {
+            *ties += 1;
+            Some(id)
+        }
         _ => None,
     };
     pick(own.resolve(qname, None, None)).or_else(|| {
@@ -285,6 +297,7 @@ fn report(label: &str, t: &EdgeTally) {
 }
 
 /// The qname of `id`, for a detail line; its numeric id when no nav names it.
+/// KEEP (FD.22): the id is only the text of a nameless node, never a pick.
 fn qname_of(merged: &MergedGraph, id: NodeId) -> String {
     merged
         .graphs
@@ -385,6 +398,7 @@ fn server_routes(
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) || is_nav_route(&n.cells) {
                 continue;
             }
+            // KEEP (FD.22): a dedup set; `out` keeps graph then node order.
             if seen.insert(n.id.0) {
                 out.push((n.id, loc.file_of(n.id)));
             }
@@ -548,8 +562,9 @@ category = "USES"
         // `report` is the api repo's MODULE only; `src::report` the web one's.
         let own = QnameIndex::build(&merged, Some(inputs[0].repo));
         let mut all = None;
-        let web_mod = bind(&merged, &own, &mut all, "src::report").expect("own repo");
-        let api_mod = bind(&merged, &own, &mut all, "report").expect("other repo");
+        let mut ties = 0;
+        let web_mod = bind(&merged, &own, &mut all, "src::report", &mut ties).expect("own repo");
+        let api_mod = bind(&merged, &own, &mut all, "report", &mut ties).expect("other repo");
         let repo_of = |id: NodeId| {
             merged
                 .graphs
@@ -559,7 +574,8 @@ category = "USES"
         };
         assert_eq!(repo_of(web_mod), Some(inputs[0].repo));
         assert_eq!(repo_of(api_mod), Some(inputs[1].repo));
-        assert!(bind(&merged, &own, &mut all, "nope::nothing").is_none());
+        assert!(bind(&merged, &own, &mut all, "nope::nothing", &mut ties).is_none());
+        assert_eq!(ties, 0, "every bind here has one hit");
 
         for text in [
             "version = 1\n[walk]\nskip = [\"gen/\"]\n",

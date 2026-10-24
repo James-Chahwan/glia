@@ -296,3 +296,156 @@ fn graph_content_is_independent_of_the_repo_identity() {
         );
     }
 }
+
+/// One tie tree (FD.22): two `User` classes of equal degree in two modules
+/// (a bare-name tie), a FUNCTION and a CLASS sharing one qname (a qname tie),
+/// an overlay `[[edge]]` and an anchored `[[constraint]]` naming that qname,
+/// and an unanchored component whose path holds two MODULEs.
+fn write_tie_tree(root: &Path) {
+    write(root, "app/a/models.py", "class User:\n    pass\n");
+    write(root, "app/b/models.py", "class User:\n    pass\n");
+    write(
+        root,
+        "app/dup.py",
+        "def Dup():\n    return 1\n\n\nclass Dup:\n    pass\n",
+    );
+    write(root, "app/run.py", "def go():\n    return 2\n");
+    write(root, "svc/one.py", "def one():\n    return 1\n");
+    write(root, "svc/two.py", "def two():\n    return 2\n");
+    write(
+        root,
+        ".glia/overlay.toml",
+        "version = 2\n\n\
+         [[edge]]\nfrom = \"app::dup::Dup\"\nto = \"app::run::go\"\ncategory = \"CALLS\"\n\n\
+         [[constraint]]\nid = \"dup-anchor\"\nkind = \"invariant\"\nanchor = \"app::dup::Dup\"\ntext = \"tied anchor\"\n\n\
+         [[component]]\nname = \"svc\"\npaths = [\"svc\"]\n",
+    );
+}
+
+/// `(qname, kind)` of `id`, from the first graph that names it.
+fn qk(m: &MergedGraph, id: NodeId) -> (String, u32) {
+    endpoints(m)
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| (String::from("?"), u32::MAX))
+}
+
+/// What a tie decides, read without a NodeId: pick_primary by name and by
+/// qname, the exact-match candidate order, find's exact rows, every
+/// CONSTRAINT cell's anchor, and the overlay edge's endpoints.
+type TieAnswers = (
+    (String, u32),
+    (String, u32),
+    Vec<(String, u32)>,
+    Vec<(String, u32)>,
+    Vec<(String, u32, String)>,
+    Vec<(String, u32, String, u32)>,
+);
+
+fn tie_answers(m: &MergedGraph) -> TieAnswers {
+    let by_name = m
+        .resolve_name("User")
+        .map(|id| qk(m, id))
+        .unwrap_or_default();
+    let by_qname = m
+        .node_id_by_qname("app::dup::Dup")
+        .map(|id| qk(m, id))
+        .unwrap_or_default();
+    let names: Vec<(String, u32)> = m
+        .names_exact("User")
+        .into_iter()
+        .map(|id| qk(m, id))
+        .collect();
+    let found =
+        glia_engine::find::find_nodes(m, "User", &glia_engine::find::FindOptions::default());
+    let found: Vec<(String, u32)> = found
+        .results
+        .iter()
+        .filter(|r| r.r#match == "exact_name")
+        .map(|r| (r.qname.clone(), 0))
+        .collect();
+    let mut anchors: Vec<(String, u32, String)> = Vec::new();
+    for g in &m.graphs {
+        for n in &g.nodes {
+            for c in n
+                .cells
+                .iter()
+                .filter(|c| c.kind == glia_code_domain::cell_type::CONSTRAINT)
+            {
+                let (q, k) = qk(m, n.id);
+                anchors.push((q, k, payload_text(c).1));
+            }
+        }
+    }
+    anchors.sort();
+    anchors.dedup();
+    let ends = endpoints(m);
+    let unknown = (String::from("?"), u32::MAX);
+    let mut overlay: Vec<(String, u32, String, u32)> = m
+        .cross_edges
+        .iter()
+        .filter(|e| Evidence::of(e).is_some_and(|ev| ev.emitter.starts_with("overlay")))
+        .map(|e| {
+            let (fq, fk) = ends.get(&e.from).unwrap_or(&unknown).clone();
+            let (tq, tk) = ends.get(&e.to).unwrap_or(&unknown).clone();
+            (fq, fk, tq, tk)
+        })
+        .collect();
+    overlay.sort();
+    (by_name, by_qname, names, found, anchors, overlay)
+}
+
+/// FD.22: a tie between equal candidates breaks by (qname, kind, graph
+/// index), never by NodeId, so every copy of one tree under another
+/// directory name answers the same. The precondition proves the copies
+/// really order the tied ids differently, so a NodeId tie-break would split
+/// them.
+#[test]
+fn tie_breaks_are_independent_of_the_repo_identity() {
+    let scratch = Scratch::new("ties");
+    let names: Vec<String> = (0..8).map(|i| format!("ties-{i}")).collect();
+    let mut answers: Vec<(String, TieAnswers)> = Vec::new();
+    let mut user_orders = Vec::new();
+    let mut dup_orders = Vec::new();
+    for name in &names {
+        let root = scratch.path(name);
+        write_tie_tree(&root);
+        let m = build(&root);
+        let users = m.names_exact("User");
+        assert_eq!(users.len(), 2, "{name}: two User classes");
+        let mut by_q = users.clone();
+        by_q.sort_by_key(|id| qk(&m, *id));
+        user_orders.push(by_q[0].0 < by_q[1].0);
+        let mut dups = m.qnames_exact("app::dup::Dup");
+        assert_eq!(
+            dups.len(),
+            2,
+            "{name}: a FUNCTION and a CLASS share app::dup::Dup"
+        );
+        dups.sort_by_key(|id| qk(&m, *id));
+        dup_orders.push(dups[0].0 < dups[1].0);
+        answers.push((name.clone(), tie_answers(&m)));
+    }
+    assert!(
+        user_orders.iter().any(|b| *b) && user_orders.iter().any(|b| !*b),
+        "precondition: the User ids must order both ways across the copies: {user_orders:?}"
+    );
+    assert!(
+        dup_orders.iter().any(|b| *b) && dup_orders.iter().any(|b| !*b),
+        "precondition: the Dup ids must order both ways across the copies: {dup_orders:?}"
+    );
+    let first = answers[0].1.clone();
+    assert_eq!(first.0.0, "app::a::models::User", "the least qname wins");
+    assert!(
+        !first.4.is_empty(),
+        "the constraint and the component anchored"
+    );
+    assert_eq!(first.5.len(), 1, "the overlay edge bound");
+    let wrong: Vec<_> = answers.iter().filter(|(_, a)| *a != first).collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} copies differ from {first:#?}: {wrong:#?}",
+        wrong.len(),
+        names.len()
+    );
+}

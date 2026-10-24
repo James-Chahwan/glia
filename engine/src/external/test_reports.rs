@@ -212,6 +212,10 @@ impl<'a> RepoIndex<'a> {
                 );
             }
         }
+        // KEEP (FD.22): a canonical pool order only. A pool's pick goes
+        // through `pick_primary_tied` (order-independent, qname tie key) and
+        // `tests_by_name` binds only a one-node pool, so no output reads this
+        // NodeId order.
         for ids in by_tail.values_mut().chain(tests_by_name.values_mut()) {
             ids.sort_by_key(|id| id.0);
         }
@@ -251,6 +255,8 @@ struct Tally {
     fail_cells: usize,
     dropped: usize,
     deduplicated: usize,
+    /// Cases whose qname candidates tied and broke by the FD.22 tie key.
+    ties: usize,
 }
 
 impl Tally {
@@ -326,6 +332,12 @@ pub(super) fn ingest_test_reports(merged: &mut MergedGraph, input: &RepoInputs) 
         tally.fail_cells,
         tally.dropped
     );
+    if tally.ties > 0 {
+        eprintln!(
+            "[tie-break] by qname site=test_reports ties={} repo={}",
+            tally.ties, input.label
+        );
+    }
     if tally.deduplicated > 0 {
         eprintln!(
             "[tests] fail-cells deduplicated {} repeated case(s) repo={}",
@@ -455,7 +467,7 @@ fn plan_fail_cells(
     let mut frames_of: BTreeMap<(u64, String, usize), Agg<'_>> = BTreeMap::new();
     let mut unmapped: BTreeSet<String> = BTreeSet::new();
     for (&case, ci) in cases.iter().zip(&per_case) {
-        let mapped = map_test(merged, index, case, ci, &first_hit);
+        let mapped = map_test(merged, index, case, ci, &first_hit, &mut tally.ties);
         if let Some((node, _)) = mapped {
             match seen_tests.get(&(case.seq, node.0, case.name.as_str())) {
                 Some(&source) if source != case.source => {
@@ -578,6 +590,7 @@ fn map_test(
     case: &TestCaseRecord,
     ci: &CaseItems,
     first_hit: &impl Fn(usize) -> Option<NodeId>,
+    ties: &mut usize,
 ) -> Option<(NodeId, Via)> {
     // 1. file_line.
     if let (Some(item), Some(file)) = (ci.file_line, case.file.as_deref())
@@ -637,7 +650,13 @@ fn map_test(
                 candidates = in_file;
             }
         }
-        return merged.pick_primary(&candidates).map(|id| (id, Via::Qname));
+        // FD.22: a tie breaks by (qname, kind, graph index), counted once
+        // per ingest instead of one pick_primary line per case.
+        let (pick, tied) = merged.pick_primary_tied(&candidates);
+        if tied > 1 {
+            *ties += 1;
+        }
+        return pick.map(|id| (id, Via::Qname));
     }
     // 3. name: only an unambiguous FUNCTION / METHOD.
     let bare = base_name(case.name.rsplit("::").next().unwrap_or(&case.name));
@@ -727,6 +746,8 @@ fn write_fail_cells(
     if plan.is_empty() {
         return;
     }
+    // KEEP (FD.22): `plan` and `done` are looked up by id while walking the
+    // graph in its own order; neither picks among candidates.
     let mut done: BTreeSet<u64> = BTreeSet::new();
     for g in merged.graphs.iter_mut().filter(|g| g.repo == input.repo) {
         for n in g.nodes.iter_mut() {
@@ -819,6 +840,8 @@ fn plan_coverage(
         return plan;
     }
     // Node ids in id order, so the plan is built one way on every run.
+    // KEEP (FD.22): each node's cell is computed from its own POSITIONs and
+    // keyed by its id; the order decides nothing in the output.
     let mut nodes: Vec<(NodeId, &Facts<'_>)> = index
         .facts
         .iter()
@@ -936,6 +959,7 @@ fn tail_file<'f>(rel: Option<&str>, sf: &str, files: &BTreeSet<&'f str>) -> Opti
 /// replacing an existing one), print the `[tests] lcov` marker and return how
 /// many nodes took a cell.
 fn ingest_lcov(merged: &mut MergedGraph, input: &RepoInputs, plan: CoveragePlan) -> usize {
+    // KEEP (FD.22): lookups and a dedup set by id, in graph order; no pick.
     let mut done: BTreeSet<u64> = BTreeSet::new();
     if !plan.cells.is_empty() {
         for g in merged.graphs.iter_mut().filter(|g| g.repo == input.repo) {

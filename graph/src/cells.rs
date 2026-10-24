@@ -35,7 +35,8 @@ pub enum CellTarget {
     /// HEURISTIC evidence: the tier says which.
     Rekeyed { id: NodeId, tier: MoveTier },
     /// Several nodes match and nothing narrows them: nothing is written. The
-    /// smallest candidate id, for the report.
+    /// least candidate by (kind, graph index, node index) (FD.22: the same in
+    /// every clone), for the report and for the readers that bind a tie.
     Ambiguous(NodeId),
     /// No node matches: nothing is written.
     Orphaned,
@@ -50,7 +51,7 @@ pub enum CellTarget {
 /// and never iterates the nav's HashMaps.
 #[derive(Debug, Clone, Default)]
 pub struct QnameIndex {
-    /// qname -> `(id, kind)`, smallest id first.
+    /// qname -> `(id, kind)`, least (kind, graph index, node index) first.
     by_qname: BTreeMap<String, Vec<(NodeId, NodeKindId)>>,
     /// Every in-scope instance of a node: `(graph index, node index)`, in
     /// graph then node order. One id can sit in several graphs. Looked up by
@@ -85,9 +86,20 @@ impl QnameIndex {
                 }
             }
         }
-        idx.by_qname
-            .values_mut()
-            .for_each(|v| v.sort_by_key(|(id, _)| id.0));
+        // FD.22: one qname's hits are pushed in (graph index, node index)
+        // order, so a stable sort by kind gives the tie key (qname, kind,
+        // graph index) the rest of the build breaks ties by; never the
+        // NodeId, which hashes the RepoId and differs between clones.
+        let mut ties = 0usize;
+        for v in idx.by_qname.values_mut() {
+            v.sort_by_key(|(_, k)| k.0);
+            if v.len() > 1 {
+                ties += 1;
+            }
+        }
+        if ties > 0 {
+            eprintln!("[tie-break] by qname site=cells ties={ties}");
+        }
         idx
     }
 
@@ -284,19 +296,22 @@ mod tests {
     }
 
     #[test]
-    fn ties_take_smallest_node_id() {
-        let (mut m, class, service) = twins();
+    fn ties_take_the_least_kind_not_the_smallest_node_id() {
+        let (mut m, class, _) = twins();
         let idx = QnameIndex::build(&m, None);
-        let smaller = if class.0 < service.0 { class } else { service };
+        // FD.22: (qname, kind, graph index), so the CLASS (the smaller kind
+        // id) whatever the two ids hash to.
+        const { assert!(node_kind::CLASS.0 < node_kind::SERVICE.0) };
+        let least = class;
         assert_eq!(
             idx.resolve("m::Svc", None, None),
-            CellTarget::Ambiguous(smaller)
+            CellTarget::Ambiguous(least)
         );
         // An ambiguous write is reported, never applied.
         let w = CellWrite::vector("m::Svc", vec![0; 8], None, Some(2));
         assert_eq!(
             apply_cell_write(&mut m, &idx, &w),
-            Ok(CellTarget::Ambiguous(smaller))
+            Ok(CellTarget::Ambiguous(least))
         );
         assert!(m.graphs[0].nodes.iter().all(|n| n.cells.is_empty()));
     }

@@ -17,7 +17,7 @@
 //! ANCHOR, shared by the three kinds:
 //! 1. `anchor = "<qname>"` binds through the repo's
 //!    [`QnameIndex`](glia_graph::cells::QnameIndex); several nodes
-//!    sharing the qname take the smallest NodeId. An anchor that binds nothing
+//!    sharing the qname take the least (kind, graph index) hit (FD.22). An anchor that binds nothing
 //!    orphans the stanza (it never falls back to a scope: a stale qname must
 //!    be visible).
 //! 2. Otherwise the scope field - a constraint's `from` for forbid_edge, its
@@ -27,7 +27,7 @@
 //!    - A constraint (DT.7a) binds the PROJECT of this repo at that path,
 //!      else the deepest PROJECT of this repo above it (a root PROJECT
 //!      encloses every path: `backend/internal/handlers` hangs on
-//!      `project:backend`), else the smallest-id MODULE of this repo whose
+//!      `project:backend`), else the least-qname MODULE of this repo whose
 //!      POSITION file lies under it (the CC.5a component fallback, for a repo
 //!      with no root manifest; `.` takes any file); with none of the three it
 //!      is orphaned. Only where the entry is STORED depends on this: the
@@ -40,7 +40,7 @@
 //! THE MODEL'S ANCHORS (CC.5a), after rule 1 (`anchor`, on a component or an
 //! allow; a layer takes none):
 //! - a component without `anchor` binds the PROJECT at its first resolved
-//!   path, else the repo root's PROJECT, else the smallest-id MODULE of this
+//!   path, else the repo root's PROJECT, else the least-qname MODULE of this
 //!   repo whose POSITION file lies under that path (a repo with no root
 //!   manifest has no root PROJECT); nothing -> orphaned;
 //! - a layer, and an allow without `anchor`, bind the repo root's PROJECT,
@@ -141,7 +141,7 @@ enum Via {
     Project,
     /// A constraint's deepest PROJECT above its scope (DT.7a).
     Enclosing,
-    /// The smallest-id MODULE under a component's first path (CC.5a) or a
+    /// The least-qname MODULE under a component's first path (CC.5a) or a
     /// constraint's scope (DT.7a).
     Module,
 }
@@ -205,12 +205,12 @@ enum Target {
     Scope(Option<String>),
     /// A `[[constraint]]` (not an allow) without `anchor`: forbid_edge's
     /// `from`, no_cycle / invariant's `scope` (`None` is the repo root). The
-    /// PROJECT at it, else the deepest PROJECT above it, else the smallest-id
+    /// PROJECT at it, else the deepest PROJECT above it, else the least-qname
     /// MODULE under it (DT.7a).
     RuleScope(Option<String>),
     /// A component without `anchor`: the PROJECT at `path` (its first
     /// resolved path, `raw` as written), else the root PROJECT, else this
-    /// repo's smallest-id MODULE under `path`.
+    /// repo's least-qname MODULE under `path`.
     Component { raw: String, path: String },
     /// A layer, or an allow without `anchor`: the root PROJECT, else where
     /// component `component` anchored.
@@ -247,10 +247,14 @@ struct Anchors {
     /// `raw scope -> resolved path`, so a scope shared by several stanzas is
     /// resolved (and its `[scope]` line printed) once.
     scopes: BTreeMap<String, String>,
-    /// This repo's MODULE nodes with their POSITION file, sorted by NodeId:
-    /// the component fallback anchor. Built on first use.
-    modules: Option<Vec<(NodeId, String)>>,
+    /// This repo's MODULE nodes with their POSITION file, sorted by the
+    /// FD.22 tie key: the component fallback anchor. Built on first use.
+    modules: Option<Vec<ModuleAt>>,
 }
+
+/// A MODULE fallback candidate: its tie key (qname, graph index, node
+/// index), its id and its POSITION file.
+type ModuleAt = ((String, usize, usize), NodeId, String);
 
 impl Anchors {
     /// `repo`'s resolvers: only its id is read, so check's re-bind (DT.7b)
@@ -275,7 +279,8 @@ impl Anchors {
         }
     }
 
-    /// The node `qname` names in this repo; the smallest NodeId on ties.
+    /// The node `qname` names in this repo; on a tie the least (kind, graph
+    /// index) hit, as `QnameIndex` orders them (FD.22).
     fn by_qname(&self, qname: &str) -> Option<NodeId> {
         match self.idx.resolve(qname.trim(), None, None) {
             CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some(id),
@@ -311,8 +316,8 @@ impl Anchors {
     /// the one with the most segments that is `.` or `path` lies under. A
     /// PROJECT only another repo of a `--with` build declares never binds
     /// here; one repo has one PROJECT per path, so there is no tie (the
-    /// smaller NodeId would win).
-    fn enclosing_project(&self, path: &str) -> Option<NodeId> {
+    /// least [`MergedGraph::tie_cmp`] key would win, FD.22).
+    fn enclosing_project(&self, merged: &MergedGraph, path: &str) -> Option<NodeId> {
         let depth = |p: &str| if p == "." { 0 } else { p.split('/').count() };
         self.projects
             .iter()
@@ -323,15 +328,16 @@ impl Anchors {
                     _ => None,
                 },
             )
-            .max_by_key(|&(d, id)| (d, std::cmp::Reverse(id.0)))
+            .max_by(|&(da, a), &(db, b)| da.cmp(&db).then_with(|| merged.tie_cmp(b, a)))
             .map(|(_, id)| id)
     }
 
-    /// The smallest-id MODULE of this repo whose POSITION file lies under
-    /// `path` (`.` = every file).
+    /// The least-qname MODULE of this repo whose POSITION file lies under
+    /// `path` (`.` = every file): (qname, kind, graph index, node index), the
+    /// FD.22 tie key, never the NodeId, so every clone anchors on one node.
     fn module_under(&mut self, merged: &MergedGraph, path: &str) -> Option<NodeId> {
         let modules = self.modules.get_or_insert_with(|| {
-            let mut out: Vec<(NodeId, String)> = Vec::new();
+            let mut out: Vec<ModuleAt> = Vec::new();
             for &(gi, ni) in self.at.values().flatten() {
                 let Some(g) = merged.graphs.get(gi) else {
                     continue;
@@ -341,18 +347,29 @@ impl Anchors {
                     continue;
                 }
                 if let Some(file) = position_file(&n.cells) {
-                    out.push((n.id, file));
+                    let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                    out.push(((qname, gi, ni), n.id, file));
                 }
             }
-            // NodeId then file: HashMap order never picks the winner.
-            out.sort_by(|a, b| (a.0.0, &a.1).cmp(&(b.0.0, &b.1)));
-            out.dedup();
+            // (qname, graph index, node index) then file: neither HashMap
+            // order nor the RepoId-hashed NodeId picks the winner (FD.22).
+            out.sort_by(|a, b| (&a.0, &a.2).cmp(&(&b.0, &b.2)));
+            // One id in several language graphs: its first place only.
+            let mut seen: HashSet<(NodeId, String)> = HashSet::new();
+            out.retain(|(_, id, file)| seen.insert((*id, file.clone())));
             out
         });
-        modules
-            .iter()
-            .find(|(_, file)| is_under(file, path))
-            .map(|(id, _)| *id)
+        let (mut ties, mut pick) = (0usize, None);
+        for (_, id, file) in modules.iter() {
+            if is_under(file, path) {
+                ties += 1;
+                pick = pick.or(Some(*id));
+            }
+        }
+        if ties > 1 {
+            eprintln!("[tie-break] by qname site=declared ties={ties}");
+        }
+        pick
     }
 
     /// Where a component without `anchor` hangs (see the module docs).
@@ -368,7 +385,10 @@ impl Anchors {
     fn rule_anchor(&mut self, merged: &MergedGraph, path: &str) -> Option<(NodeId, Via)> {
         self.project_at(path)
             .map(|id| (id, Via::Project))
-            .or_else(|| self.enclosing_project(path).map(|id| (id, Via::Enclosing)))
+            .or_else(|| {
+                self.enclosing_project(merged, path)
+                    .map(|id| (id, Via::Enclosing))
+            })
             .or_else(|| self.module_under(merged, path).map(|id| (id, Via::Module)))
     }
 }
@@ -874,6 +894,7 @@ fn write_entry(
             .get(gi)
             .and_then(|g| g.nodes.get(ni))
             .filter(|n| n.id == id)
+            // KEEP (FD.22): the id is only error text.
             .ok_or_else(|| format!("stale index: node {} is not at graph {gi} node {ni}", id.0))?;
         let existing = node
             .cells
@@ -942,8 +963,8 @@ fn report(label: &str, t: &Tally) {
 }
 
 /// Every CONSTRAINT rule in `merged` - declared in an overlay or written
-/// through the cell API - with the node it hangs on, in NodeId order (a
-/// node's rules in stored `(source, id)` order). The one entry point `glia
+/// through the cell API - with the node it hangs on, in (qname, kind, graph
+/// index) node order (FD.22; a node's rules in stored `(source, id)` order). The one entry point `glia
 /// check` (LE.8) reads rules through.
 ///
 /// A rule's scopes come back as paths: an overlay rule stored them resolved,
@@ -954,23 +975,30 @@ fn report(label: &str, t: &Tally) {
 /// several language graphs is read once.
 pub(crate) fn declared_constraints(merged: &MergedGraph) -> Vec<(NodeId, ConstraintRule)> {
     let mut seen = HashSet::new();
-    let mut out: Vec<(NodeId, ConstraintRule)> = Vec::new();
-    for g in &merged.graphs {
-        for n in &g.nodes {
+    type TieKey<'g> = (&'g str, u32, usize, usize);
+    let mut keyed: Vec<(TieKey<'_>, NodeId, ConstraintRule)> = Vec::new();
+    for (gi, g) in merged.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
             let Some(cell) = n.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT) else {
                 continue;
             };
             if seen.insert(n.id) {
-                out.extend(
+                let qname = g.nav.qname_by_id.get(&n.id).map_or("", String::as_str);
+                let kind = g.nav.kind_by_id.get(&n.id).map_or(u32::MAX, |k| k.0);
+                keyed.extend(
                     parse_constraints(&cell.payload)
                         .into_iter()
-                        .map(|r| (n.id, r)),
+                        .map(|r| ((qname, kind, gi, ni), n.id, r)),
                 );
             }
         }
     }
-    // Stable: a node's rules keep their stored order.
-    out.sort_by_key(|(id, _)| id.0);
+    // FD.22: nodes in (qname, kind, graph index, node index) order, the same
+    // in every clone (a NodeId hashes the RepoId); stable, so a node's rules
+    // keep their stored order.
+    keyed.sort_by(|a, b| a.0.cmp(&b.0)); // `.0` is the tie key, not a NodeId
+    let mut out: Vec<(NodeId, ConstraintRule)> =
+        keyed.into_iter().map(|(_, id, r)| (id, r)).collect();
     let mut paths: BTreeMap<String, String> = BTreeMap::new();
     let mut path = |raw: &mut String| {
         let resolved = paths
@@ -1482,7 +1510,15 @@ scope = \"./services/api/\"
                 ),
             ),
         ];
-        want.sort_by_key(|(id, _)| id.0);
+        // FD.22: node order is qname order (project:services/api first),
+        // stable within a node.
+        let qname_of = |id: NodeId| {
+            r.merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+        };
+        want.sort_by_key(|(id, _)| qname_of(*id));
         assert_eq!(got, want.iter().map(|(_, w)| *w).collect::<Vec<_>>());
         let by_id = |id: &str| {
             rules
@@ -1531,7 +1567,7 @@ scope = \"./services/api/\"
 
     /// CC.5a: a component path given as a project label is stored resolved;
     /// a component whose path has no PROJECT, in a repo with no root PROJECT,
-    /// hangs on the smallest-id MODULE under that path; a label resolving to a
+    /// hangs on the least-qname MODULE under that path; a label resolving to a
     /// path another component claimed rejects the later component; an API
     /// component's paths come back resolved from `declared_constraints`.
     #[test]
@@ -1619,7 +1655,7 @@ to = \"api\"
             }
         );
         assert_eq!(qname_of(api_at).as_deref(), Some("project:services/api"));
-        // No PROJECT at lib and no root PROJECT: the smallest-id MODULE under lib/.
+        // No PROJECT at lib and no root PROJECT: the least-qname MODULE under lib/.
         let (lib_at, _) = by_id("component:lib").unwrap();
         assert_eq!(kind_of(lib_at), Some("MODULE"));
         let modules: Vec<NodeId> = r
@@ -1635,7 +1671,8 @@ to = \"api\"
             .map(|n| n.id)
             .collect();
         assert_eq!(modules.len(), 2, "lib/util.py and lib/more.py");
-        assert_eq!(lib_at.0, modules.iter().map(|m| m.0).min().unwrap());
+        // FD.22: the least qname (lib::more < lib::util), never the NodeId.
+        assert_eq!(qname_of(lib_at).as_deref(), Some("lib::more"));
         // The layer and the allow follow their first component (lib).
         assert_eq!(by_id("layer:core").unwrap().0, lib_at);
         assert_eq!(by_id("lib-uses-api").unwrap().0, lib_at);
@@ -1843,19 +1880,23 @@ via = [\"./services/api/public/\"]
             (".", "project:."),
         ] {
             assert_eq!(
-                qname_in(repo_a, in_a.enclosing_project(path)).as_deref(),
+                qname_in(repo_a, in_a.enclosing_project(&r.merged, path)).as_deref(),
                 Some(want),
                 "{path}"
             );
         }
         let in_b = anchors_of(repo_b);
         assert_eq!(
-            qname_in(repo_b, in_b.enclosing_project("web/admin/panel/x.py")).as_deref(),
+            qname_in(
+                repo_b,
+                in_b.enclosing_project(&r.merged, "web/admin/panel/x.py")
+            )
+            .as_deref(),
             Some("project:web/admin/panel")
         );
         // b has no root manifest, and a's projects do not bind in b.
-        assert_eq!(in_b.enclosing_project("web/admin"), None);
-        assert_eq!(in_b.enclosing_project("."), None);
+        assert_eq!(in_b.enclosing_project(&r.merged, "web/admin"), None);
+        assert_eq!(in_b.enclosing_project(&r.merged, "."), None);
     }
 
     #[test]
