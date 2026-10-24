@@ -13,7 +13,9 @@ default none in 0.5.2), or with format="markdown" the markdown PR report
 raises ValueError. EB.7: `intent` (the PR title's routed ids and the files
 ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
 (its newest subject is the default title); EC.11: `selection_intent`
-follows it (set SELt2's calibrated pick, EC.12, else LX[IDR,P1]). Needs a `git` binary. Shared
+follows it (set SELt2's calibrated pick, EC.12, else LX[IDR,P1]). FB.12b:
+`conventions` (after check_errors) lists the conventions governing the
+changed files, only when one does. Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -36,6 +38,8 @@ WEB_APP = "from services.api.internal import charge\n\n\ndef pay(o):\n    return
 TEST_PAY = "from web.app import pay\n\n\ndef test_pay():\n    assert pay(1) == 1\n"
 RULES = ("version = 1\n\n[[constraint]]\nid = \"web-no-api-internals\"\nkind = \"forbid_edge\"\n"
          "from = \"web\"\nto = \"services/api\"\ncategories = [\"IMPORTS\", \"CALLS\"]\n")
+CONVENTION = ("\n[[convention]]\nid = \"api-pure\"\nscope = \"services/api\"\n"
+              "text = \"api internals stay pure\"\n")
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
@@ -161,6 +165,25 @@ def main() -> int:
                 "intent present")
         md = rg.review_vs_rev(str(top), format="markdown", title="T007 payment")
         c.check("markdown: ### Intent", "### Intent\n\n_title (arg): T007 payment_" in md, md[-800:])
+
+        # FB.12b: a change under a [[convention]]'s scope adds `conventions`
+        # (after check_errors), never blocking, and `### Conventions`.
+        conv = pathlib.Path(tmp) / "conv"
+        committed(conv, WEB_APP)
+        (conv / ".glia/overlay.toml").write_text(RULES + CONVENTION)
+        git(conv, "commit", "-q", "-am", "convention")
+        (conv / "services/api/internal.py").write_text(INTERNAL_EDITED)
+        cd, err = stderr_of(lambda: rg.review_vs_rev(str(conv)))
+        c.check("conventions key after check_errors",
+                list(cd) == KEYS[:10] + ["conventions"] + KEYS[10:], list(cd))
+        rows = [(x.get("id"), x.get("tier"), x.get("files")) for x in cd.get("conventions", [])]
+        c.check("the convention row", rows == [("api-pure", "declared", ["services/api/internal.py"])], rows)
+        c.check("a convention never blocks", cd.get("blocking") is False, cd.get("blocking"))
+        c.check("[review] conventions marker", "[review] conventions=1" in err, err[-600:])
+        md = rg.review_vs_rev(str(conv), format="markdown")
+        c.check("markdown: ### Conventions",
+                "| api internals stay pure | `services/api` | 1 | overlay/api-pure (declared) at .glia/overlay.toml:10 |"
+                in md, md[-800:])
 
         old = pathlib.Path(tmp) / "old"
         committed(old, WEB_APP)

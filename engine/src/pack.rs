@@ -121,9 +121,10 @@
 //! the most of the `k` cut neighbours any one file holds (EA.6b) —
 //! grep `^\[rank\] surface=pack`; then
 //! `[pack] query=<q> seeds=<S> candidates=<C> packed=<P> (full=<F> preview=<V>
-//! outline=<O> qname=<Q>) notes=<n> tokens=<U>/<B> bytes=<N> bpt=<x.y>
-//! rerenders=<R>` (one line; `notes` the manifest's [`PackedNode::notes`]
-//! summed, FB.11) — grep `^\[pack\] query=`.
+//! outline=<O> qname=<Q>) notes=<n> conventions=<c> tokens=<U>/<B> bytes=<N>
+//! bpt=<x.y> rerenders=<R>` (one line; `notes` the manifest's
+//! [`PackedNode::notes`] summed, FB.11; `conventions` the length of
+//! [`Pack::conventions`], FB.12b) — grep `^\[pack\] query=`.
 //!
 //! # Notes (FB.11)
 //!
@@ -132,6 +133,20 @@
 //! `heuristic` for a cell-API writer such as Engram's corrections, `declared`
 //! for overlay / ADR entries). They are part of its [`render_node`] text, so
 //! the climb pays for them like any other line; they never move a rank.
+//!
+//! # Conventions (FB.12b)
+//!
+//! A scope-level convention (an overlay `[[convention]]` or a cell-API CONV
+//! entry of kind `convention`, FB.12a) governs a file under any of its
+//! `paths` (`.` every file; an API entry with no `paths` its `scope`). Once
+//! the rungs are chosen, the conventions governing the packed nodes' distinct
+//! files are listed after the node sections as `## conventions`, one `-
+//! <text> (scope <scope>, <source>/<id>)` line each, longest matching path
+//! first, then `(source, id)`; [`Pack::conventions`] lists them with their
+//! tier (`declared` overlay, `heuristic` api) and how many packed files each
+//! governs. The section is part of the text, so it counts toward the budget
+//! like the links section; the climb is unchanged (each re-render measures
+//! the whole text). A convention never moves a rank or a rung's pick.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -142,12 +157,14 @@ use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
 use glia_projection_text::ladder::{
-    Fidelity, Pick, node_notes, render_node, render_pack, rendered_as,
+    Fidelity, Pick, conventions_section, node_notes, note_tier, render_node, render_pack,
+    rendered_as,
 };
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::calibrate::{COCHANGE_SET, STRUCTURE_SET, Selection, Shape, explicit, log_selection};
+use crate::external::declared::{Convention, conventions, conventions_for, node_repos};
 use crate::find::{FindOptions, find_nodes};
 use crate::identity::Collapse;
 use crate::rank::{FileRanking, RankBase, RankCache, Ranking, SourceKey, order_rows, rank_files};
@@ -261,6 +278,25 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+/// FB.12b: a convention governing at least one packed node's file (module
+/// docs "Conventions").
+#[derive(serde::Serialize, Debug, Clone)]
+#[non_exhaustive]
+pub struct PackConvention {
+    pub id: String,
+    /// `overlay` or `api`.
+    pub source: String,
+    /// `declared` (overlay / adr) or `heuristic` (a cell-API writer), the
+    /// notes' tier rule.
+    pub tier: &'static str,
+    pub scope: String,
+    pub text: String,
+    /// `.glia/overlay.toml:<line>` of an overlay convention.
+    pub decl: Option<String>,
+    /// How many distinct packed files it governs.
+    pub files: usize,
+}
+
 /// A packed context: the text to hand over, and the manifest of what is in it.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
@@ -280,6 +316,11 @@ pub struct Pack {
     pub candidates: usize,
     /// The packed nodes, in rank order.
     pub nodes: Vec<PackedNode>,
+    /// FB.12b: the conventions governing the packed nodes' files, rendered
+    /// as the text's `## conventions` section (module docs "Conventions").
+    /// Skipped in JSON when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conventions: Vec<PackConvention>,
     /// Candidates left out: `candidates - nodes.len()`.
     pub dropped: usize,
     /// How many times the text was rendered again to fit the budget.
@@ -540,7 +581,8 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     let budget = args.budget_tokens;
     let mut level = climb(&cands, budget);
     let title = format!("context for {query}");
-    let mut text = render(&view, &title, &cands, &level);
+    let conv = ConvCtx::new(merged, &loc, &cands);
+    let mut text = render(&view, &title, &cands, &level, &conv);
     let bound = 4 * level.iter().filter(|l| l.is_some()).count();
     let mut rerenders = 0usize;
     while estimate_tokens(text.len(), x10) > budget && rerenders < bound {
@@ -548,7 +590,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
             break;
         };
         level[i] = level[i].and_then(|l| cands[i].lower(l));
-        text = render(&view, &title, &cands, &level);
+        text = render(&view, &title, &cands, &level, &conv);
         rerenders += 1;
     }
 
@@ -590,6 +632,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     }
 
     let used = estimate_tokens(text.len(), x10);
+    let conventions = conv.picked(&level);
     let pack = Pack {
         query,
         bytes: text.len(),
@@ -600,6 +643,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
         candidates: cands.len(),
         dropped: cands.len() - nodes.len(),
         nodes,
+        conventions,
         rerenders,
         selection: Some(selection),
         absence: None,
@@ -899,8 +943,111 @@ fn demotion(cands: &[Cand], level: &[Option<usize>]) -> Option<usize> {
     best.map(|(i, _, _)| i)
 }
 
-/// The pack text for the current rungs, picks in rank order.
-fn render(view: &MergedGraph, title: &str, cands: &[Cand], level: &[Option<usize>]) -> String {
+/// FB.12b: the conventions of the merged graph and each candidate's
+/// `(repo, file)`, read once per pack; [`ConvCtx::picked`] maps the packed
+/// rungs to the section's rows.
+struct ConvCtx {
+    all: Vec<Convention>,
+    /// Per candidate (indexed like `cands`): its repo and located file.
+    files: Vec<Option<(u64, String)>>,
+}
+
+impl ConvCtx {
+    fn new(merged: &MergedGraph, loc: &Locator<'_>, cands: &[Cand]) -> Self {
+        let all = conventions(merged);
+        if all.is_empty() {
+            return ConvCtx {
+                all,
+                files: Vec::new(),
+            };
+        }
+        let repos = node_repos(merged);
+        let files = cands
+            .iter()
+            .map(|c| Some((*repos.get(&c.id)?, loc.file_of(c.id)?)))
+            .collect();
+        ConvCtx { all, files }
+    }
+
+    /// The conventions governing the packed (`level` Some) candidates'
+    /// distinct files, one per `(repo, source, id)`: by the longest path
+    /// that matched any of those files, longest first, then `(source, id,
+    /// repo)` (`declared::conventions_for`'s order, over the union).
+    fn picked(&self, level: &[Option<usize>]) -> Vec<PackConvention> {
+        if self.all.is_empty() {
+            return Vec::new();
+        }
+        let files: BTreeSet<(u64, &str)> = self
+            .files
+            .iter()
+            .zip(level)
+            .filter(|(_, l)| l.is_some())
+            .filter_map(|(f, _)| f.as_ref().map(|(r, f)| (*r, f.as_str())))
+            .collect();
+        // (repo, source, id) -> (longest matching path, files governed, entry)
+        let mut by: BTreeMap<(u64, &str, &str), (usize, usize, &Convention)> = BTreeMap::new();
+        for (repo, file) in &files {
+            let normal = file.trim_start_matches("./").trim_start_matches('/');
+            for c in conventions_for(&self.all, *repo, file) {
+                let len = c
+                    .paths
+                    .iter()
+                    .filter(|p| in_scope(normal, p))
+                    .map(|p| if p == "." { 0 } else { p.len() })
+                    .max()
+                    .unwrap_or(0);
+                let e = by
+                    .entry((c.repo, c.source.as_str(), c.id.as_str()))
+                    .or_insert((len, 0, c));
+                e.0 = e.0.max(len);
+                e.1 += 1;
+            }
+        }
+        let mut rows: Vec<(usize, usize, &Convention)> = by.into_values().collect();
+        rows.sort_by(|(la, _, a), (lb, _, b)| {
+            lb.cmp(la)
+                .then_with(|| (&a.source, &a.id, a.repo).cmp(&(&b.source, &b.id, b.repo)))
+        });
+        rows.into_iter()
+            .map(|(_, n, c)| PackConvention {
+                id: c.id.clone(),
+                source: c.source.clone(),
+                tier: note_tier(&c.source),
+                scope: c.scope.clone(),
+                text: c.text.clone(),
+                decl: c.decl.clone(),
+                files: n,
+            })
+            .collect()
+    }
+
+    /// The `## conventions` section for the packed rungs (empty for none).
+    fn section(&self, level: &[Option<usize>]) -> String {
+        let rows = self.picked(level);
+        let refs: Vec<(&str, &str, &str, &str)> = rows
+            .iter()
+            .map(|c| {
+                (
+                    c.text.as_str(),
+                    c.scope.as_str(),
+                    c.source.as_str(),
+                    c.id.as_str(),
+                )
+            })
+            .collect();
+        conventions_section(&refs)
+    }
+}
+
+/// The pack text for the current rungs, picks in rank order, then the
+/// conventions section (FB.12b) when one governs a packed file.
+fn render(
+    view: &MergedGraph,
+    title: &str,
+    cands: &[Cand],
+    level: &[Option<usize>],
+    conv: &ConvCtx,
+) -> String {
     let picks: Vec<Pick> = cands
         .iter()
         .zip(level)
@@ -911,7 +1058,13 @@ fn render(view: &MergedGraph, title: &str, cands: &[Cand], level: &[Option<usize
             })
         })
         .collect();
-    render_pack(view, title, &picks)
+    let mut text = render_pack(view, title, &picks);
+    let section = conv.section(level);
+    if !section.is_empty() {
+        text.push('\n');
+        text.push_str(&section);
+    }
+    text
 }
 
 /// The `budget_too_small` absence: names the smallest pack, the title and the
@@ -972,6 +1125,7 @@ fn empty(
         bytes_per_token: rate(args.bytes_per_token_x10.max(10)),
         candidates,
         nodes: Vec::new(),
+        conventions: Vec::new(),
         dropped: candidates,
         rerenders: 0,
         selection: None,
@@ -990,7 +1144,7 @@ fn rate(x10: u32) -> String {
 fn marker(p: &Pack, seeds: usize) {
     let at = |f: Fidelity| p.nodes.iter().filter(|n| n.fidelity == f.name()).count();
     eprintln!(
-        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) notes={} tokens={}/{} bytes={} bpt={} rerenders={}",
+        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) notes={} conventions={} tokens={}/{} bytes={} bpt={} rerenders={}",
         p.query.split_whitespace().collect::<Vec<_>>().join(" "),
         p.candidates,
         p.nodes.len(),
@@ -999,6 +1153,7 @@ fn marker(p: &Pack, seeds: usize) {
         at(Fidelity::Outline),
         at(Fidelity::Qname),
         p.nodes.iter().map(|n| n.notes).sum::<usize>(),
+        p.conventions.len(),
         p.used_tokens,
         p.budget_tokens,
         p.bytes,

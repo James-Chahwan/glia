@@ -1178,6 +1178,158 @@ pub(super) fn report_rules(merged: &MergedGraph) {
     );
 }
 
+/// One scope-level convention (FB.12a's CONV entry of kind
+/// [`CONVENTION_KIND`]) as the answers read it (FB.12b): pack's `##
+/// conventions` section and review's `### Conventions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Convention {
+    /// `RepoId.0` of the graph whose node carries the entry.
+    pub(crate) repo: u64,
+    pub(crate) id: String,
+    /// `overlay` or `api` (`adr` if a writer used it).
+    pub(crate) source: String,
+    pub(crate) text: String,
+    /// The scope as stored (a path; an API entry's as its writer gave it).
+    pub(crate) scope: String,
+    pub(crate) component: Option<String>,
+    /// The repo-relative paths it governs: the stored `paths`, else
+    /// `[scope]` (an API entry may carry only `scope`), each normalised and,
+    /// for a non-overlay entry, resolved like a rule scope (a project label
+    /// becomes its path). `.` covers every file.
+    pub(crate) paths: Vec<String>,
+    pub(crate) by: Option<String>,
+    pub(crate) decl: Option<String>,
+}
+
+/// Every convention of `merged`: each node's CONV entries of kind
+/// [`CONVENTION_KIND`] (any source), one per `(repo, source, id)` (the first
+/// read, in graph then node order, wins: one anchor in several language
+/// graphs is read once), sorted by `(repo, scope, source, id)`. An entry that
+/// is not an object, lacks a string `source` / `id` / `text`, or (with no
+/// `paths`) a `scope`, is skipped.
+pub(crate) fn conventions(merged: &MergedGraph) -> Vec<Convention> {
+    let mut seen: BTreeSet<(u64, String, String)> = BTreeSet::new();
+    let mut out: Vec<Convention> = Vec::new();
+    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::CONV) {
+                let CellPayload::Json(s) = &c.payload else {
+                    continue;
+                };
+                let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(s) else {
+                    continue;
+                };
+                for e in &entries {
+                    let str_of = |k: &str| e.get(k).and_then(Value::as_str).map(String::from);
+                    if str_of("kind").as_deref() != Some(CONVENTION_KIND) {
+                        continue;
+                    }
+                    let (Some(source), Some(id), Some(text)) =
+                        (str_of("source"), str_of("id"), str_of("text"))
+                    else {
+                        continue;
+                    };
+                    let scope = str_of("scope").unwrap_or_default();
+                    let stored: Vec<String> = e
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .filter(|p| !p.trim().is_empty())
+                                .map(String::from)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let raw = if stored.is_empty() {
+                        if scope.trim().is_empty() {
+                            continue;
+                        }
+                        vec![scope.clone()]
+                    } else {
+                        stored
+                    };
+                    let mut paths: Vec<String> = raw
+                        .iter()
+                        .map(|p| {
+                            let p = normalise_scope(p);
+                            if source == "overlay" {
+                                p
+                            } else {
+                                resolved
+                                    .entry(p.clone())
+                                    .or_insert_with(|| normalise_scope(&resolve_scope(merged, &p)))
+                                    .clone()
+                            }
+                        })
+                        .collect();
+                    paths.dedup();
+                    if !seen.insert((g.repo.0, source.clone(), id.clone())) {
+                        continue;
+                    }
+                    out.push(Convention {
+                        repo: g.repo.0,
+                        id,
+                        source,
+                        text,
+                        scope,
+                        component: str_of("component"),
+                        paths,
+                        by: str_of("by"),
+                        decl: str_of("decl"),
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.repo, &a.scope, &a.source, &a.id).cmp(&(b.repo, &b.scope, &b.source, &b.id))
+    });
+    out
+}
+
+/// The conventions of `all` governing repo-relative `file` of repo `repo`:
+/// those of that repo with a `paths` entry that is `file` or a `/`-boundary
+/// prefix of it (`.` covers every file; A8.3's rule), the longest matching
+/// path first, then `(source, id)`.
+pub(crate) fn conventions_for<'a>(
+    all: &'a [Convention],
+    repo: u64,
+    file: &str,
+) -> Vec<&'a Convention> {
+    let file = normalise_scope(file);
+    let mut hits: Vec<(usize, &Convention)> = all
+        .iter()
+        .filter(|c| c.repo == repo)
+        .filter_map(|c| {
+            c.paths
+                .iter()
+                .filter(|p| is_under(&file, p))
+                .map(|p| if p == "." { 0 } else { p.len() })
+                .max()
+                .map(|len| (len, c))
+        })
+        .collect();
+    hits.sort_by(|(la, a), (lb, b)| {
+        lb.cmp(la)
+            .then_with(|| (&a.source, &a.id).cmp(&(&b.source, &b.id)))
+    });
+    hits.into_iter().map(|(_, c)| c).collect()
+}
+
+/// `NodeId` -> `RepoId.0` of the FIRST graph (in `merged.graphs` order)
+/// holding it, for an answer that maps its rows' files to conventions.
+pub(crate) fn node_repos(merged: &MergedGraph) -> HashMap<NodeId, u64> {
+    let mut out: HashMap<NodeId, u64> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            out.entry(n.id).or_insert(g.repo.0);
+        }
+    }
+    out
+}
+
 /// One declared rule stanza of a repo's `.glia/overlay.toml` that reached
 /// no CONSTRAINT cell of the graph (DT.7b): `glia check` lists it among the
 /// rules that check nothing ([`crate::check::Unanchored`]).

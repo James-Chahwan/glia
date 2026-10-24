@@ -32,7 +32,8 @@
 //! [`MAX_NOTES`](crate::ladder::MAX_NOTES) then `(+<k> more notes)`. The tier
 //! is `heuristic` for source `api` (a writer's statement, never a fact glia
 //! read) and `declared` for `overlay` / `adr`. Left out: CONV entries of
-//! `kind` `convention` (FB.12b renders conventions) and overlay DECISION
+//! `kind` `convention` (FB.12b renders them per answer, through
+//! [`conventions_section`](crate::ladder::conventions_section)) and overlay DECISION
 //! entries on a PROJECT (a `[[decision]]` scope stanza's record, not per-node
 //! text). A Qname renders none; a node with no entry renders as before.
 //! [`node_notes`](crate::ladder::node_notes) lists them for a caller that
@@ -159,7 +160,8 @@ pub struct Note {
 
 /// The tier a note's source carries: `declared` for what a human declared in
 /// the repo (overlay, ADR), `heuristic` for anything else (a cell-API writer).
-fn note_tier(source: &str) -> &'static str {
+/// A convention (FB.12b) carries its source's tier the same way.
+pub fn note_tier(source: &str) -> &'static str {
     match source {
         "overlay" | "adr" => "declared",
         _ => "heuristic",
@@ -203,17 +205,8 @@ fn notes_of(n: &Node, kind: Option<NodeKindId>) -> Vec<Note> {
             } else {
                 str_of("text")
             };
-            let words = raw.unwrap_or("").split_whitespace().collect::<Vec<_>>();
-            if words.is_empty() {
+            let Some(text) = note_text(raw.unwrap_or("")) else {
                 continue;
-            }
-            let whole = words.join(" ");
-            let text = if whole.chars().count() > NOTE_CHARS {
-                let mut cut: String = whole.chars().take(NOTE_CHARS).collect();
-                cut.push('…');
-                cut
-            } else {
-                whole
             };
             out.push((
                 rank,
@@ -230,6 +223,42 @@ fn notes_of(n: &Node, kind: Option<NodeKindId>) -> Vec<Note> {
         (a.source.as_str(), a.id.as_str(), ra).cmp(&(b.source.as_str(), b.id.as_str(), rb))
     });
     out.into_iter().map(|(_, n)| n).collect()
+}
+
+/// A note's (or convention's) text as rendered: whitespace collapsed, at
+/// most [`NOTE_CHARS`] chars (a cut one ends in `…`); `None` when blank.
+fn note_text(raw: &str) -> Option<String> {
+    let words = raw.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+    let whole = words.join(" ");
+    Some(if whole.chars().count() > NOTE_CHARS {
+        let mut cut: String = whole.chars().take(NOTE_CHARS).collect();
+        cut.push('…');
+        cut
+    } else {
+        whole
+    })
+}
+
+/// FB.12b: the `## conventions` section of a pack, the CONV entries of kind
+/// `convention` this module's notes leave out, rendered by the notes' own
+/// text rule (whitespace collapsed, cut at [`NOTE_CHARS`]): `## conventions` then one `- <text> (scope
+/// <scope>, <source>/<id>)` line per `(text, scope, source, id)` row, in the
+/// order given, each ending in a newline. A row with blank text is skipped;
+/// empty when no row is left.
+pub fn conventions_section(rows: &[(&str, &str, &str, &str)]) -> String {
+    let lines: Vec<String> = rows
+        .iter()
+        .filter_map(|(text, scope, source, id)| {
+            note_text(text).map(|t| format!("- {t} (scope {scope}, {source}/{id})\n"))
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("## conventions\n{}", lines.concat())
 }
 
 /// The notes [`render_node`] renders for `id` at Outline and above (all of
@@ -867,6 +896,27 @@ mod tests {
         assert_eq!(lines[1], "  note[adr/0001-x, declared]: Use queues");
         assert_eq!(lines[4], "  (+1 more notes)");
         assert!(!out.contains("skip me"), "conventions are FB.12b's: {out}");
+    }
+
+    /// FB.12b: the conventions section, by the notes' text rule.
+    #[test]
+    fn conventions_section_renders_rows_in_order() {
+        assert_eq!(conventions_section(&[]), "");
+        assert_eq!(conventions_section(&[("  ", "src", "api", "x")]), "");
+        assert_eq!(
+            conventions_section(&[
+                (
+                    "modals  are\ncentred",
+                    "src/modals",
+                    "overlay",
+                    "convention#1"
+                ),
+                ("tabs", ".", "api", "c2"),
+            ]),
+            "## conventions\n- modals are centred (scope src/modals, overlay/convention#1)\n- tabs (scope ., api/c2)\n"
+        );
+        let long = "w ".repeat(NOTE_CHARS);
+        assert!(conventions_section(&[(&long, "s", "api", "l")]).contains('…'));
     }
 
     #[test]

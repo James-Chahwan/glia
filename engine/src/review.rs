@@ -162,6 +162,18 @@
 //! calibrated pick orders `intent.files` only. A fixed H9s50 order loses on
 //! a gate snapshot, so text fusions ship only as a repo's calibrated pick.
 //!
+//! # Conventions (FB.12b)
+//!
+//! A change inside a scope is checked against its conventions: [`Review::conventions`]
+//! lists every scope-level convention (an overlay `[[convention]]` or a
+//! cell-API CONV entry of kind `convention`, FB.12a) of the working tree that
+//! governs a changed row's file (a file under one of its `paths`, `.` every
+//! file), with the changed files it governs, longest matching path first,
+//! then `(source, id)`. Tier `declared` for an overlay one, `heuristic` for
+//! an API one. A convention is not a rule: it never blocks and never moves an
+//! impact row. fired_on, after the `[review] base=` line, only when one is
+//! listed: `[review] conventions=<n>` - grep `^\[review\] conventions=`.
+//!
 //! # Markdown (CC.6b)
 //!
 //! [`render_markdown`] is the PR report `glia review` prints and pyo3
@@ -191,7 +203,10 @@
 //! | namespace | tier | route | defined at | state | files |` when an id
 //! routed, the files table `| # | file | idr | text | ppr | ids | in impact
 //! |`, and `_(no history messages: run glia history sync)_` when the text is
-//! absent; after the sentence of a review with no graph change), `### Edge changes`
+//! absent; after the sentence of a review with no graph change),
+//! `### Conventions` (FB.12b, when one governs a changed file: `| convention
+//! | scope | files changed | source |`, the source `<source>/<id> (<tier>)`
+//! then ` at <decl>` for an overlay one), `### Edge changes`
 //! (grouped by tier, facts first), `### Changed nodes` and `### Resolved
 //! violations` (when any). A rule or forbid_path violation renders its
 //! identity first, ``_subject: `<a>`, `<b>` - tier <t> at <file:line>_`` (no
@@ -265,6 +280,7 @@ use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
+use glia_projection_text::ladder::note_tier;
 
 use crate::answers::{BlastAnswer, BlastOptions, BlastRadius, Locator, in_scope, project_roots};
 use crate::calibrate::fusions::{
@@ -285,7 +301,7 @@ use crate::coverage::CoverageNote;
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
-use crate::external::declared::declared_constraints;
+use crate::external::declared::{conventions, conventions_for, declared_constraints, node_repos};
 use crate::git_rev;
 use crate::identity::Collapse;
 use crate::intent::defs::{Tree, read_defs};
@@ -427,6 +443,11 @@ pub struct Review {
     /// never blocking, never a rule error. Not serialised when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unanchored: Vec<Unanchored>,
+    /// FB.12b: the conventions governing the changed files (module docs
+    /// "Conventions"): never blocking, a convention is not a rule. Not
+    /// serialised when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conventions: Vec<ReviewConvention>,
     /// A new BLOCKING violation exists (one at or above its rule's
     /// `min_tier`, never a heuristic one: `Violation::blocking`, module docs
     /// "New and resolved violations"), or a blocking model row
@@ -443,6 +464,90 @@ pub struct Review {
     /// `LX[IDR,P1]` with the reason. Present exactly when `intent` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_intent: Option<Selection>,
+}
+
+/// FB.12b: a convention governing at least one changed file (module docs
+/// "Conventions").
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ReviewConvention {
+    pub id: String,
+    /// `overlay` or `api`.
+    pub source: String,
+    /// `declared` (overlay / adr) or `heuristic` (a cell-API writer).
+    pub tier: &'static str,
+    pub scope: String,
+    pub text: String,
+    /// `.glia/overlay.toml:<line>` of an overlay convention.
+    pub decl: Option<String>,
+    /// The writer's `by`, when it named one.
+    pub by: Option<String>,
+    /// The changed files it governs, sorted.
+    pub files: Vec<String>,
+}
+
+/// FB.12b: the working tree's conventions governing the changed rows' files
+/// (a removed row's file too), one per `(repo, source, id)`, by the longest
+/// path that matched one of them, longest first, then `(source, id, repo)`.
+/// A changed row's repo is its node's in the working tree, else the base's.
+fn review_conventions(
+    before: &MergedGraph,
+    after: &MergedGraph,
+    changed: &[ChangedNode],
+) -> Vec<ReviewConvention> {
+    let all = conventions(after);
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let (now, then) = (node_repos(after), node_repos(before));
+    let files: BTreeSet<(u64, &str)> = changed
+        .iter()
+        .filter_map(|n| {
+            let id = NodeId(n.id);
+            let repo = now.get(&id).or_else(|| then.get(&id))?;
+            Some((*repo, n.file.as_deref()?))
+        })
+        .collect();
+    type Row<'c> = (
+        usize,
+        BTreeSet<String>,
+        &'c crate::external::declared::Convention,
+    );
+    let mut by: BTreeMap<(u64, &str, &str), Row<'_>> = BTreeMap::new();
+    for (repo, file) in &files {
+        let normal = file.trim_start_matches("./").trim_start_matches('/');
+        for c in conventions_for(&all, *repo, file) {
+            let len = c
+                .paths
+                .iter()
+                .filter(|p| in_scope(normal, p))
+                .map(|p| if p == "." { 0 } else { p.len() })
+                .max()
+                .unwrap_or(0);
+            let e = by
+                .entry((c.repo, c.source.as_str(), c.id.as_str()))
+                .or_insert_with(|| (len, BTreeSet::new(), c));
+            e.0 = e.0.max(len);
+            e.1.insert(normal.to_string());
+        }
+    }
+    let mut rows: Vec<Row<'_>> = by.into_values().collect();
+    rows.sort_by(|(la, _, a), (lb, _, b)| {
+        lb.cmp(la)
+            .then_with(|| (&a.source, &a.id, a.repo).cmp(&(&b.source, &b.id, b.repo)))
+    });
+    rows.into_iter()
+        .map(|(_, files, c)| ReviewConvention {
+            id: c.id.clone(),
+            source: c.source.clone(),
+            tier: note_tier(&c.source),
+            scope: c.scope.clone(),
+            text: c.text.clone(),
+            decl: c.decl.clone(),
+            by: c.by.clone(),
+            files: files.into_iter().collect(),
+        })
+        .collect()
 }
 
 /// The review of the working tree's change against git rev `base` (module
@@ -601,6 +706,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     for e in &edges {
         *edges_by_tier.entry(e.tier).or_insert(0) += 1;
     }
+    let conventions = review_conventions(before, after, &di.changed);
     let counts = ReviewCounts {
         nodes_changed: di.changed.len(),
         seeds: impact.seeds.len(),
@@ -628,12 +734,16 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         model_breaks,
         check_errors,
         unanchored,
+        conventions,
         selection_intent: intent.as_ref().map(|i| i.selection.clone()),
         intent,
     };
     marker(&answer);
     if let Some(line) = intent_line {
         eprintln!("{line}");
+    }
+    if !answer.conventions.is_empty() {
+        eprintln!("[review] conventions={}", answer.conventions.len());
     }
     Ok(answer)
 }
@@ -1639,6 +1749,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         max,
     );
     intent_md(&mut blocks, r, max);
+    conventions_md(&mut blocks, r, max);
 
     blocks.push("### Edge changes".to_string());
     edges_md(&mut blocks, r, max);
@@ -1811,6 +1922,34 @@ fn model_site(side: &FieldSide, field: Option<&ModelSite>, base: &str) -> String
         None => at(side.file.as_deref(), side.line),
     };
     format!("{} {loc}", code(&side.qname))
+}
+
+/// `### Conventions` (FB.12b; only when one governs a changed file): `|
+/// convention | scope | files changed | source |`, the source cell
+/// `<source>/<id>` then ` (<tier>)`, and ` at <decl>` for an overlay one.
+fn conventions_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    if r.conventions.is_empty() {
+        return;
+    }
+    blocks.push("### Conventions".to_string());
+    push_table(
+        blocks,
+        &["convention", "scope", "files changed", "source"],
+        r.conventions.iter().map(|c| {
+            let mut source = format!("{}/{} ({})", c.source, c.id, c.tier);
+            if let Some(decl) = &c.decl {
+                source.push_str(&format!(" at {decl}"));
+            }
+            vec![
+                text(&c.text),
+                code(&c.scope),
+                c.files.len().to_string(),
+                text(&source),
+            ]
+        }),
+        r.conventions.len(),
+        max,
+    );
 }
 
 /// `### Rules that check nothing` (DT.7b / DT.7c): one bullet per

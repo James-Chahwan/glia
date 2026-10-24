@@ -801,3 +801,44 @@ fn title_routes_its_ids_into_the_intent() {
         show(&plain)
     );
 }
+
+/// FB.12b: a change under a `[[convention]]`'s scope lists it under
+/// `### Conventions` (and `conventions` in `--json`, after `check_errors`)
+/// with the `[review] conventions=<n>` line after the engine's; a
+/// convention never blocks, so the exit code is the review's (0 here).
+#[test]
+fn a_change_under_a_convention_lists_it_and_keeps_the_exit_code() {
+    let s = Scratch::committed("conventions", WEB_APP);
+    s.write(
+        ".glia/overlay.toml",
+        &format!(
+            "{RULES}\n[[convention]]\nid = \"api-pure\"\nscope = \"services/api\"\ntext = \"api internals stay pure\"\n"
+        ),
+    );
+    s.commit("convention");
+    s.write("services/api/internal.py", INTERNAL_EDITED);
+    let o = s.review(&[]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+    assert!(
+        stdout(&o).contains(
+            "### Conventions\n\n| convention | scope | files changed | source |\n|---|---|---|---|\n| api internals stay pure | `services/api` | 1 | overlay/api-pure (declared) at .glia/overlay.toml:10 |"
+        ),
+        "{}",
+        show(&o)
+    );
+    let m = markers(&o);
+    assert_eq!(m.len(), 3, "{}", show(&o));
+    assert!(m[0].starts_with("[review] base=HEAD "), "{}", show(&o));
+    assert_eq!(m[1], "[review] conventions=1");
+    assert_eq!(m[2], "[review] surface=cli format=markdown exit=0");
+
+    let o = s.review(&["--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+    let keys = top_level_keys(&stdout(&o));
+    let mut want: Vec<String> = KEYS.iter().map(|k| k.to_string()).collect();
+    want.insert(10, "conventions".to_string());
+    assert_eq!(keys, want, "{}", show(&o));
+    let v = json(&o);
+    assert_eq!(v["conventions"][0]["id"], "api-pure");
+    assert_eq!(v["conventions"][0]["files"][0], "services/api/internal.py");
+}
