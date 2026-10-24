@@ -110,6 +110,44 @@ const VENDORED_KINDS: &[NodeKindId] = &[
     nk::ENUM,
 ];
 
+/// The node kinds glia embeds (FB.4, `glia_engine::semantic`): declarations,
+/// the channel ends a person names, and doc sections. A node of any other
+/// kind (a PROJECT, a REGION, a PACKAGE_DEP, a client call site ..) gets no
+/// embed text, no vector and is never counted missing. A new embeddable kind
+/// is one row here, never a list in a consumer.
+pub const EMBED_KINDS: &[NodeKindId] = &[
+    nk::MODULE,
+    nk::CLASS,
+    nk::FUNCTION,
+    nk::METHOD,
+    nk::ROUTE,
+    nk::INTERFACE,
+    nk::STRUCT,
+    nk::ENDPOINT,
+    nk::ENUM,
+    nk::GRPC_SERVICE,
+    nk::QUEUE_CONSUMER,
+    nk::QUEUE_PRODUCER,
+    nk::GRAPHQL_RESOLVER,
+    nk::GRAPHQL_OPERATION,
+    nk::WS_HANDLER,
+    nk::EVENT_HANDLER,
+    nk::CLI_COMMAND,
+    nk::COMPONENT,
+    nk::HOOK,
+    nk::SERVICE,
+    nk::DIRECTIVE,
+    nk::PIPE,
+    nk::GUARD,
+    nk::COMPOSABLE,
+    nk::DATA_ENTITY,
+    nk::CRON_JOB,
+    nk::STATE_VAR,
+    nk::DOC_SECTION,
+    nk::MESSAGE_TYPE,
+    nk::RPC_PROCEDURE,
+];
+
 /// The code domain's tables.
 pub const CODE_TABLES: DomainTables = DomainTables {
     graph_type: GRAPH_TYPE,
@@ -1018,6 +1056,22 @@ pub fn node_ext(cells: &[Cell]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embed_kinds_are_registered_distinct_declarations() {
+        let mut seen = std::collections::BTreeSet::new();
+        for k in EMBED_KINDS {
+            assert!(
+                crate::node_kind::ALL.iter().any(|(id, _)| id == k),
+                "EMBED_KINDS holds an unregistered kind {k:?}"
+            );
+            assert!(seen.insert(k.0), "EMBED_KINDS repeats {k:?}");
+        }
+        for not in [nk::PROJECT, nk::REGION, nk::PACKAGE_DEP, nk::GOAL_UNIT] {
+            assert!(!EMBED_KINDS.contains(&not), "{not:?} is not embedded");
+        }
+        assert_eq!(EMBED_KINDS.len(), 30);
+    }
 
     /// DT.5d: every row matches its positive case, and the role, extension
     /// and name gates keep the look-alikes out.
