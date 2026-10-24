@@ -533,7 +533,7 @@ glia cell set <REPO> <QNAME> <CELL> [--dims <DIMS>] [--file <PATH>] [--hint <HIN
     naming the fields that differ.
 glia cell rm <REPO> <QNAME> <CELL> [--id <ID>] [--source <SOURCE>]
     Remove one entry (--id, --source) or a node's VECTOR.
-glia cell ls <REPO> [--check] [--json] [--qname <QNAME>] [--rekey]
+glia cell ls <REPO> [--check] [--json] [--qname <QNAME>] [--rekey] [--writer <NS>]
     List the sidecar rows. --check binds each against a fresh build and exits 1 on an
     orphaned, ambiguous or rejected row; --rekey rewrites rows a moved node re-bound.
 ```

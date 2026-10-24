@@ -10,6 +10,7 @@ cmd glia cell ls
   arg qname pos=- long=qname short=- required=false num_args=1 action=Set default=- value_names=QNAME global=false hidden=false
   arg rekey pos=- long=rekey short=- required=false num_args=0 action=SetTrue default=false value_names=REKEY global=false hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg writer pos=- long=writer short=- required=false num_args=1 action=Set default=- value_names=NS global=false hidden=false
 cmd glia cell rm
   arg cell pos=3 long=- short=- required=true num_args=1 action=Set default=- value_names=CELL global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false

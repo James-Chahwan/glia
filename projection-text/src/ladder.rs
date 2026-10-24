@@ -22,6 +22,22 @@
 //! Outline when asked for either ([`rendered_as`](crate::ladder::rendered_as) says which rung a pick
 //! really renders at).
 //!
+//! NOTES (FB.11). A node's DECISION and CONV entries (each cell a JSON array
+//! of `{"source", "id", ..}` entries, `glia_code_domain::external_inputs`'
+//! PAYLOADS) are what a writer said about it: a human's overlay `[[decision]]`
+//! / `[[note]]`, an ADR, or a cell-API write such as Engram's corrections. At
+//! Outline and above a node renders them after its doc line, one
+//! `note[<source>/<id>, <tier>]: <title or text>` line each (whitespace
+//! collapsed, cut at [`NOTE_CHARS`](crate::ladder::NOTE_CHARS) chars), at most
+//! [`MAX_NOTES`](crate::ladder::MAX_NOTES) then `(+<k> more notes)`. The tier
+//! is `heuristic` for source `api` (a writer's statement, never a fact glia
+//! read) and `declared` for `overlay` / `adr`. Left out: CONV entries of
+//! `kind` `convention` (FB.12b renders conventions) and overlay DECISION
+//! entries on a PROJECT (a `[[decision]]` scope stanza's record, not per-node
+//! text). A Qname renders none; a node with no entry renders as before.
+//! [`node_notes`](crate::ladder::node_notes) lists them for a caller that
+//! counts them (the engine pack's manifest).
+//!
 //! Locations are 1-based (an editor's line): [`crate::node_position`]'s
 //! 0-based POSITION rows plus one. The kind is the code-domain registry's
 //! upper-case name ([`node_kind::name`]), the name the engine's located rows
@@ -35,7 +51,7 @@
 use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{CellPayload, EdgeCategoryId, Node, NodeId};
+use glia_core::{CellPayload, EdgeCategoryId, Node, NodeId, NodeKindId};
 use glia_graph::{MergedGraph, RepoGraph};
 
 use crate::node_position;
@@ -54,6 +70,13 @@ const NOT_LINKS: [EdgeCategoryId; 3] = [
     edge_category::CONTAINS,
     edge_category::CO_CHANGES,
 ];
+
+/// The most note lines one node renders; the rest are counted in one
+/// `(+<k> more notes)` line.
+pub const MAX_NOTES: usize = 3;
+
+/// The most chars of a note's text a note line shows.
+pub const NOTE_CHARS: usize = 200;
 
 /// A line of CODE ending (trailing whitespace ignored) in one of these opens
 /// the body: the Preview's signature ends there.
@@ -119,12 +142,127 @@ fn first_text(n: &Node, kind: glia_core::CellTypeId) -> Option<&str> {
     })
 }
 
+/// One DECISION or CONV entry as the ladder renders it (FB.11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Note {
+    /// The entry's writer: `api`, `overlay` or `adr`.
+    pub source: String,
+    /// The entry's id within its source (Engram's are `engram:<..>`).
+    pub id: String,
+    /// `heuristic` (source `api`) or `declared` (overlay / adr).
+    pub tier: &'static str,
+    /// The DECISION's `title` (else `text`) or the CONV's `text`, whitespace
+    /// collapsed, at most [`NOTE_CHARS`] chars (a cut one ends in `…`).
+    pub text: String,
+}
+
+/// The tier a note's source carries: `declared` for what a human declared in
+/// the repo (overlay, ADR), `heuristic` for anything else (a cell-API writer).
+fn note_tier(source: &str) -> &'static str {
+    match source {
+        "overlay" | "adr" => "declared",
+        _ => "heuristic",
+    }
+}
+
+/// The notes of `n` (of kind `kind`), sorted by `(source, id)` (DECISION
+/// before CONV on a tie). An entry that is not an object, lacks a string
+/// `source` / `id` or has no text is skipped, and so is a payload that is not
+/// a JSON array; see the module doc for what else is left out.
+fn notes_of(n: &Node, kind: Option<NodeKindId>) -> Vec<Note> {
+    let mut out: Vec<(u8, Note)> = Vec::new();
+    for c in &n.cells {
+        let rank = match c.kind {
+            k if k == cell_type::DECISION => 0u8,
+            k if k == cell_type::CONV => 1u8,
+            _ => continue,
+        };
+        let CellPayload::Json(s) = &c.payload else {
+            continue;
+        };
+        let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(s)
+        else {
+            continue;
+        };
+        for e in &entries {
+            let str_of = |k: &str| e.get(k).and_then(serde_json::Value::as_str);
+            let (Some(source), Some(id)) = (str_of("source"), str_of("id")) else {
+                continue;
+            };
+            if rank == 1 && str_of("kind") == Some("convention") {
+                continue;
+            }
+            if rank == 0 && source == "overlay" && kind == Some(node_kind::PROJECT) {
+                continue;
+            }
+            let raw = if rank == 0 {
+                str_of("title")
+                    .filter(|t| !t.trim().is_empty())
+                    .or(str_of("text"))
+            } else {
+                str_of("text")
+            };
+            let words = raw.unwrap_or("").split_whitespace().collect::<Vec<_>>();
+            if words.is_empty() {
+                continue;
+            }
+            let whole = words.join(" ");
+            let text = if whole.chars().count() > NOTE_CHARS {
+                let mut cut: String = whole.chars().take(NOTE_CHARS).collect();
+                cut.push('…');
+                cut
+            } else {
+                whole
+            };
+            out.push((
+                rank,
+                Note {
+                    source: source.to_string(),
+                    id: id.to_string(),
+                    tier: note_tier(source),
+                    text,
+                },
+            ));
+        }
+    }
+    out.sort_by(|(ra, a), (rb, b)| {
+        (a.source.as_str(), a.id.as_str(), ra).cmp(&(b.source.as_str(), b.id.as_str(), rb))
+    });
+    out.into_iter().map(|(_, n)| n).collect()
+}
+
+/// The notes [`render_node`] renders for `id` at Outline and above (all of
+/// them, the ones past [`MAX_NOTES`] included), in render order. Empty when
+/// the node has none or no graph holds `id`.
+pub fn node_notes(m: &MergedGraph, id: NodeId) -> Vec<Note> {
+    held(m, id).map(|h| h.notes()).unwrap_or_default()
+}
+
+/// The note lines for `notes`, each prefixed with `indent` and ending in a
+/// newline: at most [`MAX_NOTES`], then `(+<k> more notes)`.
+fn note_lines(notes: &[Note], indent: &str) -> String {
+    let mut out = String::new();
+    for n in notes.iter().take(MAX_NOTES) {
+        out.push_str(&format!(
+            "{indent}note[{}/{}, {}]: {}\n",
+            n.source, n.id, n.tier, n.text
+        ));
+    }
+    let more = notes.len().saturating_sub(MAX_NOTES);
+    if more > 0 {
+        out.push_str(&format!("{indent}(+{more} more notes)\n"));
+    }
+    out
+}
+
 /// A node as the ladder renders it: the node, its qname and its kind name,
 /// read from the graph that holds it.
 struct Held<'a> {
     node: &'a Node,
     qname: &'a str,
     kind: &'static str,
+    kind_id: Option<NodeKindId>,
 }
 
 impl<'a> Held<'a> {
@@ -135,13 +273,18 @@ impl<'a> Held<'a> {
             .get(&node.id)
             .map(String::as_str)
             .unwrap_or("");
-        let kind = g
-            .nav
-            .kind_by_id
-            .get(&node.id)
-            .map(|k| node_kind::name(*k))
-            .unwrap_or("UNKNOWN");
-        Held { node, qname, kind }
+        let kind_id = g.nav.kind_by_id.get(&node.id).copied();
+        let kind = kind_id.map(node_kind::name).unwrap_or("UNKNOWN");
+        Held {
+            node,
+            qname,
+            kind,
+            kind_id,
+        }
+    }
+
+    fn notes(&self) -> Vec<Note> {
+        notes_of(self.node, self.kind_id)
     }
 
     /// The rung this node really renders at when asked for `f`.
@@ -162,8 +305,20 @@ impl<'a> Held<'a> {
         }
     }
 
-    /// `- <qname> (<KIND> <file>:<start>)`, no trailing newline.
+    /// `- <qname> (<KIND> <file>:<start>)`, then the node's note lines
+    /// indented two spaces under it; no trailing newline.
     fn outline(&self) -> String {
+        let mut out = self.outline_line();
+        let notes = note_lines(&self.notes(), "  ");
+        if !notes.is_empty() {
+            out.push('\n');
+            out.push_str(notes.trim_end_matches('\n'));
+        }
+        out
+    }
+
+    /// The bare located line.
+    fn outline_line(&self) -> String {
         match node_position(self.node) {
             Some(p) => {
                 format!(
@@ -202,6 +357,7 @@ impl<'a> Held<'a> {
             out.push_str(line);
             out.push('\n');
         }
+        out.push_str(&note_lines(&self.notes(), ""));
 
         let body = body_lines(self.node);
         let shown: &[&str] = if whole { &body } else { signature(&body) };
@@ -608,6 +764,126 @@ mod tests {
             "# t\n\n{PRICE_FULL}\n## outline\n- shop::a::place (FUNCTION shop/a.py:8)\n\nalso: shop::a\n\n## links\nshop::a::place -CALLS-> shop::a::price\n"
         );
         assert_eq!(render_pack(&s.m, "t", &picks), want);
+    }
+
+    fn json(kind: CellTypeId, s: &str) -> Cell {
+        Cell {
+            kind,
+            payload: CellPayload::Json(s.into()),
+        }
+    }
+
+    /// `shop()` with `cells` appended to `id`'s node.
+    fn shop_with(id_of: impl Fn(&Shop) -> NodeId, cells: Vec<Cell>) -> Shop {
+        let mut s = shop();
+        let id = id_of(&s);
+        if let Some(n) = s.m.graphs[0].nodes.iter_mut().find(|n| n.id == id) {
+            n.cells.extend(cells);
+        }
+        s
+    }
+
+    #[test]
+    fn notes_render_at_outline_and_above_never_at_qname() {
+        let s = shop_with(
+            |s| s.price,
+            vec![json(
+                cell_type::DECISION,
+                r#"[{"id":"engram:3f2a","source":"api","text":"keep   charge_card\n idempotent"}]"#,
+            )],
+        );
+        let note = "note[api/engram:3f2a, heuristic]: keep charge_card idempotent";
+        assert_eq!(
+            render_node(&s.m, s.price, Fidelity::Outline).as_deref(),
+            Some(format!("- shop::a::price (FUNCTION shop/a.py:1)\n  {note}").as_str())
+        );
+        let full = render_node(&s.m, s.price, Fidelity::Full).unwrap_or_default();
+        assert_eq!(
+            full,
+            PRICE_FULL.replace("Price an order.\n", &format!("Price an order.\n{note}\n"))
+        );
+        let preview = render_node(&s.m, s.price, Fidelity::Preview).unwrap_or_default();
+        assert!(
+            preview.contains(&format!("Price an order.\n{note}\n```python")),
+            "{preview}"
+        );
+        assert_eq!(
+            render_node(&s.m, s.price, Fidelity::Qname).as_deref(),
+            Some("shop::a::price")
+        );
+        assert_eq!(node_notes(&s.m, s.price).len(), 1);
+        // In a pack the Outline's notes stay under its line.
+        let picks = [Pick {
+            id: s.price,
+            fidelity: Fidelity::Outline,
+        }];
+        assert_eq!(
+            render_pack(&s.m, "t", &picks),
+            format!("# t\n\n## outline\n- shop::a::price (FUNCTION shop/a.py:1)\n  {note}\n")
+        );
+    }
+
+    #[test]
+    fn notes_sort_cap_tier_and_skip() {
+        let long = "x".repeat(NOTE_CHARS + 5);
+        let s = shop_with(
+            |s| s.place,
+            vec![
+                json(
+                    cell_type::CONV,
+                    &format!(
+                        r#"[{{"id":"000001","source":"api","text":"{long}"}},{{"id":"c1","kind":"convention","source":"api","text":"skip me"}},{{"id":"note#1","source":"overlay","text":"declared note"}}]"#
+                    ),
+                ),
+                json(
+                    cell_type::DECISION,
+                    r#"[{"id":"0001-x","source":"adr","title":"Use queues","text":"body"},{"id":"d2","source":"api","title":"  ","text":"t2"},{"source":"api","text":"no id"}]"#,
+                ),
+                // Not an entry array: ignored.
+                json(cell_type::CONV, "{}"),
+            ],
+        );
+        let notes = node_notes(&s.m, s.place);
+        let keys: Vec<(&str, &str, &str)> = notes
+            .iter()
+            .map(|n| (n.source.as_str(), n.id.as_str(), n.tier))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("adr", "0001-x", "declared"),
+                ("api", "000001", "heuristic"),
+                ("api", "d2", "heuristic"),
+                ("overlay", "note#1", "declared"),
+            ]
+        );
+        assert_eq!(notes[0].text, "Use queues");
+        assert_eq!(notes[2].text, "t2", "a blank title falls back to text");
+        assert_eq!(notes[1].text.chars().count(), NOTE_CHARS + 1);
+        assert!(notes[1].text.ends_with('…'));
+        let out = render_node(&s.m, s.place, Fidelity::Outline).unwrap_or_default();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1 + MAX_NOTES + 1, "{out}");
+        assert_eq!(lines[1], "  note[adr/0001-x, declared]: Use queues");
+        assert_eq!(lines[4], "  (+1 more notes)");
+        assert!(!out.contains("skip me"), "conventions are FB.12b's: {out}");
+    }
+
+    #[test]
+    fn overlay_decisions_on_a_project_are_scope_records() {
+        let mut s = shop();
+        let decision = json(
+            cell_type::DECISION,
+            r#"[{"id":"d1","source":"overlay","title":"scope record"},{"id":"d2","source":"api","title":"kept"}]"#,
+        );
+        let g = &mut s.m.graphs[0];
+        g.nav.kind_by_id.insert(s.module, node_kind::PROJECT);
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.id == s.module) {
+            n.cells.push(decision);
+        }
+        let notes = node_notes(&s.m, s.module);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "d2");
     }
 
     #[test]

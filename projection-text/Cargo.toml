@@ -15,7 +15,8 @@ glia-parser-python = { path = "../parsers/code/python", optional = true }
 walkdir = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+# Plain dependency: the ladder reads DECISION / CONV entry arrays (FB.11).
+serde_json = "1"
 anyhow = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 
@@ -27,7 +28,6 @@ research = [
     "dep:walkdir",
     "dep:clap",
     "dep:serde",
-    "dep:serde_json",
     "dep:anyhow",
     "dep:regex",
 ]

@@ -857,3 +857,128 @@ fn ls_check_audits_the_vector_contract() {
     );
     assert_eq!(json["vector_audit"]["issues"][0]["line"], 4, "{json}");
 }
+
+/// FB.11 — the writer owns its rows: `--rekey` leaves a row in another
+/// writer's id namespace (`engram:..`) where it is, reporting it, and
+/// rewrites it only under `--writer <ns>`; glia's own `000001` rows rekey as
+/// before.
+#[test]
+fn rekey_leaves_another_writers_rows_unless_writer_names_it() {
+    fn moved(name: &str) -> Scratch {
+        let repo = Scratch::new(name);
+        repo.write("a.py", CHARGE);
+        let root = repo.path();
+        ok(&["build", root]);
+        ok(&[
+            "cell",
+            "set",
+            root,
+            "a::charge",
+            "DECISION",
+            "--json",
+            r#"{"id":"engram:3f2a","text":"keep charge idempotent"}"#,
+        ]);
+        ok(&[
+            "cell",
+            "set",
+            root,
+            "a::charge",
+            "CONV",
+            "--text",
+            "glia note",
+        ]);
+        std::fs::create_dir_all(repo.0.join("pkg")).expect("mkdir pkg");
+        std::fs::rename(repo.0.join("a.py"), repo.0.join("pkg/a.py")).expect("move a.py");
+        repo
+    }
+    let at = |repo: &Scratch| -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = repo
+            .cell_rows()
+            .iter()
+            .map(|r| {
+                (
+                    r["qname"].as_str().unwrap_or_default().to_string(),
+                    r["entry"]["id"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+
+    let repo = moved("foreign");
+    let r = ok(&["cell", "ls", repo.path(), "--check", "--rekey", "--json"]);
+    assert!(
+        r.stderr.contains(
+            "[cells] rekey skipped foreign=1 (writer owns its rows; --writer <ns> to rewrite) surface=cli"
+        ),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr
+            .contains("[cells] rekey qname=a::charge -> pkg::a::charge cell=CONV id=000001 "),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(
+        r.json()["rekey"],
+        serde_json::json!({"rewritten": 1, "conflicts": 0, "skipped_foreign": 1})
+    );
+    assert_eq!(
+        at(&repo),
+        [
+            ("a::charge".to_string(), "engram:3f2a".to_string()),
+            ("pkg::a::charge".to_string(), "000001".to_string()),
+        ]
+    );
+    let again = ok(&["cell", "ls", repo.path(), "--check"]);
+    assert!(
+        again
+            .stdout
+            .contains("rekeyed a::charge DECISION api/engram:3f2a -> pkg::a::charge"),
+        "the foreign row is still listed rekeyed: {}",
+        again.stdout
+    );
+
+    let repo = moved("writer");
+    let r = ok(&[
+        "cell",
+        "ls",
+        repo.path(),
+        "--check",
+        "--rekey",
+        "--writer",
+        "engram",
+        "--json",
+    ]);
+    assert!(!r.stderr.contains("rekey skipped foreign"), "{}", r.stderr);
+    assert_eq!(
+        r.json()["rekey"],
+        serde_json::json!({"rewritten": 2, "conflicts": 0})
+    );
+    assert_eq!(
+        at(&repo),
+        [
+            ("pkg::a::charge".to_string(), "000001".to_string()),
+            ("pkg::a::charge".to_string(), "engram:3f2a".to_string()),
+        ]
+    );
+
+    // Another namespace named is not this writer's.
+    let repo = moved("other");
+    let r = ok(&[
+        "cell",
+        "ls",
+        repo.path(),
+        "--check",
+        "--rekey",
+        "--writer",
+        "other",
+    ]);
+    assert!(
+        r.stderr.contains("[cells] rekey skipped foreign=1 "),
+        "{}",
+        r.stderr
+    );
+}

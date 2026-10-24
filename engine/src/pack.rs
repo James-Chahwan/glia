@@ -121,8 +121,17 @@
 //! the most of the `k` cut neighbours any one file holds (EA.6b) —
 //! grep `^\[rank\] surface=pack`; then
 //! `[pack] query=<q> seeds=<S> candidates=<C> packed=<P> (full=<F> preview=<V>
-//! outline=<O> qname=<Q>) tokens=<U>/<B> bytes=<N> bpt=<x.y> rerenders=<R>`
-//! (one line) — grep `^\[pack\] query=`.
+//! outline=<O> qname=<Q>) notes=<n> tokens=<U>/<B> bytes=<N> bpt=<x.y>
+//! rerenders=<R>` (one line; `notes` the manifest's [`PackedNode::notes`]
+//! summed, FB.11) — grep `^\[pack\] query=`.
+//!
+//! # Notes (FB.11)
+//!
+//! A packed node at Outline or above carries its DECISION / CONV entries as
+//! `note[<source>/<id>, <tier>]: ..` lines (the ladder's NOTES:
+//! `heuristic` for a cell-API writer such as Engram's corrections, `declared`
+//! for overlay / ADR entries). They are part of its [`render_node`] text, so
+//! the climb pays for them like any other line; they never move a rank.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -131,7 +140,9 @@ use glia_activation::{Direction, Specificity};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
-use glia_projection_text::ladder::{Fidelity, Pick, render_node, render_pack, rendered_as};
+use glia_projection_text::ladder::{
+    Fidelity, Pick, node_notes, render_node, render_pack, rendered_as,
+};
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
@@ -237,6 +248,16 @@ pub struct PackedNode {
     /// The find tier that matched a [`pack`] seed; `None` for a neighbour and
     /// for a [`pack_ids`] seed.
     pub matched: Option<&'static str>,
+    /// FB.11: how many DECISION / CONV notes its text carries
+    /// ([`node_notes`]; every one, the ones the ladder folds into
+    /// `(+<k> more notes)` included); 0 at the Qname rung, which shows none.
+    /// Skipped in JSON when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub notes: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// A packed context: the text to hand over, and the manifest of what is in it.
@@ -539,18 +560,25 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
             let l = (*l)?;
             let at = loc.locate(c.id);
             let asked = Fidelity::LADDER[l];
+            let rung = rendered_as(&view, c.id, asked).unwrap_or(asked);
+            let notes = if rung >= Fidelity::Outline {
+                node_notes(&view, c.id).len()
+            } else {
+                0
+            };
             Some(PackedNode {
                 id: c.id.0,
                 qname: at.qname,
                 kind: at.kind,
                 file: at.file,
                 line: at.line,
-                fidelity: rendered_as(&view, c.id, asked).unwrap_or(asked).name(),
+                fidelity: rung.name(),
                 tokens: c.cost[l].unwrap_or(0),
                 rank: i + 1,
                 tier: c.tier,
                 reason: if c.seed { "seed" } else { "neighbour" },
                 matched: c.matched,
+                notes,
             })
         })
         .collect();
@@ -961,7 +989,7 @@ fn rate(x10: u32) -> String {
 fn marker(p: &Pack, seeds: usize) {
     let at = |f: Fidelity| p.nodes.iter().filter(|n| n.fidelity == f.name()).count();
     eprintln!(
-        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) tokens={}/{} bytes={} bpt={} rerenders={}",
+        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) notes={} tokens={}/{} bytes={} bpt={} rerenders={}",
         p.query.split_whitespace().collect::<Vec<_>>().join(" "),
         p.candidates,
         p.nodes.len(),
@@ -969,6 +997,7 @@ fn marker(p: &Pack, seeds: usize) {
         at(Fidelity::Preview),
         at(Fidelity::Outline),
         at(Fidelity::Qname),
+        p.nodes.iter().map(|n| n.notes).sum::<usize>(),
         p.used_tokens,
         p.budget_tokens,
         p.bytes,

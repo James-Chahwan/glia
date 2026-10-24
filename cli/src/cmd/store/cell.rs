@@ -54,6 +54,18 @@
 //! the next free id instead, as a fresh CONV write does); it prints
 //! `[cells] rekey conflict ...`.
 //!
+//! THE LIFETIME RULE (FB.11, 0.5.4 §B): the writer owns its rows. glia never
+//! rewrites or deletes another source's rows; an orphan is kept, reported and
+//! attached to nothing, and its writer re-anchors or deletes it on its next
+//! write. A row whose entry id opens with a writer namespace, `<ns>:` with
+//! `<ns>` matching `[a-z][a-z0-9_-]*` (Engram's `engram:<..>` ids), belongs to
+//! that writer: `--rekey` rewrites it only when `--writer <ns>` names it, and
+//! otherwise leaves it listed `rekeyed` and counts it in one
+//! `[cells] rekey skipped foreign=<n> (writer owns its rows; --writer <ns> to rewrite) surface=cli`
+//! line (printed when `n` > 0; `--json`'s `rekey` gains `skipped_foreign`
+//! then). Un-namespaced ids (glia's own CLI / pyo3 writes such as `000001`,
+//! overlay ids such as `note#2`, ADR ids) and VECTOR rows rekey as before.
+//!
 //! Exit codes: 0 ok; 1 when `--check` finds a row that does not apply
 //! (ambiguous, orphaned or rejected) or a vector audit issue, or `rm` finds
 //! no such row; 2 for a
@@ -185,6 +197,10 @@ struct LsArgs {
     /// Rewrite rekeyed rows to their node's current qname and hint.
     #[arg(long, requires = "check")]
     rekey: bool,
+    /// Under `--rekey`, also rewrite the rows of this writer namespace (entry
+    /// ids `<ns>:..`, e.g. `engram`); another writer's rows are left alone.
+    #[arg(long, requires = "rekey", value_name = "NS")]
+    writer: Option<String>,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -563,7 +579,14 @@ fn ls(a: LsArgs) -> Result<i32, String> {
         audit.models.len()
     );
     let rekey = if a.rekey {
-        Some(rekey_rows(&root, &merged, &rows, &mut checked, &keep)?)
+        Some(rekey_rows(
+            &root,
+            &merged,
+            &rows,
+            &mut checked,
+            &keep,
+            a.writer.as_deref(),
+        )?)
     } else {
         None
     };
@@ -600,11 +623,12 @@ fn ls(a: LsArgs) -> Result<i32, String> {
             "check": counts.json(),
             "vector_audit": audit_json(&audit),
         });
-        if let (Some((rewritten, conflicts)), Some(o)) = (rekey, doc.as_object_mut()) {
-            o.insert(
-                "rekey".into(),
-                json!({ "rewritten": rewritten, "conflicts": conflicts }),
-            );
+        if let (Some(k), Some(o)) = (rekey, doc.as_object_mut()) {
+            let mut r = json!({ "rewritten": k.rewritten, "conflicts": k.conflicts });
+            if let (true, Some(ro)) = (k.skipped_foreign > 0, r.as_object_mut()) {
+                ro.insert("skipped_foreign".into(), json!(k.skipped_foreign));
+            }
+            o.insert("rekey".into(), r);
         }
         println!("{doc}");
     } else {
@@ -730,15 +754,36 @@ fn node_ref(merged: &MergedGraph, id: NodeId) -> Option<NodeRef> {
     })
 }
 
+/// What `--rekey` did.
+struct Rekeyed {
+    rewritten: usize,
+    conflicts: usize,
+    /// Rekeyed rows of another writer's namespace, left alone.
+    skipped_foreign: usize,
+}
+
+/// The writer namespace of an entry id: `ns` for `ns:<..>` where `ns` is
+/// `[a-z][a-z0-9_-]*`, else `None`.
+fn writer_namespace(id: &str) -> Option<&str> {
+    let (ns, _) = id.split_once(':')?;
+    let mut chars = ns.chars();
+    let first = chars.next()?;
+    (first.is_ascii_lowercase()
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'))
+    .then_some(ns)
+}
+
 /// `--rekey`: rewrite each kept rekeyed row to its node's qname and current
-/// hint (sidecar only; see the module doc). `(rewritten, conflicts)`.
+/// hint (sidecar only; see the module doc), except a row in another writer's
+/// namespace (`writer` names the one the caller may rewrite).
 fn rekey_rows(
     root: &Path,
     merged: &MergedGraph,
     rows: &[Row],
     checked: &mut [Checked],
     keep: &[bool],
-) -> Result<(usize, usize), String> {
+    writer: Option<&str>,
+) -> Result<Rekeyed, String> {
     // The entries the cells file holds, by key, kept current as rows move.
     let mut entries: BTreeMap<(String, String, String, String), Value> = rows
         .iter()
@@ -754,7 +799,7 @@ fn rekey_rows(
             _ => None,
         })
         .collect();
-    let (mut rewritten, mut conflicts) = (0, 0);
+    let (mut rewritten, mut conflicts, mut skipped_foreign) = (0, 0, 0);
     for ((row, c), _) in rows
         .iter()
         .zip(checked.iter_mut())
@@ -764,6 +809,13 @@ fn rekey_rows(
         let Some(node) = c.node.clone().filter(|_| c.status == "rekeyed") else {
             continue;
         };
+        if let Row::Cell(r) = row {
+            let id = field(&r.entry, "id");
+            if writer_namespace(&id).is_some_and(|ns| Some(ns) != writer) {
+                skipped_foreign += 1;
+                continue;
+            }
+        }
         let hint = identity_of(merged, NodeId(node.id)).map(|i| i.hint());
         let tier = c.tier.unwrap_or("?");
         let (old_id, new_id) = match row {
@@ -872,8 +924,17 @@ fn rekey_rows(
         c.rewritten_to = Some(node.qname.clone());
         rewritten += 1;
     }
+    if skipped_foreign > 0 {
+        eprintln!(
+            "[cells] rekey skipped foreign={skipped_foreign} (writer owns its rows; --writer <ns> to rewrite) surface={SURFACE}"
+        );
+    }
     eprintln!("[cells] rekey rewritten={rewritten} conflicts={conflicts} surface={SURFACE}");
-    Ok((rewritten, conflicts))
+    Ok(Rekeyed {
+        rewritten,
+        conflicts,
+        skipped_foreign,
+    })
 }
 
 /// `(qname, cell, source, id)`, the key the store upserts a cell row by.
