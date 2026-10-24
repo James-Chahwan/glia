@@ -9627,7 +9627,8 @@
   "TZ": "James 2026-10-24 (\"yeah 0.5.4 only releases after total ship and test\"): option (a): FZ.1 / FZ.2 keep depends_on every track; 0.5.4 releases only once all of T1-T11 land and test; nothing moves to 0.5.5",
   "HANDOFF-SPAN": "James 2026-10-24 (\"sinc 0.5.3 is released but repo-graph and nothing else will update til 0.5.4\"): no consumer applies the 0.5.3 handoffs; the 0.5.4 handoffs run repo-graph 0.5.2 -> 0.5.4, Engram 0.5.2 -> 0.5.4, neuropil 0.5.1 -> 0.5.4, each carrying its 0.5.3 handoff forward; 0.5.4 may break 0.5.3 surfaces freely, each break declared",
   "DEPS-NCSA": "James 2026-10-24 (\"Accept NCSA\"): NCSA (UIUC / LLVM, permissive) joins the allowed dependency licences; first instance libfuzzer-sys 0.4.13 (rav1e cfg(fuzzing), via fastembed -> image), F0.2 50af6405",
-  "STAMP-LOCK": "James 2026-10-24 (\"Hash only what glia uses\"): PARSER_STAMP hashes Cargo.lock over the HASHED_ROOTS crates' dependency closure only, so one commit has one stamp however it is checked out or packaged (F0.6); FE.5 keeps its step (h)"
+  "STAMP-LOCK": "James 2026-10-24 (\"Hash only what glia uses\"): PARSER_STAMP hashes Cargo.lock over the HASHED_ROOTS crates' dependency closure only, so one commit has one stamp however it is checked out or packaged (F0.6); FE.5 keeps its step (h)",
+  "VECTORS-OUT": "James 2026-10-24 (FB.3's question): vectors leave the build. .glia/vectors.jsonl is a query-time sidecar; no layout or PyGraph holds a VECTOR cell, a VECTOR write is write_through=sidecar_only, and vectors.jsonl / vocab-snapshot/ are not build inputs. Checked first: repo-graph skips VECTOR cells (server.py _SKIP_CELL_TYPES), Engram reads the sidecar, the archived SWE-bench work used its own model vectors. \"okay it's fine then\"."
  },
  "reverify": {
   "f7f9a495": {
