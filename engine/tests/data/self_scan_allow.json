@@ -2,6 +2,7 @@
   {"kind": "CLI_INVOCATION", "qname": "cli_invoke:git", "why": "engine/src/git_rev.rs runs git (the rev reads)"},
   {"kind": "CLI_INVOCATION", "qname": "cli_invoke:pdftotext", "why": "engine/examples/rank_eval.rs runs pdftotext (the doc-unit replay's text step)"},
   {"kind": "CLI_INVOCATION", "qname": "cli_invoke:protoc", "why": "cli/src/cmd/inputs/scip/wire.rs runs protoc (the SCIP wire re-encode test)"},
+  {"kind": "CONFIG_KEY", "qname": "config:env:CARGO_CFG_TARGET_OS", "why": "cli/build.rs reads the env var CARGO_CFG_TARGET_OS (the Dawn rpath, FB.14; embed/build.rs and py/build.rs too)"},
   {"kind": "CONFIG_KEY", "qname": "config:env:CARGO_MANIFEST_DIR", "why": "stamp/build.rs reads the env var CARGO_MANIFEST_DIR"},
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_ACTIVATION_DEBUG", "why": "activation/src/plan.rs reads the env var GLIA_ACTIVATION_DEBUG"},
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_ALGO_DEBUG", "why": "activation/src/algo/mod.rs reads the env var GLIA_ALGO_DEBUG"},
