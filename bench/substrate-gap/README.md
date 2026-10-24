@@ -68,7 +68,9 @@ The eleven fields below are the **complete and only** vocabulary:
     {"kind": "ROUTE", "name": "/users"},                 // no such node at all
     {"kind": "ROUTE"},                                    // name omitted = any name
     {"kind": "ROUTE", "name": "/users", "max_nodes": 1},  // at most N such nodes
-    {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}  // no such edge
+    {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}, // no such edge
+    {"from": "Fleet::Get", "to": "Problem", "category": "USES",
+     "rule": "json_response"}  // only an edge whose EVIDENCE rule is this (FD.24)
   ],
 
   // ---- files git refuses to track, copied in for the grade only ----

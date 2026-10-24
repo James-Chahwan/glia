@@ -795,8 +795,8 @@ def test_anchor_clojure_kafka_is_unknown():
 # categories such as IMPORTS are left out: single-dir qnames carry the dir
 # prefix, so their edges move for reasons that have nothing to do with RepoIds.
 # SHARES_DEPENDENCY stays although no resolver emits it since DD.16 (the SAME_AS
-# package_name star replaced it): a registered category, a vacuous member here
-# and in REPO_PAIRWISE_CATEGORIES. SAME_AS is left out: it is not repo-pairwise
+# package_name star replaced it): a registered category, a vacuous member here.
+# REPO_PAIRWISE_CATEGORIES no longer lists it (FD.24). SAME_AS is left out: it is not repo-pairwise
 # (a monorepo's workspace package <-> project and contract-op classes form
 # inside one repo, while two copies of one message in one repo are one node).
 CROSS_GRAPH_CATEGORIES = frozenset({
