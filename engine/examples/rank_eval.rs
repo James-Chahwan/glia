@@ -1971,7 +1971,7 @@ impl SemCache {
         Ok(SemCache { rows, path })
     }
 
-    /// Embeds every key of `want` the cache lacks (sorted by key, `SEM_CHUNK` texts per call,
+    /// Embeds every key of `want` the cache lacks (sorted by text length, then key, `SEM_CHUNK` texts per call,
     /// each chunk appended to the file before the next) and returns how many it embedded.
     fn fill(
         &mut self,
@@ -1981,10 +1981,13 @@ impl SemCache {
         label: &str,
     ) -> Result<usize, String> {
         use std::io::Write as _;
-        let miss: Vec<(&String, &String)> = want
+        let mut miss: Vec<(&String, &String)> = want
             .iter()
             .filter(|(h, _)| !self.rows.contains_key(*h))
             .collect();
+        // By length, then key: a chunk's texts are padded to its longest, so like lengths together
+        // cost the model the least.
+        miss.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.0.cmp(b.0)));
         if miss.is_empty() {
             return Ok(0);
         }
