@@ -52,7 +52,10 @@
 //! lexing, which covers Rust and Scala).
 //!
 //! DH.9: Ratchet's `$app->route('/chat', new MyChat, ..)` is a PHP server
-//! (gated on `Ratchet\App`, a path literal or nothing). Dart's
+//! (gated on `Ratchet\App`, a path literal or nothing). FD.4d: only a
+//! receiver assigned Ratchet's App reads, never in a Slim / Laravel router
+//! file ([`ratchet_receiver`]), and a double-quoted `"/ws/$x"` / `"/ws/{$x}"`
+//! reads `/ws/{x}` ([`php_route_path`]; single-quoted stays verbatim). Dart's
 //! web_socket_channel (`WebSocketChannel` / `IOWebSocketChannel` /
 //! `HtmlWebSocketChannel.connect(..)`) and dart:io's `WebSocket.connect(..)`
 //! are clients whose URL may sit in a `Uri.parse(..)` / `Uri.tryParse(..)`
@@ -112,6 +115,11 @@
 //!   `[ws] handlers framework=ratchet n=1 in server/server.php`
 //!   `[ws] clients framework=web_socket_channel n=1 in lib/chat.dart`
 //!   `[ws] clients framework=dart_io n=1 in bin/feed.dart`
+//! and (FD.4d) one per file whose needles hit inside an identifier
+//! (`io(` in `ratio(`) or named a local binding of a bare call (`let io =
+//! |..|` in Rust, [`SHADOWABLE`]), and one per file with a Ratchet row read:
+//!   `[ws] needle boundary rejected=1 path=src/layout.rs`
+//!   `[ws] ratchet routes=1 foreign_router_skipped=0 interpolations=1 path=server/server.php`
 //! and one per file whose client sites named a host (CB.21):
 //!   `[ws] client hosts sites=1 in web/chat.ts`
 //! and one per file with an identifier / member / builder URL argument
@@ -178,6 +186,11 @@ enum PathRead {
     /// The first double-quoted literal on the needle's line, from the needle
     /// on (Elixir's paren-less `socket "/socket", ...` / `channel "room:*", ...`).
     LineLiteral,
+    /// FD.4d, Ratchet: positional argument 0 read as a PHP string
+    /// ([`php_route_path`]: a double-quoted `$x` / `{$x}` / `${x}` is the
+    /// `{x}` segment, a single-quoted literal verbatim), at a site whose
+    /// receiver is Ratchet's App ([`ratchet_receiver`]).
+    RatchetRoute,
     /// DG.5, axum: the path of the first in-file `.route("/p", ..)` whose
     /// method router names the `fn` enclosing the needle
     /// ([`enclosing_rust_fn`], [`axum_route_of`]).
@@ -352,12 +365,12 @@ const HANDLER_ROWS: &[WsRow] = &[
     // PHP: Ratchet's `$app->route('/chat', new MyChat, array('*'))` (DH.9).
     // ReadOnly: only a path literal mints. The handler object is an instance
     // (`new MyChat`), not a symbol a ref could bind, so no HANDLED_BY to it is
-    // read. KNOWN IMPRECISION: a Slim / Laravel `->route('/p', ..)` sharing a
-    // file with Ratchet reads as a socket route.
+    // read. FD.4d: only a receiver assigned Ratchet's App reads, and never in
+    // a Slim / Laravel router file ([`ratchet_receiver`]).
     keyed_row(
         "->route(",
         RATCHET,
-        PathRead::Arg(0),
+        PathRead::RatchetRoute,
         Accept::ReadOnly,
         "ratchet",
     ),
@@ -412,6 +425,8 @@ const CLIENT_ROWS: &[WsRow] = &[
         PathRead::Client(0),
         "react-use-websocket",
     ),
+    // FD.4d: a file that binds its own `io` (a fn, closure or variable) and
+    // never names socket.io calls that, not socket.io ([`SHADOWABLE`]).
     row("io(", NONE, PathRead::Client(0), "socketio"),
     row("io.connect(", NONE, PathRead::Client(0), "socketio"),
     row("socket.io-client", NONE, PathRead::Generic, "socketio"),
@@ -500,6 +515,13 @@ const CLIENT_ROWS: &[WsRow] = &[
         "phoenix",
     ),
 ];
+
+/// FD.4d: bare-call needles a file may shadow with its own binding of the
+/// same name (`let io = |..| ..;` in Rust, `function io(..)` in JS, `io :=` in
+/// Go), each with the spellings that keep such a binding the framework's own
+/// (`const io = require("socket.io-client")`). A shadowed row reads nothing
+/// in that file, and its sites count as needle-boundary rejections.
+const SHADOWABLE: &[(&str, &[&str])] = &[("io(", &["socket.io"])];
 
 /// Longest name accepted; anything longer is a payload, not a path.
 const MAX_NAME_LEN: usize = 256;
@@ -708,14 +730,38 @@ fn scan(
     // a URL builder / some site read it any other way.
     let mut builder_site: Vec<bool> = Vec::new();
     let mut plain_site: Vec<bool> = Vec::new();
+    // FD.4d: needle hits refused at an identifier boundary or shadowed by a
+    // local binding, and the Ratchet route reads.
+    let mut boundary_rejected = 0usize;
+    let mut ratchet = RatchetCounts::default();
 
     for r in side.rows {
         if !gate_holds(source, r.gate) {
             continue;
         }
-        for offset in sites(source, r.needle, &mut guard) {
+        let (hits, rejected) = sites(source, r.needle, &mut guard);
+        boundary_rejected += rejected;
+        if shadowed(source, r.needle) {
+            boundary_rejected += hits.len();
+            continue;
+        }
+        for offset in hits {
+            if r.read == PathRead::RatchetRoute && !ratchet_receiver(source, offset) {
+                ratchet.foreign_router_skipped += 1;
+                continue;
+            }
             let url = client_url(source, offset, r, resolve);
-            let read = read_name(source, offset, r, url.as_ref(), &mut blocks);
+            let read = read_name(
+                source,
+                offset,
+                r,
+                url.as_ref(),
+                &mut blocks,
+                &mut ratchet.interpolations,
+            );
+            if r.read == PathRead::RatchetRoute && read.is_some() {
+                ratchet.routes += 1;
+            }
             if let Some(u) = &url {
                 reads.count(u, read.is_some());
                 if resolve.is_some() {
@@ -806,6 +852,15 @@ fn scan(
         if hosted > 0 {
             eprintln!("[ws] client hosts sites={hosted} in {path}");
         }
+        if boundary_rejected > 0 {
+            eprintln!("[ws] needle boundary rejected={boundary_rejected} path={path}");
+        }
+        if ratchet.routes + ratchet.foreign_router_skipped + ratchet.interpolations > 0 {
+            eprintln!(
+                "[ws] ratchet routes={} foreign_router_skipped={} interpolations={} path={path}",
+                ratchet.routes, ratchet.foreign_router_skipped, ratchet.interpolations
+            );
+        }
         if reads.read + reads.unread > 0 {
             eprintln!(
                 "[ws] client urls read={} (local={} field={} builder={} url_struct={}) unread={} in {path}",
@@ -835,23 +890,269 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Byte offsets of `needle` in `source`, word-bounded when the needle starts
-/// with an identifier byte, at most [`MAX_HITS_PER_NEEDLE`]. CJ.1b: an
-/// occurrence `guard` refuses (its first byte sits in a Rust / Python literal
-/// or comment) is dropped BEFORE the cap, so literal occurrences never crowd
-/// a real site out.
-fn sites(source: &str, needle: &str, guard: &mut LazyGuard<'_>) -> Vec<usize> {
+/// with an identifier byte ([`at_ident_boundary`]), at most
+/// [`MAX_HITS_PER_NEEDLE`], and the number of occurrences the boundary
+/// refused (FD.4d's marker). CJ.1b: an occurrence `guard` refuses (its first
+/// byte sits in a Rust / Python literal or comment) is dropped BEFORE the cap,
+/// so literal occurrences never crowd a real site out.
+fn sites(source: &str, needle: &str, guard: &mut LazyGuard<'_>) -> (Vec<usize>, usize) {
     if needle.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let bounded = needle.as_bytes().first().is_some_and(|b| is_ident_byte(*b));
-    let bytes = source.as_bytes();
-    source
+    let mut rejected = 0usize;
+    let hits = source
         .match_indices(needle)
         .map(|(i, _)| i)
-        .filter(|&i| !bounded || i == 0 || bytes.get(i - 1).is_none_or(|b| !is_ident_byte(*b)))
+        .filter(|&i| {
+            let ok = !bounded || at_ident_boundary(source, i);
+            if !ok {
+                rejected += 1;
+            }
+            ok
+        })
         .filter(|&i| guard.admits(i))
         .take(MAX_HITS_PER_NEEDLE)
-        .collect()
+        .collect();
+    (hits, rejected)
+}
+
+/// Whether the byte before `pos` is no identifier byte: `ws(` inside
+/// `windows(`, `io(` inside `ratio(`, are no sites. `$`, `@`, `.` and the
+/// start of the file are boundaries.
+fn at_ident_boundary(source: &str, pos: usize) -> bool {
+    pos == 0
+        || pos
+            .checked_sub(1)
+            .and_then(|p| source.as_bytes().get(p))
+            .is_none_or(|b| !is_ident_byte(*b))
+}
+
+/// FD.4d: whether `needle` is a [`SHADOWABLE`] bare call this file binds
+/// itself ([`declares_local`]) without naming the framework.
+fn shadowed(source: &str, needle: &str) -> bool {
+    SHADOWABLE.iter().any(|(n, keep)| {
+        *n == needle
+            && !keep.iter().any(|k| source.contains(k))
+            && needle
+                .strip_suffix('(')
+                .is_some_and(|name| declares_local(source, name))
+    })
+}
+
+/// Keywords that, written right before a name, declare it: a fn
+/// (`fn` / `function` / `def` / `func`) or a variable (`let` / `let mut` /
+/// `const` / `var` / `val`).
+const DECL_KEYWORDS: &[&str] = &[
+    "fn", "function", "def", "func", "let", "mut", "const", "var", "val",
+];
+
+/// Whether `source` declares `name` itself: a [`DECL_KEYWORDS`] word, then
+/// whitespace, then `name` at an identifier boundary; or Go's `name :=`.
+fn declares_local(source: &str, name: &str) -> bool {
+    let b = source.as_bytes();
+    source.match_indices(name).any(|(i, _)| {
+        let end = i + name.len();
+        if !at_ident_boundary(source, i) || b.get(end).is_some_and(|c| is_ident_byte(*c)) {
+            return false;
+        }
+        if source
+            .get(end..)
+            .is_some_and(|rest| rest.trim_start_matches([' ', '\t']).starts_with(":="))
+        {
+            return true;
+        }
+        let Some(head) = source.get(..i) else {
+            return false;
+        };
+        let word_head = head.trim_end_matches([' ', '\t']);
+        if word_head.len() == head.len() {
+            return false;
+        }
+        let start = word_head
+            .bytes()
+            .rposition(|c| !is_ident_byte(c))
+            .map_or(0, |p| p + 1);
+        word_head
+            .get(start..)
+            .is_some_and(|w| DECL_KEYWORDS.contains(&w))
+    })
+}
+
+/// FD.4d: what one file's Ratchet rows read, for the `[ws] ratchet` marker.
+#[derive(Debug, Default)]
+struct RatchetCounts {
+    /// `->route(` sites that minted a path.
+    routes: usize,
+    /// `->route(` sites in a Slim / Laravel router file, or on a receiver
+    /// never assigned Ratchet's App.
+    foreign_router_skipped: usize,
+    /// PHP interpolations read as a `{x}` segment.
+    interpolations: usize,
+}
+
+/// Spellings that make a file a Slim / Laravel router file: no `->route(` in
+/// it is a Ratchet route, whatever else it names.
+const FOREIGN_ROUTERS: &[&str] = &["Slim\\", "Route::", "$router->"];
+
+/// FD.4d: whether the `->route(` at `offset` is Ratchet's: the file is no
+/// [`FOREIGN_ROUTERS`] file, and the receiver `$v` was assigned
+/// `new \Ratchet\App(` / `new Ratchet\App(`, or `new App(` in a file with a
+/// `use Ratchet\App;` line.
+fn ratchet_receiver(source: &str, offset: usize) -> bool {
+    if FOREIGN_ROUTERS.iter().any(|f| source.contains(f)) {
+        return false;
+    }
+    let Some(head) = source.get(..offset) else {
+        return false;
+    };
+    let start = head
+        .bytes()
+        .rposition(|c| !is_ident_byte(c))
+        .map_or(0, |p| p + 1);
+    let Some(var) = head.get(start..).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    if start == 0 || head.as_bytes().get(start - 1) != Some(&b'$') {
+        return false;
+    }
+    let short_ok = uses_ratchet_app(source);
+    let dollar = format!("${var}");
+    let b = source.as_bytes();
+    source.match_indices(&dollar).any(|(i, _)| {
+        let end = i + dollar.len();
+        if b.get(end).is_some_and(|c| is_ident_byte(*c)) {
+            return false;
+        }
+        let Some(rest) = source.get(end..).map(str::trim_start) else {
+            return false;
+        };
+        if !rest.starts_with('=') || rest.starts_with("==") || rest.starts_with("=>") {
+            return false;
+        }
+        let Some(rest) = rest.get(1..).map(str::trim_start) else {
+            return false;
+        };
+        let Some(class) = rest.strip_prefix("new") else {
+            return false;
+        };
+        if !class.starts_with([' ', '\t', '\n', '\r']) {
+            return false;
+        }
+        let class = class.trim_start();
+        let after = if let Some(a) = class
+            .strip_prefix("\\Ratchet\\App")
+            .or_else(|| class.strip_prefix("Ratchet\\App"))
+        {
+            a
+        } else if let Some(a) = class.strip_prefix("App").filter(|_| short_ok) {
+            a
+        } else {
+            return false;
+        };
+        after.trim_start().starts_with('(')
+    })
+}
+
+/// A `use Ratchet\App;` (or `use \Ratchet\App;`) import line.
+fn uses_ratchet_app(source: &str) -> bool {
+    source.lines().any(|l| {
+        let t = l.trim();
+        let Some(rest) = t.strip_prefix("use") else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('\\').unwrap_or(rest);
+        rest.strip_prefix("Ratchet\\App")
+            .is_some_and(|r| r.trim_start().starts_with(';'))
+    })
+}
+
+/// FD.4d: a Ratchet route argument read as PHP: exactly one string literal
+/// (optionally a named argument). Single-quoted is verbatim (PHP does not
+/// interpolate it); double-quoted reads `\$` as `$` and each simple variable
+/// `$x` / `{$x}` / `${x}` as the `{x}` segment (LB.5's canonical param form),
+/// counted; a complex interpolation (`$o->p`, `$a[0]`, `{$o->p}`) or a
+/// backtick (a shell call) reads nothing. Returns the path and the number of
+/// interpolations folded.
+fn php_route_path(arg: &str) -> Option<(String, usize)> {
+    let arg = strip_keyword(arg.trim());
+    let (lit, rest) = leading_literal(arg)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    match arg.as_bytes().first() {
+        Some(b'\'') => return Some((lit.to_string(), 0)),
+        Some(b'"') => {}
+        _ => return None,
+    }
+    let b = lit.as_bytes();
+    let mut out = String::with_capacity(lit.len());
+    let mut folded = 0usize;
+    let mut i = 0usize;
+    let mut plain = 0usize;
+    let ident_end = |from: usize| {
+        let mut j = from;
+        if !b
+            .get(j)
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+        {
+            return None;
+        }
+        while b.get(j).is_some_and(|c| is_ident_byte(*c)) {
+            j += 1;
+        }
+        Some(j)
+    };
+    while i < b.len() {
+        let (var, next) = match (b[i], b.get(i + 1)) {
+            (b'\\', Some(b'$')) => {
+                out.push_str(lit.get(plain..i)?);
+                out.push('$');
+                i += 2;
+                plain = i;
+                continue;
+            }
+            (b'\\', Some(_)) => {
+                i += 2;
+                continue;
+            }
+            (b'{', Some(b'$')) | (b'$', Some(b'{')) => {
+                let end = ident_end(i + 2)?;
+                if b.get(end) != Some(&b'}') {
+                    return None;
+                }
+                (lit.get(i + 2..end)?, end + 1)
+            }
+            (b'$', _) => match ident_end(i + 1) {
+                Some(end) => {
+                    let complex = b.get(end) == Some(&b'[')
+                        || lit.get(end..).is_some_and(|r| r.starts_with("->"));
+                    if complex {
+                        return None;
+                    }
+                    (lit.get(i + 1..end)?, end)
+                }
+                None => {
+                    i += 1;
+                    continue;
+                }
+            },
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        out.push_str(lit.get(plain..i)?);
+        out.push('{');
+        out.push_str(var);
+        out.push('}');
+        folded += 1;
+        i = next;
+        plain = i;
+    }
+    out.push_str(lit.get(plain..)?);
+    Some((out, folded))
 }
 
 /// The name an unreadable site of `r` mints, or `None` when it mints nothing.
@@ -874,6 +1175,7 @@ fn read_name(
     r: &WsRow,
     url: Option<&ClientUrl<'_>>,
     blocks: &mut Option<Blocks>,
+    interpolations: &mut usize,
 ) -> Option<String> {
     let after = offset.checked_add(r.needle.len())?;
     let name = match r.read {
@@ -894,6 +1196,12 @@ fn read_name(
         PathRead::Client(_) | PathRead::ClientUri(_) => url?.path()?,
         PathRead::ClassBeforeLt => class_before(source, offset, after)?,
         PathRead::LineLiteral => line_literal(source, offset)?,
+        PathRead::RatchetRoute => {
+            let (path, folded) =
+                php_route_path(split_top(call_region(source, after)?, b',').first()?)?;
+            *interpolations += folded;
+            path
+        }
         PathRead::AxumRoute => {
             let blocks = blocks.get_or_insert_with(|| Blocks::new(source));
             axum_route_of(source, enclosing_rust_fn(source, offset, blocks)?, blocks)?
@@ -3020,6 +3328,7 @@ mod tests {
                 | PathRead::KeyedOrArg(_)
                 | PathRead::Client(_)
                 | PathRead::ClientUri(_)
+                | PathRead::RatchetRoute
                 | PathRead::AxumRoute
                 | PathRead::AkkaDirective => {
                     assert!(r.needle.ends_with('('), "{}", r.needle)
@@ -3738,6 +4047,129 @@ mod tests {
         assert!(clients(RATCHET_SERVER).nodes.is_empty());
     }
 
+    // ---- FD.4d: needle boundaries, Ratchet's own router, PHP interpolation --
+
+    /// glia's own engine/src/shared_cache/layout.rs shape: a local `io`
+    /// closure (and `names.windows(2)`) is no socket.io client.
+    #[test]
+    fn local_io_binding_is_no_socketio_client() {
+        let rs = "fn stage(dir: &Path, names: &[String]) -> Result<(), String> {\n\
+                  \x20   if names.windows(2).any(|w| w[0] == w[1]) {\n\
+                  \x20       return Err(String::new());\n\
+                  \x20   }\n\
+                  \x20   let io = |p: &Path, e: std::io::Error| format!(\"{}: {e}\", p.display());\n\
+                  \x20   std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;\n\
+                  \x20   Ok(())\n\
+                  }\n";
+        let out = extract_ws_client_nodes(rs, "src/layout.rs", module_id(), repo());
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        let js = "const pairs = rows.windows(3);\nfunction io(x) { return x; }\nio(pairs);\n";
+        assert!(clients(js).nodes.is_empty(), "{:?}", qnames(&clients(js)));
+        let go = "func run() {\n\tio := func(p string) string { return p }\n\tio(\"x\")\n}\n";
+        assert!(clients(go).nodes.is_empty(), "{:?}", qnames(&clients(go)));
+        // A `const io = require("socket.io-client")` binding IS socket.io (the
+        // import string's own generic row reads beside it, as before).
+        let req = "const io = require(\"socket.io-client\");\nconst s = io(\"https://h/rt\");\n";
+        assert!(qnames(&clients(req)).contains(&"ws_client:/rt".to_string()));
+        // An ungated `io(..)` with no local binding still reads.
+        assert_eq!(
+            qnames(&clients(
+                "const socket = io(\"https://api.example.com/realtime\");"
+            )),
+            vec!["ws_client:/realtime"]
+        );
+        // `ratio(` / `studio(` stay word-bounded misses, `$` / `.` before a
+        // needle are non-identifier bytes.
+        assert!(
+            clients("const r = ratio(2); studio(\"/x\");")
+                .nodes
+                .is_empty()
+        );
+        // A real client beside the shadowing text keeps its reading.
+        let both = "const pairs = rows.windows(3);\n\
+                    const s = new WebSocket('wss://chat.example/chat');\n";
+        assert_eq!(qnames(&clients(both)), vec!["ws_client:/chat"]);
+        // The URL builder still reads its literal.
+        let b = "const s = new WebSocket(this.urls.ws('/x'));\n";
+        assert_eq!(qnames(&clients(b)), vec!["ws_client:/x"]);
+    }
+
+    #[test]
+    fn needle_boundary_counts_rejections() {
+        let mut guard = LazyGuard::new("t.js", "");
+        let src = "ratio(1); io(\"/a\"); audio(2);";
+        let mut guard_src = LazyGuard::new("t.js", src);
+        let (hits, rejected) = sites(src, "io(", &mut guard_src);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(rejected, 2);
+        let (hits, rejected) = sites("", "io(", &mut guard);
+        assert!(hits.is_empty());
+        assert_eq!(rejected, 0);
+    }
+
+    #[test]
+    fn ratchet_route_reads_only_a_ratchet_app() {
+        // The receiver was assigned `new App(..)` under `use Ratchet\App`.
+        let src = "<?php\nuse Ratchet\\App;\n$app = new App('localhost', 8080);\n\
+                   $app->route('/chat', new Chat, ['*']);\n\
+                   $other->route('/not-ws', $h);\n";
+        assert_eq!(qnames(&handlers(src)), vec!["ws:/chat"]);
+        // A Slim app sharing a file with Ratchet is no socket route source.
+        let slim = "<?php\nuse Ratchet\\App;\nuse Slim\\App as Slim;\n\
+                    $app = new App('localhost', 8080);\n\
+                    $app->route('/chat', new Chat, ['*']);\n";
+        assert!(
+            handlers(slim).nodes.is_empty(),
+            "{:?}",
+            qnames(&handlers(slim))
+        );
+        // Nor a Laravel routes file that names Ratchet\App.
+        let laravel = "<?php\n// Ratchet\\App lives elsewhere\n\
+                       Route::get('/users', 'UserController@index');\n\
+                       $app->route('/users', $h);\n";
+        assert!(handlers(laravel).nodes.is_empty());
+        // `new App(..)` without `use Ratchet\App` is not Ratchet's App.
+        let other = "<?php\n$x = 'Ratchet\\App';\n$app = new App();\n$app->route('/p', $h);\n";
+        assert!(
+            handlers(other).nodes.is_empty(),
+            "{:?}",
+            qnames(&handlers(other))
+        );
+    }
+
+    #[test]
+    fn ratchet_double_quoted_path_folds_interpolation() {
+        let src = "<?php\nuse Ratchet\\App;\n$app = new App('localhost', 8080);\n\
+                   $app->route(\"/ws/$room\", new Chat, ['*']);\n\
+                   $app->route(\"/rooms/{$id}/feed\", new Feed);\n\
+                   $app->route(\"/x/${name}\", new X);\n\
+                   $app->route('/raw/$verbatim', new Raw);\n\
+                   $app->route(\"/obj/$o->id\", new Obj);\n";
+        assert_eq!(
+            qnames(&handlers(src)),
+            vec![
+                "ws:/ws/{room}",
+                "ws:/rooms/{id}/feed",
+                "ws:/x/{name}",
+                "ws:/raw/$verbatim",
+            ]
+        );
+        assert_eq!(
+            php_route_path("\"/ws/$room\""),
+            Some(("/ws/{room}".to_string(), 1))
+        );
+        assert_eq!(
+            php_route_path("'/ws/$room'"),
+            Some(("/ws/$room".to_string(), 0))
+        );
+        assert_eq!(
+            php_route_path("\"/a/\\$b\""),
+            Some(("/a/$b".to_string(), 0))
+        );
+        assert_eq!(php_route_path("\"/a/{$b->c}\""), None);
+        assert_eq!(php_route_path("`ls`"), None);
+    }
+
     /// bench/substrate-gap/matrix/dart/ws/client/lib/chat.dart.
     const DART_CHANNEL: &str = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
         \n\
@@ -3887,9 +4319,9 @@ mod tests {
         let mut guard = LazyGuard::new("t.src", src);
         let mut blocks = None;
         for r in CLIENT_ROWS.iter().filter(|r| gate_holds(src, r.gate)) {
-            for offset in sites(src, r.needle, &mut guard) {
+            for offset in sites(src, r.needle, &mut guard).0 {
                 let url = client_url(src, offset, r, None);
-                let read = read_name(src, offset, r, url.as_ref(), &mut blocks);
+                let read = read_name(src, offset, r, url.as_ref(), &mut blocks, &mut 0);
                 if let Some(u) = &url {
                     reads.count(u, read.is_some());
                 }

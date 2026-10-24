@@ -1,0 +1,14 @@
+{
+  "framework": "ws-needle-boundaries",
+  "language": "javascript",
+  "dirs": ["client", "server"],
+  "note": "FD.4d. A ws-ending identifier (`rows.windows(3)`) and a file's own `io` function are no WebSocket client; a real client and a Ratchet server keep their reading. Baseline HEAD a19ac3fe: `ws_client:ws` minted from the local `io(pairs)` call through the socket.io `io(` row (forbid fires; `rows.windows(3)` alone already mints nothing: the boundary existed); the Ratchet route reads `/rooms/$room`.",
+  "expect_nodes": [
+    {"kind": "WS_CLIENT", "name": "/chat", "note": "browser `new WebSocket('wss://chat.example/chat')`"},
+    {"kind": "WS_HANDLER", "name": "/rooms/{room}", "note": "FD.4d: a double-quoted PHP `$room` interpolation is the `{room}` segment"}
+  ],
+  "forbid": [
+    {"kind": "WS_CLIENT", "name": "ws_client:ws", "note": "FD.4d: the file's own `function io(..)` shadows socket.io's `io(`"},
+    {"kind": "WS_HANDLER", "name": "ws:/rooms/$room", "note": "FD.4d: the interpolation is no longer read verbatim"}
+  ]
+}
