@@ -760,7 +760,13 @@ pub fn extract_graphql_resolver_nodes(
     // in marked literals, in source order. Fields carry the operation name a
     // client `gql query getUser` pairs against.
     let (mut names, census) = decorator_scan(source, lang);
-    let embedded = embedded_sdl(source);
+    // FD.6: the guard `gql_literal_regions` reads, by the language tag.
+    let guard_path = match lang {
+        "rust" => RS_GUARD_PATH,
+        "python" => PY_GUARD_PATH,
+        _ => "",
+    };
+    let embedded = embedded_sdl(source, guard_path);
     if graphql_debug() {
         for marker in [census.marker(lang), embedded.marker()]
             .into_iter()
@@ -2269,6 +2275,9 @@ fn hc_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
 /// `code_guard` keys its Rust lexer on (a bare `.rs` would not do: the
 /// extension of a dot-file is none).
 const RS_GUARD_PATH: &str = "schema.rs";
+
+/// FD.6: [`RS_GUARD_PATH`]'s Python twin, for the `python` tag.
+const PY_GUARD_PATH: &str = "schema.py";
 
 /// DG.4: async-graphql's root attributes as they open an attribute, bare or
 /// crate-qualified; [`rs_root_attr_sites`] requires a `]`, `(` or blank
@@ -4195,8 +4204,8 @@ impl EmbeddedSdl {
     }
 }
 
-fn embedded_sdl(source: &str) -> EmbeddedSdl {
-    let regions = gql_literal_regions(source);
+fn embedded_sdl(source: &str, path: &str) -> EmbeddedSdl {
+    let regions = gql_literal_regions(source, path);
     let mut out = EmbeddedSdl {
         literals: regions.len(),
         ..EmbeddedSdl::default()
@@ -4323,8 +4332,31 @@ fn binding_value(source: &str, after: usize) -> Option<usize> {
 /// - a GRAPHQL / GQL heredoc, to the line whose trimmed text is the delimiter;
 /// - a template or triple-quoted literal whose body opens with `#graphql`.
 ///
-/// An unterminated literal yields no region.
-fn gql_literal_regions(source: &str) -> Vec<(usize, usize)> {
+/// An unterminated literal yields no region, and (FD.6) neither does, in a
+/// Rust or Python file (`path` picks the guard; `""` = none), a literal the
+/// file does not hold as its own ([`LazyGuard::admits_literal`]): a test's
+/// `"gql` + backtick + `type Query { .. }` + backtick + `"` sample is one
+/// Rust string, not a template.
+fn gql_literal_regions(source: &str, path: &str) -> Vec<(usize, usize)> {
+    let mut regions = gql_literal_regions_unguarded(source);
+    let mut guard = LazyGuard::new(path, source);
+    let b = source.as_bytes();
+    regions.retain(|&(start, _)| {
+        // The delimiter `literal_body` read: a `"""` / `'''` triple, else one
+        // byte (a backtick, a quote or, for a heredoc, the line break before
+        // its body, at which no Rust / Python map opens a literal).
+        let open = match start.checked_sub(3).and_then(|o| b.get(o..start)) {
+            Some([q1, q2, q3]) if q1 == q2 && q2 == q3 && matches!(q1, b'"' | b'\'') => start - 3,
+            _ => start.saturating_sub(1),
+        };
+        guard.admits_literal(open, start)
+    });
+    guard.report("graphql_sdl");
+    regions
+}
+
+/// [`gql_literal_regions`] before FD.6's literal check.
+fn gql_literal_regions_unguarded(source: &str) -> Vec<(usize, usize)> {
     let b = source.as_bytes();
     let bounded = |needle: &'static str| {
         source
@@ -5032,7 +5064,7 @@ pub fn extract_graphql_embedded_types(
     repo: RepoId,
 ) -> GraphqlTypes {
     let mut types: Vec<SdlTypeDef> = Vec::new();
-    for (start, end) in gql_literal_regions(source) {
+    for (start, end) in gql_literal_regions(source, path) {
         let Some(body) = source.get(start..end) else {
             continue;
         };
@@ -8006,6 +8038,52 @@ mod tests {
         qnames
     }
 
+    /// FD.6: in Rust and Python a GraphQL-marked literal must be the file's
+    /// own literal: a TS sample held in a test's Rust / Python string marks
+    /// nothing, the same text as TypeScript still does.
+    #[test]
+    fn sdl_samples_inside_strings_mint_nothing_in_rust_and_python() {
+        let ts = "const T = gql`type Query { users: [User] }`;\n";
+        let want = ["graphql_resolver:Query", "graphql_resolver:users"];
+        assert_eq!(resolver_qnames(ts, "typescript"), want);
+        let rs =
+            "fn t() { assert!(f(\"const T = gql`type Query { users: [User] }`;\").is_empty()); }\n";
+        assert!(
+            resolver_qnames(rs, "rust").is_empty(),
+            "{:?}",
+            resolver_qnames(rs, "rust")
+        );
+        let py = "SAMPLE = \"const T = gql`type Query { users: [User] }`;\"\n";
+        assert!(
+            resolver_qnames(py, "python").is_empty(),
+            "{:?}",
+            resolver_qnames(py, "python")
+        );
+        // A Rust literal of its own still marks: `from_definition("..")`.
+        let own = "let s = Schema::from_definition(\"type Query { users: [User] }\");\n";
+        assert_eq!(resolver_qnames(own, "rust"), want);
+        // The SDL types (DT.1j) read the same regions.
+        let types = |src: &str, path: &str| {
+            extract_graphql_embedded_types(src, path, module_id(), repo())
+                .nav
+                .qname_by_id
+                .len()
+        };
+        let sample = "fn t() { f(\"const T = gql`type User { id: ID }`;\"); }\n";
+        assert_eq!(types(sample, "src/t.rs"), 0);
+        assert_eq!(
+            types("const T = gql`type User { id: ID }`;\n", "src/t.ts"),
+            1
+        );
+        assert_eq!(
+            types(
+                "let s = Schema::from_definition(\"type User { id: ID }\");\n",
+                "src/t.rs"
+            ),
+            1
+        );
+    }
+
     fn assert_resolvers(source: &str, lang: &str, want: &[&str]) {
         let got = resolver_qnames(source, lang);
         let want: Vec<String> = want
@@ -8022,7 +8100,7 @@ mod tests {
         let source = "fn parse_repo_files() {\n        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan that\n        // embedded `type Query {` blocks already get, so a schema-first\n        // service has resolvers for its clients' operations to pair with.\n        if lang == \"graphql\" {}\n}\n";
         assert_resolvers(source, "rust", &[]);
         assert_eq!(
-            embedded_sdl(source).marker().as_deref(),
+            embedded_sdl(source, "").marker().as_deref(),
             Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
         );
     }
@@ -8038,7 +8116,7 @@ mod tests {
         let raw = "#[test]\nfn schema_routes() {\n    let sdl = r#\"\ntype Subscription {\n  orderShipped: Order\n}\n\"#;\n    assert!(!sdl.is_empty());\n}\n";
         assert_resolvers(raw, "rust", &[]);
         assert_eq!(
-            embedded_sdl(raw).marker().as_deref(),
+            embedded_sdl(raw, "").marker().as_deref(),
             Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
         );
     }
@@ -8062,7 +8140,7 @@ mod tests {
             "`type Order {{` is an object type, never a resolver"
         );
         assert_eq!(
-            embedded_sdl(source).marker().as_deref(),
+            embedded_sdl(source, "").marker().as_deref(),
             Some("[graphql-sdl-code] literals=1 roots=Query fields=1 unmarked_roots=0")
         );
     }
@@ -8164,7 +8242,7 @@ mod tests {
     fn literal_regions_are_char_safe_and_skip_unterminated_literals() {
         let source = "const a = gql`é type Query {`;\nconst b = gql`\ntype Query {\n  ünïcode: String\n  ok: Int\n}\n";
         // `a` closes on its line; `b` never closes, so only `a` is a region.
-        let regions = gql_literal_regions(source);
+        let regions = gql_literal_regions(source, "");
         assert_eq!(regions.len(), 1);
         let (s, e) = regions[0];
         assert_eq!(source.get(s..e), Some("é type Query {"));
@@ -8179,7 +8257,7 @@ mod tests {
             "/* GraphQL */",
             "<<~GRAPHQL",
         ] {
-            assert!(gql_literal_regions(tail).is_empty(), "{tail}");
+            assert!(gql_literal_regions(tail, "").is_empty(), "{tail}");
         }
     }
 

@@ -64,6 +64,9 @@ pub fn extract_data_source_nodes(
     let mut nav = CodeNav::default();
     let mut seen = std::collections::HashSet::new();
     let mut guard = LazyGuard::new(path, source);
+    let rust = path
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("rs"));
 
     for (pattern, kind, provider) in PATTERNS {
         // A provider already emitted takes nothing more from this file, so
@@ -75,10 +78,23 @@ pub fn extract_data_source_nodes(
         // FD.5a: a library name in a Ruby / PHP / Dart / Elixir import
         // string counts (`import 'package:redis/redis.dart'`), one in a
         // comment does not.
-        if !source
-            .match_indices(pattern)
-            .any(|(at, _)| guard.admits_name(at))
-        {
+        // FD.6: in a Rust file a needle also has to read as a Rust path
+        // ([`rust_path_reading`]), so a local `redis.contains(..)` or a
+        // type `PrismaSchema` names no library.
+        let mut crate_named: Option<bool> = None;
+        if !source.match_indices(pattern).any(|(at, _)| {
+            let reads = !rust
+                || rust_path_occurrence(source, at, pattern)
+                || match crate_named {
+                    Some(named) => named,
+                    None => {
+                        let named = rust_names_crate(source, provider, &mut guard);
+                        crate_named = Some(named);
+                        named
+                    }
+                };
+            reads && guard.admits_name(at)
+        }) {
             continue;
         }
         seen.insert(*provider);
@@ -102,6 +118,49 @@ pub fn extract_data_source_nodes(
     guard.report("data_sources");
 
     DataSourceNodes { nodes, edges, nav }
+}
+
+fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// FD.6: true when the `pattern` occurrence at byte `at` of a Rust file names
+/// its library the way Rust code does. The table's needles are written for
+/// the dynamic languages (`redis.`, `gorm.`, `Prisma`), and in Rust such text
+/// is mostly code naming a library in its own identifiers (a local `redis`, a
+/// type `PrismaSchema`, a fn `sqlalchemy_tablename_decl`: glia's own
+/// extractors). An occurrence counts when the needle is itself a path
+/// (`diesel::`) or the identifier it starts is a path's first segment
+/// (`Redis::open(..)`, `Elasticsearch::new(..)`); else only when the file
+/// names the provider as a crate ([`rust_names_crate`]).
+fn rust_path_occurrence(source: &str, at: usize, pattern: &str) -> bool {
+    if pattern.ends_with("::") {
+        return true;
+    }
+    let b = source.as_bytes();
+    if at > 0 && is_ident_byte(b[at - 1]) {
+        return false;
+    }
+    let mut end = at;
+    while end < b.len() && is_ident_byte(b[end]) {
+        end += 1;
+    }
+    end > at && b[end..].starts_with(b"::")
+}
+
+/// FD.6: true when a Rust file names `provider` as a crate path in code
+/// (the guard admits it) at an identifier start, ASCII case ignored
+/// (`use redis::Commands;`, `mongodb::Client::with_uri_str(..)`); a
+/// `"Redis::publish("` needle-table string names none.
+fn rust_names_crate(source: &str, provider: &str, guard: &mut LazyGuard<'_>) -> bool {
+    let b = source.as_bytes();
+    let path = format!("{provider}::");
+    let n = path.len();
+    b.windows(n).enumerate().any(|(i, w)| {
+        w.eq_ignore_ascii_case(path.as_bytes())
+            && (i == 0 || !is_ident_byte(b[i - 1]))
+            && guard.admits(i)
+    })
 }
 
 const PATTERNS: &[(&str, DataSourceKind, &str)] = &[
@@ -237,5 +296,48 @@ mod tests {
             providers("// Redis\nlet c = Redis::open(url);\n", "src/x.rs"),
             ["data_source:redis"]
         );
+    }
+
+    /// FD.6: in Rust a needle reads only as a path, or in a file that names
+    /// the provider's crate: glia's own extractors name libraries in locals,
+    /// types and fns.
+    #[test]
+    fn rust_needles_read_only_as_paths() {
+        let idents = "fn sqlalchemy_tablename_decl() {}\npub struct PrismaSchema;\n\
+                      fn f(redis: &str, acc: Acc) -> bool { acc.gorm.tagged; redis.contains(\"x\") }\n\
+                      fn g(pg: Page) { pg.path; }\n";
+        assert!(
+            providers(idents, "src/x.rs").is_empty(),
+            "{:?}",
+            providers(idents, "src/x.rs")
+        );
+        // The same text read as TypeScript keeps the substring reading.
+        assert!(!providers(idents, "src/x.ts").is_empty());
+        // A path occurrence and a named crate both count.
+        assert_eq!(
+            providers("let es = Elasticsearch::new(t);\n", "src/x.rs"),
+            ["data_source:elasticsearch"]
+        );
+        assert_eq!(
+            providers(
+                "use redis::Commands;\nfn f(redis: R) { redis.get(k); }\n",
+                "src/x.rs"
+            ),
+            ["data_source:redis"]
+        );
+        assert_eq!(
+            providers("use diesel::prelude::*;\n", "src/x.rs"),
+            ["data_source:diesel"]
+        );
+        // A crate path inside a string names no crate.
+        assert!(
+            providers(
+                "const N: &str = \"Redis::publish(\";\nfn f(redis: R) { redis.get(k); }\n",
+                "src/x.rs"
+            )
+            .is_empty()
+        );
+        // `MyRedis::new` starts no path segment named for the library.
+        assert!(providers("let c = MyRedis::new();\n", "src/x.rs").is_empty());
     }
 }

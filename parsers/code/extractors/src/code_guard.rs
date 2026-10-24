@@ -138,6 +138,9 @@ pub(crate) struct CodeGuard<'a> {
     map: CodeMap,
     src: &'a [u8],
     lang: &'static str,
+    /// FD.6: the byte spans of a Rust file's `#[cfg(test)]` / `#[test]`
+    /// items ([`CodeGuard::in_rust_test`]), found on first use.
+    test_spans: std::cell::OnceCell<Vec<(usize, usize)>>,
 }
 
 impl<'a> CodeGuard<'a> {
@@ -153,6 +156,7 @@ impl<'a> CodeGuard<'a> {
             map,
             src: source.as_bytes(),
             lang,
+            test_spans: std::cell::OnceCell::new(),
         })
     }
 
@@ -334,22 +338,17 @@ impl<'a> CodeGuard<'a> {
     /// literals"); a Ruby / PHP / Dart / Elixir literal passes on the first,
     /// and so (FD.5b) does a Go / JVM / C-family / Swift / JS one.
     pub(crate) fn opens_argument(&self, open: usize, body: usize) -> bool {
-        let Some(start) = self.literal_start(body) else {
+        let Some(lo) = self.same_literal(open, body) else {
             return false;
         };
-        // The map and the scanner may disagree on a string prefix (`r#`, `f`,
-        // `rb`): the two starts must differ only by prefix bytes.
-        let (lo, hi) = (start.min(open), start.max(open));
-        if start >= body
-            || hi - lo > 3
-            || !self.src[lo..hi]
-                .iter()
-                .all(|c| c.is_ascii_alphabetic() || *c == b'#')
-        {
-            return false;
-        }
         if !matches!(self.lang, "rust" | "python") {
             return true;
+        }
+        // FD.6: a statement literal inside a Rust `#[cfg(test)]` / `#[test]`
+        // item is a test's input (the text a scanner or parser under test
+        // reads), not the data access of the code it sits in.
+        if self.lang == "rust" && self.in_rust_test(lo) {
+            return false;
         }
         // Any prefix letters glued to the literal belong to it.
         let mut first = lo;
@@ -389,6 +388,127 @@ impl<'a> CodeGuard<'a> {
             }
             _ => false,
         }
+    }
+
+    /// The lower of the two literal starts when the literal a scanner's own
+    /// lexer opened at `open` (its delimiter; `body` its first content byte)
+    /// is the literal this map holds `body` in, opening in code: the map
+    /// and the scanner may disagree on a string prefix (`r#`, `f`, `rb`), so
+    /// the two starts must differ only by up to three prefix bytes. `None`
+    /// when `body` is code, or the map's literal opens elsewhere (the
+    /// scanner's delimiter sits inside another literal or a comment).
+    fn same_literal(&self, open: usize, body: usize) -> Option<usize> {
+        let start = self.literal_start(body)?;
+        let (lo, hi) = (start.min(open), start.max(open));
+        let prefix_only = self.src[lo..hi]
+            .iter()
+            .all(|c| c.is_ascii_alphabetic() || *c == b'#');
+        (start < body && hi - lo <= 3 && prefix_only).then_some(lo)
+    }
+
+    /// FD.6: true when, in a Rust or Python file, the literal a scanner read
+    /// with its delimiter at `open` and first content byte at `body` is a
+    /// real literal of the file ([`CodeGuard::same_literal`]): a delimiter
+    /// the scanner found inside another literal (a backtick template held
+    /// in a test's Rust string sample) or a comment opens none. In
+    /// every other guarded language this is true.
+    pub(crate) fn opens_own_literal(&self, open: usize, body: usize) -> bool {
+        !matches!(self.lang, "rust" | "python") || self.same_literal(open, body).is_some()
+    }
+
+    /// FD.6: true when byte `pos` of a Rust file sits inside an item
+    /// annotated `#[cfg(test)]` or a test attribute (`#[test]`,
+    /// `#[tokio::test]`, any attribute path ending in `test`), from the
+    /// attribute to the item's closing `}` (or `;` for a bodiless item).
+    /// False in every other language.
+    pub(crate) fn in_rust_test(&self, pos: usize) -> bool {
+        if self.lang != "rust" {
+            return false;
+        }
+        self.test_spans
+            .get_or_init(|| self.rust_test_spans())
+            .iter()
+            .any(|&(s, e)| s <= pos && pos < e)
+    }
+
+    /// The spans [`CodeGuard::in_rust_test`] reads, sorted by start.
+    fn rust_test_spans(&self) -> Vec<(usize, usize)> {
+        let src = self.src;
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0;
+        while let Some(off) = src[i..].windows(2).position(|w| w == b"#[") {
+            let at = i + off;
+            i = at + 2;
+            if self.literal_start(at).is_some() {
+                continue;
+            }
+            let Some(close) = self.attr_close(at + 2) else {
+                continue;
+            };
+            let attr: Vec<u8> = src[at + 2..close]
+                .iter()
+                .copied()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
+            let is_test = attr == b"cfg(test)" || attr == b"test" || attr.ends_with(b"::test");
+            if !is_test {
+                continue;
+            }
+            if let Some(end) = self.item_end(close + 1) {
+                spans.push((at, end));
+                i = i.max(close + 1);
+            }
+        }
+        spans
+    }
+
+    /// The `]` closing the attribute whose content starts at `from`
+    /// (brackets balanced, literals skipped), within [`ARG_WINDOW`] bytes.
+    fn attr_close(&self, from: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let end = (from + ARG_WINDOW).min(self.src.len());
+        let mut i = from;
+        while i < end {
+            if self.literal_start(i).is_some() {
+                i += 1;
+                continue;
+            }
+            match self.src[i] {
+                b'[' => depth += 1,
+                b']' if depth == 0 => return Some(i),
+                b']' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The end (one past the last byte) of the item starting at or after
+    /// `from`: its balanced `{..}` body, or the `;` of a bodiless item
+    /// (`mod tests;`), literals and comments skipped.
+    fn item_end(&self, from: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut i = from;
+        while i < self.src.len() {
+            if self.literal_start(i).is_some() {
+                i += 1;
+                continue;
+            }
+            match self.src[i] {
+                b'{' => depth += 1,
+                b'}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                b';' if depth == 0 => return Some(i + 1),
+                _ => {}
+            }
+            i += 1;
+        }
+        None
     }
 
     /// The last code byte before `pos` that is not blank, stepping over
@@ -533,6 +653,14 @@ impl<'a> LazyGuard<'a> {
     /// is counted for [`LazyGuard::report`].
     pub(crate) fn admits_argument(&mut self, open: usize, body: usize) -> bool {
         self.check(open, |g, open| g.opens_argument(open, body))
+    }
+
+    /// FD.6: true when the file has no guard, or the literal a scanner read
+    /// with its delimiter at `open` and first content byte at `body` is a
+    /// literal of the file itself ([`CodeGuard::opens_own_literal`]). A
+    /// refusal is counted for [`LazyGuard::report`].
+    pub(crate) fn admits_literal(&mut self, open: usize, body: usize) -> bool {
+        self.check(open, |g, open| g.opens_own_literal(open, body))
     }
 
     /// True when the file has no guard or `rule` accepts `pos`; builds the
@@ -832,6 +960,61 @@ mod tests {
         let body = open + 1;
         let mut guard = LazyGuard::new(path, src);
         guard.admits_argument(open, body)
+    }
+
+    /// FD.6: the spans of a Rust file's test items, from the attribute to
+    /// the item's closing `}` / `;`; braces inside literals and comments do
+    /// not end one, and a `#[test]` in a string opens none.
+    #[test]
+    fn rust_test_items_are_spanned() {
+        let src = "fn prod() { let a = \"#[test]\"; }\n\
+                   #[cfg(test)]\nmod tests {\n    fn x() { let s = \"}\"; /* } */ }\n    // }\n    fn y() {}\n}\n\
+                   fn after() {}\n\
+                   #[tokio::test]\nasync fn t() { inner(); }\n\
+                   #[cfg(test)]\nmod more;\n\
+                   fn last() {}\n";
+        let g = CodeGuard::for_path("src/a.rs", src).expect("a guard");
+        let at = |needle: &str| src.find(needle).expect("needle in source");
+        assert!(!g.in_rust_test(at("prod")));
+        assert!(!g.in_rust_test(at("let a")));
+        assert!(g.in_rust_test(at("mod tests")));
+        assert!(g.in_rust_test(at("fn y")));
+        assert!(!g.in_rust_test(at("fn after")));
+        assert!(g.in_rust_test(at("inner")));
+        assert!(g.in_rust_test(at("mod more")));
+        assert!(!g.in_rust_test(at("fn last")));
+        // Only Rust has test items.
+        let py = CodeGuard::for_path("a.py", "#[test]\ndef f():\n    pass\n").expect("a guard");
+        assert!(!py.in_rust_test(10));
+        // A statement literal in a test item is no call argument.
+        let rs =
+            "#[test]\nfn t() { db.query(\"SELECT 1\"); }\nfn p() { db.query(\"SELECT 2\"); }\n";
+        assert!(!argument_at("src/a.rs", rs, "\"SELECT 1"));
+        assert!(argument_at("src/a.rs", rs, "\"SELECT 2"));
+    }
+
+    /// FD.6: a literal a scanner reads must be one the file holds itself in
+    /// Rust and Python: a backtick or quote inside another string is none.
+    #[test]
+    fn own_literals_open_in_code() {
+        let own = |path: &str, src: &str, needle: &str| {
+            let open = src.find(needle).expect("needle in source");
+            LazyGuard::new(path, src).admits_literal(open, open + 1)
+        };
+        let rs =
+            "let a = gql(\"type Query { a: Int }\");\nlet b = \"gql`type Query { b: Int }`\";\n";
+        assert!(own("src/a.rs", rs, "\"type Query { a"));
+        assert!(!own("src/a.rs", rs, "`type Query { b"));
+        let py = "a = gql(\"type Query { a: Int }\")\nb = \"gql`type Query { b: Int }`\"\n";
+        assert!(own("a.py", py, "\"type Query { a"));
+        assert!(!own("a.py", py, "`type Query { b"));
+        // Other languages and unguarded files keep every literal.
+        assert!(own(
+            "a.ts",
+            "const b = gql`type Query { b: Int }`;\n",
+            "`type"
+        ));
+        assert!(own("", rs, "`type Query { b"));
     }
 
     #[test]

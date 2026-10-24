@@ -4954,6 +4954,27 @@ mod t {
         assert_eq!(qnames_at("src/repo.rs", RUST_SAMPLES), want);
     }
 
+    /// FD.6: a statement literal passed to a call inside a Rust
+    /// `#[cfg(test)]` module or a `#[test]` fn is the test's input, not a
+    /// data access; the same call in production code still reads.
+    #[test]
+    fn rust_test_item_statements_are_test_inputs() {
+        let src = "pub fn load(db: &Db) {\n    db.query(\"SELECT * FROM users\");\n}\n\
+                   #[cfg(test)]\nmod tests {\n    #[test]\n    fn reads() {\n        \
+                   assert_eq!(scan(\"SELECT * FROM fixture_rows\"), 1);\n        \
+                   kinds(\"MATCH (a:ROUTE) RETURN a\");\n    }\n}\n\
+                   #[test]\nfn top_level() {\n    db.query(\"SELECT id FROM top_rows\");\n}\n\
+                   pub fn after(db: &Db) {\n    db.query(\"SELECT * FROM carts\");\n}\n";
+        assert_eq!(qnames_at("src/repo.rs", src), sql(&["carts", "users"]));
+        // Read as Python the attribute lines are comments: every call counts.
+        let py = "def load(db):\n    db.query(\"SELECT * FROM users\")\n#[test]\n\
+                  def t():\n    scan(\"SELECT * FROM fixture_rows\")\n";
+        assert_eq!(
+            qnames_at("app/repo.py", py),
+            sql(&["fixture_rows", "users"])
+        );
+    }
+
     #[test]
     fn an_unguarded_file_keeps_its_reading() {
         // No path (and any language without a lexer) reads as before FD.4b:
