@@ -299,6 +299,39 @@ cannot resolve it.
 
 ## The 0.5.5 baseline
 
-FE.4 commits the scored 0.5.4 run (metrics only: no transcripts or patches, which quote
-third-party source) as `results/0.5.4/baseline.json`; 0.5.5's proof runs the same tasks and
-compares against it with FE.3's `score.py compare`.
+FE.4 runs the 0.5.4 matrix (run id `0.5.4`: the pilot's sessions are rep 1, then `run.py run
+--run-id 0.5.4`) and commits it scored, metrics only (no transcripts or patches, which quote
+third-party source; those stay under DIR):
+
+- `results/0.5.4/sessions.jsonl`: FE.3's `--out-sessions` rows, the input that reproduces the rest;
+- `results/0.5.4/baseline.json`: the 0.5.5 contract;
+- `dev-notes/agent-ab-0.5.4.md`: the report, with a short Reading section under it.
+
+They are written by
+
+```
+python3 score.py score 0.5.4 --out-md ../../dev-notes/agent-ab-0.5.4.md \
+    --out-json results/0.5.4/baseline.json --out-sessions results/0.5.4/sessions.jsonl
+```
+
+and any machine re-derives the baseline from the committed metrics alone:
+
+```
+python3 score.py score --from-metrics results/0.5.4/sessions.jsonl --out-json /tmp/b.json
+cmp /tmp/b.json results/0.5.4/baseline.json
+```
+
+0.5.5's proof runs the same tasks and prompt (`compare` refuses on a changed task file or
+prompt), scores its own run to `results/0.5.5/baseline.json`, and compares:
+
+```
+python3 score.py compare results/0.5.4/baseline.json results/0.5.5/baseline.json
+```
+
+one `[agent-ab] compare arm=<a> metric=<m> diff=<d> ci=[lo,hi] verdict=<v>` line per arm and
+judged metric (new - old over the shared tasks, the task-cluster bootstrap).
+
+The run is subscription-authenticated (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`,
+ruling FE-3) and usage-gated: check `dev-notes/wave-runner/usage_gate.py` before the pilot and
+before each resume of the full run; the full run starts only after James approves the pilot's
+estimate.
