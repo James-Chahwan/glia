@@ -699,8 +699,48 @@ fn code_text(n: &Node) -> Option<&str> {
 }
 
 /// FNV-1a 64 over the whitespace-collapsed text (the `stamp/build.rs`
-/// precedent: stable across toolchains, unlike std's `DefaultHasher`).
+/// precedent: stable across toolchains, unlike std's `DefaultHasher`): the
+/// words of `str::split_whitespace` joined by one space, `0` when that text
+/// is shorter than [`MIN_BODY_CHARS`] chars.
+///
+/// FD.34b: an all-ASCII body (nearly every CODE cell) is hashed by one byte
+/// loop, with no `char` decoding and no per-word `chars().count()`. A byte is
+/// a separator exactly when `char::is_whitespace` holds for it (`\t` `\n`
+/// `\x0B` `\x0C` `\r` and space: note `\x0B`, which
+/// `u8::is_ascii_whitespace` leaves out), and one ASCII byte is one char, so
+/// the result is bit-identical to [`body_hash_split`]. The first byte >= 0x80
+/// hands the whole input to [`body_hash_split`], which is the only path that
+/// knows Unicode whitespace (U+00A0, U+2003, ..). The test
+/// `body_hash_ascii_fast_path_equals_split_whitespace` pins the equality on
+/// 10,000 seeded inputs.
 fn body_hash(code: &str) -> u64 {
+    let (mut state, mut chars) = (FNV_OFFSET, 0usize);
+    let mut in_word = false;
+    for &b in code.as_bytes() {
+        if b >= 0x80 {
+            return body_hash_split(code);
+        }
+        if matches!(b, b' ' | b'\t'..=b'\r') {
+            in_word = false;
+            continue;
+        }
+        if !in_word {
+            if chars > 0 {
+                fnv1a(&mut state, b" ");
+                chars += 1;
+            }
+            in_word = true;
+        }
+        state ^= u64::from(b);
+        state = state.wrapping_mul(FNV_PRIME);
+        chars += 1;
+    }
+    finish_body_hash(state, chars)
+}
+
+/// The general path of [`body_hash`] (its pre-FD.34b body, unchanged): any
+/// UTF-8, words split by `char::is_whitespace`.
+fn body_hash_split(code: &str) -> u64 {
     let (mut state, mut chars) = (FNV_OFFSET, 0usize);
     for (i, word) in code.split_whitespace().enumerate() {
         if i > 0 {
@@ -710,6 +750,12 @@ fn body_hash(code: &str) -> u64 {
         fnv1a(&mut state, word.as_bytes());
         chars += word.chars().count();
     }
+    finish_body_hash(state, chars)
+}
+
+/// `0` for a body under [`MIN_BODY_CHARS`] chars, else the hash with `0`
+/// remapped to `1` (so `0` keeps meaning "no body").
+fn finish_body_hash(state: u64, chars: usize) -> u64 {
     match state {
         _ if chars < MIN_BODY_CHARS => 0,
         0 => 1,
@@ -817,6 +863,140 @@ mod tests {
         assert_ne!(body_hash(a), 0);
         assert_eq!(body_hash(a), body_hash(b));
         assert_eq!(body_hash("def f(): pass"), 0);
+    }
+
+    /// FD.34b: the ASCII byte loop of `body_hash` equals the
+    /// `split_whitespace` + `chars().count()` path (`body_hash_split`, the
+    /// pre-FD.34b fn) on 10,000 seeded inputs: ASCII with every
+    /// `char::is_whitespace` byte and the 0x1C..0x1F look-alikes, mixed
+    /// non-ASCII, Unicode whitespace, empty and all-whitespace, at lengths
+    /// that straddle `MIN_BODY_CHARS`.
+    #[test]
+    fn body_hash_ascii_fast_path_equals_split_whitespace() {
+        const ASCII_WS: &[char] = &[' ', '\t', '\n', '\x0B', '\x0C', '\r'];
+        const NOT_WS: &[char] = &['\x1C', '\x1D', '\x1E', '\x1F', '\0', '\x7F'];
+        const UNI_WS: &[char] = &[
+            '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2003}', '\u{2028}', '\u{2029}', '\u{202F}',
+            '\u{205F}', '\u{3000}',
+        ];
+        const UNI: &[char] = &['\u{00E9}', '\u{4E2D}', '\u{1F600}', '\u{200B}', '\u{FEFF}'];
+        let mut seed: u64 = 0x5eed_fd34_b000_0001;
+        let mut next = move || {
+            // xorshift64*: deterministic, no dependency.
+            seed ^= seed >> 12;
+            seed ^= seed << 25;
+            seed ^= seed >> 27;
+            seed.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        };
+        let mut classes = [0usize; 5];
+        let mut nonzero = 0usize;
+        for case in 0..10_000u32 {
+            let class = (case % 5) as usize;
+            let len = (next() % 140) as usize;
+            let mut text = String::new();
+            for _ in 0..len {
+                let r = next();
+                let pick = |set: &[char]| set[(r >> 8) as usize % set.len()];
+                let c = match (class, r % 10) {
+                    // 0: ASCII only.
+                    (0, 0..=2) => pick(ASCII_WS),
+                    (0, 3) => pick(NOT_WS),
+                    (0, _) => char::from(b'!' + ((r >> 16) % 94) as u8),
+                    // 1: mixed, non-ASCII words.
+                    (1, 0..=2) => pick(ASCII_WS),
+                    (1, 3..=4) => pick(UNI),
+                    // 2: Unicode whitespace among ASCII words.
+                    (2, 0..=1) => pick(UNI_WS),
+                    (2, 2) => pick(ASCII_WS),
+                    (1 | 2, _) => char::from(b'a' + ((r >> 16) % 26) as u8),
+                    // 3: all whitespace, ASCII and Unicode.
+                    (3, 0..=6) => pick(ASCII_WS),
+                    (3, _) => pick(UNI_WS),
+                    // 4: empty (len forced to 0 below) .. never reached.
+                    _ => ' ',
+                };
+                if class != 4 {
+                    text.push(c);
+                }
+            }
+            let fast = body_hash(&text);
+            let oracle = body_hash_split(&text);
+            assert_eq!(fast, oracle, "case {case} class {class}: {text:?}");
+            if class == 3 || class == 4 {
+                assert_eq!(fast, 0, "case {case}: no words, no hash");
+            }
+            classes[class] += 1;
+            nonzero += usize::from(fast != 0);
+        }
+        assert_eq!(classes, [2000; 5]);
+        assert!(nonzero > 2000, "both sides of MIN_BODY_CHARS: {nonzero}");
+        assert_eq!(body_hash(""), body_hash_split(""));
+        let edge = format!("{}\x0B{}", "a".repeat(30), "b".repeat(30));
+        assert_eq!(body_hash(&edge), body_hash_split(&edge));
+        assert_ne!(body_hash(&edge), 0);
+    }
+
+    /// FD.34b's timing: `body_hash` against `body_hash_split` over every
+    /// tracked-looking `.rs` / `.py` / `.ts` / `.go` source under the
+    /// workspace root (the text glia's own CODE cells slice). Run it with
+    /// `cargo test -p glia-graph --lib body_hash_timing -- --ignored
+    /// --nocapture`; it prints `[body-hash] timing ..` and asserts equality
+    /// on every file.
+    #[test]
+    #[ignore = "timing over the workspace sources; run by hand"]
+    fn body_hash_timing_over_workspace_sources() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
+            entries.sort();
+            for p in entries {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') || name == "target" || name == "node_modules" {
+                    continue;
+                }
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("rs" | "py" | "ts" | "go")
+                ) && let Ok(t) = std::fs::read_to_string(&p)
+                {
+                    out.push(t);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut texts = Vec::new();
+        walk(&root, &mut texts);
+        let bytes: usize = texts.iter().map(String::len).sum();
+        let ascii = texts.iter().filter(|t| t.is_ascii()).count();
+        let time = |texts: &[String], f: fn(&str) -> u64| {
+            let start = std::time::Instant::now();
+            let mut acc = 0u64;
+            for _ in 0..3 {
+                for t in texts {
+                    acc = acc.wrapping_add(f(t));
+                }
+            }
+            (start.elapsed().as_secs_f64() * 1000.0 / 3.0, acc)
+        };
+        let (old_ms, old_acc) = time(&texts, body_hash_split);
+        let (new_ms, new_acc) = time(&texts, body_hash);
+        assert_eq!(old_acc, new_acc);
+        let ascii_texts: Vec<String> = texts.iter().filter(|t| t.is_ascii()).cloned().collect();
+        let (old_ascii_ms, _) = time(&ascii_texts, body_hash_split);
+        let (new_ascii_ms, _) = time(&ascii_texts, body_hash);
+        for t in &texts {
+            assert_eq!(body_hash(t), body_hash_split(t));
+        }
+        eprintln!(
+            "[body-hash] timing files={} ascii={} bytes={bytes} split_ms={old_ms:.1} \
+             fast_ms={new_ms:.1} ascii_split_ms={old_ascii_ms:.1} ascii_fast_ms={new_ascii_ms:.1}",
+            texts.len(),
+            ascii
+        );
     }
 
     /// CD.7c: an unresolved CODE span handed out as JSON is not hashed as the
