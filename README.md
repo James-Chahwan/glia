@@ -507,6 +507,14 @@ glia vocab sync <REPO> [--json] [--rev <REV>]
     <repo>/.glia/vocab-snapshot/: every identifier-like token with the files it
     occurs in. find's absence and gaps read it; the build never does. Exits 1 when
     the sync fails (nothing written).
+glia embed <REPO> [--check] [--json] [--limit <N>] [--model bge-small|test-hash] [--recipe t1|t2] [--replace]
+    Embed each node's text (name, qname, leading doc, imports; code last under
+    --recipe t2) with a local model (default bge-small, cached under the user cache,
+    never inside the repo) into <repo>/.glia/vectors.jsonl, re-embedding only nodes
+    whose text changed. Never part of a build; find, flows and pack read it.
+    --replace rewrites a sidecar of another model; --limit embeds at most N nodes;
+    --check counts the nodes with no fresh vector, loads no model and writes nothing.
+    Exits 1 under --check when nodes need embedding, 2 on an error.
 glia overlay propose <REPO> [--category <CATEGORY>]... [--json] [--snippet-lines <SNIPPET_LINES>] [--top-k <TOP_K>] [--with <WITH>]...
     The overlay loop's work list: the gaps an overlay stanza could close, per
     category, each with its gap id, location and source lines, and a suspected

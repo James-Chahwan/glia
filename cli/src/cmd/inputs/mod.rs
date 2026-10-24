@@ -1,5 +1,5 @@
 //! `inputs` area: non-code inputs — gaps (LF.2c), history (LF.5d), tests (LF.6d),
-//! overlay (CE.3e), scip (CE.1c), vocab (FB.13b).
+//! overlay (CE.3e), scip (CE.1c), vocab (FB.13b), embed (FB.5b).
 //!
 //! Each command is a variant of `InputsCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -8,6 +8,7 @@
 
 use clap::Subcommand;
 
+mod embed;
 mod gaps;
 mod history;
 mod overlay;
@@ -53,6 +54,13 @@ pub(crate) enum InputsCmd {
     /// written to `<repo>/.glia/vocab-snapshot/`; find's absence and gaps
     /// read it; the build never does. Exits 1 when the sync fails.
     Vocab(vocab::Args),
+    /// Embedding snapshot (FB.5b): embed each node's text (name, qname,
+    /// leading doc, imports; code last under --recipe t2) with a local model
+    /// and write <repo>/.glia/vectors.jsonl, re-embedding only nodes whose
+    /// text changed. Never part of a build; find, flows and pack read the
+    /// sidecar. Exits 1 under --check when nodes need embedding, 2 on an
+    /// error.
+    Embed(embed::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
@@ -63,5 +71,6 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::Overlay(a) => overlay::run(a),
         InputsCmd::Scip(a) => scip::run(a),
         InputsCmd::Vocab(a) => vocab::run(a),
+        InputsCmd::Embed(a) => embed::run(a),
     }
 }
