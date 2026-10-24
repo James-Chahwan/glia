@@ -29,7 +29,7 @@
 //! bash scripts/check-engram-export.sh
 //! engram-export/target/debug/glia-export-engram <repo> --out <file> \
 //!     [--since <prior>] [--no-persist] [--include-noise] \
-//!     [--exclude <glob>]... [--exclude-path <glob>]...
+//!     [--exclude <glob>]... [--exclude-path <glob>]... [--vocab]
 //! ```
 //!
 //! `--exclude` drops nodes by KEY (the qname); `--exclude-path` drops every
@@ -92,6 +92,26 @@
 //! is basename-based and carries no file tokens. A stale one that cannot be
 //! removed is exit 5, one that cannot be written exit 9 (the gmap, its
 //! sidecars and the diff are already complete).
+//!
+//! `--vocab` (FB.13d, off by default) also writes `<out>.vocab.jsonl`
+//! (`glia_engram_export::vocab_side`): a header `{"files","gmap_digest",
+//! "tokens","vocab_side":1}` binding it to the gmap by its content digest,
+//! then `{"f","path"}` path rows for the tracked files the export's file table
+//! does not hold (ids after the table's largest, sorted by path), then one
+//! `{"files":[ids],"n","t"}` / `{"common":true,"n","t"}` row per identifier
+//! token, sorted by token. The vocabulary is FB.13a's capture of the commit
+//! the work tree had checked out at build (`HEAD`): the export reads the work
+//! tree, so on a dirty tree the vocabulary is HEAD's and the marker's
+//! `dirty=<n>` counts the modified tracked paths under the root (`git status
+//! --porcelain=v1 -uno`). It prints `[engram-export] vocab side: <tokens>
+//! tokens, <extra> extra files, <bytes> bytes, <ms> ms dirty=<n> -> <path>`
+//! after the hints line. A `--since` step writes a full file, never a diff.
+//! Every run removes a stale `<out>.vocab.jsonl` before the gmap write (exit 5
+//! when it cannot), so none ever names another gmap; it is written after the
+//! hints side file. Exit 10: `--vocab` outside a git work tree (or with no
+//! commit) - `error: --vocab needs a git work tree`, before anything is
+//! written - or a vocabulary that cannot be captured or written (the gmap, its
+//! sidecars, the diff and the hints are already complete).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -103,9 +123,12 @@ use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
 use glia_engram_export::hints_side::{HintsSideStats, write_hints_side_with};
+use glia_engram_export::vocab_side::{
+    ExportRev, VocabSideStats, export_rev, file_ids_of, write_vocab_side,
+};
 use glia_engram_export::{
     ExportOptions, build_gmap_with_nodes, hints_side_path, history_dir, meta_path, position_paths,
-    prior_tokens, sidecar_path, write_engram_gmap,
+    prior_tokens, sidecar_path, vocab_side_path, write_engram_gmap,
 };
 use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves, identities};
 
@@ -143,6 +166,11 @@ struct Args {
     /// Repeatable.
     #[arg(long = "exclude-path")]
     exclude_path: Vec<String>,
+    /// Also write `<out>.vocab.jsonl`: every identifier token of the tracked
+    /// text at the commit checked out (HEAD), bound to the gmap by digest.
+    /// Needs a git work tree (exit 10 otherwise).
+    #[arg(long)]
+    vocab: bool,
 }
 
 fn main() {
@@ -251,6 +279,19 @@ fn run(args: &Args) -> i32 {
         }
     };
     let repo_root = Path::new(&args.repo);
+    // The commit `--vocab` reads: HEAD as the build left it, resolved before
+    // anything is written, so a run outside git writes nothing.
+    let vocab_rev: Option<ExportRev> = if args.vocab {
+        match export_rev(repo_root) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("error: --vocab needs a git work tree ({e})");
+                return 10;
+            }
+        }
+    } else {
+        None
+    };
     let out_path = match &args.out {
         Some(p) => Path::new(p).to_path_buf(),
         None => {
@@ -331,6 +372,18 @@ fn run(args: &Args) -> i32 {
         );
         return 5;
     }
+    // The vocabulary side file names its gmap's digest too: removed on every
+    // run, `--vocab` or not, so none is left beside a gmap it does not name.
+    let vocab_out = vocab_side_path(&out_path);
+    if let Err(e) = std::fs::remove_file(&vocab_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!(
+            "error removing the stale vocab side file {}: {e}",
+            vocab_out.display()
+        );
+        return 5;
+    }
     // Build and write the gmap. The hints side file's identities (T12: one
     // CODE hash per glia node) read only the graph, so they are derived on a
     // second thread meanwhile and joined here; the bytes are the same either
@@ -393,6 +446,30 @@ fn run(args: &Args) -> i32 {
             }
         }
     };
+    // The vocabulary side file (FB.13d), after the hints: the capture of the
+    // build's HEAD, its file ids remapped into the gmap's file table.
+    let vocab: Option<(VocabSideStats, u128, usize)> = vocab_rev.as_ref().and_then(|rev| {
+        let started = Instant::now();
+        let written = glia_snapshots::capture_vocab(repo_root, &rev.sha)
+            .map_err(|e| format!("capture at {}: {e}", rev.sha))
+            .and_then(|v| {
+                write_vocab_side(&v, &file_ids_of(&gmap), stats.digest, &vocab_out)
+                    .map_err(|e| e.to_string())
+            });
+        match written {
+            Ok(s) => Some((s, started.elapsed().as_millis(), rev.dirty)),
+            Err(e) => {
+                eprintln!(
+                    "error writing the vocab side file {}: {e}",
+                    vocab_out.display()
+                );
+                if code == 0 {
+                    code = 10;
+                }
+                None
+            }
+        }
+    });
     // The graph this gmap was exported from, for the next `--since` run. The
     // gmap is complete without it, so a failure is a warning. Written with NO
     // repo root: a layout that records its root stores CODE as spans into the
@@ -447,6 +524,18 @@ fn run(args: &Args) -> i32 {
             s.facts,
             s.hinted,
             hints_out.display(),
+        );
+    }
+    // The FB.13d marker, with --vocab: token rows, path rows for files outside
+    // the file table, the file's size, the capture + write time, and the
+    // modified tracked paths the HEAD vocabulary does not see.
+    if let Some((s, ms, dirty)) = vocab {
+        eprintln!(
+            "[engram-export] vocab side: {} tokens, {} extra files, {} bytes, {ms} ms dirty={dirty} -> {}",
+            s.tokens,
+            s.extra_files,
+            s.bytes,
+            vocab_out.display(),
         );
     }
     // The v6 since marker (LG.8a): the diff just written, by digest and

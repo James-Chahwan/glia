@@ -413,6 +413,7 @@ dependencies = [
  "glia-core",
  "glia-engine",
  "glia-graph",
+ "glia-snapshots",
  "serde_json",
 ]
 
@@ -719,6 +720,7 @@ dependencies = [
  "glia-code-domain",
  "glia-core",
  "glia-graph",
+ "serde_json",
 ]
 
 [[package]]
@@ -727,6 +729,17 @@ version = "0.5.3"
 dependencies = [
  "glia-activation",
  "glia-core",
+]
+
+[[package]]
+name = "glia-snapshots"
+version = "0.5.3"
+dependencies = [
+ "glia-build-domain",
+ "glia-code-domain",
+ "quick-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -921,6 +934,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

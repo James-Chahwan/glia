@@ -102,3 +102,34 @@ clone pairs at different directory names and depths (`git clone --no-hardlinks`,
   corrections, 1 naming code (a DECISION on `frontend::src::app::app.routes::entryGuard`). About one row per repo-month.
 - The release-candidate replays wait for the RC commit, which now follows glia's 0.5.2 tweaks (T1-T11,
   `dev-notes/tweaks-0.5.2.md`) and James's testing.
+
+## 6. 0.5.4 as built
+
+What Engram reads from glia 0.5.4, as the packets landed (the 0.5.3 -> 0.5.4 handoff restates it with the pin):
+
+- **The vocabulary side file (FB.13d).** `glia-export-engram --vocab` (off by default) writes `<out>.vocab.jsonl`
+  beside the gmap, after the hints side file. JSONL, keys sorted, compact, `\n`-terminated:
+  - line 1, the header `{"files":<n>,"gmap_digest":"<16 hex>","tokens":<t>,"vocab_side":1}`: `gmap_digest` is the
+    same digest `meta.json` names (drop a file whose digest is not its gmap's); `files` is the size of the one file-id
+    space (the export's file table plus the path rows); `tokens` the token rows;
+  - then path rows `{"f":<id>,"path":"<repo-relative>"}`, one per tracked text file the export's file table does not
+    hold, sorted by path, ids numbered from the table's largest id + 1;
+  - then token rows sorted by token: `{"files":[<ids ascending>],"n":<occurrences>,"t":"<token>"}`, or
+    `{"common":true,"n":<n>,"t":"<token>"}` past 16 files. A file id resolves through `Gmap.files` /
+    `files.json`, then the path rows.
+  The vocabulary is FB.13a's capture (`[A-Za-z_][A-Za-z0-9_]*`, 3+ chars, the commit's tree, binary and >4 MiB
+  blobs skipped) of the commit the work tree had checked out at build (`HEAD`). The export itself reads the work
+  tree, so on a dirty tree the vocabulary is HEAD's: the marker `[engram-export] vocab side: <tokens> tokens,
+  <extra> extra files, <bytes> bytes, <ms> ms dirty=<n> -> <path>` counts the modified tracked paths (`git status
+  --porcelain=v1 -uno`). Every clone of one commit writes the same bytes. A `--since` step writes a full file,
+  never a diff. Every run removes a stale `<out>.vocab.jsonl` before writing the gmap, so a run without `--vocab`
+  leaves none. Exit 10: `--vocab` outside a git work tree (`error: --vocab needs a git work tree`, nothing
+  written) or a vocabulary that cannot be captured or written (the gmap, sidecars, diff and hints are complete).
+- **The vectors contract (FB.2).** A `.glia/vectors.jsonl` row is
+  `{"qname","kind"?,"hint"?,"model","dims","text_hash"?,"b64"}`: `model` and `dims` required, `b64` = `dims`
+  little-endian f32, finite and unit-norm; optional `text_hash` (`t<digits>:<16 lowercase hex>`) names the text
+  embedded; one model per file; rows keyed by `(qname, kind)`, so a same-qname twin keeps two rows. A reader that
+  rejected unknown fields must accept `text_hash`. `glia cell ls --check` audits a file.
+- **Vectors are query-time (FB.3).** No build reads `.glia/vectors.jsonl`: writing it never stales a layout, a
+  watch treats it as a no-op, and a VECTOR cell write changes the sidecar only, never the gmap. The gmap and its
+  sidecars carry no vectors.

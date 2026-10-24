@@ -150,6 +150,7 @@ use glia_graph::MergedGraph;
 pub mod diff;
 pub mod hints_side;
 mod natspec;
+pub mod vocab_side;
 
 /// Counts surfaced after an export so callers can flag lossy runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1663,6 +1664,16 @@ pub fn meta_path(out_path: &Path) -> PathBuf {
 pub fn hints_side_path(out_path: &Path) -> PathBuf {
     let mut s = out_path.as_os_str().to_os_string();
     s.push(".hints.jsonl");
+    PathBuf::from(s)
+}
+
+/// `<out_path>.vocab.jsonl` — the vocabulary side file ([`vocab_side`],
+/// FB.13d): written only by `glia-export-engram --vocab`, its header names the
+/// [`content_digest`] of the gmap beside it, and every run removes a stale one
+/// before it writes the gmap.
+pub fn vocab_side_path(out_path: &Path) -> PathBuf {
+    let mut s = out_path.as_os_str().to_os_string();
+    s.push(".vocab.jsonl");
     PathBuf::from(s)
 }
 
