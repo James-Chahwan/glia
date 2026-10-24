@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 419,
+  "fixtures": 422,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2051,6 +2051,18 @@
       "language": "rust",
       "per_category": {}
     },
+    "self-scan-literal-routes": {
+      "framework": "self-scan-literal-routes",
+      "language": "rust",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "self-scan-literal-schedules": {
+      "framework": "self-scan-literal-schedules",
+      "language": "rust",
+      "per_category": {}
+    },
     "solidity-abi-procedures": {
       "framework": "solidity-abi-procedures",
       "language": "solidity",
@@ -2552,6 +2564,11 @@
     "walk-user-config": {
       "framework": "walk-user-config",
       "language": "python",
+      "per_category": {}
+    },
+    "ws-needle-boundaries": {
+      "framework": "ws-needle-boundaries",
+      "language": "javascript",
       "per_category": {}
     },
     "xcli-invokes": {

@@ -55,6 +55,7 @@ EXCLUSIVE = set()
 # --verify then guards that re-running the scheduler reproduces history.
 LANDED = {
     0: "F0.1 F0.2 F0.3 F0.4 F0.5",
+    1: "F0.6 FB.1 FB.2 FD.2 FD.4a FD.4c FD.4d FD.22 FD.23a FD.25 FD.34 FE.1",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 SELECTED = "T0 T2 T5 T1 T11"
