@@ -16,7 +16,10 @@ fn cands(paths: &[&str]) -> Candidates {
 }
 
 fn renames(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    pairs
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
 }
 
 fn toks(t: &[&str]) -> Vec<String> {
@@ -25,7 +28,10 @@ fn toks(t: &[&str]) -> Vec<String> {
 
 /// (path, route) per resolved row, in the block's output order.
 fn block<'a>(r: &'a PathResolver, t: &[&str]) -> Vec<(&'a str, &'static str)> {
-    r.block(&toks(t)).into_iter().map(|(f, route, _)| (r.candidates()[f].as_str(), route)).collect()
+    r.block(&toks(t))
+        .into_iter()
+        .map(|(f, route, _)| (r.candidates()[f].as_str(), route))
+        .collect()
 }
 
 const CANDS: &[&str] = &[
@@ -60,24 +66,51 @@ fn resolver() -> PathResolver {
 
 #[test]
 fn exact_name_and_context() {
-    let r = PathResolver::new(&cands(&["src/billing/export.rs", "src/billing/mod.rs", "lib/x.rs"]), &[]);
-    assert_eq!(r.file("src/billing/export.rs", &[]), Some((r.map("src/billing/export.rs").unwrap(), "exact")));
-    assert_eq!(block(&r, &["export.rs"]), [("src/billing/export.rs", "name")]);
-    assert_eq!(block(&r, &["billing/export.rs"]), [("src/billing/export.rs", "suffix")]);
+    let r = PathResolver::new(
+        &cands(&["src/billing/export.rs", "src/billing/mod.rs", "lib/x.rs"]),
+        &[],
+    );
+    assert_eq!(
+        r.file("src/billing/export.rs", &[]),
+        Some((r.map("src/billing/export.rs").unwrap(), "exact"))
+    );
+    assert_eq!(
+        block(&r, &["export.rs"]),
+        [("src/billing/export.rs", "name")]
+    );
+    assert_eq!(
+        block(&r, &["billing/export.rs"]),
+        [("src/billing/export.rs", "suffix")]
+    );
 
     let r = resolver();
     // two export.rs share no directory with an empty block: ambiguous
     assert_eq!(block(&r, &["export.rs"]), []);
-    assert_eq!(block(&r, &["export.rs", "src/billing/mod.rs"]), [("src/billing/export.rs", "context"), ("src/billing/mod.rs", "exact")]);
+    assert_eq!(
+        block(&r, &["export.rs", "src/billing/mod.rs"]),
+        [
+            ("src/billing/export.rs", "context"),
+            ("src/billing/mod.rs", "exact")
+        ]
+    );
 }
 
 #[test]
 fn renamed_twice_resolves_to_final_candidate() {
     let r = resolver();
     // rust/engine/src/old.rs -> engine/src/mid.rs -> engine/src/rank/files.rs
-    assert_eq!(block(&r, &["rust/engine/src/old.rs"]), [("engine/src/rank/files.rs", "rename")]);
-    assert_eq!(block(&r, &["engine/src/mid.rs"]), [("engine/src/rank/files.rs", "rename")]);
-    assert_eq!(block(&r, &["old.rs"]), [("engine/src/rank/files.rs", "rename-suffix")]);
+    assert_eq!(
+        block(&r, &["rust/engine/src/old.rs"]),
+        [("engine/src/rank/files.rs", "rename")]
+    );
+    assert_eq!(
+        block(&r, &["engine/src/mid.rs"]),
+        [("engine/src/rank/files.rs", "rename")]
+    );
+    assert_eq!(
+        block(&r, &["old.rs"]),
+        [("engine/src/rank/files.rs", "rename-suffix")]
+    );
     // a chain ending outside the candidates maps nothing
     assert_eq!(r.map("gone/x.rs"), None);
     assert_eq!(r.renamed(), 3);
@@ -86,8 +119,16 @@ fn renamed_twice_resolves_to_final_candidate() {
 #[test]
 fn directories_and_cap() {
     let r = resolver();
-    assert_eq!(block(&r, &["billing/"]), [("src/billing/export.rs", "dir-suffix"), ("src/billing/mod.rs", "dir-suffix")]);
-    let many: Vec<String> = (0..DIR_CAP + 1).map(|i| format!("big/f{i:02}.rs")).collect();
+    assert_eq!(
+        block(&r, &["billing/"]),
+        [
+            ("src/billing/export.rs", "dir-suffix"),
+            ("src/billing/mod.rs", "dir-suffix")
+        ]
+    );
+    let many: Vec<String> = (0..DIR_CAP + 1)
+        .map(|i| format!("big/f{i:02}.rs"))
+        .collect();
     let refs: Vec<&str> = many.iter().map(String::as_str).collect();
     let r = PathResolver::new(&cands(&refs), &[]);
     assert_eq!(r.dir("big"), None);
@@ -96,13 +137,19 @@ fn directories_and_cap() {
     assert!(line.contains(" over_cap=2 "), "{line}");
     let at_cap: Vec<&str> = refs[..DIR_CAP].to_vec();
     let r = PathResolver::new(&cands(&at_cap), &[]);
-    assert_eq!(r.dir("big").map(|(v, route)| (v.len(), route)), Some((DIR_CAP, "dir")));
+    assert_eq!(
+        r.dir("big").map(|(v, route)| (v.len(), route)),
+        Some((DIR_CAP, "dir"))
+    );
 }
 
 #[test]
 fn braces_and_globs() {
     let r = resolver();
-    assert_eq!(block(&r, &["src/{a,b}.rs"]), [("src/a.rs", "glob"), ("src/b.rs", "glob")]);
+    assert_eq!(
+        block(&r, &["src/{a,b}.rs"]),
+        [("src/a.rs", "glob"), ("src/b.rs", "glob")]
+    );
     let many: Vec<String> = (0..40).map(|i| format!("src/m{i:02}/x.rs")).collect();
     let refs: Vec<&str> = many.iter().map(String::as_str).collect();
     let r = PathResolver::new(&cands(&refs), &[]);
@@ -120,9 +167,18 @@ fn normalisation_line_ranges_and_drops() {
     assert_eq!(block(&r, &["https://x/y.rs", "../../etc"]), []);
     assert_eq!(norm("https://x/y.rs", r.exts()), None);
     assert_eq!(norm("../../etc", r.exts()), None);
-    assert_eq!(norm("./src/a.rs,", r.exts()), Some(PTok::File("src/a.rs".into())));
-    assert_eq!(norm("**src/{a,b}.rs**", r.exts()), Some(PTok::Glob("src/{a,b}.rs".into())));
-    assert_eq!(norm("billing/", r.exts()), Some(PTok::Dir("billing".into())));
+    assert_eq!(
+        norm("./src/a.rs,", r.exts()),
+        Some(PTok::File("src/a.rs".into()))
+    );
+    assert_eq!(
+        norm("**src/{a,b}.rs**", r.exts()),
+        Some(PTok::Glob("src/{a,b}.rs".into()))
+    );
+    assert_eq!(
+        norm("billing/", r.exts()),
+        Some(PTok::Dir("billing".into()))
+    );
     assert_eq!(norm("user@host", r.exts()), None);
 }
 
@@ -136,13 +192,37 @@ type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 fn parity_with_rank_eval_kpaths() {
     let r = resolver();
     let cases: &[Case] = &[
-        (&["src/billing/export.rs"], &[("src/billing/export.rs", "exact")]),
+        (
+            &["src/billing/export.rs"],
+            &[("src/billing/export.rs", "exact")],
+        ),
         (&["export.rs"], &[]),
-        (&["export.rs", "src/billing/mod.rs"], &[("src/billing/export.rs", "context"), ("src/billing/mod.rs", "exact")]),
-        (&["rust/engine/src/old.rs"], &[("engine/src/rank/files.rs", "rename")]),
-        (&["old.rs"], &[("engine/src/rank/files.rs", "rename-suffix")]),
-        (&["billing/"], &[("src/billing/export.rs", "dir-suffix"), ("src/billing/mod.rs", "dir-suffix")]),
-        (&["src/{a,b}.rs"], &[("src/a.rs", "glob"), ("src/b.rs", "glob")]),
+        (
+            &["export.rs", "src/billing/mod.rs"],
+            &[
+                ("src/billing/export.rs", "context"),
+                ("src/billing/mod.rs", "exact"),
+            ],
+        ),
+        (
+            &["rust/engine/src/old.rs"],
+            &[("engine/src/rank/files.rs", "rename")],
+        ),
+        (
+            &["old.rs"],
+            &[("engine/src/rank/files.rs", "rename-suffix")],
+        ),
+        (
+            &["billing/"],
+            &[
+                ("src/billing/export.rs", "dir-suffix"),
+                ("src/billing/mod.rs", "dir-suffix"),
+            ],
+        ),
+        (
+            &["src/{a,b}.rs"],
+            &[("src/a.rs", "glob"), ("src/b.rs", "glob")],
+        ),
         (&["`src/a.rs:12-40`"], &[]),
         (&["src/a.rs#L12"], &[("src/a.rs", "exact")]),
         (&["https://x/y.rs", "../../etc", "www.foo.rs"], &[]),
@@ -165,7 +245,10 @@ fn parity_with_rank_eval_kpaths() {
                 ("web/app/main.ts", "glob"),
             ],
         ),
-        (&["ui/main.ts", "export.rs", "lib/util/mod.rs"], &[("web/app/main.ts", "rename-suffix")]),
+        (
+            &["ui/main.ts", "export.rs", "lib/util/mod.rs"],
+            &[("web/app/main.ts", "rename-suffix")],
+        ),
         (
             &["src/billing", "src/", "mod.rs", "tools/x.py,"],
             &[
@@ -180,7 +263,11 @@ fn parity_with_rank_eval_kpaths() {
             ],
         ),
         (
-            &["engine/src/intent/{paths,text}.rs", "README.md.", "_docs/guide.md_"],
+            &[
+                "engine/src/intent/{paths,text}.rs",
+                "README.md.",
+                "_docs/guide.md_",
+            ],
             &[
                 ("README.md", "exact"),
                 ("docs/guide.md", "exact"),
@@ -193,7 +280,10 @@ fn parity_with_rank_eval_kpaths() {
         assert_eq!(block(&r, t), want.to_vec(), "block {t:?}");
     }
     let line = r.report_line("toy", "test");
-    assert!(line.starts_with("[id-paths] repo=toy surface=test candidates=16 renamed=3 resolved="), "{line}");
+    assert!(
+        line.starts_with("[id-paths] repo=toy surface=test candidates=16 renamed=3 resolved="),
+        "{line}"
+    );
     assert!(line.contains(" routes=context:1,dir:9,dir-suffix:4,exact:7,glob:8,rename:1,rename-suffix:2 ambiguous=3 over_cap=0 unresolved=3"), "{line}");
     r.report("toy", "test");
 }
@@ -205,7 +295,12 @@ fn rename_pairs_oldest_first() {
         t,
         files: files
             .iter()
-            .map(|(p, from)| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: from.map(str::to_string) })
+            .map(|(p, from)| HistoryFile {
+                p: p.to_string(),
+                a: Some(1),
+                d: Some(0),
+                from: from.map(str::to_string),
+            })
             .collect(),
     };
     let snap = HistorySnapshot {

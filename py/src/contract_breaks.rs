@@ -46,7 +46,11 @@ fn engine_args(
             AVRO_MODES.join(", ")
         ));
     };
-    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+    let Some(tier) = MODEL_MIN_TIERS
+        .iter()
+        .copied()
+        .find(|t| *t == models_min_tier)
+    else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
             MODEL_MIN_TIERS.join(", ")
@@ -172,8 +176,18 @@ mod tests {
 
     fn git(top: &Path, gitconfig: &Path, args: &[&str]) {
         let out = Command::new("git")
-            .args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.name=glia",
+                "-c",
+                "user.email=glia@example.invalid",
+            ])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .arg("-C")
             .arg(top)
             .args(args)
@@ -183,8 +197,14 @@ mod tests {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .output()
-            .unwrap_or_else(|e| panic!("CC.8b contract_breaks_vs_rev test needs a `git` binary: {e}"));
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            .unwrap_or_else(|e| {
+                panic!("CC.8b contract_breaks_vs_rev test needs a `git` binary: {e}")
+            });
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// The object the pyo3 entry point returns, as `to_py` hands it to Python.
@@ -202,14 +222,31 @@ mod tests {
             let a = engine_args("backward", false, tier).expect("an engine tier");
             assert_eq!(a.models_min_tier, *tier);
         }
-        let err = rev_answer("/nonexistent/dt1p", "HEAD", "backward", false, None, "heuristic")
-            .expect_err("bad tier");
-        assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
-        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None, "fact").expect_err("bad mode");
-        assert_eq!(err, "unknown avro mode `x`: expected one of backward, forward, full");
+        let err = rev_answer(
+            "/nonexistent/dt1p",
+            "HEAD",
+            "backward",
+            false,
+            None,
+            "heuristic",
+        )
+        .expect_err("bad tier");
+        assert_eq!(
+            err,
+            "unknown models min tier `heuristic`: expected one of fact, derived"
+        );
+        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None, "fact")
+            .expect_err("bad mode");
+        assert_eq!(
+            err,
+            "unknown avro mode `x`: expected one of backward, forward, full"
+        );
         let err = rev_answer("/nonexistent/cc8b", "HEAD", "backward", false, None, "fact")
             .expect_err("not a directory");
-        assert!(!err.contains("avro"), "the mode passed; the engine refused the path: {err}");
+        assert!(
+            !err.contains("avro"),
+            "the mode passed; the engine refused the path: {err}"
+        );
     }
 
     /// CC.8b: the helper behind `contract_breaks_vs_rev` returns the engine's
@@ -234,17 +271,29 @@ mod tests {
         let repo = top.to_str().expect("utf-8");
         let a = rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
-        let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"models\":", "\"orphaned_clients\":", "\"breaking\":", "\"advisory\":", "\"absence\":"]
-            .iter()
-            .map(|k| text.rfind(k).unwrap_or(usize::MAX))
-            .collect();
+        let order: Vec<usize> = [
+            "\"base\":",
+            "\"schemas\":",
+            "\"models\":",
+            "\"orphaned_clients\":",
+            "\"breaking\":",
+            "\"advisory\":",
+            "\"absence\":",
+        ]
+        .iter()
+        .map(|k| text.rfind(k).unwrap_or(usize::MAX))
+        .collect();
         // A top-level key is its last occurrence: `"breaking":` also names a
         // field change's verdict inside `schemas`.
         assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
         let v = value(&a);
         assert_eq!(v["base"], "HEAD");
         assert_eq!(v["breaking"], 1, "{v}");
-        assert_eq!((v["advisory"].as_u64(), v["models"].as_array().map(Vec::len)), (Some(0), Some(0)), "{v}");
+        assert_eq!(
+            (v["advisory"].as_u64(), v["models"].as_array().map(Vec::len)),
+            (Some(0), Some(0)),
+            "{v}"
+        );
         assert!(v["absence"].is_null(), "{v}");
         let c = &v["schemas"][0]["changes"][0];
         assert_eq!(
@@ -258,9 +307,17 @@ mod tests {
             format!("{ORDERS_V1}                  currency:\n                    type: string\n"),
         )
         .expect("write v3");
-        let all = value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("compatible"));
-        assert_eq!((all["breaking"].as_u64(), all["schemas"][0]["status"].as_str()), (Some(0), Some("compatible")));
-        let only = value(&rev_answer(repo, "HEAD", "full", true, None, "fact").expect("breaking only"));
+        let all =
+            value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("compatible"));
+        assert_eq!(
+            (
+                all["breaking"].as_u64(),
+                all["schemas"][0]["status"].as_str()
+            ),
+            (Some(0), Some("compatible"))
+        );
+        let only =
+            value(&rev_answer(repo, "HEAD", "full", true, None, "fact").expect("breaking only"));
         assert_eq!(only["schemas"], serde_json::json!([]), "{only}");
         assert_eq!(only["absence"]["reason"], "no_match", "{only}");
     }
@@ -280,8 +337,11 @@ mod tests {
         std::fs::create_dir_all(&web).expect("client dir");
         let gitconfig = root.join("gitconfig");
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
-        std::fs::write(top.join("services/api/pyproject.toml"), "[project]\nname = \"api\"\n")
-            .expect("write pyproject");
+        std::fs::write(
+            top.join("services/api/pyproject.toml"),
+            "[project]\nname = \"api\"\n",
+        )
+        .expect("write pyproject");
         std::fs::write(
             top.join("services/api/app.py"),
             "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/orders\")\ndef orders():\n    return []\n",
@@ -299,20 +359,40 @@ mod tests {
 
         let repo = top.to_str().expect("utf-8");
         let clients = [root.join("client").to_str().expect("utf-8").to_string()];
-        let v = value(&rev_answer(repo, "HEAD", "backward", false, Some(&clients), "fact").expect("answer"));
+        let v = value(
+            &rev_answer(repo, "HEAD", "backward", false, Some(&clients), "fact").expect("answer"),
+        );
         assert_eq!(v["breaking"], 1, "{v}");
         let o = &v["orphaned_clients"][0];
         assert_eq!(
-            (o["client_qname"].as_str(), o["category"].as_str(), o["reason"].as_str(), o["file"].as_str()),
-            (Some("endpoint:GET:/orders"), Some("HTTP_CALLS"), Some("target_removed"), Some("web/client.py")),
+            (
+                o["client_qname"].as_str(),
+                o["category"].as_str(),
+                o["reason"].as_str(),
+                o["file"].as_str()
+            ),
+            (
+                Some("endpoint:GET:/orders"),
+                Some("HTTP_CALLS"),
+                Some("target_removed"),
+                Some("web/client.py")
+            ),
             "{v}"
         );
-        let alone = value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("alone"));
+        let alone =
+            value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("alone"));
         assert_eq!(alone["orphaned_clients"], serde_json::json!([]), "{alone}");
-        let none = value(&rev_answer(repo, "HEAD", "backward", false, Some(&[]), "fact").expect("empty list"));
-        assert_eq!(none["orphaned_clients"], serde_json::json!([]), "an empty list is no client: {none}");
+        let none = value(
+            &rev_answer(repo, "HEAD", "backward", false, Some(&[]), "fact").expect("empty list"),
+        );
+        assert_eq!(
+            none["orphaned_clients"],
+            serde_json::json!([]),
+            "an empty list is no client: {none}"
+        );
         let missing = ["/nonexistent/cc8c-client".to_string()];
-        let err = rev_answer(repo, "HEAD", "backward", false, Some(&missing), "fact").expect_err("no such client");
+        let err = rev_answer(repo, "HEAD", "backward", false, Some(&missing), "fact")
+            .expect_err("no such client");
         assert_eq!(err, "not a directory: /nonexistent/cc8c-client");
     }
 }

@@ -34,7 +34,12 @@ fn chain(n: usize) -> (MergedGraph, Vec<NodeId>) {
         .collect();
     let nodes = ids
         .iter()
-        .map(|&id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] })
+        .map(|&id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        })
         .collect();
     let edges = ids
         .windows(2)
@@ -66,10 +71,16 @@ fn blast_radius_forward_40k_chain() {
     let hits = m.blast_radius(&[ids[0]], Reach::Forward, usize::MAX, &CODE_TABLES);
     let took = t.elapsed();
     assert_eq!(hits.len(), N - 1);
-    let last = hits.iter().find(|h| h.id == ids[N - 1]).expect("the chain's tail is in the radius");
+    let last = hits
+        .iter()
+        .find(|h| h.id == ids[N - 1])
+        .expect("the chain's tail is in the radius");
     assert_eq!(last.depth, N - 1, "depth is the hop count along the chain");
     assert_eq!(last.reason, edge_category::CALLS);
-    assert!(took < BUDGET, "blast_radius over a {N}-node chain took {took:?} (budget {BUDGET:?})");
+    assert!(
+        took < BUDGET,
+        "blast_radius over a {N}-node chain took {took:?} (budget {BUDGET:?})"
+    );
 }
 
 #[test]
@@ -77,8 +88,11 @@ fn blast_radius_depth_and_direction_on_a_short_chain() {
     // n0 -> n1 -> n2 -> n3 -> n4: from n2, depth 1 reaches one hop each way.
     let (m, ids) = chain(5);
     let depth_of = |reach, depth| {
-        let mut got: Vec<(NodeId, usize)> =
-            m.blast_radius(&[ids[2]], reach, depth, &CODE_TABLES).iter().map(|h| (h.id, h.depth)).collect();
+        let mut got: Vec<(NodeId, usize)> = m
+            .blast_radius(&[ids[2]], reach, depth, &CODE_TABLES)
+            .iter()
+            .map(|h| (h.id, h.depth))
+            .collect();
         got.sort_by_key(|(id, _)| id.0);
         got
     };
@@ -88,10 +102,16 @@ fn blast_radius_depth_and_direction_on_a_short_chain() {
     };
     assert_eq!(depth_of(Reach::Forward, 1), vec![(ids[3], 1)]);
     assert_eq!(depth_of(Reach::Backward, 1), vec![(ids[1], 1)]);
-    assert_eq!(depth_of(Reach::Both, 1), sorted(vec![(ids[1], 1), (ids[3], 1)]));
+    assert_eq!(
+        depth_of(Reach::Both, 1),
+        sorted(vec![(ids[1], 1), (ids[3], 1)])
+    );
     assert_eq!(
         depth_of(Reach::Both, usize::MAX),
         sorted(vec![(ids[0], 2), (ids[1], 1), (ids[3], 1), (ids[4], 2)])
     );
-    assert!(depth_of(Reach::Forward, 0).is_empty(), "depth 0 reaches nothing");
+    assert!(
+        depth_of(Reach::Forward, 0).is_empty(),
+        "depth 0 reaches nothing"
+    );
 }

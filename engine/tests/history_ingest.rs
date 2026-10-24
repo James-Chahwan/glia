@@ -11,7 +11,9 @@ use std::path::Path;
 
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::profile::CODE_TABLES;
-use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history};
+use glia_code_domain::snapshots::{
+    BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history,
+};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Confidence, Edge, NodeId};
 use glia_engine::{
@@ -29,15 +31,27 @@ const T1: i64 = 1_767_225_600;
 const T2: i64 = 1_767_312_000;
 
 fn file(p: &str, a: u32) -> HistoryFile {
-    HistoryFile { p: p.to_string(), a: Some(a), d: Some(0), from: None }
+    HistoryFile {
+        p: p.to_string(),
+        a: Some(a),
+        d: Some(0),
+        from: None,
+    }
 }
 
 fn renamed(p: &str, from: &str, a: u32) -> HistoryFile {
-    HistoryFile { from: Some(from.to_string()), ..file(p, a) }
+    HistoryFile {
+        from: Some(from.to_string()),
+        ..file(p, a)
+    }
 }
 
 fn commit(n: usize, t: i64, files: Vec<HistoryFile>) -> HistoryCommit {
-    HistoryCommit { c: format!("{n:02}{}", "0".repeat(38)), t, files }
+    HistoryCommit {
+        c: format!("{n:02}{}", "0".repeat(38)),
+        t,
+        files,
+    }
 }
 
 /// The fixture's history, newest first: c alone; a+b three times; all three
@@ -45,9 +59,21 @@ fn commit(n: usize, t: i64, files: Vec<HistoryFile>) -> HistoryCommit {
 fn fixture_commits() -> Vec<HistoryCommit> {
     let mut out = vec![commit(5, T1 + 4 * 86_400, vec![file("svc/c.py", 1)])];
     for i in (2..=4).rev() {
-        out.push(commit(i, T1 + (i as i64 - 1) * 86_400, vec![file("svc/a.py", 1), file("svc/b.py", 1)]));
+        out.push(commit(
+            i,
+            T1 + (i as i64 - 1) * 86_400,
+            vec![file("svc/a.py", 1), file("svc/b.py", 1)],
+        ));
     }
-    out.push(commit(1, T1, vec![file("svc/a.py", 2), file("svc/b.py", 2), file("svc/c.py", 2)]));
+    out.push(commit(
+        1,
+        T1,
+        vec![
+            file("svc/a.py", 2),
+            file("svc/b.py", 2),
+            file("svc/c.py", 2),
+        ],
+    ));
     out
 }
 
@@ -55,15 +81,26 @@ fn fixture_commits() -> Vec<HistoryCommit> {
 fn tree(extra: &[(&str, &str)]) -> tempfile::TempDir {
     let d = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(d.path().join("svc")).unwrap();
-    for (p, text) in [("svc/a.py", A_PY), ("svc/b.py", B_PY), ("svc/c.py", C_PY)].iter().chain(extra) {
+    for (p, text) in [("svc/a.py", A_PY), ("svc/b.py", B_PY), ("svc/c.py", C_PY)]
+        .iter()
+        .chain(extra)
+    {
         std::fs::write(d.path().join(p), text).unwrap();
     }
     d
 }
 
 fn snapshot(root: &Path, commits: &[HistoryCommit], blame: &[BlameFile]) {
-    let head = commits.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
-    write_history(root, HistoryMeta::new(head, 2000, None, String::new()), commits, blame).expect("write snapshot");
+    let head = commits
+        .first()
+        .map_or_else(|| "0".repeat(40), |c| c.c.clone());
+    write_history(
+        root,
+        HistoryMeta::new(head, 2000, None, String::new()),
+        commits,
+        blame,
+    )
+    .expect("write snapshot");
 }
 
 fn drop_snapshot(root: &Path) {
@@ -85,7 +122,10 @@ fn id_of(m: &MergedGraph, qname: &str) -> NodeId {
 }
 
 fn qname(m: &MergedGraph, id: NodeId) -> String {
-    m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+    m.graphs
+        .iter()
+        .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+        .unwrap_or_default()
 }
 
 /// The ATTN cell payloads of `qname`, parsed.
@@ -111,11 +151,16 @@ fn one_attn(m: &MergedGraph, qname: &str) -> serde_json::Value {
 }
 
 fn cochanges(m: &MergedGraph) -> Vec<&Edge> {
-    m.all_edges().filter(|e| e.category == edge_category::CO_CHANGES).collect()
+    m.all_edges()
+        .filter(|e| e.category == edge_category::CO_CHANGES)
+        .collect()
 }
 
 fn cochange_pairs(m: &MergedGraph) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = cochanges(m).iter().map(|e| (qname(m, e.from), qname(m, e.to))).collect();
+    let mut out: Vec<(String, String)> = cochanges(m)
+        .iter()
+        .map(|e| (qname(m, e.from), qname(m, e.to)))
+        .collect();
     out.sort();
     out
 }
@@ -128,11 +173,17 @@ fn fixture_graph_matches_the_key() {
     let m = build(&root);
     let a = one_attn(&m, "svc::a");
     assert_eq!(a["source"], "git");
-    assert_eq!((a["commits"].as_u64(), a["lines_added"].as_u64()), (Some(4), Some(5)));
+    assert_eq!(
+        (a["commits"].as_u64(), a["lines_added"].as_u64()),
+        (Some(4), Some(5))
+    );
     assert_eq!(a["head"], "c50000000000");
     assert_eq!(one_attn(&m, "svc::c")["commits"], 2);
     assert_eq!(one_attn(&m, "svc::a::a")["source"], "git-blame");
-    assert_eq!(cochange_pairs(&m), [("svc::a".to_string(), "svc::b".to_string())]);
+    assert_eq!(
+        cochange_pairs(&m),
+        [("svc::a".to_string(), "svc::b".to_string())]
+    );
 }
 
 /// a.py is in 4 commits (1+1+1+2 lines), c.py in 2; every payload is compact
@@ -163,8 +214,14 @@ fn module_attn_counts() {
         )
     );
     let c = one_attn(&m, "svc::c");
-    assert_eq!((c["commits"].as_u64(), c["lines_added"].as_u64()), (Some(2), Some(3)));
-    assert_eq!((c["first"].as_i64(), c["last"].as_i64()), (Some(T1), Some(T1 + 4 * 86_400)));
+    assert_eq!(
+        (c["commits"].as_u64(), c["lines_added"].as_u64()),
+        (Some(2), Some(3))
+    );
+    assert_eq!(
+        (c["first"].as_i64(), c["last"].as_i64()),
+        (Some(T1), Some(T1 + 4 * 86_400))
+    );
     // No blame rows: no symbol ATTN.
     assert!(attn(&m, "svc::a::a").is_empty());
 }
@@ -176,15 +233,25 @@ fn rename_accrues_to_current_path() {
     let d = tree(&[("svc/c2.py", C_PY)]);
     std::fs::remove_file(d.path().join("svc/c.py")).unwrap();
     let commits = vec![
-        commit(3, T1 + 2 * 86_400, vec![renamed("svc/c2.py", "svc/c.py", 0)]),
+        commit(
+            3,
+            T1 + 2 * 86_400,
+            vec![renamed("svc/c2.py", "svc/c.py", 0)],
+        ),
         commit(2, T1 + 86_400, vec![file("svc/c.py", 1)]),
         commit(1, T1, vec![file("svc/c.py", 2), file("svc/a.py", 2)]),
     ];
     snapshot(d.path(), &commits, &[]);
     let m = build(d.path());
     let c2 = one_attn(&m, "svc::c2");
-    assert_eq!((c2["commits"].as_u64(), c2["lines_added"].as_u64()), (Some(3), Some(3)));
-    assert_eq!((c2["first"].as_i64(), c2["last"].as_i64()), (Some(T1), Some(T1 + 2 * 86_400)));
+    assert_eq!(
+        (c2["commits"].as_u64(), c2["lines_added"].as_u64()),
+        (Some(3), Some(3))
+    );
+    assert_eq!(
+        (c2["first"].as_i64(), c2["last"].as_i64()),
+        (Some(T1), Some(T1 + 2 * 86_400))
+    );
     assert_eq!(one_attn(&m, "svc::a")["commits"], 1);
 }
 
@@ -194,15 +261,27 @@ fn rename_accrues_to_current_path() {
 fn blame_symbol_attn() {
     let fg = "def f():\n    return 1\n\n\ndef g():\n    return 2\n";
     let d = tree(&[("svc/fg.py", fg)]);
-    let commits = vec![commit(2, T2, vec![file("svc/fg.py", 1)]), commit(1, T1, vec![file("svc/fg.py", 6)])];
-    let blame = vec![BlameFile { p: "svc/fg.py".into(), runs: vec![[1, 5, T1], [6, 6, T2]] }];
+    let commits = vec![
+        commit(2, T2, vec![file("svc/fg.py", 1)]),
+        commit(1, T1, vec![file("svc/fg.py", 6)]),
+    ];
+    let blame = vec![BlameFile {
+        p: "svc/fg.py".into(),
+        runs: vec![[1, 5, T1], [6, 6, T2]],
+    }];
     snapshot(d.path(), &commits, &blame);
     let m = build(d.path());
     let f = one_attn(&m, "svc::fg::f");
     assert_eq!(f["source"], "git-blame");
-    assert_eq!((f["span_changes"].as_u64(), f["last"].as_i64()), (Some(1), Some(T1)));
+    assert_eq!(
+        (f["span_changes"].as_u64(), f["last"].as_i64()),
+        (Some(1), Some(T1))
+    );
     let g = one_attn(&m, "svc::fg::g");
-    assert_eq!((g["span_changes"].as_u64(), g["last"].as_i64()), (Some(2), Some(T2)));
+    assert_eq!(
+        (g["span_changes"].as_u64(), g["last"].as_i64()),
+        (Some(2), Some(T2))
+    );
     assert_eq!(g["head"], "020000000000");
     // A file blame does not cover gives its symbols nothing.
     assert!(attn(&m, "svc::a::a").is_empty());
@@ -225,19 +304,36 @@ fn cochange_edge_above_support() {
     let edges = cochanges(&m);
     assert_eq!(edges.len(), 1, "{:?}", cochange_pairs(&m));
     let e = edges[0];
-    assert_eq!((qname(&m, e.from).as_str(), qname(&m, e.to).as_str()), ("svc::a", "svc::b"));
+    assert_eq!(
+        (qname(&m, e.from).as_str(), qname(&m, e.to).as_str()),
+        ("svc::a", "svc::b")
+    );
     assert_eq!(e.confidence, Confidence::Weak);
-    let cell = e.cells.iter().find(|c| c.kind == cell_type::ATTN).expect("edge ATTN");
-    assert_eq!(cell.payload, CellPayload::Json(r#"{"cochanges":4,"ratio_permille":1000,"window_commits":5}"#.into()));
+    let cell = e
+        .cells
+        .iter()
+        .find(|c| c.kind == cell_type::ATTN)
+        .expect("edge ATTN");
+    assert_eq!(
+        cell.payload,
+        CellPayload::Json(r#"{"cochanges":4,"ratio_permille":1000,"window_commits":5}"#.into())
+    );
     let ev = Evidence::of(e).expect("evidence");
     assert_eq!(ev.emitter, "history:cochange");
     assert_eq!(ev.file.as_deref(), Some(".glia/history-snapshot/meta.json"));
     assert_eq!(ev.basis, Basis::File);
 
-    let no_overlay = generate_one_opts(&d.path().to_string_lossy(), false, &BuildOptions::default().with_overlay(false))
-        .expect("build")
-        .merged;
-    assert_eq!(cochange_pairs(&no_overlay), [("svc::a".to_string(), "svc::b".to_string())]);
+    let no_overlay = generate_one_opts(
+        &d.path().to_string_lossy(),
+        false,
+        &BuildOptions::default().with_overlay(false),
+    )
+    .expect("build")
+    .merged;
+    assert_eq!(
+        cochange_pairs(&no_overlay),
+        [("svc::a".to_string(), "svc::b".to_string())]
+    );
 }
 
 /// a + c once, a + b twice: below support (3), no edge at all.
@@ -264,12 +360,23 @@ fn mass_commit_ignored() {
     let extra: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), body)).collect();
     let d = tree(&extra);
     let commits_over = |files: &[String]| -> Vec<HistoryCommit> {
-        (1..=3).rev().map(|i| commit(i, T1 + i as i64, files.iter().map(|p| file(p, 1)).collect())).collect()
+        (1..=3)
+            .rev()
+            .map(|i| commit(i, T1 + i as i64, files.iter().map(|p| file(p, 1)).collect()))
+            .collect()
     };
     snapshot(d.path(), &commits_over(&names), &[]);
     let m = build(d.path());
-    assert!(cochanges(&m).is_empty(), "a 31-file commit paired {} modules", cochanges(&m).len());
-    assert_eq!(one_attn(&m, "svc::m30")["commits"], 3, "a mass commit still counts as churn");
+    assert!(
+        cochanges(&m).is_empty(),
+        "a 31-file commit paired {} modules",
+        cochanges(&m).len()
+    );
+    assert_eq!(
+        one_attn(&m, "svc::m30")["commits"],
+        3,
+        "a mass commit still counts as churn"
+    );
 
     snapshot(d.path(), &commits_over(&names[..30]), &[]);
     let m = build(d.path());
@@ -287,11 +394,22 @@ fn cochange_is_not_carried() {
     let main = "from svc.a import a\n\n\ndef main():\n    return a()\n";
     let d = tree(&[("svc/main.py", main)]);
     std::fs::write(d.path().join("svc/a.py"), a).unwrap();
-    let commits: Vec<HistoryCommit> =
-        (1..=4).rev().map(|i| commit(i, T1 + i as i64, vec![file("svc/a.py", 1), file("svc/c.py", 1)])).collect();
+    let commits: Vec<HistoryCommit> = (1..=4)
+        .rev()
+        .map(|i| {
+            commit(
+                i,
+                T1 + i as i64,
+                vec![file("svc/a.py", 1), file("svc/c.py", 1)],
+            )
+        })
+        .collect();
     snapshot(d.path(), &commits, &[]);
     let with = build(d.path());
-    assert_eq!(cochange_pairs(&with), [("svc::a".to_string(), "svc::c".to_string())]);
+    assert_eq!(
+        cochange_pairs(&with),
+        [("svc::a".to_string(), "svc::c".to_string())]
+    );
     drop_snapshot(d.path());
     let without = build(d.path());
     assert!(cochanges(&without).is_empty());
@@ -300,18 +418,30 @@ fn cochange_is_not_carried() {
         let radius = |m: &MergedGraph| -> Vec<(String, &'static str)> {
             let answer = blast_radius(m, &[q], &BlastOptions::default());
             assert!(answer.unresolved.is_empty(), "{q} resolves");
-            let mut rows: Vec<(String, &'static str)> =
-                answer.results.into_iter().map(|r| (r.qname, r.reason)).collect();
+            let mut rows: Vec<(String, &'static str)> = answer
+                .results
+                .into_iter()
+                .map(|r| (r.qname, r.reason))
+                .collect();
             rows.sort();
             rows
         };
         let got = radius(&with);
-        assert!(got.iter().all(|(_, why)| *why != "CO_CHANGES"), "{q}: {got:?}");
+        assert!(
+            got.iter().all(|(_, why)| *why != "CO_CHANGES"),
+            "{q}: {got:?}"
+        );
         assert_eq!(got, radius(&without), "{q}: blast radius moved");
     }
 
-    let mut live_with: Vec<u64> = entrypoint_reachable(&with).into_iter().map(|id| id.0).collect();
-    let mut live_without: Vec<u64> = entrypoint_reachable(&without).into_iter().map(|id| id.0).collect();
+    let mut live_with: Vec<u64> = entrypoint_reachable(&with)
+        .into_iter()
+        .map(|id| id.0)
+        .collect();
+    let mut live_without: Vec<u64> = entrypoint_reachable(&without)
+        .into_iter()
+        .map(|id| id.0)
+        .collect();
     live_with.sort_unstable();
     live_without.sort_unstable();
     assert_eq!(live_with, live_without, "liveness moved");
@@ -320,9 +450,17 @@ fn cochange_is_not_carried() {
     for preset in [None, Some("repair"), Some("review"), Some("onboard")] {
         let config = CODE_TABLES.activation_config(preset);
         let scores = |m: &MergedGraph| -> Vec<(u64, u64)> {
-            m.activate(&seeds, &config).scores.iter().map(|(id, s)| (id.0, s.to_bits())).collect()
+            m.activate(&seeds, &config)
+                .scores
+                .iter()
+                .map(|(id, s)| (id.0, s.to_bits()))
+                .collect()
         };
-        assert_eq!(scores(&with), scores(&without), "preset {preset:?}: activation moved");
+        assert_eq!(
+            scores(&with),
+            scores(&without),
+            "preset {preset:?}: activation moved"
+        );
     }
 }
 
@@ -330,7 +468,10 @@ fn cochange_is_not_carried() {
 #[test]
 fn history_builds_are_byte_identical() {
     let d = tree(&[]);
-    let blame = vec![BlameFile { p: "svc/a.py".into(), runs: vec![[1, 2, T1]] }];
+    let blame = vec![BlameFile {
+        p: "svc/a.py".into(),
+        runs: vec![[1, 2, T1]],
+    }];
     snapshot(d.path(), &fixture_commits(), &blame);
     let out = tempfile::tempdir().expect("tempdir");
     let bytes = |tag: &str| -> Vec<(String, Vec<u8>)> {
@@ -341,7 +482,12 @@ fn history_builds_are_byte_identical() {
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect();
         files.sort();
         files
@@ -354,5 +500,9 @@ fn history_builds_are_byte_identical() {
     // The snapshot is in the graph at all: the module kind of a is intact.
     let m = build(d.path());
     let a = id_of(&m, "svc::a");
-    assert!(m.graphs.iter().any(|g| g.nav.kind_by_id.get(&a) == Some(&node_kind::MODULE)));
+    assert!(
+        m.graphs
+            .iter()
+            .any(|g| g.nav.kind_by_id.get(&a) == Some(&node_kind::MODULE))
+    );
 }

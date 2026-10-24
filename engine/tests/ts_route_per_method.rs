@@ -22,7 +22,10 @@ fn build() -> MergedGraph {
         "{}/../bench/substrate-gap/fixtures/ts-route-per-method",
         env!("CARGO_MANIFEST_DIR")
     );
-    let dirs: Vec<String> = ["web", "server"].iter().map(|d| format!("{root}/{d}")).collect();
+    let dirs: Vec<String> = ["web", "server"]
+        .iter()
+        .map(|d| format!("{root}/{d}"))
+        .collect();
     generate_many(&dirs).expect("fixture builds").merged
 }
 
@@ -68,11 +71,20 @@ fn ts_routes_are_per_method_located_and_any_for_agnostic_registrations() {
     // One node per (method, path); the path-only shape is gone and `ALL` is
     // never a method token.
     let routes = route_qnames(&m);
-    for q in ["GET /users", "POST /users", "GET /users/:id", "DELETE /users/:id", "ANY /health", "ANY /api/status"] {
+    for q in [
+        "GET /users",
+        "POST /users",
+        "GET /users/:id",
+        "DELETE /users/:id",
+        "ANY /health",
+        "ANY /api/status",
+    ] {
         assert!(routes.contains(q), "missing ROUTE `{q}` in {routes:?}");
     }
     assert!(
-        !routes.iter().any(|q| q.starts_with("route:") || q.starts_with("ALL ")),
+        !routes
+            .iter()
+            .any(|q| q.starts_with("route:") || q.starts_with("ALL ")),
         "{routes:?}"
     );
 

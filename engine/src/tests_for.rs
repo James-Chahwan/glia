@@ -515,10 +515,18 @@ fn rev_seeds(rev: &crate::delta::RevDelta) -> Vec<NodeId> {
             ids.push(id);
         }
     }
-    for k in d.added_edges.iter().filter(|k| walked(&new, &new_fn_tests, k)) {
+    for k in d
+        .added_edges
+        .iter()
+        .filter(|k| walked(&new, &new_fn_tests, k))
+    {
         ids.extend([k.from, k.to]);
     }
-    for k in d.removed_edges.iter().filter(|k| walked(&old, &old_fn_tests, k)) {
+    for k in d
+        .removed_edges
+        .iter()
+        .filter(|k| walked(&old, &old_fn_tests, k))
+    {
         for end in [k.from, k.to] {
             ids.push(moved_to.get(&end).copied().unwrap_or(end));
         }
@@ -1071,7 +1079,12 @@ impl Signals {
             .collect();
         for (qname, seed) in seeds {
             for (module, below) in idx.module_chain(*seed) {
-                for &nb in self.cochange.get(&module).into_iter().flat_map(BTreeMap::keys) {
+                for &nb in self
+                    .cochange
+                    .get(&module)
+                    .into_iter()
+                    .flat_map(BTreeMap::keys)
+                {
                     let nb = NodeId(nb);
                     if idx.kind.get(&nb) != Some(&node_kind::MODULE)
                         || !idx.fixture.contains(&nb)
@@ -1111,10 +1124,14 @@ impl Signals {
         if self.failed.contains(&test) || (is_module && self.failing_modules.contains(&test)) {
             out.push(FAILED_LAST_RUN);
         }
-        if seed_ids.iter().any(|s| self.implicated.contains(&NodeId(*s))) {
+        if seed_ids
+            .iter()
+            .any(|s| self.implicated.contains(&NodeId(*s)))
+        {
             out.push(SEED_ON_FAILING_TRACE);
         }
-        let test_modules: Vec<NodeId> = idx.module_chain(test).into_iter().map(|(m, _)| m).collect();
+        let test_modules: Vec<NodeId> =
+            idx.module_chain(test).into_iter().map(|(m, _)| m).collect();
         let mut cochange = false;
         let mut best: Option<u32> = None;
         for &seed in seed_ids {
@@ -1357,14 +1374,32 @@ impl WalkClasses {
             .into_iter()
             .map(|(rep, ids)| {
                 let display = view.display(NodeId(rep));
-                let cases: Vec<NodeId> = ids.into_iter().map(NodeId).filter(|&m| idx.is_case(m)).collect();
+                let cases: Vec<NodeId> = ids
+                    .into_iter()
+                    .map(NodeId)
+                    .filter(|&m| idx.is_case(m))
+                    .collect();
                 let shown = if cases.contains(&display) {
                     Some(display)
                 } else {
                     cases.into_iter().min_by(|&a, &b| {
                         let (la, lb) = (loc.locate(a), loc.locate(b));
-                        (la.file.is_none(), &la.file, la.line.is_none(), la.line, &la.qname, a.0)
-                            .cmp(&(lb.file.is_none(), &lb.file, lb.line.is_none(), lb.line, &lb.qname, b.0))
+                        (
+                            la.file.is_none(),
+                            &la.file,
+                            la.line.is_none(),
+                            la.line,
+                            &la.qname,
+                            a.0,
+                        )
+                            .cmp(&(
+                                lb.file.is_none(),
+                                &lb.file,
+                                lb.line.is_none(),
+                                lb.line,
+                                &lb.qname,
+                                b.0,
+                            ))
                     })
                 };
                 (rep, shown)

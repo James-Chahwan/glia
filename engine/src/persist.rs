@@ -106,7 +106,11 @@ impl LoadError {
         Self {
             reason: format!("{}: {reason}", dir.display()),
             needs_rebuild,
-            advice: if needs_rebuild { "rebuild the graph" } else { "" },
+            advice: if needs_rebuild {
+                "rebuild the graph"
+            } else {
+                ""
+            },
         }
     }
 
@@ -158,10 +162,16 @@ pub fn layout_meta(
                 relative_root(dir, root)
                     .unwrap_or_else(|| lenient_absolute(root).to_string_lossy().into_owned())
             }),
-            rev: roots.get(&id).and_then(|root| crate::git_rev::head_commit(Path::new(root))),
+            rev: roots
+                .get(&id)
+                .and_then(|root| crate::git_rev::head_commit(Path::new(root))),
         })
         .collect();
-    LayoutMeta { repos, parse_errors: parse_errors.to_vec(), code_spans_unresolved: 0 }
+    LayoutMeta {
+        repos,
+        parse_errors: parse_errors.to_vec(),
+        code_spans_unresolved: 0,
+    }
 }
 
 /// Write `merged` and `meta` as a sharded layout at `dir` (created if missing;
@@ -214,7 +224,14 @@ pub fn default_layout_dir(repo: &Path) -> PathBuf {
 /// (`cli`, `py`) in the markers and the error text. Errors only when the
 /// layout itself cannot be written; a failed orphan removal is a warning.
 pub fn persist_result(r: &GenerateResult, dir: &Path, writer: &str) -> Result<(), String> {
-    persist_graph(&r.merged, &r.repo_labels, &r.repo_roots, &r.parse_errors, dir, writer)
+    persist_graph(
+        &r.merged,
+        &r.repo_labels,
+        &r.repo_roots,
+        &r.parse_errors,
+        dir,
+        writer,
+    )
 }
 
 /// [`persist_result`] over borrowed parts, for a caller that holds the graph
@@ -265,8 +282,12 @@ pub fn persist_graph(
     }
     let meta = layout_meta(labels, roots, parse_errors, dir);
     let manifest = write_layout(merged, &meta, dir, writer)?;
-    let live: BTreeSet<String> =
-        manifest.shards.iter().chain(manifest.cross.as_ref()).map(|e| e.path.clone()).collect();
+    let live: BTreeSet<String> = manifest
+        .shards
+        .iter()
+        .chain(manifest.cross.as_ref())
+        .map(|e| e.path.clone())
+        .collect();
     let bytes: u64 = live
         .iter()
         .filter_map(|p| std::fs::metadata(dir.join(p)).ok())
@@ -312,7 +333,10 @@ fn is_shard_name(name: &str) -> bool {
     if name == CROSS_STACK_NAME {
         return true;
     }
-    let Some(stem) = name.strip_prefix("repo-").and_then(|n| n.strip_suffix(".gmap")) else {
+    let Some(stem) = name
+        .strip_prefix("repo-")
+        .and_then(|n| n.strip_suffix(".gmap"))
+    else {
         return false;
     };
     let mut parts = stem.splitn(2, '-');
@@ -327,9 +351,15 @@ fn manifest_paths(dir: &Path) -> Option<BTreeSet<String>> {
     let bytes = std::fs::read(dir.join(MANIFEST_NAME)).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let shards = v.get("shards")?.as_array()?;
-    let mut live: BTreeSet<String> =
-        shards.iter().filter_map(|e| e.get("path")?.as_str().map(str::to_string)).collect();
-    if let Some(p) = v.get("cross").and_then(|c| c.get("path")).and_then(|p| p.as_str()) {
+    let mut live: BTreeSet<String> = shards
+        .iter()
+        .filter_map(|e| e.get("path")?.as_str().map(str::to_string))
+        .collect();
+    if let Some(p) = v
+        .get("cross")
+        .and_then(|c| c.get("path"))
+        .and_then(|p| p.as_str())
+    {
         live.insert(p.to_string());
     }
     Some(live)
@@ -356,12 +386,18 @@ fn remove_orphan_shards(dir: &Path, live: &BTreeSet<String>) {
         match std::fs::remove_file(p) {
             Ok(()) => removed += 1,
             Err(e) => {
-                eprintln!("[gmap] warning: could not remove orphan shard {}: {e}", p.display());
+                eprintln!(
+                    "[gmap] warning: could not remove orphan shard {}: {e}",
+                    p.display()
+                );
             }
         }
     }
     if removed > 0 {
-        eprintln!("[gmap] removed {removed} orphan shard(s) from {}", dir.display());
+        eprintln!(
+            "[gmap] removed {removed} orphan shard(s) from {}",
+            dir.display()
+        );
     }
 }
 
@@ -375,7 +411,9 @@ fn remove_orphan_shards(dir: &Path, live: &BTreeSet<String>) {
 /// roots are unchanged (CD.7c); a span whose file moved, changed or is gone
 /// comes back as its `code_span` JSON (see `glia_store::read_merged_sharded_meta`).
 pub fn load_layout(dir: &Path) -> Result<GenerateResult, LoadError> {
-    read_layout(dir).map(|(r, _)| r).map_err(|e| LoadError::from_store(dir, &e))
+    read_layout(dir)
+        .map(|(r, _)| r)
+        .map_err(|e| LoadError::from_store(dir, &e))
 }
 
 /// [`load_layout`] keeping the store's error, so [`load_or_rebuild`] can take
@@ -401,8 +439,8 @@ fn read_layout(dir: &Path) -> Result<(GenerateResult, usize), StoreError> {
         })
         .collect();
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
+    let total_edges: usize =
+        merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>() + merged.cross_edges.len();
     eprintln!(
         "[gmap] loaded {}: repos={} labeled={} parse_errors={} properties={} pass_undo={}",
         dir.display(),
@@ -497,7 +535,11 @@ pub fn load_or_rebuild(
         )),
         Some(m) if m.build_stamp != BUILD_STAMP => Some(format!(
             "written by another glia build ({})",
-            if m.build_stamp.is_empty() { "no build stamp" } else { m.build_stamp.as_str() }
+            if m.build_stamp.is_empty() {
+                "no build stamp"
+            } else {
+                m.build_stamp.as_str()
+            }
         )),
         Some(_) if roots.iter().flatten().any(|root| is_gmap_stale(dir, root)) => {
             Some("stale: sources changed since the layout was written".to_string())
@@ -533,7 +575,11 @@ fn manifest_roots(dir: &Path, m: &LenientManifest) -> Option<Vec<PathBuf>> {
     }
     m.repos
         .iter()
-        .map(|r| r.root.as_deref().map(|root| lenient_absolute(&dir.join(root))))
+        .map(|r| {
+            r.root
+                .as_deref()
+                .map(|root| lenient_absolute(&dir.join(root)))
+        })
         .collect()
 }
 
@@ -579,7 +625,10 @@ fn rebuild_layout(
         match persist_result(&built, dir, "rebuild") {
             Ok(()) => settle_manifest_mtime(dir, started),
             Err(e) => {
-                eprintln!("[gmap] warning: rebuilt {} but could not write it: {e}", dir.display());
+                eprintln!(
+                    "[gmap] warning: rebuilt {} but could not write it: {e}",
+                    dir.display()
+                );
             }
         }
     }
@@ -592,14 +641,21 @@ fn rebuild_layout(
 /// rebuilds once more, nothing worse.
 fn settle_manifest_mtime(dir: &Path, started: SystemTime) {
     let path = dir.join(MANIFEST_NAME);
-    let older = std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|t| t < started);
+    let older = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t < started);
     if !older {
         return;
     }
-    let set =
-        std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(started));
+    let set = std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(started));
     if let Err(e) = set {
-        eprintln!("[gmap] warning: could not refresh the mtime of {}: {e}", path.display());
+        eprintln!(
+            "[gmap] warning: could not refresh the mtime of {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -622,7 +678,11 @@ fn relative_root(dir: &Path, root: &Path) -> Option<String> {
     if dir_parts.first() != root_parts.first() {
         return None;
     }
-    let common = dir_parts.iter().zip(&root_parts).take_while(|(a, b)| a == b).count();
+    let common = dir_parts
+        .iter()
+        .zip(&root_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
     let mut out: Vec<&str> = Vec::new();
     for c in &dir_parts[common..] {
         match c {
@@ -636,7 +696,11 @@ fn relative_root(dir: &Path, root: &Path) -> Option<String> {
             _ => return None,
         }
     }
-    Some(if out.is_empty() { ".".to_string() } else { out.join("/") })
+    Some(if out.is_empty() {
+        ".".to_string()
+    } else {
+        out.join("/")
+    })
 }
 
 /// `p` absolute and canonical as far as it exists: the deepest existing
@@ -686,14 +750,24 @@ mod tests {
         let dir = repo.join(".glia/graph");
         assert_eq!(relative_root(&dir, &repo).as_deref(), Some("../.."));
         assert_eq!(relative_root(&repo, &repo).as_deref(), Some("."));
-        assert_eq!(relative_root(&repo, &repo.join("src")).as_deref(), Some("src"));
+        assert_eq!(
+            relative_root(&repo, &repo.join("src")).as_deref(),
+            Some("src")
+        );
         let sibling = tmp.path().join("other");
-        assert_eq!(relative_root(&dir, &sibling).as_deref(), Some("../../../other"));
+        assert_eq!(
+            relative_root(&dir, &sibling).as_deref(),
+            Some("../../../other")
+        );
     }
 
     #[test]
     fn shard_names_are_exactly_what_glia_writes() {
-        for n in ["repo-1.gmap", "repo-12576015503297116104-02.gmap", "cross_stack.gmap"] {
+        for n in [
+            "repo-1.gmap",
+            "repo-12576015503297116104-02.gmap",
+            "cross_stack.gmap",
+        ] {
             assert!(is_shard_name(n), "{n}");
         }
         let not_shards = [
@@ -720,12 +794,19 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_self_ignore(tmp.path()).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "rewritten");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "rewritten"
+        );
         std::fs::write(&path, "edited\n").unwrap();
         write_self_ignore(tmp.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SELF_IGNORE);
-        let names: Vec<_> =
-            std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        let names: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
         assert_eq!(names, [".gitignore"], "no staging file left behind");
     }
 
@@ -739,7 +820,10 @@ mod tests {
         )
         .unwrap();
         let live = manifest_paths(tmp.path()).unwrap();
-        assert_eq!(live.into_iter().collect::<Vec<_>>(), ["cross_stack.gmap", "repo-7.gmap"]);
+        assert_eq!(
+            live.into_iter().collect::<Vec<_>>(),
+            ["cross_stack.gmap", "repo-7.gmap"]
+        );
     }
 
     #[test]

@@ -27,10 +27,14 @@ fn fixture_parses() -> Vec<FileParse> {
         .parent()
         .unwrap()
         .join("bench/substrate-gap/fixtures/go-package-multifile-calls");
-    ["cmd/main.go", "internal/store/store.go", "internal/store/load.go"]
-        .iter()
-        .map(|rel| parse(rel, &std::fs::read_to_string(root.join(rel)).unwrap()))
-        .collect()
+    [
+        "cmd/main.go",
+        "internal/store/store.go",
+        "internal/store/load.go",
+    ]
+    .iter()
+    .map(|rel| parse(rel, &std::fs::read_to_string(root.join(rel)).unwrap()))
+    .collect()
 }
 
 fn module(qname: &str) -> NodeId {
@@ -41,11 +45,17 @@ fn func(qname: &str) -> NodeId {
 }
 
 fn has_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) -> bool {
-    g.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
+    g.edges
+        .iter()
+        .any(|e| e.from == from && e.to == to && e.category == category)
 }
 
 fn targets(g: &RepoGraph, from: NodeId, category: EdgeCategoryId) -> Vec<NodeId> {
-    g.edges.iter().filter(|e| e.from == from && e.category == category).map(|e| e.to).collect()
+    g.edges
+        .iter()
+        .filter(|e| e.from == from && e.category == category)
+        .map(|e| e.to)
+        .collect()
 }
 
 /// The fixture: `store.Save()` (in `store.go`, the representative file) is
@@ -59,10 +69,23 @@ fn calls_resolve_across_the_files_of_a_package() {
     let load = func("internal::store::load::Load");
     let helper = func("internal::store::load::helper");
 
-    assert!(has_edge(&g, main, save, edge_category::CALLS), "control: main -> Save");
-    assert!(has_edge(&g, main, load, edge_category::CALLS), "main -> Load in a sibling file");
-    assert!(has_edge(&g, save, helper, edge_category::CALLS), "Save -> helper across files");
-    assert!(g.unresolved_calls.is_empty(), "leftover: {:?}", g.unresolved_calls);
+    assert!(
+        has_edge(&g, main, save, edge_category::CALLS),
+        "control: main -> Save"
+    );
+    assert!(
+        has_edge(&g, main, load, edge_category::CALLS),
+        "main -> Load in a sibling file"
+    );
+    assert!(
+        has_edge(&g, save, helper, edge_category::CALLS),
+        "Save -> helper across files"
+    );
+    assert!(
+        g.unresolved_calls.is_empty(),
+        "leftover: {:?}",
+        g.unresolved_calls
+    );
 
     // One IMPORTS edge, to the file named after the directory.
     assert_eq!(
@@ -83,9 +106,18 @@ fn import_binds_its_own_directory_not_a_same_named_module_elsewhere() {
             "cmd/main.go",
             "package main\n\nimport \"example.com/app/internal/store\"\n\nfunc main() {\n\tstore.Save()\n\tstore.Load()\n}\n",
         ),
-        parse("internal/store/load.go", "package store\n\nfunc Load() string { return \"b\" }\n"),
-        parse("internal/store/save.go", "package store\n\nfunc Save() string { return \"a\" }\n"),
-        parse("legacy/store.go", "package legacy\n\nfunc Save() string { return \"old\" }\n"),
+        parse(
+            "internal/store/load.go",
+            "package store\n\nfunc Load() string { return \"b\" }\n",
+        ),
+        parse(
+            "internal/store/save.go",
+            "package store\n\nfunc Save() string { return \"a\" }\n",
+        ),
+        parse(
+            "legacy/store.go",
+            "package legacy\n\nfunc Save() string { return \"old\" }\n",
+        ),
     ];
     let g = build_go(repo(), parses).unwrap();
     let main = func("cmd::main::main");
@@ -95,9 +127,17 @@ fn import_binds_its_own_directory_not_a_same_named_module_elsewhere() {
     );
     assert_eq!(
         targets(&g, main, edge_category::CALLS),
-        vec![func("internal::store::save::Save"), func("internal::store::load::Load")]
+        vec![
+            func("internal::store::save::Save"),
+            func("internal::store::load::Load")
+        ]
     );
-    assert!(!has_edge(&g, main, func("legacy::store::Save"), edge_category::CALLS));
+    assert!(!has_edge(
+        &g,
+        main,
+        func("legacy::store::Save"),
+        edge_category::CALLS
+    ));
 }
 
 /// `init` never binds (Go allows one per file and forbids calling it), even
@@ -110,8 +150,14 @@ fn init_ambiguous_unexported_and_methods_never_bind() {
     let parses = vec![
         parse("pkg/a.go", "package pkg\n\nfunc init() {}\n\nfunc A() {}\n"),
         parse("pkg/b.go", "package pkg\n\nfunc init() {}\n"),
-        parse("pkg/open_linux.go", "//go:build linux\n\npackage pkg\n\nfunc Open() {}\n"),
-        parse("pkg/open_windows.go", "//go:build windows\n\npackage pkg\n\nfunc Open() {}\n"),
+        parse(
+            "pkg/open_linux.go",
+            "//go:build linux\n\npackage pkg\n\nfunc Open() {}\n",
+        ),
+        parse(
+            "pkg/open_windows.go",
+            "//go:build windows\n\npackage pkg\n\nfunc Open() {}\n",
+        ),
         parse(
             "pkg/status.go",
             "package pkg\n\ntype Status int\n\nfunc (s Status) String() string { return \"\" }\n",
@@ -121,16 +167,25 @@ fn init_ambiguous_unexported_and_methods_never_bind() {
             "package pkg\n\nfunc C() {\n\tinit()\n\tOpen()\n\tString()\n\tA()\n}\n",
         ),
         parse("solo/x.go", "package solo\n\nfunc init() {}\n"),
-        parse("solo/y.go", "package solo\n\nfunc Y() { init() }\n\nfunc hidden() {}\n"),
+        parse(
+            "solo/y.go",
+            "package solo\n\nfunc Y() { init() }\n\nfunc hidden() {}\n",
+        ),
         parse(
             "cmd/main.go",
             "package main\n\nimport \"example.com/app/solo\"\n\nfunc main() { solo.hidden() }\n",
         ),
     ];
     let g = build_go(repo(), parses).unwrap();
-    let inits = [func("pkg::a::init"), func("pkg::b::init"), func("solo::x::init")];
+    let inits = [
+        func("pkg::a::init"),
+        func("pkg::b::init"),
+        func("solo::x::init"),
+    ];
     assert!(
-        !g.edges.iter().any(|e| e.category == edge_category::CALLS && inits.contains(&e.to)),
+        !g.edges
+            .iter()
+            .any(|e| e.category == edge_category::CALLS && inits.contains(&e.to)),
         "no CALLS to any init"
     );
     assert_eq!(
@@ -156,8 +211,15 @@ fn file_bound_import_is_not_widened_to_its_directory() {
     ];
     let g = build_go(repo(), parses).unwrap();
     let main = func("cmd::main::main");
-    assert_eq!(targets(&g, module("cmd::main"), edge_category::IMPORTS), vec![module("a::b")]);
-    assert_eq!(targets(&g, main, edge_category::CALLS), vec![func("a::b::B")], "B as before, no X");
+    assert_eq!(
+        targets(&g, module("cmd::main"), edge_category::IMPORTS),
+        vec![module("a::b")]
+    );
+    assert_eq!(
+        targets(&g, main, edge_category::CALLS),
+        vec![func("a::b::B")],
+        "B as before, no X"
+    );
 }
 
 /// `_test.go` files are built only by `go test`: a test file's bare call
@@ -169,9 +231,18 @@ fn file_bound_import_is_not_widened_to_its_directory() {
 #[test]
 fn test_files_are_seen_only_by_test_files() {
     let parses = vec![
-        parse("store/a_test.go", "package store\n\nfunc TestSave() { Save(); fixture() }\n\nfunc Only() {}\n"),
-        parse("store/export_test.go", "package store\n\nfunc fixture() {}\n\nfunc Exported() {}\n"),
-        parse("store/store.go", "package store\n\nfunc Save() { Only() }\n"),
+        parse(
+            "store/a_test.go",
+            "package store\n\nfunc TestSave() { Save(); fixture() }\n\nfunc Only() {}\n",
+        ),
+        parse(
+            "store/export_test.go",
+            "package store\n\nfunc fixture() {}\n\nfunc Exported() {}\n",
+        ),
+        parse(
+            "store/store.go",
+            "package store\n\nfunc Save() { Only() }\n",
+        ),
         parse(
             "store/zz_ext_test.go",
             "package store_test\n\nimport \"example.com/app/store\"\n\nfunc TestExt() { store.Exported() }\n",
@@ -189,13 +260,26 @@ fn test_files_are_seen_only_by_test_files() {
     let g = build_go(repo(), parses).unwrap();
     assert_eq!(
         targets(&g, func("store::a_test::TestSave"), edge_category::CALLS),
-        vec![func("store::store::Save"), func("store::export_test::fixture")],
+        vec![
+            func("store::store::Save"),
+            func("store::export_test::fixture")
+        ],
         "a test file's bare calls reach test and non-test files"
     );
-    assert!(targets(&g, func("store::store::Save"), edge_category::CALLS).is_empty(), "non-test -> test");
-    assert!(targets(&g, func("cmd::main::main"), edge_category::CALLS).is_empty(), "importer -> test");
+    assert!(
+        targets(&g, func("store::store::Save"), edge_category::CALLS).is_empty(),
+        "non-test -> test"
+    );
+    assert!(
+        targets(&g, func("cmd::main::main"), edge_category::CALLS).is_empty(),
+        "importer -> test"
+    );
     assert_eq!(
-        targets(&g, func("store::zz_ext_test::TestExt"), edge_category::CALLS),
+        targets(
+            &g,
+            func("store::zz_ext_test::TestExt"),
+            edge_category::CALLS
+        ),
         vec![func("store::export_test::Exported")],
         "an external test package sees its directory's export_test.go"
     );
@@ -204,7 +288,11 @@ fn test_files_are_seen_only_by_test_files() {
         vec![module("binlog::sink")]
     );
     assert_eq!(
-        targets(&g, func("binlog::b_end2end_test::TestE"), edge_category::CALLS),
+        targets(
+            &g,
+            func("binlog::b_end2end_test::TestE"),
+            edge_category::CALLS
+        ),
         vec![func("binlog::sink::Write")]
     );
 }
@@ -234,7 +322,10 @@ fn root_package_import_binds_calls() {
             "package app\n\ntype Client struct{}\n\nfunc NewClient() *Client { return &Client{} }\n\n\
              func (c *Client) Invoke() {}\n",
         ),
-        parse("options.go", "package app\n\nfunc WithTimeout(n int) int { return n }\n"),
+        parse(
+            "options.go",
+            "package app\n\nfunc WithTimeout(n int) int { return n }\n",
+        ),
         parse(
             "cmd/main.go",
             "package main\n\nimport \"example.com/app\"\n\nfunc main() {\n\tc := app.NewClient()\n\
@@ -242,12 +333,29 @@ fn root_package_import_binds_calls() {
         ),
     ];
     let g = build_go(repo(), parses).unwrap();
-    assert_eq!(targets(&g, module("cmd::main"), edge_category::IMPORTS), vec![module("client")]);
+    assert_eq!(
+        targets(&g, module("cmd::main"), edge_category::IMPORTS),
+        vec![module("client")]
+    );
     let main = func("cmd::main::main");
-    assert!(has_edge(&g, main, func("client::NewClient"), edge_category::CALLS), "app.NewClient()");
-    assert!(has_edge(&g, main, func("options::WithTimeout"), edge_category::CALLS), "app.WithTimeout(3)");
-    let invoke = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "client::Client::Invoke");
-    assert!(has_edge(&g, main, invoke, edge_category::CALLS), "c.Invoke() on c := app.NewClient()");
+    assert!(
+        has_edge(&g, main, func("client::NewClient"), edge_category::CALLS),
+        "app.NewClient()"
+    );
+    assert!(
+        has_edge(&g, main, func("options::WithTimeout"), edge_category::CALLS),
+        "app.WithTimeout(3)"
+    );
+    let invoke = NodeId::from_parts(
+        GRAPH_TYPE,
+        repo(),
+        node_kind::METHOD,
+        "client::Client::Invoke",
+    );
+    assert!(
+        has_edge(&g, main, invoke, edge_category::CALLS),
+        "c.Invoke() on c := app.NewClient()"
+    );
 }
 
 // ---- DF.15: an un-aliased import binds the package clause -----------------
@@ -274,25 +382,42 @@ fn clause_names_the_dir_binding() {
         .parent()
         .unwrap()
         .join("bench/substrate-gap/fixtures/go-package-clause-imports");
-    let parses = ["cmd/app/main.go", "internal/v2store/store.go", "internal/v2store/store_test.go", "nats.go"]
-        .iter()
-        .map(|rel| {
-            let src = std::fs::read_to_string(root.join(rel)).unwrap();
-            parse_under("github.com/acme/nats.go", rel, &src)
-        })
-        .collect();
+    let parses = [
+        "cmd/app/main.go",
+        "internal/v2store/store.go",
+        "internal/v2store/store_test.go",
+        "nats.go",
+    ]
+    .iter()
+    .map(|rel| {
+        let src = std::fs::read_to_string(root.join(rel)).unwrap();
+        parse_under("github.com/acme/nats.go", rel, &src)
+    })
+    .collect();
     let g = build_go(repo(), parses).unwrap();
     let main = func("cmd::app::main::main");
     assert_eq!(
         targets(&g, module("cmd::app::main"), edge_category::IMPORTS),
         vec![module("nats"), module("internal::v2store::store")]
     );
-    assert!(has_edge(&g, main, func("nats::Connect"), edge_category::CALLS), "nats.Connect(..)");
     assert!(
-        has_edge(&g, main, func("internal::v2store::store::Open"), edge_category::CALLS),
+        has_edge(&g, main, func("nats::Connect"), edge_category::CALLS),
+        "nats.Connect(..)"
+    );
+    assert!(
+        has_edge(
+            &g,
+            main,
+            func("internal::v2store::store::Open"),
+            edge_category::CALLS
+        ),
         "store.Open()"
     );
-    assert!(g.unresolved_calls.is_empty(), "leftover: {:?}", g.unresolved_calls);
+    assert!(
+        g.unresolved_calls.is_empty(),
+        "leftover: {:?}",
+        g.unresolved_calls
+    );
 }
 
 /// An external test package's `package lib_test` clause never names its
@@ -306,12 +431,21 @@ fn test_package_clause_ignored() {
             "lib/v2/a_test.go",
             "package lib_test\n\nimport \"example.com/app/lib/v2\"\n\nfunc TestA() {\n\tlib.A()\n}\n",
         ),
-        parse("cmd/main.go", "package main\n\nimport \"example.com/app/lib/v2\"\n\nfunc main() {\n\tlib.A()\n}\n"),
+        parse(
+            "cmd/main.go",
+            "package main\n\nimport \"example.com/app/lib/v2\"\n\nfunc main() {\n\tlib.A()\n}\n",
+        ),
     ];
     let g = build_go(repo(), parses).unwrap();
     let a = func("lib::v2::a::A");
-    assert!(has_edge(&g, func("cmd::main::main"), a, edge_category::CALLS), "lib.A() from cmd");
-    assert!(has_edge(&g, func("lib::v2::a_test::TestA"), a, edge_category::CALLS), "lib.A() from the x_test");
+    assert!(
+        has_edge(&g, func("cmd::main::main"), a, edge_category::CALLS),
+        "lib.A() from cmd"
+    );
+    assert!(
+        has_edge(&g, func("lib::v2::a_test::TestA"), a, edge_category::CALLS),
+        "lib.A() from the x_test"
+    );
 }
 
 /// Two clauses in one dir (build-tag variants) name no package: an import
@@ -330,7 +464,10 @@ fn conflicting_clauses_fall_back() {
     ];
     let g = build_go(repo(), parses).unwrap();
     let main = func("cmd::main::main");
-    assert!(has_edge(&g, main, func("pkg::multi::a::A"), edge_category::CALLS), "multi.A()");
+    assert!(
+        has_edge(&g, main, func("pkg::multi::a::A"), edge_category::CALLS),
+        "multi.A()"
+    );
     assert!(
         !has_edge(&g, main, func("pkg::multi::b::B"), edge_category::CALLS),
         "alpha.B(): a clause of an ambiguous dir binds nothing"
@@ -344,11 +481,22 @@ fn conflicting_clauses_fall_back() {
 fn main_clause_beside_a_library_is_dropped() {
     let parses = vec![
         parse("tools/v1/make.go", "package gen\n\nfunc Make() {}\n"),
-        parse("tools/v1/generate.go", "//go:build ignore\n\npackage main\n\nfunc main() {}\n"),
-        parse("cmd/main.go", "package main\n\nimport \"example.com/app/tools/v1\"\n\nfunc main() {\n\tgen.Make()\n}\n"),
+        parse(
+            "tools/v1/generate.go",
+            "//go:build ignore\n\npackage main\n\nfunc main() {}\n",
+        ),
+        parse(
+            "cmd/main.go",
+            "package main\n\nimport \"example.com/app/tools/v1\"\n\nfunc main() {\n\tgen.Make()\n}\n",
+        ),
     ];
     let g = build_go(repo(), parses).unwrap();
-    assert!(has_edge(&g, func("cmd::main::main"), func("tools::v1::make::Make"), edge_category::CALLS));
+    assert!(has_edge(
+        &g,
+        func("cmd::main::main"),
+        func("tools::v1::make::Make"),
+        edge_category::CALLS
+    ));
 }
 
 /// An aliased import binds its alias only, its clause or dir name never
@@ -357,7 +505,10 @@ fn main_clause_beside_a_library_is_dropped() {
 fn aliased_import_unchanged() {
     let parses = vec![
         parse("client.go", "package app\n\nfunc Dial() {}\n"),
-        parse("internal/v2store/store.go", "package store\n\nfunc Open() {}\n\nfunc Close() {}\n"),
+        parse(
+            "internal/v2store/store.go",
+            "package store\n\nfunc Open() {}\n\nfunc Close() {}\n",
+        ),
         parse(
             "cmd/main.go",
             "package main\n\nimport (\n\trp \"example.com/app\"\n\tst \"example.com/app/internal/v2store\"\n)\n\n\
@@ -366,13 +517,32 @@ fn aliased_import_unchanged() {
     ];
     let g = build_go(repo(), parses).unwrap();
     let main = func("cmd::main::main");
-    assert!(has_edge(&g, main, func("client::Dial"), edge_category::CALLS), "rp.Dial()");
-    assert!(has_edge(&g, main, func("internal::v2store::store::Open"), edge_category::CALLS), "st.Open()");
     assert!(
-        !has_edge(&g, main, func("internal::v2store::store::Close"), edge_category::CALLS),
+        has_edge(&g, main, func("client::Dial"), edge_category::CALLS),
+        "rp.Dial()"
+    );
+    assert!(
+        has_edge(
+            &g,
+            main,
+            func("internal::v2store::store::Open"),
+            edge_category::CALLS
+        ),
+        "st.Open()"
+    );
+    assert!(
+        !has_edge(
+            &g,
+            main,
+            func("internal::v2store::store::Close"),
+            edge_category::CALLS
+        ),
         "store.Close(): the import is aliased `st`"
     );
-    let dials = targets(&g, main, edge_category::CALLS).iter().filter(|&&t| t == func("client::Dial")).count();
+    let dials = targets(&g, main, edge_category::CALLS)
+        .iter()
+        .filter(|&&t| t == func("client::Dial"))
+        .count();
     assert_eq!(dials, 1, "app.Dial(): the root import is aliased `rp`");
 }
 
@@ -384,7 +554,11 @@ fn aliased_import_unchanged() {
 fn root_package_embed_binds_through_clause() {
     let prefix = "example.com/kit.go";
     let parses = vec![
-        parse_under(prefix, "base.go", "package kit\n\ntype Base struct{}\n\nfunc (b *Base) Hello() {}\n"),
+        parse_under(
+            prefix,
+            "base.go",
+            "package kit\n\ntype Base struct{}\n\nfunc (b *Base) Hello() {}\n",
+        ),
         parse_under(
             prefix,
             "cmd/x.go",
@@ -397,9 +571,17 @@ fn root_package_embed_binds_through_clause() {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "cmd::x::T"),
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "base::Base"),
     );
-    assert!(has_edge(&g, t, base, edge_category::INHERITS_FROM), "T embeds kit.Base");
     assert!(
-        has_edge(&g, method("cmd::x::T::Run"), method("base::Base::Hello"), edge_category::CALLS),
+        has_edge(&g, t, base, edge_category::INHERITS_FROM),
+        "T embeds kit.Base"
+    );
+    assert!(
+        has_edge(
+            &g,
+            method("cmd::x::T::Run"),
+            method("base::Base::Hello"),
+            edge_category::CALLS
+        ),
         "t.Hello() promoted from kit.Base"
     );
 }

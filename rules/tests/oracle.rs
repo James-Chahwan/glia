@@ -85,7 +85,8 @@ fn eval<'s>(text: &str, g: &'s MemSource, o: &Options) -> Evaluation<'s, MemSour
 }
 
 fn rows(ev: &Evaluation<'_, MemSource>, pred: &str) -> Vec<Row> {
-    ev.rows(pred).unwrap_or_else(|e| panic!("rows({pred}): {e}"))
+    ev.rows(pred)
+        .unwrap_or_else(|e| panic!("rows({pred}): {e}"))
 }
 
 fn rendered(ev: &Evaluation<'_, MemSource>, pred: &str) -> Vec<Rendered> {
@@ -97,12 +98,17 @@ fn rendered(ev: &Evaluation<'_, MemSource>, pred: &str) -> Vec<Rendered> {
 
 /// The kind name of `id` (testkit's registry).
 fn kind_name(g: &MemSource, id: NodeId) -> &'static str {
-    g.node_kind(id).and_then(|k| g.tables().registries.kind_name(k)).unwrap_or("?")
+    g.node_kind(id)
+        .and_then(|k| g.tables().registries.kind_name(k))
+        .unwrap_or("?")
 }
 
 /// The nodes of kind `kind`, in node order.
 fn of_kind(g: &MemSource, kind: &str) -> Vec<NodeId> {
-    g.node_ids().into_iter().filter(|id| kind_name(g, *id) == kind).collect()
+    g.node_ids()
+        .into_iter()
+        .filter(|id| kind_name(g, *id) == kind)
+        .collect()
 }
 
 /// Node rows rendered and sorted as `rows()` sorts them: column by column, a node by
@@ -135,7 +141,10 @@ impl Filtered {
             .filter(|(i, e)| cats.contains(&e.category) && g.edge_tier(*i, e) <= level)
             .map(|(_, e)| e.clone())
             .collect();
-        Filtered { nodes: g.node_ids(), edges }
+        Filtered {
+            nodes: g.node_ids(),
+            edges,
+        }
     }
 }
 
@@ -176,11 +185,17 @@ impl Oracle {
                 Level { adj, succ }
             })
             .collect();
-        Oracle { nodes: g.node_ids(), levels }
+        Oracle {
+            nodes: g.node_ids(),
+            levels,
+        }
     }
 
     fn succ(&self, level: Tier, x: NodeId) -> &[NodeId] {
-        self.levels[usize::from(level.level())].succ.get(&x).map_or(&[], Vec::as_slice)
+        self.levels[usize::from(level.level())]
+            .succ
+            .get(&x)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// What `x` reaches in one or more hops at `level`.
@@ -189,7 +204,11 @@ impl Oracle {
         if s.is_empty() {
             return HashSet::new();
         }
-        reachable(&self.levels[usize::from(level.level())].adj, s, Walk::Forward)
+        reachable(
+            &self.levels[usize::from(level.level())].adj,
+            s,
+            Walk::Forward,
+        )
     }
 
     /// The tier of `(x, y)` for every `y` that `x` reaches.
@@ -207,7 +226,12 @@ impl Oracle {
     fn depths(&self, level: Tier, x: NodeId) -> HashMap<NodeId, usize> {
         let s = self.succ(level, x);
         let mut out: HashMap<NodeId, usize> = s.iter().map(|&y| (y, 1)).collect();
-        let walk = bfs(&self.levels[usize::from(level.level())].adj, s, Walk::Forward, usize::MAX);
+        let walk = bfs(
+            &self.levels[usize::from(level.level())].adj,
+            s,
+            Walk::Forward,
+            usize::MAX,
+        );
         for r in walk.reached {
             out.entry(r.id).or_insert(r.depth + 1);
         }
@@ -355,7 +379,11 @@ fn scc_matches_tarjan() {
             }
         }
         assert!(!want.is_empty(), "seed {seed}: no CALLS cycle");
-        let ev = eval(r#"s(x, rep) :- scc(x, rep, "CALLS")."#, &g, &Options::default());
+        let ev = eval(
+            r#"s(x, rep) :- scc(x, rep, "CALLS")."#,
+            &g,
+            &Options::default(),
+        );
         assert_eq!(rendered(&ev, "s"), sorted(&g, want), "seed {seed}");
     }
 }
@@ -385,7 +413,13 @@ fn named(names: &[&str], edges: &[NamedEdge<'_>]) -> MemSource {
         Tier::Heuristic => Confidence::Weak,
     };
     for &(from, to, tier) in edges {
-        g.edge(id(from), id(to), testkit::category_id("CALLS"), strength(tier), tier);
+        g.edge(
+            id(from),
+            id(to),
+            testkit::category_id("CALLS"),
+            strength(tier),
+            tier,
+        );
     }
     g
 }
@@ -393,7 +427,14 @@ fn named(names: &[&str], edges: &[NamedEdge<'_>]) -> MemSource {
 /// Each leaf edge as `from->to tier`.
 fn hops(g: &MemSource, hops: &[EdgeHop]) -> Vec<String> {
     hops.iter()
-        .map(|h| format!("{}->{} {}", g.render_node(h.from), g.render_node(h.to), h.tier.name()))
+        .map(|h| {
+            format!(
+                "{}->{} {}",
+                g.render_node(h.from),
+                g.render_node(h.to),
+                h.tier.name()
+            )
+        })
         .collect()
 }
 
@@ -401,7 +442,12 @@ fn hops(g: &MemSource, hops: &[EdgeHop]) -> Vec<String> {
 fn row_of(ev: &Evaluation<'_, MemSource>, pred: &str, want: &[&str]) -> Row {
     rows(ev, pred)
         .into_iter()
-        .find(|r| r.values.iter().map(|v| ev.render(v)).eq(want.iter().map(|s| s.to_string())))
+        .find(|r| {
+            r.values
+                .iter()
+                .map(|v| ev.render(v))
+                .eq(want.iter().map(|s| s.to_string()))
+        })
         .unwrap_or_else(|| panic!("no {pred}{want:?}"))
 }
 
@@ -419,7 +465,11 @@ fn tier_lattice_fixture() {
             F,
             &["a->b fact", "b->c fact", "c->d fact"],
         ),
-        ([&short[..], &derived[..]].concat(), D, &["a->e derived", "e->d derived"]),
+        (
+            [&short[..], &derived[..]].concat(),
+            D,
+            &["a->e derived", "e->d derived"],
+        ),
         (short.to_vec(), H, &["a->d heuristic"]),
     ];
     let text = format!("{TC}{REACHES}\n");
@@ -433,7 +483,11 @@ fn tier_lattice_fixture() {
                 .explain(&row, &ExplainLimits::default())
                 .unwrap_or_else(|e| panic!("explain {pred}(a, d): {e}"));
             assert_eq!(w.tier, tier, "{pred}");
-            assert_eq!(hops(&g, &w.leaf_edges()), want, "{pred}(a, d) over {edges:?}");
+            assert_eq!(
+                hops(&g, &w.leaf_edges()),
+                want,
+                "{pred}(a, d) over {edges:?}"
+            );
         }
     }
 }
@@ -467,7 +521,11 @@ fn magic_preserves_answers() {
         for (name, text) in [("left", &left), ("right", &right), ("sg", &same_generation)] {
             let on = eval(text, &g, &opts(true));
             let off = eval(text, &g, &opts(false));
-            assert_eq!(on.stats().magic_rewrites, 1, "{name} seed {seed}: no rewrite");
+            assert_eq!(
+                on.stats().magic_rewrites,
+                1,
+                "{name} seed {seed}: no rewrite"
+            );
             assert_eq!(off.stats().magic_rewrites, 0, "{name} seed {seed}");
             let rows_on = rendered(&on, "out");
             assert_eq!(rows_on, rendered(&off, "out"), "{name} seed {seed}");
@@ -484,7 +542,10 @@ fn magic_preserves_answers() {
             }
         }
     }
-    assert!(sg_rows > 0, "the same-generation site answers nothing on any graph");
+    assert!(
+        sg_rows > 0,
+        "the same-generation site answers nothing on any graph"
+    );
 }
 
 #[test]
@@ -511,7 +572,10 @@ dead(f) :- node(f, "FUNCTION"), !live(f).
         assert_eq!(rendered(&ev, "dead"), sorted(&g, dead), "seed {seed}");
         for row in rows(&ev, "dead") {
             let [caveat] = row.absence.as_slice() else {
-                panic!("seed {seed}: one caveat per dead row, got {:?}", row.absence);
+                panic!(
+                    "seed {seed}: one caveat per dead row, got {:?}",
+                    row.absence
+                );
             };
             assert_eq!(caveat.negated, "live/1");
             assert_eq!(caveat.categories, ["CALLS", "USES"]);
@@ -543,8 +607,10 @@ tot(k, sum(i)) :- node(x, k), index(x, i).
             let group = fan.entry(*y).or_insert((0, Tier::Fact));
             *group = (group.0 + 1, group.1.max(*t));
         }
-        let mut want: Vec<Rendered> =
-            fan.into_iter().map(|(y, (n, t))| (vec![g.render_node(y), n.to_string()], t)).collect();
+        let mut want: Vec<Rendered> = fan
+            .into_iter()
+            .map(|(y, (n, t))| (vec![g.render_node(y), n.to_string()], t))
+            .collect();
         want.sort();
         assert_eq!(rendered(&ev, "fan"), want, "seed {seed}");
         // hi / tot: per kind name, the max and the sum of `index`; nodes and
@@ -559,7 +625,10 @@ tot(k, sum(i)) :- node(x, k), index(x, i).
         }
         kinds.sort();
         let fold = |pick: fn(&(&str, i64, i64)) -> i64| -> Vec<Rendered> {
-            kinds.iter().map(|r| (vec![r.0.to_string(), pick(r).to_string()], Tier::Fact)).collect()
+            kinds
+                .iter()
+                .map(|r| (vec![r.0.to_string(), pick(r).to_string()], Tier::Fact))
+                .collect()
         };
         assert_eq!(rendered(&ev, "hi"), fold(|r| r.1), "seed {seed}");
         assert_eq!(rendered(&ev, "tot"), fold(|r| r.2), "seed {seed}");
@@ -579,28 +648,57 @@ fn check_witness(
     row: &Row,
     want: &dyn Fn(NodeId, NodeId) -> Option<usize>,
 ) {
-    let edges: Vec<(&Edge, Tier)> =
-        g.edges().enumerate().map(|(i, e)| (e, g.edge_tier(i, e))).collect();
+    let edges: Vec<(&Edge, Tier)> = g
+        .edges()
+        .enumerate()
+        .map(|(i, e)| (e, g.edge_tier(i, e)))
+        .collect();
     let [Value::Node(x), Value::Node(y)] = row.values.as_slice() else {
         panic!("a tc row holds two nodes: {:?}", row.values);
     };
-    let w = ev.explain(row, &ExplainLimits::default()).unwrap_or_else(|e| panic!("{e}"));
+    let w = ev
+        .explain(row, &ExplainLimits::default())
+        .unwrap_or_else(|e| panic!("{e}"));
     let path = w.leaf_edges();
-    let label = format!("tc({}, {}) {:?}", g.render_node(*x), g.render_node(*y), row.tier);
+    let label = format!(
+        "tc({}, {}) {:?}",
+        g.render_node(*x),
+        g.render_node(*y),
+        row.tier
+    );
     assert!(!w.truncated, "{label}");
     assert_eq!(w.tier, row.tier, "{label}");
-    assert_eq!(path.first().map(|h| h.from), Some(*x), "{label}: {:?}", hops(g, &path));
-    assert_eq!(path.last().map(|h| h.to), Some(*y), "{label}: {:?}", hops(g, &path));
+    assert_eq!(
+        path.first().map(|h| h.from),
+        Some(*x),
+        "{label}: {:?}",
+        hops(g, &path)
+    );
+    assert_eq!(
+        path.last().map(|h| h.to),
+        Some(*y),
+        "{label}: {:?}",
+        hops(g, &path)
+    );
     for pair in path.windows(2) {
         assert_eq!(pair[0].to, pair[1].from, "{label}: {:?}", hops(g, &path));
     }
     for h in &path {
         let (e, t) = edges[h.ordinal];
-        assert_eq!((e.from, e.to, e.category, t), (h.from, h.to, h.category, h.tier), "{label}");
+        assert_eq!(
+            (e.from, e.to, e.category, t),
+            (h.from, h.to, h.category, h.tier),
+            "{label}"
+        );
         assert_eq!(h.category, testkit::category_id("CALLS"), "{label}");
         assert!(h.tier <= row.tier, "{label}: hop at {:?}", h.tier);
     }
-    assert_eq!(Some(path.len()), want(*x, *y), "{label}: {:?}", hops(g, &path));
+    assert_eq!(
+        Some(path.len()),
+        want(*x, *y),
+        "{label}: {:?}",
+        hops(g, &path)
+    );
     assert_eq!(w.height as usize, path.len(), "{label}");
 }
 
@@ -612,7 +710,10 @@ fn witnesses_are_valid_shortest_paths() {
     let all = rows(&ev, "tc");
     assert!(all.len() >= 500, "graph 1 has {} tc rows", all.len());
     for t in Tier::ALL {
-        assert!(all[..500].iter().any(|r| r.tier == t), "no {t:?} row among the first 500");
+        assert!(
+            all[..500].iter().any(|r| r.tier == t),
+            "no {t:?} row among the first 500"
+        );
     }
     for row in &all[..500] {
         let bfs_depth = |x: NodeId, y: NodeId| oracle.depths(row.tier, x).get(&y).copied();
@@ -630,15 +731,23 @@ fn witness_heights_match_the_lattice_oracle() {
         let mut ev = eval(TC, &g, &Options::default());
         let mut heights: HashMap<NodeId, HashMap<NodeId, (Tier, usize)>> = HashMap::new();
         for row in rows(&ev, "tc") {
-            let Value::Node(x) = row.values[0] else { panic!("{:?}", row.values) };
+            let Value::Node(x) = row.values[0] else {
+                panic!("{:?}", row.values)
+            };
             let from_x = heights.entry(x).or_insert_with(|| {
                 let (h, tiers) = (oracle.lattice_heights(x), oracle.tiers_from(x));
                 assert_eq!(h.len(), tiers.len(), "seed {seed}");
-                assert!(h.iter().all(|(y, (t, _))| tiers.get(y) == Some(t)), "seed {seed}");
+                assert!(
+                    h.iter().all(|(y, (t, _))| tiers.get(y) == Some(t)),
+                    "seed {seed}"
+                );
                 h
             });
             let lattice = |_: NodeId, y: NodeId| {
-                from_x.get(&y).filter(|(t, _)| *t == row.tier).map(|(_, h)| *h)
+                from_x
+                    .get(&y)
+                    .filter(|(t, _)| *t == row.tier)
+                    .map(|(_, h)| *h)
             };
             check_witness(&g, &mut ev, &row, &lattice);
         }
@@ -652,7 +761,9 @@ fn same_level_rederivation_keeps_the_shortest_witness() {
     // (2 hops); tc(a, z) first through a -> p1 -> p2 -> y (4 hops), later through v
     // (3 hops). The shortest DERIVED path is a -> u -> v -> z.
     use Tier::{Derived as D, Fact as F};
-    let names = ["a", "p1", "p2", "y", "z", "u", "v", "q1", "q2", "q3", "q4", "w"];
+    let names = [
+        "a", "p1", "p2", "y", "z", "u", "v", "q1", "q2", "q3", "q4", "w",
+    ];
     let edges = [
         ("a", "p1", F),
         ("p1", "p2", F),
@@ -673,8 +784,13 @@ fn same_level_rederivation_keeps_the_shortest_witness() {
     let mut ev = eval(TC, &g, &Options::default());
     let row = row_of(&ev, "tc", &["a", "z"]);
     assert_eq!(row.tier, D);
-    let w = ev.explain(&row, &ExplainLimits::default()).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(hops(&g, &w.leaf_edges()), ["a->u derived", "u->v fact", "v->z fact"]);
+    let w = ev
+        .explain(&row, &ExplainLimits::default())
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        hops(&g, &w.leaf_edges()),
+        ["a->u derived", "u->v fact", "v->z fact"]
+    );
     for row in rows(&ev, "tc") {
         let bfs_depth = |x: NodeId, y: NodeId| oracle.depths(row.tier, x).get(&y).copied();
         check_witness(&g, &mut ev, &row, &bfs_depth);

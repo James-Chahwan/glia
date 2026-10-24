@@ -442,10 +442,26 @@ fn visit_class(
     // `parent_id` is the file MODULE or the braced namespace PACKAGE, as for
     // `emit_ctor_injects` below: either scopes the heritage lookup.
     if let Some(clause) = heritage_clause(node, "base_clause") {
-        heritage_refs(clause, src, name, id, parent_id, edge_category::INHERITS_FROM, acc);
+        heritage_refs(
+            clause,
+            src,
+            name,
+            id,
+            parent_id,
+            edge_category::INHERITS_FROM,
+            acc,
+        );
     }
     if let Some(clause) = heritage_clause(node, "class_interface_clause") {
-        heritage_refs(clause, src, name, id, parent_id, edge_category::IMPLEMENTS, acc);
+        heritage_refs(
+            clause,
+            src,
+            name,
+            id,
+            parent_id,
+            edge_category::IMPLEMENTS,
+            acc,
+        );
     }
     if acc.eloquent.model_classes.contains(&node.id()) {
         emit_eloquent_model(node, src, name, id, repo, acc);
@@ -460,7 +476,11 @@ fn visit_class(
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
-                let parent = MethodParent { qname: &qname, id, class_prefix: &class_prefix };
+                let parent = MethodParent {
+                    qname: &qname,
+                    id,
+                    class_prefix: &class_prefix,
+                };
                 composed += visit_method(child, src, file_rel, &parent, repo, acc);
                 if is_di && is_constructor(child, src) {
                     // `parent_id` is the file MODULE (semicolon namespace, the
@@ -519,7 +539,15 @@ fn visit_interface(
         .record(id, name, &qname, node_kind::INTERFACE, Some(parent_id));
     // `interface A extends B, C`: INHERITS_FROM, as Java's interface extends.
     if let Some(clause) = heritage_clause(node, "base_clause") {
-        heritage_refs(clause, src, name, id, parent_id, edge_category::INHERITS_FROM, acc);
+        heritage_refs(
+            clause,
+            src,
+            name,
+            id,
+            parent_id,
+            edge_category::INHERITS_FROM,
+            acc,
+        );
     }
     // DH.14: the interface's method declarations are METHOD children of it
     // (`interface_methods`), so A6.6 pairs each implementation's same-named
@@ -529,7 +557,11 @@ fn visit_interface(
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
-                let parent = MethodParent { qname: &qname, id, class_prefix: "" };
+                let parent = MethodParent {
+                    qname: &qname,
+                    id,
+                    class_prefix: "",
+                };
                 visit_method(child, src, file_rel, &parent, repo, acc);
             }
         }
@@ -572,7 +604,15 @@ fn visit_enum(
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
     // PHP 8.1: `enum Suit: string implements HasLabel`.
     if let Some(clause) = heritage_clause(node, "class_interface_clause") {
-        heritage_refs(clause, src, name, id, parent_id, edge_category::IMPLEMENTS, acc);
+        heritage_refs(
+            clause,
+            src,
+            name,
+            id,
+            parent_id,
+            edge_category::IMPLEMENTS,
+            acc,
+        );
     }
     true
 }
@@ -634,10 +674,17 @@ fn heritage_refs(
         }
         let text = text_of(written, src).trim();
         let last = text.rsplit('\\').next().unwrap_or(text).trim();
-        if last.is_empty() || last.eq_ignore_ascii_case(own) || !seen.insert(last.to_ascii_lowercase()) {
+        if last.is_empty()
+            || last.eq_ignore_ascii_case(own)
+            || !seen.insert(last.to_ascii_lowercase())
+        {
             continue;
         }
-        if acc.namespace_tails.iter().any(|t| t.eq_ignore_ascii_case(last)) {
+        if acc
+            .namespace_tails
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(last))
+        {
             acc.namespace_named_bases += 1;
             continue;
         }
@@ -766,7 +813,11 @@ fn visit_method(
     repo: RepoId,
     acc: &mut Acc,
 ) -> usize {
-    let MethodParent { qname: parent_qname, id: parent_id, class_prefix } = *parent;
+    let MethodParent {
+        qname: parent_qname,
+        id: parent_id,
+        class_prefix,
+    } = *parent;
     let Some(name_node) = node.child_by_field_name("name") else {
         return 0;
     };
@@ -1881,18 +1932,20 @@ fn local_receiver_types(func: TsNode, src: &[u8]) -> HashMap<String, String> {
                 if let (Some(lhs), Some(rhs)) = (
                     n.child_by_field_name("left"),
                     n.child_by_field_name("right"),
-                )
-                    && lhs.kind() == "variable_name" && rhs.kind() == "object_creation_expression"
-                        && let Some(cls) = created_class_name(rhs, src) {
-                            types.insert(text_of(lhs, src).to_string(), cls);
-                        }
+                ) && lhs.kind() == "variable_name"
+                    && rhs.kind() == "object_creation_expression"
+                    && let Some(cls) = created_class_name(rhs, src)
+                {
+                    types.insert(text_of(lhs, src).to_string(), cls);
+                }
             }
             "simple_parameter" | "property_promotion_parameter" => {
                 if let (Some(ty), Some(nm)) =
                     (n.child_by_field_name("type"), n.child_by_field_name("name"))
-                    && let Some(cls) = class_type_name(text_of(ty, src)) {
-                        types.insert(text_of(nm, src).to_string(), cls);
-                    }
+                    && let Some(cls) = class_type_name(text_of(ty, src))
+                {
+                    types.insert(text_of(nm, src).to_string(), cls);
+                }
             }
             _ => {}
         }
@@ -2082,20 +2135,75 @@ const ELOQUENT_BASES: &[&str] = &[
 /// table. Compared case-insensitively: PHP method names are. Excludes the
 /// statics that never touch the table (`factory`, `observe`, `make`, `boot`).
 const ELOQUENT_QUERY_METHODS: &[&str] = &[
-    "where", "whereIn", "whereNotIn", "whereNull", "whereNotNull", "whereBetween", "whereHas",
-    "whereKey", "orWhere", "firstWhere", "find", "findOrFail", "findMany", "findOrNew", "first",
-    "firstOrFail", "firstOrCreate", "firstOrNew", "updateOrCreate", "all", "get", "create",
-    "forceCreate", "insert", "upsert", "destroy", "query", "with", "withCount", "withTrashed",
-    "onlyTrashed", "has", "doesntHave", "select", "orderBy", "latest", "oldest", "paginate",
-    "simplePaginate", "cursorPaginate", "count", "exists", "pluck", "chunk", "cursor", "sum",
-    "max", "min", "avg",
+    "where",
+    "whereIn",
+    "whereNotIn",
+    "whereNull",
+    "whereNotNull",
+    "whereBetween",
+    "whereHas",
+    "whereKey",
+    "orWhere",
+    "firstWhere",
+    "find",
+    "findOrFail",
+    "findMany",
+    "findOrNew",
+    "first",
+    "firstOrFail",
+    "firstOrCreate",
+    "firstOrNew",
+    "updateOrCreate",
+    "all",
+    "get",
+    "create",
+    "forceCreate",
+    "insert",
+    "upsert",
+    "destroy",
+    "query",
+    "with",
+    "withCount",
+    "withTrashed",
+    "onlyTrashed",
+    "has",
+    "doesntHave",
+    "select",
+    "orderBy",
+    "latest",
+    "oldest",
+    "paginate",
+    "simplePaginate",
+    "cursorPaginate",
+    "count",
+    "exists",
+    "pluck",
+    "chunk",
+    "cursor",
+    "sum",
+    "max",
+    "min",
+    "avg",
 ];
 
 /// Laravel facades: a query-shaped name on one of these (`Session::all()`,
 /// `Schema::create(...)`) is never a model query.
 const LARAVEL_FACADES: &[&str] = &[
-    "Route", "DB", "Cache", "Log", "Auth", "Config", "Storage", "Http", "Mail", "Queue", "Event",
-    "Gate", "Session", "Schema", "Validator",
+    "Route",
+    "DB",
+    "Cache",
+    "Log",
+    "Auth",
+    "Config",
+    "Storage",
+    "Http",
+    "Mail",
+    "Queue",
+    "Event",
+    "Gate",
+    "Session",
+    "Schema",
+    "Validator",
 ];
 
 /// Receivers of `::table('x')` that open a query on a named table.
@@ -2306,7 +2414,9 @@ fn is_eloquent_model(class: TsNode, src: &[u8], scope: &PhpScope) -> bool {
         let last = written.rsplit('\\').next().unwrap_or(written);
         let resolved = scope.resolve(written);
         last.eq_ignore_ascii_case("Model")
-            || ELOQUENT_BASES.iter().any(|f| f.eq_ignore_ascii_case(&resolved))
+            || ELOQUENT_BASES
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(&resolved))
     })
 }
 
@@ -2390,8 +2500,13 @@ fn emit_eloquent_model(
     } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == entity_id) {
         existing.cells.extend(cell);
     }
-    acc.nav
-        .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.nav.record(
+        entity_id,
+        name,
+        &qname,
+        node_kind::DATA_ENTITY,
+        Some(class_id),
+    );
     acc.edges.push(Edge {
         from: class_id,
         to: entity_id,
@@ -2409,7 +2524,10 @@ fn eloquent_query_site(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc
     if !matches!(receiver.kind(), "name" | "qualified_name" | "relative_name") {
         return; // `static::` / `$class::` / expressions name no class
     }
-    let Some(method) = call.child_by_field_name("name").filter(|n| n.kind() == "name") else {
+    let Some(method) = call
+        .child_by_field_name("name")
+        .filter(|n| n.kind() == "name")
+    else {
         return;
     };
     let method = text_of(method, src);
@@ -2461,7 +2579,9 @@ fn eloquent_model_target(written: &str, scope: &PhpScope) -> Option<String> {
         return None;
     }
     let in_models_ns = format!("\\{namespace}\\").contains("\\Models\\");
-    let facade = LARAVEL_FACADES.iter().any(|f| f.eq_ignore_ascii_case(model));
+    let facade = LARAVEL_FACADES
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(model));
     if in_models_ns && (scope.is_explicit(written) || !facade) {
         return Some(model.to_string());
     }
@@ -2473,14 +2593,19 @@ fn eloquent_model_target(written: &str, scope: &PhpScope) -> Option<String> {
 /// `DB::table('users as u')` -> `users`, when the receiver is the DB facade.
 fn db_table_target(call: TsNode, src: &[u8], written: &str, scope: &PhpScope) -> Option<String> {
     let fqcn = scope.resolve(written);
-    if !DB_TABLE_RECEIVERS.iter().any(|r| r.eq_ignore_ascii_case(&fqcn)) {
+    if !DB_TABLE_RECEIVERS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(&fqcn))
+    {
         return None;
     }
     let arg = nth_arg(call.child_by_field_name("arguments"), 0).and_then(arg_expr)?;
     let literal = php_literal_string(arg, src)?;
     let table = literal.split_whitespace().next()?;
     let name_shaped = table.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        && table
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
     name_shaped.then(|| table.to_string())
 }
 
@@ -3676,7 +3801,10 @@ Route::group(['middleware' => 'auth'], function () {
 "#;
         let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
         let names = route_names(&fp);
-        assert!(names.contains(&"GET /admin/stats".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"GET /admin/stats".to_string()),
+            "got {names:?}"
+        );
         assert!(names.contains(&"GET /api/me".to_string()), "got {names:?}");
         // A middleware-only group contributes no path segment.
         assert!(names.contains(&"GET /plain".to_string()), "got {names:?}");
@@ -3701,12 +3829,24 @@ Route::get('/after', [AfterController::class, 'index']);
 "#;
         let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
         let names = route_names(&fp);
-        assert!(names.contains(&"GET /api/v2/users".to_string()), "got {names:?}");
-        assert!(names.contains(&"GET /api/ping".to_string()), "got {names:?}");
+        assert!(
+            names.contains(&"GET /api/v2/users".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            names.contains(&"GET /api/ping".to_string()),
+            "got {names:?}"
+        );
         assert!(names.contains(&"GET /health".to_string()), "got {names:?}");
         assert!(names.contains(&"GET /after".to_string()), "got {names:?}");
-        assert!(!names.contains(&"GET /api/health".to_string()), "got {names:?}");
-        assert!(!names.contains(&"GET /orphan/after".to_string()), "got {names:?}");
+        assert!(
+            !names.contains(&"GET /api/health".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            !names.contains(&"GET /orphan/after".to_string()),
+            "got {names:?}"
+        );
     }
 
     #[test]
@@ -4322,13 +4462,14 @@ class User extends Model
         };
         let v: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(v["orm"], data_entity::orm::ELOQUENT);
-        let class_id = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::CLASS,
-            "app::Models::User",
-        );
-        assert!(has_edge(&fp, class_id, entity_id("User"), edge_category::DEFINES.0));
+        let class_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "app::Models::User");
+        assert!(has_edge(
+            &fp,
+            class_id,
+            entity_id("User"),
+            edge_category::DEFINES.0
+        ));
         assert!(
             !fp.nodes.iter().any(|n| n.id == entity_id("app_users")),
             "no table-keyed second id"
@@ -4353,7 +4494,13 @@ class Post extends \Illuminate\Database\Eloquent\Model
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:Post"]);
         let entity = fp.nodes.iter().find(|n| n.id == entity_id("Post")).unwrap();
         assert!(entity.cells.is_empty(), "got {:?}", entity.cells);
-        assert_eq!(fp.nav.name_by_id.get(&entity_id("Post")).map(String::as_str), Some("Post"));
+        assert_eq!(
+            fp.nav
+                .name_by_id
+                .get(&entity_id("Post"))
+                .map(String::as_str),
+            Some("Post")
+        );
     }
 
     #[test]
@@ -4371,7 +4518,11 @@ abstract class BaseModel extends Model {}
 "#;
         let fp = parse_file(source, "app/Models/Misc.php", "app::Models::Misc", repo()).unwrap();
         assert!(entity_names(&fp).is_empty(), "got {:?}", entity_names(&fp));
-        assert!(!fp.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA)
+        );
     }
 
     #[test]
@@ -4391,7 +4542,10 @@ class User extends Authenticatable
         let fp = parse_file(source, "app/Models/User.php", "app::Models::User", repo()).unwrap();
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:User"]);
         let entity = fp.nodes.iter().find(|n| n.id == entity_id("User")).unwrap();
-        assert_eq!(data_entity::table_of(&entity.cells), Some("members".to_string()));
+        assert_eq!(
+            data_entity::table_of(&entity.cells),
+            Some("members".to_string())
+        );
     }
 
     #[test]
@@ -4447,11 +4601,12 @@ class ReportController
         let access_edges = fp.edges.iter().filter(|e| e.category.0 == ad).count();
         assert_eq!(access_edges, 5, "one edge per (method, entity)");
         // Query sites carry no table cell: only the declaration site knows it.
-        assert!(fp
-            .nodes
-            .iter()
-            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
-            .all(|n| n.cells.is_empty()));
+        assert!(
+            fp.nodes
+                .iter()
+                .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
+                .all(|n| n.cells.is_empty())
+        );
         // The ordinary CALLS site is still pushed for the static call.
         assert!(fp.calls.iter().any(|c| matches!(
             &c.qualifier,
@@ -4486,8 +4641,13 @@ class Maintenance
     }
 }
 "#;
-        let fp = parse_file(source, "app/Models/Maintenance.php", "app::Models::Maintenance", repo())
-            .unwrap();
+        let fp = parse_file(
+            source,
+            "app/Models/Maintenance.php",
+            "app::Models::Maintenance",
+            repo(),
+        )
+        .unwrap();
         assert!(entity_names(&fp).is_empty(), "got {:?}", entity_names(&fp));
     }
 
@@ -4513,9 +4673,16 @@ class Flight extends Model
 "#;
         let fp = parse_file(source, "app/Reports.php", "app::Reports", repo()).unwrap();
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:Flight"]);
-        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("Flight")).collect();
+        let nodes: Vec<&Node> = fp
+            .nodes
+            .iter()
+            .filter(|n| n.id == entity_id("Flight"))
+            .collect();
         assert_eq!(nodes.len(), 1, "one node per entity per file");
-        assert_eq!(data_entity::table_of(&nodes[0].cells), Some("flights_v2".to_string()));
+        assert_eq!(
+            data_entity::table_of(&nodes[0].cells),
+            Some("flights_v2".to_string())
+        );
         assert!(has_edge(
             &fp,
             method_id("app::Reports::recent"),
@@ -4540,8 +4707,13 @@ class AuditService
     public function other() { return Html::table('users'); }
 }
 "#;
-        let fp = parse_file(source, "app/Services/AuditService.php", "app::Services::AuditService", repo())
-            .unwrap();
+        let fp = parse_file(
+            source,
+            "app/Services/AuditService.php",
+            "app::Services::AuditService",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:audit_log"]);
         assert!(has_edge(
             &fp,
@@ -4557,7 +4729,8 @@ class AuditService
         fp.refs
             .iter()
             .filter(|r| {
-                r.category == edge_category::INHERITS_FROM || r.category == edge_category::IMPLEMENTS
+                r.category == edge_category::INHERITS_FROM
+                    || r.category == edge_category::IMPLEMENTS
             })
             .map(|r| {
                 let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
@@ -4585,10 +4758,19 @@ class AuditService
         let fp = parse_file(source, "src/EloquentUserRepository.php", module, repo()).unwrap();
         assert_eq!(
             heritage_of(&fp),
-            [h("src::EloquentUserRepository", IMPLEMENTS, "UserRepository", 4)]
+            [h(
+                "src::EloquentUserRepository",
+                IMPLEMENTS,
+                "UserRepository",
+                4
+            )]
         );
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, module);
-        let r = fp.refs.iter().find(|r| r.category == edge_category::IMPLEMENTS).unwrap();
+        let r = fp
+            .refs
+            .iter()
+            .find(|r| r.category == edge_category::IMPLEMENTS)
+            .unwrap();
         assert_eq!(r.from, class);
         assert_eq!(
             r.from_module,
@@ -4598,7 +4780,9 @@ class AuditService
         let counts = &parse_counts(source, "src/EloquentUserRepository.php", module);
         assert_eq!(
             counts.marker("src/EloquentUserRepository.php").as_deref(),
-            Some("[php-heritage] extends=0 implements=1 interface_extends=0 path=src/EloquentUserRepository.php")
+            Some(
+                "[php-heritage] extends=0 implements=1 interface_extends=0 path=src/EloquentUserRepository.php"
+            )
         );
     }
 
@@ -4612,11 +4796,23 @@ class AuditService
     fn class_extends_ref() {
         let source = "<?php\nnamespace Shop;\n\nclass PgCatalog extends BaseCatalog\n{\n}\n";
         let fp = parse_file(source, "src/PgCatalog.php", "src::PgCatalog", repo()).unwrap();
-        assert_eq!(heritage_of(&fp), [h("src::PgCatalog", INHERITS, "BaseCatalog", 3)]);
-        let none = parse_file("<?php\nclass Plain {}\n", "src/Plain.php", "src::Plain", repo())
-            .unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [h("src::PgCatalog", INHERITS, "BaseCatalog", 3)]
+        );
+        let none = parse_file(
+            "<?php\nclass Plain {}\n",
+            "src/Plain.php",
+            "src::Plain",
+            repo(),
+        )
+        .unwrap();
         assert!(heritage_of(&none).is_empty());
-        assert_eq!(parse_counts("<?php\nclass Plain {}\n", "src/Plain.php", "src::Plain").marker("src/Plain.php"), None);
+        assert_eq!(
+            parse_counts("<?php\nclass Plain {}\n", "src/Plain.php", "src::Plain")
+                .marker("src/Plain.php"),
+            None
+        );
     }
 
     #[test]
@@ -4635,7 +4831,9 @@ class AuditService
             ]
         );
         assert_eq!(
-            parse_counts(source, "src/Report.php", "src::Report").marker("src/Report.php").as_deref(),
+            parse_counts(source, "src/Report.php", "src::Report")
+                .marker("src/Report.php")
+                .as_deref(),
             Some("[php-heritage] extends=1 implements=3 interface_extends=0 path=src/Report.php")
         );
     }
@@ -4650,16 +4848,24 @@ class AuditService
         let fp = parse_file(source, "Repo.php", "Repo", repo()).unwrap();
         assert_eq!(
             heritage_of(&fp),
-            [h("Catalog", INHERITS, "Readable", 3), h("Catalog", INHERITS, "Countable", 3)]
+            [
+                h("Catalog", INHERITS, "Readable", 3),
+                h("Catalog", INHERITS, "Countable", 3)
+            ]
         );
         let catalog = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "Catalog");
         let search = method_id("Catalog::search");
         assert_eq!(fp.nav.kind_by_id.get(&search), Some(&node_kind::METHOD));
         assert_eq!(fp.nav.parent_of.get(&search), Some(&catalog));
         assert!(has_edge(&fp, catalog, search, edge_category::DEFINES.0));
-        assert_eq!(qnames_of(&fp, node_kind::METHOD), ["Catalog::search", "Readable::read"]);
         assert_eq!(
-            parse_counts(source, "Repo.php", "Repo").marker("Repo.php").as_deref(),
+            qnames_of(&fp, node_kind::METHOD),
+            ["Catalog::search", "Readable::read"]
+        );
+        assert_eq!(
+            parse_counts(source, "Repo.php", "Repo")
+                .marker("Repo.php")
+                .as_deref(),
             Some("[php-heritage] extends=0 implements=0 interface_extends=2 path=Repo.php")
         );
     }
@@ -4669,7 +4875,10 @@ class AuditService
         // PHP 8.1: a backed enum implementing an interface.
         let source = "<?php\nnamespace App\\Enums;\n\nenum Suit: string implements HasLabel\n{\n    case Hearts = 'H';\n}\n";
         let fp = parse_file(source, "src/Enums/Suit.php", "src::Enums::Suit", repo()).unwrap();
-        assert_eq!(heritage_of(&fp), [h("src::Enums::Suit", IMPLEMENTS, "HasLabel", 3)]);
+        assert_eq!(
+            heritage_of(&fp),
+            [h("src::Enums::Suit", IMPLEMENTS, "HasLabel", 3)]
+        );
         let r = &fp.refs[0];
         assert_eq!(
             fp.nav.kind_by_id.get(&r.from),
@@ -4695,7 +4904,11 @@ class AuditService
             ]
         );
         let package = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Repos");
-        assert!(fp.refs.iter().all(|r| r.from_module == package), "{:?}", fp.refs);
+        assert!(
+            fp.refs.iter().all(|r| r.from_module == package),
+            "{:?}",
+            fp.refs
+        );
     }
 
     #[test]
@@ -4705,7 +4918,10 @@ class AuditService
         // repo-unique lookup would bind to the class itself.
         let source = "<?php\nnamespace Tests;\n\nabstract class TestCase extends \\PHPUnit\\Framework\\TestCase implements Fixture {}\n";
         let fp = parse_file(source, "tests/TestCase.php", "tests::TestCase", repo()).unwrap();
-        assert_eq!(heritage_of(&fp), [h("tests::TestCase", IMPLEMENTS, "Fixture", 3)]);
+        assert_eq!(
+            heritage_of(&fp),
+            [h("tests::TestCase", IMPLEMENTS, "Fixture", 3)]
+        );
     }
 
     #[test]
@@ -4714,18 +4930,28 @@ class AuditService
         // to the file's own namespace PACKAGE (`App::Command`,
         // `App::Http::Middleware`); the other clause names are unaffected.
         let symfony = "<?php\nnamespace App\\Command;\n\nuse Symfony\\Component\\Console\\Command\\Command;\n\nclass SyncCommand extends Command implements Audited {}\n";
-        let fp = parse_file(symfony, "src/Command/SyncCommand.php", "src::Command::SyncCommand", repo())
-            .unwrap();
-        assert_eq!(heritage_of(&fp), [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 5)]);
+        let fp = parse_file(
+            symfony,
+            "src/Command/SyncCommand.php",
+            "src::Command::SyncCommand",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 5)]
+        );
         let laravel = "<?php\n\nnamespace App\\Http\\Middleware;\n\nuse Illuminate\\Foundation\\Http\\Middleware\\TrimStrings as Middleware;\n\nclass TrimStrings extends Middleware\n{\n}\n";
-        let fp = parse_file(laravel, "app/Http/Middleware/TrimStrings.php", "app::Http::Middleware::TrimStrings", repo())
-            .unwrap();
+        let fp = parse_file(
+            laravel,
+            "app/Http/Middleware/TrimStrings.php",
+            "app::Http::Middleware::TrimStrings",
+            repo(),
+        )
+        .unwrap();
         assert!(heritage_of(&fp).is_empty(), "{:?}", heritage_of(&fp));
         assert_eq!(
-            namespace_tails(
-                tree_root(laravel).root_node(),
-                laravel.as_bytes()
-            ),
+            namespace_tails(tree_root(laravel).root_node(), laravel.as_bytes()),
             ["Middleware"]
         );
     }
@@ -4753,9 +4979,18 @@ class Flight extends Model
     protected $table = 'flights';
 }
 "#;
-        let fp = parse_file(source, "app/Models/Flight.php", "app::Models::Flight", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "app/Models/Flight.php",
+            "app::Models::Flight",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:Flight"]);
-        assert_eq!(heritage_of(&fp), [h("app::Models::Flight", INHERITS, "Model", 5)]);
+        assert_eq!(
+            heritage_of(&fp),
+            [h("app::Models::Flight", INHERITS, "Model", 5)]
+        );
     }
 
     #[test]

@@ -5751,7 +5751,13 @@ mod tests {
              ambiguous_server=0 open=2"
         );
         // (route, direction, line, (path, rule, breaking) changes, notes).
-        type PairRow<'a> = (&'a str, &'a str, u32, Vec<(&'a str, &'static str, bool)>, Vec<&'a str>);
+        type PairRow<'a> = (
+            &'a str,
+            &'a str,
+            u32,
+            Vec<(&'a str, &'static str, bool)>,
+            Vec<&'a str>,
+        );
         let rows: Vec<PairRow<'_>> = wp
             .pairs
             .iter()
@@ -6368,7 +6374,12 @@ mod tests {
 
     /// A [`gql_rows`] row: (operation, its (path, key, type) changes, notes,
     /// refusal).
-    type GqlRow = (String, Vec<(String, String, String)>, Vec<&'static str>, Option<&'static str>);
+    type GqlRow = (
+        String,
+        Vec<(String, String, String)>,
+        Vec<&'static str>,
+        Option<&'static str>,
+    );
 
     fn gql_rows(gp: &GraphqlPairs) -> Vec<GqlRow> {
         gp.pairs
@@ -7574,10 +7585,18 @@ mod tests {
             1,
             false,
             false,
-            vec![fld("activities", Some("ActivitySummary[]"), true, summary(2))],
+            vec![fld(
+                "activities",
+                Some("ActivitySummary[]"),
+                true,
+                summary(2),
+            )],
         );
         let unknown_record = val(TS, "UnknownRecord");
-        assert!(names_nothing(&unknown_record), "an alias bound to nothing names nothing");
+        assert!(
+            names_nothing(&unknown_record),
+            "an alias bound to nothing names nothing"
+        );
         let envelope = inline(
             GO,
             false,
@@ -7589,9 +7608,17 @@ mod tests {
             )],
         );
         let client = union_of(TS, vec![list.clone(), unknown_record.clone(), summary(2)]);
-        assert_eq!(opens(&wire_fields(&client)), [""], "a union root opens the side whole");
+        assert_eq!(
+            opens(&wire_fields(&client)),
+            [""],
+            "a union root opens the side whole"
+        );
         let judged = client.judged_against(&envelope);
-        assert_eq!(judged.model, Some(NodeId(1)), "the one object member: {judged:?}");
+        assert_eq!(
+            judged.model,
+            Some(NodeId(1)),
+            "the one object member: {judged:?}"
+        );
         let w = wire_fields(&judged);
         assert_eq!(keys(&w), ["", "activities", "activities[].title"]);
         assert!(w.open.is_empty(), "{:?}", w.open);
@@ -7600,18 +7627,31 @@ mod tests {
         let either = union_of(TS, vec![list.clone(), summary(2)]);
         let bare = model_of(GO, 10, true, false, vec![mf(GO, "title", "string", true)]);
         assert_eq!(either.judged_against(&bare).model, Some(NodeId(2)));
-        assert_eq!(keys(&wire_fields(&either.judged_against(&bare))), ["", "title"]);
+        assert_eq!(
+            keys(&wire_fields(&either.judged_against(&bare))),
+            ["", "title"]
+        );
 
         // An envelope or its bare object, against an object: the merged view,
         // each name required only when every member requires it.
         let item = model_of(TS, 3, false, false, vec![mf(TS, "title", "string", true)]);
-        let result = inline(TS, false, vec![fld("result", Some("Item"), true, item.clone())]);
-        let merged = union_of(TS, vec![result, item]).judged_against(&envelope).into_owned();
+        let result = inline(
+            TS,
+            false,
+            vec![fld("result", Some("Item"), true, item.clone())],
+        );
+        let merged = union_of(TS, vec![result, item])
+            .judged_against(&envelope)
+            .into_owned();
         let w = wire_fields(&merged);
         assert_eq!(keys(&w), ["", "result", "result.title", "title"]);
         assert!(w.open.is_empty(), "{:?}", w.open);
         assert_eq!(
-            (w.fields[""].kind, w.fields["result"].required, w.fields["title"].required),
+            (
+                w.fields[""].kind,
+                w.fields["result"].required,
+                w.fields["title"].required
+            ),
             (Some("object"), false, false)
         );
         // Two typed objects beside an open record: their merged view too.
@@ -7633,10 +7673,20 @@ mod tests {
         let array_only = union_of(TS, vec![unknown_record.clone(), summary(2)]);
         assert!(still_open(&array_only, &envelope), "no object member left");
         let text = union_of(TS, vec![val(TS, "string"), unknown_record.clone()]);
-        assert!(still_open(&text, &val(GO, "string")), "a scalar server value");
-        assert!(still_open(&client, &union_of(GO, vec![envelope.clone(), bare.clone()])));
+        assert!(
+            still_open(&text, &val(GO, "string")),
+            "a scalar server value"
+        );
+        assert!(still_open(
+            &client,
+            &union_of(GO, vec![envelope.clone(), bare.clone()])
+        ));
         assert!(still_open(&unknown_record, &envelope), "no union");
-        assert_eq!(list.judged_against(&envelope).model, Some(NodeId(1)), "a model is itself");
+        assert_eq!(
+            list.judged_against(&envelope).model,
+            Some(NodeId(1)),
+            "a model is itself"
+        );
     }
 
     #[test]

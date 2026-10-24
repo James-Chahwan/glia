@@ -48,8 +48,9 @@ use glia_code_extractors::grpc::RpcPackageCell;
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    AliasIndex, ExternalSides, HostScoped, Narrowed, Owners, ProjectFiles, build_service_alias_index,
-    hit_hosts, narrow_by_host, owner_spelling, str_field, third_party_hosts_lazy, third_party_sides,
+    AliasIndex, ExternalSides, HostScoped, Narrowed, Owners, ProjectFiles,
+    build_service_alias_index, hit_hosts, narrow_by_host, owner_spelling, str_field,
+    third_party_hosts_lazy, third_party_sides,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -90,7 +91,9 @@ impl CrossGraphResolver for GrpcStackResolver {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_CLIENT) {
                     continue;
                 }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
                 // LB.8: a client stub is one project's side of the service; the
                 // owner segment is stripped, the `grpc:` contract is never owned.
                 let Some(svc_name) = split_owner(qname).0.strip_prefix("grpc_client:") else {
@@ -111,9 +114,13 @@ impl CrossGraphResolver for GrpcStackResolver {
                     external.add(n.id, hosts);
                     continue;
                 }
-                let Some((targets, name_pkg)) = grpc_candidate_keys(svc_name)
-                    .into_iter()
-                    .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)))
+                let Some((targets, name_pkg)) =
+                    grpc_candidate_keys(svc_name).into_iter().find_map(|c| {
+                        index
+                            .get(&c.key)
+                            .filter(|t| !t.is_empty())
+                            .map(|t| (t, c.package))
+                    })
                 else {
                     continue;
                 };
@@ -122,11 +129,13 @@ impl CrossGraphResolver for GrpcStackResolver {
                     if all.len() < 2 || all.iter().any(|t| t.mixed_owner) {
                         return false;
                     }
-                    let Some(hosts) = hits.get(&n.id).and_then(|c| hit_hosts(c.iter().copied())) else {
+                    let Some(hosts) = hits.get(&n.id).and_then(|c| hit_hosts(c.iter().copied()))
+                    else {
                         return false;
                     };
-                    let aliases = aliases
-                        .get_or_insert_with(|| build_service_alias_index(&merged.graphs, &owners).0);
+                    let aliases = aliases.get_or_insert_with(|| {
+                        build_service_alias_index(&merged.graphs, &owners).0
+                    });
                     narrow_by_host(aliases, Some(&hosts), all) != Narrowed::No
                 };
                 // LC.3c: the rule is the Pick that chose the targets, or
@@ -232,13 +241,18 @@ fn pair_servers(merged: &MergedGraph, index: &GrpcIndex, rules: &mut RuleTally) 
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_SERVER) || !seen.insert(n.id) {
                 continue;
             }
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
             let Some(svc_name) = split_owner(qname).0.strip_prefix("grpc_server:") else {
                 continue;
             };
-            let found = grpc_candidate_keys(svc_name)
-                .into_iter()
-                .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)));
+            let found = grpc_candidate_keys(svc_name).into_iter().find_map(|c| {
+                index
+                    .get(&c.key)
+                    .filter(|t| !t.is_empty())
+                    .map(|t| (t, c.package))
+            });
             // LC.3c: the rule is the Pick that chose the targets.
             let picked: Option<(Vec<&GrpcTarget>, &'static str)> =
                 found.and_then(|(targets, name_pkg)| {
@@ -312,14 +326,22 @@ impl HostScoped for GrpcTarget {
 /// CB.21: the nested projects the POSITION files of a service lie in, one
 /// entry per distinct owner in cell order (`None` for a file outside every
 /// project). Empty for a service that carries no POSITION.
-fn declaring_owners<'p>(cells: &[Cell], repo: RepoId, projects: &'p ProjectFiles) -> Vec<Option<&'p str>> {
+fn declaring_owners<'p>(
+    cells: &[Cell],
+    repo: RepoId,
+    projects: &'p ProjectFiles,
+) -> Vec<Option<&'p str>> {
     let mut out: Vec<Option<&str>> = Vec::new();
     for c in cells {
-        let CellPayload::Json(json) = &c.payload else { continue };
+        let CellPayload::Json(json) = &c.payload else {
+            continue;
+        };
         if c.kind != cell_type::POSITION {
             continue;
         }
-        let Some(file) = str_field(json, "file") else { continue };
+        let Some(file) = str_field(json, "file") else {
+            continue;
+        };
         let owner = projects.owner_of(repo, file);
         if !out.contains(&owner) {
             out.push(owner);
@@ -381,8 +403,12 @@ fn build_grpc_service_index(graphs: &[RepoGraph]) -> (GrpcIndex, Owners) {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_SERVICE) {
                 continue;
             }
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(svc_name) = qname.strip_prefix("grpc:") else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some(svc_name) = qname.strip_prefix("grpc:") else {
+                continue;
+            };
             let mut pkg = service_package(&n.cells);
             // A5.1 writes `grpc:<package>.<Service>` exactly when the proto has
             // a package, and a proto service name has no dot, so the qname
@@ -413,9 +439,17 @@ fn build_grpc_service_index(graphs: &[RepoGraph]) -> (GrpcIndex, Owners) {
                 && bare != svc_name
             {
                 index.qualified += 1;
-                index.by_key.entry(bare.to_string()).or_default().push(target.clone());
+                index
+                    .by_key
+                    .entry(bare.to_string())
+                    .or_default()
+                    .push(target.clone());
             }
-            index.by_key.entry(svc_name.to_string()).or_default().push(target);
+            index
+                .by_key
+                .entry(svc_name.to_string())
+                .or_default()
+                .push(target);
         }
     }
     (index, owners)
@@ -469,7 +503,11 @@ fn contains_run(hay: &[&str], needle: &[&str], ignore_case: bool) -> bool {
     !needle.is_empty()
         && hay.windows(needle.len()).any(|w| {
             w.iter().zip(needle).all(|(a, b)| {
-                if ignore_case { a.eq_ignore_ascii_case(b) } else { a == b }
+                if ignore_case {
+                    a.eq_ignore_ascii_case(b)
+                } else {
+                    a == b
+                }
             })
         })
 }
@@ -500,7 +538,11 @@ enum Pick<'a> {
 /// case-insensitively (C# PascalCases it, Ruby capitalises it). The option is
 /// mapped back to the target's `package` — `using GreeterApi;` selects the
 /// service whose `csharp_namespace` is `GreeterApi`, whatever its package is.
-fn evidence_tier(package: Option<&str>, targets: &[GrpcTarget], imports: &[Vec<&str>]) -> Option<u8> {
+fn evidence_tier(
+    package: Option<&str>,
+    targets: &[GrpcTarget],
+    imports: &[Vec<&str>],
+) -> Option<u8> {
     let options = targets
         .iter()
         .filter(|t| t.pkg.package.as_deref() == package)
@@ -508,7 +550,10 @@ fn evidence_tier(package: Option<&str>, targets: &[GrpcTarget], imports: &[Vec<&
             [
                 // `go_package = "example.com/gen/billing;billingpb"` — the path
                 // is what an importer writes; the alias after `;` is not.
-                t.pkg.go_package.as_deref().map(|g| g.split(';').next().unwrap_or(g)),
+                t.pkg
+                    .go_package
+                    .as_deref()
+                    .map(|g| g.split(';').next().unwrap_or(g)),
                 t.pkg.java_package.as_deref(),
                 t.pkg.csharp_namespace.as_deref(),
             ]
@@ -521,7 +566,10 @@ fn evidence_tier(package: Option<&str>, targets: &[GrpcTarget], imports: &[Vec<&
         }
     }
     let run = path_tokens(package?);
-    imports.iter().any(|i| contains_run(i, &run, true)).then_some(2)
+    imports
+        .iter()
+        .any(|i| contains_run(i, &run, true))
+        .then_some(2)
 }
 
 fn pick_targets<'a>(
@@ -529,7 +577,8 @@ fn pick_targets<'a>(
     name_pkg: Option<&str>,
     evidence: &[Vec<String>],
 ) -> Pick<'a> {
-    let mut packages: Vec<Option<&str>> = targets.iter().map(|t| t.pkg.package.as_deref()).collect();
+    let mut packages: Vec<Option<&str>> =
+        targets.iter().map(|t| t.pkg.package.as_deref()).collect();
     packages.sort_unstable();
     packages.dedup();
     if packages.len() <= 1 {
@@ -549,7 +598,9 @@ fn pick_targets<'a>(
                 .iter()
                 .filter_map(|p| evidence_tier(*p, targets, &imports).map(|t| (*p, t)))
                 .collect();
-            let Some(best) = tiers.iter().map(|(_, t)| *t).min() else { continue };
+            let Some(best) = tiers.iter().map(|(_, t)| *t).min() else {
+                continue;
+            };
             let mut winners = tiers.iter().filter(|(_, t)| *t == best).map(|(p, _)| *p);
             if let (Some(w), None) = (winners.next(), winners.next())
                 && !chosen.contains(&w)
@@ -582,9 +633,18 @@ mod tests {
             "grpc-owner",
             &[
                 (node_kind::GRPC_SERVICE, "grpc:user.UserService"),
-                (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/gateway"),
-                (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/admin"),
-                (node_kind::GRPC_SERVER, "grpc_server:UserService @services/users"),
+                (
+                    node_kind::GRPC_CLIENT,
+                    "grpc_client:UserService @services/gateway",
+                ),
+                (
+                    node_kind::GRPC_CLIENT,
+                    "grpc_client:UserService @services/admin",
+                ),
+                (
+                    node_kind::GRPC_SERVER,
+                    "grpc_server:UserService @services/users",
+                ),
             ],
         );
         let mut m = MergedGraph::new(vec![g]);
@@ -593,13 +653,22 @@ mod tests {
         assert_eq!(
             cross_pairs(&m, edge_category::GRPC_CALLS),
             [
-                s("grpc_client:UserService @services/admin", "grpc:user.UserService"),
-                s("grpc_client:UserService @services/gateway", "grpc:user.UserService"),
+                s(
+                    "grpc_client:UserService @services/admin",
+                    "grpc:user.UserService"
+                ),
+                s(
+                    "grpc_client:UserService @services/gateway",
+                    "grpc:user.UserService"
+                ),
             ]
         );
         assert_eq!(
             cross_pairs(&m, edge_category::HANDLED_BY),
-            [s("grpc:user.UserService", "grpc_server:UserService @services/users")]
+            [s(
+                "grpc:user.UserService",
+                "grpc_server:UserService @services/users"
+            )]
         );
     }
 
@@ -610,10 +679,15 @@ mod tests {
     /// hostless site or an unknown host it stays dropped.
     #[test]
     fn grpc_host_resolves_an_ambiguous_pair() {
-        let hit = |json: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.into()) };
+        let hit = |json: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.into()),
+        };
         let position = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":3,"end_line":3}}"#
+            )),
         };
         let graph = |client_cells: Vec<Cell>| {
             let mut g = channel_graph(
@@ -624,11 +698,18 @@ mod tests {
                     (node_kind::PROJECT, "project:services/gateway"),
                     (node_kind::GRPC_SERVICE, "grpc:users.v1.UserService"),
                     (node_kind::GRPC_SERVICE, "grpc:admin.v1.UserService"),
-                    (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/gateway"),
+                    (
+                        node_kind::GRPC_CLIENT,
+                        "grpc_client:UserService @services/gateway",
+                    ),
                 ],
             );
             let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
-            for (id, label) in ids.iter().zip(["example.com/users", "example.com/admin", "example.com/gateway"]) {
+            for (id, label) in ids.iter().zip([
+                "example.com/users",
+                "example.com/admin",
+                "example.com/gateway",
+            ]) {
                 g.nav.name_by_id.insert(*id, label.to_string());
             }
             g.nodes[3].cells = vec![position("services/users/api/user.proto")];
@@ -653,15 +734,27 @@ mod tests {
         let (got, rules) = pairs(vec![hit(r#"{"via":"grpc","host":"users-svc:50051"}"#)]);
         assert_eq!(
             got,
-            [("grpc_client:UserService @services/gateway".to_string(), "grpc:users.v1.UserService".to_string())]
+            [(
+                "grpc_client:UserService @services/gateway".to_string(),
+                "grpc:users.v1.UserService".to_string()
+            )]
         );
-        assert!(rules.iter().all(|r| r.contains(r#""rule":"host""#)), "{rules:?}");
+        assert!(
+            rules.iter().all(|r| r.contains(r#""rule":"host""#)),
+            "{rules:?}"
+        );
         for cells in [
             vec![],
             vec![hit(r#"{"via":"grpc"}"#)],
-            vec![hit(r#"{"via":"grpc","host":"users-svc:50051"}"#), hit(r#"{"via":"grpc"}"#)],
+            vec![
+                hit(r#"{"via":"grpc","host":"users-svc:50051"}"#),
+                hit(r#"{"via":"grpc"}"#),
+            ],
             vec![hit(r#"{"via":"grpc","host":"billing:9000"}"#)],
-            vec![hit(r#"{"via":"grpc","host":"users"}"#), hit(r#"{"via":"grpc","host":"admin-svc"}"#)],
+            vec![
+                hit(r#"{"via":"grpc","host":"users"}"#),
+                hit(r#"{"via":"grpc","host":"admin-svc"}"#),
+            ],
         ] {
             assert!(pairs(cells.clone()).0.is_empty(), "{cells:?}");
         }
@@ -681,14 +774,22 @@ mod tests {
         );
         let pos = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":0}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":0}}"#
+            )),
         };
-        g.nodes[2].cells = vec![pos("services/users/user.proto"), pos("services/admin/user.proto")];
+        g.nodes[2].cells = vec![
+            pos("services/users/user.proto"),
+            pos("services/admin/user.proto"),
+        ];
         let (index, owners) = build_grpc_service_index(std::slice::from_ref(&g));
         let t = &index.by_key["UserService"][0];
         assert!(t.mixed_owner && t.owner.is_none());
         assert_eq!(owners.len(), 0);
-        g.nodes[2].cells = vec![pos("services/users/user.proto"), pos("services/users/copy.proto")];
+        g.nodes[2].cells = vec![
+            pos("services/users/user.proto"),
+            pos("services/users/copy.proto"),
+        ];
         let (index, owners) = build_grpc_service_index(std::slice::from_ref(&g));
         let t = &index.by_key["UserService"][0];
         assert!(!t.mixed_owner);
@@ -728,13 +829,24 @@ mod tests {
     #[test]
     fn token_runs_match_across_separators_and_respect_case_only_when_asked() {
         let hay = path_tokens("example.com/gen/billing");
-        assert!(contains_run(&hay, &path_tokens("example.com/gen/billing"), false));
+        assert!(contains_run(
+            &hay,
+            &path_tokens("example.com/gen/billing"),
+            false
+        ));
         assert!(contains_run(&hay, &path_tokens("gen::billing"), false));
         assert!(!contains_run(&hay, &path_tokens("gen/legacy"), false));
         assert!(!contains_run(&hay, &path_tokens("Billing"), false));
         assert!(contains_run(&hay, &path_tokens("Billing"), true));
-        assert!(!contains_run(&hay, &[], true), "an empty needle names nothing");
+        assert!(
+            !contains_run(&hay, &[], true),
+            "an empty needle names nothing"
+        );
         // A token is whole: `billing` is not `billingpb`.
-        assert!(!contains_run(&path_tokens("gen/billingpb"), &path_tokens("billing"), true));
+        assert!(!contains_run(
+            &path_tokens("gen/billingpb"),
+            &path_tokens("billing"),
+            true
+        ));
     }
 }

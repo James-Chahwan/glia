@@ -31,14 +31,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::NodeId;
 use glia_projection_text::driver_utils::build_repo_graph;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
-#[command(about = "Forward CALLS-chain from F2P methods + test_patch-referenced production symbols")]
+#[command(
+    about = "Forward CALLS-chain from F2P methods + test_patch-referenced production symbols"
+)]
 struct Args {
     /// Repo root to walk for `*.py` files.
     #[arg(long)]
@@ -125,10 +127,7 @@ fn label_to_qname_suffix(label: &str) -> String {
     chunks.join("::")
 }
 
-fn find_f2p_anchor(
-    graph: &glia_graph::RepoGraph,
-    suffix: &str,
-) -> Option<(NodeId, String)> {
+fn find_f2p_anchor(graph: &glia_graph::RepoGraph, suffix: &str) -> Option<(NodeId, String)> {
     if suffix.is_empty() {
         return None;
     }
@@ -350,8 +349,8 @@ fn main() -> Result<()> {
 
     // (2) test_patch-derived production-symbol anchors.
     if let Some(tp_path) = &args.test_patch {
-        let patch_text = fs::read_to_string(tp_path)
-            .with_context(|| format!("read {}", tp_path.display()))?;
+        let patch_text =
+            fs::read_to_string(tp_path).with_context(|| format!("read {}", tp_path.display()))?;
         let candidates = extract_candidates_from_test_patch(&patch_text);
         eprintln!("[test_patch] {} candidate identifiers", candidates.len());
 
@@ -382,10 +381,7 @@ fn main() -> Result<()> {
             args.match_cap
         );
         if !dropped_tokens.is_empty() {
-            eprintln!(
-                "[test_patch] dropped: {}",
-                dropped_tokens.join(", ")
-            );
+            eprintln!("[test_patch] dropped: {}", dropped_tokens.join(", "));
         }
 
         for (tok, anchor_id, anchor_qn) in tp_anchor_pool {
@@ -394,9 +390,7 @@ fn main() -> Result<()> {
             let bfs_starts: Vec<(NodeId, String)> = if kind == Some(node_kind::CLASS) {
                 let methods = expand_class_to_methods(&graph, anchor_id);
                 if methods.is_empty() {
-                    eprintln!(
-                        "[tp-anchor] {tok} → {anchor_qn} (CLASS, 0 methods, skipped)"
-                    );
+                    eprintln!("[tp-anchor] {tok} → {anchor_qn} (CLASS, 0 methods, skipped)");
                     continue;
                 }
                 methods

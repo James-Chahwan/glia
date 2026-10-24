@@ -80,11 +80,20 @@ pub const GRAPH_TYPE: &str = "rules-test";
 pub const KINDS: [(&str, u32); 4] = [("FUNCTION", 1), ("MODULE", 2), ("ROUTE", 3), ("OBJECT", 4)];
 
 /// The kit's edge categories, `(name, test-local id)`.
-pub const CATEGORIES: [(&str, u32); 6] =
-    [("CALLS", 1), ("IMPORTS", 2), ("USES", 3), ("HANDLED_BY", 4), ("TESTS", 5), ("NEXT", 6)];
+pub const CATEGORIES: [(&str, u32); 6] = [
+    ("CALLS", 1),
+    ("IMPORTS", 2),
+    ("USES", 3),
+    ("HANDLED_BY", 4),
+    ("TESTS", 5),
+    ("NEXT", 6),
+];
 
 /// Attribute 0 of every builder's source: `index(Node, int)`, node `i`'s number.
-pub const INDEX: AttrDecl = AttrDecl { name: "index", ty: ColType::Int };
+pub const INDEX: AttrDecl = AttrDecl {
+    name: "index",
+    ty: ColType::Int,
+};
 
 static KIND_REGISTRY: [(NodeKindId, &str); 4] = {
     let mut out = [(NodeKindId(0), ""); 4];
@@ -107,8 +116,10 @@ static CATEGORY_REGISTRY: [(EdgeCategoryId, &str); 6] = {
 };
 
 /// CALLS and USES (`CATEGORIES[0]`, `CATEGORIES[2]`).
-static CARRY: [EdgeCategoryId; 2] =
-    [EdgeCategoryId(CATEGORIES[0].1), EdgeCategoryId(CATEGORIES[2].1)];
+static CARRY: [EdgeCategoryId; 2] = [
+    EdgeCategoryId(CATEGORIES[0].1),
+    EdgeCategoryId(CATEGORIES[2].1),
+];
 
 /// The kit's domain tables: graph type [`GRAPH_TYPE`], the [`KINDS`] and
 /// [`CATEGORIES`] registries (no cell types), carry edges CALLS and USES, and an
@@ -121,7 +132,11 @@ pub fn tables() -> DomainTables {
             edge_categories: &CATEGORY_REGISTRY,
             cell_types: &[],
         },
-        entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+        entry: EntryRule {
+            kinds: &[],
+            roles: &[],
+            named: &[],
+        },
         carry_edges: &CARRY,
         effect_sinks: &[],
         activation_weights: &[],
@@ -133,7 +148,10 @@ pub fn tables() -> DomainTables {
 
 /// The [`CATEGORIES`] id of `name`; `EdgeCategoryId(0)` for any other name.
 pub fn category_id(name: &str) -> EdgeCategoryId {
-    let id = CATEGORIES.iter().find(|(n, _)| *n == name).map_or(0, |(_, id)| *id);
+    let id = CATEGORIES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(0, |(_, id)| *id);
     EdgeCategoryId(id)
 }
 
@@ -165,7 +183,8 @@ fn numbered(n: u32, salt: u64) -> (MemSource, Vec<NodeId>) {
     let mut ids = Vec::with_capacity(n as usize);
     for i in 0..n {
         let id = node_id(salt, i);
-        g.node(id, kind_of(i), format!("n{i:05}")).set_attr(id, 0, Value::Int(i64::from(i)));
+        g.node(id, kind_of(i), format!("n{i:05}"))
+            .set_attr(id, 0, Value::Int(i64::from(i)));
         ids.push(id);
     }
     (g, ids)
@@ -228,7 +247,11 @@ pub fn chain(n: u32, category: &str, tiers: &[Tier]) -> MemSource {
     let (mut g, ids) = numbered(n, 0);
     let cat = category_id(category);
     for (i, hop) in ids.windows(2).enumerate() {
-        let tier = if tiers.is_empty() { Tier::Derived } else { tiers[i % tiers.len()] };
+        let tier = if tiers.is_empty() {
+            Tier::Derived
+        } else {
+            tiers[i % tiers.len()]
+        };
         g.edge(hop[0], hop[1], cat, confidence(tier), tier);
     }
     g
@@ -270,7 +293,12 @@ pub fn clique_ring(n: u32, chords: u32, category: &str, seed: u64) -> MemSource 
 pub fn resalted(g: &MemSource, salt: u64) -> MemSource {
     let graph_type = g.tables().graph_type;
     let new_id = |id: NodeId| {
-        NodeId::from_parts(graph_type, RepoId(salt), NodeKindId(0), &format!("{:016x}", id.0))
+        NodeId::from_parts(
+            graph_type,
+            RepoId(salt),
+            NodeKindId(0),
+            &format!("{:016x}", id.0),
+        )
     };
     let mut out = MemSource::new(*g.tables());
     let ids: Vec<NodeId> = g.node_ids().into_iter().rev().collect();
@@ -296,7 +324,10 @@ pub fn resalted(g: &MemSource, salt: u64) -> MemSource {
 /// `(183_870, 573_053)`.
 pub fn scaled_size(nodes: usize, edges: usize, k: u32) -> (usize, usize) {
     let copied = edges.saturating_mul(k as usize);
-    (nodes.saturating_mul(k as usize), copied.saturating_add(cross_edges(edges, k)))
+    (
+        nodes.saturating_mul(k as usize),
+        copied.saturating_add(cross_edges(edges, k)),
+    )
 }
 
 /// The spike's cross-edge count: `edges * k / 100` (saturating).
@@ -353,7 +384,11 @@ pub fn scaled(g: &MemSource, k: u32) -> MemSource {
     };
     copy_columns(g, &mut out, k, endpoint);
     let edges: Vec<_> = g.edges().collect();
-    let tiers: Vec<Tier> = edges.iter().enumerate().map(|(i, e)| g.edge_tier(i, e)).collect();
+    let tiers: Vec<Tier> = edges
+        .iter()
+        .enumerate()
+        .map(|(i, e)| g.edge_tier(i, e))
+        .collect();
     for c in 0..k {
         for (e, tier) in edges.iter().zip(&tiers) {
             let mut copy = (*e).clone();
@@ -432,7 +467,12 @@ mod tests {
         g.edges()
             .enumerate()
             .map(|(i, e)| {
-                (g.render_node(e.from), g.render_node(e.to), e.category.0, g.edge_tier(i, e))
+                (
+                    g.render_node(e.from),
+                    g.render_node(e.to),
+                    e.category.0,
+                    g.edge_tier(i, e),
+                )
             })
             .collect()
     }
@@ -486,7 +526,10 @@ mod tests {
         let ids = a.node_ids();
         assert_eq!(ids.len(), 500);
         assert_eq!(ids[42], node_id(0, 42));
-        assert_eq!(ids[42], NodeId::from_parts("rules-test", RepoId(0), NodeKindId(3), "n42"));
+        assert_eq!(
+            ids[42],
+            NodeId::from_parts("rules-test", RepoId(0), NodeKindId(3), "n42")
+        );
         assert_eq!(a.node_kind(ids[42]), Some(NodeKindId(3)));
         assert_eq!(a.render_node(ids[42]), "n00042");
         assert_eq!(rendered_nodes(&a)[42].2, Some(Value::Int(42)));
@@ -495,8 +538,15 @@ mod tests {
         let rows = edge_rows(&a);
         for (tier, pct) in [(Tier::Fact, 60), (Tier::Derived, 30), (Tier::Heuristic, 10)] {
             let got = rows.iter().filter(|r| r.4 == tier).count() as i64;
-            assert!((got - pct * 100).abs() <= 200, "{tier:?}: {got} of 10000, want {pct}%");
-            assert!(rows.iter().filter(|r| r.4 == tier).all(|r| r.3 == confidence(tier)));
+            assert!(
+                (got - pct * 100).abs() <= 200,
+                "{tier:?}: {got} of 10000, want {pct}%"
+            );
+            assert!(
+                rows.iter()
+                    .filter(|r| r.4 == tier)
+                    .all(|r| r.3 == confidence(tier))
+            );
         }
         // Every drawn category is one of the spec's, and each one occurs.
         for c in ["CALLS", "USES", "IMPORTS"] {
@@ -521,7 +571,10 @@ mod tests {
     fn resalted_keeps_the_rendered_graph() {
         let mut g = lcg_graph(&spec(300, 900, 3, 0));
         let ids = g.node_ids();
-        let cell = Cell { kind: CellTypeId(9), payload: CellPayload::Text("x".into()) };
+        let cell = Cell {
+            kind: CellTypeId(9),
+            payload: CellPayload::Text("x".into()),
+        };
         g.cell(ids[7], cell.clone());
         let g2 = resalted(&g, 7);
 
@@ -529,7 +582,10 @@ mod tests {
         old.sort_unstable_by_key(|id| id.0);
         let new = g2.node_ids();
         assert_eq!(new.len(), ids.len());
-        assert!(new.iter().all(|id| old.binary_search_by_key(&id.0, |o| o.0).is_err()));
+        assert!(
+            new.iter()
+                .all(|id| old.binary_search_by_key(&id.0, |o| o.0).is_err())
+        );
         assert!(g2.edges().all(|e| {
             old.binary_search_by_key(&e.from.0, |o| o.0).is_err()
                 && old.binary_search_by_key(&e.to.0, |o| o.0).is_err()
@@ -548,9 +604,15 @@ mod tests {
         b.sort();
         assert_eq!(a, b);
         // Every endpoint is a node of g2; cells travel with their node.
-        assert!(g2.edges().all(|e| g2.node_kind(e.from).is_some() && g2.node_kind(e.to).is_some()));
+        assert!(
+            g2.edges()
+                .all(|e| g2.node_kind(e.from).is_some() && g2.node_kind(e.to).is_some())
+        );
         let seven = new.iter().find(|id| g2.render_node(**id) == "n00007");
-        assert_eq!(seven.map(|id| g2.node_cells(*id).to_vec()), Some(vec![cell]));
+        assert_eq!(
+            seven.map(|id| g2.node_cells(*id).to_vec()),
+            Some(vec![cell])
+        );
         assert_eq!(g2.attributes(), g.attributes());
         assert_eq!(g2.tables(), g.tables());
         // Deterministic, and another salt is other ids again.
@@ -560,7 +622,9 @@ mod tests {
 
     /// The spike's stream restated from its literal constants.
     fn spike_next(state: &mut u64) -> u32 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*state >> 33) as u32
     }
 
@@ -615,7 +679,10 @@ mod tests {
             let to = spike_next(&mut state) as usize % 10_000;
             let (sf, st, cat, conf, tier) = se[30_000 + j];
             assert_eq!((sf, st), (sids[from], sids[to]), "cross edge {j}");
-            assert_eq!((cat, conf, tier), (category_id("CALLS"), Confidence::Strong, Tier::Fact));
+            assert_eq!(
+                (cat, conf, tier),
+                (category_id("CALLS"), Confidence::Strong, Tier::Fact)
+            );
         }
         let mut lcg = Lcg(SCALE_SEED);
         let mut reference = SCALE_SEED;
@@ -633,7 +700,10 @@ mod tests {
     fn scaled_copies_cells_and_dangling_endpoints() {
         let mut g = chain(3, "CALLS", &[Tier::Fact]);
         let ids = g.node_ids();
-        let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text("body".into()) };
+        let cell = Cell {
+            kind: CellTypeId(1),
+            payload: CellPayload::Text("body".into()),
+        };
         g.cell(ids[1], cell.clone());
         let dangling = NodeId(0xdead);
         let edge = Edge::new(ids[2], dangling, category_id("USES"), Confidence::Medium);
@@ -679,7 +749,10 @@ mod tests {
         assert_ne!(edge_rows(&g), edge_rows(&clique_ring(60, 120, "CALLS", 2)));
 
         let one = clique_ring(1, 0, "CALLS", 1);
-        assert_eq!(strongly_connected(&Adjacency::build(&one, &CategorySet::all())).len(), 1);
+        assert_eq!(
+            strongly_connected(&Adjacency::build(&one, &CategorySet::all())).len(),
+            1
+        );
         assert_eq!(clique_ring(0, 5, "CALLS", 1).edges().count(), 0);
     }
 
@@ -699,7 +772,11 @@ mod tests {
         );
         assert_eq!(g.node_kind(node_id(0, 4)), Some(NodeKindId(1)));
         let plain = chain(3, "NEXT", &[]);
-        assert!(edge_rows(&plain).iter().all(|r| r.4 == Tier::Derived && r.2 == EdgeCategoryId(6)));
+        assert!(
+            edge_rows(&plain)
+                .iter()
+                .all(|r| r.4 == Tier::Derived && r.2 == EdgeCategoryId(6))
+        );
         assert_eq!(chain(1, "CALLS", &[Tier::Fact]).edges().count(), 0);
         assert_eq!(chain(0, "CALLS", &[Tier::Fact]).node_ids().len(), 0);
     }

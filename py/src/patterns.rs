@@ -45,7 +45,9 @@ fn options(
     group_by: &str,
 ) -> Result<PatternArgs, String> {
     if min_share > 100 {
-        return Err(format!("min_share is a percentage (0-100), got {min_share}"));
+        return Err(format!(
+            "min_share is a percentage (0-100), got {min_share}"
+        ));
     }
     let Some(group_by) = GroupBy::parse(group_by) else {
         return Err(format!(
@@ -137,9 +139,15 @@ impl PyGraph {
         scope: Option<&str>,
         group_by: &str,
     ) -> PyResult<Py<PyAny>> {
-        let report =
-            graph_report(&self.merged, &self.repo_labels, min_support, min_share, scope, group_by)
-                .map_err(PyValueError::new_err)?;
+        let report = graph_report(
+            &self.merged,
+            &self.repo_labels,
+            min_support,
+            min_share,
+            scope,
+            group_by,
+        )
+        .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&report))
     }
 }
@@ -201,11 +209,36 @@ mod tests {
     /// `(name, route, service fn or None for a direct call, repository fn)`
     /// per gin handler; the last one skips the service layer.
     const HANDLERS: [(&str, &str, Option<&str>, &str); 6] = [
-        ("GetUserHandler", "GET(\"/users/:id\"", Some("GetUser"), "FindUser"),
-        ("CreateUserHandler", "POST(\"/users\"", Some("CreateUser"), "InsertUser"),
-        ("GetOrderHandler", "GET(\"/orders/:id\"", Some("GetOrder"), "FindOrder"),
-        ("ListProductsHandler", "GET(\"/products\"", Some("ListProducts"), "AllProducts"),
-        ("CreatePaymentHandler", "POST(\"/payments\"", Some("CreatePayment"), "InsertPayment"),
+        (
+            "GetUserHandler",
+            "GET(\"/users/:id\"",
+            Some("GetUser"),
+            "FindUser",
+        ),
+        (
+            "CreateUserHandler",
+            "POST(\"/users\"",
+            Some("CreateUser"),
+            "InsertUser",
+        ),
+        (
+            "GetOrderHandler",
+            "GET(\"/orders/:id\"",
+            Some("GetOrder"),
+            "FindOrder",
+        ),
+        (
+            "ListProductsHandler",
+            "GET(\"/products\"",
+            Some("ListProducts"),
+            "AllProducts",
+        ),
+        (
+            "CreatePaymentHandler",
+            "POST(\"/payments\"",
+            Some("CreatePayment"),
+            "InsertPayment",
+        ),
         ("RawOrderHandler", "POST(\"/orders\"", None, "SaveOrder"),
     ];
     const CONVENTION: &str = "handler>service>repository>db";
@@ -223,7 +256,8 @@ mod tests {
             handlers.push_str(&format!("\tr.{route}, {name})\n"));
         }
         handlers.push_str("}\n");
-        let mut service = String::from("package service\n\nimport \"example.com/shop/repository\"\n");
+        let mut service =
+            String::from("package service\n\nimport \"example.com/shop/repository\"\n");
         let mut repository =
             String::from("package repository\n\nimport \"database/sql\"\n\nvar db *sql.DB\n");
         for (i, (name, _, svc, repo)) in hs.iter().enumerate() {
@@ -247,7 +281,11 @@ mod tests {
             handlers = handlers.replace("\t\"example.com/shop/repository\"\n", "");
         }
         for (rel, text) in [
-            ("go.mod", "module example.com/shop\n\ngo 1.21\n\nrequire github.com/gin-gonic/gin v1.9.1\n".to_string()),
+            (
+                "go.mod",
+                "module example.com/shop\n\ngo 1.21\n\nrequire github.com/gin-gonic/gin v1.9.1\n"
+                    .to_string(),
+            ),
             ("handlers/handlers.go", handlers),
             ("service/service.go", service),
             ("repository/repository.go", repository),
@@ -282,8 +320,18 @@ mod tests {
 
     fn git(top: &Path, gitconfig: &Path, args: &[&str]) {
         let out = Command::new("git")
-            .args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.name=glia",
+                "-c",
+                "user.email=glia@example.invalid",
+            ])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .arg("-C")
             .arg(top)
             .args(args)
@@ -294,7 +342,11 @@ mod tests {
             .env_remove("GIT_INDEX_FILE")
             .output()
             .unwrap_or_else(|e| panic!("LE.7b patterns_vs_rev test needs a `git` binary: {e}"));
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// LE.7b: the helper behind `PyGraph.patterns` returns the engine's report with the documented keys and no
@@ -305,7 +357,8 @@ mod tests {
     fn graph_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("graph", 6);
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "service").expect("report");
+        let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "service")
+            .expect("report");
         let v = value(&r);
         for key in ["populations", "divergences", "skipped_small", "delta_mode"] {
             assert!(v.get(key).is_some(), "{key} missing: {v}");
@@ -332,35 +385,69 @@ mod tests {
         assert_eq!(v["skipped_small"], 0);
         assert_eq!(divergent(&v), [DIRECT]);
         let p = &v["populations"][0];
-        assert_eq!((p["status"].as_str(), p["verdict"].as_str()), (Some("judged"), Some("5/6")), "{p}");
+        assert_eq!(
+            (p["status"].as_str(), p["verdict"].as_str()),
+            (Some("judged"), Some("5/6")),
+            "{p}"
+        );
         assert_eq!(p["convention"], CONVENTION);
         assert_eq!(v["divergences"][0]["file"], "handlers/handlers.go");
         assert_eq!(v["divergences"][0]["route_path"], "/orders");
 
         // min_support above the population: too small, nothing judged.
-        let small = value(&graph_report(&built.merged, &built.repo_labels, 7, 75, None, "service").expect("report"));
-        assert_eq!((small["skipped_small"].as_u64(), small["judged"].as_u64()), (Some(1), Some(0)));
+        let small = value(
+            &graph_report(&built.merged, &built.repo_labels, 7, 75, None, "service")
+                .expect("report"),
+        );
+        assert_eq!(
+            (small["skipped_small"].as_u64(), small["judged"].as_u64()),
+            (Some(1), Some(0))
+        );
         assert_eq!(small["populations"][0]["status"], "too_small");
         assert!(divergent(&small).is_empty());
         // A 5/6 share is below 90%: no convention.
-        let split = value(&graph_report(&built.merged, &built.repo_labels, 5, 90, None, "service").expect("report"));
+        let split = value(
+            &graph_report(&built.merged, &built.repo_labels, 5, 90, None, "service")
+                .expect("report"),
+        );
         assert_eq!(split["populations"][0]["status"], "no_convention");
         assert!(divergent(&split).is_empty());
         // A scope no handler sits under: every handler excluded.
-        let scoped = value(&graph_report(&built.merged, &built.repo_labels, 5, 75, Some("service"), "service").expect("report"));
+        let scoped = value(
+            &graph_report(
+                &built.merged,
+                &built.repo_labels,
+                5,
+                75,
+                Some("service"),
+                "service",
+            )
+            .expect("report"),
+        );
         assert_eq!(scoped["excluded"]["out_of_scope"], 6, "{scoped}");
         assert_eq!(scoped["handlers"], 0);
 
-        let err = graph_report(&built.merged, &built.repo_labels, 5, 101, None, "service").expect_err("bad share");
+        let err = graph_report(&built.merged, &built.repo_labels, 5, 101, None, "service")
+            .expect_err("bad share");
         assert!(err.contains("101"), "{err}");
 
         // CA.5b: group_by reaches the engine; any other value names the two.
-        let by_pkg =
-            value(&graph_report(&built.merged, &built.repo_labels, 5, 75, None, "package").expect("report"));
+        let by_pkg = value(
+            &graph_report(&built.merged, &built.repo_labels, 5, 75, None, "package")
+                .expect("report"),
+        );
         assert_eq!(by_pkg["populations"][0]["package"], "handlers", "{by_pkg}");
-        assert_eq!(v["populations"][0]["package"], serde_json::Value::Null, "{v}");
-        let err = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "dir").expect_err("bad group_by");
-        assert!(err.contains("\"service\" or \"package\"") && err.contains("\"dir\""), "{err}");
+        assert_eq!(
+            v["populations"][0]["package"],
+            serde_json::Value::Null,
+            "{v}"
+        );
+        let err = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "dir")
+            .expect_err("bad group_by");
+        assert!(
+            err.contains("\"service\" or \"package\"") && err.contains("\"dir\""),
+            "{err}"
+        );
     }
 
     /// LE.7b: the helper behind `patterns_vs_rev` judges the working
@@ -373,7 +460,11 @@ mod tests {
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
         git(&top, &gitconfig, &["init", "-q"]);
         git(&top, &gitconfig, &["add", "-A"]);
-        git(&top, &gitconfig, &["commit", "-q", "-m", "five layered handlers"]);
+        git(
+            &top,
+            &gitconfig,
+            &["commit", "-q", "-m", "five layered handlers"],
+        );
         write_shop(&top, 6);
         let repo = top.to_str().expect("utf-8");
         let v = value(&rev_report(repo, "HEAD", 5, 75, None, "service").expect("report"));

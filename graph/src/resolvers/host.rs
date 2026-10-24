@@ -104,7 +104,12 @@ pub(crate) fn owner_spelling(rel: &str) -> Cow<'_, str> {
 pub(crate) fn owner_of_file<'r>(rels: &[&'r str], file: &str) -> Option<&'r str> {
     rels.iter()
         .copied()
-        .filter(|r| file == *r || file.strip_prefix(*r).is_some_and(|rest| rest.starts_with('/')))
+        .filter(|r| {
+            file == *r
+                || file
+                    .strip_prefix(*r)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
         .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
 }
 
@@ -255,7 +260,10 @@ const CLUSTER_DNS_TAILS: &[&str] = &[".svc", ".local"];
 /// The IacResolver builds its index the same way, and this one stays separate
 /// on purpose: that one pairs verbatim qnames, this one keys on a normalised
 /// NAME and only for the service-naming kinds.
-pub(crate) fn build_service_alias_index(graphs: &[RepoGraph], owners: &Owners) -> (AliasIndex, usize) {
+pub(crate) fn build_service_alias_index(
+    graphs: &[RepoGraph],
+    owners: &Owners,
+) -> (AliasIndex, usize) {
     let mut index = AliasIndex::new();
     let mut project_level: HashSet<String> = HashSet::new();
     let mut nested: HashMap<RepoId, Vec<&str>> = HashMap::new();
@@ -358,7 +366,9 @@ fn declaring_modules(g: &RepoGraph) -> HashMap<NodeId, Vec<NodeId>> {
 /// the extension dropped and `/` spelled `::`): `services::users::compose`
 /// -> `services/users`. `None` for a file at the repo root.
 fn module_dir(qname: &str) -> Option<String> {
-    qname.rsplit_once("::").map(|(dir, _)| dir.replace("::", "/"))
+    qname
+        .rsplit_once("::")
+        .map(|(dir, _)| dir.replace("::", "/"))
 }
 
 /// The last `/` segment of a name or path.
@@ -561,8 +571,12 @@ pub(crate) fn third_party_sides(graphs: &[RepoGraph], kind: NodeKindId) -> HashS
     cells
         .into_iter()
         .filter(|(_, c)| {
-            third_party_hosts_lazy(&mut aliases, || build_service_alias_index(graphs, &Owners::default()).0, c)
-                .is_some()
+            third_party_hosts_lazy(
+                &mut aliases,
+                || build_service_alias_index(graphs, &Owners::default()).0,
+                c,
+            )
+            .is_some()
         })
         .map(|(id, _)| id)
         .collect()
@@ -588,7 +602,11 @@ impl ExternalSides {
     /// The marker line, or None when no side was third-party.
     pub(crate) fn line(&self, via: &str) -> Option<String> {
         (!self.sides.is_empty()).then(|| {
-            format!("[channel-external] via={via} clients={} hosts={}", self.sides.len(), self.hosts.len())
+            format!(
+                "[channel-external] via={via} clients={} hosts={}",
+                self.sides.len(),
+                self.hosts.len()
+            )
         })
     }
 
@@ -670,15 +688,22 @@ pub(crate) fn narrow_by_host<T: HostScoped>(
         };
         scopes.extend(named.iter().copied());
     }
-    let keeps = |t: &T| scopes.contains(&(t.repo(), None)) || scopes.contains(&(t.repo(), t.owner()));
+    let keeps =
+        |t: &T| scopes.contains(&(t.repo(), None)) || scopes.contains(&(t.repo(), t.owner()));
     let kept_repos: HashSet<RepoId> = hits.iter().filter(|t| keeps(t)).map(|t| t.repo()).collect();
     let kept = hits.iter().filter(|t| keeps(t)).count();
     if kept == 0 || kept == hits.len() {
         return Narrowed::No;
     }
-    let within_repo = hits.iter().any(|t| !keeps(t) && kept_repos.contains(&t.repo()));
+    let within_repo = hits
+        .iter()
+        .any(|t| !keeps(t) && kept_repos.contains(&t.repo()));
     hits.retain(|t| keeps(t));
-    if within_repo { Narrowed::Owner } else { Narrowed::Repo }
+    if within_repo {
+        Narrowed::Owner
+    } else {
+        Narrowed::Repo
+    }
 }
 
 // ============================================================================
@@ -739,7 +764,13 @@ impl<'g> SideNarrowing<'g> {
                 }
             }
         }
-        Self { graphs, owners, scopes, cells, aliases: None }
+        Self {
+            graphs,
+            owners,
+            scopes,
+            cells,
+            aliases: None,
+        }
     }
 
     /// DF.9: the hosts of `side` when it is a third-party side
@@ -749,7 +780,11 @@ impl<'g> SideNarrowing<'g> {
     pub(crate) fn third_party_hosts(&mut self, side: NodeId) -> Option<Vec<String>> {
         let cells = self.cells.get(&side)?;
         let (graphs, owners) = (self.graphs, &self.owners);
-        third_party_hosts_lazy(&mut self.aliases, || build_service_alias_index(graphs, owners).0, cells)
+        third_party_hosts_lazy(
+            &mut self.aliases,
+            || build_service_alias_index(graphs, owners).0,
+            cells,
+        )
     }
 
     /// Keep only the `targets` of the side `from` that live in the project or
@@ -757,11 +792,20 @@ impl<'g> SideNarrowing<'g> {
     /// target's node id. True when targets were dropped. Nothing narrows
     /// under two targets, without a host on every hit, for a target with no
     /// indexed scope, or without a kept target.
-    pub(crate) fn narrow<T>(&mut self, from: NodeId, targets: &mut Vec<T>, id: impl Fn(&T) -> NodeId) -> bool {
+    pub(crate) fn narrow<T>(
+        &mut self,
+        from: NodeId,
+        targets: &mut Vec<T>,
+        id: impl Fn(&T) -> NodeId,
+    ) -> bool {
         if targets.len() < 2 {
             return false;
         }
-        let Some(hosts) = self.cells.get(&from).and_then(|c| hit_hosts(c.iter().copied())) else {
+        let Some(hosts) = self
+            .cells
+            .get(&from)
+            .and_then(|c| hit_hosts(c.iter().copied()))
+        else {
             return false;
         };
         let mut scoped: Vec<Scoped> = Vec::with_capacity(targets.len());
@@ -772,7 +816,9 @@ impl<'g> SideNarrowing<'g> {
             scoped.push(Scoped { at, repo, owner });
         }
         let (graphs, owners) = (self.graphs, &self.owners);
-        let aliases = self.aliases.get_or_insert_with(|| build_service_alias_index(graphs, owners).0);
+        let aliases = self
+            .aliases
+            .get_or_insert_with(|| build_service_alias_index(graphs, owners).0);
         if narrow_by_host(aliases, Some(&hosts), &mut scoped) == Narrowed::No {
             return false;
         }
@@ -794,13 +840,17 @@ mod tests {
     use glia_core::{Confidence, Edge};
 
     fn hit(json: &str) -> Cell {
-        Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.into()) }
+        Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.into()),
+        }
     }
 
     /// A3.3 — `raw` is read only as a KEY, and to the first unescaped quote.
     #[test]
     fn raw_field_matches_the_key_not_a_value() {
-        let with = r#"{"method":"GET","path":"/users","confidence":"strong","raw":"https://a/users?x=1"}"#;
+        let with =
+            r#"{"method":"GET","path":"/users","confidence":"strong","raw":"https://a/users?x=1"}"#;
         assert_eq!(raw_field(with), Some("https://a/users?x=1"));
         let without = r#"{"method":"GET","path":"/users","file":"a.ts","line":1,"col":1,"confidence":"strong"}"#;
         assert_eq!(raw_field(without), None);
@@ -825,7 +875,8 @@ mod tests {
                 (node_kind::INFRA_RESOURCE, "infra:statefulset:Users_DB"),
             ],
         );
-        let (idx, project_level) = build_service_alias_index(std::slice::from_ref(&g), &Owners::default());
+        let (idx, project_level) =
+            build_service_alias_index(std::slice::from_ref(&g), &Owners::default());
         assert_eq!(idx.keys().collect::<Vec<_>>(), vec!["users-db"]);
         assert_eq!(project_level, 0);
     }
@@ -857,23 +908,50 @@ mod tests {
         );
         let r = g.repo;
         let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
-        let labels = ["users-service", "@shop/web", "root", "github.com/acme/billing-api", "My App"];
+        let labels = [
+            "users-service",
+            "@shop/web",
+            "root",
+            "github.com/acme/billing-api",
+            "My App",
+        ];
         for (id, label) in ids.iter().zip(labels) {
             g.nav.name_by_id.insert(*id, label.to_string());
         }
         let owners = owners(&["services/users", "go/billing", "my%20app"]);
         let (idx, project_level) = build_service_alias_index(std::slice::from_ref(&g), &owners);
         let scopes = |k: &str| {
-            let mut v: Vec<AliasScope> = idx.get(k).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            let mut v: Vec<AliasScope> = idx
+                .get(k)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
             v.sort_by_key(|(repo, owner)| (repo.0, *owner));
             v
         };
-        assert_eq!(scopes("users"), vec![(r, Some(0))], "label users-service and dir users meet");
-        assert_eq!(scopes("billing"), vec![(r, Some(1))], "Go module path: last segment");
-        assert_eq!(scopes("my app"), vec![(r, Some(2))], "a spaced rel finds its escaped owner");
-        assert!(idx.contains_key("web") && scopes("web").is_empty(), "npm scope dropped; no route, no scope");
+        assert_eq!(
+            scopes("users"),
+            vec![(r, Some(0))],
+            "label users-service and dir users meet"
+        );
+        assert_eq!(
+            scopes("billing"),
+            vec![(r, Some(1))],
+            "Go module path: last segment"
+        );
+        assert_eq!(
+            scopes("my app"),
+            vec![(r, Some(2))],
+            "a spaced rel finds its escaped owner"
+        );
+        assert!(
+            idx.contains_key("web") && scopes("web").is_empty(),
+            "npm scope dropped; no route, no scope"
+        );
         assert!(idx.contains_key("storefront") && scopes("storefront").is_empty());
-        assert!(!idx.contains_key("root") && !idx.contains_key("."), "the repo root is no alias");
+        assert!(
+            !idx.contains_key("root") && !idx.contains_key("."),
+            "the repo root is no alias"
+        );
         let mut keys: Vec<&String> = idx.keys().collect();
         keys.sort();
         assert_eq!(keys, ["billing", "my app", "storefront", "users", "web"]);
@@ -919,14 +997,33 @@ mod tests {
         let owners = owners(&["services/users"]);
         let (idx, _) = build_service_alias_index(std::slice::from_ref(&g), &owners);
         let scopes = |k: &str| {
-            let mut v: Vec<AliasScope> = idx.get(k).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            let mut v: Vec<AliasScope> = idx
+                .get(k)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
             v.sort_by_key(|(repo, owner)| (repo.0, *owner));
             v
         };
-        assert_eq!(scopes("users"), vec![(r, Some(0))], "declared inside the users project");
-        assert_eq!(scopes("orders"), vec![(r, None)], "root compose: the whole repo");
-        assert_eq!(scopes("frontend"), vec![(r, None)], "a project with no route falls back to the repo");
-        assert_eq!(scopes("carts"), vec![(r, None)], "usersx is not under users");
+        assert_eq!(
+            scopes("users"),
+            vec![(r, Some(0))],
+            "declared inside the users project"
+        );
+        assert_eq!(
+            scopes("orders"),
+            vec![(r, None)],
+            "root compose: the whole repo"
+        );
+        assert_eq!(
+            scopes("frontend"),
+            vec![(r, None)],
+            "a project with no route falls back to the repo"
+        );
+        assert_eq!(
+            scopes("carts"),
+            vec![(r, None)],
+            "usersx is not under users"
+        );
         assert_eq!(scopes("search"), vec![(r, None)], "no declaring file");
     }
 
@@ -935,11 +1032,21 @@ mod tests {
     #[test]
     fn owner_of_file_takes_the_longest_segment_bounded_rel() {
         let rels = ["services", "services/api", "web"];
-        assert_eq!(owner_of_file(&rels, "services/api/main.go"), Some("services/api"));
-        assert_eq!(owner_of_file(&rels, "services/other/x.go"), Some("services"));
+        assert_eq!(
+            owner_of_file(&rels, "services/api/main.go"),
+            Some("services/api")
+        );
+        assert_eq!(
+            owner_of_file(&rels, "services/other/x.go"),
+            Some("services")
+        );
         assert_eq!(owner_of_file(&rels, "services/api"), Some("services/api"));
         assert_eq!(owner_of_file(&rels, "web"), Some("web"));
-        assert_eq!(owner_of_file(&rels, "webx/a.ts"), None, "segment boundary, not a string prefix");
+        assert_eq!(
+            owner_of_file(&rels, "webx/a.ts"),
+            None,
+            "segment boundary, not a string prefix"
+        );
         assert_eq!(owner_of_file(&rels, "main.go"), None);
         assert_eq!(owner_of_file(&[], "services/api/main.go"), None);
     }
@@ -984,7 +1091,10 @@ mod tests {
     #[test]
     fn endpoint_hit_host_fields_are_read_as_keys() {
         let h = |json: &str| hit_hosts(&[hit(json)]);
-        assert_eq!(h(r#"{"path":"/u","host":"a:1"}"#), Some(vec!["a:1".to_string()]));
+        assert_eq!(
+            h(r#"{"path":"/u","host":"a:1"}"#),
+            Some(vec!["a:1".to_string()])
+        );
         // `hosts` wins and is the whole set; `host` is its first entry.
         assert_eq!(
             h(r#"{"host":"a","hosts":["a", "b" ,"a"]}"#),
@@ -1004,10 +1114,20 @@ mod tests {
     /// CB.21: an owner-qualified qname yields its owner; a bare one none.
     #[test]
     fn owner_from_qname_suffix_reads_the_owner_segment() {
-        assert_eq!(owner_from_qname_suffix("ws:/ws @services/chat"), Some("services/chat"));
+        assert_eq!(
+            owner_from_qname_suffix("ws:/ws @services/chat"),
+            Some("services/chat")
+        );
         assert_eq!(owner_from_qname_suffix("ws:/ws"), None);
-        assert_eq!(owner_from_qname_suffix("ws:/pkg/@scope"), None, "an npm scope is no owner");
-        assert_eq!(owner_from_qname_suffix("ws:/ws @my%20app"), Some("my%20app"));
+        assert_eq!(
+            owner_from_qname_suffix("ws:/pkg/@scope"),
+            None,
+            "an npm scope is no owner"
+        );
+        assert_eq!(
+            owner_from_qname_suffix("ws:/ws @my%20app"),
+            Some("my%20app")
+        );
     }
 
     /// CB.21: nested PROJECT rels per repo, the repo root skipped; a file's
@@ -1026,10 +1146,20 @@ mod tests {
         let b = channel_graph("pf-b", &[(node_kind::PROJECT, "project:api")]);
         let (ra, rb) = (a.repo, b.repo);
         let pf = ProjectFiles::of(&[a, b]);
-        assert_eq!(pf.owner_of(ra, "services/users/api/user.proto"), Some("services/users"));
-        assert_eq!(pf.owner_of(ra, "services/admin/user.proto"), Some("services"));
+        assert_eq!(
+            pf.owner_of(ra, "services/users/api/user.proto"),
+            Some("services/users")
+        );
+        assert_eq!(
+            pf.owner_of(ra, "services/admin/user.proto"),
+            Some("services")
+        );
         assert_eq!(pf.owner_of(ra, "proto/user.proto"), None);
-        assert_eq!(pf.owner_of(ra, "api/x.proto"), None, "another repo's project");
+        assert_eq!(
+            pf.owner_of(ra, "api/x.proto"),
+            None,
+            "another repo's project"
+        );
         assert_eq!(pf.owner_of(rb, "api/x.proto"), Some("api"));
     }
 
@@ -1078,15 +1208,26 @@ mod tests {
         assert_eq!(project_level, 3, "chat, notify and web");
         let both = || {
             vec![
-                Plain { id: 1, repo: g.repo, owner: chat },
-                Plain { id: 2, repo: g.repo, owner: notify },
+                Plain {
+                    id: 1,
+                    repo: g.repo,
+                    owner: chat,
+                },
+                Plain {
+                    id: 2,
+                    repo: g.repo,
+                    owner: notify,
+                },
             ]
         };
         let ids = |hits: &[Plain]| hits.iter().map(|t| t.id).collect::<Vec<_>>();
 
         let mut hits = both();
         let host = vec!["chat-svc:8080".to_string()];
-        assert_eq!(narrow_by_host(&aliases, Some(&host), &mut hits), Narrowed::Owner);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host), &mut hits),
+            Narrowed::Owner
+        );
         assert_eq!(ids(&hits), [1]);
 
         let mut hits = both();
@@ -1095,7 +1236,11 @@ mod tests {
 
         for unknown in [vec!["billing:9000".to_string()], vec!["web".to_string()]] {
             let mut hits = both();
-            assert_eq!(narrow_by_host(&aliases, Some(&unknown), &mut hits), Narrowed::No, "{unknown:?}");
+            assert_eq!(
+                narrow_by_host(&aliases, Some(&unknown), &mut hits),
+                Narrowed::No,
+                "{unknown:?}"
+            );
             assert_eq!(ids(&hits), [1, 2], "{unknown:?}");
         }
     }

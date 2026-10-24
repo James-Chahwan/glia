@@ -41,7 +41,11 @@ fn capped(max_rows: usize) -> Options {
 /// The budget error of an evaluation that must stop.
 fn stopped(text: &str, g: &MemSource, opts: &Options) -> RulesError {
     match run("rules", text, g, opts) {
-        Ok(ev) => panic!("evaluation passed a budget of {}: {:?}", opts.max_rows, ev.stats()),
+        Ok(ev) => panic!(
+            "evaluation passed a budget of {}: {:?}",
+            opts.max_rows,
+            ev.stats()
+        ),
         Err(e) => e,
     }
 }
@@ -52,9 +56,17 @@ fn evaluated<'s>(text: &str, g: &'s MemSource, opts: &Options) -> Evaluation<'s,
 
 /// The renders of `pred`'s rows, one string per row.
 fn rendered(ev: &Evaluation<'_, MemSource>, pred: &str) -> Vec<String> {
-    let rows = ev.rows(pred).unwrap_or_else(|e| panic!("rows({pred}): {e}"));
+    let rows = ev
+        .rows(pred)
+        .unwrap_or_else(|e| panic!("rows({pred}): {e}"));
     rows.iter()
-        .map(|r| r.values.iter().map(|v| ev.render(v)).collect::<Vec<_>>().join(" "))
+        .map(|r| {
+            r.values
+                .iter()
+                .map(|v| ev.render(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .collect()
 }
 
@@ -67,13 +79,29 @@ fn every_node() -> Vec<String> {
 fn unseeded_tc_hits_the_budget() {
     let g = ring();
     let err = stopped(UNSEEDED_TC, &g, &capped(CAP));
-    let RulesError::Budget { predicate, source, line, rows, cap } = &err else {
+    let RulesError::Budget {
+        predicate,
+        source,
+        line,
+        rows,
+        cap,
+    } = &err
+    else {
         panic!("expected a budget error, got {err:?}")
     };
-    assert_eq!((predicate.as_str(), source.as_str(), *line, *cap), ("tc/2", "rules", 2, CAP));
-    assert!(*rows > CAP && *rows < 160_000, "{rows}: stopped past the cap, before the closure");
+    assert_eq!(
+        (predicate.as_str(), source.as_str(), *line, *cap),
+        ("tc/2", "rules", 2, CAP)
+    );
+    assert!(
+        *rows > CAP && *rows < 160_000,
+        "{rows}: stopped past the cap, before the closure"
+    );
     let text = err.to_string();
-    assert!(text.starts_with("rule evaluation stopped: `tc/2` (rules:2) reached "), "{text}");
+    assert!(
+        text.starts_with("rule evaluation stopped: `tc/2` (rules:2) reached "),
+        "{text}"
+    );
     // Actionable: the message names the seeded forms.
     assert!(text.contains("`tc(x, y) :- seed(x), ...`"), "{text}");
     assert!(text.contains("reaches(x, y, \"CATS\")"), "{text}");
@@ -94,7 +122,11 @@ pair(x, y) :- stc(x, y).
     assert_eq!(rendered(&ev, "hit"), every_node());
     let pairs = rendered(&ev, "pair");
     assert_eq!(pairs.len(), 400);
-    assert!(pairs.iter().all(|p| p.starts_with("n00000 ")), "{:?}", pairs.first());
+    assert!(
+        pairs.iter().all(|p| p.starts_with("n00000 ")),
+        "{:?}",
+        pairs.first()
+    );
     assert!(ev.stats().derived_rows < CAP / 10, "{:?}", ev.stats());
 }
 
@@ -115,7 +147,13 @@ fn magic_seeds_user_recursion() {
     let mut off = on.clone();
     off.magic = false;
     let err = stopped(&text, &g, &off);
-    let RulesError::Budget { predicate, line, cap, .. } = &err else {
+    let RulesError::Budget {
+        predicate,
+        line,
+        cap,
+        ..
+    } = &err
+    else {
         panic!("expected a budget error, got {err:?}")
     };
     assert_eq!((predicate.as_str(), *line, *cap), ("tc/2", 3, CAP), "{err}");
@@ -135,12 +173,25 @@ fn one_round_explosion() {
     // One non-recursive round of 160,000 raw rows: counted as emitted, so it stops
     // before the round is inserted.
     let err = stopped("p(x, y) :- node(x, _), node(y, _).", &g, &capped(CAP));
-    let RulesError::Budget { predicate, source, line, rows, cap } = &err else {
+    let RulesError::Budget {
+        predicate,
+        source,
+        line,
+        rows,
+        cap,
+    } = &err
+    else {
         panic!("expected a budget error, got {err:?}")
     };
-    assert_eq!((predicate.as_str(), source.as_str(), *line, *cap), ("p/2", "rules", 1, CAP));
+    assert_eq!(
+        (predicate.as_str(), source.as_str(), *line, *cap),
+        ("p/2", "rules", 1, CAP)
+    );
     assert!(*rows > CAP && *rows < 160_000, "{rows}");
-    assert!(err.to_string().starts_with("rule evaluation stopped: `p/2` (rules:1) reached "));
+    assert!(
+        err.to_string()
+            .starts_with("rule evaluation stopped: `p/2` (rules:1) reached ")
+    );
     // Under a budget that holds it (160,000 bindings emitted, then 160,000 rows
     // inserted), the round is all 160,000 rows.
     let ev = evaluated("p(x, y) :- node(x, _), node(y, _).", &g, &capped(320_000));
@@ -202,7 +253,10 @@ fn explain_candidates_budget() {
         })
     );
     if let Err(e) = &err {
-        assert!(e.to_string().starts_with("rule evaluation stopped: `two/2` (rules:1) reached "));
+        assert!(
+            e.to_string()
+                .starts_with("rule evaluation stopped: `two/2` (rules:1) reached ")
+        );
     }
     // Under the evaluation's own cap the smallest rendered body wins: through n00001.
     let own = ev.explain_limits();
@@ -210,7 +264,12 @@ fn explain_candidates_budget() {
     let hops: Vec<(String, String)> = w
         .leaf_edges()
         .iter()
-        .map(|h| (ev.render(&Value::Node(h.from)), ev.render(&Value::Node(h.to))))
+        .map(|h| {
+            (
+                ev.render(&Value::Node(h.from)),
+                ev.render(&Value::Node(h.to)),
+            )
+        })
         .collect();
     let want = [("n00000", "n00001"), ("n00001", "n00051")];
     assert_eq!(hops, want.map(|(a, b)| (a.to_string(), b.to_string())));

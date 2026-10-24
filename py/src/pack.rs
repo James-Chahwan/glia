@@ -66,7 +66,12 @@ fn pack_args(
 /// EC.9b (ruling EC-9b): pack never reads the calibration record, so
 /// `ranking=None` is `ppr`, the default ranking (H10 with `cochange`). `Err`
 /// names an unknown `ranking`.
-fn ranked(mut args: PackArgs, ranking: Option<&str>, cochange: bool, cache: Arc<RankCache>) -> Result<PackArgs, String> {
+fn ranked(
+    mut args: PackArgs,
+    ranking: Option<&str>,
+    cochange: bool,
+    cache: Arc<RankCache>,
+) -> Result<PackArgs, String> {
     args.ranking = ranking_named(ranking.unwrap_or("ppr"), cochange)?;
     args.rank_cache = Some(cache);
     Ok(args)
@@ -296,7 +301,11 @@ mod tests {
         // EA.7: the ranking keywords and the held cache reach the engine;
         // a pack through a held cache equals the engine's through the same
         // cache, and a second call over it equals the first.
-        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let held = Arc::new(RankCache::new(
+            "pygraph",
+            &built.repo_roots,
+            &built.repo_labels,
+        ));
         let r = ranked(args.clone(), Some("bfs"), false, held.clone()).expect("bfs");
         assert_eq!(r.ranking.harness_name(), "B0");
         assert!(r.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
@@ -304,20 +313,34 @@ mod tests {
         let first = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         let again = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         assert_eq!(first, again, "a warm cache packs what a cold one did");
-        assert_eq!(first, ours, "no history snapshot: the held cache packs the 0.5.2 order");
+        assert_eq!(
+            first, ours,
+            "no history snapshot: the held cache packs the 0.5.2 order"
+        );
         // EC.9b: no ranking is the default ranking, never the record: the
         // same pack as `ppr`, its selection the uncalibrated fallback.
         let sel = ranked(args.clone(), None, true, held.clone()).expect("None");
         assert_eq!(sel.ranking, d.ranking);
         let mut fell = pack_query(m, "price", &sel, 0);
         let why = fell.selection.take().expect("a selection");
-        assert_eq!((why.pick.as_str(), why.source, why.reason), ("H10", "fallback", Some("pack_uncalibrated")));
-        let bfs = pack_query(m, "price", &r, 0).selection.expect("a selection");
+        assert_eq!(
+            (why.pick.as_str(), why.source, why.reason),
+            ("H10", "fallback", Some("pack_uncalibrated"))
+        );
+        let bfs = pack_query(m, "price", &r, 0)
+            .selection
+            .expect("a selection");
         assert_eq!((bfs.pick.as_str(), bfs.source), ("B0", "explicit"));
         let mut asked = pack_query(m, "price", &d, 0);
         asked.selection = None;
-        assert_eq!(serde_json::to_string(&fell).expect("json"), serde_json::to_string(&asked).expect("json"));
+        assert_eq!(
+            serde_json::to_string(&fell).expect("json"),
+            serde_json::to_string(&asked).expect("json")
+        );
         let err = ranked(args.clone(), Some("x"), true, held).expect_err("x is no ranking");
-        assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
+        assert_eq!(
+            err,
+            "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
     }
 }

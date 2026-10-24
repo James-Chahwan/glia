@@ -41,12 +41,7 @@ pub struct PackageNodes {
 
 /// Detect manifest type from path basename and extract dependencies. Returns
 /// an empty result when the path isn't a recognised manifest.
-pub fn extract_for_path(
-    source: &str,
-    path: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> PackageNodes {
+pub fn extract_for_path(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> PackageNodes {
     let base = path.rsplit('/').next().unwrap_or(path);
     let names_with_eco: Vec<(&'static str, String)> = match base {
         "package.json" => scan_package_json(source)
@@ -107,11 +102,7 @@ pub(crate) fn is_gemspec_name(base: &str) -> bool {
     base.len() > ".gemspec".len() && base.ends_with(".gemspec")
 }
 
-fn build_nodes(
-    deps: Vec<(&'static str, String)>,
-    module_id: NodeId,
-    repo: RepoId,
-) -> PackageNodes {
+fn build_nodes(deps: Vec<(&'static str, String)>, module_id: NodeId, repo: RepoId) -> PackageNodes {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut nav = CodeNav::default();
@@ -241,7 +232,9 @@ fn extract_top_level_string_keys(body: &str) -> Vec<String> {
                 // Confirm followed by `:` (after optional whitespace) to
                 // distinguish keys from value strings.
                 let mut k = j + 1;
-                while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') {
+                while k < bytes.len()
+                    && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n')
+                {
                     k += 1;
                 }
                 if k < bytes.len() && bytes[k] == b':' {
@@ -418,11 +411,7 @@ fn pep508_package_name(spec: &str) -> Option<String> {
         })
         .unwrap_or(s.len());
     let name = s[..end].trim().to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 // ----------------------------------------------------------------------------
@@ -800,10 +789,20 @@ end
     /// manifest branch), but declares no PACKAGE_DEP of its own.
     #[test]
     fn gemspec_is_a_manifest_path() {
-        for path in ["mytool.gemspec", "server/mytool.gemspec", "a/b/my-tool.gemspec"] {
+        for path in [
+            "mytool.gemspec",
+            "server/mytool.gemspec",
+            "a/b/my-tool.gemspec",
+        ] {
             assert!(is_manifest_path(path), "{path}");
         }
-        for path in [".gemspec", "mytool.gemspec.bak", "gemspec", "mytool.gemspecs", "lib/gemspec.rb"] {
+        for path in [
+            ".gemspec",
+            "mytool.gemspec.bak",
+            "gemspec",
+            "mytool.gemspecs",
+            "lib/gemspec.rb",
+        ] {
             assert!(!is_manifest_path(path), "{path}");
         }
         let repo = RepoId(1);

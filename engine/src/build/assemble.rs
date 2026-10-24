@@ -95,7 +95,13 @@ fn build_const_table_with(
             return ConstScan::NoLang;
         };
         if let Some((hashes, consts)) = lookup
-            && let Some(scan) = consts.get(path, &ConstKey { content_hash: hashes[i], lang })
+            && let Some(scan) = consts.get(
+                path,
+                &ConstKey {
+                    content_hash: hashes[i],
+                    lang,
+                },
+            )
         {
             return ConstScan::Hit(scan.clone());
         }
@@ -121,7 +127,10 @@ fn build_const_table_with(
             ConstScan::Fresh(lang, scan) => {
                 miss += 1;
                 if let Some((hashes, m)) = memo.as_mut() {
-                    let key = ConstKey { content_hash: hashes[i], lang };
+                    let key = ConstKey {
+                        content_hash: hashes[i],
+                        lang,
+                    };
                     m.consts.insert(path.clone(), key, scan.clone());
                 }
                 scan
@@ -334,7 +343,9 @@ pub(crate) fn parse_and_graft(
     // queue / event const folds also read `file_tables`, the per-file scans
     // the table was merged from (DC.3).
     let started = Instant::now();
-    let memo = hashes.as_deref().zip(cache.as_deref_mut().map(ParseCache::memo_mut));
+    let memo = hashes
+        .as_deref()
+        .zip(cache.as_deref_mut().map(ParseCache::memo_mut));
     let (mut const_table, file_tables, const_files, threads) =
         build_const_table_with(files, memo, &mut parse_errors);
     if !const_table.is_empty() {
@@ -423,8 +434,11 @@ pub(super) fn build_graphs_for_repo(
     let mut grafted = parse_and_graft(files, cache, ctx);
 
     let started = Instant::now();
-    let GroupPlan { groups, di_refs, recv_fields } =
-        lang_build::plan_groups(std::mem::take(&mut grafted.parses_by_lang), ctx.repo_label);
+    let GroupPlan {
+        groups,
+        di_refs,
+        recv_fields,
+    } = lang_build::plan_groups(std::mem::take(&mut grafted.parses_by_lang), ctx.repo_label);
     let group_ctx = GroupCtx {
         repo: ctx.repo,
         repo_label: ctx.repo_label,
@@ -442,7 +456,12 @@ pub(super) fn build_graphs_for_repo(
     if let Some(line) = grafted.dart_packages.marker(ctx.repo_label) {
         eprintln!("{line}");
     }
-    let LanguageGraphs { graphs, keys, fills, pooled } = lang_build::fold_groups(
+    let LanguageGraphs {
+        graphs,
+        keys,
+        fills,
+        pooled,
+    } = lang_build::fold_groups(
         builds,
         &recv_fields,
         &mut grafted.parse_errors,
@@ -453,7 +472,11 @@ pub(super) fn build_graphs_for_repo(
     // caller that keeps a per-graph side table beside them (a watch session's
     // group of each graph) maps a graph to its group through it.
     debug_assert_eq!(keys.len(), graphs.len(), "one plan key per language graph");
-    debug_assert_eq!(fills.len(), graphs.len(), "one evidence fill per language graph");
+    debug_assert_eq!(
+        fills.len(),
+        graphs.len(),
+        "one evidence fill per language graph"
+    );
 
     repo_markers(&graphs, &di_refs, &grafted, pooled, ctx.repo_label);
     (graphs, fills, grafted.parse_errors, grafted.times)

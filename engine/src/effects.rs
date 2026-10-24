@@ -447,9 +447,11 @@ pub fn effects(
     // gRPC / GraphQL client sink), from every entry's cells.
     let external = external_sinks(
         merged,
-        hits.iter()
-            .map(|h| h.real)
-            .filter(|id| index.kind(*id).is_some_and(|k| EXTERNAL_SIDE_KINDS.contains(&k))),
+        hits.iter().map(|h| h.real).filter(|id| {
+            index
+                .kind(*id)
+                .is_some_and(|k| EXTERNAL_SIDE_KINDS.contains(&k))
+        }),
     );
 
     let keying = default_keying(merged);

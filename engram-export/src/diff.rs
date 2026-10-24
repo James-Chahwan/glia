@@ -454,14 +454,22 @@ fn pair_routes(
         if !taken[b]
             && let Some((token, kind, verb, path)) = route_slot(n)
         {
-            groups.entry((token, kind, verb)).or_default().0.push((b, path));
+            groups
+                .entry((token, kind, verb))
+                .or_default()
+                .0
+                .push((b, path));
         }
     }
     for (t, n) in target.nodes.iter().enumerate() {
         if pair[t].is_none()
             && let Some((token, kind, verb, path)) = route_slot(n)
         {
-            groups.entry((token, kind, verb)).or_default().1.push((t, path));
+            groups
+                .entry((token, kind, verb))
+                .or_default()
+                .1
+                .push((t, path));
         }
     }
     let equal: fn(&str, &str) -> bool = |a, b| a == b;
@@ -470,7 +478,11 @@ fn pair_routes(
         if bs.is_empty() || ts.is_empty() {
             continue;
         }
-        let made = if is_endpoint_kind(kind) { &mut endpoints } else { &mut routes };
+        let made = if is_endpoint_kind(kind) {
+            &mut endpoints
+        } else {
+            &mut routes
+        };
         for fits in [equal, alike_paths] {
             let free_b: Side = bs.iter().filter(|(b, _)| !taken[*b]).copied().collect();
             let free_t: Side = ts
@@ -1689,7 +1701,10 @@ mod tests {
             ],
             vec![],
         );
-        let base = gmap(vec![endpoint("endpoint:DELETE:<unresolved> @web", f, 2)], vec![]);
+        let base = gmap(
+            vec![endpoint("endpoint:DELETE:<unresolved> @web", f, 2)],
+            vec![],
+        );
         let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
         assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
         assert_eq!(diff.removed, ["endpoint:DELETE:<unresolved> @web"]);

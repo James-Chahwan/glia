@@ -464,16 +464,19 @@ fn checker_reports_each_stale_mention_at_its_line() {
     // --experimental` (DE.11), so a synthetic hidden `--legacy` on `patterns`
     // keeps the checker's hidden-flag branch covered.
     let mut s = surface();
-    s.flags.get_mut("patterns").expect("patterns snapshot").insert(
-        "--legacy".into(),
-        ArgSpec {
-            long: "--legacy".into(),
-            takes_value: false,
-            values: vec![],
-            hidden: true,
-            global: false,
-        },
-    );
+    s.flags
+        .get_mut("patterns")
+        .expect("patterns snapshot")
+        .insert(
+            "--legacy".into(),
+            ArgSpec {
+                long: "--legacy".into(),
+                takes_value: false,
+                values: vec![],
+                hidden: true,
+                global: false,
+            },
+        );
     let md = "\
 ## Install
 ```

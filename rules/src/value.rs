@@ -58,7 +58,9 @@ impl Tier {
 
     /// The tier a name spells, in either case; `None` for any other text.
     pub fn parse(s: &str) -> Option<Tier> {
-        Tier::ALL.into_iter().find(|t| t.name().eq_ignore_ascii_case(s))
+        Tier::ALL
+            .into_iter()
+            .find(|t| t.name().eq_ignore_ascii_case(s))
     }
 
     /// The tier of a conjunction: the weaker of the two (max).
@@ -300,7 +302,9 @@ impl<K, V> Default for Lookup<K, V> {
 
 impl<K, V> fmt::Debug for Lookup<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Lookup").field("len", &self.0.len()).finish()
+        f.debug_struct("Lookup")
+            .field("len", &self.0.len())
+            .finish()
     }
 }
 
@@ -467,7 +471,11 @@ mod tests {
         let want = [h2, h10, hs10, h9, ha, hb, hlo, hi];
         for w in want.windows(2) {
             assert_eq!(t.cmp_rendered(w[0], w[1], &render), Ordering::Less, "{w:?}");
-            assert_eq!(t.cmp_rendered(w[1], w[0], &render), Ordering::Greater, "{w:?}");
+            assert_eq!(
+                t.cmp_rendered(w[1], w[0], &render),
+                Ordering::Greater,
+                "{w:?}"
+            );
         }
         assert_eq!(t.cmp_rendered(ha, ha, &render), Ordering::Equal);
         let mut got = vec![hb, h9, hi, h10, ha, hs10, hlo, h2];
@@ -496,7 +504,10 @@ mod tests {
             t.intern(ValueRef::Str("9")),
             t.intern(ValueRef::Str("b")),
         );
-        let (n1, n2) = (t.intern(ValueRef::Node(NodeId(1))), t.intern(ValueRef::Node(NodeId(2))));
+        let (n1, n2) = (
+            t.intern(ValueRef::Node(NodeId(1))),
+            t.intern(ValueRef::Node(NodeId(2))),
+        );
         assert_eq!(t.cmp_values(i2, i10), Some(Ordering::Less));
         assert_eq!(t.cmp_values(ineg, i2), Some(Ordering::Less));
         assert_eq!(t.cmp_values(i10, i10), Some(Ordering::Equal));

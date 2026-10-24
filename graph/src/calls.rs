@@ -55,7 +55,8 @@ impl SiteFiles {
             .or_else(|| self.0.get(&r.from))
             .and_then(|file| {
                 let base = file.rsplit('/').next().unwrap_or(file);
-                base.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+                base.rsplit_once('.')
+                    .map(|(_, ext)| ext.to_ascii_lowercase())
             })
             .is_some_and(|ext| is_ts_family(&ext))
     }
@@ -401,19 +402,39 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
         }
         for fact in facts {
             let (receiver, name, line, write) = match fact {
-                NavFact::MemberRead { receiver, name, line } => (receiver, name, line, false),
-                NavFact::MemberWrite { receiver, name, line } => (receiver, name, line, true),
+                NavFact::MemberRead {
+                    receiver,
+                    name,
+                    line,
+                } => (receiver, name, line, false),
+                NavFact::MemberWrite {
+                    receiver,
+                    name,
+                    line,
+                } => (receiver, name, line, true),
                 _ => continue,
             };
             stats.member_reads += 1;
             let plain = !receiver.is_empty()
-                && receiver.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$');
+                && receiver
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$');
             let qualifier = if plain {
-                CallQualifier::Attribute { base: receiver.clone(), name: name.clone() }
+                CallQualifier::Attribute {
+                    base: receiver.clone(),
+                    name: name.clone(),
+                }
             } else {
-                CallQualifier::ComplexReceiver { receiver: receiver.clone(), name: name.clone() }
+                CallQualifier::ComplexReceiver {
+                    receiver: receiver.clone(),
+                    name: name.clone(),
+                }
             };
-            let site = CallSite { from: n.id, qualifier, line: *line };
+            let site = CallSite {
+                from: n.id,
+                qualifier,
+                line: *line,
+            };
             let Some(from_module) = enclosing_home_module(g, n.id) else {
                 continue;
             };
@@ -428,8 +449,17 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
             let Some(member) = type_method(g, type_id, name) else {
                 continue;
             };
-            let wanted = if write { NavFact::Setter } else { NavFact::Getter };
-            if member == n.id || !g.nav.nav_facts.get(&member).is_some_and(|f| f.contains(&wanted))
+            let wanted = if write {
+                NavFact::Setter
+            } else {
+                NavFact::Getter
+            };
+            if member == n.id
+                || !g
+                    .nav
+                    .nav_facts
+                    .get(&member)
+                    .is_some_and(|f| f.contains(&wanted))
             {
                 continue;
             }
@@ -444,7 +474,13 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
             stats.accessor_read += 1;
             "receiver_accessor_read"
         };
-        push_edge(g, from, to, edge_category::CALLS, graph_evidence("graph:calls", rule).line(line));
+        push_edge(
+            g,
+            from,
+            to,
+            edge_category::CALLS,
+            graph_evidence("graph:calls", rule).line(line),
+        );
     }
 }
 
@@ -508,10 +544,7 @@ fn bare_call_target(
 
 /// True when `id` is a METHOD owned directly by an INTERFACE.
 fn is_interface_method(nav: &CodeNav, id: NodeId) -> bool {
-    nav.parent_of
-        .get(&id)
-        .and_then(|p| nav.kind_by_id.get(p))
-        == Some(&node_kind::INTERFACE)
+    nav.parent_of.get(&id).and_then(|p| nav.kind_by_id.get(p)) == Some(&node_kind::INTERFACE)
 }
 
 /// Per-build tally of resolutions that only bind because an ENUM owns methods
@@ -621,8 +654,9 @@ pub(crate) fn position_file(node: &glia_core::Node) -> Option<String> {
 /// partition keeps the other refs in their original order, so every other
 /// edge list is unchanged.
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mut EvidenceTally) {
-    let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) =
-        refs.iter().partition(|r| r.category == edge_category::NAVIGATES_TO);
+    let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) = refs
+        .iter()
+        .partition(|r| r.category == edge_category::NAVIGATES_TO);
     let files = if refs.is_empty() && nav_refs.is_empty() {
         SiteFiles(HashMap::new())
     } else {
@@ -788,7 +822,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
     if enum_hits.uses > 0 {
-        eprintln!("[resolve] enum member uses bound: {} ext={}", enum_hits.uses, enum_hits.ext(g));
+        eprintln!(
+            "[resolve] enum member uses bound: {} ext={}",
+            enum_hits.uses,
+            enum_hits.ext(g)
+        );
     }
     // DT.5k fired_on, once per graph build that bound one:
     //   `[resolve] static member uses bound: N`
@@ -818,7 +856,10 @@ fn heritage_through_module(g: &RepoGraph, bound: NodeId, name: &str) -> Option<N
     if g.nav.kind_by_id.get(&bound) != Some(&node_kind::MODULE) {
         return Some(bound);
     }
-    g.symbols.module_symbols.get(&bound).and_then(|s| s.get(name).copied())
+    g.symbols
+        .module_symbols
+        .get(&bound)
+        .and_then(|s| s.get(name).copied())
 }
 
 /// Resolve `base.name()` where `base` is a plain identifier already bound in
@@ -835,18 +876,24 @@ fn resolve_attribute_target(
 ) -> Option<NodeId> {
     let base_id = bindings?.get(base).copied()?;
     match g.nav.kind_by_id.get(&base_id).copied() {
-        Some(k) if k == node_kind::MODULE || k == node_kind::PACKAGE => {
-            g.symbols.module_symbols.get(&base_id).and_then(|s| s.get(name).copied())
-        }
-        Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT || k == node_kind::ENUM => {
-            g.symbols.class_methods.get(&base_id).and_then(|m| m.get(name).copied())
-        }
+        Some(k) if k == node_kind::MODULE || k == node_kind::PACKAGE => g
+            .symbols
+            .module_symbols
+            .get(&base_id)
+            .and_then(|s| s.get(name).copied()),
+        Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT || k == node_kind::ENUM => g
+            .symbols
+            .class_methods
+            .get(&base_id)
+            .and_then(|m| m.get(name).copied()),
         // A6.6: a statically-qualified interface call (`IFoo.Of()`, a Java
         // static interface method, a Rust `Trait::f`) binds the interface's
         // own METHOD through its separate table.
-        Some(k) if k == node_kind::INTERFACE => {
-            g.symbols.interface_methods.get(&base_id).and_then(|m| m.get(name).copied())
-        }
+        Some(k) if k == node_kind::INTERFACE => g
+            .symbols
+            .interface_methods
+            .get(&base_id)
+            .and_then(|m| m.get(name).copied()),
         _ => None,
     }
 }
@@ -1193,7 +1240,12 @@ pub(crate) fn type_method(g: &RepoGraph, type_id: NodeId, method: &str) -> Optio
         .class_methods
         .get(&type_id)
         .and_then(|m| m.get(method).copied())
-        .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))
+        .or_else(|| {
+            g.symbols
+                .interface_methods
+                .get(&type_id)
+                .and_then(|m| m.get(method).copied())
+        })
 }
 
 /// DF.17: the STATE_VAR child named `name` of the CLASS `type_id` (CH.2's
@@ -1205,10 +1257,16 @@ fn state_member(g: &RepoGraph, type_id: NodeId, name: &str) -> Option<NodeId> {
     if g.nav.kind_by_id.get(&type_id) != Some(&node_kind::CLASS) {
         return None;
     }
-    let mut hits = g.nav.children_of.get(&type_id)?.iter().copied().filter(|c| {
-        g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR)
-            && g.nav.name_by_id.get(c).map(String::as_str) == Some(name)
-    });
+    let mut hits = g
+        .nav
+        .children_of
+        .get(&type_id)?
+        .iter()
+        .copied()
+        .filter(|c| {
+            g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR)
+                && g.nav.name_by_id.get(c).map(String::as_str) == Some(name)
+        });
     let hit = hits.next()?;
     hits.all(|c| c == hit).then_some(hit)
 }
@@ -1218,7 +1276,10 @@ fn state_member(g: &RepoGraph, type_id: NodeId, name: &str) -> Option<NodeId> {
 /// whose bare field reads are constructor-gated and whose typed receivers
 /// may read a STATE_VAR (DF.17).
 fn is_ts_family(ext: &str) -> bool {
-    matches!(ext, "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue")
+    matches!(
+        ext,
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue"
+    )
 }
 
 /// CL.5a: the simple name of the type a constructor-call receiver builds —
@@ -1420,11 +1481,19 @@ pub(crate) fn scope_binding(g: &RepoGraph, module: NodeId, name: &str) -> Option
                 || k == node_kind::ENUM
         )
     };
-    let bound = g.symbols.module_import_bindings.get(&module).and_then(|b| b.get(name));
+    let bound = g
+        .symbols
+        .module_import_bindings
+        .get(&module)
+        .and_then(|b| b.get(name));
     if let Some(&bound) = bound {
         return Some(heritage_through_module(g, bound, name).filter(is_type));
     }
-    let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(name));
+    let own = g
+        .symbols
+        .module_symbols
+        .get(&module)
+        .and_then(|s| s.get(name));
     if let Some(&own) = own {
         return Some(Some(own).filter(is_type));
     }
@@ -1542,7 +1611,11 @@ fn receiver_type_node(
 /// identifier, binds no FUNCTION or declares no class return type names
 /// nothing.
 fn returned_type(g: &RepoGraph, from_module: NodeId, from: NodeId, callee: &str) -> Option<NodeId> {
-    if callee.is_empty() || !callee.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+    if callee.is_empty()
+        || !callee
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    {
         return None;
     }
     let bindings = g.symbols.module_import_bindings.get(&from_module);
@@ -1590,11 +1663,7 @@ fn own_field_type<'g>(g: &'g RepoGraph, owner: NodeId, field: &str) -> Option<&'
 /// The type `scope` records for its local `name` (`""` = unknown type), or
 /// `None` when `name` is not a local of `scope`.
 fn local_type<'g>(g: &'g RepoGraph, scope: NodeId, name: &str) -> Option<&'g str> {
-    g.nav
-        .local_types
-        .get(&scope)?
-        .get(name)
-        .map(String::as_str)
+    g.nav.local_types.get(&scope)?.get(name).map(String::as_str)
 }
 
 /// The declared type of `field` on the innermost CLASS / STRUCT / ENUM
@@ -1631,7 +1700,8 @@ impl BareFieldGate {
             .and_then(|&i| position_file(&g.nodes[i]))
             .and_then(|file| {
                 let base = file.rsplit('/').next().unwrap_or(&file);
-                base.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+                base.rsplit_once('.')
+                    .map(|(_, ext)| ext.to_ascii_lowercase())
             })
     }
 
@@ -1690,7 +1760,10 @@ impl ConstructedReceivers {
         } else {
             self.unbound += 1;
         }
-        *self.by_ext.entry(ext.unwrap_or_else(|| "?".to_string())).or_default() += 1;
+        *self
+            .by_ext
+            .entry(ext.unwrap_or_else(|| "?".to_string()))
+            .or_default() += 1;
     }
 
     /// The fired_on line, `None` when the build met no constructed receiver:
@@ -1699,7 +1772,11 @@ impl ConstructedReceivers {
         if self.bound + self.unbound == 0 {
             return None;
         }
-        let exts: Vec<String> = self.by_ext.iter().map(|(e, n)| format!("{e}:{n}")).collect();
+        let exts: Vec<String> = self
+            .by_ext
+            .iter()
+            .map(|(e, n)| format!("{e}:{n}"))
+            .collect();
         Some(format!(
             "[recv] constructed receivers: bound={} unbound={} (ext={})",
             self.bound,
@@ -1761,7 +1838,8 @@ pub(crate) fn emit_method_level_implements_with(
     g: &mut RepoGraph,
     extra: impl Fn(&RepoGraph, NodeId, &str) -> Option<NodeId>,
 ) -> usize {
-    let mut existing: std::collections::HashSet<(NodeId, NodeId)> = std::collections::HashSet::new();
+    let mut existing: std::collections::HashSet<(NodeId, NodeId)> =
+        std::collections::HashSet::new();
     // (implementing METHOD, interface METHOD, confidence, found by `extra`).
     let mut pairs: Vec<(NodeId, NodeId, Confidence, bool)> = Vec::new();
     for e in &g.edges {
@@ -1788,7 +1866,11 @@ pub(crate) fn emit_method_level_implements_with(
     pairs.dedup_by_key(|(a, b, ..)| (*a, *b));
     pairs.retain(|(a, b, ..)| !existing.contains(&(*a, *b)));
     for &(from, to, confidence, promoted) in &pairs {
-        let rule = if promoted { "promoted_method" } else { "same_name" };
+        let rule = if promoted {
+            "promoted_method"
+        } else {
+            "same_name"
+        };
         let ev = graph_evidence("graph:iface", rule);
         push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, confidence);
     }
@@ -1920,7 +2002,13 @@ fn nearest_definer(
         }
         let mut hits: Vec<NodeId> = level
             .iter()
-            .filter_map(|b| g.symbols.class_methods.get(b).and_then(|m| m.get(name)).copied())
+            .filter_map(|b| {
+                g.symbols
+                    .class_methods
+                    .get(b)
+                    .and_then(|m| m.get(name))
+                    .copied()
+            })
             .collect();
         hits.sort_unstable_by_key(|h| h.0);
         hits.dedup();
@@ -2064,11 +2152,19 @@ fn self_lookup(
 ) -> Option<(InheritWalk, Definer)> {
     let owner = enclosing_class_or_struct(&g.nav, site.from)
         .filter(|o| g.nav.kind_by_id.get(o) == Some(&node_kind::CLASS))?;
-    let own_defines = g.symbols.class_methods.get(&owner).is_some_and(|m| m.contains_key(name));
+    let own_defines = g
+        .symbols
+        .class_methods
+        .get(&owner)
+        .is_some_and(|m| m.contains_key(name));
     if !is_super && own_defines {
         return None;
     }
-    let walk = if is_super { InheritWalk::SuperCall } else { InheritWalk::SelfCall };
+    let walk = if is_super {
+        InheritWalk::SuperCall
+    } else {
+        InheritWalk::SelfCall
+    };
     Some((walk, nearest_definer(g, supers, owner, name)))
 }
 
@@ -2090,14 +2186,20 @@ fn receiver_lookup(
     if has_own_member(g, class, name) {
         return None;
     }
-    Some((InheritWalk::Receiver { constructed }, nearest_definer(g, supers, class, name)))
+    Some((
+        InheritWalk::Receiver { constructed },
+        nearest_definer(g, supers, class, name),
+    ))
 }
 
 /// True when the CLASS `class` declares a member `name` itself: a METHOD
 /// (`class_methods`) or a STATE_VAR child (DF.17's [`state_member`] shape),
 /// either of which a lookup on an instance finds before the prototype chain.
 fn has_own_member(g: &RepoGraph, class: NodeId, name: &str) -> bool {
-    g.symbols.class_methods.get(&class).is_some_and(|m| m.contains_key(name))
+    g.symbols
+        .class_methods
+        .get(&class)
+        .is_some_and(|m| m.contains_key(name))
         || g.nav.children_of.get(&class).is_some_and(|children| {
             children.iter().any(|c| {
                 g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR)
@@ -2125,7 +2227,9 @@ fn receiver_class(
     let is_class = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
     let from_module = enclosing_home_module(g, site.from)?;
     if let Some(ty) = constructed_type(site) {
-        return constructed_type_id(g, from_module, ty).filter(is_class).map(|t| (t, true));
+        return constructed_type_id(g, from_module, ty)
+            .filter(is_class)
+            .map(|t| (t, true));
     }
     let type_name = receiver_type(g, site)?;
     let (type_id, _) = receiver_type_node(g, site, from_module, type_name, gate, false)
@@ -2176,8 +2280,10 @@ pub(crate) fn emit_override_implements(g: &mut RepoGraph, stats: &mut InheritSta
         let Some(methods) = g.symbols.class_methods.get(&NodeId(sub)) else {
             continue;
         };
-        let mut own: Vec<(&str, NodeId)> =
-            methods.iter().map(|(name, &mid)| (name.as_str(), mid)).collect();
+        let mut own: Vec<(&str, NodeId)> = methods
+            .iter()
+            .map(|(name, &mid)| (name.as_str(), mid))
+            .collect();
         own.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.0.cmp(&b.1.0)));
         for (name, sub_mid) in own {
             if name == CONSTRUCTOR {
@@ -2204,7 +2310,14 @@ pub(crate) fn emit_override_implements(g: &mut RepoGraph, stats: &mut InheritSta
     pairs.retain(|(from, to, _)| !existing.contains(&(*from, *to)));
     for &(from, to, rule) in &pairs {
         let ev = graph_evidence("graph:iface", rule);
-        push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, Confidence::Strong);
+        push_edge_with(
+            g,
+            from,
+            to,
+            edge_category::IMPLEMENTS,
+            ev,
+            Confidence::Strong,
+        );
         if rule == ABSTRACT_OVERRIDE {
             stats.implements += 1;
         } else {
@@ -2279,14 +2392,24 @@ mod tests {
         let r = repo();
         let m2 = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "m2");
         let pkg = NodeId::from_parts(GRAPH_TYPE, r, node_kind::PACKAGE, "m2::MyApp.Accounts");
-        let callee =
-            NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m2::MyApp.Accounts::get_user");
+        let callee = NodeId::from_parts(
+            GRAPH_TYPE,
+            r,
+            node_kind::FUNCTION,
+            "m2::MyApp.Accounts::get_user",
+        );
         let m1 = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "m1");
         let caller = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m1::show");
 
         let mut nav2 = CodeNav::default();
         nav2.record(m2, "m2", "m2", node_kind::MODULE, None);
-        nav2.record(pkg, "Accounts", "m2::MyApp.Accounts", node_kind::PACKAGE, Some(m2));
+        nav2.record(
+            pkg,
+            "Accounts",
+            "m2::MyApp.Accounts",
+            node_kind::PACKAGE,
+            Some(m2),
+        );
         nav2.record(
             callee,
             "get_user",
@@ -2294,7 +2417,12 @@ mod tests {
             node_kind::FUNCTION,
             Some(pkg),
         );
-        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let accounts = FileParse {
             nodes: vec![node(m2), node(pkg), node(callee)],
             edges: vec![],
@@ -2333,12 +2461,22 @@ mod tests {
         };
 
         let g = build_dotted(r, vec![accounts, controller]).unwrap();
-        let calls: Vec<_> =
-            g.edges.iter().filter(|e| e.category == edge_category::CALLS).collect();
-        assert_eq!(calls.len(), 1, "expected exactly one CALLS edge, got {calls:?}");
+        let calls: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS)
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one CALLS edge, got {calls:?}"
+        );
         assert_eq!(calls[0].from, caller);
         assert_eq!(calls[0].to, callee);
-        assert!(g.unresolved_calls.is_empty(), "call should not land in unresolved_calls");
+        assert!(
+            g.unresolved_calls.is_empty(),
+            "call should not land in unresolved_calls"
+        );
     }
 
     // ---- LA.30a: an ENUM owns its methods and members ----------------------
@@ -2351,7 +2489,10 @@ mod tests {
 
     impl Shape {
         fn new() -> Self {
-            Shape { nav: CodeNav::default(), nodes: vec![] }
+            Shape {
+                nav: CodeNav::default(),
+                nodes: vec![],
+            }
         }
 
         fn add(
@@ -2364,7 +2505,12 @@ mod tests {
             let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);
             self.nav.record(id, name, qname, kind, parent);
-            self.nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            self.nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             id
         }
 
@@ -2400,11 +2546,18 @@ mod tests {
     }
 
     fn attr(base: &str, name: &str) -> CallQualifier {
-        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 
     fn edges_of(g: &RepoGraph, category: EdgeCategoryId) -> Vec<(NodeId, NodeId)> {
-        g.edges.iter().filter(|e| e.category == category).map(|e| (e.from, e.to)).collect()
+        g.edges
+            .iter()
+            .filter(|e| e.category == category)
+            .map(|e| (e.from, e.to))
+            .collect()
     }
 
     /// `m2`: `enum E { RED; fn pick() }` — the imported-enum side of the
@@ -2427,7 +2580,11 @@ mod tests {
         let e = s.add(node_kind::ENUM, "m::E", Some(m));
         let a = s.add(node_kind::METHOD, "m::E::a", Some(e));
         let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
-        let site = CallSite { from: a, qualifier: CallQualifier::SelfMethod("b".to_string()), line: 0 };
+        let site = CallSite {
+            from: a,
+            qualifier: CallQualifier::SelfMethod("b".to_string()),
+            line: 0,
+        };
         let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(a, b)]);
         assert!(g.unresolved_calls.is_empty());
@@ -2443,7 +2600,11 @@ mod tests {
         let x = s.add(node_kind::ATTRIBUTE, "m::E::X", Some(e));
         let inner = s.add(node_kind::METHOD, "m::E::X::m", Some(x));
         let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
-        let site = CallSite { from: inner, qualifier: CallQualifier::SelfMethod("b".to_string()), line: 0 };
+        let site = CallSite {
+            from: inner,
+            qualifier: CallQualifier::SelfMethod("b".to_string()),
+            line: 0,
+        };
         let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(inner, b)]);
     }
@@ -2458,7 +2619,11 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "E")],
-            vec![CallSite { from: f, qualifier: attr("E", "pick"), line: 0 }],
+            vec![CallSite {
+                from: f,
+                qualifier: attr("E", "pick"),
+                line: 0,
+            }],
             vec![],
         );
         let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
@@ -2520,7 +2685,11 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "E")],
-            vec![CallSite { from: f, qualifier: attr("E", "RED"), line: 0 }],
+            vec![CallSite {
+                from: f,
+                qualifier: attr("E", "RED"),
+                line: 0,
+            }],
             vec![],
         );
         let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
@@ -2551,8 +2720,14 @@ mod tests {
         let caller = s.file(vec![], vec![], vec![handled]);
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
         // The ENUM's method is indexed (it owns it) but stays out of this pool.
-        assert_eq!(g.symbols.class_methods[&mode].get("run").copied(), Some(enum_run));
-        assert_eq!(edges_of(&g, edge_category::HANDLED_BY), vec![(route, class_run)]);
+        assert_eq!(
+            g.symbols.class_methods[&mode].get("run").copied(),
+            Some(enum_run)
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::HANDLED_BY),
+            vec![(route, class_run)]
+        );
     }
 
     // ---- A6.2a: receiver-type inference -------------------------------------
@@ -2589,7 +2764,19 @@ mod tests {
         let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
         let get = s.add(node_kind::METHOD, "m1::A::get", Some(a));
         s.nav.record_field_type(a, "repo", "UserRepo");
-        (s.file(imports, vec![CallSite { from: get, qualifier, line: 0 }], vec![]), a, get)
+        (
+            s.file(
+                imports,
+                vec![CallSite {
+                    from: get,
+                    qualifier,
+                    line: 0,
+                }],
+                vec![],
+            ),
+            a,
+            get,
+        )
     }
 
     #[test]
@@ -2598,7 +2785,10 @@ mod tests {
         let (caller, _, get) = caller_module(attr("repo", "find"), vec![]);
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
-        assert!(g.unresolved_calls.is_empty(), "the field-typed call must bind");
+        assert!(
+            g.unresolved_calls.is_empty(),
+            "the field-typed call must bind"
+        );
     }
 
     /// `this.repo.find()` reaches the pass as a ComplexReceiver.
@@ -2623,14 +2813,19 @@ mod tests {
         let m3 = s3.add(node_kind::MODULE, "m3", None);
         let imported = s3.add(node_kind::CLASS, "m3::repo", Some(m3));
         let imported_find = s3.add(node_kind::METHOD, "m3::repo::find", Some(imported));
-        let (caller, _, get) =
-            caller_module(attr("repo", "find"), vec![import_symbol("m1", "m3", "repo")]);
+        let (caller, _, get) = caller_module(
+            attr("repo", "find"),
+            vec![import_symbol("m1", "m3", "repo")],
+        );
         let g = build_dotted(
             repo(),
             vec![repo_file, s3.file(vec![], vec![], vec![]), caller],
         )
         .unwrap();
-        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, imported_find)]);
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS),
+            vec![(get, imported_find)]
+        );
         assert!(!edges_of(&g, edge_category::CALLS).contains(&(get, typed_find)));
     }
 
@@ -2644,9 +2839,17 @@ mod tests {
         let m1 = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m1");
         let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "m1::B");
         let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m1::B::run");
-        caller.nav.record(b, "B", "m1::B", node_kind::CLASS, Some(m1));
-        caller.nav.record(run, "run", "m1::B::run", node_kind::METHOD, Some(b));
-        caller.calls.push(CallSite { from: run, qualifier: attr("repo", "find"), line: 0 });
+        caller
+            .nav
+            .record(b, "B", "m1::B", node_kind::CLASS, Some(m1));
+        caller
+            .nav
+            .record(run, "run", "m1::B::run", node_kind::METHOD, Some(b));
+        caller.calls.push(CallSite {
+            from: run,
+            qualifier: attr("repo", "find"),
+            line: 0,
+        });
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 2);
@@ -2663,8 +2866,11 @@ mod tests {
         let twin = s4.add(node_kind::CLASS, "m4::UserRepo", Some(m4));
         s4.add(node_kind::METHOD, "m4::UserRepo::find", Some(twin));
         let (caller, _, _) = caller_module(attr("repo", "find"), vec![]);
-        let g = build_dotted(repo(), vec![repo_file, s4.file(vec![], vec![], vec![]), caller])
-            .unwrap();
+        let g = build_dotted(
+            repo(),
+            vec![repo_file, s4.file(vec![], vec![], vec![]), caller],
+        )
+        .unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 1);
     }
@@ -2685,8 +2891,23 @@ mod tests {
         if let Some(f) = field {
             s.nav.record_field_type(a, f, "UserRepo");
         }
-        let from = if nested { s.add(node_kind::CLASS, "m1::A::B", Some(a)) } else { a };
-        (s.file(vec![], vec![CallSite { from, qualifier, line: 8 }], vec![]), from)
+        let from = if nested {
+            s.add(node_kind::CLASS, "m1::A::B", Some(a))
+        } else {
+            a
+        };
+        (
+            s.file(
+                vec![],
+                vec![CallSite {
+                    from,
+                    qualifier,
+                    line: 8,
+                }],
+                vec![],
+            ),
+            from,
+        )
     }
 
     #[test]
@@ -2758,7 +2979,11 @@ mod tests {
         );
         let (caller, a) = class_scope_caller(recv("this.repo", "find"), Some("repo"), false);
         let g = build_dotted(repo(), vec![caller]).unwrap();
-        let site = |r: &str| CallSite { from: a, qualifier: recv(r, "find"), line: 0 };
+        let site = |r: &str| CallSite {
+            from: a,
+            qualifier: recv(r, "find"),
+            line: 0,
+        };
         assert!(is_class_scope_receiver(&g, &site("this.repo")));
         assert!(is_class_scope_receiver(&g, &site("self.repo")));
         assert!(!is_class_scope_receiver(&g, &site("this.repo.inner")));
@@ -2766,14 +2991,21 @@ mod tests {
         let m1 = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m1");
         assert!(!is_class_scope_receiver(
             &g,
-            &CallSite { from: m1, qualifier: recv("this.repo", "find"), line: 0 }
+            &CallSite {
+                from: m1,
+                qualifier: recv("this.repo", "find"),
+                line: 0
+            }
         ));
     }
 
     // ---- LA.35a: locals before fields ----------------------------------------
 
     fn recv(receiver: &str, name: &str) -> CallQualifier {
-        CallQualifier::ComplexReceiver { receiver: receiver.to_string(), name: name.to_string() }
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
     }
 
     /// `m3`: `struct Index { find() }` — a second type with a `find`.
@@ -2795,9 +3027,17 @@ mod tests {
         let free = s.add(node_kind::FUNCTION, "m1::free", Some(m1));
         s.nav.record_local_type(free, "r", "UserRepo");
         let calls = vec![
-            CallSite { from: free, qualifier: recv("r", "find"), line: 0 },
+            CallSite {
+                from: free,
+                qualifier: recv("r", "find"),
+                line: 0,
+            },
             // Not a local of `free`: nothing to type it by.
-            CallSite { from: free, qualifier: recv("q", "find"), line: 0 },
+            CallSite {
+                from: free,
+                qualifier: recv("q", "find"),
+                line: 0,
+            },
         ];
         let g = build_dotted(repo(), vec![repo_file, s.file(vec![], calls, vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(free, find)]);
@@ -2812,12 +3052,20 @@ mod tests {
         let (repo_file, _, find) = repo_module();
         let (mut caller, _, get) = caller_module(recv("repo", "find"), vec![]);
         caller.nav.record_local_type(get, "repo", "");
-        caller.calls.push(CallSite { from: get, qualifier: attr("repo", "find"), line: 0 });
+        caller.calls.push(CallSite {
+            from: get,
+            qualifier: attr("repo", "find"),
+            line: 0,
+        });
         let g = build_dotted(repo(), vec![repo_file.clone(), caller.clone()]).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 2);
 
-        caller.calls = vec![CallSite { from: get, qualifier: recv("self.repo", "find"), line: 0 }];
+        caller.calls = vec![CallSite {
+            from: get,
+            qualifier: recv("self.repo", "find"),
+            line: 0,
+        }];
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
     }
@@ -2844,7 +3092,11 @@ mod tests {
         let (mut caller, _, get) = caller_module(recv("r", "find"), vec![]);
         caller.nav.record_local_type(get, "r", "self.repo");
         caller.nav.record_local_type(get, "o", "self.other");
-        caller.calls.push(CallSite { from: get, qualifier: recv("o", "find"), line: 0 });
+        caller.calls.push(CallSite {
+            from: get,
+            qualifier: recv("o", "find"),
+            line: 0,
+        });
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
         assert_eq!(g.unresolved_calls.len(), 1);
@@ -2893,7 +3145,11 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "UserRepo")],
-            vec![CallSite { from: f, qualifier: attr("UserRepo", "find"), line: 0 }],
+            vec![CallSite {
+                from: f,
+                qualifier: attr("UserRepo", "find"),
+                line: 0,
+            }],
             vec![],
         );
         let g = build_dotted(repo(), vec![iface_file, caller]).unwrap();
@@ -2904,7 +3160,11 @@ mod tests {
 
     /// Give the node `id` a POSITION cell in `file`.
     fn place(file: &mut FileParse, id: NodeId, path: &str) {
-        let node = file.nodes.iter_mut().find(|n| n.id == id).expect("node in file");
+        let node = file
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .expect("node in file");
         node.cells.push(glia_core::Cell {
             kind: cell_type::POSITION,
             payload: glia_core::CellPayload::Json(format!(
@@ -2915,17 +3175,21 @@ mod tests {
 
     /// `m1`: `class A { repo: UserRepo; <method>() { <qualifier> } }` where the
     /// caller lives in `path` and is named `method`.
-    fn placed_caller(
-        qualifier: CallQualifier,
-        method: &str,
-        path: &str,
-    ) -> (FileParse, NodeId) {
+    fn placed_caller(qualifier: CallQualifier, method: &str, path: &str) -> (FileParse, NodeId) {
         let mut s = Shape::new();
         let m1 = s.add(node_kind::MODULE, "m1", None);
         let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
         let caller = s.add(node_kind::METHOD, &format!("m1::A::{method}"), Some(a));
         s.nav.record_field_type(a, "repo", "UserRepo");
-        let mut file = s.file(vec![], vec![CallSite { from: caller, qualifier, line: 0 }], vec![]);
+        let mut file = s.file(
+            vec![],
+            vec![CallSite {
+                from: caller,
+                qualifier,
+                line: 0,
+            }],
+            vec![],
+        );
         place(&mut file, caller, path);
         (file, caller)
     }
@@ -2947,8 +3211,7 @@ mod tests {
     #[test]
     fn bare_receiver_inside_constructor_binds_in_typescript() {
         let (repo_file, _, find) = repo_module();
-        let (caller, ctor) =
-            placed_caller(attr("repo", "find"), "constructor", "src/a.service.ts");
+        let (caller, ctor) = placed_caller(attr("repo", "find"), "constructor", "src/a.service.ts");
         let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(ctor, find)]);
     }
@@ -3018,7 +3281,10 @@ mod tests {
             method_twin = s.add(node_kind::METHOD, "m2::DraftStore::twin", Some(store));
             s.add(node_kind::STATE_VAR, "m2::DraftStore::twin", Some(store));
         }
-        (s.file(vec![], vec![], vec![]), [store, draft, save, method_twin])
+        (
+            s.file(vec![], vec![], vec![]),
+            [store, draft, save, method_twin],
+        )
     }
 
     /// `m1`: `class Editor { store: DraftStore; show() { this.store.<m>() .. } }`,
@@ -3032,7 +3298,11 @@ mod tests {
         let calls = methods
             .iter()
             .enumerate()
-            .map(|(i, m)| CallSite { from: show, qualifier: recv("this.store", m), line: i as u32 })
+            .map(|(i, m)| CallSite {
+                from: show,
+                qualifier: recv("this.store", m),
+                line: i as u32,
+            })
             .collect();
         let mut file = s.file(vec![], calls, vec![]);
         if let Some(path) = path {
@@ -3046,7 +3316,10 @@ mod tests {
         let (store, [_, draft, save, _]) = store_module(false);
         let (caller, show) = reader(&["draft", "save"], Some("src/app/editor.component.ts"));
         let g = build_typescript(repo(), vec![store, caller], |_, _| None).unwrap();
-        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, draft), (show, save)]);
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS),
+            vec![(show, draft), (show, save)]
+        );
         assert_eq!(
             evidence_rule(&g, show, draft, edge_category::CALLS),
             calls_rule("receiver_state")
@@ -3064,7 +3337,10 @@ mod tests {
         let (store, [_, _, _, method_twin]) = store_module(true);
         let (caller, show) = reader(&["twin"], Some("src/app/editor.component.ts"));
         let g = build_typescript(repo(), vec![store, caller], |_, _| None).unwrap();
-        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, method_twin)]);
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS),
+            vec![(show, method_twin)]
+        );
         assert_eq!(
             evidence_rule(&g, show, method_twin, edge_category::CALLS),
             calls_rule("receiver_type")
@@ -3080,7 +3356,11 @@ mod tests {
             let (store, [_, _, save, _]) = store_module(false);
             let (caller, show) = reader(&["draft", "save"], path);
             let g = build_dotted(repo(), vec![store, caller]).unwrap();
-            assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, save)], "{path:?}");
+            assert_eq!(
+                edges_of(&g, edge_category::CALLS),
+                vec![(show, save)],
+                "{path:?}"
+            );
             assert_eq!(g.unresolved_calls.len(), 1, "{path:?}");
         }
         let (store, [_, _, save, _]) = store_module(false);
@@ -3095,16 +3375,26 @@ mod tests {
         let (store, [class, draft, _, _]) = store_module(false);
         let g = build_dotted(repo(), vec![store]).unwrap();
         assert_eq!(state_member(&g, class, "draft"), Some(draft));
-        assert_eq!(state_member(&g, class, "save"), None, "a METHOD is not state");
+        assert_eq!(
+            state_member(&g, class, "save"),
+            None,
+            "a METHOD is not state"
+        );
         assert_eq!(state_member(&g, draft, "draft"), None, "not a CLASS");
 
         let (mut store, [class, draft, _, _]) = store_module(false);
         let q = "m2::DraftStore::draft#2";
         let shadow = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, q);
         assert_ne!(shadow, draft);
-        store.nav.record(shadow, "draft", q, node_kind::STATE_VAR, Some(class));
+        store
+            .nav
+            .record(shadow, "draft", q, node_kind::STATE_VAR, Some(class));
         let g = build_dotted(repo(), vec![store]).unwrap();
-        assert_eq!(state_member(&g, class, "draft"), None, "two same-named STATE_VARs");
+        assert_eq!(
+            state_member(&g, class, "draft"),
+            None,
+            "two same-named STATE_VARs"
+        );
     }
 
     #[test]
@@ -3123,7 +3413,11 @@ mod tests {
         let mut s = Shape::new();
         let m = s.add(node_kind::MODULE, module, None);
         let calc = s.add(node_kind::CLASS, &format!("{module}::Calc"), Some(m));
-        let add = s.add(node_kind::METHOD, &format!("{module}::Calc::add"), Some(calc));
+        let add = s.add(
+            node_kind::METHOD,
+            &format!("{module}::Calc::add"),
+            Some(calc),
+        );
         (s.file(vec![], vec![], vec![]), add)
     }
 
@@ -3137,7 +3431,11 @@ mod tests {
         let t = s.add(node_kind::FUNCTION, "m1::t", Some(m1));
         let calls = qualifiers
             .into_iter()
-            .map(|qualifier| CallSite { from: t, qualifier, line: 0 })
+            .map(|qualifier| CallSite {
+                from: t,
+                qualifier,
+                line: 0,
+            })
             .collect();
         (s.file(imports, calls, vec![]), t)
     }
@@ -3146,7 +3444,12 @@ mod tests {
     fn constructed_type_forms() {
         let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m1::t");
         let of = |qualifier: CallQualifier| {
-            constructed_type(&CallSite { from, qualifier, line: 0 }).map(str::to_string)
+            constructed_type(&CallSite {
+                from,
+                qualifier,
+                line: 0,
+            })
+            .map(str::to_string)
         };
         let calc = Some("Calc".to_string());
         for receiver in [
@@ -3208,7 +3511,10 @@ mod tests {
         );
         let g = build_dotted(repo(), vec![calc_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(t, add)]);
-        assert_eq!(evidence_rule(&g, t, add, edge_category::CALLS), calls_rule("receiver_type"));
+        assert_eq!(
+            evidence_rule(&g, t, add, edge_category::CALLS),
+            calls_rule("receiver_type")
+        );
         assert_eq!(g.unresolved_calls.len(), 2);
     }
 
@@ -3245,8 +3551,11 @@ mod tests {
     #[test]
     fn constructed_receiver_skips_the_field_gate() {
         let (repo_file, _, find) = repo_module();
-        let (caller, shadow) =
-            placed_caller(attr("(new UserRepo())", "find"), "shadow", "src/a.service.ts");
+        let (caller, shadow) = placed_caller(
+            attr("(new UserRepo())", "find"),
+            "shadow",
+            "src/a.service.ts",
+        );
         let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(shadow, find)]);
 
@@ -3279,7 +3588,12 @@ mod tests {
     fn constructed_type_postfix_new() {
         let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m1::t");
         let of = |qualifier: CallQualifier| {
-            constructed_type(&CallSite { from, qualifier, line: 0 }).map(str::to_string)
+            constructed_type(&CallSite {
+                from,
+                qualifier,
+                line: 0,
+            })
+            .map(str::to_string)
         };
         for (receiver, want) in [
             ("Calc.new", "Calc"),
@@ -3295,7 +3609,11 @@ mod tests {
             // Read as written; the type lookup rejects a non-type.
             ("calc.new", "calc"),
         ] {
-            assert_eq!(of(recv(receiver, "add")).as_deref(), Some(want), "{receiver:?}");
+            assert_eq!(
+                of(recv(receiver, "add")).as_deref(),
+                Some(want),
+                "{receiver:?}"
+            );
         }
         assert_eq!(of(attr("Calc.new", "add")).as_deref(), Some("Calc"));
         for receiver in [
@@ -3326,12 +3644,19 @@ mod tests {
     fn postfix_new_receiver_binds_the_constructed_types_method() {
         let (calc_file, add) = calc_module("m2");
         let (caller, t) = constructing_caller(
-            vec![recv("Calc.new", "add"), recv("Calc.new.with(1)", "add"), recv("Calc::new()", "add")],
+            vec![
+                recv("Calc.new", "add"),
+                recv("Calc.new.with(1)", "add"),
+                recv("Calc::new()", "add"),
+            ],
             vec![],
         );
         let g = crate::build::build_ruby(repo(), vec![calc_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(t, add)]);
-        assert_eq!(evidence_rule(&g, t, add, edge_category::CALLS), calls_rule("receiver_type"));
+        assert_eq!(
+            evidence_rule(&g, t, add, edge_category::CALLS),
+            calls_rule("receiver_type")
+        );
         assert_eq!(g.unresolved_calls.len(), 2);
     }
 
@@ -3389,9 +3714,12 @@ mod tests {
         let m2 = other.add(node_kind::MODULE, "src::b", None);
         other.add(node_kind::CLASS, "src::b::Base", Some(m2));
         other.add(node_kind::INTERFACE, "src::b::IFoo", Some(m2));
-        let g =
-            build_typescript(repo(), vec![file, other.file(vec![], vec![], vec![])], |_, _| None)
-                .unwrap();
+        let g = build_typescript(
+            repo(),
+            vec![file, other.file(vec![], vec![], vec![])],
+            |_, _| None,
+        )
+        .unwrap();
         assert_eq!(
             heritage_edges(&g),
             vec![
@@ -3428,16 +3756,28 @@ mod tests {
         );
         let g = build_typescript(
             repo(),
-            vec![b.file(vec![], vec![], vec![]), dup.file(vec![], vec![], vec![]), child_file],
+            vec![
+                b.file(vec![], vec![], vec![]),
+                dup.file(vec![], vec![], vec![]),
+                child_file,
+            ],
             |_, spec| (spec == "./base").then(|| "src::base".to_string()),
         )
         .unwrap();
         assert_eq!(
             heritage_edges(&g),
-            vec![(child, base, edge_category::INHERITS_FROM, Confidence::Strong)]
+            vec![(
+                child,
+                base,
+                edge_category::INHERITS_FROM,
+                Confidence::Strong
+            )]
         );
         assert_eq!(g.unresolved_refs.len(), 1);
-        assert_eq!(g.unresolved_refs[0].qualifier, CallQualifier::Bare("Component".to_string()));
+        assert_eq!(
+            g.unresolved_refs[0].qualifier,
+            CallQualifier::Bare("Component".to_string())
+        );
     }
 
     /// A TS default import binds its local name to the MODULE. Heritage must
@@ -3477,13 +3817,22 @@ mod tests {
         );
         let g = build_typescript(
             repo(),
-            vec![b.file(vec![], vec![], vec![]), o.file(vec![], vec![], vec![]), child_file],
+            vec![
+                b.file(vec![], vec![], vec![]),
+                o.file(vec![], vec![], vec![]),
+                child_file,
+            ],
             |_, spec| (spec == "./base").then(|| "src::base".to_string()),
         )
         .unwrap();
         assert_eq!(
             heritage_edges(&g),
-            vec![(child, base, edge_category::INHERITS_FROM, Confidence::Strong)]
+            vec![(
+                child,
+                base,
+                edge_category::INHERITS_FROM,
+                Confidence::Strong
+            )]
         );
         assert_eq!(g.unresolved_refs.len(), 1);
         assert_eq!(g.unresolved_refs[0].from, alias);
@@ -3497,8 +3846,11 @@ mod tests {
         let (caller, a, get) = caller_module(attr("other", "find"), vec![]);
         let mut part = Shape::new();
         part.nav.record_field_type(a, "other", "UserRepo");
-        let g = build_dotted(repo(), vec![repo_file, caller, part.file(vec![], vec![], vec![])])
-            .unwrap();
+        let g = build_dotted(
+            repo(),
+            vec![repo_file, caller, part.file(vec![], vec![], vec![])],
+        )
+        .unwrap();
         assert_eq!(g.nav.field_types[&a].len(), 2);
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
     }
@@ -3520,7 +3872,12 @@ mod tests {
         let mut catalog_file = c.file(
             vec![],
             vec![],
-            vec![heritage_ref(catalog, cm, "Readable", edge_category::INHERITS_FROM)],
+            vec![heritage_ref(
+                catalog,
+                cm,
+                "Readable",
+                edge_category::INHERITS_FROM,
+            )],
         );
         place(&mut catalog_file, catalog, "src/shop/Catalog.java");
         (vec![readable_file, catalog_file], catalog, readable)
@@ -3532,10 +3889,19 @@ mod tests {
         let g = build_dotted(repo(), files).unwrap();
         assert_eq!(
             heritage_edges(&g),
-            vec![(catalog, readable, edge_category::INHERITS_FROM, Confidence::Strong)]
+            vec![(
+                catalog,
+                readable,
+                edge_category::INHERITS_FROM,
+                Confidence::Strong
+            )]
         );
         assert!(g.unresolved_refs.is_empty());
-        let tally = IfaceExtends { bound: 1, unresolved: 0, ifaces: vec![catalog] };
+        let tally = IfaceExtends {
+            bound: 1,
+            unresolved: 0,
+            ifaces: vec![catalog],
+        };
         assert_eq!(
             tally.marker(&g).as_deref(),
             Some("[heritage] interface-extends bound=1 unresolved=0 ext=java")
@@ -3570,9 +3936,18 @@ mod tests {
         all.push(k.file(vec![], vec![], vec![]));
         let g = build_dotted(repo(), all).unwrap();
         let m = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::Catalog");
-        assert!(extends_interface(&g, &heritage_ref(catalog, m, "Readable", edge_category::INHERITS_FROM)));
-        assert!(!extends_interface(&g, &heritage_ref(catalog, m, "Readable", edge_category::IMPLEMENTS)));
-        assert!(!extends_interface(&g, &heritage_ref(class, km, "Base", edge_category::INHERITS_FROM)));
+        assert!(extends_interface(
+            &g,
+            &heritage_ref(catalog, m, "Readable", edge_category::INHERITS_FROM)
+        ));
+        assert!(!extends_interface(
+            &g,
+            &heritage_ref(catalog, m, "Readable", edge_category::IMPLEMENTS)
+        ));
+        assert!(!extends_interface(
+            &g,
+            &heritage_ref(class, km, "Base", edge_category::INHERITS_FROM)
+        ));
         assert_eq!(IfaceExtends::default().marker(&g), None);
     }
 
@@ -3613,20 +3988,38 @@ mod tests {
         let f = s1.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s1.file(
             vec![import_symbol("m1", "m2", "helper")],
-            vec![CallSite { from: f, qualifier: bare("helper"), line: 0 }],
+            vec![CallSite {
+                from: f,
+                qualifier: bare("helper"),
+                line: 0,
+            }],
             vec![],
         );
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
-        assert_eq!(evidence_rule(&g, f, helper, edge_category::CALLS), calls_rule("import_binding"));
+        assert_eq!(
+            evidence_rule(&g, f, helper, edge_category::CALLS),
+            calls_rule("import_binding")
+        );
 
         // module_symbol: a sibling top-level def of the caller's module.
         let mut s = Shape::new();
         let m = s.add(node_kind::MODULE, "m", None);
         let a = s.add(node_kind::FUNCTION, "m::a", Some(m));
         let b = s.add(node_kind::FUNCTION, "m::b", Some(m));
-        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b"), line: 0 }], vec![]);
+        let file = s.file(
+            vec![],
+            vec![CallSite {
+                from: a,
+                qualifier: bare("b"),
+                line: 0,
+            }],
+            vec![],
+        );
         let g = build_dotted(repo(), vec![file]).unwrap();
-        assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("module_symbol"));
+        assert_eq!(
+            evidence_rule(&g, a, b, edge_category::CALLS),
+            calls_rule("module_symbol")
+        );
 
         // package_symbol: Elixir `defmodule` PACKAGE siblings, which the file
         // MODULE's own symbols do not list.
@@ -3635,9 +4028,20 @@ mod tests {
         let pkg = s.add(node_kind::PACKAGE, "lib::MyApp", Some(m));
         let a = s.add(node_kind::FUNCTION, "lib::MyApp::a", Some(pkg));
         let b = s.add(node_kind::FUNCTION, "lib::MyApp::b", Some(pkg));
-        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b"), line: 0 }], vec![]);
+        let file = s.file(
+            vec![],
+            vec![CallSite {
+                from: a,
+                qualifier: bare("b"),
+                line: 0,
+            }],
+            vec![],
+        );
         let g = build_dotted(repo(), vec![file]).unwrap();
-        assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("package_symbol"));
+        assert_eq!(
+            evidence_rule(&g, a, b, edge_category::CALLS),
+            calls_rule("package_symbol")
+        );
     }
 
     /// A HANDLED_BY ref no import or same-module def can bind falls back to
@@ -3672,7 +4076,10 @@ mod tests {
         UnresolvedRef {
             from: route,
             from_module: module,
-            qualifier: CallQualifier::Attribute { base: ty.to_string(), name: name.to_string() },
+            qualifier: CallQualifier::Attribute {
+                base: ty.to_string(),
+                name: name.to_string(),
+            },
             category: edge_category::HANDLED_BY,
             line: 7,
         }
@@ -3690,21 +4097,41 @@ mod tests {
     fn type_qualified_handler_binds_its_own_method() {
         let mut t = Shape::new();
         let tm = t.add(node_kind::MODULE, "handlers::tokens", None);
-        let tokens = t.add(node_kind::STRUCT, "handlers::tokens::TokensHandler", Some(tm));
-        let tokens_list =
-            t.add(node_kind::METHOD, "handlers::tokens::TokensHandler::List", Some(tokens));
+        let tokens = t.add(
+            node_kind::STRUCT,
+            "handlers::tokens::TokensHandler",
+            Some(tm),
+        );
+        let tokens_list = t.add(
+            node_kind::METHOD,
+            "handlers::tokens::TokensHandler::List",
+            Some(tokens),
+        );
         let get_tokens = t.add(node_kind::ROUTE, "GET /tokens", None);
-        let tokens_file =
-            t.file(vec![], vec![], vec![type_handler(get_tokens, tm, "TokensHandler", "List")]);
+        let tokens_file = t.file(
+            vec![],
+            vec![],
+            vec![type_handler(get_tokens, tm, "TokensHandler", "List")],
+        );
 
         let mut o = Shape::new();
         let om = o.add(node_kind::MODULE, "handlers::offers", None);
-        let offers = o.add(node_kind::STRUCT, "handlers::offers::OffersHandler", Some(om));
-        let offers_list =
-            o.add(node_kind::METHOD, "handlers::offers::OffersHandler::List", Some(offers));
+        let offers = o.add(
+            node_kind::STRUCT,
+            "handlers::offers::OffersHandler",
+            Some(om),
+        );
+        let offers_list = o.add(
+            node_kind::METHOD,
+            "handlers::offers::OffersHandler::List",
+            Some(offers),
+        );
         let get_offers = o.add(node_kind::ROUTE, "GET /offers", None);
-        let offers_file =
-            o.file(vec![], vec![], vec![type_handler(get_offers, om, "OffersHandler", "List")]);
+        let offers_file = o.file(
+            vec![],
+            vec![],
+            vec![type_handler(get_offers, om, "OffersHandler", "List")],
+        );
 
         let g = crate::build::build_go(repo(), vec![tokens_file, offers_file]).unwrap();
         let handled: Vec<(NodeId, NodeId)> = g
@@ -3737,7 +4164,11 @@ mod tests {
         let mut s = Shape::new();
         let sm = s.add(node_kind::MODULE, "handlers::users", None);
         let users = s.add(node_kind::STRUCT, "handlers::users::UsersHandler", Some(sm));
-        let show = s.add(node_kind::METHOD, "handlers::users::UsersHandler::Show", Some(users));
+        let show = s.add(
+            node_kind::METHOD,
+            "handlers::users::UsersHandler::Show",
+            Some(users),
+        );
         let types_file = s.file(vec![], vec![], vec![]);
 
         let mut r = Shape::new();
@@ -3758,7 +4189,10 @@ mod tests {
         let g = crate::build::build_go(repo(), vec![types_file, routes_file]).unwrap();
         assert_eq!(
             evidence_rule(&g, get_user, show, edge_category::HANDLED_BY),
-            Some(("graph:go_packages".to_string(), Some("package_type_method".to_string())))
+            Some((
+                "graph:go_packages".to_string(),
+                Some("package_type_method".to_string())
+            ))
         );
         assert_eq!(g.unresolved_refs.len(), 1);
         assert_eq!(g.unresolved_refs[0].from, get_other);
@@ -3802,13 +4236,39 @@ mod tests {
         );
         let mut nav = CodeNav::default();
         nav.record(m, "Repo", "app::Repo", node_kind::MODULE, None);
-        nav.record(iface, "Store", "app::Repo::Store", node_kind::INTERFACE, Some(m));
-        nav.record(iface_get, "get", "app::Repo::Store::get", node_kind::METHOD, Some(iface));
+        nav.record(
+            iface,
+            "Store",
+            "app::Repo::Store",
+            node_kind::INTERFACE,
+            Some(m),
+        );
+        nav.record(
+            iface_get,
+            "get",
+            "app::Repo::Store::get",
+            node_kind::METHOD,
+            Some(iface),
+        );
         nav.record(cls, "Repo", "app::Repo::Repo", node_kind::CLASS, Some(m));
-        nav.record(cls_get, "get", "app::Repo::Repo::get", node_kind::METHOD, Some(cls));
-        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        nav.record(
+            cls_get,
+            "get",
+            "app::Repo::Repo::get",
+            node_kind::METHOD,
+            Some(cls),
+        );
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let file = FileParse {
-            nodes: [m, iface, iface_get, cls, cls_get].into_iter().map(node).collect(),
+            nodes: [m, iface, iface_get, cls, cls_get]
+                .into_iter()
+                .map(node)
+                .collect(),
             edges: vec![],
             imports: vec![],
             calls: vec![],
@@ -3833,19 +4293,34 @@ mod tests {
         assert_eq!(conf(&g, cls_get, iface_get), Some(Confidence::Strong));
 
         g.edges.retain(|e| e.from != cls_get);
-        g.edges.insert(0, Edge::new(cls, iface, edge_category::IMPLEMENTS, Confidence::Medium));
+        g.edges.insert(
+            0,
+            Edge::new(cls, iface, edge_category::IMPLEMENTS, Confidence::Medium),
+        );
         emit_method_level_implements(&mut g);
-        assert_eq!(conf(&g, cls_get, iface_get), Some(Confidence::Strong), "strongest class edge");
+        assert_eq!(
+            conf(&g, cls_get, iface_get),
+            Some(Confidence::Strong),
+            "strongest class edge"
+        );
     }
 
     // ---- CH.1b: inherited calls and abstract overrides (TS family) ----------
 
     fn self_call(from: NodeId, name: &str, line: u32) -> CallSite {
-        CallSite { from, qualifier: CallQualifier::SelfMethod(name.to_string()), line }
+        CallSite {
+            from,
+            qualifier: CallQualifier::SelfMethod(name.to_string()),
+            line,
+        }
     }
 
     fn super_call(from: NodeId, name: &str, line: u32) -> CallSite {
-        CallSite { from, qualifier: CallQualifier::SuperMethod(name.to_string()), line }
+        CallSite {
+            from,
+            qualifier: CallQualifier::SuperMethod(name.to_string()),
+            line,
+        }
     }
 
     /// The hand-built files' relative resolver: `./<stem>` -> `src::<stem>`.
@@ -3859,7 +4334,14 @@ mod tests {
     fn with_evidence(
         g: &RepoGraph,
         category: EdgeCategoryId,
-    ) -> Vec<(NodeId, NodeId, String, Option<String>, Option<u32>, Confidence)> {
+    ) -> Vec<(
+        NodeId,
+        NodeId,
+        String,
+        Option<String>,
+        Option<u32>,
+        Confidence,
+    )> {
         g.edges
             .iter()
             .filter(|e| e.category == category)
@@ -3993,7 +4475,10 @@ mod tests {
         ];
         let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
         assert_eq!(super_calls(&g), vec![(b_d, a_d, Some(10))]);
-        assert!(inherited_calls(&g).is_empty(), "a super call is not inherited_method");
+        assert!(
+            inherited_calls(&g).is_empty(),
+            "a super call is not inherited_method"
+        );
         assert!(!edges_of(&g, edge_category::CALLS).contains(&(b_d, b_d)));
         assert!(g.unresolved_calls.is_empty());
     }
@@ -4029,12 +4514,9 @@ mod tests {
             heritage_ref(cd, m, "A", edge_category::INHERITS_FROM),
             heritage_ref(ce, m, "B", edge_category::INHERITS_FROM),
         ];
-        let g = crate::build::build_typescript_family(
-            repo(),
-            vec![s.file(vec![], vec![], refs)],
-            rel,
-        )
-        .unwrap();
+        let g =
+            crate::build::build_typescript_family(repo(), vec![s.file(vec![], vec![], refs)], rel)
+                .unwrap();
         let mut want = vec![
             (b_f, a_f, Confidence::Strong),
             (d_f, a_f, Confidence::Strong),
@@ -4042,11 +4524,21 @@ mod tests {
         ];
         want.sort_by_key(|(a, b, _)| (a.0, b.0));
         assert_eq!(abstract_implements(&g), want);
-        let mut concrete = vec![(b_d, a_d, Confidence::Strong), (c_f, b_f, Confidence::Strong)];
+        let mut concrete = vec![
+            (b_d, a_d, Confidence::Strong),
+            (c_f, b_f, Confidence::Strong),
+        ];
         concrete.sort_by_key(|(a, b, _)| (a.0, b.0));
-        assert_eq!(concrete_overrides(&g), concrete, "B::d overrides A::d, C::f overrides B::f");
+        assert_eq!(
+            concrete_overrides(&g),
+            concrete,
+            "B::d overrides A::d, C::f overrides B::f"
+        );
         let implements = edges_of(&g, edge_category::IMPLEMENTS);
-        assert!(!implements.contains(&(c_f, a_f)), "C::f's nearest definer is B::f");
+        assert!(
+            !implements.contains(&(c_f, a_f)),
+            "C::f's nearest definer is B::f"
+        );
     }
 
     /// DF.22c: one module, `A { constructor, d, e }` <- `B { constructor, d }`
@@ -4072,7 +4564,10 @@ mod tests {
             heritage_ref(cc, m, "B", edge_category::INHERITS_FROM),
             heritage_ref(cd, m, "A", edge_category::INHERITS_FROM),
         ];
-        (s.file(vec![], vec![], refs), [a_ctor, a_d, a_e, b_ctor, b_d, c_d, c_e, d_e])
+        (
+            s.file(vec![], vec![], refs),
+            [a_ctor, a_d, a_e, b_ctor, b_d, c_d, c_e, d_e],
+        )
     }
 
     /// DF.22c: over [`concrete_file`], every override of a concrete member
@@ -4095,13 +4590,22 @@ mod tests {
         assert_eq!(concrete_overrides(&g), want);
         assert!(abstract_implements(&g).is_empty());
         let implements = edges_of(&g, edge_category::IMPLEMENTS);
-        assert!(!implements.contains(&(b_ctor, a_ctor)), "a constructor is never dispatched");
+        assert!(
+            !implements.contains(&(b_ctor, a_ctor)),
+            "a constructor is never dispatched"
+        );
         assert!(!implements.iter().any(|(from, _)| *from == b_ctor));
-        assert!(!implements.contains(&(c_d, a_d)), "the nearest definer (B::d) wins");
+        assert!(
+            !implements.contains(&(c_d, a_d)),
+            "the nearest definer (B::d) wins"
+        );
 
         let (file, _) = concrete_file();
         let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
-        assert!(concrete_overrides(&plain).is_empty(), "build_typescript pairs nothing");
+        assert!(
+            concrete_overrides(&plain).is_empty(),
+            "build_typescript pairs nothing"
+        );
         let mut stats = InheritStats::default();
         resolve_inherited_calls(&mut plain, &mut stats);
         emit_override_implements(&mut plain, &mut stats);
@@ -4144,7 +4648,12 @@ mod tests {
             w.file(
                 vec![],
                 vec![self_call(w_run, "base", 4)],
-                vec![heritage_ref(cw, mw, "External", edge_category::INHERITS_FROM)],
+                vec![heritage_ref(
+                    cw,
+                    mw,
+                    "External",
+                    edge_category::INHERITS_FROM,
+                )],
             ),
         ];
         (files, [a_load, a_f, b_find, b_f, w_run, cw])
@@ -4153,9 +4662,7 @@ mod tests {
     /// Every edge, sorted, with its evidence: what must not depend on the
     /// order the parses arrive in.
     #[allow(clippy::type_complexity)]
-    fn sorted_edges(
-        g: &RepoGraph,
-    ) -> Vec<(u64, u64, u32, Option<String>, Option<u32>)> {
+    fn sorted_edges(g: &RepoGraph) -> Vec<(u64, u64, u32, Option<String>, Option<u32>)> {
         let mut v: Vec<_> = g
             .edges
             .iter()
@@ -4185,7 +4692,10 @@ mod tests {
         let (files, [a_load, a_f, b_find, b_f, w_run, _]) = inherit_files();
         let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
         assert_eq!(inherited_calls(&g), vec![(b_find, a_load, Some(2))]);
-        assert_eq!(abstract_implements(&g), vec![(b_f, a_f, Confidence::Strong)]);
+        assert_eq!(
+            abstract_implements(&g),
+            vec![(b_f, a_f, Confidence::Strong)]
+        );
         assert_eq!(
             g.unresolved_calls,
             vec![self_call(b_find, "nope", 3), self_call(w_run, "base", 4)],
@@ -4202,7 +4712,11 @@ mod tests {
         assert!(inherited_calls(&plain).is_empty());
         assert!(abstract_implements(&plain).is_empty());
         assert!(concrete_overrides(&plain).is_empty());
-        assert_eq!(plain.unresolved_calls.len(), 3, "every self call stays unresolved");
+        assert_eq!(
+            plain.unresolved_calls.len(),
+            3,
+            "every self call stays unresolved"
+        );
 
         let mut stats = InheritStats::default();
         resolve_inherited_calls(&mut plain, &mut stats);
@@ -4219,7 +4733,11 @@ mod tests {
         let before = plain.edges.len();
         let mut again = InheritStats::default();
         emit_override_implements(&mut plain, &mut again);
-        assert_eq!(plain.edges.len(), before, "an IMPLEMENTS already present is not pushed again");
+        assert_eq!(
+            plain.edges.len(),
+            before,
+            "an IMPLEMENTS already present is not pushed again"
+        );
         assert_eq!(again.marker(), None, "nothing new to count");
         assert_eq!(InheritStats::default().marker(), None);
     }
@@ -4272,7 +4790,11 @@ mod tests {
     }
 
     fn attr_call(from: NodeId, base: &str, name: &str, line: u32) -> CallSite {
-        CallSite { from, qualifier: attr(base, name), line }
+        CallSite {
+            from,
+            qualifier: attr(base, name),
+            line,
+        }
     }
 
     /// The CALLS edges whose EVIDENCE is `graph:calls` / `rule`, in edge
@@ -4331,13 +4853,26 @@ mod tests {
         let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
         assert_eq!(
             calls_with_rule(&g, "inherited_receiver"),
-            vec![(c_go, a_load, Some(4)), (f, a_load, Some(8)), (f, a_load, Some(9))]
+            vec![
+                (c_go, a_load, Some(4)),
+                (f, a_load, Some(8)),
+                (f, a_load, Some(9))
+            ]
         );
-        assert_eq!(calls_with_rule(&g, "receiver_type"), vec![(c_go, b_find, Some(5))]);
-        assert!(inherited_calls(&g).is_empty(), "no this.m() / super.m() site here");
+        assert_eq!(
+            calls_with_rule(&g, "receiver_type"),
+            vec![(c_go, b_find, Some(5))]
+        );
+        assert!(
+            inherited_calls(&g).is_empty(),
+            "no this.m() / super.m() site here"
+        );
         assert_eq!(
             g.unresolved_calls,
-            vec![receiver_call(c_go, "this.b", "nope", 6), attr_call(f, "q", "load", 10)],
+            vec![
+                receiver_call(c_go, "this.b", "nope", 6),
+                attr_call(f, "q", "load", 10)
+            ],
             "unbound sites keep their order"
         );
         assert_eq!(
@@ -4382,7 +4917,10 @@ mod tests {
         let mut stats = InheritStats::default();
         resolve_inherited_calls(&mut plain, &mut stats);
         assert!(calls_with_rule(&plain, "inherited_receiver").is_empty());
-        assert_eq!(plain.unresolved_calls, vec![receiver_call(u_run, "this.k", "m", 2)]);
+        assert_eq!(
+            plain.unresolved_calls,
+            vec![receiver_call(u_run, "this.k", "m", 2)]
+        );
         assert_eq!(
             stats.marker().as_deref(),
             Some(
@@ -4401,7 +4939,10 @@ mod tests {
         let (files, [_, b_find, c_go, f]) = receiver_files();
         let plain = build_typescript(repo(), files, rel).unwrap();
         assert!(calls_with_rule(&plain, "inherited_receiver").is_empty());
-        assert_eq!(calls_with_rule(&plain, "receiver_type"), vec![(c_go, b_find, Some(5))]);
+        assert_eq!(
+            calls_with_rule(&plain, "receiver_type"),
+            vec![(c_go, b_find, Some(5))]
+        );
         assert_eq!(
             plain.unresolved_calls,
             vec![
@@ -4433,7 +4974,10 @@ mod tests {
         );
         let g = crate::build::build_typescript_family(repo(), vec![file], rel).unwrap();
         assert!(calls_with_rule(&g, "inherited_receiver").is_empty());
-        assert_eq!(g.unresolved_calls, vec![receiver_call(f, "new B()", "load", 3)]);
+        assert_eq!(
+            g.unresolved_calls,
+            vec![receiver_call(f, "new B()", "load", 3)]
+        );
     }
 
     // ---- DT.5k: TypeScript receivers typed by the parser ---------------------
@@ -4461,14 +5005,21 @@ mod tests {
             ("flag", &[NavFact::Getter][..]),
             ("check", &[][..]),
         ] {
-            let method = s.add(node_kind::METHOD, &format!("src::api::Auth::{name}"), Some(auth));
+            let method = s.add(
+                node_kind::METHOD,
+                &format!("src::api::Auth::{name}"),
+                Some(auth),
+            );
             for f in facts {
                 s.nav.record_fact(method, f.clone());
             }
         }
         s.add(node_kind::STATE_VAR, "src::api::Auth::ready", Some(auth));
         let refs = vec![heritage_ref(store, m, "Base", edge_category::INHERITS_FROM)];
-        (s.file(vec![], vec![], refs), [get, reset, base_method, auth])
+        (
+            s.file(vec![], vec![], refs),
+            [get, reset, base_method, auth],
+        )
     }
 
     /// The TS-family caller module `src::<stem>` importing `names` from
@@ -4486,14 +5037,20 @@ mod tests {
         let m = s.add(node_kind::MODULE, &module, None);
         let f = s.add(node_kind::FUNCTION, &format!("{module}::f"), Some(m));
         fill(&mut s, m, f);
-        let imports = names.iter().map(|n| import_symbol(&module, "./api", n)).collect();
+        let imports = names
+            .iter()
+            .map(|n| import_symbol(&module, "./api", n))
+            .collect();
         let mut file = s.file(imports, calls(f), vec![]);
         place(&mut file, f, path);
         (file, f)
     }
 
     fn receiver_fact(receiver: &str, ty: &str) -> NavFact {
-        NavFact::ReceiverType { receiver: receiver.to_string(), ty: ty.to_string() }
+        NavFact::ReceiverType {
+            receiver: receiver.to_string(),
+            ty: ty.to_string(),
+        }
     }
 
     /// A ComplexReceiver the parser typed (`inject(Api).get()`, a
@@ -4508,7 +5065,10 @@ mod tests {
             s.nav.record_fact(f, receiver_fact("inject(Api)", "Api"));
         });
         let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
-        assert_eq!(calls_with_rule(&g, "receiver_type"), vec![(f, get, Some(3))]);
+        assert_eq!(
+            calls_with_rule(&g, "receiver_type"),
+            vec![(f, get, Some(3))]
+        );
         assert!(g.unresolved_calls.is_empty());
 
         let (api, _) = dt5k_api();
@@ -4520,7 +5080,8 @@ mod tests {
         let (api, _) = dt5k_api();
         let (caller, _) = dt5k_caller("guard", "src/guard.ts", &["Api"], call, |s, m, _| {
             let other = s.add(node_kind::FUNCTION, "src::guard::other", Some(m));
-            s.nav.record_fact(other, receiver_fact("inject(Api)", "Api"));
+            s.nav
+                .record_fact(other, receiver_fact("inject(Api)", "Api"));
         });
         let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
@@ -4535,10 +5096,14 @@ mod tests {
         let call = |f| vec![receiver_call(f, "inject(Store)", "baseMethod", 4)];
         let (api, [_, _, base_method, _]) = dt5k_api();
         let (caller, f) = dt5k_caller("guard", "src/guard.ts", &["Store"], call, |s, _, f| {
-            s.nav.record_fact(f, receiver_fact("inject(Store)", "Store"));
+            s.nav
+                .record_fact(f, receiver_fact("inject(Store)", "Store"));
         });
         let g = crate::build::build_typescript_family(repo(), vec![api, caller], rel).unwrap();
-        assert_eq!(calls_with_rule(&g, "inherited_receiver"), vec![(f, base_method, Some(4))]);
+        assert_eq!(
+            calls_with_rule(&g, "inherited_receiver"),
+            vec![(f, base_method, Some(4))]
+        );
     }
 
     /// `const s = makeStore(); s.reset()` in a TS caller binds Store::reset,
@@ -4557,10 +5122,17 @@ mod tests {
                 s.nav.record_return_type(make, "Store");
                 s.nav.record_local_type(f, "s", "makeStore()");
             });
-            (build_typescript(repo(), vec![api, caller], rel).unwrap(), f, reset)
+            (
+                build_typescript(repo(), vec![api, caller], rel).unwrap(),
+                f,
+                reset,
+            )
         };
         let (g, f, reset) = same("src/spec.spec.ts");
-        assert_eq!(calls_with_rule(&g, "receiver_return"), vec![(f, reset, Some(5))]);
+        assert_eq!(
+            calls_with_rule(&g, "receiver_return"),
+            vec![(f, reset, Some(5))]
+        );
         for path in ["svc/spec.py", "svc/spec.go"] {
             let (g, _, _) = same(path);
             assert!(edges_of(&g, edge_category::CALLS).is_empty(), "{path}");
@@ -4573,7 +5145,11 @@ mod tests {
         let tm = t.add(node_kind::MODULE, "src::testing", None);
         let make = t.add(node_kind::FUNCTION, "src::testing::makeDraft", Some(tm));
         t.nav.record_return_type(make, "Store");
-        let testing = t.file(vec![import_symbol("src::testing", "./api", "Store")], vec![], vec![]);
+        let testing = t.file(
+            vec![import_symbol("src::testing", "./api", "Store")],
+            vec![],
+            vec![],
+        );
         let mut s = Shape::new();
         let m = s.add(node_kind::MODULE, "src::spec", None);
         let f = s.add(node_kind::FUNCTION, "src::spec::f", Some(m));
@@ -4585,17 +5161,21 @@ mod tests {
         );
         place(&mut caller, f, "src/spec.spec.ts");
         let g = build_typescript(repo(), vec![api, testing, caller], rel).unwrap();
-        assert_eq!(calls_with_rule(&g, "receiver_return"), vec![(f, reset, Some(5))]);
+        assert_eq!(
+            calls_with_rule(&g, "receiver_return"),
+            vec![(f, reset, Some(5))]
+        );
 
         // A CLASS-bound callee (`Store()`) and an unannotated FUNCTION.
         for callee in ["Store", "makeAny"] {
             let (api, _) = dt5k_api();
-            let (caller, _) = dt5k_caller("spec", "src/spec.spec.ts", &["Store"], call, |s, m, f| {
-                if callee == "makeAny" {
-                    s.add(node_kind::FUNCTION, "src::spec::makeAny", Some(m));
-                }
-                s.nav.record_local_type(f, "s", &format!("{callee}()"));
-            });
+            let (caller, _) =
+                dt5k_caller("spec", "src/spec.spec.ts", &["Store"], call, |s, m, f| {
+                    if callee == "makeAny" {
+                        s.add(node_kind::FUNCTION, "src::spec::makeAny", Some(m));
+                    }
+                    s.nav.record_local_type(f, "s", &format!("{callee}()"));
+                });
             let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
             assert!(edges_of(&g, edge_category::CALLS).is_empty(), "{callee}()");
             assert_eq!(g.unresolved_calls.len(), 1, "{callee}()");
@@ -4603,11 +5183,19 @@ mod tests {
     }
 
     fn member_read(receiver: &str, name: &str, line: u32) -> NavFact {
-        NavFact::MemberRead { receiver: receiver.to_string(), name: name.to_string(), line }
+        NavFact::MemberRead {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+            line,
+        }
     }
 
     fn member_write(receiver: &str, name: &str, line: u32) -> NavFact {
-        NavFact::MemberWrite { receiver: receiver.to_string(), name: name.to_string(), line }
+        NavFact::MemberWrite {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+            line,
+        }
     }
 
     /// Member accesses on a typed local bind a getter read
@@ -4637,20 +5225,41 @@ mod tests {
         };
         let (api, _) = dt5k_api();
         let method = |name: &str| {
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &format!("src::api::Auth::{name}"))
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::METHOD,
+                &format!("src::api::Auth::{name}"),
+            )
         };
-        let (caller, f) =
-            dt5k_caller("guard", "src/guard.ts", &["Auth"], |_| vec![], |s, _, f| facts(s, f));
+        let (caller, f) = dt5k_caller(
+            "guard",
+            "src/guard.ts",
+            &["Auth"],
+            |_| vec![],
+            |s, _, f| facts(s, f),
+        );
         let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
         assert_eq!(
             calls_with_rule(&g, "receiver_accessor_read"),
-            vec![(f, method("isIn"), Some(1)), (f, method("both"), Some(3)), (f, method("isIn"), Some(9))]
+            vec![
+                (f, method("isIn"), Some(1)),
+                (f, method("both"), Some(3)),
+                (f, method("isIn"), Some(9))
+            ]
         );
         assert_eq!(
             calls_with_rule(&g, "receiver_accessor_write"),
-            vec![(f, method("session"), Some(2)), (f, method("both"), Some(4))]
+            vec![
+                (f, method("session"), Some(2)),
+                (f, method("both"), Some(4))
+            ]
         );
-        assert_eq!(edges_of(&g, edge_category::CALLS).len(), 5, "nothing else binds");
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS).len(),
+            5,
+            "nothing else binds"
+        );
 
         // `this.auth.isIn` in a method of a class with `auth: Auth`.
         let (api, _) = dt5k_api();
@@ -4660,16 +5269,31 @@ mod tests {
         let run = s.add(node_kind::METHOD, "src::c::C::run", Some(c));
         s.nav.record_field_type(c, "auth", "Auth");
         s.nav.record_fact(run, member_read("this.auth", "isIn", 2));
-        let mut caller = s.file(vec![import_symbol("src::c", "./api", "Auth")], vec![], vec![]);
+        let mut caller = s.file(
+            vec![import_symbol("src::c", "./api", "Auth")],
+            vec![],
+            vec![],
+        );
         place(&mut caller, run, "src/c.component.ts");
         let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
-        assert_eq!(calls_with_rule(&g, "receiver_accessor_read"), vec![(run, method("isIn"), Some(2))]);
+        assert_eq!(
+            calls_with_rule(&g, "receiver_accessor_read"),
+            vec![(run, method("isIn"), Some(2))]
+        );
 
         let (api, _) = dt5k_api();
-        let (caller, _) =
-            dt5k_caller("guard", "lib/guard.dart", &["Auth"], |_| vec![], |s, _, f| facts(s, f));
+        let (caller, _) = dt5k_caller(
+            "guard",
+            "lib/guard.dart",
+            &["Auth"],
+            |_| vec![],
+            |s, _, f| facts(s, f),
+        );
         let g = build_typescript(repo(), vec![api, caller], rel).unwrap();
-        assert!(edges_of(&g, edge_category::CALLS).is_empty(), "a Dart scope is its builder's");
+        assert!(
+            edges_of(&g, edge_category::CALLS).is_empty(),
+            "a Dart scope is its builder's"
+        );
     }
 
     /// DT.5k's readings resolve a type through the caller's own scope only:
@@ -4692,12 +5316,14 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "src::guard::f", Some(m));
         let router_of = s.add(node_kind::FUNCTION, "src::guard::routerOf", Some(m));
         s.nav.record_return_type(router_of, "Router");
-        s.nav.record_fact(f, receiver_fact("inject(Router)", "Router"));
+        s.nav
+            .record_fact(f, receiver_fact("inject(Router)", "Router"));
         s.nav.record_local_type(f, "r", "Router");
         s.nav.record_local_type(f, "n", "routerOf()");
         s.nav.record_fact(f, member_read("r", "url", 2));
         s.nav.record_fact(f, member_read("n", "url", 3));
-        s.nav.record_fact(f, member_read("inject(Router)", "url", 4));
+        s.nav
+            .record_fact(f, member_read("inject(Router)", "url", 4));
         let holder = s.add(node_kind::CLASS, "src::guard::Holder", Some(m));
         let h = s.add(node_kind::METHOD, "src::guard::Holder::h", Some(holder));
         s.nav.record_field_type(holder, "router", "Router");
@@ -4713,11 +5339,19 @@ mod tests {
         );
         place(&mut caller, f, "src/guard.ts");
         place(&mut caller, h, "src/guard.ts");
-        let g = build_typescript(repo(), vec![l.file(vec![], vec![], vec![]), caller], rel).unwrap();
-        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(h, go)], "A6.2a unchanged");
+        let g =
+            build_typescript(repo(), vec![l.file(vec![], vec![], vec![]), caller], rel).unwrap();
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS),
+            vec![(h, go)],
+            "A6.2a unchanged"
+        );
         assert_eq!(
             g.unresolved_calls,
-            vec![receiver_call(f, "inject(Router)", "go", 1), attr_call(f, "n", "go", 5)]
+            vec![
+                receiver_call(f, "inject(Router)", "go", 1),
+                attr_call(f, "n", "go", 5)
+            ]
         );
     }
 
@@ -4755,7 +5389,11 @@ mod tests {
         assert_eq!(g.unresolved_refs.len(), 1);
         for (kind, qname, path) in [
             (node_kind::CLASS, "src::guard::Guard", "src/guard.ts"),
-            (node_kind::METHOD, "src::guard::Guard::run", "src/Guard.java"),
+            (
+                node_kind::METHOD,
+                "src::guard::Guard::run",
+                "src/Guard.java",
+            ),
         ] {
             let (g, from, router) = build(kind, qname, path);
             assert_eq!(
@@ -4799,15 +5437,25 @@ mod tests {
                 vec![uses],
             );
             place(&mut file, f, path);
-            let g = build_typescript(repo(), vec![c.file(vec![], vec![], vec![]), file], rel).unwrap();
+            let g =
+                build_typescript(repo(), vec![c.file(vec![], vec![], vec![]), file], rel).unwrap();
             (g, f, [class, make, red])
         };
         let (g, f, [class, ..]) = build("Countries.FALLBACK", "src/page.ts");
-        assert_eq!(evidence_rule(&g, f, class, edge_category::USES), refs_rule("static_member"));
+        assert_eq!(
+            evidence_rule(&g, f, class, edge_category::USES),
+            refs_rule("static_member")
+        );
         let (g, f, [_, _, red]) = build("Kind.RED", "src/page.ts");
-        assert_eq!(evidence_rule(&g, f, red, edge_category::USES), refs_rule("enum_member"));
+        assert_eq!(
+            evidence_rule(&g, f, red, edge_category::USES),
+            refs_rule("enum_member")
+        );
         let (g, f, [_, make, _]) = build("Countries.make", "src/page.ts");
-        assert_eq!(evidence_rule(&g, f, make, edge_category::USES), refs_rule("attribute"));
+        assert_eq!(
+            evidence_rule(&g, f, make, edge_category::USES),
+            refs_rule("attribute")
+        );
         let (g, _, _) = build("Countries.FALLBACK", "src/Page.java");
         assert!(edges_of(&g, edge_category::USES).is_empty());
         assert_eq!(g.unresolved_refs.len(), 1);

@@ -111,11 +111,12 @@ fn ts_family_is_a_pooled_graph() {
     // ts_smoke is all TypeScript: its one graph is the TS family's.
     let four = analyze_fixture("ts_smoke", "4");
     let consts = parallel_line(&four, ": const-scan ");
-    assert!(consts.contains(" 1 language graphs on 4 threads"), "{consts}");
-    let one = analyze_fixture("ts_smoke", "1");
     assert!(
-        parallel_line(&one, ": const-scan ").contains(" 1 language graphs on 1 threads")
+        consts.contains(" 1 language graphs on 4 threads"),
+        "{consts}"
     );
+    let one = analyze_fixture("ts_smoke", "1");
+    assert!(parallel_line(&one, ": const-scan ").contains(" 1 language graphs on 1 threads"));
     assert!(!four.stdout.is_empty());
     assert!(
         four.stdout == one.stdout,
@@ -125,11 +126,12 @@ fn ts_family_is_a_pooled_graph() {
     // http_stack_smoke is Go + TypeScript: two graphs, both pooled.
     let four = analyze_fixture("http_stack_smoke", "4");
     let consts = parallel_line(&four, ": const-scan ");
-    assert!(consts.contains(" 2 language graphs on 4 threads"), "{consts}");
-    let one = analyze_fixture("http_stack_smoke", "1");
     assert!(
-        parallel_line(&one, ": const-scan ").contains(" 2 language graphs on 1 threads")
+        consts.contains(" 2 language graphs on 4 threads"),
+        "{consts}"
     );
+    let one = analyze_fixture("http_stack_smoke", "1");
+    assert!(parallel_line(&one, ": const-scan ").contains(" 2 language graphs on 1 threads"));
     assert!(!four.stdout.is_empty());
     assert!(
         four.stdout == one.stdout,

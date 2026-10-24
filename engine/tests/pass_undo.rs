@@ -42,7 +42,10 @@ fn fixture(tmp: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn build(repos: &[&Path]) -> GenerateResult {
-    let paths: Vec<String> = repos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = repos
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap()
 }
 
@@ -52,7 +55,9 @@ fn endpoint_id(m: &MergedGraph) -> NodeId {
         .nodes_of_kind(node_kind::ENDPOINT)
         .into_iter()
         .filter(|id| {
-            m.graphs.iter().any(|g| g.nav.qname_by_id.get(id).is_some_and(|q| q == ENDPOINT))
+            m.graphs
+                .iter()
+                .any(|g| g.nav.qname_by_id.get(id).is_some_and(|q| q == ENDPOINT))
         })
         .collect();
     assert_eq!(ids.len(), 1, "exactly one {ENDPOINT} node: {ids:?}");
@@ -61,7 +66,12 @@ fn endpoint_id(m: &MergedGraph) -> NodeId {
 
 /// The confidence of every instance of `id`, across every graph.
 fn confidences(m: &MergedGraph, id: NodeId) -> Vec<Confidence> {
-    m.graphs.iter().flat_map(|g| g.nodes.iter()).filter(|n| n.id == id).map(|n| n.confidence).collect()
+    m.graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter())
+        .filter(|n| n.id == id)
+        .map(|n| n.confidence)
+        .collect()
 }
 
 #[test]
@@ -71,8 +81,16 @@ fn demotion_is_recorded_persisted_and_undoable() {
 
     let r = build(&[&web]);
     let ep = endpoint_id(&r.merged);
-    assert_eq!(confidences(&r.merged, ep), vec![Confidence::Medium], "web-only: demoted");
-    assert_eq!(r.merged.pass_undo, vec![(ep, Confidence::Strong)], "the demotion is recorded");
+    assert_eq!(
+        confidences(&r.merged, ep),
+        vec![Confidence::Medium],
+        "web-only: demoted"
+    );
+    assert_eq!(
+        r.merged.pass_undo,
+        vec![(ep, Confidence::Strong)],
+        "the demotion is recorded"
+    );
 
     let dir = tmp.path().join("layout");
     let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, &dir);
@@ -84,11 +102,22 @@ fn demotion_is_recorded_persisted_and_undoable() {
     );
 
     let mut loaded = load_layout(&dir).unwrap().merged;
-    assert_eq!(loaded.pass_undo, r.merged.pass_undo, "pass_undo survives the layout");
-    assert_eq!(confidences(&loaded, ep), vec![Confidence::Medium], "loaded as written");
+    assert_eq!(
+        loaded.pass_undo, r.merged.pass_undo,
+        "pass_undo survives the layout"
+    );
+    assert_eq!(
+        confidences(&loaded, ep),
+        vec![Confidence::Medium],
+        "loaded as written"
+    );
 
     loaded.undo_pass_mutations();
-    assert_eq!(confidences(&loaded, ep), vec![Confidence::Strong], "undo restores Strong");
+    assert_eq!(
+        confidences(&loaded, ep),
+        vec![Confidence::Strong],
+        "undo restores Strong"
+    );
     assert!(loaded.pass_undo.is_empty(), "undo clears the record");
 
     // A second undo has nothing left to restore.
@@ -103,8 +132,16 @@ fn no_demotion_no_undo() {
 
     let r = build(&[&api, &web]);
     let ep = endpoint_id(&r.merged);
-    assert_eq!(confidences(&r.merged, ep), vec![Confidence::Strong], "together: matched");
-    assert!(r.merged.pass_undo.is_empty(), "nothing demoted, nothing recorded: {:?}", r.merged.pass_undo);
+    assert_eq!(
+        confidences(&r.merged, ep),
+        vec![Confidence::Strong],
+        "together: matched"
+    );
+    assert!(
+        r.merged.pass_undo.is_empty(),
+        "nothing demoted, nothing recorded: {:?}",
+        r.merged.pass_undo
+    );
 
     // A layout without demotions writes no `pass_undo` key at all, so its
     // manifest bytes are what they were before LC.10a.
@@ -112,7 +149,10 @@ fn no_demotion_no_undo() {
     let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, &dir);
     persist_layout(&r.merged, &meta, &dir, "test").unwrap();
     let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
-    assert!(!manifest.contains("pass_undo"), "no key when empty: {manifest}");
+    assert!(
+        !manifest.contains("pass_undo"),
+        "no key when empty: {manifest}"
+    );
     assert!(load_layout(&dir).unwrap().merged.pass_undo.is_empty());
 }
 
@@ -126,7 +166,12 @@ fn undone_layout_matches_the_together_build() {
     let together = build(&[&api, &web]);
     let web_only = build(&[&web]);
     let dir = tmp.path().join("web-layout");
-    let meta = layout_meta(&web_only.repo_labels, &web_only.repo_roots, &web_only.parse_errors, &dir);
+    let meta = layout_meta(
+        &web_only.repo_labels,
+        &web_only.repo_roots,
+        &web_only.parse_errors,
+        &dir,
+    );
     persist_layout(&web_only.merged, &meta, &dir, "test").unwrap();
     let mut loaded = load_layout(&dir).unwrap().merged;
     loaded.undo_pass_mutations();

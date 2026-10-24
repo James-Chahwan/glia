@@ -120,7 +120,10 @@ fn ingest_marker(stderr: &str) -> &str {
 }
 
 fn warnings(stderr: &str) -> Vec<&str> {
-    stderr.lines().filter(|l| l.starts_with("warning: ")).collect()
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("warning: "))
+        .collect()
 }
 
 #[test]
@@ -128,9 +131,23 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
     let r = Scratch::new("ingest");
     let junit = r.report("pytest-junit.xml", PYTEST_JUNIT);
     let lcov = r.report("coverage.lcov", LCOV);
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--lcov", &lcov, "--run", "ci-42"]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &junit,
+        "--lcov",
+        &lcov,
+        "--run",
+        "ci-42",
+    ]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 
     let snapshot = tests_dir(&r.top);
     let mut reports = [junit.clone(), lcov.clone()];
@@ -140,7 +157,10 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
         [
             format!("read {}", reports[0]),
             format!("read {}", reports[1]),
-            format!("ingested 1 failing case(s) and 1 lcov file(s) -> {}", snapshot.display()),
+            format!(
+                "ingested 1 failing case(s) and 1 lcov file(s) -> {}",
+                snapshot.display()
+            ),
             "this run is seq 0; the snapshot holds 1 run(s) (window 10)".to_string(),
             format!("run `glia build {}` to ingest.", r.path()),
         ],
@@ -156,21 +176,44 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
     assert!(warnings(&stderr).is_empty(), "{stderr}");
 
     for file in [TESTS_CASES_FILE, TESTS_LCOV_FILE, META_FILE] {
-        assert!(snapshot.join(file).is_file(), "{file} not written under {}", snapshot.display());
+        assert!(
+            snapshot.join(file).is_file(),
+            "{file} not written under {}",
+            snapshot.display()
+        );
     }
     let cases = r.snapshot_file(TESTS_CASES_FILE);
     assert_eq!(cases.lines().count(), 1, "{cases}");
-    let case: Value = serde_json::from_str(cases.lines().next().unwrap_or("")).expect("case row parses");
-    assert_eq!((case["name"].as_str(), case["status"].as_str()), (Some("test_boom"), Some("failed")));
+    let case: Value =
+        serde_json::from_str(cases.lines().next().unwrap_or("")).expect("case row parses");
+    assert_eq!(
+        (case["name"].as_str(), case["status"].as_str()),
+        (Some("test_boom"), Some("failed"))
+    );
     assert_eq!(r.snapshot_file(TESTS_LCOV_FILE).lines().count(), 2);
     let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
     assert_eq!(meta["run"], "ci-42", "{meta}");
     assert_eq!(meta["reports"], serde_json::json!(reports), "{meta}");
-    assert_eq!((meta["cases_total"].as_u64(), meta["passed"].as_u64()), (Some(3), Some(2)), "{meta}");
+    assert_eq!(
+        (meta["cases_total"].as_u64(), meta["passed"].as_u64()),
+        (Some(3), Some(2)),
+        "{meta}"
+    );
     // CC.9b: a version 2 snapshot, one run in a window of 10.
-    assert_eq!((meta["version"].as_u64(), meta["window"].as_u64()), (Some(2), Some(10)), "{meta}");
+    assert_eq!(
+        (meta["version"].as_u64(), meta["window"].as_u64()),
+        (Some(2), Some(10)),
+        "{meta}"
+    );
     assert_eq!(meta["runs"].as_array().map(|r| r.len()), Some(1), "{meta}");
-    assert_eq!((meta["runs"][0]["seq"].as_u64(), meta["runs"][0]["run"].as_str()), (Some(0), Some("ci-42")), "{meta}");
+    assert_eq!(
+        (
+            meta["runs"][0]["seq"].as_u64(),
+            meta["runs"][0]["run"].as_str()
+        ),
+        (Some(0), Some("ci-42")),
+        "{meta}"
+    );
     assert_eq!(case["seq"], 0, "{case}");
 }
 
@@ -181,36 +224,78 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
 fn window_keeps_the_last_runs_and_reset_starts_over() {
     let r = Scratch::new("window");
     let junit = r.report("pytest-junit.xml", PYTEST_JUNIT);
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--window", "0"]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &junit,
+        "--window",
+        "0",
+    ]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
-    assert!(!r.top.join(".glia").exists(), "a usage error writes nothing");
+    assert!(
+        !r.top.join(".glia").exists(),
+        "a usage error writes nothing"
+    );
 
     let seqs = |r: &Scratch| -> Vec<u64> {
-        let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
-        meta["runs"].as_array().into_iter().flatten().filter_map(|run| run["seq"].as_u64()).collect()
+        let meta: Value =
+            serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
+        meta["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|run| run["seq"].as_u64())
+            .collect()
     };
     for (i, window) in ["3", "3", "3", "3"].into_iter().enumerate() {
         let label = format!("ci-{i}");
-        let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--run", &label, "--window", window]);
+        let out = r.glia(&[
+            "tests",
+            "ingest",
+            r.path(),
+            "--junit",
+            &junit,
+            "--run",
+            &label,
+            "--window",
+            window,
+        ]);
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-        assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
         let runs = (i + 1).min(3);
         assert!(
-            ingest_marker(&stderr).ends_with(&format!(" stored=1 runs={runs} window=3 seq={i} surface=cli")),
+            ingest_marker(&stderr).ends_with(&format!(
+                " stored=1 runs={runs} window=3 seq={i} surface=cli"
+            )),
             "{stderr}"
         );
         assert!(
-            stdout.contains(&format!("this run is seq {i}; the snapshot holds {runs} run(s) (window 3)")),
+            stdout.contains(&format!(
+                "this run is seq {i}; the snapshot holds {runs} run(s) (window 3)"
+            )),
             "{stdout}"
         );
     }
     assert_eq!(seqs(&r), [1, 2, 3], "run 0 aged out of a window of 3");
-    assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 3, "one failing case per kept run");
+    assert_eq!(
+        r.snapshot_file(TESTS_CASES_FILE).lines().count(),
+        3,
+        "one failing case per kept run"
+    );
 
     let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--reset"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert!(ingest_marker(&stderr).ends_with(" stored=1 runs=1 window=10 seq=0 surface=cli"), "{stderr}");
+    assert!(
+        ingest_marker(&stderr).ends_with(" stored=1 runs=1 window=10 seq=0 surface=cli"),
+        "{stderr}"
+    );
     assert_eq!(seqs(&r), [0]);
 }
 
@@ -220,12 +305,20 @@ fn no_report_flag_is_a_usage_error() {
     let out = r.glia(&["tests", "ingest", r.path()]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
-    assert!(stderr.starts_with("error: ") && stderr.contains("--junit"), "clap names the flags:\n{stderr}");
     assert!(
-        stderr.contains("Usage: glia tests ingest <REPO> <--junit <PATH>...|--log <PATH>...|--lcov <PATH>...>"),
+        stderr.starts_with("error: ") && stderr.contains("--junit"),
+        "clap names the flags:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "Usage: glia tests ingest <REPO> <--junit <PATH>...|--log <PATH>...|--lcov <PATH>...>"
+        ),
         "the usage puts the repo first, since each path flag takes every path after it:\n{stderr}"
     );
-    assert!(!r.top.join(".glia").exists(), "a usage error writes nothing");
+    assert!(
+        !r.top.join(".glia").exists(),
+        "a usage error writes nothing"
+    );
 
     // `--run` alone is not a report.
     let out = r.glia(&["tests", "ingest", r.path(), "--run", "ci-1"]);
@@ -238,7 +331,10 @@ fn no_report_flag_is_a_usage_error() {
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("<REPO>"), "{stderr}");
-    assert!(!r.top.join(".glia").exists(), "a usage error writes nothing");
+    assert!(
+        !r.top.join(".glia").exists(),
+        "a usage error writes nothing"
+    );
 }
 
 #[test]
@@ -246,22 +342,51 @@ fn a_malformed_report_warns_and_the_rest_is_ingested() {
     let r = Scratch::new("malformed");
     let bad = r.report("cut.xml", CUT_XML);
     let good = r.report("pytest-junit.xml", PYTEST_JUNIT);
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &bad, "--junit", &good]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &bad,
+        "--junit",
+        &good,
+    ]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
 
     let warned = warnings(&stderr);
-    assert_eq!(warned.len(), 1, "one warning per unreadable report:\n{stderr}");
+    assert_eq!(
+        warned.len(),
+        1,
+        "one warning per unreadable report:\n{stderr}"
+    );
     assert!(
-        warned[0].starts_with(&format!("warning: skipped {bad}: ")) && warned[0].contains("still open"),
+        warned[0].starts_with(&format!("warning: skipped {bad}: "))
+            && warned[0].contains("still open"),
         "{}",
         warned[0]
     );
-    assert!(stderr.contains(&format!("[tests] skip report={bad} ")), "{stderr}");
-    assert!(stdout.lines().any(|l| l == format!("read {good}")), "{stdout}");
-    assert!(!stdout.contains(&bad), "a skipped report is not listed as read:\n{stdout}");
+    assert!(
+        stderr.contains(&format!("[tests] skip report={bad} ")),
+        "{stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == format!("read {good}")),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains(&bad),
+        "a skipped report is not listed as read:\n{stdout}"
+    );
     let marker = ingest_marker(&stderr);
-    assert!(marker.contains(" junit_files=1 ") && marker.contains(" stored=1 "), "{marker}");
+    assert!(
+        marker.contains(" junit_files=1 ") && marker.contains(" stored=1 "),
+        "{marker}"
+    );
     let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
     assert_eq!(meta["reports"], serde_json::json!([good]), "{meta}");
     assert_eq!(meta["run"], Value::Null, "no --run, no label: {meta}");
@@ -273,24 +398,53 @@ fn every_report_failing_exits_1_and_writes_nothing() {
     let bad = r.report("cut.xml", CUT_XML);
     let missing = r.root.join("reports/no-such.lcov");
     let missing = missing.to_str().expect("utf-8");
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &bad, "--lcov", missing]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &bad,
+        "--lcov",
+        missing,
+    ]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-    assert_eq!(out.status.code(), Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(stdout.is_empty(), "{stdout}");
-    let errors: Vec<&str> = stderr.lines().filter(|l| l.starts_with("error: ")).collect();
+    let errors: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("error: "))
+        .collect();
     assert_eq!(errors.len(), 1, "{stderr}");
     assert!(
-        errors[0].contains("no report could be read") && errors[0].contains(&bad) && errors[0].contains(missing),
+        errors[0].contains("no report could be read")
+            && errors[0].contains(&bad)
+            && errors[0].contains(missing),
         "the error names every report and why: {}",
         errors[0]
     );
-    assert!(!stderr.contains("[tests] ingest "), "no marker on failure: {stderr}");
-    assert!(!r.top.join(".glia").exists(), "a failed ingest writes nothing");
+    assert!(
+        !stderr.contains("[tests] ingest "),
+        "no marker on failure: {stderr}"
+    );
+    assert!(
+        !r.top.join(".glia").exists(),
+        "a failed ingest writes nothing"
+    );
 
     // A repo that is not a directory.
     let good = r.report("pytest-junit.xml", PYTEST_JUNIT);
     let gone = r.top.join("no-such-dir");
-    let out = r.glia(&["tests", "ingest", gone.to_str().expect("utf-8"), "--junit", &good]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        gone.to_str().expect("utf-8"),
+        "--junit",
+        &good,
+    ]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.starts_with("error: not a directory: "), "{stderr}");
@@ -306,9 +460,22 @@ fn path_flags_repeat_and_take_a_glob_expansion() {
     let log = r.report("ci.log", CI_LOG);
     let lcov = r.report("coverage.lcov", LCOV);
 
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &a, &b, "--log", &log]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &a,
+        &b,
+        "--log",
+        &log,
+    ]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     let marker = ingest_marker(&stderr);
     assert!(
         marker.ends_with(
@@ -317,22 +484,54 @@ fn path_flags_repeat_and_take_a_glob_expansion() {
         ),
         "{marker}"
     );
-    assert!(stdout.contains("ingested 3 failing case(s) and 0 lcov file(s) -> "), "{stdout}");
+    assert!(
+        stdout.contains("ingested 3 failing case(s) and 0 lcov file(s) -> "),
+        "{stdout}"
+    );
 
     // The same reports as repeated flags, in another order, plus lcov: a
     // re-ingest is the next run of the window (CC.9b), so both runs' failing
     // cases are kept.
-    let out = r.glia(&["tests", "ingest", r.path(), "--lcov", &lcov, "--junit", &b, "--junit", &a]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--lcov",
+        &lcov,
+        "--junit",
+        &b,
+        "--junit",
+        &a,
+    ]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let marker = ingest_marker(&stderr);
-    assert!(marker.contains(" junit_files=2 log_files=0 lcov_files=1 ") && marker.contains(" stored=2 "), "{marker}");
-    assert!(marker.ends_with(" runs=2 window=10 seq=1 surface=cli"), "{marker}");
-    assert!(stdout.contains("ingested 2 failing case(s) and 1 lcov file(s) -> "), "{stdout}");
+    assert!(
+        marker.contains(" junit_files=2 log_files=0 lcov_files=1 ")
+            && marker.contains(" stored=2 "),
+        "{marker}"
+    );
+    assert!(
+        marker.ends_with(" runs=2 window=10 seq=1 surface=cli"),
+        "{marker}"
+    );
+    assert!(
+        stdout.contains("ingested 2 failing case(s) and 1 lcov file(s) -> "),
+        "{stdout}"
+    );
     assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 5);
 
     // `--window 1` replaces the snapshot, as 0.5.0 did.
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &a, &b, "--window", "1"]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &a,
+        &b,
+        "--window",
+        "1",
+    ]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(ingest_marker(&text(&out.stderr)).ends_with(" runs=1 window=1 seq=2 surface=cli"));
     assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 2);
@@ -350,13 +549,24 @@ fn the_build_still_succeeds_after_an_ingest() {
 
     let junit = r.report("pytest-junit.xml", PYTEST_JUNIT);
     let lcov = r.report("coverage.lcov", LCOV);
-    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--lcov", &lcov]);
+    let out = r.glia(&[
+        "tests",
+        "ingest",
+        r.path(),
+        "--junit",
+        &junit,
+        "--lcov",
+        &lcov,
+    ]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
     let out = r.glia(&["analyze", r.path(), "--format", "json"]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert!(!stderr.contains("[tests] snapshot incomplete"), "the snapshot reads back whole:\n{stderr}");
+    assert!(
+        !stderr.contains("[tests] snapshot incomplete"),
+        "the snapshot reads back whole:\n{stderr}"
+    );
     let graph: Value = serde_json::from_str(stdout.trim()).expect("analyze json parses");
     let qnames: Vec<&str> = graph["nodes"]
         .as_array()

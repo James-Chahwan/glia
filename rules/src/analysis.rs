@@ -81,7 +81,12 @@ pub(crate) fn analyse_with(
             })
             .collect();
     }
-    Ok(Analysis { warnings: cx.warnings, preds: cx.preds, rules, strata })
+    Ok(Analysis {
+        warnings: cx.warnings,
+        preds: cx.preds,
+        rules,
+        strata,
+    })
 }
 
 /// A checked program: its predicates, compiled rules and strata, and the warnings
@@ -276,7 +281,10 @@ impl CatSet {
     /// and whether it reads every category.
     fn names(&self, catalog: &Catalog) -> (Vec<String>, bool) {
         let name = |c: &EdgeCategoryId| {
-            catalog.registries.category_name(*c).map_or_else(|| format!("#{}", c.0), str::to_string)
+            catalog
+                .registries
+                .category_name(*c)
+                .map_or_else(|| format!("#{}", c.0), str::to_string)
         };
         let mut names: Vec<String> = match self {
             CatSet::All => return (Vec::new(), true),
@@ -332,13 +340,15 @@ pub(crate) fn closure_set(catalog: &Catalog, builtin: usize, terms: &[CTerm]) ->
     if !matches!(decl.kind, BuiltinKind::Reaches | BuiltinKind::Scc) {
         return None;
     }
-    Some(match decl.cols.iter().position(|c| *c == ColType::CategorySet) {
-        None => CatSet::Carry,
-        Some(c) => match terms.get(c) {
-            Some(CTerm::Const(ConstVal::CatSet(set))) => set.clone(),
-            _ => CatSet::All,
+    Some(
+        match decl.cols.iter().position(|c| *c == ColType::CategorySet) {
+            None => CatSet::Carry,
+            Some(c) => match terms.get(c) {
+                Some(CTerm::Const(ConstVal::CatSet(set))) => set.clone(),
+                _ => CatSet::All,
+            },
         },
-    })
+    )
 }
 
 // ============================================================================
@@ -374,12 +384,16 @@ pub(crate) fn sips_order(
     size: &dyn Fn(PredId) -> Option<usize>,
 ) -> Vec<usize> {
     let n = rule.body.len();
-    let mut bound: Vec<bool> =
-        (0..usize::from(rule.nvars)).map(|v| bound.get(v).copied().unwrap_or(false)).collect();
+    let mut bound: Vec<bool> = (0..usize::from(rule.nvars))
+        .map(|v| bound.get(v).copied().unwrap_or(false))
+        .collect();
     let mut placed = vec![false; n];
     let mut order = Vec::with_capacity(n);
     let mut next = first.filter(|&f| f < n);
-    while let Some(i) = next.take().or_else(|| pick(rule, preds, catalog, &bound, &placed, size)) {
+    while let Some(i) = next
+        .take()
+        .or_else(|| pick(rule, preds, catalog, &bound, &placed, size))
+    {
         placed[i] = true;
         order.push(i);
         bind_literal(&rule.body[i], &mut bound);
@@ -411,8 +425,10 @@ fn pick(
     size: &dyn Fn(PredId) -> Option<usize>,
 ) -> Option<usize> {
     let open: Vec<usize> = (0..rule.body.len()).filter(|&i| !placed[i]).collect();
-    let shapes: Vec<Shape> =
-        open.iter().map(|&i| shape(&rule.body[i], preds, catalog, bound, size)).collect();
+    let shapes: Vec<Shape> = open
+        .iter()
+        .map(|&i| shape(&rule.body[i], preds, catalog, bound, size))
+        .collect();
     if let Some(k) = shapes.iter().position(|s| s.filter) {
         return Some(open[k]);
     }
@@ -433,7 +449,8 @@ fn pick(
             best = Some(k);
         }
     }
-    best.or(if open.is_empty() { None } else { Some(0) }).map(|k| open[k])
+    best.or(if open.is_empty() { None } else { Some(0) })
+        .map(|k| open[k])
 }
 
 /// A literal's [`Shape`] under `bound`.
@@ -460,7 +477,9 @@ fn shape(
             Shape {
                 filter: runnable && !has_free_var(terms, bound),
                 eligible: runnable,
-                joined: terms.iter().any(|t| matches!(t, CTerm::Var(_)) && is_bound(t, bound)),
+                joined: terms
+                    .iter()
+                    .any(|t| matches!(t, CTerm::Var(_)) && is_bound(t, bound)),
                 bound: terms.iter().enumerate().filter(selective).count(),
                 size: size(*p).unwrap_or(usize::MAX),
             }
@@ -479,7 +498,13 @@ fn shape(
                     || (matches!(r, CTerm::Var(_)) && !rb && lb));
             // An assignment yields exactly one binding per input binding: size 1, and
             // never a cross product.
-            Shape { filter: lb && rb, eligible: assigns, joined: assigns, bound: 1, size: 1 }
+            Shape {
+                filter: lb && rb,
+                eligible: assigns,
+                joined: assigns,
+                bound: 1,
+                size: 1,
+            }
         }
     }
 }
@@ -494,7 +519,9 @@ fn is_bound(t: &CTerm, bound: &[bool]) -> bool {
 }
 
 fn has_free_var(terms: &[CTerm], bound: &[bool]) -> bool {
-    terms.iter().any(|t| matches!(t, CTerm::Var(_)) && !is_bound(t, bound))
+    terms
+        .iter()
+        .any(|t| matches!(t, CTerm::Var(_)) && !is_bound(t, bound))
 }
 
 /// Mark what running `lit` binds: every variable of a positive atom; the free side of
@@ -558,7 +585,10 @@ mod msg {
     }
 
     pub(super) fn unknown_in_set(name: &str, set: &str, suggestion: Option<&str>) -> String {
-        suggest(format!("unknown edge category `{name}` in the category set `{set}`"), suggestion)
+        suggest(
+            format!("unknown edge category `{name}` in the category set `{set}`"),
+            suggestion,
+        )
     }
 
     pub(super) fn builtin_head(sig: &str) -> String {
@@ -595,7 +625,10 @@ mod msg {
     }
 
     pub(super) fn too_many_args(name: &str, arity: usize) -> String {
-        format!("a predicate may have at most {} arguments; `{name}` has {arity}", super::MAX_ARITY)
+        format!(
+            "a predicate may have at most {} arguments; `{name}` has {arity}",
+            super::MAX_ARITY
+        )
     }
 
     /// `count` with no variable, or `min` / `max` / `sum` with other than one.
@@ -620,11 +653,17 @@ mod msg {
 
     /// `preds` are the component's `name/arity`s, sorted by name.
     pub(super) fn negation_cycle(preds: &[String]) -> String {
-        format!("negation inside recursion: {} through this negated atom", depend(preds))
+        format!(
+            "negation inside recursion: {} through this negated atom",
+            depend(preds)
+        )
     }
 
     pub(super) fn aggregate_cycle(preds: &[String]) -> String {
-        format!("aggregation inside recursion: {} through this aggregate", depend(preds))
+        format!(
+            "aggregation inside recursion: {} through this aggregate",
+            depend(preds)
+        )
     }
 
     /// `` `p/1` depends on itself `` or `` `p/0`, `q/0` depend on each other ``.
@@ -663,7 +702,10 @@ fn example_head(name: &str, arity: usize) -> String {
         return name.to_string();
     }
     let vars: Vec<String> = (0..arity)
-        .map(|i| VARS.get(i).map_or_else(|| format!("x{}", i + 1), |v| (*v).to_string()))
+        .map(|i| {
+            VARS.get(i)
+                .map_or_else(|| format!("x{}", i + 1), |v| (*v).to_string())
+        })
         .collect();
     format!("{name}({})", vars.join(", "))
 }
@@ -750,7 +792,10 @@ impl Vars {
     }
 
     fn find(&self, name: &str) -> Option<u16> {
-        self.names.iter().position(|n| n == name).and_then(|v| u16::try_from(v).ok())
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .and_then(|v| u16::try_from(v).ok())
     }
 
     fn len(&self) -> u16 {
@@ -817,12 +862,14 @@ impl<'a> Cx<'a> {
 
     fn error(&mut self, span: Span, rule_sig: &str, message: String) {
         let source = self.program.source_name(span.source);
-        self.errors.push(Diagnostic::error(span, source, Some(rule_sig), message));
+        self.errors
+            .push(Diagnostic::error(span, source, Some(rule_sig), message));
     }
 
     fn warning(&mut self, span: Span, rule_sig: &str, message: String) {
         let source = self.program.source_name(span.source);
-        self.warnings.push(Diagnostic::warning(span, source, Some(rule_sig), message));
+        self.warnings
+            .push(Diagnostic::warning(span, source, Some(rule_sig), message));
     }
 
     fn new_pred(&mut self, name: &str, arity: usize, kind: PredKind, synthetic: bool) -> PredId {
@@ -865,7 +912,11 @@ impl<'a> Cx<'a> {
             if let Some(&id) = self.by_name.get(name.as_str()) {
                 let defined = self.preds[id as usize].arity;
                 if defined != arity {
-                    self.error(rule.head.span, &sig, msg::arity(name, arity, &defined.to_string()));
+                    self.error(
+                        rule.head.span,
+                        &sig,
+                        msg::arity(name, arity, &defined.to_string()),
+                    );
                     out.push(None);
                     continue;
                 }
@@ -909,17 +960,30 @@ impl<'a> Cx<'a> {
             if defined == arity {
                 return Some(id);
             }
-            self.error(a.span, rule_sig, msg::arity(&a.pred, arity, &defined.to_string()));
+            self.error(
+                a.span,
+                rule_sig,
+                msg::arity(&a.pred, arity, &defined.to_string()),
+            );
             return None;
         }
         if let Some(i) = catalog.edb.iter().position(|p| p.name == a.pred) {
             let defined = catalog.edb[i].cols.len();
-            let id = self.new_pred(&a.pred, defined, PredKind::Edb(EdbPred::of(i, &a.pred)), false);
+            let id = self.new_pred(
+                &a.pred,
+                defined,
+                PredKind::Edb(EdbPred::of(i, &a.pred)),
+                false,
+            );
             self.by_name.insert(a.pred.clone(), id);
             if defined == arity {
                 return Some(id);
             }
-            self.error(a.span, rule_sig, msg::arity(&a.pred, arity, &defined.to_string()));
+            self.error(
+                a.span,
+                rule_sig,
+                msg::arity(&a.pred, arity, &defined.to_string()),
+            );
             return None;
         }
         let mut arities = Vec::new();
@@ -946,7 +1010,11 @@ impl<'a> Cx<'a> {
                     let init: Vec<String> = init.iter().map(ToString::to_string).collect();
                     format!("{} or {last}", init.join(", "))
                 }
-                _ => arities.iter().map(ToString::to_string).collect::<Vec<_>>().join(""),
+                _ => arities
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(""),
             };
             self.error(a.span, rule_sig, msg::arity(&a.pred, arity, &defined));
             return None;
@@ -973,14 +1041,21 @@ impl<'a> Cx<'a> {
         atom_sig: &str,
     ) -> CTerm {
         let (ty, req) = match self.info(p) {
-            Some(info) => (info.col_type(self.catalog, col), info.bind_req(self.catalog, col)),
+            Some(info) => (
+                info.col_type(self.catalog, col),
+                info.bind_req(self.catalog, col),
+            ),
             None => (ColType::Any, None),
         };
         let argno = col + 1;
         match t {
             Term::Var { span, .. } | Term::Wild(span) => {
                 if req == Some(BindReq::Const) {
-                    self.error(*span, rule_sig, msg::const_arg(argno, atom_sig, const_what(ty)));
+                    self.error(
+                        *span,
+                        rule_sig,
+                        msg::const_arg(argno, atom_sig, const_what(ty)),
+                    );
                 }
                 plain_term(t, vars)
             }
@@ -993,14 +1068,22 @@ impl<'a> Cx<'a> {
                     None => plain_term(t, vars),
                 },
                 ColType::Int => {
-                    self.error(*span, rule_sig, msg::const_arg(argno, atom_sig, const_what(ty)));
+                    self.error(
+                        *span,
+                        rule_sig,
+                        msg::const_arg(argno, atom_sig, const_what(ty)),
+                    );
                     plain_term(t, vars)
                 }
                 ColType::Str | ColType::Node | ColType::Any => plain_term(t, vars),
             },
             Term::Int { span, .. } => {
                 if !matches!(ty, ColType::Int | ColType::Node | ColType::Any) {
-                    self.error(*span, rule_sig, msg::const_arg(argno, atom_sig, const_what(ty)));
+                    self.error(
+                        *span,
+                        rule_sig,
+                        msg::const_arg(argno, atom_sig, const_what(ty)),
+                    );
                 }
                 plain_term(t, vars)
             }
@@ -1072,7 +1155,11 @@ impl<'a> Cx<'a> {
                 }
                 HeadArg::Agg(a) => {
                     let found = a.vars.len();
-                    let fits = if a.op == AggOp::Count { found > 0 } else { found == 1 };
+                    let fits = if a.op == AggOp::Count {
+                        found > 0
+                    } else {
+                        found == 1
+                    };
                     if !fits {
                         self.error(a.span, &sig, msg::aggregate_vars(a.op, found));
                     }
@@ -1322,10 +1409,14 @@ impl<'a> Cx<'a> {
         // Per edge: the rule (program index) and the span its error points at.
         let mut sites: Vec<(usize, Span)> = Vec::new();
         for r in rules {
-            let agg_span = self.program.rules[r.index].head.args.iter().find_map(|a| match a {
-                HeadArg::Agg(a) => Some(a.span),
-                HeadArg::Term(_) => None,
-            });
+            let agg_span = self.program.rules[r.index]
+                .head
+                .args
+                .iter()
+                .find_map(|a| match a {
+                    HeadArg::Agg(a) => Some(a.span),
+                    HeadArg::Term(_) => None,
+                });
             for lit in &r.body {
                 let (p, dep, span) = match (lit, agg_span) {
                     (CLit::Pos(p, _, _), Some(agg)) => (*p, Dep::Agg, agg),
@@ -1334,7 +1425,12 @@ impl<'a> Cx<'a> {
                     (CLit::Cmp(..), _) => continue,
                 };
                 if self.is_idb(p) {
-                    edges.push(DepEdge { body: p, head: r.head, dep, site: sites.len() });
+                    edges.push(DepEdge {
+                        body: p,
+                        head: r.head,
+                        dep,
+                        site: sites.len(),
+                    });
                     sites.push((r.index, span));
                 }
             }
@@ -1370,7 +1466,9 @@ impl<'a> Cx<'a> {
 
     /// One error for a component a negated or aggregated read stays inside.
     fn bad_cycle(&mut self, b: &BadCycle, sites: &[(usize, Span)]) {
-        let Some(&(rule, span)) = sites.get(b.site) else { return };
+        let Some(&(rule, span)) = sites.get(b.site) else {
+            return;
+        };
         let mut members: Vec<(&str, usize)> = b
             .preds
             .iter()
@@ -1416,7 +1514,9 @@ impl<'a> Cx<'a> {
                 CLit::Pos(p, ..) => self.info(*p).map(PredInfo::signature),
                 _ => None,
             });
-            let (Some(from), Some(head)) = (from, self.info(r.head)) else { continue };
+            let (Some(from), Some(head)) = (from, self.info(r.head)) else {
+                continue;
+            };
             let (sig, example) = (head.signature(), example_head(&head.name, head.arity));
             let span = self.program.rules[r.index].head.span;
             self.warning(span, &sig, msg::unseeded(&sig, &from, &example));
@@ -1431,7 +1531,9 @@ impl<'a> Cx<'a> {
     fn seeds(&self, r: &CRule, k: usize) -> bool {
         let mut positive = false;
         for lit in &r.body {
-            let CLit::Pos(p, terms, _) = lit else { continue };
+            let CLit::Pos(p, terms, _) = lit else {
+                continue;
+            };
             positive = true;
             let Some(info) = self.info(*p) else { continue };
             let constant = |c: usize, t: &CTerm| -> bool {
@@ -1488,7 +1590,9 @@ impl<'a> Cx<'a> {
     fn direct_reads(&self, rules: &[CRule]) -> Vec<Reads> {
         let mut reads = vec![Reads::default(); self.n_idb];
         for r in rules {
-            let Some(slot) = reads.get_mut(r.head as usize) else { continue };
+            let Some(slot) = reads.get_mut(r.head as usize) else {
+                continue;
+            };
             for lit in &r.body {
                 if let CLit::Pos(p, terms, _) | CLit::Neg(p, terms, _) = lit {
                     self.literal_reads(*p, terms, slot);
@@ -1511,7 +1615,9 @@ impl<'a> Cx<'a> {
             let mut stack = vec![p];
             seen[p as usize] = true;
             while let Some(q) = stack.pop() {
-                let Some(r) = reads.get(q as usize) else { continue };
+                let Some(r) = reads.get(q as usize) else {
+                    continue;
+                };
                 acc.categories.extend(r.categories.iter().cloned());
                 acc.any |= r.any;
                 for &next in &r.idb {
@@ -1597,7 +1703,13 @@ mod tests {
     }
 
     fn at(start: u32) -> Span {
-        Span { source: 0, start, end: start + 1, line: 1, col: start + 1 }
+        Span {
+            source: 0,
+            start,
+            end: start + 1,
+            line: 1,
+            col: start + 1,
+        }
     }
 
     fn ok(p: &Program) -> Analysis {
@@ -1629,7 +1741,8 @@ mod tests {
 
     fn id_of(a: &Analysis, name: &str) -> PredId {
         let p = a.preds.iter().position(|p| p.name == name);
-        p.map(|p| p as PredId).unwrap_or_else(|| panic!("no predicate {name}"))
+        p.map(|p| p as PredId)
+            .unwrap_or_else(|| panic!("no predicate {name}"))
     }
 
     fn stratum_of(a: &Analysis, name: &str) -> usize {
@@ -1660,21 +1773,39 @@ mod tests {
         )]);
         let d = errors(&p);
         assert_eq!(d.len(), 1, "{d:?}");
-        assert_eq!(d[0].message, "unknown predicate `edg/3`; did you mean `edge`?");
+        assert_eq!(
+            d[0].message,
+            "unknown predicate `edg/3`; did you mean `edge`?"
+        );
         assert_eq!(d[0].predicate.as_deref(), Some("v/1"));
         assert_eq!(d[0].severity, Severity::Error);
         assert_eq!(d[0].source_name, "rules");
 
         // Nothing within distance 2: no suggestion. Ties go to the smaller name, and a
         // user predicate is a known name too.
-        let far = program(vec![rule("v", vec![v("a")], vec![pos("zzzz", vec![v("a")])])]);
+        let far = program(vec![rule(
+            "v",
+            vec![v("a")],
+            vec![pos("zzzz", vec![v("a")])],
+        )]);
         assert_eq!(messages(&errors(&far)), ["unknown predicate `zzzz/1`"]);
         let tie = program(vec![
-            rule("hb", vec![v("a")], vec![pos("node", vec![v("a"), Term::wild()])]),
-            rule("ha", vec![v("a")], vec![pos("node", vec![v("a"), Term::wild()])]),
+            rule(
+                "hb",
+                vec![v("a")],
+                vec![pos("node", vec![v("a"), Term::wild()])],
+            ),
+            rule(
+                "ha",
+                vec![v("a")],
+                vec![pos("node", vec![v("a"), Term::wild()])],
+            ),
             rule("v", vec![v("a")], vec![pos("hc", vec![v("a")])]),
         ]);
-        assert_eq!(messages(&errors(&tie)), ["unknown predicate `hc/1`; did you mean `ha`?"]);
+        assert_eq!(
+            messages(&errors(&tie)),
+            ["unknown predicate `hc/1`; did you mean `ha`?"]
+        );
         assert_eq!(suggest("Edge", ["edge", "node"]), Some("edge"));
         assert_eq!(distance("ROTUE", "ROUTE"), 2);
         assert_eq!(distance("", "abc"), 3);
@@ -1683,7 +1814,11 @@ mod tests {
     #[test]
     fn arity_mismatch() {
         let p = program(vec![
-            rule("p", vec![v("x")], vec![pos("edge", vec![v("x"), Term::wild(), s("CALLS")])]),
+            rule(
+                "p",
+                vec![v("x")],
+                vec![pos("edge", vec![v("x"), Term::wild(), s("CALLS")])],
+            ),
             rule("q", vec![v("x")], vec![pos("p", vec![v("x"), v("x")])]),
         ]);
         let d = errors(&p);
@@ -1699,9 +1834,16 @@ mod tests {
             rule(
                 "b",
                 vec![v("x")],
-                vec![pos("node", vec![v("x"), Term::wild()]), pos("reaches", vec![v("x")])],
+                vec![
+                    pos("node", vec![v("x"), Term::wild()]),
+                    pos("reaches", vec![v("x")]),
+                ],
             ),
-            rule("a", vec![v("x"), v("y")], vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])]),
+            rule(
+                "a",
+                vec![v("x"), v("y")],
+                vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])],
+            ),
         ]);
         assert_eq!(
             messages(&errors(&p)),
@@ -1767,7 +1909,10 @@ mod tests {
         assert_eq!(set("*"), CTerm::Const(ConstVal::CatSet(CatSet::All)));
         assert_eq!(
             set("USES | CALLS|USES"),
-            CTerm::Const(ConstVal::CatSet(CatSet::Of(vec![EdgeCategoryId(1), EdgeCategoryId(3)])))
+            CTerm::Const(ConstVal::CatSet(CatSet::Of(vec![
+                EdgeCategoryId(1),
+                EdgeCategoryId(3)
+            ])))
         );
 
         // Const-bound builtin arguments, and constants of the wrong type.
@@ -1786,7 +1931,10 @@ mod tests {
             rule(
                 "w",
                 vec![v("a")],
-                vec![pos("reaches", vec![v("a"), Term::wild(), s("CALLS"), s("2")])],
+                vec![pos(
+                    "reaches",
+                    vec![v("a"), Term::wild(), s("CALLS"), s("2")],
+                )],
             ),
         ]);
         assert_eq!(
@@ -1836,7 +1984,11 @@ mod tests {
                 vec![v("x"), v("y")],
                 vec![pos("edge", vec![v("x"), v("y"), Term::wild()])],
             ),
-            rule("ok", vec![v("x")], vec![pos("node", vec![v("x"), Term::wild()])]),
+            rule(
+                "ok",
+                vec![v("x")],
+                vec![pos("node", vec![v("x"), Term::wild()])],
+            ),
         ]);
         assert_eq!(
             messages(&errors(&p)),
@@ -1845,8 +1997,10 @@ mod tests {
                 "`reaches/2` is a built-in predicate and cannot be defined by a rule",
             ]
         );
-        let attrs =
-            catalog().with_attrs(&[crate::ir::AttrDecl { name: "index", ty: ColType::Int }]);
+        let attrs = catalog().with_attrs(&[crate::ir::AttrDecl {
+            name: "index",
+            ty: ColType::Int,
+        }]);
         let p = program(vec![rule(
             "index",
             vec![v("x"), Term::int(0)],
@@ -1865,11 +2019,22 @@ mod tests {
             vec![v("y")],
             vec![pos("node", vec![v("x"), s("ROUTE")])],
         )]));
-        assert_eq!(messages(&d), ["variable `y` in the head of `v/1` is not bound by the body"]);
+        assert_eq!(
+            messages(&d),
+            ["variable `y` in the head of `v/1` is not bound by the body"]
+        );
 
-        let defs = || rule("p", vec![v("x")], vec![pos("node", vec![v("x"), Term::wild()])]);
-        let d =
-            errors(&program(vec![defs(), rule("v", vec![v("x")], vec![neg("p", vec![v("x")])])]));
+        let defs = || {
+            rule(
+                "p",
+                vec![v("x")],
+                vec![pos("node", vec![v("x"), Term::wild()])],
+            )
+        };
+        let d = errors(&program(vec![
+            defs(),
+            rule("v", vec![v("x")], vec![neg("p", vec![v("x")])]),
+        ]));
         assert_eq!(
             messages(&d),
             [
@@ -1886,7 +2051,10 @@ mod tests {
                 Literal::cmp(CmpOp::Gt, v("y"), Term::int(3)),
             ],
         )]));
-        assert_eq!(messages(&d), ["variable `y` in a comparison is not bound by a positive atom"]);
+        assert_eq!(
+            messages(&d),
+            ["variable `y` in a comparison is not bound by a positive atom"]
+        );
 
         // An assignment binds: `y = x`, and a chain `z = y` after it.
         let safe = program(vec![rule(
@@ -1902,13 +2070,20 @@ mod tests {
         let assign = program(vec![rule(
             "v",
             vec![v("x")],
-            vec![pos("node", vec![v("x"), Term::wild()]), Literal::cmp(CmpOp::Eq, v("y"), v("x"))],
+            vec![
+                pos("node", vec![v("x"), Term::wild()]),
+                Literal::cmp(CmpOp::Eq, v("y"), v("x")),
+            ],
         )]);
         assert!(analyse(&assign, &catalog()).is_ok());
 
         // `_` in a head; a fact's variable; a May column binds.
         let d = errors(&program(vec![
-            rule("w", vec![Term::wild()], vec![pos("node", vec![v("x"), Term::wild()])]),
+            rule(
+                "w",
+                vec![Term::wild()],
+                vec![pos("node", vec![v("x"), Term::wild()])],
+            ),
             Rule::fact("f", vec![v("q")]),
         ]));
         assert_eq!(
@@ -1938,10 +2113,16 @@ mod tests {
         let p = program(vec![rule(
             "v",
             vec![v("x")],
-            vec![pos("node", vec![v("x"), Term::wild()]), pos("in_scope", vec![v("x"), v("p")])],
+            vec![
+                pos("node", vec![v("x"), Term::wild()]),
+                pos("in_scope", vec![v("x"), v("p")]),
+            ],
         )]);
         let d = errors_in(&p, &c);
-        assert_eq!(messages(&d), ["`in_scope/2` needs argument 2 bound before the call"]);
+        assert_eq!(
+            messages(&d),
+            ["`in_scope/2` needs argument 2 bound before the call"]
+        );
         assert_eq!(d[0].predicate.as_deref(), Some("v/1"));
 
         // Bound later in the order than it is written: fine.
@@ -1992,7 +2173,14 @@ mod tests {
         assert_eq!(r.head_terms, vec![CTerm::Var(0), CTerm::Wild]);
         assert_eq!(r.aggs, vec![(AggOp::Count, vec![1])]);
         assert_eq!(r.var_names, ["y", "x"]);
-        assert_eq!(a.strata, vec![Stratum { preds: vec![0], recursive: false, aggregate: true }]);
+        assert_eq!(
+            a.strata,
+            vec![Stratum {
+                preds: vec![0],
+                recursive: false,
+                aggregate: true
+            }]
+        );
         assert_eq!(
             messages(&errors(&fan(true))),
             ["`fan/2` has an aggregate head, so it must have exactly one rule (found 2)"]
@@ -2014,8 +2202,16 @@ mod tests {
         let node = || pos("node", vec![v("x"), Term::wild()]);
         // `_` in a comparison, and in a negated builtin's Must column.
         let p = program(vec![
-            rule("v", vec![v("x")], vec![node(), Literal::cmp(CmpOp::Ne, v("x"), Term::wild())]),
-            rule("w", vec![v("x")], vec![node(), neg("starts_with", vec![Term::wild(), s("n")])]),
+            rule(
+                "v",
+                vec![v("x")],
+                vec![node(), Literal::cmp(CmpOp::Ne, v("x"), Term::wild())],
+            ),
+            rule(
+                "w",
+                vec![v("x")],
+                vec![node(), neg("starts_with", vec![Term::wild(), s("n")])],
+            ),
         ]);
         assert_eq!(
             messages(&errors_in(&p, &c)),
@@ -2040,7 +2236,10 @@ mod tests {
         let fact = |n: usize| program(vec![Rule::fact("wide", vec![Term::int(0); n])]);
         assert!(analyse(&fact(MAX_ARITY), &c).is_ok());
         let d = errors(&fact(MAX_ARITY + 1));
-        assert_eq!(messages(&d), ["a predicate may have at most 256 arguments; `wide` has 257"]);
+        assert_eq!(
+            messages(&d),
+            ["a predicate may have at most 256 arguments; `wide` has 257"]
+        );
         assert_eq!(d[0].predicate.as_deref(), Some("wide/257"));
         let wide = BuiltinDecl {
             name: "wide_call".into(),
@@ -2070,11 +2269,23 @@ mod tests {
             )])
         };
         let texts = |op: AggOp, vars: &[&str]| -> Vec<String> {
-            errors(&agg(op, vars)).into_iter().map(|d| d.message).collect()
+            errors(&agg(op, vars))
+                .into_iter()
+                .map(|d| d.message)
+                .collect()
         };
-        assert_eq!(texts(AggOp::Count, &[]), ["`count` takes at least one variable"]);
-        assert_eq!(texts(AggOp::Sum, &["a", "b"]), ["`sum` takes one variable, found 2"]);
-        assert_eq!(texts(AggOp::Min, &[]), ["`min` takes one variable, found 0"]);
+        assert_eq!(
+            texts(AggOp::Count, &[]),
+            ["`count` takes at least one variable"]
+        );
+        assert_eq!(
+            texts(AggOp::Sum, &["a", "b"]),
+            ["`sum` takes one variable, found 2"]
+        );
+        assert_eq!(
+            texts(AggOp::Min, &[]),
+            ["`min` takes one variable, found 0"]
+        );
         assert!(analyse(&agg(AggOp::Count, &["a", "b"]), &c).is_ok());
         assert!(analyse(&agg(AggOp::Max, &["a"]), &c).is_ok());
     }
@@ -2117,7 +2328,10 @@ mod tests {
             rule(
                 "zz",
                 vec![v("x")],
-                vec![pos("node", vec![v("x"), Term::wild()]), neg("aa", vec![v("x")])],
+                vec![
+                    pos("node", vec![v("x"), Term::wild()]),
+                    neg("aa", vec![v("x")]),
+                ],
             ),
             rule("aa", vec![v("x")], vec![pos("zz", vec![v("x")])]),
         ]);
@@ -2160,18 +2374,43 @@ mod tests {
 
     #[test]
     fn strata_order() {
-        let a_rule = || rule("a", vec![v("x")], vec![pos("node", vec![v("x"), s("ROUTE")])]);
-        let b_rule =
-            || rule("b", vec![v("x")], vec![pos("edge", vec![v("x"), Term::wild(), s("CALLS")])]);
-        let c_rule =
-            || rule("c", vec![v("x")], vec![pos("a", vec![v("x")]), pos("b", vec![v("x")])]);
+        let a_rule = || {
+            rule(
+                "a",
+                vec![v("x")],
+                vec![pos("node", vec![v("x"), s("ROUTE")])],
+            )
+        };
+        let b_rule = || {
+            rule(
+                "b",
+                vec![v("x")],
+                vec![pos("edge", vec![v("x"), Term::wild(), s("CALLS")])],
+            )
+        };
+        let c_rule = || {
+            rule(
+                "c",
+                vec![v("x")],
+                vec![pos("a", vec![v("x")]), pos("b", vec![v("x")])],
+            )
+        };
         let an = ok(&program(vec![a_rule(), b_rule(), c_rule()]));
         assert_eq!(an.predicates(), ["a/1", "b/1", "c/1"]);
         assert_eq!(an.strata_count(), 3);
-        assert_eq!((stratum_of(&an, "a"), stratum_of(&an, "b"), stratum_of(&an, "c")), (0, 1, 2));
+        assert_eq!(
+            (
+                stratum_of(&an, "a"),
+                stratum_of(&an, "b"),
+                stratum_of(&an, "c")
+            ),
+            (0, 1, 2)
+        );
         // EDB predicates follow the IDB ones, in first-reference order.
-        let edb: Vec<(String, PredKind)> =
-            an.preds[3..].iter().map(|p| (p.signature(), p.kind)).collect();
+        let edb: Vec<(String, PredKind)> = an.preds[3..]
+            .iter()
+            .map(|p| (p.signature(), p.kind))
+            .collect();
         assert_eq!(
             edb,
             [
@@ -2182,25 +2421,49 @@ mod tests {
 
         // Every order of the three rules: the dependent one after both, the two
         // independent ones in source order.
-        let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
         let make: [fn() -> Rule; 3] = [a_rule, b_rule, c_rule];
         for order in orders {
             let an = ok(&program(order.iter().map(|&i| make[i]()).collect()));
-            let (sa, sb, sc) = (stratum_of(&an, "a"), stratum_of(&an, "b"), stratum_of(&an, "c"));
+            let (sa, sb, sc) = (
+                stratum_of(&an, "a"),
+                stratum_of(&an, "b"),
+                stratum_of(&an, "c"),
+            );
             assert!(sa < sc && sb < sc, "{order:?}");
             let a_first = order.iter().position(|&i| i == 0) < order.iter().position(|&i| i == 1);
             assert_eq!(sa < sb, a_first, "{order:?}");
         }
 
         // A recursive pair is one recursive stratum.
-        let an = ok(&program(tc(vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])])));
-        assert_eq!(an.strata, vec![Stratum { preds: vec![0], recursive: true, aggregate: false }]);
+        let an = ok(&program(tc(vec![pos(
+            "edge",
+            vec![v("x"), v("y"), s("CALLS")],
+        )])));
+        assert_eq!(
+            an.strata,
+            vec![Stratum {
+                preds: vec![0],
+                recursive: true,
+                aggregate: false
+            }]
+        );
         assert!(an.preds[0].recursive);
     }
 
     #[test]
     fn warnings() {
-        let a = ok(&program(tc(vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])])));
+        let a = ok(&program(tc(vec![pos(
+            "edge",
+            vec![v("x"), v("y"), s("CALLS")],
+        )])));
         assert_eq!(
             messages(&a.warnings),
             [
@@ -2213,8 +2476,11 @@ mod tests {
         assert_eq!(a.warnings[0].predicate.as_deref(), Some("tc/2"));
 
         // Seeded by a lower IDB predicate, a constant, or a builtin's Must constant.
-        let mut seeded =
-            vec![rule("seed", vec![v("x")], vec![pos("node", vec![v("x"), Term::wild()])])];
+        let mut seeded = vec![rule(
+            "seed",
+            vec![v("x")],
+            vec![pos("node", vec![v("x"), Term::wild()])],
+        )];
         seeded.extend(tc(vec![
             pos("seed", vec![v("x")]),
             pos("edge", vec![v("x"), v("y"), s("CALLS")]),
@@ -2238,14 +2504,21 @@ mod tests {
         ]);
         let w = ok(&program(by_cell)).warnings;
         assert_eq!(w.len(), 1);
-        assert!(w[0].message.contains("every row of `cell/3`"), "{}", w[0].message);
+        assert!(
+            w[0].message.contains("every row of `cell/3`"),
+            "{}",
+            w[0].message
+        );
 
         let a = ok(&program(vec![rule(
             "v",
             vec![v("x")],
             vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])],
         )]));
-        assert_eq!(messages(&a.warnings), ["variable `y` appears once; write `_`"]);
+        assert_eq!(
+            messages(&a.warnings),
+            ["variable `y` appears once; write `_`"]
+        );
         assert_eq!(a.warnings[0].predicate.as_deref(), Some("v/1"));
         // A leading underscore marks a variable as meant to be unused.
         let a = ok(&program(vec![rule(
@@ -2269,7 +2542,10 @@ mod tests {
             rule(
                 "v",
                 vec![v("r")],
-                vec![pos("node", vec![v("r"), s("ROUTE")]), neg("handled", vec![v("r")])],
+                vec![
+                    pos("node", vec![v("r"), s("ROUTE")]),
+                    neg("handled", vec![v("r")]),
+                ],
             ),
         ]);
         let a = ok(&p);
@@ -2289,12 +2565,18 @@ mod tests {
             rule(
                 "live",
                 vec![v("y")],
-                vec![pos("node", vec![v("x"), s("ROUTE")]), pos("reaches", vec![v("x"), v("y")])],
+                vec![
+                    pos("node", vec![v("x"), s("ROUTE")]),
+                    pos("reaches", vec![v("x"), v("y")]),
+                ],
             ),
             rule(
                 "imp",
                 vec![v("y")],
-                vec![pos("edge", vec![v("x"), v("y"), s("IMPORTS")]), pos("live", vec![v("x")])],
+                vec![
+                    pos("edge", vec![v("x"), v("y"), s("IMPORTS")]),
+                    pos("live", vec![v("x")]),
+                ],
             ),
             rule(
                 "anyc",
@@ -2334,7 +2616,11 @@ mod tests {
         assert_eq!(
             reads,
             [
-                ("imp/1".to_string(), strs(&["CALLS", "IMPORTS", "USES"]), false),
+                (
+                    "imp/1".to_string(),
+                    strs(&["CALLS", "IMPORTS", "USES"]),
+                    false
+                ),
                 ("anyc/1".to_string(), Vec::new(), true),
                 ("all/1".to_string(), Vec::new(), true),
                 ("edge/3".to_string(), strs(&["USES"]), false),
@@ -2356,16 +2642,29 @@ mod tests {
         )]);
         let a = ok_in(&p, &c);
         let r = &a.rules[0];
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![2, 0, 1]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &|_| None),
+            vec![2, 0, 1]
+        );
         // `first` runs first; then edge (one bound column, c) ties in_scope (its
         // constant) and wins by source order, and in_scope is left a filter.
-        assert_eq!(sips_order(r, &a.preds, &c, &[], Some(1), &|_| None), vec![1, 0, 2]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], Some(1), &|_| None),
+            vec![1, 0, 2]
+        );
         // Pre-bound head variable b (the explain plan): edge has a bound column, so it
         // ties in_scope at one and runs first by source order.
-        let b = r.var_names.iter().position(|n| n == "b").unwrap_or(usize::MAX);
+        let b = r
+            .var_names
+            .iter()
+            .position(|n| n == "b")
+            .unwrap_or(usize::MAX);
         let mut bound = vec![false; usize::from(r.nvars)];
         bound[b] = true;
-        assert_eq!(sips_order(r, &a.preds, &c, &bound, None, &|_| None), vec![0, 1, 2]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &bound, None, &|_| None),
+            vec![0, 1, 2]
+        );
 
         // Ties to the smaller known size, then source order; filters run as soon as
         // they are fully bound, assignments when one side is.
@@ -2391,13 +2690,22 @@ mod tests {
         // Unknown sizes: edge and node(z, "ROUTE") tie at one bound column, edge first
         // by source order; node(x, _) and `x != y` are then filters; the assignment
         // (size 1) beats node(z, "ROUTE"), which it leaves a filter.
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![1, 0, 2, 3, 4]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &|_| None),
+            vec![1, 0, 2, 3, 4]
+        );
         let small_edge = |p: PredId| Some(if p == edge { 10 } else { 1_000 });
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &small_edge), vec![1, 0, 2, 3, 4]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &small_edge),
+            vec![1, 0, 2, 3, 4]
+        );
         // A smaller node relation wins the tie: node(z, "ROUTE") first, then `z = y`
         // (size 1 beats edge's 1,000), then edge with y bound, then the filters.
         let small_node = |p: PredId| Some(if p == edge { 1_000 } else { 10 });
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &small_node), vec![4, 3, 1, 0, 2]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &small_node),
+            vec![4, 3, 1, 0, 2]
+        );
     }
 
     #[test]
@@ -2406,7 +2714,10 @@ mod tests {
         // variable once `seg(a, "parsers")` ran, so ranking it beside the join on `a`
         // by its constant (and its smaller size) ran it as a cross product of the two
         // scopes. The join runs first and leaves it a filter.
-        let c = catalog().with_attrs(&[crate::ir::AttrDecl { name: "seg", ty: ColType::Str }]);
+        let c = catalog().with_attrs(&[crate::ir::AttrDecl {
+            name: "seg",
+            ty: ColType::Str,
+        }]);
         let p = program(vec![
             rule(
                 "f",
@@ -2441,11 +2752,20 @@ mod tests {
                 _ => 2,
             })
         };
-        assert_eq!(sips_order(&a.rules[0], &a.preds, &c, &[], None, &size), vec![0, 1, 2, 3]);
-        assert_eq!(sips_order(&a.rules[1], &a.preds, &c, &[], None, &size), vec![4, 3, 1, 0, 2]);
+        assert_eq!(
+            sips_order(&a.rules[0], &a.preds, &c, &[], None, &size),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            sips_order(&a.rules[1], &a.preds, &c, &[], None, &size),
+            vec![4, 3, 1, 0, 2]
+        );
         // With nothing joined yet the constants still rank: seg(a, ..) and seg(b, ..)
         // tie and source order starts from seg(a, ..).
-        assert_eq!(sips_order(&a.rules[0], &a.preds, &c, &[], None, &|_| None)[0], 0);
+        assert_eq!(
+            sips_order(&a.rules[0], &a.preds, &c, &[], None, &|_| None)[0],
+            0
+        );
     }
 
     /// `in_seg(Node, Str)`: the builtin form of the `seg` attribute (node `i`'s
@@ -2527,7 +2847,10 @@ mod tests {
             salt: 1,
         };
         let mut g: MemSource = lcg_graph(&spec);
-        g.attr(crate::ir::AttrDecl { name: "seg", ty: ColType::Str });
+        g.attr(crate::ir::AttrDecl {
+            name: "seg",
+            ty: ColType::Str,
+        });
         let mut index = crate::value::Lookup::new();
         for i in 0..N {
             g.set_attr(node_id(1, i), 1, Value::Str(seg_of(i)));
@@ -2553,7 +2876,9 @@ mod tests {
         let (attr_ms, attr_rows) = best_of(attr);
         let (builtin_ms, builtin_rows) = best_of(builtin);
         let values = |rows: &[crate::eval::Row]| {
-            rows.iter().map(|r| (r.values.clone(), r.tier)).collect::<Vec<_>>()
+            rows.iter()
+                .map(|r| (r.values.clone(), r.tier))
+                .collect::<Vec<_>>()
         };
         assert!(!attr_rows.is_empty());
         assert_eq!(values(&attr_rows), values(&builtin_rows));
@@ -2580,7 +2905,10 @@ mod tests {
         )]);
         let a = ok_in(&p, &c);
         let r = &a.rules[0];
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![1, 0]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &|_| None),
+            vec![1, 0]
+        );
         // reaches/4's depth constant is no key either: node(a, _) and the walk tie at
         // nothing bound and source order runs node first, so the walk gets `a` bound
         // (counting the two constants ranked the walk first with both ends free).
@@ -2594,12 +2922,18 @@ mod tests {
         )]);
         let a = ok(&p);
         let r = &a.rules[0];
-        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![0, 1]);
+        assert_eq!(
+            sips_order(r, &a.preds, &c, &[], None, &|_| None),
+            vec![0, 1]
+        );
     }
 
     #[test]
     fn analysis_shape() {
-        let c = catalog().with_attrs(&[crate::ir::AttrDecl { name: "index", ty: ColType::Int }]);
+        let c = catalog().with_attrs(&[crate::ir::AttrDecl {
+            name: "index",
+            ty: ColType::Int,
+        }]);
         let p = program(vec![
             rule(
                 "seed",
@@ -2612,7 +2946,10 @@ mod tests {
             rule(
                 "hit",
                 vec![v("y")],
-                vec![pos("seed", vec![v("x")]), pos("reaches", vec![v("x"), v("y"), s("CALLS")])],
+                vec![
+                    pos("seed", vec![v("x")]),
+                    pos("reaches", vec![v("x"), v("y"), s("CALLS")]),
+                ],
             ),
         ]);
         let a = ok_in(&p, &c);
@@ -2629,13 +2966,22 @@ mod tests {
             ]
         );
         assert_eq!(a.rules.iter().map(|r| r.index).collect::<Vec<_>>(), [0, 1]);
-        assert_eq!(a.rules[1].body[0], CLit::Pos(0, vec![CTerm::Var(1)], Span::default()));
+        assert_eq!(
+            a.rules[1].body[0],
+            CLit::Pos(0, vec![CTerm::Var(1)], Span::default())
+        );
         assert_eq!(a.preds[3].col_type(&c, 1), ColType::Int);
         assert_eq!(a.preds[4].bind_req(&c, 2), Some(BindReq::Const));
         assert_eq!(a.preds[0].col_type(&c, 0), ColType::Any);
-        assert_eq!(closure_set(&c, 0, &[CTerm::Wild, CTerm::Wild]), Some(CatSet::Carry));
+        assert_eq!(
+            closure_set(&c, 0, &[CTerm::Wild, CTerm::Wild]),
+            Some(CatSet::Carry)
+        );
         assert_eq!(closure_set(&c, 5, &[CTerm::Wild, CTerm::Wild]), None);
-        assert_eq!(CatSet::Carry.names(&c), (vec!["CALLS".to_string(), "USES".to_string()], false));
+        assert_eq!(
+            CatSet::Carry.names(&c),
+            (vec!["CALLS".to_string(), "USES".to_string()], false)
+        );
         assert!(a.warnings.is_empty());
         // Analysis is a function of the text: twice gives the same compiled program.
         let b = ok_in(&p, &c);

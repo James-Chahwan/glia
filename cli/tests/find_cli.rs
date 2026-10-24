@@ -75,7 +75,10 @@ fn ok(args: &[&str]) -> Output {
 /// answer's `absence` is `null`.
 fn rows(out: &Output) -> Vec<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    assert!(v["absence"].is_null(), "a found answer carries no absence: {v}");
+    assert!(
+        v["absence"].is_null(),
+        "a found answer carries no absence: {v}"
+    );
     v["results"].as_array().expect("a `results` array").clone()
 }
 
@@ -116,13 +119,21 @@ fn kind_filter_keeps_only_functions_in_rank_order() {
     let (api, web) = (fx.repo("api"), fx.repo("web"));
     let all = rows(&ok(&["find", &api, "user", "--with", &web, "--json"]));
     for k in ["METHOD", "CLASS", "MODULE"] {
-        assert!(all.iter().any(|r| r["kind"] == k), "fixture lacks a {k} row: {all:#?}");
+        assert!(
+            all.iter().any(|r| r["kind"] == k),
+            "fixture lacks a {k} row: {all:#?}"
+        );
     }
-    let funcs = rows(&ok(&["find", &api, "user", "--with", &web, "--kind", "FUNCTION", "--json"]));
+    let funcs = rows(&ok(&[
+        "find", &api, "user", "--with", &web, "--kind", "FUNCTION", "--json",
+    ]));
     assert!(!funcs.is_empty());
     assert!(funcs.iter().all(|r| r["kind"] == "FUNCTION"), "{funcs:#?}");
-    let expected: Vec<serde_json::Value> =
-        all.iter().filter(|r| r["kind"] == "FUNCTION").cloned().collect();
+    let expected: Vec<serde_json::Value> = all
+        .iter()
+        .filter(|r| r["kind"] == "FUNCTION")
+        .cloned()
+        .collect();
     assert_eq!(funcs, expected);
 }
 
@@ -133,7 +144,10 @@ fn unknown_kind_exits_2_and_lists_the_valid_names() {
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("unknown --kind 'NOPE'"), "{stderr}");
-    assert!(stderr.contains("FUNCTION") && stderr.contains("METHOD"), "{stderr}");
+    assert!(
+        stderr.contains("FUNCTION") && stderr.contains("METHOD"),
+        "{stderr}"
+    );
     assert!(out.stdout.is_empty());
 }
 
@@ -144,7 +158,10 @@ fn table_names_the_tier_and_location() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // LD.6: the `live` column, rendered as `blast-radius` renders it; nothing
     // reaches `get_user` from an entrypoint in this fixture.
-    assert!(stdout.contains("| match | live | kind | qname | location |"), "{stdout}");
+    assert!(
+        stdout.contains("| match | live | kind | qname | location |"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("| exact_name | ⊘ | FUNCTION | `users::get_user` | users.py:1 |"),
         "{stdout}"
@@ -172,10 +189,14 @@ fn identity_class_is_one_row_unless_no_collapse() {
     let out = ok(&["find", &web, q, "--with", &admin, "--json"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("[identity] collapse surface=find classes=2 walk_classes=0 folded=1 rows=1"),
+        stderr
+            .contains("[identity] collapse surface=find classes=2 walk_classes=0 folded=1 rows=1"),
         "{stderr}"
     );
-    assert!(stderr.contains("[find] query='package:npm:react' matched=2"), "{stderr}");
+    assert!(
+        stderr.contains("[find] query='package:npm:react' matched=2"),
+        "{stderr}"
+    );
     let one = rows(&out);
     assert_eq!(one.len(), 1, "{one:#?}");
     let id = &one[0]["identity"];
@@ -186,21 +207,32 @@ fn identity_class_is_one_row_unless_no_collapse() {
     assert_eq!(also.len(), 1, "{id}");
     assert_eq!(also[0]["repo"], "admin", "{id}");
     assert_eq!(also[0]["qname"], q, "{id}");
-    assert!(also[0]["file"].is_null() && also[0]["line"].is_null(), "{id}");
+    assert!(
+        also[0]["file"].is_null() && also[0]["line"].is_null(),
+        "{id}"
+    );
 
     let raw = ok(&["find", &web, q, "--with", &admin, "--no-collapse", "--json"]);
     let stderr = String::from_utf8_lossy(&raw.stderr);
-    assert!(!stderr.contains("[identity] collapse "), "--no-collapse builds no view: {stderr}");
+    assert!(
+        !stderr.contains("[identity] collapse "),
+        "--no-collapse builds no view: {stderr}"
+    );
     let two = rows(&raw);
     assert_eq!(two.len(), 2, "{two:#?}");
     assert!(two.iter().all(|r| r.get("identity").is_none()), "{two:#?}");
-    assert_eq!(two[0]["id"], one[0]["id"], "the collapsed row is the best-ranked member");
+    assert_eq!(
+        two[0]["id"], one[0]["id"],
+        "the collapsed row is the best-ranked member"
+    );
 
     // The table names the other repo in the location cell.
     let table = ok(&["find", &web, q, "--with", &admin]);
     let stdout = String::from_utf8_lossy(&table.stdout);
     assert!(
-        stdout.contains("| exact_qname | ⊘ | PACKAGE_DEP | `package:npm:react` | — (also in: admin) |"),
+        stdout.contains(
+            "| exact_qname | ⊘ | PACKAGE_DEP | `package:npm:react` | — (also in: admin) |"
+        ),
         "{stdout}"
     );
 }
@@ -216,9 +248,19 @@ fn identity_table_lists_located_members() {
         .lines()
         .find(|l| l.starts_with("| qname_suffix |"))
         .unwrap_or_else(|| panic!("{stdout}"));
-    assert_eq!(stdout.lines().filter(|l| l.starts_with("| qname_suffix |")).count(), 1, "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("| qname_suffix |"))
+            .count(),
+        1,
+        "{stdout}"
+    );
     assert!(row.contains(" (also in: "), "{row}");
-    assert!(row.contains("features/orders/feature.yaml:"), "the feature op: {row}");
+    assert!(
+        row.contains("features/orders/feature.yaml:"),
+        "the feature op: {row}"
+    );
     assert!(!row.contains("diverged"), "{row}");
 }
 
@@ -237,17 +279,32 @@ fn files_fixture(fx: &Fixture, history: bool) -> String {
     std::fs::write(root.join("orders.py"), ORDERS_PY).unwrap();
     std::fs::write(root.join("specs/001-users/tasks.md"), TASKS_MD).unwrap();
     // The working tree's definitions are read through git (`intent::defs::Tree::Work`).
-    for args in [["init", "-q"].as_slice(), &["add", "-A"], &["commit", "-q", "-m", "init"]] {
+    for args in [
+        ["init", "-q"].as_slice(),
+        &["add", "-A"],
+        &["commit", "-q", "-m", "init"],
+    ] {
         let st = Command::new("git")
             .arg("-C")
             .arg(&root)
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .expect("git");
-        assert!(st.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&st.stderr));
+        assert!(
+            st.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&st.stderr)
+        );
     }
     if history {
         use glia_code_domain::snapshots::{
@@ -257,7 +314,12 @@ fn files_fixture(fx: &Fixture, history: bool) -> String {
         let commits = [HistoryCommit {
             c: c.clone(),
             t: 1_767_225_601,
-            files: vec![HistoryFile { p: "orders.py".into(), a: Some(1), d: Some(0), from: None }],
+            files: vec![HistoryFile {
+                p: "orders.py".into(),
+                a: Some(1),
+                d: Some(0),
+                from: None,
+            }],
         }];
         let messages = [HistoryMessage {
             c: c.clone(),
@@ -283,29 +345,52 @@ fn files_ranks_the_id_first_then_the_text() {
         stderr.contains("[find-files] repo=files surface=cli fusion=LX[IDR,T1s] ids=1 idr_files=1 text=present text_files=1 rows=2"),
         "{stderr}"
     );
-    assert!(stderr.contains("[intent] text repo=files surface=cli "), "{stderr}");
+    assert!(
+        stderr.contains("[intent] text repo=files surface=cli "),
+        "{stderr}"
+    );
     assert!(stderr.contains("[idr] repo=files surface=cli "), "{stderr}");
     // EC.13: no calibration record: SELf2t's fallback, named under the table
     assert!(
         stderr.contains("[select] surface=find_files set=SELf2t shape=find pick=LX[IDR,T1s] source=fallback reason=absent test_commits=0"),
         "{stderr}"
     );
-    assert!(stdout.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"), "{stdout}");
-    assert!(stdout.starts_with("# files for `T012 order cache`\n"), "{stdout}");
-    assert!(stdout.contains("| id | namespace | tier | route | defined at | state |"), "{stdout}");
+    assert!(
+        stdout.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.starts_with("# files for `T012 order cache`\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| id | namespace | tier | route | defined at | state |"),
+        "{stdout}"
+    );
     assert!(stdout.contains("| `T012` |"), "{stdout}");
     let at = |s: &str| stdout.find(s).unwrap_or_else(|| panic!("{s} in {stdout}"));
-    assert!(at("| 1 | `users.py` | 1 |") < at("| 2 | `orders.py` | 0 |"), "{stdout}");
+    assert!(
+        at("| 1 | `users.py` | 1 |") < at("| 2 | `orders.py` | 0 |"),
+        "{stdout}"
+    );
 
     let json = ok(&["find", &repo, "T012 order cache", "--files", "--json"]).stdout;
     let text = String::from_utf8_lossy(&json);
     // the envelope, then each row's keys in the engine's field order
-    assert!(text.starts_with("{\"results\":[{\"rank\":1,\"file\":\"users.py\",\"idr\":1.0,\"text\":0.0,\"degree\":"), "{text}");
+    assert!(
+        text.starts_with(
+            "{\"results\":[{\"rank\":1,\"file\":\"users.py\",\"idr\":1.0,\"text\":0.0,\"degree\":"
+        ),
+        "{text}"
+    );
     assert!(text.contains(",\"ids\":[\"T012\"]},{\"rank\":2,"), "{text}");
     let v: serde_json::Value = serde_json::from_slice(&json).expect("json");
     let rows = v["results"].as_array().expect("results");
     assert!(v["absence"].is_null(), "{v}");
-    assert_eq!((rows[0]["file"].as_str(), rows[1]["file"].as_str()), (Some("users.py"), Some("orders.py")));
+    assert_eq!(
+        (rows[0]["file"].as_str(), rows[1]["file"].as_str()),
+        (Some("users.py"), Some("orders.py"))
+    );
     assert_eq!(rows[0]["ids"], serde_json::json!(["T012"]));
     assert_eq!(
         v["selection"],
@@ -322,15 +407,28 @@ fn files_absence_names_the_missing_inputs() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(v["results"], serde_json::json!([]));
     let note = v["absence"]["note"].as_str().expect("note");
-    assert!(note.contains("no id in the query resolved to a defining row"), "{note}");
-    assert!(note.contains("no history messages (run glia history sync)"), "{note}");
+    assert!(
+        note.contains("no id in the query resolved to a defining row"),
+        "{note}"
+    );
+    assert!(
+        note.contains("no history messages (run glia history sync)"),
+        "{note}"
+    );
     assert_eq!(v["absence"]["reason"], "no_match");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("text=absent text_files=0 rows=0"), "{stderr}");
+    assert!(
+        stderr.contains("text=absent text_files=0 rows=0"),
+        "{stderr}"
+    );
     assert_eq!(v["selection"]["source"], "fallback");
     let plain = ok(&["find", &repo, "warm the cache", "--files"]).stdout;
     let plain = String::from_utf8_lossy(&plain);
-    assert!(plain.contains("_(no match)_") && plain.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"), "{plain}");
+    assert!(
+        plain.contains("_(no match)_")
+            && plain.ends_with("\nranked by LX[IDR,T1s] (fallback: absent)\n"),
+        "{plain}"
+    );
 }
 
 #[test]
@@ -340,12 +438,22 @@ fn files_refuses_with_and_node_flags() {
     let out = glia(&["find", &api, "user", "--with", &web, "--files"]);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("error: find --files ranks one repo's files; got 2 repos"), "{stderr}");
-    for flag in [["--kind", "FUNCTION"].as_slice(), &["--no-collapse"], &["--scope", "x"]] {
+    assert!(
+        stderr.contains("error: find --files ranks one repo's files; got 2 repos"),
+        "{stderr}"
+    );
+    for flag in [
+        ["--kind", "FUNCTION"].as_slice(),
+        &["--no-collapse"],
+        &["--scope", "x"],
+    ] {
         let mut args = vec!["find", api.as_str(), "user", "--files"];
         args.extend_from_slice(flag);
         let out = glia(&args);
         assert_eq!(out.status.code(), Some(2), "{flag:?}");
-        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"), "{flag:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+            "{flag:?}"
+        );
     }
 }

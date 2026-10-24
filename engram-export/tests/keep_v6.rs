@@ -138,7 +138,10 @@ impl Scratch {
         for (path, body) in MANIFESTS {
             s.write(path, body);
         }
-        s.write("README.md", &format!("# Shop\n\nThe shop's services.\n\n{REFUNDS}"));
+        s.write(
+            "README.md",
+            &format!("# Shop\n\nThe shop's services.\n\n{REFUNDS}"),
+        );
         s
     }
 
@@ -166,7 +169,10 @@ impl Scratch {
             .unwrap();
         let stderr = String::from_utf8_lossy(&run.stderr);
         assert_eq!(run.status.code(), Some(0), "export failed:\n{stderr}");
-        assert!(!self.repo().join(".glia").exists(), "--no-persist wrote build state");
+        assert!(
+            !self.repo().join(".glia").exists(),
+            "--no-persist wrote build state"
+        );
         let gmap: Gmap = bincode::deserialize(&std::fs::read(&out).unwrap()).unwrap();
         assert_eq!(gmap.format_version, engram_core::GMAP_FORMAT_VERSION);
         gmap
@@ -184,9 +190,9 @@ fn symbols_in<'g>(gmap: &'g Gmap, path: &str) -> Vec<(&'g str, &'g str, Option<&
     gmap.nodes
         .iter()
         .filter_map(|n| match &n.content {
-            Content::Symbol { name, span, doc, .. }
-                if gmap.files.get(&span.file).map(String::as_str) == Some(path) =>
-            {
+            Content::Symbol {
+                name, span, doc, ..
+            } if gmap.files.get(&span.file).map(String::as_str) == Some(path) => {
                 Some((n.key.as_str(), name.as_str(), doc.as_deref()))
             }
             _ => None,
@@ -201,7 +207,10 @@ fn leading_doc_reaches_symbol_doc_in_every_language() {
     let mut lost = Vec::new();
     for (lang, path, _, symbol, phrase) in LANGS {
         let in_file = symbols_in(&gmap, path);
-        let hits: Vec<_> = in_file.iter().filter(|(_, name, _)| name == symbol).collect();
+        let hits: Vec<_> = in_file
+            .iter()
+            .filter(|(_, name, _)| name == symbol)
+            .collect();
         match hits.as_slice() {
             [(_, _, Some(doc))] if doc.contains(phrase) => {}
             [(key, _, doc)] => lost.push(format!(
@@ -231,15 +240,20 @@ fn proposition_cap_is_500_bytes_end_to_end() {
         .nodes
         .iter()
         .filter_map(|n| match &n.content {
-            Content::Proposition { text, span: Some(span) }
-                if gmap.files.get(&span.file).map(String::as_str) == Some("README.md") =>
-            {
+            Content::Proposition {
+                text,
+                span: Some(span),
+            } if gmap.files.get(&span.file).map(String::as_str) == Some("README.md") => {
                 Some(text.as_str())
             }
             _ => None,
         })
         .collect();
-    let refunds: Vec<&str> = texts.iter().copied().filter(|t| t.contains("Refunds are")).collect();
+    let refunds: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|t| t.contains("Refunds are"))
+        .collect();
     let [capped] = refunds.as_slice() else {
         panic!("want one README Proposition holding the Refunds section, got {texts:?}");
     };
@@ -247,8 +261,14 @@ fn proposition_cap_is_500_bytes_end_to_end() {
     // A cut, not a rewrite: the section's opening bytes, ended at the last
     // sentence end inside the cap.
     let prose = REFUNDS.trim();
-    assert!(prose.starts_with(capped), "not a prefix of the section: {capped:?}");
-    assert!(capped.ends_with('.'), "does not end at a sentence: {capped:?}");
+    assert!(
+        prose.starts_with(capped),
+        "not a prefix of the section: {capped:?}"
+    );
+    assert!(
+        capped.ends_with('.'),
+        "does not end at a sentence: {capped:?}"
+    );
     assert!(
         prose[capped.len()..].starts_with(' ') || prose[capped.len()..].starts_with('\n'),
         "cut inside a sentence: {capped:?}"
@@ -257,5 +277,8 @@ fn proposition_cap_is_500_bytes_end_to_end() {
         !prose[capped.len()..500].contains(". "),
         "cut at an earlier sentence end than the last one inside 500 bytes: {capped:?}"
     );
-    assert!(capped.ends_with("once the card network has settled it."), "{capped:?}");
+    assert!(
+        capped.ends_with("once the card network has settled it."),
+        "{capped:?}"
+    );
 }

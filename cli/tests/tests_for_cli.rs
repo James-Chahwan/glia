@@ -259,7 +259,10 @@ fn limit_keeps_the_failing_test() {
     let out = s.tests_for(&[PRICE, "--limit", "1"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("| 1 ") || l.starts_with("| 2 ")).collect();
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("| 1 ") || l.starts_with("| 2 "))
+        .collect();
     assert_eq!(rows.len(), 1, "{text}");
     assert!(
         rows[0].starts_with("| 1 | derived | `shop::tests::test_audit::test_audited_place` | FUNCTION | shop/tests/test_audit.py:4 | 3 | failed_last_run |"),
@@ -268,7 +271,9 @@ fn limit_keeps_the_failing_test() {
     assert!(text.contains("- omitted: 2 (past --limit)"), "{text}");
     let err = stderr(&out);
     assert!(
-        err.lines().any(|l| l == "[tests-for] seeds=1 tests=1 fact=0 derived=1 heuristic=0 untested=0 files=1"),
+        err.lines()
+            .any(|l| l
+                == "[tests-for] seeds=1 tests=1 fact=0 derived=1 heuristic=0 untested=0 files=1"),
         "{err}"
     );
     assert!(
@@ -277,7 +282,12 @@ fn limit_keeps_the_failing_test() {
     );
 
     let out = s.tests_for(&[PRICE, "--limit", "1", "--files-only"]);
-    assert_eq!(stdout(&out), "shop/tests/test_audit.py\n", "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "shop/tests/test_audit.py\n",
+        "{}",
+        stderr(&out)
+    );
 
     // --no-signals: the structural order, no signals line; the pinned
     // marker still reads the same.
@@ -465,12 +475,30 @@ impl ScipRepos {
         let root = std::env::temp_dir().join(format!("glia-dd12-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let files = [
-            ("billing/lib/money.py", "def format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\ndef invoice(cents):\n    return format_cents(cents)\n"),
-            ("billing/tests/test_invoice.py", "from lib.money import invoice\n\n\ndef test_invoice():\n    invoice(100)\n"),
-            ("billing/tests/test_fmt.py", "from lib.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00\"\n"),
-            ("shop/app/money.py", "def format_cents(cents):\n    return \"%.2f EUR\" % (cents / 100)\n\n\ndef checkout(cents):\n    return format_cents(cents)\n"),
-            ("shop/tests/test_money.py", "from app.money import checkout\n\n\ndef test_checkout():\n    checkout(100)\n"),
-            ("shop/tests/test_fmt.py", "from app.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00 EUR\"\n"),
+            (
+                "billing/lib/money.py",
+                "def format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\ndef invoice(cents):\n    return format_cents(cents)\n",
+            ),
+            (
+                "billing/tests/test_invoice.py",
+                "from lib.money import invoice\n\n\ndef test_invoice():\n    invoice(100)\n",
+            ),
+            (
+                "billing/tests/test_fmt.py",
+                "from lib.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00\"\n",
+            ),
+            (
+                "shop/app/money.py",
+                "def format_cents(cents):\n    return \"%.2f EUR\" % (cents / 100)\n\n\ndef checkout(cents):\n    return format_cents(cents)\n",
+            ),
+            (
+                "shop/tests/test_money.py",
+                "from app.money import checkout\n\n\ndef test_checkout():\n    checkout(100)\n",
+            ),
+            (
+                "shop/tests/test_fmt.py",
+                "from app.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00 EUR\"\n",
+            ),
         ];
         for (rel, text) in files {
             let p = root.join(rel);
@@ -485,7 +513,11 @@ impl ScipRepos {
                     path,
                     language: "python".to_string(),
                     source_hash: source_hash(&bytes),
-                    defs: vec![ScipDefRow { s, line, name: name.to_string() }],
+                    defs: vec![ScipDefRow {
+                        s,
+                        line,
+                        name: name.to_string(),
+                    }],
                     refs: Vec::new(),
                 }
             };
@@ -502,7 +534,12 @@ impl ScipRepos {
                 symbol(0, "`money`/format_cents()."),
                 symbol(1, "`tests.test_fmt`/test_format()."),
             ];
-            let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+            let meta = ScipMeta::new(
+                "scip-python".to_string(),
+                "0.6.0".to_string(),
+                String::new(),
+                0,
+            );
             write_scip(&repo, meta, &documents, &symbols).expect("write snapshot");
         }
         ScipRepos(root)
@@ -558,13 +595,19 @@ fn identity_classes_collapse_unless_no_collapse() {
         .collect();
     assert!(qnames.contains(&"tests::test_money::test_checkout"), "{v}");
     assert_eq!(
-        qnames.iter().filter(|q| **q == "tests::test_fmt::test_format").count(),
+        qnames
+            .iter()
+            .filter(|q| **q == "tests::test_fmt::test_format")
+            .count(),
         1,
         "{v}"
     );
     let fmt = v["tests"]
         .as_array()
-        .and_then(|t| t.iter().find(|t| t["qname"] == "tests::test_fmt::test_format"))
+        .and_then(|t| {
+            t.iter()
+                .find(|t| t["qname"] == "tests::test_fmt::test_format")
+        })
         .expect("the test_format row");
     assert_eq!(fmt["identity"]["tier"], "fact", "{fmt}");
     assert_eq!(fmt["identity"]["also_in"][0]["repo"], "shop", "{fmt}");

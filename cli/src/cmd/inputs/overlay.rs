@@ -57,8 +57,8 @@ use glia_engine::gaps::{CATEGORIES, DROP, GapRow, KEEP, REVIEW, verdict};
 use glia_engine::overlay_loop::{
     AcceptOptions, AcceptSummary, DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, GraphDelta, MAX_RULE_HITS,
     Proposal, ProposeOptions, ProposedGap, RULE_CHECKS_NOTHING, RULE_DUPLICATE, RULE_ERROR,
-    RULE_HOLDS, RULE_ORPHANED, RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, Snippet,
-    StanzaTrial, TryOptions, TryReport, accept, propose, report_candidate, try_candidate,
+    RULE_HOLDS, RULE_ORPHANED, RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, Snippet, StanzaTrial,
+    TryOptions, TryReport, accept, propose, report_candidate, try_candidate,
 };
 
 use crate::common::build_options;

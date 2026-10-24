@@ -313,7 +313,11 @@ fn fold_identity(view: &IdentityView, rows: Vec<Server>) -> Vec<Server> {
         return rows;
     }
     let servers_before = rows.len();
-    let mut rows = view.fold(rows, |s| NodeId(s.id), |s, identity| s.identity = Some(identity));
+    let mut rows = view.fold(
+        rows,
+        |s| NodeId(s.id),
+        |s, identity| s.identity = Some(identity),
+    );
     let mut handlers_folded = 0usize;
     for s in &mut rows {
         let before = s.handlers.len();
@@ -448,7 +452,13 @@ pub(crate) fn external_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> O
                 hosts.insert(h.to_string());
             }
             let listed = v.get("hosts").and_then(|h| h.as_array());
-            hosts.extend(listed.into_iter().flatten().filter_map(|h| h.as_str()).map(str::to_string));
+            hosts.extend(
+                listed
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| h.as_str())
+                    .map(str::to_string),
+            );
         }
     }
     external.then(|| hosts.into_iter().collect())
@@ -840,10 +850,16 @@ mod tests {
             cell_type::ENDPOINT_HIT,
             r#"{"via":"ws","host":"api.github.com","external":true}"#,
         );
-        let unmarked = cell(cell_type::ENDPOINT_HIT, r#"{"via":"graphql","hosts":["in.example.org"]}"#);
+        let unmarked = cell(
+            cell_type::ENDPOINT_HIT,
+            r#"{"via":"graphql","hosts":["in.example.org"]}"#,
+        );
         assert_eq!(
             external_hosts(&[gql, origin, ws, unmarked]),
-            Some(vec!["api.github.com".to_string(), "z.example.org".to_string()])
+            Some(vec![
+                "api.github.com".to_string(),
+                "z.example.org".to_string()
+            ])
         );
     }
 

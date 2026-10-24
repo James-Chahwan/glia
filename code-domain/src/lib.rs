@@ -324,7 +324,10 @@ pub mod node_kind {
 
     /// Name for a node-kind id, or `"UNKNOWN"` if unregistered.
     pub fn name(k: NodeKindId) -> &'static str {
-        ALL.iter().find(|(id, _)| *id == k).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+        ALL.iter()
+            .find(|(id, _)| *id == k)
+            .map(|(_, n)| *n)
+            .unwrap_or("UNKNOWN")
     }
 }
 
@@ -553,7 +556,10 @@ pub mod edge_category {
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
     pub fn name(c: EdgeCategoryId) -> &'static str {
-        ALL.iter().find(|(id, _)| *id == c).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+        ALL.iter()
+            .find(|(id, _)| *id == c)
+            .map(|(_, n)| *n)
+            .unwrap_or("UNKNOWN")
     }
 }
 
@@ -757,7 +763,10 @@ pub mod cell_type {
 
     /// Name for a cell-type id, or `"UNKNOWN"` if unregistered.
     pub fn name(c: CellTypeId) -> &'static str {
-        ALL.iter().find(|(id, _)| *id == c).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+        ALL.iter()
+            .find(|(id, _)| *id == c)
+            .map(|(_, n)| *n)
+            .unwrap_or("UNKNOWN")
     }
 }
 
@@ -779,8 +788,17 @@ pub enum ParseError {
 
 /// An import statement as parsed from a source file. The resolver uses this
 /// to wire cross-file bindings regardless of the source language.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct ImportStmt {
     /// qname of the module doing the importing (`myapp::auth`, `svc::users`).
@@ -793,8 +811,17 @@ pub struct ImportStmt {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub enum ImportTarget {
     /// Whole-module import — Python `import foo.bar`, Go `import "github.com/x/y"`,
@@ -816,8 +843,17 @@ pub enum ImportTarget {
 // Call records
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct CallSite {
     pub from: NodeId,
@@ -844,8 +880,17 @@ pub struct CallSite {
 /// `from_module` is separate from `from` because Route nodes are path-only
 /// (package-agnostic) and have no unique enclosing module — the parser must
 /// tell the resolver which package's imports to use.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct UnresolvedRef {
     pub from: NodeId,
@@ -902,8 +947,17 @@ pub fn dir_stem_qname(path: &str) -> String {
 /// Classification of a call site by its syntactic shape. Resolution (which
 /// node id the call actually targets) happens in `glia-graph` using the
 /// import table + symbol table, not in the parser.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub enum CallQualifier {
     /// `foo()` — bare name. Resolves to a local def, an imported symbol, or
@@ -963,8 +1017,7 @@ pub fn library_name(path: &str, lang: &str) -> Option<String> {
         // no domain segment and must NOT leak into Symbol.imports. Return the
         // module path (host/org/repo). Parser stores paths `::`- or `/`-joined.
         "go" => {
-            let segs: Vec<&str> =
-                p.split(['/', ':']).filter(|s| !s.is_empty()).collect();
+            let segs: Vec<&str> = p.split(['/', ':']).filter(|s| !s.is_empty()).collect();
             match segs.first() {
                 Some(first) if first.contains('.') => {
                     Some(segs.iter().take(3).copied().collect::<Vec<_>>().join("/"))
@@ -1169,9 +1222,7 @@ impl LocalModuleIndex {
             self.paths.insert(segs[..i].join("::"));
             self.paths.insert(segs[segs.len() - i..].join("::"));
         }
-        if is_package
-            && let Some(declared) = qname.rsplit("::").next()
-        {
+        if is_package && let Some(declared) = qname.rsplit("::").next() {
             let segs = import_segments(declared);
             for i in 1..=segs.len() {
                 self.paths.insert(segs[..i].join("::"));
@@ -1220,7 +1271,10 @@ impl LocalModuleIndex {
         let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
         !spec.is_empty()
             && (self.alias_exact.contains(spec)
-                || self.alias_prefixes.iter().any(|p| spec.starts_with(p.as_str())))
+                || self
+                    .alias_prefixes
+                    .iter()
+                    .any(|p| spec.starts_with(p.as_str())))
     }
 
     /// True if exactly one declaration in the repo carries `name`. An item
@@ -1248,7 +1302,10 @@ fn symbol_evidence_applies(lang: &str) -> bool {
 /// (the TS family, as [`library_name`] groups them). A Python `import config`
 /// is never a TS alias, whatever a tsconfig in the repo declares.
 fn ts_alias_applies(lang: &str) -> bool {
-    matches!(lang, "typescript" | "javascript" | "react" | "angular" | "vue")
+    matches!(
+        lang,
+        "typescript" | "javascript" | "react" | "angular" | "vue"
+    )
 }
 
 /// The form of a candidate library name that is looked up in the index. A
@@ -1285,14 +1342,21 @@ fn filter_library_names(
     for imp in imports {
         let (path, symbol) = match &imp.target {
             ImportTarget::Module { path, .. } => (path.as_str(), None),
-            ImportTarget::Symbol { module, name, level, .. } => {
+            ImportTarget::Symbol {
+                module,
+                name,
+                level,
+                ..
+            } => {
                 if *level > 0 {
                     continue; // Python relative import — intra-package
                 }
                 (module.as_str(), Some(name.as_str()))
             }
         };
-        let Some(lib) = library_name(path, lang) else { continue };
+        let Some(lib) = library_name(path, lang) else {
+            continue;
+        };
         let is_local = local.is_local_path(local_lookup_key(&lib, lang))
             || (ts_alias_applies(lang) && local.is_alias_import(path))
             || (symbol_evidence_applies(lang) && symbol.is_some_and(|n| local.is_local_symbol(n)));
@@ -1545,16 +1609,29 @@ pub enum NavFact {
     /// scope, `within` = `""`, or inside the namespace `within`).
     UsingNamespace { within: String, ns: String },
     /// C++ (CB.19 -> CB.25): `using <ns>::<name>;`.
-    UsingName { within: String, ns: String, name: String },
+    UsingName {
+        within: String,
+        ns: String,
+        name: String,
+    },
     /// Go (CB.23 -> CB.20): the call on 0-based row `line` of this fn passes a
     /// router mount as argument `arg` (0-based, receiver excluded) of the
     /// function or method named `callee`.
-    MountArg { line: u32, callee: String, arg: u32, mount: Mount },
+    MountArg {
+        line: u32,
+        callee: String,
+        arg: u32,
+        mount: Mount,
+    },
     /// Go (CB.23 -> CB.20): this fn assigns a router mount to field `field` of
     /// struct `owner`, named `<package dir qname>::<Type>` (`api::Server`): a
     /// Go package is its directory (LA.13b), and a struct's methods may sit in
     /// other files of it, whose file-module qnames differ.
-    FieldMount { owner: String, field: String, mount: Mount },
+    FieldMount {
+        owner: String,
+        field: String,
+        mount: Mount,
+    },
     /// C/C++ (CB.19 -> CB.25): a function this MODULE defines with internal
     /// linkage (`static` in C / C++, or inside an anonymous namespace): never
     /// the definition a prototype in another file names.
@@ -1563,13 +1640,21 @@ pub enum NavFact {
     /// the literal authority `host` (`via` = `"graphql"` | `"rpc"`), on 0-based
     /// row `line`; the post-cache graft spreads it to its project's
     /// GRAPHQL_OPERATION / RPC_CALL sides.
-    ClientHost { via: String, host: String, line: u32 },
+    ClientHost {
+        via: String,
+        host: String,
+        line: u32,
+    },
     /// Dart (CH.5a): this MODULE builds an HTTP client whose base URL is the
     /// expression `expr` (`via` = `"dio"`: a `BaseOptions(baseUrl: ..)`
     /// argument, or the right side of `<recv>.options.baseUrl = ..`) on
     /// 0-based row `line`; the endpoint fold (CH.5c) resolves it to the
     /// project's client base path.
-    ClientBase { via: String, expr: String, line: u32 },
+    ClientBase {
+        via: String,
+        expr: String,
+        line: u32,
+    },
     /// Dart (CH.5a): getter or constant `name` (`Env.apiBaseUrl` in a type,
     /// `apiBase` at library level) evaluates to the URL-shaped literal `value`,
     /// `${…}` for each interpolation.
@@ -1623,21 +1708,34 @@ pub enum NavFact {
     /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only:
     /// `export * as <exported> from '<source>'` on 0-based row `line` (the
     /// name is the source MODULE itself).
-    ReExportNamespace { source: String, exported: String, line: u32 },
+    ReExportNamespace {
+        source: String,
+        exported: String,
+        line: u32,
+    },
     /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
     /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only: one
     /// specifier of `export { <name> as <exported> } from '<source>'` (an
     /// `export type { .. } from` included) on 0-based row `line`. `default`
     /// may stand on either side; a string module export name (`"a-b"`) has
     /// its quotes stripped. `exported` is `name` when there is no `as`.
-    ReExportName { source: String, name: String, exported: String, line: u32 },
+    ReExportName {
+        source: String,
+        name: String,
+        exported: String,
+        line: u32,
+    },
     /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
     /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only: one
     /// specifier of a from-less `export { <local> as <exported> }` (or
     /// `export type { .. }`) on 0-based row `line`. The file exports whatever
     /// its own `local` names: a declaration, an import, or a binding that
     /// mints no node.
-    ExportLocal { local: String, exported: String, line: u32 },
+    ExportLocal {
+        local: String,
+        exported: String,
+        line: u32,
+    },
     /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
     /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only:
     /// every name this file's own `export` declarations export, sorted and
@@ -1673,7 +1771,11 @@ pub enum NavFact {
     /// `this.<field>` with a declared type, a typed local or parameter, or a
     /// [`NavFact::ReceiverType`] receiver; a TS read is a CALLS of `name` only
     /// when `name` is a [`NavFact::Getter`] of the receiver's class.
-    MemberRead { receiver: String, name: String, line: u32 },
+    MemberRead {
+        receiver: String,
+        name: String,
+        line: u32,
+    },
     /// Dart (DT.5i), recorded by the Dart parser on a top-level provider
     /// STATE_VAR of a file importing a Riverpod library (`final p =
     /// Provider<T>(..)`, `StateNotifierProvider<N, S>(..)`, the `.autoDispose`
@@ -1703,7 +1805,11 @@ pub enum NavFact {
     /// `line`), whose receiver the parser types the same way. It is a CALLS of
     /// `name` only when `name` is a [`NavFact::Setter`] of the receiver's
     /// class.
-    MemberWrite { receiver: String, name: String, line: u32 },
+    MemberWrite {
+        receiver: String,
+        name: String,
+        line: u32,
+    },
     /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on a METHOD:
     /// it is declared as a `get` accessor (a getter and its setter share one
     /// METHOD, so one METHOD may carry both facts).
@@ -1724,10 +1830,18 @@ pub enum Mount {
     Const(String),
     /// Parameter `index` of the enclosing fn `fn_qname` (receiver excluded),
     /// then `suffix`.
-    Param { fn_qname: String, index: u32, suffix: String },
+    Param {
+        fn_qname: String,
+        index: u32,
+        suffix: String,
+    },
     /// Field `field` of struct `owner` (`<package dir qname>::<Type>`), then
     /// `suffix`.
-    Field { owner: String, field: String, suffix: String },
+    Field {
+        owner: String,
+        field: String,
+        suffix: String,
+    },
 }
 
 impl CodeNav {
@@ -1828,7 +1942,7 @@ impl CodeNav {
 // shared crate, not duplicated per parser).
 
 pub mod endpoint {
-    use super::{cell_type, edge_category, node_kind, GRAPH_TYPE};
+    use super::{GRAPH_TYPE, cell_type, edge_category, node_kind};
     use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
     use std::collections::HashSet;
 
@@ -2156,7 +2270,10 @@ pub mod endpoint {
             if tmpl.is_none() && class_prefix.is_empty() {
                 return;
             }
-            out.push((verb, compose_route_path(class_prefix, tmpl.unwrap_or_default())));
+            out.push((
+                verb,
+                compose_route_path(class_prefix, tmpl.unwrap_or_default()),
+            ));
         };
         for (name, arg) in anns {
             if let Some(verb) = mapping_verb(name) {
@@ -3227,8 +3344,16 @@ pub mod recv_stats {
     /// Languages always printed: the matrix rows whose parser records
     /// receiver types (C# since A6.2a; java / typescript by A6.2b / A6.2c;
     /// python / ruby / go / dart by LA.23a-e; rust fields and locals by LA.35a).
-    pub const LANGS: [&str; 8] =
-        ["csharp", "java", "typescript", "python", "ruby", "go", "dart", "rust"];
+    pub const LANGS: [&str; 8] = [
+        "csharp",
+        "java",
+        "typescript",
+        "python",
+        "ruby",
+        "go",
+        "dart",
+        "rust",
+    ];
 
     thread_local! {
         /// This thread's receiver-typed binds since its last [`reset`] /
@@ -3370,19 +3495,34 @@ mod tests {
 
     #[test]
     fn dir_stem_qname_scopes_by_directory_and_stem() {
-        assert_eq!(dir_stem_qname("services/orders/openapi.yaml"), "services::orders::openapi");
-        assert_eq!(dir_stem_qname("services/billing/openapi.json"), "services::billing::openapi");
+        assert_eq!(
+            dir_stem_qname("services/orders/openapi.yaml"),
+            "services::orders::openapi"
+        );
+        assert_eq!(
+            dir_stem_qname("services/billing/openapi.json"),
+            "services::billing::openapi"
+        );
         // A root-level file is its stem alone: the pre-LB.12 qname, unchanged.
         assert_eq!(dir_stem_qname("openapi.json"), "openapi");
         assert_eq!(dir_stem_qname("README.md"), "README");
         assert_eq!(dir_stem_qname("docs/a/guide.md"), "docs::a::guide");
-        assert_eq!(dir_stem_qname(".glia/scratch/spec.json"), ".glia::scratch::spec");
+        assert_eq!(
+            dir_stem_qname(".glia/scratch/spec.json"),
+            ".glia::scratch::spec"
+        );
         // Only the last extension goes; a dotfile is its own stem.
-        assert_eq!(dir_stem_qname("src/users.controller.ts"), "src::users.controller");
+        assert_eq!(
+            dir_stem_qname("src/users.controller.ts"),
+            "src::users.controller"
+        );
         assert_eq!(dir_stem_qname("svc/Dockerfile"), "svc::Dockerfile");
         assert_eq!(dir_stem_qname("cfg/.env"), "cfg::.env");
         // A backslash separator normalises, so a Windows path scopes the same.
-        assert_eq!(dir_stem_qname(r"specs\004-x\contracts\openapi.json"), "specs::004-x::contracts::openapi");
+        assert_eq!(
+            dir_stem_qname(r"specs\004-x\contracts\openapi.json"),
+            "specs::004-x::contracts::openapi"
+        );
         assert_eq!(dir_stem_qname(r"a.b\c.yaml"), "a.b::c");
     }
 
@@ -3395,7 +3535,11 @@ mod tests {
         // Byte 4 is inside the two-byte `é`: no panic, still row 1.
         assert_eq!(line_of(src, 4), 1);
         assert_eq!(line_of(src, src.len()), 2);
-        assert_eq!(line_of(src, usize::MAX), 2, "past the end counts the whole source");
+        assert_eq!(
+            line_of(src, usize::MAX),
+            2,
+            "past the end counts the whole source"
+        );
         assert_eq!(line_of("", 3), 0);
     }
 
@@ -3437,7 +3581,10 @@ mod tests {
     /// A FileParse declaring `decls` (kind, qname) and importing `imports`.
     /// A node's nav name is its last qname segment, as the parsers record it.
     fn decl_parse(decls: &[(NodeKindId, &str)], imports: Vec<ImportStmt>) -> FileParse {
-        let mut fp = FileParse { imports, ..Default::default() };
+        let mut fp = FileParse {
+            imports,
+            ..Default::default()
+        };
         for (kind, qname) in decls {
             let id = NodeId::from_parts(GRAPH_TYPE, glia_core::RepoId(1), *kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);
@@ -3456,7 +3603,10 @@ mod tests {
 
     #[test]
     fn bare_module_qname_strips_only_a_file_named_modules_extension() {
-        assert_eq!(bare_module_qname("api::user.py", "user"), Some("api::user".to_string()));
+        assert_eq!(
+            bare_module_qname("api::user.py", "user"),
+            Some("api::user".to_string())
+        );
         // A normal module: its last segment is its name.
         assert_eq!(bare_module_qname("api::user", "user"), None);
         // A non-code MODULE (LB.9a): named by its whole file name.
@@ -3484,12 +3634,16 @@ mod tests {
             "api::user.py",
         );
         let mut fp = FileParse::default();
-        fp.nav.record(id, "user", "api::user.py", node_kind::MODULE, None);
+        fp.nav
+            .record(id, "user", "api::user.py", node_kind::MODULE, None);
         let mut local = LocalModuleIndex::default();
         local.add_parse(&fp);
         assert!(local.is_local_path("api.user"));
         assert!(local.is_local_path("user"));
-        assert!(!local.is_local_path("py"), "the extension is not a local module");
+        assert!(
+            !local.is_local_path("py"),
+            "the extension is not a local module"
+        );
         assert!(!local.is_local_path("user.py"));
     }
 
@@ -3503,7 +3657,10 @@ mod tests {
         }
         for ext in ["js", "jsx", "vue"] {
             assert_eq!(same_stem_order(ext).first(), Some(&"js"), "{ext}");
-            assert!(same_stem_order(ext).contains(&"ts"), "{ext}: allowJs / bundlers load .ts");
+            assert!(
+                same_stem_order(ext).contains(&"ts"),
+                "{ext}: allowJs / bundlers load .ts"
+            );
         }
         // A JVM Clojure load never offers the ClojureScript file, and back.
         assert_eq!(same_stem_order("clj"), ["clj", "cljc"]);
@@ -3513,7 +3670,9 @@ mod tests {
         // No file-import rule: a .cljc loads a different sibling per platform;
         // Java / Kotlin import classes, Elixir aliases modules, Terraform
         // modules are directories, C/C++ includes name the file.
-        for ext in ["cljc", "java", "kt", "ex", "exs", "tf", "hcl", "cpp", "h", "py", ""] {
+        for ext in [
+            "cljc", "java", "kt", "ex", "exs", "tf", "hcl", "cpp", "h", "py", "",
+        ] {
             assert!(same_stem_order(ext).is_empty(), "{ext}");
         }
     }
@@ -3527,7 +3686,10 @@ mod tests {
     fn module_import(path: &str) -> ImportStmt {
         ImportStmt {
             from_module: String::new(),
-            target: ImportTarget::Module { path: path.to_string(), alias: None },
+            target: ImportTarget::Module {
+                path: path.to_string(),
+                alias: None,
+            },
             line: 0,
         }
     }
@@ -3567,8 +3729,14 @@ mod tests {
         assert!(local.is_local_path("snapshot"), "suffix");
         assert!(local.is_local_path("src"), "prefix");
         assert!(local.is_local_path("src::snapshot"), "whole qname");
-        assert!(local.is_local_path("src.snapshot") && local.is_local_path("src/snapshot"), "normalised");
-        assert!(!local.is_local_path("snap"), "segment-aligned, not substring");
+        assert!(
+            local.is_local_path("src.snapshot") && local.is_local_path("src/snapshot"),
+            "normalised"
+        );
+        assert!(
+            !local.is_local_path("snap"),
+            "segment-aligned, not substring"
+        );
         assert!(!local.is_local_path(""), "empty is never local");
         // Only MODULE / PACKAGE qnames are paths: a CLASS is not a namespace.
         let local = index_of(&[(node_kind::CLASS, "models::Widget")]);
@@ -3579,11 +3747,20 @@ mod tests {
     fn local_index_symbol_is_ambiguity_safe() {
         let one = index_of(&[(node_kind::CLASS, "a::Helper")]);
         assert!(one.is_local_symbol("Helper"));
-        let two = index_of(&[(node_kind::CLASS, "a::Helper"), (node_kind::CLASS, "b::Helper")]);
-        assert!(!two.is_local_symbol("Helper"), "two declarations: ambiguous");
+        let two = index_of(&[
+            (node_kind::CLASS, "a::Helper"),
+            (node_kind::CLASS, "b::Helper"),
+        ]);
+        assert!(
+            !two.is_local_symbol("Helper"),
+            "two declarations: ambiguous"
+        );
         // Java's Helper.java declares MODULE `Helper` AND CLASS `Helper::Helper`:
         // one declaration, two nodes. It must still count as unique.
-        let java = index_of(&[(node_kind::MODULE, "Helper"), (node_kind::CLASS, "Helper::Helper")]);
+        let java = index_of(&[
+            (node_kind::MODULE, "Helper"),
+            (node_kind::CLASS, "Helper::Helper"),
+        ]);
         assert!(java.is_local_symbol("Helper"));
         assert!(!java.is_local_symbol("Other"));
     }
@@ -3616,23 +3793,43 @@ mod tests {
             library_names_filtered(&imports, "rust", &local),
             vec!["serde".to_string(), "tokio".to_string()]
         );
-        assert_eq!(library_name("Ordering::Less", "rust"), None, "a type, never a crate");
+        assert_eq!(
+            library_name("Ordering::Less", "rust"),
+            None,
+            "a type, never a crate"
+        );
     }
 
     #[test]
     fn filtered_drops_rust_sibling_module() {
         // `use snapshot::Page;` — a path through a sibling module.
-        let local = index_of(&[(node_kind::MODULE, "src::snapshot"), (node_kind::MODULE, "src::confluence_rest")]);
+        let local = index_of(&[
+            (node_kind::MODULE, "src::snapshot"),
+            (node_kind::MODULE, "src::confluence_rest"),
+        ]);
         let imports = vec![symbol_import("snapshot", "Page")];
-        assert_eq!(library_names(&imports, "rust"), vec!["snapshot".to_string()], "the leak this fixes");
+        assert_eq!(
+            library_names(&imports, "rust"),
+            vec!["snapshot".to_string()],
+            "the leak this fixes"
+        );
         assert!(library_names_filtered(&imports, "rust", &local).is_empty());
     }
 
     #[test]
     fn filtered_drops_python_own_package() {
-        let local = index_of(&[(node_kind::MODULE, "myapp::auth"), (node_kind::MODULE, "myapp::users")]);
-        let imports = vec![symbol_import("myapp.users", "User"), module_import("requests")];
-        assert_eq!(library_names_filtered(&imports, "python", &local), vec!["requests".to_string()]);
+        let local = index_of(&[
+            (node_kind::MODULE, "myapp::auth"),
+            (node_kind::MODULE, "myapp::users"),
+        ]);
+        let imports = vec![
+            symbol_import("myapp.users", "User"),
+            module_import("requests"),
+        ];
+        assert_eq!(
+            library_names_filtered(&imports, "python", &local),
+            vec!["requests".to_string()]
+        );
     }
 
     /// A6.8: a TS specifier a tsconfig `paths` key matches names an in-repo
@@ -3654,7 +3851,14 @@ mod tests {
         ];
         assert_eq!(
             library_names(&imports, "typescript"),
-            ["@angular/core", "@core/auth.service", "@env", "@environment/prod", "rxjs", "~"],
+            [
+                "@angular/core",
+                "@core/auth.service",
+                "@env",
+                "@environment/prod",
+                "rxjs",
+                "~"
+            ],
             "the leak this fixes"
         );
         assert_eq!(
@@ -3662,8 +3866,14 @@ mod tests {
             ["@angular/core", "@environment/prod", "rxjs"],
             "an exact key is matched whole: `@environment/prod` is not `@env`"
         );
-        assert!(local.is_alias_import("\"@core/x\""), "quotes are the parser's, not the key's");
-        assert!(!local.is_alias_import("lodash"), "the catch-all `*` declared nothing");
+        assert!(
+            local.is_alias_import("\"@core/x\""),
+            "quotes are the parser's, not the key's"
+        );
+        assert!(
+            !local.is_alias_import("lodash"),
+            "the catch-all `*` declared nothing"
+        );
         assert!(!local.is_alias_import(""));
         // Only the TS family resolves through tsconfig.
         let py = vec![module_import("@env")];
@@ -3684,12 +3894,18 @@ mod tests {
         assert!(library_names_filtered(&imports, "java", &local).is_empty());
         // An external class from a package the repo does not declare stays.
         let imports = vec![symbol_import("org::slf4j", "Logger")];
-        assert_eq!(library_names_filtered(&imports, "java", &local), vec!["org::slf4j".to_string()]);
+        assert_eq!(
+            library_names_filtered(&imports, "java", &local),
+            vec!["org::slf4j".to_string()]
+        );
     }
 
     #[test]
     fn filtered_keeps_external() {
-        let local = index_of(&[(node_kind::MODULE, "cmd::server"), (node_kind::PACKAGE, "internal::util")]);
+        let local = index_of(&[
+            (node_kind::MODULE, "cmd::server"),
+            (node_kind::PACKAGE, "internal::util"),
+        ]);
         let imports = vec![module_import("github.com::external::lib")];
         assert_eq!(
             library_names_filtered(&imports, "go", &local),
@@ -3700,20 +3916,51 @@ mod tests {
     #[test]
     fn filtered_drops_declared_namespaces_and_local_headers() {
         // PHP / C#: the declared namespace is a PACKAGE node.
-        let local = index_of(&[(node_kind::PACKAGE, "App::Services"), (node_kind::PACKAGE, "Shop::Services")]);
-        let php = vec![symbol_import("App::Services", "Greeter"), symbol_import("GuzzleHttp", "Client")];
-        assert_eq!(library_names_filtered(&php, "php", &local), vec!["GuzzleHttp".to_string()]);
-        let cs = vec![symbol_import("Shop", "Services"), symbol_import("System::Threading", "Tasks")];
-        assert_eq!(library_names_filtered(&cs, "csharp", &local), vec!["System::Threading".to_string()]);
+        let local = index_of(&[
+            (node_kind::PACKAGE, "App::Services"),
+            (node_kind::PACKAGE, "Shop::Services"),
+        ]);
+        let php = vec![
+            symbol_import("App::Services", "Greeter"),
+            symbol_import("GuzzleHttp", "Client"),
+        ];
+        assert_eq!(
+            library_names_filtered(&php, "php", &local),
+            vec!["GuzzleHttp".to_string()]
+        );
+        let cs = vec![
+            symbol_import("Shop", "Services"),
+            symbol_import("System::Threading", "Tasks"),
+        ];
+        assert_eq!(
+            library_names_filtered(&cs, "csharp", &local),
+            vec!["System::Threading".to_string()]
+        );
         // Elixir: `defmodule MyApp.Repo` in ex/repo.ex — the dotted declared
         // name and its parents are declared namespaces.
-        let local = index_of(&[(node_kind::PACKAGE, "ex::repo::MyApp.Repo"), (node_kind::PACKAGE, "ex::web::MyAppWeb.Router")]);
-        let ex = vec![module_import("MyApp.Repo"), module_import("MyAppWeb"), module_import("Plug.Conn")];
-        assert_eq!(library_names_filtered(&ex, "elixir", &local), vec!["Plug.Conn".to_string()]);
+        let local = index_of(&[
+            (node_kind::PACKAGE, "ex::repo::MyApp.Repo"),
+            (node_kind::PACKAGE, "ex::web::MyAppWeb.Router"),
+        ]);
+        let ex = vec![
+            module_import("MyApp.Repo"),
+            module_import("MyAppWeb"),
+            module_import("Plug.Conn"),
+        ];
+        assert_eq!(
+            library_names_filtered(&ex, "elixir", &local),
+            vec!["Plug.Conn".to_string()]
+        );
         // C: `#include "mathutil.h"` next to c/mathutil.h (MODULE `c::mathutil`).
-        let local = index_of(&[(node_kind::MODULE, "c::mathutil"), (node_kind::MODULE, "c::main")]);
+        let local = index_of(&[
+            (node_kind::MODULE, "c::mathutil"),
+            (node_kind::MODULE, "c::main"),
+        ]);
         let c = vec![module_import("mathutil.h"), module_import("zlib.h")];
-        assert_eq!(library_names_filtered(&c, "c_cpp", &local), vec!["zlib.h".to_string()]);
+        assert_eq!(
+            library_names_filtered(&c, "c_cpp", &local),
+            vec!["zlib.h".to_string()]
+        );
     }
 
     #[test]
@@ -3722,31 +3969,50 @@ mod tests {
         // uniquely declared — but the `django.db` models import is still a
         // dependency on django. Same for TS `import { User } from 'firebase/auth'`
         // beside the repo's own `interface User`.
-        let local = index_of(&[(node_kind::MODULE, "shop::models"), (node_kind::INTERFACE, "src::types::User")]);
+        let local = index_of(&[
+            (node_kind::MODULE, "shop::models"),
+            (node_kind::INTERFACE, "src::types::User"),
+        ]);
         let py = vec![symbol_import("django.db", "models")];
-        assert_eq!(library_names_filtered(&py, "python", &local), vec!["django".to_string()]);
+        assert_eq!(
+            library_names_filtered(&py, "python", &local),
+            vec!["django".to_string()]
+        );
         let ts = vec![symbol_import("firebase/auth", "User")];
-        assert_eq!(library_names_filtered(&ts, "typescript", &local), vec!["firebase".to_string()]);
+        assert_eq!(
+            library_names_filtered(&ts, "typescript", &local),
+            vec!["firebase".to_string()]
+        );
     }
 
     #[test]
     fn filtered_caps_after_filtering() {
         // Twelve local modules sort before the one real dependency; capping
         // before filtering would report none of the file's dependencies.
-        let decls: Vec<(NodeKindId, String)> =
-            (0..12).map(|i| (node_kind::MODULE, format!("a{i:02}::m"))).collect();
-        let decl_refs: Vec<(NodeKindId, &str)> = decls.iter().map(|(k, q)| (*k, q.as_str())).collect();
+        let decls: Vec<(NodeKindId, String)> = (0..12)
+            .map(|i| (node_kind::MODULE, format!("a{i:02}::m")))
+            .collect();
+        let decl_refs: Vec<(NodeKindId, &str)> =
+            decls.iter().map(|(k, q)| (*k, q.as_str())).collect();
         let local = index_of(&decl_refs);
-        let mut imports: Vec<ImportStmt> = (0..12).map(|i| module_import(&format!("a{i:02}.m"))).collect();
+        let mut imports: Vec<ImportStmt> = (0..12)
+            .map(|i| module_import(&format!("a{i:02}.m")))
+            .collect();
         imports.push(module_import("zzz"));
         assert_eq!(library_names(&imports, "python").len(), 10);
-        assert_eq!(library_names_filtered(&imports, "python", &local), vec!["zzz".to_string()]);
+        assert_eq!(
+            library_names_filtered(&imports, "python", &local),
+            vec!["zzz".to_string()]
+        );
     }
 
     #[test]
     fn attach_filtered_is_idempotent() {
         let mut fp = decl_parse(
-            &[(node_kind::MODULE, "myapp::auth"), (node_kind::FUNCTION, "myapp::auth::login")],
+            &[
+                (node_kind::MODULE, "myapp::auth"),
+                (node_kind::FUNCTION, "myapp::auth::login"),
+            ],
             vec![module_import("myapp.users"), module_import("requests")],
         );
         let mut local = LocalModuleIndex::default();
@@ -3754,21 +4020,48 @@ mod tests {
         // A POSITION after the raw cell: the rewrite must keep the cell's slot.
         attach_imports_cell(&mut fp, "python");
         for n in &mut fp.nodes {
-            n.cells.push(Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{}".into()) });
+            n.cells.push(Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json("{}".into()),
+            });
         }
-        assert_eq!(imports_payloads(&fp)[0], vec![r#"["myapp","requests"]"#.to_string()], "raw cell");
+        assert_eq!(
+            imports_payloads(&fp)[0],
+            vec![r#"["myapp","requests"]"#.to_string()],
+            "raw cell"
+        );
 
-        assert_eq!(attach_imports_cell_filtered(&mut fp, "python", &local), (1, 1));
-        assert_eq!(attach_imports_cell_filtered(&mut fp, "python", &local), (1, 1));
+        assert_eq!(
+            attach_imports_cell_filtered(&mut fp, "python", &local),
+            (1, 1)
+        );
+        assert_eq!(
+            attach_imports_cell_filtered(&mut fp, "python", &local),
+            (1, 1)
+        );
         for (n, payloads) in fp.nodes.iter().zip(imports_payloads(&fp)) {
-            assert_eq!(payloads, vec![r#"["requests"]"#.to_string()], "exactly one filtered cell");
+            assert_eq!(
+                payloads,
+                vec![r#"["requests"]"#.to_string()],
+                "exactly one filtered cell"
+            );
             let kinds: Vec<CellTypeId> = n.cells.iter().map(|c| c.kind).collect();
-            assert_eq!(kinds, vec![cell_type::IMPORTS, cell_type::POSITION], "slot kept");
+            assert_eq!(
+                kinds,
+                vec![cell_type::IMPORTS, cell_type::POSITION],
+                "slot kept"
+            );
         }
         // A node that never had the cell gains exactly one.
         let mut bare = decl_parse(&[(node_kind::MODULE, "x")], vec![module_import("requests")]);
-        assert_eq!(attach_imports_cell_filtered(&mut bare, "python", &local), (1, 0));
-        assert_eq!(imports_payloads(&bare), vec![vec![r#"["requests"]"#.to_string()]]);
+        assert_eq!(
+            attach_imports_cell_filtered(&mut bare, "python", &local),
+            (1, 0)
+        );
+        assert_eq!(
+            imports_payloads(&bare),
+            vec![vec![r#"["requests"]"#.to_string()]]
+        );
     }
 
     #[test]
@@ -3807,7 +4100,10 @@ mod tests {
             sorted.dedup();
             assert_eq!(sorted.len(), ids.len(), "{what}: duplicate id in ALL");
             let expected: Vec<u32> = (1..=ids.len() as u32).collect();
-            assert_eq!(sorted, expected, "{what}: ids must be a gap-free 1..=len range");
+            assert_eq!(
+                sorted, expected,
+                "{what}: ids must be a gap-free 1..=len range"
+            );
             let mut n = names.clone();
             n.sort_unstable();
             n.dedup();
@@ -3845,11 +4141,38 @@ mod tests {
     /// the documented false negatives (`api` router, `audio*` substring).
     #[test]
     fn http_client_receiver_classifies_client_and_server_names() {
-        for client in ["http", "dio", "_dio", "httpClient", "apiClient", "_client", "restClient", "api", "userApi", "HTTP"] {
-            assert!(endpoint::is_http_client_receiver(client), "{client} is a client");
+        for client in [
+            "http",
+            "dio",
+            "_dio",
+            "httpClient",
+            "apiClient",
+            "_client",
+            "restClient",
+            "api",
+            "userApi",
+            "HTTP",
+        ] {
+            assert!(
+                endpoint::is_http_client_receiver(client),
+                "{client} is a client"
+            );
         }
-        for server in ["app", "router", "server", "r", "v1", "fastify", "hono", "koaRouter", ""] {
-            assert!(!endpoint::is_http_client_receiver(server), "{server} is not a client");
+        for server in [
+            "app",
+            "router",
+            "server",
+            "r",
+            "v1",
+            "fastify",
+            "hono",
+            "koaRouter",
+            "",
+        ] {
+            assert!(
+                !endpoint::is_http_client_receiver(server),
+                "{server} is not a client"
+            );
         }
         // Deliberate false negatives, pinned so nobody "fixes" one silently.
         assert!(endpoint::is_http_client_receiver("audioRouter"));
@@ -3917,7 +4240,10 @@ mod tests {
         );
         assert_eq!(endpoint::join_scope(&[], "/users"), "/users");
         assert_eq!(endpoint::join_scope(&[], "users"), "/users");
-        assert_eq!(endpoint::join_scope(&["api".into()], "/users"), "/api/users");
+        assert_eq!(
+            endpoint::join_scope(&["api".into()], "/users"),
+            "/api/users"
+        );
         assert_eq!(
             endpoint::join_scope(&["/api/".into(), String::new(), "v1/".into()], "/users"),
             "/api/v1/users"
@@ -3942,17 +4268,26 @@ mod tests {
         // itself is an ANY route; the stereotype maps nothing.
         let class = anns(&[("RestController", None), ("RequestMapping", Some("/api"))]);
         assert_eq!(jvm_route_prefix(&class), "/api");
-        assert_eq!(jvm_annotation_routes(&class, ""), vec![("ANY", "/api".to_string())]);
+        assert_eq!(
+            jvm_annotation_routes(&class, ""),
+            vec![("ANY", "/api".to_string())]
+        );
         // Method level composes onto the prefix; a leading `/` does not reset it.
         let get = anns(&[("GetMapping", Some("/users/{id}"))]);
         assert_eq!(
             jvm_annotation_routes(&get, "/api"),
             vec![("GET", "/api/users/{id}".to_string())]
         );
-        assert_eq!(jvm_annotation_routes(&get, ""), vec![("GET", "/users/{id}".to_string())]);
+        assert_eq!(
+            jvm_annotation_routes(&get, ""),
+            vec![("GET", "/users/{id}".to_string())]
+        );
         // A marker maps the prefix; with no prefix it names nothing.
         let post = anns(&[("PostMapping", None)]);
-        assert_eq!(jvm_annotation_routes(&post, "api"), vec![("POST", "/api".to_string())]);
+        assert_eq!(
+            jvm_annotation_routes(&post, "api"),
+            vec![("POST", "/api".to_string())]
+        );
         assert!(jvm_annotation_routes(&post, "").is_empty());
         // Micronaut `@Controller("/m")` + `@Get("/x")`.
         let micronaut = anns(&[("Controller", Some("/m"))]);
@@ -3964,7 +4299,10 @@ mod tests {
         // JAX-RS: `@GET @Path("/{id}")` under `@Path("/r")`; a bare `@DELETE`
         // maps the resource root; `@Path` alone is ANY.
         let jaxrs = anns(&[("GET", None), ("Path", Some("/{id}"))]);
-        assert_eq!(jvm_annotation_routes(&jaxrs, "/r"), vec![("GET", "/r/{id}".to_string())]);
+        assert_eq!(
+            jvm_annotation_routes(&jaxrs, "/r"),
+            vec![("GET", "/r/{id}".to_string())]
+        );
         assert_eq!(
             jvm_annotation_routes(&anns(&[("DELETE", None)]), "/r"),
             vec![("DELETE", "/r".to_string())]
@@ -3981,14 +4319,29 @@ mod tests {
 
     #[test]
     fn jvm_vocabulary_is_shared_by_both_parsers() {
-        assert_eq!(jvm::data_entity_qname(jvm::SQL_FLAVOR, "User"), "data_entity:sql:User");
-        assert_eq!(jvm::DATA_ENTITY_ANNOTATIONS[0], ("Document", jvm::NOSQL_FLAVOR));
+        assert_eq!(
+            jvm::data_entity_qname(jvm::SQL_FLAVOR, "User"),
+            "data_entity:sql:User"
+        );
+        assert_eq!(
+            jvm::DATA_ENTITY_ANNOTATIONS[0],
+            ("Document", jvm::NOSQL_FLAVOR)
+        );
         assert_eq!(jvm::repository_flavor("JpaRepository"), Some("sql"));
-        assert_eq!(jvm::repository_flavor("ReactiveMongoRepository"), Some("nosql"));
-        assert_eq!(jvm::repository_flavor("CoroutineCrudRepository"), Some("sql"));
+        assert_eq!(
+            jvm::repository_flavor("ReactiveMongoRepository"),
+            Some("nosql")
+        );
+        assert_eq!(
+            jvm::repository_flavor("CoroutineCrudRepository"),
+            Some("sql")
+        );
         assert_eq!(jvm::repository_flavor("UserRepository"), None);
         assert!(jvm::is_non_injectable_type("String"));
-        assert!(!jvm::is_non_injectable_type("Int"), "Java list stays Java's");
+        assert!(
+            !jvm::is_non_injectable_type("Int"),
+            "Java list stays Java's"
+        );
         assert!(jvm::is_kotlin_value_type("Int"));
         assert!(!jvm::is_kotlin_value_type("UserService"));
     }
@@ -4003,10 +4356,17 @@ mod tests {
         assert_eq!(rest_template_verb("headForHeaders"), Some("HEAD"));
         assert_eq!(rest_template_verb("put"), Some("PUT"));
         assert_eq!(rest_template_verb("delete"), Some("DELETE"));
-        assert_eq!(rest_template_verb("get"), None, "WebClient's verb, not RestTemplate's");
+        assert_eq!(
+            rest_template_verb("get"),
+            None,
+            "WebClient's verb, not RestTemplate's"
+        );
         assert_eq!(rest_template_verb("exchange"), None);
         assert_eq!(http_method_ref_verb("HttpMethod.GET"), Some("GET"));
-        assert_eq!(http_method_ref_verb("org.springframework.http.HttpMethod.patch"), Some("PATCH"));
+        assert_eq!(
+            http_method_ref_verb("org.springframework.http.HttpMethod.patch"),
+            Some("PATCH")
+        );
         assert_eq!(http_method_ref_verb("HttpMethod.valueOf(m)"), None);
         assert_eq!(http_method_ref_verb("\"/users\""), None);
     }
@@ -4130,10 +4490,19 @@ mod tests {
             assert_eq!(split_owner(base), (base, None), "no owner: {base}");
         }
         assert_eq!(with_owner("GET /x", ""), "GET /x");
-        assert_eq!(with_owner("GET /x", "packages/@shop/web"), "GET /x @packages/@shop/web");
-        assert_eq!(split_owner("GET /x @packages/@shop/web"), ("GET /x", Some("packages/@shop/web")));
+        assert_eq!(
+            with_owner("GET /x", "packages/@shop/web"),
+            "GET /x @packages/@shop/web"
+        );
+        assert_eq!(
+            split_owner("GET /x @packages/@shop/web"),
+            ("GET /x", Some("packages/@shop/web"))
+        );
         // `@` inside a path segment, no space before it: not an owner.
-        assert_eq!(split_owner("route:/pkg/@scope/x"), ("route:/pkg/@scope/x", None));
+        assert_eq!(
+            split_owner("route:/pkg/@scope/x"),
+            ("route:/pkg/@scope/x", None)
+        );
         assert_eq!(split_owner("GET /users/@me"), ("GET /users/@me", None));
         // An empty or whitespace-bearing tail is not an owner.
         assert_eq!(split_owner("GET /x @"), ("GET /x @", None));
@@ -4296,8 +4665,8 @@ mod tests {
     #[test]
     fn const_placeholder_mount_is_provisional() {
         use endpoint::{
-            const_placeholder, has_const_placeholder, mount_route_qname,
-            next_const_placeholder, parse_mount_route_qname, split_owner, with_owner,
+            const_placeholder, has_const_placeholder, mount_route_qname, next_const_placeholder,
+            parse_mount_route_qname, split_owner, with_owner,
         };
         let other = const_placeholder("api", "OtherFilePrefix");
         assert_eq!(other, "${const:api.OtherFilePrefix}");
@@ -4314,7 +4683,13 @@ mod tests {
             next_const_placeholder(&const_placeholder("", "Root")),
             Some((0, 14, "", "Root"))
         );
-        for s in ["/api/v1", "${base}/x", "${const:api.X", "${const:X}", "${const:api.}"] {
+        for s in [
+            "/api/v1",
+            "${base}/x",
+            "${const:api.X",
+            "${const:X}",
+            "${const:api.}",
+        ] {
             assert!(!has_const_placeholder(s), "{s}");
         }
 
@@ -4328,7 +4703,10 @@ mod tests {
 
         let joined = Mount::Const(format!("{}/x", const_placeholder("api", "AdminPrefix")));
         let q = with_owner(&mount_route_qname("POST", &joined, "/stats"), "shop");
-        assert_eq!(q, "POST <mount:const:${const:api.AdminPrefix}/x>/stats @shop");
+        assert_eq!(
+            q,
+            "POST <mount:const:${const:api.AdminPrefix}/x>/stats @shop"
+        );
         let (base, owner) = split_owner(&q);
         assert_eq!(owner, Some("shop"));
         assert_eq!(
@@ -4337,7 +4715,11 @@ mod tests {
         );
 
         // A group's index route: the local path stays `/` behind the token.
-        let q = mount_route_qname("GET", &Mount::Const(const_placeholder("paths", "Shared")), "/");
+        let q = mount_route_qname(
+            "GET",
+            &Mount::Const(const_placeholder("paths", "Shared")),
+            "/",
+        );
         assert_eq!(q, "GET <mount:const:${const:paths.Shared}>/");
 
         // A Param mount carries the placeholder in its suffix, folded into the
@@ -4474,7 +4856,10 @@ mod tests {
     fn normalise_client_path_strips_host_and_query_only() {
         let n = |s: &str| endpoint::normalise_client_path(s);
         // Absolute URL: scheme + host + query all go.
-        assert_eq!(n("https://api.example.com/users?active=1"), ("/users".into(), true));
+        assert_eq!(
+            n("https://api.example.com/users?active=1"),
+            ("/users".into(), true)
+        );
         assert_eq!(n("http://api/users"), ("/users".into(), true));
         // Bare host → the root path.
         assert_eq!(n("https://api.example.com"), ("/".into(), true));
@@ -4494,10 +4879,7 @@ mod tests {
         assert_eq!(n("<unresolved>"), ("<unresolved>".into(), false));
         assert_eq!(n(""), (String::new(), false));
         // A `://` that is only in the query is not a scheme.
-        assert_eq!(
-            n("/login?next=https://x/y"),
-            ("/login".into(), true)
-        );
+        assert_eq!(n("/login?next=https://x/y"), ("/login".into(), true));
         // A path that embeds a URL keeps it: the scheme must precede any `/`.
         assert_eq!(n("/proxy/http://x/y"), ("/proxy/http://x/y".into(), false));
         // A query-only literal is NOT turned into "" (which would read as `/`).
@@ -4590,7 +4972,14 @@ mod tests {
             let (mut nodes, mut edges) = (Vec::new(), Vec::new());
             let (mut nav, mut seen) = (CodeNav::default(), Default::default());
             endpoint::push_client_endpoint_with_raw(
-                RepoId(1), &ep, raw, from, &mut nodes, &mut edges, &mut nav, &mut seen,
+                RepoId(1),
+                &ep,
+                raw,
+                from,
+                &mut nodes,
+                &mut edges,
+                &mut nav,
+                &mut seen,
             );
             match &nodes[0].cells[0].payload {
                 CellPayload::Json(j) => j.clone(),
@@ -4609,12 +4998,15 @@ mod tests {
         let (mut nodes, mut edges) = (Vec::new(), Vec::new());
         let (mut nav, mut seen) = (CodeNav::default(), Default::default());
         endpoint::push_client_endpoint(
-            RepoId(1), &ep, from, &mut nodes, &mut edges, &mut nav, &mut seen,
+            RepoId(1),
+            &ep,
+            from,
+            &mut nodes,
+            &mut edges,
+            &mut nav,
+            &mut seen,
         );
-        assert_eq!(
-            nodes[0].cells[0].payload,
-            CellPayload::Json(payload(None))
-        );
+        assert_eq!(nodes[0].cells[0].payload, CellPayload::Json(payload(None)));
     }
 
     /// CB.21 — a channel client's ENDPOINT_HIT: `via` first, `host` only when
@@ -4628,12 +5020,18 @@ mod tests {
         let c = endpoint::channel_hit_cell("ws", Some("chat-svc:8080"));
         assert_eq!(c.kind, cell_type::ENDPOINT_HIT);
         assert_eq!(json(c), r#"{"via":"ws","host":"chat-svc:8080"}"#);
-        assert_eq!(json(endpoint::channel_hit_cell("grpc", None)), r#"{"via":"grpc"}"#);
+        assert_eq!(
+            json(endpoint::channel_hit_cell("grpc", None)),
+            r#"{"via":"grpc"}"#
+        );
         assert_eq!(
             json(endpoint::channel_hit_cell("grpc", Some("a\"b"))),
             r#"{"via":"grpc","host":"a\"b"}"#
         );
-        assert_eq!(endpoint::http_node_span(&[endpoint::channel_hit_cell("ws", Some("h"))]), None);
+        assert_eq!(
+            endpoint::http_node_span(&[endpoint::channel_hit_cell("ws", Some("h"))]),
+            None
+        );
     }
 
     /// A11.5 — `host` rides on ENDPOINT_HIT only when given, after `raw`; the
@@ -4781,7 +5179,11 @@ mod tests {
         assert_eq!(cell_type::name(cell_type::ACCESS_MODE), "ACCESS_MODE");
         // D0.1 — the 0.5.2 allocation, locked at 37.
         assert_eq!(edge_category::name(edge_category::SAME_AS), "SAME_AS");
-        assert_eq!(edge_category::SAME_AS.0, 37, "SAME_AS is locked at 37 (D0.1)");
+        assert_eq!(
+            edge_category::SAME_AS.0,
+            37,
+            "SAME_AS is locked at 37 (D0.1)"
+        );
         // F0.1 — the 0.5.4 allocations (no emitter until FC.4 / FC.5b / FA.21).
         assert_eq!(node_kind::name(node_kind::GOAL_UNIT), "GOAL_UNIT");
         assert_eq!(edge_category::name(edge_category::TRACES), "TRACES");
@@ -5132,8 +5534,14 @@ mod tests {
     #[test]
     fn http_node_span_reads_endpoint_hit_and_json_route_method() {
         use endpoint::http_node_span;
-        let json = |kind, s: &str| Cell { kind, payload: CellPayload::Json(s.into()) };
-        let text = |kind, s: &str| Cell { kind, payload: CellPayload::Text(s.into()) };
+        let json = |kind, s: &str| Cell {
+            kind,
+            payload: CellPayload::Json(s.into()),
+        };
+        let text = |kind, s: &str| Cell {
+            kind,
+            payload: CellPayload::Text(s.into()),
+        };
         let hit = cell_type::ENDPOINT_HIT;
         let rm = cell_type::ROUTE_METHOD;
         let span = |f: &str, l: Option<i64>| Some((f.to_string(), l));
@@ -5143,41 +5551,74 @@ mod tests {
         let table: Vec<Case> = vec![
             (
                 "ENDPOINT_HIT, as endpoint_hit_json writes it",
-                vec![json(hit, r#"{"method":"GET","path":"/users","file":"web/api.ts","line":2,"col":21,"confidence":"strong"}"#)],
+                vec![json(
+                    hit,
+                    r#"{"method":"GET","path":"/users","file":"web/api.ts","line":2,"col":21,"confidence":"strong"}"#,
+                )],
                 span("web/api.ts", Some(1)),
             ),
             (
                 "parser-go ROUTE_METHOD json",
-                vec![json(rm, r#"{"method":"GET","handler":"listUsers","file":"main.go","line":15,"col":2}"#)],
+                vec![json(
+                    rm,
+                    r#"{"method":"GET","handler":"listUsers","file":"main.go","line":15,"col":2}"#,
+                )],
                 span("main.go", Some(14)),
             ),
             (
                 "ts_routes line:0 is unknown, not row -1",
-                vec![json(rm, r#"{"method":"GET","handler":"","file":"server.ts","line":0,"col":0}"#)],
+                vec![json(
+                    rm,
+                    r#"{"method":"GET","handler":"","file":"server.ts","line":0,"col":0}"#,
+                )],
                 span("server.ts", None),
             ),
             ("bare-verb Text ROUTE_METHOD", vec![text(rm, "GET")], None),
-            ("malformed JSON", vec![json(hit, r#"{"file":"a.ts","line":"#)], None),
-            ("empty file is no file", vec![json(hit, r#"{"file":"","line":3}"#)], None),
-            ("non-integer line", vec![json(hit, r#"{"file":"a.ts","line":"3"}"#)], span("a.ts", None)),
+            (
+                "malformed JSON",
+                vec![json(hit, r#"{"file":"a.ts","line":"#)],
+                None,
+            ),
+            (
+                "empty file is no file",
+                vec![json(hit, r#"{"file":"","line":3}"#)],
+                None,
+            ),
+            (
+                "non-integer line",
+                vec![json(hit, r#"{"file":"a.ts","line":"3"}"#)],
+                span("a.ts", None),
+            ),
             (
                 "a POSITION cell is not an HTTP span",
-                vec![json(cell_type::POSITION, r#"{"file":"a.py","start_line":4,"end_line":9}"#)],
+                vec![json(
+                    cell_type::POSITION,
+                    r#"{"file":"a.py","start_line":4,"end_line":9}"#,
+                )],
                 None,
             ),
             (
                 "first usable ROUTE_METHOD wins, the bare verb is skipped",
                 vec![
                     text(rm, "POST"),
-                    json(rm, r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#),
-                    json(rm, r#"{"method":"PUT","handler":null,"file":"b.go","line":9,"col":1}"#),
+                    json(
+                        rm,
+                        r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#,
+                    ),
+                    json(
+                        rm,
+                        r#"{"method":"PUT","handler":null,"file":"b.go","line":9,"col":1}"#,
+                    ),
                 ],
                 span("a.go", Some(6)),
             ),
             (
                 "ENDPOINT_HIT outranks an earlier ROUTE_METHOD",
                 vec![
-                    json(rm, r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#),
+                    json(
+                        rm,
+                        r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#,
+                    ),
                     json(hit, r#"{"file":"c.ts","line":1}"#),
                 ],
                 span("c.ts", Some(0)),

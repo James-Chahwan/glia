@@ -467,14 +467,7 @@ fn passes_populate_exactly_what_they_declare() {
 #[test]
 fn dependency_guard() {
     let deps = table_keys(include_str!("../Cargo.toml"), "dependencies");
-    assert_eq!(
-        deps,
-        [
-            "glia-activation",
-            "glia-core",
-            "glia-store"
-        ]
-    );
+    assert_eq!(deps, ["glia-activation", "glia-core", "glia-store"]);
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();

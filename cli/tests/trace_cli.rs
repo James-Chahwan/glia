@@ -29,7 +29,8 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("glia-trace-cli-{}-{tag}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("glia-trace-cli-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for (rel, text) in [
             ("web/checkout.ts", CHECKOUT_TS),
@@ -63,7 +64,11 @@ fn glia(args: &[&str]) -> (Output, Vec<String>) {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "glia {args:?} exited {:?}\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia {args:?} exited {:?}\n{stderr}",
+        out.status
+    );
     let markers: Vec<String> = stderr
         .lines()
         .filter(|l| l.starts_with("[trace] seed="))
@@ -84,7 +89,15 @@ fn trace_json_answers_ranked_paths() {
     let fx = Fixture::new("json");
     let (web, api, billing) = (fx.repo("web"), fx.repo("api"), fx.repo("billing"));
     let args = [
-        "trace", &web, "checkout::placeOrder", "--with", &api, "--with", &billing, "--depth", "8",
+        "trace",
+        &web,
+        "checkout::placeOrder",
+        "--with",
+        &api,
+        "--with",
+        &billing,
+        "--depth",
+        "8",
         "--json",
     ];
     let (out, markers) = glia(&args);
@@ -98,13 +111,31 @@ fn trace_json_answers_ranked_paths() {
     assert_eq!(paths[0]["rank"], 1);
     assert_eq!(paths[0]["length"], 7);
     assert_eq!(paths[0]["cross_service_hops"], 2);
-    assert_eq!(paths[0]["mechanisms"], serde_json::json!(["CALLS", "HTTP_CALLS", "HANDLED_BY"]));
-    assert_eq!(v["hops"].as_array().map(Vec::len), Some(11), "the BFS tree rides along: {v}");
+    assert_eq!(
+        paths[0]["mechanisms"],
+        serde_json::json!(["CALLS", "HTTP_CALLS", "HANDLED_BY"])
+    );
+    assert_eq!(
+        v["hops"].as_array().map(Vec::len),
+        Some(11),
+        "the BFS tree rides along: {v}"
+    );
     assert_eq!(v["resolved_by"], "qname");
     assert_eq!(v["truncated"], false);
     assert!(v["absence"].is_null(), "{v}");
 
-    let (out, _) = glia(&["trace", &web, "placeOrder", "--with", &api, "--with", &billing, "--max-paths", "1", "--json"]);
+    let (out, _) = glia(&[
+        "trace",
+        &web,
+        "placeOrder",
+        "--with",
+        &api,
+        "--with",
+        &billing,
+        "--max-paths",
+        "1",
+        "--json",
+    ]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
     assert_eq!(v["paths"].as_array().map(Vec::len), Some(1), "{v}");
 }
@@ -113,27 +144,70 @@ fn trace_json_answers_ranked_paths() {
 fn trace_table_prints_one_block_per_path() {
     let fx = Fixture::new("table");
     let (web, api, billing) = (fx.repo("web"), fx.repo("api"), fx.repo("billing"));
-    let (out, _) = glia(&["trace", &web, "placeOrder", "--with", &api, "--with", &billing, "--depth", "8"]);
+    let (out, _) = glia(&[
+        "trace",
+        &web,
+        "placeOrder",
+        "--with",
+        &api,
+        "--with",
+        &billing,
+        "--depth",
+        "8",
+    ]);
     let text = stdout(&out);
-    assert!(text.contains("### path 1 - 7 hops, 2 cross-service (CALLS, HTTP_CALLS, HANDLED_BY)"), "{text}");
-    assert!(text.contains("### path 3 - 5 hops, 1 cross-service (CALLS, HTTP_CALLS, HANDLED_BY)"), "{text}");
+    assert!(
+        text.contains("### path 1 - 7 hops, 2 cross-service (CALLS, HTTP_CALLS, HANDLED_BY)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("### path 3 - 5 hops, 1 cross-service (CALLS, HTTP_CALLS, HANDLED_BY)"),
+        "{text}"
+    );
     assert_eq!(text.matches("### path ").count(), 3, "{text}");
     assert!(
-        text.contains("| 7 | HANDLED_BY |  | `POST /charge` | `app::charge` (FUNCTION) | ● | app.py:7 |"),
+        text.contains(
+            "| 7 | HANDLED_BY |  | `POST /charge` | `app::charge` (FUNCTION) | ● | app.py:7 |"
+        ),
         "{text}"
     );
 
     // Two-node mode: the directed path, then the undirected fallback.
     let (out, markers) = glia(&[
-        "trace", &web, "placeOrder", "--with", &api, "--with", &billing, "--to", "app::audit",
+        "trace",
+        &web,
+        "placeOrder",
+        "--with",
+        &api,
+        "--with",
+        &billing,
+        "--to",
+        "app::audit",
     ]);
     let text = stdout(&out);
-    assert!(text.contains("# glia trace `placeOrder` → `app::audit` (depth ≤ 6)"), "{text}");
-    assert!(text.contains("### path 1 - 5 hops, 1 cross-service"), "{text}");
-    assert!(markers[0].ends_with(" to=app::audit directed=true"), "{markers:?}");
+    assert!(
+        text.contains("# glia trace `placeOrder` → `app::audit` (depth ≤ 6)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("### path 1 - 5 hops, 1 cross-service"),
+        "{text}"
+    );
+    assert!(
+        markers[0].ends_with(" to=app::audit directed=true"),
+        "{markers:?}"
+    );
 
     let (out, _) = glia(&[
-        "trace", &api, "app::audit", "--with", &web, "--with", &billing, "--to", "placeOrder",
+        "trace",
+        &api,
+        "app::audit",
+        "--with",
+        &web,
+        "--with",
+        &billing,
+        "--to",
+        "placeOrder",
     ]);
     let text = stdout(&out);
     assert!(text.contains("_undirected: "), "{text}");
@@ -146,8 +220,14 @@ fn an_unknown_feature_is_an_absence_with_exit_0() {
     let (out, markers) = glia(&["trace", &api, "no::such::thing"]);
     let text = stdout(&out);
     assert!(text.contains("_(nothing resolved)_"), "{text}");
-    assert!(text.contains("> FACT: no node has the qname or name `no::such::thing`"), "{text}");
-    assert_eq!(markers, ["[trace] seed=no::such::thing resolved_by=none paths=0 expanded=0 truncated=false"]);
+    assert!(
+        text.contains("> FACT: no node has the qname or name `no::such::thing`"),
+        "{text}"
+    );
+    assert_eq!(
+        markers,
+        ["[trace] seed=no::such::thing resolved_by=none paths=0 expanded=0 truncated=false"]
+    );
 
     // A dead end no entry key names resolves and says why it is empty.
     let (out, _) = glia(&["trace", &api, "queue_producer:orders", "--json"]);
@@ -165,10 +245,16 @@ fn a_dead_end_feature_word_traces_its_entry_flow() {
     // LD.4a: `_(no outward flow)_`); the entry flow keyed `post_/orders`
     // contains the word, so the route seeds the trace.
     let (out, markers) = glia(&["trace", &api, "orders"]);
-    assert_eq!(markers, ["[trace] seed=orders resolved_by=entry_flow paths=3 expanded=8 truncated=false"]);
+    assert_eq!(
+        markers,
+        ["[trace] seed=orders resolved_by=entry_flow paths=3 expanded=8 truncated=false"]
+    );
     let text = stdout(&out);
     assert!(!text.contains("_(no outward flow)_"), "{text}");
-    assert!(text.contains("| 1 | HANDLED_BY |  | `POST /orders` | `app::create_order` (FUNCTION) |"), "{text}");
+    assert!(
+        text.contains("| 1 | HANDLED_BY |  | `POST /orders` | `app::create_order` (FUNCTION) |"),
+        "{text}"
+    );
     let (out, _) = glia(&["trace", &api, "orders", "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
     assert_eq!(v["resolved_by"], "entry_flow");
@@ -186,7 +272,11 @@ fn flows(args: &[&str]) -> (Output, Vec<String>) {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "glia flows {args:?} exited {:?}\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia flows {args:?} exited {:?}\n{stderr}",
+        out.status
+    );
     let markers: Vec<String> = stderr
         .lines()
         .filter(|l| l.starts_with("[flows] entries="))
@@ -203,7 +293,10 @@ fn flows_json_rows_equal_the_engine_answer() {
     let fx = Fixture::new("flows-json");
     let (api, billing) = (fx.repo("api"), fx.repo("billing"));
     let (out, markers) = flows(&[&api, "--with", &billing, "--json"]);
-    assert_eq!(markers, ["[flows] entries=2 flows=2 cross_service=1 depth<=6"]);
+    assert_eq!(
+        markers,
+        ["[flows] entries=2 flows=2 cross_service=1 depth<=6"]
+    );
     let cli: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
 
     let r = glia_engine::generate_many(&[api.clone(), billing.clone()]).expect("generate_many");
@@ -224,8 +317,14 @@ fn flows_table_prints_one_row_per_flow() {
     let (api, billing) = (fx.repo("api"), fx.repo("billing"));
     let (out, _) = flows(&[&api, "--with", &billing]);
     let text = stdout(&out);
-    assert!(text.contains(&format!("# glia flows `{api}` (depth ≤ 6)")), "{text}");
-    assert!(text.contains("| key | kind | entry | reach | xsvc | mechanisms | location |"), "{text}");
+    assert!(
+        text.contains(&format!("# glia flows `{api}` (depth ≤ 6)")),
+        "{text}"
+    );
+    assert!(
+        text.contains("| key | kind | entry | reach | xsvc | mechanisms | location |"),
+        "{text}"
+    );
     assert!(
         text.contains("| `post_/charge` | ROUTE | `POST /charge` | 1 |  | HANDLED_BY | app.py:"),
         "{text}"
@@ -238,7 +337,10 @@ fn flows_table_prints_one_row_per_flow() {
     // Nothing reached within 0 hops: no rows, still exit 0.
     let (out, markers) = flows(&[&api, "--depth", "0"]);
     assert!(stdout(&out).contains("_(no entry point reaches anything within 0 hops)_"));
-    assert_eq!(markers, ["[flows] entries=1 flows=0 cross_service=0 depth<=0"]);
+    assert_eq!(
+        markers,
+        ["[flows] entries=1 flows=0 cross_service=0 depth<=0"]
+    );
 }
 
 /// Run `glia <args>` with persistence off, exit 0 asserted; returns stdout
@@ -250,7 +352,11 @@ fn identity_run(args: &[&str]) -> (String, Vec<String>) {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "glia {args:?} exited {:?}\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia {args:?} exited {:?}\n{stderr}",
+        out.status
+    );
     let lines: Vec<String> = stderr
         .lines()
         .filter(|l| l.starts_with("[identity] collapse"))
@@ -270,7 +376,10 @@ fn identity_run(args: &[&str]) -> (String, Vec<String>) {
 /// surface=trace|flows` line by default and none with `--no-collapse`.
 #[test]
 fn identity_classes_collapse_unless_no_collapse() {
-    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/identity-contract-ops");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bench/substrate-gap/fixtures/identity-contract-ops"
+    );
     let ops = [
         "contract::docs::swagger::GET:/orders",
         "contract::features::orders::feature::GET:/api/orders",
@@ -279,31 +388,59 @@ fn identity_classes_collapse_unless_no_collapse() {
 
     let (text, lines) = identity_run(&["trace", fixture, "contract::main::GET:/orders", "--json"]);
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].starts_with("[identity] collapse surface=trace classes="), "{lines:?}");
+    assert!(
+        lines[0].starts_with("[identity] collapse surface=trace classes="),
+        "{lines:?}"
+    );
     let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
-    assert_eq!(v["seed"]["qname"], "contract::main::GET:/orders", "the seed is the query's node");
+    assert_eq!(
+        v["seed"]["qname"], "contract::main::GET:/orders",
+        "the seed is the query's node"
+    );
     let first = &v["paths"][0]["hops"][0];
     assert_eq!(first["mechanism"], "DOCUMENTS", "{v}");
     assert_eq!(first["to_qname"], "GET /api/orders", "{v}");
     let shown = first["from_qname"].as_str().expect("a from_qname");
-    assert!(ops.contains(&shown), "the class shows one of its ops: {shown}");
+    assert!(
+        ops.contains(&shown),
+        "the class shows one of its ops: {shown}"
+    );
 
-    let (text, lines) = identity_run(&["trace", fixture, "contract::main::GET:/orders", "--json", "--no-collapse"]);
+    let (text, lines) = identity_run(&[
+        "trace",
+        fixture,
+        "contract::main::GET:/orders",
+        "--json",
+        "--no-collapse",
+    ]);
     assert!(lines.is_empty(), "no collapse, no identity line: {lines:?}");
     let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
-    assert_eq!(v["paths"][0]["hops"][0]["from_qname"], "contract::main::GET:/orders", "{v}");
+    assert_eq!(
+        v["paths"][0]["hops"][0]["from_qname"], "contract::main::GET:/orders",
+        "{v}"
+    );
     assert!(!text.contains("to_identity"), "{text}");
 
     // A hop into the class (the undirected fallback: DOCUMENTS runs doc ->
     // route) carries the class's identity.
-    let args = ["trace", fixture, "GET /api/orders", "--to", "contract::main::GET:/orders"];
+    let args = [
+        "trace",
+        fixture,
+        "GET /api/orders",
+        "--to",
+        "contract::main::GET:/orders",
+    ];
     let (text, lines) = identity_run(&[&args[..], &["--json"]].concat());
     assert_eq!(lines.len(), 1, "{lines:?}");
     let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
     let hop = &v["paths"][0]["hops"][0];
     assert_eq!(hop["to_qname"], "contract::main::GET:/orders", "{v}");
     assert_eq!(hop["to_identity"]["tier"], "derived", "{v}");
-    assert_eq!(hop["to_identity"]["also_in"].as_array().map(Vec::len), Some(2), "{v}");
+    assert_eq!(
+        hop["to_identity"]["also_in"].as_array().map(Vec::len),
+        Some(2),
+        "{v}"
+    );
     let (table, _) = identity_run(&args);
     assert!(table.contains("(also in: "), "{table}");
     let (table, _) = identity_run(&[&args[..], &["--no-collapse"]].concat());
@@ -311,7 +448,10 @@ fn identity_classes_collapse_unless_no_collapse() {
 
     let (_, lines) = identity_run(&["flows", fixture, "--json"]);
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].starts_with("[identity] collapse surface=flows classes="), "{lines:?}");
+    assert!(
+        lines[0].starts_with("[identity] collapse surface=flows classes="),
+        "{lines:?}"
+    );
     let (_, lines) = identity_run(&["flows", fixture, "--json", "--no-collapse"]);
     assert!(lines.is_empty(), "{lines:?}");
 }

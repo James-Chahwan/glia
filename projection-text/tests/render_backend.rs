@@ -25,10 +25,7 @@ fn repo() -> RepoId {
 }
 
 fn build() -> glia_graph::RepoGraph {
-    let files = [
-        ("users/users.go", "users"),
-        ("server/server.go", "server"),
-    ];
+    let files = [("users/users.go", "users"), ("server/server.go", "server")];
     let parses: Vec<_> = files
         .iter()
         .map(|(rel, pkg)| {
@@ -46,7 +43,10 @@ fn backend_renders_with_legend_topology_and_node_blocks() {
 
     // Top-level structure.
     assert!(out.starts_with("[LEGEND]"), "missing LEGEND header:\n{out}");
-    assert!(out.contains("[TOPOLOGY]"), "missing TOPOLOGY header:\n{out}");
+    assert!(
+        out.contains("[TOPOLOGY]"),
+        "missing TOPOLOGY header:\n{out}"
+    );
 
     // Routes are entry kinds — their topology lines must carry the `*` sigil.
     let topology_section = out

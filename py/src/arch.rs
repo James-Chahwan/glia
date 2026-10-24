@@ -84,7 +84,10 @@ impl PyGraph {
     /// SAME_AS link per stored `member -> center` edge, every edge counted.
     #[pyo3(signature = (collapse=true))]
     fn service_map(&self, py: Python<'_>, collapse: bool) -> PyResult<Py<PyAny>> {
-        to_py(py, service_map_json(&self.merged, &self.repo_labels, collapse))
+        to_py(
+            py,
+            service_map_json(&self.merged, &self.repo_labels, collapse),
+        )
     }
 }
 
@@ -145,20 +148,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
         let same_as = |collapse: bool| -> Vec<(String, String)> {
-            let json = service_map_json(&built.merged, &built.repo_labels, collapse).expect("serialises");
+            let json =
+                service_map_json(&built.merged, &built.repo_labels, collapse).expect("serialises");
             let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
             v["links"]
                 .as_array()
                 .expect("links")
                 .iter()
                 .filter(|l| l["mechanism"] == "SAME_AS")
-                .map(|l| (l["from"].as_str().unwrap_or("?").to_string(), l["to"].as_str().unwrap_or("?").to_string()))
+                .map(|l| {
+                    (
+                        l["from"].as_str().unwrap_or("?").to_string(),
+                        l["to"].as_str().unwrap_or("?").to_string(),
+                    )
+                })
                 .collect()
         };
         let pairs = |p: &[(&str, &str)]| -> Vec<(String, String)> {
-            p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+            p.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
         };
-        assert_eq!(same_as(true), pairs(&[("alpha", "beta"), ("alpha", "gamma"), ("beta", "gamma")]));
+        assert_eq!(
+            same_as(true),
+            pairs(&[("alpha", "beta"), ("alpha", "gamma"), ("beta", "gamma")])
+        );
         assert_eq!(same_as(false).len(), 2, "{:?}", same_as(false));
     }
 }

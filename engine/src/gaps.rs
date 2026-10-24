@@ -1329,7 +1329,10 @@ fn collect_rows(
                     && !provenance_is(n.cells, "test_fixture")
                 {
                     // Generated code is no authored symbol to delete.
-                    if GENERATED_PROVENANCE.iter().any(|p| provenance_is(n.cells, p)) {
+                    if GENERATED_PROVENANCE
+                        .iter()
+                        .any(|p| provenance_is(n.cells, p))
+                    {
                         generated += 1;
                         continue;
                     }
@@ -1341,7 +1344,11 @@ fn collect_rows(
                     // a live owner made it live already, and an owner with
                     // an incoming carry edge (a dead caller's included, as
                     // dispatch reads it) is no row.
-                    if view.invoked_owner.get(&n.id).is_some_and(|o| view.carry_in.contains(o)) {
+                    if view
+                        .invoked_owner
+                        .get(&n.id)
+                        .is_some_and(|o| view.carry_in.contains(o))
+                    {
                         invoked += 1;
                         continue;
                     }

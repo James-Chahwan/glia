@@ -103,7 +103,8 @@ const FANCY_TS: &str = "import { Renderer } from './renderer';\n\nexport class F
 /// A concrete `Base::m`, one override calling `super.m()`, one not.
 const BASE_TS: &str = "export class Base {\n  m(): void {}\n}\n";
 const A_TS: &str = "import { Base } from './base';\n\nexport class A extends Base {\n  m(): void {\n    super.m();\n  }\n}\n";
-const B_TS: &str = "import { Base } from './base';\n\nexport class B extends Base {\n  m(): void {}\n}\n";
+const B_TS: &str =
+    "import { Base } from './base';\n\nexport class B extends Base {\n  m(): void {}\n}\n";
 /// A virtual call into `Base::m` through a constructor-parameter field.
 const CALLER_TS: &str = "import { Base } from './base';\n\nexport class Caller {\n  constructor(private readonly base: Base) {}\n\n  go(): void {\n    this.base.m();\n  }\n}\n";
 
@@ -246,7 +247,11 @@ fn ts_reached_override_is_live() {
     );
     let mut rows = dead(&report(&m));
     rows.sort();
-    let mut want = ["::AdminRepo", "::AdminRepo::audit", "::AdminRepo::findAdmin"];
+    let mut want = [
+        "::AdminRepo",
+        "::AdminRepo::audit",
+        "::AdminRepo::findAdmin",
+    ];
     want.sort();
     assert_eq!(rows.len(), want.len(), "exactly the three rows: {rows:?}");
     for suffix in want {
@@ -276,7 +281,10 @@ fn ts_template_method_override_is_not_dead() {
         !has(&rows, "::FancyRenderer::paint"),
         "Renderer::render calls Renderer::paint, which dispatches to the override: {rows:?}"
     );
-    assert!(has(&rows, "::Renderer::render"), "nothing calls render: still a row, got {rows:?}");
+    assert!(
+        has(&rows, "::Renderer::render"),
+        "nothing calls render: still a row, got {rows:?}"
+    );
     assert!(
         !entrypoint_reachable(&m).contains(&node(&m, "::FancyRenderer::paint")),
         "liveness is untouched: no entry reaches render"
@@ -288,10 +296,17 @@ fn super_call_vouches_for_no_override() {
     // Base::m's only caller is A::m's `super.m()` (rule super_method): it runs
     // Base::m itself, never B::m, so neither override is vouched for. This
     // pins both ends of the rule string (graph writes it, gaps reads it).
-    let m = build(&[("src/base.ts", BASE_TS), ("src/a.ts", A_TS), ("src/b.ts", B_TS)]);
+    let m = build(&[
+        ("src/base.ts", BASE_TS),
+        ("src/a.ts", A_TS),
+        ("src/b.ts", B_TS),
+    ]);
     let rows = dead(&report(&m));
     for row in ["::A::m", "::B::m"] {
-        assert!(has(&rows, row), "a super call dispatches to no override: {row} in {rows:?}");
+        assert!(
+            has(&rows, row),
+            "a super call dispatches to no override: {row} in {rows:?}"
+        );
     }
 }
 
@@ -307,9 +322,15 @@ fn a_virtual_call_vouches_for_every_override() {
     ]);
     let rows = dead(&report(&m));
     for row in ["::A::m", "::B::m"] {
-        assert!(!has(&rows, row), "Caller::go calls Base::m: {row} not in {rows:?}");
+        assert!(
+            !has(&rows, row),
+            "Caller::go calls Base::m: {row} not in {rows:?}"
+        );
     }
-    assert!(has(&rows, "::Caller::go"), "nothing calls go: still a row, got {rows:?}");
+    assert!(
+        has(&rows, "::Caller::go"),
+        "nothing calls go: still a row, got {rows:?}"
+    );
 }
 
 #[test]
@@ -329,7 +350,10 @@ fn ts_concrete_override_reached_is_live() {
         "::StoresListener::constructor",
         "::UserStore::constructor",
     ] {
-        assert!(live.contains(&node(&m, ctor)), "a live owner's constructor is live: {ctor}");
+        assert!(
+            live.contains(&node(&m, ctor)),
+            "a live owner's constructor is live: {ctor}"
+        );
     }
     let rows = dead(&report(&m));
     assert!(rows.is_empty(), "no dead row: {rows:?}");

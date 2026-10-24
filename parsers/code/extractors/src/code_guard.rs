@@ -379,7 +379,10 @@ mod tests {
         let sq: Vec<usize> = rs.match_indices("'schedule':").map(|(i, _)| i).collect();
         assert!(g.opens_literal(dq[0]));
         assert!(!g.opens_literal(dq[1]), "inside a // comment");
-        assert!(!g.opens_literal(sq[0]), "a bare 'schedule': is code in Rust");
+        assert!(
+            !g.opens_literal(sq[0]),
+            "a bare 'schedule': is code in Rust"
+        );
         assert!(!g.opens_literal(sq[1]), "inside a string");
         // No guard admits every key; a refusal is counted.
         let mut none = LazyGuard::new("app.ts", "x = \"{'schedule': 1}\"");

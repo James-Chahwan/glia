@@ -91,8 +91,18 @@ fn nodes_json_string(merged: &MergedGraph, live: &HashSet<NodeId>) -> String {
 /// roles (LD.6), and `live` is the caller's membership test.
 fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
     let kind = g.nav.kind_by_id.get(&n.id).copied();
-    let name = g.nav.name_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
-    let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+    let name = g
+        .nav
+        .name_by_id
+        .get(&n.id)
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let qname = g
+        .nav
+        .qname_by_id
+        .get(&n.id)
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let conf = match n.confidence {
         Confidence::Strong => "strong",
         Confidence::Medium => "medium",
@@ -111,8 +121,10 @@ fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
         None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
     };
     let role_kinds = roles_in(kind, &n.cells);
-    let entry =
-        CODE_PROFILE.tables.entry.is_entry_at(kind, name, &role_kinds, || node_ext(&n.cells));
+    let entry = CODE_PROFILE
+        .tables
+        .entry
+        .is_entry_at(kind, name, &role_kinds, || node_ext(&n.cells));
     let roles: Vec<String> = role_kinds
         .into_iter()
         .map(|r| format!("\"{}\"", escape_json(node_kind::name(r))))
@@ -151,14 +163,23 @@ mod tests {
         nav.record(class, "Api", "svc::Api", node_kind::CLASS, None);
         nav.record(func, "helper", "svc::helper", node_kind::FUNCTION, None);
         nav.record(comp, "Card", "ui::Card", node_kind::COMPONENT, None);
-        let node = |id, cells| Node { id, repo, confidence: Confidence::Strong, cells };
+        let node = |id, cells| Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        };
         let role = Cell {
             kind: cell_type::ROLE,
             payload: CellPayload::Json(r#"{"roles":["SERVICE"]}"#.into()),
         };
         let g = RepoGraph {
             repo,
-            nodes: vec![node(class, vec![role]), node(func, vec![]), node(comp, vec![])],
+            nodes: vec![
+                node(class, vec![role]),
+                node(func, vec![]),
+                node(comp, vec![]),
+            ],
             edges: vec![],
             nav,
             symbols: SymbolTable::default(),
@@ -167,9 +188,21 @@ mod tests {
             properties: Default::default(),
         };
         let rec = |i: usize| node_record_json(&g, &g.nodes[i], false);
-        assert!(rec(0).ends_with(r#","roles":["SERVICE"],"entry":false,"live":false}"#), "{}", rec(0));
-        assert!(rec(1).ends_with(r#","roles":[],"entry":false,"live":false}"#), "{}", rec(1));
-        assert!(rec(2).ends_with(r#","roles":["COMPONENT"],"entry":true,"live":false}"#), "{}", rec(2));
+        assert!(
+            rec(0).ends_with(r#","roles":["SERVICE"],"entry":false,"live":false}"#),
+            "{}",
+            rec(0)
+        );
+        assert!(
+            rec(1).ends_with(r#","roles":[],"entry":false,"live":false}"#),
+            "{}",
+            rec(1)
+        );
+        assert!(
+            rec(2).ends_with(r#","roles":["COMPONENT"],"entry":true,"live":false}"#),
+            "{}",
+            rec(2)
+        );
         let v: serde_json::Value = serde_json::from_str(&rec(0)).expect("valid JSON");
         assert_eq!(v["kind"], node_kind::CLASS.0);
         assert_eq!(v["qname"], "svc::Api");
@@ -233,8 +266,15 @@ mod tests {
                 (n["qname"].as_str().unwrap_or("").to_string(), entry, live)
             })
             .collect();
-        for (q, entry, live) in [("app", false, false), ("app::helper", false, true), ("app::main", true, true)] {
-            assert!(flags.contains(&(q.to_string(), entry, live)), "{q}: {flags:?}");
+        for (q, entry, live) in [
+            ("app", false, false),
+            ("app::helper", false, true),
+            ("app::main", true, true),
+        ] {
+            assert!(
+                flags.contains(&(q.to_string(), entry, live)),
+                "{q}: {flags:?}"
+            );
         }
     }
 }

@@ -88,7 +88,9 @@ fn build_in(root: &Path) -> MergedGraph {
         .iter()
         .map(|d| root.join(d).to_string_lossy().into_owned())
         .collect();
-    generate_many(&repos).expect("go-test-file-routes builds").merged
+    generate_many(&repos)
+        .expect("go-test-file-routes builds")
+        .merged
 }
 
 /// A layout merge of the two repos, each built (and persisted under its own
@@ -96,15 +98,24 @@ fn build_in(root: &Path) -> MergedGraph {
 fn merge_in(root: &Path) -> MergedGraph {
     let members: Vec<MergeMember> = ["server", "web"]
         .iter()
-        .map(|d| MergeMember::Repo { name: d.to_string(), root: root.join(d) })
+        .map(|d| MergeMember::Repo {
+            name: d.to_string(),
+            root: root.join(d),
+        })
         .collect();
-    merge_layouts(&members).expect("the layout merge").result.merged
+    merge_layouts(&members)
+        .expect("the layout merge")
+        .result
+        .merged
 }
 
 /// A node's qname without its ` @<project>` owner segment.
 fn qname(m: &MergedGraph, id: NodeId) -> Option<String> {
     m.graphs.iter().find_map(|g| {
-        g.nav.qname_by_id.get(&id).map(|q| q.split(" @").next().unwrap_or(q).to_string())
+        g.nav
+            .qname_by_id
+            .get(&id)
+            .map(|q| q.split(" @").next().unwrap_or(q).to_string())
     })
 }
 
@@ -126,11 +137,16 @@ fn route_origins(m: &MergedGraph) -> BTreeSet<(String, String)> {
                 .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE))
                 .flat_map(move |n| {
                     let q = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
-                    n.cells.iter().filter(|c| c.kind == cell_type::ORIGIN).filter_map(move |c| {
-                        let CellPayload::Json(j) = &c.payload else { return None };
-                        let v: serde_json::Value = serde_json::from_str(j).ok()?;
-                        Some((q.clone(), v["provenance"].as_str()?.to_string()))
-                    })
+                    n.cells
+                        .iter()
+                        .filter(|c| c.kind == cell_type::ORIGIN)
+                        .filter_map(move |c| {
+                            let CellPayload::Json(j) = &c.payload else {
+                                return None;
+                            };
+                            let v: serde_json::Value = serde_json::from_str(j).ok()?;
+                            Some((q.clone(), v["provenance"].as_str()?.to_string()))
+                        })
                 })
         })
         .collect()
@@ -149,10 +165,17 @@ fn routes(m: &MergedGraph) -> BTreeSet<String> {
 }
 
 fn pairs(items: &[(&str, &str)]) -> BTreeSet<(String, String)> {
-    items.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    items
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
 }
 
-const TEST_ONLY: [&str; 3] = ["GET /boom", "GET /health-test", "POST /api/auth/password/reset/:token"];
+const TEST_ONLY: [&str; 3] = [
+    "GET /boom",
+    "GET /health-test",
+    "POST /api/auth/password/reset/:token",
+];
 
 #[test]
 fn test_only_routes_pair_no_client_and_product_routes_keep_pairing() {
@@ -183,7 +206,10 @@ fn test_only_routes_pair_no_client_and_product_routes_keep_pairing() {
         ])
     );
     for (_, to) in http_calls(&m) {
-        assert!(!TEST_ONLY.contains(&to.as_str()), "{to} is a test-only route");
+        assert!(
+            !TEST_ONLY.contains(&to.as_str()),
+            "{to} is a test-only route"
+        );
     }
 }
 
@@ -195,7 +221,10 @@ fn only_test_only_routes_are_stamped_test_fixture() {
     // `GET /api/ab_test` (the symbol-qname rule).
     assert_eq!(
         route_origins(&m),
-        TEST_ONLY.iter().map(|q| (q.to_string(), "test_fixture".to_string())).collect()
+        TEST_ONLY
+            .iter()
+            .map(|q| (q.to_string(), "test_fixture".to_string()))
+            .collect()
     );
 }
 
@@ -204,7 +233,10 @@ fn a_declared_tests_route_is_tagged_and_excluded() {
     let td = tree(true);
     let m = build_in(td.path());
     let origins = route_origins(&m);
-    assert!(origins.contains(&("GET /qa-only".to_string(), "test_fixture".to_string())), "{origins:?}");
+    assert!(
+        origins.contains(&("GET /qa-only".to_string(), "test_fixture".to_string())),
+        "{origins:?}"
+    );
     assert_eq!(origins.len(), 4, "{origins:?}");
     assert_eq!(
         http_calls(&m),
@@ -252,16 +284,32 @@ fn build_stderr(mode: &str, declared: bool) -> Vec<String> {
     let td = tree(declared);
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, format!("{mode}:{}", td.path().display()))
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child build failed: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stderr).lines().map(String::from).collect()
+    assert!(
+        out.status.success(),
+        "child build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(String::from)
+        .collect()
 }
 
 fn lines_with<'l>(lines: &'l [String], prefix: &str) -> Vec<&'l str> {
-    lines.iter().filter(|l| l.starts_with(prefix)).map(String::as_str).collect()
+    lines
+        .iter()
+        .filter(|l| l.starts_with(prefix))
+        .map(String::as_str)
+        .collect()
 }
 
 #[test]
@@ -273,13 +321,18 @@ fn markers_count_the_excluded_routes() {
     );
     assert_eq!(
         lines_with(&lines, "[http] routes="),
-        vec!["[http] routes=3 endpoints=4 paired=2 (exact=2 any=0 eprefix=0 rprefix=0 base=0 suffix=0)"]
+        vec![
+            "[http] routes=3 endpoints=4 paired=2 (exact=2 any=0 eprefix=0 rprefix=0 base=0 suffix=0)"
+        ]
     );
     // HEAD: test_fixture=10 (path=8 qname=2); the qname hit left is the
     // ENDPOINT `endpoint:GET:/api/ab_test`, out of DT.6a's scope.
     let provenance = lines_with(&lines, "[provenance] test_fixture=");
     assert_eq!(provenance.len(), 1, "{provenance:?}");
-    assert!(provenance[0].starts_with("[provenance] test_fixture=8 (path=7 qname=1) "), "{provenance:?}");
+    assert!(
+        provenance[0].starts_with("[provenance] test_fixture=8 (path=7 qname=1) "),
+        "{provenance:?}"
+    );
 
     // The declared pattern: one more route excluded, counted on the repo's
     // declared line with the other nodes of `qa/routes.go` (its MODULE, the
@@ -292,18 +345,30 @@ fn markers_count_the_excluded_routes() {
     );
     let declared = lines_with(&lines, "[provenance] declared tests repo=");
     assert_eq!(declared.len(), 1, "{declared:?}");
-    assert!(declared[0].ends_with(" patterns=1 tagged=3"), "{declared:?}");
+    assert!(
+        declared[0].ends_with(" patterns=1 tagged=3"),
+        "{declared:?}"
+    );
     let provenance = lines_with(&lines, "[provenance] test_fixture=");
-    assert!(provenance[0].starts_with("[provenance] test_fixture=11 (path=7 qname=1) "), "{provenance:?}");
+    assert!(
+        provenance[0].starts_with("[provenance] test_fixture=11 (path=7 qname=1) "),
+        "{provenance:?}"
+    );
 
     // A layout merge: each member build, then the merge's own resolve.
     let lines = build_stderr("merge", false);
     let excluded = lines_with(&lines, "[http] test routes excluded");
-    assert_eq!(excluded.last(), Some(&"[http] test routes excluded from route index: 3"), "{excluded:?}");
+    assert_eq!(
+        excluded.last(),
+        Some(&"[http] test routes excluded from route index: 3"),
+        "{excluded:?}"
+    );
     let http = lines_with(&lines, "[http] routes=");
     assert_eq!(
         http.last(),
-        Some(&"[http] routes=3 endpoints=4 paired=2 (exact=2 any=0 eprefix=0 rprefix=0 base=0 suffix=0)"),
+        Some(
+            &"[http] routes=3 endpoints=4 paired=2 (exact=2 any=0 eprefix=0 rprefix=0 base=0 suffix=0)"
+        ),
         "{http:?}"
     );
 }

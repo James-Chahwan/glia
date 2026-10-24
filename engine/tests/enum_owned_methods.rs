@@ -57,7 +57,11 @@ fn enum_impl_self_call_binds_the_enums_own_method() {
         "self.weight() inside `impl Tier` must bind Tier::weight; CALLS = {calls:?}"
     );
     assert!(
-        has(&calls, "src::lib::Ledger::total", "src::lib::Ledger::weight"),
+        has(
+            &calls,
+            "src::lib::Ledger::total",
+            "src::lib::Ledger::weight"
+        ),
         "control: the struct twin resolves; CALLS = {calls:?}"
     );
 }

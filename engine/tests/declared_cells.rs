@@ -16,13 +16,20 @@ use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule, parse_co
 use glia_code_domain::{cell_type, glia_config, node_kind};
 use glia_core::{CellPayload, CellTypeId, NodeId};
 use glia_engine::{
-    BuildOptions, GenerateResult, ParseCache, generate_one, generate_one_opts, generate_one_with_cache,
+    BuildOptions, GenerateResult, ParseCache, generate_one, generate_one_opts,
+    generate_one_with_cache,
 };
 use glia_store::write_merged_sharded;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/overlay-declared-cells";
-const OVERLAY: &str = include_str!("../../bench/substrate-gap/fixtures/overlay-declared-cells/.glia/overlay.toml");
-const FILES: &[&str] = &["services/api/pyproject.toml", "services/api/app.py", "web/package.json", "web/src/ui.ts"];
+const OVERLAY: &str =
+    include_str!("../../bench/substrate-gap/fixtures/overlay-declared-cells/.glia/overlay.toml");
+const FILES: &[&str] = &[
+    "services/api/pyproject.toml",
+    "services/api/app.py",
+    "web/package.json",
+    "web/src/ui.ts",
+];
 
 /// The fixture tree under `<tmp>/repo`, with `overlay` as its overlay file
 /// (none when `None`) and `cells` as its `.glia/cells.jsonl`.
@@ -49,7 +56,11 @@ fn cell(r: &GenerateResult, qname: &str, t: CellTypeId) -> Vec<String> {
         .merged
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname)))
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname))
+        })
         .collect();
     assert_eq!(nodes.len(), 1, "exactly one node is {qname}");
     nodes[0]
@@ -65,8 +76,16 @@ fn cell(r: &GenerateResult, qname: &str, t: CellTypeId) -> Vec<String> {
 
 /// Every payload of type `t` anywhere in the graph.
 fn all_of(r: &GenerateResult, t: CellTypeId) -> Vec<CellPayload> {
-    let cells = r.merged.graphs.iter().flat_map(|g| &g.nodes).flat_map(|n| &n.cells);
-    cells.filter(|c| c.kind == t).map(|c| c.payload.clone()).collect()
+    let cells = r
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| &g.nodes)
+        .flat_map(|n| &n.cells);
+    cells
+        .filter(|c| c.kind == t)
+        .map(|c| c.payload.clone())
+        .collect()
 }
 
 #[test]
@@ -75,9 +94,14 @@ fn constraint_anchors_on_project() {
     let r = generate_one(&repo(tmp.path(), Some(OVERLAY), None)).unwrap();
     assert_eq!(
         cell(&r, "project:web", cell_type::CONSTRAINT),
-        [r#"[{"categories":["CALLS"],"decl":".glia/overlay.toml:3","from":"web","from_raw":"web","id":"web-no-api-internals","kind":"forbid_edge","origin":"human","source":"overlay","text":"web goes through HTTP","to":"services/api","to_raw":"services/api"}]"#]
+        [
+            r#"[{"categories":["CALLS"],"decl":".glia/overlay.toml:3","from":"web","from_raw":"web","id":"web-no-api-internals","kind":"forbid_edge","origin":"human","source":"overlay","text":"web goes through HTTP","to":"services/api","to_raw":"services/api"}]"#
+        ]
     );
-    assert!(cell(&r, "project:services/api", cell_type::CONSTRAINT).is_empty(), "a forbid_edge hangs on its `from`");
+    assert!(
+        cell(&r, "project:services/api", cell_type::CONSTRAINT).is_empty(),
+        "a forbid_edge hangs on its `from`"
+    );
     assert_eq!(all_of(&r, cell_type::CONSTRAINT).len(), 1);
 }
 
@@ -88,11 +112,15 @@ fn decision_and_note_anchor_on_qname() {
     let charge = "services::api::app::charge";
     assert_eq!(
         cell(&r, charge, cell_type::DECISION),
-        [r#"[{"decl":".glia/overlay.toml:12","id":"charge-idempotent","source":"overlay","status":"accepted","title":"charge() is idempotent on order id"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:12","id":"charge-idempotent","source":"overlay","status":"accepted","title":"charge() is idempotent on order id"}]"#
+        ]
     );
     assert_eq!(
         cell(&r, charge, cell_type::CONV),
-        [r#"[{"decl":".glia/overlay.toml:18","id":"note#1","source":"overlay","text":"retries are safe"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:18","id":"note#1","source":"overlay","text":"retries are safe"}]"#
+        ]
     );
 }
 
@@ -102,13 +130,19 @@ fn decision_and_note_anchor_on_qname() {
 fn label_scope_resolves() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = repo(tmp.path(), None, None);
-    std::fs::write(Path::new(&dir).join("web/package.json"), "{\"name\": \"@shop/web\"}\n").unwrap();
+    std::fs::write(
+        Path::new(&dir).join("web/package.json"),
+        "{\"name\": \"@shop/web\"}\n",
+    )
+    .unwrap();
     let overlay = "version = 1\n\n[[constraint]]\nid = \"c\"\nkind = \"forbid_edge\"\nfrom = \"@shop/web\"\nto = \"api\"\n";
     std::fs::write(Path::new(&dir).join(".glia/overlay.toml"), overlay).unwrap();
     let r = generate_one(&dir).unwrap();
     assert_eq!(
         cell(&r, "project:web", cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:3","from":"web","from_raw":"@shop/web","id":"c","kind":"forbid_edge","origin":"llm","source":"overlay","to":"services/api","to_raw":"api"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:3","from":"web","from_raw":"@shop/web","id":"c","kind":"forbid_edge","origin":"llm","source":"overlay","to":"services/api","to_raw":"api"}]"#
+        ]
     );
 }
 
@@ -129,29 +163,50 @@ fn child_build_for_stderr() {
 fn declared_lines(dir: &str) -> Vec<String> {
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, dir)
         .output()
         .expect("re-run the test binary");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "child build failed: {stderr}");
-    stderr.lines().filter(|l| l.starts_with("[declared]")).map(String::from).collect()
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("[declared]"))
+        .map(String::from)
+        .collect()
 }
 
 /// The `file` of a node's first POSITION cell.
 fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
-    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| match &c.payload {
-        CellPayload::Json(s) | CellPayload::Text(s) => {
-            serde_json::from_str::<serde_json::Value>(s).ok()?.get("file")?.as_str().map(String::from)
-        }
-        CellPayload::Bytes(_) => None,
-    })
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .ok()?
+                    .get("file")?
+                    .as_str()
+                    .map(String::from)
+            }
+            CellPayload::Bytes(_) => None,
+        })
 }
 
 /// The smallest-id MODULE of the build whose POSITION file lies under `dir`
 /// (`.` = any), as the CC.5a component fallback picks it, and its qname.
 fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
-    let under = |f: &str| dir == "." || f == dir || f.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'));
+    let under = |f: &str| {
+        dir == "."
+            || f == dir
+            || f.strip_prefix(dir)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
     r.merged
         .graphs
         .iter()
@@ -160,7 +215,12 @@ fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
                 .iter()
                 .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
                 .filter(|n| position_file(&n.cells).is_some_and(|f| under(&f)))
-                .map(|n| (n.id, g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default()))
+                .map(|n| {
+                    (
+                        n.id,
+                        g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default(),
+                    )
+                })
         })
         .min_by_key(|(id, _)| id.0)
         .expect("a MODULE under the path")
@@ -176,7 +236,9 @@ fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
 #[test]
 fn subdir_scope_anchors_on_the_enclosing_project() {
     let stanza = |from: &str| {
-        format!("version = 1\n\n[[constraint]]\nid = \"api-no-web\"\nkind = \"forbid_edge\"\nfrom = \"{from}\"\nto = \"web\"\ncategories = [\"CALLS\"]\n")
+        format!(
+            "version = 1\n\n[[constraint]]\nid = \"api-no-web\"\nkind = \"forbid_edge\"\nfrom = \"{from}\"\nto = \"web\"\ncategories = [\"CALLS\"]\n"
+        )
     };
     let (sub_tmp, proj_tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let sub_dir = repo(sub_tmp.path(), Some(&stanza("services/api/app.py")), None);
@@ -186,7 +248,9 @@ fn subdir_scope_anchors_on_the_enclosing_project() {
     let at_project = cell(&proj, "project:services/api", cell_type::CONSTRAINT);
     assert_eq!(
         at_project,
-        [r#"[{"categories":["CALLS"],"decl":".glia/overlay.toml:3","from":"services/api","from_raw":"services/api","id":"api-no-web","kind":"forbid_edge","origin":"llm","source":"overlay","to":"web","to_raw":"web"}]"#]
+        [
+            r#"[{"categories":["CALLS"],"decl":".glia/overlay.toml:3","from":"services/api","from_raw":"services/api","id":"api-no-web","kind":"forbid_edge","origin":"llm","source":"overlay","to":"web","to_raw":"web"}]"#
+        ]
     );
     assert_eq!(
         cell(&sub, "project:services/api", cell_type::CONSTRAINT),
@@ -198,19 +262,26 @@ fn subdir_scope_anchors_on_the_enclosing_project() {
     assert_eq!(all_of(&sub, cell_type::CONSTRAINT).len(), 1);
     let report = glia_engine::check::check(&sub.merged);
     assert_eq!((report.rules, report.checked), (1, 1), "{report:#?}");
-    assert!(report.errors.is_empty() && report.unchecked.is_empty(), "{report:#?}");
+    assert!(
+        report.errors.is_empty() && report.unchecked.is_empty(),
+        "{report:#?}"
+    );
 
     assert_eq!(
         declared_lines(&sub_dir),
         [
-            format!("[declared] repo={sub_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1)"),
+            format!(
+                "[declared] repo={sub_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1)"
+            ),
             "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
         ]
     );
     assert_eq!(
         declared_lines(&proj_dir),
         [
-            format!("[declared] repo={proj_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"),
+            format!(
+                "[declared] repo={proj_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"
+            ),
             "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
         ]
     );
@@ -229,7 +300,9 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
     let (module, qname) = smallest_module_under(&r, ".");
     assert_eq!(
         cell(&r, &qname, cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:3","id":"acyclic","kind":"no_cycle","origin":"llm","source":"overlay"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:3","id":"acyclic","kind":"no_cycle","origin":"llm","source":"overlay"}]"#
+        ]
     );
     let holders: Vec<NodeId> = r
         .merged
@@ -239,13 +312,18 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
         .filter(|n| n.cells.iter().any(|c| c.kind == cell_type::CONSTRAINT))
         .map(|n| n.id)
         .collect();
-    assert!(!holders.is_empty() && holders.iter().all(|id| *id == module), "{holders:?} vs {module:?}");
+    assert!(
+        !holders.is_empty() && holders.iter().all(|id| *id == module),
+        "{holders:?} vs {module:?}"
+    );
     let report = glia_engine::check::check(&r.merged);
     assert_eq!((report.rules, report.checked), (1, 1), "{report:#?}");
     assert_eq!(
         declared_lines(&dir),
         [
-            format!("[declared] repo={dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1)"),
+            format!(
+                "[declared] repo={dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1)"
+            ),
             "[declared] rules=1 (forbid_edge=0 no_cycle=1 invariant=0)".to_string(),
         ]
     );
@@ -282,14 +360,24 @@ text = \"stale anchor\"
     let dir = repo(tmp.path(), Some(overlay), None);
     let r = generate_one(&dir).unwrap();
     for t in [cell_type::DECISION, cell_type::CONV] {
-        assert!(all_of(&r, t).is_empty(), "cell {t:?} was written: {:?}", all_of(&r, t));
+        assert!(
+            all_of(&r, t).is_empty(),
+            "cell {t:?} was written: {:?}",
+            all_of(&r, t)
+        );
     }
     let (_, module) = smallest_module_under(&r, ".");
     assert_eq!(
         cell(&r, &module, cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:8","id":"unscoped","kind":"invariant","origin":"llm","source":"overlay","text":"charges are idempotent"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:8","id":"unscoped","kind":"invariant","origin":"llm","source":"overlay","text":"charges are idempotent"}]"#
+        ]
     );
-    assert_eq!(all_of(&r, cell_type::CONSTRAINT).len(), 1, "nope-acyclic stays orphaned");
+    assert_eq!(
+        all_of(&r, cell_type::CONSTRAINT).len(),
+        1,
+        "nope-acyclic stays orphaned"
+    );
     assert_eq!(
         declared_lines(&dir),
         [
@@ -307,13 +395,19 @@ text = \"stale anchor\"
 fn unscoped_rule_anchors_on_root_project() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = repo(tmp.path(), None, None);
-    std::fs::write(Path::new(&dir).join("pyproject.toml"), "[project]\nname = \"shop\"\n").unwrap();
+    std::fs::write(
+        Path::new(&dir).join("pyproject.toml"),
+        "[project]\nname = \"shop\"\n",
+    )
+    .unwrap();
     let overlay = "version = 1\n\n[[constraint]]\nid = \"acyclic\"\nkind = \"no_cycle\"\n";
     std::fs::write(Path::new(&dir).join(".glia/overlay.toml"), overlay).unwrap();
     let r = generate_one(&dir).unwrap();
     assert_eq!(
         cell(&r, "project:.", cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:3","id":"acyclic","kind":"no_cycle","origin":"llm","source":"overlay"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:3","id":"acyclic","kind":"no_cycle","origin":"llm","source":"overlay"}]"#
+        ]
     );
 }
 
@@ -331,7 +425,12 @@ fn declared_constraints_round_trips() {
     assert_eq!(rule.id, "web-no-api-internals");
     assert_eq!(
         rule.kind,
-        ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+        ConstraintKind::ForbidEdge {
+            from: "web".into(),
+            to: "services/api".into(),
+            transitive: false,
+            via: vec![]
+        }
     );
     assert_eq!(rule.categories, ["CALLS"]);
     assert_eq!(rule.source, "overlay");
@@ -370,13 +469,20 @@ origin = "human"
     let r = generate_one(&repo(tmp.path(), Some(overlay), None)).unwrap();
     assert_eq!(
         cell(&r, "project:web", cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:3","from":"web","from_raw":"web","id":"no-api","kind":"forbid_edge","origin":"llm","source":"overlay","to":"services/api","to_raw":"services/api","transitive":true,"via":["services/api/public"],"via_raw":["services/api/public"]}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:3","from":"web","from_raw":"web","id":"no-api","kind":"forbid_edge","origin":"llm","source":"overlay","to":"services/api","to_raw":"services/api","transitive":true,"via":["services/api/public"],"via_raw":["services/api/public"]}]"#
+        ]
     );
     assert_eq!(
         cell(&r, "project:services/api", cell_type::CONSTRAINT),
-        [r#"[{"decl":".glia/overlay.toml:11","id":"no-routes","kind":"invariant","min_tier":"fact","origin":"human","rule":"violation(x) :- node(x, \"ROUTE\").","scope":"services/api","scope_raw":"services/api","source":"overlay","text":"the api declares no route"}]"#]
+        [
+            r#"[{"decl":".glia/overlay.toml:11","id":"no-routes","kind":"invariant","min_tier":"fact","origin":"human","rule":"violation(x) :- node(x, \"ROUTE\").","scope":"services/api","scope_raw":"services/api","source":"overlay","text":"the api declares no route"}]"#
+        ]
     );
-    let rules: Vec<ConstraintRule> = all_of(&r, cell_type::CONSTRAINT).iter().flat_map(parse_constraints).collect();
+    let rules: Vec<ConstraintRule> = all_of(&r, cell_type::CONSTRAINT)
+        .iter()
+        .flat_map(parse_constraints)
+        .collect();
     let by_id = |id: &str| rules.iter().find(|x| x.id == id).cloned().unwrap();
     let forbid = by_id("no-api");
     assert_eq!(
@@ -403,7 +509,14 @@ origin = "human"
     let v1 = overlay.replacen("version = 2", "version = 1", 1);
     let loaded = glia_config::parse_str(&v1);
     assert_eq!(loaded.errors.len(), 2, "{:?}", loaded.errors);
-    assert!(loaded.errors.iter().all(|e| e.contains("need `version = 2`")), "{:?}", loaded.errors);
+    assert!(
+        loaded
+            .errors
+            .iter()
+            .all(|e| e.contains("need `version = 2`")),
+        "{:?}",
+        loaded.errors
+    );
     let tmp = tempfile::tempdir().unwrap();
     let r = generate_one(&repo(tmp.path(), Some(&v1), None)).unwrap();
     assert!(all_of(&r, cell_type::CONSTRAINT).is_empty());
@@ -419,7 +532,10 @@ fn sidecar_rule_is_rejected() {
         );
         let tmp = tempfile::tempdir().unwrap();
         let r = generate_one(&repo(tmp.path(), None, Some(&row))).unwrap();
-        assert!(all_of(&r, cell_type::CONSTRAINT).is_empty(), "source {source}: the rule row is not applied");
+        assert!(
+            all_of(&r, cell_type::CONSTRAINT).is_empty(),
+            "source {source}: the rule row is not applied"
+        );
     }
 }
 
@@ -432,7 +548,9 @@ fn api_and_overlay_entries_coexist() {
     let r = generate_one(&repo(tmp.path(), Some(OVERLAY), Some(row))).unwrap();
     assert_eq!(
         cell(&r, "services::api::app::charge", cell_type::DECISION),
-        [r#"[{"id":"zz","source":"api","title":"from the API"},{"decl":".glia/overlay.toml:12","id":"charge-idempotent","source":"overlay","status":"accepted","title":"charge() is idempotent on order id"}]"#]
+        [
+            r#"[{"id":"zz","source":"api","title":"from the API"},{"decl":".glia/overlay.toml:12","id":"charge-idempotent","source":"overlay","status":"accepted","title":"charge() is idempotent on order id"}]"#
+        ]
     );
 }
 
@@ -466,7 +584,11 @@ fn declared_changes_only_its_node_cells() {
             assert_eq!(na.id, nb.id);
             if na.cells != nb.cells {
                 changed += 1;
-                assert_eq!(na.cells[..nb.cells.len()], nb.cells[..], "declared cells are appended");
+                assert_eq!(
+                    na.cells[..nb.cells.len()],
+                    nb.cells[..],
+                    "declared cells are appended"
+                );
             }
         }
     }
@@ -510,7 +632,10 @@ to = \"api\"
         ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
         ("web/ui.py", "def render():\n    return 1\n"),
         ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
-        ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+        (
+            "services/api/app.py",
+            "def charge(order_id):\n    return order_id\n",
+        ),
         (".glia/overlay.toml", overlay),
     ] {
         std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
@@ -536,32 +661,85 @@ to = \"api\"
     nodes.sort_by_key(|(id, _, _)| id.0);
     let rules: Vec<(String, ConstraintRule)> = nodes
         .iter()
-        .flat_map(|(_, q, p)| parse_constraints(p).into_iter().map(move |rule| (q.clone(), rule)))
+        .flat_map(|(_, q, p)| {
+            parse_constraints(p)
+                .into_iter()
+                .map(move |rule| (q.clone(), rule))
+        })
         .collect();
     assert_eq!(rules.len(), 5, "{rules:#?}");
     let mut ids: Vec<&str> = rules.iter().map(|(_, x)| x.id.as_str()).collect();
     ids.sort_unstable();
-    assert_eq!(ids, ["component:api", "component:web", "layer:core", "layer:ui", "web-uses-api"]);
+    assert_eq!(
+        ids,
+        [
+            "component:api",
+            "component:web",
+            "layer:core",
+            "layer:ui",
+            "web-uses-api"
+        ]
+    );
     let mut kinds: Vec<&str> = rules.iter().map(|(_, x)| x.kind.name()).collect();
     kinds.sort_unstable();
     assert_eq!(kinds, ["allow", "component", "component", "layer", "layer"]);
-    let anchor = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(q, _)| q.as_str()).unwrap();
+    let anchor = |id: &str| {
+        rules
+            .iter()
+            .find(|(_, x)| x.id == id)
+            .map(|(q, _)| q.as_str())
+            .unwrap()
+    };
     assert_eq!(anchor("component:web"), "project:web");
-    assert_eq!(anchor("layer:ui"), "project:web", "a layer follows its first component");
-    assert_eq!(anchor("web-uses-api"), "project:web", "an allow follows its `from`");
+    assert_eq!(
+        anchor("layer:ui"),
+        "project:web",
+        "a layer follows its first component"
+    );
+    assert_eq!(
+        anchor("web-uses-api"),
+        "project:web",
+        "an allow follows its `from`"
+    );
     assert_eq!(anchor("component:api"), "project:services/api");
     assert_eq!(anchor("layer:core"), "project:services/api");
     // One node's rules keep their stored (source, id) order.
-    let on_web: Vec<&str> =
-        rules.iter().filter(|(q, _)| q == "project:web").map(|(_, x)| x.id.as_str()).collect();
+    let on_web: Vec<&str> = rules
+        .iter()
+        .filter(|(q, _)| q == "project:web")
+        .map(|(_, x)| x.id.as_str())
+        .collect();
     assert_eq!(on_web, ["component:web", "layer:ui", "web-uses-api"]);
-    let kind = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
-    assert_eq!(kind("component:api"), ConstraintKind::Component { name: "api".into(), paths: vec!["services/api".into()] });
+    let kind = |id: &str| {
+        rules
+            .iter()
+            .find(|(_, x)| x.id == id)
+            .map(|(_, x)| x.kind.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        kind("component:api"),
+        ConstraintKind::Component {
+            name: "api".into(),
+            paths: vec!["services/api".into()]
+        }
+    );
     assert_eq!(
         kind("layer:core"),
-        ConstraintKind::Layer { name: "core".into(), rank: 1, components: vec!["api".into()], strict: false }
+        ConstraintKind::Layer {
+            name: "core".into(),
+            rank: 1,
+            components: vec!["api".into()],
+            strict: false
+        }
     );
-    assert_eq!(kind("web-uses-api"), ConstraintKind::Allow { from: "web".into(), to: "api".into() });
+    assert_eq!(
+        kind("web-uses-api"),
+        ConstraintKind::Allow {
+            from: "web".into(),
+            to: "api".into()
+        }
+    );
 
     assert_eq!(
         cell(&r, "project:web", cell_type::CONSTRAINT),
@@ -601,7 +779,12 @@ fn dir_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -619,12 +802,18 @@ fn declared_builds_are_byte_identical() {
     let mut cache = ParseCache::new();
     generate_one_with_cache(&repo_s, &mut cache).unwrap();
     let warm = generate_one_with_cache(&repo_s, &mut cache).unwrap();
-    assert!(cache.stats.reused > 0, "the cached build must reuse its parse");
+    assert!(
+        cache.stats.reused > 0,
+        "the cached build must reuse its parse"
+    );
     write_merged_sharded(&warm.merged, &out("cached")).unwrap();
 
     let clean1 = dir_bytes(&out("clean1"));
     assert!(!clean1.is_empty());
     assert_eq!(clean1, dir_bytes(&out("clean2")), "clean vs clean");
     assert_eq!(clean1, dir_bytes(&out("cached")), "clean vs cached");
-    assert_eq!(cell(&warm, "services::api::app::charge", cell_type::DECISION).len(), 1);
+    assert_eq!(
+        cell(&warm, "services::api::app::charge", cell_type::DECISION).len(),
+        1
+    );
 }

@@ -79,7 +79,10 @@ pub fn parse(text: &str) -> Result<Query, Vec<Diagnostic>> {
     let tokens = match lexer::lex(0, SOURCE_NAME, text) {
         Ok(tokens) => tokens,
         Err(RulesError::Parse(diags)) => {
-            eprintln!("[gql] parse clauses=0 patterns=0 diagnostics={}", diags.len());
+            eprintln!(
+                "[gql] parse clauses=0 patterns=0 diagnostics={}",
+                diags.len()
+            );
             return Err(diags);
         }
         Err(other) => {
@@ -95,7 +98,10 @@ pub fn parse(text: &str) -> Result<Query, Vec<Diagnostic>> {
     let eof_span = tokens.last().map(|t| t.span).unwrap_or_default();
     let mut p = Parser {
         tokens,
-        eof: Token { kind: TokenKind::Eof, span: eof_span },
+        eof: Token {
+            kind: TokenKind::Eof,
+            span: eof_span,
+        },
         pos: 0,
         diags: Vec::new(),
         clauses: 0,
@@ -109,7 +115,11 @@ pub fn parse(text: &str) -> Result<Query, Vec<Diagnostic>> {
         p.patterns,
         p.diags.len()
     );
-    if p.diags.is_empty() { Ok(query) } else { Err(p.diags) }
+    if p.diags.is_empty() {
+        Ok(query)
+    } else {
+        Err(p.diags)
+    }
 }
 
 /// Where the query is in `match+ [WHERE] RETURN [ORDER BY] [LIMIT] [;]`.
@@ -190,7 +200,10 @@ impl Clause {
 /// relationship type and a property key may spell one (`(o:Order {limit: 1})`).
 fn reserved(word: &str) -> bool {
     Clause::of(word).is_some()
-        || REFUSED_CLAUSES.iter().chain(OPERATOR_WORDS.iter()).any(|k| word.eq_ignore_ascii_case(k))
+        || REFUSED_CLAUSES
+            .iter()
+            .chain(OPERATOR_WORDS.iter())
+            .any(|k| word.eq_ignore_ascii_case(k))
 }
 
 fn agg_op(word: &str) -> Option<AggOp> {
@@ -201,18 +214,27 @@ fn agg_op(word: &str) -> Option<AggOp> {
 
 /// The canonical name of a Cypher shortest-path function, refused by name.
 fn shortest_fn(word: &str) -> Option<&'static str> {
-    ["shortestPath", "allShortestPaths"].into_iter().find(|f| word.eq_ignore_ascii_case(f))
+    ["shortestPath", "allShortestPaths"]
+        .into_iter()
+        .find(|f| word.eq_ignore_ascii_case(f))
 }
 
 /// `a` .. `b` as one span (`a` starts it, `b` ends it).
 fn join(a: Span, b: Span) -> Span {
-    Span { end: b.end.max(a.end), ..a }
+    Span {
+        end: b.end.max(a.end),
+        ..a
+    }
 }
 
 /// The `-` of a greedy `:-` / `<-` token (`pair`, two ASCII bytes) through `int`:
 /// the span of the negative literal the hint reads it as.
 fn minus_through(pair: Span, int: Span) -> Span {
-    Span { start: pair.start + 1, col: pair.col + 1, ..join(pair, int) }
+    Span {
+        start: pair.start + 1,
+        col: pair.col + 1,
+        ..join(pair, int)
+    }
 }
 
 struct Parser {
@@ -271,7 +293,10 @@ impl Parser {
     }
 
     fn previous(&self) -> Option<&TokenKind> {
-        self.pos.checked_sub(1).and_then(|i| self.tokens.get(i)).map(|t| &t.kind)
+        self.pos
+            .checked_sub(1)
+            .and_then(|i| self.tokens.get(i))
+            .map(|t| &t.kind)
     }
 
     // ---- diagnostics -------------------------------------------------------
@@ -282,13 +307,18 @@ impl Parser {
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
         if !self.full() {
-            self.diags.push(Diagnostic::error(span, SOURCE_NAME, None, message));
+            self.diags
+                .push(Diagnostic::error(span, SOURCE_NAME, None, message));
         }
     }
 
     /// Refuse `name` at `span`, with an optional hint after a colon.
     fn refuse(&mut self, span: Span, name: &str, hint: &str) {
-        let tail = if hint.is_empty() { String::new() } else { format!(": {hint}") };
+        let tail = if hint.is_empty() {
+            String::new()
+        } else {
+            format!(": {hint}")
+        };
         self.error(span, format!("`{name}` {SUBSET}{tail}"));
     }
 
@@ -303,7 +333,10 @@ impl Parser {
                 }
                 _ => ("$".to_string(), t.span),
             };
-            self.error(span, format!("parameter `{name}` {SUBSET}: write the value as a literal"));
+            self.error(
+                span,
+                format!("parameter `{name}` {SUBSET}: write the value as a literal"),
+            );
         } else {
             let found = match &t.kind {
                 TokenKind::Eof => "end of input".to_string(),
@@ -315,19 +348,30 @@ impl Parser {
     }
 
     fn expect(&mut self, kind: TokenKind, what: &str) -> Option<Span> {
-        if self.at(&kind) { Some(self.bump()) } else { self.unexpected(what) }
+        if self.at(&kind) {
+            Some(self.bump())
+        } else {
+            self.unexpected(what)
+        }
     }
 
     fn ident(&mut self, what: &str) -> Option<Ident> {
         match self.kind().clone() {
-            TokenKind::Ident(name) => Some(Ident { name, span: self.bump() }),
+            TokenKind::Ident(name) => Some(Ident {
+                name,
+                span: self.bump(),
+            }),
             _ => self.unexpected(what),
         }
     }
 
     /// A variable or alias: an identifier that is not [`reserved`].
     fn var(&mut self, what: &str) -> Option<Ident> {
-        if self.word(0).is_some_and(reserved) { self.unexpected(what) } else { self.ident(what) }
+        if self.word(0).is_some_and(reserved) {
+            self.unexpected(what)
+        } else {
+            self.ident(what)
+        }
     }
 
     /// Is a variable (an unreserved identifier) at `ahead`?
@@ -341,7 +385,9 @@ impl Parser {
     /// spelling right after `.`, `:`, `|` or `(` is a key or label, one after AS is
     /// the (refused) alias, and `WITH` after STARTS / ENDS is the string test's.
     fn at_clause(&self) -> bool {
-        let Some(word) = self.word(0) else { return false };
+        let Some(word) = self.word(0) else {
+            return false;
+        };
         match self.previous() {
             Some(TokenKind::Dot | TokenKind::Colon | TokenKind::Pipe | TokenKind::LParen) => {
                 return false;
@@ -408,7 +454,10 @@ impl Parser {
                     let (next, in_order) = clause.step(stage);
                     if !in_order {
                         let span = self.tok(0).span;
-                        self.error(span, format!("`{}` is out of place: {SHAPE}", clause.name()));
+                        self.error(
+                            span,
+                            format!("`{}` is out of place: {SHAPE}", clause.name()),
+                        );
                     }
                     stage = stage.max(next);
                     self.clauses += 1;
@@ -443,7 +492,9 @@ impl Parser {
     /// MATCH of OPTIONAL MATCH, the DELETE of DETACH DELETE).
     fn refused_clause(&mut self) -> Option<&'static str> {
         let word = self.word(0)?;
-        let kw = REFUSED_CLAUSES.into_iter().find(|k| word.eq_ignore_ascii_case(k))?;
+        let kw = REFUSED_CLAUSES
+            .into_iter()
+            .find(|k| word.eq_ignore_ascii_case(k))?;
         let start = self.bump();
         let name = match kw {
             "OPTIONAL" if self.kw(0, "MATCH") => "OPTIONAL MATCH",
@@ -543,7 +594,11 @@ impl Parser {
         } else {
             None
         };
-        Some(ReturnItem { expr, alias, span: self.span_from(start) })
+        Some(ReturnItem {
+            expr,
+            alias,
+            span: self.span_from(start),
+        })
     }
 
     /// `count(*)`, `op([DISTINCT] operand)`; the cursor is on the name.
@@ -564,7 +619,12 @@ impl Parser {
             (distinct, Some(self.operand()?))
         };
         self.expect(TokenKind::RParen, "`)` to close the aggregate")?;
-        Some(Agg { op, distinct, arg, span: self.span_from(start) })
+        Some(Agg {
+            op,
+            distinct,
+            arg,
+            span: self.span_from(start),
+        })
     }
 
     fn order_key(&mut self) -> Option<OrderKey> {
@@ -581,7 +641,11 @@ impl Parser {
         let key = if self.at(&TokenKind::Dot) {
             self.bump();
             let key = self.ident("a property key after `.`")?;
-            Operand::Prop { span: join(var.span, key.span), var, key }
+            Operand::Prop {
+                span: join(var.span, key.span),
+                var,
+                key,
+            }
         } else {
             Operand::Var(var)
         };
@@ -589,7 +653,11 @@ impl Parser {
         if descending || self.kw(0, "ASC") {
             self.bump();
         }
-        Some(OrderKey { key, descending, span: self.span_from(start) })
+        Some(OrderKey {
+            key,
+            descending,
+            span: self.span_from(start),
+        })
     }
 
     // ---- patterns ----------------------------------------------------------
@@ -611,14 +679,22 @@ impl Parser {
                 .and_then(|w| RESTRICTORS.into_iter().find(|r| w.eq_ignore_ascii_case(r)))
             {
                 let span = self.bump();
-                self.refuse(span, r, "glia returns endpoint pairs under walk semantics (Q4)");
+                self.refuse(
+                    span,
+                    r,
+                    "glia returns endpoint pairs under walk semantics (Q4)",
+                );
             }
         }
         if let Some(f) = self.word(0).and_then(shortest_fn)
             && self.tok(1).kind == TokenKind::LParen
         {
             let span = self.tok(0).span;
-            self.refuse(span, &format!("{f}()"), "write `p = ANY SHORTEST (a)-[:T]->+(b)`");
+            self.refuse(
+                span,
+                &format!("{f}()"),
+                "write `p = ANY SHORTEST (a)-[:T]->+(b)`",
+            );
             return None;
         }
         let first = self.node()?;
@@ -629,7 +705,13 @@ impl Parser {
             steps.push((rel, node));
         }
         self.patterns += 1;
-        Some(PathPattern { var, shortest, start: first, steps, span: self.span_from(start) })
+        Some(PathPattern {
+            var,
+            shortest,
+            start: first,
+            steps,
+            span: self.span_from(start),
+        })
     }
 
     /// `ANY SHORTEST` (the one selector), or a refused / incomplete one.
@@ -664,7 +746,11 @@ impl Parser {
     fn node(&mut self) -> Option<NodePat> {
         let start = self.tok(0).span;
         self.expect(TokenKind::LParen, "`(` to start a node pattern")?;
-        let var = if self.at_var(0) { self.ident("a node variable") } else { None };
+        let var = if self.at_var(0) {
+            self.ident("a node variable")
+        } else {
+            None
+        };
         let labels = self.names("a label after `:`")?;
         let mut props = Vec::new();
         if self.at(&TokenKind::LBrace) {
@@ -679,7 +765,12 @@ impl Parser {
             self.expect(TokenKind::RBrace, "`,` or `}` in the property map")?;
         }
         self.expect(TokenKind::RParen, "`)` to close the node pattern")?;
-        Some(NodePat { var, labels, props, span: self.span_from(start) })
+        Some(NodePat {
+            var,
+            labels,
+            props,
+            span: self.span_from(start),
+        })
     }
 
     /// `[':' name ('|' name)*]`: labels or relationship types.
@@ -707,7 +798,13 @@ impl Parser {
                     dash,
                     format!("`:-` reads as one token here: write `{}: -{v}`", key.name),
                 );
-                return Some((key, Lit::Int { value: v.checked_neg().unwrap_or(v), span }));
+                return Some((
+                    key,
+                    Lit::Int {
+                        value: v.checked_neg().unwrap_or(v),
+                        span,
+                    },
+                ));
             }
             return self.unexpected("an integer after `:-`");
         }
@@ -742,7 +839,10 @@ impl Parser {
         };
         self.bump();
         let mut quant = inner;
-        if matches!(self.kind(), TokenKind::Plus | TokenKind::Star | TokenKind::LBrace) {
+        if matches!(
+            self.kind(),
+            TokenKind::Plus | TokenKind::Star | TokenKind::LBrace
+        ) {
             let outer = self.gquant()?;
             if !bracketed {
                 self.error(
@@ -762,17 +862,30 @@ impl Parser {
         if let Some(q) = quant {
             self.check_quant(q, &types);
         }
-        Some(RelPat { var, types, dir, quant, span: self.span_from(start) })
+        Some(RelPat {
+            var,
+            types,
+            dir,
+            quant,
+            span: self.span_from(start),
+        })
     }
 
     /// Cypher `*`, `*n`, `*m..`, `*..n`, `*m..n` inside the brackets.
     fn star_quant(&mut self) -> Option<Quant> {
         let start = self.bump();
-        let lo = if matches!(self.kind(), TokenKind::Int(_)) { Some(self.bound()?) } else { None };
+        let lo = if matches!(self.kind(), TokenKind::Int(_)) {
+            Some(self.bound()?)
+        } else {
+            None
+        };
         let (min, max) = if self.at(&TokenKind::DotDot) {
             self.bump();
-            let hi =
-                if matches!(self.kind(), TokenKind::Int(_)) { Some(self.bound()?) } else { None };
+            let hi = if matches!(self.kind(), TokenKind::Int(_)) {
+                Some(self.bound()?)
+            } else {
+                None
+            };
             (lo.unwrap_or(1), hi)
         } else {
             match lo {
@@ -780,7 +893,11 @@ impl Parser {
                 None => (1, None),
             }
         };
-        Some(Quant { min, max, span: self.span_from(start) })
+        Some(Quant {
+            min,
+            max,
+            span: self.span_from(start),
+        })
     }
 
     /// GQL `+`, `*`, `{m,n}`, `{m,}`, `{m}` after the closing arrow.
@@ -812,7 +929,11 @@ impl Parser {
                 (lo, hi)
             }
         };
-        Some(Quant { min, max, span: self.span_from(start) })
+        Some(Quant {
+            min,
+            max,
+            span: self.span_from(start),
+        })
     }
 
     fn bound(&mut self) -> Option<u32> {
@@ -833,7 +954,10 @@ impl Parser {
         match q.max {
             Some(max) if q.min > max => self.error(
                 q.span,
-                format!("the quantifier's lower bound {} exceeds its upper bound {max}", q.min),
+                format!(
+                    "the quantifier's lower bound {} exceeds its upper bound {max}",
+                    q.min
+                ),
             ),
             Some(0) if !types.is_empty() => {
                 let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
@@ -857,7 +981,10 @@ impl Parser {
         self.nesting += 1;
         let e = if self.nesting > MAX_NESTING {
             let span = self.tok(0).span;
-            self.error(span, format!("the condition nests deeper than {MAX_NESTING} levels"));
+            self.error(
+                span,
+                format!("the condition nests deeper than {MAX_NESTING} levels"),
+            );
             None
         } else {
             self.expr_inner(min_bp)
@@ -870,7 +997,10 @@ impl Parser {
         let mut left = if self.kw(0, "NOT") {
             let start = self.bump();
             let inner = self.expr(3)?;
-            Expr::Not { span: join(start, inner.span()), expr: Box::new(inner) }
+            Expr::Not {
+                span: join(start, inner.span()),
+                expr: Box::new(inner),
+            }
         } else {
             self.cmp()?
         };
@@ -890,9 +1020,17 @@ impl Parser {
             let span = join(left.span(), right.span());
             let (left_box, right_box) = (Box::new(left), Box::new(right));
             left = if bp == 1 {
-                Expr::Or { left: left_box, right: right_box, span }
+                Expr::Or {
+                    left: left_box,
+                    right: right_box,
+                    span,
+                }
             } else {
-                Expr::And { left: left_box, right: right_box, span }
+                Expr::And {
+                    left: left_box,
+                    right: right_box,
+                    span,
+                }
             };
         }
         Some(left)
@@ -910,7 +1048,11 @@ impl Parser {
         if self.at(&TokenKind::LParen) {
             if self.paren_is_pattern() {
                 let p = self.path_pattern(false)?;
-                return Some(Expr::Pattern { span: p.span, pattern: Box::new(p), exists: false });
+                return Some(Expr::Pattern {
+                    span: p.span,
+                    pattern: Box::new(p),
+                    exists: false,
+                });
             }
             self.bump();
             let e = self.expr(0)?;
@@ -923,9 +1065,15 @@ impl Parser {
             let p = self.path_pattern(false)?;
             self.expect(TokenKind::RBrace, "`}` to close EXISTS")?;
             let span = self.span_from(start);
-            return Some(Expr::Pattern { pattern: Box::new(p), exists: true, span });
+            return Some(Expr::Pattern {
+                pattern: Box::new(p),
+                exists: true,
+                span,
+            });
         }
-        if self.word(0).is_some_and(|w| !w.eq_ignore_ascii_case("type"))
+        if self
+            .word(0)
+            .is_some_and(|w| !w.eq_ignore_ascii_case("type"))
             && self.tok(1).kind == TokenKind::LParen
         {
             return self.call();
@@ -938,11 +1086,18 @@ impl Parser {
     fn call(&mut self) -> Option<Expr> {
         let name = self.ident("a function name")?;
         if let Some(f) = shortest_fn(&name.name) {
-            self.refuse(name.span, &format!("{f}()"), "write `p = ANY SHORTEST (a)-[:T]->+(b)`");
+            self.refuse(
+                name.span,
+                &format!("{f}()"),
+                "write `p = ANY SHORTEST (a)-[:T]->+(b)`",
+            );
             return None;
         }
         if let Some(op) = agg_op(&name.name) {
-            self.error(name.span, format!("aggregate `{}()` is allowed only in RETURN", op.name()));
+            self.error(
+                name.span,
+                format!("aggregate `{}()` is allowed only in RETURN", op.name()),
+            );
             return None;
         }
         self.bump();
@@ -965,7 +1120,9 @@ impl Parser {
                 | TokenKind::Le
                 | TokenKind::Gt
                 | TokenKind::Ge
-        ) || ["STARTS", "ENDS", "CONTAINS", "IN"].into_iter().any(|w| self.kw(0, w));
+        ) || ["STARTS", "ENDS", "CONTAINS", "IN"]
+            .into_iter()
+            .any(|w| self.kw(0, w));
         if compared {
             // `toUpper(a.x) = 'X'`: a call in WHERE is a condition, never a value.
             self.error(
@@ -978,7 +1135,11 @@ impl Parser {
             );
             return None;
         }
-        Some(Expr::Call { span: self.span_from(name.span), name, args })
+        Some(Expr::Call {
+            span: self.span_from(name.span),
+            name,
+            args,
+        })
     }
 
     /// The operator and right side after `left`.
@@ -996,7 +1157,12 @@ impl Parser {
         if let Some(op) = op {
             self.bump();
             let right = self.operand()?;
-            return Some(Expr::Cmp { op, left, right, span: self.span_from(start) });
+            return Some(Expr::Cmp {
+                op,
+                left,
+                right,
+                span: self.span_from(start),
+            });
         }
         let test = if self.kw(0, "STARTS") || self.kw(0, "ENDS") {
             let starts = self.kw(0, "STARTS");
@@ -1004,7 +1170,11 @@ impl Parser {
             if !self.kw(0, "WITH") {
                 return self.unexpected("WITH");
             }
-            Some(if starts { StrOp::StartsWith } else { StrOp::EndsWith })
+            Some(if starts {
+                StrOp::StartsWith
+            } else {
+                StrOp::EndsWith
+            })
         } else if self.kw(0, "CONTAINS") {
             Some(StrOp::Contains)
         } else {
@@ -1013,7 +1183,12 @@ impl Parser {
         if let Some(op) = test {
             self.bump();
             let right = self.operand()?;
-            return Some(Expr::StrTest { op, left, right, span: self.span_from(start) });
+            return Some(Expr::StrTest {
+                op,
+                left,
+                right,
+                span: self.span_from(start),
+            });
         }
         if self.kw(0, "IN") {
             self.bump();
@@ -1024,7 +1199,11 @@ impl Parser {
                 list.push(self.lit()?);
             }
             self.expect(TokenKind::RBracket, "`,` or `]` in the IN list")?;
-            return Some(Expr::In { left, list, span: self.span_from(start) });
+            return Some(Expr::In {
+                left,
+                list,
+                span: self.span_from(start),
+            });
         }
         // `a<-1` lexes `<-` as an arrow: hint the spacing, read it as `a < -1`.
         if let (TokenKind::LeftArrow, TokenKind::Int(v)) = (self.kind(), &self.tok(1).kind) {
@@ -1036,9 +1215,20 @@ impl Parser {
                 Operand::Var(v) => v.name.clone(),
                 _ => "x".to_string(),
             };
-            self.error(arrow, format!("`<-` reads as an arrow here: write `{shown} < -{v}`"));
-            let right = Operand::Lit(Lit::Int { value: v.checked_neg().unwrap_or(v), span });
-            return Some(Expr::Cmp { op: CmpOp::Lt, left, right, span: self.span_from(start) });
+            self.error(
+                arrow,
+                format!("`<-` reads as an arrow here: write `{shown} < -{v}`"),
+            );
+            let right = Operand::Lit(Lit::Int {
+                value: v.checked_neg().unwrap_or(v),
+                span,
+            });
+            return Some(Expr::Cmp {
+                op: CmpOp::Lt,
+                left,
+                right,
+                span: self.span_from(start),
+            });
         }
         self.unexpected(
             "a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, STARTS WITH, ENDS WITH, CONTAINS or IN)",
@@ -1073,7 +1263,10 @@ impl Parser {
                 self.bump();
                 let var = self.var("a relationship variable in type()")?;
                 self.expect(TokenKind::RParen, "`)` to close type()")?;
-                Some(Operand::Type { var, span: self.span_from(start) })
+                Some(Operand::Type {
+                    var,
+                    span: self.span_from(start),
+                })
             }
             TokenKind::LParen => {
                 let span = self.tok(0).span;
@@ -1083,8 +1276,10 @@ impl Parser {
                         &format!("{f}()"),
                         "write `p = ANY SHORTEST (a)-[:T]->+(b)`",
                     ),
-                    None => self
-                        .error(span, format!("function `{word}()` {SUBSET}: a value is {VALUE}")),
+                    None => self.error(
+                        span,
+                        format!("function `{word}()` {SUBSET}: a value is {VALUE}"),
+                    ),
                 }
                 None
             }
@@ -1092,7 +1287,11 @@ impl Parser {
                 let var = self.ident("a variable")?;
                 self.bump();
                 let key = self.ident("a property key after `.`")?;
-                Some(Operand::Prop { span: join(var.span, key.span), var, key })
+                Some(Operand::Prop {
+                    span: join(var.span, key.span),
+                    var,
+                    key,
+                })
             }
             _ => Some(Operand::Var(self.ident("a variable")?)),
         }
@@ -1111,7 +1310,9 @@ impl Parser {
             }
             TokenKind::Minus if matches!(self.tok(1).kind, TokenKind::Int(_)) => {
                 self.bump();
-                let TokenKind::Int(v) = *self.kind() else { return self.unexpected("an integer") };
+                let TokenKind::Int(v) = *self.kind() else {
+                    return self.unexpected("an integer");
+                };
                 let span = join(span, self.bump());
                 match v.checked_neg() {
                     Some(value) => Some(Lit::Int { value, span }),
@@ -1125,7 +1326,10 @@ impl Parser {
                 if w.eq_ignore_ascii_case("TRUE") || w.eq_ignore_ascii_case("FALSE") =>
             {
                 self.bump();
-                Some(Lit::Bool { value: w.eq_ignore_ascii_case("TRUE"), span })
+                Some(Lit::Bool {
+                    value: w.eq_ignore_ascii_case("TRUE"),
+                    span,
+                })
             }
             _ => self.unexpected("a literal (a string, an integer, TRUE or FALSE)"),
         }

@@ -138,8 +138,8 @@ impl Scratch {
     fn model_shop(name: &str) -> Self {
         let s = Scratch::plain(name);
         s.git(&["init", "-q"]);
-        let fixture =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/tests/data/model-breaks-shop");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/data/model-breaks-shop");
         let mut files = Vec::new();
         files_under(&fixture, &fixture, &mut files);
         for rel in &files {
@@ -150,7 +150,10 @@ impl Scratch {
         s.commit("v1");
         let order = s.top.join("api/internal/models/order.go");
         let text = std::fs::read_to_string(&order).expect("order.go");
-        assert!(text.contains("`json:\"customerName\"`"), "the fixture's tag");
+        assert!(
+            text.contains("`json:\"customerName\"`"),
+            "the fixture's tag"
+        );
         let renamed = text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1);
         std::fs::write(&order, renamed).expect("rename");
         s.commit("v2");
@@ -506,7 +509,12 @@ const MODEL_ROW: &str = "| http_model | `GET /api/orders/:id` (+2) | derived | j
 fn an_inferred_model_break_is_advisory_and_blocks_under_derived() {
     let s = Scratch::model_shop("model-breaks");
     let o = s.review(&["--base", "HEAD~1"]);
-    assert_eq!(o.status.code(), Some(0), "advisory: the gate passes\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "advisory: the gate passes\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     let headline = out.lines().nth(1).unwrap_or_default();
     assert!(
@@ -538,10 +546,19 @@ fn an_inferred_model_break_is_advisory_and_blocks_under_derived() {
         .lines()
         .position(|l| l.starts_with("[review] base="))
         .expect("the review marker");
-    assert!(model < review, "[model-breaks] comes before [review] base=\n{}", show(&o));
+    assert!(
+        model < review,
+        "[model-breaks] comes before [review] base=\n{}",
+        show(&o)
+    );
 
     let o = s.review(&["--base", "HEAD~1", "--models-min-tier", "derived"]);
-    assert_eq!(o.status.code(), Some(1), "derived: the break blocks\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "derived: the break blocks\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert!(out.contains("### Model breaks (blocking)"), "{}", show(&o));
     assert!(out.contains(MODEL_ROW), "{}", show(&o));
@@ -552,17 +569,38 @@ fn an_inferred_model_break_is_advisory_and_blocks_under_derived() {
     let o = s.review(&["--base", "HEAD~1", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", show(&o));
     // EB.7: HEAD~1..HEAD holds `v2`, the default title
-    assert_eq!(top_level_keys(&stdout(&o)), KEYS_WITH_INTENT, "{}", show(&o));
-    let v = json(&o);
-    assert_eq!((v["intent"]["title"].as_str(), v["intent"]["title_source"].as_str()), (Some("v2"), Some("commit")), "{v}");
     assert_eq!(
-        (v["model_breaks"][0]["pairing"].as_str(), v["counts"]["model_breaks"].as_u64(), v["blocking"].as_bool()),
+        top_level_keys(&stdout(&o)),
+        KEYS_WITH_INTENT,
+        "{}",
+        show(&o)
+    );
+    let v = json(&o);
+    assert_eq!(
+        (
+            v["intent"]["title"].as_str(),
+            v["intent"]["title_source"].as_str()
+        ),
+        (Some("v2"), Some("commit")),
+        "{v}"
+    );
+    assert_eq!(
+        (
+            v["model_breaks"][0]["pairing"].as_str(),
+            v["counts"]["model_breaks"].as_u64(),
+            v["blocking"].as_bool()
+        ),
         (Some("http_model"), Some(1), Some(false)),
         "{v}"
     );
 
     let o = s.review(&["--base", "HEAD~1", "--models-min-tier", "heuristic"]);
-    assert_eq!(o.status.code(), Some(2), "clap refuses the tier\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "clap refuses the tier\n{}",
+        show(&o)
+    );
     assert!(stderr(&o).contains("fact, derived"), "{}", show(&o));
     assert!(markers(&o).is_empty(), "nothing is built\n{}", show(&o));
 }
@@ -588,16 +626,27 @@ fn a_rules_caveats_print_once() {
     s.commit("rules");
     s.write("services/api/handlers.py", &format!("{HANDLERS}\n\ndef also_unused():\n    return 2\n\n\ndef third_unused():\n    return 3\n"));
     let o = s.review(&[]);
-    assert_eq!(o.status.code(), Some(1), "two new fact violations block\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "two new fact violations block\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert_eq!(
-        out.matches("#### api-called (rule, .glia/overlay.toml:3)").count(),
+        out.matches("#### api-called (rule, .glia/overlay.toml:3)")
+            .count(),
         2,
         "two violations of the rule\n{}",
         show(&o)
     );
     let paragraphs: Vec<&str> = out.split("\n\n").filter(|p| p.starts_with("⚠ ")).collect();
-    assert_eq!(paragraphs.len(), 1, "one caveat paragraph for the rule\n{}", show(&o));
+    assert_eq!(
+        paragraphs.len(),
+        1,
+        "one caveat paragraph for the rule\n{}",
+        show(&o)
+    );
     let lines = paragraphs[0].lines().count();
     let m = markers(&o);
     assert_eq!(m.len(), 3, "{}", show(&o));
@@ -644,11 +693,17 @@ fn ranking_flags_reach_the_impact() {
     let o = s.review(&["--no-cochange", "--ranking", "ppr-wide"]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
     assert!(
-        stderr(&o).lines().any(|l| l.starts_with("[rank] surface=review ranking=PT* ")),
+        stderr(&o)
+            .lines()
+            .any(|l| l.starts_with("[rank] surface=review ranking=PT* ")),
         "{}",
         show(&o)
     );
-    assert!(stdout(&o).starts_with("## glia review vs `HEAD`\n**1 new violation(s)**"), "{}", show(&o));
+    assert!(
+        stdout(&o).starts_with("## glia review vs `HEAD`\n**1 new violation(s)**"),
+        "{}",
+        show(&o)
+    );
     assert_eq!(base.status.code(), Some(1), "{}", show(&base));
     let bad = s.review(&["--ranking", "pagerank"]);
     assert_eq!(bad.status.code(), Some(2), "{}", show(&bad));
@@ -670,7 +725,12 @@ fn title_routes_its_ids_into_the_intent() {
     s.write("web/app.py", WEB_APP);
     let o = s.review(&["--json", "--title", "T007 charge hardening"]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
-    assert_eq!(top_level_keys(&stdout(&o)), KEYS_WITH_INTENT, "{}", show(&o));
+    assert_eq!(
+        top_level_keys(&stdout(&o)),
+        KEYS_WITH_INTENT,
+        "{}",
+        show(&o)
+    );
     let v = json(&o);
     assert_eq!(v["intent"]["title_source"], "arg", "{v}");
     assert_eq!(v["intent"]["fusion"], "LX[IDR,P1]", "{v}");
@@ -686,7 +746,12 @@ fn title_routes_its_ids_into_the_intent() {
             v["selection_intent"]["source"].as_str(),
             v["selection_intent"]["reason"].as_str()
         ),
-        (Some("SELt2"), Some("LX[IDR,P1]"), Some("fallback"), Some("absent")),
+        (
+            Some("SELt2"),
+            Some("LX[IDR,P1]"),
+            Some("fallback"),
+            Some("absent")
+        ),
         "{v}"
     );
     let err = stderr(&o);
@@ -697,13 +762,25 @@ fn title_routes_its_ids_into_the_intent() {
         "{}",
         show(&o)
     );
-    let review = err.lines().position(|l| l.starts_with("[review] base=")).expect("review marker");
+    let review = err
+        .lines()
+        .position(|l| l.starts_with("[review] base="))
+        .expect("review marker");
     let intent = err
         .lines()
-        .position(|l| l.starts_with("[review-intent] base=HEAD title_source=arg fusion=LX[IDR,P1] ids=1 idr_files=1 "))
+        .position(|l| {
+            l.starts_with(
+                "[review-intent] base=HEAD title_source=arg fusion=LX[IDR,P1] ids=1 idr_files=1 ",
+            )
+        })
         .unwrap_or_else(|| panic!("the intent marker\n{}", show(&o)));
     assert_eq!(intent, review + 1, "{}", show(&o));
-    assert!(err.lines().any(|l| l.starts_with("[idr] ") && l.contains(" surface=review ")), "{}", show(&o));
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[idr] ") && l.contains(" surface=review ")),
+        "{}",
+        show(&o)
+    );
 
     let md = s.review(&["--title", "T007 charge hardening"]);
     assert!(
@@ -717,7 +794,9 @@ fn title_routes_its_ids_into_the_intent() {
     let plain = s.review(&["--json"]);
     assert_eq!(top_level_keys(&stdout(&plain)), KEYS, "{}", show(&plain));
     assert!(
-        stderr(&plain).lines().any(|l| l.starts_with("[review-intent] base=HEAD title_source=none ")),
+        stderr(&plain)
+            .lines()
+            .any(|l| l.starts_with("[review-intent] base=HEAD title_source=none ")),
         "{}",
         show(&plain)
     );

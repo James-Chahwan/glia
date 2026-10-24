@@ -74,8 +74,7 @@ fn users_py_emits_class_methods_and_self_call() {
     let p = parse("myapp/users.py", "myapp::users");
 
     let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "myapp::users");
-    let class_id =
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "myapp::users::User");
+    let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "myapp::users::User");
     let login_id = NodeId::from_parts(
         GRAPH_TYPE,
         repo(),
@@ -147,7 +146,11 @@ fn auth_py_emits_function_and_records_imports() {
         .filter(|c| c.from == func_id)
         .map(|c| &c.qualifier)
         .collect();
-    assert_eq!(sites.len(), 3, "expected 3 unresolved calls, got: {sites:?}");
+    assert_eq!(
+        sites.len(),
+        3,
+        "expected 3 unresolved calls, got: {sites:?}"
+    );
 }
 
 #[test]

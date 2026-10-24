@@ -50,18 +50,18 @@
 //!   `<layout>/timeline.gmap` by `write_timeline`, read back by
 //!   `read_timeline` / `decode_timeline` (FS-free).
 
-mod error;
-mod container;
-mod code_section;
-mod layout;
-mod inspect;
 mod cells;
+mod code_section;
+mod container;
+mod error;
+mod inspect;
+mod layout;
 mod timeline;
 
-pub use error::*;
-pub use container::*;
-pub use code_section::*;
-pub use layout::*;
-pub use inspect::*;
 pub use cells::*;
+pub use code_section::*;
+pub use container::*;
+pub use error::*;
+pub use inspect::*;
+pub use layout::*;
 pub use timeline::*;

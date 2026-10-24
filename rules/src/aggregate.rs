@@ -82,7 +82,10 @@ impl<'a> Rows<'a> {
 }
 
 fn type_error(pred: &str, message: String) -> RulesError {
-    RulesError::Type { predicate: pred.to_string(), message }
+    RulesError::Type {
+        predicate: pred.to_string(),
+        message,
+    }
 }
 
 /// Evaluate `spec` over `bindings` (flat, `width` handles per binding, with one
@@ -101,8 +104,18 @@ pub(crate) fn aggregate(
     cmp: &mut dyn FnMut(&mut ValueTable, Handle, Handle) -> Ordering,
     pred: &str,
 ) -> Result<AggOutput, RulesError> {
-    check(spec, width, bindings.len(), levels.len(), heights.len(), pred)?;
-    let rows = Rows { data: &bindings, width };
+    check(
+        spec,
+        width,
+        bindings.len(),
+        levels.len(),
+        heights.len(),
+        pred,
+    )?;
+    let rows = Rows {
+        data: &bindings,
+        width,
+    };
 
     // (1) One derivation per projected row: sort by (row, level, height) and keep
     // the first of each run, the best level and its lowest height.
@@ -131,7 +144,16 @@ pub(crate) fn aggregate(
         // (3) Each op over the group's distinct tuples of its own columns.
         results.clear();
         for (op, cols) in &spec.ops {
-            results.push(apply(*op, cols, members, rows, values, cmp, &mut scratch, pred)?);
+            results.push(apply(
+                *op,
+                cols,
+                members,
+                rows,
+                values,
+                cmp,
+                &mut scratch,
+                pred,
+            )?);
         }
 
         // (4) The head row in head order, the weakest level and 1 + the max height.
@@ -141,7 +163,11 @@ pub(crate) fn aggregate(
                 OutCol::Agg(j) => results[j],
             });
         }
-        out.levels.push(members.iter().fold(Tier::Fact, |t, &i| t.weakest(levels[i])));
+        out.levels.push(
+            members
+                .iter()
+                .fold(Tier::Fact, |t, &i| t.weakest(levels[i])),
+        );
         let height = members.iter().map(|&i| heights[i]).max().unwrap_or(0);
         out.heights.push(height.saturating_add(1));
         start = end;
@@ -185,7 +211,11 @@ fn apply(
             Ok(values.intern(ValueRef::Int(total)))
         }
         (AggOp::Min | AggOp::Max, &[col]) => {
-            let wins = if op == AggOp::Min { Ordering::Less } else { Ordering::Greater };
+            let wins = if op == AggOp::Min {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
             let mut best = rows.get(members[0])[col];
             for &i in &members[1..] {
                 let h = rows.get(i)[col];
@@ -197,9 +227,10 @@ fn apply(
             Ok(best)
         }
         // `check` admits min / max / sum over exactly one column.
-        (AggOp::Min | AggOp::Max | AggOp::Sum, _) => {
-            Err(type_error(pred, format!("`{op}` takes one variable in `{pred}`")))
-        }
+        (AggOp::Min | AggOp::Max | AggOp::Sum, _) => Err(type_error(
+            pred,
+            format!("`{op}` takes one variable in `{pred}`"),
+        )),
     }
 }
 
@@ -239,10 +270,15 @@ fn check(
         ));
     }
     if spec.group > width {
-        return bad(format!("aggregate of `{pred}` groups by {} of {width} columns", spec.group));
+        return bad(format!(
+            "aggregate of `{pred}` groups by {} of {width} columns",
+            spec.group
+        ));
     }
     if spec.ops.is_empty() {
-        return bad(format!("aggregate of `{pred}` has no aggregate in its head"));
+        return bad(format!(
+            "aggregate of `{pred}` has no aggregate in its head"
+        ));
     }
     for (op, cols) in &spec.ops {
         match (op, cols.len()) {
@@ -264,7 +300,9 @@ fn check(
             OutCol::Agg(j) => j < spec.ops.len(),
         };
         if !fits {
-            return bad(format!("aggregate of `{pred}` names a head column it lacks: {col:?}"));
+            return bad(format!(
+                "aggregate of `{pred}` names a head column it lacks: {col:?}"
+            ));
         }
     }
     Ok(())
@@ -302,7 +340,11 @@ mod tests {
                 });
             }
         }
-        (b, rows.iter().map(|r| r.1).collect(), rows.iter().map(|r| r.2).collect())
+        (
+            b,
+            rows.iter().map(|r| r.1).collect(),
+            rows.iter().map(|r| r.2).collect(),
+        )
     }
 
     fn run(
@@ -381,11 +423,23 @@ mod tests {
         let mut t = ValueTable::new();
         let head = [OutCol::Group(0), OutCol::Agg(0), OutCol::Agg(1)];
         let s = spec(1, &[(AggOp::Min, &[1]), (AggOp::Max, &[1])], &head);
-        let rows: &[(&[&str], Tier, u32)] =
-            &[(&["g", "#2"], F, 0), (&["g", "#1"], F, 0), (&["g", "#3"], F, 0)];
+        let rows: &[(&[&str], Tier, u32)] = &[
+            (&["g", "#2"], F, 0),
+            (&["g", "#1"], F, 0),
+            (&["g", "#3"], F, 0),
+        ];
         let (b, l, h) = input(&mut t, rows);
-        let out = aggregate(b.clone(), 2, l.clone(), h.clone(), &s, &mut t, &mut by_handle, "w/2")
-            .expect("handle order");
+        let out = aggregate(
+            b.clone(),
+            2,
+            l.clone(),
+            h.clone(),
+            &s,
+            &mut t,
+            &mut by_handle,
+            "w/2",
+        )
+        .expect("handle order");
         // Interned 2, 1, 3: handle order ranks 2 first and 3 last.
         assert_eq!(text(&t, &out, 3), [["g", "#2", "#3"]]);
         let mut reversed = |_: &mut ValueTable, a: Handle, b: Handle| b.cmp(&a);
@@ -398,7 +452,11 @@ mod tests {
         // b's NodeId (100) is below a's (900) and b is interned first, yet a renders
         // first: the comparator, not the id or the handle, picks the winner.
         let render = |n: NodeId| {
-            if n.0 == 900 { "a::x".to_string() } else { "b::y".to_string() }
+            if n.0 == 900 {
+                "a::x".to_string()
+            } else {
+                "b::y".to_string()
+            }
         };
         let mut t = ValueTable::new();
         let g = t.intern(ValueRef::Str("g"));
@@ -425,8 +483,11 @@ mod tests {
     fn sum_checks() {
         let mut t = ValueTable::new();
         let s = spec(1, &[(AggOp::Sum, &[1])], &COUNT_HEAD);
-        let ok: &[(&[&str], Tier, u32)] =
-            &[(&["g", "#1"], F, 0), (&["g", "#2"], F, 0), (&["g", "#3"], F, 0)];
+        let ok: &[(&[&str], Tier, u32)] = &[
+            (&["g", "#1"], F, 0),
+            (&["g", "#2"], F, 0),
+            (&["g", "#3"], F, 0),
+        ];
         let out = run(&mut t, ok, &s).expect("sum");
         assert_eq!(text(&t, &out, 2), [["g", "#6"]]);
 
@@ -438,7 +499,10 @@ mod tests {
         assert_eq!(text(&t, &out, 2), [["g", "#3"]]);
 
         let mixed: &[(&[&str], Tier, u32)] = &[(&["g", "#1"], F, 0), (&["g", "x"], F, 0)];
-        assert_eq!(err_text(run(&mut t, mixed, &s)), "sum over a non-integer value in `w/2`");
+        assert_eq!(
+            err_text(run(&mut t, mixed, &s)),
+            "sum over a non-integer value in `w/2`"
+        );
 
         let mut t = ValueTable::new();
         let max = t.intern(ValueRef::Int(i64::MAX));
@@ -471,7 +535,10 @@ mod tests {
             (&["g3", "x1"], F, 0),
         ];
         let out = run(&mut t, rows, &s).expect("tiers");
-        assert_eq!(text(&t, &out, 2), [["g1", "#2"], ["g2", "#2"], ["g3", "#1"]]);
+        assert_eq!(
+            text(&t, &out, 2),
+            [["g1", "#2"], ["g2", "#2"], ["g3", "#1"]]
+        );
         assert_eq!(out.levels, [H, F, F]);
     }
 
@@ -499,9 +566,17 @@ mod tests {
     fn empty_input_no_rows() {
         let mut t = ValueTable::new();
         let s = spec(1, &[(AggOp::Count, &[1])], &COUNT_HEAD);
-        let out =
-            aggregate(Vec::new(), 2, Vec::new(), Vec::new(), &s, &mut t, &mut by_handle, "w/2")
-                .expect("empty");
+        let out = aggregate(
+            Vec::new(),
+            2,
+            Vec::new(),
+            Vec::new(),
+            &s,
+            &mut t,
+            &mut by_handle,
+            "w/2",
+        )
+        .expect("empty");
         assert_eq!(out, AggOutput::default());
         assert_eq!(t.len(), 0, "no count of 0 is interned");
     }
@@ -536,24 +611,50 @@ mod tests {
     fn spec_errors_name_the_predicate() {
         let mut t = ValueTable::new();
         let mut empty = |s: &AggSpec, width: usize| {
-            aggregate(Vec::new(), width, Vec::new(), Vec::new(), s, &mut t, &mut by_handle, "w/2")
+            aggregate(
+                Vec::new(),
+                width,
+                Vec::new(),
+                Vec::new(),
+                s,
+                &mut t,
+                &mut by_handle,
+                "w/2",
+            )
         };
         // sum(n, m) and count() parse and analyse; the operator rejects them, even
         // with no input.
         let two = spec(1, &[(AggOp::Sum, &[1, 2])], &COUNT_HEAD);
-        assert_eq!(err_text(empty(&two, 3)), "`sum` takes one variable, found 2 in `w/2`");
+        assert_eq!(
+            err_text(empty(&two, 3)),
+            "`sum` takes one variable, found 2 in `w/2`"
+        );
         let none = spec(1, &[(AggOp::Count, &[])], &COUNT_HEAD);
-        assert_eq!(err_text(empty(&none, 1)), "`count` takes at least one variable in `w/2`");
+        assert_eq!(
+            err_text(empty(&none, 1)),
+            "`count` takes at least one variable in `w/2`"
+        );
         let wide = spec(1, &[(AggOp::Max, &[2])], &COUNT_HEAD);
-        assert_eq!(err_text(empty(&wide, 2)), "aggregate of `w/2` reads column 2 of 2");
+        assert_eq!(
+            err_text(empty(&wide, 2)),
+            "aggregate of `w/2` reads column 2 of 2"
+        );
         let head = spec(1, &[(AggOp::Count, &[1])], &[OutCol::Group(1)]);
         assert_eq!(
             err_text(empty(&head, 2)),
             "aggregate of `w/2` names a head column it lacks: Group(1)"
         );
         let count = spec(1, &[(AggOp::Count, &[1])], &COUNT_HEAD);
-        let r =
-            aggregate(vec![0, 1, 2], 2, vec![F], vec![0], &count, &mut t, &mut by_handle, "w/2");
+        let r = aggregate(
+            vec![0, 1, 2],
+            2,
+            vec![F],
+            vec![0],
+            &count,
+            &mut t,
+            &mut by_handle,
+            "w/2",
+        );
         assert_eq!(
             err_text(r),
             "aggregate input for `w/2` is malformed: 3 values, 1 levels and 1 heights for rows of width 2"

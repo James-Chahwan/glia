@@ -756,9 +756,18 @@ fn try_judges_an_empty_scope_as_checking_nothing() {
         "from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)",
         "{t}"
     );
-    assert!(rule["fix"].as_str().is_some_and(|f| f.starts_with("check the spelling of `from`")), "{t}");
+    assert!(
+        rule["fix"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("check the spelling of `from`")),
+        "{t}"
+    );
     assert!(rule.get("error").is_none(), "{t}");
-    assert_eq!(t["rules"]["statuses"], serde_json::json!({"checks_nothing": 1}), "{t}");
+    assert_eq!(
+        t["rules"]["statuses"],
+        serde_json::json!({"checks_nothing": 1}),
+        "{t}"
+    );
     assert_eq!(t["rules"]["delta"]["errors"], serde_json::json!([]), "{t}");
     assert_eq!(t["rules"]["graph_verdict"], "drop", "{t}");
     assert_eq!(t["rules"]["rule_verdict"], "review", "{t}");

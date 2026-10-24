@@ -51,7 +51,10 @@ fn messages_only_proto_yields_located_message_types() {
     let qnames: Vec<&str> = found.iter().map(|(q, _, _)| q.as_str()).collect();
     assert_eq!(
         qnames,
-        vec!["message:proto:common.v1.Money", "message:proto:common.v1.Status"],
+        vec![
+            "message:proto:common.v1.Money",
+            "message:proto:common.v1.Status"
+        ],
         "a .proto with no service must still be parsed"
     );
     for (q, _, origin) in &found {

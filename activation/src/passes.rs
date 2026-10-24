@@ -103,7 +103,9 @@ impl<G: 'static, C: 'static> Copy for PassRegistry<G, C> {}
 
 impl<G: 'static, C: 'static> fmt::Debug for PassRegistry<G, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PassRegistry").field("specs", &self.specs).finish()
+        f.debug_struct("PassRegistry")
+            .field("specs", &self.specs)
+            .finish()
     }
 }
 
@@ -139,10 +141,16 @@ impl<G: 'static, C: 'static> PassRegistry<G, C> {
         let mut errors = Vec::new();
         for (i, spec) in order.iter().enumerate() {
             if spec.name.is_empty() {
-                errors.push(format!("pass #{i} ({:?} stage) has an empty name", spec.stage));
+                errors.push(format!(
+                    "pass #{i} ({:?} stage) has an empty name",
+                    spec.stage
+                ));
             }
             if order[..i].iter().any(|s| s.name == spec.name) {
-                errors.push(format!("pass name {:?} is declared more than once", spec.name));
+                errors.push(format!(
+                    "pass name {:?} is declared more than once",
+                    spec.name
+                ));
             }
             for dep in spec.after {
                 match order.iter().position(|s| s.name == *dep) {
@@ -161,7 +169,11 @@ impl<G: 'static, C: 'static> PassRegistry<G, C> {
                 }
             }
         }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Run every pass over `g` in [`Self::order`], handing each the build
@@ -245,7 +257,13 @@ mod tests {
         stage: Stage,
         after: &'static [&'static str],
     ) -> PassSpec<Log> {
-        PassSpec { name, stage, after, populates: &[], run: |_, _| {} }
+        PassSpec {
+            name,
+            stage,
+            after,
+            populates: &[],
+            run: |_, _| {},
+        }
     }
 
     fn names<G, C>(r: &PassRegistry<G, C>) -> Vec<&'static str> {
@@ -276,7 +294,10 @@ mod tests {
         ]);
         let errors = R.validate().unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(errors[0].contains("\"pair\" is declared more than once"), "{errors:?}");
+        assert!(
+            errors[0].contains("\"pair\" is declared more than once"),
+            "{errors:?}"
+        );
         assert!(errors[1].contains("empty name"), "{errors:?}");
     }
 
@@ -342,7 +363,11 @@ mod tests {
         let ctx: Ctx = vec!["zeta", "alpha", "mid"];
         let mut g: Log = Vec::new();
         let report = R.run(&mut g, &ctx);
-        assert_eq!(g, ["alpha", "mid", "zeta"], "every pass read the ctx; the finalize ran last");
+        assert_eq!(
+            g,
+            ["alpha", "mid", "zeta"],
+            "every pass read the ctx; the finalize ran last"
+        );
         assert_eq!(report.ran, ["copy_first", "copy_rest", "finalize"]);
         assert_eq!((report.resolve, report.post, report.finalize), (1, 1, 1));
         assert_eq!(R.specs()[2].populates, [CellTypeId(7)]);
@@ -374,7 +399,12 @@ mod tests {
         let (slowest, took) = report.slowest().expect("three passes ran");
         assert_eq!(slowest, "sleep");
         assert_eq!(took, post, "the stage's only pass");
-        assert_eq!(PassRegistry::<Log>::empty().run(&mut Vec::new(), &()).slowest(), None);
+        assert_eq!(
+            PassRegistry::<Log>::empty()
+                .run(&mut Vec::new(), &())
+                .slowest(),
+            None
+        );
     }
 
     #[test]

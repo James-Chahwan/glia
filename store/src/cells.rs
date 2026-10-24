@@ -207,7 +207,11 @@ impl CellWriteOutcome {
 /// that differ (`kind`, `file`, `body`, `local`; `no_identity` for a node
 /// with none). A rekeyed row keeps its own target and tier: the hint did the
 /// binding there. Ambiguous / orphaned / rejected rows have no node.
-fn hint_report(merged: &MergedGraph, t: &CellTarget, caller: Option<&str>) -> (Option<String>, Vec<String>) {
+fn hint_report(
+    merged: &MergedGraph,
+    t: &CellTarget,
+    caller: Option<&str>,
+) -> (Option<String>, Vec<String>) {
     let (id, bound) = match t {
         CellTarget::Bound(id) => (*id, true),
         CellTarget::Rekeyed { id, .. } => (*id, false),
@@ -246,7 +250,9 @@ fn differing_fields(own: &Identity, given: &Identity) -> Vec<String> {
 fn target_fields(t: &CellTarget) -> (String, Option<String>, Option<u64>) {
     match t {
         CellTarget::Bound(id) => ("bound".into(), None, Some(id.0)),
-        CellTarget::Rekeyed { id, tier } => ("rekeyed".into(), Some(tier.as_str().into()), Some(id.0)),
+        CellTarget::Rekeyed { id, tier } => {
+            ("rekeyed".into(), Some(tier.as_str().into()), Some(id.0))
+        }
         CellTarget::Ambiguous(id) => ("ambiguous".into(), None, Some(id.0)),
         CellTarget::Orphaned => ("orphaned".into(), None, None),
         CellTarget::Rejected(_) => ("rejected".into(), None, None),
@@ -335,8 +341,15 @@ pub fn write_cell(
     let entry = match (prepared.entry, &sidecar) {
         (Some(mut entry), Sidecar::Cells(_, rows)) => {
             if w.cell == cell_type::CONV && entry.get("id").is_none_or(Value::is_null) {
-                let source = entry.get("source").and_then(Value::as_str).unwrap_or_default().to_string();
-                entry.insert("id".into(), Value::String(next_conv_id(rows, &w.qname, &source)));
+                let source = entry
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                entry.insert(
+                    "id".into(),
+                    Value::String(next_conv_id(rows, &w.qname, &source)),
+                );
             }
             let entry = canonical(&Value::Object(entry));
             validate_entry(w.cell, &entry).map_err(invalid)?;
@@ -352,7 +365,10 @@ pub fn write_cell(
     let mut layout = Layout::open(repo_root, gmap_dir, repo);
     let (bound, hint, report) = match &mut layout.state {
         LayoutState::Fresh { merged, idx, .. } => {
-            let hint = w.hint.clone().or_else(|| hint_of(merged, idx, &w.qname, w.kind.as_deref()));
+            let hint = w
+                .hint
+                .clone()
+                .or_else(|| hint_of(merged, idx, &w.qname, w.kind.as_deref()));
             let target = apply_cell_write(merged, idx, &stored.clone().with_hint(hint.clone()))
                 .map_err(invalid)?;
             if let CellTarget::Rejected(e) = &target {
@@ -374,7 +390,11 @@ pub fn write_cell(
         cell: cell_name(w.cell).to_string(),
         kind: w.kind.clone(),
         hint,
-        entry_id: entry.as_ref().and_then(|e| e.get("id")).and_then(Value::as_str).map(str::to_string),
+        entry_id: entry
+            .as_ref()
+            .and_then(|e| e.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         entry,
         rows,
         target: PENDING.into(),
@@ -450,23 +470,37 @@ pub fn remove_cell_entry(
 /// instance of the node is changed. A payload that is not an entry array
 /// belongs to an extractor and is left alone. Returns where it bound; only
 /// `Bound` and `Rekeyed` changed anything.
-pub fn apply_cell_removal(merged: &mut MergedGraph, idx: &QnameIndex, r: &CellRemoval) -> CellTarget {
+pub fn apply_cell_removal(
+    merged: &mut MergedGraph,
+    idx: &QnameIndex,
+    r: &CellRemoval,
+) -> CellTarget {
     if !WRITABLE.contains(&r.cell) {
-        return CellTarget::Rejected(format!("cell type {} is not externally writable", cell_name(r.cell)));
+        return CellTarget::Rejected(format!(
+            "cell type {} is not externally writable",
+            cell_name(r.cell)
+        ));
     }
     let target = idx.resolve(&r.qname, r.kind.as_deref(), r.hint.as_deref());
     let id = match target {
         CellTarget::Bound(id) | CellTarget::Rekeyed { id, .. } => id,
         other => return other,
     };
-    for node in merged.graphs.iter_mut().flat_map(|g| g.nodes.iter_mut()).filter(|n| n.id == id) {
+    for node in merged
+        .graphs
+        .iter_mut()
+        .flat_map(|g| g.nodes.iter_mut())
+        .filter(|n| n.id == id)
+    {
         let Some(at) = node.cells.iter().position(|c| c.kind == r.cell) else {
             continue;
         };
         let keep = if r.cell == cell_type::VECTOR {
             None
         } else {
-            node.cells.get(at).and_then(|c| remove_entry(&c.payload, &r.source, &r.id))
+            node.cells
+                .get(at)
+                .and_then(|c| remove_entry(&c.payload, &r.source, &r.id))
         };
         match keep {
             Some(payload) => {
@@ -487,7 +521,12 @@ pub fn apply_cell_removal(merged: &mut MergedGraph, idx: &QnameIndex, r: &CellRe
 // ---------------------------------------------------------------------------
 
 enum LayoutState {
-    Fresh { dir: PathBuf, merged: Box<MergedGraph>, meta: LayoutMeta, idx: Box<QnameIndex> },
+    Fresh {
+        dir: PathBuf,
+        merged: Box<MergedGraph>,
+        meta: LayoutMeta,
+        idx: Box<QnameIndex>,
+    },
     Skip(WriteThrough),
 }
 
@@ -501,8 +540,12 @@ impl<'a> Layout<'a> {
     fn open(repo_root: &'a Path, gmap_dir: Option<&Path>, repo: Option<RepoId>) -> Self {
         let state = match gmap_dir {
             None => LayoutState::Skip(WriteThrough::NoGmap),
-            Some(dir) if !dir.join(MANIFEST_NAME).is_file() => LayoutState::Skip(WriteThrough::NoGmap),
-            Some(dir) if is_gmap_stale(dir, repo_root) => LayoutState::Skip(WriteThrough::GmapStale),
+            Some(dir) if !dir.join(MANIFEST_NAME).is_file() => {
+                LayoutState::Skip(WriteThrough::NoGmap)
+            }
+            Some(dir) if is_gmap_stale(dir, repo_root) => {
+                LayoutState::Skip(WriteThrough::GmapStale)
+            }
             Some(dir) => match read_merged_sharded_meta(dir) {
                 // A layout that reads fresh but cannot be decoded needs the
                 // rebuild its next load does.
@@ -517,7 +560,12 @@ impl<'a> Layout<'a> {
                         Some(scope) => {
                             let idx = Box::new(QnameIndex::build(&merged, scope));
                             let merged = Box::new(merged);
-                            LayoutState::Fresh { dir: dir.to_path_buf(), merged, meta, idx }
+                            LayoutState::Fresh {
+                                dir: dir.to_path_buf(),
+                                merged,
+                                meta,
+                                idx,
+                            }
                         }
                     }
                 }
@@ -531,7 +579,9 @@ impl<'a> Layout<'a> {
     fn finish(self, bound: Option<&CellTarget>) -> Result<WriteThrough, StoreError> {
         let (dir, merged, meta) = match self.state {
             LayoutState::Skip(w) => return Ok(w),
-            LayoutState::Fresh { dir, merged, meta, .. } => (dir, merged, meta),
+            LayoutState::Fresh {
+                dir, merged, meta, ..
+            } => (dir, merged, meta),
         };
         match bound {
             Some(CellTarget::Bound(_) | CellTarget::Rekeyed { .. } | CellTarget::Ambiguous(_)) => {}
@@ -559,7 +609,12 @@ fn repo_count(merged: &MergedGraph) -> usize {
 }
 
 /// The move-stable hint of the node `qname` binds to exactly.
-fn hint_of(merged: &MergedGraph, idx: &QnameIndex, qname: &str, kind: Option<&str>) -> Option<String> {
+fn hint_of(
+    merged: &MergedGraph,
+    idx: &QnameIndex,
+    qname: &str,
+    kind: Option<&str>,
+) -> Option<String> {
     let id: NodeId = match idx.resolve(qname, kind, None) {
         CellTarget::Bound(id) => id,
         _ => return None,
@@ -620,7 +675,11 @@ impl Sidecar {
                     b64: b64_encode(bytes),
                 });
             }
-            _ => return Err(invalid("the payload does not fit its sidecar file".to_string())),
+            _ => {
+                return Err(invalid(
+                    "the payload does not fit its sidecar file".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -630,7 +689,12 @@ impl Sidecar {
     fn take(&mut self, r: &CellRemoval) -> Option<(Option<String>, Option<String>, Option<Value>)> {
         match self {
             Sidecar::Cells(_, rows) => {
-                let key = (r.qname.clone(), cell_name(r.cell).to_string(), r.source.clone(), r.id.clone());
+                let key = (
+                    r.qname.clone(),
+                    cell_name(r.cell).to_string(),
+                    r.source.clone(),
+                    r.id.clone(),
+                );
                 let at = rows.iter().position(|x| row_key(x) == key)?;
                 let row = rows.remove(at);
                 Some((row.kind, row.hint, Some(row.entry)))
@@ -687,10 +751,12 @@ fn prepare(w: &CellWrite) -> Result<Prepared, StoreError> {
     let is_vector = w.cell == cell_type::VECTOR;
     match &w.payload {
         WritePayload::Entry(v) if !is_vector => {
-            let mut entry = v
-                .as_object()
-                .cloned()
-                .ok_or_else(|| invalid(format!("a {} entry must be a JSON object", cell_name(w.cell))))?;
+            let mut entry = v.as_object().cloned().ok_or_else(|| {
+                invalid(format!(
+                    "a {} entry must be a JSON object",
+                    cell_name(w.cell)
+                ))
+            })?;
             if entry.get("source").is_none_or(Value::is_null) {
                 entry.insert("source".into(), Value::String(ENTRY_SOURCES[0].into()));
             }
@@ -702,11 +768,17 @@ fn prepare(w: &CellWrite) -> Result<Prepared, StoreError> {
                     redacted += n;
                 }
             }
-            Ok(Prepared { entry: Some(entry), redacted })
+            Ok(Prepared {
+                entry: Some(entry),
+                redacted,
+            })
         }
         WritePayload::Vector { bytes, dims, .. } if is_vector => {
             check_vector(bytes, *dims).map_err(invalid)?;
-            Ok(Prepared { entry: None, redacted: 0 })
+            Ok(Prepared {
+                entry: None,
+                redacted: 0,
+            })
         }
         _ => Err(invalid(format!(
             "cell type {} does not take this payload: VECTOR takes bytes, CONSTRAINT / DECISION / CONV a JSON entry",
@@ -729,9 +801,16 @@ fn check_hint(h: &str, kind: Option<&str>) -> Result<(), StoreError> {
         .iter()
         .find(|(id, _)| *id == ident.kind)
         .map(|(_, n)| *n)
-        .ok_or_else(|| invalid(format!("hint {h:?} names node kind id {}, which is not registered", ident.kind.0)))?;
+        .ok_or_else(|| {
+            invalid(format!(
+                "hint {h:?} names node kind id {}, which is not registered",
+                ident.kind.0
+            ))
+        })?;
     match kind {
-        Some(k) if k != name => Err(invalid(format!("hint {h:?} names a {name} but kind is {k}"))),
+        Some(k) if k != name => Err(invalid(format!(
+            "hint {h:?} names a {name} but kind is {k}"
+        ))),
         _ => Ok(()),
     }
 }
@@ -754,8 +833,19 @@ fn next_conv_id(rows: &[CellRow], qname: &str, source: &str) -> String {
 
 /// `(qname, cell, source, id)`, the key a cell row is upserted and sorted by.
 fn row_key(r: &CellRow) -> (String, String, String, String) {
-    let field = |k: &str| r.entry.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    (r.qname.clone(), r.cell.clone(), field("source"), field("id"))
+    let field = |k: &str| {
+        r.entry
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    (
+        r.qname.clone(),
+        r.cell.clone(),
+        field("source"),
+        field("id"),
+    )
 }
 
 /// A sidecar's rows, refusing a file with unreadable lines: rewriting it would
@@ -773,7 +863,10 @@ fn readable_rows<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, 
 }
 
 fn cell_name(c: CellTypeId) -> &'static str {
-    cell_type::ALL.iter().find(|(id, _)| *id == c).map_or("?", |(_, n)| n)
+    cell_type::ALL
+        .iter()
+        .find(|(id, _)| *id == c)
+        .map_or("?", |(_, n)| n)
 }
 
 fn invalid(msg: String) -> StoreError {
@@ -832,7 +925,10 @@ impl CellsLock {
         }
         Err(StoreError::Io(io::Error::new(
             io::ErrorKind::WouldBlock,
-            format!("{} is held by another writer (retry, or remove it if no writer is running)", path.display()),
+            format!(
+                "{} is held by another writer (retry, or remove it if no writer is running)",
+                path.display()
+            ),
         )))
     }
 }
@@ -886,7 +982,10 @@ mod tests {
         assert!(!e["title"].as_str().unwrap().contains("sk_live_"));
         assert_eq!(e.get("text"), Some(&json!("plain")));
         let given = CellWrite::entry("a", cell_type::CONV, json!({"source": "adr", "text": "x"}));
-        assert_eq!(prepare(&given).unwrap().entry.unwrap().get("source"), Some(&json!("adr")));
+        assert_eq!(
+            prepare(&given).unwrap().entry.unwrap().get("source"),
+            Some(&json!("adr"))
+        );
     }
 
     #[test]
@@ -899,30 +998,56 @@ mod tests {
         let mut entry_on_vector = CellWrite::vector("a", vec![0; 4], None, None);
         entry_on_vector.payload = WritePayload::Entry(json!({}));
         assert!(msg(entry_on_vector).contains("VECTOR takes bytes"));
-        let kind = CellWrite::entry("a", cell_type::CONV, json!({"text": "x"})).with_kind(Some("NOPE".into()));
+        let kind = CellWrite::entry("a", cell_type::CONV, json!({"text": "x"}))
+            .with_kind(Some("NOPE".into()));
         assert!(msg(kind).contains("NOPE"));
     }
 
     #[test]
     fn prepare_refuses_a_hint_that_is_not_v1_or_contradicts_kind() {
         let msg = |w: CellWrite| prepare(&w).err().map(|e| e.to_string()).unwrap_or_default();
-        let conv = |hint: &str| CellWrite::entry("a", cell_type::CONV, json!({"text": "x"})).with_hint(Some(hint.into()));
+        let conv = |hint: &str| {
+            CellWrite::entry("a", cell_type::CONV, json!({"text": "x"}))
+                .with_hint(Some(hint.into()))
+        };
         assert!(msg(conv("a.py:1:0")).contains("is not a v1 identity hint"));
         assert!(msg(conv("v2|3|a.py|0000000000000000|f")).contains("is not a v1 identity hint"));
-        assert!(msg(conv("v1|999|a.py|0000000000000000|f")).contains("node kind id 999, which is not registered"));
+        assert!(
+            msg(conv("v1|999|a.py|0000000000000000|f"))
+                .contains("node kind id 999, which is not registered")
+        );
         let function = "v1|3|a.py|0000000000000000|f";
-        assert!(msg(conv(function).with_kind(Some("CLASS".into()))).contains("names a FUNCTION but kind is CLASS"));
+        assert!(
+            msg(conv(function).with_kind(Some("CLASS".into())))
+                .contains("names a FUNCTION but kind is CLASS")
+        );
         assert!(prepare(&conv(function)).is_ok());
         assert!(prepare(&conv(function).with_kind(Some("FUNCTION".into()))).is_ok());
     }
 
     #[test]
     fn differing_fields_come_in_hint_order() {
-        let own = Identity { kind: node_kind::FUNCTION, file: "a.py".into(), local: "f".into(), body: 0 };
+        let own = Identity {
+            kind: node_kind::FUNCTION,
+            file: "a.py".into(),
+            local: "f".into(),
+            body: 0,
+        };
         assert!(differing_fields(&own, &own).is_empty());
-        let given = Identity { kind: node_kind::CLASS, file: "b.py".into(), local: "g".into(), body: 7 };
-        assert_eq!(differing_fields(&own, &given), ["kind", "file", "body", "local"]);
-        let body = Identity { body: 7, ..own.clone() };
+        let given = Identity {
+            kind: node_kind::CLASS,
+            file: "b.py".into(),
+            local: "g".into(),
+            body: 7,
+        };
+        assert_eq!(
+            differing_fields(&own, &given),
+            ["kind", "file", "body", "local"]
+        );
+        let body = Identity {
+            body: 7,
+            ..own.clone()
+        };
         assert_eq!(differing_fields(&own, &body), ["body"]);
     }
 

@@ -15,33 +15,62 @@
 use std::collections::HashMap;
 
 use glia_activation::Direction;
+use glia_core::NodeId;
 use glia_engine::profile::CODE_PROFILE;
 use glia_engine::{
-    BlastAnswer, BlastOptions, blast_radius, entrypoint_reachable, generate_many, resolve_signal_located,
+    BlastAnswer, BlastOptions, blast_radius, entrypoint_reachable, generate_many,
+    resolve_signal_located,
 };
 use glia_graph::{MergedGraph, Reach};
-use glia_core::NodeId;
 
 fn fixture() -> MergedGraph {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/xstack-go-http");
+    let root = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bench/substrate-gap/fixtures/xstack-go-http"
+    );
     let repos = vec![format!("{root}/client"), format!("{root}/server")];
     generate_many(&repos).expect("xstack-go-http builds").merged
 }
 
 /// Every field a caller sees, the score as bits.
-type Row = (u64, String, &'static str, usize, u64, bool, Option<String>, Option<i64>);
+type Row = (
+    u64,
+    String,
+    &'static str,
+    usize,
+    u64,
+    bool,
+    Option<String>,
+    Option<i64>,
+);
 
 fn rows(answer: &[BlastAnswer]) -> Vec<Row> {
     answer
         .iter()
-        .map(|a| (a.id, a.qname.clone(), a.reason, a.depth, a.score.to_bits(), a.live, a.file.clone(), a.line))
+        .map(|a| {
+            (
+                a.id,
+                a.qname.clone(),
+                a.reason,
+                a.depth,
+                a.score.to_bits(),
+                a.live,
+                a.file.clone(),
+                a.line,
+            )
+        })
         .collect()
 }
 
 const SEED: &str = "GET /users";
 
 /// The rows of LD.5's `blast_radius` from [`SEED`] alone, which must resolve.
-fn blast(m: &MergedGraph, direction: Reach, top_k: Option<usize>, live_only: bool) -> Vec<BlastAnswer> {
+fn blast(
+    m: &MergedGraph,
+    direction: Reach,
+    top_k: Option<usize>,
+    live_only: bool,
+) -> Vec<BlastAnswer> {
     let mut opts = BlastOptions::default();
     opts.direction = direction;
     opts.top_k = top_k;
@@ -58,28 +87,50 @@ fn live_only_is_an_order_preserving_filter() {
         let all = blast(&m, dir, None, false);
         let live = blast(&m, dir, None, true);
         let expected: Vec<Row> = rows(&all).into_iter().filter(|r| r.5).collect();
-        assert_eq!(rows(&live), expected, "{dir:?}: live_only == the full answer's live rows, same order");
+        assert_eq!(
+            rows(&live),
+            expected,
+            "{dir:?}: live_only == the full answer's live rows, same order"
+        );
         // `top_k` still cuts after the filter: the first live row, not the
         // first row filtered afterwards.
         let one = blast(&m, dir, Some(1), true);
-        assert_eq!(rows(&one), expected.into_iter().take(1).collect::<Vec<_>>(), "{dir:?}: live + top_k 1");
+        assert_eq!(
+            rows(&one),
+            expected.into_iter().take(1).collect::<Vec<_>>(),
+            "{dir:?}: live + top_k 1"
+        );
     }
     // Both ways from the ROUTE: the client ENDPOINT, the chi handler and the
     // client function that calls the endpoint. Only the handler is reachable
     // from an entrypoint.
     let both = blast(&m, Reach::Both, None, false);
     let qnames: Vec<&str> = both.iter().map(|a| a.qname.as_str()).collect();
-    assert_eq!(qnames, ["endpoint:GET:/users", "main::listUsers", "client::FetchUsers"]);
+    assert_eq!(
+        qnames,
+        [
+            "endpoint:GET:/users",
+            "main::listUsers",
+            "client::FetchUsers"
+        ]
+    );
     let live = blast(&m, Reach::Both, None, true);
     let live_q: Vec<&str> = live.iter().map(|a| a.qname.as_str()).collect();
-    assert_eq!(live_q, ["main::listUsers"], "--live-only drops the two dead rows");
+    assert_eq!(
+        live_q,
+        ["main::listUsers"],
+        "--live-only drops the two dead rows"
+    );
 }
 
 /// The pre-LD.12c blast ranking: `activate()` over the whole graph, looked up
 /// per closure node, sorted by (score desc, id asc).
 fn legacy_blast_ranking(m: &MergedGraph, seed: NodeId, reach: Reach) -> Vec<(NodeId, u64)> {
-    let closure: Vec<NodeId> =
-        m.blast_radius(&[seed], reach, 4, &CODE_PROFILE.tables).iter().map(|h| h.id).collect();
+    let closure: Vec<NodeId> = m
+        .blast_radius(&[seed], reach, 4, &CODE_PROFILE.tables)
+        .iter()
+        .map(|h| h.id)
+        .collect();
     let mut config = CODE_PROFILE.tables.activation_config(None);
     config.direction = match reach {
         Reach::Forward => Direction::Forward,
@@ -88,18 +139,29 @@ fn legacy_blast_ranking(m: &MergedGraph, seed: NodeId, reach: Reach) -> Vec<(Nod
     };
     config.top_k = usize::MAX;
     let scores: HashMap<NodeId, f64> = m.activate(&[seed], &config).scores.into_iter().collect();
-    let mut ranked: Vec<(NodeId, f64)> =
-        closure.into_iter().map(|id| (id, scores.get(&id).copied().unwrap_or(0.0))).collect();
+    let mut ranked: Vec<(NodeId, f64)> = closure
+        .into_iter()
+        .map(|id| (id, scores.get(&id).copied().unwrap_or(0.0)))
+        .collect();
     ranked.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.0.cmp(&b.0.0))
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.0.cmp(&b.0.0))
     });
-    ranked.into_iter().map(|(id, s)| (id, s.to_bits())).collect()
+    ranked
+        .into_iter()
+        .map(|(id, s)| (id, s.to_bits()))
+        .collect()
 }
 
 #[test]
 fn blast_ranking_is_the_legacy_activate_lookup_bit_for_bit() {
     let m = fixture();
-    let seed = m.qnames_exact(SEED).first().copied().expect("the ROUTE's qname is `GET /users`");
+    let seed = m
+        .qnames_exact(SEED)
+        .first()
+        .copied()
+        .expect("the ROUTE's qname is `GET /users`");
     for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
         let plan: Vec<(NodeId, u64)> = m
             .blast_radius(&[seed], reach, 4, &CODE_PROFILE.tables)
@@ -117,7 +179,10 @@ fn resolve_scores_are_the_legacy_activate_lookup_bit_for_bit() {
     let m = fixture();
     let live = entrypoint_reachable(&m);
     for (signal, kind) in [
-        ("goroutine 1 [running]:\nmain.listUsers(...)\n\t/app/server/main.go:9 +0x1d\nclient.FetchUsers()\n\t/app/client/client.go:9 +0x2a", "stacktrace"),
+        (
+            "goroutine 1 [running]:\nmain.listUsers(...)\n\t/app/server/main.go:9 +0x1d\nclient.FetchUsers()\n\t/app/client/client.go:9 +0x2a",
+            "stacktrace",
+        ),
         ("server/main.go\nclient/client.go", "diff"),
     ] {
         let seeds = m.resolve_signal(signal, kind);
@@ -128,7 +193,13 @@ fn resolve_scores_are_the_legacy_activate_lookup_bit_for_bit() {
         let scores: HashMap<NodeId, f64> = m.activate(&seeds, &config).scores.into_iter().collect();
         let legacy: Vec<(u64, u64, bool)> = seeds
             .iter()
-            .map(|id| (id.0, scores.get(id).copied().unwrap_or(0.0).to_bits(), live.contains(id)))
+            .map(|id| {
+                (
+                    id.0,
+                    scores.get(id).copied().unwrap_or(0.0).to_bits(),
+                    live.contains(id),
+                )
+            })
             .collect();
         let got: Vec<(u64, u64, bool)> = resolve_signal_located(&m, signal, kind, None, None)
             .results
@@ -137,8 +208,15 @@ fn resolve_scores_are_the_legacy_activate_lookup_bit_for_bit() {
             .collect();
         assert_eq!(got, legacy, "{kind}: resolution order and scores unchanged");
         // top_k keeps the resolution-order prefix.
-        let one: Vec<u64> =
-            resolve_signal_located(&m, signal, kind, Some(1), None).results.iter().map(|r| r.id).collect();
-        assert_eq!(one, vec![seeds[0].0], "{kind}: top_k 1 is the first resolved seed");
+        let one: Vec<u64> = resolve_signal_located(&m, signal, kind, Some(1), None)
+            .results
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            one,
+            vec![seeds[0].0],
+            "{kind}: top_k 1 is the first resolved seed"
+        );
     }
 }

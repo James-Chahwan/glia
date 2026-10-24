@@ -19,15 +19,13 @@ use glia_store::{
 };
 
 /// A second domain's navigation state, defined here and nowhere in the store.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct ToySection {
     frames: Vec<(u64, u32)>,
 }
 
 /// A second, differently-shaped section, so a file carries two.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct NoteSection {
     text: String,
 }
@@ -49,8 +47,14 @@ fn toy_core() -> Container {
     let repo = RepoId::from_canonical("toy://clip-1");
     let mut header = Header::new("toy");
     header.node_kind_registry = vec![
-        RegistryEntry { id: TOY_KIND_FRAME.0, name: "FRAME".into() },
-        RegistryEntry { id: TOY_KIND_CLIP.0, name: "CLIP".into() },
+        RegistryEntry {
+            id: TOY_KIND_FRAME.0,
+            name: "FRAME".into(),
+        },
+        RegistryEntry {
+            id: TOY_KIND_CLIP.0,
+            name: "CLIP".into(),
+        },
     ];
     Container {
         header,
@@ -68,7 +72,9 @@ fn toy_core() -> Container {
 }
 
 fn toy_section() -> ToySection {
-    ToySection { frames: vec![(0, 7), (40, 9), (80, 11)] }
+    ToySection {
+        frames: vec![(0, 7), (40, 9), (80, 11)],
+    }
 }
 
 fn write_toy(dir: &Path, sections: &[EncodedSection]) -> PathBuf {
@@ -108,7 +114,11 @@ fn toy_domain_section_round_trips() {
     assert!(code_section_of(&m).unwrap().is_none());
     assert_eq!(qname_of(&m, NodeId(10)).unwrap(), None);
     assert_eq!(
-        m.section_names().unwrap().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        m.section_names()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
         vec!["toy"]
     );
 
@@ -117,7 +127,11 @@ fn toy_domain_section_round_trips() {
     assert_eq!(archived.kind(NodeId(20)), Some(TOY_KIND_FRAME));
     assert_eq!(archived.kind(NodeId(30)), Some(TOY_KIND_FRAME));
     assert_eq!(archived.kind(NodeId(99)), None);
-    let ids: Vec<u64> = archived.node_kinds.iter().map(|e| e.0.0.to_native()).collect();
+    let ids: Vec<u64> = archived
+        .node_kinds
+        .iter()
+        .map(|e| e.0.0.to_native())
+        .collect();
     assert_eq!(ids, vec![10, 20, 30], "node_kinds is written sorted by id");
 
     // The owned read-back carries the core and the section bytes verbatim.
@@ -135,7 +149,13 @@ fn toy_domain_section_round_trips() {
 #[test]
 fn sections_are_16_aligned() {
     let tmp = tempfile::tempdir().unwrap();
-    let toy = encode_section("toy", &ToySection { frames: vec![(1, 1)] }).unwrap();
+    let toy = encode_section(
+        "toy",
+        &ToySection {
+            frames: vec![(1, 1)],
+        },
+    )
+    .unwrap();
     let note = encode_section("note", &NoteSection { text: "abc".into() }).unwrap();
     let (toy_bytes, note_bytes) = (toy.bytes.to_vec(), note.bytes.to_vec());
     let path = tmp.path().join("two.gmap");
@@ -149,8 +169,16 @@ fn sections_are_16_aligned() {
     let raw = std::fs::read(&path).unwrap();
     let core_offset = le_u64(&raw, 16);
     let core_len = le_u64(&raw, 24);
-    assert_eq!(core_offset % 16, 0, "core offset {core_offset} not 16-aligned");
-    assert_eq!(core_offset + core_len, raw.len() as u64, "the core is the file's tail");
+    assert_eq!(
+        core_offset % 16,
+        0,
+        "core offset {core_offset} not 16-aligned"
+    );
+    assert_eq!(
+        core_offset + core_len,
+        raw.len() as u64,
+        "the core is the file's tail"
+    );
 
     let m = MmapContainer::open(&path).unwrap();
     let table = &m.archived().unwrap().sections;
@@ -158,14 +186,33 @@ fn sections_are_16_aligned() {
     let mut prev_end = 32u64;
     for (entry, owned) in table.iter().zip(&core.sections) {
         let (offset, len) = (entry.offset.to_native(), entry.len.to_native());
-        assert_eq!(offset % 16, 0, "section {} offset {offset} not 16-aligned", entry.name);
-        assert!(offset >= prev_end, "section {} overlaps its predecessor", entry.name);
-        assert!(offset + len <= core_offset, "section {} runs into the core", entry.name);
+        assert_eq!(
+            offset % 16,
+            0,
+            "section {} offset {offset} not 16-aligned",
+            entry.name
+        );
+        assert!(
+            offset >= prev_end,
+            "section {} overlaps its predecessor",
+            entry.name
+        );
+        assert!(
+            offset + len <= core_offset,
+            "section {} runs into the core",
+            entry.name
+        );
         assert_eq!((offset, len), (owned.offset, owned.len));
         prev_end = offset + len;
     }
-    assert_eq!(m.section_bytes("toy").unwrap().unwrap(), toy_bytes.as_slice());
-    assert_eq!(m.section_bytes("note").unwrap().unwrap(), note_bytes.as_slice());
+    assert_eq!(
+        m.section_bytes("toy").unwrap().unwrap(),
+        toy_bytes.as_slice()
+    );
+    assert_eq!(
+        m.section_bytes("note").unwrap().unwrap(),
+        note_bytes.as_slice()
+    );
     let note = m.section::<ArchivedNoteSection>("note").unwrap().unwrap();
     assert_eq!(note.text.as_str(), "abc");
     assert!(m.section_bytes("absent").unwrap().is_none());
@@ -173,7 +220,13 @@ fn sections_are_16_aligned() {
     // Deterministic: the same core and sections encode to the same bytes.
     let again = tmp.path().join("again.gmap");
     let mut core2 = toy_core();
-    let toy2 = encode_section("toy", &ToySection { frames: vec![(1, 1)] }).unwrap();
+    let toy2 = encode_section(
+        "toy",
+        &ToySection {
+            frames: vec![(1, 1)],
+        },
+    )
+    .unwrap();
     let note2 = encode_section("note", &NoteSection { text: "abc".into() }).unwrap();
     write_container(&again, &mut core2, &[toy2, note2]).unwrap();
     assert_eq!(std::fs::read(&again).unwrap(), raw);
@@ -190,14 +243,23 @@ fn duplicate_section_names_are_rejected() {
         Err(StoreError::Corrupt { detail }) => assert!(detail.contains("toy"), "{detail}"),
         other => panic!("duplicate section name: expected Corrupt, got {other:?}"),
     }
-    assert!(!path.exists(), "nothing is written when the table is invalid");
+    assert!(
+        !path.exists(),
+        "nothing is written when the table is invalid"
+    );
 }
 
 #[test]
 fn upsert_cell_preserves_sections() {
     let tmp = tempfile::tempdir().unwrap();
     let toy = encode_section("toy", &toy_section()).unwrap();
-    let note = encode_section("note", &NoteSection { text: "keep me".into() }).unwrap();
+    let note = encode_section(
+        "note",
+        &NoteSection {
+            text: "keep me".into(),
+        },
+    )
+    .unwrap();
     let path = write_toy(tmp.path(), &[toy, note]);
     let (toy_before, note_before) = {
         let m = MmapContainer::open(&path).unwrap();
@@ -207,21 +269,47 @@ fn upsert_cell_preserves_sections() {
         )
     };
 
-    upsert_cell(&path, NodeId(20), CellTypeId(1), CellPayload::Text("frame 20".into())).unwrap();
+    upsert_cell(
+        &path,
+        NodeId(20),
+        CellTypeId(1),
+        CellPayload::Text("frame 20".into()),
+    )
+    .unwrap();
     {
         let m = MmapContainer::open(&path).unwrap();
         let archived = m.archived().unwrap();
-        let node = archived.nodes.iter().find(|n| n.id.0.to_native() == 20).unwrap();
+        let node = archived
+            .nodes
+            .iter()
+            .find(|n| n.id.0.to_native() == 20)
+            .unwrap();
         assert_eq!(node.cells.len(), 1, "the upsert landed");
-        assert_eq!(m.section_bytes("toy").unwrap().unwrap(), toy_before.as_slice());
-        assert_eq!(m.section_bytes("note").unwrap().unwrap(), note_before.as_slice());
-        assert_eq!(archived.kind(NodeId(20)), Some(TOY_KIND_FRAME), "node_kinds survive");
+        assert_eq!(
+            m.section_bytes("toy").unwrap().unwrap(),
+            toy_before.as_slice()
+        );
+        assert_eq!(
+            m.section_bytes("note").unwrap().unwrap(),
+            note_before.as_slice()
+        );
+        assert_eq!(
+            archived.kind(NodeId(20)),
+            Some(TOY_KIND_FRAME),
+            "node_kinds survive"
+        );
     }
 
     assert!(remove_cell(&path, NodeId(20), CellTypeId(1)).unwrap());
     let m = MmapContainer::open(&path).unwrap();
-    assert_eq!(m.section_bytes("toy").unwrap().unwrap(), toy_before.as_slice());
-    assert_eq!(m.section_bytes("note").unwrap().unwrap(), note_before.as_slice());
+    assert_eq!(
+        m.section_bytes("toy").unwrap().unwrap(),
+        toy_before.as_slice()
+    );
+    assert_eq!(
+        m.section_bytes("note").unwrap().unwrap(),
+        note_before.as_slice()
+    );
     let toy = m.section::<ArchivedToySection>("toy").unwrap().unwrap();
     assert_eq!(toy.frames.len(), 3);
 }
@@ -254,31 +342,54 @@ fn build_backend() -> RepoGraph {
 #[test]
 fn code_round_trip_unchanged() {
     let g = build_backend();
-    assert!(!g.nodes.is_empty() && !g.edges.is_empty(), "fixture built an empty graph");
-    assert!(!g.nav.parent_of.is_empty(), "fixture has no containment to round-trip");
-    assert!(!g.symbols.module_by_qname.is_empty(), "fixture has no symbols to round-trip");
+    assert!(
+        !g.nodes.is_empty() && !g.edges.is_empty(),
+        "fixture built an empty graph"
+    );
+    assert!(
+        !g.nav.parent_of.is_empty(),
+        "fixture has no containment to round-trip"
+    );
+    assert!(
+        !g.symbols.module_by_qname.is_empty(),
+        "fixture has no symbols to round-trip"
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("backend.gmap");
     let bytes = encode_repo_graph(&g).unwrap();
     std::fs::write(&path, &bytes).unwrap();
-    assert_eq!(bytes, encode_repo_graph(&g).unwrap(), "encoding is deterministic");
+    assert_eq!(
+        bytes,
+        encode_repo_graph(&g).unwrap(),
+        "encoding is deterministic"
+    );
 
     // CD.7b: the Go backend's edges carry EVIDENCE, stored interned against a
     // "strings" section written after the code section.
     let evidence = glia_code_domain::cell_type::EVIDENCE;
-    assert!(g.edges.iter().any(|e| e.cell(evidence).is_some()), "fixture edges carry no EVIDENCE");
+    assert!(
+        g.edges.iter().any(|e| e.cell(evidence).is_some()),
+        "fixture edges carry no EVIDENCE"
+    );
     assert!(
         !bytes.windows(12).any(|w| w == br#"{"emitter":""#),
         "an EVIDENCE cell was written as JSON"
     );
     let m = MmapContainer::open(&path).unwrap();
     assert_eq!(
-        m.section_names().unwrap().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        m.section_names()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
         vec![CODE_SECTION, STRINGS_SECTION]
     );
     assert_eq!(m.archived().unwrap().header.graph_type.as_str(), "code");
-    assert_eq!(m.archived().unwrap().node_kinds.len(), g.nav.kind_by_id.len());
+    assert_eq!(
+        m.archived().unwrap().node_kinds.len(),
+        g.nav.kind_by_id.len()
+    );
 
     let back = decode_repo_graph(&m).unwrap();
     assert_eq!(back.repo, g.repo);
@@ -292,14 +403,20 @@ fn code_round_trip_unchanged() {
     assert_eq!(back.symbols.module_by_qname, g.symbols.module_by_qname);
     assert_eq!(back.symbols.module_symbols, g.symbols.module_symbols);
     assert_eq!(back.symbols.class_methods, g.symbols.class_methods);
-    assert_eq!(back.symbols.module_import_bindings, g.symbols.module_import_bindings);
+    assert_eq!(
+        back.symbols.module_import_bindings,
+        g.symbols.module_import_bindings
+    );
     assert_eq!(back.unresolved_calls, g.unresolved_calls);
     assert_eq!(back.unresolved_refs, g.unresolved_refs);
 
     // Point lookups: the qname reads the code section, the kind reads the core.
     let (&id, qname) = g.nav.qname_by_id.iter().next().unwrap();
     assert_eq!(qname_of(&m, id).unwrap().as_deref(), Some(qname.as_str()));
-    assert_eq!(m.archived().unwrap().kind(id), g.nav.kind_by_id.get(&id).copied());
+    assert_eq!(
+        m.archived().unwrap().kind(id),
+        g.nav.kind_by_id.get(&id).copied()
+    );
 }
 
 #[test]

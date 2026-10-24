@@ -48,7 +48,10 @@ impl Scratch {
     }
 
     fn repo_str(&self) -> String {
-        self.repo().to_str().expect("utf-8 scratch path").to_string()
+        self.repo()
+            .to_str()
+            .expect("utf-8 scratch path")
+            .to_string()
     }
 
     fn stderr_path(&self) -> PathBuf {
@@ -97,7 +100,11 @@ impl Watch {
                 }
             }
         });
-        Watch { child, stdin, lines: rx }
+        Watch {
+            child,
+            stdin,
+            lines: rx,
+        }
     }
 
     /// The next stdout line as JSON, within [`TIMEOUT`].
@@ -165,7 +172,14 @@ fn streams_an_update_and_persists_on_eof() {
     let s = Scratch::new("eof");
     let mut w = Watch::spawn(
         &s,
-        &["--poll-ms", "20", "--debounce-ms", "20", "--persist-every", "0"],
+        &[
+            "--poll-ms",
+            "20",
+            "--debounce-ms",
+            "20",
+            "--persist-every",
+            "0",
+        ],
     );
     ready(&mut w, &s);
     // Written beside the repo and renamed in, so no scan can see a.py
@@ -192,7 +206,9 @@ fn streams_an_update_and_persists_on_eof() {
     }
     let nodes = u["nodes"].as_array().expect("nodes rows");
     assert!(
-        nodes.iter().any(|n| n["change"] == "modified" && n["qname"] == "a::foo"),
+        nodes
+            .iter()
+            .any(|n| n["change"] == "modified" && n["qname"] == "a::foo"),
         "a modified row for foo: {u}"
     );
     // Not persisted yet: --persist-every 0 writes only on exit.
@@ -217,13 +233,21 @@ fn streams_an_update_and_persists_on_eof() {
     // (`graph2` sits at the same depth, so the manifest's relative root
     // matches).
     let watched = layout_bytes(&layout);
-    assert!(watched.contains_key("manifest.json"), "{:?}", watched.keys());
+    assert!(
+        watched.contains_key("manifest.json"),
+        "{:?}",
+        watched.keys()
+    );
     let out = Command::new(env!("CARGO_BIN_EXE_glia"))
         .args(["build", &s.repo_str(), "--out"])
         .arg(s.repo().join(".glia/graph2"))
         .output()
         .expect("run glia build");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let built = layout_bytes(&s.repo().join(".glia/graph2"));
     assert_eq!(
         watched.keys().collect::<Vec<_>>(),
@@ -275,11 +299,17 @@ fn persists_on_the_interval() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(w.child.try_wait().expect("try_wait").is_none(), "still running");
+    assert!(
+        w.child.try_wait().expect("try_wait").is_none(),
+        "still running"
+    );
     drop(w.stdin.take());
     assert_eq!(w.wait(&s), 0, "stderr:\n{}", s.stderr());
     let err = s.stderr();
-    assert!(err.contains("[watch] persisted seq=0 reason=interval"), "{err}");
+    assert!(
+        err.contains("[watch] persisted seq=0 reason=interval"),
+        "{err}"
+    );
     assert!(err.contains("[watch] persisted seq=0 reason=exit"), "{err}");
 }
 

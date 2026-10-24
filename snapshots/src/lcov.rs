@@ -61,7 +61,11 @@ pub(crate) fn merge(records: Vec<LcovFileRecord>) -> Vec<LcovFileRecord> {
     }
     by_sf
         .into_iter()
-        .map(|(sf, (rel, lines))| LcovFileRecord { sf, rel, lines: lines.into_iter().map(|(l, h)| [l, h]).collect() })
+        .map(|(sf, (rel, lines))| LcovFileRecord {
+            sf,
+            rel,
+            lines: lines.into_iter().map(|(l, h)| [l, h]).collect(),
+        })
         .collect()
 }
 
@@ -69,19 +73,32 @@ pub(crate) fn merge(records: Vec<LcovFileRecord>) -> Vec<LcovFileRecord> {
 /// `u32::MAX`. A negative, empty or non-numeric field is not a DA line.
 fn parse_da(da: &str) -> Option<(u32, u32)> {
     let mut fields = da.split(',');
-    let line = fields.next()?.trim().parse::<u32>().ok().filter(|&l| l > 0)?;
+    let line = fields
+        .next()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|&l| l > 0)?;
     let hits = fields.next()?.trim();
     if hits.is_empty() || !hits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let hits = hits.parse::<u64>().map_or(u32::MAX, |h| u32::try_from(h).unwrap_or(u32::MAX));
+    let hits = hits
+        .parse::<u64>()
+        .map_or(u32::MAX, |h| u32::try_from(h).unwrap_or(u32::MAX));
     Some((line, hits))
 }
 
 /// The repo root as `/`-terminated prefixes: canonical first, then as given.
 fn root_prefixes(repo_root: &Path) -> Vec<String> {
     let mut roots = Vec::new();
-    for root in [std::fs::canonicalize(repo_root).ok(), Some(repo_root.to_path_buf())].into_iter().flatten() {
+    for root in [
+        std::fs::canonicalize(repo_root).ok(),
+        Some(repo_root.to_path_buf()),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let mut s = root.to_string_lossy().replace('\\', "/");
         if !s.ends_with('/') {
             s.push('/');
@@ -100,7 +117,12 @@ fn rel_path(sf: &str, roots: &[String]) -> Option<String> {
         let rel = norm.trim_start_matches("./");
         return (!rel.is_empty() && !rel.starts_with("../")).then(|| rel.to_string());
     }
-    let strip = |path: &str| roots.iter().find_map(|root| path.strip_prefix(root.as_str())).map(str::to_string);
+    let strip = |path: &str| {
+        roots
+            .iter()
+            .find_map(|root| path.strip_prefix(root.as_str()))
+            .map(str::to_string)
+    };
     strip(&norm).or_else(|| {
         let canonical = std::fs::canonicalize(sf).ok()?;
         strip(&canonical.to_string_lossy().replace('\\', "/"))
@@ -117,7 +139,11 @@ mod tests {
                     SF:b.py\nDA:x,1\nDA:3,-1\nDA:0,1\nend_of_record\n";
         let rows = parse_lcov(text, Path::new("/nowhere"));
         assert_eq!(rows[0].lines, vec![[1, u32::MAX], [2, 4]]);
-        assert!(rows[1].lines.is_empty(), "malformed DA lines are skipped: {:?}", rows[1]);
+        assert!(
+            rows[1].lines.is_empty(),
+            "malformed DA lines are skipped: {:?}",
+            rows[1]
+        );
         let merged = merge(vec![rows[0].clone(), rows[0].clone()]);
         assert_eq!(merged[0].lines, vec![[1, u32::MAX], [2, 8]]);
     }
@@ -127,7 +153,14 @@ mod tests {
         let roots = root_prefixes(Path::new("/ci/work/repo"));
         assert_eq!(rel_path("/usr/lib/python3/x.py", &roots), None);
         assert_eq!(rel_path("../other/x.py", &roots), None);
-        assert_eq!(rel_path("./api/app.py", &roots).as_deref(), Some("api/app.py"));
-        assert_eq!(rel_path("/ci/work/repository/x.py", &roots), None, "a sibling that shares the prefix");
+        assert_eq!(
+            rel_path("./api/app.py", &roots).as_deref(),
+            Some("api/app.py")
+        );
+        assert_eq!(
+            rel_path("/ci/work/repository/x.py", &roots),
+            None,
+            "a sibling that shares the prefix"
+        );
     }
 }

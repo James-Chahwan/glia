@@ -97,20 +97,39 @@ fn v6_constants_and_layout() {
         EdgeKind::Returns,
     ];
     for (i, kind) in older.iter().enumerate() {
-        assert_eq!(bincode::serialize(kind).unwrap(), le32(&[i as u32]), "{kind:?}");
+        assert_eq!(
+            bincode::serialize(kind).unwrap(),
+            le32(&[i as u32]),
+            "{kind:?}"
+        );
     }
-    assert_eq!(bincode::serialize(&EdgeKind::Documents).unwrap(), vec![12, 0, 0, 0]);
+    assert_eq!(
+        bincode::serialize(&EdgeKind::Documents).unwrap(),
+        vec![12, 0, 0, 0]
+    );
     let back: EdgeKind = bincode::deserialize(&[12, 0, 0, 0]).unwrap();
     assert_eq!(back, EdgeKind::Documents);
 
     // SpanRef: five u32 LE in declaration order, 20 bytes.
-    let span = SpanRef { file: 1, start: 2, end: 3, start_line: 4, end_line: 5 };
+    let span = SpanRef {
+        file: 1,
+        start: 2,
+        end: 3,
+        start_line: 4,
+        end_line: 5,
+    };
     let bytes = bincode::serialize(&span).unwrap();
     assert_eq!(bytes.len(), 20);
     assert_eq!(bytes, le32(&[1, 2, 3, 4, 5]));
     assert_eq!(
         SpanRef::bytes(7, 10, 20),
-        SpanRef { file: 7, start: 10, end: 20, start_line: 0, end_line: 0 }
+        SpanRef {
+            file: 7,
+            start: 10,
+            end: 20,
+            start_line: 0,
+            end_line: 0
+        }
     );
     assert_eq!(SpanRef::NONE, SpanRef::bytes(0, 0, 0));
 
@@ -123,12 +142,21 @@ fn v6_constants_and_layout() {
 fn proposition_span_round_trips() {
     let anchored = Content::Proposition {
         text: "Orders are placed through the order service.".to_string(),
-        span: Some(SpanRef { file: 2, start: 0, end: 57, start_line: 1, end_line: 3 }),
+        span: Some(SpanRef {
+            file: 2,
+            start: 0,
+            end: 57,
+            start_line: 1,
+            end_line: 3,
+        }),
     };
     let unanchored = Content::proposition("Call OrderService.place with a sku.");
     assert_eq!(
         unanchored,
-        Content::Proposition { text: "Call OrderService.place with a sku.".to_string(), span: None }
+        Content::Proposition {
+            text: "Call OrderService.place with a sku.".to_string(),
+            span: None
+        }
     );
     for c in [&anchored, &unanchored] {
         let bytes = bincode::serialize(c).unwrap();
@@ -138,8 +166,14 @@ fn proposition_span_round_trips() {
         assert_eq!(&back, c);
     }
     // The anchor is not part of the fact's identity or its encodable text.
-    assert_eq!(content_key(&anchored), "Orders are placed through the order service.");
-    assert_eq!(encodable_text(&anchored), "Orders are placed through the order service.");
+    assert_eq!(
+        content_key(&anchored),
+        "Orders are placed through the order service."
+    );
+    assert_eq!(
+        encodable_text(&anchored),
+        "Orders are placed through the order service."
+    );
 }
 
 #[test]
@@ -148,13 +182,22 @@ fn gmap_diff_round_trips_and_leads_with_version() {
         "svc::orders::OrderService::place",
         Content::Symbol {
             name: "place".to_string(),
-            span: SpanRef { file: 3, start: 76, end: 167, start_line: 7, end_line: 9 },
+            span: SpanRef {
+                file: 3,
+                start: 76,
+                end: 167,
+                start_line: 7,
+                end_line: 9,
+            },
             qname: Some("svc::orders::OrderService::place".to_string()),
             doc: Some("Place one order.".to_string()),
             imports: Some(vec!["json".to_string()]),
         },
     );
-    let section = node("docs::README::placing-orders", Content::proposition("Placing orders"));
+    let section = node(
+        "docs::README::placing-orders",
+        Content::proposition("Placing orders"),
+    );
     let diff = GmapDiff {
         format_version: GMAP_FORMAT_VERSION,
         base_digest: content_digest(b"base"),
@@ -178,7 +221,10 @@ fn gmap_diff_round_trips_and_leads_with_version() {
             to: "svc::orders::OrderService::cancel".to_string(),
             weight: Some(1.0),
         }],
-        files: BTreeMap::from([(2, "docs/README.md".to_string()), (3, "svc/orders.py".to_string())]),
+        files: BTreeMap::from([
+            (2, "docs/README.md".to_string()),
+            (3, "svc/orders.py".to_string()),
+        ]),
     };
     let bytes = bincode::serialize(&diff).unwrap();
     // First field on purpose, as in Gmap: a reader gates on it before decoding the rest.
@@ -188,13 +234,19 @@ fn gmap_diff_round_trips_and_leads_with_version() {
     assert_eq!(back.base_digest, content_digest(b"base"));
     assert_eq!(back.target_digest, content_digest(b"target"));
     assert_eq!(back.removed, vec!["docs::README::orders".to_string()]);
-    assert_eq!(back.modified[0].prior_key, "api::orders::OrderService::place");
+    assert_eq!(
+        back.modified[0].prior_key,
+        "api::orders::OrderService::place"
+    );
     assert!(back.modified[0].location_only);
     assert_eq!(back.modified[0].node.content, diff.modified[0].node.content);
     assert_eq!(back.added[0].content, diff.added[0].content);
     assert_eq!(back.edges_added[0].kind, EdgeKind::Documents);
     assert_eq!(back.edges_removed[0].kind, EdgeKind::Contains);
-    assert_eq!(back.files.get(&3).map(String::as_str), Some("svc/orders.py"));
+    assert_eq!(
+        back.files.get(&3).map(String::as_str),
+        Some("svc/orders.py")
+    );
 }
 
 /// A fresh scratch repo for one test, removed on drop.
@@ -247,7 +299,10 @@ fn export_bytes_are_deterministic() {
     // The files map is written in id order, which is sorted-path order.
     let (gmap, _, _) = build_gmap(&result.merged, &repo, &opts);
     let paths: Vec<&str> = gmap.files.values().map(String::as_str).collect();
-    assert_eq!(paths, ["contracts/Vault.sol", "docs/README.md", "svc/orders.py"]);
+    assert_eq!(
+        paths,
+        ["contracts/Vault.sol", "docs/README.md", "svc/orders.py"]
+    );
 
     // The written file is those bytes, and stats.digest addresses them.
     let out = scratch.0.join("fx.engram-gmap");

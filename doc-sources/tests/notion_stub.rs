@@ -105,7 +105,10 @@ fn block(kind: &str, body: Value) -> Value {
 fn order_blocks(line: &str) -> Canned {
     list(
         vec![
-            block("heading_2", json!({ "rich_text": [span("Orders", false)], "is_toggleable": false })),
+            block(
+                "heading_2",
+                json!({ "rich_text": [span("Orders", false)], "is_toggleable": false }),
+            ),
             block(
                 "paragraph",
                 json!({ "rich_text": [span(line, false), span("OrderService.place", true)] }),
@@ -120,10 +123,25 @@ fn order_blocks(line: &str) -> Canned {
 }
 
 fn assert_headers(req: &Recorded) {
-    assert_eq!(req.header("notion-version"), Some(NOTION_VERSION), "{}", req.target);
+    assert_eq!(
+        req.header("notion-version"),
+        Some(NOTION_VERSION),
+        "{}",
+        req.target
+    );
     assert_eq!(req.header("notion-version"), Some("2025-09-03"));
-    assert_eq!(req.header("authorization"), Some("Bearer secret_t"), "{}", req.target);
-    assert_eq!(req.header("content-type"), Some("application/json"), "{}", req.target);
+    assert_eq!(
+        req.header("authorization"),
+        Some("Bearer secret_t"),
+        "{}",
+        req.target
+    );
+    assert_eq!(
+        req.header("content-type"),
+        Some("application/json"),
+        "{}",
+        req.target
+    );
 }
 
 fn body(req: &Recorded) -> Value {
@@ -135,8 +153,14 @@ fn pulls_a_database() {
     // B is listed first but created later: pages come back in created order.
     let stub = StubServer::start(vec![
         database(&["ds1"]),
-        list(vec![page(PAGE_B, "Shipping", "2026-09-02T00:00:00.000Z")], Some("c2")),
-        list(vec![page(PAGE_A, "Order Flow", "2026-09-01T00:00:00.000Z")], None),
+        list(
+            vec![page(PAGE_B, "Shipping", "2026-09-02T00:00:00.000Z")],
+            Some("c2"),
+        ),
+        list(
+            vec![page(PAGE_A, "Order Flow", "2026-09-01T00:00:00.000Z")],
+            None,
+        ),
         order_blocks("Calls "),
         order_blocks("Ships after "),
     ])
@@ -147,15 +171,30 @@ fn pulls_a_database() {
 
     assert_eq!(seen.len(), 5);
     seen.iter().for_each(assert_headers);
-    assert_eq!((seen[0].method.as_str(), seen[0].target.as_str()), ("GET", "/v1/databases/db1"));
+    assert_eq!(
+        (seen[0].method.as_str(), seen[0].target.as_str()),
+        ("GET", "/v1/databases/db1")
+    );
     for req in &seen[1..3] {
-        assert_eq!((req.method.as_str(), req.target.as_str()), ("POST", "/v1/data_sources/ds1/query"));
+        assert_eq!(
+            (req.method.as_str(), req.target.as_str()),
+            ("POST", "/v1/data_sources/ds1/query")
+        );
     }
     assert_eq!(body(&seen[1]), json!({ "page_size": 100 }));
-    assert_eq!(body(&seen[2]), json!({ "page_size": 100, "start_cursor": "c2" }));
+    assert_eq!(
+        body(&seen[2]),
+        json!({ "page_size": 100, "start_cursor": "c2" })
+    );
     assert_eq!(seen[3].method, "GET");
-    assert_eq!(seen[3].target, format!("/v1/blocks/{PAGE_A}/children?page_size=100"));
-    assert_eq!(seen[4].target, format!("/v1/blocks/{PAGE_B}/children?page_size=100"));
+    assert_eq!(
+        seen[3].target,
+        format!("/v1/blocks/{PAGE_A}/children?page_size=100")
+    );
+    assert_eq!(
+        seen[4].target,
+        format!("/v1/blocks/{PAGE_B}/children?page_size=100")
+    );
 
     assert_eq!(
         stats,
@@ -183,15 +222,27 @@ fn pulls_a_database() {
     assert_eq!(first.kind, DocSourceKind::Notion);
     assert_eq!(first.container, "db1");
     assert_eq!(first.title, "Order Flow");
-    assert_eq!(first.url, format!("https://www.notion.so/{}", PAGE_A.replace('-', "")));
+    assert_eq!(
+        first.url,
+        format!("https://www.notion.so/{}", PAGE_A.replace('-', ""))
+    );
     assert_eq!(first.version, "2026-09-20T10:00:00.000Z");
     assert_eq!(pages[1].title, "Shipping");
 
     let (record, redacted) = record_from_page(first);
     assert_eq!(redacted, 0);
     assert_eq!(record.rel_path, "notion/db1/order-flow.md");
-    for needle in ["# Order Flow\n", "## Orders", "Calls `OrderService.place`", "```python\nsvc.place(order)\n```"] {
-        assert!(record.text.contains(needle), "{needle:?} missing from\n{}", record.text);
+    for needle in [
+        "# Order Flow\n",
+        "## Orders",
+        "Calls `OrderService.place`",
+        "```python\nsvc.place(order)\n```",
+    ] {
+        assert!(
+            record.text.contains(needle),
+            "{needle:?} missing from\n{}",
+            record.text
+        );
     }
 }
 
@@ -218,22 +269,41 @@ fn unsupported_blocks_are_counted() {
     let (pages, stats) = pulled.expect("pull succeeds");
 
     assert_eq!(seen.len(), 3, "no blocks are read for the trashed page");
-    assert_eq!(body(&seen[1]), json!({ "page_size": 10 }), "a pull capped below 100 asks for no more");
+    assert_eq!(
+        body(&seen[1]),
+        json!({ "page_size": 10 }),
+        "a pull capped below 100 asks for no more"
+    );
     // CE.4f: the image renders as a link; table_of_contents carries no
     // content and is dropped; `unsupported` (Notion's own type for a block
     // the API cannot serve) is still counted.
     assert_eq!(
-        stats.unsupported.iter().map(|(k, v)| (k.as_str(), *v)).collect::<Vec<_>>(),
+        stats
+            .unsupported
+            .iter()
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect::<Vec<_>>(),
         [("unsupported", 1)]
     );
     assert_eq!((stats.unsupported_total(), stats.dropped), (1, 1));
-    assert_eq!((stats.fetched, stats.pages, stats.skipped_archived, stats.blocks), (2, 1, 1, 4));
+    assert_eq!(
+        (
+            stats.fetched,
+            stats.pages,
+            stats.skipped_archived,
+            stats.blocks
+        ),
+        (2, 1, 1, 4)
+    );
     assert_eq!(
         stats.unsupported_marker().as_deref(),
         Some("[docs] notion unsupported unsupported=1")
     );
     let (record, _) = record_from_page(&pages[0]);
-    assert_eq!(record.text, "# Guide\n\nRead `Guide`\n\n[a.png](https://img.example/a.png)\n");
+    assert_eq!(
+        record.text,
+        "# Guide\n\nRead `Guide`\n\n[a.png](https://img.example/a.png)\n"
+    );
 }
 
 #[test]
@@ -265,7 +335,10 @@ fn errors_hide_the_token() {
         .err()
         .expect("a 400 fails");
     stub.finish();
-    assert!(err.starts_with("400: validation_error - ") && !err.contains(TOKEN), "{err}");
+    assert!(
+        err.starts_with("400: validation_error - ") && !err.contains(TOKEN),
+        "{err}"
+    );
 }
 
 #[test]
@@ -273,26 +346,45 @@ fn remote_plain_http_refused() {
     let err = Config::resolve(Some(TOKEN.into()), Some("http://notion.example".into()))
         .err()
         .unwrap_or_default();
-    assert!(err.starts_with("refusing plain http:// to non-loopback host notion.example"), "{err}");
+    assert!(
+        err.starts_with("refusing plain http:// to non-loopback host notion.example"),
+        "{err}"
+    );
     assert!(!err.contains(TOKEN));
 
     // A hand-built Config is refused by the pull itself, before any request.
-    let cfg = Config { token: TOKEN.into(), origin: "http://notion.example".into() };
-    let err = notion::pull_database(&cfg, "db1", 10).err().unwrap_or_default();
+    let cfg = Config {
+        token: TOKEN.into(),
+        origin: "http://notion.example".into(),
+    };
+    let err = notion::pull_database(&cfg, "db1", 10)
+        .err()
+        .unwrap_or_default();
     assert!(err.starts_with("refusing plain http://"), "{err}");
 
     // An origin carries no path; the database id no path segment.
     assert!(Config::resolve(Some(TOKEN.into()), Some("https://api.notion.com/v1".into())).is_err());
-    let cfg = Config { token: TOKEN.into(), origin: "https://api.notion.com".into() };
-    let err = notion::pull_database(&cfg, "../v1/users", 10).err().unwrap_or_default();
-    assert!(err.starts_with("--database takes a Notion database id"), "{err}");
+    let cfg = Config {
+        token: TOKEN.into(),
+        origin: "https://api.notion.com".into(),
+    };
+    let err = notion::pull_database(&cfg, "../v1/users", 10)
+        .err()
+        .unwrap_or_default();
+    assert!(
+        err.starts_with("--database takes a Notion database id"),
+        "{err}"
+    );
 }
 
 #[test]
 fn max_pages_stops_the_listing() {
     let stub = StubServer::start(vec![
         database(&["ds2", "ds1"]),
-        list(vec![page(PAGE_A, "Order Flow", "2026-09-01T00:00:00.000Z")], Some("c2")),
+        list(
+            vec![page(PAGE_A, "Order Flow", "2026-09-01T00:00:00.000Z")],
+            Some("c2"),
+        ),
         order_blocks("Calls "),
     ])
     .expect("stub binds");
@@ -300,10 +392,21 @@ fn max_pages_stops_the_listing() {
     let seen = stub.finish();
     let (pages, stats) = pulled.expect("pull succeeds");
     assert_eq!(seen.len(), 3, "no second query after the cap");
-    assert_eq!(seen[1].target, "/v1/data_sources/ds1/query", "data sources are queried in id order");
+    assert_eq!(
+        seen[1].target, "/v1/data_sources/ds1/query",
+        "data sources are queried in id order"
+    );
     assert_eq!(body(&seen[1]), json!({ "page_size": 1 }));
     assert_eq!(pages.len(), 1);
-    assert_eq!((stats.data_sources, stats.fetched, stats.requests, stats.truncated), (2, 1, 3, true));
+    assert_eq!(
+        (
+            stats.data_sources,
+            stats.fetched,
+            stats.requests,
+            stats.truncated
+        ),
+        (2, 1, 3, true)
+    );
 }
 
 #[test]
@@ -314,7 +417,11 @@ fn repeated_titles_keep_their_own_paths() {
             vec![
                 page(PAGE_B, "Notes", "2026-09-02T00:00:00.000Z"),
                 page(PAGE_A, "Notes", "2026-09-01T00:00:00.000Z"),
-                page("1a2b3c4d-0000-4000-8000-00000000000c", "", "2026-09-03T00:00:00.000Z"),
+                page(
+                    "1a2b3c4d-0000-4000-8000-00000000000c",
+                    "",
+                    "2026-09-03T00:00:00.000Z",
+                ),
             ],
             None,
         ),
@@ -326,7 +433,10 @@ fn repeated_titles_keep_their_own_paths() {
     let pulled = notion::pull_database(&cfg(&stub.origin()), "DB1", 10);
     stub.finish();
     let (pages, _) = pulled.expect("pull succeeds");
-    let paths: Vec<String> = pages.iter().map(|p| record_from_page(p).0.rel_path).collect();
+    let paths: Vec<String> = pages
+        .iter()
+        .map(|p| record_from_page(p).0.rel_path)
+        .collect();
     assert_eq!(
         paths,
         [
@@ -355,7 +465,10 @@ fn text_body(content: &str) -> Value {
 
 /// The database, its one query answer listing `PAGE_A` titled `title`.
 fn one_page_db(title: &str) -> Vec<Canned> {
-    vec![database(&["ds1"]), list(vec![page(PAGE_A, title, "2026-09-01T00:00:00.000Z")], None)]
+    vec![
+        database(&["ds1"]),
+        list(vec![page(PAGE_A, title, "2026-09-01T00:00:00.000Z")], None),
+    ]
 }
 
 fn rate_limited(retry_after: &str) -> Canned {
@@ -406,7 +519,10 @@ fn pull_one(canned: Vec<Canned>) -> (glia_doc_sources::Page, NotionStats, Vec<Re
 fn toggles_keep_their_code() {
     let toggle = "3c000000-0000-4000-8000-0000000000aa";
     let mut canned = one_page_db("Guide");
-    canned.push(list(vec![parent(toggle, "toggle", text_body("Placing an order"))], None));
+    canned.push(list(
+        vec![parent(toggle, "toggle", text_body("Placing an order"))],
+        None,
+    ));
     canned.push(list(
         vec![block("code", json!({ "rich_text": [span("fn place() {}\n", false)], "language": "rust", "caption": [] }))],
         None,
@@ -415,21 +531,32 @@ fn toggles_keep_their_code() {
 
     assert_eq!(seen.len(), 4);
     seen.iter().for_each(assert_headers);
-    assert_eq!(seen[3].target, format!("/v1/blocks/{toggle}/children?page_size=100"));
+    assert_eq!(
+        seen[3].target,
+        format!("/v1/blocks/{toggle}/children?page_size=100")
+    );
     let (record, _) = record_from_page(&page);
     assert_eq!(
-        record.text,
-        "# Guide\n\n- Placing an order\n  ```rust\n  fn place() {}\n  ```\n",
+        record.text, "# Guide\n\n- Placing an order\n  ```rust\n  fn place() {}\n  ```\n",
         "the toggle's summary is a list line and its code is indented under it"
     );
-    assert_eq!((stats.blocks, stats.unsupported_total(), stats.requests), (2, 0, 4));
+    assert_eq!(
+        (stats.blocks, stats.unsupported_total(), stats.requests),
+        (2, 0, 4)
+    );
 }
 
 #[test]
 fn nested_lists_indent() {
     let mut canned = one_page_db("Guide");
-    canned.push(list(vec![parent("li-a", "bulleted_list_item", text_body("a"))], None));
-    canned.push(list(vec![block("numbered_list_item", text_body("b"))], None));
+    canned.push(list(
+        vec![parent("li-a", "bulleted_list_item", text_body("a"))],
+        None,
+    ));
+    canned.push(list(
+        vec![block("numbered_list_item", text_body("b"))],
+        None,
+    ));
     let (page, stats, seen) = pull_one(canned);
     assert_eq!(seen[3].target, "/v1/blocks/li-a/children?page_size=100");
     let (record, _) = record_from_page(&page);
@@ -439,17 +566,29 @@ fn nested_lists_indent() {
 
 #[test]
 fn tables_render() {
-    let row = |a: &str, b: &str| block("table_row", json!({ "cells": [[span(a, false)], [span(b, false)]] }));
+    let row = |a: &str, b: &str| {
+        block(
+            "table_row",
+            json!({ "cells": [[span(a, false)], [span(b, false)]] }),
+        )
+    };
     let mut canned = one_page_db("Guide");
     canned.push(list(
-        vec![parent("tbl-1", "table", json!({ "table_width": 2, "has_column_header": true, "has_row_header": false }))],
+        vec![parent(
+            "tbl-1",
+            "table",
+            json!({ "table_width": 2, "has_column_header": true, "has_row_header": false }),
+        )],
         None,
     ));
     canned.push(list(vec![row("h1", "h2"), row("a", "b")], None));
     let (page, stats, seen) = pull_one(canned);
     assert_eq!(seen[3].target, "/v1/blocks/tbl-1/children?page_size=100");
     let (record, _) = record_from_page(&page);
-    assert_eq!(record.text, "# Guide\n\n| h1 | h2 |\n| --- | --- |\n| a | b |\n");
+    assert_eq!(
+        record.text,
+        "# Guide\n\n| h1 | h2 |\n| --- | --- |\n| a | b |\n"
+    );
     assert_eq!((stats.blocks, stats.unsupported_total()), (3, 0));
 }
 
@@ -501,12 +640,26 @@ fn page_tree_mode() {
 
     let root = "2b000000000040008000000000000001";
     assert_eq!(pages.len(), 3);
-    assert!(pages.iter().all(|p| p.container == root && p.kind == DocSourceKind::Notion));
+    assert!(
+        pages
+            .iter()
+            .all(|p| p.container == root && p.kind == DocSourceKind::Notion)
+    );
     let titles: Vec<&str> = pages.iter().map(|p| p.title.as_str()).collect();
-    assert_eq!(titles, ["Engineering", "Runbooks", "Deploy"], "titles come from GET /v1/pages");
-    assert_eq!(pages[1].url, format!("https://www.notion.so/{}", SUB_A.replace('-', "")));
+    assert_eq!(
+        titles,
+        ["Engineering", "Runbooks", "Deploy"],
+        "titles come from GET /v1/pages"
+    );
+    assert_eq!(
+        pages[1].url,
+        format!("https://www.notion.so/{}", SUB_A.replace('-', ""))
+    );
     assert_eq!(pages[1].version, "2026-09-21T08:00:00.000Z");
-    let paths: Vec<String> = pages.iter().map(|p| record_from_page(p).0.rel_path).collect();
+    let paths: Vec<String> = pages
+        .iter()
+        .map(|p| record_from_page(p).0.rel_path)
+        .collect();
     assert_eq!(
         paths,
         [
@@ -521,10 +674,21 @@ fn page_tree_mode() {
         "# Engineering\n\nOwned by `OrderService`\n\n\
          - [Runbooks](https://www.notion.so/2b000000000040008000000000000002)\n"
     );
-    assert!(record_from_page(&pages[2]).0.text.contains("```shell\nglia build .\n```"));
+    assert!(
+        record_from_page(&pages[2])
+            .0
+            .text
+            .contains("```shell\nglia build .\n```")
+    );
 
     assert_eq!(
-        (stats.data_sources, stats.fetched, stats.pages, stats.retries, stats.truncated),
+        (
+            stats.data_sources,
+            stats.fetched,
+            stats.pages,
+            stats.retries,
+            stats.truncated
+        ),
         (0, 3, 3, 1, false)
     );
     assert_eq!(
@@ -537,11 +701,16 @@ fn page_tree_mode() {
 fn page_tree_caps_depth_and_pages() {
     // A chain root -> p1 -> ... -> p6: p6 lies 6 levels down, past the cap of
     // 5, so it is counted and never read.
-    let ids: Vec<String> = (0..=6).map(|i| format!("4d000000-0000-4000-8000-00000000000{i}")).collect();
+    let ids: Vec<String> = (0..=6)
+        .map(|i| format!("4d000000-0000-4000-8000-00000000000{i}"))
+        .collect();
     let mut canned = Vec::new();
     for (i, id) in ids.iter().take(6).enumerate() {
         canned.push(page_object(id, &format!("Level {i}")));
-        canned.push(list(vec![child_page(&ids[i + 1], &format!("Level {}", i + 1))], None));
+        canned.push(list(
+            vec![child_page(&ids[i + 1], &format!("Level {}", i + 1))],
+            None,
+        ));
     }
     let stub = StubServer::start(canned).expect("stub binds");
     let pulled = notion::pull_page_tree(&cfg(&stub.origin()), &ids[0], 100);
@@ -549,13 +718,19 @@ fn page_tree_caps_depth_and_pages() {
     let (pages, stats) = pulled.expect("pull succeeds");
     assert_eq!(pages.len(), 6);
     assert_eq!(stats.depth_capped, 1);
-    assert!(!seen.iter().any(|r| r.target.contains(&ids[6])), "the page past the cap is not read");
+    assert!(
+        !seen.iter().any(|r| r.target.contains(&ids[6])),
+        "the page past the cap is not read"
+    );
     assert_eq!(notion::MAX_PAGE_DEPTH, 5);
 
     // --max-pages 2 over a root with two sub-pages: the third stays queued.
     let stub = StubServer::start(vec![
         page_object(ROOT, "Engineering"),
-        list(vec![child_page(SUB_A, "Runbooks"), child_page(SUB_B, "Deploy")], None),
+        list(
+            vec![child_page(SUB_A, "Runbooks"), child_page(SUB_B, "Deploy")],
+            None,
+        ),
         page_object(SUB_A, "Runbooks"),
         list(vec![], None),
     ])
@@ -580,11 +755,26 @@ fn rate_limit_is_retried() {
     canned.push(order_blocks("Calls "));
     let (page, stats, seen) = pull_one(canned);
     assert_eq!(seen.len(), 4);
-    assert_eq!(seen[2].target, format!("/v1/blocks/{PAGE_A}/children?page_size=100"));
-    assert_eq!(seen[2].target, seen[3].target, "the throttled request is sent again");
+    assert_eq!(
+        seen[2].target,
+        format!("/v1/blocks/{PAGE_A}/children?page_size=100")
+    );
+    assert_eq!(
+        seen[2].target, seen[3].target,
+        "the throttled request is sent again"
+    );
     assert_eq!((stats.requests, stats.retries), (4, 1));
-    assert!(record_from_page(&page).0.text.contains("Calls `OrderService.place`"));
-    assert!(stats.sync_marker("db1", 1).ends_with(" requests=4 retries=1 depth_capped=0"));
+    assert!(
+        record_from_page(&page)
+            .0
+            .text
+            .contains("Calls `OrderService.place`")
+    );
+    assert!(
+        stats
+            .sync_marker("db1", 1)
+            .ends_with(" requests=4 retries=1 depth_capped=0")
+    );
 
     // Four 429s in a row: three retries, then an error naming the 429.
     let stub = StubServer::start(vec![
@@ -621,7 +811,9 @@ fn server_errors_are_retried() {
             .to_string(),
     )])
     .expect("stub binds");
-    let err = notion::pull_database(&cfg(&stub.origin()), "db1", 10).err().unwrap_or_default();
+    let err = notion::pull_database(&cfg(&stub.origin()), "db1", 10)
+        .err()
+        .unwrap_or_default();
     let seen = stub.finish();
     assert_eq!(err, "500: internal_server_error - boom");
     assert_eq!(seen.len(), 1);
@@ -633,7 +825,10 @@ fn depth_is_capped() {
     let id = |i: usize| format!("tog-{i:02}");
     let mut canned = one_page_db("Deep");
     for i in 1..=9 {
-        canned.push(list(vec![parent(&id(i), "toggle", text_body(&format!("t{i}")))], None));
+        canned.push(list(
+            vec![parent(&id(i), "toggle", text_body(&format!("t{i}")))],
+            None,
+        ));
     }
     let stub = StubServer::start(canned).expect("stub binds");
     let pulled = notion::pull_database(&cfg(&stub.origin()), "db1", 10);
@@ -647,12 +842,18 @@ fn depth_is_capped() {
         .collect();
     assert_eq!(chain.len(), notion::MAX_BLOCK_DEPTH, "{chain:?}");
     assert_eq!(chain.len(), 8);
-    assert_eq!(chain.last().copied(), Some("/v1/blocks/tog-08/children?page_size=100"));
+    assert_eq!(
+        chain.last().copied(),
+        Some("/v1/blocks/tog-08/children?page_size=100")
+    );
     assert_eq!(stats.depth_capped, 1, "tog-09's children are past the cap");
     assert_eq!(stats.blocks, 9);
     let text = record_from_page(&pages[0]).0.text;
     assert!(text.contains("- t1\n  - t2\n    - t3\n"), "{text}");
-    assert!(text.contains(&format!("\n{}- t9\n", " ".repeat(16))), "{text}");
+    assert!(
+        text.contains(&format!("\n{}- t9\n", " ".repeat(16))),
+        "{text}"
+    );
 }
 
 #[test]
@@ -662,9 +863,15 @@ fn synced_copies_read_their_original() {
     let hidden = json!({ "object": "block", "id": "sync-copy2", "type": "synced_block", "has_children": true,
         "synced_block": { "synced_from": { "type": "block_id", "block_id": "sync-hidden" } } });
     let mut canned = one_page_db("Shared");
-    canned.push(list(vec![copy, hidden, block("paragraph", text_body("after"))], None));
     canned.push(list(
-        vec![block("paragraph", json!({ "rich_text": [span("Uses ", false), span("Ledger", true)] }))],
+        vec![copy, hidden, block("paragraph", text_body("after"))],
+        None,
+    ));
+    canned.push(list(
+        vec![block(
+            "paragraph",
+            json!({ "rich_text": [span("Uses ", false), span("Ledger", true)] }),
+        )],
         None,
     ));
     canned.push(Canned::status(
@@ -675,9 +882,24 @@ fn synced_copies_read_their_original() {
     ));
     let (page, stats, seen) = pull_one(canned);
 
-    assert_eq!(seen[3].target, "/v1/blocks/sync-orig/children?page_size=100");
-    assert_eq!(seen[4].target, "/v1/blocks/sync-hidden/children?page_size=100");
-    assert!(!seen.iter().any(|r| r.target.contains("sync-copy")), "a copy reads its original");
-    assert_eq!(stats.unreadable, 1, "an original the integration cannot read is skipped");
-    assert_eq!(record_from_page(&page).0.text, "# Shared\n\nUses `Ledger`\n\nafter\n");
+    assert_eq!(
+        seen[3].target,
+        "/v1/blocks/sync-orig/children?page_size=100"
+    );
+    assert_eq!(
+        seen[4].target,
+        "/v1/blocks/sync-hidden/children?page_size=100"
+    );
+    assert!(
+        !seen.iter().any(|r| r.target.contains("sync-copy")),
+        "a copy reads its original"
+    );
+    assert_eq!(
+        stats.unreadable, 1,
+        "an original the integration cannot read is skipped"
+    );
+    assert_eq!(
+        record_from_page(&page).0.text,
+        "# Shared\n\nUses `Ledger`\n\nafter\n"
+    );
 }

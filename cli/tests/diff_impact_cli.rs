@@ -20,13 +20,16 @@ use serde_json::Value;
 const A_PY: &str = "def price(o):\n    return o\n\n\ndef place(o):\n    return price(o)\n";
 const B_PY: &str = "from shop.a import place\n\n\ndef checkout(o):\n    return place(o)\n";
 /// `A_PY` with `price`'s body edited.
-const A_PY_EDITED: &str = "def price(o):\n    return o or 0\n\n\ndef place(o):\n    return price(o)\n";
+const A_PY_EDITED: &str =
+    "def price(o):\n    return o or 0\n\n\ndef place(o):\n    return price(o)\n";
 /// The unified diff of `A_PY` -> `A_PY_EDITED`.
 const PRICE_DIFF: &str = "--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,2 +1,2 @@\n def price(o):\n-    return o\n+    return o or 0\n";
 
 const PRICE: &str = "shop::a::price";
-const REV_MARKER: &str = "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0";
-const DIFF_MARKER: &str = "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0";
+const REV_MARKER: &str =
+    "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0";
+const DIFF_MARKER: &str =
+    "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0";
 
 /// A scratch dir holding the tree (`repo/`), an empty global git config and a
 /// `HOME`; removed on drop (`cli` has no dev-dependencies, so no `tempfile`).
@@ -51,7 +54,12 @@ impl Scratch {
         let home = root.join("home");
         std::fs::create_dir_all(&home).expect("scratch HOME dir");
         let gitconfig = root.join("gitconfig");
-        let s = Scratch { root, top, home, gitconfig };
+        let s = Scratch {
+            root,
+            top,
+            home,
+            gitconfig,
+        };
         std::fs::create_dir_all(&s.top).expect("scratch repo dir");
         std::fs::write(&s.gitconfig, "").expect("empty gitconfig");
         s.write("shop/a.py", A_PY);
@@ -103,15 +111,29 @@ impl Scratch {
 
     fn git(&self, args: &[&str]) {
         let mut cmd = Command::new("git");
-        cmd.args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
-            .arg("-C")
-            .arg(&self.top)
-            .args(args);
+        cmd.args([
+            "-c",
+            "user.name=glia",
+            "-c",
+            "user.email=glia@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .arg("-C")
+        .arg(&self.top)
+        .args(args);
         let out = self.hermetic(cmd).output().unwrap_or_else(|e| {
             panic!("LE.2 diff-impact rev mode needs a `git` binary on PATH; running it failed: {e}")
         });
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// `glia diff-impact <repo> <args>`.
@@ -178,29 +200,71 @@ fn diff_file_json() {
     let out = s.diff_impact(&["--diff", &diff, "--direction", "backward", "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = v
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["base", "changed", "edges_added", "edges_removed", "impact", "unresolved_diff_files"]
+        [
+            "base",
+            "changed",
+            "edges_added",
+            "edges_removed",
+            "impact",
+            "unresolved_diff_files"
+        ]
     );
     assert!(v["base"].is_null());
     assert_eq!(v["changed"][0]["qname"], PRICE);
     assert_eq!(v["changed"][0]["change"], "diff_hit");
     assert_eq!(rows(&v), price_rows());
-    assert_eq!(v["impact"]["results"][0]["line"].as_i64().map(|l| l >= 1), Some(true));
+    assert_eq!(
+        v["impact"]["results"][0]["line"].as_i64().map(|l| l >= 1),
+        Some(true)
+    );
     assert!(v["impact"]["absence"].is_null());
-    let impact_keys: Vec<&str> =
-        v["impact"].as_object().expect("impact").keys().map(String::as_str).collect();
-    assert_eq!(impact_keys, ["absence", "files", "results", "seeds", "selection", "unresolved"]);
+    let impact_keys: Vec<&str> = v["impact"]
+        .as_object()
+        .expect("impact")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        impact_keys,
+        [
+            "absence",
+            "files",
+            "results",
+            "seeds",
+            "selection",
+            "unresolved"
+        ]
+    );
     // EC.8: no record in the scratch repo: SELh0's fallback, logged once.
     assert_eq!(
-        (&v["impact"]["selection"]["source"], &v["impact"]["selection"]["reason"]),
+        (
+            &v["impact"]["selection"]["source"],
+            &v["impact"]["selection"]["reason"]
+        ),
         (&Value::from("fallback"), &Value::from("absent")),
         "{v}"
     );
-    assert!(stderr(&out).lines().any(|l| l.starts_with("[select] surface=diff_impact set=SELh0 ")), "{}", stderr(&out));
-    assert!(stderr(&out).lines().any(|l| l == DIFF_MARKER), "{}", stderr(&out));
+    assert!(
+        stderr(&out)
+            .lines()
+            .any(|l| l.starts_with("[select] surface=diff_impact set=SELh0 ")),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).lines().any(|l| l == DIFF_MARKER),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -218,7 +282,11 @@ fn with_needs_diff_exit_2() {
     let s = Scratch::shop("with");
     let out = s.diff_impact(&["--with", s.path()]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(stderr(&out).contains("--with needs --diff"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--with needs --diff"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 /// The default change source is the working tree against `HEAD`; the table
@@ -234,11 +302,27 @@ fn rev_mode_table_defaults_to_head() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("(vs `HEAD`, backward, depth ≤ 4)"), "{text}");
-    assert!(text.contains("- changed: 2 nodes, 1 seeds; edges +0 -0; in radius: 2"), "{text}");
-    assert!(text.contains("| modified | ● | FUNCTION | `shop::a::price` | shop/a.py:1 |"), "{text}");
-    assert!(text.contains("| score | depth | live | via | kind | qname | seed | location |"), "{text}");
-    assert!(text.contains("| `shop::b::checkout` | `shop::a::price` | shop/b.py:4 |"), "{text}");
-    assert!(stderr(&out).lines().any(|l| l == REV_MARKER), "{}", stderr(&out));
+    assert!(
+        text.contains("- changed: 2 nodes, 1 seeds; edges +0 -0; in radius: 2"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| modified | ● | FUNCTION | `shop::a::price` | shop/a.py:1 |"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| score | depth | live | via | kind | qname | seed | location |"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| `shop::b::checkout` | `shop::a::price` | shop/b.py:4 |"),
+        "{text}"
+    );
+    assert!(
+        stderr(&out).lines().any(|l| l == REV_MARKER),
+        "{}",
+        stderr(&out)
+    );
 
     let json = s.diff_impact(&["--base", "HEAD", "--direction", "backward", "--json"]);
     assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
@@ -275,9 +359,15 @@ fn stdin_deletion_only_diff_names_the_file() {
     let out = child.wait_with_output().expect("glia output");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains("- diff files no node placed: shop/a.py"), "{text}");
+    assert!(
+        text.contains("- diff files no node placed: shop/a.py"),
+        "{text}"
+    );
     assert!(text.contains("_(nothing in radius)_"), "{text}");
-    assert!(text.contains("> FACT: the diff resolved to no node"), "{text}");
+    assert!(
+        text.contains("> FACT: the diff resolved to no node"),
+        "{text}"
+    );
     assert!(
         stderr(&out).lines().any(|l| l == "[diff-impact] mode=diff base=- changed=0 seeds=0 impact=0 edges +0 -0 unresolved_files=1"),
         "{}",
@@ -351,9 +441,14 @@ fn ranking_flags_reach_the_radius() {
     let out = s.diff_impact(&["--direction", "backward", "--no-cochange"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let err = stderr(&out);
-    assert!(err.lines().any(|l| l.starts_with("[rank-cache] holder=cli ")), "{err}");
     assert!(
-        err.lines().any(|l| l.starts_with("[rank] surface=diff_impact ranking=P1 ")),
+        err.lines()
+            .any(|l| l.starts_with("[rank-cache] holder=cli ")),
+        "{err}"
+    );
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[rank] surface=diff_impact ranking=P1 ")),
         "{err}"
     );
     // EC.8: no `--ranking`, no calibration record: SELs0's fallback.
@@ -362,28 +457,50 @@ fn ranking_flags_reach_the_radius() {
         "{err}"
     );
     let text = stdout(&out);
-    assert!(text.contains("\nranking: P1 (fallback: absent, shape k1)\n"), "{text}");
-    assert!(text.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"), "{text}");
+    assert!(
+        text.contains("\nranking: P1 (fallback: absent, shape k1)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\n## files\n\n| # | file | rows | co-change | ppr |\n"),
+        "{text}"
+    );
     assert!(text.contains("| 1 | shop/b.py | 1 | 0.000 |"), "{text}");
 
     let diff = s.outside("price.diff", PRICE_DIFF);
     let json = s.diff_impact(&[
-        "--diff", &diff, "--direction", "backward", "--ranking", "bfs", "--no-cochange",
-        "--top-files", "1", "--json",
+        "--diff",
+        &diff,
+        "--direction",
+        "backward",
+        "--ranking",
+        "bfs",
+        "--no-cochange",
+        "--top-files",
+        "1",
+        "--json",
     ]);
     assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
     assert!(
-        stderr(&json).lines().any(|l| l.starts_with("[rank] surface=diff_impact ranking=B0 ")),
+        stderr(&json)
+            .lines()
+            .any(|l| l.starts_with("[rank] surface=diff_impact ranking=B0 ")),
         "{}",
         stderr(&json)
     );
     assert!(
-        stderr(&json).lines().any(|l| l.starts_with("[select] surface=diff_impact set=SELs0 shape=k1 pick=B0 source=explicit ")),
+        stderr(&json).lines().any(|l| l.starts_with(
+            "[select] surface=diff_impact set=SELs0 shape=k1 pick=B0 source=explicit "
+        )),
         "{}",
         stderr(&json)
     );
     let v: Value = serde_json::from_str(&stdout(&json)).expect("valid JSON");
     assert_eq!(rows(&v), price_rows());
     assert_eq!(v["impact"]["selection"]["source"], "explicit", "{v}");
-    assert_eq!(v["impact"]["files"].as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(
+        v["impact"]["files"].as_array().map(Vec::len),
+        Some(1),
+        "{v}"
+    );
 }

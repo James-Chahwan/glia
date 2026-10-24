@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use glia_activation::{activate, ActivationConfig};
+use glia_activation::{ActivationConfig, activate};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
 fn build_grid(n: usize, density: usize) -> (Vec<NodeId>, Vec<Edge>) {
@@ -90,14 +90,14 @@ fn main() {
     println!("|----------|-------------------------------------|---------|----------|");
 
     // Synthetic ladder — typical glia .gmap sizes
-    bench_size("tiny",   100,    2, 3);
-    bench_size("small",  1_000,  3, 5);
+    bench_size("tiny", 100, 2, 3);
+    bench_size("small", 1_000, 3, 5);
     bench_size("medium", 10_000, 4, 10);
-    bench_size("large",  50_000, 5, 20);
-    bench_size("huge",   100_000, 5, 50);
+    bench_size("large", 50_000, 5, 20);
+    bench_size("huge", 100_000, 5, 50);
 
     // Real-shaped: heavy seeds (e.g. multiple-query activation)
-    bench_size("multi-seed-small",  1_000,  3, 50);
+    bench_size("multi-seed-small", 1_000, 3, 50);
     bench_size("multi-seed-medium", 10_000, 4, 100);
 
     println!();

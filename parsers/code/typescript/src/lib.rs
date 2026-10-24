@@ -93,8 +93,13 @@ fn parse_file_stats(
         cells: build_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     // A13.15: ES imports are hoisted, so a `typeorm` import below the first
     // `@Entity` class still gates it; read them all before any visit.
@@ -102,7 +107,15 @@ fn parse_file_stats(
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
-        visit_top(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+        visit_top(
+            child,
+            src,
+            file_rel_path,
+            module_qname,
+            module_id,
+            repo,
+            &mut acc,
+        );
     }
     // DT.1q: the names the file's own `export` declarations export, one fact
     // on the file MODULE (the graph's re-export resolution reads it).
@@ -914,7 +927,9 @@ fn declared_names(decl: TsNode, src: &[u8], out: &mut BTreeSet<String>) {
             }
         }
         "internal_module" | "module" => {
-            let Some(name) = decl.child_by_field_name("name") else { return };
+            let Some(name) = decl.child_by_field_name("name") else {
+                return;
+            };
             match name.kind() {
                 "identifier" => {
                     out.insert(text(name, src).to_string());
@@ -934,7 +949,10 @@ fn declared_names(decl: TsNode, src: &[u8], out: &mut BTreeSet<String>) {
         }
         "import_alias" => {
             let mut c = decl.walk();
-            if let Some(id) = decl.named_children(&mut c).find(|ch| ch.kind() == "identifier") {
+            if let Some(id) = decl
+                .named_children(&mut c)
+                .find(|ch| ch.kind() == "identifier")
+            {
                 out.insert(text(id, src).to_string());
             }
         }
@@ -972,14 +990,18 @@ fn declared_names(decl: TsNode, src: &[u8], out: &mut BTreeSet<String>) {
 /// like any other, since heritage and receiver typing read types.
 fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
     let line = line_at(n);
-    let source = n.child_by_field_name("source").map(|s| strip_string_quotes(text(s, src)));
+    let source = n
+        .child_by_field_name("source")
+        .map(|s| strip_string_quotes(text(s, src)));
     let mut clause_or_ns = false;
     let mut c = n.walk();
     for child in n.named_children(&mut c) {
         match child.kind() {
             "namespace_export" => {
                 clause_or_ns = true;
-                let Some(source) = source.clone() else { continue };
+                let Some(source) = source.clone() else {
+                    continue;
+                };
                 let mut nc = child.walk();
                 let Some(name) = child
                     .named_children(&mut nc)
@@ -988,7 +1010,14 @@ fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
                     continue;
                 };
                 let exported = strip_string_quotes(text(name, src));
-                acc.nav.record_fact(module_id, NavFact::ReExportNamespace { source, exported, line });
+                acc.nav.record_fact(
+                    module_id,
+                    NavFact::ReExportNamespace {
+                        source,
+                        exported,
+                        line,
+                    },
+                );
             }
             "export_clause" => {
                 clause_or_ns = true;
@@ -997,7 +1026,9 @@ fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
                     if spec.kind() != "export_specifier" {
                         continue;
                     }
-                    let Some(name_n) = spec.child_by_field_name("name") else { continue };
+                    let Some(name_n) = spec.child_by_field_name("name") else {
+                        continue;
+                    };
                     let name = strip_string_quotes(text(name_n, src));
                     let exported = spec
                         .child_by_field_name("alias")
@@ -1009,7 +1040,11 @@ fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
                             exported,
                             line,
                         },
-                        None => NavFact::ExportLocal { local: name, exported, line },
+                        None => NavFact::ExportLocal {
+                            local: name,
+                            exported,
+                            line,
+                        },
                     };
                     acc.nav.record_fact(module_id, fact);
                 }
@@ -1018,7 +1053,8 @@ fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
         }
     }
     if !clause_or_ns && let Some(source) = source {
-        acc.nav.record_fact(module_id, NavFact::ReExportStar { source, line });
+        acc.nav
+            .record_fact(module_id, NavFact::ReExportStar { source, line });
     }
 }
 
@@ -1060,8 +1096,13 @@ fn visit_class(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav
-        .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
+    acc.nav.record(
+        class_id,
+        name,
+        &class_qname,
+        node_kind::CLASS,
+        Some(module_id),
+    );
     acc.classes.entry(name.to_string()).or_insert(class_id);
     if n.kind() == "abstract_class_declaration" {
         acc.abstract_stats.classes += 1;
@@ -1073,7 +1114,10 @@ fn visit_class(
     // no CallSite (a decorator is applied, not called by the source).
     for dec in class_decorators(n) {
         let mut dc = dec.walk();
-        let Some(call) = dec.named_children(&mut dc).find(|c| c.kind() == "call_expression") else {
+        let Some(call) = dec
+            .named_children(&mut dc)
+            .find(|c| c.kind() == "call_expression")
+        else {
             continue;
         };
         let Some(args) = call.child_by_field_name("arguments") else {
@@ -1500,7 +1544,10 @@ fn visit_function_field(
     }
     // `#tick` keeps its `#`, as `visit_method` names `#m() {}`.
     let name = text(name_node, src);
-    if method_names.contains(name) || acc.class_methods.contains_key(&(class_id, name.to_string()))
+    if method_names.contains(name)
+        || acc
+            .class_methods
+            .contains_key(&(class_id, name.to_string()))
     {
         acc.fn_fields.shadowed += 1;
         return;
@@ -1740,7 +1787,9 @@ fn signal_query_type<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a st
     let upper = |t: &&str| t.starts_with(|c: char| c.is_ascii_uppercase());
     let args = call.child_by_field_name("arguments")?;
     let mut ac = args.walk();
-    let mut it = args.named_children(&mut ac).filter(|a| a.kind() != "comment");
+    let mut it = args
+        .named_children(&mut ac)
+        .filter(|a| a.kind() != "comment");
     let locator = it.next()?;
     // A `read` option decides first: the query yields its token's type
     // (`viewChild<Cmp, ElementRef>('x', { read: ElementRef })` is an
@@ -1749,7 +1798,8 @@ fn signal_query_type<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a st
         let mut oc = opts.walk();
         let read = opts.named_children(&mut oc).find(|p| {
             p.kind() == "pair"
-                && p.child_by_field_name("key").is_some_and(|k| text(k, src) == "read")
+                && p.child_by_field_name("key")
+                    .is_some_and(|k| text(k, src) == "read")
         });
         if let Some(pair) = read {
             return pair
@@ -1768,7 +1818,9 @@ fn signal_query_type<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a st
     if !matches!(locator.kind(), "identifier" | "member_expression") {
         return None;
     }
-    heritage_type_name(locator, src).filter(upper).map(|t| (binding, t))
+    heritage_type_name(locator, src)
+        .filter(upper)
+        .map(|t| (binding, t))
 }
 
 /// DT.5k: the local names bound to an imported single-result signal query
@@ -1797,7 +1849,9 @@ fn signal_read_field(receiver: &str) -> Option<&str> {
     let f = r.strip_prefix("this.")?.strip_suffix("()")?;
     let ident = |s: &str| {
         let s = s.strip_prefix('#').unwrap_or(s);
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
     };
     ident(f).then_some(f)
 }
@@ -1854,9 +1908,10 @@ fn collect_class_heritage(
                 edge_category::INHERITS_FROM,
                 clause.children_by_field_name("value", &mut tc).collect(),
             ),
-            "implements_clause" => {
-                (edge_category::IMPLEMENTS, clause.named_children(&mut tc).collect())
-            }
+            "implements_clause" => (
+                edge_category::IMPLEMENTS,
+                clause.named_children(&mut tc).collect(),
+            ),
             _ => continue,
         };
         for ty in types {
@@ -2076,8 +2131,11 @@ fn ts_interface_schema(iface: TsNode, src: &[u8]) -> Option<ModelSchema> {
                     .child_by_field_name("type")
                     .and_then(|t| first_named(t));
                 let ty_text = ty.map_or_else(|| "any".to_string(), |t| collapse_ws(text(t, src)));
-                let optional = has_token(member, "?") || ty.is_some_and(|t| ts_optional_type(t, src));
-                schema.fields.push(ModelField::new(&key, &ty_text, !optional));
+                let optional =
+                    has_token(member, "?") || ty.is_some_and(|t| ts_optional_type(t, src));
+                schema
+                    .fields
+                    .push(ModelField::new(&key, &ty_text, !optional));
             }
             "index_signature" => schema.open = true,
             _ => {}
@@ -2115,7 +2173,9 @@ fn ts_class_schema(class: TsNode, src: &[u8]) -> Option<ModelSchema> {
         .into_iter()
         .filter_map(|d| decorator_name(d, src))
         .any(|n| {
-            DI_DECORATORS.contains(&n) || NEST_DI_DECORATORS.contains(&n) || MODULE_DECORATORS.contains(&n)
+            DI_DECORATORS.contains(&n)
+                || NEST_DI_DECORATORS.contains(&n)
+                || MODULE_DECORATORS.contains(&n)
         });
     if framework {
         return None;
@@ -2123,14 +2183,21 @@ fn ts_class_schema(class: TsNode, src: &[u8]) -> Option<ModelSchema> {
     let body = class.child_by_field_name("body")?;
     let mut schema = ModelSchema::new(WireFormat::Ts);
     let mut cursor = class.walk();
-    if let Some(heritage) = class.named_children(&mut cursor).find(|c| c.kind() == "class_heritage") {
+    if let Some(heritage) = class
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "class_heritage")
+    {
         let mut hc = heritage.walk();
         for clause in heritage.named_children(&mut hc) {
             if clause.kind() != "extends_clause" {
                 continue;
             }
             let mut tc = clause.walk();
-            if clause.children_by_field_name("type_arguments", &mut tc).next().is_some() {
+            if clause
+                .children_by_field_name("type_arguments", &mut tc)
+                .next()
+                .is_some()
+            {
                 schema.open = true;
                 continue;
             }
@@ -2157,7 +2224,9 @@ fn ts_class_schema(class: TsNode, src: &[u8]) -> Option<ModelSchema> {
                     return None;
                 }
             }
-            "method_definition" if !ctor_seen && child_text(member, "name", src) == Some("constructor") => {
+            "method_definition"
+                if !ctor_seen && child_text(member, "name", src) == Some("constructor") =>
+            {
                 ctor_seen = true;
                 if !push_param_properties(&mut schema, member, src) {
                     return None;
@@ -2183,7 +2252,12 @@ fn push_class_field(schema: &mut ModelSchema, field: TsNode, src: &[u8]) -> bool
         return false;
     }
     let value = field.child_by_field_name("value");
-    if value.is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression" | "function")) {
+    if value.is_some_and(|v| {
+        matches!(
+            v.kind(),
+            "arrow_function" | "function_expression" | "function"
+        )
+    }) {
         return false;
     }
     let Some(key) = ts_property_key(name, src) else {
@@ -2224,15 +2298,25 @@ fn push_param_properties(schema: &mut ModelSchema, ctor: TsNode, src: &[u8]) -> 
 /// A field `key` of `member` (a class field or a parameter property): its
 /// annotation, else its initialiser's type; `required` unless `?` or a
 /// top-level `| undefined`.
-fn push_typed_field(schema: &mut ModelSchema, key: &str, member: TsNode, value: Option<TsNode>, src: &[u8]) {
-    let ty = member.child_by_field_name("type").and_then(|t| first_named(t));
+fn push_typed_field(
+    schema: &mut ModelSchema,
+    key: &str,
+    member: TsNode,
+    value: Option<TsNode>,
+    src: &[u8],
+) {
+    let ty = member
+        .child_by_field_name("type")
+        .and_then(|t| first_named(t));
     let ty_text = match (ty, value) {
         (Some(t), _) => collapse_ws(text(t, src)),
         (None, Some(v)) => ts_initializer_type(v, src),
         (None, None) => "any".to_string(),
     };
     let optional = has_token(member, "?") || ty.is_some_and(|t| ts_optional_type(t, src));
-    schema.fields.push(ModelField::new(key, &ty_text, !optional));
+    schema
+        .fields
+        .push(ModelField::new(key, &ty_text, !optional));
 }
 
 /// The member's accessibility modifier text (`public` / `private` /
@@ -2531,7 +2615,10 @@ fn visit_abstract_method(
         return;
     }
     let name = text(name_node, src);
-    if acc.class_methods.contains_key(&(class_id, name.to_string())) {
+    if acc
+        .class_methods
+        .contains_key(&(class_id, name.to_string()))
+    {
         return;
     }
     let method_qname = format!("{class_qname}::{name}");
@@ -2635,7 +2722,14 @@ fn visit_lexical(
         }
         let name = text(name_n, src);
         emit_function_value(
-            value, name, src, file_rel, module_qname, module_id, repo, acc,
+            value,
+            name,
+            src,
+            file_rel,
+            module_qname,
+            module_id,
+            repo,
+            acc,
         );
     }
 }
@@ -3068,8 +3162,14 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     if object.kind() != "identifier" || property.kind() != "property_identifier" {
         return;
     }
-    let (base, name) = (text(object, src).to_string(), text(property, src).to_string());
-    if acc.member_ref_seen.insert((from, base.clone(), name.clone())) {
+    let (base, name) = (
+        text(object, src).to_string(),
+        text(property, src).to_string(),
+    );
+    if acc
+        .member_ref_seen
+        .insert((from, base.clone(), name.clone()))
+    {
         acc.member_refs.push((from, base, name, line_at(node)));
     }
 }
@@ -3145,7 +3245,8 @@ fn record_this_ref(
             }
         }
         None => {
-            acc.this_ref_seen.insert((from, name.clone()), acc.this_refs.len());
+            acc.this_ref_seen
+                .insert((from, name.clone()), acc.this_refs.len());
             acc.this_refs.push((from, class, name, row));
         }
     }
@@ -3162,7 +3263,10 @@ fn record_inject_receiver(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc)
         return;
     };
     let mut inner = object;
-    while matches!(inner.kind(), "parenthesized_expression" | "non_null_expression") {
+    while matches!(
+        inner.kind(),
+        "parenthesized_expression" | "non_null_expression"
+    ) {
         let mut c = inner.walk();
         let Some(next) = inner.named_children(&mut c).find(|n| n.kind() != "comment") else {
             return;
@@ -3232,7 +3336,10 @@ fn record_member_read(
                 return;
             };
             if o.kind() != "this"
-                || !matches!(p.kind(), "property_identifier" | "private_property_identifier")
+                || !matches!(
+                    p.kind(),
+                    "property_identifier" | "private_property_identifier"
+                )
             {
                 return;
             }
@@ -3629,11 +3736,10 @@ fn record_declarator_type(decl: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc
             // DT.5k: a bare call `f(..)` holds `f`'s result, typed late
             // ([`record_call_locals`]); a member call's result stays unknown.
             None => match value.child_by_field_name("function") {
-                Some(f) if f.kind() == "identifier" => acc.call_locals.push((
-                    scope,
-                    name.to_string(),
-                    text(f, src).to_string(),
-                )),
+                Some(f) if f.kind() == "identifier" => {
+                    acc.call_locals
+                        .push((scope, name.to_string(), text(f, src).to_string()))
+                }
                 _ => acc.nav.record_local_type(scope, name, ""),
             },
         },
@@ -3670,7 +3776,9 @@ fn inject_shape<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
     }
     let args = call.child_by_field_name("arguments")?;
     let mut ac = args.walk();
-    let arg = args.named_children(&mut ac).find(|a| a.kind() != "comment")?;
+    let arg = args
+        .named_children(&mut ac)
+        .find(|a| a.kind() != "comment")?;
     if !matches!(arg.kind(), "identifier" | "member_expression") {
         return None;
     }
@@ -5040,7 +5148,9 @@ fn config_path(member: TsNode, src: &[u8]) -> Option<String> {
     }
     segs.reverse();
     let ident = |s: &str| {
-        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     };
     let (_, owners) = segs.split_last()?;
@@ -5053,7 +5163,9 @@ fn config_path(member: TsNode, src: &[u8]) -> Option<String> {
 /// The one named non-comment child of `n`.
 fn sole_named(n: TsNode) -> Option<TsNode> {
     let mut cursor = n.walk();
-    let mut named = n.named_children(&mut cursor).filter(|c| c.kind() != "comment");
+    let mut named = n
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() != "comment");
     let only = named.next()?;
     named.next().is_none().then_some(only)
 }
@@ -5145,7 +5257,11 @@ fn downgrade(c: Confidence) -> Confidence {
 /// `response` and then `request` (DT.1d) are spliced in last through
 /// `wire::append_hit_fields`, each only when the site states it: a hit with
 /// neither keeps HEAD's bytes. The endpoint fold appends `host` after them.
-fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>, request: Option<&Shape>) -> Cell {
+fn endpoint_hit_cell(
+    cand: &EndpointCandidate,
+    wrapper_of: Option<&str>,
+    request: Option<&Shape>,
+) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
         method: &'a str,
@@ -5389,7 +5505,13 @@ fn awaited_generic_callee<'t>(call: TsNode<'t>) -> Option<(TsNode<'t>, TsNode<'t
 /// response from its first type argument, and both body readings of its
 /// second argument (the argument itself, and its `json:` option), between
 /// which [`request_of`] picks.
-fn member_call_wire(call: TsNode, verb: &str, args: TsNode, awaited_generic: bool, src: &[u8]) -> WireRead {
+fn member_call_wire(
+    call: TsNode,
+    verb: &str,
+    args: TsNode,
+    awaited_generic: bool,
+    src: &[u8],
+) -> WireRead {
     let response = WIRE_RESPONSE_VERBS
         .contains(&verb)
         .then(|| call.child_by_field_name("type_arguments"))
@@ -5464,7 +5586,9 @@ fn request_of<'c>(
     }
     match alias_module {
         Some("axios") => second(),
-        Some("ky" | "ky-universal" | "got") if w.has_second => RequestRead::Body(w.json_option.as_ref()),
+        Some("ky" | "ky-universal" | "got") if w.has_second => {
+            RequestRead::Body(w.json_option.as_ref())
+        }
         Some("ky" | "ky-universal" | "got") => RequestRead::NoBody,
         _ => unknown(),
     }
@@ -5476,7 +5600,10 @@ fn request_of<'c>(
 fn import_module<'i>(imports: &'i [ImportStmt], binding: &str) -> Option<&'i str> {
     imports.iter().find_map(|imp| match &imp.target {
         ImportTarget::Symbol {
-            module, name, alias, ..
+            module,
+            name,
+            alias,
+            ..
         } if alias.as_deref().unwrap_or(name.as_str()) == binding => Some(module.as_str()),
         ImportTarget::Module {
             path,
@@ -5514,7 +5641,10 @@ fn ts_type_shape(ty: TsNode, src: &[u8]) -> Shape {
             flatten_union(ty, &mut members);
             let kept: Vec<TsNode> = members
                 .into_iter()
-                .filter(|m| !(m.kind() == "literal_type" && matches!(text(*m, src).trim(), "null" | "undefined")))
+                .filter(|m| {
+                    !(m.kind() == "literal_type"
+                        && matches!(text(*m, src).trim(), "null" | "undefined"))
+                })
                 .collect();
             match kept.as_slice() {
                 [] => Shape::named("null"),
@@ -5527,12 +5657,17 @@ fn ts_type_shape(ty: TsNode, src: &[u8]) -> Shape {
             t @ ("any" | "unknown" | "object") => Shape::open(t),
             t => Shape::named(t),
         },
-        "type_identifier" | "nested_type_identifier" | "array_type" | "literal_type" => Shape::named(&written()),
+        "type_identifier" | "nested_type_identifier" | "array_type" | "literal_type" => {
+            Shape::named(&written())
+        }
         "generic_type" => {
             let name = ty.child_by_field_name("name").map(|n| text(n, src));
-            let one_arg = ty
-                .child_by_field_name("type_arguments")
-                .is_some_and(|a| a.named_children(&mut a.walk()).filter(|c| c.kind() != "comment").count() == 1);
+            let one_arg = ty.child_by_field_name("type_arguments").is_some_and(|a| {
+                a.named_children(&mut a.walk())
+                    .filter(|c| c.kind() != "comment")
+                    .count()
+                    == 1
+            });
             if one_arg && matches!(name, Some("Array" | "ReadonlyArray")) {
                 Shape::named(&written())
             } else {
@@ -5572,7 +5707,8 @@ fn object_type_shape(ty: TsNode, src: &[u8]) -> Shape {
                     continue;
                 };
                 let t = member.child_by_field_name("type").and_then(first_named);
-                let optional = has_token(member, "?") || t.is_some_and(|t| ts_optional_type(t, src));
+                let optional =
+                    has_token(member, "?") || t.is_some_and(|t| ts_optional_type(t, src));
                 let shape = t.map_or_else(|| Shape::open("any"), |t| ts_type_shape(t, src));
                 fields.push(ShapeField::new(&key, !optional, shape));
             }
@@ -5596,22 +5732,33 @@ fn object_type_shape(ty: TsNode, src: &[u8]) -> Shape {
 /// - anything else (a member read, a call): open, its text as `raw`.
 fn body_shape(arg: TsNode, src: &[u8]) -> Option<(Shape, WireSource)> {
     let (shape, source) = match arg.kind() {
-        "object" => (object_literal_shape(arg, src, BODY_DEPTH), WireSource::Literal),
+        "object" => (
+            object_literal_shape(arg, src, BODY_DEPTH),
+            WireSource::Literal,
+        ),
         "identifier" | "shorthand_property_identifier" => {
             let name = text(arg, src);
             if name == "undefined" {
                 return None;
             }
-            declared_shape(arg, name, src, BODY_DEPTH).unwrap_or_else(|| (Shape::open(name), WireSource::Unread))
+            declared_shape(arg, name, src, BODY_DEPTH)
+                .unwrap_or_else(|| (Shape::open(name), WireSource::Unread))
         }
         "as_expression" | "satisfies_expression" => match asserted_type(arg) {
             Some(t) => (ts_type_shape(t, src), WireSource::Annotated),
             None => return body_shape(first_named(arg)?, src),
         },
-        "parenthesized_expression" | "non_null_expression" => return body_shape(first_named(arg)?, src),
+        "parenthesized_expression" | "non_null_expression" => {
+            return body_shape(first_named(arg)?, src);
+        }
         "new_expression" => (constructed_shape(arg, src), WireSource::Annotated),
-        "string" | "template_string" | "number" | "true" | "false" | "null" | "undefined" => return None,
-        _ => (Shape::open(&collapse_ws(text(arg, src))), WireSource::Unread),
+        "string" | "template_string" | "number" | "true" | "false" | "null" | "undefined" => {
+            return None;
+        }
+        _ => (
+            Shape::open(&collapse_ws(text(arg, src))),
+            WireSource::Unread,
+        ),
     };
     let non_json = matches!(&shape, Shape::Named { ty, array: false, .. } if NON_JSON_BODY_TYPES.contains(&ty.as_str()));
     (!non_json).then_some((shape, source))
@@ -5645,7 +5792,10 @@ fn object_literal_shape(obj: TsNode, src: &[u8], depth: u8) -> Shape {
     for member in obj.named_children(&mut cursor) {
         match member.kind() {
             "pair" => {
-                let Some(key) = member.child_by_field_name("key").and_then(|k| ts_property_key(k, src)) else {
+                let Some(key) = member
+                    .child_by_field_name("key")
+                    .and_then(|k| ts_property_key(k, src))
+                else {
                     open = true;
                     continue;
                 };
@@ -5695,8 +5845,12 @@ fn value_shape(value: TsNode, src: &[u8], depth: u8) -> Option<Shape> {
             Some(t) => ts_type_shape(t, src),
             None => return value_shape(first_named(value)?, src, depth),
         },
-        "parenthesized_expression" | "non_null_expression" => return value_shape(first_named(value)?, src, depth),
-        "arrow_function" | "function_expression" | "generator_function" | "undefined" => return None,
+        "parenthesized_expression" | "non_null_expression" => {
+            return value_shape(first_named(value)?, src, depth);
+        }
+        "arrow_function" | "function_expression" | "generator_function" | "undefined" => {
+            return None;
+        }
         _ => Shape::open(&collapse_ws(text(value, src))),
     };
     Some(shape)
@@ -5718,7 +5872,12 @@ enum Declared<'t> {
 /// value. `None` when the name is unbound, bound by a pattern, or declared
 /// with nothing that states its type (the caller reads it as open). A
 /// declaration is read, never an assignment: no value data-flow.
-fn declared_shape(use_node: TsNode, name: &str, src: &[u8], depth: u8) -> Option<(Shape, WireSource)> {
+fn declared_shape(
+    use_node: TsNode,
+    name: &str,
+    src: &[u8],
+    depth: u8,
+) -> Option<(Shape, WireSource)> {
     if depth == 0 {
         return None;
     }
@@ -5733,11 +5892,15 @@ fn declared_shape(use_node: TsNode, name: &str, src: &[u8], depth: u8) -> Option
             }
             let value = d.child_by_field_name("value")?;
             match value.kind() {
-                "as_expression" | "satisfies_expression" => {
-                    Some((ts_type_shape(asserted_type(value)?, src), WireSource::Annotated))
-                }
+                "as_expression" | "satisfies_expression" => Some((
+                    ts_type_shape(asserted_type(value)?, src),
+                    WireSource::Annotated,
+                )),
                 "new_expression" => Some((constructed_shape(value, src), WireSource::Annotated)),
-                "object" => Some((object_literal_shape(value, src, depth - 1), WireSource::Literal)),
+                "object" => Some((
+                    object_literal_shape(value, src, depth - 1),
+                    WireSource::Literal,
+                )),
                 _ => None,
             }
         }
@@ -5867,17 +6030,18 @@ fn object_property<'t>(obj: TsNode<'t>, key: &str, src: &[u8]) -> Option<TsNode<
         return None;
     }
     let mut cursor = obj.walk();
-    obj.named_children(&mut cursor).find_map(|m| match m.kind() {
-        "pair" if m
-            .child_by_field_name("key")
-            .and_then(|k| ts_property_key(k, src))
-            .is_some_and(|k| k == key) =>
-        {
-            m.child_by_field_name("value")
-        }
-        "shorthand_property_identifier" if text(m, src) == key => Some(m),
-        _ => None,
-    })
+    obj.named_children(&mut cursor)
+        .find_map(|m| match m.kind() {
+            "pair"
+                if m.child_by_field_name("key")
+                    .and_then(|k| ts_property_key(k, src))
+                    .is_some_and(|k| k == key) =>
+            {
+                m.child_by_field_name("value")
+            }
+            "shorthand_property_identifier" if text(m, src) == key => Some(m),
+            _ => None,
+        })
 }
 
 /// DT.1d: a `fetch` init object's `body: JSON.stringify(<expr>)` as the
@@ -5922,10 +6086,16 @@ fn fetch_response(call: TsNode, src: &[u8]) -> Option<Shape> {
                 .is_some_and(|p| text(p, src) == "json")
                 && json_call.kind() == "call_expression"
                 && json_call.child_by_field_name("function") == Some(parent);
-            if is_json { json_result_type(json_call, src) } else { None }
+            if is_json {
+                json_result_type(json_call, src)
+            } else {
+                None
+            }
         }
         "variable_declarator" if parent.child_by_field_name("value") == Some(node) => {
-            let name = parent.child_by_field_name("name").filter(|n| n.kind() == "identifier")?;
+            let name = parent
+                .child_by_field_name("name")
+                .filter(|n| n.kind() == "identifier")?;
             let name = text(name, src);
             let scope = enclosing_callable(call);
             let mut stack = vec![scope];
@@ -5937,7 +6107,8 @@ fn fetch_response(call: TsNode, src: &[u8]) -> Option<Shape> {
                     && f.kind() == "member_expression"
                     && f.child_by_field_name("object")
                         .is_some_and(|o| o.kind() == "identifier" && text(o, src) == name)
-                    && f.child_by_field_name("property").is_some_and(|p| text(p, src) == "json")
+                    && f.child_by_field_name("property")
+                        .is_some_and(|p| text(p, src) == "json")
                 {
                     json_calls.push(n);
                 }
@@ -5945,7 +6116,9 @@ fn fetch_response(call: TsNode, src: &[u8]) -> Option<Shape> {
                 stack.extend(n.named_children(&mut cursor));
             }
             json_calls.sort_by_key(|n| n.start_byte());
-            json_calls.into_iter().find_map(|jc| json_result_type(jc, src))
+            json_calls
+                .into_iter()
+                .find_map(|jc| json_result_type(jc, src))
         }
         _ => None,
     }
@@ -5981,8 +6154,12 @@ fn json_result_type(json_call: TsNode, src: &[u8]) -> Option<Shape> {
 /// `T` for a `Promise<T>` type node, else the node itself.
 fn unwrap_promise<'t>(ty: TsNode<'t>, src: &[u8]) -> TsNode<'t> {
     if ty.kind() == "generic_type"
-        && ty.child_by_field_name("name").is_some_and(|n| text(n, src) == "Promise")
-        && let Some(arg) = ty.child_by_field_name("type_arguments").and_then(first_named)
+        && ty
+            .child_by_field_name("name")
+            .is_some_and(|n| text(n, src) == "Promise")
+        && let Some(arg) = ty
+            .child_by_field_name("type_arguments")
+            .and_then(first_named)
     {
         return arg;
     }
@@ -6296,7 +6473,13 @@ const GQL_CLIENT_METHODS: &[&str] = &["query", "mutate", "watchQuery", "subscrib
 /// DT.1k: the options keys a client method reads its document from.
 const GQL_DOCUMENT_KEYS: &[&str] = &["query", "mutation", "document"];
 /// DT.1k: the hooks (Apollo Client React, urql) typed by their result.
-const GQL_HOOKS: &[&str] = &["useQuery", "useLazyQuery", "useMutation", "useSubscription", "useSuspenseQuery"];
+const GQL_HOOKS: &[&str] = &[
+    "useQuery",
+    "useLazyQuery",
+    "useMutation",
+    "useSubscription",
+    "useSuspenseQuery",
+];
 /// DT.1k: urql client methods taking the document positionally.
 const URQL_METHODS: &[&str] = &["query", "mutation", "subscription"];
 
@@ -6344,7 +6527,10 @@ fn gql_document_name(arg: TsNode, src: &[u8]) -> Option<String> {
     match arg.kind() {
         "identifier" | "shorthand_property_identifier" => Some(text(arg, src).to_string()),
         "member_expression" => {
-            let (object, property) = (arg.child_by_field_name("object")?, arg.child_by_field_name("property")?);
+            let (object, property) = (
+                arg.child_by_field_name("object")?,
+                arg.child_by_field_name("property")?,
+            );
             (object.kind() == "identifier" && property.kind() == "property_identifier")
                 .then(|| format!("{}.{}", text(object, src), text(property, src)))
         }
@@ -6366,7 +6552,10 @@ fn gql_options_document(arg: TsNode, src: &[u8]) -> Option<String> {
 fn try_detect_graphql_result(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     let (callee, type_args) = match awaited_generic_callee(call) {
         Some(found) => found,
-        None => match (call.child_by_field_name("function"), call.child_by_field_name("type_arguments")) {
+        None => match (
+            call.child_by_field_name("function"),
+            call.child_by_field_name("type_arguments"),
+        ) {
             (Some(f), Some(t)) => (f, t),
             _ => return,
         },
@@ -6379,9 +6568,10 @@ fn try_detect_graphql_result(call: TsNode, src: &[u8], from: NodeId, acc: &mut A
     };
     let found = match callee.kind() {
         "member_expression" => {
-            let (Some(object), Some(property)) =
-                (callee.child_by_field_name("object"), callee.child_by_field_name("property"))
-            else {
+            let (Some(object), Some(property)) = (
+                callee.child_by_field_name("object"),
+                callee.child_by_field_name("property"),
+            ) else {
                 return;
             };
             let method = text(property, src);
@@ -6410,9 +6600,18 @@ fn try_detect_graphql_result(call: TsNode, src: &[u8], from: NodeId, acc: &mut A
         return;
     };
     let raw = collapse_ws(text(ty, src));
-    let mut w = wire::ServerWire::new(wire::WireForm::GraphqlResult, &raw, line_at(call).saturating_add(1), ts_type_shape(ty, src));
+    let mut w = wire::ServerWire::new(
+        wire::WireForm::GraphqlResult,
+        &raw,
+        line_at(call).saturating_add(1),
+        ts_type_shape(ty, src),
+    );
     w.document = Some(document);
-    acc.graphql_results.push(GraphqlResultCand { from, gate, wire: w });
+    acc.graphql_results.push(GraphqlResultCand {
+        from,
+        gate,
+        wire: w,
+    });
 }
 
 /// DT.1k: the candidates whose gate the file's imports open, each a
@@ -6427,7 +6626,12 @@ fn attach_graphql_results(acc: &mut Acc) {
     let mut urql = false;
     for imp in &acc.imports {
         match &imp.target {
-            ImportTarget::Symbol { module, name, alias, .. } if is_graphql_client_module(module) => {
+            ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                ..
+            } if is_graphql_client_module(module) => {
                 urql |= is_urql_module(module);
                 if GQL_HOOKS.contains(&name.as_str()) {
                     hooks.insert(alias.as_deref().unwrap_or(name.as_str()));
@@ -6629,9 +6833,12 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             _ => None,
         };
         match resolved {
-            Some(to) => out
-                .edges
-                .push(evidence::intra_file_call(lang_tag(&acc.file_rel), uc.from, to, uc.line)),
+            Some(to) => out.edges.push(evidence::intra_file_call(
+                lang_tag(&acc.file_rel),
+                uc.from,
+                to,
+                uc.line,
+            )),
             None => out.calls.push(CallSite {
                 from: uc.from,
                 qualifier: uc.qualifier,
@@ -6716,7 +6923,11 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     let lang = lang_tag(&acc.file_rel);
     let accessor_edges = accessor_calls.edges.len();
     for (from, to, row, write) in accessor_calls.edges {
-        let rule = if write { "accessor_write" } else { "accessor_read" };
+        let rule = if write {
+            "accessor_write"
+        } else {
+            "accessor_read"
+        };
         let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
             .rule(rule)
             .line(row);
@@ -6757,10 +6968,17 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             // `inject(CountriesService).list()`) is DI from the scope that
             // runs it: an INJECTS of `T`, bound like A7.1's field form.
             if !shadowed
-                && let Some(row) =
-                    vr.sites.iter().filter(|(_, c)| is_inject(c)).map(|(r, _)| *r).min()
+                && let Some(row) = vr
+                    .sites
+                    .iter()
+                    .filter(|(_, c)| is_inject(c))
+                    .map(|(r, _)| *r)
+                    .min()
             {
-                let in_file = acc.classes.get(&vr.name).or_else(|| acc.const_vars.get(&vr.name));
+                let in_file = acc
+                    .classes
+                    .get(&vr.name)
+                    .or_else(|| acc.const_vars.get(&vr.name));
                 if let Some(&to) = in_file {
                     // A class's own member injecting it vouches for nothing;
                     // only the INJECTS is skipped, so the scope's non-inject
@@ -6876,7 +7094,11 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         // DT.5k: `T.X` on a CLASS of this file, read outside `T` (its own
         // members reading a static vouch for nothing), USES `T`.
         if let Some(&class) = acc.classes.get(&base) {
-            let local = out.nav.local_types.get(&from).is_some_and(|l| l.contains_key(&base));
+            let local = out
+                .nav
+                .local_types
+                .get(&from)
+                .is_some_and(|l| l.contains_key(&base));
             if !local && !within(&out.nav, from, class) {
                 let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
                     .rule("static_member")
@@ -6947,7 +7169,11 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     for mr in std::mem::take(&mut acc.member_reads) {
         let typed = match &mr.shape {
             RecvShape::ThisField(f) => mr.class.is_some_and(|c| {
-                out.nav.field_types.get(&c).and_then(|t| t.get(f)).is_some_and(|t| !t.is_empty())
+                out.nav
+                    .field_types
+                    .get(&c)
+                    .and_then(|t| t.get(f))
+                    .is_some_and(|t| !t.is_empty())
             }),
             RecvShape::Local => out
                 .nav
@@ -6965,16 +7191,23 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             continue;
         }
         let fact = if mr.write {
-            NavFact::MemberWrite { receiver: mr.receiver, name: mr.name, line: mr.row }
+            NavFact::MemberWrite {
+                receiver: mr.receiver,
+                name: mr.name,
+                line: mr.row,
+            }
         } else {
-            NavFact::MemberRead { receiver: mr.receiver, name: mr.name, line: mr.row }
+            NavFact::MemberRead {
+                receiver: mr.receiver,
+                name: mr.name,
+                line: mr.row,
+            }
         };
         out.nav.record_fact(mr.from, fact);
         acc.receiver_stats.member_reads += 1;
     }
 
-    let mut endpoint_nav_seen: std::collections::HashSet<NodeId> =
-        std::collections::HashSet::new();
+    let mut endpoint_nav_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let repo = acc.repo.expect("Acc.repo set in parse_file");
     let mut wire_stats = WireStats::default();
     for cand in acc.endpoints {
@@ -7089,15 +7322,24 @@ fn record_receiver_types(acc: &mut Acc, out: &mut FileParse) {
         let Some(field) = signal_read_field(receiver) else {
             continue;
         };
-        let Some((binding, ty)) = class.and_then(|c| acc.signal_queries.get(&(c, field.to_string())))
+        let Some((binding, ty)) =
+            class.and_then(|c| acc.signal_queries.get(&(c, field.to_string())))
         else {
             continue;
         };
         if !queries.contains(binding.as_str()) {
             continue;
         }
-        let fact = NavFact::ReceiverType { receiver: receiver.to_string(), ty: ty.clone() };
-        if !out.nav.nav_facts.get(&from).is_some_and(|f| f.contains(&fact)) {
+        let fact = NavFact::ReceiverType {
+            receiver: receiver.to_string(),
+            ty: ty.clone(),
+        };
+        if !out
+            .nav
+            .nav_facts
+            .get(&from)
+            .is_some_and(|f| f.contains(&fact))
+        {
             out.nav.record_fact(from, fact);
             acc.receiver_stats.query_receivers += 1;
         }
@@ -7112,7 +7354,12 @@ fn record_receiver_types(acc: &mut Acc, out: &mut FileParse) {
             continue;
         }
         let fact = NavFact::ReceiverType { receiver, ty };
-        if !out.nav.nav_facts.get(&scope).is_some_and(|f| f.contains(&fact)) {
+        if !out
+            .nav
+            .nav_facts
+            .get(&scope)
+            .is_some_and(|f| f.contains(&fact))
+        {
             out.nav.record_fact(scope, fact);
             acc.receiver_stats.inject_receivers += 1;
         }
@@ -7177,9 +7424,7 @@ fn build_alias_set(imports: &[ImportStmt]) -> std::collections::HashSet<&str> {
     let mut set = std::collections::HashSet::new();
     for imp in imports {
         match &imp.target {
-            ImportTarget::Module {
-                alias: Some(a), ..
-            } => {
+            ImportTarget::Module { alias: Some(a), .. } => {
                 set.insert(a.as_str());
             }
             ImportTarget::Symbol {
@@ -7312,7 +7557,8 @@ mod tests {
         ] {
             let parse = parse_file(src, path, "src::run", repo()).unwrap();
             let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::run::run");
-            let near = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::run::near");
+            let near =
+                NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::run::near");
             let edge = parse
                 .edges
                 .iter()
@@ -7321,7 +7567,11 @@ mod tests {
             let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
             assert_eq!(ev.emitter, tag, "{path}");
             assert_eq!(ev.rule.as_deref(), Some("intra_file"));
-            assert_eq!((ev.line, ev.basis), (Some(9), Basis::Site), "`return near() + x;` is row 9");
+            assert_eq!(
+                (ev.line, ev.basis),
+                (Some(9), Basis::Site),
+                "`return near() + x;` is row 9"
+            );
             let far = parse
                 .calls
                 .iter()
@@ -7463,7 +7713,10 @@ export class DashboardComponent {
         let without = format!("import {{ Component }} from \"@angular/core\";\n{body}");
         let parse = parse_file(&without, "src/dash.component.ts", "src::dash", repo()).unwrap();
         assert!(
-            !parse.refs.iter().any(|r| r.category == edge_category::INJECTS),
+            !parse
+                .refs
+                .iter()
+                .any(|r| r.category == edge_category::INJECTS),
             "un-imported inject() must not mint INJECTS refs, got: {:?}",
             parse.refs
         );
@@ -7537,18 +7790,10 @@ const hello = (n: string) => `hi ${n}`;
         let parse = parse_file(src, "src/greet.ts", "src::greet", repo()).unwrap();
 
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::greet");
-        let greet_id = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::FUNCTION,
-            "src::greet::greet",
-        );
-        let hello_id = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::FUNCTION,
-            "src::greet::hello",
-        );
+        let greet_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::greet::greet");
+        let hello_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::greet::hello");
 
         assert!(parse.nodes.iter().any(|n| n.id == module_id));
         assert!(parse.nodes.iter().any(|n| n.id == greet_id));
@@ -7557,8 +7802,18 @@ const hello = (n: string) => `hi ${n}`;
             "arrow const should be hoisted to a Function node"
         );
 
-        assert!(has_edge(&parse, module_id, greet_id, edge_category::DEFINES));
-        assert!(has_edge(&parse, module_id, hello_id, edge_category::DEFINES));
+        assert!(has_edge(
+            &parse,
+            module_id,
+            greet_id,
+            edge_category::DEFINES
+        ));
+        assert!(has_edge(
+            &parse,
+            module_id,
+            hello_id,
+            edge_category::DEFINES
+        ));
 
         // Intra-file bare call: greet → hello
         assert!(
@@ -7584,8 +7839,7 @@ export class User {
         let parse = parse_file(src, "src/user.ts", "src::user", repo()).unwrap();
 
         let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::user");
-        let class_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::user::User");
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::user::User");
         let login_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -7693,12 +7947,7 @@ export function doGreet(g: Greeter) {
 
         let iface_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "src::g::Greeter");
-        let fn_id = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::FUNCTION,
-            "src::g::doGreet",
-        );
+        let fn_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::g::doGreet");
 
         assert!(
             parse.nodes.iter().any(|n| n.id == iface_id),
@@ -7936,7 +8185,11 @@ export class UserService {
         let parse2 = parse_file(src2, "src/user.service.ts", "src::user::service", repo()).unwrap();
         let ep2 = endpoint_id(repo(), "GET", "/users/${…}");
         let payloads2 = endpoint_payloads(&parse2, ep2);
-        assert_eq!(payloads2.len(), 1, "templated absolute URL must normalise too");
+        assert_eq!(
+            payloads2.len(),
+            1,
+            "templated absolute URL must normalise too"
+        );
         assert_eq!(
             payloads2[0]["raw"],
             "https://api.example.com/users/${…}?expand=${…}"
@@ -7966,7 +8219,10 @@ export class AuthService {
         assert_eq!(hint[0]["path"], "/auth/login");
         assert_eq!(hint[0]["raw"], "auth/login");
         assert!(
-            !parse.nodes.iter().any(|n| n.id == endpoint_id(repo(), "POST", "auth/login")),
+            !parse
+                .nodes
+                .iter()
+                .any(|n| n.id == endpoint_id(repo(), "POST", "auth/login")),
             "the unslashed id must be gone"
         );
         for (method, path) in [("GET", "/api/users"), ("GET", "${…}/users")] {
@@ -8500,7 +8756,13 @@ export class TradeService {
 ";
         let (parse, .., stats) =
             parse_file_stats(src, "src/trade.service.ts", "src::trade", repo()).unwrap();
-        assert!(method_calls(&parse, "src::trade", "TradeService::list", "GET", "${…}/trades"));
+        assert!(method_calls(
+            &parse,
+            "src::trade",
+            "TradeService::list",
+            "GET",
+            "${…}/trades"
+        ));
         let hit = sole_hit(&parse, "GET", "${…}/trades");
         assert_eq!(hit["template"], "${environment.apiUrl}/trades");
         assert_eq!(hit["alias"], "this.api");
@@ -8538,7 +8800,10 @@ export class NotificationsService {
 ";
         let parse = parse_file(src, "src/n.ts", "src::n", repo()).unwrap();
         let hit = sole_hit(&parse, "GET", "${…}/unread");
-        assert_eq!(hit["template"], "${environment.apiUrl}/notifications/unread");
+        assert_eq!(
+            hit["template"],
+            "${environment.apiUrl}/notifications/unread"
+        );
         assert_eq!(hit["alias"], "this.base");
     }
 
@@ -9047,7 +9312,10 @@ export class GeoService {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         // CH.3b's facts only: DT.5k's MemberRead / MemberWrite facts share the scope.
         let facts = parse.nav.nav_facts.get(&id).cloned().unwrap_or_default();
-        facts.into_iter().filter(|f| matches!(f, NavFact::UrlPrefixKey { .. })).collect()
+        facts
+            .into_iter()
+            .filter(|f| matches!(f, NavFact::UrlPrefixKey { .. }))
+            .collect()
     }
 
     fn prefix_key(key: &str) -> Vec<NavFact> {
@@ -9098,20 +9366,41 @@ function ensureTrailingSlash(value: string): string {
 }
 ";
         let parse = parse_file(src, "src/api-url-builder.service.ts", "src::urls", repo()).unwrap();
-        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::ApiUrlBuilderService::{name}"));
+        let m = |name: &str| {
+            facts_of(
+                &parse,
+                node_kind::METHOD,
+                &format!("src::urls::ApiUrlBuilderService::{name}"),
+            )
+        };
         let f = |name: &str| facts_of(&parse, node_kind::FUNCTION, &format!("src::urls::{name}"));
-        assert_eq!(m("buildApiUrl"), prefix_key("apiPrefix"), "through buildApiUrlFrom");
-        assert_eq!(f("buildApiUrlFrom"), prefix_key("apiPrefix"), "its own read");
+        assert_eq!(
+            m("buildApiUrl"),
+            prefix_key("apiPrefix"),
+            "through buildApiUrlFrom"
+        );
+        assert_eq!(
+            f("buildApiUrlFrom"),
+            prefix_key("apiPrefix"),
+            "its own read"
+        );
         assert_eq!(m("buildApiRootUrl"), [], "reads apiBaseUrl only");
-        for helper in ["normalizeApiPrefix", "stripLeadingSlash", "ensureTrailingSlash"] {
+        for helper in [
+            "normalizeApiPrefix",
+            "stripLeadingSlash",
+            "ensureTrailingSlash",
+        ] {
             assert_eq!(f(helper), [], "{helper} reads no prefix member");
         }
         // The facts are build-time only: no node, edge or cell changes.
         assert!(
-            parse.nodes.iter().all(|n| n.cells.iter().all(|c| match &c.payload {
-                CellPayload::Json(s) | CellPayload::Text(s) => !s.contains("UrlPrefixKey"),
-                _ => true,
-            }))
+            parse
+                .nodes
+                .iter()
+                .all(|n| n.cells.iter().all(|c| match &c.payload {
+                    CellPayload::Json(s) | CellPayload::Text(s) => !s.contains("UrlPrefixKey"),
+                    _ => true,
+                }))
         );
     }
 
@@ -9162,14 +9451,32 @@ function d3(p: string): string { return cfg.apiPrefix + p; }
 declare const cfg: { apiPrefix: string };
 ";
         let parse = parse_file(src, "src/urls.ts", "src::urls", repo()).unwrap();
-        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::Urls::{name}"));
+        let m = |name: &str| {
+            facts_of(
+                &parse,
+                node_kind::METHOD,
+                &format!("src::urls::Urls::{name}"),
+            )
+        };
         let f = |name: &str| facts_of(&parse, node_kind::FUNCTION, &format!("src::urls::{name}"));
         assert_eq!(m("buildWsUrl"), prefix_key("apiPrefix"));
         assert_eq!(m("logUrls"), [], "no parameter: not a URL builder");
-        assert_eq!(m("fromEnv"), prefix_key("API_PREFIX"), "spelling as written");
+        assert_eq!(
+            m("fromEnv"),
+            prefix_key("API_PREFIX"),
+            "spelling as written"
+        );
         assert_eq!(m("fromCfg"), prefix_key("apiPrefix"), "a destructured read");
-        assert_eq!(m("fromPair"), prefix_key("basePath"), "a renamed destructured read");
-        assert_eq!(m("onPath"), prefix_key("#basePath"), "an arrow field, one bare parameter");
+        assert_eq!(
+            m("fromPair"),
+            prefix_key("basePath"),
+            "a renamed destructured read"
+        );
+        assert_eq!(
+            m("onPath"),
+            prefix_key("#basePath"),
+            "an arrow field, one bare parameter"
+        );
         assert_eq!(f("d3"), prefix_key("apiPrefix"));
         assert_eq!(f("d2"), prefix_key("apiPrefix"), "one call deep");
         assert_eq!(f("d1"), prefix_key("apiPrefix"), "two calls deep");
@@ -9205,10 +9512,20 @@ function helper(p: string): string {
 declare const cfg: { basePath: string };
 ";
         let parse = parse_file(src, "src/urls.ts", "src::urls", repo()).unwrap();
-        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::Urls::{name}"));
+        let m = |name: &str| {
+            facts_of(
+                &parse,
+                node_kind::METHOD,
+                &format!("src::urls::Urls::{name}"),
+            )
+        };
         assert_eq!(m("build"), [], "apiPrefix + basePath: ambiguous");
         assert_eq!(m("viaHelper"), [], "a callee's second key is ambiguous too");
-        assert_eq!(m("sameKeyTwice"), prefix_key("apiPrefix"), "one key, first spelling");
+        assert_eq!(
+            m("sameKeyTwice"),
+            prefix_key("apiPrefix"),
+            "one key, first spelling"
+        );
         assert_eq!(
             facts_of(&parse, node_kind::FUNCTION, "src::urls::helper"),
             prefix_key("basePath")
@@ -9271,12 +9588,22 @@ export class FriendService {
             ),
             "wrapper_of follows wrapper: {hit}"
         );
-        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/user/profile"));
+        let p = endpoint_payloads(
+            &parse,
+            endpoint_id(repo(), "GET", "/protected/user/profile"),
+        );
         assert_eq!(p[0]["wrapper"], "buildApiUrl");
-        assert_eq!(p[0]["wrapper_of"], "ApiUrlBuilderService", "through the URL method");
+        assert_eq!(
+            p[0]["wrapper_of"], "ApiUrlBuilderService",
+            "through the URL method"
+        );
         let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/later/x"));
         assert_eq!(p[0]["wrapper"], "buildApiUrl");
-        assert!(p[0].get("wrapper_of").is_none(), "a `function` rebinds `this`: {}", p[0]);
+        assert!(
+            p[0].get("wrapper_of").is_none(),
+            "a `function` rebinds `this`: {}",
+            p[0]
+        );
 
         let injected = "\
 import { Injectable, inject } from '@angular/core';
@@ -9297,7 +9624,10 @@ export class FriendService {
         let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/friends"));
         assert_eq!(p.len(), 1);
         assert_eq!(p[0]["wrapper"], "buildApiUrl");
-        assert_eq!(p[0]["wrapper_of"], "ApiUrlBuilderService", "an inject(T) field");
+        assert_eq!(
+            p[0]["wrapper_of"], "ApiUrlBuilderService",
+            "an inject(T) field"
+        );
 
         let untyped = "\
 export class FriendService {
@@ -9309,7 +9639,10 @@ export class FriendService {
 ";
         let parse = parse_file(untyped, "src/friend.service.ts", "src::friend", repo()).unwrap();
         let hit = payload(&parse, "GET", "/protected/friends");
-        assert!(hit.ends_with(r#""wrapper":"buildApiUrl"}"#), "no wrapper_of: {hit}");
+        assert!(
+            hit.ends_with(r#""wrapper":"buildApiUrl"}"#),
+            "no wrapper_of: {hit}"
+        );
     }
 
     /// CH.3b (e): prefix-like names that are not API prefixes (`cachePrefix`,
@@ -9349,14 +9682,26 @@ export class Store {
             parse.nav.nav_facts
         );
         assert!(
-            ["cachePrefix", "prefix", "apiBaseUrl", "logPrefix", "i18nPrefix"]
-                .iter()
-                .all(|n| !API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
+            [
+                "cachePrefix",
+                "prefix",
+                "apiBaseUrl",
+                "logPrefix",
+                "i18nPrefix"
+            ]
+            .iter()
+            .all(|n| !API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
         );
         assert!(
-            ["apiPrefix", "API_PREFIX", "api_base_path", "#basePath", "api-root"]
-                .iter()
-                .all(|n| API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
+            [
+                "apiPrefix",
+                "API_PREFIX",
+                "api_base_path",
+                "#basePath",
+                "api-root"
+            ]
+            .iter()
+            .all(|n| API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
         );
     }
 
@@ -9603,7 +9948,10 @@ export class UserService {
         let tail = endpoint_id(repo(), "GET", "/api/users/${…}");
         let payloads = endpoint_payloads(&parse, tail);
         assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0]["template"], "/api/users/${id}?q=${ environment.flag }");
+        assert_eq!(
+            payloads[0]["template"],
+            "/api/users/${id}?q=${ environment.flag }"
+        );
         assert_eq!(payloads[0]["raw"], "/api/users/${…}?q=${…}");
 
         let plain = endpoint_id(repo(), "GET", "/api/health");
@@ -9634,7 +9982,10 @@ export class HealthService {
         // Parser emits two Node entries — graph-build merges them into one with
         // two stacked cells.
         let occurrences = parse.nodes.iter().filter(|n| n.id == ep).count();
-        assert_eq!(occurrences, 2, "expected 2 Node emissions for same endpoint");
+        assert_eq!(
+            occurrences, 2,
+            "expected 2 Node emissions for same endpoint"
+        );
         let payloads = endpoint_payloads(&parse, ep);
         assert_eq!(payloads.len(), 2, "expected 2 ENDPOINT_HIT cells");
     }
@@ -9730,8 +10081,12 @@ class X extends Base implements IFoo {}
         let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::fees");
 
         // FEE_BPS is documented → emitted as STATE_VAR with a DOC cell.
-        let fee_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::fees::FEE_BPS");
+        let fee_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "src::fees::FEE_BPS",
+        );
         let fee = parse
             .nodes
             .iter()
@@ -9749,8 +10104,7 @@ class X extends Base implements IFoo {}
         );
 
         // TAG is an undocumented literal-primitive number → gated out.
-        let tag_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::fees::TAG");
+        let tag_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::fees::TAG");
         assert!(
             !parse.nodes.iter().any(|n| n.id == tag_id),
             "undocumented numeric const should be suppressed by the noise gate"
@@ -9819,7 +10173,10 @@ export interface Catalog extends Readable { count(): number; }
             );
         }
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::INHERITS_FROM),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::INHERITS_FROM),
             "the parser must not mint heritage edges, edges: {:?}",
             parse.edges
         );
@@ -9870,7 +10227,11 @@ export enum Color {
         let parse = parse_file(src, "src/color.ts", "src::color", repo()).unwrap();
         let module = id(node_kind::MODULE, "src::color");
         let color = id(node_kind::ENUM, "src::color::Color");
-        assert!(has_node(&parse, color), "ENUM Color missing: {:?}", parse.nodes);
+        assert!(
+            has_node(&parse, color),
+            "ENUM Color missing: {:?}",
+            parse.nodes
+        );
         assert!(has_edge(&parse, module, color, edge_category::DEFINES));
         let members: Vec<NodeId> = ["Red", "Green", "Blue"]
             .iter()
@@ -9878,8 +10239,15 @@ export enum Color {
             .collect();
         for (m, name) in members.iter().zip(["Red", "Green", "Blue"]) {
             assert!(has_node(&parse, *m), "ATTRIBUTE {name} missing");
-            assert!(has_edge(&parse, color, *m, edge_category::HAS_ATTRIBUTE), "{name}");
-            assert_eq!(parse.nav.parent_of.get(m), Some(&color), "{name} nav parent");
+            assert!(
+                has_edge(&parse, color, *m, edge_category::HAS_ATTRIBUTE),
+                "{name}"
+            );
+            assert_eq!(
+                parse.nav.parent_of.get(m),
+                Some(&color),
+                "{name} nav parent"
+            );
             assert_eq!(parse.nav.name_by_id.get(m).map(String::as_str), Some(name));
         }
         let attr_count = parse
@@ -9887,7 +10255,10 @@ export enum Color {
             .iter()
             .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ATTRIBUTE))
             .count();
-        assert_eq!(attr_count, 3, "one ATTRIBUTE per member, the enum name is not one");
+        assert_eq!(
+            attr_count, 3,
+            "one ATTRIBUTE per member, the enum name is not one"
+        );
 
         // POSITION of a member is its own line (0-based); DOC from its JSDoc.
         let green = parse.nodes.iter().find(|n| n.id == members[1]).unwrap();
@@ -9899,7 +10270,10 @@ export enum Color {
                 _ => None,
             })
             .expect("member POSITION cell");
-        assert!(pos.contains("\"start_line\":3,"), "Green sits on row 3: {pos}");
+        assert!(
+            pos.contains("\"start_line\":3,"),
+            "Green sits on row 3: {pos}"
+        );
         assert!(
             green.cells.iter().any(|c| c.kind == cell_type::DOC
                 && matches!(&c.payload, CellPayload::Text(t) if t.contains("calm"))),
@@ -9933,7 +10307,10 @@ enum Local {
             assert!(has_node(&parse, enum_id), "ENUM {e} missing");
             for m in members {
                 let m_id = id(node_kind::ATTRIBUTE, &format!("src::dir::{e}::{m}"));
-                assert!(has_edge(&parse, enum_id, m_id, edge_category::HAS_ATTRIBUTE), "{e}::{m}");
+                assert!(
+                    has_edge(&parse, enum_id, m_id, edge_category::HAS_ATTRIBUTE),
+                    "{e}::{m}"
+                );
             }
         }
     }
@@ -9945,7 +10322,10 @@ enum Local {
         let e = id(node_kind::ENUM, "src::e::E");
         for m in ["my-key", "other"] {
             let m_id = id(node_kind::ATTRIBUTE, &format!("src::e::E::{m}"));
-            assert!(has_edge(&parse, e, m_id, edge_category::HAS_ATTRIBUTE), "{m}");
+            assert!(
+                has_edge(&parse, e, m_id, edge_category::HAS_ATTRIBUTE),
+                "{m}"
+            );
         }
         assert_eq!(
             parse.nav.children_of.get(&e).map(Vec::len),
@@ -9970,7 +10350,11 @@ export function other(): string {
         let parse = parse_file(src, "src/color.ts", "src::color", repo()).unwrap();
         let warm = id(node_kind::FUNCTION, "src::color::warm");
         let red = id(node_kind::ATTRIBUTE, "src::color::Color::Red");
-        assert_eq!(uses_edges(&parse), vec![(warm, red)], "one deduped USES, the named member only");
+        assert_eq!(
+            uses_edges(&parse),
+            vec![(warm, red)],
+            "one deduped USES, the named member only"
+        );
         assert!(
             parse.refs.iter().all(|r| r.category != edge_category::USES),
             "a same-file enum never emits a USES ref (Color.Missing is dropped): {:?}",
@@ -9989,10 +10373,20 @@ export function pick(): Color {
 ";
         let parse = parse_file(src, "src/paint.ts", "src::paint", repo()).unwrap();
         let pick = id(node_kind::FUNCTION, "src::paint::pick");
-        assert_eq!(uses_refs(&parse, pick), vec![("Color".to_string(), "Green".to_string())]);
-        let r = parse.refs.iter().find(|r| r.category == edge_category::USES).unwrap();
+        assert_eq!(
+            uses_refs(&parse, pick),
+            vec![("Color".to_string(), "Green".to_string())]
+        );
+        let r = parse
+            .refs
+            .iter()
+            .find(|r| r.category == edge_category::USES)
+            .unwrap();
         assert_eq!(r.from_module, id(node_kind::MODULE, "src::paint"));
-        assert!(uses_edges(&parse).is_empty(), "the imported member binds in the graph crate");
+        assert!(
+            uses_edges(&parse).is_empty(),
+            "the imported member binds in the graph crate"
+        );
     }
 
     #[test]
@@ -10027,11 +10421,17 @@ export function load() {
 ";
         let parse = parse_file(src, "src/load.ts", "src::load", repo()).unwrap();
         let load = id(node_kind::FUNCTION, "src::load::load");
-        assert!(uses_refs(&parse, load).is_empty(), "a callee is a CallSite, not a USES ref");
+        assert!(
+            uses_refs(&parse, load).is_empty(),
+            "a callee is a CallSite, not a USES ref"
+        );
         assert!(
             parse.calls.iter().any(|c| c.from == load
                 && c.qualifier
-                    == CallQualifier::Attribute { base: "Api".into(), name: "Load".into() }),
+                    == CallQualifier::Attribute {
+                        base: "Api".into(),
+                        name: "Load".into()
+                    }),
             "Api.Load() stays a CallSite: {:?}",
             parse.calls
         );
@@ -10062,21 +10462,38 @@ enum Merged { B = 2, C = 3 }
 ";
         let parse = parse_file(src, "src/m.ts", "src::m", repo()).unwrap();
         let merged = id(node_kind::ENUM, "src::m::Merged");
-        assert_eq!(parse.nodes.iter().filter(|n| n.id == merged).count(), 1, "one ENUM node");
+        assert_eq!(
+            parse.nodes.iter().filter(|n| n.id == merged).count(),
+            1,
+            "one ENUM node"
+        );
         let module = id(node_kind::MODULE, "src::m");
         assert_eq!(
-            parse.nav.children_of.get(&module).map(|c| c.iter().filter(|x| **x == merged).count()),
+            parse
+                .nav
+                .children_of
+                .get(&module)
+                .map(|c| c.iter().filter(|x| **x == merged).count()),
             Some(1),
             "the module lists the enum once"
         );
-        let children = parse.nav.children_of.get(&merged).cloned().unwrap_or_default();
+        let children = parse
+            .nav
+            .children_of
+            .get(&merged)
+            .cloned()
+            .unwrap_or_default();
         let expect: Vec<NodeId> = ["A", "B", "C"]
             .iter()
             .map(|m| id(node_kind::ATTRIBUTE, &format!("src::m::Merged::{m}")))
             .collect();
         assert_eq!(children, expect, "A, B, C once each, in declaration order");
         assert_eq!(
-            parse.edges.iter().filter(|e| e.category == edge_category::HAS_ATTRIBUTE).count(),
+            parse
+                .edges
+                .iter()
+                .filter(|e| e.category == edge_category::HAS_ATTRIBUTE)
+                .count(),
             3
         );
     }
@@ -10096,7 +10513,9 @@ enum Merged { B = 2, C = 3 }
     }
 
     fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
-        v.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect()
+        v.iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
     }
 
     #[test]
@@ -10679,7 +11098,10 @@ class Hero {
 ";
         let parse = parse_file(src, "src/hero.component.ts", "src::hero", repo()).unwrap();
         let class = id(node_kind::CLASS, "src::hero::Hero");
-        let field = id(node_kind::METHOD, "src::hero::Hero::handleMotionPreferenceChange");
+        let field = id(
+            node_kind::METHOD,
+            "src::hero::Hero::handleMotionPreferenceChange",
+        );
         assert!(has_node(&parse, field), "the arrow field is a METHOD");
         assert!(has_edge(&parse, class, field, edge_category::DEFINES));
         for (callee, row) in [("stopAnimation", 5), ("renderFrame", 6)] {
@@ -10702,8 +11124,14 @@ class Hero {
         );
         let (code, pos, _) = method_cells(&parse, "src::hero::Hero::handleMotionPreferenceChange");
         assert!(pos.contains("\"start_line\":3,"), "the field's row: {pos}");
-        assert!(code.starts_with("private handleMotionPreferenceChange"), "CODE: {code}");
-        assert_eq!(fn_field_counts(src, "src/hero.component.ts", "src::hero"), (1, 0));
+        assert!(
+            code.starts_with("private handleMotionPreferenceChange"),
+            "CODE: {code}"
+        );
+        assert_eq!(
+            fn_field_counts(src, "src/hero.component.ts", "src::hero"),
+            (1, 0)
+        );
     }
 
     #[test]
@@ -10721,7 +11149,11 @@ class Hero {
             has_edge(&parse, init, field, edge_category::CALLS),
             "a method declared above the field binds `this.applyColor()` to it"
         );
-        assert!(call_site_names(&parse, init).is_empty(), "{:?}", parse.calls);
+        assert!(
+            call_site_names(&parse, init).is_empty(),
+            "{:?}",
+            parse.calls
+        );
     }
 
     #[test]
@@ -10738,7 +11170,10 @@ class C {
         for field in ["onSave", "items"] {
             let m = id(node_kind::METHOD, &format!("src::c::C::{field}"));
             assert!(has_node(&parse, m), "{field} is a METHOD");
-            assert!(has_edge(&parse, m, persist, edge_category::CALLS), "{field} -> persist");
+            assert!(
+                has_edge(&parse, m, persist, edge_category::CALLS),
+                "{field} -> persist"
+            );
         }
         let (_, stats, ..) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
         assert_eq!((stats.arrow, stats.function, stats.calls), (0, 2, 2));
@@ -10755,10 +11190,17 @@ class C {
         assert!(has_node(&parse, create), "a static arrow field is a METHOD");
         assert!(has_edge(&parse, tick, notify, edge_category::CALLS));
         assert!(
-            !parse.edges.iter().any(|e| e.from == create && e.category == edge_category::CALLS),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.from == create && e.category == edge_category::CALLS),
             "`new Store()` is not a call"
         );
-        assert!(call_site_names(&parse, create).is_empty(), "{:?}", parse.calls);
+        assert!(
+            call_site_names(&parse, create).is_empty(),
+            "{:?}",
+            parse.calls
+        );
     }
 
     #[test]
@@ -10797,7 +11239,10 @@ export class K {
             let v = id(node_kind::STATE_VAR, &format!("src::k::K::{field}"));
             assert!(!has_node(&parse, v), "{field} is no STATE_VAR");
         }
-        assert_eq!(inject_targets(&parse, "src::k", "src::k::K"), vec!["ApiService".to_string()]);
+        assert_eq!(
+            inject_targets(&parse, "src::k", "src::k::K"),
+            vec!["ApiService".to_string()]
+        );
         assert_eq!(fn_field_counts(src, "src/k.component.ts", "src::k"), (0, 0));
     }
 
@@ -10806,8 +11251,16 @@ export class K {
         let src = "class K { f = () => a(); f() { b(); } }\n";
         let parse = parse_file(src, "src/k.ts", "src::k", repo()).unwrap();
         let f = id(node_kind::METHOD, "src::k::K::f");
-        assert_eq!(parse.nodes.iter().filter(|n| n.id == f).count(), 1, "one node for `f`");
-        assert_eq!(call_site_names(&parse, f), vec!["b".to_string()], "the method's body only");
+        assert_eq!(
+            parse.nodes.iter().filter(|n| n.id == f).count(),
+            1,
+            "one node for `f`"
+        );
+        assert_eq!(
+            call_site_names(&parse, f),
+            vec!["b".to_string()],
+            "the method's body only"
+        );
         assert_eq!(fn_field_counts(src, "src/k.ts", "src::k"), (0, 1));
 
         // A second field of one name keeps the first field's node.
@@ -10901,16 +11354,30 @@ export class Grid {
             let qname = format!("src::grid::Grid::{field}");
             let v = id(node_kind::STATE_VAR, &qname);
             assert!(has_node(&parse, v), "{field} is a STATE_VAR");
-            assert_eq!(parse.nodes.iter().filter(|n| n.id == v).count(), 1, "{field} once");
-            assert!(has_edge(&parse, class, v, edge_category::DEFINES), "DEFINES {field}");
+            assert_eq!(
+                parse.nodes.iter().filter(|n| n.id == v).count(),
+                1,
+                "{field} once"
+            );
+            assert!(
+                has_edge(&parse, class, v, edge_category::DEFINES),
+                "DEFINES {field}"
+            );
             assert!(
                 !has_node(&parse, id(node_kind::METHOD, &qname)),
                 "{field} is no METHOD"
             );
             let pos = state_position(&parse, &qname);
-            assert!(pos.contains(&format!("\"start_line\":{row},")), "{field}: {pos}");
+            assert!(
+                pos.contains(&format!("\"start_line\":{row},")),
+                "{field}: {pos}"
+            );
             assert_eq!(parse.nav.kind_by_id.get(&v), Some(&node_kind::STATE_VAR));
-            assert_eq!(parse.nav.parent_of.get(&v), Some(&class), "{field}'s nav parent");
+            assert_eq!(
+                parse.nav.parent_of.get(&v),
+                Some(&class),
+                "{field}'s nav parent"
+            );
         }
         assert_eq!(
             state_field_counts(GRID, "src/grid.component.ts", "src::grid"),
@@ -10927,16 +11394,37 @@ export class Grid {
         let m = |f: &str| id(node_kind::METHOD, &format!("src::grid::Grid::{f}"));
         assert_intra_call(&parse, v("total"), v("rows"), 5, "total -> rows");
         assert_intra_call(&parse, v("total"), v("page"), 5, "total -> page");
-        assert_intra_call(&parse, v("isLong"), m("longest"), 6, "isLong -> longest (declared below)");
+        assert_intra_call(
+            &parse,
+            v("isLong"),
+            m("longest"),
+            6,
+            "isLong -> longest (declared below)",
+        );
         assert_intra_call(&parse, v("isLong"), v("rows"), 6, "isLong -> rows");
-        assert_intra_call(&parse, m("next"), v("page"), 9, "next -> page (a method's signal read)");
+        assert_intra_call(
+            &parse,
+            m("next"),
+            v("page"),
+            9,
+            "next -> page (a method's signal read)",
+        );
         // The factory call is an ordinary library CallSite of the field.
-        assert_eq!(call_site_names(&parse, v("total")), vec!["computed".to_string()]);
-        assert_eq!(call_site_names(&parse, v("rows")), vec!["required".to_string()]);
+        assert_eq!(
+            call_site_names(&parse, v("total")),
+            vec!["computed".to_string()]
+        );
+        assert_eq!(
+            call_site_names(&parse, v("rows")),
+            vec!["required".to_string()]
+        );
         assert_eq!(call_site_names(&parse, m("next")), vec!["set".to_string()]);
         let class = id(node_kind::CLASS, "src::grid::Grid");
         assert!(
-            !parse.edges.iter().any(|e| e.from == class && e.category == edge_category::CALLS),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.from == class && e.category == edge_category::CALLS),
             "the class takes none of the initializers' calls"
         );
         assert!(
@@ -10965,15 +11453,24 @@ export class K {
         let parse = parse_file(src, "src/k.component.ts", "src::k", repo()).unwrap();
         for field in ["http", "store", "subject", "rafId", "state"] {
             let qname = format!("src::k::K::{field}");
-            assert!(!has_node(&parse, id(node_kind::STATE_VAR, &qname)), "{field} is no STATE_VAR");
-            assert!(!has_node(&parse, id(node_kind::METHOD, &qname)), "{field} is no METHOD");
+            assert!(
+                !has_node(&parse, id(node_kind::STATE_VAR, &qname)),
+                "{field} is no STATE_VAR"
+            );
+            assert!(
+                !has_node(&parse, id(node_kind::METHOD, &qname)),
+                "{field} is no METHOD"
+            );
         }
         assert_eq!(
             inject_targets(&parse, "src::k", "src::k::K"),
             vec!["HttpClient".to_string(), "Store".to_string()],
             "both inject() fields keep their INJECTS"
         );
-        assert_eq!(state_field_counts(src, "src/k.component.ts", "src::k"), (0, 0, 0));
+        assert_eq!(
+            state_field_counts(src, "src/k.component.ts", "src::k"),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -10988,11 +11485,16 @@ export class ProfileComponent {
   readonly profile = toSignal(this.http.get<string>('/api/profile'));
 }
 ";
-        let parse =
-            parse_file(src, "src/profile.component.ts", "src::profile", repo()).unwrap();
+        let parse = parse_file(src, "src/profile.component.ts", "src::profile", repo()).unwrap();
         let ep = endpoint_id(repo(), "GET", "/api/profile");
-        assert!(has_node(&parse, ep), "the client call in a field is an ENDPOINT");
-        let profile = id(node_kind::STATE_VAR, "src::profile::ProfileComponent::profile");
+        assert!(
+            has_node(&parse, ep),
+            "the client call in a field is an ENDPOINT"
+        );
+        let profile = id(
+            node_kind::STATE_VAR,
+            "src::profile::ProfileComponent::profile",
+        );
         let froms: Vec<NodeId> = parse
             .edges
             .iter()
@@ -11033,7 +11535,10 @@ export class FriendService {
             }
         );
         assert_eq!(site.line, 4, "the call's row");
-        assert_eq!(state_field_counts(src, "src/friend.service.ts", "src::friend"), (1, 0, 1));
+        assert_eq!(
+            state_field_counts(src, "src/friend.service.ts", "src::friend"),
+            (1, 0, 1)
+        );
     }
 
     #[test]
@@ -11044,11 +11549,17 @@ export class FriendService {
         for field in ["FALLBACK", "#ticks"] {
             let v = id(node_kind::STATE_VAR, &format!("src::store::Store::{field}"));
             assert!(has_node(&parse, v), "{field} is a STATE_VAR");
-            assert!(has_edge(&parse, class, v, edge_category::DEFINES), "DEFINES {field}");
+            assert!(
+                has_edge(&parse, class, v, edge_category::DEFINES),
+                "DEFINES {field}"
+            );
         }
         let ticks = id(node_kind::STATE_VAR, "src::store::Store::#ticks");
         assert_eq!(call_site_names(&parse, ticks), vec!["interval".to_string()]);
-        assert_eq!(state_field_counts(src, "src/store.ts", "src::store"), (2, 0, 2));
+        assert_eq!(
+            state_field_counts(src, "src/store.ts", "src::store"),
+            (2, 0, 2)
+        );
     }
 
     #[test]
@@ -11075,16 +11586,29 @@ class W {
         for field in ["d", "e", "f", "h"] {
             assert!(!has_node(&parse, v(field)), "{field} is no STATE_VAR");
         }
-        assert_eq!(parse.nodes.iter().filter(|n| n.id == v("g")).count(), 1, "one node for `g`");
-        assert_eq!(call_site_names(&parse, v("g")), vec!["load".to_string()], "the first `g` only");
+        assert_eq!(
+            parse.nodes.iter().filter(|n| n.id == v("g")).count(),
+            1,
+            "one node for `g`"
+        );
+        assert_eq!(
+            call_site_names(&parse, v("g")),
+            vec!["load".to_string()],
+            "the first `g` only"
+        );
         let f = id(node_kind::METHOD, "src::w::W::f");
         assert!(has_node(&parse, f), "the method `f` keeps its node");
         assert!(
-            !parse.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "signal" && c.line == 6)),
+            !parse.calls.iter().any(
+                |c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "signal" && c.line == 6)
+            ),
             "a shadowed field's initializer is not walked: {:?}",
             parse.calls
         );
-        assert!(has_node(&parse, id(node_kind::METHOD, "src::w::W::h")), "CG.1 keeps the arrow");
+        assert!(
+            has_node(&parse, id(node_kind::METHOD, "src::w::W::h")),
+            "CG.1 keeps the arrow"
+        );
         assert_eq!(state_field_counts(src, "src/w.ts", "src::w"), (4, 1, 4));
     }
 
@@ -11127,41 +11651,77 @@ export abstract class BaseRepo<T> {
         use glia_code_domain::evidence::{Basis, Evidence};
         let parse = parse_file(BASE_REPO, "src/base-repo.ts", "src::base-repo", repo()).unwrap();
         let class = id(node_kind::CLASS, "src::base-repo::BaseRepo");
-        assert!(has_node(&parse, class), "`export abstract class` is a CLASS");
-        let m = |name: &str| id(node_kind::METHOD, &format!("src::base-repo::BaseRepo::{name}"));
+        assert!(
+            has_node(&parse, class),
+            "`export abstract class` is a CLASS"
+        );
+        let m = |name: &str| {
+            id(
+                node_kind::METHOD,
+                &format!("src::base-repo::BaseRepo::{name}"),
+            )
+        };
         for name in ["load", "fetchOne", "label", "describe"] {
             assert!(has_node(&parse, m(name)), "{name} is a METHOD");
-            assert!(has_edge(&parse, class, m(name), edge_category::DEFINES), "DEFINES {name}");
+            assert!(
+                has_edge(&parse, class, m(name), edge_category::DEFINES),
+                "DEFINES {name}"
+            );
         }
         for (from, to, row) in [("load", "fetchOne", 2), ("describe", "label", 7)] {
             let edge = parse
                 .edges
                 .iter()
                 .find(|e| e.from == m(from) && e.to == m(to) && e.category == edge_category::CALLS)
-                .unwrap_or_else(|| panic!("{from} -> {to} resolves in-file, edges {:?}", parse.edges));
+                .unwrap_or_else(|| {
+                    panic!("{from} -> {to} resolves in-file, edges {:?}", parse.edges)
+                });
             let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
-            assert_eq!((ev.line, ev.basis), (Some(row), Basis::Site), "{from} -> {to}");
+            assert_eq!(
+                (ev.line, ev.basis),
+                (Some(row), Basis::Site),
+                "{from} -> {to}"
+            );
             assert_eq!(ev.rule.as_deref(), Some("intra_file"));
         }
         let (code, pos, _) = method_cells(&parse, "src::base-repo::BaseRepo::fetchOne");
-        assert_eq!(code, "abstract fetchOne(id: string): T", "the signature is the CODE");
-        assert!(pos.contains("\"start_line\":4,"), "fetchOne sits on row 4: {pos}");
+        assert_eq!(
+            code, "abstract fetchOne(id: string): T",
+            "the signature is the CODE"
+        );
+        assert!(
+            pos.contains("\"start_line\":4,"),
+            "fetchOne sits on row 4: {pos}"
+        );
         let (code, _, _) = method_cells(&parse, "src::base-repo::BaseRepo::label");
         assert_eq!(code, "protected abstract label(): string");
         for name in ["fetchOne", "label"] {
-            assert!(call_site_names(&parse, m(name)).is_empty(), "{name} has no body to call from");
             assert!(
-                !parse.edges.iter().any(|e| e.from == m(name) && e.category == edge_category::CALLS),
+                call_site_names(&parse, m(name)).is_empty(),
+                "{name} has no body to call from"
+            );
+            assert!(
+                !parse
+                    .edges
+                    .iter()
+                    .any(|e| e.from == m(name) && e.category == edge_category::CALLS),
                 "{name} makes no call"
             );
         }
         assert!(
-            call_site_names(&parse, m("load")).is_empty() && call_site_names(&parse, m("describe")).is_empty(),
+            call_site_names(&parse, m("load")).is_empty()
+                && call_site_names(&parse, m("describe")).is_empty(),
             "both self-calls bind in-file: {:?}",
             parse.calls
         );
-        assert!(!has_node(&parse, id(node_kind::FUNCTION, "src::base-repo::fetchOne")));
-        assert_eq!(abstract_counts(BASE_REPO, "src/base-repo.ts", "src::base-repo"), (1, 2));
+        assert!(!has_node(
+            &parse,
+            id(node_kind::FUNCTION, "src::base-repo::fetchOne")
+        ));
+        assert_eq!(
+            abstract_counts(BASE_REPO, "src/base-repo.ts", "src::base-repo"),
+            (1, 2)
+        );
     }
 
     #[test]
@@ -11169,7 +11729,10 @@ export abstract class BaseRepo<T> {
         let src = "abstract class A { abstract run(): void; }\nexport default abstract class B { go() {} }\n";
         let parse = parse_file(src, "src/ab.ts", "src::ab", repo()).unwrap();
         for qname in ["src::ab::A", "src::ab::B"] {
-            assert!(has_node(&parse, id(node_kind::CLASS, qname)), "CLASS {qname}");
+            assert!(
+                has_node(&parse, id(node_kind::CLASS, qname)),
+                "CLASS {qname}"
+            );
         }
         assert!(has_node(&parse, id(node_kind::METHOD, "src::ab::A::run")));
         assert!(has_node(&parse, id(node_kind::METHOD, "src::ab::B::go")));
@@ -11182,7 +11745,11 @@ export abstract class BaseRepo<T> {
         let parse = parse_file(odd, "src/c.ts", "src::c", repo()).unwrap();
         for name in ["m", "m2"] {
             let mid = id(node_kind::METHOD, &format!("src::c::C::{name}"));
-            assert_eq!(parse.nodes.iter().filter(|n| n.id == mid).count(), 1, "{name} once");
+            assert_eq!(
+                parse.nodes.iter().filter(|n| n.id == mid).count(),
+                1,
+                "{name} once"
+            );
         }
         let c = id(node_kind::CLASS, "src::c::C");
         let defined = parse
@@ -11195,7 +11762,10 @@ export abstract class BaseRepo<T> {
         assert_eq!(fn_field_counts(odd, "src/c.ts", "src::c"), (0, 1));
 
         // A plain class counts nothing.
-        assert_eq!(abstract_counts("class P { go() {} }\n", "src/p.ts", "src::p"), (0, 0));
+        assert_eq!(
+            abstract_counts("class P { go() {} }\n", "src/p.ts", "src::p"),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -11205,8 +11775,14 @@ export abstract class BaseRepo<T> {
         let class = id(node_kind::CLASS, "src::repo::Repo");
         assert!(has_node(&parse, class));
         let refs = bare_refs(&parse, class);
-        assert!(refs.contains(&("Base".to_string(), edge_category::INHERITS_FROM)), "{refs:?}");
-        assert!(refs.contains(&("IRepo".to_string(), edge_category::IMPLEMENTS)), "{refs:?}");
+        assert!(
+            refs.contains(&("Base".to_string(), edge_category::INHERITS_FROM)),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&("IRepo".to_string(), edge_category::IMPLEMENTS)),
+            "{refs:?}"
+        );
     }
 
     #[test]
@@ -11251,7 +11827,12 @@ export abstract class BaseRepo<T> {
     #[test]
     fn abstract_member_carries_the_fact() {
         let parse = parse_file(BASE_REPO, "src/base-repo.ts", "src::base-repo", repo()).unwrap();
-        let m = |name: &str| id(node_kind::METHOD, &format!("src::base-repo::BaseRepo::{name}"));
+        let m = |name: &str| {
+            id(
+                node_kind::METHOD,
+                &format!("src::base-repo::BaseRepo::{name}"),
+            )
+        };
         for name in ["fetchOne", "label"] {
             assert_eq!(
                 parse.nav.nav_facts.get(&m(name)),
@@ -11260,15 +11841,26 @@ export abstract class BaseRepo<T> {
             );
         }
         for name in ["load", "describe"] {
-            assert!(!parse.nav.nav_facts.contains_key(&m(name)), "{name} is concrete");
+            assert!(
+                !parse.nav.nav_facts.contains_key(&m(name)),
+                "{name} is concrete"
+            );
         }
         let odd = "abstract class C {\n  abstract m(): void;\n  abstract m(): void;\n  n() {}\n}\n";
         let parse = parse_file(odd, "src/c.ts", "src::c", repo()).unwrap();
         assert_eq!(
-            parse.nav.nav_facts.get(&id(node_kind::METHOD, "src::c::C::m")),
+            parse
+                .nav
+                .nav_facts
+                .get(&id(node_kind::METHOD, "src::c::C::m")),
             Some(&vec![NavFact::AbstractMethod])
         );
-        assert!(!parse.nav.nav_facts.contains_key(&id(node_kind::METHOD, "src::c::C::n")));
+        assert!(
+            !parse
+                .nav
+                .nav_facts
+                .contains_key(&id(node_kind::METHOD, "src::c::C::n"))
+        );
     }
 
     /// `super.m()` is a SuperMethod CallSite at the call's row, never a
@@ -11281,9 +11873,16 @@ export abstract class BaseRepo<T> {
         let parse = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
         let c_m = id(node_kind::METHOD, "src::c::C::m");
         let c_n = id(node_kind::METHOD, "src::c::C::n");
-        let from_c_m: Vec<(&CallQualifier, u32)> =
-            parse.calls.iter().filter(|c| c.from == c_m).map(|c| (&c.qualifier, c.line)).collect();
-        assert_eq!(from_c_m, vec![(&CallQualifier::SuperMethod("m".to_string()), 2)]);
+        let from_c_m: Vec<(&CallQualifier, u32)> = parse
+            .calls
+            .iter()
+            .filter(|c| c.from == c_m)
+            .map(|c| (&c.qualifier, c.line))
+            .collect();
+        assert_eq!(
+            from_c_m,
+            vec![(&CallQualifier::SuperMethod("m".to_string()), 2)]
+        );
         assert!(
             !parse.calls.iter().any(|c| matches!(
                 &c.qualifier,
@@ -11292,9 +11891,16 @@ export abstract class BaseRepo<T> {
             "{:?}",
             parse.calls
         );
-        assert!(has_edge(&parse, c_m, c_n, edge_category::CALLS), "this.n() binds in-file");
+        assert!(
+            has_edge(&parse, c_m, c_n, edge_category::CALLS),
+            "this.n() binds in-file"
+        );
         let ctor = id(node_kind::METHOD, "src::c::C::constructor");
-        assert!(!parse.calls.iter().any(|c| c.from == ctor), "{:?}", parse.calls);
+        assert!(
+            !parse.calls.iter().any(|c| c.from == ctor),
+            "{:?}",
+            parse.calls
+        );
     }
 
     /// CH.4: the USES edges `parse` holds from `from`, as `(to, evidence)`.
@@ -11307,7 +11913,12 @@ export abstract class BaseRepo<T> {
             .edges
             .iter()
             .filter(|e| e.from == from && e.category == edge_category::USES)
-            .map(|e| (e.to, Evidence::of(e).expect("a method_ref USES carries evidence")))
+            .map(|e| {
+                (
+                    e.to,
+                    Evidence::of(e).expect("a method_ref USES carries evidence"),
+                )
+            })
             .collect()
     }
 
@@ -11395,9 +12006,18 @@ export class Hero {
         let src = "class C {\n  render() { this.handleTick(0); }\n  handleTick(n: number) {}\n}\n";
         let parse = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
         let m = |f: &str| id(node_kind::METHOD, &format!("src::c::C::{f}"));
-        assert_intra_call(&parse, m("render"), m("handleTick"), 1, "render -> handleTick");
+        assert_intra_call(
+            &parse,
+            m("render"),
+            m("handleTick"),
+            1,
+            "render -> handleTick",
+        );
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::USES),
             "{:?}",
             parse.edges
         );
@@ -11440,7 +12060,10 @@ export class Sub extends Base {
             "the getter is a METHOD (so the accessor filter is what drops it)"
         );
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::USES),
             "no USES: {:?}",
             parse.edges
         );
@@ -11485,7 +12108,10 @@ export class Hero {
 ";
         let parse = parse_file(src, "src/hero.ts", "src::hero", repo()).unwrap();
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::USES),
             "{:?}",
             parse.edges
         );
@@ -11592,7 +12218,10 @@ export const g = (h: Helper) => h.go();
             local_types(&parse, "src::guard::guard"),
             locals(&[("auth", "AuthService")])
         );
-        let aliased = format!("import {{ inject as di }} from '@angular/core';\n{}", body.replace("inject(", "di("));
+        let aliased = format!(
+            "import {{ inject as di }} from '@angular/core';\n{}",
+            body.replace("inject(", "di(")
+        );
         let parse = parse_file(&aliased, "src/guard.ts", "src::guard", repo()).unwrap();
         assert_eq!(
             local_types(&parse, "src::guard::guard"),
@@ -11600,7 +12229,10 @@ export const g = (h: Helper) => h.go();
         );
         let local_fn = format!("function inject(t: unknown) {{ return t; }}\n{body}");
         let parse = parse_file(&local_fn, "src/guard.ts", "src::guard", repo()).unwrap();
-        assert_eq!(local_types(&parse, "src::guard::guard"), locals(&[("auth", "")]));
+        assert_eq!(
+            local_types(&parse, "src::guard::guard"),
+            locals(&[("auth", "")])
+        );
     }
 
     /// DF.22a: `[ts-locals]` counts the `x.m()` sites on a recorded local by
@@ -11636,7 +12268,8 @@ export class C {
         );
         let guard = "import { inject } from '@angular/core';\n\
                      export const guard = () => { const auth = inject(AuthService); return auth.check(); };\n";
-        let (_, _, _, _, stats, ..) = parse_file_stats(guard, "src/g.ts", "src::g", repo()).unwrap();
+        let (_, _, _, _, stats, ..) =
+            parse_file_stats(guard, "src/g.ts", "src::g", repo()).unwrap();
         assert_eq!((stats.typed, stats.inject, stats.unknown), (1, 1, 0));
     }
 }
@@ -11795,7 +12428,16 @@ export class Api { base = '/api'; }
         let generic = one(&parse, node_kind::CLASS, "src::p::Generic");
         assert!(generic.open && generic.extends.is_empty());
         for no_model in [
-            "Store", "Service", "Hidden", "Statics", "Getter", "Handler", "Protected", "Bare", "Widget", "Api",
+            "Store",
+            "Service",
+            "Hidden",
+            "Statics",
+            "Getter",
+            "Handler",
+            "Protected",
+            "Bare",
+            "Widget",
+            "Api",
         ] {
             assert!(
                 schemas(&parse, node_kind::CLASS, &format!("src::p::{no_model}")).is_empty(),
@@ -11810,7 +12452,8 @@ export class Api { base = '/api'; }
         let src = include_str!(
             "../../../../bench/substrate-gap/fixtures/models-declared-fields/web/src/models/account.ts"
         );
-        let parse = parse_file(src, "src/models/account.ts", "src::models::account", repo()).unwrap();
+        let parse =
+            parse_file(src, "src/models/account.ts", "src::models::account", repo()).unwrap();
         let q = |n: &str| format!("src::models::account::{n}");
         assert_eq!(
             schemas(&parse, node_kind::INTERFACE, &q("Account")),
@@ -11842,11 +12485,18 @@ export class Api { base = '/api'; }
                     .to_string()
             ]
         );
-        assert_eq!(schemas(&parse, node_kind::INTERFACE, &q("Audited")).len(), 1);
+        assert_eq!(
+            schemas(&parse, node_kind::INTERFACE, &q("Audited")).len(),
+            1
+        );
         assert!(schemas(&parse, node_kind::CLASS, &q("AccountStore")).is_empty());
         // Every payload reads back through the wire vocabulary unchanged.
         for n in &parse.nodes {
-            for c in n.cells.iter().filter(|c| c.kind == cell_type::SCHEMA_FIELDS) {
+            for c in n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            {
                 let schema = ModelSchema::from_cell(c).expect("a wire ModelSchema");
                 assert_eq!(schema.cell(), *c);
             }
@@ -11958,7 +12608,10 @@ mod wire_shape_tests {
         let src = "async function f() { const r = await this.http.get<Foo>(u).toPromise(); }";
         let tree = ts_tree(src);
         let call = first_call(&tree);
-        assert_eq!(call.child_by_field_name("function").unwrap().kind(), "member_expression");
+        assert_eq!(
+            call.child_by_field_name("function").unwrap().kind(),
+            "member_expression"
+        );
         let inner = call
             .child_by_field_name("function")
             .and_then(|m| m.child_by_field_name("object"))
@@ -11967,12 +12620,22 @@ mod wire_shape_tests {
         assert_eq!(text(member, src.as_bytes()), "this.http.get");
 
         for (src, kind) in [
-            ("async function f() { const r = axios.get<Foo>(u); }", "member_expression"),
-            ("async function f() { const r = await axios.get(u); }", "member_expression"),
+            (
+                "async function f() { const r = axios.get<Foo>(u); }",
+                "member_expression",
+            ),
+            (
+                "async function f() { const r = await axios.get(u); }",
+                "member_expression",
+            ),
         ] {
             let tree = ts_tree(src);
             let call = first_call(&tree);
-            assert_eq!(call.child_by_field_name("function").unwrap().kind(), kind, "{src}");
+            assert_eq!(
+                call.child_by_field_name("function").unwrap().kind(),
+                kind,
+                "{src}"
+            );
             assert!(awaited_generic_callee(call).is_none(), "{src}");
         }
     }
@@ -11985,10 +12648,17 @@ mod wire_shape_tests {
             "src/order.service.ts",
         );
         let hit = sole(&p, "GET", "/api/orders");
-        assert!(hit.ends_with(",\"response\":{\"array\":true,\"type\":\"Order\"}}"), "{hit}");
+        assert!(
+            hit.ends_with(",\"response\":{\"array\":true,\"type\":\"Order\"}}"),
+            "{hit}"
+        );
         assert_eq!(shapes(&hit).1, None);
         let stats = last_stats();
-        assert_eq!((stats.responses, stats.requests, stats.typed), (1, 0, 1), "{stats:?}");
+        assert_eq!(
+            (stats.responses, stats.requests, stats.typed),
+            (1, 0, 1),
+            "{stats:?}"
+        );
     }
 
     /// examples-glia `place(order: NewOrder)`: the body is the parameter, read
@@ -11996,12 +12666,16 @@ mod wire_shape_tests {
     #[test]
     fn post_body_param_annotation() {
         let p = parse(
-            &ng("  place(order: NewOrder) { return this.http.post<Order>('/api/orders', order); }\n"),
+            &ng(
+                "  place(order: NewOrder) { return this.http.post<Order>('/api/orders', order); }\n",
+            ),
             "src/order.service.ts",
         );
         let hit = sole(&p, "POST", "/api/orders");
         assert!(
-            hit.ends_with(",\"response\":{\"type\":\"Order\"},\"request\":{\"type\":\"NewOrder\"}}"),
+            hit.ends_with(
+                ",\"response\":{\"type\":\"Order\"},\"request\":{\"type\":\"NewOrder\"}}"
+            ),
             "{hit}"
         );
         let stats = last_stats();
@@ -12032,8 +12706,10 @@ mod wire_shape_tests {
         // A spread leaves the literal open; a local object literal is read
         // through its declarator.
         let p = parse(
-            &ng("  save(base: Order) {\n    const patch = { ...base, state: 'x' };\n    \
-                 return this.http.put('/api/orders/one', patch);\n  }\n"),
+            &ng(
+                "  save(base: Order) {\n    const patch = { ...base, state: 'x' };\n    \
+                 return this.http.put('/api/orders/one', patch);\n  }\n",
+            ),
             "src/order.service.ts",
         );
         let hit = sole(&p, "PUT", "/api/orders/one");
@@ -12051,7 +12727,9 @@ mod wire_shape_tests {
     #[test]
     fn inline_envelope_type() {
         let p = parse(
-            &ng("  offers() { return this.http.get<{ offers: Offer[]; page: number; limit?: number }>('/api/offers'); }\n"),
+            &ng(
+                "  offers() { return this.http.get<{ offers: Offer[]; page: number; limit?: number }>('/api/offers'); }\n",
+            ),
             "src/order.service.ts",
         );
         let hit = sole(&p, "GET", "/api/offers");
@@ -12071,19 +12749,26 @@ mod wire_shape_tests {
     #[test]
     fn union_with_null() {
         let p = parse(
-            &ng("  a() { return this.http.get<Order | null>('/api/a'); }\n  \
+            &ng(
+                "  a() { return this.http.get<Order | null>('/api/a'); }\n  \
                  b() { return this.http.get<Order | Refund>('/api/b'); }\n  \
-                 c() { return this.http.get<{ users: User[] | null }>('/api/c'); }\n"),
+                 c() { return this.http.get<{ users: User[] | null }>('/api/c'); }\n",
+            ),
             "src/order.service.ts",
         );
-        assert_eq!(shapes(&sole(&p, "GET", "/api/a")).0.as_deref(), Some("{\"type\":\"Order\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/a")).0.as_deref(),
+            Some("{\"type\":\"Order\"}")
+        );
         assert_eq!(
             shapes(&sole(&p, "GET", "/api/b")).0.as_deref(),
             Some("{\"union\":[{\"type\":\"Order\"},{\"type\":\"Refund\"}]}")
         );
         assert_eq!(
             shapes(&sole(&p, "GET", "/api/c")).0.as_deref(),
-            Some("{\"fields\":[{\"name\":\"users\",\"required\":true,\"shape\":{\"array\":true,\"type\":\"User\"}}]}")
+            Some(
+                "{\"fields\":[{\"name\":\"users\",\"required\":true,\"shape\":{\"array\":true,\"type\":\"User\"}}]}"
+            )
         );
     }
 
@@ -12100,11 +12785,26 @@ mod wire_shape_tests {
             "src/order.service.ts",
         );
         let resp = |path: &str| shapes(&sole(&p, "GET", path)).0;
-        assert_eq!(resp("/api/a").as_deref(), Some("{\"open\":true,\"raw\":\"any\"}"));
-        assert_eq!(resp("/api/b").as_deref(), Some("{\"open\":true,\"raw\":\"unknown\"}"));
-        assert_eq!(resp("/api/c").as_deref(), Some("{\"open\":true,\"raw\":\"Partial<Order>\"}"));
-        assert_eq!(resp("/api/d").as_deref(), Some("{\"array\":true,\"type\":\"Order\"}"));
-        assert_eq!(resp("/api/e").as_deref(), Some("{\"array\":true,\"type\":\"Order\"}"));
+        assert_eq!(
+            resp("/api/a").as_deref(),
+            Some("{\"open\":true,\"raw\":\"any\"}")
+        );
+        assert_eq!(
+            resp("/api/b").as_deref(),
+            Some("{\"open\":true,\"raw\":\"unknown\"}")
+        );
+        assert_eq!(
+            resp("/api/c").as_deref(),
+            Some("{\"open\":true,\"raw\":\"Partial<Order>\"}")
+        );
+        assert_eq!(
+            resp("/api/d").as_deref(),
+            Some("{\"array\":true,\"type\":\"Order\"}")
+        );
+        assert_eq!(
+            resp("/api/e").as_deref(),
+            Some("{\"array\":true,\"type\":\"Order\"}")
+        );
     }
 
     /// `await axios.get<T>(..)`, `(await axios.post<T>(..)).data`, `await
@@ -12122,7 +12822,11 @@ mod wire_shape_tests {
         let p = parse(src, "src/load.ts");
         let foo = sole(&p, "GET", "/api/foo");
         let v: serde_json::Value = serde_json::from_str(&foo).unwrap();
-        assert_eq!((v["line"].as_u64(), v["col"].as_u64()), (Some(3), Some(19)), "col at `axios`: {foo}");
+        assert_eq!(
+            (v["line"].as_u64(), v["col"].as_u64()),
+            (Some(3), Some(19)),
+            "col at `axios`: {foo}"
+        );
         assert_eq!(shapes(&foo).0.as_deref(), Some("{\"type\":\"Foo\"}"));
         let bar = sole(&p, "POST", "/api/bar");
         assert_eq!(
@@ -12132,10 +12836,18 @@ mod wire_shape_tests {
                 Some("{\"fields\":[{\"name\":\"a\",\"required\":true,\"shape\":{\"type\":\"number\"}}]}".into())
             )
         );
-        assert_eq!(shapes(&sole(&p, "GET", "/api/foos")).0.as_deref(), Some("{\"array\":true,\"type\":\"Foo\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/foos")).0.as_deref(),
+            Some("{\"array\":true,\"type\":\"Foo\"}")
+        );
         assert_eq!(last_stats().awaited_generic, 3);
         let load = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::svc::load");
-        let foo_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/api/foo");
+        let foo_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/api/foo",
+        );
         assert!(
             p.edges
                 .iter()
@@ -12144,11 +12856,16 @@ mod wire_shape_tests {
         );
 
         let p = parse(
-            &ng("  async one() { return await this.http.get<Order>('/api/one').toPromise(); }\n  \
-                 async two() { const x = await this.http.get<Order[]>('/api/two'); return x; }\n"),
+            &ng(
+                "  async one() { return await this.http.get<Order>('/api/one').toPromise(); }\n  \
+                 async two() { const x = await this.http.get<Order[]>('/api/two'); return x; }\n",
+            ),
             "src/order.service.ts",
         );
-        assert_eq!(shapes(&sole(&p, "GET", "/api/one")).0.as_deref(), Some("{\"type\":\"Order\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/one")).0.as_deref(),
+            Some("{\"type\":\"Order\"}")
+        );
         assert_eq!(
             shapes(&sole(&p, "GET", "/api/two")).0.as_deref(),
             Some("{\"array\":true,\"type\":\"Order\"}")
@@ -12179,16 +12896,29 @@ mod wire_shape_tests {
             ),
             "{hit}"
         );
-        assert_eq!(shapes(&sole(&p, "GET", "/api/one")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/one")),
+            (Some("{\"type\":\"Order\"}".into()), None)
+        );
         assert_eq!(
             shapes(&sole(&p, "PUT", "/api/two")),
-            (Some("{\"array\":true,\"type\":\"Order\"}".into()), Some("{\"type\":\"NewOrder\"}".into()))
+            (
+                Some("{\"array\":true,\"type\":\"Order\"}".into()),
+                Some("{\"type\":\"NewOrder\"}".into())
+            )
         );
-        assert_eq!(shapes(&sole(&p, "GET", "/api/three")), (Some("{\"type\":\"Stats\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/three")),
+            (Some("{\"type\":\"Stats\"}".into()), None)
+        );
         // A FormData body is no JSON body: the hit keeps HEAD's bytes.
         assert_eq!(shapes(&sole(&p, "POST", "/api/four")), (None, None));
         let stats = last_stats();
-        assert_eq!((stats.responses, stats.requests, stats.fetch), (4, 2, 6), "{stats:?}");
+        assert_eq!(
+            (stats.responses, stats.requests, stats.fetch),
+            (4, 2, 6),
+            "{stats:?}"
+        );
     }
 
     /// ky / got: the body is the `json:` option of the second argument, any
@@ -12204,16 +12934,27 @@ mod wire_shape_tests {
         let p = parse(src, "src/clients.ts");
         assert_eq!(
             shapes(&sole(&p, "POST", "/api/a")).1.as_deref(),
-            Some("{\"fields\":[{\"name\":\"name\",\"required\":true,\"shape\":{\"type\":\"string\"}}]}")
+            Some(
+                "{\"fields\":[{\"name\":\"name\",\"required\":true,\"shape\":{\"type\":\"string\"}}]}"
+            )
         );
-        assert_eq!(shapes(&sole(&p, "PUT", "/api/b")).1.as_deref(), Some("{\"type\":\"Profile\"}"));
+        assert_eq!(
+            shapes(&sole(&p, "PUT", "/api/b")).1.as_deref(),
+            Some("{\"type\":\"Profile\"}")
+        );
         assert_eq!(shapes(&sole(&p, "POST", "/api/c")), (None, None));
         assert_eq!(
             shapes(&sole(&p, "POST", "/api/d")),
-            (Some("{\"type\":\"Order\"}".into()), Some("{\"type\":\"NewOrder\"}".into()))
+            (
+                Some("{\"type\":\"Order\"}".into()),
+                Some("{\"type\":\"NewOrder\"}".into())
+            )
         );
         // axios `get`'s second argument is its config, never a body.
-        assert_eq!(shapes(&sole(&p, "GET", "/api/e")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/e")),
+            (Some("{\"type\":\"Order\"}".into()), None)
+        );
         assert_eq!(last_stats().unknown_client, 0);
     }
 
@@ -12227,8 +12968,14 @@ mod wire_shape_tests {
                    a(o: NewOrder) { return this.client.post<Order>('/api/a', o); }\n  \
                    b(o: NewOrder) { return api.post<Order>('/api/b', o); }\n}\n";
         let p = parse(src, "src/s.service.ts");
-        assert_eq!(shapes(&sole(&p, "POST", "/api/a")), (Some("{\"type\":\"Order\"}".into()), None));
-        assert_eq!(shapes(&sole(&p, "POST", "/api/b")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/a")),
+            (Some("{\"type\":\"Order\"}".into()), None)
+        );
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/b")),
+            (Some("{\"type\":\"Order\"}".into()), None)
+        );
         assert_eq!(last_stats().unknown_client, 2);
     }
 
@@ -12245,8 +12992,14 @@ mod wire_shape_tests {
                    d(file: File) { const fd = new FormData(); fd.append('f', file); return this.http.post('/api/d', fd); }\n  \
                    e() { return this.http.post('/api/e', this.form.value); }\n}\n";
         let p = parse(src, "src/s.service.ts");
-        assert_eq!(shapes(&sole(&p, "POST", "/api/a")).1.as_deref(), Some("{\"type\":\"NewOrder\"}"));
-        assert_eq!(shapes(&sole(&p, "GET", "/api/b")), (Some("{\"type\":\"Order\"}".into()), None));
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/a")).1.as_deref(),
+            Some("{\"type\":\"NewOrder\"}")
+        );
+        assert_eq!(
+            shapes(&sole(&p, "GET", "/api/b")),
+            (Some("{\"type\":\"Order\"}".into()), None)
+        );
         assert_eq!(shapes(&sole(&p, "POST", "/api/c")), (None, None));
         assert_eq!(shapes(&sole(&p, "POST", "/api/d")), (None, None));
         assert_eq!(
@@ -12282,7 +13035,9 @@ mod wire_shape_tests {
     #[test]
     fn hit_shapes_round_trip() {
         let p = parse(
-            &ng("  a(o: NewOrder) { return this.http.post<{ items: Item[]; next?: string | null; [k: string]: unknown }>('/api/a', { o, n: 1 }); }\n"),
+            &ng(
+                "  a(o: NewOrder) { return this.http.post<{ items: Item[]; next?: string | null; [k: string]: unknown }>('/api/a', { o, n: 1 }); }\n",
+            ),
             "src/order.service.ts",
         );
         let hit = sole(&p, "POST", "/api/a");
@@ -12307,27 +13062,49 @@ mod reexport_tests {
 
     /// The facts recorded on the file MODULE `src::<stem>` of `src`.
     fn facts(src: &str, path: &str) -> Vec<NavFact> {
-        let stem = path.trim_start_matches("src/").rsplit_once('.').map_or(path, |(s, _)| s);
+        let stem = path
+            .trim_start_matches("src/")
+            .rsplit_once('.')
+            .map_or(path, |(s, _)| s);
         let qname = format!("src::{stem}");
         let parse = parse_file(src, path, &qname, repo()).expect("parse");
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, &qname);
-        parse.nav.nav_facts.get(&module).cloned().unwrap_or_default()
+        parse
+            .nav
+            .nav_facts
+            .get(&module)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn star(source: &str, line: u32) -> NavFact {
-        NavFact::ReExportStar { source: source.into(), line }
+        NavFact::ReExportStar {
+            source: source.into(),
+            line,
+        }
     }
 
     fn named(source: &str, name: &str, exported: &str, line: u32) -> NavFact {
-        NavFact::ReExportName { source: source.into(), name: name.into(), exported: exported.into(), line }
+        NavFact::ReExportName {
+            source: source.into(),
+            name: name.into(),
+            exported: exported.into(),
+            line,
+        }
     }
 
     fn local(local: &str, exported: &str, line: u32) -> NavFact {
-        NavFact::ExportLocal { local: local.into(), exported: exported.into(), line }
+        NavFact::ExportLocal {
+            local: local.into(),
+            exported: exported.into(),
+            line,
+        }
     }
 
     fn exports(names: &[&str]) -> NavFact {
-        NavFact::Exports { names: names.iter().map(|n| n.to_string()).collect() }
+        NavFact::Exports {
+            names: names.iter().map(|n| n.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -12344,7 +13121,11 @@ export { \"a-b\" as ab } from './kebab';
             facts(src, "src/index.ts"),
             [
                 star("./models", 0),
-                NavFact::ReExportNamespace { source: "./util/format".into(), exported: "fmt".into(), line: 1 },
+                NavFact::ReExportNamespace {
+                    source: "./util/format".into(),
+                    exported: "fmt".into(),
+                    line: 1
+                },
                 named("./ab", "A", "A", 2),
                 named("./ab", "B", "C", 2),
                 named("./types", "T", "T", 3),
@@ -12367,7 +13148,11 @@ export = KEY;
 ";
         assert_eq!(
             facts(src, "src/order.model.ts"),
-            [local("User", "Customer", 2), local("KEY", "KEY", 2), local("User", "User", 3)]
+            [
+                local("User", "Customer", 2),
+                local("KEY", "KEY", 2),
+                local("User", "User", 3)
+            ]
         );
     }
 
@@ -12397,13 +13182,15 @@ function helper() {}
         assert_eq!(
             got,
             [exports(&[
-                "A", "B", "E", "I", "N", "T", "c1", "c2", "d1", "decl", "default", "df", "e2", "f", "g",
-                "l", "rest", "sig",
+                "A", "B", "E", "I", "N", "T", "c1", "c2", "d1", "decl", "default", "df", "e2", "f",
+                "g", "l", "rest", "sig",
             ])]
         );
         // The non-exported class and `K` (exported as `default` only) are
         // absent; the namespace's inner export is no module export.
-        let NavFact::Exports { names } = &got[0] else { unreachable!() };
+        let NavFact::Exports { names } = &got[0] else {
+            unreachable!()
+        };
         for absent in ["Private", "helper", "K", "z", "Inner"] {
             assert!(!names.iter().any(|n| n == absent), "{absent}");
         }
@@ -12411,8 +13198,14 @@ function helper() {}
 
     #[test]
     fn export_default_expression_exports_default() {
-        assert_eq!(facts("export default { name: 'x' };\n", "src/cfg.ts"), [exports(&["default"])]);
-        assert_eq!(facts("export default function () {}\n", "src/fn.ts"), [exports(&["default"])]);
+        assert_eq!(
+            facts("export default { name: 'x' };\n", "src/cfg.ts"),
+            [exports(&["default"])]
+        );
+        assert_eq!(
+            facts("export default function () {}\n", "src/fn.ts"),
+            [exports(&["default"])]
+        );
         // `export as namespace` and a plain file record nothing.
         assert!(facts("export as namespace Lib;\n", "src/umd.ts").is_empty());
         assert!(facts("const x = 1;\n", "src/plain.ts").is_empty());
@@ -12481,7 +13274,12 @@ mod value_ref_tests {
 
     /// The `(to, rule, row)` of every `category` edge from `from` whose
     /// evidence names `rule`.
-    fn ruled(parse: &FileParse, from: NodeId, category: glia_core::EdgeCategoryId, rule: &str) -> Vec<(NodeId, u32)> {
+    fn ruled(
+        parse: &FileParse,
+        from: NodeId,
+        category: glia_core::EdgeCategoryId,
+        rule: &str,
+    ) -> Vec<(NodeId, u32)> {
         parse
             .edges
             .iter()
@@ -12538,7 +13336,12 @@ export const appConfig: ApplicationConfig = {
         let cfg = id(node_kind::STATE_VAR, "src::app::app.config::appConfig");
         assert_eq!(
             bare_calls_from(&p, cfg),
-            ["provideHttpClient", "provideI18n", "provideRouter", "withInterceptors"]
+            [
+                "provideHttpClient",
+                "provideI18n",
+                "provideRouter",
+                "withInterceptors"
+            ]
         );
         assert_eq!(
             uses_refs(&p, cfg),
@@ -12570,9 +13373,20 @@ let later = isListingWizard('x');
         let wizard = id(node_kind::FUNCTION, "src::app::listing::isListingWizard");
         let by_path = id(node_kind::FUNCTION, "src::app::listing::byPath");
         let calls = ruled(&p, module, edge_category::CALLS, "intra_file");
-        assert_eq!(calls, [(wizard, 3)], "one const call; a `let` is not walked");
-        assert_eq!(ruled(&p, module, edge_category::USES, "value_ref"), [(by_path, 3)]);
-        assert!(all_uses_ref_names(&p).is_empty(), "LISTING_ROUTES is a callee's object: {:?}", p.refs);
+        assert_eq!(
+            calls,
+            [(wizard, 3)],
+            "one const call; a `let` is not walked"
+        );
+        assert_eq!(
+            ruled(&p, module, edge_category::USES, "value_ref"),
+            [(by_path, 3)]
+        );
+        assert!(
+            all_uses_ref_names(&p).is_empty(),
+            "LISTING_ROUTES is a callee's object: {:?}",
+            p.refs
+        );
     }
 
     /// A route table's guard is a USES ref from the `routes` STATE_VAR; a
@@ -12611,11 +13425,16 @@ export default bootstrap;
         let p = parse(src, "src/main.ts", "src::main");
         let module = id(node_kind::MODULE, "src::main");
         let boot = id(node_kind::FUNCTION, "src::main::bootstrap");
-        assert_eq!(ruled(&p, module, edge_category::USES, "value_ref"), [(boot, 3)]);
+        assert_eq!(
+            ruled(&p, module, edge_category::USES, "value_ref"),
+            [(boot, 3)]
+        );
         assert!(all_uses_ref_names(&p).is_empty(), "{:?}", p.refs);
         let main = p.nav.nav_facts.get(&module).cloned().unwrap_or_default();
         assert!(
-            main.contains(&NavFact::Exports { names: [DEFAULT_EXPORT.to_string()].into() }),
+            main.contains(&NavFact::Exports {
+                names: [DEFAULT_EXPORT.to_string()].into()
+            }),
             "DT.1q's default export is kept: {main:?}"
         );
     }
@@ -12646,15 +13465,33 @@ import { TradeService, MockTradeService } from '../core/trade.service';
 })
 export class HomePage {}
 ";
-        let p = parse(src, "src/app/home/home.page.ts", "src::app::home::home.page");
+        let p = parse(
+            src,
+            "src/app/home/home.page.ts",
+            "src::app::home::home.page",
+        );
         let page = id(node_kind::CLASS, "src::app::home::home.page::HomePage");
         let names: Vec<String> = uses_refs(&p, page).into_iter().map(|(n, _)| n).collect();
         assert_eq!(
             names,
-            ["KsInputDirective", "MockTradeService", "NG_VALUE_ACCESSOR", "TimeAgoPipe", "TradeService"]
+            [
+                "KsInputDirective",
+                "MockTradeService",
+                "NG_VALUE_ACCESSOR",
+                "TimeAgoPipe",
+                "TradeService"
+            ]
         );
-        assert_eq!(bare_calls_from(&p, page), ["forwardRef"], "the decorator callee is no CallSite");
-        assert!(!p.edges.iter().any(|e| e.from == page && e.to == page), "{:?}", p.edges);
+        assert_eq!(
+            bare_calls_from(&p, page),
+            ["forwardRef"],
+            "the decorator callee is no CallSite"
+        );
+        assert!(
+            !p.edges.iter().any(|e| e.from == page && e.to == page),
+            "{:?}",
+            p.edges
+        );
     }
 
     /// A parameter, a local, a nested declaration of the passing scope and
@@ -12682,17 +13519,35 @@ function sortNested(items: Item[]): Item[] {
 export const authGuard = () => { const auth = inject(AuthService); return auth.ok(); };
 export function sorted(items: Item[]): Item[] { return [...items].sort(byUrgency); }
 ";
-        let p = parse(src, "src/app/home/home.page.ts", "src::app::home::home.page");
-        let f = |n: &str| id(node_kind::FUNCTION, &format!("src::app::home::home.page::{n}"));
+        let p = parse(
+            src,
+            "src/app/home/home.page.ts",
+            "src::app::home::home.page",
+        );
+        let f = |n: &str| {
+            id(
+                node_kind::FUNCTION,
+                &format!("src::app::home::home.page::{n}"),
+            )
+        };
         for scope in ["sortWith", "sortLocal", "sortNested", "authGuard"] {
             assert!(
-                !p.edges.iter().any(|e| e.from == f(scope) && e.category == edge_category::USES),
+                !p.edges
+                    .iter()
+                    .any(|e| e.from == f(scope) && e.category == edge_category::USES),
                 "{scope}: {:?}",
                 p.edges
             );
         }
-        assert!(all_uses_ref_names(&p).is_empty(), "inject(AuthService) is DI: {:?}", p.refs);
-        assert_eq!(ruled(&p, f("sorted"), edge_category::USES, "value_ref"), [(f("byUrgency"), 17)]);
+        assert!(
+            all_uses_ref_names(&p).is_empty(),
+            "inject(AuthService) is DI: {:?}",
+            p.refs
+        );
+        assert_eq!(
+            ruled(&p, f("sorted"), edge_category::USES, "value_ref"),
+            [(f("byUrgency"), 17)]
+        );
     }
 
     /// A `this.<getter>` read (a value read in a template, a member read's
@@ -12720,19 +13575,35 @@ export class TradeService {
   }
 }
 ";
-        let p = parse(src, "src/app/core/trade.service.ts", "src::app::core::trade.service");
-        let m = |n: &str| id(node_kind::METHOD, &format!("src::app::core::trade.service::TradeService::{n}"));
+        let p = parse(
+            src,
+            "src/app/core/trade.service.ts",
+            "src::app::core::trade.service",
+        );
+        let m = |n: &str| {
+            id(
+                node_kind::METHOD,
+                &format!("src::app::core::trade.service::TradeService::{n}"),
+            )
+        };
         let mut reads = ruled(&p, m("list"), edge_category::CALLS, "accessor_read");
         reads.sort_by_key(|(_, row)| *row);
         assert_eq!(reads, [(m("apiUrl"), 8), (m("form"), 10)]);
-        assert_eq!(ruled(&p, m("rename"), edge_category::CALLS, "accessor_write"), [(m("label"), 13)]);
+        assert_eq!(
+            ruled(&p, m("rename"), edge_category::CALLS, "accessor_write"),
+            [(m("label"), 13)]
+        );
         assert!(
-            !p.edges.iter().any(|e| e.to == m("unused") && e.category == edge_category::CALLS),
+            !p.edges
+                .iter()
+                .any(|e| e.to == m("unused") && e.category == edge_category::CALLS),
             "{:?}",
             p.edges
         );
         assert!(
-            !p.edges.iter().any(|e| e.from == m("label") && e.category == edge_category::CALLS),
+            !p.edges
+                .iter()
+                .any(|e| e.from == m("label") && e.category == edge_category::CALLS),
             "a plain field write binds nothing: {:?}",
             p.edges
         );
@@ -12756,8 +13627,14 @@ export class Hero {
 ";
         let p = parse(src, "src/hero.ts", "src::hero");
         let m = |n: &str| id(node_kind::METHOD, &format!("src::hero::Hero::{n}"));
-        assert_eq!(ruled(&p, m("init"), edge_category::USES, "method_ref"), [(m("onResize"), 2)]);
-        assert_eq!(ruled(&p, m("init"), edge_category::CALLS, "accessor_read"), [(m("isDesktop"), 2)]);
+        assert_eq!(
+            ruled(&p, m("init"), edge_category::USES, "method_ref"),
+            [(m("onResize"), 2)]
+        );
+        assert_eq!(
+            ruled(&p, m("init"), edge_category::CALLS, "accessor_read"),
+            [(m("isDesktop"), 2)]
+        );
     }
 }
 
@@ -12823,7 +13700,11 @@ mod graphql_result_tests {
         assert_eq!(
             q[0].shape.to_json(),
             Shape::Object {
-                fields: vec![ShapeField::new("items", true, Shape::named("InventoryItem[]"))],
+                fields: vec![ShapeField::new(
+                    "items",
+                    true,
+                    Shape::named("InventoryItem[]")
+                )],
                 open: false,
             }
             .to_json()
@@ -12851,8 +13732,18 @@ mod graphql_result_tests {
                    \x20 save() { return this.apollo.mutate<{ save: Item }>({ mutation: SAVE }); }\n\
                    }\n";
         let p = parse(src);
-        let m = |n: &str| results(&p, node_kind::METHOD, &format!("src::inventory::Stock::{n}"));
-        let docs = |n: &str| m(n).iter().map(|w| w.document.clone().unwrap_or_default()).collect::<Vec<_>>();
+        let m = |n: &str| {
+            results(
+                &p,
+                node_kind::METHOD,
+                &format!("src::inventory::Stock::{n}"),
+            )
+        };
+        let docs = |n: &str| {
+            m(n).iter()
+                .map(|w| w.document.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(docs("list"), ["docs.GET_ITEMS"]);
         assert_eq!(docs("bump"), ["query"]);
         assert_eq!(docs("save"), ["SAVE"]);
@@ -12869,9 +13760,17 @@ mod graphql_result_tests {
                    export function Save() { const [run] = useM<{ save: Item }>(SAVE); return run; }\n\
                    export function Gen() { return Apollo.useQuery<GetItemsQuery>(GetItemsDocument); }\n";
         let p = parse(src);
-        for (f, doc) in [("List", "GET_ITEMS"), ("Save", "SAVE"), ("Gen", "GetItemsDocument")] {
+        for (f, doc) in [
+            ("List", "GET_ITEMS"),
+            ("Save", "SAVE"),
+            ("Gen", "GetItemsDocument"),
+        ] {
             let r = results(&p, node_kind::FUNCTION, &func(f));
-            assert_eq!(r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(), [Some(doc)], "{f}");
+            assert_eq!(
+                r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(),
+                [Some(doc)],
+                "{f}"
+            );
         }
         let other = "import { useQuery } from '@tanstack/react-query';\n\
                      export function List() { return useQuery<Item[]>(KEY); }\n\
@@ -12901,7 +13800,10 @@ mod graphql_result_tests {
         let urql = "import { createClient } from '@urql/core';\n\
                     export async function g() { return client.query<{ items: Item[] }>(GET_ITEMS, { first: 1 }).toPromise(); }\n";
         let r = results(&parse(urql), node_kind::FUNCTION, &func("g"));
-        assert_eq!(r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(), [Some("GET_ITEMS")]);
+        assert_eq!(
+            r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(),
+            [Some("GET_ITEMS")]
+        );
         let no_urql = "export async function g() { return client.query<{ items: Item[] }>(GET_ITEMS).toPromise(); }\n";
         assert_eq!(every(&parse(no_urql)), 0, "positional needs urql");
     }
@@ -12915,7 +13817,12 @@ mod graphql_result_tests {
                    \x20 await client.mutate<{ restock: StockItem }>({ mutation: RESTOCK });\n}\n";
         let p = parse(src);
         let r = results(&p, node_kind::FUNCTION, &func("both"));
-        assert_eq!(r.iter().map(|w| (w.line, w.ty.as_str())).collect::<Vec<_>>(), [(2, "StockList"), (3, "")]);
+        assert_eq!(
+            r.iter()
+                .map(|w| (w.line, w.ty.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, "StockList"), (3, "")]
+        );
         assert_eq!(r[0].shape.to_json(), Shape::named("StockList").to_json());
     }
 }
@@ -12945,7 +13852,9 @@ mod typed_receiver_tests {
 
     /// The 0-based row of the first source line containing `needle`.
     fn row_of(src: &str, needle: &str) -> u32 {
-        src.lines().position(|l| l.contains(needle)).expect("needle in src") as u32
+        src.lines()
+            .position(|l| l.contains(needle))
+            .expect("needle in src") as u32
     }
 
     /// `scope`'s ReceiverType facts as `(receiver, ty)`, sorted.
@@ -12985,12 +13894,16 @@ mod typed_receiver_tests {
             .into_iter()
             .flatten()
             .filter_map(|f| match f {
-                NavFact::MemberRead { receiver, name, line } => {
-                    Some((receiver.clone(), name.clone(), *line, false))
-                }
-                NavFact::MemberWrite { receiver, name, line } => {
-                    Some((receiver.clone(), name.clone(), *line, true))
-                }
+                NavFact::MemberRead {
+                    receiver,
+                    name,
+                    line,
+                } => Some((receiver.clone(), name.clone(), *line, false)),
+                NavFact::MemberWrite {
+                    receiver,
+                    name,
+                    line,
+                } => Some((receiver.clone(), name.clone(), *line, true)),
                 _ => None,
             })
             .collect();
@@ -13007,7 +13920,11 @@ mod typed_receiver_tests {
     }
 
     /// The Bare refs of `category` from `from`, as `(name, row)`, sorted.
-    fn bare_refs(p: &FileParse, from: NodeId, category: glia_core::EdgeCategoryId) -> Vec<(String, u32)> {
+    fn bare_refs(
+        p: &FileParse,
+        from: NodeId,
+        category: glia_core::EdgeCategoryId,
+    ) -> Vec<(String, u32)> {
         let mut out: Vec<(String, u32)> = p
             .refs
             .iter()
@@ -13023,13 +13940,18 @@ mod typed_receiver_tests {
 
     /// The `(from, to, row)` of every `category` edge whose evidence rule is
     /// `rule`.
-    fn ruled(p: &FileParse, category: glia_core::EdgeCategoryId, rule: &str) -> Vec<(NodeId, NodeId, u32)> {
+    fn ruled(
+        p: &FileParse,
+        category: glia_core::EdgeCategoryId,
+        rule: &str,
+    ) -> Vec<(NodeId, NodeId, u32)> {
         p.edges
             .iter()
             .filter(|e| e.category == category)
             .filter_map(|e| {
                 let ev = Evidence::of(e)?;
-                (ev.rule.as_deref() == Some(rule)).then(|| (e.from, e.to, ev.line.expect("a site row")))
+                (ev.rule.as_deref() == Some(rule))
+                    .then(|| (e.from, e.to, ev.line.expect("a site row")))
             })
             .collect()
     }
@@ -13138,7 +14060,10 @@ export function f(): void {
         let p = parse(src, "src/f.ts", "src::f");
         assert_eq!(
             receiver_types(&p, id(node_kind::FUNCTION, "src::f::f")),
-            [pair("inject(Store)", "Store"), pair("inject<Api>(TOKEN)", "Api")]
+            [
+                pair("inject(Store)", "Store"),
+                pair("inject<Api>(TOKEN)", "Api")
+            ]
         );
 
         let local = "\
@@ -13175,15 +14100,24 @@ export function optional(): boolean {
         let optional = id(node_kind::FUNCTION, "src::guard::optional");
         assert_eq!(
             bare_refs(&p, guard, edge_category::INJECTS),
-            [("AuthService".to_string(), row_of(src, "inject(AuthService);"))]
+            [(
+                "AuthService".to_string(),
+                row_of(src, "inject(AuthService);")
+            )]
         );
-        assert!(bare_refs(&p, guard, edge_category::USES).is_empty(), "the token is no value");
+        assert!(
+            bare_refs(&p, guard, edge_category::USES).is_empty(),
+            "the token is no value"
+        );
         let row = row_of(src, "inject(AuthService, OPTS)");
         assert_eq!(
             bare_refs(&p, optional, edge_category::INJECTS),
             [("AuthService".to_string(), row)]
         );
-        assert_eq!(bare_refs(&p, optional, edge_category::USES), [("OPTS".to_string(), row)]);
+        assert_eq!(
+            bare_refs(&p, optional, edge_category::USES),
+            [("OPTS".to_string(), row)]
+        );
 
         let field = "\
 import { Component, inject } from '@angular/core';
@@ -13210,7 +14144,10 @@ export class C {
         injects.sort_by(|a, b| a.1.cmp(&b.1));
         assert_eq!(
             injects,
-            [(class, "AuthService".to_string()), (countries, "CountriesService".to_string())],
+            [
+                (class, "AuthService".to_string()),
+                (countries, "CountriesService".to_string())
+            ],
             "the whole-initialiser field is A7.1's class ref only"
         );
 
@@ -13261,7 +14198,10 @@ export function probe(): boolean { return inject(AuthService) !== null; }
         assert!(p.refs.iter().all(|r| r.category != edge_category::INJECTS));
         assert_eq!(
             bare_refs(&p, probe, edge_category::USES),
-            [("AuthService".to_string(), row_of(not_angular, "inject(AuthService)"))]
+            [(
+                "AuthService".to_string(),
+                row_of(not_angular, "inject(AuthService)")
+            )]
         );
     }
 
@@ -13293,7 +14233,9 @@ export function h(): number { return Imported.MAX; }
             .iter()
             .filter(|r| r.category == edge_category::USES)
             .filter_map(|r| match &r.qualifier {
-                CallQualifier::Attribute { base, name } => Some((r.from, base.clone(), name.clone())),
+                CallQualifier::Attribute { base, name } => {
+                    Some((r.from, base.clone(), name.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -13323,15 +14265,28 @@ export function r(): void { const make = make(); make.go(); }
 ";
         let (p, _, _, _, stats, ..) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
         let local = |scope: NodeId, name: &str| {
-            p.nav.local_types.get(&scope).and_then(|l| l.get(name)).cloned()
+            p.nav
+                .local_types
+                .get(&scope)
+                .and_then(|l| l.get(name))
+                .cloned()
         };
         let run = id(node_kind::METHOD, "src::c::C::run");
         assert_eq!(local(run, "s").as_deref(), Some("make()"));
         assert_eq!(local(run, "t").as_deref(), Some(""));
         assert_eq!(local(run, "u").as_deref(), Some(""));
-        assert_eq!(local(id(node_kind::FUNCTION, "src::c::p"), "v").as_deref(), Some(""));
-        assert_eq!(local(id(node_kind::FUNCTION, "src::c::q"), "w").as_deref(), Some(""));
-        assert_eq!(local(id(node_kind::FUNCTION, "src::c::r"), "make").as_deref(), Some(""));
+        assert_eq!(
+            local(id(node_kind::FUNCTION, "src::c::p"), "v").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            local(id(node_kind::FUNCTION, "src::c::q"), "w").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            local(id(node_kind::FUNCTION, "src::c::r"), "make").as_deref(),
+            Some("")
+        );
         assert_eq!((stats.call, stats.typed), (1, 1), "{stats:?}");
 
         let returns = "\
@@ -13348,10 +14303,15 @@ export function j(): A | B { return x; }
 ";
         let p = parse(returns, "src/r.ts", "src::r");
         let ret = |name: &str| {
-            p.nav.return_types.get(&id(node_kind::FUNCTION, &format!("src::r::{name}"))).cloned()
+            p.nav
+                .return_types
+                .get(&id(node_kind::FUNCTION, &format!("src::r::{name}")))
+                .cloned()
         };
-        let got: Vec<(&str, Option<String>)> =
-            ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].into_iter().map(|n| (n, ret(n))).collect();
+        let got: Vec<(&str, Option<String>)> = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+            .into_iter()
+            .map(|n| (n, ret(n)))
+            .collect();
         let some = |s: &str| Some(s.to_string());
         assert_eq!(
             got,

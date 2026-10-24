@@ -47,7 +47,11 @@ fn fixture_copy() -> tempfile::TempDir {
 }
 
 fn repo_of(tmp: &tempfile::TempDir) -> String {
-    tmp.path().join("repo").to_str().expect("utf-8 tempdir").to_string()
+    tmp.path()
+        .join("repo")
+        .to_str()
+        .expect("utf-8 tempdir")
+        .to_string()
 }
 
 /// id -> qname over every graph of the build.
@@ -117,7 +121,10 @@ fn same_stem_files_of_one_build_group_keep_separate_identities() {
         assert!(modules.contains(&m.to_string()), "{m} missing: {modules:?}");
     }
     for m in ["src::util", "clj::app::core", "jvm::shop::Foo"] {
-        assert!(!modules.contains(&m.to_string()), "{m} still a MODULE: {modules:?}");
+        assert!(
+            !modules.contains(&m.to_string()),
+            "{m} still a MODULE: {modules:?}"
+        );
     }
     // The stem stays each MODULE's display name.
     for g in &merged.graphs {
@@ -129,7 +136,11 @@ fn same_stem_files_of_one_build_group_keep_separate_identities() {
                 _ => continue,
             };
             if g.nav.kind_by_id.get(id) == Some(&node_kind::MODULE) {
-                assert_eq!(g.nav.name_by_id.get(id).map(String::as_str), Some(want), "{qname}");
+                assert_eq!(
+                    g.nav.name_by_id.get(id).map(String::as_str),
+                    Some(want),
+                    "{qname}"
+                );
             }
         }
     }
@@ -141,7 +152,11 @@ fn same_stem_files_of_one_build_group_keep_separate_identities() {
         ("clj::app::server", "clj::app::core.clj"),
         ("clj::app::main", "clj::app::core.cljs"),
     ] {
-        assert_eq!(targets_from(&merged, edge_category::IMPORTS, from), [to], "{from}");
+        assert_eq!(
+            targets_from(&merged, edge_category::IMPORTS, from),
+            [to],
+            "{from}"
+        );
     }
 
     // (3) Calls follow the import; each file's fmt / f calls its own helper.
@@ -153,7 +168,11 @@ fn same_stem_files_of_one_build_group_keep_separate_identities() {
         ("clj::app::core.clj::f", "clj::app::core.clj::g"),
         ("clj::app::core.cljs::f", "clj::app::core.cljs::h"),
     ] {
-        assert_eq!(targets_from(&merged, edge_category::CALLS, from), [to], "{from}");
+        assert_eq!(
+            targets_from(&merged, edge_category::CALLS, from),
+            [to],
+            "{from}"
+        );
     }
     // Kotlin's top-level function follows its file's MODULE.
     assert_eq!(
@@ -163,7 +182,11 @@ fn same_stem_files_of_one_build_group_keep_separate_identities() {
 
     // (4) One DEFINES into each fmt (HEAD: src::util -> src::util::fmt x2).
     let defines = edges(&merged, edge_category::DEFINES);
-    for f in ["src::util.ts::fmt", "src::util.js::fmt", "clj::app::core.clj::f"] {
+    for f in [
+        "src::util.ts::fmt",
+        "src::util.js::fmt",
+        "clj::app::core.clj::f",
+    ] {
         let into: Vec<&(String, String)> = defines.iter().filter(|(_, t)| t == f).collect();
         assert_eq!(into.len(), 1, "{f}: {into:?}");
     }
@@ -179,8 +202,14 @@ fn a_test_module_pairs_its_own_languages_sibling() {
     )
     .expect("write util.test.ts");
     let merged = generate_one(&repo).expect("generate_one").merged;
-    assert_eq!(targets_from(&merged, edge_category::TESTS, "src::util.test"), ["src::util.ts"]);
-    assert_eq!(targets_from(&merged, edge_category::IMPORTS, "src::util.test"), ["src::util.ts"]);
+    assert_eq!(
+        targets_from(&merged, edge_category::TESTS, "src::util.test"),
+        ["src::util.ts"]
+    );
+    assert_eq!(
+        targets_from(&merged, edge_category::IMPORTS, "src::util.test"),
+        ["src::util.ts"]
+    );
 }
 
 /// The whole store, file by file, for a byte comparison.
@@ -208,19 +237,39 @@ fn incremental_builds_agree_as_a_sibling_leaves() {
     let tmp = fixture_copy();
     let repo = repo_of(&tmp);
     let clean = generate_one(&repo).expect("generate_one").merged;
-    let cold = generate_one_incremental(&repo).expect("cold incremental").merged;
-    let warm = generate_one_incremental(&repo).expect("warm incremental").merged;
+    let cold = generate_one_incremental(&repo)
+        .expect("cold incremental")
+        .merged;
+    let warm = generate_one_incremental(&repo)
+        .expect("warm incremental")
+        .merged;
     let clean_bytes = store_bytes(&clean, &tmp.path().join("clean"));
-    assert_eq!(store_bytes(&cold, &tmp.path().join("cold")), clean_bytes, "cold vs clean");
-    assert_eq!(store_bytes(&warm, &tmp.path().join("warm")), clean_bytes, "warm vs clean");
+    assert_eq!(
+        store_bytes(&cold, &tmp.path().join("cold")),
+        clean_bytes,
+        "cold vs clean"
+    );
+    assert_eq!(
+        store_bytes(&warm, &tmp.path().join("warm")),
+        clean_bytes,
+        "warm vs clean"
+    );
 
     std::fs::remove_file(Path::new(&repo).join("src/util.js")).expect("rm util.js");
-    let warm2 = generate_one_incremental(&repo).expect("warm incremental, ts alone").merged;
+    let warm2 = generate_one_incremental(&repo)
+        .expect("warm incremental, ts alone")
+        .merged;
     let clean2 = generate_one(&repo).expect("clean, ts alone").merged;
     let modules = module_qnames(&clean2);
     assert!(modules.contains(&"src::util".to_string()), "{modules:?}");
-    assert!(!modules.contains(&"src::util.ts".to_string()), "{modules:?}");
-    assert_eq!(targets_from(&clean2, edge_category::IMPORTS, "src::old"), ["src::util"]);
+    assert!(
+        !modules.contains(&"src::util.ts".to_string()),
+        "{modules:?}"
+    );
+    assert_eq!(
+        targets_from(&clean2, edge_category::IMPORTS, "src::old"),
+        ["src::util"]
+    );
     assert_eq!(
         store_bytes(&warm2, &tmp.path().join("warm2")),
         store_bytes(&clean2, &tmp.path().join("clean2")),
@@ -230,14 +279,22 @@ fn incremental_builds_agree_as_a_sibling_leaves() {
     // And back: util.js returns and util.ts's cached parse (now plain
     // `src::util`) must be rejected for `src::util.ts`.
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
-    std::fs::copy(src.join("src/util.js"), Path::new(&repo).join("src/util.js"))
-        .expect("restore util.js");
-    let warm3 = generate_one_incremental(&repo).expect("warm incremental, js back").merged;
+    std::fs::copy(
+        src.join("src/util.js"),
+        Path::new(&repo).join("src/util.js"),
+    )
+    .expect("restore util.js");
+    let warm3 = generate_one_incremental(&repo)
+        .expect("warm incremental, js back")
+        .merged;
     let clean3 = generate_one(&repo).expect("clean, js back").merged;
     assert_eq!(
         store_bytes(&warm3, &tmp.path().join("warm3")),
         store_bytes(&clean3, &tmp.path().join("clean3")),
         "incremental vs clean after src/util.js returned"
     );
-    assert_eq!(store_bytes(&clean3, &tmp.path().join("clean3b")), clean_bytes);
+    assert_eq!(
+        store_bytes(&clean3, &tmp.path().join("clean3b")),
+        clean_bytes
+    );
 }

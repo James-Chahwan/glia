@@ -308,14 +308,29 @@ fn no_match_exits_1_with_the_absence() {
 #[test]
 fn ranking_flags_reach_the_pack() {
     let root = Root::new("ranking");
-    let out = glia(&[root.path(), "price", "--no-cochange", "--ranking", "bfs"], 0);
-    assert!(!lines_with(&out, "[rank-cache] holder=cli ").is_empty(), "{}", stderr(&out));
+    let out = glia(
+        &[root.path(), "price", "--no-cochange", "--ranking", "bfs"],
+        0,
+    );
+    assert!(
+        !lines_with(&out, "[rank-cache] holder=cli ").is_empty(),
+        "{}",
+        stderr(&out)
+    );
     let rank = lines_with(&out, "[rank] surface=pack ");
     assert_eq!(rank.len(), 1, "{}", stderr(&out));
-    assert!(rank[0].starts_with("[rank] surface=pack ranking=B0 "), "{}", rank[0]);
+    assert!(
+        rank[0].starts_with("[rank] surface=pack ranking=B0 "),
+        "{}",
+        rank[0]
+    );
     let dflt = glia(&[root.path(), "price"], 0);
     let rank = lines_with(&dflt, "[rank] surface=pack ");
-    assert!(rank[0].starts_with("[rank] surface=pack ranking=H10 "), "{}", rank[0]);
+    assert!(
+        rank[0].starts_with("[rank] surface=pack ranking=H10 "),
+        "{}",
+        rank[0]
+    );
     glia(&[root.path(), "price", "--ranking", "x"], 2);
 }
 
@@ -335,16 +350,28 @@ fn select_line_names_the_pick() {
         "[select] surface=pack set=SELh0 shape=k1 pick=H10 source=fallback reason=pack_uncalibrated test_commits=0"
     );
     let named = glia(&[root.path(), "price", "--ranking", "ppr"], 0);
-    assert_eq!(lines_with(&named, "[select] surface=pack "), sel, "--ranking ppr is the default ranking");
+    assert_eq!(
+        lines_with(&named, "[select] surface=pack "),
+        sel,
+        "--ranking ppr is the default ranking"
+    );
     assert_eq!(named.stdout, dflt.stdout);
     let text = String::from_utf8_lossy(&dflt.stdout);
-    assert!(text.starts_with("# context for price\n") && !text.contains("[select]"), "{text}");
+    assert!(
+        text.starts_with("# context for price\n") && !text.contains("[select]"),
+        "{text}"
+    );
 
-    let explicit = glia(&[root.path(), "price", "--no-cochange", "--ranking", "bfs"], 0);
+    let explicit = glia(
+        &[root.path(), "price", "--no-cochange", "--ranking", "bfs"],
+        0,
+    );
     let sel = lines_with(&explicit, "[select] surface=pack ");
     assert_eq!(
         sel,
-        ["[select] surface=pack set=SELs0 shape=k1 pick=B0 source=explicit reason=- test_commits=0"]
+        [
+            "[select] surface=pack set=SELs0 shape=k1 pick=B0 source=explicit reason=- test_commits=0"
+        ]
     );
 
     let out = glia(&[root.path(), "price", "--json"], 0);

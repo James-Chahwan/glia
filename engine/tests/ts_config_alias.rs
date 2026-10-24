@@ -50,7 +50,9 @@ fn build() -> (tempfile::TempDir, MergedGraph) {
         .iter()
         .map(|d| td.path().join(d).to_string_lossy().into_owned())
         .collect();
-    let m = generate_many(&repos).expect("ts-config-alias-endpoints builds").merged;
+    let m = generate_many(&repos)
+        .expect("ts-config-alias-endpoints builds")
+        .merged;
     (td, m)
 }
 
@@ -125,14 +127,20 @@ fn config_alias_bases_fold_and_pair_exactly() {
     let calls = http_calls(&m);
     let pairs: BTreeSet<(String, String)> = [
         ("endpoint:GET:/api/trades", "GET /api/trades"),
-        ("endpoint:GET:/api/notifications/unread", "GET /api/notifications/unread"),
+        (
+            "endpoint:GET:/api/notifications/unread",
+            "GET /api/notifications/unread",
+        ),
         ("endpoint:GET:/admin/stats", "GET /admin/stats"),
         ("endpoint:GET:/admin/users", "GET /admin/users"),
     ]
     .iter()
     .map(|(a, b)| (a.to_string(), b.to_string()))
     .collect();
-    assert_eq!(calls, pairs, "each endpoint pairs its own route, and only it");
+    assert_eq!(
+        calls, pairs,
+        "each endpoint pairs its own route, and only it"
+    );
     assert!(
         !calls.contains(&("endpoint:GET:/admin/stats".into(), "GET /stats".into())),
         "the admin stats call never pairs the public route"
@@ -162,7 +170,12 @@ fn folded_hits_name_the_member_alias_and_the_host() {
             "${…}/stats",
         ),
         // The module const folds through the const table, not the parser.
-        ("endpoint:GET:/admin/users", None, "${ADMIN_BASE}/users", "${…}/users"),
+        (
+            "endpoint:GET:/admin/users",
+            None,
+            "${ADMIN_BASE}/users",
+            "${…}/users",
+        ),
     ] {
         let h = hits(&m, endpoint);
         assert_eq!(h.len(), 1, "{endpoint}: {h:?}");

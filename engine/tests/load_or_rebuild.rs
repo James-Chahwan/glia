@@ -23,9 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use glia_engine::persist::{
-    LoadOutcome, default_layout_dir, load_or_rebuild, persist_result,
-};
+use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild, persist_result};
 use glia_engine::{BUILD_STAMP, GenerateResult, generate_many, generate_one};
 use glia_store::{FORMAT_VERSION, MANIFEST_VERSION, MmapContainer, read_manifest_lenient};
 
@@ -67,7 +65,10 @@ fn copy_dir(from: &Path, to: &Path) {
 fn materialise(tmp: &Path) -> PathBuf {
     let d = tmp.join("repo");
     copy_dir(&fixture().join("repo"), &d);
-    copy_dir(&fixture().join("layout-ai-repo-graph"), &d.join(".ai/repo-graph"));
+    copy_dir(
+        &fixture().join("layout-ai-repo-graph"),
+        &d.join(".ai/repo-graph"),
+    );
     copy_dir(&fixture().join("layout-glia-build"), &d.join(".glia"));
     d
 }
@@ -151,13 +152,19 @@ fn rebuilt_reason(outcome: LoadOutcome) -> String {
 }
 
 fn assert_fresh(outcome: &LoadOutcome) {
-    assert!(matches!(outcome, LoadOutcome::Fresh), "expected Fresh, got {outcome:?}");
+    assert!(
+        matches!(outcome, LoadOutcome::Fresh),
+        "expected Fresh, got {outcome:?}"
+    );
 }
 
 /// The graph a load served equals a cold build of the same sources.
 fn assert_matches_cold_build(r: &GenerateResult, repo: &Path) {
     let cold = generate_one(repo.to_str().unwrap()).unwrap();
-    assert_eq!((r.total_nodes, r.total_edges), (cold.total_nodes, cold.total_edges));
+    assert_eq!(
+        (r.total_nodes, r.total_edges),
+        (cold.total_nodes, cold.total_edges)
+    );
     assert!(r.total_nodes > 0);
 }
 
@@ -205,7 +212,10 @@ fn old_format_at_the_default_dir_discards_its_parse_cache() {
     let dir = default_layout_dir(&d);
     copy_dir(&fixture().join("layout-ai-repo-graph"), &dir);
     let old_cache = std::fs::read(dir.join("parse_cache.bin")).unwrap();
-    assert!(!gmap_names(&d.join(".glia")).is_empty(), "flat 0.4.x shards present");
+    assert!(
+        !gmap_names(&d.join(".glia")).is_empty(),
+        "flat 0.4.x shards present"
+    );
 
     let (r, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     assert!(rebuilt_reason(outcome).contains("old format"));
@@ -213,10 +223,15 @@ fn old_format_at_the_default_dir_discards_its_parse_cache() {
     let cache = std::fs::read(dir.join("parse_cache.bin")).unwrap();
     assert_ne!(cache, old_cache, "the foreign parse cache was rewritten");
     assert!(
-        cache.windows(BUILD_STAMP.len()).any(|w| w == BUILD_STAMP.as_bytes()),
+        cache
+            .windows(BUILD_STAMP.len())
+            .any(|w| w == BUILD_STAMP.as_bytes()),
         "the parse cache now carries this build's stamp"
     );
-    assert!(gmap_names(&d.join(".glia")).is_empty(), "flat 0.4.x shards swept");
+    assert!(
+        gmap_names(&d.join(".glia")).is_empty(),
+        "flat 0.4.x shards swept"
+    );
     assert_eq!(gmap_names(&dir), manifest_gmaps(&dir));
 
     let (_, outcome) = load_or_rebuild(&dir, None, true).unwrap();
@@ -233,8 +248,15 @@ fn fresh_layout_is_not_rewritten() {
 
     let (r, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     assert_fresh(&outcome);
-    assert_eq!((r.total_nodes, r.total_edges), (built.total_nodes, built.total_edges));
-    assert_eq!(snapshot(&dir), before, "a fresh layout is served, not rewritten");
+    assert_eq!(
+        (r.total_nodes, r.total_edges),
+        (built.total_nodes, built.total_edges)
+    );
+    assert_eq!(
+        snapshot(&dir),
+        before,
+        "a fresh layout is served, not rewritten"
+    );
 }
 
 #[test]
@@ -248,7 +270,10 @@ fn stale_sources_rebuild() {
     let (r, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     let reason = rebuilt_reason(outcome);
     assert!(reason.starts_with("stale"), "{reason}");
-    assert!(r.total_nodes > built.total_nodes, "the new function is in the graph");
+    assert!(
+        r.total_nodes > built.total_nodes,
+        "the new function is in the graph"
+    );
     assert_matches_cold_build(&r, &d);
     let (_, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     assert_fresh(&outcome);
@@ -335,7 +360,11 @@ fn no_persist_rebuild_writes_nothing() {
     let (r, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     assert!(rebuilt_reason(outcome).starts_with("stale"));
     assert!(r.total_nodes > built.total_nodes);
-    assert_eq!(snapshot(&dir), before, "manifest, shards and parse cache untouched");
+    assert_eq!(
+        snapshot(&dir),
+        before,
+        "manifest, shards and parse cache untouched"
+    );
 }
 
 #[test]
@@ -361,7 +390,10 @@ fn corrupt_shard_rebuilds() {
     let tmp = tempfile::tempdir().unwrap();
     let d = sources(tmp.path());
     let (dir, _) = persist_default(&d);
-    let shard = manifest_gmaps(&dir).into_iter().find(|n| n.starts_with("repo-")).unwrap();
+    let shard = manifest_gmaps(&dir)
+        .into_iter()
+        .find(|n| n.starts_with("repo-"))
+        .unwrap();
     let path = dir.join(&shard);
     let mut bytes = std::fs::read(&path).unwrap();
     bytes.truncate(bytes.len() / 2);
@@ -370,7 +402,10 @@ fn corrupt_shard_rebuilds() {
     let (r, outcome) = load_or_rebuild(&dir, Some(&d), true).unwrap();
     let reason = rebuilt_reason(outcome);
     let name = shard.trim_end_matches(".gmap");
-    assert_eq!(reason, format!("shard {name} does not match its manifest hash"));
+    assert_eq!(
+        reason,
+        format!("shard {name} does not match its manifest hash")
+    );
     assert_matches_cold_build(&r, &d);
     let (_, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert_fresh(&outcome);
@@ -382,7 +417,10 @@ fn two_repo_layout(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let web = tmp.join("web");
     copy_dir(&fixture().join("repo/api"), &api);
     copy_dir(&fixture().join("repo/web"), &web);
-    let paths = [api.to_string_lossy().into_owned(), web.to_string_lossy().into_owned()];
+    let paths = [
+        api.to_string_lossy().into_owned(),
+        web.to_string_lossy().into_owned(),
+    ];
     let r = generate_many(&paths).unwrap();
     let dir = tmp.join("layout");
     persist_result(&r, &dir, "test").unwrap();
@@ -395,18 +433,30 @@ fn multi_repo_layout_rebuilds_from_every_root() {
     let tmp = tempfile::tempdir().unwrap();
     let (dir, api, web) = two_repo_layout(tmp.path());
     std::thread::sleep(Duration::from_millis(20));
-    std::fs::write(api.join("extra.py"), "def audit_users():\n    return None\n").unwrap();
+    std::fs::write(
+        api.join("extra.py"),
+        "def audit_users():\n    return None\n",
+    )
+    .unwrap();
 
     let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert!(rebuilt_reason(outcome).starts_with("stale"));
     let mut labels: Vec<&str> = r.repo_labels.values().map(String::as_str).collect();
     labels.sort_unstable();
     assert_eq!(labels, ["api", "web"]);
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+    let canon = |p: &Path| {
+        std::fs::canonicalize(p)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
     let mut roots: Vec<String> = r.repo_roots.values().cloned().collect();
     roots.sort();
     assert_eq!(roots, [canon(&api), canon(&web)]);
-    assert!(!r.merged.cross_edges.is_empty(), "the HTTP pairing survives the rebuild");
+    assert!(
+        !r.merged.cross_edges.is_empty(),
+        "the HTTP pairing survives the rebuild"
+    );
     let (_, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert_fresh(&outcome);
 }
@@ -417,7 +467,11 @@ fn missing_root_is_named_and_nothing_is_written() {
     let tmp = tempfile::tempdir().unwrap();
     let (dir, api, web) = two_repo_layout(tmp.path());
     std::thread::sleep(Duration::from_millis(20));
-    std::fs::write(api.join("extra.py"), "def audit_users():\n    return None\n").unwrap();
+    std::fs::write(
+        api.join("extra.py"),
+        "def audit_users():\n    return None\n",
+    )
+    .unwrap();
     std::fs::remove_dir_all(&web).unwrap();
     let before = snapshot(&dir);
 
@@ -442,19 +496,32 @@ fn v050_layout_rebuilds() {
     let dir = default_layout_dir(&d);
     copy_dir(&fixture().join("../gmap_v050/layout"), &dir);
     let old = read_manifest_lenient(&dir).unwrap();
-    assert_eq!(old.schema_version, MANIFEST_VERSION, "0.5.0 wrote the current manifest schema");
+    assert_eq!(
+        old.schema_version, MANIFEST_VERSION,
+        "0.5.0 wrote the current manifest schema"
+    );
     assert_eq!(old.build_stamp, "0.5.0+p5fa8bd06e59848d5");
     for name in manifest_gmaps(&dir) {
         let b = std::fs::read(dir.join(&name)).unwrap();
-        assert_eq!(&b[8..12], &2u32.to_le_bytes(), "{name}: the fixture is not format 2");
+        assert_eq!(
+            &b[8..12],
+            &2u32.to_le_bytes(),
+            "{name}: the fixture is not format 2"
+        );
     }
 
     let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
-    assert_eq!(rebuilt_reason(outcome), "written by another glia build (0.5.0+p5fa8bd06e59848d5)");
+    assert_eq!(
+        rebuilt_reason(outcome),
+        "written by another glia build (0.5.0+p5fa8bd06e59848d5)"
+    );
 
     // The graph served is a cold build of the same sources, edge cells included.
     let cold = generate_one(d.to_str().unwrap()).unwrap();
-    assert_eq!((r.total_nodes, r.total_edges), (cold.total_nodes, cold.total_edges));
+    assert_eq!(
+        (r.total_nodes, r.total_edges),
+        (cold.total_nodes, cold.total_edges)
+    );
     assert!(r.total_edges > 0);
     assert_eq!(r.merged.graphs.len(), cold.merged.graphs.len());
     for (a, b) in r.merged.graphs.iter().zip(&cold.merged.graphs) {
@@ -462,7 +529,11 @@ fn v050_layout_rebuilds() {
         assert_eq!(a.edges, b.edges);
     }
     assert_eq!(r.merged.cross_edges, cold.merged.cross_edges);
-    assert_eq!(r.merged.cross_edges.len(), 1, "the fixture's one TS -> Go HTTP pairing");
+    assert_eq!(
+        r.merged.cross_edges.len(),
+        1,
+        "the fixture's one TS -> Go HTTP pairing"
+    );
 
     // Rewritten in place as this build's format; nothing of 0.5.0's is left.
     let new = read_manifest_lenient(&dir).unwrap();
@@ -471,7 +542,11 @@ fn v050_layout_rebuilds() {
     for name in manifest_gmaps(&dir) {
         let path = dir.join(&name);
         let b = std::fs::read(&path).unwrap();
-        assert_eq!(&b[8..12], &FORMAT_VERSION.to_le_bytes(), "{name}: not rewritten");
+        assert_eq!(
+            &b[8..12],
+            &FORMAT_VERSION.to_le_bytes(),
+            "{name}: not rewritten"
+        );
         assert_eq!(FORMAT_VERSION, 3);
         MmapContainer::open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
     }
@@ -480,7 +555,10 @@ fn v050_layout_rebuilds() {
     let (again, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert_fresh(&outcome);
     for (a, b) in again.merged.graphs.iter().zip(&r.merged.graphs) {
-        assert_eq!(a.edges, b.edges, "a fresh load expands the interned EVIDENCE back");
+        assert_eq!(
+            a.edges, b.edges,
+            "a fresh load expands the interned EVIDENCE back"
+        );
     }
     assert_eq!(again.merged.cross_edges, r.merged.cross_edges);
 }
@@ -490,11 +568,19 @@ fn v050_layout_rebuilds() {
 fn raw_spans(dir: &Path) -> Vec<(glia_code_domain::code_span::CodeSpan, u32)> {
     use glia_code_domain::code_span::CodeSpan;
     let mut out = Vec::new();
-    for name in manifest_gmaps(dir).iter().filter(|n| n.as_str() != "cross_stack.gmap") {
-        let g = glia_store::decode_repo_graph(&MmapContainer::open(&dir.join(name)).unwrap()).unwrap();
+    for name in manifest_gmaps(dir)
+        .iter()
+        .filter(|n| n.as_str() != "cross_stack.gmap")
+    {
+        let g =
+            glia_store::decode_repo_graph(&MmapContainer::open(&dir.join(name)).unwrap()).unwrap();
         for n in &g.nodes {
             let kind = g.nav.kind_by_id.get(&n.id).map_or(0, |k| k.0);
-            for c in n.cells.iter().filter(|c| c.kind == glia_code_domain::cell_type::CODE) {
+            for c in n
+                .cells
+                .iter()
+                .filter(|c| c.kind == glia_code_domain::cell_type::CODE)
+            {
                 if let Some(span) = CodeSpan::from_payload(&c.payload) {
                     out.push((span, kind));
                 }
@@ -520,8 +606,10 @@ fn edit_inside(dir: &Path, repo: &Path, kinds: &[glia_core::NodeKindId]) -> usiz
             if !src[k as usize].is_ascii_lowercase() {
                 continue;
             }
-            let covering =
-                spans.iter().filter(|(o, _)| o.file == s.file && (o.start..o.end).contains(&k)).count();
+            let covering = spans
+                .iter()
+                .filter(|(o, _)| o.file == s.file && (o.start..o.end).contains(&k))
+                .count();
             if best.as_ref().is_none_or(|(c, _, _)| covering < *c) {
                 best = Some((covering, s.file.clone(), k as usize));
             }
@@ -589,7 +677,10 @@ fn unresolved_code_span_rebuilds() {
     let covering = edit_inside(&dir, &repo, &[glia_code_domain::node_kind::MODULE]);
     assert_eq!(covering, 1, "a byte only the module's span covers");
     manifest_mtime_ahead(&dir);
-    assert!(!glia_store::is_gmap_stale(&dir, &repo), "the mtime scan must not see the edit");
+    assert!(
+        !glia_store::is_gmap_stale(&dir, &repo),
+        "the mtime scan must not see the edit"
+    );
 
     let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert_eq!(
@@ -610,13 +701,19 @@ fn edited_function_in_a_built_layout_rebuilds() {
     let tmp = tempfile::tempdir().unwrap();
     let d = sources(tmp.path());
     let (dir, _) = persist_default(&d);
-    assert!(!raw_spans(&dir).is_empty(), "the default layout stores CODE as spans");
+    assert!(
+        !raw_spans(&dir).is_empty(),
+        "the default layout stores CODE as spans"
+    );
 
     use glia_code_domain::node_kind::{FUNCTION, METHOD};
     let covering = edit_inside(&dir, &d, &[FUNCTION, METHOD]);
     assert_eq!(covering, 2, "the function's span and its module's");
     manifest_mtime_ahead(&dir);
-    assert!(!glia_store::is_gmap_stale(&dir, &d), "the mtime scan must not see the edit");
+    assert!(
+        !glia_store::is_gmap_stale(&dir, &d),
+        "the mtime scan must not see the edit"
+    );
 
     let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
     assert_eq!(
@@ -628,6 +725,9 @@ fn edited_function_in_a_built_layout_rebuilds() {
     assert_fresh(&outcome);
     let cold = generate_one(d.to_str().unwrap()).unwrap();
     for (a, b) in again.merged.graphs.iter().zip(&cold.merged.graphs) {
-        assert_eq!(a.nodes, b.nodes, "every CODE cell reads back as the edited text");
+        assert_eq!(
+            a.nodes, b.nodes,
+            "every CODE cell reads back as the edited text"
+        );
     }
 }

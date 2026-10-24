@@ -76,9 +76,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{CodeNav, FileParse, cell_type, edge_category, node_kind};
-use glia_core::{
-    Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
-};
+use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
 /// Where a marker node's needle actually fired, 0-indexed like every other
 /// POSITION in the repo (`glia_doc::position_json`).
@@ -507,7 +505,10 @@ impl AccessStats {
     /// One function edge of `category`, re-homed for `emitter`, whose
     /// ACCESS_MODE is `mode`.
     fn count_owner(&mut self, category: EdgeCategoryId, emitter: &str, mode: Option<&str>) {
-        match (category == edge_category::READS_CONFIG, emitter == FLAGS_EMITTER) {
+        match (
+            category == edge_category::READS_CONFIG,
+            emitter == FLAGS_EMITTER,
+        ) {
             (true, true) => self.flag_fn += 1,
             (true, false) => self.config_fn += 1,
             (false, _) => self.count_fn(mode),
@@ -516,7 +517,10 @@ impl AccessStats {
 
     /// One module edge of `category`, re-homed for `emitter`, kept.
     fn count_kept(&mut self, category: EdgeCategoryId, emitter: &str) {
-        match (category == edge_category::READS_CONFIG, emitter == FLAGS_EMITTER) {
+        match (
+            category == edge_category::READS_CONFIG,
+            emitter == FLAGS_EMITTER,
+        ) {
             (true, true) => self.flag_module += 1,
             (true, false) => self.config_module += 1,
             (false, _) => self.module_kept += 1,
@@ -1769,7 +1773,11 @@ mod tests {
         assert_eq!(reads(&fp, flag), vec![send]);
         assert_eq!(reads(&fp, secret), vec![module]);
         let evidence_of = |to: NodeId| {
-            let e = fp.edges.iter().find(|e| e.from == send && e.to == to).unwrap();
+            let e = fp
+                .edges
+                .iter()
+                .find(|e| e.from == send && e.to == to)
+                .unwrap();
             assert!(e.cell(cell_type::ACCESS_MODE).is_none());
             Evidence::of(e).unwrap()
         };
@@ -1817,8 +1825,14 @@ mod tests {
         let (mut fp, module) = parse_with(&[(node_kind::FUNCTION, "send", Some((3, 6)))]);
         fp.nodes.push(node(flag, vec![]));
         let q = "config:flag:new-checkout";
-        fp.nav.record(flag, q, q, node_kind::CONFIG_KEY, Some(module));
-        let mut e = Edge::new(module, flag, edge_category::READS_CONFIG, Confidence::Medium);
+        fp.nav
+            .record(flag, q, q, node_kind::CONFIG_KEY, Some(module));
+        let mut e = Edge::new(
+            module,
+            flag,
+            edge_category::READS_CONFIG,
+            Confidence::Medium,
+        );
         evidence::attach(&mut e, Evidence::emitter(FLAGS_EMITTER));
         fp.edges.push(e);
         let kept = rehome_to_owner(

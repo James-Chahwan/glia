@@ -58,8 +58,7 @@ pub const STRINGS_SECTION: &str = "strings";
 
 /// Everything the code domain persists beyond the core: navigation maps, the
 /// symbol table, the references resolution left unbound, and the accessor set.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct CodeSection {
     pub nav: CodeNavStore,
@@ -122,8 +121,7 @@ impl ArchivedCodeSection {
 /// deterministic (so two builds of the same graph produce byte-identical files,
 /// useful for content-hash-based shard manifests at v0.4.5c) and lets future
 /// readers binary-search the archived form for point lookups.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct CodeNavStore {
     pub name_by_id: Vec<(NodeId, String)>,
@@ -135,8 +133,7 @@ pub struct CodeNavStore {
 /// Serialised mirror of `SymbolTable`: every map flattened into a `Vec`
 /// sorted by key at both levels (outer by `NodeId`, inner by name), so the
 /// shard bytes are identical across processes. Field order is archive order.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct SymbolTableStore {
     pub module_by_qname: Vec<(String, NodeId)>,
@@ -165,8 +162,7 @@ impl CodeNavStore {
             .collect();
         qname_by_id.sort_by_key(|(k, _)| k.0);
 
-        let mut parent_of: Vec<_> =
-            nav.parent_of.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut parent_of: Vec<_> = nav.parent_of.iter().map(|(k, v)| (*k, *v)).collect();
         parent_of.sort_by_key(|(k, _)| k.0);
 
         let mut children_of: Vec<_> = nav
@@ -222,19 +218,20 @@ impl SymbolTableStore {
             .collect();
         module_by_qname.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let to_pair_vec = |m: &std::collections::HashMap<NodeId, std::collections::HashMap<String, NodeId>>| {
-            let mut out: Vec<_> = m
-                .iter()
-                .map(|(k, inner)| {
-                    let mut pairs: Vec<_> =
-                        inner.iter().map(|(s, n)| (s.clone(), *n)).collect();
-                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                    (*k, pairs)
-                })
-                .collect();
-            out.sort_by_key(|(k, _)| k.0);
-            out
-        };
+        let to_pair_vec =
+            |m: &std::collections::HashMap<NodeId, std::collections::HashMap<String, NodeId>>| {
+                let mut out: Vec<_> = m
+                    .iter()
+                    .map(|(k, inner)| {
+                        let mut pairs: Vec<_> =
+                            inner.iter().map(|(s, n)| (s.clone(), *n)).collect();
+                        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                        (*k, pairs)
+                    })
+                    .collect();
+                out.sort_by_key(|(k, _)| k.0);
+                out
+            };
 
         Self {
             module_by_qname,
@@ -356,8 +353,7 @@ const EVIDENCE_TAG: u8 = 0x01;
 /// payload of the file indexes, in first-seen order. Filled while the edges
 /// are walked in their stored (sorted build) order, so an identical graph
 /// writes an identical table.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct StringTable {
     pub strings: Vec<String>,
@@ -528,7 +524,13 @@ fn decode_evidence<'s>(
     if at + 1 != bytes.len() {
         return Err(format!("{} trailing byte(s)", bytes.len() - at - 1));
     }
-    Ok(Evidence { emitter, rule, file, line, basis })
+    Ok(Evidence {
+        emitter,
+        rule,
+        file,
+        line,
+        basis,
+    })
 }
 
 /// Intern every canonical EVIDENCE cell of `edges` into `table`, in edge
@@ -563,7 +565,9 @@ pub fn intern_evidence(edges: &mut [Edge], table: &mut StringTable) -> InternSta
 /// layout adds the shard's name.
 pub fn expand_evidence(edges: &mut [Edge], table: &ArchivedStringTable) -> Result<(), StoreError> {
     let strings = &table.strings;
-    expand_with(edges, strings.len(), &|i| strings.get(i).map(|s| s.as_str()))
+    expand_with(edges, strings.len(), &|i| {
+        strings.get(i).map(|s| s.as_str())
+    })
 }
 
 fn expand_with<'s>(
@@ -652,7 +656,9 @@ impl CodeSource for FsCodeSource {
     fn read(&self, repo: RepoId, file: &str) -> Option<Cow<'_, [u8]>> {
         let root = self.roots.get(&repo.0)?;
         let rel = Path::new(file);
-        let plain = rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        let plain = rel
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
         if file.is_empty() || !plain {
             return None;
         }
@@ -708,11 +714,19 @@ impl SourceFile {
     fn find_on_line(&self, line: usize, text: &[u8]) -> Option<usize> {
         let starts = self.line_starts.get_or_init(|| {
             let mut v = vec![0usize];
-            v.extend(self.bytes.iter().enumerate().filter(|(_, b)| **b == b'\n').map(|(i, _)| i + 1));
+            v.extend(
+                self.bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b == b'\n')
+                    .map(|(i, _)| i + 1),
+            );
             v
         });
         let from = *starts.get(line)?;
-        let to = starts.get(line + 1).map_or(self.bytes.len(), |next| next - 1);
+        let to = starts
+            .get(line + 1)
+            .map_or(self.bytes.len(), |next| next - 1);
         let first = *text.first()?;
         (from..=to).find(|&k| {
             self.bytes.get(k) == Some(&first) && self.bytes.get(k..k + text.len()) == Some(text)
@@ -730,7 +744,11 @@ struct ShardFiles<'s> {
 
 impl<'s> ShardFiles<'s> {
     fn new(source: &'s dyn CodeSource, repo: RepoId) -> Self {
-        Self { source, repo, files: HashMap::new() }
+        Self {
+            source,
+            repo,
+            files: HashMap::new(),
+        }
     }
 
     fn get(&mut self, file: &str) -> Option<&SourceFile> {
@@ -748,15 +766,22 @@ impl<'s> ShardFiles<'s> {
 /// `(file, 0-based start_line)` of the node's first POSITION cell that has
 /// both, JSON or text.
 fn first_position(cells: &[Cell]) -> Option<(String, usize)> {
-    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| {
-        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
-            return None;
-        };
-        let v: serde_json::Value = serde_json::from_str(s).ok()?;
-        let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?.to_string();
-        let line = usize::try_from(v.get("start_line")?.as_u64()?).ok()?;
-        Some((file, line))
-    })
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .find_map(|c| {
+            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(s).ok()?;
+            let file = v
+                .get("file")?
+                .as_str()
+                .filter(|f| !f.is_empty())?
+                .to_string();
+            let line = usize::try_from(v.get("start_line")?.as_u64()?).ok()?;
+            Some((file, line))
+        })
 }
 
 /// Store every CODE text of `nodes` found verbatim in its POSITION file,
@@ -811,9 +836,10 @@ fn expand_code_spans<'s>(
             if b.first() != Some(&CODE_SPAN_TAG) {
                 continue;
             }
-            let span = CodeSpan::decode(b, table_len, string).map_err(|why| {
-                StoreError::Corrupt { detail: format!("CODE span of node {i} ({id}): {why}") }
-            })?;
+            let span =
+                CodeSpan::decode(b, table_len, string).map_err(|why| StoreError::Corrupt {
+                    detail: format!("CODE span of node {i} ({id}): {why}"),
+                })?;
             let text = files
                 .as_deref_mut()
                 .and_then(|f| f.get(&span.file))
@@ -895,7 +921,11 @@ fn intern_for_write(
         )));
     }
     let code_cells = || {
-        core.nodes.iter().flat_map(|n| &n.cells).filter(|c| c.kind == cell_type::CODE).count()
+        core.nodes
+            .iter()
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::CODE)
+            .count()
     };
     if !intern {
         let kept_json = core
@@ -904,8 +934,18 @@ fn intern_for_write(
             .flat_map(|e| &e.cells)
             .filter(|c| c.kind == cell_type::EVIDENCE)
             .count();
-        let spans = CodeSpanStats { inline: code_cells(), ..CodeSpanStats::default() };
-        return Ok((None, InternStats { interned: 0, kept_json }, spans));
+        let spans = CodeSpanStats {
+            inline: code_cells(),
+            ..CodeSpanStats::default()
+        };
+        return Ok((
+            None,
+            InternStats {
+                interned: 0,
+                kept_json,
+            },
+            spans,
+        ));
     }
     let mut table = StringTable::default();
     let stats = intern_evidence(&mut core.edges, &mut table);
@@ -914,7 +954,10 @@ fn intern_for_write(
             let mut files = ShardFiles::new(source, core.repo);
             span_code_cells(&mut core.nodes, &mut Interner::new(&mut table), &mut files)
         }
-        None => CodeSpanStats { inline: code_cells(), ..CodeSpanStats::default() },
+        None => CodeSpanStats {
+            inline: code_cells(),
+            ..CodeSpanStats::default()
+        },
     };
     let section = if table.is_empty() {
         None
@@ -1111,7 +1154,9 @@ pub fn code_section_of(m: &MmapContainer) -> Result<Option<&ArchivedCodeSection>
 /// section on every call: for many lookups, take `code_section_of` once and
 /// call `ArchivedCodeSection::qname`.
 pub fn qname_of(m: &MmapContainer, id: NodeId) -> Result<Option<String>, StoreError> {
-    Ok(code_section_of(m)?.and_then(|s| s.qname(id)).map(str::to_string))
+    Ok(code_section_of(m)?
+        .and_then(|s| s.qname(id))
+        .map(str::to_string))
 }
 
 /// Serialise a `RepoGraph` to a `.gmap` file (preamble + code and strings
@@ -1127,7 +1172,6 @@ pub fn write_repo_graph(g: &RepoGraph, path: &Path) -> Result<(), StoreError> {
 // ============================================================================
 // Tests
 // ============================================================================
-
 
 #[cfg(test)]
 mod tests {
@@ -1167,7 +1211,10 @@ mod tests {
     fn symbol_store_persists_interface_methods_sorted() {
         let mut sym = SymbolTable::default();
         for (iface, names) in [(90u64, ["Save", "GetById"]), (20, ["Put", "Delete"])] {
-            let inner = names.iter().enumerate().map(|(i, n)| (n.to_string(), NodeId(iface + 1 + i as u64)));
+            let inner = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.to_string(), NodeId(iface + 1 + i as u64)));
             sym.interface_methods.insert(NodeId(iface), inner.collect());
         }
         let store = SymbolTableStore::from_owned(&sym);
@@ -1176,8 +1223,14 @@ mod tests {
             .iter()
             .map(|(k, m)| (k.0, m.iter().map(|(n, _)| n.as_str()).collect()))
             .collect();
-        assert_eq!(flat, vec![(20, vec!["Delete", "Put"]), (90, vec!["GetById", "Save"])]);
-        assert_eq!(store.to_owned_table().interface_methods, sym.interface_methods);
+        assert_eq!(
+            flat,
+            vec![(20, vec!["Delete", "Put"]), (90, vec!["GetById", "Save"])]
+        );
+        assert_eq!(
+            store.to_owned_table().interface_methods,
+            sym.interface_methods
+        );
     }
 
     /// LC.7: `properties` rides the code section, sorted, and decodes back into
@@ -1223,7 +1276,13 @@ mod tests {
     fn evidence_graph(n: u64) -> RepoGraph {
         use glia_core::{Confidence, Node};
         let repo = RepoId::from_canonical("test://cd7b-shrink");
-        let emitters = ["graph:calls", "graph:imports", "parser:rust", "graph:nav", "pass:tests"];
+        let emitters = [
+            "graph:calls",
+            "graph:imports",
+            "parser:rust",
+            "graph:nav",
+            "pass:tests",
+        ];
         let rules = [
             "import_binding",
             "module_symbol",
@@ -1233,9 +1292,20 @@ mod tests {
             "global_unique",
             "enum_member",
         ];
-        let bases = [Basis::Site, Basis::FromNode, Basis::ToNode, Basis::File, Basis::None];
+        let bases = [
+            Basis::Site,
+            Basis::FromNode,
+            Basis::ToNode,
+            Basis::File,
+            Basis::None,
+        ];
         let nodes: Vec<Node> = (0..n + 1)
-            .map(|i| Node { id: NodeId(i), repo, confidence: Confidence::Strong, cells: vec![] })
+            .map(|i| Node {
+                id: NodeId(i),
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            })
             .collect();
         let edges = (0..n)
             .map(|i| {
@@ -1248,8 +1318,13 @@ mod tests {
                     ev = ev.at(file, (i * 37 % 40_000) as u32);
                 }
                 ev.basis = bases[(i % 5) as usize];
-                Edge::new(NodeId(i), NodeId(i + 1), edge_category::CALLS, Confidence::Strong)
-                    .with_cell(ev.to_cell())
+                Edge::new(
+                    NodeId(i),
+                    NodeId(i + 1),
+                    edge_category::CALLS,
+                    Confidence::Strong,
+                )
+                .with_cell(ev.to_cell())
             })
             .collect();
         RepoGraph {
@@ -1269,7 +1344,13 @@ mod tests {
         let g = evidence_graph(10_000);
         let plain = encode_repo_graph_uninterned(&g);
         let encoded = encode_repo_graph_counted(&g, None).unwrap();
-        assert_eq!(encoded.evidence, InternStats { interned: 10_000, kept_json: 0 });
+        assert_eq!(
+            encoded.evidence,
+            InternStats {
+                interned: 10_000,
+                kept_json: 0
+            }
+        );
         assert!(encoded.has_strings && !encoded.has_code);
         let json_bytes: usize = g
             .edges
@@ -1287,29 +1368,57 @@ mod tests {
             encoded.bytes.len(),
             saved / 10_000
         );
-        assert!(json_bytes / 10_000 >= 80, "fixture payloads are not real-sized: {json_bytes}");
-        assert!(saved >= 700_000, "interning saved only {saved} bytes over 10,000 edges");
+        assert!(
+            json_bytes / 10_000 >= 80,
+            "fixture payloads are not real-sized: {json_bytes}"
+        );
+        assert!(
+            saved >= 700_000,
+            "interning saved only {saved} bytes over 10,000 edges"
+        );
 
         // The smaller file is the same graph.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("shrink.gmap");
         std::fs::write(&path, &encoded.bytes).unwrap();
-        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().edges, g.edges);
+        assert_eq!(
+            decode_repo_graph(&MmapContainer::open(&path).unwrap())
+                .unwrap()
+                .edges,
+            g.edges
+        );
     }
 
     #[test]
     fn varints_round_trip_at_every_width() {
-        for v in [0u64, 1, 127, 128, 16_383, 16_384, u64::from(u32::MAX), u64::MAX - 1, u64::MAX] {
+        for v in [
+            0u64,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            u64::from(u32::MAX),
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
             let mut out = Vec::new();
             put_varint(&mut out, v);
             let mut at = 0;
             assert_eq!(take_varint(&out, &mut at, "v"), Ok(v), "{v}");
             assert_eq!(at, out.len(), "{v}: every byte consumed");
             let mut at = 0;
-            assert!(take_varint(&out[..out.len() - 1], &mut at, "v").is_err(), "{v}: truncated");
+            assert!(
+                take_varint(&out[..out.len() - 1], &mut at, "v").is_err(),
+                "{v}: truncated"
+            );
         }
         let mut at = 0;
-        assert!(take_varint(&[0xff; 11], &mut at, "v").unwrap_err().contains("overflows"));
+        assert!(
+            take_varint(&[0xff; 11], &mut at, "v")
+                .unwrap_err()
+                .contains("overflows")
+        );
     }
 
     /// The table is filled in first-seen edge order and shared by every
@@ -1318,27 +1427,62 @@ mod tests {
     fn interning_is_first_seen_and_compact() {
         let cell = |ev: Evidence| ev.to_cell();
         let mut edges = vec![
-            Edge::new(NodeId(1), NodeId(2), edge_category::CALLS, glia_core::Confidence::Strong)
-                .with_cell(cell(
-                    Evidence::emitter("graph:calls").rule("module_symbol").at("a.rs", 4),
-                )),
-            Edge::new(NodeId(2), NodeId(3), edge_category::CALLS, glia_core::Confidence::Strong)
-                .with_cell(cell(Evidence::emitter("graph:nav"))),
-            Edge::new(NodeId(3), NodeId(4), edge_category::CALLS, glia_core::Confidence::Strong)
-                .with_cell(cell(Evidence::emitter("graph:calls").at("a.rs", 0))),
+            Edge::new(
+                NodeId(1),
+                NodeId(2),
+                edge_category::CALLS,
+                glia_core::Confidence::Strong,
+            )
+            .with_cell(cell(
+                Evidence::emitter("graph:calls")
+                    .rule("module_symbol")
+                    .at("a.rs", 4),
+            )),
+            Edge::new(
+                NodeId(2),
+                NodeId(3),
+                edge_category::CALLS,
+                glia_core::Confidence::Strong,
+            )
+            .with_cell(cell(Evidence::emitter("graph:nav"))),
+            Edge::new(
+                NodeId(3),
+                NodeId(4),
+                edge_category::CALLS,
+                glia_core::Confidence::Strong,
+            )
+            .with_cell(cell(Evidence::emitter("graph:calls").at("a.rs", 0))),
         ];
         let before = edges.clone();
         let mut table = StringTable::default();
         let stats = intern_evidence(&mut edges, &mut table);
-        assert_eq!(stats, InternStats { interned: 3, kept_json: 0 });
-        assert_eq!(table.strings, vec!["graph:calls", "module_symbol", "a.rs", "graph:nav"]);
+        assert_eq!(
+            stats,
+            InternStats {
+                interned: 3,
+                kept_json: 0
+            }
+        );
+        assert_eq!(
+            table.strings,
+            vec!["graph:calls", "module_symbol", "a.rs", "graph:nav"]
+        );
         let bytes = |e: &Edge| match &e.cells[0].payload {
             CellPayload::Bytes(b) => b.clone(),
             other => panic!("not interned: {other:?}"),
         };
-        assert_eq!(bytes(&edges[0]), vec![0x01, 0, 2, 3, 5, basis_byte(Basis::Site)]);
-        assert_eq!(bytes(&edges[1]), vec![0x01, 3, 0, 0, 0, basis_byte(Basis::None)]);
-        assert_eq!(bytes(&edges[2]), vec![0x01, 0, 0, 3, 1, basis_byte(Basis::Site)]);
+        assert_eq!(
+            bytes(&edges[0]),
+            vec![0x01, 0, 2, 3, 5, basis_byte(Basis::Site)]
+        );
+        assert_eq!(
+            bytes(&edges[1]),
+            vec![0x01, 3, 0, 0, 0, basis_byte(Basis::None)]
+        );
+        assert_eq!(
+            bytes(&edges[2]),
+            vec![0x01, 0, 0, 3, 1, basis_byte(Basis::Site)]
+        );
 
         // Expanding against the same table gives the exact JSON back.
         let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&table).unwrap();
@@ -1355,18 +1499,27 @@ mod tests {
         let get = |i: usize| table.get(i).copied();
         for (bytes, why) in [
             (vec![0x01], "truncated varint (emitter)"),
-            (vec![0x01, 1, 0, 0, 0, 1], "emitter index 1 outside the 1-entry strings table"),
+            (
+                vec![0x01, 1, 0, 0, 0, 1],
+                "emitter index 1 outside the 1-entry strings table",
+            ),
             (vec![0x01, 0, 2, 0, 0, 1], "rule index 1 outside"),
             (vec![0x01, 0, 0, 0, 0], "no basis byte"),
             (vec![0x01, 0, 0, 0, 0, 9], "unknown basis byte 9"),
             (vec![0x01, 0, 0, 0, 0, 1, 0], "1 trailing byte(s)"),
-            (vec![0x01, 0, 0, 0, 0x81, 0x80, 0x80, 0x80, 0x10, 1], "past u32"),
+            (
+                vec![0x01, 0, 0, 0, 0x81, 0x80, 0x80, 0x80, 0x10, 1],
+                "past u32",
+            ),
         ] {
             let got = decode_evidence(&bytes, 1, &get).unwrap_err();
             assert!(got.contains(why), "{bytes:?}: {got}");
         }
         assert_eq!(
-            decode_evidence(&[0x01, 0, 0, 0, 0, 1], 1, &get).unwrap().to_cell().payload,
+            decode_evidence(&[0x01, 0, 0, 0, 0, 1], 1, &get)
+                .unwrap()
+                .to_cell()
+                .payload,
             CellPayload::Json(r#"{"emitter":"graph:calls","basis":"site"}"#.into())
         );
     }
@@ -1391,7 +1544,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vector.gmap");
         write_repo_graph(&g, &path).unwrap();
-        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().edges, g.edges);
+        assert_eq!(
+            decode_repo_graph(&MmapContainer::open(&path).unwrap())
+                .unwrap()
+                .edges,
+            g.edges
+        );
     }
 
     /// CD.7c: the span scan finds a text at any byte of its line, byte
@@ -1404,11 +1562,23 @@ mod tests {
         };
         let at_b = f.bytes.windows(2).position(|w| w == b"fn").unwrap();
         assert_eq!(f.find_on_line(1, b"fn b() {}"), Some(at_b));
-        assert_eq!(f.find_on_line(1, b"fn b() {}\nfn c"), Some(at_b), "a text may run past its line");
-        assert_eq!(f.find_on_line(0, b"fn b() {}"), None, "starts on line 1, not 0");
+        assert_eq!(
+            f.find_on_line(1, b"fn b() {}\nfn c"),
+            Some(at_b),
+            "a text may run past its line"
+        );
+        assert_eq!(
+            f.find_on_line(0, b"fn b() {}"),
+            None,
+            "starts on line 1, not 0"
+        );
         assert_eq!(f.find_on_line(2, b"fn c() {}"), Some(f.bytes.len() - 9));
         assert_eq!(f.find_on_line(3, b"fn c() {}"), None, "no line 3");
-        assert_eq!(f.find_on_line(0, b"= 1"), Some(3), "after the two-byte e-acute");
+        assert_eq!(
+            f.find_on_line(0, b"= 1"),
+            Some(3),
+            "after the two-byte e-acute"
+        );
         assert_eq!(f.find_on_line(0, b""), None);
     }
 
@@ -1421,10 +1591,15 @@ mod tests {
             id: NodeId(3),
             repo: RepoId(1),
             confidence: glia_core::Confidence::Strong,
-            cells: vec![glia_core::Cell { kind: cell_type::CODE, payload }],
+            cells: vec![glia_core::Cell {
+                kind: cell_type::CODE,
+                payload,
+            }],
         };
         let mut g = evidence_graph(1);
-        g.nodes = vec![node(CellPayload::Bytes(CodeSpan::of("a.rs", 0, b"x").encode(0)))];
+        g.nodes = vec![node(CellPayload::Bytes(
+            CodeSpan::of("a.rs", 0, b"x").encode(0),
+        ))];
         match encode_repo_graph(&g) {
             Err(StoreError::Invalid(why)) => assert!(why.contains("node 0"), "{why}"),
             other => panic!("expected Invalid, got {:?}", other.map(|b| b.len())),
@@ -1433,7 +1608,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("bytes.gmap");
         write_repo_graph(&g, &path).unwrap();
-        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().nodes, g.nodes);
+        assert_eq!(
+            decode_repo_graph(&MmapContainer::open(&path).unwrap())
+                .unwrap()
+                .nodes,
+            g.nodes
+        );
     }
 
     /// CD.7c: a span whose file index is outside the table is `Corrupt`

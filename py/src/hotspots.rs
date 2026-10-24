@@ -32,8 +32,12 @@ fn hotspot_answer(
     scope: Option<String>,
     unparsed_files: usize,
 ) -> Result<Hotspots, String> {
-    let level = parse_level(level)
-        .ok_or_else(|| format!("unknown level '{level}'; valid levels: {}", LEVELS.join(", ")))?;
+    let level = parse_level(level).ok_or_else(|| {
+        format!(
+            "unknown level '{level}'; valid levels: {}",
+            LEVELS.join(", ")
+        )
+    })?;
     let mut args = HotspotArgs::default();
     args.level = level;
     args.top = top;
@@ -107,19 +111,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         for (rel, src) in [
             ("core/util.py", "def helper(x):\n    return x + 1\n"),
-            ("api/a.py", "from core.util import helper\n\n\ndef get_a(x):\n    return helper(x)\n"),
+            (
+                "api/a.py",
+                "from core.util import helper\n\n\ndef get_a(x):\n    return helper(x)\n",
+            ),
             ("scripts/once.py", "def run_once():\n    return 0\n"),
         ] {
             let path = root.join(rel);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("temp dir");
             std::fs::write(path, src).expect("write fixture");
         }
-        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path")).expect("bare build");
+        let built =
+            glia_engine::generate_one(root.to_str().expect("utf-8 temp path")).expect("bare build");
         let bare = hotspot_answer(&built.merged, "both", 20, 2, false, None, 3).expect("answer");
         let absence = bare.absence.expect("no history is an absence");
         assert_eq!((absence.reason, absence.unparsed_files), ("no_history", 3));
 
-        let file = |p: &str| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None };
+        let file = |p: &str| HistoryFile {
+            p: p.to_string(),
+            a: Some(1),
+            d: Some(0),
+            from: None,
+        };
         let commit = |i: i64, paths: &[&str]| HistoryCommit {
             c: format!("{i:02}{}", "0".repeat(38)),
             t: 1_767_225_600 + i * 86_400,
@@ -130,24 +143,39 @@ mod tests {
             commit(2, &["scripts/once.py", "core/util.py", "api/a.py"]),
             commit(1, &["scripts/once.py", "core/util.py", "api/a.py"]),
         ];
-        write_history(&root, HistoryMeta::new(commits[0].c.clone(), 2000, None, String::new()), &commits, &[])
-            .expect("write snapshot");
+        write_history(
+            &root,
+            HistoryMeta::new(commits[0].c.clone(), 2000, None, String::new()),
+            &commits,
+            &[],
+        )
+        .expect("write snapshot");
         let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
 
         let answer = hotspot_answer(&built.merged, "module", 0, 2, false, None, 0).expect("answer");
-        assert!(answer.absence.is_none() && answer.symbols.is_empty(), "{answer:#?}");
+        assert!(
+            answer.absence.is_none() && answer.symbols.is_empty(),
+            "{answer:#?}"
+        );
         assert_eq!(answer.modules[0].qname, "core::util", "{answer:#?}");
         assert_eq!(answer.modules.len(), 3);
         assert_eq!(answer.history_head, Some(1_767_225_600 + 3 * 86_400));
         let json = serde_json::to_string(&answer).expect("serialises");
-        assert!(json.starts_with("{\"modules\":[{\"level\":\"module\",\"qname\":\"core::util\""), "{json}");
+        assert!(
+            json.starts_with("{\"modules\":[{\"level\":\"module\",\"qname\":\"core::util\""),
+            "{json}"
+        );
 
         let cut = hotspot_answer(&built.merged, "both", 1, 2, false, None, 0).expect("answer");
         assert_eq!((cut.modules.len(), cut.modules[0].ranked), (1, 3));
 
-        let err = hotspot_answer(&built.merged, "modules", 20, 2, false, None, 0).expect_err("unknown level");
-        assert!(err.contains("modules") && err.contains("module, symbol, both"), "{err}");
+        let err = hotspot_answer(&built.merged, "modules", 20, 2, false, None, 0)
+            .expect_err("unknown level");
+        assert!(
+            err.contains("modules") && err.contains("module, symbol, both"),
+            "{err}"
+        );
     }
 }

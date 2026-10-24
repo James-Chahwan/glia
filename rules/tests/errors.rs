@@ -49,7 +49,10 @@ impl Builtin for InScope {
         for id in &self.cli {
             if node.is_none_or(|n| n == ValueRef::Node(*id)) {
                 let values = vec![Value::Node(*id), Value::Str((*scope).into())];
-                out.push(BuiltinRow { values, tier: Tier::Fact });
+                out.push(BuiltinRow {
+                    values,
+                    tier: Tier::Fact,
+                });
             }
         }
         Ok(())
@@ -69,9 +72,15 @@ fn graph(conflict: bool) -> MemSource {
     };
     let mut g = testkit::lcg_graph(&spec);
     let cli = vec![testkit::node_id(0, 0), testkit::node_id(0, 1)];
-    g.builtin(Box::new(InScope { name: "in_scope", cli }));
+    g.builtin(Box::new(InScope {
+        name: "in_scope",
+        cli,
+    }));
     if conflict {
-        g.builtin(Box::new(InScope { name: "edge", cli: Vec::new() }));
+        g.builtin(Box::new(InScope {
+            name: "edge",
+            cli: Vec::new(),
+        }));
     }
     g
 }
@@ -95,7 +104,13 @@ struct Case {
 }
 
 fn case(name: &'static str, text: &str, want: Want) -> Case {
-    Case { name, text: text.to_string(), opts: Options::default(), conflict: false, want }
+    Case {
+        name,
+        text: text.to_string(),
+        opts: Options::default(),
+        conflict: false,
+        want,
+    }
 }
 
 fn variant(e: &RulesError) -> &'static str {
@@ -136,7 +151,10 @@ fn cases() -> Vec<Case> {
     let two = "a(x) :- node(x, \"ROUTE\").\nb(x, y) :- edge(x, y, \"CALLS\").";
     let mut outputs = case("unknown_output_option", two, Err("Unknown", ""));
     outputs.opts.outputs = vec!["nope".into()];
-    outputs.want = Err("Unknown", "unknown output `nope`; the program defines a/1, b/2");
+    outputs.want = Err(
+        "Unknown",
+        "unknown output `nope`; the program defines a/1, b/2",
+    );
     let mut conflict = case(
         "catalog_conflict_warning",
         "v(x) :- node(x, k).",
@@ -280,7 +298,10 @@ fn cases() -> Vec<Case> {
         case(
             "unknown_cell_type",
             "v(x) :- cell(x, \"CODE\", _).",
-            Err("Invalid", "rules:1:17: error: unknown cell type `CODE` (in the rule for `v/1`)"),
+            Err(
+                "Invalid",
+                "rules:1:17: error: unknown cell type `CODE` (in the rule for `v/1`)",
+            ),
         ),
         case(
             "constant_argument",
@@ -522,12 +543,18 @@ fn cases() -> Vec<Case> {
         case(
             "builtin_failed",
             "v(x) :- node(x, _), in_scope(x, \"nowhere\").",
-            Err("Builtin", "builtin `in_scope/2` failed: scope `nowhere` holds no node"),
+            Err(
+                "Builtin",
+                "builtin `in_scope/2` failed: scope `nowhere` holds no node",
+            ),
         ),
         case(
             "rows_unknown",
             two,
-            RowsErr("nope", "unknown output `nope`; the program defines a/1, b/2"),
+            RowsErr(
+                "nope",
+                "unknown output `nope`; the program defines a/1, b/2",
+            ),
         ),
         outputs,
         budget,
@@ -565,10 +592,19 @@ fn outcome(c: &Case) -> Result<String, String> {
             Ok(rows) => Err(format!("rows({output:?}) answered {} rows", rows.len())),
         },
         (Want::Warns(_), Ok(ev)) => {
-            if ev.warnings().iter().any(|w| w.severity != Severity::Warning) {
+            if ev
+                .warnings()
+                .iter()
+                .any(|w| w.severity != Severity::Warning)
+            {
                 return Err(format!("a non-warning in {:?}", ev.warnings()));
             }
-            Ok(ev.warnings().iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+            Ok(ev
+                .warnings()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"))
         }
         (_, Err(e)) => Err(format!("run failed: {e}")),
         (_, Ok(ev)) => Err(format!("run succeeded with outputs {:?}", ev.outputs())),
@@ -591,7 +627,11 @@ fn error_texts() {
         }
     }
     let n = failures.len();
-    assert!(failures.is_empty(), "{n} of the table differ:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{n} of the table differ:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// The arity cap is 256 (relation and plan columns are u8): 256 arguments evaluate.

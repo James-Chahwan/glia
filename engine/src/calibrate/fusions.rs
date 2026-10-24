@@ -176,8 +176,24 @@ pub struct Needs {
 
 /// What `name` reads; None for a name [`seeded_keys`] does not rank.
 pub fn needs(name: &str) -> Option<Needs> {
-    let n = |pt, c0, w5, m| Some(Needs { pt, c0, w5, m, idr: false });
-    let i = |pt, c0| Some(Needs { pt, c0, w5: false, m: false, idr: true });
+    let n = |pt, c0, w5, m| {
+        Some(Needs {
+            pt,
+            c0,
+            w5,
+            m,
+            idr: false,
+        })
+    };
+    let i = |pt, c0| {
+        Some(Needs {
+            pt,
+            c0,
+            w5: false,
+            m: false,
+            idr: true,
+        })
+    };
     match name {
         "T1s" | "P1" | "H9s50" => n(false, false, false, false),
         "LX[IDR,P1]" | LX_IDR_H9S50 => i(false, false),
@@ -227,7 +243,11 @@ pub fn seeded_keys(name: &str, s: &Signals, excluded: &[bool]) -> Option<Vec<Ran
             .collect();
         Some(scalar(&v))
     };
-    let idr = || s.idr.as_deref().map_or_else(|| vec![0.0; n], |v| dense(v, n));
+    let idr = || {
+        s.idr
+            .as_deref()
+            .map_or_else(|| vec![0.0; n], |v| dense(v, n))
+    };
     let h9s50 = || fuse::blend(0.5, &mm(&t1s), &mm(&p1));
     let h9s25 = || fuse::blend(0.25, &mm(&t1s), &mm(&s.pt));
     let h18 = || fuse::mean(&[&mm(&t1s), &mm(&s.c0), &mm(&s.pt)]);
@@ -251,7 +271,12 @@ pub fn seeded_keys(name: &str, s: &Signals, excluded: &[bool]) -> Option<Vec<Ran
         LX_IDR_H9S50 => lex2(&idr(), &h9s50()),
         "LX[IDR,H18s[PT*]]" => lex2(&idr(), &h18()),
         "LX[IDR,H9s25[PT*]]" => lex2(&idr(), &h9s25()),
-        "H18si[PT*]" => scalar(&fuse::mean(&[&mm(&idr()), &mm(&t1s), &mm(&s.c0), &mm(&s.pt)])),
+        "H18si[PT*]" => scalar(&fuse::mean(&[
+            &mm(&idr()),
+            &mm(&t1s),
+            &mm(&s.c0),
+            &mm(&s.pt),
+        ])),
         "LX[IDR,C0,PT*]" => {
             let (i, c0, pt) = (idr(), dense(&s.c0, n), dense(&s.pt, n));
             (0..n).map(|f| [i[f], c0[f], pt[f]]).collect()
@@ -462,7 +487,12 @@ impl IdrCtx {
     /// `[ids] vocab repo=<r> surface=calibrate patterns=<n> source=override
     /// trackers=<t> rejected=<x> markdown=<m>`, else [`IdVocab::for_root`]
     /// (no line: the replay's routes are quiet, EC.13).
-    fn new(root: &Path, merged: &MergedGraph, cands: &Candidates, vocab: Option<IdVocab>) -> IdrCtx {
+    fn new(
+        root: &Path,
+        merged: &MergedGraph,
+        cands: &Candidates,
+        vocab: Option<IdVocab>,
+    ) -> IdrCtx {
         let renames = read_history(root)
             .as_ref()
             .map(rename_pairs)
@@ -513,9 +543,16 @@ impl IdrCtx {
     ) -> Result<ParentRoute, String> {
         let parent = resolve_rev(root, &format!("{sha}^"))?;
         if self.vocab.mentions(subj).is_empty() && conventional_scopes(subj).is_empty() {
-            return Ok(ParentRoute { idr: vec![0.0; cands.len()], side: false, has_id: false });
+            return Ok(ParentRoute {
+                idr: vec![0.0; cands.len()],
+                side: false,
+                has_id: false,
+            });
         }
-        let tree = Tree::Rev { repo: root, sha: parent.sha };
+        let tree = Tree::Rev {
+            repo: root,
+            sha: parent.sha,
+        };
         let dirs: Vec<&str> = self.dirs.iter().map(String::as_str).collect();
         let defs = read_defs(&tree, &dirs, &self.vocab, None);
         let ns = defs.namespaces(&self.vocab.local_words);
@@ -524,7 +561,11 @@ impl IdrCtx {
         let side = if quiet { side.quiet() } else { side };
         let recent = recent_scopes(older_newest_first, &ns, &self.vocab);
         let routed = route(subj, &side, &recent);
-        Ok(ParentRoute { idr: routed.idr, side: true, has_id: routed.has_id })
+        Ok(ParentRoute {
+            idr: routed.idr,
+            side: true,
+            has_id: routed.has_id,
+        })
     }
 }
 
@@ -663,7 +704,14 @@ impl IdrState {
                 IdrCtx::new(q.repo_root, q.merged, q.cands, self.vocab.get().cloned())
             });
             let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
-            ctx.route_at_parent(q.repo_root, q.cands, &self.cur_sha, &self.cur_subject, &older, true)
+            ctx.route_at_parent(
+                q.repo_root,
+                q.cands,
+                &self.cur_sha,
+                &self.cur_subject,
+                &older,
+                true,
+            )
         };
         {
             let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
@@ -747,7 +795,8 @@ pub fn answer_signals(
     let n = x.cands.len();
     let need = needs(name).unwrap_or_default();
     let mut s = Signals::zeros(n);
-    let to_cands = |v: &dyn Fn(u32) -> f64| -> Vec<f64> { x.cands.files.iter().map(|&f| v(f)).collect() };
+    let to_cands =
+        |v: &dyn Fn(u32) -> f64| -> Vec<f64> { x.cands.files.iter().map(|&f| v(f)).collect() };
     if need.pt && !(x.seed_files.is_empty() && x.extra.is_empty()) {
         let fr = rank_files(
             x.merged,
@@ -847,14 +896,30 @@ pub struct FindNeeds {
 /// What the find fusion `name` reads; None for a name [`find_keys`] does not
 /// rank.
 pub fn find_needs(name: &str) -> Option<FindNeeds> {
-    let n = |px1, pxt, c0x, idr| Some(FindNeeds { px1, pxt, c0x, w5: false, m: false, idr });
+    let n = |px1, pxt, c0x, idr| {
+        Some(FindNeeds {
+            px1,
+            pxt,
+            c0x,
+            w5: false,
+            m: false,
+            idr,
+        })
+    };
     match name {
         "T1s" => n(false, false, false, false),
         "PX1" | "H9x" => n(true, false, false, false),
         "PXT" | "H9x25T" => n(false, true, false, false),
         "C0x" => n(false, false, true, false),
         "H18x" | "H10x" => n(false, true, true, false),
-        "ALL5x" => Some(FindNeeds { px1: false, pxt: true, c0x: true, w5: true, m: true, idr: false }),
+        "ALL5x" => Some(FindNeeds {
+            px1: false,
+            pxt: true,
+            c0x: true,
+            w5: true,
+            m: true,
+            idr: false,
+        }),
         "LX[IDR,T1s]" => n(false, false, false, true),
         "LX[IDR,H9x25T]" => n(false, true, false, true),
         "LX[IDR,H18x]" | "H18xi" | "LX[IDR,C0x,PXT]" => n(false, true, true, true),
@@ -896,7 +961,13 @@ pub fn find_keys(name: &str, s: &FindSignals) -> Option<Vec<RankKey>> {
         "H9x25T" => scalar(&h9x25()),
         "H18x" => scalar(&h18x()),
         "H10x" => lex2(&c0x, &pxt),
-        "ALL5x" => scalar(&fuse::mean(&[&mm(&t1s), &mm(&s.w5), &mm(&s.m), &mm(&c0x), &mm(&pxt)])),
+        "ALL5x" => scalar(&fuse::mean(&[
+            &mm(&t1s),
+            &mm(&s.w5),
+            &mm(&s.m),
+            &mm(&c0x),
+            &mm(&pxt),
+        ])),
         "LX[IDR,T1s]" => lex2(&idr, &t1s),
         "LX[IDR,H18x]" => lex2(&idr, &h18x()),
         "LX[IDR,H9x25T]" => lex2(&idr, &h9x25()),
@@ -1013,7 +1084,12 @@ impl<'a> FindHead<'a> {
         cands: &'a Candidates,
         history: Option<(&'a HistorySnapshot, &'a [HistoryMessage])>,
     ) -> FindHead<'a> {
-        FindHead { merged, cache, cands, history }
+        FindHead {
+            merged,
+            cache,
+            cands,
+            history,
+        }
     }
 }
 
@@ -1027,7 +1103,12 @@ impl<'a> FindHead<'a> {
 /// `w / |nodes|` (an empty top scores 0), W5 / M [`work_at_head`] with
 /// nothing excluded, `now` the newest snapshot commit's author time (its
 /// committer time without the messages sidecar), surface `find_files`.
-pub fn find_signals_at_head(x: &FindHead<'_>, name: &str, t1s: Vec<f64>, idr: Vec<f64>) -> FindSignals {
+pub fn find_signals_at_head(
+    x: &FindHead<'_>,
+    name: &str,
+    t1s: Vec<f64>,
+    idr: Vec<f64>,
+) -> FindSignals {
     let n = x.cands.len();
     let need = find_needs(name).unwrap_or_default();
     let t1s = dense(&t1s, n);
@@ -1106,7 +1187,15 @@ pub fn find_signals_at_head(x: &FindHead<'_>, name: &str, t1s: Vec<f64>, idr: Ve
             .commits
             .first()
             .map_or(0, |c| if aligned { msgs[0].at } else { c.t });
-        let (w5, m) = work_at_head(snap, msgs, x.cands, &BTreeSet::new(), now, None, "find_files");
+        let (w5, m) = work_at_head(
+            snap,
+            msgs,
+            x.cands,
+            &BTreeSet::new(),
+            now,
+            None,
+            "find_files",
+        );
         s.w5 = w5;
         s.m = m;
     }
@@ -1145,7 +1234,10 @@ mod tests {
         v.iter().map(|&s| (s - lo) / (hi - lo)).collect()
     }
     fn blend(a: f64, x: &[f64], y: &[f64]) -> Vec<f64> {
-        x.iter().zip(y).map(|(p, q)| a * p + (1.0 - a) * q).collect()
+        x.iter()
+            .zip(y)
+            .map(|(p, q)| a * p + (1.0 - a) * q)
+            .collect()
     }
     fn r3_eq(parts: &[&[f64]]) -> Vec<f64> {
         let nf = parts[0].len();
@@ -1172,17 +1264,29 @@ mod tests {
     fn harness(s: &Signals, ex: &[bool]) -> Vec<(&'static str, Vec<RankKey>)> {
         let nf = s.p1.len();
         let mm = |v: &[f64]| mm_ex(v, ex);
-        let (mm_p1, mm_pt, mm_c0, mm_t1s, mm_w5, mm_m) =
-            (mm(&s.p1), mm(&s.pt), mm(&s.c0), mm(&s.t1s), mm(&s.w5), mm(&s.m));
+        let (mm_p1, mm_pt, mm_c0, mm_t1s, mm_w5, mm_m) = (
+            mm(&s.p1),
+            mm(&s.pt),
+            mm(&s.c0),
+            mm(&s.t1s),
+            mm(&s.w5),
+            mm(&s.m),
+        );
         let h9s50 = blend(0.5, &mm_t1s, &mm_p1);
         let idr = s.idr.clone().unwrap_or_default();
         let mm_idr = mm(&idr);
         let h9s25 = blend(0.25, &mm_t1s, &mm_pt);
         let h18 = r3_eq(&[&mm_t1s, &mm_c0, &mm_pt]);
-        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
+        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> {
+            (0..nf).map(|f| [a[f], b[f], c[f]]).collect()
+        };
         let ht = |w: &[f64], i: usize| {
             let (_, a, b, c) = HT_GRID[i];
-            scalar(&(0..nf).map(|f| a * mm_t1s[f] + b * w[f] + c * mm_p1[f]).collect::<Vec<_>>())
+            scalar(
+                &(0..nf)
+                    .map(|f| a * mm_t1s[f] + b * w[f] + c * mm_p1[f])
+                    .collect::<Vec<_>>(),
+            )
         };
         vec![
             ("H18s[PT*]", scalar(&r3_eq(&[&mm_t1s, &mm_c0, &mm_pt]))),
@@ -1194,13 +1298,19 @@ mod tests {
             ("HTsd[W5]", ht(&mm_w5, 3)),
             ("HTsc[M]", ht(&mm_m, 2)),
             ("HTsd[M]", ht(&mm_m, 3)),
-            ("ALL5", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0, &mm_p1]))),
+            (
+                "ALL5",
+                scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0, &mm_p1])),
+            ),
             ("LX[IDR,P1]", lex2(&idr, &s.p1)),
             ("LX[IDR,H9s50]", lex2(&idr, &h9s50)),
             // EC.12: r3_bank_seed's id-routed fusions, SELt2's last four
             ("LX[IDR,H18s[PT*]]", lex2(&idr, &h18)),
             ("LX[IDR,H9s25[PT*]]", lex2(&idr, &h9s25)),
-            ("H18si[PT*]", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0, &mm_pt]))),
+            (
+                "H18si[PT*]",
+                scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0, &mm_pt])),
+            ),
             ("LX[IDR,C0,PT*]", lx3(&idr, &s.c0, &s.pt)),
         ]
     }
@@ -1230,7 +1340,9 @@ mod tests {
         let h9x = blend(0.5, &mm_t1s, &mm_px1);
         let h9x25 = blend(0.25, &mm_t1s, &mm_pxt);
         let h18x = r3_eq(&[&mm_t1s, &mm_c0x, &mm_pxt]);
-        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> { (0..nf).map(|f| [a[f], b[f], c[f]]).collect() };
+        let lx3 = |a: &[f64], b: &[f64], c: &[f64]| -> Vec<RankKey> {
+            (0..nf).map(|f| [a[f], b[f], c[f]]).collect()
+        };
         let mut out: Vec<(String, Vec<RankKey>)> = Vec::new();
         let mut push = |n: &str, k: Vec<RankKey>| out.push((n.to_string(), k));
         push("T1s", scalar(t1s));
@@ -1241,11 +1353,17 @@ mod tests {
         push("H9x25T", scalar(&h9x25));
         push("H18x", scalar(&h18x));
         push("H10x", lex2(c0x, pxt));
-        push("ALL5x", scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0x, &mm_pxt])));
+        push(
+            "ALL5x",
+            scalar(&r3_eq(&[&mm_t1s, &mm_w5, &mm_m, &mm_c0x, &mm_pxt])),
+        );
         push("LX[IDR,T1s]", lex2(idr, t1s));
         push("LX[IDR,H18x]", lex2(idr, &h18x));
         push("LX[IDR,H9x25T]", lex2(idr, &h9x25));
-        push("H18xi", scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0x, &mm_pxt])));
+        push(
+            "H18xi",
+            scalar(&r3_eq(&[&mm_idr, &mm_t1s, &mm_c0x, &mm_pxt])),
+        );
         push("LX[IDR,C0x,PXT]", lx3(idr, c0x, pxt));
         for (_, k) in out.iter_mut() {
             if k.iter().all(|v| v[2] == 0.0) {
@@ -1300,11 +1418,18 @@ mod tests {
         assert!(find_needs("H9s50").is_none());
 
         // nothing matched: degree, then position; no row kept
-        let z = FindSignals { deg: s.deg.clone(), ..FindSignals::default() };
+        let z = FindSignals {
+            deg: s.deg.clone(),
+            ..FindSignals::default()
+        };
         for name in FIND_NAMES {
             let k = find_keys(name, &z).expect(name);
             let tie: Vec<u32> = (0..6).collect();
-            assert_eq!(seeded_order(&k, &tie, &[false; 6]), [1, 3, 0, 4, 2, 5], "{name}");
+            assert_eq!(
+                seeded_order(&k, &tie, &[false; 6]),
+                [1, 3, 0, 4, 2, 5],
+                "{name}"
+            );
             assert!(find_order(&k).is_empty(), "{name}");
         }
     }
@@ -1342,7 +1467,11 @@ mod tests {
     fn every_seeded_name_ranks_and_flat_signals_tie_to_position() {
         let (s, ex) = sig();
         for name in SEEDED_NAMES.iter().chain([&LX_IDR_H9S50]) {
-            assert_eq!(seeded_keys(name, &s, &ex).map(|k| k.len()), Some(6), "{name}");
+            assert_eq!(
+                seeded_keys(name, &s, &ex).map(|k| k.len()),
+                Some(6),
+                "{name}"
+            );
         }
         let z = Signals::zeros(4);
         let none = [false; 4];
@@ -1393,7 +1522,13 @@ mod tests {
             let k = seeded_keys(n, &s, &ex).expect(n);
             assert_eq!(seeded_order(&k, &tie, &ex)[..2], [2, 4], "{n}");
         }
-        for n in ["LX[IDR,H18s[PT*]]", "LX[IDR,H9s25[PT*]]", "H18si[PT*]", "LX[IDR,C0,PT*]", "LX[IDR,P1]"] {
+        for n in [
+            "LX[IDR,H18s[PT*]]",
+            "LX[IDR,H9s25[PT*]]",
+            "H18si[PT*]",
+            "LX[IDR,C0,PT*]",
+            "LX[IDR,P1]",
+        ] {
             assert!(needs(n).is_some_and(|x| x.idr), "{n}");
         }
         assert!(needs("H18s[PT*]").is_some_and(|x| !x.idr));
@@ -1417,7 +1552,13 @@ mod tests {
             commit("d", "T002 second", vec![0, 2]),
             commit("e", "T003 third", vec![1, 3]),
         ];
-        let replay = Replay { train: vec![true; 5], tests: vec![4], messages: true, commits, ..Replay::default() };
+        let replay = Replay {
+            train: vec![true; 5],
+            tests: vec![4],
+            messages: true,
+            commits,
+            ..Replay::default()
+        };
         let mut r = IdrState::for_replay(&replay, 4);
         for c in &replay.commits[..4] {
             r.observe(c, true);
@@ -1436,7 +1577,10 @@ mod tests {
             dirs: Vec::new(),
             paths: PathResolver::new(&cands, &[]),
         };
-        assert!(ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[], true).is_err());
+        assert!(
+            ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[], true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1471,7 +1615,13 @@ mod tests {
         assert!(t.subject_scores(&replay.commits[1]).is_none());
         assert_eq!(t.builds(), 1);
         // no messages: nothing scores, nothing is built
-        let mut bare = TextState::for_replay(&Replay { messages: false, ..replay.clone() }, 4);
+        let mut bare = TextState::for_replay(
+            &Replay {
+                messages: false,
+                ..replay.clone()
+            },
+            4,
+        );
         bare.observe(&replay.commits[0], true);
         bare.begin_test_commit(&replay, 2);
         assert!(bare.subject_scores(&replay.commits[2]).is_none());

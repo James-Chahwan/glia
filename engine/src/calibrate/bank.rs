@@ -102,7 +102,11 @@ impl StructIndex {
             }
         }
         let carry = cache.carry(merged);
-        let nodes: usize = pos_file.iter().flatten().map(|&f| files.nodes(f).len()).sum();
+        let nodes: usize = pos_file
+            .iter()
+            .flatten()
+            .map(|&f| files.nodes(f).len())
+            .sum();
         let unmapped = pos_file.iter().filter(|f| f.is_none()).count();
         eprintln!(
             "[calibrate] bank structure files={} nodes={nodes} ppr_indexes={indexes} carry_edges={}",
@@ -163,7 +167,11 @@ impl StructIndex {
 /// `Ppr::uniform` over every node of the seed files (candidate positions),
 /// flattened in seed order, first occurrence kept: weight 1 / the seeds the
 /// P1 index holds, as [`crate::rank::rank_files_with_c0`] weighs them.
-pub fn uniform_seed_nodes(idx: &StructIndex, merged: &MergedGraph, seed_files: &[u32]) -> Vec<(NodeId, f64)> {
+pub fn uniform_seed_nodes(
+    idx: &StructIndex,
+    merged: &MergedGraph,
+    seed_files: &[u32],
+) -> Vec<(NodeId, f64)> {
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut seeds: Vec<NodeId> = Vec::new();
     for &p in seed_files {
@@ -207,8 +215,17 @@ pub fn weighted_seed_nodes(idx: &StructIndex, top: &[(u32, f64)]) -> Vec<(NodeId
 /// The pooled PPR score per candidate position: `P1` (damping 0.5, max pool)
 /// or, `wide`, `PT*` (damping 0.85, sum pool). An empty or unheld
 /// personalisation scores 0 everywhere.
-pub fn ppr_files(idx: &StructIndex, merged: &MergedGraph, pers: &[(NodeId, f64)], wide: bool) -> Vec<f64> {
-    let base = if wide { RankBase::PprWide } else { RankBase::Ppr };
+pub fn ppr_files(
+    idx: &StructIndex,
+    merged: &MergedGraph,
+    pers: &[(NodeId, f64)],
+    wide: bool,
+) -> Vec<f64> {
+    let base = if wide {
+        RankBase::PprWide
+    } else {
+        RankBase::Ppr
+    };
     idx.by_position(&base_keys(merged, &idx.cache, pers, base))
         .into_iter()
         .map(|k| k[0])
@@ -255,14 +272,16 @@ pub fn structure_keys(name: &str, q: &QueryCtx<'_>) -> Option<Vec<RankKey>> {
         })
     };
     let pt = || {
-        q.memo.get_or("pt", || {
-            ppr_files(idx, q.merged, &query_pers(idx, q), true)
-        })
+        q.memo
+            .get_or("pt", || ppr_files(idx, q.merged, &query_pers(idx, q), true))
     };
     let b0 = || {
         q.memo.get_or("b0", || {
             let seeds: Vec<NodeId> = query_pers(idx, q).into_iter().map(|(u, _)| u).collect();
-            bfs_files(idx, q.merged, &seeds).into_iter().map(|k| k[0]).collect()
+            bfs_files(idx, q.merged, &seeds)
+                .into_iter()
+                .map(|k| k[0])
+                .collect()
         })
     };
     let c0 = || {
@@ -330,11 +349,27 @@ mod tests {
     fn toy() -> (tempfile::TempDir, MergedGraph, Arc<RankCache>, Candidates) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("toy");
-        write(&root, "a.py", "from b import bf\n\ndef af():\n    return bf()\n");
-        write(&root, "b.py", "from c import cf\n\ndef bf():\n    return cf()\n\ndef bg():\n    return 2\n");
+        write(
+            &root,
+            "a.py",
+            "from b import bf\n\ndef af():\n    return bf()\n",
+        );
+        write(
+            &root,
+            "b.py",
+            "from c import cf\n\ndef bf():\n    return cf()\n\ndef bg():\n    return 2\n",
+        );
         write(&root, "c.py", "def cf():\n    return 1\n");
-        write(&root, "d.py", "from c import cf\n\ndef df():\n    return cf()\n");
-        write(&root, "e.py", "from c import cf\n\ndef ef():\n    return cf()\n");
+        write(
+            &root,
+            "d.py",
+            "from c import cf\n\ndef df():\n    return cf()\n",
+        );
+        write(
+            &root,
+            "e.py",
+            "from c import cf\n\ndef ef():\n    return cf()\n",
+        );
         write(&root, "f.py", "def ff():\n    return 3\n");
         let r = crate::generate_one(root.to_str().expect("utf-8")).expect("build");
         let cache = Arc::new(RankCache::new("calibrate", &r.repo_roots, &r.repo_labels));
@@ -355,7 +390,14 @@ mod tests {
         }
     }
 
-    fn keys(name: &str, merged: &MergedGraph, cands: &Candidates, state: &ReplayState, q: &ReplayQuery, memo: &Memo) -> Vec<RankKey> {
+    fn keys(
+        name: &str,
+        merged: &MergedGraph,
+        cands: &Candidates,
+        state: &ReplayState,
+        q: &ReplayQuery,
+        memo: &Memo,
+    ) -> Vec<RankKey> {
         let excluded = vec![false; cands.len()];
         let commit = ReplayCommit::default();
         let ctx = QueryCtx {
@@ -374,9 +416,16 @@ mod tests {
     #[test]
     fn bank_keys_are_the_answers_arithmetic() {
         let (_tmp, merged, cache, cands) = toy();
-        assert_eq!(cands.paths, ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"]);
+        assert_eq!(
+            cands.paths,
+            ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py"]
+        );
         let mut state = ReplayState::new(cands.len(), 30);
-        state.register(Box::new(StructIndex::build(&merged, &cands, Arc::clone(&cache))));
+        state.register(Box::new(StructIndex::build(
+            &merged,
+            &cands,
+            Arc::clone(&cache),
+        )));
         let pos = |p: &str| cands.position(p).expect(p) as u32;
         let (a, c, d, f) = (pos("a.py"), pos("c.py"), pos("d.py"), pos("f.py"));
         // d and e tie on structure from a (both import c); d co-changed.
@@ -400,8 +449,17 @@ mod tests {
 
         // Equal, bit for bit, to the answers' rank_files_with_c0 (one file
         // space: candidate position == FileIndex index here).
-        let dense: Vec<f64> = (0..cands.len()).map(|i| if i as u32 == d { 0.5 } else { 0.0 }).collect();
-        for (name, ours) in [("P1", &p1), ("PT*", &pt), ("B0", &b0), ("H10", &h10), ("H10[PT*]", &hpt), ("H10[B0]", &hb0)] {
+        let dense: Vec<f64> = (0..cands.len())
+            .map(|i| if i as u32 == d { 0.5 } else { 0.0 })
+            .collect();
+        for (name, ours) in [
+            ("P1", &p1),
+            ("PT*", &pt),
+            ("B0", &b0),
+            ("H10", &h10),
+            ("H10[PT*]", &hpt),
+            ("H10[B0]", &hb0),
+        ] {
             let r = Ranking::from_harness_name(name).expect(name);
             let fr = rank_files_with_c0(&merged, &cache, &[a], &[], r, Some(&dense));
             assert_eq!(&fr.keys, ours, "{name}");
@@ -453,13 +511,25 @@ mod tests {
         let b = cands.position("b.py").expect("b");
         let p1 = ppr_files(&idx, &merged, &pers, false);
         let sum05: f64 = {
-            let ix = cache.ppr_index(&merged, SourceKey::Merged, &ppr_config(RankBase::Ppr).expect("ppr"));
+            let ix = cache.ppr_index(
+                &merged,
+                SourceKey::Merged,
+                &ppr_config(RankBase::Ppr).expect("ppr"),
+            );
             let (v, _) = ix.vector_weighted(&pers);
-            files.nodes(cands.files[b]).iter().map(|&u| ix.index_of(u).map_or(0.0, |i| v[i])).sum()
+            files
+                .nodes(cands.files[b])
+                .iter()
+                .map(|&u| ix.index_of(u).map_or(0.0, |i| v[i]))
+                .sum()
         };
         assert!(sum05 > p1[b], "sum {sum05} max {}", p1[b]);
         // Empty personalisation: zeros, and BFS reaches nothing.
-        assert!(ppr_files(&idx, &merged, &[], true).iter().all(|&s| s == 0.0));
+        assert!(
+            ppr_files(&idx, &merged, &[], true)
+                .iter()
+                .all(|&s| s == 0.0)
+        );
         assert!(bfs_files(&idx, &merged, &[]).iter().all(|k| k[0] == -1e9));
     }
 
@@ -467,7 +537,10 @@ mod tests {
     fn find_seeds_weigh_by_file() {
         let (_tmp, merged, cache, cands) = toy();
         let idx = StructIndex::build(&merged, &cands, cache);
-        let (b, c) = (cands.position("b.py").expect("b") as u32, cands.position("c.py").expect("c") as u32);
+        let (b, c) = (
+            cands.position("b.py").expect("b") as u32,
+            cands.position("c.py").expect("c") as u32,
+        );
         let pers = weighted_seed_nodes(&idx, &[(b, 0.6), (c, 0.4)]);
         let nb = idx.nodes_at(b).len();
         let nc = idx.nodes_at(c).len();

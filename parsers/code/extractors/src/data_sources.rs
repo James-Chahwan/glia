@@ -159,8 +159,7 @@ mod tests {
     fn detects_database_node_and_edge() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out =
-            extract_data_source_nodes("const db = new MongoClient(url);", "", mid, repo);
+        let out = extract_data_source_nodes("const db = new MongoClient(url);", "", mid, repo);
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].from, mid);
@@ -190,12 +189,7 @@ mod tests {
     fn dedupes_provider_within_file() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out = extract_data_source_nodes(
-            "redis.set(k, v);\nRedis.Client.new();",
-            "",
-            mid,
-            repo,
-        );
+        let out = extract_data_source_nodes("redis.set(k, v);\nRedis.Client.new();", "", mid, repo);
         assert_eq!(out.nodes.len(), 1, "same provider deduped once");
     }
 
@@ -223,7 +217,11 @@ mod tests {
         // The same Rust text read as TypeScript keeps the HEAD substring match.
         assert_eq!(
             providers(rs, "src/x.ts"),
-            ["data_source:elasticsearch", "data_source:mongodb", "data_source:sendgrid"]
+            [
+                "data_source:elasticsearch",
+                "data_source:mongodb",
+                "data_source:sendgrid"
+            ]
         );
         // Python code keeps its client; a docstring / comment mention does not.
         assert_eq!(

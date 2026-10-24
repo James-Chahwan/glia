@@ -27,7 +27,8 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use glia_code_domain::snapshots::{
-    ScipDefRow, ScipDocumentRecord, ScipMeta, ScipRefRow, ScipSymbolRecord, scip_dir, source_hash, write_scip,
+    ScipDefRow, ScipDocumentRecord, ScipMeta, ScipRefRow, ScipSymbolRecord, scip_dir, source_hash,
+    write_scip,
 };
 use serde::Serialize;
 
@@ -143,7 +144,10 @@ pub struct ScipImportOptions {
 
 impl Default for ScipImportOptions {
     fn default() -> Self {
-        Self { prefix: None, surface: "lib" }
+        Self {
+            prefix: None,
+            surface: "lib",
+        }
     }
 }
 
@@ -227,17 +231,25 @@ impl ScipImporter {
     ///
     /// Errs when the repo is not a directory or the prefix is absolute or has
     /// a `..` component.
-    pub fn new(repo_root: &Path, info: ScipIndexInfo, opts: ScipImportOptions) -> Result<Self, String> {
-        let repo = std::fs::canonicalize(repo_root).map_err(|e| format!("repo {}: {e}", repo_root.display()))?;
+    pub fn new(
+        repo_root: &Path,
+        info: ScipIndexInfo,
+        opts: ScipImportOptions,
+    ) -> Result<Self, String> {
+        let repo = std::fs::canonicalize(repo_root)
+            .map_err(|e| format!("repo {}: {e}", repo_root.display()))?;
         if !repo.is_dir() {
             return Err(format!("not a directory: {}", repo_root.display()));
         }
         let base = match &opts.prefix {
             Some(prefix) => {
                 if is_absolute(prefix) {
-                    return Err(format!("--prefix {prefix:?} is absolute; give a directory relative to the repo"));
+                    return Err(format!(
+                        "--prefix {prefix:?} is absolute; give a directory relative to the repo"
+                    ));
                 }
-                components(prefix).ok_or_else(|| format!("--prefix {prefix:?} has a `..` component"))?
+                components(prefix)
+                    .ok_or_else(|| format!("--prefix {prefix:?} has a `..` component"))?
             }
             None => match root_under_repo(&repo, &info.project_root) {
                 Some(base) => base,
@@ -285,7 +297,10 @@ impl ScipImporter {
             self.skipped += 1;
             return;
         };
-        let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+        let lines: Vec<&str> = text
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
         if d.encoding == PositionEncoding::Unspecified {
             self.encoding_unspecified += 1;
         }
@@ -307,18 +322,32 @@ impl ScipImporter {
             };
             if o.roles & ROLE_DEFINITION != 0 {
                 let name = (range.start_line == range.end_line)
-                    .then(|| lines.get(range.start_line).and_then(|l| l.get(range.start_byte..range.end_byte)))
+                    .then(|| {
+                        lines
+                            .get(range.start_line)
+                            .and_then(|l| l.get(range.start_byte..range.end_byte))
+                    })
                     .flatten()
                     .filter(|name| !name.is_empty());
                 let Some(name) = name else {
                     self.bad_ranges += 1;
                     continue;
                 };
-                let Some(s) = self.intern(&o.symbol) else { continue };
-                defs.push(ScipDefRow { s, line: range.line, name: name.to_string() });
+                let Some(s) = self.intern(&o.symbol) else {
+                    continue;
+                };
+                defs.push(ScipDefRow {
+                    s,
+                    line: range.line,
+                    name: name.to_string(),
+                });
             } else {
-                let call = lines.get(range.end_line).is_some_and(|l| next_is_call(l, range.end_byte));
-                let Some(s) = self.intern(&o.symbol) else { continue };
+                let call = lines
+                    .get(range.end_line)
+                    .is_some_and(|l| next_is_call(l, range.end_byte));
+                let Some(s) = self.intern(&o.symbol) else {
+                    continue;
+                };
                 refs.push(ScipRefRow {
                     s,
                     line: range.line,
@@ -384,7 +413,12 @@ impl ScipImporter {
         let mut kept = vec![false; self.interned.len()];
         let mut stack: Vec<u32> = Vec::new();
         for (_, acc) in &kept_docs {
-            for id in acc.defs.iter().map(|r| r.s).chain(acc.refs.iter().map(|r| r.s)) {
+            for id in acc
+                .defs
+                .iter()
+                .map(|r| r.s)
+                .chain(acc.refs.iter().map(|r| r.s))
+            {
                 mark(id, &mut kept, &mut stack);
             }
         }
@@ -399,17 +433,26 @@ impl ScipImporter {
         let mut symbols: Vec<ScipSymbolRecord> = Vec::new();
         for (symbol, &tmp) in &self.interned {
             if kept.get(tmp as usize).copied().unwrap_or(false) {
-                let id = u32::try_from(symbols.len()).map_err(|_| "symbol id overflow".to_string())?;
+                let id =
+                    u32::try_from(symbols.len()).map_err(|_| "symbol id overflow".to_string())?;
                 if let Some(slot) = final_id.get_mut(tmp as usize) {
                     *slot = Some(id);
                 }
-                symbols.push(ScipSymbolRecord { id, symbol: symbol.clone(), implements: Vec::new() });
+                symbols.push(ScipSymbolRecord {
+                    id,
+                    symbol: symbol.clone(),
+                    implements: Vec::new(),
+                });
             }
         }
         let remap = |tmp: u32| final_id.get(tmp as usize).copied().flatten();
         for (&tmp, targets) in &self.implements {
             let Some(id) = remap(tmp) else { continue };
-            let mut ids: Vec<u32> = targets.iter().filter_map(|&t| remap(t)).filter(|&t| t != id).collect();
+            let mut ids: Vec<u32> = targets
+                .iter()
+                .filter_map(|&t| remap(t))
+                .filter(|&t| t != id)
+                .collect();
             ids.sort_unstable();
             ids.dedup();
             if let Some(record) = symbols.get_mut(id as usize) {
@@ -419,16 +462,43 @@ impl ScipImporter {
 
         let mut documents = Vec::with_capacity(kept_docs.len());
         for (path, acc) in kept_docs {
-            let mut defs: Vec<ScipDefRow> =
-                acc.defs.into_iter().filter_map(|r| Some(ScipDefRow { s: remap(r.s)?, ..r })).collect();
-            let mut refs: Vec<ScipRefRow> =
-                acc.refs.into_iter().filter_map(|r| Some(ScipRefRow { s: remap(r.s)?, ..r })).collect();
+            let mut defs: Vec<ScipDefRow> = acc
+                .defs
+                .into_iter()
+                .filter_map(|r| {
+                    Some(ScipDefRow {
+                        s: remap(r.s)?,
+                        ..r
+                    })
+                })
+                .collect();
+            let mut refs: Vec<ScipRefRow> = acc
+                .refs
+                .into_iter()
+                .filter_map(|r| {
+                    Some(ScipRefRow {
+                        s: remap(r.s)?,
+                        ..r
+                    })
+                })
+                .collect();
             defs.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
             refs.sort_by_key(ScipRefRow::sort_key);
-            documents.push(ScipDocumentRecord { path, language: acc.language, source_hash: acc.source_hash, defs, refs });
+            documents.push(ScipDocumentRecord {
+                path,
+                language: acc.language,
+                source_hash: acc.source_hash,
+                defs,
+                refs,
+            });
         }
 
-        let meta = ScipMeta::new(self.info.tool.clone(), self.info.tool_version.clone(), self.base.join("/"), skipped);
+        let meta = ScipMeta::new(
+            self.info.tool.clone(),
+            self.info.tool_version.clone(),
+            self.base.join("/"),
+            skipped,
+        );
         write_scip(&self.repo, meta, &documents, &symbols)?;
         ensure_glia_gitignore(&self.repo)?;
         ensure_dir_gitignore(&scip_dir(&self.repo))?;
@@ -438,14 +508,21 @@ impl ScipImporter {
             skipped,
             defs: documents.iter().map(|d| d.defs.len()).sum(),
             refs: documents.iter().map(|d| d.refs.len()).sum(),
-            calls: documents.iter().flat_map(|d| &d.refs).filter(|r| r.call).count(),
+            calls: documents
+                .iter()
+                .flat_map(|d| &d.refs)
+                .filter(|r| r.call)
+                .count(),
             symbols: symbols.len(),
             locals: self.locals,
             forward: self.forward,
             bad_ranges: self.bad_ranges,
             encoding_unspecified: self.encoding_unspecified,
         };
-        eprintln!("{}", import_marker(&repo_label(&self.repo), &self.info, &summary, self.surface));
+        eprintln!(
+            "{}",
+            import_marker(&repo_label(&self.repo), &self.info, &summary, self.surface)
+        );
         Ok(summary)
     }
 
@@ -486,7 +563,9 @@ impl ScipImporter {
         if targets.is_empty() {
             return;
         }
-        let Some(id) = self.intern(&sym.symbol) else { return };
+        let Some(id) = self.intern(&sym.symbol) else {
+            return;
+        };
         let mut ids = BTreeSet::new();
         for target in targets {
             let Some(t) = self.intern(target) else { return };
@@ -527,7 +606,13 @@ fn convert_range(lines: &[&str], o: &ScipOccurrenceIn, enc: PositionEncoding) ->
     if (end_line, end_byte) < (start_line, start_byte) {
         return None;
     }
-    Some(ByteRange { line, start_line, start_byte, end_line, end_byte })
+    Some(ByteRange {
+        line,
+        start_line,
+        start_byte,
+        end_line,
+        end_byte,
+    })
 }
 
 /// The byte offset in `line` of the char boundary `units` code units in, or
@@ -553,12 +638,18 @@ pub fn unit_offset_to_byte(line: &str, units: i32, enc: PositionEncoding) -> Opt
 /// balanced, at most 256 bytes, on this line) and more blanks, the next char
 /// is `(`. An `end_byte` off a char boundary or past the line is not a call.
 pub fn next_is_call(line: &str, end_byte: usize) -> bool {
-    let Some(rest) = line.get(end_byte..) else { return false };
+    let Some(rest) = line.get(end_byte..) else {
+        return false;
+    };
     let mut rest = rest.trim_start_matches([' ', '\t']);
     let generic = rest.strip_prefix("::").unwrap_or(rest);
     if generic.starts_with('<') {
-        let Some(len) = balanced_angles(generic) else { return false };
-        let Some(after) = generic.get(len..) else { return false };
+        let Some(len) = balanced_angles(generic) else {
+            return false;
+        };
+        let Some(after) = generic.get(len..) else {
+            return false;
+        };
         rest = after.trim_start_matches([' ', '\t']);
     } else if generic.len() != rest.len() {
         // `::` not followed by `<`: a path (`f::new`), never a call of `f`.
@@ -624,7 +715,9 @@ fn root_under_repo(repo: &Path, project_root: &str) -> Option<Vec<String>> {
     }
     let canonical = std::fs::canonicalize(path).ok()?;
     let rel = canonical.strip_prefix(repo).ok()?;
-    rel.components().map(|c| c.as_os_str().to_str().map(str::to_string)).collect()
+    rel.components()
+        .map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect()
 }
 
 /// `%XX` escapes decoded; `None` on a malformed escape or non-UTF-8 result.
@@ -660,14 +753,22 @@ fn read_inside(repo: &Path, rel: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&canonical).ok()?.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(&canonical)
+        .ok()?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
     (bytes.len() as u64 <= MAX_SOURCE_BYTES).then_some(bytes)
 }
 
 /// Create `<dir>/.gitignore` with [`SCIP_DIR_GITIGNORE`] unless one exists.
 fn ensure_dir_gitignore(dir: &Path) -> Result<(), String> {
     let path = dir.join(".gitignore");
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
         Ok(mut file) => file
             .write_all(SCIP_DIR_GITIGNORE.as_bytes())
             .map_err(|e| format!("write {}: {e}", path.display())),
@@ -680,8 +781,17 @@ fn ensure_dir_gitignore(dir: &Path) -> Result<(), String> {
 /// defs=N refs=N calls=N symbols=N locals=N forward=N bad_ranges=N
 /// encoding_unspecified=N surface=<surface>`; whitespace in the tool name or
 /// version becomes `_` so the line stays `key=value` tokens.
-fn import_marker(label: &str, info: &ScipIndexInfo, s: &ScipImportSummary, surface: &str) -> String {
-    let token = |v: &str| v.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect::<String>();
+fn import_marker(
+    label: &str,
+    info: &ScipIndexInfo,
+    s: &ScipImportSummary,
+    surface: &str,
+) -> String {
+    let token = |v: &str| {
+        v.chars()
+            .map(|c| if c.is_whitespace() { '_' } else { c })
+            .collect::<String>()
+    };
     format!(
         "[scip] import repo={label} tool={}@{} documents={} skipped={} defs={} refs={} calls={} symbols={} \
          locals={} forward={} bad_ranges={} encoding_unspecified={} surface={surface}",
@@ -724,13 +834,23 @@ mod tests {
             "[scip] import repo=g1 tool=scip-python@0.6.0 documents=2 skipped=0 defs=2 refs=1 calls=1 \
              symbols=2 locals=0 forward=0 bad_ranges=0 encoding_unspecified=0 surface=lib"
         );
-        let spaced = ScipIndexInfo { tool: "rust analyzer".into(), tool_version: "".into(), ..info };
-        assert!(import_marker("g1", &spaced, &summary, "cli").contains(" tool=rust_analyzer@ documents=2"));
+        let spaced = ScipIndexInfo {
+            tool: "rust analyzer".into(),
+            tool_version: "".into(),
+            ..info
+        };
+        assert!(
+            import_marker("g1", &spaced, &summary, "cli")
+                .contains(" tool=rust_analyzer@ documents=2")
+        );
     }
 
     #[test]
     fn paths_split_and_refuse_parent_components() {
-        assert_eq!(components("a/./b//c"), Some(vec!["a".to_string(), "b".into(), "c".into()]));
+        assert_eq!(
+            components("a/./b//c"),
+            Some(vec!["a".to_string(), "b".into(), "c".into()])
+        );
         assert_eq!(components("a\\b"), Some(vec!["a".to_string(), "b".into()]));
         assert_eq!(components("."), Some(Vec::new()));
         assert_eq!(components("a/../b"), None);

@@ -473,7 +473,8 @@ impl ConstTable {
         let values = |map: &BTreeMap<String, String>, alts: &BTreeMap<String, Vec<String>>| {
             usize::from(map.contains_key(&key)) + alts.get(&key).map_or(0, Vec::len)
         };
-        let n = values(&self.by_key, &self.alternatives) + values(&self.exprs, &self.expr_alternatives);
+        let n =
+            values(&self.by_key, &self.alternatives) + values(&self.exprs, &self.expr_alternatives);
         (n == 1).then_some(key)
     }
 
@@ -802,7 +803,9 @@ fn config_term(s: &str) -> Option<(String, &str)> {
             let (inner, rest) = config_expr(s.get(1..)?)?;
             let rest = rest.trim_start().strip_prefix(')')?;
             match replace_call(rest) {
-                Some((from, to, after)) => Some((replace_span(sole_path(&inner)?, from, to), after)),
+                Some((from, to, after)) => {
+                    Some((replace_span(sole_path(&inner)?, from, to), after))
+                }
                 None => Some((inner, rest)),
             }
         }
@@ -1619,11 +1622,21 @@ mod tests {
     #[test]
     fn pin_overrides_first_wins_and_clears_alternatives() {
         let mut repo = ConstTable::default();
-        repo.merge_from(&scan("export const GATEWAY = '/a';
-", "typescript"));
-        repo.merge_from(&scan("export const GATEWAY = '/b';
-", "typescript"));
-        assert_eq!(repo.resolve_expr_strict("GATEWAY"), None, "ambiguous before the pin");
+        repo.merge_from(&scan(
+            "export const GATEWAY = '/a';
+",
+            "typescript",
+        ));
+        repo.merge_from(&scan(
+            "export const GATEWAY = '/b';
+",
+            "typescript",
+        ));
+        assert_eq!(
+            repo.resolve_expr_strict("GATEWAY"),
+            None,
+            "ambiguous before the pin"
+        );
         assert_eq!(repo.conflicts(), 1);
         assert!(!repo.is_pinned("GATEWAY"));
 
@@ -1649,8 +1662,11 @@ mod tests {
     /// scan would refuse is not bound, and the table is left unchanged.
     #[test]
     fn secret_named_pin_is_refused() {
-        let mut repo = scan("export const API = '/v1';
-", "typescript");
+        let mut repo = scan(
+            "export const API = '/v1';
+",
+            "typescript",
+        );
         assert!(!repo.pin("API_TOKEN", "x"));
         assert!(!repo.pin("API", ""));
         assert!(!repo.pin("API", "${OTHER}/x"));
@@ -1669,19 +1685,44 @@ mod tests {
     /// exactly, never a path parameter and never an unpinned key.
     #[test]
     fn pinned_keys_in_finds_the_folded_pins() {
-        let mut repo = scan("export const VERSION = 'v2';
+        let mut repo = scan(
+            "export const VERSION = 'v2';
 export const PAGE = 'p';
-", "typescript");
-        assert!(repo.pinned_keys_in("${GATEWAY}/users").is_empty(), "no pins at all");
+",
+            "typescript",
+        );
+        assert!(
+            repo.pinned_keys_in("${GATEWAY}/users").is_empty(),
+            "no pins at all"
+        );
         assert!(repo.pin("GATEWAY", "/orders-svc"));
         assert!(repo.pin("id", "7"));
         assert!(repo.pin("PAGE", "q"));
         assert_eq!(repo.pinned_keys_in("${GATEWAY}/users"), ["GATEWAY"]);
-        assert_eq!(repo.pinned_keys_in("${this.cfg.GATEWAY}/users"), ["GATEWAY"], "last segment");
-        assert_eq!(repo.pinned_keys_in("${GATEWAY}/${VERSION}/users"), ["GATEWAY"], "VERSION is source");
-        assert_eq!(repo.pinned_keys_in("${GATEWAY}/${PAGE}/${GATEWAY}"), ["GATEWAY", "PAGE"]);
-        assert!(repo.pinned_keys_in("/users/${id}").is_empty(), "a path parameter never folds");
-        assert!(repo.pinned_keys_in("/x/${GATEWAY}").iter().eq(["GATEWAY"].iter()), "a later span, exact");
+        assert_eq!(
+            repo.pinned_keys_in("${this.cfg.GATEWAY}/users"),
+            ["GATEWAY"],
+            "last segment"
+        );
+        assert_eq!(
+            repo.pinned_keys_in("${GATEWAY}/${VERSION}/users"),
+            ["GATEWAY"],
+            "VERSION is source"
+        );
+        assert_eq!(
+            repo.pinned_keys_in("${GATEWAY}/${PAGE}/${GATEWAY}"),
+            ["GATEWAY", "PAGE"]
+        );
+        assert!(
+            repo.pinned_keys_in("/users/${id}").is_empty(),
+            "a path parameter never folds"
+        );
+        assert!(
+            repo.pinned_keys_in("/x/${GATEWAY}")
+                .iter()
+                .eq(["GATEWAY"].iter()),
+            "a later span, exact"
+        );
         assert!(repo.pinned_keys_in("${OTHER}/users").is_empty());
         assert!(repo.pinned_keys_in("/users").is_empty());
         assert!(repo.pinned_keys_in("${GATEWAY").is_empty(), "unclosed span");
@@ -1719,10 +1760,21 @@ export const PAGE = 'p';
         );
         assert_eq!(expr("NOTICES"), Some("${environment.apiUrl}/notifications"));
         assert_eq!(expr("plainBase"), Some("${environment.api.base}"));
-        assert_eq!(expr("paren"), Some("${environment.apiUrl.replace('/api', '/v2')}/x"));
+        assert_eq!(
+            expr("paren"),
+            Some("${environment.apiUrl.replace('/api', '/v2')}/x")
+        );
         assert_eq!(expr("LIT"), Some("/a/b"));
         for k in [
-            "base", "CALL", "SELF", "ENV", "ENV2", "TERN", "BARE", "SPLICE", "DOLLAR",
+            "base",
+            "CALL",
+            "SELF",
+            "ENV",
+            "ENV2",
+            "TERN",
+            "BARE",
+            "SPLICE",
+            "DOLLAR",
             "API_TOKEN_URL",
         ] {
             assert_eq!(expr(k), None, "{k} is no config expression");
@@ -1769,7 +1821,8 @@ export const PAGE = 'p';
             "typescript",
         );
         assert_eq!(
-            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin/stats", &t).as_deref(),
+            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin/stats", &t)
+                .as_deref(),
             Some("http://localhost:3701/admin/stats")
         );
         assert_eq!(
@@ -1778,7 +1831,8 @@ export const PAGE = 'p';
             "first occurrence only"
         );
         assert_eq!(
-            fold_interpolations("${ environment.apiUrl.replace( \"/api\" , '/v2' ) }/x", &t).as_deref(),
+            fold_interpolations("${ environment.apiUrl.replace( \"/api\" , '/v2' ) }/x", &t)
+                .as_deref(),
             Some("http://localhost:3701/v2/x")
         );
         assert_eq!(
@@ -1834,7 +1888,11 @@ export const PAGE = 'p';
             repo.merge_from(&scan(src, "typescript"));
         }
         assert_eq!(
-            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin/stats", &repo).as_deref(),
+            fold_interpolations(
+                "${environment.apiUrl.replace('/api', '')}/admin/stats",
+                &repo
+            )
+            .as_deref(),
             Some("http://localhost:3701/admin/stats")
         );
         assert_eq!(
@@ -1856,7 +1914,10 @@ export const PAGE = 'p';
             None
         );
         assert_eq!(
-            fold_interpolations("${environment.apiUrl.replace('api.kinaswap.com', '')}/x", &only),
+            fold_interpolations(
+                "${environment.apiUrl.replace('api.kinaswap.com', '')}/x",
+                &only
+            ),
             None,
             "an emptied authority is no base"
         );
@@ -1972,7 +2033,10 @@ export const PAGE = 'p';
         );
         let mut pinned = t.clone();
         assert!(pinned.pin("environment.apiUrl", "http://gw"));
-        assert_eq!(pinned.pinned_keys_in("${ADMIN}/users"), ["environment.apiUrl"]);
+        assert_eq!(
+            pinned.pinned_keys_in("${ADMIN}/users"),
+            ["environment.apiUrl"]
+        );
         assert_eq!(
             fold_interpolations("${ADMIN}/users", &pinned).as_deref(),
             Some("http://gw/admin/users")
@@ -1985,7 +2049,10 @@ export const PAGE = 'p';
     /// deployment's value deterministically. A pin is its key's one value.
     #[test]
     fn entries_yields_first_values_then_alternatives() {
-        let mut repo = scan("export const environment = { apiUrl: 'http://localhost:3701' };\n", "typescript");
+        let mut repo = scan(
+            "export const environment = { apiUrl: 'http://localhost:3701' };\n",
+            "typescript",
+        );
         for src in [
             "export const environment = { apiUrl: 'https://api.kinaswap.com' };\n",
             "export const environment = { apiUrl: 'https://staging.kinaswap.com' };\n",

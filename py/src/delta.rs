@@ -24,7 +24,10 @@ use crate::registry::ModuleFns;
 /// rev, or a failed build.
 fn graph_delta_answer(repo_path: &str, base: &str) -> Result<GraphDeltaAnswer, String> {
     let answer = graph_delta_vs_rev(repo_path, base)?.answer;
-    eprintln!("[delta] surface=pyo3 rows={}", answer.nodes.len() + answer.edges.len());
+    eprintln!(
+        "[delta] surface=pyo3 rows={}",
+        answer.nodes.len() + answer.edges.len()
+    );
     Ok(answer)
 }
 
@@ -89,8 +92,18 @@ mod tests {
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
         let git = |args: &[&str]| {
             let out = Command::new("git")
-                .args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-                .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args([
+                    "-c",
+                    "user.name=glia",
+                    "-c",
+                    "user.email=glia@example.invalid",
+                ])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
                 .arg("-C")
                 .arg(&top)
                 .args(args)
@@ -101,7 +114,11 @@ mod tests {
                 .env_remove("GIT_INDEX_FILE")
                 .output()
                 .unwrap_or_else(|e| panic!("LE.1c graph_delta test needs a `git` binary: {e}"));
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         std::fs::write(
             top.join("shop/a.py"),
@@ -138,14 +155,25 @@ mod tests {
         let answer = graph_delta_answer(repo, "HEAD").expect("delta vs HEAD");
         let text = serde_json::to_string(&answer).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
-        let keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+        let keys: Vec<&str> = v
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
         let mut want = vec!["base", "files", "counts", "nodes", "edges"];
         want.sort_unstable();
         assert_eq!(keys, want, "{text}");
-        let order: Vec<usize> = ["\"base\":", "\"files\":", "\"counts\":", "\"nodes\":", "\"edges\":"]
-            .iter()
-            .map(|k| text.find(k).unwrap_or(usize::MAX))
-            .collect();
+        let order: Vec<usize> = [
+            "\"base\":",
+            "\"files\":",
+            "\"counts\":",
+            "\"nodes\":",
+            "\"edges\":",
+        ]
+        .iter()
+        .map(|k| text.find(k).unwrap_or(usize::MAX))
+        .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
         assert_eq!(v["base"], "HEAD");
         let call = v["edges"]
@@ -154,12 +182,20 @@ mod tests {
                 es.iter().find(|e| {
                     e["change"] == "added"
                         && e["category"] == "CALLS"
-                        && e["to_qname"].as_str().is_some_and(|q| q.ends_with("::audit"))
+                        && e["to_qname"]
+                            .as_str()
+                            .is_some_and(|q| q.ends_with("::audit"))
                 })
             })
             .unwrap_or_else(|| panic!("place -> audit CALLS added: {text}"));
-        assert_eq!((call["site_file"].as_str(), call["site_line"].as_i64()), (Some("shop/a.py"), Some(2)));
-        assert!(v["counts"]["nodes_added"].as_u64().is_some_and(|n| n >= 1), "{text}");
+        assert_eq!(
+            (call["site_file"].as_str(), call["site_line"].as_i64()),
+            (Some("shop/a.py"), Some(2))
+        );
+        assert!(
+            v["counts"]["nodes_added"].as_u64().is_some_and(|n| n >= 1),
+            "{text}"
+        );
 
         let err = graph_delta_answer(repo, "no-such-rev").expect_err("unknown rev");
         assert!(err.contains("unknown rev no-such-rev"), "{err}");

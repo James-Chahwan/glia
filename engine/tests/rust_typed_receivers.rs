@@ -57,19 +57,47 @@ fn typed_receivers_bind_through_the_receiver_type() {
     let r = generate_one(&fixture()).expect("fixture builds");
     let calls = calls(&r);
     for (from, to, form) in [
-        ("src::lib::Service::get", "src::repo::Repo::find", "self.repo.find() on field repo: Repo"),
-        ("src::lib::Service::via_param", "src::repo::Repo::find", "r.find() on parameter r: &Repo"),
-        ("src::lib::Service::via_local", "src::repo::Repo::find", "let r = Repo::new()"),
-        ("src::lib::Service::via_typed", "src::repo::Repo::find", "let r: Repo = .."),
-        ("src::lib::free", "src::repo::Repo::find", "free-fn parameter r: &mut Repo"),
-        ("src::lib::sized", "src::repo::Index::size", "parameter repo: &repo::Index"),
+        (
+            "src::lib::Service::get",
+            "src::repo::Repo::find",
+            "self.repo.find() on field repo: Repo",
+        ),
+        (
+            "src::lib::Service::via_param",
+            "src::repo::Repo::find",
+            "r.find() on parameter r: &Repo",
+        ),
+        (
+            "src::lib::Service::via_local",
+            "src::repo::Repo::find",
+            "let r = Repo::new()",
+        ),
+        (
+            "src::lib::Service::via_typed",
+            "src::repo::Repo::find",
+            "let r: Repo = ..",
+        ),
+        (
+            "src::lib::free",
+            "src::repo::Repo::find",
+            "free-fn parameter r: &mut Repo",
+        ),
+        (
+            "src::lib::sized",
+            "src::repo::Index::size",
+            "parameter repo: &repo::Index",
+        ),
         (
             "src::lib::Service::unit_value",
             "src::repo::Repo::find",
             "CONTROL: Repo.find(5) stays an Attribute on the unit-struct value",
         ),
     ] {
-        assert_eq!(count(&calls, from, to), 1, "{form}: {from} -> {to}; CALLS = {calls:?}");
+        assert_eq!(
+            count(&calls, from, to),
+            1,
+            "{form}: {from} -> {to}; CALLS = {calls:?}"
+        );
     }
 }
 
@@ -80,7 +108,11 @@ fn a_value_receiver_is_never_a_field_or_a_path() {
     // `let repo = index()` has no type the parser can read; it shadows the
     // field `repo: Repo`, so `repo.find(9)` binds nothing.
     assert_eq!(
-        count(&calls, "src::lib::Service::shadowed", "src::repo::Repo::find"),
+        count(
+            &calls,
+            "src::lib::Service::shadowed",
+            "src::repo::Repo::find"
+        ),
         0,
         "the untyped local shadows the field; CALLS = {calls:?}"
     );
@@ -107,7 +139,11 @@ fn impl_in_another_file_resolves() {
     let r = generate_one(&fixture()).expect("fixture builds");
     let calls = calls(&r);
     assert_eq!(
-        count(&calls, "src::lib::Service::cached", "src::cache_impl::Cache::lookup"),
+        count(
+            &calls,
+            "src::lib::Service::cached",
+            "src::cache_impl::Cache::lookup"
+        ),
         1,
         "CALLS = {calls:?}"
     );
@@ -149,7 +185,11 @@ fn cross_file_self_field_and_enum_receivers_resolve() {
          pub fn get(&self) -> u32 {\n        self.repo.find()\n    }\n\n    \
          pub fn label(&self) -> &'static str {\n        let m = Mode::On;\n        m.describe()\n    }\n}\n",
     );
-    write(root, "src/mode.rs", "pub enum Mode {\n    On,\n    Off,\n}\n");
+    write(
+        root,
+        "src/mode.rs",
+        "pub enum Mode {\n    On,\n    Off,\n}\n",
+    );
     write(
         root,
         "src/mode_impl.rs",
@@ -160,8 +200,15 @@ fn cross_file_self_field_and_enum_receivers_resolve() {
     let calls = calls(&r);
     for (from, to) in [
         ("src::service_impl::Service::get", "src::repo::Repo::find"),
-        ("src::service_impl::Service::label", "src::mode_impl::Mode::describe"),
+        (
+            "src::service_impl::Service::label",
+            "src::mode_impl::Mode::describe",
+        ),
     ] {
-        assert_eq!(count(&calls, from, to), 1, "{from} -> {to}; CALLS = {calls:?}");
+        assert_eq!(
+            count(&calls, from, to),
+            1,
+            "{from} -> {to}; CALLS = {calls:?}"
+        );
     }
 }

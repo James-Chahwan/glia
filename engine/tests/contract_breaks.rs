@@ -603,7 +603,11 @@ fn client_in_another_repo_is_orphaned() {
     let web = client_dir.path().join("web");
     std::fs::create_dir_all(&web).expect("client web dir");
     std::fs::write(web.join("client.py"), CLIENT_PY).expect("client write");
-    let clients = [client_dir.path().to_str().expect("utf-8 temp path").to_string()];
+    let clients = [client_dir
+        .path()
+        .to_str()
+        .expect("utf-8 temp path")
+        .to_string()];
 
     let clean = contract_breaks_vs_rev_with(provider.path(), "HEAD", &clients, &backward())
         .unwrap_or_else(|e| panic!("contract breaks --with vs HEAD: {e}"));
@@ -680,7 +684,11 @@ fn client_git_work_tree_is_not_rolled_back() {
     let o = &b.orphaned_clients[0];
     assert_eq!(
         (o.client_qname.as_str(), o.target_qname.as_str(), o.reason),
-        ("endpoint:GET:/orders", "GET /orders @services/api", "target_removed")
+        (
+            "endpoint:GET:/orders",
+            "GET /orders @services/api",
+            "target_removed"
+        )
     );
     assert_eq!(b.breaking, 1);
 }
@@ -754,7 +762,11 @@ fn an_inferred_model_break_is_advisory_by_default() {
     let repo = model_shop::renamed();
     let b = vs(&repo, "HEAD~1", &ContractBreakArgs::default());
     assert_eq!(ContractBreakArgs::default().models_min_tier, "fact");
-    assert!(b.schemas.is_empty() && b.orphaned_clients.is_empty(), "{}", dump(&b));
+    assert!(
+        b.schemas.is_empty() && b.orphaned_clients.is_empty(),
+        "{}",
+        dump(&b)
+    );
     assert_eq!(
         b.models.iter().map(model).collect::<Vec<_>>(),
         [(
@@ -775,16 +787,29 @@ fn an_inferred_model_break_is_advisory_by_default() {
 fn the_derived_models_min_tier_makes_the_break_block() {
     let repo = model_shop::renamed();
     let b = vs(&repo, "HEAD~1", &models_at("derived"));
-    assert_eq!((b.breaking, b.advisory, b.models.len()), (1, 0, 1), "{:#?}", b.models);
+    assert_eq!(
+        (b.breaking, b.advisory, b.models.len()),
+        (1, 0, 1),
+        "{:#?}",
+        b.models
+    );
     assert!(b.models[0].blocking, "{:#?}", b.models[0]);
     let mut only = models_at("derived");
     only.breaking_only = true;
     let b = vs(&repo, "HEAD~1", &only);
-    assert_eq!((b.breaking, b.advisory, b.models.len()), (1, 0, 1), "breaking_only keeps a breaking row");
+    assert_eq!(
+        (b.breaking, b.advisory, b.models.len()),
+        (1, 0, 1),
+        "breaking_only keeps a breaking row"
+    );
     let mut only = ContractBreakArgs::default();
     only.breaking_only = true;
     let b = vs(&repo, "HEAD~1", &only);
-    assert_eq!((b.breaking, b.advisory, b.models.len()), (0, 1, 1), "an advisory row is breaking too");
+    assert_eq!(
+        (b.breaking, b.advisory, b.models.len()),
+        (0, 1, 1),
+        "an advisory row is breaking too"
+    );
 }
 
 /// (c) A tier outside `fact` / `derived` is refused before anything is
@@ -817,7 +842,10 @@ fn a_compatible_model_change_is_listed_and_breaking_only_drops_it() {
     );
     let b = vs(&repo, "HEAD", &ContractBreakArgs::default());
     assert_eq!(
-        b.models.iter().map(|m| (m.status, m.changes[0].rule)).collect::<Vec<_>>(),
+        b.models
+            .iter()
+            .map(|m| (m.status, m.changes[0].rule))
+            .collect::<Vec<_>>(),
         [("compatible", "response_field_added")]
     );
     assert_eq!((b.breaking, b.advisory), (0, 0));
@@ -871,8 +899,8 @@ fn copy_tree(from: &Path, write: &dyn Fn(&str, &str)) {
     let mut files = Vec::new();
     files_under(from, from, &mut files);
     for rel in &files {
-        let text = std::fs::read_to_string(from.join(rel))
-            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let text =
+            std::fs::read_to_string(from.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
         write(rel, &text);
     }
 }
@@ -884,12 +912,17 @@ fn copy_tree(from: &Path, write: &dyn Fn(&str, &str)) {
 #[test]
 fn a_typed_client_in_another_repo_is_judged() {
     let api = GitRepo::init();
-    copy_tree(&model_shop::fixture().join("api"), &|rel, text| api.write(rel, text));
+    copy_tree(&model_shop::fixture().join("api"), &|rel, text| {
+        api.write(rel, text)
+    });
     api.commit("v1");
     let order = api.root().join("internal/models/order.go");
     let text = std::fs::read_to_string(&order).expect("order.go");
-    std::fs::write(&order, text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1))
-        .expect("rename");
+    std::fs::write(
+        &order,
+        text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1),
+    )
+    .expect("rename");
     api.commit("v2");
     let client = tempfile::tempdir().expect("client dir");
     copy_tree(&model_shop::fixture().join("web"), &|rel, text| {
@@ -899,8 +932,13 @@ fn a_typed_client_in_another_repo_is_judged() {
     });
     let clients = [client.path().to_str().expect("utf-8").to_string()];
 
-    let b = contract_breaks_vs_rev_with(api.path(), "HEAD~1", &clients, &ContractBreakArgs::default())
-        .unwrap_or_else(|e| panic!("with the client: {e}"));
+    let b = contract_breaks_vs_rev_with(
+        api.path(),
+        "HEAD~1",
+        &clients,
+        &ContractBreakArgs::default(),
+    )
+    .unwrap_or_else(|e| panic!("with the client: {e}"));
     assert_eq!(
         b.models.iter().map(model).collect::<Vec<_>>(),
         [(
@@ -912,11 +950,18 @@ fn a_typed_client_in_another_repo_is_judged() {
         b.models
     );
     let m = &b.models[0];
-    assert_ne!(m.client.repo_id, m.server.repo_id, "the client is the other repo's");
+    assert_ne!(
+        m.client.repo_id, m.server.repo_id,
+        "the client is the other repo's"
+    );
     assert_eq!((b.breaking, b.advisory), (0, 1));
 
     let alone = vs(&api, "HEAD~1", &ContractBreakArgs::default());
-    assert!(alone.models.is_empty(), "without the client nothing pairs: {:#?}", alone.models);
+    assert!(
+        alone.models.is_empty(),
+        "without the client nothing pairs: {:#?}",
+        alone.models
+    );
 }
 
 /// (g) DT.1p's member read: a client root typed `Order | UnknownRecord`
@@ -930,9 +975,17 @@ fn a_typed_client_in_another_repo_is_judged() {
 fn a_union_client_root_is_judged_by_its_member() {
     let repo = model_shop::v1();
     let service = "web/src/app/core/services/order.service.ts";
-    model_shop::edit(&repo, service, "this.http.get<Order>(", "this.http.get<Order | UnknownRecord>(");
+    model_shop::edit(
+        &repo,
+        service,
+        "this.http.get<Order>(",
+        "this.http.get<Order | UnknownRecord>(",
+    );
     let text = std::fs::read_to_string(repo.root().join(service)).expect("service");
-    repo.write(service, &format!("{text}\ntype UnknownRecord = Record<string, unknown>;\n"));
+    repo.write(
+        service,
+        &format!("{text}\ntype UnknownRecord = Record<string, unknown>;\n"),
+    );
     repo.commit("v1: a defensive cast");
     model_shop::edit(
         &repo,
@@ -947,12 +1000,16 @@ fn a_union_client_root_is_judged_by_its_member() {
         b.models.iter().map(model).collect::<Vec<_>>(),
         [
             (
-                format!("http_model response | endpoint:GET:/api/orders/${{…}} @web web/src/app/core/services/order.service.ts:14 | {server} | breaking derived blocking=false"),
+                format!(
+                    "http_model response | endpoint:GET:/api/orders/${{…}} @web web/src/app/core/services/order.service.ts:14 | {server} | breaking derived blocking=false"
+                ),
                 strings(&["GET /api/orders/:id"]),
                 rename.clone(),
             ),
             (
-                format!("http_model response | web::src::app::core::models::order::Order web/src/app/core/models/order.ts:9 | {server} | breaking derived blocking=false"),
+                format!(
+                    "http_model response | web::src::app::core::models::order::Order web/src/app/core/models/order.ts:9 | {server} | breaking derived blocking=false"
+                ),
                 strings(&["PATCH /api/orders/:id/status", "POST /api/orders"]),
                 rename,
             ),
@@ -961,12 +1018,21 @@ fn a_union_client_root_is_judged_by_its_member() {
         b.models
     );
     let at = |s: &Option<glia_engine::contract_breaks::ModelSite>| {
-        s.as_ref().map(|s| format!("{}:{}", s.file.as_deref().unwrap_or("?"), s.line.unwrap_or(0)))
+        s.as_ref().map(|s| {
+            format!(
+                "{}:{}",
+                s.file.as_deref().unwrap_or("?"),
+                s.line.unwrap_or(0)
+            )
+        })
     };
     let c = &b.models[0].changes[0];
     assert_eq!(
         (at(&c.client).as_deref(), at(&c.server).as_deref()),
-        (Some("web/src/app/core/models/order.ts:11"), Some("api/internal/models/order.go:22")),
+        (
+            Some("web/src/app/core/models/order.ts:11"),
+            Some("api/internal/models/order.go:22")
+        ),
         "the member's field: {c:#?}"
     );
     assert_eq!((b.breaking, b.advisory), (0, 2));

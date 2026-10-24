@@ -1215,7 +1215,11 @@ fn intent_rank(x: &IntentAt<'_>) -> IntentRanked {
             TextAbsent::Messages.report(label, "review");
             (vec![0.0; n], "absent")
         }
-        Some(h @ IntentHistory { messages: Some(m), .. }) => {
+        Some(
+            h @ IntentHistory {
+                messages: Some(m), ..
+            },
+        ) => {
             let idx = TextIndex::build(&h.snapshot, m, &cands, x.exclude);
             idx.report(label, "review", &query);
             (idx.scores(&query), "present")
@@ -1250,7 +1254,12 @@ fn intent_rank(x: &IntentAt<'_>) -> IntentRanked {
             .filter(|p| *p != ".")
             .collect();
         let renames = snap.map(rename_pairs).unwrap_or_default();
-        let defs = read_defs(&tree, &dirs, &vocab, x.base_repo.map(|r| (before, RepoId(r))));
+        let defs = read_defs(
+            &tree,
+            &dirs,
+            &vocab,
+            x.base_repo.map(|r| (before, RepoId(r))),
+        );
         let ns = defs.namespaces(&vocab.local_words);
         let inputs = IdrInputs {
             defs,
@@ -1323,7 +1332,12 @@ fn intent_rank(x: &IntentAt<'_>) -> IntentRanked {
         bank,
     };
     let order = signals.order(&selection.pick).unwrap_or_else(|| {
-        fuse::lx(&signals.idr, &[&signals.ppr], &signals.tie, &signals.excluded)
+        fuse::lx(
+            &signals.idr,
+            &[&signals.ppr],
+            &signals.tie,
+            &signals.excluded,
+        )
     });
     IntentRanked {
         cands,

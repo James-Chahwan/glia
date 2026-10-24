@@ -70,8 +70,15 @@ const USERS: [&str; 2] = ["GET /users", "POST /users"];
 fn monorepo_keys_on_project_roots() {
     let r = build("arch_monorepo");
     let map = service_map(&r.merged, &r.repo_labels);
-    assert_eq!(map.keying, "project_roots", "one repo with manifests → key on its roots");
-    assert_eq!(ids(&map), ["api", "web"], "services are the sorted project roots");
+    assert_eq!(
+        map.keying, "project_roots",
+        "one repo with manifests → key on its roots"
+    );
+    assert_eq!(
+        ids(&map),
+        ["api", "web"],
+        "services are the sorted project roots"
+    );
     assert_eq!(http_channels(&map, "web", "api"), USERS);
     assert_eq!(map.self_links, 0);
     assert_eq!(service(&map, "api").languages, ["go"]);
@@ -105,10 +112,17 @@ fn route_and_endpoint_are_located_via_cell_tier() {
 fn adjacency_tier_places_a_route_with_a_bare_method_cell() {
     let r = build("arch_adjacency");
     let map = service_map(&r.merged, &r.repo_labels);
-    assert_eq!(map.keying, "top_level_dir", "no manifests → key on the directory");
+    assert_eq!(
+        map.keying, "top_level_dir",
+        "no manifests → key on the directory"
+    );
     assert_eq!(map.unlocated_nodes, 0, "every node placed");
     assert_eq!(ids(&map), ["api", "web"]);
-    assert_eq!(service(&map, "api").routes, 2, "Flask: one ROUTE per method");
+    assert_eq!(
+        service(&map, "api").routes,
+        2,
+        "Flask: one ROUTE per method"
+    );
     assert_eq!(service(&map, "api").languages, ["python"]);
     assert_eq!(http_channels(&map, "web", "api"), USERS);
 }
@@ -136,8 +150,15 @@ fn nested_monorepo_splits_on_detected_project_roots() {
     let flat = service_map_with(&r.merged, &r.repo_labels, &ServiceKeying::TopLevelDir);
     assert_eq!(flat.keying, "top_level_dir");
     assert_eq!(ids(&flat), ["services"]);
-    assert!(flat.links.is_empty(), "both ends in one service: {:?}", flat.links);
-    assert_eq!(flat.self_links, 2, "GET + POST /users both dropped as self-links");
+    assert!(
+        flat.links.is_empty(),
+        "both ends in one service: {:?}",
+        flat.links
+    );
+    assert_eq!(
+        flat.self_links, 2,
+        "GET + POST /users both dropped as self-links"
+    );
 }
 
 /// The A8 hand-off lock: same graph, explicit project roots → two services and

@@ -1,4 +1,4 @@
-use glia_code_domain::{CodeNav, edge_category, node_kind, GRAPH_TYPE};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 use glia_graph::*;
 
@@ -22,7 +22,12 @@ fn make_graph(repo: RepoId, nodes: Vec<Node>, nav: CodeNav) -> RepoGraph {
     }
 }
 
-fn make_node(repo: RepoId, kind: glia_core::NodeKindId, qname: &str, confidence: Confidence) -> (Node, NodeId) {
+fn make_node(
+    repo: RepoId,
+    kind: glia_core::NodeKindId,
+    qname: &str,
+    confidence: Confidence,
+) -> (Node, NodeId) {
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
     let node = Node {
         id,
@@ -44,19 +49,45 @@ fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: glia_cor
 #[test]
 fn grpc_resolver_links_client_to_service() {
     let mut nav_a = CodeNav::default();
-    let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:UserService", Confidence::Strong);
-    record(&mut nav_a, svc_id, "UserService", "grpc:UserService", node_kind::GRPC_SERVICE);
+    let (svc_node, svc_id) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:UserService",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        svc_id,
+        "UserService",
+        "grpc:UserService",
+        node_kind::GRPC_SERVICE,
+    );
     let ga = make_graph(repo_a(), vec![svc_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::GRPC_CLIENT, "grpc_client:UserService", Confidence::Medium);
-    record(&mut nav_b, client_id, "UserService", "grpc_client:UserService", node_kind::GRPC_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::GRPC_CLIENT,
+        "grpc_client:UserService",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "UserService",
+        "grpc_client:UserService",
+        node_kind::GRPC_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     GrpcStackResolver.resolve(&mut merged);
 
-    let grpc_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::GRPC_CALLS).collect();
+    let grpc_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::GRPC_CALLS)
+        .collect();
     assert_eq!(grpc_edges.len(), 1);
     assert_eq!(grpc_edges[0].from, client_id);
     assert_eq!(grpc_edges[0].to, svc_id);
@@ -69,20 +100,50 @@ fn grpc_resolver_pairs_bare_client_to_package_qualified_service() {
     // stub reconstructed from generated code only knows the bare name. The
     // index's bare-last-segment fallback keeps the pairing alive.
     let mut nav_a = CodeNav::default();
-    let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:user.UserService", Confidence::Strong);
-    record(&mut nav_a, svc_id, "UserService", "grpc:user.UserService", node_kind::GRPC_SERVICE);
+    let (svc_node, svc_id) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:user.UserService",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        svc_id,
+        "UserService",
+        "grpc:user.UserService",
+        node_kind::GRPC_SERVICE,
+    );
     let ga = make_graph(repo_a(), vec![svc_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::GRPC_CLIENT, "grpc_client:UserService", Confidence::Medium);
-    record(&mut nav_b, client_id, "UserService", "grpc_client:UserService", node_kind::GRPC_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::GRPC_CLIENT,
+        "grpc_client:UserService",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "UserService",
+        "grpc_client:UserService",
+        node_kind::GRPC_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     GrpcStackResolver.resolve(&mut merged);
 
-    let grpc_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::GRPC_CALLS).collect();
-    assert_eq!(grpc_edges.len(), 1, "exactly one edge — the dual key must not double-emit");
+    let grpc_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::GRPC_CALLS)
+        .collect();
+    assert_eq!(
+        grpc_edges.len(),
+        1,
+        "exactly one edge — the dual key must not double-emit"
+    );
     assert_eq!(grpc_edges[0].from, client_id);
     assert_eq!(grpc_edges[0].to, svc_id);
 }
@@ -90,13 +151,35 @@ fn grpc_resolver_pairs_bare_client_to_package_qualified_service() {
 #[test]
 fn grpc_resolver_method_level_matches_service() {
     let mut nav_a = CodeNav::default();
-    let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:OrderService", Confidence::Strong);
-    record(&mut nav_a, svc_id, "OrderService", "grpc:OrderService", node_kind::GRPC_SERVICE);
+    let (svc_node, svc_id) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:OrderService",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        svc_id,
+        "OrderService",
+        "grpc:OrderService",
+        node_kind::GRPC_SERVICE,
+    );
     let ga = make_graph(repo_a(), vec![svc_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::GRPC_CLIENT, "grpc_client:OrderService.PlaceOrder", Confidence::Medium);
-    record(&mut nav_b, client_id, "OrderService", "grpc_client:OrderService.PlaceOrder", node_kind::GRPC_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::GRPC_CLIENT,
+        "grpc_client:OrderService.PlaceOrder",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "OrderService",
+        "grpc_client:OrderService.PlaceOrder",
+        node_kind::GRPC_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -120,7 +203,13 @@ fn rpc_package_cell(json: &str) -> glia_core::Cell {
 
 /// A package-qualified GRPC_SERVICE in `repo`, carrying the RPC_PACKAGE cell
 /// the proto extractor writes.
-fn grpc_service(repo: RepoId, nav: &mut CodeNav, package: &str, name: &str, pkg_json: &str) -> (Node, NodeId) {
+fn grpc_service(
+    repo: RepoId,
+    nav: &mut CodeNav,
+    package: &str,
+    name: &str,
+    pkg_json: &str,
+) -> (Node, NodeId) {
     let qname = format!("grpc:{package}.{name}");
     let (mut node, id) = make_node(repo, node_kind::GRPC_SERVICE, &qname, Confidence::Strong);
     node.cells.push(rpc_package_cell(pkg_json));
@@ -130,7 +219,12 @@ fn grpc_service(repo: RepoId, nav: &mut CodeNav, package: &str, name: &str, pkg_
 
 /// A GRPC_CLIENT in `repo` for `svc_name`, with one RPC_PACKAGE evidence cell
 /// per entry of `evidence` (one per file that constructs the stub).
-fn grpc_client(repo: RepoId, nav: &mut CodeNav, svc_name: &str, evidence: &[&str]) -> (Node, NodeId) {
+fn grpc_client(
+    repo: RepoId,
+    nav: &mut CodeNav,
+    svc_name: &str,
+    evidence: &[&str],
+) -> (Node, NodeId) {
     let qname = format!("grpc_client:{svc_name}");
     let (mut node, id) = make_node(repo, node_kind::GRPC_CLIENT, &qname, Confidence::Medium);
     for json in evidence {
@@ -143,7 +237,10 @@ fn grpc_client(repo: RepoId, nav: &mut CodeNav, svc_name: &str, evidence: &[&str
 
 /// `billing.PaymentsService` and `legacy.PaymentsService` in repo A, and one
 /// client in repo B. Returns (merged-after-resolve, billing id, legacy id, client id).
-fn payments_collision(client_name: &str, evidence: &[&str]) -> (MergedGraph, NodeId, NodeId, NodeId) {
+fn payments_collision(
+    client_name: &str,
+    evidence: &[&str],
+) -> (MergedGraph, NodeId, NodeId, NodeId) {
     let mut nav_a = CodeNav::default();
     let (billing, billing_id) = grpc_service(
         repo_a(),
@@ -183,13 +280,19 @@ fn grpc_call_targets(merged: &MergedGraph, from: NodeId) -> Vec<NodeId> {
 fn grpc_resolver_drops_ambiguous_bare_service_name() {
     // A bare client whose file names neither package: pairing it with both is
     // the silent wrong edge, so it pairs with neither.
-    let (merged, _, _, client_id) =
-        payments_collision("PaymentsService", &[r#"{"imports":["context","google.golang.org/grpc"]}"#]);
+    let (merged, _, _, client_id) = payments_collision(
+        "PaymentsService",
+        &[r#"{"imports":["context","google.golang.org/grpc"]}"#],
+    );
     assert_eq!(grpc_call_targets(&merged, client_id), Vec::<NodeId>::new());
 
     // No evidence cell at all: the same drop.
     let (merged, _, _, client_id) = payments_collision("PaymentsService", &[]);
-    assert!(merged.cross_edges.is_empty(), "got {:?}", merged.cross_edges);
+    assert!(
+        merged.cross_edges.is_empty(),
+        "got {:?}",
+        merged.cross_edges
+    );
     assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
 }
 
@@ -258,7 +361,10 @@ fn grpc_resolver_two_files_decide_separately() {
             r#"{"imports":["context"]}"#,
         ],
     );
-    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id, legacy_id]);
+    assert_eq!(
+        grpc_call_targets(&merged, client_id),
+        vec![billing_id, legacy_id]
+    );
 }
 
 #[test]
@@ -300,28 +406,63 @@ fn grpc_resolver_same_package_in_two_repos_is_not_ambiguous() {
     // The server and a vendored copy both declare billing.PaymentsService: one
     // package, two nodes — both pairings stand, with no evidence needed.
     let mut nav_a = CodeNav::default();
-    let (server, server_id) =
-        grpc_service(repo_a(), &mut nav_a, "billing", "PaymentsService", r#"{"package":"billing"}"#);
+    let (server, server_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "billing",
+        "PaymentsService",
+        r#"{"package":"billing"}"#,
+    );
     let ga = make_graph(repo_a(), vec![server], nav_a);
     let mut nav_b = CodeNav::default();
-    let (copy, copy_id) =
-        grpc_service(repo_b(), &mut nav_b, "billing", "PaymentsService", r#"{"package":"billing"}"#);
+    let (copy, copy_id) = grpc_service(
+        repo_b(),
+        &mut nav_b,
+        "billing",
+        "PaymentsService",
+        r#"{"package":"billing"}"#,
+    );
     let (client, client_id) = grpc_client(repo_b(), &mut nav_b, "PaymentsService", &[]);
     let gb = make_graph(repo_b(), vec![copy, client], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     GrpcStackResolver.resolve(&mut merged);
-    assert_eq!(grpc_call_targets(&merged, client_id), vec![server_id, copy_id]);
+    assert_eq!(
+        grpc_call_targets(&merged, client_id),
+        vec![server_id, copy_id]
+    );
 }
 
 #[test]
 fn grpc_resolver_package_falls_back_to_the_qname_without_a_cell() {
     // Services with no RPC_PACKAGE cell still differ by their A5.1 qname prefix.
     let mut nav_a = CodeNav::default();
-    let (b, _) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:billing.PaymentsService", Confidence::Strong);
-    record(&mut nav_a, b.id, "PaymentsService", "grpc:billing.PaymentsService", node_kind::GRPC_SERVICE);
-    let (l, _) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:legacy.PaymentsService", Confidence::Strong);
-    record(&mut nav_a, l.id, "PaymentsService", "grpc:legacy.PaymentsService", node_kind::GRPC_SERVICE);
+    let (b, _) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:billing.PaymentsService",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        b.id,
+        "PaymentsService",
+        "grpc:billing.PaymentsService",
+        node_kind::GRPC_SERVICE,
+    );
+    let (l, _) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:legacy.PaymentsService",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        l.id,
+        "PaymentsService",
+        "grpc:legacy.PaymentsService",
+        node_kind::GRPC_SERVICE,
+    );
     let ga = make_graph(repo_a(), vec![b, l], nav_a);
     let mut nav_b = CodeNav::default();
     let (client, client_id) = grpc_client(repo_b(), &mut nav_b, "PaymentsService", &[]);
@@ -336,7 +477,12 @@ fn grpc_resolver_package_falls_back_to_the_qname_without_a_cell() {
 
 /// A GRPC_SERVER marker in `repo` for `svc_name`, with one RPC_PACKAGE
 /// evidence cell per entry of `evidence`.
-fn grpc_server(repo: RepoId, nav: &mut CodeNav, svc_name: &str, evidence: &[&str]) -> (Node, NodeId) {
+fn grpc_server(
+    repo: RepoId,
+    nav: &mut CodeNav,
+    svc_name: &str,
+    evidence: &[&str],
+) -> (Node, NodeId) {
     let qname = format!("grpc_server:{svc_name}");
     let (mut node, id) = make_node(repo, node_kind::GRPC_SERVER, &qname, Confidence::Medium);
     for json in evidence {
@@ -359,7 +505,13 @@ fn handled_by(merged: &MergedGraph) -> Vec<(NodeId, NodeId)> {
 #[test]
 fn grpc_resolver_links_service_to_server_impl() {
     let mut nav_a = CodeNav::default();
-    let (svc, svc_id) = grpc_service(repo_a(), &mut nav_a, "helloworld", "Greeter", r#"{"package":"helloworld"}"#);
+    let (svc, svc_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "helloworld",
+        "Greeter",
+        r#"{"package":"helloworld"}"#,
+    );
     let ga = make_graph(repo_a(), vec![svc], nav_a);
     let mut nav_b = CodeNav::default();
     let (server, server_id) = grpc_server(repo_b(), &mut nav_b, "Greeter", &[]);
@@ -370,7 +522,11 @@ fn grpc_resolver_links_service_to_server_impl() {
 
     // Exactly one edge, contract -> impl, like ROUTE -> handler.
     assert_eq!(handled_by(&merged), vec![(svc_id, server_id)]);
-    assert_eq!(merged.cross_edges.len(), 1, "a server marker is not a client: no GRPC_CALLS");
+    assert_eq!(
+        merged.cross_edges.len(),
+        1,
+        "a server marker is not a client: no GRPC_CALLS"
+    );
     assert_eq!(merged.cross_edges[0].confidence, Confidence::Medium);
 }
 
@@ -394,8 +550,12 @@ fn grpc_resolver_server_pairing_is_package_aware_and_deduplicated() {
     );
     let ga = make_graph(repo_a(), vec![hello, v2], nav_a);
     let mut nav_b = CodeNav::default();
-    let (server, server_id) =
-        grpc_server(repo_b(), &mut nav_b, "Greeter", &[r#"{"imports":["Grpc.Core","GreeterApi"]}"#]);
+    let (server, server_id) = grpc_server(
+        repo_b(),
+        &mut nav_b,
+        "Greeter",
+        &[r#"{"imports":["Grpc.Core","GreeterApi"]}"#],
+    );
     // The same marker id in a second graph of repo B (two language graphs):
     // it is still paired once.
     let (server_again, _) = grpc_server(repo_b(), &mut nav_b.clone(), "Greeter", &[]);
@@ -412,8 +572,20 @@ fn grpc_resolver_server_pairing_is_package_aware_and_deduplicated() {
 
     // With no evidence at all the two packages are ambiguous: no edge.
     let mut nav_a = CodeNav::default();
-    let (p1, _) = grpc_service(repo_a(), &mut nav_a, "billing", "PaymentsService", r#"{"package":"billing"}"#);
-    let (p2, _) = grpc_service(repo_a(), &mut nav_a, "legacy", "PaymentsService", r#"{"package":"legacy"}"#);
+    let (p1, _) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "billing",
+        "PaymentsService",
+        r#"{"package":"billing"}"#,
+    );
+    let (p2, _) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "legacy",
+        "PaymentsService",
+        r#"{"package":"legacy"}"#,
+    );
     let ga = make_graph(repo_a(), vec![p1, p2], nav_a);
     let mut nav_b = CodeNav::default();
     let (s, _) = grpc_server(repo_b(), &mut nav_b, "PaymentsService", &[]);
@@ -430,19 +602,45 @@ fn grpc_resolver_server_pairing_is_package_aware_and_deduplicated() {
 #[test]
 fn queue_resolver_links_producer_to_consumer() {
     let mut nav_a = CodeNav::default();
-    let (consumer_node, consumer_id) = make_node(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:emails", Confidence::Medium);
-    record(&mut nav_a, consumer_id, "emails", "queue_consumer:emails", node_kind::QUEUE_CONSUMER);
+    let (consumer_node, consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:emails",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        consumer_id,
+        "emails",
+        "queue_consumer:emails",
+        node_kind::QUEUE_CONSUMER,
+    );
     let ga = make_graph(repo_a(), vec![consumer_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (producer_node, producer_id) = make_node(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:emails", Confidence::Medium);
-    record(&mut nav_b, producer_id, "emails", "queue_producer:emails", node_kind::QUEUE_PRODUCER);
+    let (producer_node, producer_id) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:emails",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        producer_id,
+        "emails",
+        "queue_producer:emails",
+        node_kind::QUEUE_PRODUCER,
+    );
     let gb = make_graph(repo_b(), vec![producer_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     QueueStackResolver.resolve(&mut merged);
 
-    let queue_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::QUEUE_FLOWS).collect();
+    let queue_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+        .collect();
     assert_eq!(queue_edges.len(), 1);
     assert_eq!(queue_edges[0].from, producer_id);
     assert_eq!(queue_edges[0].to, consumer_id);
@@ -451,13 +649,35 @@ fn queue_resolver_links_producer_to_consumer() {
 #[test]
 fn queue_resolver_no_match_on_different_topics() {
     let mut nav_a = CodeNav::default();
-    let (consumer_node, consumer_id) = make_node(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:emails", Confidence::Medium);
-    record(&mut nav_a, consumer_id, "emails", "queue_consumer:emails", node_kind::QUEUE_CONSUMER);
+    let (consumer_node, consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:emails",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        consumer_id,
+        "emails",
+        "queue_consumer:emails",
+        node_kind::QUEUE_CONSUMER,
+    );
     let ga = make_graph(repo_a(), vec![consumer_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (producer_node, producer_id) = make_node(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:orders", Confidence::Medium);
-    record(&mut nav_b, producer_id, "orders", "queue_producer:orders", node_kind::QUEUE_PRODUCER);
+    let (producer_node, producer_id) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:orders",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        producer_id,
+        "orders",
+        "queue_producer:orders",
+        node_kind::QUEUE_PRODUCER,
+    );
     let gb = make_graph(repo_b(), vec![producer_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -527,7 +747,13 @@ fn queue_resolver_unresolved_producer_cannot_reach_a_real_consumer() {
         "queue_consumer:orders",
         Confidence::Medium,
     );
-    record(&mut nav_a, real_consumer_id, "orders", "queue_consumer:orders", node_kind::QUEUE_CONSUMER);
+    record(
+        &mut nav_a,
+        real_consumer_id,
+        "orders",
+        "queue_consumer:orders",
+        node_kind::QUEUE_CONSUMER,
+    );
     let (tag_consumer, tag_consumer_id) = make_node(
         repo_a(),
         node_kind::QUEUE_CONSUMER,
@@ -550,7 +776,13 @@ fn queue_resolver_unresolved_producer_cannot_reach_a_real_consumer() {
         "queue_producer:orders",
         Confidence::Medium,
     );
-    record(&mut nav_b, real_producer_id, "orders", "queue_producer:orders", node_kind::QUEUE_PRODUCER);
+    record(
+        &mut nav_b,
+        real_producer_id,
+        "orders",
+        "queue_producer:orders",
+        node_kind::QUEUE_PRODUCER,
+    );
     let (tag_producer, tag_producer_id) = make_node(
         repo_b(),
         node_kind::QUEUE_PRODUCER,
@@ -595,7 +827,12 @@ fn family_cell(family: &str) -> glia_core::Cell {
 /// One queue side: (topic, one family per CODE cell — empty = no cell at all).
 type QueueSide<'a> = (&'a str, &'a [&'a str]);
 
-fn queue_side(repo: RepoId, kind: glia_core::NodeKindId, prefix: &str, sides: &[QueueSide]) -> RepoGraph {
+fn queue_side(
+    repo: RepoId,
+    kind: glia_core::NodeKindId,
+    prefix: &str,
+    sides: &[QueueSide],
+) -> RepoGraph {
     let mut nav = CodeNav::default();
     let mut nodes = Vec::new();
     for (topic, families) in sides {
@@ -610,9 +847,22 @@ fn queue_side(repo: RepoId, kind: glia_core::NodeKindId, prefix: &str, sides: &[
 
 /// Run the resolver over producers (repo b) and consumers (repo a); return the
 /// QUEUE_FLOWS edges as (producer qname, consumer qname, confidence), sorted.
-fn queue_pairs(producers: &[QueueSide], consumers: &[QueueSide]) -> Vec<(String, String, Confidence)> {
-    let ga = queue_side(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:", consumers);
-    let gb = queue_side(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:", producers);
+fn queue_pairs(
+    producers: &[QueueSide],
+    consumers: &[QueueSide],
+) -> Vec<(String, String, Confidence)> {
+    let ga = queue_side(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:",
+        consumers,
+    );
+    let gb = queue_side(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:",
+        producers,
+    );
     let mut merged = MergedGraph::new(vec![ga, gb]);
     QueueStackResolver.resolve(&mut merged);
     let qname = |id: NodeId| {
@@ -645,18 +895,29 @@ fn queue_resolver_pairs_when_family_absent() {
     // Absent must pair — the three tests above build cell-less nodes.
     let both_absent = queue_pairs(&[("jobs", &[])], &[("jobs", &[])]);
     assert_eq!(both_absent.len(), 1, "got {both_absent:?}");
-    assert_eq!(both_absent[0].2, Confidence::Strong, "exact pairs keep weakest(), not Weak");
+    assert_eq!(
+        both_absent[0].2,
+        Confidence::Strong,
+        "exact pairs keep weakest(), not Weak"
+    );
     let one_absent = queue_pairs(&[("jobs", &["kafka"])], &[("jobs", &[])]);
     assert_eq!(one_absent.len(), 1, "got {one_absent:?}");
     let generic = queue_pairs(&[("jobs", &["kafka"])], &[("jobs", &["generic"])]);
-    assert_eq!(generic.len(), 1, "generic pairs with any family, got {generic:?}");
+    assert_eq!(
+        generic.len(),
+        1,
+        "generic pairs with any family, got {generic:?}"
+    );
 }
 
 #[test]
 fn queue_resolver_reads_every_family_cell() {
     // A topic consumed from two files via two frameworks carries two cells;
     // the second one must count, not just the first.
-    let pairs = queue_pairs(&[("jobs", &["bullmq"])], &[("jobs", &["sidekiq", "bullmq"])]);
+    let pairs = queue_pairs(
+        &[("jobs", &["bullmq"])],
+        &[("jobs", &["sidekiq", "bullmq"])],
+    );
     assert_eq!(pairs.len(), 1, "got {pairs:?}");
 }
 
@@ -664,7 +925,11 @@ fn queue_resolver_reads_every_family_cell() {
 fn queue_resolver_nats_wildcard() {
     let pairs = queue_pairs(
         &[("orders.created", &["nats"])],
-        &[("orders.*", &["nats"]), ("billing.*", &["nats"]), ("orders.*.v1", &["nats"])],
+        &[
+            ("orders.*", &["nats"]),
+            ("billing.*", &["nats"]),
+            ("orders.*.v1", &["nats"]),
+        ],
     );
     assert_eq!(
         pairs,
@@ -686,12 +951,30 @@ fn queue_resolver_wildcard_dialects() {
         ("orders", "nats", "orders.>", "nats", false),
         // AMQP `#` = zero or more tokens, anywhere.
         ("orders", "rabbitmq", "orders.#", "rabbitmq", true),
-        ("orders.eu.created", "rabbitmq", "orders.#", "rabbitmq", true),
+        (
+            "orders.eu.created",
+            "rabbitmq",
+            "orders.#",
+            "rabbitmq",
+            true,
+        ),
         ("a.x.y.error", "rabbitmq", "*.#.error", "rabbitmq", true),
         ("a.x.y.info", "rabbitmq", "*.#.error", "rabbitmq", false),
         // MQTT: '/' levels with `+` and `#`; '.' is an ordinary character.
-        ("sensors/kitchen/temp", "mqtt", "sensors/+/temp", "mqtt", true),
-        ("sensors/kitchen/humidity", "mqtt", "sensors/+/temp", "mqtt", false),
+        (
+            "sensors/kitchen/temp",
+            "mqtt",
+            "sensors/+/temp",
+            "mqtt",
+            true,
+        ),
+        (
+            "sensors/kitchen/humidity",
+            "mqtt",
+            "sensors/+/temp",
+            "mqtt",
+            false,
+        ),
         ("sensors", "mqtt", "sensors/#", "mqtt", true),
         ("orders.created", "mqtt", "orders.*", "mqtt", false),
         // Kafka: regex approximated by its literal prefix; `\.` is a literal dot.
@@ -722,7 +1005,11 @@ fn queue_resolver_wildcard_dialects() {
         );
         if want {
             // A pattern match is an inference (Weak); literal equality is not.
-            let conf = if topic == pattern { Confidence::Strong } else { Confidence::Weak };
+            let conf = if topic == pattern {
+                Confidence::Strong
+            } else {
+                Confidence::Weak
+            };
             assert_eq!(pairs[0].2, conf, "{topic} vs {pattern}");
         }
     }
@@ -732,9 +1019,18 @@ fn queue_resolver_wildcard_dialects() {
 fn queue_resolver_ignores_catchall() {
     // A subscription with no literal token is not an identity; pairing it
     // would make every publisher a dependency of this one subscriber.
-    for (pattern, family) in [(">", "nats"), ("#", "rabbitmq"), ("*.*", "nats"), ("#", "mqtt"), ("^.*", "kafka")] {
+    for (pattern, family) in [
+        (">", "nats"),
+        ("#", "rabbitmq"),
+        ("*.*", "nats"),
+        ("#", "mqtt"),
+        ("^.*", "kafka"),
+    ] {
         let pairs = queue_pairs(&[("orders.created", &[family])], &[(pattern, &[family])]);
-        assert!(pairs.is_empty(), "{pattern} ({family}) must pair with nothing, got {pairs:?}");
+        assert!(
+            pairs.is_empty(),
+            "{pattern} ({family}) must pair with nothing, got {pairs:?}"
+        );
     }
     // …but a literal publish of the same string still pairs exactly.
     let literal = queue_pairs(&[(">", &["nats"])], &[(">", &["nats"])]);
@@ -766,13 +1062,21 @@ fn tf_sub_ref(res: &str, name: &str, topic_res: &str) -> (&'static str, String, 
     let json = format!(
         r#"{{"pubsub":"subscription","name":"{name}","topic_ref":"google_pubsub_topic.{topic_res}"}}"#
     );
-    ("google_pubsub_subscription", res.to_string(), pubsub_cell(json))
+    (
+        "google_pubsub_subscription",
+        res.to_string(),
+        pubsub_cell(json),
+    )
 }
 
 /// `google_pubsub_subscription.<res> { name = "<name>", topic = "<topic>" }`.
 fn tf_sub_lit(res: &str, name: &str, topic: &str) -> (&'static str, String, glia_core::Cell) {
     let json = format!(r#"{{"pubsub":"subscription","name":"{name}","topic":"{topic}"}}"#);
-    ("google_pubsub_subscription", res.to_string(), pubsub_cell(json))
+    (
+        "google_pubsub_subscription",
+        res.to_string(),
+        pubsub_cell(json),
+    )
 }
 
 /// One Terraform repo of INFRA_RESOURCE nodes, qname = the parser's
@@ -783,9 +1087,20 @@ fn infra_graph(resources: Vec<(&'static str, String, glia_core::Cell)>) -> RepoG
     let mut nodes = Vec::new();
     for (ty, res, cell) in resources {
         let qname = infra::qname(infra::canonical_kind(ty), &res);
-        let (mut node, id) = make_node(infra_repo(), node_kind::INFRA_RESOURCE, &qname, Confidence::Strong);
+        let (mut node, id) = make_node(
+            infra_repo(),
+            node_kind::INFRA_RESOURCE,
+            &qname,
+            Confidence::Strong,
+        );
         node.cells.push(cell);
-        record(&mut nav, id, &format!("{ty}.{res}"), &qname, node_kind::INFRA_RESOURCE);
+        record(
+            &mut nav,
+            id,
+            &format!("{ty}.{res}"),
+            &qname,
+            node_kind::INFRA_RESOURCE,
+        );
         nodes.push(node);
     }
     make_graph(infra_repo(), nodes, nav)
@@ -798,8 +1113,18 @@ fn binding_pairs(
     consumers: &[QueueSide],
     infra: RepoGraph,
 ) -> Vec<(String, String, Confidence, String)> {
-    let ga = queue_side(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:", consumers);
-    let gb = queue_side(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:", producers);
+    let ga = queue_side(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:",
+        consumers,
+    );
+    let gb = queue_side(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:",
+        producers,
+    );
     let mut merged = MergedGraph::new(vec![ga, gb, infra]);
     QueueStackResolver.resolve(&mut merged);
     let qname = |id: NodeId| {
@@ -814,7 +1139,8 @@ fn binding_pairs(
         .iter()
         .filter(|e| e.category == edge_category::QUEUE_FLOWS)
         .map(|e| {
-            let ev = glia_code_domain::evidence::Evidence::of(e).expect("every QUEUE_FLOWS edge carries EVIDENCE");
+            let ev = glia_code_domain::evidence::Evidence::of(e)
+                .expect("every QUEUE_FLOWS edge carries EVIDENCE");
             let rule = format!("{}:{}", ev.emitter, ev.rule.unwrap_or_default());
             (qname(e.from), qname(e.to), e.confidence, rule)
         })
@@ -839,9 +1165,16 @@ fn queue_resolver_pairs_through_pubsub_binding() {
     let by_ref = binding_pairs(
         &[("orders", &["pubsub"])],
         &[("orders-worker", &["pubsub"])],
-        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "orders")]),
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_worker", "orders-worker", "orders"),
+        ]),
     );
-    assert_eq!(by_ref, [binding_edge("orders", "orders-worker")], "a declared binding is Medium, never Strong");
+    assert_eq!(
+        by_ref,
+        [binding_edge("orders", "orders-worker")],
+        "a declared binding is Medium, never Strong"
+    );
 
     // A literal `topic = "orders"` binds the same way, with no topic resource.
     let by_literal = binding_pairs(
@@ -864,7 +1197,11 @@ fn queue_resolver_pairs_through_pubsub_binding() {
 fn queue_resolver_no_binding_no_pair() {
     // fixtures/xcut-queue-cloud-pubsub: a topic and a subscription with
     // different names and no IaC binding are different names, not a pair.
-    let none = binding_pairs(&[("orders", &["pubsub"])], &[("orders-worker", &["pubsub"])], infra_graph(vec![]));
+    let none = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![]),
+    );
     assert!(none.is_empty(), "got {none:?}");
 
     // A declared topic alone binds nothing; neither does a subscription whose
@@ -872,7 +1209,10 @@ fn queue_resolver_no_binding_no_pair() {
     let dangling = binding_pairs(
         &[("orders", &["pubsub"])],
         &[("orders-worker", &["pubsub"])],
-        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "missing")]),
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_worker", "orders-worker", "missing"),
+        ]),
     );
     assert!(dangling.is_empty(), "got {dangling:?}");
 
@@ -887,15 +1227,32 @@ fn queue_resolver_no_binding_no_pair() {
 
 #[test]
 fn queue_resolver_binding_respects_family() {
-    let infra = || infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "orders")]);
+    let infra = || {
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_worker", "orders-worker", "orders"),
+        ])
+    };
     // A Kafka consumer that happens to be named like the subscription is no
     // Pub/Sub subscriber: the binding does not apply to it.
-    let kafka_consumer = binding_pairs(&[("orders", &["pubsub"])], &[("orders-worker", &["kafka"])], infra());
+    let kafka_consumer = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["kafka"])],
+        infra(),
+    );
     assert!(kafka_consumer.is_empty(), "got {kafka_consumer:?}");
-    let kafka_both = binding_pairs(&[("orders", &["kafka"])], &[("orders-worker", &["kafka"])], infra());
+    let kafka_both = binding_pairs(
+        &[("orders", &["kafka"])],
+        &[("orders-worker", &["kafka"])],
+        infra(),
+    );
     assert!(kafka_both.is_empty(), "got {kafka_both:?}");
     // A Kafka producer of `orders` is not the Pub/Sub topic `orders`.
-    let kafka_producer = binding_pairs(&[("orders", &["kafka"])], &[("orders-worker", &["pubsub"])], infra());
+    let kafka_producer = binding_pairs(
+        &[("orders", &["kafka"])],
+        &[("orders-worker", &["pubsub"])],
+        infra(),
+    );
     assert!(kafka_producer.is_empty(), "got {kafka_producer:?}");
 }
 
@@ -965,7 +1322,10 @@ fn queue_resolver_binding_keeps_exact_pairs() {
     let same_name = binding_pairs(
         &[("orders", &["pubsub"])],
         &[("orders", &["pubsub"])],
-        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_sub", "orders", "orders")]),
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_sub", "orders", "orders"),
+        ]),
     );
     assert_eq!(
         same_name,
@@ -990,7 +1350,12 @@ fn graphql_pairs(op: &str, resolvers: &[&str]) -> (Vec<glia_core::Edge>, NodeId,
     let mut resolver_ids = Vec::new();
     for name in resolvers {
         let qname = format!("graphql_resolver:{name}");
-        let (node, id) = make_node(repo_a(), node_kind::GRAPHQL_RESOLVER, &qname, Confidence::Strong);
+        let (node, id) = make_node(
+            repo_a(),
+            node_kind::GRAPHQL_RESOLVER,
+            &qname,
+            Confidence::Strong,
+        );
         record(&mut nav_a, id, name, &qname, node_kind::GRAPHQL_RESOLVER);
         resolver_nodes.push(node);
         resolver_ids.push(id);
@@ -999,8 +1364,19 @@ fn graphql_pairs(op: &str, resolvers: &[&str]) -> (Vec<glia_core::Edge>, NodeId,
 
     let mut nav_b = CodeNav::default();
     let op_qname = format!("graphql_op:{op}");
-    let (op_node, op_id) = make_node(repo_b(), node_kind::GRAPHQL_OPERATION, &op_qname, Confidence::Medium);
-    record(&mut nav_b, op_id, op, &op_qname, node_kind::GRAPHQL_OPERATION);
+    let (op_node, op_id) = make_node(
+        repo_b(),
+        node_kind::GRAPHQL_OPERATION,
+        &op_qname,
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        op_id,
+        op,
+        &op_qname,
+        node_kind::GRAPHQL_OPERATION,
+    );
     let gb = make_graph(repo_b(), vec![op_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -1071,19 +1447,45 @@ fn graphql_resolver_pairs_generated_hook_and_short_root_field() {
 #[test]
 fn ws_resolver_links_client_to_handler() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:/chat", Confidence::Strong);
-    record(&mut nav_a, handler_id, "chat", "ws:/chat", node_kind::WS_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::WS_HANDLER,
+        "ws:/chat",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "chat",
+        "ws:/chat",
+        node_kind::WS_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/chat", Confidence::Medium);
-    record(&mut nav_b, client_id, "chat", "ws_client:/chat", node_kind::WS_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::WS_CLIENT,
+        "ws_client:/chat",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "chat",
+        "ws_client:/chat",
+        node_kind::WS_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     WebSocketStackResolver.resolve(&mut merged);
 
-    let ws_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::WS_CONNECTS).collect();
+    let ws_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::WS_CONNECTS)
+        .collect();
     assert_eq!(ws_edges.len(), 1);
     assert_eq!(ws_edges[0].from, client_id);
     assert_eq!(ws_edges[0].to, handler_id);
@@ -1095,20 +1497,39 @@ fn ws_resolver_links_client_to_handler() {
 #[test]
 fn ws_resolver_does_not_wildcard_unparsed_handler() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:ws", Confidence::Medium);
+    let (handler_node, handler_id) =
+        make_node(repo_a(), node_kind::WS_HANDLER, "ws:ws", Confidence::Medium);
     record(&mut nav_a, handler_id, "ws", "ws:ws", node_kind::WS_HANDLER);
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/notifications", Confidence::Medium);
-    record(&mut nav_b, client_id, "/notifications", "ws_client:/notifications", node_kind::WS_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::WS_CLIENT,
+        "ws_client:/notifications",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "/notifications",
+        "ws_client:/notifications",
+        node_kind::WS_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     WebSocketStackResolver.resolve(&mut merged);
 
-    let ws_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::WS_CONNECTS).collect();
-    assert!(ws_edges.is_empty(), "generic handler name must not fan out to unrelated clients");
+    let ws_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::WS_CONNECTS)
+        .collect();
+    assert!(
+        ws_edges.is_empty(),
+        "generic handler name must not fan out to unrelated clients"
+    );
 }
 
 /// `@WebSocketGateway` / `Phoenix.Channel` / `ActionCable` handlers are named
@@ -1116,20 +1537,45 @@ fn ws_resolver_does_not_wildcard_unparsed_handler() {
 #[test]
 fn ws_resolver_does_not_wildcard_default_handler() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:default", Confidence::Medium);
-    record(&mut nav_a, handler_id, "default", "ws:default", node_kind::WS_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::WS_HANDLER,
+        "ws:default",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "default",
+        "ws:default",
+        node_kind::WS_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/notifications", Confidence::Medium);
-    record(&mut nav_b, client_id, "/notifications", "ws_client:/notifications", node_kind::WS_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::WS_CLIENT,
+        "ws_client:/notifications",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "/notifications",
+        "ws_client:/notifications",
+        node_kind::WS_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     WebSocketStackResolver.resolve(&mut merged);
 
     assert!(
-        merged.cross_edges.iter().all(|e| e.category != edge_category::WS_CONNECTS),
+        merged
+            .cross_edges
+            .iter()
+            .all(|e| e.category != edge_category::WS_CONNECTS),
         "handler named `default` must not pair with an unrelated client path"
     );
 }
@@ -1139,19 +1585,45 @@ fn ws_resolver_does_not_wildcard_default_handler() {
 #[test]
 fn ws_resolver_suffix_matches_on_segment_boundary() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:/chat", Confidence::Strong);
-    record(&mut nav_a, handler_id, "chat", "ws:/chat", node_kind::WS_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::WS_HANDLER,
+        "ws:/chat",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "chat",
+        "ws:/chat",
+        node_kind::WS_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/api/v1/chat", Confidence::Medium);
-    record(&mut nav_b, client_id, "/api/v1/chat", "ws_client:/api/v1/chat", node_kind::WS_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::WS_CLIENT,
+        "ws_client:/api/v1/chat",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "/api/v1/chat",
+        "ws_client:/api/v1/chat",
+        node_kind::WS_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     WebSocketStackResolver.resolve(&mut merged);
 
-    let ws_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::WS_CONNECTS).collect();
+    let ws_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::WS_CONNECTS)
+        .collect();
     assert_eq!(ws_edges.len(), 1);
     assert_eq!(ws_edges[0].from, client_id);
     assert_eq!(ws_edges[0].to, handler_id);
@@ -1162,20 +1634,45 @@ fn ws_resolver_suffix_matches_on_segment_boundary() {
 #[test]
 fn ws_resolver_rejects_byte_suffix() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:/socket", Confidence::Strong);
-    record(&mut nav_a, handler_id, "socket", "ws:/socket", node_kind::WS_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::WS_HANDLER,
+        "ws:/socket",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "socket",
+        "ws:/socket",
+        node_kind::WS_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/websocket", Confidence::Medium);
-    record(&mut nav_b, client_id, "/websocket", "ws_client:/websocket", node_kind::WS_CLIENT);
+    let (client_node, client_id) = make_node(
+        repo_b(),
+        node_kind::WS_CLIENT,
+        "ws_client:/websocket",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_id,
+        "/websocket",
+        "ws_client:/websocket",
+        node_kind::WS_CLIENT,
+    );
     let gb = make_graph(repo_b(), vec![client_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     WebSocketStackResolver.resolve(&mut merged);
 
     assert!(
-        merged.cross_edges.iter().all(|e| e.category != edge_category::WS_CONNECTS),
+        merged
+            .cross_edges
+            .iter()
+            .all(|e| e.category != edge_category::WS_CONNECTS),
         "`/websocket` byte-ends-with `socket` but is a different mount point"
     );
 }
@@ -1187,19 +1684,45 @@ fn ws_resolver_rejects_byte_suffix() {
 #[test]
 fn event_resolver_links_emitter_to_handler() {
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "event_handle:user.created", Confidence::Weak);
-    record(&mut nav_a, handler_id, "user.created", "event_handle:user.created", node_kind::EVENT_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:user.created",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "user.created",
+        "event_handle:user.created",
+        node_kind::EVENT_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:user.created", Confidence::Weak);
-    record(&mut nav_b, emitter_id, "user.created", "event_emit:user.created", node_kind::EVENT_EMITTER);
+    let (emitter_node, emitter_id) = make_node(
+        repo_b(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:user.created",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_b,
+        emitter_id,
+        "user.created",
+        "event_emit:user.created",
+        node_kind::EVENT_EMITTER,
+    );
     let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     EventBusResolver.resolve(&mut merged);
 
-    let event_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::EVENT_FLOWS).collect();
+    let event_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .collect();
     assert_eq!(event_edges.len(), 1);
     assert_eq!(event_edges[0].from, emitter_id);
     assert_eq!(event_edges[0].to, handler_id);
@@ -1211,19 +1734,45 @@ fn event_resolver_folds_event_suffix() {
     // Spring publishes `OrderPlacedEvent`; the listener's parameter is often
     // spelled `OrderPlaced`. Type-named keys fold to one event.
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "event_handle:OrderPlaced", Confidence::Medium);
-    record(&mut nav_a, handler_id, "OrderPlaced", "event_handle:OrderPlaced", node_kind::EVENT_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:OrderPlaced",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "OrderPlaced",
+        "event_handle:OrderPlaced",
+        node_kind::EVENT_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:OrderPlacedEvent", Confidence::Medium);
-    record(&mut nav_b, emitter_id, "OrderPlacedEvent", "event_emit:OrderPlacedEvent", node_kind::EVENT_EMITTER);
+    let (emitter_node, emitter_id) = make_node(
+        repo_b(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:OrderPlacedEvent",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        emitter_id,
+        "OrderPlacedEvent",
+        "event_emit:OrderPlacedEvent",
+        node_kind::EVENT_EMITTER,
+    );
     let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     EventBusResolver.resolve(&mut merged);
 
-    let event_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::EVENT_FLOWS).collect();
+    let event_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .collect();
     assert_eq!(event_edges.len(), 1, "{:?}", merged.cross_edges);
     assert_eq!(event_edges[0].from, emitter_id);
     assert_eq!(event_edges[0].to, handler_id);
@@ -1235,19 +1784,45 @@ fn event_resolver_indexes_bare_code_qnames() {
     // extractor's `event_handle:` prefix. Those used to be `continue`d out of
     // the index, which made every parser-emitted event a disconnected island.
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "notify::Listener::OrderPlaced", Confidence::Medium);
-    record(&mut nav_a, handler_id, "OrderPlaced", "notify::Listener::OrderPlaced", node_kind::EVENT_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "notify::Listener::OrderPlaced",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "OrderPlaced",
+        "notify::Listener::OrderPlaced",
+        node_kind::EVENT_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:OrderPlaced", Confidence::Medium);
-    record(&mut nav_b, emitter_id, "OrderPlaced", "event_emit:OrderPlaced", node_kind::EVENT_EMITTER);
+    let (emitter_node, emitter_id) = make_node(
+        repo_b(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:OrderPlaced",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        emitter_id,
+        "OrderPlaced",
+        "event_emit:OrderPlaced",
+        node_kind::EVENT_EMITTER,
+    );
     let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     EventBusResolver.resolve(&mut merged);
 
-    let event_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::EVENT_FLOWS).collect();
+    let event_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .collect();
     assert_eq!(event_edges.len(), 1, "{:?}", merged.cross_edges);
     assert_eq!(event_edges[0].from, emitter_id);
     assert_eq!(event_edges[0].to, handler_id);
@@ -1259,13 +1834,35 @@ fn event_resolver_keeps_string_topics_exact() {
     // one, so `user.created` must never reach `user.updated` — no separator
     // folding, no lowercasing, no all-to-all.
     let mut nav_a = CodeNav::default();
-    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "event_handle:user.updated", Confidence::Weak);
-    record(&mut nav_a, handler_id, "user.updated", "event_handle:user.updated", node_kind::EVENT_HANDLER);
+    let (handler_node, handler_id) = make_node(
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:user.updated",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_a,
+        handler_id,
+        "user.updated",
+        "event_handle:user.updated",
+        node_kind::EVENT_HANDLER,
+    );
     let ga = make_graph(repo_a(), vec![handler_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:user.created", Confidence::Weak);
-    record(&mut nav_b, emitter_id, "user.created", "event_emit:user.created", node_kind::EVENT_EMITTER);
+    let (emitter_node, emitter_id) = make_node(
+        repo_b(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:user.created",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_b,
+        emitter_id,
+        "user.created",
+        "event_emit:user.created",
+        node_kind::EVENT_EMITTER,
+    );
     let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -1287,7 +1884,8 @@ fn transport_origin() -> glia_core::Cell {
     glia_core::Cell {
         kind: glia_code_domain::cell_type::ORIGIN,
         payload: glia_core::CellPayload::Json(
-            r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#.into(),
+            r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#
+                .into(),
         ),
     }
 }
@@ -1340,10 +1938,24 @@ fn pair(a: &str, b: &str) -> (String, String) {
 fn event_resolver_pairs_within_an_owner_or_with_an_unowned_side() {
     let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
     for q in ["event_emit:x @a", "event_emit:x @b"] {
-        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, q, false);
+        event_side(
+            &mut nodes,
+            &mut nav,
+            repo_a(),
+            node_kind::EVENT_EMITTER,
+            q,
+            false,
+        );
     }
     for q in ["event_handle:x @a", "event_handle:x @b", "event_handle:x"] {
-        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, q, false);
+        event_side(
+            &mut nodes,
+            &mut nav,
+            repo_a(),
+            node_kind::EVENT_HANDLER,
+            q,
+            false,
+        );
     }
     let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
     EventBusResolver.resolve(&mut merged);
@@ -1363,38 +1975,107 @@ fn event_resolver_pairs_within_an_owner_or_with_an_unowned_side() {
 fn event_resolver_transport_side_pairs_across_owners() {
     for (transport, want) in [(true, 1usize), (false, 0)] {
         let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
-        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, "event_emit:y @a", false);
-        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:y @b", transport);
+        event_side(
+            &mut nodes,
+            &mut nav,
+            repo_a(),
+            node_kind::EVENT_EMITTER,
+            "event_emit:y @a",
+            false,
+        );
+        event_side(
+            &mut nodes,
+            &mut nav,
+            repo_a(),
+            node_kind::EVENT_HANDLER,
+            "event_handle:y @b",
+            transport,
+        );
         let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
         EventBusResolver.resolve(&mut merged);
         assert_eq!(event_flows(&merged).len(), want, "transport={transport}");
     }
     // Either side may carry the mark: a ClientProxy.emit reaches a plain handler.
     let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
-    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, "event_emit:y @a", true);
-    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:y @b", false);
+    event_side(
+        &mut nodes,
+        &mut nav,
+        repo_a(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:y @a",
+        true,
+    );
+    event_side(
+        &mut nodes,
+        &mut nav,
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:y @b",
+        false,
+    );
     let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
     EventBusResolver.resolve(&mut merged);
-    assert_eq!(event_flows(&merged), [pair("event_emit:y @a", "event_handle:y @b")]);
+    assert_eq!(
+        event_flows(&merged),
+        [pair("event_emit:y @a", "event_handle:y @b")]
+    );
 }
 
 #[test]
 fn event_resolver_owner_is_repo_scoped() {
     // The same rel path in two repos is two projects.
     let (mut na, mut va) = (Vec::new(), CodeNav::default());
-    event_side(&mut na, &mut va, repo_a(), node_kind::EVENT_EMITTER, "event_emit:x @svc", false);
+    event_side(
+        &mut na,
+        &mut va,
+        repo_a(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:x @svc",
+        false,
+    );
     let (mut nb, mut vb) = (Vec::new(), CodeNav::default());
-    event_side(&mut nb, &mut vb, repo_b(), node_kind::EVENT_HANDLER, "event_handle:x @svc", false);
-    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), na, va), make_graph(repo_b(), nb, vb)]);
+    event_side(
+        &mut nb,
+        &mut vb,
+        repo_b(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:x @svc",
+        false,
+    );
+    let mut merged = MergedGraph::new(vec![
+        make_graph(repo_a(), na, va),
+        make_graph(repo_b(), nb, vb),
+    ]);
     EventBusResolver.resolve(&mut merged);
-    assert!(event_flows(&merged).is_empty(), "{:?}", event_flows(&merged));
+    assert!(
+        event_flows(&merged).is_empty(),
+        "{:?}",
+        event_flows(&merged)
+    );
 
     // An unowned emitter in A still reaches B's owned handler.
     let (mut na, mut va) = (Vec::new(), CodeNav::default());
-    let e = event_side(&mut na, &mut va, repo_a(), node_kind::EVENT_EMITTER, "event_emit:x", false);
+    let e = event_side(
+        &mut na,
+        &mut va,
+        repo_a(),
+        node_kind::EVENT_EMITTER,
+        "event_emit:x",
+        false,
+    );
     let (mut nb, mut vb) = (Vec::new(), CodeNav::default());
-    let h = event_side(&mut nb, &mut vb, repo_b(), node_kind::EVENT_HANDLER, "event_handle:x @svc", false);
-    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), na, va), make_graph(repo_b(), nb, vb)]);
+    let h = event_side(
+        &mut nb,
+        &mut vb,
+        repo_b(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:x @svc",
+        false,
+    );
+    let mut merged = MergedGraph::new(vec![
+        make_graph(repo_a(), na, va),
+        make_graph(repo_b(), nb, vb),
+    ]);
     EventBusResolver.resolve(&mut merged);
     let edges: Vec<(NodeId, NodeId)> = merged
         .cross_edges
@@ -1410,10 +2091,28 @@ fn event_resolver_code_qname_event_is_unowned() {
     // A parser-declared event keeps its code qname (never owned); it keys on
     // its NAME and pairs an owned handler of any project.
     let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
-    let (emitter, e) = make_node(repo_a(), node_kind::EVENT_EMITTER, "m::C::C::BidPlaced", Confidence::Medium);
-    record(&mut nav, e, "BidPlaced", "m::C::C::BidPlaced", node_kind::EVENT_EMITTER);
+    let (emitter, e) = make_node(
+        repo_a(),
+        node_kind::EVENT_EMITTER,
+        "m::C::C::BidPlaced",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav,
+        e,
+        "BidPlaced",
+        "m::C::C::BidPlaced",
+        node_kind::EVENT_EMITTER,
+    );
     nodes.push(emitter);
-    let h = event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced @web", false);
+    let h = event_side(
+        &mut nodes,
+        &mut nav,
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:BidPlaced @web",
+        false,
+    );
     let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
     EventBusResolver.resolve(&mut merged);
     let edges: Vec<(NodeId, NodeId)> = merged
@@ -1432,18 +2131,49 @@ fn event_resolver_never_pairs_a_solidity_event_by_name() {
     // never with an in-process handler by name. Before DT.10b this pair
     // was one EVENT_FLOWS edge; it is none.
     let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
-    let (mut emitter, e) = make_node(repo_a(), node_kind::EVENT_EMITTER, "m::C::C::BidPlaced", Confidence::Medium);
+    let (mut emitter, e) = make_node(
+        repo_a(),
+        node_kind::EVENT_EMITTER,
+        "m::C::C::BidPlaced",
+        Confidence::Medium,
+    );
     emitter.cells.push(glia_core::Cell {
         kind: glia_code_domain::cell_type::POSITION,
-        payload: glia_core::CellPayload::Json(r#"{"file":"contracts/C.sol","start_line":3,"end_line":3}"#.into()),
+        payload: glia_core::CellPayload::Json(
+            r#"{"file":"contracts/C.sol","start_line":3,"end_line":3}"#.into(),
+        ),
     });
-    record(&mut nav, e, "BidPlaced", "m::C::C::BidPlaced", node_kind::EVENT_EMITTER);
+    record(
+        &mut nav,
+        e,
+        "BidPlaced",
+        "m::C::C::BidPlaced",
+        node_kind::EVENT_EMITTER,
+    );
     nodes.push(emitter);
-    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced @web", false);
-    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced", false);
+    event_side(
+        &mut nodes,
+        &mut nav,
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:BidPlaced @web",
+        false,
+    );
+    event_side(
+        &mut nodes,
+        &mut nav,
+        repo_a(),
+        node_kind::EVENT_HANDLER,
+        "event_handle:BidPlaced",
+        false,
+    );
     let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
     EventBusResolver.resolve(&mut merged);
-    assert!(event_flows(&merged).is_empty(), "{:?}", event_flows(&merged));
+    assert!(
+        event_flows(&merged).is_empty(),
+        "{:?}",
+        event_flows(&merged)
+    );
 }
 
 // ============================================================================
@@ -1453,19 +2183,45 @@ fn event_resolver_never_pairs_a_solidity_event_by_name() {
 #[test]
 fn cli_resolver_links_invocation_to_command() {
     let mut nav_a = CodeNav::default();
-    let (cmd_node, cmd_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:migrate", Confidence::Strong);
-    record(&mut nav_a, cmd_id, "migrate", "cli:migrate", node_kind::CLI_COMMAND);
+    let (cmd_node, cmd_id) = make_node(
+        repo_a(),
+        node_kind::CLI_COMMAND,
+        "cli:migrate",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        cmd_id,
+        "migrate",
+        "cli:migrate",
+        node_kind::CLI_COMMAND,
+    );
     let ga = make_graph(repo_a(), vec![cmd_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (inv_node, inv_id) = make_node(repo_b(), node_kind::CLI_INVOCATION, "cli_invoke:migrate", Confidence::Medium);
-    record(&mut nav_b, inv_id, "migrate", "cli_invoke:migrate", node_kind::CLI_INVOCATION);
+    let (inv_node, inv_id) = make_node(
+        repo_b(),
+        node_kind::CLI_INVOCATION,
+        "cli_invoke:migrate",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        inv_id,
+        "migrate",
+        "cli_invoke:migrate",
+        node_kind::CLI_INVOCATION,
+    );
     let gb = make_graph(repo_b(), vec![inv_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     CliInvocationResolver.resolve(&mut merged);
 
-    let cli_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::CLI_INVOKES).collect();
+    let cli_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::CLI_INVOKES)
+        .collect();
     assert_eq!(cli_edges.len(), 1);
     assert_eq!(cli_edges[0].from, inv_id);
     assert_eq!(cli_edges[0].to, cmd_id);
@@ -1478,21 +2234,68 @@ fn cli_resolver_links_invocation_to_command() {
 #[test]
 fn cli_resolver_pairs_subcommand_from_argv_cell() {
     let mut nav_a = CodeNav::default();
-    let (root_node, root_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:mytool", Confidence::Strong);
-    record(&mut nav_a, root_id, "mytool", "cli:mytool", node_kind::CLI_COMMAND);
-    let (sub_node, sub_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:migrate", Confidence::Strong);
-    record(&mut nav_a, sub_id, "migrate", "cli:migrate", node_kind::CLI_COMMAND);
-    let (other_node, _) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:yes", Confidence::Strong);
-    record(&mut nav_a, other_node.id, "yes", "cli:yes", node_kind::CLI_COMMAND);
+    let (root_node, root_id) = make_node(
+        repo_a(),
+        node_kind::CLI_COMMAND,
+        "cli:mytool",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        root_id,
+        "mytool",
+        "cli:mytool",
+        node_kind::CLI_COMMAND,
+    );
+    let (sub_node, sub_id) = make_node(
+        repo_a(),
+        node_kind::CLI_COMMAND,
+        "cli:migrate",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        sub_id,
+        "migrate",
+        "cli:migrate",
+        node_kind::CLI_COMMAND,
+    );
+    let (other_node, _) = make_node(
+        repo_a(),
+        node_kind::CLI_COMMAND,
+        "cli:yes",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        other_node.id,
+        "yes",
+        "cli:yes",
+        node_kind::CLI_COMMAND,
+    );
     let ga = make_graph(repo_a(), vec![root_node, sub_node, other_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (mut inv_node, inv_id) = make_node(repo_b(), node_kind::CLI_INVOCATION, "cli_invoke:mytool", Confidence::Medium);
+    let (mut inv_node, inv_id) = make_node(
+        repo_b(),
+        node_kind::CLI_INVOCATION,
+        "cli_invoke:mytool",
+        Confidence::Medium,
+    );
     inv_node.cells.push(glia_code_extractors::cli::argv_cell(
         "mytool",
-        &[vec!["migrate".into(), "--yes".into()], vec!["--dry-run".into(), "seed".into()]],
+        &[
+            vec!["migrate".into(), "--yes".into()],
+            vec!["--dry-run".into(), "seed".into()],
+        ],
     ));
-    record(&mut nav_b, inv_id, "mytool", "cli_invoke:mytool", node_kind::CLI_INVOCATION);
+    record(
+        &mut nav_b,
+        inv_id,
+        "mytool",
+        "cli_invoke:mytool",
+        node_kind::CLI_INVOCATION,
+    );
     let gb = make_graph(repo_b(), vec![inv_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -1505,7 +2308,10 @@ fn cli_resolver_pairs_subcommand_from_argv_cell() {
         .map(|e| (e.from, e.to, e.confidence))
         .collect();
     cli_edges.sort_by_key(|(_, to, _)| to.0);
-    let mut expected = vec![(inv_id, root_id, Confidence::Medium), (inv_id, sub_id, Confidence::Weak)];
+    let mut expected = vec![
+        (inv_id, root_id, Confidence::Medium),
+        (inv_id, sub_id, Confidence::Weak),
+    ];
     expected.sort_by_key(|(_, to, _)| to.0);
     assert_eq!(cli_edges, expected);
 }
@@ -1517,21 +2323,87 @@ fn cli_resolver_pairs_subcommand_from_argv_cell() {
 #[test]
 fn all_resolvers_compose_cleanly() {
     let mut nav_a = CodeNav::default();
-    let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:Auth", Confidence::Strong);
-    record(&mut nav_a, svc_id, "Auth", "grpc:Auth", node_kind::GRPC_SERVICE);
-    let (consumer_node, consumer_id) = make_node(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:jobs", Confidence::Medium);
-    record(&mut nav_a, consumer_id, "jobs", "queue_consumer:jobs", node_kind::QUEUE_CONSUMER);
-    let (cmd_node, cmd_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:seed", Confidence::Strong);
-    record(&mut nav_a, cmd_id, "seed", "cli:seed", node_kind::CLI_COMMAND);
+    let (svc_node, svc_id) = make_node(
+        repo_a(),
+        node_kind::GRPC_SERVICE,
+        "grpc:Auth",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        svc_id,
+        "Auth",
+        "grpc:Auth",
+        node_kind::GRPC_SERVICE,
+    );
+    let (consumer_node, consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:jobs",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_a,
+        consumer_id,
+        "jobs",
+        "queue_consumer:jobs",
+        node_kind::QUEUE_CONSUMER,
+    );
+    let (cmd_node, cmd_id) = make_node(
+        repo_a(),
+        node_kind::CLI_COMMAND,
+        "cli:seed",
+        Confidence::Strong,
+    );
+    record(
+        &mut nav_a,
+        cmd_id,
+        "seed",
+        "cli:seed",
+        node_kind::CLI_COMMAND,
+    );
     let ga = make_graph(repo_a(), vec![svc_node, consumer_node, cmd_node], nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (client_node, _) = make_node(repo_b(), node_kind::GRPC_CLIENT, "grpc_client:Auth", Confidence::Medium);
-    record(&mut nav_b, client_node.id, "Auth", "grpc_client:Auth", node_kind::GRPC_CLIENT);
-    let (producer_node, _) = make_node(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:jobs", Confidence::Medium);
-    record(&mut nav_b, producer_node.id, "jobs", "queue_producer:jobs", node_kind::QUEUE_PRODUCER);
-    let (inv_node, _) = make_node(repo_b(), node_kind::CLI_INVOCATION, "cli_invoke:seed", Confidence::Medium);
-    record(&mut nav_b, inv_node.id, "seed", "cli_invoke:seed", node_kind::CLI_INVOCATION);
+    let (client_node, _) = make_node(
+        repo_b(),
+        node_kind::GRPC_CLIENT,
+        "grpc_client:Auth",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        client_node.id,
+        "Auth",
+        "grpc_client:Auth",
+        node_kind::GRPC_CLIENT,
+    );
+    let (producer_node, _) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:jobs",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        producer_node.id,
+        "jobs",
+        "queue_producer:jobs",
+        node_kind::QUEUE_PRODUCER,
+    );
+    let (inv_node, _) = make_node(
+        repo_b(),
+        node_kind::CLI_INVOCATION,
+        "cli_invoke:seed",
+        Confidence::Medium,
+    );
+    record(
+        &mut nav_b,
+        inv_node.id,
+        "seed",
+        "cli_invoke:seed",
+        node_kind::CLI_INVOCATION,
+    );
     let gb = make_graph(repo_b(), vec![client_node, producer_node, inv_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
@@ -1540,9 +2412,24 @@ fn all_resolvers_compose_cleanly() {
     merged.run(&CliInvocationResolver);
 
     assert_eq!(merged.cross_edges.len(), 3);
-    assert!(merged.cross_edges.iter().any(|e| e.category == edge_category::GRPC_CALLS));
-    assert!(merged.cross_edges.iter().any(|e| e.category == edge_category::QUEUE_FLOWS));
-    assert!(merged.cross_edges.iter().any(|e| e.category == edge_category::CLI_INVOKES));
+    assert!(
+        merged
+            .cross_edges
+            .iter()
+            .any(|e| e.category == edge_category::GRPC_CALLS)
+    );
+    assert!(
+        merged
+            .cross_edges
+            .iter()
+            .any(|e| e.category == edge_category::QUEUE_FLOWS)
+    );
+    assert!(
+        merged
+            .cross_edges
+            .iter()
+            .any(|e| e.category == edge_category::CLI_INVOKES)
+    );
 }
 
 // ============================================================================
@@ -1571,9 +2458,7 @@ fn route_method_cell(method: &str) -> glia_core::Cell {
 fn nav_route_cell() -> glia_core::Cell {
     glia_core::Cell {
         kind: glia_code_domain::cell_type::ORIGIN,
-        payload: glia_core::CellPayload::Json(
-            r#"{"provenance":"nav_route"}"#.to_string(),
-        ),
+        payload: glia_core::CellPayload::Json(r#"{"provenance":"nav_route"}"#.to_string()),
     }
 }
 
@@ -1645,7 +2530,11 @@ fn http_any_route_matches_every_verb() {
     let edges = http_edges(&merged);
 
     let route = node_id(repo_a(), node_kind::ROUTE, "ANY /posts");
-    assert_eq!(edges.len(), 2, "both verbs must reach the ANY route: {edges:?}");
+    assert_eq!(
+        edges.len(),
+        2,
+        "both verbs must reach the ANY route: {edges:?}"
+    );
     for verb in ["GET", "POST"] {
         let ep = node_id(
             repo_b(),
@@ -1700,7 +2589,10 @@ fn http_route_side_prefix_strip() {
     let edges = http_edges(&merged);
 
     assert_eq!(edges.len(), 1, "{edges:?}");
-    assert_eq!(edges[0].to, node_id(repo_a(), node_kind::ROUTE, "GET /api/orders"));
+    assert_eq!(
+        edges[0].to,
+        node_id(repo_a(), node_kind::ROUTE, "GET /api/orders")
+    );
     assert_eq!(
         edges[0].confidence,
         Confidence::Medium,
@@ -1720,7 +2612,10 @@ fn http_base_url_fold() {
     let edges = http_edges(&merged);
 
     assert_eq!(edges.len(), 1, "{edges:?}");
-    assert_eq!(edges[0].to, node_id(repo_a(), node_kind::ROUTE, "GET /users"));
+    assert_eq!(
+        edges[0].to,
+        node_id(repo_a(), node_kind::ROUTE, "GET /users")
+    );
     assert_eq!(edges[0].confidence, Confidence::Medium);
 }
 
@@ -1787,7 +2682,13 @@ fn http_any_nav_route_is_still_excluded() {
         make_node(repo_a(), node_kind::ROUTE, "ANY /users", Confidence::Medium);
     route.cells.push(route_method_cell("ANY"));
     route.cells.push(nav_route_cell());
-    record(&mut nav, route_qid, "ANY /users", "ANY /users", node_kind::ROUTE);
+    record(
+        &mut nav,
+        route_qid,
+        "ANY /users",
+        "ANY /users",
+        node_kind::ROUTE,
+    );
     let server = make_graph(repo_a(), vec![route], nav);
 
     let client = endpoint_repo(repo_b(), &[("GET", "/users", Confidence::Strong)]);
@@ -1844,9 +2745,12 @@ fn channel_merge(
     let ga = make_graph(repo_a(), nodes_a, nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (mut client, client_id) = make_node(repo_b(), client_kind, client_qname, Confidence::Medium);
+    let (mut client, client_id) =
+        make_node(repo_b(), client_kind, client_qname, Confidence::Medium);
     client.cells.extend(hits.iter().map(|j| endpoint_hit(j)));
-    let name = client_qname.split_once(':').map_or(client_qname, |(_, n)| n);
+    let name = client_qname
+        .split_once(':')
+        .map_or(client_qname, |(_, n)| n);
     record(&mut nav_b, client_id, name, client_qname, client_kind);
     let gb = make_graph(repo_b(), vec![client], nav_b);
     (MergedGraph::new(vec![ga, gb]), client_id)
@@ -1868,16 +2772,29 @@ fn ws_server() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)> {
 
 #[test]
 fn ws_external_client_is_not_paired() {
-    let (mut merged, client) = channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE]);
+    let (mut merged, client) = channel_merge(
+        &ws_server(),
+        node_kind::WS_CLIENT,
+        "ws_client:/ws",
+        &[WS_BINANCE],
+    );
     WebSocketStackResolver.resolve(&mut merged);
-    assert!(cross(&merged, edge_category::WS_CONNECTS).is_empty(), "a third-party /ws is not the app's /ws");
+    assert!(
+        cross(&merged, edge_category::WS_CONNECTS).is_empty(),
+        "a third-party /ws is not the app's /ws"
+    );
     let third = WebSocketStackResolver::third_party_clients(&merged.graphs);
     assert_eq!(third.len(), 1, "the one external client, counted once");
     assert!(third.contains(&client));
 
     // Control: the same site without the mark pairs, as before DF.9.
     let plain = r#"{"via":"ws","host":"stream.binance.com"}"#;
-    let (mut merged, client) = channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[plain]);
+    let (mut merged, client) = channel_merge(
+        &ws_server(),
+        node_kind::WS_CLIENT,
+        "ws_client:/ws",
+        &[plain],
+    );
     WebSocketStackResolver.resolve(&mut merged);
     assert_eq!(cross(&merged, edge_category::WS_CONNECTS).len(), 1);
     assert!(!WebSocketStackResolver::third_party_clients(&merged.graphs).contains(&client));
@@ -1887,8 +2804,12 @@ fn ws_external_client_is_not_paired() {
 fn ws_mixed_sites_still_pair() {
     // DF.8 marks per site: one public site and one host-less site leave one
     // unmarked hit, so not every site is external.
-    let (mut merged, client) =
-        channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE, r#"{"via":"ws"}"#]);
+    let (mut merged, client) = channel_merge(
+        &ws_server(),
+        node_kind::WS_CLIENT,
+        "ws_client:/ws",
+        &[WS_BINANCE, r#"{"via":"ws"}"#],
+    );
     WebSocketStackResolver.resolve(&mut merged);
     let edges = cross(&merged, edge_category::WS_CONNECTS);
     assert_eq!(edges.len(), 1, "{edges:?}");
@@ -1903,7 +2824,8 @@ fn ws_external_host_naming_a_project_pairs() {
     let mut server = ws_server();
     server.push((node_kind::PROJECT, "project:services/users", "users"));
     let hit = r#"{"via":"ws","host":"users.example-corp.com","external":true}"#;
-    let (mut merged, client) = channel_merge(&server, node_kind::WS_CLIENT, "ws_client:/ws", &[hit]);
+    let (mut merged, client) =
+        channel_merge(&server, node_kind::WS_CLIENT, "ws_client:/ws", &[hit]);
     WebSocketStackResolver.resolve(&mut merged);
     let edges = cross(&merged, edge_category::WS_CONNECTS);
     assert_eq!(edges.len(), 1, "{edges:?}");
@@ -1917,10 +2839,17 @@ fn grpc_server_side() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)
 
 #[test]
 fn grpc_external_client_is_not_paired() {
-    let (mut merged, client) =
-        channel_merge(&grpc_server_side(), node_kind::GRPC_CLIENT, "grpc_client:Geocoder", &[GRPC_GOOGLE]);
+    let (mut merged, client) = channel_merge(
+        &grpc_server_side(),
+        node_kind::GRPC_CLIENT,
+        "grpc_client:Geocoder",
+        &[GRPC_GOOGLE],
+    );
     GrpcStackResolver.resolve(&mut merged);
-    assert!(cross(&merged, edge_category::GRPC_CALLS).is_empty(), "a Google stub is not the in-repo Geocoder");
+    assert!(
+        cross(&merged, edge_category::GRPC_CALLS).is_empty(),
+        "a Google stub is not the in-repo Geocoder"
+    );
     assert!(GrpcStackResolver::third_party_clients(&merged.graphs).contains(&client));
 
     // Control: unmarked, and marked beside an unmarked site, it pairs.
@@ -1928,32 +2857,61 @@ fn grpc_external_client_is_not_paired() {
         &[r#"{"via":"grpc","host":"geocoder.googleapis.com:443"}"#][..],
         &[GRPC_GOOGLE, r#"{"via":"grpc","host":"geo-svc:50051"}"#][..],
     ] {
-        let (mut merged, client) =
-            channel_merge(&grpc_server_side(), node_kind::GRPC_CLIENT, "grpc_client:Geocoder", hits);
+        let (mut merged, client) = channel_merge(
+            &grpc_server_side(),
+            node_kind::GRPC_CLIENT,
+            "grpc_client:Geocoder",
+            hits,
+        );
         GrpcStackResolver.resolve(&mut merged);
-        assert_eq!(cross(&merged, edge_category::GRPC_CALLS).len(), 1, "{hits:?}");
-        assert!(!GrpcStackResolver::third_party_clients(&merged.graphs).contains(&client), "{hits:?}");
+        assert_eq!(
+            cross(&merged, edge_category::GRPC_CALLS).len(),
+            1,
+            "{hits:?}"
+        );
+        assert!(
+            !GrpcStackResolver::third_party_clients(&merged.graphs).contains(&client),
+            "{hits:?}"
+        );
     }
 }
 
 fn graphql_server_side() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)> {
-    vec![(node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser", "getUser")]
+    vec![(
+        node_kind::GRAPHQL_RESOLVER,
+        "graphql_resolver:getUser",
+        "getUser",
+    )]
 }
 
 #[test]
 fn graphql_external_op_is_not_paired() {
-    let (mut merged, op) =
-        channel_merge(&graphql_server_side(), node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[GQL_GITHUB]);
+    let (mut merged, op) = channel_merge(
+        &graphql_server_side(),
+        node_kind::GRAPHQL_OPERATION,
+        "graphql_op:GetUser",
+        &[GQL_GITHUB],
+    );
     GraphQLStackResolver.resolve(&mut merged);
-    assert!(cross(&merged, edge_category::GRAPHQL_CALLS).is_empty(), "GitHub's getUser is not the app's");
+    assert!(
+        cross(&merged, edge_category::GRAPHQL_CALLS).is_empty(),
+        "GitHub's getUser is not the app's"
+    );
     assert!(GraphQLStackResolver::third_party_clients(&merged.graphs).contains(&op));
 
     // Control: the same operation unmarked pairs.
     let plain = r#"{"via":"graphql","hosts":["api.github.com"]}"#;
-    let (mut merged, op) =
-        channel_merge(&graphql_server_side(), node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[plain]);
+    let (mut merged, op) = channel_merge(
+        &graphql_server_side(),
+        node_kind::GRAPHQL_OPERATION,
+        "graphql_op:GetUser",
+        &[plain],
+    );
     GraphQLStackResolver.resolve(&mut merged);
-    assert_eq!(cross(&merged, edge_category::GRAPHQL_CALLS), vec![(op, merged.cross_edges[0].to)]);
+    assert_eq!(
+        cross(&merged, edge_category::GRAPHQL_CALLS),
+        vec![(op, merged.cross_edges[0].to)]
+    );
     assert!(!GraphQLStackResolver::third_party_clients(&merged.graphs).contains(&op));
 }
 
@@ -1972,16 +2930,34 @@ fn third_party_clients_lists_only_external() {
         id
     };
     let ws_ext = add(node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE]);
-    add(node_kind::WS_CLIENT, "ws_client:/feed", &[r#"{"via":"ws","host":"localhost:8080"}"#]);
-    let grpc_ext = add(node_kind::GRPC_CLIENT, "grpc_client:Geocoder", &[GRPC_GOOGLE]);
-    add(node_kind::GRPC_CLIENT, "grpc_client:UserService", &[r#"{"via":"grpc"}"#]);
-    let gql_ext = add(node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[GQL_GITHUB]);
+    add(
+        node_kind::WS_CLIENT,
+        "ws_client:/feed",
+        &[r#"{"via":"ws","host":"localhost:8080"}"#],
+    );
+    let grpc_ext = add(
+        node_kind::GRPC_CLIENT,
+        "grpc_client:Geocoder",
+        &[GRPC_GOOGLE],
+    );
+    add(
+        node_kind::GRPC_CLIENT,
+        "grpc_client:UserService",
+        &[r#"{"via":"grpc"}"#],
+    );
+    let gql_ext = add(
+        node_kind::GRAPHQL_OPERATION,
+        "graphql_op:GetUser",
+        &[GQL_GITHUB],
+    );
     add(node_kind::GRAPHQL_OPERATION, "graphql_op:me", &[]);
     // An HTTP ENDPOINT marked external is the HTTP resolver's, not theirs.
     add(
         node_kind::ENDPOINT,
         "endpoint:GET:/search",
-        &[r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org","external":true}"#],
+        &[
+            r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org","external":true}"#,
+        ],
     );
     let graphs = vec![make_graph(repo_b(), nodes, nav)];
 
@@ -1990,8 +2966,17 @@ fn third_party_clients_lists_only_external() {
         v.sort_by_key(|id| id.0);
         v
     };
-    assert_eq!(set(WebSocketStackResolver::third_party_clients(&graphs)), vec![ws_ext]);
-    assert_eq!(set(GrpcStackResolver::third_party_clients(&graphs)), vec![grpc_ext]);
-    assert_eq!(set(GraphQLStackResolver::third_party_clients(&graphs)), vec![gql_ext]);
+    assert_eq!(
+        set(WebSocketStackResolver::third_party_clients(&graphs)),
+        vec![ws_ext]
+    );
+    assert_eq!(
+        set(GrpcStackResolver::third_party_clients(&graphs)),
+        vec![grpc_ext]
+    );
+    assert_eq!(
+        set(GraphQLStackResolver::third_party_clients(&graphs)),
+        vec![gql_ext]
+    );
     assert_eq!(HttpStackResolver::third_party_endpoints(&graphs).len(), 1);
 }

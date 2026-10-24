@@ -78,39 +78,102 @@ const BENCH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap
 
 /// `(source under BENCH, destination in the fixture)`.
 const COPIED: &[(&str, &str)] = &[
-    ("fixtures/ts-tsconfig-paths/tsconfig.json", "web/tsconfig.json"),
-    ("fixtures/ts-tsconfig-paths/src/app/core/auth.service.ts", "web/src/app/core/auth.service.ts"),
-    ("fixtures/ts-tsconfig-paths/src/app/feature/page.ts", "web/src/app/feature/page.ts"),
+    (
+        "fixtures/ts-tsconfig-paths/tsconfig.json",
+        "web/tsconfig.json",
+    ),
+    (
+        "fixtures/ts-tsconfig-paths/src/app/core/auth.service.ts",
+        "web/src/app/core/auth.service.ts",
+    ),
+    (
+        "fixtures/ts-tsconfig-paths/src/app/feature/page.ts",
+        "web/src/app/feature/page.ts",
+    ),
     ("fixtures/rust-crate-path-calls/Cargo.toml", "rs/Cargo.toml"),
-    ("fixtures/rust-crate-path-calls/core/Cargo.toml", "rs/core/Cargo.toml"),
-    ("fixtures/rust-crate-path-calls/core/src/api.rs", "rs/core/src/api.rs"),
-    ("fixtures/rust-crate-path-calls/core/src/lib.rs", "rs/core/src/lib.rs"),
-    ("fixtures/rust-crate-path-calls/app/Cargo.toml", "rs/app/Cargo.toml"),
-    ("fixtures/rust-crate-path-calls/app/src/main.rs", "rs/app/src/main.rs"),
-    ("fixtures/xcut-grpc-grpc_calls/server/user.proto", "grpc/server/user.proto"),
-    ("fixtures/xcut-grpc-grpc_calls/client/main.go", "grpc/client/main.go"),
-    ("fixtures/cpp-include-paths/CMakeLists.txt", "cpp/CMakeLists.txt"),
-    ("fixtures/cpp-include-paths/src/cart.cpp", "cpp/src/cart.cpp"),
-    ("fixtures/cpp-include-paths/include/shop/cart.hpp", "cpp/include/shop/cart.hpp"),
-    ("fixtures/cpp-include-paths/include/shop/util.hpp", "cpp/include/shop/util.hpp"),
+    (
+        "fixtures/rust-crate-path-calls/core/Cargo.toml",
+        "rs/core/Cargo.toml",
+    ),
+    (
+        "fixtures/rust-crate-path-calls/core/src/api.rs",
+        "rs/core/src/api.rs",
+    ),
+    (
+        "fixtures/rust-crate-path-calls/core/src/lib.rs",
+        "rs/core/src/lib.rs",
+    ),
+    (
+        "fixtures/rust-crate-path-calls/app/Cargo.toml",
+        "rs/app/Cargo.toml",
+    ),
+    (
+        "fixtures/rust-crate-path-calls/app/src/main.rs",
+        "rs/app/src/main.rs",
+    ),
+    (
+        "fixtures/xcut-grpc-grpc_calls/server/user.proto",
+        "grpc/server/user.proto",
+    ),
+    (
+        "fixtures/xcut-grpc-grpc_calls/client/main.go",
+        "grpc/client/main.go",
+    ),
+    (
+        "fixtures/cpp-include-paths/CMakeLists.txt",
+        "cpp/CMakeLists.txt",
+    ),
+    (
+        "fixtures/cpp-include-paths/src/cart.cpp",
+        "cpp/src/cart.cpp",
+    ),
+    (
+        "fixtures/cpp-include-paths/include/shop/cart.hpp",
+        "cpp/include/shop/cart.hpp",
+    ),
+    (
+        "fixtures/cpp-include-paths/include/shop/util.hpp",
+        "cpp/include/shop/util.hpp",
+    ),
     ("matrix/scala/cron/Jobs.scala", "scala/Jobs.scala"),
-    ("matrix/scala/cron/src/main/resources/application.conf", "scala/src/main/resources/application.conf"),
+    (
+        "matrix/scala/cron/src/main/resources/application.conf",
+        "scala/src/main/resources/application.conf",
+    ),
 ];
 
 /// The fixture's language groups, in plan order: every one rebuilds on a full
 /// rebuild other than `go_modules` (DC.7b).
-const EVERY_GROUP: &[&str] = &["c_cpp", "go", "manifest", "proto", "python", "rust", "scala", "typescript"];
+const EVERY_GROUP: &[&str] = &[
+    "c_cpp",
+    "go",
+    "manifest",
+    "proto",
+    "python",
+    "rust",
+    "scala",
+    "typescript",
+];
 
 /// The fixture's own files, beside the copies.
 const INLINE: &[(&str, &str)] = &[
     ("go.mod", "module example.com/parity\n\ngo 1.21\n"),
-    ("tools/gen.go", "package tools\n\nfunc Gen() int { return 1 }\n"),
+    (
+        "tools/gen.go",
+        "package tools\n\nfunc Gen() int { return 1 }\n",
+    ),
     (
         "cmd/main.go",
         "package main\n\nimport \"example.com/parity/tools\"\n\nfunc main() { tools.Gen() }\n",
     ),
-    ("grpc/client/go.mod", "module example.com/client\n\ngo 1.21\n"),
-    ("web/package.json", "{\n  \"name\": \"web\",\n  \"dependencies\": { \"axios\": \"^1.6.0\" }\n}\n"),
+    (
+        "grpc/client/go.mod",
+        "module example.com/client\n\ngo 1.21\n",
+    ),
+    (
+        "web/package.json",
+        "{\n  \"name\": \"web\",\n  \"dependencies\": { \"axios\": \"^1.6.0\" }\n}\n",
+    ),
     (
         "web/src/app/core/api.ts",
         "import axios from 'axios';\n\nconst GATEWAY = process.env.GATEWAY_URL;\n\nexport async function listThings() {\n  return axios.get(`${GATEWAY}/things`);\n}\n",
@@ -119,15 +182,36 @@ const INLINE: &[(&str, &str)] = &[
         "api/user.py",
         "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\")\ndef get_user():\n    return {\"id\": 1}\n",
     ),
-    ("api/svc.py", "from api.user import get_user\n\n\ndef handle():\n    return get_user()\n"),
-    ("cpp/third/tp.hpp", "#pragma once\ninline int tp_value() { return 7; }\n"),
-    ("cpp/src/extra.cpp", "#include <tp.hpp>\n\nint extra_value() { return tp_value(); }\n"),
-    ("scala/build.sbt", "lazy val api = project.in(file(\"api\"))\n"),
-    ("scala/api/Api.scala", "package shop.api\n\nobject Api {\n  def ping(): String = \"pong\"\n}\n"),
-    ("README.md", "# Parity fixture\n\nThe API serves users through `get_user`.\n"),
+    (
+        "api/svc.py",
+        "from api.user import get_user\n\n\ndef handle():\n    return get_user()\n",
+    ),
+    (
+        "cpp/third/tp.hpp",
+        "#pragma once\ninline int tp_value() { return 7; }\n",
+    ),
+    (
+        "cpp/src/extra.cpp",
+        "#include <tp.hpp>\n\nint extra_value() { return tp_value(); }\n",
+    ),
+    (
+        "scala/build.sbt",
+        "lazy val api = project.in(file(\"api\"))\n",
+    ),
+    (
+        "scala/api/Api.scala",
+        "package shop.api\n\nobject Api {\n  def ping(): String = \"pong\"\n}\n",
+    ),
+    (
+        "README.md",
+        "# Parity fixture\n\nThe API serves users through `get_user`.\n",
+    ),
     ("docs/guide.md", "# Guide\n\n`get_user` returns one user.\n"),
     (".gitignore", "*.log\n"),
-    (".glia/overlay.toml", "version = 1\n\n[constants]\nGATEWAY = \"/gw\"\n"),
+    (
+        ".glia/overlay.toml",
+        "version = 1\n\n[constants]\nGATEWAY = \"/gw\"\n",
+    ),
 ];
 
 fn write(repo: &Path, rel: &str, body: &str) {
@@ -163,23 +247,47 @@ fn replace(repo: &Path, rel: &str, old: &str, new: &str) {
 // ---- the edits -------------------------------------------------------------
 
 fn body_edit(r: &Path) {
-    replace(r, "api/svc.py", "    return get_user()\n", "    user = get_user()\n    return user\n");
+    replace(
+        r,
+        "api/svc.py",
+        "    return get_user()\n",
+        "    user = get_user()\n    return user\n",
+    );
 }
 fn body_edit_polled(r: &Path) {
     body_edit(r);
     // A stamp unlike the record's, set rather than slept on.
     let t = settled() + Duration::from_secs(60);
-    std::fs::File::open(r.join("api/svc.py")).and_then(|f| f.set_modified(t)).expect("mtime");
+    std::fs::File::open(r.join("api/svc.py"))
+        .and_then(|f| f.set_modified(t))
+        .expect("mtime");
 }
 fn declaration_edit(r: &Path) {
     let user = std::fs::read_to_string(r.join("api/user.py")).expect("read");
-    write(r, "api/user.py", &format!("{user}\n\ndef list_users():\n    return [get_user()]\n"));
-    replace(r, "api/svc.py", "import get_user\n", "import get_user, list_users\n");
+    write(
+        r,
+        "api/user.py",
+        &format!("{user}\n\ndef list_users():\n    return [get_user()]\n"),
+    );
+    replace(
+        r,
+        "api/svc.py",
+        "import get_user\n",
+        "import get_user, list_users\n",
+    );
     let svc = std::fs::read_to_string(r.join("api/svc.py")).expect("read");
-    write(r, "api/svc.py", &format!("{svc}\n\ndef handle_all():\n    return list_users()\n"));
+    write(
+        r,
+        "api/svc.py",
+        &format!("{svc}\n\ndef handle_all():\n    return list_users()\n"),
+    );
 }
 fn add_go(r: &Path) {
-    write(r, "grpc/client/extra.go", "package main\n\nfunc Extra() { FetchUser(\"x\") }\n");
+    write(
+        r,
+        "grpc/client/extra.go",
+        "package main\n\nfunc Extra() { FetchUser(\"x\") }\n",
+    );
 }
 fn delete_go(r: &Path) {
     std::fs::remove_file(r.join("grpc/client/extra.go")).expect("rm");
@@ -188,7 +296,11 @@ fn rename_py(r: &Path) {
     std::fs::rename(r.join("api/svc.py"), r.join("api/service.py")).expect("mv");
 }
 fn same_stem_add(r: &Path) {
-    write(r, "api/user.ts", "export function userTs(): number {\n  return 1;\n}\n");
+    write(
+        r,
+        "api/user.ts",
+        "export function userTs(): number {\n  return 1;\n}\n",
+    );
 }
 const CLIENT: &str = "\nexport async function getUsers() {\n  return axios.get('/users');\n}\n";
 fn client_add(r: &Path) {
@@ -199,18 +311,46 @@ fn client_remove(r: &Path) {
     replace(r, "web/src/app/core/api.ts", CLIENT, "");
 }
 fn go_mod_edit(r: &Path) {
-    replace(r, "go.mod", "module example.com/parity\n", "module example.com/moved\n");
+    replace(
+        r,
+        "go.mod",
+        "module example.com/parity\n",
+        "module example.com/moved\n",
+    );
 }
 fn tsconfig_edit(r: &Path) {
-    replace(r, "web/tsconfig.json", "[\"app/core/*\"]", "[\"app/none/*\"]");
+    replace(
+        r,
+        "web/tsconfig.json",
+        "[\"app/core/*\"]",
+        "[\"app/none/*\"]",
+    );
 }
 fn cargo_member_add(r: &Path) {
-    write(r, "rs/util/Cargo.toml", "[package]\nname = \"acme-util\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
-    write(r, "rs/util/src/lib.rs", "pub fn util() -> u32 {\n    3\n}\n");
-    replace(r, "rs/Cargo.toml", "members = [\"core\", \"app\"]", "members = [\"core\", \"app\", \"util\"]");
+    write(
+        r,
+        "rs/util/Cargo.toml",
+        "[package]\nname = \"acme-util\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        r,
+        "rs/util/src/lib.rs",
+        "pub fn util() -> u32 {\n    3\n}\n",
+    );
+    replace(
+        r,
+        "rs/Cargo.toml",
+        "members = [\"core\", \"app\"]",
+        "members = [\"core\", \"app\", \"util\"]",
+    );
 }
 fn overlay_edit(r: &Path) {
-    replace(r, ".glia/overlay.toml", "GATEWAY = \"/gw\"", "GATEWAY = \"/gw2\"");
+    replace(
+        r,
+        ".glia/overlay.toml",
+        "GATEWAY = \"/gw\"",
+        "GATEWAY = \"/gw2\"",
+    );
 }
 fn proto_rpc_add(r: &Path) {
     replace(
@@ -221,14 +361,28 @@ fn proto_rpc_add(r: &Path) {
     );
 }
 fn proto_field_edit(r: &Path) {
-    replace(r, "grpc/server/user.proto", "string name = 2;", "string display_name = 2;");
+    replace(
+        r,
+        "grpc/server/user.proto",
+        "string name = 2;",
+        "string display_name = 2;",
+    );
 }
 fn markdown_edit(r: &Path) {
     let readme = std::fs::read_to_string(r.join("README.md")).expect("read");
-    write(r, "README.md", &format!("{readme}\n## Handling\n\nSee `handle`.\n"));
+    write(
+        r,
+        "README.md",
+        &format!("{readme}\n## Handling\n\nSee `handle`.\n"),
+    );
 }
 fn include_root_add(r: &Path) {
-    replace(r, "cpp/CMakeLists.txt", "PUBLIC include)", "PUBLIC include third)");
+    replace(
+        r,
+        "cpp/CMakeLists.txt",
+        "PUBLIC include)",
+        "PUBLIC include third)",
+    );
 }
 fn gitignore_docs(r: &Path) {
     write(r, ".gitignore", "*.log\ndocs/\n");
@@ -243,9 +397,17 @@ fn conf_edit(r: &Path) {
     );
 }
 fn sbt_member_add(r: &Path) {
-    write(r, "scala/util/Util.scala", "package shop.util\n\nobject Util {\n  def twice(n: Int): Int = n * 2\n}\n");
+    write(
+        r,
+        "scala/util/Util.scala",
+        "package shop.util\n\nobject Util {\n  def twice(n: Int): Int = n * 2\n}\n",
+    );
     let sbt = std::fs::read_to_string(r.join("scala/build.sbt")).expect("read");
-    write(r, "scala/build.sbt", &format!("{sbt}lazy val util = project.in(file(\"util\"))\n"));
+    write(
+        r,
+        "scala/build.sbt",
+        &format!("{sbt}lazy val util = project.in(file(\"util\"))\n"),
+    );
 }
 
 // ---- the harness -----------------------------------------------------------
@@ -311,7 +473,11 @@ fn layout_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
             if p.is_dir() {
                 stack.push(p);
             } else {
-                let rel = p.strip_prefix(dir).expect("under dir").to_string_lossy().into_owned();
+                let rel = p
+                    .strip_prefix(dir)
+                    .expect("under dir")
+                    .to_string_lossy()
+                    .into_owned();
                 out.push((rel, std::fs::read(&p).expect("read")));
             }
         }
@@ -325,16 +491,29 @@ fn layout_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
 fn assert_parity(s: &WatchSession, clean: &GenerateResult, out: &Path, at: &str) {
     let w = s.result();
     assert_eq!(w.parse_errors, clean.parse_errors, "{at}: parse_errors");
-    assert_eq!(w.merged.pass_undo, clean.merged.pass_undo, "{at}: pass_undo");
-    assert_eq!((w.total_nodes, w.total_edges), (clean.total_nodes, clean.total_edges), "{at}: totals");
+    assert_eq!(
+        w.merged.pass_undo, clean.merged.pass_undo,
+        "{at}: pass_undo"
+    );
+    assert_eq!(
+        (w.total_nodes, w.total_edges),
+        (clean.total_nodes, clean.total_edges),
+        "{at}: totals"
+    );
     s.persist(&out.join("watch")).expect("persist the session");
     persist_result(clean, &out.join("clean"), "watch").expect("persist the clean build");
-    let (wf, cf) = (layout_bytes(&out.join("watch")), layout_bytes(&out.join("clean")));
+    let (wf, cf) = (
+        layout_bytes(&out.join("watch")),
+        layout_bytes(&out.join("clean")),
+    );
     let names = |fs: &[(String, Vec<u8>)]| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
     assert!(!wf.is_empty(), "{at}: a layout");
     assert_eq!(names(&wf), names(&cf), "{at}: layout file sets differ");
     for ((name, wb), (_, cb)) in wf.iter().zip(&cf) {
-        assert!(wb == cb, "{at}: {name} differs from a clean build + persist");
+        assert!(
+            wb == cb,
+            "{at}: {name} differs from a clean build + persist"
+        );
     }
 }
 
@@ -342,24 +521,58 @@ fn assert_parity(s: &WatchSession, clean: &GenerateResult, out: &Path, at: &str)
 /// delta's from `prev` to `clean`. Returns whether that delta moved anything.
 fn assert_delta(u: &WatchUpdate, prev: &GenerateResult, clean: &GenerateResult, at: &str) -> bool {
     let (d, nodes, edges) = located_delta(&prev.merged, &clean.merged);
-    assert_eq!(json(&u.nodes), json(&nodes), "{at}: node rows equal the full delta's");
-    assert_eq!(json(&u.edges), json(&edges), "{at}: edge rows equal the full delta's");
+    assert_eq!(
+        json(&u.nodes),
+        json(&nodes),
+        "{at}: node rows equal the full delta's"
+    );
+    assert_eq!(
+        json(&u.edges),
+        json(&edges),
+        "{at}: edge rows equal the full delta's"
+    );
     let c = &u.counts;
     assert_eq!(
-        [c.nodes_added, c.nodes_removed, c.nodes_modified, c.nodes_moved],
-        [d.added_nodes.len(), d.removed_nodes.len(), d.modified_nodes.len(), d.moved_nodes.len()],
+        [
+            c.nodes_added,
+            c.nodes_removed,
+            c.nodes_modified,
+            c.nodes_moved
+        ],
+        [
+            d.added_nodes.len(),
+            d.removed_nodes.len(),
+            d.modified_nodes.len(),
+            d.moved_nodes.len()
+        ],
         "{at}: node counts"
     );
     assert_eq!(
-        [c.edges_added, c.edges_removed, c.edges_reconfidenced, c.moves_ignored],
-        [d.added_edges.len(), d.removed_edges.len(), d.reconfidenced_edges.len(), d.ignored_moves],
+        [
+            c.edges_added,
+            c.edges_removed,
+            c.edges_reconfidenced,
+            c.moves_ignored
+        ],
+        [
+            d.added_edges.len(),
+            d.removed_edges.len(),
+            d.reconfidenced_edges.len(),
+            d.ignored_moves
+        ],
         "{at}: edge counts and ignored moves"
     );
     !nodes.is_empty() || !edges.is_empty()
 }
 
 /// Checks 3 and 4 (module doc) for one update.
-fn assert_rows(u: &WatchUpdate, prev: &GenerateResult, clean: &GenerateResult, step: &Step, at: &str) {
+fn assert_rows(
+    u: &WatchUpdate,
+    prev: &GenerateResult,
+    clean: &GenerateResult,
+    step: &Step,
+    at: &str,
+) {
     let moved = assert_delta(u, prev, clean, at);
     let e = &step.expect;
     if e.noop {
@@ -371,23 +584,46 @@ fn assert_rows(u: &WatchUpdate, prev: &GenerateResult, clean: &GenerateResult, s
         assert_eq!(u.groups_rebuilt, exact, "{at}: groups rebuilt");
     }
     for key in e.rebuilt_contains {
-        assert!(u.groups_rebuilt.iter().any(|g| g == key), "{at}: {key} rebuilt: {:?}", u.groups_rebuilt);
+        assert!(
+            u.groups_rebuilt.iter().any(|g| g == key),
+            "{at}: {key} rebuilt: {:?}",
+            u.groups_rebuilt
+        );
     }
     for key in e.rebuilt_excludes {
-        assert!(!u.groups_rebuilt.iter().any(|g| g == key), "{at}: {key} reused: {:?}", u.groups_rebuilt);
+        assert!(
+            !u.groups_rebuilt.iter().any(|g| g == key),
+            "{at}: {key} reused: {:?}",
+            u.groups_rebuilt
+        );
     }
-    assert_eq!(u.full_rebuild.as_deref(), e.full_rebuild, "{at}: full_rebuild");
+    assert_eq!(
+        u.full_rebuild.as_deref(),
+        e.full_rebuild,
+        "{at}: full_rebuild"
+    );
     assert_eq!(u.files.added, e.files_added, "{at}: files added");
     assert_eq!(u.files.modified, e.files_modified, "{at}: files modified");
     assert_eq!(u.files.removed, e.files_removed, "{at}: files removed");
     for kind in e.row_kinds {
-        assert!(u.nodes.iter().any(|n| n.kind == *kind), "{at}: a {kind} row: {:?}", u.nodes);
+        assert!(
+            u.nodes.iter().any(|n| n.kind == *kind),
+            "{at}: a {kind} row: {:?}",
+            u.nodes
+        );
     }
     for change in e.row_changes {
-        assert!(u.nodes.iter().any(|n| n.change == *change), "{at}: a {change} row: {:?}", u.nodes);
+        assert!(
+            u.nodes.iter().any(|n| n.change == *change),
+            "{at}: a {change} row: {:?}",
+            u.nodes
+        );
     }
     if e.moves_pass_undo {
-        assert_ne!(prev.merged.pass_undo, clean.merged.pass_undo, "{at}: the step moves pass_undo");
+        assert_ne!(
+            prev.merged.pass_undo, clean.merged.pass_undo,
+            "{at}: the step moves pass_undo"
+        );
     }
 }
 
@@ -407,10 +643,14 @@ fn settle(dir: &Path) {
             if p.is_dir() {
                 stack.push(p);
             } else {
-                std::fs::File::open(&p).and_then(|f| f.set_modified(t)).expect("mtime");
+                std::fs::File::open(&p)
+                    .and_then(|f| f.set_modified(t))
+                    .expect("mtime");
             }
         }
-        std::fs::File::open(&d).and_then(|f| f.set_modified(t)).expect("mtime");
+        std::fs::File::open(&d)
+            .and_then(|f| f.set_modified(t))
+            .expect("mtime");
     }
 }
 
@@ -424,8 +664,16 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
     }
     let mut s = WatchSession::open(root, &BuildOptions::default()).expect("open");
     let mut prev = generate_one(root).expect("clean build");
-    assert!(!prev.merged.pass_undo.is_empty(), "{sequence}: the unpaired route leaves an undo record");
-    assert_parity(&s, &prev, &tmp.path().join("out").join("0-open"), &format!("{sequence}/open"));
+    assert!(
+        !prev.merged.pass_undo.is_empty(),
+        "{sequence}: the unpaired route leaves an undo record"
+    );
+    assert_parity(
+        &s,
+        &prev,
+        &tmp.path().join("out").join("0-open"),
+        &format!("{sequence}/open"),
+    );
     let mut updates = Vec::new();
     for (i, step) in steps.iter().enumerate() {
         let at = format!("{sequence}/{}", step.name);
@@ -449,7 +697,10 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
             "{at}: the rank cache is kept exactly when the update is a noop"
         );
         let clean = generate_one(root).expect("clean build");
-        let out = tmp.path().join("out").join(format!("{}-{}", i + 1, step.name));
+        let out = tmp
+            .path()
+            .join("out")
+            .join(format!("{}-{}", i + 1, step.name));
         assert_parity(&s, &clean, &out, &at);
         assert_rows(&u, &prev, &clean, step, &at);
         prev = clean;
@@ -464,7 +715,11 @@ const BODY: Step = Step {
     name: "body",
     edit: body_edit,
     via: Via::Apply(&["api/svc.py"]),
-    expect: Expect { rebuilt_exact: Some(&["python"]), files_modified: &["api/svc.py"], ..EXPECT },
+    expect: Expect {
+        rebuilt_exact: Some(&["python"]),
+        files_modified: &["api/svc.py"],
+        ..EXPECT
+    },
 };
 
 #[test]
@@ -564,7 +819,13 @@ fn scripted_client() {
             ..EXPECT
         },
     };
-    run("client", &[client("client_add", client_add), client("client_remove", client_remove)]);
+    run(
+        "client",
+        &[
+            client("client_add", client_add),
+            client("client_remove", client_remove),
+        ],
+    );
 }
 
 #[test]
@@ -698,7 +959,10 @@ fn scripted_include_roots() {
             name: "cmake_dir",
             edit: include_root_add,
             via: Via::Apply(&["cpp/CMakeLists.txt"]),
-            expect: Expect { rebuilt_exact: Some(&["c_cpp"]), ..EXPECT },
+            expect: Expect {
+                rebuilt_exact: Some(&["c_cpp"]),
+                ..EXPECT
+            },
         }],
     );
 }
@@ -711,7 +975,11 @@ fn scripted_gitignore() {
             name: "ignore_docs",
             edit: gitignore_docs,
             via: Via::Apply(&[".gitignore"]),
-            expect: Expect { rebuilt_exact: Some(&[]), files_removed: &["docs/guide.md"], ..EXPECT },
+            expect: Expect {
+                rebuilt_exact: Some(&[]),
+                files_removed: &["docs/guide.md"],
+                ..EXPECT
+            },
         }],
     );
 }
@@ -724,7 +992,11 @@ fn scripted_noop() {
             name: "unchanged",
             edit: untouched,
             via: Via::Apply(&["api/svc.py"]),
-            expect: Expect { rebuilt_exact: Some(&[]), noop: true, ..EXPECT },
+            expect: Expect {
+                rebuilt_exact: Some(&[]),
+                noop: true,
+                ..EXPECT
+            },
         }],
     );
 }
@@ -732,13 +1004,30 @@ fn scripted_noop() {
 /// `step` through `apply` and, on a second fresh fixture, through the stat
 /// poll (`edit` writes the same change): the same rows and counts.
 fn poll_matches_apply(sequence: &str, step: Step, edit: fn(&Path)) {
-    let polled = Step { name: "polled", edit, via: Via::Poll, expect: Expect { ..step.expect } };
+    let polled = Step {
+        name: "polled",
+        edit,
+        via: Via::Poll,
+        expect: Expect { ..step.expect },
+    };
     let applied = run(&format!("{sequence}_apply"), &[step]);
     let polled = run(&format!("{sequence}_poll"), &[polled]);
     for (a, p) in applied.iter().zip(&polled) {
-        assert_eq!(json(&p.nodes), json(&a.nodes), "{sequence}: poll node rows equal the apply path's");
-        assert_eq!(json(&p.edges), json(&a.edges), "{sequence}: poll edge rows equal the apply path's");
-        assert_eq!(json(&p.counts), json(&a.counts), "{sequence}: poll counts equal the apply path's");
+        assert_eq!(
+            json(&p.nodes),
+            json(&a.nodes),
+            "{sequence}: poll node rows equal the apply path's"
+        );
+        assert_eq!(
+            json(&p.edges),
+            json(&a.edges),
+            "{sequence}: poll edge rows equal the apply path's"
+        );
+        assert_eq!(
+            json(&p.counts),
+            json(&a.counts),
+            "{sequence}: poll counts equal the apply path's"
+        );
     }
 }
 
@@ -772,7 +1061,11 @@ const SBT: Step = Step {
     name: "member_add",
     edit: sbt_member_add,
     via: Via::Apply(&["scala/build.sbt", "scala/util/Util.scala"]),
-    expect: Expect { files_added: &["scala/util/Util.scala"], row_kinds: &["PROJECT"], ..EXPECT },
+    expect: Expect {
+        files_added: &["scala/util/Util.scala"],
+        row_kinds: &["PROJECT"],
+        ..EXPECT
+    },
 };
 
 #[test]
@@ -817,7 +1110,14 @@ impl SplitMix64 {
 #[test]
 fn splitmix64_is_the_reference() {
     let mut r = SplitMix64(0);
-    assert_eq!([r.next(), r.next(), r.next()], [0xE220_A839_7B1D_CDAF, 0x6E78_9E6A_A1B9_65F4, 0x06C4_5D18_8009_454F]);
+    assert_eq!(
+        [r.next(), r.next(), r.next()],
+        [
+            0xE220_A839_7B1D_CDAF,
+            0x6E78_9E6A_A1B9_65F4,
+            0x06C4_5D18_8009_454F
+        ]
+    );
 }
 
 /// One random edit. Toggles flip between the fixture's state and one other.
@@ -916,7 +1216,12 @@ struct Done {
 
 impl Done {
     fn describe(&self) -> String {
-        format!("step={} op={} path={}", self.step, self.op.name(), self.paths.join(","))
+        format!(
+            "step={} op={} path={}",
+            self.step,
+            self.op.name(),
+            self.paths.join(",")
+        )
     }
 }
 
@@ -950,22 +1255,39 @@ fn in_last_fn(rel: &str, text: &str, i: usize) -> String {
                 .filter(|&p| p == 0 || matches!(text.as_bytes()[p - 1], b'\n' | b' '))
                 .last()
                 .unwrap_or_else(|| panic!("{rel}: no {kw}"));
-            let brace = start + text[start..].find('{').unwrap_or_else(|| panic!("{rel}: no body"));
-            let stmt = if lang == "go" { format!("\n\t_ = {i}\n") } else { format!("\n    let _b{i} = {i};\n") };
+            let brace = start
+                + text[start..]
+                    .find('{')
+                    .unwrap_or_else(|| panic!("{rel}: no body"));
+            let stmt = if lang == "go" {
+                format!("\n\t_ = {i}\n")
+            } else {
+                format!("\n    let _b{i} = {i};\n")
+            };
             (brace + 1, stmt)
         }
         "ts" => {
             let (mut off, mut hit) = (0, None);
             for line in text.split_inclusive('\n') {
                 let t = line.trim_end();
-                let first = t.trim_start().split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+                let first = t
+                    .trim_start()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap_or("");
                 let opens = t.ends_with('{') || t.ends_with("{}");
-                if opens && t.contains(')') && !["if", "for", "while", "switch", "catch"].contains(&first) {
+                if opens
+                    && t.contains(')')
+                    && !["if", "for", "while", "switch", "catch"].contains(&first)
+                {
                     hit = t.rfind('{').map(|b| off + b + 1);
                 }
                 off += line.len();
             }
-            (hit.unwrap_or_else(|| panic!("{rel}: no function")), format!("\n  const _b{i} = {i};\n"))
+            (
+                hit.unwrap_or_else(|| panic!("{rel}: no function")),
+                format!("\n  const _b{i} = {i};\n"),
+            )
         }
         other => panic!("{rel}: no body edit for .{other}"),
     };
@@ -985,7 +1307,11 @@ fn tree_bytes(repo: &Path) -> BTreeMap<String, Vec<u8>> {
                     stack.push(p);
                 }
             } else {
-                let rel = p.strip_prefix(repo).expect("under repo").to_string_lossy().into_owned();
+                let rel = p
+                    .strip_prefix(repo)
+                    .expect("under repo")
+                    .to_string_lossy()
+                    .into_owned();
                 out.insert(rel, std::fs::read(&p).expect("read"));
             }
         }
@@ -995,15 +1321,21 @@ fn tree_bytes(repo: &Path) -> BTreeMap<String, Vec<u8>> {
 
 /// The walked side of a tree: every file outside `.glia/`.
 fn walked(tree: &BTreeMap<String, Vec<u8>>) -> BTreeSet<String> {
-    tree.keys().filter(|r| !r.starts_with(".glia/")).cloned().collect()
+    tree.keys()
+        .filter(|r| !r.starts_with(".glia/"))
+        .cloned()
+        .collect()
 }
 
 const OVERLAY: &str = ".glia/overlay.toml";
 const PROTO: &str = "grpc/server/user.proto";
 const SAME_STEM: &str = "api/user.ts";
 const CLIENT_HEAD: &str = "\nexport async function getUsers() {";
-const SCIP_FILES: [&str; 3] =
-    [".glia/scip-snapshot/documents.jsonl", ".glia/scip-snapshot/meta.json", ".glia/scip-snapshot/symbols.jsonl"];
+const SCIP_FILES: [&str; 3] = [
+    ".glia/scip-snapshot/documents.jsonl",
+    ".glia/scip-snapshot/meta.json",
+    ".glia/scip-snapshot/symbols.jsonl",
+];
 
 /// The language group a changed path's group must rebuild for (`None` for a
 /// doc or a `.glia` input).
@@ -1053,9 +1385,15 @@ impl World {
         let none_added = self.added().is_empty();
         let applies = |o: &Op| !(none_added && matches!(o, Op::DeleteFile | Op::Rename));
         if !self.bag.iter().any(applies) {
-            self.bag.extend(Op::ALL.iter().flat_map(|&o| std::iter::repeat_n(o, o.weight())));
+            self.bag.extend(
+                Op::ALL
+                    .iter()
+                    .flat_map(|&o| std::iter::repeat_n(o, o.weight())),
+            );
         }
-        let open: Vec<usize> = (0..self.bag.len()).filter(|&i| applies(&self.bag[i])).collect();
+        let open: Vec<usize> = (0..self.bag.len())
+            .filter(|&i| applies(&self.bag[i]))
+            .collect();
         let card = open[self.rng.below(open.len())];
         self.bag.remove(card)
     }
@@ -1095,34 +1433,56 @@ impl World {
     fn run(&mut self, op: Op, i: usize, stamp: SystemTime) -> Vec<String> {
         match op {
             Op::Body => {
-                let files: Vec<String> =
-                    self.mirror.iter().filter(|r| matches!(ext(r), "py" | "go" | "ts" | "rs")).cloned().collect();
+                let files: Vec<String> = self
+                    .mirror
+                    .iter()
+                    .filter(|r| matches!(ext(r), "py" | "go" | "ts" | "rs"))
+                    .cloned()
+                    .collect();
                 let rel = self.choose(&files);
                 let edited = in_last_fn(&rel, &self.read(&rel), i);
                 self.put(&rel, &edited);
                 vec![rel]
             }
             Op::Declaration if self.rng.next().is_multiple_of(2) => {
-                self.append("api/user.py", &format!("\n\ndef decl_{i}():\n    return {i}\n"));
-                let call = format!("\nfrom api.user import decl_{i}\n\n\ndef call_{i}():\n    return decl_{i}()\n");
+                self.append(
+                    "api/user.py",
+                    &format!("\n\ndef decl_{i}():\n    return {i}\n"),
+                );
+                let call = format!(
+                    "\nfrom api.user import decl_{i}\n\n\ndef call_{i}():\n    return decl_{i}()\n"
+                );
                 self.append("api/svc.py", &call);
                 vec!["api/svc.py".into(), "api/user.py".into()]
             }
             Op::Declaration => {
-                self.append("tools/gen.go", &format!("\nfunc Decl{i}() int {{ return {i} }}\n"));
-                self.append("cmd/main.go", &format!("\nfunc call{i}() int {{ return tools.Decl{i}() }}\n"));
+                self.append(
+                    "tools/gen.go",
+                    &format!("\nfunc Decl{i}() int {{ return {i} }}\n"),
+                );
+                self.append(
+                    "cmd/main.go",
+                    &format!("\nfunc call{i}() int {{ return tools.Decl{i}() }}\n"),
+                );
                 vec!["cmd/main.go".into(), "tools/gen.go".into()]
             }
             Op::AddFile => {
                 let (rel, body) = match self.rng.below(3) {
                     0 => (
                         format!("api/added_{i}.py"),
-                        format!("from api.user import get_user\n\n\ndef added_{i}():\n    return get_user()\n"),
+                        format!(
+                            "from api.user import get_user\n\n\ndef added_{i}():\n    return get_user()\n"
+                        ),
                     ),
-                    1 => (format!("tools/added_{i}.go"), format!("package tools\n\nfunc Added{i}() int {{\n\treturn Gen()\n}}\n")),
+                    1 => (
+                        format!("tools/added_{i}.go"),
+                        format!("package tools\n\nfunc Added{i}() int {{\n\treturn Gen()\n}}\n"),
+                    ),
                     _ => (
                         format!("pkg{i}/mod_{i}.py"),
-                        format!("from api.svc import handle\n\n\ndef mod_{i}():\n    return handle()\n"),
+                        format!(
+                            "from api.svc import handle\n\n\ndef mod_{i}():\n    return handle()\n"
+                        ),
                     ),
                 };
                 self.put(&rel, &body);
@@ -1147,7 +1507,10 @@ impl World {
                 vec![SAME_STEM.into()]
             }
             Op::SameStem => {
-                self.put(SAME_STEM, "export function userTs(): number {\n  return 1;\n}\n");
+                self.put(
+                    SAME_STEM,
+                    "export function userTs(): number {\n  return 1;\n}\n",
+                );
                 vec![SAME_STEM.into()]
             }
             Op::Markdown => {
@@ -1158,12 +1521,24 @@ impl World {
             Op::Touch => {
                 let files: Vec<String> = self.mirror.iter().cloned().collect();
                 let rel = self.choose(&files);
-                std::fs::File::open(self.repo.join(&rel)).and_then(|f| f.set_modified(stamp)).expect("mtime");
+                std::fs::File::open(self.repo.join(&rel))
+                    .and_then(|f| f.set_modified(stamp))
+                    .expect("mtime");
                 vec![rel]
             }
-            Op::GoMod => self.toggle("go.mod", "module example.com/parity\n", "module example.com/moved\n"),
-            Op::Tsconfig => self.toggle("web/tsconfig.json", "[\"app/core/*\"]", "[\"app/none/*\"]"),
-            Op::Proto => self.toggle(PROTO, "  rpc ListUsers", "  rpc DeleteUser (GetUserRequest) returns (User);\n  rpc ListUsers"),
+            Op::GoMod => self.toggle(
+                "go.mod",
+                "module example.com/parity\n",
+                "module example.com/moved\n",
+            ),
+            Op::Tsconfig => {
+                self.toggle("web/tsconfig.json", "[\"app/core/*\"]", "[\"app/none/*\"]")
+            }
+            Op::Proto => self.toggle(
+                PROTO,
+                "  rpc ListUsers",
+                "  rpc DeleteUser (GetUserRequest) returns (User);\n  rpc ListUsers",
+            ),
             Op::Overlay => self.toggle(OVERLAY, "GATEWAY = \"/gw\"", "GATEWAY = \"/gw2\""),
             Op::Client => {
                 let rel = "web/src/app/core/api.ts";
@@ -1193,8 +1568,14 @@ impl World {
 /// (`global_unique`: HEURISTIC, Strong) and one it infers (Go's implicit
 /// IMPLEMENTS: DERIVED, Medium).
 const RANDOM_INLINE: &[(&str, &str)] = &[
-    ("api/base.py", "class Base:\n    def run(self):\n        return 0\n"),
-    ("api/child.py", "class Child(Base):\n    def run(self):\n        return 1\n"),
+    (
+        "api/base.py",
+        "class Base:\n    def run(self):\n        return 0\n",
+    ),
+    (
+        "api/child.py",
+        "class Child(Base):\n    def run(self):\n        return 1\n",
+    ),
     (
         "tools/shape.go",
         "package tools\n\ntype Shape interface {\n\tArea() int\n}\n\ntype Square struct{}\n\nfunc (Square) Area() int {\n\treturn 4\n}\n",
@@ -1232,14 +1613,47 @@ fn write_snapshot(repo: &Path) {
     // references (symbol, line needle)), by path.
     const DOCUMENTS: [(&str, &str, Defs, Refs); 9] = [
         ("api/base.py", "python", &[(3, "class Base", "Base")], &[]),
-        ("api/child.py", "python", &[(4, "class Child", "Child")], &[]),
-        ("api/svc.py", "python", &[], &[(0, "get_user()"), (5, "get_user()")]),
-        ("api/user.py", "python", &[(5, "def get_user(", "get_user")], &[]),
+        (
+            "api/child.py",
+            "python",
+            &[(4, "class Child", "Child")],
+            &[],
+        ),
+        (
+            "api/svc.py",
+            "python",
+            &[],
+            &[(0, "get_user()"), (5, "get_user()")],
+        ),
+        (
+            "api/user.py",
+            "python",
+            &[(5, "def get_user(", "get_user")],
+            &[],
+        ),
         ("rs/app/src/main.rs", "rust", &[], &[(6, "e.run()")]),
-        ("rs/core/src/api.rs", "rust", &[(6, "pub fn run(", "run")], &[]),
+        (
+            "rs/core/src/api.rs",
+            "rust",
+            &[(6, "pub fn run(", "run")],
+            &[],
+        ),
         ("tools/gen.go", "go", &[(0, "func Gen(", "Gen")], &[]),
-        ("tools/shape.go", "go", &[(1, "type Shape interface", "Shape"), (2, "type Square struct", "Square")], &[]),
-        ("web/src/app/core/api.ts", "typescript", &[(1, "function listThings(", "listThings")], &[]),
+        (
+            "tools/shape.go",
+            "go",
+            &[
+                (1, "type Shape interface", "Shape"),
+                (2, "type Square struct", "Square"),
+            ],
+            &[],
+        ),
+        (
+            "web/src/app/core/api.ts",
+            "typescript",
+            &[(1, "function listThings(", "listThings")],
+            &[],
+        ),
     ];
     let documents: Vec<ScipDocumentRecord> = DOCUMENTS
         .iter()
@@ -1247,16 +1661,30 @@ fn write_snapshot(repo: &Path) {
             let text = std::fs::read_to_string(repo.join(path)).expect("read");
             let line = |needle: &str| {
                 let at = text.lines().position(|l| l.contains(needle));
-                u32::try_from(at.unwrap_or_else(|| panic!("{path}: {needle}"))).expect("a short file")
+                u32::try_from(at.unwrap_or_else(|| panic!("{path}: {needle}")))
+                    .expect("a short file")
             };
             ScipDocumentRecord {
                 path: path.into(),
                 language: language.into(),
                 source_hash: source_hash(text.as_bytes()),
-                defs: defs.iter().map(|&(s, needle, name)| ScipDefRow { s, line: line(needle), name: name.into() }).collect(),
+                defs: defs
+                    .iter()
+                    .map(|&(s, needle, name)| ScipDefRow {
+                        s,
+                        line: line(needle),
+                        name: name.into(),
+                    })
+                    .collect(),
                 refs: refs
                     .iter()
-                    .map(|&(s, needle)| ScipRefRow { s, line: line(needle), call: true, write: false, import: false })
+                    .map(|&(s, needle)| ScipRefRow {
+                        s,
+                        line: line(needle),
+                        call: true,
+                        write: false,
+                        import: false,
+                    })
                     .collect(),
             }
         })
@@ -1266,7 +1694,11 @@ fn write_snapshot(repo: &Path) {
         .map(|(id, symbol)| ScipSymbolRecord {
             id,
             symbol: symbol.into(),
-            implements: IMPLEMENTS.iter().filter(|(a, _)| *a == id).map(|&(_, b)| b).collect(),
+            implements: IMPLEMENTS
+                .iter()
+                .filter(|(a, _)| *a == id)
+                .map(|&(_, b)| b)
+                .collect(),
         })
         .collect();
     let meta = ScipMeta::new("scip-parity".into(), "0".into(), String::new(), 0);
@@ -1292,8 +1724,12 @@ struct Want {
 
 impl Want {
     fn of(before: &BTreeMap<String, Vec<u8>>, after: &BTreeMap<String, Vec<u8>>) -> Self {
-        let changed: BTreeSet<&str> =
-            before.keys().chain(after.keys()).filter(|k| before.get(*k) != after.get(*k)).map(String::as_str).collect();
+        let changed: BTreeSet<&str> = before
+            .keys()
+            .chain(after.keys())
+            .filter(|k| before.get(*k) != after.get(*k))
+            .map(String::as_str)
+            .collect();
         let in_both = |k: &str| before.contains_key(k) && after.contains_key(k);
         let (files_before, files_after) = (walked(before), walked(after));
         let modified = changed
@@ -1310,15 +1746,24 @@ impl Want {
         } else {
             None
         };
-        let mut contains: BTreeSet<&'static str> = changed.iter().filter_map(|k| group_of(k)).collect();
+        let mut contains: BTreeSet<&'static str> =
+            changed.iter().filter_map(|k| group_of(k)).collect();
         if changed.contains(SAME_STEM) && !in_both(SAME_STEM) {
             contains.insert("python");
         }
-        let in_place = changed.iter().all(|k| in_both(k) && matches!(ext(k), "py" | "go" | "ts" | "rs" | "md"));
+        let in_place = changed
+            .iter()
+            .all(|k| in_both(k) && matches!(ext(k), "py" | "go" | "ts" | "rs" | "md"));
         let rebuilt_exact = if changed.contains(OVERLAY) || changed.contains(PROTO) {
             Some(EVERY_GROUP.to_vec())
         } else if in_place {
-            Some(EVERY_GROUP.iter().copied().filter(|g| contains.contains(g)).collect())
+            Some(
+                EVERY_GROUP
+                    .iter()
+                    .copied()
+                    .filter(|g| contains.contains(g))
+                    .collect(),
+            )
         } else {
             None
         };
@@ -1333,19 +1778,40 @@ impl Want {
         }
     }
 
-    fn check(&self, u: &WatchUpdate, seq: u64, prev: &GenerateResult, clean: &GenerateResult, at: &str) {
+    fn check(
+        &self,
+        u: &WatchUpdate,
+        seq: u64,
+        prev: &GenerateResult,
+        clean: &GenerateResult,
+        at: &str,
+    ) {
         assert_eq!(u.seq, if self.changed { seq + 1 } else { seq }, "{at}: seq");
         let moved = assert_delta(u, prev, clean, at);
-        assert!(self.changed || !moved, "{at}: an unchanged tree moves nothing");
+        assert!(
+            self.changed || !moved,
+            "{at}: an unchanged tree moves nothing"
+        );
         assert_eq!(u.files.added, self.added, "{at}: files added (the mirror)");
-        assert_eq!(u.files.removed, self.removed, "{at}: files removed (the mirror)");
+        assert_eq!(
+            u.files.removed, self.removed,
+            "{at}: files removed (the mirror)"
+        );
         assert_eq!(u.files.modified, self.modified, "{at}: files modified");
-        assert_eq!(u.full_rebuild.as_deref(), self.full_rebuild, "{at}: full_rebuild");
+        assert_eq!(
+            u.full_rebuild.as_deref(),
+            self.full_rebuild,
+            "{at}: full_rebuild"
+        );
         if let Some(exact) = &self.rebuilt_exact {
             assert_eq!(&u.groups_rebuilt, exact, "{at}: groups rebuilt");
         }
         for g in &self.rebuilt_contains {
-            assert!(u.groups_rebuilt.iter().any(|r| r == g), "{at}: {g} rebuilt: {:?}", u.groups_rebuilt);
+            assert!(
+                u.groups_rebuilt.iter().any(|r| r == g),
+                "{at}: {g} rebuilt: {:?}",
+                u.groups_rebuilt
+            );
         }
     }
 }
@@ -1376,7 +1842,13 @@ fn random_sequence(seed: u64, steps: usize, tally: &mut Tally) {
     assert_parity(&s, &prev, &out.join("open"), &format!("seed={seed} open"));
     let mut last = tree_bytes(&repo);
     let initial = walked(&last);
-    let mut w = World { repo: repo.clone(), rng: SplitMix64(seed), mirror: initial.clone(), initial, bag: Vec::new() };
+    let mut w = World {
+        repo: repo.clone(),
+        rng: SplitMix64(seed),
+        mirror: initial.clone(),
+        initial,
+        bag: Vec::new(),
+    };
     let mut batch: Vec<Done> = Vec::new();
     for i in 0..steps {
         let op = w.pick();
@@ -1418,11 +1890,20 @@ fn random_sequence(seed: u64, steps: usize, tally: &mut Tally) {
             let mut named: Vec<PathBuf> = batch
                 .iter()
                 .flat_map(|d| &d.paths)
-                .map(|p| if r & 2 == 0 { PathBuf::from(p) } else { repo.join(p) })
+                .map(|p| {
+                    if r & 2 == 0 {
+                        PathBuf::from(p)
+                    } else {
+                        repo.join(p)
+                    }
+                })
                 .collect();
             named.sort();
             named.dedup();
-            Some(s.apply(&named).unwrap_or_else(|e| panic!("{at}: apply: {e}")))
+            Some(
+                s.apply(&named)
+                    .unwrap_or_else(|e| panic!("{at}: apply: {e}")),
+            )
         } else {
             s.poll().unwrap_or_else(|e| panic!("{at}: poll: {e}"))
         };
@@ -1436,7 +1917,10 @@ fn random_sequence(seed: u64, steps: usize, tally: &mut Tally) {
                 assert!(!want.changed, "{at}: the poll sees the edit");
                 assert_eq!(s.seq(), seq, "{at}: seq");
                 let (_, nodes, edges) = located_delta(&prev.merged, &clean.merged);
-                assert!(nodes.is_empty() && edges.is_empty(), "{at}: an unchanged tree builds the same graph");
+                assert!(
+                    nodes.is_empty() && edges.is_empty(),
+                    "{at}: an unchanged tree builds the same graph"
+                );
             }
         }
         if !want.changed {
@@ -1451,23 +1935,33 @@ fn random_sequence(seed: u64, steps: usize, tally: &mut Tally) {
 /// A count from the environment, else `default`.
 fn env_count(name: &str, default: u64) -> u64 {
     match std::env::var(name) {
-        Ok(v) => v.trim().parse().unwrap_or_else(|_| panic!("{name}={v}: not a count")),
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{name}={v}: not a count")),
         Err(_) => default,
     }
 }
 
 #[test]
 fn random_sequences() {
-    let soak = ["GLIA_WATCH_PARITY_SEED", "GLIA_WATCH_PARITY_SEEDS", "GLIA_WATCH_PARITY_STEPS"]
-        .iter()
-        .any(|v| std::env::var(v).is_ok());
+    let soak = [
+        "GLIA_WATCH_PARITY_SEED",
+        "GLIA_WATCH_PARITY_SEEDS",
+        "GLIA_WATCH_PARITY_STEPS",
+    ]
+    .iter()
+    .any(|v| std::env::var(v).is_ok());
     let seeds: Vec<u64> = match std::env::var("GLIA_WATCH_PARITY_SEED") {
         Ok(_) => vec![env_count("GLIA_WATCH_PARITY_SEED", 0)],
         Err(_) => (1..=env_count("GLIA_WATCH_PARITY_SEEDS", 4)).collect(),
     };
     let steps = usize::try_from(env_count("GLIA_WATCH_PARITY_STEPS", 15)).expect("a step count");
     // Stamps stay behind the clock (`random_sequence`).
-    assert!(steps < 3000, "GLIA_WATCH_PARITY_STEPS={steps}: at most 2999");
+    assert!(
+        steps < 3000,
+        "GLIA_WATCH_PARITY_STEPS={steps}: at most 2999"
+    );
     let mut tally = Tally::default();
     for &seed in &seeds {
         random_sequence(seed, steps, &mut tally);
@@ -1483,8 +1977,18 @@ fn random_sequences() {
         // The default seeds reach every op and route: a table edit that
         // drops one from them fails here, not silently.
         for op in Op::ALL {
-            assert!(tally.ops.contains_key(op.name()), "seeds 1..=4 never ran {}: {:?}", op.name(), tally.ops);
+            assert!(
+                tally.ops.contains_key(op.name()),
+                "seeds 1..=4 never ran {}: {:?}",
+                op.name(),
+                tally.ops
+            );
         }
-        assert_eq!(tally.routes.len(), 3, "seeds 1..=4 take every route: {:?}", tally.routes);
+        assert_eq!(
+            tally.routes.len(),
+            3,
+            "seeds 1..=4 take every route: {:?}",
+            tally.routes
+        );
     }
 }

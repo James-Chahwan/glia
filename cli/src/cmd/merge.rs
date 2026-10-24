@@ -160,7 +160,11 @@ fn emit(result: &GenerateResult, out: Option<&str>) -> i32 {
                 eprintln!("error writing {out_path}: {e}");
                 return 4;
             }
-            eprintln!("wrote {} bytes to {}", path.metadata().map(|m| m.len()).unwrap_or(0), out_path);
+            eprintln!(
+                "wrote {} bytes to {}",
+                path.metadata().map(|m| m.len()).unwrap_or(0),
+                out_path
+            );
         }
     }
     0
@@ -188,7 +192,13 @@ fn member_name(path: &Path) -> String {
         .unwrap_or_default();
     let plain: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     plain.trim_start_matches('.').to_string()
 }
@@ -212,7 +222,11 @@ mod tests {
         assert_eq!(name("/"), "");
         let cwd = std::env::current_dir().expect("cwd");
         let expected = member_name(&cwd);
-        assert!(!expected.is_empty(), "the test cwd {} has a basename", cwd.display());
+        assert!(
+            !expected.is_empty(),
+            "the test cwd {} has a basename",
+            cwd.display()
+        );
         assert_eq!(name("."), expected);
     }
 }

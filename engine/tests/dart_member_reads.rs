@@ -54,7 +54,9 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn build_in(dir: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), dir);
-    generate_one(&dir.display().to_string()).expect("fixture builds").merged
+    generate_one(&dir.display().to_string())
+        .expect("fixture builds")
+        .merged
 }
 
 fn build() -> (tempfile::TempDir, MergedGraph) {
@@ -86,9 +88,15 @@ fn edges(m: &MergedGraph, category: EdgeCategoryId) -> Vec<Row> {
 
 /// The evidence (emitter, rule) of the one `from -> to` edge in `rows`.
 fn evidence_of(rows: &[Row], from: &str, to: &str) -> (String, Option<String>) {
-    let hits: Vec<&Row> = rows.iter().filter(|(f, t, _)| f == from && t == to).collect();
+    let hits: Vec<&Row> = rows
+        .iter()
+        .filter(|(f, t, _)| f == from && t == to)
+        .collect();
     assert_eq!(hits.len(), 1, "one edge {from} -> {to}: {rows:?}");
-    let ev = hits[0].2.clone().unwrap_or_else(|| panic!("evidence on {from} -> {to}"));
+    let ev = hits[0]
+        .2
+        .clone()
+        .unwrap_or_else(|| panic!("evidence on {from} -> {to}"));
     (ev.emitter, ev.rule)
 }
 
@@ -107,11 +115,36 @@ fn member_reads_bind_by_what_they_name() {
     let uses = edges(&m, edge_category::USES);
     let reads = "graph:reads".to_string();
     for (rows, from, to, rule) in [
-        (&calls, format!("{SERVICE}::isReady"), format!("{ENV}::baseUrl"), "accessor_read"),
-        (&calls, format!("{PAGE}::build"), format!("{ENV}::port"), "accessor_read"),
-        (&calls, format!("{PAGE}::_canSubmit"), format!("{SERVICE}::isReady"), "accessor_read"),
-        (&uses, format!("{SERVICE}::listAll"), format!("{MODELS}::Friend::fromJson"), "tear_off"),
-        (&uses, format!("{PAGE}::build"), ENV.to_string(), "static_member"),
+        (
+            &calls,
+            format!("{SERVICE}::isReady"),
+            format!("{ENV}::baseUrl"),
+            "accessor_read",
+        ),
+        (
+            &calls,
+            format!("{PAGE}::build"),
+            format!("{ENV}::port"),
+            "accessor_read",
+        ),
+        (
+            &calls,
+            format!("{PAGE}::_canSubmit"),
+            format!("{SERVICE}::isReady"),
+            "accessor_read",
+        ),
+        (
+            &uses,
+            format!("{SERVICE}::listAll"),
+            format!("{MODELS}::Friend::fromJson"),
+            "tear_off",
+        ),
+        (
+            &uses,
+            format!("{PAGE}::build"),
+            ENV.to_string(),
+            "static_member",
+        ),
     ] {
         assert_eq!(
             evidence_of(rows, &from, &to),
@@ -120,7 +153,11 @@ fn member_reads_bind_by_what_they_name() {
         );
     }
     // Friend.fromJson tears off Friend's factory, never a same-named one.
-    assert!(!has(&uses, &format!("{SERVICE}::listAll"), &format!("{MODELS}::Interest::fromJson")));
+    assert!(!has(
+        &uses,
+        &format!("{SERVICE}::listAll"),
+        &format!("{MODELS}::Interest::fromJson")
+    ));
 }
 
 /// A same-class name in any value position is a reference the parser binds
@@ -155,12 +192,36 @@ fn names_in_any_value_position_are_references() {
         );
     }
     // The six forbid rows of the fixture's key.json.
-    assert!(!has(&calls, &format!("{PAGE}::_dump"), &format!("{MODELS}::Interest::isEven")));
-    assert!(!has(&calls, &format!("{PAGE}::_shadow"), &format!("{PAGE}::_canSubmit")));
-    assert!(!has(&calls, &format!("{PAGE}::_shadow"), &format!("{SERVICE}::isReady")));
-    assert!(!has(&uses, &format!("{PAGE}::_shadow"), &format!("{PAGE}::onPressed")));
-    assert!(!has(&uses, &format!("{PAGE}::build"), &format!("{PAGE}::onPressed")));
-    assert!(!has(&uses, &format!("{SERVICE}::listAll"), &format!("{MODELS}::Interest::fromJson")));
+    assert!(!has(
+        &calls,
+        &format!("{PAGE}::_dump"),
+        &format!("{MODELS}::Interest::isEven")
+    ));
+    assert!(!has(
+        &calls,
+        &format!("{PAGE}::_shadow"),
+        &format!("{PAGE}::_canSubmit")
+    ));
+    assert!(!has(
+        &calls,
+        &format!("{PAGE}::_shadow"),
+        &format!("{SERVICE}::isReady")
+    ));
+    assert!(!has(
+        &uses,
+        &format!("{PAGE}::_shadow"),
+        &format!("{PAGE}::onPressed")
+    ));
+    assert!(!has(
+        &uses,
+        &format!("{PAGE}::build"),
+        &format!("{PAGE}::onPressed")
+    ));
+    assert!(!has(
+        &uses,
+        &format!("{SERVICE}::listAll"),
+        &format!("{MODELS}::Interest::fromJson")
+    ));
 }
 
 /// `FriendService.new` builds a FriendService (CALLS of the CLASS), a class
@@ -172,24 +233,51 @@ fn tear_offs_field_initialisers_and_element_closures() {
     let (_tmp, m) = build();
     let calls = edges(&m, edge_category::CALLS);
     for (from, to, why) in [
-        (format!("{PAGE}::build"), SERVICE.to_string(), "_register(FriendService.new)"),
-        (PAGE.to_string(), SERVICE.to_string(), "final FriendService _friends = FriendService()"),
-        (PAGE.to_string(), "lib::features::friends_page::_Tab".to_string(), "static const _tabs"),
-        (format!("{PAGE}::build"), format!("{MODELS}::Interest::toJson"), "an element closure"),
+        (
+            format!("{PAGE}::build"),
+            SERVICE.to_string(),
+            "_register(FriendService.new)",
+        ),
+        (
+            PAGE.to_string(),
+            SERVICE.to_string(),
+            "final FriendService _friends = FriendService()",
+        ),
+        (
+            PAGE.to_string(),
+            "lib::features::friends_page::_Tab".to_string(),
+            "static const _tabs",
+        ),
+        (
+            format!("{PAGE}::build"),
+            format!("{MODELS}::Interest::toJson"),
+            "an element closure",
+        ),
     ] {
-        assert!(has(&calls, &from, &to), "{why}: CALLS {from} -> {to}; CALLS = {calls:?}");
+        assert!(
+            has(&calls, &from, &to),
+            "{why}: CALLS {from} -> {to}; CALLS = {calls:?}"
+        );
     }
     // `_dump`'s closure `i` shares its name with an int loop variable that
     // receives `.isEven`: it is typed nowhere, so `i.toJson()` binds nothing.
-    assert!(!has(&calls, &format!("{PAGE}::_dump"), &format!("{MODELS}::Interest::toJson")));
+    assert!(!has(
+        &calls,
+        &format!("{PAGE}::_dump"),
+        &format!("{MODELS}::Interest::toJson")
+    ));
 }
 
 #[test]
 fn dead_symbol_is_the_look_alikes_and_the_unread() {
     let (_tmp, m) = build();
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let mut rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let mut rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     rows.sort();
     let mut want = vec![
         format!("{ENV}::debugBanner"),
@@ -218,15 +306,28 @@ fn markers_count_the_reads() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, tmp.path())
         .env("GLIA_THREADS", "1")
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let lines = |prefix: &str| -> Vec<String> {
-        stderr.lines().filter(|l| l.starts_with(prefix)).map(String::from).collect()
+        stderr
+            .lines()
+            .filter(|l| l.starts_with(prefix))
+            .map(String::from)
+            .collect()
     };
     assert_eq!(
         lines("[reads]"),

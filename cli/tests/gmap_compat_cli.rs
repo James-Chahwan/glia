@@ -71,7 +71,10 @@ fn copy_tree(from: &Path, to: &Path) {
 fn materialize(s: &Scratch) -> (PathBuf, PathBuf) {
     let repo = s.0.join("repo");
     copy_tree(&fixture().join("repo"), &repo);
-    copy_tree(&fixture().join("layout-ai-repo-graph"), &repo.join(".ai/repo-graph"));
+    copy_tree(
+        &fixture().join("layout-ai-repo-graph"),
+        &repo.join(".ai/repo-graph"),
+    );
     copy_tree(&fixture().join("layout-glia-build"), &repo.join(".glia"));
     let clean = s.0.join("clean").join("repo");
     copy_tree(&fixture().join("repo"), &clean);
@@ -87,7 +90,11 @@ fn build(repo: &Path) -> String {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "glia build exited {:?}\nstderr:\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia build exited {:?}\nstderr:\n{stderr}",
+        out.status
+    );
     for line in stderr.lines() {
         if line.starts_with("[gmap] ") || line.starts_with("[incremental] ") {
             eprintln!("{line}");
@@ -111,15 +118,25 @@ fn files_in(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 fn gmaps_in(dir: &Path) -> BTreeMap<String, Vec<u8>> {
-    files_in(dir).into_iter().filter(|(n, _)| n.ends_with(".gmap")).collect()
+    files_in(dir)
+        .into_iter()
+        .filter(|(n, _)| n.ends_with(".gmap"))
+        .collect()
 }
 
 fn lines_with<'a>(stderr: &'a str, prefix: &str) -> Vec<&'a str> {
     stderr.lines().filter(|l| l.starts_with(prefix)).collect()
 }
 
-fn assert_same_gmaps(got: &BTreeMap<String, Vec<u8>>, want: &BTreeMap<String, Vec<u8>>, what: &str) {
-    assert!(!want.is_empty(), "{what}: the reference layout has no .gmap files");
+fn assert_same_gmaps(
+    got: &BTreeMap<String, Vec<u8>>,
+    want: &BTreeMap<String, Vec<u8>>,
+    what: &str,
+) {
+    assert!(
+        !want.is_empty(),
+        "{what}: the reference layout has no .gmap files"
+    );
     assert_eq!(
         got.keys().collect::<Vec<_>>(),
         want.keys().collect::<Vec<_>>(),
@@ -138,8 +155,14 @@ fn build_over_a_pre_leap_repo() {
     let glia_dir = repo.join(".glia");
     let legacy_before = files_in(&legacy);
     let flat_before = gmaps_in(&glia_dir);
-    assert!(legacy_before.contains_key("parse_cache.bin"), "pre-leap sidecar not materialised");
-    assert!(!flat_before.is_empty(), "flat glia build shards not materialised");
+    assert!(
+        legacy_before.contains_key("parse_cache.bin"),
+        "pre-leap sidecar not materialised"
+    );
+    assert!(
+        !flat_before.is_empty(),
+        "flat glia build shards not materialised"
+    );
 
     let stderr = build(&repo);
     let layout = default_gmap_dir(&repo);
@@ -151,8 +174,15 @@ fn build_over_a_pre_leap_repo() {
     assert_eq!(manifest.build_stamp, BUILD_STAMP);
     let loaded = read_merged_sharded(&layout).expect("the new layout loads");
     assert!(loaded.graphs.iter().map(|g| g.nodes.len()).sum::<usize>() > 0);
-    assert_eq!(loaded.cross_edges.len(), 1, "the fixture's one TS -> Go HTTP pairing");
-    assert!(!is_gmap_stale(&layout, &repo), "a fresh upgrade reads stale");
+    assert_eq!(
+        loaded.cross_edges.len(),
+        1,
+        "the fixture's one TS -> Go HTTP pairing"
+    );
+    assert!(
+        !is_gmap_stale(&layout, &repo),
+        "a fresh upgrade reads stale"
+    );
 
     // LC.9's markers: the legacy layout is named once and left byte-for-byte;
     // the flat 0.4.x shards, which no manifest names, are swept and said so.
@@ -169,16 +199,32 @@ fn build_over_a_pre_leap_repo() {
         flat_before.len(),
         glia_dir.display()
     );
-    assert!(stderr.lines().any(|l| l == swept), "flat sweep marker missing:\n{stderr}");
-    assert!(files_in(&legacy) == legacy_before, "the legacy .ai/repo-graph layout was modified");
-    assert!(gmaps_in(&glia_dir).is_empty(), "flat 0.4.x shards survived the upgrade");
+    assert!(
+        stderr.lines().any(|l| l == swept),
+        "flat sweep marker missing:\n{stderr}"
+    );
+    assert!(
+        files_in(&legacy) == legacy_before,
+        "the legacy .ai/repo-graph layout was modified"
+    );
+    assert!(
+        gmaps_in(&glia_dir).is_empty(),
+        "flat 0.4.x shards survived the upgrade"
+    );
     // Neither pre-leap sidecar is read: nothing reports a foreign cache.
-    assert!(lines_with(&stderr, "[incremental] cache stamp mismatch").is_empty(), "{stderr}");
+    assert!(
+        lines_with(&stderr, "[incremental] cache stamp mismatch").is_empty(),
+        "{stderr}"
+    );
 
     // No leftover reaches the graph: the same bytes as a build of the sources alone.
     build(&clean);
     let upgraded = gmaps_in(&layout);
-    assert_same_gmaps(&upgraded, &gmaps_in(&default_gmap_dir(&clean)), "pre-leap repo vs clean sources");
+    assert_same_gmaps(
+        &upgraded,
+        &gmaps_in(&default_gmap_dir(&clean)),
+        "pre-leap repo vs clean sources",
+    );
 
     // The sidecar the upgrade wrote is this build's: the next build reuses
     // every parse and rewrites nothing.
@@ -188,15 +234,36 @@ fn build_over_a_pre_leap_repo() {
         .filter(|l| l.contains(": reused "))
         .collect();
     assert_eq!(reuse.len(), 1, "{again}");
-    assert!(reuse[0].contains(", reparsed 0, "), "the second build reparsed: {}", reuse[0]);
-    assert!(!reuse[0].contains(": reused 0,"), "the second build reused nothing: {}", reuse[0]);
-    assert!(lines_with(&again, "[incremental] cache stamp mismatch").is_empty(), "{again}");
-    assert_same_gmaps(&gmaps_in(&layout), &upgraded, "second build over the upgraded repo");
-    assert!(files_in(&legacy) == legacy_before, "the second build modified the legacy layout");
+    assert!(
+        reuse[0].contains(", reparsed 0, "),
+        "the second build reparsed: {}",
+        reuse[0]
+    );
+    assert!(
+        !reuse[0].contains(": reused 0,"),
+        "the second build reused nothing: {}",
+        reuse[0]
+    );
+    assert!(
+        lines_with(&again, "[incremental] cache stamp mismatch").is_empty(),
+        "{again}"
+    );
+    assert_same_gmaps(
+        &gmaps_in(&layout),
+        &upgraded,
+        "second build over the upgraded repo",
+    );
+    assert!(
+        files_in(&legacy) == legacy_before,
+        "the second build modified the legacy layout"
+    );
 }
 
 fn v050_layout() -> PathBuf {
-    fixture().parent().expect("fixtures dir").join("gmap_v050/layout")
+    fixture()
+        .parent()
+        .expect("fixtures dir")
+        .join("gmap_v050/layout")
 }
 
 /// `glia inspect <path>`: exit code and stderr.
@@ -205,7 +272,10 @@ fn inspect(path: &Path) -> (Option<i32>, String) {
         .args(["inspect", path.to_str().expect("scratch path is UTF-8")])
         .output()
         .expect("glia runs");
-    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -216,13 +286,27 @@ fn inspect_a_v050_layout_says_rebuild() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join("manifest.json")).expect("manifest"))
             .expect("manifest json");
-    let shard = layout.join(manifest["shards"][0]["path"].as_str().expect("a shard path"));
+    let shard = layout.join(
+        manifest["shards"][0]["path"]
+            .as_str()
+            .expect("a shard path"),
+    );
     let cross = layout.join("cross_stack.gmap");
     for path in [&shard, &cross, &layout] {
         let (code, stderr) = inspect(path);
         assert_eq!(code, Some(1), "glia inspect {}: {stderr}", path.display());
-        let want = format!("error: {}: old format v2 (this build reads v3) - rebuild the graph", path.display());
-        assert!(stderr.lines().any(|l| l == want), "glia inspect {}:\n{stderr}", path.display());
-        assert!(!stderr.contains("[inspect] "), "a 0.5.0 file was inspected:\n{stderr}");
+        let want = format!(
+            "error: {}: old format v2 (this build reads v3) - rebuild the graph",
+            path.display()
+        );
+        assert!(
+            stderr.lines().any(|l| l == want),
+            "glia inspect {}:\n{stderr}",
+            path.display()
+        );
+        assert!(
+            !stderr.contains("[inspect] "),
+            "a 0.5.0 file was inspected:\n{stderr}"
+        );
     }
 }

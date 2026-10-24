@@ -28,8 +28,16 @@ use std::path::{Component, Path, PathBuf};
 /// not an input to it. The build-target domain crate is hashed since 0.5.4 (F0.2): it shapes
 /// `targets.gmap`. Deliberately NOT `embed`: embeddings are query-time and never
 /// a build input.
-const HASHED_ROOTS: &[&str] =
-    &["core", "code-domain", "graph", "engine", "store", "parsers", "activation", "build-domain"];
+const HASHED_ROOTS: &[&str] = &[
+    "core",
+    "code-domain",
+    "graph",
+    "engine",
+    "store",
+    "parsers",
+    "activation",
+    "build-domain",
+];
 
 /// Committed files outside any crate `src` that still change parse output.
 /// `Cargo.lock` is the only thing that captures a tree-sitter GRAMMAR bump —
@@ -81,7 +89,12 @@ fn is_input(p: &Path) -> bool {
         .any(|c| matches!(c, Component::Normal(s) if s == "src"))
 }
 
-fn visit(dir: &Path, ws_root: &Path, files: &mut BTreeMap<String, PathBuf>, dirs: &mut Vec<PathBuf>) {
+fn visit(
+    dir: &Path,
+    ws_root: &Path,
+    files: &mut BTreeMap<String, PathBuf>,
+    dirs: &mut Vec<PathBuf>,
+) {
     dirs.push(dir.to_path_buf());
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -122,7 +135,10 @@ fn main() {
     for root in HASHED_ROOTS {
         let dir = ws_root.join(root);
         if !dir.is_dir() {
-            die(&format!("hashed root {root:?} is missing under {}", ws_root.display()));
+            die(&format!(
+                "hashed root {root:?} is missing under {}",
+                ws_root.display()
+            ));
         }
         visit(&dir, ws_root, &mut files, &mut dirs);
     }
@@ -135,7 +151,9 @@ fn main() {
         } else {
             // Not fatal (an sdist may prune it), but never silent: a missing
             // Cargo.lock means a tree-sitter grammar bump stops moving the stamp.
-            println!("cargo:warning=glia-stamp: {name} not found — grammar bumps will not move the stamp");
+            println!(
+                "cargo:warning=glia-stamp: {name} not found — grammar bumps will not move the stamp"
+            );
         }
     }
 

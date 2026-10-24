@@ -447,7 +447,12 @@ where
     same.report();
     let mut tally = EvidenceTally::default();
     let bound = std::cell::Cell::new(0usize);
-    resolve_calls(&mut g, &all_calls, |g, site| dart::provider_call(g, site, &bound), &mut tally);
+    resolve_calls(
+        &mut g,
+        &all_calls,
+        |g, site| dart::provider_call(g, site, &bound),
+        &mut tally,
+    );
     resolve_refs(&mut g, &all_refs, &mut tally);
     let reads = dart::resolve_member_reads(&mut g, dart::provider_type);
     emit_method_level_implements(&mut g);
@@ -482,7 +487,12 @@ where
     let types = SwiftModuleTypes::new(&g);
     let rewritten = implicit_self(&g, &types, &mut all_calls);
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |g, site| types.resolve(g, site), &mut tally);
+    resolve_calls(
+        &mut g,
+        &all_calls,
+        |g, site| types.resolve(g, site),
+        &mut tally,
+    );
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
     eprintln!("{}", types.marker(rewritten));
@@ -540,7 +550,12 @@ fn elixir_passes(
     same.report();
     let modules = ElixirModules::new(&g, &all_imports);
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |g, site| modules.resolve(g, site), &mut tally);
+    resolve_calls(
+        &mut g,
+        &all_calls,
+        |g, site| modules.resolve(g, site),
+        &mut tally,
+    );
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
     (g, modules, tally)
@@ -587,7 +602,13 @@ pub fn build_rust(
     for site in all_calls {
         match idx.resolve_scoped_bare(&g, &site, &bindings) {
             Some((to, rule)) => {
-                push_edge(&mut g, site.from, to, edge_category::CALLS, rust_ev(rule).line(site.line));
+                push_edge(
+                    &mut g,
+                    site.from,
+                    to,
+                    edge_category::CALLS,
+                    rust_ev(rule).line(site.line),
+                );
                 mod_scoped += usize::from(rule == MOD_ITEM);
             }
             None => rest.push(site),
@@ -659,7 +680,12 @@ where
     let (mut g, all_imports, mut all_calls, mut all_refs) = merge_parses(repo, parses);
     let (defining, members) = bind_out_of_line(&mut g, &mut all_calls, &mut all_refs);
     build_symbol_table(&mut g);
-    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut SameStem::default());
+    resolve_imports_ts(
+        &mut g,
+        &all_imports,
+        &resolve_source,
+        &mut SameStem::default(),
+    );
     let cpp = CppScope::new(&g, &defining);
     let rewritten = implicit_this(&g, &cpp, &mut all_calls);
     let scope = CppCallScope::new(&g, defining);
@@ -988,7 +1014,9 @@ impl SplitStats {
 /// `service::UserService::Get` under `service` -> `UserService`. Any other
 /// shape -> `None`.
 fn go_receiver_of<'a>(method_qname: &'a str, module_qname: &str) -> Option<&'a str> {
-    let rest = method_qname.strip_prefix(module_qname)?.strip_prefix("::")?;
+    let rest = method_qname
+        .strip_prefix(module_qname)?
+        .strip_prefix("::")?;
     let (recv, name) = rest.split_once("::")?;
     (!recv.is_empty() && !name.is_empty() && !name.contains("::")).then_some(recv)
 }
@@ -1031,11 +1059,17 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
         let mut types: HashMap<(&str, &str), Vec<NodeId>> = HashMap::new();
         let mut candidates: Vec<(NodeId, NodeId, &str, &str)> = Vec::new();
         for n in &g.nodes {
-            let Some(&kind) = nav.kind_by_id.get(&n.id) else { continue };
-            let Some((module, module_qname)) = module_of(&n.id) else { continue };
+            let Some(&kind) = nav.kind_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some((module, module_qname)) = module_of(&n.id) else {
+                continue;
+            };
             if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
                 if let Some(name) = nav.name_by_id.get(&n.id) {
-                    let ids = types.entry((go_package_dir(module_qname), name.as_str())).or_default();
+                    let ids = types
+                        .entry((go_package_dir(module_qname), name.as_str()))
+                        .or_default();
                     if !ids.contains(&n.id) {
                         ids.push(n.id);
                     }
@@ -1102,8 +1136,10 @@ fn resolve_go_calls<H>(
     let bound: HashSet<NodeId> = split.bound.iter().map(|&(m, _, _)| m).collect();
     let (file_scoped, rest): (Vec<CallSite>, Vec<CallSite>) =
         calls.iter().cloned().partition(|s| {
-            matches!(s.qualifier, CallQualifier::Bare(_) | CallQualifier::Attribute { .. })
-                && under_bound_method(&g.nav, &bound, s.from)
+            matches!(
+                s.qualifier,
+                CallQualifier::Bare(_) | CallQualifier::Attribute { .. }
+            ) && under_bound_method(&g.nav, &bound, s.from)
         });
     resolve_calls(g, &rest, hook, tally);
     for &(method, module, _) in &split.bound {
@@ -1180,7 +1216,11 @@ fn go_file_modules(g: &RepoGraph) -> Vec<(String, NodeId)> {
         .iter()
         .filter(|(q, id)| g.nav.qname_by_id.get(*id) == Some(*q))
         .map(|(q, id)| {
-            let bare = g.nav.name_by_id.get(id).and_then(|n| bare_module_qname(q, n));
+            let bare = g
+                .nav
+                .name_by_id
+                .get(id)
+                .and_then(|n| bare_module_qname(q, n));
             (bare.unwrap_or_else(|| q.clone()), *id)
         })
         .collect();
@@ -1199,14 +1239,21 @@ fn go_file_modules(g: &RepoGraph) -> Vec<(String, NodeId)> {
 fn go_package_names(g: &RepoGraph) -> BTreeMap<String, String> {
     let mut clauses: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     for (qname, id) in go_file_modules(g) {
-        if qname.rsplit("::").next().is_some_and(|stem| stem.ends_with("_test")) {
+        if qname
+            .rsplit("::")
+            .next()
+            .is_some_and(|stem| stem.ends_with("_test"))
+        {
             continue;
         }
         for fact in g.nav.nav_facts.get(&id).into_iter().flatten() {
             if let NavFact::GoPackageName { name } = fact
                 && !name.ends_with("_test")
             {
-                clauses.entry(go_package_dir(&qname).to_string()).or_default().insert(name);
+                clauses
+                    .entry(go_package_dir(&qname).to_string())
+                    .or_default()
+                    .insert(name);
             }
         }
     }
@@ -1407,7 +1454,10 @@ impl GoPackages {
                 },
             };
             if let Some(&from) = g.symbols.module_by_qname.get(&stmt.from_module) {
-                import_path.entry(from).or_default().insert(local.to_string(), path.clone());
+                import_path
+                    .entry(from)
+                    .or_default()
+                    .insert(local.to_string(), path.clone());
             }
         }
         let mut method_file: HashMap<NodeId, NodeId> = HashMap::new();
@@ -1622,7 +1672,12 @@ impl GoPackages {
                 importers.entry(dir).or_default().insert(own);
             }
         }
-        DirImportGraph { of_file, of_dir, importers, closure: HashMap::new() }
+        DirImportGraph {
+            of_file,
+            of_dir,
+            importers,
+            closure: HashMap::new(),
+        }
     }
 
     /// The reachability-gate view of a type or interface `id`: its file
@@ -1699,7 +1754,12 @@ impl<'p> DirImportGraph<'p> {
     /// whole package. (A `_test.go` side is answered from its own file's
     /// direct imports, [`DirImportGraph::imports_directly`].)
     fn start(&self, side: GoSide<'p>) -> Vec<&'p str> {
-        self.of_dir.get(side.dir).into_iter().flatten().copied().collect()
+        self.of_dir
+            .get(side.dir)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// True when file MODULE `file` imports package dir `dir` itself.
@@ -1733,7 +1793,11 @@ impl<'p> DirImportGraph<'p> {
                 (false, true) => self.imports_directly(i.file, t.dir),
                 _ => false,
             };
-            return if hit { GoReach::Reached } else { GoReach::Unreached };
+            return if hit {
+                GoReach::Reached
+            } else {
+                GoReach::Unreached
+            };
         }
         let shared = match (self.importers.get(t.dir), self.importers.get(i.dir)) {
             (Some(a), Some(b)) => !a.is_disjoint(b),
@@ -1808,12 +1872,19 @@ fn receiver_segments(text: &str) -> Option<Vec<Seg<'_>>> {
             Some(name) => (name, true),
             None => (part, false),
         };
-        let ident = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        let ident = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_alphanumeric() || c == '_');
         if !ident || segs.len() == RECV_MAX_SEGS {
             return None;
         }
-        segs.push(if call { Seg::Call(name) } else { Seg::Ident(name) });
+        segs.push(if call {
+            Seg::Call(name)
+        } else {
+            Seg::Ident(name)
+        });
     }
     Some(segs)
 }
@@ -1929,8 +2000,12 @@ impl ReceiverTally {
     /// `[go-receivers] bound=<n> (return=<a> local=<b> package_var=<c>
     /// field_chain=<d>) typed_unbound=<u>`, once per Go graph.
     fn marker(&self) -> String {
-        let (r, l, p, f) =
-            (self.ret.get(), self.local.get(), self.package_var.get(), self.field_chain.get());
+        let (r, l, p, f) = (
+            self.ret.get(),
+            self.local.get(),
+            self.package_var.get(),
+            self.field_chain.get(),
+        );
         format!(
             "[go-receivers] bound={} (return={r} local={l} package_var={p} field_chain={f}) \
              typed_unbound={}",
@@ -2018,7 +2093,9 @@ impl GoPackages {
             }
             None => {
                 if typed.any {
-                    self.tally.typed_unbound.set(self.tally.typed_unbound.get() + 1);
+                    self.tally
+                        .typed_unbound
+                        .set(self.tally.typed_unbound.get() + 1);
                 }
                 None
             }
@@ -2036,7 +2113,12 @@ impl GoPackages {
             .class_methods
             .get(&ty)
             .and_then(|m| m.get(name).copied())
-            .or_else(|| g.symbols.interface_methods.get(&ty).and_then(|m| m.get(name).copied()));
+            .or_else(|| {
+                g.symbols
+                    .interface_methods
+                    .get(&ty)
+                    .and_then(|m| m.get(name).copied())
+            });
         match own {
             Some(method) => Some((method, false)),
             None => self.promoted.method(ty, name).map(|method| (method, true)),
@@ -2046,7 +2128,10 @@ impl GoPackages {
     /// The file MODULE a node's facts are written in: a split-file method's
     /// own file ([`GoPackages::method_file`]), else its nearest MODULE.
     fn file_of(&self, g: &RepoGraph, id: NodeId) -> Option<NodeId> {
-        self.method_file.get(&id).copied().or_else(|| enclosing_module(&g.nav, id))
+        self.method_file
+            .get(&id)
+            .copied()
+            .or_else(|| enclosing_module(&g.nav, id))
     }
 
     /// The type a receiver chain `segs` read in `scope` evaluates to, with
@@ -2207,7 +2292,11 @@ impl GoPackages {
                 let (method, _) = self.method_on(g, owner, m)?;
                 let ret = g.nav.return_types.get(&method)?;
                 typed.any = true;
-                let at = RecvScope { func: None, module: self.file_of(g, method)?, ..scope };
+                let at = RecvScope {
+                    func: None,
+                    module: self.file_of(g, method)?,
+                    ..scope
+                };
                 let ty = self.type_of_text(g, at, ret, depth + 1, typed)?;
                 Some((Hop::Type(ty), RecvSource::Return))
             }
@@ -2235,7 +2324,11 @@ impl GoPackages {
         }
         let ret = g.nav.return_types.get(&callee)?;
         typed.any = true;
-        let at = RecvScope { func: None, module: self.file_of(g, callee)?, ..scope };
+        let at = RecvScope {
+            func: None,
+            module: self.file_of(g, callee)?,
+            ..scope
+        };
         self.type_of_text(g, at, ret, depth + 1, typed)
     }
 
@@ -2271,7 +2364,11 @@ impl GoPackages {
                 return None;
             }
             typed.any = true;
-            let at = RecvScope { func: None, module: m, ..scope };
+            let at = RecvScope {
+                func: None,
+                module: m,
+                ..scope
+            };
             let ty = self.type_of_text(g, at, t, depth + 1, typed)?;
             match answer {
                 Some(a) if a != ty => return None,
@@ -2323,7 +2420,9 @@ impl GoPackages {
         let chain = segs.first() == Some(&Seg::Ident("self"))
             || segs.iter().any(|s| matches!(s, Seg::Call(_)));
         if chain {
-            return self.chain_type(g, scope, &segs, depth, typed).map(|(ty, _)| ty);
+            return self
+                .chain_type(g, scope, &segs, depth, typed)
+                .map(|(ty, _)| ty);
         }
         match segs.as_slice() {
             [Seg::Ident(pkg), Seg::Ident(name)] => {
@@ -2364,7 +2463,14 @@ impl GoPackages {
         }
         typed.any = true;
         let module = enclosing_module(&g.nav, decl)?;
-        Some((RecvScope { func: None, module, ..scope }, name.as_str()))
+        Some((
+            RecvScope {
+                func: None,
+                module,
+                ..scope
+            },
+            name.as_str(),
+        ))
     }
 
     /// DT.5j: the type of an element (a map's value) of the container the
@@ -2475,7 +2581,14 @@ impl GoPackages {
             if t.is_empty() {
                 return Vec::new();
             }
-            out.push((RecvScope { func: None, module: m, ..scope }, t.clone()));
+            out.push((
+                RecvScope {
+                    func: None,
+                    module: m,
+                    ..scope
+                },
+                t.clone(),
+            ));
         }
         out
     }
@@ -2492,7 +2605,11 @@ impl GoPackages {
             NavFact::SliceResult { elem } => Some(elem.as_str()),
             _ => None,
         })?;
-        let at = RecvScope { func: None, module: self.file_of(g, callee)?, ..scope };
+        let at = RecvScope {
+            func: None,
+            module: self.file_of(g, callee)?,
+            ..scope
+        };
         Some((at, format!("[]{elem}")))
     }
 
@@ -2617,14 +2734,21 @@ impl GoPackages {
     /// Runs after [`GoPackages::bind_type_handlers`] and before
     /// `resolve_refs`; the other refs keep their order.
     fn bind_value_refs(&self, g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> ValueStats {
-        let (values, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
-            std::mem::take(refs).into_iter().partition(|r| r.category == edge_category::USES);
+        let (values, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) = std::mem::take(refs)
+            .into_iter()
+            .partition(|r| r.category == edge_category::USES);
         *refs = rest;
-        let mut stats = ValueStats { refs: values.len(), ..ValueStats::default() };
+        let mut stats = ValueStats {
+            refs: values.len(),
+            ..ValueStats::default()
+        };
         let mut bound: Vec<(UnresolvedRef, NodeId, &'static str)> = Vec::new();
         for r in values {
             let own_type = |to: NodeId| g.nav.parent_of.get(&r.from) == Some(&to);
-            match self.value_target(g, &r).filter(|&(to, _)| to != r.from && !own_type(to)) {
+            match self
+                .value_target(g, &r)
+                .filter(|&(to, _)| to != r.from && !own_type(to))
+            {
                 Some((to, rule)) => bound.push((r, to, rule)),
                 None => stats.dropped += 1,
             }
@@ -2667,7 +2791,12 @@ impl GoPackages {
         };
         match &r.qualifier {
             CallQualifier::Bare(name) => {
-                let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(name)).copied();
+                let own = g
+                    .symbols
+                    .module_symbols
+                    .get(&module)
+                    .and_then(|s| s.get(name))
+                    .copied();
                 let hit = own.or_else(|| {
                     self.unique_in(g, caller_dir, name, module, scope.with_tests(caller_dir))
                 })?;
@@ -2748,7 +2877,12 @@ enum TypeHandler {
     /// named as written (CI.4, and a parser-rewritten `T`, DF.16), or
     /// `local_type_method` for another package's `pkg.T` or a call result
     /// `F()` / `pkg.F()` (DF.16).
-    Bound { method: NodeId, promoted: bool, other_file: bool, rule: &'static str },
+    Bound {
+        method: NodeId,
+        promoted: bool,
+        other_file: bool,
+        rule: &'static str,
+    },
     /// DT.5j: a package-qualified handler `pkg.F` whose FUNCTION sits in a
     /// file of the imported package other than the one the import binds.
     Function(NodeId),
@@ -2780,7 +2914,12 @@ impl GoPackages {
         let mut files: Option<SiteFiles> = None;
         for r in std::mem::take(refs) {
             match self.type_handler(g, &r) {
-                TypeHandler::Bound { method, promoted, other_file, rule } => {
+                TypeHandler::Bound {
+                    method,
+                    promoted,
+                    other_file,
+                    rule,
+                } => {
                     let files = files.get_or_insert_with(|| SiteFiles::of(g));
                     let ev = files.place(go_ev(rule), &r);
                     push_edge(g, r.from, method, edge_category::HANDLED_BY, ev);
@@ -2835,8 +2974,14 @@ impl GoPackages {
             return TypeHandler::Generic;
         };
         let module = r.from_module;
-        let imported = self.import_path.get(&module).is_some_and(|m| m.contains_key(base))
-            || g.symbols.module_import_bindings.get(&module).is_some_and(|m| m.contains_key(base));
+        let imported = self
+            .import_path
+            .get(&module)
+            .is_some_and(|m| m.contains_key(base))
+            || g.symbols
+                .module_import_bindings
+                .get(&module)
+                .is_some_and(|m| m.contains_key(base));
         if imported {
             return self.package_handler(g, module, base, name);
         }
@@ -2844,7 +2989,11 @@ impl GoPackages {
             return self.local_type_handler(g, module, base, name);
         }
         let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
-        let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(base));
+        let own = g
+            .symbols
+            .module_symbols
+            .get(&module)
+            .and_then(|s| s.get(base));
         let (ty, other_file) = match own.copied().filter(is_struct) {
             Some(ty) => (ty, false),
             None => {
@@ -2852,21 +3001,31 @@ impl GoPackages {
                     return TypeHandler::Generic;
                 };
                 let with_tests = self.tests.contains(&module);
-                match self.unique_type_in(g, dir, base, with_tests).filter(is_struct) {
+                match self
+                    .unique_type_in(g, dir, base, with_tests)
+                    .filter(is_struct)
+                {
                     Some(ty) => (ty, true),
                     None => return TypeHandler::Generic,
                 }
             }
         };
-        let declares = g.symbols.class_methods.get(&ty).is_some_and(|m| m.contains_key(name));
+        let declares = g
+            .symbols
+            .class_methods
+            .get(&ty)
+            .is_some_and(|m| m.contains_key(name));
         if !other_file && declares {
             return TypeHandler::Generic;
         }
         let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
         match self.method_on(g, ty, name) {
-            Some((method, promoted)) if on_struct(&method) => {
-                TypeHandler::Bound { method, promoted, other_file, rule: "package_type_method" }
-            }
+            Some((method, promoted)) if on_struct(&method) => TypeHandler::Bound {
+                method,
+                promoted,
+                other_file,
+                rule: "package_type_method",
+            },
             _ => TypeHandler::Unbound,
         }
     }
@@ -2878,8 +3037,18 @@ impl GoPackages {
     /// ([`GoPackages::imported_dir`] + [`GoPackages::unique_in`], the lookup a
     /// `pkg.F(..)` call takes): a Go package is its directory (LA.13b), and
     /// the import binds only one of its files. None (or two) -> generic.
-    fn package_handler(&self, g: &RepoGraph, module: NodeId, base: &str, name: &str) -> TypeHandler {
-        let bound = g.symbols.module_import_bindings.get(&module).and_then(|b| b.get(base));
+    fn package_handler(
+        &self,
+        g: &RepoGraph,
+        module: NodeId,
+        base: &str,
+        name: &str,
+    ) -> TypeHandler {
+        let bound = g
+            .symbols
+            .module_import_bindings
+            .get(&module)
+            .and_then(|b| b.get(base));
         let declared = bound
             .and_then(|f| g.symbols.module_symbols.get(f))
             .is_some_and(|s| s.contains_key(name));
@@ -2892,7 +3061,10 @@ impl GoPackages {
         let same_dir = self.dir_of.get(&module).is_some_and(|d| d == dir);
         let with_tests = self.tests.contains(&module) && same_dir;
         let is_fn = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::FUNCTION);
-        match self.unique_in(g, dir, name, module, with_tests).filter(is_fn) {
+        match self
+            .unique_in(g, dir, name, module, with_tests)
+            .filter(is_fn)
+        {
             Some(function) => TypeHandler::Function(function),
             None => TypeHandler::Generic,
         }
@@ -2941,7 +3113,10 @@ impl GoPackages {
         };
         let mut typed = Typed::default();
         let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
-        let Some(ty) = self.type_of_text(g, scope, base, 0, &mut typed).filter(is_struct) else {
+        let Some(ty) = self
+            .type_of_text(g, scope, base, 0, &mut typed)
+            .filter(is_struct)
+        else {
             return TypeHandler::Generic;
         };
         let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
@@ -2993,7 +3168,13 @@ impl GoEmbedBinds {
     /// `[go-embeds]` counters from `promoted` (read after the calls bound).
     fn push(self, g: &mut RepoGraph, promoted: &GoPromoted) -> GoEmbedStats {
         for (from, to, rule, line) in self.bound {
-            push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule).line(line));
+            push_edge(
+                g,
+                from,
+                to,
+                edge_category::INHERITS_FROM,
+                go_ev(rule).line(line),
+            );
         }
         g.unresolved_refs.extend(self.unbound);
         GoEmbedStats {
@@ -3075,8 +3256,11 @@ fn bind_go_embeds(
     imports: &[ImportStmt],
     package_names: &BTreeMap<String, String>,
 ) -> GoEmbedBinds {
-    let mut out =
-        GoEmbedBinds { bound: Vec::new(), unbound: Vec::new(), stats: GoEmbedStats::default() };
+    let mut out = GoEmbedBinds {
+        bound: Vec::new(),
+        unbound: Vec::new(),
+        stats: GoEmbedStats::default(),
+    };
     if embeds.is_empty() {
         return out;
     }
@@ -3098,8 +3282,14 @@ fn bind_go_embeds(
             continue;
         };
         let dir = go_package_dir(module_qname);
-        by_dir_name.entry((dir, name.as_str())).or_default().push((n.id, kind));
-        by_name.entry(name.as_str()).or_default().push((dir, n.id, kind));
+        by_dir_name
+            .entry((dir, name.as_str()))
+            .or_default()
+            .push((n.id, kind));
+        by_name
+            .entry(name.as_str())
+            .or_default()
+            .push((dir, n.id, kind));
     }
     // (importing file's MODULE qname, local package name) -> import path; an
     // un-aliased import under its package clause name, as GoPackages names
@@ -3134,14 +3324,18 @@ fn bind_go_embeds(
             out.unbound.push(r.clone());
             continue;
         };
-        let module_qname = nav.qname_by_id.get(&r.from_module).map_or("", String::as_str);
+        let module_qname = nav
+            .qname_by_id
+            .get(&r.from_module)
+            .map_or("", String::as_str);
         let hit = match &r.qualifier {
             CallQualifier::Bare(name) => by_dir_name
                 .get(&(go_package_dir(module_qname), name.as_str()))
                 .and_then(|ids| only(from_kind, &mut ids.iter().copied()))
                 .map(|hit| (hit, "embed_package")),
-            CallQualifier::Attribute { base, name } => {
-                import_paths.get(&(module_qname, base.as_str())).and_then(|&path| {
+            CallQualifier::Attribute { base, name } => import_paths
+                .get(&(module_qname, base.as_str()))
+                .and_then(|&path| {
                     let suffix = format!("::{path}");
                     let mut ids = by_name
                         .get(name.as_str())
@@ -3152,8 +3346,7 @@ fn bind_go_embeds(
                         })
                         .map(|&(_, id, kind)| (id, kind));
                     only(from_kind, &mut ids).map(|hit| (hit, "embed_import"))
-                })
-            }
+                }),
             _ => None,
         };
         if from_kind == node_kind::STRUCT {
@@ -3231,8 +3424,11 @@ impl GoPromoted {
             list.sort_unstable_by_key(|id| id.0);
             list.dedup();
         }
-        let mut structs: Vec<NodeId> =
-            embeds.keys().copied().filter(|&id| kind(id) == Some(node_kind::STRUCT)).collect();
+        let mut structs: Vec<NodeId> = embeds
+            .keys()
+            .copied()
+            .filter(|&id| kind(id) == Some(node_kind::STRUCT))
+            .collect();
         structs.sort_unstable_by_key(|id| id.0);
         let field_names = |s: NodeId| -> Vec<&str> {
             let fields = g.nav.field_types.get(&s).into_iter();
@@ -3505,7 +3701,11 @@ impl AliasStats {
     /// sigs_rewritten=R (interface=I) ambiguous=X shadowed=S`, `<first>`
     /// written `<root>` for the repository-root dir.
     fn marker(&self) -> String {
-        let first = if self.first.is_empty() { "<root>" } else { self.first.as_str() };
+        let first = if self.first.is_empty() {
+            "<root>"
+        } else {
+            self.first.as_str()
+        };
         format!(
             "[go-alias] {first}: aliases={} packages={} sigs_rewritten={} (interface={}) \
              ambiguous={} shadowed={}",
@@ -3543,7 +3743,11 @@ impl GoPackages {
             .flat_map(|locals| locals.keys())
             .filter_map(|local| self.imported_dir(g, file, local))
             .collect();
-        Some(AliasScope { dir, imported, test: self.tests.contains(&file) })
+        Some(AliasScope {
+            dir,
+            imported,
+            test: self.tests.contains(&file),
+        })
     }
 }
 
@@ -3584,12 +3788,14 @@ impl<'a> AliasTable<'a> {
             };
             for fact in facts {
                 if let NavFact::TypeAlias { name, shape } = fact {
-                    defs.entry((dir.as_str(), name.as_str())).or_default().push(AliasDef {
-                        module: *module,
-                        name: name.as_str(),
-                        shape: shape.as_str(),
-                        test: packages.tests.contains(module),
-                    });
+                    defs.entry((dir.as_str(), name.as_str()))
+                        .or_default()
+                        .push(AliasDef {
+                            module: *module,
+                            name: name.as_str(),
+                            shape: shape.as_str(),
+                            test: packages.tests.contains(module),
+                        });
                 }
             }
         }
@@ -3605,12 +3811,18 @@ impl<'a> AliasTable<'a> {
             if *kind != node_kind::STRUCT && *kind != node_kind::INTERFACE {
                 continue;
             }
-            let dir = packages.file_of(g, *id).and_then(|f| packages.dir_of.get(&f));
+            let dir = packages
+                .file_of(g, *id)
+                .and_then(|f| packages.dir_of.get(&f));
             if let (Some(dir), Some(name)) = (dir, g.nav.name_by_id.get(id)) {
                 own_types.insert((dir.as_str(), name.as_str()));
             }
         }
-        Some(AliasTable { defs, names, own_types })
+        Some(AliasTable {
+            defs,
+            names,
+            own_types,
+        })
     }
 
     /// The `(aliases, packages, first)` of the marker.
@@ -3697,7 +3909,8 @@ impl<'a> AliasResolver<'a> {
 
     /// Whether some token of `text` is an alias name.
     fn names_any(&self, text: &str) -> bool {
-        text.split(|c: char| !is_go_ident_char(c)).any(|t| self.table.names.contains(t))
+        text.split(|c: char| !is_go_ident_char(c))
+            .any(|t| self.table.names.contains(t))
     }
 
     /// `text` with each alias name resolved in `scope` replaced by its
@@ -3845,7 +4058,13 @@ impl<'a> AliasResolver<'a> {
         match res {
             Ok((text, h)) => {
                 let height = h + 1;
-                self.memo.insert(key, AliasMemo::Done { text: text.clone(), height });
+                self.memo.insert(
+                    key,
+                    AliasMemo::Done {
+                        text: text.clone(),
+                        height,
+                    },
+                );
                 Ok((text, height))
             }
             Err(AliasFail::Cycle) => {
@@ -3882,7 +4101,12 @@ fn resolve_go_alias_sigs(g: &mut RepoGraph, packages: &GoPackages) -> Option<Ali
     let (rewrites, stats) = {
         let table = AliasTable::build(g, packages)?;
         let (aliases, dirs, first) = table.counts();
-        let mut stats = AliasStats { first, aliases, packages: dirs, ..AliasStats::default() };
+        let mut stats = AliasStats {
+            first,
+            aliases,
+            packages: dirs,
+            ..AliasStats::default()
+        };
         let mut methods: Vec<NodeId> = g.nav.method_sigs.keys().copied().collect();
         methods.sort_unstable_by_key(|id| id.0);
         let mut resolver = AliasResolver::new(g, packages, table);
@@ -3894,7 +4118,9 @@ fn resolve_go_alias_sigs(g: &mut RepoGraph, packages: &GoPackages) -> Option<Ali
             if !resolver.names_any(old) {
                 continue;
             }
-            let Some(scope) = packages.file_of(g, m).and_then(|f| packages.alias_scope(g, f))
+            let Some(scope) = packages
+                .file_of(g, m)
+                .and_then(|f| packages.alias_scope(g, f))
             else {
                 continue;
             };
@@ -3905,7 +4131,11 @@ fn resolve_go_alias_sigs(g: &mut RepoGraph, packages: &GoPackages) -> Option<Ali
                 continue;
             }
             stats.sigs_rewritten += 1;
-            let parent = g.nav.parent_of.get(&m).and_then(|p| g.nav.kind_by_id.get(p));
+            let parent = g
+                .nav
+                .parent_of
+                .get(&m)
+                .and_then(|p| g.nav.kind_by_id.get(p));
             if parent == Some(&node_kind::INTERFACE) {
                 stats.interface += 1;
             }
@@ -4071,13 +4301,17 @@ fn emit_go_implicit_implements(
                 continue;
             }
             let known = match &r.qualifier {
-                CallQualifier::Bare(name) => {
-                    GO_PREDECLARED_IFACES.iter().find(|(n, _)| n == name).map(|(_, ms)| *ms)
-                }
+                CallQualifier::Bare(name) => GO_PREDECLARED_IFACES
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ms)| *ms),
                 _ => None,
             };
             match known {
-                Some(ms) => predeclared.entry(r.from).or_default().extend(ms.iter().copied()),
+                Some(ms) => predeclared
+                    .entry(r.from)
+                    .or_default()
+                    .extend(ms.iter().copied()),
                 None => {
                     open.insert(r.from);
                 }
@@ -4097,7 +4331,14 @@ fn emit_go_implicit_implements(
             let set = have_sets.entry(*owner).or_default();
             for (name, mid) in methods {
                 let sig = nav.method_sigs.get(mid).map(String::as_str);
-                set.insert(name.as_str(), Have { dir, sig, src: HaveSrc::Own });
+                set.insert(
+                    name.as_str(),
+                    Have {
+                        dir,
+                        sig,
+                        src: HaveSrc::Own,
+                    },
+                );
             }
         }
         for (ty, promoted) in packages.promoted.method_sets() {
@@ -4128,7 +4369,11 @@ fn emit_go_implicit_implements(
             };
             let set = have_sets.entry(r.from).or_default();
             for &(name, sig) in *methods {
-                let error_m = Have { dir: None, sig: Some(sig), src: HaveSrc::Predeclared };
+                let error_m = Have {
+                    dir: None,
+                    sig: Some(sig),
+                    src: HaveSrc::Predeclared,
+                };
                 match set.get(name).map(|h| h.src) {
                     None => {
                         set.insert(name, error_m);
@@ -4175,7 +4420,8 @@ fn emit_go_implicit_implements(
                         known = false;
                         break 'walk;
                     };
-                    set.entry(key).or_insert_with(|| nav.method_sigs.get(mid).map(String::as_str));
+                    set.entry(key)
+                        .or_insert_with(|| nav.method_sigs.get(mid).map(String::as_str));
                 }
                 for &(name, sig) in predeclared.get(&i).into_iter().flatten() {
                     set.entry((name, None)).or_insert(Some(sig));
@@ -4208,7 +4454,9 @@ fn emit_go_implicit_implements(
                 // An unexported name matches a method declared in the
                 // interface's package, wherever it is promoted from.
                 let covers = set.keys().all(|&(name, pkg)| {
-                    methods.get(name).is_some_and(|h| pkg.is_none_or(|p| h.dir == Some(p)))
+                    methods
+                        .get(name)
+                        .is_some_and(|h| pkg.is_none_or(|p| h.dir == Some(p)))
                 });
                 if !covers {
                     continue;
@@ -4243,7 +4491,11 @@ fn emit_go_implicit_implements(
                     }
                     continue;
                 }
-                let used = || set.keys().filter_map(|(name, _)| methods.get(name)).map(|h| h.src);
+                let used = || {
+                    set.keys()
+                        .filter_map(|(name, _)| methods.get(name))
+                        .map(|h| h.src)
+                };
                 pairs.push(ImplicitPair {
                     ty,
                     iface,
@@ -5114,7 +5366,10 @@ impl ElixirModules {
                 continue;
             };
             // Node ids are unique keys, so a second entry is a second node.
-            by_name.entry(full.clone()).and_modify(|hit| *hit = None).or_insert(Some(id));
+            by_name
+                .entry(full.clone())
+                .and_modify(|hit| *hit = None)
+                .or_insert(Some(id));
             full_of.insert(id, full);
         }
         let mut nested_heads: HashMap<NodeId, BTreeSet<String>> = HashMap::new();
@@ -5124,7 +5379,10 @@ impl ElixirModules {
                 && let Some(seg) = own_segment(nav, id)
             {
                 let head = seg.split('.').next().unwrap_or(seg);
-                nested_heads.entry(*parent).or_default().insert(head.to_string());
+                nested_heads
+                    .entry(*parent)
+                    .or_default()
+                    .insert(head.to_string());
             }
         }
         let mut aliases: HashMap<NodeId, BTreeMap<String, Option<String>>> = HashMap::new();
@@ -5186,7 +5444,10 @@ impl ElixirModules {
                 None => (path, "alias_path"),
             }
         } else if let Some(outer) = self.nested_alias(g, site.from, head) {
-            (format!("{}.{base}", self.full_of.get(&outer)?), "nested_alias")
+            (
+                format!("{}.{base}", self.full_of.get(&outer)?),
+                "nested_alias",
+            )
         } else {
             (base.clone(), "full_name")
         };
@@ -5233,7 +5494,11 @@ impl ElixirModules {
         let mut cur = from;
         for _ in 0..=g.nav.parent_of.len() {
             cur = *g.nav.parent_of.get(&cur)?;
-            if self.nested_heads.get(&cur).is_some_and(|heads| heads.contains(head)) {
+            if self
+                .nested_heads
+                .get(&cur)
+                .is_some_and(|heads| heads.contains(head))
+            {
                 return Some(cur);
             }
         }
@@ -5360,7 +5625,12 @@ mod tests {
         let mut foo_nav = CodeNav::default();
         foo_nav.record(foo_id, "foo", "com::foo", node_kind::MODULE, None);
         let foo = FileParse {
-            nodes: vec![Node { id: foo_id, repo, confidence: Confidence::Strong, cells: vec![] }],
+            nodes: vec![Node {
+                id: foo_id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            }],
             edges: vec![],
             imports: vec![ImportStmt {
                 from_module: "com::foo".to_string(),
@@ -5380,11 +5650,27 @@ mod tests {
 
         let mut bar_nav = CodeNav::default();
         bar_nav.record(bar_id, "bar", "com::bar", node_kind::MODULE, None);
-        bar_nav.record(helper_id, "Helper", "com::bar::Helper", node_kind::CLASS, Some(bar_id));
+        bar_nav.record(
+            helper_id,
+            "Helper",
+            "com::bar::Helper",
+            node_kind::CLASS,
+            Some(bar_id),
+        );
         let bar = FileParse {
             nodes: vec![
-                Node { id: bar_id, repo, confidence: Confidence::Strong, cells: vec![] },
-                Node { id: helper_id, repo, confidence: Confidence::Strong, cells: vec![] },
+                Node {
+                    id: bar_id,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
+                Node {
+                    id: helper_id,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
             ],
             edges: vec![],
             imports: vec![],
@@ -5396,9 +5682,9 @@ mod tests {
 
         let g = build_dotted(repo, vec![foo, bar]).unwrap();
         assert!(
-            g.edges.iter().any(|e|
-                e.from == foo_id && e.to == bar_id && e.category == edge_category::IMPORTS
-            ),
+            g.edges.iter().any(|e| e.from == foo_id
+                && e.to == bar_id
+                && e.category == edge_category::IMPORTS),
             "expected IMPORTS edge from com::foo to com::bar"
         );
         let foo_bindings = g.symbols.module_import_bindings.get(&foo_id).unwrap();
@@ -5414,7 +5700,12 @@ mod tests {
         let mut app_nav = CodeNav::default();
         app_nav.record(app_id, "app", "app", node_kind::MODULE, None);
         let app = FileParse {
-            nodes: vec![Node { id: app_id, repo, confidence: Confidence::Strong, cells: vec![] }],
+            nodes: vec![Node {
+                id: app_id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            }],
             edges: vec![],
             imports: vec![ImportStmt {
                 from_module: "app".to_string(),
@@ -5433,7 +5724,12 @@ mod tests {
         let mut foo_bar_nav = CodeNav::default();
         foo_bar_nav.record(foo_bar_id, "bar", "foo::bar", node_kind::MODULE, None);
         let foo_bar = FileParse {
-            nodes: vec![Node { id: foo_bar_id, repo, confidence: Confidence::Strong, cells: vec![] }],
+            nodes: vec![Node {
+                id: foo_bar_id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            }],
             edges: vec![],
             imports: vec![],
             calls: vec![],
@@ -5444,9 +5740,9 @@ mod tests {
 
         let g = build_ruby(repo, vec![app, foo_bar]).unwrap();
         assert!(
-            g.edges.iter().any(|e|
-                e.from == app_id && e.to == foo_bar_id && e.category == edge_category::IMPORTS
-            ),
+            g.edges.iter().any(|e| e.from == app_id
+                && e.to == foo_bar_id
+                && e.category == edge_category::IMPORTS),
             "expected IMPORTS edge from app to foo::bar (slash → ::)"
         );
     }
@@ -5461,23 +5757,69 @@ mod tests {
         let r = repo();
         let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "svc");
         let iface = NodeId::from_parts(GRAPH_TYPE, r, node_kind::INTERFACE, "svc::IUserService");
-        let iface_get =
-            NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::IUserService::GetById");
+        let iface_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            r,
+            node_kind::METHOD,
+            "svc::IUserService::GetById",
+        );
         let cls = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "svc::UserService");
-        let cls_get =
-            NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::UserService::GetById");
+        let cls_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            r,
+            node_kind::METHOD,
+            "svc::UserService::GetById",
+        );
         let cls_load =
             NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::UserService::Load");
         let mut nav = CodeNav::default();
         nav.record(m, "svc", "svc", node_kind::MODULE, None);
-        nav.record(iface, "IUserService", "svc::IUserService", node_kind::INTERFACE, Some(m));
-        nav.record(iface_get, "GetById", "svc::IUserService::GetById", node_kind::METHOD, Some(iface));
-        nav.record(cls, "UserService", "svc::UserService", node_kind::CLASS, Some(m));
-        nav.record(cls_get, "GetById", "svc::UserService::GetById", node_kind::METHOD, Some(cls));
-        nav.record(cls_load, "Load", "svc::UserService::Load", node_kind::METHOD, Some(cls));
-        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        nav.record(
+            iface,
+            "IUserService",
+            "svc::IUserService",
+            node_kind::INTERFACE,
+            Some(m),
+        );
+        nav.record(
+            iface_get,
+            "GetById",
+            "svc::IUserService::GetById",
+            node_kind::METHOD,
+            Some(iface),
+        );
+        nav.record(
+            cls,
+            "UserService",
+            "svc::UserService",
+            node_kind::CLASS,
+            Some(m),
+        );
+        nav.record(
+            cls_get,
+            "GetById",
+            "svc::UserService::GetById",
+            node_kind::METHOD,
+            Some(cls),
+        );
+        nav.record(
+            cls_load,
+            "Load",
+            "svc::UserService::Load",
+            node_kind::METHOD,
+            Some(cls),
+        );
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let file = FileParse {
-            nodes: [m, iface, iface_get, cls, cls_get, cls_load].into_iter().map(node).collect(),
+            nodes: [m, iface, iface_get, cls, cls_get, cls_load]
+                .into_iter()
+                .map(node)
+                .collect(),
             edges: vec![],
             imports: vec![],
             calls: vec![],
@@ -5509,8 +5851,14 @@ mod tests {
         let (file, [iface, iface_get, cls, cls_get, _]) = iface_and_impl();
         let g = build_dotted(repo(), vec![file]).unwrap();
         assert!(!g.symbols.class_methods.contains_key(&iface));
-        assert_eq!(g.symbols.interface_methods[&iface].get("GetById").copied(), Some(iface_get));
-        assert_eq!(g.symbols.class_methods[&cls].get("GetById").copied(), Some(cls_get));
+        assert_eq!(
+            g.symbols.interface_methods[&iface].get("GetById").copied(),
+            Some(iface_get)
+        );
+        assert_eq!(
+            g.symbols.class_methods[&cls].get("GetById").copied(),
+            Some(cls_get)
+        );
         assert!(!g.symbols.interface_methods.contains_key(&cls));
     }
 
@@ -5534,7 +5882,11 @@ mod tests {
             assert!(implements(&g).contains(&(cls_get, iface_get)));
             let before = g.edges.len();
             crate::calls::emit_method_level_implements(&mut g);
-            assert_eq!(g.edges.len(), before, "re-running the pass must not duplicate");
+            assert_eq!(
+                g.edges.len(),
+                before,
+                "re-running the pass must not duplicate"
+            );
         }
         let (file, [_, iface_get, _, cls_get, _]) = iface_and_impl();
         let g = build_typescript(repo(), vec![file], |_, _| None).unwrap();
@@ -5545,7 +5897,11 @@ mod tests {
         assert!(implements(&g).contains(&(cls_get, iface_get)));
         let before = g.edges.len();
         crate::calls::emit_method_level_implements(&mut g);
-        assert_eq!(g.edges.len(), before, "re-running the pass must not duplicate");
+        assert_eq!(
+            g.edges.len(),
+            before,
+            "re-running the pass must not duplicate"
+        );
     }
 
     /// Two implementors of one interface, several methods: the emitted edge
@@ -5585,7 +5941,12 @@ mod tests {
                 ids.push(id);
             }
         }
-        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let file = FileParse {
             nodes: ids.into_iter().map(node).collect(),
             edges,
@@ -5596,7 +5957,10 @@ mod tests {
             properties: HashSet::new(),
         };
         let g = build_dotted(r, vec![file]).unwrap();
-        let method_level: Vec<_> = implements(&g).into_iter().filter(|(_, to)| *to != iface).collect();
+        let method_level: Vec<_> = implements(&g)
+            .into_iter()
+            .filter(|(_, to)| *to != iface)
+            .collect();
         assert_eq!(method_level.len(), 8, "2 implementors x 4 methods");
         let mut sorted = method_level.clone();
         sorted.sort_unstable_by_key(|(a, b)| (a.0, b.0));
@@ -5613,8 +5977,19 @@ mod tests {
         let r = repo();
         let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "svc");
         let route = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, "svc::GET /users/{id}");
-        file.nav.record(route, "GET /users/{id}", "svc::GET /users/{id}", node_kind::ROUTE, Some(m));
-        file.nodes.push(Node { id: route, repo: r, confidence: Confidence::Strong, cells: vec![] });
+        file.nav.record(
+            route,
+            "GET /users/{id}",
+            "svc::GET /users/{id}",
+            node_kind::ROUTE,
+            Some(m),
+        );
+        file.nodes.push(Node {
+            id: route,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
         file.refs.push(UnresolvedRef {
             from: route,
             from_module: m,
@@ -5646,23 +6021,36 @@ mod tests {
     /// MODULE (a METHOD there is one whose receiver type this file does not
     /// declare) and `Some(q)` names an earlier item of the same file. Every
     /// item gets its parent -> item DEFINES edge.
-    fn go_file(
-        module: &str,
-        items: &[(glia_core::NodeKindId, &str, Option<&str>)],
-    ) -> FileParse {
+    fn go_file(module: &str, items: &[(glia_core::NodeKindId, &str, Option<&str>)]) -> FileParse {
         let r = repo();
         let m = gid(node_kind::MODULE, module);
         let mut nav = CodeNav::default();
-        nav.record(m, module.rsplit("::").next().unwrap_or(module), module, node_kind::MODULE, None);
+        nav.record(
+            m,
+            module.rsplit("::").next().unwrap_or(module),
+            module,
+            node_kind::MODULE,
+            None,
+        );
         let mut ids: HashMap<&str, NodeId> = HashMap::new();
-        let mut nodes = vec![Node { id: m, repo: r, confidence: Confidence::Strong, cells: vec![] }];
+        let mut nodes = vec![Node {
+            id: m,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        }];
         let mut edges = vec![];
         for &(kind, qname, parent) in items {
             let id = gid(kind, qname);
             let parent_id = parent.map_or(m, |p| ids[p]);
             let name = qname.rsplit("::").next().unwrap_or(qname);
             nav.record(id, name, qname, kind, Some(parent_id));
-            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             edges.push(glia_core::Edge {
                 from: parent_id,
                 to: id,
@@ -5683,8 +6071,15 @@ mod tests {
         }
     }
 
-    fn has_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> bool {
-        g.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
+    fn has_edge(
+        g: &RepoGraph,
+        from: NodeId,
+        to: NodeId,
+        category: glia_core::EdgeCategoryId,
+    ) -> bool {
+        g.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == category)
     }
 
     /// The fixtures/go-split-receiver shape: `types.go` declares `UserRepo`
@@ -5696,11 +6091,19 @@ mod tests {
             "types",
             &[
                 (node_kind::STRUCT, "types::UserRepo", None),
-                (node_kind::METHOD, "types::UserRepo::Find", Some("types::UserRepo")),
+                (
+                    node_kind::METHOD,
+                    "types::UserRepo::Find",
+                    Some("types::UserRepo"),
+                ),
                 (node_kind::STRUCT, "types::UserService", None),
             ],
         );
-        types.nav.record_field_type(gid(node_kind::STRUCT, "types::UserService"), "repo", "UserRepo");
+        types.nav.record_field_type(
+            gid(node_kind::STRUCT, "types::UserService"),
+            "repo",
+            "UserRepo",
+        );
         let mut service = go_file(
             "service",
             &[
@@ -5710,7 +6113,11 @@ mod tests {
         );
         let get = gid(node_kind::METHOD, "service::UserService::Get");
         service.calls = vec![
-            CallSite { from: get, qualifier: CallQualifier::SelfMethod("audit".to_string()), line: 0 },
+            CallSite {
+                from: get,
+                qualifier: CallQualifier::SelfMethod("audit".to_string()),
+                line: 0,
+            },
             CallSite {
                 from: get,
                 qualifier: CallQualifier::ComplexReceiver {
@@ -5729,8 +6136,10 @@ mod tests {
     /// `module_symbols`, and its self-call and field-typed call both bind.
     #[test]
     fn split_method_rebinds_under_its_struct_and_resolves_calls() {
-        let (svc_struct, find) =
-            (gid(node_kind::STRUCT, "types::UserService"), gid(node_kind::METHOD, "types::UserRepo::Find"));
+        let (svc_struct, find) = (
+            gid(node_kind::STRUCT, "types::UserService"),
+            gid(node_kind::METHOD, "types::UserRepo::Find"),
+        );
         let (service, get, audit) = (
             gid(node_kind::MODULE, "service"),
             gid(node_kind::METHOD, "service::UserService::Get"),
@@ -5739,7 +6148,10 @@ mod tests {
 
         let (mut g, _, _, _) = merge_parses(repo(), fixture_shape());
         let stats = bind_split_go_receivers(&mut g);
-        assert_eq!(stats.bound, vec![(get, service, svc_struct), (audit, service, svc_struct)]);
+        assert_eq!(
+            stats.bound,
+            vec![(get, service, svc_struct), (audit, service, svc_struct)]
+        );
         assert_eq!(
             stats.marker().as_deref(),
             Some("[go-recv] split-file methods bound: 2 (ambiguous=0 unmatched=0)")
@@ -5751,13 +6163,33 @@ mod tests {
         assert_eq!(g.nav.children_of[&svc_struct], vec![get, audit]);
         assert!(!g.nav.children_of[&service].contains(&get));
         for m in [get, audit] {
-            assert!(has_edge(&g, svc_struct, m, edge_category::DEFINES), "struct -> method DEFINES");
-            assert!(has_edge(&g, service, m, edge_category::DEFINES), "the file still defines it");
+            assert!(
+                has_edge(&g, svc_struct, m, edge_category::DEFINES),
+                "struct -> method DEFINES"
+            );
+            assert!(
+                has_edge(&g, service, m, edge_category::DEFINES),
+                "the file still defines it"
+            );
         }
-        assert_eq!(g.symbols.class_methods[&svc_struct].get("Get").copied(), Some(get));
-        assert!(g.symbols.module_symbols.get(&service).is_none_or(|s| !s.contains_key("Get")));
-        assert!(has_edge(&g, get, audit, edge_category::CALLS), "SelfMethod across files");
-        assert!(has_edge(&g, get, find, edge_category::CALLS), "field-typed call across files");
+        assert_eq!(
+            g.symbols.class_methods[&svc_struct].get("Get").copied(),
+            Some(get)
+        );
+        assert!(
+            g.symbols
+                .module_symbols
+                .get(&service)
+                .is_none_or(|s| !s.contains_key("Get"))
+        );
+        assert!(
+            has_edge(&g, get, audit, edge_category::CALLS),
+            "SelfMethod across files"
+        );
+        assert!(
+            has_edge(&g, get, find, edge_category::CALLS),
+            "field-typed call across files"
+        );
         assert!(g.unresolved_calls.is_empty());
     }
 
@@ -5774,11 +6206,26 @@ mod tests {
         ];
         let (mut g, _, _, _) = merge_parses(repo(), parses);
         let stats = bind_split_go_receivers(&mut g);
-        let (b_m, c_m) = (gid(node_kind::METHOD, "b::svc::T::M"), gid(node_kind::METHOD, "c::svc::T::M"));
-        assert_eq!(stats.bound, vec![(b_m, gid(node_kind::MODULE, "b::svc"), gid(node_kind::STRUCT, "b::types::T"))]);
+        let (b_m, c_m) = (
+            gid(node_kind::METHOD, "b::svc::T::M"),
+            gid(node_kind::METHOD, "c::svc::T::M"),
+        );
+        assert_eq!(
+            stats.bound,
+            vec![(
+                b_m,
+                gid(node_kind::MODULE, "b::svc"),
+                gid(node_kind::STRUCT, "b::types::T")
+            )]
+        );
         assert_eq!((stats.ambiguous, stats.unmatched), (0, 1));
         assert_eq!(g.nav.parent_of[&c_m], gid(node_kind::MODULE, "c::svc"));
-        assert!(g.nav.children_of.get(&gid(node_kind::STRUCT, "a::types::T")).is_none_or(|k| k.is_empty()));
+        assert!(
+            g.nav
+                .children_of
+                .get(&gid(node_kind::STRUCT, "a::types::T"))
+                .is_none_or(|k| k.is_empty())
+        );
     }
 
     /// Two files of one directory each declaring `type T struct` (a tree that
@@ -5800,7 +6247,10 @@ mod tests {
             Some("[go-recv] split-file methods bound: 0 (ambiguous=1 unmatched=0)")
         );
         assert_eq!(g.edges.len(), before);
-        assert_eq!(g.nav.parent_of[&gid(node_kind::METHOD, "x::three::T::M")], gid(node_kind::MODULE, "x::three"));
+        assert_eq!(
+            g.nav.parent_of[&gid(node_kind::METHOD, "x::three::T::M")],
+            gid(node_kind::MODULE, "x::three")
+        );
     }
 
     /// A method declared beside its struct is already under it: not a
@@ -5809,7 +6259,10 @@ mod tests {
     fn same_file_method_is_untouched() {
         let parses = vec![go_file(
             "s",
-            &[(node_kind::STRUCT, "s::T", None), (node_kind::METHOD, "s::T::M", Some("s::T"))],
+            &[
+                (node_kind::STRUCT, "s::T", None),
+                (node_kind::METHOD, "s::T::M", Some("s::T")),
+            ],
         )];
         let (mut g, _, _, _) = merge_parses(repo(), parses);
         let (edges, parent) = (g.edges.len(), g.nav.parent_of.clone());
@@ -5838,7 +6291,10 @@ mod tests {
         );
         handlers.imports = vec![ImportStmt {
             from_module: "app::handlers".to_string(),
-            target: ImportTarget::Module { path: "store".to_string(), alias: None },
+            target: ImportTarget::Module {
+                path: "store".to_string(),
+                alias: None,
+            },
             line: 0,
         }];
         let (handle, helper, write_json, run) = (
@@ -5847,32 +6303,67 @@ mod tests {
             gid(node_kind::FUNCTION, "app::handlers::writeJSON"),
             gid(node_kind::FUNCTION, "app::handlers::run"),
         );
-        let site = |from, qualifier| CallSite { from, qualifier, line: 0 };
+        let site = |from, qualifier| CallSite {
+            from,
+            qualifier,
+            line: 0,
+        };
         handlers.calls = vec![
             site(handle, CallQualifier::Bare("writeJSON".to_string())),
             site(
                 handle,
-                CallQualifier::Attribute { base: "store".to_string(), name: "Validate".to_string() },
+                CallQualifier::Attribute {
+                    base: "store".to_string(),
+                    name: "Validate".to_string(),
+                },
             ),
             site(handle, CallQualifier::SelfMethod("helper".to_string())),
             site(run, CallQualifier::Bare("Handle".to_string())),
         ];
         let parses = vec![
-            go_file("store::store", &[(node_kind::FUNCTION, "store::store::Validate", None)]),
-            go_file("app::server", &[(node_kind::STRUCT, "app::server::Server", None)]),
+            go_file(
+                "store::store",
+                &[(node_kind::FUNCTION, "store::store::Validate", None)],
+            ),
+            go_file(
+                "app::server",
+                &[(node_kind::STRUCT, "app::server::Server", None)],
+            ),
             handlers,
         ];
         let g = build_go(repo(), parses).unwrap();
         let server = gid(node_kind::STRUCT, "app::server::Server");
-        assert_eq!(g.nav.parent_of[&handle], server, "struct parent restored after the file pass");
-        assert!(has_edge(&g, handle, write_json, edge_category::CALLS), "same-file bare call");
+        assert_eq!(
+            g.nav.parent_of[&handle], server,
+            "struct parent restored after the file pass"
+        );
         assert!(
-            has_edge(&g, handle, gid(node_kind::FUNCTION, "store::store::Validate"), edge_category::CALLS),
+            has_edge(&g, handle, write_json, edge_category::CALLS),
+            "same-file bare call"
+        );
+        assert!(
+            has_edge(
+                &g,
+                handle,
+                gid(node_kind::FUNCTION, "store::store::Validate"),
+                edge_category::CALLS
+            ),
             "import of the method's own file"
         );
-        assert!(has_edge(&g, handle, helper, edge_category::CALLS), "self-call through the struct");
-        assert!(!g.edges.iter().any(|e| e.from == run && e.category == edge_category::CALLS));
-        assert_eq!(g.unresolved_calls.len(), 1, "only the bare `Handle()` stays unresolved");
+        assert!(
+            has_edge(&g, handle, helper, edge_category::CALLS),
+            "self-call through the struct"
+        );
+        assert!(
+            !g.edges
+                .iter()
+                .any(|e| e.from == run && e.category == edge_category::CALLS)
+        );
+        assert_eq!(
+            g.unresolved_calls.len(),
+            1,
+            "only the bare `Handle()` stays unresolved"
+        );
     }
 
     // ---- LD.7b: Go implicit interface satisfaction --------------------------
@@ -5920,10 +6411,22 @@ mod tests {
                 "mem",
                 &[
                     (node_kind::STRUCT, "mem::MemStore", None),
-                    (node_kind::METHOD, "mem::MemStore::Get", Some("mem::MemStore")),
-                    (node_kind::METHOD, "mem::MemStore::Put", Some("mem::MemStore")),
+                    (
+                        node_kind::METHOD,
+                        "mem::MemStore::Get",
+                        Some("mem::MemStore"),
+                    ),
+                    (
+                        node_kind::METHOD,
+                        "mem::MemStore::Put",
+                        Some("mem::MemStore"),
+                    ),
                     (node_kind::STRUCT, "mem::ReadOnly", None),
-                    (node_kind::METHOD, "mem::ReadOnly::Get", Some("mem::ReadOnly")),
+                    (
+                        node_kind::METHOD,
+                        "mem::ReadOnly::Get",
+                        Some("mem::ReadOnly"),
+                    ),
                 ],
             ),
         ]
@@ -5946,17 +6449,29 @@ mod tests {
         );
 
         let g = build_go(repo(), implicit_iface_shape()).unwrap();
-        assert_eq!(implements_edge(&g, mem_store, store), Some(Confidence::Medium));
-        assert_eq!(implements_edge(&g, read_only, store), None, "ReadOnly lacks Put");
+        assert_eq!(
+            implements_edge(&g, mem_store, store),
+            Some(Confidence::Medium)
+        );
+        assert_eq!(
+            implements_edge(&g, read_only, store),
+            None,
+            "ReadOnly lacks Put"
+        );
         for name in ["Get", "Put"] {
             let (from, to) = (
                 gid(node_kind::METHOD, &format!("mem::MemStore::{name}")),
                 gid(node_kind::METHOD, &format!("store::Store::{name}")),
             );
-            assert!(implements_edge(&g, from, to).is_some(), "method-level {name}");
+            assert!(
+                implements_edge(&g, from, to).is_some(),
+                "method-level {name}"
+            );
         }
-        let (ro_get, store_get) =
-            (gid(node_kind::METHOD, "mem::ReadOnly::Get"), gid(node_kind::METHOD, "store::Store::Get"));
+        let (ro_get, store_get) = (
+            gid(node_kind::METHOD, "mem::ReadOnly::Get"),
+            gid(node_kind::METHOD, "store::Store::Get"),
+        );
         assert_eq!(implements_edge(&g, ro_get, store_get), None);
     }
 
@@ -5982,17 +6497,23 @@ mod tests {
                     }
                 }
             }
-            let borrowed: Vec<_> =
-                items.iter().map(|(k, q, p)| (*k, q.as_str(), p.as_deref())).collect();
+            let borrowed: Vec<_> = items
+                .iter()
+                .map(|(k, q, p)| (*k, q.as_str(), p.as_deref()))
+                .collect();
             vec![go_file("pkg", &borrowed)]
         };
         let first = build_go(repo(), shape()).unwrap();
         let second = build_go(repo(), shape()).unwrap();
-        let implements: Vec<_> =
-            first.edges.iter().filter(|e| e.category == edge_category::IMPLEMENTS).collect();
+        let implements: Vec<_> = first
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .collect();
         let from_kind = |e: &&Edge| first.nav.kind_by_id.get(&e.from).copied();
-        let (types, methods): (Vec<_>, Vec<_>) =
-            implements.into_iter().partition(|e| from_kind(e) == Some(node_kind::STRUCT));
+        let (types, methods): (Vec<_>, Vec<_>) = implements
+            .into_iter()
+            .partition(|e| from_kind(e) == Some(node_kind::STRUCT));
         assert_eq!(types.len(), 16, "4 types x 4 interfaces");
         assert!(types.iter().all(|e| e.confidence == Confidence::Medium));
         // CA.3b: the method-level pairs ride on the Medium type-level edges.
@@ -6010,7 +6531,11 @@ mod tests {
             "store",
             &[
                 (node_kind::INTERFACE, "store::Reader", None),
-                (node_kind::METHOD, "store::Reader::Get", Some("store::Reader")),
+                (
+                    node_kind::METHOD,
+                    "store::Reader::Get",
+                    Some("store::Reader"),
+                ),
                 (node_kind::INTERFACE, "store::Store", None),
                 (node_kind::METHOD, "store::Store::Put", Some("store::Store")),
                 (node_kind::STRUCT, "store::Mem", None),
@@ -6020,7 +6545,11 @@ mod tests {
                 (node_kind::METHOD, "store::Half::Put", Some("store::Half")),
             ],
         );
-        file.refs = vec![embed("store", "store::Store", CallQualifier::Bare("Reader".to_string()))];
+        file.refs = vec![embed(
+            "store",
+            "store::Store",
+            CallQualifier::Bare("Reader".to_string()),
+        )];
         let (reader, store, mem, half) = (
             gid(node_kind::INTERFACE, "store::Reader"),
             gid(node_kind::INTERFACE, "store::Store"),
@@ -6031,7 +6560,11 @@ mod tests {
         assert!(has_edge(&g, store, reader, edge_category::INHERITS_FROM));
         assert_eq!(implements_edge(&g, mem, store), Some(Confidence::Medium));
         assert_eq!(implements_edge(&g, mem, reader), Some(Confidence::Medium));
-        assert_eq!(implements_edge(&g, half, store), None, "Half lacks the embedded Get");
+        assert_eq!(
+            implements_edge(&g, half, store),
+            None,
+            "Half lacks the embedded Get"
+        );
         assert_eq!(implements_edge(&g, half, reader), None);
         assert_eq!(
             stats.map(|s| s.marker()).as_deref(),
@@ -6048,9 +6581,17 @@ mod tests {
             "port",
             &[
                 (node_kind::INTERFACE, "port::ReadCloser", None),
-                (node_kind::METHOD, "port::ReadCloser::Close", Some("port::ReadCloser")),
+                (
+                    node_kind::METHOD,
+                    "port::ReadCloser::Close",
+                    Some("port::ReadCloser"),
+                ),
                 (node_kind::INTERFACE, "port::CodedError", None),
-                (node_kind::METHOD, "port::CodedError::Code", Some("port::CodedError")),
+                (
+                    node_kind::METHOD,
+                    "port::CodedError::Code",
+                    Some("port::CodedError"),
+                ),
                 (node_kind::STRUCT, "port::File", None),
                 (node_kind::METHOD, "port::File::Close", Some("port::File")),
                 (node_kind::METHOD, "port::File::Code", Some("port::File")),
@@ -6063,9 +6604,16 @@ mod tests {
             embed(
                 "port",
                 "port::ReadCloser",
-                CallQualifier::Attribute { base: "io".to_string(), name: "Reader".to_string() },
+                CallQualifier::Attribute {
+                    base: "io".to_string(),
+                    name: "Reader".to_string(),
+                },
             ),
-            embed("port", "port::CodedError", CallQualifier::Bare("error".to_string())),
+            embed(
+                "port",
+                "port::CodedError",
+                CallQualifier::Bare("error".to_string()),
+            ),
         ];
         let (read_closer, coded, file_ty, fault) = (
             gid(node_kind::INTERFACE, "port::ReadCloser"),
@@ -6075,7 +6623,11 @@ mod tests {
         );
         let (g, stats) = go_implicit(vec![file]);
         assert_eq!(implements_edge(&g, file_ty, read_closer), None);
-        assert_eq!(implements_edge(&g, file_ty, coded), None, "File has Code but no Error");
+        assert_eq!(
+            implements_edge(&g, file_ty, coded),
+            None,
+            "File has Code but no Error"
+        );
         assert_eq!(implements_edge(&g, fault, coded), Some(Confidence::Medium));
         assert_eq!(
             stats.map(|s| s.marker()).as_deref(),
@@ -6092,29 +6644,47 @@ mod tests {
                 "a::sealed",
                 &[
                     (node_kind::INTERFACE, "a::sealed::Sealed", None),
-                    (node_kind::METHOD, "a::sealed::Sealed::isSealed", Some("a::sealed::Sealed")),
+                    (
+                        node_kind::METHOD,
+                        "a::sealed::Sealed::isSealed",
+                        Some("a::sealed::Sealed"),
+                    ),
                 ],
             ),
             go_file(
                 "a::impl",
                 &[
                     (node_kind::STRUCT, "a::impl::T", None),
-                    (node_kind::METHOD, "a::impl::T::isSealed", Some("a::impl::T")),
+                    (
+                        node_kind::METHOD,
+                        "a::impl::T::isSealed",
+                        Some("a::impl::T"),
+                    ),
                 ],
             ),
             go_file(
                 "b::impl",
                 &[
                     (node_kind::STRUCT, "b::impl::U", None),
-                    (node_kind::METHOD, "b::impl::U::isSealed", Some("b::impl::U")),
+                    (
+                        node_kind::METHOD,
+                        "b::impl::U::isSealed",
+                        Some("b::impl::U"),
+                    ),
                 ],
             ),
         ];
         let sealed = gid(node_kind::INTERFACE, "a::sealed::Sealed");
         let (g, _) = go_implicit(parses);
         let same_pkg = gid(node_kind::STRUCT, "a::impl::T");
-        assert_eq!(implements_edge(&g, same_pkg, sealed), Some(Confidence::Medium));
-        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "b::impl::U"), sealed), None);
+        assert_eq!(
+            implements_edge(&g, same_pkg, sealed),
+            Some(Confidence::Medium)
+        );
+        assert_eq!(
+            implements_edge(&g, gid(node_kind::STRUCT, "b::impl::U"), sealed),
+            None
+        );
     }
 
     /// Embeds bind to an INTERFACE only, package-scoped: `Reader` is the
@@ -6135,40 +6705,76 @@ mod tests {
         api.imports = vec![
             ImportStmt {
                 from_module: "backend::svc::api".to_string(),
-                target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+                target: ImportTarget::Module {
+                    path: "internal::store".to_string(),
+                    alias: None,
+                },
                 line: 0,
             },
             ImportStmt {
                 from_module: "backend::svc::api".to_string(),
-                target: ImportTarget::Module { path: "io".to_string(), alias: None },
+                target: ImportTarget::Module {
+                    path: "io".to_string(),
+                    alias: None,
+                },
                 line: 0,
             },
         ];
         let port = "backend::svc::api::Port";
         api.refs = vec![
-            embed("backend::svc::api", port, CallQualifier::Bare("Reader".to_string())),
             embed(
                 "backend::svc::api",
                 port,
-                CallQualifier::Attribute { base: "store".to_string(), name: "Writer".to_string() },
+                CallQualifier::Bare("Reader".to_string()),
             ),
             embed(
                 "backend::svc::api",
                 port,
-                CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+                CallQualifier::Attribute {
+                    base: "store".to_string(),
+                    name: "Writer".to_string(),
+                },
             ),
-            embed("backend::svc::api", port, CallQualifier::Bare("Dup".to_string())),
+            embed(
+                "backend::svc::api",
+                port,
+                CallQualifier::Attribute {
+                    base: "io".to_string(),
+                    name: "Closer".to_string(),
+                },
+            ),
+            embed(
+                "backend::svc::api",
+                port,
+                CallQualifier::Bare("Dup".to_string()),
+            ),
         ];
         let parses = vec![
             api,
-            go_file("backend::svc::read", &[(node_kind::INTERFACE, "backend::svc::read::Reader", None)]),
-            go_file("backend::other::read", &[(node_kind::INTERFACE, "backend::other::read::Reader", None)]),
+            go_file(
+                "backend::svc::read",
+                &[(node_kind::INTERFACE, "backend::svc::read::Reader", None)],
+            ),
+            go_file(
+                "backend::other::read",
+                &[(node_kind::INTERFACE, "backend::other::read::Reader", None)],
+            ),
             go_file(
                 "backend::internal::store::write",
-                &[(node_kind::INTERFACE, "backend::internal::store::write::Writer", None)],
+                &[(
+                    node_kind::INTERFACE,
+                    "backend::internal::store::write::Writer",
+                    None,
+                )],
             ),
-            go_file("backend::svc::dup_a", &[(node_kind::INTERFACE, "backend::svc::dup_a::Dup", None)]),
-            go_file("backend::svc::dup_b", &[(node_kind::INTERFACE, "backend::svc::dup_b::Dup", None)]),
+            go_file(
+                "backend::svc::dup_a",
+                &[(node_kind::INTERFACE, "backend::svc::dup_a::Dup", None)],
+            ),
+            go_file(
+                "backend::svc::dup_b",
+                &[(node_kind::INTERFACE, "backend::svc::dup_b::Dup", None)],
+            ),
         ];
         let (g, _) = go_implicit(parses);
         let from = gid(node_kind::INTERFACE, port);
@@ -6181,16 +6787,26 @@ mod tests {
         embedded.sort_unstable_by_key(|id| id.0);
         let mut expect = vec![
             gid(node_kind::INTERFACE, "backend::svc::read::Reader"),
-            gid(node_kind::INTERFACE, "backend::internal::store::write::Writer"),
+            gid(
+                node_kind::INTERFACE,
+                "backend::internal::store::write::Writer",
+            ),
         ];
         expect.sort_unstable_by_key(|id| id.0);
         assert_eq!(embedded, expect);
-        let unbound: Vec<&CallQualifier> =
-            g.unresolved_refs.iter().filter(|r| r.from == from).map(|r| &r.qualifier).collect();
+        let unbound: Vec<&CallQualifier> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.from == from)
+            .map(|r| &r.qualifier)
+            .collect();
         assert_eq!(
             unbound,
             vec![
-                &CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+                &CallQualifier::Attribute {
+                    base: "io".to_string(),
+                    name: "Closer".to_string()
+                },
                 &CallQualifier::Bare("Dup".to_string()),
             ]
         );
@@ -6209,7 +6825,11 @@ mod tests {
             ],
         );
         let (g, stats) = go_implicit(vec![file]);
-        assert!(!g.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS));
+        assert!(
+            !g.edges
+                .iter()
+                .any(|e| e.category == edge_category::IMPLEMENTS)
+        );
         assert_eq!(
             stats.map(|s| s.marker()).as_deref(),
             Some("[iface] go implicit implements: 0 (interfaces=0 types=0 embedded=0 open=0)")
@@ -6277,9 +6897,15 @@ mod tests {
         ]);
         let (g, stats) = go_implicit(parses);
         let store = gid(node_kind::INTERFACE, "store::store::Store");
-        let (wrong, mem_ty) =
-            (gid(node_kind::STRUCT, "other::other::Wrong"), gid(node_kind::STRUCT, "mem::mem::Mem"));
-        assert_eq!(implements_edge(&g, wrong, store), None, "names match, signatures do not");
+        let (wrong, mem_ty) = (
+            gid(node_kind::STRUCT, "other::other::Wrong"),
+            gid(node_kind::STRUCT, "mem::mem::Mem"),
+        );
+        assert_eq!(
+            implements_edge(&g, wrong, store),
+            None,
+            "names match, signatures do not"
+        );
         assert_eq!(
             implements_edge(
                 &g,
@@ -6289,11 +6915,25 @@ mod tests {
             None
         );
         assert_eq!(implements_edge(&g, mem_ty, store), Some(Confidence::Medium));
-        assert_eq!(implements_rule(&g, mem_ty, store).as_deref(), Some("method_signature"));
-        let user_loader = gid(node_kind::INTERFACE, "store::loader::UserLoader");
-        assert!(implements_edge(&g, gid(node_kind::STRUCT, "store::loader::UserRepo"), user_loader).is_some());
         assert_eq!(
-            implements_edge(&g, gid(node_kind::STRUCT, "store::loader::KYCRepo"), user_loader),
+            implements_rule(&g, mem_ty, store).as_deref(),
+            Some("method_signature")
+        );
+        let user_loader = gid(node_kind::INTERFACE, "store::loader::UserLoader");
+        assert!(
+            implements_edge(
+                &g,
+                gid(node_kind::STRUCT, "store::loader::UserRepo"),
+                user_loader
+            )
+            .is_some()
+        );
+        assert_eq!(
+            implements_edge(
+                &g,
+                gid(node_kind::STRUCT, "store::loader::KYCRepo"),
+                user_loader
+            ),
             None,
             "the result type differs"
         );
@@ -6310,10 +6950,15 @@ mod tests {
     /// method on a generic receiver) the name match stands, rule `method_set`.
     #[test]
     fn go_implicit_unknown_signature_keeps_the_name_match() {
-        let (store, mem_store) =
-            (gid(node_kind::INTERFACE, "store::Store"), gid(node_kind::STRUCT, "mem::MemStore"));
+        let (store, mem_store) = (
+            gid(node_kind::INTERFACE, "store::Store"),
+            gid(node_kind::STRUCT, "mem::MemStore"),
+        );
         let (g, stats) = go_implicit(implicit_iface_shape());
-        assert_eq!(implements_rule(&g, mem_store, store).as_deref(), Some("method_set"));
+        assert_eq!(
+            implements_rule(&g, mem_store, store).as_deref(),
+            Some("method_set")
+        );
         assert_eq!(
             filtered(&stats).as_deref(),
             Some(
@@ -6325,10 +6970,18 @@ mod tests {
         let boxed = "package box\n\ntype Box[T any] struct{}\n\n\
                      func (b *Box[T]) Get(key string) string { return key }\n\
                      func (b *Box[T]) Put(key, value string) {}\n";
-        let (g, _) = go_implicit(go_sources(&[("store/store.go", STORE_GO), ("box/box.go", boxed)]));
-        let (store, box_ty) =
-            (gid(node_kind::INTERFACE, "store::store::Store"), gid(node_kind::STRUCT, "box::box::Box"));
-        assert_eq!(implements_rule(&g, box_ty, store).as_deref(), Some("method_set"));
+        let (g, _) = go_implicit(go_sources(&[
+            ("store/store.go", STORE_GO),
+            ("box/box.go", boxed),
+        ]));
+        let (store, box_ty) = (
+            gid(node_kind::INTERFACE, "store::store::Store"),
+            gid(node_kind::STRUCT, "box::box::Box"),
+        );
+        assert_eq!(
+            implements_rule(&g, box_ty, store).as_deref(),
+            Some("method_set")
+        );
     }
 
     /// A one-method interface pairs only across an import path: no import
@@ -6336,9 +6989,14 @@ mod tests {
     /// interface's importing the type's, or a chain of imports keeps it.
     #[test]
     fn go_implicit_scope_one_method_needs_an_import_path() {
-        let (closer, file) =
-            (gid(node_kind::INTERFACE, "a::closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
-        let (g, stats) = go_implicit(go_sources(&[("a/closer.go", CLOSER_GO), ("b/file.go", FILE_GO)]));
+        let (closer, file) = (
+            gid(node_kind::INTERFACE, "a::closer::Closer"),
+            gid(node_kind::STRUCT, "b::file::File"),
+        );
+        let (g, stats) = go_implicit(go_sources(&[
+            ("a/closer.go", CLOSER_GO),
+            ("b/file.go", FILE_GO),
+        ]));
         assert_eq!(implements_edge(&g, file, closer), None);
         assert_eq!(
             filtered(&stats).as_deref(),
@@ -6350,10 +7008,19 @@ mod tests {
 
         let b_imports_a = "package b\n\nimport \"example.com/scope/a\"\n\ntype File struct{}\n\n\
                            func (f *File) Close() {}\n\nvar _ a.Closer = (*File)(nil)\n";
-        let (g, stats) =
-            go_implicit(go_sources(&[("a/closer.go", CLOSER_GO), ("b/file.go", b_imports_a)]));
-        assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium), "b imports a");
-        assert_eq!(implements_rule(&g, file, closer).as_deref(), Some("method_signature"));
+        let (g, stats) = go_implicit(go_sources(&[
+            ("a/closer.go", CLOSER_GO),
+            ("b/file.go", b_imports_a),
+        ]));
+        assert_eq!(
+            implements_edge(&g, file, closer),
+            Some(Confidence::Medium),
+            "b imports a"
+        );
+        assert_eq!(
+            implements_rule(&g, file, closer).as_deref(),
+            Some("method_signature")
+        );
         assert_eq!(
             filtered(&stats).as_deref(),
             Some(
@@ -6364,18 +7031,25 @@ mod tests {
 
         let a_imports_b = "package a\n\nimport \"example.com/scope/b\"\n\n\
                            type Closer interface {\n\tClose()\n}\n\nfunc Wrap(f *b.File) Closer { return f }\n";
-        let (g, _) = go_implicit(go_sources(&[("a/closer.go", a_imports_b), ("b/file.go", FILE_GO)]));
+        let (g, _) = go_implicit(go_sources(&[
+            ("a/closer.go", a_imports_b),
+            ("b/file.go", FILE_GO),
+        ]));
         assert!(implements_edge(&g, file, closer).is_some(), "a imports b");
 
         let b_imports_c = "package b\n\nimport \"example.com/scope/c\"\n\ntype File struct{}\n\n\
                            func (f *File) Close() {}\n\nfunc Use() { c.Take(&File{}) }\n";
-        let c_imports_a = "package c\n\nimport \"example.com/scope/a\"\n\nfunc Take(x a.Closer) {}\n";
+        let c_imports_a =
+            "package c\n\nimport \"example.com/scope/a\"\n\nfunc Take(x a.Closer) {}\n";
         let (g, _) = go_implicit(go_sources(&[
             ("a/closer.go", CLOSER_GO),
             ("b/file.go", b_imports_c),
             ("c/c.go", c_imports_a),
         ]));
-        assert!(implements_edge(&g, file, closer).is_some(), "b -> c -> a, transitively");
+        assert!(
+            implements_edge(&g, file, closer).is_some(),
+            "b -> c -> a, transitively"
+        );
     }
 
     /// A package importing both sides wires them: the pair is kept though
@@ -6389,8 +7063,10 @@ mod tests {
             ("b/file.go", FILE_GO),
             ("cmd/main.go", main),
         ]));
-        let (closer, file) =
-            (gid(node_kind::INTERFACE, "a::closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
+        let (closer, file) = (
+            gid(node_kind::INTERFACE, "a::closer::Closer"),
+            gid(node_kind::STRUCT, "b::file::File"),
+        );
         assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
         assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 0)));
     }
@@ -6418,8 +7094,16 @@ mod tests {
             ("tests/conn.go", conn),
             ("b/file.go", FILE_GO),
         ]));
-        assert_eq!(implements_edge(&g, fake, closable), Some(Confidence::Medium), "same file");
-        assert_eq!(implements_edge(&g, conn_ty, closable), Some(Confidence::Medium), "same dir");
+        assert_eq!(
+            implements_edge(&g, fake, closable),
+            Some(Confidence::Medium),
+            "same file"
+        );
+        assert_eq!(
+            implements_edge(&g, conn_ty, closable),
+            Some(Confidence::Medium),
+            "same dir"
+        );
         assert_eq!(
             implements_edge(&g, file, closable),
             None,
@@ -6435,7 +7119,10 @@ mod tests {
             ("tests/x_test.go", x_test_imports_b.as_str()),
             ("b/file.go", FILE_GO),
         ]));
-        assert!(implements_edge(&g, file, closable).is_some(), "the test file imports b");
+        assert!(
+            implements_edge(&g, file, closable).is_some(),
+            "the test file imports b"
+        );
     }
 
     /// CI.3: an import of the repository-root package is recorded (path
@@ -6449,16 +7136,35 @@ mod tests {
                  func (f *File) Close() {}\n\nvar _ scope.Closer = (*File)(nil)\n";
         let parses = go_sources(&[("closer.go", root), ("b/file.go", b)]);
         assert_eq!(
-            parses[1].imports.iter().map(|i| &i.target).collect::<Vec<_>>(),
-            [&ImportTarget::Module { path: String::new(), alias: None }],
+            parses[1]
+                .imports
+                .iter()
+                .map(|i| &i.target)
+                .collect::<Vec<_>>(),
+            [&ImportTarget::Module {
+                path: String::new(),
+                alias: None
+            }],
             "the root import is recorded"
         );
-        let GoPasses { g, implicit: stats, packages, .. } = build_go_passes(repo(), parses);
-        let (closer, file) =
-            (gid(node_kind::INTERFACE, "closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
+        let GoPasses {
+            g,
+            implicit: stats,
+            packages,
+            ..
+        } = build_go_passes(repo(), parses);
+        let (closer, file) = (
+            gid(node_kind::INTERFACE, "closer::Closer"),
+            gid(node_kind::STRUCT, "b::file::File"),
+        );
         assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
         assert!(
-            has_edge(&g, gid(node_kind::MODULE, "b::file"), gid(node_kind::MODULE, "closer"), edge_category::IMPORTS),
+            has_edge(
+                &g,
+                gid(node_kind::MODULE, "b::file"),
+                gid(node_kind::MODULE, "closer"),
+                edge_category::IMPORTS
+            ),
             "b::file IMPORTS the root package"
         );
         assert_eq!(
@@ -6482,13 +7188,21 @@ mod tests {
         let b = "package b\n\nimport \"example.com/scope\"\n\ntype File struct{}\n\n\
                  func (f *File) Close() {}\n\nvar _ scope.Closer = (*File)(nil)\n";
         let iso = "package iso\n\ntype File struct{}\n\nfunc (f *File) Close() {}\n";
-        let (g, stats) =
-            go_implicit(go_sources(&[("closer.go", root), ("b/file.go", b), ("iso/file.go", iso)]));
+        let (g, stats) = go_implicit(go_sources(&[
+            ("closer.go", root),
+            ("b/file.go", b),
+            ("iso/file.go", iso),
+        ]));
         let closer = gid(node_kind::INTERFACE, "closer::Closer");
-        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "b::file::File"), closer), Some(Confidence::Medium));
+        assert_eq!(
+            implements_edge(&g, gid(node_kind::STRUCT, "b::file::File"), closer),
+            Some(Confidence::Medium)
+        );
         let iso_file = gid(node_kind::STRUCT, "iso::file::File");
         assert!(
-            !g.edges.iter().any(|e| e.from == iso_file && e.category == edge_category::IMPLEMENTS),
+            !g.edges
+                .iter()
+                .any(|e| e.from == iso_file && e.category == edge_category::IMPLEMENTS),
             "no import path links iso to the root package"
         );
         assert_eq!(
@@ -6508,7 +7222,8 @@ mod tests {
         // The interface in the test file.
         let x_test = "package tests\n\nimport \"example.com/scope/c\"\n\n\
                       type Closable interface {\n\tClose()\n}\n\nvar _ = c.Take\n";
-        let c_imports_b = "package c\n\nimport \"example.com/scope/b\"\n\nfunc Take(f *b.File) {}\n";
+        let c_imports_b =
+            "package c\n\nimport \"example.com/scope/b\"\n\nfunc Take(f *b.File) {}\n";
         let closable = gid(node_kind::INTERFACE, "tests::x_test::Closable");
         let file = gid(node_kind::STRUCT, "b::file::File");
         let (g, stats) = go_implicit(go_sources(&[
@@ -6516,7 +7231,11 @@ mod tests {
             ("c/c.go", c_imports_b),
             ("b/file.go", FILE_GO),
         ]));
-        assert_eq!(implements_edge(&g, file, closable), None, "x_test reaches b only through c");
+        assert_eq!(
+            implements_edge(&g, file, closable),
+            None,
+            "x_test reaches b only through c"
+        );
         assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 1)));
 
         let x_test_imports_b = x_test.replace(
@@ -6528,20 +7247,31 @@ mod tests {
             ("c/c.go", c_imports_b),
             ("b/file.go", FILE_GO),
         ]));
-        assert_eq!(implements_edge(&g, file, closable), Some(Confidence::Medium), "x_test imports b");
+        assert_eq!(
+            implements_edge(&g, file, closable),
+            Some(Confidence::Medium),
+            "x_test imports b"
+        );
 
         // The type in the test file.
         let y_test = "package tests\n\nimport \"example.com/scope/c\"\n\n\
                       type fake struct{}\n\nfunc (f fake) Close() {}\n\nvar _ = c.Use\n";
-        let c_imports_a = "package c\n\nimport \"example.com/scope/a\"\n\nfunc Use(x a.Closer) {}\n";
-        let (fake, closer) =
-            (gid(node_kind::STRUCT, "tests::y_test::fake"), gid(node_kind::INTERFACE, "a::closer::Closer"));
+        let c_imports_a =
+            "package c\n\nimport \"example.com/scope/a\"\n\nfunc Use(x a.Closer) {}\n";
+        let (fake, closer) = (
+            gid(node_kind::STRUCT, "tests::y_test::fake"),
+            gid(node_kind::INTERFACE, "a::closer::Closer"),
+        );
         let (g, stats) = go_implicit(go_sources(&[
             ("tests/y_test.go", y_test),
             ("c/c.go", c_imports_a),
             ("a/closer.go", CLOSER_GO),
         ]));
-        assert_eq!(implements_edge(&g, fake, closer), None, "y_test reaches a only through c");
+        assert_eq!(
+            implements_edge(&g, fake, closer),
+            None,
+            "y_test reaches a only through c"
+        );
         assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 1)));
 
         let y_test_imports_a = y_test.replace(
@@ -6553,7 +7283,11 @@ mod tests {
             ("c/c.go", c_imports_a),
             ("a/closer.go", CLOSER_GO),
         ]));
-        assert_eq!(implements_edge(&g, fake, closer), Some(Confidence::Medium), "y_test imports a");
+        assert_eq!(
+            implements_edge(&g, fake, closer),
+            Some(Confidence::Medium),
+            "y_test imports a"
+        );
     }
 
     /// A6.6's method pairs of a Go implicit (Medium) type-level edge are
@@ -6566,7 +7300,11 @@ mod tests {
                 gid(node_kind::METHOD, &format!("mem::MemStore::{name}")),
                 gid(node_kind::METHOD, &format!("store::Store::{name}")),
             );
-            assert_eq!(implements_edge(&g, from, to), Some(Confidence::Medium), "{name}");
+            assert_eq!(
+                implements_edge(&g, from, to),
+                Some(Confidence::Medium),
+                "{name}"
+            );
             assert_eq!(implements_rule(&g, from, to).as_deref(), Some("same_name"));
         }
     }
@@ -6577,20 +7315,39 @@ mod tests {
     /// `internal/store` and calls `store.Save()` / `store.Load()`; `Save`
     /// (store.go) calls `helper()` (load.go).
     fn multifile_package_shape() -> Vec<FileParse> {
-        let mut main = go_file("cmd::main", &[(node_kind::FUNCTION, "cmd::main::main", None)]);
+        let mut main = go_file(
+            "cmd::main",
+            &[(node_kind::FUNCTION, "cmd::main::main", None)],
+        );
         main.imports = vec![ImportStmt {
             from_module: "cmd::main".to_string(),
-            target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+            target: ImportTarget::Module {
+                path: "internal::store".to_string(),
+                alias: None,
+            },
             line: 0,
         }];
         let from = gid(node_kind::FUNCTION, "cmd::main::main");
-        let attr = |name: &str| CallQualifier::Attribute { base: "store".to_string(), name: name.to_string() };
+        let attr = |name: &str| CallQualifier::Attribute {
+            base: "store".to_string(),
+            name: name.to_string(),
+        };
         main.calls = vec![
-            CallSite { from, qualifier: attr("Save"), line: 0 },
-            CallSite { from, qualifier: attr("Load"), line: 0 },
+            CallSite {
+                from,
+                qualifier: attr("Save"),
+                line: 0,
+            },
+            CallSite {
+                from,
+                qualifier: attr("Load"),
+                line: 0,
+            },
         ];
-        let mut store =
-            go_file("internal::store::store", &[(node_kind::FUNCTION, "internal::store::store::Save", None)]);
+        let mut store = go_file(
+            "internal::store::store",
+            &[(node_kind::FUNCTION, "internal::store::store::Save", None)],
+        );
         store.calls = vec![CallSite {
             from: gid(node_kind::FUNCTION, "internal::store::store::Save"),
             qualifier: CallQualifier::Bare("helper".to_string()),
@@ -6611,8 +7368,12 @@ mod tests {
     /// bound in a sibling file; the fixture prints the packet's marker.
     #[test]
     fn go_package_stats_and_marker() {
-        let GoPasses { g, packages: stats, receivers, .. } =
-            build_go_passes(repo(), multifile_package_shape());
+        let GoPasses {
+            g,
+            packages: stats,
+            receivers,
+            ..
+        } = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(
             stats,
             GoPackageStats {
@@ -6632,8 +7393,18 @@ mod tests {
         let main = gid(node_kind::FUNCTION, "cmd::main::main");
         let save = gid(node_kind::FUNCTION, "internal::store::store::Save");
         assert!(has_edge(&g, main, save, edge_category::CALLS));
-        assert!(has_edge(&g, main, gid(node_kind::FUNCTION, "internal::store::load::Load"), edge_category::CALLS));
-        assert!(has_edge(&g, save, gid(node_kind::FUNCTION, "internal::store::load::helper"), edge_category::CALLS));
+        assert!(has_edge(
+            &g,
+            main,
+            gid(node_kind::FUNCTION, "internal::store::load::Load"),
+            edge_category::CALLS
+        ));
+        assert!(has_edge(
+            &g,
+            save,
+            gid(node_kind::FUNCTION, "internal::store::load::helper"),
+            edge_category::CALLS
+        ));
         assert!(g.unresolved_calls.is_empty());
         assert_eq!(
             receivers.marker(),
@@ -6641,9 +7412,15 @@ mod tests {
             "package calls are not typed-receiver binds"
         );
 
-        assert_eq!(stats.root_marker(), None, "no root-package import, no CI.3 line");
+        assert_eq!(
+            stats.root_marker(),
+            None,
+            "no root-package import, no CI.3 line"
+        );
 
-        let GoPasses { packages: empty, .. } = build_go_passes(repo(), vec![]);
+        let GoPasses {
+            packages: empty, ..
+        } = build_go_passes(repo(), vec![]);
         assert_eq!(empty.marker(), None, "no MODULE, no marker");
     }
 
@@ -6688,7 +7465,11 @@ mod tests {
             assert_eq!(receiver_segments(raw), None, "{raw:?}");
         }
         assert!(receiver_segments("a.b.c.d.e.f").is_some());
-        assert_eq!(receiver_segments("a.b.c.d.e.f.g"), None, "longer than RECV_MAX_SEGS");
+        assert_eq!(
+            receiver_segments("a.b.c.d.e.f.g"),
+            None,
+            "longer than RECV_MAX_SEGS"
+        );
     }
 
     /// The bench fixture go-return-type-receivers, parsed as the engine
@@ -6710,7 +7491,8 @@ mod tests {
         .map(|rel| {
             let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
             let qname = rel.trim_end_matches(".go").replace('/', "::");
-            glia_parser_go::parse_file(&src, rel, &qname, "example.com/shop", repo()).expect("parse")
+            glia_parser_go::parse_file(&src, rel, &qname, "example.com/shop", repo())
+                .expect("parse")
         })
         .collect();
         let GoPasses { receivers, .. } = build_go_passes(repo(), parses);
@@ -6762,8 +7544,10 @@ mod tests {
         let (mut g, imports, _, refs) = merge_parses(repo(), parses);
         bind_split_go_receivers(&mut g);
         build_symbol_table(&mut g);
-        let embeds: Vec<UnresolvedRef> =
-            refs.into_iter().filter(|r| is_go_embed(&g.nav, r)).collect();
+        let embeds: Vec<UnresolvedRef> = refs
+            .into_iter()
+            .filter(|r| is_go_embed(&g.nav, r))
+            .collect();
         let binds = bind_go_embeds(&g, &embeds, &imports, &go_package_names(&g));
         let promoted = GoPromoted::build(&g, &binds.bound);
         (g, promoted)
@@ -6782,7 +7566,10 @@ mod tests {
                    type Svc struct {\n\t*store.Users\n\terror\n}\n";
         let parses = go_sources(&[
             ("store/base.go", "package store\n\ntype Base struct{}\n"),
-            ("store/users.go", "package store\n\ntype Users struct {\n\t*Base\n}\n"),
+            (
+                "store/users.go",
+                "package store\n\ntype Users struct {\n\t*Base\n}\n",
+            ),
             ("store/iface.go", iface),
             ("app/app.go", app),
         ]);
@@ -6798,8 +7585,14 @@ mod tests {
             gid(node_kind::INTERFACE, "store::iface::Port"),
         );
         let inh = edge_category::INHERITS_FROM;
-        assert_eq!(edge_rule_line(&g, users, base, inh), rule("embed_package", 3));
-        assert_eq!(edge_rule_line(&g, logging, repo_i, inh), rule("embed_package", 7));
+        assert_eq!(
+            edge_rule_line(&g, users, base, inh),
+            rule("embed_package", 3)
+        );
+        assert_eq!(
+            edge_rule_line(&g, logging, repo_i, inh),
+            rule("embed_package", 7)
+        );
         assert_eq!(edge_rule_line(&g, svc, users, inh), rule("embed_import", 5));
         assert!(!g.edges.iter().any(|e| e.from == port && e.category == inh));
         let unbound: Vec<(NodeId, &CallQualifier)> = g
@@ -6815,7 +7608,14 @@ mod tests {
                 (svc, &CallQualifier::Bare("error".to_string())),
             ]
         );
-        assert_eq!((embeds.struct_refs, embeds.bound_struct, embeds.bound_interface), (4, 2, 1));
+        assert_eq!(
+            (
+                embeds.struct_refs,
+                embeds.bound_struct,
+                embeds.bound_interface
+            ),
+            (4, 2, 1)
+        );
         // LoggingRepo promotes the interface's method.
         let (_, promoted) = promoted_index(go_sources(&[("store/iface.go", iface)]));
         assert_eq!(
@@ -6845,17 +7645,31 @@ mod tests {
         let st = |n: &str| gid(node_kind::STRUCT, &format!("p::p::{n}"));
         let m = |q: &str| gid(node_kind::METHOD, &format!("p::p::{q}"));
         let names = |map: &HashMap<NodeId, BTreeMap<String, NodeId>>, ty: &str| -> Vec<String> {
-            map.get(&st(ty)).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+            map.get(&st(ty))
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default()
         };
         assert_eq!(names(&promoted.methods, "Users"), ["Close", "exec"]);
         assert_eq!(names(&promoted.fields, "Users"), ["db"]);
         assert_eq!(promoted.field_owner(st("Users"), "db"), Some(st("Base")));
-        assert_eq!(promoted.method(st("Users"), "Name"), None, "its own Name blocks Base's");
-        assert_eq!(promoted.method(st("Deep"), "Name"), Some(m("Users::Name")), "depth 1 over 2");
+        assert_eq!(
+            promoted.method(st("Users"), "Name"),
+            None,
+            "its own Name blocks Base's"
+        );
+        assert_eq!(
+            promoted.method(st("Deep"), "Name"),
+            Some(m("Users::Name")),
+            "depth 1 over 2"
+        );
         assert_eq!(promoted.method(st("Deep"), "Close"), Some(m("Base::Close")));
         assert_eq!(promoted.field_owner(st("Deep"), "Base"), Some(st("Users")));
         assert_eq!(promoted.field_owner(st("Deep"), "db"), Some(st("Base")));
-        assert_eq!(promoted.method(st("Pair"), "Close"), None, "A and B both supply Close");
+        assert_eq!(
+            promoted.method(st("Pair"), "Close"),
+            None,
+            "A and B both supply Close"
+        );
         assert_eq!(promoted.ambiguous, 1);
     }
 
@@ -6869,11 +7683,21 @@ mod tests {
         let calls = edge_category::CALLS;
         let close = m("store::base::Base::Close");
         assert_eq!(
-            edge_rule_line(&g, m("store::users::Users::Save"), m("store::base::Base::exec"), calls),
+            edge_rule_line(
+                &g,
+                m("store::users::Users::Save"),
+                m("store::base::Base::exec"),
+                calls
+            ),
             rule("promoted_self", 11)
         );
         assert_eq!(
-            edge_rule_line(&g, m("store::users::Users::Flush"), m("store::base::DB::Run"), calls),
+            edge_rule_line(
+                &g,
+                m("store::users::Users::Flush"),
+                m("store::base::DB::Run"),
+                calls
+            ),
             rule("receiver_field_chain", 13)
         );
         assert_eq!(
@@ -6922,16 +7746,22 @@ mod tests {
             .parent()
             .map(|p| p.join("bench/substrate-gap/fixtures/go-split-receiver-handlers"))
             .expect("workspace root");
-        ["base.go", "monitor.go", "offers.go", "routes.go", "tokens.go"]
-            .iter()
-            .map(|file| {
-                let rel = format!("handlers/{file}");
-                let src = std::fs::read_to_string(root.join(&rel)).expect("fixture file");
-                let qname = rel.trim_end_matches(".go").replace('/', "::");
-                glia_parser_go::parse_file(&src, &rel, &qname, "example.com/split", repo())
-                    .expect("parse")
-            })
-            .collect()
+        [
+            "base.go",
+            "monitor.go",
+            "offers.go",
+            "routes.go",
+            "tokens.go",
+        ]
+        .iter()
+        .map(|file| {
+            let rel = format!("handlers/{file}");
+            let src = std::fs::read_to_string(root.join(&rel)).expect("fixture file");
+            let qname = rel.trim_end_matches(".go").replace('/', "::");
+            glia_parser_go::parse_file(&src, &rel, &qname, "example.com/split", repo())
+                .expect("parse")
+        })
+        .collect()
     }
 
     /// The ROUTE whose qname is `qname` (after the CB.20 re-key).
@@ -6993,7 +7823,11 @@ mod tests {
             ("GET /tokens", "handlers::tokens::TokensHandler::List", 6),
             ("POST /tokens", "handlers::tokens::TokensHandler::Create", 7),
             ("GET /offers", "handlers::offers::OffersHandler::List", 12),
-            ("POST /offers", "handlers::offers::OffersHandler::Create", 13),
+            (
+                "POST /offers",
+                "handlers::offers::OffersHandler::Create",
+                13,
+            ),
         ];
         for (route, method, row) in cases {
             let r = route_id(&g, route);
@@ -7002,14 +7836,22 @@ mod tests {
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 5, other_file: 5, promoted: 1, unbound: 0, package_functions: 0 }
+            TypeHandlerStats {
+                bound: 5,
+                other_file: 5,
+                promoted: 1,
+                unbound: 0,
+                package_functions: 0
+            }
         );
         assert_eq!(
             handlers.marker().as_deref(),
             Some("[go-handlers] package-type handlers bound=5 (other_file=5 promoted=1) unbound=0")
         );
         assert!(
-            !g.unresolved_refs.iter().any(|r| r.category == edge_category::HANDLED_BY),
+            !g.unresolved_refs
+                .iter()
+                .any(|r| r.category == edge_category::HANDLED_BY),
             "{:?}",
             g.unresolved_refs
         );
@@ -7039,8 +7881,7 @@ mod tests {
         let other = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
                      type OffersHandler struct{}\n\n\
                      func (h *OffersHandler) List(c *gin.Context) {}\n";
-        let parses =
-            go_sources(&[("handlers/tokens.go", src), ("handlers/offers.go", other)]);
+        let parses = go_sources(&[("handlers/tokens.go", src), ("handlers/offers.go", other)]);
         let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
         let list = gid(node_kind::METHOD, "handlers::tokens::TokensHandler::List");
         let r = route_id(&g, "GET /tokens");
@@ -7064,13 +7905,22 @@ mod tests {
     type EvRow = (String, Option<String>, Option<u32>);
 
     /// The [`EvRow`] of the one `category` edge `from -> to`.
-    fn ev_of(g: &RepoGraph, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> EvRow {
+    fn ev_of(
+        g: &RepoGraph,
+        from: NodeId,
+        to: NodeId,
+        category: glia_core::EdgeCategoryId,
+    ) -> EvRow {
         let ev = Evidence::of(only_edge(g, from, to, category)).expect("EVIDENCE cell");
         (ev.emitter, ev.rule, ev.line)
     }
 
     fn hook_ev(rule: &str, line: u32) -> EvRow {
-        ("graph:go_packages".to_string(), Some(rule.to_string()), Some(line))
+        (
+            "graph:go_packages".to_string(),
+            Some(rule.to_string()),
+            Some(line),
+        )
     }
 
     const TOKENS_GO: &str = "package tokens\n\ntype Registry struct{}\n\n\
@@ -7110,12 +7960,18 @@ mod tests {
             m("tokens::registry::Registry::ActivePair"),
             m("screening::registry::Registry::ActivePair"),
         );
-        assert_eq!(ev_of(&g, create, tok, calls), hook_ev("receiver_field_chain", 12));
+        assert_eq!(
+            ev_of(&g, create, tok, calls),
+            hook_ev("receiver_field_chain", 12)
+        );
         assert_eq!(
             ev_of(&g, create, m("screening::registry::Registry::Get"), calls),
             hook_ev("receiver_field_chain", 12)
         );
-        assert_eq!(ev_of(&g, pairs, tok, calls), hook_ev("receiver_field_chain", 4));
+        assert_eq!(
+            ev_of(&g, pairs, tok, calls),
+            hook_ev("receiver_field_chain", 4)
+        );
         assert!(!has_edge(&g, create, scr, calls));
         assert!(!has_edge(&g, pairs, scr, calls));
         assert_eq!(receivers.qualified_field.get(), 3);
@@ -7134,7 +7990,10 @@ mod tests {
         let g = build_go(repo(), parses).unwrap();
         let log = gid(node_kind::METHOD, "app::logger::Logger::Log");
         let info = gid(node_kind::METHOD, "store::logger::Logger::Info");
-        assert_eq!(ev_of(&g, log, info, edge_category::CALLS), hook_ev("receiver_field_chain", 8));
+        assert_eq!(
+            ev_of(&g, log, info, edge_category::CALLS),
+            hook_ev("receiver_field_chain", 8)
+        );
         let calls: Vec<NodeId> = g
             .edges
             .iter()
@@ -7165,7 +8024,8 @@ mod tests {
     /// interface METHOD; an index-only range and a map's key bind nothing.
     #[test]
     fn range_value_binds_the_element_type() {
-        let GoPasses { g, receivers, .. } = build_go_passes(repo(), go_sources(&[("p/p.go", RANGE_GO)]));
+        let GoPasses { g, receivers, .. } =
+            build_go_passes(repo(), go_sources(&[("p/p.go", RANGE_GO)]));
         let name = gid(node_kind::METHOD, "p::p::Check::Name");
         let calls = edge_category::CALLS;
         let callers = [
@@ -7177,10 +8037,19 @@ mod tests {
             gid(node_kind::FUNCTION, "p::p::Var"),
         ];
         for from in callers {
-            assert_eq!(rule_of(only_edge(&g, from, name, calls)).1.as_deref(), Some("receiver_local"));
+            assert_eq!(
+                rule_of(only_edge(&g, from, name, calls)).1.as_deref(),
+                Some("receiver_local")
+            );
         }
         let index = gid(node_kind::METHOD, "p::p::Svc::Index");
-        assert!(!g.edges.iter().any(|e| e.from == index && e.category == calls), "{:?}", g.edges);
+        assert!(
+            !g.edges
+                .iter()
+                .any(|e| e.from == index && e.category == calls),
+            "{:?}",
+            g.edges
+        );
         assert_eq!(receivers.elem.get(), 6);
     }
 
@@ -7208,11 +8077,17 @@ mod tests {
         );
         let agree = gid(node_kind::FUNCTION, "fx::oxr_test::TestAgree");
         let mixed = gid(node_kind::FUNCTION, "fx::oxr_test::TestMixed");
-        assert_eq!(ev_of(&g, agree, oxr, edge_category::CALLS), hook_ev("receiver_local", 11));
+        assert_eq!(
+            ev_of(&g, agree, oxr, edge_category::CALLS),
+            hook_ev("receiver_local", 11)
+        );
         for to in [oxr, other] {
             assert!(!has_edge(&g, mixed, to, edge_category::CALLS));
         }
-        assert_eq!((receivers.alternatives.get(), receivers.func_value.get()), (1, 1));
+        assert_eq!(
+            (receivers.alternatives.get(), receivers.func_value.get()),
+            (1, 1)
+        );
     }
 
     /// A func-typed parameter's or func literal's `func() R` types a call
@@ -7222,11 +8097,18 @@ mod tests {
         let src = "package app\n\ntype Repo struct{}\n\nfunc (r *Repo) Find() {}\n\n\
                    func Use(mk func() (*Repo, error)) {\n\tr, _ := mk()\n\tr.Find()\n}\n\n\
                    func Lit() {\n\tf := func() *Repo { return nil }\n\tf().Find()\n}\n";
-        let GoPasses { g, receivers, .. } = build_go_passes(repo(), go_sources(&[("app/app.go", src)]));
+        let GoPasses { g, receivers, .. } =
+            build_go_passes(repo(), go_sources(&[("app/app.go", src)]));
         let find = gid(node_kind::METHOD, "app::app::Repo::Find");
         let calls = edge_category::CALLS;
-        assert_eq!(ev_of(&g, gid(node_kind::FUNCTION, "app::app::Use"), find, calls), hook_ev("receiver_local", 8));
-        assert_eq!(ev_of(&g, gid(node_kind::FUNCTION, "app::app::Lit"), find, calls), hook_ev("receiver_local", 13));
+        assert_eq!(
+            ev_of(&g, gid(node_kind::FUNCTION, "app::app::Use"), find, calls),
+            hook_ev("receiver_local", 8)
+        );
+        assert_eq!(
+            ev_of(&g, gid(node_kind::FUNCTION, "app::app::Lit"), find, calls),
+            hook_ev("receiver_local", 13)
+        );
         assert_eq!(receivers.func_value.get(), 2);
     }
 
@@ -7262,14 +8144,28 @@ mod tests {
             .filter_map(Evidence::of)
             .map(|ev| (ev.emitter, ev.rule, ev.line))
             .collect();
-        assert_eq!(sites, vec![hook_ev("receiver_return", 9), hook_ev("receiver_return", 10)]);
+        assert_eq!(
+            sites,
+            vec![
+                hook_ev("receiver_return", 9),
+                hook_ev("receiver_return", 10)
+            ]
+        );
         assert!(!has_edge(&g, from, own_err, edge_category::CALLS));
         assert_eq!(receivers.conversion.get(), 2);
         // The literals build svc's Refusal (the 2026-10-17 correction).
         let uses = edge_category::USES;
         let svc_ty = gid(node_kind::STRUCT, "svc::refusal::Refusal");
-        assert_eq!(ev_of(&g, from, svc_ty, uses), hook_ev("composite_literal", 9));
-        assert!(!has_edge(&g, from, gid(node_kind::STRUCT, "apperr::apperr::Refusal"), uses));
+        assert_eq!(
+            ev_of(&g, from, svc_ty, uses),
+            hook_ev("composite_literal", 9)
+        );
+        assert!(!has_edge(
+            &g,
+            from,
+            gid(node_kind::STRUCT, "apperr::apperr::Refusal"),
+            uses
+        ));
     }
 
     /// Method and func values: a typed local's and `self`'s method value
@@ -7297,8 +8193,11 @@ mod tests {
                    func Main() {\n\ts := &Svc{}\n\tx := idx.New()\n\tx.Set(s.OnDone)\n\tx.Set(helper)\n\
                    \tx.Set(sibling)\n\tx.Set(idx.Exported)\n\t_ = s.id\n\t_ = idx.Global\n}\n";
         let other = "package app\n\nfunc sibling(id string) {}\n";
-        let parses =
-            go_sources(&[("idx/idx.go", idx), ("app/app.go", app), ("app/other.go", other)]);
+        let parses = go_sources(&[
+            ("idx/idx.go", idx),
+            ("app/app.go", app),
+            ("app/other.go", other),
+        ]);
         let GoPasses { g, values, .. } = build_go_passes(repo(), parses);
         let (f, m, s) = (
             |q: &str| gid(node_kind::FUNCTION, q),
@@ -7307,27 +8206,70 @@ mod tests {
         );
         let uses = edge_category::USES;
         let main = f("app::app::Main");
-        assert_eq!(ev_of(&g, main, m("app::app::Svc::OnDone"), uses), hook_ev("method_value", 15));
-        assert_eq!(ev_of(&g, main, f("app::app::helper"), uses), hook_ev("func_value", 16));
-        assert_eq!(ev_of(&g, main, f("app::other::sibling"), uses), hook_ev("func_value", 17));
-        assert_eq!(ev_of(&g, main, f("idx::idx::Exported"), uses), hook_ev("func_value", 18));
-        assert_eq!(ev_of(&g, main, s("app::app::Svc"), uses), hook_ev("composite_literal", 13));
         assert_eq!(
-            ev_of(&g, m("idx::idx::Indexer::Self"), m("idx::idx::Indexer::Self2"), uses),
+            ev_of(&g, main, m("app::app::Svc::OnDone"), uses),
+            hook_ev("method_value", 15)
+        );
+        assert_eq!(
+            ev_of(&g, main, f("app::app::helper"), uses),
+            hook_ev("func_value", 16)
+        );
+        assert_eq!(
+            ev_of(&g, main, f("app::other::sibling"), uses),
+            hook_ev("func_value", 17)
+        );
+        assert_eq!(
+            ev_of(&g, main, f("idx::idx::Exported"), uses),
+            hook_ev("func_value", 18)
+        );
+        assert_eq!(
+            ev_of(&g, main, s("app::app::Svc"), uses),
+            hook_ev("composite_literal", 13)
+        );
+        assert_eq!(
+            ev_of(
+                &g,
+                m("idx::idx::Indexer::Self"),
+                m("idx::idx::Indexer::Self2"),
+                uses
+            ),
             hook_ev("method_value", 14)
         );
         let default_done = gid(node_kind::STATE_VAR, "idx::idx::defaultDone");
-        assert_eq!(ev_of(&g, default_done, f("idx::idx::logDone"), uses), hook_ev("func_value", 4));
-        assert_eq!(ev_of(&g, f("idx::idx::New"), s("idx::idx::Indexer"), uses), hook_ev("composite_literal", 8));
+        assert_eq!(
+            ev_of(&g, default_done, f("idx::idx::logDone"), uses),
+            hook_ev("func_value", 4)
+        );
+        assert_eq!(
+            ev_of(&g, f("idx::idx::New"), s("idx::idx::Indexer"), uses),
+            hook_ev("composite_literal", 8)
+        );
         let from_uses = |from: NodeId| -> Vec<NodeId> {
-            g.edges.iter().filter(|e| e.from == from && e.category == uses).map(|e| e.to).collect()
+            g.edges
+                .iter()
+                .filter(|e| e.from == from && e.category == uses)
+                .map(|e| e.to)
+                .collect()
         };
-        assert!(from_uses(m("idx::idx::Indexer::Loop")).is_empty(), "its own method value");
-        assert!(from_uses(m("app::app::Svc::Clone")).is_empty(), "its own STRUCT");
+        assert!(
+            from_uses(m("idx::idx::Indexer::Loop")).is_empty(),
+            "its own method value"
+        );
+        assert!(
+            from_uses(m("app::app::Svc::Clone")).is_empty(),
+            "its own STRUCT"
+        );
         assert_eq!(from_uses(main).len(), 5, "s.id and idx.Global bind nothing");
         assert_eq!(
             values,
-            ValueStats { refs: 14, methods: 2, funcs: 4, composites: 2, dropped: 6, pkg_handlers: 0 }
+            ValueStats {
+                refs: 14,
+                methods: 2,
+                funcs: 4,
+                composites: 2,
+                dropped: 6,
+                pkg_handlers: 0
+            }
         );
     }
 
@@ -7339,7 +8281,8 @@ mod tests {
     /// own METHOD.
     #[test]
     fn composite_literal_uses_bind_the_struct() {
-        let store = "package store\n\ntype Repo struct{}\n\ntype Cfg struct{}\n\ntype Only struct{}\n";
+        let store =
+            "package store\n\ntype Repo struct{}\n\ntype Cfg struct{}\n\ntype Only struct{}\n";
         let app = "package app\n\nimport (\n\t\"example.com/scope/store\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\n\
                    type Local struct{}\n\ntype Repo struct{}\n\n\
                    func Build() {\n\t_ = Local{}\n\t_ = &store.Repo{}\n\t_ = store.Cfg{}\n\t_ = Sibling{}\n\
@@ -7372,7 +8315,10 @@ mod tests {
             ]
         );
         let fallback = gid(node_kind::STATE_VAR, "app::app::fallback");
-        assert_eq!(ev_of(&g, fallback, s("app::app::Local"), uses), hook_ev("composite_literal", 23));
+        assert_eq!(
+            ev_of(&g, fallback, s("app::app::Local"), uses),
+            hook_ev("composite_literal", 23)
+        );
         let copy = gid(node_kind::METHOD, "app::app::Local::Copy");
         assert!(!g.edges.iter().any(|e| e.from == copy && e.category == uses));
         // `Only{}` names no type of app (a repo-wide bare name never binds);
@@ -7401,14 +8347,25 @@ mod tests {
             ("controllers/health.go", health),
             ("server/server.go", server),
         ]);
-        let GoPasses { g, handlers, values, .. } = build_go_passes(repo(), parses);
+        let GoPasses {
+            g,
+            handlers,
+            values,
+            ..
+        } = build_go_passes(repo(), parses);
         let f = |q: &str| gid(node_kind::FUNCTION, q);
-        let (ping, health_r, hook) =
-            (route_id(&g, "GET /ping"), route_id(&g, "GET /health"), route_id(&g, "GET /hook"));
+        let (ping, health_r, hook) = (
+            route_id(&g, "GET /ping"),
+            route_id(&g, "GET /health"),
+            route_id(&g, "GET /hook"),
+        );
         let ping_fn = f("controllers::activity::Ping");
         let health_fn = f("controllers::health::Health");
         assert_eq!(handled_by(&g, ping), vec![ping_fn]);
-        assert_eq!(handler_ev(&g, ping, ping_fn).1.as_deref(), Some("attribute"));
+        assert_eq!(
+            handler_ev(&g, ping, ping_fn).1.as_deref(),
+            Some("attribute")
+        );
         assert_eq!(handled_by(&g, health_r), vec![health_fn]);
         assert_eq!(
             handler_ev(&g, health_r, health_fn),
@@ -7422,7 +8379,11 @@ mod tests {
         assert!(handled_by(&g, hook).is_empty());
         assert_eq!(handlers.package_functions, 1);
         assert_eq!(values.pkg_handlers, 1);
-        assert_eq!(handlers.marker(), None, "[go-handlers] counts package types only");
+        assert_eq!(
+            handlers.marker(),
+            None,
+            "[go-handlers] counts package types only"
+        );
     }
 
     /// The two DT.5j markers' shapes, and silence when nothing counted.
@@ -7436,7 +8397,11 @@ mod tests {
             conversion: true,
             ..Typed::default()
         });
-        tally.bound_through(&Typed { qualified_field: true, alternatives: true, ..Typed::default() });
+        tally.bound_through(&Typed {
+            qualified_field: true,
+            alternatives: true,
+            ..Typed::default()
+        });
         assert_eq!(
             tally.typed_marker().as_deref(),
             Some(
@@ -7445,7 +8410,14 @@ mod tests {
             )
         );
         assert_eq!(ValueStats::default().marker(), None);
-        let stats = ValueStats { refs: 9, methods: 1, funcs: 2, composites: 3, dropped: 3, pkg_handlers: 1 };
+        let stats = ValueStats {
+            refs: 9,
+            methods: 1,
+            funcs: 2,
+            composites: 3,
+            dropped: 3,
+            pkg_handlers: 1,
+        };
         assert_eq!(
             stats.marker().as_deref(),
             Some(
@@ -7453,10 +8425,15 @@ mod tests {
                  pkg_handlers=1"
             )
         );
-        let handlers_only = ValueStats { pkg_handlers: 2, ..ValueStats::default() };
+        let handlers_only = ValueStats {
+            pkg_handlers: 2,
+            ..ValueStats::default()
+        };
         assert_eq!(
             handlers_only.marker().as_deref(),
-            Some("[go-values] uses=0 (method=0 func=0 composite_literal=0) dropped=0 refs=0 pkg_handlers=2")
+            Some(
+                "[go-values] uses=0 (method=0 func=0 composite_literal=0) dropped=0 refs=0 pkg_handlers=2"
+            )
         );
     }
 
@@ -7475,8 +8452,10 @@ mod tests {
                       func Register(r *gin.Engine) {\n\
                       \th := &TokensHandler{}\n\
                       \tr.GET(\"/x\", h.List)\n}\n";
-        let parses =
-            go_sources(&[("handlers/tokens.go", types), ("handlers/routes.go", routes)]);
+        let parses = go_sources(&[
+            ("handlers/tokens.go", types),
+            ("handlers/routes.go", routes),
+        ]);
         let handler_refs: Vec<CallQualifier> = parses
             .iter()
             .flat_map(|p| &p.refs)
@@ -7497,7 +8476,13 @@ mod tests {
         assert_eq!(handler_ev(&g, r, list), pkg_type_ev(6));
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 1, other_file: 1, promoted: 0, unbound: 0, package_functions: 0 }
+            TypeHandlerStats {
+                bound: 1,
+                other_file: 1,
+                promoted: 0,
+                unbound: 0,
+                package_functions: 0
+            }
         );
     }
 
@@ -7543,8 +8528,10 @@ mod tests {
                       \tr.GET(\"/tokens\", h.List)\n\
                       \tu, _ := NewUsersHandler()\n\
                       \tr.GET(\"/users\", u.Show)\n}\n";
-        let parses =
-            go_sources(&[("handlers/types.go", DF16_TYPES), ("handlers/routes.go", routes)]);
+        let parses = go_sources(&[
+            ("handlers/types.go", DF16_TYPES),
+            ("handlers/routes.go", routes),
+        ]);
         let bases: Vec<String> = parses
             .iter()
             .flat_map(|p| &p.refs)
@@ -7564,11 +8551,21 @@ mod tests {
         ] {
             let r = route_id(&g, route);
             assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
-            assert_eq!(handler_ev(&g, r, m(method)), local_type_ev(file, row), "{route}");
+            assert_eq!(
+                handler_ev(&g, r, m(method)),
+                local_type_ev(file, row),
+                "{route}"
+            );
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 2, other_file: 2, promoted: 0, unbound: 0, package_functions: 0 }
+            TypeHandlerStats {
+                bound: 2,
+                other_file: 2,
+                promoted: 0,
+                unbound: 0,
+                package_functions: 0
+            }
         );
 
         // The type and its constructor in the registering file itself:
@@ -7582,10 +8579,19 @@ mod tests {
         let r = route_id(&g, "GET /tokens");
         let list = m("handlers::types::TokensHandler::List");
         assert_eq!(handled_by(&g, r), vec![list]);
-        assert_eq!(handler_ev(&g, r, list).1.as_deref(), Some("local_type_method"));
+        assert_eq!(
+            handler_ev(&g, r, list).1.as_deref(),
+            Some("local_type_method")
+        );
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 1, other_file: 0, promoted: 0, unbound: 0, package_functions: 0 }
+            TypeHandlerStats {
+                bound: 1,
+                other_file: 0,
+                promoted: 0,
+                unbound: 0,
+                package_functions: 0
+            }
         );
     }
 
@@ -7603,8 +8609,7 @@ mod tests {
                     \th := handlers.NewTokensHandler()\n\
                     \tr.GET(\"/b\", h.Show)\n\
                     \tr.GET(\"/c\", u.List)\n}\n";
-        let parses =
-            go_sources(&[("handlers/types.go", DF16_TYPES), ("cmd/main.go", main)]);
+        let parses = go_sources(&[("handlers/types.go", DF16_TYPES), ("cmd/main.go", main)]);
         let bases: Vec<String> = parses
             .iter()
             .flat_map(|p| &p.refs)
@@ -7616,7 +8621,11 @@ mod tests {
             .collect();
         assert_eq!(
             bases,
-            vec!["handlers.TokensHandler", "handlers.NewTokensHandler()", "handlers.UsersHandler"]
+            vec![
+                "handlers.TokensHandler",
+                "handlers.NewTokensHandler()",
+                "handlers.UsersHandler"
+            ]
         );
         let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
         let m = |q: &str| gid(node_kind::METHOD, q);
@@ -7627,11 +8636,21 @@ mod tests {
         ] {
             let r = route_id(&g, route);
             assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
-            assert_eq!(handler_ev(&g, r, m(method)), local_type_ev("cmd/main.go", row), "{route}");
+            assert_eq!(
+                handler_ev(&g, r, m(method)),
+                local_type_ev("cmd/main.go", row),
+                "{route}"
+            );
         }
         assert_eq!(
             handlers,
-            TypeHandlerStats { bound: 3, other_file: 3, promoted: 0, unbound: 0, package_functions: 0 }
+            TypeHandlerStats {
+                bound: 3,
+                other_file: 3,
+                promoted: 0,
+                unbound: 0,
+                package_functions: 0
+            }
         );
     }
 
@@ -7650,8 +8669,10 @@ mod tests {
                       \tr.GET(\"/x\", x.List)\n\
                       \te := gin.New()\n\
                       \tr.GET(\"/e\", e.List)\n}\n";
-        let parses =
-            go_sources(&[("handlers/types.go", DF16_TYPES), ("handlers/routes.go", routes)]);
+        let parses = go_sources(&[
+            ("handlers/types.go", DF16_TYPES),
+            ("handlers/routes.go", routes),
+        ]);
         let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
         for route in ["GET /l", "GET /x", "GET /e"] {
             assert_eq!(handled_by(&g, route_id(&g, route)), vec![], "{route}");
@@ -7678,15 +8699,20 @@ mod tests {
             .parent()
             .map(|p| p.join("bench/substrate-gap/fixtures/go-embedded-implements"))
             .expect("workspace root");
-        ["fake/fake.go", "pb/greeter_grpc.pb.go", "server/server.go", "store/store.go"]
-            .iter()
-            .map(|rel| {
-                let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
-                let qname = rel.trim_end_matches(".go").replace('/', "::");
-                glia_parser_go::parse_file(&src, rel, &qname, "example.com/impl", repo())
-                    .expect("parse")
-            })
-            .collect()
+        [
+            "fake/fake.go",
+            "pb/greeter_grpc.pb.go",
+            "server/server.go",
+            "store/store.go",
+        ]
+        .iter()
+        .map(|rel| {
+            let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
+            let qname = rel.trim_end_matches(".go").replace('/', "::");
+            glia_parser_go::parse_file(&src, rel, &qname, "example.com/impl", repo())
+                .expect("parse")
+        })
+        .collect()
     }
 
     /// A type's method set counts what its embeds promote (a pointer to a
@@ -7706,11 +8732,22 @@ mod tests {
         let greeter = it("pb::greeter_grpc.pb::GreeterServer");
         let (users, logging) = (st("store::store::Users"), st("store::store::LoggingRepo"));
         let server = st("server::server::server");
-        for (from, to) in [(users, repo_i), (users, closer), (logging, repo_i), (server, greeter)] {
+        for (from, to) in [
+            (users, repo_i),
+            (users, closer),
+            (logging, repo_i),
+            (server, greeter),
+        ] {
             assert_eq!(implements_edge(&g, from, to), Some(Confidence::Medium));
-            assert_eq!(implements_rule(&g, from, to).as_deref(), Some("method_signature"));
+            assert_eq!(
+                implements_rule(&g, from, to).as_deref(),
+                Some("method_signature")
+            );
         }
-        assert_eq!(implements_edge(&g, st("fake::fake::fakeServer"), greeter), None);
+        assert_eq!(
+            implements_edge(&g, st("fake::fake::fakeServer"), greeter),
+            None
+        );
         assert_eq!(implements_edge(&g, st("store::store::Pair"), closer), None);
         let pair = |from: &str, to: &str| {
             let (from, to) = (m(from), m(to));
@@ -7732,7 +8769,10 @@ mod tests {
             medium("same_name")
         );
         let say_hello = "pb::greeter_grpc.pb::GreeterServer::SayHello";
-        assert_eq!(pair("server::server::server::SayHello", say_hello), medium("same_name"));
+        assert_eq!(
+            pair("server::server::server::SayHello", say_hello),
+            medium("same_name")
+        );
         let must_embed = "mustEmbedUnimplementedGreeterServer";
         assert_eq!(
             pair(
@@ -7747,7 +8787,9 @@ mod tests {
         // Repo::Close or -> Closer::Close pair).
         let repo_close = m("store::store::Repo::Close");
         let implements_out = |from: NodeId| {
-            g.edges.iter().any(|e| e.from == from && e.category == edge_category::IMPLEMENTS)
+            g.edges
+                .iter()
+                .any(|e| e.from == from && e.category == edge_category::IMPLEMENTS)
         };
         assert!(!implements_out(repo_close));
     }
@@ -7768,9 +8810,18 @@ mod tests {
         let (g, stats) = go_implicit(go_sources(&[("e/e.go", src)]));
         let coded = gid(node_kind::INTERFACE, "e::e::coded");
         let code_err = gid(node_kind::STRUCT, "e::e::codeErr");
-        assert_eq!(implements_edge(&g, code_err, coded), Some(Confidence::Medium));
-        assert_eq!(implements_rule(&g, code_err, coded).as_deref(), Some("method_signature"));
-        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "e::e::clash"), coded), None);
+        assert_eq!(
+            implements_edge(&g, code_err, coded),
+            Some(Confidence::Medium)
+        );
+        assert_eq!(
+            implements_rule(&g, code_err, coded).as_deref(),
+            Some("method_signature")
+        );
+        assert_eq!(
+            implements_edge(&g, gid(node_kind::STRUCT, "e::e::clash"), coded),
+            None
+        );
         assert_eq!(
             stats.map(|s| (s.edges, s.promoted_pairs, s.from_interface)),
             Some((1, 1, 0))
@@ -7785,7 +8836,10 @@ mod tests {
     fn go_implicit_promoted_marker_shape() {
         let (_, stats) = go_implicit(implements_fixture());
         assert_eq!(
-            stats.as_ref().map(GoImplicitStats::promoted_marker).as_deref(),
+            stats
+                .as_ref()
+                .map(GoImplicitStats::promoted_marker)
+                .as_deref(),
             Some("[iface] go implicit promoted: pairs=5 (from_interface=2) method_pairs=1")
         );
         assert_eq!(
@@ -7794,15 +8848,22 @@ mod tests {
         );
         let (_, plain) = go_implicit(implicit_iface_shape());
         assert_eq!(
-            plain.as_ref().map(GoImplicitStats::promoted_marker).as_deref(),
+            plain
+                .as_ref()
+                .map(GoImplicitStats::promoted_marker)
+                .as_deref(),
             Some("[iface] go implicit promoted: pairs=0 (from_interface=0) method_pairs=0")
         );
     }
 
     // ---- CI.6: Go type aliases in method signatures -------------------------
 
-    const ALIAS_FIXTURE_FILES: [&str; 4] =
-        ["pb/chat_grpc.pb.go", "server/server.go", "server/compat.go", "store/store.go"];
+    const ALIAS_FIXTURE_FILES: [&str; 4] = [
+        "pb/chat_grpc.pb.go",
+        "server/server.go",
+        "server/compat.go",
+        "store/store.go",
+    ];
 
     /// Files of the bench fixture go-alias-signatures, parsed as the engine
     /// does (go.mod `example.com/aliases`), in the order given.
@@ -7829,7 +8890,10 @@ mod tests {
     }
 
     fn sig<'g>(g: &'g RepoGraph, method: &str) -> Option<&'g str> {
-        g.nav.method_sigs.get(&gid(node_kind::METHOD, method)).map(String::as_str)
+        g.nav
+            .method_sigs
+            .get(&gid(node_kind::METHOD, method))
+            .map(String::as_str)
     }
 
     /// A method typed by protoc-gen-go-grpc's stream alias (`pb.Chat_StreamServer
@@ -7846,14 +8910,23 @@ mod tests {
         for ty in ["server::server::ChatService", "server::compat::ChatLegacy"] {
             let ty = gid(node_kind::STRUCT, ty);
             assert_eq!(implements_edge(&g, ty, chat), Some(Confidence::Medium));
-            assert_eq!(implements_rule(&g, ty, chat).as_deref(), Some("method_signature"));
+            assert_eq!(
+                implements_rule(&g, ty, chat).as_deref(),
+                Some("method_signature")
+            );
         }
         let (stream, iface_stream) = (
             gid(node_kind::METHOD, "server::server::ChatService::Stream"),
             gid(node_kind::METHOD, "pb::chat_grpc.pb::ChatServer::Stream"),
         );
-        assert_eq!(implements_edge(&g, stream, iface_stream), Some(Confidence::Medium));
-        assert_eq!(implements_rule(&g, stream, iface_stream).as_deref(), Some("same_name"));
+        assert_eq!(
+            implements_edge(&g, stream, iface_stream),
+            Some(Confidence::Medium)
+        );
+        assert_eq!(
+            implements_rule(&g, stream, iface_stream).as_deref(),
+            Some("same_name")
+        );
         let wrong = gid(node_kind::STRUCT, "server::server::WrongChat");
         assert_eq!(implements_edge(&g, wrong, chat), None);
         let wrong_stream = gid(node_kind::METHOD, "server::server::WrongChat::Stream");
@@ -7865,7 +8938,11 @@ mod tests {
             sig(&g, "server::server::WrongChat::Stream"),
             Some("(ServerStreamingServer[Reply])(error)")
         );
-        assert_eq!(sig(&g, "pb::chat_grpc.pb::ChatServer::Stream"), Some(bidi), "unchanged");
+        assert_eq!(
+            sig(&g, "pb::chat_grpc.pb::ChatServer::Stream"),
+            Some(bidi),
+            "unchanged"
+        );
     }
 
     /// Aliases of one package on either side of the compare: the
@@ -7878,12 +8955,27 @@ mod tests {
         let repo_i = gid(node_kind::INTERFACE, "store::store::Repo");
         let mem = gid(node_kind::STRUCT, "store::store::memRepo");
         assert_eq!(implements_edge(&g, mem, repo_i), Some(Confidence::Medium));
-        assert_eq!(implements_rule(&g, mem, repo_i).as_deref(), Some("method_signature"));
-        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "store::store::badRepo"), repo_i), None);
+        assert_eq!(
+            implements_rule(&g, mem, repo_i).as_deref(),
+            Some("method_signature")
+        );
+        assert_eq!(
+            implements_edge(&g, gid(node_kind::STRUCT, "store::store::badRepo"), repo_i),
+            None
+        );
         assert_eq!(sig(&g, "store::store::Repo::List"), Some("()([]*Record)"));
-        assert_eq!(sig(&g, "store::store::memRepo::Get"), Some("(string)(*Record,error)"));
-        assert_eq!(sig(&g, "store::store::badRepo::Get"), Some("(int)(*Record,error)"));
-        assert_eq!(sig(&g, "store::store::badRepo::List"), Some("()([]*Record)"));
+        assert_eq!(
+            sig(&g, "store::store::memRepo::Get"),
+            Some("(string)(*Record,error)")
+        );
+        assert_eq!(
+            sig(&g, "store::store::badRepo::Get"),
+            Some("(int)(*Record,error)")
+        );
+        assert_eq!(
+            sig(&g, "store::store::badRepo::List"),
+            Some("()([]*Record)")
+        );
     }
 
     /// The quokka chat shape: a server embedding the generated Unimplemented
@@ -7897,14 +8989,26 @@ mod tests {
         let feed = gid(node_kind::INTERFACE, "pb::chat_grpc.pb::FeedServer");
         let service = gid(node_kind::STRUCT, "server::server::FeedService");
         assert_eq!(implements_edge(&g, service, feed), Some(Confidence::Medium));
-        assert_eq!(implements_rule(&g, service, feed).as_deref(), Some("method_signature"));
+        assert_eq!(
+            implements_rule(&g, service, feed).as_deref(),
+            Some("method_signature")
+        );
         let (watch, iface_watch) = (
             gid(node_kind::METHOD, "server::server::FeedService::Watch"),
             gid(node_kind::METHOD, "pb::chat_grpc.pb::FeedServer::Watch"),
         );
-        assert_eq!(implements_rule(&g, watch, iface_watch).as_deref(), Some("same_name"));
-        let unimplemented = gid(node_kind::STRUCT, "pb::chat_grpc.pb::UnimplementedFeedServer");
-        assert_eq!(implements_edge(&g, unimplemented, feed), Some(Confidence::Medium));
+        assert_eq!(
+            implements_rule(&g, watch, iface_watch).as_deref(),
+            Some("same_name")
+        );
+        let unimplemented = gid(
+            node_kind::STRUCT,
+            "pb::chat_grpc.pb::UnimplementedFeedServer",
+        );
+        assert_eq!(
+            implements_edge(&g, unimplemented, feed),
+            Some(Confidence::Medium)
+        );
     }
 
     /// A bare name resolves through the method's package and its file's
@@ -7922,14 +9026,23 @@ mod tests {
                  func (A) Get(z Z) {}\n",
             ),
             ("a/x_test.go", "package a\n\ntype Z = float64\n"),
-            ("a/y_test.go", "package a\n\ntype Y struct{}\n\nfunc (Y) Get(z Z) {}\n"),
-            ("b/b.go", "package b\n\ntype S = string\n\ntype T = []byte\n"),
+            (
+                "a/y_test.go",
+                "package a\n\ntype Y struct{}\n\nfunc (Y) Get(z Z) {}\n",
+            ),
+            (
+                "b/b.go",
+                "package b\n\ntype S = string\n\ntype T = []byte\n",
+            ),
             (
                 "u/u.go",
                 "package u\n\nimport (\n\t\"example.com/scope/a\"\n\t\"example.com/scope/b\"\n)\n\n\
                  type U struct{}\n\nfunc (U) Get(x a.S) {}\n\nfunc (U) Put(x b.T) {}\n",
             ),
-            ("n/n.go", "package n\n\ntype S int\n\ntype N struct{}\n\nfunc (N) Get(x S) {}\n"),
+            (
+                "n/n.go",
+                "package n\n\ntype S int\n\ntype N struct{}\n\nfunc (N) Get(x S) {}\n",
+            ),
             (
                 "c/c.go",
                 "package c\n\nimport \"example.com/scope/a\"\n\nvar _ a.A\n\n\
@@ -7937,11 +9050,19 @@ mod tests {
             ),
         ]);
         let (g, stats) = go_aliases(parses);
-        assert_eq!(sig(&g, "u::u::U::Get"), Some("(S)()"), "a.S = int, b.S = string");
+        assert_eq!(
+            sig(&g, "u::u::U::Get"),
+            Some("(S)()"),
+            "a.S = int, b.S = string"
+        );
         assert_eq!(sig(&g, "u::u::U::Put"), Some("([]byte)()"), "one target");
         assert_eq!(sig(&g, "n::n::N::Get"), Some("(S)()"), "no import");
         assert_eq!(sig(&g, "c::c::C::Get"), Some("(S)()"), "c's own S");
-        assert_eq!(sig(&g, "a::a::A::Get"), Some("(Z)()"), "a test file's alias");
+        assert_eq!(
+            sig(&g, "a::a::A::Get"),
+            Some("(Z)()"),
+            "a test file's alias"
+        );
         assert_eq!(sig(&g, "a::y_test::Y::Get"), Some("(float64)()"));
         assert_eq!(
             stats.as_ref().map(AliasStats::marker).as_deref(),
@@ -7995,7 +9116,10 @@ mod tests {
                  ambiguous=0 shadowed=0"
             )
         );
-        let (_, root) = go_aliases(go_sources(&[("main.go", "package main\n\ntype ID = string\n")]));
+        let (_, root) = go_aliases(go_sources(&[(
+            "main.go",
+            "package main\n\ntype ID = string\n",
+        )]));
         assert_eq!(
             root.as_ref().map(AliasStats::marker).as_deref(),
             Some(
@@ -8048,15 +9172,27 @@ mod tests {
             build_symbol_table(&mut g);
             let pk = GoPackages::build(&g, &imports, go_package_names(&g));
             let importer = m("main");
-            assert_eq!(pk.import_target("a::store", importer), DirImport::Bound(m("a::store::store")));
-            assert_eq!(pk.import_target("b::util", importer), DirImport::Bound(m("b::util::y")));
-            assert_eq!(pk.import_target("c::only", importer), DirImport::Bound(m("c::only::more_test")));
+            assert_eq!(
+                pk.import_target("a::store", importer),
+                DirImport::Bound(m("a::store::store"))
+            );
+            assert_eq!(
+                pk.import_target("b::util", importer),
+                DirImport::Bound(m("b::util::y"))
+            );
+            assert_eq!(
+                pk.import_target("c::only", importer),
+                DirImport::Bound(m("c::only::more_test"))
+            );
             assert_eq!(
                 pk.import_target("c::only", m("c::only::more_test")),
                 DirImport::Bound(m("c::only::only_test"))
             );
             assert_eq!(pk.import_target("a", importer), DirImport::NoDir);
-            assert_eq!(pk.import_target("", m("a::store::zeta")), DirImport::Bound(importer));
+            assert_eq!(
+                pk.import_target("", m("a::store::zeta")),
+                DirImport::Bound(importer)
+            );
             assert_eq!(pk.import_target("", importer), DirImport::OnlyImporter);
         }
     }
@@ -8069,12 +9205,22 @@ mod tests {
         let r = repo();
         let m = gid(node_kind::MODULE, qname);
         let mut fp = FileParse::default();
-        fp.nodes.push(Node { id: m, repo: r, confidence: Confidence::Strong, cells: vec![] });
+        fp.nodes.push(Node {
+            id: m,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
         fp.nav.record(m, name, qname, node_kind::MODULE, None);
         for f in fns {
             let q = format!("{qname}::{f}");
             let id = gid(node_kind::FUNCTION, &q);
-            fp.nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            fp.nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             fp.nav.record(id, f, &q, node_kind::FUNCTION, Some(m));
         }
         fp
@@ -8100,20 +9246,31 @@ mod tests {
     fn a_file_named_module_answers_to_its_bare_path() {
         let g = build_python(
             repo(),
-            vec![py_importer(), named_module("api::user.py", "user", &["validate"])],
+            vec![
+                py_importer(),
+                named_module("api::user.py", "user", &["validate"]),
+            ],
         )
         .unwrap();
         let user = gid(node_kind::MODULE, "api::user.py");
         assert_eq!(g.symbols.module_by_qname.get("api::user"), Some(&user));
         assert_eq!(g.symbols.module_by_qname.get("api::user.py"), Some(&user));
         assert!(
-            has_edge(&g, gid(node_kind::MODULE, "api::main"), user, edge_category::IMPORTS),
+            has_edge(
+                &g,
+                gid(node_kind::MODULE, "api::main"),
+                user,
+                edge_category::IMPORTS
+            ),
             "the bare-path import binds the file-named MODULE"
         );
         let bound = g.symbols.module_import_bindings[&gid(node_kind::MODULE, "api::main")]
             .get("validate")
             .copied();
-        assert_eq!(bound, Some(gid(node_kind::FUNCTION, "api::user.py::validate")));
+        assert_eq!(
+            bound,
+            Some(gid(node_kind::FUNCTION, "api::user.py::validate"))
+        );
     }
 
     #[test]
@@ -8152,14 +9309,20 @@ mod tests {
     fn go_packages_read_a_file_named_module_once_by_its_bare_form() {
         // `infra/main.go` + `infra/main.tf`, `infra/main_test.go` + `.py`:
         // one member each, the test file still a test, the alias not a member.
-        let GoPasses { g, packages: stats, .. } = build_go_passes(
+        let GoPasses {
+            g, packages: stats, ..
+        } = build_go_passes(
             repo(),
             vec![
                 named_module("infra::main.go", "main", &[]),
                 named_module("infra::main_test.go", "main_test", &[]),
             ],
         );
-        assert_eq!(g.symbols.module_by_qname.len(), 4, "two MODULEs, two aliases");
+        assert_eq!(
+            g.symbols.module_by_qname.len(),
+            4,
+            "two MODULEs, two aliases"
+        );
         assert_eq!(stats.dirs, 1);
         assert_eq!(stats.multi_file, 1);
         let (mut g2, imports, _, _) = merge_parses(
@@ -8173,7 +9336,10 @@ mod tests {
         build_symbol_table(&mut g2);
         let pk = GoPackages::build(&g2, &imports, go_package_names(&g2));
         assert_eq!(pk.by_dir["infra"].len(), 2);
-        assert!(pk.tests.contains(&gid(node_kind::MODULE, "infra::main_test.go")));
+        assert!(
+            pk.tests
+                .contains(&gid(node_kind::MODULE, "infra::main_test.go"))
+        );
         assert_eq!(
             pk.import_target("infra", gid(node_kind::MODULE, "cmd::run")),
             DirImport::Bound(gid(node_kind::MODULE, "infra::main.go"))
@@ -8323,7 +9489,10 @@ mod tests {
         assert_eq!(g.nav.nav_facts[&t], [fact("a"), fact("d")]);
 
         rename_nodes(&mut g, &mut calls, &mut refs, &[(t, s)]);
-        assert!(!g.nav.nav_facts.contains_key(&t), "the old scope's facts moved");
+        assert!(
+            !g.nav.nav_facts.contains_key(&t),
+            "the old scope's facts moved"
+        );
         assert_eq!(
             g.nav.nav_facts[&s],
             [fact("a"), fact("b"), fact("c"), fact("d")]
@@ -8411,7 +9580,10 @@ mod tests {
         assert_eq!(g.nav.method_sigs[&s], "(string)(string)");
         rename_nodes(&mut g, &mut calls, &mut refs, &[(t, s), (u, NodeId(24))]);
         assert!(!g.nav.method_sigs.contains_key(&t) && !g.nav.method_sigs.contains_key(&u));
-        assert_eq!(g.nav.method_sigs[&s], "(string)(string)", "the survivor keeps its own");
+        assert_eq!(
+            g.nav.method_sigs[&s], "(string)(string)",
+            "the survivor keeps its own"
+        );
         assert_eq!(g.nav.method_sigs[&NodeId(24)], "()()");
     }
 
@@ -9040,7 +10212,11 @@ mod tests {
         calls: &[(&str, &str, &str)],
     ) -> FileParse {
         let mut all = vec![(node_kind::PACKAGE, package, None)];
-        all.extend(items.iter().map(|&(k, q, p)| (k, q, Some(p.unwrap_or(package)))));
+        all.extend(
+            items
+                .iter()
+                .map(|&(k, q, p)| (k, q, Some(p.unwrap_or(package)))),
+        );
         let mut fp = go_file(module, &all);
         fp.imports = uses
             .iter()
@@ -9059,7 +10235,10 @@ mod tests {
             .iter()
             .map(|&(from, base, name)| CallSite {
                 from: gid(node_kind::METHOD, from),
-                qualifier: CallQualifier::Attribute { base: base.to_string(), name: name.to_string() },
+                qualifier: CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                },
                 line: 0,
             })
             .collect();
@@ -9067,8 +10246,14 @@ mod tests {
     }
 
     /// A class `<package>::<class>` with one METHOD `m`, as `namespaced_file` items.
-    fn class_with<'a>(class: &'a str, method: &'a str) -> [(NodeKindId, &'a str, Option<&'a str>); 2] {
-        [(node_kind::CLASS, class, None), (node_kind::METHOD, method, Some(class))]
+    fn class_with<'a>(
+        class: &'a str,
+        method: &'a str,
+    ) -> [(NodeKindId, &'a str, Option<&'a str>); 2] {
+        [
+            (node_kind::CLASS, class, None),
+            (node_kind::METHOD, method, Some(class)),
+        ]
     }
 
     /// bench/substrate-gap/fixtures/php-shared-namespace-bindings: two files
@@ -9093,14 +10278,20 @@ mod tests {
             namespaced_file(
                 "src::Orders::OrderService",
                 "App::Orders",
-                &class_with("App::Orders::OrderService", "App::Orders::OrderService::place"),
+                &class_with(
+                    "App::Orders::OrderService",
+                    "App::Orders::OrderService::place",
+                ),
                 &[("App::Billing", "Invoicer")],
                 &[("App::Orders::OrderService::place", "Invoicer", "issue")],
             ),
             namespaced_file(
                 "src::Orders::ShipmentService",
                 "App::Orders",
-                &class_with("App::Orders::ShipmentService", "App::Orders::ShipmentService::ship"),
+                &class_with(
+                    "App::Orders::ShipmentService",
+                    "App::Orders::ShipmentService::ship",
+                ),
                 &[("App::Billing", "Ledger")],
                 &[("App::Orders::ShipmentService::ship", "Ledger", "issue")],
             ),
@@ -9122,17 +10313,31 @@ mod tests {
             gid(node_kind::METHOD, "App::Billing::Invoicer::issue"),
             gid(node_kind::METHOD, "App::Billing::Ledger::issue"),
         );
-        assert!(has_edge(&g, place, invoicer_issue, edge_category::CALLS), "own file's use");
-        assert!(has_edge(&g, ship, ledger_issue, edge_category::CALLS), "control");
-        assert!(!has_edge(&g, place, ledger_issue, edge_category::CALLS), "another file's use");
+        assert!(
+            has_edge(&g, place, invoicer_issue, edge_category::CALLS),
+            "own file's use"
+        );
+        assert!(
+            has_edge(&g, ship, ledger_issue, edge_category::CALLS),
+            "control"
+        );
+        assert!(
+            !has_edge(&g, place, ledger_issue, edge_category::CALLS),
+            "another file's use"
+        );
         assert!(g.unresolved_calls.is_empty());
         let order_file = gid(node_kind::MODULE, "src::Orders::OrderService");
         assert_eq!(g.symbols.home_module.get(&place), Some(&order_file));
         assert_eq!(
-            g.symbols.home_module.get(&gid(node_kind::CLASS, "App::Orders::OrderService")),
+            g.symbols
+                .home_module
+                .get(&gid(node_kind::CLASS, "App::Orders::OrderService")),
             Some(&order_file)
         );
-        assert_eq!(crate::calls::enclosing_home_module(&g, place), Some(order_file));
+        assert_eq!(
+            crate::calls::enclosing_home_module(&g, place),
+            Some(order_file)
+        );
     }
 
     /// A PACKAGE two files open hangs under the FIRST file merged (the one
@@ -9152,7 +10357,10 @@ mod tests {
             gid(node_kind::MODULE, "src::Billing::Invoicer")
         );
         for file in [first, second] {
-            assert!(g.nav.children_of[&file].contains(&orders), "every file lists it");
+            assert!(
+                g.nav.children_of[&file].contains(&orders),
+                "every file lists it"
+            );
         }
         let mut reversed = php_shared_namespace_shape();
         reversed.reverse();
@@ -9177,7 +10385,10 @@ mod tests {
                 namespaced_file(
                     "Orders::OrderService",
                     "Shop::Orders",
-                    &class_with("Shop::Orders::OrderService", "Shop::Orders::OrderService::Place"),
+                    &class_with(
+                        "Shop::Orders::OrderService",
+                        "Shop::Orders::OrderService::Place",
+                    ),
                     &[("Shop::Billing", "Invoicer")],
                     &[("Shop::Orders::OrderService::Place", "Invoicer", "Issue")],
                 ),
@@ -9216,7 +10427,11 @@ mod tests {
             "app::models",
             &[
                 (node_kind::CLASS, "app::models::User", None),
-                (node_kind::METHOD, "app::models::User::save", Some("app::models::User")),
+                (
+                    node_kind::METHOD,
+                    "app::models::User::save",
+                    Some("app::models::User"),
+                ),
             ],
         ));
         parses.push(namespaced_file(
@@ -9287,7 +10502,10 @@ mod tests {
             gid(node_kind::MODULE, "Orders::OrderService"),
             gid(node_kind::MODULE, "Orders::OrderService.Shipping"),
         );
-        assert_eq!(g.symbols.home_module.get(&gid(node_kind::CLASS, class)), Some(&first));
+        assert_eq!(
+            g.symbols.home_module.get(&gid(node_kind::CLASS, class)),
+            Some(&first)
+        );
         assert_eq!(g.symbols.home_module.get(&ship), Some(&second));
         assert!(has_edge(
             &g,
@@ -9321,16 +10539,29 @@ mod tests {
     ) -> FileParse {
         let mut f = go_file(file, &[]);
         let pkg = format!("{file}::{module}");
-        ex_push(&mut f, node_kind::PACKAGE, &pkg, gid(node_kind::MODULE, file));
+        ex_push(
+            &mut f,
+            node_kind::PACKAGE,
+            &pkg,
+            gid(node_kind::MODULE, file),
+        );
         for name in fns {
             let qname = format!("{pkg}::{name}");
-            ex_push(&mut f, node_kind::FUNCTION, &qname, gid(node_kind::PACKAGE, &pkg));
+            ex_push(
+                &mut f,
+                node_kind::FUNCTION,
+                &qname,
+                gid(node_kind::PACKAGE, &pkg),
+            );
         }
         f.imports = imports
             .iter()
             .map(|path| ImportStmt {
                 from_module: file.to_string(),
-                target: ImportTarget::Module { path: (*path).to_string(), alias: None },
+                target: ImportTarget::Module {
+                    path: (*path).to_string(),
+                    alias: None,
+                },
                 line: 1,
             })
             .collect();
@@ -9353,10 +10584,18 @@ mod tests {
     fn ex_push(f: &mut FileParse, kind: glia_core::NodeKindId, qname: &str, parent: NodeId) {
         let id = gid(kind, qname);
         let seg = qname.rsplit("::").next().unwrap_or(qname);
-        let name =
-            if kind == node_kind::PACKAGE { seg.rsplit('.').next().unwrap_or(seg) } else { seg };
+        let name = if kind == node_kind::PACKAGE {
+            seg.rsplit('.').next().unwrap_or(seg)
+        } else {
+            seg
+        };
         f.nav.record(id, name, qname, kind, Some(parent));
-        f.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        f.nodes.push(Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
         f.edges.push(glia_core::Edge {
             from: parent,
             to: id,
@@ -9394,7 +10633,11 @@ mod tests {
         let mut calls: Vec<_> = rows
             .iter()
             .map(|&(to, rule)| {
-                (gid(node_kind::FUNCTION, to), ELIXIR_EMITTER.to_string(), rule.to_string())
+                (
+                    gid(node_kind::FUNCTION, to),
+                    ELIXIR_EMITTER.to_string(),
+                    rule.to_string(),
+                )
             })
             .collect();
         sort_calls(&mut calls);
@@ -9455,7 +10698,10 @@ mod tests {
         assert_eq!(modules.marker(), None);
         // The edge and rule the shared dotted builder draws.
         let dotted = build_dotted(repo(), parses).unwrap();
-        assert_eq!(calls_from(&dotted, "lib::caller::Shop.Caller::aliased"), want);
+        assert_eq!(
+            calls_from(&dotted, "lib::caller::Shop.Caller::aliased"),
+            want
+        );
     }
 
     #[test]
@@ -9482,12 +10728,25 @@ mod tests {
             "Shop.Caller",
             &["own", "helper"],
             &[],
-            &[("own", "__MODULE__", "helper"), ("own", "__MODULE__.Item", "new")],
+            &[
+                ("own", "__MODULE__", "helper"),
+                ("own", "__MODULE__.Item", "new"),
+            ],
         );
         let pkg = gid(node_kind::PACKAGE, "lib::caller::Shop.Caller");
-        ex_push(&mut caller, node_kind::PACKAGE, "lib::caller::Shop.Caller::Item", pkg);
+        ex_push(
+            &mut caller,
+            node_kind::PACKAGE,
+            "lib::caller::Shop.Caller::Item",
+            pkg,
+        );
         let item = gid(node_kind::PACKAGE, "lib::caller::Shop.Caller::Item");
-        ex_push(&mut caller, node_kind::FUNCTION, "lib::caller::Shop.Caller::Item::new", item);
+        ex_push(
+            &mut caller,
+            node_kind::FUNCTION,
+            "lib::caller::Shop.Caller::Item::new",
+            item,
+        );
         let twin = ex_module("lib::twin", "Shop.Caller", &[], &[], &[]);
         let (g, modules, _) = elixir_passes(repo(), vec![caller, twin]);
         assert_eq!(
@@ -9530,9 +10789,19 @@ mod tests {
         // top-level one and `Outer.Inner.g()` the nested one.
         let mut outer = ex_module("lib::outer", "Outer", &["f"], &[], &[("f", "Inner", "g")]);
         let outer_pkg = gid(node_kind::PACKAGE, "lib::outer::Outer");
-        ex_push(&mut outer, node_kind::PACKAGE, "lib::outer::Outer::Inner", outer_pkg);
+        ex_push(
+            &mut outer,
+            node_kind::PACKAGE,
+            "lib::outer::Outer::Inner",
+            outer_pkg,
+        );
         let inner_pkg = gid(node_kind::PACKAGE, "lib::outer::Outer::Inner");
-        ex_push(&mut outer, node_kind::FUNCTION, "lib::outer::Outer::Inner::g", inner_pkg);
+        ex_push(
+            &mut outer,
+            node_kind::FUNCTION,
+            "lib::outer::Outer::Inner::g",
+            inner_pkg,
+        );
         let top = ex_module("lib::inner", "Inner", &["g"], &[], &[]);
         let other = ex_module(
             "lib::other",
@@ -9610,7 +10879,11 @@ mod tests {
                 &[],
                 &[("full", "Shop.Cart", "total"), ("full", "Cart", "total")],
             );
-            let carts = [("lib::cart", "Shop.Cart"), ("lib::a", "Cart"), ("lib::b", "Cart")];
+            let carts = [
+                ("lib::cart", "Shop.Cart"),
+                ("lib::a", "Cart"),
+                ("lib::b", "Cart"),
+            ];
             let mut files: Vec<_> = carts.iter().map(|&(f, m)| ex_cart(f, m)).collect();
             files.push(caller);
             files

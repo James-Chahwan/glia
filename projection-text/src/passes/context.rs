@@ -36,8 +36,7 @@ impl PassContext {
 
     /// Serialise `value` and store it under `key`. Overwrites any prior entry.
     pub fn put<T: serde::Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
-        let v = serde_json::to_value(value)
-            .with_context(|| format!("serialise artifact {key}"))?;
+        let v = serde_json::to_value(value).with_context(|| format!("serialise artifact {key}"))?;
         self.artifacts.insert(key.to_string(), v);
         Ok(())
     }
@@ -49,8 +48,7 @@ impl PassContext {
             .artifacts
             .get(key)
             .ok_or_else(|| anyhow!("artifact {key} not found in context"))?;
-        serde_json::from_value(v.clone())
-            .with_context(|| format!("deserialise artifact {key}"))
+        serde_json::from_value(v.clone()).with_context(|| format!("deserialise artifact {key}"))
     }
 
     /// Borrow the raw JSON value at `key` without cloning. Returns `None` if
@@ -91,7 +89,10 @@ mod tests {
     #[test]
     fn put_then_get_round_trips() {
         let mut c = ctx();
-        let s = Sample { a: 7, b: "x".into() };
+        let s = Sample {
+            a: 7,
+            b: "x".into(),
+        };
         c.put("k", &s).unwrap();
         let got: Sample = c.get("k").unwrap();
         assert_eq!(got, s);

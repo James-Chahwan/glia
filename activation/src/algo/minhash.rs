@@ -42,7 +42,9 @@ impl MinHasher {
     /// everywhere, and a longer signature extends a shorter one.
     pub fn new(k: usize, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
-        Self { seeds: (0..k).map(|_| rng.next_u64()).collect() }
+        Self {
+            seeds: (0..k).map(|_| rng.next_u64()).collect(),
+        }
     }
 
     /// The signature length.
@@ -115,7 +117,11 @@ pub fn lsh_candidates(sigs: &[Vec<u64>], bands: usize, rows: usize) -> LshCandid
     if shaped.len() < 2 {
         // Nothing to pair; also keeps a bad shape (bands * rows past
         // usize) from walking its bands.
-        return LshCandidates { pairs, oversized_buckets: 0, misshapen };
+        return LshCandidates {
+            pairs,
+            oversized_buckets: 0,
+            misshapen,
+        };
     }
     let mut compacted = 0usize;
     let mut oversized_buckets = 0usize;
@@ -123,7 +129,11 @@ pub fn lsh_candidates(sigs: &[Vec<u64>], bands: usize, rows: usize) -> LshCandid
     for band in 0..bands {
         let span = band * rows..(band + 1) * rows;
         keyed.clear();
-        keyed.extend(shaped.iter().map(|&(sig, ix)| (band_key(&sig[span.clone()]), ix)));
+        keyed.extend(
+            shaped
+                .iter()
+                .map(|&(sig, ix)| (band_key(&sig[span.clone()]), ix)),
+        );
         keyed.sort_unstable();
         for bucket in keyed.chunk_by(|a, b| a.0 == b.0) {
             if bucket.len() > MAX_BUCKET {
@@ -144,7 +154,11 @@ pub fn lsh_candidates(sigs: &[Vec<u64>], bands: usize, rows: usize) -> LshCandid
     }
     pairs.sort_unstable();
     pairs.dedup();
-    LshCandidates { pairs, oversized_buckets, misshapen }
+    LshCandidates {
+        pairs,
+        oversized_buckets,
+        misshapen,
+    }
 }
 
 /// A band's bucket key: its values chained through `mix64`.
@@ -207,7 +221,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             self.0
         }
 
@@ -261,7 +278,10 @@ mod tests {
             let only_a = rng.below(rest as u64 + 1) as usize;
             let (a, b) = pair(&mut rng, shared, only_a, rest - only_a);
             let truth = exact(&a, &b);
-            assert!((0.09..=0.91).contains(&truth), "pair {t}: true Jaccard {truth}");
+            assert!(
+                (0.09..=0.91).contains(&truth),
+                "pair {t}: true Jaccard {truth}"
+            );
             let err = (estimate(&mh.signature(&a), &mh.signature(&b)) - truth).abs();
             assert!(err <= 0.125, "pair {t}: |estimate - {truth}| = {err}");
             total_err += err;
@@ -307,9 +327,17 @@ mod tests {
         // 10 planted pairs: 40 to 57 shared ids, 1 to 3 of each side's own.
         let mut planted = BTreeSet::new();
         for p in 0..10u64 {
-            let (a, b) = pair(&mut rng, 40 + 2 * p as usize, 1 + (p % 3) as usize, 3 - (p % 3) as usize);
+            let (a, b) = pair(
+                &mut rng,
+                40 + 2 * p as usize,
+                1 + (p % 3) as usize,
+                3 - (p % 3) as usize,
+            );
             assert!(exact(&a, &b) >= 0.85, "planted pair {p}: {}", exact(&a, &b));
-            let (i, j) = (rng.below(sets.len() as u64 + 1) as usize, rng.below(sets.len() as u64 + 2) as usize);
+            let (i, j) = (
+                rng.below(sets.len() as u64 + 1) as usize,
+                rng.below(sets.len() as u64 + 2) as usize,
+            );
             sets.insert(i, a);
             sets.insert(j, b);
         }
@@ -328,10 +356,16 @@ mod tests {
         let sigs: Vec<Vec<u64>> = sets.iter().map(|s| mh.signature(s)).collect();
         let got = lsh_candidates(&sigs, 32, 4);
         assert_eq!((got.oversized_buckets, got.misshapen), (0, 0));
-        assert!(got.pairs.windows(2).all(|w| w[0] < w[1]), "sorted, deduplicated");
+        assert!(
+            got.pairs.windows(2).all(|w| w[0] < w[1]),
+            "sorted, deduplicated"
+        );
         assert!(got.pairs.iter().all(|&(i, j)| i < j));
         for pair in &planted {
-            assert!(got.pairs.contains(pair), "planted pair {pair:?} is not a candidate");
+            assert!(
+                got.pairs.contains(pair),
+                "planted pair {pair:?} is not a candidate"
+            );
         }
         // Each permutation is a bijection, so sets with no id in common
         // never agree at any position: the unplanted pairs are no candidates.
@@ -357,11 +391,24 @@ mod tests {
         // SplitMix64(0)'s reference first outputs, and a signature pinned
         // against an independent (Python, arbitrary-precision) evaluation:
         // the same bits on every platform.
-        assert_eq!(MinHasher::new(4, 0).seeds, [0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4, 0x06c45d188009454f, 0xf88bb8a8724c81ec]);
-        assert_eq!(MinHasher::new(3, 7).signature(&[40, 2, 1, 3]), [0x0524257c04fcf117, 0x2ac41d15edbb29d9, 0x24ed189de445e5d4]);
+        assert_eq!(
+            MinHasher::new(4, 0).seeds,
+            [
+                0xe220a8397b1dcdaf,
+                0x6e789e6aa1b965f4,
+                0x06c45d188009454f,
+                0xf88bb8a8724c81ec
+            ]
+        );
+        assert_eq!(
+            MinHasher::new(3, 7).signature(&[40, 2, 1, 3]),
+            [0x0524257c04fcf117, 0x2ac41d15edbb29d9, 0x24ed189de445e5d4]
+        );
         assert_eq!(band_key(&[1, 2]), 0xef30b01c2974aeeb);
 
-        let sigs: Vec<Vec<u64>> = (0..30u64).map(|s| mh.signature(&[s % 5, 100, 200 + s % 3])).collect();
+        let sigs: Vec<Vec<u64>> = (0..30u64)
+            .map(|s| mh.signature(&[s % 5, 100, 200 + s % 3]))
+            .collect();
         assert_eq!(lsh_candidates(&sigs, 12, 4), lsh_candidates(&sigs, 12, 4));
     }
 
@@ -401,7 +448,12 @@ mod tests {
 
     #[test]
     fn misshapen_signatures_join_no_bucket() {
-        let sigs = vec![vec![1u64, 2, 3, 4], vec![1, 2, 3, 4], vec![1, 2, 3], vec![1, 2, 3, 4]];
+        let sigs = vec![
+            vec![1u64, 2, 3, 4],
+            vec![1, 2, 3, 4],
+            vec![1, 2, 3],
+            vec![1, 2, 3, 4],
+        ];
         let got = lsh_candidates(&sigs, 2, 2);
         assert_eq!(got.misshapen, 1);
         assert_eq!(got.pairs, [(0, 1), (0, 3), (1, 3)]);

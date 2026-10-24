@@ -203,7 +203,10 @@ enum Scope {
     Match,
     /// A WHERE pattern: a MATCH node variable is shared, any other name is local and
     /// renamed fresh.
-    Local { renames: Vec<(String, String)>, shared: Vec<String> },
+    Local {
+        renames: Vec<(String, String)>,
+        shared: Vec<String>,
+    },
 }
 
 /// WHERE in negation normal form: a leaf is an atomic condition and whether it is
@@ -257,15 +260,27 @@ struct Lower<'q> {
 // ============================================================================
 
 fn atom(pred: &str, args: Vec<Term>, span: Span) -> Atom {
-    Atom { pred: pred.to_string(), args, span }
+    Atom {
+        pred: pred.to_string(),
+        args,
+        span,
+    }
 }
 
 fn str_at(value: &str, span: Span) -> Term {
-    Term::Str { value: value.to_string(), span }
+    Term::Str {
+        value: value.to_string(),
+        span,
+    }
 }
 
 fn eq(left: Term, right: Term, span: Span) -> Literal {
-    Literal::Cmp(Comparison { op: CmpOp::Eq, left, right, span })
+    Literal::Cmp(Comparison {
+        op: CmpOp::Eq,
+        left,
+        right,
+        span,
+    })
 }
 
 fn node_any(v: &str, span: Span) -> Literal {
@@ -273,7 +288,15 @@ fn node_any(v: &str, span: Span) -> Literal {
 }
 
 fn rule(pred: &str, args: Vec<HeadArg>, body: Conj, span: Span) -> Rule {
-    Rule { head: Head { pred: pred.to_string(), args, span }, body, span }
+    Rule {
+        head: Head {
+            pred: pred.to_string(),
+            args,
+            span,
+        },
+        body,
+        span,
+    }
 }
 
 fn head_of(terms: &[Term]) -> Vec<HeadArg> {
@@ -316,7 +339,11 @@ fn nnf(e: &Expr, neg: bool) -> Nnf<'_> {
     match e {
         Expr::Or { left, right, .. } | Expr::And { left, right, .. } => {
             let parts = vec![nnf(left, neg), nnf(right, neg)];
-            if matches!(e, Expr::Or { .. }) != neg { Nnf::Or(parts) } else { Nnf::And(parts) }
+            if matches!(e, Expr::Or { .. }) != neg {
+                Nnf::Or(parts)
+            } else {
+                Nnf::And(parts)
+            }
         }
         Expr::Not { expr, .. } => nnf(expr, !neg),
         leaf => Nnf::Leaf(leaf, neg),
@@ -341,11 +368,15 @@ fn pattern_count(p: &PathPattern) -> u64 {
         let rel = match r.quant {
             None if r.dir == Dir::Undirected => 2,
             None => 1,
-            Some(Quant { min: 0, max: None, .. }) => 2,
+            Some(Quant {
+                min: 0, max: None, ..
+            }) => 2,
             Some(Quant { max: None, .. }) => 1,
-            Some(Quant { min, max: Some(max), .. }) if max <= MAX_UNROLL => {
-                u64::from(max - min) + 1
-            }
+            Some(Quant {
+                min,
+                max: Some(max),
+                ..
+            }) if max <= MAX_UNROLL => u64::from(max - min) + 1,
             Some(_) => 1,
         };
         n = n.saturating_mul(rel).saturating_mul(labels(node));
@@ -449,9 +480,10 @@ fn wild_singletons(r: &mut Rule) {
             Literal::Pos(a) | Literal::Neg(a) => {
                 a.args.iter().filter_map(var_name).for_each(&mut count)
             }
-            Literal::Cmp(c) => {
-                [&c.left, &c.right].into_iter().filter_map(var_name).for_each(&mut count)
-            }
+            Literal::Cmp(c) => [&c.left, &c.right]
+                .into_iter()
+                .filter_map(var_name)
+                .for_each(&mut count),
         }
     }
     let once =
@@ -496,7 +528,8 @@ impl<'q> Lower<'q> {
 
     fn err(&mut self, span: Span, message: impl Into<String>) {
         if self.diags.len() < MAX_DIAGNOSTICS {
-            self.diags.push(Diagnostic::error(span, SOURCE_NAME, None, message));
+            self.diags
+                .push(Diagnostic::error(span, SOURCE_NAME, None, message));
         }
     }
 
@@ -528,7 +561,10 @@ impl<'q> Lower<'q> {
     }
 
     fn slice(&self, span: Span) -> String {
-        self.text.get(span.start as usize..span.end as usize).unwrap_or_default().to_string()
+        self.text
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// A property key or function name must not read the lowering's own predicates.
@@ -547,7 +583,10 @@ impl<'q> Lower<'q> {
     fn lit_term(&mut self, l: &Lit) -> Option<Term> {
         match l {
             Lit::Str { value, span } => Some(str_at(value, *span)),
-            Lit::Int { value, span } => Some(Term::Int { value: *value, span: *span }),
+            Lit::Int { value, span } => Some(Term::Int {
+                value: *value,
+                span: *span,
+            }),
             Lit::Bool { span, .. } => {
                 self.err(*span, BOOL_LITERAL);
                 None
@@ -597,7 +636,10 @@ impl<'q> Lower<'q> {
         let cond = q.condition.as_ref().map(|c| nnf(c, false));
         let cond_n = cond.as_ref().map_or(1, nnf_count);
         let patterns = q.matches.iter().flat_map(|m| &m.patterns);
-        let total = patterns.clone().map(pattern_count).fold(cond_n, u64::saturating_mul);
+        let total = patterns
+            .clone()
+            .map(pattern_count)
+            .fold(cond_n, u64::saturating_mul);
         if total > MAX_ALTERNATIVES {
             let span = match &q.condition {
                 Some(c) if cond_n > 1 => c.span(),
@@ -658,7 +700,12 @@ impl<'q> Lower<'q> {
             for body in bodies {
                 self.helpers.push(rule(&pred, head_of(&args), body, q.span));
             }
-            rules.push(rule(OUTPUT, head, vec![Literal::Pos(atom(&pred, args, q.span))], q.span));
+            rules.push(rule(
+                OUTPUT,
+                head,
+                vec![Literal::Pos(atom(&pred, args, q.span))],
+                q.span,
+            ));
         } else {
             for body in bodies {
                 rules.push(rule(OUTPUT, head.clone(), body, q.span));
@@ -688,8 +735,11 @@ impl<'q> Lower<'q> {
         for p in q.matches.iter().flat_map(|m| &m.patterns) {
             if let Some(v) = &p.var {
                 self.declare_var(v, VarKind::Path);
-                let quants: Vec<Span> =
-                    p.steps.iter().filter_map(|(r, _)| r.quant.map(|q| q.span)).collect();
+                let quants: Vec<Span> = p
+                    .steps
+                    .iter()
+                    .filter_map(|(r, _)| r.quant.map(|q| q.span))
+                    .collect();
                 if quants.len() != 1 {
                     let span = quants.get(1).copied().unwrap_or(p.span);
                     let message = format!(
@@ -708,7 +758,11 @@ impl<'q> Lower<'q> {
             }
             for (r, _) in &p.steps {
                 if let Some(v) = &r.var {
-                    let kind = if r.quant.is_some() { VarKind::QuantRel } else { VarKind::Rel };
+                    let kind = if r.quant.is_some() {
+                        VarKind::QuantRel
+                    } else {
+                        VarKind::Rel
+                    };
                     self.declare_var(v, kind);
                 }
             }
@@ -757,7 +811,11 @@ impl<'q> Lower<'q> {
             }
         }
         if let (Scope::Match, Some(v)) = (&*scope, &p.var) {
-            self.paths.push(PathVar { name: v.name.clone(), start: first, end: prev });
+            self.paths.push(PathVar {
+                name: v.name.clone(),
+                start: first,
+                end: prev,
+            });
         }
         alts
     }
@@ -774,7 +832,10 @@ impl<'q> Lower<'q> {
                     id.name.clone()
                 }
                 Some(k) => {
-                    self.err(id.span, format!("`{}` is {}, not a node", id.name, k.describe()));
+                    self.err(
+                        id.span,
+                        format!("`{}` is {}, not a node", id.name, k.describe()),
+                    );
                     id.name.clone()
                 }
                 None => match renames.iter().find(|(u, _)| *u == id.name) {
@@ -839,7 +900,9 @@ impl<'q> Lower<'q> {
             if !self.allowed(k, "property") {
                 continue;
             }
-            let Some(t) = self.lit_term(lit) else { continue };
+            let Some(t) = self.lit_term(lit) else {
+                continue;
+            };
             let a = Literal::Pos(atom(&k.name, vec![Term::var(v), t], k.span));
             alts.iter_mut().for_each(|c| c.push(a.clone()));
         }
@@ -847,7 +910,11 @@ impl<'q> Lower<'q> {
     }
 
     fn step(&mut self, r: &RelPat, left: &str, right: &str, cat: Option<&str>) -> Vec<Conj> {
-        let (src, dst) = if r.dir == Dir::In { (right, left) } else { (left, right) };
+        let (src, dst) = if r.dir == Dir::In {
+            (right, left)
+        } else {
+            (left, right)
+        };
         let Some(q) = r.quant else {
             let mut alts = vec![self.hop(r, src, dst, cat, false)];
             if r.dir == Dir::Undirected {
@@ -863,7 +930,11 @@ impl<'q> Lower<'q> {
         match (r.types.as_slice(), both) {
             ([], false) => {
                 let c = cat.map_or_else(Term::wild, Term::var);
-                vec![Literal::Pos(atom("edge", vec![Term::var(x), Term::var(y), c], r.span))]
+                vec![Literal::Pos(atom(
+                    "edge",
+                    vec![Term::var(x), Term::var(y), c],
+                    r.span,
+                ))]
             }
             ([t], false) => {
                 let mut conj = vec![Literal::Pos(atom(
@@ -899,9 +970,16 @@ impl<'q> Lower<'q> {
         if with_cat {
             head.push(Term::var("c"));
         }
-        let dirs: &[(&str, &str)] = if both { &[("x", "y"), ("y", "x")] } else { &[("x", "y")] };
-        let types: Vec<Option<&Ident>> =
-            if r.types.is_empty() { vec![None] } else { r.types.iter().map(Some).collect() };
+        let dirs: &[(&str, &str)] = if both {
+            &[("x", "y"), ("y", "x")]
+        } else {
+            &[("x", "y")]
+        };
+        let types: Vec<Option<&Ident>> = if r.types.is_empty() {
+            vec![None]
+        } else {
+            r.types.iter().map(Some).collect()
+        };
         for t in &types {
             for (a, b) in dirs {
                 let ty = match t {
@@ -956,7 +1034,11 @@ impl<'q> Lower<'q> {
             let cats = if r.types.is_empty() {
                 "*".to_string()
             } else {
-                r.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("|")
+                r.types
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|")
             };
             let reach = vec![Term::var(&at), Term::var(dst), str_at(&cats, r.span)];
             conj.push(Literal::Pos(atom("reaches", reach, r.span)));
@@ -979,7 +1061,11 @@ impl<'q> Lower<'q> {
             let mut conj = Vec::new();
             let mut at = src.to_string();
             for i in 1..=k {
-                let next = if i == k { dst.to_string() } else { self.fresh() };
+                let next = if i == k {
+                    dst.to_string()
+                } else {
+                    self.fresh()
+                };
                 conj.extend(self.hop(r, &at, &next, None, both));
                 at = next;
             }
@@ -1015,7 +1101,12 @@ impl<'q> Lower<'q> {
 
     fn leaf(&mut self, e: &Expr, neg: bool) -> Vec<Conj> {
         match e {
-            Expr::Cmp { op, left, right, span } => {
+            Expr::Cmp {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let (Some(l), Some(r)) = (self.operand(left), self.operand(right)) else {
                     return Vec::new();
                 };
@@ -1030,7 +1121,12 @@ impl<'q> Lower<'q> {
                 }));
                 vec![conj]
             }
-            Expr::StrTest { op, left, right, span } => {
+            Expr::StrTest {
+                op,
+                left,
+                right,
+                span,
+            } => {
                 let (builtin, word) = str_builtin(*op);
                 for o in [left, right] {
                     if let Operand::Var(id) = o
@@ -1067,14 +1163,27 @@ impl<'q> Lower<'q> {
                     self.calls.push(name.name.clone());
                 }
                 let terms = vals.iter().map(|v| v.term.clone()).collect();
-                self.test(Literal::Pos(atom(&name.name, terms, *span)), vals, neg, *span)
+                self.test(
+                    Literal::Pos(atom(&name.name, terms, *span)),
+                    vals,
+                    neg,
+                    *span,
+                )
             }
             Expr::In { left, list, span } => {
-                let Some(l) = self.operand(left) else { return Vec::new() };
-                let Some(pred) = self.in_table(list) else { return Vec::new() };
+                let Some(l) = self.operand(left) else {
+                    return Vec::new();
+                };
+                let Some(pred) = self.in_table(list) else {
+                    return Vec::new();
+                };
                 let a = atom(&pred, vec![l.term], *span);
                 let mut conj = l.pre;
-                conj.push(if neg { Literal::Neg(a) } else { Literal::Pos(a) });
+                conj.push(if neg {
+                    Literal::Neg(a)
+                } else {
+                    Literal::Pos(a)
+                });
                 vec![conj]
             }
             Expr::Pattern { pattern, span, .. } => self.pattern_condition(pattern, neg, *span),
@@ -1098,12 +1207,17 @@ impl<'q> Lower<'q> {
             );
             return Vec::new();
         }
-        let mut scope = Scope::Local { renames: Vec::new(), shared: Vec::new() };
+        let mut scope = Scope::Local {
+            renames: Vec::new(),
+            shared: Vec::new(),
+        };
         let alts = self.pattern(p, &mut scope);
         if !neg {
             return alts;
         }
-        let Scope::Local { shared, .. } = scope else { return Vec::new() };
+        let Scope::Local { shared, .. } = scope else {
+            return Vec::new();
+        };
         let pred = self.helper(Helper::Not);
         let args: Vec<Term> = shared.iter().map(Term::var).collect();
         for mut body in alts {
@@ -1132,8 +1246,10 @@ impl<'q> Lower<'q> {
         }
         let pred = self.helper(Helper::Not);
         let args: Vec<Term> = owns.iter().map(|(n, _)| Term::var(n)).collect();
-        let must: Vec<(String, Bind)> =
-            owns.iter().filter_map(|(n, b)| b.map(|b| (n.clone(), b))).collect();
+        let must: Vec<(String, Bind)> = owns
+            .iter()
+            .filter_map(|(n, b)| b.map(|b| (n.clone(), b)))
+            .collect();
         let mut body = pre.clone();
         self.bind(&mut body, &must);
         body.push(lit);
@@ -1152,7 +1268,8 @@ impl<'q> Lower<'q> {
         let pred = self.helper(Helper::In);
         for t in terms {
             let span = t.span();
-            self.helpers.push(rule(&pred, vec![HeadArg::Term(t)], Vec::new(), span));
+            self.helpers
+                .push(rule(&pred, vec![HeadArg::Term(t)], Vec::new(), span));
         }
         Some(pred)
     }
@@ -1163,7 +1280,10 @@ impl<'q> Lower<'q> {
                 self.node_ref(id)?;
                 let owns = vec![(id.name.clone(), Some(Bind::Node))];
                 Some(Val {
-                    term: Term::Var { name: id.name.clone(), span: id.span },
+                    term: Term::Var {
+                        name: id.name.clone(),
+                        span: id.span,
+                    },
                     pre: Vec::new(),
                     owns,
                 })
@@ -1176,17 +1296,30 @@ impl<'q> Lower<'q> {
                 let x = self.attr_var(&var.name, &key.name);
                 let read = atom(&key.name, vec![Term::var(&var.name), Term::var(&x)], *span);
                 let owns = vec![(var.name.clone(), Some(Bind::Node)), (x.clone(), None)];
-                Some(Val { term: Term::var(x), pre: vec![Literal::Pos(read)], owns })
+                Some(Val {
+                    term: Term::var(x),
+                    pre: vec![Literal::Pos(read)],
+                    owns,
+                })
             }
-            Operand::Lit(l) => {
-                Some(Val { term: self.lit_term(l)?, pre: Vec::new(), owns: Vec::new() })
-            }
+            Operand::Lit(l) => Some(Val {
+                term: self.lit_term(l)?,
+                pre: Vec::new(),
+                owns: Vec::new(),
+            }),
             Operand::Type { var, .. } => {
                 let message = match self.kind(&var.name) {
                     Some(VarKind::Rel) => {
                         let owns = vec![(var.name.clone(), Some(Bind::Cat))];
-                        let term = Term::Var { name: var.name.clone(), span: var.span };
-                        return Some(Val { term, pre: Vec::new(), owns });
+                        let term = Term::Var {
+                            name: var.name.clone(),
+                            span: var.span,
+                        };
+                        return Some(Val {
+                            term,
+                            pre: Vec::new(),
+                            owns,
+                        });
                     }
                     Some(VarKind::QuantRel) => {
                         format!(
@@ -1221,7 +1354,10 @@ impl<'q> Lower<'q> {
                 )
             }
             Some(VarKind::Path) => {
-                format!("`{}` is a path variable: it is a RETURN column only", id.name)
+                format!(
+                    "`{}` is a path variable: it is a RETURN column only",
+                    id.name
+                )
             }
             None => format!("`{}` is not bound by MATCH", id.name),
         };
@@ -1236,7 +1372,8 @@ impl<'q> Lower<'q> {
             return x.clone();
         }
         let x = self.fresh();
-        self.attrs.push((var.to_string(), key.to_string(), x.clone()));
+        self.attrs
+            .push((var.to_string(), key.to_string(), x.clone()));
         x
     }
 
@@ -1249,7 +1386,13 @@ impl<'q> Lower<'q> {
     fn ret(
         &mut self,
         q: &Query,
-    ) -> (Vec<HeadArg>, Conj, Vec<String>, Option<usize>, Option<String>) {
+    ) -> (
+        Vec<HeadArg>,
+        Conj,
+        Vec<String>,
+        Option<usize>,
+        Option<String>,
+    ) {
         let mut head = Vec::with_capacity(q.items.len() + 1);
         let mut pre = Vec::new();
         let mut columns = Vec::with_capacity(q.items.len());
@@ -1285,9 +1428,17 @@ impl<'q> Lower<'q> {
                         self.err(id.span, "a query returns at most one path variable");
                         continue;
                     }
-                    let Some(p) = self.paths.iter().find(|p| p.name == id.name) else { continue };
-                    head.push(HeadArg::Term(Term::Var { name: p.start.clone(), span: id.span }));
-                    trailing = Some(Term::Var { name: p.end.clone(), span: id.span });
+                    let Some(p) = self.paths.iter().find(|p| p.name == id.name) else {
+                        continue;
+                    };
+                    head.push(HeadArg::Term(Term::Var {
+                        name: p.start.clone(),
+                        span: id.span,
+                    }));
+                    trailing = Some(Term::Var {
+                        name: p.end.clone(),
+                        span: id.span,
+                    });
                     path_column = Some(i);
                 }
                 RetExpr::Operand(o) => {
@@ -1316,14 +1467,22 @@ impl<'q> Lower<'q> {
                             continue;
                         }
                         Some(o) => match self.operand(o) {
-                            Some(Val { term: Term::Var { name, .. }, pre: p, .. }) => {
+                            Some(Val {
+                                term: Term::Var { name, .. },
+                                pre: p,
+                                ..
+                            }) => {
                                 pre.extend(p);
                                 vec![name]
                             }
                             _ => continue,
                         },
                     };
-                    head.push(HeadArg::Agg(Aggregate { op: a.op, vars, span: a.span }));
+                    head.push(HeadArg::Agg(Aggregate {
+                        op: a.op,
+                        vars,
+                        span: a.span,
+                    }));
                 }
             }
         }
@@ -1351,7 +1510,10 @@ impl<'q> Lower<'q> {
                 })
             };
             match alias.or_else(written) {
-                Some(column) => out.push(OrderKey { column, descending: k.descending }),
+                Some(column) => out.push(OrderKey {
+                    column,
+                    descending: k.descending,
+                }),
                 None => {
                     let span = k.key.span();
                     let message = format!(

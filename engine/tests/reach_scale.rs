@@ -28,7 +28,11 @@ fn chain(n: usize, head: &str) -> (MergedGraph, Vec<NodeId>) {
     let mut nav = CodeNav::default();
     let ids: Vec<NodeId> = (0..n)
         .map(|i| {
-            let name = if i == 0 { head.to_string() } else { format!("n{i}") };
+            let name = if i == 0 {
+                head.to_string()
+            } else {
+                format!("n{i}")
+            };
             let qname = format!("m::{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, &qname);
             nav.record(id, &name, &qname, node_kind::FUNCTION, None);
@@ -37,7 +41,12 @@ fn chain(n: usize, head: &str) -> (MergedGraph, Vec<NodeId>) {
         .collect();
     let nodes = ids
         .iter()
-        .map(|&id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] })
+        .map(|&id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        })
         .collect();
     let edges = ids
         .windows(2)
@@ -70,7 +79,10 @@ fn entrypoint_reachable_40k_chain_under_budget() {
     let took = t.elapsed();
     assert_eq!(live.len(), N);
     assert!(live.contains(&ids[0]) && live.contains(&ids[N - 1]));
-    assert!(took < BUDGET, "entrypoint_reachable over a {N}-node live chain took {took:?} (budget {BUDGET:?})");
+    assert!(
+        took < BUDGET,
+        "entrypoint_reachable over a {N}-node live chain took {took:?} (budget {BUDGET:?})"
+    );
 }
 
 #[test]

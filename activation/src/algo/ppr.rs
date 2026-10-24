@@ -123,11 +123,18 @@ impl<'a> PushPpr<'a> {
 
     /// The weighted degree of `id` (0 when it is not indexed).
     pub fn degree(&self, id: NodeId) -> f64 {
-        self.adj.index_of(id).map_or(0.0, |ix| self.degree[ix as usize])
+        self.adj
+            .index_of(id)
+            .map_or(0.0, |ix| self.degree[ix as usize])
     }
 
     /// [`push_ppr`] from `seed`, with what the run did.
-    pub fn run(&mut self, seed: NodeId, alpha: f64, epsilon: f64) -> (Vec<(NodeId, f64)>, PushStats) {
+    pub fn run(
+        &mut self,
+        seed: NodeId,
+        alpha: f64,
+        epsilon: f64,
+    ) -> (Vec<(NodeId, f64)>, PushStats) {
         let mut stats = PushStats::default();
         let valid = alpha > 0.0 && alpha <= 1.0 && epsilon > 0.0 && epsilon.is_finite();
         let Some(s) = self.adj.index_of(seed).filter(|_| valid) else {
@@ -191,7 +198,10 @@ impl<'a> PushPpr<'a> {
         self.touched.clear();
         stats.residual = residual;
         out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let ranked = out.into_iter().map(|(ix, p)| (self.adj.id(ix), p)).collect();
+        let ranked = out
+            .into_iter()
+            .map(|(ix, p)| (self.adj.id(ix), p))
+            .collect();
         (ranked, stats)
     }
 
@@ -320,7 +330,11 @@ mod tests {
             let want = oracle(&g, NodeId(seed), 0.5);
             let got = scores(&g, &push_ppr(&adj, NodeId(seed), &weight, 0.5, 1e-9));
             for (i, (w, p)) in want.iter().zip(&got).enumerate() {
-                assert!((w - p).abs() <= 1e-6, "seed {seed} node {}: push {p} vs power {w}", g.nodes[i].0);
+                assert!(
+                    (w - p).abs() <= 1e-6,
+                    "seed {seed} node {}: push {p} vs power {w}",
+                    g.nodes[i].0
+                );
             }
         }
     }
@@ -337,13 +351,24 @@ mod tests {
             assert_eq!(top(&g, &got, 3), top(&g, &want, 3), "seed {seed}");
             for (i, (w, p)) in want.iter().zip(&got).enumerate() {
                 let bound = 1e-3 * push.degree(g.nodes[i]);
-                assert!(*w - p >= -1e-12 && w - p <= bound, "seed {seed} node {}: {p} vs {w}", g.nodes[i].0);
+                assert!(
+                    *w - p >= -1e-12 && w - p <= bound,
+                    "seed {seed} node {}: {p} vs {w}",
+                    g.nodes[i].0
+                );
             }
             // At most 1 / (epsilon * alpha) weighted degree is pushed; the
             // least degree here is 1.5.
-            assert!(stats.pushes as f64 <= 1.0 + 1.0 / (1e-3 * 0.5 * 1.5), "{stats:?}");
+            assert!(
+                stats.pushes as f64 <= 1.0 + 1.0 / (1e-3 * 0.5 * 1.5),
+                "{stats:?}"
+            );
             let settled: f64 = ranked.iter().map(|r| r.1).sum();
-            assert!((settled + stats.residual - 1.0).abs() < 1e-12, "mass: {settled} + {}", stats.residual);
+            assert!(
+                (settled + stats.residual - 1.0).abs() < 1e-12,
+                "mass: {settled} + {}",
+                stats.residual
+            );
         }
     }
 
@@ -359,7 +384,10 @@ mod tests {
         assert_eq!(got, vec![(NodeId(7), 1.0)]);
         assert_eq!(stats.pushes, 1);
         assert_eq!(stats.residual, 0.0);
-        assert_eq!(push_ppr(&adj, NodeId(8), &weight, 0.5, 1e-3), vec![(NodeId(8), 1.0)]);
+        assert_eq!(
+            push_ppr(&adj, NodeId(8), &weight, 0.5, 1e-3),
+            vec![(NodeId(8), 1.0)]
+        );
         // A seed with edges settles 1 - residual, every score positive.
         let (got, stats) = PushPpr::new(&adj, &weight).run(NodeId(1), 0.5, 1e-3);
         let settled: f64 = got.iter().map(|r| r.1).sum();
@@ -370,12 +398,22 @@ mod tests {
     #[test]
     fn a_dangling_endpoint_is_walked() {
         // 9 is no node: the edge 2 -> 9 is still indexed (parity rule 1).
-        let g = ToyGraph { nodes: vec![NodeId(1), NodeId(2)], edges: vec![toy_edge(1, 2, 1), toy_edge(2, 9, 1)] };
+        let g = ToyGraph {
+            nodes: vec![NodeId(1), NodeId(2)],
+            edges: vec![toy_edge(1, 2, 1), toy_edge(2, 9, 1)],
+        };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let got = push_ppr(&adj, NodeId(1), &weight, 0.5, 1e-9);
         let ids: Vec<u64> = got.iter().map(|r| r.0.0).collect();
         assert_eq!(ids, vec![1, 2, 9]);
-        let want = oracle(&ToyGraph { nodes: vec![NodeId(1), NodeId(2), NodeId(9)], edges: g.edges.clone() }, NodeId(1), 0.5);
+        let want = oracle(
+            &ToyGraph {
+                nodes: vec![NodeId(1), NodeId(2), NodeId(9)],
+                edges: g.edges.clone(),
+            },
+            NodeId(1),
+            0.5,
+        );
         for (r, w) in got.iter().zip(&want) {
             assert!((r.1 - w).abs() <= 1e-6, "{r:?} vs {w}");
         }
@@ -401,7 +439,10 @@ mod tests {
         let (got, _) = push.run(NodeId(0), 0.5, 1e-4);
         assert_eq!(got.len(), 1501);
         assert_eq!(got[0].0, NodeId(0));
-        assert!(got[1..].iter().all(|r| r.1.to_bits() == got[1].1.to_bits()), "leaves tie");
+        assert!(
+            got[1..].iter().all(|r| r.1.to_bits() == got[1].1.to_bits()),
+            "leaves tie"
+        );
         let leaves: Vec<u64> = got[1..].iter().map(|r| r.0.0).collect();
         assert_eq!(leaves, (1..=1500).collect::<Vec<u64>>());
     }
@@ -411,14 +452,30 @@ mod tests {
         let g = toy();
         let adj = Adjacency::build(&g, &CategorySet::all());
         assert!(push_ppr(&adj, NodeId(42), &weight, 0.5, 1e-3).is_empty());
-        for (alpha, eps) in [(0.0, 1e-3), (1.5, 1e-3), (f64::NAN, 1e-3), (0.5, 0.0), (0.5, f64::INFINITY), (0.5, -1.0)] {
-            assert!(push_ppr(&adj, NodeId(1), &weight, alpha, eps).is_empty(), "{alpha} {eps}");
+        for (alpha, eps) in [
+            (0.0, 1e-3),
+            (1.5, 1e-3),
+            (f64::NAN, 1e-3),
+            (0.5, 0.0),
+            (0.5, f64::INFINITY),
+            (0.5, -1.0),
+        ] {
+            assert!(
+                push_ppr(&adj, NodeId(1), &weight, alpha, eps).is_empty(),
+                "{alpha} {eps}"
+            );
         }
         // alpha 1 settles everything at the seed.
-        assert_eq!(push_ppr(&adj, NodeId(1), &weight, 1.0, 1e-3), vec![(NodeId(1), 1.0)]);
+        assert_eq!(
+            push_ppr(&adj, NodeId(1), &weight, 1.0, 1e-3),
+            vec![(NodeId(1), 1.0)]
+        );
         // A non-finite or negative weight is not walked.
         let odd = |c: EdgeCategoryId| if c.0 == 1 { f64::NAN } else { -1.0 };
-        assert_eq!(push_ppr(&adj, NodeId(1), &odd, 0.5, 1e-3), vec![(NodeId(1), 1.0)]);
+        assert_eq!(
+            push_ppr(&adj, NodeId(1), &odd, 0.5, 1e-3),
+            vec![(NodeId(1), 1.0)]
+        );
         assert!(Adjacency::default().is_empty());
         assert!(push_ppr(&Adjacency::default(), NodeId(1), &weight, 0.5, 1e-3).is_empty());
     }
@@ -434,14 +491,21 @@ mod tests {
             let again = push_ppr(&adj, NodeId(seed), &weight, 0.5, 1e-3);
             let (from_reused, _) = reused.run(NodeId(seed), 0.5, 1e-3);
             assert_eq!(bits(&fresh), bits(&again), "seed {seed}");
-            assert_eq!(bits(&fresh), bits(&from_reused), "seed {seed}: reused scratch");
+            assert_eq!(
+                bits(&fresh),
+                bits(&from_reused),
+                "seed {seed}: reused scratch"
+            );
         }
     }
 
     #[test]
     fn a_self_loop_counts_once() {
         // 1 - 2 plus a self-loop at 2: d(2) = 1 + 0.5, not 1 + 2 * 0.5.
-        let g = ToyGraph { nodes: vec![NodeId(1), NodeId(2)], edges: vec![toy_edge(1, 2, 1), toy_edge(2, 2, 2)] };
+        let g = ToyGraph {
+            nodes: vec![NodeId(1), NodeId(2)],
+            edges: vec![toy_edge(1, 2, 1), toy_edge(2, 2, 2)],
+        };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let push = PushPpr::new(&adj, &weight);
         assert_eq!(push.degree(NodeId(2)), 1.5);

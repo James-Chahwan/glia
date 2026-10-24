@@ -33,7 +33,11 @@ fn read_sidecar_stamp(bytes: &[u8]) -> String {
         FRAME_MAGIC,
         "parse_cache.bin does not open with the GLIAPCZ1 frame magic"
     );
-    let len = u64::from_le_bytes(bytes[FRAME_MAGIC.len()..STAMP_AT].try_into().expect("8 bytes")) as usize;
+    let len = u64::from_le_bytes(
+        bytes[FRAME_MAGIC.len()..STAMP_AT]
+            .try_into()
+            .expect("8 bytes"),
+    ) as usize;
     assert!(
         len > 0 && len < 64,
         "frame header stamp length is {len} — not a plausible build stamp"
@@ -86,7 +90,8 @@ fn cache_stamp_binds_to_parser_sources_not_just_release() {
     let tail = &stamp[prefix.len()..];
     assert_eq!(tail.len(), 16, "parser-stamp tail {tail:?} is not 16 chars");
     assert!(
-        tail.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        tail.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
         "parser-stamp tail {tail:?} is not lowercase hex"
     );
 
@@ -101,7 +106,11 @@ fn cache_stamp_binds_to_parser_sources_not_just_release() {
     // the cache must be rejected.
     let flip_at = STAMP_AT + stamp.len() - 1;
     let mut tampered = bytes.clone();
-    tampered[flip_at] = if tampered[flip_at] == b'0' { b'1' } else { b'0' };
+    tampered[flip_at] = if tampered[flip_at] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
     std::fs::write(&sidecar, &tampered).expect("rewrite tampered sidecar");
     assert!(
         ParseCache::load(repo_str).is_empty(),

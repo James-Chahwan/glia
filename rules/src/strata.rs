@@ -116,13 +116,21 @@ impl GraphSource for PredGraph {
 /// one per offending component, in component order (by smallest member),
 /// each with the read and site of its first offending edge in input order.
 pub(crate) fn stratify(npreds: usize, edges: &[DepEdge]) -> Result<Strata, Vec<BadCycle>> {
-    let n = edges.iter().map(|e| e.body.max(e.head) as usize + 1).fold(npreds, usize::max);
+    let n = edges
+        .iter()
+        .map(|e| e.body.max(e.head) as usize + 1)
+        .fold(npreds, usize::max);
     let graph = PredGraph {
         nodes: (0..n as u64).map(NodeId).collect(),
         edges: edges
             .iter()
             .map(|e| {
-                Edge::new(NodeId(u64::from(e.body)), NodeId(u64::from(e.head)), e.dep.category(), Confidence::Strong)
+                Edge::new(
+                    NodeId(u64::from(e.body)),
+                    NodeId(u64::from(e.head)),
+                    e.dep.category(),
+                    Confidence::Strong,
+                )
             })
             .collect(),
     };
@@ -147,7 +155,8 @@ pub(crate) fn stratify(npreds: usize, edges: &[DepEdge]) -> Result<Strata, Vec<B
     let mut offence: Vec<Option<(Dep, usize)>> = vec![None; n];
     for e in edges {
         let rep = component[e.body as usize];
-        if e.dep != Dep::Pos && rep == component[e.head as usize] && offence[rep as usize].is_none() {
+        if e.dep != Dep::Pos && rep == component[e.head as usize] && offence[rep as usize].is_none()
+        {
             offence[rep as usize] = Some((e.dep, e.site));
         }
     }
@@ -156,7 +165,11 @@ pub(crate) fn stratify(npreds: usize, edges: &[DepEdge]) -> Result<Strata, Vec<B
     let bad: Vec<BadCycle> = recursive_components
         .iter()
         .filter_map(|members| {
-            offence[members[0] as usize].map(|(dep, site)| BadCycle { preds: members.clone(), dep, site })
+            offence[members[0] as usize].map(|(dep, site)| BadCycle {
+                preds: members.clone(),
+                dep,
+                site,
+            })
         })
         .collect();
     if !bad.is_empty() {
@@ -180,8 +193,10 @@ pub(crate) fn stratify(npreds: usize, edges: &[DepEdge]) -> Result<Strata, Vec<B
     }
 
     // Kahn over components, the ready one with the smallest member first.
-    let mut ready: BinaryHeap<Reverse<u32>> =
-        (0..n as u32).filter(|&c| component[c as usize] == c && indegree[c as usize] == 0).map(Reverse).collect();
+    let mut ready: BinaryHeap<Reverse<u32>> = (0..n as u32)
+        .filter(|&c| component[c as usize] == c && indegree[c as usize] == 0)
+        .map(Reverse)
+        .collect();
     let mut stratum_of_component = vec![0usize; n];
     let mut order: Vec<Vec<u32>> = Vec::new();
     while let Some(Reverse(c)) = ready.pop() {
@@ -195,9 +210,17 @@ pub(crate) fn stratify(npreds: usize, edges: &[DepEdge]) -> Result<Strata, Vec<B
         }
     }
     // The condensation is acyclic, so every component was emitted.
-    let stratum_of = component.iter().map(|&c| stratum_of_component[c as usize]).collect();
+    let stratum_of = component
+        .iter()
+        .map(|&c| stratum_of_component[c as usize])
+        .collect();
 
-    Ok(Strata { stratum_of, order, recursive, component })
+    Ok(Strata {
+        stratum_of,
+        order,
+        recursive,
+        component,
+    })
 }
 
 #[cfg(test)]
@@ -205,7 +228,12 @@ mod tests {
     use super::*;
 
     fn edge(body: u32, head: u32, dep: Dep, site: usize) -> DepEdge {
-        DepEdge { body, head, dep, site }
+        DepEdge {
+            body,
+            head,
+            dep,
+            site,
+        }
     }
 
     fn pos(body: u32, head: u32) -> DepEdge {
@@ -271,7 +299,15 @@ mod tests {
         assert_eq!(s.order, vec![vec![1], vec![2], vec![0]]);
         assert_eq!(s.stratum_of, vec![2, 0, 1]);
 
-        assert_eq!(ok(0, &[]), Strata { stratum_of: vec![], order: vec![], recursive: vec![], component: vec![] });
+        assert_eq!(
+            ok(0, &[]),
+            Strata {
+                stratum_of: vec![],
+                order: vec![],
+                recursive: vec![],
+                component: vec![]
+            }
+        );
     }
 
     #[test]
@@ -310,11 +346,19 @@ mod tests {
 
         // Negation of a recursive component from outside it is fine, and an
         // aggregate over it likewise: every such edge runs upward.
-        let edges = [pos(0, 1), pos(1, 0), edge(1, 2, Dep::Neg, 5), edge(0, 3, Dep::Agg, 6)];
+        let edges = [
+            pos(0, 1),
+            pos(1, 0),
+            edge(1, 2, Dep::Neg, 5),
+            edge(0, 3, Dep::Agg, 6),
+        ];
         let s = ok(4, &edges);
         for e in &edges {
             if e.dep != Dep::Pos {
-                assert!(s.stratum_of[e.body as usize] < s.stratum_of[e.head as usize], "{e:?}");
+                assert!(
+                    s.stratum_of[e.body as usize] < s.stratum_of[e.head as usize],
+                    "{e:?}"
+                );
             }
         }
     }
@@ -323,7 +367,11 @@ mod tests {
     fn negation_inside_recursion() {
         assert_eq!(
             err(2, &[pos(0, 1), edge(1, 0, Dep::Neg, 7)]),
-            vec![BadCycle { preds: vec![0, 1], dep: Dep::Neg, site: 7 }]
+            vec![BadCycle {
+                preds: vec![0, 1],
+                dep: Dep::Neg,
+                site: 7
+            }]
         );
 
         // Two bad components, the later one's edges first in the input:
@@ -343,20 +391,39 @@ mod tests {
         assert_eq!(
             bad,
             vec![
-                BadCycle { preds: vec![0, 1], dep: Dep::Neg, site: 9 },
-                BadCycle { preds: vec![3, 4], dep: Dep::Agg, site: 11 },
+                BadCycle {
+                    preds: vec![0, 1],
+                    dep: Dep::Neg,
+                    site: 9
+                },
+                BadCycle {
+                    preds: vec![3, 4],
+                    dep: Dep::Agg,
+                    site: 11
+                },
             ]
         );
 
         // A negated self read is a one-predicate bad cycle.
-        assert_eq!(err(1, &[edge(0, 0, Dep::Neg, 2)]), vec![BadCycle { preds: vec![0], dep: Dep::Neg, site: 2 }]);
+        assert_eq!(
+            err(1, &[edge(0, 0, Dep::Neg, 2)]),
+            vec![BadCycle {
+                preds: vec![0],
+                dep: Dep::Neg,
+                site: 2
+            }]
+        );
     }
 
     #[test]
     fn aggregate_inside_recursion() {
         assert_eq!(
             err(3, &[pos(0, 1), edge(1, 1, Dep::Agg, 12)]),
-            vec![BadCycle { preds: vec![1], dep: Dep::Agg, site: 12 }]
+            vec![BadCycle {
+                preds: vec![1],
+                dep: Dep::Agg,
+                site: 12
+            }]
         );
         // A positive self read is recursion, not an error.
         let s = ok(1, &[pos(0, 0)]);
@@ -413,6 +480,13 @@ mod tests {
         let s = ok(1, &[pos(0, 2)]);
         assert_eq!(s.stratum_of.len(), 3);
         assert_eq!(s.order, vec![vec![0], vec![1], vec![2]]);
-        assert_eq!(err(0, &[edge(1, 1, Dep::Neg, 8)]), vec![BadCycle { preds: vec![1], dep: Dep::Neg, site: 8 }]);
+        assert_eq!(
+            err(0, &[edge(1, 1, Dep::Neg, 8)]),
+            vec![BadCycle {
+                preds: vec![1],
+                dep: Dep::Neg,
+                site: 8
+            }]
+        );
     }
 }

@@ -30,7 +30,10 @@ use glia_engine::generate_one;
 const FIXTURE: &str = "fixtures/dart-body-owners";
 
 fn bench(rel: &str) -> String {
-    format!("{}/../bench/substrate-gap/{rel}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 #[test]
@@ -89,7 +92,10 @@ fn member_bodies_are_credited_to_their_owner() {
         ("lib::app::Api::area", "lib::app::Api::store"),
         ("lib::app::Meters::twicePlus", "lib::app::Meters::plus"),
     ] {
-        assert!(has(from, to), "expected CALLS {from} -> {to}; CALLS = {calls:?}");
+        assert!(
+            has(from, to),
+            "expected CALLS {from} -> {to}; CALLS = {calls:?}"
+        );
     }
 
     for (from, to) in [
@@ -103,7 +109,10 @@ fn member_bodies_are_credited_to_their_owner() {
         .iter()
         .filter(|(from, _, _)| kind.get(from) == Some(&node_kind::ENDPOINT))
         .collect();
-    assert!(from_endpoint.is_empty(), "CALLS from an ENDPOINT: {from_endpoint:?}");
+    assert!(
+        from_endpoint.is_empty(),
+        "CALLS from an ENDPOINT: {from_endpoint:?}"
+    );
 }
 
 /// The qname and kind of every node, and the CALLS / HAS_ATTRIBUTE / IMPORTS
@@ -166,9 +175,9 @@ fn constructors_operators_abstract_members_and_enum_constants_are_nodes() {
         assert!(b.nodes.contains(&(k, q.clone())), "expected node {q}");
     }
     let has = |cat, from: &str, to: &str| {
-        b.edges
-            .iter()
-            .any(|(c, f, t)| *c == cat && f == &format!("{m}::{from}") && t == &format!("{m}::{to}"))
+        b.edges.iter().any(|(c, f, t)| {
+            *c == cat && f == &format!("{m}::{from}") && t == &format!("{m}::{to}")
+        })
     };
     for (cat, from, to) in [
         (edge_category::CALLS, "Money::Money", "Money::validate"),
@@ -179,18 +188,26 @@ fn constructors_operators_abstract_members_and_enum_constants_are_nodes() {
         (edge_category::HAS_ATTRIBUTE, "Currency", "Currency::aud"),
         (edge_category::HAS_ATTRIBUTE, "Currency", "Currency::usd"),
     ] {
-        assert!(has(cat, from, to), "expected {cat:?} {from} -> {to}; edges = {:?}", b.edges);
+        assert!(
+            has(cat, from, to),
+            "expected {cat:?} {from} -> {to}; edges = {:?}",
+            b.edges
+        );
     }
     // A CLASS makes no calls: its members do.
     let from_class: Vec<_> = b
         .edges
         .iter()
-        .filter(|(c, f, _)| *c == edge_category::CALLS && b.kind_of.get(f) == Some(&node_kind::CLASS))
+        .filter(|(c, f, _)| {
+            *c == edge_category::CALLS && b.kind_of.get(f) == Some(&node_kind::CLASS)
+        })
         .collect();
     assert!(from_class.is_empty(), "CALLS from a CLASS: {from_class:?}");
     // An abstract member has no body, so no calls.
     assert!(
-        !b.edges.iter().any(|(_, f, _)| f.starts_with(&format!("{m}::Repo::"))),
+        !b.edges
+            .iter()
+            .any(|(_, f, _)| f.starts_with(&format!("{m}::Repo::"))),
         "{:?}",
         b.edges
     );
@@ -201,9 +218,15 @@ fn unnamed_extension_containers_initialisers_and_import_prefixes_resolve() {
     let b = build("fixtures/dart-extensions-imports");
     for (k, q) in [
         (node_kind::CLASS, "lib::src::ext::extension<Money>"),
-        (node_kind::METHOD, "lib::src::ext::extension<Money>::doubled"),
+        (
+            node_kind::METHOD,
+            "lib::src::ext::extension<Money>::doubled",
+        ),
         (node_kind::CLASS, "lib::src::ext::extension<String>"),
-        (node_kind::METHOD, "lib::src::ext::extension<String>::toCents"),
+        (
+            node_kind::METHOD,
+            "lib::src::ext::extension<String>::toCents",
+        ),
         (node_kind::STATE_VAR, "lib::src::money::defaultTax"),
         (node_kind::STATE_VAR, "lib::src::money::cache"),
         (node_kind::STATE_VAR, "lib::src::money::hits"),
@@ -214,16 +237,48 @@ fn unnamed_extension_containers_initialisers_and_import_prefixes_resolve() {
     for q in ["lib::src::ext::Money", "lib::src::ext::String"] {
         assert!(!b.kind_of.contains_key(q), "no phantom {q}");
     }
-    let has = |cat, from: &str, to: &str| b.edges.iter().any(|(c, f, t)| *c == cat && f == from && t == to);
+    let has = |cat, from: &str, to: &str| {
+        b.edges
+            .iter()
+            .any(|(c, f, t)| *c == cat && f == from && t == to)
+    };
     for (cat, from, to) in [
         (edge_category::IMPORTS, "lib::src::ext", "lib::src::money"),
-        (edge_category::CALLS, "lib::src::ext::total", "lib::src::money::round2"),
-        (edge_category::CALLS, "lib::src::ext::extension<Money>::doubled", "lib::src::money::round2"),
-        (edge_category::CALLS, "lib::src::ext::extension<Money>::doubled", "lib::src::money::Money"),
-        (edge_category::CALLS, "lib::src::ext::extension<String>::toCents", "lib::src::money::round2"),
-        (edge_category::CALLS, "lib::src::money::defaultTax", "lib::src::money::seed"),
-        (edge_category::CALLS, "lib::src::money::hits", "lib::src::money::round2"),
+        (
+            edge_category::CALLS,
+            "lib::src::ext::total",
+            "lib::src::money::round2",
+        ),
+        (
+            edge_category::CALLS,
+            "lib::src::ext::extension<Money>::doubled",
+            "lib::src::money::round2",
+        ),
+        (
+            edge_category::CALLS,
+            "lib::src::ext::extension<Money>::doubled",
+            "lib::src::money::Money",
+        ),
+        (
+            edge_category::CALLS,
+            "lib::src::ext::extension<String>::toCents",
+            "lib::src::money::round2",
+        ),
+        (
+            edge_category::CALLS,
+            "lib::src::money::defaultTax",
+            "lib::src::money::seed",
+        ),
+        (
+            edge_category::CALLS,
+            "lib::src::money::hits",
+            "lib::src::money::round2",
+        ),
     ] {
-        assert!(has(cat, from, to), "expected {cat:?} {from} -> {to}; edges = {:?}", b.edges);
+        assert!(
+            has(cat, from, to),
+            "expected {cat:?} {from} -> {to}; edges = {:?}",
+            b.edges
+        );
     }
 }

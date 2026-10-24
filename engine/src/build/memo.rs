@@ -72,7 +72,9 @@ pub(crate) struct PathMemo<K, V> {
 
 impl<K, V> Default for PathMemo<K, V> {
     fn default() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 }
 
@@ -248,7 +250,10 @@ mod tests {
     fn services_fp_tracks_every_field() {
         let base = [svc("Greeter", &["Hi"])];
         assert_eq!(services_fp(&base), services_fp(&[svc("Greeter", &["Hi"])]));
-        assert_ne!(services_fp(&base), services_fp(&[svc("Greeter", &["Hi", "Bye"])]));
+        assert_ne!(
+            services_fp(&base),
+            services_fp(&[svc("Greeter", &["Hi", "Bye"])])
+        );
         assert_ne!(services_fp(&base), services_fp(&[svc("Farewell", &["Hi"])]));
         assert_ne!(services_fp(&base), services_fp(&[]));
         let two = [svc("A", &[]), svc("B", &[])];
@@ -263,7 +268,11 @@ mod tests {
         assert_eq!(m.get("a", &1), Some(&10));
         assert_eq!(m.get("a", &2), None, "another key misses");
         m.insert("a".into(), 3, 30);
-        assert_eq!((m.get("a", &1), m.get("a", &3)), (None, Some(&30)), "overwritten");
+        assert_eq!(
+            (m.get("a", &1), m.get("a", &3)),
+            (None, Some(&30)),
+            "overwritten"
+        );
         assert_eq!(m.len(), 2, "one entry per path");
         m.retain(&HashSet::from(["b"]));
         assert_eq!((m.len(), m.get("b", &2)), (1, Some(&20)));

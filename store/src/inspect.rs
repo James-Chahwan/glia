@@ -97,7 +97,11 @@ impl Inspection {
         let joined = |mut v: Vec<String>| {
             v.sort();
             v.dedup();
-            if v.is_empty() { "-".to_string() } else { v.join(",") }
+            if v.is_empty() {
+                "-".to_string()
+            } else {
+                v.join(",")
+            }
         };
         let graph_types = joined(self.shards.iter().map(|s| s.graph_type.clone()).collect());
         let formats = joined(self.shards.iter().map(|s| s.format.to_string()).collect());
@@ -222,7 +226,9 @@ impl Table {
         for e in registry {
             let id = e.id.to_native();
             if self.counts.contains_key(&id) {
-                self.names.entry(id).or_insert_with(|| e.name.as_str().to_string());
+                self.names
+                    .entry(id)
+                    .or_insert_with(|| e.name.as_str().to_string());
             }
         }
     }
@@ -251,7 +257,11 @@ impl Table {
                         format!("#{id}")
                     }
                 };
-                NamedCount { id: *id, name, count: *count }
+                NamedCount {
+                    id: *id,
+                    name,
+                    count: *count,
+                }
             })
             .collect();
         (out, unregistered)
@@ -314,6 +324,12 @@ impl Tables {
         let (categories, uc) = self.categories.named();
         let (node_cells, un) = self.node_cells.named();
         let (edge_cells, ue) = self.edge_cells.named();
-        Named { kinds, categories, node_cells, edge_cells, unregistered: uk + uc + un + ue }
+        Named {
+            kinds,
+            categories,
+            node_cells,
+            edge_cells,
+            unregistered: uk + uc + un + ue,
+        }
     }
 }

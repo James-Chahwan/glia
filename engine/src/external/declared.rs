@@ -295,12 +295,15 @@ impl Anchors {
 
     /// This repo's PROJECT node at `path`.
     fn project_at(&self, path: &str) -> Option<NodeId> {
-        self.projects.iter().filter(|p| p.path == path).find_map(|p| {
-            match self.idx.resolve(&p.qname, Some("PROJECT"), None) {
-                CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some(id),
-                _ => None,
-            }
-        })
+        self.projects
+            .iter()
+            .filter(|p| p.path == path)
+            .find_map(
+                |p| match self.idx.resolve(&p.qname, Some("PROJECT"), None) {
+                    CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some(id),
+                    _ => None,
+                },
+            )
     }
 
     /// The deepest PROJECT of this repo at or above `path`: among the build's
@@ -314,10 +317,12 @@ impl Anchors {
         self.projects
             .iter()
             .filter(|p| p.path == "." || is_under(path, &p.path))
-            .filter_map(|p| match self.idx.resolve(&p.qname, Some("PROJECT"), None) {
-                CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some((depth(&p.path), id)),
-                _ => None,
-            })
+            .filter_map(
+                |p| match self.idx.resolve(&p.qname, Some("PROJECT"), None) {
+                    CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some((depth(&p.path), id)),
+                    _ => None,
+                },
+            )
             .max_by_key(|&(d, id)| (d, std::cmp::Reverse(id.0)))
             .map(|(_, id)| id)
     }
@@ -328,7 +333,9 @@ impl Anchors {
         let modules = self.modules.get_or_insert_with(|| {
             let mut out: Vec<(NodeId, String)> = Vec::new();
             for &(gi, ni) in self.at.values().flatten() {
-                let Some(g) = merged.graphs.get(gi) else { continue };
+                let Some(g) = merged.graphs.get(gi) else {
+                    continue;
+                };
                 let Some(n) = g.nodes.get(ni) else { continue };
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
                     continue;
@@ -342,7 +349,10 @@ impl Anchors {
             out.dedup();
             out
         });
-        modules.iter().find(|(_, file)| is_under(file, path)).map(|(id, _)| *id)
+        modules
+            .iter()
+            .find(|(_, file)| is_under(file, path))
+            .map(|(id, _)| *id)
     }
 
     /// Where a component without `anchor` hangs (see the module docs).
@@ -365,19 +375,26 @@ impl Anchors {
 
 /// The `file` of a node's first POSITION cell.
 fn position_file(cells: &[Cell]) -> Option<String> {
-    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| match &c.payload {
-        CellPayload::Json(s) | CellPayload::Text(s) => serde_json::from_str::<Value>(s)
-            .ok()?
-            .get("file")?
-            .as_str()
-            .map(String::from),
-        CellPayload::Bytes(_) => None,
-    })
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => serde_json::from_str::<Value>(s)
+                .ok()?
+                .get("file")?
+                .as_str()
+                .map(String::from),
+            CellPayload::Bytes(_) => None,
+        })
 }
 
 /// `file` is `path` or lies below it, by whole path segments.
 fn is_under(file: &str, path: &str) -> bool {
-    path == "." || file == path || file.strip_prefix(path).is_some_and(|rest| rest.starts_with('/'))
+    path == "."
+        || file == path
+        || file
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// A scope string as a path: no leading `./` or `/`, no trailing `/`; empty
@@ -386,7 +403,11 @@ fn normalise_scope(raw: &str) -> String {
     let s = raw.trim();
     let s = s.strip_prefix("./").unwrap_or(s);
     let s = s.trim_start_matches('/').trim_end_matches('/');
-    if s.is_empty() { ".".to_string() } else { s.to_string() }
+    if s.is_empty() {
+        ".".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 fn origin_name(o: Origin) -> &'static str {
@@ -408,7 +429,9 @@ fn object(pairs: Vec<(&str, Option<Value>)>) -> Value {
 }
 
 fn text(s: &Option<String>) -> Option<Value> {
-    s.as_deref().filter(|t| !t.trim().is_empty()).map(|t| Value::String(t.to_string()))
+    s.as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| Value::String(t.to_string()))
 }
 
 /// Every declared stanza of `cfg` as an entry, in file order per section:
@@ -420,19 +443,32 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
         c.component.len() + c.layer.len() + c.constraint.len() + c.decision.len() + c.note.len(),
     );
     let s = |v: &str| Some(Value::String(v.to_string()));
-    let strings = |v: &[String]| Some(Value::Array(v.iter().map(|x| Value::String(x.clone())).collect()));
+    let strings = |v: &[String]| {
+        Some(Value::Array(
+            v.iter().map(|x| Value::String(x.clone())).collect(),
+        ))
+    };
     // resolved path -> the component that claimed it first.
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     for spanned in &c.component {
         let d = spanned.get_ref();
         let decl = cfg.decl_of(spanned.span());
-        let paths: Vec<String> = d.paths.iter().map(|raw| anchors.path_of(merged, raw)).collect();
+        let paths: Vec<String> = d
+            .paths
+            .iter()
+            .map(|raw| anchors.path_of(merged, raw))
+            .collect();
         let mut reject = None;
         let mut mine: Vec<&String> = Vec::with_capacity(paths.len());
         for (raw, path) in d.paths.iter().zip(&paths) {
-            let owner = claimed.get(path).cloned().or_else(|| mine.contains(&path).then(|| d.name.clone()));
+            let owner = claimed
+                .get(path)
+                .cloned()
+                .or_else(|| mine.contains(&path).then(|| d.name.clone()));
             if let Some(owner) = owner {
-                reject = Some(format!("path {raw} -> {path} is already claimed by component {owner}"));
+                reject = Some(format!(
+                    "path {raw} -> {path} is already claimed by component {owner}"
+                ));
                 break;
             }
             mine.push(path);
@@ -483,7 +519,10 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             ("id", s(&id)),
             ("kind", s("layer")),
             ("name", s(&d.name)),
-            ("rank", Some(Value::from(u32::try_from(rank).unwrap_or(u32::MAX)))),
+            (
+                "rank",
+                Some(Value::from(u32::try_from(rank).unwrap_or(u32::MAX))),
+            ),
             ("components", strings(&d.components)),
             ("strict", Some(Value::Bool(d.strict))),
             ("decl", s(&decl)),
@@ -493,7 +532,9 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             cell: cell_type::CONSTRAINT,
             id,
             decl,
-            target: Target::Model { component: d.components.first().cloned().unwrap_or_default() },
+            target: Target::Model {
+                component: d.components.first().cloned().unwrap_or_default(),
+            },
             declared: false,
             model: true,
             component: None,
@@ -504,7 +545,9 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
     for spanned in &c.constraint {
         let d = spanned.get_ref();
         let decl = cfg.decl_of(spanned.span());
-        let categories = (!d.categories.is_empty()).then(|| strings(&d.categories)).flatten();
+        let categories = (!d.categories.is_empty())
+            .then(|| strings(&d.categories))
+            .flatten();
         if d.kind == "allow" {
             // Component names, stored raw: they are not scopes.
             let from = d.from.clone().unwrap_or_default();
@@ -550,7 +593,11 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
         let (via, via_raw) = if d.via.is_empty() {
             (None, None)
         } else {
-            let resolved: Vec<String> = d.via.iter().map(|raw| anchors.path_of(merged, raw)).collect();
+            let resolved: Vec<String> = d
+                .via
+                .iter()
+                .map(|raw| anchors.path_of(merged, raw))
+                .collect();
             (strings(&resolved), strings(&d.via))
         };
         let entry = object(vec![
@@ -573,13 +620,20 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             ("origin", s(origin_name(d.origin))),
             ("decl", s(&decl)),
         ]);
-        let scope = if d.kind == "forbid_edge" { d.from.clone() } else { d.scope.clone() };
+        let scope = if d.kind == "forbid_edge" {
+            d.from.clone()
+        } else {
+            d.scope.clone()
+        };
         out.push(Stanza {
             section: "constraint",
             cell: cell_type::CONSTRAINT,
             id: d.id.clone(),
             decl,
-            target: d.anchor.clone().map_or(Target::RuleScope(scope), Target::Qname),
+            target: d
+                .anchor
+                .clone()
+                .map_or(Target::RuleScope(scope), Target::Qname),
             declared: true,
             model: false,
             component: None,
@@ -603,7 +657,10 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             cell: cell_type::DECISION,
             id: d.id.clone(),
             decl,
-            target: d.anchor.clone().map_or(Target::Scope(d.scope.clone()), Target::Qname),
+            target: d
+                .anchor
+                .clone()
+                .map_or(Target::Scope(d.scope.clone()), Target::Qname),
             declared: true,
             model: false,
             component: None,
@@ -614,7 +671,9 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
     for (i, spanned) in c.note.iter().enumerate() {
         let d = spanned.get_ref();
         let decl = cfg.decl_of(spanned.span());
-        let id = d.id.clone().unwrap_or_else(|| format!("{NOTE_ID_PREFIX}{}", i + 1));
+        let id =
+            d.id.clone()
+                .unwrap_or_else(|| format!("{NOTE_ID_PREFIX}{}", i + 1));
         let entry = object(vec![
             ("source", s("overlay")),
             ("id", s(&id)),
@@ -664,7 +723,9 @@ impl Unbound {
             Unbound::RuleScope { raw, path } => {
                 format!("scope={raw} -> {path} (no PROJECT at or above it, no MODULE under it)")
             }
-            Unbound::ComponentPath { raw, path } => format!("path={raw} -> {path} (no PROJECT or MODULE)"),
+            Unbound::ComponentPath { raw, path } => {
+                format!("path={raw} -> {path} (no PROJECT or MODULE)")
+            }
             Unbound::Model { component } => {
                 format!("component={component} (no root PROJECT; the component did not anchor)")
             }
@@ -693,7 +754,10 @@ fn bind_stanza(
     components: &BTreeMap<String, (NodeId, Via)>,
 ) -> Result<(NodeId, Via), Unbound> {
     match &st.target {
-        Target::Qname(q) => anchors.by_qname(q).map(|id| (id, Via::Qname)).ok_or_else(|| Unbound::Anchor(q.clone())),
+        Target::Qname(q) => anchors
+            .by_qname(q)
+            .map(|id| (id, Via::Qname))
+            .ok_or_else(|| Unbound::Anchor(q.clone())),
         Target::Scope(scope) => {
             let raw = scope.clone().unwrap_or_default();
             let path = anchors.path_of(merged, &raw);
@@ -710,14 +774,21 @@ fn bind_stanza(
                 None => Err(Unbound::RuleScope { raw, path }),
             }
         }
-        Target::Component { raw, path } => anchors
-            .component_anchor(merged, path)
-            .ok_or_else(|| Unbound::ComponentPath { raw: raw.clone(), path: path.clone() }),
+        Target::Component { raw, path } => {
+            anchors
+                .component_anchor(merged, path)
+                .ok_or_else(|| Unbound::ComponentPath {
+                    raw: raw.clone(),
+                    path: path.clone(),
+                })
+        }
         Target::Model { component } => anchors
             .project_at(".")
             .map(|id| (id, Via::Project))
             .or_else(|| components.get(component).copied())
-            .ok_or_else(|| Unbound::Model { component: component.clone() }),
+            .ok_or_else(|| Unbound::Model {
+                component: component.clone(),
+            }),
     }
 }
 
@@ -742,7 +813,11 @@ pub(super) fn apply_declared_cells(
         note: c.note.len(),
         component: c.component.len(),
         layer: c.layer.len(),
-        allow: c.constraint.iter().filter(|s| s.get_ref().kind == "allow").count(),
+        allow: c
+            .constraint
+            .iter()
+            .filter(|s| s.get_ref().kind == "allow")
+            .count(),
         ..Tally::default()
     };
     let mut anchors = Anchors::build(merged, input.repo);
@@ -800,14 +875,21 @@ fn write_entry(
             .and_then(|g| g.nodes.get(ni))
             .filter(|n| n.id == id)
             .ok_or_else(|| format!("stale index: node {} is not at graph {gi} node {ni}", id.0))?;
-        let existing = node.cells.iter().find(|c| c.kind == cell).map(|c| &c.payload);
+        let existing = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell)
+            .map(|c| &c.payload);
         payloads.push(merge_entry(existing, entry)?);
     }
     for (&(gi, ni), payload) in places.iter().zip(payloads) {
         if let Some(node) = merged.graphs.get_mut(gi).and_then(|g| g.nodes.get_mut(ni)) {
             match node.cells.iter_mut().find(|c| c.kind == cell) {
                 Some(c) => c.payload = payload,
-                None => node.cells.push(Cell { kind: cell, payload }),
+                None => node.cells.push(Cell {
+                    kind: cell,
+                    payload,
+                }),
             }
         }
     }
@@ -815,7 +897,13 @@ fn write_entry(
 }
 
 fn report(label: &str, t: &Tally) {
-    let nonzero = |key: &str, n: usize| if n > 0 { format!(" {key}={n}") } else { String::new() };
+    let nonzero = |key: &str, n: usize| {
+        if n > 0 {
+            format!(" {key}={n}")
+        } else {
+            String::new()
+        }
+    };
     if t.constraint + t.decision + t.note > 0 {
         eprintln!(
             "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}){}",
@@ -846,7 +934,10 @@ fn report(label: &str, t: &Tally) {
         eprintln!("[declared] {line}");
     }
     if t.details.len() > MAX_DETAIL_LINES {
-        eprintln!("[declared] ... {} more detail lines", t.details.len() - MAX_DETAIL_LINES);
+        eprintln!(
+            "[declared] ... {} more detail lines",
+            t.details.len() - MAX_DETAIL_LINES
+        );
     }
 }
 
@@ -870,7 +961,11 @@ pub(crate) fn declared_constraints(merged: &MergedGraph) -> Vec<(NodeId, Constra
                 continue;
             };
             if seen.insert(n.id) {
-                out.extend(parse_constraints(&cell.payload).into_iter().map(|r| (n.id, r)));
+                out.extend(
+                    parse_constraints(&cell.payload)
+                        .into_iter()
+                        .map(|r| (n.id, r)),
+                );
             }
         }
     }
@@ -897,7 +992,10 @@ pub(crate) fn declared_constraints(merged: &MergedGraph) -> Vec<(NodeId, Constra
                 }
             }
             ConstraintKind::NoCycle { scope: Some(scope) } => path(scope),
-            ConstraintKind::Component { paths: component_paths, .. } => {
+            ConstraintKind::Component {
+                paths: component_paths,
+                ..
+            } => {
                 for p in component_paths {
                     path(p);
                 }
@@ -959,8 +1057,7 @@ pub(crate) struct DeclaredMiss {
 pub(crate) const ABSENT_REASON: &str = "absent: declared in the overlay but not in this graph \
      (rebuild; or the build refused to merge it, see its [declared] rejected= line)";
 
-const ABSENT_FIX: &str =
-    "rebuild the graph (`glia build <repo>`); if the row stays, the build's `[declared] rejected` line says why";
+const ABSENT_FIX: &str = "rebuild the graph (`glia build <repo>`); if the row stays, the build's `[declared] rejected` line says why";
 const CLAIM_FIX: &str =
     "give each path to one component (a project label and its directory are one path)";
 const VALIDATOR_FIX: &str = "correct the stanza as the message says, then rebuild";
@@ -1006,7 +1103,9 @@ pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) ->
     let mut out = Vec::new();
     let mut held_rules: Option<BTreeSet<(u64, String)>> = None;
     for (repo, root) in roots {
-        let Some(cfg) = glia_config::load(root) else { continue };
+        let Some(cfg) = glia_config::load(root) else {
+            continue;
+        };
         out.extend(loader_misses(root, &cfg));
         let c = &cfg.config;
         if c.constraint.is_empty() && c.component.is_empty() && c.layer.is_empty() {
@@ -1015,7 +1114,10 @@ pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) ->
         let held = held_rules.get_or_insert_with(|| overlay_rules_held(merged));
         let mut anchors = Anchors::build(merged, RepoId(*repo));
         let all = stanzas(&cfg, merged, &mut anchors);
-        let declared: BTreeSet<&str> = all.iter().filter_map(|st| st.component.as_deref()).collect();
+        let declared: BTreeSet<&str> = all
+            .iter()
+            .filter_map(|st| st.component.as_deref())
+            .collect();
         let mut components: BTreeMap<String, (NodeId, Via)> = BTreeMap::new();
         for st in &all {
             if st.cell != cell_type::CONSTRAINT {
@@ -1024,7 +1126,11 @@ pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) ->
             let (status, reason, fix) = if let Some(e) = &st.reject {
                 (REJECTED, format!("rejected: {e}"), CLAIM_FIX.to_string())
             } else if let Err(e) = validate_declared_entry(st.cell, &st.entry) {
-                (REJECTED, format!("rejected: {e}"), VALIDATOR_FIX.to_string())
+                (
+                    REJECTED,
+                    format!("rejected: {e}"),
+                    VALIDATOR_FIX.to_string(),
+                )
             } else {
                 match bind_stanza(st, merged, &mut anchors, &components) {
                     Err(unbound) => {
@@ -1204,7 +1310,9 @@ fn placement(st: &Stanza) -> &'static str {
     match st.section {
         "component" => "its first path",
         _ if st.model => "its `from` component",
-        _ if st.entry.get("kind").and_then(Value::as_str) == Some("forbid_edge") => "its `from` scope",
+        _ if st.entry.get("kind").and_then(Value::as_str) == Some("forbid_edge") => {
+            "its `from` scope"
+        }
         _ => "its `scope`",
     }
 }
@@ -1222,7 +1330,10 @@ fn fix_for(
     match unbound {
         Unbound::Anchor(q) => {
             let place = placement(st);
-            match qname_ancestors(q).into_iter().find(|p| anchors.by_qname(p).is_some()) {
+            match qname_ancestors(q)
+                .into_iter()
+                .find(|p| anchors.by_qname(p).is_some())
+            {
                 Some(p) => format!(
                     "drop `anchor` to place it by {place}, or set anchor = \"{p}\" (the nearest qname above it that this graph holds)"
                 ),
@@ -1234,7 +1345,10 @@ fn fix_for(
         Unbound::RuleScope { path, .. } => {
             let forbid = st.entry.get("kind").and_then(Value::as_str) == Some("forbid_edge");
             let field = if forbid { "from" } else { "scope" };
-            match ancestors(path).into_iter().find(|a| anchors.rule_anchor(merged, a).is_some()) {
+            match ancestors(path)
+                .into_iter()
+                .find(|a| anchors.rule_anchor(merged, a).is_some())
+            {
                 Some(a) if a != "." => format!(
                     "check the spelling of `{field}` (the nearest path above it that anchors a rule is `{a}`), or declare a [[project]] at `{path}`"
                 ),
@@ -1247,9 +1361,9 @@ fn fix_for(
             }
         }
         Unbound::ComponentPath { path, .. } => {
-            let near = ancestors(path)
-                .into_iter()
-                .find(|a| anchors.project_at(a).is_some() || anchors.module_under(merged, a).is_some());
+            let near = ancestors(path).into_iter().find(|a| {
+                anchors.project_at(a).is_some() || anchors.module_under(merged, a).is_some()
+            });
             match near {
                 Some(a) if a != "." => format!(
                     "check the spelling of the component's first path (the nearest path above it that holds code is `{a}`), or declare a [[project]] at `{path}`"
@@ -1266,10 +1380,16 @@ fn fix_for(
             format!("declare a [[project]] at `{path}`, or set `anchor`")
         }
         Unbound::Model { component } if !declared.contains(component.as_str()) => {
-            format!("declare a [[component]] named `{component}`, or name a declared component first")
+            format!(
+                "declare a [[component]] named `{component}`, or name a declared component first"
+            )
         }
         Unbound::Model { component } => {
-            let anchor_too = if st.section == "constraint" { ", or set `anchor` on this stanza" } else { "" };
+            let anchor_too = if st.section == "constraint" {
+                ", or set `anchor` on this stanza"
+            } else {
+                ""
+            };
             format!(
                 "anchor component `{component}` first (its own row says why), or give the repo a root PROJECT (a root manifest, or a [[project]] at `.`){anchor_too}"
             )
@@ -1304,7 +1424,10 @@ scope = \"./services/api/\"
             ("web/package.json", "{\"name\": \"web\"}\n"),
             ("web/src/ui.ts", "export function render() { return 1; }\n"),
             ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
-            ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+            (
+                "services/api/app.py",
+                "def charge(order_id):\n    return order_id\n",
+            ),
             (".glia/overlay.toml", OVERLAY),
             (
                 ".glia/cells.jsonl",
@@ -1319,29 +1442,91 @@ scope = \"./services/api/\"
         let rules = declared_constraints(&r.merged);
         let got: Vec<(&str, &str, &str, Option<&str>)> = rules
             .iter()
-            .map(|(_, rule)| (rule.id.as_str(), rule.source.as_str(), rule.kind.name(), rule.decl.as_deref()))
+            .map(|(_, rule)| {
+                (
+                    rule.id.as_str(),
+                    rule.source.as_str(),
+                    rule.kind.name(),
+                    rule.decl.as_deref(),
+                )
+            })
             .collect();
-        let web = rules.iter().find(|(_, x)| x.id == "w").map(|(id, _)| *id).unwrap();
-        let api = rules.iter().find(|(_, x)| x.id == "api-acyclic").map(|(id, _)| *id).unwrap();
+        let web = rules
+            .iter()
+            .find(|(_, x)| x.id == "w")
+            .map(|(id, _)| *id)
+            .unwrap();
+        let api = rules
+            .iter()
+            .find(|(_, x)| x.id == "api-acyclic")
+            .map(|(id, _)| *id)
+            .unwrap();
         let mut want = [
             (web, ("w", "api", "forbid_edge", None)),
-            (web, ("web-no-api-internals", "overlay", "forbid_edge", Some(".glia/overlay.toml:3"))),
-            (api, ("api-acyclic", "overlay", "no_cycle", Some(".glia/overlay.toml:10"))),
+            (
+                web,
+                (
+                    "web-no-api-internals",
+                    "overlay",
+                    "forbid_edge",
+                    Some(".glia/overlay.toml:3"),
+                ),
+            ),
+            (
+                api,
+                (
+                    "api-acyclic",
+                    "overlay",
+                    "no_cycle",
+                    Some(".glia/overlay.toml:10"),
+                ),
+            ),
         ];
         want.sort_by_key(|(id, _)| id.0);
         assert_eq!(got, want.iter().map(|(_, w)| *w).collect::<Vec<_>>());
-        let by_id = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
+        let by_id = |id: &str| {
+            rules
+                .iter()
+                .find(|(_, x)| x.id == id)
+                .map(|(_, x)| x.kind.clone())
+                .unwrap()
+        };
         // The API rule's `./web` and label `api` come back as paths.
         assert_eq!(
             by_id("w"),
-            ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+            ConstraintKind::ForbidEdge {
+                from: "web".into(),
+                to: "services/api".into(),
+                transitive: false,
+                via: vec![]
+            }
         );
-        assert_eq!(by_id("api-acyclic"), ConstraintKind::NoCycle { scope: Some("services/api".into()) });
+        assert_eq!(
+            by_id("api-acyclic"),
+            ConstraintKind::NoCycle {
+                scope: Some("services/api".into())
+            }
+        );
         // The stored overlay entry keeps both the resolved and the raw scope.
-        let stored = r.merged.graphs.iter().flat_map(|g| &g.nodes).find(|n| n.id == api).unwrap();
-        let payload = stored.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT).unwrap();
-        let CellPayload::Json(s) = &payload.payload else { panic!("CONSTRAINT is JSON") };
-        assert!(s.contains(r#""scope":"services/api","scope_raw":"./services/api/""#), "{s}");
+        let stored = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .find(|n| n.id == api)
+            .unwrap();
+        let payload = stored
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::CONSTRAINT)
+            .unwrap();
+        let CellPayload::Json(s) = &payload.payload else {
+            panic!("CONSTRAINT is JSON")
+        };
+        assert!(
+            s.contains(r#""scope":"services/api","scope_raw":"./services/api/""#),
+            "{s}"
+        );
     }
 
     /// CC.5a: a component path given as a project label is stored resolved;
@@ -1380,7 +1565,10 @@ to = \"api\"
 ";
         for (path, body) in [
             ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
-            ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+            (
+                "services/api/app.py",
+                "def charge(order_id):\n    return order_id\n",
+            ),
             ("lib/util.py", "def helper():\n    return 1\n"),
             ("lib/more.py", "def other():\n    return 2\n"),
             (".glia/overlay.toml", overlay),
@@ -1396,16 +1584,40 @@ to = \"api\"
         let r = crate::generate_one(root.to_str().unwrap()).unwrap();
         let rules = declared_constraints(&r.merged);
         let kind_of = |id: NodeId| {
-            r.merged.graphs.iter().find_map(|g| g.nav.kind_by_id.get(&id).copied()).map(node_kind::name)
+            r.merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.kind_by_id.get(&id).copied())
+                .map(node_kind::name)
         };
-        let qname_of = |id: NodeId| r.merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned());
+        let qname_of = |id: NodeId| {
+            r.merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+        };
         let by_id = |id: &str| rules.iter().find(|(_, x)| x.id == id).cloned();
         let mut ids: Vec<&str> = rules.iter().map(|(_, x)| x.id.as_str()).collect();
         ids.sort_unstable();
-        assert_eq!(ids, ["component:api", "component:ext", "component:lib", "layer:core", "lib-uses-api"]);
+        assert_eq!(
+            ids,
+            [
+                "component:api",
+                "component:ext",
+                "component:lib",
+                "layer:core",
+                "lib-uses-api"
+            ]
+        );
 
         let (api_at, api) = by_id("component:api").unwrap();
-        assert_eq!(api.kind, ConstraintKind::Component { name: "api".into(), paths: vec!["services/api".into()] });
+        assert_eq!(
+            api.kind,
+            ConstraintKind::Component {
+                name: "api".into(),
+                paths: vec!["services/api".into()]
+            }
+        );
         assert_eq!(qname_of(api_at).as_deref(), Some("project:services/api"));
         // No PROJECT at lib and no root PROJECT: the smallest-id MODULE under lib/.
         let (lib_at, _) = by_id("component:lib").unwrap();
@@ -1414,7 +1626,11 @@ to = \"api\"
             .merged
             .graphs
             .iter()
-            .flat_map(|g| g.nodes.iter().filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE)))
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+            })
             .filter(|n| position_file(&n.cells).is_some_and(|f| is_under(&f, "lib")))
             .map(|n| n.id)
             .collect();
@@ -1425,20 +1641,52 @@ to = \"api\"
         assert_eq!(by_id("lib-uses-api").unwrap().0, lib_at);
         assert_eq!(
             by_id("layer:core").unwrap().1.kind,
-            ConstraintKind::Layer { name: "core".into(), rank: 0, components: vec!["lib".into(), "api".into()], strict: true }
+            ConstraintKind::Layer {
+                name: "core".into(),
+                rank: 0,
+                components: vec!["lib".into(), "api".into()],
+                strict: true
+            }
         );
-        assert_eq!(by_id("lib-uses-api").unwrap().1.kind, ConstraintKind::Allow { from: "lib".into(), to: "api".into() });
+        assert_eq!(
+            by_id("lib-uses-api").unwrap().1.kind,
+            ConstraintKind::Allow {
+                from: "lib".into(),
+                to: "api".into()
+            }
+        );
         // The API entry's `./lib/` and label `api` come back as paths.
         assert_eq!(
             by_id("component:ext").unwrap().1.kind,
-            ConstraintKind::Component { name: "ext".into(), paths: vec!["lib".into(), "services/api".into()] }
+            ConstraintKind::Component {
+                name: "ext".into(),
+                paths: vec!["lib".into(), "services/api".into()]
+            }
         );
         // The stored overlay entry keeps both the resolved and the raw path.
-        let stored = r.merged.graphs.iter().flat_map(|g| &g.nodes).find(|n| n.id == api_at).unwrap();
-        let payload = stored.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT).unwrap();
-        let CellPayload::Json(s) = &payload.payload else { panic!("CONSTRAINT is JSON") };
-        assert!(s.contains(r#""paths":["services/api"],"paths_raw":["api"]"#), "{s}");
-        assert!(!s.contains("component:dup"), "a path already claimed rejects the later component: {s}");
+        let stored = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .find(|n| n.id == api_at)
+            .unwrap();
+        let payload = stored
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::CONSTRAINT)
+            .unwrap();
+        let CellPayload::Json(s) = &payload.payload else {
+            panic!("CONSTRAINT is JSON")
+        };
+        assert!(
+            s.contains(r#""paths":["services/api"],"paths_raw":["api"]"#),
+            "{s}"
+        );
+        assert!(
+            !s.contains("component:dup"),
+            "a path already claimed rejects the later component: {s}"
+        );
     }
 
     /// DB.1: an API rule's `via` facades come back resolved like its from /
@@ -1462,7 +1710,10 @@ via = [\"./services/api/public/\"]
             ("web/package.json", "{\"name\": \"web\"}\n"),
             ("web/src/ui.ts", "export function render() { return 1; }\n"),
             ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
-            ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+            (
+                "services/api/app.py",
+                "def charge(order_id):\n    return order_id\n",
+            ),
             (".glia/overlay.toml", overlay),
             (
                 ".glia/cells.jsonl",
@@ -1475,7 +1726,13 @@ via = [\"./services/api/public/\"]
         }
         let r = crate::generate_one(root.to_str().unwrap()).unwrap();
         let rules = declared_constraints(&r.merged);
-        let by_id = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
+        let by_id = |id: &str| {
+            rules
+                .iter()
+                .find(|(_, x)| x.id == id)
+                .map(|(_, x)| x.kind.clone())
+                .unwrap()
+        };
         assert_eq!(
             by_id("w"),
             ConstraintKind::ForbidEdge {
@@ -1494,10 +1751,26 @@ via = [\"./services/api/public/\"]
                 via: vec!["services/api/public".into()],
             }
         );
-        let web = rules.iter().find(|(_, x)| x.id == "no-api").map(|(id, _)| *id).unwrap();
-        let stored = r.merged.graphs.iter().flat_map(|g| &g.nodes).find(|n| n.id == web).unwrap();
-        let payload = stored.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT).unwrap();
-        let CellPayload::Json(s) = &payload.payload else { panic!("CONSTRAINT is JSON") };
+        let web = rules
+            .iter()
+            .find(|(_, x)| x.id == "no-api")
+            .map(|(id, _)| *id)
+            .unwrap();
+        let stored = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .find(|n| n.id == web)
+            .unwrap();
+        let payload = stored
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::CONSTRAINT)
+            .unwrap();
+        let CellPayload::Json(s) = &payload.payload else {
+            panic!("CONSTRAINT is JSON")
+        };
         assert!(
             s.contains(r#""transitive":true,"via":["services/api/public"],"via_raw":["./services/api/public/"]"#),
             "{s}"
@@ -1515,16 +1788,27 @@ via = [\"./services/api/public/\"]
             (&a, "pyproject.toml", "[project]\nname = \"shop\"\n"),
             (&a, "web/pyproject.toml", "[project]\nname = \"web\"\n"),
             (&a, "web/app.py", "def show():\n    return 1\n"),
-            (&a, "web/admin/pyproject.toml", "[project]\nname = \"admin\"\n"),
+            (
+                &a,
+                "web/admin/pyproject.toml",
+                "[project]\nname = \"admin\"\n",
+            ),
             (&a, "web/admin/panel.py", "def panel():\n    return 2\n"),
-            (&b, "web/admin/panel/pyproject.toml", "[project]\nname = \"panel\"\n"),
+            (
+                &b,
+                "web/admin/panel/pyproject.toml",
+                "[project]\nname = \"panel\"\n",
+            ),
             (&b, "web/admin/panel/x.py", "def x():\n    return 3\n"),
         ] {
             let p = root.join(path);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         }
-        let paths = [a.to_str().unwrap().to_string(), b.to_str().unwrap().to_string()];
+        let paths = [
+            a.to_str().unwrap().to_string(),
+            b.to_str().unwrap().to_string(),
+        ];
         let r = crate::generate_many(&paths).unwrap();
         let repo_with = |qname: &str| {
             r.merged
@@ -1535,11 +1819,18 @@ via = [\"./services/api/public/\"]
                 .unwrap()
         };
         let anchors_of = |repo| Anchors::build(&r.merged, repo);
-        let (repo_a, repo_b) = (repo_with("project:web/admin"), repo_with("project:web/admin/panel"));
+        let (repo_a, repo_b) = (
+            repo_with("project:web/admin"),
+            repo_with("project:web/admin/panel"),
+        );
         assert_ne!(repo_a, repo_b);
         let qname_in = |repo, id: Option<NodeId>| {
             let id = id?;
-            r.merged.graphs.iter().filter(|g| g.repo == repo).find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+            r.merged
+                .graphs
+                .iter()
+                .filter(|g| g.repo == repo)
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
         };
         let in_a = anchors_of(repo_a);
         // Every PROJECT of the build is in the vocabulary, b's included.
@@ -1551,7 +1842,11 @@ via = [\"./services/api/public/\"]
             ("webapp", "project:."),
             (".", "project:."),
         ] {
-            assert_eq!(qname_in(repo_a, in_a.enclosing_project(path)).as_deref(), Some(want), "{path}");
+            assert_eq!(
+                qname_in(repo_a, in_a.enclosing_project(path)).as_deref(),
+                Some(want),
+                "{path}"
+            );
         }
         let in_b = anchors_of(repo_b);
         assert_eq!(
@@ -1565,10 +1860,16 @@ via = [\"./services/api/public/\"]
 
     #[test]
     fn ancestors_walk_up_to_the_root() {
-        assert_eq!(ancestors("backend/internal/gone"), ["backend/internal", "backend", "."]);
+        assert_eq!(
+            ancestors("backend/internal/gone"),
+            ["backend/internal", "backend", "."]
+        );
         assert_eq!(ancestors("web"), ["."]);
         assert!(ancestors(".").is_empty());
-        assert_eq!(qname_ancestors("backend::internal::gone::Thing"), ["backend::internal::gone", "backend::internal", "backend"]);
+        assert_eq!(
+            qname_ancestors("backend::internal::gone::Thing"),
+            ["backend::internal::gone", "backend::internal", "backend"]
+        );
         assert!(qname_ancestors("Thing").is_empty());
     }
 
@@ -1595,6 +1896,9 @@ via = [\"./services/api/public/\"]
     fn rule_headers_counts_rule_sections() {
         let text = "\u{feff}[[component]]\nname = \"a\"\n  [[ constraint ]] # x\n[[constraint]]\n[[layer]]#top\n[[edge]]\n[constraint]\n[[constraints]]\n[[constraint]] x\n# [[layer]]\n";
         assert_eq!(rule_headers(text), [2, 1, 1]);
-        assert_eq!(rule_headers("version = 1\n[[edge]]\nfrom = \"a\"\n"), [0, 0, 0]);
+        assert_eq!(
+            rule_headers("version = 1\n[[edge]]\nfrom = \"a\"\n"),
+            [0, 0, 0]
+        );
     }
 }

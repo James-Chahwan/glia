@@ -28,7 +28,10 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn fixture_str(name: &str) -> String {
-    fixture(name).to_str().expect("fixture path is UTF-8").to_string()
+    fixture(name)
+        .to_str()
+        .expect("fixture path is UTF-8")
+        .to_string()
 }
 
 /// A scratch dir, created fresh and removed on drop (`cli` has no
@@ -71,7 +74,11 @@ fn glia(args: &[&str]) -> Output {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "glia {args:?} exited {:?}\nstderr:\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia {args:?} exited {:?}\nstderr:\n{stderr}",
+        out.status
+    );
     for line in stderr.lines() {
         if line.starts_with("[timing] ") {
             eprintln!("{line}");
@@ -106,8 +113,13 @@ fn ms_of(line: &str, key: &str) -> Option<f64> {
     let at = line.find(&format!(" {key}="))?;
     let value = &line[at + key.len() + 2..];
     let value = value.split(' ').next().unwrap_or_default();
-    let n = value.strip_suffix("ms").unwrap_or_else(|| panic!("{key} is <n>ms: {line}"));
-    Some(n.parse().unwrap_or_else(|_| panic!("{key} is a number: {line}")))
+    let n = value
+        .strip_suffix("ms")
+        .unwrap_or_else(|| panic!("{key} is <n>ms: {line}"));
+    Some(
+        n.parse()
+            .unwrap_or_else(|_| panic!("{key} is a number: {line}")),
+    )
 }
 
 fn ms(line: &str, key: &str) -> f64 {
@@ -119,7 +131,10 @@ const REPO_PHASES: [&str; 5] = ["walk", "parse", "const_scan", "grafts", "langua
 /// A `[timing] repo=` line names all five phases, and they fit in `total`.
 fn check_repo_line(line: &str, total: f64) {
     let sum: f64 = REPO_PHASES.iter().map(|k| ms(line, k)).sum();
-    assert!(sum <= total + 1e-9, "repo phases {sum} > build total {total}: {line}");
+    assert!(
+        sum <= total + 1e-9,
+        "repo phases {sum} > build total {total}: {line}"
+    );
 }
 
 /// A `[timing] build` line: its stage parts fit in its total, and it names
@@ -127,12 +142,22 @@ fn check_repo_line(line: &str, total: f64) {
 fn check_build_line(line: &str, external_cells: bool) -> f64 {
     let total = ms(line, "total");
     let ext = ms_of(line, "external_cells");
-    assert_eq!(ext.is_some(), external_cells, "external_cells= present: {line}");
+    assert_eq!(
+        ext.is_some(),
+        external_cells,
+        "external_cells= present: {line}"
+    );
     let parts = ms(line, "resolve") + ms(line, "post") + ms(line, "finalize") + ext.unwrap_or(0.0);
-    assert!(parts <= total + 1e-9, "stages {parts} > total {total}: {line}");
+    assert!(
+        parts <= total + 1e-9,
+        "stages {parts} > total {total}: {line}"
+    );
     let slowest = line.split(" slowest_pass=").nth(1).expect("slowest_pass=");
     let (name, time) = slowest.rsplit_once(':').expect("slowest_pass=<name>:<ms>");
-    assert!(!name.is_empty() && name != "none", "a code build runs passes: {line}");
+    assert!(
+        !name.is_empty() && name != "none",
+        "a code build runs passes: {line}"
+    );
     assert!(time.ends_with("ms"), "{line}");
     total
 }
@@ -142,9 +167,15 @@ fn analyze_times_the_repo_and_the_build() {
     let repo = fixture_str("py_smoke");
     let first = glia(&["analyze", &repo, "--format", "json"]);
     let repo_line = one_line(&first, "[timing] repo=");
-    assert!(repo_line.starts_with(&format!("[timing] repo={repo} walk=")), "{repo_line}");
+    assert!(
+        repo_line.starts_with(&format!("[timing] repo={repo} walk=")),
+        "{repo_line}"
+    );
     let build = one_line(&first, "[timing] build ");
-    assert!(build.starts_with("[timing] build repos=1 resolve="), "{build}");
+    assert!(
+        build.starts_with("[timing] build repos=1 resolve="),
+        "{build}"
+    );
     let total = check_build_line(&build, true);
     check_repo_line(&repo_line, total);
     // analyze writes no layout.
@@ -161,8 +192,14 @@ fn a_source_merge_times_each_repo_in_argument_order() {
     let out = glia(&["merge", &py, &go]);
     let repos = lines(&out, "[timing] repo=");
     assert_eq!(repos.len(), 2, "{repos:?}");
-    assert!(repos[0].starts_with(&format!("[timing] repo={py} walk=")), "{repos:?}");
-    assert!(repos[1].starts_with(&format!("[timing] repo={go} walk=")), "{repos:?}");
+    assert!(
+        repos[0].starts_with(&format!("[timing] repo={py} walk=")),
+        "{repos:?}"
+    );
+    assert!(
+        repos[1].starts_with(&format!("[timing] repo={go} walk=")),
+        "{repos:?}"
+    );
     let build = one_line(&out, "[timing] build ");
     assert!(build.starts_with("[timing] build repos=2 "), "{build}");
     let total = check_build_line(&build, true);
@@ -181,11 +218,20 @@ fn build_times_the_persist_and_a_layout_merge_times_its_passes() {
     let built = glia(&["build", a_str]);
     let persist = one_line(&built, "[timing] persist ");
     let dir = a.join(".glia/graph");
-    assert!(persist.starts_with("[timing] persist writer=cli "), "{persist}");
-    assert!(persist.ends_with(&format!(" dir={}", dir.display())), "{persist}");
+    assert!(
+        persist.starts_with("[timing] persist writer=cli "),
+        "{persist}"
+    );
+    assert!(
+        persist.ends_with(&format!(" dir={}", dir.display())),
+        "{persist}"
+    );
     let elapsed = persist.split(' ').nth(3).expect("<ms> field");
     assert!(elapsed.ends_with("ms"), "{persist}");
-    elapsed.trim_end_matches("ms").parse::<f64>().expect("<ms> is a number");
+    elapsed
+        .trim_end_matches("ms")
+        .parse::<f64>()
+        .expect("<ms> is a number");
     one_line(&built, "[timing] repo=");
     one_line(&built, "[timing] build repos=1 ");
     glia(&["build", b.to_str().expect("UTF-8 scratch path")]);
@@ -204,11 +250,20 @@ fn build_times_the_persist_and_a_layout_merge_times_its_passes() {
         "--layout",
         out_dir.to_str().expect("UTF-8"),
     ]);
-    assert!(lines(&merged, "[timing] repo=").is_empty(), "layouts are loaded, not built");
+    assert!(
+        lines(&merged, "[timing] repo=").is_empty(),
+        "layouts are loaded, not built"
+    );
     let build = one_line(&merged, "[timing] build ");
     assert!(build.starts_with("[timing] build repos=2 "), "{build}");
     check_build_line(&build, false);
     let persist = one_line(&merged, "[timing] persist ");
-    assert!(persist.starts_with("[timing] persist writer=merge "), "{persist}");
-    assert!(persist.ends_with(&format!(" dir={}", out_dir.display())), "{persist}");
+    assert!(
+        persist.starts_with("[timing] persist writer=merge "),
+        "{persist}"
+    );
+    assert!(
+        persist.ends_with(&format!(" dir={}", out_dir.display())),
+        "{persist}"
+    );
 }

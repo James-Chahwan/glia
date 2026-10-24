@@ -14,9 +14,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use glia_code_domain::edge_category;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::walk_gating::repo_identity;
-use glia_code_domain::edge_category;
 use glia_core::{Cell, CellPayload, NodeId};
 use glia_engine::generate_one;
 use glia_graph::MergedGraph;
@@ -30,7 +30,8 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("glia-repo-id-{tag}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("glia-repo-id-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create scratch parent");
         Scratch(dir)
     }
@@ -47,7 +48,9 @@ impl Drop for Scratch {
 }
 
 fn build(root: &Path) -> MergedGraph {
-    generate_one(&root.to_string_lossy()).unwrap_or_else(|e| panic!("build {}: {e}", root.display())).merged
+    generate_one(&root.to_string_lossy())
+        .unwrap_or_else(|e| panic!("build {}: {e}", root.display()))
+        .merged
 }
 
 /// `(qname, kind id)` of every node, for edge endpoints. Lookup only.
@@ -100,7 +103,15 @@ fn projection(m: &MergedGraph) -> (Vec<NodeRow>, Vec<EdgeRow>) {
         .map(|e| {
             let (fq, fk) = ends.get(&e.from).unwrap_or(&unknown).clone();
             let (tq, tk) = ends.get(&e.to).unwrap_or(&unknown).clone();
-            (fq, fk, e.category.0, tq, tk, format!("{:?}", e.confidence), e.cells.iter().map(payload_text).collect())
+            (
+                fq,
+                fk,
+                e.category.0,
+                tq,
+                tk,
+                format!("{:?}", e.confidence),
+                e.cells.iter().map(payload_text).collect(),
+            )
         })
         .collect();
     edges.sort();
@@ -116,7 +127,12 @@ fn documents(m: &MergedGraph) -> Vec<(String, String, String, String)> {
         .filter(|e| e.category == edge_category::DOCUMENTS)
         .map(|e| {
             let rule = Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default();
-            (qname(&e.from), qname(&e.to), format!("{:?}", e.confidence), rule)
+            (
+                qname(&e.from),
+                qname(&e.to),
+                format!("{:?}", e.confidence),
+                rule,
+            )
         })
         .collect();
     out.sort();
@@ -139,19 +155,42 @@ fn write(root: &Path, rel: &str, text: &str) {
 #[test]
 fn doclink_target_is_independent_of_the_repo_identity() {
     let scratch = Scratch::new("doclink");
-    let names = ["doclink-a", "doclink-b", "doclink-c", "doclink-d", "doclink-e", "doclink-f"];
+    let names = [
+        "doclink-a",
+        "doclink-b",
+        "doclink-c",
+        "doclink-d",
+        "doclink-e",
+        "doclink-f",
+    ];
     let mut keys = Vec::new();
     for name in names {
         let root = scratch.path(name);
-        write(&root, "README.md", "# Notes\n\n## Caching\n\nCall `refresh` after a write; `Feed.refresh` reloads the feed.\n");
-        write(&root, "billing/wallet.py", "class Wallet:\n    def refresh(self):\n        return 1\n");
-        write(&root, "web/feed.py", "class Feed:\n    def refresh(self):\n        return 2\n");
+        write(
+            &root,
+            "README.md",
+            "# Notes\n\n## Caching\n\nCall `refresh` after a write; `Feed.refresh` reloads the feed.\n",
+        );
+        write(
+            &root,
+            "billing/wallet.py",
+            "class Wallet:\n    def refresh(self):\n        return 1\n",
+        );
+        write(
+            &root,
+            "web/feed.py",
+            "class Feed:\n    def refresh(self):\n        return 2\n",
+        );
         keys.push(repo_identity(&root).key);
     }
     let mut distinct = keys.clone();
     distinct.sort();
     distinct.dedup();
-    assert_eq!(distinct.len(), names.len(), "each copy has its own RepoId: {keys:?}");
+    assert_eq!(
+        distinct.len(),
+        names.len(),
+        "each copy has its own RepoId: {keys:?}"
+    );
 
     let expected = vec![
         (
@@ -172,7 +211,12 @@ fn doclink_target_is_independent_of_the_repo_identity() {
         .map(|name| (*name, documents(&build(&scratch.path(name)))))
         .filter(|(_, got)| *got != expected)
         .collect();
-    assert!(wrong.is_empty(), "{} of {} names differ from {expected:?}: {wrong:#?}", wrong.len(), names.len());
+    assert!(
+        wrong.is_empty(),
+        "{} of {} names differ from {expected:?}: {wrong:#?}",
+        wrong.len(),
+        names.len()
+    );
 }
 
 /// Copy `src` to `dst`, dotfiles included (`.glia/` snapshots, sidecars and
@@ -180,7 +224,10 @@ fn doclink_target_is_independent_of_the_repo_identity() {
 /// wheel left in some fixtures) and a persisted `.glia/graph/` layout.
 fn copy_tree(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).expect("create copy dir");
-    let mut entries: Vec<_> = std::fs::read_dir(src).expect("read fixture dir").flatten().collect();
+    let mut entries: Vec<_> = std::fs::read_dir(src)
+        .expect("read fixture dir")
+        .flatten()
+        .collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let name = e.file_name();
@@ -217,13 +264,23 @@ fn graph_content_is_independent_of_the_repo_identity() {
         "external-cells-sidecar",
         "scip-python-dict-dispatch",
     ] {
-        let (one, two) = (scratch.path(&format!("{f}-one")), scratch.path(&format!("{f}-two")));
+        let (one, two) = (
+            scratch.path(&format!("{f}-one")),
+            scratch.path(&format!("{f}-two")),
+        );
         copy_tree(&fixtures.join(f), &one);
         copy_tree(&fixtures.join(f), &two);
-        assert_ne!(repo_identity(&one).key, repo_identity(&two).key, "{f}: the copies share a RepoId");
+        assert_ne!(
+            repo_identity(&one).key,
+            repo_identity(&two).key,
+            "{f}: the copies share a RepoId"
+        );
         let (a, b) = (build(&one), build(&two));
         let (pa, pb) = (projection(&a), projection(&b));
-        assert!(!pa.0.is_empty() && !pa.1.is_empty(), "{f}: an empty graph proves nothing");
+        assert!(
+            !pa.0.is_empty() && !pa.1.is_empty(),
+            "{f}: an empty graph proves nothing"
+        );
         assert_eq!(pa.0.len(), pb.0.len(), "{f}: node counts differ");
         for (x, y) in pa.0.iter().zip(&pb.0) {
             assert_eq!(x, y, "{f}: nodes differ");
@@ -232,6 +289,10 @@ fn graph_content_is_independent_of_the_repo_identity() {
         for (x, y) in pa.1.iter().zip(&pb.1) {
             assert_eq!(x, y, "{f}: edges differ");
         }
-        eprintln!("[repo-id-invariance] {f}: {} nodes, {} edges equal under two RepoIds", pa.0.len(), pa.1.len());
+        eprintln!(
+            "[repo-id-invariance] {f}: {} nodes, {} edges equal under two RepoIds",
+            pa.0.len(),
+            pa.1.len()
+        );
     }
 }

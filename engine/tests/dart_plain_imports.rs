@@ -17,7 +17,10 @@ use glia_core::NodeId;
 use glia_engine::generate_one;
 
 fn fixture() -> String {
-    format!("{}/../bench/substrate-gap/fixtures/dart-plain-import-calls", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/fixtures/dart-plain-import-calls",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Every `(from qname, to qname, category, evidence rule)` edge of the build.
@@ -54,17 +57,33 @@ fn calls(edges: &[(String, String, u32, String)]) -> Vec<(&str, &str, &str)> {
 fn a_plain_import_binds_the_librarys_public_names() {
     let edges = edges();
     assert!(
-        edges
-            .iter()
-            .any(|(f, t, c, _)| f == "lib::cart" && t == "lib::src::util" && *c == edge_category::IMPORTS.0),
+        edges.iter().any(|(f, t, c, _)| f == "lib::cart"
+            && t == "lib::src::util"
+            && *c == edge_category::IMPORTS.0),
         "IMPORTS lib::cart -> lib::src::util (DF.4a's own-package URI); edges = {edges:?}"
     );
     let calls = calls(&edges);
     for (from, to, rule) in [
-        ("lib::cart::Cart::total", "lib::src::util::formatPrice", "import_binding"),
-        ("lib::cart::Cart::total", "lib::src::util::Money::zero", "attribute"),
-        ("lib::cart::Cart::total", "lib::src::fmt::shout", "import_binding"),
-        ("lib::cart::main", "lib::src::util::formatPrice", "import_binding"),
+        (
+            "lib::cart::Cart::total",
+            "lib::src::util::formatPrice",
+            "import_binding",
+        ),
+        (
+            "lib::cart::Cart::total",
+            "lib::src::util::Money::zero",
+            "attribute",
+        ),
+        (
+            "lib::cart::Cart::total",
+            "lib::src::fmt::shout",
+            "import_binding",
+        ),
+        (
+            "lib::cart::main",
+            "lib::src::util::formatPrice",
+            "import_binding",
+        ),
         ("lib::cart::main", "lib::src::util::Money", "import_binding"),
     ] {
         assert!(
@@ -83,10 +102,15 @@ fn an_ambiguous_or_private_name_binds_nothing() {
         "`shout` is declared by both of clash.dart's plain imports: no CALLS from run; CALLS = {calls:?}"
     );
     assert!(
-        !calls.iter().any(|(_, t, _)| *t == "lib::src::util::_hidden"),
+        !calls
+            .iter()
+            .any(|(_, t, _)| *t == "lib::src::util::_hidden"),
         "the private _hidden is never bound; CALLS = {calls:?}"
     );
     // cart.dart's calls are the five above and nothing else.
-    let from_cart: Vec<_> = calls.iter().filter(|(f, _, _)| f.starts_with("lib::cart::")).collect();
+    let from_cart: Vec<_> = calls
+        .iter()
+        .filter(|(f, _, _)| f.starts_with("lib::cart::"))
+        .collect();
     assert_eq!(from_cart.len(), 5, "{from_cart:?}");
 }

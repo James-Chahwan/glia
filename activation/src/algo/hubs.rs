@@ -101,7 +101,9 @@ pub fn degree_table(adj: &Adjacency, count: &CategorySet) -> DegreeTable {
     for ix in 0..n as u32 {
         let i = ix as usize;
         for inc in adj.outgoing(ix) {
-            let Some(s) = slot(inc.category) else { continue };
+            let Some(s) = slot(inc.category) else {
+                continue;
+            };
             if slot_out[s] == 0 && slot_in[s] == 0 {
                 touched.push(s);
             }
@@ -109,7 +111,9 @@ pub fn degree_table(adj: &Adjacency, count: &CategorySet) -> DegreeTable {
             out[i] += 1;
         }
         for inc in adj.incoming(ix) {
-            let Some(s) = slot(inc.category) else { continue };
+            let Some(s) = slot(inc.category) else {
+                continue;
+            };
             if slot_out[s] == 0 && slot_in[s] == 0 {
                 touched.push(s);
             }
@@ -171,20 +175,33 @@ pub fn hits(adj: &Adjacency, iterations: u32) -> Hits {
         normalise(&mut authority);
         for _ in 0..iterations {
             for v in 0..n as u32 {
-                authority[v as usize] = adj.incoming(v).iter().fold(0.0, |s, inc| s + hub[inc.other as usize]);
+                authority[v as usize] = adj
+                    .incoming(v)
+                    .iter()
+                    .fold(0.0, |s, inc| s + hub[inc.other as usize]);
             }
             normalise(&mut authority);
             for u in 0..n as u32 {
-                hub[u as usize] = adj.outgoing(u).iter().fold(0.0, |s, inc| s + authority[inc.other as usize]);
+                hub[u as usize] = adj
+                    .outgoing(u)
+                    .iter()
+                    .fold(0.0, |s, inc| s + authority[inc.other as usize]);
             }
             normalise(&mut hub);
         }
     }
 
     if super::algo_debug() {
-        eprintln!("[algo] hubs hits nodes={n} edges={} rounds={iterations}", adj.kept_edges());
+        eprintln!(
+            "[algo] hubs hits nodes={n} edges={} rounds={iterations}",
+            adj.kept_edges()
+        );
     }
-    Hits { hub, authority, iterations }
+    Hits {
+        hub,
+        authority,
+        iterations,
+    }
 }
 
 /// Scale `xs` to unit L2 norm, summing squares in index order; all zeros stay
@@ -222,7 +239,10 @@ mod tests {
     fn star() -> ToyGraph {
         let mut edges: Vec<Edge> = (1..=9).map(|t| toy_edge(0, t, CALLS.0)).collect();
         edges.push(toy_edge(5, 0, USES.0));
-        ToyGraph { nodes: (0..=9).map(NodeId).collect(), edges }
+        ToyGraph {
+            nodes: (0..=9).map(NodeId).collect(),
+            edges,
+        }
     }
 
     #[test]
@@ -261,7 +281,11 @@ mod tests {
         // 1 -> 1 twice (parallel self-loops); 1 -> 7, and 7 is no node.
         let g = ToyGraph {
             nodes: vec![NodeId(1)],
-            edges: vec![toy_edge(1, 1, CALLS.0), toy_edge(1, 1, CALLS.0), toy_edge(1, 7, USES.0)],
+            edges: vec![
+                toy_edge(1, 1, CALLS.0),
+                toy_edge(1, 1, CALLS.0),
+                toy_edge(1, 7, USES.0),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let t = degree_table(&adj, &CategorySet::all());
@@ -270,19 +294,30 @@ mod tests {
         assert_eq!(rows(&t, one), vec![(CALLS.0, 2, 2), (USES.0, 1, 0)]);
         assert_eq!(rows(&t, seven), vec![(USES.0, 0, 1)]);
         let h = hits(&adj, 20);
-        assert!(h.authority[seven as usize] > 0.0, "a dangling endpoint is an authority like any node");
+        assert!(
+            h.authority[seven as usize] > 0.0,
+            "a dangling endpoint is an authority like any node"
+        );
     }
 
     #[test]
     fn percentiles() {
-        let t = DegreeTable { out: (1..=100).collect(), inn: (1..=100).rev().collect(), by_cat: Vec::new() };
+        let t = DegreeTable {
+            out: (1..=100).collect(),
+            inn: (1..=100).rev().collect(),
+            by_cat: Vec::new(),
+        };
         assert_eq!(t.percentile_out(990), 99);
         assert_eq!(t.percentile_in(990), 99);
         assert_eq!(t.percentile_out(500), 50);
         assert_eq!(t.percentile_out(0), 1);
         assert_eq!(t.percentile_out(1000), 100);
         assert_eq!(t.percentile_out(5000), 100, "clamped to the maximum");
-        let small = DegreeTable { out: vec![3, 1, 2], inn: vec![0, 0, 7], by_cat: Vec::new() };
+        let small = DegreeTable {
+            out: vec![3, 1, 2],
+            inn: vec![0, 0, 7],
+            by_cat: Vec::new(),
+        };
         assert_eq!(small.percentile_out(500), 2);
         assert_eq!(small.percentile_in(500), 0, "zero-degree ids count");
         assert_eq!(small.percentile_in(990), 7);
@@ -299,7 +334,10 @@ mod tests {
             }
         }
         edges.push(toy_edge(3, 10, CALLS.0));
-        let g = ToyGraph { nodes: [1, 2, 3, 10, 11, 12].map(NodeId).to_vec(), edges };
+        let g = ToyGraph {
+            nodes: [1, 2, 3, 10, 11, 12].map(NodeId).to_vec(),
+            edges,
+        };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let h = hits(&adj, 20);
         assert_eq!(h.iterations, 20);
@@ -330,7 +368,12 @@ mod tests {
         let adj = Adjacency::build(&star(), &CategorySet::all());
         let h = hits(&adj, 0);
         let start = 1.0 / (adj.len() as f64).sqrt();
-        assert!(h.hub.iter().chain(&h.authority).all(|&s| (s - start).abs() < 1e-15));
+        assert!(
+            h.hub
+                .iter()
+                .chain(&h.authority)
+                .all(|&s| (s - start).abs() < 1e-15)
+        );
         assert_eq!(h.iterations, 0);
     }
 
@@ -341,15 +384,30 @@ mod tests {
             let g = random_graph(&mut rng);
             let first = hits(&Adjacency::build(&g, &CategorySet::all()), 20);
             let second = hits(&Adjacency::build(&g, &CategorySet::all()), 20);
-            let bits = |h: &Hits| -> Vec<u64> { h.hub.iter().chain(&h.authority).map(|s| s.to_bits()).collect() };
+            let bits = |h: &Hits| -> Vec<u64> {
+                h.hub
+                    .iter()
+                    .chain(&h.authority)
+                    .map(|s| s.to_bits())
+                    .collect()
+            };
             assert_eq!(bits(&first), bits(&second));
-            assert!(first.hub.iter().chain(&first.authority).all(|s| s.is_finite() && *s >= 0.0));
+            assert!(
+                first
+                    .hub
+                    .iter()
+                    .chain(&first.authority)
+                    .all(|s| s.is_finite() && *s >= 0.0)
+            );
         }
     }
 
     #[test]
     fn empty_graph_zeros() {
-        let g = ToyGraph { nodes: vec![NodeId(1), NodeId(2), NodeId(3)], edges: Vec::new() };
+        let g = ToyGraph {
+            nodes: vec![NodeId(1), NodeId(2), NodeId(3)],
+            edges: Vec::new(),
+        };
         let adj = Adjacency::build(&g, &CategorySet::all());
         for rounds in [0, 1, 20] {
             let h = hits(&adj, rounds);
@@ -362,9 +420,25 @@ mod tests {
         assert_eq!((t.percentile_in(990), t.percentile_out(990)), (0, 0));
         assert_eq!(t.of(0).count(), 0);
 
-        let nothing = Adjacency::build(&ToyGraph { nodes: Vec::new(), edges: Vec::new() }, &CategorySet::all());
-        assert_eq!(hits(&nothing, 20), Hits { hub: Vec::new(), authority: Vec::new(), iterations: 20 });
-        assert_eq!(degree_table(&nothing, &CategorySet::all()), DegreeTable::default());
+        let nothing = Adjacency::build(
+            &ToyGraph {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
+            &CategorySet::all(),
+        );
+        assert_eq!(
+            hits(&nothing, 20),
+            Hits {
+                hub: Vec::new(),
+                authority: Vec::new(),
+                iterations: 20
+            }
+        );
+        assert_eq!(
+            degree_table(&nothing, &CategorySet::all()),
+            DegreeTable::default()
+        );
         // Edges the index dropped (category 2 not kept) score nothing either.
         let dropped = Adjacency::build(&star(), &CategorySet::of(&[EdgeCategoryId(3)]));
         assert!(hits(&dropped, 5).hub.iter().all(|&s| s == 0.0));
@@ -406,7 +480,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             self.0 >> 33
         }
 
@@ -435,7 +512,13 @@ mod tests {
                 let prior = &edges[rng.below(edges.len() as u64) as usize];
                 (e.from, e.to) = (prior.from, prior.to);
             } else {
-                let mut pick = || if rng.chance(5) { scatter(1_000 + rng.below(2)) } else { scatter(rng.below(n)) };
+                let mut pick = || {
+                    if rng.chance(5) {
+                        scatter(1_000 + rng.below(2))
+                    } else {
+                        scatter(rng.below(n))
+                    }
+                };
                 e.from = pick();
                 e.to = pick();
                 if rng.chance(6) {
@@ -452,8 +535,10 @@ mod tests {
         if rng.chance(40) {
             return CategorySet::all();
         }
-        let some: Vec<EdgeCategoryId> =
-            (1..=CATEGORIES as u32).map(EdgeCategoryId).filter(|_| rng.chance(60)).collect();
+        let some: Vec<EdgeCategoryId> = (1..=CATEGORIES as u32)
+            .map(EdgeCategoryId)
+            .filter(|_| rng.chance(60))
+            .collect();
         CategorySet::of(&some)
     }
 }

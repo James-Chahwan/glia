@@ -84,7 +84,10 @@ fn answers_report_1_based_lines() {
     let d = repo.path();
 
     // blast-radius --json: the caller `app::main` sits on line 8.
-    let v = json(&glia(&repo.0, &["blast-radius", d, "app::helper", "--json"]));
+    let v = json(&glia(
+        &repo.0,
+        &["blast-radius", d, "app::helper", "--json"],
+    ));
     let main_row = v["results"]
         .as_array()
         .expect("a `results` array (LD.5: {seeds, unresolved, results, absence})")
@@ -93,13 +96,22 @@ fn answers_report_1_based_lines() {
         .unwrap_or_else(|| panic!("app::main is in helper's blast radius: {v}"));
     assert_eq!(main_row["file"], "app.py", "{v}");
     assert_eq!(main_row["line"], 8, "1-based `def main` line: {v}");
-    assert_eq!(v["seeds"][0]["line"], 4, "the seed is located too, 1-based: {v}");
+    assert_eq!(
+        v["seeds"][0]["line"], 4,
+        "the seed is located too, 1-based: {v}"
+    );
 
     // blast-radius table: the printed location is the same 1-based line.
     let out = glia(&repo.0, &["blast-radius", d, "app::helper"]);
     let table = String::from_utf8_lossy(&out.stdout);
-    assert!(table.contains("app.py:8"), "table must print app.py:8:\n{table}");
-    assert!(!table.contains("app.py:7"), "no 0-based row may leak:\n{table}");
+    assert!(
+        table.contains("app.py:8"),
+        "table must print app.py:8:\n{table}"
+    );
+    assert!(
+        !table.contains("app.py:7"),
+        "no 0-based row may leak:\n{table}"
+    );
 
     // trace --json: the hop into `app::helper` lands on line 4.
     let v = json(&glia(&repo.0, &["trace", d, "app::main", "--json"]));
@@ -114,8 +126,14 @@ fn answers_report_1_based_lines() {
 
     // resolve --kind diff: every node of the changed file, 1-based; the
     // MODULE row is line 1, never 0.
-    let v = json(&glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--json"]));
-    assert!(v["absence"].is_null(), "a found answer carries no absence: {v}");
+    let v = json(&glia(
+        &repo.0,
+        &["resolve", d, "app.py", "--kind", "diff", "--json"],
+    ));
+    assert!(
+        v["absence"].is_null(),
+        "a found answer carries no absence: {v}"
+    );
     let mut got: Vec<(String, i64)> = v["results"]
         .as_array()
         .expect("a `results` array")
@@ -165,7 +183,11 @@ fn empty_answers_carry_their_absence() {
     assert_eq!(v["results"], serde_json::json!([]), "{v}");
     assert_eq!(v["absence"]["tier"], "FACT", "{v}");
     assert_eq!(v["absence"]["reason"], "unknown_symbol", "{v}");
-    assert_eq!(v["absence"]["mechanisms"], serde_json::json!(["DOCUMENTS"]), "{v}");
+    assert_eq!(
+        v["absence"]["mechanisms"],
+        serde_json::json!(["DOCUMENTS"]),
+        "{v}"
+    );
     assert_eq!(v["absence"]["unparsed_files"], 0, "{v}");
     assert_eq!(
         absence_markers(&out),
@@ -197,10 +219,18 @@ fn empty_answers_carry_their_absence() {
     assert!(text.contains("> did you mean: app::helper"), "{text}");
 
     // resolve and find: the same envelope, their own reasons.
-    let v = json(&glia(&repo.0, &["resolve", d, "zzz.py", "--kind", "diff", "--json"]));
+    let v = json(&glia(
+        &repo.0,
+        &["resolve", d, "zzz.py", "--kind", "diff", "--json"],
+    ));
     assert_eq!(v["results"], serde_json::json!([]), "{v}");
     assert_eq!(v["absence"]["reason"], "no_signal_match", "{v}");
-    let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--scope", "nowhere"]);
+    let out = glia(
+        &repo.0,
+        &[
+            "resolve", d, "app.py", "--kind", "diff", "--scope", "nowhere",
+        ],
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("_(nothing resolved)_\n> FACT: 3 results outside scope `nowhere`"),
@@ -221,21 +251,29 @@ fn resolve_and_trace_rows_carry_live() {
     let repo = TempRepo::new("live");
     let d = repo.path();
 
-    let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--json"]);
+    let out = glia(
+        &repo.0,
+        &["resolve", d, "app.py", "--kind", "diff", "--json"],
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let marker = stderr
         .lines()
         .find(|l| l.starts_with("[live] annotate surface=resolve"))
         .unwrap_or_else(|| panic!("the resolve marker fires:\n{stderr}"));
     eprintln!("{marker}");
-    assert_eq!(marker, "[live] annotate surface=resolve rows=3 live=2 entry_kinds=11");
+    assert_eq!(
+        marker,
+        "[live] annotate surface=resolve rows=3 live=2 entry_kinds=11"
+    );
     let v = json(&out);
     let mut got: Vec<(String, bool)> = v["results"]
         .as_array()
         .expect("a `results` array")
         .iter()
         .map(|r| {
-            let live = r["live"].as_bool().unwrap_or_else(|| panic!("row carries a bool `live`: {r}"));
+            let live = r["live"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("row carries a bool `live`: {r}"));
             (r["qname"].as_str().unwrap_or_default().to_string(), live)
         })
         .collect();
@@ -254,19 +292,40 @@ fn resolve_and_trace_rows_carry_live() {
     let hops = v["hops"].as_array().expect("a `hops` array");
     assert!(!hops.is_empty(), "{v}");
     for h in hops {
-        assert!(h["to_live"].is_boolean(), "hop carries a bool `to_live`: {h}");
+        assert!(
+            h["to_live"].is_boolean(),
+            "hop carries a bool `to_live`: {h}"
+        );
     }
-    let helper = hops.iter().find(|h| h["to_qname"] == "app::helper").expect("main -> helper hop");
+    let helper = hops
+        .iter()
+        .find(|h| h["to_qname"] == "app::helper")
+        .expect("main -> helper hop");
     assert_eq!(helper["to_live"], true, "{v}");
 
     let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff"]);
     let table = String::from_utf8_lossy(&out.stdout);
-    assert!(table.contains("| score | live | kind | qname | location |"), "{table}");
-    assert!(table.contains("| ● | FUNCTION | `app::main` | app.py:8 |"), "{table}");
-    assert!(table.contains("| ⊘ | MODULE | `app` | app.py:1 |"), "{table}");
+    assert!(
+        table.contains("| score | live | kind | qname | location |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| ● | FUNCTION | `app::main` | app.py:8 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| ⊘ | MODULE | `app` | app.py:1 |"),
+        "{table}"
+    );
 
     let out = glia(&repo.0, &["trace", d, "app::main"]);
     let table = String::from_utf8_lossy(&out.stdout);
-    assert!(table.contains("| depth | mechanism | xsvc | from | → to | live | location |"), "{table}");
-    assert!(table.contains("| `app::main` | `app::helper` (FUNCTION) | ● | app.py:4 |"), "{table}");
+    assert!(
+        table.contains("| depth | mechanism | xsvc | from | → to | live | location |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| `app::main` | `app::helper` (FUNCTION) | ● | app.py:4 |"),
+        "{table}"
+    );
 }

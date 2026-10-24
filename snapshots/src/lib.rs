@@ -43,8 +43,8 @@ pub use git_history::{HistoryOptions, HistorySummary};
 pub use junit::{JunitCounts, parse_junit};
 pub use lcov::parse_lcov;
 pub use scip::{
-    PositionEncoding, ScipDocumentIn, ScipImportOptions, ScipImportSummary, ScipImporter, ScipIndexInfo,
-    ScipOccurrenceIn, ScipSymbolIn, next_is_call, unit_offset_to_byte,
+    PositionEncoding, ScipDocumentIn, ScipImportOptions, ScipImportSummary, ScipImporter,
+    ScipIndexInfo, ScipOccurrenceIn, ScipSymbolIn, next_is_call, unit_offset_to_byte,
 };
 
 /// Largest report file read: CI XML and logs can be huge, and a report past
@@ -102,7 +102,10 @@ fn sync_marker(label: &str, s: &HistorySummary, opts: &HistoryOptions) -> String
     let head: String = s.head.chars().take(12).collect();
     let mut window = format!("max:{}", opts.max_commits);
     if let Some(since) = &opts.since {
-        let since: String = since.chars().map(|c| if c.is_whitespace() { '_' } else { c }).collect();
+        let since: String = since
+            .chars()
+            .map(|c| if c.is_whitespace() { '_' } else { c })
+            .collect();
         window.push_str(&format!(",since:{since}"));
     }
     let messages = if opts.messages {
@@ -233,7 +236,9 @@ pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<Tests
         }
     };
     for path in &opts.junit {
-        let Some((label, bytes)) = read(path, &mut summary) else { continue };
+        let Some((label, bytes)) = read(path, &mut summary) else {
+            continue;
+        };
         match parse_junit(&bytes, &label) {
             Ok((rows, counts)) => {
                 cases.extend(rows);
@@ -246,28 +251,47 @@ pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<Tests
         }
     }
     for path in &opts.logs {
-        let Some((label, bytes)) = read(path, &mut summary) else { continue };
+        let Some((label, bytes)) = read(path, &mut summary) else {
+            continue;
+        };
         cases.extend(parse_ci_log(&String::from_utf8_lossy(&bytes), &label));
         summary.log_files += 1;
         summary.reports.push(label);
     }
     for path in &opts.lcov {
-        let Some((label, bytes)) = read(path, &mut summary) else { continue };
+        let Some((label, bytes)) = read(path, &mut summary) else {
+            continue;
+        };
         coverage.extend(parse_lcov(&String::from_utf8_lossy(&bytes), repo_root));
         summary.lcov_files += 1;
         summary.reports.push(label);
     }
     if summary.reports.is_empty() {
-        let reasons: Vec<String> =
-            summary.report_errors.iter().map(|e| format!("{}: {}", e.report, e.reason)).collect();
+        let reasons: Vec<String> = summary
+            .report_errors
+            .iter()
+            .map(|e| format!("{}: {}", e.report, e.reason))
+            .collect();
         return Err(format!("no report could be read ({})", reasons.join("; ")));
     }
 
     for case in &mut cases {
         case.sanitize();
     }
-    let meta = TestsMeta::new(opts.run.clone(), summary.reports.clone(), skipped_passed.0, skipped_passed.1);
-    let written = append_tests_run(repo_root, meta, &cases, &lcov::merge(coverage), opts.window, opts.reset)?;
+    let meta = TestsMeta::new(
+        opts.run.clone(),
+        summary.reports.clone(),
+        skipped_passed.0,
+        skipped_passed.1,
+    );
+    let written = append_tests_run(
+        repo_root,
+        meta,
+        &cases,
+        &lcov::merge(coverage),
+        opts.window,
+        opts.reset,
+    )?;
     ensure_glia_gitignore(repo_root)?;
 
     summary.runs = written.runs.len();
@@ -281,26 +305,40 @@ pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<Tests
     summary.stored = cases.len();
     summary.redacted = cases.iter().filter(|c| c.redacted).count();
     summary.covered_files = written.lcov_files;
-    eprintln!("{}", ingest_marker(&repo_label(repo_root), &summary, opts.window, opts.surface));
+    eprintln!(
+        "{}",
+        ingest_marker(&repo_label(repo_root), &summary, opts.window, opts.surface)
+    );
     Ok(summary)
 }
 
 /// A report's label: repo-relative (`/`-separated) when it is under the repo,
 /// else the path as given.
 fn report_label(root: &Path, path: &Path) -> String {
-    let under = std::fs::canonicalize(root).ok().zip(std::fs::canonicalize(path).ok()).and_then(|(root, path)| {
-        let rel = path.strip_prefix(&root).ok()?;
-        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        Some(parts.join("/"))
-    });
+    let under = std::fs::canonicalize(root)
+        .ok()
+        .zip(std::fs::canonicalize(path).ok())
+        .and_then(|(root, path)| {
+            let rel = path.strip_prefix(&root).ok()?;
+            let parts: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            Some(parts.join("/"))
+        });
     under.unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// A report's bytes, unless it is over [`MAX_REPORT_BYTES`] or unreadable.
 fn read_report(path: &Path) -> Result<Vec<u8>, String> {
-    let len = std::fs::metadata(path).map_err(|e| format!("read: {e}"))?.len();
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("read: {e}"))?
+        .len();
     if len > MAX_REPORT_BYTES as u64 {
-        return Err(format!("{len} bytes is over the {} MiB report cap", MAX_REPORT_BYTES >> 20));
+        return Err(format!(
+            "{len} bytes is over the {} MiB report cap",
+            MAX_REPORT_BYTES >> 20
+        ));
     }
     std::fs::read(path).map_err(|e| format!("read: {e}"))
 }
@@ -318,7 +356,16 @@ fn ingest_marker(label: &str, s: &TestsSummary, window: usize, surface: &str) ->
     format!(
         "[tests] ingest repo={label} junit_files={} log_files={} lcov_files={} cases={} failed={} errors={} \
          skipped={} passed={} stored={} runs={} window={window} seq={} surface={surface}",
-        s.junit_files, s.log_files, s.lcov_files, s.cases, s.failed, s.errors, s.skipped, s.passed, s.stored, s.runs,
+        s.junit_files,
+        s.log_files,
+        s.lcov_files,
+        s.cases,
+        s.failed,
+        s.errors,
+        s.skipped,
+        s.passed,
+        s.stored,
+        s.runs,
         s.seq
     )
 }
@@ -328,7 +375,11 @@ fn ensure_glia_gitignore(root: &Path) -> Result<(), String> {
     let dir = root.join(CONTROL_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join(".gitignore");
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
         Ok(mut file) => file
             .write_all(GLIA_GITIGNORE.as_bytes())
             .map_err(|e| format!("write {}: {e}", path.display())),
@@ -361,12 +412,21 @@ mod tests {
             "[history] sync repo=g1 head=3bd47ffe34bc commits=5 files=3 renames=1 binary=0 \
              blame_files=0 runs=0 window=max:2000 messages=5 redacted=1 branch_labels=2 trailers_dropped=4 surface=lib"
         );
-        let opts = HistoryOptions { since: Some("2 weeks ago".into()), surface: "cli", ..HistoryOptions::default() };
+        let opts = HistoryOptions {
+            since: Some("2 weeks ago".into()),
+            surface: "cli",
+            ..HistoryOptions::default()
+        };
         assert!(sync_marker("g1", &summary, &opts).ends_with(
             "window=max:2000,since:2_weeks_ago messages=5 redacted=1 branch_labels=2 trailers_dropped=4 surface=cli"
         ));
-        let off = HistoryOptions { messages: false, ..HistoryOptions::default() };
-        assert!(sync_marker("g1", &summary, &off).ends_with("window=max:2000 messages=off surface=lib"));
+        let off = HistoryOptions {
+            messages: false,
+            ..HistoryOptions::default()
+        };
+        assert!(
+            sync_marker("g1", &summary, &off).ends_with("window=max:2000 messages=off surface=lib")
+        );
     }
 
     #[test]
@@ -387,7 +447,14 @@ mod tests {
              skipped=0 passed=2 stored=1 runs=1 window=10 seq=0 surface=lib"
         );
         // The packet's fired_on line: the third run of a window of 10.
-        let third = TestsSummary { lcov_files: 0, cases: 2, passed: 1, runs: 3, seq: 2, ..summary };
+        let third = TestsSummary {
+            lcov_files: 0,
+            cases: 2,
+            passed: 1,
+            runs: 3,
+            seq: 2,
+            ..summary
+        };
         assert!(
             ingest_marker("g1", &third, 10, "cli")
                 .ends_with(" cases=2 failed=1 errors=0 skipped=0 passed=1 stored=1 runs=3 window=10 seq=2 surface=cli")
@@ -396,10 +463,19 @@ mod tests {
 
     #[test]
     fn gitignore_lists_only_regenerable_inputs() {
-        let lines: Vec<&str> = GLIA_GITIGNORE.lines().filter(|l| !l.starts_with('#')).collect();
+        let lines: Vec<&str> = GLIA_GITIGNORE
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect();
         assert_eq!(
             lines,
-            ["vectors.jsonl", "docs-snapshot/", "history-snapshot/", "test-snapshot/", "scip-snapshot/"]
+            [
+                "vectors.jsonl",
+                "docs-snapshot/",
+                "history-snapshot/",
+                "test-snapshot/",
+                "scip-snapshot/"
+            ]
         );
     }
 }

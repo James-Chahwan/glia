@@ -41,12 +41,7 @@ pub struct IacNodes {
 /// Extract from a Dockerfile. Emits one `infra:image:<basename>` node where
 /// `<basename>` is the parent directory basename (the conventional image name
 /// before any tag is applied at build time). Cell records the FROM base.
-pub fn extract_dockerfile(
-    source: &str,
-    path: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> IacNodes {
+pub fn extract_dockerfile(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> IacNodes {
     let mut out = IacNodes {
         nodes: Vec::new(),
         edges: Vec::new(),
@@ -90,11 +85,7 @@ pub fn extract_dockerfile(
 /// Extract from a YAML manifest. Detects k8s `kind:` declarations and
 /// docker-compose `services:` entries. Emits one INFRA_RESOURCE per object,
 /// linking containers' `image:` refs to their host workload.
-pub fn extract_yaml(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> IacNodes {
+pub fn extract_yaml(source: &str, module_id: NodeId, repo: RepoId) -> IacNodes {
     let mut out = IacNodes {
         nodes: Vec::new(),
         edges: Vec::new(),
@@ -109,13 +100,7 @@ pub fn extract_yaml(
 // Helpers
 // ----------------------------------------------------------------------------
 
-fn emit_resource(
-    out: &mut IacNodes,
-    kind: &str,
-    name: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) {
+fn emit_resource(out: &mut IacNodes, kind: &str, name: &str, module_id: NodeId, repo: RepoId) {
     let qname = infra::qname(kind, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
     // Dedupe within this extraction call.
@@ -128,7 +113,8 @@ fn emit_resource(
         confidence: Confidence::Medium,
         cells: vec![],
     });
-    out.nav.record(id, name, &qname, node_kind::INFRA_RESOURCE, Some(module_id));
+    out.nav
+        .record(id, name, &qname, node_kind::INFRA_RESOURCE, Some(module_id));
     // Module → resource edge for "what does this file declare" queries.
     out.edges.push(Edge {
         from: module_id,
@@ -203,19 +189,18 @@ const K8S_KINDS: &[&str] = &[
     "ReplicaSet",
 ];
 
-fn extract_k8s_documents(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-    out: &mut IacNodes,
-) {
+fn extract_k8s_documents(source: &str, module_id: NodeId, repo: RepoId, out: &mut IacNodes) {
     for doc in source.split("\n---") {
         let doc = doc.trim_start_matches('\n');
         if doc.is_empty() {
             continue;
         }
-        let Some(kind) = read_k8s_kind(doc) else { continue };
-        let Some(name) = read_k8s_name(doc) else { continue };
+        let Some(kind) = read_k8s_kind(doc) else {
+            continue;
+        };
+        let Some(name) = read_k8s_name(doc) else {
+            continue;
+        };
         let kind_lower = kind.to_ascii_lowercase();
         emit_resource(out, &kind_lower, &name, module_id, repo);
 
@@ -325,12 +310,7 @@ fn image_refs_in_doc(doc: &str) -> Vec<String> {
 // `infra:image:<basename>` and REFERENCES edge.
 // ----------------------------------------------------------------------------
 
-fn extract_compose_services(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-    out: &mut IacNodes,
-) {
+fn extract_compose_services(source: &str, module_id: NodeId, repo: RepoId, out: &mut IacNodes) {
     // Find `services:` block at top level (indent 0).
     let mut in_services = false;
     let mut services_indent: usize = 0;
@@ -464,7 +444,11 @@ mod tests {
         // FROM base also captured.
         assert!(q.contains(&"infra:image:python".to_string()));
         // REFERENCES edge from api → python.
-        assert!(out.edges.iter().any(|e| e.category == edge_category::INFRA_REFERENCES));
+        assert!(
+            out.edges
+                .iter()
+                .any(|e| e.category == edge_category::INFRA_REFERENCES)
+        );
     }
 
     #[test]
@@ -511,9 +495,7 @@ spec:
             "infra:image:api",
         );
         assert!(out.edges.iter().any(|e| {
-            e.from == dep_id
-                && e.to == img_id
-                && e.category == edge_category::INFRA_REFERENCES
+            e.from == dep_id && e.to == img_id && e.category == edge_category::INFRA_REFERENCES
         }));
     }
 
@@ -605,9 +587,7 @@ services:
             "infra:image:api",
         );
         assert!(out.edges.iter().any(|e| {
-            e.from == svc_id
-                && e.to == img_id
-                && e.category == edge_category::INFRA_REFERENCES
+            e.from == svc_id && e.to == img_id && e.category == edge_category::INFRA_REFERENCES
         }));
     }
 

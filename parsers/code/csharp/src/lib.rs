@@ -49,10 +49,24 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_children(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
+    visit_children(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        module_id,
+        repo,
+        &mut acc,
+    );
 
     // LA.40a fired_on:
     // `GLIA_CSHARP_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[csharp-using\]'`
@@ -217,8 +231,12 @@ fn visit_children(
             "namespace_declaration" => {
                 visit_namespace(child, src, file_rel, parent_id, module_id, repo, acc);
             }
-            "class_declaration" | "struct_declaration" | "interface_declaration"
-            | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
+            "class_declaration"
+            | "struct_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "record_struct_declaration" => {
                 // A C# 11 `file` type is file-local by the language: two files
                 // of one namespace may each declare `file class Scratch`, so it
                 // takes the file-module scope that tells them apart - at the
@@ -408,7 +426,9 @@ fn visit_type_decl(
     };
     let name = text_of(name_node, src);
     let kind = match node.kind() {
-        "class_declaration" | "record_declaration" | "record_struct_declaration" => node_kind::CLASS,
+        "class_declaration" | "record_declaration" | "record_struct_declaration" => {
+            node_kind::CLASS
+        }
         "struct_declaration" => node_kind::STRUCT,
         "interface_declaration" => node_kind::INTERFACE,
         "enum_declaration" => node_kind::ENUM,
@@ -543,8 +563,12 @@ fn visit_type_decl(
             "property_declaration" if kind != node_kind::INTERFACE => {
                 collect_field_types(child, src, id, acc);
             }
-            "class_declaration" | "struct_declaration" | "interface_declaration"
-            | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
+            "class_declaration"
+            | "struct_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "record_struct_declaration" => {
                 visit_type_decl(child, src, file_rel, &qname, id, module_id, repo, acc);
             }
             _ => {}
@@ -767,12 +791,37 @@ fn field_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
 fn is_primitive_type(name: &str) -> bool {
     matches!(
         name,
-        "int" | "uint" | "long" | "ulong" | "short" | "ushort"
-            | "byte" | "sbyte" | "float" | "double" | "decimal"
-            | "bool" | "char" | "string" | "object" | "void"
-            | "Int32" | "Int64" | "UInt32" | "UInt64" | "Boolean"
-            | "String" | "Char" | "Byte" | "Double" | "Single"
-            | "Decimal" | "Object" | "DateTime" | "TimeSpan" | "Guid"
+        "int"
+            | "uint"
+            | "long"
+            | "ulong"
+            | "short"
+            | "ushort"
+            | "byte"
+            | "sbyte"
+            | "float"
+            | "double"
+            | "decimal"
+            | "bool"
+            | "char"
+            | "string"
+            | "object"
+            | "void"
+            | "Int32"
+            | "Int64"
+            | "UInt32"
+            | "UInt64"
+            | "Boolean"
+            | "String"
+            | "Char"
+            | "Byte"
+            | "Double"
+            | "Single"
+            | "Decimal"
+            | "Object"
+            | "DateTime"
+            | "TimeSpan"
+            | "Guid"
     )
 }
 
@@ -859,8 +908,7 @@ fn is_interface_name(raw: &str) -> bool {
     let base = raw.split('<').next().unwrap_or(raw).trim();
     let simple = base.rsplit('.').next().unwrap_or(base).trim();
     let mut chars = simple.chars();
-    matches!(chars.next(), Some('I'))
-        && matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+    matches!(chars.next(), Some('I')) && matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
 }
 
 /// G12.5: record an unresolved heritage reference from a class to a supertype.
@@ -1582,7 +1630,13 @@ fn string_literal_text(node: TsNode, src: &[u8]) -> Option<String> {
 /// name. `Map` on its own is deliberately absent: `app.Map("/x", branch)` takes
 /// a whole sub-pipeline rather than a verb, so it names no HTTP method.
 const MINIMAL_API_MAPS: [&str; 7] = [
-    "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapHead", "MapOptions",
+    "MapGet",
+    "MapPost",
+    "MapPut",
+    "MapDelete",
+    "MapPatch",
+    "MapHead",
+    "MapOptions",
 ];
 
 /// Walk a subtree and emit one ROUTE per `app.MapGet("/path", handler)`.
@@ -1932,7 +1986,8 @@ fn request_message_endpoint(
     let Some(verb) = nth_arg_expr(new_expr, 0).and_then(|a| http_method_verb(a, src)) else {
         return false;
     };
-    let Some((raw, strong)) = nth_arg_expr(new_expr, 1).and_then(|a| client_path_arg(a, src)) else {
+    let Some((raw, strong)) = nth_arg_expr(new_expr, 1).and_then(|a| client_path_arg(a, src))
+    else {
         return false;
     };
     emit_client_endpoint(verb, &raw, strong, new_expr, file_rel, from, repo, acc)
@@ -2139,7 +2194,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     while let Some(n) = stack.pop() {
         if n.kind() == "invocation_expression" {
             let qualifier = classify_invocation(n, src);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -2286,9 +2345,30 @@ public enum Color { Red, Green, Blue }
 public interface IDrawable { void Draw(); }
 "#;
         let fp = parse_file(source, "Models.cs", "MyApp", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2404,7 +2484,10 @@ namespace Shop.Controllers
             import_rows(&fp),
             vec![
                 ("Controllers::UserController", "Shop::Models".to_string()),
-                ("Controllers::UserController", "Shop::Services::Billing".to_string()),
+                (
+                    "Controllers::UserController",
+                    "Shop::Services::Billing".to_string()
+                ),
             ]
         );
     }
@@ -2463,7 +2546,13 @@ public class UsersController {
     public IActionResult Create() { return Ok(); }
 }
 "#;
-        let fp = parse_file(source, "Controllers/UsersController.cs", "MyApp::Controllers", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Controllers/UsersController.cs",
+            "MyApp::Controllers",
+            repo(),
+        )
+        .unwrap();
         let routes: Vec<_> = fp
             .nav
             .kind_by_id
@@ -2647,13 +2736,23 @@ namespace Shop.Controllers
     }
 }
 "#;
-        let fp = parse_file(source, "Controllers/UsersController.cs", "Shop::Controllers", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Controllers/UsersController.cs",
+            "Shop::Controllers",
+            repo(),
+        )
+        .unwrap();
         let injects: Vec<&UnresolvedRef> = fp
             .refs
             .iter()
             .filter(|r| r.category == edge_category::INJECTS)
             .collect();
-        assert_eq!(injects.len(), 1, "exactly one INJECTS ref (primitive skipped)");
+        assert_eq!(
+            injects.len(),
+            1,
+            "exactly one INJECTS ref (primitive skipped)"
+        );
         assert_eq!(
             injects[0].qualifier,
             CallQualifier::Bare("IUserService".to_string())
@@ -2726,14 +2825,20 @@ namespace Shop.Services
             fields(class("Shop::Services::UserService::Inner")),
             vec![pair("_cache", "Cache")]
         );
-        assert_eq!(fields(class("Shop::Services::Order")), vec![pair("Buyer", "Customer")]);
+        assert_eq!(
+            fields(class("Shop::Services::Order")),
+            vec![pair("Buyer", "Customer")]
+        );
         let iface = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
             node_kind::INTERFACE,
             "Shop::Services::IUserService",
         );
-        assert!(!fp.nav.field_types.contains_key(&iface), "interface properties are not fields");
+        assert!(
+            !fp.nav.field_types.contains_key(&iface),
+            "interface properties are not fields"
+        );
         assert_eq!(fp.nav.field_types.len(), 3);
     }
 
@@ -3024,7 +3129,10 @@ public interface IUserApi {
         let get = endpoint_id("GET", "/api/users/{id}");
         let post = endpoint_id("POST", "/api/users");
         assert!(fp.nodes.iter().any(|n| n.id == get), "GET endpoint missing");
-        assert!(fp.nodes.iter().any(|n| n.id == post), "POST endpoint missing");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == post),
+            "POST endpoint missing"
+        );
 
         let method_id = NodeId::from_parts(
             GRAPH_TYPE,
@@ -3033,9 +3141,9 @@ public interface IUserApi {
             "Shop::Clients::IUserApi::GetUserAsync",
         );
         assert!(
-            fp.edges.iter().any(|e| e.from == method_id
-                && e.to == get
-                && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.from == method_id && e.to == get && e.category == edge_category::CALLS),
             "expected CALLS from the interface method into its ENDPOINT"
         );
         // A client contract is not a server: no ROUTE, so nothing can be
@@ -3064,7 +3172,13 @@ public class NotARefitClient {
     public void Ghost() { }
 }
 "#;
-        let fp = parse_file(source, "Clients/NotARefitClient.cs", "Shop::Clients", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Clients/NotARefitClient.cs",
+            "Shop::Clients",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             fp.nav
                 .kind_by_id
@@ -3097,11 +3211,15 @@ public class OrderClient {
 "#;
         let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
         assert!(
-            fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/api/orders")),
+            fp.nodes
+                .iter()
+                .any(|n| n.id == endpoint_id("GET", "/api/orders")),
             "GET /api/orders ENDPOINT missing"
         );
         assert!(
-            fp.nodes.iter().any(|n| n.id == endpoint_id("POST", "/api/orders")),
+            fp.nodes
+                .iter()
+                .any(|n| n.id == endpoint_id("POST", "/api/orders")),
             "POST /api/orders ENDPOINT missing"
         );
         let method_id = NodeId::from_parts(
@@ -3202,7 +3320,9 @@ public class OrderClient {
 "#;
         let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
         assert!(
-            fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/api/secure")),
+            fp.nodes
+                .iter()
+                .any(|n| n.id == endpoint_id("GET", "/api/secure")),
             "HttpRequestMessage(HttpMethod.Get, …) should emit a GET ENDPOINT"
         );
     }
@@ -3390,7 +3510,9 @@ public class OrderClient {
         let control = id_of(node_kind::CLASS, "Shop::Core::Helpers");
         assert_eq!(h.nav.parent_of.get(&control), Some(&package));
         assert_eq!(
-            o.nav.parent_of.get(&id_of(node_kind::STRUCT, "Svc::Other::Pair")),
+            o.nav
+                .parent_of
+                .get(&id_of(node_kind::STRUCT, "Svc::Other::Pair")),
             Some(&package)
         );
 
@@ -3447,10 +3569,14 @@ app.Run();
         let fp = parse_file(source, "server/Program.cs", "server::Program", repo()).unwrap();
         let routes = route_names(&fp);
         for want in ["GET /health", "POST /orders", "GET /orders/{id}"] {
-            assert!(routes.contains(&want.to_string()), "missing {want} in {routes:?}");
+            assert!(
+                routes.contains(&want.to_string()),
+                "missing {want} in {routes:?}"
+            );
         }
         // A lambda handler names no node, so HANDLED_BY targets the MODULE.
-        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server::Program");
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server::Program");
         let handled: Vec<_> = fp
             .edges
             .iter()
@@ -3500,7 +3626,10 @@ app.MapGroup("/api").MapGroup("/v2").MapPost("/orders", () => "ok");
         let fp = parse_file(source, "server/Program.cs", "server::Program", repo()).unwrap();
         let routes = route_names(&fp);
         assert!(routes.contains(&"GET /api/users".to_string()), "{routes:?}");
-        assert!(routes.contains(&"POST /api/v2/orders".to_string()), "{routes:?}");
+        assert!(
+            routes.contains(&"POST /api/v2/orders".to_string()),
+            "{routes:?}"
+        );
     }
 
     #[test]
@@ -3538,7 +3667,12 @@ public class Startup {
         let routes = route_names(&fp);
         assert!(routes.contains(&"GET /legacy".to_string()), "{routes:?}");
         // Anchored on the enclosing METHOD, not the module.
-        let configure = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "App::Startup::Configure");
+        let configure = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "App::Startup::Configure",
+        );
         assert!(
             fp.edges
                 .iter()

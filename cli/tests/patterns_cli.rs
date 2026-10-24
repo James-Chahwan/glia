@@ -34,12 +34,48 @@ const DELTA_MARKER: &str = "[patterns] surface=cli mode=delta";
 /// `(name, gin registration, service fn or None for a direct call,
 /// repository fn, SQL)` per handler; the last one skips the service layer.
 const HANDLERS: [(&str, &str, Option<&str>, &str, &str); 6] = [
-    ("GetUserHandler", "GET(\"/users/:id\"", Some("GetUser"), "FindUser", "SELECT name FROM users WHERE id = $1"),
-    ("CreateUserHandler", "POST(\"/users\"", Some("CreateUser"), "InsertUser", "INSERT INTO users (name) VALUES ($1)"),
-    ("GetOrderHandler", "GET(\"/orders/:id\"", Some("GetOrder"), "FindOrder", "SELECT item FROM orders WHERE id = $1"),
-    ("ListProductsHandler", "GET(\"/products\"", Some("ListProducts"), "AllProducts", "SELECT name FROM products WHERE id > $1"),
-    ("CreatePaymentHandler", "POST(\"/payments\"", Some("CreatePayment"), "InsertPayment", "INSERT INTO payments (amount) VALUES ($1)"),
-    ("RawOrderHandler", "POST(\"/orders\"", None, "SaveOrder", "INSERT INTO orders (item) VALUES ($1)"),
+    (
+        "GetUserHandler",
+        "GET(\"/users/:id\"",
+        Some("GetUser"),
+        "FindUser",
+        "SELECT name FROM users WHERE id = $1",
+    ),
+    (
+        "CreateUserHandler",
+        "POST(\"/users\"",
+        Some("CreateUser"),
+        "InsertUser",
+        "INSERT INTO users (name) VALUES ($1)",
+    ),
+    (
+        "GetOrderHandler",
+        "GET(\"/orders/:id\"",
+        Some("GetOrder"),
+        "FindOrder",
+        "SELECT item FROM orders WHERE id = $1",
+    ),
+    (
+        "ListProductsHandler",
+        "GET(\"/products\"",
+        Some("ListProducts"),
+        "AllProducts",
+        "SELECT name FROM products WHERE id > $1",
+    ),
+    (
+        "CreatePaymentHandler",
+        "POST(\"/payments\"",
+        Some("CreatePayment"),
+        "InsertPayment",
+        "INSERT INTO payments (amount) VALUES ($1)",
+    ),
+    (
+        "RawOrderHandler",
+        "POST(\"/orders\"",
+        None,
+        "SaveOrder",
+        "INSERT INTO orders (item) VALUES ($1)",
+    ),
 ];
 
 /// `handlers/handlers.go` for the first `n` handlers.
@@ -90,7 +126,12 @@ impl Scratch {
         let home = root.join("home");
         std::fs::create_dir_all(&home).expect("scratch HOME dir");
         let gitconfig = root.join("gitconfig");
-        let s = Scratch { root, top, home, gitconfig };
+        let s = Scratch {
+            root,
+            top,
+            home,
+            gitconfig,
+        };
         std::fs::create_dir_all(&s.top).expect("scratch repo dir");
         std::fs::write(&s.gitconfig, "").expect("empty gitconfig");
         s.write_shop(n);
@@ -99,17 +140,24 @@ impl Scratch {
 
     fn write_shop(&self, n: usize) {
         let hs = &HANDLERS[..n];
-        let mut service = String::from("package service\n\nimport \"example.com/shop/repository\"\n");
-        let mut repository = String::from("package repository\n\nimport \"database/sql\"\n\nvar db *sql.DB\n");
+        let mut service =
+            String::from("package service\n\nimport \"example.com/shop/repository\"\n");
+        let mut repository =
+            String::from("package repository\n\nimport \"database/sql\"\n\nvar db *sql.DB\n");
         for (_, _, svc, repo, sql) in hs {
             if let Some(f) = svc {
-                service.push_str(&format!("\nfunc {f}(id string) string {{\n\treturn repository.{repo}(id)\n}}\n"));
+                service.push_str(&format!(
+                    "\nfunc {f}(id string) string {{\n\treturn repository.{repo}(id)\n}}\n"
+                ));
             }
             repository.push_str(&format!(
                 "\nfunc {repo}(id string) string {{\n\tdb.Exec(\"{sql}\", id)\n\treturn id\n}}\n"
             ));
         }
-        self.write("go.mod", "module example.com/shop\n\ngo 1.21\n\nrequire github.com/gin-gonic/gin v1.9.1\n");
+        self.write(
+            "go.mod",
+            "module example.com/shop\n\ngo 1.21\n\nrequire github.com/gin-gonic/gin v1.9.1\n",
+        );
         self.write("handlers/handlers.go", &handlers_go(n));
         self.write("service/service.go", &service);
         self.write("repository/repository.go", &repository);
@@ -140,15 +188,29 @@ impl Scratch {
 
     fn git(&self, args: &[&str]) {
         let mut cmd = Command::new("git");
-        cmd.args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
-            .arg("-C")
-            .arg(&self.top)
-            .args(args);
+        cmd.args([
+            "-c",
+            "user.name=glia",
+            "-c",
+            "user.email=glia@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .arg("-C")
+        .arg(&self.top)
+        .args(args);
         let out = self.hermetic(cmd).output().unwrap_or_else(|e| {
             panic!("LE.7b patterns --base needs a `git` binary on PATH; running it failed: {e}")
         });
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// `glia patterns <repo> <args>`.
@@ -168,7 +230,8 @@ fn stderr(o: &Output) -> String {
 }
 
 fn json(o: &Output) -> Value {
-    serde_json::from_str(&stdout(o)).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", stdout(o)))
+    serde_json::from_str(&stdout(o))
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", stdout(o)))
 }
 
 fn divergent(v: &Value) -> Vec<&str> {
@@ -182,12 +245,19 @@ fn divergent(v: &Value) -> Vec<&str> {
 
 /// 1-based line of the first line of `text` containing `needle`.
 fn line_of(text: &str, needle: &str) -> usize {
-    text.lines().position(|l| l.contains(needle)).expect("needle in fixture") + 1
+    text.lines()
+        .position(|l| l.contains(needle))
+        .expect("needle in fixture")
+        + 1
 }
 
 /// No line of `err` carries the pre-promotion word (CC.12b).
 fn no_experimental_word(err: &str) {
-    assert!(!err.lines().any(|l| l.starts_with("[patterns] experimental")), "{err}");
+    assert!(
+        !err.lines()
+            .any(|l| l.starts_with("[patterns] experimental")),
+        "{err}"
+    );
 }
 
 /// CC.12b: `glia patterns <dir>` runs without a flag (exit 0, the report,
@@ -201,22 +271,41 @@ fn runs_without_flag_and_refuses_the_old_one() {
     let plain = s.patterns(&["--json"]);
     let err = stderr(&plain);
     assert_eq!(plain.status.code(), Some(0), "{err}");
-    assert_eq!(json(&plain)["judged"].as_u64(), Some(1), "{}", stdout(&plain));
+    assert_eq!(
+        json(&plain)["judged"].as_u64(),
+        Some(1),
+        "{}",
+        stdout(&plain)
+    );
     assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")),
+        "{err}"
+    );
     assert!(!err.contains("[patterns] note:"), "{err}");
     no_experimental_word(&err);
 
     let flagged = s.patterns(&["--experimental", "--json"]);
     let err = stderr(&flagged);
     assert_eq!(flagged.status.code(), Some(2), "{err}");
-    assert!(err.contains("unexpected argument '--experimental'"), "{err}");
-    assert!(!err.lines().any(|l| l.starts_with("[patterns] ")), "no build ran: {err}");
+    assert!(
+        err.contains("unexpected argument '--experimental'"),
+        "{err}"
+    );
+    assert!(
+        !err.lines().any(|l| l.starts_with("[patterns] ")),
+        "no build ran: {err}"
+    );
     assert!(stdout(&flagged).is_empty(), "{}", stdout(&flagged));
 
     let table = s.patterns(&[]);
     assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
-    assert!(stdout(&table).starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())), "{}", stdout(&table));
+    assert!(
+        stdout(&table).starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())),
+        "{}",
+        stdout(&table)
+    );
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia"));
     let out = cmd
@@ -226,7 +315,11 @@ fn runs_without_flag_and_refuses_the_old_one() {
         .expect("run glia");
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(stderr(&out).contains("error: "), "{}", stderr(&out));
-    assert!(!stderr(&out).contains("pass --experimental"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("pass --experimental"),
+        "{}",
+        stderr(&out)
+    );
     assert!(stdout(&out).is_empty(), "{}", stdout(&out));
 }
 
@@ -243,21 +336,48 @@ fn json_has_no_experimental_key() {
     assert!(v.get("experimental").is_none(), "{v}");
     no_experimental_word(&err);
     assert_eq!(v["delta_mode"], false);
-    assert_eq!((v["handlers"].as_u64(), v["judged"].as_u64()), (Some(6), Some(1)), "{v}");
+    assert_eq!(
+        (v["handlers"].as_u64(), v["judged"].as_u64()),
+        (Some(6), Some(1)),
+        "{v}"
+    );
     assert_eq!(divergent(&v), [DIRECT]);
     let d = &v["divergences"][0];
-    assert_eq!((d["verdict"].as_str(), d["tier"].as_str()), (Some("DIVERGENCE"), Some("heuristic")));
+    assert_eq!(
+        (d["verdict"].as_str(), d["tier"].as_str()),
+        (Some("DIVERGENCE"), Some("heuristic"))
+    );
     assert_eq!(d["signature"], DIRECT_SIGNATURE);
     assert_eq!(d["convention"], CONVENTION);
     assert_eq!(d["file"], "handlers/handlers.go");
     let line = line_of(&handlers_go(6), "func RawOrderHandler(");
     assert_eq!(d["line"].as_u64(), Some(line as u64));
     let p = &v["populations"][0];
-    assert_eq!((p["status"].as_str(), p["verdict"].as_str()), (Some("judged"), Some("5/6")), "{p}");
+    assert_eq!(
+        (p["status"].as_str(), p["verdict"].as_str()),
+        (Some("judged"), Some("5/6")),
+        "{p}"
+    );
     assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=") && l.ends_with(" blind=0 group_by=service")), "{err}");
-    assert_eq!((p["package"].clone(), p["sighted"].as_u64(), v["blind"].as_u64()), (Value::Null, Some(6), Some(0)), "{v}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")),
+        "{err}"
+    );
+    assert!(
+        err.lines().any(|l| l.starts_with("[patterns] populations=")
+            && l.ends_with(" blind=0 group_by=service")),
+        "{err}"
+    );
+    assert_eq!(
+        (
+            p["package"].clone(),
+            p["sighted"].as_u64(),
+            v["blind"].as_u64()
+        ),
+        (Value::Null, Some(6), Some(0)),
+        "{v}"
+    );
 }
 
 /// Table mode: the counts, then the population's heading with its verdict and
@@ -269,28 +389,53 @@ fn table_names_the_population_and_its_status() {
     let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())), "{text}");
+    assert!(
+        text.starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())),
+        "{text}"
+    );
     assert!(text.contains("- handlers: 6 in 1 populations; judged: 1; below min support (5): 0; divergences: 1; blind: 0\n"), "{text}");
     assert!(text.contains("- excluded handlers: none\n"), "{text}");
-    assert!(text.contains(&format!("## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
-    assert!(!text.contains("- blind (the graph follows no chain)"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains("- blind (the graph follows no chain)"),
+        "{text}"
+    );
     let line = line_of(&handlers_go(6), "func RawOrderHandler(");
-    let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
+    let row = format!(
+        "| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |"
+    );
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
     let small = s.patterns(&["--min-support", "7"]);
     assert_eq!(small.status.code(), Some(0), "{}", stderr(&small));
     let text = stdout(&small);
-    assert!(text.contains("_(population below min support: `handlers` has 6 handlers, fewer than 7)_"), "{text}");
+    assert!(
+        text.contains("_(population below min support: `handlers` has 6 handlers, fewer than 7)_"),
+        "{text}"
+    );
     assert!(!text.contains("| handler |"), "{text}");
 
     let split = s.patterns(&["--min-share", "90"]);
     assert_eq!(split.status.code(), Some(0), "{}", stderr(&split));
-    assert!(stdout(&split).contains("## handlers - no convention: no signature holds 90% of 6 sighted handlers"), "{}", stdout(&split));
+    assert!(
+        stdout(&split)
+            .contains("## handlers - no convention: no signature holds 90% of 6 sighted handlers"),
+        "{}",
+        stdout(&split)
+    );
 
     let bad = s.patterns(&["--min-share", "101"]);
     assert_eq!(bad.status.code(), Some(2));
-    assert!(stderr(&bad).contains("--min-share is a percentage (0-100), got 101"), "{}", stderr(&bad));
+    assert!(
+        stderr(&bad).contains("--min-share is a percentage (0-100), got 101"),
+        "{}",
+        stderr(&bad)
+    );
 }
 
 /// `--base` builds the one repo against its rev, so `--with` beside it is a
@@ -301,7 +446,11 @@ fn base_with_with_is_rejected() {
     let other = Scratch::shop("with-other", 5);
     let out = s.patterns(&["--base", "HEAD", "--with", other.path()]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(stderr(&out).contains("--with needs whole-graph mode"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--with needs whole-graph mode"),
+        "{}",
+        stderr(&out)
+    );
     assert!(stdout(&out).is_empty());
     assert!(!stderr(&out).contains(DELTA_MARKER));
 }
@@ -327,17 +476,36 @@ fn base_lists_only_touched_divergences() {
     assert_eq!(divergent(&v), [DIRECT]);
     assert_eq!(v["populations"][0]["verdict"], "5/6");
     assert!(err.lines().any(|l| l == DELTA_MARKER), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] delta touched_nodes=")), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[patterns] delta touched_nodes=")),
+        "{err}"
+    );
 
     s.git(&["add", "-A"]);
     s.git(&["commit", "-q", "-m", "six handlers"]);
-    s.write("util/util.go", "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n");
+    s.write(
+        "util/util.go",
+        "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n",
+    );
     let out = s.patterns(&["--base", "HEAD"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.starts_with(&format!("# glia patterns `{}` (delta vs `HEAD`)\n", s.path())), "{text}");
-    assert!(text.contains("divergences touched by the change: 0; blind touched by the change: 0\n"), "{text}");
-    assert!(text.contains("_(no divergence touched by the change; 1 in the whole graph)_"), "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "# glia patterns `{}` (delta vs `HEAD`)\n",
+            s.path()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("divergences touched by the change: 0; blind touched by the change: 0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("_(no divergence touched by the change; 1 in the whole graph)_"),
+        "{text}"
+    );
 
     let bad = s.patterns(&["--base", "no-such-rev"]);
     assert_eq!(bad.status.code(), Some(2));
@@ -348,13 +516,24 @@ fn base_lists_only_touched_divergences() {
 #[test]
 fn no_handlers_says_nothing_to_judge() {
     let s = Scratch::shop("empty", 6);
-    for rel in ["handlers/handlers.go", "service/service.go", "repository/repository.go"] {
+    for rel in [
+        "handlers/handlers.go",
+        "service/service.go",
+        "repository/repository.go",
+    ] {
         std::fs::remove_file(Path::new(s.path()).join(rel)).expect("remove");
     }
-    s.write("util/util.go", "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n");
+    s.write(
+        "util/util.go",
+        "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n",
+    );
     let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(stdout(&out).contains("_(no route handler placed in any population: nothing to judge)_"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("_(no route handler placed in any population: nothing to judge)_"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 /// The blind health check's qname.
@@ -364,7 +543,9 @@ const HEALTH: &str = "handlers::handlers::HealthHandler";
 /// no chain from (`handler>(no effect)`).
 fn handlers_with_health() -> String {
     let src = handlers_go(6);
-    let (head, tail) = src.split_once("func Register(r *gin.Engine) {\n").expect("Register");
+    let (head, tail) = src
+        .split_once("func Register(r *gin.Engine) {\n")
+        .expect("Register");
     let (body, rest) = tail.split_once("}\n").expect("Register's end");
     format!(
         "{head}func Register(r *gin.Engine) {{\n{body}\tr.GET(\"/health\", HealthHandler)\n}}\n{rest}\nfunc HealthHandler(c *gin.Context) {{\n\tc.JSON(http.StatusOK, \"ok\")\n}}\n"
@@ -385,29 +566,59 @@ fn blind_handler_is_listed_not_divergent() {
     assert_eq!(out.status.code(), Some(0), "{err}");
     let v = json(&out);
     let p = &v["populations"][0];
-    assert_eq!((p["size"].as_u64(), p["sighted"].as_u64(), p["verdict"].as_str()), (Some(7), Some(6), Some("5/6")), "{p}");
+    assert_eq!(
+        (
+            p["size"].as_u64(),
+            p["sighted"].as_u64(),
+            p["verdict"].as_str()
+        ),
+        (Some(7), Some(6), Some("5/6")),
+        "{p}"
+    );
     assert_eq!(divergent(&v), [DIRECT]);
     assert_eq!(v["blind"].as_u64(), Some(1), "{v}");
     let b = &p["blind"][0];
     assert_eq!(b["handler"], HEALTH);
-    assert_eq!((b["route_method"].as_str(), b["route_path"].as_str()), (Some("GET"), Some("/health")));
+    assert_eq!(
+        (b["route_method"].as_str(), b["route_path"].as_str()),
+        (Some("GET"), Some("/health"))
+    );
     let line = line_of(&src, "func HealthHandler(");
-    assert_eq!((b["file"].as_str(), b["line"].as_u64()), (Some("handlers/handlers.go"), Some(line as u64)));
-    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=7 divergences=1") && l.ends_with(" blind=1 group_by=service")), "{err}");
+    assert_eq!(
+        (b["file"].as_str(), b["line"].as_u64()),
+        (Some("handlers/handlers.go"), Some(line as u64))
+    );
+    assert!(
+        err.lines().any(|l| l
+            .starts_with("[patterns] populations=1 judged=1 handlers=7 divergences=1")
+            && l.ends_with(" blind=1 group_by=service")),
+        "{err}"
+    );
 
     let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("; divergences: 1; blind: 1\n"), "{text}");
-    assert!(text.contains(&format!("## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
-    assert!(text.contains("- blind (the graph follows no chain): 1\n"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains("- blind (the graph follows no chain): 1\n"),
+        "{text}"
+    );
     let row = format!("| `{HEALTH}` | GET /health | handlers/handlers.go:{line} |");
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
     // Above the six sighted: the population reads blind, nothing diverges.
     let out = s.patterns(&["--min-support", "7"]);
     let text = stdout(&out);
-    assert!(text.contains("## handlers - blind: 6 of 7 handlers reach a sink, fewer than 7\n"), "{text}");
+    assert!(
+        text.contains("## handlers - blind: 6 of 7 handlers reach a sink, fewer than 7\n"),
+        "{text}"
+    );
     assert!(!text.contains("| handler | route | signature |"), "{text}");
 }
 
@@ -427,16 +638,27 @@ fn group_by_package_keys_populations_by_directory() {
     for p in pops {
         assert!(p["package"].is_string(), "no package on {p}");
     }
-    assert_eq!((pops[0]["service"].as_str(), pops[0]["package"].as_str()), (Some("handlers"), Some("handlers")), "{v}");
+    assert_eq!(
+        (pops[0]["service"].as_str(), pops[0]["package"].as_str()),
+        (Some("handlers"), Some("handlers")),
+        "{v}"
+    );
     assert_eq!(divergent(&v), [DIRECT]);
     assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 ") && l.ends_with(" group_by=package")), "{err}");
 
     let out = s.patterns(&["--group-by", "package"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.contains(&format!("## handlers / handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
+    assert!(
+        text.contains(&format!(
+            "## handlers / handlers - 5/6 sighted handlers follow `{CONVENTION}`\n"
+        )),
+        "{text}"
+    );
     let line = line_of(&handlers_go(6), "func RawOrderHandler(");
-    let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
+    let row = format!(
+        "| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |"
+    );
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
     let bad = s.patterns(&["--group-by", "directory"]);

@@ -40,8 +40,13 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     visit_top(
         root,
@@ -147,13 +152,46 @@ fn visit_top(
         match child.kind() {
             "import_directive" => collect_import(child, src, module_qname, acc),
             "contract_declaration" => {
-                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::CLASS, local_interfaces, acc);
+                visit_contract(
+                    child,
+                    src,
+                    file_rel,
+                    module_qname,
+                    module_id,
+                    module_id,
+                    repo,
+                    node_kind::CLASS,
+                    local_interfaces,
+                    acc,
+                );
             }
             "interface_declaration" => {
-                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::INTERFACE, local_interfaces, acc);
+                visit_contract(
+                    child,
+                    src,
+                    file_rel,
+                    module_qname,
+                    module_id,
+                    module_id,
+                    repo,
+                    node_kind::INTERFACE,
+                    local_interfaces,
+                    acc,
+                );
             }
             "library_declaration" => {
-                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::PACKAGE, local_interfaces, acc);
+                visit_contract(
+                    child,
+                    src,
+                    file_rel,
+                    module_qname,
+                    module_id,
+                    module_id,
+                    repo,
+                    node_kind::PACKAGE,
+                    local_interfaces,
+                    acc,
+                );
             }
             "enum_declaration" => {
                 visit_enum(child, src, file_rel, module_qname, module_id, repo, acc);
@@ -225,7 +263,9 @@ fn visit_contract(
                     visit_struct_decl(child, src, file_rel, &qname, id, repo, acc);
                 }
                 "state_variable_declaration" => {
-                    visit_state_variable(child, src, file_rel, &qname, id, repo, owner, &mut abi, acc);
+                    visit_state_variable(
+                        child, src, file_rel, &qname, id, repo, owner, &mut abi, acc,
+                    );
                 }
                 _ => {}
             }
@@ -380,7 +420,9 @@ fn getter_arity(ty: TsNode) -> u32 {
             continue;
         }
         let mut cursor = cur.walk();
-        let is_array = cur.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "[");
+        let is_array = cur
+            .children(&mut cursor)
+            .any(|c| !c.is_named() && c.kind() == "[");
         if is_array && let Some(inner) = named_child_of_kind(cur, "type_name") {
             arity += 1;
             cur = inner;
@@ -425,20 +467,26 @@ fn visit_function(
     let cells = entity_cells(&node, src, file_rel, &mut acc.natspec);
     if callable(node, src, owner.kind) {
         let mut cursor = node.walk();
-        let arity = node.named_children(&mut cursor).filter(|c| c.kind() == "parameter").count();
-        record_member(abi, name, u32::try_from(arity).unwrap_or(u32::MAX), || FirstDecl {
-            mutability: named_child_of_kind(node, "state_mutability")
-                .map(|m| text_of(m, src).trim().to_string())
-                .filter(|m| !m.is_empty())
-                .unwrap_or_else(|| evm::NONPAYABLE.to_string()),
-            getter: false,
-            abstract_: owner.kind == node_kind::INTERFACE || node.child_by_field_name("body").is_none(),
-            handler: Some(id),
-            position: cells
-                .iter()
-                .find(|c| c.kind == cell_type::POSITION)
-                .cloned()
-                .unwrap_or_else(|| position_cell(&node, file_rel)),
+        let arity = node
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() == "parameter")
+            .count();
+        record_member(abi, name, u32::try_from(arity).unwrap_or(u32::MAX), || {
+            FirstDecl {
+                mutability: named_child_of_kind(node, "state_mutability")
+                    .map(|m| text_of(m, src).trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| evm::NONPAYABLE.to_string()),
+                getter: false,
+                abstract_: owner.kind == node_kind::INTERFACE
+                    || node.child_by_field_name("body").is_none(),
+                handler: Some(id),
+                position: cells
+                    .iter()
+                    .find(|c| c.kind == cell_type::POSITION)
+                    .cloned()
+                    .unwrap_or_else(|| position_cell(&node, file_rel)),
+            }
         });
     }
     acc.nodes.push(Node {
@@ -485,8 +533,7 @@ fn collect_emits_in(
             let event = text_of(unwrap_expression(name_node), src);
             if !event.is_empty() {
                 let to_qname = format!("{contract_qname}::{event}");
-                let to =
-                    NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &to_qname);
+                let to = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &to_qname);
                 acc.edges.push(Edge {
                     from,
                     to,
@@ -647,7 +694,10 @@ fn visit_state_variable(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
     if owner.kind == node_kind::CLASS && is_public_state(node, src) {
-        let arity = node.child_by_field_name("type").map(getter_arity).unwrap_or(0);
+        let arity = node
+            .child_by_field_name("type")
+            .map(getter_arity)
+            .unwrap_or(0);
         record_member(abi, name, arity, || FirstDecl {
             mutability: "view".to_string(),
             getter: true,
@@ -817,7 +867,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             && let Some(func) = n.child_by_field_name("function")
         {
             let qualifier = classify_call(func, src);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -1036,8 +1090,10 @@ fn param_names<'a>(node: &TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if matches!(child.kind(), "parameter" | "event_parameter" | "error_parameter")
-            && let Some(n) = child.child_by_field_name("name")
+        if matches!(
+            child.kind(),
+            "parameter" | "event_parameter" | "error_parameter"
+        ) && let Some(n) = child.child_by_field_name("name")
         {
             out.push(text_of(n, src));
         }
@@ -1085,8 +1141,22 @@ contract Token {
 }
 "#;
         let fp = parse_file(source, "contracts/Token.sol", "contracts::Token", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1103,8 +1173,22 @@ library SafeMath {
 }
 "#;
         let fp = parse_file(source, "contracts/Lib.sol", "contracts::Lib", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::PACKAGE)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1129,15 +1213,15 @@ contract X is IFoo {
             .find(|(_, k)| **k == node_kind::STATE_VAR)
             .map(|(id, _)| *id)
             .expect("expected a STATE_VAR node");
-        assert_eq!(fp.nav.name_by_id.get(&var_id).map(String::as_str), Some("feeBasisPoints"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&var_id).map(String::as_str),
+            Some("feeBasisPoints")
+        );
 
         // The DOC cell carries the NatSpec.
         let var_node = fp.nodes.iter().find(|n| n.id == var_id).unwrap();
         assert!(
-            var_node
-                .cells
-                .iter()
-                .any(|c| c.kind == cell_type::DOC),
+            var_node.cells.iter().any(|c| c.kind == cell_type::DOC),
             "STATE_VAR should carry a DOC cell"
         );
 
@@ -1155,18 +1239,27 @@ contract X is IFoo {
             fp.refs
         );
         assert_eq!(
-            fp.refs.iter().filter(|r| r.category == edge_category::INHERITS_FROM).count(),
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INHERITS_FROM)
+                .count(),
             0,
         );
         assert!(
-            !fp.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS
-                || e.category == edge_category::INHERITS_FROM),
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::IMPLEMENTS
+                    || e.category == edge_category::INHERITS_FROM),
             "heritage must not be a parser-fabricated edge"
         );
         // The ref resolves from the file MODULE, out of the contract `X`.
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "contracts::X");
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::X::X");
-        assert!(fp.refs.iter().any(|r| r.from == x_id && r.from_module == module_id));
+        assert!(
+            fp.refs
+                .iter()
+                .any(|r| r.from == x_id && r.from_module == module_id)
+        );
     }
 
     #[test]
@@ -1202,7 +1295,10 @@ contract Y is Base {
             1,
         );
         assert_eq!(
-            fp.refs.iter().filter(|r| r.category == edge_category::IMPLEMENTS).count(),
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::IMPLEMENTS)
+                .count(),
             0,
         );
     }
@@ -1255,10 +1351,8 @@ contract Bank {
             .map(|(id, _)| *id)
             .expect("deposit method node");
         assert!(
-            fp.calls
-                .iter()
-                .any(|c| c.from == deposit_id
-                    && matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit")),
+            fp.calls.iter().any(|c| c.from == deposit_id
+                && matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit")),
             "the _credit call should originate from deposit"
         );
 
@@ -1352,10 +1446,13 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
             })
             .map(|(id, _)| *id)?;
         let node = fp.nodes.iter().find(|n| n.id == id)?;
-        node.cells.iter().find(|c| c.kind == cell).map(|c| match &c.payload {
-            CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
-            other => format!("{other:?}"),
-        })
+        node.cells
+            .iter()
+            .find(|c| c.kind == cell)
+            .map(|c| match &c.payload {
+                CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+                other => format!("{other:?}"),
+            })
     }
 
     const VAULT: &str = r#"// SPDX-License-Identifier: MIT
@@ -1455,7 +1552,9 @@ contract Vault {
         );
         assert_eq!(
             cell_on(&fp, "feeBasisPoints", cell_type::DOC_TAGS).as_deref(),
-            Some(r#"{"style":"natspec","tags":[{"tag":"notice","text":"Platform fee in basis points."}]}"#)
+            Some(
+                r#"{"style":"natspec","tags":[{"tag":"notice","text":"Platform fee in basis points."}]}"#
+            )
         );
         // The module node carries no DOC_TAGS: a file is not a NatSpec target
         // (and its SPDX line is boilerplate).
@@ -1517,8 +1616,14 @@ contract C {
             r#"{"tag":"param","name":"who","text":"The payee, possibly a contract."},"#,
             r#"{"tag":"return","name":"paid","text":"Amount paid."}]}"#,
         );
-        assert_eq!(cell_on(&a, "pay", cell_type::DOC_TAGS).as_deref(), Some(want));
-        assert_eq!(cell_on(&b, "pay", cell_type::DOC_TAGS).as_deref(), Some(want));
+        assert_eq!(
+            cell_on(&a, "pay", cell_type::DOC_TAGS).as_deref(),
+            Some(want)
+        );
+        assert_eq!(
+            cell_on(&b, "pay", cell_type::DOC_TAGS).as_deref(),
+            Some(want)
+        );
     }
 
     #[test]
@@ -1540,7 +1645,10 @@ contract C {
         let fp = parse_file(source, "C.sol", "C", repo()).unwrap();
         // DOC still carries the plain comment; DOC_TAGS does not claim it.
         assert!(cell_on(&fp, "ResolutionProposed", cell_type::DOC).is_some());
-        assert_eq!(cell_on(&fp, "ResolutionProposed", cell_type::DOC_TAGS), None);
+        assert_eq!(
+            cell_on(&fp, "ResolutionProposed", cell_type::DOC_TAGS),
+            None
+        );
         assert_eq!(cell_on(&fp, "f", cell_type::DOC_TAGS), None);
         // An event's @param binds against its event parameters; the `//`
         // divider between the NatSpec and the event is stepped over.
@@ -1572,15 +1680,23 @@ contract C {
     /// The facts of procedure `qname`, read through the evm vocabulary.
     fn facts(fp: &FileParse, qname: &str) -> evm::ProcedureFacts {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, qname);
-        let node = fp.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no {qname}"));
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("no {qname}"));
         evm::read_procedure_cell(&node.cells).unwrap_or_else(|| panic!("no evm cell on {qname}"))
     }
 
     /// The (from, to) qnames of every `category` edge of `fp`.
     fn edge_qnames(fp: &FileParse, category: glia_core::EdgeCategoryId) -> Vec<(String, String)> {
         let q = |id: &NodeId| fp.nav.qname_by_id.get(id).cloned().unwrap_or_default();
-        let mut out: Vec<(String, String)> =
-            fp.edges.iter().filter(|e| e.category == category).map(|e| (q(&e.from), q(&e.to))).collect();
+        let mut out: Vec<(String, String)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == category)
+            .map(|e| (q(&e.from), q(&e.to)))
+            .collect();
         out.sort();
         out
     }
@@ -1648,38 +1764,81 @@ contract Escrow is IEscrow {
         assert_eq!(
             edge_qnames(&fp, edge_category::HANDLED_BY),
             [
-                ("evm:Escrow.deposit".to_string(), "contracts::Escrow::Escrow::deposit".to_string()),
-                ("evm:Escrow.deposits".to_string(), "contracts::Escrow::Escrow::deposits".to_string()),
-                ("evm:Escrow.release".to_string(), "contracts::Escrow::Escrow::release".to_string()),
-                ("evm:Escrow.seller".to_string(), "contracts::Escrow::Escrow::seller".to_string()),
-                ("evm:IEscrow.deposit".to_string(), "contracts::Escrow::IEscrow::deposit".to_string()),
+                (
+                    "evm:Escrow.deposit".to_string(),
+                    "contracts::Escrow::Escrow::deposit".to_string()
+                ),
+                (
+                    "evm:Escrow.deposits".to_string(),
+                    "contracts::Escrow::Escrow::deposits".to_string()
+                ),
+                (
+                    "evm:Escrow.release".to_string(),
+                    "contracts::Escrow::Escrow::release".to_string()
+                ),
+                (
+                    "evm:Escrow.seller".to_string(),
+                    "contracts::Escrow::Escrow::seller".to_string()
+                ),
+                (
+                    "evm:IEscrow.deposit".to_string(),
+                    "contracts::Escrow::IEscrow::deposit".to_string()
+                ),
             ]
         );
         // Each procedure: one node, the contract as nav parent, the nav name
         // `<Contract>.<member>`, its POSITION first then the evm CODE cell,
         // and no DEFINES into it.
-        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Escrow.deposit");
-        let escrow = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::Escrow::Escrow");
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::RPC_PROCEDURE,
+            "evm:Escrow.deposit",
+        );
+        let escrow = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "contracts::Escrow::Escrow",
+        );
         assert_eq!(fp.nav.parent_of.get(&id), Some(&escrow));
-        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("Escrow.deposit"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&id).map(String::as_str),
+            Some("Escrow.deposit")
+        );
         let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
         assert_eq!(node.cells.len(), 2);
         assert_eq!(node.cells[0].kind, cell_type::POSITION);
-        let CellPayload::Json(pos) = &node.cells[0].payload else { panic!("POSITION payload") };
+        let CellPayload::Json(pos) = &node.cells[0].payload else {
+            panic!("POSITION payload")
+        };
         assert!(pos.contains("contracts/Escrow.sol"), "{pos}");
-        let method = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "contracts::Escrow::Escrow::deposit");
+        let method = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "contracts::Escrow::Escrow::deposit",
+        );
         let method_pos = fp
             .nodes
             .iter()
             .find(|n| n.id == method)
             .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::POSITION))
             .unwrap();
-        assert_eq!(&node.cells[0], method_pos, "the procedure sits at its function");
-        assert!(!fp.edges.iter().any(|e| e.to == id), "nothing points INTO a handled procedure");
+        assert_eq!(
+            &node.cells[0], method_pos,
+            "the procedure sits at its function"
+        );
+        assert!(
+            !fp.edges.iter().any(|e| e.to == id),
+            "nothing points INTO a handled procedure"
+        );
         assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1);
         // A by-name lookup of a contract member still finds only the METHOD.
         assert!(
-            fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit"))
+            fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit"))
         );
     }
 
@@ -1698,7 +1857,10 @@ contract Escrow is IEscrow {
             assert!(!procs.iter().any(|p| p == absent), "{absent} in {procs:?}");
         }
         // The library function and the internal one stay METHODs.
-        for kept in ["contracts::Escrow::Fees::cut", "contracts::Escrow::Escrow::_credit"] {
+        for kept in [
+            "contracts::Escrow::Fees::cut",
+            "contracts::Escrow::Escrow::_credit",
+        ] {
             assert!(fp.nav.qname_by_id.values().any(|q| q == kept), "{kept}");
         }
         let source = r#"
@@ -1730,24 +1892,46 @@ function free(uint256 x) pure returns (uint256) { return x; }
     #[test]
     fn overloads_share_one_procedure_with_both_arities() {
         let fp = parse_file(ESCROW, "contracts/Escrow.sol", "contracts::Escrow", repo()).unwrap();
-        let release = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Escrow.release");
+        let release = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::RPC_PROCEDURE,
+            "evm:Escrow.release",
+        );
         assert_eq!(fp.nodes.iter().filter(|n| n.id == release).count(), 1);
         assert_eq!(
-            fp.edges.iter().filter(|e| e.from == release && e.category == edge_category::HANDLED_BY).count(),
+            fp.edges
+                .iter()
+                .filter(|e| e.from == release && e.category == edge_category::HANDLED_BY)
+                .count(),
             1,
             "both overloads share the one METHOD id"
         );
         let node = fp.nodes.iter().find(|n| n.id == release).unwrap();
-        let code = node.cells.iter().find(|c| c.kind == cell_type::CODE).unwrap();
-        let CellPayload::Json(json) = &code.payload else { panic!("CODE payload") };
+        let code = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::CODE)
+            .unwrap();
+        let CellPayload::Json(json) = &code.payload else {
+            panic!("CODE payload")
+        };
         assert_eq!(
             json,
             r#"{"via":"evm","arities":[1,2],"mutability":"nonpayable","getter":false,"abstract":false}"#
         );
         // The first declaration's POSITION: the one-parameter `release`.
-        let CellPayload::Json(pos) = &node.cells[0].payload else { panic!("POSITION payload") };
-        let first_line = ESCROW.lines().position(|l| l.contains("function release(bytes32 orderId) public")).unwrap();
-        assert!(pos.contains(&format!("\"start_line\":{first_line}")), "{pos} vs line {first_line}");
+        let CellPayload::Json(pos) = &node.cells[0].payload else {
+            panic!("POSITION payload")
+        };
+        let first_line = ESCROW
+            .lines()
+            .position(|l| l.contains("function release(bytes32 orderId) public"))
+            .unwrap();
+        assert!(
+            pos.contains(&format!("\"start_line\":{first_line}")),
+            "{pos} vs line {first_line}"
+        );
     }
 
     #[test]
@@ -1785,19 +1969,24 @@ contract Bank {
         // on the state variable finds nothing; this pins the shape it reads.
         let source = "contract S { uint256 public x = a + b; function f() public {} }";
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_solidity::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         let mut found = (false, false);
         let mut stack = vec![tree.root_node()];
         while let Some(n) = stack.pop() {
             match n.kind() {
                 "state_variable_declaration" => {
-                    let field = n.child_by_field_name("visibility").map(|v| text_of(v, source.as_bytes()));
+                    let field = n
+                        .child_by_field_name("visibility")
+                        .map(|v| text_of(v, source.as_bytes()));
                     assert_eq!(field, Some("public"));
                     found.0 = true;
                 }
                 "function_definition" => {
-                    let child = named_child_of_kind(n, "visibility").map(|v| text_of(v, source.as_bytes()));
+                    let child =
+                        named_child_of_kind(n, "visibility").map(|v| text_of(v, source.as_bytes()));
                     assert_eq!(child, Some("public"));
                     found.1 = true;
                 }
@@ -1826,7 +2015,10 @@ contract Fee {
         assert_eq!(procedures(&fp), ["evm:Fee.FEE"]);
         assert_eq!(
             edge_qnames(&fp, edge_category::HANDLED_BY),
-            [("evm:Fee.FEE".to_string(), "contracts::Fee::Fee::FEE".to_string())]
+            [(
+                "evm:Fee.FEE".to_string(),
+                "contracts::Fee::Fee::FEE".to_string()
+            )]
         );
         let f = facts(&fp, "evm:Fee.FEE");
         assert_eq!((f.arities.as_slice(), f.getter), (&[0][..], true));
@@ -1838,7 +2030,9 @@ contract Fee {
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::Fee::Fee");
         let position = Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(r#"{"file":"contracts/Fee.sol","start_line":3,"end_line":3}"#.into()),
+            payload: CellPayload::Json(
+                r#"{"file":"contracts/Fee.sol","start_line":3,"end_line":3}"#.into(),
+            ),
         };
         let mut abi = ContractAbi::new();
         record_member(&mut abi, "FEE", 0, || FirstDecl {
@@ -1849,15 +2043,31 @@ contract Fee {
             position: position.clone(),
         });
         let mut acc = Acc::default();
-        emit_procedures(&abi, Owner { name: "Fee", kind: node_kind::CLASS }, class, module, repo(), &mut acc);
+        emit_procedures(
+            &abi,
+            Owner {
+                name: "Fee",
+                kind: node_kind::CLASS,
+            },
+            class,
+            module,
+            repo(),
+            &mut acc,
+        );
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Fee.FEE");
         assert_eq!(acc.edges.len(), 1);
         let e = &acc.edges[0];
-        assert_eq!((e.from, e.to, e.category), (module, id, edge_category::CONTAINS));
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (module, id, edge_category::CONTAINS)
+        );
         assert_eq!(acc.nodes.len(), 1);
         assert_eq!(acc.nodes[0].cells[0], position);
         assert_eq!(acc.nav.parent_of.get(&id), Some(&class));
-        assert_eq!((acc.abi.procedures, acc.abi.getters, acc.abi.contracts), (1, 1, 1));
+        assert_eq!(
+            (acc.abi.procedures, acc.abi.getters, acc.abi.contracts),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -1876,12 +2086,28 @@ abstract contract Base {
         let fp = parse_file(source, "I.sol", "I", repo()).unwrap();
         assert_eq!(
             procedures(&fp),
-            ["evm:Base.done", "evm:Base.hook", "evm:IERC20.totalSupply", "evm:IERC20.transfer"]
+            [
+                "evm:Base.done",
+                "evm:Base.hook",
+                "evm:IERC20.totalSupply",
+                "evm:IERC20.transfer"
+            ]
         );
         let total = facts(&fp, "evm:IERC20.totalSupply");
-        assert_eq!((total.arities.as_slice(), total.mutability.as_str(), total.abstract_), (&[0][..], "view", true));
+        assert_eq!(
+            (
+                total.arities.as_slice(),
+                total.mutability.as_str(),
+                total.abstract_
+            ),
+            (&[0][..], "view", true)
+        );
         let transfer = facts(&fp, "evm:IERC20.transfer");
-        assert_eq!((transfer.arities.as_slice(), transfer.abstract_), (&[2][..], true), "returns are not params");
+        assert_eq!(
+            (transfer.arities.as_slice(), transfer.abstract_),
+            (&[2][..], true),
+            "returns are not params"
+        );
         assert!(facts(&fp, "evm:Base.hook").abstract_, "no body");
         assert!(!facts(&fp, "evm:Base.done").abstract_);
     }
@@ -1898,7 +2124,12 @@ contract M {
 }
 "#;
         let fp = parse_file(source, "M.sol", "M", repo()).unwrap();
-        for (q, m) in [("evm:M.a", "payable"), ("evm:M.b", "view"), ("evm:M.c", "pure"), ("evm:M.d", "nonpayable")] {
+        for (q, m) in [
+            ("evm:M.a", "payable"),
+            ("evm:M.b", "view"),
+            ("evm:M.c", "pure"),
+            ("evm:M.d", "nonpayable"),
+        ] {
             assert_eq!(facts(&fp, q).mutability, m, "{q}");
         }
     }

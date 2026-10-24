@@ -87,7 +87,11 @@ impl<T> Answer<T> {
     /// is built (and its marker printed) only when `results` is empty.
     pub(crate) fn from_results(results: Vec<T>, absence: impl FnOnce() -> Absence) -> Self {
         let absence = results.is_empty().then(absence);
-        Answer { results, absence, selection: None }
+        Answer {
+            results,
+            absence,
+            selection: None,
+        }
     }
 }
 

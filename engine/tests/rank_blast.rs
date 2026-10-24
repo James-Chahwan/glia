@@ -34,19 +34,37 @@ const PAGE: &str = "web/page.ts";
 /// The HEAD (0.5.2 / pre-EA.5) backward depth-1 rows from `core`, captured
 /// at landing with `glia blast-radius <tree> core --direction backward
 /// --depth 1 --json`: five rows of one score, by node id.
-const HEAD_ROWS: [&str; 5] = ["svc::a::a", "svc::d::d2", "svc::b::b", "svc::d::d1", "svc::c::c"];
+const HEAD_ROWS: [&str; 5] = [
+    "svc::a::a",
+    "svc::d::d2",
+    "svc::b::b",
+    "svc::d::d1",
+    "svc::c::c",
+];
 
 fn tree() -> Vec<(&'static str, &'static str)> {
     vec![
         (CORE, "def core(x):\n    return x\n"),
-        (A, "from svc.core import core\n\n\ndef a():\n    return core(1)\n"),
-        (B, "from svc.core import core\n\n\ndef b():\n    return core(1)\n"),
-        (C, "from svc.core import core\n\n\ndef c():\n    return core(1)\n"),
+        (
+            A,
+            "from svc.core import core\n\n\ndef a():\n    return core(1)\n",
+        ),
+        (
+            B,
+            "from svc.core import core\n\n\ndef b():\n    return core(1)\n",
+        ),
+        (
+            C,
+            "from svc.core import core\n\n\ndef c():\n    return core(1)\n",
+        ),
         (
             D,
             "from svc.core import core\n\n\ndef d1():\n    return core(1)\n\n\ndef d2():\n    return core(2)\n",
         ),
-        (PAGE, "export function renderPage(t: string): string {\n  return t;\n}\n"),
+        (
+            PAGE,
+            "export function renderPage(t: string): string {\n  return t;\n}\n",
+        ),
     ]
 }
 
@@ -94,8 +112,13 @@ fn write_tree(root: &Path) {
 fn write_snapshot(root: &Path) {
     let h = history();
     let head = h.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
-    write_history(root, HistoryMeta::new(head, 2000, None, String::new()), &h, &[])
-        .expect("write snapshot");
+    write_history(
+        root,
+        HistoryMeta::new(head, 2000, None, String::new()),
+        &h,
+        &[],
+    )
+    .expect("write snapshot");
 }
 
 struct Built {
@@ -149,7 +172,10 @@ fn qnames(r: &BlastRadius) -> Vec<&str> {
 }
 
 fn files_of(r: &BlastRadius) -> Vec<&str> {
-    r.results.iter().map(|a| a.file.as_deref().unwrap_or("")).collect()
+    r.results
+        .iter()
+        .map(|a| a.file.as_deref().unwrap_or(""))
+        .collect()
 }
 
 fn json<T: serde::Serialize>(v: &T) -> String {
@@ -158,7 +184,9 @@ fn json<T: serde::Serialize>(v: &T) -> String {
 
 fn seed_file(b: &Built, c: &RankCache) -> u32 {
     let files = c.files(&b.merged);
-    files.index_of(files.repo(0), CORE).expect("core.py is a candidate")
+    files
+        .index_of(files.repo(0), CORE)
+        .expect("core.py is a candidate")
 }
 
 /// (1) Ranking::head(): the HEAD rows, and `files` is P1's top 10.
@@ -166,20 +194,33 @@ fn seed_file(b: &Built, c: &RankCache) -> u32 {
 fn head_ranking_keeps_the_head_rows_and_lists_p1_files() {
     let (_d, b) = tree_with_snapshot();
     let c = cache(&b);
-    let r = blast_radius(&b.merged, &["core"], &opts(Ranking::head(), Some(c.clone())));
+    let r = blast_radius(
+        &b.merged,
+        &["core"],
+        &opts(Ranking::head(), Some(c.clone())),
+    );
     assert_eq!(r.seeds.len(), 1);
-    assert_eq!(r.seeds[0].file.as_deref(), Some(CORE), "the seed is core in svc/core.py");
+    assert_eq!(
+        r.seeds[0].file.as_deref(),
+        Some(CORE),
+        "the seed is core in svc/core.py"
+    );
     assert_eq!(qnames(&r), HEAD_ROWS);
 
     let files = c.files(&b.merged);
     let fr = rank_files(&b.merged, &c, &[seed_file(&b, &c)], &[], Ranking::head());
     let mut per: BTreeMap<u32, usize> = BTreeMap::new();
     for a in &r.results {
-        let f = files.file_of_node(NodeId(a.id)).expect("a row's file is a candidate");
+        let f = files
+            .file_of_node(NodeId(a.id))
+            .expect("a row's file is a candidate");
         *per.entry(f).or_default() += 1;
     }
     assert_eq!(json(&r.files), json(&fr.top(&files, 10, &per)));
-    assert!(!r.files.iter().any(|f| f.file == CORE), "a seed file is never listed");
+    assert!(
+        !r.files.iter().any(|f| f.file == CORE),
+        "a seed file is never listed"
+    );
 }
 
 /// (2) The default (H10): co-changed files' rows first by C0, the rest in
@@ -187,13 +228,40 @@ fn head_ranking_keeps_the_head_rows_and_lists_p1_files() {
 #[test]
 fn default_ranking_lifts_cochanged_files() {
     let (_d, b) = tree_with_snapshot();
-    let r = blast_radius(&b.merged, &["core"], &opts(Ranking::default(), Some(cache(&b))));
-    assert_eq!(qnames(&r), ["svc::c::c", "svc::b::b", "svc::a::a", "svc::d::d2", "svc::d::d1"]);
+    let r = blast_radius(
+        &b.merged,
+        &["core"],
+        &opts(Ranking::default(), Some(cache(&b))),
+    );
+    assert_eq!(
+        qnames(&r),
+        [
+            "svc::c::c",
+            "svc::b::b",
+            "svc::a::a",
+            "svc::d::d2",
+            "svc::d::d1"
+        ]
+    );
     assert_eq!(files_of(&r)[0], C);
-    let top: Vec<(&str, f64, usize)> =
-        r.files.iter().take(3).map(|f| (f.file.as_str(), f.cochange, f.rows)).collect();
-    assert_eq!(top, [(C, 5.0 / 17.0, 1), (PAGE, 4.0 / 17.0, 0), (B, 2.0 / 17.0, 1)]);
-    assert!(!r.files.iter().any(|f| f.file == CORE), "a seed file is never listed");
+    let top: Vec<(&str, f64, usize)> = r
+        .files
+        .iter()
+        .take(3)
+        .map(|f| (f.file.as_str(), f.cochange, f.rows))
+        .collect();
+    assert_eq!(
+        top,
+        [
+            (C, 5.0 / 17.0, 1),
+            (PAGE, 4.0 / 17.0, 0),
+            (B, 2.0 / 17.0, 1)
+        ]
+    );
+    assert!(
+        !r.files.iter().any(|f| f.file == CORE),
+        "a seed file is never listed"
+    );
 }
 
 /// (3) PT* without co-change: each file's rows contiguous, files in PT*'s
@@ -202,7 +270,11 @@ fn default_ranking_lifts_cochanged_files() {
 fn ppr_wide_groups_rows_by_file_and_keeps_scores() {
     let (_d, b) = tree_with_snapshot();
     let c = cache(&b);
-    let head = blast_radius(&b.merged, &["core"], &opts(Ranking::head(), Some(c.clone())));
+    let head = blast_radius(
+        &b.merged,
+        &["core"],
+        &opts(Ranking::head(), Some(c.clone())),
+    );
     let wide = Ranking::new(RankBase::PprWide, false);
     let r = blast_radius(&b.merged, &["core"], &opts(wide, Some(c.clone())));
 
@@ -211,7 +283,11 @@ fn ppr_wide_groups_rows_by_file_and_keeps_scores() {
     let mut seen: Vec<&str> = Vec::new();
     for f in files_of(&r) {
         if seen.last() != Some(&f) {
-            assert!(!seen.contains(&f), "{f}'s rows are contiguous: {:?}", files_of(&r));
+            assert!(
+                !seen.contains(&f),
+                "{f}'s rows are contiguous: {:?}",
+                files_of(&r)
+            );
             seen.push(f);
         }
     }
@@ -221,10 +297,19 @@ fn ppr_wide_groups_rows_by_file_and_keeps_scores() {
     sorted.sort();
     assert_eq!(places, sorted, "files in PT* order: {seen:?}");
 
-    let by_id: BTreeMap<u64, u64> = head.results.iter().map(|a| (a.id, a.score.to_bits())).collect();
+    let by_id: BTreeMap<u64, u64> = head
+        .results
+        .iter()
+        .map(|a| (a.id, a.score.to_bits()))
+        .collect();
     assert_eq!(r.results.len(), head.results.len());
     for a in &r.results {
-        assert_eq!(by_id.get(&a.id), Some(&a.score.to_bits()), "{}'s score", a.qname);
+        assert_eq!(
+            by_id.get(&a.id),
+            Some(&a.score.to_bits()),
+            "{}'s score",
+            a.qname
+        );
     }
 }
 
@@ -236,8 +321,16 @@ fn no_snapshot_default_is_head() {
     let root = root_in(&d);
     write_tree(&root);
     let b = build(&root);
-    let h = blast_radius(&b.merged, &["core"], &opts(Ranking::head(), Some(cache(&b))));
-    let r = blast_radius(&b.merged, &["core"], &opts(Ranking::default(), Some(cache(&b))));
+    let h = blast_radius(
+        &b.merged,
+        &["core"],
+        &opts(Ranking::head(), Some(cache(&b))),
+    );
+    let r = blast_radius(
+        &b.merged,
+        &["core"],
+        &opts(Ranking::default(), Some(cache(&b))),
+    );
     assert_eq!(json(&r.results), json(&h.results));
     assert_eq!(qnames(&r), HEAD_ROWS);
     // No cache at all (a library caller): a transient one with no roots,
@@ -252,7 +345,11 @@ fn no_snapshot_default_is_head() {
 #[test]
 fn an_unresolved_seed_lists_no_files() {
     let (_d, b) = tree_with_snapshot();
-    let r = blast_radius(&b.merged, &["no_such_symbol"], &opts(Ranking::default(), Some(cache(&b))));
+    let r = blast_radius(
+        &b.merged,
+        &["no_such_symbol"],
+        &opts(Ranking::default(), Some(cache(&b))),
+    );
     assert!(r.results.is_empty() && r.files.is_empty());
     let v: serde_json::Value = serde_json::from_str(&json(&r)).expect("json");
     assert_eq!(v["files"], serde_json::json!([]));
@@ -268,12 +365,23 @@ fn diff_impact_vs_rev_reads_the_working_trees_snapshot() {
     write_tree(root);
     let git = |args: &[&str]| {
         let out = Command::new("git")
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .current_dir(root)
             .output()
             .expect("git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init", "-q"]);
     git(&["add", "svc", "web"]);
@@ -295,7 +403,11 @@ fn diff_impact_vs_rev_reads_the_working_trees_snapshot() {
     // ids are the git repo's, so the head ties differ from the dir tree's).
     let lifted = ["svc::c::c", "svc::b::b"];
     let mut want: Vec<&str> = lifted.to_vec();
-    want.extend(qnames(&head.impact).into_iter().filter(|q| !lifted.contains(q)));
+    want.extend(
+        qnames(&head.impact)
+            .into_iter()
+            .filter(|q| !lifted.contains(q)),
+    );
     assert_eq!(head.impact.results.len(), 5);
     assert_eq!(qnames(&di.impact), want);
     assert_eq!(di.impact.files.first().map(|f| f.file.as_str()), Some(C));
@@ -309,7 +421,11 @@ fn child_rank_blast() {
         let b = build(Path::new(&dir));
         let c = cache(&b);
         for _ in 0..2 {
-            let r = blast_radius(&b.merged, &["core"], &opts(Ranking::default(), Some(c.clone())));
+            let r = blast_radius(
+                &b.merged,
+                &["core"],
+                &opts(Ranking::default(), Some(c.clone())),
+            );
             println!("{}", json(&r));
         }
     }
@@ -318,7 +434,12 @@ fn child_rank_blast() {
 fn run_child(root: &Path) -> (Vec<String>, String) {
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_rank_blast", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_rank_blast",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, root)
         .output()
         .expect("re-run the test binary");
@@ -356,19 +477,34 @@ fn a_held_cache_answers_the_second_query_from_its_indexes() {
         assert!(l.ends_with(&format!("closure_index={how}")), "{l}");
     }
     let cache = lines(&stderr, "[rank-cache] holder=answer");
-    let closure: Vec<&&str> = cache.iter().filter(|l| l.contains("direction=backward")).collect();
-    let file: Vec<&&str> = cache.iter().filter(|l| l.contains("direction=undirected")).collect();
+    let closure: Vec<&&str> = cache
+        .iter()
+        .filter(|l| l.contains("direction=backward"))
+        .collect();
+    let file: Vec<&&str> = cache
+        .iter()
+        .filter(|l| l.contains("direction=undirected"))
+        .collect();
     assert_eq!(closure.len(), 2, "{stderr}");
     assert_eq!(file.len(), 2, "{stderr}");
-    assert!(closure[0].contains("index=built") && closure[1].contains("index=hit"), "{stderr}");
-    assert!(file[0].contains("index=built") && file[1].contains("index=hit"), "{stderr}");
+    assert!(
+        closure[0].contains("index=built") && closure[1].contains("index=hit"),
+        "{stderr}"
+    );
+    assert!(
+        file[0].contains("index=built") && file[1].contains("index=hit"),
+        "{stderr}"
+    );
     // The marker follows the unchanged `[blast]` line.
     let order: Vec<&str> = stderr
         .lines()
         .filter(|l| l.starts_with("[blast] seeds=") || l.starts_with("[rank] surface="))
         .collect();
     assert_eq!(order.len(), 4);
-    assert!(order[0].starts_with("[blast]") && order[1].starts_with("[rank]"), "{order:?}");
+    assert!(
+        order[0].starts_with("[blast]") && order[1].starts_with("[rank]"),
+        "{order:?}"
+    );
 }
 
 /// (5)'s marker: no snapshot, co-change reads nothing.
@@ -379,8 +515,19 @@ fn no_snapshot_marker() {
     write_tree(&root);
     let (answers, stderr) = run_child(&root);
     assert_eq!(answers[0], answers[1]);
-    assert_eq!(lines(&stderr, "[rank-cochange] holder=answer none reason=no_snapshot").len(), 1, "{stderr}");
-    let rank = lines(&stderr, "[rank] surface=blast_radius ranking=H10 seed_files=1 cochange_files=0 ");
+    assert_eq!(
+        lines(
+            &stderr,
+            "[rank-cochange] holder=answer none reason=no_snapshot"
+        )
+        .len(),
+        1,
+        "{stderr}"
+    );
+    let rank = lines(
+        &stderr,
+        "[rank] surface=blast_radius ranking=H10 seed_files=1 cochange_files=0 ",
+    );
     assert_eq!(rank.len(), 2, "{stderr}");
     assert!(rank.iter().all(|l| l.contains(" lifted=0 ")), "{stderr}");
 }

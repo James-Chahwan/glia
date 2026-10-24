@@ -36,13 +36,9 @@ pub enum StoreError {
     Corrupt { detail: String },
     #[error("manifest json: {0}")]
     ManifestJson(#[from] serde_json::Error),
-    #[error(
-        "unsupported manifest schema version {got} (this build supports {supported})"
-    )]
+    #[error("unsupported manifest schema version {got} (this build supports {supported})")]
     ManifestSchemaVersion { got: u32, supported: u32 },
-    #[error(
-        "content hash mismatch on shard {shard} — manifest says {expected}, file is {got}"
-    )]
+    #[error("content hash mismatch on shard {shard} — manifest says {expected}, file is {got}")]
     ContentHashMismatch {
         shard: String,
         expected: String,

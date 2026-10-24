@@ -16,9 +16,12 @@ use glia_engine::{BuildOptions, GenerateResult, generate_many_opts};
 use glia_graph::MergedGraph;
 use glia_store::write_merged_sharded;
 
-const REPORT_TS: &str = include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/web/src/report.ts");
-const REPORT_PY: &str = include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/api/report.py");
-const OVERLAY: &str = include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/web/.glia/overlay.toml");
+const REPORT_TS: &str =
+    include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/web/src/report.ts");
+const REPORT_PY: &str =
+    include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/api/report.py");
+const OVERLAY: &str =
+    include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/web/.glia/overlay.toml");
 
 /// `<tmp>/web` + `<tmp>/api` with the fixture sources; the web repo's overlay
 /// file is `overlay` (none when `None`). Returns the two repo paths.
@@ -31,7 +34,10 @@ fn tree(tmp: &Path, overlay: Option<&str>) -> Vec<String> {
     std::fs::write(web.join("src/report.ts"), REPORT_TS).unwrap();
     std::fs::write(api.join("report.py"), REPORT_PY).unwrap();
     set_overlay(&web, overlay);
-    vec![web.to_string_lossy().into_owned(), api.to_string_lossy().into_owned()]
+    vec![
+        web.to_string_lossy().into_owned(),
+        api.to_string_lossy().into_owned(),
+    ]
 }
 
 fn set_overlay(repo: &Path, overlay: Option<&str>) {
@@ -50,7 +56,9 @@ fn build(repos: &[String], overlay: bool) -> GenerateResult {
 
 /// The qname of every node, and the repo it sits in.
 fn qname(m: &MergedGraph, id: glia_core::NodeId) -> Option<(RepoId, String)> {
-    m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).map(|q| (g.repo, q.clone())))
+    m.graphs
+        .iter()
+        .find_map(|g| g.nav.qname_by_id.get(&id).map(|q| (g.repo, q.clone())))
 }
 
 /// Every edge (intra and cross) `from -[category]-> to`, by exact qname.
@@ -74,14 +82,22 @@ fn layout_bytes(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort();
     out
 }
 
 fn assert_same_layout(a: &MergedGraph, b: &MergedGraph, out: &Path, context: &str) {
-    let (la, lb) = (layout_bytes(a, &out.join("a")), layout_bytes(b, &out.join("b")));
+    let (la, lb) = (
+        layout_bytes(a, &out.join("a")),
+        layout_bytes(b, &out.join("b")),
+    );
     let names = |l: &[(String, Vec<u8>)]| l.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
     assert_eq!(names(&la), names(&lb), "{context}: file sets differ");
     for ((name, x), (_, y)) in la.iter().zip(&lb) {
@@ -91,7 +107,13 @@ fn assert_same_layout(a: &MergedGraph, b: &MergedGraph, out: &Path, context: &st
 
 /// 0-based line of the `n`th (1-based) `[[edge]]` header of `text`.
 fn stanza_line(text: &str, n: usize) -> u32 {
-    let i = text.lines().enumerate().filter(|(_, l)| l.trim() == "[[edge]]").nth(n - 1).expect("stanza").0;
+    let i = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == "[[edge]]")
+        .nth(n - 1)
+        .expect("stanza")
+        .0;
     u32::try_from(i).unwrap()
 }
 
@@ -101,23 +123,36 @@ fn overlay_edge_is_applied_weak() {
     let repos = tree(tmp.path(), Some(OVERLAY));
     let r = build(&repos, true);
     let m = &r.merged;
-    let hits = edges(m, "src::report::loadReport", "report::build_report", edge_category::CALLS);
+    let hits = edges(
+        m,
+        "src::report::loadReport",
+        "report::build_report",
+        edge_category::CALLS,
+    );
     assert_eq!(hits.len(), 1, "exactly one declared CALLS edge");
     let e = hits[0];
     assert_eq!(e.confidence, Confidence::Weak, "an llm stanza is Weak");
-    assert!(m.cross_edges.iter().any(|c| std::ptr::eq(c, e)), "a cross edge");
+    assert!(
+        m.cross_edges.iter().any(|c| std::ptr::eq(c, e)),
+        "a cross edge"
+    );
     let origin = e.cell(cell_type::ORIGIN).expect("ORIGIN edge cell");
     assert_eq!(
         origin.payload,
         CellPayload::Json(
-            r#"{"provenance":"overlay:llm","rule":"edge#1","note":"URL built in buildUrl()"}"#.into()
+            r#"{"provenance":"overlay:llm","rule":"edge#1","note":"URL built in buildUrl()"}"#
+                .into()
         )
     );
     let ev = Evidence::of(e).expect("evidence");
     assert_eq!(ev.emitter, "overlay:edge");
     assert_eq!(ev.rule.as_deref(), Some("edge#1"));
     assert_eq!(ev.file.as_deref(), Some(".glia/overlay.toml"));
-    assert_eq!(ev.line, Some(stanza_line(OVERLAY, 1)), "the stanza's [[edge]] line, 0-based");
+    assert_eq!(
+        ev.line,
+        Some(stanza_line(OVERLAY, 1)),
+        "the stanza's [[edge]] line, 0-based"
+    );
     assert_eq!(ev.basis, Basis::Site);
     // The web repo holds the stanza, the api repo the handler.
     let (from_repo, _) = qname(m, e.from).unwrap();
@@ -131,7 +166,15 @@ fn no_overlay_hides_it() {
     let repos = tree(tmp.path(), Some(OVERLAY));
     let with = build(&repos, true);
     let without = build(&repos, false);
-    assert!(edges(&without.merged, "src::report::loadReport", "report::build_report", edge_category::CALLS).is_empty());
+    assert!(
+        edges(
+            &without.merged,
+            "src::report::loadReport",
+            "report::build_report",
+            edge_category::CALLS
+        )
+        .is_empty()
+    );
     assert_eq!(edge_count(&without.merged) + 1, edge_count(&with.merged));
 
     // The fixture's file holds only [[edge]] stanzas, so the build without the
@@ -139,7 +182,12 @@ fn no_overlay_hides_it() {
     // byte (user-config and declared sections are not switched off).
     set_overlay(&PathBuf::from(&repos[0]), None);
     let deleted = build(&repos, true);
-    assert_same_layout(&without.merged, &deleted.merged, &tmp.path().join("out"), "--no-overlay vs no file");
+    assert_same_layout(
+        &without.merged,
+        &deleted.merged,
+        &tmp.path().join("out"),
+        "--no-overlay vs no file",
+    );
 }
 
 #[test]
@@ -147,12 +195,24 @@ fn structural_category_never_lands() {
     let tmp = tempfile::tempdir().unwrap();
     let repos = tree(tmp.path(), Some(OVERLAY));
     let m = build(&repos, true).merged;
-    assert!(edges(&m, "src::report::loadReport", "report::helper", edge_category::DEFINES).is_empty());
+    assert!(
+        edges(
+            &m,
+            "src::report::loadReport",
+            "report::helper",
+            edge_category::DEFINES
+        )
+        .is_empty()
+    );
     let any = m.all_edges().filter(|e| {
         qname(&m, e.from).is_some_and(|(_, q)| q == "src::report::loadReport")
             && qname(&m, e.to).is_some_and(|(_, q)| q == "report::helper")
     });
-    assert_eq!(any.count(), 0, "the rejected stanza adds no edge of any category");
+    assert_eq!(
+        any.count(),
+        0,
+        "the rejected stanza adds no edge of any category"
+    );
 }
 
 #[test]
@@ -162,8 +222,15 @@ fn orphan_qname_is_counted_not_applied() {
     let repos = tree(tmp.path(), Some(orphan));
     let m = build(&repos, true).merged;
     let bare = build(&repos, false).merged;
-    assert_eq!(edge_count(&m), edge_count(&bare), "an orphaned stanza adds nothing");
-    assert!(m.all_edges().all(|e| Evidence::of(e).is_none_or(|ev| !ev.emitter.starts_with("overlay:"))));
+    assert_eq!(
+        edge_count(&m),
+        edge_count(&bare),
+        "an orphaned stanza adds nothing"
+    );
+    assert!(
+        m.all_edges()
+            .all(|e| Evidence::of(e).is_none_or(|ev| !ev.emitter.starts_with("overlay:")))
+    );
 }
 
 #[test]
@@ -174,14 +241,28 @@ fn redundant_stanza_adds_no_duplicate() {
     std::fs::create_dir_all(api.join(".glia")).unwrap();
     set_overlay(
         &api,
-        Some("version = 1\n\n[[edge]]\nfrom = \"report::build_report\"\nto = \"report::helper\"\ncategory = \"CALLS\"\n"),
+        Some(
+            "version = 1\n\n[[edge]]\nfrom = \"report::build_report\"\nto = \"report::helper\"\ncategory = \"CALLS\"\n",
+        ),
     );
     let m = build(&repos, true).merged;
     let bare = build(&repos, false).merged;
-    assert_eq!(edge_count(&m), edge_count(&bare), "the extractor already has this edge");
-    let hits = edges(&m, "report::build_report", "report::helper", edge_category::CALLS);
+    assert_eq!(
+        edge_count(&m),
+        edge_count(&bare),
+        "the extractor already has this edge"
+    );
+    let hits = edges(
+        &m,
+        "report::build_report",
+        "report::helper",
+        edge_category::CALLS,
+    );
     assert_eq!(hits.len(), 1);
-    assert!(hits[0].cell(cell_type::ORIGIN).is_none(), "the extracted edge, not an overlay copy");
+    assert!(
+        hits[0].cell(cell_type::ORIGIN).is_none(),
+        "the extracted edge, not an overlay copy"
+    );
 }
 
 #[test]
@@ -194,9 +275,22 @@ fn own_repo_binds_before_other_repos() {
     }
     std::fs::write(a.join("main.py"), "def run():\n    return 0\n").unwrap();
     // a: `util::f` exists in both repos -> a's own. b: `main::run` only in a.
-    set_overlay(&a, Some("version = 1\n\n[[edge]]\nfrom = \"main::run\"\nto = \"util::f\"\ncategory = \"USES\"\n"));
-    set_overlay(&b, Some("version = 1\n\n[[edge]]\nfrom = \"util::f\"\nto = \"main::run\"\ncategory = \"USES\"\n"));
-    let repos = vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()];
+    set_overlay(
+        &a,
+        Some(
+            "version = 1\n\n[[edge]]\nfrom = \"main::run\"\nto = \"util::f\"\ncategory = \"USES\"\n",
+        ),
+    );
+    set_overlay(
+        &b,
+        Some(
+            "version = 1\n\n[[edge]]\nfrom = \"util::f\"\nto = \"main::run\"\ncategory = \"USES\"\n",
+        ),
+    );
+    let repos = vec![
+        a.to_string_lossy().into_owned(),
+        b.to_string_lossy().into_owned(),
+    ];
     let m = build(&repos, true).merged;
     let repo_a = m.graphs.first().map(|g| g.repo).unwrap();
     let uses: Vec<_> = m
@@ -206,9 +300,18 @@ fn own_repo_binds_before_other_repos() {
         .map(|e| (qname(&m, e.from).unwrap(), qname(&m, e.to).unwrap()))
         .collect();
     assert_eq!(uses.len(), 2, "{uses:?}");
-    let a_edge = uses.iter().find(|(f, _)| f.1 == "main::run").expect("a's stanza");
-    assert_eq!(a_edge.1.0, repo_a, "util::f binds in the stanza's own repo first");
-    let b_edge = uses.iter().find(|(f, _)| f.1 == "util::f").expect("b's stanza");
+    let a_edge = uses
+        .iter()
+        .find(|(f, _)| f.1 == "main::run")
+        .expect("a's stanza");
+    assert_eq!(
+        a_edge.1.0, repo_a,
+        "util::f binds in the stanza's own repo first"
+    );
+    let b_edge = uses
+        .iter()
+        .find(|(f, _)| f.1 == "util::f")
+        .expect("b's stanza");
     assert_ne!(b_edge.0.0, repo_a, "b's util::f is b's own");
     assert_eq!(b_edge.1.0, repo_a, "main::run falls back to the other repo");
 }
@@ -220,7 +323,12 @@ fn malformed_toml_builds_without_overlay() {
     let broken = build(&repos, true);
     set_overlay(&PathBuf::from(&repos[0]), None);
     let none = build(&repos, true);
-    assert_same_layout(&broken.merged, &none.merged, &tmp.path().join("out"), "malformed vs no file");
+    assert_same_layout(
+        &broken.merged,
+        &none.merged,
+        &tmp.path().join("out"),
+        "malformed vs no file",
+    );
 }
 
 #[test]
@@ -229,6 +337,20 @@ fn overlay_builds_are_byte_identical() {
     let repos = tree(tmp.path(), Some(OVERLAY));
     let one = build(&repos, true);
     let two = build(&repos, true);
-    assert_eq!(edges(&one.merged, "src::report::loadReport", "report::build_report", edge_category::CALLS).len(), 1);
-    assert_same_layout(&one.merged, &two.merged, &tmp.path().join("out"), "clean vs clean");
+    assert_eq!(
+        edges(
+            &one.merged,
+            "src::report::loadReport",
+            "report::build_report",
+            edge_category::CALLS
+        )
+        .len(),
+        1
+    );
+    assert_same_layout(
+        &one.merged,
+        &two.merged,
+        &tmp.path().join("out"),
+        "clean vs clean",
+    );
 }

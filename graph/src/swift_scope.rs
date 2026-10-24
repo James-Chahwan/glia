@@ -811,7 +811,12 @@ mod tests {
             &store,
             &[
                 (node_kind::STRUCT, &store, None, "struct Store {"),
-                (node_kind::METHOD, &save, Some(&store), "func save(_ x: Int)"),
+                (
+                    node_kind::METHOD,
+                    &save,
+                    Some(&store),
+                    "func save(_ x: Int)",
+                ),
                 (node_kind::METHOD, &load, Some(&store), "func load() -> Int"),
             ],
             vec![],
@@ -886,7 +891,11 @@ mod tests {
         let g = build(vec![
             store_in("Sources::App"),
             store_in("Sources::Admin"),
-            service_in("Sources::App", &[("repo", "")], &[("repo", "save"), ("other", "save")]),
+            service_in(
+                "Sources::App",
+                &[("repo", "")],
+                &[("repo", "save"), ("other", "save")],
+            ),
         ]);
         assert!(calls_from(&g, node_kind::METHOD, "Sources::App::Service::run").is_empty());
     }

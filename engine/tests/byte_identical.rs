@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use glia_engine::{generate_one, generate_one_with_cache, ParseCache};
+use glia_engine::{ParseCache, generate_one, generate_one_with_cache};
 use glia_store::write_merged_sharded;
 
 /// Multi-language fixture: two shards (python + go) plus markdown docs, so
@@ -18,8 +18,11 @@ fn write_fixture(dir: &Path) {
         "def foo():\n    \"\"\"Frobnicates.\"\"\"\n    return bar()\n\ndef bar():\n    return 1\n",
     )
     .unwrap();
-    std::fs::write(dir.join("b.py"), "class Widget:\n    def spin(self):\n        return 2\n")
-        .unwrap();
+    std::fs::write(
+        dir.join("b.py"),
+        "class Widget:\n    def spin(self):\n        return 2\n",
+    )
+    .unwrap();
     std::fs::write(dir.join("go.mod"), "module example.com/fixture\n").unwrap();
     std::fs::write(
         dir.join("m.go"),
@@ -31,7 +34,11 @@ fn write_fixture(dir: &Path) {
         "export function tsEntry(): number {\n  return 3;\n}\n",
     )
     .unwrap();
-    std::fs::write(dir.join("README.md"), "# Fixture\n\nUse `foo` and `Widget.spin`.\n").unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "# Fixture\n\nUse `foo` and `Widget.spin`.\n",
+    )
+    .unwrap();
 }
 
 /// Map of file name → bytes for every file in a sharded output dir.
@@ -96,8 +103,14 @@ fn incremental_build_is_byte_identical_to_clean_on_disk() {
     .unwrap();
 
     let incr = generate_one_with_cache(repo_s, &mut cache).unwrap();
-    assert!(cache.stats.reused > 0, "fixture must exercise the reuse path");
-    assert!(cache.stats.reparsed > 0, "fixture must exercise the reparse path");
+    assert!(
+        cache.stats.reused > 0,
+        "fixture must exercise the reuse path"
+    );
+    assert!(
+        cache.stats.reparsed > 0,
+        "fixture must exercise the reparse path"
+    );
     let clean = generate_one(repo_s).unwrap();
 
     let out_incr = tmp.path().join("out_incr");

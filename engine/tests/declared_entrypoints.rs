@@ -20,7 +20,8 @@ use glia_graph::{MergedGraph, Reach};
 use glia_store::{read_merged_sharded, write_merged_sharded};
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/overlay-entrypoints";
-const OVERLAY: &str = include_str!("../../bench/substrate-gap/fixtures/overlay-entrypoints/.glia/overlay.toml");
+const OVERLAY: &str =
+    include_str!("../../bench/substrate-gap/fixtures/overlay-entrypoints/.glia/overlay.toml");
 const FILES: &[&str] = &["app/jobs.py"];
 
 const JOB: &str = "app::jobs::nightly_rollup";
@@ -44,7 +45,10 @@ fn repo(tmp: &Path, overlay: Option<&str>) -> String {
 
 fn overlay(patterns: &[&str]) -> String {
     let list: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
-    format!("version = 1\n\n[entrypoints]\nqnames = [{}]\n", list.join(", "))
+    format!(
+        "version = 1\n\n[entrypoints]\nqnames = [{}]\n",
+        list.join(", ")
+    )
 }
 
 fn build(overlay: Option<&str>) -> GenerateResult {
@@ -78,7 +82,10 @@ fn entrypoints(merged: &MergedGraph) -> Vec<(String, String)> {
                 let CellPayload::Json(s) = &c.payload else {
                     panic!("ENTRYPOINT is a Json cell, got {:?}", c.payload);
                 };
-                out.push((g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default(), s.clone()));
+                out.push((
+                    g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default(),
+                    s.clone(),
+                ));
             }
         }
     }
@@ -102,7 +109,10 @@ fn helper_live(merged: &MergedGraph) -> bool {
 #[test]
 fn declared_job_is_live() {
     let bare = build(None);
-    assert!(!helper_live(&bare.merged), "control: without the declaration summarise is dead");
+    assert!(
+        !helper_live(&bare.merged),
+        "control: without the declaration summarise is dead"
+    );
     assert!(entrypoints(&bare.merged).is_empty());
 
     let r = build(Some(OVERLAY));
@@ -113,7 +123,10 @@ fn declared_job_is_live() {
             r#"{"decl":".glia/overlay.toml:4","pattern":"app::jobs::nightly_rollup","source":"config"}"#.to_string()
         )]
     );
-    assert!(helper_live(&r.merged), "summarise is reached from the declared job");
+    assert!(
+        helper_live(&r.merged),
+        "summarise is reached from the declared job"
+    );
     let live = entrypoint_reachable(&r.merged);
     assert!(live.contains(&function(&r.merged, JOB)));
     assert!(live.contains(&function(&r.merged, HELPER)));
@@ -124,7 +137,11 @@ fn prefix_pattern_matches_descendants() {
     let r = build(Some(&overlay(&["app::jobs::*"])));
     let got = entrypoints(&r.merged);
     let qnames: Vec<&str> = got.iter().map(|(q, _)| q.as_str()).collect();
-    assert_eq!(qnames, [JOB, HELPER], "every node under app::jobs::, and not app::jobs itself");
+    assert_eq!(
+        qnames,
+        [JOB, HELPER],
+        "every node under app::jobs::, and not app::jobs itself"
+    );
     for (_, p) in &got {
         assert!(p.contains(r#""pattern":"app::jobs::*""#), "{p}");
     }
@@ -136,14 +153,21 @@ fn first_matching_pattern_wins() {
     let r = build(Some(&overlay(&["app::jobs::*", JOB])));
     let got = entrypoints(&r.merged);
     assert_eq!(got.len(), 2, "one cell per node: {got:?}");
-    assert!(got.iter().all(|(_, p)| p.contains(r#""pattern":"app::jobs::*""#)), "{got:?}");
+    assert!(
+        got.iter()
+            .all(|(_, p)| p.contains(r#""pattern":"app::jobs::*""#)),
+        "{got:?}"
+    );
 }
 
 /// A pattern that binds nothing writes nothing: every edge and every node
 /// cell is what the same tree without the overlay file gives.
 #[test]
 fn unmatched_pattern_changes_nothing() {
-    let with = build(Some(&overlay(&["app::none", "app::jobs::nightly_rollup::*"])));
+    let with = build(Some(&overlay(&[
+        "app::none",
+        "app::jobs::nightly_rollup::*",
+    ])));
     let bare = build(None);
     assert!(entrypoints(&with.merged).is_empty());
     assert!(!helper_live(&with.merged));
@@ -175,7 +199,10 @@ fn entrypoint_survives_gmap_roundtrip() {
     let back = read_merged_sharded(&out).unwrap();
     assert_eq!(entrypoints(&back), entrypoints(&r.merged));
     let live = entrypoint_reachable(&back);
-    assert!(live.contains(&function(&back, JOB)), "the declared job is an entry after the round trip");
+    assert!(
+        live.contains(&function(&back, JOB)),
+        "the declared job is an entry after the round trip"
+    );
     assert!(live.contains(&function(&back, HELPER)));
     assert!(helper_live(&back));
 }
@@ -186,7 +213,12 @@ fn dir_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -203,7 +235,10 @@ fn declared_entrypoint_builds_are_byte_identical() {
     let mut cache = ParseCache::new();
     generate_one_with_cache(&repo_s, &mut cache).unwrap();
     let warm = generate_one_with_cache(&repo_s, &mut cache).unwrap();
-    assert!(cache.stats.reused > 0, "the cached build must reuse its parse");
+    assert!(
+        cache.stats.reused > 0,
+        "the cached build must reuse its parse"
+    );
     write_merged_sharded(&warm.merged, &out("cached")).unwrap();
 
     let clean1 = dir_bytes(&out("clean1"));

@@ -148,10 +148,7 @@ fn main() -> Result<()> {
                 targets.files.iter().collect::<Vec<_>>(),
             ));
         }
-        if !qname_match
-            && !targets.qname_tails.is_empty()
-            && !shape.hunks.is_empty()
-        {
+        if !qname_match && !targets.qname_tails.is_empty() && !shape.hunks.is_empty() {
             critiques.push(format!(
                 "**TARGET-MISMATCH (function)**: Hunk contexts {:?} don't include \
                  any directive-named qname tail {:?}. The directive's targets are \
@@ -187,8 +184,8 @@ fn main() -> Result<()> {
                 } else {
                     prefix
                 };
-                let near_equiv = !inner_path.is_empty()
-                    && shape.added_text.contains(&format!(".{inner_path}."));
+                let near_equiv =
+                    !inner_path.is_empty() && shape.added_text.contains(&format!(".{inner_path}."));
                 if added_has_attr && !added_has_prefix && !near_equiv {
                     critiques.push(format!(
                         "**ACCESS-PATH-MISS**: Directive listed access path `{}` \
@@ -211,11 +208,7 @@ fn main() -> Result<()> {
                     if df.ends_with(tf.as_str()) || tf.ends_with(df.as_str()) {
                         let max_lo = (*hs).max(*ts);
                         let min_hi = (*he).min(*te);
-                        let dist = if max_lo <= min_hi {
-                            0
-                        } else {
-                            max_lo - min_hi
-                        };
+                        let dist = if max_lo <= min_hi { 0 } else { max_lo - min_hi };
                         if dist <= 10 {
                             any_close = true;
                             break;
@@ -350,7 +343,13 @@ fn parse_directive(text: &str) -> DirectiveTargets {
             access_paths.insert(c.get(1).unwrap().as_str().to_string());
         }
     }
-    DirectiveTargets { qnames, qname_tails, files, line_ranges, access_paths }
+    DirectiveTargets {
+        qnames,
+        qname_tails,
+        files,
+        line_ranges,
+        access_paths,
+    }
 }
 
 fn parse_diff(text: &str) -> DiffShape {
@@ -376,8 +375,14 @@ fn parse_diff(text: &str) -> DiffShape {
         if let Some(c) = hunk_re.captures(line) {
             if let Some(f) = &cur_file {
                 let start: u32 = c.get(1).unwrap().as_str().parse().unwrap_or(0);
-                let count: u32 = c.get(2).map(|m| m.as_str().parse().unwrap_or(1)).unwrap_or(1);
-                let ctx = c.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+                let count: u32 = c
+                    .get(2)
+                    .map(|m| m.as_str().parse().unwrap_or(1))
+                    .unwrap_or(1);
+                let ctx = c
+                    .get(3)
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default();
                 hunks.push((f.clone(), start, start + count - 1, ctx));
             }
             continue;
@@ -394,5 +399,10 @@ fn parse_diff(text: &str) -> DiffShape {
             }
         }
     }
-    DiffShape { files, hunks, added_text, removed_text }
+    DiffShape {
+        files,
+        hunks,
+        added_text,
+        removed_text,
+    }
 }

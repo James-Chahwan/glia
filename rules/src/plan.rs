@@ -278,10 +278,17 @@ pub(crate) fn plan_stratum(
     stratum: usize,
     size: &dyn Fn(PredId) -> Option<usize>,
 ) -> StratumPlan {
-    let Some(st) = an.strata.get(stratum) else { return StratumPlan::default() };
+    let Some(st) = an.strata.get(stratum) else {
+        return StratumPlan::default();
+    };
     let own = st.preds.as_slice();
     let masked = |p: PredId| if own.contains(&p) { None } else { size(p) };
-    let mut planner = Planner { an, catalog, own, slots: 0 };
+    let mut planner = Planner {
+        an,
+        catalog,
+        own,
+        slots: 0,
+    };
     let mut out = StratumPlan::default();
     for rule in an.rules.iter().filter(|r| own.contains(&r.head)) {
         if rule.aggs.is_empty() {
@@ -289,12 +296,23 @@ pub(crate) fn plan_stratum(
         } else {
             let (steps, project, spec) = planner.aggregate(rule, &masked);
             out.agg = Some(spec);
-            let variant = Variant { delta: None, steps, head: project };
-            out.rules.push(RulePlan { rule: rule.index, variants: vec![variant] });
+            let variant = Variant {
+                delta: None,
+                steps,
+                head: project,
+            };
+            out.rules.push(RulePlan {
+                rule: rule.index,
+                variants: vec![variant],
+            });
         }
     }
     out.multi_slots = planner.slots;
-    let lists = out.rules.iter_mut().flat_map(|r| r.variants.iter_mut()).map(|v| &mut v.steps);
+    let lists = out
+        .rules
+        .iter_mut()
+        .flat_map(|r| r.variants.iter_mut())
+        .map(|v| &mut v.steps);
     out.indexes = assign_indexes(an, lists, Some(own));
     out
 }
@@ -307,17 +325,32 @@ pub(crate) fn plan_aggregate(
     rule: usize,
     size: &dyn Fn(PredId) -> Option<usize>,
 ) -> Option<AggPlan> {
-    let r = an.rules.iter().find(|r| r.index == rule).filter(|r| !r.aggs.is_empty())?;
+    let r = an
+        .rules
+        .iter()
+        .find(|r| r.index == rule)
+        .filter(|r| !r.aggs.is_empty())?;
     let own: &[PredId] = an
         .preds
         .get(r.head as usize)
         .and_then(|p| an.strata.get(p.stratum))
         .map_or(&[], |s| s.preds.as_slice());
     let masked = |p: PredId| if own.contains(&p) { None } else { size(p) };
-    let mut planner = Planner { an, catalog, own, slots: 0 };
+    let mut planner = Planner {
+        an,
+        catalog,
+        own,
+        slots: 0,
+    };
     let (mut steps, project, spec) = planner.aggregate(r, &masked);
     let indexes = assign_indexes(an, std::iter::once(&mut steps), Some(own));
-    Some(AggPlan { steps, project, spec, indexes, multi_slots: planner.slots })
+    Some(AggPlan {
+        steps,
+        project,
+        spec,
+        indexes,
+        multi_slots: planner.slots,
+    })
 }
 
 /// The explain plan of rule `rule` (a `CRule::index`) with `bound[v]` marking the
@@ -333,10 +366,16 @@ pub(crate) fn plan_bound(
     let Some(r) = an.rules.iter().find(|r| r.index == rule) else {
         return (Vec::new(), Vec::new());
     };
-    let mut b: Vec<bool> =
-        (0..usize::from(r.nvars)).map(|v| bound.get(v).copied().unwrap_or(false)).collect();
+    let mut b: Vec<bool> = (0..usize::from(r.nvars))
+        .map(|v| bound.get(v).copied().unwrap_or(false))
+        .collect();
     let order = sips_order(r, &an.preds, catalog, &b, None, &|_| None);
-    let mut planner = Planner { an, catalog, own: &[], slots: 0 };
+    let mut planner = Planner {
+        an,
+        catalog,
+        own: &[],
+        slots: 0,
+    };
     let (mut steps, _) = planner.body(r, &order, &mut b, &|_| Src::All, false);
     let indexes = assign_indexes(an, std::iter::once(&mut steps), None);
     (steps, indexes)
@@ -395,7 +434,11 @@ fn assign_indexes<'s>(
         });
     }
     if let Some(own) = identity_of {
-        let read: Vec<PredId> = out.iter().map(|(p, _)| *p).chain(own.iter().copied()).collect();
+        let read: Vec<PredId> = out
+            .iter()
+            .map(|(p, _)| *p)
+            .chain(own.iter().copied())
+            .collect();
         for p in read {
             let arity = an.preds.get(p as usize).map_or(0, |i| i.arity);
             out.push((p, (0..arity).map(col).collect()));
@@ -405,9 +448,15 @@ fn assign_indexes<'s>(
     out.dedup();
     for steps in lists {
         visit(steps, &mut |s| {
-            if let Step::Scan { pred, perm, index, .. }
-            | Step::Lookup { pred, perm, index, .. }
-            | Step::Neg { pred, perm, index, .. } = s
+            if let Step::Scan {
+                pred, perm, index, ..
+            }
+            | Step::Lookup {
+                pred, perm, index, ..
+            }
+            | Step::Neg {
+                pred, perm, index, ..
+            } = s
                 && let Ok(at) = out.binary_search_by(|(p, q)| (p, q).cmp(&(pred, perm)))
             {
                 *index = at;
@@ -501,9 +550,24 @@ fn relation(pred: PredId, terms: &[CTerm], bound: &mut [bool], src: Src) -> Step
     let (binds, checks) = free_columns(terms, &free);
     mark_all(terms, bound);
     if key.is_empty() {
-        Step::Scan { pred, index: 0, perm, binds, checks, src }
+        Step::Scan {
+            pred,
+            index: 0,
+            perm,
+            binds,
+            checks,
+            src,
+        }
     } else {
-        Step::Lookup { pred, index: 0, perm, key, binds, checks, src }
+        Step::Lookup {
+            pred,
+            index: 0,
+            perm,
+            key,
+            binds,
+            checks,
+            src,
+        }
     }
 }
 
@@ -572,7 +636,10 @@ impl Planner<'_> {
     }
 
     fn is_reaches(&self, b: usize) -> bool {
-        self.catalog.builtins.get(b).is_some_and(|d| d.kind == BuiltinKind::Reaches)
+        self.catalog
+            .builtins
+            .get(b)
+            .is_some_and(|d| d.kind == BuiltinKind::Reaches)
     }
 
     /// A positive atom of a relation (IDB or EDB).
@@ -622,7 +689,12 @@ impl Planner<'_> {
                 },
                 _ => {
                     let (key, perm, _) = keyed(terms, bound);
-                    Step::Neg { pred: *p, index: 0, perm, key }
+                    Step::Neg {
+                        pred: *p,
+                        index: 0,
+                        perm,
+                        key,
+                    }
                 }
             }),
             CLit::Cmp(op, l, r, _) => comparison(*op, l, r, bound),
@@ -634,7 +706,11 @@ impl Planner<'_> {
         let cats = closure_set(self.catalog, b, terms);
         let reach = self.is_reaches(b);
         // A reaches call's columns past the two ends are constants.
-        let span = if reach { terms.len().min(2) } else { terms.len() };
+        let span = if reach {
+            terms.len().min(2)
+        } else {
+            terms.len()
+        };
         let free: Vec<usize> = (0..span).filter(|&c| !is_bound(&terms[c], bound)).collect();
         let (binds, checks) = free_columns(terms, &free);
         let step = if reach {
@@ -649,7 +725,14 @@ impl Planner<'_> {
             }
         } else {
             let args = terms.iter().map(|t| bound_part(Some(t), bound)).collect();
-            Step::Call { builtin: b, cats, args, binds, checks, src }
+            Step::Call {
+                builtin: b,
+                cats,
+                args,
+                binds,
+                checks,
+                src,
+            }
         };
         mark_all(terms, bound);
         step
@@ -664,8 +747,12 @@ impl Planner<'_> {
         live: &[bool],
         steps: &mut Vec<Step>,
     ) -> Option<Step> {
-        let CLit::Pos(p, terms, _) = lit else { return None };
-        let Some(PredKind::Builtin(b)) = self.kind(*p) else { return None };
+        let CLit::Pos(p, terms, _) = lit else {
+            return None;
+        };
+        let Some(PredKind::Builtin(b)) = self.kind(*p) else {
+            return None;
+        };
         if !self.is_reaches(b) || steps.is_empty() {
             return None;
         }
@@ -675,7 +762,9 @@ impl Planner<'_> {
             (false, true) => (y, x, true),
             _ => return None,
         };
-        let (CTerm::Var(seed_var), CTerm::Var(bind)) = (source, other) else { return None };
+        let (CTerm::Var(seed_var), CTerm::Var(bind)) = (source, other) else {
+            return None;
+        };
         if bound.iter().zip(live).any(|(b, l)| *b && *l) {
             return None;
         }
@@ -721,7 +810,9 @@ impl Planner<'_> {
         let mut folded = None;
         let mut complete = true;
         for (k, &i) in order.iter().enumerate() {
-            let Some(lit) = rule.body.get(i) else { continue };
+            let Some(lit) = rule.body.get(i) else {
+                continue;
+            };
             if hoist
                 && complete
                 && let Some(multi) = self.hoist(lit, bound, &live[k], &mut steps)
@@ -751,17 +842,29 @@ impl Planner<'_> {
         let (base, folded) = self.body(rule, &base_order, &mut vec![false; n], &|_| Src::All, true);
         let mut variants = Vec::new();
         let Some(k) = folded else {
-            variants.push(Variant { delta: None, steps: base, head: head.clone() });
-            let capable: Vec<usize> =
-                (0..len).filter(|&d| self.delta_capable(&rule.body[d])).collect();
+            variants.push(Variant {
+                delta: None,
+                steps: base,
+                head: head.clone(),
+            });
+            let capable: Vec<usize> = (0..len)
+                .filter(|&d| self.delta_capable(&rule.body[d]))
+                .collect();
             for d in capable {
                 let first = self.is_relation(&rule.body[d]).then_some(d);
                 let order = sips_order(rule, preds, catalog, &[], first, size);
                 let src = move |j: usize| assign(j, d);
                 let (steps, _) = self.body(rule, &order, &mut vec![false; n], &src, false);
-                variants.push(Variant { delta: Some(d), steps, head: head.clone() });
+                variants.push(Variant {
+                    delta: Some(d),
+                    steps,
+                    head: head.clone(),
+                });
             }
-            return RulePlan { rule: rule.index, variants };
+            return RulePlan {
+                rule: rule.index,
+                variants,
+            };
         };
         // The composite: base[0], folding every literal up to base_order[k].
         let r = base_order[k];
@@ -772,9 +875,14 @@ impl Planner<'_> {
             mark_lit(&rule.body[i], &mut cbound);
         }
         let composite = base.first().cloned();
-        variants.push(Variant { delta: None, steps: base, head: head.clone() });
-        let mut deltas: Vec<usize> =
-            (0..len).filter(|&d| !member[d] && self.delta_capable(&rule.body[d])).collect();
+        variants.push(Variant {
+            delta: None,
+            steps: base,
+            head: head.clone(),
+        });
+        let mut deltas: Vec<usize> = (0..len)
+            .filter(|&d| !member[d] && self.delta_capable(&rule.body[d]))
+            .collect();
         deltas.push(r);
         deltas.sort_unstable();
         for d in deltas {
@@ -790,9 +898,16 @@ impl Planner<'_> {
             }
             let (rest, _) = self.body(rule, &order, &mut cbound.clone(), &src, false);
             steps.extend(rest);
-            variants.push(Variant { delta: Some(d), steps, head: head.clone() });
+            variants.push(Variant {
+                delta: Some(d),
+                steps,
+                head: head.clone(),
+            });
         }
-        RulePlan { rule: rule.index, variants }
+        RulePlan {
+            rule: rule.index,
+            variants,
+        }
     }
 
     /// An aggregate rule's body plan, its projection and its spec.
@@ -835,7 +950,15 @@ impl Planner<'_> {
             ops.push((*op, cols));
         }
         project.extend(aggregated.into_iter().map(KeyPart::Var));
-        (steps, project, AggSpec { group, ops, out_order })
+        (
+            steps,
+            project,
+            AggSpec {
+                group,
+                ops,
+                out_order,
+            },
+        )
     }
 }
 
@@ -914,12 +1037,14 @@ mod tests {
 
     fn pid(an: &Analysis, name: &str) -> PredId {
         let p = an.preds.iter().position(|p| p.name == name);
-        p.map(|p| p as PredId).unwrap_or_else(|| panic!("no predicate {name}"))
+        p.map(|p| p as PredId)
+            .unwrap_or_else(|| panic!("no predicate {name}"))
     }
 
     fn var(an: &Analysis, rule: usize, name: &str) -> u16 {
         let v = an.rules[rule].var_names.iter().position(|n| n == name);
-        v.map(|v| v as u16).unwrap_or_else(|| panic!("no variable {name} in rule {rule}"))
+        v.map(|v| v as u16)
+            .unwrap_or_else(|| panic!("no variable {name} in rule {rule}"))
     }
 
     fn stratum(an: &Analysis, name: &str) -> usize {
@@ -1040,7 +1165,12 @@ mod tests {
         // Sorted, deduplicated, with every read and defined predicate's identity.
         assert_eq!(
             plan.indexes,
-            vec![(vp, vec![0, 1]), (edge, vec![0, 1, 2]), (edge, vec![2, 0, 1]), (carry, vec![0])]
+            vec![
+                (vp, vec![0, 1]),
+                (edge, vec![0, 1, 2]),
+                (edge, vec![2, 0, 1]),
+                (carry, vec![0])
+            ]
         );
         assert_eq!((plan.multi_slots, &plan.agg), (0, &None));
     }
@@ -1048,7 +1178,11 @@ mod tests {
     #[test]
     fn variants_and_sources() {
         let (an, c) = analysed(vec![
-            rule("tc", vec![v("x"), v("y")], vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])]),
+            rule(
+                "tc",
+                vec![v("x"), v("y")],
+                vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])],
+            ),
             rule(
                 "tc",
                 vec![v("x"), v("z")],
@@ -1115,7 +1249,12 @@ mod tests {
             ]
         );
         // The first round of the first level reads everything whole.
-        assert!(variant(rp, None).steps.iter().all(|s| src_of(s) == Some(Src::All)));
+        assert!(
+            variant(rp, None)
+                .steps
+                .iter()
+                .all(|s| src_of(s) == Some(Src::All))
+        );
         // The base rule's one EDB literal is its only delta.
         assert_eq!(deltas(rule_plan(&plan, 0)), [None, Some(0)]);
     }
@@ -1135,7 +1274,11 @@ mod tests {
         let (an, c) = analysed(vec![looked_up("ROUTE"), looked_up("MODULE")]);
         let plan = plan_of(&an, &c, "p");
         let edge = pid(&an, "edge");
-        let by_col_1 = plan.indexes.iter().filter(|(p, q)| *p == edge && q == &[1, 0, 2]).count();
+        let by_col_1 = plan
+            .indexes
+            .iter()
+            .filter(|(p, q)| *p == edge && q == &[1, 0, 2])
+            .count();
         assert_eq!(by_col_1, 1, "{:?}", plan.indexes);
         let at = ix(&plan.indexes, edge, &[1, 0, 2]);
         for r in 0..2 {
@@ -1146,8 +1289,12 @@ mod tests {
             );
             assert!(hit, "{:?}", none.steps);
         }
-        let edges: Vec<&Vec<u8>> =
-            plan.indexes.iter().filter(|(p, _)| *p == edge).map(|(_, q)| q).collect();
+        let edges: Vec<&Vec<u8>> = plan
+            .indexes
+            .iter()
+            .filter(|(p, _)| *p == edge)
+            .map(|(_, q)| q)
+            .collect();
         assert_eq!(edges, [&vec![0, 1, 2], &vec![1, 0, 2]]);
     }
 
@@ -1193,7 +1340,10 @@ mod tests {
         let rp = rule_plan(&plan, 0);
         // The composite is one delta-capable literal at its reaches literal's index.
         assert_eq!(deltas(rp), [None, Some(1)]);
-        assert_eq!(variant(rp, None).steps, vec![multi(Src::All), after.clone()]);
+        assert_eq!(
+            variant(rp, None).steps,
+            vec![multi(Src::All), after.clone()]
+        );
         assert_eq!(variant(rp, Some(1)).steps, vec![multi(Src::Delta), after]);
         assert_eq!(plan.multi_slots, 1);
     }
@@ -1203,7 +1353,10 @@ mod tests {
         let (an, c) = analysed(vec![rule(
             "pair",
             vec![v("a"), v("b")],
-            vec![pos("in_scope", vec![v("a"), s("cli")]), pos("reaches", vec![v("a"), v("b")])],
+            vec![
+                pos("in_scope", vec![v("a"), s("cli")]),
+                pos("reaches", vec![v("a"), v("b")]),
+            ],
         )]);
         let plan = plan_of(&an, &c, "pair");
         let (a, b) = (var(&an, 0, "a"), var(&an, 0, "b"));
@@ -1222,7 +1375,13 @@ mod tests {
         );
         // reaches is tiered, so the per-binding call is a delta of its own.
         assert_eq!(deltas(rp), [None, Some(1)]);
-        assert!(matches!(variant(rp, Some(1)).steps[1], Step::Reach { src: Src::Delta, .. }));
+        assert!(matches!(
+            variant(rp, Some(1)).steps[1],
+            Step::Reach {
+                src: Src::Delta,
+                ..
+            }
+        ));
         assert_eq!(plan.multi_slots, 0);
     }
 
@@ -1310,7 +1469,11 @@ mod tests {
         bound[usize::from(a)] = true;
         bound[usize::from(b)] = true;
         let (steps, indexes) = plan_bound(&an, &c, 0, &bound);
-        assert!(steps.iter().all(|s| src_of(s).is_none_or(|s| s == Src::All)));
+        assert!(
+            steps
+                .iter()
+                .all(|s| src_of(s).is_none_or(|s| s == Src::All))
+        );
         assert_eq!(indexes, vec![(edge, vec![0, 1, 2]), (carry, vec![0])]);
         assert_eq!(
             steps[2],
@@ -1328,11 +1491,18 @@ mod tests {
 
         // A permutation the evaluation plan never requested.
         let (an, c) = analysed(vec![
-            rule("r", vec![v("z")], vec![pos("node", vec![v("z"), s("ROUTE")])]),
             rule(
                 "r",
                 vec![v("z")],
-                vec![pos("r", vec![v("y")]), pos("edge", vec![v("y"), v("z"), s("CALLS")])],
+                vec![pos("node", vec![v("z"), s("ROUTE")])],
+            ),
+            rule(
+                "r",
+                vec![v("z")],
+                vec![
+                    pos("r", vec![v("y")]),
+                    pos("edge", vec![v("y"), v("z"), s("CALLS")]),
+                ],
             ),
         ]);
         let (rp, edge) = (pid(&an, "r"), pid(&an, "edge"));
@@ -1365,8 +1535,16 @@ mod tests {
             ]
         );
         let eval = plan_of(&an, &c, "r");
-        assert!(eval.indexes.contains(&(edge, vec![0, 2, 1])), "{:?}", eval.indexes);
-        assert!(!eval.indexes.contains(&(edge, vec![1, 2, 0])), "{:?}", eval.indexes);
+        assert!(
+            eval.indexes.contains(&(edge, vec![0, 2, 1])),
+            "{:?}",
+            eval.indexes
+        );
+        assert!(
+            !eval.indexes.contains(&(edge, vec![1, 2, 0])),
+            "{:?}",
+            eval.indexes
+        );
         // An unknown rule plans nothing.
         assert_eq!(plan_bound(&an, &c, 9, &[]), (Vec::new(), Vec::new()));
     }
@@ -1389,16 +1567,28 @@ mod tests {
         let (x, y) = (var(&an, 0, "x"), var(&an, 0, "y"));
         let agg =
             plan_aggregate(&an, &c, 0, &|_| None).unwrap_or_else(|| panic!("an aggregate plan"));
-        assert_eq!(agg.project, vec![KeyPart::Var(y), cs("calls"), KeyPart::Var(x)]);
+        assert_eq!(
+            agg.project,
+            vec![KeyPart::Var(y), cs("calls"), KeyPart::Var(x)]
+        );
         assert_eq!(
             agg.spec,
             AggSpec {
                 group: 2,
                 ops: vec![(AggOp::Count, vec![2]), (AggOp::Max, vec![2])],
-                out_order: vec![OutCol::Group(0), OutCol::Group(1), OutCol::Agg(0), OutCol::Agg(1)],
+                out_order: vec![
+                    OutCol::Group(0),
+                    OutCol::Group(1),
+                    OutCol::Agg(0),
+                    OutCol::Agg(1)
+                ],
             }
         );
-        assert!(agg.steps.iter().all(|s| src_of(s).is_none_or(|s| s == Src::All)));
+        assert!(
+            agg.steps
+                .iter()
+                .all(|s| src_of(s).is_none_or(|s| s == Src::All))
+        );
         // The stratum plan carries the same body, projection and spec as one variant.
         let plan = plan_of(&an, &c, "fan");
         let rp = rule_plan(&plan, 0);
@@ -1413,8 +1603,16 @@ mod tests {
     #[test]
     fn repeats_assignments_and_negated_builtins() {
         let (an, c) = analysed(vec![
-            rule("self_loop", vec![v("x")], vec![pos("edge", vec![v("x"), v("x"), s("CALLS")])]),
-            rule("cyc", vec![v("x")], vec![pos("reaches", vec![v("x"), v("x"), s("CALLS")])]),
+            rule(
+                "self_loop",
+                vec![v("x")],
+                vec![pos("edge", vec![v("x"), v("x"), s("CALLS")])],
+            ),
+            rule(
+                "cyc",
+                vec![v("x")],
+                vec![pos("reaches", vec![v("x"), v("x"), s("CALLS")])],
+            ),
             rule(
                 "w",
                 vec![v("x"), v("z")],
@@ -1435,7 +1633,9 @@ mod tests {
             ),
         ]);
         let first = |head: &str, rule: usize| {
-            variant(rule_plan(&plan_of(&an, &c, head), rule), None).steps.clone()
+            variant(rule_plan(&plan_of(&an, &c, head), rule), None)
+                .steps
+                .clone()
         };
         let x0 = var(&an, 0, "x");
         assert!(matches!(
@@ -1461,7 +1661,13 @@ mod tests {
         let w = first("w", 2);
         // Analysis rejects `x != _` (DA.16), so no comparison here holds a `_`.
         assert_eq!(w.len(), 2, "{w:?}");
-        assert_eq!(w[1], Step::Assign { var: z2, from: KeyPart::Var(x2) });
+        assert_eq!(
+            w[1],
+            Step::Assign {
+                var: z2,
+                from: KeyPart::Var(x2)
+            }
+        );
         let (x3, t3) = (var(&an, 3, "x"), var(&an, 3, "t"));
         // `!reaches(x, _, ..)` is a filter once node binds x, so it runs before cell.
         let quiet = first("quiet", 3);
@@ -1535,13 +1741,21 @@ mod tests {
     fn hoist_needs_complete_input_and_resolve_reaches_seeds() {
         // r's own atom feeds the call: the stratum is still growing, so no hoist.
         let (an, c) = analysed(vec![
-            rule("r", vec![v("b")], vec![pos("node", vec![v("b"), s("ROUTE")])]),
+            rule(
+                "r",
+                vec![v("b")],
+                vec![pos("node", vec![v("b"), s("ROUTE")])],
+            ),
             rule(
                 "r",
                 vec![v("b")],
                 vec![pos("r", vec![v("a")]), pos("reaches", vec![v("a"), v("b")])],
             ),
-            rule("seed", vec![v("a")], vec![pos("node", vec![v("a"), s("MODULE")])]),
+            rule(
+                "seed",
+                vec![v("a")],
+                vec![pos("node", vec![v("a"), s("MODULE")])],
+            ),
             rule(
                 "hit",
                 vec![v("b")],
@@ -1554,15 +1768,31 @@ mod tests {
         ]);
         let recursive = plan_of(&an, &c, "r");
         let steps = &variant(rule_plan(&recursive, 1), None).steps;
-        assert!(matches!(steps[1], Step::Reach { from: Some(_), .. }), "{steps:?}");
+        assert!(
+            matches!(steps[1], Step::Reach { from: Some(_), .. }),
+            "{steps:?}"
+        );
         assert_eq!(recursive.multi_slots, 0);
         // A lower stratum is complete: the seed folds, and node(b, _) is a delta.
         let mut plan = plan_of(&an, &c, "hit");
         let rp = rule_plan(&plan, 3);
         assert_eq!(deltas(rp), [None, Some(1), Some(2)]);
         let by_node = variant(rp, Some(2));
-        assert!(matches!(by_node.steps[0], Step::ReachMulti { slot: 0, src: Src::Old, .. }));
-        assert!(matches!(by_node.steps[1], Step::Lookup { src: Src::Delta, .. }));
+        assert!(matches!(
+            by_node.steps[0],
+            Step::ReachMulti {
+                slot: 0,
+                src: Src::Old,
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_node.steps[1],
+            Step::Lookup {
+                src: Src::Delta,
+                ..
+            }
+        ));
         // resolve maps every index, inside seeds too.
         let before = plan.clone();
         let map: Vec<usize> = (0..plan.indexes.len()).map(|i| i + 100).collect();
@@ -1601,7 +1831,11 @@ mod tests {
     #[test]
     fn own_sizes_are_unknown_and_plans_are_deterministic() {
         let (an, c) = analysed(vec![
-            rule("t", vec![v("x"), v("y")], vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])]),
+            rule(
+                "t",
+                vec![v("x"), v("y")],
+                vec![pos("edge", vec![v("x"), v("y"), s("CALLS")])],
+            ),
             rule(
                 "t",
                 vec![v("x"), v("y")],

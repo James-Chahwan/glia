@@ -841,7 +841,10 @@ fn abi_ref(ctx: &Ctx, arg: AbiArg, at: usize) -> AbiRef {
                     && !ctx.decls.iter().any(|d| d.name == name)
                     && let Some(v) = ctx.value_imports.iter().find(|v| v.local == name)
                 {
-                    let import = evm::AbiRef { name: v.name.clone(), from: v.spec.clone() };
+                    let import = evm::AbiRef {
+                        name: v.name.clone(),
+                        from: v.spec.clone(),
+                    };
                     return AbiRef::Imported(name, import);
                 }
                 AbiRef::Named(Scope::Abi(name), abi)
@@ -1829,7 +1832,11 @@ fn value_imports(source: &str, view: &str) -> Vec<ValueImport> {
                 Some(name) => name,
             };
             if is_ident(&local) {
-                out.push(ValueImport { local, name: name.to_string(), spec: spec.clone() });
+                out.push(ValueImport {
+                    local,
+                    name: name.to_string(),
+                    spec: spec.clone(),
+                });
             }
         }
     }
@@ -1846,7 +1853,11 @@ fn value_imports(source: &str, view: &str) -> Vec<ValueImport> {
             continue;
         };
         for (name, local) in destructured(view, at).unwrap_or_default() {
-            out.push(ValueImport { local, name, spec: spec.clone() });
+            out.push(ValueImport {
+                local,
+                name,
+                spec: spec.clone(),
+            });
         }
     }
     out
@@ -2849,7 +2860,12 @@ exports.OLD = ['function old()'];
             .into_iter()
             .map(|(n, e)| (n, e.iter().map(AbiEntry::to_key).collect()))
             .collect();
-        let row = |n: &str, e: &[&str]| (n.to_string(), e.iter().map(|k| k.to_string()).collect::<Vec<_>>());
+        let row = |n: &str, e: &[&str]| {
+            (
+                n.to_string(),
+                e.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+            )
+        };
         assert_eq!(
             decls,
             [
@@ -2860,8 +2876,16 @@ exports.OLD = ['function old()'];
                 row("OLD", &["f:old/0"]),
             ]
         );
-        let out = crate::evm::extract_evm_clients(src, "typescript", glia_core::NodeId(1), glia_core::RepoId(1));
-        assert!(out.nodes.is_empty() && out.markers("src/abi.ts").is_empty(), "a declaring file calls nothing");
+        let out = crate::evm::extract_evm_clients(
+            src,
+            "typescript",
+            glia_core::NodeId(1),
+            glia_core::RepoId(1),
+        );
+        assert!(
+            out.nodes.is_empty() && out.markers("src/abi.ts").is_empty(),
+            "a declaring file calls nothing"
+        );
         assert_eq!(out.abi_decls.len(), 5, "no client-library import needed");
         assert!(
             crate::evm::extract_evm_clients(src, "go", glia_core::NodeId(1), glia_core::RepoId(1))

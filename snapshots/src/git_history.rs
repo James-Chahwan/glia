@@ -32,7 +32,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use glia_code_domain::snapshots::{
-    BlameFile, HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, clean_message_counted, redact_untrusted,
+    BlameFile, HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, clean_message_counted,
+    redact_untrusted,
 };
 use serde::Serialize;
 
@@ -56,7 +57,14 @@ pub struct HistoryOptions {
 
 impl Default for HistoryOptions {
     fn default() -> Self {
-        Self { max_commits: 2000, since: None, blame: false, blame_max_files: 300, messages: true, surface: "lib" }
+        Self {
+            max_commits: 2000,
+            since: None,
+            blame: false,
+            blame_max_files: 300,
+            messages: true,
+            surface: "lib",
+        }
     }
 }
 
@@ -122,11 +130,18 @@ pub(crate) fn capture(root: &Path, opts: &HistoryOptions) -> Result<Capture, Str
     let prefix = run_git(root, &["rev-parse", "--show-prefix"])
         .map_err(|e| format!("{} is not inside a git work tree: {e}", root.display()))?;
     let relative_to = first_line(&prefix);
-    let head = run_git(root, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-        .map_err(|_| format!("{} has no commits: HEAD does not name a commit", root.display()))?;
+    let head =
+        run_git(root, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).map_err(|_| {
+            format!(
+                "{} has no commits: HEAD does not name a commit",
+                root.display()
+            )
+        })?;
     let head = first_line(&head);
     if !is_sha(head.as_bytes()) {
-        return Err(format!("git rev-parse HEAD printed {head:?}, not a commit sha"));
+        return Err(format!(
+            "git rev-parse HEAD printed {head:?}, not a commit sha"
+        ));
     }
 
     let window = Window::new(opts, &head, !relative_to.is_empty());
@@ -145,7 +160,11 @@ pub(crate) fn capture(root: &Path, opts: &HistoryOptions) -> Result<Capture, Str
         ]),
     )?;
     let commits = parse_log(&log)?;
-    let blame = if opts.blame { blame_top_files(root, &head, &commits, opts.blame_max_files)? } else { Vec::new() };
+    let blame = if opts.blame {
+        blame_top_files(root, &head, &commits, opts.blame_max_files)?
+    } else {
+        Vec::new()
+    };
     let (messages, redacted, trailers_dropped) = if opts.messages {
         let (rows, redacted, trailers) = capture_messages(root, &window, &commits)?;
         (Some(rows), redacted, trailers)
@@ -153,7 +172,14 @@ pub(crate) fn capture(root: &Path, opts: &HistoryOptions) -> Result<Capture, Str
         (None, 0, 0)
     };
     let meta = HistoryMeta::new(head, opts.max_commits, opts.since.clone(), relative_to);
-    Ok(Capture { meta, commits, blame, messages, redacted, trailers_dropped })
+    Ok(Capture {
+        meta,
+        commits,
+        blame,
+        messages,
+        redacted,
+        trailers_dropped,
+    })
 }
 
 /// The window arguments every log of one sync shares: `--max-count`, the
@@ -207,7 +233,16 @@ fn capture_messages(
     window: &Window,
     commits: &[HistoryCommit],
 ) -> Result<(Vec<HistoryMessage>, usize, usize), String> {
-    let log = run_git(root, &window.args(&["log", "-z", "--no-merges", "--no-color", "--format=%x1e%H%x1f%at%x1f%B"]))?;
+    let log = run_git(
+        root,
+        &window.args(&[
+            "log",
+            "-z",
+            "--no-merges",
+            "--no-color",
+            "--format=%x1e%H%x1f%at%x1f%B",
+        ]),
+    )?;
     let raw = parse_message_log(&log)?;
     let (labels, label_redactions) = branch_labels(root, window);
     let (mut redacted, mut trailers, mut unmatched) = (label_redactions, 0, 0);
@@ -216,16 +251,31 @@ fn capture_messages(
         let br = labels.get(&commit.c).map(|(_, label)| label.clone());
         let Some((at, message)) = raw.get(&commit.c) else {
             unmatched += 1;
-            rows.push(HistoryMessage { c: commit.c.clone(), at: 0, s: String::new(), b: String::new(), br });
+            rows.push(HistoryMessage {
+                c: commit.c.clone(),
+                at: 0,
+                s: String::new(),
+                b: String::new(),
+                br,
+            });
             continue;
         };
         let (s, b, dropped, n) = clean_message_counted(message);
         trailers += dropped;
         redacted += n;
-        rows.push(HistoryMessage { c: commit.c.clone(), at: *at, s, b, br });
+        rows.push(HistoryMessage {
+            c: commit.c.clone(),
+            at: *at,
+            s,
+            b,
+            br,
+        });
     }
     if unmatched > 0 {
-        eprintln!("[history] messages unmatched={unmatched} of {}", commits.len());
+        eprintln!(
+            "[history] messages unmatched={unmatched} of {}",
+            commits.len()
+        );
     }
     Ok((rows, redacted, trailers))
 }
@@ -247,16 +297,24 @@ pub(crate) fn parse_message_log(bytes: &[u8]) -> Result<BTreeMap<String, (i64, S
         let sha = fields.next().unwrap_or_default();
         let time = fields.next().unwrap_or_default();
         let Some(message) = fields.next() else {
-            return Err(format!("git log (messages): malformed record {:?}", lossy(&record[..record.len().min(80)])));
+            return Err(format!(
+                "git log (messages): malformed record {:?}",
+                lossy(&record[..record.len().min(80)])
+            ));
         };
         if !is_sha(sha) {
-            return Err(format!("git log (messages): malformed commit sha {:?}", lossy(sha)));
+            return Err(format!(
+                "git log (messages): malformed commit sha {:?}",
+                lossy(sha)
+            ));
         }
         let c = lossy(sha);
-        let at: i64 = lossy(time)
-            .trim()
-            .parse()
-            .map_err(|_| format!("git log (messages): commit {c} has author time {:?}", lossy(time)))?;
+        let at: i64 = lossy(time).trim().parse().map_err(|_| {
+            format!(
+                "git log (messages): commit {c} has author time {:?}",
+                lossy(time)
+            )
+        })?;
         // `-z` ends each record with a NUL.
         let mut message = message;
         while let Some(rest) = message.strip_suffix(b"\0") {
@@ -279,7 +337,10 @@ pub(crate) fn parse_message_log(bytes: &[u8]) -> Result<BTreeMap<String, (i64, S
 fn branch_labels(root: &Path, window: &Window) -> (BTreeMap<String, (usize, String)>, usize) {
     let mut best: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let (mut redacted, mut skipped) = (0, 0);
-    let log = match run_git(root, &window.args(&["log", "--merges", "--no-color", "--format=%H%x1f%P%x1f%s"])) {
+    let log = match run_git(
+        root,
+        &window.args(&["log", "--merges", "--no-color", "--format=%H%x1f%P%x1f%s"]),
+    ) {
         Ok(log) => log,
         Err(e) => {
             eprintln!("[history] branch labels skipped reason={e}");
@@ -288,13 +349,20 @@ fn branch_labels(root: &Path, window: &Window) -> (BTreeMap<String, (usize, Stri
     };
     for line in lossy(&log).lines() {
         let mut p = line.split('\x1f');
-        let (Some(_), Some(ps), Some(subj)) = (p.next(), p.next(), p.next()) else { continue };
+        let (Some(_), Some(ps), Some(subj)) = (p.next(), p.next(), p.next()) else {
+            continue;
+        };
         let ps: Vec<&str> = ps.split_whitespace().collect();
         if ps.len() < 2 {
             continue;
         }
-        let Some(label) = merge_label(subj) else { continue };
-        let side = match run_git(root, &["rev-list", "--no-merges", ps[1], &format!("^{}", ps[0])]) {
+        let Some(label) = merge_label(subj) else {
+            continue;
+        };
+        let side = match run_git(
+            root,
+            &["rev-list", "--no-merges", ps[1], &format!("^{}", ps[0])],
+        ) {
             Ok(side) => lossy(&side),
             Err(_) => {
                 skipped += 1;
@@ -306,14 +374,18 @@ fn branch_labels(root: &Path, window: &Window) -> (BTreeMap<String, (usize, Stri
         let shas: Vec<&str> = side.lines().collect();
         let n = shas.len();
         for s in shas {
-            let e = best.entry(s.to_string()).or_insert((usize::MAX, String::new()));
+            let e = best
+                .entry(s.to_string())
+                .or_insert((usize::MAX, String::new()));
             if n < e.0 {
                 *e = (n, label.clone());
             }
         }
     }
     if skipped > 0 {
-        eprintln!("[history] branch labels skipped merges={skipped} reason=a parent object is missing");
+        eprintln!(
+            "[history] branch labels skipped merges={skipped} reason=a parent object is missing"
+        );
     }
     (best, redacted)
 }
@@ -338,7 +410,12 @@ pub(crate) fn merge_label(subj: &str) -> Option<String> {
         Some((h, i)) => (h, Some(i.trim().trim_matches('\''))),
         None => (r, None),
     };
-    let head = head.split(" (").next().unwrap_or(head).trim().trim_matches('\'');
+    let head = head
+        .split(" (")
+        .next()
+        .unwrap_or(head)
+        .trim()
+        .trim_matches('\'');
     if head.is_empty() {
         return None;
     }
@@ -356,7 +433,10 @@ pub(crate) fn summarize(cap: &Capture) -> HistorySummary {
     let (mut renames, mut binary) = (0, 0);
     for commit in &cap.commits {
         for file in &commit.files {
-            let current = alias.get(file.p.as_str()).copied().unwrap_or(file.p.as_str());
+            let current = alias
+                .get(file.p.as_str())
+                .copied()
+                .unwrap_or(file.p.as_str());
             files.insert(current);
             if let Some(old) = file.from.as_deref() {
                 renames += 1;
@@ -378,7 +458,10 @@ pub(crate) fn summarize(cap: &Capture) -> HistorySummary {
         messages: cap.messages.as_ref().map_or(0, Vec::len),
         redacted: cap.redacted,
         trailers_dropped: cap.trailers_dropped,
-        branch_labels: cap.messages.as_ref().map_or(0, |m| m.iter().filter(|r| r.br.is_some()).count()),
+        branch_labels: cap
+            .messages
+            .as_ref()
+            .map_or(0, |m| m.iter().filter(|r| r.br.is_some()).count()),
     }
 }
 
@@ -427,7 +510,9 @@ fn first_line(bytes: &[u8]) -> String {
 
 /// A full SHA-1 or SHA-256 object name.
 fn is_sha(s: &[u8]) -> bool {
-    (s.len() == 40 || s.len() == 64) && s.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    (s.len() == 40 || s.len() == 64)
+        && s.iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
 fn lossy(bytes: &[u8]) -> String {
@@ -446,13 +531,19 @@ pub(crate) fn parse_log(bytes: &[u8]) -> Result<Vec<HistoryCommit>, String> {
     }
     let mut commits = Vec::new();
     for record in records {
-        let header_len = record.iter().position(|b| *b == 0 || *b == b'\n').unwrap_or(record.len());
+        let header_len = record
+            .iter()
+            .position(|b| *b == 0 || *b == b'\n')
+            .unwrap_or(record.len());
         let (header, rest) = record.split_at(header_len);
         let mut fields = header.split(|b| *b == 0x1f);
         let sha = fields.next().unwrap_or_default();
         let time = fields.next().unwrap_or_default();
         if !is_sha(sha) || fields.next().is_some() {
-            return Err(format!("git log: malformed commit header {:?}", lossy(header)));
+            return Err(format!(
+                "git log: malformed commit header {:?}",
+                lossy(header)
+            ));
         }
         let c = lossy(sha);
         let t: i64 = lossy(time)
@@ -468,22 +559,48 @@ pub(crate) fn parse_log(bytes: &[u8]) -> Result<Vec<HistoryCommit>, String> {
                 continue;
             }
             let mut parts = stat.splitn(3, |b| *b == b'\t');
-            let (Some(added), Some(deleted), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
-                return Err(format!("git log: commit {c}: unparseable numstat entry {:?}", lossy(stat)));
+            let (Some(added), Some(deleted), Some(path)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(format!(
+                    "git log: commit {c}: unparseable numstat entry {:?}",
+                    lossy(stat)
+                ));
             };
-            let a = parse_count(added).ok_or_else(|| format!("git log: commit {c}: bad added count {:?}", lossy(added)))?;
-            let d = parse_count(deleted).ok_or_else(|| format!("git log: commit {c}: bad deleted count {:?}", lossy(deleted)))?;
+            let a = parse_count(added).ok_or_else(|| {
+                format!("git log: commit {c}: bad added count {:?}", lossy(added))
+            })?;
+            let d = parse_count(deleted).ok_or_else(|| {
+                format!(
+                    "git log: commit {c}: bad deleted count {:?}",
+                    lossy(deleted)
+                )
+            })?;
             if path.is_empty() {
                 // A rename: the source and destination follow as their own tokens.
                 let (Some(old), Some(new)) = (tokens.next(), tokens.next()) else {
-                    return Err(format!("git log: commit {c}: rename entry without both paths"));
+                    return Err(format!(
+                        "git log: commit {c}: rename entry without both paths"
+                    ));
                 };
                 if old.is_empty() || new.is_empty() {
-                    return Err(format!("git log: commit {c}: rename entry with an empty path"));
+                    return Err(format!(
+                        "git log: commit {c}: rename entry with an empty path"
+                    ));
                 }
-                files.push(HistoryFile { p: lossy(new), a, d, from: Some(lossy(old)) });
+                files.push(HistoryFile {
+                    p: lossy(new),
+                    a,
+                    d,
+                    from: Some(lossy(old)),
+                });
             } else {
-                files.push(HistoryFile { p: lossy(path), a, d, from: None });
+                files.push(HistoryFile {
+                    p: lossy(path),
+                    a,
+                    d,
+                    from: None,
+                });
             }
         }
         commits.push(HistoryCommit { c, t, files });
@@ -507,7 +624,9 @@ fn parse_count(field: &[u8]) -> Option<Option<u32>> {
     if field.is_empty() || !field.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let n = field.iter().fold(0u64, |n, b| n.saturating_mul(10).saturating_add(u64::from(b - b'0')));
+    let n = field.iter().fold(0u64, |n, b| {
+        n.saturating_mul(10).saturating_add(u64::from(b - b'0'))
+    });
     Some(Some(u32::try_from(n).unwrap_or(u32::MAX)))
 }
 
@@ -526,7 +645,9 @@ fn blame_top_files(
         for file in &commit.files {
             *touched.entry(file.p.as_str()).or_default() += 1;
             // Commits run newest first, so the first entry is the file's latest state.
-            binary_now.entry(file.p.as_str()).or_insert(file.a.is_none() || file.d.is_none());
+            binary_now
+                .entry(file.p.as_str())
+                .or_insert(file.a.is_none() || file.d.is_none());
         }
     }
     let at_head = blobs_at(root, head)?;
@@ -539,9 +660,13 @@ fn blame_top_files(
 
     let mut out = Vec::with_capacity(ranked.len());
     for (path, _) in ranked {
-        let blamed = run_git(root, &["blame", "--porcelain", "-w", head, "--", path]).and_then(|b| parse_blame(&b));
+        let blamed = run_git(root, &["blame", "--porcelain", "-w", head, "--", path])
+            .and_then(|b| parse_blame(&b));
         match blamed {
-            Ok(runs) => out.push(BlameFile { p: path.to_string(), runs }),
+            Ok(runs) => out.push(BlameFile {
+                p: path.to_string(),
+                runs,
+            }),
             Err(e) => eprintln!("[history] blame skipped path={path} reason={e}"),
         }
     }
@@ -556,9 +681,14 @@ fn blobs_at(root: &Path, head: &str) -> Result<BTreeSet<String>, String> {
     let mut blobs = BTreeSet::new();
     for entry in listing.split(|b| *b == 0) {
         let mut halves = entry.splitn(2, |b| *b == b'\t');
-        let (Some(info), Some(path)) = (halves.next(), halves.next()) else { continue };
+        let (Some(info), Some(path)) = (halves.next(), halves.next()) else {
+            continue;
+        };
         let mut info = info.split(|b| *b == b' ');
-        let (mode, kind) = (info.next().unwrap_or_default(), info.next().unwrap_or_default());
+        let (mode, kind) = (
+            info.next().unwrap_or_default(),
+            info.next().unwrap_or_default(),
+        );
         if kind == b"blob" && (mode == b"100644" || mode == b"100755") {
             blobs.insert(lossy(path));
         }
@@ -624,31 +754,53 @@ mod tests {
     const SHA_C: &str = "158f1bc7092ca345693cd686f51518c4f0e0907d";
 
     fn file(p: &str, a: Option<u32>, d: Option<u32>, from: Option<&str>) -> HistoryFile {
-        HistoryFile { p: p.into(), a, d, from: from.map(str::to_string) }
+        HistoryFile {
+            p: p.into(),
+            a,
+            d,
+            from: from.map(str::to_string),
+        }
     }
 
     #[test]
     fn parses_renames_binaries_and_empty_commits() {
         let mut raw = Vec::new();
-        raw.extend_from_slice(format!("\x1e{SHA_A}\x1f1767571200\0\n0\t0\t\0svc/c.py\0svc/c2.py\0").as_bytes());
+        raw.extend_from_slice(
+            format!("\x1e{SHA_A}\x1f1767571200\0\n0\t0\t\0svc/c.py\0svc/c2.py\0").as_bytes(),
+        );
         raw.extend_from_slice(format!("\x1e{SHA_B}\x1f1767484800\0").as_bytes());
-        raw.extend_from_slice(format!("\x1e{SHA_C}\x1f1767225600\0\n2\t0\tsvc/a.py\0-\t-\timg\tx.png\0").as_bytes());
+        raw.extend_from_slice(
+            format!("\x1e{SHA_C}\x1f1767225600\0\n2\t0\tsvc/a.py\0-\t-\timg\tx.png\0").as_bytes(),
+        );
         let commits = parse_log(&raw).unwrap();
         assert_eq!(commits.len(), 3);
         assert_eq!(commits[0].c, SHA_A);
         assert_eq!(commits[0].t, 1767571200);
-        assert_eq!(commits[0].files, [file("svc/c2.py", Some(0), Some(0), Some("svc/c.py"))]);
-        assert!(commits[1].files.is_empty(), "an empty commit keeps its record");
+        assert_eq!(
+            commits[0].files,
+            [file("svc/c2.py", Some(0), Some(0), Some("svc/c.py"))]
+        );
+        assert!(
+            commits[1].files.is_empty(),
+            "an empty commit keeps its record"
+        );
         // A tab inside a path survives: only the first two tabs split.
         assert_eq!(
             commits[2].files,
-            [file("svc/a.py", Some(2), Some(0), None), file("img\tx.png", None, None, None)]
+            [
+                file("svc/a.py", Some(2), Some(0), None),
+                file("img\tx.png", None, None, None)
+            ]
         );
     }
 
     #[test]
     fn odd_bytes_degrade_and_malformed_output_errors_without_panicking() {
-        let raw = [format!("\x1e{SHA_A}\x1f1\0\n1\t0\t").into_bytes(), b"caf\xe9.py\0".to_vec()].concat();
+        let raw = [
+            format!("\x1e{SHA_A}\x1f1\0\n1\t0\t").into_bytes(),
+            b"caf\xe9.py\0".to_vec(),
+        ]
+        .concat();
         let commits = parse_log(&raw).unwrap();
         assert_eq!(commits[0].files[0].p, "caf\u{fffd}.py");
         assert_eq!(parse_log(b"").unwrap(), Vec::<HistoryCommit>::new());
@@ -688,7 +840,10 @@ mod tests {
             ("Merge branch 'feat-x'", Some("feat-x")),
             ("Merge branch 'feat-x' into main", Some("feat-x")),
             ("Merge branch 'lane' into wave", Some("lane")),
-            ("Merge remote-tracking branch 'origin/fix-z'", Some("origin/fix-z")),
+            (
+                "Merge remote-tracking branch 'origin/fix-z'",
+                Some("origin/fix-z"),
+            ),
             ("Merge lane-3 into wave-2", Some("lane-3@wave-2")),
             ("Merge lane-3 into main", Some("lane-3")),
             ("Merge lane-3 into 'master'", Some("lane-3")),
@@ -708,9 +863,18 @@ mod tests {
         let got = parse_message_log(raw.as_bytes()).unwrap();
         assert_eq!(got.get(SHA_A), Some(&(1700, "subj\n\nbody\n".to_string())));
         assert_eq!(got.get(SHA_B), Some(&(1600, String::new())));
-        let odd = [format!("\x1e{SHA_A}\x1f1\x1fcaf").into_bytes(), b"\xe9\0".to_vec()].concat();
+        let odd = [
+            format!("\x1e{SHA_A}\x1f1\x1fcaf").into_bytes(),
+            b"\xe9\0".to_vec(),
+        ]
+        .concat();
         assert_eq!(parse_message_log(&odd).unwrap()[SHA_A].1, "caf\u{fffd}");
-        for bad in ["junk\x1e".to_string(), format!("\x1e{SHA_A}\x1f1"), "\x1enope\x1f1\x1fm".to_string(), format!("\x1e{SHA_A}\x1fx\x1fm")] {
+        for bad in [
+            "junk\x1e".to_string(),
+            format!("\x1e{SHA_A}\x1f1"),
+            "\x1enope\x1f1\x1fm".to_string(),
+            format!("\x1e{SHA_A}\x1fx\x1fm"),
+        ] {
             assert!(parse_message_log(bad.as_bytes()).is_err(), "{bad:?}");
         }
     }

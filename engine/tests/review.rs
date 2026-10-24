@@ -1198,11 +1198,20 @@ fn model_break_is_advisory() {
     let m = &r.model_breaks[0];
     assert_eq!(
         (m.pairing, m.status, m.tier, m.blocking, m.changes[0].rule),
-        ("http_model", "breaking", "derived", false, "json_name_changed")
+        (
+            "http_model",
+            "breaking",
+            "derived",
+            false,
+            "json_name_changed"
+        )
     );
     assert_eq!(r.counts.model_breaks, 1);
     assert!(!r.blocking, "an advisory model break does not block");
-    assert!(r.new_violations.is_empty() && r.check_errors.is_empty(), "{r:#?}");
+    assert!(
+        r.new_violations.is_empty() && r.check_errors.is_empty(),
+        "{r:#?}"
+    );
     let text = md(&r);
     let headline = text.lines().nth(1).expect("a headline");
     assert!(
@@ -1218,7 +1227,10 @@ fn model_break_is_advisory() {
     let json: serde_json::Value = serde_json::from_str(&json(&r)).expect("JSON");
     assert_eq!(json["model_breaks"][0]["pairing"], "http_model");
     assert_eq!(json["counts"]["model_breaks"], 1);
-    assert!(json.get("unanchored").is_none(), "no rule checks nothing: {json}");
+    assert!(
+        json.get("unanchored").is_none(),
+        "no rule checks nothing: {json}"
+    );
 }
 
 /// (2) `models_min_tier` `derived` makes the derived pairing's break block:
@@ -1232,7 +1244,9 @@ fn models_min_tier_derived_blocks() {
     assert!(r.model_breaks[0].blocking);
     let text = md(&r);
     assert!(
-        text.lines().nth(1).is_some_and(|h| h.ends_with(" | 1 model break(s)")),
+        text.lines()
+            .nth(1)
+            .is_some_and(|h| h.ends_with(" | 1 model break(s)")),
         "{text}"
     );
     assert!(
@@ -1248,7 +1262,10 @@ fn an_unknown_models_min_tier_is_refused_before_building() {
     let mut args = ReviewArgs::default();
     args.models_min_tier = "heuristic";
     let err = review_vs_rev("/nonexistent/dt1p", "HEAD", &args).expect_err("bad tier");
-    assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
+    assert_eq!(
+        err,
+        "unknown models min tier `heuristic`: expected one of fact, derived"
+    );
 }
 
 /// (4) A change with no model exchange: no model row, the pre-DT.1p report.
@@ -1259,7 +1276,11 @@ fn no_model_exchange_keeps_the_report() {
     let r = run(&repo);
     assert!(r.model_breaks.is_empty());
     assert_eq!(r.counts.model_breaks, 0);
-    assert_eq!(md(&r), GOLDEN_NEW, "no model break: no headline suffix, no section");
+    assert_eq!(
+        md(&r),
+        GOLDEN_NEW,
+        "no model break: no headline suffix, no section"
+    );
 }
 
 /// A version-1 forbid_edge whose `from` scope (`webs`) holds no located node;
@@ -1282,7 +1303,11 @@ fn a_rule_that_checks_nothing_is_listed_not_an_error() {
     let repo = committed_rules(WEBS_DIRECT, &[]);
     repo.write("web/app.py", SHOW_AND_F);
     let r = run(&repo);
-    assert!(r.check_errors.is_empty(), "not a rule error: {:#?}", r.check_errors);
+    assert!(
+        r.check_errors.is_empty(),
+        "not a rule error: {:#?}",
+        r.check_errors
+    );
     assert_eq!(
         r.unanchored
             .iter()
@@ -1332,16 +1357,27 @@ fn a_rules_caveats_print_once_per_section() {
         r.new_violations
     );
     let per_row = r.new_violations[0].caveats.len();
-    assert!(per_row > 0 && r.new_violations[1].caveats.len() == per_row, "{:#?}", r.new_violations);
+    assert!(
+        per_row > 0 && r.new_violations[1].caveats.len() == per_row,
+        "{:#?}",
+        r.new_violations
+    );
     let text = md(&r);
     let blocks: Vec<&str> = text.split("\n\n").filter(|b| b.starts_with("⚠ ")).collect();
-    assert_eq!(blocks.len(), 1, "one caveat paragraph for the rule:\n{text}");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "one caveat paragraph for the rule:\n{text}"
+    );
     assert_eq!(blocks[0].lines().count(), per_row.min(5), "{text}");
     let second = text
         .split("_subject: `services::api::handlers::third_unused`")
         .nth(1)
         .expect("the second violation");
-    assert!(!second.split("### ").next().unwrap_or("").contains("⚠ "), "{text}");
+    assert!(
+        !second.split("### ").next().unwrap_or("").contains("⚠ "),
+        "{text}"
+    );
     let fold = caveat_fold(&r);
     assert_eq!(
         (fold.rules, fold.lines, fold.folded),

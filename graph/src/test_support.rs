@@ -23,15 +23,53 @@ pub(crate) fn flow_graph() -> RepoGraph {
     let c = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::c");
     let d = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::d");
     let nodes = vec![
-        Node { id: a, repo: r, confidence: Confidence::Strong, cells: vec![] },
-        Node { id: b, repo: r, confidence: Confidence::Strong, cells: vec![] },
-        Node { id: c, repo: r, confidence: Confidence::Strong, cells: vec![] },
-        Node { id: d, repo: r, confidence: Confidence::Strong, cells: vec![] },
+        Node {
+            id: a,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        },
+        Node {
+            id: b,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        },
+        Node {
+            id: c,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        },
+        Node {
+            id: d,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        },
     ];
     let edges = vec![
-        Edge { from: a, to: b, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
-        Edge { from: b, to: c, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
-        Edge { from: d, to: c, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
+        Edge {
+            from: a,
+            to: b,
+            category: edge_category::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        },
+        Edge {
+            from: b,
+            to: c,
+            category: edge_category::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        },
+        Edge {
+            from: d,
+            to: c,
+            category: edge_category::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        },
     ];
     let mut nav = CodeNav::default();
     nav.record(a, "a", "m::a", node_kind::FUNCTION, None);

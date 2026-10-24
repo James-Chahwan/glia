@@ -37,7 +37,10 @@ pub(crate) fn escape_json(s: &str) -> String {
 /// An engine answer, as native Python objects (the convention above). Pass
 /// `serde_json::to_string(&answer)`: a serialisation error becomes a
 /// `ValueError`, as the JSON-string returns raised before LD.2.
-pub(crate) fn to_py(py: Python<'_>, json: Result<String, serde_json::Error>) -> PyResult<Py<PyAny>> {
+pub(crate) fn to_py(
+    py: Python<'_>,
+    json: Result<String, serde_json::Error>,
+) -> PyResult<Py<PyAny>> {
     let text = json.map_err(|e| PyValueError::new_err(e.to_string()))?;
     let loads = py.import("json")?.getattr("loads")?;
     Ok(loads.call1((text,))?.unbind())
@@ -73,12 +76,26 @@ mod tests {
         let text = serde_json::to_string(&v).expect("serialises");
         let field = |key: &str| -> String {
             let at = text.find(&format!("\"{key}\":")).expect("key present") + key.len() + 3;
-            text[at..].split([',', '}']).next().unwrap_or_default().to_string()
+            text[at..]
+                .split([',', '}'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
         };
         assert_eq!(field("id"), BIG_ID.to_string(), "{text}");
-        assert!(is_exact_int_literal(&field("id")), "an id must decode as an int: {text}");
-        assert_ne!((BIG_ID as f64) as u64, BIG_ID, "the f64 detour this rules out is lossy");
-        assert!(!is_exact_int_literal(&field("score")), "0.25 decodes as a float: {text}");
+        assert!(
+            is_exact_int_literal(&field("id")),
+            "an id must decode as an int: {text}"
+        );
+        assert_ne!(
+            (BIG_ID as f64) as u64,
+            BIG_ID,
+            "the f64 detour this rules out is lossy"
+        );
+        assert!(
+            !is_exact_int_literal(&field("score")),
+            "0.25 decodes as a float: {text}"
+        );
         assert_eq!(field("score"), "0.25");
         assert_eq!(field("file"), "null");
         assert!(is_exact_int_literal("-42"));
@@ -91,7 +108,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("glia-ld2-convert-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp dir");
-        std::fs::write(root.join("app.py"), "def helper(x):\n    return x + 1\n").expect("write fixture");
+        std::fs::write(root.join("app.py"), "def helper(x):\n    return x + 1\n")
+            .expect("write fixture");
         let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
@@ -104,8 +122,14 @@ mod tests {
         let text = serde_json::to_string(row).expect("serialises");
         let at = |key: &str| text.find(&format!("\"{key}\":")).unwrap_or(usize::MAX);
         let order = ["id", "qname", "name", "kind", "file", "line", "match"].map(at);
-        assert!(order[0] == 1 && order.windows(2).all(|w| w[0] < w[1]), "{text}");
-        let id_text = text["{\"id\":".len()..].split(',').next().unwrap_or_default();
+        assert!(
+            order[0] == 1 && order.windows(2).all(|w| w[0] < w[1]),
+            "{text}"
+        );
+        let id_text = text["{\"id\":".len()..]
+            .split(',')
+            .next()
+            .unwrap_or_default();
         assert!(is_exact_int_literal(id_text), "{text}");
         assert_eq!(id_text.parse::<u64>().ok(), Some(row.id), "{text}");
     }

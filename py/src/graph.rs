@@ -127,7 +127,8 @@ impl PyGraph {
     /// The live set of this graph: `entrypoint_reachable`, computed on the
     /// first call and cached (see the `live` field).
     pub(crate) fn live(&self) -> &HashSet<NodeId> {
-        self.live.get_or_init(|| glia_engine::entrypoint_reachable(&self.merged))
+        self.live
+            .get_or_init(|| glia_engine::entrypoint_reachable(&self.merged))
     }
 
     /// `self` marked with whether its build applied the overlay.
@@ -181,7 +182,11 @@ impl PyGraph {
     }
 
     fn edge_count(&self) -> usize {
-        self.merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
+        self.merged
+            .graphs
+            .iter()
+            .map(|g| g.edges.len())
+            .sum::<usize>()
             + self.merged.cross_edges.len()
     }
 
@@ -250,7 +255,10 @@ impl PyGraph {
     fn save_to_default(&self, repo_path: &str) -> PyResult<()> {
         let dir = default_layout_dir(Path::new(repo_path));
         if let Some(why) = default_dir_refusal(self.overlay_applied) {
-            return Err(PyValueError::new_err(format!("save_to_default({}): {why}", dir.display())));
+            return Err(PyValueError::new_err(format!(
+                "save_to_default({}): {why}",
+                dir.display()
+            )));
         }
         persist_graph(
             &self.merged,
@@ -277,7 +285,10 @@ mod tests {
     /// cell in those methods before allowing it.
     #[test]
     fn writable_cells_leave_the_live_cache_valid() {
-        assert!(!WRITABLE.contains(&cell_type::ROLE), "a ROLE write would change liveness");
+        assert!(
+            !WRITABLE.contains(&cell_type::ROLE),
+            "a ROLE write would change liveness"
+        );
     }
 
     /// LF.2b persist guard: only an overlay-applied graph may go to the
@@ -286,6 +297,9 @@ mod tests {
     fn default_dir_takes_only_overlay_applied_graphs() {
         assert_eq!(default_dir_refusal(true), None);
         let why = default_dir_refusal(false).expect("an overlay=False graph is refused");
-        assert!(why.contains("overlay=False") && why.contains("save_to(dir)"), "{why}");
+        assert!(
+            why.contains("overlay=False") && why.contains("save_to(dir)"),
+            "{why}"
+        );
     }
 }

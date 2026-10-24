@@ -53,7 +53,9 @@ pub(crate) struct Args {
 fn canonical_categories(given: &[String]) -> Result<Vec<&'static str>, String> {
     let mut out: Vec<&'static str> = Vec::with_capacity(given.len());
     for g in given {
-        let hit = edge_category::ALL.iter().find(|(_, n)| n.eq_ignore_ascii_case(g.trim()));
+        let hit = edge_category::ALL
+            .iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(g.trim()));
         match hit {
             Some((_, n)) => {
                 if !out.contains(n) {
@@ -62,7 +64,10 @@ fn canonical_categories(given: &[String]) -> Result<Vec<&'static str>, String> {
             }
             None => {
                 let valid: Vec<&str> = edge_category::ALL.iter().map(|(_, n)| *n).collect();
-                return Err(format!("unknown edge category `{g}`; valid: {}", valid.join(", ")));
+                return Err(format!(
+                    "unknown edge category `{g}`; valid: {}",
+                    valid.join(", ")
+                ));
             }
         }
     }
@@ -99,7 +104,11 @@ fn node_name(n: &DeltaNode) -> String {
 /// A node row's location; a removed node is located in the base rev.
 fn node_location(n: &DeltaNode, base: &str) -> String {
     let loc = at(n.file.as_deref(), n.line);
-    if n.side == "before" { format!("{loc} (at {base})") } else { loc }
+    if n.side == "before" {
+        format!("{loc} (at {base})")
+    } else {
+        loc
+    }
 }
 
 /// An edge row's change cell: a reconfidenced edge shows `was → now`.
@@ -125,7 +134,11 @@ fn edge_site(e: &DeltaEdge, base: &str) -> String {
     if e.change == "removed" {
         notes.push(format!("at {base}"));
     }
-    if notes.is_empty() { s } else { format!("{s} ({})", notes.join(", ")) }
+    if notes.is_empty() {
+        s
+    } else {
+        format!("{s} ({})", notes.join(", "))
+    }
 }
 
 fn print_table(repo: &str, a: &GraphDeltaAnswer, empty: bool) {
@@ -166,7 +179,13 @@ fn print_table(repo: &str, a: &GraphDeltaAnswer, empty: bool) {
         println!("| change | kind | qname | location |");
         println!("|---|---|---|---|");
         for n in &a.nodes {
-            println!("| {} | {} | {} | {} |", n.change, n.kind, node_name(n), node_location(n, &a.base));
+            println!(
+                "| {} | {} | {} | {} |",
+                n.change,
+                n.kind,
+                node_name(n),
+                node_location(n, &a.base)
+            );
         }
         println!();
     }
@@ -212,7 +231,10 @@ pub(crate) fn run(args: Args) -> i32 {
     };
     let empty = answer.nodes.is_empty() && answer.edges.is_empty();
     filter(&mut answer, args.edges_only, &categories);
-    eprintln!("[delta] surface=cli rows={}", answer.nodes.len() + answer.edges.len());
+    eprintln!(
+        "[delta] surface=cli rows={}",
+        answer.nodes.len() + answer.edges.len()
+    );
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
     } else {
@@ -230,7 +252,10 @@ mod tests {
         let got = canonical_categories(&["calls".into(), "CALLS".into(), " Http_Calls ".into()]);
         assert_eq!(got, Ok(vec!["CALLS", "HTTP_CALLS"]));
         let err = canonical_categories(&["CALL".into()]).expect_err("CALL is no category");
-        assert!(err.starts_with("unknown edge category `CALL`; valid: "), "{err}");
+        assert!(
+            err.starts_with("unknown edge category `CALL`; valid: "),
+            "{err}"
+        );
         for (_, name) in edge_category::ALL {
             assert!(err.contains(name), "{name} missing from: {err}");
         }

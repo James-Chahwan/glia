@@ -30,8 +30,14 @@ fn write(path: &Path, body: &str) {
 /// the `.glia/overlay.toml` body.
 fn probe_repo(root: &Path, overlay: &str) {
     write(&root.join("app.py"), "def main():\n    return 1\n");
-    write(&root.join("legacy/old.py"), "def legacy_thing():\n    return 1\n");
-    write(&root.join("tools/migrator/run.py"), "def migrate():\n    return 2\n");
+    write(
+        &root.join("legacy/old.py"),
+        "def legacy_thing():\n    return 1\n",
+    );
+    write(
+        &root.join("tools/migrator/run.py"),
+        "def migrate():\n    return 2\n",
+    );
     write(&root.join(".glia/overlay.toml"), overlay);
 }
 
@@ -59,14 +65,19 @@ fn nodes(r: &GenerateResult) -> HashMap<String, Seen> {
             .nodes
             .iter()
             .filter_map(|n| {
-                n.cells.iter().find(|c| c.kind == cell_type::ORIGIN).and_then(|c| match &c.payload {
-                    CellPayload::Json(j) => Some((n.id, j.clone())),
-                    _ => None,
-                })
+                n.cells
+                    .iter()
+                    .find(|c| c.kind == cell_type::ORIGIN)
+                    .and_then(|c| match &c.payload {
+                        CellPayload::Json(j) => Some((n.id, j.clone())),
+                        _ => None,
+                    })
             })
             .collect();
         for (id, q) in &g.nav.qname_by_id {
-            let Some(kind) = g.nav.kind_by_id.get(id) else { continue };
+            let Some(kind) = g.nav.kind_by_id.get(id) else {
+                continue;
+            };
             out.insert(
                 q.clone(),
                 Seen {
@@ -95,9 +106,15 @@ fn skip_dir_becomes_excluded_region() {
     probe_repo(&root, PROBE_OVERLAY);
     let all = build(&root);
 
-    assert!(!all.contains_key("legacy::old"), "the skipped tree must not be parsed");
+    assert!(
+        !all.contains_key("legacy::old"),
+        "the skipped tree must not be parsed"
+    );
     assert!(!all.contains_key("legacy::old::legacy_thing"));
-    assert!(all.keys().all(|q| !q.starts_with("legacy::")), "nothing from legacy/");
+    assert!(
+        all.keys().all(|q| !q.starts_with("legacy::")),
+        "nothing from legacy/"
+    );
     let region = all.get("region:legacy").expect("region:legacy");
     assert_eq!(region.kind, node_kind::REGION);
     assert_eq!(region.name, "legacy");
@@ -106,7 +123,10 @@ fn skip_dir_becomes_excluded_region() {
         serde_json::json!({"provenance": "excluded", "region": "legacy"})
     );
     // The control: the rest of the tree is still parsed.
-    assert_eq!(all.get("app::main").map(|s| s.kind), Some(node_kind::FUNCTION));
+    assert_eq!(
+        all.get("app::main").map(|s| s.kind),
+        Some(node_kind::FUNCTION)
+    );
     assert_eq!(
         all.get("tools::migrator::run::migrate").map(|s| s.kind),
         Some(node_kind::FUNCTION)
@@ -120,18 +140,42 @@ fn skip_dir_becomes_excluded_region() {
 fn skip_files_and_anchoring() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
-    probe_repo(&root, "version = 1\n[walk]\nskip = [\"*_gen.py\", \"/tools/old\"]\n");
+    probe_repo(
+        &root,
+        "version = 1\n[walk]\nskip = [\"*_gen.py\", \"/tools/old\"]\n",
+    );
     write(&root.join("api_gen.py"), "def generated():\n    return 1\n");
-    write(&root.join("pkg/models_gen.py"), "def generated_too():\n    return 1\n");
-    write(&root.join("tools/old/x.py"), "def anchored():\n    return 1\n");
-    write(&root.join("pkg/tools/old/y.py"), "def not_anchored():\n    return 1\n");
+    write(
+        &root.join("pkg/models_gen.py"),
+        "def generated_too():\n    return 1\n",
+    );
+    write(
+        &root.join("tools/old/x.py"),
+        "def anchored():\n    return 1\n",
+    );
+    write(
+        &root.join("pkg/tools/old/y.py"),
+        "def not_anchored():\n    return 1\n",
+    );
     let all = build(&root);
 
-    assert!(all.keys().all(|q| !q.contains("_gen")), "skipped files are not read");
-    assert!(all.contains_key("region:tools/old"), "the anchored dir is a region");
-    assert!(!all.contains_key("region:pkg/tools/old"), "the anchor does not match below the root");
+    assert!(
+        all.keys().all(|q| !q.contains("_gen")),
+        "skipped files are not read"
+    );
+    assert!(
+        all.contains_key("region:tools/old"),
+        "the anchored dir is a region"
+    );
+    assert!(
+        !all.contains_key("region:pkg/tools/old"),
+        "the anchor does not match below the root"
+    );
     assert!(all.contains_key("pkg::tools::old::y::not_anchored"));
-    assert!(all.contains_key("legacy::old::legacy_thing"), "no skip for legacy in this config");
+    assert!(
+        all.contains_key("legacy::old::legacy_thing"),
+        "no skip for legacy in this config"
+    );
 }
 
 /// Config only extends the defaults: a `!` pattern never un-collapses a
@@ -141,19 +185,35 @@ fn skip_files_and_anchoring() {
 fn skip_never_unskips() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
-    probe_repo(&root, "version = 1\n[walk]\nskip = [\"!node_modules\", \"!gen\", \"vendor\"]\n");
+    probe_repo(
+        &root,
+        "version = 1\n[walk]\nskip = [\"!node_modules\", \"!gen\", \"vendor\"]\n",
+    );
     write(&root.join(".gitignore"), "/gen\n");
-    write(&root.join("node_modules/left-pad/index.js"), "module.exports = function pad() {};\n");
+    write(
+        &root.join("node_modules/left-pad/index.js"),
+        "module.exports = function pad() {};\n",
+    );
     write(&root.join("gen/out.py"), "def generated():\n    return 1\n");
-    write(&root.join("vendor/lib.py"), "def vendored():\n    return 1\n");
+    write(
+        &root.join("vendor/lib.py"),
+        "def vendored():\n    return 1\n",
+    );
     let all = build(&root);
 
-    let provenance = |q: &str| origin_json(all.get(q).unwrap_or_else(|| panic!("no {q}")))["provenance"].clone();
+    let provenance =
+        |q: &str| origin_json(all.get(q).unwrap_or_else(|| panic!("no {q}")))["provenance"].clone();
     assert_eq!(provenance("region:node_modules"), "vendored");
     assert_eq!(provenance("region:gen"), "build_output");
     assert_eq!(provenance("region:vendor"), "excluded");
-    assert!(all.keys().all(|q| !q.contains("generated") && !q.contains("vendored") && !q.contains("pad")));
-    assert!(all.contains_key("legacy::old::legacy_thing"), "legacy is not skipped by this config");
+    assert!(
+        all.keys()
+            .all(|q| !q.contains("generated") && !q.contains("vendored") && !q.contains("pad"))
+    );
+    assert!(
+        all.contains_key("legacy::old::legacy_thing"),
+        "legacy is not skipped by this config"
+    );
 }
 
 #[test]
@@ -163,7 +223,9 @@ fn declared_root_emits_project() {
     probe_repo(&root, PROBE_OVERLAY);
     let all = build(&root);
 
-    let project = all.get("project:tools/migrator").expect("project:tools/migrator");
+    let project = all
+        .get("project:tools/migrator")
+        .expect("project:tools/migrator");
     assert_eq!(project.kind, node_kind::PROJECT);
     assert_eq!(project.name, "migrator");
     assert_eq!(
@@ -178,7 +240,11 @@ fn declared_root_emits_project() {
         })
     );
     // The repo has no manifest anywhere else: it is the only PROJECT.
-    let projects: Vec<&String> = all.iter().filter(|(_, s)| s.kind == node_kind::PROJECT).map(|(q, _)| q).collect();
+    let projects: Vec<&String> = all
+        .iter()
+        .filter(|(_, s)| s.kind == node_kind::PROJECT)
+        .map(|(q, _)| q)
+        .collect();
     assert_eq!(projects, ["project:tools/migrator"]);
 }
 
@@ -189,15 +255,23 @@ fn declared_root_shadowed_by_manifest() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     probe_repo(&root, PROBE_OVERLAY);
-    write(&root.join("tools/migrator/pyproject.toml"), "[project]\nname = \"db-migrator\"\n");
+    write(
+        &root.join("tools/migrator/pyproject.toml"),
+        "[project]\nname = \"db-migrator\"\n",
+    );
     let all = build(&root);
 
-    let project = all.get("project:tools/migrator").expect("project:tools/migrator");
+    let project = all
+        .get("project:tools/migrator")
+        .expect("project:tools/migrator");
     assert_eq!(project.name, "db-migrator");
     let origin = origin_json(project);
     assert_eq!(origin["ecosystem"], "python");
     assert_eq!(origin["manifest"], "tools/migrator/pyproject.toml");
-    let projects = all.values().filter(|s| s.kind == node_kind::PROJECT).count();
+    let projects = all
+        .values()
+        .filter(|s| s.kind == node_kind::PROJECT)
+        .count();
     assert_eq!(projects, 1, "one PROJECT for the path, not two");
 }
 
@@ -216,9 +290,15 @@ fn declared_root_never_inside_a_region() {
             "[[project]]\npath = \"missing/dir\"\n",
         ),
     );
-    write(&root.join("node_modules/pkg/index.js"), "module.exports = 1;\n");
+    write(
+        &root.join("node_modules/pkg/index.js"),
+        "module.exports = 1;\n",
+    );
     let all = build(&root);
-    assert!(all.values().all(|s| s.kind != node_kind::PROJECT), "no PROJECT at all");
+    assert!(
+        all.values().all(|s| s.kind != node_kind::PROJECT),
+        "no PROJECT at all"
+    );
     assert!(all.contains_key("region:legacy") && all.contains_key("region:node_modules"));
 }
 
@@ -245,10 +325,16 @@ fn staleness_agrees_with_walk() {
         let layout = default_layout_dir(&root);
         let r = generate_one(root.to_str().unwrap()).unwrap();
         let parsed_legacy = nodes(&r).contains_key("legacy::old::legacy_thing");
-        assert_eq!(parsed_legacy, legacy_is_source, "walk verdict for legacy/ ({overlay:?})");
+        assert_eq!(
+            parsed_legacy, legacy_is_source,
+            "walk verdict for legacy/ ({overlay:?})"
+        );
         persist_result(&r, &layout, "test").unwrap();
         let manifest = layout.join(MANIFEST_NAME);
-        assert!(!is_gmap_stale(&layout, &root), "fresh right after the persist");
+        assert!(
+            !is_gmap_stale(&layout, &root),
+            "fresh right after the persist"
+        );
 
         touch_after(&root.join("legacy/old.py"), &manifest);
         assert_eq!(
@@ -257,6 +343,9 @@ fn staleness_agrees_with_walk() {
             "the scan must agree with the walk about legacy/old.py ({overlay:?})"
         );
         touch_after(&root.join("app.py"), &manifest);
-        assert!(is_gmap_stale(&layout, &root), "an un-skipped file marks stale");
+        assert!(
+            is_gmap_stale(&layout, &root),
+            "an un-skipped file marks stale"
+        );
     }
 }

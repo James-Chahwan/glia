@@ -171,7 +171,11 @@ pub fn stoer_wagner(g: &WeightedGraph) -> Option<MinCut> {
             phases[best].side.len()
         );
     }
-    Some(MinCut { weight, side, phases })
+    Some(MinCut {
+        weight,
+        side,
+        phases,
+    })
 }
 
 /// Merge super-vertices `a` and `b` into one and return the label that is
@@ -281,7 +285,11 @@ pub fn min_st_cut(g: &WeightedGraph, sources: &[u32], sinks: &[u32]) -> Option<S
             source_side.iter().filter(|&&s| s).count()
         );
     }
-    Some(StCut { flow, source_side, cut_pairs })
+    Some(StCut {
+        flow,
+        source_side,
+        cut_pairs,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -458,7 +466,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             self.0 >> 33
         }
     }
@@ -477,7 +488,11 @@ mod tests {
             }
             for b in a + 1..n {
                 if r.next() % 10 < density {
-                    let (x, y) = if r.next().is_multiple_of(2) { (a, b) } else { (b, a) };
+                    let (x, y) = if r.next().is_multiple_of(2) {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                     pairs.push((x, y, 1 + r.next() % 9));
                     if r.next().is_multiple_of(8) {
                         pairs.push((a, b, 1 + r.next() % 9));
@@ -490,7 +505,8 @@ mod tests {
 
     fn weight_of(g: &WeightedGraph, a: u32, b: u32) -> u64 {
         let row = g.neighbours(a);
-        row.binary_search_by_key(&b, |e| e.0).map_or(0, |i| row[i].1)
+        row.binary_search_by_key(&b, |e| e.0)
+            .map_or(0, |i| row[i].1)
     }
 
     /// The weight of every pair with exactly one end inside.
@@ -508,24 +524,37 @@ mod tests {
 
     /// `crossing` of every subset, indexed by its bitmask.
     fn crossings(g: &WeightedGraph) -> Vec<u64> {
-        (0u32..1 << g.len()).map(|mask| crossing(g, |v| mask >> v & 1 == 1)).collect()
+        (0u32..1 << g.len())
+            .map(|mask| crossing(g, |v| mask >> v & 1 == 1))
+            .collect()
     }
 
     fn brute_global(g: &WeightedGraph) -> u64 {
         let n = g.len();
         let cross = crossings(g);
         // Node n - 1 stays outside: each of the 2^(n-1) - 1 bipartitions once.
-        (1..1usize << (n - 1)).map(|mask| cross[mask]).min().unwrap_or(0)
+        (1..1usize << (n - 1))
+            .map(|mask| cross[mask])
+            .min()
+            .unwrap_or(0)
     }
 
     fn brute_st(cross: &[u64], sources: &[u32], sinks: &[u32]) -> u64 {
         let must: usize = sources.iter().map(|&s| 1 << s).sum();
         let never: usize = sinks.iter().map(|&t| 1 << t).sum();
-        (0..cross.len()).filter(|m| m & must == must && m & never == 0).map(|m| cross[m]).min().unwrap_or(0)
+        (0..cross.len())
+            .filter(|m| m & must == must && m & never == 0)
+            .map(|m| cross[m])
+            .min()
+            .unwrap_or(0)
     }
 
     fn members(side: &[bool]) -> Vec<u32> {
-        side.iter().enumerate().filter(|&(_, &s)| s).map(|(v, _)| v as u32).collect()
+        side.iter()
+            .enumerate()
+            .filter(|&(_, &s)| s)
+            .map(|(v, _)| v as u32)
+            .collect()
     }
 
     #[test]
@@ -536,8 +565,15 @@ mod tests {
             let cut = stoer_wagner(&g).expect("two or more nodes");
             assert_eq!(cut.weight, brute_global(&g), "seed {seed}");
             let inside = members(&cut.side);
-            assert!(!inside.is_empty() && inside.len() < g.len(), "seed {seed}: a proper side");
-            assert_eq!(crossing(&g, |v| cut.side[v as usize]), cut.weight, "seed {seed}");
+            assert!(
+                !inside.is_empty() && inside.len() < g.len(),
+                "seed {seed}: a proper side"
+            );
+            assert_eq!(
+                crossing(&g, |v| cut.side[v as usize]),
+                cut.weight,
+                "seed {seed}"
+            );
             if cut.weight == 0 {
                 zero += 1;
             } else {
@@ -545,7 +581,10 @@ mod tests {
             }
         }
         // The corpus exercises both disconnected and connected views.
-        assert!(zero >= 20 && positive >= 100, "zero={zero} positive={positive}");
+        assert!(
+            zero >= 20 && positive >= 100,
+            "zero={zero} positive={positive}"
+        );
     }
 
     #[test]
@@ -555,13 +594,34 @@ mod tests {
             let cut = stoer_wagner(&g).expect("two or more nodes");
             assert_eq!(cut.phases.len(), g.len() - 1, "seed {seed}");
             for (i, p) in cut.phases.iter().enumerate() {
-                assert!(p.side.windows(2).all(|w| w[0] < w[1]), "seed {seed} phase {i}: sorted, distinct");
-                assert!(!p.side.is_empty() && p.side.len() < g.len(), "seed {seed} phase {i}");
-                assert_eq!(crossing(&g, |v| p.side.binary_search(&v).is_ok()), p.weight, "seed {seed} phase {i}");
+                assert!(
+                    p.side.windows(2).all(|w| w[0] < w[1]),
+                    "seed {seed} phase {i}: sorted, distinct"
+                );
+                assert!(
+                    !p.side.is_empty() && p.side.len() < g.len(),
+                    "seed {seed} phase {i}"
+                );
+                assert_eq!(
+                    crossing(&g, |v| p.side.binary_search(&v).is_ok()),
+                    p.weight,
+                    "seed {seed} phase {i}"
+                );
             }
-            let first_min = cut.phases.iter().position(|p| p.weight == cut.weight).expect("a phase has the min");
-            assert!(cut.phases.iter().all(|p| p.weight >= cut.weight), "seed {seed}");
-            assert_eq!(members(&cut.side), cut.phases[first_min].side, "seed {seed}: the earliest min phase wins");
+            let first_min = cut
+                .phases
+                .iter()
+                .position(|p| p.weight == cut.weight)
+                .expect("a phase has the min");
+            assert!(
+                cut.phases.iter().all(|p| p.weight >= cut.weight),
+                "seed {seed}"
+            );
+            assert_eq!(
+                members(&cut.side),
+                cut.phases[first_min].side,
+                "seed {seed}: the earliest min phase wins"
+            );
         }
     }
 
@@ -578,12 +638,25 @@ mod tests {
                         continue;
                     }
                     let st = min_st_cut(&g, &[s], &[t]).expect("disjoint terminals");
-                    assert_eq!(st.flow, brute_st(&cross, &[s], &[t]), "seed {seed} s={s} t={t}");
-                    assert!(st.source_side[s as usize] && !st.source_side[t as usize], "seed {seed} s={s} t={t}");
-                    assert_eq!(crossing(&g, |v| st.source_side[v as usize]), st.flow, "seed {seed} s={s} t={t}");
+                    assert_eq!(
+                        st.flow,
+                        brute_st(&cross, &[s], &[t]),
+                        "seed {seed} s={s} t={t}"
+                    );
+                    assert!(
+                        st.source_side[s as usize] && !st.source_side[t as usize],
+                        "seed {seed} s={s} t={t}"
+                    );
+                    assert_eq!(
+                        crossing(&g, |v| st.source_side[v as usize]),
+                        st.flow,
+                        "seed {seed} s={s} t={t}"
+                    );
                     let expect: Vec<(u32, u32)> = (0..n)
                         .flat_map(|a| g.neighbours(a).iter().map(move |&(b, _)| (a, b)))
-                        .filter(|&(a, b)| b > a && st.source_side[a as usize] != st.source_side[b as usize])
+                        .filter(|&(a, b)| {
+                            b > a && st.source_side[a as usize] != st.source_side[b as usize]
+                        })
                         .collect();
                     assert_eq!(st.cut_pairs, expect, "seed {seed} s={s} t={t}");
                     let sum: u64 = st.cut_pairs.iter().map(|&(a, b)| weight_of(&g, a, b)).sum();
@@ -601,7 +674,10 @@ mod tests {
     fn edmonds_karp(g: &WeightedGraph, sources: &[u32], sinks: &[u32]) -> u64 {
         let n = g.len();
         let (src, snk) = (n, n + 1);
-        let big = 1 + (0..n as u32).flat_map(|a| g.neighbours(a).iter().map(|&(_, w)| w)).sum::<u64>();
+        let big = 1
+            + (0..n as u32)
+                .flat_map(|a| g.neighbours(a).iter().map(|&(_, w)| w))
+                .sum::<u64>();
         let mut cap = vec![vec![0u64; n + 2]; n + 2];
         for a in 0..n as u32 {
             for &(b, w) in g.neighbours(a) {
@@ -653,7 +729,11 @@ mod tests {
             let n = 20 + (r.next() % 60) as u32;
             let mut pairs = Vec::new();
             for _ in 0..n * (2 + (r.next() % 3) as u32) {
-                pairs.push(((r.next() % n as u64) as u32, (r.next() % n as u64) as u32, 1 + r.next() % 12));
+                pairs.push((
+                    (r.next() % n as u64) as u32,
+                    (r.next() % n as u64) as u32,
+                    1 + r.next() % 12,
+                ));
             }
             let g = WeightedGraph::from_pairs(n as usize, &pairs);
             let k = 1 + (r.next() % 3) as u32;
@@ -661,9 +741,19 @@ mod tests {
             let sinks: Vec<u32> = (n - k..n).collect();
             let st = min_st_cut(&g, &sources, &sinks).expect("disjoint terminals");
             assert_eq!(st.flow, edmonds_karp(&g, &sources, &sinks), "seed {seed}");
-            assert_eq!(crossing(&g, |v| st.source_side[v as usize]), st.flow, "seed {seed}");
-            assert!(sources.iter().all(|&s| st.source_side[s as usize]), "seed {seed}");
-            assert!(sinks.iter().all(|&t| !st.source_side[t as usize]), "seed {seed}");
+            assert_eq!(
+                crossing(&g, |v| st.source_side[v as usize]),
+                st.flow,
+                "seed {seed}"
+            );
+            assert!(
+                sources.iter().all(|&s| st.source_side[s as usize]),
+                "seed {seed}"
+            );
+            assert!(
+                sinks.iter().all(|&t| !st.source_side[t as usize]),
+                "seed {seed}"
+            );
         }
     }
 
@@ -675,7 +765,17 @@ mod tests {
         // the flow it carries, not stay at the pair weight.
         let g = WeightedGraph::from_pairs(
             8,
-            &[(0, 1, 1), (1, 2, 1), (2, 3, 1), (0, 4, 2), (4, 5, 2), (5, 2, 2), (1, 6, 2), (6, 7, 2), (7, 3, 2)],
+            &[
+                (0, 1, 1),
+                (1, 2, 1),
+                (2, 3, 1),
+                (0, 4, 2),
+                (4, 5, 2),
+                (5, 2, 2),
+                (1, 6, 2),
+                (6, 7, 2),
+                (7, 3, 2),
+            ],
         );
         let st = min_st_cut(&g, &[0], &[3]).expect("disjoint terminals");
         assert_eq!(st.flow, 3);
@@ -723,7 +823,10 @@ mod tests {
         assert_eq!(min_st_cut(&g, &[0], &[8]), None, "out of range");
         assert_eq!(min_st_cut(&g, &[9], &[1]), None, "out of range");
         assert_eq!(stoer_wagner(&WeightedGraph::from_pairs(0, &[])), None);
-        assert_eq!(stoer_wagner(&WeightedGraph::from_pairs(1, &[(0, 0, 3)])), None);
+        assert_eq!(
+            stoer_wagner(&WeightedGraph::from_pairs(1, &[(0, 0, 3)])),
+            None
+        );
         let two = stoer_wagner(&WeightedGraph::from_pairs(2, &[])).expect("two nodes");
         assert_eq!((two.weight, two.phases.len()), (0, 1));
     }
@@ -743,7 +846,10 @@ mod tests {
         let cut = stoer_wagner(&g).expect("ten nodes");
         assert_eq!(cut.weight, 2);
         let side = members(&cut.side);
-        assert!(side == vec![0, 1, 2, 3, 4] || side == vec![5, 6, 7, 8, 9], "{side:?}");
+        assert!(
+            side == vec![0, 1, 2, 3, 4] || side == vec![5, 6, 7, 8, 9],
+            "{side:?}"
+        );
         let st = min_st_cut(&g, &[0], &[9]).expect("disjoint terminals");
         assert_eq!((st.flow, st.cut_pairs.clone()), (2, vec![(4, 5)]));
         assert_eq!(members(&st.source_side), vec![0, 1, 2, 3, 4]);
@@ -752,12 +858,29 @@ mod tests {
     #[test]
     fn disconnected_is_zero() {
         // A triangle {0, 1, 2} and a path 3-4-5, a self-loop on 4.
-        let g = WeightedGraph::from_pairs(6, &[(0, 1, 3), (1, 2, 3), (0, 2, 3), (3, 4, 2), (4, 5, 2), (4, 4, 9)]);
+        let g = WeightedGraph::from_pairs(
+            6,
+            &[
+                (0, 1, 3),
+                (1, 2, 3),
+                (0, 2, 3),
+                (3, 4, 2),
+                (4, 5, 2),
+                (4, 4, 9),
+            ],
+        );
         let cut = stoer_wagner(&g).expect("six nodes");
         assert_eq!(cut.weight, 0);
         let side = members(&cut.side);
-        assert!(side == vec![0, 1, 2] || side == vec![3, 4, 5], "one component: {side:?}");
-        let first_zero = cut.phases.iter().position(|p| p.weight == 0).expect("a zero phase");
+        assert!(
+            side == vec![0, 1, 2] || side == vec![3, 4, 5],
+            "one component: {side:?}"
+        );
+        let first_zero = cut
+            .phases
+            .iter()
+            .position(|p| p.weight == 0)
+            .expect("a zero phase");
         assert_eq!(cut.phases[first_zero].side, side);
         assert!(cut.phases[..first_zero].iter().all(|p| p.weight > 0));
 
@@ -801,6 +924,9 @@ mod tests {
         pairs.reverse();
         let back = WeightedGraph::from_pairs(300, &pairs);
         assert_eq!(stoer_wagner(&back), stoer_wagner(&views[40]));
-        assert_eq!(min_st_cut(&back, &[5, 9], &[200]), min_st_cut(&views[40], &[5, 9], &[200]));
+        assert_eq!(
+            min_st_cut(&back, &[5, 9], &[200]),
+            min_st_cut(&views[40], &[5, 9], &[200])
+        );
     }
 }

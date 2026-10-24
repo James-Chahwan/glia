@@ -592,17 +592,27 @@ mod tests {
     #[test]
     fn intra_file_call_is_a_parser_site() {
         let e = intra_file_call("python", NodeId(1), NodeId(2), 7);
-        assert_eq!((e.from, e.to, e.category), (NodeId(1), NodeId(2), edge_category::CALLS));
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (NodeId(1), NodeId(2), edge_category::CALLS)
+        );
         assert_eq!(e.confidence, Confidence::Strong);
         let ev = Evidence::of(&e).expect("one EVIDENCE cell");
         assert_eq!(
             ev,
-            Evidence::emitter("parser:python").rule("intra_file").line(7)
+            Evidence::emitter("parser:python")
+                .rule("intra_file")
+                .line(7)
         );
         // The fill pass keeps the line and takes the caller's file.
         let mut filled = ev.clone();
         let from: Location = ("b.py".to_string(), Some(3));
-        filled.fill(edge_category::CALLS, Some(node_kind::FUNCTION), Some(&from), None);
+        filled.fill(
+            edge_category::CALLS,
+            Some(node_kind::FUNCTION),
+            Some(&from),
+            None,
+        );
         assert_eq!(
             (filled.file.as_deref(), filled.line, filled.basis),
             (Some("b.py"), Some(7), Basis::Site)

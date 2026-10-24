@@ -39,7 +39,8 @@ impl Repos {
         use glia_code_domain::snapshots::{
             ScipDefRow, ScipDocumentRecord, ScipMeta, ScipSymbolRecord, source_hash, write_scip,
         };
-        let root = std::env::temp_dir().join(format!("glia-dd13-serves-{}-{tag}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("glia-dd13-serves-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for repo in ["billing", "shop"] {
             let dir = root.join(repo);
@@ -49,11 +50,24 @@ impl Repos {
                 path: "app.py".to_string(),
                 language: "python".to_string(),
                 source_hash: source_hash(APP.as_bytes()),
-                defs: vec![ScipDefRow { s: 0, line: 6, name: "create_order".to_string() }],
+                defs: vec![ScipDefRow {
+                    s: 0,
+                    line: 6,
+                    name: "create_order".to_string(),
+                }],
                 refs: Vec::new(),
             }];
-            let symbols = vec![ScipSymbolRecord { id: 0, symbol: SYMBOL.to_string(), implements: Vec::new() }];
-            let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+            let symbols = vec![ScipSymbolRecord {
+                id: 0,
+                symbol: SYMBOL.to_string(),
+                implements: Vec::new(),
+            }];
+            let meta = ScipMeta::new(
+                "scip-python".to_string(),
+                "0.6.0".to_string(),
+                String::new(),
+                0,
+            );
             write_scip(&dir, meta, &documents, &symbols).expect("write snapshot");
         }
         Repos(root)
@@ -84,7 +98,11 @@ fn stderr(o: &Output) -> String {
 
 /// The stderr lines starting with `prefix`.
 fn lines(o: &Output, prefix: &str) -> Vec<String> {
-    stderr(o).lines().filter(|l| l.starts_with(prefix)).map(str::to_string).collect()
+    stderr(o)
+        .lines()
+        .filter(|l| l.starts_with(prefix))
+        .map(str::to_string)
+        .collect()
 }
 
 #[test]
@@ -119,20 +137,40 @@ fn identity_classes_tag_handlers_unless_no_collapse() {
         assert_eq!(hi[0]["identity"]["tier"], "fact", "{row}");
         assert_eq!(hi[0]["identity"]["rules"][0], "scip_symbol", "{row}");
         assert_eq!(hi[0]["identity"]["also_in"][0]["file"], "app.py", "{row}");
-        also.push(hi[0]["identity"]["also_in"][0]["repo"].as_str().expect("a repo label"));
+        also.push(
+            hi[0]["identity"]["also_in"][0]["repo"]
+                .as_str()
+                .expect("a repo label"),
+        );
     }
     also.sort_unstable();
-    assert_eq!(also, ["billing", "shop"], "each handler names the other repo's copy");
+    assert_eq!(
+        also,
+        ["billing", "shop"],
+        "each handler names the other repo's copy"
+    );
 
     let out = r.serves(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    let line = |repo: &str| format!("`app::create_order` app.py:{n} (also in: {repo} app.py:{n})", n = handler_line(rows));
-    assert!(text.contains(&line("shop")) && text.contains(&line("billing")), "{text}");
+    let line = |repo: &str| {
+        format!(
+            "`app::create_order` app.py:{n} (also in: {repo} app.py:{n})",
+            n = handler_line(rows)
+        )
+    };
+    assert!(
+        text.contains(&line("shop")) && text.contains(&line("billing")),
+        "{text}"
+    );
 
     let out = r.serves(&["--json", "--no-collapse"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(lines(&out, "[identity] collapse").is_empty(), "{}", stderr(&out));
+    assert!(
+        lines(&out, "[identity] collapse").is_empty(),
+        "{}",
+        stderr(&out)
+    );
     assert!(!stdout(&out).contains("identity"), "{}", stdout(&out));
     let raw: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(raw["results"].as_array().map(Vec::len), Some(2), "{raw}");
@@ -142,5 +180,7 @@ fn identity_classes_tag_handlers_unless_no_collapse() {
 
 /// The handler's 1-based line (both copies are one file, so one line).
 fn handler_line(rows: &[Value]) -> i64 {
-    rows[0]["handlers"][0]["line"].as_i64().expect("a located handler")
+    rows[0]["handlers"][0]["line"]
+        .as_i64()
+        .expect("a located handler")
 }

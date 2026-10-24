@@ -40,7 +40,11 @@ use super::algo_debug;
 /// caller bug (debug assertion); in release it takes no part in lo / hi and
 /// maps to 0.0.
 pub fn minmax(v: &[f64], excluded: &[bool]) -> Vec<f64> {
-    debug_assert_eq!(v.len(), excluded.len(), "minmax: score and exclusion lengths differ");
+    debug_assert_eq!(
+        v.len(),
+        excluded.len(),
+        "minmax: score and exclusion lengths differ"
+    );
     debug_assert!(v.iter().all(|s| s.is_finite()), "minmax: non-finite score");
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for (i, &s) in v.iter().enumerate() {
@@ -52,13 +56,24 @@ pub fn minmax(v: &[f64], excluded: &[bool]) -> Vec<f64> {
     if hi.partial_cmp(&lo) != Some(Ordering::Greater) {
         return vec![0.0; v.len()];
     }
-    v.iter().map(|&s| if s.is_finite() { (s - lo) / (hi - lo) } else { 0.0 }).collect()
+    v.iter()
+        .map(|&s| {
+            if s.is_finite() {
+                (s - lo) / (hi - lo)
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 /// The weighted blend `a * x[i] + (1.0 - a) * y[i]`.
 pub fn blend(a: f64, x: &[f64], y: &[f64]) -> Vec<f64> {
     debug_assert_eq!(x.len(), y.len(), "blend: lengths differ");
-    x.iter().zip(y).map(|(p, q)| a * p + (1.0 - a) * q).collect()
+    x.iter()
+        .zip(y)
+        .map(|(p, q)| a * p + (1.0 - a) * q)
+        .collect()
 }
 
 /// The equal mean of the parts: per index, the sum over the parts (in part
@@ -70,7 +85,13 @@ pub fn mean(parts: &[&[f64]]) -> Vec<f64> {
     let n = first.len();
     debug_assert!(parts.iter().all(|p| p.len() == n), "mean: lengths differ");
     (0..n)
-        .map(|i| parts.iter().map(|p| p.get(i).copied().unwrap_or(0.0)).sum::<f64>() / parts.len() as f64)
+        .map(|i| {
+            parts
+                .iter()
+                .map(|p| p.get(i).copied().unwrap_or(0.0))
+                .sum::<f64>()
+                / parts.len() as f64
+        })
         .collect()
 }
 
@@ -80,10 +101,19 @@ pub fn mean(parts: &[&[f64]]) -> Vec<f64> {
 /// index itself.
 pub fn lex_order(keys: &[&[f64]], tie: &[u32], excluded: &[bool]) -> Vec<usize> {
     let n = tie.len();
-    debug_assert_eq!(excluded.len(), n, "lex_order: tie and exclusion lengths differ");
-    debug_assert!(keys.iter().all(|k| k.len() == n), "lex_order: key and tie lengths differ");
+    debug_assert_eq!(
+        excluded.len(),
+        n,
+        "lex_order: tie and exclusion lengths differ"
+    );
+    debug_assert!(
+        keys.iter().all(|k| k.len() == n),
+        "lex_order: key and tie lengths differ"
+    );
     let key = |k: &[f64], i: usize| k.get(i).copied().unwrap_or(0.0);
-    let mut ix: Vec<usize> = (0..n).filter(|&i| !excluded.get(i).copied().unwrap_or(false)).collect();
+    let mut ix: Vec<usize> = (0..n)
+        .filter(|&i| !excluded.get(i).copied().unwrap_or(false))
+        .collect();
     ix.sort_by(|&a, &b| {
         for k in keys {
             let (x, y) = (key(k, a), key(k, b));
@@ -97,7 +127,9 @@ pub fn lex_order(keys: &[&[f64]], tie: &[u32], excluded: &[bool]) -> Vec<usize> 
         tie[a].cmp(&tie[b]).then(a.cmp(&b))
     });
     if algo_debug() {
-        let zero = keys.first().map_or(0, |k| ix.iter().filter(|&&i| key(k, i) == 0.0).count());
+        let zero = keys
+            .first()
+            .map_or(0, |k| ix.iter().filter(|&&i| key(k, i) == 0.0).count());
         eprintln!(
             "[algo] fuse keys={} candidates={} excluded={} zero_first_key={zero}",
             keys.len(),
@@ -128,7 +160,10 @@ mod tests {
 
     #[test]
     fn fuse_minmax_excludes_and_flattens() {
-        assert_eq!(minmax(&[3.0, 1.0, 2.0], &[true, false, false]), vec![2.0, 0.0, 1.0]);
+        assert_eq!(
+            minmax(&[3.0, 1.0, 2.0], &[true, false, false]),
+            vec![2.0, 0.0, 1.0]
+        );
         assert_eq!(minmax(&[4.0, 4.0, 4.0], &[false; 3]), vec![0.0; 3]);
         assert_eq!(minmax(&[1.0, 2.0], &[true, true]), vec![0.0; 2]);
         assert!(minmax(&[], &[]).is_empty());
@@ -138,7 +173,10 @@ mod tests {
     fn fuse_blend_and_mean() {
         assert_eq!(blend(0.25, &[1.0, 0.0], &[0.0, 1.0]), vec![0.25, 0.75]);
         assert_eq!(blend(0.5, &[0.5, 1.0], &[0.5, 0.0]), vec![0.5, 0.5]);
-        assert_eq!(mean(&[&[1.0, 0.0], &[0.0, 0.25], &[0.5, 0.5]]), vec![0.5, 0.25]);
+        assert_eq!(
+            mean(&[&[1.0, 0.0], &[0.0, 0.25], &[0.5, 0.5]]),
+            vec![0.5, 0.25]
+        );
         assert!(mean(&[]).is_empty());
     }
 
@@ -146,7 +184,10 @@ mod tests {
     fn fuse_lex_order_falls_through_to_tie() {
         let a = [1.0, 0.0, 0.0, 1.0];
         let b = [0.2, 0.9, 0.9, 0.1];
-        assert_eq!(lex_order(&[&a, &b], &[3, 2, 1, 0], &[false; 4]), vec![0, 3, 2, 1]);
+        assert_eq!(
+            lex_order(&[&a, &b], &[3, 2, 1, 0], &[false; 4]),
+            vec![0, 3, 2, 1]
+        );
         assert_eq!(lx(&a, &[&b], &[3, 2, 1, 0], &[false; 4]), vec![0, 3, 2, 1]);
     }
 

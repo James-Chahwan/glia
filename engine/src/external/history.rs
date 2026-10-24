@@ -168,7 +168,10 @@ pub(super) fn json<T: serde::Serialize>(v: &T) -> String {
 }
 
 fn attn(payload: String) -> Cell {
-    Cell { kind: cell_type::ATTN, payload: CellPayload::Json(payload) }
+    Cell {
+        kind: cell_type::ATTN,
+        payload: CellPayload::Json(payload),
+    }
 }
 
 /// A node's first POSITION cell: `(file, start_line, end_line)`, 0-based rows
@@ -180,7 +183,11 @@ pub(super) fn position(n: &Node) -> Option<(String, Option<i64>, Option<i64>)> {
         return None;
     };
     let v: serde_json::Value = serde_json::from_str(s).ok()?;
-    let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?.to_string();
+    let file = v
+        .get("file")?
+        .as_str()
+        .filter(|f| !f.is_empty())?
+        .to_string();
     let line = |k: &str| v.get(k).and_then(serde_json::Value::as_i64);
     Some((file, line("start_line"), line("end_line")))
 }
@@ -199,7 +206,9 @@ pub(super) fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<Strin
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
                 continue;
             }
-            let Some((file, _, _)) = position(n) else { continue };
+            let Some((file, _, _)) = position(n) else {
+                continue;
+            };
             let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
             let cand = (qname.is_none(), qname.unwrap_or(""), n.id);
             best.entry(file)
@@ -211,7 +220,9 @@ pub(super) fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<Strin
                 .or_insert(cand);
         }
     }
-    best.into_iter().map(|(file, (_, _, id))| (file, id)).collect()
+    best.into_iter()
+        .map(|(file, (_, _, id))| (file, id))
+        .collect()
 }
 
 /// Every file entry of every commit of `snapshot` under the path it has at
@@ -261,7 +272,10 @@ pub fn rename_pairs(snapshot: &HistorySnapshot) -> Vec<(String, String)> {
 /// co-change suggestions' multi-file rules (`cochange::cochange_multi`,
 /// CC.11b).
 pub(crate) fn commit_file_sets(snapshot: &HistorySnapshot) -> Vec<BTreeSet<String>> {
-    current_paths(snapshot).into_iter().map(|paths| paths.into_iter().collect()).collect()
+    current_paths(snapshot)
+        .into_iter()
+        .map(|paths| paths.into_iter().collect())
+        .collect()
 }
 
 /// Read `input`'s snapshot and fold it over the repo's modules. `None` when
@@ -269,7 +283,12 @@ pub(crate) fn commit_file_sets(snapshot: &HistorySnapshot) -> Vec<BTreeSet<Strin
 fn ingest(merged: &MergedGraph, input: &RepoInputs) -> Option<Ingest> {
     let snapshot = read_history(&input.root)?;
     let modules = module_files(merged, input.repo);
-    let head = snapshot.meta.head.get(..12).unwrap_or(&snapshot.meta.head).to_string();
+    let head = snapshot
+        .meta
+        .head
+        .get(..12)
+        .unwrap_or(&snapshot.meta.head)
+        .to_string();
 
     let mut churn: BTreeMap<String, Churn> = BTreeMap::new();
     let mut unmapped: BTreeSet<String> = BTreeSet::new();
@@ -319,13 +338,30 @@ fn ingest(merged: &MergedGraph, input: &RepoInputs) -> Option<Ingest> {
                 return None;
             }
             let ratio_permille = 1000 * u64::from(count) / least;
-            (ratio_permille >= MIN_RATIO_PERMILLE).then_some(Pair { a, b, count, ratio_permille })
+            (ratio_permille >= MIN_RATIO_PERMILLE).then_some(Pair {
+                a,
+                b,
+                count,
+                ratio_permille,
+            })
         })
         .collect();
-    pairs.sort_by(|x, y| y.count.cmp(&x.count).then_with(|| x.a.cmp(&y.a)).then_with(|| x.b.cmp(&y.b)));
+    pairs.sort_by(|x, y| {
+        y.count
+            .cmp(&x.count)
+            .then_with(|| x.a.cmp(&y.a))
+            .then_with(|| x.b.cmp(&y.b))
+    });
     pairs.truncate(MAX_PAIRS);
 
-    Some(Ingest { snapshot, head, modules, churn, unmapped, pairs })
+    Some(Ingest {
+        snapshot,
+        head,
+        modules,
+        churn,
+        unmapped,
+        pairs,
+    })
 }
 
 /// The CO_CHANGES half: push one edge per kept pair of `input`'s snapshot
@@ -343,7 +379,11 @@ pub(super) fn history_edges(merged: &mut MergedGraph, input: &RepoInputs) -> usi
         let (Some(&from), Some(&to)) = (ing.modules.get(&p.a), ing.modules.get(&p.b)) else {
             continue;
         };
-        let cell = PairAttn { cochanges: p.count, ratio_permille: p.ratio_permille, window_commits };
+        let cell = PairAttn {
+            cochanges: p.count,
+            ratio_permille: p.ratio_permille,
+            window_commits,
+        };
         merged.cross_edges.push(
             Edge::new(from, to, edge_category::CO_CHANGES, Confidence::Weak)
                 .with_cell(attn(json(&cell)))
@@ -366,7 +406,9 @@ pub(super) fn history_cells(merged: &mut MergedGraph, input: &RepoInputs) -> boo
     // for the marker's counts.
     let mut module_cells: BTreeMap<u64, String> = BTreeMap::new();
     for (path, c) in &ing.churn {
-        let Some(id) = ing.modules.get(path) else { continue };
+        let Some(id) = ing.modules.get(path) else {
+            continue;
+        };
         let payload = ModuleAttn {
             source: SOURCE_GIT,
             commits: c.commits,
@@ -410,7 +452,10 @@ pub(super) fn history_cells(merged: &mut MergedGraph, input: &RepoInputs) -> boo
         ing.pairs.len(),
     );
     if skipped > 0 {
-        eprintln!("[history] skipped {skipped} node(s) already carrying ATTN repo={}", input.label);
+        eprintln!(
+            "[history] skipped {skipped} node(s) already carrying ATTN repo={}",
+            input.label
+        );
     }
     attn_written + blame_written > 0
 }
@@ -422,15 +467,28 @@ fn blame_cells(merged: &MergedGraph, repo: RepoId, ing: &Ingest) -> BTreeMap<u64
     if ing.snapshot.blame.is_empty() {
         return out;
     }
-    let runs: BTreeMap<&str, &[[i64; 3]]> =
-        ing.snapshot.blame.iter().map(|b| (b.p.as_str(), b.runs.as_slice())).collect();
+    let runs: BTreeMap<&str, &[[i64; 3]]> = ing
+        .snapshot
+        .blame
+        .iter()
+        .map(|b| (b.p.as_str(), b.runs.as_slice()))
+        .collect();
     for g in merged.graphs.iter().filter(|g| g.repo == repo) {
         for n in &g.nodes {
-            if !g.nav.kind_by_id.get(&n.id).is_some_and(|k| SYMBOL_KINDS.contains(k)) {
+            if !g
+                .nav
+                .kind_by_id
+                .get(&n.id)
+                .is_some_and(|k| SYMBOL_KINDS.contains(k))
+            {
                 continue;
             }
-            let Some((file, Some(s0), end)) = position(n) else { continue };
-            let Some(file_runs) = runs.get(file.as_str()) else { continue };
+            let Some((file, Some(s0), end)) = position(n) else {
+                continue;
+            };
+            let Some(file_runs) = runs.get(file.as_str()) else {
+                continue;
+            };
             // POSITION rows are 0-based, blame lines 1-based: convert once.
             let (lo, hi) = (s0 + 1, end.unwrap_or(s0).max(s0) + 1);
             let times: BTreeSet<i64> = file_runs
@@ -439,7 +497,12 @@ fn blame_cells(merged: &MergedGraph, repo: RepoId, ing: &Ingest) -> BTreeMap<u64
                 .map(|[_, _, t]| *t)
                 .collect();
             let Some(&last) = times.last() else { continue };
-            let payload = SymbolAttn { source: SOURCE_BLAME, last, span_changes: times.len(), head: &ing.head };
+            let payload = SymbolAttn {
+                source: SOURCE_BLAME,
+                last,
+                span_changes: times.len(),
+                head: &ing.head,
+            };
             out.insert(n.id.0, json(&payload));
         }
     }
@@ -479,16 +542,30 @@ mod tests {
     /// [`ingest`] over `snap` (written to a temp dir named by `tag`) and one
     /// MODULE per file of `files`.
     fn fold(tag: &str, snap: HistorySnapshot, files: &[&str]) -> Ingest {
-        let modules: BTreeMap<String, NodeId> =
-            files.iter().enumerate().map(|(i, f)| (f.to_string(), NodeId(i as u64 + 1))).collect();
+        let modules: BTreeMap<String, NodeId> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.to_string(), NodeId(i as u64 + 1)))
+            .collect();
         let snapshot = snap;
-        let dir = std::env::temp_dir().join(format!("glia_history_fold_{}_{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("glia_history_fold_{}_{tag}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        glia_code_domain::snapshots::write_history(&dir, snapshot.meta.clone(), &snapshot.commits, &snapshot.blame)
-            .expect("write snapshot");
+        glia_code_domain::snapshots::write_history(
+            &dir,
+            snapshot.meta.clone(),
+            &snapshot.commits,
+            &snapshot.blame,
+        )
+        .expect("write snapshot");
         let repo = RepoId::from_canonical("test://history-fold");
         let merged = module_graph(repo, &modules);
-        let input = RepoInputs { repo, root: dir.clone(), label: "fold".into(), config: None };
+        let input = RepoInputs {
+            repo,
+            root: dir.clone(),
+            label: "fold".into(),
+            config: None,
+        };
         let ing = ingest(&merged, &input).expect("a complete snapshot");
         std::fs::remove_dir_all(&dir).ok();
         ing
@@ -513,7 +590,9 @@ mod tests {
                 confidence: Confidence::Strong,
                 cells: vec![Cell {
                     kind: cell_type::POSITION,
-                    payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+                    payload: CellPayload::Json(format!(
+                        r#"{{"file":"{file}","start_line":0,"end_line":1}}"#
+                    )),
                 }],
             });
             g.nav.kind_by_id.insert(*id, node_kind::MODULE);
@@ -528,14 +607,30 @@ mod tests {
         // support.
         let mut commits = Vec::new();
         for i in 0..3 {
-            commits.push(commit(&format!("ab{i}"), 100 + i, &[("a.py", 1, None), ("b.py", 1, None)]));
+            commits.push(commit(
+                &format!("ab{i}"),
+                100 + i,
+                &[("a.py", 1, None), ("b.py", 1, None)],
+            ));
         }
         for i in 0..7 {
             commits.push(commit(&format!("a{i}"), 200 + i, &[("a.py", 1, None)]));
         }
         commits.push(commit("ef", 300, &[("e.py", 1, None), ("f.py", 1, None)]));
-        let ing = fold("support", snapshot(commits, vec![]), &["a.py", "b.py", "e.py", "f.py"]);
-        assert_eq!(ing.pairs, [Pair { a: "a.py".into(), b: "b.py".into(), count: 3, ratio_permille: 1000 }]);
+        let ing = fold(
+            "support",
+            snapshot(commits, vec![]),
+            &["a.py", "b.py", "e.py", "f.py"],
+        );
+        assert_eq!(
+            ing.pairs,
+            [Pair {
+                a: "a.py".into(),
+                b: "b.py".into(),
+                count: 3,
+                ratio_permille: 1000
+            }]
+        );
         assert_eq!(ing.churn["a.py"].commits, 10);
         assert_eq!(ing.head, "abcdef012345");
     }
@@ -545,7 +640,11 @@ mod tests {
         // x+y together 3x, but each changes 11x: 1000*3/11 = 272 < 300.
         let mut commits = Vec::new();
         for i in 0..3 {
-            commits.push(commit(&format!("xy{i}"), i, &[("x.py", 1, None), ("y.py", 1, None)]));
+            commits.push(commit(
+                &format!("xy{i}"),
+                i,
+                &[("x.py", 1, None), ("y.py", 1, None)],
+            ));
         }
         for i in 0..8 {
             commits.push(commit(&format!("x{i}"), 10 + i, &[("x.py", 1, None)]));
@@ -558,9 +657,20 @@ mod tests {
 
     #[test]
     fn unmapped_paths_are_counted_not_guessed() {
-        let commits = vec![commit("c1", 1, &[("a.py", 1, None), ("Cargo.lock", 9, None), ("docs/x.md", 2, None)])];
+        let commits = vec![commit(
+            "c1",
+            1,
+            &[
+                ("a.py", 1, None),
+                ("Cargo.lock", 9, None),
+                ("docs/x.md", 2, None),
+            ],
+        )];
         let ing = fold("unmapped", snapshot(commits, vec![]), &["a.py"]);
-        assert_eq!(ing.unmapped.iter().map(String::as_str).collect::<Vec<_>>(), ["Cargo.lock", "docs/x.md"]);
+        assert_eq!(
+            ing.unmapped.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["Cargo.lock", "docs/x.md"]
+        );
         assert_eq!(ing.churn.len(), 1);
     }
 
@@ -583,12 +693,26 @@ mod tests {
         // Newest first: y -> z, then x -> y beside a doc, then x with a lockfile.
         let commits = vec![
             commit("c3", 3, &[("z.py", 1, Some("y.py"))]),
-            commit("c2", 2, &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)]),
+            commit(
+                "c2",
+                2,
+                &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)],
+            ),
             commit("c1", 1, &[("x.py", 5, None), ("Cargo.lock", 9, None)]),
         ];
         let sets = commit_file_sets(&snapshot(commits, vec![]));
-        let names: Vec<Vec<&str>> = sets.iter().map(|s| s.iter().map(String::as_str).collect()).collect();
-        assert_eq!(names, [vec!["z.py"], vec!["docs/x.md", "z.py"], vec!["Cargo.lock", "z.py"]]);
+        let names: Vec<Vec<&str>> = sets
+            .iter()
+            .map(|s| s.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                vec!["z.py"],
+                vec!["docs/x.md", "z.py"],
+                vec!["Cargo.lock", "z.py"]
+            ]
+        );
     }
 
     /// EB.5c: `rename_pairs` reads the data this fold reads,
@@ -597,19 +721,35 @@ mod tests {
     #[test]
     fn rename_pairs_are_the_fold_oldest_first() {
         let commits = vec![
-            commit("c4", 4, &[("w.py", 1, Some("z.py")), ("b2.py", 1, Some("b1.py"))]),
+            commit(
+                "c4",
+                4,
+                &[("w.py", 1, Some("z.py")), ("b2.py", 1, Some("b1.py"))],
+            ),
             commit("c3", 3, &[("z.py", 1, Some("y.py"))]),
-            commit("c2", 2, &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)]),
+            commit(
+                "c2",
+                2,
+                &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)],
+            ),
             commit("c1", 1, &[("x.py", 5, None), ("b1.py", 1, None)]),
         ];
         let snap = snapshot(commits, vec![]);
         let pairs = rename_pairs(&snap);
-        let want: Vec<(String, String)> = [("x.py", "y.py"), ("y.py", "z.py"), ("b1.py", "b2.py"), ("z.py", "w.py")]
-            .iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect();
+        let want: Vec<(String, String)> = [
+            ("x.py", "y.py"),
+            ("y.py", "z.py"),
+            ("b1.py", "b2.py"),
+            ("z.py", "w.py"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
         assert_eq!(pairs, want);
-        let fwd: BTreeMap<&str, &str> = pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let fwd: BTreeMap<&str, &str> = pairs
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         let follow = |p: &str| {
             let mut p = p.to_string();
             while let Some(n) = fwd.get(p.as_str()) {
@@ -642,7 +782,9 @@ mod tests {
         };
         let at = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":1}}"#
+            )),
         };
         for (id, qname, file) in [
             (5u64, None, "svc/a.py"),
@@ -651,7 +793,12 @@ mod tests {
             (7, Some("svc::c"), "svc/c.py"),
         ] {
             let id = NodeId(id);
-            g.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells: vec![at(file)] });
+            g.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![at(file)],
+            });
             g.nav.kind_by_id.insert(id, node_kind::MODULE);
             if let Some(q) = qname {
                 g.nav.qname_by_id.insert(id, q.to_string());
@@ -661,7 +808,10 @@ mod tests {
         let files = module_files(&merged, repo);
         assert_eq!(
             files.into_iter().collect::<Vec<_>>(),
-            [("svc/a.py".to_string(), NodeId(20)), ("svc/c.py".to_string(), NodeId(7))]
+            [
+                ("svc/a.py".to_string(), NodeId(20)),
+                ("svc/c.py".to_string(), NodeId(7))
+            ]
         );
     }
 
@@ -672,8 +822,18 @@ mod tests {
             repo: RepoId::from_canonical("test://pos"),
             confidence: Confidence::Strong,
             cells: vec![
-                Cell { kind: cell_type::POSITION, payload: CellPayload::Json(r#"{"file":"a.py","start_line":3,"end_line":5}"#.into()) },
-                Cell { kind: cell_type::POSITION, payload: CellPayload::Json(r#"{"file":"b.py","start_line":0,"end_line":0}"#.into()) },
+                Cell {
+                    kind: cell_type::POSITION,
+                    payload: CellPayload::Json(
+                        r#"{"file":"a.py","start_line":3,"end_line":5}"#.into(),
+                    ),
+                },
+                Cell {
+                    kind: cell_type::POSITION,
+                    payload: CellPayload::Json(
+                        r#"{"file":"b.py","start_line":0,"end_line":0}"#.into(),
+                    ),
+                },
             ],
         };
         assert_eq!(position(&n), Some(("a.py".into(), Some(3), Some(5))));

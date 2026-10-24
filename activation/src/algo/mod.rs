@@ -76,7 +76,10 @@ pub struct CategorySet {
 impl CategorySet {
     /// Every category.
     pub fn all() -> Self {
-        Self { sorted: Vec::new(), all: true }
+        Self {
+            sorted: Vec::new(),
+            all: true,
+        }
     }
 
     /// Exactly the categories in `c` (none when `c` is empty).
@@ -192,8 +195,26 @@ impl Adjacency {
         }
 
         let n = ids.len();
-        let (out_start, out) = csr(n, &kept, |&(from, to, c), k| (from, Inc { edge: k, other: to, category: c }));
-        let (in_start, inn) = csr(n, &kept, |&(from, to, c), k| (to, Inc { edge: k, other: from, category: c }));
+        let (out_start, out) = csr(n, &kept, |&(from, to, c), k| {
+            (
+                from,
+                Inc {
+                    edge: k,
+                    other: to,
+                    category: c,
+                },
+            )
+        });
+        let (in_start, inn) = csr(n, &kept, |&(from, to, c), k| {
+            (
+                to,
+                Inc {
+                    edge: k,
+                    other: from,
+                    category: c,
+                },
+            )
+        });
         if algo_debug() {
             eprintln!(
                 "[algo] adjacency nodes={nodes} dangling={} kept={} of {total} edges",
@@ -201,12 +222,26 @@ impl Adjacency {
                 kept.len()
             );
         }
-        Self { ids, index, out_start, out, in_start, inn, kept: kept.len() }
+        Self {
+            ids,
+            index,
+            out_start,
+            out,
+            in_start,
+            inn,
+            kept: kept.len(),
+        }
     }
 
     fn over_limit(what: &str, cap: usize) -> Self {
-        eprintln!("[algo] adjacency: more than {cap} {what} - u32 index limit, returning an empty index");
-        Self { out_start: vec![0], in_start: vec![0], ..Self::default() }
+        eprintln!(
+            "[algo] adjacency: more than {cap} {what} - u32 index limit, returning an empty index"
+        );
+        Self {
+            out_start: vec![0],
+            in_start: vec![0],
+            ..Self::default()
+        }
     }
 
     /// Indexed ids: the nodes plus the dangling edge endpoints.
@@ -261,7 +296,11 @@ fn csr(
         start[i + 1] += start[i];
     }
     let mut cursor = start.clone();
-    let blank = Inc { edge: 0, other: 0, category: EdgeCategoryId(0) };
+    let blank = Inc {
+        edge: 0,
+        other: 0,
+        category: EdgeCategoryId(0),
+    };
     let mut list = vec![blank; kept.len()];
     for (k, e) in kept.iter().enumerate() {
         let (row, inc) = key(e, k as u32);
@@ -323,7 +362,11 @@ mod tests {
             edge_categories: &[(A, "A"), (B, "B"), (C, "C")],
             cell_types: &[],
         },
-        entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+        entry: EntryRule {
+            kinds: &[],
+            roles: &[],
+            named: &[],
+        },
         carry_edges: &[B, A],
         effect_sinks: &[],
         activation_weights: &[],
@@ -333,14 +376,21 @@ mod tests {
     };
 
     fn ids(adj: &Adjacency, xs: &[Inc]) -> Vec<(u64, u32)> {
-        xs.iter().map(|i| (adj.id(i.other).0, i.category.0)).collect()
+        xs.iter()
+            .map(|i| (adj.id(i.other).0, i.category.0))
+            .collect()
     }
 
     #[test]
     fn carry_uses_table_categories() {
         let g = ToyGraph {
             nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
-            edges: vec![toy_edge(1, 2, 1), toy_edge(1, 3, 3), toy_edge(1, 4, 2), toy_edge(2, 3, 3)],
+            edges: vec![
+                toy_edge(1, 2, 1),
+                toy_edge(1, 3, 3),
+                toy_edge(1, 4, 2),
+                toy_edge(2, 3, 3),
+            ],
         };
         let adj = Adjacency::carry(&g, &TABLES);
         assert_eq!(adj.kept_edges(), 2);
@@ -363,7 +413,12 @@ mod tests {
         let g = ToyGraph {
             nodes: vec![NodeId(5), NodeId(1), NodeId(5)],
             // 9 and 7 are no node; 8 sits only on a dropped (category 3) edge.
-            edges: vec![toy_edge(1, 9, 1), toy_edge(8, 1, 3), toy_edge(7, 5, 2), toy_edge(9, 1, 1)],
+            edges: vec![
+                toy_edge(1, 9, 1),
+                toy_edge(8, 1, 3),
+                toy_edge(7, 5, 2),
+                toy_edge(9, 1, 1),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::of(&[A, B]));
         let order: Vec<u64> = (0..adj.len() as u32).map(|i| adj.id(i).0).collect();
@@ -387,7 +442,10 @@ mod tests {
         assert_eq!(adj.kept_edges(), 0);
         assert_eq!(adj.index_of(NodeId(1)), None);
         // At a cap of 1 the one node fits; the second kept edge does not.
-        let one = ToyGraph { nodes: vec![NodeId(1)], edges: vec![toy_edge(1, 1, 1), toy_edge(1, 1, 1)] };
+        let one = ToyGraph {
+            nodes: vec![NodeId(1)],
+            edges: vec![toy_edge(1, 1, 1), toy_edge(1, 1, 1)],
+        };
         assert!(Adjacency::build_capped(&one, &CategorySet::all(), 1).is_empty());
         assert_eq!(Adjacency::build_capped(&g, &CategorySet::all(), 3).len(), 3);
     }

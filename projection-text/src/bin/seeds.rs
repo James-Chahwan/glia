@@ -17,12 +17,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_code_domain::node_kind;
 use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeId;
 use glia_graph::RepoGraph;
 use glia_projection_text::driver_utils::{build_repo_graph, extract_position_cell, write_json};
+use regex::Regex;
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -121,8 +121,8 @@ fn main() -> Result<()> {
     let mut test_patch_facts = TestPatchFacts::default();
     let mut tp_added_tokens: BTreeSet<String> = BTreeSet::new();
     if let Some(tp) = &args.test_patch {
-        let patch_text = std::fs::read_to_string(tp)
-            .with_context(|| format!("read {}", tp.display()))?;
+        let patch_text =
+            std::fs::read_to_string(tp).with_context(|| format!("read {}", tp.display()))?;
         let added = extract_candidates_from_test_patch(&patch_text);
         tp_added_tokens = added.clone();
         let added_count = added.len();
@@ -157,7 +157,10 @@ fn main() -> Result<()> {
             test_patch_facts.resolved_attrs.len(),
         );
         if !test_patch_facts.constructor_calls.is_empty() {
-            eprintln!("  constructor_calls: {:?}", test_patch_facts.constructor_calls);
+            eprintln!(
+                "  constructor_calls: {:?}",
+                test_patch_facts.constructor_calls
+            );
         }
         if !test_patch_facts.resolved_attrs.is_empty() {
             eprintln!("  resolved_attrs:    {:?}", test_patch_facts.resolved_attrs);
@@ -173,7 +176,10 @@ fn main() -> Result<()> {
         args.match_cap,
     );
     if !dropped.is_empty() {
-        eprintln!("[seeder] over-cap tokens (each matched >{}): {:?}", args.match_cap, dropped);
+        eprintln!(
+            "[seeder] over-cap tokens (each matched >{}): {:?}",
+            args.match_cap, dropped
+        );
     }
 
     // Layer-3 fallback: if issue-only matching yielded zero seeds AND we have
@@ -187,8 +193,7 @@ fn main() -> Result<()> {
         for t in &tp_added_tokens {
             combined.insert(t.clone());
         }
-        let (seeds_fb, matched_fb, dropped_fb) =
-            match_to_seeds(&graph, &combined, args.match_cap);
+        let (seeds_fb, matched_fb, dropped_fb) = match_to_seeds(&graph, &combined, args.match_cap);
         eprintln!(
             "[seeder] (fallback) {} seed nodes from {} matched tokens (dropped {} over-cap)",
             seeds_fb.len(),
@@ -209,7 +214,9 @@ fn main() -> Result<()> {
     }
 
     if seeds.is_empty() {
-        eprintln!("WARNING: no token→qname matches — emitting empty seeds.json so downstream pipeline can continue with issue-only context");
+        eprintln!(
+            "WARNING: no token→qname matches — emitting empty seeds.json so downstream pipeline can continue with issue-only context"
+        );
         // Emit empty seeds file in the full Output schema and exit 0; downstream
         // bins (node_summaries, synth_*) handle empty seed lists. Without this,
         // instances whose issue text shares zero tokens with their codebase
@@ -264,7 +271,11 @@ fn main() -> Result<()> {
     let mut config = CODE_TABLES.activation_config(None);
     config.top_k = args.top_k;
     let result = graph.activate(&seeds, &config);
-    eprintln!("[seeder] activated top-{}: {} nodes", args.top_k, result.scores.len());
+    eprintln!(
+        "[seeder] activated top-{}: {} nodes",
+        args.top_k,
+        result.scores.len()
+    );
 
     let activated: Vec<(NodeId, f64)> = result.scores.clone();
     let activated = if args.no_siblings {
@@ -290,10 +301,7 @@ fn main() -> Result<()> {
     let activated = {
         let mut v = activated;
         let in_set: HashSet<NodeId> = v.iter().map(|(id, _)| *id).collect();
-        let min_score = v
-            .iter()
-            .map(|(_, s)| *s)
-            .fold(f64::INFINITY, f64::min);
+        let min_score = v.iter().map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
         let floor = if min_score.is_finite() && min_score > 0.0 {
             min_score
         } else {
@@ -332,10 +340,7 @@ fn main() -> Result<()> {
     // file entirely. This pass anchors the model to issue-named symbols.
     let issue_anchored = inject_issue_anchors(&issue, &graph, &activated, &id_to_qname, &tokens);
     let activated = if !issue_anchored.is_empty() {
-        let max_existing = activated
-            .iter()
-            .map(|(_, s)| *s)
-            .fold(0.0_f64, f64::max);
+        let max_existing = activated.iter().map(|(_, s)| *s).fold(0.0_f64, f64::max);
         let min_existing = activated
             .iter()
             .map(|(_, s)| *s)
@@ -380,12 +385,7 @@ fn main() -> Result<()> {
 
     let activated_qnames: Vec<(String, f64)> = activated
         .iter()
-        .map(|(id, s)| {
-            (
-                id_to_qname.get(id).copied().unwrap_or("?").to_string(),
-                *s,
-            )
-        })
+        .map(|(id, s)| (id_to_qname.get(id).copied().unwrap_or("?").to_string(), *s))
         .collect();
 
     let mut seed_qnames: Vec<String> = seeds
@@ -467,7 +467,10 @@ fn inject_issue_anchors(
                 let s = &pos_json[file_start + 8..];
                 if let Some(end) = s.find('"') {
                     let f = &s[..end];
-                    if matched_files.iter().any(|mf| f.ends_with(mf.as_str()) || f == mf) {
+                    if matched_files
+                        .iter()
+                        .any(|mf| f.ends_with(mf.as_str()) || f == mf)
+                    {
                         if anchored.insert(node.id) {
                             file_hits += 1;
                         }
@@ -497,9 +500,7 @@ fn inject_issue_anchors(
     if !dotted_refs.is_empty() {
         for (id, qname) in id_to_qname {
             for dr in &dotted_refs {
-                if qname.ends_with(dr.as_str())
-                    || qname.contains(&format!("::{dr}::"))
-                {
+                if qname.ends_with(dr.as_str()) || qname.contains(&format!("::{dr}::")) {
                     if anchored.insert(*id) {
                         dotted_hits += 1;
                     }
@@ -551,16 +552,82 @@ fn inject_issue_anchors(
     // boosted set with attribute-noise (e.g. sphinx-10325 had many
     // `desc_*::classes` entries from token `classes`).
     for noise in [
-        "true", "false", "none", "the", "this", "issue", "test", "args",
-        "class", "classes", "module", "modules", "line", "lines", "tag", "tags",
-        "name", "names", "type", "types", "value", "values", "data", "index",
-        "kind", "node", "nodes", "item", "items", "key", "keys", "id", "ids",
-        "code", "list", "dict", "str", "int", "bool", "result", "results",
-        "file", "files", "path", "paths", "size", "len", "length", "count",
-        "default", "self", "cls", "obj", "obj_", "func", "method", "methods",
-        "field", "fields", "attr", "attrs", "attribute", "attributes",
-        "input", "output", "outputs", "options", "option", "config", "configs",
-        "context", "state", "status", "info", "details", "description",
+        "true",
+        "false",
+        "none",
+        "the",
+        "this",
+        "issue",
+        "test",
+        "args",
+        "class",
+        "classes",
+        "module",
+        "modules",
+        "line",
+        "lines",
+        "tag",
+        "tags",
+        "name",
+        "names",
+        "type",
+        "types",
+        "value",
+        "values",
+        "data",
+        "index",
+        "kind",
+        "node",
+        "nodes",
+        "item",
+        "items",
+        "key",
+        "keys",
+        "id",
+        "ids",
+        "code",
+        "list",
+        "dict",
+        "str",
+        "int",
+        "bool",
+        "result",
+        "results",
+        "file",
+        "files",
+        "path",
+        "paths",
+        "size",
+        "len",
+        "length",
+        "count",
+        "default",
+        "self",
+        "cls",
+        "obj",
+        "obj_",
+        "func",
+        "method",
+        "methods",
+        "field",
+        "fields",
+        "attr",
+        "attrs",
+        "attribute",
+        "attributes",
+        "input",
+        "output",
+        "outputs",
+        "options",
+        "option",
+        "config",
+        "configs",
+        "context",
+        "state",
+        "status",
+        "info",
+        "details",
+        "description",
     ] {
         bt_idents.remove(noise);
     }
@@ -591,8 +658,14 @@ fn inject_issue_anchors(
     let tb_re = Regex::new(r"\b([\w/]+\.py):(\d+)\b").unwrap();
     let mut tb_frames: Vec<(String, usize)> = Vec::new();
     for caps in tb_re.captures_iter(&issue) {
-        let path = caps.get(1).map(|m| m.as_str().replace('\\', "/")).unwrap_or_default();
-        let line: usize = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        let path = caps
+            .get(1)
+            .map(|m| m.as_str().replace('\\', "/"))
+            .unwrap_or_default();
+        let line: usize = caps
+            .get(2)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
         if line == 0 || is_test_path(&path) {
             continue;
         }
@@ -601,7 +674,9 @@ fn inject_issue_anchors(
     let mut tb_hits = 0usize;
     if !tb_frames.is_empty() {
         for node in &graph.nodes {
-            let Some(pos_json) = extract_position_cell(node) else { continue };
+            let Some(pos_json) = extract_position_cell(node) else {
+                continue;
+            };
             // pull file
             let node_file = match pos_json.find("\"file\":\"") {
                 Some(s) => {
@@ -610,11 +685,15 @@ fn inject_issue_anchors(
                 }
                 None => continue,
             };
-            if node_file.is_empty() { continue; }
+            if node_file.is_empty() {
+                continue;
+            }
             let start = match pos_json.find("\"start_line\":") {
                 Some(s) => {
                     let rest = &pos_json[s + 13..];
-                    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(rest.len());
                     rest[..end].parse::<usize>().unwrap_or(0)
                 }
                 None => continue,
@@ -622,7 +701,9 @@ fn inject_issue_anchors(
             let end_line = match pos_json.find("\"end_line\":") {
                 Some(s) => {
                     let rest = &pos_json[s + 11..];
-                    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(rest.len());
                     rest[..end].parse::<usize>().unwrap_or(start)
                 }
                 None => start,
@@ -688,11 +769,7 @@ fn inject_issue_anchors(
         }
     }
     let before = anchored.len();
-    anchored.retain(|id| {
-        id_to_file
-            .get(id)
-            .map_or(true, |f| !is_test_path(f))
-    });
+    anchored.retain(|id| id_to_file.get(id).map_or(true, |f| !is_test_path(f)));
     let dropped = before - anchored.len();
     if dropped > 0 {
         eprintln!("[seeder] issue-anchor: dropped {dropped} test-file nodes");
@@ -707,16 +784,15 @@ fn inject_issue_anchors(
 /// real qnames but would dominate token sets if left in.
 const STOP_TOKENS: &[&str] = &[
     // Python keywords
-    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
-    "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is",
-    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with",
-    "yield", "True", "False", "None", "self", "cls",
-    // diff/test artifacts
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+    "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "True",
+    "False", "None", "self", "cls", // diff/test artifacts
     "test", "tests", "py", "diff", "git", "index", "ok",
     // common English fillers (don't match qnames anyway, but keeps token set tidy)
-    "the", "and", "but", "for", "not", "are", "was", "were", "this", "that", "with", "from",
-    "into", "have", "has", "had", "can", "all", "any", "use", "uses", "used", "see", "via",
-    "would", "could", "should", "when", "where", "what", "why", "how", "out",
+    "the", "and", "but", "for", "not", "are", "was", "were", "this", "that", "with", "from", "into",
+    "have", "has", "had", "can", "all", "any", "use", "uses", "used", "see", "via", "would",
+    "could", "should", "when", "where", "what", "why", "how", "out",
 ];
 
 fn extract_candidates(issue: &str) -> BTreeSet<String> {
@@ -787,14 +863,23 @@ fn extract_test_patch_facts(patch: &str) -> TestPatchFacts {
     let class_attr_re = Regex::new(r"\b([A-Z][A-Za-z0-9_]+)\.([a-zA-Z_][A-Za-z0-9_]+)").unwrap();
     let var_attr_re = Regex::new(r"\b([a-z_][A-Za-z0-9_]*)\.([a-zA-Z_][A-Za-z0-9_]+)").unwrap();
     // `var = ClassName(...)` — captures binding for var-type tracking.
-    let assign_re = Regex::new(r"^\s*([a-z_][A-Za-z0-9_]*)\s*=\s*([A-Z][A-Za-z0-9_]+)\s*\(")
-        .unwrap();
+    let assign_re =
+        Regex::new(r"^\s*([a-z_][A-Za-z0-9_]*)\s*=\s*([A-Z][A-Za-z0-9_]+)\s*\(").unwrap();
 
     // Names that look capitalized but are framework noise / builtins —
     // skipping them keeps the constructor-call signal high-precision.
     const STOP_CTOR: &[&str] = &[
-        "True", "False", "None", "Exception", "ValueError", "TypeError",
-        "AttributeError", "KeyError", "RuntimeError", "Test", "TestCase",
+        "True",
+        "False",
+        "None",
+        "Exception",
+        "ValueError",
+        "TypeError",
+        "AttributeError",
+        "KeyError",
+        "RuntimeError",
+        "Test",
+        "TestCase",
     ];
     const STOP_VAR: &[&str] = &["self", "cls", "os", "sys", "re", "io", "json"];
     let stop_ctor: HashSet<&str> = STOP_CTOR.iter().copied().collect();

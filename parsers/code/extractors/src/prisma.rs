@@ -90,8 +90,14 @@ pub fn extract_prisma_models(
 ) -> PrismaSchema {
     let scanned = scan(source);
     let provider_here = scanned.provider.is_some();
-    let provider = scanned.provider.or_else(|| repo_provider.map(str::to_owned));
-    let flavor = if provider.as_deref() == Some("mongodb") { "nosql" } else { "sql" };
+    let provider = scanned
+        .provider
+        .or_else(|| repo_provider.map(str::to_owned));
+    let flavor = if provider.as_deref() == Some("mongodb") {
+        "nosql"
+    } else {
+        "sql"
+    };
     let mut out = DataEntityNodes {
         nodes: Vec::new(),
         edges: Vec::new(),
@@ -108,7 +114,8 @@ pub fn extract_prisma_models(
             confidence: Confidence::Strong,
             cells: table.iter().map(|t| table_cell(t, orm::PRISMA)).collect(),
         });
-        out.nav.record(id, model, &qname, node_kind::DATA_ENTITY, Some(module_id));
+        out.nav
+            .record(id, model, &qname, node_kind::DATA_ENTITY, Some(module_id));
         out.edges.push(Edge {
             from: module_id,
             to: id,
@@ -238,7 +245,9 @@ fn first_string(s: &str) -> Option<String> {
 }
 
 fn is_identifier(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    s.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -295,10 +304,18 @@ model Order {
     #[test]
     fn prisma_model_emits_entity() {
         let out = extract_prisma_models(SCHEMA, module(), RepoId(1), None);
-        assert_eq!(names(&out), ["data_entity:sql:User", "data_entity:sql:Order"]);
+        assert_eq!(
+            names(&out),
+            ["data_entity:sql:User", "data_entity:sql:Order"]
+        );
         assert_eq!((out.models, out.mapped), (2, 1));
         let order = entity("data_entity:sql:Order");
-        let edge = out.entities.edges.iter().find(|e| e.to == order).expect("Order edge");
+        let edge = out
+            .entities
+            .edges
+            .iter()
+            .find(|e| e.to == order)
+            .expect("Order edge");
         assert_eq!(edge.from, module());
         assert_eq!(edge.category, edge_category::ACCESSES_DATA);
         assert_eq!(out.entities.nav.name_by_id[&order], "Order");
@@ -313,7 +330,11 @@ model Order {
     fn prisma_map_attribute_overrides_model_name() {
         let out = extract_prisma_models(SCHEMA, module(), RepoId(1), None);
         let user = &out.entities.nodes[0];
-        assert_eq!(user.id, entity("data_entity:sql:User"), "keyed on the model, not the table");
+        assert_eq!(
+            user.id,
+            entity("data_entity:sql:User"),
+            "keyed on the model, not the table"
+        );
         assert_eq!(user.cells.len(), 1);
         assert_eq!(user.cells[0].kind, cell_type::CODE);
         assert_eq!(table_of(&user.cells), Some("app_users".to_string()));
@@ -325,21 +346,31 @@ model Order {
             RepoId(1),
             None,
         );
-        assert_eq!(table_of(&named.entities.nodes[0].cells), Some("a_rows".to_string()));
+        assert_eq!(
+            table_of(&named.entities.nodes[0].cells),
+            Some("a_rows".to_string())
+        );
     }
 
     #[test]
     fn prisma_mongodb_provider_uses_nosql_flavor() {
-        let src = "datasource db {\n  provider = \"mongodb\"\n}\nmodel Event {\n  id String @id\n}\n";
+        let src =
+            "datasource db {\n  provider = \"mongodb\"\n}\nmodel Event {\n  id String @id\n}\n";
         let out = extract_prisma_models(src, module(), RepoId(1), None);
         assert_eq!(names(&out), ["data_entity:nosql:Event"]);
         // A prismaSchemaFolder model file inherits the repo's one provider;
         // its own datasource wins over the repo's.
         let model_only = "model Event {\n  id String @id\n}\n";
-        assert_eq!(shared_provider([src, model_only]), Some("mongodb".to_string()));
+        assert_eq!(
+            shared_provider([src, model_only]),
+            Some("mongodb".to_string())
+        );
         let out = extract_prisma_models(model_only, module(), RepoId(1), Some("mongodb"));
         assert_eq!(names(&out), ["data_entity:nosql:Event"]);
-        assert!(out.marker("m.prisma").contains("provider=mongodb datasource=repo"));
+        assert!(
+            out.marker("m.prisma")
+                .contains("provider=mongodb datasource=repo")
+        );
         let out = extract_prisma_models(SCHEMA, module(), RepoId(1), Some("mongodb"));
         assert_eq!(names(&out)[0], "data_entity:sql:User");
         // Two schemas that disagree leave the model file to the sql default.
@@ -358,19 +389,27 @@ model Order {
         assert!(!is_prisma_schema("prisma/schema.prisma.bak"));
         assert!(!is_prisma_schema("prisma/schema.ts"));
         assert!(!is_prisma_schema("node_modules/.prisma/client/index.js"));
-        assert!(!is_prisma_schema("prisma/migrations/20240101_init/migration.sql"));
+        assert!(!is_prisma_schema(
+            "prisma/migrations/20240101_init/migration.sql"
+        ));
     }
 
     #[test]
     fn prisma_scan_skips_non_models_and_stays_bounded() {
         let out = extract_prisma_models(SCHEMA, module(), RepoId(1), None);
         for absent in ["Role", "Draft", "client", "db", "app_users", "user_id"] {
-            assert!(!names(&out).iter().any(|q| q.ends_with(&format!(":{absent}"))), "{absent}");
+            assert!(
+                !names(&out)
+                    .iter()
+                    .any(|q| q.ends_with(&format!(":{absent}"))),
+                "{absent}"
+            );
         }
         let deep = format!("model Deep {}\n", "{".repeat(20));
         let out = extract_prisma_models(&deep, module(), RepoId(1), None);
         assert_eq!(out.models, 1, "the header is still a declaration");
-        let one_line = extract_prisma_models("model Tag { id Int @id }\n", module(), RepoId(1), None);
+        let one_line =
+            extract_prisma_models("model Tag { id Int @id }\n", module(), RepoId(1), None);
         assert_eq!(names(&one_line), ["data_entity:sql:Tag"]);
     }
 }

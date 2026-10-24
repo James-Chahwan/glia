@@ -25,12 +25,22 @@ fn render(q: &Query) -> String {
         parts.push(format!("WHERE {}", expr(c)));
     }
     let items: Vec<String> = q.items.iter().map(item).collect();
-    parts.push(format!("RETURN {}{}", if q.distinct { "DISTINCT " } else { "" }, items.join(", ")));
+    parts.push(format!(
+        "RETURN {}{}",
+        if q.distinct { "DISTINCT " } else { "" },
+        items.join(", ")
+    ));
     if !q.order_by.is_empty() {
         let keys: Vec<String> = q
             .order_by
             .iter()
-            .map(|k| format!("{}{}", operand(&k.key), if k.descending { " DESC" } else { "" }))
+            .map(|k| {
+                format!(
+                    "{}{}",
+                    operand(&k.key),
+                    if k.descending { " DESC" } else { "" }
+                )
+            })
             .collect();
         parts.push(format!("ORDER BY {}", keys.join(", ")));
     }
@@ -66,8 +76,11 @@ fn node(n: &NodePat) -> String {
         s.push_str(&format!(":{}", labels.join("|")));
     }
     if !n.props.is_empty() {
-        let props: Vec<String> =
-            n.props.iter().map(|(k, v)| format!("{}: {}", k.name, lit(v))).collect();
+        let props: Vec<String> = n
+            .props
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k.name, lit(v)))
+            .collect();
         s.push_str(&format!(" {{{}}}", props.join(", ")));
     }
     s.push(')');
@@ -102,10 +115,14 @@ fn expr(e: &Expr) -> String {
         Expr::Or { left, right, .. } => format!("({} OR {})", expr(left), expr(right)),
         Expr::And { left, right, .. } => format!("({} AND {})", expr(left), expr(right)),
         Expr::Not { expr: inner, .. } => format!("NOT {}", expr(inner)),
-        Expr::Cmp { op, left, right, .. } => {
+        Expr::Cmp {
+            op, left, right, ..
+        } => {
             format!("{} {} {}", operand(left), op.symbol(), operand(right))
         }
-        Expr::StrTest { op, left, right, .. } => {
+        Expr::StrTest {
+            op, left, right, ..
+        } => {
             let word = match op {
                 StrOp::StartsWith => "STARTS WITH",
                 StrOp::EndsWith => "ENDS WITH",
@@ -117,7 +134,11 @@ fn expr(e: &Expr) -> String {
             let list: Vec<String> = list.iter().map(lit).collect();
             format!("{} IN [{}]", operand(left), list.join(", "))
         }
-        Expr::Pattern { pattern: p, exists: true, .. } => format!("EXISTS {{{}}}", pattern(p)),
+        Expr::Pattern {
+            pattern: p,
+            exists: true,
+            ..
+        } => format!("EXISTS {{{}}}", pattern(p)),
         Expr::Pattern { pattern: p, .. } => pattern(p),
         Expr::Call { name, args, .. } => {
             let args: Vec<String> = args.iter().map(operand).collect();
@@ -185,13 +206,17 @@ fn errors(text: &str) -> Vec<String> {
 
 /// The source text a span covers (spans are byte ranges on char boundaries).
 fn slice(text: &str, span: glia_rules::diag::Span) -> &str {
-    text.get(span.start as usize..span.end as usize).unwrap_or("<not a char boundary>")
+    text.get(span.start as usize..span.end as usize)
+        .unwrap_or("<not a char boundary>")
 }
 
 /// The bounds of the first relationship's quantifier in `MATCH (a)<rel>(b) RETURN b`.
 fn quant(rel: &str) -> Option<(u32, Option<u32>)> {
     let q = ok(&format!("MATCH (a){rel}(b) RETURN b"));
-    q.matches[0].patterns[0].steps[0].0.quant.map(|q| q.bounds())
+    q.matches[0].patterns[0].steps[0]
+        .0
+        .quant
+        .map(|q| q.bounds())
 }
 
 // ============================================================================
@@ -204,7 +229,10 @@ fn every_construct_parses() {
         // Nodes: bare, one label, label alternatives, a property map of each literal kind.
         ("MATCH (a) RETURN a", "MATCH (a) | RETURN a"),
         ("MATCH (a:ROUTE) RETURN a", "MATCH (a:ROUTE) | RETURN a"),
-        ("MATCH (f:FUNCTION|METHOD) RETURN f.qname", "MATCH (f:FUNCTION|METHOD) | RETURN f.qname"),
+        (
+            "MATCH (f:FUNCTION|METHOD) RETURN f.qname",
+            "MATCH (f:FUNCTION|METHOD) | RETURN f.qname",
+        ),
         (
             "MATCH (a:ROUTE {qname: 'web::get', line: 3, live: true, depth: -1}) RETURN a",
             "MATCH (a:ROUTE {qname: \"web::get\", line: 3, live: TRUE, depth: -1}) | RETURN a",
@@ -214,25 +242,55 @@ fn every_construct_parses() {
             "MATCH (:ROUTE)-[:HANDLED_BY]->(h) RETURN h",
             "MATCH (:ROUTE)-[:HANDLED_BY]->(h) | RETURN h",
         ),
-        ("MATCH (a)<-[r:CALLS]-(b) RETURN a, b, r", "MATCH (a)<-[r:CALLS]-(b) | RETURN a, b, r"),
-        ("MATCH (a)-[:IMPORTS]-(b) RETURN b", "MATCH (a)-[:IMPORTS]-(b) | RETURN b"),
-        ("MATCH (a)-->(b)<--(c)--(d) RETURN d", "MATCH (a)-[]->(b)<-[]-(c)-[]-(d) | RETURN d"),
+        (
+            "MATCH (a)<-[r:CALLS]-(b) RETURN a, b, r",
+            "MATCH (a)<-[r:CALLS]-(b) | RETURN a, b, r",
+        ),
+        (
+            "MATCH (a)-[:IMPORTS]-(b) RETURN b",
+            "MATCH (a)-[:IMPORTS]-(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-->(b)<--(c)--(d) RETURN d",
+            "MATCH (a)-[]->(b)<-[]-(c)-[]-(d) | RETURN d",
+        ),
         // Every quantifier spelling: Cypher inside the brackets, GQL after them.
         (
             "MATCH (a:ROUTE)-[:CALLS|USES*1..3]->(b) RETURN b",
             "MATCH (a:ROUTE)-[:CALLS|USES]->{1,3}(b) | RETURN b",
         ),
-        ("MATCH (a)-[*]->(b) RETURN b", "MATCH (a)-[]->{1,}(b) | RETURN b"),
-        ("MATCH (a)-[r:CALLS*2]->(b) RETURN b", "MATCH (a)-[r:CALLS]->{2,2}(b) | RETURN b"),
-        ("MATCH (a)-[:CALLS*2..]->(b) RETURN b", "MATCH (a)-[:CALLS]->{2,}(b) | RETURN b"),
-        ("MATCH (a)-[:CALLS*..4]-(b) RETURN b", "MATCH (a)-[:CALLS]-{1,4}(b) | RETURN b"),
-        ("MATCH (a)-[:CALLS]->+(b) RETURN b", "MATCH (a)-[:CALLS]->{1,}(b) | RETURN b"),
-        ("MATCH (a)-[:CALLS]->*(b) RETURN b", "MATCH (a)-[:CALLS]->{0,}(b) | RETURN b"),
+        (
+            "MATCH (a)-[*]->(b) RETURN b",
+            "MATCH (a)-[]->{1,}(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-[r:CALLS*2]->(b) RETURN b",
+            "MATCH (a)-[r:CALLS]->{2,2}(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-[:CALLS*2..]->(b) RETURN b",
+            "MATCH (a)-[:CALLS]->{2,}(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-[:CALLS*..4]-(b) RETURN b",
+            "MATCH (a)-[:CALLS]-{1,4}(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-[:CALLS]->+(b) RETURN b",
+            "MATCH (a)-[:CALLS]->{1,}(b) | RETURN b",
+        ),
+        (
+            "MATCH (a)-[:CALLS]->*(b) RETURN b",
+            "MATCH (a)-[:CALLS]->{0,}(b) | RETURN b",
+        ),
         (
             "MATCH (a)-[:CALLS]->{2,5}(b)-[:USES]->{3}(c) RETURN c",
             "MATCH (a)-[:CALLS]->{2,5}(b)-[:USES]->{3,3}(c) | RETURN c",
         ),
-        ("MATCH (a)<-[:CALLS]-{1,}(b) RETURN b", "MATCH (a)<-[:CALLS]-{1,}(b) | RETURN b"),
+        (
+            "MATCH (a)<-[:CALLS]-{1,}(b) RETURN b",
+            "MATCH (a)<-[:CALLS]-{1,}(b) | RETURN b",
+        ),
         // A path variable under ANY SHORTEST; two MATCH clauses, one with two patterns.
         (
             "MATCH p = ANY SHORTEST (a:ROUTE)-[:CALLS]->+(b:DATA) RETURN p",
@@ -344,9 +402,13 @@ fn spans_slice_back_to_their_text() {
 
 #[test]
 fn quantifier_spellings_agree() {
-    for rel in
-        ["-[:CALLS*1..]->", "-[:CALLS*]->", "-[:CALLS]->+", "-[:CALLS]->{1,}", "-[:CALLS*..]->"]
-    {
+    for rel in [
+        "-[:CALLS*1..]->",
+        "-[:CALLS*]->",
+        "-[:CALLS]->+",
+        "-[:CALLS]->{1,}",
+        "-[:CALLS*..]->",
+    ] {
         assert_eq!(quant(rel), Some((1, None)), "for {rel}");
     }
     assert_eq!(quant("-[:CALLS*2..4]->"), quant("-[:CALLS]->{2,4}"));
@@ -354,7 +416,12 @@ fn quantifier_spellings_agree() {
     for rel in ["-[:CALLS*0..]->", "-[:CALLS]->*", "-[:CALLS]->{0,}"] {
         assert_eq!(quant(rel), Some((0, None)), "for {rel}");
     }
-    for rel in ["-[:CALLS*3]->", "-[:CALLS*3..3]->", "-[:CALLS]->{3}", "-[:CALLS]->{3,3}"] {
+    for rel in [
+        "-[:CALLS*3]->",
+        "-[:CALLS*3..3]->",
+        "-[:CALLS]->{3}",
+        "-[:CALLS]->{3,3}",
+    ] {
         assert_eq!(quant(rel), Some((3, Some(3))), "for {rel}");
     }
     assert_eq!(quant("-[:CALLS*..2]->"), quant("-[:CALLS]->{1,2}"));
@@ -408,23 +475,59 @@ fn outside_the_subset_is_refused() {
 
     // The rest of the refused list: one diagnostic each, naming the construct.
     let named = [
-        ("MATCH (a) RETURN a UNION MATCH (b) RETURN b", "UNION", (1, 20)),
+        (
+            "MATCH (a) RETURN a UNION MATCH (b) RETURN b",
+            "UNION",
+            (1, 20),
+        ),
         ("MATCH (a) CALL db.labels() RETURN a", "CALL", (1, 11)),
         ("MERGE (a:X) RETURN a", "MERGE", (1, 1)),
         ("MATCH (a) SET a.x = 1 RETURN a", "SET", (1, 11)),
         ("MATCH (a) DELETE a", "DELETE", (1, 11)),
         ("MATCH (a) DETACH DELETE a", "DETACH DELETE", (1, 11)),
         ("MATCH (a) REMOVE a.x RETURN a", "REMOVE", (1, 11)),
-        ("MATCH (a) FOREACH (x IN [1] | SET a.x = x) RETURN a", "FOREACH", (1, 11)),
-        ("LOAD CSV FROM 'f' AS row MATCH (a) RETURN a", "LOAD", (1, 1)),
+        (
+            "MATCH (a) FOREACH (x IN [1] | SET a.x = x) RETURN a",
+            "FOREACH",
+            (1, 11),
+        ),
+        (
+            "LOAD CSV FROM 'f' AS row MATCH (a) RETURN a",
+            "LOAD",
+            (1, 1),
+        ),
         ("MATCH (a) RETURN a SKIP 1 LIMIT 2", "SKIP", (1, 20)),
-        ("MATCH (a) RETURN CASE WHEN a.x = 1 THEN 1 END", "CASE", (1, 18)),
-        ("MATCH p = ALL SHORTEST (a)-[:T]->+(b) RETURN p", "ALL SHORTEST", (1, 11)),
-        ("MATCH p = allShortestPaths((a)-[:T*]->(b)) RETURN p", "allShortestPaths()", (1, 11)),
-        ("MATCH (a) WHERE shortestPath((a)-[*]->(a)) RETURN a", "shortestPath()", (1, 17)),
+        (
+            "MATCH (a) RETURN CASE WHEN a.x = 1 THEN 1 END",
+            "CASE",
+            (1, 18),
+        ),
+        (
+            "MATCH p = ALL SHORTEST (a)-[:T]->+(b) RETURN p",
+            "ALL SHORTEST",
+            (1, 11),
+        ),
+        (
+            "MATCH p = allShortestPaths((a)-[:T*]->(b)) RETURN p",
+            "allShortestPaths()",
+            (1, 11),
+        ),
+        (
+            "MATCH (a) WHERE shortestPath((a)-[*]->(a)) RETURN a",
+            "shortestPath()",
+            (1, 17),
+        ),
         ("MATCH ACYCLIC (a)-[:T]->+(b) RETURN b", "ACYCLIC", (1, 7)),
-        ("MATCH p = ANY SHORTEST SIMPLE (a)-[:T]->+(b) RETURN p", "SIMPLE", (1, 24)),
-        ("match (a) optional match (b) return a", "OPTIONAL MATCH", (1, 11)),
+        (
+            "MATCH p = ANY SHORTEST SIMPLE (a)-[:T]->+(b) RETURN p",
+            "SIMPLE",
+            (1, 24),
+        ),
+        (
+            "match (a) optional match (b) return a",
+            "OPTIONAL MATCH",
+            (1, 11),
+        ),
         ("MATCH (a {qname: $q}) RETURN a", "$q", (1, 18)),
     ];
     for (text, name, (line, col)) in named {
@@ -432,10 +535,20 @@ fn outside_the_subset_is_refused() {
         assert_eq!(got.len(), 1, "for {text:?}: {got:?}");
         let prefix = format!("<gql>:{line}:{col}: error: ");
         assert!(got[0].starts_with(&prefix), "for {text:?}: {got:?}");
-        assert!(got[0].contains(&format!("`{name}`")), "for {text:?}: {got:?}");
-        assert!(got[0].contains("is not in the GQL read subset (docs/rules.md)"), "{got:?}");
+        assert!(
+            got[0].contains(&format!("`{name}`")),
+            "for {text:?}: {got:?}"
+        );
+        assert!(
+            got[0].contains("is not in the GQL read subset (docs/rules.md)"),
+            "{got:?}"
+        );
         let restrictor = ["TRAIL", "ACYCLIC", "SIMPLE"].contains(&name);
-        assert_eq!(got[0].contains("walk semantics (Q4)"), restrictor, "for {text:?}: {got:?}");
+        assert_eq!(
+            got[0].contains("walk semantics (Q4)"),
+            restrictor,
+            "for {text:?}: {got:?}"
+        );
     }
 }
 
@@ -447,7 +560,10 @@ fn outside_the_subset_is_refused() {
 fn syntax_errors_are_located() {
     let cases: [(&str, &[&str]); 14] = [
         // A lexical error comes back as the shared lexer's diagnostic.
-        ("MATCH (a) WHERE a.q = 'abc RETURN a", &["<gql>:1:23: error: unterminated string"]),
+        (
+            "MATCH (a) WHERE a.q = 'abc RETURN a",
+            &["<gql>:1:23: error: unterminated string"],
+        ),
         (
             "MATCH (a)-[:T*3..1]->(b) RETURN b",
             &["<gql>:1:14: error: the quantifier's lower bound 3 exceeds its upper bound 1"],
@@ -458,13 +574,17 @@ fn syntax_errors_are_located() {
         ),
         (
             "MATCH (a)-[:T|U*0]->(b) RETURN b",
-            &["<gql>:1:16: error: a quantifier of at most 0 hops never takes a `T|U` \
-               relationship: drop the type or raise the upper bound"],
+            &[
+                "<gql>:1:16: error: a quantifier of at most 0 hops never takes a `T|U` \
+               relationship: drop the type or raise the upper bound",
+            ],
         ),
         (
             "MATCH (a)-[:T*1..2]->+(b) RETURN b",
-            &["<gql>:1:22: error: a relationship takes one quantifier, `*m..n` inside the \
-               brackets or `+` / `*` / `{m,n}` after them, not both"],
+            &[
+                "<gql>:1:22: error: a relationship takes one quantifier, `*m..n` inside the \
+               brackets or `+` / `*` / `{m,n}` after them, not both",
+            ],
         ),
         (
             "MATCH (a:ROUTE RETURN a",
@@ -496,15 +616,20 @@ fn syntax_errors_are_located() {
             &["<gql>:1:20: error: `<-` reads as an arrow here: write `a.n < -1`"],
         ),
         // Clause structure.
-        ("", &["<gql>:1:1: error: expected MATCH, found end of input"]),
+        (
+            "",
+            &["<gql>:1:1: error: expected MATCH, found end of input"],
+        ),
         (
             "MATCH (a)",
             &["<gql>:1:10: error: expected `,`, MATCH, WHERE or RETURN, found end of input"],
         ),
         (
             "MATCH (a) RETURN a WHERE a.x = 1",
-            &["<gql>:1:20: error: `WHERE` is out of place: a query reads MATCH .. [WHERE ..] \
-               RETURN [DISTINCT] .. [ORDER BY ..] [LIMIT n]"],
+            &[
+                "<gql>:1:20: error: `WHERE` is out of place: a query reads MATCH .. [WHERE ..] \
+               RETURN [DISTINCT] .. [ORDER BY ..] [LIMIT n]",
+            ],
         ),
         (
             "MATCH (a) RETURN a LIMIT -1",
@@ -517,9 +642,15 @@ fn syntax_errors_are_located() {
 
     // Aggregates and functions where the subset does not take them.
     let where_agg = errors("MATCH (a) WHERE count(a) > 1 RETURN a");
-    assert_eq!(where_agg, vec!["<gql>:1:17: error: aggregate `count()` is allowed only in RETURN"]);
+    assert_eq!(
+        where_agg,
+        vec!["<gql>:1:17: error: aggregate `count()` is allowed only in RETURN"]
+    );
     let star = errors("MATCH (a) RETURN min(*)");
-    assert_eq!(star, vec!["<gql>:1:22: error: `*` is allowed only in count(*)"]);
+    assert_eq!(
+        star,
+        vec!["<gql>:1:22: error: `*` is allowed only in count(*)"]
+    );
     let order = errors("MATCH (a) RETURN count(a) ORDER BY count(a)");
     assert_eq!(
         order,
@@ -569,11 +700,21 @@ fn diagnostics_cap_at_20() {
     let text = format!("MATCH (a) RETURN a{}", " WHERE a.x = 1".repeat(30));
     let got = errors(&text);
     assert_eq!(got.len(), 20);
-    assert!(got.iter().all(|d| d.contains("`WHERE` is out of place")), "{got:?}");
+    assert!(
+        got.iter().all(|d| d.contains("`WHERE` is out of place")),
+        "{got:?}"
+    );
     // A condition nested past the depth limit is one located error, not a stack overflow.
-    let deep = format!("MATCH (a) WHERE {}a.x = 1{} RETURN a", "(".repeat(500), ")".repeat(500));
+    let deep = format!(
+        "MATCH (a) WHERE {}a.x = 1{} RETURN a",
+        "(".repeat(500),
+        ")".repeat(500)
+    );
     let got = errors(&deep);
-    assert_eq!(got, vec!["<gql>:1:81: error: the condition nests deeper than 64 levels"]);
+    assert_eq!(
+        got,
+        vec!["<gql>:1:81: error: the condition nests deeper than 64 levels"]
+    );
 }
 
 // ============================================================================
@@ -583,9 +724,10 @@ fn diagnostics_cap_at_20() {
 #[test]
 fn keywords_are_case_insensitive() {
     assert_eq!(render(&ok("match (a) return a")), "MATCH (a) | RETURN a");
-    let lower =
-        ok("MaTcH p = any shortest (a:Route)-[:calls]->+(b) wHeRe a.x starts with 'x' and not \
-         b.y in [TRUE] Return Distinct a.x As X, CoUnT(DiStInCt b) Order By X desc Limit 1");
+    let lower = ok(
+        "MaTcH p = any shortest (a:Route)-[:calls]->+(b) wHeRe a.x starts with 'x' and not \
+         b.y in [TRUE] Return Distinct a.x As X, CoUnT(DiStInCt b) Order By X desc Limit 1",
+    );
     assert_eq!(
         render(&lower),
         "MATCH p = ANY SHORTEST (a:Route)-[:calls]->{1,}(b) | WHERE (a.x STARTS WITH \"x\" AND \
@@ -595,7 +737,9 @@ fn keywords_are_case_insensitive() {
     // A keyword spelling as a label, relationship type or property key stays an
     // identifier; as a variable or alias it is reserved.
     assert_eq!(
-        render(&ok("MATCH (a:Order {limit: 1})-[r:WHERE]->(b:match) RETURN a.return, r.order")),
+        render(&ok(
+            "MATCH (a:Order {limit: 1})-[r:WHERE]->(b:match) RETURN a.return, r.order"
+        )),
         "MATCH (a:Order {limit: 1})-[r:WHERE]->(b:match) | RETURN a.return, r.order"
     );
     assert_eq!(

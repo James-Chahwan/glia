@@ -53,9 +53,8 @@ fn capture_merged_shards() {
         .map(str::to_string)
         .collect();
     assert!(!repos.is_empty(), "GLIA_PARITY_REPOS names no repo");
-    let out = PathBuf::from(
-        std::env::var("GLIA_PARITY_OUT").expect("GLIA_PARITY_OUT: output directory"),
-    );
+    let out =
+        PathBuf::from(std::env::var("GLIA_PARITY_OUT").expect("GLIA_PARITY_OUT: output directory"));
 
     for (i, repo) in repos.iter().enumerate() {
         let tag = format!("one[{i}]");

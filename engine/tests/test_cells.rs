@@ -51,7 +51,9 @@ fn write(root: &Path, rel: &str, text: &str) {
 }
 
 fn build(repo: &Path) -> MergedGraph {
-    generate_one(repo.to_str().expect("utf-8 tempdir")).expect("build").merged
+    generate_one(repo.to_str().expect("utf-8 tempdir"))
+        .expect("build")
+        .merged
 }
 
 /// Every TEST cell of every copy of the node named `qname`, one entry per
@@ -61,7 +63,12 @@ fn test_cells<'m>(m: &'m MergedGraph, qname: &str) -> Vec<Vec<&'m Cell>> {
     for g in &m.graphs {
         for n in &g.nodes {
             if g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname) {
-                out.push(n.cells.iter().filter(|c| c.kind == cell_type::TEST).collect());
+                out.push(
+                    n.cells
+                        .iter()
+                        .filter(|c| c.kind == cell_type::TEST)
+                        .collect(),
+                );
             }
         }
     }
@@ -72,7 +79,11 @@ fn test_cells<'m>(m: &'m MergedGraph, qname: &str) -> Vec<Vec<&'m Cell>> {
 /// The one TEST cell `qname` carries across its copies, parsed.
 fn test_cell(m: &MergedGraph, qname: &str) -> Value {
     let cells: Vec<&Cell> = test_cells(m, qname).into_iter().flatten().collect();
-    assert_eq!(cells.len(), 1, "{qname}: exactly one TEST cell across its copies");
+    assert_eq!(
+        cells.len(),
+        1,
+        "{qname}: exactly one TEST cell across its copies"
+    );
     match &cells[0].payload {
         CellPayload::Json(j) => serde_json::from_str(j).expect("TEST payload is JSON"),
         other => panic!("{qname}: TEST payload is not Json: {other:?}"),
@@ -86,7 +97,11 @@ fn entries(cell: &Value) -> Vec<(String, String)> {
         .expect("tests is an array")
         .iter()
         .map(|e| {
-            assert_eq!(e.as_object().map(|o| o.len()), Some(2), "entry is {{test, kind}}: {e}");
+            assert_eq!(
+                e.as_object().map(|o| o.len()),
+                Some(2),
+                "entry is {{test, kind}}: {e}"
+            );
             (
                 e["test"].as_str().expect("test is a string").to_string(),
                 e["kind"].as_str().expect("kind is a string").to_string(),
@@ -111,30 +126,49 @@ fn test_cell_lists_direct_tests_sorted() {
     let price = test_cell(&m, "shop::orders::service::price");
     assert_eq!(
         entries(&price),
-        [("shop::tests::test_service::test_price".to_string(), "FUNCTION".to_string())]
+        [(
+            "shop::tests::test_service::test_price".to_string(),
+            "FUNCTION".to_string()
+        )]
     );
     assert_eq!(price["total"], 1);
-    assert_eq!(price.as_object().map(|o| o.len()), Some(2), "{{tests, total}} only: {price}");
+    assert_eq!(
+        price.as_object().map(|o| o.len()),
+        Some(2),
+        "{{tests, total}} only: {price}"
+    );
 
     let service = test_cell(&m, "shop::orders::service");
     assert_eq!(
         entries(&service),
-        [("shop::tests::test_service".to_string(), "MODULE".to_string())]
+        [(
+            "shop::tests::test_service".to_string(),
+            "MODULE".to_string()
+        )]
     );
     assert_eq!(service["total"], 1);
 
     let audited = test_cell(&m, "shop::orders::audit::audited_place");
     assert_eq!(
         entries(&audited),
-        [("shop::tests::test_audit::test_audited_place".to_string(), "FUNCTION".to_string())]
+        [(
+            "shop::tests::test_audit::test_audited_place".to_string(),
+            "FUNCTION".to_string()
+        )]
     );
 
     // Precision: test_service pairs service, never audit.
     let audit = test_cell(&m, "shop::orders::audit");
-    assert_eq!(entries(&audit), [("shop::tests::test_audit".to_string(), "MODULE".to_string())]);
+    assert_eq!(
+        entries(&audit),
+        [("shop::tests::test_audit".to_string(), "MODULE".to_string())]
+    );
 
     // The compact payload, byte for byte (key order = the documented shape).
-    let raw: Vec<&Cell> = test_cells(&m, "shop::orders::service::price").into_iter().flatten().collect();
+    let raw: Vec<&Cell> = test_cells(&m, "shop::orders::service::price")
+        .into_iter()
+        .flatten()
+        .collect();
     assert_eq!(
         raw[0].payload,
         CellPayload::Json(
@@ -152,17 +186,25 @@ fn transitive_tests_are_not_in_the_cell() {
     let m = build(&tmp.path().join("repo"));
     // `place` is reached from test_audited_place only through audited_place:
     // nothing TESTS it directly.
-    assert_eq!(test_cells(&m, "shop::orders::service::place"), vec![Vec::<&Cell>::new()]);
+    assert_eq!(
+        test_cells(&m, "shop::orders::service::place"),
+        vec![Vec::<&Cell>::new()]
+    );
     // audited_place lists its own test, not the tests of what calls it, and
     // price lists test_price only, not test_audited_place (which reaches it
     // through place).
     let price = test_cell(&m, "shop::orders::service::price");
     assert!(
-        entries(&price).iter().all(|(t, _)| !t.contains("test_audited_place")),
+        entries(&price)
+            .iter()
+            .all(|(t, _)| !t.contains("test_audited_place")),
         "{price}"
     );
     // Tests themselves carry no TEST cell.
-    assert_eq!(test_cells(&m, "shop::tests::test_service::test_price"), vec![Vec::<&Cell>::new()]);
+    assert_eq!(
+        test_cells(&m, "shop::tests::test_service::test_price"),
+        vec![Vec::<&Cell>::new()]
+    );
 }
 
 /// An ENDPOINT a Python and a TypeScript client both call is one NodeId in
@@ -172,7 +214,11 @@ fn transitive_tests_are_not_in_the_cell() {
 fn one_cell_per_node_across_graph_copies() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
-    write(&repo, "client.py", "import requests\n\n\ndef load_users():\n    return requests.get(\"/users\").json()\n");
+    write(
+        &repo,
+        "client.py",
+        "import requests\n\n\ndef load_users():\n    return requests.get(\"/users\").json()\n",
+    );
     write(
         &repo,
         "client.ts",
@@ -192,14 +238,24 @@ fn one_cell_per_node_across_graph_copies() {
     let m = build(&repo);
 
     let copies = test_cells(&m, "endpoint:GET:/users");
-    assert_eq!(copies.len(), 2, "the endpoint sits in both per-language graphs");
+    assert_eq!(
+        copies.len(),
+        2,
+        "the endpoint sits in both per-language graphs"
+    );
     assert_eq!(
         copies.iter().map(Vec::len).collect::<Vec<_>>(),
         [1, 0],
         "one TEST cell, on the first copy in graph order"
     );
     let cell = test_cell(&m, "endpoint:GET:/users");
-    assert_eq!(entries(&cell), [("tests::test_client::test_users".to_string(), "FUNCTION".to_string())]);
+    assert_eq!(
+        entries(&cell),
+        [(
+            "tests::test_client::test_users".to_string(),
+            "FUNCTION".to_string()
+        )]
+    );
     assert_eq!(cell["total"], 1);
 }
 
@@ -207,10 +263,16 @@ fn one_cell_per_node_across_graph_copies() {
 fn cap_at_50_keeps_total() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
-    write(&repo, "shop/pricing.py", "def price(order):\n    return len(order)\n");
+    write(
+        &repo,
+        "shop/pricing.py",
+        "def price(order):\n    return len(order)\n",
+    );
     let mut tests = String::from("from shop.pricing import price\n");
     for i in 0..60 {
-        tests.push_str(&format!("\n\ndef test_price_{i:02}():\n    assert price([{i}]) == 1\n"));
+        tests.push_str(&format!(
+            "\n\ndef test_price_{i:02}():\n    assert price([{i}]) == 1\n"
+        ));
     }
     write(&repo, "shop/tests/test_pricing.py", &tests);
     let m = build(&repo);
@@ -220,7 +282,12 @@ fn cap_at_50_keeps_total() {
     assert_eq!(cell["total"], 60, "total is the real count");
     assert_eq!(got.len(), 50, "the list is capped");
     let want: Vec<(String, String)> = (0..50)
-        .map(|i| (format!("shop::tests::test_pricing::test_price_{i:02}"), "FUNCTION".to_string()))
+        .map(|i| {
+            (
+                format!("shop::tests::test_pricing::test_price_{i:02}"),
+                "FUNCTION".to_string(),
+            )
+        })
         .collect();
     assert_eq!(got, want, "sorted by test qname, the first 50 kept");
 }
@@ -229,10 +296,15 @@ fn cap_at_50_keeps_total() {
 fn no_tests_edges_no_cells_no_marker() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
-    write(&repo, "shop/pricing.py", "def price(order):\n    return len(order)\n\n\ndef place(order):\n    return price(order)\n");
+    write(
+        &repo,
+        "shop/pricing.py",
+        "def price(order):\n    return len(order)\n\n\ndef place(order):\n    return price(order)\n",
+    );
     let m = build(&repo);
     assert!(
-        !m.all_edges().any(|e| e.category == glia_code_domain::edge_category::TESTS),
+        !m.all_edges()
+            .any(|e| e.category == glia_code_domain::edge_category::TESTS),
         "no TESTS edge in a tree without tests"
     );
     // The marker is gated on the same count (TestCellStats::marker is None
@@ -253,7 +325,12 @@ fn two_builds_serialise_identically() {
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
             .expect("read out dir")
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).expect("read")))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).expect("read"),
+                )
+            })
             .collect();
         files.sort();
         files

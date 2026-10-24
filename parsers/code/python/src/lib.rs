@@ -15,15 +15,13 @@ use std::collections::HashMap;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::data_entity;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras, push_client_endpoint_with};
+use glia_code_domain::evidence;
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
-};
-use glia_code_domain::data_entity;
-use glia_code_domain::evidence;
-use glia_code_domain::di_stats::{self, DiShape};
-use glia_code_domain::endpoint::{
-    self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
 
 /// Parse one Python source file.
@@ -55,8 +53,13 @@ pub fn parse_file(
         cells: build_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     // substrate-gap py-accesses-data — pre-pass: harvest `__tablename__` from
     // every model class so `session.query(User)` sites (which may appear before
@@ -78,17 +81,38 @@ pub fn parse_file(
     for child in root.named_children(&mut cursor) {
         match child.kind() {
             "class_definition" => {
-                visit_class(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+                visit_class(
+                    child,
+                    src,
+                    file_rel_path,
+                    module_qname,
+                    module_id,
+                    repo,
+                    &mut acc,
+                );
             }
             "function_definition" => {
                 visit_function(
-                    child, src, file_rel_path, module_qname, module_id, None, repo, &mut acc,
+                    child,
+                    src,
+                    file_rel_path,
+                    module_qname,
+                    module_id,
+                    None,
+                    repo,
+                    &mut acc,
                     &[],
                 );
             }
             "decorated_definition" => {
                 visit_decorated_top(
-                    child, src, file_rel_path, module_qname, module_id, repo, &mut acc,
+                    child,
+                    src,
+                    file_rel_path,
+                    module_qname,
+                    module_id,
+                    repo,
+                    &mut acc,
                 );
             }
             "import_statement" => collect_import(child, src, module_qname, &mut acc),
@@ -101,7 +125,13 @@ pub fn parse_file(
                 // glia v5 G19 — module-level constant assignments
                 // (`MAX_RETRIES = …`). Only UPPERCASE names.
                 collect_state_vars(
-                    child, src, file_rel_path, module_qname, module_id, repo, &mut acc,
+                    child,
+                    src,
+                    file_rel_path,
+                    module_qname,
+                    module_id,
+                    repo,
+                    &mut acc,
                 );
             }
             "assignment" => {
@@ -112,7 +142,15 @@ pub fn parse_file(
             // file is executed as a script, so its calls are the MODULE's and
             // the MODULE is an entry.
             "if_statement" if is_main_guard(child, src) => {
-                visit_main_guard(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+                visit_main_guard(
+                    child,
+                    src,
+                    file_rel_path,
+                    module_qname,
+                    module_id,
+                    repo,
+                    &mut acc,
+                );
             }
             _ => {}
         }
@@ -159,8 +197,11 @@ fn is_main_guard(n: TsNode, src: &[u8]) -> bool {
     let mut c = cond.walk();
     let operands: Vec<TsNode> = cond.named_children(&mut c).collect();
     let mut c = cond.walk();
-    let operators: Vec<&str> =
-        cond.children(&mut c).filter(|k| !k.is_named()).map(|k| k.kind()).collect();
+    let operators: Vec<&str> = cond
+        .children(&mut c)
+        .filter(|k| !k.is_named())
+        .map(|k| k.kind())
+        .collect();
     let [a, b] = operands[..] else {
         return false;
     };
@@ -168,7 +209,8 @@ fn is_main_guard(n: TsNode, src: &[u8]) -> bool {
         return false;
     }
     let is_name = |x: TsNode| x.kind() == "identifier" && text(x, src) == "__name__";
-    let is_main = |x: TsNode| x.kind() == "string" && strip_string_quotes(text(x, src)) == "__main__";
+    let is_main =
+        |x: TsNode| x.kind() == "string" && strip_string_quotes(text(x, src)) == "__main__";
     (is_name(a) && is_main(b)) || (is_main(a) && is_name(b))
 }
 
@@ -201,7 +243,10 @@ fn visit_main_guard(
         && module.id == module_id
         && !module.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
     {
-        module.cells.push(Cell { kind: cell_type::ENTRYPOINT, payload: CellPayload::Json(payload) });
+        module.cells.push(Cell {
+            kind: cell_type::ENTRYPOINT,
+            payload: CellPayload::Json(payload),
+        });
     }
     eprintln!("[py-main] guard module={module_qname} calls={calls} file={file_rel}");
 }
@@ -224,7 +269,15 @@ fn visit_decorated_top(
     match inner.kind() {
         "function_definition" => {
             visit_function(
-                inner, src, file_rel, module_qname, module_id, None, repo, acc, &decos,
+                inner,
+                src,
+                file_rel,
+                module_qname,
+                module_id,
+                None,
+                repo,
+                acc,
+                &decos,
             );
         }
         "class_definition" => {
@@ -454,8 +507,13 @@ fn visit_class(
         cells: Vec::new(),
     });
     acc.module_classes.insert(name.to_string(), class_id);
-    acc.nav
-        .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
+    acc.nav.record(
+        class_id,
+        name,
+        &class_qname,
+        node_kind::CLASS,
+        Some(module_id),
+    );
 
     // v0.4.13a — record base class simple names for super() resolution.
     // `class Foo(Bar, pkg.Baz, metaclass=Meta):` → record ["Bar", "Baz"].
@@ -499,7 +557,15 @@ fn visit_class(
         match member.kind() {
             "function_definition" => {
                 visit_method(
-                    member, src, file_rel, &class_qname, class_id, module_id, repo, acc, &[],
+                    member,
+                    src,
+                    file_rel,
+                    &class_qname,
+                    class_id,
+                    module_id,
+                    repo,
+                    acc,
+                    &[],
                 );
             }
             "decorated_definition" => {
@@ -528,8 +594,8 @@ fn visit_class(
                 for child in member.named_children(&mut ec) {
                     if matches!(child.kind(), "assignment")
                         && let Some(lhs) = child.child_by_field_name("left")
-                            && lhs.kind() == "identifier"
-                        {
+                        && lhs.kind() == "identifier"
+                    {
                         let attr_name = text(lhs, src);
                         emit_class_attribute(
                             class_id,
@@ -561,9 +627,7 @@ fn visit_class(
                             // class-level `x = Target(...)`.
                             let rhs = child.child_by_field_name("right");
                             if let Some(rhs) = rhs {
-                                emit_rhs_constructor_refs(
-                                    rhs, src, attr_id, module_id, acc,
-                                );
+                                emit_rhs_constructor_refs(rhs, src, attr_id, module_id, acc);
                             }
                             // LA.23a — the field's type for receiver-typed
                             // calls: the annotation (dataclass / pydantic /
@@ -581,8 +645,7 @@ fn visit_class(
                                     }
                                 }
                                 None => {
-                                    if let Some(t) = rhs.and_then(|r| constructor_type(r, src))
-                                    {
+                                    if let Some(t) = rhs.and_then(|r| constructor_type(r, src)) {
                                         record_field_type(
                                             acc,
                                             class_id,
@@ -686,7 +749,13 @@ struct AttrClass<'a> {
 /// The read-based signal matches what any reader (human or LLM) infers:
 /// if a class's methods read `self.foo`, the class has an attribute `foo`.
 fn collect_self_attr_assignments(body: TsNode, src: &[u8], class: &AttrClass<'_>, acc: &mut Acc) {
-    let AttrClass { class_id, class_qname, file_rel, module_id, repo } = *class;
+    let AttrClass {
+        class_id,
+        class_qname,
+        file_rel,
+        module_id,
+        repo,
+    } = *class;
     let mut stack = vec![body];
     while let Some(node) = stack.pop() {
         // Don't descend into nested function/class bodies — `self` there is a
@@ -705,7 +774,13 @@ fn collect_self_attr_assignments(body: TsNode, src: &[u8], class: &AttrClass<'_>
         {
             let attr_name = text(attr, src);
             emit_class_attribute(
-                class_id, class_qname, attr_name, file_rel, module_id, repo, acc,
+                class_id,
+                class_qname,
+                attr_name,
+                file_rel,
+                module_id,
+                repo,
+                acc,
             );
         }
         let mut c = node.walk();
@@ -747,8 +822,13 @@ fn visit_method(
     });
     acc.class_methods
         .insert((class_id, name.to_string()), method_id);
-    acc.nav
-        .record(method_id, name, &method_qname, node_kind::METHOD, Some(class_id));
+    acc.nav.record(
+        method_id,
+        name,
+        &method_qname,
+        node_kind::METHOD,
+        Some(class_id),
+    );
 
     for deco in decorators {
         check_route_decorator(*deco, src, method_id, repo, acc);
@@ -779,7 +859,13 @@ fn visit_method(
         collect_calls_in(body, src, method_id, Some(class_id), repo, file_rel, acc);
         // v0.4.13 — scan for `self.<attr> = …` assignments that define class
         // attributes via instance-side `__init__`-style initialisation.
-        let class = AttrClass { class_id, class_qname, file_rel, module_id, repo };
+        let class = AttrClass {
+            class_id,
+            class_qname,
+            file_rel,
+            module_id,
+            repo,
+        };
         collect_self_attr_assignments(body, src, &class, acc);
         // v0.4.13b — RHS constructor inference: `self.<attr> = Target(...)`
         // emits USES ref from ATTRIBUTE to Target so PPR can surface the
@@ -840,11 +926,17 @@ fn visit_function(
             acc.module_functions.insert(name.to_string(), func_id);
         }
         Some(enclosing) => {
-            acc.nested_functions.insert((enclosing, name.to_string()), func_id);
+            acc.nested_functions
+                .insert((enclosing, name.to_string()), func_id);
         }
     }
-    acc.nav
-        .record(func_id, name, &func_qname, node_kind::FUNCTION, Some(parent));
+    acc.nav.record(
+        func_id,
+        name,
+        &func_qname,
+        node_kind::FUNCTION,
+        Some(parent),
+    );
 
     for deco in decorators {
         check_route_decorator(*deco, src, func_id, repo, acc);
@@ -876,7 +968,15 @@ fn visit_function(
         for member in body.named_children(&mut cursor) {
             match member.kind() {
                 "function_definition" => visit_function(
-                    member, src, file_rel, &func_qname, module_id, Some(func_id), repo, acc, &[],
+                    member,
+                    src,
+                    file_rel,
+                    &func_qname,
+                    module_id,
+                    Some(func_id),
+                    repo,
+                    acc,
+                    &[],
                 ),
                 "decorated_definition" => {
                     let (decos, inner) = split_decorated(member);
@@ -884,8 +984,15 @@ fn visit_function(
                         && inner.kind() == "function_definition"
                     {
                         visit_function(
-                            inner, src, file_rel, &func_qname, module_id, Some(func_id), repo,
-                            acc, &decos,
+                            inner,
+                            src,
+                            file_rel,
+                            &func_qname,
+                            module_id,
+                            Some(func_id),
+                            repo,
+                            acc,
+                            &decos,
                         );
                     }
                 }
@@ -1217,12 +1324,14 @@ fn scan_model_tables(root: TsNode, src: &[u8], module_qname: &str, repo: RepoId,
     for child in root.named_children(&mut cursor) {
         let class_node = match child.kind() {
             "class_definition" => Some(child),
-            "decorated_definition" => {
-                split_decorated(child).1.filter(|i| i.kind() == "class_definition")
-            }
+            "decorated_definition" => split_decorated(child)
+                .1
+                .filter(|i| i.kind() == "class_definition"),
             _ => None,
         };
-        let Some(class_node) = class_node else { continue };
+        let Some(class_node) = class_node else {
+            continue;
+        };
         let Some(class_name) = child_text(class_node, "name", src) else {
             continue;
         };
@@ -1337,22 +1446,23 @@ fn is_django_path(path: &str) -> bool {
 /// short `models.Model` base, which Tortoise ORM spells identically.
 fn imports_django(root: TsNode, src: &[u8]) -> bool {
     let mut cursor = root.walk();
-    root.named_children(&mut cursor).any(|stmt| match stmt.kind() {
-        "import_from_statement" => {
-            child_text(stmt, "module_name", src).is_some_and(is_django_path)
-        }
-        "import_statement" => {
-            let mut inner = stmt.walk();
-            stmt.named_children(&mut inner).any(|name| {
-                let path = match name.kind() {
-                    "aliased_import" => child_text(name, "name", src),
-                    _ => Some(text(name, src)),
-                };
-                path.is_some_and(is_django_path)
-            })
-        }
-        _ => false,
-    })
+    root.named_children(&mut cursor)
+        .any(|stmt| match stmt.kind() {
+            "import_from_statement" => {
+                child_text(stmt, "module_name", src).is_some_and(is_django_path)
+            }
+            "import_statement" => {
+                let mut inner = stmt.walk();
+                stmt.named_children(&mut inner).any(|name| {
+                    let path = match name.kind() {
+                        "aliased_import" => child_text(name, "name", src),
+                        _ => Some(text(name, src)),
+                    };
+                    path.is_some_and(is_django_path)
+                })
+            }
+            _ => false,
+        })
 }
 
 /// True when `class_node` directly subclasses Django's model base:
@@ -1398,9 +1508,10 @@ fn django_meta(class_node: TsNode, src: &[u8]) -> DjangoMeta {
         return meta;
     };
     let mut cursor = body.walk();
-    let Some(meta_class) = body.named_children(&mut cursor).find(|m| {
-        m.kind() == "class_definition" && child_text(*m, "name", src) == Some("Meta")
-    }) else {
+    let Some(meta_class) = body
+        .named_children(&mut cursor)
+        .find(|m| m.kind() == "class_definition" && child_text(*m, "name", src) == Some("Meta"))
+    else {
         return meta;
     };
     let Some(meta_body) = meta_class.child_by_field_name("body") else {
@@ -1443,7 +1554,9 @@ fn plain_string_literal(n: TsNode, src: &[u8]) -> Option<String> {
         return None;
     }
     let mut cursor = n.walk();
-    if n.named_children(&mut cursor).any(|c| c.kind() == "interpolation") {
+    if n.named_children(&mut cursor)
+        .any(|c| c.kind() == "interpolation")
+    {
         return None;
     }
     let value = strip_string_quotes(text(n, src));
@@ -1471,7 +1584,10 @@ fn django_table(class_name: &str, meta: DjangoMeta, module_qname: &str) -> (Stri
         return (table, false);
     }
     let model = class_name.to_lowercase();
-    let app = meta.app_label.as_deref().or_else(|| django_app_segment(module_qname));
+    let app = meta
+        .app_label
+        .as_deref()
+        .or_else(|| django_app_segment(module_qname));
     match app {
         Some(app) => (format!("{app}_{model}"), true),
         None => (model, true),
@@ -1519,8 +1635,13 @@ fn emit_django_model(
         confidence: Confidence::Medium,
         cells: vec![data_entity::table_cell(&table, data_entity::orm::DJANGO)],
     });
-    acc.nav
-        .record(entity_id, class_name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.nav.record(
+        entity_id,
+        class_name,
+        &qname,
+        node_kind::DATA_ENTITY,
+        Some(class_id),
+    );
     acc.edges.push(Edge {
         from: class_id,
         to: entity_id,
@@ -1665,7 +1786,9 @@ fn is_http_client_receiver(name: &str) -> bool {
 fn http_receiver_simple<'a>(object: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
     match object.kind() {
         "identifier" => Some(text(object, src)),
-        "attribute" => object.child_by_field_name("attribute").map(|a| text(a, src)),
+        "attribute" => object
+            .child_by_field_name("attribute")
+            .map(|a| text(a, src)),
         _ => None,
     }
 }
@@ -2190,13 +2313,7 @@ fn collect_return_type_ref(
 /// project-class identifier found. Same traversal shape as
 /// `collect_return_type_ref` but tagged `USES` (attrs aren't callable, so
 /// RETURNS_TYPE doesn't fit without a composition.rs behavior change).
-fn collect_attr_type_ref(
-    ty: TsNode,
-    src: &[u8],
-    from: NodeId,
-    module_id: NodeId,
-    acc: &mut Acc,
-) {
+fn collect_attr_type_ref(ty: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc: &mut Acc) {
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut stack = vec![ty];
     while let Some(n) = stack.pop() {
@@ -2282,12 +2399,8 @@ fn collect_self_attr_rhs_types(
                 && !(attr_name.starts_with("__") && attr_name.ends_with("__"))
             {
                 let attr_qname = format!("{class_qname}::{attr_name}");
-                let attr_id = NodeId::from_parts(
-                    GRAPH_TYPE,
-                    repo,
-                    node_kind::ATTRIBUTE,
-                    &attr_qname,
-                );
+                let attr_id =
+                    NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &attr_qname);
                 emit_rhs_constructor_refs(rhs, src, attr_id, module_id, acc);
             }
             if let Some(params) = init_params {
@@ -2565,13 +2678,43 @@ fn is_field_type_name(name: &str) -> bool {
 fn is_type_noise(s: &str) -> bool {
     matches!(
         s,
-        "str" | "bytes" | "int" | "float" | "bool" | "None" | "object"
-            | "list" | "dict" | "tuple" | "set" | "frozenset"
-            | "Any" | "Optional" | "Union" | "List" | "Dict" | "Tuple" | "Set"
-            | "Callable" | "Iterable" | "Iterator" | "Generator" | "AsyncIterable"
-            | "AsyncIterator" | "AsyncGenerator" | "Awaitable" | "Coroutine"
-            | "Sequence" | "Mapping" | "MutableMapping" | "MutableSequence"
-            | "Type" | "ClassVar" | "Final" | "Literal" | "Self"
+        "str"
+            | "bytes"
+            | "int"
+            | "float"
+            | "bool"
+            | "None"
+            | "object"
+            | "list"
+            | "dict"
+            | "tuple"
+            | "set"
+            | "frozenset"
+            | "Any"
+            | "Optional"
+            | "Union"
+            | "List"
+            | "Dict"
+            | "Tuple"
+            | "Set"
+            | "Callable"
+            | "Iterable"
+            | "Iterator"
+            | "Generator"
+            | "AsyncIterable"
+            | "AsyncIterator"
+            | "AsyncGenerator"
+            | "Awaitable"
+            | "Coroutine"
+            | "Sequence"
+            | "Mapping"
+            | "MutableMapping"
+            | "MutableSequence"
+            | "Type"
+            | "ClassVar"
+            | "Final"
+            | "Literal"
+            | "Self"
     )
 }
 
@@ -2602,7 +2745,9 @@ fn resolve_intra_file(mut acc: Acc, file_rel: &str) -> Result<FileParse, ParseEr
         if let CallQualifier::Bare(name) = &uc.qualifier
             && let Some(to) = nested_def(&out.nav, &acc.nested_functions, uc.from, name)
         {
-            let ev = evidence::Evidence::emitter("parser:python").rule("nested_def").line(uc.line);
+            let ev = evidence::Evidence::emitter("parser:python")
+                .rule("nested_def")
+                .line(uc.line);
             out.edges.push(
                 Edge::new(uc.from, to, edge_category::CALLS, Confidence::Strong)
                     .with_cell(ev.to_cell()),
@@ -2623,11 +2768,9 @@ fn resolve_intra_file(mut acc: Acc, file_rel: &str) -> Result<FileParse, ParseEr
             CallQualifier::SuperMethod(name) => uc.enclosing_class.and_then(|cid| {
                 acc.class_bases.get(&cid).and_then(|bases| {
                     bases.iter().find_map(|base_name| {
-                        acc.module_classes
-                            .get(base_name)
-                            .and_then(|base_id| {
-                                acc.class_methods.get(&(*base_id, name.clone())).copied()
-                            })
+                        acc.module_classes.get(base_name).and_then(|base_id| {
+                            acc.class_methods.get(&(*base_id, name.clone())).copied()
+                        })
                     })
                 })
             }),
@@ -2741,8 +2884,7 @@ fn strip_string_quotes(s: &str) -> String {
     {
         &t[3..t.len() - 3]
     } else if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"'))
-            || (t.starts_with('\'') && t.ends_with('\'')))
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
     {
         &t[1..t.len() - 1]
     } else {
@@ -2821,7 +2963,8 @@ fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
         if prefix.is_empty() {
             continue;
         }
-        acc.router_prefixes.insert(text(lhs, src).to_string(), prefix);
+        acc.router_prefixes
+            .insert(text(lhs, src).to_string(), prefix);
     }
 
     // Pass 2 — same-file FastAPI mount: `app.include_router(router, prefix="/v2")`
@@ -2841,7 +2984,9 @@ fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
             continue;
         };
         let mut cursor = args.walk();
-        let Some(first) = args.named_children(&mut cursor).find(|a| a.kind() == "identifier")
+        let Some(first) = args
+            .named_children(&mut cursor)
+            .find(|a| a.kind() == "identifier")
         else {
             continue;
         };
@@ -2852,7 +2997,11 @@ fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
             continue;
         }
         let target = text(first, src).to_string();
-        let own = acc.router_prefixes.get(&target).cloned().unwrap_or_default();
+        let own = acc
+            .router_prefixes
+            .get(&target)
+            .cloned()
+            .unwrap_or_default();
         let composed = if own.is_empty() {
             mount
         } else {
@@ -2911,7 +3060,11 @@ fn check_route_decorator(
     // prefix `join_path("", p)` is a pure pass-through and `abs_path` only
     // normalises the leading slash, so `@app.get("/users")` stays byte-identical.
     let receiver = head.rsplit_once('.').map(|(r, _)| r.trim()).unwrap_or("");
-    let prefix = acc.router_prefixes.get(receiver).map(String::as_str).unwrap_or("");
+    let prefix = acc
+        .router_prefixes
+        .get(receiver)
+        .map(String::as_str)
+        .unwrap_or("");
     let full = endpoint::abs_path(&endpoint::join_path(prefix, &path));
     if !prefix.is_empty() {
         acc.routes_composed += 1;
@@ -2983,11 +3136,8 @@ fn scan_django_routes(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
             && let Some(func) = n.child_by_field_name("function")
         {
             let name = text(func, src);
-            let is_django =
-                matches!(name, "path" | "re_path" | "url") || name.ends_with(".path");
-            if is_django
-                && let Some(args) = n.child_by_field_name("arguments")
-            {
+            let is_django = matches!(name, "path" | "re_path" | "url") || name.ends_with(".path");
+            if is_django && let Some(args) = n.child_by_field_name("arguments") {
                 let arg_text = text(args, src);
                 if let Some(path) = first_string_literal(&arg_text[1..]) {
                     emit_route_no_handler("ANY", &path, repo, acc);
@@ -3196,7 +3346,11 @@ mod tests {
             .edges
             .iter()
             .find(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
-            .map(|e| evidence::Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default())
+            .map(|e| {
+                evidence::Evidence::of(e)
+                    .and_then(|ev| ev.rule)
+                    .unwrap_or_default()
+            })
     }
 
     /// Every ENTRYPOINT cell payload on the MODULE `m`.
@@ -3225,7 +3379,11 @@ mod tests {
         ] {
             let src = format!("def run():\n    return 1\n\n\n{guard}\n    run()\n");
             let parse = parse_file(&src, "m.py", "m", repo()).unwrap();
-            assert_eq!(calls_rule(&parse, mid("m"), fid("m::run")).as_deref(), Some("intra_file"), "{guard}");
+            assert_eq!(
+                calls_rule(&parse, mid("m"), fid("m::run")).as_deref(),
+                Some("intra_file"),
+                "{guard}"
+            );
             assert_eq!(
                 entry_cells(&parse, "m"),
                 [r#"{"decl":"m.py:5","source":"main_guard"}"#],
@@ -3245,16 +3403,25 @@ mod tests {
         ] {
             let src = format!("name = 'x'\n\n\ndef run():\n    return 1\n\n\n{guard}\n    run()\n");
             let parse = parse_file(&src, "m.py", "m", repo()).unwrap();
-            assert!(calls_rule(&parse, mid("m"), fid("m::run")).is_none(), "{guard}");
+            assert!(
+                calls_rule(&parse, mid("m"), fid("m::run")).is_none(),
+                "{guard}"
+            );
             assert!(entry_cells(&parse, "m").is_empty(), "{guard}");
         }
         // elif / else run on import; a def inside the guard is not walked.
         let src = "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n\n\n\
                    if __name__ == \"__main__\":\n    def later():\n        c()\n\n    a()\nelif x:\n    b()\nelse:\n    c()\n";
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
-        assert!(calls_rule(&parse, mid("m"), fid("m::a")).is_some(), "the guard's own call");
+        assert!(
+            calls_rule(&parse, mid("m"), fid("m::a")).is_some(),
+            "the guard's own call"
+        );
         assert!(calls_rule(&parse, mid("m"), fid("m::b")).is_none(), "elif");
-        assert!(calls_rule(&parse, mid("m"), fid("m::c")).is_none(), "else and the inner def");
+        assert!(
+            calls_rule(&parse, mid("m"), fid("m::c")).is_none(),
+            "else and the inner def"
+        );
         assert_eq!(entry_cells(&parse, "m").len(), 1);
     }
 
@@ -3266,13 +3433,25 @@ mod tests {
                    def helper():\n    return 0\n\n\n\
                    class K:\n    def m(self):\n        return double(1)\n";
         let parse = parse_file(src, "tool.py", "tool", repo()).unwrap();
-        let (compute, inner_double, double) =
-            (fid("tool::compute"), fid("tool::compute::double"), fid("tool::double"));
-        assert_eq!(calls_rule(&parse, compute, inner_double).as_deref(), Some("nested_def"));
-        assert!(calls_rule(&parse, compute, double).is_none(), "the nested def shadows it");
+        let (compute, inner_double, double) = (
+            fid("tool::compute"),
+            fid("tool::compute::double"),
+            fid("tool::double"),
+        );
+        assert_eq!(
+            calls_rule(&parse, compute, inner_double).as_deref(),
+            Some("nested_def")
+        );
+        assert!(
+            calls_rule(&parse, compute, double).is_none(),
+            "the nested def shadows it"
+        );
         // Nested-nested: inner's helper() is outer's nested helper.
         let (inner, outer_helper) = (fid("tool::outer::inner"), fid("tool::outer::helper"));
-        assert_eq!(calls_rule(&parse, inner, outer_helper).as_deref(), Some("nested_def"));
+        assert_eq!(
+            calls_rule(&parse, inner, outer_helper).as_deref(),
+            Some("nested_def")
+        );
         assert!(calls_rule(&parse, inner, fid("tool::helper")).is_none());
         assert_eq!(
             calls_rule(&parse, fid("tool::outer"), fid("tool::outer::inner")).as_deref(),
@@ -3307,7 +3486,12 @@ mod tests {
         assert!(parse.nodes.iter().any(|n| n.id == inner_id));
 
         assert!(has_edge(&parse, module_id, hash_id, edge_category::DEFINES));
-        assert!(has_edge(&parse, module_id, inner_id, edge_category::DEFINES));
+        assert!(has_edge(
+            &parse,
+            module_id,
+            inner_id,
+            edge_category::DEFINES
+        ));
 
         // Intra-file bare call: hash_password → _inner
         assert!(
@@ -3337,7 +3521,12 @@ mod tests {
             "myapp::settings::MAX_RETRIES",
         );
         assert!(parse.nodes.iter().any(|n| n.id == max_retries));
-        assert!(has_edge(&parse, module_id, max_retries, edge_category::DEFINES));
+        assert!(has_edge(
+            &parse,
+            module_id,
+            max_retries,
+            edge_category::DEFINES
+        ));
 
         // lowercase name → skipped entirely.
         let config = NodeId::from_parts(
@@ -3354,12 +3543,8 @@ mod tests {
         let src = "from .helpers import hash_password\n\n\nclass User:\n    def login(self, password):\n        return hash_password(password)\n\n    def save(self):\n        self.login(\"x\")\n";
         let parse = parse_file(src, "myapp/users.py", "myapp::users", repo()).unwrap();
 
-        let class_id = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::CLASS,
-            "myapp::users::User",
-        );
+        let class_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "myapp::users::User");
         let login_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -3388,11 +3573,8 @@ mod tests {
 
         // hash_password(...) inside login — cross-file, stays unresolved.
         assert!(
-            parse
-                .calls
-                .iter()
-                .any(|c| c.from == login_id
-                    && matches!(&c.qualifier, CallQualifier::Bare(n) if n == "hash_password")),
+            parse.calls.iter().any(|c| c.from == login_id
+                && matches!(&c.qualifier, CallQualifier::Bare(n) if n == "hash_password")),
             "expected hash_password call to be unresolved, got: {:?}",
             parse.calls
         );
@@ -3440,7 +3622,11 @@ mod tests {
         quals.sort_by_key(|q| format!("{q:?}"));
         assert_eq!(quals.len(), 3, "unexpected call sites: {quals:?}");
         // User() — bare call (constructor)
-        assert!(quals.iter().any(|q| matches!(q, CallQualifier::Bare(n) if n == "User")));
+        assert!(
+            quals
+                .iter()
+                .any(|q| matches!(q, CallQualifier::Bare(n) if n == "User"))
+        );
         // u.login("x") — Attribute. v0.4.3 disambiguates "u is a local var → drop"
         // from "helpers is an imported name → resolve" using the import table.
         assert!(quals.iter().any(
@@ -3506,12 +3692,8 @@ mod tests {
     fn flask_app_get_decorator_emits_route() {
         let src = "from flask import Flask\napp = Flask(__name__)\n\n@app.get('/users')\ndef list_users():\n    return []\n";
         let parse = parse_file(src, "app.py", "app", repo()).unwrap();
-        let handler = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::FUNCTION,
-            "app::list_users",
-        );
+        let handler =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "app::list_users");
         let rid = route_id("GET", "/users");
         assert!(parse.nodes.iter().any(|n| n.id == rid), "missing Route");
         assert!(parse.nodes.iter().any(|n| n.id == handler));
@@ -3525,8 +3707,18 @@ mod tests {
     fn flask_route_with_methods_kwarg_emits_multiple() {
         let src = "from flask import Flask\napp = Flask(__name__)\n\n@app.route('/users', methods=['GET','POST'])\ndef users():\n    return []\n";
         let parse = parse_file(src, "app.py", "app", repo()).unwrap();
-        assert!(parse.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
-        assert!(parse.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/users"))
+        );
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == route_id("POST", "/users"))
+        );
     }
 
     #[test]
@@ -3573,8 +3765,12 @@ mod tests {
         let src = "from flask import Blueprint\nbp = Blueprint('orders', __name__, url_prefix='/api/v1/orders')\n\n@bp.route('/<int:id>', methods=['GET'])\ndef get_order(id):\n    return {}\n";
         let parse = parse_file(src, "routers.py", "routers", repo()).unwrap();
         let rid = route_id("GET", "/api/v1/orders/<int:id>");
-        let handler =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "routers::get_order");
+        let handler = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "routers::get_order",
+        );
         assert!(
             parse.nodes.iter().any(|n| n.id == rid),
             "Blueprint(url_prefix=…) not composed; routes: {:?}",
@@ -3588,7 +3784,10 @@ mod tests {
         let src = "from fastapi import APIRouter, FastAPI\napp = FastAPI()\nrouter = APIRouter(prefix='/users')\napp.include_router(router, prefix='/v2')\n\n@router.get('/{id}')\ndef get_user(id: int):\n    return {}\n";
         let parse = parse_file(src, "main.py", "main", repo()).unwrap();
         assert!(
-            parse.nodes.iter().any(|n| n.id == route_id("GET", "/v2/users/{id}")),
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/v2/users/{id}")),
             "include_router prefix not folded; routes: {:?}",
             route_names(&parse)
         );
@@ -3619,22 +3818,30 @@ mod tests {
     fn django_path_call_emits_route_without_handler() {
         let src = "from django.urls import path, re_path\nfrom . import views\n\nurlpatterns = [\n    path('users/', views.user_list),\n    re_path(r'^admin/', views.admin),\n]\n";
         let parse = parse_file(src, "urls.py", "urls", repo()).unwrap();
-        assert!(parse.nodes.iter().any(|n| n.id == route_id("ANY", "users/")));
-        assert!(parse.nodes.iter().any(|n| n.id == route_id("ANY", "^admin/")));
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == route_id("ANY", "users/"))
+        );
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == route_id("ANY", "^admin/"))
+        );
     }
 
     #[test]
     fn class_method_decorator_emits_route() {
         let src = "class Api:\n    @staticmethod\n    @app.get('/ok')\n    def ok():\n        return 'ok'\n";
         let parse = parse_file(src, "api.py", "api", repo()).unwrap();
-        let handler = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::METHOD,
-            "api::Api::ok",
-        );
+        let handler = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "api::Api::ok");
         let rid = route_id("GET", "/ok");
-        assert!(parse.nodes.iter().any(|n| n.id == handler), "method missing");
+        assert!(
+            parse.nodes.iter().any(|n| n.id == handler),
+            "method missing"
+        );
         assert!(parse.nodes.iter().any(|n| n.id == rid), "route missing");
         assert!(has_edge(&parse, rid, handler, edge_category::HANDLED_BY));
     }
@@ -3691,7 +3898,10 @@ mod tests {
             .refs
             .iter()
             .any(|r| matches!(&r.qualifier, CallQualifier::Bare(n) if n == "None"));
-        assert!(!has_none_ref, "`None` return annotation shouldn't emit a ref");
+        assert!(
+            !has_none_ref,
+            "`None` return annotation shouldn't emit a ref"
+        );
     }
 
     // v0.4.13 — INHERITS_FROM refs for every base class in `class Foo(Bar, Baz)`.
@@ -3743,9 +3953,14 @@ mod tests {
         let exclude_count = parse
             .nodes
             .iter()
-            .filter(|n| parse.nav.qname_by_id.get(&n.id).map(|s| s.as_str()) == Some("m::Schema::exclude"))
+            .filter(|n| {
+                parse.nav.qname_by_id.get(&n.id).map(|s| s.as_str()) == Some("m::Schema::exclude")
+            })
             .count();
-        assert_eq!(exclude_count, 1, "expected exactly one ATTRIBUTE node for exclude (dedupe)");
+        assert_eq!(
+            exclude_count, 1,
+            "expected exactly one ATTRIBUTE node for exclude (dedupe)"
+        );
 
         // Dunder names are skipped.
         let dunder_count = parse
@@ -3769,7 +3984,8 @@ mod tests {
     fn return_type_annotation_emits_returns_type_ref() {
         let src = "class Schema: pass\n\nclass Field:\n    def ensure(self) -> Schema:\n        return self\n";
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
-        let ensure_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::ensure");
+        let ensure_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::ensure");
         let has_ref = parse.refs.iter().any(|r| {
             r.from == ensure_id
                 && r.category == edge_category::RETURNS_TYPE
@@ -3785,11 +4001,11 @@ mod tests {
     // v0.4.13b — USES ref from class-level typed attribute `x: T = ...`.
     #[test]
     fn class_attr_type_annotation_emits_uses_ref() {
-        let src = "class Schema: pass\n\nclass Field:\n    parent: Schema = None\n    name: str = ''\n";
+        let src =
+            "class Schema: pass\n\nclass Field:\n    parent: Schema = None\n    name: str = ''\n";
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
-        let parent_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::parent",
-        );
+        let parent_attr =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::parent");
         let has_schema_ref = parse.refs.iter().any(|r| {
             r.from == parent_attr
                 && r.category == edge_category::USES
@@ -3801,12 +4017,10 @@ mod tests {
             parse.refs
         );
         // `name: str` — `str` is type-noise, should NOT emit a ref.
-        let name_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::name",
-        );
+        let name_attr =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::name");
         let has_str_ref = parse.refs.iter().any(|r| {
-            r.from == name_attr
-                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "str")
+            r.from == name_attr && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "str")
         });
         assert!(
             !has_str_ref,
@@ -3832,15 +4046,23 @@ class Field:
 "#;
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
         let root = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::root");
-        let from_dict = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::from_dict",
-        );
+        let from_dict =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::from_dict");
         let not_prop = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::not_a_property",
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "m::Field::not_a_property",
         );
         assert!(parse.properties.contains(&root), "expected @property root");
-        assert!(!parse.properties.contains(&from_dict), "from_dict is not a property");
-        assert!(!parse.properties.contains(&not_prop), "classmethod is not a property");
+        assert!(
+            !parse.properties.contains(&from_dict),
+            "from_dict is not a property"
+        );
+        assert!(
+            !parse.properties.contains(&not_prop),
+            "classmethod is not a property"
+        );
     }
 
     #[test]
@@ -3865,9 +4087,7 @@ class Field:
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
 
         // self._t = Target() → USES Target
-        let t_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_t",
-        );
+        let t_attr = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_t");
         assert!(
             parse.refs.iter().any(|r| {
                 r.from == t_attr
@@ -3879,9 +4099,7 @@ class Field:
         );
 
         // self._q = mod.QualTarget() → USES QualTarget (final segment)
-        let q_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_q",
-        );
+        let q_attr = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_q");
         assert!(
             parse.refs.iter().any(|r| {
                 r.from == q_attr
@@ -3893,13 +4111,10 @@ class Field:
         );
 
         // self._n = dict() → dict is type-noise, NO ref
-        let n_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_n",
-        );
+        let n_attr = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_n");
         assert!(
             !parse.refs.iter().any(|r| {
-                r.from == n_attr
-                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "dict")
+                r.from == n_attr && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "dict")
             }),
             "dict should be filtered as type-noise, got refs: {:?}",
             parse.refs
@@ -3907,7 +4122,10 @@ class Field:
 
         // Class-level: module_attr = Target() → USES Target
         let ma_attr = NodeId::from_parts(
-            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::module_attr",
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ATTRIBUTE,
+            "m::Field::module_attr",
         );
         assert!(
             parse.refs.iter().any(|r| {
@@ -3940,8 +4158,12 @@ class Field:
         let src = "import requests\n\n\ndef fetch_user(uid):\n    r = requests.get(f\"http://api/users/{uid}\")\n    return r.json()\n\n\ndef make_user(body):\n    requests.post(\"http://api/users\", json=body)\n";
         let parse = parse_file(src, "client.py", "client", repo()).unwrap();
 
-        let fetch_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "client::fetch_user");
+        let fetch_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "client::fetch_user",
+        );
         let ep_get = endpoint_id("GET", "/users/${…}");
         let ep_post = endpoint_id("POST", "/users");
 
@@ -4007,8 +4229,14 @@ class Field:
         let run_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "api::Api::run");
         let ep_get = endpoint_id("GET", "/things");
         let ep_post = endpoint_id("POST", "/things");
-        assert!(parse.nodes.iter().any(|n| n.id == ep_get), "missing GET /things");
-        assert!(parse.nodes.iter().any(|n| n.id == ep_post), "missing POST /things");
+        assert!(
+            parse.nodes.iter().any(|n| n.id == ep_get),
+            "missing GET /things"
+        );
+        assert!(
+            parse.nodes.iter().any(|n| n.id == ep_post),
+            "missing POST /things"
+        );
         assert!(has_edge(&parse, run_id, ep_get, edge_category::CALLS));
         assert!(has_edge(&parse, run_id, ep_post, edge_category::CALLS));
     }
@@ -4071,7 +4299,10 @@ class Field:
             .edges
             .iter()
             .any(|e| e.category == edge_category::ACCESSES_DATA);
-        assert!(!has_ad, "query on an unknown model must not emit ACCESSES_DATA");
+        assert!(
+            !has_ad,
+            "query on an unknown model must not emit ACCESSES_DATA"
+        );
     }
 
     // ---- A13.17 Django ORM ------------------------------------------------
@@ -4111,34 +4342,77 @@ class Field:
         // No db_table, no app_label: the app is the segment before `models`,
         // and the model is lowercased WITHOUT snake-casing (Django's rule).
         let parse = parse_file(DJANGO_MODEL, "shop/models.py", "shop::models", repo()).unwrap();
-        assert_eq!(django_table_cell(&parse, "OrderItem").as_deref(), Some("shop_orderitem"));
+        assert_eq!(
+            django_table_cell(&parse, "OrderItem").as_deref(),
+            Some("shop_orderitem")
+        );
 
         let entity = django_entity_id("OrderItem");
-        let class_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "shop::models::OrderItem");
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "shop::models::OrderItem",
+        );
         assert!(has_edge(&parse, class_id, entity, edge_category::DEFINES));
-        assert_eq!(parse.nav.name_by_id.get(&entity).map(String::as_str), Some("OrderItem"));
-        assert_eq!(parse.nav.parent_of.get(&entity), Some(&class_id), "the model class owns it");
+        assert_eq!(
+            parse.nav.name_by_id.get(&entity).map(String::as_str),
+            Some("OrderItem")
+        );
+        assert_eq!(
+            parse.nav.parent_of.get(&entity),
+            Some(&class_id),
+            "the model class owns it"
+        );
         let entity_node = parse.nodes.iter().find(|n| n.id == entity).unwrap();
-        assert_eq!(entity_node.confidence, Confidence::Medium, "a convention, not a declaration");
+        assert_eq!(
+            entity_node.confidence,
+            Confidence::Medium,
+            "a convention, not a declaration"
+        );
 
         // A `models/` package keys on the segment before `models`, too.
-        let pkg = parse_file(DJANGO_MODEL, "shop/models/item.py", "shop::models::item", repo())
-            .unwrap();
-        assert_eq!(django_table_cell(&pkg, "OrderItem").as_deref(), Some("shop_orderitem"));
+        let pkg = parse_file(
+            DJANGO_MODEL,
+            "shop/models/item.py",
+            "shop::models::item",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            django_table_cell(&pkg, "OrderItem").as_deref(),
+            Some("shop_orderitem")
+        );
 
         // No app segment at all: the lowercased model alone.
         let bare = parse_file(DJANGO_MODEL, "models.py", "models", repo()).unwrap();
-        assert_eq!(django_table_cell(&bare, "OrderItem").as_deref(), Some("orderitem"));
+        assert_eq!(
+            django_table_cell(&bare, "OrderItem").as_deref(),
+            Some("orderitem")
+        );
     }
 
     #[test]
     fn django_meta_db_table_wins() {
         let src = "import django.db.models\n\n\nclass Order(django.db.models.Model):\n    class Meta:\n        app_label = \"billing\"\n        db_table = \"legacy_orders\"\n";
         let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
-        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("legacy_orders"));
-        assert_eq!(data_entity_count(&parse), 1, "one model-keyed node, never table-keyed");
-        assert_eq!(parse.nav.name_by_id.get(&django_entity_id("Order")).map(String::as_str), Some("Order"));
+        assert_eq!(
+            django_table_cell(&parse, "Order").as_deref(),
+            Some("legacy_orders")
+        );
+        assert_eq!(
+            data_entity_count(&parse),
+            1,
+            "one model-keyed node, never table-keyed"
+        );
+        assert_eq!(
+            parse
+                .nav
+                .name_by_id
+                .get(&django_entity_id("Order"))
+                .map(String::as_str),
+            Some("Order")
+        );
     }
 
     #[test]
@@ -4147,7 +4421,10 @@ class Field:
         let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
         // The interpolated db_table is not a literal, so it reads as absent and
         // the app label beats the module's `shop` segment.
-        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("billing_order"));
+        assert_eq!(
+            django_table_cell(&parse, "Order").as_deref(),
+            Some("billing_order")
+        );
     }
 
     #[test]
@@ -4157,18 +4434,37 @@ class Field:
         let src = "from .models import Order\n\n\ndef recent_orders():\n    return Order.objects.filter(total__gt=0).order_by(\"-total\")\n\n\ndef other(qs):\n    return qs.objects.all()\n";
         let parse = parse_file(src, "shop/views.py", "shop::views", repo()).unwrap();
         let entity = django_entity_id("Order");
-        let accessor =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::views::recent_orders");
-        assert!(has_edge(&parse, accessor, entity, edge_category::ACCESSES_DATA));
+        let accessor = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "shop::views::recent_orders",
+        );
+        assert!(has_edge(
+            &parse,
+            accessor,
+            entity,
+            edge_category::ACCESSES_DATA
+        ));
         let access_edges = parse
             .edges
             .iter()
             .filter(|e| e.category == edge_category::ACCESSES_DATA)
             .count();
-        assert_eq!(access_edges, 1, "a chain counts once; a lowercase receiver is no model");
+        assert_eq!(
+            access_edges, 1,
+            "a chain counts once; a lowercase receiver is no model"
+        );
         assert_eq!(data_entity_count(&parse), 1);
-        assert_eq!(django_table_cell(&parse, "Order"), None, "the table rides the declaration only");
-        assert!(!parse.nav.parent_of.contains_key(&entity), "the query site owns nothing");
+        assert_eq!(
+            django_table_cell(&parse, "Order"),
+            None,
+            "the table rides the declaration only"
+        );
+        assert!(
+            !parse.nav.parent_of.contains_key(&entity),
+            "the query site owns nothing"
+        );
     }
 
     #[test]
@@ -4177,10 +4473,22 @@ class Field:
         let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
         let entity = django_entity_id("Order");
         assert_eq!(data_entity_count(&parse), 1);
-        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("shop_order"));
-        let newest =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::models::newest");
-        assert!(has_edge(&parse, newest, entity, edge_category::ACCESSES_DATA));
+        assert_eq!(
+            django_table_cell(&parse, "Order").as_deref(),
+            Some("shop_order")
+        );
+        let newest = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "shop::models::newest",
+        );
+        assert!(has_edge(
+            &parse,
+            newest,
+            entity,
+            edge_category::ACCESSES_DATA
+        ));
     }
 
     #[test]
@@ -4193,7 +4501,11 @@ class Field:
 
         let abstract_base = "from django.db import models\n\n\nclass Stamped(models.Model):\n    class Meta:\n        abstract = True\n";
         let parse = parse_file(abstract_base, "core/models.py", "core::models", repo()).unwrap();
-        assert_eq!(data_entity_count(&parse), 0, "an abstract model owns no table");
+        assert_eq!(
+            data_entity_count(&parse),
+            0,
+            "an abstract model owns no table"
+        );
     }
 
     #[test]
@@ -4203,7 +4515,11 @@ class Field:
         // still lands on the table-keyed id the data_entities extractor mints.
         let src = "from django.db import models\n\n\nclass User(models.Model):\n    __tablename__ = \"users\"\n\n\ndef find_users(session):\n    return session.query(User).all()\n";
         let parse = parse_file(src, "store.py", "store", repo()).unwrap();
-        assert_eq!(data_entity_count(&parse), 0, "the SQLAlchemy path pushes no node");
+        assert_eq!(
+            data_entity_count(&parse),
+            0,
+            "the SQLAlchemy path pushes no node"
+        );
         let find_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::find_users");
         let table_keyed = NodeId::from_parts(
@@ -4212,7 +4528,12 @@ class Field:
             node_kind::DATA_ENTITY,
             "data_entity:sql:users",
         );
-        assert!(has_edge(&parse, find_id, table_keyed, edge_category::ACCESSES_DATA));
+        assert!(has_edge(
+            &parse,
+            find_id,
+            table_keyed,
+            edge_category::ACCESSES_DATA
+        ));
         assert!(!parse.edges.iter().any(|e| e.to == django_entity_id("User")));
     }
 
@@ -4223,8 +4544,12 @@ class Field:
         let src = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n";
         let parse = parse_file(src, "test_calc.py", "test_calc", repo()).unwrap();
 
-        let test_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test_calc::test_add");
+        let test_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "test_calc::test_add",
+        );
 
         let has_tests_ref = parse.refs.iter().any(|r| {
             r.from == test_id
@@ -4290,7 +4615,10 @@ class Field:
         let parse = parse_file(src, "app.py", "app", repo()).unwrap();
         let mut got = injects_from(&parse, fn_id("app::admin"));
         got.sort();
-        assert_eq!(got, vec!["current_user".to_string(), "verify_token".to_string()]);
+        assert_eq!(
+            got,
+            vec!["current_user".to_string(), "verify_token".to_string()]
+        );
     }
 
     #[test]
@@ -4300,7 +4628,10 @@ class Field:
         let src = "def f(x = compute(), y = 3, z = Depends(lambda: 1), w: int = other(get_db)):\n    return x\n";
         let parse = parse_file(src, "app.py", "app", repo()).unwrap();
         assert!(
-            parse.refs.iter().all(|r| r.category != edge_category::INJECTS),
+            parse
+                .refs
+                .iter()
+                .all(|r| r.category != edge_category::INJECTS),
             "expected no INJECTS refs, got {:?}",
             injects_from(&parse, fn_id("app::f"))
         );
@@ -4330,7 +4661,10 @@ class Field:
         let parse = parse_file(src, "users.py", "users", repo()).unwrap();
         assert_eq!(
             injects_from(&parse, fn_id("users::read_users")),
-            vec!["audit".to_string(), "get_current_active_superuser".to_string()],
+            vec![
+                "audit".to_string(),
+                "get_current_active_superuser".to_string()
+            ],
         );
     }
 

@@ -45,8 +45,8 @@ use clap::Subcommand;
 use glia_engine::absence::Answer;
 use glia_engine::persist::{default_layout_dir, load_or_rebuild};
 use glia_engine::timeline::{
-    AsOfSummary, DEFAULT_REVS, EdgeHistoryRow, MAX_REVS, RevRef, TimelineArgs, TimelineBuilt, as_of,
-    build_timeline, edge_history, load_timeline,
+    AsOfSummary, DEFAULT_REVS, EdgeHistoryRow, MAX_REVS, RevRef, TimelineArgs, TimelineBuilt,
+    as_of, build_timeline, edge_history, load_timeline,
 };
 
 use crate::cmd::resolve::print_absence;
@@ -117,8 +117,18 @@ enum TimelineCmd {
 
 pub(crate) fn run(args: Args) -> i32 {
     match args.action {
-        TimelineCmd::Build { repo, revs, head, json } => build(&repo, revs, head, json),
-        TimelineCmd::History { repo, qname, category, json } => history(&repo, &qname, category.as_deref(), json),
+        TimelineCmd::Build {
+            repo,
+            revs,
+            head,
+            json,
+        } => build(&repo, revs, head, json),
+        TimelineCmd::History {
+            repo,
+            qname,
+            category,
+            json,
+        } => history(&repo, &qname, category.as_deref(), json),
         TimelineCmd::AsOf { repo, rev, json } => as_of_rev(&repo, &rev, json),
     }
 }
@@ -171,7 +181,10 @@ fn history(repo: &str, qname: &str, category: Option<&str>, json: bool) -> i32 {
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = current.parse_errors.len();
     }
-    eprintln!("[timeline] surface=cli history rows={}", answer.results.len());
+    eprintln!(
+        "[timeline] surface=cli history rows={}",
+        answer.results.len()
+    );
     if json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
     } else {
@@ -213,12 +226,21 @@ fn cell(s: &str) -> String {
 }
 
 fn print_built(repo: &str, head: &str, b: &TimelineBuilt) {
-    println!("# glia timeline build `{repo}` ({} revs of {head})", b.revs.len());
+    println!(
+        "# glia timeline build `{repo}` ({} revs of {head})",
+        b.revs.len()
+    );
     println!();
     println!("| rev | sha | date | subject |");
     println!("|---|---|---|---|");
     for r in &b.revs {
-        println!("| {} | {} | {} | {} |", r.index, short(&r.sha), utc_date(r.time), cell(&r.subject));
+        println!(
+            "| {} | {} | {} | {} |",
+            r.index,
+            short(&r.sha),
+            utc_date(r.time),
+            cell(&r.subject)
+        );
     }
     println!();
     println!(
@@ -237,8 +259,15 @@ fn print_built(repo: &str, head: &str, b: &TimelineBuilt) {
 /// One history line (module docs).
 fn history_line(r: &EdgeHistoryRow) -> String {
     let arrow = if r.direction == "in" { "<-" } else { "->" };
-    let before = if r.since_window_start { " (before the window)" } else { "" };
-    let until = r.until.as_ref().map_or_else(|| "still present".to_string(), |u| format!("until {}", rev_label(u)));
+    let before = if r.since_window_start {
+        " (before the window)"
+    } else {
+        ""
+    };
+    let until = r.until.as_ref().map_or_else(
+        || "still present".to_string(),
+        |u| format!("until {}", rev_label(u)),
+    );
     let at = match (r.file.as_deref(), r.line) {
         (Some(f), Some(l)) => format!(" at {f}:{l}"),
         (Some(f), None) => format!(" at {f}"),
@@ -269,7 +298,11 @@ fn print_history(qname: &str, category: Option<&str>, revs: usize, a: &Answer<Ed
 }
 
 fn print_as_of(repo: &str, s: &AsOfSummary) {
-    println!("# glia timeline as-of `{repo}` rev {} ({})", s.rev.index, rev_label(&s.rev));
+    println!(
+        "# glia timeline as-of `{repo}` rev {} ({})",
+        s.rev.index,
+        rev_label(&s.rev)
+    );
     println!();
     println!("- nodes: {} | edges: {}", s.nodes, s.edges);
     println!();

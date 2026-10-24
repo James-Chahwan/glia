@@ -60,7 +60,9 @@ impl Built {
     }
 
     fn has_edge(&self, from: &str, to: &str, cat: EdgeCategoryId) -> bool {
-        self.edges.iter().any(|(f, t, c)| f == from && t == to && *c == cat)
+        self.edges
+            .iter()
+            .any(|(f, t, c)| f == from && t == to && *c == cat)
     }
 
     fn uses(&self) -> Vec<(&str, &str)> {
@@ -77,8 +79,15 @@ fn enums_and_members_are_nodes() {
     let b = build();
     for e in ["Color", "Dir", "Local"] {
         let q = format!("src::color::{e}");
-        assert!(b.has_node(node_kind::ENUM, &q), "ENUM {q} missing; nodes = {:?}", b.nodes);
-        assert!(b.has_edge("src::color", &q, edge_category::DEFINES), "DEFINES {q}");
+        assert!(
+            b.has_node(node_kind::ENUM, &q),
+            "ENUM {q} missing; nodes = {:?}",
+            b.nodes
+        );
+        assert!(
+            b.has_edge("src::color", &q, edge_category::DEFINES),
+            "DEFINES {q}"
+        );
     }
     for (e, m) in [
         ("Color", "Red"),
@@ -91,8 +100,14 @@ fn enums_and_members_are_nodes() {
     ] {
         let enum_q = format!("src::color::{e}");
         let q = format!("{enum_q}::{m}");
-        assert!(b.has_node(node_kind::ATTRIBUTE, &q), "ATTRIBUTE {q} missing");
-        assert!(b.has_edge(&enum_q, &q, edge_category::HAS_ATTRIBUTE), "HAS_ATTRIBUTE {q}");
+        assert!(
+            b.has_node(node_kind::ATTRIBUTE, &q),
+            "ATTRIBUTE {q} missing"
+        );
+        assert!(
+            b.has_edge(&enum_q, &q, edge_category::HAS_ATTRIBUTE),
+            "HAS_ATTRIBUTE {q}"
+        );
     }
 }
 
@@ -106,15 +121,30 @@ fn member_reads_are_uses_edges_same_file_and_imported() {
         ("src::paint::pick", "src::color::Color::Green"),
         ("src::paint::up", "src::color::Dir::Up"),
     ] {
-        assert!(uses.contains(&(from, to)), "USES {from} -> {to} missing; USES = {uses:?}");
+        assert!(
+            uses.contains(&(from, to)),
+            "USES {from} -> {to} missing; USES = {uses:?}"
+        );
     }
-    assert_eq!(uses.len(), 4, "exactly the four member reads; USES = {uses:?}");
+    assert_eq!(
+        uses.len(),
+        4,
+        "exactly the four member reads; USES = {uses:?}"
+    );
 }
 
 #[test]
 fn only_the_named_member_is_used_and_the_enum_is_not_its_own_member() {
     let b = build();
-    assert!(!b.has_edge("src::color::warm", "src::color::Color::Green", edge_category::USES));
-    assert!(!b.has_edge("src::paint::pick", "src::color::Color::Red", edge_category::USES));
+    assert!(!b.has_edge(
+        "src::color::warm",
+        "src::color::Color::Green",
+        edge_category::USES
+    ));
+    assert!(!b.has_edge(
+        "src::paint::pick",
+        "src::color::Color::Red",
+        edge_category::USES
+    ));
     assert!(!b.has_node(node_kind::ATTRIBUTE, "src::color::Color::Color"));
 }

@@ -548,7 +548,10 @@ fn trait_impl_across_files() {
     let implements = edges_of(&r, edge_category::IMPLEMENTS);
     assert_eq!(
         implements,
-        vec![("src::sql::SqlRepo".to_string(), "src::repo::Repo".to_string())],
+        vec![(
+            "src::sql::SqlRepo".to_string(),
+            "src::repo::Repo".to_string()
+        )],
         "IMPLEMENTS = {implements:?}"
     );
     let qname = qnames(&r);

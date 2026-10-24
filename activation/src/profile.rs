@@ -71,13 +71,21 @@ impl Registries {
 
     /// Ids and names unique within each registry; names non-empty.
     fn check(&self, errors: &mut Vec<String>) {
-        check_registry("node kind", self.node_kinds.iter().map(|(i, n)| (i.0, *n)), errors);
+        check_registry(
+            "node kind",
+            self.node_kinds.iter().map(|(i, n)| (i.0, *n)),
+            errors,
+        );
         check_registry(
             "edge category",
             self.edge_categories.iter().map(|(i, n)| (i.0, *n)),
             errors,
         );
-        check_registry("cell type", self.cell_types.iter().map(|(i, n)| (i.0, *n)), errors);
+        check_registry(
+            "cell type",
+            self.cell_types.iter().map(|(i, n)| (i.0, *n)),
+            errors,
+        );
     }
 }
 
@@ -351,7 +359,9 @@ impl DomainTables {
     /// preset's overrides. `None`, or a name no preset has, is the base.
     pub fn activation_config(&self, preset: Option<&str>) -> ActivationConfig {
         let mut config = ActivationConfig::default();
-        config.edge_weights.extend(self.activation_weights.iter().copied());
+        config
+            .edge_weights
+            .extend(self.activation_weights.iter().copied());
         if let Some(p) = preset.and_then(|name| self.preset(name)) {
             config.edge_weights.extend(p.overrides.iter().copied());
         }
@@ -368,7 +378,10 @@ impl DomainTables {
     /// every grouping - when it has none. A linear find: the table holds at
     /// most one row per registered category.
     pub fn community_weight(&self, c: EdgeCategoryId) -> u32 {
-        self.community_weights.iter().find(|(k, _)| *k == c).map_or(0, |(_, w)| *w)
+        self.community_weights
+            .iter()
+            .find(|(k, _)| *k == c)
+            .map_or(0, |(_, w)| *w)
     }
 
     /// The identity rule called `name`, if the domain declares one. `name` is
@@ -385,7 +398,10 @@ impl DomainTables {
         kind: NodeKindId,
         via: EdgeCategoryId,
     ) -> Option<(usize, &'static EffectSink)> {
-        self.effect_sinks.iter().enumerate().find(|(_, s)| s.matches(kind, via))
+        self.effect_sinks
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.matches(kind, via))
     }
 
     /// Every problem with the tables, or `Ok`: the registries hold unique ids
@@ -415,8 +431,10 @@ impl DomainTables {
         let kinds = |field: &str, ids: &[NodeKindId], errors: &mut Vec<String>| {
             for (i, k) in ids.iter().enumerate() {
                 if r.kind_name(*k).is_none() {
-                    errors
-                        .push(format!("{field} holds node kind {}, which is not registered", k.0));
+                    errors.push(format!(
+                        "{field} holds node kind {}, which is not registered",
+                        k.0
+                    ));
                 }
                 if ids[..i].contains(k) {
                     errors.push(format!("{field} lists node kind {} more than once", k.0));
@@ -439,7 +457,9 @@ impl DomainTables {
                 errors.push(format!("entry.named[{i}].exts holds an empty extension"));
             }
             if n.exts.iter().any(|e| e.contains('.')) {
-                errors.push(format!("entry.named[{i}].exts holds an extension with a dot"));
+                errors.push(format!(
+                    "entry.named[{i}].exts holds an extension with a dot"
+                ));
             }
         }
 
@@ -455,28 +475,47 @@ impl DomainTables {
                     ));
                 }
                 if seen.contains(&c) {
-                    errors.push(format!("{field} lists edge category {} more than once", c.0));
+                    errors.push(format!(
+                        "{field} lists edge category {} more than once",
+                        c.0
+                    ));
                 }
                 seen.push(c);
             }
         };
-        categories("carry_edges", &mut self.carry_edges.iter().copied(), &mut errors);
+        categories(
+            "carry_edges",
+            &mut self.carry_edges.iter().copied(),
+            &mut errors,
+        );
         for (i, sink) in self.effect_sinks.iter().enumerate() {
             let field = format!("effect_sinks[{i}]");
             if sink.class.is_empty() {
                 errors.push(format!("{field} has an empty class"));
             }
             if self.effect_sinks[..i].iter().any(|s| s.class == sink.class) {
-                errors.push(format!("effect sink class {:?} is declared more than once", sink.class));
+                errors.push(format!(
+                    "effect sink class {:?} is declared more than once",
+                    sink.class
+                ));
             }
             if sink.kinds.is_empty() || sink.via.is_empty() {
-                errors.push(format!("{field} matches no node: it needs a kind and a category"));
+                errors.push(format!(
+                    "{field} matches no node: it needs a kind and a category"
+                ));
             }
             kinds(&format!("{field}.kinds"), sink.kinds, &mut errors);
-            categories(&format!("{field}.via"), &mut sink.via.iter().copied(), &mut errors);
+            categories(
+                &format!("{field}.via"),
+                &mut sink.via.iter().copied(),
+                &mut errors,
+            );
             for (j, prior) in self.effect_sinks[..i].iter().enumerate() {
                 let shared = sink.kinds.iter().find_map(|k| {
-                    sink.via.iter().find(|c| prior.matches(*k, **c)).map(|c| (k, c))
+                    sink.via
+                        .iter()
+                        .find(|c| prior.matches(*k, **c))
+                        .map(|c| (k, c))
                 });
                 if let Some((k, c)) = shared {
                     errors.push(format!(
@@ -503,20 +542,38 @@ impl DomainTables {
             if p.name.is_empty() {
                 errors.push(format!("activation_presets[{i}] has an empty name"));
             }
-            if self.activation_presets[..i].iter().any(|q| q.name == p.name) {
-                errors.push(format!("activation preset {:?} is declared more than once", p.name));
+            if self.activation_presets[..i]
+                .iter()
+                .any(|q| q.name == p.name)
+            {
+                errors.push(format!(
+                    "activation preset {:?} is declared more than once",
+                    p.name
+                ));
             }
-            weights(&format!("activation preset {:?}", p.name), p.overrides, &mut errors);
+            weights(
+                &format!("activation preset {:?}", p.name),
+                p.overrides,
+                &mut errors,
+            );
         }
 
         for (i, (c, w)) in self.community_weights.iter().enumerate() {
             let field = format!("community_weights[{i}]");
             if r.category_name(*c).is_none() {
-                errors
-                    .push(format!("{field} holds edge category {}, which is not registered", c.0));
+                errors.push(format!(
+                    "{field} holds edge category {}, which is not registered",
+                    c.0
+                ));
             }
-            if self.community_weights[..i].iter().any(|(prior, _)| prior == c) {
-                errors.push(format!("{field} lists edge category {} more than once", c.0));
+            if self.community_weights[..i]
+                .iter()
+                .any(|(prior, _)| prior == c)
+            {
+                errors.push(format!(
+                    "{field} lists edge category {} more than once",
+                    c.0
+                ));
             }
             if *w == 0 {
                 errors.push(format!(
@@ -537,9 +594,14 @@ impl DomainTables {
                 ));
             }
             if !rule.name.is_empty()
-                && self.identity_rules[..i].iter().any(|prior| prior.name == rule.name)
+                && self.identity_rules[..i]
+                    .iter()
+                    .any(|prior| prior.name == rule.name)
             {
-                errors.push(format!("{field} name {:?} is declared more than once", rule.name));
+                errors.push(format!(
+                    "{field} name {:?} is declared more than once",
+                    rule.name
+                ));
             }
             if rule.key.is_empty() {
                 errors.push(format!("{field} has an empty key"));
@@ -558,7 +620,11 @@ impl DomainTables {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -634,7 +700,11 @@ impl<G: 'static, C: 'static> DomainProfile<G, C> {
                 }
             }
         }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -665,7 +735,11 @@ mod tests {
                 (CLASS, "CLASS"),
                 (COMPONENT, "COMPONENT"),
             ],
-            edge_categories: &[(CALLS, "CALLS"), (IMPORTS, "IMPORTS"), (CONTAINS, "CONTAINS")],
+            edge_categories: &[
+                (CALLS, "CALLS"),
+                (IMPORTS, "IMPORTS"),
+                (CONTAINS, "CONTAINS"),
+            ],
             cell_types: &[(ORIGIN, "ORIGIN"), (ROLE, "ROLE")],
         },
         entry: EntryRule {
@@ -682,8 +756,14 @@ mod tests {
         effect_sinks: &[],
         activation_weights: &[(CALLS, 5.0), (IMPORTS, 3.0)],
         activation_presets: &[
-            ActivationPreset { name: "repair", overrides: &[(CALLS, 8.0), (CONTAINS, 2.0)] },
-            ActivationPreset { name: "wide", overrides: &[(IMPORTS, 0.0)] },
+            ActivationPreset {
+                name: "repair",
+                overrides: &[(CALLS, 8.0), (CONTAINS, 2.0)],
+            },
+            ActivationPreset {
+                name: "wide",
+                overrides: &[(IMPORTS, 0.0)],
+            },
         ],
         community_weights: &[(CALLS, 3), (IMPORTS, 1)],
         identity_rules: &[],
@@ -729,21 +809,44 @@ mod tests {
     #[test]
     fn entry_rule_ext_gate() {
         const GO_INIT: &[NamedEntry] = &[
-            NamedEntry { kinds: &[FUNCTION, METHOD], exact: &["main"], prefixes: &[], exts: &[] },
-            NamedEntry { kinds: &[FUNCTION], exact: &["init"], prefixes: &[], exts: &["go"] },
+            NamedEntry {
+                kinds: &[FUNCTION, METHOD],
+                exact: &["main"],
+                prefixes: &[],
+                exts: &[],
+            },
+            NamedEntry {
+                kinds: &[FUNCTION],
+                exact: &["init"],
+                prefixes: &[],
+                exts: &["go"],
+            },
         ];
-        let e = EntryRule { kinds: &[ROUTE], roles: &[COMPONENT], named: GO_INIT };
+        let e = EntryRule {
+            kinds: &[ROUTE],
+            roles: &[COMPONENT],
+            named: GO_INIT,
+        };
         let at = |kind, name: &str, ext: Option<&str>| {
             let ext = ext.map(str::to_string);
             e.is_entry_at(Some(kind), name, &[], || ext)
         };
         assert!(at(FUNCTION, "init", Some("go")));
-        assert!(at(FUNCTION, "init", Some("GO")), "the extension ignores ASCII case");
+        assert!(
+            at(FUNCTION, "init", Some("GO")),
+            "the extension ignores ASCII case"
+        );
         assert!(!at(FUNCTION, "init", Some("ts")));
         assert!(!at(FUNCTION, "init", Some("py")));
         assert!(!at(FUNCTION, "init", None), "no file, no limited row");
-        assert!(!at(METHOD, "init", Some("go")), "a Go METHOD named init is no entry");
-        assert!(!e.is_entry(Some(FUNCTION), "init", &[]), "is_entry is extension-blind");
+        assert!(
+            !at(METHOD, "init", Some("go")),
+            "a Go METHOD named init is no entry"
+        );
+        assert!(
+            !e.is_entry(Some(FUNCTION), "init", &[]),
+            "is_entry is extension-blind"
+        );
         // An unlimited row matches with or without a file.
         assert!(at(FUNCTION, "main", None) && at(FUNCTION, "main", Some("rs")));
         assert!(e.is_entry(Some(FUNCTION), "main", &[]));
@@ -766,10 +869,28 @@ mod tests {
         assert!(GO_INIT[1].accepts_ext(Some("Go")) && !GO_INIT[1].accepts_ext(Some("gox")));
         assert!(!GO_INIT[1].accepts_ext(None));
 
-        const INIT: NamedEntry = NamedEntry { kinds: &[FUNCTION], exact: &["init"], prefixes: &[], exts: &[] };
-        const EMPTY: &[NamedEntry] = &[NamedEntry { exts: &[""], ..INIT }];
-        const DOTTED: &[NamedEntry] = &[NamedEntry { exts: &[".go"], ..INIT }];
-        let with = |named| DomainTables { entry: EntryRule { kinds: &[], roles: &[], named }, ..TABLES };
+        const INIT: NamedEntry = NamedEntry {
+            kinds: &[FUNCTION],
+            exact: &["init"],
+            prefixes: &[],
+            exts: &[],
+        };
+        const EMPTY: &[NamedEntry] = &[NamedEntry {
+            exts: &[""],
+            ..INIT
+        }];
+        const DOTTED: &[NamedEntry] = &[NamedEntry {
+            exts: &[".go"],
+            ..INIT
+        }];
+        let with = |named| DomainTables {
+            entry: EntryRule {
+                kinds: &[],
+                roles: &[],
+                named,
+            },
+            ..TABLES
+        };
         assert_eq!(with(GO_INIT).validate(), Ok(()));
         assert_eq!(
             with(EMPTY).validate().unwrap_err(),
@@ -799,14 +920,36 @@ mod tests {
 
         let repair = TABLES.activation_config(Some("repair"));
         assert_eq!(repair.edge_weights.len(), 3);
-        assert_eq!(repair.edge_weights.get(&CALLS), Some(&8.0), "an override replaces");
-        assert_eq!(repair.edge_weights.get(&IMPORTS), Some(&3.0), "the rest stays base");
-        assert_eq!(repair.edge_weights.get(&CONTAINS), Some(&2.0), "an override adds");
-        assert_eq!(TABLES.activation_config(Some("wide")).edge_weights.get(&IMPORTS), Some(&0.0));
+        assert_eq!(
+            repair.edge_weights.get(&CALLS),
+            Some(&8.0),
+            "an override replaces"
+        );
+        assert_eq!(
+            repair.edge_weights.get(&IMPORTS),
+            Some(&3.0),
+            "the rest stays base"
+        );
+        assert_eq!(
+            repair.edge_weights.get(&CONTAINS),
+            Some(&2.0),
+            "an override adds"
+        );
+        assert_eq!(
+            TABLES
+                .activation_config(Some("wide"))
+                .edge_weights
+                .get(&IMPORTS),
+            Some(&0.0)
+        );
 
         // An unknown preset is the base, as None is.
         for p in [Some("nonsense"), Some(""), Some("Repair")] {
-            assert_eq!(TABLES.activation_config(p).edge_weights, base.edge_weights, "{p:?}");
+            assert_eq!(
+                TABLES.activation_config(p).edge_weights,
+                base.edge_weights,
+                "{p:?}"
+            );
         }
         assert!(TABLES.preset("repair").is_some() && TABLES.preset("nonsense").is_none());
         assert!(TABLES.carries(CALLS) && !TABLES.carries(IMPORTS));
@@ -816,22 +959,43 @@ mod tests {
     fn validate_flags_unregistered_ids() {
         assert_eq!(TABLES.validate(), Ok(()));
 
-        let bad = DomainTables { carry_edges: &[CALLS, EdgeCategoryId(999)], ..TABLES };
+        let bad = DomainTables {
+            carry_edges: &[CALLS, EdgeCategoryId(999)],
+            ..TABLES
+        };
         let errors = bad.validate().unwrap_err();
-        assert_eq!(errors, ["carry_edges holds edge category 999, which is not registered"]);
+        assert_eq!(
+            errors,
+            ["carry_edges holds edge category 999, which is not registered"]
+        );
 
         let bad = DomainTables {
             graph_type: "",
             entry: EntryRule {
                 kinds: &[ROUTE, NodeKindId(77), ROUTE],
                 roles: &[NodeKindId(78)],
-                named: &[NamedEntry { kinds: &[FUNCTION], exact: &[], prefixes: &[""], exts: &[] }],
+                named: &[NamedEntry {
+                    kinds: &[FUNCTION],
+                    exact: &[],
+                    prefixes: &[""],
+                    exts: &[],
+                }],
             },
-            effect_sinks: &[EffectSink { class: "db", kinds: &[ROUTE], via: &[EdgeCategoryId(55)] }],
+            effect_sinks: &[EffectSink {
+                class: "db",
+                kinds: &[ROUTE],
+                via: &[EdgeCategoryId(55)],
+            }],
             activation_weights: &[(CALLS, -1.0), (IMPORTS, f64::NAN), (CALLS, 2.0)],
             activation_presets: &[
-                ActivationPreset { name: "p", overrides: &[(EdgeCategoryId(66), 1.0)] },
-                ActivationPreset { name: "p", overrides: &[] },
+                ActivationPreset {
+                    name: "p",
+                    overrides: &[(EdgeCategoryId(66), 1.0)],
+                },
+                ActivationPreset {
+                    name: "p",
+                    overrides: &[],
+                },
             ],
             ..TABLES
         };
@@ -856,7 +1020,11 @@ mod tests {
                 node_kinds: &[(ROUTE, "ROUTE"), (ROUTE, "ROUTE2"), (FUNCTION, "ROUTE")],
                 ..TABLES.registries
             },
-            entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+            entry: EntryRule {
+                kinds: &[],
+                roles: &[],
+                named: &[],
+            },
             ..TABLES
         };
         assert_eq!(
@@ -871,21 +1039,47 @@ mod tests {
     #[test]
     fn effect_sinks_classify_and_validate() {
         const SINKS: &[EffectSink] = &[
-            EffectSink { class: "call", kinds: &[ROUTE], via: &[CALLS] },
-            EffectSink { class: "import", kinds: &[ROUTE, CLASS], via: &[IMPORTS] },
+            EffectSink {
+                class: "call",
+                kinds: &[ROUTE],
+                via: &[CALLS],
+            },
+            EffectSink {
+                class: "import",
+                kinds: &[ROUTE, CLASS],
+                via: &[IMPORTS],
+            },
         ];
-        let tables = DomainTables { effect_sinks: SINKS, ..TABLES };
+        let tables = DomainTables {
+            effect_sinks: SINKS,
+            ..TABLES
+        };
         assert_eq!(tables.validate(), Ok(()));
         // The pair classifies: the kind alone or the category alone does not.
-        assert_eq!(tables.effect_sink(ROUTE, CALLS).map(|(i, s)| (i, s.class)), Some((0, "call")));
-        assert_eq!(tables.effect_sink(CLASS, IMPORTS).map(|(i, s)| (i, s.class)), Some((1, "import")));
+        assert_eq!(
+            tables.effect_sink(ROUTE, CALLS).map(|(i, s)| (i, s.class)),
+            Some((0, "call"))
+        );
+        assert_eq!(
+            tables
+                .effect_sink(CLASS, IMPORTS)
+                .map(|(i, s)| (i, s.class)),
+            Some((1, "import"))
+        );
         assert!(tables.effect_sink(CLASS, CALLS).is_none());
         assert!(tables.effect_sink(FUNCTION, IMPORTS).is_none());
-        assert!(TABLES.effect_sink(ROUTE, CALLS).is_none(), "an empty table has no effects");
+        assert!(
+            TABLES.effect_sink(ROUTE, CALLS).is_none(),
+            "an empty table has no effects"
+        );
 
         // An unregistered kind is rejected, as an unregistered category is.
         let bad = DomainTables {
-            effect_sinks: &[EffectSink { class: "db", kinds: &[NodeKindId(77), ROUTE], via: &[CALLS] }],
+            effect_sinks: &[EffectSink {
+                class: "db",
+                kinds: &[NodeKindId(77), ROUTE],
+                via: &[CALLS],
+            }],
             ..TABLES
         };
         assert_eq!(
@@ -895,9 +1089,21 @@ mod tests {
 
         let bad = DomainTables {
             effect_sinks: &[
-                EffectSink { class: "", kinds: &[], via: &[CALLS] },
-                EffectSink { class: "db", kinds: &[ROUTE, ROUTE], via: &[CALLS, CALLS] },
-                EffectSink { class: "db", kinds: &[ROUTE], via: &[CALLS] },
+                EffectSink {
+                    class: "",
+                    kinds: &[],
+                    via: &[CALLS],
+                },
+                EffectSink {
+                    class: "db",
+                    kinds: &[ROUTE, ROUTE],
+                    via: &[CALLS, CALLS],
+                },
+                EffectSink {
+                    class: "db",
+                    kinds: &[ROUTE],
+                    via: &[CALLS],
+                },
             ],
             ..TABLES
         };
@@ -931,7 +1137,10 @@ mod tests {
             ),
         ];
         for (weights, error) in rows {
-            let bad = DomainTables { community_weights: weights, ..TABLES };
+            let bad = DomainTables {
+                community_weights: weights,
+                ..TABLES
+            };
             assert_eq!(bad.validate().unwrap_err(), [error], "{weights:?}");
         }
         // Each problem is reported against its own row, in row order.
@@ -948,22 +1157,46 @@ mod tests {
             ]
         );
         // No rows is a domain that groups nothing: legal.
-        assert_eq!(DomainTables { community_weights: &[], ..TABLES }.validate(), Ok(()));
+        assert_eq!(
+            DomainTables {
+                community_weights: &[],
+                ..TABLES
+            }
+            .validate(),
+            Ok(())
+        );
     }
 
     #[test]
     fn community_weight_defaults_to_zero() {
         assert_eq!(TABLES.community_weight(CALLS), 3);
         assert_eq!(TABLES.community_weight(IMPORTS), 1);
-        assert_eq!(TABLES.community_weight(CONTAINS), 0, "registered, not listed");
-        assert_eq!(TABLES.community_weight(EdgeCategoryId(999)), 0, "not registered");
-        let none = DomainTables { community_weights: &[], ..TABLES };
+        assert_eq!(
+            TABLES.community_weight(CONTAINS),
+            0,
+            "registered, not listed"
+        );
+        assert_eq!(
+            TABLES.community_weight(EdgeCategoryId(999)),
+            0,
+            "not registered"
+        );
+        let none = DomainTables {
+            community_weights: &[],
+            ..TABLES
+        };
         assert_eq!(none.community_weight(CALLS), 0);
         // Independent of the PPR weights: IMPORTS weighs 3.0 there and 1
         // here, and `repair` adds CONTAINS at 2.0 there while it stays 0 here.
-        assert_eq!(TABLES.activation_config(None).edge_weights.get(&IMPORTS), Some(&3.0));
         assert_eq!(
-            TABLES.activation_config(Some("repair")).edge_weights.get(&CONTAINS),
+            TABLES.activation_config(None).edge_weights.get(&IMPORTS),
+            Some(&3.0)
+        );
+        assert_eq!(
+            TABLES
+                .activation_config(Some("repair"))
+                .edge_weights
+                .get(&CONTAINS),
             Some(&2.0)
         );
         assert_eq!(TABLES.community_weight(CONTAINS), 0);
@@ -974,26 +1207,48 @@ mod tests {
         // Each problem alone is one error, naming its rule.
         let rows: [(&[IdentityRule], &str); 6] = [
             (
-                &[IdentityRule { name: "a/b", ..RULE_X }],
+                &[IdentityRule {
+                    name: "a/b",
+                    ..RULE_X
+                }],
                 "identity_rules[0] name \"a/b\" contains '/', which qualifies an evidence rule (<rule>/diverged)",
             ),
-            (&[RULE_X, RULE_X], "identity_rules[1] name \"x\" is declared more than once"),
             (
-                &[IdentityRule { from: &[], ..RULE_X }],
+                &[RULE_X, RULE_X],
+                "identity_rules[1] name \"x\" is declared more than once",
+            ),
+            (
+                &[IdentityRule {
+                    from: &[],
+                    ..RULE_X
+                }],
                 "identity_rules[0].from is empty: the rule pairs no node",
             ),
             (
-                &[IdentityRule { to: &[FUNCTION, NodeKindId(999)], ..RULE_X }],
+                &[IdentityRule {
+                    to: &[FUNCTION, NodeKindId(999)],
+                    ..RULE_X
+                }],
                 "identity_rules[0].to holds node kind 999, which is not registered",
             ),
             (
-                &[IdentityRule { tier: IdentityTier::Heuristic, walk: true, ..RULE_X }],
+                &[IdentityRule {
+                    tier: IdentityTier::Heuristic,
+                    walk: true,
+                    ..RULE_X
+                }],
                 "identity_rules[0] (\"x\") is heuristic and walks: a heuristic class is never contracted in a walk",
             ),
-            (&[IdentityRule { name: "", ..RULE_X }], "identity_rules[0] has an empty name"),
+            (
+                &[IdentityRule { name: "", ..RULE_X }],
+                "identity_rules[0] has an empty name",
+            ),
         ];
         for (rules, error) in rows {
-            let bad = DomainTables { identity_rules: rules, ..TABLES };
+            let bad = DomainTables {
+                identity_rules: rules,
+                ..TABLES
+            };
             assert_eq!(bad.validate().unwrap_err(), [error], "{rules:?}");
         }
 
@@ -1026,7 +1281,11 @@ mod tests {
         // lists, and no rules at all are legal.
         let ok = DomainTables {
             identity_rules: &[
-                IdentityRule { tier: IdentityTier::Heuristic, walk: false, ..RULE_X },
+                IdentityRule {
+                    tier: IdentityTier::Heuristic,
+                    walk: false,
+                    ..RULE_X
+                },
                 IdentityRule {
                     name: "y",
                     from: &[CLASS],
@@ -1054,7 +1313,10 @@ mod tests {
                 walk: false,
             },
         ];
-        let tables = DomainTables { identity_rules: RULES, ..TABLES };
+        let tables = DomainTables {
+            identity_rules: RULES,
+            ..TABLES
+        };
         assert_eq!(tables.validate(), Ok(()));
         assert_eq!(tables.identity_rule("x"), Some(&RULE_X));
         assert_eq!(
@@ -1064,7 +1326,10 @@ mod tests {
         for unknown in ["z", "", "X", "x/diverged"] {
             assert!(tables.identity_rule(unknown).is_none(), "{unknown:?}");
         }
-        assert!(TABLES.identity_rule("x").is_none(), "an empty table has no identity");
+        assert!(
+            TABLES.identity_rule("x").is_none(),
+            "an empty table has no identity"
+        );
     }
 
     #[test]
@@ -1072,7 +1337,10 @@ mod tests {
         use IdentityTier::{Derived, Fact, Heuristic};
         assert!(Fact < Derived && Derived < Heuristic);
         // A class joined through rules of several tiers is the weakest.
-        assert_eq!([Derived, Heuristic, Fact].into_iter().max(), Some(Heuristic));
+        assert_eq!(
+            [Derived, Heuristic, Fact].into_iter().max(),
+            Some(Heuristic)
+        );
         assert_eq!([Fact, Derived, Fact].into_iter().max(), Some(Derived));
         let names = [Fact, Derived, Heuristic].map(IdentityTier::as_str);
         assert_eq!(names, ["fact", "derived", "heuristic"]);
@@ -1088,7 +1356,13 @@ mod tests {
         stage: Stage,
         populates: &'static [CellTypeId],
     ) -> PassSpec<Log> {
-        PassSpec { name, stage, after: &[], populates, run: |g, _| g.push("ran") }
+        PassSpec {
+            name,
+            stage,
+            after: &[],
+            populates,
+            run: |g, _| g.push("ran"),
+        }
     }
 
     #[test]
@@ -1105,7 +1379,10 @@ mod tests {
         assert_eq!(PROFILE.validate(), Ok(()));
         assert_eq!(
             PROFILE.cell_populators(),
-            [("tag_origin", &[ORIGIN, ROLE][..]), ("tag_roles", &[ROLE][..])]
+            [
+                ("tag_origin", &[ORIGIN, ROLE][..]),
+                ("tag_roles", &[ROLE][..])
+            ]
         );
         let mut g: Log = Vec::new();
         let report = PROFILE.run_passes(&mut g, &());
@@ -1113,15 +1390,20 @@ mod tests {
         assert_eq!((report.resolve, report.post, report.finalize), (2, 1, 1));
         assert_eq!(g.len(), 4);
 
-        let none: DomainProfile<Log> =
-            DomainProfile { tables: TABLES, passes: PassRegistry::empty() };
+        let none: DomainProfile<Log> = DomainProfile {
+            tables: TABLES,
+            passes: PassRegistry::empty(),
+        };
         assert!(none.cell_populators().is_empty());
     }
 
     #[test]
     fn profile_validate_flags_passes_and_unregistered_populates() {
         const BAD: DomainProfile<Log> = DomainProfile {
-            tables: DomainTables { carry_edges: &[EdgeCategoryId(999)], ..TABLES },
+            tables: DomainTables {
+                carry_edges: &[EdgeCategoryId(999)],
+                ..TABLES
+            },
             passes: PassRegistry::new(&[
                 pass("tag", Stage::Post, &[CellTypeId(42)]),
                 pass("tag", Stage::Post, &[]),

@@ -99,7 +99,9 @@ impl WeightedGraph {
         let mut pairs = Vec::with_capacity(adj.kept_edges());
         for ix in 0..n as u32 {
             for inc in adj.outgoing(ix) {
-                let w = table.binary_search_by_key(&inc.category.0, |&(c, _)| c).map_or(0, |i| table[i].1);
+                let w = table
+                    .binary_search_by_key(&inc.category.0, |&(c, _)| c)
+                    .map_or(0, |i| table[i].1);
                 if w == 0 {
                     continue;
                 }
@@ -139,7 +141,12 @@ impl WeightedGraph {
 
     /// [`Self::assemble`] from a starting diagonal `self_w` (one entry per
     /// id): a quotient's communities carry their internal weight there.
-    fn assemble_with(ids: Vec<NodeId>, mut pairs: Vec<(u32, u32, u64)>, mut self_w: Vec<u64>, cap: usize) -> Self {
+    fn assemble_with(
+        ids: Vec<NodeId>,
+        mut pairs: Vec<(u32, u32, u64)>,
+        mut self_w: Vec<u64>,
+        cap: usize,
+    ) -> Self {
         let n = ids.len();
         if n > cap {
             return Self::over_limit("nodes", cap);
@@ -192,12 +199,28 @@ impl WeightedGraph {
             })
             .collect();
         let total = strength.iter().fold(0u64, |s, &k| s.saturating_add(k));
-        Self { ids, start, nbr, self_w, strength, total }
+        Self {
+            ids,
+            start,
+            nbr,
+            self_w,
+            strength,
+            total,
+        }
     }
 
     fn over_limit(what: &str, cap: usize) -> Self {
-        eprintln!("[algo] community view: more than {cap} {what} - u32 index limit, returning an empty view");
-        Self { ids: Vec::new(), start: vec![0], nbr: Vec::new(), self_w: Vec::new(), strength: Vec::new(), total: 0 }
+        eprintln!(
+            "[algo] community view: more than {cap} {what} - u32 index limit, returning an empty view"
+        );
+        Self {
+            ids: Vec::new(),
+            start: vec![0],
+            nbr: Vec::new(),
+            self_w: Vec::new(),
+            strength: Vec::new(),
+            total: 0,
+        }
     }
 
     /// Nodes in the view, weighted or not.
@@ -221,7 +244,10 @@ impl WeightedGraph {
 
     /// The dense index of `id`, when the view holds it.
     pub fn index_of(&self, id: NodeId) -> Option<u32> {
-        self.ids.binary_search_by_key(&id.0, |x| x.0).ok().map(|i| i as u32)
+        self.ids
+            .binary_search_by_key(&id.0, |x| x.0)
+            .ok()
+            .map(|i| i as u32)
     }
 
     /// `(neighbour, merged weight)` of `ix` (`ix < len()`), sorted by
@@ -273,7 +299,9 @@ impl WeightedGraph {
                     continue;
                 }
                 match label(u as usize) {
-                    Some(d) if d == c => self_w[ci] = self_w[ci].saturating_add(w.saturating_mul(2)),
+                    Some(d) if d == c => {
+                        self_w[ci] = self_w[ci].saturating_add(w.saturating_mul(2))
+                    }
                     Some(d) => pairs.push((c.min(d), c.max(d), w)),
                     None => {}
                 }
@@ -355,7 +383,13 @@ pub struct CommunityOptions {
 
 impl Default for CommunityOptions {
     fn default() -> Self {
-        Self { seed: 0, resolution: Resolution::ONE, max_levels: 10, max_rounds: 20, leiden_edge_cap: 20_000_000 }
+        Self {
+            seed: 0,
+            resolution: Resolution::ONE,
+            max_levels: 10,
+            max_rounds: 20,
+            leiden_edge_cap: 20_000_000,
+        }
     }
 }
 
@@ -401,7 +435,11 @@ pub fn modularity(g: &WeightedGraph, membership: &[u32], res: Resolution) -> f64
             }
         }
     }
-    let mut ks: Vec<(u32, u64)> = membership.iter().copied().zip(g.strength.iter().copied()).collect();
+    let mut ks: Vec<(u32, u64)> = membership
+        .iter()
+        .copied()
+        .zip(g.strength.iter().copied())
+        .collect();
     ks.sort_unstable_by_key(|&(c, _)| c);
     let mut squares: u128 = 0;
     for group in ks.chunk_by(|a, b| a.0 == b.0) {
@@ -446,13 +484,26 @@ pub fn label_propagation(g: &WeightedGraph, opts: &CommunityOptions) -> Partitio
                 }
                 score[l] = score[l].saturating_add(w);
             }
-            let best = touched.iter().map(|&l| score[l as usize]).max().unwrap_or(0);
+            let best = touched
+                .iter()
+                .map(|&l| score[l as usize])
+                .max()
+                .unwrap_or(0);
             let current = label[v as usize];
             if best > 0 && score[current as usize] != best {
                 ties.clear();
-                ties.extend(touched.iter().copied().filter(|&l| score[l as usize] == best));
+                ties.extend(
+                    touched
+                        .iter()
+                        .copied()
+                        .filter(|&l| score[l as usize] == best),
+                );
                 ties.sort_unstable();
-                let pick = if ties.len() == 1 { 0 } else { rng.below(ties.len() as u64) as usize };
+                let pick = if ties.len() == 1 {
+                    0
+                } else {
+                    rng.below(ties.len() as u64) as usize
+                };
                 label[v as usize] = ties[pick];
                 changed = true;
             }
@@ -467,13 +518,23 @@ pub fn label_propagation(g: &WeightedGraph, opts: &CommunityOptions) -> Partitio
     }
     let (membership, communities) = canonical(&label);
     let modularity = modularity(g, &membership, opts.resolution);
-    Partition { membership, communities, modularity, levels: rounds, method: Method::LabelPropagation }
+    Partition {
+        membership,
+        communities,
+        modularity,
+        levels: rounds,
+        method: Method::LabelPropagation,
+    }
 }
 
 /// Leiden, or [`label_propagation`] when the view has more than
 /// `opts.leiden_edge_cap` pairs; [`Partition::method`] says which ran.
 pub fn communities(g: &WeightedGraph, opts: &CommunityOptions) -> Partition {
-    if g.pair_count() > opts.leiden_edge_cap { label_propagation(g, opts) } else { leiden(g, opts) }
+    if g.pair_count() > opts.leiden_edge_cap {
+        label_propagation(g, opts)
+    } else {
+        leiden(g, opts)
+    }
 }
 
 /// Seeded Leiden (Traag, Waltman and van Eck, 2019) maximising modularity
@@ -540,7 +601,13 @@ pub fn leiden(g: &WeightedGraph, opts: &CommunityOptions) -> Partition {
     let flat: Vec<u32> = to_level.iter().map(|&x| comm[x as usize]).collect();
     let (membership, communities) = canonical(&split_disconnected(g, &flat));
     let modularity = modularity(g, &membership, opts.resolution);
-    Partition { membership, communities, modularity, levels, method: Method::Leiden }
+    Partition {
+        membership,
+        communities,
+        modularity,
+        levels,
+        method: Method::Leiden,
+    }
 }
 
 /// Fast local moving over `g` from the partition `comm` (ids in
@@ -551,7 +618,13 @@ pub fn leiden(g: &WeightedGraph, opts: &CommunityOptions) -> Partition {
 /// neighbours outside its new community are queued unless already queued.
 /// Every move strictly raises modularity, so the queue drains. Returns the
 /// number of non-empty communities.
-fn move_nodes(g: &WeightedGraph, comm: &mut [u32], scale: &Scale, rng: &mut SplitMix64, s: &mut Scratch) -> usize {
+fn move_nodes(
+    g: &WeightedGraph,
+    comm: &mut [u32],
+    scale: &Scale,
+    rng: &mut SplitMix64,
+    s: &mut Scratch,
+) -> usize {
     let n = g.len();
     let mut tot = vec![0u64; n];
     let mut size = vec![0u32; n];
@@ -560,7 +633,10 @@ fn move_nodes(g: &WeightedGraph, comm: &mut [u32], scale: &Scale, rng: &mut Spli
         size[c as usize] += 1;
     }
     // The empty ids, largest first, so a pop hands out the smallest.
-    let mut empty: Vec<u32> = (0..n as u32).rev().filter(|&c| size[c as usize] == 0).collect();
+    let mut empty: Vec<u32> = (0..n as u32)
+        .rev()
+        .filter(|&c| size[c as usize] == 0)
+        .collect();
     s.order.clear();
     s.order.extend(0..n as u32);
     rng.shuffle(&mut s.order);
@@ -637,7 +713,13 @@ fn move_nodes(g: &WeightedGraph, comm: &mut [u32], scale: &Scale, rng: &mut Spli
 /// itself well connected (`den * 2m * w(T, S-T) >= num * K_T * (K_S -
 /// K_T)`) with the best non-negative gain, ties to the smaller id. Returns
 /// each node's sub-community, ids in `0..g.len()`.
-fn refine(g: &WeightedGraph, comm: &[u32], scale: &Scale, rng: &mut SplitMix64, s: &mut Scratch) -> Vec<u32> {
+fn refine(
+    g: &WeightedGraph,
+    comm: &[u32],
+    scale: &Scale,
+    rng: &mut SplitMix64,
+    s: &mut Scratch,
+) -> Vec<u32> {
     let n = g.len();
     let mut tot_s = vec![0u64; n];
     for (&c, &k) in comm.iter().zip(&g.strength) {
@@ -665,7 +747,10 @@ fn refine(g: &WeightedGraph, comm: &[u32], scale: &Scale, rng: &mut SplitMix64, 
         }
         let home = comm[vi];
         let (k_v, k_s) = (g.strength[vi], tot_s[home as usize]);
-        if !scale.gain(ext[vi], k_v, k_s.saturating_sub(k_v)).non_negative() {
+        if !scale
+            .gain(ext[vi], k_v, k_s.saturating_sub(k_v))
+            .non_negative()
+        {
             continue;
         }
         for &(u, w) in g.neighbours(v) {
@@ -681,7 +766,10 @@ fn refine(g: &WeightedGraph, comm: &[u32], scale: &Scale, rng: &mut SplitMix64, 
         let mut best: Option<(u32, Gain)> = None;
         for &t in &s.touched {
             let ti = t as usize;
-            if !scale.gain(ext[ti], rtot[ti], k_s.saturating_sub(rtot[ti])).non_negative() {
+            if !scale
+                .gain(ext[ti], rtot[ti], k_s.saturating_sub(rtot[ti]))
+                .non_negative()
+            {
                 continue;
             }
             let gain = scale.gain(s.link[ti], k_v, rtot[ti]);
@@ -708,7 +796,9 @@ fn refine(g: &WeightedGraph, comm: &[u32], scale: &Scale, rng: &mut SplitMix64, 
             rtot[ti] = rtot[ti].saturating_add(k_v);
             rtot[vi] = 0;
             // The v-T edges turn internal: out of both boundaries.
-            ext[ti] = ext[ti].saturating_add(ext[vi]).saturating_sub(s.link[ti].saturating_mul(2));
+            ext[ti] = ext[ti]
+                .saturating_add(ext[vi])
+                .saturating_sub(s.link[ti].saturating_mul(2));
             ext[vi] = 0;
         }
         for &t in &s.touched {
@@ -801,14 +891,20 @@ struct Scale {
 impl Scale {
     fn new(res: Resolution, total: u64) -> Self {
         let (num, den) = res.ratio();
-        Self { num: u64::from(num), den_total: u128::from(den) * u128::from(total) }
+        Self {
+            num: u64::from(num),
+            den_total: u128::from(den) * u128::from(total),
+        }
     }
 
     /// `den * 2m * link - num * k * tot`. A move's gain with `link = k_vC`,
     /// `k = k_v`, `tot = K_C`; a well-connectedness margin with the set's
     /// boundary weight, its strength and the rest of its community's.
     fn gain(&self, link: u64, k: u64, tot: u64) -> Gain {
-        Gain { pos: U256::mul(self.den_total, link), neg: U256::mul(u128::from(self.num) * u128::from(k), tot) }
+        Gain {
+            pos: U256::mul(self.den_total, link),
+            neg: U256::mul(u128::from(self.num) * u128::from(k), tot),
+        }
     }
 }
 
@@ -847,13 +943,19 @@ impl U256 {
         let low = (a & u128::from(u64::MAX)) * b;
         let high = (a >> 64) * b;
         let (lo, carry) = (high << 64).overflowing_add(low);
-        Self { hi: (high >> 64) + u128::from(carry), lo }
+        Self {
+            hi: (high >> 64) + u128::from(carry),
+            lo,
+        }
     }
 
     /// `self + o`. Every operand here is under `2^161`, so `hi` never wraps.
     fn add(self, o: Self) -> Self {
         let (lo, carry) = self.lo.overflowing_add(o.lo);
-        Self { hi: self.hi.wrapping_add(o.hi).wrapping_add(u128::from(carry)), lo }
+        Self {
+            hi: self.hi.wrapping_add(o.hi).wrapping_add(u128::from(carry)),
+            lo,
+        }
     }
 }
 
@@ -861,7 +963,11 @@ impl U256 {
 /// smallest member index (in a view, the smallest id value). Returns the
 /// membership and the community count.
 fn canonical(labels: &[u32]) -> (Vec<u32>, usize) {
-    let mut by: Vec<(u32, u32)> = labels.iter().enumerate().map(|(i, &l)| (l, i as u32)).collect();
+    let mut by: Vec<(u32, u32)> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (l, i as u32))
+        .collect();
     by.sort_unstable();
     // (size, smallest member, offset of the group in `by`)
     let mut groups: Vec<(usize, u32, usize)> = Vec::new();
@@ -941,22 +1047,31 @@ mod tests {
     const USES: u32 = 2;
     const DROPPED: u32 = 3;
     const UNLISTED: u32 = 4;
-    const WEIGHTS: &[(EdgeCategoryId, u32)] =
-        &[(EdgeCategoryId(CALLS), 4), (EdgeCategoryId(USES), 2), (EdgeCategoryId(DROPPED), 0)];
+    const WEIGHTS: &[(EdgeCategoryId, u32)] = &[
+        (EdgeCategoryId(CALLS), 4),
+        (EdgeCategoryId(USES), 2),
+        (EdgeCategoryId(DROPPED), 0),
+    ];
 
     /// A 60-node graph from a 64-bit LCG: scattered id values, 240 edges over
     /// four categories, self-loops, repeats and a few dangling endpoints.
     fn lcg_graph(seed: u64) -> ToyGraph {
         let mut x = seed;
         let mut step = || {
-            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             x >> 33
         };
         let nodes: Vec<NodeId> = (0..60).map(|i| NodeId(mix64(i) % 1_000_000)).collect();
         let mut edges = Vec::new();
         for _ in 0..240 {
             let from = nodes[(step() % 60) as usize].0;
-            let to = if step() % 25 == 0 { 2_000_000 + step() % 4 } else { nodes[(step() % 60) as usize].0 };
+            let to = if step() % 25 == 0 {
+                2_000_000 + step() % 4
+            } else {
+                nodes[(step() % 60) as usize].0
+            };
             edges.push(toy_edge(from, to, 1 + (step() % 4) as u32));
         }
         ToyGraph { nodes, edges }
@@ -978,7 +1093,10 @@ mod tests {
     }
 
     fn options(seed: u64) -> CommunityOptions {
-        CommunityOptions { seed, ..CommunityOptions::default() }
+        CommunityOptions {
+            seed,
+            ..CommunityOptions::default()
+        }
     }
 
     #[test]
@@ -992,7 +1110,10 @@ mod tests {
         assert_eq!(WeightedGraph::from_source(&reversed, WEIGHTS), view);
         let mut perm: Vec<u32> = (0..g.edges.len() as u32).collect();
         SplitMix64::new(3).shuffle(&mut perm);
-        let shuffled = ToyGraph { nodes: g.nodes.clone(), edges: perm.iter().map(|&i| g.edges[i as usize].clone()).collect() };
+        let shuffled = ToyGraph {
+            nodes: g.nodes.clone(),
+            edges: perm.iter().map(|&i| g.edges[i as usize].clone()).collect(),
+        };
         assert_eq!(WeightedGraph::from_source(&shuffled, WEIGHTS), view);
         // Not vacuous: dangling endpoints joined, pairs merged, ids sorted.
         assert!(view.len() > g.nodes.len() && view.pair_count() > 50);
@@ -1009,29 +1130,57 @@ mod tests {
     fn parallel_and_opposite_edges_merge() {
         let g = ToyGraph {
             nodes: vec![NodeId(20), NodeId(10)],
-            edges: vec![toy_edge(10, 20, CALLS), toy_edge(20, 10, CALLS), toy_edge(10, 20, USES)],
+            edges: vec![
+                toy_edge(10, 20, CALLS),
+                toy_edge(20, 10, CALLS),
+                toy_edge(10, 20, USES),
+            ],
         };
         let view = WeightedGraph::from_source(&g, WEIGHTS);
-        let (a, b) = (view.index_of(NodeId(10)).unwrap(), view.index_of(NodeId(20)).unwrap());
+        let (a, b) = (
+            view.index_of(NodeId(10)).unwrap(),
+            view.index_of(NodeId(20)).unwrap(),
+        );
         assert_eq!((a, b), (0, 1));
         assert_eq!(view.neighbours(a), &[(b, 10)]);
         assert_eq!(view.neighbours(b), &[(a, 10)]);
-        assert_eq!((view.strength(a), view.pair_count(), view.total_weight()), (10, 1, 20));
+        assert_eq!(
+            (view.strength(a), view.pair_count(), view.total_weight()),
+            (10, 1, 20)
+        );
     }
 
     #[test]
     fn zero_weight_categories_dropped() {
         let g = ToyGraph {
             nodes: vec![NodeId(1), NodeId(2), NodeId(3)],
-            edges: vec![toy_edge(1, 2, UNLISTED), toy_edge(2, 3, DROPPED), toy_edge(3, 9, UNLISTED)],
+            edges: vec![
+                toy_edge(1, 2, UNLISTED),
+                toy_edge(2, 3, DROPPED),
+                toy_edge(3, 9, UNLISTED),
+            ],
         };
         let view = WeightedGraph::from_source(&g, WEIGHTS);
-        assert_eq!((view.len(), view.pair_count(), view.total_weight()), (3, 0, 0));
-        assert_eq!(view.index_of(NodeId(9)), None, "an unweighted edge's dangling endpoint is not indexed");
+        assert_eq!(
+            (view.len(), view.pair_count(), view.total_weight()),
+            (3, 0, 0)
+        );
+        assert_eq!(
+            view.index_of(NodeId(9)),
+            None,
+            "an unweighted edge's dangling endpoint is not indexed"
+        );
         // The first entry listed for a category wins, a 0 included.
-        let first_wins =
-            [(EdgeCategoryId(CALLS), 3), (EdgeCategoryId(CALLS), 5), (EdgeCategoryId(USES), 0), (EdgeCategoryId(USES), 7)];
-        let g = ToyGraph { nodes: vec![NodeId(1), NodeId(2)], edges: vec![toy_edge(1, 2, CALLS), toy_edge(2, 1, USES)] };
+        let first_wins = [
+            (EdgeCategoryId(CALLS), 3),
+            (EdgeCategoryId(CALLS), 5),
+            (EdgeCategoryId(USES), 0),
+            (EdgeCategoryId(USES), 7),
+        ];
+        let g = ToyGraph {
+            nodes: vec![NodeId(1), NodeId(2)],
+            edges: vec![toy_edge(1, 2, CALLS), toy_edge(2, 1, USES)],
+        };
         let view = WeightedGraph::from_source(&g, &first_wins);
         assert_eq!(view.neighbours(0), &[(1, 3)]);
     }
@@ -1040,13 +1189,28 @@ mod tests {
     fn self_loops_follow_the_networkx_convention() {
         // networkx 3.6.1: modularity(G, [{0, 1}, {2}], weight='weight') = -0.125
         // and the singletons -0.045, for loop 0-0 (3), 0-1 (2), 1-2 (5).
-        let g = WeightedGraph::from_pairs(3, &[(0, 0, 3), (0, 1, 2), (1, 2, 5), (7, 1, 4), (1, 2, 0)]);
-        assert_eq!((g.self_weight(0), g.strength(0), g.strength(1), g.total_weight()), (6, 8, 7, 20));
+        let g =
+            WeightedGraph::from_pairs(3, &[(0, 0, 3), (0, 1, 2), (1, 2, 5), (7, 1, 4), (1, 2, 0)]);
+        assert_eq!(
+            (
+                g.self_weight(0),
+                g.strength(0),
+                g.strength(1),
+                g.total_weight()
+            ),
+            (6, 8, 7, 20)
+        );
         assert!((modularity(&g, &[0, 0, 1], Resolution::ONE) + 0.125).abs() < 1e-12);
         assert!((modularity(&g, &[0, 1, 2], Resolution::ONE) + 0.045).abs() < 1e-12);
-        let src = ToyGraph { nodes: vec![NodeId(5)], edges: vec![toy_edge(5, 5, CALLS)] };
+        let src = ToyGraph {
+            nodes: vec![NodeId(5)],
+            edges: vec![toy_edge(5, 5, CALLS)],
+        };
         let view = WeightedGraph::from_source(&src, WEIGHTS);
-        assert_eq!((view.self_weight(0), view.strength(0), view.pair_count()), (8, 8, 0));
+        assert_eq!(
+            (view.self_weight(0), view.strength(0), view.pair_count()),
+            (8, 8, 0)
+        );
     }
 
     #[test]
@@ -1056,27 +1220,114 @@ mod tests {
         assert_eq!(g.total_weight(), 26);
         let split = [0, 0, 0, 0, 1, 1, 1, 1];
         let q = modularity(&g, &split, Resolution::ONE);
-        assert!((q - 2.0 * (6.0 / 13.0 - 0.25)).abs() < 1e-12 && (q - 0.4231).abs() < 5e-5, "{q}");
+        assert!(
+            (q - 2.0 * (6.0 / 13.0 - 0.25)).abs() < 1e-12 && (q - 0.4231).abs() < 5e-5,
+            "{q}"
+        );
         assert_eq!(modularity(&g, &[7; 8], Resolution::ONE), 0.0);
         let half = modularity(&g, &split, Resolution { num: 1, den: 2 });
         assert!((half - 2.0 * (6.0 / 13.0 - 0.125)).abs() < 1e-12);
-        assert_eq!(modularity(&g, &split, Resolution { num: 1, den: 0 }), q, "den 0 reads as 1");
+        assert_eq!(
+            modularity(&g, &split, Resolution { num: 1, den: 0 }),
+            q,
+            "den 0 reads as 1"
+        );
         assert!(modularity(&g, &[0; 7], Resolution::ONE).is_nan());
-        assert_eq!(modularity(&WeightedGraph::from_pairs(3, &[]), &[0, 1, 2], Resolution::ONE), 0.0);
+        assert_eq!(
+            modularity(
+                &WeightedGraph::from_pairs(3, &[]),
+                &[0, 1, 2],
+                Resolution::ONE
+            ),
+            0.0
+        );
     }
 
     /// Zachary's karate club, networkx 3.6.1 `karate_club_graph()`, 0-based.
     const KARATE: [(u32, u32); 78] = [
-        (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7), (0, 8), (0, 10), (0, 11), (0, 12), (0, 13), (0, 17),
-        (0, 19), (0, 21), (0, 31), (1, 2), (1, 3), (1, 7), (1, 13), (1, 17), (1, 19), (1, 21), (1, 30), (2, 3),
-        (2, 7), (2, 8), (2, 9), (2, 13), (2, 27), (2, 28), (2, 32), (3, 7), (3, 12), (3, 13), (4, 6), (4, 10),
-        (5, 6), (5, 10), (5, 16), (6, 16), (8, 30), (8, 32), (8, 33), (9, 33), (13, 33), (14, 32), (14, 33),
-        (15, 32), (15, 33), (18, 32), (18, 33), (19, 33), (20, 32), (20, 33), (22, 32), (22, 33), (23, 25),
-        (23, 27), (23, 29), (23, 32), (23, 33), (24, 25), (24, 27), (24, 31), (25, 31), (26, 29), (26, 33),
-        (27, 33), (28, 31), (28, 33), (29, 32), (29, 33), (30, 32), (30, 33), (31, 32), (31, 33), (32, 33),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 4),
+        (0, 5),
+        (0, 6),
+        (0, 7),
+        (0, 8),
+        (0, 10),
+        (0, 11),
+        (0, 12),
+        (0, 13),
+        (0, 17),
+        (0, 19),
+        (0, 21),
+        (0, 31),
+        (1, 2),
+        (1, 3),
+        (1, 7),
+        (1, 13),
+        (1, 17),
+        (1, 19),
+        (1, 21),
+        (1, 30),
+        (2, 3),
+        (2, 7),
+        (2, 8),
+        (2, 9),
+        (2, 13),
+        (2, 27),
+        (2, 28),
+        (2, 32),
+        (3, 7),
+        (3, 12),
+        (3, 13),
+        (4, 6),
+        (4, 10),
+        (5, 6),
+        (5, 10),
+        (5, 16),
+        (6, 16),
+        (8, 30),
+        (8, 32),
+        (8, 33),
+        (9, 33),
+        (13, 33),
+        (14, 32),
+        (14, 33),
+        (15, 32),
+        (15, 33),
+        (18, 32),
+        (18, 33),
+        (19, 33),
+        (20, 32),
+        (20, 33),
+        (22, 32),
+        (22, 33),
+        (23, 25),
+        (23, 27),
+        (23, 29),
+        (23, 32),
+        (23, 33),
+        (24, 25),
+        (24, 27),
+        (24, 31),
+        (25, 31),
+        (26, 29),
+        (26, 33),
+        (27, 33),
+        (28, 31),
+        (28, 33),
+        (29, 32),
+        (29, 33),
+        (30, 32),
+        (30, 33),
+        (31, 32),
+        (31, 33),
+        (32, 33),
     ];
     /// Its `club` attribute: the members who followed the Officer.
-    const OFFICER: [u32; 17] = [9, 14, 15, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33];
+    const OFFICER: [u32; 17] = [
+        9, 14, 15, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+    ];
 
     fn karate() -> WeightedGraph {
         let pairs: Vec<(u32, u32, u64)> = KARATE.iter().map(|&(a, b)| (a, b, 1)).collect();
@@ -1090,7 +1341,10 @@ mod tests {
         let club: Vec<u32> = (0..34).map(|i| u32::from(OFFICER.contains(&i))).collect();
         let q = modularity(&g, &club, Resolution::ONE);
         // networkx 3.6.1: 0.3582347140039448.
-        assert!((q - 0.3582).abs() <= 0.0005 && (q - 0.358_234_714_003_944_8).abs() < 1e-12, "{q}");
+        assert!(
+            (q - 0.3582).abs() <= 0.0005 && (q - 0.358_234_714_003_944_8).abs() < 1e-12,
+            "{q}"
+        );
     }
 
     #[test]
@@ -1098,7 +1352,10 @@ mod tests {
         let g = cliques(2, 6);
         let two = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
         let p = label_propagation(&g, &options(0));
-        assert_eq!((p.communities, p.membership.as_slice(), p.method), (2, &two[..], Method::LabelPropagation));
+        assert_eq!(
+            (p.communities, p.membership.as_slice(), p.method),
+            (2, &two[..], Method::LabelPropagation)
+        );
         // A reference implementation of the same rules in Python recovers the
         // two cliques for 995 of seeds 0..1000 and merges them for 5.
         let (mut recovered, mut merged) = (0, 0);
@@ -1116,7 +1373,9 @@ mod tests {
         // mean networkx modularity 0.359111604207758; seed 0 runs 5 rounds
         // into 3 communities (Q 0.34393491124260345).
         let g = karate();
-        let runs: Vec<Partition> = (0..200).map(|seed| label_propagation(&g, &options(seed))).collect();
+        let runs: Vec<Partition> = (0..200)
+            .map(|seed| label_propagation(&g, &options(seed)))
+            .collect();
         assert!(runs.iter().all(|p| p.communities > 1));
         let mean = runs.iter().map(|p| p.modularity).sum::<f64>() / 200.0;
         assert!((mean - 0.359_111_604_207_758).abs() < 1e-9, "{mean}");
@@ -1134,9 +1393,15 @@ mod tests {
             nodes: g.nodes.iter().rev().copied().collect(),
             edges: g.edges.iter().rev().cloned().collect(),
         };
-        assert_eq!(label_propagation(&WeightedGraph::from_source(&reversed, WEIGHTS), &options(9)), p);
+        assert_eq!(
+            label_propagation(&WeightedGraph::from_source(&reversed, WEIGHTS), &options(9)),
+            p
+        );
         assert_eq!(p.membership.len(), view.len());
-        assert_eq!(p.modularity, modularity(&view, &p.membership, Resolution::ONE));
+        assert_eq!(
+            p.modularity,
+            modularity(&view, &p.membership, Resolution::ONE)
+        );
     }
 
     #[test]
@@ -1144,11 +1409,26 @@ mod tests {
         // Nodes 5 and 6 are isolated; 0-1 a pair; 2-3-4 a triangle.
         let g = WeightedGraph::from_pairs(7, &[(0, 1, 5), (2, 3, 1), (3, 4, 1), (2, 4, 1)]);
         let p = label_propagation(&g, &options(1));
-        assert_eq!((p.membership, p.communities), (vec![1, 1, 0, 0, 0, 2, 3], 4));
-        let none = label_propagation(&g, &CommunityOptions { max_rounds: 0, ..options(1) });
-        assert_eq!((none.membership, none.communities, none.levels), ((0..7).collect::<Vec<u32>>(), 7, 0));
+        assert_eq!(
+            (p.membership, p.communities),
+            (vec![1, 1, 0, 0, 0, 2, 3], 4)
+        );
+        let none = label_propagation(
+            &g,
+            &CommunityOptions {
+                max_rounds: 0,
+                ..options(1)
+            },
+        );
+        assert_eq!(
+            (none.membership, none.communities, none.levels),
+            ((0..7).collect::<Vec<u32>>(), 7, 0)
+        );
         let empty = label_propagation(&WeightedGraph::from_pairs(0, &[]), &options(1));
-        assert_eq!((empty.communities, empty.modularity, empty.levels), (0, 0.0, 1));
+        assert_eq!(
+            (empty.communities, empty.modularity, empty.levels),
+            (0, 0.0, 1)
+        );
     }
 
     #[test]
@@ -1160,7 +1440,10 @@ mod tests {
         let over_links = WeightedGraph::assemble(ids.clone(), vec![(0, 1, 1), (1, 2, 1)], 3);
         assert!(over_links.is_empty() && over_links.total_weight() == 0);
         assert_eq!(label_propagation(&over_links, &options(0)).communities, 0);
-        assert_eq!(WeightedGraph::assemble(ids, vec![(0, 1, 1), (0, 1, 2)], 3).neighbours(0), &[(1, 3)]);
+        assert_eq!(
+            WeightedGraph::assemble(ids, vec![(0, 1, 1), (0, 1, 2)], 3).neighbours(0),
+            &[(1, 3)]
+        );
     }
 
     #[test]
@@ -1168,7 +1451,11 @@ mod tests {
         let mut r = SplitMix64::new(0);
         assert_eq!(
             [r.next_u64(), r.next_u64(), r.next_u64()],
-            [0xe220_a839_7b1d_cdaf, 0x6e78_9e6a_a1b9_65f4, 0x06c4_5d18_8009_454f]
+            [
+                0xe220_a839_7b1d_cdaf,
+                0x6e78_9e6a_a1b9_65f4,
+                0x06c4_5d18_8009_454f
+            ]
         );
         let mut r = SplitMix64::new(42);
         assert!((0..1000).all(|_| r.below(7) < 7));
@@ -1202,13 +1489,16 @@ mod tests {
     fn random_view(seed: u64) -> WeightedGraph {
         let mut x = mix64(seed);
         let mut step = move || {
-            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             x >> 33
         };
         let n = 5 + step() % 76;
         let m = step() % 301;
-        let pairs: Vec<(u32, u32, u64)> =
-            (0..m).map(|_| ((step() % n) as u32, (step() % n) as u32, 1 + step() % 4)).collect();
+        let pairs: Vec<(u32, u32, u64)> = (0..m)
+            .map(|_| ((step() % n) as u32, (step() % n) as u32, 1 + step() % 4))
+            .collect();
         WeightedGraph::from_pairs(n as usize, &pairs)
     }
 
@@ -1216,7 +1506,9 @@ mod tests {
     fn assert_connected(g: &WeightedGraph, p: &Partition) {
         assert_eq!(p.membership.len(), g.len());
         for c in 0..p.communities as u32 {
-            let members: Vec<u32> = (0..g.len() as u32).filter(|&v| p.membership[v as usize] == c).collect();
+            let members: Vec<u32> = (0..g.len() as u32)
+                .filter(|&v| p.membership[v as usize] == c)
+                .collect();
             assert!(!members.is_empty(), "community {c} is empty");
             let mut seen = vec![false; g.len()];
             let mut stack = vec![members[0]];
@@ -1231,7 +1523,11 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(reached, members.len(), "community {c} is not connected: {members:?}");
+            assert_eq!(
+                reached,
+                members.len(),
+                "community {c} is not connected: {members:?}"
+            );
         }
     }
 
@@ -1240,7 +1536,10 @@ mod tests {
         let g = planted(7);
         let p = leiden(&g, &options(0));
         let groups: Vec<u32> = (0..100).map(|i| i / 25).collect();
-        assert_eq!((p.membership.as_slice(), p.communities, p.method), (groups.as_slice(), 4, Method::Leiden));
+        assert_eq!(
+            (p.membership.as_slice(), p.communities, p.method),
+            (groups.as_slice(), 4, Method::Leiden)
+        );
         assert_eq!(p.modularity, modularity(&g, &groups, Resolution::ONE));
     }
 
@@ -1249,7 +1548,9 @@ mod tests {
         // networkx 3.6.1 Louvain over 200 seeds: 0.4198 x42, 0.4188 x62,
         // 0.4156 x49, 0.4151 x29, minimum 0.3854.
         let g = karate();
-        let qs: Vec<f64> = (0..=19).map(|seed| leiden(&g, &options(seed)).modularity).collect();
+        let qs: Vec<f64> = (0..=19)
+            .map(|seed| leiden(&g, &options(seed)).modularity)
+            .collect();
         let best = qs.iter().copied().fold(f64::MIN, f64::max);
         assert!(best >= 0.4180, "best {best}: {qs:?}");
         assert!(qs.iter().all(|&q| q >= 0.3900), "{qs:?}");
@@ -1267,7 +1568,13 @@ mod tests {
             assert_connected(&g, &p);
             assert!(p.levels >= 1 && p.levels <= CommunityOptions::default().max_levels);
             // One level stops before refinement: connected by the final pass.
-            let early = leiden(&g, &CommunityOptions { max_levels: 1, ..options(seed) });
+            let early = leiden(
+                &g,
+                &CommunityOptions {
+                    max_levels: 1,
+                    ..options(seed)
+                },
+            );
             assert_connected(&g, &early);
             split += usize::from(early.communities > p.communities);
         }
@@ -1284,9 +1591,16 @@ mod tests {
             leiden_sum += leiden(&g, &options(seed)).modularity;
             lpa_sum += label_propagation(&g, &options(seed)).modularity;
         }
-        assert!(leiden_sum / 200.0 >= lpa_sum / 200.0, "leiden {} lpa {}", leiden_sum / 200.0, lpa_sum / 200.0);
+        assert!(
+            leiden_sum / 200.0 >= lpa_sum / 200.0,
+            "leiden {} lpa {}",
+            leiden_sum / 200.0,
+            lpa_sum / 200.0
+        );
         let g = planted(7);
-        assert!(leiden(&g, &options(0)).modularity >= label_propagation(&g, &options(0)).modularity);
+        assert!(
+            leiden(&g, &options(0)).modularity >= label_propagation(&g, &options(0)).modularity
+        );
     }
 
     #[test]
@@ -1299,11 +1613,20 @@ mod tests {
             nodes: g.nodes.iter().rev().copied().collect(),
             edges: g.edges.iter().rev().cloned().collect(),
         };
-        assert_eq!(leiden(&WeightedGraph::from_source(&reversed, WEIGHTS), &options(9)), p);
+        assert_eq!(
+            leiden(&WeightedGraph::from_source(&reversed, WEIGHTS), &options(9)),
+            p
+        );
         // Not vacuous: a real partition, canonical ids.
         assert!(p.communities > 1 && p.communities < view.len());
-        assert_eq!(canonical(&p.membership), (p.membership.clone(), p.communities));
-        assert_eq!(p.modularity, modularity(&view, &p.membership, Resolution::ONE));
+        assert_eq!(
+            canonical(&p.membership),
+            (p.membership.clone(), p.communities)
+        );
+        assert_eq!(
+            p.modularity,
+            modularity(&view, &p.membership, Resolution::ONE)
+        );
     }
 
     #[test]
@@ -1312,9 +1635,14 @@ mod tests {
         let view = WeightedGraph::from_source(&lcg_graph(5), WEIGHTS);
         let p = leiden(&view, &options(9));
         let q = view.quotient(&p.membership, p.communities);
-        assert_eq!((q.len(), q.total_weight()), (p.communities, view.total_weight()));
+        assert_eq!(
+            (q.len(), q.total_weight()),
+            (p.communities, view.total_weight())
+        );
         for c in 0..p.communities as u32 {
-            let members: Vec<u32> = (0..view.len() as u32).filter(|&v| p.membership[v as usize] == c).collect();
+            let members: Vec<u32> = (0..view.len() as u32)
+                .filter(|&v| p.membership[v as usize] == c)
+                .collect();
             let loops: u64 = members.iter().map(|&v| view.self_weight(v)).sum();
             let mut internal = 0u64;
             for &v in &members {
@@ -1325,7 +1653,10 @@ mod tests {
                 }
             }
             assert_eq!(q.self_weight(c), 2 * internal + loops);
-            assert_eq!(q.strength(c), members.iter().map(|&v| view.strength(v)).sum::<u64>());
+            assert_eq!(
+                q.strength(c),
+                members.iter().map(|&v| view.strength(v)).sum::<u64>()
+            );
             assert_eq!(q.id(c), NodeId(u64::from(c)));
         }
         let singletons: Vec<u32> = (0..q.len() as u32).collect();
@@ -1333,22 +1664,43 @@ mod tests {
         // Without self-loops: exactly twice the internal weight.
         let g = cliques(2, 4);
         let q = g.quotient(&[0, 0, 0, 0, 1, 1, 1, 1], 2);
-        assert_eq!((q.self_weight(0), q.self_weight(1), q.total_weight()), (12, 12, 26));
+        assert_eq!(
+            (q.self_weight(0), q.self_weight(1), q.total_weight()),
+            (12, 12, 26)
+        );
         assert_eq!(q.neighbours(0), &[(1, 1)]);
         // A node without a label in range is left out; an unused id is a node of strength 0.
         let q = g.quotient(&[0, 0, 0, 0, 9, 9, 9], 3);
-        assert_eq!((q.len(), q.self_weight(0), q.pair_count(), q.strength(2)), (3, 12, 0, 0));
+        assert_eq!(
+            (q.len(), q.self_weight(0), q.pair_count(), q.strength(2)),
+            (3, 12, 0, 0)
+        );
     }
 
     #[test]
     fn cap_falls_back_to_lpa() {
         let g = karate();
-        let capped = communities(&g, &CommunityOptions { leiden_edge_cap: 1, ..options(3) });
+        let capped = communities(
+            &g,
+            &CommunityOptions {
+                leiden_edge_cap: 1,
+                ..options(3)
+            },
+        );
         assert_eq!(capped.method, Method::LabelPropagation);
         assert_eq!(capped, label_propagation(&g, &options(3)));
-        let at_cap = communities(&g, &CommunityOptions { leiden_edge_cap: g.pair_count(), ..options(3) });
+        let at_cap = communities(
+            &g,
+            &CommunityOptions {
+                leiden_edge_cap: g.pair_count(),
+                ..options(3)
+            },
+        );
         assert_eq!(at_cap, leiden(&g, &options(3)));
-        assert_eq!((communities(&g, &options(3)).method, Method::Leiden.name()), (Method::Leiden, "leiden"));
+        assert_eq!(
+            (communities(&g, &options(3)).method, Method::Leiden.name()),
+            (Method::Leiden, "leiden")
+        );
     }
 
     #[test]
@@ -1362,10 +1714,24 @@ mod tests {
         let clique = WeightedGraph::from_pairs(10, &pairs);
         let p = leiden(&clique, &options(0));
         assert_eq!((p.communities, p.modularity), (1, 0.0));
-        let fine = Resolution { num: u32::MAX, den: 1 };
-        assert_eq!(leiden(&clique, &CommunityOptions { resolution: fine, ..options(0) }).communities, 10);
+        let fine = Resolution {
+            num: u32::MAX,
+            den: 1,
+        };
+        assert_eq!(
+            leiden(
+                &clique,
+                &CommunityOptions {
+                    resolution: fine,
+                    ..options(0)
+                }
+            )
+            .communities,
+            10
+        );
         // Weights that saturate the u64 sums still finish.
-        let saturated: Vec<(u32, u32, u64)> = pairs.iter().map(|&(a, b, _)| (a, b, u64::MAX)).collect();
+        let saturated: Vec<(u32, u32, u64)> =
+            pairs.iter().map(|&(a, b, _)| (a, b, u64::MAX)).collect();
         let g = WeightedGraph::from_pairs(10, &saturated);
         assert_eq!(g.total_weight(), u64::MAX);
         assert_connected(&g, &leiden(&g, &options(0)));
@@ -1376,22 +1742,51 @@ mod tests {
         // Scaling every weight by 2^44 and gamma's terms by u32::MAX scales
         // each side of every decision alike, and pushes `den * 2m * k_v`
         // past i128: exact arithmetic gives the same partition.
-        let huge = Resolution { num: u32::MAX, den: u32::MAX };
+        let huge = Resolution {
+            num: u32::MAX,
+            den: u32::MAX,
+        };
         let mut past_i128 = 0;
         for seed in 0..40 {
             let g = random_view(seed);
             let scaled_pairs: Vec<(u32, u32, u64)> = (0..g.len() as u32)
-                .flat_map(|v| g.neighbours(v).iter().filter(move |&&(u, _)| u > v).map(move |&(u, w)| (v, u, w << 44)))
+                .flat_map(|v| {
+                    g.neighbours(v)
+                        .iter()
+                        .filter(move |&&(u, _)| u > v)
+                        .map(move |&(u, w)| (v, u, w << 44))
+                })
                 .chain((0..g.len() as u32).map(|v| (v, v, (g.self_weight(v) / 2) << 44)))
                 .collect();
             let scaled = WeightedGraph::from_pairs(g.len(), &scaled_pairs);
             assert_eq!(scaled.total_weight(), g.total_weight() << 44);
             let base = leiden(&g, &options(seed));
-            let big = leiden(&scaled, &CommunityOptions { resolution: huge, ..options(seed) });
-            assert_eq!((big.membership, big.levels), (base.membership, base.levels), "seed {seed}");
-            let k_max = (0..scaled.len() as u32).map(|v| scaled.strength(v)).max().unwrap_or(0);
-            let term = U256::mul(u128::from(u32::MAX) * u128::from(scaled.total_weight()), k_max);
-            past_i128 += usize::from(term > U256 { hi: 0, lo: i128::MAX as u128 });
+            let big = leiden(
+                &scaled,
+                &CommunityOptions {
+                    resolution: huge,
+                    ..options(seed)
+                },
+            );
+            assert_eq!(
+                (big.membership, big.levels),
+                (base.membership, base.levels),
+                "seed {seed}"
+            );
+            let k_max = (0..scaled.len() as u32)
+                .map(|v| scaled.strength(v))
+                .max()
+                .unwrap_or(0);
+            let term = U256::mul(
+                u128::from(u32::MAX) * u128::from(scaled.total_weight()),
+                k_max,
+            );
+            past_i128 += usize::from(
+                term > U256 {
+                    hi: 0,
+                    lo: i128::MAX as u128,
+                },
+            );
         }
         // Not vacuous: most of these views need more than i128 holds.
         assert!(past_i128 >= 20, "{past_i128}");
@@ -1401,12 +1796,34 @@ mod tests {
     fn wide_arithmetic() {
         let max = U256::mul(u128::MAX, u64::MAX);
         // (2^128 - 1)(2^64 - 1) = (2^64 - 2) * 2^128 + (2^128 - 2^64 + 1).
-        assert_eq!(max, U256 { hi: (1u128 << 64) - 2, lo: u128::MAX - (1u128 << 64) + 2 });
-        assert_eq!(U256::mul(12_345, 678), U256 { hi: 0, lo: 12_345 * 678 });
-        assert_eq!(U256::mul(1u128 << 100, 1 << 40), U256 { hi: 1 << 12, lo: 0 });
-        let carry = U256 { hi: 0, lo: u128::MAX }.add(U256 { hi: 0, lo: 1 });
+        assert_eq!(
+            max,
+            U256 {
+                hi: (1u128 << 64) - 2,
+                lo: u128::MAX - (1u128 << 64) + 2
+            }
+        );
+        assert_eq!(
+            U256::mul(12_345, 678),
+            U256 {
+                hi: 0,
+                lo: 12_345 * 678
+            }
+        );
+        assert_eq!(
+            U256::mul(1u128 << 100, 1 << 40),
+            U256 { hi: 1 << 12, lo: 0 }
+        );
+        let carry = U256 {
+            hi: 0,
+            lo: u128::MAX,
+        }
+        .add(U256 { hi: 0, lo: 1 });
         assert_eq!(carry, U256 { hi: 1, lo: 0 });
-        let g = |pos: u128, neg: u128| Gain { pos: U256::mul(pos, 1), neg: U256::mul(neg, 1) };
+        let g = |pos: u128, neg: u128| Gain {
+            pos: U256::mul(pos, 1),
+            neg: U256::mul(neg, 1),
+        };
         assert_eq!(g(5, 3).compare(&g(10, 8)), Ordering::Equal);
         assert_eq!(g(5, 3).compare(&g(1, 0)), Ordering::Greater);
         assert_eq!(g(0, 7).compare(&g(0, 6)), Ordering::Less);
@@ -1419,7 +1836,10 @@ mod tests {
         // five becomes three connected pieces.
         let g = WeightedGraph::from_pairs(5, &[(0, 1, 1), (2, 3, 1)]);
         assert_eq!(split_disconnected(&g, &[0; 5]), vec![0, 0, 1, 1, 2]);
-        assert_eq!(split_disconnected(&g, &[0, 1, 1, 1, 1]), vec![0, 1, 2, 2, 3]);
+        assert_eq!(
+            split_disconnected(&g, &[0, 1, 1, 1, 1]),
+            vec![0, 1, 2, 2, 3]
+        );
         assert_eq!(first_seen(&[7, 3, 7, 0]), (vec![0, 1, 0, 2], 3));
     }
 
@@ -1428,24 +1848,52 @@ mod tests {
         let g = cliques(4, 6);
         let p = leiden(&g, &options(1));
         let four: Vec<u32> = (0..24).map(|i| i / 6).collect();
-        assert_eq!((p.membership.as_slice(), p.communities), (four.as_slice(), 4));
+        assert_eq!(
+            (p.membership.as_slice(), p.communities),
+            (four.as_slice(), 4)
+        );
         // Gamma 1/100 merges the chain of cliques; that takes an aggregate level.
-        let coarse = leiden(&g, &CommunityOptions { resolution: Resolution { num: 1, den: 100 }, ..options(1) });
+        let coarse = leiden(
+            &g,
+            &CommunityOptions {
+                resolution: Resolution { num: 1, den: 100 },
+                ..options(1)
+            },
+        );
         assert_eq!(coarse.communities, 1);
         assert!(coarse.levels >= 2, "{}", coarse.levels);
-        let den0 = leiden(&g, &CommunityOptions { resolution: Resolution { num: 1, den: 0 }, ..options(1) });
+        let den0 = leiden(
+            &g,
+            &CommunityOptions {
+                resolution: Resolution { num: 1, den: 0 },
+                ..options(1)
+            },
+        );
         assert_eq!(den0, p, "den 0 reads as 1");
     }
 
     #[test]
     fn level_bounds_and_degenerate_views() {
         let g = karate();
-        let none = leiden(&g, &CommunityOptions { max_levels: 0, ..options(0) });
-        assert_eq!((none.membership, none.communities, none.levels), ((0..34).collect::<Vec<u32>>(), 34, 0));
+        let none = leiden(
+            &g,
+            &CommunityOptions {
+                max_levels: 0,
+                ..options(0)
+            },
+        );
+        assert_eq!(
+            (none.membership, none.communities, none.levels),
+            ((0..34).collect::<Vec<u32>>(), 34, 0)
+        );
         let empty = leiden(&WeightedGraph::from_pairs(0, &[]), &options(0));
-        assert_eq!((empty.communities, empty.modularity, empty.levels), (0, 0.0, 1));
+        assert_eq!(
+            (empty.communities, empty.modularity, empty.levels),
+            (0, 0.0, 1)
+        );
         // Isolated nodes (a self-loop is no edge to anyone) stay singletons.
-        let g = WeightedGraph::from_pairs(6, &[(0, 1, 5), (2, 3, 1), (3, 4, 1), (2, 4, 1), (5, 5, 3)]);
+        let g =
+            WeightedGraph::from_pairs(6, &[(0, 1, 5), (2, 3, 1), (3, 4, 1), (2, 4, 1), (5, 5, 3)]);
         let p = leiden(&g, &options(1));
         assert_eq!((p.membership, p.communities), (vec![1, 1, 0, 0, 0, 2], 3));
     }

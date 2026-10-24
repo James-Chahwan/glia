@@ -47,8 +47,12 @@ impl CrossGraphResolver for CliInvocationResolver {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::CLI_INVOCATION) {
                     continue;
                 }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(tool) = qname.strip_prefix("cli_invoke:") else { continue };
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                let Some(tool) = qname.strip_prefix("cli_invoke:") else {
+                    continue;
+                };
                 invocations += 1;
                 for t in command_index.get(tool).into_iter().flatten() {
                     if paired.insert((n.id, t.id)) {
@@ -111,7 +115,9 @@ fn subcommand_word<'a>(argv: &'a [String], tool: &str) -> Option<&'a str> {
     let dotted = tool == "mix";
     argv.iter().map(String::as_str).find(|t| {
         let mut chars = t.chars();
-        chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
             && chars.all(|c| {
                 c.is_ascii_lowercase()
                     || c.is_ascii_digit()
@@ -131,8 +137,14 @@ mod tests {
 
     #[test]
     fn subcommand_word_skips_flags_and_paths() {
-        assert_eq!(subcommand_word(&argv(&["migrate", "--yes"]), "tool"), Some("migrate"));
-        assert_eq!(subcommand_word(&argv(&["--config", "cfg.yaml", "db-sync"]), "tool"), Some("db-sync"));
+        assert_eq!(
+            subcommand_word(&argv(&["migrate", "--yes"]), "tool"),
+            Some("migrate")
+        );
+        assert_eq!(
+            subcommand_word(&argv(&["--config", "cfg.yaml", "db-sync"]), "tool"),
+            Some("db-sync")
+        );
         assert_eq!(subcommand_word(&argv(&["-f", "/tmp/x", "."]), "tool"), None);
         assert_eq!(subcommand_word(&argv(&["Build"]), "tool"), None);
         assert_eq!(subcommand_word(&[], "tool"), None);
@@ -142,14 +154,32 @@ mod tests {
     /// binary passes a dotted token over as a file name.
     #[test]
     fn mix_subcommand_keeps_dots() {
-        assert_eq!(subcommand_word(&argv(&["shop.sync"]), "mix"), Some("shop.sync"));
-        assert_eq!(subcommand_word(&argv(&["ecto.gen.repo", "-r", "Repo"]), "mix"), Some("ecto.gen.repo"));
-        assert_eq!(subcommand_word(&argv(&["--no-deps-check", "phx.server"]), "mix"), Some("phx.server"));
-        assert_eq!(subcommand_word(&argv(&["test", "test/a_test.exs"]), "mix"), Some("test"));
+        assert_eq!(
+            subcommand_word(&argv(&["shop.sync"]), "mix"),
+            Some("shop.sync")
+        );
+        assert_eq!(
+            subcommand_word(&argv(&["ecto.gen.repo", "-r", "Repo"]), "mix"),
+            Some("ecto.gen.repo")
+        );
+        assert_eq!(
+            subcommand_word(&argv(&["--no-deps-check", "phx.server"]), "mix"),
+            Some("phx.server")
+        );
+        assert_eq!(
+            subcommand_word(&argv(&["test", "test/a_test.exs"]), "mix"),
+            Some("test")
+        );
         assert_eq!(subcommand_word(&argv(&["shop.sync"]), "tool"), None);
-        assert_eq!(subcommand_word(&argv(&["x.yaml", "apply"]), "kubectl"), Some("apply"));
+        assert_eq!(
+            subcommand_word(&argv(&["x.yaml", "apply"]), "kubectl"),
+            Some("apply")
+        );
         // `.` widens only the tail: a word still starts lower-case or a digit.
-        assert_eq!(subcommand_word(&argv(&[".hidden", "Shop.Sync"]), "mix"), None);
+        assert_eq!(
+            subcommand_word(&argv(&[".hidden", "Shop.Sync"]), "mix"),
+            None
+        );
     }
 
     /// DH.10: `mix shop.sync` pairs, Weak, with the Mix task `cli:shop.sync`
@@ -169,13 +199,29 @@ mod tests {
             let inv = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_INVOCATION, &qname);
             nav.record(inv, bin, &qname, node_kind::CLI_INVOCATION, None);
             let cmd = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_COMMAND, "cli:shop.sync");
-            nav.record(cmd, "shop.sync", "cli:shop.sync", node_kind::CLI_COMMAND, None);
+            nav.record(
+                cmd,
+                "shop.sync",
+                "cli:shop.sync",
+                node_kind::CLI_COMMAND,
+                None,
+            );
             let argvs = [argv(&["shop.sync"])];
             let graph = RepoGraph {
                 repo,
                 nodes: vec![
-                    Node { id: inv, repo, confidence: Confidence::Medium, cells: vec![argv_cell(bin, &argvs)] },
-                    Node { id: cmd, repo, confidence: Confidence::Strong, cells: vec![] },
+                    Node {
+                        id: inv,
+                        repo,
+                        confidence: Confidence::Medium,
+                        cells: vec![argv_cell(bin, &argvs)],
+                    },
+                    Node {
+                        id: cmd,
+                        repo,
+                        confidence: Confidence::Strong,
+                        cells: vec![],
+                    },
                 ],
                 edges: vec![],
                 nav,
@@ -209,16 +255,48 @@ mod tests {
 
         let repo = RepoId::from_canonical("test://cli/colon");
         let mut nav = CodeNav::default();
-        let inv = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_INVOCATION, "cli_invoke:php");
-        nav.record(inv, "php", "cli_invoke:php", node_kind::CLI_INVOCATION, None);
-        let cmd = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_COMMAND, "cli:app:sync-orders");
-        nav.record(cmd, "app:sync-orders", "cli:app:sync-orders", node_kind::CLI_COMMAND, None);
+        let inv = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CLI_INVOCATION,
+            "cli_invoke:php",
+        );
+        nav.record(
+            inv,
+            "php",
+            "cli_invoke:php",
+            node_kind::CLI_INVOCATION,
+            None,
+        );
+        let cmd = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CLI_COMMAND,
+            "cli:app:sync-orders",
+        );
+        nav.record(
+            cmd,
+            "app:sync-orders",
+            "cli:app:sync-orders",
+            node_kind::CLI_COMMAND,
+            None,
+        );
         let argvs = [argv(&["bin/console", "app:sync-orders"])];
         let graph = RepoGraph {
             repo,
             nodes: vec![
-                Node { id: inv, repo, confidence: Confidence::Medium, cells: vec![argv_cell("php", &argvs)] },
-                Node { id: cmd, repo, confidence: Confidence::Strong, cells: vec![] },
+                Node {
+                    id: inv,
+                    repo,
+                    confidence: Confidence::Medium,
+                    cells: vec![argv_cell("php", &argvs)],
+                },
+                Node {
+                    id: cmd,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
             ],
             edges: vec![],
             nav,
@@ -236,7 +314,13 @@ mod tests {
             .map(|e| (e.from, e.to, e.confidence))
             .collect();
         assert_eq!(edges, vec![(inv, cmd, Confidence::Weak)]);
-        assert_eq!(subcommand_word(&argv(&["bin/console", "app:sync-orders"]), "php"), Some("app:sync-orders"));
-        assert_eq!(subcommand_word(&argv(&["emails:send", "--queue"]), "php"), Some("emails:send"));
+        assert_eq!(
+            subcommand_word(&argv(&["bin/console", "app:sync-orders"]), "php"),
+            Some("app:sync-orders")
+        );
+        assert_eq!(
+            subcommand_word(&argv(&["emails:send", "--queue"]), "php"),
+            Some("emails:send")
+        );
     }
 }

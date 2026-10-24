@@ -17,11 +17,11 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use regex::Regex;
 use glia_activation::plan::{ActivatedView, SynthCell, SynthHook};
 use glia_code_domain::node_kind;
 use glia_core::{NodeId, NodeKindId};
 use glia_graph::RepoGraph;
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::driver_utils::{
@@ -162,7 +162,10 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
         eprintln!("[keysym] dotted-attr issue tokens: {:?}", dot_attrs);
         eprintln!("[keysym] issue anchor tokens: {:?}", issue_anchors);
         eprintln!("[keysym] issue file stems: {:?}", issue_file_stems);
-        eprintln!("[keysym] class seeds (with mention counts): {:?}", class_seed_counts);
+        eprintln!(
+            "[keysym] class seeds (with mention counts): {:?}",
+            class_seed_counts
+        );
         eprintln!("[keysym] test_patch attr facts: {:?}", test_attr_facts);
 
         let chain_depths = &self.chain_depths;
@@ -171,17 +174,21 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
 
         // G3-lazy: drop CLASS — class body dumps duplicate already-selected methods.
         // Class-level constants that matter will still enter via PPR ATTRIBUTE scoring.
-        let source_kinds: HashSet<NodeKindId> =
-            [node_kind::METHOD, node_kind::FUNCTION]
-                .into_iter()
-                .collect();
+        let source_kinds: HashSet<NodeKindId> = [node_kind::METHOD, node_kind::FUNCTION]
+            .into_iter()
+            .collect();
 
         // 1. Rank activated METHOD/FUNCTION by (score + dot-attr tail boost + issue-body-match boost).
-        let issue_anchored_set: HashSet<&str> =
-            self.issue_anchored_qnames.iter().map(|s| s.as_str()).collect();
+        let issue_anchored_set: HashSet<&str> = self
+            .issue_anchored_qnames
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         if !issue_anchored_set.is_empty() {
-            eprintln!("[keysym] issue-anchored qnames: {} (anchor_priority_boost=+25.0)",
-                issue_anchored_set.len());
+            eprintln!(
+                "[keysym] issue-anchored qnames: {} (anchor_priority_boost=+25.0)",
+                issue_anchored_set.len()
+            );
         }
         let mut ranked: Vec<(String, f64, &str)> = Vec::new();
         // Track substituted qnames (parent class promoted from an anchored attr)
@@ -276,7 +283,13 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
             };
             ranked.push((
                 qname.clone(),
-                score + tail_boost + body_boost + chain_boost + file_boost + class_boost + attr_boost
+                score
+                    + tail_boost
+                    + body_boost
+                    + chain_boost
+                    + file_boost
+                    + class_boost
+                    + attr_boost
                     + anchor_priority_boost,
                 "activated",
             ));
@@ -289,8 +302,7 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
 
         // 2. Backtick intermediates from top-N A+ cell summaries, suffix-matched
         //    against activated qname list.
-        let activated_qnames: Vec<String> =
-            self.activated.iter().map(|(q, _)| q.clone()).collect();
+        let activated_qnames: Vec<String> = self.activated.iter().map(|(q, _)| q.clone()).collect();
         let aplus_cells: Vec<&SynthCell> = view
             .synth
             .iter()
@@ -298,7 +310,11 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
             .filter(|s| s.key.starts_with(ACCESS_PATH_PREFIX))
             .collect();
         let mut aplus_sorted: Vec<&SynthCell> = aplus_cells.clone();
-        aplus_sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        aplus_sorted.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let top_aplus: Vec<&SynthCell> = aplus_sorted.into_iter().take(self.aplus_scan).collect();
 
         let mut intermediates: Vec<String> = Vec::new();
@@ -365,8 +381,12 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
         // informative (e.g. `Field`, `DateTime`, `List`, `Tuple` for marshmallow).
         let mut inscope_classes: Vec<NodeId> = Vec::new();
         for (qname, _reason, _score) in &selection {
-            let Some(node) = qname_to_node.get(qname.as_str()) else { continue };
-            let Some(&parent) = graph.nav.parent_of.get(&node.id) else { continue };
+            let Some(node) = qname_to_node.get(qname.as_str()) else {
+                continue;
+            };
+            let Some(&parent) = graph.nav.parent_of.get(&node.id) else {
+                continue;
+            };
             if graph.nav.kind_by_id.get(&parent).copied() == Some(node_kind::CLASS)
                 && !inscope_classes.contains(&parent)
             {
@@ -392,8 +412,7 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
         // iter order. resolve_suffix() iterates this Vec and returns the FIRST match,
         // so when multiple qnames have a matching suffix the chain-grounding cell
         // resolution becomes run-dependent. Sort lexicographically.
-        let mut all_qnames: Vec<String> =
-            qname_to_node.keys().map(|s| s.to_string()).collect();
+        let mut all_qnames: Vec<String> = qname_to_node.keys().map(|s| s.to_string()).collect();
         all_qnames.sort();
         // Side map: synthesized source text for attribute-presence cells.
         // ATTRIBUTE nodes carry no CODE cell, so step 4 prefers this when set.
@@ -452,9 +471,7 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
                         if *c == parent_class {
                             continue;
                         }
-                        let has = class_attrs
-                            .get(c)
-                            .map_or(false, |s| s.contains(&attr_name));
+                        let has = class_attrs.get(c).map_or(false, |s| s.contains(&attr_name));
                         let Some(cq) = graph.nav.qname_by_id.get(c).cloned() else {
                             continue;
                         };
@@ -517,7 +534,9 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
                 continue;
             };
             let pos_json = extract_position_cell(node);
-            let file = pos_json.and_then(parse_file_field).unwrap_or_else(|| "?".to_string());
+            let file = pos_json
+                .and_then(parse_file_field)
+                .unwrap_or_else(|| "?".to_string());
             // Extract start_line/end_line from POSITION cell JSON
             let (start_line, end_line) = pos_json
                 .map(|j| {
@@ -527,7 +546,10 @@ impl SynthHook<RepoGraph> for KeySymbolsSynth {
                 })
                 .unwrap_or((0, 0));
             let capped = if self.max_chars > 0 && src.len() > self.max_chars {
-                format!("{}\n# ... (truncated)", clip_at_char_boundary(src, self.max_chars))
+                format!(
+                    "{}\n# ... (truncated)",
+                    clip_at_char_boundary(src, self.max_chars)
+                )
             } else {
                 src.to_string()
             };

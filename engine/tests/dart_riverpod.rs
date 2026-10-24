@@ -55,7 +55,9 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn build_in(dir: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), dir);
-    generate_one(&dir.display().to_string()).expect("fixture builds").merged
+    generate_one(&dir.display().to_string())
+        .expect("fixture builds")
+        .merged
 }
 
 fn build() -> (tempfile::TempDir, MergedGraph) {
@@ -87,9 +89,15 @@ fn edges(m: &MergedGraph, category: EdgeCategoryId) -> Vec<Row> {
 
 /// The evidence (emitter, rule) of the one `from -> to` edge in `rows`.
 fn evidence_of(rows: &[Row], from: &str, to: &str) -> (String, Option<String>) {
-    let hits: Vec<&Row> = rows.iter().filter(|(f, t, _)| f == from && t == to).collect();
+    let hits: Vec<&Row> = rows
+        .iter()
+        .filter(|(f, t, _)| f == from && t == to)
+        .collect();
     assert_eq!(hits.len(), 1, "one edge {from} -> {to}: {rows:?}");
-    let ev = hits[0].2.clone().unwrap_or_else(|| panic!("evidence on {from} -> {to}"));
+    let ev = hits[0]
+        .2
+        .clone()
+        .unwrap_or_else(|| panic!("evidence on {from} -> {to}"));
     (ev.emitter, ev.rule)
 }
 
@@ -118,29 +126,64 @@ fn provider_receivers_bind_in_the_declared_type() {
         .collect();
     provider.sort();
     let mut want: Vec<(String, String)> = [
-        (format!("{PAGE}::_submit"), format!("{AUTH}::AuthService::login")),
-        (format!("{PAGE}::_submit"), format!("{FRIEND}::FriendService::accept")),
-        (format!("{FRIEND}::friendsProvider"), format!("{FRIEND}::FriendService::listAll")),
+        (
+            format!("{PAGE}::_submit"),
+            format!("{AUTH}::AuthService::login"),
+        ),
+        (
+            format!("{PAGE}::_submit"),
+            format!("{FRIEND}::FriendService::accept"),
+        ),
+        (
+            format!("{FRIEND}::friendsProvider"),
+            format!("{FRIEND}::FriendService::listAll"),
+        ),
         (format!("{PAGE}::_make"), format!("{GROUP}::create")),
-        (format!("{AUTH}::AuthService::login"), format!("{TOKEN}::write")),
-        (format!("{AUTH}::AuthService::logout"), format!("{TOKEN}::clear")),
-        (format!("{PAGE}::build"), format!("{AUTH}::AuthService::logout")),
+        (
+            format!("{AUTH}::AuthService::login"),
+            format!("{TOKEN}::write"),
+        ),
+        (
+            format!("{AUTH}::AuthService::logout"),
+            format!("{TOKEN}::clear"),
+        ),
+        (
+            format!("{PAGE}::build"),
+            format!("{AUTH}::AuthService::logout"),
+        ),
     ]
     .into_iter()
     .collect();
     want.sort();
     assert_eq!(provider, want);
     assert_eq!(
-        evidence_of(&calls, &format!("{PAGE}::build"), &format!("{AUTH}::AuthState::isAuthenticated")),
+        evidence_of(
+            &calls,
+            &format!("{PAGE}::build"),
+            &format!("{AUTH}::AuthState::isAuthenticated")
+        ),
         ("graph:reads".to_string(), Some("accessor_read".to_string()))
     );
     for to in ["listAll", "leave", "create"] {
-        assert!(!has(&calls, &format!("{PAGE}::_export"), &format!("{GROUP}::{to}")), "_export -> {to}");
+        assert!(
+            !has(
+                &calls,
+                &format!("{PAGE}::_export"),
+                &format!("{GROUP}::{to}")
+            ),
+            "_export -> {to}"
+        );
     }
-    assert!(!has(&calls, &format!("{FRIEND}::friendsProvider"), &format!("{GROUP}::listAll")));
+    assert!(!has(
+        &calls,
+        &format!("{FRIEND}::friendsProvider"),
+        &format!("{GROUP}::listAll")
+    ));
     let uses = edges(&m, edge_category::USES);
     assert!(
-        !uses.iter().any(|(_, t, _)| t == &format!("{FRIEND}::friendServiceProvider")),
+        !uses
+            .iter()
+            .any(|(_, t, _)| t == &format!("{FRIEND}::friendServiceProvider")),
         "a provider read is no USES of its STATE_VAR: {uses:?}"
     );
 }
@@ -153,7 +196,11 @@ fn state_holder_state_is_its_generic_argument() {
     let (_tmp, m) = build();
     let calls = edges(&m, edge_category::CALLS);
     assert_eq!(
-        evidence_of(&calls, &format!("{AUTH}::AuthService::login"), &format!("{AUTH}::AuthState::copyWith")),
+        evidence_of(
+            &calls,
+            &format!("{AUTH}::AuthService::login"),
+            &format!("{AUTH}::AuthState::copyWith")
+        ),
         ("graph:calls".to_string(), Some("receiver_type".to_string()))
     );
 }
@@ -174,7 +221,10 @@ fn a_dio_interceptor_is_a_service() {
         .expect("the interceptor node");
     let kind = g.nav.kind_by_id.get(&id).copied();
     assert_eq!(kind, Some(node_kind::CLASS));
-    assert_eq!(glia_graph::roles::roles_in(kind, &n.cells), vec![node_kind::SERVICE]);
+    assert_eq!(
+        glia_graph::roles::roles_in(kind, &n.cells),
+        vec![node_kind::SERVICE]
+    );
 }
 
 /// dead_symbol is exactly the fixture's true-dead methods: GroupService's
@@ -186,8 +236,12 @@ fn a_dio_interceptor_is_a_service() {
 fn dead_symbol_is_the_look_alikes_and_the_unread() {
     let (_tmp, m) = build();
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let mut rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let mut rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     rows.sort();
     let mut want = vec![
         format!("{GROUP}::leave"),
@@ -197,7 +251,9 @@ fn dead_symbol_is_the_look_alikes_and_the_unread() {
     want.sort();
     assert_eq!(rows, want, "3 of HEAD's 12 rows stay");
     assert!(
-        glia_code_domain::profile::INVOKED_MEMBERS.iter().any(|r| r.framework == "dio"),
+        glia_code_domain::profile::INVOKED_MEMBERS
+            .iter()
+            .any(|r| r.framework == "dio"),
         "DT.5l's dio row keeps the interceptor's override live"
     );
 }
@@ -219,17 +275,33 @@ fn markers_count_providers_and_reads() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, tmp.path())
         .env("GLIA_THREADS", "1")
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let lines = |prefix: &str| -> Vec<String> {
-        stderr.lines().filter(|l| l.starts_with(prefix)).map(String::from).collect()
+        stderr
+            .lines()
+            .filter(|l| l.starts_with(prefix))
+            .map(String::from)
+            .collect()
     };
-    assert_eq!(lines("[dart-scope]"), ["[dart-scope] provider receivers bound=7"]);
+    assert_eq!(
+        lines("[dart-scope]"),
+        ["[dart-scope] provider receivers bound=7"]
+    );
     assert_eq!(
         lines("[reads]"),
         ["[reads] member reads accessor_read=1 tear_off=0 static_member=1 unbound=1"]
@@ -243,7 +315,9 @@ fn markers_count_providers_and_reads() {
         assert!(riverpod.iter().any(|l| l == want), "{want}: {riverpod:?}");
     }
     assert!(
-        !riverpod.iter().any(|l| l.ends_with("file=lib/core/auth_interceptor.dart")),
+        !riverpod
+            .iter()
+            .any(|l| l.ends_with("file=lib/core/auth_interceptor.dart")),
         "{riverpod:?}"
     );
     assert_eq!(

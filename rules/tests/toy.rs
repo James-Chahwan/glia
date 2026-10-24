@@ -46,7 +46,11 @@ const TABLES: DomainTables = DomainTables {
         ],
         cell_types: &[(LABEL, "LABEL")],
     },
-    entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+    entry: EntryRule {
+        kinds: &[],
+        roles: &[],
+        named: &[],
+    },
     carry_edges: &[NEXT_SHOT],
     effect_sinks: &[],
     activation_weights: &[],
@@ -56,7 +60,10 @@ const TABLES: DomainTables = DomainTables {
 };
 
 /// The reel's one attribute column: `index(Node, int)`, a node's place in the reel.
-const ATTRS: &[AttrDecl] = &[AttrDecl { name: "index", ty: ColType::Int }];
+const ATTRS: &[AttrDecl] = &[AttrDecl {
+    name: "index",
+    ty: ColType::Int,
+}];
 
 /// A nameless domain's graph, scanned as plain vectors (12 nodes: no map).
 struct Reel {
@@ -78,17 +85,30 @@ fn word(kind: NodeKindId) -> &'static str {
 
 /// toy-domain's identity scheme: a hash of `<kind word>/<index>`, never displayed.
 fn id(kind: NodeKindId, index: u32) -> NodeId {
-    NodeId::from_parts("toy-reel", RepoId(1), kind, &format!("{}/{index}", word(kind)))
+    NodeId::from_parts(
+        "toy-reel",
+        RepoId(1),
+        kind,
+        &format!("{}/{index}", word(kind)),
+    )
 }
 
 fn reel() -> Reel {
-    let mut r =
-        Reel { nodes: Vec::new(), edges: Vec::new(), tiers: Vec::new(), labels: Vec::new() };
+    let mut r = Reel {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        tiers: Vec::new(),
+        labels: Vec::new(),
+    };
     for (kind, n) in [(SCENE, 2), (SHOT, 6), (OBJECT, 4)] {
         r.nodes.extend((0..n).map(|i| (id(kind, i), kind, i)));
     }
     let mut edge = |from: NodeId, to: NodeId, cat: EdgeCategoryId, tier: Tier| {
-        let conf = if tier == Tier::Fact { Confidence::Strong } else { Confidence::Weak };
+        let conf = if tier == Tier::Fact {
+            Confidence::Strong
+        } else {
+            Confidence::Weak
+        };
         r.edges.push(Edge::new(from, to, cat, conf));
         r.tiers.push(tier);
     };
@@ -103,7 +123,10 @@ fn reel() -> Reel {
         edge(id(SHOT, sh), id(OBJECT, o), FEATURES, Tier::Fact);
     }
     for (o, text) in [(0, "cat"), (3, "lamp")] {
-        let cell = Cell { kind: LABEL, payload: CellPayload::Text(text.into()) };
+        let cell = Cell {
+            kind: LABEL,
+            payload: CellPayload::Text(text.into()),
+        };
         r.labels.push((id(OBJECT, o), vec![cell]));
     }
     r
@@ -129,7 +152,10 @@ impl FactSource for Reel {
     }
 
     fn node_cells(&self, id: NodeId) -> &[Cell] {
-        self.labels.iter().find(|l| l.0 == id).map_or(&[], |l| l.1.as_slice())
+        self.labels
+            .iter()
+            .find(|l| l.0 == id)
+            .map_or(&[], |l| l.1.as_slice())
     }
 
     fn render_node(&self, id: NodeId) -> String {
@@ -178,7 +204,9 @@ fn evaluate(r: &Reel) -> Evaluation<'_, Reel> {
 /// Output `pred`'s rows, rendered, with their tiers.
 fn table(ev: &Evaluation<'_, Reel>, pred: &str) -> Vec<(Vec<String>, Tier)> {
     let rows = ev.rows(pred).unwrap_or_else(|e| panic!("{pred}: {e}"));
-    rows.iter().map(|r| (r.values.iter().map(|v| ev.render(v)).collect(), r.tier)).collect()
+    rows.iter()
+        .map(|r| (r.values.iter().map(|v| ev.render(v)).collect(), r.tier))
+        .collect()
 }
 
 fn row(cols: &[&str], tier: Tier) -> (Vec<String>, Tier) {
@@ -192,45 +220,89 @@ fn shot(i: u32) -> String {
 #[test]
 fn toy_program_rows() {
     let r = reel();
-    assert!(catalog_conflicts(&r).is_empty(), "{:?}", catalog_conflicts(&r));
+    assert!(
+        catalog_conflicts(&r).is_empty(),
+        "{:?}",
+        catalog_conflicts(&r)
+    );
     let ev = evaluate(&r);
     // `later` is read unbound and is an output (magic never rewrites one), so its
     // recursion runs from every NEXT_SHOT edge, which analysis says, and only that.
-    let warned: Vec<_> = ev.warnings().iter().map(|d| (d.severity, d.predicate.clone())).collect();
+    let warned: Vec<_> = ev
+        .warnings()
+        .iter()
+        .map(|d| (d.severity, d.predicate.clone()))
+        .collect();
     assert_eq!(warned, [(Severity::Warning, Some("later/2".to_string()))]);
-    assert!(ev.warnings()[0].message.starts_with("recursive predicate `later/2` is unseeded"));
-    let outputs =
-        ["early/1", "in_scene/2", "labelled/1", "later/2", "shots/2", "to_last/1", "unseen/1"];
+    assert!(
+        ev.warnings()[0]
+            .message
+            .starts_with("recursive predicate `later/2` is unseeded")
+    );
+    let outputs = [
+        "early/1",
+        "in_scene/2",
+        "labelled/1",
+        "later/2",
+        "shots/2",
+        "to_last/1",
+        "unseen/1",
+    ];
     assert_eq!(ev.outputs(), outputs);
 
     // Recursion: every ordered shot pair, HEURISTIC exactly when it crosses shot/2 -> shot/3.
     let mut later = Vec::new();
     for a in 0..6u32 {
         for b in a + 1..6 {
-            let tier = if a <= 2 && b >= 3 { Tier::Heuristic } else { Tier::Fact };
+            let tier = if a <= 2 && b >= 3 {
+                Tier::Heuristic
+            } else {
+                Tier::Fact
+            };
             later.push((vec![shot(a), shot(b)], tier));
         }
     }
     assert_eq!(later.len(), 15);
     assert_eq!(table(&ev, "later"), later);
-    let in_scene = [["object/0", "scene/0"], ["object/1", "scene/0"], ["object/2", "scene/1"]];
-    assert_eq!(table(&ev, "in_scene"), in_scene.map(|c| row(&c, Tier::Fact)));
+    let in_scene = [
+        ["object/0", "scene/0"],
+        ["object/1", "scene/0"],
+        ["object/2", "scene/1"],
+    ];
+    assert_eq!(
+        table(&ev, "in_scene"),
+        in_scene.map(|c| row(&c, Tier::Fact))
+    );
     assert_eq!(
         table(&ev, "shots"),
-        [row(&["scene/0", "3"], Tier::Fact), row(&["scene/1", "3"], Tier::Fact)]
+        [
+            row(&["scene/0", "3"], Tier::Fact),
+            row(&["scene/1", "3"], Tier::Fact)
+        ]
     );
     let early: Vec<_> = (0..3).map(|i| (vec![shot(i)], Tier::Fact)).collect();
     assert_eq!(table(&ev, "early"), early);
     let to_last: Vec<_> = (0..5)
-        .map(|i| (vec![shot(i)], if i <= 2 { Tier::Heuristic } else { Tier::Fact }))
+        .map(|i| {
+            (
+                vec![shot(i)],
+                if i <= 2 { Tier::Heuristic } else { Tier::Fact },
+            )
+        })
         .collect();
     assert_eq!(table(&ev, "to_last"), to_last);
     assert_eq!(
         table(&ev, "labelled"),
-        [row(&["object/0"], Tier::Fact), row(&["object/3"], Tier::Fact)]
+        [
+            row(&["object/0"], Tier::Fact),
+            row(&["object/3"], Tier::Fact)
+        ]
     );
     for pred in outputs.iter().filter(|p| **p != "unseen/1") {
-        assert!(ev.rows(pred).unwrap().iter().all(|r| r.absence.is_empty()), "{pred} has absence");
+        assert!(
+            ev.rows(pred).unwrap().iter().all(|r| r.absence.is_empty()),
+            "{pred} has absence"
+        );
     }
 
     // Negation: the one object no shot features, with the absence it rests on.
@@ -255,7 +327,9 @@ fn toy_witness() {
     assert_eq!(target.tier, Tier::Heuristic);
     let mut limits = ExplainLimits::default();
     limits.max_candidates = 10_000;
-    let w = ev.explain(target, &limits).expect("later(shot/0, shot/5) explains");
+    let w = ev
+        .explain(target, &limits)
+        .expect("later(shot/0, shot/5) explains");
     let head = (w.predicate.as_str(), w.tier, w.height, w.truncated);
     assert_eq!(head, ("later/2", Tier::Heuristic, 5, false));
     let hops: Vec<_> = w
@@ -263,8 +337,17 @@ fn toy_witness() {
         .iter()
         .map(|h| {
             let e = &r.edges[h.ordinal];
-            assert_eq!((e.from, e.to, e.category), (h.from, h.to, h.category), "ordinal is global");
-            (r.render_node(h.from), r.render_node(h.to), h.category, h.tier)
+            assert_eq!(
+                (e.from, e.to, e.category),
+                (h.from, h.to, h.category),
+                "ordinal is global"
+            );
+            (
+                r.render_node(h.from),
+                r.render_node(h.to),
+                h.category,
+                h.tier,
+            )
         })
         .collect();
     let want: Vec<_> = (0..5)
@@ -295,7 +378,10 @@ fn table_keys(manifest: &str, name: &str) -> Vec<String> {
 #[test]
 fn dependency_guard() {
     let manifest = include_str!("../Cargo.toml");
-    assert_eq!(table_keys(manifest, "dependencies"), ["glia-activation", "glia-core"]);
+    assert_eq!(
+        table_keys(manifest, "dependencies"),
+        ["glia-activation", "glia-core"]
+    );
     // No [dev-dependencies], [build-dependencies], [target.*.dependencies] or
     // [dependencies.<crate>] table: nothing else can reach the crate, even in a test.
     let dep_tables: Vec<&str> = manifest
@@ -304,7 +390,10 @@ fn dependency_guard() {
         .filter(|l| l.starts_with('[') && l.contains("dependencies"))
         .collect();
     assert_eq!(dep_tables, ["[dependencies]"]);
-    assert!(!manifest.contains("toy-domain"), "rules/Cargo.toml names toy-domain");
+    assert!(
+        !manifest.contains("toy-domain"),
+        "rules/Cargo.toml names toy-domain"
+    );
 }
 
 #[test]

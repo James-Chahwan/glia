@@ -100,7 +100,11 @@ fn opens_with_heading(markdown: &str, title_slug: &str) -> bool {
     if title_slug.is_empty() {
         return false;
     }
-    let Some(first) = markdown.lines().map(str::trim_start).find(|l| !l.trim().is_empty()) else {
+    let Some(first) = markdown
+        .lines()
+        .map(str::trim_start)
+        .find(|l| !l.trim().is_empty())
+    else {
         return false;
     };
     (first.starts_with("# ") || first.starts_with("## "))
@@ -148,7 +152,8 @@ pub fn record_from_page(p: &Page) -> (DocRecord, usize) {
 }
 
 fn is_source(rec: &DocRecord, source: &SnapshotSource) -> bool {
-    rec.provenance.kind == source.kind && rec.provenance.container.as_deref() == Some(source.container.as_str())
+    rec.provenance.kind == source.kind
+        && rec.provenance.container.as_deref() == Some(source.container.as_str())
 }
 
 fn sort_key(rec: &DocRecord) -> (&'static str, &str, &str) {
@@ -246,11 +251,17 @@ pub fn write_snapshot(
     std::fs::write(&tmp, buf).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, &manifest) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename {} -> {}: {e}", tmp.display(), manifest.display()));
+        return Err(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            manifest.display()
+        ));
     }
 
     if dropped_lines > 0 {
-        eprintln!("[docs] snapshot dropped {dropped_lines} manifest line(s) that did not parse as a DocRecord");
+        eprintln!(
+            "[docs] snapshot dropped {dropped_lines} manifest line(s) that did not parse as a DocRecord"
+        );
     }
     if duplicate_new > 0 {
         eprintln!(
@@ -262,5 +273,11 @@ pub fn write_snapshot(
         "[docs] snapshot source={tag} container={} records={written} kept_other={kept_other} replaced={replaced} redacted={redacted} -> .glia/docs-snapshot/manifest.jsonl",
         source.container
     );
-    Ok(SnapshotWrite { path: manifest, written, kept_other, replaced, dropped_lines })
+    Ok(SnapshotWrite {
+        path: manifest,
+        written,
+        kept_other,
+        replaced,
+        dropped_lines,
+    })
 }

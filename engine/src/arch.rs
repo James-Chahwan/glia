@@ -216,8 +216,13 @@ fn project_root_paths(merged: &MergedGraph) -> Vec<String> {
             if *kind != node_kind::PROJECT {
                 continue;
             }
-            let path = g.nav.qname_by_id.get(id).and_then(|q| q.strip_prefix("project:"));
-            if let Some(p) = path.filter(|p| !p.is_empty() && *p != "." && !hosts.contains_key(*p)) {
+            let path = g
+                .nav
+                .qname_by_id
+                .get(id)
+                .and_then(|q| q.strip_prefix("project:"));
+            if let Some(p) = path.filter(|p| !p.is_empty() && *p != "." && !hosts.contains_key(*p))
+            {
                 roots.insert(p.to_string());
             }
         }
@@ -277,8 +282,10 @@ fn rel_under<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
 /// agree. The rule itself is [`platform_host_owners`].
 fn platform_host_roots(merged: &MergedGraph) -> BTreeMap<String, String> {
     let roots = crate::answers::project_roots(merged);
-    let pairs: Vec<(&str, &str)> =
-        roots.iter().map(|r| (r.path.as_str(), r.ecosystem.as_str())).collect();
+    let pairs: Vec<(&str, &str)> = roots
+        .iter()
+        .map(|r| (r.path.as_str(), r.ecosystem.as_str()))
+        .collect();
     platform_host_owners(&pairs)
 }
 
@@ -307,7 +314,9 @@ pub(crate) fn platform_host_owners(roots: &[(&str, &str)]) -> BTreeMap<String, S
             .iter()
             .filter_map(|o| rel_under(path, o).map(|rest| (*o, rest)))
             .max_by_key(|(o, _)| if *o == "." { 0 } else { o.len() });
-        let Some((owner, rest)) = nearest else { continue };
+        let Some((owner, rest)) = nearest else {
+            continue;
+        };
         let first = rest.split('/').next().unwrap_or(rest);
         if !PLATFORM_HOST_DIRS.contains(&first) {
             continue;
@@ -354,9 +363,15 @@ pub fn service_of(
             let best = roots
                 .iter()
                 .filter(|r| file == r.as_str() || file.starts_with(&format!("{r}/")))
-                .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.as_str().cmp(b.as_str())));
+                .max_by(|a, b| {
+                    a.len()
+                        .cmp(&b.len())
+                        .then_with(|| a.as_str().cmp(b.as_str()))
+                });
             // A file under no declared root is still PLACED, never dropped.
-            let key = best.cloned().unwrap_or_else(|| OUTSIDE_PROJECTS.to_string());
+            let key = best
+                .cloned()
+                .unwrap_or_else(|| OUTSIDE_PROJECTS.to_string());
             prefixed(key, repo, labels)
         }
     }
@@ -622,7 +637,9 @@ pub fn service_map_collapsed(
             .cloned()
             .unwrap_or_else(|| format!("repo{repo}"));
         for n in &g.nodes {
-            let Some(file) = files.get(&n.id) else { continue };
+            let Some(file) = files.get(&n.id) else {
+                continue;
+            };
             let id = service_of(file, repo, keying, repo_labels);
             svc_of.entry(n.id).or_insert_with(|| id.clone());
             let e = acc.entry(id).or_insert_with(|| Acc {
@@ -860,7 +877,10 @@ mod tests {
 
         let go_route = node(vec![cell(
             cell_type::ROUTE_METHOD,
-            CellPayload::Json(r#"{"method":"GET","handler":null,"file":"server/main.go","line":7,"col":1}"#.into()),
+            CellPayload::Json(
+                r#"{"method":"GET","handler":null,"file":"server/main.go","line":7,"col":1}"#
+                    .into(),
+            ),
         )]);
         assert_eq!(node_file(&go_route).as_deref(), Some("server/main.go"));
 
@@ -896,7 +916,10 @@ mod tests {
     fn service_of_project_roots_longest_prefix() {
         let k = ServiceKeying::ProjectRoots(vec!["services".into(), "services/api".into()]);
         let l = labels(1);
-        assert_eq!(service_of("services/api/main.go", 0, &k, &l), "services/api");
+        assert_eq!(
+            service_of("services/api/main.go", 0, &k, &l),
+            "services/api"
+        );
         assert_eq!(service_of("services/other/x.go", 0, &k, &l), "services");
         // No declared root matches → ONE shared bucket, still placed (A8.6):
         // `tools/`, `docs/` and top-level files are not pseudo-services.
@@ -904,9 +927,15 @@ mod tests {
         assert_eq!(service_of("docs/a.md", 0, &k, &l), "(outside projects)");
         assert_eq!(service_of("main.go", 0, &k, &l), "(outside projects)");
         // `servicesX/` is not under `services/` — segment boundary, not prefix.
-        assert_eq!(service_of("servicesX/y.go", 0, &k, &l), "(outside projects)");
+        assert_eq!(
+            service_of("servicesX/y.go", 0, &k, &l),
+            "(outside projects)"
+        );
         // Two merged repos: the bucket is repo-qualified like any other id.
-        assert_eq!(service_of("tools/z.py", 1, &k, &labels(2)), "r1/(outside projects)");
+        assert_eq!(
+            service_of("tools/z.py", 1, &k, &labels(2)),
+            "r1/(outside projects)"
+        );
         assert_eq!(k.name(), "project_roots");
     }
 
@@ -916,7 +945,12 @@ mod tests {
     fn default_keying_reads_project_anchors() {
         use glia_code_domain::project_roots::ProjectRoot;
 
-        let root_only = [ProjectRoot::new(String::new(), "go", "go.mod", Some("m".into()))];
+        let root_only = [ProjectRoot::new(
+            String::new(),
+            "go",
+            "go.mod",
+            Some("m".into()),
+        )];
         let nested = [
             ProjectRoot::new(String::new(), "npm", "package.json", None),
             ProjectRoot::new("services/web".into(), "npm", "package.json", None),
@@ -935,7 +969,11 @@ mod tests {
             ServiceKeying::ProjectRoots(vec!["services/api".into(), "services/web".into()])
         );
         let (idx, unlocated) = file_index(&m);
-        assert_eq!((idx.len(), unlocated), (0, 0), "anchors are neither placed nor unlocated");
+        assert_eq!(
+            (idx.len(), unlocated),
+            (0, 0),
+            "anchors are neither placed nor unlocated"
+        );
 
         let m = MergedGraph::new(vec![graph(&nested, 1), graph(&root_only, 2)]);
         assert_eq!(default_keying(&m), ServiceKeying::PerRepo);
@@ -952,13 +990,33 @@ mod tests {
             MergedGraph::new(vec![crate::walk::build_project_graph(roots, RepoId(1))])
         };
         let stack = [
-            ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", Some("mobile_app".into())),
+            ProjectRoot::new(
+                "mobile".into(),
+                "dart",
+                "pubspec.yaml",
+                Some("mobile_app".into()),
+            ),
             ProjectRoot::new("mobile/android".into(), "gradle", "build.gradle.kts", None),
-            ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle.kts", None),
-            ProjectRoot::new("mobile/linux".into(), "cmake", "CMakeLists.txt", Some("runner".into())),
+            ProjectRoot::new(
+                "mobile/android/app".into(),
+                "gradle",
+                "build.gradle.kts",
+                None,
+            ),
+            ProjectRoot::new(
+                "mobile/linux".into(),
+                "cmake",
+                "CMakeLists.txt",
+                Some("runner".into()),
+            ),
             ProjectRoot::new("tools".into(), "npm", "package.json", Some("tools".into())),
             ProjectRoot::new("tools/plugin".into(), "gradle", "build.gradle", None),
-            ProjectRoot::new("server".into(), "go", "go.mod", Some("example.com/server".into())),
+            ProjectRoot::new(
+                "server".into(),
+                "go",
+                "go.mod",
+                Some("example.com/server".into()),
+            ),
         ];
         let m = graph(&stack);
         let hosts: Vec<(String, String)> = platform_host_roots(&m).into_iter().collect();
@@ -989,7 +1047,12 @@ mod tests {
         ];
         let m = graph(&root_app);
         assert_eq!(platform_host_roots(&m).len(), 2);
-        assert_eq!(platform_host_roots(&m).get("android/app").map(String::as_str), Some("."));
+        assert_eq!(
+            platform_host_roots(&m)
+                .get("android/app")
+                .map(String::as_str),
+            Some(".")
+        );
         assert_eq!(default_keying(&m), ServiceKeying::TopLevelDir);
 
         // A non-shell root between the app and a shell keeps the shell keyed:
@@ -1012,12 +1075,20 @@ mod tests {
         let stack = [
             ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", None),
             ProjectRoot::new("mobile/android".into(), "gradle", "build.gradle.kts", None),
-            ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new(
+                "mobile/android/app".into(),
+                "gradle",
+                "build.gradle.kts",
+                None,
+            ),
             ProjectRoot::new("server".into(), "go", "go.mod", None),
         ];
         let m = MergedGraph::new(vec![crate::walk::build_project_graph(&stack, RepoId(1))]);
-        let reversed: Vec<(&str, &str)> =
-            stack.iter().rev().map(|r| (r.rel_path.as_str(), r.ecosystem)).collect();
+        let reversed: Vec<(&str, &str)> = stack
+            .iter()
+            .rev()
+            .map(|r| (r.rel_path.as_str(), r.ecosystem))
+            .collect();
         assert_eq!(platform_host_owners(&reversed), platform_host_roots(&m));
         assert_eq!(platform_host_owners(&reversed).len(), 2);
         assert!(platform_host_owners(&[]).is_empty());

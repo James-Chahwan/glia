@@ -60,19 +60,33 @@ pub fn parse_program(source_name: &str, text: &str) -> Result<Program, RulesErro
     let mut program = Program::new();
     let source = program.add_source(source_name);
     let tokens = lexer::lex(source, source_name, text)?;
-    let mut p = Parser { tokens: &tokens, pos: 0, predicate: None, open: 0 };
+    let mut p = Parser {
+        tokens: &tokens,
+        pos: 0,
+        predicate: None,
+        open: 0,
+    };
     let mut diags = Vec::new();
     while diags.len() < MAX_DIAGNOSTICS && p.peek().kind != TokenKind::Eof {
         match p.clause() {
             Ok(rule) => program.rules.push(rule),
             Err(fail) => {
                 let pred = p.predicate.as_deref();
-                diags.push(Diagnostic::error(fail.span, source_name, pred, fail.message));
+                diags.push(Diagnostic::error(
+                    fail.span,
+                    source_name,
+                    pred,
+                    fail.message,
+                ));
                 p.recover();
             }
         }
     }
-    if diags.is_empty() { Ok(program) } else { Err(RulesError::Parse(diags)) }
+    if diags.is_empty() {
+        Ok(program)
+    } else {
+        Err(RulesError::Parse(diags))
+    }
 }
 
 /// A syntax error: where it is and what it says; the clause's predicate is added
@@ -86,12 +100,23 @@ type Parsed<T> = Result<T, Failure>;
 
 /// What `peek` returns past the end; unreachable, since the lexer's tokens end `Eof`
 /// and the parser never steps past it.
-static END: Token =
-    Token { kind: TokenKind::Eof, span: Span { source: 0, start: 0, end: 0, line: 0, col: 0 } };
+static END: Token = Token {
+    kind: TokenKind::Eof,
+    span: Span {
+        source: 0,
+        start: 0,
+        end: 0,
+        line: 0,
+        col: 0,
+    },
+};
 
 /// The span from `from`'s start to `to`'s end.
 fn join(from: Span, to: Span) -> Span {
-    Span { end: to.end.max(from.start), ..from }
+    Span {
+        end: to.end.max(from.start),
+        ..from
+    }
 }
 
 /// A token as a "found ..." message names it.
@@ -145,7 +170,9 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_kind(&self, ahead: usize) -> &'a TokenKind {
-        self.tokens.get(self.pos + ahead).map_or(&END.kind, |t| &t.kind)
+        self.tokens
+            .get(self.pos + ahead)
+            .map_or(&END.kind, |t| &t.kind)
     }
 
     /// Consume the next token (never the final `Eof`), tracking bracket depth.
@@ -162,12 +189,19 @@ impl<'a> Parser<'a> {
     }
 
     fn eat(&mut self, kind: &TokenKind) -> Option<&'a Token> {
-        if self.peek().kind == *kind { Some(self.advance()) } else { None }
+        if self.peek().kind == *kind {
+            Some(self.advance())
+        } else {
+            None
+        }
     }
 
     /// An error at the next (unconsumed) token.
     fn fail<T>(&self, message: String) -> Parsed<T> {
-        Err(Failure { span: self.peek().span, message })
+        Err(Failure {
+            span: self.peek().span,
+            message,
+        })
     }
 
     fn found(&self) -> String {
@@ -194,8 +228,9 @@ impl<'a> Parser<'a> {
                     _ => "",
                 };
                 let found = self.found();
-                return self
-                    .fail(format!("expected `.` after the rule for `{sig}`, found {found}{hint}"));
+                return self.fail(format!(
+                    "expected `.` after the rule for `{sig}`, found {found}{hint}"
+                ));
             }
         } else if self.peek().kind == TokenKind::Dot {
             let wild = head.args.iter().find_map(|a| match a {
@@ -203,7 +238,10 @@ impl<'a> Parser<'a> {
                 _ => None,
             });
             if let Some(span) = wild {
-                return Err(Failure { span, message: "a fact may not contain `_`".to_string() });
+                return Err(Failure {
+                    span,
+                    message: "a fact may not contain `_`".to_string(),
+                });
             }
         } else {
             let hint = match self.peek().kind {
@@ -211,11 +249,16 @@ impl<'a> Parser<'a> {
                 _ => "",
             };
             let found = self.found();
-            return self
-                .fail(format!("expected `:-` or `.` after the head `{sig}`, found {found}{hint}"));
+            return self.fail(format!(
+                "expected `:-` or `.` after the head `{sig}`, found {found}{hint}"
+            ));
         }
         let dot = self.advance();
-        Ok(Rule { span: join(head.span, dot.span), head, body })
+        Ok(Rule {
+            span: join(head.span, dot.span),
+            head,
+            body,
+        })
     }
 
     fn head(&mut self) -> Parsed<Head> {
@@ -273,7 +316,11 @@ impl<'a> Parser<'a> {
             self.advance();
             self.advance();
             let (vars, close) = self.list(false, Self::agg_var)?;
-            return Ok(HeadArg::Agg(Aggregate { op, vars, span: join(tok.span, close) }));
+            return Ok(HeadArg::Agg(Aggregate {
+                op,
+                vars,
+                span: join(tok.span, close),
+            }));
         }
         self.term().map(HeadArg::Term)
     }
@@ -304,7 +351,10 @@ impl<'a> Parser<'a> {
             (TokenKind::Ident(_) | TokenKind::Str(_) | TokenKind::Int(_) | TokenKind::Minus, _) => {
                 self.comparison().map(Literal::Cmp)
             }
-            (other, _) => self.fail(format!("expected a body literal, found {}", describe(other))),
+            (other, _) => self.fail(format!(
+                "expected a body literal, found {}",
+                describe(other)
+            )),
         }
     }
 
@@ -314,11 +364,16 @@ impl<'a> Parser<'a> {
         let pred = match (&tok.kind, negation) {
             (TokenKind::Ident(name), _) if name != "_" => name,
             (other, Some(neg)) => {
-                return self
-                    .fail(format!("expected an atom after `{neg}`, found {}", describe(other)));
+                return self.fail(format!(
+                    "expected an atom after `{neg}`, found {}",
+                    describe(other)
+                ));
             }
             (other, None) => {
-                return self.fail(format!("expected a predicate name, found {}", describe(other)));
+                return self.fail(format!(
+                    "expected a predicate name, found {}",
+                    describe(other)
+                ));
             }
         };
         if *self.peek_kind(1) != TokenKind::LParen {
@@ -335,7 +390,11 @@ impl<'a> Parser<'a> {
         self.advance();
         self.advance();
         let (args, close) = self.list(true, Self::term)?;
-        Ok(Atom { pred: pred.clone(), args, span: join(tok.span, close) })
+        Ok(Atom {
+            pred: pred.clone(),
+            args,
+            span: join(tok.span, close),
+        })
     }
 
     fn comparison(&mut self) -> Parsed<Comparison> {
@@ -369,7 +428,12 @@ impl<'a> Parser<'a> {
         };
         self.advance();
         let right = self.term()?;
-        Ok(Comparison { op, span: join(left.span(), right.span()), left, right })
+        Ok(Comparison {
+            op,
+            span: join(left.span(), right.span()),
+            left,
+            right,
+        })
     }
 
     fn term(&mut self) -> Parsed<Term> {
@@ -379,27 +443,41 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(name) if *self.peek_kind(1) == TokenKind::LParen => {
                 return match aggop(name) {
                     Some(op) => self.fail(head_only(op)),
-                    None => {
-                        self.fail(format!("expected a term, found `{name}(`; atoms do not nest"))
-                    }
+                    None => self.fail(format!(
+                        "expected a term, found `{name}(`; atoms do not nest"
+                    )),
                 };
             }
             TokenKind::Ident(name) if name == "_" => Term::Wild(span),
-            TokenKind::Ident(name) => Term::Var { name: name.clone(), span },
-            TokenKind::Str(value) => Term::Str { value: value.clone(), span },
-            TokenKind::Int(value) => Term::Int { value: *value, span },
+            TokenKind::Ident(name) => Term::Var {
+                name: name.clone(),
+                span,
+            },
+            TokenKind::Str(value) => Term::Str {
+                value: value.clone(),
+                span,
+            },
+            TokenKind::Int(value) => Term::Int {
+                value: *value,
+                span,
+            },
             TokenKind::Minus => {
                 self.advance();
                 let next = self.peek();
                 let TokenKind::Int(value) = next.kind else {
-                    return self
-                        .fail(format!("expected an integer after `-`, found {}", self.found()));
+                    return self.fail(format!(
+                        "expected an integer after `-`, found {}",
+                        self.found()
+                    ));
                 };
                 self.advance();
                 let span = join(span, next.span);
                 return match value.checked_neg() {
                     Some(value) => Ok(Term::Int { value, span }),
-                    None => Err(Failure { span, message: "integer out of range".to_string() }),
+                    None => Err(Failure {
+                        span,
+                        message: "integer out of range".to_string(),
+                    }),
                 };
             }
             other => return self.fail(format!("expected a term, found {}", describe(other))),
@@ -467,16 +545,26 @@ mod tests {
     }
 
     fn slice(text: &str, span: Span) -> &str {
-        text.get(span.start as usize..span.end as usize).unwrap_or("<not a char boundary>")
+        text.get(span.start as usize..span.end as usize)
+            .unwrap_or("<not a char boundary>")
     }
 
     fn strip_term(t: &Term) -> Term {
         let span = Span::default();
         match t {
-            Term::Var { name, .. } => Term::Var { name: name.clone(), span },
+            Term::Var { name, .. } => Term::Var {
+                name: name.clone(),
+                span,
+            },
             Term::Wild(_) => Term::Wild(span),
-            Term::Str { value, .. } => Term::Str { value: value.clone(), span },
-            Term::Int { value, .. } => Term::Int { value: *value, span },
+            Term::Str { value, .. } => Term::Str {
+                value: value.clone(),
+                span,
+            },
+            Term::Int { value, .. } => Term::Int {
+                value: *value,
+                span,
+            },
         }
     }
 
@@ -503,9 +591,11 @@ mod tests {
                         .iter()
                         .map(|a| match a {
                             HeadArg::Term(t) => HeadArg::Term(strip_term(t)),
-                            HeadArg::Agg(g) => {
-                                HeadArg::Agg(Aggregate { op: g.op, vars: g.vars.clone(), span })
-                            }
+                            HeadArg::Agg(g) => HeadArg::Agg(Aggregate {
+                                op: g.op,
+                                vars: g.vars.clone(),
+                                span,
+                            }),
                         })
                         .collect(),
                     span,
@@ -527,7 +617,10 @@ mod tests {
                 span,
             })
             .collect();
-        Program { sources: p.sources.clone(), rules }
+        Program {
+            sources: p.sources.clone(),
+            rules,
+        }
     }
 
     const EVERY: &str = r#"// every construct, one per clause
@@ -570,7 +663,10 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
             .body
             .iter()
             .filter_map(|l| match l {
-                Literal::Cmp(Comparison { right: Term::Int { value, .. }, .. }) => Some(*value),
+                Literal::Cmp(Comparison {
+                    right: Term::Int { value, .. },
+                    ..
+                }) => Some(*value),
                 _ => None,
             })
             .collect();
@@ -608,7 +704,10 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
 
         // No clause at all is an empty program that still names its source.
         let empty = parse_program("check", "  // nothing\n/* here */").unwrap();
-        assert_eq!((empty.sources.clone(), empty.rules.len()), (vec!["check".to_string()], 0));
+        assert_eq!(
+            (empty.sources.clone(), empty.rules.len()),
+            (vec!["check".to_string()], 0)
+        );
     }
 
     #[test]
@@ -623,7 +722,11 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
             let first = parse(text);
             let rendered = first.to_string();
             let second = parse(&rendered);
-            assert_eq!(strip(&second), strip(&first), "round trip of {text:?} via {rendered:?}");
+            assert_eq!(
+                strip(&second),
+                strip(&first),
+                "round trip of {text:?} via {rendered:?}"
+            );
             assert_eq!(second.to_string(), rendered);
         }
     }
@@ -634,47 +737,79 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
                     f(y, count(x)) :- e(x, y).\nok() :- f(1, 2).\nok :- ok().\n";
         let p = parse(text);
         let r = &p.rules[1];
-        let Literal::Pos(edge) = &r.body[0] else { panic!("{:?}", r.body[0]) };
-        assert_eq!((edge.pred.as_str(), edge.span.line, edge.span.col), ("edge", 3, 9));
+        let Literal::Pos(edge) = &r.body[0] else {
+            panic!("{:?}", r.body[0])
+        };
+        assert_eq!(
+            (edge.pred.as_str(), edge.span.line, edge.span.col),
+            ("edge", 3, 9)
+        );
         assert_eq!(slice(text, edge.span), "edge(y, _, \"CALLS\")");
         assert_eq!((edge.args[1].span().line, edge.args[1].span().col), (3, 17));
         assert_eq!(slice(text, edge.args[2].span()), "\"CALLS\"");
-        let Literal::Cmp(cmp) = &r.body[1] else { panic!("{:?}", r.body[1]) };
+        let Literal::Cmp(cmp) = &r.body[1] else {
+            panic!("{:?}", r.body[1])
+        };
         assert_eq!(slice(text, cmp.span), "y != -3");
         assert_eq!(slice(text, cmp.right.span()), "-3");
         assert_eq!((cmp.span.line, cmp.span.col), (3, 30));
         assert_eq!(slice(text, r.head.span), "r(y)");
-        assert_eq!(slice(text, r.span), "r(y) :- edge(y, _, \"CALLS\"), y != -3.");
-        let HeadArg::Agg(count) = &p.rules[2].head.args[1] else { panic!("{:?}", p.rules[2].head) };
-        assert_eq!((slice(text, count.span), count.span.line, count.span.col), ("count(x)", 4, 6));
+        assert_eq!(
+            slice(text, r.span),
+            "r(y) :- edge(y, _, \"CALLS\"), y != -3."
+        );
+        let HeadArg::Agg(count) = &p.rules[2].head.args[1] else {
+            panic!("{:?}", p.rules[2].head)
+        };
+        assert_eq!(
+            (slice(text, count.span), count.span.line, count.span.col),
+            ("count(x)", 4, 6)
+        );
         assert_eq!(slice(text, p.rules[3].head.span), "ok()");
         assert_eq!(slice(text, p.rules[4].head.span), "ok");
         assert_eq!(slice(text, p.rules[4].span), "ok :- ok().");
-        assert!(p.rules.iter().all(|r| r.span.source == 0 && r.head.span.source == 0));
+        assert!(
+            p.rules
+                .iter()
+                .all(|r| r.span.source == 0 && r.head.span.source == 0)
+        );
     }
 
     #[test]
     fn errors_name_line_col_and_predicate() {
-        let err =
-            parse_program("rules", "v(x) :- node(x, \"ROUTE\")\nw(y) :- edge(y, _, \"CALLS\").")
-                .unwrap_err();
+        let err = parse_program(
+            "rules",
+            "v(x) :- node(x, \"ROUTE\")\nw(y) :- edge(y, _, \"CALLS\").",
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "rules:2:1: error: expected `.` after the rule for `v/1`, found `w` (in the rule for `v/1`)"
         );
-        let [d] = err.diagnostics() else { panic!("{err}") };
-        assert_eq!((d.span.line, d.span.col, d.predicate.as_deref()), (2, 1, Some("v/1")));
+        let [d] = err.diagnostics() else {
+            panic!("{err}")
+        };
+        assert_eq!(
+            (d.span.line, d.span.col, d.predicate.as_deref()),
+            (2, 1, Some("v/1"))
+        );
         assert!(matches!(err, RulesError::Parse(_)));
 
         // Before the head is read there is no predicate to name.
-        assert_eq!(errors("v(x, ) :- p(x)."), ["rules:1:6: error: expected a term, found `)`"]);
+        assert_eq!(
+            errors("v(x, ) :- p(x)."),
+            ["rules:1:6: error: expected a term, found `)`"]
+        );
         assert_eq!(
             errors("v(x) :- p(x)"),
             [
                 "rules:1:13: error: expected `.` after the rule for `v/1`, found end of input (in the rule for `v/1`)"
             ]
         );
-        assert_eq!(errors("\"v\"(x)."), ["rules:1:1: error: expected a rule head, found `\"v\"`"]);
+        assert_eq!(
+            errors("\"v\"(x)."),
+            ["rules:1:1: error: expected a rule head, found `\"v\"`"]
+        );
         // The source name is the caller's; a lexical error comes back as lex gives it.
         let check = parse_program("check", "ok.\np(\"abc).").unwrap_err();
         assert_eq!(check, lexer::lex(0, "check", "ok.\np(\"abc).").unwrap_err());
@@ -761,7 +896,10 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
             ]
         );
         // With the space it is a comparison.
-        assert_eq!(parse("v(a) :- p(a), a < -1.").to_string(), "v(a) :- p(a), a < -1.\n");
+        assert_eq!(
+            parse("v(a) :- p(a), a < -1.").to_string(),
+            "v(a) :- p(a), a < -1.\n"
+        );
     }
 
     #[test]
@@ -769,7 +907,11 @@ t(Route) :- r(Route), not(Route), "a\tb" = "q\"".
         let errs = errors(&"v(x) :- count(x).\n".repeat(30));
         assert_eq!(errs.len(), MAX_DIAGNOSTICS);
         assert_eq!(errs.len(), 20);
-        assert!(errs[19].starts_with("rules:20:9: error: an aggregate (count)"), "{}", errs[19]);
+        assert!(
+            errs[19].starts_with("rules:20:9: error: an aggregate (count)"),
+            "{}",
+            errs[19]
+        );
     }
 
     #[test]

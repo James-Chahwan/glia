@@ -141,7 +141,10 @@ pub fn read_workspace(path: &Path) -> Result<Vec<MergeMember>, String> {
     let bytes = std::fs::read(path).map_err(|e| fail(&e))?;
     let ws: Workspace = serde_json::from_slice(&bytes).map_err(|e| fail(&e))?;
     if ws.version != 1 {
-        return Err(fail(&format!("unsupported version {} (this build reads 1)", ws.version)));
+        return Err(fail(&format!(
+            "unsupported version {} (this build reads 1)",
+            ws.version
+        )));
     }
     let base = path.parent().unwrap_or(Path::new("."));
     let mut out = Vec::with_capacity(ws.members.len());
@@ -164,8 +167,14 @@ pub fn read_workspace(path: &Path) -> Result<Vec<MergeMember>, String> {
         }
         let p = base.join(&value);
         out.push(match key {
-            "gmap" => MergeMember::Gmap { name: m.name, dir: p },
-            _ => MergeMember::Repo { name: m.name, root: p },
+            "gmap" => MergeMember::Gmap {
+                name: m.name,
+                dir: p,
+            },
+            _ => MergeMember::Repo {
+                name: m.name,
+                root: p,
+            },
         });
     }
     check_names(&out).map_err(|e| fail(&e))?;
@@ -207,12 +216,19 @@ fn load_member(m: &MergeMember) -> Result<Loaded, String> {
         MergeMember::Gmap { dir, .. } => {
             let result = load_layout(dir).map_err(|e| fail(&e))?;
             let extras = read_layout_extras(dir).map_err(|e| fail(&e))?;
-            let build_stamp = read_manifest_lenient(dir).map(|l| l.build_stamp).unwrap_or_default();
-            Ok(Loaded { result, extras, build_stamp })
+            let build_stamp = read_manifest_lenient(dir)
+                .map(|l| l.build_stamp)
+                .unwrap_or_default();
+            Ok(Loaded {
+                result,
+                extras,
+                build_stamp,
+            })
         }
         MergeMember::Repo { root, .. } => {
             let dir = default_layout_dir(root);
-            let (result, outcome) = load_or_rebuild(&dir, Some(root), true).map_err(|e| fail(&e))?;
+            let (result, outcome) =
+                load_or_rebuild(&dir, Some(root), true).map_err(|e| fail(&e))?;
             // A rebuilt layout's graph is this build's, whatever the disk holds
             // (`GLIA_NO_PERSIST=1` leaves the old layout in place): its foreign
             // shards, if any, still ride along, and a layout it could not read
@@ -220,11 +236,20 @@ fn load_member(m: &MergeMember) -> Result<Loaded, String> {
             let (extras, build_stamp) = match outcome {
                 LoadOutcome::Fresh => (
                     read_layout_extras(&dir).map_err(|e| fail(&e))?,
-                    read_manifest_lenient(&dir).map(|l| l.build_stamp).unwrap_or_default(),
+                    read_manifest_lenient(&dir)
+                        .map(|l| l.build_stamp)
+                        .unwrap_or_default(),
                 ),
-                _ => (read_layout_extras(&dir).unwrap_or_default(), BUILD_STAMP.to_string()),
+                _ => (
+                    read_layout_extras(&dir).unwrap_or_default(),
+                    BUILD_STAMP.to_string(),
+                ),
             };
-            Ok(Loaded { result, extras, build_stamp })
+            Ok(Loaded {
+                result,
+                extras,
+                build_stamp,
+            })
         }
     }
 }
@@ -290,9 +315,16 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
     let mut stored_labels: Vec<(u64, String)> = Vec::new();
     let mut member_meta = Vec::with_capacity(members.len());
     for (m, l) in members.iter().zip(loaded) {
-        let Loaded { result, extras, build_stamp } = l;
+        let Loaded {
+            result,
+            extras,
+            build_stamp,
+        } = l;
         for id in member_repos(&result) {
-            let root = result.repo_roots.get(&id).filter(|r| Path::new(r.as_str()).is_dir());
+            let root = result
+                .repo_roots
+                .get(&id)
+                .filter(|r| Path::new(r.as_str()).is_dir());
             match (root, result.repo_labels.get(&id)) {
                 (Some(root), _) => label_inputs.push((id, root.clone())),
                 (None, Some(label)) => stored_labels.push((id, label.clone())),
@@ -303,7 +335,11 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
             roots.entry(*id).or_insert_with(|| root.clone());
         }
         parse_errors.extend(result.parse_errors);
-        let MergedGraph { graphs: g, cross_edges, .. } = result.merged;
+        let MergedGraph {
+            graphs: g,
+            cross_edges,
+            ..
+        } = result.merged;
         graphs.extend(g);
         kept.extend(cross_edges.into_iter().filter(|e| !is_recomputed(e)));
         foreign.extend(extras.foreign.into_iter().map(|f| ForeignShard {
@@ -336,9 +372,12 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
     merged.cross_edges.extend(kept);
     merged.sort_cross_edges();
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
-    let gmaps = members.iter().filter(|m| matches!(m, MergeMember::Gmap { .. })).count();
+    let total_edges: usize =
+        merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>() + merged.cross_edges.len();
+    let gmaps = members
+        .iter()
+        .filter(|m| matches!(m, MergeMember::Gmap { .. }))
+        .count();
     eprintln!(
         "[merge] members={} (gmap={gmaps} repo={}) repos={} code_shards={code_shards} \
          foreign_shards={} cross_edges={} kept_member_edges={kept_member_edges} \
@@ -352,7 +391,10 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
     // CA.9: the merge's build line. A member layout is loaded, not walked or
     // parsed (one rebuilt first prints its own lines), and its external cells
     // are already in it, so the line has passes and a total only.
-    eprintln!("{}", BuildTimes::new(owner.len(), &report, None, started.elapsed()).marker());
+    eprintln!(
+        "{}",
+        BuildTimes::new(owner.len(), &report, None, started.elapsed()).marker()
+    );
     Ok(MergeResult {
         result: GenerateResult {
             merged,
@@ -468,7 +510,8 @@ fn caveats_for(members: &[MergeMember], loaded: &[Loaded]) -> Vec<String> {
 /// caller in the marker and the error text.
 pub fn persist_merge(r: &MergeResult, dir: &Path, writer: &str) -> Result<(), String> {
     let started = Instant::now();
-    let fail = |e: &dyn std::fmt::Display| format!("{writer}: persist merge to {}: {e}", dir.display());
+    let fail =
+        |e: &dyn std::fmt::Display| format!("{writer}: persist merge to {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     write_self_ignore(dir).map_err(|e| fail(&e))?;
     let prior = manifest_files(dir);
@@ -476,11 +519,18 @@ pub fn persist_merge(r: &MergeResult, dir: &Path, writer: &str) -> Result<(), St
     let meta = layout_meta(&g.repo_labels, &g.repo_roots, &g.parse_errors, dir);
     let manifest = write_merged_sharded_extras(&g.merged, &meta, &r.foreign, &r.members, dir)
         .map_err(|e| fail(&e))?;
-    let live: BTreeSet<String> =
-        manifest.shards.iter().chain(manifest.cross.as_ref()).map(|e| e.path.clone()).collect();
+    let live: BTreeSet<String> = manifest
+        .shards
+        .iter()
+        .chain(manifest.cross.as_ref())
+        .map(|e| e.path.clone())
+        .collect();
     for stale in prior.difference(&live) {
         if let Err(e) = std::fs::remove_file(dir.join(stale)) {
-            eprintln!("[merge] warning: could not remove {stale} from {}: {e}", dir.display());
+            eprintln!(
+                "[merge] warning: could not remove {stale} from {}: {e}",
+                dir.display()
+            );
         }
     }
     eprintln!(
@@ -504,7 +554,11 @@ fn manifest_files(dir: &Path) -> BTreeSet<String> {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return BTreeSet::new();
     };
-    let shards = v.get("shards").and_then(|s| s.as_array()).into_iter().flatten();
+    let shards = v
+        .get("shards")
+        .and_then(|s| s.as_array())
+        .into_iter()
+        .flatten();
     shards
         .chain(v.get("cross"))
         .filter_map(|e| e.get("path")?.as_str())

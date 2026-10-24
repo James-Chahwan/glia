@@ -181,7 +181,11 @@ pub fn blast_radius_over_with<G: GraphSource + ?Sized>(
     // Deduplicated, first occurrence kept: the walk's start order and the
     // PPR personalisation (uniform over distinct seeds).
     let mut is_seed: HashSet<NodeId> = HashSet::with_capacity(seeds.len());
-    let seeds: Vec<NodeId> = seeds.iter().copied().filter(|s| is_seed.insert(*s)).collect();
+    let seeds: Vec<NodeId> = seeds
+        .iter()
+        .copied()
+        .filter(|s| is_seed.insert(*s))
+        .collect();
 
     // First-reach (depth, reason) per node: a BFS over the carry edges'
     // CSR index (LD.15b), so depth is the shortest carry-path from the
@@ -239,9 +243,13 @@ pub fn blast_radius_over_with<G: GraphSource + ?Sized>(
     view.scores
         .into_iter()
         .filter_map(|(id, score)| {
-            first
-                .get(&id)
-                .map(|&(depth, reason, seed)| BlastHit { id, depth, reason, score, seed })
+            first.get(&id).map(|&(depth, reason, seed)| BlastHit {
+                id,
+                depth,
+                reason,
+                score,
+                seed,
+            })
         })
         .collect()
 }
@@ -257,12 +265,12 @@ fn reach_debug() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use crate::test_support::{flow_graph, repo};
     use crate::types::{RepoGraph, SymbolTable};
     use glia_code_domain::profile::CODE_TABLES;
     use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
     use glia_core::{Confidence, Edge, Node};
+    use std::collections::HashSet;
 
     #[test]
     fn blast_radius_follows_semantic_edges_not_imports() {
@@ -272,7 +280,12 @@ mod tests {
         let x = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::x");
         let y = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::y");
         let z = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "m::z");
-        let mk = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let mk = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let mut nav = CodeNav::default();
         nav.record(x, "x", "m::x", node_kind::FUNCTION, None);
         nav.record(y, "y", "m::y", node_kind::FUNCTION, None);
@@ -281,8 +294,20 @@ mod tests {
             repo: r,
             nodes: vec![mk(x), mk(y), mk(z)],
             edges: vec![
-                Edge { from: x, to: y, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
-                Edge { from: x, to: z, category: edge_category::IMPORTS, confidence: Confidence::Strong, cells: Vec::new() },
+                Edge {
+                    from: x,
+                    to: y,
+                    category: edge_category::CALLS,
+                    confidence: Confidence::Strong,
+                    cells: Vec::new(),
+                },
+                Edge {
+                    from: x,
+                    to: z,
+                    category: edge_category::IMPORTS,
+                    confidence: Confidence::Strong,
+                    cells: Vec::new(),
+                },
             ],
             symbols: SymbolTable::default(),
             nav,
@@ -297,7 +322,11 @@ mod tests {
         assert!(ids.contains(&y), "CALLS target must be in radius");
         assert!(!ids.contains(&z), "IMPORTS target must NOT be in radius");
         let yh = hits.iter().find(|h| h.id == y).unwrap();
-        assert_eq!(yh.reason, edge_category::CALLS, "reason = the reaching edge");
+        assert_eq!(
+            yh.reason,
+            edge_category::CALLS,
+            "reason = the reaching edge"
+        );
         assert_eq!(yh.depth, 1);
     }
 
@@ -312,7 +341,10 @@ mod tests {
         let hits = merged.blast_radius(&[a], Reach::Forward, 5, &CODE_TABLES);
         let ids: Vec<NodeId> = hits.iter().map(|h| h.id).collect();
         assert!(ids.contains(&b) && ids.contains(&c));
-        assert!(!ids.contains(&d), "d is upstream of c, not in forward radius of a");
+        assert!(
+            !ids.contains(&d),
+            "d is upstream of c, not in forward radius of a"
+        );
         // Scores are sorted descending (ranking is real).
         for w in hits.windows(2) {
             assert!(w[0].score >= w[1].score, "hits must be score-sorted");
@@ -333,7 +365,9 @@ mod tests {
     }
 
     fn rows(hits: &[BlastHit]) -> Vec<(NodeId, usize, EdgeCategoryId, u64)> {
-        hits.iter().map(|h| (h.id, h.depth, h.reason, h.score.to_bits())).collect()
+        hits.iter()
+            .map(|h| (h.id, h.depth, h.reason, h.score.to_bits()))
+            .collect()
     }
 
     #[test]
@@ -352,7 +386,11 @@ mod tests {
         let drop_b = DropOne(b);
         let kept = merged.blast_radius_filtered(&[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b]);
         let expected: Vec<BlastHit> = all.iter().filter(|h| h.id != b).cloned().collect();
-        assert_eq!(rows(&kept), rows(&expected), "same rows, same order, b gone");
+        assert_eq!(
+            rows(&kept),
+            rows(&expected),
+            "same rows, same order, b gone"
+        );
     }
 
     #[test]
@@ -363,7 +401,12 @@ mod tests {
         let x = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::x");
         let y = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::y");
         let ghost = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::ghost");
-        let mk = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let mk = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         let call = |from, to| Edge {
             from,
             to,
@@ -400,7 +443,8 @@ mod tests {
         let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
         let (a, b, c, d) = (id("m::a"), id("m::b"), id("m::c"), id("m::d"));
         let facts = |hits: &[BlastHit]| {
-            let mut v: Vec<(NodeId, usize, NodeId)> = hits.iter().map(|h| (h.id, h.depth, h.seed)).collect();
+            let mut v: Vec<(NodeId, usize, NodeId)> =
+                hits.iter().map(|h| (h.id, h.depth, h.seed)).collect();
             v.sort_by_key(|t| t.0.0);
             v
         };
@@ -416,7 +460,10 @@ mod tests {
         let again = merged.blast_radius(&[a, a, d, a], Reach::Forward, 4, &CODE_TABLES);
         assert_eq!(rows(&again), rows(&hits), "duplicate seeds are one seed");
         for w in hits.windows(2) {
-            assert!(w[0].score >= w[1].score, "one ranking over the union, score-sorted");
+            assert!(
+                w[0].score >= w[1].score,
+                "one ranking over the union, score-sorted"
+            );
         }
 
         // A seed another seed reaches is never a hit: [a, b] forward is {c},
@@ -440,7 +487,11 @@ mod tests {
         assert_eq!(facts(&hits), sorted(vec![(a, 2, c), (b, 1, c), (d, 1, c)]));
 
         // No seeds, no walk.
-        assert!(merged.blast_radius(&[], Reach::Both, 4, &CODE_TABLES).is_empty());
+        assert!(
+            merged
+                .blast_radius(&[], Reach::Both, 4, &CODE_TABLES)
+                .is_empty()
+        );
     }
 
     /// DD.10: the free fn over a `MergedGraph` is the method, bit for bit,
@@ -452,14 +503,28 @@ mod tests {
         let (b, c) = (id("m::b"), id("m::c"));
         for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
             assert_eq!(
-                rows(&blast_radius_over(&merged, &[c], reach, 4, &CODE_TABLES, &[])),
+                rows(&blast_radius_over(
+                    &merged,
+                    &[c],
+                    reach,
+                    4,
+                    &CODE_TABLES,
+                    &[]
+                )),
                 rows(&merged.blast_radius(&[c], reach, 4, &CODE_TABLES)),
                 "{reach:?}"
             );
         }
         let drop_b = DropOne(b);
         assert_eq!(
-            rows(&blast_radius_over(&merged, &[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
+            rows(&blast_radius_over(
+                &merged,
+                &[c],
+                Reach::Both,
+                4,
+                &CODE_TABLES,
+                &[&drop_b]
+            )),
             rows(&merged.blast_radius_filtered(&[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
         );
     }
@@ -473,19 +538,23 @@ mod tests {
         let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
         let b = id("m::b");
         let bits = |h: &[BlastHit]| -> Vec<(NodeId, usize, u64, NodeId)> {
-            h.iter().map(|x| (x.id, x.depth, x.score.to_bits(), x.seed)).collect()
+            h.iter()
+                .map(|x| (x.id, x.depth, x.score.to_bits(), x.seed))
+                .collect()
         };
         for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
             let plain = blast_radius_over(&merged, &[b], reach, 4, &CODE_TABLES, &[]);
             let cfg = closure_config(&CODE_TABLES, reach);
             let ix = PprIndex::build(&merged.node_ids(), merged.edges(), &cfg);
-            let with = blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&ix));
+            let with =
+                blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&ix));
             assert!(!plain.is_empty(), "{reach:?}");
             assert_eq!(bits(&with), bits(&plain), "{reach:?}");
             let mut other = cfg.clone();
             other.damping = 0.85;
             let wrong = PprIndex::build(&merged.node_ids(), merged.edges(), &other);
-            let fell = blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&wrong));
+            let fell =
+                blast_radius_over_with(&merged, &[b], reach, 4, &CODE_TABLES, &[], Some(&wrong));
             assert_eq!(bits(&fell), bits(&plain), "{reach:?} mismatched index");
         }
     }
@@ -513,7 +582,8 @@ mod tests {
         let merged = MergedGraph::new(vec![flow_graph()]);
         let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
         let (a, b, c, d) = (id("m::a"), id("m::b"), id("m::c"), id("m::d"));
-        let depth_of = |hits: &[BlastHit], n: NodeId| hits.iter().find(|h| h.id == n).map(|h| h.depth);
+        let depth_of =
+            |hits: &[BlastHit], n: NodeId| hits.iter().find(|h| h.id == n).map(|h| h.depth);
 
         let raw = merged.blast_radius(&[a], Reach::Forward, 4, &CODE_TABLES);
         assert_eq!((depth_of(&raw, b), depth_of(&raw, c)), (Some(1), Some(2)));
@@ -522,8 +592,15 @@ mod tests {
         let q = Quotient::new(&merged, &classes);
         let seed = q.rep(a);
         let hits = blast_radius_over(&q, &[seed], Reach::Forward, 4, &CODE_TABLES, &[]);
-        assert_eq!((depth_of(&hits, b), depth_of(&hits, c)), (Some(1), Some(1)), "{hits:?}");
-        assert!(hits.iter().all(|h| h.id != a && h.id != d), "a class-mate is never a hit: {hits:?}");
+        assert_eq!(
+            (depth_of(&hits, b), depth_of(&hits, c)),
+            (Some(1), Some(1)),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter().all(|h| h.id != a && h.id != d),
+            "a class-mate is never a hit: {hits:?}"
+        );
         assert!(hits.iter().all(|h| h.seed == seed), "{hits:?}");
 
         // A filter over the quotient drops a row and keeps the rest in order.

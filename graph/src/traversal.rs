@@ -35,12 +35,7 @@ impl RepoGraph {
 
     /// Node ids reachable from `start` following edges in `follow` up to
     /// `max_depth`. Start node excluded.
-    pub fn bfs(
-        &self,
-        start: NodeId,
-        follow: &[EdgeCategoryId],
-        max_depth: usize,
-    ) -> Vec<NodeId> {
+    pub fn bfs(&self, start: NodeId, follow: &[EdgeCategoryId], max_depth: usize) -> Vec<NodeId> {
         let adj = Adjacency::build(self, &CategorySet::of(follow));
         reach_ids(reach::bfs(&adj, &[start], Walk::Forward, max_depth))
     }
@@ -103,11 +98,7 @@ impl RepoGraph {
 
     /// Count nodes of a given kind.
     pub fn count_of_kind(&self, kind: NodeKindId) -> usize {
-        self.nav
-            .kind_by_id
-            .values()
-            .filter(|k| **k == kind)
-            .count()
+        self.nav.kind_by_id.values().filter(|k| **k == kind).count()
     }
 
     /// Spreading activation (PPR) over this repo's graph.
@@ -169,7 +160,9 @@ fn neighbours_in<'a>(
 
 /// The `[traverse]` fired_on line: one per merged-graph walk (LD.3a).
 fn traverse_marker(op: &str, walk: Walk, seeds: usize, reached: usize, index_nodes: usize) {
-    eprintln!("[traverse] op={op} walk={walk:?} seeds={seeds} reached={reached} index_nodes={index_nodes}");
+    eprintln!(
+        "[traverse] op={op} walk={walk:?} seeds={seeds} reached={reached} index_nodes={index_nodes}"
+    );
 }
 
 /// Nodes in `nodes` order, edges in `edges` order.
@@ -374,8 +367,7 @@ mod tests {
         let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
         let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
         let d = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::d");
-        let absent =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::ghost");
+        let absent = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::ghost");
 
         // a (transitive via b) and d (direct) both reach c. ghost is not in graph.
         let hit = g.reachable_by(c, &[a, d, absent], &[edge_category::CALLS], 5);
@@ -386,7 +378,10 @@ mod tests {
         assert_eq!(hit_swapped, vec![d, a]);
 
         // Empty sources short-circuits.
-        assert!(g.reachable_by(c, &[], &[edge_category::CALLS], 5).is_empty());
+        assert!(
+            g.reachable_by(c, &[], &[edge_category::CALLS], 5)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -410,13 +405,20 @@ mod tests {
         assert_eq!(GraphSource::node_ids(&g), nodes);
         let intra = g.edges.len();
         let mut merged = MergedGraph::new(vec![g, flow_graph()]);
-        let cross = Edge { from: ghost, to: a, ..to_ghost };
+        let cross = Edge {
+            from: ghost,
+            to: a,
+            ..to_ghost
+        };
         merged.cross_edges.push(cross.clone());
         let merged_nodes = GraphSource::node_ids(&merged);
         assert_eq!(merged_nodes.len(), 8);
         assert_eq!(merged_nodes[..4], nodes[..]);
         let edges: Vec<&Edge> = GraphSource::edges(&merged).collect();
         assert_eq!(edges.len(), intra + 3 + 1);
-        assert_eq!(edges.last().map(|e| (e.from, e.to)), Some((cross.from, cross.to)));
+        assert_eq!(
+            edges.last().map(|e| (e.from, e.to)),
+            Some((cross.from, cross.to))
+        );
     }
 }

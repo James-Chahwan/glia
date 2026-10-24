@@ -120,9 +120,7 @@ fn main() {
     let cli = Cli::parse();
     // The global options reach the commands through `common`, set once here
     // before any command runs (the only place that sees `Cli`).
-    common::set_build_options(
-        glia_engine::BuildOptions::default().with_overlay(!cli.no_overlay),
-    );
+    common::set_build_options(glia_engine::BuildOptions::default().with_overlay(!cli.no_overlay));
     let exit = match cli.cmd {
         Cmd::Analyze(a) => cmd::analyze::run(a),
         Cmd::Arch(a) => cmd::arch::run(a),
@@ -166,10 +164,7 @@ mod tests {
         );
         let rendered = Cli::command().render_version();
         let line = rendered.trim_end();
-        let want_prefix = format!(
-            "glia {rel} (build {rel}+p",
-            rel = glia_engine::RELEASE
-        );
+        let want_prefix = format!("glia {rel} (build {rel}+p", rel = glia_engine::RELEASE);
         assert!(line.starts_with(&want_prefix), "--version printed {line:?}");
         let hex = line
             .strip_prefix(&want_prefix)
@@ -178,7 +173,8 @@ mod tests {
         assert_eq!(hex, glia_engine::PARSER_STAMP, "--version printed {line:?}");
         assert_eq!(hex.len(), 16, "--version printed {line:?}");
         assert!(
-            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "--version printed {line:?}"
         );
     }

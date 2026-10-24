@@ -42,8 +42,10 @@ use glia_engine::{GenerateResult, generate_many};
 
 const BILLING_MONEY: &str = "def format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\ndef invoice(cents):\n    return format_cents(cents)\n";
 const SHOP_MONEY: &str = "def format_cents(cents):\n    return \"%.2f EUR\" % (cents / 100)\n\n\ndef checkout(cents):\n    return format_cents(cents)\n\n\ndef main():\n    checkout(100)\n";
-const BILLING_TEST: &str = "from lib.money import invoice\n\n\ndef test_invoice():\n    invoice(100)\n";
-const SHOP_TEST: &str = "from app.money import checkout\n\n\ndef test_checkout():\n    checkout(100)\n";
+const BILLING_TEST: &str =
+    "from lib.money import invoice\n\n\ndef test_invoice():\n    invoice(100)\n";
+const SHOP_TEST: &str =
+    "from app.money import checkout\n\n\ndef test_checkout():\n    checkout(100)\n";
 const BILLING_FMT: &str = "from lib.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00\"\n";
 const SHOP_FMT: &str = "from app.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00 EUR\"\n";
 
@@ -69,7 +71,11 @@ fn snapshot(repo: &Path, dir: &str, fmt: bool) {
             path,
             language: "python".to_string(),
             source_hash: source_hash(&bytes),
-            defs: vec![ScipDefRow { s, line, name: name.to_string() }],
+            defs: vec![ScipDefRow {
+                s,
+                line,
+                name: name.to_string(),
+            }],
             refs: Vec::new(),
         }
     };
@@ -84,7 +90,12 @@ fn snapshot(repo: &Path, dir: &str, fmt: bool) {
         documents.push(doc("tests/test_fmt.py".to_string(), 1, 3, "test_format"));
         symbols.push(symbol(1, "`tests.test_fmt`/test_format()."));
     }
-    let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
     write_scip(repo, meta, &documents, &symbols).expect("write snapshot");
 }
 
@@ -105,7 +116,10 @@ fn repos(fmt_tests: bool) -> tempfile::TempDir {
 }
 
 fn build_paths(roots: &[&Path]) -> GenerateResult {
-    let paths: Vec<String> = roots.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = roots
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap_or_else(|e| panic!("{paths:?} builds: {e}"))
 }
 
@@ -116,13 +130,21 @@ fn build_both(td: &tempfile::TempDir) -> GenerateResult {
 }
 
 fn same_as_edges(r: &GenerateResult) -> usize {
-    r.merged.cross_edges.iter().filter(|e| e.category == edge_category::SAME_AS).count()
+    r.merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count()
 }
 
 /// Options: collapse on with the build's labels (`on`) or off.
 fn args(r: &GenerateResult, on: bool) -> TestsForArgs {
     let mut a = TestsForArgs::default();
-    a.collapse = if on { Collapse::with_labels(&r.repo_labels) } else { Collapse::off() };
+    a.collapse = if on {
+        Collapse::with_labels(&r.repo_labels)
+    } else {
+        Collapse::off()
+    };
     a
 }
 
@@ -136,7 +158,12 @@ fn json<T: serde::Serialize>(v: &T) -> String {
 
 /// The FUNCTION / METHOD rows (the test cases), qnames sorted.
 fn cases(a: &TestsFor) -> Vec<&str> {
-    let mut q: Vec<&str> = a.tests.iter().filter(|t| t.kind != "MODULE").map(|t| t.qname.as_str()).collect();
+    let mut q: Vec<&str> = a
+        .tests
+        .iter()
+        .filter(|t| t.kind != "MODULE")
+        .map(|t| t.qname.as_str())
+        .collect();
     q.sort_unstable();
     q
 }
@@ -163,21 +190,39 @@ fn path_qnames(t: &TestHit) -> Vec<&str> {
 fn shared_copy_finds_other_repo_tests() {
     let td = repos(false);
     let r = build_both(&td);
-    assert!(same_as_edges(&r) > 0, "control: the format_cents copies are one SCIP class");
+    assert!(
+        same_as_edges(&r) > 0,
+        "control: the format_cents copies are one SCIP class"
+    );
 
     let off = answer(&r, &[SEED], &args(&r, false));
-    assert_eq!(cases(&off), [TEST_INVOICE], "HEAD: billing's test only: {off:#?}");
+    assert_eq!(
+        cases(&off),
+        [TEST_INVOICE],
+        "HEAD: billing's test only: {off:#?}"
+    );
     assert!(!json(&off).contains("\"identity\""), "{}", json(&off));
 
-    assert!(TestsForArgs::default().collapse.enabled, "collapse is on by default");
+    assert!(
+        TestsForArgs::default().collapse.enabled,
+        "collapse is on by default"
+    );
     let on = answer(&r, &[SEED], &args(&r, true));
     assert_eq!(cases(&on), [TEST_INVOICE, TEST_CHECKOUT], "{on:#?}");
     assert_eq!(on.seeds, [SEED]);
     assert!(on.untested.is_empty(), "{:?}", on.untested);
 
     let checkout = row(&on, TEST_CHECKOUT);
-    assert_eq!((checkout.tier, checkout.reason, checkout.depth), ("derived", "reaches", 2), "{checkout:#?}");
-    assert_eq!(path_qnames(checkout), ["app::money::checkout", SEED], "through the class onto the seed");
+    assert_eq!(
+        (checkout.tier, checkout.reason, checkout.depth),
+        ("derived", "reaches", 2),
+        "{checkout:#?}"
+    );
+    assert_eq!(
+        path_qnames(checkout),
+        ["app::money::checkout", SEED],
+        "through the class onto the seed"
+    );
     assert_eq!(checkout.path.len(), checkout.depth);
     assert_eq!(checkout.covers, [SEED]);
     assert_eq!(checkout.file.as_deref(), Some("tests/test_money.py"));
@@ -188,7 +233,11 @@ fn shared_copy_finds_other_repo_tests() {
     let invoice = row(&on, TEST_INVOICE);
     let head = row(&off, TEST_INVOICE);
     assert_eq!(json(invoice), json(head));
-    assert!(on.test_files.contains(&"tests/test_money.py".to_string()), "{:?}", on.test_files);
+    assert!(
+        on.test_files.contains(&"tests/test_money.py".to_string()),
+        "{:?}",
+        on.test_files
+    );
 
     // Diff mode walks the same quotient.
     let diff = "--- a/lib/money.py\n+++ b/lib/money.py\n@@ -1,2 +1,2 @@\n def format_cents(cents):\n\
@@ -207,11 +256,19 @@ fn class_seeds_are_one_seed() {
     let r = build_both(&td);
     let both = ["lib::money::format_cents", "app::money::format_cents"];
     let on = answer(&r, &both, &args(&r, true));
-    assert_eq!(on.seeds, ["app::money::format_cents"], "the first by (qname, id) kept");
+    assert_eq!(
+        on.seeds,
+        ["app::money::format_cents"],
+        "the first by (qname, id) kept"
+    );
     assert_eq!(cases(&on), [TEST_INVOICE, TEST_CHECKOUT], "{on:#?}");
     let off = answer(&r, &both, &args(&r, false));
     assert_eq!(off.seeds.len(), 2, "{:?}", off.seeds);
-    assert_eq!(cases(&off), [TEST_INVOICE, TEST_CHECKOUT], "each seed's own test: {off:#?}");
+    assert_eq!(
+        cases(&off),
+        [TEST_INVOICE, TEST_CHECKOUT],
+        "each seed's own test: {off:#?}"
+    );
 }
 
 /// (3) Test rows of one class fold: each repo's `test_format` is one SCIP
@@ -224,7 +281,11 @@ fn test_copies_fold_with_identity() {
     let r = build_both(&td);
 
     let off = answer(&r, &[SEED], &args(&r, false));
-    let off_fmt: Vec<&TestHit> = off.tests.iter().filter(|t| t.qname == TEST_FORMAT).collect();
+    let off_fmt: Vec<&TestHit> = off
+        .tests
+        .iter()
+        .filter(|t| t.qname == TEST_FORMAT)
+        .collect();
     assert_eq!(off_fmt.len(), 1, "HEAD: billing's test_format: {off:#?}");
     assert_eq!(off_fmt[0].file.as_deref(), Some("tests/test_fmt.py"));
     assert!(off_fmt[0].identity.is_none());
@@ -236,13 +297,24 @@ fn test_copies_fold_with_identity() {
     assert_eq!(t.depth, 1, "{t:#?}");
     assert_eq!(t.tier, off_fmt[0].tier, "billing's own best hit: {t:#?}");
     assert_eq!(t.line, off_fmt[0].line, "billing's copy is the one shown");
-    let id = t.identity.as_ref().expect("the class row carries its identity");
+    let id = t
+        .identity
+        .as_ref()
+        .expect("the class row carries its identity");
     assert_eq!(id.tier, "fact");
     assert_eq!(id.rules, ["scip_symbol"]);
     assert!(id.diverged, "the two bodies differ");
-    let also: Vec<(&str, &str)> = id.also_in.iter().map(|a| (a.repo.as_str(), a.qname.as_str())).collect();
+    let also: Vec<(&str, &str)> = id
+        .also_in
+        .iter()
+        .map(|a| (a.repo.as_str(), a.qname.as_str()))
+        .collect();
     assert_eq!(also, [("shop", TEST_FORMAT)]);
-    assert!(json(&on).contains("\"identity\":{\"tier\":\"fact\""), "{}", json(&on));
+    assert!(
+        json(&on).contains("\"identity\":{\"tier\":\"fact\""),
+        "{}",
+        json(&on)
+    );
     // The other repo's tests are found too.
     assert!(cases(&on).contains(&TEST_CHECKOUT), "{on:#?}");
 
@@ -260,13 +332,29 @@ fn test_copies_fold_with_identity() {
     let on = answer(&rev, &[SEED], &args(&rev, true));
     let fmt: Vec<&TestHit> = on.tests.iter().filter(|t| t.qname == TEST_FORMAT).collect();
     assert_eq!(fmt.len(), 1, "folded to one row: {on:#?}");
-    assert_eq!((fmt[0].tier, fmt[0].reason), ("fact", "tests_edge"), "{:#?}", fmt[0]);
+    assert_eq!(
+        (fmt[0].tier, fmt[0].reason),
+        ("fact", "tests_edge"),
+        "{:#?}",
+        fmt[0]
+    );
     assert_eq!(fmt[0].line, off_fmt[0].line);
-    let id = fmt[0].identity.as_ref().expect("the kept row carries the class");
-    let also: Vec<(&str, &str)> = id.also_in.iter().map(|a| (a.repo.as_str(), a.qname.as_str())).collect();
+    let id = fmt[0]
+        .identity
+        .as_ref()
+        .expect("the kept row carries the class");
+    let also: Vec<(&str, &str)> = id
+        .also_in
+        .iter()
+        .map(|a| (a.repo.as_str(), a.qname.as_str()))
+        .collect();
     assert_eq!(also, [("shop", TEST_FORMAT)]);
     let raw = answer(&rev, &[SEED], &args(&rev, false));
-    assert_eq!(raw.tests.iter().filter(|t| t.qname == TEST_FORMAT).count(), 1, "{raw:#?}");
+    assert_eq!(
+        raw.tests.iter().filter(|t| t.qname == TEST_FORMAT).count(),
+        1,
+        "{raw:#?}"
+    );
 }
 
 /// (4) No SAME_AS edge: the default answer is the `Collapse::off()` answer,
@@ -275,8 +363,17 @@ fn test_copies_fold_with_identity() {
 fn class_free_identical() {
     let td = repos(false);
     let billing = build_paths(&[&td.path().join("billing")]);
-    assert_eq!(same_as_edges(&billing), 0, "control: one SCIP repo, no class");
-    for seeds in [&[SEED][..], &["invoice"][..], &[TEST_INVOICE][..], &["no_such_symbol"][..]] {
+    assert_eq!(
+        same_as_edges(&billing),
+        0,
+        "control: one SCIP repo, no class"
+    );
+    for seeds in [
+        &[SEED][..],
+        &["invoice"][..],
+        &[TEST_INVOICE][..],
+        &["no_such_symbol"][..],
+    ] {
         let a = json(&answer(&billing, seeds, &TestsForArgs::default()));
         let b = json(&answer(&billing, seeds, &args(&billing, false)));
         assert_eq!(a, b, "{seeds:?}");

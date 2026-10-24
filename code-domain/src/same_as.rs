@@ -125,7 +125,11 @@ pub const DIVERGED: &str = "diverged";
 
 /// The EVIDENCE `rule` of a SAME_AS edge: `rule`, or `rule/diverged`.
 pub fn evidence_rule(rule: &str, diverged: bool) -> String {
-    if diverged { format!("{rule}/{DIVERGED}") } else { rule.to_string() }
+    if diverged {
+        format!("{rule}/{DIVERGED}")
+    } else {
+        rule.to_string()
+    }
 }
 
 /// The inverse of [`evidence_rule`]: `("message_fqname", true)` for
@@ -145,11 +149,18 @@ pub enum OpShape {
     /// An HTTP operation: `method` ASCII-upper-cased, `path` verbatim (no
     /// parameter fold; a consumer that matches routes folds it itself), and
     /// the ORIGIN `raw_path` when it has one.
-    Http { method: String, path: String, raw_path: Option<String> },
+    Http {
+        method: String,
+        path: String,
+        raw_path: Option<String>,
+    },
     /// A message channel: the ORIGIN `action` (`publish`, `subscribe`, ..)
     /// when present, and the `channel` with its leading and trailing `/`
     /// trimmed, as the key compares it.
-    Channel { action: Option<String>, channel: String },
+    Channel {
+        action: Option<String>,
+        channel: String,
+    },
 }
 
 /// A contract op's identity: its shape and the key text CC.8 prints.
@@ -186,7 +197,10 @@ pub fn contract_op_key(origin: &Value) -> Option<ContractOpKey> {
         Some(a) => format!("{a} {channel}"),
         None => channel.to_string(),
     };
-    let shape = OpShape::Channel { action: action.map(str::to_string), channel: channel.to_string() };
+    let shape = OpShape::Channel {
+        action: action.map(str::to_string),
+        channel: channel.to_string(),
+    };
     Some(ContractOpKey { shape, display })
 }
 
@@ -355,7 +369,11 @@ pub fn scip_identity_key(symbol: &str) -> Option<ScipIdentity> {
 
 /// A decoded SCIP field back in SCIP's encoding: spaces doubled, empty `.`.
 fn scip_field(f: &str) -> String {
-    if f.is_empty() { ".".to_string() } else { f.replace(' ', "  ") }
+    if f.is_empty() {
+        ".".to_string()
+    } else {
+        f.replace(' ', "  ")
+    }
 }
 
 // ---- content digests -------------------------------------------------------
@@ -420,7 +438,11 @@ mod tests {
         assert_eq!(k.display, "GET /users/{id}");
         assert_eq!(
             k.shape,
-            OpShape::Http { method: "GET".into(), path: "/users/{id}".into(), raw_path: None }
+            OpShape::Http {
+                method: "GET".into(),
+                path: "/users/{id}".into(),
+                raw_path: None
+            }
         );
         for source in ["swaggo", "feature_yaml"] {
             let k = contract_op_key(&json!({
@@ -445,11 +467,20 @@ mod tests {
         assert_eq!(k.display, "publish orders");
         assert_eq!(
             k.shape,
-            OpShape::Channel { action: Some("publish".into()), channel: "orders".into() }
+            OpShape::Channel {
+                action: Some("publish".into()),
+                channel: "orders".into()
+            }
         );
-        assert_eq!(display(json!({"provenance": "contract", "channel": "/x/"})).as_deref(), Some("x"));
+        assert_eq!(
+            display(json!({"provenance": "contract", "channel": "/x/"})).as_deref(),
+            Some("x")
+        );
         // key_of's fall-through: a method without a string path is not HTTP.
-        assert_eq!(display(json!({"provenance": "contract", "method": "get"})), None);
+        assert_eq!(
+            display(json!({"provenance": "contract", "method": "get"})),
+            None
+        );
         assert_eq!(
             display(json!({"provenance": "contract", "method": "get", "channel": "c"})).as_deref(),
             Some("c")
@@ -460,7 +491,10 @@ mod tests {
             Some("a c")
         );
         // An action without a channel keys nothing (key_of keeps its qname).
-        assert_eq!(display(json!({"provenance": "contract", "action": "publish"})), None);
+        assert_eq!(
+            display(json!({"provenance": "contract", "action": "publish"})),
+            None
+        );
         assert_eq!(
             display(json!({"provenance": "documentation", "method": "get", "path": "/u"})),
             None
@@ -472,27 +506,48 @@ mod tests {
     #[test]
     fn op_key_json_and_cells() {
         let j = r#"{"provenance":"contract","source":"openapi","method":"delete","path":"/a"}"#;
-        assert_eq!(contract_op_key_json(j).map(|k| k.display).as_deref(), Some("DELETE /a"));
+        assert_eq!(
+            contract_op_key_json(j).map(|k| k.display).as_deref(),
+            Some("DELETE /a")
+        );
         // No `"contract"` string: rejected before parsing (valid or not).
-        assert_eq!(contract_op_key_json(r#"{"provenance":"code","method":"get","path":"/a"}"#), None);
+        assert_eq!(
+            contract_op_key_json(r#"{"provenance":"code","method":"get","path":"/a"}"#),
+            None
+        );
         assert_eq!(contract_op_key_json("not json at all"), None);
-        assert_eq!(contract_op_key_json(r#"{"provenance":"contract", broken"#), None);
+        assert_eq!(
+            contract_op_key_json(r#"{"provenance":"contract", broken"#),
+            None
+        );
         let cells = vec![
             cell(cell_type::CODE, CellPayload::Text("x".into())),
-            cell(cell_type::ORIGIN, CellPayload::Json(r#"{"provenance":"code"}"#.into())),
+            cell(
+                cell_type::ORIGIN,
+                CellPayload::Json(r#"{"provenance":"code"}"#.into()),
+            ),
             cell(cell_type::ORIGIN, CellPayload::Json(j.into())),
         ];
-        assert_eq!(contract_op_key_cells(&cells).map(|k| k.display).as_deref(), Some("DELETE /a"));
+        assert_eq!(
+            contract_op_key_cells(&cells).map(|k| k.display).as_deref(),
+            Some("DELETE /a")
+        );
         assert_eq!(contract_op_key_cells(&cells[..2]), None);
         // A contract ORIGIN on a non-ORIGIN cell is not read.
-        assert_eq!(contract_op_key_cells(&[cell(cell_type::CODE, CellPayload::Json(j.into()))]), None);
+        assert_eq!(
+            contract_op_key_cells(&[cell(cell_type::CODE, CellPayload::Json(j.into()))]),
+            None
+        );
     }
 
     #[test]
     fn s1_ecosystem_table() {
         let pairs = [
             (("npm", "@org/lib"), "package:npm:@org/lib"),
-            (("go", "github.com/org/lib"), "package:gomod:github.com/org/lib"),
+            (
+                ("go", "github.com/org/lib"),
+                "package:gomod:github.com/org/lib",
+            ),
             (("cargo", "my-lib"), "package:cargo:my_lib"),
             (("python", "My_Lib"), "package:pypi:my-lib"),
             (("php", "org/lib"), "package:composer:org/lib"),
@@ -502,18 +557,41 @@ mod tests {
             assert!(p.is_some(), "{eco} {label}");
             assert_eq!(p, dep_identity_key(dep), "{eco} {label} vs {dep}");
         }
-        assert_eq!(project_dep_key("python", "My_Lib").as_deref(), Some("pypi:my-lib"));
-        assert_eq!(project_dep_key("cargo", "my-lib").as_deref(), Some("cargo:my_lib"));
-        for eco in ["maven", "ruby", "dart", "declared", "gradle", "elixir", "dotnet", "swift"] {
+        assert_eq!(
+            project_dep_key("python", "My_Lib").as_deref(),
+            Some("pypi:my-lib")
+        );
+        assert_eq!(
+            project_dep_key("cargo", "my-lib").as_deref(),
+            Some("cargo:my_lib")
+        );
+        for eco in [
+            "maven", "ruby", "dart", "declared", "gradle", "elixir", "dotnet", "swift",
+        ] {
             assert_eq!(project_dep_key(eco, "lib"), None, "{eco}");
         }
         assert_eq!(project_dep_key("npm", ""), None);
-        assert_ne!(dep_identity_key("package:npm:requests"), dep_identity_key("package:pypi:requests"));
+        assert_ne!(
+            dep_identity_key("package:npm:requests"),
+            dep_identity_key("package:pypi:requests")
+        );
         // npm stays case-sensitive; Composer folds case; PEP 503 folds runs.
-        assert_ne!(dep_identity_key("package:npm:React"), dep_identity_key("package:npm:react"));
-        assert_eq!(dep_identity_key("package:composer:Org/Lib").as_deref(), Some("composer:org/lib"));
-        assert_eq!(dep_identity_key("package:pypi:Zope.._-Interface").as_deref(), Some("pypi:zope-interface"));
-        assert_eq!(dep_identity_key("package:rubygems:rails").as_deref(), Some("rubygems:rails"));
+        assert_ne!(
+            dep_identity_key("package:npm:React"),
+            dep_identity_key("package:npm:react")
+        );
+        assert_eq!(
+            dep_identity_key("package:composer:Org/Lib").as_deref(),
+            Some("composer:org/lib")
+        );
+        assert_eq!(
+            dep_identity_key("package:pypi:Zope.._-Interface").as_deref(),
+            Some("pypi:zope-interface")
+        );
+        assert_eq!(
+            dep_identity_key("package:rubygems:rails").as_deref(),
+            Some("rubygems:rails")
+        );
         assert_eq!(dep_identity_key("package:npm:"), None);
         assert_eq!(dep_identity_key("package::x"), None);
         assert_eq!(dep_identity_key("module:npm:x"), None);
@@ -524,7 +602,10 @@ mod tests {
     fn scip_keys() {
         let s = "scip-python python svc 0.1 `svc.repos`/UserRepo#save().";
         let id = scip_identity_key(s).expect("global symbol");
-        assert_eq!(id.key, "scip-python python svc `svc.repos`/UserRepo#save().");
+        assert_eq!(
+            id.key,
+            "scip-python python svc `svc.repos`/UserRepo#save()."
+        );
         assert_eq!(id.version, "0.1");
         assert_eq!(id.package, "svc");
         assert_eq!(id.descriptor, "`svc.repos`/UserRepo#save().");
@@ -533,7 +614,8 @@ mod tests {
         assert_eq!(later.key, id.key);
         assert_ne!(later.version, id.version);
         assert_ne!(
-            scip_identity_key("scip-python python svc 0.1 `svc.repos`/UserRepo#load().").map(|i| i.key),
+            scip_identity_key("scip-python python svc 0.1 `svc.repos`/UserRepo#load().")
+                .map(|i| i.key),
             Some(id.key.clone())
         );
         assert_eq!(scip_identity_key("local 4"), None);
@@ -549,7 +631,14 @@ mod tests {
             scip_identity_key("a b  c p v d.").map(|i| i.key)
         );
         let dots = scip_identity_key("rust-analyzer . . . crate/f().").expect("placeholders");
-        assert_eq!((dots.manager.as_str(), dots.package.as_str(), dots.version.as_str()), ("", "", ""));
+        assert_eq!(
+            (
+                dots.manager.as_str(),
+                dots.package.as_str(),
+                dots.version.as_str()
+            ),
+            ("", "", "")
+        );
         assert_eq!(dots.key, "rust-analyzer . . crate/f().");
         // The descriptor is the verbatim rest, spaces included.
         let sp = scip_identity_key("s m p v `a b`/c.").expect("descriptor with a space");
@@ -573,11 +662,20 @@ mod tests {
         assert_eq!(code_digest(&code(&t39)), None);
         assert_eq!(code_digest(&code(&t40)), Some(xxh64(t40.as_bytes())));
         let span = CodeSpan::of("src/a.rs", 120, t40.as_bytes()).to_payload();
-        assert_eq!(code_digest(&[cell(cell_type::CODE, span)]), code_digest(&code(&t40)));
+        assert_eq!(
+            code_digest(&[cell(cell_type::CODE, span)]),
+            code_digest(&code(&t40))
+        );
         let short = CodeSpan::of("src/a.rs", 0, t39.as_bytes()).to_payload();
         assert_eq!(code_digest(&[cell(cell_type::CODE, short)]), None);
-        assert_eq!(code_digest(&[cell(cell_type::CODE, CellPayload::Bytes(vec![0x02; 64]))]), None);
-        assert_eq!(code_digest(&[cell(cell_type::ORIGIN, CellPayload::Text(t40.clone()))]), None);
+        assert_eq!(
+            code_digest(&[cell(cell_type::CODE, CellPayload::Bytes(vec![0x02; 64]))]),
+            None
+        );
+        assert_eq!(
+            code_digest(&[cell(cell_type::ORIGIN, CellPayload::Text(t40.clone()))]),
+            None
+        );
         assert_eq!(code_digest(&[]), None);
         // The first CODE cell decides, even when a later one is long enough.
         let two = vec![
@@ -591,10 +689,19 @@ mod tests {
             cell(cell_type::CODE, CellPayload::Text(t40.clone())),
             cell(cell_type::SCHEMA_FIELDS, CellPayload::Json(p.into())),
         ];
-        assert_eq!(content_key(node_kind::MESSAGE_TYPE, &message), Some(xxh64(p.as_bytes())));
-        assert_eq!(content_key(node_kind::DOC_SECTION, &message), Some(xxh64(p.as_bytes())));
+        assert_eq!(
+            content_key(node_kind::MESSAGE_TYPE, &message),
+            Some(xxh64(p.as_bytes()))
+        );
+        assert_eq!(
+            content_key(node_kind::DOC_SECTION, &message),
+            Some(xxh64(p.as_bytes()))
+        );
         assert_eq!(content_key(node_kind::MESSAGE_TYPE, &code(&t40)), None);
-        assert_eq!(content_key(node_kind::FUNCTION, &message), Some(xxh64(t40.as_bytes())));
+        assert_eq!(
+            content_key(node_kind::FUNCTION, &message),
+            Some(xxh64(t40.as_bytes()))
+        );
         assert_eq!(content_key(node_kind::FUNCTION, &code(&t39)), None);
     }
 
@@ -606,7 +713,10 @@ mod tests {
                 assert_eq!(split_evidence_rule(&r), (rule, diverged), "{r}");
             }
         }
-        assert_eq!(evidence_rule(RULE_MESSAGE_FQNAME, true), "message_fqname/diverged");
+        assert_eq!(
+            evidence_rule(RULE_MESSAGE_FQNAME, true),
+            "message_fqname/diverged"
+        );
         assert_eq!(evidence_rule(RULE_MESSAGE_FQNAME, false), "message_fqname");
         assert_eq!(split_evidence_rule("diverged"), ("diverged", false));
         assert_eq!(split_evidence_rule("xdiverged"), ("xdiverged", false));
@@ -628,8 +738,14 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), ALL_RULES.len());
         assert_eq!(evidence_rule(RULE_HTTP_MODEL, true), "http_model/diverged");
-        assert_eq!(split_evidence_rule("http_model/diverged"), (RULE_HTTP_MODEL, true));
-        assert_eq!(evidence_rule(RULE_GRAPHQL_MODEL, true), "graphql_model/diverged");
+        assert_eq!(
+            split_evidence_rule("http_model/diverged"),
+            (RULE_HTTP_MODEL, true)
+        );
+        assert_eq!(
+            evidence_rule(RULE_GRAPHQL_MODEL, true),
+            "graphql_model/diverged"
+        );
         assert_eq!(MODEL_RULES, [RULE_HTTP_MODEL, RULE_GRAPHQL_MODEL]);
         assert!(is_identity_emitter("resolver:identity"));
         assert!(is_identity_emitter("resolver:models"));

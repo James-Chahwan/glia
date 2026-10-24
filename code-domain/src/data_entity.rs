@@ -136,7 +136,11 @@ mod tests {
         };
         assert_eq!(table_of(&[cron.clone(), text, doc, blank, broken]), None);
         assert_eq!(
-            table_of(&[cron, table_cell("orders", orm::GORM), table_cell("x", orm::GORM)]),
+            table_of(&[
+                cron,
+                table_cell("orders", orm::GORM),
+                table_cell("x", orm::GORM)
+            ]),
             Some("orders".to_string()),
             "the FIRST cell carrying a table wins"
         );

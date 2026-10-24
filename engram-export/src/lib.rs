@@ -493,24 +493,70 @@ pub fn edge_weight(cat: EdgeCategoryId) -> Option<f32> {
 /// Path segments that introduce a feature/domain: the segment *after* one of
 /// these is the natural feature name. Case-insensitive.
 const CONTAINER_MARKERS: &[&str] = &[
-    "features", "feature", "modules", "pages", "page", "domains", "domain",
-    "services", "service", "controllers", "controller", "handlers", "handler",
-    "guards", "guard", "components", "component", "directives", "directive",
-    "pipes", "pipe", "models", "model", "repositories", "repository", "repos",
-    "routes", "views", "view", "resolvers", "resolver",
+    "features",
+    "feature",
+    "modules",
+    "pages",
+    "page",
+    "domains",
+    "domain",
+    "services",
+    "service",
+    "controllers",
+    "controller",
+    "handlers",
+    "handler",
+    "guards",
+    "guard",
+    "components",
+    "component",
+    "directives",
+    "directive",
+    "pipes",
+    "pipe",
+    "models",
+    "model",
+    "repositories",
+    "repository",
+    "repos",
+    "routes",
+    "views",
+    "view",
+    "resolvers",
+    "resolver",
 ];
 
 /// `<name>.<type>` filename suffixes (Angular/Nest conventions) stripped to
 /// recover the feature stem (`auth.guard` → `auth`, `login.component` → `login`).
 const TYPE_SUFFIXES: &[&str] = &[
-    ".component", ".service", ".guard", ".module", ".page", ".directive",
-    ".pipe", ".controller", ".resolver", ".interceptor", ".model", ".store",
-    ".spec", ".test", ".routes", ".config",
+    ".component",
+    ".service",
+    ".guard",
+    ".module",
+    ".page",
+    ".directive",
+    ".pipe",
+    ".controller",
+    ".resolver",
+    ".interceptor",
+    ".model",
+    ".store",
+    ".spec",
+    ".test",
+    ".routes",
+    ".config",
 ];
 
 /// `<name>_<type>` snake suffixes (Go/Rust conventions).
-const NAME_SUFFIXES: &[&str] =
-    &["_controller", "_service", "_handler", "_repository", "_repo", "_test", "_spec"];
+const NAME_SUFFIXES: &[&str] = &[
+    "_controller",
+    "_service",
+    "_handler",
+    "_repository",
+    "_repo",
+    "_test",
+    "_spec",
+];
 
 /// The natural feature/module key a node belongs to, for engram's concept
 /// routing (G14). `repo::<feature>`, or `None` to let engram fall back to its
@@ -593,7 +639,10 @@ fn endpoint_hit_sites(cells: &[Cell]) -> Vec<(String, u64, u64)> {
             let v: serde_json::Value = serde_json::from_str(j).ok()?;
             let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?;
             let line = v.get("line")?.as_u64()?;
-            let col = v.get("col").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let col = v
+                .get("col")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             Some((file.to_string(), line, col))
         })
         .collect()
@@ -701,7 +750,9 @@ fn build_identity_hints<'a>(
     }
     let mut groups: BTreeMap<(&str, u32), Vec<(HintRank<'a>, NodeId)>> = BTreeMap::new();
     for (file, kind, rank, id) in &members {
-        let token = file_identity.get(file).map_or(file.as_str(), String::as_str);
+        let token = file_identity
+            .get(file)
+            .map_or(file.as_str(), String::as_str);
         groups.entry((token, *kind)).or_default().push((*rank, *id));
     }
     // Lookup only: the output is read by NodeId, never iterated into bytes.
@@ -712,7 +763,13 @@ fn build_identity_hints<'a>(
         for (ordinal, (rank, id)) in v.iter().enumerate() {
             let here = Some((rank.0, rank.1, rank.2));
             let row_tie = (ordinal > 0 && rows(ordinal - 1) == here) || rows(ordinal + 1) == here;
-            out.insert(*id, Hint { text: format!("{token}:{kind}:{ordinal}"), row_tie });
+            out.insert(
+                *id,
+                Hint {
+                    text: format!("{token}:{kind}:{ordinal}"),
+                    row_tie,
+                },
+            );
         }
     }
     out
@@ -746,7 +803,9 @@ pub fn prior_tokens(prior: &Gmap) -> BTreeMap<String, String> {
         };
         let file = match &n.content {
             Content::Symbol { span, .. } => span.file,
-            Content::Proposition { span: Some(span), .. } => span.file,
+            Content::Proposition {
+                span: Some(span), ..
+            } => span.file,
             _ => continue,
         };
         let Some(path) = prior.files.get(&file) else {
@@ -899,7 +958,11 @@ impl SourceLines {
     fn new(bytes: &[u8]) -> SourceLines {
         let starts = line_starts(bytes);
         let lines = line_count(bytes, &starts);
-        SourceLines { starts, len: bytes.len() as u32, lines }
+        SourceLines {
+            starts,
+            len: bytes.len() as u32,
+            lines,
+        }
     }
 }
 
@@ -921,7 +984,11 @@ fn line_starts(bytes: &[u8]) -> Vec<u32> {
 /// empty one, and an empty file still has line 1.
 fn line_count(bytes: &[u8], starts: &[u32]) -> u32 {
     let n = starts.len() as u32;
-    if bytes.last() == Some(&b'\n') { n - 1 } else { n }
+    if bytes.last() == Some(&b'\n') {
+        n - 1
+    } else {
+        n
+    }
 }
 
 /// 1-based, inclusive `(start_line, end_line)` for a POSITION's
@@ -1036,7 +1103,11 @@ fn inheritdoc_base(
         .map(str::to_string);
     via_heritage.or_else(|| {
         let keys = types.get(base)?;
-        if keys.len() == 1 { keys.iter().next().cloned() } else { None }
+        if keys.len() == 1 {
+            keys.iter().next().cloned()
+        } else {
+            None
+        }
     })
 }
 
@@ -1058,9 +1129,16 @@ fn intern_files(
             id_to_path.insert(id, path.clone());
         }
     }
-    let fresh: Vec<&String> = paths.iter().filter(|p| !kept.contains(p.as_str())).collect();
+    let fresh: Vec<&String> = paths
+        .iter()
+        .filter(|p| !kept.contains(p.as_str()))
+        .collect();
     let mut next = id_to_path.keys().next_back().copied().unwrap_or(0);
-    if u32::try_from(fresh.len()).ok().and_then(|n| next.checked_add(n)).is_none() {
+    if u32::try_from(fresh.len())
+        .ok()
+        .and_then(|n| next.checked_add(n))
+        .is_none()
+    {
         return intern_files(paths, None);
     }
     for p in fresh {
@@ -1072,7 +1150,12 @@ fn intern_files(
 
 /// An exported edge's sort key, `(from, kind, to, weight bits)` (DE.2).
 fn edge_order(e: &GmapEdge) -> (&str, EdgeKind, &str, Option<u32>) {
-    (e.from.as_str(), e.kind, e.to.as_str(), e.weight.map(f32::to_bits))
+    (
+        e.from.as_str(),
+        e.kind,
+        e.to.as_str(),
+        e.weight.map(f32::to_bits),
+    )
 }
 
 /// Build an [`engram_core::Gmap`] plus the file-id → path sidecar table from a
@@ -1099,7 +1182,12 @@ pub fn build_gmap_with_nodes(
     merged: &MergedGraph,
     repo_root: &Path,
     opts: &ExportOptions,
-) -> (Gmap, BTreeMap<u32, String>, ExportStats, Vec<Option<NodeId>>) {
+) -> (
+    Gmap,
+    BTreeMap<u32, String>,
+    ExportStats,
+    Vec<Option<NodeId>>,
+) {
     let mut stats = ExportStats::default();
 
     // Pass 1 — intern distinct POSITION file paths to stable, 1-based ids.
@@ -1158,17 +1246,29 @@ pub fn build_gmap_with_nodes(
             } else {
                 position_of(&n.cells).map(|(f, _, _)| f)
             };
-            if filtered(qname, origin_provenance(&n.cells).as_deref(), file.as_deref(), opts)
-                .is_some()
+            if filtered(
+                qname,
+                origin_provenance(&n.cells).as_deref(),
+                file.as_deref(),
+                opts,
+            )
+            .is_some()
             {
                 continue;
             }
-            let rank = (key_rank(n, g.nav.kind_by_id.get(&n.id).copied()), Reverse((gi, ni)));
+            let rank = (
+                key_rank(n, g.nav.kind_by_id.get(&n.id).copied()),
+                Reverse((gi, ni)),
+            );
             let Some(best) = winners.get_mut(qname.as_str()) else {
                 winners.insert(qname.as_str(), rank);
                 continue;
             };
-            let loser = if rank > *best { std::mem::replace(best, rank) } else { rank };
+            let loser = if rank > *best {
+                std::mem::replace(best, rank)
+            } else {
+                rank
+            };
             let runner = runners_up.entry(qname.as_str()).or_insert(loser.0);
             if loser.0 > *runner {
                 *runner = loser.0;
@@ -1237,9 +1337,16 @@ pub fn build_gmap_with_nodes(
                 Some((file, sr, er)) => {
                     let fid = file_id.get(file.as_str()).copied().unwrap_or(0);
                     let src = line_cache.get(file);
-                    let (start, end) = src.map_or((0, 0), |s| byte_range(&s.starts, s.len, *sr, *er));
+                    let (start, end) =
+                        src.map_or((0, 0), |s| byte_range(&s.starts, s.len, *sr, *er));
                     let (start_line, end_line) = line_span(*sr, *er, src.map(|s| s.lines));
-                    SpanRef { file: fid, start, end, start_line, end_line }
+                    SpanRef {
+                        file: fid,
+                        start,
+                        end,
+                        start_line,
+                        end_line,
+                    }
                 }
                 None => SpanRef::NONE,
             };
@@ -1281,7 +1388,10 @@ pub fn build_gmap_with_nodes(
                 (doc, imports_cell(&n.cells))
             };
             if !is_doc && (kind == Some(node_kind::CLASS) || kind == Some(node_kind::INTERFACE)) {
-                exported_types.entry(name.clone()).or_default().insert(qname.clone());
+                exported_types
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(qname.clone());
             }
             let short = natspec.as_ref().map(|_| name.clone());
             let (content, concept_hint) = if is_doc {
@@ -1296,7 +1406,13 @@ pub fn build_gmap_with_nodes(
                 if anchor.is_some() {
                     stats.propositions_anchored += 1;
                 }
-                (Content::Proposition { text: prose, span: anchor }, ch)
+                (
+                    Content::Proposition {
+                        text: prose,
+                        span: anchor,
+                    },
+                    ch,
+                )
             } else {
                 (
                     Content::Symbol {
@@ -1352,7 +1468,10 @@ pub fn build_gmap_with_nodes(
                 stats.identity_hints += usize::from(identity_hint.is_some());
                 nodes.push(GmapNode {
                     key: key.clone(),
-                    content: Content::Proposition { text: f.text, span: anchor },
+                    content: Content::Proposition {
+                        text: f.text,
+                        span: anchor,
+                    },
                     provenance: Some("natspec".to_string()),
                     concept_hint: fact_concept.clone(),
                     identity_hint,
@@ -1479,8 +1598,8 @@ pub fn export_engram_gmap(
 /// leaves the previous meta beside the new gmap; its `gmap_digest` no longer
 /// matches the gmap's digest, which is how a reader tells it is stale.
 pub fn write_engram_gmap(gmap: &Gmap, out_path: &Path) -> io::Result<u64> {
-    let bytes = bincode::serialize(gmap)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let bytes =
+        bincode::serialize(gmap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_atomic(out_path, &bytes)?;
 
     let sidecar: BTreeMap<String, &String> =
@@ -1698,10 +1817,16 @@ mod tests {
             kind: cell_type::DOC,
             payload: CellPayload::Text("Sends the verification email.".into()),
         }];
-        assert_eq!(doc_cell(&cells).as_deref(), Some("Sends the verification email."));
+        assert_eq!(
+            doc_cell(&cells).as_deref(),
+            Some("Sends the verification email.")
+        );
         assert_eq!(doc_cell(&[]), None);
         // License header / TODO skipped.
-        assert_eq!(clean_and_cap_doc("Copyright 2026 Acme. All rights reserved.".into()), None);
+        assert_eq!(
+            clean_and_cap_doc("Copyright 2026 Acme. All rights reserved.".into()),
+            None
+        );
         assert_eq!(clean_and_cap_doc("TODO: fix this later".into()), None);
         // Cap at 500 chars (Python docstrings can be long).
         let long = "a".repeat(800);
@@ -1728,13 +1853,28 @@ mod tests {
         let repo = RepoId(1);
         let (refunds, placing) = (NodeId(30), NodeId(31));
         let mut nav = CodeNav::default();
-        nav.record(refunds, "refunds", "docs::docs::orders::refunds", node_kind::DOC_SECTION, None);
-        nav.record(placing, "placing-orders", "docs::docs::orders::placing-orders", node_kind::DOC_SECTION, None);
+        nav.record(
+            refunds,
+            "refunds",
+            "docs::docs::orders::refunds",
+            node_kind::DOC_SECTION,
+            None,
+        );
+        nav.record(
+            placing,
+            "placing-orders",
+            "docs::docs::orders::placing-orders",
+            node_kind::DOC_SECTION,
+            None,
+        );
         let doc = |id: NodeId, text: &str| Node {
             id,
             repo,
             confidence: Confidence::Strong,
-            cells: vec![Cell { kind: cell_type::CODE, payload: CellPayload::Text(text.to_string()) }],
+            cells: vec![Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text(text.to_string()),
+            }],
         };
         let g = RepoGraph {
             repo,
@@ -1747,7 +1887,8 @@ mod tests {
             properties: Default::default(),
         };
         let merged = MergedGraph::new(vec![g]);
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         assert_eq!(stats.propositions, 2);
         let text = |key: &str| match gmap.nodes.iter().find(|n| n.key == key).map(|n| &n.content) {
             Some(Content::Proposition { text, .. }) => text.clone(),
@@ -1756,7 +1897,10 @@ mod tests {
         let capped = text("docs::docs::orders::refunds");
         assert!(capped.len() <= 500, "{}", capped.len());
         assert_eq!(capped, cap_prose(long));
-        assert!(capped.ends_with("once the card network has settled it."), "{capped:?}");
+        assert!(
+            capped.ends_with("once the card network has settled it."),
+            "{capped:?}"
+        );
         assert!(!capped.contains("OrderService.refund"));
         assert_eq!(text("docs::docs::orders::placing-orders"), short);
     }
@@ -1765,7 +1909,9 @@ mod tests {
     fn concept_hint_structural_examples() {
         // From the handoff §4a table.
         assert_eq!(
-            concept_hint_for("quokka_web::src::app::features::auth::login.component::LoginComponent"),
+            concept_hint_for(
+                "quokka_web::src::app::features::auth::login.component::LoginComponent"
+            ),
             Some("quokka_web::auth".into())
         );
         assert_eq!(
@@ -1852,19 +1998,31 @@ mod tests {
             .find(|n| n.key == "app::User::login")
             .expect("login node present");
         match &login_node.content {
-            Content::Symbol { name, span, qname, .. } => {
+            Content::Symbol {
+                name, span, qname, ..
+            } => {
                 assert_eq!(name, "login"); // short name, not the qname
                 assert_eq!(qname.as_deref(), Some("app::User::login")); // full qname carried (G2)
                 // rows 2..=3 -> bytes [12, 20) and 1-based lines 3..=4 (v6).
                 assert_eq!(
                     *span,
-                    SpanRef { file: 1, start: 12, end: 20, start_line: 3, end_line: 4 }
+                    SpanRef {
+                        file: 1,
+                        start: 12,
+                        end: 20,
+                        start_line: 3,
+                        end_line: 4
+                    }
                 );
             }
             other => panic!("expected Symbol, got {other:?}"),
         }
         // node with no POSITION cell → placeholder span, file id 0.
-        let query_node = gmap.nodes.iter().find(|n| n.key == "app::db::query").unwrap();
+        let query_node = gmap
+            .nodes
+            .iter()
+            .find(|n| n.key == "app::db::query")
+            .unwrap();
         match &query_node.content {
             Content::Symbol { span, .. } => {
                 assert_eq!(*span, SpanRef::NONE)
@@ -1923,7 +2081,10 @@ mod tests {
     /// a later POSITION never overrides the first parseable one.
     #[test]
     fn position_of_takes_first_parseable() {
-        let bad = Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{".into()) };
+        let bad = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json("{".into()),
+        };
         let cells = vec![bad, pos_cell("a.go", 4, 6), pos_cell("b.go", 1, 2)];
         assert_eq!(position_of(&cells), Some(("a.go".to_string(), 4, 6)));
         assert_eq!(position_of(&[]), None);
@@ -1959,9 +2120,24 @@ mod tests {
         let g = RepoGraph {
             repo,
             nodes: vec![
-                Node { id: authored, repo, confidence: Confidence::Strong, cells: vec![] },
-                Node { id: dep, repo, confidence: Confidence::Strong, cells: vec![origin_cell("dependency")] },
-                Node { id: region, repo, confidence: Confidence::Strong, cells: vec![origin_cell("build_output")] },
+                Node {
+                    id: authored,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
+                Node {
+                    id: dep,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![origin_cell("dependency")],
+                },
+                Node {
+                    id: region,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![origin_cell("build_output")],
+                },
             ],
             edges: vec![],
             nav,
@@ -1981,7 +2157,10 @@ mod tests {
         let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
         assert!(keys.contains(&"app::login"), "authored kept: {keys:?}");
         assert!(keys.contains(&"region:www"), "region anchor kept: {keys:?}");
-        assert!(!keys.contains(&"package:npm:react"), "dependency dropped: {keys:?}");
+        assert!(
+            !keys.contains(&"package:npm:react"),
+            "dependency dropped: {keys:?}"
+        );
         assert_eq!(stats.dropped_noise, 1);
 
         // Contract fields populate (G5/G2 + carry-provenance).
@@ -2001,7 +2180,11 @@ mod tests {
     #[test]
     fn include_noise_keeps_everything() {
         let merged = three_node_graph();
-        let opts = ExportOptions { include_noise: true, exclude: vec![], ..Default::default() };
+        let opts = ExportOptions {
+            include_noise: true,
+            exclude: vec![],
+            ..Default::default()
+        };
         let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &opts);
         assert_eq!(gmap.nodes.len(), 3);
         assert_eq!(stats.dropped_noise, 0);
@@ -2015,10 +2198,21 @@ mod tests {
         let repo = RepoId(1);
         let id = NodeId(7);
         let mut nav = CodeNav::default();
-        nav.record(id, "endpoint:GET:/search", "endpoint:GET:/search", node_kind::ENDPOINT, None);
+        nav.record(
+            id,
+            "endpoint:GET:/search",
+            "endpoint:GET:/search",
+            node_kind::ENDPOINT,
+            None,
+        );
         let g = RepoGraph {
             repo,
-            nodes: vec![Node { id, repo, confidence: Confidence::Medium, cells: vec![origin_cell("external")] }],
+            nodes: vec![Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: vec![origin_cell("external")],
+            }],
             edges: vec![],
             nav,
             symbols: Default::default(),
@@ -2027,9 +2221,15 @@ mod tests {
             properties: Default::default(),
         };
         let merged = MergedGraph::new(vec![g]);
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         let ep = gmap.nodes.iter().find(|n| n.key == "endpoint:GET:/search");
-        assert_eq!(ep.and_then(|n| n.provenance.as_deref()), Some("external"), "{:?}", gmap.nodes);
+        assert_eq!(
+            ep.and_then(|n| n.provenance.as_deref()),
+            Some("external"),
+            "{:?}",
+            gmap.nodes
+        );
         assert_eq!(stats.dropped_noise, 0);
     }
 
@@ -2061,7 +2261,13 @@ mod tests {
                 "bench/substrate-gap/fixtures/cs/server/OrdersController.cs",
                 3,
             ),
-            (2, "app::orders::get_order", node_kind::FUNCTION, "app/orders.py", 0),
+            (
+                2,
+                "app::orders::get_order",
+                node_kind::FUNCTION,
+                "app/orders.py",
+                0,
+            ),
         ]);
         merged.cross_edges.push(glia_core::Edge {
             from: NodeId(2),
@@ -2103,14 +2309,20 @@ mod tests {
     fn exclude_path_leaves_unpositioned_and_key_rules_alone() {
         let merged = three_node_graph();
         let root = std::env::temp_dir();
-        let opts = ExportOptions { exclude_paths: vec!["*".to_string()], ..Default::default() };
+        let opts = ExportOptions {
+            exclude_paths: vec!["*".to_string()],
+            ..Default::default()
+        };
         let (gmap, files, stats) = build_gmap(&merged, &root, &opts);
         let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
         assert_eq!(keys, ["app::login", "region:www"]);
         assert_eq!(stats.dropped_excluded_path, 0);
         assert!(files.is_empty());
 
-        let opts = ExportOptions { exclude: vec!["region:*".to_string()], ..opts };
+        let opts = ExportOptions {
+            exclude: vec!["region:*".to_string()],
+            ..opts
+        };
         let (gmap, _, stats) = build_gmap(&merged, &root, &opts);
         let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
         assert_eq!(keys, ["app::login"]);
@@ -2121,7 +2333,10 @@ mod tests {
         let located = located_graph(&[(1, "region:www", node_kind::MODULE, "www/index.html", 0)]);
         let (gmap, _, stats) = build_gmap(&located, &root, &opts);
         assert!(gmap.nodes.is_empty());
-        assert_eq!((stats.dropped_excluded, stats.dropped_excluded_path), (1, 0));
+        assert_eq!(
+            (stats.dropped_excluded, stats.dropped_excluded_path),
+            (1, 0)
+        );
     }
 
     /// One graph of `(id, qname, kind, POSITION file, start row)` rows.
@@ -2157,7 +2372,10 @@ mod tests {
     /// `twin` adds a second interface named `IB`.
     fn inheritdoc_graph(heritage: &[u64], twin: bool) -> MergedGraph {
         let repo = RepoId(1);
-        let tags = |json: &str| Cell { kind: cell_type::DOC_TAGS, payload: CellPayload::Json(json.into()) };
+        let tags = |json: &str| Cell {
+            kind: cell_type::DOC_TAGS,
+            payload: CellPayload::Json(json.into()),
+        };
         type Row<'a> = (u64, &'a str, &'a str, NodeKindId, Option<u64>, Vec<Cell>);
         let mut rows: Vec<Row> = vec![
             (1, "A", "c::A::A", node_kind::CLASS, None, vec![]),
@@ -2167,7 +2385,9 @@ mod tests {
                 "c::A::A::f",
                 node_kind::METHOD,
                 Some(1),
-                vec![tags(r#"{"style":"natspec","tags":[{"tag":"inheritdoc","name":"IB","text":""}]}"#)],
+                vec![tags(
+                    r#"{"style":"natspec","tags":[{"tag":"inheritdoc","name":"IB","text":""}]}"#,
+                )],
             ),
             (3, "IB", "c::IB::IB", node_kind::INTERFACE, None, vec![]),
             (4, "f", "c::IB::IB::f", node_kind::METHOD, Some(3), vec![]),
@@ -2180,9 +2400,17 @@ mod tests {
         let mut nodes = Vec::new();
         for (id, name, qname, kind, parent, cells) in rows {
             nav.record(NodeId(id), name, qname, kind, parent.map(NodeId));
-            nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
+            nodes.push(Node {
+                id: NodeId(id),
+                repo,
+                confidence: Confidence::Strong,
+                cells,
+            });
         }
-        let edges = heritage.iter().map(|to| edge(1, *to, ec::IMPLEMENTS)).collect();
+        let edges = heritage
+            .iter()
+            .map(|to| edge(1, *to, ec::IMPLEMENTS))
+            .collect();
         MergedGraph::new(vec![RepoGraph {
             repo,
             nodes,
@@ -2205,7 +2433,13 @@ mod tests {
             .filter(|e| e.kind == EdgeKind::Documents && e.to == "c::A::A::f")
             .map(|e| e.from.clone())
             .collect();
-        (from, (stats.natspec_inheritdoc_resolved, stats.natspec_inheritdoc_unresolved))
+        (
+            from,
+            (
+                stats.natspec_inheritdoc_resolved,
+                stats.natspec_inheritdoc_unresolved,
+            ),
+        )
     }
 
     /// Heritage edges first; a dangling or missing one falls back to the only
@@ -2214,17 +2448,33 @@ mod tests {
     #[test]
     fn inheritdoc_resolves_via_heritage_then_a_unique_short_name() {
         let base = vec!["c::IB::IB::f".to_string()];
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[], false)), (base.clone(), (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[999], false)), (base.clone(), (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[999], true)), (vec![], (0, 1)));
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[], false)),
+            (base.clone(), (1, 0))
+        );
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[999], false)),
+            (base.clone(), (1, 0))
+        );
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[999], true)),
+            (vec![], (0, 1))
+        );
         let via_heritage = vec!["d::IB::IB::f".to_string()];
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[5], true)), (via_heritage, (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[3], true)), (base, (1, 0)));
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[5], true)),
+            (via_heritage, (1, 0))
+        );
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[3], true)),
+            (base, (1, 0))
+        );
     }
 
     fn hint_of(gmap: &Gmap, key: &str) -> String {
         let n = gmap.nodes.iter().find(|n| n.key == key);
-        n.and_then(|n| n.identity_hint.clone()).unwrap_or_else(|| panic!("{key}: no hint"))
+        n.and_then(|n| n.identity_hint.clone())
+            .unwrap_or_else(|| panic!("{key}: no hint"))
     }
 
     /// A path and a carried token holding `:` (and `#`) come back out of the
@@ -2242,8 +2492,14 @@ mod tests {
         };
         let (mut gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &opts);
         assert_eq!(stats.identity_hints, 3);
-        assert_eq!(hint_of(&gmap, "c::w::a::g"), format!("c:/w:x/a.py:{}:1", node_kind::FUNCTION.0));
-        assert_eq!(hint_of(&gmap, "b"), format!("old:dir/b.py#2:{}:0", node_kind::MODULE.0));
+        assert_eq!(
+            hint_of(&gmap, "c::w::a::g"),
+            format!("c:/w:x/a.py:{}:1", node_kind::FUNCTION.0)
+        );
+        assert_eq!(
+            hint_of(&gmap, "b"),
+            format!("old:dir/b.py#2:{}:0", node_kind::MODULE.0)
+        );
         let want: BTreeMap<String, String> = [
             ("b.py".to_string(), "old:dir/b.py#2".to_string()),
             ("c:/w:x/a.py".to_string(), "c:/w:x/a.py".to_string()),
@@ -2288,12 +2544,18 @@ mod tests {
         };
         let current: Vec<String> = position_paths(&after).into_iter().collect();
         let file_identity = carry_file_tokens(&prior_tokens(&g1), &moves, &current);
-        let opts = ExportOptions { file_identity, ..Default::default() };
+        let opts = ExportOptions {
+            file_identity,
+            ..Default::default()
+        };
         let (g2, _, _) = build_gmap(&after, &std::env::temp_dir(), &opts);
         assert_eq!(hint_of(&g2, "sub::a"), hint_of(&g1, "a"));
         assert_eq!(hint_of(&g2, "sub::a::f"), hint_of(&g1, "a::f"));
         assert_eq!(hint_of(&g2, "b"), hint_of(&g1, "b"));
-        assert_eq!(hint_of(&g2, "a"), format!("a.py#2:{}:0", node_kind::MODULE.0));
+        assert_eq!(
+            hint_of(&g2, "a"),
+            format!("a.py#2:{}:0", node_kind::MODULE.0)
+        );
         // The next link reads the carried and the suffixed tokens back.
         let t2 = prior_tokens(&g2);
         assert_eq!(t2.get("sub/a.py").map(String::as_str), Some("a.py"));
@@ -2395,7 +2657,10 @@ mod tests {
             };
         let (plain, _, _) = build_gmap(&after, &std::env::temp_dir(), &ExportOptions::default());
         assert_eq!((span_file(&g1, "b"), span_file(&plain, "b")), (1, 2));
-        let opts = ExportOptions { prior_files: Some(g1.files.clone()), ..Default::default() };
+        let opts = ExportOptions {
+            prior_files: Some(g1.files.clone()),
+            ..Default::default()
+        };
         let (g2, _, stats) = build_gmap(&after, &std::env::temp_dir(), &opts);
         assert_eq!(g2.files, table(&[(1, "b.py"), (2, "a.py")]));
         assert_eq!(stats.files, 2);
@@ -2429,7 +2694,8 @@ mod tests {
             edge(3, 2, ec::CALLS),
             edge(3, 2, ec::DEFINES),
         ];
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         let got: Vec<(&str, EdgeKind, &str, Option<f32>)> = gmap
             .edges
             .iter()
@@ -2463,7 +2729,8 @@ mod tests {
             (5, "fx::later", node_kind::STATE_VAR, "vars.go", 4),
         ]);
         merged.graphs[0].nav.qname_by_id.remove(&NodeId(0));
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         let kind = node_kind::STATE_VAR.0;
         assert_eq!(hint_of(&gmap, "fx::hi"), format!("vars.go:{kind}:0"));
         assert_eq!(hint_of(&gmap, "fx::lo"), format!("vars.go:{kind}:1"));
@@ -2484,15 +2751,25 @@ mod tests {
             (4, "web::Pane", node_kind::CLASS, "pane.ts", 1),
             (8, "web::Pane", node_kind::COMPONENT, "pane.ts", 1),
         ]);
-        let doc = Cell { kind: cell_type::DOC, payload: CellPayload::Text("A card.".into()) };
+        let doc = Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text("A card.".into()),
+        };
         for n in &mut merged.graphs[0].nodes {
             if n.id != NodeId(4) {
                 n.cells.push(doc.clone());
             }
         }
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
-        assert_eq!(hint_of(&gmap, "web::Card"), format!("card.ts:{}:0", node_kind::CLASS.0));
-        assert_eq!(hint_of(&gmap, "web::Pane"), format!("pane.ts:{}:0", node_kind::COMPONENT.0));
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        assert_eq!(
+            hint_of(&gmap, "web::Card"),
+            format!("card.ts:{}:0", node_kind::CLASS.0)
+        );
+        assert_eq!(
+            hint_of(&gmap, "web::Pane"),
+            format!("pane.ts:{}:0", node_kind::COMPONENT.0)
+        );
         assert_eq!((stats.duplicate_keys, stats.key_kind_ties), (2, 1));
     }
 
@@ -2509,7 +2786,12 @@ mod tests {
             if let Some((file, row)) = pos {
                 cells.insert(0, pos_cell(file, row, row + 1));
             }
-            nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
+            nodes.push(Node {
+                id: NodeId(id),
+                repo,
+                confidence: Confidence::Strong,
+                cells,
+            });
         }
         MergedGraph::new(vec![RepoGraph {
             repo,
@@ -2524,7 +2806,10 @@ mod tests {
     }
 
     fn hit_cell(json: &str) -> Cell {
-        Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.to_string()) }
+        Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.to_string()),
+        }
     }
 
     /// An HTTP ENDPOINT_HIT at `file:line:col` (`endpoint_hit_json`'s shape).
@@ -2535,7 +2820,10 @@ mod tests {
     }
 
     fn node_of<'g>(gmap: &'g Gmap, key: &str) -> &'g GmapNode {
-        gmap.nodes.iter().find(|n| n.key == key).unwrap_or_else(|| panic!("{key}: not exported"))
+        gmap.nodes
+            .iter()
+            .find(|n| n.key == key)
+            .unwrap_or_else(|| panic!("{key}: not exported"))
     }
 
     fn span_of(gmap: &Gmap, key: &str) -> SpanRef {
@@ -2561,13 +2849,23 @@ mod tests {
                     None,
                     vec![hit("b.ts", 3, 5), hit("a.ts", 10, 2)],
                 ),
-                (12, "endpoint:GET:/b @web", node_kind::ENDPOINT, None, vec![hit("a.ts", 10, 1)]),
+                (
+                    12,
+                    "endpoint:GET:/b @web",
+                    node_kind::ENDPOINT,
+                    None,
+                    vec![hit("a.ts", 10, 1)],
+                ),
                 (
                     13,
                     "endpoint:POST:/c @web",
                     node_kind::ENDPOINT,
                     None,
-                    vec![hit_cell("{"), hit_cell(r#"{"via":"ws"}"#), hit("a.ts", 4, 9)],
+                    vec![
+                        hit_cell("{"),
+                        hit_cell(r#"{"via":"ws"}"#),
+                        hit("a.ts", 4, 9),
+                    ],
                 ),
                 (
                     14,
@@ -2579,20 +2877,36 @@ mod tests {
             ],
             &[],
         );
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         let kind = node_kind::ENDPOINT.0;
-        assert_eq!(hint_of(&gmap, "endpoint:POST:/c @web"), format!("a.ts:{kind}:0"));
-        assert_eq!(hint_of(&gmap, "endpoint:GET:/b @web"), format!("a.ts:{kind}:1"));
-        assert_eq!(hint_of(&gmap, "endpoint:GET:/a @web"), format!("a.ts:{kind}:2"));
+        assert_eq!(
+            hint_of(&gmap, "endpoint:POST:/c @web"),
+            format!("a.ts:{kind}:0")
+        );
+        assert_eq!(
+            hint_of(&gmap, "endpoint:GET:/b @web"),
+            format!("a.ts:{kind}:1")
+        );
+        assert_eq!(
+            hint_of(&gmap, "endpoint:GET:/a @web"),
+            format!("a.ts:{kind}:2")
+        );
         assert_eq!(node_of(&gmap, "endpoint:GET:/d @web").identity_hint, None);
-        assert_eq!(hint_of(&gmap, "web::a"), format!("a.ts:{}:0", node_kind::CLASS.0));
+        assert_eq!(
+            hint_of(&gmap, "web::a"),
+            format!("a.ts:{}:0", node_kind::CLASS.0)
+        );
         assert_eq!(span_of(&gmap, "endpoint:GET:/a @web"), SpanRef::NONE);
         assert_eq!(
             (stats.positionless_endpoints, stats.anchored_endpoints),
             (4, 3)
         );
         // One row, two cols: ordered by col, no qname tie.
-        assert_eq!((stats.identity_hints, stats.positioned, stats.hint_row_ties), (4, 1, 0));
+        assert_eq!(
+            (stats.identity_hints, stats.positioned, stats.hint_row_ties),
+            (4, 1, 0)
+        );
         // The anchors hold no span file, so b.ts (a call site only) gets no
         // token and a.ts's comes from the located class.
         assert_eq!(
@@ -2606,7 +2920,10 @@ mod tests {
             ..Default::default()
         };
         let (moved, _, _) = build_gmap(&merged, &std::env::temp_dir(), &opts);
-        assert_eq!(hint_of(&moved, "endpoint:POST:/c @web"), format!("old/a.ts:{kind}:0"));
+        assert_eq!(
+            hint_of(&moved, "endpoint:POST:/c @web"),
+            format!("old/a.ts:{kind}:0")
+        );
     }
 
     /// DE.3: a positionless `page:` ROUTE takes the file and start row of its
@@ -2619,7 +2936,13 @@ mod tests {
     fn pages_anchor_at_their_least_qname_located_handler() {
         let mut merged = graph_of(
             vec![
-                (10, "web::kyc::KycComponent", node_kind::CLASS, Some(("kyc.component.ts", 5)), vec![]),
+                (
+                    10,
+                    "web::kyc::KycComponent",
+                    node_kind::CLASS,
+                    Some(("kyc.component.ts", 5)),
+                    vec![],
+                ),
                 (
                     11,
                     "web::admin::AdminComponent",
@@ -2627,14 +2950,26 @@ mod tests {
                     Some(("admin.component.ts", 2)),
                     vec![],
                 ),
-                (12, "web::zz::Other", node_kind::CLASS, Some(("other.ts", 0)), vec![]),
+                (
+                    12,
+                    "web::zz::Other",
+                    node_kind::CLASS,
+                    Some(("other.ts", 0)),
+                    vec![],
+                ),
                 (13, "web::lost::Gone", node_kind::CLASS, None, vec![]),
                 (20, "page:/kyc @web", node_kind::ROUTE, None, vec![]),
                 (21, "page:/admin @web", node_kind::ROUTE, None, vec![]),
                 (22, "page:/lost @web", node_kind::ROUTE, None, vec![]),
                 (23, "page:/none @web", node_kind::ROUTE, None, vec![]),
                 (26, "page:/kyc/:id @web", node_kind::ROUTE, None, vec![]),
-                (24, "GET /kyc/status @web", node_kind::ROUTE, Some(("kyc.component.ts", 9)), vec![]),
+                (
+                    24,
+                    "GET /kyc/status @web",
+                    node_kind::ROUTE,
+                    Some(("kyc.component.ts", 9)),
+                    vec![],
+                ),
                 (25, "GET /x @api", node_kind::ROUTE, None, vec![]),
             ],
             &[
@@ -2648,12 +2983,25 @@ mod tests {
         );
         // A cross edge anchors too.
         merged.cross_edges.push(edge(21, 11, ec::HANDLED_BY));
-        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let (gmap, _, stats) =
+            build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
         let route = node_kind::ROUTE.0;
-        assert_eq!(hint_of(&gmap, "page:/kyc @web"), format!("kyc.component.ts:{route}:0"));
-        assert_eq!(hint_of(&gmap, "page:/kyc/:id @web"), format!("kyc.component.ts:{route}:1"));
-        assert_eq!(hint_of(&gmap, "GET /kyc/status @web"), format!("kyc.component.ts:{route}:2"));
-        assert_eq!(hint_of(&gmap, "page:/admin @web"), format!("admin.component.ts:{route}:0"));
+        assert_eq!(
+            hint_of(&gmap, "page:/kyc @web"),
+            format!("kyc.component.ts:{route}:0")
+        );
+        assert_eq!(
+            hint_of(&gmap, "page:/kyc/:id @web"),
+            format!("kyc.component.ts:{route}:1")
+        );
+        assert_eq!(
+            hint_of(&gmap, "GET /kyc/status @web"),
+            format!("kyc.component.ts:{route}:2")
+        );
+        assert_eq!(
+            hint_of(&gmap, "page:/admin @web"),
+            format!("admin.component.ts:{route}:0")
+        );
         for key in ["page:/lost @web", "page:/none @web", "GET /x @api"] {
             assert_eq!(node_of(&gmap, key).identity_hint, None, "{key}");
         }
@@ -2663,7 +3011,10 @@ mod tests {
         );
         assert_eq!(span_of(&gmap, "page:/kyc @web"), SpanRef::NONE);
         assert_eq!((stats.positionless_pages, stats.anchored_pages), (5, 3));
-        assert_eq!((stats.positionless_endpoints, stats.anchored_endpoints), (0, 0));
+        assert_eq!(
+            (stats.positionless_endpoints, stats.anchored_endpoints),
+            (0, 0)
+        );
         // The two pages of KycComponent: the qname ordered them.
         assert_eq!(stats.hint_row_ties, 2);
     }
@@ -2673,7 +3024,13 @@ mod tests {
     #[test]
     fn inheritdoc_picks_the_least_matching_heritage_qname() {
         let base = vec!["c::IB::IB::f".to_string()];
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[5, 3], true)), (base.clone(), (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[3, 5], true)), (base, (1, 0)));
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[5, 3], true)),
+            (base.clone(), (1, 0))
+        );
+        assert_eq!(
+            inheritdoc_edges(&inheritdoc_graph(&[3, 5], true)),
+            (base, (1, 0))
+        );
     }
 }

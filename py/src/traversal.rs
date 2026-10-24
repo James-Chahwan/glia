@@ -134,7 +134,10 @@ fn parse_categories(
     let Some(args) = categories else {
         return Ok(None);
     };
-    args.iter().map(category_id).collect::<Result<Vec<_>, _>>().map(Some)
+    args.iter()
+        .map(category_id)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 /// The whole body of [`PyGraph::neighbours`], minus pyo3.
@@ -214,8 +217,18 @@ fn path_steps(
     let reach = parse_direction(direction)?;
     let follow = parse_categories(categories)?;
     Ok(merged
-        .shortest_path(NodeId(from_id), NodeId(to_id), reach, follow.as_deref(), depth)
-        .map(|path| path.into_iter().map(|(id, via)| (id.0, via.map(|c| c.0))).collect()))
+        .shortest_path(
+            NodeId(from_id),
+            NodeId(to_id),
+            reach,
+            follow.as_deref(),
+            depth,
+        )
+        .map(|path| {
+            path.into_iter()
+                .map(|(id, via)| (id.0, via.map(|c| c.0)))
+                .collect()
+        }))
 }
 
 #[pymethods]
@@ -249,8 +262,14 @@ impl PyGraph {
         categories: Option<Vec<CategoryArg>>,
         depth: usize,
     ) -> PyResult<Vec<(u64, usize, u32, u64)>> {
-        bfs_rows(&self.merged, node_id, direction, categories.as_deref(), depth)
-            .map_err(PyValueError::new_err)
+        bfs_rows(
+            &self.merged,
+            node_id,
+            direction,
+            categories.as_deref(),
+            depth,
+        )
+        .map_err(PyValueError::new_err)
     }
 
     /// The ids that reach `node_id` within `depth` hops (a backward walk), in
@@ -279,8 +298,14 @@ impl PyGraph {
         categories: Option<Vec<CategoryArg>>,
         depth: usize,
     ) -> PyResult<Vec<u64>> {
-        reachable_ids(&self.merged, sink_id, &source_ids, categories.as_deref(), depth)
-            .map_err(PyValueError::new_err)
+        reachable_ids(
+            &self.merged,
+            sink_id,
+            &source_ids,
+            categories.as_deref(),
+            depth,
+        )
+        .map_err(PyValueError::new_err)
     }
 
     /// A shortest path by hop count from `from_id` to `to_id` along
@@ -298,8 +323,15 @@ impl PyGraph {
         categories: Option<Vec<CategoryArg>>,
         depth: usize,
     ) -> PyResult<Option<Vec<PathStep>>> {
-        path_steps(&self.merged, from_id, to_id, direction, categories.as_deref(), depth)
-            .map_err(PyValueError::new_err)
+        path_steps(
+            &self.merged,
+            from_id,
+            to_id,
+            direction,
+            categories.as_deref(),
+            depth,
+        )
+        .map_err(PyValueError::new_err)
     }
 }
 
@@ -344,7 +376,10 @@ mod tests {
             assert_eq!(direction_label(reach), Ok(d));
         }
         let err = parse_direction("sideways").expect_err("not a direction");
-        assert!(err.contains("'sideways'") && err.contains("\"out\", \"in\", \"both\""), "{err}");
+        assert!(
+            err.contains("'sideways'") && err.contains("\"out\", \"in\", \"both\""),
+            "{err}"
+        );
         assert!(parse_direction("OUT").is_err(), "directions are exact");
     }
 
@@ -353,7 +388,10 @@ mod tests {
     }
 
     fn names(names: &[&str]) -> Vec<CategoryArg> {
-        names.iter().map(|n| CategoryArg::Name((*n).to_string())).collect()
+        names
+            .iter()
+            .map(|n| CategoryArg::Name((*n).to_string()))
+            .collect()
     }
 
     #[test]
@@ -365,7 +403,10 @@ mod tests {
             Ok(Some(vec![edge_category::CALLS, edge_category::DEFINES]))
         );
         let err = parse_categories(Some(&ids(&[CALLS, 999]))).expect_err("999 is no category");
-        assert!(err.contains("id 999") && err.contains("category_names()"), "{err}");
+        assert!(
+            err.contains("id 999") && err.contains("category_names()"),
+            "{err}"
+        );
     }
 
     /// DT.9: a registry name stands for its id, ASCII case-insensitive and
@@ -378,29 +419,56 @@ mod tests {
         assert_eq!(parse_categories(Some(&names(&["  Calls\t"]))), calls);
         assert_eq!(
             parse_categories(Some(&names(&[" Defines ", "http_calls", "SAME_AS"]))),
-            Ok(Some(vec![edge_category::DEFINES, edge_category::HTTP_CALLS, edge_category::SAME_AS]))
+            Ok(Some(vec![
+                edge_category::DEFINES,
+                edge_category::HTTP_CALLS,
+                edge_category::SAME_AS
+            ]))
         );
         assert_eq!(
-            parse_categories(Some(&[CategoryArg::Id(CALLS), CategoryArg::Name("DEFINES".into())])),
+            parse_categories(Some(&[
+                CategoryArg::Id(CALLS),
+                CategoryArg::Name("DEFINES".into())
+            ])),
             Ok(Some(vec![edge_category::CALLS, edge_category::DEFINES]))
         );
         assert_eq!(
-            parse_categories(Some(&[CategoryArg::Name("defines".into()), CategoryArg::Id(CALLS)])),
+            parse_categories(Some(&[
+                CategoryArg::Name("defines".into()),
+                CategoryArg::Id(CALLS)
+            ])),
             Ok(Some(vec![edge_category::DEFINES, edge_category::CALLS]))
         );
         // Every registry name round-trips to its own id.
         for (id, name) in edge_category::ALL {
-            assert_eq!(parse_categories(Some(&names(&[name]))), Ok(Some(vec![*id])), "{name}");
+            assert_eq!(
+                parse_categories(Some(&names(&[name]))),
+                Ok(Some(vec![*id])),
+                "{name}"
+            );
         }
 
-        let err = parse_categories(Some(&names(&["CALLS", "NOPE"]))).expect_err("NOPE is no category");
-        assert!(err.contains("'NOPE'") && err.contains("category_names()"), "{err}");
+        let err =
+            parse_categories(Some(&names(&["CALLS", "NOPE"]))).expect_err("NOPE is no category");
+        assert!(
+            err.contains("'NOPE'") && err.contains("category_names()"),
+            "{err}"
+        );
         let err = parse_categories(Some(&names(&[""]))).expect_err("an empty name is no category");
         assert!(err.contains("''"), "{err}");
-        assert!(parse_categories(Some(&names(&["CALL"]))).is_err(), "names match whole, never by prefix");
-        assert!(parse_categories(Some(&names(&["4"]))).is_err(), "a digit string is a name, not an id");
-        let err = parse_categories(Some(&[CategoryArg::Name("calls".into()), CategoryArg::Id(999)]))
-            .expect_err("999 is no category");
+        assert!(
+            parse_categories(Some(&names(&["CALL"]))).is_err(),
+            "names match whole, never by prefix"
+        );
+        assert!(
+            parse_categories(Some(&names(&["4"]))).is_err(),
+            "a digit string is a name, not an id"
+        );
+        let err = parse_categories(Some(&[
+            CategoryArg::Name("calls".into()),
+            CategoryArg::Id(999),
+        ]))
+        .expect_err("999 is no category");
         assert!(err.contains("id 999"), "{err}");
     }
 
@@ -416,9 +484,15 @@ mod tests {
             neighbour_rows(&g, helper, "in", None),
             Ok(vec![(app, DEFINES, "in"), (main, CALLS, "in")])
         );
-        assert_eq!(neighbour_rows(&g, helper, "in", Some(&ids(&[CALLS]))), Ok(vec![(main, CALLS, "in")]));
+        assert_eq!(
+            neighbour_rows(&g, helper, "in", Some(&ids(&[CALLS]))),
+            Ok(vec![(main, CALLS, "in")])
+        );
         assert_eq!(neighbour_rows(&g, helper, "out", None), Ok(vec![]));
-        assert_eq!(neighbour_rows(&g, main, "out", None), Ok(vec![(helper, CALLS, "out")]));
+        assert_eq!(
+            neighbour_rows(&g, main, "out", None),
+            Ok(vec![(helper, CALLS, "out")])
+        );
         assert_eq!(
             neighbour_rows(&g, main, "both", None),
             Ok(vec![(app, DEFINES, "in"), (helper, CALLS, "out")])
@@ -430,13 +504,25 @@ mod tests {
         assert_eq!(walked, vec![(helper, 1, CALLS, main)]);
         assert_eq!(bfs_rows(&g, main, "out", None, 0), Ok(vec![]));
         let up = bfs_rows(&g, helper, "in", None, 3).expect("bfs");
-        assert_eq!(up, vec![(app, 1, DEFINES, helper), (main, 1, CALLS, helper)]);
+        assert_eq!(
+            up,
+            vec![(app, 1, DEFINES, helper), (main, 1, CALLS, helper)]
+        );
 
-        assert_eq!(predecessor_ids(&g, helper, Some(&ids(&[CALLS])), 3), Ok(vec![main]));
+        assert_eq!(
+            predecessor_ids(&g, helper, Some(&ids(&[CALLS])), 3),
+            Ok(vec![main])
+        );
         assert_eq!(predecessor_ids(&g, helper, None, 3), Ok(vec![app, main]));
 
-        assert_eq!(reachable_ids(&g, helper, &[main, app], Some(&ids(&[CALLS])), 6), Ok(vec![main]));
-        assert_eq!(reachable_ids(&g, helper, &[main, app], None, 6), Ok(vec![main, app]));
+        assert_eq!(
+            reachable_ids(&g, helper, &[main, app], Some(&ids(&[CALLS])), 6),
+            Ok(vec![main])
+        );
+        assert_eq!(
+            reachable_ids(&g, helper, &[main, app], None, 6),
+            Ok(vec![main, app])
+        );
         assert_eq!(reachable_ids(&g, helper, &[], None, 6), Ok(vec![]));
 
         assert_eq!(
@@ -448,7 +534,10 @@ mod tests {
             path_steps(&g, main, helper, "out", None, 12),
             Ok(Some(vec![(main, None), (helper, Some(CALLS))]))
         );
-        assert_eq!(path_steps(&g, main, main, "in", None, 12), Ok(Some(vec![(main, None)])));
+        assert_eq!(
+            path_steps(&g, main, main, "in", None, 12),
+            Ok(Some(vec![(main, None)]))
+        );
         assert!(path_steps(&g, helper, main, "up", None, 12).is_err());
         assert!(predecessor_ids(&g, helper, Some(&ids(&[999])), 3).is_err());
 
@@ -464,10 +553,22 @@ mod tests {
         ];
         for (given, as_ids) in &pairs {
             let (cats, same) = (Some(&given[..]), Some(&as_ids[..]));
-            assert_eq!(neighbour_rows(&g, helper, "in", cats), neighbour_rows(&g, helper, "in", same));
-            assert_eq!(bfs_rows(&g, main, "out", cats, 3), bfs_rows(&g, main, "out", same, 3));
-            assert_eq!(bfs_rows(&g, helper, "in", cats, 3), bfs_rows(&g, helper, "in", same, 3));
-            assert_eq!(predecessor_ids(&g, helper, cats, 3), predecessor_ids(&g, helper, same, 3));
+            assert_eq!(
+                neighbour_rows(&g, helper, "in", cats),
+                neighbour_rows(&g, helper, "in", same)
+            );
+            assert_eq!(
+                bfs_rows(&g, main, "out", cats, 3),
+                bfs_rows(&g, main, "out", same, 3)
+            );
+            assert_eq!(
+                bfs_rows(&g, helper, "in", cats, 3),
+                bfs_rows(&g, helper, "in", same, 3)
+            );
+            assert_eq!(
+                predecessor_ids(&g, helper, cats, 3),
+                predecessor_ids(&g, helper, same, 3)
+            );
             assert_eq!(
                 reachable_ids(&g, helper, &[app, main], cats, 6),
                 reachable_ids(&g, helper, &[app, main], same, 6)
@@ -478,15 +579,27 @@ mod tests {
             );
         }
         let calls = names(&["calls"]);
-        assert_eq!(neighbour_rows(&g, helper, "in", Some(&calls)), Ok(vec![(main, CALLS, "in")]));
-        assert_eq!(bfs_rows(&g, main, "out", Some(&calls), 3), Ok(vec![(helper, 1, CALLS, main)]));
+        assert_eq!(
+            neighbour_rows(&g, helper, "in", Some(&calls)),
+            Ok(vec![(main, CALLS, "in")])
+        );
+        assert_eq!(
+            bfs_rows(&g, main, "out", Some(&calls), 3),
+            Ok(vec![(helper, 1, CALLS, main)])
+        );
         assert_eq!(predecessor_ids(&g, helper, Some(&calls), 3), Ok(vec![main]));
-        assert_eq!(reachable_ids(&g, helper, &[main, app], Some(&calls), 6), Ok(vec![main]));
+        assert_eq!(
+            reachable_ids(&g, helper, &[main, app], Some(&calls), 6),
+            Ok(vec![main])
+        );
         assert_eq!(
             path_steps(&g, helper, main, "both", Some(&calls), 12),
             Ok(Some(vec![(helper, None), (main, Some(CALLS))]))
         );
-        assert_eq!(path_steps(&g, app, main, "both", Some(&calls), 12), Ok(None));
+        assert_eq!(
+            path_steps(&g, app, main, "both", Some(&calls), 12),
+            Ok(None)
+        );
         assert_eq!(
             neighbour_rows(&g, helper, "in", Some(&mixed)),
             Ok(vec![(app, DEFINES, "in"), (main, CALLS, "in")])

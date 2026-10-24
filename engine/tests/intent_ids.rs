@@ -16,7 +16,10 @@ fn vocab(patterns: &[&str]) -> IdVocab {
 
 /// (id, family) of every mention, in text order.
 fn ids(v: &IdVocab, text: &str) -> Vec<(String, String)> {
-    v.mentions(text).into_iter().map(|m| (m.id, m.family)).collect()
+    v.mentions(text)
+        .into_iter()
+        .map(|m| (m.id, m.family))
+        .collect()
 }
 
 fn just_ids(v: &IdVocab, text: &str) -> Vec<String> {
@@ -27,8 +30,14 @@ const DOT: &str = "{U}.{N}{l?}";
 
 #[test]
 fn grammar_accepts_and_rejects() {
-    for ok in ["{U}-{N}", "T{N3}", DOT, "{U}.{N}", "FR-{N}", "PR #{N}", "{N}", "x{N9}y", "{U}{N1}"] {
-        assert!(IdPattern::parse(ok).is_ok(), "{ok} should parse: {:?}", IdPattern::parse(ok));
+    for ok in [
+        "{U}-{N}", "T{N3}", DOT, "{U}.{N}", "FR-{N}", "PR #{N}", "{N}", "x{N9}y", "{U}{N1}",
+    ] {
+        assert!(
+            IdPattern::parse(ok).is_ok(),
+            "{ok} should parse: {:?}",
+            IdPattern::parse(ok)
+        );
     }
     let long = format!("{}{{N}}", "A".repeat(62));
     assert_eq!(long.chars().count(), 65);
@@ -51,7 +60,10 @@ fn grammar_accepts_and_rejects() {
 #[test]
 fn defaults_are_tickets_and_spec_kit_ids() {
     assert_eq!(DEFAULT_PATTERNS, ["{U}-{N}", "T{N3}"]);
-    assert_eq!(DEFAULT_LOCAL_WORDS, ["analysis", "finding", "remediation", "review", "audit"]);
+    assert_eq!(
+        DEFAULT_LOCAL_WORDS,
+        ["analysis", "finding", "remediation", "review", "audit"]
+    );
     let v = IdVocab::default();
     assert_eq!(v.source, VocabSource::Default);
     assert_eq!(
@@ -81,9 +93,18 @@ fn dotted_ids_carry_their_family() {
 fn letter_shorthands_expand() {
     let v = vocab(&[DOT]);
     assert_eq!(just_ids(&v, "LA.25a/b landed"), ["LA.25a", "LA.25b"]);
-    assert_eq!(just_ids(&v, "LA.30a-c landed"), ["LA.30a", "LA.30b", "LA.30c"]);
-    assert_eq!(just_ids(&v, "LA.30a\u{2013}c landed"), ["LA.30a", "LA.30b", "LA.30c"]);
-    assert_eq!(just_ids(&v, "DT.5h-DT.5l"), ["DT.5h", "DT.5i", "DT.5j", "DT.5k", "DT.5l"]);
+    assert_eq!(
+        just_ids(&v, "LA.30a-c landed"),
+        ["LA.30a", "LA.30b", "LA.30c"]
+    );
+    assert_eq!(
+        just_ids(&v, "LA.30a\u{2013}c landed"),
+        ["LA.30a", "LA.30b", "LA.30c"]
+    );
+    assert_eq!(
+        just_ids(&v, "DT.5h-DT.5l"),
+        ["DT.5h", "DT.5i", "DT.5j", "DT.5k", "DT.5l"]
+    );
     // An extra mention sits at the shorthand's byte span.
     let m = v.mentions("LA.25a/b");
     assert_eq!((m[0].start, m[0].end), (0, 6));
@@ -99,24 +120,46 @@ fn letter_shorthands_expand() {
 #[test]
 fn non_ids_are_not_found() {
     let v = IdVocab::default();
-    for text in ["UTF-8x", "T12", "xT012", "0.5.2", "sha256", "T0123", "LANG-12.3"] {
-        assert!(v.mentions(text).is_empty(), "{text}: {:?}", v.mentions(text));
+    for text in [
+        "UTF-8x",
+        "T12",
+        "xT012",
+        "0.5.2",
+        "sha256",
+        "T0123",
+        "LANG-12.3",
+    ] {
+        assert!(
+            v.mentions(text).is_empty(),
+            "{text}: {:?}",
+            v.mentions(text)
+        );
     }
     let d = vocab(&[DOT]);
     for text in ["0.5.2", "sha256", "DT.5h.1", "dt.5h", "xDT.5h"] {
-        assert!(d.mentions(text).is_empty(), "{text}: {:?}", d.mentions(text));
+        assert!(
+            d.mentions(text).is_empty(),
+            "{text}: {:?}",
+            d.mentions(text)
+        );
     }
     // A following `.` / `-` is a boundary when no digit follows it.
     assert_eq!(just_ids(&v, "see LANG-12."), ["LANG-12"]);
     assert_eq!(just_ids(&d, "DT.5h- x"), ["DT.5h"]);
     // rank_eval `dot_ids` parity: a dash then a lone later letter is a range.
-    assert_eq!(just_ids(&d, "DT.5h-k"), ["DT.5h", "DT.5i", "DT.5j", "DT.5k"]);
+    assert_eq!(
+        just_ids(&d, "DT.5h-k"),
+        ["DT.5h", "DT.5i", "DT.5j", "DT.5k"]
+    );
 }
 
 #[test]
 fn overlapping_patterns_pick_the_longest() {
     let v = vocab(&["FR-{N}", "{U}-{N}-{U}"]);
-    assert_eq!(ids(&v, "FR-001-API"), [("FR-001-API".to_string(), "FR-".to_string())]);
+    assert_eq!(
+        ids(&v, "FR-001-API"),
+        [("FR-001-API".to_string(), "FR-".to_string())]
+    );
     // Equal length: the earlier start wins, then the pattern order.
     let w = vocab(&["T{N3}", "{U}{N}"]);
     assert_eq!(just_ids(&w, "T012"), ["T012"]);
@@ -133,7 +176,8 @@ fn root_with(overlay: &str) -> tempfile::TempDir {
 
 #[test]
 fn config_replaces_the_defaults() {
-    let dir = root_with("version = 1\n[ids]\npatterns = [\"{U}.{N}{l?}\"]\nlocal_words = [\"audit\"]\n");
+    let dir =
+        root_with("version = 1\n[ids]\npatterns = [\"{U}.{N}{l?}\"]\nlocal_words = [\"audit\"]\n");
     let v = IdVocab::for_root(dir.path());
     v.report("fixture", "test");
     assert_eq!(v.source, VocabSource::Config);
@@ -157,11 +201,20 @@ fn empty_patterns_turn_routing_off() {
 
 #[test]
 fn a_bad_pattern_drops_only_itself() {
-    let text = "version = 1\n[ids]\npatterns = [\n  \"{U}-{N}\",\n  \"{X}-{N}\",\n  \"T{N3}\",\n]\n";
+    let text =
+        "version = 1\n[ids]\npatterns = [\n  \"{U}-{N}\",\n  \"{X}-{N}\",\n  \"T{N3}\",\n]\n";
     let l = parse_str(text);
     assert_eq!(l.errors.len(), 1, "{:?}", l.errors);
-    assert!(l.errors[0].starts_with(".glia/overlay.toml:5: [ids] patterns"), "{}", l.errors[0]);
-    assert!(l.errors[0].ends_with("(pattern dropped)"), "{}", l.errors[0]);
+    assert!(
+        l.errors[0].starts_with(".glia/overlay.toml:5: [ids] patterns"),
+        "{}",
+        l.errors[0]
+    );
+    assert!(
+        l.errors[0].ends_with("(pattern dropped)"),
+        "{}",
+        l.errors[0]
+    );
     let dir = root_with(text);
     let v = IdVocab::for_root(dir.path());
     v.report("fixture", "test");

@@ -116,8 +116,10 @@ impl MagicReport {
             .rewritten
             .iter()
             .map(|(p, a, n)| format!("[rules] magic pred={p} adornment={a} sites={n}"));
-        let skipped =
-            self.skipped.iter().map(|(p, r)| format!("[rules] magic skipped pred={p} reason={r}"));
+        let skipped = self
+            .skipped
+            .iter()
+            .map(|(p, r)| format!("[rules] magic skipped pred={p} reason={r}"));
         rewritten.chain(skipped).collect()
     }
 }
@@ -165,7 +167,11 @@ fn demand(
             Some(OUTPUT)
         } else if st.aggregate {
             Some(AGGREGATE)
-        } else if st.preds.iter().any(|&p| info(p).is_some_and(|i| i.arity > MAX_ARITY)) {
+        } else if st
+            .preds
+            .iter()
+            .any(|&p| info(p).is_some_and(|i| i.arity > MAX_ARITY))
+        {
             Some(ARITY)
         } else {
             None
@@ -178,8 +184,11 @@ fn demand(
     let mut rewritten: Vec<(PredId, String, usize)> = Vec::new();
     let mut current: Option<(Program, Analysis)> = None;
     for &members in todo.iter().rev() {
-        let names: Vec<(&str, usize)> =
-            members.iter().filter_map(|&p| info(p)).map(|i| (i.name.as_str(), i.arity)).collect();
+        let names: Vec<(&str, usize)> = members
+            .iter()
+            .filter_map(|&p| info(p))
+            .map(|i| (i.name.as_str(), i.arity))
+            .collect();
         let (prog, cur) = current.as_ref().map_or((program, an), |(p, a)| (p, a));
         let step = component(prog, cur, catalog, &names).and_then(|step| {
             analyse_with(&step.program, catalog, true)
@@ -202,7 +211,10 @@ fn demand(
     rewritten.sort();
     let sig = |p: PredId| info(p).map_or_else(String::new, PredInfo::signature);
     let report = MagicReport {
-        rewritten: rewritten.into_iter().map(|(p, a, n)| (sig(p), a, n)).collect(),
+        rewritten: rewritten
+            .into_iter()
+            .map(|(p, a, n)| (sig(p), a, n))
+            .collect(),
         skipped: skipped.into_iter().map(|(p, r)| (sig(p), r)).collect(),
     };
     (current.map(|(p, _)| p), report)
@@ -255,7 +267,10 @@ fn component(
     catalog: &Catalog,
     members: &[(&str, usize)],
 ) -> Result<Step, &'static str> {
-    let scc: Vec<PredId> = members.iter().filter_map(|&(n, a)| find(an, n, a)).collect();
+    let scc: Vec<PredId> = members
+        .iter()
+        .filter_map(|&(n, a)| find(an, n, a))
+        .collect();
     if scc.len() != members.len() {
         // Rewriting a higher component never drops a lower one's rules, so this does
         // not happen; a member the program no longer defines has no site.
@@ -267,7 +282,11 @@ fn component(
     let mut sites: Vec<(usize, Demand)> = Vec::new();
     let mut keep_original = false;
     for cr in an.rules.iter().filter(|r| !in_scc(&r.head)) {
-        if !cr.body.iter().any(|l| matches!(l, CLit::Pos(p, ..) | CLit::Neg(p, ..) if in_scc(p))) {
+        if !cr
+            .body
+            .iter()
+            .any(|l| matches!(l, CLit::Pos(p, ..) | CLit::Neg(p, ..) if in_scc(p)))
+        {
             continue;
         }
         let order = sips_order(cr, &an.preds, catalog, &[], None, &|_| None);
@@ -311,7 +330,11 @@ fn component(
                     && in_scc(q)
                 {
                     let (kept, c) = prefix(cr, &an.preds, catalog, &order, i, bound.clone(), terms);
-                    atoms.push(Demand { lit: i, pair: pair_of(&mut pairs, *q, c), kept });
+                    atoms.push(Demand {
+                        lit: i,
+                        pair: pair_of(&mut pairs, *q, c),
+                        kept,
+                    });
                 }
             }
             copies.push((cr.index, atoms));
@@ -321,14 +344,26 @@ fn component(
     }
 
     let name = |p: PredId| an.preds.get(p as usize).map_or("", |i| i.name.as_str());
-    let adorned: Vec<String> =
-        pairs.iter().map(|q| synthetic('a', name(q.pred), &q.adornment)).collect();
-    let magic: Vec<String> =
-        pairs.iter().map(|q| synthetic('m', name(q.pred), &q.adornment)).collect();
+    let adorned: Vec<String> = pairs
+        .iter()
+        .map(|q| synthetic('a', name(q.pred), &q.adornment))
+        .collect();
+    let magic: Vec<String> = pairs
+        .iter()
+        .map(|q| synthetic('m', name(q.pred), &q.adornment))
+        .collect();
     let mut block: Vec<usize> = (0..pairs.len()).collect();
     block.sort_by_key(|&k| (pairs[k].pred, adornment_text(&pairs[k].adornment)));
-    let last = an.rules.iter().filter(|r| in_scc(&r.head)).map(|r| r.index).max();
-    let mut out = Emit { rules: Vec::with_capacity(prog.rules.len()), seen: Lookup::new() };
+    let last = an
+        .rules
+        .iter()
+        .filter(|r| in_scc(&r.head))
+        .map(|r| r.index)
+        .max();
+    let mut out = Emit {
+        rules: Vec::with_capacity(prog.rules.len()),
+        seen: Lookup::new(),
+    };
     for (ri, rule) in prog.rules.iter().enumerate() {
         if an.rules.get(ri).is_some_and(|cr| in_scc(&cr.head)) {
             if keep_original {
@@ -350,8 +385,15 @@ fn component(
                     });
                     let mut body = vec![guard.clone()];
                     body.extend((0..r.body.len()).filter_map(|j| renamed(r, j, &names)));
-                    let head = Head { pred: adorned[k].clone(), ..r.head.clone() };
-                    out.generated(Rule { head, body, span: r.span });
+                    let head = Head {
+                        pred: adorned[k].clone(),
+                        ..r.head.clone()
+                    };
+                    out.generated(Rule {
+                        head,
+                        body,
+                        span: r.span,
+                    });
                     for d in atoms {
                         let mut body = vec![guard.clone()];
                         body.extend(d.kept.iter().filter_map(|&j| renamed(r, j, &names)));
@@ -361,25 +403,44 @@ fn component(
             }
             continue;
         }
-        let here: Vec<&Demand> = sites.iter().filter(|(r, _)| *r == ri).map(|(_, d)| d).collect();
+        let here: Vec<&Demand> = sites
+            .iter()
+            .filter(|(r, _)| *r == ri)
+            .map(|(_, d)| d)
+            .collect();
         if here.is_empty() {
             out.rules.push(rule.clone());
             continue;
         }
         let names = renames(rule.body.len(), here.iter().copied(), &adorned);
         for d in &here {
-            let body = d.kept.iter().filter_map(|&j| renamed(rule, j, &names)).collect();
+            let body = d
+                .kept
+                .iter()
+                .filter_map(|&j| renamed(rule, j, &names))
+                .collect();
             out.magic(rule, d, &pairs, &magic, body);
         }
-        let body = (0..rule.body.len()).filter_map(|j| renamed(rule, j, &names)).collect();
-        out.rules.push(Rule { body, ..rule.clone() });
+        let body = (0..rule.body.len())
+            .filter_map(|j| renamed(rule, j, &names))
+            .collect();
+        out.rules.push(Rule {
+            body,
+            ..rule.clone()
+        });
     }
     let member = |p: PredId| scc.iter().position(|&q| q == p);
     let report = pairs
         .iter()
         .filter_map(|q| member(q.pred).map(|m| (m, adornment_text(&q.adornment), q.sites)))
         .collect();
-    Ok(Step { program: Program { sources: prog.sources.clone(), rules: out.rules }, pairs: report })
+    Ok(Step {
+        program: Program {
+            sources: prog.sources.clone(),
+            rules: out.rules,
+        },
+        pairs: report,
+    })
 }
 
 /// The rewritten program under construction.
@@ -421,17 +482,28 @@ impl Emit {
             .filter(|(_, b)| **b)
             .map(|(t, _)| HeadArg::Term(t.clone()))
             .collect();
-        let head = Head { pred: magic[d.pair].clone(), args, span: atom.span };
+        let head = Head {
+            pred: magic[d.pair].clone(),
+            args,
+            span: atom.span,
+        };
         let restates = body.iter().any(|l| match l {
             Literal::Pos(a) => {
                 a.pred == head.pred
                     && a.args.len() == head.args.len()
-                    && a.args.iter().zip(&head.args).all(|(t, h)| t.to_string() == h.to_string())
+                    && a.args
+                        .iter()
+                        .zip(&head.args)
+                        .all(|(t, h)| t.to_string() == h.to_string())
             }
             Literal::Neg(_) | Literal::Cmp(_) => false,
         });
         if !restates {
-            self.generated(Rule { head, body, span: rule.span });
+            self.generated(Rule {
+                head,
+                body,
+                span: rule.span,
+            });
         }
     }
 }
@@ -443,7 +515,10 @@ fn synthetic(tag: char, pred: &str, adornment: &[bool]) -> String {
 
 /// `b` per bound argument, `f` per free one.
 fn adornment_text(adornment: &[bool]) -> String {
-    adornment.iter().map(|&b| if b { 'b' } else { 'f' }).collect()
+    adornment
+        .iter()
+        .map(|&b| if b { 'b' } else { 'f' })
+        .collect()
 }
 
 /// The IDB predicate `name/arity` of `an`.
@@ -457,10 +532,18 @@ fn find(an: &Analysis, name: &str, arity: usize) -> Option<PredId> {
 
 /// The index of pair (`pred`, `adornment`), added when new.
 fn pair_of(pairs: &mut Vec<Pair>, pred: PredId, adornment: Vec<bool>) -> usize {
-    if let Some(k) = pairs.iter().position(|q| q.pred == pred && q.adornment == adornment) {
+    if let Some(k) = pairs
+        .iter()
+        .position(|q| q.pred == pred && q.adornment == adornment)
+    {
         return k;
     }
-    pairs.push(Pair { pred, adornment, sites: 0, copies: Vec::new() });
+    pairs.push(Pair {
+        pred,
+        adornment,
+        sites: 0,
+        copies: Vec::new(),
+    });
     pairs.len() - 1
 }
 
@@ -497,7 +580,10 @@ fn renames<'d>(
 fn renamed(rule: &Rule, j: usize, names: &[Option<String>]) -> Option<Literal> {
     let lit = rule.body.get(j)?;
     Some(match (lit, names.get(j).and_then(Option::as_ref)) {
-        (Literal::Pos(a), Some(name)) => Literal::Pos(Atom { pred: name.clone(), ..a.clone() }),
+        (Literal::Pos(a), Some(name)) => Literal::Pos(Atom {
+            pred: name.clone(),
+            ..a.clone()
+        }),
         _ => lit.clone(),
     })
 }
@@ -520,14 +606,17 @@ fn prefix(
         let Some(lit) = cr.body.get(i) else { continue };
         let runs = match lit {
             CLit::Pos(p, terms, _) => terms.iter().enumerate().all(|(c, t)| {
-                match preds.get(*p as usize).and_then(|info| info.bind_req(catalog, c)) {
+                match preds
+                    .get(*p as usize)
+                    .and_then(|info| info.bind_req(catalog, c))
+                {
                     Some(BindReq::Must | BindReq::Const) => is_bound(t, &bound),
                     Some(BindReq::May) | None => true,
                 }
             }),
-            CLit::Neg(_, terms, _) => {
-                terms.iter().all(|t| !matches!(t, CTerm::Var(_)) || is_bound(t, &bound))
-            }
+            CLit::Neg(_, terms, _) => terms
+                .iter()
+                .all(|t| !matches!(t, CTerm::Var(_)) || is_bound(t, &bound)),
             CLit::Cmp(op, l, r, _) => {
                 let (lb, rb) = (is_bound(l, &bound), is_bound(r, &bound));
                 (lb && rb)
@@ -550,7 +639,10 @@ fn prefix(
         }
     }
     kept.sort_unstable();
-    (kept, site_terms.iter().map(|t| is_bound(t, &bound)).collect())
+    (
+        kept,
+        site_terms.iter().map(|t| is_bound(t, &bound)).collect(),
+    )
 }
 
 /// A constant, or a variable `bound` marks. `_` is never bound.
@@ -676,7 +768,11 @@ mod tests {
 
     /// `out(b) :- seed(a), tc(a, b).`
     fn out_bound() -> Rule {
-        rule("out", vec![v("b")], vec![pos("seed", vec![v("a")]), pos("tc", vec![v("a"), v("b")])])
+        rule(
+            "out",
+            vec![v("b")],
+            vec![pos("seed", vec![v("a")]), pos("tc", vec![v("a"), v("b")])],
+        )
     }
 
     fn analysed(p: &Program) -> Analysis {
@@ -687,8 +783,12 @@ mod tests {
     }
 
     fn id_of(a: &Analysis, name: &str) -> PredId {
-        let p = a.preds.iter().position(|p| p.kind == PredKind::Idb && p.name == name);
-        p.map(|p| p as PredId).unwrap_or_else(|| panic!("no predicate {name}"))
+        let p = a
+            .preds
+            .iter()
+            .position(|p| p.kind == PredKind::Idb && p.name == name);
+        p.map(|p| p as PredId)
+            .unwrap_or_else(|| panic!("no predicate {name}"))
     }
 
     /// [`demand`] over `p` with `outputs` named; a rewritten program must analyse.
@@ -713,11 +813,17 @@ mod tests {
     }
 
     fn pairs(entries: &[(&str, &str, usize)]) -> Vec<(String, String, usize)> {
-        entries.iter().map(|(p, a, n)| ((*p).to_string(), (*a).to_string(), *n)).collect()
+        entries
+            .iter()
+            .map(|(p, a, n)| ((*p).to_string(), (*a).to_string(), *n))
+            .collect()
     }
 
     fn skips(entries: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
-        entries.iter().map(|(p, r)| ((*p).to_string(), *r)).collect()
+        entries
+            .iter()
+            .map(|(p, r)| ((*p).to_string(), *r))
+            .collect()
     }
 
     // ------------------------------------------------------------------------
@@ -751,7 +857,13 @@ mod tests {
                 for cr in an.rules.iter().filter(|r| st.preds.contains(&r.head)) {
                     let order = sips_order(cr, &an.preds, &cat, &[], None, &|_| None);
                     let mut found = Vec::new();
-                    join(cr, &order, &mut vec![None; usize::from(cr.nvars)], &rel, &mut found);
+                    join(
+                        cr,
+                        &order,
+                        &mut vec![None; usize::from(cr.nvars)],
+                        &rel,
+                        &mut found,
+                    );
                     for row in found {
                         grew |= rel[cr.head as usize].insert(row);
                     }
@@ -762,7 +874,13 @@ mod tests {
             }
         }
         let idb = |i: &PredInfo| i.kind == PredKind::Idb;
-        let derived = an.preds.iter().zip(&rel).filter(|(i, _)| idb(i)).map(|(_, r)| r.len()).sum();
+        let derived = an
+            .preds
+            .iter()
+            .zip(&rel)
+            .filter(|(i, _)| idb(i))
+            .map(|(_, r)| r.len())
+            .sum();
         let user = an
             .preds
             .iter()
@@ -809,7 +927,12 @@ mod tests {
         out: &mut Vec<Vec<String>>,
     ) {
         let Some((&i, rest)) = order.split_first() else {
-            out.push(cr.head_terms.iter().map(|t| value(t, b).expect("a bound head")).collect());
+            out.push(
+                cr.head_terms
+                    .iter()
+                    .map(|t| value(t, b).expect("a bound head"))
+                    .collect(),
+            );
             return;
         };
         match &cr.body[i] {
@@ -823,7 +946,10 @@ mod tests {
                 }
             }
             CLit::Neg(p, terms, _) => {
-                if !rel[*p as usize].iter().any(|row| unify(terms, row, &mut b.clone())) {
+                if !rel[*p as usize]
+                    .iter()
+                    .any(|row| unify(terms, row, &mut b.clone()))
+                {
                     join(cr, rest, b, rel, out);
                 }
             }
@@ -863,14 +989,26 @@ mod tests {
     /// The rewrite of `p` (for `outputs`) gives every output the rows the original
     /// does; returns the derived-row counts without and with the rewrite.
     fn same_answers(p: &Program, outputs: &[&str]) -> (usize, usize) {
-        let (Some(q), _) = run(p, outputs) else { panic!("expected a rewrite") };
+        let (Some(q), _) = run(p, outputs) else {
+            panic!("expected a rewrite")
+        };
         let (before, all_before) = naive(p, GRAPH);
         let (after, all_after) = naive(&q, GRAPH);
         for o in outputs {
-            let key = before.keys().find(|k| k.starts_with(&format!("{o}/"))).cloned();
+            let key = before
+                .keys()
+                .find(|k| k.starts_with(&format!("{o}/")))
+                .cloned();
             let key = key.unwrap_or_else(|| panic!("no output {o}"));
-            assert!(!before[&key].is_empty(), "{key} has no rows: the check proves nothing");
-            assert_eq!(before.get(&key), after.get(&key), "{key} changed under\n{q}");
+            assert!(
+                !before[&key].is_empty(),
+                "{key} has no rows: the check proves nothing"
+            );
+            assert_eq!(
+                before.get(&key),
+                after.get(&key),
+                "{key} changed under\n{q}"
+            );
         }
         (all_before, all_after)
     }
@@ -900,10 +1038,16 @@ seed("a").
         // The public entry point returns the same program and report (and prints them).
         let an = analysed(&p);
         let printed = rewrite(&p, &an, &catalog(), &[id_of(&an, "out")]);
-        assert_eq!(printed.map(|(q, r)| (q.to_string(), r)), Some((text, report)));
+        assert_eq!(
+            printed.map(|(q, r)| (q.to_string(), r)),
+            Some((text, report))
+        );
         // The answers hold, and the seeded copy derives under half the rows.
         let (without, with) = same_answers(&p, &["out"]);
-        assert!(with * 2 < without, "derived {with} with magic, {without} without");
+        assert!(
+            with * 2 < without,
+            "derived {with} with magic, {without} without"
+        );
     }
 
     #[test]
@@ -944,7 +1088,11 @@ seed("a").
     fn free_site_keeps_original() {
         let mut rules = tc_left();
         rules.push(out_bound());
-        rules.push(rule("all", vec![v("a"), v("b")], vec![pos("tc", vec![v("a"), v("b")])]));
+        rules.push(rule(
+            "all",
+            vec![v("a"), v("b")],
+            vec![pos("tc", vec![v("a"), v("b")])],
+        ));
         rules.push(fact("seed", &["a"]));
         let p = program(rules);
         let (text, report) = rewritten(&p, &["out", "all"]);
@@ -973,8 +1121,14 @@ seed("a").
         rules.push(fact("seed", &["x"]));
         let p = program(rules);
         let (text, _) = rewritten(&p, &["out", "loose"]);
-        assert!(text.starts_with("tc(x, y) :- edge(x, y, \"CALLS\").\n"), "{text}");
-        assert!(text.contains("loose(a) :- seed(a), !tc(a, \"e\").\n"), "{text}");
+        assert!(
+            text.starts_with("tc(x, y) :- edge(x, y, \"CALLS\").\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("loose(a) :- seed(a), !tc(a, \"e\").\n"),
+            "{text}"
+        );
         same_answers(&p, &["out", "loose"]);
     }
 
@@ -1004,7 +1158,10 @@ seed("a").
 seed("x").
 "#;
         assert_eq!(text, expected);
-        assert_eq!(report.rewritten, pairs(&[("tc/2", "bf", 1), ("tc/2", "fb", 1)]));
+        assert_eq!(
+            report.rewritten,
+            pairs(&[("tc/2", "bf", 1), ("tc/2", "fb", 1)])
+        );
         same_answers(&p, &["out", "into"]);
     }
 
@@ -1080,7 +1237,11 @@ bad("c").
     #[test]
     fn free_sites_only_are_no_bound_site() {
         let mut rules = tc_left();
-        rules.push(rule("all", vec![v("a"), v("b")], vec![pos("tc", vec![v("a"), v("b")])]));
+        rules.push(rule(
+            "all",
+            vec![v("a"), v("b")],
+            vec![pos("tc", vec![v("a"), v("b")])],
+        ));
         let (q, report) = run(&program(rules), &["all"]);
         assert!(q.is_none());
         assert_eq!(report.skipped, skips(&[("tc/2", NO_BOUND_SITE)]));
@@ -1124,7 +1285,11 @@ bad("c").
         let p = program(vec![
             fact("w", &["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
             rule("w", xs, vec![pos("w", rotated)]),
-            rule("out", vec![v("b")], vec![pos("seed", vec![v("a")]), pos("w", site)]),
+            rule(
+                "out",
+                vec![v("b")],
+                vec![pos("seed", vec![v("a")]), pos("w", site)],
+            ),
             fact("seed", &["1"]),
         ]);
         let (q, report) = run(&p, &["out"]);
@@ -1166,10 +1331,17 @@ bad("c").
     #[test]
     fn constant_site_seeds_a_fact() {
         let mut rules = tc_right();
-        rules.push(rule("out", vec![v("b")], vec![pos("tc", vec![s("a"), v("b")])]));
+        rules.push(rule(
+            "out",
+            vec![v("b")],
+            vec![pos("tc", vec![s("a"), v("b")])],
+        ));
         let p = program(rules);
         let (text, report) = rewritten(&p, &["out"]);
-        assert!(text.contains("__m_tc__bf(\"a\").\nout(b) :- __a_tc__bf(\"a\", b).\n"), "{text}");
+        assert!(
+            text.contains("__m_tc__bf(\"a\").\nout(b) :- __a_tc__bf(\"a\", b).\n"),
+            "{text}"
+        );
         assert_eq!(report.rewritten, pairs(&[("tc/2", "bf", 1)]));
         same_answers(&p, &["out"]);
     }
@@ -1182,13 +1354,19 @@ bad("c").
             rule(
                 "tc",
                 vec![v("x"), v("z")],
-                vec![pos("tc", vec![v("x"), v("y")]), pos("tc", vec![v("y"), v("z")])],
+                vec![
+                    pos("tc", vec![v("x"), v("y")]),
+                    pos("tc", vec![v("y"), v("z")]),
+                ],
             ),
             out_bound(),
             fact("seed", &["a"]),
         ]);
         let (text, _) = rewritten(&p, &["out"]);
-        assert!(text.contains("__m_tc__bf(y) :- __m_tc__bf(x), __a_tc__bf(x, y).\n"), "{text}");
+        assert!(
+            text.contains("__m_tc__bf(y) :- __m_tc__bf(x), __a_tc__bf(x, y).\n"),
+            "{text}"
+        );
         same_answers(&p, &["out"]);
 
         // Same generation: up = USES, flat = IMPORTS, down = USES reversed.
@@ -1255,7 +1433,10 @@ out(b) :- seed(a), __a_p__bf(a, b).
 seed("a").
 "#;
         assert_eq!(text, expected);
-        assert_eq!(report.rewritten, pairs(&[("p/2", "bf", 1), ("q/2", "bf", 0)]));
+        assert_eq!(
+            report.rewritten,
+            pairs(&[("p/2", "bf", 1), ("q/2", "bf", 0)])
+        );
         same_answers(&p, &["out"]);
     }
 
@@ -1264,7 +1445,11 @@ seed("a").
         // reach reads tc; both are recursive candidates. reach is rewritten first, then
         // tc's sites are the ones inside reach's adorned copies.
         let mut rules = tc_left();
-        rules.push(rule("reach", vec![v("x"), v("y")], vec![pos("tc", vec![v("x"), v("y")])]));
+        rules.push(rule(
+            "reach",
+            vec![v("x"), v("y")],
+            vec![pos("tc", vec![v("x"), v("y")])],
+        ));
         rules.push(rule(
             "reach",
             vec![v("x"), v("z")],
@@ -1277,7 +1462,10 @@ seed("a").
         rules.push(rule(
             "out",
             vec![v("b")],
-            vec![pos("seed", vec![v("a")]), pos("reach", vec![v("a"), v("b")])],
+            vec![
+                pos("seed", vec![v("a")]),
+                pos("reach", vec![v("a"), v("b")]),
+            ],
         ));
         rules.push(fact("seed", &["a"]));
         let p = program(rules);
@@ -1293,7 +1481,10 @@ out(b) :- seed(a), __a_reach__bf(a, b).
 seed("a").
 "#;
         assert_eq!(text, expected);
-        assert_eq!(report.rewritten, pairs(&[("tc/2", "bf", 2), ("reach/2", "bf", 1)]));
+        assert_eq!(
+            report.rewritten,
+            pairs(&[("tc/2", "bf", 2), ("reach/2", "bf", 1)])
+        );
         same_answers(&p, &["out"]);
     }
 
@@ -1305,7 +1496,10 @@ seed("a").
         rules.push(rule(
             "out",
             vec![v("b")],
-            vec![Literal::cmp(CmpOp::Eq, v("m"), s("a")), pos("tc", vec![v("m"), v("b")])],
+            vec![
+                Literal::cmp(CmpOp::Eq, v("m"), s("a")),
+                pos("tc", vec![v("m"), v("b")]),
+            ],
         ));
         rules.push(rule(
             "out",
@@ -1318,7 +1512,11 @@ seed("a").
         ));
         let p = program(rules);
         let (text, report) = rewritten(&p, &["out"]);
-        assert_eq!(text.matches("__m_tc__bf(m) :- m = \"a\".\n").count(), 1, "{text}");
+        assert_eq!(
+            text.matches("__m_tc__bf(m) :- m = \"a\".\n").count(),
+            1,
+            "{text}"
+        );
         assert_eq!(report.rewritten, pairs(&[("tc/2", "bf", 2)]));
         same_answers(&p, &["out"]);
     }

@@ -114,7 +114,11 @@ impl BuildTimes {
 
 /// `[timing] persist writer=<w> <ms> dir=<dir>`
 pub(crate) fn persist_marker(writer: &str, took: Duration, dir: &Path) -> String {
-    format!("[timing] persist writer={writer} {} dir={}", ms(took), dir.display())
+    format!(
+        "[timing] persist writer={writer} {} dir={}",
+        ms(took),
+        dir.display()
+    )
 }
 
 /// `d` as milliseconds with one decimal, truncated: `12.3ms`.
@@ -169,7 +173,11 @@ mod tests {
             "[timing] build repos=2 resolve=8.0ms post=2.5ms finalize=1.0ms external_cells=0.1ms \
              total=90.0ms slowest_pass=http:6.7ms"
         );
-        let merge = BuildTimes { external_cells: None, slowest: None, ..build };
+        let merge = BuildTimes {
+            external_cells: None,
+            slowest: None,
+            ..build
+        };
         assert_eq!(
             merge.marker(),
             "[timing] build repos=2 resolve=8.0ms post=2.5ms finalize=1.0ms total=90.0ms \
@@ -186,11 +194,23 @@ mod tests {
     fn build_times_read_the_pass_report() {
         let mut report = PassReport::default();
         report.elapsed = [us(5_000), us(2_000), us(1_000)];
-        report.pass_elapsed = vec![("grpc", us(1_000)), ("http", us(4_000)), ("sort", us(1_000))];
+        report.pass_elapsed = vec![
+            ("grpc", us(1_000)),
+            ("http", us(4_000)),
+            ("sort", us(1_000)),
+        ];
         let t = BuildTimes::new(1, &report, Some(us(300)), us(20_000));
-        assert_eq!((t.resolve, t.post, t.finalize), (us(5_000), us(2_000), us(1_000)));
+        assert_eq!(
+            (t.resolve, t.post, t.finalize),
+            (us(5_000), us(2_000), us(1_000))
+        );
         assert_eq!(t.slowest, Some(("http", us(4_000))));
         assert_eq!(t.external_cells, Some(us(300)));
-        assert!(t.marker().ends_with(" total=20.0ms slowest_pass=http:4.0ms"), "{}", t.marker());
+        assert!(
+            t.marker()
+                .ends_with(" total=20.0ms slowest_pass=http:4.0ms"),
+            "{}",
+            t.marker()
+        );
     }
 }

@@ -69,7 +69,13 @@ impl Diagnostic {
         predicate: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(Severity::Error, span, source_name, predicate, message.into())
+        Self::new(
+            Severity::Error,
+            span,
+            source_name,
+            predicate,
+            message.into(),
+        )
     }
 
     /// A warning at `span` of `source_name`, in the rule for `predicate` when known.
@@ -79,7 +85,13 @@ impl Diagnostic {
         predicate: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(Severity::Warning, span, source_name, predicate, message.into())
+        Self::new(
+            Severity::Warning,
+            span,
+            source_name,
+            predicate,
+            message.into(),
+        )
     }
 
     fn new(
@@ -126,14 +138,23 @@ pub enum RulesError {
     Invalid(Vec<Diagnostic>),
     /// Evaluation stopped: `predicate` (`name/arity`, its first rule at
     /// `source:line`) had derived `rows` rows against the budget `cap`.
-    Budget { predicate: String, source: String, line: u32, rows: usize, cap: usize },
+    Budget {
+        predicate: String,
+        source: String,
+        line: u32,
+        rows: usize,
+        cap: usize,
+    },
     /// A builtin (`name/arity`) returned an error.
     Builtin { name: String, message: String },
     /// A run-time type error; `message` names the predicate.
     Type { predicate: String, message: String },
     /// An output was asked for that the program does not define; `known` lists the
     /// predicates it does define, as `name/arity`.
-    Unknown { predicate: String, known: Vec<String> },
+    Unknown {
+        predicate: String,
+        known: Vec<String>,
+    },
 }
 
 impl RulesError {
@@ -188,12 +209,24 @@ impl fmt::Display for RulesError {
                 }
                 Ok(())
             }
-            RulesError::Budget { predicate, source, line, rows, cap } => {
-                write!(f, "rule evaluation stopped: `{predicate}` ({source}:{line}) ")?;
+            RulesError::Budget {
+                predicate,
+                source,
+                line,
+                rows,
+                cap,
+            } => {
+                write!(
+                    f,
+                    "rule evaluation stopped: `{predicate}` ({source}:{line}) "
+                )?;
                 if rows == cap {
                     write!(f, "reached {rows} derived rows, the row budget.")?;
                 } else {
-                    write!(f, "reached {rows} derived rows against a row budget of {cap}.")?;
+                    write!(
+                        f,
+                        "reached {rows} derived rows against a row budget of {cap}."
+                    )?;
                 }
                 write!(
                     f,
@@ -211,7 +244,10 @@ impl fmt::Display for RulesError {
                 let mut known: Vec<&str> = known.iter().map(String::as_str).collect();
                 known.sort_unstable();
                 if known.is_empty() {
-                    write!(f, "unknown output `{predicate}`; the program defines no predicate")
+                    write!(
+                        f,
+                        "unknown output `{predicate}`; the program defines no predicate"
+                    )
                 } else {
                     write!(
                         f,
@@ -231,7 +267,13 @@ mod tests {
     use super::*;
 
     fn at(line: u32, col: u32, start: u32) -> Span {
-        Span { source: 0, start, end: start + 1, line, col }
+        Span {
+            source: 0,
+            start,
+            end: start + 1,
+            line,
+            col,
+        }
     }
 
     #[test]
@@ -298,15 +340,27 @@ mod tests {
             name: "in_scope/2".into(),
             message: "scope `nowhere` holds no node".into(),
         };
-        assert_eq!(b.to_string(), "builtin `in_scope/2` failed: scope `nowhere` holds no node");
+        assert_eq!(
+            b.to_string(),
+            "builtin `in_scope/2` failed: scope `nowhere` holds no node"
+        );
 
         let u = RulesError::Unknown {
             predicate: "nope".into(),
             known: vec!["b/2".into(), "a/1".into()],
         };
-        assert_eq!(u.to_string(), "unknown output `nope`; the program defines a/1, b/2");
-        let none = RulesError::Unknown { predicate: "nope".into(), known: Vec::new() };
-        assert_eq!(none.to_string(), "unknown output `nope`; the program defines no predicate");
+        assert_eq!(
+            u.to_string(),
+            "unknown output `nope`; the program defines a/1, b/2"
+        );
+        let none = RulesError::Unknown {
+            predicate: "nope".into(),
+            known: Vec::new(),
+        };
+        assert_eq!(
+            none.to_string(),
+            "unknown output `nope`; the program defines no predicate"
+        );
 
         let t = RulesError::Type {
             predicate: "w/2".into(),
@@ -315,14 +369,25 @@ mod tests {
         assert_eq!(t.to_string(), "sum over a non-integer value in `w/2`");
 
         let lexical = Diagnostic::error(at(1, 16, 15), "rules", None, "unterminated string");
-        assert_eq!(lexical.to_string(), "rules:1:16: error: unterminated string");
+        assert_eq!(
+            lexical.to_string(),
+            "rules:1:16: error: unterminated string"
+        );
 
         // Two diagnostics, recorded out of source order, render one per line in
         // source order; diagnostics() keeps the recorded order.
-        let second =
-            Diagnostic::error(at(4, 2, 60), "rules", Some("w/1"), "expected a term, found `)`");
-        let first =
-            Diagnostic::error(at(2, 1, 20), "rules", Some("v/1"), "unknown aggregate `avg`");
+        let second = Diagnostic::error(
+            at(4, 2, 60),
+            "rules",
+            Some("w/1"),
+            "expected a term, found `)`",
+        );
+        let first = Diagnostic::error(
+            at(2, 1, 20),
+            "rules",
+            Some("v/1"),
+            "unknown aggregate `avg`",
+        );
         let inv = RulesError::Invalid(vec![second.clone(), first.clone()]);
         assert_eq!(
             inv.to_string(),

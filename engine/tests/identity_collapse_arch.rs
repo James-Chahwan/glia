@@ -31,12 +31,20 @@ fn write(root: &Path, rel: &str, text: &str) {
 }
 
 fn build(paths: &[PathBuf]) -> GenerateResult {
-    let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap_or_else(|e| panic!("{paths:?} builds: {e}"))
 }
 
 fn arch(r: &GenerateResult, collapse: &Collapse) -> ServiceMap {
-    service_map_collapsed(&r.merged, &r.repo_labels, &default_keying(&r.merged), collapse)
+    service_map_collapsed(
+        &r.merged,
+        &r.repo_labels,
+        &default_keying(&r.merged),
+        collapse,
+    )
 }
 
 fn on(r: &GenerateResult) -> Collapse {
@@ -44,11 +52,22 @@ fn on(r: &GenerateResult) -> Collapse {
 }
 
 /// `(from, to, channel, count, confidence)` of every link over `mechanism`.
-fn rows<'a>(map: &'a ServiceMap, mechanism: &str) -> Vec<(&'a str, &'a str, &'a str, usize, &'a str)> {
+fn rows<'a>(
+    map: &'a ServiceMap,
+    mechanism: &str,
+) -> Vec<(&'a str, &'a str, &'a str, usize, &'a str)> {
     map.links
         .iter()
         .filter(|l| l.mechanism == mechanism)
-        .map(|l: &ServiceLink| (l.from.as_str(), l.to.as_str(), l.channel.as_str(), l.count, l.confidence))
+        .map(|l: &ServiceLink| {
+            (
+                l.from.as_str(),
+                l.to.as_str(),
+                l.channel.as_str(),
+                l.count,
+                l.confidence,
+            )
+        })
         .collect()
 }
 
@@ -77,9 +96,15 @@ fn three_react_repos() -> (tempfile::TempDir, GenerateResult) {
         write(
             &root,
             "package.json",
-            &format!("{{\"name\": \"{repo}\", \"version\": \"1.0.0\", \"dependencies\": {{\"react\": \"^18.2.0\"}}}}\n"),
+            &format!(
+                "{{\"name\": \"{repo}\", \"version\": \"1.0.0\", \"dependencies\": {{\"react\": \"^18.2.0\"}}}}\n"
+            ),
         );
-        write(&root, "src/index.js", &format!("export function {repo}Main() {{\n  return \"{repo}\";\n}}\n"));
+        write(
+            &root,
+            "src/index.js",
+            &format!("export function {repo}Main() {{\n  return \"{repo}\";\n}}\n"),
+        );
         paths.push(root);
     }
     let r = build(&paths);
@@ -92,7 +117,12 @@ fn three_repo_class_links_every_pair() {
     let classes = same_as_classes(&r);
     assert_eq!(classes.len(), 1, "control: one react class");
     assert_eq!(classes.members(), 3);
-    let star = r.merged.cross_edges.iter().filter(|e| e.category == edge_category::SAME_AS).count();
+    let star = r
+        .merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count();
     assert_eq!(star, 2, "control: stored as a two-edge star");
 
     let map = arch(&r, &on(&r));
@@ -116,7 +146,10 @@ fn three_repo_class_links_every_pair() {
     // The PACKAGE_DEPs place the links, never the summaries.
     let off = arch(&r, &Collapse::off());
     let summaries = |m: &ServiceMap| {
-        m.services.iter().map(|s| (s.id.clone(), s.nodes, s.files)).collect::<Vec<_>>()
+        m.services
+            .iter()
+            .map(|s| (s.id.clone(), s.nodes, s.files))
+            .collect::<Vec<_>>()
     };
     assert_eq!(summaries(&map), summaries(&off));
     assert_eq!(map.unlocated_nodes, off.unlocated_nodes, "still unlocated");
@@ -124,42 +157,81 @@ fn three_repo_class_links_every_pair() {
     // Off: the raw star, two links, both touching the center's service.
     let raw = rows(&off, "SAME_AS");
     assert_eq!(raw.len(), 2, "{raw:#?}");
-    assert!(raw.iter().all(|&(_, _, c, n, conf)| (c, n, conf) == ("react", 1, "strong")));
+    assert!(
+        raw.iter()
+            .all(|&(_, _, c, n, conf)| (c, n, conf) == ("react", 1, "strong"))
+    );
     let center = ["alpha", "beta", "gamma"]
         .into_iter()
         .find(|s| raw.iter().all(|&(f, t, ..)| f == *s || t == *s))
         .expect("both star links share the center's service");
-    assert!(raw.iter().all(|&(f, t, ..)| f < t), "SAME_AS is symmetric: from < to ({raw:?}, center {center})");
+    assert!(
+        raw.iter().all(|&(f, t, ..)| f < t),
+        "SAME_AS is symmetric: from < to ({raw:?}, center {center})"
+    );
 
     // service_map / service_map_with collapse by default (no labels needed).
     assert!(Collapse::default().enabled);
     let dflt = arch(&r, &Collapse::default());
     assert_eq!(json(&service_map(&r.merged, &r.repo_labels)), json(&dflt));
-    assert_eq!(json(&service_map_with(&r.merged, &r.repo_labels, &default_keying(&r.merged))), json(&dflt));
-    assert_eq!(json(&dflt), json(&map), "the labels only name also_in rows, which arch has none of");
+    assert_eq!(
+        json(&service_map_with(
+            &r.merged,
+            &r.repo_labels,
+            &default_keying(&r.merged)
+        )),
+        json(&dflt)
+    );
+    assert_eq!(
+        json(&dflt),
+        json(&map),
+        "the labels only name also_in rows, which arch has none of"
+    );
 }
 
 #[test]
 fn heuristic_links_weak() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures/identity-vendored-subtree");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/identity-vendored-subtree");
     let r = build(&[fixture.join("money"), fixture.join("shop")]);
     let classes = same_as_classes(&r);
-    assert!(classes.len() >= 2, "control: the vendored candidates, {} classes", classes.len());
+    assert!(
+        classes.len() >= 2,
+        "control: the vendored candidates, {} classes",
+        classes.len()
+    );
 
     let map = arch(&r, &on(&r));
     let links = rows(&map, "SAME_AS");
-    assert_eq!(links.len(), classes.len(), "one row per (service pair, class): {links:#?}");
+    assert_eq!(
+        links.len(),
+        classes.len(),
+        "one row per (service pair, class): {links:#?}"
+    );
     assert!(
-        links.iter().all(|&(f, t, _, n, conf)| (f, t, n, conf) == ("money", "shop", 1, "weak")),
+        links
+            .iter()
+            .all(|&(f, t, _, n, conf)| (f, t, n, conf) == ("money", "shop", 1, "weak")),
         "every candidate class money <-> shop, from < to, HEURISTIC = weak: {links:#?}"
     );
     let mut channels: Vec<&str> = links.iter().map(|l| l.2).collect();
     channels.sort_unstable();
     channels.dedup();
-    assert_eq!(channels.len(), links.len(), "one class per channel: {channels:?}");
-    assert!(channels.contains(&"formatCents") && channels.contains(&"parseCents"), "{channels:?}");
+    assert_eq!(
+        channels.len(),
+        links.len(),
+        "one class per channel: {channels:?}"
+    );
+    assert!(
+        channels.contains(&"formatCents") && channels.contains(&"parseCents"),
+        "{channels:?}"
+    );
     let total: usize = links.iter().map(|l| l.3).sum();
-    assert_eq!(total, classes.len(), "the link counts sum to the vendored classes");
+    assert_eq!(
+        total,
+        classes.len(),
+        "the link counts sum to the vendored classes"
+    );
 
     // Candidates never collapse, so every two-member class reads as its one
     // star edge did: Off is the same rows, now oriented from < to as well.
@@ -181,7 +253,11 @@ fn flow_counts_by_class() {
          @app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return {\"orders\": []}\n",
     );
     let web = td.path().join("web");
-    write(&web, "package.json", "{\"name\": \"web\", \"version\": \"1.0.0\"}\n");
+    write(
+        &web,
+        "package.json",
+        "{\"name\": \"web\", \"version\": \"1.0.0\"}\n",
+    );
     write(
         &web,
         "docs/a/openapi.yaml",
@@ -197,7 +273,11 @@ fn flow_counts_by_class() {
     );
     let r = build(&[api, web]);
     let classes = same_as_classes(&r);
-    assert_eq!((classes.len(), classes.members()), (1, 2), "control: the two ops are one class");
+    assert_eq!(
+        (classes.len(), classes.members()),
+        (1, 2),
+        "control: the two ops are one class"
+    );
 
     let map = arch(&r, &on(&r));
     assert_eq!(
@@ -206,10 +286,20 @@ fn flow_counts_by_class() {
         "one op, documenting its route once: {:#?}",
         map.links
     );
-    assert!(rows(&map, "SAME_AS").is_empty(), "the class sits in web: a self link");
+    assert!(
+        rows(&map, "SAME_AS").is_empty(),
+        "the class sits in web: a self link"
+    );
     let off = arch(&r, &Collapse::off());
-    assert_eq!(rows(&off, "DOCUMENTS"), [("web", "api", "GET /orders", 2, "medium")], "control: one per copy");
-    assert_eq!(map.self_links, off.self_links, "the SAME_AS self link either way");
+    assert_eq!(
+        rows(&off, "DOCUMENTS"),
+        [("web", "api", "GET /orders", 2, "medium")],
+        "control: one per copy"
+    );
+    assert_eq!(
+        map.self_links, off.self_links,
+        "the SAME_AS self link either way"
+    );
     assert_eq!(map.self_links, 1);
 }
 
@@ -217,10 +307,16 @@ fn flow_counts_by_class() {
 /// answer, byte for byte (`arch_service_map.rs` / `service_map.rs` pin it).
 #[test]
 fn class_free_identical() {
-    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/xstack-ts-go-http");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bench/substrate-gap/fixtures/xstack-ts-go-http"
+    );
     let r = generate_one(fixture).expect("fixture builds");
     assert!(
-        !r.merged.cross_edges.iter().any(|e| e.category == edge_category::SAME_AS),
+        !r.merged
+            .cross_edges
+            .iter()
+            .any(|e| e.category == edge_category::SAME_AS),
         "control: class-free"
     );
     let head = json(&service_map(&r.merged, &r.repo_labels));

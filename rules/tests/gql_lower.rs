@@ -42,7 +42,11 @@ fn tables() -> DomainTables {
 }
 
 fn id(name: &str) -> NodeId {
-    let kind = if name.starts_with('f') { FUNCTION } else { MODULE };
+    let kind = if name.starts_with('f') {
+        FUNCTION
+    } else {
+        MODULE
+    };
     NodeId::from_parts("gql-lower-test", RepoId(0), kind, name)
 }
 
@@ -51,7 +55,10 @@ fn id(name: &str) -> NodeId {
 /// IMPORTS m1->m2, m2->m3.
 fn fixture() -> MemSource {
     let mut g = MemSource::new(tables());
-    g.attr(AttrDecl { name: "qname", ty: ColType::Str });
+    g.attr(AttrDecl {
+        name: "qname",
+        ty: ColType::Str,
+    });
     for n in ["f1", "f2", "f3", "f4", "m1", "m2", "m3"] {
         let kind = if n.starts_with('f') { FUNCTION } else { MODULE };
         g.node(id(n), kind, n);
@@ -94,9 +101,16 @@ fn rows(text: &str) -> Vec<Vec<String>> {
         Ok(ev) => ev,
         Err(e) => panic!("{text}\n{}\n{e}", c.program),
     };
-    assert!(ev.warnings().is_empty(), "{text}: {:?}\n{}", ev.warnings(), c.program);
+    assert!(
+        ev.warnings().is_empty(),
+        "{text}: {:?}\n{}",
+        ev.warnings(),
+        c.program
+    );
     let rows = ev.rows(&c.output).expect("result rows");
-    rows.iter().map(|r| r.values.iter().map(|v| ev.render(v)).collect()).collect()
+    rows.iter()
+        .map(|r| r.values.iter().map(|v| ev.render(v)).collect())
+        .collect()
 }
 
 /// The rendered rows, one column each.
@@ -137,7 +151,12 @@ fn typed_hop() {
     );
     assert_eq!(
         rows(text),
-        [r(&["f1", "f2"]), r(&["f1", "f4"]), r(&["f2", "f3"]), r(&["f3", "f4"])]
+        [
+            r(&["f1", "f2"]),
+            r(&["f1", "f4"]),
+            r(&["f2", "f3"]),
+            r(&["f3", "f4"])
+        ]
     );
 }
 
@@ -145,21 +164,35 @@ fn typed_hop() {
 fn reaches_and_bounds() {
     let star = "MATCH (a {qname: 'f1'})-[:CALLS*]->(b) RETURN b.qname";
     assert_eq!(col(star), ["f2", "f3", "f4"]);
-    assert!(compile(star).program.to_string().contains("reaches(a, b, \"CALLS\")"));
+    assert!(
+        compile(star)
+            .program
+            .to_string()
+            .contains("reaches(a, b, \"CALLS\")")
+    );
     // Walk length exactly 2: f4 is reached at 1 (f1 -> f4) and 3, never at 2.
-    assert_eq!(col("MATCH (a {qname: 'f1'})-[:CALLS*2..2]->(b) RETURN b.qname"), ["f3"]);
+    assert_eq!(
+        col("MATCH (a {qname: 'f1'})-[:CALLS*2..2]->(b) RETURN b.qname"),
+        ["f3"]
+    );
     assert_eq!(
         col("MATCH (a {qname: 'f1'})-[:CALLS*0..]->(b) RETURN b.qname"),
         ["f1", "f2", "f3", "f4"]
     );
     // Every spelling of one bound lowers alike: {2,} is two-or-more.
-    assert_eq!(col("MATCH (a {qname: 'f1'})-[:CALLS]->{2,}(b) RETURN b.qname"), ["f3", "f4"]);
+    assert_eq!(
+        col("MATCH (a {qname: 'f1'})-[:CALLS]->{2,}(b) RETURN b.qname"),
+        ["f3", "f4"]
+    );
     assert_eq!(
         col("MATCH (a {qname: 'f1'})-[:CALLS*1..3]->(b) RETURN b.qname"),
         ["f2", "f3", "f4"]
     );
     // <- reads right to left; an untyped quantifier walks every category.
-    assert_eq!(col("MATCH (b {qname: 'f4'})<-[:CALLS*]-(a) RETURN a.qname"), ["f1", "f2", "f3"]);
+    assert_eq!(
+        col("MATCH (b {qname: 'f4'})<-[:CALLS*]-(a) RETURN a.qname"),
+        ["f1", "f2", "f3"]
+    );
     assert_eq!(
         col("MATCH (m {qname: 'm1'})-[*]->(x) RETURN x"),
         ["f1", "f2", "f3", "f4", "m2", "m3"]
@@ -184,7 +217,12 @@ fn not_pattern_is_a_negated_helper() {
     let text = "MATCH (f:FUNCTION) WHERE NOT ()-[:CALLS]->(f) RETURN f.qname";
     assert_eq!(col(text), ["f1"]);
     let c = compile(text);
-    let not0 = c.program.rules.iter().filter(|r| r.head.pred == "gql_not0").count();
+    let not0 = c
+        .program
+        .rules
+        .iter()
+        .filter(|r| r.head.pred == "gql_not0")
+        .count();
     assert_eq!(not0, 1);
     assert_eq!(
         c.program.to_string(),
@@ -202,7 +240,12 @@ fn not_pattern_is_a_negated_helper() {
     );
     // A pattern sharing no variable negates an arity-0 helper: some IMPORTS edge exists.
     let closed = "MATCH (f:FUNCTION) WHERE NOT ()-[:IMPORTS]->() RETURN f";
-    assert!(compile(closed).program.to_string().contains("gql_not0 :- edge(_, _, \"IMPORTS\")."));
+    assert!(
+        compile(closed)
+            .program
+            .to_string()
+            .contains("gql_not0 :- edge(_, _, \"IMPORTS\").")
+    );
     assert_eq!(col(closed), Vec::<String>::new());
     assert_eq!(
         col("MATCH (f:FUNCTION) WHERE NOT ()-[:IMPORTS]->(f) RETURN f"),
@@ -214,9 +257,14 @@ fn not_pattern_is_a_negated_helper() {
 #[test]
 fn analysis_errors_point_into_the_query() {
     let c = compile("MATCH (a:ROUTEE) RETURN a");
-    let err = evaluate(&c.program, &fixture(), &Options::default()).err().expect("unknown kind");
+    let err = evaluate(&c.program, &fixture(), &Options::default())
+        .err()
+        .expect("unknown kind");
     let text = err.to_string();
-    assert!(text.starts_with("<gql>:1:10: error: unknown node kind `ROUTEE`"), "{text}");
+    assert!(
+        text.starts_with("<gql>:1:10: error: unknown node kind `ROUTEE`"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -224,7 +272,12 @@ fn dnf_and_in() {
     let text = "MATCH (a:FUNCTION) WHERE a.qname = 'f1' OR a.qname IN ['f2', 'f3'] RETURN a.qname";
     assert_eq!(col(text), ["f1", "f2", "f3"]);
     let c = compile(text);
-    let result = c.program.rules.iter().filter(|r| r.head.pred == "result").count();
+    let result = c
+        .program
+        .rules
+        .iter()
+        .filter(|r| r.head.pred == "result")
+        .count();
     assert_eq!(result, 2, "{}", c.program);
     let facts: Vec<String> = c
         .program
@@ -244,7 +297,10 @@ fn dnf_and_in() {
     let or3 = "(a.qname = 'f1' OR a.qname = 'f2' OR a.qname = 'f3')";
     let big =
         format!("MATCH (a:FUNCTION) WHERE {or3} AND {or3} AND {or3} AND {or3} RETURN a.qname");
-    assert_eq!(errors(&big), ["the query expands to 81 alternatives (limit 64): split it"]);
+    assert_eq!(
+        errors(&big),
+        ["the query expands to 81 alternatives (limit 64): split it"]
+    );
 }
 
 #[test]
@@ -253,32 +309,62 @@ fn aggregates_group() {
         "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a.qname AS f, count(b) AS n ORDER BY n DESC";
     let c = compile(text);
     assert_eq!(c.columns, ["f", "n"]);
-    assert_eq!(c.order_by, [OrderKey { column: 1, descending: true }]);
+    assert_eq!(
+        c.order_by,
+        [OrderKey {
+            column: 1,
+            descending: true
+        }]
+    );
     assert_eq!(
         c.program.to_string(),
         "result(_g0, count(b)) :- node(a, \"FUNCTION\"), edge(a, b, \"CALLS\"), qname(a, _g0).\n"
     );
-    assert_eq!(rows(text), [r(&["f1", "2"]), r(&["f2", "1"]), r(&["f3", "1"])]);
+    assert_eq!(
+        rows(text),
+        [r(&["f1", "2"]), r(&["f2", "1"]), r(&["f3", "1"])]
+    );
     // count(*) counts distinct bindings of every MATCH variable; DISTINCT changes nothing.
     assert_eq!(col("MATCH (a)-[:CALLS]->(b) RETURN count(*)"), ["4"]);
-    assert_eq!(col("MATCH (a)-[:CALLS]->(b) RETURN count(DISTINCT a)"), ["3"]);
+    assert_eq!(
+        col("MATCH (a)-[:CALLS]->(b) RETURN count(DISTINCT a)"),
+        ["3"]
+    );
     // ORDER BY and LIMIT are kept for the engine (it sorts rendered values, DB.7c), so
     // the program still answers every group.
     let text =
         "MATCH (m:MODULE)-[:DEFINES]->(f) RETURN m.qname, count(f) AS n ORDER BY m.qname LIMIT 1";
     assert_eq!(col(text), ["m1,2", "m2,2"]);
     let c = compile(text);
-    assert_eq!((c.order_by, c.limit), (vec![OrderKey { column: 0, descending: false }], Some(1)));
+    assert_eq!(
+        (c.order_by, c.limit),
+        (
+            vec![OrderKey {
+                column: 0,
+                descending: false
+            }],
+            Some(1)
+        )
+    );
     // An aggregate over several alternatives reads one gql_match union.
     let union = "MATCH (a:FUNCTION|MODULE)-[:CALLS|DEFINES]->(b) RETURN a.qname, count(b)";
     assert_eq!(col(union), ["f1,2", "f2,1", "f3,1", "m1,2", "m2,2"]);
     let program = compile(union).program.to_string();
-    assert!(program.contains("result(_g0, count(b)) :- gql_match0(_g0, b)."), "{program}");
+    assert!(
+        program.contains("result(_g0, count(b)) :- gql_match0(_g0, b)."),
+        "{program}"
+    );
     assert_eq!(compile(union).limit, None);
     let limited = compile("MATCH (a) RETURN a ORDER BY a LIMIT 3");
     assert_eq!(
         (limited.order_by, limited.limit),
-        (vec![OrderKey { column: 0, descending: false }], Some(3))
+        (
+            vec![OrderKey {
+                column: 0,
+                descending: false
+            }],
+            Some(3)
+        )
     );
 }
 
@@ -288,7 +374,13 @@ fn homomorphism() {
     assert!(got.contains(&r(&["f1", "f1"])), "{got:?}");
     assert_eq!(
         got,
-        [r(&["f1", "f1"]), r(&["f1", "f3"]), r(&["f2", "f2"]), r(&["f3", "f1"]), r(&["f3", "f3"])]
+        [
+            r(&["f1", "f1"]),
+            r(&["f1", "f3"]),
+            r(&["f2", "f2"]),
+            r(&["f3", "f1"]),
+            r(&["f3", "f3"])
+        ]
     );
 }
 
@@ -299,8 +391,14 @@ fn missing_attribute_drops_the_row() {
     assert_eq!(col("MATCH (m:MODULE) RETURN m.qname"), ["m1", "m2"]);
     assert_eq!(col("MATCH (m:MODULE) RETURN m"), ["m1", "m2", "m3"]);
     // ... also under NOT: a missing attribute never satisfies a negated test.
-    assert_eq!(col("MATCH (m:MODULE) WHERE NOT m.qname STARTS WITH 'x' RETURN m"), ["m1", "m2"]);
-    assert_eq!(col("MATCH (m:MODULE) WHERE NOT m.qname = 'm1' RETURN m"), ["m2"]);
+    assert_eq!(
+        col("MATCH (m:MODULE) WHERE NOT m.qname STARTS WITH 'x' RETURN m"),
+        ["m1", "m2"]
+    );
+    assert_eq!(
+        col("MATCH (m:MODULE) WHERE NOT m.qname = 'm1' RETURN m"),
+        ["m2"]
+    );
 }
 
 #[test]
@@ -336,23 +434,39 @@ fn relationship_types_and_directions() {
         col("MATCH (a {qname: 'f2'})-[r:CALLS]-(b) RETURN b, type(r)"),
         ["f1,CALLS", "f3,CALLS"]
     );
-    assert_eq!(col("MATCH (a)<-[:DEFINES]-(m {qname: 'm2'}) RETURN a"), ["f3", "f4"]);
+    assert_eq!(
+        col("MATCH (a)<-[:DEFINES]-(m {qname: 'm2'}) RETURN a"),
+        ["f3", "f4"]
+    );
     // Two labels are two alternatives.
-    assert_eq!(col("MATCH (a:FUNCTION|MODULE)-[:IMPORTS]->(b) RETURN a, b"), ["m1,m2", "m2,m3"]);
+    assert_eq!(
+        col("MATCH (a:FUNCTION|MODULE)-[:IMPORTS]->(b) RETURN a, b"),
+        ["m1,m2", "m2,m3"]
+    );
 }
 
 #[test]
 fn conditions_and_builtins() {
-    assert_eq!(col("MATCH (a:FUNCTION) WHERE a.qname > 'f2' RETURN a"), ["f3", "f4"]);
-    assert_eq!(col("MATCH (a:FUNCTION) WHERE NOT a.qname > 'f2' RETURN a"), ["f1", "f2"]);
-    assert_eq!(col("MATCH (a) WHERE a.qname ENDS WITH '1' RETURN a"), ["f1", "m1"]);
+    assert_eq!(
+        col("MATCH (a:FUNCTION) WHERE a.qname > 'f2' RETURN a"),
+        ["f3", "f4"]
+    );
+    assert_eq!(
+        col("MATCH (a:FUNCTION) WHERE NOT a.qname > 'f2' RETURN a"),
+        ["f1", "f2"]
+    );
+    assert_eq!(
+        col("MATCH (a) WHERE a.qname ENDS WITH '1' RETURN a"),
+        ["f1", "m1"]
+    );
     assert_eq!(
         col("MATCH (a) WHERE a.qname CONTAINS 'm' AND NOT a.qname CONTAINS '2' RETURN a"),
         ["m1"]
     );
     // A condition helper's head is the variables it shares (the node and its attribute).
-    let program =
-        compile("MATCH (a) WHERE NOT a.qname STARTS WITH 'f' RETURN a").program.to_string();
+    let program = compile("MATCH (a) WHERE NOT a.qname STARTS WITH 'f' RETURN a")
+        .program
+        .to_string();
     assert!(
         program.contains("gql_not0(a, _g0) :- qname(a, _g0), starts_with(_g0, \"f\")."),
         "{program}"
@@ -360,7 +474,11 @@ fn conditions_and_builtins() {
     // A function call is the builtin of that name: `in_scope` is unknown to this source,
     // so analysis (later) names it at the call; the lowering just emits it.
     let call = compile("MATCH (a) WHERE in_scope(a, 'web') RETURN a");
-    assert!(call.program.to_string().contains("in_scope(a, \"web\")"), "{}", call.program);
+    assert!(
+        call.program.to_string().contains("in_scope(a, \"web\")"),
+        "{}",
+        call.program
+    );
 }
 
 #[test]
@@ -368,7 +486,13 @@ fn path_column() {
     let c = compile("MATCH p = (a {qname: 'f1'})-[:CALLS*]->(b) RETURN b.qname, p ORDER BY p");
     assert_eq!(c.columns, ["b.qname", "p"]);
     assert_eq!(c.path_column, Some(1));
-    assert_eq!(c.order_by, [OrderKey { column: 1, descending: false }]);
+    assert_eq!(
+        c.order_by,
+        [OrderKey {
+            column: 1,
+            descending: false
+        }]
+    );
     // The path column holds the path's start; one trailing column, its end, keeps
     // two paths with different endpoints apart.
     let head = &c.program.rules[0].head;
@@ -406,7 +530,12 @@ fn anchor_names_the_first_property_variable() {
     );
     assert_eq!(
         rows(text),
-        [r(&["f1", "f2"]), r(&["f1", "f4"]), r(&["f2", "f3"]), r(&["f3", "f4"])]
+        [
+            r(&["f1", "f2"]),
+            r(&["f1", "f4"]),
+            r(&["f2", "f3"]),
+            r(&["f3", "f4"])
+        ]
     );
     // The first property, whichever pattern end it reads; type(r) is no node.
     let flipped = compile("MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN b.qname AS to, a.qname");

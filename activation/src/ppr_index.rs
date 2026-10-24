@@ -40,7 +40,11 @@ pub struct PprIndex {
 
 /// The sorted `(category, bits)` fingerprint of a config's edge weights.
 fn weight_fingerprint(config: &ActivationConfig) -> Vec<(EdgeCategoryId, u64)> {
-    let mut w: Vec<(EdgeCategoryId, u64)> = config.edge_weights.iter().map(|(&c, &w)| (c, w.to_bits())).collect();
+    let mut w: Vec<(EdgeCategoryId, u64)> = config
+        .edge_weights
+        .iter()
+        .map(|(&c, &w)| (c, w.to_bits()))
+        .collect();
     w.sort_unstable_by_key(|&(c, _)| c.0);
     w
 }
@@ -49,19 +53,32 @@ impl PprIndex {
     /// Index `node_ids` and `edges` (walked in iterator order) under
     /// `config`. An edge whose category weighs 0 or less, or with an endpoint
     /// that is no node, is skipped.
-    pub fn build<'e>(node_ids: &[NodeId], edges: impl Iterator<Item = &'e Edge>, config: &ActivationConfig) -> Self {
+    pub fn build<'e>(
+        node_ids: &[NodeId],
+        edges: impl Iterator<Item = &'e Edge>,
+        config: &ActivationConfig,
+    ) -> Self {
         let n = node_ids.len();
-        let id_to_idx: HashMap<NodeId, usize> = node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let id_to_idx: HashMap<NodeId, usize> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
 
         // (target, source, weight) in ppr_vector's push order.
         let mut events: Vec<(usize, usize, f64)> = Vec::new();
         let mut out_w: Vec<f64> = vec![0.0; n];
         for edge in edges {
-            let w = config.edge_weights.get(&edge.category).copied().unwrap_or(1.0);
+            let w = config
+                .edge_weights
+                .get(&edge.category)
+                .copied()
+                .unwrap_or(1.0);
             if w <= 0.0 {
                 continue;
             }
-            let (Some(&fi), Some(&ti)) = (id_to_idx.get(&edge.from), id_to_idx.get(&edge.to)) else {
+            let (Some(&fi), Some(&ti)) = (id_to_idx.get(&edge.from), id_to_idx.get(&edge.to))
+            else {
                 continue;
             };
             match config.direction {
@@ -123,7 +140,10 @@ impl PprIndex {
             return (Vec::new(), 0);
         }
         let mut personalization = vec![0.0; n];
-        let seed_count = seeds.iter().filter(|s| self.id_to_idx.contains_key(s)).count();
+        let seed_count = seeds
+            .iter()
+            .filter(|s| self.id_to_idx.contains_key(s))
+            .count();
         if seed_count == 0 {
             return (Vec::new(), 0);
         }
@@ -174,13 +194,23 @@ impl PprIndex {
             for i in 0..n {
                 let propagated: f64 = self.inc[self.start[i]..self.start[i + 1]]
                     .iter()
-                    .map(|&(j, w)| if self.out_w[j] > 0.0 { scores[j] * w / self.out_w[j] } else { 0.0 })
+                    .map(|&(j, w)| {
+                        if self.out_w[j] > 0.0 {
+                            scores[j] * w / self.out_w[j]
+                        } else {
+                            0.0
+                        }
+                    })
                     .sum();
-                new_scores[i] =
-                    (1.0 - d) * personalization[i] + d * (propagated + dangling_sum * personalization[i]);
+                new_scores[i] = (1.0 - d) * personalization[i]
+                    + d * (propagated + dangling_sum * personalization[i]);
             }
 
-            let diff: f64 = scores.iter().zip(new_scores.iter()).map(|(a, b)| (a - b).abs()).sum();
+            let diff: f64 = scores
+                .iter()
+                .zip(new_scores.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum();
             std::mem::swap(&mut scores, &mut new_scores);
             iterations += 1;
 
@@ -242,13 +272,21 @@ pub(crate) fn ppr_vector_head<'e>(
         return (Vec::new(), 0);
     }
 
-    let id_to_idx: HashMap<NodeId, usize> = node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let id_to_idx: HashMap<NodeId, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
 
     let mut incoming: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
     let mut out_weight: Vec<f64> = vec![0.0; n];
 
     for edge in edges {
-        let w = config.edge_weights.get(&edge.category).copied().unwrap_or(1.0);
+        let w = config
+            .edge_weights
+            .get(&edge.category)
+            .copied()
+            .unwrap_or(1.0);
         if w <= 0.0 {
             continue;
         }
@@ -296,18 +334,32 @@ pub(crate) fn ppr_vector_head<'e>(
     for _ in 0..config.max_iterations {
         let mut new_scores = vec![0.0; n];
 
-        let dangling_sum: f64 = (0..n).filter(|&j| out_weight[j] == 0.0).map(|j| scores[j]).sum();
+        let dangling_sum: f64 = (0..n)
+            .filter(|&j| out_weight[j] == 0.0)
+            .map(|j| scores[j])
+            .sum();
 
         for i in 0..n {
             let propagated: f64 = incoming[i]
                 .iter()
-                .map(|&(j, w)| if out_weight[j] > 0.0 { scores[j] * w / out_weight[j] } else { 0.0 })
+                .map(|&(j, w)| {
+                    if out_weight[j] > 0.0 {
+                        scores[j] * w / out_weight[j]
+                    } else {
+                        0.0
+                    }
+                })
                 .sum();
 
-            new_scores[i] = (1.0 - d) * personalization[i] + d * (propagated + dangling_sum * personalization[i]);
+            new_scores[i] = (1.0 - d) * personalization[i]
+                + d * (propagated + dangling_sum * personalization[i]);
         }
 
-        let diff: f64 = scores.iter().zip(new_scores.iter()).map(|(a, b)| (a - b).abs()).sum();
+        let diff: f64 = scores
+            .iter()
+            .zip(new_scores.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
 
         scores = new_scores;
         iterations += 1;
@@ -330,7 +382,13 @@ mod tests {
     const ZERO: EdgeCategoryId = EdgeCategoryId(9);
 
     fn edge(from: u64, to: u64, category: EdgeCategoryId) -> Edge {
-        Edge { from: NodeId(from), to: NodeId(to), category, confidence: Confidence::Strong, cells: Vec::new() }
+        Edge {
+            from: NodeId(from),
+            to: NodeId(to),
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        }
     }
 
     fn ids(ns: &[u64]) -> Vec<NodeId> {
@@ -367,16 +425,33 @@ mod tests {
         edge_weights.insert(CALLS, 1.0);
         edge_weights.insert(CONTAINS, 0.3);
         edge_weights.insert(ZERO, 0.0);
-        ActivationConfig { damping, direction, edge_weights, epsilon: 1e-12, ..Default::default() }
+        ActivationConfig {
+            damping,
+            direction,
+            edge_weights,
+            epsilon: 1e-12,
+            ..Default::default()
+        }
     }
 
-    const DIRECTIONS: [Direction; 3] = [Direction::Forward, Direction::Backward, Direction::Undirected];
+    const DIRECTIONS: [Direction; 3] = [
+        Direction::Forward,
+        Direction::Backward,
+        Direction::Undirected,
+    ];
 
     /// (a) The index's vector equals HEAD's ppr_vector in bits and rounds.
     #[test]
     fn vector_equals_head_ppr_vector() {
         let (nodes, edges) = graph();
-        let seed_sets = [ids(&[1]), ids(&[3]), ids(&[2, 2, 5]), ids(&[6, 99]), ids(&[99]), vec![]];
+        let seed_sets = [
+            ids(&[1]),
+            ids(&[3]),
+            ids(&[2, 2, 5]),
+            ids(&[6, 99]),
+            ids(&[99]),
+            vec![],
+        ];
         let mut nonempty = 0usize;
         for direction in DIRECTIONS {
             for damping in [0.5, 0.85] {
@@ -385,7 +460,11 @@ mod tests {
                 for seeds in &seed_sets {
                     let (old, oi) = ppr_vector_head(&nodes, edges.iter(), seeds, &c);
                     let (new, ni) = ix.vector(seeds);
-                    assert_eq!((bits(&old), oi), (bits(&new), ni), "{direction:?} d={damping} seeds={seeds:?}");
+                    assert_eq!(
+                        (bits(&old), oi),
+                        (bits(&new), ni),
+                        "{direction:?} d={damping} seeds={seeds:?}"
+                    );
                     nonempty += usize::from(!new.is_empty());
                 }
             }
@@ -413,7 +492,11 @@ mod tests {
             for seeds in [ids(&[1]), ids(&[5, 7]), ids(&[4])] {
                 let fresh = PprIndex::build(&nodes, edges.iter(), &c).vector(&seeds);
                 let reused = ix.vector(&seeds);
-                assert_eq!((bits(&fresh.0), fresh.1), (bits(&reused.0), reused.1), "{direction:?} {seeds:?}");
+                assert_eq!(
+                    (bits(&fresh.0), fresh.1),
+                    (bits(&reused.0), reused.1),
+                    "{direction:?} {seeds:?}"
+                );
             }
         }
     }
@@ -425,11 +508,27 @@ mod tests {
         let c = config(Direction::Forward, 0.5);
         let ix = PprIndex::build(&nodes, edges.iter(), &c);
         assert!(ix.matches(&c));
-        assert!(ix.matches(&ActivationConfig { top_k: 3, node_specificity: crate::Specificity::Idf, ..c.clone() }));
-        assert!(!ix.matches(&ActivationConfig { damping: 0.85, ..c.clone() }));
-        assert!(!ix.matches(&ActivationConfig { direction: Direction::Backward, ..c.clone() }));
-        assert!(!ix.matches(&ActivationConfig { max_iterations: 7, ..c.clone() }));
-        assert!(!ix.matches(&ActivationConfig { epsilon: 1e-6, ..c.clone() }));
+        assert!(ix.matches(&ActivationConfig {
+            top_k: 3,
+            node_specificity: crate::Specificity::Idf,
+            ..c.clone()
+        }));
+        assert!(!ix.matches(&ActivationConfig {
+            damping: 0.85,
+            ..c.clone()
+        }));
+        assert!(!ix.matches(&ActivationConfig {
+            direction: Direction::Backward,
+            ..c.clone()
+        }));
+        assert!(!ix.matches(&ActivationConfig {
+            max_iterations: 7,
+            ..c.clone()
+        }));
+        assert!(!ix.matches(&ActivationConfig {
+            epsilon: 1e-6,
+            ..c.clone()
+        }));
         let mut w = c.clone();
         w.edge_weights.insert(CONTAINS, 0.4);
         assert!(!ix.matches(&w));
@@ -457,11 +556,22 @@ mod tests {
             for i in 0..n {
                 let propagated: f64 = ix.inc[ix.start[i]..ix.start[i + 1]]
                     .iter()
-                    .map(|&(j, w)| if ix.out_w[j] > 0.0 { scores[j] * w / ix.out_w[j] } else { 0.0 })
+                    .map(|&(j, w)| {
+                        if ix.out_w[j] > 0.0 {
+                            scores[j] * w / ix.out_w[j]
+                        } else {
+                            0.0
+                        }
+                    })
                     .sum();
-                new_scores[i] = (1.0 - d) * personalization[i] + d * (propagated + dangling_sum * personalization[i]);
+                new_scores[i] = (1.0 - d) * personalization[i]
+                    + d * (propagated + dangling_sum * personalization[i]);
             }
-            let diff: f64 = scores.iter().zip(new_scores.iter()).map(|(a, b)| (a - b).abs()).sum();
+            let diff: f64 = scores
+                .iter()
+                .zip(new_scores.iter())
+                .map(|(a, b)| (a - b).abs())
+                .sum();
             std::mem::swap(&mut scores, &mut new_scores);
             if diff < ix.epsilon {
                 break;
@@ -487,10 +597,19 @@ mod tests {
                 assert_eq!((bits(&a), ai), (bits(&b), bi), "{direction:?} d={damping}");
 
                 // Weighted, a repeated node (last weight wins), a non-node.
-                let pers = [(NodeId(1), 0.2), (NodeId(5), 0.5), (NodeId(1), 0.3), (NodeId(99), 9.0)];
+                let pers = [
+                    (NodeId(1), 0.2),
+                    (NodeId(5), 0.5),
+                    (NodeId(1), 0.3),
+                    (NodeId(99), 9.0),
+                ];
                 let (w, _) = ix.vector_weighted(&pers);
                 let by_index = [(0usize, 0.2), (4, 0.5), (0, 0.3)];
-                assert_eq!(bits(&w), bits(&power_head(&ix, &by_index)), "{direction:?} d={damping}");
+                assert_eq!(
+                    bits(&w),
+                    bits(&power_head(&ix, &by_index)),
+                    "{direction:?} d={damping}"
+                );
             }
         }
         let ix = PprIndex::build(&nodes, edges.iter(), &config(Direction::Forward, 0.5));

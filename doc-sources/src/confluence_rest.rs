@@ -27,14 +27,23 @@ impl Config {
         token: Option<String>,
     ) -> Result<Config, String> {
         let dot = load_dotenv();
-        let miss = |k: &str| format!("missing {k} (pass --{}, or set it in env / ./.env)", k.to_ascii_lowercase().replace("confluence_", ""));
+        let miss = |k: &str| {
+            format!(
+                "missing {k} (pass --{}, or set it in env / ./.env)",
+                k.to_ascii_lowercase().replace("confluence_", "")
+            )
+        };
         let cfg = Config {
             site: pick(site, "CONFLUENCE_SITE", &dot).ok_or_else(|| miss("CONFLUENCE_SITE"))?,
             email: pick(email, "CONFLUENCE_EMAIL", &dot).ok_or_else(|| miss("CONFLUENCE_EMAIL"))?,
             token: pick(token, "CONFLUENCE_TOKEN", &dot).ok_or_else(|| miss("CONFLUENCE_TOKEN"))?,
         };
         let origin = cfg.checked_origin()?;
-        let transport = if origin.starts_with("http://") { "plain http, loopback" } else { "https" };
+        let transport = if origin.starts_with("http://") {
+            "plain http, loopback"
+        } else {
+            "https"
+        };
         eprintln!("[docs] origin={origin} ({transport})");
         Ok(cfg)
     }
@@ -73,7 +82,10 @@ impl Config {
         Ok(format!("{}/wiki/rest/api", self.checked_origin()?))
     }
     fn auth(&self) -> String {
-        format!("Basic {}", b64(format!("{}:{}", self.email, self.token).as_bytes()))
+        format!(
+            "Basic {}",
+            b64(format!("{}:{}", self.email, self.token).as_bytes())
+        )
     }
 }
 
@@ -96,10 +108,7 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
     loop {
         let url = format!(
             "{}/space/{}/content/page?limit={}&start={}&expand=body.storage,version",
-            base,
-            space,
-            limit,
-            start
+            base, space, limit, start
         );
         let v = get_json(cfg, &url)?;
         let results = v["results"].as_array().cloned().unwrap_or_default();
@@ -113,7 +122,10 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
                 url: format!("{}/wiki{}", cfg.origin(), webui),
                 version: p["version"]["number"].as_i64().unwrap_or(1).to_string(),
                 body: PageBody::ConfluenceStorage(
-                    p["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+                    p["body"]["storage"]["value"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 ),
                 slug_hint: None,
             });
@@ -128,7 +140,11 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
 
 /// Fetch one page (id, title, current version, storage body).
 pub fn fetch_page(cfg: &Config, id: &str) -> Result<Page, String> {
-    let url = format!("{}/content/{}?expand=body.storage,version,space", cfg.base()?, id);
+    let url = format!(
+        "{}/content/{}?expand=body.storage,version,space",
+        cfg.base()?,
+        id
+    );
     let v = get_json(cfg, &url)?;
     let webui = v["_links"]["webui"].as_str().unwrap_or("");
     Ok(Page {
@@ -138,14 +154,22 @@ pub fn fetch_page(cfg: &Config, id: &str) -> Result<Page, String> {
         url: format!("{}/wiki{}", cfg.origin(), webui),
         version: v["version"]["number"].as_i64().unwrap_or(1).to_string(),
         body: PageBody::ConfluenceStorage(
-            v["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+            v["body"]["storage"]["value"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
         ),
         slug_hint: None,
     })
 }
 
 /// Create a page from a storage-format body.
-pub fn create_page(cfg: &Config, space: &str, title: &str, storage: &str) -> Result<PageRef, String> {
+pub fn create_page(
+    cfg: &Config,
+    space: &str,
+    title: &str,
+    storage: &str,
+) -> Result<PageRef, String> {
     let body = serde_json::json!({
         "type": "page",
         "title": title,
@@ -216,7 +240,10 @@ fn into_json(resp: Result<ureq::Response, ureq::Error>) -> Result<serde_json::Va
         Ok(r) => r.into_json().map_err(|e| format!("decode json: {e}")),
         Err(ureq::Error::Status(code, r)) => {
             let body = r.into_string().unwrap_or_default();
-            Err(format!("HTTP {code}: {}", body.chars().take(300).collect::<String>()))
+            Err(format!(
+                "HTTP {code}: {}",
+                body.chars().take(300).collect::<String>()
+            ))
         }
         Err(e) => Err(format!("request failed: {e}")),
     }

@@ -124,8 +124,15 @@ impl Scratch {
     fn export(&self, name: &str, extra: &[&str]) -> String {
         let out = self.run(name, extra);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "export {name} failed:\n{stderr}");
-        assert!(!self.fx().join(".glia").exists(), "--no-persist wrote into the fixture");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "export {name} failed:\n{stderr}"
+        );
+        assert!(
+            !self.fx().join(".glia").exists(),
+            "--no-persist wrote into the fixture"
+        );
         stderr
     }
 
@@ -137,7 +144,9 @@ impl Scratch {
     fn hint_lines(&self, name: &str) -> (serde_json::Value, Vec<serde_json::Value>) {
         let text = String::from_utf8(read(&self.hints(name))).unwrap();
         assert!(text.ends_with('\n'), "JSONL ends with a newline");
-        let mut lines = text.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap());
+        let mut lines = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap());
         let header = lines.next().expect("a header line");
         (header, lines.collect())
     }
@@ -160,13 +169,20 @@ fn rows(lines: &[serde_json::Value]) -> Vec<(String, Option<String>)> {
         .map(|r| {
             let obj = r.as_object().unwrap();
             assert_eq!(obj.len(), 2, "a row is {{hint, key}}: {r}");
-            (r["key"].as_str().unwrap().to_string(), r["hint"].as_str().map(str::to_string))
+            (
+                r["key"].as_str().unwrap().to_string(),
+                r["hint"].as_str().map(str::to_string),
+            )
         })
         .collect()
 }
 
 fn hint_of<'a>(rows: &'a [(String, Option<String>)], key: &str) -> Option<&'a str> {
-    rows.iter().find(|r| r.0 == key).unwrap_or_else(|| panic!("no row for {key}")).1.as_deref()
+    rows.iter()
+        .find(|r| r.0 == key)
+        .unwrap_or_else(|| panic!("no row for {key}"))
+        .1
+        .as_deref()
 }
 
 #[test]
@@ -193,7 +209,10 @@ fn side_file_binds_to_its_gmap_and_lists_every_fact() {
     );
 
     // One row per fact, strictly ascending by key, the gmap's keys exactly.
-    assert!(rows.windows(2).all(|w| w[0].0 < w[1].0), "rows sorted by key, no repeat");
+    assert!(
+        rows.windows(2).all(|w| w[0].0 < w[1].0),
+        "rows sorted by key, no repeat"
+    );
     let row_keys: BTreeSet<&str> = rows.iter().map(|r| r.0.as_str()).collect();
     let gmap_keys: BTreeSet<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
     assert_eq!(row_keys, gmap_keys);
@@ -202,17 +221,30 @@ fn side_file_binds_to_its_gmap_and_lists_every_fact() {
     // Every hint is a well-formed v1 hint; some carry a body hash.
     for (key, hint) in &rows {
         if let Some(h) = hint {
-            assert_eq!(Identity::parse_hint(h).map(|i| i.hint()).as_deref(), Some(h.as_str()), "{key}");
+            assert_eq!(
+                Identity::parse_hint(h).map(|i| i.hint()).as_deref(),
+                Some(h.as_str()),
+                "{key}"
+            );
         }
     }
-    assert!(hinted > 0 && hinted < rows.len(), "{hinted} of {}", rows.len());
     assert!(
-        rows.iter().filter_map(|r| r.1.as_deref()).any(|h| !h.contains("|0000000000000000|")),
+        hinted > 0 && hinted < rows.len(),
+        "{hinted} of {}",
+        rows.len()
+    );
+    assert!(
+        rows.iter()
+            .filter_map(|r| r.1.as_deref())
+            .any(|h| !h.contains("|0000000000000000|")),
         "some fact has a body hash"
     );
 
     // The client call's ENDPOINT and the doc section have no v1 identity.
-    let endpoint = rows.iter().find(|r| r.0.starts_with("endpoint:")).expect("an endpoint: fact");
+    let endpoint = rows
+        .iter()
+        .find(|r| r.0.starts_with("endpoint:"))
+        .expect("an endpoint: fact");
     assert_eq!(endpoint.1, None, "{}", endpoint.0);
     let section = gmap
         .nodes
@@ -221,17 +253,32 @@ fn side_file_binds_to_its_gmap_and_lists_every_fact() {
         .expect("a doc section fact");
     assert_eq!(hint_of(&rows, &section.key), None, "{}", section.key);
     // A function with a MODULE ancestor and a file has one.
-    let a = rows.iter().find(|r| r.0.ends_with("svc::chain::a")).expect("chain::a");
-    assert_eq!(a.1.as_deref(), Some(format!("v1|{}|chain.py|0000000000000000|a", node_kind::FUNCTION.0).as_str()));
+    let a = rows
+        .iter()
+        .find(|r| r.0.ends_with("svc::chain::a"))
+        .expect("chain::a");
+    assert_eq!(
+        a.1.as_deref(),
+        Some(format!("v1|{}|chain.py|0000000000000000|a", node_kind::FUNCTION.0).as_str())
+    );
 
     // The marker: exactly one line, the counts, and the file's path.
     let marker: Vec<&str> = stderr.lines().filter(|l| l.starts_with(MARKER)).collect();
     assert_eq!(marker.len(), 1, "{stderr}");
     let want = format!("{MARKER}{} facts, {hinted} v1 hints, ", gmap.nodes.len());
     assert!(marker[0].starts_with(&want), "{} vs {want}", marker[0]);
-    assert!(marker[0].ends_with(&format!(" ms -> {}", s.hints("a").display())), "{}", marker[0]);
+    assert!(
+        marker[0].ends_with(&format!(" ms -> {}", s.hints("a").display())),
+        "{}",
+        marker[0]
+    );
     // After the build marker, before anything the run prints later.
-    let at = |prefix: &str| stderr.lines().position(|l| l.starts_with(prefix)).expect(prefix);
+    let at = |prefix: &str| {
+        stderr
+            .lines()
+            .position(|l| l.starts_with(prefix))
+            .expect(prefix)
+    };
     assert!(at("[engram-export] glia build=") < at(MARKER), "{stderr}");
 }
 
@@ -239,51 +286,105 @@ fn side_file_binds_to_its_gmap_and_lists_every_fact() {
 fn hints_bind_their_fact_on_the_layout_a_cell_write_reads() {
     let s = Scratch::new("bind");
     let r = generate_one(s.fx().to_str().unwrap()).expect("build");
-    let (gmap, _, _, fact_nodes) = build_gmap_with_nodes(&r.merged, &s.fx(), &ExportOptions::default());
+    let (gmap, _, _, fact_nodes) =
+        build_gmap_with_nodes(&r.merged, &s.fx(), &ExportOptions::default());
     assert_eq!(fact_nodes.len(), gmap.nodes.len(), "one node slot per fact");
     // build_gmap is the same gmap, without the node slots.
     let plain = build_gmap(&r.merged, &s.fx(), &ExportOptions::default()).0;
-    assert_eq!(bincode::serialize(&plain).unwrap(), bincode::serialize(&gmap).unwrap());
+    assert_eq!(
+        bincode::serialize(&plain).unwrap(),
+        bincode::serialize(&gmap).unwrap()
+    );
 
     let rows = hint_rows(&r.merged, &gmap, &fact_nodes);
-    let row_hint = |key: &str| rows.iter().find(|row| row.key == key).and_then(|row| row.hint.clone());
+    let row_hint = |key: &str| {
+        rows.iter()
+            .find(|row| row.key == key)
+            .and_then(|row| row.hint.clone())
+    };
     let facts: Vec<(&str, glia_core::NodeId)> = gmap
         .nodes
         .iter()
         .zip(&fact_nodes)
         .filter_map(|(n, id)| id.map(|id| (n.key.as_str(), id)))
         .collect();
-    assert_eq!(facts.len(), gmap.nodes.len(), "a Python / TS / markdown export has no NatSpec tag fact");
+    assert_eq!(
+        facts.len(),
+        gmap.nodes.len(),
+        "a Python / TS / markdown export has no NatSpec tag fact"
+    );
     for (key, id) in &facts {
-        assert_eq!(row_hint(key), identity_of(&r.merged, *id).map(|i| i.hint()), "{key}");
+        assert_eq!(
+            row_hint(key),
+            identity_of(&r.merged, *id).map(|i| i.hint()),
+            "{key}"
+        );
     }
 
     // A rooted layout stores CODE as spans (CD.7c); the cell store's fresh
     // layout read rehydrates them. Every hint survives the round trip.
     let dir = s.0.join("layout");
-    persist_graph(&r.merged, &r.repo_labels, &r.repo_roots, &r.parse_errors, &dir, "test").expect("persist");
+    persist_graph(
+        &r.merged,
+        &r.repo_labels,
+        &r.repo_roots,
+        &r.parse_errors,
+        &dir,
+        "test",
+    )
+    .expect("persist");
     let loaded = load_layout(&dir).expect("load").merged;
     let idx = QnameIndex::build(&loaded, None);
     let mut bound = 0;
     for (key, id) in &facts {
         let hint = row_hint(key);
-        assert_eq!(identity_of(&loaded, *id).map(|i| i.hint()), hint, "{key} after the layout round trip");
+        assert_eq!(
+            identity_of(&loaded, *id).map(|i| i.hint()),
+            hint,
+            "{key} after the layout round trip"
+        );
         if let Some(h) = hint {
-            assert_eq!(idx.resolve(key, None, Some(&h)), CellTarget::Bound(*id), "{key} {h}");
+            assert_eq!(
+                idx.resolve(key, None, Some(&h)),
+                CellTarget::Bound(*id),
+                "{key} {h}"
+            );
             bound += 1;
         }
     }
     assert_eq!(bound, rows.iter().filter(|row| row.hint.is_some()).count());
 
     // The twin: the qname alone is ambiguous, the hint alone binds the METHOD.
-    let (cart, cart_id) = *facts.iter().find(|(k, _)| k.ends_with("svc::cart::Cart::total")).expect("Cart.total");
-    assert!(matches!(idx.resolve(cart, None, None), CellTarget::Ambiguous(_)), "two nodes carry {cart}");
+    let (cart, cart_id) = *facts
+        .iter()
+        .find(|(k, _)| k.ends_with("svc::cart::Cart::total"))
+        .expect("Cart.total");
+    assert!(
+        matches!(idx.resolve(cart, None, None), CellTarget::Ambiguous(_)),
+        "two nodes carry {cart}"
+    );
     let hint = row_hint(cart).expect("Cart.total has a v1 hint");
     let ident = Identity::parse_hint(&hint).expect("v1");
-    assert_eq!(ident.kind, node_kind::METHOD, "the export's key winner is the METHOD: {hint}");
-    assert_eq!(hint, format!("v1|{}|cart.py|{CART_TOTAL_BODY}|Cart::total", node_kind::METHOD.0));
-    assert_eq!(idx.resolve(cart, None, Some(&hint)), CellTarget::Bound(cart_id));
-    assert_eq!(idx.resolve(cart, Some("METHOD"), None), CellTarget::Bound(cart_id));
+    assert_eq!(
+        ident.kind,
+        node_kind::METHOD,
+        "the export's key winner is the METHOD: {hint}"
+    );
+    assert_eq!(
+        hint,
+        format!(
+            "v1|{}|cart.py|{CART_TOTAL_BODY}|Cart::total",
+            node_kind::METHOD.0
+        )
+    );
+    assert_eq!(
+        idx.resolve(cart, None, Some(&hint)),
+        CellTarget::Bound(cart_id)
+    );
+    assert_eq!(
+        idx.resolve(cart, Some("METHOD"), None),
+        CellTarget::Bound(cart_id)
+    );
 }
 
 #[test]
@@ -292,10 +393,18 @@ fn rerun_and_flags_change_nothing() {
     s.export("a", &[]);
     let first = read(&s.hints("a"));
     s.export("a", &[]);
-    assert_eq!(read(&s.hints("a")), first, "a rerun writes the same hints bytes");
+    assert_eq!(
+        read(&s.hints("a")),
+        first,
+        "a rerun writes the same hints bytes"
+    );
     // 0.5.2's `--ppr-candidates` (DE.5) is gone (EG.4): clap refuses it.
     let refused = s.run("ppr", &["--ppr-candidates", "3"]);
-    assert_eq!(refused.status.code(), Some(2), "--ppr-candidates is an unexpected argument");
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "--ppr-candidates is an unexpected argument"
+    );
     // A stale hints file is replaced, never appended to or kept; a stale
     // `.ppr.jsonl` a 0.5.2 run left beside the gmap is deleted.
     let stale_ppr = {
@@ -307,12 +416,28 @@ fn rerun_and_flags_change_nothing() {
     std::fs::write(&stale_ppr, b"{\"stale\":true}\n").unwrap();
     s.export("stale", &[]);
     assert_eq!(read(&s.hints("stale")), first);
-    assert!(!stale_ppr.exists(), "a stale {} is removed", stale_ppr.display());
+    assert!(
+        !stale_ppr.exists(),
+        "a stale {} is removed",
+        stale_ppr.display()
+    );
     // The gmap and its sidecars are the same bytes whatever the flags.
-    let files = |name: &str| [s.out(name), sidecar_path(&s.out(name)), meta_path(&s.out(name))];
+    let files = |name: &str| {
+        [
+            s.out(name),
+            sidecar_path(&s.out(name)),
+            meta_path(&s.out(name)),
+        ]
+    };
     for name in ["stale"] {
         for (a, b) in files("a").into_iter().zip(files(name)) {
-            assert_eq!(read(&a), read(&b), "{} differs from {}", b.display(), a.display());
+            assert_eq!(
+                read(&a),
+                read(&b),
+                "{} differs from {}",
+                b.display(),
+                a.display()
+            );
         }
     }
 }

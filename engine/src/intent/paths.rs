@@ -29,7 +29,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-
 use super::text::Candidates;
 
 /// rank_eval's `KDIR_CAP`: a directory or glob naming more files names no
@@ -89,7 +88,11 @@ pub fn norm(raw: &str, exts: &BTreeSet<String>) -> Option<PTok> {
         }
         t = t.trim_matches(|c: char| c == '_' || c == '~');
     }
-    if t.contains("://") || t.starts_with("http") || t.starts_with("www.") || t.contains('@') && !t.contains('/') {
+    if t.contains("://")
+        || t.starts_with("http")
+        || t.starts_with("www.")
+        || t.contains('@') && !t.contains('/')
+    {
         return None;
     }
     let mut s = t.to_string();
@@ -129,7 +132,10 @@ pub fn norm(raw: &str, exts: &BTreeSet<String>) -> Option<PTok> {
     if !e.is_empty() && exts.contains(&e) {
         return Some(PTok::File(s.to_string()));
     }
-    if s.contains('/') && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '@' | '+')) {
+    if s.contains('/')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | '@' | '+'))
+    {
         return Some(PTok::Dir(s.to_string()));
     }
     None
@@ -138,8 +144,12 @@ pub fn norm(raw: &str, exts: &BTreeSet<String>) -> Option<PTok> {
 /// rank_eval `kbraces`: `{a,b}` alternatives expanded (cartesian, at most 64
 /// patterns); an unclosed `{` is dropped.
 fn braces(p: &str) -> Vec<String> {
-    let Some(o) = p.find('{') else { return vec![p.to_string()] };
-    let Some(c) = p[o..].find('}').map(|x| o + x) else { return vec![p.replace('{', "")] };
+    let Some(o) = p.find('{') else {
+        return vec![p.to_string()];
+    };
+    let Some(c) = p[o..].find('}').map(|x| o + x) else {
+        return vec![p.replace('{', "")];
+    };
     let (head, alts, tail) = (&p[..o], &p[o + 1..c], &p[c + 1..]);
     let mut out = Vec::new();
     for t in braces(tail) {
@@ -160,11 +170,18 @@ fn glob(p: &[u8], s: &[u8]) -> bool {
         return s.is_empty();
     }
     if p.starts_with(b"**") {
-        let rest = if p.len() > 2 && p[2] == b'/' { &p[3..] } else { &p[2..] };
-        return (0..=s.len()).any(|k| (k == 0 || s[k - 1] == b'/') && glob(rest, &s[k..])) || glob(rest, s);
+        let rest = if p.len() > 2 && p[2] == b'/' {
+            &p[3..]
+        } else {
+            &p[2..]
+        };
+        return (0..=s.len()).any(|k| (k == 0 || s[k - 1] == b'/') && glob(rest, &s[k..]))
+            || glob(rest, s);
     }
     match p[0] {
-        b'*' => (0..=s.len()).take_while(|&k| k == 0 || s[k - 1] != b'/').any(|k| glob(&p[1..], &s[k..])),
+        b'*' => (0..=s.len())
+            .take_while(|&k| k == 0 || s[k - 1] != b'/')
+            .any(|k| glob(&p[1..], &s[k..])),
         b'?' => !s.is_empty() && s[0] != b'/' && glob(&p[1..], &s[1..]),
         c => !s.is_empty() && s[0] == c && glob(&p[1..], &s[1..]),
     }
@@ -208,7 +225,11 @@ impl PathResolver {
     /// oldest first ([`rename_pairs`]): a later rename of one old path wins.
     pub fn new(cands: &Candidates, renames: &[(String, String)]) -> PathResolver {
         let cand = cands.paths.clone();
-        let exact: BTreeMap<String, usize> = cand.iter().enumerate().map(|(i, p)| (p.clone(), i)).collect();
+        let exact: BTreeMap<String, usize> = cand
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect();
         let mut fwd: BTreeMap<&str, &str> = BTreeMap::new();
         for (a, b) in renames {
             fwd.insert(a.as_str(), b.as_str());
@@ -251,7 +272,11 @@ impl PathResolver {
             }
             add_dirs(&segs, f, &mut dir_files);
         }
-        for v in suffix.values_mut().chain(hsuffix.values_mut()).chain(dir_files.values_mut()) {
+        for v in suffix
+            .values_mut()
+            .chain(hsuffix.values_mut())
+            .chain(dir_files.values_mut())
+        {
             v.sort_unstable();
             v.dedup();
         }
@@ -259,14 +284,21 @@ impl PathResolver {
         for d in dir_files.keys() {
             let segs: Vec<&str> = d.split('/').collect();
             for k in 0..segs.len() {
-                dir_suffix.entry(segs[k..].join("/")).or_default().push(d.clone());
+                dir_suffix
+                    .entry(segs[k..].join("/"))
+                    .or_default()
+                    .push(d.clone());
             }
         }
         for v in dir_suffix.values_mut() {
             v.sort();
             v.dedup();
         }
-        let exts = cand.iter().map(|p| ext_of(p)).filter(|e| !e.is_empty()).collect();
+        let exts = cand
+            .iter()
+            .map(|p| ext_of(p))
+            .filter(|e| !e.is_empty())
+            .collect();
         PathResolver {
             cand,
             exact,
@@ -307,7 +339,11 @@ impl PathResolver {
     pub fn dir(&self, d: &str) -> Option<(Vec<usize>, &'static str)> {
         let full: Vec<&String> = match self.dir_files.get_key_value(d) {
             Some((k, _)) => vec![k],
-            None => self.dir_suffix.get(d).map(|v| v.iter().collect()).unwrap_or_default(),
+            None => self
+                .dir_suffix
+                .get(d)
+                .map(|v| v.iter().collect())
+                .unwrap_or_default(),
         };
         if full.len() != 1 {
             if full.len() > 1 {
@@ -320,7 +356,10 @@ impl PathResolver {
             self.counts.borrow_mut().over_cap += 1;
             return None;
         }
-        Some((files.clone(), if full[0] == d { "dir" } else { "dir-suffix" }))
+        Some((
+            files.clone(),
+            if full[0] == d { "dir" } else { "dir-suffix" },
+        ))
     }
 
     /// rank_eval `KPaths::file`: one normalised file mention resolved:
@@ -393,8 +432,15 @@ impl PathResolver {
                 self.counts.borrow_mut().unresolved += 1;
                 continue;
             }
-            let anchored = self.cand.iter().any(|c| c.split('/').next() == p.split('/').next());
-            let pat = if anchored { p.clone() } else { format!("**/{p}") };
+            let anchored = self
+                .cand
+                .iter()
+                .any(|c| c.split('/').next() == p.split('/').next());
+            let pat = if anchored {
+                p.clone()
+            } else {
+                format!("**/{p}")
+            };
             for (f, c) in self.cand.iter().enumerate() {
                 if glob(pat.as_bytes(), c.as_bytes()) {
                     got.insert(f);
@@ -418,7 +464,9 @@ impl PathResolver {
         let mut pending: Vec<&String> = Vec::new();
         let mut ctx: Vec<String> = Vec::new();
         for raw in toks {
-            let Some(pt) = norm(raw, &self.exts) else { continue };
+            let Some(pt) = norm(raw, &self.exts) else {
+                continue;
+            };
             match pt {
                 PTok::File(t) => match self.file_counted(&t, &[], false) {
                     Some((f, route)) => {

@@ -118,7 +118,12 @@ fn json_schemas_are_shared_message_types() {
     assert_eq!(same.len(), 1, "one star edge for one shared root");
     assert_ne!(same[0].from, same[0].to);
     let rule = Evidence::of(same[0]).and_then(|ev| ev.rule);
-    assert_eq!(rule.as_deref(), Some(same_as::RULE_MESSAGE_FQNAME), "{:?}", same[0]);
+    assert_eq!(
+        rule.as_deref(),
+        Some(same_as::RULE_MESSAGE_FQNAME),
+        "{:?}",
+        same[0]
+    );
     assert!(
         joining(edge_category::SHARES_SCHEMA).is_empty(),
         "the message pair is the SAME_AS star now"

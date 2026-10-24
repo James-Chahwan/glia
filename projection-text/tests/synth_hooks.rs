@@ -265,7 +265,8 @@ mod research {
             class_seeds: Vec::new(),
             test_patch_facts: TestPatchFacts::default(),
             issue_anchored_qnames: Vec::new(),
-            issue: std::fs::read_to_string(fixture_dir().join("issue.txt")).expect("read issue.txt"),
+            issue: std::fs::read_to_string(fixture_dir().join("issue.txt"))
+                .expect("read issue.txt"),
             test_patch: String::new(),
             chain_depths: HashMap::new(),
             top_k: 5,
@@ -305,12 +306,21 @@ mod research {
     fn key_symbols_hook_ranks_the_fixture() {
         let g = bin_graph();
         let view = key_symbols_view(&g, &fixture_key_symbols());
-        assert_eq!(view.applied, vec![ACCESS_PATH, CALLSITE_ARGFLOW, KEY_SYMBOLS]);
+        assert_eq!(
+            view.applied,
+            vec![ACCESS_PATH, CALLSITE_ARGFLOW, KEY_SYMBOLS]
+        );
 
         let cells: Vec<&SynthCell> = view.cells_of(KEY_SYMBOLS).collect();
         let rows: Vec<(u64, &str, &str)> = cells
             .iter()
-            .map(|c| (c.id, c.key.as_str(), cell_attr(c, "reason").expect("reason")))
+            .map(|c| {
+                (
+                    c.id,
+                    c.key.as_str(),
+                    cell_attr(c, "reason").expect("reason"),
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -331,24 +341,45 @@ mod research {
 
         // Outer.use: seed 0.7 + tail `.use` 10.0 + body match `get_inner` 3.0,
         // summed in the ranker's order.
-        assert_eq!(cells[0].score, 0.7 + 10.0 + 3.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0);
+        assert_eq!(
+            cells[0].score,
+            0.7 + 10.0 + 3.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0
+        );
         // Source.use: tail only (`resolve` / `opts` are no issue anchors).
-        assert_eq!(cells[1].score, 0.4 + 10.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0);
+        assert_eq!(
+            cells[1].score,
+            0.4 + 10.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0 + 0.0
+        );
         assert!(cells[5..].iter().all(|c| c.score == 0.0), "no ranked score");
 
         for c in &cells {
-            assert_eq!(c.anchor, Some(node_of(&g, &c.key).id), "{} anchored on its node", c.key);
+            assert_eq!(
+                c.anchor,
+                Some(node_of(&g, &c.key).id),
+                "{} anchored on its node",
+                c.key
+            );
             let names: Vec<&str> = c.attrs.iter().map(|(k, _)| *k).collect();
-            assert_eq!(names, vec!["file", "rank", "reason", "start_line", "end_line"]);
+            assert_eq!(
+                names,
+                vec!["file", "rank", "reason", "start_line", "end_line"]
+            );
             assert_eq!(cell_attr(c, "file"), Some("m.py"));
             assert_eq!(cell_attr(c, "rank"), Some(c.id.to_string().as_str()));
         }
         let outer_use = node_of(&g, "m::Outer::use");
         assert_eq!(Some(cells[0].text.as_str()), extract_code_cell(outer_use));
         let pos: serde_json::Value =
-            serde_json::from_str(extract_position_cell(outer_use).expect("POSITION")).expect("json");
-        assert_eq!(cell_attr(cells[0], "start_line"), Some(pos["start_line"].to_string().as_str()));
-        assert_eq!(cell_attr(cells[0], "end_line"), Some(pos["end_line"].to_string().as_str()));
+            serde_json::from_str(extract_position_cell(outer_use).expect("POSITION"))
+                .expect("json");
+        assert_eq!(
+            cell_attr(cells[0], "start_line"),
+            Some(pos["start_line"].to_string().as_str())
+        );
+        assert_eq!(
+            cell_attr(cells[0], "end_line"),
+            Some(pos["end_line"].to_string().as_str())
+        );
         assert!(
             cells[6]
                 .text
@@ -371,7 +402,11 @@ mod research {
                 .synth
                 .iter()
                 .filter(|c| c.hook != KEY_SYMBOLS)
-                .map(|c| SynthCell { hook: SUMMARY, anchor: None, ..c.clone() }),
+                .map(|c| SynthCell {
+                    hook: SUMMARY,
+                    anchor: None,
+                    ..c.clone()
+                }),
         );
         let preloaded = view.synth.len();
         assert_eq!(preloaded, 3, "two access paths and one call-site cell");
@@ -423,11 +458,23 @@ mod research {
             view.synth[0].text.clone()
         };
 
-        assert!(!code.is_char_boundary(e_acute + 1), "the cut falls inside `é`");
-        assert_eq!(clip(e_acute + 1), format!("{}\n# ... (truncated)", &code[..e_acute]));
+        assert!(
+            !code.is_char_boundary(e_acute + 1),
+            "the cut falls inside `é`"
+        );
+        assert_eq!(
+            clip(e_acute + 1),
+            format!("{}\n# ... (truncated)", &code[..e_acute])
+        );
         // On a boundary the cut is exact, as HEAD's byte slice was.
-        assert_eq!(clip(e_acute + 2), format!("{}\n# ... (truncated)", &code[..e_acute + 2]));
-        assert_eq!(clip(e_acute), format!("{}\n# ... (truncated)", &code[..e_acute]));
+        assert_eq!(
+            clip(e_acute + 2),
+            format!("{}\n# ... (truncated)", &code[..e_acute + 2])
+        );
+        assert_eq!(
+            clip(e_acute),
+            format!("{}\n# ... (truncated)", &code[..e_acute])
+        );
         // 0 = no cap; a cap at or above the length leaves the source whole.
         assert_eq!(clip(0), code);
         assert_eq!(clip(code.len()), code);
@@ -443,7 +490,8 @@ mod research {
 
     fn fixture_derived_notes() -> DerivedNotesSynth {
         DerivedNotesSynth {
-            issue: std::fs::read_to_string(fixture_dir().join("issue.txt")).expect("read issue.txt"),
+            issue: std::fs::read_to_string(fixture_dir().join("issue.txt"))
+                .expect("read issue.txt"),
         }
     }
 
@@ -484,9 +532,19 @@ mod research {
         assert_eq!(notes.len(), 1);
         let cell = notes[0];
         assert_eq!(cell.text, FIXTURE_NOTES);
-        assert_eq!(cell_attr(cell, "bullets"), Some("polymorphism,attr_presence"));
-        assert_eq!((cell.id, cell.key.as_str(), cell.anchor, cell.score), (1, DERIVED_NOTES, None, 0.0));
-        assert_eq!(view.synth.last(), Some(cell), "the last hook's one cell comes last");
+        assert_eq!(
+            cell_attr(cell, "bullets"),
+            Some("polymorphism,attr_presence")
+        );
+        assert_eq!(
+            (cell.id, cell.key.as_str(), cell.anchor, cell.score),
+            (1, DERIVED_NOTES, None, 0.0)
+        );
+        assert_eq!(
+            view.synth.last(),
+            Some(cell),
+            "the last hook's one cell comes last"
+        );
     }
 
     /// `SynthCell` literal for the marshmallow-shape inputs below.
@@ -520,19 +578,74 @@ mod research {
         let fields = "src::marshmallow::fields";
         let mut view = ActivatedView::from_ranked(Vec::new());
         view.synth = vec![
-            cell(SUMMARY, 7, &format!("{fields}::DateTime"), "DateTime field: serializes datetimes using the schema's DATEFORMAT option."),
-            cell(ACCESS_PATH, 9912, "synth::AccessPath::self.root.opts", "AccessPath `self.root.opts` — `Field.root` → `Schema` (docstring hint) → `BaseSchema.opts` (attribute)"),
-            cell(CALLSITE_ARGFLOW, 20_000_000, &format!("{fields}::Field::__init__"), "# Callsite arg-flow for polymorphic method `__init__` (derived from AST call re-walk)\n# Defined on classes: DateTime, Field, List, Tuple\n# In `src::marshmallow::fields::List::__init__`: `super().__init__(**kwargs)`\n# In `src::marshmallow::fields::Tuple::__init__`: `super().__init__(*args, **kwargs)`\n"),
-            cell(CALLSITE_ARGFLOW, 20_000_001, &format!("{fields}::DateTime::_bind_to_schema"), "# Callsite arg-flow for polymorphic method `_bind_to_schema` (derived from AST call re-walk)\n# Defined on classes: DateTime, Field, List, Mapping, Tuple\n# In `src::marshmallow::fields::List::_bind_to_schema`: `self.inner._bind_to_schema(field_name, self (=List))`\n# In `src::marshmallow::fields::Mapping::_bind_to_schema`: `self.value_field._bind_to_schema(field_name, self (=Mapping))`\n# In `src::marshmallow::fields::Tuple::_bind_to_schema`: `container._bind_to_schema(field_name, self (=Tuple))`\n# In `src::marshmallow::schema::BaseSchema::_bind_field`: `field_obj._bind_to_schema(field_name, self (=BaseSchema))`\n"),
+            cell(
+                SUMMARY,
+                7,
+                &format!("{fields}::DateTime"),
+                "DateTime field: serializes datetimes using the schema's DATEFORMAT option.",
+            ),
+            cell(
+                ACCESS_PATH,
+                9912,
+                "synth::AccessPath::self.root.opts",
+                "AccessPath `self.root.opts` — `Field.root` → `Schema` (docstring hint) → `BaseSchema.opts` (attribute)",
+            ),
+            cell(
+                CALLSITE_ARGFLOW,
+                20_000_000,
+                &format!("{fields}::Field::__init__"),
+                "# Callsite arg-flow for polymorphic method `__init__` (derived from AST call re-walk)\n# Defined on classes: DateTime, Field, List, Tuple\n# In `src::marshmallow::fields::List::__init__`: `super().__init__(**kwargs)`\n# In `src::marshmallow::fields::Tuple::__init__`: `super().__init__(*args, **kwargs)`\n",
+            ),
+            cell(
+                CALLSITE_ARGFLOW,
+                20_000_001,
+                &format!("{fields}::DateTime::_bind_to_schema"),
+                "# Callsite arg-flow for polymorphic method `_bind_to_schema` (derived from AST call re-walk)\n# Defined on classes: DateTime, Field, List, Mapping, Tuple\n# In `src::marshmallow::fields::List::_bind_to_schema`: `self.inner._bind_to_schema(field_name, self (=List))`\n# In `src::marshmallow::fields::Mapping::_bind_to_schema`: `self.value_field._bind_to_schema(field_name, self (=Mapping))`\n# In `src::marshmallow::fields::Tuple::_bind_to_schema`: `container._bind_to_schema(field_name, self (=Tuple))`\n# In `src::marshmallow::schema::BaseSchema::_bind_field`: `field_obj._bind_to_schema(field_name, self (=BaseSchema))`\n",
+            ),
             // Read as a summary this would win the call-site pick (`fields` is
             // in the issue, and it defines on fewer classes).
-            cell("unrelated", 1, "x::A::fields", "# Callsite arg-flow for polymorphic method `fields` (derived from AST call re-walk)\n# Defined on classes: A, B\n# In `x::A::fields`: `self.inner.fields(self (=A))`\n"),
-            cell(KEY_SYMBOLS, 1, &format!("{fields}::DateTime::_bind_to_schema"), "    def _bind_to_schema(self, field_name, schema):\n        super()._bind_to_schema(field_name, schema)\n        self.format = (\n            self.format\n            or getattr(schema.opts, self.SCHEMA_OPTS_VAR_NAME)\n            or self.DEFAULT_FORMAT\n        )\n"),
-            cell(KEY_SYMBOLS, 2, &format!("{fields}::Field::root"), "    @property\n    def root(self):\n        \"\"\"Reference to the `Schema` that this field belongs to even if it is buried in a\n        container field (e.g. `List`).\n        Return `None` for unbound fields.\n        \"\"\"\n        ret = self\n        while hasattr(ret, \"parent\"):\n            ret = ret.parent\n        return ret if isinstance(ret, SchemaABC) else None\n"),
-            cell(KEY_SYMBOLS, 3, &format!("{fields}::Field::_bind_to_schema"), "    def _bind_to_schema(self, field_name, schema):\n        \"\"\"Update field with values from its parent schema. Called by\n        :meth:`Schema._bind_field <marshmallow.Schema._bind_field>`.\n        \"\"\"\n        self.parent = self.parent or schema\n        self.name = self.name or field_name\n"),
-            cell(KEY_SYMBOLS, 4, &format!("{fields}::List::_bind_to_schema"), "    def _bind_to_schema(self, field_name, schema):\n        super()._bind_to_schema(field_name, schema)\n        self.inner = copy.deepcopy(self.inner)\n        self.inner._bind_to_schema(field_name, self)\n"),
-            cell(KEY_SYMBOLS, 5, "src::marshmallow::schema::BaseSchema::opts", "# Attribute `.opts` presence (derived from HAS_ATTRIBUTE edges)\n# Defined on class: `BaseSchema`\n# NOT defined on in-scope classes: Field, DateTime\n"),
-            cell(KEY_SYMBOLS, 6, &format!("{fields}::Field::context"), "# Attribute `.context` presence (derived from HAS_ATTRIBUTE edges)\n# Defined on class: `Field`\n# NOT defined on in-scope classes: (none)\n"),
+            cell(
+                "unrelated",
+                1,
+                "x::A::fields",
+                "# Callsite arg-flow for polymorphic method `fields` (derived from AST call re-walk)\n# Defined on classes: A, B\n# In `x::A::fields`: `self.inner.fields(self (=A))`\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                1,
+                &format!("{fields}::DateTime::_bind_to_schema"),
+                "    def _bind_to_schema(self, field_name, schema):\n        super()._bind_to_schema(field_name, schema)\n        self.format = (\n            self.format\n            or getattr(schema.opts, self.SCHEMA_OPTS_VAR_NAME)\n            or self.DEFAULT_FORMAT\n        )\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                2,
+                &format!("{fields}::Field::root"),
+                "    @property\n    def root(self):\n        \"\"\"Reference to the `Schema` that this field belongs to even if it is buried in a\n        container field (e.g. `List`).\n        Return `None` for unbound fields.\n        \"\"\"\n        ret = self\n        while hasattr(ret, \"parent\"):\n            ret = ret.parent\n        return ret if isinstance(ret, SchemaABC) else None\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                3,
+                &format!("{fields}::Field::_bind_to_schema"),
+                "    def _bind_to_schema(self, field_name, schema):\n        \"\"\"Update field with values from its parent schema. Called by\n        :meth:`Schema._bind_field <marshmallow.Schema._bind_field>`.\n        \"\"\"\n        self.parent = self.parent or schema\n        self.name = self.name or field_name\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                4,
+                &format!("{fields}::List::_bind_to_schema"),
+                "    def _bind_to_schema(self, field_name, schema):\n        super()._bind_to_schema(field_name, schema)\n        self.inner = copy.deepcopy(self.inner)\n        self.inner._bind_to_schema(field_name, self)\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                5,
+                "src::marshmallow::schema::BaseSchema::opts",
+                "# Attribute `.opts` presence (derived from HAS_ATTRIBUTE edges)\n# Defined on class: `BaseSchema`\n# NOT defined on in-scope classes: Field, DateTime\n",
+            ),
+            cell(
+                KEY_SYMBOLS,
+                6,
+                &format!("{fields}::Field::context"),
+                "# Attribute `.context` presence (derived from HAS_ATTRIBUTE edges)\n# Defined on class: `Field`\n# NOT defined on in-scope classes: (none)\n",
+            ),
         ];
         view
     }
@@ -560,7 +673,9 @@ mod research {
 
     #[test]
     fn derived_notes_hook_renders_all_three_notes_like_the_bin() {
-        let hook = DerivedNotesSynth { issue: MM_ISSUE.to_string() };
+        let hook = DerivedNotesSynth {
+            issue: MM_ISSUE.to_string(),
+        };
         let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
         let mut view = marshmallow_view();
         let preloaded = view.synth.len();
@@ -570,16 +685,22 @@ mod research {
         assert_eq!(view.synth.len(), preloaded + 1);
         let cell = &view.synth[preloaded];
         assert_eq!(cell.text, MM_NOTES);
-        assert_eq!(cell_attr(cell, "bullets"), Some("chain,polymorphism,attr_presence"));
+        assert_eq!(
+            cell_attr(cell, "bullets"),
+            Some("chain,polymorphism,attr_presence")
+        );
     }
 
     #[test]
     fn derived_notes_hook_emits_no_cell_without_a_note() {
-        let hook = DerivedNotesSynth { issue: MM_ISSUE.to_string() };
+        let hook = DerivedNotesSynth {
+            issue: MM_ISSUE.to_string(),
+        };
         let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
         // Summaries only, no call-site cell and no key symbols: nothing to note.
         let mut view = marshmallow_view();
-        view.synth.retain(|c| c.hook == SUMMARY || c.hook == ACCESS_PATH);
+        view.synth
+            .retain(|c| c.hook == SUMMARY || c.hook == ACCESS_PATH);
         let before = view.synth.clone();
         plan.synthesize(&empty_graph(), &mut view);
 
@@ -592,9 +713,15 @@ mod research {
         let first = plan_view(&bin_graph()).synth;
         assert!(first.iter().any(|c| c.hook == DERIVED_NOTES));
         for run in 1..RUNS {
-            assert_eq!(plan_view(&bin_graph()).synth, first, "run {run} differs from run 0");
+            assert_eq!(
+                plan_view(&bin_graph()).synth,
+                first,
+                "run {run} differs from run 0"
+            );
         }
-        let hook = DerivedNotesSynth { issue: MM_ISSUE.to_string() };
+        let hook = DerivedNotesSynth {
+            issue: MM_ISSUE.to_string(),
+        };
         let mm = |g: &RepoGraph| hook.synth(g, &marshmallow_view());
         let g = empty_graph();
         let mm_first = mm(&g);
@@ -629,12 +756,19 @@ mod research {
         assert_eq!(one.synth, cells);
         assert_eq!(one.applied, PLAN.to_vec());
         let per_hook: Vec<usize> = PLAN.iter().map(|h| one.cells_of(h).count()).collect();
-        assert_eq!(per_hook, vec![2, 1, 9, 1], "two paths, one call-site, nine symbols, one note");
+        assert_eq!(
+            per_hook,
+            vec![2, 1, 9, 1],
+            "two paths, one call-site, nine symbols, one note"
+        );
     }
 
     /// Run a research bin; its stderr (the `[synth]` marker) on success.
     fn run_bin(exe: &str, args: &[&str]) -> String {
-        let out: Output = Command::new(exe).args(args).output().expect("spawn research bin");
+        let out: Output = Command::new(exe)
+            .args(args)
+            .output()
+            .expect("spawn research bin");
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(out.status.success(), "{exe} {args:?} failed: {stderr}");
         stderr
@@ -658,39 +792,98 @@ mod research {
         let fixture = fixture_dir();
         let f = |name: &str| fixture.join(name).to_string_lossy().into_owned();
         let d = |name: &str| dir.join(name).to_string_lossy().into_owned();
-        let (src, seeds, summaries, issue) =
-            (f("src"), f("seeds.json"), f("summaries.json"), f("issue.txt"));
-        let (a1, aplus, source_cells, notes, out_dir) =
-            (d("a1.json"), d("aplus.json"), d("source_cells.json"), d("notes.md"), d("plan"));
-        let (src, seeds, summaries, issue) =
-            (src.as_str(), seeds.as_str(), summaries.as_str(), issue.as_str());
+        let (src, seeds, summaries, issue) = (
+            f("src"),
+            f("seeds.json"),
+            f("summaries.json"),
+            f("issue.txt"),
+        );
+        let (a1, aplus, source_cells, notes, out_dir) = (
+            d("a1.json"),
+            d("aplus.json"),
+            d("source_cells.json"),
+            d("notes.md"),
+            d("plan"),
+        );
+        let (src, seeds, summaries, issue) = (
+            src.as_str(),
+            seeds.as_str(),
+            summaries.as_str(),
+            issue.as_str(),
+        );
 
         run_bin(
             env!("CARGO_BIN_EXE_synth_composition"),
-            &canonical(&["--src", src, "--seeds", seeds, "--summaries", summaries, "--out", &a1]),
+            &canonical(&[
+                "--src",
+                src,
+                "--seeds",
+                seeds,
+                "--summaries",
+                summaries,
+                "--out",
+                &a1,
+            ]),
         );
         run_bin(
             env!("CARGO_BIN_EXE_synth_callsite_argflow"),
-            &canonical(&["--src", src, "--seeds", seeds, "--summaries", &a1, "--out", &aplus]),
+            &canonical(&[
+                "--src",
+                src,
+                "--seeds",
+                seeds,
+                "--summaries",
+                &a1,
+                "--out",
+                &aplus,
+            ]),
         );
         run_bin(
             env!("CARGO_BIN_EXE_synth_key_symbols"),
             &canonical(&[
-                "--src", src, "--seeds", seeds, "--issue", issue, "--summaries", &aplus, "--out",
+                "--src",
+                src,
+                "--seeds",
+                seeds,
+                "--issue",
+                issue,
+                "--summaries",
+                &aplus,
+                "--out",
                 &source_cells,
             ]),
         );
         let notes_err = run_bin(
             env!("CARGO_BIN_EXE_synth_derived_notes"),
-            &["--source-cells", &source_cells, "--summaries", &aplus, "--issue", issue, "--out", &notes],
+            &[
+                "--source-cells",
+                &source_cells,
+                "--summaries",
+                &aplus,
+                "--issue",
+                issue,
+                "--out",
+                &notes,
+            ],
         );
-        assert!(notes_err.contains("[synth] plan hooks=[derived_notes] cells=1\n"), "{notes_err}");
+        assert!(
+            notes_err.contains("[synth] plan hooks=[derived_notes] cells=1\n"),
+            "{notes_err}"
+        );
 
         let plan_err = run_bin(
             env!("CARGO_BIN_EXE_synth_plan"),
             &canonical(&[
-                "--src", src, "--seeds", seeds, "--summaries", summaries, "--issue", issue,
-                "--out-dir", &out_dir,
+                "--src",
+                src,
+                "--seeds",
+                seeds,
+                "--summaries",
+                summaries,
+                "--issue",
+                issue,
+                "--out-dir",
+                &out_dir,
             ]),
         );
         assert!(

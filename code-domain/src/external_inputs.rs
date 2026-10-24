@@ -74,7 +74,8 @@ use crate::cell_type;
 use crate::edge_category;
 use crate::glia_config::{
     CONSTRAINT_KINDS, MAX_ID_CHARS, MAX_NOTE_CHARS, MIN_TIERS, MODEL_KINDS, RULE_ONLY_INVARIANT,
-    TRANSITIVE_ONLY_FORBID, VIA_ONLY_TRANSITIVE, check_min_tier, check_min_tier_on, check_rule_text,
+    TRANSITIVE_ONLY_FORBID, VIA_ONLY_TRANSITIVE, check_min_tier, check_min_tier_on,
+    check_rule_text,
 };
 
 /// Repo-relative path of the checked-in cell sidecar.
@@ -85,8 +86,12 @@ pub const VECTORS_FILE: &str = ".glia/vectors.jsonl";
 pub const MAX_VECTOR_BYTES: usize = 65_536;
 /// The cell types an external writer may set. Every other type is owned by
 /// an extractor or a build pass.
-pub const WRITABLE: &[CellTypeId] =
-    &[cell_type::CONSTRAINT, cell_type::DECISION, cell_type::CONV, cell_type::VECTOR];
+pub const WRITABLE: &[CellTypeId] = &[
+    cell_type::CONSTRAINT,
+    cell_type::DECISION,
+    cell_type::CONV,
+    cell_type::VECTOR,
+];
 /// Who wrote an entry: the write API (LF.1b / LF.1c), the overlay's declared
 /// knowledge (LF.4a) or an ADR (LF.4b).
 pub const ENTRY_SOURCES: &[&str] = &["api", "overlay", "adr"];
@@ -132,7 +137,11 @@ pub enum WritePayload {
     /// One entry, upserted by `(source, id)` into the cell's entry array.
     Entry(Value),
     /// The node's whole VECTOR cell.
-    Vector { bytes: Vec<u8>, model: Option<String>, dims: Option<u32> },
+    Vector {
+        bytes: Vec<u8>,
+        model: Option<String>,
+        dims: Option<u32>,
+    },
 }
 
 /// One cell write, from a sidecar row or a live API call. Built by
@@ -151,7 +160,13 @@ pub struct CellWrite {
 impl CellWrite {
     /// An entry write of `cell` on `qname`.
     pub fn entry(qname: impl Into<String>, cell: CellTypeId, value: Value) -> Self {
-        CellWrite { qname: qname.into(), kind: None, hint: None, cell, payload: WritePayload::Entry(value) }
+        CellWrite {
+            qname: qname.into(),
+            kind: None,
+            hint: None,
+            cell,
+            payload: WritePayload::Entry(value),
+        }
     }
 
     /// A VECTOR write on `qname`.
@@ -188,7 +203,8 @@ impl TryFrom<&CellRow> for CellWrite {
     type Error = String;
 
     fn try_from(row: &CellRow) -> Result<Self, String> {
-        let cell = cell_type_id(&row.cell).ok_or_else(|| format!("unknown cell type {:?}", row.cell))?;
+        let cell =
+            cell_type_id(&row.cell).ok_or_else(|| format!("unknown cell type {:?}", row.cell))?;
         Ok(CellWrite::entry(row.qname.clone(), cell, row.entry.clone())
             .with_kind(row.kind.clone())
             .with_hint(row.hint.clone()))
@@ -202,27 +218,39 @@ impl TryFrom<&VectorRow> for CellWrite {
     fn try_from(row: &VectorRow) -> Result<Self, String> {
         let bytes = b64_decode(&row.b64)?;
         check_vector(&bytes, row.dims)?;
-        Ok(CellWrite::vector(row.qname.clone(), bytes, row.model.clone(), row.dims)
-            .with_kind(row.kind.clone())
-            .with_hint(row.hint.clone()))
+        Ok(
+            CellWrite::vector(row.qname.clone(), bytes, row.model.clone(), row.dims)
+                .with_kind(row.kind.clone())
+                .with_hint(row.hint.clone()),
+        )
     }
 }
 
 /// The cell type registered under `name` (`"CONV"`).
 pub fn cell_type_id(name: &str) -> Option<CellTypeId> {
-    cell_type::ALL.iter().find(|(_, n)| *n == name).map(|(id, _)| *id)
+    cell_type::ALL
+        .iter()
+        .find(|(_, n)| *n == name)
+        .map(|(id, _)| *id)
 }
 
 /// A VECTOR payload is 1..=[`MAX_VECTOR_BYTES`] bytes and, when `dims` is
 /// given, exactly `dims * 4` of them.
 pub fn check_vector(bytes: &[u8], dims: Option<u32>) -> Result<(), String> {
     if bytes.is_empty() || bytes.len() > MAX_VECTOR_BYTES {
-        return Err(format!("vector is {} bytes; must be 1..={MAX_VECTOR_BYTES}", bytes.len()));
+        return Err(format!(
+            "vector is {} bytes; must be 1..={MAX_VECTOR_BYTES}",
+            bytes.len()
+        ));
     }
     if let Some(d) = dims {
         let want = usize::try_from(d).ok().and_then(|d| d.checked_mul(4));
         if want != Some(bytes.len()) {
-            return Err(format!("vector is {} bytes but dims={d} needs {} (f32)", bytes.len(), u64::from(d) * 4));
+            return Err(format!(
+                "vector is {} bytes but dims={d} needs {} (f32)",
+                bytes.len(),
+                u64::from(d) * 4
+            ));
         }
     }
     Ok(())
@@ -245,7 +273,12 @@ pub fn read_rows<T: DeserializeOwned>(path: &Path) -> (Vec<T>, Vec<String>) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
-        Err(e) => return (Vec::new(), vec![format!("{}: cannot read: {e}", path.display())]),
+        Err(e) => {
+            return (
+                Vec::new(),
+                vec![format!("{}: cannot read: {e}", path.display())],
+            );
+        }
     };
     let bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes);
     let mut rows = Vec::new();
@@ -258,7 +291,9 @@ pub fn read_rows<T: DeserializeOwned>(path: &Path) -> (Vec<T>, Vec<String>) {
                 if l.is_empty() {
                     Ok(None)
                 } else {
-                    serde_json::from_str::<T>(l).map(Some).map_err(|e| e.to_string())
+                    serde_json::from_str::<T>(l)
+                        .map(Some)
+                        .map_err(|e| e.to_string())
                 }
             });
         match parsed {
@@ -278,7 +313,10 @@ pub fn write_rows<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
     let mut out = io::BufWriter::new(std::fs::File::create(&tmp)?);
@@ -287,7 +325,9 @@ pub fn write_rows<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
         serde_json::to_writer(&mut out, &canonical(&v)).map_err(io::Error::other)?;
         out.write_all(b"\n")?;
     }
-    out.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
+    out.into_inner()
+        .map_err(io::IntoInnerError::into_error)?
+        .sync_all()?;
     std::fs::rename(&tmp, path)
 }
 
@@ -298,7 +338,8 @@ pub fn write_rows<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
 pub fn canonical(v: &Value) -> Value {
     match v {
         Value::Object(m) => {
-            let sorted: BTreeMap<&String, Value> = m.iter().map(|(k, v)| (k, canonical(v))).collect();
+            let sorted: BTreeMap<&String, Value> =
+                m.iter().map(|(k, v)| (k, canonical(v))).collect();
             let mut out = Map::new();
             for (k, v) in sorted {
                 out.insert(k.clone(), v);
@@ -362,12 +403,19 @@ fn check_entry(cell: CellTypeId, v: &Value, allow_rule: bool) -> Result<(), Stri
     };
     match text("source")? {
         Some(s) if ENTRY_SOURCES.contains(&s) => {}
-        other => return Err(format!("`source` {other:?} is not one of {}", ENTRY_SOURCES.join(" | "))),
+        other => {
+            return Err(format!(
+                "`source` {other:?} is not one of {}",
+                ENTRY_SOURCES.join(" | ")
+            ));
+        }
     }
     let id = text("id")?.ok_or("`id` is required")?;
     let n = id.chars().count();
     if n == 0 || n > MAX_ID_CHARS || id.chars().any(char::is_control) {
-        return Err(format!("`id` {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"));
+        return Err(format!(
+            "`id` {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"
+        ));
     }
     match cell {
         c if c == cell_type::CONSTRAINT => constraint_checks(obj, allow_rule),
@@ -382,7 +430,9 @@ fn check_entry(cell: CellTypeId, v: &Value, allow_rule: bool) -> Result<(), Stri
             let t = text("text")?.unwrap_or_default();
             let chars = t.chars().count();
             if t.trim().is_empty() || chars > MAX_NOTE_CHARS {
-                return Err(format!("`text` must be 1..={MAX_NOTE_CHARS} chars (got {chars})"));
+                return Err(format!(
+                    "`text` must be 1..={MAX_NOTE_CHARS} chars (got {chars})"
+                ));
             }
             text("by")?;
             text("at")?;
@@ -402,7 +452,11 @@ fn constraint_checks(obj: &Map<String, Value>, allow_rule: bool) -> Result<(), S
     };
     let kind = text("kind")?.unwrap_or_default();
     if !CONSTRAINT_KINDS.contains(&kind) && !MODEL_KINDS.contains(&kind) {
-        let all: Vec<&str> = CONSTRAINT_KINDS.iter().chain(MODEL_KINDS).copied().collect();
+        let all: Vec<&str> = CONSTRAINT_KINDS
+            .iter()
+            .chain(MODEL_KINDS)
+            .copied()
+            .collect();
         return Err(format!("`kind` {kind:?} is not one of {}", all.join(" | ")));
     }
     if matches!(kind, "forbid_edge" | "allow") && !(present("from")? && present("to")?) {
@@ -418,11 +472,18 @@ fn constraint_checks(obj: &Map<String, Value>, allow_rule: bool) -> Result<(), S
         return Err("kind component needs `paths`: a non-empty array of non-empty strings".into());
     }
     if kind == "layer" {
-        if obj.get("rank").and_then(Value::as_u64).and_then(|r| u32::try_from(r).ok()).is_none() {
+        if obj
+            .get("rank")
+            .and_then(Value::as_u64)
+            .and_then(|r| u32::try_from(r).ok())
+            .is_none()
+        {
             return Err("kind layer needs `rank`: an integer 0..=4294967295".into());
         }
         if string_list(obj, "components").is_none() {
-            return Err("kind layer needs `components`: a non-empty array of non-empty strings".into());
+            return Err(
+                "kind layer needs `components`: a non-empty array of non-empty strings".into(),
+            );
         }
         if !matches!(obj.get("strict"), None | Some(Value::Null | Value::Bool(_))) {
             return Err("`strict` must be a bool".into());
@@ -456,7 +517,9 @@ fn constraint_checks(obj: &Map<String, Value>, allow_rule: bool) -> Result<(), S
                 Some("overlay") => {}
                 other => {
                     let src = other.unwrap_or_default();
-                    return Err(format!("`rule` is written only with source `overlay`, not {src:?} (0.5.2 Q9)"));
+                    return Err(format!(
+                        "`rule` is written only with source `overlay`, not {src:?} (0.5.2 Q9)"
+                    ));
                 }
             }
             true
@@ -485,7 +548,12 @@ fn constraint_checks(obj: &Map<String, Value>, allow_rule: bool) -> Result<(), S
             check_min_tier(tier)?;
             check_min_tier_on(kind, has_rule)?;
         }
-        Some(_) => return Err(format!("`min_tier` must be a string: {}", MIN_TIERS.join(" | "))),
+        Some(_) => {
+            return Err(format!(
+                "`min_tier` must be a string: {}",
+                MIN_TIERS.join(" | ")
+            ));
+        }
     }
     Ok(())
 }
@@ -496,7 +564,12 @@ fn string_list(obj: &Map<String, Value>, key: &str) -> Option<Vec<String>> {
     let items = obj.get(key)?.as_array()?;
     let out = items
         .iter()
-        .map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from))
+        .map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
         .collect::<Option<Vec<_>>>()?;
     (!out.is_empty()).then_some(out)
 }
@@ -553,7 +626,12 @@ fn entry_array(p: &CellPayload) -> Option<Vec<Value>> {
 
 /// `(source, id)`; `""` for a missing field.
 fn entry_key(e: &Value) -> (String, String) {
-    let field = |k: &str| e.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let field = |k: &str| {
+        e.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     (field("source"), field("id"))
 }
 
@@ -575,7 +653,12 @@ pub enum ConstraintKind {
     /// any third scope counts, except one that enters `to` through a `via`
     /// facade scope (resolved paths, like `from` / `to`). A transitive rule is
     /// evaluated as `forbid_path` violations by `engine::check` (DB.3b).
-    ForbidEdge { from: String, to: String, transitive: bool, via: Vec<String> },
+    ForbidEdge {
+        from: String,
+        to: String,
+        transitive: bool,
+        via: Vec<String>,
+    },
     /// No cycle among the nodes in `scope` (`None` = the whole graph).
     NoCycle { scope: Option<String> },
     /// A statement. With `rule` (overlay version 2, DB.1) it is checked: the
@@ -589,7 +672,12 @@ pub enum ConstraintKind {
     /// A reflexion-model layer (CC.5a): `rank` 0 is the top. Its components
     /// may use those of any lower layer, or with `strict` only of rank + 1. A
     /// declaration, not a rule.
-    Layer { name: String, rank: u32, components: Vec<String>, strict: bool },
+    Layer {
+        name: String,
+        rank: u32,
+        components: Vec<String>,
+        strict: bool,
+    },
     /// The model permits component `from` to depend on component `to` (CC.5a).
     Allow { from: String, to: String },
 }
@@ -641,7 +729,11 @@ pub struct ConstraintRule {
 /// outside `glia_config::MIN_TIERS`) is skipped; a payload that is not a JSON
 /// array yields nothing. Never panics.
 pub fn parse_constraints(payload: &CellPayload) -> Vec<ConstraintRule> {
-    entry_array(payload).unwrap_or_default().iter().filter_map(constraint_rule).collect()
+    entry_array(payload)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(constraint_rule)
+        .collect()
 }
 
 fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
@@ -649,7 +741,11 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
     // `Err` (a non-string) is malformed; `Ok(None)` is absent.
     let field = |key: &str| string_field(obj, key).ok();
     let required = |key: &str| {
-        field(key).flatten().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+        field(key)
+            .flatten()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
     };
     let kind = match field("kind")?? {
         "forbid_edge" => ConstraintKind::ForbidEdge {
@@ -665,7 +761,9 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
                 Some(_) => string_list(obj, "via")?,
             },
         },
-        "no_cycle" => ConstraintKind::NoCycle { scope: field("scope")?.map(String::from) },
+        "no_cycle" => ConstraintKind::NoCycle {
+            scope: field("scope")?.map(String::from),
+        },
         "invariant" => ConstraintKind::Invariant {
             text: required("text")?,
             rule: match field("rule")? {
@@ -674,8 +772,14 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
                 Some(r) => Some(r.to_string()),
             },
         },
-        "allow" => ConstraintKind::Allow { from: required("from")?, to: required("to")? },
-        "component" => ConstraintKind::Component { name: required("name")?, paths: string_list(obj, "paths")? },
+        "allow" => ConstraintKind::Allow {
+            from: required("from")?,
+            to: required("to")?,
+        },
+        "component" => ConstraintKind::Component {
+            name: required("name")?,
+            paths: string_list(obj, "paths")?,
+        },
         "layer" => ConstraintKind::Layer {
             name: required("name")?,
             rank: u32::try_from(obj.get("rank")?.as_u64()?).ok()?,
@@ -690,9 +794,10 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
     };
     let categories = match obj.get("categories") {
         None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(names)) => {
-            names.iter().map(|n| n.as_str().map(String::from)).collect::<Option<Vec<_>>>()?
-        }
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|n| n.as_str().map(String::from))
+            .collect::<Option<Vec<_>>>()?,
         Some(_) => return None,
     };
     let min_tier = match field("min_tier")? {
@@ -729,20 +834,35 @@ mod tests {
         let p = merge_entry(Some(&p), &b).unwrap();
         assert_eq!(
             p,
-            CellPayload::Json(r#"[{"id":"1","source":"api","text":"a"},{"id":"2","source":"api","text":"b"}]"#.into())
+            CellPayload::Json(
+                r#"[{"id":"1","source":"api","text":"a"},{"id":"2","source":"api","text":"b"}]"#
+                    .into()
+            )
         );
         // Same (source, id) replaces.
         let p = merge_entry(Some(&p), &json!({"source": "api", "id": "1", "text": "z"})).unwrap();
         assert_eq!(
             p,
-            CellPayload::Json(r#"[{"id":"1","source":"api","text":"z"},{"id":"2","source":"api","text":"b"}]"#.into())
+            CellPayload::Json(
+                r#"[{"id":"1","source":"api","text":"z"},{"id":"2","source":"api","text":"b"}]"#
+                    .into()
+            )
         );
         // An extractor-owned payload is never clobbered.
         assert!(merge_entry(Some(&CellPayload::Text("x".into())), &a).is_err());
         assert!(merge_entry(Some(&CellPayload::Json("{}".into())), &a).is_err());
         // DECISION status is stored lowercased.
-        let d = merge_entry(None, &json!({"source": "api", "id": "d", "title": "t", "status": "Accepted"})).unwrap();
-        assert_eq!(d, CellPayload::Json(r#"[{"id":"d","source":"api","status":"accepted","title":"t"}]"#.into()));
+        let d = merge_entry(
+            None,
+            &json!({"source": "api", "id": "d", "title": "t", "status": "Accepted"}),
+        )
+        .unwrap();
+        assert_eq!(
+            d,
+            CellPayload::Json(
+                r#"[{"id":"d","source":"api","status":"accepted","title":"t"}]"#.into()
+            )
+        );
     }
 
     #[test]
@@ -750,7 +870,10 @@ mod tests {
         let p = merge_entry(None, &json!({"source": "api", "id": "1", "text": "a"})).unwrap();
         let p = merge_entry(Some(&p), &json!({"source": "adr", "id": "1", "title": "t"})).unwrap();
         let p = remove_entry(&p, "api", "1").unwrap();
-        assert_eq!(p, CellPayload::Json(r#"[{"id":"1","source":"adr","title":"t"}]"#.into()));
+        assert_eq!(
+            p,
+            CellPayload::Json(r#"[{"id":"1","source":"adr","title":"t"}]"#.into())
+        );
         assert_eq!(remove_entry(&p, "adr", "1"), None);
         let text = CellPayload::Text("x".into());
         assert_eq!(remove_entry(&text, "api", "1"), Some(text));
@@ -759,32 +882,80 @@ mod tests {
     #[test]
     fn validate_entry_rules() {
         let ok = |c, v: Value| validate_entry(c, &v).is_ok();
-        assert!(ok(cell_type::CONV, json!({"source": "api", "id": "1", "text": "t", "by": "me", "at": "x"})));
-        assert!(!ok(cell_type::CONV, json!({"source": "api", "id": "1", "text": "  "})));
-        assert!(!ok(cell_type::CONV, json!({"source": "api", "id": "1", "text": "x".repeat(MAX_NOTE_CHARS + 1)})));
-        assert!(!ok(cell_type::CONV, json!({"source": "web", "id": "1", "text": "t"})));
-        assert!(!ok(cell_type::CONV, json!({"source": "api", "id": "", "text": "t"})));
-        assert!(!ok(cell_type::CONV, json!({"source": "api", "id": "a\u{7}", "text": "t"})));
-        assert!(!ok(cell_type::CONV, json!({"source": "api", "id": "x".repeat(MAX_ID_CHARS + 1), "text": "t"})));
+        assert!(ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "1", "text": "t", "by": "me", "at": "x"})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "1", "text": "  "})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "1", "text": "x".repeat(MAX_NOTE_CHARS + 1)})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "web", "id": "1", "text": "t"})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "", "text": "t"})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "a\u{7}", "text": "t"})
+        ));
+        assert!(!ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "x".repeat(MAX_ID_CHARS + 1), "text": "t"})
+        ));
         assert!(!ok(cell_type::CONV, json!(["not", "an", "object"])));
-        assert!(ok(cell_type::DECISION, json!({"source": "adr", "id": "d", "text": "t"})));
-        assert!(!ok(cell_type::DECISION, json!({"source": "adr", "id": "d", "status": "open"})));
+        assert!(ok(
+            cell_type::DECISION,
+            json!({"source": "adr", "id": "d", "text": "t"})
+        ));
+        assert!(!ok(
+            cell_type::DECISION,
+            json!({"source": "adr", "id": "d", "status": "open"})
+        ));
         assert!(ok(
             cell_type::CONSTRAINT,
             json!({"source": "overlay", "id": "c", "kind": "forbid_edge", "from": "a", "to": "b", "categories": ["CALLS"]})
         ));
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "forbid_edge", "from": "a"})));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "overlay", "id": "c", "kind": "forbid_edge", "from": "a"})
+        ));
         assert!(!ok(
             cell_type::CONSTRAINT,
             json!({"source": "overlay", "id": "c", "kind": "no_cycle", "categories": ["NOPE"]})
         ));
-        assert!(ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "no_cycle"})));
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "invariant"})));
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "other"})));
+        assert!(ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "overlay", "id": "c", "kind": "no_cycle"})
+        ));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "overlay", "id": "c", "kind": "invariant"})
+        ));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "overlay", "id": "c", "kind": "other"})
+        ));
         // CC.5a: allow needs from + to; component / layer validate like an overlay write.
-        assert!(ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "from": "web", "to": "api"})));
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "from": "web"})));
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "to": "api"})));
+        assert!(ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "a", "kind": "allow", "from": "web", "to": "api"})
+        ));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "a", "kind": "allow", "from": "web"})
+        ));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "a", "kind": "allow", "to": "api"})
+        ));
         assert!(ok(
             cell_type::CONSTRAINT,
             json!({"source": "api", "id": "component:web", "kind": "component", "name": "web", "paths": ["web"]})
@@ -795,7 +966,10 @@ mod tests {
                 json!({"source": "api", "id": "component:web", "kind": "component", "name": "web", "paths": bad})
             ));
         }
-        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "component:x", "kind": "component", "paths": ["x"]})));
+        assert!(!ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "component:x", "kind": "component", "paths": ["x"]})
+        ));
         assert!(ok(
             cell_type::CONSTRAINT,
             json!({"source": "api", "id": "layer:ui", "kind": "layer", "name": "ui", "rank": 0, "components": ["web"], "strict": true})
@@ -845,8 +1019,10 @@ mod tests {
         ];
         let payload = CellPayload::Json(serde_json::to_string(&entries).unwrap());
         let rules = parse_constraints(&payload);
-        let got: Vec<(&str, &str, Option<&str>)> =
-            rules.iter().map(|r| (r.id.as_str(), r.kind.name(), r.decl.as_deref())).collect();
+        let got: Vec<(&str, &str, Option<&str>)> = rules
+            .iter()
+            .map(|r| (r.id.as_str(), r.kind.name(), r.decl.as_deref()))
+            .collect();
         assert_eq!(
             got,
             [
@@ -861,27 +1037,64 @@ mod tests {
         );
         assert_eq!(
             rules[0].kind,
-            ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+            ConstraintKind::ForbidEdge {
+                from: "web".into(),
+                to: "services/api".into(),
+                transitive: false,
+                via: vec![]
+            }
         );
-        assert_eq!(rules[0].categories, ["CALLS", "RENAMED_SINCE"], "an unregistered name is kept for the checker");
+        assert_eq!(
+            rules[0].categories,
+            ["CALLS", "RENAMED_SINCE"],
+            "an unregistered name is kept for the checker"
+        );
         assert_eq!(rules[0].source, "overlay");
-        assert_eq!(rules[1].kind, ConstraintKind::NoCycle { scope: Some("services/api".into()) });
+        assert_eq!(
+            rules[1].kind,
+            ConstraintKind::NoCycle {
+                scope: Some("services/api".into())
+            }
+        );
         assert_eq!(rules[2].kind, ConstraintKind::NoCycle { scope: None });
-        assert_eq!(rules[3].kind, ConstraintKind::Invariant { text: "charges are idempotent".into(), rule: None });
+        assert_eq!(
+            rules[3].kind,
+            ConstraintKind::Invariant {
+                text: "charges are idempotent".into(),
+                rule: None
+            }
+        );
         assert_eq!(
             rules[4].kind,
-            ConstraintKind::Component { name: "web".into(), paths: vec!["web".into(), "shared/ui".into()] }
+            ConstraintKind::Component {
+                name: "web".into(),
+                paths: vec!["web".into(), "shared/ui".into()]
+            }
         );
         assert_eq!(
             rules[5].kind,
-            ConstraintKind::Layer { name: "core".into(), rank: 1, components: vec!["api".into()], strict: true }
+            ConstraintKind::Layer {
+                name: "core".into(),
+                rank: 1,
+                components: vec!["api".into()],
+                strict: true
+            }
         );
-        assert_eq!(rules[6].kind, ConstraintKind::Allow { from: "web".into(), to: "api".into() });
+        assert_eq!(
+            rules[6].kind,
+            ConstraintKind::Allow {
+                from: "web".into(),
+                to: "api".into()
+            }
+        );
         assert_eq!(rules[6].categories, ["CALLS"]);
         // strict defaults to false.
         let lax = json!([{"source": "api", "id": "l", "kind": "layer", "name": "l", "rank": 0, "components": ["web"]}]);
         let lax = parse_constraints(&CellPayload::Json(lax.to_string()));
-        assert!(matches!(lax[0].kind, ConstraintKind::Layer { strict: false, .. }), "{lax:?}");
+        assert!(
+            matches!(lax[0].kind, ConstraintKind::Layer { strict: false, .. }),
+            "{lax:?}"
+        );
 
         // Round trip through the writer's merge: what merge_entry stores parses back.
         let stored = merge_entry(None, &entries[0]).unwrap();
@@ -901,32 +1114,72 @@ mod tests {
         let probe = |source: &str| json!({"source": source, "id": "r1", "kind": "invariant", "text": "t", "rule": rule});
         for source in ["api", "overlay"] {
             let e = validate_entry(cell_type::CONSTRAINT, &probe(source)).expect_err(source);
-            assert!(e.contains("declared only in .glia/overlay.toml"), "{source}: {e}");
+            assert!(
+                e.contains("declared only in .glia/overlay.toml"),
+                "{source}: {e}"
+            );
             assert_eq!(e, RULE_IS_OVERLAY_ONLY);
         }
         // Any value, even null, is refused: the key itself is overlay-only.
         for v in [json!(null), json!(""), json!(7)] {
-            let entry = json!({"source": "api", "id": "r", "kind": "invariant", "text": "t", "rule": v});
-            assert_eq!(validate_entry(cell_type::CONSTRAINT, &entry), Err(RULE_IS_OVERLAY_ONLY.to_string()));
+            let entry =
+                json!({"source": "api", "id": "r", "kind": "invariant", "text": "t", "rule": v});
+            assert_eq!(
+                validate_entry(cell_type::CONSTRAINT, &entry),
+                Err(RULE_IS_OVERLAY_ONLY.to_string())
+            );
         }
-        assert_eq!(validate_declared_entry(cell_type::CONSTRAINT, &probe("overlay")), Ok(()));
-        let api = validate_declared_entry(cell_type::CONSTRAINT, &probe("api")).expect_err("source api");
-        assert!(api.contains("only with source `overlay`") && api.contains("Q9"), "{api}");
+        assert_eq!(
+            validate_declared_entry(cell_type::CONSTRAINT, &probe("overlay")),
+            Ok(())
+        );
+        let api =
+            validate_declared_entry(cell_type::CONSTRAINT, &probe("api")).expect_err("source api");
+        assert!(
+            api.contains("only with source `overlay`") && api.contains("Q9"),
+            "{api}"
+        );
         let declared = |v: Value| validate_declared_entry(cell_type::CONSTRAINT, &v);
-        let blank = declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": "  "}));
-        assert!(blank.as_ref().is_err_and(|e| e.contains("not blank")), "{blank:?}");
+        let blank = declared(
+            json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": "  "}),
+        );
+        assert!(
+            blank.as_ref().is_err_and(|e| e.contains("not blank")),
+            "{blank:?}"
+        );
         let long = "x".repeat(crate::glia_config::MAX_RULE_CHARS + 1);
         assert!(declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": long})).is_err());
-        let on_forbid = declared(json!({"source": "overlay", "id": "r", "kind": "forbid_edge", "from": "a", "to": "b", "rule": rule}));
+        let on_forbid = declared(
+            json!({"source": "overlay", "id": "r", "kind": "forbid_edge", "from": "a", "to": "b", "rule": rule}),
+        );
         assert_eq!(on_forbid, Err("`rule` is an invariant field".to_string()));
-        assert!(declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": 1})).is_err());
+        assert!(
+            declared(
+                json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": 1})
+            )
+            .is_err()
+        );
         assert_eq!(
-            declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": rule, "min_tier": "fact"})),
+            declared(
+                json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": rule, "min_tier": "fact"})
+            ),
             Ok(())
         );
         // validate_declared_entry runs every validate_entry check besides.
-        assert!(validate_declared_entry(cell_type::CONV, &json!({"source": "overlay", "id": "n", "text": "  "})).is_err());
-        assert!(validate_declared_entry(cell_type::DECISION, &json!({"source": "overlay", "id": "d", "text": "t"})).is_ok());
+        assert!(
+            validate_declared_entry(
+                cell_type::CONV,
+                &json!({"source": "overlay", "id": "n", "text": "  "})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_declared_entry(
+                cell_type::DECISION,
+                &json!({"source": "overlay", "id": "d", "text": "t"})
+            )
+            .is_ok()
+        );
 
         // transitive / via / min_tier: the same shape rules on both paths.
         let forbid = |extra: Value| {
@@ -938,22 +1191,53 @@ mod tests {
         };
         for check in [validate_entry, validate_declared_entry] {
             let ok = |v: Value| check(cell_type::CONSTRAINT, &v).is_ok();
-            assert!(ok(forbid(json!({"transitive": true, "via": ["api/public"], "min_tier": "derived"}))));
+            assert!(ok(forbid(
+                json!({"transitive": true, "via": ["api/public"], "min_tier": "derived"})
+            )));
             assert!(ok(forbid(json!({"transitive": false}))));
-            assert!(ok(json!({"source": "api", "id": "c", "kind": "no_cycle", "min_tier": "fact"})));
+            assert!(ok(
+                json!({"source": "api", "id": "c", "kind": "no_cycle", "min_tier": "fact"})
+            ));
             for (bad, needle) in [
                 (forbid(json!({"min_tier": "heuristic"})), "never fails CI"),
                 (forbid(json!({"min_tier": "x"})), "must be fact | derived"),
                 (forbid(json!({"min_tier": 1})), "must be a string"),
-                (forbid(json!({"transitive": "yes"})), "`transitive` must be a bool"),
-                (forbid(json!({"via": ["api/public"]})), "set `transitive = true`"),
-                (forbid(json!({"transitive": true, "via": []})), "non-empty array"),
-                (forbid(json!({"transitive": true, "via": [""]})), "non-empty array"),
-                (forbid(json!({"transitive": true, "via": "api/public"})), "non-empty array"),
-                (json!({"source": "api", "id": "c", "kind": "no_cycle", "transitive": true}), "forbid_edge field"),
-                (json!({"source": "api", "id": "c", "kind": "no_cycle", "via": ["x"]}), "set `transitive = true`"),
-                (json!({"source": "api", "id": "a", "kind": "allow", "from": "w", "to": "a", "min_tier": "fact"}), "kind allow"),
-                (json!({"source": "api", "id": "i", "kind": "invariant", "text": "t", "min_tier": "fact"}), "needs `rule`"),
+                (
+                    forbid(json!({"transitive": "yes"})),
+                    "`transitive` must be a bool",
+                ),
+                (
+                    forbid(json!({"via": ["api/public"]})),
+                    "set `transitive = true`",
+                ),
+                (
+                    forbid(json!({"transitive": true, "via": []})),
+                    "non-empty array",
+                ),
+                (
+                    forbid(json!({"transitive": true, "via": [""]})),
+                    "non-empty array",
+                ),
+                (
+                    forbid(json!({"transitive": true, "via": "api/public"})),
+                    "non-empty array",
+                ),
+                (
+                    json!({"source": "api", "id": "c", "kind": "no_cycle", "transitive": true}),
+                    "forbid_edge field",
+                ),
+                (
+                    json!({"source": "api", "id": "c", "kind": "no_cycle", "via": ["x"]}),
+                    "set `transitive = true`",
+                ),
+                (
+                    json!({"source": "api", "id": "a", "kind": "allow", "from": "w", "to": "a", "min_tier": "fact"}),
+                    "kind allow",
+                ),
+                (
+                    json!({"source": "api", "id": "i", "kind": "invariant", "text": "t", "min_tier": "fact"}),
+                    "needs `rule`",
+                ),
                 (
                     json!({"source": "api", "id": "component:w", "kind": "component", "name": "w", "paths": ["w"], "min_tier": "fact"}),
                     "kind component",
@@ -999,13 +1283,31 @@ mod tests {
             }
         );
         assert_eq!(rules[0].min_tier.as_deref(), Some("fact"));
-        assert_eq!(rules[1].kind, ConstraintKind::Invariant { text: "no routes".into(), rule: Some(rule.into()) });
+        assert_eq!(
+            rules[1].kind,
+            ConstraintKind::Invariant {
+                text: "no routes".into(),
+                rule: Some(rule.into())
+            }
+        );
         assert_eq!(rules[1].min_tier.as_deref(), Some("derived"));
-        assert_eq!((rules[2].kind.name(), rules[2].min_tier.as_deref()), ("no_cycle", Some("fact")));
+        assert_eq!(
+            (rules[2].kind.name(), rules[2].min_tier.as_deref()),
+            ("no_cycle", Some("fact"))
+        );
         // A version-1 entry reads with every version-2 field unset.
-        let v1 = json!([{"source": "api", "id": "w", "kind": "forbid_edge", "from": "a", "to": "b"}]);
+        let v1 =
+            json!([{"source": "api", "id": "w", "kind": "forbid_edge", "from": "a", "to": "b"}]);
         let v1 = parse_constraints(&CellPayload::Json(v1.to_string()));
-        assert_eq!(v1[0].kind, ConstraintKind::ForbidEdge { from: "a".into(), to: "b".into(), transitive: false, via: vec![] });
+        assert_eq!(
+            v1[0].kind,
+            ConstraintKind::ForbidEdge {
+                from: "a".into(),
+                to: "b".into(),
+                transitive: false,
+                via: vec![]
+            }
+        );
         assert_eq!(v1[0].min_tier, None);
         // Round trip through the writer's merge.
         let stored = merge_entry(None, &entries[0]).unwrap();
@@ -1055,14 +1357,30 @@ mod tests {
             b64: "AACAPwAAAEA=".into(),
         };
         let w = CellWrite::try_from(&row(Some(2))).unwrap();
-        assert_eq!(w.payload, WritePayload::Vector { bytes: bytes.clone(), model: None, dims: Some(2) });
+        assert_eq!(
+            w.payload,
+            WritePayload::Vector {
+                bytes: bytes.clone(),
+                model: None,
+                dims: Some(2)
+            }
+        );
         assert!(CellWrite::try_from(&row(Some(3))).is_err());
         assert!(CellWrite::try_from(&row(None)).is_ok());
-        let bad = VectorRow { b64: "***".into(), ..row(None) };
+        let bad = VectorRow {
+            b64: "***".into(),
+            ..row(None)
+        };
         assert!(CellWrite::try_from(&bad).is_err());
         assert!(check_vector(&vec![0; MAX_VECTOR_BYTES + 4], None).is_err());
         assert!(check_vector(&[], None).is_err());
-        let unknown = CellRow { qname: "a".into(), kind: None, hint: None, cell: "NOPE".into(), entry: json!({}) };
+        let unknown = CellRow {
+            qname: "a".into(),
+            kind: None,
+            hint: None,
+            cell: "NOPE".into(),
+            entry: json!({}),
+        };
         assert!(CellWrite::try_from(&unknown).is_err());
     }
 }

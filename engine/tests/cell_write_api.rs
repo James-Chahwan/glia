@@ -12,11 +12,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use glia_code_domain::{cell_type, node_kind};
 use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, read_rows,
 };
 use glia_code_domain::snapshots::REDACTED;
+use glia_code_domain::{cell_type, node_kind};
 use glia_core::{Cell, CellPayload, CellTypeId, NodeId, NodeKindId, RepoId};
 use glia_engine::persist::layout_meta;
 use glia_engine::{generate_many, generate_one};
@@ -60,7 +60,11 @@ fn cells_of(m: &MergedGraph, qname: &str) -> Vec<Cell> {
     let hits: Vec<&Vec<Cell>> = m
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname)))
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname))
+        })
         .map(|n| &n.cells)
         .collect();
     assert_eq!(hits.len(), 1, "exactly one node is {qname}");
@@ -68,7 +72,10 @@ fn cells_of(m: &MergedGraph, qname: &str) -> Vec<Cell> {
 }
 
 fn payload(m: &MergedGraph, qname: &str, t: CellTypeId) -> Option<CellPayload> {
-    cells_of(m, qname).into_iter().find(|c| c.kind == t).map(|c| c.payload)
+    cells_of(m, qname)
+        .into_iter()
+        .find(|c| c.kind == t)
+        .map(|c| c.payload)
 }
 
 fn conv(text: &str) -> CellWrite {
@@ -87,14 +94,24 @@ fn shards(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().ends_with(".gmap"))
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort();
     out
 }
 
 fn set_mtime(path: &Path, t: SystemTime) {
-    fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
 }
 
 /// The sidecar is the durable home: a write with no gmap lands on the node of
@@ -107,9 +124,13 @@ fn write_survives_rebuild() {
     assert_eq!(out.write_through, WriteThrough::NoGmap);
     assert_eq!(out.entry_id.as_deref(), Some("000001"));
     assert_eq!((out.rows, out.target.as_str()), (1, "pending"));
-    let want = CellPayload::Json(r#"[{"id":"000001","source":"api","text":"retries are safe"}]"#.into());
+    let want =
+        CellPayload::Json(r#"[{"id":"000001","source":"api","text":"retries are safe"}]"#.into());
     for _ in 0..2 {
-        assert_eq!(payload(&build(&root), "a::charge", cell_type::CONV), Some(want.clone()));
+        assert_eq!(
+            payload(&build(&root), "a::charge", cell_type::CONV),
+            Some(want.clone())
+        );
     }
 }
 
@@ -130,7 +151,10 @@ fn write_through_equals_rebuild() {
     assert_eq!(out.write_through, WriteThrough::Applied);
     assert_eq!(out.target, "bound");
     assert!(out.node.is_some());
-    assert!(!is_gmap_stale(&dir, &root), "the write-through keeps the layout fresh");
+    assert!(
+        !is_gmap_stale(&dir, &root),
+        "the write-through keeps the layout fresh"
+    );
 
     let warm = read_merged_sharded(&dir).unwrap();
     let fresh = build(&root);
@@ -138,17 +162,29 @@ fn write_through_equals_rebuild() {
     assert_eq!(
         decision,
         Some(CellPayload::Json(
-            r#"[{"id":"d1","source":"api","status":"accepted","title":"Charges are idempotent"}]"#.into()
+            r#"[{"id":"d1","source":"api","status":"accepted","title":"Charges are idempotent"}]"#
+                .into()
         ))
     );
     assert_eq!(decision, payload(&fresh, "a::charge", cell_type::DECISION));
     let rebuilt = tmp.path().join("rebuilt");
     write_merged_sharded(&fresh, &rebuilt).unwrap();
-    assert_eq!(shards(&dir), shards(&rebuilt), "the write-through gmap is the rebuild's, byte for byte");
+    assert_eq!(
+        shards(&dir),
+        shards(&rebuilt),
+        "the write-through gmap is the rebuild's, byte for byte"
+    );
 
     let rows = cell_rows(&root);
     assert_eq!(rows.len(), 1);
-    assert!(rows[0].hint.as_deref().is_some_and(|h| h.starts_with("v1|")), "{:?}", rows[0].hint);
+    assert!(
+        rows[0]
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.starts_with("v1|")),
+        "{:?}",
+        rows[0].hint
+    );
     assert_eq!(out.hint, rows[0].hint);
     assert!(!root.join(CELLS_LOCK).exists(), "the lock is released");
 }
@@ -162,16 +198,31 @@ fn stale_source_is_never_masked() {
     let root = repo(tmp.path(), "repo");
     let dir = persist(&root);
     let manifest = fs::read(dir.join(MANIFEST_NAME)).unwrap();
-    fs::write(root.join("a.py"), format!("{SOURCE}\n\ndef void(order_id):\n    return None\n")).unwrap();
-    set_mtime(&root.join("a.py"), SystemTime::now() + Duration::from_secs(5));
+    fs::write(
+        root.join("a.py"),
+        format!("{SOURCE}\n\ndef void(order_id):\n    return None\n"),
+    )
+    .unwrap();
+    set_mtime(
+        &root.join("a.py"),
+        SystemTime::now() + Duration::from_secs(5),
+    );
     assert!(is_gmap_stale(&dir, &root));
 
     let out = write_cell(&root, Some(&dir), None, &conv("n")).unwrap();
     assert_eq!(out.write_through, WriteThrough::GmapStale);
     assert_eq!(out.target, "pending");
     assert!(is_gmap_stale(&dir, &root), "a stale layout stays stale");
-    assert_eq!(fs::read(dir.join(MANIFEST_NAME)).unwrap(), manifest, "the manifest is untouched");
-    assert_eq!(cell_rows(&root).len(), 1, "the sidecar still takes the write");
+    assert_eq!(
+        fs::read(dir.join(MANIFEST_NAME)).unwrap(),
+        manifest,
+        "the manifest is untouched"
+    );
+    assert_eq!(
+        cell_rows(&root).len(),
+        1,
+        "the sidecar still takes the write"
+    );
 }
 
 /// A sidecar edited by hand after the persist makes the layout stale, so the
@@ -191,7 +242,11 @@ fn hand_edited_sidecar_skips_write_through() {
     assert_eq!(out.write_through, WriteThrough::GmapStale);
     let rows = cell_rows(&root);
     let names: Vec<&str> = rows.iter().map(|r| r.qname.as_str()).collect();
-    assert_eq!(names, ["a::charge", "a::refund"], "the hand row is kept, rows sorted");
+    assert_eq!(
+        names,
+        ["a::charge", "a::refund"],
+        "the hand row is kept, rows sorted"
+    );
     assert!(is_gmap_stale(&dir, &root));
 }
 
@@ -203,13 +258,28 @@ fn conv_appends_get_sequential_ids() {
     let root = repo(tmp.path(), "repo");
     let a = write_cell(&root, None, None, &conv("first")).unwrap();
     let b = write_cell(&root, None, None, &conv("second")).unwrap();
-    assert_eq!((a.entry_id.as_deref(), b.entry_id.as_deref()), (Some("000001"), Some("000002")));
+    assert_eq!(
+        (a.entry_id.as_deref(), b.entry_id.as_deref()),
+        (Some("000001"), Some("000002"))
+    );
     assert_eq!(b.rows, 2);
-    let ids: Vec<String> = cell_rows(&root).iter().map(|r| r.entry["id"].as_str().unwrap().to_string()).collect();
+    let ids: Vec<String> = cell_rows(&root)
+        .iter()
+        .map(|r| r.entry["id"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(ids, ["000001", "000002"]);
-    let other = write_cell(&root, None, None, &CellWrite::entry("a::refund", cell_type::CONV, json!({"text": "x"})))
-        .unwrap();
-    assert_eq!(other.entry_id.as_deref(), Some("000001"), "ids count per qname");
+    let other = write_cell(
+        &root,
+        None,
+        None,
+        &CellWrite::entry("a::refund", cell_type::CONV, json!({"text": "x"})),
+    )
+    .unwrap();
+    assert_eq!(
+        other.entry_id.as_deref(),
+        Some("000001"),
+        "ids count per qname"
+    );
 }
 
 /// A VECTOR goes to vectors.jsonl as base64, writes through as bytes, and a
@@ -221,16 +291,45 @@ fn vector_roundtrip() {
     let dir = persist(&root);
     let w = CellWrite::vector("a::charge", VECTOR.to_vec(), Some("m1".into()), Some(2));
     let out = write_cell(&root, Some(&dir), None, &w).unwrap();
-    assert_eq!((out.write_through, out.entry_id.as_deref(), out.cell.as_str()), (WriteThrough::Applied, None, "VECTOR"));
+    assert_eq!(
+        (
+            out.write_through,
+            out.entry_id.as_deref(),
+            out.cell.as_str()
+        ),
+        (WriteThrough::Applied, None, "VECTOR")
+    );
     let (rows, errors) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
     assert!(errors.is_empty());
-    assert_eq!((rows.len(), rows[0].b64.as_str(), rows[0].dims), (1, "AACAPwAAAEA=", Some(2)));
-    assert!(!root.join(CELLS_FILE).exists(), "a vector never touches cells.jsonl");
+    assert_eq!(
+        (rows.len(), rows[0].b64.as_str(), rows[0].dims),
+        (1, "AACAPwAAAEA=", Some(2))
+    );
+    assert!(
+        !root.join(CELLS_FILE).exists(),
+        "a vector never touches cells.jsonl"
+    );
     let bytes = Some(CellPayload::Bytes(VECTOR.to_vec()));
-    assert_eq!(payload(&read_merged_sharded(&dir).unwrap(), "a::charge", cell_type::VECTOR), bytes);
-    assert_eq!(payload(&build(&root), "a::charge", cell_type::VECTOR), bytes);
+    assert_eq!(
+        payload(
+            &read_merged_sharded(&dir).unwrap(),
+            "a::charge",
+            cell_type::VECTOR
+        ),
+        bytes
+    );
+    assert_eq!(
+        payload(&build(&root), "a::charge", cell_type::VECTOR),
+        bytes
+    );
     // A second vector for the qname replaces the row.
-    write_cell(&root, Some(&dir), None, &CellWrite::vector("a::charge", vec![1; 4], None, Some(1))).unwrap();
+    write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &CellWrite::vector("a::charge", vec![1; 4], None, Some(1)),
+    )
+    .unwrap();
     let (rows, _) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
     assert_eq!(rows.len(), 1);
     assert!(!is_gmap_stale(&dir, &root));
@@ -243,14 +342,26 @@ fn code_cell_is_not_writable() {
     let tmp = tempfile::tempdir().unwrap();
     let root = repo(tmp.path(), "repo");
     let code = CellWrite::entry("a::charge", cell_type::CODE, json!({"text": "x"}));
-    let err = write_cell(&root, None, None, &code).unwrap_err().to_string();
+    let err = write_cell(&root, None, None, &code)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("WRITABLE"), "{err}");
     let entry_on_vector = CellWrite::entry("a::charge", cell_type::VECTOR, json!({"text": "x"}));
     assert!(write_cell(&root, None, None, &entry_on_vector).is_err());
     let bad_kind = conv("x").with_kind(Some("NOPE".into()));
-    assert!(write_cell(&root, None, None, &bad_kind).unwrap_err().to_string().contains("NOPE"));
+    assert!(
+        write_cell(&root, None, None, &bad_kind)
+            .unwrap_err()
+            .to_string()
+            .contains("NOPE")
+    );
     let no_id = CellWrite::entry("a::charge", cell_type::DECISION, json!({"title": "t"}));
-    assert!(write_cell(&root, None, None, &no_id).unwrap_err().to_string().contains("`id`"));
+    assert!(
+        write_cell(&root, None, None, &no_id)
+            .unwrap_err()
+            .to_string()
+            .contains("`id`")
+    );
     assert!(!root.join(".glia").join("cells.jsonl").exists());
 }
 
@@ -262,16 +373,38 @@ fn remove_entry_drops_the_cell() {
     let root = repo(tmp.path(), "repo");
     let dir = persist(&root);
     write_cell(&root, Some(&dir), None, &conv("gone soon")).unwrap();
-    assert!(payload(&read_merged_sharded(&dir).unwrap(), "a::charge", cell_type::CONV).is_some());
+    assert!(
+        payload(
+            &read_merged_sharded(&dir).unwrap(),
+            "a::charge",
+            cell_type::CONV
+        )
+        .is_some()
+    );
 
     let rm = CellRemoval::entry("a::charge", cell_type::CONV, "api", "000001");
-    let out = remove_cell_entry(&root, Some(&dir), None, &rm).unwrap().expect("the row existed");
-    assert_eq!((out.write_through, out.rows, out.target.as_str()), (WriteThrough::Applied, 0, "bound"));
+    let out = remove_cell_entry(&root, Some(&dir), None, &rm)
+        .unwrap()
+        .expect("the row existed");
+    assert_eq!(
+        (out.write_through, out.rows, out.target.as_str()),
+        (WriteThrough::Applied, 0, "bound")
+    );
     assert!(cell_rows(&root).is_empty());
-    assert_eq!(payload(&read_merged_sharded(&dir).unwrap(), "a::charge", cell_type::CONV), None);
+    assert_eq!(
+        payload(
+            &read_merged_sharded(&dir).unwrap(),
+            "a::charge",
+            cell_type::CONV
+        ),
+        None
+    );
     assert_eq!(payload(&build(&root), "a::charge", cell_type::CONV), None);
     assert!(!is_gmap_stale(&dir, &root));
-    assert_eq!(remove_cell_entry(&root, Some(&dir), None, &rm).unwrap(), None);
+    assert_eq!(
+        remove_cell_entry(&root, Some(&dir), None, &rm).unwrap(),
+        None
+    );
 }
 
 /// A layout of several repos has no one repo to bind in unless the caller
@@ -281,7 +414,10 @@ fn remove_entry_drops_the_cell() {
 fn multi_repo_gmap_without_repo_is_skipped() {
     let tmp = tempfile::tempdir().unwrap();
     let (a, b) = (repo(tmp.path(), "alpha"), repo(tmp.path(), "beta"));
-    let paths = [a.to_str().unwrap().to_string(), b.to_str().unwrap().to_string()];
+    let paths = [
+        a.to_str().unwrap().to_string(),
+        b.to_str().unwrap().to_string(),
+    ];
     let persist_both = |dir: &Path| {
         let r = generate_many(&paths).unwrap();
         let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, dir);
@@ -292,20 +428,36 @@ fn multi_repo_gmap_without_repo_is_skipped() {
     let r = persist_both(&dir);
     let out = write_cell(&a, Some(&dir), None, &conv("which repo?")).unwrap();
     assert_eq!(out.write_through, WriteThrough::MultiRepo);
-    assert!(is_gmap_stale(&dir, &a), "the unwritten layout no longer matches alpha's sidecar");
+    assert!(
+        is_gmap_stale(&dir, &a),
+        "the unwritten layout no longer matches alpha's sidecar"
+    );
 
-    let repo_a = r.repo_roots.iter().find(|(_, p)| Path::new(p) == a).map(|(id, _)| RepoId(*id)).unwrap();
+    let repo_a = r
+        .repo_roots
+        .iter()
+        .find(|(_, p)| Path::new(p) == a)
+        .map(|(id, _)| RepoId(*id))
+        .unwrap();
     persist_both(&dir);
     assert!(!is_gmap_stale(&dir, &a));
     let out = write_cell(&a, Some(&dir), Some(repo_a), &conv("alpha only")).unwrap();
-    assert_eq!((out.write_through, out.target.as_str()), (WriteThrough::Applied, "bound"));
+    assert_eq!(
+        (out.write_through, out.target.as_str()),
+        (WriteThrough::Applied, "bound")
+    );
     assert!(!is_gmap_stale(&dir, &a) && !is_gmap_stale(&dir, &b));
     let warm = read_merged_sharded(&dir).unwrap();
     let convs: Vec<(RepoId, CellPayload)> = warm
         .graphs
         .iter()
         .flat_map(|g| g.nodes.iter().map(move |n| (g.repo, n)))
-        .flat_map(|(r, n)| n.cells.iter().filter(|c| c.kind == cell_type::CONV).map(move |c| (r, c.payload.clone())))
+        .flat_map(|(r, n)| {
+            n.cells
+                .iter()
+                .filter(|c| c.kind == cell_type::CONV)
+                .map(move |c| (r, c.payload.clone()))
+        })
         .collect();
     assert_eq!(convs.len(), 1, "{convs:?}");
     assert_eq!(convs[0].0, repo_a);
@@ -320,8 +472,14 @@ fn in_memory_apply_matches_sidecar() {
     let out = write_cell(&root, None, None, &conv("live")).unwrap();
     let stored = CellWrite::entry("a::charge", cell_type::CONV, out.entry.clone().unwrap());
     let idx = QnameIndex::build(&live, None);
-    assert!(matches!(apply_cell_write(&mut live, &idx, &stored), Ok(CellTarget::Bound(_))));
-    assert_eq!(payload(&live, "a::charge", cell_type::CONV), payload(&build(&root), "a::charge", cell_type::CONV));
+    assert!(matches!(
+        apply_cell_write(&mut live, &idx, &stored),
+        Ok(CellTarget::Bound(_))
+    ));
+    assert_eq!(
+        payload(&live, "a::charge", cell_type::CONV),
+        payload(&build(&root), "a::charge", cell_type::CONV)
+    );
     assert!(payload(&live, "a::charge", cell_type::CONV).is_some());
 }
 
@@ -334,7 +492,10 @@ fn free_text_is_redacted_before_it_is_stored() {
     let out = write_cell(&root, None, None, &conv(&format!("rotate {secret} soon"))).unwrap();
     assert_eq!(out.redacted, 1);
     let sidecar = fs::read_to_string(root.join(CELLS_FILE)).unwrap();
-    assert!(!sidecar.contains(secret) && sidecar.contains(REDACTED), "{sidecar}");
+    assert!(
+        !sidecar.contains(secret) && sidecar.contains(REDACTED),
+        "{sidecar}"
+    );
 }
 
 /// A crashed writer's lock expires; a live one makes the next writer give up
@@ -351,7 +512,9 @@ fn lock_expires_and_blocks() {
     assert!(!lock.exists());
 
     fs::write(&lock, "999999\n").unwrap();
-    let err = write_cell(&root, None, None, &conv("blocked")).unwrap_err().to_string();
+    let err = write_cell(&root, None, None, &conv("blocked"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("cells.lock"), "{err}");
     assert!(lock.exists(), "another writer's live lock is left alone");
     assert_eq!(cell_rows(&root).len(), 1);
@@ -364,7 +527,8 @@ fn node_of(m: &MergedGraph, qname: &str, kind: NodeKindId) -> NodeId {
         .iter()
         .flat_map(|g| g.nodes.iter().map(move |n| (g, n.id)))
         .filter(|(g, id)| {
-            g.nav.qname_by_id.get(id).is_some_and(|q| q == qname) && g.nav.kind_by_id.get(id) == Some(&kind)
+            g.nav.qname_by_id.get(id).is_some_and(|q| q == qname)
+                && g.nav.kind_by_id.get(id) == Some(&kind)
         })
         .map(|(_, id)| id)
         .collect();
@@ -375,7 +539,9 @@ fn node_of(m: &MergedGraph, qname: &str, kind: NodeKindId) -> NodeId {
 /// The node's own v1 hint, as a fresh build derives it.
 fn own_hint(root: &Path, qname: &str, kind: NodeKindId) -> String {
     let m = build(root);
-    identity_of(&m, node_of(&m, qname, kind)).expect("a v1 identity").hint()
+    identity_of(&m, node_of(&m, qname, kind))
+        .expect("a v1 identity")
+        .hint()
 }
 
 /// `hint` with its `|`-separated field `at` (0 = version) replaced.
@@ -395,16 +561,30 @@ fn caller_hint_is_validated() {
     let before = shards(&dir);
     let function = own_hint(&root, "a::charge", node_kind::FUNCTION);
     let refused = [
-        (conv("x").with_hint(Some("a.py:1:0".into())), "is not a v1 identity hint"),
-        (conv("x").with_hint(Some("v1|999|a.py|0000000000000000|f".into())), "node kind id 999, which is not registered"),
-        (conv("x").with_hint(Some(function)).with_kind(Some("CLASS".into())), "names a FUNCTION but kind is CLASS"),
+        (
+            conv("x").with_hint(Some("a.py:1:0".into())),
+            "is not a v1 identity hint",
+        ),
+        (
+            conv("x").with_hint(Some("v1|999|a.py|0000000000000000|f".into())),
+            "node kind id 999, which is not registered",
+        ),
+        (
+            conv("x")
+                .with_hint(Some(function))
+                .with_kind(Some("CLASS".into())),
+            "names a FUNCTION but kind is CLASS",
+        ),
     ];
     for (w, why) in refused {
         let err = write_cell(&root, Some(&dir), None, &w).unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
         assert!(err.to_string().contains(why), "{err} lacks {why:?}");
     }
-    assert!(!root.join(CELLS_FILE).exists(), "a refused hint writes no row");
+    assert!(
+        !root.join(CELLS_FILE).exists(),
+        "a refused hint writes no row"
+    );
     assert!(!root.join(CELLS_LOCK).exists(), "nor takes the lock");
     assert_eq!(shards(&dir), before, "the layout is untouched");
     assert!(!is_gmap_stale(&dir, &root));
@@ -417,8 +597,17 @@ fn an_agreeing_hint_binds() {
     let root = repo(tmp.path(), "repo");
     let dir = persist(&root);
     let hint = own_hint(&root, "a::charge", node_kind::FUNCTION);
-    let out = write_cell(&root, Some(&dir), None, &conv("agreed").with_hint(Some(hint.clone()))).unwrap();
-    assert_eq!((out.target.as_str(), out.write_through), ("bound", WriteThrough::Applied));
+    let out = write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &conv("agreed").with_hint(Some(hint.clone())),
+    )
+    .unwrap();
+    assert_eq!(
+        (out.target.as_str(), out.write_through),
+        ("bound", WriteThrough::Applied)
+    );
     assert_eq!(out.node_hint.as_deref(), Some(hint.as_str()));
     assert!(out.hint_differs.is_empty(), "{:?}", out.hint_differs);
     assert_eq!(cell_rows(&root)[0].hint.as_deref(), Some(hint.as_str()));
@@ -436,27 +625,65 @@ fn a_differing_hint_is_reported_and_applied() {
     // SOURCE's bodies are under 40 chars: the own body field is all zeros.
     assert_eq!(own.split('|').nth(3), Some("0000000000000000"), "{own}");
     let body = with_field(&own, 3, "0123456789abcdef");
-    let out = write_cell(&root, Some(&dir), None, &conv("moved on").with_hint(Some(body.clone()))).unwrap();
-    assert_eq!((out.target.as_str(), out.write_through), ("hint_differs", WriteThrough::Applied));
+    let out = write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &conv("moved on").with_hint(Some(body.clone())),
+    )
+    .unwrap();
+    assert_eq!(
+        (out.target.as_str(), out.write_through),
+        ("hint_differs", WriteThrough::Applied)
+    );
     assert_eq!(out.hint_differs, ["body"]);
     assert_eq!(out.node_hint.as_deref(), Some(own.as_str()));
-    assert_eq!(out.hint.as_deref(), Some(body.as_str()), "the outcome names the caller's hint");
+    assert_eq!(
+        out.hint.as_deref(),
+        Some(body.as_str()),
+        "the outcome names the caller's hint"
+    );
     let node = node_of(&build(&root), "a::charge", node_kind::FUNCTION);
     assert_eq!(out.node, Some(node.0), "the qname's node");
     let warm = read_merged_sharded(&dir).unwrap();
     let rebuilt = payload(&build(&root), "a::charge", cell_type::CONV);
     assert!(rebuilt.is_some());
-    assert_eq!(payload(&warm, "a::charge", cell_type::CONV), rebuilt, "write-through == rebuild");
+    assert_eq!(
+        payload(&warm, "a::charge", cell_type::CONV),
+        rebuilt,
+        "write-through == rebuild"
+    );
     assert!(!is_gmap_stale(&dir, &root));
-    assert_eq!(cell_rows(&root)[0].hint.as_deref(), Some(body.as_str()), "the row stores the caller's hint");
+    assert_eq!(
+        cell_rows(&root)[0].hint.as_deref(),
+        Some(body.as_str()),
+        "the row stores the caller's hint"
+    );
 
     let local = with_field(&own, 4, "other");
-    let out = write_cell(&root, Some(&dir), None, &conv("renamed?").with_hint(Some(local))).unwrap();
-    assert_eq!((out.target.as_str(), out.hint_differs.as_slice()), ("hint_differs", ["local".to_string()].as_slice()));
+    let out = write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &conv("renamed?").with_hint(Some(local)),
+    )
+    .unwrap();
+    assert_eq!(
+        (out.target.as_str(), out.hint_differs.as_slice()),
+        ("hint_differs", ["local".to_string()].as_slice())
+    );
 
-    let none = write_cell(&root, None, None, &conv("no layout").with_hint(Some(own_hint(&root, "a::charge", node_kind::FUNCTION))))
-        .unwrap();
-    assert_eq!((none.target.as_str(), none.node_hint.as_deref()), ("pending", None));
+    let none = write_cell(
+        &root,
+        None,
+        None,
+        &conv("no layout").with_hint(Some(own_hint(&root, "a::charge", node_kind::FUNCTION))),
+    )
+    .unwrap();
+    assert_eq!(
+        (none.target.as_str(), none.node_hint.as_deref()),
+        ("pending", None)
+    );
     assert!(none.hint_differs.is_empty());
 }
 
@@ -470,7 +697,13 @@ fn a_hint_singles_out_one_of_two_twins() {
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("app.py"), CART).unwrap();
     let dir = persist(&root);
-    let w = || CellWrite::entry("app::Cart::total", cell_type::CONV, json!({ "text": "twin" }));
+    let w = || {
+        CellWrite::entry(
+            "app::Cart::total",
+            cell_type::CONV,
+            json!({ "text": "twin" }),
+        )
+    };
     let out = write_cell(&root, Some(&dir), None, &w()).unwrap();
     assert_eq!(out.target, "ambiguous");
     assert_eq!(out.hint, None, "an ambiguous row captures no hint");
@@ -478,14 +711,26 @@ fn a_hint_singles_out_one_of_two_twins() {
     let m = build(&root);
     let method = node_of(&m, "app::Cart::total", node_kind::METHOD);
     node_of(&m, "app::Cart::total", node_kind::ATTRIBUTE);
-    let hint = identity_of(&m, method).expect("the METHOD's identity").hint();
+    let hint = identity_of(&m, method)
+        .expect("the METHOD's identity")
+        .hint();
     let out = write_cell(&root, Some(&dir), None, &w().with_hint(Some(hint.clone()))).unwrap();
     assert_eq!((out.target.as_str(), out.node), ("bound", Some(method.0)));
     assert_eq!(out.node_hint.as_deref(), Some(hint.as_str()));
     assert!(out.hint_differs.is_empty());
 
-    let err = write_cell(&root, Some(&dir), None, &w().with_hint(Some(hint)).with_kind(Some("ATTRIBUTE".into())))
-        .unwrap_err();
+    let err = write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &w().with_hint(Some(hint))
+            .with_kind(Some("ATTRIBUTE".into())),
+    )
+    .unwrap_err();
     assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
-    assert!(err.to_string().contains("names a METHOD but kind is ATTRIBUTE"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("names a METHOD but kind is ATTRIBUTE"),
+        "{err}"
+    );
 }

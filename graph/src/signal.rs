@@ -32,7 +32,10 @@ impl MergedGraph {
         // fired_on marker (LA.14): only when a token was a full qname, so a
         // plain test-id signal stays silent.
         if r.counts.exact_qname > 0 {
-            eprintln!("[resolve] test-id exact-qname tokens={}", r.counts.exact_qname);
+            eprintln!(
+                "[resolve] test-id exact-qname tokens={}",
+                r.counts.exact_qname
+            );
         }
         // How each file/frame query landed, accumulated across the whole
         // signal so the marker fires once per call and not once per frame.
@@ -69,7 +72,10 @@ impl MergedGraph {
     /// [`Self::resolve_signals`] without the marker, plus the summed counts.
     fn resolve_signals_counted(&self, items: &[(&str, &str)]) -> (Vec<Vec<NodeId>>, MatchCounts) {
         let mut r = Resolver::new(self);
-        let out = items.iter().map(|(text, kind)| r.resolve(text, kind)).collect();
+        let out = items
+            .iter()
+            .map(|(text, kind)| r.resolve(text, kind))
+            .collect();
         (out, r.counts)
     }
 }
@@ -103,13 +109,22 @@ struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     fn new(graph: &'a MergedGraph) -> Self {
-        Resolver { graph, files: None, names: None, counts: MatchCounts::default() }
+        Resolver {
+            graph,
+            files: None,
+            names: None,
+            counts: MatchCounts::default(),
+        }
     }
 
     /// One signal (see [`MergedGraph::resolve_signal`]), counted into
     /// `self.counts`.
     fn resolve(&mut self, text: &str, kind: &str) -> Vec<NodeId> {
-        let kind = if kind == "auto" { sniff_signal_kind(text) } else { kind };
+        let kind = if kind == "auto" {
+            sniff_signal_kind(text)
+        } else {
+            kind
+        };
         let mut out: Vec<NodeId> = Vec::new();
         let mut seen: HashSet<NodeId> = HashSet::new();
         match kind {
@@ -171,7 +186,12 @@ impl<'a> Resolver<'a> {
                     if let Some((file, start, end)) = position_of(n) {
                         idx.entry(basename(&file).to_string())
                             .or_default()
-                            .push(Located { file, id: n.id, start, end });
+                            .push(Located {
+                                file,
+                                id: n.id,
+                                start,
+                                end,
+                            });
                     }
                 }
             }
@@ -194,7 +214,11 @@ impl<'a> Resolver<'a> {
             if line0 < n.start || line0 > n.end {
                 continue;
             }
-            let slot = if path_tail_matches(&n.file, &want) { &mut precise } else { &mut loose };
+            let slot = if path_tail_matches(&n.file, &want) {
+                &mut precise
+            } else {
+                &mut loose
+            };
             let width = n.end - n.start;
             if slot.map(|(_, w)| width < w).unwrap_or(true) {
                 *slot = Some((n.id, width));
@@ -248,7 +272,9 @@ impl<'a> Resolver<'a> {
             let mut idx: HashMap<&'a str, Vec<(NodeId, &'a str)>> = HashMap::new();
             for g in &graph.graphs {
                 for n in &g.nodes {
-                    let Some(qn) = g.nav.qname_by_id.get(&n.id) else { continue };
+                    let Some(qn) = g.nav.qname_by_id.get(&n.id) else {
+                        continue;
+                    };
                     let qn = qn.as_str();
                     let tail = qn.rsplit("::").next().unwrap_or(qn);
                     idx.entry(tail).or_default().push((n.id, qn));
@@ -280,7 +306,9 @@ impl<'a> Resolver<'a> {
                 .copied()
                 .filter(|s| !s.is_empty() && !s.contains('.') && !s.contains('/'))
                 .collect();
-            let Some(last) = name_segs.last() else { continue };
+            let Some(last) = name_segs.last() else {
+                continue;
+            };
             let joined = name_segs.join("::");
             let suffix = format!("::{joined}");
             // Prefer the exact qname, then a qname ending with the full
@@ -398,7 +426,11 @@ fn parse_diff_frames(text: &str) -> Vec<(String, u32)> {
         if let Some(p) = line.strip_prefix("+++ ") {
             let p = p.split('\t').next().unwrap_or(p).trim();
             let p = p.strip_prefix("b/").unwrap_or(p);
-            cur_file = if p == "/dev/null" { None } else { Some(p.to_string()) };
+            cur_file = if p == "/dev/null" {
+                None
+            } else {
+                Some(p.to_string())
+            };
             continue;
         }
         if line.starts_with("--- ") {
@@ -450,7 +482,10 @@ fn json_str_field(json: &str, key: &str) -> Option<String> {
 fn json_num_field(json: &str, key: &str) -> Option<u32> {
     let marker = format!("\"{key}\":");
     let start = json.find(&marker)? + marker.len();
-    let digits: String = json[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = json[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -476,8 +511,7 @@ fn path_tail_matches(a: &str, b: &str) -> bool {
     fn suffix_of(long: &str, short: &str) -> bool {
         !short.is_empty()
             && long.ends_with(short)
-            && (long.len() == short.len()
-                || long.as_bytes()[long.len() - short.len() - 1] == b'/')
+            && (long.len() == short.len() || long.as_bytes()[long.len() - short.len() - 1] == b'/')
     }
     suffix_of(a, b) || suffix_of(b, a)
 }
@@ -541,7 +575,10 @@ mod tests {
         assert_eq!(m.resolve_signal(tb, "auto"), vec![id]);
 
         // Generic path:line (Node/Go style).
-        assert_eq!(m.resolve_signal("at fn (foo/bar.py:16:3)", "stacktrace"), vec![id]);
+        assert_eq!(
+            m.resolve_signal("at fn (foo/bar.py:16:3)", "stacktrace"),
+            vec![id]
+        );
 
         // Unified diff touching the file.
         let diff = "--- a/foo/bar.py\n+++ b/foo/bar.py\n@@ -14,1 +14,2 @@\n+    x = 1\n";
@@ -554,9 +591,10 @@ mod tests {
         assert_eq!(m.resolve_signal("tests/test_x.py::bar", "test"), vec![id]);
 
         // A frame in a different file resolves to nothing.
-        assert!(m
-            .resolve_signal("File \"other.py\", line 15, in q", "stacktrace")
-            .is_empty());
+        assert!(
+            m.resolve_signal("File \"other.py\", line 15, in q", "stacktrace")
+                .is_empty()
+        );
     }
 
     /// Two same-basename MODULE nodes in different sub-projects — the monorepo
@@ -624,14 +662,25 @@ mod tests {
         let mut id_of = |kind, qname: &str, name: &str| {
             let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
             nav.record(id, name, qname, kind, None);
-            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             id
         };
         let exact = id_of(node_kind::FUNCTION, "m::a::f", "f");
         let busier = id_of(node_kind::FUNCTION, "m::b::f", "f");
         let module = id_of(node_kind::MODULE, "m::tests::f", "f");
         let callers: Vec<NodeId> = (0..3)
-            .map(|i| id_of(node_kind::FUNCTION, &format!("m::b::c{i}"), &format!("c{i}")))
+            .map(|i| {
+                id_of(
+                    node_kind::FUNCTION,
+                    &format!("m::b::c{i}"),
+                    &format!("c{i}"),
+                )
+            })
             .collect();
         let edge = |from, to, category| glia_core::Edge {
             from,
@@ -645,7 +694,9 @@ mod tests {
             .map(|&c| edge(c, busier, glia_code_domain::edge_category::CALLS))
             .collect();
         edges.extend(
-            callers.iter().map(|&c| edge(module, c, glia_code_domain::edge_category::IMPORTS)),
+            callers
+                .iter()
+                .map(|&c| edge(module, c, glia_code_domain::edge_category::IMPORTS)),
         );
         let g = RepoGraph {
             repo: r,
@@ -671,7 +722,10 @@ mod tests {
         assert_eq!(m.resolve_signal("m::a::f", "test"), vec![exact]);
         // A pytest id is unaffected: its path segment is dropped, so the
         // remaining `a::f` equals no qname and the `::`-suffix tier answers.
-        assert_eq!(m.resolve_signal("tests/test_x.py::a::f", "test"), vec![exact]);
+        assert_eq!(
+            m.resolve_signal("tests/test_x.py::a::f", "test"),
+            vec![exact]
+        );
     }
 
     #[test]
@@ -695,7 +749,10 @@ mod tests {
         let (m, a, b) = graph_with_two_utils();
         let items: [(&str, &str); 3] = [
             // precise: the path suffix lands on svc_b.
-            ("  File \"/repo/svc_b/utils.py\", line 3, in helper\n", "stacktrace"),
+            (
+                "  File \"/repo/svc_b/utils.py\", line 3, in helper\n",
+                "stacktrace",
+            ),
             // loose: a prefix no POSITION shares falls back to the basename,
             // which seeds both modules.
             ("src/utils.py\n", "diff"),
@@ -715,7 +772,14 @@ mod tests {
         }
         // ... and the one marker line's counts are the per-item sums.
         assert_eq!(summed, want);
-        assert_eq!(summed, MatchCounts { precise: 1, loose: 2, exact_qname: 1 });
+        assert_eq!(
+            summed,
+            MatchCounts {
+                precise: 1,
+                loose: 2,
+                exact_qname: 1
+            }
+        );
         let mut both = vec![a, b];
         both.sort_by_key(|id| id.0);
         assert_eq!(batch, vec![vec![b], both, vec![a]]);

@@ -142,7 +142,15 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
         "go" => {
             let view = scan::code_view(source, lang);
             let (sites, c) = go::scan(source, &view);
-            ("go", sites, c.abis, c.not_in_abi, c.dynamic, c.wrappers, Vec::new())
+            (
+                "go",
+                sites,
+                c.abis,
+                c.not_in_abi,
+                c.dynamic,
+                c.wrappers,
+                Vec::new(),
+            )
         }
         l if TS_FAMILY.contains(&l) => {
             let view = scan::code_view(source, lang);

@@ -51,7 +51,10 @@ fn materialise_pre_leap() -> tempfile::TempDir {
     let root = fixture_root();
     let d = tempfile::tempdir().unwrap();
     copy_tree(&root.join("repo"), d.path());
-    copy_tree(&root.join("layout-ai-repo-graph"), &d.path().join(".ai/repo-graph"));
+    copy_tree(
+        &root.join("layout-ai-repo-graph"),
+        &d.path().join(".ai/repo-graph"),
+    );
     copy_tree(&root.join("layout-glia-build"), &d.path().join(".glia"));
     d
 }
@@ -108,8 +111,14 @@ fn assert_readable(e: &StoreError) {
     assert!(e.needs_rebuild(), "{e:?} must ask for a rebuild");
     assert!(e.rebuild_reason().is_some(), "{e:?} has no rebuild reason");
     let shown = e.to_string();
-    assert!(!shown.contains("rkyv"), "error leaks rkyv internals: {shown}");
-    assert!(!shown.contains("rancor"), "error leaks rancor internals: {shown}");
+    assert!(
+        !shown.contains("rkyv"),
+        "error leaks rkyv internals: {shown}"
+    );
+    assert!(
+        !shown.contains("rancor"),
+        "error leaks rancor internals: {shown}"
+    );
 }
 
 #[test]
@@ -120,12 +129,18 @@ fn v1_layout_reports_old_format() {
     // The fixture must really be the pre-leap schema, or this test proves nothing.
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join(MANIFEST_NAME)).unwrap()).unwrap();
-    assert_eq!(manifest["schema_version"], 1, "fixture manifest is not schema 1");
+    assert_eq!(
+        manifest["schema_version"], 1,
+        "fixture manifest is not schema 1"
+    );
 
     match ShardedMmap::open(&layout) {
-        Err(ref e @ StoreError::ManifestSchemaVersion { got: 1, supported: 2 }) => {
-            assert_readable(e)
-        }
+        Err(
+            ref e @ StoreError::ManifestSchemaVersion {
+                got: 1,
+                supported: 2,
+            },
+        ) => assert_readable(e),
         Err(e) => panic!("v1 layout: expected ManifestSchemaVersion{{1, 2}}, got {e:?}"),
         Ok(_) => panic!("v1 layout opened under manifest schema {MANIFEST_VERSION}"),
     }
@@ -133,13 +148,24 @@ fn v1_layout_reports_old_format() {
     // Every shard, cross_stack.gmap and the flat `glia build` output.
     let mut files = gmaps_in(&layout);
     files.extend(gmaps_in(&d.path().join(".glia")));
-    assert_eq!(files.len(), 7, "expected 4 sharded + 3 flat .gmap files: {files:?}");
-    assert!(files.iter().any(|p| p.ends_with(".ai/repo-graph/cross_stack.gmap")));
+    assert_eq!(
+        files.len(),
+        7,
+        "expected 4 sharded + 3 flat .gmap files: {files:?}"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|p| p.ends_with(".ai/repo-graph/cross_stack.gmap"))
+    );
     for p in &files {
         match MmapContainer::open(p) {
             Err(ref e @ StoreError::OldFormat { found: None }) => assert_readable(e),
             Err(e) => panic!("{}: expected OldFormat{{None}}, got {e:?}", p.display()),
-            Ok(_) => panic!("{}: a 0.4.x file opened as format {FORMAT_VERSION}", p.display()),
+            Ok(_) => panic!(
+                "{}: a 0.4.x file opened as format {FORMAT_VERSION}",
+                p.display()
+            ),
         }
     }
 
@@ -155,7 +181,10 @@ fn v1_layout_reports_old_format() {
         Ok(_) => panic!("read_merged_sharded loaded a v1 layout"),
     }
 
-    assert!(is_gmap_stale(&layout, d.path()), "a v1 layout must be stale");
+    assert!(
+        is_gmap_stale(&layout, d.path()),
+        "a v1 layout must be stale"
+    );
 }
 
 /// A schema-2 manifest over 0.4.x shards (a half-copied or hand-edited
@@ -188,7 +217,9 @@ fn v2_manifest_over_v1_shards_reports_old_format() {
 fn old_format_reason_names_the_old_writer() {
     let d = materialise_pre_leap();
     let first = gmaps_in(&d.path().join(".glia")).remove(0);
-    let e = MmapContainer::open(&first).err().expect("0.4.x file opened");
+    let e = MmapContainer::open(&first)
+        .err()
+        .expect("0.4.x file opened");
     assert_eq!(
         e.rebuild_reason().as_deref(),
         Some("old format (no preamble, written by glia < 0.5.0)")
@@ -206,7 +237,10 @@ fn preamble_v1_is_old_format() {
     patch(&path, VERSION_AT, &1u32.to_le_bytes());
     match MmapContainer::open(&path) {
         Err(ref e @ StoreError::OldFormat { found: Some(1) }) => assert_readable(e),
-        other => panic!("preamble v1: expected OldFormat{{Some(1)}}, got {:?}", other.err()),
+        other => panic!(
+            "preamble v1: expected OldFormat{{Some(1)}}, got {:?}",
+            other.err()
+        ),
     }
 
     // CD.7b: 0.5.0's format is old now.
@@ -214,15 +248,24 @@ fn preamble_v1_is_old_format() {
     match MmapContainer::open(&path) {
         Err(ref e @ StoreError::OldFormat { found: Some(2) }) => {
             assert_readable(e);
-            assert_eq!(e.rebuild_reason().as_deref(), Some("old format v2 (this build reads v3)"));
+            assert_eq!(
+                e.rebuild_reason().as_deref(),
+                Some("old format v2 (this build reads v3)")
+            );
         }
-        other => panic!("preamble v2: expected OldFormat{{Some(2)}}, got {:?}", other.err()),
+        other => panic!(
+            "preamble v2: expected OldFormat{{Some(2)}}, got {:?}",
+            other.err()
+        ),
     }
 
     patch(&path, VERSION_AT, &4u32.to_le_bytes());
     match MmapContainer::open(&path) {
         Err(ref e @ StoreError::FutureFormat { found: 4 }) => assert_readable(e),
-        other => panic!("preamble v4: expected FutureFormat{{4}}, got {:?}", other.err()),
+        other => panic!(
+            "preamble v4: expected FutureFormat{{4}}, got {:?}",
+            other.err()
+        ),
     }
 }
 
@@ -234,7 +277,11 @@ fn same_version_other_layout_is_corrupt_not_rkyv() {
     let mut len = [0u8; 8];
     len.copy_from_slice(&bytes[CORE_LEN_AT..CORE_LEN_AT + 8]);
     let core_len = u64::from_le_bytes(len);
-    assert_eq!(core_len as usize + 32, bytes.len(), "core is the rest of the file");
+    assert_eq!(
+        core_len as usize + 32,
+        bytes.len(),
+        "core is the rest of the file"
+    );
 
     // Same format version, different archive: the dev-build drift case.
     bytes.extend_from_slice(&[0u8; 8]);
@@ -270,7 +317,10 @@ fn v3_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("layout");
     let merged = MergedGraph {
-        graphs: vec![graph("test://lc1-a", &[10, 11]), graph("test://lc1-b", &[20])],
+        graphs: vec![
+            graph("test://lc1-a", &[10, 11]),
+            graph("test://lc1-b", &[20]),
+        ],
         cross_edges: vec![glia_core::Edge {
             from: NodeId(10),
             to: NodeId(20),
@@ -282,7 +332,10 @@ fn v3_round_trips() {
     };
     let manifest = write_merged_sharded(&merged, &dir).unwrap();
     assert_eq!(manifest.schema_version, 2);
-    assert_eq!(MANIFEST_VERSION, 2, "CD.7b changes the shards, not the manifest shape");
+    assert_eq!(
+        MANIFEST_VERSION, 2,
+        "CD.7b changes the shards, not the manifest shape"
+    );
     assert_eq!(FORMAT_VERSION, 3);
 
     let on_disk: serde_json::Value =
@@ -293,7 +346,11 @@ fn v3_round_trips() {
     assert_eq!(files.len(), 3, "two shards + cross_stack: {files:?}");
     for p in &files {
         let b = std::fs::read(p).unwrap();
-        assert!(b.starts_with(PREAMBLE_MAGIC), "{}: no GLIAGMAP preamble", p.display());
+        assert!(
+            b.starts_with(PREAMBLE_MAGIC),
+            "{}: no GLIAGMAP preamble",
+            p.display()
+        );
         assert_eq!(&b[VERSION_AT..VERSION_AT + 4], &3u32.to_le_bytes());
         assert_eq!(&b[16..24], &32u64.to_le_bytes(), "core_offset");
     }
@@ -308,7 +365,10 @@ fn v3_round_trips() {
 
     // The archived header agrees with the preamble.
     let opened = MmapContainer::open(&files[0]).unwrap();
-    assert_eq!(opened.archived().unwrap().header.version.to_native(), FORMAT_VERSION);
+    assert_eq!(
+        opened.archived().unwrap().header.version.to_native(),
+        FORMAT_VERSION
+    );
 }
 
 #[test]
@@ -335,10 +395,16 @@ fn stale_on_old_manifest_schema() {
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
     v["schema_version"] = serde_json::json!(1);
     std::fs::write(&manifest_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-    assert!(is_gmap_stale(&gmap_dir, &repo_dir), "schema 1 manifest must be stale");
+    assert!(
+        is_gmap_stale(&gmap_dir, &repo_dir),
+        "schema 1 manifest must be stale"
+    );
     assert!(matches!(
         ShardedMmap::open(&gmap_dir).err(),
-        Some(StoreError::ManifestSchemaVersion { got: 1, supported: 2 })
+        Some(StoreError::ManifestSchemaVersion {
+            got: 1,
+            supported: 2
+        })
     ));
 }
 

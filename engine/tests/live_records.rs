@@ -36,12 +36,23 @@ impl G {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         let name = qname.rsplit("::").next().unwrap_or(qname);
         self.nav.record(id, name, qname, kind, None);
-        self.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        self.nodes.push(Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
         id
     }
 
     fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
-        self.edges.push(Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() });
+        self.edges.push(Edge {
+            from,
+            to,
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
     }
 
     fn merged(self) -> MergedGraph {
@@ -97,7 +108,10 @@ fn inbound_handler_kinds_are_entrypoints() {
     ] {
         assert!(live.contains(&id), "{what} must be live");
     }
-    assert!(!live.contains(&orphan), "a function nothing reaches stays dead");
+    assert!(
+        !live.contains(&orphan),
+        "a function nothing reaches stays dead"
+    );
 }
 
 /// `entry_kinds()` is the entry table's kinds with their names, in table
@@ -118,7 +132,8 @@ fn entry_kinds_matches_profile() {
 const APP_PY: &str = "from flask import Flask\nfrom kafka import KafkaProducer\n\napp = Flask(__name__)\nproducer = KafkaProducer()\n\n\ndef audit(order):\n    return order\n\n\ndef publish(order):\n    producer.send('orders', order)\n\n\ndef save(order):\n    return audit(order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    save(order)\n    publish(order)\n    return order\n";
 const CHECKOUT_TS: &str = "export async function placeOrder(body: unknown) {\n  return fetch('/orders', { method: 'POST', body: JSON.stringify(body) });\n}\n";
 /// A doc section naming `create_order`, so `governing_docs` has a row.
-const README_MD: &str = "# Orders\n\n## Creating an order\n\n`create_order` saves the order, then publishes it.\n";
+const README_MD: &str =
+    "# Orders\n\n## Creating an order\n\n`create_order` saves the order, then publishes it.\n";
 
 /// The packet's two-repo build: a Flask api whose POST /orders route is
 /// HANDLED_BY `create_order` (which calls `save` -> `audit` and `publish`), and
@@ -131,7 +146,10 @@ fn orders_stack() -> (tempfile::TempDir, MergedGraph) {
     std::fs::write(api.join("app.py"), APP_PY).expect("write app.py");
     std::fs::write(api.join("README.md"), README_MD).expect("write README.md");
     std::fs::write(web.join("checkout.ts"), CHECKOUT_TS).expect("write checkout.ts");
-    let paths = [api.to_string_lossy().into_owned(), web.to_string_lossy().into_owned()];
+    let paths = [
+        api.to_string_lossy().into_owned(),
+        web.to_string_lossy().into_owned(),
+    ];
     let merged = generate_many(&paths).expect("generate_many").merged;
     (tmp, merged)
 }
@@ -153,9 +171,17 @@ fn resolve_rows_carry_live() {
             .find(|r| r.qname == q)
             .unwrap_or_else(|| panic!("{q} is a resolve row: {:?}", res.results))
     };
-    for q in ["app::create_order", "app::save", "app::audit", "app::publish"] {
+    for q in [
+        "app::create_order",
+        "app::save",
+        "app::audit",
+        "app::publish",
+    ] {
         let row = by_qname(q);
-        assert!(row.live, "{q} is reached from ROUTE POST /orders, so it is live");
+        assert!(
+            row.live,
+            "{q} is reached from ROUTE POST /orders, so it is live"
+        );
         assert_eq!(row.live, live.contains(&NodeId(row.id)));
     }
     let module = by_qname("app");
@@ -174,7 +200,11 @@ fn resolve_rows_carry_live() {
     assert_eq!(flags(&again.results), flags(&res.results));
 
     let docs = governing_docs(&m, "app::create_order", None);
-    assert!(!docs.results.is_empty(), "README section documents create_order: {:?}", docs.absence);
+    assert!(
+        !docs.results.is_empty(),
+        "README section documents create_order: {:?}",
+        docs.absence
+    );
     for d in &docs.results {
         assert_eq!(d.kind, "DOC_SECTION");
         assert_eq!(d.live, live.contains(&NodeId(d.id)), "{}", d.qname);
@@ -190,7 +220,10 @@ fn resolve_rows_carry_live() {
         assert_eq!(r.live, live.contains(&NodeId(r.id)), "{}", r.qname);
     }
     let module = find_nodes(&m, "app", &FindOptions::default()).results;
-    let module = module.iter().find(|r| r.kind == "MODULE" && r.qname == "app").expect("module app");
+    let module = module
+        .iter()
+        .find(|r| r.kind == "MODULE" && r.qname == "app")
+        .expect("module app");
     assert!(!module.live);
 
     let mut opts = TraceOptions::default();
@@ -201,10 +234,16 @@ fn resolve_rows_carry_live() {
     assert!(!hops.is_empty());
     for h in &hops {
         let to = find_nodes(&m, &h.to_qname, &FindOptions::default()).results;
-        let exact = to.iter().find(|r| r.qname == h.to_qname).expect("hop target is findable");
+        let exact = to
+            .iter()
+            .find(|r| r.qname == h.to_qname)
+            .expect("hop target is findable");
         assert_eq!(h.to_live, exact.live, "{}", h.to_qname);
     }
-    let save = hops.iter().find(|h| h.to_qname == "app::save").expect("create_order -> save hop");
+    let save = hops
+        .iter()
+        .find(|h| h.to_qname == "app::save")
+        .expect("create_order -> save hop");
     assert!(save.to_live);
     let v = serde_json::to_value(save).expect("serialises");
     assert_eq!(v["to_live"], serde_json::Value::Bool(true), "{v}");

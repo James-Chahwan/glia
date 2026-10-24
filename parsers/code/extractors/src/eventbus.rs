@@ -63,30 +63,65 @@ const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     (".emit(", NameRule::Literal, false, VerbGate::Receiver),
     (".dispatch(", NameRule::Literal, false, VerbGate::Receiver),
     ("Subject.next(", NameRule::Literal, false, VerbGate::Open),
-    ("EventBridge.putEvents", NameRule::DetailType, false, VerbGate::Open),
-    ("eventBridge.putEvents", NameRule::DetailType, false, VerbGate::Open),
+    (
+        "EventBridge.putEvents",
+        NameRule::DetailType,
+        false,
+        VerbGate::Open,
+    ),
+    (
+        "eventBridge.putEvents",
+        NameRule::DetailType,
+        false,
+        VerbGate::Open,
+    ),
     ("publish(", NameRule::Literal, true, VerbGate::Bus),
     (".trigger(", NameRule::Literal, false, VerbGate::Receiver),
-    ("dispatchEvent(", NameRule::Literal, false, VerbGate::Receiver),
+    (
+        "dispatchEvent(",
+        NameRule::Literal,
+        false,
+        VerbGate::Receiver,
+    ),
     (".Publish(", NameRule::Literal, true, VerbGate::Bus),
     (".instrument(", NameRule::Literal, false, VerbGate::Receiver),
 ];
 
 const HANDLER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     (".on(", NameRule::Literal, true, VerbGate::Receiver),
-    (".addEventListener(", NameRule::Literal, false, VerbGate::Receiver),
+    (
+        ".addEventListener(",
+        NameRule::Literal,
+        false,
+        VerbGate::Receiver,
+    ),
     (".subscribe(", NameRule::Literal, true, VerbGate::Bus),
     ("@EventPattern(", NameRule::Literal, false, VerbGate::Open),
     ("@OnEvent(", NameRule::Literal, false, VerbGate::Open),
     // Phoenix LiveView's callback clause, its event literal first (CB.3a).
     // The bare token `handle_event` — a Python / Home Assistant method, a
     // Ruby hook — is no needle.
-    ("def handle_event(", NameRule::Literal, false, VerbGate::Open),
-    (".addListener(", NameRule::Literal, false, VerbGate::Receiver),
+    (
+        "def handle_event(",
+        NameRule::Literal,
+        false,
+        VerbGate::Open,
+    ),
+    (
+        ".addListener(",
+        NameRule::Literal,
+        false,
+        VerbGate::Receiver,
+    ),
     (".Subscribe(", NameRule::Literal, true, VerbGate::Bus),
     (".SubscribeAsync(", NameRule::Literal, true, VerbGate::Bus),
     (".SubscribeOnce(", NameRule::Literal, true, VerbGate::Bus),
-    (".SubscribeOnceAsync(", NameRule::Literal, true, VerbGate::Bus),
+    (
+        ".SubscribeOnceAsync(",
+        NameRule::Literal,
+        true,
+        VerbGate::Bus,
+    ),
 ];
 
 /// Where an occurrence of a string-keyed needle reads its event name (CB.3a).
@@ -525,10 +560,24 @@ pub fn extract_event_nodes_with_consts(
     resolve: &dyn Fn(&str) -> Option<String>,
 ) -> EventFold {
     let mut counts = ConstFoldCounts::default();
-    let emitters =
-        emit_event_nodes(source, path, module_id, repo, &EMITTER_SIDE, Some(resolve), &mut counts);
-    let handlers =
-        emit_event_nodes(source, path, module_id, repo, &HANDLER_SIDE, Some(resolve), &mut counts);
+    let emitters = emit_event_nodes(
+        source,
+        path,
+        module_id,
+        repo,
+        &EMITTER_SIDE,
+        Some(resolve),
+        &mut counts,
+    );
+    let handlers = emit_event_nodes(
+        source,
+        path,
+        module_id,
+        repo,
+        &HANDLER_SIDE,
+        Some(resolve),
+        &mut counts,
+    );
     EventFold {
         emitters,
         handlers,
@@ -653,7 +702,10 @@ fn emit_event_nodes(
             module_id,
             repo,
         );
-        anchors.push(Anchor { node: id, line: line_of(source, at) });
+        anchors.push(Anchor {
+            node: id,
+            line: line_of(source, at),
+        });
     }
 
     // DG.3: the typed in-process buses, then DH.7's typed framework buses,
@@ -677,7 +729,10 @@ fn emit_event_nodes(
                 module_id,
                 repo,
             );
-            anchors.push(Anchor { node: id, line: line_of(source, at) });
+            anchors.push(Anchor {
+                node: id,
+                line: line_of(source, at),
+            });
             match tallies.iter_mut().find(|t| t.framework == framework) {
                 Some(t) => {
                     t.sites += 1;
@@ -720,7 +775,10 @@ fn emit_event_nodes(
             repo,
         );
         if minted {
-            anchors.push(Anchor { node: id, line: line_of(source, idx) });
+            anchors.push(Anchor {
+                node: id,
+                line: line_of(source, idx),
+            });
         }
         if let Some(via) = transport_via(pattern, source, &mut ctx) {
             mark_transport(&mut nodes, id, via);
@@ -746,7 +804,10 @@ fn emit_event_nodes(
             repo,
         );
         minted_literal += usize::from(minted);
-        anchors.push(Anchor { node: id, line: line_of(source, *at) });
+        anchors.push(Anchor {
+            node: id,
+            line: line_of(source, *at),
+        });
     }
 
     // The fold stays quiet: each file reports once per parse.
@@ -774,7 +835,11 @@ fn emit_event_nodes(
         }
         guard.report(side.guard_label);
     }
-    EventNodes { nodes, nav, anchors }
+    EventNodes {
+        nodes,
+        nav,
+        anchors,
+    }
 }
 
 /// What a found string-keyed site read ([`find_gated`]): the two
@@ -841,7 +906,10 @@ fn site_name(
 /// transport ([`TRANSPORT_NEEDLES`], or `.emit(` in a file naming
 /// [`NEST_MICROSERVICES`]); `None` for an in-process bus.
 fn transport_via(pattern: &str, source: &str, ctx: &mut VerbCtx) -> Option<&'static str> {
-    if let Some(&(_, via)) = TRANSPORT_NEEDLES.iter().find(|(needle, _)| *needle == pattern) {
+    if let Some(&(_, via)) = TRANSPORT_NEEDLES
+        .iter()
+        .find(|(needle, _)| *needle == pattern)
+    {
         return Some(via);
     }
     (pattern == ".emit(" && ctx.ms_client(source)).then_some(MICROSERVICES_EMIT_VIA)
@@ -1098,7 +1166,8 @@ struct VerbCtx {
 
 impl VerbCtx {
     fn lower(&mut self, source: &str) -> &str {
-        self.lower.get_or_insert_with(|| source.to_ascii_lowercase())
+        self.lower
+            .get_or_insert_with(|| source.to_ascii_lowercase())
     }
 
     fn emitter_lib(&mut self, source: &str) -> bool {
@@ -1206,9 +1275,8 @@ fn suppressed(side: &str, needle: &str, name: &str) {
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] unnamed'`
 fn event_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_EVENT_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_EVENT_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Why a gate kept or rejected one occurrence of a gated verb.
@@ -1464,7 +1532,8 @@ fn receiver_admits(source: &str, at: usize, pattern: &str, ctx: &mut VerbCtx) ->
 /// with `emitter`. A capitalised INSTANCE bound in the file
 /// (`const Emitter = new EventEmitter()`) is still admitted by R2.
 fn is_emitter_class(receiver: &str) -> bool {
-    receiver.starts_with(|c: char| c.is_ascii_uppercase()) && EMITTER_CONSTRUCTORS.contains(&receiver)
+    receiver.starts_with(|c: char| c.is_ascii_uppercase())
+        && EMITTER_CONSTRUCTORS.contains(&receiver)
 }
 
 /// One identifier [`emitter_bindings`] found bound to an emitter constructor.
@@ -1516,8 +1585,18 @@ fn emitter_bindings(source: &str) -> Vec<EmitterBinding> {
             if eq > 0
                 && matches!(
                     b[eq - 1],
-                    b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|'
-                        | b'^' | b'?'
+                    b'=' | b'!'
+                        | b'<'
+                        | b'>'
+                        | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'/'
+                        | b'%'
+                        | b'&'
+                        | b'|'
+                        | b'^'
+                        | b'?'
                 )
             {
                 continue;
@@ -1634,7 +1713,10 @@ fn import_position(b: &[u8], quote: usize) -> bool {
         before.ends_with(w)
             && (before.len() == w.len() || !is_ident_byte(before[before.len() - w.len() - 1]))
     };
-    before.ends_with(b"require(") || before.ends_with(b"import(") || word(b"from") || word(b"import")
+    before.ends_with(b"require(")
+        || before.ends_with(b"import(")
+        || word(b"from")
+        || word(b"import")
 }
 
 /// Does the file name `module` as a quoted string anywhere? For a scoped
@@ -1665,7 +1747,8 @@ fn emitter_subclass(source: &str) -> SubclassEvidence {
     while let Some(rel) = source[from..].find("extends") {
         let at = from + rel;
         from = at + "extends".len();
-        if (at > 0 && is_ident_byte(b[at - 1])) || !b.get(from).is_some_and(u8::is_ascii_whitespace) {
+        if (at > 0 && is_ident_byte(b[at - 1])) || !b.get(from).is_some_and(u8::is_ascii_whitespace)
+        {
             continue;
         }
         let rest = source[from..].trim_start();
@@ -2144,7 +2227,8 @@ fn tokio_broadcast_enums<'s>(source: &'s str, guard: &mut LazyGuard<'_>) -> Vec<
     let mut found: Vec<(usize, &str)> = Vec::new();
     for needle in BROADCAST_TYPES {
         for (at, _) in source.match_indices(needle) {
-            let Some((segments, _)) = path_at(source, skip_ws(source.as_bytes(), at + needle.len()))
+            let Some((segments, _)) =
+                path_at(source, skip_ws(source.as_bytes(), at + needle.len()))
             else {
                 continue;
             };
@@ -2177,7 +2261,10 @@ fn path_at(source: &str, i: usize) -> Option<(Vec<&str>, usize)> {
     let mut at = i;
     loop {
         let start = at;
-        while b.get(at).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_') {
+        while b
+            .get(at)
+            .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_')
+        {
             at += 1;
         }
         if at == start {
@@ -2186,7 +2273,8 @@ fn path_at(source: &str, i: usize) -> Option<(Vec<&str>, usize)> {
         segments.push(&source[start..at]);
         let more = b.get(at) == Some(&b':')
             && b.get(at + 1) == Some(&b':')
-            && b.get(at + 2).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
+            && b.get(at + 2)
+                .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
         if !more {
             break;
         }
@@ -2279,7 +2367,12 @@ fn tokio_broadcast_sites(source: &str, side: BusSide, guard: &mut LazyGuard<'_>)
     }
     receives.sort_unstable();
     let fns = rust_fn_keywords(source, guard);
-    let scope = FnScope { fns: &fns, sends: &sends, receives: &receives, len: source.len() };
+    let scope = FnScope {
+        fns: &fns,
+        sends: &sends,
+        receives: &receives,
+        len: source.len(),
+    };
     variant_paths(source, &enums)
         .into_iter()
         .filter(|&(at, _, _)| !sends.iter().any(|&(open, close)| open <= at && at < close))
@@ -2451,7 +2544,10 @@ fn akka_event_stream_sites(source: &str, side: BusSide) -> Vec<BusSite> {
                 push(name, at);
             }
             for (at, _) in source.match_indices(AKKA_SUBSCRIBE_TYPED) {
-                push(class_name(&source[at + AKKA_SUBSCRIBE_TYPED.len()..], b"]["), at);
+                push(
+                    class_name(&source[at + AKKA_SUBSCRIBE_TYPED.len()..], b"]["),
+                    at,
+                );
             }
         }
     }
@@ -2476,7 +2572,10 @@ fn class_name<'s>(text: &'s str, follow: &[u8]) -> Option<&'s str> {
     let end = text
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
         .unwrap_or(text.len());
-    let next = text[end..].trim_start_matches([' ', '\t']).as_bytes().first()?;
+    let next = text[end..]
+        .trim_start_matches([' ', '\t'])
+        .as_bytes()
+        .first()?;
     if !follow.contains(next) {
         return None;
     }
@@ -2731,9 +2830,15 @@ fn php_resolve(source: &str, written: &str) -> Option<(String, String)> {
     let (class, ns) = if written.contains('\\') {
         (short.to_string(), php_namespace_of(written).to_string())
     } else if let Some(target) = crate::queues::php_use_target(source, short) {
-        (php_short(&target)?.to_string(), php_namespace_of(&target).to_string())
+        (
+            php_short(&target)?.to_string(),
+            php_namespace_of(&target).to_string(),
+        )
     } else {
-        (short.to_string(), php_namespace(source).unwrap_or("").to_string())
+        (
+            short.to_string(),
+            php_namespace(source).unwrap_or("").to_string(),
+        )
     };
     is_type_name(&class).then_some((class, ns))
 }
@@ -2876,7 +2981,9 @@ fn php_closure_list(arg: &str) -> Option<&str> {
         Some(rest) if rest.starts_with(|c: char| c.is_ascii_whitespace()) => rest.trim_start(),
         _ => arg,
     };
-    let rest = ["function", "fn"].iter().find_map(|kw| arg.strip_prefix(kw))?;
+    let rest = ["function", "fn"]
+        .iter()
+        .find_map(|kw| arg.strip_prefix(kw))?;
     rest.trim_start().strip_prefix('(')
 }
 
@@ -2920,7 +3027,9 @@ fn dart_event_bus_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) 
         BusSide::Emit => {
             for (at, _) in source.match_indices(DART_FIRE) {
                 let after = at + DART_FIRE.len();
-                if let Some(class) = call_arg(source, after, DART_FIRE, 0).and_then(dart_constructed) {
+                if let Some(class) =
+                    call_arg(source, after, DART_FIRE, 0).and_then(dart_constructed)
+                {
                     out.push((class.to_string(), at, DART_EVENT_BUS));
                 }
             }
@@ -2969,7 +3078,10 @@ fn dart_constructed(arg: &str) -> Option<&str> {
     let mut class: Option<&str> = None;
     loop {
         let start = i;
-        while b.get(i).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_') {
+        while b
+            .get(i)
+            .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_')
+        {
             i += 1;
         }
         if i == start {
@@ -3910,21 +4022,53 @@ mod tests {
             v
         };
         assert_eq!(
-            qn(extract_event_emitter_nodes(src, "x.ts", module_id(), repo())),
+            qn(extract_event_emitter_nodes(
+                src,
+                "x.ts",
+                module_id(),
+                repo()
+            )),
             vec![s("event_emit:user.created")]
         );
         assert_eq!(
-            qn(extract_event_handler_nodes(src, "x.ts", module_id(), repo())),
+            qn(extract_event_handler_nodes(
+                src,
+                "x.ts",
+                module_id(),
+                repo()
+            )),
             vec![s("event_handle:OrderPlaced")]
         );
-        assert_eq!(qn(extract_event_emitter_nodes(src, "x.rs", module_id(), repo())), Vec::<String>::new());
-        assert_eq!(qn(extract_event_handler_nodes(src, "x.rs", module_id(), repo())), Vec::<String>::new());
+        assert_eq!(
+            qn(extract_event_emitter_nodes(
+                src,
+                "x.rs",
+                module_id(),
+                repo()
+            )),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            qn(extract_event_handler_nodes(
+                src,
+                "x.rs",
+                module_id(),
+                repo()
+            )),
+            Vec::<String>::new()
+        );
         let fold = extract_event_nodes_with_consts(src, "x.rs", module_id(), repo(), &|_| None);
         assert!(fold.emitters.nodes.is_empty() && fold.handlers.nodes.is_empty());
         // A real call after the literal still mints, anchored at the call.
-        let real = "let bus = \"emitter.emit('user.created', u);\";\nemitter.emit(\"order.placed\", o);\n";
+        let real =
+            "let bus = \"emitter.emit('user.created', u);\";\nemitter.emit(\"order.placed\", o);\n";
         assert_eq!(
-            qn(extract_event_emitter_nodes(real, "x.rs", module_id(), repo())),
+            qn(extract_event_emitter_nodes(
+                real,
+                "x.rs",
+                module_id(),
+                repo()
+            )),
             vec![s("event_emit:order.placed")]
         );
     }
@@ -4028,7 +4172,13 @@ mod tests {
         // String-keyed: the minting site only, at its own line.
         let src = "import x;\nexport function f() {\n  bus.on('user.created', h);\n}";
         let out = extract_event_handler_nodes(src, "", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 2 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 2
+            }]
+        );
 
         // A suppressed broker call mints nothing, so it anchors nothing.
         let src = "import { connect } from 'mqtt';\nclient.subscribe('t');";
@@ -4058,7 +4208,13 @@ mod tests {
         let src = "def publish(self, m): pass\nbus.publish('user.created', u)";
         assert_eq!(emitted(src), vec!["event_emit:user.created"]);
         let out = extract_event_emitter_nodes(src, "", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 1
+            }]
+        );
     }
 
     #[test]
@@ -4149,15 +4305,37 @@ mod tests {
         let out = extract_event_emitter_nodes(src, "bus.go", module_id(), repo());
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].confidence, Confidence::Weak);
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 9 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 9
+            }]
+        );
         let out = extract_event_handler_nodes(src, "bus.go", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 8 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 8
+            }]
+        );
         // CJ.1a: the same calls in a Rust string literal (this file's own
         // tests) or comment mint nothing in glia's build.
         let rust = "/// `bus.Subscribe(\"order:placed\", f)`\nfn f() {\n    let s = \"bus.Publish(\\\"order:placed\\\", 1)\";\n}\n";
         let none = |out: EventNodes| out.nodes.is_empty();
-        assert!(none(extract_event_emitter_nodes(rust, "x.rs", module_id(), repo())));
-        assert!(none(extract_event_handler_nodes(rust, "x.rs", module_id(), repo())));
+        assert!(none(extract_event_emitter_nodes(
+            rust,
+            "x.rs",
+            module_id(),
+            repo()
+        )));
+        assert!(none(extract_event_handler_nodes(
+            rust,
+            "x.rs",
+            module_id(),
+            repo()
+        )));
         // A Go method DECLARATION is never a site: the needles are dotted.
         let decl = "func (b *Bus) Publish(topic string, args ...interface{}) {}\nfunc (b *Bus) Subscribe(topic string, fn interface{}) error { return nil }\n";
         assert_eq!(emitted(decl), Vec::<String>::new());
@@ -4169,7 +4347,12 @@ mod tests {
         let src = "package main\n\nimport \"github.com/asaskevich/EventBus\"\n\nfunc main() {\n\teb := EventBus.New()\n\teb.Subscribe(\"x\", h)\n\teb.SubscribeAsync(\"y\", h, false)\n\teb.SubscribeOnce(\"z\", h)\n\teb.SubscribeOnceAsync(\"w\", h)\n\teb.Publish(\"x\", 1)\n}\n";
         assert_eq!(
             handled(src),
-            vec!["event_handle:w", "event_handle:x", "event_handle:y", "event_handle:z"]
+            vec![
+                "event_handle:w",
+                "event_handle:x",
+                "event_handle:y",
+                "event_handle:z"
+            ]
         );
         assert_eq!(emitted(src), vec!["event_emit:x"]);
         // `eb` is not bus-shaped: the asaskevich import admits it.
@@ -4192,7 +4375,10 @@ mod tests {
         assert_eq!(emitted(&bus_in_broker), Vec::<String>::new());
         assert_eq!(handled(&bus_in_broker), Vec::<String>::new());
         // No import: `nc` is still no bus.
-        assert_eq!(emitted("nc.Publish(\"orders.created\", b)"), Vec::<String>::new());
+        assert_eq!(
+            emitted("nc.Publish(\"orders.created\", b)"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -4206,7 +4392,10 @@ mod tests {
         ] {
             assert_eq!(handled(src), Vec::<String>::new(), "{src}");
         }
-        assert_eq!(verdict("source.Subscribe(x => f(x));", ".Subscribe("), Verdict::NoBus);
+        assert_eq!(
+            verdict("source.Subscribe(x => f(x));", ".Subscribe("),
+            Verdict::NoBus
+        );
         // The contrast: a bus subscribed by a topic literal is a handler.
         assert_eq!(
             handled("_eventBus.Subscribe(\"order.placed\", OnPlaced);"),
@@ -4223,7 +4412,10 @@ mod tests {
         assert_eq!(out.nodes[0].confidence, Confidence::Medium);
         assert_eq!(verdict(src, ".Publish("), Verdict::TypeSite);
         // `.Publish(evt)` names nothing (CB.3a).
-        assert_eq!(emitted("await _mediator.Publish(evt, ct);"), Vec::<String>::new());
+        assert_eq!(
+            emitted("await _mediator.Publish(evt, ct);"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -4276,10 +4468,12 @@ mod tests {
             emitted("import PubSub from 'pubsub-js';\nif (publish('x', data)) {}"),
             vec!["event_emit:x"]
         );
-        let wisper = "include Wisper::Publisher\ndef call\n  return publish('order_placed', self)\nend\n";
+        let wisper =
+            "include Wisper::Publisher\ndef call\n  return publish('order_placed', self)\nend\n";
         assert_eq!(emitted(wisper), vec!["event_emit:order_placed"]);
         // Declarations stay declarations with the import present.
-        let java = "import PubSub from 'pubsub-js';\ninterface Notifier {\n  void publish(String p);\n}";
+        let java =
+            "import PubSub from 'pubsub-js';\ninterface Notifier {\n  void publish(String p);\n}";
         assert_eq!(emitted(java), Vec::<String>::new());
         let dart = "import PubSub from 'pubsub-js';\nFuture<void> publish(String m) async {\n  print(m);\n}";
         assert_eq!(emitted(dart), Vec::<String>::new());
@@ -4314,7 +4508,13 @@ mod tests {
         );
         assert_eq!(handled(src), vec!["event_handle:order.shipped"]);
         let out = extract_event_handler_nodes(src, "", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 1
+            }]
+        );
     }
 
     #[test]
@@ -4549,7 +4749,13 @@ mod tests {
         let src = "el.addEventListener('click', h);\nbus.addEventListener('user.created', h2);";
         assert_eq!(handled(src), vec!["event_handle:user.created"]);
         let out = extract_event_handler_nodes(src, "", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 1
+            }]
+        );
     }
 
     #[test]
@@ -4587,7 +4793,9 @@ mod tests {
     }
 
     fn transport(via: &str) -> Vec<String> {
-        vec![format!(r#"{{"provenance":"synthetic","delivery":"transport","via":"{via}"}}"#)]
+        vec![format!(
+            r#"{{"provenance":"synthetic","delivery":"transport","via":"{via}"}}"#
+        )]
     }
 
     /// LB.8b: a transport needle marks the node it mints (or re-sees) with the
@@ -4603,14 +4811,20 @@ mod tests {
         );
         assert_eq!(
             origins(&out),
-            vec![(s("event_handle:order_shipped"), transport("nestjs-microservices"))]
+            vec![(
+                s("event_handle:order_shipped"),
+                transport("nestjs-microservices")
+            )]
         );
 
         let client = "import { ClientProxy } from '@nestjs/microservices';\nthis.client.emit('order_shipped', o);";
         let out = extract_event_emitter_nodes(client, "", module_id(), repo());
         assert_eq!(
             origins(&out),
-            vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
+            vec![(
+                s("event_emit:order_shipped"),
+                transport("nestjs-microservices")
+            )]
         );
 
         // CB.3a: a putEvents names its entry's DetailType; with none it names
@@ -4627,8 +4841,17 @@ mod tests {
 
         let local = "import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nbus.emit('x', 1);";
         let out = extract_event_emitter_nodes(local, "", module_id(), repo());
-        assert_eq!(origins(&out), vec![(s("event_emit:x"), vec![])], "in-process: no ORIGIN");
-        let out = extract_event_handler_nodes("bus.on('x', h);\n@OnEvent('y')\nh2() {}", "", module_id(), repo());
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_emit:x"), vec![])],
+            "in-process: no ORIGIN"
+        );
+        let out = extract_event_handler_nodes(
+            "bus.on('x', h);\n@OnEvent('y')\nh2() {}",
+            "",
+            module_id(),
+            repo(),
+        );
         assert_eq!(
             origins(&out),
             vec![(s("event_handle:x"), vec![]), (s("event_handle:y"), vec![])],
@@ -4642,7 +4865,10 @@ mod tests {
     fn a_transport_needle_marks_a_node_an_in_process_needle_minted() {
         let src = "bus.on('x', h);\n@EventPattern('x')\nonX(data) {}";
         let out = extract_event_handler_nodes(src, "", module_id(), repo());
-        assert_eq!(origins(&out), vec![(s("event_handle:x"), transport("nestjs-microservices"))]);
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_handle:x"), transport("nestjs-microservices"))]
+        );
         assert_eq!(out.nodes.len(), 1);
     }
 
@@ -4658,7 +4884,10 @@ mod tests {
     fn constant_reference_names_both_sides() {
         // HEAD: event_emit:emit and event_handle:@OnEvent, which never pair.
         assert_eq!(
-            emitted(concat!("this.eventEmitter.em", "it(OrderEvents.Created, {id})")),
+            emitted(concat!(
+                "this.eventEmitter.em",
+                "it(OrderEvents.Created, {id})"
+            )),
             vec!["event_emit:OrderEvents.Created"]
         );
         assert_eq!(
@@ -4699,9 +4928,15 @@ mod tests {
             handled(concat!("bus.o", "n(V2_READY, h)")),
             vec!["event_handle:V2_READY"]
         );
-        assert_eq!(constant_ref_after("(ORDER_PLACED)", 1), Some(s("ORDER_PLACED")));
+        assert_eq!(
+            constant_ref_after("(ORDER_PLACED)", 1),
+            Some(s("ORDER_PLACED"))
+        );
         // A collection noun is not a bus name here: `ORDER_EVENTS` is a topic.
-        assert_eq!(constant_ref_after("(ORDER_EVENTS, x)", 1), Some(s("ORDER_EVENTS")));
+        assert_eq!(
+            constant_ref_after("(ORDER_EVENTS, x)", 1),
+            Some(s("ORDER_EVENTS"))
+        );
         // No letter: not a constant.
         assert_eq!(constant_ref_after("(1_000)", 1), None);
     }
@@ -4713,7 +4948,10 @@ mod tests {
             emitted(concat!("this.itemsSubj", "ect.next(items);")),
             Vec::<String>::new()
         );
-        assert_eq!(emitted(concat!("emitter.em", "it(evt);")), Vec::<String>::new());
+        assert_eq!(
+            emitted(concat!("emitter.em", "it(evt);")),
+            Vec::<String>::new()
+        );
         assert_eq!(
             handled(concat!("@On", "Event(name)\nh() {}")),
             Vec::<String>::new()
@@ -4723,7 +4961,10 @@ mod tests {
         // string-keyed `.subscribe(` row keys nothing by the server, and
         // DH.7's Phoenix pass reads the topic.
         assert_eq!(
-            handled(concat!("Phoenix.PubSub.subsc", "ribe(Shop.PubSub, \"order_placed\")")),
+            handled(concat!(
+                "Phoenix.PubSub.subsc",
+                "ribe(Shop.PubSub, \"order_placed\")"
+            )),
             vec![s("event_handle:order_placed")]
         );
         for arg in [
@@ -4760,10 +5001,22 @@ mod tests {
         // The capitalised receiver, a quoted key, a `)` inside an earlier
         // string, and the key on a later line.
         for src in [
-            concat!("EventBridge.put", "Events({ Entries: [{ DetailType: 'OrderPlaced' }] });"),
-            concat!("eventBridge.put", "Events({ \"Entries\": [{ \"DetailType\": \"OrderPlaced\" }] });"),
-            concat!("eventBridge.put", "Events({ Entries: [{ Source: \"a)b\", DetailType: \"OrderPlaced\" }] });"),
-            concat!("eventBridge.put", "Events({\n  Entries: [{\n    DetailType: \"OrderPlaced\",\n  }],\n});"),
+            concat!(
+                "EventBridge.put",
+                "Events({ Entries: [{ DetailType: 'OrderPlaced' }] });"
+            ),
+            concat!(
+                "eventBridge.put",
+                "Events({ \"Entries\": [{ \"DetailType\": \"OrderPlaced\" }] });"
+            ),
+            concat!(
+                "eventBridge.put",
+                "Events({ Entries: [{ Source: \"a)b\", DetailType: \"OrderPlaced\" }] });"
+            ),
+            concat!(
+                "eventBridge.put",
+                "Events({\n  Entries: [{\n    DetailType: \"OrderPlaced\",\n  }],\n});"
+            ),
         ] {
             assert_eq!(emitted(src), vec!["event_emit:OrderPlaced"], "{src}");
         }
@@ -4772,12 +5025,27 @@ mod tests {
         // call all name nothing (HEAD: event_emit:eventBridge.putEvents).
         for src in [
             "events.put_events(Entries=[{'Source': 'shop', 'DetailType': 'OrderPlaced'}])",
-            concat!("await eventBridge.put", "Events({ Entries: [] }).promise();"),
+            concat!(
+                "await eventBridge.put",
+                "Events({ Entries: [] }).promise();"
+            ),
             concat!("await eventBridge.put", "Events(params).promise();"),
-            concat!("eventBridge.put", "Events({ Entries: [{ DetailType: kind }] });"),
-            concat!("eventBridge.put", "Events(p);\nconst e = { DetailType: \"Other\" };"),
-            concat!("// announce with eventBridge.put", "Events, DetailType: \"Other\""),
-            concat!("eventBridge.put", "Events({ Entries: [{ MyDetailType: \"Other\" }] });"),
+            concat!(
+                "eventBridge.put",
+                "Events({ Entries: [{ DetailType: kind }] });"
+            ),
+            concat!(
+                "eventBridge.put",
+                "Events(p);\nconst e = { DetailType: \"Other\" };"
+            ),
+            concat!(
+                "// announce with eventBridge.put",
+                "Events, DetailType: \"Other\""
+            ),
+            concat!(
+                "eventBridge.put",
+                "Events({ Entries: [{ MyDetailType: \"Other\" }] });"
+            ),
         ] {
             assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
         }
@@ -4786,7 +5054,10 @@ mod tests {
             detail_type_in("(Entries=[dict(Source='s', DetailType='OrderPlaced')])", 0),
             LiteralAt::Name(s("OrderPlaced"))
         );
-        assert_eq!(detail_type_in("({ DetailType: 'a\nb' })", 0), LiteralAt::Malformed);
+        assert_eq!(
+            detail_type_in("({ DetailType: 'a\nb' })", 0),
+            LiteralAt::Malformed
+        );
     }
 
     #[test]
@@ -4798,7 +5069,10 @@ mod tests {
         assert_eq!(handled(live), vec!["event_handle:inc"]);
         // HEAD: event_handle:handle_event for each.
         for src in [
-            concat!("class Listener:\n    def handle", "_event(self, event):\n        pass\n"),
+            concat!(
+                "class Listener:\n    def handle",
+                "_event(self, event):\n        pass\n"
+            ),
             concat!("self.handle", "_event(event)"),
             concat!("def handle", "_event(event)\n  log(event)\nend"),
         ] {
@@ -4812,7 +5086,13 @@ mod tests {
         let src = concat!("bus.em", "it(x);\nbus.em", "it(\"user.created\", u);");
         assert_eq!(emitted(src), vec!["event_emit:user.created"]);
         let out = extract_event_emitter_nodes(src, "", module_id(), repo());
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 1
+            }]
+        );
         // A constant reference is a name like a literal.
         let src = concat!("bus.em", "it(x);\nbus.em", "it(OrderEvents.Created, u);");
         assert_eq!(emitted(src), vec!["event_emit:OrderEvents.Created"]);
@@ -4831,8 +5111,14 @@ mod tests {
         }
         let src = concat!("bus.em", "it(', ');\nbus.em", "it(OrderEvents.Created, x);");
         assert_eq!(emitted(src), vec!["event_emit:OrderEvents.Created"]);
-        assert_eq!(event_name_at("(', ')", "", 1, NameRule::Literal), SiteName::Malformed);
-        assert_eq!(event_name_at("(x)", "", 1, NameRule::Literal), SiteName::Unnamed);
+        assert_eq!(
+            event_name_at("(', ')", "", 1, NameRule::Literal),
+            SiteName::Malformed
+        );
+        assert_eq!(
+            event_name_at("(x)", "", 1, NameRule::Literal),
+            SiteName::Unnamed
+        );
         assert_eq!(
             event_name_at("(X.Y)", "", 1, NameRule::Literal),
             SiteName::Constant(s("X.Y"))
@@ -4869,9 +5155,12 @@ mod tests {
     #[test]
     fn constant_sites_fold_on_both_sides() {
         let src = concat!(
-            "this.eventEmitter.em", "it(OrderEvents.Created, { id });\n",
-            "@On", "Event(OrderEvents.Paid)\nonPaid(p) {}\n",
-            "@On", "Event(ORDER_PLACED)\nonPlaced(p) {}\n"
+            "this.eventEmitter.em",
+            "it(OrderEvents.Created, { id });\n",
+            "@On",
+            "Event(OrderEvents.Paid)\nonPaid(p) {}\n",
+            "@On",
+            "Event(ORDER_PLACED)\nonPlaced(p) {}\n"
         );
         let fold = folded(
             src,
@@ -4884,7 +5173,13 @@ mod tests {
         assert_eq!(qnames(&fold.emitters), vec!["event_emit:order.created"]);
         // `@OnEvent(` is one needle: its first named site wins (CB.3a's rule).
         assert_eq!(qnames(&fold.handlers), vec!["event_handle:order.paid"]);
-        assert_eq!(fold.counts, ConstFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            fold.counts,
+            ConstFoldCounts {
+                folded: 2,
+                unresolved: 0
+            }
+        );
         assert_eq!(fold.path, PATH);
         // `Events::ORDER_PLACED` reaches the resolver as written.
         let fold = folded(
@@ -4900,9 +5195,15 @@ mod tests {
         // nodes (the constant path is the fallback), counting each constant
         // site unresolved; the per-file pass itself counts nothing.
         for (src, constants) in [
-            (concat!("this.eventEmitter.em", "it(OrderEvents.Created, {id})"), 1),
+            (
+                concat!("this.eventEmitter.em", "it(OrderEvents.Created, {id})"),
+                1,
+            ),
             (concat!("@On", "Event(OrderEvents.Created)\naudit(p) {}"), 1),
-            (concat!("bus.em", "it('user.created', u);\nbus.o", "n(V2_READY, h)"), 1),
+            (
+                concat!("bus.em", "it('user.created', u);\nbus.o", "n(V2_READY, h)"),
+                1,
+            ),
             (
                 concat!(
                     "import { ClientProxy } from '@nestjs/microservices';\nthis.client.em",
@@ -4911,20 +5212,32 @@ mod tests {
                 ),
                 2,
             ),
-            (concat!("publisher.publishEv", "ent(new OrderPlacedEvent(id));"), 0),
+            (
+                concat!("publisher.publishEv", "ent(new OrderPlacedEvent(id));"),
+                0,
+            ),
         ] {
             let fold = extract_event_nodes_with_consts(src, PATH, module_id(), repo(), &|_| None);
             let emitters = extract_event_emitter_nodes(src, "", module_id(), repo());
             let handlers = extract_event_handler_nodes(src, "", module_id(), repo());
             assert_eq!(fold.emitters.nodes, emitters.nodes, "{src}");
             assert_eq!(fold.emitters.anchors, emitters.anchors, "{src}");
-            assert_eq!(fold.emitters.nav.qname_by_id, emitters.nav.qname_by_id, "{src}");
+            assert_eq!(
+                fold.emitters.nav.qname_by_id, emitters.nav.qname_by_id,
+                "{src}"
+            );
             assert_eq!(fold.handlers.nodes, handlers.nodes, "{src}");
             assert_eq!(fold.handlers.anchors, handlers.anchors, "{src}");
-            assert_eq!(fold.handlers.nav.qname_by_id, handlers.nav.qname_by_id, "{src}");
+            assert_eq!(
+                fold.handlers.nav.qname_by_id, handlers.nav.qname_by_id,
+                "{src}"
+            );
             assert_eq!(
                 fold.counts,
-                ConstFoldCounts { folded: 0, unresolved: constants },
+                ConstFoldCounts {
+                    folded: 0,
+                    unresolved: constants
+                },
                 "{src}"
             );
         }
@@ -4933,15 +5246,20 @@ mod tests {
     #[test]
     fn a_quoted_literal_is_never_re_resolved() {
         let src = concat!(
-            "bus.em", "it('order.created', x);\n",
-            "@On", "Event(\"order.created\")\nh(p) {}"
+            "bus.em",
+            "it('order.created', x);\n",
+            "@On",
+            "Event(\"order.created\")\nh(p) {}"
         );
         let fold = folded(src, &[("order.created", "other.event")]);
         assert_eq!(qnames(&fold.emitters), vec!["event_emit:order.created"]);
         assert_eq!(qnames(&fold.handlers), vec!["event_handle:order.created"]);
         assert_eq!(fold.counts, ConstFoldCounts::default());
         // A variable argument is no site, so the resolver never sees it.
-        let fold = folded(concat!("bus.em", "it(evt, x);"), &[("evt", "order.created")]);
+        let fold = folded(
+            concat!("bus.em", "it(evt, x);"),
+            &[("evt", "order.created")],
+        );
         assert!(fold.emitters.nodes.is_empty());
         assert_eq!(fold.counts, ConstFoldCounts::default());
     }
@@ -4960,8 +5278,19 @@ mod tests {
                 repo(),
                 &resolve,
             );
-            assert_eq!(qnames(&fold.emitters), vec!["event_emit:OrderEvents.Created"], "{value:?}");
-            assert_eq!(fold.counts, ConstFoldCounts { folded: 0, unresolved: 1 }, "{value:?}");
+            assert_eq!(
+                qnames(&fold.emitters),
+                vec!["event_emit:OrderEvents.Created"],
+                "{value:?}"
+            );
+            assert_eq!(
+                fold.counts,
+                ConstFoldCounts {
+                    folded: 0,
+                    unresolved: 1
+                },
+                "{value:?}"
+            );
         }
         let fold = folded(
             concat!("bus.em", "it(OrderEvents.Created, x);"),
@@ -4992,7 +5321,10 @@ mod tests {
         let fold = folded(src, &[("Topics.ORDER", "order_shipped")]);
         assert_eq!(
             origins(&fold.emitters),
-            vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
+            vec![(
+                s("event_emit:order_shipped"),
+                transport("nestjs-microservices")
+            )]
         );
     }
 
@@ -5038,9 +5370,15 @@ mod tests {
             nodes: vec![node(module, vec![]), node(func, vec![span])],
             ..Default::default()
         };
-        fp.nav.record(module, "test", "test", node_kind::MODULE, None);
         fp.nav
-            .record(func, "create", "test::create", node_kind::FUNCTION, Some(module));
+            .record(module, "test", "test", node_kind::MODULE, None);
+        fp.nav.record(
+            func,
+            "create",
+            "test::create",
+            node_kind::FUNCTION,
+            Some(module),
+        );
         let mut anchors = Vec::new();
         for out in [
             extract_event_emitter_nodes(src, "", module, repo()),
@@ -5067,13 +5405,17 @@ mod tests {
     /// emitter inside the function (line 1), the handler at module scope.
     const CONST_SRC: &str = concat!(
         "import { OnEvent } from '@nestjs/event-emitter';\n",
-        "  this.eventEmitter.em", "it(OrderEvents.Created, { id });\n",
-        "@On", "Event(OrderEvents.Paid)\n"
+        "  this.eventEmitter.em",
+        "it(OrderEvents.Created, { id });\n",
+        "@On",
+        "Event(OrderEvents.Paid)\n"
     );
     const LITERAL_SRC: &str = concat!(
         "import { OnEvent } from '@nestjs/event-emitter';\n",
-        "  this.eventEmitter.em", "it('order.created', { id });\n",
-        "@On", "Event('order.paid')\n"
+        "  this.eventEmitter.em",
+        "it('order.created', { id });\n",
+        "@On",
+        "Event('order.paid')\n"
     );
     const BINDINGS: &[(&str, &str)] = &[
         ("OrderEvents.Created", "order.created"),
@@ -5083,7 +5425,10 @@ mod tests {
     type Triple = (NodeId, NodeId, glia_core::EdgeCategoryId);
 
     fn triples(fp: &FileParse) -> Vec<Triple> {
-        fp.edges.iter().map(|e| (e.from, e.to, e.category)).collect()
+        fp.edges
+            .iter()
+            .map(|e| (e.from, e.to, e.category))
+            .collect()
     }
 
     #[test]
@@ -5098,7 +5443,13 @@ mod tests {
         );
         assert!(fp.nav.kind_by_id.contains_key(&old_emit));
         let fold = folded(CONST_SRC, BINDINGS);
-        assert_eq!(fold.counts, ConstFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            fold.counts,
+            ConstFoldCounts {
+                folded: 2,
+                unresolved: 0
+            }
+        );
         replace_event_nodes(&mut fp, module_id(), "typescript", fold);
         let literal = event_parse(LITERAL_SRC);
 
@@ -5112,8 +5463,18 @@ mod tests {
         assert_eq!(fp.nav.children_of, literal.nav.children_of);
         // The emitter is USED by the function; the module-scope handler takes
         // the module CONTAINS fallback; nothing names a gone id.
-        let emit = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::EVENT_EMITTER, "event_emit:order.created");
-        let handle = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::EVENT_HANDLER, "event_handle:order.paid");
+        let emit = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::EVENT_EMITTER,
+            "event_emit:order.created",
+        );
+        let handle = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::EVENT_HANDLER,
+            "event_handle:order.paid",
+        );
         assert_eq!(triples(&fp), triples(&literal));
         assert_eq!(
             triples(&fp),
@@ -5122,15 +5483,27 @@ mod tests {
                 (module_id(), handle, edge_category::CONTAINS),
             ]
         );
-        assert!(!fp.edges.iter().any(|e| e.from == old_emit || e.to == old_emit));
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.from == old_emit || e.to == old_emit)
+        );
         // Re-anchored post-cache: `extractor:anchor` rule `const_fold`.
-        assert!(fp.edges.iter().all(|e| evidence::Evidence::of(e).is_some_and(
-            |ev| ev.emitter == "extractor:anchor" && ev.rule.as_deref() == Some("const_fold")
-        )));
+        assert!(
+            fp.edges.iter().all(|e| evidence::Evidence::of(e)
+                .is_some_and(|ev| ev.emitter == "extractor:anchor"
+                    && ev.rule.as_deref() == Some("const_fold")))
+        );
         assert_eq!(crate::anchor::census(&fp), crate::anchor::census(&literal));
         // One IMPORTS cell per folded node, last.
         for n in fp.nodes.iter().filter(|n| n.id == emit || n.id == handle) {
-            assert_eq!(n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS).count(), 1);
+            assert_eq!(
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::IMPORTS)
+                    .count(),
+                1
+            );
             assert_eq!(n.cells.last().map(|c| c.kind), Some(cell_type::IMPORTS));
         }
     }
@@ -5152,13 +5525,27 @@ mod tests {
             confidence: Confidence::Strong,
             cells: vec![],
         });
-        fp.nav.record(declared, "Transfer", "Token::Transfer", node_kind::EVENT_EMITTER, Some(module_id()));
+        fp.nav.record(
+            declared,
+            "Transfer",
+            "Token::Transfer",
+            node_kind::EVENT_EMITTER,
+            Some(module_id()),
+        );
         assert!(!is_event_site(node_kind::EVENT_EMITTER, "Token::Transfer"));
         assert!(is_event_site(node_kind::EVENT_EMITTER, "event_emit:x"));
         assert!(!is_event_site(node_kind::EVENT_HANDLER, "event_emit:x"));
-        replace_event_nodes(&mut fp, module_id(), "typescript", folded(CONST_SRC, BINDINGS));
+        replace_event_nodes(
+            &mut fp,
+            module_id(),
+            "typescript",
+            folded(CONST_SRC, BINDINGS),
+        );
         assert!(fp.nodes.iter().any(|n| n.id == declared));
-        assert_eq!(fp.nav.qname_by_id.get(&declared).map(String::as_str), Some("Token::Transfer"));
+        assert_eq!(
+            fp.nav.qname_by_id.get(&declared).map(String::as_str),
+            Some("Token::Transfer")
+        );
         assert_eq!(fp.nodes.first().map(|n| n.id), Some(module_id()));
         assert_eq!(fp.nodes.last().map(|n| n.id), Some(declared));
     }
@@ -5640,9 +6027,15 @@ mod tests {
         // Anchors are 0-based lines: the send, then the `while let`.
         let out = extract_event_emitter_nodes(TOKIO_MATRIX, "src/events.rs", module_id(), repo());
         assert!(out.nodes.iter().all(|n| n.confidence == Confidence::Medium));
-        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![14]);
+        assert_eq!(
+            out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![14]
+        );
         let out = extract_event_handler_nodes(TOKIO_MATRIX, "src/events.rs", module_id(), repo());
-        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![10]);
+        assert_eq!(
+            out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![10]
+        );
 
         // A match over a receive: every arm's variant, alternatives included;
         // the qualified send and a field type of the bus name the enum.
@@ -5662,7 +6055,12 @@ mod tests {
         assert_eq!(emit, strs(&["event_emit:D"]));
         assert_eq!(
             handle,
-            strs(&["event_handle:A", "event_handle:B", "event_handle:C", "event_handle:E"])
+            strs(&[
+                "event_handle:A",
+                "event_handle:B",
+                "event_handle:C",
+                "event_handle:E"
+            ])
         );
 
         // A pattern in a file that never receives is no handler.
@@ -5721,7 +6119,10 @@ mod tests {
         // Control: the same lines as code are a bus.
         let live = "let (tx, mut rx) = broadcast::channel::<Event>(16);\nlet _ = tx.send(Event::A(1));\nwhile let Ok(Event::A(x)) = rx.recv().await {}\n";
         let (emit, handle) = bus_qnames(live, "src/sample.rs");
-        assert_eq!((emit, handle), (strs(&["event_emit:A"]), strs(&["event_handle:A"])));
+        assert_eq!(
+            (emit, handle),
+            (strs(&["event_emit:A"]), strs(&["event_handle:A"]))
+        );
         // The enum is read only from a channel type in code: a real send of a
         // variant whose enum only a string names mints nothing either.
         let half = "const T: &str = \"broadcast::Sender<Event>\";\nfn f(tx: X) { let _ = tx.send(Event::A(1)); }\n";
@@ -5754,9 +6155,16 @@ mod tests {
         let (emit, handle) = bus_qnames(more, "W.scala");
         assert_eq!(
             emit,
-            strs(&["event_emit:Cancelled", "event_emit:Refunded", "event_emit:Shipped"])
+            strs(&[
+                "event_emit:Cancelled",
+                "event_emit:Refunded",
+                "event_emit:Shipped"
+            ])
         );
-        assert_eq!(handle, strs(&["event_handle:Refunded", "event_handle:Shipped"]));
+        assert_eq!(
+            handle,
+            strs(&["event_handle:Refunded", "event_handle:Shipped"])
+        );
     }
 
     #[test]
@@ -5764,8 +6172,10 @@ mod tests {
         let bare = AKKA_MATRIX.replace("import akka.actor.{ActorRef, ActorSystem}\n", "");
         let (emit, handle) = bus_qnames(&bare, "Orders.scala");
         assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
-        let (emit, handle) =
-            bus_qnames(&AKKA_MATRIX.replace("akka.actor", "org.apache.pekko.actor"), "Orders.scala");
+        let (emit, handle) = bus_qnames(
+            &AKKA_MATRIX.replace("akka.actor", "org.apache.pekko.actor"),
+            "Orders.scala",
+        );
         assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
         assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
     }
@@ -5813,9 +6223,15 @@ mod tests {
         assert_eq!(anchor_lines(&out), vec![(s("event_emit:order.placed"), 2)]);
         // The block form; a constant-keyed instrument keeps CB.3a's path.
         let block = "ActiveSupport::Notifications.instrument('cache.read', key: k) do\n  read\nend\nActiveSupport::Notifications.instrument(EVENT, payload)\n";
-        assert_eq!(bus_qnames(block, "c.rb").0, strs(&["event_emit:cache.read"]));
+        assert_eq!(
+            bus_qnames(block, "c.rb").0,
+            strs(&["event_emit:cache.read"])
+        );
         let constant = "ActiveSupport::Notifications.instrument(Orders::PLACED, payload)\n";
-        assert_eq!(bus_qnames(constant, "c.rb").0, strs(&["event_emit:Orders::PLACED"]));
+        assert_eq!(
+            bus_qnames(constant, "c.rb").0,
+            strs(&["event_emit:Orders::PLACED"])
+        );
     }
 
     #[test]
@@ -5839,7 +6255,10 @@ mod tests {
 
     #[test]
     fn laravel_dispatch_event_and_listener() {
-        assert_eq!(bus_qnames(LARAVEL_EVENT, "app/Events/OrderPlaced.php"), (vec![], vec![]));
+        assert_eq!(
+            bus_qnames(LARAVEL_EVENT, "app/Events/OrderPlaced.php"),
+            (vec![], vec![])
+        );
         let path = "app/Listeners/SendReceipt.php";
         let (emit, handle) = bus_qnames(LARAVEL_LISTENER, path);
         assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
@@ -5848,7 +6267,12 @@ mod tests {
         let h = extract_event_handler_nodes(LARAVEL_LISTENER, path, module_id(), repo());
         assert_eq!(anchor_lines(&e), vec![(s("event_emit:OrderPlaced"), 13)]);
         assert_eq!(anchor_lines(&h), vec![(s("event_handle:OrderPlaced"), 8)]);
-        assert!(e.nodes.iter().chain(&h.nodes).all(|n| n.confidence == Confidence::Medium));
+        assert!(
+            e.nodes
+                .iter()
+                .chain(&h.nodes)
+                .all(|n| n.confidence == Confidence::Medium)
+        );
         assert!(e.nodes.iter().chain(&h.nodes).all(|n| n.cells.is_empty()));
 
         // dispatchIf / dispatchUnless, a group import with an alias (the event
@@ -5858,14 +6282,25 @@ mod tests {
         let more = "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Events\\{OrderShipped, OrderRefunded as Refunded};\nclass C\n{\n    public function f($o)\n    {\n        OrderShipped::dispatchIf($o->ok, $o);\n        Refunded::dispatchUnless($o->ok, $o);\n        \\App\\Events\\OrderCancelled::dispatch($o);\n        OrderShipped::dispatch($o);\n    }\n}\n";
         assert_eq!(
             bus_qnames(more, "a.php").0,
-            strs(&["event_emit:OrderCancelled", "event_emit:OrderRefunded", "event_emit:OrderShipped"])
+            strs(&[
+                "event_emit:OrderCancelled",
+                "event_emit:OrderRefunded",
+                "event_emit:OrderShipped"
+            ])
         );
         let out = extract_event_emitter_nodes(more, "a.php", module_id(), repo());
         assert_eq!(out.anchors.len(), 4);
-        let own_ns = "<?php\nnamespace App\\Events;\nfunction again(): void { OrderPlaced::dispatch(1); }\n";
-        assert_eq!(bus_qnames(own_ns, "a.php").0, strs(&["event_emit:OrderPlaced"]));
+        let own_ns =
+            "<?php\nnamespace App\\Events;\nfunction again(): void { OrderPlaced::dispatch(1); }\n";
+        assert_eq!(
+            bus_qnames(own_ns, "a.php").0,
+            strs(&["event_emit:OrderPlaced"])
+        );
         let declared = "<?php\nnamespace Shop;\nuse Illuminate\\Foundation\\Events\\Dispatchable;\nclass Placed\n{\n    use Dispatchable;\n    public static function now(): void { Placed::dispatch(); }\n}\n";
-        assert_eq!(bus_qnames(declared, "a.php").0, strs(&["event_emit:Placed"]));
+        assert_eq!(
+            bus_qnames(declared, "a.php").0,
+            strs(&["event_emit:Placed"])
+        );
     }
 
     #[test]
@@ -5880,7 +6315,10 @@ mod tests {
         assert_eq!(bus_qnames(misc, "a.php"), (vec![], vec![]));
         // Beside a job import the event keeps its node and the job mints none.
         let mixed = "<?php\nuse App\\Events\\OrderPlaced;\nuse App\\Jobs\\SendWelcomeEmail;\nOrderPlaced::dispatch(1);\nSendWelcomeEmail::dispatch();\n";
-        assert_eq!(bus_qnames(mixed, "a.php"), (strs(&["event_emit:OrderPlaced"]), vec![]));
+        assert_eq!(
+            bus_qnames(mixed, "a.php"),
+            (strs(&["event_emit:OrderPlaced"]), vec![])
+        );
     }
 
     #[test]
@@ -5889,7 +6327,11 @@ mod tests {
         assert_eq!(
             bus_qnames(emit, "a.php"),
             (
-                strs(&["event_emit:OrderPlaced", "event_emit:OrderRefunded", "event_emit:OrderShipped"]),
+                strs(&[
+                    "event_emit:OrderPlaced",
+                    "event_emit:OrderRefunded",
+                    "event_emit:OrderShipped"
+                ]),
                 vec![]
             )
         );
@@ -5909,7 +6351,8 @@ mod tests {
 
     #[test]
     fn laravel_handle_outside_listeners_is_no_handler() {
-        let service = LARAVEL_LISTENER.replace("namespace App\\Listeners;", "namespace App\\Services;");
+        let service =
+            LARAVEL_LISTENER.replace("namespace App\\Listeners;", "namespace App\\Services;");
         assert_eq!(
             bus_qnames(&service, "a.php"),
             (strs(&["event_emit:OrderPlaced"]), vec![])
@@ -5970,8 +6413,8 @@ mod tests {
             "import 'package:flutter/widgets.dart';",
         );
         assert_eq!(bus_qnames(&flutter, "lib/orders.dart"), (vec![], vec![]));
-        let commented =
-            DART_EVENT_BUS_MATRIX.replace("import 'package:event_bus", "// import 'package:event_bus");
+        let commented = DART_EVENT_BUS_MATRIX
+            .replace("import 'package:event_bus", "// import 'package:event_bus");
         assert_eq!(bus_qnames(&commented, "lib/orders.dart"), (vec![], vec![]));
     }
 
@@ -6030,11 +6473,20 @@ mod tests {
         let src = "/// Phoenix.PubSub.broadcast(Shop.PubSub, \"order_placed\", m)\nfn f() {\n    let s = \"Phoenix.PubSub.subscribe(Shop.PubSub, 'order_placed')\";\n}\n";
         assert_eq!(
             bus_qnames(src, "lib/a.ex"),
-            (strs(&["event_emit:order_placed"]), strs(&["event_handle:order_placed"]))
+            (
+                strs(&["event_emit:order_placed"]),
+                strs(&["event_handle:order_placed"])
+            )
         );
         assert_eq!(bus_qnames(src, "src/a.rs"), (vec![], vec![]));
-        let dart = format!("{}\nfn f() {{ let s = \"eventBus.fire(OrderPlaced('o'))\"; }}\n", "import 'package:event_bus/event_bus.dart';");
-        assert_eq!(bus_qnames(&dart, "lib/a.dart").0, strs(&["event_emit:OrderPlaced"]));
+        let dart = format!(
+            "{}\nfn f() {{ let s = \"eventBus.fire(OrderPlaced('o'))\"; }}\n",
+            "import 'package:event_bus/event_bus.dart';"
+        );
+        assert_eq!(
+            bus_qnames(&dart, "lib/a.dart").0,
+            strs(&["event_emit:OrderPlaced"])
+        );
         assert_eq!(bus_qnames(&dart, "src/a.rs"), (vec![], vec![]));
     }
 

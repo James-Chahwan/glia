@@ -101,50 +101,232 @@ const fn secret(
     mount: &'static [&'static str],
     norm: fn(&str) -> Option<String>,
 ) -> Row {
-    Row { needle, provider, gate, pick, mount, norm }
+    Row {
+        needle,
+        provider,
+        gate,
+        pick,
+        mount,
+        norm,
+    }
 }
 
 const SECRET_ROWS: &[Row] = &[
     // Vault — hvac (py), node-vault (js), Spring VaultTemplate (java),
     // `Vault.logical.read` (ruby) all take the full path as the first
     // argument. `.read(` is generic, so the path must contain a `/`.
-    secret(".read(", "vault", VAULT, Pick::Positional(0), &[], vault_path),
-    secret(".Logical().Read(", "vault", VAULT, Pick::Positional(0), &[], vault_path),
-    secret(".Logical().ReadWithContext(", "vault", VAULT, Pick::Positional(1), &[], vault_path),
+    secret(
+        ".read(",
+        "vault",
+        VAULT,
+        Pick::Positional(0),
+        &[],
+        vault_path,
+    ),
+    secret(
+        ".Logical().Read(",
+        "vault",
+        VAULT,
+        Pick::Positional(0),
+        &[],
+        vault_path,
+    ),
+    secret(
+        ".Logical().ReadWithContext(",
+        "vault",
+        VAULT,
+        Pick::Positional(1),
+        &[],
+        vault_path,
+    ),
     // hvac KV engines: `read_secret_version(path="api", mount_point="secret")`.
-    secret(".read_secret_version(", "vault", VAULT, Pick::NamedOrFirst(&["path"]), &["mount_point"], plain),
-    secret(".read_secret(", "vault", VAULT, Pick::NamedOrFirst(&["path"]), &["mount_point"], plain),
+    secret(
+        ".read_secret_version(",
+        "vault",
+        VAULT,
+        Pick::NamedOrFirst(&["path"]),
+        &["mount_point"],
+        plain,
+    ),
+    secret(
+        ".read_secret(",
+        "vault",
+        VAULT,
+        Pick::NamedOrFirst(&["path"]),
+        &["mount_point"],
+        plain,
+    ),
     // VaultSharp: `ReadSecretAsync(path: "db", mountPoint: "secret")`.
-    secret(".ReadSecretAsync(", "vault", VAULT, Pick::NamedOrFirst(&["path"]), &["mountPoint"], plain),
+    secret(
+        ".ReadSecretAsync(",
+        "vault",
+        VAULT,
+        Pick::NamedOrFirst(&["path"]),
+        &["mountPoint"],
+        plain,
+    ),
     // Go `client.KVv2("secret").Get(ctx, "db")`; Ruby `Vault.kv("secret").read("db")`.
-    secret(".KVv2(", "vault", VAULT, Pick::MountThen(".Get(", 1), &[], plain),
-    secret(".KVv1(", "vault", VAULT, Pick::MountThen(".Get(", 1), &[], plain),
-    secret(".kv(", "vault", VAULT, Pick::MountThen(".read(", 0), &[], plain),
+    secret(
+        ".KVv2(",
+        "vault",
+        VAULT,
+        Pick::MountThen(".Get(", 1),
+        &[],
+        plain,
+    ),
+    secret(
+        ".KVv1(",
+        "vault",
+        VAULT,
+        Pick::MountThen(".Get(", 1),
+        &[],
+        plain,
+    ),
+    secret(
+        ".kv(",
+        "vault",
+        VAULT,
+        Pick::MountThen(".read(", 0),
+        &[],
+        plain,
+    ),
     // AWS Secrets Manager — boto3 kwarg, aws-sdk-ruby keyword / hash rocket
     // (`secret_id: "x"`, `:secret_id => "x"`, DH.6), JS v2 / v3 object
     // literal, aws-sdk-php request array through `->` (`['SecretId' => 'x']`,
     // DH.6), Go input struct (`aws.String` wrapper), C# initializer, Java
     // v1 / v2 builders.
-    secret(".get_secret_value(", "aws_sm", AWS_SM, Pick::Named(&["SecretId", "secret_id"]), &[], aws_ref),
-    secret(".getSecretValue(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
-    secret("->getSecretValue(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
-    secret("GetSecretValueCommand(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
-    secret("GetSecretValueInput", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
-    secret("GetSecretValueRequest", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
-    secret(".secretId(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
-    secret(".withSecretId(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
+    secret(
+        ".get_secret_value(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId", "secret_id"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        ".getSecretValue(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        "->getSecretValue(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        "GetSecretValueCommand(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        "GetSecretValueInput",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        "GetSecretValueRequest",
+        "aws_sm",
+        AWS_SM,
+        Pick::Named(&["SecretId"]),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        ".secretId(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Positional(0),
+        &[],
+        aws_ref,
+    ),
+    secret(
+        ".withSecretId(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Positional(0),
+        &[],
+        aws_ref,
+    ),
     // Rust aws-sdk-secretsmanager fluent builders (DG.6):
     // `client.get_secret_value().secret_id("x").send()`.
-    secret(".secret_id(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
+    secret(
+        ".secret_id(",
+        "aws_sm",
+        AWS_SM,
+        Pick::Positional(0),
+        &[],
+        aws_ref,
+    ),
     // GCP Secret Manager: a `projects/<p>/secrets/<s>[/versions/<v>]` name.
-    secret(".access_secret_version(", "gcp_sm", GCP_SM, Pick::NamedOrFirst(&["name"]), &[], gcp_ref),
-    secret(".accessSecretVersion(", "gcp_sm", GCP_SM, Pick::NamedOrFirst(&["name"]), &[], gcp_ref),
-    secret("AccessSecretVersionRequest", "gcp_sm", GCP_SM, Pick::Named(&["Name"]), &[], gcp_ref),
+    secret(
+        ".access_secret_version(",
+        "gcp_sm",
+        GCP_SM,
+        Pick::NamedOrFirst(&["name"]),
+        &[],
+        gcp_ref,
+    ),
+    secret(
+        ".accessSecretVersion(",
+        "gcp_sm",
+        GCP_SM,
+        Pick::NamedOrFirst(&["name"]),
+        &[],
+        gcp_ref,
+    ),
+    secret(
+        "AccessSecretVersionRequest",
+        "gcp_sm",
+        GCP_SM,
+        Pick::Named(&["Name"]),
+        &[],
+        gcp_ref,
+    ),
     // Azure Key Vault `SecretClient`: the secret's name.
-    secret(".get_secret(", "azure_kv", AZURE_KV, Pick::NamedOrFirst(&["name"]), &[], plain),
-    secret(".getSecret(", "azure_kv", AZURE_KV, Pick::Positional(0), &[], plain),
-    secret(".GetSecret(", "azure_kv", AZURE_KV, Pick::NamedOrFirst(&["name"]), &[], plain),
-    secret(".GetSecretAsync(", "azure_kv", AZURE_KV, Pick::NamedOrFirst(&["name"]), &[], plain),
+    secret(
+        ".get_secret(",
+        "azure_kv",
+        AZURE_KV,
+        Pick::NamedOrFirst(&["name"]),
+        &[],
+        plain,
+    ),
+    secret(
+        ".getSecret(",
+        "azure_kv",
+        AZURE_KV,
+        Pick::Positional(0),
+        &[],
+        plain,
+    ),
+    secret(
+        ".GetSecret(",
+        "azure_kv",
+        AZURE_KV,
+        Pick::NamedOrFirst(&["name"]),
+        &[],
+        plain,
+    ),
+    secret(
+        ".GetSecretAsync(",
+        "azure_kv",
+        AZURE_KV,
+        Pick::NamedOrFirst(&["name"]),
+        &[],
+        plain,
+    ),
 ];
 
 const LAUNCHDARKLY: &[&str] = &["launchdarkly", "ldclient"];
@@ -158,8 +340,20 @@ const SPLIT: &[&str] = &["splitio", "io.split"];
 const FLIPPER: &[&str] = &["flipper"];
 const FUN_WITH_FLAGS: &[&str] = &["funwithflags"];
 
-const fn flag(needle: &'static str, provider: &'static str, gate: &'static [&'static str], pick: Pick) -> Row {
-    Row { needle, provider, gate, pick, mount: &[], norm: plain }
+const fn flag(
+    needle: &'static str,
+    provider: &'static str,
+    gate: &'static [&'static str],
+    pick: Pick,
+) -> Row {
+    Row {
+        needle,
+        provider,
+        gate,
+        pick,
+        mount: &[],
+        norm: plain,
+    }
 }
 
 const FLAG_ROWS: &[Row] = &[
@@ -167,50 +361,245 @@ const FLAG_ROWS: &[Row] = &[
     // Rust's `variation(&ctx, "k", default)` (DG.6, FirstElseSecond);
     // `Variation(` covers Bool / String / Int / Float64 / JSON / bool / json
     // / jsonValue ... and `VariationDetail(` their detail twins.
-    flag(".variation(", "launchdarkly", LAUNCHDARKLY, Pick::FirstElseSecond),
-    flag("Variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
-    flag(".variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::FirstElseSecond),
-    flag(".variationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
-    flag("VariationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    flag(
+        ".variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::FirstElseSecond,
+    ),
+    flag(
+        "Variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::FirstElseSecond,
+    ),
+    flag(
+        ".variationDetail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(0),
+    ),
+    flag(
+        "VariationDetail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(0),
+    ),
     // The PHP SDK (launchdarkly/server-sdk) calls through `->`:
     // `$client->variation('k', $ctx, false)` (DH.6).
-    flag("->variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
-    flag("->variationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    flag(
+        "->variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(0),
+    ),
+    flag(
+        "->variationDetail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(0),
+    ),
     // The LaunchDarkly Rust SDK's typed variations and their detail twins
     // (DG.6): `client.bool_variation(&ctx, "k", false)`, the key argument #1.
-    flag(".bool_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".str_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".float_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".int_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".json_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".bool_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".str_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".float_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".int_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
-    flag(".json_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(
+        ".bool_variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".str_variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".float_variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".int_variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".json_variation(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".bool_variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".str_variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".float_variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".int_variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".json_variation_detail(",
+        "launchdarkly",
+        LAUNCHDARKLY,
+        Pick::Positional(1),
+    ),
     // OpenFeature: key first everywhere but Go, where it follows the ctx.
-    flag(".getBooleanValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getStringValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getNumberValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getIntegerValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getDoubleValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getObjectValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".getBooleanDetails(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".get_boolean_value(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".get_string_value(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".get_integer_value(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".get_float_value(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".get_object_value(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".GetBooleanValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".GetBooleanValueAsync(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".GetStringValueAsync(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".GetIntegerValueAsync(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".GetDoubleValueAsync(", "openfeature", OPENFEATURE, Pick::Positional(0)),
-    flag(".BooleanValue(", "openfeature", OPENFEATURE, Pick::Positional(1)),
-    flag(".StringValue(", "openfeature", OPENFEATURE, Pick::Positional(1)),
-    flag(".IntValue(", "openfeature", OPENFEATURE, Pick::Positional(1)),
-    flag(".FloatValue(", "openfeature", OPENFEATURE, Pick::Positional(1)),
-    flag(".ObjectValue(", "openfeature", OPENFEATURE, Pick::Positional(1)),
+    flag(
+        ".getBooleanValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getStringValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getNumberValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getIntegerValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getDoubleValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getObjectValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getBooleanDetails(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".get_boolean_value(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".get_string_value(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".get_integer_value(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".get_float_value(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".get_object_value(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetBooleanValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetBooleanValueAsync(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetStringValueAsync(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetIntegerValueAsync(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetDoubleValueAsync(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".BooleanValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".StringValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".IntValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".FloatValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(1),
+    ),
+    flag(
+        ".ObjectValue(",
+        "openfeature",
+        OPENFEATURE,
+        Pick::Positional(1),
+    ),
     // Unleash: JS / Java camelCase, Python snake_case, Go / C# PascalCase,
     // Ruby predicate.
     flag(".isEnabled(", "unleash", UNLEASH, Pick::Positional(0)),
@@ -223,31 +612,81 @@ const FLAG_ROWS: &[Row] = &[
     // Flagsmith.
     flag(".hasFeature(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
     flag(".has_feature(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".is_feature_enabled(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".isFeatureEnabled(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".IsFeatureEnabled(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
+    flag(
+        ".is_feature_enabled(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".isFeatureEnabled(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".IsFeatureEnabled(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
     flag(".getValue(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".get_feature_value(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".getFeatureValue(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
-    flag(".GetFeatureValue(", "flagsmith", FLAGSMITH, Pick::Positional(0)),
+    flag(
+        ".get_feature_value(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".getFeatureValue(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
+    flag(
+        ".GetFeatureValue(",
+        "flagsmith",
+        FLAGSMITH,
+        Pick::Positional(0),
+    ),
     // Split.
     flag(".getTreatment(", "split", SPLIT, Pick::SecondElseFirst),
     flag(".get_treatment(", "split", SPLIT, Pick::SecondElseFirst),
-    flag(".getTreatmentWithConfig(", "split", SPLIT, Pick::SecondElseFirst),
-    flag(".get_treatment_with_config(", "split", SPLIT, Pick::SecondElseFirst),
+    flag(
+        ".getTreatmentWithConfig(",
+        "split",
+        SPLIT,
+        Pick::SecondElseFirst,
+    ),
+    flag(
+        ".get_treatment_with_config(",
+        "split",
+        SPLIT,
+        Pick::SecondElseFirst,
+    ),
     flag(".Treatment(", "split", SPLIT, Pick::SecondElseFirst),
     // Flipper (Ruby) and FunWithFlags (Elixir) key a flag by a symbol / atom
     // or a string, first (DH.6). The FunWithFlags needle names its module,
     // so its gate is that module name.
     flag(".enabled?(", "flipper", FLIPPER, Pick::Atom(0)),
-    flag("FunWithFlags.enabled?(", "fun_with_flags", FUN_WITH_FLAGS, Pick::Atom(0)),
+    flag(
+        "FunWithFlags.enabled?(",
+        "fun_with_flags",
+        FUN_WITH_FLAGS,
+        Pick::Atom(0),
+    ),
 ];
 
 /// Secrets-manager references read in a code file:
 /// `config:secret:<provider>/<ref>`, `READS_CONFIG` from `module_id`. No
 /// [`ConfigNodes::sites`]: a secret reference stays on the module. `path`
 /// picks the CJ.1c guard (`""` = no guard).
-pub fn extract_secret_refs(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
+pub fn extract_secret_refs(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ConfigNodes {
     let mut guard = LazyGuard::new(path, source);
     let defs = scan(source, SECRET_ROWS, &mut guard)
         .into_iter()
@@ -265,7 +704,12 @@ pub fn extract_secret_refs(source: &str, path: &str, module_id: NodeId, repo: Re
 /// engine can re-home the module edge to the function holding the check (the
 /// LE.4b shape of `config::extract_config_reads`). `path` picks the CJ.1c
 /// guard (`""` = no guard).
-pub fn extract_feature_flags(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
+pub fn extract_feature_flags(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ConfigNodes {
     let mut sites = Vec::new();
     let mut defs = Vec::new();
     let mut guard = LazyGuard::new(path, source);
@@ -337,7 +781,11 @@ pub fn marker(outs: &[&ConfigNodes], src: &str) -> Option<String> {
 /// boundary. A row whose provider tokens are absent from the file never runs.
 /// CJ.1c: an occurrence the guard refuses (a Rust / Python literal or comment)
 /// is skipped.
-fn scan(source: &str, rows: &[Row], guard: &mut LazyGuard<'_>) -> Vec<(String, &'static str, usize)> {
+fn scan(
+    source: &str,
+    rows: &[Row],
+    guard: &mut LazyGuard<'_>,
+) -> Vec<(String, &'static str, usize)> {
     let mut lower: Option<String> = None;
     let mut out = Vec::new();
     for row in rows {
@@ -379,8 +827,11 @@ fn capture(call: &str, row: &Row) -> Option<String> {
     let raw = match row.pick {
         Pick::Positional(n) => args.get(n).and_then(|a| string_literal(a))?.to_string(),
         Pick::Named(names) => named_literal(&call[1..close - 1], names)?,
-        Pick::NamedOrFirst(names) => named_literal(&call[1..close - 1], names)
-            .or_else(|| args.first().and_then(|a| string_literal(a)).map(str::to_string))?,
+        Pick::NamedOrFirst(names) => named_literal(&call[1..close - 1], names).or_else(|| {
+            args.first()
+                .and_then(|a| string_literal(a))
+                .map(str::to_string)
+        })?,
         Pick::SecondElseFirst => args
             .get(1)
             .and_then(|a| string_literal(a))
@@ -417,7 +868,11 @@ fn named_literal_opt(names: &[&str], window: &str) -> Option<String> {
 }
 
 fn join_mount(mount: &str, path: &str) -> String {
-    format!("{}/{}", mount.trim_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        mount.trim_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 /// Byte offset of the opening `(` / `{` after a needle that stops at a type
@@ -573,12 +1028,7 @@ fn named_literal(window: &str, names: &[&str]) -> Option<String> {
             // An optional wrapper call: `aws.String(` / `&` before the literal.
             let value = value.trim_start_matches('&');
             let value = match value.find('(') {
-                Some(p)
-                    if p > 0
-                        && value[..p]
-                            .bytes()
-                            .all(|c| ident(c) || c == b'.') =>
-                {
+                Some(p) if p > 0 && value[..p].bytes().all(|c| ident(c) || c == b'.') => {
                     &value[p + 1..]
                 }
                 _ => value,
@@ -674,12 +1124,20 @@ mod tests {
     }
 
     fn cell_of(out: &ConfigNodes, qname: &str) -> Option<String> {
-        let id = out.nav.qname_by_id.iter().find(|(_, q)| *q == qname).map(|(id, _)| *id)?;
+        let id = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| *q == qname)
+            .map(|(id, _)| *id)?;
         let node = out.nodes.iter().find(|n| n.id == id)?;
-        node.cells.iter().find(|c| c.kind == cell_type::ENV).map(|c| match &c.payload {
-            CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
-            CellPayload::Bytes(_) => String::new(),
-        })
+        node.cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENV)
+            .map(|c| match &c.payload {
+                CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
     }
 
     #[test]
@@ -688,7 +1146,11 @@ mod tests {
             "import hvac\nc = hvac.Client()\ntoken = c.read(\"secret/data/api\")[\"data\"]\n",
         );
         assert_eq!(qnames(&out), vec!["config:secret:vault/secret/data/api"]);
-        assert!(out.edges.iter().all(|e| e.category == edge_category::READS_CONFIG));
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG)
+        );
         assert_eq!(
             cell_of(&out, "config:secret:vault/secret/data/api").as_deref(),
             Some(r#"{"source":"vault","redacted":true}"#)
@@ -717,7 +1179,10 @@ mod tests {
         ));
         assert_eq!(
             qnames(&out),
-            vec!["config:secret:vault/secret/data/cache", "config:secret:vault/secret/db"]
+            vec![
+                "config:secret:vault/secret/data/cache",
+                "config:secret:vault/secret/db"
+            ]
         );
     }
 
@@ -744,19 +1209,28 @@ mod tests {
             "  SecretId: 'prod/stripe',\n",
             "}));\n",
         );
-        assert_eq!(qnames(&secrets(js)), vec!["config:secret:aws_sm/prod/stripe"]);
+        assert_eq!(
+            qnames(&secrets(js)),
+            vec!["config:secret:aws_sm/prod/stripe"]
+        );
         // Go: struct field through the `aws.String` wrapper.
         let go = concat!(
             "import \"github.com/aws/aws-sdk-go/service/secretsmanager\"\n",
             "out, err := svc.GetSecretValue(&secretsmanager.GetSecretValueInput{SecretId: aws.String(\"prod/api-key\")})\n",
         );
-        assert_eq!(qnames(&secrets(go)), vec!["config:secret:aws_sm/prod/api-key"]);
+        assert_eq!(
+            qnames(&secrets(go)),
+            vec!["config:secret:aws_sm/prod/api-key"]
+        );
         // C#: object initializer after `()`; a full ARN keeps only the name.
         let cs = concat!(
             "using Amazon.SecretsManager;\n",
             "var req = new GetSecretValueRequest() { SecretId = \"arn:aws:secretsmanager:eu-west-1:123:secret:prod/queue\" };\n",
         );
-        assert_eq!(qnames(&secrets(cs)), vec!["config:secret:aws_sm/prod/queue"]);
+        assert_eq!(
+            qnames(&secrets(cs)),
+            vec!["config:secret:aws_sm/prod/queue"]
+        );
     }
 
     #[test]
@@ -765,12 +1239,18 @@ mod tests {
             "from google.cloud import secretmanager\n",
             "r = client.access_secret_version(name=\"projects/p/secrets/db/versions/latest\")\n",
         );
-        assert_eq!(qnames(&secrets(py)), vec!["config:secret:gcp_sm/projects/p/secrets/db"]);
+        assert_eq!(
+            qnames(&secrets(py)),
+            vec!["config:secret:gcp_sm/projects/p/secrets/db"]
+        );
         let cs = concat!(
             "using Azure.Security.KeyVault.Secrets;\n",
             "KeyVaultSecret s = await client.GetSecretAsync(\"db-password\");\n",
         );
-        assert_eq!(qnames(&secrets(cs)), vec!["config:secret:azure_kv/db-password"]);
+        assert_eq!(
+            qnames(&secrets(cs)),
+            vec!["config:secret:azure_kv/db-password"]
+        );
     }
 
     /// DG.6: aws-sdk-secretsmanager's fluent builders name the secret through
@@ -797,7 +1277,10 @@ mod tests {
         let out = extract_secret_refs(rs, "src/secrets.rs", m, repo);
         assert_eq!(
             qnames(&out),
-            ["config:secret:aws_sm/prod/api-key", "config:secret:aws_sm/prod/db-password"]
+            [
+                "config:secret:aws_sm/prod/api-key",
+                "config:secret:aws_sm/prod/db-password"
+            ]
         );
         assert!(
             out.edges
@@ -815,7 +1298,11 @@ mod tests {
             Some("[secrets] refs=2 providers=1 flags=0 flag_defs=0 src=rust")
         );
         // No Secrets Manager token: some other builder's `.secret_id(`.
-        assert!(secrets("let s = approle.secret_id(\"prod/x\");\n").nodes.is_empty());
+        assert!(
+            secrets("let s = approle.secret_id(\"prod/x\");\n")
+                .nodes
+                .is_empty()
+        );
     }
 
     /// DG.6: the LaunchDarkly Rust SDK's typed variations take
@@ -874,9 +1361,17 @@ mod tests {
             "use launchdarkly_server_sdk::Client;\n",
             "let on = client.bool_variation(\"new-checkout\", &ctx, false);\n",
         );
-        assert!(flags(swapped).nodes.is_empty(), "{:?}", qnames(&flags(swapped)));
+        assert!(
+            flags(swapped).nodes.is_empty(),
+            "{:?}",
+            qnames(&flags(swapped))
+        );
         // No LaunchDarkly token: some other `bool_variation`.
-        assert!(flags("let on = cfg.bool_variation(&ctx, \"new-checkout\", false);\n").nodes.is_empty());
+        assert!(
+            flags("let on = cfg.bool_variation(&ctx, \"new-checkout\", false);\n")
+                .nodes
+                .is_empty()
+        );
     }
 
     /// DG.6: `variation` / `variation_detail` take the key first in every
@@ -902,7 +1397,11 @@ mod tests {
         );
         assert_eq!(
             qnames(&flags(py)),
-            ["config:flag:py-detail", "config:flag:py-first", "config:flag:py-flag"]
+            [
+                "config:flag:py-detail",
+                "config:flag:py-first",
+                "config:flag:py-flag"
+            ]
         );
         let js = concat!(
             "import { init } from 'launchdarkly-node-server-sdk';\n",
@@ -933,9 +1432,17 @@ mod tests {
     #[test]
     fn secret_needle_needs_its_provider_token() {
         // No hvac / vault token: `.read("a/b")` is some file reader.
-        assert!(secrets("data = archive.read(\"docs/readme.md\")\n").nodes.is_empty());
+        assert!(
+            secrets("data = archive.read(\"docs/readme.md\")\n")
+                .nodes
+                .is_empty()
+        );
         // No Secrets Manager token: a same-named method on something else.
-        assert!(secrets("x = cache.get_secret_value(SecretId=\"prod/x\")\n").nodes.is_empty());
+        assert!(
+            secrets("x = cache.get_secret_value(SecretId=\"prod/x\")\n")
+                .nodes
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1049,7 +1556,11 @@ mod tests {
             Some(r#"{"source":"flipper","redacted":true}"#)
         );
         assert_eq!(out.sites.len(), 4, "{:?}", out.sites);
-        assert!(out.sites.iter().all(|(_, o)| rb[*o..].starts_with(".enabled?(")));
+        assert!(
+            out.sites
+                .iter()
+                .all(|(_, o)| rb[*o..].starts_with(".enabled?("))
+        );
         // The probe's per-file line: one flag read, nothing declared.
         let one = "require \"flipper\"\nFlipper.enabled?(:\"new-checkout\", user)\n";
         let secrets_out = extract_secret_refs(one, "client/checkout.rb", m, repo);
@@ -1087,13 +1598,20 @@ mod tests {
             "end\n",
         );
         let out = extract_feature_flags(ex, "client/lib/checkout.ex", m, repo);
-        assert_eq!(qnames(&out), ["config:flag:fast_search", "config:flag:new-checkout"]);
+        assert_eq!(
+            qnames(&out),
+            ["config:flag:fast_search", "config:flag:new-checkout"]
+        );
         assert_eq!(
             cell_of(&out, "config:flag:new-checkout").as_deref(),
             Some(r#"{"source":"fun_with_flags","redacted":true}"#)
         );
         assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
-        assert!(out.sites.iter().all(|(_, o)| ex[*o..].starts_with("FunWithFlags.enabled?(")));
+        assert!(
+            out.sites
+                .iter()
+                .all(|(_, o)| ex[*o..].starts_with("FunWithFlags.enabled?("))
+        );
         // An atom must be the whole argument: a call, a concatenation or a
         // variable reads nothing.
         let whole = concat!(
@@ -1126,17 +1644,29 @@ mod tests {
             "}\n",
         );
         let out = flags(php);
-        assert_eq!(qnames(&out), ["config:flag:beta-search", "config:flag:new-checkout"]);
+        assert_eq!(
+            qnames(&out),
+            ["config:flag:beta-search", "config:flag:new-checkout"]
+        );
         assert_eq!(
             cell_of(&out, "config:flag:new-checkout").as_deref(),
             Some(r#"{"source":"launchdarkly","redacted":true}"#)
         );
         assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
-        assert!(out.sites.iter().all(|(_, o)| php[*o..].starts_with("->variation")));
+        assert!(
+            out.sites
+                .iter()
+                .all(|(_, o)| php[*o..].starts_with("->variation"))
+        );
         // No LaunchDarkly token: some other `->variation(`.
-        assert!(flags("<?php\n$v = $product->variation('blue-large');\n").nodes.is_empty());
+        assert!(
+            flags("<?php\n$v = $product->variation('blue-large');\n")
+                .nodes
+                .is_empty()
+        );
         // A non-literal key reads nothing.
-        let var = "<?php\nuse LaunchDarkly\\LDClient;\n$on = $client->variation($key, $ctx, false);\n";
+        let var =
+            "<?php\nuse LaunchDarkly\\LDClient;\n$on = $client->variation($key, $ctx, false);\n";
         assert!(flags(var).nodes.is_empty(), "{:?}", qnames(&flags(var)));
     }
 
@@ -1161,7 +1691,10 @@ mod tests {
         let out = extract_secret_refs(rb, "secrets.rb", m, repo);
         assert_eq!(
             qnames(&out),
-            ["config:secret:aws_sm/prod/api-key", "config:secret:aws_sm/prod/db-password"]
+            [
+                "config:secret:aws_sm/prod/api-key",
+                "config:secret:aws_sm/prod/db-password"
+            ]
         );
         assert!(
             out.edges
@@ -1186,7 +1719,11 @@ mod tests {
             "client.get_secret_value(secret_id: \"#{env}/db\")\n",
             "client.get_secret_value(secret_id: name)\n",
         );
-        assert!(secrets(dynamic).nodes.is_empty(), "{:?}", qnames(&secrets(dynamic)));
+        assert!(
+            secrets(dynamic).nodes.is_empty(),
+            "{:?}",
+            qnames(&secrets(dynamic))
+        );
     }
 
     /// DH.6: aws-sdk-php takes a request array, `['SecretId' => 'x']`, through
@@ -1205,14 +1742,25 @@ mod tests {
         let out = secrets(php);
         assert_eq!(
             qnames(&out),
-            ["config:secret:aws_sm/prod/db-password", "config:secret:aws_sm/prod/stripe"]
+            [
+                "config:secret:aws_sm/prod/db-password",
+                "config:secret:aws_sm/prod/stripe"
+            ]
         );
-        assert!(out.edges.iter().all(|e| e.category == edge_category::READS_CONFIG));
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG)
+        );
         // A concatenated id is not a whole literal.
         let cat = "<?php\nuse Aws\\SecretsManager\\SecretsManagerClient;\n$r = $client->getSecretValue(['SecretId' => 'prod/' . $name]);\n";
         assert!(secrets(cat).nodes.is_empty(), "{:?}", qnames(&secrets(cat)));
         // No Secrets Manager token: some other `->getSecretValue(`.
-        assert!(secrets("<?php\n$v = $vault->getSecretValue(['SecretId' => 'prod/x']);\n").nodes.is_empty());
+        assert!(
+            secrets("<?php\n$v = $vault->getSecretValue(['SecretId' => 'prod/x']);\n")
+                .nodes
+                .is_empty()
+        );
     }
 
     /// DH.6: a `=>` separator (PHP array key, Ruby hash rocket) is stepped
@@ -1220,18 +1768,39 @@ mod tests {
     /// whole literal.
     #[test]
     fn named_literal_steps_over_hash_rocket() {
-        assert_eq!(named_literal("['SecretId' => 'x/y']", &["SecretId"]).as_deref(), Some("x/y"));
-        assert_eq!(named_literal(":secret_id => \"x/y\"", &["secret_id"]).as_deref(), Some("x/y"));
-        assert_eq!(named_literal("\"secret_id\"=>\"x/y\", a: 1", &["secret_id"]).as_deref(), Some("x/y"));
+        assert_eq!(
+            named_literal("['SecretId' => 'x/y']", &["SecretId"]).as_deref(),
+            Some("x/y")
+        );
+        assert_eq!(
+            named_literal(":secret_id => \"x/y\"", &["secret_id"]).as_deref(),
+            Some("x/y")
+        );
+        assert_eq!(
+            named_literal("\"secret_id\"=>\"x/y\", a: 1", &["secret_id"]).as_deref(),
+            Some("x/y")
+        );
         // The pre-DH.6 separators still read.
-        assert_eq!(named_literal("SecretId=\"x/y\"", &["SecretId"]).as_deref(), Some("x/y"));
-        assert_eq!(named_literal("{ SecretId: 'x/y' }", &["SecretId"]).as_deref(), Some("x/y"));
-        assert_eq!(named_literal("SecretId = \"x/y\"", &["SecretId"]).as_deref(), Some("x/y"));
+        assert_eq!(
+            named_literal("SecretId=\"x/y\"", &["SecretId"]).as_deref(),
+            Some("x/y")
+        );
+        assert_eq!(
+            named_literal("{ SecretId: 'x/y' }", &["SecretId"]).as_deref(),
+            Some("x/y")
+        );
+        assert_eq!(
+            named_literal("SecretId = \"x/y\"", &["SecretId"]).as_deref(),
+            Some("x/y")
+        );
         // Refused: comparison, path, a non-literal or partial value after `=>`.
         assert_eq!(named_literal("SecretId == 'x/y'", &["SecretId"]), None);
         assert_eq!(named_literal("SecretId::Value", &["SecretId"]), None);
         assert_eq!(named_literal("'SecretId' => $id", &["SecretId"]), None);
-        assert_eq!(named_literal("'SecretId' => 'x/' . $y", &["SecretId"]), None);
+        assert_eq!(
+            named_literal("'SecretId' => 'x/' . $y", &["SecretId"]),
+            None
+        );
         assert_eq!(named_literal("'MySecretId' => 'x/y'", &["SecretId"]), None);
     }
 
@@ -1273,7 +1842,11 @@ mod tests {
         let ids: Vec<NodeId> = out.nodes.iter().map(|n| n.id).collect();
         assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
         assert!(out.sites.iter().all(|(t, _)| ids.contains(t)));
-        assert!(out.sites.iter().all(|(_, o)| twice[*o..].starts_with(".variation(")));
+        assert!(
+            out.sites
+                .iter()
+                .all(|(_, o)| twice[*o..].starts_with(".variation("))
+        );
     }
 
     #[test]

@@ -253,8 +253,18 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("SELh0", "H10", vec!["H10", "H10[PT*]", "H10[B0]"], vec!["k1", "k2", "k3", "half"]),
-                ("SELs0", "P1", vec!["P1", "PT*", "B0"], vec!["k1", "k2", "k3", "half"]),
+                (
+                    "SELh0",
+                    "H10",
+                    vec!["H10", "H10[PT*]", "H10[B0]"],
+                    vec!["k1", "k2", "k3", "half"]
+                ),
+                (
+                    "SELs0",
+                    "P1",
+                    vec!["P1", "PT*", "B0"],
+                    vec!["k1", "k2", "k3", "half"]
+                ),
             ]
         );
         assert!(s.iter().all(|x| x.fallback_candidate.is_none()));
@@ -295,9 +305,15 @@ mod tests {
         assert_eq!(s.len(), 1);
         let x = &s[0];
         assert_eq!((x.set, x.fallback), ("SELf2t", "LX[IDR,T1s]"));
-        assert_eq!(x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(), FIND_CANDIDATES);
+        assert_eq!(
+            x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            FIND_CANDIDATES
+        );
         assert_eq!(x.shapes, [Shape::Find]);
-        assert_eq!(x.fallback_candidate.as_ref().map(|c| c.name()), Some("LX[IDR,T1s]"));
+        assert_eq!(
+            x.fallback_candidate.as_ref().map(|c| c.name()),
+            Some("LX[IDR,T1s]")
+        );
         assert!(!FIND_CANDIDATES.contains(&FIND_FALLBACK));
         for n in FIND_CANDIDATES.iter().chain([&FIND_FALLBACK]) {
             assert!(crate::calibrate::fusions::find_needs(n).is_some(), "{n}");
@@ -334,9 +350,15 @@ mod tests {
         assert_eq!(s.len(), 1);
         let x = &s[0];
         assert_eq!((x.set, x.fallback), ("SELt2", "LX[IDR,P1]"));
-        assert_eq!(x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(), REVIEW_CANDIDATES);
+        assert_eq!(
+            x.candidates.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            REVIEW_CANDIDATES
+        );
         assert_eq!(x.shapes, SEEDED_SHAPES);
-        assert_eq!(x.fallback_candidate.as_ref().map(|c| c.name()), Some("LX[IDR,P1]"));
+        assert_eq!(
+            x.fallback_candidate.as_ref().map(|c| c.name()),
+            Some("LX[IDR,P1]")
+        );
         assert!(!REVIEW_CANDIDATES.contains(&REVIEW_FALLBACK));
         for n in REVIEW_CANDIDATES {
             assert!(crate::calibrate::fusions::needs(n).is_some(), "{n}");
@@ -348,7 +370,10 @@ mod tests {
     fn unknown_group_names_the_known() {
         assert_eq!(
             specs(&["structure", "nope"]).err(),
-            Some("unknown candidate group `nope`: expected one of structure, review, find".to_string())
+            Some(
+                "unknown candidate group `nope`: expected one of structure, review, find"
+                    .to_string()
+            )
         );
         assert!(specs(&[]).expect("empty").is_empty());
     }

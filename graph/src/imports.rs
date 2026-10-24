@@ -84,9 +84,13 @@ pub(crate) fn same_stem_table(g: &RepoGraph) -> SameStem {
         else {
             continue;
         };
-        let Some(bare) = bare_module_qname(qname, name) else { continue };
+        let Some(bare) = bare_module_qname(qname, name) else {
+            continue;
+        };
         let last = qname.rsplit("::").next().unwrap_or(qname);
-        let Some((_, ext)) = last.rsplit_once('.') else { continue };
+        let Some((_, ext)) = last.rsplit_once('.') else {
+            continue;
+        };
         let siblings = by_bare.entry(bare).or_default();
         // A MODULE recorded twice (two node records of one id) is one sibling.
         if !siblings.iter().any(|(_, id)| *id == n.id) {
@@ -94,13 +98,18 @@ pub(crate) fn same_stem_table(g: &RepoGraph) -> SameStem {
         }
     }
     by_bare.retain(|_, siblings| siblings.len() > 1);
-    SameStem { by_bare, ..SameStem::default() }
+    SameStem {
+        by_bare,
+        ..SameStem::default()
+    }
 }
 
 /// The extension of a file path's last component (`src/app.ts` -> `ts`).
 fn file_ext(path: &str) -> Option<&str> {
     let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    file.rsplit_once('.').map(|(_, ext)| ext).filter(|e| !e.is_empty())
+    file.rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|e| !e.is_empty())
 }
 
 /// The extension an import specifier names itself (`./util.js` -> `js`,
@@ -183,7 +192,11 @@ impl SameStem {
     ///   `[imports] same-stem picks: explicit={e} importer={i} unresolved={u} (stems={s} exts={x,y})`
     /// `exts` (the siblings' extensions, sorted) tells the language graph.
     pub(crate) fn marker(&self) -> Option<String> {
-        let SameStemStats { explicit, importer, unresolved } = self.stats;
+        let SameStemStats {
+            explicit,
+            importer,
+            unresolved,
+        } = self.stats;
         (explicit + importer + unresolved > 0).then(|| {
             let exts: BTreeSet<&str> = self
                 .by_bare
@@ -210,7 +223,10 @@ impl SameStem {
     /// lazily-read table [`Self::pick`] uses, so a graph reads every MODULE's
     /// POSITION at most once whichever step asks first.
     fn importer_ext(&mut self, g: &RepoGraph, importer: NodeId) -> Option<String> {
-        self.module_ext.get_or_insert_with(|| module_exts(g)).get(&importer).cloned()
+        self.module_ext
+            .get_or_insert_with(|| module_exts(g))
+            .get(&importer)
+            .cloned()
     }
 }
 
@@ -303,13 +319,21 @@ impl NamespaceIndex {
                 .map(|e| (e.to, e.from)),
         );
         for (package, scope) in scopes {
-            let Some(qname) = g.nav.qname_by_id.get(&package) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&package) else {
+                continue;
+            };
             let root = qname.split("::").next().unwrap_or(qname);
             idx.roots.insert(root.to_string());
             let members = idx.members.entry(qname.clone()).or_default();
-            let Some(symbols) = g.symbols.module_symbols.get(&scope) else { continue };
+            let Some(symbols) = g.symbols.module_symbols.get(&scope) else {
+                continue;
+            };
             for (name, id) in symbols {
-                let member_kind = g.nav.kind_by_id.get(id).is_some_and(|k| MEMBER_KINDS.contains(k));
+                let member_kind = g
+                    .nav
+                    .kind_by_id
+                    .get(id)
+                    .is_some_and(|k| MEMBER_KINDS.contains(k));
                 if !member_kind {
                     continue;
                 }
@@ -324,7 +348,11 @@ impl NamespaceIndex {
 
     /// The member `name` of namespace `ns` (a `::` qname).
     pub(crate) fn member(&self, ns: &str, name: &str) -> NsHit {
-        let nested = if ns.is_empty() { name.to_string() } else { format!("{ns}::{name}") };
+        let nested = if ns.is_empty() {
+            name.to_string()
+        } else {
+            format!("{ns}::{name}")
+        };
         let Some(members) = self.members.get(ns) else {
             return if self.members.contains_key(&nested) {
                 NsHit::Namespace
@@ -420,7 +448,9 @@ impl Namespaces {
             }
         };
         if step != NsStep::Fallthrough {
-            let ext = same.importer_ext(g, importer).unwrap_or_else(|| "?".to_string());
+            let ext = same
+                .importer_ext(g, importer)
+                .unwrap_or_else(|| "?".to_string());
             self.stats.exts.insert(ext);
         }
         step
@@ -431,12 +461,21 @@ impl Namespaces {
     ///   `[imports] namespace symbols: bound={b} ambiguous={a} missing={m} refused_owned_root={r} (exts={x,y})`
     /// `exts` (the importers' file extensions, sorted) tells PHP from C#.
     fn marker(&self) -> Option<String> {
-        let NamespaceStats { bound, ambiguous, missing, refused_owned_root, exts } = &self.stats;
+        let NamespaceStats {
+            bound,
+            ambiguous,
+            missing,
+            refused_owned_root,
+            exts,
+        } = &self.stats;
         (bound + ambiguous + missing + refused_owned_root > 0).then(|| {
             format!(
                 "[imports] namespace symbols: bound={bound} ambiguous={ambiguous} \
                  missing={missing} refused_owned_root={refused_owned_root} (exts={})",
-                exts.iter().map(String::as_str).collect::<Vec<_>>().join(",")
+                exts.iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
             )
         })
     }
@@ -485,12 +524,7 @@ pub(crate) fn resolve_imports_python(
 ) {
     let mut ns = Namespaces::default();
     for stmt in imports {
-        let Some(from_mod_id) = g
-            .symbols
-            .module_by_qname
-            .get(&stmt.from_module)
-            .copied()
-        else {
+        let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
         };
 
@@ -507,9 +541,9 @@ pub(crate) fn resolve_imports_python(
                 };
                 if let Some((target_id, rule)) = found {
                     import_edge(g, from_mod_id, target_id, rule, stmt.line);
-                    let bound_name = alias.clone().unwrap_or_else(|| {
-                        path.split('.').next().unwrap_or(path).to_string()
-                    });
+                    let bound_name = alias
+                        .clone()
+                        .unwrap_or_else(|| path.split('.').next().unwrap_or(path).to_string());
                     g.symbols
                         .module_import_bindings
                         .entry(from_mod_id)
@@ -526,10 +560,7 @@ pub(crate) fn resolve_imports_python(
                     // picks from keeps the class guess (`import shop.Foo` beside
                     // Foo.java + Foo.kt binds CLASS Foo) but never the module
                     // one: a lone `core` elsewhere is not the pair's `core`.
-                    let tail = path
-                        .rsplit(['.', ':', '/'])
-                        .next()
-                        .unwrap_or(path);
+                    let tail = path.rsplit(['.', ':', '/']).next().unwrap_or(path);
                     let refused = same_pick == SamePick::Refused;
                     let guess = unique_global_function(g, tail)
                         .or_else(|| (!refused).then(|| unique_global_module(g, tail)).flatten());
@@ -545,8 +576,14 @@ pub(crate) fn resolve_imports_python(
                     }
                 }
             }
-            ImportTarget::Symbol { module, name, alias, level } => {
-                let target_module_qname = resolve_module_reference(&stmt.from_module, module, *level);
+            ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                level,
+            } => {
+                let target_module_qname =
+                    resolve_module_reference(&stmt.from_module, module, *level);
 
                 // Try `module::name` as a submodule first — matches Python's
                 // `from pkg import mod` → edge to pkg.mod if submodule exists.
@@ -568,23 +605,21 @@ pub(crate) fn resolve_imports_python(
                         .entry(from_mod_id)
                         .or_default()
                         .insert(bound, submodule_id);
-                } else if let Some((target_mod_id, rule)) = match g
-                    .symbols
-                    .module_by_qname
-                    .get(&target_module_qname)
+                } else if let Some((target_mod_id, rule)) =
+                    match g.symbols.module_by_qname.get(&target_module_qname) {
+                        Some(id) => Some((*id, "symbol")),
+                        // LB.13: the module is an ambiguous same-stem pair; the
+                        // name binds inside the sibling picked.
+                        None => match same.pick_path(g, &target_module_qname, from_mod_id) {
+                            SamePick::Bound(id) => Some((id, "same_stem")),
+                            SamePick::Refused => {
+                                sym_refused = true;
+                                None
+                            }
+                            SamePick::NotAStem => None,
+                        },
+                    }
                 {
-                    Some(id) => Some((*id, "symbol")),
-                    // LB.13: the module is an ambiguous same-stem pair; the
-                    // name binds inside the sibling picked.
-                    None => match same.pick_path(g, &target_module_qname, from_mod_id) {
-                        SamePick::Bound(id) => Some((id, "same_stem")),
-                        SamePick::Refused => {
-                            sym_refused = true;
-                            None
-                        }
-                        SamePick::NotAStem => None,
-                    },
-                } {
                     // `from pkg.mod import Name` — target is a symbol inside pkg.mod.
                     import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
                     if let Some(symbol_id) = g
@@ -672,12 +707,7 @@ pub(crate) fn resolve_imports_go(
 ) -> GoImportStats {
     let mut stats = GoImportStats::default();
     for stmt in imports {
-        let Some(from_mod_id) = g
-            .symbols
-            .module_by_qname
-            .get(&stmt.from_module)
-            .copied()
-        else {
+        let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
         };
         let ImportTarget::Module { path, alias } = &stmt.target else {
@@ -687,7 +717,11 @@ pub(crate) fn resolve_imports_go(
         if root {
             stats.root_imports += 1;
         }
-        let exact = if root { None } else { g.symbols.module_by_qname.get(path).copied() };
+        let exact = if root {
+            None
+        } else {
+            g.symbols.module_by_qname.get(path).copied()
+        };
         let target = match exact {
             Some(exact) => Some((exact, "module")),
             None => match packages.import_target(path, from_mod_id) {
@@ -755,12 +789,7 @@ pub(crate) struct GoImportStats {
 /// slashes to `::` then look up directly (same shape as Go's resolver).
 pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
     for stmt in imports {
-        let Some(from_mod_id) = g
-            .symbols
-            .module_by_qname
-            .get(&stmt.from_module)
-            .copied()
-        else {
+        let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
         };
         let ImportTarget::Module { path, alias } = &stmt.target else {
@@ -771,9 +800,13 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
             continue;
         };
         import_edge(g, from_mod_id, target_id, "module", stmt.line);
-        let bound = alias
-            .clone()
-            .unwrap_or_else(|| target_qname.rsplit("::").next().unwrap_or(&target_qname).to_string());
+        let bound = alias.clone().unwrap_or_else(|| {
+            target_qname
+                .rsplit("::")
+                .next()
+                .unwrap_or(&target_qname)
+                .to_string()
+        });
         g.symbols
             .module_import_bindings
             .entry(from_mod_id)
@@ -829,12 +862,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     let mut barrels = reexports::Barrels::read(g, imports, resolve_source, same);
     barrels.materialize(g);
     for stmt in imports {
-        let Some(from_mod_id) = g
-            .symbols
-            .module_by_qname
-            .get(&stmt.from_module)
-            .copied()
-        else {
+        let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
         };
         match &stmt.target {
@@ -842,9 +870,14 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 let Some(target_qname) = resolve_source(&stmt.from_module, path) else {
                     continue;
                 };
-                let Some((target_id, rule)) =
-                    ts_target(g, same, &target_qname, spec_ext(path), from_mod_id, "module")
-                else {
+                let Some((target_id, rule)) = ts_target(
+                    g,
+                    same,
+                    &target_qname,
+                    spec_ext(path),
+                    from_mod_id,
+                    "module",
+                ) else {
                     continue;
                 };
                 dir_index.record(rule, path);
@@ -871,9 +904,14 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 let Some(target_qname) = resolve_source(&stmt.from_module, module) else {
                     continue;
                 };
-                let Some((target_mod_id, rule)) =
-                    ts_target(g, same, &target_qname, spec_ext(module), from_mod_id, "symbol")
-                else {
+                let Some((target_mod_id, rule)) = ts_target(
+                    g,
+                    same,
+                    &target_qname,
+                    spec_ext(module),
+                    from_mod_id,
+                    "symbol",
+                ) else {
                     continue;
                 };
                 dir_index.record(rule, module);
@@ -935,8 +973,9 @@ impl DartLibraryNames {
     ///   `[imports] dart plain-import names bound={b} ambiguous={a}`
     pub(crate) fn marker(&self) -> Option<String> {
         let DartLibraryNames { bound, ambiguous } = *self;
-        (bound + ambiguous > 0)
-            .then(|| format!("[imports] dart plain-import names bound={bound} ambiguous={ambiguous}"))
+        (bound + ambiguous > 0).then(|| {
+            format!("[imports] dart plain-import names bound={bound} ambiguous={ambiguous}")
+        })
     }
 }
 
@@ -945,7 +984,9 @@ impl DartLibraryNames {
 /// path) is no name the code can write.
 fn dart_public_name(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '$')
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '$')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
@@ -1001,7 +1042,9 @@ pub(crate) fn bind_dart_library_names(
         }
         let mut seen: BTreeMap<&str, Vec<NodeId>> = BTreeMap::new();
         for library in &libraries {
-            let Some(symbols) = g.symbols.module_symbols.get(library) else { continue };
+            let Some(symbols) = g.symbols.module_symbols.get(library) else {
+                continue;
+            };
             for (name, &id) in symbols {
                 if !dart_public_name(name) {
                     continue;
@@ -1030,7 +1073,11 @@ pub(crate) fn bind_dart_library_names(
             continue;
         }
         stats.bound += add.len();
-        g.symbols.module_import_bindings.entry(importer).or_default().extend(add);
+        g.symbols
+            .module_import_bindings
+            .entry(importer)
+            .or_default()
+            .extend(add);
     }
     stats
 }
@@ -1109,8 +1156,9 @@ const DIR_INDEX_IMPORTERS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "
 /// DT.1b: the extensions with which a TS-family specifier names a file
 /// (`./util.js`, `./data.json`, `./App.vue`). A specifier ending in one never
 /// loads a directory's index.
-const FILE_SPEC_EXTS: &[&str] =
-    &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "json", "dart", "sol"];
+const FILE_SPEC_EXTS: &[&str] = &[
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "json", "dart", "sol",
+];
 
 /// DT.1b: whether a specifier whose own extension is `explicit_ext`
 /// ([`spec_ext`]) can name a directory: it has none (`../models`), or its
@@ -1138,7 +1186,11 @@ impl DirIndexBinds {
         if rule != DIR_INDEX {
             return;
         }
-        if spec.trim().trim_matches(|c| c == '"' || c == '\'').starts_with('.') {
+        if spec
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .starts_with('.')
+        {
             self.relative += 1;
         } else {
             self.alias += 1;
@@ -1150,7 +1202,8 @@ impl DirIndexBinds {
     pub(crate) fn marker(&self) -> Option<String> {
         let DirIndexBinds { relative, alias } = *self;
         let n = relative + alias;
-        (n > 0).then(|| format!("[imports] dir-index binds={n} (relative={relative} alias={alias})"))
+        (n > 0)
+            .then(|| format!("[imports] dir-index binds={n} (relative={relative} alias={alias})"))
     }
 }
 
@@ -1203,7 +1256,10 @@ mod tests {
 
     #[test]
     fn relative_import_resolution() {
-        assert_eq!(resolve_module_reference("myapp::users", "helpers", 1), "myapp::helpers");
+        assert_eq!(
+            resolve_module_reference("myapp::users", "helpers", 1),
+            "myapp::helpers"
+        );
         assert_eq!(resolve_module_reference("a::b::c", "d", 2), "a::d");
         assert_eq!(resolve_module_reference("a::b", "c.d", 0), "c::d");
         assert_eq!(resolve_module_reference("a::b::c", "", 1), "a::b");
@@ -1234,12 +1290,22 @@ mod tests {
                 r#"{{"file":"{path}","start_line":0,"end_line":9}}"#
             )),
         };
-        fp.nodes.push(Node { id: m, repo: repo(), confidence: Confidence::Strong, cells: vec![position] });
+        fp.nodes.push(Node {
+            id: m,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![position],
+        });
         fp.nav.record(m, name, qname, node_kind::MODULE, None);
         for f in fns {
             let q = format!("{qname}::{f}");
             let id = func(&q);
-            fp.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+            fp.nodes.push(Node {
+                id,
+                repo: repo(),
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             fp.nav.record(id, f, &q, node_kind::FUNCTION, Some(m));
         }
         fp
@@ -1276,14 +1342,22 @@ mod tests {
                 ".." => {
                     segs.pop();
                 }
-                p => segs.push(p.strip_suffix(".ts").or_else(|| p.strip_suffix(".js")).unwrap_or(p)),
+                p => segs.push(
+                    p.strip_suffix(".ts")
+                        .or_else(|| p.strip_suffix(".js"))
+                        .unwrap_or(p),
+                ),
             }
         }
         Some(segs.join("::"))
     }
 
     fn edges_of(g: &RepoGraph, category: EdgeCategoryId, from: NodeId) -> Vec<NodeId> {
-        g.edges.iter().filter(|e| e.category == category && e.from == from).map(|e| e.to).collect()
+        g.edges
+            .iter()
+            .filter(|e| e.category == category && e.from == from)
+            .map(|e| e.to)
+            .collect()
     }
 
     fn ts_pair() -> Vec<FileParse> {
@@ -1317,32 +1391,72 @@ mod tests {
         ));
         let g = build_typescript(repo(), parses, ts_source).expect("build");
         let (ts, js) = (module("src::util.ts"), module("src::util.js"));
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("src::app")), [ts]);
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("src::old")), [js]);
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("src::bridge")), [js]);
-        assert_eq!(edges_of(&g, edge_category::CALLS, func("src::app::render")), [func("src::util.ts::fmt")]);
-        assert_eq!(edges_of(&g, edge_category::CALLS, func("src::old::draw")), [func("src::util.js::fmt")]);
-        assert_eq!(edges_of(&g, edge_category::CALLS, func("src::bridge::wrap")), [func("src::util.js::fmt")]);
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("src::app")),
+            [ts]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("src::old")),
+            [js]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("src::bridge")),
+            [js]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS, func("src::app::render")),
+            [func("src::util.ts::fmt")]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS, func("src::old::draw")),
+            [func("src::util.js::fmt")]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS, func("src::bridge::wrap")),
+            [func("src::util.js::fmt")]
+        );
         // The pick is build-local: no bare alias lands in the symbol table.
         assert_eq!(g.symbols.module_by_qname.get("src::util"), None);
         // Each IMPORTS edge names the rule that bound it.
-        for e in g.edges.iter().filter(|e| e.category == edge_category::IMPORTS) {
+        for e in g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+        {
             let ev = Evidence::of(e).expect("evidence");
-            assert_eq!((ev.emitter.as_str(), ev.rule.as_deref()), ("graph:imports", Some("same_stem")));
+            assert_eq!(
+                (ev.emitter.as_str(), ev.rule.as_deref()),
+                ("graph:imports", Some("same_stem"))
+            );
             assert_eq!(ev.line, Some(0));
         }
         // Replayed on the built graph: one explicit pick, two by importer.
         let mut same = same_stem_table(&g);
-        assert_eq!(same.pick(&g, "src::util", Some("js"), module("src::app")), SamePick::Bound(js));
-        assert_eq!(same.pick(&g, "src::util", None, module("src::app")), SamePick::Bound(ts));
-        assert_eq!(same.pick(&g, "src::util", None, module("src::old")), SamePick::Bound(js));
+        assert_eq!(
+            same.pick(&g, "src::util", Some("js"), module("src::app")),
+            SamePick::Bound(js)
+        );
+        assert_eq!(
+            same.pick(&g, "src::util", None, module("src::app")),
+            SamePick::Bound(ts)
+        );
+        assert_eq!(
+            same.pick(&g, "src::util", None, module("src::old")),
+            SamePick::Bound(js)
+        );
         assert_eq!(
             same.stats,
-            SameStemStats { explicit: 1, importer: 2, unresolved: 0 }
+            SameStemStats {
+                explicit: 1,
+                importer: 2,
+                unresolved: 0
+            }
         );
         assert_eq!(
             same.marker().as_deref(),
-            Some("[imports] same-stem picks: explicit=1 importer=2 unresolved=0 (stems=1 exts=js,ts)")
+            Some(
+                "[imports] same-stem picks: explicit=1 importer=2 unresolved=0 (stems=1 exts=js,ts)"
+            )
         );
     }
 
@@ -1351,7 +1465,10 @@ mod tests {
     fn requires_core(mut fp: FileParse, qname: &str) -> FileParse {
         fp.imports.push(ImportStmt {
             from_module: qname.to_string(),
-            target: ImportTarget::Module { path: "app.core".to_string(), alias: None },
+            target: ImportTarget::Module {
+                path: "app.core".to_string(),
+                alias: None,
+            },
             line: 1,
         });
         fp
@@ -1360,12 +1477,31 @@ mod tests {
     #[test]
     fn a_clojure_require_binds_its_platforms_sibling() {
         let parses = vec![
-            file("clj/app/core.clj", "clj::app::core.clj", "core", &["f", "g"]),
-            file("clj/app/core.cljs", "clj::app::core.cljs", "core", &["f", "h"]),
+            file(
+                "clj/app/core.clj",
+                "clj::app::core.clj",
+                "core",
+                &["f", "g"],
+            ),
+            file(
+                "clj/app/core.cljs",
+                "clj::app::core.cljs",
+                "core",
+                &["f", "h"],
+            ),
             file("clj/app/core.cljc", "clj::app::core.cljc", "core", &["k"]),
-            requires_core(file("clj/app/server.clj", "clj::app::server", "server", &[]), "clj::app::server"),
-            requires_core(file("clj/app/main.cljs", "clj::app::main", "main", &[]), "clj::app::main"),
-            requires_core(file("clj/app/shared.cljc", "clj::app::shared", "shared", &[]), "clj::app::shared"),
+            requires_core(
+                file("clj/app/server.clj", "clj::app::server", "server", &[]),
+                "clj::app::server",
+            ),
+            requires_core(
+                file("clj/app/main.cljs", "clj::app::main", "main", &[]),
+                "clj::app::main",
+            ),
+            requires_core(
+                file("clj/app/shared.cljc", "clj::app::shared", "shared", &[]),
+                "clj::app::shared",
+            ),
             // A lone `core` elsewhere: the tail fallback must not take it for
             // the pair's once their own qnames stop ending in `core`.
             file("clj/lib/core.clj", "clj::lib::core", "core", &[]),
@@ -1385,7 +1521,10 @@ mod tests {
         assert_eq!(bound.get("app"), Some(&module("clj::app::core.clj")));
 
         let mut same = same_stem_table(&g);
-        assert_eq!(same.pick_path(&g, "app::core", module("clj::app::shared")), SamePick::Refused);
+        assert_eq!(
+            same.pick_path(&g, "app::core", module("clj::app::shared")),
+            SamePick::Refused
+        );
         assert_eq!(
             same.pick_path(&g, "app::core", module("clj::app::server")),
             SamePick::Bound(module("clj::app::core.clj"))
@@ -1395,8 +1534,18 @@ mod tests {
             SamePick::Bound(module("clj::app::core.cljs"))
         );
         // Not an ambiguous stem of this graph.
-        assert_eq!(same.pick_path(&g, "lib::core", module("clj::app::server")), SamePick::NotAStem);
-        assert_eq!(same.stats, SameStemStats { explicit: 0, importer: 2, unresolved: 0 });
+        assert_eq!(
+            same.pick_path(&g, "lib::core", module("clj::app::server")),
+            SamePick::NotAStem
+        );
+        assert_eq!(
+            same.stats,
+            SameStemStats {
+                explicit: 0,
+                importer: 2,
+                unresolved: 0
+            }
+        );
 
         // The resolver's own count, replayed on the built symbol table: the
         // .cljc require is the one unresolved.
@@ -1408,10 +1557,19 @@ mod tests {
             .collect();
         let mut same = same_stem_table(&g);
         resolve_imports_python(&mut g, &imports, &mut same);
-        assert_eq!(same.stats, SameStemStats { explicit: 0, importer: 2, unresolved: 1 });
+        assert_eq!(
+            same.stats,
+            SameStemStats {
+                explicit: 0,
+                importer: 2,
+                unresolved: 1
+            }
+        );
         assert_eq!(
             same.marker().as_deref(),
-            Some("[imports] same-stem picks: explicit=0 importer=2 unresolved=1 (stems=1 exts=clj,cljc,cljs)")
+            Some(
+                "[imports] same-stem picks: explicit=0 importer=2 unresolved=1 (stems=1 exts=clj,cljc,cljs)"
+            )
         );
     }
 
@@ -1422,12 +1580,26 @@ mod tests {
         // empty order refuses the module but the class guess still binds.
         let mut java = file("jvm/shop/Foo.java", "jvm::shop::Foo.java", "Foo", &[]);
         let class = gid(node_kind::CLASS, "jvm::shop::Foo");
-        java.nodes.push(Node { id: class, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
-        java.nav.record(class, "Foo", "jvm::shop::Foo", node_kind::CLASS, Some(module("jvm::shop::Foo.java")));
+        java.nodes.push(Node {
+            id: class,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        java.nav.record(
+            class,
+            "Foo",
+            "jvm::shop::Foo",
+            node_kind::CLASS,
+            Some(module("jvm::shop::Foo.java")),
+        );
         let mut main = file("jvm/app/Main.java", "jvm::app::Main", "Main", &[]);
         main.imports.push(ImportStmt {
             from_module: "jvm::app::Main".to_string(),
-            target: ImportTarget::Module { path: "shop.Foo".to_string(), alias: None },
+            target: ImportTarget::Module {
+                path: "shop.Foo".to_string(),
+                alias: None,
+            },
             line: 2,
         });
         let parses = vec![
@@ -1436,9 +1608,15 @@ mod tests {
             main,
         ];
         let g = build_dotted(repo(), parses).expect("build");
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("jvm::app::Main")), [class]);
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("jvm::app::Main")),
+            [class]
+        );
         let mut same = same_stem_table(&g);
-        assert_eq!(same.pick_path(&g, "shop::Foo", module("jvm::app::Main")), SamePick::Refused);
+        assert_eq!(
+            same.pick_path(&g, "shop::Foo", module("jvm::app::Main")),
+            SamePick::Refused
+        );
     }
 
     #[test]
@@ -1448,12 +1626,18 @@ mod tests {
             file("a/app/core.cljs", "a::app::core.cljs", "core", &[]),
             file("b/app/core.clj", "b::app::core.clj", "core", &[]),
             file("b/app/core.cljs", "b::app::core.cljs", "core", &[]),
-            requires_core(file("a/app/server.clj", "a::app::server", "server", &[]), "a::app::server"),
+            requires_core(
+                file("a/app/server.clj", "a::app::server", "server", &[]),
+                "a::app::server",
+            ),
         ];
         let g = build_dotted(repo(), parses).expect("build");
         assert!(edges_of(&g, edge_category::IMPORTS, module("a::app::server")).is_empty());
         let mut same = same_stem_table(&g);
-        assert_eq!(same.pick_path(&g, "app::core", module("a::app::server")), SamePick::Refused);
+        assert_eq!(
+            same.pick_path(&g, "app::core", module("a::app::server")),
+            SamePick::Refused
+        );
     }
 
     #[test]
@@ -1463,15 +1647,29 @@ mod tests {
             // A file-named MODULE alone in its bare form (LB.9b's cross-group
             // case) is its alias's, not an ambiguous stem.
             file("api/user.ts", "api::user.ts", "user", &[]),
-            imports_fmt(file("src/app.ts", "src::app", "app", &["render"]), "src::app", "./util", "render"),
+            imports_fmt(
+                file("src/app.ts", "src::app", "app", &["render"]),
+                "src::app",
+                "./util",
+                "render",
+            ),
         ];
         let g = build_typescript(repo(), parses, ts_source).expect("build");
         let mut same = same_stem_table(&g);
         assert!(same.by_bare.is_empty());
-        assert_eq!(same.pick(&g, "api::user", None, module("src::app")), SamePick::NotAStem);
-        assert!(same.module_ext.is_none(), "no pick needed an importer's extension");
+        assert_eq!(
+            same.pick(&g, "api::user", None, module("src::app")),
+            SamePick::NotAStem
+        );
+        assert!(
+            same.module_ext.is_none(),
+            "no pick needed an importer's extension"
+        );
         assert_eq!(same.marker(), None);
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("src::app")), [module("src::util")]);
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("src::app")),
+            [module("src::util")]
+        );
     }
 
     #[test]
@@ -1499,7 +1697,12 @@ mod tests {
     /// records a namespace: node, nav child of the file, CONTAINS edge.
     fn opens(fp: &mut FileParse, m: NodeId, ns: &str) -> NodeId {
         let pkg = gid(node_kind::PACKAGE, ns);
-        fp.nodes.push(Node { id: pkg, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        fp.nodes.push(Node {
+            id: pkg,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
         let simple = ns.rsplit("::").next().unwrap_or(ns);
         fp.nav.record(pkg, simple, ns, node_kind::PACKAGE, Some(m));
         fp.edges.push(glia_core::Edge {
@@ -1517,12 +1720,23 @@ mod tests {
     fn declares(fp: &mut FileParse, parent: NodeId, qname: &str, methods: &[&str]) {
         let name = qname.rsplit("::").next().unwrap_or(qname);
         let c = class(qname);
-        fp.nodes.push(Node { id: c, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
-        fp.nav.record(c, name, qname, node_kind::CLASS, Some(parent));
+        fp.nodes.push(Node {
+            id: c,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        fp.nav
+            .record(c, name, qname, node_kind::CLASS, Some(parent));
         for m in methods {
             let q = format!("{qname}::{m}");
             let id = method(&q);
-            fp.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+            fp.nodes.push(Node {
+                id,
+                repo: repo(),
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
             fp.nav.record(id, m, &q, node_kind::METHOD, Some(c));
         }
     }
@@ -1554,7 +1768,10 @@ mod tests {
         });
         fp.calls.push(CallSite {
             from: method(&format!("{qname}::{caller}")),
-            qualifier: CallQualifier::Attribute { base: name.to_string(), name: "issue".to_string() },
+            qualifier: CallQualifier::Attribute {
+                base: name.to_string(),
+                name: "issue".to_string(),
+            },
             line: 9,
         });
         fp
@@ -1564,7 +1781,12 @@ mod tests {
     /// method `run` calls `Invoicer::issue()` after `use <ns>\Invoicer;`.
     fn service(svc: &str, ext: &str, ns: &str) -> FileParse {
         let q = format!("src::Orders::{svc}");
-        let fp = php_class(&format!("src/Orders/{svc}.{ext}"), &q, "App::Orders", &["run"]);
+        let fp = php_class(
+            &format!("src/Orders/{svc}.{ext}"),
+            &q,
+            "App::Orders",
+            &["run"],
+        );
         uses(fp, &q, ns, "Invoicer", "run")
     }
 
@@ -1573,12 +1795,21 @@ mod tests {
         g.edges
             .iter()
             .filter(|e| e.category == edge_category::IMPORTS && e.from == module(from))
-            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .map(|e| {
+                (
+                    e.to,
+                    Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default(),
+                )
+            })
             .collect()
     }
 
     fn calls_of(g: &RepoGraph, svc: &str) -> Vec<NodeId> {
-        edges_of(g, edge_category::CALLS, method(&format!("src::Orders::{svc}::run")))
+        edges_of(
+            g,
+            edge_category::CALLS,
+            method(&format!("src::Orders::{svc}::run")),
+        )
     }
 
     /// The namespace step's own count, replayed on the built graph.
@@ -1606,8 +1837,18 @@ mod tests {
 
     fn billing_and_shipping() -> Vec<FileParse> {
         vec![
-            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]),
-            php_class("src/Shipping/Invoicer.php", "src::Shipping::Invoicer", "App::Shipping", &["issue"]),
+            php_class(
+                "src/Billing/Invoicer.php",
+                "src::Billing::Invoicer",
+                "App::Billing",
+                &["issue"],
+            ),
+            php_class(
+                "src/Shipping/Invoicer.php",
+                "src::Shipping::Invoicer",
+                "App::Shipping",
+                &["issue"],
+            ),
         ]
     }
 
@@ -1618,18 +1859,43 @@ mod tests {
         parses.push(service("ShipmentService", "php", "App::Shipping"));
         let imports = all_imports(&parses);
         let g = build_dotted(repo(), parses).expect("build");
-        let (billing, shipping) = (class("src::Billing::Invoicer"), class("src::Shipping::Invoicer"));
-        assert_eq!(imports_of(&g, "src::Orders::OrderService"), [(billing, "namespace".to_string())]);
-        assert_eq!(imports_of(&g, "src::Orders::ShipmentService"), [(shipping, "namespace".to_string())]);
-        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
-        assert_eq!(calls_of(&g, "ShipmentService"), [method("src::Shipping::Invoicer::issue")]);
+        let (billing, shipping) = (
+            class("src::Billing::Invoicer"),
+            class("src::Shipping::Invoicer"),
+        );
+        assert_eq!(
+            imports_of(&g, "src::Orders::OrderService"),
+            [(billing, "namespace".to_string())]
+        );
+        assert_eq!(
+            imports_of(&g, "src::Orders::ShipmentService"),
+            [(shipping, "namespace".to_string())]
+        );
+        assert_eq!(
+            calls_of(&g, "OrderService"),
+            [method("src::Billing::Invoicer::issue")]
+        );
+        assert_eq!(
+            calls_of(&g, "ShipmentService"),
+            [method("src::Shipping::Invoicer::issue")]
+        );
         // HEAD's short-name guess sees two Invoicers and binds neither.
         assert_eq!(unique_global_function(&g, "Invoicer"), None);
         let (stats, marker) = replay(&g, &imports);
-        assert_eq!((stats.bound, stats.ambiguous, stats.missing, stats.refused_owned_root), (2, 0, 0, 0));
+        assert_eq!(
+            (
+                stats.bound,
+                stats.ambiguous,
+                stats.missing,
+                stats.refused_owned_root
+            ),
+            (2, 0, 0, 0)
+        );
         assert_eq!(
             marker.as_deref(),
-            Some("[imports] namespace symbols: bound=2 ambiguous=0 missing=0 refused_owned_root=0 (exts=php)")
+            Some(
+                "[imports] namespace symbols: bound=2 ambiguous=0 missing=0 refused_owned_root=0 (exts=php)"
+            )
         );
     }
 
@@ -1646,8 +1912,14 @@ mod tests {
         let billing = class("src::Billing::Invoicer");
         // The target HEAD's tail guess picked, now confirmed by the namespace.
         assert_eq!(unique_global_function(&g, "Invoicer"), Some(billing));
-        assert_eq!(imports_of(&g, "src::Orders::OrderService"), [(billing, "namespace".to_string())]);
-        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
+        assert_eq!(
+            imports_of(&g, "src::Orders::OrderService"),
+            [(billing, "namespace".to_string())]
+        );
+        assert_eq!(
+            calls_of(&g, "OrderService"),
+            [method("src::Billing::Invoicer::issue")]
+        );
     }
 
     #[test]
@@ -1665,12 +1937,17 @@ mod tests {
         assert!(imports_of(&g, "src::Orders::LegalService").is_empty());
         assert!(calls_of(&g, "LegalService").is_empty());
         // The control still binds.
-        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
+        assert_eq!(
+            calls_of(&g, "OrderService"),
+            [method("src::Billing::Invoicer::issue")]
+        );
         let (stats, marker) = replay(&g, &imports);
         assert_eq!((stats.bound, stats.refused_owned_root), (1, 1));
         assert_eq!(
             marker.as_deref(),
-            Some("[imports] namespace symbols: bound=1 ambiguous=0 missing=0 refused_owned_root=1 (exts=php)")
+            Some(
+                "[imports] namespace symbols: bound=1 ambiguous=0 missing=0 refused_owned_root=1 (exts=php)"
+            )
         );
     }
 
@@ -1688,8 +1965,14 @@ mod tests {
         let imports = all_imports(&parses);
         let g = build_dotted(repo(), parses).expect("build");
         let billing = class("src::Billing::Invoicer");
-        assert_eq!(imports_of(&g, "src::Orders::LegalService"), [(billing, "tail_unique".to_string())]);
-        assert_eq!(calls_of(&g, "LegalService"), [method("src::Billing::Invoicer::issue")]);
+        assert_eq!(
+            imports_of(&g, "src::Orders::LegalService"),
+            [(billing, "tail_unique".to_string())]
+        );
+        assert_eq!(
+            calls_of(&g, "LegalService"),
+            [method("src::Billing::Invoicer::issue")]
+        );
         let (stats, marker) = replay(&g, &imports);
         assert_eq!(stats, NamespaceStats::default());
         assert_eq!(marker, None);
@@ -1708,9 +1991,15 @@ mod tests {
         parses.push(service("VendorService", "php", "Illuminate::Support"));
         let g = build_dotted(repo(), parses).expect("build");
         let billing = class("src::Billing::Invoicer");
-        assert_eq!(imports_of(&g, "src::Orders::VendorService"), [(billing, "tail_unique".to_string())]);
+        assert_eq!(
+            imports_of(&g, "src::Orders::VendorService"),
+            [(billing, "tail_unique".to_string())]
+        );
         let idx = NamespaceIndex::build(&g);
-        assert_eq!(idx.member("Illuminate::Support", "Invoicer"), NsHit::NotDeclared);
+        assert_eq!(
+            idx.member("Illuminate::Support", "Invoicer"),
+            NsHit::NotDeclared
+        );
         assert!(!idx.owns_root("Illuminate::Support"));
         assert!(idx.owns_root("App::Legal"));
     }
@@ -1726,24 +2015,45 @@ mod tests {
         let pkg_b = opens(&mut b, module("lib::Jobs::Queue"), "App::Jobs");
         declares(&mut b, pkg_b, "App::Jobs::Queue", &["issue"]);
         // A same-named class of another namespace.
-        let other = php_class("src/Mail/Mailer.php", "src::Mail::Mailer", "App::Mail", &["issue"]);
+        let other = php_class(
+            "src/Mail/Mailer.php",
+            "src::Mail::Mailer",
+            "App::Mail",
+            &["issue"],
+        );
         let q = "src::Orders::OrderService";
         let svc = php_class("src/Orders/OrderService.php", q, "App::Orders", &["run"]);
         let svc = uses(svc, q, "App::Jobs", "Mailer", "run");
         let g = build_dotted(repo(), vec![a, b, other, svc]).expect("build");
         let mailer = class("App::Jobs::Mailer");
         assert_eq!(imports_of(&g, q), [(mailer, "namespace".to_string())]);
-        assert_eq!(calls_of(&g, "OrderService"), [method("App::Jobs::Mailer::issue")]);
+        assert_eq!(
+            calls_of(&g, "OrderService"),
+            [method("App::Jobs::Mailer::issue")]
+        );
         let idx = NamespaceIndex::build(&g);
-        assert_eq!(idx.member("App::Jobs", "Queue"), NsHit::Unique(class("App::Jobs::Queue")));
+        assert_eq!(
+            idx.member("App::Jobs", "Queue"),
+            NsHit::Unique(class("App::Jobs::Queue"))
+        );
     }
 
     #[test]
     fn declared_namespace_without_the_member_binds_nothing() {
         // `use App\Billing\Invoicer;` while the only Invoicer is App\Legacy's.
         let mut parses = vec![
-            php_class("src/Billing/Ledger.php", "src::Billing::Ledger", "App::Billing", &["post"]),
-            php_class("src/Legacy/Invoicer.php", "src::Legacy::Invoicer", "App::Legacy", &["issue"]),
+            php_class(
+                "src/Billing/Ledger.php",
+                "src::Billing::Ledger",
+                "App::Billing",
+                &["post"],
+            ),
+            php_class(
+                "src/Legacy/Invoicer.php",
+                "src::Legacy::Invoicer",
+                "App::Legacy",
+                &["issue"],
+            ),
         ];
         parses.push(service("OrderService", "php", "App::Billing"));
         let imports = all_imports(&parses);
@@ -1757,8 +2067,18 @@ mod tests {
     #[test]
     fn a_class_two_files_declare_in_one_namespace_binds_nothing() {
         let mut parses = vec![
-            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]),
-            php_class("lib/Billing/Invoicer.php", "lib::Billing::Invoicer", "App::Billing", &["issue"]),
+            php_class(
+                "src/Billing/Invoicer.php",
+                "src::Billing::Invoicer",
+                "App::Billing",
+                &["issue"],
+            ),
+            php_class(
+                "lib/Billing/Invoicer.php",
+                "lib::Billing::Invoicer",
+                "App::Billing",
+                &["issue"],
+            ),
         ];
         parses.push(service("OrderService", "php", "App::Billing"));
         let imports = all_imports(&parses);
@@ -1775,10 +2095,18 @@ mod tests {
         // not the parent namespace `App` is itself declared.
         let mut root = file("src/Kernel.php", "src::Kernel", "Kernel", &[]);
         opens(&mut root, module("src::Kernel"), "App");
-        let invoicer =
-            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]);
+        let invoicer = php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        );
         let mut svc = service("OrderService", "php", "App");
-        if let Some(ImportStmt { target: ImportTarget::Symbol { name, .. }, .. }) = svc.imports.last_mut() {
+        if let Some(ImportStmt {
+            target: ImportTarget::Symbol { name, .. },
+            ..
+        }) = svc.imports.last_mut()
+        {
             *name = "Billing".to_string();
         }
         let imports = svc.imports.clone();
@@ -1812,7 +2140,11 @@ mod tests {
                 ".." => {
                     segs.pop();
                 }
-                p => segs.push(p.strip_suffix(".dart").or_else(|| p.strip_suffix(".ts")).unwrap_or(p)),
+                p => segs.push(
+                    p.strip_suffix(".dart")
+                        .or_else(|| p.strip_suffix(".ts"))
+                        .unwrap_or(p),
+                ),
             }
         }
         Some(segs.join("::"))
@@ -1833,7 +2165,10 @@ mod tests {
     fn import_module(fp: &mut FileParse, qname: &str, spec: &str, alias: Option<&str>) {
         fp.imports.push(ImportStmt {
             from_module: qname.to_string(),
-            target: ImportTarget::Module { path: spec.to_string(), alias: alias.map(str::to_string) },
+            target: ImportTarget::Module {
+                path: spec.to_string(),
+                alias: alias.map(str::to_string),
+            },
             line: fp.imports.len() as u32,
         });
     }
@@ -1853,7 +2188,11 @@ mod tests {
     }
 
     fn call(fp: &mut FileParse, caller: &str, qualifier: CallQualifier) {
-        fp.calls.push(CallSite { from: func(caller), qualifier, line: 7 });
+        fp.calls.push(CallSite {
+            from: func(caller),
+            qualifier,
+            line: 7,
+        });
     }
 
     fn bare(name: &str) -> CallQualifier {
@@ -1866,7 +2205,12 @@ mod tests {
             .edges
             .iter()
             .filter(|e| e.category == edge_category::CALLS && e.from == func(caller))
-            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .map(|e| {
+                (
+                    e.to,
+                    Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default(),
+                )
+            })
             .collect();
         out.sort_by_key(|(id, _)| id.0);
         out
@@ -1884,12 +2228,20 @@ mod tests {
             .iter()
             .map(|(importer, name)| {
                 let m = module(importer);
-                (m, name.to_string(), g.symbols.module_import_bindings[&m][*name])
+                (
+                    m,
+                    name.to_string(),
+                    g.symbols.module_import_bindings[&m][*name],
+                )
             })
             .collect();
         g.symbols.module_import_bindings.clear();
         for (m, name, id) in kept {
-            g.symbols.module_import_bindings.entry(m).or_default().insert(name, id);
+            g.symbols
+                .module_import_bindings
+                .entry(m)
+                .or_default()
+                .insert(name, id);
         }
         let pairs: Vec<(NodeId, NodeId)> =
             plain.iter().map(|(a, b)| (module(a), module(b))).collect();
@@ -1914,19 +2266,37 @@ mod tests {
         call(
             &mut cart,
             "lib::cart::total",
-            CallQualifier::Attribute { base: "Money".to_string(), name: "zero".to_string() },
+            CallQualifier::Attribute {
+                base: "Money".to_string(),
+                name: "zero".to_string(),
+            },
         );
         let mut g = build_typescript(repo(), vec![util_dart(), cart], dart_source).expect("build");
-        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("lib::cart")), [module("lib::src::util")]);
+        assert_eq!(
+            edges_of(&g, edge_category::IMPORTS, module("lib::cart")),
+            [module("lib::src::util")]
+        );
         let mut want = vec![
-            (func("lib::src::util::formatPrice"), "import_binding".to_string()),
+            (
+                func("lib::src::util::formatPrice"),
+                "import_binding".to_string(),
+            ),
             (class("lib::src::util::Money"), "import_binding".to_string()),
-            (method("lib::src::util::Money::zero"), "attribute".to_string()),
+            (
+                method("lib::src::util::Money::zero"),
+                "attribute".to_string(),
+            ),
         ];
         want.sort_by_key(|(id, _)| id.0);
         assert_eq!(calls_from(&g, "lib::cart::total"), want);
         let stats = replay_dart(&mut g, &[("lib::cart", "lib::src::util")], &[]);
-        assert_eq!(stats, DartLibraryNames { bound: 2, ambiguous: 0 });
+        assert_eq!(
+            stats,
+            DartLibraryNames {
+                bound: 2,
+                ambiguous: 0
+            }
+        );
         assert_eq!(
             stats.marker().as_deref(),
             Some("[imports] dart plain-import names bound=2 ambiguous=0")
@@ -1942,11 +2312,20 @@ mod tests {
         assert!(calls_from(&g, "lib::cart::total").is_empty());
         let bound = &g.symbols.module_import_bindings[&module("lib::cart")];
         assert_eq!(bound.get("_hidden"), None);
-        assert_eq!(bound.get("formatPrice"), Some(&func("lib::src::util::formatPrice")));
+        assert_eq!(
+            bound.get("formatPrice"),
+            Some(&func("lib::src::util::formatPrice"))
+        );
         // A path-named child (a ROUTE / ENDPOINT) is no Dart name either.
-        for (name, public) in
-            [("formatPrice", true), ("Money", true), ("$tag", true), ("_x", false), ("GET /a", false), ("1x", false), ("", false)]
-        {
+        for (name, public) in [
+            ("formatPrice", true),
+            ("Money", true),
+            ("$tag", true),
+            ("_x", false),
+            ("GET /a", false),
+            ("1x", false),
+            ("", false),
+        ] {
             assert_eq!(dart_public_name(name), public, "{name:?}");
         }
     }
@@ -1976,13 +2355,24 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(stats, DartLibraryNames { bound: 1, ambiguous: 1 });
+        assert_eq!(
+            stats,
+            DartLibraryNames {
+                bound: 1,
+                ambiguous: 1
+            }
+        );
     }
 
     #[test]
     fn show_binding_wins_over_plain() {
         let fmt = library("lib/src/fmt.dart", "lib::src::fmt", &["shout"], &[]);
-        let other = library("lib/src/other.dart", "lib::src::other", &["shout", "trim"], &[]);
+        let other = library(
+            "lib/src/other.dart",
+            "lib::src::other",
+            &["shout", "trim"],
+            &[],
+        );
         let mut app = library("lib/app.dart", "lib::app", &["run"], &[]);
         import_show(&mut app, "lib::app", "src/other.dart", "shout");
         import_module(&mut app, "lib::app", "src/fmt.dart", None);
@@ -1998,8 +2388,11 @@ mod tests {
         let bound = &g.symbols.module_import_bindings[&module("lib::app")];
         assert_eq!(bound.get("o"), Some(&module("lib::src::other")));
         assert_eq!(bound.get("trim"), None);
-        let stats =
-            replay_dart(&mut g, &[("lib::app", "lib::src::fmt")], &[("lib::app", "shout"), ("lib::app", "o")]);
+        let stats = replay_dart(
+            &mut g,
+            &[("lib::app", "lib::src::fmt")],
+            &[("lib::app", "shout"), ("lib::app", "o")],
+        );
         assert_eq!(stats, DartLibraryNames::default());
         assert_eq!(stats.marker(), None);
     }
@@ -2018,7 +2411,13 @@ mod tests {
         want.sort_by_key(|(id, _)| id.0);
         assert_eq!(calls_from(&g, "lib::cart::total"), want);
         let stats = replay_dart(&mut g, &[("lib::cart", "lib::src::util")], &[]);
-        assert_eq!(stats, DartLibraryNames { bound: 1, ambiguous: 0 });
+        assert_eq!(
+            stats,
+            DartLibraryNames {
+                bound: 1,
+                ambiguous: 0
+            }
+        );
     }
 
     #[test]
@@ -2034,7 +2433,11 @@ mod tests {
         let imported = edges_of(&g, edge_category::IMPORTS, module("src::app"));
         assert_eq!(imported, [module("src::util"), module("src::util")]);
         assert!(calls_from(&g, "src::app::render").is_empty());
-        assert!(!g.symbols.module_import_bindings.contains_key(&module("src::app")));
+        assert!(
+            !g.symbols
+                .module_import_bindings
+                .contains_key(&module("src::app"))
+        );
         let stats = replay_dart(&mut g, &[("src::app", "src::util")], &[]);
         assert_eq!(stats, DartLibraryNames::default());
     }
@@ -2047,7 +2450,12 @@ mod tests {
         g.edges
             .iter()
             .filter(|e| e.category == edge_category::IMPORTS && e.from == module(importer))
-            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .map(|e| {
+                (
+                    e.to,
+                    Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default(),
+                )
+            })
             .collect()
     }
 
@@ -2060,14 +2468,24 @@ mod tests {
     /// function every importer calls.
     fn models_index() -> FileParse {
         let q = "src::app::core::models::index";
-        file("src/app/core/models/index.ts", q, "index", &["accountLabel", "Account"])
+        file(
+            "src/app/core/models/index.ts",
+            q,
+            "index",
+            &["accountLabel", "Account"],
+        )
     }
 
     /// A service MODULE `src::app::core::services::<name>` with method-like
     /// FUNCTION `fns`.
     fn service_ts(name: &str, fns: &[&str]) -> FileParse {
         let path = format!("src/app/core/services/{name}.ts");
-        file(&path, &format!("src::app::core::services::{name}"), name, fns)
+        file(
+            &path,
+            &format!("src::app::core::services::{name}"),
+            name,
+            fns,
+        )
     }
 
     /// `import { <name> } from '<spec>'` in MODULE `qname`, and `<caller>`
@@ -2094,7 +2512,10 @@ mod tests {
         let g = build_typescript(repo(), vec![models_index(), svc], ts_source).expect("build");
         let index = "src::app::core::models::index";
         assert_eq!(imports_from(&g, q), [by_dir(index), by_dir(index)]);
-        assert_eq!(g.symbols.module_import_bindings[&module(q)].get("m"), Some(&module(index)));
+        assert_eq!(
+            g.symbols.module_import_bindings[&module(q)].get("m"),
+            Some(&module(index))
+        );
         // The evidence names the import statement's own row.
         let lines: Vec<Option<u32>> = g
             .edges
@@ -2106,10 +2527,27 @@ mod tests {
         // A miss with no index module reads no MODULE POSITION; a directory
         // import reads them once, for the importer's extension.
         let mut same = same_stem_table(&g);
-        assert_eq!(ts_target(&g, &mut same, "src::app::core::none", None, module(q), "symbol"), None);
+        assert_eq!(
+            ts_target(
+                &g,
+                &mut same,
+                "src::app::core::none",
+                None,
+                module(q),
+                "symbol"
+            ),
+            None
+        );
         assert!(same.module_ext.is_none());
         assert_eq!(
-            ts_target(&g, &mut same, "src::app::core::models", None, module(q), "symbol"),
+            ts_target(
+                &g,
+                &mut same,
+                "src::app::core::models",
+                None,
+                module(q),
+                "symbol"
+            ),
             Some((module(index), DIR_INDEX))
         );
         assert!(same.module_ext.is_some());
@@ -2122,29 +2560,54 @@ mod tests {
         imports_and_calls(&mut svc, q, "../models", "accountLabel", "label");
         // A same-named function elsewhere: without the binding a name guess
         // could take it; with it, the imported one wins.
-        let other = file("src/legacy/labels.ts", "src::legacy::labels", "labels", &["accountLabel"]);
+        let other = file(
+            "src/legacy/labels.ts",
+            "src::legacy::labels",
+            "labels",
+            &["accountLabel"],
+        );
         let parses = vec![models_index(), svc, other];
         let g = build_typescript_family(repo(), parses, ts_source).expect("build");
         let label = func("src::app::core::models::index::accountLabel");
-        assert_eq!(imports_from(&g, q), [by_dir("src::app::core::models::index")]);
-        assert_eq!(g.symbols.module_import_bindings[&module(q)].get("accountLabel"), Some(&label));
-        assert_eq!(calls_from(&g, &format!("{q}::label")), [(label, "import_binding".to_string())]);
+        assert_eq!(
+            imports_from(&g, q),
+            [by_dir("src::app::core::models::index")]
+        );
+        assert_eq!(
+            g.symbols.module_import_bindings[&module(q)].get("accountLabel"),
+            Some(&label)
+        );
+        assert_eq!(
+            calls_from(&g, &format!("{q}::label")),
+            [(label, "import_binding".to_string())]
+        );
     }
 
     #[test]
     fn file_beats_directory() {
         let q = "src::app::core::services::report.service";
-        let file_fmt = file("src/app/core/format.ts", "src::app::core::format", "format", &["pad"]);
+        let file_fmt = file(
+            "src/app/core/format.ts",
+            "src::app::core::format",
+            "format",
+            &["pad"],
+        );
         let dir_q = "src::app::core::format::index";
         let dir_fmt = file("src/app/core/format/index.ts", dir_q, "index", &["pad"]);
         let mut svc = service_ts("report.service", &["render"]);
         imports_and_calls(&mut svc, q, "../format", "pad", "render");
         let parses = vec![file_fmt, dir_fmt, svc];
         let g = build_typescript_family(repo(), parses, ts_source).expect("build");
-        assert_eq!(imports_from(&g, q), [(module("src::app::core::format"), "symbol".to_string())]);
+        assert_eq!(
+            imports_from(&g, q),
+            [(module("src::app::core::format"), "symbol".to_string())]
+        );
         assert_eq!(
             calls_from(&g, &format!("{q}::render")),
-            [(func("src::app::core::format::pad"), "import_binding".to_string())]
+            [(
+                func("src::app::core::format::pad"),
+                "import_binding".to_string()
+            )]
         );
         // A refused same-stem pair is a file pair too: it never falls through
         // to the directory (an importer with no extension has no order).
@@ -2155,24 +2618,56 @@ mod tests {
         ];
         let g = build_typescript(repo(), pair, ts_source).expect("build");
         let mut same = same_stem_table(&g);
-        assert_eq!(ts_target(&g, &mut same, "src::util", None, module("src::stray"), "symbol"), None);
+        assert_eq!(
+            ts_target(
+                &g,
+                &mut same,
+                "src::util",
+                None,
+                module("src::stray"),
+                "symbol"
+            ),
+            None
+        );
         assert_eq!(same.stats.unresolved, 1);
     }
 
     #[test]
     fn index_pair_picks_the_importers_sibling() {
         let parses = vec![
-            file("src/models/index.ts", "src::models::index.ts", "index", &["fmt"]),
-            file("src/models/index.js", "src::models::index.js", "index", &["fmt"]),
+            file(
+                "src/models/index.ts",
+                "src::models::index.ts",
+                "index",
+                &["fmt"],
+            ),
+            file(
+                "src/models/index.js",
+                "src::models::index.js",
+                "index",
+                &["fmt"],
+            ),
             fmt_importer("src/app.ts", "src::app", "./models", "render"),
             fmt_importer("src/old.js", "src::old", "./models", "draw"),
         ];
         let g = build_typescript_family(repo(), parses, ts_source).expect("build");
-        assert_eq!(imports_from(&g, "src::app"), [by_dir("src::models::index.ts")]);
-        assert_eq!(imports_from(&g, "src::old"), [by_dir("src::models::index.js")]);
+        assert_eq!(
+            imports_from(&g, "src::app"),
+            [by_dir("src::models::index.ts")]
+        );
+        assert_eq!(
+            imports_from(&g, "src::old"),
+            [by_dir("src::models::index.js")]
+        );
         let calls = |caller: &str| edges_of(&g, edge_category::CALLS, func(caller));
-        assert_eq!(calls("src::app::render"), [func("src::models::index.ts::fmt")]);
-        assert_eq!(calls("src::old::draw"), [func("src::models::index.js::fmt")]);
+        assert_eq!(
+            calls("src::app::render"),
+            [func("src::models::index.ts::fmt")]
+        );
+        assert_eq!(
+            calls("src::old::draw"),
+            [func("src::models::index.js::fmt")]
+        );
     }
 
     /// The engine's A6.8 alias resolver for one tsconfig at the repo root
@@ -2194,7 +2689,12 @@ mod tests {
     #[test]
     fn alias_target_dir_binds_index() {
         let q = "src::app::pages::home";
-        let core_index = file("src/app/core/index.ts", "src::app::core::index", "index", &["boot"]);
+        let core_index = file(
+            "src/app/core/index.ts",
+            "src::app::core::index",
+            "index",
+            &["boot"],
+        );
         let mut page = file("src/app/pages/home.ts", q, "home", &["init"]);
         imports_and_calls(&mut page, q, "@core", "boot", "init");
         imports_and_calls(&mut page, q, "@core/models", "accountLabel", "init");
@@ -2202,19 +2702,37 @@ mod tests {
         let parses = vec![core_index, models_index(), page];
         let g = build_typescript_family(repo(), parses, aliased_source).expect("build");
         let (core, models) = ("src::app::core::index", "src::app::core::models::index");
-        assert_eq!(imports_from(&g, q), [by_dir(core), by_dir(models), by_dir(models)]);
+        assert_eq!(
+            imports_from(&g, q),
+            [by_dir(core), by_dir(models), by_dir(models)]
+        );
         let bound = &g.symbols.module_import_bindings[&module(q)];
-        assert_eq!(bound.get("boot"), Some(&func("src::app::core::index::boot")));
-        assert_eq!(bound.get("Account"), Some(&func("src::app::core::models::index::Account")));
+        assert_eq!(
+            bound.get("boot"),
+            Some(&func("src::app::core::index::boot"))
+        );
+        assert_eq!(
+            bound.get("Account"),
+            Some(&func("src::app::core::models::index::Account"))
+        );
         // The marker's tally of the same statements, plus one bound exactly.
         let mut binds = DirIndexBinds::default();
         for spec in ["@core", "'@core/models'", "../core/models"] {
             binds.record(DIR_INDEX, spec);
         }
         binds.record("symbol", "./x");
-        assert_eq!(binds, DirIndexBinds { relative: 1, alias: 2 });
+        assert_eq!(
+            binds,
+            DirIndexBinds {
+                relative: 1,
+                alias: 2
+            }
+        );
         let marker = binds.marker();
-        assert_eq!(marker.as_deref(), Some("[imports] dir-index binds=3 (relative=1 alias=2)"));
+        assert_eq!(
+            marker.as_deref(),
+            Some("[imports] dir-index binds=3 (relative=1 alias=2)")
+        );
         assert_eq!(DirIndexBinds::default().marker(), None);
     }
 
@@ -2225,14 +2743,20 @@ mod tests {
         imports_and_calls(&mut svc, q, "../models.js", "accountLabel", "label");
         imports_and_calls(&mut svc, q, "../models.ts", "accountLabel", "label");
         import_module(&mut svc, q, "../models.json", None);
-        let g = build_typescript_family(repo(), vec![models_index(), svc], ts_source).expect("build");
+        let g =
+            build_typescript_family(repo(), vec![models_index(), svc], ts_source).expect("build");
         assert!(imports_from(&g, q).is_empty());
         assert!(calls_from(&g, &format!("{q}::label")).is_empty());
         // A dot that is no file extension can still name a directory.
         assert!(names_a_directory(None));
         assert!(names_a_directory(Some("kit")));
         assert!(!names_a_directory(Some("js")));
-        let kit = file("src/ui.kit/index.ts", "src::ui.kit::index", "index", &["fmt"]);
+        let kit = file(
+            "src/ui.kit/index.ts",
+            "src::ui.kit::index",
+            "index",
+            &["fmt"],
+        );
         let app = fmt_importer("src/app.ts", "src::app", "./ui.kit", "render");
         let g = build_typescript_family(repo(), vec![kit, app], ts_source).expect("build");
         assert_eq!(imports_from(&g, "src::app"), [by_dir("src::ui.kit::index")]);
@@ -2250,9 +2774,18 @@ mod tests {
         call(&mut cart, "lib::cart::total", bare("formatPrice"));
         let g = build_typescript(repo(), vec![index, cart], dart_source).expect("build");
         assert!(imports_from(&g, "lib::cart").is_empty());
-        assert!(!g.symbols.module_import_bindings.contains_key(&module("lib::cart")));
+        assert!(
+            !g.symbols
+                .module_import_bindings
+                .contains_key(&module("lib::cart"))
+        );
         // A Terraform module `source` directory: the same gate.
-        let vpc = file("infra/modules/vpc/index.tf", "infra::modules::vpc::index", "index", &[]);
+        let vpc = file(
+            "infra/modules/vpc/index.tf",
+            "infra::modules::vpc::index",
+            "index",
+            &[],
+        );
         let mut main = file("infra/main.tf", "infra::main", "main", &[]);
         import_module(&mut main, "infra::main", "./modules/vpc", None);
         let g = build_typescript(repo(), vec![vpc, main], ts_source).expect("build");
@@ -2265,7 +2798,9 @@ mod tests {
 
     /// The MODULE qname of a TS file path: extension dropped, `/` -> `::`.
     fn ts_qname(path: &str) -> String {
-        path.rsplit_once('.').map_or(path, |(stem, _)| stem).replace('/', "::")
+        path.rsplit_once('.')
+            .map_or(path, |(stem, _)| stem)
+            .replace('/', "::")
     }
 
     /// The TS parser's parse of `src` at `path`, its export facts included.
@@ -2277,12 +2812,19 @@ mod tests {
     fn ts_graph(files: &[(&str, &str)]) -> (RepoGraph, Vec<ImportStmt>) {
         let parses: Vec<FileParse> = files.iter().map(|(p, s)| ts(p, s)).collect();
         let imports = all_imports(&parses);
-        (build_typescript_family(repo(), parses, ts_source).expect("build"), imports)
+        (
+            build_typescript_family(repo(), parses, ts_source).expect("build"),
+            imports,
+        )
     }
 
     /// What MODULE `importer` binds `name` to.
     fn binding(g: &RepoGraph, importer: &str, name: &str) -> Option<NodeId> {
-        g.symbols.module_import_bindings.get(&module(importer))?.get(name).copied()
+        g.symbols
+            .module_import_bindings
+            .get(&module(importer))?
+            .get(name)
+            .copied()
     }
 
     /// `(target, rule)` of every `category` edge from `from`, sorted.
@@ -2291,7 +2833,12 @@ mod tests {
             .edges
             .iter()
             .filter(|e| e.category == category && e.from == from)
-            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .map(|e| {
+                (
+                    e.to,
+                    Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default(),
+                )
+            })
             .collect();
         out.sort_by_key(|(id, rule)| (id.0, rule.clone()));
         out
@@ -2392,7 +2939,10 @@ mod tests {
                     "}\n",
                 ),
             ),
-            ("src/core/util/format.ts", "export function shout(s: string): string { return s; }\n"),
+            (
+                "src/core/util/format.ts",
+                "export function shout(s: string): string { return s; }\n",
+            ),
             ("src/shared/index.js", "export * from './badge';\n"),
             (
                 "src/shared/badge.ts",
@@ -2477,7 +3027,10 @@ mod tests {
         let name = func("src::core::models::user::displayName");
         assert_eq!(binding(&g, "src::app", "User"), Some(user));
         assert_eq!(binding(&g, "src::app", "displayName"), Some(name));
-        assert_eq!(calls_from(&g, "src::app::run"), [rule(name, "import_binding")]);
+        assert_eq!(
+            calls_from(&g, "src::app::run"),
+            [rule(name, "import_binding")]
+        );
         // Both barrels hold the same-name declarations their stars pass.
         for barrel in ["src::core::index", "src::core::models::index"] {
             let syms = &g.symbols.module_symbols[&module(barrel)];
@@ -2499,7 +3052,10 @@ mod tests {
                     "export * from './a';\n",
                 ),
             ),
-            ("src/app.ts", "import { A } from './lib';\nexport class X extends A {}\n"),
+            (
+                "src/app.ts",
+                "import { A } from './lib';\nexport class X extends A {}\n",
+            ),
         ]);
         let a = module("src::lib::a");
         let rows: Vec<(NodeId, Option<String>, Option<u32>)> = g
@@ -2508,12 +3064,19 @@ mod tests {
             .filter(|e| e.category == edge_category::IMPORTS && e.from == module("src::lib::index"))
             .map(|e| {
                 let ev = Evidence::of(e);
-                (e.to, ev.as_ref().and_then(|v| v.rule.clone()), ev.and_then(|v| v.line))
+                (
+                    e.to,
+                    ev.as_ref().and_then(|v| v.rule.clone()),
+                    ev.and_then(|v| v.line),
+                )
             })
             .collect();
         // One edge per statement, at its own row: the two-name clause is one.
         let reexport = Some(reexports::REEXPORT.to_string());
-        assert_eq!(rows, [(a, reexport.clone(), Some(2)), (a, reexport, Some(3))]);
+        assert_eq!(
+            rows,
+            [(a, reexport.clone(), Some(2)), (a, reexport, Some(3))]
+        );
         // The importer IMPORTS the barrel it names, never the declaring module.
         assert_eq!(imports_from(&g, "src::app"), [by_dir("src::lib::index")]);
         assert_eq!(
@@ -2525,8 +3088,14 @@ mod tests {
     #[test]
     fn named_reexport_binds_under_its_new_name() {
         let (g, _) = ts_graph(&[
-            ("src/svc/audit.ts", "export class AuditLog { record() {} }\n"),
-            ("src/svc/index.ts", "export { AuditLog as Journal } from './audit';\n"),
+            (
+                "src/svc/audit.ts",
+                "export class AuditLog { record() {} }\n",
+            ),
+            (
+                "src/svc/index.ts",
+                "export { AuditLog as Journal } from './audit';\n",
+            ),
             (
                 "src/page.ts",
                 concat!(
@@ -2550,14 +3119,20 @@ mod tests {
         );
         assert_eq!(
             out_edges(&g, edge_category::CALLS, method("src::page::Page::go")),
-            [rule(method("src::svc::audit::AuditLog::record"), "receiver_type")]
+            [rule(
+                method("src::svc::audit::AuditLog::record"),
+                "receiver_type"
+            )]
         );
     }
 
     #[test]
     fn namespace_reexport_binds_the_module() {
         let (g, _) = ts_graph(&[
-            ("src/util/format.ts", "export function shout(s: string) { return s; }\n"),
+            (
+                "src/util/format.ts",
+                "export function shout(s: string) { return s; }\n",
+            ),
             ("src/core.ts", "export * as fmt from './util/format';\n"),
             (
                 "src/page.ts",
@@ -2567,7 +3142,10 @@ mod tests {
                 ),
             ),
         ]);
-        assert_eq!(binding(&g, "src::page", "fmt"), Some(module("src::util::format")));
+        assert_eq!(
+            binding(&g, "src::page", "fmt"),
+            Some(module("src::util::format"))
+        );
         assert_eq!(
             calls_from(&g, "src::page::run"),
             [rule(func("src::util::format::shout"), "attribute")]
@@ -2607,7 +3185,10 @@ mod tests {
     fn local_export_renames_an_own_declaration() {
         let (g, _) = ts_graph(&[
             ("src/lib.ts", "function f() {}\nexport { f as g };\n"),
-            ("src/app.ts", "import { g } from './lib';\nexport function run() { g(); }\n"),
+            (
+                "src/app.ts",
+                "import { g } from './lib';\nexport function run() { g(); }\n",
+            ),
         ]);
         let f = func("src::lib::f");
         assert_eq!(binding(&g, "src::app", "g"), Some(f));
@@ -2620,7 +3201,10 @@ mod tests {
         let (g, imports) = ts_graph(&[
             ("src/m/a.ts", "export function displayName() {}\n"),
             ("src/m/b.ts", "export function displayName() {}\n"),
-            ("src/m/index.ts", "export * from './a';\nexport * from './b';\n"),
+            (
+                "src/m/index.ts",
+                "export * from './a';\nexport * from './b';\n",
+            ),
             ("src/core.ts", "export * from './m';\n"),
             (
                 "src/app.ts",
@@ -2634,7 +3218,10 @@ mod tests {
         assert!(calls_from(&g, "src::app::run").is_empty());
         for barrel in ["src::core", "src::m::index"] {
             let syms = g.symbols.module_symbols.get(&module(barrel));
-            assert!(syms.is_none_or(|s| !s.contains_key("displayName")), "{barrel}");
+            assert!(
+                syms.is_none_or(|s| !s.contains_key("displayName")),
+                "{barrel}"
+            );
         }
         // Ambiguous at both levels, and the import is left unbound.
         let stats = replay_ts(&g, &imports);
@@ -2656,8 +3243,14 @@ mod tests {
                     "export type { Pending };\n",
                 ),
             ),
-            ("src/m/index.ts", "export * from './user';\nexport * from './friend';\n"),
-            ("src/app.ts", "import { Pending } from './m';\nexport class X extends Pending {}\n"),
+            (
+                "src/m/index.ts",
+                "export * from './user';\nexport * from './friend';\n",
+            ),
+            (
+                "src/app.ts",
+                "import { Pending } from './m';\nexport class X extends Pending {}\n",
+            ),
         ]);
         let pending = class("src::m::friend::Pending");
         assert_eq!(binding(&g, "src::app", "Pending"), Some(pending));
@@ -2680,16 +3273,31 @@ mod tests {
                     "export class Thing {}\n",
                 ),
             ),
-            ("src/mid.ts", "export * from './a';\nexport class Other {}\n"),
+            (
+                "src/mid.ts",
+                "export * from './a';\nexport class Other {}\n",
+            ),
             ("src/top.ts", "export * from './mid';\n"),
             ("src/app.ts", "import { Thing, Other } from './barrel';\n"),
             ("src/app2.ts", "import { Other, Thing } from './top';\n"),
         ]);
-        assert_eq!(binding(&g, "src::app", "Thing"), Some(class("src::barrel::Thing")));
-        assert_eq!(binding(&g, "src::app", "Other"), Some(class("src::b::Named")));
+        assert_eq!(
+            binding(&g, "src::app", "Thing"),
+            Some(class("src::barrel::Thing"))
+        );
+        assert_eq!(
+            binding(&g, "src::app", "Other"),
+            Some(class("src::b::Named"))
+        );
         // Inside the chain an exported declaration shadows the stars too.
-        assert_eq!(binding(&g, "src::app2", "Other"), Some(class("src::mid::Other")));
-        assert_eq!(binding(&g, "src::app2", "Thing"), Some(class("src::a::Thing")));
+        assert_eq!(
+            binding(&g, "src::app2", "Other"),
+            Some(class("src::mid::Other"))
+        );
+        assert_eq!(
+            binding(&g, "src::app2", "Thing"),
+            Some(class("src::a::Thing"))
+        );
     }
 
     #[test]
@@ -2697,13 +3305,22 @@ mod tests {
         let (g, imports) = ts_graph(&[
             // A local type alias beside a star exporting class Session.
             ("src/s.ts", "export class Session {}\n"),
-            ("src/t.ts", "export type Session = { id: string };\nexport * from './s';\n"),
+            (
+                "src/t.ts",
+                "export type Session = { id: string };\nexport * from './s';\n",
+            ),
             // A nodeless const re-exported by a from-less clause.
             ("src/k2.ts", "export class X {}\n"),
-            ("src/k.ts", "const X = 1;\nexport { X };\nexport * from './k2';\n"),
+            (
+                "src/k.ts",
+                "const X = 1;\nexport { X };\nexport * from './k2';\n",
+            ),
             // An external named re-export beside a star exporting the name.
             ("src/obs.ts", "export class Observable {}\n"),
-            ("src/r.ts", "export { Observable } from 'rxjs';\nexport * from './obs';\n"),
+            (
+                "src/r.ts",
+                "export { Observable } from 'rxjs';\nexport * from './obs';\n",
+            ),
             (
                 "src/app.ts",
                 concat!(
@@ -2729,7 +3346,10 @@ mod tests {
             ("src/a.ts", "export class Mode {}\n"),
             ("src/b.ts", "export type Mode = 'x' | 'y';\n"),
             ("src/i.ts", "export * from './a';\nexport * from './b';\n"),
-            ("src/app.ts", "import { Mode } from './i';\nexport class M extends Mode {}\n"),
+            (
+                "src/app.ts",
+                "import { Mode } from './i';\nexport class M extends Mode {}\n",
+            ),
         ]);
         assert_eq!(binding(&g, "src::app", "Mode"), None);
         assert_eq!(replay_ts(&g, &imports).ambiguous, 1);
@@ -2738,7 +3358,10 @@ mod tests {
     #[test]
     fn star_never_reexports_default() {
         let (g, _) = ts_graph(&[
-            ("src/w.ts", "export default class Widget {}\nexport function helper() {}\n"),
+            (
+                "src/w.ts",
+                "export default class Widget {}\nexport function helper() {}\n",
+            ),
             ("src/star.ts", "export * from './w';\n"),
             ("src/named.ts", "export { default } from './w';\n"),
             ("src/as.ts", "export { default as Widget } from './w';\n"),
@@ -2760,7 +3383,10 @@ mod tests {
         // A star passes `helper` but never the default: a default import of
         // the star barrel binds the barrel itself (the default convention).
         assert_eq!(binding(&g, "src::app", "W"), Some(module("src::star")));
-        assert_eq!(binding(&g, "src::app", "helper"), Some(func("src::w::helper")));
+        assert_eq!(
+            binding(&g, "src::app", "helper"),
+            Some(func("src::w::helper"))
+        );
         // `export { default } from` and `{ default as X } from` name it.
         assert_eq!(binding(&g, "src::app", "W2"), Some(module("src::w")));
         assert_eq!(binding(&g, "src::app", "Widget"), Some(module("src::w")));
@@ -2775,22 +3401,37 @@ mod tests {
     fn a_private_declaration_is_not_star_exported() {
         // quokka core/chat: two private `function pickString` helpers.
         let (g, _) = ts_graph(&[
-            ("src/a.ts", "function pickString() {}\nexport function useA() {}\n"),
+            (
+                "src/a.ts",
+                "function pickString() {}\nexport function useA() {}\n",
+            ),
             ("src/b.ts", "export function pickString() {}\n"),
             ("src/i.ts", "export * from './a';\nexport * from './b';\n"),
             ("src/app.ts", "import { pickString, useA } from './i';\n"),
         ]);
-        assert_eq!(binding(&g, "src::app", "pickString"), Some(func("src::b::pickString")));
+        assert_eq!(
+            binding(&g, "src::app", "pickString"),
+            Some(func("src::b::pickString"))
+        );
         assert_eq!(binding(&g, "src::app", "useA"), Some(func("src::a::useA")));
     }
 
     #[test]
     fn reexport_cycles_terminate() {
         let (g, imports) = ts_graph(&[
-            ("src/a.ts", "export * from './b';\nexport * from './c';\nexport function fa() {}\n"),
-            ("src/b.ts", "export * from './a';\nexport function fb() {}\n"),
+            (
+                "src/a.ts",
+                "export * from './b';\nexport * from './c';\nexport function fa() {}\n",
+            ),
+            (
+                "src/b.ts",
+                "export * from './a';\nexport function fb() {}\n",
+            ),
             ("src/c.ts", "export function x() {}\n"),
-            ("src/self.ts", "export * from './self';\nexport function s() {}\n"),
+            (
+                "src/self.ts",
+                "export * from './self';\nexport function s() {}\n",
+            ),
             (
                 "src/app.ts",
                 concat!(
@@ -2820,14 +3461,20 @@ mod tests {
         let mut files: Vec<(String, String)> =
             vec![("src/c0.ts".into(), "export function deep() {}\n".into())];
         for i in 1..=40 {
-            files.push((format!("src/c{i}.ts"), format!("export * from './c{}';\n", i - 1)));
+            files.push((
+                format!("src/c{i}.ts"),
+                format!("export * from './c{}';\n", i - 1),
+            ));
         }
         let mut app = String::new();
         for i in [20, 32, 33, 40] {
             app.push_str(&format!("import {{ deep as d{i} }} from './c{i}';\n"));
         }
         files.push(("src/app.ts".into(), app));
-        let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
         let (g, imports) = ts_graph(&refs);
         let deep = func("src::c0::deep");
         // A barrel binds through at most 32 levels, whichever barrel was
@@ -2848,7 +3495,10 @@ mod tests {
             ("src/i.ts", "export * from 'rxjs';\nexport * from './a';\n"),
             ("src/app.ts", "import { f } from './i';\n"),
         ]);
-        assert_eq!(imports_from(&g, "src::i"), [rule(module("src::a"), reexports::REEXPORT)]);
+        assert_eq!(
+            imports_from(&g, "src::i"),
+            [rule(module("src::a"), reexports::REEXPORT)]
+        );
         assert_eq!(binding(&g, "src::app", "f"), Some(func("src::a::f")));
         let stats = replay_ts(&g, &imports);
         assert_eq!((stats.stars, stats.edges, stats.external), (2, 1, 1));
@@ -2867,7 +3517,10 @@ mod tests {
                 ),
             ),
         ]);
-        assert_eq!(binding(&g, "src::app", "core"), Some(module("src::core::index")));
+        assert_eq!(
+            binding(&g, "src::app", "core"),
+            Some(module("src::core::index"))
+        );
         assert_eq!(
             calls_from(&g, "src::app::run"),
             [rule(func("src::core::svc::fn"), "attribute")]
@@ -2912,10 +3565,11 @@ mod tests {
         let mut want = vec![svc("Repo"), svc("Store")];
         want.sort_by_key(|id| id.0);
         assert_eq!(injected, want);
-        let called: Vec<NodeId> = out_edges(&g, edge_category::CALLS, method("src::page::Page::run"))
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let called: Vec<NodeId> =
+            out_edges(&g, edge_category::CALLS, method("src::page::Page::run"))
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
         let mut want: Vec<NodeId> = ["Api::get", "Store::save", "Repo::load"]
             .iter()
             .map(|m| method(&format!("src::core::svc::{m}")))
@@ -2934,16 +3588,28 @@ mod tests {
         for (name, want) in [
             ("User", class("src::core::models::user.model::User")),
             ("Order", class("src::core::models::order.model::Order")),
-            ("orderTotal", func("src::core::models::order.model::orderTotal")),
-            ("UserService", class("src::core::services::user.service::UserService")),
+            (
+                "orderTotal",
+                func("src::core::models::order.model::orderTotal"),
+            ),
+            (
+                "UserService",
+                class("src::core::services::user.service::UserService"),
+            ),
         ] {
             assert_eq!(core.get(name), Some(&want), "{name}");
         }
         // A named import binds each side-table entry.
         let audit = class("src::core::services::audit::AuditLog");
         assert_eq!(binding(&g, "src::profile", "Journal"), Some(audit));
-        assert_eq!(binding(&g, "src::profile", "fmt"), Some(module("src::core::util::format")));
-        assert_eq!(binding(&g, "src::vip", "Customer"), Some(class("src::core::models::user.model::User")));
+        assert_eq!(
+            binding(&g, "src::profile", "fmt"),
+            Some(module("src::core::util::format"))
+        );
+        assert_eq!(
+            binding(&g, "src::vip", "Customer"),
+            Some(class("src::core::models::user.model::User"))
+        );
         assert_eq!(binding(&g, "src::profile", "displayName"), None);
     }
 
@@ -2951,13 +3617,23 @@ mod tests {
     fn name_only_fallbacks_do_not_move() {
         let (g, imports) = ts_graph(&fixture());
         let mut pre = pre_imports(&g);
-        let mut names: BTreeSet<String> =
-            pre.symbols.module_symbols.values().flat_map(|s| s.keys().cloned()).collect();
+        let mut names: BTreeSet<String> = pre
+            .symbols
+            .module_symbols
+            .values()
+            .flat_map(|s| s.keys().cloned())
+            .collect();
         names.extend(["Journal", "Customer", "fmt"].map(String::from));
         let answers = |g: &RepoGraph| -> Vec<(String, Option<NodeId>, Option<NodeId>)> {
             names
                 .iter()
-                .map(|n| (n.clone(), unique_global_function(g, n), crate::calls::unique_global_type(g, n)))
+                .map(|n| {
+                    (
+                        n.clone(),
+                        unique_global_function(g, n),
+                        crate::calls::unique_global_type(g, n),
+                    )
+                })
                 .collect()
         };
         let before = answers(&pre);
@@ -2968,7 +3644,14 @@ mod tests {
         assert_eq!(answers(&g), before);
         // An externally imported `Journal` binds nothing: no INJECTS, no CALLS.
         assert!(out_edges(&g, edge_category::INJECTS, class("src::report::ReportPage")).is_empty());
-        assert!(out_edges(&g, edge_category::CALLS, method("src::report::ReportPage::open")).is_empty());
+        assert!(
+            out_edges(
+                &g,
+                edge_category::CALLS,
+                method("src::report::ReportPage::open")
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2980,7 +3663,14 @@ mod tests {
         barrels.materialize(&mut pre);
         // Only the named imports of a barrel are tallied; replay the build.
         let stats = replay_ts(&g, &imports);
-        assert_eq!(barrels.stats(), ReexportStats { bound: 0, unbound: 0, ..stats });
+        assert_eq!(
+            barrels.stats(),
+            ReexportStats {
+                bound: 0,
+                unbound: 0,
+                ..stats
+            }
+        );
         let expect = "[imports] reexport stars=6 named=1 namespace=1 local=1 edges=8 external=0 \
                       entries=15 aliased=5 bound=8 unbound=1 ambiguous=2 cycles=0 capped=0";
         assert_eq!(stats.marker().as_deref(), Some(expect));
@@ -3000,7 +3690,13 @@ mod tests {
                 .map(|e| {
                     let ev = Evidence::of(e);
                     let rule = ev.as_ref().and_then(|v| v.rule.clone()).unwrap_or_default();
-                    (e.from.0, e.to.0, e.category.0, rule, ev.and_then(|v| v.line))
+                    (
+                        e.from.0,
+                        e.to.0,
+                        e.category.0,
+                        rule,
+                        ev.and_then(|v| v.line),
+                    )
                 })
                 .collect();
             edges.sort();
@@ -3008,7 +3704,8 @@ mod tests {
                 let mut rows: Vec<(u64, Vec<(String, u64)>)> = t
                     .iter()
                     .map(|(m, s)| {
-                        let mut s: Vec<(String, u64)> = s.iter().map(|(n, id)| (n.clone(), id.0)).collect();
+                        let mut s: Vec<(String, u64)> =
+                            s.iter().map(|(n, id)| (n.clone(), id.0)).collect();
                         s.sort();
                         (m.0, s)
                     })
@@ -3016,7 +3713,11 @@ mod tests {
                 rows.sort();
                 rows
             };
-            (edges, table(&g.symbols.module_symbols), table(&g.symbols.module_import_bindings))
+            (
+                edges,
+                table(&g.symbols.module_symbols),
+                table(&g.symbols.module_import_bindings),
+            )
         };
         let files = fixture();
         let (fwd, _) = ts_graph(&files);
@@ -3034,12 +3735,19 @@ mod tests {
         let parses = vec![index, cart];
         let imports = all_imports(&parses);
         let g = build_typescript(repo(), parses, dart_source).expect("build");
-        assert_eq!(imports_from(&g, "lib::cart"), [rule(module("lib::src::util"), "symbol")]);
+        assert_eq!(
+            imports_from(&g, "lib::cart"),
+            [rule(module("lib::src::util"), "symbol")]
+        );
         let mut pre = pre_imports(&g);
         let mut same = same_stem_table(&pre);
         let barrels = Barrels::read(&mut pre, &imports, &dart_source, &mut same);
         assert_eq!(barrels.stats(), ReexportStats::default());
         assert_eq!(barrels.marker(), None);
-        assert!(pre.edges.iter().all(|e| e.category != edge_category::IMPORTS));
+        assert!(
+            pre.edges
+                .iter()
+                .all(|e| e.category != edge_category::IMPORTS)
+        );
     }
 }

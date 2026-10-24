@@ -152,7 +152,11 @@ pub fn lex(source: SourceId, source_name: &str, text: &str) -> Result<Vec<Token>
         diags: Vec::new(),
     };
     lexer.run();
-    if lexer.diags.is_empty() { Ok(lexer.tokens) } else { Err(RulesError::Parse(lexer.diags)) }
+    if lexer.diags.is_empty() {
+        Ok(lexer.tokens)
+    } else {
+        Err(RulesError::Parse(lexer.diags))
+    }
 }
 
 /// A position: byte offset (always on a char boundary), 1-based line and char column.
@@ -172,8 +176,19 @@ struct Cursor<'a> {
 impl<'a> Cursor<'a> {
     fn new(text: &'a str) -> Self {
         // A byte-order mark is invisible in an editor, so it takes no column.
-        let pos = if text.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
-        Cursor { text, at: Mark { pos, line: 1, col: 1 } }
+        let pos = if text.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        Cursor {
+            text,
+            at: Mark {
+                pos,
+                line: 1,
+                col: 1,
+            },
+        }
     }
 
     /// The unread text; `get` keeps a bad offset from panicking (it never is one).
@@ -234,7 +249,11 @@ fn offset(pos: usize) -> u32 {
 
 /// A char as a diagnostic shows it: control chars escaped, everything else as is.
 fn shown(c: char) -> String {
-    if c.is_control() { c.escape_default().to_string() } else { c.to_string() }
+    if c.is_control() {
+        c.escape_default().to_string()
+    } else {
+        c.to_string()
+    }
 }
 
 impl Lexer<'_> {
@@ -251,7 +270,8 @@ impl Lexer<'_> {
     fn error(&mut self, from: Mark, message: String) {
         if self.diags.len() < MAX_DIAGNOSTICS {
             let span = self.span_from(from);
-            self.diags.push(Diagnostic::error(span, self.source_name, None, message));
+            self.diags
+                .push(Diagnostic::error(span, self.source_name, None, message));
         }
     }
 
@@ -306,7 +326,11 @@ impl Lexer<'_> {
                     continue;
                 }
                 c if c == '_' || c.is_ascii_alphabetic() => {
-                    while self.cur.peek().is_some_and(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    while self
+                        .cur
+                        .peek()
+                        .is_some_and(|c| c == '_' || c.is_ascii_alphanumeric())
+                    {
                         self.cur.bump();
                     }
                     TokenKind::Ident(self.cur.since(from).to_string())
@@ -441,7 +465,9 @@ impl Lexer<'_> {
     }
 
     fn after_minus(&self) -> bool {
-        self.tokens.last().is_some_and(|t| t.kind == TokenKind::Minus)
+        self.tokens
+            .last()
+            .is_some_and(|t| t.kind == TokenKind::Minus)
     }
 }
 
@@ -591,7 +617,10 @@ mod tests {
                 Eof,
             ]
         );
-        assert_eq!(kinds("->{1,3}"), vec![Arrow, LBrace, Int(1), Comma, Int(3), RBrace, Eof]);
+        assert_eq!(
+            kinds("->{1,3}"),
+            vec![Arrow, LBrace, Int(1), Comma, Int(3), RBrace, Eof]
+        );
         // The abbreviated arrows and the open quantifier, as DB.7a's grammar reads them.
         assert_eq!(kinds("-->"), vec![Minus, Arrow, Eof]);
         assert_eq!(kinds("<--"), vec![LeftArrow, Minus, Eof]);
@@ -626,20 +655,39 @@ mod tests {
         let toks = tokens("\n\"é\" x");
         let x = &toks[1];
         assert_eq!(x.kind, id("x"));
-        assert_eq!((x.span.line, x.span.col, x.span.start, x.span.end), (2, 5, 6, 7));
+        assert_eq!(
+            (x.span.line, x.span.col, x.span.start, x.span.end),
+            (2, 5, 6, 7)
+        );
         // The string spans its quotes: bytes 1..5, the é two bytes wide.
-        assert_eq!((toks[0].span.start, toks[0].span.end, toks[0].span.col), (1, 5, 1));
+        assert_eq!(
+            (toks[0].span.start, toks[0].span.end, toks[0].span.col),
+            (1, 5, 1)
+        );
         // The end-of-input token is empty and sits at the end.
-        assert_eq!((toks[2].kind.clone(), toks[2].span.start, toks[2].span.end), (Eof, 7, 7));
+        assert_eq!(
+            (toks[2].kind.clone(), toks[2].span.start, toks[2].span.end),
+            (Eof, 7, 7)
+        );
 
         // CRLF reports the same lines and columns as LF; only the bytes move.
         let lf = tokens("p(x).\nq(y) :-\n  r(y).\n");
         let crlf = tokens("p(x).\r\nq(y) :-\r\n  r(y).\r\n");
-        let at = |t: &[Token]| t.iter().map(|t| (t.span.line, t.span.col)).collect::<Vec<_>>();
+        let at = |t: &[Token]| {
+            t.iter()
+                .map(|t| (t.span.line, t.span.col))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(at(&lf), at(&crlf));
         let r = &crlf[10];
-        assert_eq!((r.kind.clone(), r.span.line, r.span.col, r.span.start), (id("r"), 3, 3, 18));
-        assert_eq!((lf[15].kind.clone(), lf[15].span.line, lf[15].span.col), (Eof, 4, 1));
+        assert_eq!(
+            (r.kind.clone(), r.span.line, r.span.col, r.span.start),
+            (id("r"), 3, 3, 18)
+        );
+        assert_eq!(
+            (lf[15].kind.clone(), lf[15].span.line, lf[15].span.col),
+            (Eof, 4, 1)
+        );
 
         // Every span lands on char boundaries and slices back to its token's text.
         let text = "p(\"é\", 'ü') :- /* ö */ q(\"ßß\", x). // ü";
@@ -647,22 +695,44 @@ mod tests {
         assert_eq!(toks.len(), 15);
         for t in &toks {
             let slice = text.get(t.span.start as usize..t.span.end as usize);
-            assert!(slice.is_some(), "span {:?} is not on a char boundary", t.span);
+            assert!(
+                slice.is_some(),
+                "span {:?} is not on a char boundary",
+                t.span
+            );
         }
-        assert_eq!(text.get(toks[4].span.start as usize..toks[4].span.end as usize), Some("'ü'"));
+        assert_eq!(
+            text.get(toks[4].span.start as usize..toks[4].span.end as usize),
+            Some("'ü'")
+        );
         assert_eq!((toks[7].kind.clone(), toks[7].span.col), (id("q"), 24));
         let toks = tokens("ab(\"ßß\", cd)");
         let cd = &toks[4];
-        assert_eq!((cd.kind.clone(), cd.span.col, cd.span.start), (id("cd"), 10, 11));
+        assert_eq!(
+            (cd.kind.clone(), cd.span.col, cd.span.start),
+            (id("cd"), 10, 11)
+        );
 
         // The span carries the source id; a leading byte-order mark takes no column.
         let toks = lex(7, "check", "\u{feff}ok.").unwrap();
-        assert_eq!(toks[0].span, Span { source: 7, start: 3, end: 5, line: 1, col: 1 });
+        assert_eq!(
+            toks[0].span,
+            Span {
+                source: 7,
+                start: 3,
+                end: 5,
+                line: 1,
+                col: 1
+            }
+        );
     }
 
     #[test]
     fn comments_and_escapes() {
-        assert_eq!(kinds("// c\n/* b */ \"a\\\\\\\"b\""), vec![st("a\\\"b"), Eof]);
+        assert_eq!(
+            kinds("// c\n/* b */ \"a\\\\\\\"b\""),
+            vec![st("a\\\"b"), Eof]
+        );
         // Every escape in both quote styles; a raw tab and CR are kept as written.
         assert_eq!(
             kinds(r#"'it\'s \"q\" \\ \n\t' "x'y" "#),
@@ -672,8 +742,19 @@ mod tests {
         // A comment ends a line without eating the next token; a block comment may
         // span lines, and `*` inside it does not end it.
         let toks = tokens("a // x\nb /* 1\n * 2 **/ c");
-        let at: Vec<_> = toks.iter().map(|t| (t.kind.clone(), t.span.line, t.span.col)).collect();
-        assert_eq!(at, vec![(id("a"), 1, 1), (id("b"), 2, 1), (id("c"), 3, 10), (Eof, 3, 11)]);
+        let at: Vec<_> = toks
+            .iter()
+            .map(|t| (t.kind.clone(), t.span.line, t.span.col))
+            .collect();
+        assert_eq!(
+            at,
+            vec![
+                (id("a"), 1, 1),
+                (id("b"), 2, 1),
+                (id("c"), 3, 10),
+                (Eof, 3, 11)
+            ]
+        );
         // The IR's canonical string rendering reads back to the same value.
         let value = "q\\\"t\n\tr\r'é";
         let rendered = Term::str(value).to_string();
@@ -686,9 +767,15 @@ mod tests {
         assert_eq!(err.diagnostics().len(), 1);
         assert_eq!(err.to_string(), "rules:2:5: error: unterminated string");
         let d = &err.diagnostics()[0];
-        assert_eq!((d.span.start, d.span.end, d.predicate.clone()), (10, 14, None));
+        assert_eq!(
+            (d.span.start, d.span.end, d.predicate.clone()),
+            (10, 14, None)
+        );
 
-        assert_eq!(errors("99999999999999999999"), vec!["rules:1:1: error: integer out of range"]);
+        assert_eq!(
+            errors("99999999999999999999"),
+            vec!["rules:1:1: error: integer out of range"]
+        );
         assert_eq!(
             errors("p(@).\nq(#)."),
             vec![
@@ -711,18 +798,35 @@ mod tests {
                 "rules:1:5: error: unknown escape `\\q` in string (escapes: \\\\ \\\" \\' \\n \\t)"
             ]
         );
-        assert_eq!(errors("p. /* x\ny"), vec!["rules:1:4: error: unterminated block comment"]);
-        assert_eq!(errors("a / b"), vec!["rules:1:3: error: unexpected character `/`"]);
+        assert_eq!(
+            errors("p. /* x\ny"),
+            vec!["rules:1:4: error: unterminated block comment"]
+        );
+        assert_eq!(
+            errors("a / b"),
+            vec!["rules:1:3: error: unexpected character `/`"]
+        );
         // A non-ASCII char outside a string is one diagnostic spanning its bytes; a
         // control char is shown escaped.
         let err = lex(0, "rules", "é\u{7}").unwrap_err();
-        let shown: Vec<_> =
-            err.diagnostics().iter().map(|d| (d.to_string(), d.span.start, d.span.end)).collect();
+        let shown: Vec<_> = err
+            .diagnostics()
+            .iter()
+            .map(|d| (d.to_string(), d.span.start, d.span.end))
+            .collect();
         assert_eq!(
             shown,
             vec![
-                ("rules:1:1: error: unexpected character `é`".to_string(), 0, 2),
-                ("rules:1:2: error: unexpected character `\\u{7}`".to_string(), 2, 3),
+                (
+                    "rules:1:1: error: unexpected character `é`".to_string(),
+                    0,
+                    2
+                ),
+                (
+                    "rules:1:2: error: unexpected character `\\u{7}`".to_string(),
+                    2,
+                    3
+                ),
             ]
         );
         // At most 20 diagnostics, in source order.
@@ -733,7 +837,10 @@ mod tests {
 
     #[test]
     fn ne_spellings() {
-        assert_eq!(kinds("a != b <> c"), vec![id("a"), Ne, id("b"), Ne, id("c"), Eof]);
+        assert_eq!(
+            kinds("a != b <> c"),
+            vec![id("a"), Ne, id("b"), Ne, id("c"), Eof]
+        );
         assert_eq!(
             kinds("<= >= -> <- :- .. < > = ! : . ? $p"),
             vec![
@@ -756,29 +863,56 @@ mod tests {
             ]
         );
         let toks = tokens("x<>y");
-        assert_eq!((toks[1].span.start, toks[1].span.end, toks[1].span.col), (1, 3, 2));
+        assert_eq!(
+            (toks[1].span.start, toks[1].span.end, toks[1].span.col),
+            (1, 3, 2)
+        );
         // The greedy pairs: `a<-1` is an arrow, `a < -1` a comparison; `n:-1` is `:-`.
         assert_eq!(kinds("a<-1"), vec![id("a"), LeftArrow, Int(1), Eof]);
         assert_eq!(kinds("a < -1"), vec![id("a"), Lt, Minus, Int(1), Eof]);
-        assert_eq!(kinds("{n:-1}"), vec![LBrace, id("n"), ColonDash, Int(1), RBrace, Eof]);
-        assert_eq!(kinds("{n: -1}"), vec![LBrace, id("n"), Colon, Minus, Int(1), RBrace, Eof]);
+        assert_eq!(
+            kinds("{n:-1}"),
+            vec![LBrace, id("n"), ColonDash, Int(1), RBrace, Eof]
+        );
+        assert_eq!(
+            kinds("{n: -1}"),
+            vec![LBrace, id("n"), Colon, Minus, Int(1), RBrace, Eof]
+        );
     }
 
     #[test]
     fn integer_bounds() {
-        assert_eq!(kinds("9223372036854775807 007"), vec![Int(i64::MAX), Int(7), Eof]);
-        assert_eq!(errors("9223372036854775808"), vec!["rules:1:1: error: integer out of range"]);
+        assert_eq!(
+            kinds("9223372036854775807 007"),
+            vec![Int(i64::MAX), Int(7), Eof]
+        );
+        assert_eq!(
+            errors("9223372036854775808"),
+            vec!["rules:1:1: error: integer out of range"]
+        );
         // Its negation is i64::MIN: after a minus the two fold into one token
         // spanning both, so the IR's rendering of i64::MIN reads back.
         let toks = tokens("n < -9223372036854775808.");
         assert_eq!(toks[2].kind, Int(i64::MIN));
-        assert_eq!((toks[2].span.start, toks[2].span.end, toks[2].span.col), (4, 24, 5));
+        assert_eq!(
+            (toks[2].span.start, toks[2].span.end, toks[2].span.col),
+            (4, 24, 5)
+        );
         assert_eq!(toks[3].kind, Dot);
-        assert_eq!(kinds(&Term::int(i64::MIN).to_string()), vec![Int(i64::MIN), Eof]);
+        assert_eq!(
+            kinds(&Term::int(i64::MIN).to_string()),
+            vec![Int(i64::MIN), Eof]
+        );
         assert_eq!(kinds("- 9223372036854775808"), vec![Int(i64::MIN), Eof]);
-        assert_eq!(kinds("--9223372036854775808"), vec![Minus, Int(i64::MIN), Eof]);
+        assert_eq!(
+            kinds("--9223372036854775808"),
+            vec![Minus, Int(i64::MIN), Eof]
+        );
         assert_eq!(kinds("-5"), vec![Minus, Int(5), Eof]);
-        assert_eq!(errors("-9223372036854775809"), vec!["rules:1:2: error: integer out of range"]);
+        assert_eq!(
+            errors("-9223372036854775809"),
+            vec!["rules:1:2: error: integer out of range"]
+        );
         assert_eq!(
             errors("1..99999999999999999999"),
             vec!["rules:1:4: error: integer out of range"]
@@ -790,13 +924,25 @@ mod tests {
         // Every token kind's Display lexes back to that kind.
         let text = "id 'it\\'s' 42 ( ) [ ] { } , . .. : :- ; | * + - ? -> <- ! = != <> < <= > >= $";
         let original = kinds(text);
-        let rendered: Vec<String> =
-            original.iter().filter(|k| **k != Eof).map(ToString::to_string).collect();
+        let rendered: Vec<String> = original
+            .iter()
+            .filter(|k| **k != Eof)
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(rendered[1], "\"it's\"");
         assert_eq!(rendered[25], "!=");
         assert_eq!(kinds(&rendered.join(" ")), original);
         assert_eq!(Eof.to_string(), "end of input");
         assert_eq!(kinds(""), vec![Eof]);
-        assert_eq!(tokens("p.\n")[2].span, Span { source: 0, start: 3, end: 3, line: 2, col: 1 });
+        assert_eq!(
+            tokens("p.\n")[2].span,
+            Span {
+                source: 0,
+                start: 3,
+                end: 3,
+                line: 2,
+                col: 1
+            }
+        );
     }
 }

@@ -26,9 +26,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::identity::Collapse;
-use glia_engine::tests_for::{
-    TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
-};
+use glia_engine::tests_for::{TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev};
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -329,7 +327,13 @@ def place(order):\n    return price(order)\n";
     fn graph_helpers_return_the_documented_object() {
         let (_scratch, top) = shop("graph");
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let a = qname_answer(&built.merged, &built.repo_labels, &["price".to_string()], defaults()).expect("answer");
+        let a = qname_answer(
+            &built.merged,
+            &built.repo_labels,
+            &["price".to_string()],
+            defaults(),
+        )
+        .expect("answer");
         let v = value(&a);
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [
@@ -363,8 +367,13 @@ def place(order):\n    return price(order)\n";
 
         // Nothing calls place: its module's name pairing is its only row,
         // and module_level=false leaves the answer empty, with its absence.
-        let paired =
-            qname_answer(&built.merged, &built.repo_labels, &["place".to_string()], defaults()).expect("answer");
+        let paired = qname_answer(
+            &built.merged,
+            &built.repo_labels,
+            &["place".to_string()],
+            defaults(),
+        )
+        .expect("answer");
         assert_eq!(value(&paired)["tests"][0]["tier"], "heuristic");
         assert_eq!(paired.untested, ["shop::service::place"]);
         let cases = qname_answer(

@@ -2862,7 +2862,10 @@ fn closure_at(b: &[u8], i: usize) -> bool {
 /// ([`string_literals`]), for the needle scanners that run with no path and
 /// so no CJ.1 guard: a needle whose first byte is in a span is no call.
 pub(crate) fn literal_spans(source: &str) -> Vec<Range<usize>> {
-    string_literals(source).into_iter().map(|l| l.outer).collect()
+    string_literals(source)
+        .into_iter()
+        .map(|l| l.outer)
+        .collect()
 }
 
 /// True when byte `pos` sits inside one of `spans` ([`literal_spans`]).
@@ -2874,7 +2877,10 @@ pub(crate) fn in_spans(spans: &[Range<usize>], pos: usize) -> bool {
 /// True when the line holding `pos` opens, before `pos`, with one of
 /// `prefixes`: a comment line (`//`, `/*`, a block comment's `*`, `#`).
 pub(crate) fn line_opens_with(b: &[u8], pos: usize, prefixes: &[&[u8]]) -> bool {
-    let start = b[..pos].iter().rposition(|&c| c == b'\n').map_or(0, |p| p + 1);
+    let start = b[..pos]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |p| p + 1);
     let line = b[start..pos].trim_ascii_start();
     prefixes.iter().any(|p| line.starts_with(p))
 }
@@ -4745,7 +4751,10 @@ Future<int> addUser(Database db, String email) {
         assert_eq!(entity_qnames(&out), ["data_entity:sql:users"]);
         assert!(access.declared.is_empty(), "a helper call is a site");
         let hits = sqflite_table_calls(SQFLITE_REPO).unwrap_or_default();
-        assert_eq!(sqflite_marker(&hits), "[data-entity] sqflite tables=1 sites=2");
+        assert_eq!(
+            sqflite_marker(&hits),
+            "[data-entity] sqflite tables=1 sites=2"
+        );
         assert_eq!(
             sites_of(SQFLITE_REPO),
             [

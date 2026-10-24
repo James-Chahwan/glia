@@ -164,13 +164,23 @@ fn docs_sync_through_stub_feeds_documents_edge() {
 }
 
 /// `glia docs sync <repo> --space <space>` against a stub serving `page`.
-fn sync_space(scratch: &Path, repo: &str, space: &str, page: serde_json::Value) -> (Output, String) {
-    let stub = StubServer::start(vec![Canned::ok(serde_json::json!({ "results": [page] }).to_string())])
-        .expect("stub binds");
+fn sync_space(
+    scratch: &Path,
+    repo: &str,
+    space: &str,
+    page: serde_json::Value,
+) -> (Output, String) {
+    let stub = StubServer::start(vec![Canned::ok(
+        serde_json::json!({ "results": [page] }).to_string(),
+    )])
+    .expect("stub binds");
     let origin = stub.origin();
     let out = glia(
         scratch,
-        &["docs", "sync", repo, "--space", space, "--site", &origin, "--email", "e", "--token", "t"],
+        &[
+            "docs", "sync", repo, "--space", space, "--site", &origin, "--email", "e", "--token",
+            "t",
+        ],
     );
     stub.finish();
     let stderr = text(&out.stderr);
@@ -212,13 +222,23 @@ fn docs_sync_second_space_keeps_the_first() {
         &scratch.0,
         repo_arg,
         "ENG",
-        page("1", "Orders", "<p>Call <code>place_order</code>.</p>", "ENG"),
+        page(
+            "1",
+            "Orders",
+            "<p>Call <code>place_order</code>.</p>",
+            "ENG",
+        ),
     );
     let (_, stderr) = sync_space(
         &scratch.0,
         repo_arg,
         "OPS",
-        page("2", "Billing", "<h2>Billing</h2><p>see <code>BillingService</code></p>", "OPS"),
+        page(
+            "2",
+            "Billing",
+            "<h2>Billing</h2><p>see <code>BillingService</code></p>",
+            "OPS",
+        ),
     );
     assert!(
         stderr.contains(
@@ -235,10 +255,17 @@ fn docs_sync_second_space_keeps_the_first() {
             v["rel_path"].as_str().unwrap_or("").to_string()
         })
         .collect();
-    assert_eq!(paths, ["confluence/ENG/orders.md", "confluence/OPS/billing.md"]);
+    assert_eq!(
+        paths,
+        ["confluence/ENG/orders.md", "confluence/OPS/billing.md"]
+    );
 
     let out = glia(&scratch.0, &["analyze", repo_arg, "--format", "json"]);
-    assert!(out.status.success(), "analyze stderr:\n{}", text(&out.stderr));
+    assert!(
+        out.status.success(),
+        "analyze stderr:\n{}",
+        text(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("analyze stdout is JSON");
     let nodes = v["nodes"].as_array().expect("nodes array");
     let edges = v["edges"].as_array().expect("edges array");
@@ -258,11 +285,15 @@ fn docs_sync_second_space_keeps_the_first() {
         .collect();
     assert_eq!(into_billing.len(), 1, "one CONTAINS edge into it");
     assert!(
-        nodes.iter().any(|n| n["id"] == into_billing[0]["from"] && n["qname"] == "docspace::confluence::OPS"),
+        nodes.iter().any(
+            |n| n["id"] == into_billing[0]["from"] && n["qname"] == "docspace::confluence::OPS"
+        ),
         "the OPS space contains it"
     );
     assert!(
-        nodes.iter().any(|n| n["kind_name"] == "DOC_SECTION" && n["qname"] == "docs::ENG::orders::orders"),
+        nodes
+            .iter()
+            .any(|n| n["kind_name"] == "DOC_SECTION" && n["qname"] == "docs::ENG::orders::orders"),
         "the ENG space's page survives the OPS sync"
     );
 }

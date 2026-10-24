@@ -70,7 +70,11 @@ fn glia(args: &[&str]) -> Output {
         .output()
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "glia {args:?} exited {:?}\nstderr:\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia {args:?} exited {:?}\nstderr:\n{stderr}",
+        out.status
+    );
     for line in stderr.lines() {
         if line.starts_with("[gmap] ") {
             eprintln!("{line}");
@@ -97,8 +101,11 @@ fn gmaps_directly_in(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn cross_triples(m: &glia_graph::MergedGraph) -> Vec<(u64, u64, u32)> {
-    let mut v: Vec<(u64, u64, u32)> =
-        m.cross_edges.iter().map(|e| (e.from.0, e.to.0, e.category.0)).collect();
+    let mut v: Vec<(u64, u64, u32)> = m
+        .cross_edges
+        .iter()
+        .map(|e| (e.from.0, e.to.0, e.category.0))
+        .collect();
     v.sort_unstable();
     v
 }
@@ -117,10 +124,23 @@ fn build_writes_the_layout_the_mcp_reads() {
     )
     .expect("manifest is JSON");
     assert_eq!(manifest["schema_version"], MANIFEST_VERSION);
-    assert!(layout.join("cross_stack.gmap").is_file(), "cross_stack.gmap missing");
-    assert!(layout.join("parse_cache.bin").is_file(), "parse cache not beside the layout");
-    assert_eq!(gmaps_directly_in(&repo.join(".glia")), Vec::<PathBuf>::new(), "flat shards");
-    assert!(!repo.join(".ai").exists(), "nothing is written under .ai any more");
+    assert!(
+        layout.join("cross_stack.gmap").is_file(),
+        "cross_stack.gmap missing"
+    );
+    assert!(
+        layout.join("parse_cache.bin").is_file(),
+        "parse cache not beside the layout"
+    );
+    assert_eq!(
+        gmaps_directly_in(&repo.join(".glia")),
+        Vec::<PathBuf>::new(),
+        "flat shards"
+    );
+    assert!(
+        !repo.join(".ai").exists(),
+        "nothing is written under .ai any more"
+    );
     assert_eq!(
         std::fs::read_to_string(layout.join(".gitignore")).expect("self-ignoring .gitignore"),
         SELF_IGNORE
@@ -132,12 +152,25 @@ fn build_writes_the_layout_the_mcp_reads() {
     let loaded_nodes: usize = loaded.graphs.iter().map(|g| g.nodes.len()).sum();
     assert_eq!(loaded_nodes, fresh.total_nodes);
     assert_eq!(cross_triples(&loaded), cross_triples(&fresh.merged));
-    assert_eq!(loaded.cross_edges.len(), 3, "http_stack_smoke's HTTP_CALLS cross edges");
-    assert!(!is_gmap_stale(&layout, &repo), "a fresh build must not read as stale");
+    assert_eq!(
+        loaded.cross_edges.len(),
+        3,
+        "http_stack_smoke's HTTP_CALLS cross edges"
+    );
+    assert!(
+        !is_gmap_stale(&layout, &repo),
+        "a fresh build must not read as stale"
+    );
 
     let marker = format!("[gmap] wrote {} writer=cli shards=", layout.display());
-    assert!(stderr.contains(&marker), "fired_on marker missing:\n{stderr}");
-    assert!(stderr.contains(" cross=3 bytes="), "marker counts:\n{stderr}");
+    assert!(
+        stderr.contains(&marker),
+        "fired_on marker missing:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(" cross=3 bytes="),
+        "marker counts:\n{stderr}"
+    );
 }
 
 #[test]
@@ -154,10 +187,23 @@ fn legacy_layout_is_reported_not_read() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let notice = format!("[gmap] legacy layout ignored: {}", legacy.display());
     assert!(stderr.contains(&notice), "legacy notice missing:\n{stderr}");
-    assert_eq!(stderr.matches("[gmap] legacy layout ignored:").count(), 1, "{stderr}");
-    assert_eq!(std::fs::read(legacy.join("manifest.json")).expect("still there"), legacy_manifest);
-    assert_eq!(std::fs::read_to_string(legacy.join("config.yaml")).expect("still there"), "skip: []\n");
-    assert!(!legacy.join("parse_cache.bin").exists(), "the cache moved to the new layout");
+    assert_eq!(
+        stderr.matches("[gmap] legacy layout ignored:").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(legacy.join("manifest.json")).expect("still there"),
+        legacy_manifest
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy.join("config.yaml")).expect("still there"),
+        "skip: []\n"
+    );
+    assert!(
+        !legacy.join("parse_cache.bin").exists(),
+        "the cache moved to the new layout"
+    );
     let loaded = read_merged_sharded(&default_gmap_dir(&repo)).expect("new layout loads");
     assert_eq!(loaded.cross_edges.len(), 3);
 }
@@ -190,12 +236,27 @@ fn orphan_shards_are_cleaned() {
     let out = glia(&["build", path_str(&repo)]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert!(!glia_dir.join("repo-42-00.gmap").exists(), "0.4.x flat shard kept");
-    assert!(glia_dir.join("keep.gmap").exists(), "a non-shard file was removed");
-    assert!(!layout.join("repo-42-07.gmap").exists(), "layout orphan kept");
-    assert!(legacy.join("repo-7.gmap").exists(), "a shard the legacy manifest names was removed");
+    assert!(
+        !glia_dir.join("repo-42-00.gmap").exists(),
+        "0.4.x flat shard kept"
+    );
+    assert!(
+        glia_dir.join("keep.gmap").exists(),
+        "a non-shard file was removed"
+    );
+    assert!(
+        !layout.join("repo-42-07.gmap").exists(),
+        "layout orphan kept"
+    );
+    assert!(
+        legacy.join("repo-7.gmap").exists(),
+        "a shard the legacy manifest names was removed"
+    );
     assert!(!legacy.join("repo-42.gmap").exists(), "legacy orphan kept");
-    assert!(stderr.contains("[gmap] removed 1 orphan shard(s) from "), "{stderr}");
+    assert!(
+        stderr.contains("[gmap] removed 1 orphan shard(s) from "),
+        "{stderr}"
+    );
     // Every shard left in the layout is one its manifest names.
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join("manifest.json")).expect("manifest"))
@@ -249,21 +310,41 @@ fn pre_leap_checkout_upgrades_in_place() {
         .join("tests/fixtures/gmap_pre_leap");
     let d = s.0.join("repo");
     copy_tree(&fixture.join("repo"), &d);
-    copy_tree(&fixture.join("layout-ai-repo-graph"), &d.join(".ai/repo-graph"));
+    copy_tree(
+        &fixture.join("layout-ai-repo-graph"),
+        &d.join(".ai/repo-graph"),
+    );
     copy_tree(&fixture.join("layout-glia-build"), &d.join(".glia"));
     let flat = gmaps_directly_in(&d.join(".glia"));
-    assert!(!flat.is_empty(), "the fixture carries the flat glia build shards");
+    assert!(
+        !flat.is_empty(),
+        "the fixture carries the flat glia build shards"
+    );
     let legacy = d.join(".ai").join("repo-graph");
     let legacy_before = snapshot(&legacy);
 
     let out = glia(&["build", path_str(&d)]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert!(stderr.contains(&format!("[gmap] legacy layout ignored: {}", legacy.display())), "{stderr}");
-    let swept = format!("[gmap] removed {} orphan shard(s) from {}", flat.len(), d.join(".glia").display());
+    assert!(
+        stderr.contains(&format!(
+            "[gmap] legacy layout ignored: {}",
+            legacy.display()
+        )),
+        "{stderr}"
+    );
+    let swept = format!(
+        "[gmap] removed {} orphan shard(s) from {}",
+        flat.len(),
+        d.join(".glia").display()
+    );
     assert!(stderr.contains(&swept), "{stderr}");
     assert_eq!(gmaps_directly_in(&d.join(".glia")), Vec::<PathBuf>::new());
-    assert_eq!(snapshot(&legacy), legacy_before, "the legacy layout was modified");
+    assert_eq!(
+        snapshot(&legacy),
+        legacy_before,
+        "the legacy layout was modified"
+    );
     let layout = default_gmap_dir(&d);
     let loaded = read_merged_sharded(&layout).expect("the 0.5.0 layout loads");
     assert!(loaded.graphs.iter().map(|g| g.nodes.len()).sum::<usize>() > 0);
@@ -278,7 +359,13 @@ fn build_out_names_a_layout_dir() {
     let out_dir = s.0.join("elsewhere").join("layout");
     glia(&["build", path_str(&repo), "--out", path_str(&out_dir)]);
     assert!(out_dir.join("manifest.json").is_file());
-    assert_eq!(read_merged_sharded(&out_dir).expect("loads").cross_edges.len(), 3);
+    assert_eq!(
+        read_merged_sharded(&out_dir)
+            .expect("loads")
+            .cross_edges
+            .len(),
+        3
+    );
     assert!(!default_gmap_dir(&repo).join("manifest.json").exists());
 }
 
@@ -303,14 +390,26 @@ fn layout_never_shows_in_git_status() {
     let git_ok = git(&["init", "-q"]).is_ok_and(|o| o.status.success());
     glia(&["build", path_str(&repo)]);
     let layout = default_gmap_dir(&repo);
-    assert_eq!(std::fs::read_to_string(layout.join(".gitignore")).expect("written"), SELF_IGNORE);
-    assert!(!repo.join(".gitignore").exists(), "the root .gitignore is the user's");
+    assert_eq!(
+        std::fs::read_to_string(layout.join(".gitignore")).expect("written"),
+        SELF_IGNORE
+    );
+    assert!(
+        !repo.join(".gitignore").exists(),
+        "the root .gitignore is the user's"
+    );
     if !git_ok {
         eprintln!("[lc9] git unavailable - git status assertion skipped");
         return;
     }
     let status = git(&["status", "--porcelain", "--untracked-files=all"]).expect("git status");
     let listed = String::from_utf8_lossy(&status.stdout);
-    assert!(listed.contains("backend/"), "the fixture itself is untracked: {listed}");
-    assert!(!listed.contains(".glia"), "the layout shows in git status:\n{listed}");
+    assert!(
+        listed.contains("backend/"),
+        "the fixture itself is untracked: {listed}"
+    );
+    assert!(
+        !listed.contains(".glia"),
+        "the layout shows in git status:\n{listed}"
+    );
 }

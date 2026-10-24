@@ -42,30 +42,75 @@ use twox_hash::XxHash64;
 // IDs
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct NodeId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct RepoId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct ShardId(pub u64);
 
 /// Self-describing graph-type tag — one per container file.
 /// Code = `"code"`, chemistry = `"chemistry"`, etc. Core interprets no values.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct GraphType(pub String);
 
 impl GraphType {
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl NodeId {
@@ -106,8 +151,19 @@ impl ShardId {
 // Kinds & registry-backed tags
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub enum Confidence {
     Strong,
@@ -117,22 +173,55 @@ pub enum Confidence {
 
 /// Registry-backed cell type tag. Interpretation lives in the per-domain
 /// cell registry stored in the container header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct CellTypeId(pub u32);
 
 /// Registry-backed edge category tag. Interpretation lives in the per-domain
 /// edge registry stored in the container header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct EdgeCategoryId(pub u32);
 
 /// Registry-backed node-kind tag. Code: Module/Class/Method/Route/...
 /// Chemistry: Atom/Bond/Molecule/...
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct NodeKindId(pub u32);
 
@@ -140,8 +229,18 @@ pub struct NodeKindId(pub u32);
 // Cells
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub enum CellPayload {
     /// Most cells: code, intent, doc, conv.
@@ -152,8 +251,18 @@ pub enum CellPayload {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct Cell {
     pub kind: CellTypeId,
@@ -164,8 +273,17 @@ pub struct Cell {
 // Core graph types
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct Node {
     pub id: NodeId,
@@ -182,8 +300,18 @@ pub struct Node {
 /// cells, so two builds that saw the same edge at different lines compare
 /// unequal: compare edges across builds by [`Edge::key`]. Two call sites of one
 /// callee stay two edges; nothing merges same-key edges.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[rkyv(derive(Debug, PartialEq, Eq, Hash))]
 pub struct Edge {
     pub from: NodeId,
@@ -202,7 +330,13 @@ impl Edge {
     /// An edge with no cells. New emitters build edges with this rather than
     /// a struct literal, so a later field does not touch them.
     pub fn new(from: NodeId, to: NodeId, category: EdgeCategoryId, confidence: Confidence) -> Self {
-        Self { from, to, category, confidence, cells: Vec::new() }
+        Self {
+            from,
+            to,
+            category,
+            confidence,
+            cells: Vec::new(),
+        }
     }
 
     /// `self` with `cell` appended.
@@ -294,17 +428,33 @@ pub trait NodeLike {
 }
 
 impl NodeLike for Node {
-    fn id(&self) -> NodeId { self.id }
-    fn repo(&self) -> RepoId { self.repo }
-    fn confidence(&self) -> Confidence { self.confidence }
-    fn cell_count(&self) -> usize { self.cells.len() }
+    fn id(&self) -> NodeId {
+        self.id
+    }
+    fn repo(&self) -> RepoId {
+        self.repo
+    }
+    fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+    fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
 }
 
 impl NodeLike for ArchivedNode {
-    fn id(&self) -> NodeId { NodeId(self.id.0.to_native()) }
-    fn repo(&self) -> RepoId { RepoId(self.repo.0.to_native()) }
-    fn confidence(&self) -> Confidence { (&self.confidence).into() }
-    fn cell_count(&self) -> usize { self.cells.len() }
+    fn id(&self) -> NodeId {
+        NodeId(self.id.0.to_native())
+    }
+    fn repo(&self) -> RepoId {
+        RepoId(self.repo.0.to_native())
+    }
+    fn confidence(&self) -> Confidence {
+        (&self.confidence).into()
+    }
+    fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
 }
 
 #[allow(clippy::wrong_self_convention)]
@@ -317,19 +467,39 @@ pub trait EdgeLike {
 }
 
 impl EdgeLike for Edge {
-    fn from_id(&self) -> NodeId { self.from }
-    fn to_id(&self) -> NodeId { self.to }
-    fn category(&self) -> EdgeCategoryId { self.category }
-    fn confidence(&self) -> Confidence { self.confidence }
-    fn cell_count(&self) -> usize { self.cells.len() }
+    fn from_id(&self) -> NodeId {
+        self.from
+    }
+    fn to_id(&self) -> NodeId {
+        self.to
+    }
+    fn category(&self) -> EdgeCategoryId {
+        self.category
+    }
+    fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+    fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
 }
 
 impl EdgeLike for ArchivedEdge {
-    fn from_id(&self) -> NodeId { NodeId(self.from.0.to_native()) }
-    fn to_id(&self) -> NodeId { NodeId(self.to.0.to_native()) }
-    fn category(&self) -> EdgeCategoryId { EdgeCategoryId(self.category.0.to_native()) }
-    fn confidence(&self) -> Confidence { (&self.confidence).into() }
-    fn cell_count(&self) -> usize { self.cells.len() }
+    fn from_id(&self) -> NodeId {
+        NodeId(self.from.0.to_native())
+    }
+    fn to_id(&self) -> NodeId {
+        NodeId(self.to.0.to_native())
+    }
+    fn category(&self) -> EdgeCategoryId {
+        EdgeCategoryId(self.category.0.to_native())
+    }
+    fn confidence(&self) -> Confidence {
+        (&self.confidence).into()
+    }
+    fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
 }
 
 // Bridge the archived unit-variant enum back to its owned form — needed to
@@ -448,13 +618,21 @@ mod tests {
     }
 
     fn json_cell(kind: u32, payload: &str) -> Cell {
-        Cell { kind: CellTypeId(kind), payload: CellPayload::Json(payload.into()) }
+        Cell {
+            kind: CellTypeId(kind),
+            payload: CellPayload::Json(payload.into()),
+        }
     }
 
     #[test]
     fn edge_cells_round_trip_rkyv() {
-        let e = Edge::new(NodeId(10), NodeId(20), EdgeCategoryId(3), Confidence::Strong)
-            .with_cell(json_cell(21, r#"{"line":12,"emitter":"python"}"#));
+        let e = Edge::new(
+            NodeId(10),
+            NodeId(20),
+            EdgeCategoryId(3),
+            Confidence::Strong,
+        )
+        .with_cell(json_cell(21, r#"{"line":12,"emitter":"python"}"#));
         assert_eq!(e.cell_count(), 1);
         assert_eq!(e.cell(CellTypeId(21)), Some(&e.cells[0]));
         assert_eq!(e.cell(CellTypeId(22)), None);
@@ -561,7 +739,10 @@ mod tests {
         // Equal only when equal.
         for a in &sorted {
             for b in &sorted {
-                assert_eq!(canonical_edge_cmp(a, b) == core::cmp::Ordering::Equal, a == b);
+                assert_eq!(
+                    canonical_edge_cmp(a, b) == core::cmp::Ordering::Equal,
+                    a == b
+                );
             }
         }
         // No cells: the pre-LC.2 key order.
@@ -572,7 +753,14 @@ mod tests {
             Edge::new(NodeId(1), NodeId(2), EdgeCategoryId(9), Confidence::Weak),
         ];
         let mut by_old_key = plain.clone();
-        by_old_key.sort_by_key(|e| (e.from.0, e.to.0, e.category.0, confidence_rank(e.confidence)));
+        by_old_key.sort_by_key(|e| {
+            (
+                e.from.0,
+                e.to.0,
+                e.category.0,
+                confidence_rank(e.confidence),
+            )
+        });
         plain.sort_unstable_by(canonical_edge_cmp);
         assert_eq!(plain, by_old_key);
     }

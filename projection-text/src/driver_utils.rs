@@ -56,7 +56,11 @@ pub fn build_repo_graph(src: &Path, repo_canonical: &str) -> Result<RepoGraph> {
     let parses = parse_tree(src, repo)?;
     eprintln!("[parse] {} Python files", parses.len());
     let graph = build_python(repo, parses).map_err(|e| anyhow!("build_python: {e:?}"))?;
-    eprintln!("[graph] {} nodes, {} edges", graph.nodes.len(), graph.edges.len());
+    eprintln!(
+        "[graph] {} nodes, {} edges",
+        graph.nodes.len(),
+        graph.edges.len()
+    );
     Ok(graph)
 }
 

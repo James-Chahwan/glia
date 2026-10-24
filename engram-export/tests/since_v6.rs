@@ -418,7 +418,12 @@ fn version_and_history_name_the_glia_build() {
 
     // (d) the meta sidecar: exactly these keys, sorted, bound to the gmap.
     let (text, meta) = read_meta(&s.out("a"));
-    let keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+    let keys: Vec<&str> = meta
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     let mut sorted = keys.clone();
     sorted.sort_unstable();
     assert_eq!(
@@ -435,7 +440,10 @@ fn version_and_history_name_the_glia_build() {
             "version_line",
         ]
     );
-    assert!(text.starts_with("{\n  \"build_stamp\""), "keys not sorted:\n{text}");
+    assert!(
+        text.starts_with("{\n  \"build_stamp\""),
+        "keys not sorted:\n{text}"
+    );
     let a_digest = hex(content_digest(&s.bytes("a")));
     assert_eq!(meta["build_stamp"], glia_engine::BUILD_STAMP);
     assert_eq!(meta["exporter"], "glia-export-engram");
@@ -455,7 +463,11 @@ fn version_and_history_name_the_glia_build() {
     // (e) an identical export writes a byte-identical meta; a --since export
     // writes its own, bound to its own gmap (the since line's target).
     s.export("a", None, &["--no-persist"], false);
-    assert_eq!(read_meta(&s.out("a")).0, text, "identical exports, different meta");
+    assert_eq!(
+        read_meta(&s.out("a")).0,
+        text,
+        "identical exports, different meta"
+    );
     s.edit_a_to_b();
     let b_err = s.export("b", Some("a"), &["--no-persist"], false);
     let b_digest = hex(content_digest(&s.bytes("b")));
@@ -481,7 +493,10 @@ fn version_and_history_name_the_glia_build() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(6));
-    assert!(!meta_path(&s.out("c")).exists(), "a refused run wrote a meta");
+    assert!(
+        !meta_path(&s.out("c")).exists(),
+        "a refused run wrote a meta"
+    );
 }
 
 /// An Angular service with one HttpClient call (DE.3).
@@ -521,7 +536,9 @@ fn a_rekeyed_endpoint_arrives_as_a_move() {
         identity_line(&a_err).ends_with("; anchored endpoint=1/1 page=0/0"),
         "{a_err}"
     );
-    let edited = s.read("web/stats.service.ts").replace("'/stats'", "'/api/stats'");
+    let edited = s
+        .read("web/stats.service.ts")
+        .replace("'/stats'", "'/api/stats'");
     s.write("web/stats.service.ts", &edited);
     let b_err = s.export("b", Some("a"), &["--no-persist"], false);
     assert_eq!(

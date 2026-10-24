@@ -20,17 +20,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
-    UnresolvedRef, cell_type, edge_category, node_kind,
-};
 use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, const_placeholder, join_path, mount_route_qname,
     push_client_endpoint_with,
 };
-use glia_code_domain::wire::{ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat};
+use glia_code_domain::wire::{
+    ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat,
+};
+pub use glia_code_domain::{
+    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
+    UnresolvedRef, cell_type, edge_category, node_kind,
+};
 use glia_code_domain::{Mount, NavFact};
 
 // ============================================================================
@@ -88,16 +90,23 @@ pub fn parse_file_with_modules(
         confidence: Confidence::Strong,
         cells: file_cells(&root, src, file_rel_path),
     });
-    let module_simple = package_qname
-        .rsplit("::")
-        .next()
-        .unwrap_or(package_qname);
-    acc.nav
-        .record(module_id, module_simple, package_qname, node_kind::MODULE, None);
+    let module_simple = package_qname.rsplit("::").next().unwrap_or(package_qname);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        package_qname,
+        node_kind::MODULE,
+        None,
+    );
     // DF.15: the `package` clause names the package an un-aliased import of
     // this file's directory binds; the graph reads it (`GoPackages::build`).
     if let Some(name) = package_clause_name(root, src) {
-        acc.nav.record_fact(module_id, NavFact::GoPackageName { name: name.to_string() });
+        acc.nav.record_fact(
+            module_id,
+            NavFact::GoPackageName {
+                name: name.to_string(),
+            },
+        );
     }
 
     // Struct/interface name → NodeId map for this file. Populated in a first
@@ -679,7 +688,8 @@ fn collect_interface_elems(
                     confidence: Confidence::Strong,
                     cells: entity_cells(elem, src, file_rel),
                 });
-                acc.nav.record(id, name, &qname, node_kind::METHOD, Some(iface_id));
+                acc.nav
+                    .record(id, name, &qname, node_kind::METHOD, Some(iface_id));
                 acc.edges.push(Edge {
                     from: iface_id,
                     to: id,
@@ -695,7 +705,8 @@ fn collect_interface_elems(
                     acc.nav.record_return_type(id, &ty);
                 }
                 // DT.1e: a `[]T` first result, which `return_types` skips.
-                let elem_ty = slice_result_elem(elem.child_by_field_name("result"), src, &iface_params);
+                let elem_ty =
+                    slice_result_elem(elem.child_by_field_name("result"), src, &iface_params);
                 record_slice_result(acc, id, elem_ty);
                 // CA.3a: the element's normalised signature, the same text
                 // an implementation in another package records.
@@ -738,7 +749,11 @@ fn collect_interface_elems(
 /// how the graph's implicit-IMPLEMENTS pass knows the interface's method set
 /// is not fully known.
 fn embedded_iface_qualifier(term: TsNode, src: &[u8]) -> Option<CallQualifier> {
-    let term = if term.kind() == "generic_type" { term.child_by_field_name("type")? } else { term };
+    let term = if term.kind() == "generic_type" {
+        term.child_by_field_name("type")?
+    } else {
+        term
+    };
     match term.kind() {
         "type_identifier" => {
             let name = text_of(term, src);
@@ -789,9 +804,10 @@ fn collect_field_types(
         if spec.kind() != "type_spec" {
             continue;
         }
-        let (Some(name_node), Some(type_node)) =
-            (spec.child_by_field_name("name"), spec.child_by_field_name("type"))
-        else {
+        let (Some(name_node), Some(type_node)) = (
+            spec.child_by_field_name("name"),
+            spec.child_by_field_name("type"),
+        ) else {
             continue;
         };
         if type_node.kind() != "struct_type" {
@@ -906,9 +922,13 @@ fn go_struct_schema(list: TsNode, src: &[u8], stats: &mut ModelStats) -> Option<
             match &json.name {
                 Some(name) => {
                     let go_name = embed_go_name(&base);
-                    schema.fields.push(go_field(name, go_name, &ty, &json, bind));
+                    schema
+                        .fields
+                        .push(go_field(name, go_name, &ty, &json, bind));
                 }
-                None if !base.is_empty() && !schema.extends.contains(&base) => schema.extends.push(base),
+                None if !base.is_empty() && !schema.extends.contains(&base) => {
+                    schema.extends.push(base)
+                }
                 None => {}
             }
             continue;
@@ -951,8 +971,10 @@ fn go_field(wire: &str, go_name: &str, ty: &str, json: &JsonTag, bind: bool) -> 
 fn go_quotable(ty: &str) -> bool {
     let t = ty.trim_start_matches(['*', ' ']);
     let bits = |r: &str| matches!(r, "" | "8" | "16" | "32" | "64");
-    matches!(t, "bool" | "string" | "byte" | "rune" | "uintptr" | "float32" | "float64")
-        || t.strip_prefix("uint").is_some_and(bits)
+    matches!(
+        t,
+        "bool" | "string" | "byte" | "rune" | "uintptr" | "float32" | "float64"
+    ) || t.strip_prefix("uint").is_some_and(bits)
         || t.strip_prefix("int").is_some_and(bits)
 }
 
@@ -1011,7 +1033,10 @@ fn parse_json_tag(raw: &str) -> JsonTag {
         return JsonTag::default();
     };
     if value == "-" {
-        return JsonTag { skip: true, ..JsonTag::default() };
+        return JsonTag {
+            skip: true,
+            ..JsonTag::default()
+        };
     }
     let (name, opts) = value.split_once(',').unwrap_or((value.as_str(), ""));
     let has = |o: &str| opts.split(',').any(|x| x == o);
@@ -1036,7 +1061,8 @@ fn json_valid_name(name: &str) -> bool {
 /// as one item of its comma list.
 fn bind_required(raw: &str) -> bool {
     ["binding", "validate"].into_iter().any(|key| {
-        struct_tag_lookup(raw, key).is_some_and(|v| v.split(',').any(|item| item.trim() == "required"))
+        struct_tag_lookup(raw, key)
+            .is_some_and(|v| v.split(',').any(|item| item.trim() == "required"))
     })
 }
 
@@ -1099,7 +1125,9 @@ fn go_unquote(s: &str) -> Option<String> {
         let e = chars.next()?;
         let hex = |chars: &mut std::str::Chars, n: usize| -> Option<u32> {
             let digits: String = chars.by_ref().take(n).collect();
-            (digits.len() == n).then(|| u32::from_str_radix(&digits, 16).ok()).flatten()
+            (digits.len() == n)
+                .then(|| u32::from_str_radix(&digits, 16).ok())
+                .flatten()
         };
         let decoded = match e {
             'a' => '\u{07}',
@@ -1153,7 +1181,8 @@ fn push_struct_embed(
     let Some(module_id) = acc.module_id else {
         return;
     };
-    let Some(qualifier) = embedded_struct_qualifier(type_node, src, type_params, &acc.external_pkgs)
+    let Some(qualifier) =
+        embedded_struct_qualifier(type_node, src, type_params, &acc.external_pkgs)
     else {
         return;
     };
@@ -1189,7 +1218,10 @@ fn embedded_struct_qualifier(
             let base = text_of(inner.child_by_field_name("package")?, src);
             let name = text_of(inner.child_by_field_name("name")?, src);
             (!base.is_empty() && !name.is_empty() && !external_pkgs.contains(base)).then(|| {
-                CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+                CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                }
             })
         }
         _ => None,
@@ -1351,7 +1383,13 @@ fn collect_state_vars(
                 for spec in child.named_children(&mut sc) {
                     if spec.kind() == "var_spec" {
                         emit_state_var_spec(
-                            spec, src, file_rel, package_qname, module_id, repo, acc,
+                            spec,
+                            src,
+                            file_rel,
+                            package_qname,
+                            module_id,
+                            repo,
+                            acc,
                         );
                     }
                 }
@@ -1705,7 +1743,11 @@ fn extract_type_name(type_node: TsNode, src: &[u8]) -> String {
             if let Some(inner) = type_node.child_by_field_name("type") {
                 extract_type_name(inner, src)
             } else {
-                text_of(type_node, src).split('[').next().unwrap_or("").to_string()
+                text_of(type_node, src)
+                    .split('[')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
             }
         }
         "qualified_type" => {
@@ -1713,7 +1755,11 @@ fn extract_type_name(type_node: TsNode, src: &[u8]) -> String {
             if let Some(name) = type_node.child_by_field_name("name") {
                 text_of(name, src).to_string()
             } else {
-                text_of(type_node, src).rsplit('.').next().unwrap_or("").to_string()
+                text_of(type_node, src)
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
             }
         }
         _ => text_of(type_node, src).to_string(),
@@ -1892,13 +1938,7 @@ fn encloses(root: &str, qname: &str) -> bool {
 // Import collection
 // ============================================================================
 
-fn collect_imports(
-    decl: TsNode,
-    src: &[u8],
-    package_qname: &str,
-    go: &GoModules,
-    acc: &mut Acc,
-) {
+fn collect_imports(decl: TsNode, src: &[u8], package_qname: &str, go: &GoModules, acc: &mut Acc) {
     // import_declaration may wrap an import_spec_list or a single import_spec.
     let mut cursor = decl.walk();
     for child in decl.named_children(&mut cursor) {
@@ -1919,13 +1959,7 @@ fn collect_imports(
     }
 }
 
-fn record_import(
-    spec: TsNode,
-    src: &[u8],
-    package_qname: &str,
-    go: &GoModules,
-    acc: &mut Acc,
-) {
+fn record_import(spec: TsNode, src: &[u8], package_qname: &str, go: &GoModules, acc: &mut Acc) {
     // import_spec children: optional name (alias) + path (interpreted_string_literal).
     let alias = spec
         .child_by_field_name("name")
@@ -2013,10 +2047,7 @@ fn record_import(
 
     acc.imports.push(ImportStmt {
         from_module: package_qname.to_string(),
-        target: ImportTarget::Module {
-            path: qname,
-            alias,
-        },
+        target: ImportTarget::Module { path: qname, alias },
         line: line_at(spec),
     });
 }
@@ -2026,7 +2057,9 @@ fn record_import(
 /// an un-aliased import under this name, never the import path's last
 /// element (module `github.com/nats-io/nats.go` declares `package nats`).
 fn package_clause_name<'a>(root: TsNode, src: &'a [u8]) -> Option<&'a str> {
-    let clause = named_kids(Some(root)).into_iter().find(|c| c.kind() == "package_clause")?;
+    let clause = named_kids(Some(root))
+        .into_iter()
+        .find(|c| c.kind() == "package_clause")?;
     let ident = named_kids(Some(clause))
         .into_iter()
         .find(|c| c.kind() == "package_identifier")?;
@@ -2093,7 +2126,16 @@ fn collect_calls_in<'t>(
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_calls_at(child, src, from, receiver_var, repo, file_rel, acc, closures);
+        collect_calls_at(
+            child,
+            src,
+            from,
+            receiver_var,
+            repo,
+            file_rel,
+            acc,
+            closures,
+        );
     }
 }
 
@@ -2274,7 +2316,9 @@ fn record_value_refs(
         "var_spec" => named_kids(node.child_by_field_name("value")),
         "return_statement" => {
             let mut c = node.walk();
-            let list = node.named_children(&mut c).find(|n| n.kind() == "expression_list");
+            let list = node
+                .named_children(&mut c)
+                .find(|n| n.kind() == "expression_list");
             named_kids(list)
         }
         _ => return,
@@ -2338,16 +2382,20 @@ fn queue_composite_ref(lit: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             CallQualifier::Bare(name.to_string())
         }
         "qualified_type" => {
-            let (Some(pkg), Some(name)) =
-                (inner.child_by_field_name("package"), inner.child_by_field_name("name"))
-            else {
+            let (Some(pkg), Some(name)) = (
+                inner.child_by_field_name("package"),
+                inner.child_by_field_name("name"),
+            ) else {
                 return;
             };
             let (pkg, name) = (text_of(pkg, src), text_of(name, src));
             if pkg.is_empty() || name.is_empty() {
                 return;
             }
-            CallQualifier::Attribute { base: pkg.to_string(), name: name.to_string() }
+            CallQualifier::Attribute {
+                base: pkg.to_string(),
+                name: name.to_string(),
+            }
         }
         _ => return,
     };
@@ -2387,7 +2435,10 @@ fn value_qualifier(v: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<
         "selector_expression" => {
             let base = chain_text(v.child_by_field_name("operand")?, src, receiver_var)?;
             let name = text_of(v.child_by_field_name("field")?, src);
-            (!name.is_empty()).then(|| CallQualifier::Attribute { base, name: name.to_string() })
+            (!name.is_empty()).then(|| CallQualifier::Attribute {
+                base,
+                name: name.to_string(),
+            })
         }
         "parenthesized_expression" => {
             let mut c = v.walk();
@@ -2410,7 +2461,12 @@ fn value_qualifier(v: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<
 fn flush_value_refs(acc: &mut Acc) {
     let queued = std::mem::take(&mut acc.value_refs);
     let mut seen: std::collections::HashSet<(NodeId, String)> = std::collections::HashSet::new();
-    for QueuedValue { start, composite, r } in queued {
+    for QueuedValue {
+        start,
+        composite,
+        r,
+    } in queued
+    {
         if !composite
             && (acc.handler_args.contains(&start)
                 || acc.value_skip.iter().any(|&(s, e)| s <= start && start < e))
@@ -2730,7 +2786,10 @@ fn record_result_names(result: Option<TsNode>, src: &[u8], scope: NodeId, acc: &
         for name in param.children_by_field_name("name", &mut nc) {
             let name = text_of(name, src);
             if !name.is_empty() && name != "_" {
-                acc.value_shadows.entry(scope).or_default().insert(name.to_string());
+                acc.value_shadows
+                    .entry(scope)
+                    .or_default()
+                    .insert(name.to_string());
             }
         }
     }
@@ -2781,7 +2840,9 @@ pub fn method_signature(source: &str) -> Option<String> {
     let tree = parser.parse(&text, None)?;
     let root = tree.root_node();
     let mut c = root.walk();
-    let decl = root.named_children(&mut c).find(|n| n.kind() == "method_declaration")?;
+    let decl = root
+        .named_children(&mut c)
+        .find(|n| n.kind() == "method_declaration")?;
     let params = decl.child_by_field_name("parameters")?;
     go_signature(params, decl.child_by_field_name("result"), text.as_bytes())
 }
@@ -3044,7 +3105,10 @@ fn receiver_is_generic(receiver: TsNode) -> bool {
         };
         loop {
             ty = unwrap_pointer(ty);
-            match (ty.kind() == "parenthesized_type").then(|| first_type_child(ty)).flatten() {
+            match (ty.kind() == "parenthesized_type")
+                .then(|| first_type_child(ty))
+                .flatten()
+            {
                 Some(inner) => ty = inner,
                 None => break,
             }
@@ -3095,7 +3159,11 @@ fn go_value_type(value: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Ac
             let func = value.child_by_field_name("function");
             if let Some(f) = func.filter(|f| f.kind() == "identifier") {
                 let name = text_of(f, src);
-                let first_arg = || value.child_by_field_name("arguments").and_then(|a| a.named_child(0));
+                let first_arg = || {
+                    value
+                        .child_by_field_name("arguments")
+                        .and_then(|a| a.named_child(0))
+                };
                 if name == "new" {
                     return first_arg()
                         .and_then(|a| type_expr_ref(a, src, tp))
@@ -3339,7 +3407,10 @@ fn record_body_locals(
             for name in node.children_by_field_name("name", &mut nc) {
                 let name = text_of(name, src);
                 if !name.is_empty() && name != "_" {
-                    acc.value_shadows.entry(scope).or_default().insert(name.to_string());
+                    acc.value_shadows
+                        .entry(scope)
+                        .or_default()
+                        .insert(name.to_string());
                 }
             }
         }
@@ -3631,7 +3702,13 @@ const CTX_JSON_WRITES: [&str; 7] = [
 /// Context methods that bind the request body into their first argument
 /// (`&v`): gin `ShouldBindJSON` / `BindJSON` / `ShouldBind` / `Bind`, echo
 /// `Bind`, fiber `BodyParser`.
-const CTX_BINDS: [&str; 5] = ["ShouldBindJSON", "BindJSON", "ShouldBind", "Bind", "BodyParser"];
+const CTX_BINDS: [&str; 5] = [
+    "ShouldBindJSON",
+    "BindJSON",
+    "ShouldBind",
+    "Bind",
+    "BodyParser",
+];
 
 /// The deepest envelope literal a wire shape opens; one nested deeper is
 /// open.
@@ -3694,19 +3771,27 @@ fn wire_status(arg: TsNode, src: &[u8], wire: &WireFile) -> WireStatus {
     let arg = unparen_expr(arg);
     match arg.kind() {
         "int_literal" => match text_of(arg, src).replace('_', "").parse::<u64>() {
-            Ok(n) if (200..300).contains(&n) => u16::try_from(n).map_or(WireStatus::Unknown, WireStatus::Known),
+            Ok(n) if (200..300).contains(&n) => {
+                u16::try_from(n).map_or(WireStatus::Unknown, WireStatus::Known)
+            }
             Ok(_) => WireStatus::Skip,
             Err(_) => WireStatus::Unknown,
         },
         "selector_expression" => {
-            let (Some(pkg), Some(field)) = (arg.child_by_field_name("operand"), arg.child_by_field_name("field"))
-            else {
+            let (Some(pkg), Some(field)) = (
+                arg.child_by_field_name("operand"),
+                arg.child_by_field_name("field"),
+            ) else {
                 return WireStatus::Unknown;
             };
             let pkg_name = text_of(pkg, src);
             let status_pkg = pkg.kind() == "identifier"
-                && (wire.http.contains(pkg_name) || wire.is_framework(pkg_name, WireFramework::Fiber));
-            match text_of(field, src).strip_prefix("Status").filter(|_| status_pkg) {
+                && (wire.http.contains(pkg_name)
+                    || wire.is_framework(pkg_name, WireFramework::Fiber));
+            match text_of(field, src)
+                .strip_prefix("Status")
+                .filter(|_| status_pkg)
+            {
                 Some(name) => STATUS_2XX
                     .iter()
                     .find(|(n, _)| *n == name)
@@ -3743,7 +3828,9 @@ fn implicit_status<'t>(
         let mut prev = cur.prev_named_sibling();
         while let Some(stmt) = prev {
             if stmt.kind() == "expression_statement"
-                && let Some(call) = stmt.named_child(0).filter(|c| c.kind() == "call_expression")
+                && let Some(call) = stmt
+                    .named_child(0)
+                    .filter(|c| c.kind() == "call_expression")
                 && let Some(arg) = setter(call)
             {
                 return wire_status(arg, src, wire);
@@ -3791,7 +3878,13 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                 .and_then(|t| t.split_once('.'))
                 .is_some_and(|(pkg, ty)| ty == want && wire.http.contains(pkg))
     };
-    let response = |value: TsNode<'t>, status| Some(WireSite { form: WireForm::JsonResponse, value, status });
+    let response = |value: TsNode<'t>, status| {
+        Some(WireSite {
+            form: WireForm::JsonResponse,
+            value,
+            status,
+        })
+    };
     let bind = |value: TsNode<'t>| {
         Some(WireSite {
             form: WireForm::JsonBind,
@@ -3849,7 +3942,10 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
             let (inner_op, inner_method) = selector_call(operand, src)?;
             let inner_args = call_args(operand);
             // fiber `c.Status(n).JSON(v)`.
-            if inner_method == "Status" && method == "JSON" && ctx(inner_op) == Some(WireFramework::Fiber) {
+            if inner_method == "Status"
+                && method == "JSON"
+                && ctx(inner_op) == Some(WireFramework::Fiber)
+            {
                 return response(*args.first()?, wire_status(*inner_args.first()?, src, wire));
             }
             if !is_pkg(&wire.json, inner_op) {
@@ -3872,8 +3968,12 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                 ("NewDecoder", "Decode") => {
                     let body = unparen_expr(*inner_args.first()?);
                     let from_request = body.kind() == "selector_expression"
-                        && body.child_by_field_name("field").is_some_and(|f| text_of(f, src) == "Body")
-                        && body.child_by_field_name("operand").is_some_and(|r| http_typed(r, "Request"));
+                        && body
+                            .child_by_field_name("field")
+                            .is_some_and(|f| text_of(f, src) == "Body")
+                        && body
+                            .child_by_field_name("operand")
+                            .is_some_and(|r| http_typed(r, "Request"));
                     if !from_request {
                         return None;
                     }
@@ -3891,7 +3991,13 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
 /// var's initialiser is skipped). A response with a known non-2xx status
 /// writes nothing and is counted; a bind carries no status. An identical
 /// payload already on the node is kept once.
-fn try_detect_json_wire(call: TsNode, src: &[u8], from: NodeId, receiver_var: Option<&str>, acc: &mut Acc) {
+fn try_detect_json_wire(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
     if !acc.wire.enabled() {
         return;
     }
@@ -3923,7 +4029,8 @@ fn try_detect_json_wire(call: TsNode, src: &[u8], from: NodeId, receiver_var: Op
         return;
     };
     let seen = node.cells.iter().any(|c| {
-        c.kind == cell_type::MESSAGE_TYPE && matches!(&c.payload, CellPayload::Json(j) if *j == payload)
+        c.kind == cell_type::MESSAGE_TYPE
+            && matches!(&c.payload, CellPayload::Json(j) if *j == payload)
     });
     if seen {
         return;
@@ -3971,8 +4078,7 @@ fn wire_value(
 ) -> Shape {
     let mut e = unparen_expr(expr);
     while e.kind() == "unary_expression"
-        && e
-            .child_by_field_name("operator")
+        && e.child_by_field_name("operator")
             .is_some_and(|o| matches!(o.kind(), "&" | "*"))
         && let Some(inner) = e.child_by_field_name("operand")
     {
@@ -3982,12 +4088,17 @@ fn wire_value(
     match e.kind() {
         "composite_literal" => composite_shape(e, src, scope, receiver_var, wire, depth),
         "call_expression" => call_shape(e, src, scope, receiver_var, wire, depth),
-        "identifier" => wire.local(scope, text_of(e, src)).cloned().unwrap_or_else(open),
-        "selector_expression" => chain_text(e, src, receiver_var).map_or_else(open, |chain| Shape::Chain {
-            chain,
-            array: false,
-            model: None,
-        }),
+        "identifier" => wire
+            .local(scope, text_of(e, src))
+            .cloned()
+            .unwrap_or_else(open),
+        "selector_expression" => {
+            chain_text(e, src, receiver_var).map_or_else(open, |chain| Shape::Chain {
+                chain,
+                array: false,
+                model: None,
+            })
+        }
         "interpreted_string_literal" | "raw_string_literal" => Shape::named("string"),
         "int_literal" => Shape::named("int"),
         "float_literal" => Shape::named("float64"),
@@ -4012,7 +4123,9 @@ fn composite_shape(
     let body = lit.child_by_field_name("body");
     let envelope = match ty.kind() {
         "struct_type" => return anon_struct_shape(ty, src),
-        "map_type" => ty.child_by_field_name("key").is_some_and(|k| text_of(k, src) == "string"),
+        "map_type" => ty
+            .child_by_field_name("key")
+            .is_some_and(|k| text_of(k, src) == "string"),
         "qualified_type" => is_envelope_type(ty, src, wire),
         // A slice or array of an anonymous struct names no element type.
         "slice_type" | "array_type" | "implicit_length_array_type" => {
@@ -4036,7 +4149,10 @@ fn composite_shape(
 /// `ty` (a `qualified_type`) is a framework's envelope map through this
 /// file's import: `gin.H`, `echo.Map`, `fiber.Map`.
 fn is_envelope_type(ty: TsNode, src: &[u8], wire: &WireFile) -> bool {
-    let (Some(pkg), Some(name)) = (ty.child_by_field_name("package"), ty.child_by_field_name("name")) else {
+    let (Some(pkg), Some(name)) = (
+        ty.child_by_field_name("package"),
+        ty.child_by_field_name("name"),
+    ) else {
         return false;
     };
     let (pkg, name) = (text_of(pkg, src), text_of(name, src));
@@ -4125,7 +4241,10 @@ fn anon_struct_shape(ty: TsNode, src: &[u8]) -> Shape {
         .find(|c| c.kind() == "field_declaration_list")
         .and_then(|list| go_struct_schema(list, src, &mut stats));
     let Some(schema) = schema else {
-        return Shape::Object { fields: Vec::new(), open: false };
+        return Shape::Object {
+            fields: Vec::new(),
+            open: false,
+        };
     };
     let fields = schema
         .fields
@@ -4153,7 +4272,10 @@ fn call_shape(
 ) -> Shape {
     let open = || Shape::open(&collapse_go_ws(text_of(call, src)));
     let args = call_args(call);
-    if let Some(f) = call.child_by_field_name("function").filter(|f| f.kind() == "identifier") {
+    if let Some(f) = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "identifier")
+    {
         let name = text_of(f, src);
         match name {
             "make" => {
@@ -4168,9 +4290,9 @@ fn call_shape(
                     .map_or_else(open, |t| Shape::named(&collapse_go_ws(text_of(*t, src))));
             }
             "append" => {
-                return args
-                    .first()
-                    .map_or_else(open, |a| wire_value(*a, src, scope, receiver_var, wire, depth));
+                return args.first().map_or_else(open, |a| {
+                    wire_value(*a, src, scope, receiver_var, wire, depth)
+                });
             }
             "any" | "error" | "comparable" => return open(),
             _ if is_untyped_builtin(name) => return open(),
@@ -4207,7 +4329,13 @@ fn declared_wire_shape(ty: TsNode, src: &[u8], wire: &WireFile) -> Shape {
 /// declared type, slice kept: `var xs []T` -> `T`, array; `var req struct{..}`
 /// -> its Object) or `var x = v`; a range / receive / type-switch name is
 /// open. A later `x = ..` assignment changes nothing.
-fn record_wire_locals(node: TsNode, src: &[u8], scope: NodeId, receiver_var: Option<&str>, acc: &mut Acc) {
+fn record_wire_locals(
+    node: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
     if !acc.wire.enabled() {
         return;
     }
@@ -4244,14 +4372,16 @@ fn record_wire_locals(node: TsNode, src: &[u8], scope: NodeId, receiver_var: Opt
         "range_clause" | "receive_statement" if declares(node) => {
             for name in named_kids(node.child_by_field_name("left")) {
                 if name.kind() == "identifier" {
-                    acc.wire.declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                    acc.wire
+                        .declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
                 }
             }
         }
         "type_switch_statement" => {
             for name in named_kids(node.child_by_field_name("alias")) {
                 if name.kind() == "identifier" {
-                    acc.wire.declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                    acc.wire
+                        .declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
                 }
             }
         }
@@ -4281,7 +4411,9 @@ fn slice_result_elem(result: Option<TsNode>, src: &[u8], type_params: &[String])
         ty = ty.named_children(&mut c).next()?;
     }
     match ty.kind() {
-        "slice_type" | "array_type" => fact_type(ty.child_by_field_name("element")?, src, type_params),
+        "slice_type" | "array_type" => {
+            fact_type(ty.child_by_field_name("element")?, src, type_params)
+        }
         _ => None,
     }
 }
@@ -4725,7 +4857,9 @@ fn try_detect_gorm_access(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
     };
     let method = text_of(field, src);
     let mut cursor = args.walk();
-    let mut named = args.named_children(&mut cursor).filter(|a| a.kind() != "comment");
+    let mut named = args
+        .named_children(&mut cursor)
+        .filter(|a| a.kind() != "comment");
     if method == "Table" {
         // `db.Table("users u")` / `db.Table("public.users")`: the table is the
         // first word, normalised like a raw-SQL table so the two collapse. A
@@ -4744,7 +4878,11 @@ fn try_detect_gorm_access(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
     let models: Vec<String> = if method == "AutoMigrate" {
         named.filter_map(|a| gorm_model_arg(a, src)).collect()
     } else if GORM_MODEL_ARG_METHODS.contains(&method) {
-        named.next().and_then(|a| gorm_model_arg(a, src)).into_iter().collect()
+        named
+            .next()
+            .and_then(|a| gorm_model_arg(a, src))
+            .into_iter()
+            .collect()
     } else {
         return;
     };
@@ -4851,7 +4989,9 @@ fn single_string_return(body: TsNode, src: &[u8]) -> Option<String> {
         .named_children(&mut cursor)
         .find(|n| n.kind() == "statement_list")?;
     let mut cursor = list.walk();
-    let mut stmts = list.named_children(&mut cursor).filter(|n| n.kind() != "comment");
+    let mut stmts = list
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() != "comment");
     let ret = stmts.next()?;
     if stmts.next().is_some() || ret.kind() != "return_statement" {
         return None;
@@ -4875,7 +5015,8 @@ fn has_gorm_tag(node: TsNode, src: &[u8]) -> bool {
         return true;
     }
     let mut cursor = node.walk();
-    node.named_children(&mut cursor).any(|c| has_gorm_tag(c, src))
+    node.named_children(&mut cursor)
+        .any(|c| has_gorm_tag(c, src))
 }
 
 /// Normalise a captured SQL identifier: drop the schema prefix, require an
@@ -6249,7 +6390,15 @@ fn collect_routes_in(
             callable.body,
         ),
     };
-    walk_routes(callable.body, src, file_rel, module_id, repo, &mut scope, acc);
+    walk_routes(
+        callable.body,
+        src,
+        file_rel,
+        module_id,
+        repo,
+        &mut scope,
+        acc,
+    );
     acc.field_prefixes = fields;
     acc.import_dirs = imports;
     acc.file_consts = consts;
@@ -6340,8 +6489,7 @@ fn record_field_mounts(n: TsNode, src: &[u8], scope: &RouteScope, acc: &mut Acc)
     let mut found: Vec<(String, String, Mount)> = Vec::new();
     match n.kind() {
         "assignment_statement" => {
-            if n
-                .child_by_field_name("operator")
+            if n.child_by_field_name("operator")
                 .is_none_or(|op| op.kind() != "=")
             {
                 return;
@@ -6522,7 +6670,9 @@ fn try_emit_route(
     // Gorilla `.Methods(..)` precedent).
     if method_name == "Match" {
         if args.named_child_count() >= 3
-            && let Some(verbs) = args.named_child(0).and_then(|a| method_list_literal(a, src))
+            && let Some(verbs) = args
+                .named_child(0)
+                .and_then(|a| method_list_literal(a, src))
             && arg_is_url_path(args, 1, src)
         {
             let mut emitted = false;
@@ -6546,7 +6696,17 @@ fn try_emit_route(
         // path, never a path. A host pattern matches neither arm below.
         if let Some((verb, path)) = args.named_child(0).and_then(|a| method_pattern(a, src)) {
             let emitted = emit_route_from_call(
-                call, verb, 0, 1, Some(&path), src, file_rel, module_id, repo, scope, acc,
+                call,
+                verb,
+                0,
+                1,
+                Some(&path),
+                src,
+                file_rel,
+                module_id,
+                repo,
+                scope,
+                acc,
             );
             if emitted {
                 acc.route_forms.pattern += 1;
@@ -6572,13 +6732,13 @@ fn try_emit_route(
     // outbound ENDPOINT (handled by try_detect_go_endpoint); skip its receiver
     // here so it isn't mis-emitted as a phantom server ROUTE. CB.11: a struct
     // field receiver (`s.client.Get("/x")`) is judged by its field name.
-    let receiver_name = func
-        .child_by_field_name("operand")
-        .and_then(|operand| match operand.kind() {
-            "identifier" => Some(operand),
-            "selector_expression" => operand.child_by_field_name("field"),
-            _ => None,
-        });
+    let receiver_name =
+        func.child_by_field_name("operand")
+            .and_then(|operand| match operand.kind() {
+                "identifier" => Some(operand),
+                "selector_expression" => operand.child_by_field_name("field"),
+                _ => None,
+            });
     if receiver_name.is_some_and(|name| is_http_client_receiver(text_of(name, src))) {
         return false;
     }
@@ -6900,10 +7060,45 @@ const MAX_FUNC_LITERAL_CALLEES: usize = 8;
 /// never an in-repo function, and the HANDLED_BY `unique_global_function`
 /// fallback would otherwise bind `len(x)` to a repo function named `len`.
 const GO_PREDECLARED_CALLEES: &[&str] = &[
-    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make", "max",
-    "min", "new", "panic", "print", "println", "real", "recover", "bool", "byte", "complex64",
-    "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune",
-    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any",
+    "append",
+    "cap",
+    "clear",
+    "close",
+    "complex",
+    "copy",
+    "delete",
+    "imag",
+    "len",
+    "make",
+    "max",
+    "min",
+    "new",
+    "panic",
+    "print",
+    "println",
+    "real",
+    "recover",
+    "bool",
+    "byte",
+    "complex64",
+    "complex128",
+    "error",
+    "float32",
+    "float64",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "rune",
+    "string",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+    "any",
 ];
 
 /// LA.18d: the in-repo-shaped direct callees of a func-literal route handler,
@@ -7045,7 +7240,9 @@ fn local_handler_base(nav: &CodeNav, scope: NodeId, var: &str) -> Option<String>
     let path = call.unwrap_or(text);
     let segs: Vec<&str> = path.split('.').collect();
     let ident = |s: &str| {
-        s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && s.chars().all(|c| c.is_alphanumeric() || c == '_')
     };
     if segs.len() > 2 || !segs.iter().all(|s| ident(s)) {
@@ -7170,8 +7367,14 @@ func inner(p string) string {
 
     #[test]
     fn parses_package_and_two_functions() {
-        let parse =
-            parse_file(HELPERS, "svc/helpers/helpers.go", "svc::helpers", "", repo()).unwrap();
+        let parse = parse_file(
+            HELPERS,
+            "svc/helpers/helpers.go",
+            "svc::helpers",
+            "",
+            repo(),
+        )
+        .unwrap();
 
         let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "svc::helpers");
         let hash_id = NodeId::from_parts(
@@ -7223,7 +7426,8 @@ func (u *User) save() error {
     fn parses_struct_interface_and_methods_with_self_call() {
         let parse = parse_file(USERS, "svc/users/users.go", "svc::users", "", repo()).unwrap();
 
-        let struct_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "svc::users::User");
+        let struct_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "svc::users::User");
         let iface_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -7249,7 +7453,12 @@ func (u *User) save() error {
         assert!(parse.nodes.iter().any(|n| n.id == save_id));
 
         // Methods are children of the struct.
-        assert!(has_edge(&parse, struct_id, login_id, edge_category::DEFINES));
+        assert!(has_edge(
+            &parse,
+            struct_id,
+            login_id,
+            edge_category::DEFINES
+        ));
         assert!(has_edge(&parse, struct_id, save_id, edge_category::DEFINES));
 
         // Self-call `u.save()` inside Login's body maps to SelfMethod (because
@@ -7305,18 +7514,38 @@ type Small interface {
     #[test]
     fn interface_method_elems_are_method_nodes() {
         let parse = parse_file(IFACES, "shop/store.go", "shop::store", "", repo()).unwrap();
-        let store = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "shop::store::Store");
+        let store = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::INTERFACE,
+            "shop::store::Store",
+        );
         for name in ["Get", "Put"] {
             let q = format!("shop::store::Store::{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &q);
-            let node = parse.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{q}"));
+            let node = parse
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{q}"));
             assert!(has_edge(&parse, store, id, edge_category::DEFINES), "{q}");
             assert_eq!(parse.nav.parent_of.get(&id), Some(&store), "{q}");
-            assert_eq!(parse.nav.name_by_id.get(&id).map(String::as_str), Some(name));
+            assert_eq!(
+                parse.nav.name_by_id.get(&id).map(String::as_str),
+                Some(name)
+            );
             let kinds: Vec<_> = node.cells.iter().map(|c| c.kind).collect();
-            assert!(kinds.contains(&cell_type::CODE) && kinds.contains(&cell_type::POSITION), "{q}");
+            assert!(
+                kinds.contains(&cell_type::CODE) && kinds.contains(&cell_type::POSITION),
+                "{q}"
+            );
         }
-        let get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "shop::store::Store::Get");
+        let get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "shop::store::Store::Get",
+        );
         let get_node = parse.nodes.iter().find(|n| n.id == get).unwrap();
         assert!(get_node.cells.iter().any(|c| c.kind == cell_type::DOC));
         // Type-term-only interfaces declare no method.
@@ -7335,21 +7564,41 @@ type Small interface {
     fn embedded_interface_emits_inherits_from_ref() {
         let parse = parse_file(IFACES, "shop/store.go", "shop::store", "", repo()).unwrap();
         let iface = |name: &str| {
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, &format!("shop::store::{name}"))
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::INTERFACE,
+                &format!("shop::store::{name}"),
+            )
         };
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::store");
         assert_eq!(
             iface_refs(&parse, iface("ReadStore")),
             vec![
-                (CallQualifier::Bare("Reader".to_string()), edge_category::INHERITS_FROM),
                 (
-                    CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+                    CallQualifier::Bare("Reader".to_string()),
                     edge_category::INHERITS_FROM
                 ),
-                (CallQualifier::Bare("Paged".to_string()), edge_category::INHERITS_FROM),
+                (
+                    CallQualifier::Attribute {
+                        base: "io".to_string(),
+                        name: "Closer".to_string()
+                    },
+                    edge_category::INHERITS_FROM
+                ),
+                (
+                    CallQualifier::Bare("Paged".to_string()),
+                    edge_category::INHERITS_FROM
+                ),
             ]
         );
-        assert!(parse.refs.iter().filter(|r| r.from == iface("ReadStore")).all(|r| r.from_module == module));
+        assert!(
+            parse
+                .refs
+                .iter()
+                .filter(|r| r.from == iface("ReadStore"))
+                .all(|r| r.from_module == module)
+        );
         for name in ["Store", "Number", "Ordered", "Small"] {
             assert!(iface_refs(&parse, iface(name)).is_empty(), "{name}");
         }
@@ -7421,20 +7670,32 @@ var Registry = newRegistry()
 
     #[test]
     fn documented_const_emits_state_var_but_bare_literal_does_not() {
-        let parse =
-            parse_file(STATE_VARS, "config/config.go", "config", "", repo()).unwrap();
+        let parse = parse_file(STATE_VARS, "config/config.go", "config", "", repo()).unwrap();
 
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "config");
 
         // Documented literal const → kept.
-        let max_retries =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "config::MaxRetries");
+        let max_retries = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "config::MaxRetries",
+        );
         assert!(parse.nodes.iter().any(|n| n.id == max_retries));
-        assert!(has_edge(&parse, module_id, max_retries, edge_category::DEFINES));
+        assert!(has_edge(
+            &parse,
+            module_id,
+            max_retries,
+            edge_category::DEFINES
+        ));
 
         // Undocumented bare-literal const → noise-gated out.
-        let internal_seed =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "config::internalSeed");
+        let internal_seed = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "config::internalSeed",
+        );
         assert!(!parse.nodes.iter().any(|n| n.id == internal_seed));
 
         // Undocumented var with a call initialiser → non-trivial, kept.
@@ -7540,9 +7801,19 @@ func Purge(db *gorm.DB) {
         let parse = parse_file(SRC, "store.go", "store", "", repo()).unwrap();
         let list = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::ListUsers");
         let user = sql_entity_id("User");
-        assert_eq!(access_targets(&parse, list), vec![user], "model-keyed, from the enclosing fn");
-        assert_eq!(parse.nav.name_by_id.get(&user).map(String::as_str), Some("User"));
-        assert!(table_cells_of(&parse, user).is_empty(), "a query site never knows the table");
+        assert_eq!(
+            access_targets(&parse, list),
+            vec![user],
+            "model-keyed, from the enclosing fn"
+        );
+        assert_eq!(
+            parse.nav.name_by_id.get(&user).map(String::as_str),
+            Some("User")
+        );
+        assert!(
+            table_cells_of(&parse, user).is_empty(),
+            "a query site never knows the table"
+        );
 
         let purge = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::Purge");
         let got: std::collections::HashSet<NodeId> =
@@ -7551,7 +7822,10 @@ func Purge(db *gorm.DB) {
             .iter()
             .map(|m| sql_entity_id(m))
             .collect();
-        assert_eq!(got, want, "value literal, qualified type, new(T), AutoMigrate's every arg");
+        assert_eq!(
+            got, want,
+            "value literal, qualified type, new(T), AutoMigrate's every arg"
+        );
     }
 
     #[test]
@@ -7575,8 +7849,14 @@ func (*Order) TableName() string {
 func (t Tenant) TableName() string { return t.prefix + "_tenants" }
 "#;
         let parse = parse_file(SRC, "model.go", "store", "", repo()).unwrap();
-        assert_eq!(table_cells_of(&parse, sql_entity_id("User")), vec!["app_users"]);
-        assert_eq!(table_cells_of(&parse, sql_entity_id("Order")), vec!["legacy_orders"]);
+        assert_eq!(
+            table_cells_of(&parse, sql_entity_id("User")),
+            vec!["app_users"]
+        );
+        assert_eq!(
+            table_cells_of(&parse, sql_entity_id("Order")),
+            vec!["legacy_orders"]
+        );
         let cell = parse
             .nodes
             .iter()
@@ -7593,7 +7873,10 @@ func (t Tenant) TableName() string { return t.prefix + "_tenants" }
             "a computed TableName() declares no fixed table"
         );
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA),
             "a declaration is not an access"
         );
     }
@@ -7603,7 +7886,10 @@ func (t Tenant) TableName() string { return t.prefix + "_tenants" }
         // A pure model file imports nothing; its `gorm:"…"` tags are the evidence.
         const TAGGED: &str = "package store\n\ntype User struct {\n    ID uint `gorm:\"primaryKey\"`\n}\n\nfunc (User) TableName() string { return \"app_users\" }\n";
         let parse = parse_file(TAGGED, "model.go", "store", "", repo()).unwrap();
-        assert_eq!(table_cells_of(&parse, sql_entity_id("User")), vec!["app_users"]);
+        assert_eq!(
+            table_cells_of(&parse, sql_entity_id("User")),
+            vec!["app_users"]
+        );
 
         // No import, no tag: `TableName()` is just a method name.
         const PLAIN: &str = "package report\n\ntype Sheet struct{ Title string }\n\nfunc (Sheet) TableName() string { return \"sheet\" }\n";
@@ -7646,7 +7932,10 @@ func Update(db *gorm.DB, u *User, cfg Config) {
 "#;
         let parse = parse_file(GORM, "update.go", "store", "", repo()).unwrap();
         assert!(
-            !parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA),
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA),
             "a variable argument carries no model type"
         );
 
@@ -7659,7 +7948,12 @@ func Render(t *Template) {
 }
 "#;
         let parse = parse_file(NO_IMPORT, "view.go", "view", "", repo()).unwrap();
-        assert!(!parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
+        assert!(
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA)
+        );
     }
 
     #[test]
@@ -8135,7 +8429,9 @@ func setupRoutes(r *mux.Router) {
             let mut parse_errors = 0usize;
 
             for file in &files {
-                let Ok(source) = std::fs::read_to_string(file) else { continue };
+                let Ok(source) = std::fs::read_to_string(file) else {
+                    continue;
+                };
                 let rel = file.strip_prefix(path).unwrap_or(file).to_string_lossy();
                 let parse = match parse_file(&source, &rel, "pkg", "github.com/x/y", repo()) {
                     Ok(p) => p,
@@ -8209,7 +8505,10 @@ func handle(r *http.Request) string {
             .nodes
             .iter()
             .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD));
-        assert!(!any_route, "getters with non-`/` strings must not be routes");
+        assert!(
+            !any_route,
+            "getters with non-`/` strings must not be routes"
+        );
     }
 
     // ========================================================================
@@ -8278,8 +8577,12 @@ func GetOne(ctx context.Context) {
         );
 
         // CALLS edge from the enclosing function into each endpoint.
-        let fetch_users =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "client::FetchUsers");
+        let fetch_users = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "client::FetchUsers",
+        );
         assert!(
             has_edge(&parse, fetch_users, get_users, edge_category::CALLS),
             "expected CALLS edge FetchUsers -> GET /users endpoint"
@@ -8527,8 +8830,17 @@ func setup(h http.Header, wg *sync.WaitGroup, q url.Values) {
 }
 "#;
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
-        assert!(route_qnames(&parse).is_empty(), "{:?}", route_qnames(&parse));
-        assert!(parse.refs.iter().all(|r| r.category != edge_category::HANDLED_BY));
+        assert!(
+            route_qnames(&parse).is_empty(),
+            "{:?}",
+            route_qnames(&parse)
+        );
+        assert!(
+            parse
+                .refs
+                .iter()
+                .all(|r| r.category != edge_category::HANDLED_BY)
+        );
     }
 
     #[test]
@@ -8601,7 +8913,10 @@ func setup(r *gin.Engine, admin *gin.Engine) {
                 r#"{"file":"server.go","start_line":4,"end_line":4}"#.to_string(),
             ]
         );
-        assert_eq!(handled_by(&parse, users), vec![bare("List"), bare("ListAll")]);
+        assert_eq!(
+            handled_by(&parse, users),
+            vec![bare("List"), bare("ListAll")]
+        );
     }
 
     #[test]
@@ -8705,7 +9020,11 @@ func Run() {
 }
 "#;
         let parse = parse_file(source, "app/run.go", "app", "", repo()).unwrap();
-        assert!(injects_refs(&parse).is_empty(), "{:?}", injects_refs(&parse));
+        assert!(
+            injects_refs(&parse).is_empty(),
+            "{:?}",
+            injects_refs(&parse)
+        );
     }
 
     #[test]
@@ -8747,7 +9066,10 @@ var ProviderSet = wire.NewSet(NewA, NewB)
 "#;
         let parse = parse_file(source, "app/set.go", "app", "", repo()).unwrap();
         let set = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::ProviderSet");
-        assert!(parse.nodes.iter().any(|n| n.id == set), "expected STATE_VAR");
+        assert!(
+            parse.nodes.iter().any(|n| n.id == set),
+            "expected STATE_VAR"
+        );
         assert_eq!(
             injects_refs(&parse),
             vec![(set, bare("NewA")), (set, bare("NewB"))]
@@ -8826,11 +9148,23 @@ func (h *TokensHandler) Create(c *gin.Context) {}
         let register = "handlers::tokens::TokensHandler::RegisterRoutes";
         let list = param_route_id(register, 0, "GET", "/tokens");
         let create = param_route_id(register, 0, "POST", "/tokens");
-        assert_eq!(handled_by(&parse, list), vec![attr("TokensHandler", "List")]);
-        assert_eq!(handled_by(&parse, create), vec![attr("TokensHandler", "Create")]);
+        assert_eq!(
+            handled_by(&parse, list),
+            vec![attr("TokensHandler", "List")]
+        );
+        assert_eq!(
+            handled_by(&parse, create),
+            vec![attr("TokensHandler", "Create")]
+        );
         // The ROUTE_METHOD cell keeps the source text of the handler.
-        assert_eq!(route_handlers(&parse, list), vec![Some("h.List".to_string())]);
-        assert_eq!(route_handlers(&parse, create), vec![Some("h.Create".to_string())]);
+        assert_eq!(
+            route_handlers(&parse, list),
+            vec![Some("h.List".to_string())]
+        );
+        assert_eq!(
+            route_handlers(&parse, create),
+            vec![Some("h.Create".to_string())]
+        );
         // A package-qualified handler in the same method is untouched.
         assert_eq!(
             handled_by(&parse, param_route_id(register, 0, "GET", "/health")),
@@ -8838,11 +9172,13 @@ func (h *TokensHandler) Create(c *gin.Context) {}
         );
         let module_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "handlers::tokens");
-        assert!(parse
-            .refs
-            .iter()
-            .filter(|r| r.from == list || r.from == create)
-            .all(|r| r.from_module == module_id));
+        assert!(
+            parse
+                .refs
+                .iter()
+                .filter(|r| r.from == list || r.from == create)
+                .all(|r| r.from_module == module_id)
+        );
     }
 
     // ---- DF.16: a typed parameter / local names its type text ----
@@ -8873,8 +9209,14 @@ func Register(r *gin.Engine, h *TokensHandler, u *handlers.UsersHandler, v Token
     r.GET("/z", v.Show)
 }
 "#;
-        let parse =
-            parse_file(source, "api/routes.go", "api::routes", "example.com/shop", repo()).unwrap();
+        let parse = parse_file(
+            source,
+            "api/routes.go",
+            "api::routes",
+            "example.com/shop",
+            repo(),
+        )
+        .unwrap();
         let x = route_id(repo(), "GET", "/x");
         assert_eq!(handled_by(&parse, x), vec![attr("TokensHandler", "List")]);
         // Another package's type keeps its import name; a value parameter
@@ -8908,8 +9250,14 @@ func Register(r *gin.Engine) {
     r.POST("/v", v.Create)
 }
 "#;
-        let parse =
-            parse_file(source, "api/routes.go", "api::routes", "example.com/shop", repo()).unwrap();
+        let parse = parse_file(
+            source,
+            "api/routes.go",
+            "api::routes",
+            "example.com/shop",
+            repo(),
+        )
+        .unwrap();
         for (method, path, name) in [
             ("GET", "/t", "Show"),
             ("DELETE", "/d", "Del"),
@@ -8951,8 +9299,14 @@ func setup(r *gin.Engine) {
     r.GET("/products", p.List)
 }
 "#;
-        let parse =
-            parse_file(source, "server/server.go", "server", "example.com/app", repo()).unwrap();
+        let parse = parse_file(
+            source,
+            "server/server.go",
+            "server",
+            "example.com/app",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             handled_by(&parse, route_id(repo(), "GET", "/users")),
             vec![attr("NewUsers()", "List")]
@@ -9012,8 +9366,14 @@ func (s *Server) routes(r *gin.Engine) {
     r.GET("/u", u.List)
 }
 "#;
-        let parse =
-            parse_file(source, "server/server.go", "server", "example.com/app", repo()).unwrap();
+        let parse = parse_file(
+            source,
+            "server/server.go",
+            "server",
+            "example.com/app",
+            repo(),
+        )
+        .unwrap();
         for (path, base) in [
             ("/a", "a"),
             ("/k", "k"),
@@ -9060,7 +9420,11 @@ func other(r *gin.Engine) {
             repo(),
         )
         .unwrap();
-        let cases = [("/a", "TokensHandler"), ("/b", "UsersHandler"), ("/c", "UsersHandler")];
+        let cases = [
+            ("/a", "TokensHandler"),
+            ("/b", "UsersHandler"),
+            ("/c", "UsersHandler"),
+        ];
         for (path, base) in cases {
             assert_eq!(
                 handled_by(&parse, route_id(repo(), "GET", path)),
@@ -9089,7 +9453,12 @@ func main() {
         assert_eq!(handled_by(&parse, ws), vec![bare("serveWs")]);
         // Same module stamp as the identifier arm.
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "main");
-        assert!(parse.refs.iter().all(|r| r.from != ws || r.from_module == module_id));
+        assert!(
+            parse
+                .refs
+                .iter()
+                .all(|r| r.from != ws || r.from_module == module_id)
+        );
     }
 
     #[test]
@@ -9104,8 +9473,14 @@ func setup(r *gin.Engine) {
     })
 }
 "#;
-        let parse = parse_file(source, "server/server.go", "server", "example.com/app", repo())
-            .unwrap();
+        let parse = parse_file(
+            source,
+            "server/server.go",
+            "server",
+            "example.com/app",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             handled_by(&parse, route_id(repo(), "GET", "/x")),
             vec![bare("build")]
@@ -9183,8 +9558,14 @@ func setup(r *gin.Engine, h *Hub) {
     })
 }
 "#;
-        let parse = parse_file(source, "server/server.go", "server", "example.com/app", repo())
-            .unwrap();
+        let parse = parse_file(
+            source,
+            "server/server.go",
+            "server",
+            "example.com/app",
+            repo(),
+        )
+        .unwrap();
         // A repo-local package and a captured variable both stay.
         assert_eq!(
             handled_by(&parse, route_id(repo(), "GET", "/users")),
@@ -9368,7 +9749,10 @@ func main() {
         assert_eq!(import_local_names("log"), vec!["log"]);
         assert_eq!(import_local_names("encoding/json"), vec!["json"]);
         assert_eq!(import_local_names("github.com/go-chi/chi/v5"), vec!["chi"]);
-        assert_eq!(import_local_names("gopkg.in/yaml.v3"), vec!["yaml.v3", "yaml"]);
+        assert_eq!(
+            import_local_names("gopkg.in/yaml.v3"),
+            vec!["yaml.v3", "yaml"]
+        );
         assert_eq!(
             import_local_names("github.com/mattn/go-sqlite3"),
             vec!["go-sqlite3", "sqlite3"]
@@ -9457,8 +9841,12 @@ func run(s *UserService) {
 "#;
         let parse = parse_file(source, "run.go", "shop", "", repo()).unwrap();
         let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::run");
-        let calls: Vec<&CallQualifier> =
-            parse.calls.iter().filter(|c| c.from == run).map(|c| &c.qualifier).collect();
+        let calls: Vec<&CallQualifier> = parse
+            .calls
+            .iter()
+            .filter(|c| c.from == run)
+            .map(|c| &c.qualifier)
+            .collect();
         assert_eq!(calls, vec![&complex("s.repo", "Find")]);
     }
 
@@ -9504,7 +9892,9 @@ type UserService struct {
 "#;
 
     fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
-        v.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect()
+        v.iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
     }
 
     #[test]
@@ -9603,9 +9993,17 @@ type UserService struct {
         let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
         assert_eq!(
             embed_refs(&parse, "shop::UserService"),
-            vec![bare("UserRepo"), bare("Audit"), attr("store", "Tx"), bare("Base")]
+            vec![
+                bare("UserRepo"),
+                bare("Audit"),
+                attr("store", "Tx"),
+                bare("Base")
+            ]
         );
-        assert_eq!(embed_refs(&parse, "shop::Logger"), vec![attr("store", "Logger")]);
+        assert_eq!(
+            embed_refs(&parse, "shop::Logger"),
+            vec![attr("store", "Logger")]
+        );
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop");
         let lines: Vec<(u32, NodeId)> = parse
             .refs
@@ -10060,7 +10458,11 @@ func TestOXR(t *testing.T) {
 }
 "#;
         let parse = parse_file(source, "fx/oxr_test.go", "fx", "", repo()).unwrap();
-        let locals = parse.nav.local_types.get(&func_id("fx::TestOXR")).expect("locals");
+        let locals = parse
+            .nav
+            .local_types
+            .get(&func_id("fx::TestOXR"))
+            .expect("locals");
         assert_eq!(locals["o"], "NewOXR()|src()");
     }
 
@@ -10099,8 +10501,10 @@ func F() {
 }
 "#;
         let parse = parse_file(source, "app/f.go", "app", "example.com/app", repo()).unwrap();
-        let calls: Vec<CallQualifier> =
-            calls_from(&parse, func_id("app::F")).into_iter().map(|(q, _)| q).collect();
+        let calls: Vec<CallQualifier> = calls_from(&parse, func_id("app::F"))
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect();
         assert_eq!(calls, vec![complex("pkg.T()", "M"), complex("T()", "N")]);
     }
 
@@ -10191,8 +10595,13 @@ var hv = handle
         );
         // The route's handler argument is its HANDLED_BY only, the wire
         // provider its INJECTS only.
-        assert!(parse.refs.iter().any(|r| r.category == edge_category::HANDLED_BY
-            && r.qualifier == attr("store", "Handle")));
+        assert!(
+            parse
+                .refs
+                .iter()
+                .any(|r| r.category == edge_category::HANDLED_BY
+                    && r.qualifier == attr("store", "Handle"))
+        );
         assert_eq!(injects_refs(&parse), vec![(run, attr("store", "NewA"))]);
         // A named result (of a func, of a func literal) and a body `const`
         // shadow the package scope: no ref.
@@ -10203,7 +10612,11 @@ var hv = handle
         let hv = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::hv");
         assert_eq!(uses_quals(&parse, hv), vec![bare("handle")]);
         // No other USES ref anywhere in the file.
-        let total = parse.refs.iter().filter(|r| r.category == edge_category::USES).count();
+        let total = parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .count();
         assert_eq!(total, 8);
     }
 
@@ -10255,8 +10668,12 @@ var fallback = &Svc{}
                 (bare("Config"), row_of(src, "&Config{}")),
             ]
         );
-        assert_eq!(injects_refs(&parse), vec![(func_id("app::Build"), bare("NewA"))]);
-        let fallback = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::fallback");
+        assert_eq!(
+            injects_refs(&parse),
+            vec![(func_id("app::Build"), bare("NewA"))]
+        );
+        let fallback =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::fallback");
         assert_eq!(uses_quals(&parse, fallback), vec![bare("Svc")]);
     }
 
@@ -10313,13 +10730,25 @@ func Routes(r *gin.Engine) {
             Some("svc-b::client".to_string())
         );
         assert_eq!(go.map_import("svc::cmd::main", "example.com/svcx/y"), None);
-        assert_eq!(go.map_import("svc::cmd::main", "github.com/google/uuid"), None);
+        assert_eq!(
+            go.map_import("svc::cmd::main", "github.com/google/uuid"),
+            None
+        );
         // A nested module's own path names its root dir.
-        assert_eq!(go.map_import("svc::cmd::main", "example.com/svc"), Some("svc".to_string()));
+        assert_eq!(
+            go.map_import("svc::cmd::main", "example.com/svc"),
+            Some("svc".to_string())
+        );
         // Root-only: HEAD semantics, the root module's own path is degenerate.
         let root = GoModules::root_only("example.com/app");
-        assert_eq!(root.map_import("x::y", "example.com/app/x"), Some("x".to_string()));
-        assert_eq!(root.map_import("x::y", "example.com/app"), Some(String::new()));
+        assert_eq!(
+            root.map_import("x::y", "example.com/app/x"),
+            Some("x".to_string())
+        );
+        assert_eq!(
+            root.map_import("x::y", "example.com/app"),
+            Some(String::new())
+        );
         assert_eq!(root.map_import("x::y", "example.com/apple/x"), None);
         assert!(GoModules::root_only("").is_empty());
     }
@@ -10367,18 +10796,32 @@ func Routes(r *gin.Engine) {
                 &module(None),
                 &module(Some("rp")),
                 &module(Some("_")),
-                &ImportTarget::Module { path: "store".to_string(), alias: None },
-                &ImportTarget::Module { path: "fmt".to_string(), alias: None },
+                &ImportTarget::Module {
+                    path: "store".to_string(),
+                    alias: None
+                },
+                &ImportTarget::Module {
+                    path: "fmt".to_string(),
+                    alias: None
+                },
             ]
         );
         assert!(imports.iter().all(|i| i.from_module == "cmd::main"));
         assert_eq!(external, ["fmt"], "the root import is in-repo");
 
-        let (imports, external) =
-            imports_under("example.com/app/v3", "package main\n\nimport \"example.com/app/v3\"\n");
-        assert_eq!(imports.iter().map(|i| &i.target).collect::<Vec<_>>(), [&module(None)]);
+        let (imports, external) = imports_under(
+            "example.com/app/v3",
+            "package main\n\nimport \"example.com/app/v3\"\n",
+        );
+        assert_eq!(
+            imports.iter().map(|i| &i.target).collect::<Vec<_>>(),
+            [&module(None)]
+        );
         assert!(external.is_empty());
-        assert_eq!(import_local_names("google.golang.org/grpc").first(), Some(&"grpc"));
+        assert_eq!(
+            import_local_names("google.golang.org/grpc").first(),
+            Some(&"grpc")
+        );
         assert_eq!(import_local_names("example.com/x/y/v3").first(), Some(&"y"));
     }
 
@@ -10403,17 +10846,28 @@ func Routes(r *gin.Engine) {
                 })
                 .collect::<Vec<_>>()
         };
-        let store = "// Package store keeps things.\npackage store\n\nfunc Open() int { return 1 }\n";
+        let store =
+            "// Package store keeps things.\npackage store\n\nfunc Open() int { return 1 }\n";
         assert_eq!(
-            names(store, "internal/v2store/store.go", "internal::v2store::store"),
+            names(
+                store,
+                "internal/v2store/store.go",
+                "internal::v2store::store"
+            ),
             ["store"]
         );
         assert_eq!(
-            names("package store_test\n\nfunc helper() {}\n", "internal/v2store/store_test.go",
-                "internal::v2store::store_test"),
+            names(
+                "package store_test\n\nfunc helper() {}\n",
+                "internal/v2store/store_test.go",
+                "internal::v2store::store_test"
+            ),
             ["store_test"]
         );
-        assert!(names("func broken() {}\n", "x/x.go", "x::x").is_empty(), "no clause, no fact");
+        assert!(
+            names("func broken() {}\n", "x/x.go", "x::x").is_empty(),
+            "no clause, no fact"
+        );
     }
 
     #[test]
@@ -10423,10 +10877,19 @@ func Routes(r *gin.Engine) {
             ("a".into(), "example.com/m".into()),
             ("b".into(), "example.com/m".into()),
         ]);
-        assert_eq!(go.map_import("b::main", "example.com/m/p"), Some("b::p".to_string()));
-        assert_eq!(go.map_import("a::main", "example.com/m/p"), Some("a::p".to_string()));
+        assert_eq!(
+            go.map_import("b::main", "example.com/m/p"),
+            Some("b::p".to_string())
+        );
+        assert_eq!(
+            go.map_import("a::main", "example.com/m/p"),
+            Some("a::p".to_string())
+        );
         // An importer in neither: the first root by dir, never HashMap order.
-        assert_eq!(go.map_import("c::main", "example.com/m/p"), Some("a::p".to_string()));
+        assert_eq!(
+            go.map_import("c::main", "example.com/m/p"),
+            Some("a::p".to_string())
+        );
         // A file of a nested module still reaches the module around it.
         let go = GoModules::from_entries(vec![
             (String::new(), "example.com/root".into()),
@@ -10461,11 +10924,20 @@ func Routes(r *gin.Engine) {
             ("empty".into(), String::new()),
         ]);
         assert_eq!(a, b);
-        assert_eq!(a.context_key(), "svc=example.com/svc;svc-b=example.com/svc-b");
-        assert_eq!(GoModules::root_only("example.com/app").context_key(), "=example.com/app");
+        assert_eq!(
+            a.context_key(),
+            "svc=example.com/svc;svc-b=example.com/svc-b"
+        );
+        assert_eq!(
+            GoModules::root_only("example.com/app").context_key(),
+            "=example.com/app"
+        );
         assert_eq!(GoModules::default().context_key(), "");
         let pairs: Vec<(&str, &str)> = a.iter().collect();
-        assert_eq!(pairs, vec![("svc", "example.com/svc"), ("svc-b", "example.com/svc-b")]);
+        assert_eq!(
+            pairs,
+            vec![("svc", "example.com/svc"), ("svc-b", "example.com/svc-b")]
+        );
     }
 
     #[test]
@@ -10484,7 +10956,11 @@ func Routes(r *gin.Engine) {
             .collect();
         assert_eq!(
             paths,
-            vec!["github.com::google::uuid", "svc::internal::store", "svc-b::client"]
+            vec![
+                "github.com::google::uuid",
+                "svc::internal::store",
+                "svc-b::client"
+            ]
         );
         // Root-only parse of the same file: both intra-repo imports stay raw.
         let raw = parse_file(MAIN, "svc/cmd/main.go", "svc::cmd::main", "", repo()).unwrap();
@@ -10591,7 +11067,10 @@ func (b *bb) Build(info base.PickerBuildInfo) balancer.Picker { return nil }
                     "app::R::Meta",
                     "(interface{Apply(*Cfg)error;Name()string})(struct{A,B(int);Base})",
                 ),
-                ("app::R::Page", "(Query[User],func()error)(*Page[User],error)"),
+                (
+                    "app::R::Page",
+                    "(Query[User],func()error)(*Page[User],error)"
+                ),
                 ("app::R::Put", "(string,string)(error)"),
                 ("app::R::Walk", "(func(Context)error)(map[string]*Y)"),
                 ("app::bb::Build", "(PickerBuildInfo)(Picker)"),
@@ -10617,20 +11096,35 @@ func (b *bb) Build(info base.PickerBuildInfo) balancer.Picker { return nil }
     #[test]
     fn method_signature_reads_a_declarations_text() {
         for (code, want) in [
-            ("func (e *Error) Error() string { return e.Message }", "()(string)"),
+            (
+                "func (e *Error) Error() string { return e.Message }",
+                "()(string)",
+            ),
             (
                 "func (g GeoCoordinates) MarshalJSON() ([]byte, error) { return nil, nil }",
                 "()([]byte,error)",
             ),
-            ("func (s *S) Scan(src interface{}) error { return nil }", "(any)(error)"),
+            (
+                "func (s *S) Scan(src interface{}) error { return nil }",
+                "(any)(error)",
+            ),
             (
                 "func (h *H) ServeHTTP(w http.ResponseWriter, r *http.Request) {}",
                 "(ResponseWriter,*Request)()",
             ),
-            ("func (b byAge) Less(i, j int) bool { return b[i] < b[j] }", "(int,int)(bool)"),
-            ("func (s Set[T]) String() string { return \"\" }", "()(string)"),
+            (
+                "func (b byAge) Less(i, j int) bool { return b[i] < b[j] }",
+                "(int,int)(bool)",
+            ),
+            (
+                "func (s Set[T]) String() string { return \"\" }",
+                "()(string)",
+            ),
             ("func (p P) String() string { return ) }", "()(string)"),
-            ("// String is a doc comment.\nfunc (p P) String() string { return \"\" }", "()(string)"),
+            (
+                "// String is a doc comment.\nfunc (p P) String() string { return \"\" }",
+                "()(string)",
+            ),
         ] {
             assert_eq!(method_signature(code).as_deref(), Some(want), "{code}");
         }
@@ -10657,7 +11151,10 @@ func (b *bb) Build(info base.PickerBuildInfo) balancer.Picker { return nil }
                 other => panic!("CODE is text: {other:?}"),
             })
             .expect("a CODE cell");
-        assert_eq!(method_signature(&code).as_deref(), Some(parse.nav.method_sigs[&id].as_str()));
+        assert_eq!(
+            method_signature(&code).as_deref(),
+            Some(parse.nav.method_sigs[&id].as_str())
+        );
         assert_eq!(parse.nav.method_sigs[&id], "()(int)");
     }
 
@@ -10687,12 +11184,23 @@ func (p *Plain) Close() error { return nil }
         let parse = parse_file(source, "app/app.go", "app", "example.com/app", repo()).unwrap();
         // The generic receiver's and the generic interface's methods are
         // nodes still; they record no signature.
-        for q in ["app::Collection::InsertOne", "app::Collection::Count", "app::Repo::Get", "app::Repo::All"] {
-            assert!(parse.nav.qname_by_id.contains_key(&method_id(q)), "{q} is a METHOD");
+        for q in [
+            "app::Collection::InsertOne",
+            "app::Collection::Count",
+            "app::Repo::Get",
+            "app::Repo::All",
+        ] {
+            assert!(
+                parse.nav.qname_by_id.contains_key(&method_id(q)),
+                "{q} is a METHOD"
+            );
         }
         assert_eq!(
             sigs_of(&parse),
-            pairs(&[("app::Closer::Close", "()(error)"), ("app::Plain::Close", "()(error)")])
+            pairs(&[
+                ("app::Closer::Close", "()(error)"),
+                ("app::Plain::Close", "()(error)")
+            ])
         );
     }
 
@@ -10749,7 +11257,14 @@ type Msg struct{}
             let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, q);
             assert!(parse.nodes.iter().any(|n| n.id == id), "{q} is a STRUCT");
         }
-        for name in ["Chat_StreamServer", "Key", "Set", "Legacy", "Status", "Grouped"] {
+        for name in [
+            "Chat_StreamServer",
+            "Key",
+            "Set",
+            "Legacy",
+            "Status",
+            "Grouped",
+        ] {
             assert!(
                 !parse.nav.name_by_id.values().any(|n| n == name),
                 "the alias {name} is not a node"
@@ -10932,7 +11447,10 @@ func (s *Server) routes() {
 }
 "#;
         let (_, routes) = field_routes(source);
-        assert_eq!(routes, vec!["GET <mount:field:api::Server.other>/z".to_string()]);
+        assert_eq!(
+            routes,
+            vec!["GET <mount:field:api::Server.other>/z".to_string()]
+        );
     }
 
     #[test]
@@ -10988,8 +11506,14 @@ func (s *Server) routes() {
                 .map(|(_, _, mount)| mount)
                 .collect()
         };
-        assert_eq!(v1("api::server::NewServer"), vec![Mount::Const("/v1".into())]);
-        assert_eq!(v1("api::server::NewLegacy"), vec![Mount::Const("/legacy".into())]);
+        assert_eq!(
+            v1("api::server::NewServer"),
+            vec![Mount::Const("/v1".into())]
+        );
+        assert_eq!(
+            v1("api::server::NewLegacy"),
+            vec![Mount::Const("/legacy".into())]
+        );
     }
 
     #[test]
@@ -11453,8 +11977,14 @@ func serve(mux *http.ServeMux, rg *gin.RouterGroup, router *Router) {
     );
 
     fn hooks_parse() -> FileParse {
-        parse_file(PKG_VAR_HOOKS, "hooks/hooks.go", "hooks::hooks", "example.com/hooks", repo())
-            .unwrap()
+        parse_file(
+            PKG_VAR_HOOKS,
+            "hooks/hooks.go",
+            "hooks::hooks",
+            "example.com/hooks",
+            repo(),
+        )
+        .unwrap()
     }
 
     fn state_var_id(qname: &str) -> NodeId {
@@ -11501,7 +12031,10 @@ func serve(mux *http.ServeMux, rg *gin.RouterGroup, router *Router) {
         assert!(minted.is_empty(), "{minted:?}");
         for name in ["newStore", "onEvict"] {
             let fn_id = func_id(&format!("hooks::hooks::{name}"));
-            assert!(!parse.nodes.iter().any(|n| n.id == fn_id), "FUNCTION {name}");
+            assert!(
+                !parse.nodes.iter().any(|n| n.id == fn_id),
+                "FUNCTION {name}"
+            );
         }
     }
 
@@ -11568,8 +12101,14 @@ var onSave = func(repo *store.Repo) {
         );
         assert_eq!(row("var defaultStore = store.Open()"), 20);
         let paired = row("limit, ttl = clamp(10), clamp(20)");
-        assert_eq!(calls_from(&parse, var("limit")), vec![(bare("clamp"), paired)]);
-        assert_eq!(calls_from(&parse, var("ttl")), vec![(bare("clamp"), paired)]);
+        assert_eq!(
+            calls_from(&parse, var("limit")),
+            vec![(bare("clamp"), paired)]
+        );
+        assert_eq!(
+            calls_from(&parse, var("ttl")),
+            vec![(bare("clamp"), paired)]
+        );
         // One multi-value initialiser pairs with the first name only.
         assert_eq!(
             calls_from(&parse, var("lo")),
@@ -11715,7 +12254,11 @@ func main() {
                     "Admin".to_string(),
                     Mount::Const("/w".into())
                 ),
-                ("App".to_string(), "Root".to_string(), Mount::Const(String::new())),
+                (
+                    "App".to_string(),
+                    "Root".to_string(),
+                    Mount::Const(String::new())
+                ),
             ]
         );
     }
@@ -11956,8 +12499,9 @@ func (s *Server) Mount(rg *gin.RouterGroup) {
     // DF.7: route-group prefixes held in a constant.
     // ------------------------------------------------------------------------
 
-    const CONST_ROUTES: &str =
-        include_str!("../../../../bench/substrate-gap/fixtures/go-route-const-prefix/api/routes.go");
+    const CONST_ROUTES: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/go-route-const-prefix/api/routes.go"
+    );
 
     /// The file MODULE's `GoStringConst` facts as `(name, value)`, in record
     /// order.
@@ -11974,7 +12518,12 @@ func (s *Server) Mount(rg *gin.RouterGroup) {
     }
 
     fn plain_route(method: &str, path: &str) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, &format!("{method} {path}"))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            &format!("{method} {path}"),
+        )
     }
 
     #[test]
@@ -11983,7 +12532,10 @@ func (s *Server) Mount(rg *gin.RouterGroup) {
         // constant, so the ROUTE is final, never provisional.
         let parse = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
         let qnames = route_qnames(&parse);
-        assert!(qnames.contains(&"GET /api/v1/items".to_string()), "{qnames:?}");
+        assert!(
+            qnames.contains(&"GET /api/v1/items".to_string()),
+            "{qnames:?}"
+        );
         assert!(!qnames.contains(&"GET /items".to_string()), "{qnames:?}");
         let items = plain_route("GET", "/api/v1/items");
         assert_eq!(handled_by(&parse, items), vec![bare("listItems")]);
@@ -12327,23 +12879,40 @@ mod model_schema_tests {
     }
 
     fn tag(name: Option<&str>, skip: bool, omitempty: bool, as_string: bool) -> JsonTag {
-        JsonTag { name: name.map(str::to_string), skip, omitempty, as_string }
+        JsonTag {
+            name: name.map(str::to_string),
+            skip,
+            omitempty,
+            as_string,
+        }
     }
 
     #[test]
     fn json_tag_table() {
         let cases: &[(&str, JsonTag)] = &[
             (r#"json:"id""#, tag(Some("id"), false, false, false)),
-            (r#"json:"email,omitempty""#, tag(Some("email"), false, true, false)),
+            (
+                r#"json:"email,omitempty""#,
+                tag(Some("email"), false, true, false),
+            ),
             (r#"json:",omitempty""#, tag(None, false, true, false)),
             (r#"json:"-""#, tag(None, true, false, false)),
             (r#"json:"-,""#, tag(Some("-"), false, false, false)),
             (r#"json:"n,string""#, tag(Some("n"), false, false, true)),
-            (r#"json:"n,omitempty,string""#, tag(Some("n"), false, true, true)),
+            (
+                r#"json:"n,omitempty,string""#,
+                tag(Some("n"), false, true, true),
+            ),
             (r#"json:"z,omitzero""#, tag(Some("z"), false, true, false)),
-            (r#"db:"id" json:"user_id" binding:"required""#, tag(Some("user_id"), false, false, false)),
+            (
+                r#"db:"id" json:"user_id" binding:"required""#,
+                tag(Some("user_id"), false, false, false),
+            ),
             (r#"json:"a\"b""#, tag(None, false, false, false)),
-            (r#"json:"ok name""#, tag(Some("ok name"), false, false, false)),
+            (
+                r#"json:"ok name""#,
+                tag(Some("ok name"), false, false, false),
+            ),
             (r#"json:"xé""#, tag(Some("xé"), false, false, false)),
             ("", JsonTag::default()),
             (r#"xml:"a""#, JsonTag::default()),
@@ -12429,7 +12998,10 @@ type Outer struct{ *Base }
         assert!(schemas(&parse, "m::m::onlyHidden").is_empty());
         assert!(schemas(&parse, "m::m::Empty").is_empty());
         let outer = ModelSchema::parse(&schemas(&parse, "m::m::Outer")[0]).expect("schema");
-        assert_eq!((outer.extends, outer.fields.len()), (vec!["Base".to_string()], 0));
+        assert_eq!(
+            (outer.extends, outer.fields.len()),
+            (vec!["Base".to_string()], 0)
+        );
         let base = ModelSchema::parse(&schemas(&parse, "m::m::Base")[0]).expect("schema");
         assert_eq!(base.fields[0].member(), "X");
     }
@@ -12459,7 +13031,10 @@ type Outer struct{ *Base }
             .map(|l| go_struct_schema(*l, src.as_bytes(), &mut stats).is_some())
             .collect();
         assert_eq!(written, vec![true, false]);
-        assert_eq!((stats.structs, stats.fields, stats.embeds, stats.skipped), (1, 1, 1, 3));
+        assert_eq!(
+            (stats.structs, stats.fields, stats.embeds, stats.skipped),
+            (1, 1, 1, 3)
+        );
     }
 
     /// The models-declared-fields fixture's Go file, cell for cell.
@@ -12468,8 +13043,14 @@ type Outer struct{ *Base }
         let src = include_str!(
             "../../../../bench/substrate-gap/fixtures/models-declared-fields/api/models/account.go"
         );
-        let parse = parse_file(src, "models/account.go", "models::account", "example.com/fields/api", repo())
-            .unwrap();
+        let parse = parse_file(
+            src,
+            "models/account.go",
+            "models::account",
+            "example.com/fields/api",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             schemas(&parse, "models::account::Account"),
             vec![
@@ -12499,12 +13080,19 @@ type Outer struct{ *Base }
         assert_eq!(schemas(&parse, "models::account::Person").len(), 1);
         assert!(schemas(&parse, "models::account::cache").is_empty());
         for n in &parse.nodes {
-            for c in n.cells.iter().filter(|c| c.kind == cell_type::SCHEMA_FIELDS) {
+            for c in n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            {
                 let payload = match &c.payload {
                     CellPayload::Json(j) => j.as_str(),
                     _ => "",
                 };
-                assert!(!payload.contains("secret") && !payload.contains("Password"), "{payload}");
+                assert!(
+                    !payload.contains("secret") && !payload.contains("Password"),
+                    "{payload}"
+                );
                 let schema = ModelSchema::from_cell(c).expect("a wire ModelSchema");
                 assert_eq!(schema.cell(), *c);
             }
@@ -12553,15 +13141,27 @@ mod wire_tests {
     }
 
     fn call(chain: &str) -> Shape {
-        Shape::Call { chain: chain.into(), array: false, model: None }
+        Shape::Call {
+            chain: chain.into(),
+            array: false,
+            model: None,
+        }
     }
 
     fn chain(chain: &str) -> Shape {
-        Shape::Chain { chain: chain.into(), array: false, model: None }
+        Shape::Chain {
+            chain: chain.into(),
+            array: false,
+            model: None,
+        }
     }
 
     fn named(ty: &str, array: bool) -> Shape {
-        Shape::Named { ty: ty.into(), array, model: None }
+        Shape::Named {
+            ty: ty.into(),
+            array,
+            model: None,
+        }
     }
 
     fn field(name: &str, shape: Shape) -> ShapeField {
@@ -12600,7 +13200,12 @@ func (f *Fleet) List(c *gin.Context) {{
             ]
         );
         let ws = sites(&p, "web::h::Fleet::List");
-        assert_eq!(ws[0].cell(), ServerWire::from_cell(&ws[0].cell()).expect("round trip").cell());
+        assert_eq!(
+            ws[0].cell(),
+            ServerWire::from_cell(&ws[0].cell())
+                .expect("round trip")
+                .cell()
+        );
     }
 
     #[test]
@@ -12693,7 +13298,10 @@ func (f *Fleet) Trips(c *gin.Context) {{
                     field(
                         "meta",
                         Shape::Object {
-                            fields: vec![field("page", chain("self.page")), field("raw", named("int", false))],
+                            fields: vec![
+                                field("page", chain("self.page")),
+                                field("raw", named("int", false))
+                            ],
                             open: false,
                         }
                     ),
@@ -12705,14 +13313,27 @@ func (f *Fleet) Trips(c *gin.Context) {{
         // A non-literal key leaves the envelope open.
         assert_eq!(
             ws[1].shape,
-            Shape::Object { fields: vec![field("ok", named("bool", false))], open: true }
+            Shape::Object {
+                fields: vec![field("ok", named("bool", false))],
+                open: true
+            }
         );
         // Three envelope levels are read; the fourth is open.
-        let Shape::Object { fields: a, .. } = &ws[2].shape else { panic!("{:?}", ws[2].shape) };
-        let Shape::Object { fields: b, .. } = &a[0].shape else { panic!("{a:?}") };
-        let Shape::Object { fields: cf, .. } = &b[0].shape else { panic!("{b:?}") };
+        let Shape::Object { fields: a, .. } = &ws[2].shape else {
+            panic!("{:?}", ws[2].shape)
+        };
+        let Shape::Object { fields: b, .. } = &a[0].shape else {
+            panic!("{a:?}")
+        };
+        let Shape::Object { fields: cf, .. } = &b[0].shape else {
+            panic!("{b:?}")
+        };
         assert_eq!(cf[0].name, "c");
-        assert!(matches!(&cf[0].shape, Shape::Open { .. }), "{:?}", cf[0].shape);
+        assert!(
+            matches!(&cf[0].shape, Shape::Open { .. }),
+            "{:?}",
+            cf[0].shape
+        );
     }
 
     #[test]
@@ -12746,14 +13367,27 @@ func (f *Fleet) Register(c *gin.Context) {{
         plate.bind_required = true;
         let note = ShapeField::new("note", false, named("string", false));
         assert_eq!(ws[1].form, WireForm::JsonBind);
-        assert_eq!(ws[1].shape, Shape::Object { fields: vec![plate, note], open: false });
+        assert_eq!(
+            ws[1].shape,
+            Shape::Object {
+                fields: vec![plate, note],
+                open: false
+            }
+        );
         assert_eq!(ws[2].form, WireForm::JsonResponse);
         assert_eq!(
             ws[2].shape,
-            Shape::Object { fields: vec![field("id", named("string", false))], open: false }
+            Shape::Object {
+                fields: vec![field("id", named("string", false))],
+                open: false
+            }
         );
         // The value's struct is no model: no SCHEMA_FIELDS anywhere.
-        assert!(p.nodes.iter().all(|n| n.cells.iter().all(|c| c.kind != cell_type::SCHEMA_FIELDS)));
+        assert!(
+            p.nodes
+                .iter()
+                .all(|n| n.cells.iter().all(|c| c.kind != cell_type::SCHEMA_FIELDS))
+        );
     }
 
     #[test]
@@ -12780,7 +13414,11 @@ func (f *Fleet) Get(c *gin.Context) {{
         let got: Vec<(Option<u16>, &str)> = ws.iter().map(|w| (w.status, w.raw.as_str())).collect();
         assert_eq!(
             got,
-            vec![(None, "gin.H{\"error\": err.Error()}"), (None, "v"), (Some(204), "v")],
+            vec![
+                (None, "gin.H{\"error\": err.Error()}"),
+                (None, "v"),
+                (Some(204), "v")
+            ],
             "the 404 / 400 / 418 bodies are skipped by status, never by key"
         );
         assert!(ws.iter().all(|w| !w.raw.contains("Problem")));
@@ -12810,7 +13448,13 @@ func NotGin(c *gin.Context) {
         let ws = sites(&p, "web::h::List");
         assert_eq!(ws.len(), 1, "{ws:?}");
         assert_eq!(ws[0].status, Some(200));
-        assert_eq!(ws[0].shape, Shape::Object { fields: vec![field("ok", named("int", false))], open: false });
+        assert_eq!(
+            ws[0].shape,
+            Shape::Object {
+                fields: vec![field("ok", named("int", false))],
+                open: false
+            }
+        );
         // `gin.` is not this file's name for gin: no import binds it.
         assert!(sites(&p, "web::h::NotGin").is_empty());
     }
@@ -12836,11 +13480,17 @@ func Get(c echo.Context) error {
         let p = parse(echo);
         let ws = sites(&p, "web::h::Get");
         assert_eq!(ws.len(), 2, "{ws:?}");
-        assert_eq!((ws[0].form, &ws[0].shape), (WireForm::JsonBind, &named("Order", false)));
+        assert_eq!(
+            (ws[0].form, &ws[0].shape),
+            (WireForm::JsonBind, &named("Order", false))
+        );
         assert_eq!(ws[1].status, Some(200));
         assert_eq!(
             ws[1].shape,
-            Shape::Object { fields: vec![field("order", named("Order", false))], open: false }
+            Shape::Object {
+                fields: vec![field("order", named("Order", false))],
+                open: false
+            }
         );
 
         let fiber = "package h
@@ -12867,14 +13517,33 @@ func Gone(c *fiber.Ctx) error {
         let p = parse(fiber);
         let ws = sites(&p, "web::h::List");
         assert_eq!(ws.len(), 1, "{ws:?}");
-        assert_eq!(ws[0].status, Some(200), "fiber c.JSON(v) is an implicit 200");
-        assert_eq!(ws[0].shape, Shape::Object { fields: vec![field("items", call("list()"))], open: false });
+        assert_eq!(
+            ws[0].status,
+            Some(200),
+            "fiber c.JSON(v) is an implicit 200"
+        );
+        assert_eq!(
+            ws[0].shape,
+            Shape::Object {
+                fields: vec![field("items", call("list()"))],
+                open: false
+            }
+        );
         let ws = sites(&p, "web::h::Create");
         let got: Vec<(WireForm, Option<u16>)> = ws.iter().map(|w| (w.form, w.status)).collect();
-        assert_eq!(got, vec![(WireForm::JsonBind, None), (WireForm::JsonResponse, Some(201))]);
+        assert_eq!(
+            got,
+            vec![
+                (WireForm::JsonBind, None),
+                (WireForm::JsonResponse, Some(201))
+            ]
+        );
         assert_eq!(ws[0].shape, named("Order", false));
         assert_eq!(ws[1].shape, named("Order", false));
-        assert!(sites(&p, "web::h::Gone").is_empty(), "a c.Status(410) statement before it");
+        assert!(
+            sites(&p, "web::h::Gone").is_empty(),
+            "a c.Status(410) statement before it"
+        );
     }
 
     #[test]
@@ -12923,9 +13592,13 @@ func Plain(w http.ResponseWriter, r *http.Request) {
         let p = parse(src);
         let ws = sites(&p, "web::h::Report");
         assert_eq!(ws.len(), 1);
-        assert_eq!((ws[0].status, &ws[0].shape), (Some(200), &named("Report", false)));
+        assert_eq!(
+            (ws[0].status, &ws[0].shape),
+            (Some(200), &named("Report", false))
+        );
         let ws = sites(&p, "web::h::Create");
-        let got: Vec<(WireForm, Option<u16>, &Shape)> = ws.iter().map(|w| (w.form, w.status, &w.shape)).collect();
+        let got: Vec<(WireForm, Option<u16>, &Shape)> =
+            ws.iter().map(|w| (w.form, w.status, &w.shape)).collect();
         assert_eq!(
             got,
             vec![
@@ -12938,9 +13611,18 @@ func Plain(w http.ResponseWriter, r *http.Request) {
         assert_eq!((ws.len(), ws[0].status), (1, None));
         let ws = sites(&p, "web::h::Chi");
         let got: Vec<(WireForm, Option<u16>)> = ws.iter().map(|w| (w.form, w.status)).collect();
-        assert_eq!(got, vec![(WireForm::JsonBind, None), (WireForm::JsonResponse, Some(202))]);
+        assert_eq!(
+            got,
+            vec![
+                (WireForm::JsonBind, None),
+                (WireForm::JsonResponse, Some(202))
+            ]
+        );
         let ws = sites(&p, "web::h::Plain");
-        assert_eq!((ws[0].status, &ws[0].shape), (Some(200), &named("Order", true)));
+        assert_eq!(
+            (ws[0].status, &ws[0].shape),
+            (Some(200), &named("Order", true))
+        );
     }
 
     #[test]
@@ -12962,27 +13644,60 @@ func (s *Store) Names() []string { return nil }
 func Map[T any]() []T { return nil }
 func Grid() [][]models.Trip { return nil }
 ";
-        let p = parse_file(src, "store/store.go", "store::store", "example.com/app", repo()).expect("parse");
+        let p = parse_file(
+            src,
+            "store/store.go",
+            "store::store",
+            "example.com/app",
+            repo(),
+        )
+        .expect("parse");
         let fact = |kind, q: &str| -> Vec<NavFact> {
             p.nav
                 .nav_facts
                 .get(&id(kind, q))
-                .map(|fs| fs.iter().filter(|f| matches!(f, NavFact::SliceResult { .. })).cloned().collect())
+                .map(|fs| {
+                    fs.iter()
+                        .filter(|f| matches!(f, NavFact::SliceResult { .. }))
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let slice = |e: &str| vec![NavFact::SliceResult { elem: e.into() }];
-        assert_eq!(fact(node_kind::METHOD, "store::store::Store::Vehicles"), slice("models.Vehicle"));
-        assert_eq!(fact(node_kind::METHOD, "store::store::Store::Trips"), slice("models.Trip"));
-        assert_eq!(fact(node_kind::METHOD, "store::store::Repo::All"), slice("models.Trip"));
+        assert_eq!(
+            fact(node_kind::METHOD, "store::store::Store::Vehicles"),
+            slice("models.Vehicle")
+        );
+        assert_eq!(
+            fact(node_kind::METHOD, "store::store::Store::Trips"),
+            slice("models.Trip")
+        );
+        assert_eq!(
+            fact(node_kind::METHOD, "store::store::Repo::All"),
+            slice("models.Trip")
+        );
         // A named result type is a return type, never a slice result.
         assert!(fact(node_kind::METHOD, "store::store::Store::Vehicle").is_empty());
         assert_eq!(
-            p.nav.return_types.get(&id(node_kind::METHOD, "store::store::Store::Vehicle")).map(String::as_str),
+            p.nav
+                .return_types
+                .get(&id(node_kind::METHOD, "store::store::Store::Vehicle"))
+                .map(String::as_str),
             Some("models.Vehicle")
         );
-        assert!(fact(node_kind::METHOD, "store::store::Store::Names").is_empty(), "predeclared element");
-        assert!(fact(node_kind::FUNCTION, "store::store::Map").is_empty(), "a type parameter");
-        assert!(fact(node_kind::FUNCTION, "store::store::Grid").is_empty(), "a slice of slices");
+        assert!(
+            fact(node_kind::METHOD, "store::store::Store::Names").is_empty(),
+            "predeclared element"
+        );
+        assert!(
+            fact(node_kind::FUNCTION, "store::store::Map").is_empty(),
+            "a type parameter"
+        );
+        assert!(
+            fact(node_kind::FUNCTION, "store::store::Grid").is_empty(),
+            "a slice of slices"
+        );
     }
 
     #[test]
@@ -13017,9 +13732,15 @@ func Writer(c *gin.Context) {
 ";
         let p = parse(src);
         assert!(
-            p.nodes.iter().all(|n| n.cells.iter().all(|c| c.kind != cell_type::MESSAGE_TYPE)),
+            p.nodes
+                .iter()
+                .all(|n| n.cells.iter().all(|c| c.kind != cell_type::MESSAGE_TYPE)),
             "no site: {:?}",
-            p.nodes.iter().flat_map(|n| n.cells.iter()).filter(|c| c.kind == cell_type::MESSAGE_TYPE).collect::<Vec<_>>()
+            p.nodes
+                .iter()
+                .flat_map(|n| n.cells.iter())
+                .filter(|c| c.kind == cell_type::MESSAGE_TYPE)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -13046,7 +13767,10 @@ var Handler = func(c *gin.Context) {{
 "
         );
         let p = parse(&src);
-        assert_eq!(payloads(&p, node_kind::METHOD, "web::h::Fleet::Twice").len(), 1);
+        assert_eq!(
+            payloads(&p, node_kind::METHOD, "web::h::Fleet::Twice").len(),
+            1
+        );
         let ws = sites(&p, "web::h::Fleet::Shadow");
         // `v` is declared with two shapes before either write (body order):
         // each write sees it open, never a guess.
@@ -13056,7 +13780,12 @@ var Handler = func(c *gin.Context) {{
         let total: usize = p
             .nodes
             .iter()
-            .map(|n| n.cells.iter().filter(|c| c.kind == cell_type::MESSAGE_TYPE).count())
+            .map(|n| {
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::MESSAGE_TYPE)
+                    .count()
+            })
             .sum();
         assert_eq!(total, 3);
     }

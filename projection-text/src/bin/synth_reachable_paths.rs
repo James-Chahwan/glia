@@ -97,10 +97,9 @@ fn main() -> Result<()> {
 
     let graph = build_repo_graph(&args.src, &args.repo_canonical)?;
     let seeds: SeedsFile = {
-        let bytes = std::fs::read(&args.seeds)
-            .with_context(|| format!("read {}", args.seeds.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse {}", args.seeds.display()))?
+        let bytes =
+            std::fs::read(&args.seeds).with_context(|| format!("read {}", args.seeds.display()))?;
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", args.seeds.display()))?
     };
 
     let activated_method_ids = activated_methods(&graph, &seeds.activated);
@@ -189,10 +188,7 @@ fn activated_methods(graph: &RepoGraph, activated: &[(String, f64)]) -> Vec<Node
 /// duplicates by emitting one sink per residence (downstream dedup happens at
 /// reachability filter time — if no activated method reaches a residence, it
 /// drops out).
-fn collect_sinks(
-    graph: &RepoGraph,
-    facts: &TestPatchFacts,
-) -> Vec<(NodeId, String, String)> {
+fn collect_sinks(graph: &RepoGraph, facts: &TestPatchFacts) -> Vec<(NodeId, String, String)> {
     let mut sinks: Vec<(NodeId, String, String)> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
 
@@ -240,11 +236,7 @@ fn collect_sinks(
                     continue;
                 }
                 if seen.insert(*id) {
-                    sinks.push((
-                        *id,
-                        qname.clone(),
-                        format!("constructor_call:{cls_name}"),
-                    ));
+                    sinks.push((*id, qname.clone(), format!("constructor_call:{cls_name}")));
                 }
             }
         }
@@ -279,7 +271,9 @@ mod tests {
 
     #[test]
     fn collects_constructor_class_methods_as_sinks() {
-        let g = graph_for("class Foo:\n    def a(self): pass\n    def b(self): pass\nclass Bar:\n    def c(self): pass\n");
+        let g = graph_for(
+            "class Foo:\n    def a(self): pass\n    def b(self): pass\nclass Bar:\n    def c(self): pass\n",
+        );
         let mut facts = TestPatchFacts::default();
         facts.constructor_calls.insert("Foo".into(), 1);
         let sinks = collect_sinks(&g, &facts);
@@ -295,10 +289,10 @@ mod tests {
     fn activated_methods_filters_to_callable_kinds() {
         let g = graph_for("class Foo:\n    def bar(self): pass\ndef top(): pass\n");
         let activated = vec![
-            ("m::Foo".to_string(), 0.5),         // CLASS — should be filtered out
-            ("m::Foo::bar".to_string(), 0.4),     // METHOD — keep
-            ("m::top".to_string(), 0.3),          // FUNCTION — keep
-            ("m::ghost".to_string(), 0.2),        // unknown — drop
+            ("m::Foo".to_string(), 0.5),      // CLASS — should be filtered out
+            ("m::Foo::bar".to_string(), 0.4), // METHOD — keep
+            ("m::top".to_string(), 0.3),      // FUNCTION — keep
+            ("m::ghost".to_string(), 0.2),    // unknown — drop
         ];
         let ids = activated_methods(&g, &activated);
         assert_eq!(ids.len(), 2);
@@ -308,9 +302,7 @@ mod tests {
     fn end_to_end_emits_cell_when_activated_caller_reaches_sink() {
         // Top-level functions only — Python resolver reliably emits CALLS
         // edges between module-local function calls. caller → mid → sink.
-        let g = graph_for(
-            "def sink(): pass\ndef mid(): sink()\ndef caller(): mid()\n",
-        );
+        let g = graph_for("def sink(): pass\ndef mid(): sink()\ndef caller(): mid()\n");
         let facts = TestPatchFacts::default();
         // Treat top-level `sink` as a constructor sink — that path resolves
         // by class-name match, but here we route via class_attrs analog by

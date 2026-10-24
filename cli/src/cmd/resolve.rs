@@ -73,7 +73,14 @@ pub(crate) fn run(args: Args) -> i32 {
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
-        println!("| {:.4} | {} | {} | `{}` | {} |", a.score, live_glyph(a.live), a.kind, a.qname, loc);
+        println!(
+            "| {:.4} | {} | {} | `{}` | {} |",
+            a.score,
+            live_glyph(a.live),
+            a.kind,
+            a.qname,
+            loc
+        );
     }
     0
 }

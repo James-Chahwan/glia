@@ -26,10 +26,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_code_domain::node_kind;
 use glia_core::NodeId;
 use glia_projection_text::driver_utils::{build_repo_graph, extract_position_cell};
+use regex::Regex;
 
 #[derive(Parser, Debug)]
 #[command(about = "Derive a directive block from SWE-bench test_patch.patch (B1, cycle 0.6)")]
@@ -104,11 +104,54 @@ struct ResolvedSymbol {
 }
 
 const STOP_IDENTS: &[&str] = &[
-    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
-    "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is",
-    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with",
-    "yield", "True", "False", "None", "self", "cls", "test", "tests", "py", "pytest",
-    "fixture", "parametrize", "approx", "raises", "warns", "match", "case",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
+    "True",
+    "False",
+    "None",
+    "self",
+    "cls",
+    "test",
+    "tests",
+    "py",
+    "pytest",
+    "fixture",
+    "parametrize",
+    "approx",
+    "raises",
+    "warns",
+    "match",
+    "case",
 ];
 
 fn main() -> Result<()> {
@@ -141,8 +184,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let graph = build_repo_graph(&args.src, &args.repo_canonical)
-        .context("build_repo_graph failed")?;
+    let graph =
+        build_repo_graph(&args.src, &args.repo_canonical).context("build_repo_graph failed")?;
     eprintln!(
         "[synth_test_expectation] graph: {} nodes",
         graph.nodes.len()
@@ -167,19 +210,27 @@ fn main() -> Result<()> {
         None => HashSet::new(),
     };
     if !prose_idents.is_empty() {
-        eprintln!("[synth_test_expectation] {} prose-mentioned identifiers (tie-break bias)",
-                  prose_idents.len());
+        eprintln!(
+            "[synth_test_expectation] {} prose-mentioned identifiers (tie-break bias)",
+            prose_idents.len()
+        );
     }
 
     let tail_idx = build_tail_index(&graph);
     // file_by_id + start_line_by_id: lookup maps from POSITION cells so the
     // directive can disambiguate package vs module (sphinx-10325) and surface
     // each target's definition signature line (Lever 2 gold-line skeleton).
-    let mut file_by_id: std::collections::HashMap<NodeId, String> = std::collections::HashMap::new();
-    let mut start_line_by_id: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
+    let mut file_by_id: std::collections::HashMap<NodeId, String> =
+        std::collections::HashMap::new();
+    let mut start_line_by_id: std::collections::HashMap<NodeId, u32> =
+        std::collections::HashMap::new();
     for n in &graph.nodes {
-        let Some(pos_json) = extract_position_cell(n) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(pos_json) else { continue };
+        let Some(pos_json) = extract_position_cell(n) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(pos_json) else {
+            continue;
+        };
         if let Some(file) = v.get("file").and_then(|x| x.as_str()) {
             file_by_id.insert(n.id, file.to_string());
         }
@@ -256,7 +307,8 @@ fn main() -> Result<()> {
             (Some(file), Some(sl)) => {
                 let file_abs = args.src.join(file);
                 std::fs::read_to_string(&file_abs).ok().and_then(|text| {
-                    text.lines().nth((sl as usize).saturating_sub(1))
+                    text.lines()
+                        .nth((sl as usize).saturating_sub(1))
                         .map(|s| (sl, s.trim_end().to_string()))
                 })
             }
@@ -290,7 +342,10 @@ fn main() -> Result<()> {
     }
 
     if resolved.is_empty() {
-        write_empty_directive(&args.text_out, "no test_patch identifiers matched any graph qname")?;
+        write_empty_directive(
+            &args.text_out,
+            "no test_patch identifiers matched any graph qname",
+        )?;
         return Ok(());
     }
 
@@ -333,7 +388,9 @@ fn parse_test_patch(patch: &str) -> Result<Vec<TestPatchHunk>> {
                     out.push(h);
                 }
             }
-            let Some(file) = cur_file.clone() else { continue };
+            let Some(file) = cur_file.clone() else {
+                continue;
+            };
             let new_start: u32 = c.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
             cur_hunk = Some(TestPatchHunk {
                 new_file: file,
@@ -398,9 +455,13 @@ fn build_tail_index<'g>(
         // tail-index matched `inheritedmeth` against test-root fixtures
         // (`tests::roots::test-ext-autodoc::target::inheritance::Base::*`)
         // instead of the real `sphinx::ext::autodoc::__init__::*` module.
-        if qn_str.starts_with("tests::") || qn_str.contains("::tests::") ||
-           qn_str.starts_with("test::") || qn_str.contains("::test::") ||
-           qn_str.starts_with("test_") || qn_str.contains("::test_") {
+        if qn_str.starts_with("tests::")
+            || qn_str.contains("::tests::")
+            || qn_str.starts_with("test::")
+            || qn_str.contains("::test::")
+            || qn_str.starts_with("test_")
+            || qn_str.contains("::test_")
+        {
             continue;
         }
         // Exclude external test-infrastructure API. pytest's Pytester /
@@ -409,17 +470,30 @@ fn build_tail_index<'g>(
         // (fixtures, harness) not the implementation under test. Cycle 0.8
         // pytest-11143 regressed because the directive named these as PRIMARY
         // while the actual gold target (AssertionRewriter) sat in SECONDARY.
-        if qn_str.starts_with("testing::") || qn_str.contains("::pytester::") ||
-           qn_str.contains("::conftest::") ||
-           qn_str.contains("::fixtures::") || qn_str.ends_with("::pytester") {
+        if qn_str.starts_with("testing::")
+            || qn_str.contains("::pytester::")
+            || qn_str.contains("::conftest::")
+            || qn_str.contains("::fixtures::")
+            || qn_str.ends_with("::pytester")
+        {
             continue;
         }
         let tail_check = qn_str.rsplit("::").next().unwrap_or("");
         // Pytest fixture names — these are always test scaffolding.
         const FIXTURE_TAILS: &[&str] = &[
-            "pytester", "tmpdir", "tmp_path", "monkeypatch", "caplog",
-            "capsys", "capfd", "recwarn", "request", "makepyfile",
-            "runpytest", "runpytest_subprocess", "makefile",
+            "pytester",
+            "tmpdir",
+            "tmp_path",
+            "monkeypatch",
+            "caplog",
+            "capsys",
+            "capfd",
+            "recwarn",
+            "request",
+            "makepyfile",
+            "runpytest",
+            "runpytest_subprocess",
+            "makefile",
         ];
         if FIXTURE_TAILS.contains(&tail_check) {
             continue;
@@ -482,7 +556,12 @@ fn render_directive(
         match (&r.file, &r.signature_line) {
             (Some(f), Some((ln, sig))) => s.push_str(&format!(
                 "- `{}` ({}, referenced as `{}` in the new tests) — file `{}` line {} ({})\n",
-                r.qname, r.kind_label, r.name, f, ln, sig.trim(),
+                r.qname,
+                r.kind_label,
+                r.name,
+                f,
+                ln,
+                sig.trim(),
             )),
             (Some(f), None) => s.push_str(&format!(
                 "- `{}` ({}, referenced as `{}` in the new tests) — file `{}`\n",
@@ -499,8 +578,7 @@ fn render_directive(
     // Surface unique target files explicitly — many SWE-bench instances have
     // package-vs-module ambiguity (`pkg/__init__.py` vs `pkg.py`); listing
     // the resolved file paths once lets the model pick the right one.
-    let target_files: BTreeSet<&str> = resolved.iter()
-        .filter_map(|r| r.file.as_deref()).collect();
+    let target_files: BTreeSet<&str> = resolved.iter().filter_map(|r| r.file.as_deref()).collect();
     if !target_files.is_empty() {
         s.push_str("Implementation files that contain the targets above:\n");
         for f in &target_files {

@@ -91,7 +91,11 @@ impl GraphQLStackResolver {
 
 impl CrossGraphResolver for GraphQLStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let by_name = build_kind_index(&merged.graphs, node_kind::GRAPHQL_RESOLVER, "graphql_resolver:");
+        let by_name = build_kind_index(
+            &merged.graphs,
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:",
+        );
 
         // Re-key the resolver index by field. Equality of keys is the whole
         // predicate, so a keyed lookup is the old ops × resolvers scan without
@@ -116,7 +120,10 @@ impl CrossGraphResolver for GraphQLStackResolver {
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::GRAPHQL_OPERATION) {
-                    documents.entry(n.id).or_default().extend(n.cells.iter().filter(|c| c.kind == cell_type::CODE));
+                    documents
+                        .entry(n.id)
+                        .or_default()
+                        .extend(n.cells.iter().filter(|c| c.kind == cell_type::CODE));
                 }
             }
         }
@@ -138,7 +145,9 @@ impl CrossGraphResolver for GraphQLStackResolver {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRAPHQL_OPERATION) {
                     continue;
                 }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
                 // LB.8: the owner segment names the calling project, not the
                 // field. The resolver index is owner-free (`build_kind_index`).
                 let Some(op_name) = split_owner(qname).0.strip_prefix("graphql_op:") else {
@@ -251,8 +260,15 @@ fn op_keys(docs: &[&Cell], op_name: &str) -> (Vec<String>, KeySource) {
 /// index holds it (one key's list is HEAD's target list). There is one pair
 /// per (operation, resolver) however many root fields name it: [`op_keys`]
 /// dedups the keys, and a resolver sits under one name, so under one key.
-fn key_targets(by_key: &HashMap<String, Vec<ServiceTarget>>, keys: &[String]) -> Vec<ServiceTarget> {
-    keys.iter().filter_map(|k| by_key.get(k)).flatten().copied().collect()
+fn key_targets(
+    by_key: &HashMap<String, Vec<ServiceTarget>>,
+    keys: &[String],
+) -> Vec<ServiceTarget> {
+    keys.iter()
+        .filter_map(|k| by_key.get(k))
+        .flatten()
+        .copied()
+        .collect()
 }
 
 /// DT.11a: the `[graphql-root-fields]` counts.
@@ -349,7 +365,9 @@ fn gql_key(raw: &str) -> Option<String> {
     // A GraphQL name is `[_A-Za-z][_0-9A-Za-z]*`; anything else (`client.query`,
     // `strawberry.type`, a `${...}` fragment) is not a field.
     let mut chars = key.chars();
-    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    let valid = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !valid {
         return None;
@@ -389,10 +407,19 @@ mod host_tests {
                 (node_kind::PROJECT, "project:services/catalog"),
                 (node_kind::PROJECT, "project:apps/web"),
                 (node_kind::PROJECT, "project:apps/admin"),
-                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/users"),
-                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/catalog"),
+                (
+                    node_kind::GRAPHQL_RESOLVER,
+                    "graphql_resolver:getUser @services/users",
+                ),
+                (
+                    node_kind::GRAPHQL_RESOLVER,
+                    "graphql_resolver:getUser @services/catalog",
+                ),
                 (node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web"),
-                (node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/admin"),
+                (
+                    node_kind::GRAPHQL_OPERATION,
+                    "graphql_op:getUser @apps/admin",
+                ),
             ],
         );
         let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
@@ -401,13 +428,19 @@ mod host_tests {
         }
         g.nodes[6].cells = hits
             .iter()
-            .map(|j| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json((*j).into()) })
+            .map(|j| Cell {
+                kind: cell_type::ENDPOINT_HIT,
+                payload: CellPayload::Json((*j).into()),
+            })
             .collect();
         g
     }
 
     fn pair(from: &str, to: &str) -> (String, String) {
-        (format!("graphql_op:getUser @{from}"), format!("graphql_resolver:getUser @{to}"))
+        (
+            format!("graphql_op:getUser @{from}"),
+            format!("graphql_resolver:getUser @{to}"),
+        )
     }
 
     /// CB.24: the web app's client names users-svc, so its operation keeps
@@ -417,7 +450,10 @@ mod host_tests {
     #[test]
     fn graphql_host_narrows_to_the_named_project() {
         let g = two_servers("gql-host", &[r#"{"via":"graphql","hosts":["users-svc"]}"#]);
-        let copy = channel_graph("gql-host", &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")]);
+        let copy = channel_graph(
+            "gql-host",
+            &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")],
+        );
         let mut merged = MergedGraph::new(vec![g, copy]);
         merged.run(&GraphQLStackResolver);
         assert_eq!(
@@ -434,8 +470,19 @@ mod host_tests {
             .iter()
             .map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule))
             .collect();
-        assert_eq!(rules.iter().filter(|r| r.as_deref() == Some("host")).count(), 2, "{rules:?}");
-        assert_eq!(rules.iter().filter(|r| r.is_none()).count(), 2, "unnarrowed pairs stay bare");
+        assert_eq!(
+            rules
+                .iter()
+                .filter(|r| r.as_deref() == Some("host"))
+                .count(),
+            2,
+            "{rules:?}"
+        );
+        assert_eq!(
+            rules.iter().filter(|r| r.is_none()).count(),
+            2,
+            "unnarrowed pairs stay bare"
+        );
     }
 
     /// DF.9: the web app's Apollo client dials a public host the engine
@@ -449,14 +496,22 @@ mod host_tests {
         let github = r#"{"via":"graphql","hosts":["api.github.com"],"external":true}"#;
         let g = two_servers("gql-external", &[github]);
         let web = g.nodes[6].id;
-        let copy = channel_graph("gql-external", &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")]);
+        let copy = channel_graph(
+            "gql-external",
+            &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")],
+        );
         let mut merged = MergedGraph::new(vec![g, copy]);
         merged.run(&GraphQLStackResolver);
         assert_eq!(
             cross_pairs(&merged, edge_category::GRAPHQL_CALLS),
-            vec![pair("apps/admin", "services/catalog"), pair("apps/admin", "services/users")]
+            vec![
+                pair("apps/admin", "services/catalog"),
+                pair("apps/admin", "services/users")
+            ]
         );
-        let third: Vec<NodeId> = GraphQLStackResolver::third_party_clients(&merged.graphs).into_iter().collect();
+        let third: Vec<NodeId> = GraphQLStackResolver::third_party_clients(&merged.graphs)
+            .into_iter()
+            .collect();
         assert_eq!(third, vec![web]);
 
         let own = r#"{"via":"graphql","hosts":["users.example-corp.com"],"external":true}"#;
@@ -466,7 +521,10 @@ mod host_tests {
             .into_iter()
             .filter(|(f, _)| f.ends_with("@apps/web"))
             .count();
-        assert_eq!(web_pairs, 2, "`users` names the users project: not third-party");
+        assert_eq!(
+            web_pairs, 2,
+            "`users` names the users project: not third-party"
+        );
         assert!(GraphQLStackResolver::third_party_clients(&merged.graphs).is_empty());
     }
 
@@ -481,7 +539,10 @@ mod host_tests {
             &[r#"{"via":"graphql","hosts":["billing:9000"]}"#][..],
             &[r#"{"via":"graphql","hosts":["web"]}"#][..],
             &[r#"{"via":"graphql","hosts":["catalog-svc","users-svc"]}"#][..],
-            &[r#"{"via":"graphql","hosts":["users-svc"]}"#, r#"{"via":"graphql"}"#][..],
+            &[
+                r#"{"via":"graphql","hosts":["users-svc"]}"#,
+                r#"{"via":"graphql"}"#,
+            ][..],
         ] {
             let mut merged = MergedGraph::new(vec![two_servers("gql-no-host", hits)]);
             merged.run(&GraphQLStackResolver);
@@ -491,10 +552,16 @@ mod host_tests {
                 .collect();
             assert_eq!(
                 web,
-                vec![pair("apps/web", "services/catalog"), pair("apps/web", "services/users")],
+                vec![
+                    pair("apps/web", "services/catalog"),
+                    pair("apps/web", "services/users")
+                ],
                 "{hits:?}"
             );
-            assert!(merged.cross_edges.iter().all(|e| e.cells.is_empty()), "{hits:?}");
+            assert!(
+                merged.cross_edges.iter().all(|e| e.cells.is_empty()),
+                "{hits:?}"
+            );
         }
     }
 }
@@ -508,14 +575,27 @@ mod root_field_tests {
 
     /// A graph of `ops` (qname, document or none) and resolvers `fields`.
     fn graph(tag: &str, ops: &[(&str, Option<&str>)], fields: &[&str]) -> RepoGraph {
-        let resolvers: Vec<String> = fields.iter().map(|f| format!("graphql_resolver:{f}")).collect();
-        let mut spec: Vec<_> = ops.iter().map(|(q, _)| (node_kind::GRAPHQL_OPERATION, *q)).collect();
-        spec.extend(resolvers.iter().map(|q| (node_kind::GRAPHQL_RESOLVER, q.as_str())));
+        let resolvers: Vec<String> = fields
+            .iter()
+            .map(|f| format!("graphql_resolver:{f}"))
+            .collect();
+        let mut spec: Vec<_> = ops
+            .iter()
+            .map(|(q, _)| (node_kind::GRAPHQL_OPERATION, *q))
+            .collect();
+        spec.extend(
+            resolvers
+                .iter()
+                .map(|q| (node_kind::GRAPHQL_RESOLVER, q.as_str())),
+        );
         let mut g = channel_graph(tag, &spec);
         for (n, (_, doc)) in g.nodes.iter_mut().zip(ops) {
             n.cells = doc
                 .iter()
-                .map(|d| Cell { kind: cell_type::CODE, payload: CellPayload::Text((*d).to_string()) })
+                .map(|d| Cell {
+                    kind: cell_type::CODE,
+                    payload: CellPayload::Text((*d).to_string()),
+                })
                 .collect();
         }
         g
@@ -532,18 +612,29 @@ mod root_field_tests {
     }
 
     fn p(op: &str, field: &str) -> (String, String) {
-        (format!("graphql_op:{op}"), format!("graphql_resolver:{field}"))
+        (
+            format!("graphql_op:{op}"),
+            format!("graphql_resolver:{field}"),
+        )
     }
 
     fn rules(m: &MergedGraph) -> Vec<Option<String>> {
-        m.cross_edges.iter().map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule)).collect()
+        m.cross_edges
+            .iter()
+            .map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule))
+            .collect()
     }
 
     /// examples-glia's admin console: `query StockList` selects `products`.
     #[test]
     fn root_field_pairs_unlike_name() {
-        let doc = "\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n";
-        let m = run(graph("gql-rf", &[("graphql_op:StockList", Some(doc))], &["products", "stockList"]));
+        let doc =
+            "\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n";
+        let m = run(graph(
+            "gql-rf",
+            &[("graphql_op:StockList", Some(doc))],
+            &["products", "stockList"],
+        ));
         assert_eq!(pairs(&m), vec![p("StockList", "products")]);
         assert_eq!(rules(&m), vec![Some("root_field".to_string())]);
     }
@@ -553,8 +644,15 @@ mod root_field_tests {
     #[test]
     fn multi_root_document_pairs_each() {
         let doc = "query Dashboard { me { id } recent: orders(last: 5) { id } again: me { name } }";
-        let m = run(graph("gql-multi", &[("graphql_op:Dashboard", Some(doc))], &["me", "orders", "products"]));
-        assert_eq!(pairs(&m), vec![p("Dashboard", "me"), p("Dashboard", "orders")]);
+        let m = run(graph(
+            "gql-multi",
+            &[("graphql_op:Dashboard", Some(doc))],
+            &["me", "orders", "products"],
+        ));
+        assert_eq!(
+            pairs(&m),
+            vec![p("Dashboard", "me"), p("Dashboard", "orders")]
+        );
         assert_eq!(rules(&m), vec![Some("root_field".to_string()); 2]);
     }
 
@@ -566,7 +664,10 @@ mod root_field_tests {
         let m = run(graph(
             "gql-replace",
             &[
-                ("graphql_op:Products", Some("query Products { __typename me { id } }")),
+                (
+                    "graphql_op:Products",
+                    Some("query Products { __typename me { id } }"),
+                ),
                 ("graphql_op:GetUsers", Some("query GetUsers { u }")),
             ],
             &["products", "me", "getUsers"],
@@ -579,27 +680,46 @@ mod root_field_tests {
     /// stamp; two graph entries of one operation pool their documents.
     #[test]
     fn no_document_falls_back_to_name() {
-        let span = r#"{"code_span":{"file":"src/q.ts","start":0,"end":9,"xxh64":"0000000000000000"}}"#;
+        let span =
+            r#"{"code_span":{"file":"src/q.ts","start":0,"end":9,"xxh64":"0000000000000000"}}"#;
         let mut g = graph(
             "gql-name",
             &[
                 ("graphql_op:useGetUserQuery", None),
-                ("graphql_op:listUsers", Some("query listUsers { ...UserList }")),
+                (
+                    "graphql_op:listUsers",
+                    Some("query listUsers { ...UserList }"),
+                ),
                 ("graphql_op:orders", None),
             ],
             &["getUser", "listUsers", "orders", "me"],
         );
-        g.nodes[2].cells = vec![Cell { kind: cell_type::CODE, payload: CellPayload::Json(span.into()) }];
+        g.nodes[2].cells = vec![Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Json(span.into()),
+        }];
         let m = run(g);
         assert_eq!(
             pairs(&m),
-            vec![p("listUsers", "listUsers"), p("orders", "orders"), p("useGetUserQuery", "getUser")]
+            vec![
+                p("listUsers", "listUsers"),
+                p("orders", "orders"),
+                p("useGetUserQuery", "getUser")
+            ]
         );
         assert!(rules(&m).iter().all(Option::is_none), "{:?}", rules(&m));
 
         // The second entry of `graphql_op:orders` holds the document.
-        let first = graph("gql-pool", &[("graphql_op:orders", None)], &["me", "orders"]);
-        let second = graph("gql-pool", &[("graphql_op:orders", Some("{ me { id } }"))], &[]);
+        let first = graph(
+            "gql-pool",
+            &[("graphql_op:orders", None)],
+            &["me", "orders"],
+        );
+        let second = graph(
+            "gql-pool",
+            &[("graphql_op:orders", Some("{ me { id } }"))],
+            &[],
+        );
         let mut m = MergedGraph::new(vec![first, second]);
         m.run(&GraphQLStackResolver);
         assert_eq!(pairs(&m), vec![p("orders", "me"), p("orders", "me")]);
@@ -613,7 +733,11 @@ mod tests {
     #[test]
     fn field_names_key_to_themselves() {
         assert_eq!(key("getUser"), Some("getuser".into()));
-        assert_eq!(key("users"), Some("users".into()), "`use` is not a hook prefix here");
+        assert_eq!(
+            key("users"),
+            Some("users".into()),
+            "`use` is not a hook prefix here"
+        );
         assert_eq!(key("me"), Some("me".into()));
     }
 
@@ -629,10 +753,23 @@ mod tests {
     #[test]
     fn type_level_and_fallback_names_key_to_nothing() {
         for name in [
-            "Query", "Mutation", "Subscription", "Resolver", "ResolveField", "ObjectType",
-            "strawberry.type", "strawberry.mutation",
-            "useQuery", "useMutation", "useSubscription", "useLazyQuery",
-            "client.query", "client.mutate", "client.subscribe", "graphql-request", "request",
+            "Query",
+            "Mutation",
+            "Subscription",
+            "Resolver",
+            "ResolveField",
+            "ObjectType",
+            "strawberry.type",
+            "strawberry.mutation",
+            "useQuery",
+            "useMutation",
+            "useSubscription",
+            "useLazyQuery",
+            "client.query",
+            "client.mutate",
+            "client.subscribe",
+            "graphql-request",
+            "request",
         ] {
             assert_eq!(key(name), None, "{name} must not be a pairing key");
         }

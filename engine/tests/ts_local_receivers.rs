@@ -159,7 +159,8 @@ fn constructor_parameter_still_binds() {
     let nodes = by_qname(&m);
     let ctor = node(&nodes, "src::p::P::constructor", node_kind::METHOD);
     let api_fetch = node(&nodes, &format!("{API}::fetchUser"), node_kind::METHOD);
-    let ev = calls_evidence(&m, ctor, api_fetch).expect("P::constructor CALLS ApiService::fetchUser");
+    let ev =
+        calls_evidence(&m, ctor, api_fetch).expect("P::constructor CALLS ApiService::fetchUser");
     assert_eq!(ev.emitter, "graph:calls", "{ev:?}");
     assert_eq!(ev.rule.as_deref(), Some("receiver_type"), "{ev:?}");
     assert_eq!(ev.line, Some(4), "{ev:?}");

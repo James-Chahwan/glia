@@ -71,17 +71,19 @@ fn inspect_names_kinds_from_the_file() {
     let repo = s.0.join("repo");
     copy_tree(&fixture, &repo);
     let layout = s.0.join("layout");
-    let built = glia_engine::generate_one(repo.to_str().expect("utf-8 path"))
-        .expect("generate py_smoke");
-    let manifest = glia_store::write_merged_sharded(&built.merged, &layout)
-        .expect("write layout");
+    let built =
+        glia_engine::generate_one(repo.to_str().expect("utf-8 path")).expect("generate py_smoke");
+    let manifest = glia_store::write_merged_sharded(&built.merged, &layout).expect("write layout");
     let layout_arg = layout.to_str().expect("utf-8 path");
 
     let (code, json, stderr) = glia(&["inspect", layout_arg, "--json"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(json["manifest_schema"], glia_store::MANIFEST_VERSION);
     let shards = json["shards"].as_array().expect("shards");
-    assert_eq!(shards.len(), manifest.shards.len() + manifest.cross.iter().count());
+    assert_eq!(
+        shards.len(),
+        manifest.shards.len() + manifest.cross.iter().count()
+    );
     assert!(shards.iter().all(|s| s["graph_type"] == "code"), "{json}");
     let kinds = &json["totals"]["kinds"];
     assert!(count_of(kinds, "MODULE") > 0, "no MODULE in {kinds}");
@@ -89,7 +91,14 @@ fn inspect_names_kinds_from_the_file() {
     assert_eq!(json["totals"]["unregistered"], 0, "{json}");
     assert_eq!(
         json["totals"]["nodes"].as_u64(),
-        Some(built.merged.graphs.iter().map(|g| g.nodes.len() as u64).sum::<u64>())
+        Some(
+            built
+                .merged
+                .graphs
+                .iter()
+                .map(|g| g.nodes.len() as u64)
+                .sum::<u64>()
+        )
     );
 
     let marker = stderr
@@ -120,5 +129,8 @@ fn inspect_fails_with_the_rebuild_reason() {
     let (code, _, stderr) = glia(&["inspect", old.to_str().expect("utf-8 path")]);
     assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stderr.contains("rebuild the graph"), "{stderr}");
-    assert!(!stderr.contains("[inspect] "), "no marker on failure: {stderr}");
+    assert!(
+        !stderr.contains("[inspect] "),
+        "no marker on failure: {stderr}"
+    );
 }

@@ -660,7 +660,15 @@ impl WatchSession {
             walk,
             read,
         };
-        let built = build(&at, &setup, &mut tree, &mut cache, &[], services_fp, started);
+        let built = build(
+            &at,
+            &setup,
+            &mut tree,
+            &mut cache,
+            &[],
+            services_fp,
+            started,
+        );
         eprintln!(
             "[watch] open repo={root} files={walked} groups={} nodes={} edges={} took={}",
             built.groups.len(),
@@ -668,7 +676,11 @@ impl WatchSession {
             built.result.total_edges,
             timing::ms(started.elapsed())
         );
-        let rank = Arc::new(RankCache::new("watch", &built.result.repo_roots, &built.result.repo_labels));
+        let rank = Arc::new(RankCache::new(
+            "watch",
+            &built.result.repo_roots,
+            &built.result.repo_labels,
+        ));
         let mut session = Self {
             abs_roots: abs_roots(&root_path),
             index: index_of(&records),
@@ -841,7 +853,11 @@ impl WatchSession {
         self.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
-        self.rank = Arc::new(RankCache::new("watch", &self.result.repo_roots, &self.result.repo_labels));
+        self.rank = Arc::new(RankCache::new(
+            "watch",
+            &self.result.repo_roots,
+            &self.result.repo_labels,
+        ));
         crate::memory::release_freed_memory("watch_update");
         let stats = self.cache.stats;
         let update = WatchUpdate {
@@ -1642,18 +1658,18 @@ fn reuse_slots(
     fingerprints: &[Option<u64>],
     cached: &[CachedGroup],
 ) -> (Vec<Option<LangBuild>>, Vec<Option<usize>>) {
-    let by_key: BTreeMap<&str, usize> = cached
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.key, i))
-        .collect();
+    let by_key: BTreeMap<&str, usize> =
+        cached.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
     keys.iter()
         .zip(fingerprints)
         .map(|(key, fp)| {
             let hit = fp.and_then(|fp| {
-                by_key
-                    .get(key)
-                    .and_then(|&i| cached.get(i).filter(|c| c.fingerprint == fp).map(|c| (i, c)))
+                by_key.get(key).and_then(|&i| {
+                    cached
+                        .get(i)
+                        .filter(|c| c.fingerprint == fp)
+                        .map(|c| (i, c))
+                })
             });
             (hit.map(|(_, c)| c.build.clone()), hit.map(|(i, _)| i))
         })
@@ -1663,7 +1679,11 @@ fn reuse_slots(
 /// DC.7b: the group cache an update leaves, aligned with the plan: a reused
 /// group keeps its previous entry (`kept`), a rebuilt one with a fingerprint
 /// takes a clone of its build.
-fn cache_slots(builds: &[LangBuild], fingerprints: &[Option<u64>], kept: &[Option<usize>]) -> Vec<Slot> {
+fn cache_slots(
+    builds: &[LangBuild],
+    fingerprints: &[Option<u64>],
+    kept: &[Option<usize>],
+) -> Vec<Slot> {
     builds
         .iter()
         .zip(fingerprints)
@@ -2419,7 +2439,11 @@ mod tests {
             "web/lib/util.ts",
             "export function util(): number {\n  return 1;\n}\n",
         );
-        write(&dir, "Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n");
+        write(
+            &dir,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\"]\n",
+        );
         write(
             &dir,
             "crates/a/Cargo.toml",
@@ -2492,10 +2516,7 @@ mod tests {
             ),
             (
                 "proto_service",
-                vec![(
-                    "api/greet.proto",
-                    proto("  rpc Bye (Req) returns (Rep);\n"),
-                )],
+                vec![("api/greet.proto", proto("  rpc Bye (Req) returns (Rep);\n"))],
                 vec!["api/greet.proto"],
             ),
             (
@@ -2632,7 +2653,9 @@ mod tests {
         want.extend(["go graph: e".to_string(), "typescript graph: e".to_string()]);
         assert_eq!(s.result().parse_errors, want);
         assert!(
-            !s.graph_keys.iter().any(|k| *k == "go" || *k == "typescript"),
+            !s.graph_keys
+                .iter()
+                .any(|k| *k == "go" || *k == "typescript"),
             "{:?}",
             s.graph_keys
         );
@@ -2643,7 +2666,9 @@ mod tests {
         );
         let full = located_delta_counted(&prev, &s.result().merged, &[]);
         assert!(
-            u.nodes.iter().any(|n| n.change == "removed" && n.qname.ends_with("F")),
+            u.nodes
+                .iter()
+                .any(|n| n.change == "removed" && n.qname.ends_with("F")),
             "the go graph's nodes are gone: {:?}",
             u.nodes
         );
@@ -2677,7 +2702,9 @@ mod tests {
             assert_eq!(json(&u.nodes), json(&nodes), "{tag}: node rows");
             assert_eq!(json(&u.edges), json(&edges), "{tag}: edge rows");
             assert_eq!(
-                u.counts.nodes_added + u.counts.nodes_removed + u.counts.nodes_modified
+                u.counts.nodes_added
+                    + u.counts.nodes_removed
+                    + u.counts.nodes_modified
                     + u.counts.nodes_moved,
                 nodes.len(),
                 "{tag}"

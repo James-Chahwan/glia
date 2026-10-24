@@ -31,7 +31,13 @@ fn id(repo: RepoId, kind: NodeKindId, qname: &str) -> NodeId {
 }
 
 fn edge(from: NodeId, to: NodeId, category: EdgeCategoryId) -> Edge {
-    Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
+    Edge {
+        from,
+        to,
+        category,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    }
 }
 
 /// A repo graph of `nodes` (qname, kind) and `edges`, nav recorded.
@@ -43,7 +49,12 @@ fn graph(repo: RepoId, nodes: &[(&str, NodeKindId)], edges: Vec<Edge>) -> RepoGr
             let nid = id(repo, kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);
             nav.record(nid, name, qname, kind, None);
-            Node { id: nid, repo, confidence: Confidence::Strong, cells: vec![] }
+            Node {
+                id: nid,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            }
         })
         .collect();
     RepoGraph {
@@ -75,7 +86,10 @@ fn stack() -> Stack {
     let helper = id(repo_b(), node_kind::FUNCTION, "api::orders::fetch_rows");
     let a = graph(
         repo_a(),
-        &[("web::api::load_orders", node_kind::FUNCTION), ("endpoint:GET:/orders", node_kind::ENDPOINT)],
+        &[
+            ("web::api::load_orders", node_kind::FUNCTION),
+            ("endpoint:GET:/orders", node_kind::ENDPOINT),
+        ],
         vec![edge(client, endpoint, CALLS)],
     );
     let b = graph(
@@ -85,11 +99,21 @@ fn stack() -> Stack {
             ("api::orders::list", node_kind::FUNCTION),
             ("api::orders::fetch_rows", node_kind::FUNCTION),
         ],
-        vec![edge(route, handler, HANDLED_BY), edge(handler, helper, CALLS)],
+        vec![
+            edge(route, handler, HANDLED_BY),
+            edge(handler, helper, CALLS),
+        ],
     );
     let mut m = MergedGraph::new(vec![a, b]);
     m.cross_edges.push(edge(endpoint, route, HTTP_CALLS));
-    Stack { m, client, endpoint, route, handler, helper }
+    Stack {
+        m,
+        client,
+        endpoint,
+        route,
+        handler,
+        helper,
+    }
 }
 
 fn rows(r: &[Reached]) -> Vec<(NodeId, usize, EdgeCategoryId, NodeId)> {
@@ -99,14 +123,23 @@ fn rows(r: &[Reached]) -> Vec<(NodeId, usize, EdgeCategoryId, NodeId)> {
 #[test]
 fn incoming_neighbours_include_cross_edges() {
     let s = stack();
-    assert_eq!(s.m.neighbours(s.route, Reach::Backward, None), vec![(s.endpoint, HTTP_CALLS, Reach::Backward)]);
+    assert_eq!(
+        s.m.neighbours(s.route, Reach::Backward, None),
+        vec![(s.endpoint, HTTP_CALLS, Reach::Backward)]
+    );
     // Forward from the endpoint crosses into repo B.
-    assert_eq!(s.m.neighbours(s.endpoint, Reach::Forward, None), vec![(s.route, HTTP_CALLS, Reach::Forward)]);
+    assert_eq!(
+        s.m.neighbours(s.endpoint, Reach::Forward, None),
+        vec![(s.route, HTTP_CALLS, Reach::Forward)]
+    );
     // Both: global edge order (graphs in Vec order, then cross_edges), each
     // row tagged with the way it was walked.
     assert_eq!(
         s.m.neighbours(s.route, Reach::Both, None),
-        vec![(s.handler, HANDLED_BY, Reach::Forward), (s.endpoint, HTTP_CALLS, Reach::Backward)]
+        vec![
+            (s.handler, HANDLED_BY, Reach::Forward),
+            (s.endpoint, HTTP_CALLS, Reach::Backward)
+        ]
     );
     // A category filter drops the cross edge.
     assert_eq!(
@@ -122,11 +155,17 @@ fn a_self_loop_is_one_forward_neighbour_under_both() {
     s.m.cross_edges.push(edge(s.helper, s.helper, CALLS));
     assert_eq!(
         s.m.neighbours(s.helper, Reach::Both, None),
-        vec![(s.handler, CALLS, Reach::Backward), (s.helper, CALLS, Reach::Forward)]
+        vec![
+            (s.handler, CALLS, Reach::Backward),
+            (s.helper, CALLS, Reach::Forward)
+        ]
     );
     assert_eq!(
         s.m.neighbours(s.helper, Reach::Backward, None),
-        vec![(s.handler, CALLS, Reach::Backward), (s.helper, CALLS, Reach::Backward)]
+        vec![
+            (s.handler, CALLS, Reach::Backward),
+            (s.helper, CALLS, Reach::Backward)
+        ]
     );
 }
 
@@ -144,30 +183,53 @@ fn bfs_crosses_repos() {
         ]
     );
     // max_depth bounds the walk; the seed is never reached.
-    let two: Vec<NodeId> = s.m.bfs(&[s.client], Reach::Forward, None, 2).iter().map(|r| r.id).collect();
+    let two: Vec<NodeId> =
+        s.m.bfs(&[s.client], Reach::Forward, None, 2)
+            .iter()
+            .map(|r| r.id)
+            .collect();
     assert_eq!(two, vec![s.endpoint, s.route]);
     assert!(s.m.bfs(&[s.client], Reach::Forward, None, 0).is_empty());
     // Backward from the helper walks the same chain the other way.
-    let back: Vec<NodeId> = s.m.bfs(&[s.helper], Reach::Backward, None, 10).iter().map(|r| r.id).collect();
+    let back: Vec<NodeId> =
+        s.m.bfs(&[s.helper], Reach::Backward, None, 10)
+            .iter()
+            .map(|r| r.id)
+            .collect();
     assert_eq!(back, vec![s.handler, s.route, s.endpoint, s.client]);
 }
 
 #[test]
 fn predecessors_cross_repos() {
     let s = stack();
-    assert_eq!(s.m.predecessors(s.helper, None, 10), vec![s.handler, s.route, s.endpoint, s.client]);
-    assert_eq!(s.m.predecessors(s.helper, Some(&[CALLS, HANDLED_BY]), 10), vec![s.handler, s.route]);
+    assert_eq!(
+        s.m.predecessors(s.helper, None, 10),
+        vec![s.handler, s.route, s.endpoint, s.client]
+    );
+    assert_eq!(
+        s.m.predecessors(s.helper, Some(&[CALLS, HANDLED_BY]), 10),
+        vec![s.handler, s.route]
+    );
 }
 
 #[test]
 fn reachable_by_keeps_sources_order() {
     let s = stack();
     let stray = id(repo_a(), node_kind::FUNCTION, "web::api::never_built");
-    assert_eq!(s.m.reachable_by(s.helper, &[s.client, stray], None, 10), vec![s.client]);
-    assert_eq!(s.m.reachable_by(s.helper, &[s.route, s.client], None, 10), vec![s.route, s.client]);
+    assert_eq!(
+        s.m.reachable_by(s.helper, &[s.client, stray], None, 10),
+        vec![s.client]
+    );
+    assert_eq!(
+        s.m.reachable_by(s.helper, &[s.route, s.client], None, 10),
+        vec![s.route, s.client]
+    );
     // Out of reach within 2 hops; the HTTP hop is filtered out.
     assert!(s.m.reachable_by(s.helper, &[s.client], None, 2).is_empty());
-    assert!(s.m.reachable_by(s.helper, &[s.client], Some(&[CALLS, HANDLED_BY]), 10).is_empty());
+    assert!(
+        s.m.reachable_by(s.helper, &[s.client], Some(&[CALLS, HANDLED_BY]), 10)
+            .is_empty()
+    );
     assert!(s.m.reachable_by(s.helper, &[], None, 10).is_empty());
 }
 
@@ -181,8 +243,14 @@ fn shortest_path_crosses_repos() {
         (s.handler, Some(HANDLED_BY)),
         (s.helper, Some(CALLS)),
     ];
-    assert_eq!(s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 10), Some(forward.clone()));
-    assert_eq!(s.m.shortest_path(s.helper, s.client, Reach::Forward, None, 10), None);
+    assert_eq!(
+        s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 10),
+        Some(forward.clone())
+    );
+    assert_eq!(
+        s.m.shortest_path(s.helper, s.client, Reach::Forward, None, 10),
+        None
+    );
     // Both: the reversed node sequence; each step carries the category of
     // the edge it was entered by.
     assert_eq!(
@@ -195,14 +263,36 @@ fn shortest_path_crosses_repos() {
             (s.client, Some(CALLS)),
         ])
     );
-    assert_eq!(s.m.shortest_path(s.helper, s.client, Reach::Backward, None, 10).map(|p| p.len()), Some(5));
+    assert_eq!(
+        s.m.shortest_path(s.helper, s.client, Reach::Backward, None, 10)
+            .map(|p| p.len()),
+        Some(5)
+    );
     // Four hops do not fit in three.
-    assert_eq!(s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 3), None);
-    assert_eq!(s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 4), Some(forward));
+    assert_eq!(
+        s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 3),
+        None
+    );
+    assert_eq!(
+        s.m.shortest_path(s.client, s.helper, Reach::Forward, None, 4),
+        Some(forward)
+    );
     // A category filter that drops the HTTP hop disconnects the repos.
-    assert_eq!(s.m.shortest_path(s.client, s.helper, Reach::Both, Some(&[CALLS, HANDLED_BY]), 10), None);
+    assert_eq!(
+        s.m.shortest_path(
+            s.client,
+            s.helper,
+            Reach::Both,
+            Some(&[CALLS, HANDLED_BY]),
+            10
+        ),
+        None
+    );
     // from == to is the zero-hop path.
-    assert_eq!(s.m.shortest_path(s.route, s.route, Reach::Forward, None, 0), Some(vec![(s.route, None)]));
+    assert_eq!(
+        s.m.shortest_path(s.route, s.route, Reach::Forward, None, 0),
+        Some(vec![(s.route, None)])
+    );
 }
 
 #[test]
@@ -222,16 +312,31 @@ fn a_cross_edge_to_no_node_is_still_followed() {
     // An endpoint of an edge need not be a node (LD.15a parity rule 1).
     let ghost = id(repo_b(), node_kind::FUNCTION, "api::orders::unbuilt");
     s.m.cross_edges.push(edge(s.helper, ghost, CALLS));
-    let ids: Vec<NodeId> = s.m.bfs(&[s.client], Reach::Forward, None, 10).iter().map(|r| r.id).collect();
+    let ids: Vec<NodeId> =
+        s.m.bfs(&[s.client], Reach::Forward, None, 10)
+            .iter()
+            .map(|r| r.id)
+            .collect();
     assert_eq!(ids.last(), Some(&ghost));
-    assert_eq!(s.m.shortest_path(s.client, ghost, Reach::Forward, None, 10).map(|p| p.len()), Some(6));
-    assert_eq!(s.m.neighbours(ghost, Reach::Backward, None), vec![(s.helper, CALLS, Reach::Backward)]);
+    assert_eq!(
+        s.m.shortest_path(s.client, ghost, Reach::Forward, None, 10)
+            .map(|p| p.len()),
+        Some(6)
+    );
+    assert_eq!(
+        s.m.neighbours(ghost, Reach::Backward, None),
+        vec![(s.helper, CALLS, Reach::Backward)]
+    );
 }
 
 #[test]
 fn category_filter_limits_bfs() {
     let s = stack();
-    let ids: Vec<NodeId> = s.m.bfs(&[s.client], Reach::Forward, Some(&[CALLS]), 10).iter().map(|r| r.id).collect();
+    let ids: Vec<NodeId> =
+        s.m.bfs(&[s.client], Reach::Forward, Some(&[CALLS]), 10)
+            .iter()
+            .map(|r| r.id)
+            .collect();
     assert_eq!(ids, vec![s.endpoint]);
 }
 
@@ -248,8 +353,14 @@ fn head_contrast() {
     assert!(b.neighbours(s.route, Reach::Backward).is_empty());
     assert_eq!(
         b.neighbours(s.handler, Reach::Both),
-        vec![(s.route, HANDLED_BY, Reach::Backward), (s.helper, CALLS, Reach::Forward)]
+        vec![
+            (s.route, HANDLED_BY, Reach::Backward),
+            (s.helper, CALLS, Reach::Forward)
+        ]
     );
     let a = &s.m.graphs[0];
-    assert_eq!(a.bfs(s.client, &[CALLS, HTTP_CALLS, HANDLED_BY], 10), vec![s.endpoint]);
+    assert_eq!(
+        a.bfs(s.client, &[CALLS, HTTP_CALLS, HANDLED_BY], 10),
+        vec![s.endpoint]
+    );
 }

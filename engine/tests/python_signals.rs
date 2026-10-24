@@ -24,7 +24,8 @@ use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_ca
 use glia_graph::MergedGraph;
 
 /// matrix/python/eventbus: a named blinker signal.
-const BLINKER_SIGNALS: &str = "from blinker import signal\n\norder_placed = signal(\"order-placed\")\n";
+const BLINKER_SIGNALS: &str =
+    "from blinker import signal\n\norder_placed = signal(\"order-placed\")\n";
 
 const BLINKER_ORDERS: &str = "from signals import order_placed\n\n\n@order_placed.connect\ndef send_receipt(sender, **kw):\n    print(\"receipt\", kw)\n\n\ndef place(order):\n    order_placed.send(\"orders\", order=order)\n";
 
@@ -198,7 +199,10 @@ fn signal_marker(dir: &Path) -> Vec<String> {
 
 #[test]
 fn blinker_signal_pairs_across_files() {
-    let td = repo(&[("signals.py", BLINKER_SIGNALS), ("orders.py", BLINKER_ORDERS)]);
+    let td = repo(&[
+        ("signals.py", BLINKER_SIGNALS),
+        ("orders.py", BLINKER_ORDERS),
+    ]);
     let m = &build(td.path()).merged;
     assert_eq!(emitters(m), vec![s("event_emit:order-placed")]);
     assert_eq!(handlers(m), vec![s("event_handle:order-placed")]);
@@ -256,17 +260,26 @@ fn blinker_signal_pairs_across_files() {
             vec![cell_type::POSITION, cell_type::IMPORTS, cell_type::ORIGIN],
             "{q}"
         );
-        assert_eq!(origins(m, q), vec![s(r#"{"provenance":"synthetic"}"#)], "{q}");
+        assert_eq!(
+            origins(m, q),
+            vec![s(r#"{"provenance":"synthetic"}"#)],
+            "{q}"
+        );
     }
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=1 files=1 emit=1 handle=1 dropped=0")]
+        vec![s(
+            "[event-py-signals] decls=1 files=1 emit=1 handle=1 dropped=0"
+        )]
     );
 }
 
 #[test]
 fn django_signal_pairs_across_files() {
-    let td = repo(&[("signals.py", DJANGO_SIGNALS), ("receivers.py", DJANGO_RECEIVERS)]);
+    let td = repo(&[
+        ("signals.py", DJANGO_SIGNALS),
+        ("receivers.py", DJANGO_RECEIVERS),
+    ]);
     let m = &build(td.path()).merged;
     assert_eq!(emitters(m), vec![s("event_emit:signals.order_placed")]);
     assert_eq!(handlers(m), vec![s("event_handle:signals.order_placed")]);
@@ -309,7 +322,10 @@ fn relative_import_binds() {
     ]);
     let m = &build(td.path()).merged;
     assert_eq!(emitters(m), vec![s("event_emit:shop.signals.order_placed")]);
-    assert_eq!(handlers(m), vec![s("event_handle:shop.signals.order_placed")]);
+    assert_eq!(
+        handlers(m),
+        vec![s("event_handle:shop.signals.order_placed")]
+    );
     assert_eq!(
         edges(m, edge_category::EVENT_FLOWS),
         vec![pair(
@@ -341,7 +357,10 @@ fn module_imports_bind_the_dotted_name() {
     ]);
     let m = &build(td.path()).merged;
     assert_eq!(emitters(m), vec![s("event_emit:shop.signals.order_placed")]);
-    assert_eq!(handlers(m), vec![s("event_handle:shop.signals.order_placed")]);
+    assert_eq!(
+        handlers(m),
+        vec![s("event_handle:shop.signals.order_placed")]
+    );
     let uses: Vec<_> = edges(m, edge_category::USES)
         .into_iter()
         .filter(|(_, to)| to.starts_with("event_emit:"))
@@ -350,12 +369,17 @@ fn module_imports_bind_the_dotted_name() {
         uses,
         vec![
             pair("shop::audit::audit", "event_emit:shop.signals.order_placed"),
-            pair("shop::orders::place", "event_emit:shop.signals.order_placed"),
+            pair(
+                "shop::orders::place",
+                "event_emit:shop.signals.order_placed"
+            ),
         ]
     );
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=1 files=3 emit=2 handle=1 dropped=0")]
+        vec![s(
+            "[event-py-signals] decls=1 files=3 emit=2 handle=1 dropped=0"
+        )]
     );
 }
 
@@ -393,12 +417,20 @@ fn two_apps_same_signal_name_do_not_pair() {
         ),
     ]);
     let m = &build(td.path()).merged;
-    assert_eq!(emitters(m), vec![s("event_emit:app_a.signals.order_placed")]);
-    assert_eq!(handlers(m), vec![s("event_handle:app_b.signals.order_placed")]);
+    assert_eq!(
+        emitters(m),
+        vec![s("event_emit:app_a.signals.order_placed")]
+    );
+    assert_eq!(
+        handlers(m),
+        vec![s("event_handle:app_b.signals.order_placed")]
+    );
     assert!(edges(m, edge_category::EVENT_FLOWS).is_empty());
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=2 files=2 emit=1 handle=1 dropped=0")]
+        vec![s(
+            "[event-py-signals] decls=2 files=2 emit=1 handle=1 dropped=0"
+        )]
     );
 }
 
@@ -422,7 +454,9 @@ fn unbound_send_mints_nothing() {
     assert!(handlers(m).is_empty(), "{:?}", handlers(m));
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=1 files=0 emit=0 handle=0 dropped=0")]
+        vec![s(
+            "[event-py-signals] decls=1 files=0 emit=0 handle=0 dropped=0"
+        )]
     );
 }
 
@@ -440,7 +474,9 @@ fn a_name_declared_twice_differently_is_dropped() {
     assert!(handlers(m).is_empty(), "{:?}", handlers(m));
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=0 files=0 emit=0 handle=0 dropped=1")]
+        vec![s(
+            "[event-py-signals] decls=0 files=0 emit=0 handle=0 dropped=1"
+        )]
     );
 }
 
@@ -462,7 +498,9 @@ fn a_file_binding_one_name_to_two_signals_binds_neither() {
     assert!(emitters(m).is_empty(), "{:?}", emitters(m));
     assert_eq!(
         signal_marker(td.path()),
-        vec![s("[event-py-signals] decls=2 files=0 emit=0 handle=0 dropped=1")]
+        vec![s(
+            "[event-py-signals] decls=2 files=0 emit=0 handle=0 dropped=1"
+        )]
     );
 }
 
@@ -647,7 +685,10 @@ fn cache_rebuild_is_identical() {
     let rekeyed = generate_one_with_cache(path, &mut cache).expect("rekeyed");
     let diff = cache.last_diff().expect("a diff").clone();
     assert!(diff.reused.contains(&s("receivers.py")), "{diff:?}");
-    assert_eq!(emitters(&rekeyed.merged), vec![s("event_emit:order-placed")]);
+    assert_eq!(
+        emitters(&rekeyed.merged),
+        vec![s("event_emit:order-placed")]
+    );
 
     let clean = generate_one(path).expect("clean");
     assert_eq!(

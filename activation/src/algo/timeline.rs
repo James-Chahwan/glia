@@ -109,7 +109,11 @@ impl TimelineBuilder {
         let d = graph_delta(&DeltaSide::default(), first, &DeltaOptions::default());
         Self {
             open_edges: d.added_edges.into_iter().map(|k| (k, 0)).collect(),
-            open_nodes: d.added_nodes.into_iter().map(|id| (id.0, (0, Vec::new()))).collect(),
+            open_nodes: d
+                .added_nodes
+                .into_iter()
+                .map(|id| (id.0, (0, Vec::new())))
+                .collect(),
             closed_edges: Vec::new(),
             closed_nodes: Vec::new(),
             rev: 0,
@@ -125,7 +129,14 @@ impl TimelineBuilder {
     pub fn push(&mut self, prev: &DeltaSide<'_>, next: &DeltaSide<'_>, moves: &[(NodeId, NodeId)]) {
         self.rev = self.rev.saturating_add(1);
         let rev = self.rev;
-        let d = graph_delta(prev, next, &DeltaOptions { content_cells: &[], moves });
+        let d = graph_delta(
+            prev,
+            next,
+            &DeltaOptions {
+                content_cells: &[],
+                moves,
+            },
+        );
         self.moves_applied += d.moved_nodes.len();
         self.moves_ignored += d.ignored_moves;
 
@@ -133,23 +144,42 @@ impl TimelineBuilder {
         // and how the open spans are held.
         for key in d.removed_edges {
             if let Some(from_rev) = self.open_edges.remove(&key) {
-                self.closed_edges.push(EdgeSpan { key, from_rev, until_rev: Some(rev) });
+                self.closed_edges.push(EdgeSpan {
+                    key,
+                    from_rev,
+                    until_rev: Some(rev),
+                });
             }
         }
         for id in d.removed_nodes {
             if let Some((from_rev, prior_ids)) = self.open_nodes.remove(&id.0) {
-                self.closed_nodes.push(NodeSpan { id, from_rev, until_rev: Some(rev), prior_ids });
+                self.closed_nodes.push(NodeSpan {
+                    id,
+                    from_rev,
+                    until_rev: Some(rev),
+                    prior_ids,
+                });
             }
         }
 
         // Carry what stays open onto next-side ids. A fresh map, not an
         // in-place rename, so a swap or a chain cannot overwrite a span.
         if !d.moved_nodes.is_empty() {
-            let moved: BTreeMap<u64, u64> = d.moved_nodes.iter().map(|&(b, a)| (b.0, a.0)).collect();
+            let moved: BTreeMap<u64, u64> =
+                d.moved_nodes.iter().map(|&(b, a)| (b.0, a.0)).collect();
             let remap = |id: NodeId| NodeId(moved.get(&id.0).copied().unwrap_or(id.0));
             self.open_edges = std::mem::take(&mut self.open_edges)
                 .into_iter()
-                .map(|(k, from_rev)| (EdgeKey { from: remap(k.from), to: remap(k.to), category: k.category }, from_rev))
+                .map(|(k, from_rev)| {
+                    (
+                        EdgeKey {
+                            from: remap(k.from),
+                            to: remap(k.to),
+                            category: k.category,
+                        },
+                        from_rev,
+                    )
+                })
                 .collect();
             self.open_nodes = std::mem::take(&mut self.open_nodes)
                 .into_iter()
@@ -177,19 +207,31 @@ impl TimelineBuilder {
     /// snapshot (`until_rev: None`), sorted (see [`Timeline`]).
     pub fn finish(self) -> Timeline {
         let mut edges = self.closed_edges;
-        edges.extend(self.open_edges.into_iter().map(|(key, from_rev)| EdgeSpan { key, from_rev, until_rev: None }));
-        edges.sort_unstable_by(|a, b| {
-            (a.from_rev, a.key).cmp(&(b.from_rev, b.key)).then_with(|| until_order(a.until_rev, b.until_rev))
-        });
-        let mut nodes = self.closed_nodes;
-        nodes.extend(self.open_nodes.into_iter().map(|(id, (from_rev, prior_ids))| NodeSpan {
-            id: NodeId(id),
+        edges.extend(self.open_edges.into_iter().map(|(key, from_rev)| EdgeSpan {
+            key,
             from_rev,
             until_rev: None,
-            prior_ids,
         }));
+        edges.sort_unstable_by(|a, b| {
+            (a.from_rev, a.key)
+                .cmp(&(b.from_rev, b.key))
+                .then_with(|| until_order(a.until_rev, b.until_rev))
+        });
+        let mut nodes = self.closed_nodes;
+        nodes.extend(
+            self.open_nodes
+                .into_iter()
+                .map(|(id, (from_rev, prior_ids))| NodeSpan {
+                    id: NodeId(id),
+                    from_rev,
+                    until_rev: None,
+                    prior_ids,
+                }),
+        );
         nodes.sort_unstable_by(|a, b| {
-            (a.from_rev, a.id.0).cmp(&(b.from_rev, b.id.0)).then_with(|| until_order(a.until_rev, b.until_rev))
+            (a.from_rev, a.id.0)
+                .cmp(&(b.from_rev, b.id.0))
+                .then_with(|| until_order(a.until_rev, b.until_rev))
         });
         let t = Timeline {
             revs: self.rev.saturating_add(1),
@@ -246,16 +288,27 @@ mod tests {
     }
 
     fn snap(nodes: &[u64], edges: &[(u64, u64)]) -> Snap {
-        snap_with(nodes, edges.iter().map(|&(f, t)| toy_edge(f, t, CAT)).collect())
+        snap_with(
+            nodes,
+            edges.iter().map(|&(f, t)| toy_edge(f, t, CAT)).collect(),
+        )
     }
 
     fn snap_with(nodes: &[u64], edges: Vec<Edge>) -> Snap {
         let ids: Vec<NodeId> = nodes.iter().map(|&n| NodeId(n)).collect();
         let nodes = ids
             .iter()
-            .map(|&id| Node { id, repo: RepoId(1), confidence: Confidence::Strong, cells: Vec::new() })
+            .map(|&id| Node {
+                id,
+                repo: RepoId(1),
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            })
             .collect();
-        Snap { g: ToyGraph { nodes: ids, edges }, nodes }
+        Snap {
+            g: ToyGraph { nodes: ids, edges },
+            nodes,
+        }
     }
 
     /// Fold `snaps` in order; `moves[i]` is applied on the push into
@@ -263,27 +316,49 @@ mod tests {
     fn fold(snaps: &[Snap], moves: &[&[(u64, u64)]]) -> Timeline {
         let mut b = TimelineBuilder::new(&snaps[0].side());
         for (i, pair) in snaps.windows(2).enumerate() {
-            let m: Vec<(NodeId, NodeId)> =
-                moves.get(i).copied().unwrap_or(&[]).iter().map(|&(x, y)| (NodeId(x), NodeId(y))).collect();
+            let m: Vec<(NodeId, NodeId)> = moves
+                .get(i)
+                .copied()
+                .unwrap_or(&[])
+                .iter()
+                .map(|&(x, y)| (NodeId(x), NodeId(y)))
+                .collect();
             b.push(&pair[0].side(), &pair[1].side(), &m);
         }
         b.finish()
     }
 
     fn key(from: u64, to: u64) -> EdgeKey {
-        EdgeKey { from: NodeId(from), to: NodeId(to), category: EdgeCategoryId(CAT) }
+        EdgeKey {
+            from: NodeId(from),
+            to: NodeId(to),
+            category: EdgeCategoryId(CAT),
+        }
     }
 
     fn espan(from: u64, to: u64, from_rev: u32, until_rev: Option<u32>) -> EdgeSpan {
-        EdgeSpan { key: key(from, to), from_rev, until_rev }
+        EdgeSpan {
+            key: key(from, to),
+            from_rev,
+            until_rev,
+        }
     }
 
     fn nspan(id: u64, from_rev: u32, until_rev: Option<u32>, prior: &[(u32, u64)]) -> NodeSpan {
-        NodeSpan { id: NodeId(id), from_rev, until_rev, prior_ids: prior.iter().map(|&(r, n)| (r, NodeId(n))).collect() }
+        NodeSpan {
+            id: NodeId(id),
+            from_rev,
+            until_rev,
+            prior_ids: prior.iter().map(|&(r, n)| (r, NodeId(n))).collect(),
+        }
     }
 
     fn spans_of(t: &Timeline, k: EdgeKey) -> Vec<(u32, Option<u32>)> {
-        t.edges.iter().filter(|s| s.key == k).map(|s| (s.from_rev, s.until_rev)).collect()
+        t.edges
+            .iter()
+            .filter(|s| s.key == k)
+            .map(|s| (s.from_rev, s.until_rev))
+            .collect()
     }
 
     #[test]
@@ -298,29 +373,56 @@ mod tests {
         assert_eq!(t.revs, 4);
         assert_eq!(t.edges, vec![espan(1, 2, 0, Some(2)), espan(1, 2, 3, None)]);
         // The nodes never left: one span each.
-        assert_eq!(t.nodes, vec![nspan(1, 0, None, &[]), nspan(2, 0, None, &[])]);
+        assert_eq!(
+            t.nodes,
+            vec![nspan(1, 0, None, &[]), nspan(2, 0, None, &[])]
+        );
         assert_eq!((t.moves_applied, t.moves_ignored), (0, 0));
     }
 
     #[test]
     fn move_keeps_one_interval() {
-        let snaps = [snap(&[5, 7], &[(5, 7)]), snap(&[5, 7], &[(5, 7)]), snap(&[7, 9], &[(9, 7)])];
+        let snaps = [
+            snap(&[5, 7], &[(5, 7)]),
+            snap(&[5, 7], &[(5, 7)]),
+            snap(&[7, 9], &[(9, 7)]),
+        ];
         let t = fold(&snaps, &[&[], &[(5, 9)]]);
         assert_eq!(t.edges, vec![espan(9, 7, 0, None)]);
-        assert_eq!(t.nodes, vec![nspan(7, 0, None, &[]), nspan(9, 0, None, &[(2, 5)])]);
+        assert_eq!(
+            t.nodes,
+            vec![nspan(7, 0, None, &[]), nspan(9, 0, None, &[(2, 5)])]
+        );
         assert_eq!(t.moves_applied, 1);
         // Without the move map the same snapshots are a removal plus an addition.
         let t = fold(&snaps, &[]);
         assert_eq!(t.edges, vec![espan(5, 7, 0, Some(2)), espan(9, 7, 2, None)]);
-        assert_eq!(t.nodes, vec![nspan(5, 0, Some(2), &[]), nspan(7, 0, None, &[]), nspan(9, 2, None, &[])]);
+        assert_eq!(
+            t.nodes,
+            vec![
+                nspan(5, 0, Some(2), &[]),
+                nspan(7, 0, None, &[]),
+                nspan(9, 2, None, &[])
+            ]
+        );
     }
 
     #[test]
     fn chained_moves() {
-        let snaps = [snap(&[5, 7], &[(5, 7), (7, 5)]), snap(&[7, 9], &[(9, 7), (7, 9)]), snap(&[7, 11], &[(11, 7), (7, 11)])];
+        let snaps = [
+            snap(&[5, 7], &[(5, 7), (7, 5)]),
+            snap(&[7, 9], &[(9, 7), (7, 9)]),
+            snap(&[7, 11], &[(11, 7), (7, 11)]),
+        ];
         let t = fold(&snaps, &[&[(5, 9)], &[(9, 11)]]);
         assert_eq!(t.edges, vec![espan(7, 11, 0, None), espan(11, 7, 0, None)]);
-        assert_eq!(t.nodes, vec![nspan(7, 0, None, &[]), nspan(11, 0, None, &[(1, 5), (2, 9)])]);
+        assert_eq!(
+            t.nodes,
+            vec![
+                nspan(7, 0, None, &[]),
+                nspan(11, 0, None, &[(1, 5), (2, 9)])
+            ]
+        );
         assert_eq!(t.moves_applied, 2);
     }
 
@@ -328,21 +430,42 @@ mod tests {
     fn removed_before_move_closes_under_old_key() {
         // At rev 1 node 5 moves to 9: its edge to 7 is dropped in the same
         // change, its edge to 8 survives.
-        let snaps = [snap(&[5, 7, 8], &[(5, 7), (5, 8)]), snap(&[7, 8, 9], &[(9, 8)]), snap(&[7, 8], &[])];
+        let snaps = [
+            snap(&[5, 7, 8], &[(5, 7), (5, 8)]),
+            snap(&[7, 8, 9], &[(9, 8)]),
+            snap(&[7, 8], &[]),
+        ];
         let t = fold(&snaps, &[&[(5, 9)]]);
-        assert_eq!(t.edges, vec![espan(5, 7, 0, Some(1)), espan(9, 8, 0, Some(2))]);
+        assert_eq!(
+            t.edges,
+            vec![espan(5, 7, 0, Some(1)), espan(9, 8, 0, Some(2))]
+        );
         // The node's span closes under the id it had when last seen.
-        assert_eq!(t.nodes, vec![nspan(7, 0, None, &[]), nspan(8, 0, None, &[]), nspan(9, 0, Some(2), &[(1, 5)])]);
+        assert_eq!(
+            t.nodes,
+            vec![
+                nspan(7, 0, None, &[]),
+                nspan(8, 0, None, &[]),
+                nspan(9, 0, Some(2), &[(1, 5)])
+            ]
+        );
     }
 
     #[test]
     fn deterministic_output_order() {
         // Same snapshots, different list orders, repeated items and mixed
         // confidences: equal timelines.
-        let a = [snap(&[5, 7, 9], &[(5, 7), (9, 7)]), snap(&[7, 9], &[(9, 7)]), snap(&[5, 7], &[(5, 7)])];
+        let a = [
+            snap(&[5, 7, 9], &[(5, 7), (9, 7)]),
+            snap(&[7, 9], &[(9, 7)]),
+            snap(&[5, 7], &[(5, 7)]),
+        ];
         let weak = |f, t| Edge::new(NodeId(f), NodeId(t), EdgeCategoryId(CAT), Confidence::Weak);
         let b = [
-            snap_with(&[9, 7, 5, 7], vec![toy_edge(9, 7, CAT), weak(5, 7), toy_edge(5, 7, CAT)]),
+            snap_with(
+                &[9, 7, 5, 7],
+                vec![toy_edge(9, 7, CAT), weak(5, 7), toy_edge(5, 7, CAT)],
+            ),
             snap_with(&[9, 7], vec![weak(9, 7), weak(9, 7)]),
             snap_with(&[7, 5], vec![toy_edge(5, 7, CAT)]),
         ];
@@ -351,27 +474,63 @@ mod tests {
         let (ta, tb) = (fold(&a, moves), fold(&b, moves));
         assert_eq!(ta, tb);
         // Two spans share (from_rev, key): the closed one sorts first.
-        assert_eq!(ta.edges, vec![espan(5, 7, 0, Some(1)), espan(5, 7, 0, None)]);
-        assert_eq!(ta.nodes, vec![nspan(5, 0, Some(1), &[]), nspan(5, 0, None, &[(2, 9)]), nspan(7, 0, None, &[])]);
+        assert_eq!(
+            ta.edges,
+            vec![espan(5, 7, 0, Some(1)), espan(5, 7, 0, None)]
+        );
+        assert_eq!(
+            ta.nodes,
+            vec![
+                nspan(5, 0, Some(1), &[]),
+                nspan(5, 0, None, &[(2, 9)]),
+                nspan(7, 0, None, &[])
+            ]
+        );
         // Sorted by from_rev before key.
-        let c = [snap(&[1, 2, 3, 9], &[(3, 9)]), snap(&[1, 2, 3, 9], &[(3, 9), (1, 2), (9, 1)])];
+        let c = [
+            snap(&[1, 2, 3, 9], &[(3, 9)]),
+            snap(&[1, 2, 3, 9], &[(3, 9), (1, 2), (9, 1)]),
+        ];
         let t = fold(&c, &[]);
-        assert_eq!(t.edges, vec![espan(3, 9, 0, None), espan(1, 2, 1, None), espan(9, 1, 1, None)]);
+        assert_eq!(
+            t.edges,
+            vec![
+                espan(3, 9, 0, None),
+                espan(1, 2, 1, None),
+                espan(9, 1, 1, None)
+            ]
+        );
     }
 
     #[test]
     fn empty_snapshots() {
         let t = fold(&[snap(&[], &[])], &[]);
-        assert_eq!(t, Timeline { revs: 1, ..Timeline::default() });
-        let snaps = [snap(&[], &[]), snap(&[1, 2], &[(1, 2)]), snap(&[1, 2], &[(1, 2)])];
+        assert_eq!(
+            t,
+            Timeline {
+                revs: 1,
+                ..Timeline::default()
+            }
+        );
+        let snaps = [
+            snap(&[], &[]),
+            snap(&[1, 2], &[(1, 2)]),
+            snap(&[1, 2], &[(1, 2)]),
+        ];
         let t = fold(&snaps, &[]);
         assert_eq!(t.revs, 3);
         assert_eq!(t.edges, vec![espan(1, 2, 1, None)]);
-        assert_eq!(t.nodes, vec![nspan(1, 1, None, &[]), nspan(2, 1, None, &[])]);
+        assert_eq!(
+            t.nodes,
+            vec![nspan(1, 1, None, &[]), nspan(2, 1, None, &[])]
+        );
         // Everything leaving closes every span.
         let t = fold(&[snap(&[1, 2], &[(1, 2)]), snap(&[], &[])], &[]);
         assert_eq!(t.edges, vec![espan(1, 2, 0, Some(1))]);
-        assert_eq!(t.nodes, vec![nspan(1, 0, Some(1), &[]), nspan(2, 0, Some(1), &[])]);
+        assert_eq!(
+            t.nodes,
+            vec![nspan(1, 0, Some(1), &[]), nspan(2, 0, Some(1), &[])]
+        );
     }
 
     #[test]
@@ -379,7 +538,10 @@ mod tests {
         let snaps = [snap(&[5, 9], &[(5, 9)]), snap(&[5, 9], &[(9, 5)])];
         let t = fold(&snaps, &[&[(5, 9), (9, 5)]]);
         assert_eq!(t.edges, vec![espan(9, 5, 0, None)]);
-        assert_eq!(t.nodes, vec![nspan(5, 0, None, &[(1, 9)]), nspan(9, 0, None, &[(1, 5)])]);
+        assert_eq!(
+            t.nodes,
+            vec![nspan(5, 0, None, &[(1, 9)]), nspan(9, 0, None, &[(1, 5)])]
+        );
         assert_eq!(t.moves_applied, 2);
     }
 
@@ -391,18 +553,36 @@ mod tests {
         let t = fold(&snaps, &[&[(5, 99)]]);
         assert_eq!((t.moves_applied, t.moves_ignored), (0, 1));
         assert_eq!(t.edges, vec![espan(5, 7, 0, Some(1)), espan(9, 7, 1, None)]);
-        assert_eq!(t.nodes, vec![nspan(5, 0, Some(1), &[]), nspan(7, 0, None, &[]), nspan(9, 1, None, &[])]);
+        assert_eq!(
+            t.nodes,
+            vec![
+                nspan(5, 0, Some(1), &[]),
+                nspan(7, 0, None, &[]),
+                nspan(9, 1, None, &[])
+            ]
+        );
     }
 
     #[test]
     fn reconfidenced_edge_is_one_span() {
         let snaps = [
             snap_with(&[1, 2], vec![toy_edge(1, 2, CAT)]),
-            snap_with(&[1, 2], vec![Edge::new(NodeId(1), NodeId(2), EdgeCategoryId(CAT), Confidence::Weak)]),
+            snap_with(
+                &[1, 2],
+                vec![Edge::new(
+                    NodeId(1),
+                    NodeId(2),
+                    EdgeCategoryId(CAT),
+                    Confidence::Weak,
+                )],
+            ),
         ];
         assert_eq!(fold(&snaps, &[]).edges, vec![espan(1, 2, 0, None)]);
         // A different category is a different edge.
-        let snaps = [snap(&[1, 2], &[(1, 2)]), snap_with(&[1, 2], vec![toy_edge(1, 2, CAT + 1)])];
+        let snaps = [
+            snap(&[1, 2], &[(1, 2)]),
+            snap_with(&[1, 2], vec![toy_edge(1, 2, CAT + 1)]),
+        ];
         let t = fold(&snaps, &[]);
         assert_eq!(spans_of(&t, key(1, 2)), vec![(0, Some(1))]);
         assert_eq!(t.edges.len(), 2);

@@ -126,7 +126,13 @@ pub(crate) fn run(args: Args) -> i32 {
         Collapse::with_labels(&result.repo_labels)
     };
     let live = glia_engine::entrypoint_reachable(&result.merged);
-    let mut answer = match serves_with(&result.merged, &live, &args.channel, &args.mechanism, &collapse) {
+    let mut answer = match serves_with(
+        &result.merged,
+        &live,
+        &args.channel,
+        &args.mechanism,
+        &collapse,
+    ) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: {e}");

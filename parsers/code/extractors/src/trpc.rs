@@ -211,7 +211,12 @@ pub fn trpc_client_hosts(source: &str) -> Vec<(String, u32)> {
     }
     let mut sites = Vec::new();
     for link in TRPC_LINKS {
-        sites.extend(crate::graphql::client_option_urls(source, link, false, &["url"]));
+        sites.extend(crate::graphql::client_option_urls(
+            source,
+            link,
+            false,
+            &["url"],
+        ));
     }
     crate::graphql::client_sites_in_order(source, sites)
 }

@@ -56,11 +56,25 @@ out(b) :- seed(a), link(a, b).
 
 /// The outputs [`PROGRAM`] is evaluated for: every predicate but the helpers `handled`,
 /// `seed` and `link` (so `link` is magic-rewritten; outputs never are).
-const OUTPUTS: [&str; 11] =
-    ["tc", "unhandled", "fan_in", "lo", "hi", "total", "far", "hit", "cyc", "named", "out"];
+const OUTPUTS: [&str; 11] = [
+    "tc",
+    "unhandled",
+    "fan_in",
+    "lo",
+    "hi",
+    "total",
+    "far",
+    "hit",
+    "cyc",
+    "named",
+    "out",
+];
 
 /// Attribute 1 of [`graph`]: `name(Node, str)`, a node's render (`n00042`).
-const NAME: AttrDecl = AttrDecl { name: "name", ty: ColType::Str };
+const NAME: AttrDecl = AttrDecl {
+    name: "name",
+    ty: ColType::Str,
+};
 
 /// `lcg_graph` (seed 3, 400 nodes, 1,200 edges over CALLS / USES / HANDLED_BY at 60 /
 /// 30 / 10 percent FACT / DERIVED / HEURISTIC), plus the [`NAME`] column.
@@ -93,7 +107,8 @@ fn eval(g: &MemSource) -> Evaluation<'_, MemSource> {
 }
 
 fn rows<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, pred: &str) -> Vec<Row> {
-    ev.rows(pred).unwrap_or_else(|e| panic!("rows({pred}): {e}"))
+    ev.rows(pred)
+        .unwrap_or_else(|e| panic!("rows({pred}): {e}"))
 }
 
 /// A row as a checkout-independent value: rendered values, tier, absence caveats.
@@ -119,12 +134,21 @@ fn node<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, id: NodeId) -> String {
 }
 
 fn category(c: EdgeCategoryId) -> String {
-    tables().registries.category_name(c).map_or_else(|| format!("#{}", c.0), str::to_string)
+    tables()
+        .registries
+        .category_name(c)
+        .map_or_else(|| format!("#{}", c.0), str::to_string)
 }
 
 /// A hop by (render(from), render(to), category name, tier): never its ordinal.
 fn hop<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, h: &EdgeHop) -> String {
-    format!("{} -> {} {} {:?}", node(ev, h.from), node(ev, h.to), category(h.category), h.tier)
+    format!(
+        "{} -> {} {} {:?}",
+        node(ev, h.from),
+        node(ev, h.to),
+        category(h.category),
+        h.tier
+    )
 }
 
 fn leaf<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, l: Option<&Leaf>) -> String {
@@ -157,7 +181,10 @@ fn rendered_witness<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, w: &Witness)
     let mut stack = vec![(0usize, w)];
     while let Some((depth, w)) = stack.pop() {
         let values: Vec<String> = w.values.iter().map(|v| ev.render(v)).collect();
-        let rule = w.rule.as_ref().map(|r| format!("{}:{} #{}", r.source, r.line, r.index));
+        let rule = w
+            .rule
+            .as_ref()
+            .map(|r| format!("{}:{} #{}", r.source, r.line, r.index));
         out.push(format!(
             "{:indent$}{}({}) {:?} h={} rule={} neg={} trunc={} {}",
             "",
@@ -200,7 +227,10 @@ fn same_rows_across_checkouts() {
     let mut tiers_seen: Vec<Tier> = Vec::new();
     for pred in &outputs {
         let (ra, rb) = (rendered_rows(&a, pred), rendered_rows(&b, pred));
-        assert!(!ra.is_empty(), "{pred} has no rows: the gate would prove nothing");
+        assert!(
+            !ra.is_empty(),
+            "{pred} has no rows: the gate would prove nothing"
+        );
         assert_eq!(ra.len(), rb.len(), "{pred}: row counts differ");
         for (i, (x, y)) in ra.iter().zip(&rb).enumerate() {
             assert_eq!(x, y, "{pred}: row {i} differs across checkouts");
@@ -214,8 +244,16 @@ fn same_rows_across_checkouts() {
     // Every tier occurs, and negation rows carry their caveats.
     assert_eq!(tiers_seen.len(), 3, "{tiers_seen:?}");
     let unhandled = rendered_rows(&a, "unhandled");
-    let caveat = ("handled/1".to_string(), vec!["HANDLED_BY".to_string()], false);
-    assert!(unhandled.iter().all(|r| r.2 == [caveat.clone()]), "{:?}", unhandled.first());
+    let caveat = (
+        "handled/1".to_string(),
+        vec!["HANDLED_BY".to_string()],
+        false,
+    );
+    assert!(
+        unhandled.iter().all(|r| r.2 == [caveat.clone()]),
+        "{:?}",
+        unhandled.first()
+    );
 
     // The comparison really ran against other ids: equal renders, unequal NodeIds.
     let (ta, tb) = (rows(&a, "tc"), rows(&b, "tc"));
@@ -241,22 +279,35 @@ fn same_witnesses_across_checkouts() {
         let (ra, rb) = (sample(&rows(&a, pred)), sample(&rows(&b, pred)));
         assert!(ra.len() >= 200, "{pred}: {} rows sampled", ra.len());
         assert_eq!(ra.len(), rb.len());
-        let wa = a.explain_all(&ra, &limits).unwrap_or_else(|e| panic!("explain {pred}: {e}"));
-        let wb = b.explain_all(&rb, &limits).unwrap_or_else(|e| panic!("explain {pred}: {e}"));
+        let wa = a
+            .explain_all(&ra, &limits)
+            .unwrap_or_else(|e| panic!("explain {pred}: {e}"));
+        let wb = b
+            .explain_all(&rb, &limits)
+            .unwrap_or_else(|e| panic!("explain {pred}: {e}"));
         for (i, (x, y)) in wa.iter().zip(&wb).enumerate() {
-            assert_eq!(rendered_witness(&a, x), rendered_witness(&b, y), "{pred}: witness {i}");
+            assert_eq!(
+                rendered_witness(&a, x),
+                rendered_witness(&b, y),
+                "{pred}: witness {i}"
+            );
             let (ha, hb) = (x.leaf_edges(), y.leaf_edges());
             let hops_a: Vec<String> = ha.iter().map(|h| hop(&a, h)).collect();
             let hops_b: Vec<String> = hb.iter().map(|h| hop(&b, h)).collect();
             assert!(!hops_a.is_empty(), "{pred}: witness {i} reads no edge");
             assert_eq!(hops_a, hops_b, "{pred}: witness {i} hops");
-            let (oa, ob): (Vec<usize>, Vec<usize>) =
-                (ha.iter().map(|h| h.ordinal).collect(), hb.iter().map(|h| h.ordinal).collect());
+            let (oa, ob): (Vec<usize>, Vec<usize>) = (
+                ha.iter().map(|h| h.ordinal).collect(),
+                hb.iter().map(|h| h.ordinal).collect(),
+            );
             ordinals_differ |= oa != ob;
         }
     }
     // Edge order is reversed, so the stored ordinals moved while the hops did not.
-    assert!(ordinals_differ, "no ordinal moved: the resalted edge order was not exercised");
+    assert!(
+        ordinals_differ,
+        "no ordinal moved: the resalted edge order was not exercised"
+    );
 }
 
 #[test]
@@ -269,8 +320,12 @@ fn repeat_runs_identical() {
         assert_eq!(ra, rb, "{pred}: rows differ between two runs");
         if ["tc/2", "hit/2", "cyc/2", "named/2", "fan_in/2"].contains(&pred.as_str()) {
             let some = sample(&ra);
-            let wa = a.explain_all(&some, &limits).unwrap_or_else(|e| panic!("{pred}: {e}"));
-            let wb = b.explain_all(&some, &limits).unwrap_or_else(|e| panic!("{pred}: {e}"));
+            let wa = a
+                .explain_all(&some, &limits)
+                .unwrap_or_else(|e| panic!("{pred}: {e}"));
+            let wb = b
+                .explain_all(&some, &limits)
+                .unwrap_or_else(|e| panic!("{pred}: {e}"));
             assert!(wa == wb, "{pred}: witnesses differ between two runs");
         }
     }
@@ -287,7 +342,10 @@ fn repeat_runs_identical() {
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
     let mut paths: Vec<PathBuf> = entries
-        .map(|e| e.unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display())).path())
+        .map(|e| {
+            e.unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+                .path()
+        })
         .collect();
     paths.sort();
     for p in paths {
@@ -306,7 +364,9 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
     let mut i = 0;
     while i < lines.len() {
         let opens = lines[i] == "#[cfg(test)]"
-            && lines.get(i + 1).is_some_and(|l| l.starts_with("mod ") && l.ends_with('{'));
+            && lines
+                .get(i + 1)
+                .is_some_and(|l| l.starts_with("mod ") && l.ends_with('{'));
         if !opens {
             i += 1;
             continue;
@@ -325,8 +385,14 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
 }
 
 /// Lookup-map calls that would expose its order.
-const ITERATION: [&str; 6] =
-    [".iter()", ".iter_mut()", ".keys()", ".values()", ".drain()", ".into_iter()"];
+const ITERATION: [&str; 6] = [
+    ".iter()",
+    ".iter_mut()",
+    ".keys()",
+    ".values()",
+    ".drain()",
+    ".into_iter()",
+];
 
 /// One file's guard result: its offences as `rules/src/<name>:<line>: ...`, and (for
 /// `value.rs`) whether Lookup's inner map is a private `HashMap` field.
@@ -340,7 +406,10 @@ fn scan(name: &str, text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
     let in_test = test_lines(&lines);
     let is_value = name == "value.rs";
-    let mut out = Scan { offences: Vec::new(), lookup_field: false };
+    let mut out = Scan {
+        offences: Vec::new(),
+        lookup_field: false,
+    };
     for (n, line) in lines.iter().enumerate() {
         let at = format!("rules/src/{name}:{}", n + 1);
         let mut flag = |what: &str| out.offences.push(format!("{at}: {what}: {}", line.trim()));
@@ -403,10 +472,23 @@ fn source_guard() {
     rust_files(&root, &mut files);
     let names: Vec<String> = files
         .iter()
-        .map(|p| p.strip_prefix(&root).map_or_else(|_| p.display(), |r| r.display()).to_string())
+        .map(|p| {
+            p.strip_prefix(&root)
+                .map_or_else(|_| p.display(), |r| r.display())
+                .to_string()
+        })
         .collect();
-    for must in ["value.rs", "eval.rs", "exec.rs", "explain.rs", "gql/lower.rs"] {
-        assert!(names.iter().any(|n| n == must), "{must} not scanned: {names:?}");
+    for must in [
+        "value.rs",
+        "eval.rs",
+        "exec.rs",
+        "explain.rs",
+        "gql/lower.rs",
+    ] {
+        assert!(
+            names.iter().any(|n| n == must),
+            "{must} not scanned: {names:?}"
+        );
     }
     let mut offences: Vec<String> = Vec::new();
     let mut lookup_field = false;
@@ -416,8 +498,15 @@ fn source_guard() {
         offences.extend(s.offences);
         lookup_field |= s.lookup_field;
     }
-    assert!(lookup_field, "value.rs: Lookup's inner map must be a private HashMap field");
-    assert!(offences.is_empty(), "determinism guard:\n{}", offences.join("\n"));
+    assert!(
+        lookup_field,
+        "value.rs: Lookup's inner map must be a private HashMap field"
+    );
+    assert!(
+        offences.is_empty(),
+        "determinism guard:\n{}",
+        offences.join("\n")
+    );
 }
 
 /// The guard flags what it says it flags, at file:line, and spares a test module.
@@ -426,17 +515,32 @@ fn source_guard_catches() {
     let shipped = "use std::collections::HashSet;\nfn f() {\n    let m: HashMap<u32, u32> = HashMap::new();\n    rayon::scope(|_| xs.par_iter());\n}\n";
     let found = scan("gql/new.rs", shipped).offences;
     assert_eq!(found.len(), 4, "{found:?}");
-    assert!(found[0].starts_with("rules/src/gql/new.rs:1: `HashSet`"), "{found:?}");
+    assert!(
+        found[0].starts_with("rules/src/gql/new.rs:1: `HashSet`"),
+        "{found:?}"
+    );
     assert!(found[1].starts_with("rules/src/gql/new.rs:3: `HashMap` outside value.rs"));
-    assert!(found[2].starts_with("rules/src/gql/new.rs:4: `rayon`"), "{found:?}");
-    assert!(found[3].starts_with("rules/src/gql/new.rs:4: `par_iter`"), "{found:?}");
+    assert!(
+        found[2].starts_with("rules/src/gql/new.rs:4: `rayon`"),
+        "{found:?}"
+    );
+    assert!(
+        found[3].starts_with("rules/src/gql/new.rs:4: `par_iter`"),
+        "{found:?}"
+    );
 
     // A test module's oracle set is spared; a thread in it is not.
     let tests = "fn g() {}\n\n#[cfg(test)]\nmod tests {\n    use std::collections::HashSet;\n    fn t() { std::thread::spawn(|| ()); }\n}\nstruct After(HashSet<u8>);\n";
     let found = scan("closure.rs", tests).offences;
     assert_eq!(found.len(), 2, "{found:?}");
-    assert!(found[0].starts_with("rules/src/closure.rs:6: `thread::spawn`"), "{found:?}");
-    assert!(found[1].starts_with("rules/src/closure.rs:8: `HashSet`"), "{found:?}");
+    assert!(
+        found[0].starts_with("rules/src/closure.rs:6: `thread::spawn`"),
+        "{found:?}"
+    );
+    assert!(
+        found[1].starts_with("rules/src/closure.rs:8: `HashSet`"),
+        "{found:?}"
+    );
 
     // value.rs: the map is allowed, iterating it is not.
     let value = "pub(crate) struct Lookup<K, V>(HashMap<K, V>);\n        self.0.get(k)\n        self.0.keys().next()\n        for (k, v) in &self.0 {\nimpl<K, V> IntoIterator for Lookup<K, V> {\n";
@@ -446,5 +550,11 @@ fn source_guard_catches() {
     assert!(s.offences[0].starts_with("rules/src/value.rs:3: `.keys()` on Lookup's map"));
     assert!(s.offences[1].starts_with("rules/src/value.rs:4: a `for` loop over Lookup's map"));
     assert!(s.offences[2].starts_with("rules/src/value.rs:5: an iterator impl on Lookup"));
-    assert!(!scan("value.rs", "pub(crate) struct Lookup<K, V>(pub HashMap<K, V>);").lookup_field);
+    assert!(
+        !scan(
+            "value.rs",
+            "pub(crate) struct Lookup<K, V>(pub HashMap<K, V>);"
+        )
+        .lookup_field
+    );
 }

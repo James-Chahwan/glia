@@ -24,9 +24,9 @@ use std::process::Command;
 use glia_code_domain::cell_type;
 use glia_core::{CellPayload, NodeId};
 use glia_store::{
-    MANIFEST_VERSION, MmapContainer, ShardedMmap, StoreError, is_gmap_stale,
-    read_manifest_lenient, read_merged_sharded, read_merged_sharded_meta, read_to_owned,
-    remove_cell, upsert_cell, upsert_cell_sharded,
+    MANIFEST_VERSION, MmapContainer, ShardedMmap, StoreError, is_gmap_stale, read_manifest_lenient,
+    read_merged_sharded, read_merged_sharded_meta, read_to_owned, remove_cell, upsert_cell,
+    upsert_cell_sharded,
 };
 use twox_hash::XxHash64;
 
@@ -177,7 +177,10 @@ fn materialize() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
     copy_tree(&root.join("repo"), &repo);
-    copy_tree(&root.join("layout-ai-repo-graph"), &repo.join(".ai/repo-graph"));
+    copy_tree(
+        &root.join("layout-ai-repo-graph"),
+        &repo.join(".ai/repo-graph"),
+    );
     copy_tree(&root.join("layout-glia-build"), &repo.join(".glia"));
     (tmp, repo)
 }
@@ -204,12 +207,27 @@ fn tree_bytes(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// Display says so, and it carries no archive internals (the pre-LC.1 text was
 /// `rkyv: failed without error information`).
 fn assert_file_says_rebuild(what: &str, e: &StoreError) {
-    assert!(e.needs_rebuild(), "{what}: {e:?} does not ask for a rebuild");
-    assert!(e.rebuild_reason().is_some(), "{what}: {e:?} has no rebuild reason");
+    assert!(
+        e.needs_rebuild(),
+        "{what}: {e:?} does not ask for a rebuild"
+    );
+    assert!(
+        e.rebuild_reason().is_some(),
+        "{what}: {e:?} has no rebuild reason"
+    );
     let shown = e.to_string();
-    assert!(shown.contains("rebuild"), "{what}: Display does not say rebuild: {shown}");
-    assert!(!shown.contains("rkyv"), "{what}: Display leaks rkyv: {shown}");
-    assert!(!shown.contains("failed without error information"), "{what}: {shown}");
+    assert!(
+        shown.contains("rebuild"),
+        "{what}: Display does not say rebuild: {shown}"
+    );
+    assert!(
+        !shown.contains("rkyv"),
+        "{what}: Display leaks rkyv: {shown}"
+    );
+    assert!(
+        !shown.contains("failed without error information"),
+        "{what}: {shown}"
+    );
 }
 
 /// A layout-level failure on the pre-leap sharded directory: the manifest
@@ -222,7 +240,9 @@ fn assert_manifest_schema_1(what: &str, e: &StoreError) {
     assert!(e.needs_rebuild(), "{what}: {e:?}");
     assert_eq!(
         e.rebuild_reason(),
-        Some(format!("manifest schema 1, this build reads {MANIFEST_VERSION}")),
+        Some(format!(
+            "manifest schema 1, this build reads {MANIFEST_VERSION}"
+        )),
         "{what}"
     );
 }
@@ -262,12 +282,19 @@ fn every_pre_leap_file_reports_rebuild() {
         .filter(|p| p.extension().is_some_and(|x| x == "gmap"))
         .collect();
     flat_files.sort();
-    assert!(!flat_files.is_empty(), "no flat glia build files materialised");
+    assert!(
+        !flat_files.is_empty(),
+        "no flat glia build files materialised"
+    );
     files.extend(flat_files);
     assert!(named > 1, "the manifest names no shards");
 
     for p in &files {
-        let rel = p.strip_prefix(&repo).expect("under repo").display().to_string();
+        let rel = p
+            .strip_prefix(&repo)
+            .expect("under repo")
+            .display()
+            .to_string();
         match MmapContainer::open(p) {
             Ok(_) => panic!("{rel}: a pre-leap file opened"),
             Err(e) => assert_file_says_rebuild(&format!("MmapContainer::open {rel}"), &e),
@@ -308,7 +335,10 @@ fn every_pre_leap_file_reports_rebuild() {
     let lenient = read_manifest_lenient(&sharded).expect("a schema-1 manifest reads leniently");
     assert_eq!(lenient.schema_version, 1);
     assert_eq!(lenient.build_stamp, PRE_LEAP_STAMP);
-    assert!(lenient.repos.is_empty(), "a 0.4.x manifest records no repos");
+    assert!(
+        lenient.repos.is_empty(),
+        "a 0.4.x manifest records no repos"
+    );
 
     // The flat directory has no manifest: to a layout reader it is no layout,
     // which is a rebuild too, never an attempt to read the files in it.
@@ -325,8 +355,14 @@ fn every_pre_leap_file_reports_rebuild() {
         assert!(e.needs_rebuild(), "{what}: {e:?}");
     }
 
-    assert!(is_gmap_stale(&sharded, &repo), "the pre-leap sharded layout reads fresh");
-    assert!(is_gmap_stale(&flat, &repo), "the flat glia build dir reads fresh");
+    assert!(
+        is_gmap_stale(&sharded, &repo),
+        "the pre-leap sharded layout reads fresh"
+    );
+    assert!(
+        is_gmap_stale(&flat, &repo),
+        "the flat glia build dir reads fresh"
+    );
 
     let after = tree_bytes(&repo);
     assert_eq!(
@@ -335,7 +371,11 @@ fn every_pre_leap_file_reports_rebuild() {
         "a store call created or removed a file"
     );
     for (rel, bytes) in &before {
-        assert!(after[rel] == *bytes, "{}: a store call changed its bytes", rel.display());
+        assert!(
+            after[rel] == *bytes,
+            "{}: a store call changed its bytes",
+            rel.display()
+        );
     }
 }
 
@@ -353,8 +393,16 @@ fn child_load_pre_leap_layouts() {
     };
     let repo = PathBuf::from(repo);
     for dir in [repo.join(".ai/repo-graph"), repo.join(".glia")] {
-        assert!(read_merged_sharded(&dir).is_err(), "{} loaded", dir.display());
-        assert!(read_merged_sharded_meta(&dir).is_err(), "{} loaded", dir.display());
+        assert!(
+            read_merged_sharded(&dir).is_err(),
+            "{} loaded",
+            dir.display()
+        );
+        assert!(
+            read_merged_sharded_meta(&dir).is_err(),
+            "{} loaded",
+            dir.display()
+        );
     }
     eprintln!("{CHILD_DONE}");
 }
@@ -364,21 +412,40 @@ fn loaders_print_the_needs_rebuild_marker() {
     let (_tmp, repo) = materialize();
     let repo = repo.canonicalize().expect("canonical repo");
     let run = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", "child_load_pre_leap_layouts", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_load_pre_leap_layouts",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, &repo)
         .output()
         .expect("re-run the test binary");
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "child failed:\n{stderr}");
     assert!(stderr.contains(CHILD_DONE), "child did not run:\n{stderr}");
-    let marks: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[gmap] needs rebuild: ")).collect();
+    let marks: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[gmap] needs rebuild: "))
+        .collect();
 
     let sharded = format!(
         "[gmap] needs rebuild: {}: manifest schema 1, this build reads {MANIFEST_VERSION}",
         repo.join(".ai/repo-graph").display()
     );
-    let flat = format!("[gmap] needs rebuild: {}: not found: ", repo.join(".glia").display());
+    let flat = format!(
+        "[gmap] needs rebuild: {}: not found: ",
+        repo.join(".glia").display()
+    );
     assert_eq!(marks.len(), 4, "one marker per failed load:\n{stderr}");
-    assert_eq!(marks.iter().filter(|l| **l == sharded).count(), 2, "{stderr}");
-    assert_eq!(marks.iter().filter(|l| l.starts_with(&flat)).count(), 2, "{stderr}");
+    assert_eq!(
+        marks.iter().filter(|l| **l == sharded).count(),
+        2,
+        "{stderr}"
+    );
+    assert_eq!(
+        marks.iter().filter(|l| l.starts_with(&flat)).count(),
+        2,
+        "{stderr}"
+    );
 }

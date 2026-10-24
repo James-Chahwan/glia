@@ -466,7 +466,16 @@ mod tests {
         let entries = fail_entries(&[cell(cell_type::FAIL, payload.into())]);
         let got: Vec<_> = entries
             .iter()
-            .map(|e| (e.id.as_str(), e.fails, e.window, e.latest_seq, e.last_failed_seq, e.failed_latest()))
+            .map(|e| {
+                (
+                    e.id.as_str(),
+                    e.fails,
+                    e.window,
+                    e.latest_seq,
+                    e.last_failed_seq,
+                    e.failed_latest(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
@@ -479,7 +488,10 @@ mod tests {
         // A v1 entry: one failure in its one run, which was the latest.
         let v1 = r#"[{"id":"latest:t::a","report":"r.xml","role":"test","source":"junit","status":"failed","test":"t::a","via":"qname"}]"#;
         let e = &fail_entries(&[cell(cell_type::FAIL, v1.into())])[0];
-        assert_eq!((e.fails, e.window, e.latest_seq, e.last_failed_seq), (1, 1, None, None));
+        assert_eq!(
+            (e.fails, e.window, e.latest_seq, e.last_failed_seq),
+            (1, 1, None, None)
+        );
         assert!(e.failed_latest());
     }
 

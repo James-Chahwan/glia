@@ -49,7 +49,8 @@ use glia_engine::{GenerateResult, entrypoint_reachable, generate_many};
 const BILLING_MONEY: &str = "from flask import Flask\n\nfrom lib.orders import place\n\napp = Flask(__name__)\n\n\ndef format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\n@app.route(\"/invoice\")\ndef invoice():\n    place(100)\n    return format_cents(100)\n\n\ndef main():\n    return format_cents(1)\n";
 const BILLING_ORDERS: &str = "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n\n\ndef place(total):\n    return OrderDto(total)\n";
 const SHOP_MONEY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\ndef format_cents(cents):\n    return _eur(\"%.2f\" % (cents / 100))\n\n\ndef _eur(text):\n    return text + \" EUR\"\n\n\n@app.route(\"/checkout\")\ndef checkout():\n    return format_cents(100)\n\n\ndef main():\n    return format_cents(1)\n";
-const SHOP_ORDERS: &str = "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n";
+const SHOP_ORDERS: &str =
+    "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n";
 
 fn write(root: &Path, rel: &str, text: &str) {
     let p = root.join(rel);
@@ -59,7 +60,9 @@ fn write(root: &Path, rel: &str, text: &str) {
 
 /// The 0-based row of the line of `text` starting with `needle`.
 fn row_of(text: &str, needle: &str) -> u32 {
-    text.lines().position(|l| l.starts_with(needle)).unwrap_or_else(|| panic!("no `{needle}`")) as u32
+    text.lines()
+        .position(|l| l.starts_with(needle))
+        .unwrap_or_else(|| panic!("no `{needle}`")) as u32
 }
 
 /// `repo`'s snapshot: `<dir>/money.py` defines `format_cents` and `main`,
@@ -77,21 +80,45 @@ fn snapshot(repo: &Path, dir: &str, money: &str) {
             refs: Vec::new(),
         }
     };
-    let def = |s: u32, line: u32, name: &str| ScipDefRow { s, line, name: name.to_string() };
+    let def = |s: u32, line: u32, name: &str| ScipDefRow {
+        s,
+        line,
+        name: name.to_string(),
+    };
     let documents = vec![
         doc(
             "money.py",
-            vec![def(0, row_of(money, "def format_cents"), "format_cents"), def(1, row_of(money, "def main"), "main")],
+            vec![
+                def(0, row_of(money, "def format_cents"), "format_cents"),
+                def(1, row_of(money, "def main"), "main"),
+            ],
         ),
         doc("orders.py", vec![def(2, 0, "OrderDto")]),
     ];
     let sym = |d: &str| format!("scip-python python money 1.0.0 {d}");
     let symbols = vec![
-        ScipSymbolRecord { id: 0, symbol: sym("`money`/format_cents()."), implements: Vec::new() },
-        ScipSymbolRecord { id: 1, symbol: sym("`money`/main()."), implements: Vec::new() },
-        ScipSymbolRecord { id: 2, symbol: sym("`orders`/OrderDto#"), implements: Vec::new() },
+        ScipSymbolRecord {
+            id: 0,
+            symbol: sym("`money`/format_cents()."),
+            implements: Vec::new(),
+        },
+        ScipSymbolRecord {
+            id: 1,
+            symbol: sym("`money`/main()."),
+            implements: Vec::new(),
+        },
+        ScipSymbolRecord {
+            id: 2,
+            symbol: sym("`orders`/OrderDto#"),
+            implements: Vec::new(),
+        },
     ];
-    let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
     write_scip(repo, meta, &documents, &symbols).expect("write snapshot");
 }
 
@@ -108,7 +135,10 @@ fn repos() -> tempfile::TempDir {
 }
 
 fn build_paths(roots: &[PathBuf]) -> GenerateResult {
-    let paths: Vec<String> = roots.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = roots
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap_or_else(|e| panic!("{paths:?} builds: {e}"))
 }
 
@@ -119,18 +149,28 @@ fn build_both(td: &tempfile::TempDir) -> GenerateResult {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(name)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(name)
 }
 
 fn same_as_edges(r: &GenerateResult) -> usize {
-    r.merged.cross_edges.iter().filter(|e| e.category == edge_category::SAME_AS).count()
+    r.merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count()
 }
 
 /// Trace options: `to`, and collapse on with the build's labels or off.
 fn opts(r: &GenerateResult, to: Option<&str>, on: bool) -> TraceOptions {
     let mut o = TraceOptions::default();
     o.to = to.map(str::to_string);
-    o.collapse = if on { Collapse::with_labels(&r.repo_labels) } else { Collapse::off() };
+    o.collapse = if on {
+        Collapse::with_labels(&r.repo_labels)
+    } else {
+        Collapse::off()
+    };
     o
 }
 
@@ -139,8 +179,18 @@ fn trace(r: &GenerateResult, feature: &str, to: Option<&str>, on: bool) -> Trace
 }
 
 fn flows(r: &GenerateResult, on: bool) -> Vec<EntryFlow> {
-    let collapse = if on { Collapse::with_labels(&r.repo_labels) } else { Collapse::off() };
-    entry_flows_with_live(&r.merged, &entrypoint_reachable(&r.merged), &r.repo_labels, 6, &collapse)
+    let collapse = if on {
+        Collapse::with_labels(&r.repo_labels)
+    } else {
+        Collapse::off()
+    };
+    entry_flows_with_live(
+        &r.merged,
+        &entrypoint_reachable(&r.merged),
+        &r.repo_labels,
+        6,
+        &collapse,
+    )
 }
 
 fn json<T: serde::Serialize>(v: &T) -> String {
@@ -149,7 +199,9 @@ fn json<T: serde::Serialize>(v: &T) -> String {
 
 /// A path as `from -> to` qname pairs.
 fn steps(hops: &[TraceHop]) -> Vec<(&str, &str)> {
-    hops.iter().map(|h| (h.from_qname.as_str(), h.to_qname.as_str())).collect()
+    hops.iter()
+        .map(|h| (h.from_qname.as_str(), h.to_qname.as_str()))
+        .collect()
 }
 
 fn flow<'a>(flows: &'a [EntryFlow], qname: &str) -> &'a EntryFlow {
@@ -163,7 +215,12 @@ fn flow<'a>(flows: &'a [EntryFlow], qname: &str) -> &'a EntryFlow {
 fn also(h: &TraceHop) -> Vec<(&str, &str)> {
     h.to_identity
         .as_ref()
-        .map(|id| id.also_in.iter().map(|a| (a.repo.as_str(), a.qname.as_str())).collect())
+        .map(|id| {
+            id.also_in
+                .iter()
+                .map(|a| (a.repo.as_str(), a.qname.as_str()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -178,35 +235,75 @@ fn also(h: &TraceHop) -> Vec<(&str, &str)> {
 fn one_path_for_copies() {
     let td = repos();
     let r = build_both(&td);
-    assert_eq!(same_as_edges(&r), 3, "control: format_cents, main and OrderDto are classes");
+    assert_eq!(
+        same_as_edges(&r),
+        3,
+        "control: format_cents, main and OrderDto are classes"
+    );
 
     // Two-node mode.
     let on = trace(&r, "GET /invoice", Some("app::money::format_cents"), true);
-    assert_eq!(on.target.as_ref().map(|t| t.qname.as_str()), Some("app::money::format_cents"), "target is the query's node");
+    assert_eq!(
+        on.target.as_ref().map(|t| t.qname.as_str()),
+        Some("app::money::format_cents"),
+        "target is the query's node"
+    );
     assert_eq!(on.paths.len(), 1, "{on:#?}");
     let p = &on.paths[0];
     assert!(p.directed, "{p:#?}");
-    assert_eq!(p.length, 2, "route -> handler -> the format_cents class: {p:#?}");
+    assert_eq!(
+        p.length, 2,
+        "route -> handler -> the format_cents class: {p:#?}"
+    );
     assert_eq!(p.mechanisms, ["HANDLED_BY", "CALLS"]);
     assert_eq!(
         steps(&p.hops),
-        [("GET /invoice", "lib::money::invoice"), ("lib::money::invoice", "lib::money::format_cents")],
+        [
+            ("GET /invoice", "lib::money::invoice"),
+            ("lib::money::invoice", "lib::money::format_cents")
+        ],
         "the class shows its display member, billing's copy (the first graph's)"
     );
-    assert!(p.hops.iter().all(|h| !h.cross_repo && !h.cross_service), "{p:#?}");
+    assert!(
+        p.hops.iter().all(|h| !h.cross_repo && !h.cross_service),
+        "{p:#?}"
+    );
 
     let off = trace(&r, "GET /invoice", Some("app::money::format_cents"), false);
-    assert!(!off.paths.is_empty(), "HEAD: the undirected fallback: {off:#?}");
-    assert!(off.paths.iter().all(|p| !p.directed), "HEAD: no directed path to shop's copy: {off:#?}");
+    assert!(
+        !off.paths.is_empty(),
+        "HEAD: the undirected fallback: {off:#?}"
+    );
+    assert!(
+        off.paths.iter().all(|p| !p.directed),
+        "HEAD: no directed path to shop's copy: {off:#?}"
+    );
     assert_eq!(off.paths[0].length, 3);
     assert_eq!(off.paths[0].hops[2].mechanism, "SAME_AS");
 
     // A target in the seed's walk class is the zero-length path.
-    let same = trace(&r, "lib::money::format_cents", Some("app::money::format_cents"), true);
+    let same = trace(
+        &r,
+        "lib::money::format_cents",
+        Some("app::money::format_cents"),
+        true,
+    );
     assert_eq!(same.paths.len(), 1);
-    assert_eq!((same.paths[0].length, same.paths[0].directed), (0, true), "{same:#?}");
-    let raw_same = trace(&r, "lib::money::format_cents", Some("app::money::format_cents"), false);
-    assert!(raw_same.paths.iter().all(|p| !p.directed && p.length == 1), "{raw_same:#?}");
+    assert_eq!(
+        (same.paths[0].length, same.paths[0].directed),
+        (0, true),
+        "{same:#?}"
+    );
+    let raw_same = trace(
+        &r,
+        "lib::money::format_cents",
+        Some("app::money::format_cents"),
+        false,
+    );
+    assert!(
+        raw_same.paths.iter().all(|p| !p.directed && p.length == 1),
+        "{raw_same:#?}"
+    );
 
     // One-node mode: the format_cents path goes on through shop's copy's
     // callee `_eur`; the HEAD path stops at billing's copy.
@@ -214,7 +311,11 @@ fn one_path_for_copies() {
     let to_eur = on
         .paths
         .iter()
-        .find(|p| p.hops.last().is_some_and(|h| h.to_qname == "app::money::_eur"))
+        .find(|p| {
+            p.hops
+                .last()
+                .is_some_and(|h| h.to_qname == "app::money::_eur")
+        })
         .unwrap_or_else(|| panic!("a path into shop's _eur: {on:#?}"));
     assert_eq!(
         steps(&to_eur.hops),
@@ -228,10 +329,15 @@ fn one_path_for_copies() {
     assert!(to_eur.hops[2].cross_repo, "the shown ends sit in two repos");
     let off = trace(&r, "GET /invoice", None, false);
     assert!(
-        off.paths.iter().all(|p| p.hops.iter().all(|h| h.to_qname != "app::money::_eur")),
+        off.paths
+            .iter()
+            .all(|p| p.hops.iter().all(|h| h.to_qname != "app::money::_eur")),
         "HEAD never reaches _eur: {off:#?}"
     );
-    assert!(on.hops.iter().any(|h| h.to_qname == "app::money::_eur"), "the BFS tree reaches it too");
+    assert!(
+        on.hops.iter().any(|h| h.to_qname == "app::money::_eur"),
+        "the BFS tree reaches it too"
+    );
 
     // Two class-mates are one seed: billing's and shop's `main` answer alike,
     // one path (main -> format_cents -> _eur), where HEAD has a different
@@ -243,13 +349,29 @@ fn one_path_for_copies() {
     assert_eq!(a.paths.len(), 1, "{a:#?}");
     assert_eq!(
         steps(&a.paths[0].hops),
-        [("lib::money::main", "lib::money::format_cents"), ("lib::money::format_cents", "app::money::_eur")]
+        [
+            ("lib::money::main", "lib::money::format_cents"),
+            ("lib::money::format_cents", "app::money::_eur")
+        ]
     );
-    let (ra, rb) = (trace(&r, "lib::money::main", None, false), trace(&r, "app::money::main", None, false));
+    let (ra, rb) = (
+        trace(&r, "lib::money::main", None, false),
+        trace(&r, "app::money::main", None, false),
+    );
     assert_ne!(json(&ra.paths), json(&rb.paths), "HEAD: one path per copy");
-    assert_eq!(steps(&ra.paths[0].hops), [("lib::money::main", "lib::money::format_cents")]);
-    assert_eq!(a.seed.as_ref().map(|s| s.qname.as_str()), Some("lib::money::main"));
-    assert_eq!(b.seed.as_ref().map(|s| s.qname.as_str()), Some("app::money::main"), "seed is the query's node");
+    assert_eq!(
+        steps(&ra.paths[0].hops),
+        [("lib::money::main", "lib::money::format_cents")]
+    );
+    assert_eq!(
+        a.seed.as_ref().map(|s| s.qname.as_str()),
+        Some("lib::money::main")
+    );
+    assert_eq!(
+        b.seed.as_ref().map(|s| s.qname.as_str()),
+        Some("app::money::main"),
+        "seed is the query's node"
+    );
 }
 
 /// (2) A hop into a class carries its identity: FACT, `scip_symbol`,
@@ -264,27 +386,57 @@ fn hop_identity() {
     let id = last.to_identity.as_ref().expect("the class hop's identity");
     assert_eq!((id.tier, id.diverged), ("fact", true));
     assert_eq!(id.rules, ["scip_symbol"]);
-    assert_eq!(also(last), [("shop", "app::money::format_cents")], "also_in names the other repo");
-    assert!(id.also_in.iter().all(|a| a.file.is_some() && a.line.is_some_and(|l| l >= 1)), "located, 1-based");
-    assert_eq!((last.to_file.as_deref(), last.to_line), (Some("lib/money.py"), Some(8)), "the display member's place");
+    assert_eq!(
+        also(last),
+        [("shop", "app::money::format_cents")],
+        "also_in names the other repo"
+    );
+    assert!(
+        id.also_in
+            .iter()
+            .all(|a| a.file.is_some() && a.line.is_some_and(|l| l >= 1)),
+        "located, 1-based"
+    );
+    assert_eq!(
+        (last.to_file.as_deref(), last.to_line),
+        (Some("lib/money.py"), Some(8)),
+        "the display member's place"
+    );
 
     let first = &on.paths[0].hops[0];
     assert!(first.to_identity.is_none());
     let text = json(first);
     assert!(!text.contains("to_identity"), "{text}");
-    assert!(json(&on).contains("\"to_identity\":{\"tier\":\"fact\""), "{}", json(&on));
+    assert!(
+        json(&on).contains("\"to_identity\":{\"tier\":\"fact\""),
+        "{}",
+        json(&on)
+    );
 
     // The BFS tree tags the same way: the DTO class shows billing's DTO.
     let tree = trace(&r, "GET /invoice", None, true);
-    let dto: Vec<&TraceHop> = tree.hops.iter().filter(|h| h.to_qname.ends_with("::OrderDto")).collect();
+    let dto: Vec<&TraceHop> = tree
+        .hops
+        .iter()
+        .filter(|h| h.to_qname.ends_with("::OrderDto"))
+        .collect();
     assert_eq!(dto.len(), 1, "the DTO class once: {:#?}", tree.hops);
     assert_eq!(dto[0].to_qname, "lib::orders::OrderDto");
     assert_eq!(also(dto[0]), [("shop", "app::orders::OrderDto")]);
-    assert!(tree.hops.iter().all(|h| h.mechanism != "SHARES_SCHEMA"), "the pair is intra-class: {:#?}", tree.hops);
+    assert!(
+        tree.hops.iter().all(|h| h.mechanism != "SHARES_SCHEMA"),
+        "the pair is intra-class: {:#?}",
+        tree.hops
+    );
 
     // Collapse off: no hop carries an identity.
     let off = trace(&r, "GET /invoice", None, false);
-    assert!(off.hops.iter().chain(off.paths.iter().flat_map(|p| &p.hops)).all(|h| h.to_identity.is_none()));
+    assert!(
+        off.hops
+            .iter()
+            .chain(off.paths.iter().flat_map(|p| &p.hops))
+            .all(|h| h.to_identity.is_none())
+    );
     assert!(!json(&off).contains("to_identity"));
 }
 
@@ -299,12 +451,24 @@ fn flows_dedupe() {
     let td = repos();
     let r = build_both(&td);
     let off = flows(&r, false);
-    let mains_off: Vec<&str> = off.iter().filter(|f| f.key == "main").map(|f| f.entry.qname.as_str()).collect();
-    assert_eq!(mains_off, ["app::money::main", "lib::money::main"], "HEAD: one flow per entry");
+    let mains_off: Vec<&str> = off
+        .iter()
+        .filter(|f| f.key == "main")
+        .map(|f| f.entry.qname.as_str())
+        .collect();
+    assert_eq!(
+        mains_off,
+        ["app::money::main", "lib::money::main"],
+        "HEAD: one flow per entry"
+    );
     assert_eq!(off.len(), 4);
 
     let on = flows(&r, true);
-    assert_eq!(json(&on), json(&entry_flows(&r.merged, &r.repo_labels, 6)), "entry_flows collapses with its labels");
+    assert_eq!(
+        json(&on),
+        json(&entry_flows(&r.merged, &r.repo_labels, 6)),
+        "entry_flows collapses with its labels"
+    );
     let mains: Vec<&EntryFlow> = on.iter().filter(|f| f.key == "main").collect();
     assert_eq!(mains.len(), 1, "{on:#?}");
     let main = mains[0];
@@ -312,19 +476,42 @@ fn flows_dedupe() {
     assert_eq!(main.entry.file.as_deref(), Some("lib/money.py"));
     assert_eq!(
         steps(&main.hops),
-        [("lib::money::main", "lib::money::format_cents"), ("lib::money::format_cents", "app::money::_eur")]
+        [
+            ("lib::money::main", "lib::money::format_cents"),
+            ("lib::money::format_cents", "app::money::_eur")
+        ]
     );
-    assert_eq!(main.services, ["billing", "shop"], "the flow touches shop through the class");
+    assert_eq!(
+        main.services,
+        ["billing", "shop"],
+        "the flow touches shop through the class"
+    );
     assert!(main.cross_service);
     assert_eq!(on.len(), 3);
 
     let invoice = flow(&on, "GET /invoice");
-    let dtos = invoice.hops.iter().filter(|h| h.to_qname.ends_with("::OrderDto")).count();
+    let dtos = invoice
+        .hops
+        .iter()
+        .filter(|h| h.to_qname.ends_with("::OrderDto"))
+        .count();
     assert_eq!(dtos, 1, "{invoice:#?}");
-    let fcs = invoice.hops.iter().filter(|h| h.to_qname.ends_with("::format_cents")).count();
+    let fcs = invoice
+        .hops
+        .iter()
+        .filter(|h| h.to_qname.ends_with("::format_cents"))
+        .count();
     assert_eq!(fcs, 1);
     let raw_invoice = flow(&off, "GET /invoice");
-    assert_eq!(raw_invoice.hops.iter().filter(|h| h.to_qname.ends_with("::OrderDto")).count(), 2, "HEAD: both DTOs");
+    assert_eq!(
+        raw_invoice
+            .hops
+            .iter()
+            .filter(|h| h.to_qname.ends_with("::OrderDto"))
+            .count(),
+        2,
+        "HEAD: both DTOs"
+    );
     for f in &on {
         let mut seen: Vec<&str> = f.hops.iter().map(|h| h.to_qname.as_str()).collect();
         let n = seen.len();
@@ -339,9 +526,17 @@ fn flows_dedupe() {
     assert!(same_as_edges(&ops) > 0, "control: the ops are one class");
     let on = flows(&ops, true);
     let route = flow(&on, "GET /api/orders");
-    let docs = route.hops.iter().filter(|h| h.to_kind == "DOC_SECTION").count();
+    let docs = route
+        .hops
+        .iter()
+        .filter(|h| h.to_kind == "DOC_SECTION")
+        .count();
     assert!(docs <= 1, "the contract class at most once: {route:#?}");
-    assert_eq!(json(&on), json(&flows(&ops, false)), "a flow no class enters is its HEAD self");
+    assert_eq!(
+        json(&on),
+        json(&flows(&ops, false)),
+        "a flow no class enters is its HEAD self"
+    );
 }
 
 /// (4) `package_name` classes collapse but never walk: the hop into
@@ -350,17 +545,30 @@ fn flows_dedupe() {
 /// the HEAD walk.
 #[test]
 fn package_hop_shows_the_reached_node() {
-    let r = build_paths(&[fixture("identity-npm-package").join("web"), fixture("identity-npm-package").join("admin")]);
+    let r = build_paths(&[
+        fixture("identity-npm-package").join("web"),
+        fixture("identity-npm-package").join("admin"),
+    ]);
     assert!(same_as_edges(&r) > 0);
     let on = trace(&r, "package.json", None, true);
     let off = trace(&r, "package.json", None, false);
-    let react = on.hops.iter().find(|h| h.to_qname == "package:npm:react").unwrap_or_else(|| panic!("{on:#?}"));
+    let react = on
+        .hops
+        .iter()
+        .find(|h| h.to_qname == "package:npm:react")
+        .unwrap_or_else(|| panic!("{on:#?}"));
     assert!(!react.cross_repo, "{react:#?}");
     let id = react.to_identity.as_ref().expect("react's identity");
-    assert_eq!((id.tier, id.rules.as_slice()), ("fact", ["package_name"].as_slice()));
+    assert_eq!(
+        (id.tier, id.rules.as_slice()),
+        ("fact", ["package_name"].as_slice())
+    );
     assert_eq!(id.also_in.len(), 1);
     let strip = |a: &TraceAnswer| -> Vec<(String, String, bool)> {
-        a.hops.iter().map(|h| (h.from_qname.clone(), h.to_qname.clone(), h.cross_repo)).collect()
+        a.hops
+            .iter()
+            .map(|h| (h.from_qname.clone(), h.to_qname.clone(), h.cross_repo))
+            .collect()
     };
     assert_eq!(strip(&on), strip(&off), "the HEAD walk");
     assert_eq!(on.paths.len(), off.paths.len());
@@ -372,7 +580,11 @@ fn package_hop_shows_the_reached_node() {
 fn class_free_identical() {
     let td = repos();
     let billing = build_paths(&[td.path().join("billing")]);
-    assert_eq!(same_as_edges(&billing), 0, "control: one SCIP repo, no class");
+    assert_eq!(
+        same_as_edges(&billing),
+        0,
+        "control: one SCIP repo, no class"
+    );
     let npm = build_paths(&[fixture("identity-npm-package").join("web")]);
     assert_eq!(same_as_edges(&npm), 0);
     for (r, feature, to) in [

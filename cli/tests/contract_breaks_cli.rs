@@ -95,7 +95,12 @@ impl Scratch {
         std::fs::create_dir_all(&home).expect("scratch HOME dir");
         let gitconfig = root.join("gitconfig");
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
-        Scratch { root, top, home, gitconfig }
+        Scratch {
+            root,
+            top,
+            home,
+            gitconfig,
+        }
     }
 
     /// A fresh `git init` (branch `main`) with no commits.
@@ -118,8 +123,8 @@ impl Scratch {
     /// `customer_name` and committed as `v2` (DT.1p).
     fn model_shop(name: &str) -> Self {
         let s = Scratch::git_repo(name);
-        let fixture =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/tests/data/model-breaks-shop");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/data/model-breaks-shop");
         let mut files = Vec::new();
         files_under(&fixture, &fixture, &mut files);
         for rel in &files {
@@ -130,9 +135,15 @@ impl Scratch {
         s.commit("v1");
         let order = s.top.join("api/internal/models/order.go");
         let text = std::fs::read_to_string(&order).expect("order.go");
-        assert!(text.contains("`json:\"customerName\"`"), "the fixture's tag");
-        std::fs::write(&order, text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1))
-            .expect("rename");
+        assert!(
+            text.contains("`json:\"customerName\"`"),
+            "the fixture's tag"
+        );
+        std::fs::write(
+            &order,
+            text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1),
+        )
+        .expect("rename");
         s.commit("v2");
         s
     }
@@ -183,7 +194,9 @@ impl Scratch {
         .arg(&self.top)
         .args(args);
         let out = self.hermetic(cmd).output().unwrap_or_else(|e| {
-            panic!("CC.8b contract-breaks tests need a `git` binary on PATH; running it failed: {e}")
+            panic!(
+                "CC.8b contract-breaks tests need a `git` binary on PATH; running it failed: {e}"
+            )
         });
         assert!(
             out.status.success(),
@@ -235,7 +248,12 @@ fn stderr(o: &Output) -> String {
 }
 
 fn show(o: &Output) -> String {
-    format!("exit {:?}\nstdout:\n{}\nstderr:\n{}", o.status.code(), stdout(o), stderr(o))
+    format!(
+        "exit {:?}\nstdout:\n{}\nstderr:\n{}",
+        o.status.code(),
+        stdout(o),
+        stderr(o)
+    )
 }
 
 /// The engine's `[contract-breaks] base=..` line, once per run.
@@ -281,7 +299,12 @@ fn removed_response_field_fails_the_gate_and_a_revert_passes_it() {
     let s = Scratch::orders("removed-field");
     s.write("openapi.yaml", &orders_without_total());
     let o = s.breaks(&[]);
-    assert_eq!(o.status.code(), Some(1), "a breaking change exits 1\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "a breaking change exits 1\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert!(
         out.starts_with(&format!("# glia contract-breaks `{}` vs HEAD\n", s.path())),
@@ -301,22 +324,45 @@ fn removed_response_field_fails_the_gate_and_a_revert_passes_it() {
         "total",
         "number",
     ] {
-        assert!(row.contains(want), "row lacks `{want}`: {row}\n{}", show(&o));
+        assert!(
+            row.contains(want),
+            "row lacks `{want}`: {row}\n{}",
+            show(&o)
+        );
     }
-    assert!(!out.contains("## compatible") && !out.contains("## unknown"), "{}", show(&o));
-    assert!(!out.contains("## orphaned clients"), "no client lost its provider\n{}", show(&o));
+    assert!(
+        !out.contains("## compatible") && !out.contains("## unknown"),
+        "{}",
+        show(&o)
+    );
+    assert!(
+        !out.contains("## orphaned clients"),
+        "no client lost its provider\n{}",
+        show(&o)
+    );
     assert_eq!(markers(&o), [MARKER_BREAKING], "{}", show(&o));
 
     s.write("openapi.yaml", ORDERS_V1);
     let o = s.breaks(&[]);
-    assert_eq!(o.status.code(), Some(0), "a reverted tree passes\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "a reverted tree passes\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert!(out.contains("no contract change vs HEAD"), "{}", show(&o));
-    assert!(out.contains("> FACT: "), "the engine's absence is printed\n{}", show(&o));
+    assert!(
+        out.contains("> FACT: "),
+        "the engine's absence is printed\n{}",
+        show(&o)
+    );
     assert!(!out.contains("## breaking"), "{}", show(&o));
     assert_eq!(
         markers(&o),
-        ["[contract-breaks] base=HEAD pairs=1 breaking=0 compatible=0 unknown=0 removed=0 added=0 orphaned_clients=0"],
+        [
+            "[contract-breaks] base=HEAD pairs=1 breaking=0 compatible=0 unknown=0 removed=0 added=0 orphaned_clients=0"
+        ],
         "{}",
         show(&o)
     );
@@ -329,28 +375,65 @@ fn json_is_the_engine_answer_and_keeps_the_exit_code() {
     let o = s.breaks(&["--json"]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
     let v = json(&o);
-    let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = v
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["absence", "advisory", "base", "breaking", "models", "orphaned_clients", "schemas"],
+        [
+            "absence",
+            "advisory",
+            "base",
+            "breaking",
+            "models",
+            "orphaned_clients",
+            "schemas"
+        ],
         "{v}"
     );
     let text = stdout(&o);
-    let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"models\":", "\"orphaned_clients\":", "\"breaking\":", "\"advisory\":", "\"absence\":"]
-        .iter()
-        .map(|k| text.rfind(k).unwrap_or(usize::MAX))
-        .collect();
-    assert!(order.windows(2).all(|w| w[0] < w[1]), "the engine's field order (a top-level key is its last occurrence): {text}");
+    let order: Vec<usize> = [
+        "\"base\":",
+        "\"schemas\":",
+        "\"models\":",
+        "\"orphaned_clients\":",
+        "\"breaking\":",
+        "\"advisory\":",
+        "\"absence\":",
+    ]
+    .iter()
+    .map(|k| text.rfind(k).unwrap_or(usize::MAX))
+    .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "the engine's field order (a top-level key is its last occurrence): {text}"
+    );
     assert_eq!(v["base"], "HEAD");
     assert_eq!(v["breaking"], 1);
     assert!(v["absence"].is_null(), "{v}");
     let row = &v["schemas"][0];
-    assert_eq!((row["status"].as_str(), row["key"].as_str()), (Some("breaking"), Some("GET /orders/{id}")));
+    assert_eq!(
+        (row["status"].as_str(), row["key"].as_str()),
+        (Some("breaking"), Some("GET /orders/{id}"))
+    );
     let c = &row["changes"][0];
     assert_eq!(
-        (c["section"].as_str(), c["field"].as_str(), c["rule"].as_str(), c["breaking"].as_bool()),
-        (Some("response:200"), Some("total"), Some("response_field_removed"), Some(true)),
+        (
+            c["section"].as_str(),
+            c["field"].as_str(),
+            c["rule"].as_str(),
+            c["breaking"].as_bool()
+        ),
+        (
+            Some("response:200"),
+            Some("total"),
+            Some("response_field_removed"),
+            Some(true)
+        ),
         "{v}"
     );
     assert_eq!(markers(&o), [MARKER_BREAKING], "{}", show(&o));
@@ -361,7 +444,12 @@ fn compatible_change_passes_and_breaking_only_hides_it() {
     let s = Scratch::orders("compatible");
     s.write("openapi.yaml", &orders_with_currency());
     let o = s.breaks(&[]);
-    assert_eq!(o.status.code(), Some(0), "a compatible change never fails the gate\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "a compatible change never fails the gate\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert!(section_rows(&out, "breaking").is_empty(), "{}", show(&o));
     let rows = section_rows(&out, "compatible");
@@ -375,15 +463,30 @@ fn compatible_change_passes_and_breaking_only_hides_it() {
     let o = s.breaks(&["--breaking-only"]);
     assert_eq!(o.status.code(), Some(0), "{}", show(&o));
     let out = stdout(&o);
-    assert!(!out.contains("## compatible"), "--breaking-only leaves compatible rows out\n{}", show(&o));
-    assert!(out.contains("no breaking contract change vs HEAD"), "{}", show(&o));
-    assert!(out.contains("left out by breaking_only"), "the absence says why\n{}", show(&o));
+    assert!(
+        !out.contains("## compatible"),
+        "--breaking-only leaves compatible rows out\n{}",
+        show(&o)
+    );
+    assert!(
+        out.contains("no breaking contract change vs HEAD"),
+        "{}",
+        show(&o)
+    );
+    assert!(
+        out.contains("left out by breaking_only"),
+        "the absence says why\n{}",
+        show(&o)
+    );
 }
 
 #[test]
 fn removed_op_is_one_row_located_at_the_base() {
     let s = Scratch::orders("removed-op");
-    s.write("openapi.yaml", "openapi: 3.0.0\ninfo:\n  title: orders\n  version: \"1\"\npaths: {}\n");
+    s.write(
+        "openapi.yaml",
+        "openapi: 3.0.0\ninfo:\n  title: orders\n  version: \"1\"\npaths: {}\n",
+    );
     let o = s.breaks(&[]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
     let rows = section_rows(&stdout(&o), "breaking");
@@ -405,7 +508,12 @@ fn orphaned_client_fails_the_gate() {
     s.commit("client + service");
     std::fs::remove_file(s.top.join("services/api/app.py")).expect("remove the route");
     let o = s.breaks(&[]);
-    assert_eq!(o.status.code(), Some(1), "an orphaned client is breaking\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "an orphaned client is breaking\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     let rows = section_rows(&out, "orphaned clients");
     assert_eq!(rows.len(), 1, "{}", show(&o));
@@ -417,9 +525,17 @@ fn orphaned_client_fails_the_gate() {
         "target_removed",
         "fact",
     ] {
-        assert!(rows[0].contains(want), "orphan row lacks `{want}`\n{}", show(&o));
+        assert!(
+            rows[0].contains(want),
+            "orphan row lacks `{want}`\n{}",
+            show(&o)
+        );
     }
-    assert!(markers(&o)[0].ends_with("orphaned_clients=1"), "{}", show(&o));
+    assert!(
+        markers(&o)[0].ends_with("orphaned_clients=1"),
+        "{}",
+        show(&o)
+    );
 }
 
 /// CC.8c: `--with <client>` builds a client repo beside the provider on
@@ -439,7 +555,12 @@ fn with_client_repo_orphans_its_call() {
     let client = client.to_str().expect("utf-8 scratch path");
 
     let o = s.breaks(&["--with", client]);
-    assert_eq!(o.status.code(), Some(1), "the other repo's client is orphaned\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "the other repo's client is orphaned\n{}",
+        show(&o)
+    );
     let rows = section_rows(&stdout(&o), "orphaned clients");
     assert_eq!(rows.len(), 1, "{}", show(&o));
     for want in [
@@ -450,11 +571,21 @@ fn with_client_repo_orphans_its_call() {
         "target_removed",
         "fact",
     ] {
-        assert!(rows[0].contains(want), "orphan row lacks `{want}`\n{}", show(&o));
+        assert!(
+            rows[0].contains(want),
+            "orphan row lacks `{want}`\n{}",
+            show(&o)
+        );
     }
-    assert!(markers(&o)[0].ends_with("orphaned_clients=1"), "{}", show(&o));
     assert!(
-        stderr(&o).lines().any(|l| l == "[contract-breaks] clients=1 built_twice=1"),
+        markers(&o)[0].ends_with("orphaned_clients=1"),
+        "{}",
+        show(&o)
+    );
+    assert!(
+        stderr(&o)
+            .lines()
+            .any(|l| l == "[contract-breaks] clients=1 built_twice=1"),
         "the --with marker\n{}",
         show(&o)
     );
@@ -462,11 +593,23 @@ fn with_client_repo_orphans_its_call() {
     let o = s.breaks(&["--with", client, "--json"]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
     let v = json(&o);
-    assert_eq!(v["orphaned_clients"][0]["client_qname"], "endpoint:GET:/orders", "{v}");
+    assert_eq!(
+        v["orphaned_clients"][0]["client_qname"], "endpoint:GET:/orders",
+        "{v}"
+    );
 
     let o = s.breaks(&[]);
-    assert_eq!(o.status.code(), Some(0), "without --with the client is not built\n{}", show(&o));
-    assert!(!stderr(&o).contains("[contract-breaks] clients="), "{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "without --with the client is not built\n{}",
+        show(&o)
+    );
+    assert!(
+        !stderr(&o).contains("[contract-breaks] clients="),
+        "{}",
+        show(&o)
+    );
 
     let o = s.breaks(&["--with", "/nonexistent/cc8c-client"]);
     assert_eq!(o.status.code(), Some(2), "{}", show(&o));
@@ -524,7 +667,12 @@ fn no_overlay_is_refused() {
 fn inferred_model_break_is_advisory() {
     let s = Scratch::model_shop("model-breaks");
     let o = s.breaks(&["--base", "HEAD~1"]);
-    assert_eq!(o.status.code(), Some(0), "an advisory row passes the gate\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "an advisory row passes the gate\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     for want in [
         "- breaking: 0 (0 contract changes, 0 orphaned clients) | unknown: 0 | compatible: 0\n- models: 1 breaking (0 blocking, 1 advisory) | 0 compatible | min tier fact\n",
@@ -534,15 +682,25 @@ fn inferred_model_break_is_advisory() {
     }
     assert_eq!(
         section_rows(&out, "models"),
-        ["| http_model | `GET /api/orders/:id` +2 | breaking | advisory | derived | server | **json_name_changed** | `customerName` | customerName | customer_name | `web::src::app::core::models::order::Order` web/src/app/core/models/order.ts:11 | `api::internal::models::order::Order` api/internal/models/order.go:22 |"],
+        [
+            "| http_model | `GET /api/orders/:id` +2 | breaking | advisory | derived | server | **json_name_changed** | `customerName` | customerName | customer_name | `web::src::app::core::models::order::Order` web/src/app/core/models/order.ts:11 | `api::internal::models::order::Order` api/internal/models/order.go:22 |"
+        ],
         "{}",
         show(&o)
     );
-    assert!(!out.contains("no contract change"), "a model row is a change\n{}", show(&o));
+    assert!(
+        !out.contains("no contract change"),
+        "a model row is a change\n{}",
+        show(&o)
+    );
     let err = stderr(&o);
     let lines: Vec<&str> = err
         .lines()
-        .filter(|l| l.starts_with("[contract-breaks] ") || l.starts_with("[model-breaks] ") || l.starts_with("[absence] "))
+        .filter(|l| {
+            l.starts_with("[contract-breaks] ")
+                || l.starts_with("[model-breaks] ")
+                || l.starts_with("[absence] ")
+        })
         .collect();
     assert_eq!(
         lines,
@@ -558,23 +716,47 @@ fn inferred_model_break_is_advisory() {
     assert_eq!(o.status.code(), Some(0), "{}", show(&o));
     let v = json(&o);
     assert_eq!(
-        (v["breaking"].as_u64(), v["advisory"].as_u64(), v["models"][0]["pairing"].as_str(), v["models"][0]["changes"][0]["rule"].as_str()),
-        (Some(0), Some(1), Some("http_model"), Some("json_name_changed")),
+        (
+            v["breaking"].as_u64(),
+            v["advisory"].as_u64(),
+            v["models"][0]["pairing"].as_str(),
+            v["models"][0]["changes"][0]["rule"].as_str()
+        ),
+        (
+            Some(0),
+            Some(1),
+            Some("http_model"),
+            Some("json_name_changed")
+        ),
         "{v}"
     );
 
     let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "derived"]);
-    assert_eq!(o.status.code(), Some(1), "derived: the break fails the gate\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "derived: the break fails the gate\n{}",
+        show(&o)
+    );
     let out = stdout(&o);
     assert!(
         out.contains("- breaking: 1 (0 contract changes, 0 orphaned clients, 1 blocking model break) | unknown: 0 | compatible: 0\n- models: 1 breaking (1 blocking, 0 advisory) | 0 compatible | min tier derived\n"),
         "{}",
         show(&o)
     );
-    assert!(section_rows(&out, "models")[0].contains(" | breaking | blocking | derived | "), "{}", show(&o));
+    assert!(
+        section_rows(&out, "models")[0].contains(" | breaking | blocking | derived | "),
+        "{}",
+        show(&o)
+    );
 
     let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "heuristic"]);
-    assert_eq!(o.status.code(), Some(2), "clap refuses the tier\n{}", show(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "clap refuses the tier\n{}",
+        show(&o)
+    );
     assert!(stderr(&o).contains("fact, derived"), "{}", show(&o));
     assert!(markers(&o).is_empty(), "nothing is built\n{}", show(&o));
 }

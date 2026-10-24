@@ -16,7 +16,10 @@ use glia_core::{NodeId, NodeKindId};
 use glia_engine::generate_one;
 
 fn bench(rel: &str) -> String {
-    format!("{}/../bench/substrate-gap/{rel}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Every CALLS edge of a build as `(from qname, to qname, to kind)`, sorted.
@@ -47,13 +50,27 @@ fn calls(dir: &str) -> Vec<(String, String, Option<NodeKindId>)> {
 fn bare_calls_follow_dart_lexical_scope() {
     let calls = calls("fixtures/dart-bare-calls");
     let want = [
-        ("lib::calc::Calc::total", "lib::calc::Calc::add", node_kind::METHOD),
-        ("lib::calc::Calc::useStatic", "lib::calc::Calc::make", node_kind::METHOD),
-        ("lib::calc::Calc::viaTop", "lib::calc::helper", node_kind::FUNCTION),
+        (
+            "lib::calc::Calc::total",
+            "lib::calc::Calc::add",
+            node_kind::METHOD,
+        ),
+        (
+            "lib::calc::Calc::useStatic",
+            "lib::calc::Calc::make",
+            node_kind::METHOD,
+        ),
+        (
+            "lib::calc::Calc::viaTop",
+            "lib::calc::helper",
+            node_kind::FUNCTION,
+        ),
     ];
     for (from, to, k) in want {
         assert!(
-            calls.iter().any(|(f, t, tk)| f == from && t == to && *tk == Some(k)),
+            calls
+                .iter()
+                .any(|(f, t, tk)| f == from && t == to && *tk == Some(k)),
             "expected CALLS {from} -> {to}; CALLS = {calls:?}"
         );
     }
@@ -66,10 +83,26 @@ fn bare_calls_follow_dart_lexical_scope() {
 fn members_and_locals_shadow_library_and_class_names() {
     let calls = calls("fixtures/dart-bare-calls");
     for (from, to, why) in [
-        ("lib::calc::Calc::total", "lib::calc::add", "the member add shadows the top-level add"),
-        ("lib::calc::Calc::shadow", "lib::calc::Calc::twice", "the local closure twice shadows the member"),
-        ("lib::calc::Calc::param", "lib::calc::Calc::add", "the parameter add shadows the member"),
-        ("lib::calc::Calc::param", "lib::calc::add", "the parameter add shadows the top-level add"),
+        (
+            "lib::calc::Calc::total",
+            "lib::calc::add",
+            "the member add shadows the top-level add",
+        ),
+        (
+            "lib::calc::Calc::shadow",
+            "lib::calc::Calc::twice",
+            "the local closure twice shadows the member",
+        ),
+        (
+            "lib::calc::Calc::param",
+            "lib::calc::Calc::add",
+            "the parameter add shadows the member",
+        ),
+        (
+            "lib::calc::Calc::param",
+            "lib::calc::add",
+            "the parameter add shadows the top-level add",
+        ),
     ] {
         assert!(
             !calls.iter().any(|(f, t, _)| f == from && t == to),
@@ -82,11 +115,9 @@ fn members_and_locals_shadow_library_and_class_names() {
 fn matrix_dart_calls_probe_binds_the_self_call() {
     let calls = calls("matrix/dart/calls");
     assert!(
-        calls
-            .iter()
-            .any(|(f, t, k)| f == "calc::Calc::total"
-                && t == "calc::Calc::add"
-                && *k == Some(node_kind::METHOD)),
+        calls.iter().any(|(f, t, k)| f == "calc::Calc::total"
+            && t == "calc::Calc::add"
+            && *k == Some(node_kind::METHOD)),
         "expected CALLS calc::Calc::total -> calc::Calc::add; CALLS = {calls:?}"
     );
 }

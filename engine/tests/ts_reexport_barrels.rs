@@ -58,7 +58,10 @@ fn q(rest: &str) -> String {
 /// A node's qname without its ` @<project>` owner segment.
 fn qname_of(m: &MergedGraph, id: NodeId) -> Option<String> {
     m.graphs.iter().find_map(|g| {
-        g.nav.qname_by_id.get(&id).map(|q| q.split(" @").next().unwrap_or(q).to_string())
+        g.nav
+            .qname_by_id
+            .get(&id)
+            .map(|q| q.split(" @").next().unwrap_or(q).to_string())
     })
 }
 
@@ -116,7 +119,9 @@ fn table(t: &HashMap<NodeId, HashMap<String, NodeId>>) -> BTreeMap<u64, BTreeMap
 }
 
 fn has_edge(m: &MergedGraph, cat: EdgeCategoryId, from: &str, to: &str) -> bool {
-    rows(m).iter().any(|(c, f, t, ..)| *c == cat.0 && f == from && t == to)
+    rows(m)
+        .iter()
+        .any(|(c, f, t, ..)| *c == cat.0 && f == from && t == to)
 }
 
 #[test]
@@ -134,11 +139,25 @@ fn barrels_bind_the_declaring_symbols() {
         ("shared::index", "shared::badge", 0),
     ];
     // (category, from, to, emitter, rule, line).
-    type Want<'a> = (EdgeCategoryId, String, String, &'a str, &'a str, Option<u32>);
+    type Want<'a> = (
+        EdgeCategoryId,
+        String,
+        String,
+        &'a str,
+        &'a str,
+        Option<u32>,
+    );
     let mut want: Vec<Want<'_>> = imports
         .iter()
         .map(|(f, t, line)| {
-            (edge_category::IMPORTS, q(f), q(t), "graph:imports", "reexport", Some(*line))
+            (
+                edge_category::IMPORTS,
+                q(f),
+                q(t),
+                "graph:imports",
+                "reexport",
+                Some(*line),
+            )
         })
         .collect();
     let page = "features::profile::profile.page::ProfilePage";
@@ -148,20 +167,70 @@ fn barrels_bind_the_declaring_symbols() {
     let vip = "features::profile::vip::VipCustomer";
     let (refs, calls, bind) = ("graph:refs", "graph:calls", "import_binding");
     for (cat, from, to, emitter, rule) in [
-        (edge_category::INJECTS, page, "core::services::user.service::UserService", refs, bind),
-        (edge_category::INJECTS, page, "core::services::audit::AuditLog", refs, bind),
-        (edge_category::CALLS, load, "core::services::user.service::UserService::find", calls, "receiver_type"),
-        (edge_category::CALLS, load, "core::services::audit::AuditLog::record", calls, "receiver_type"),
-        (edge_category::CALLS, load, "core::util::format::shout", calls, "attribute"),
-        (edge_category::CALLS, total, "core::models::order.model::orderTotal", calls, bind),
-        (edge_category::CALLS, label, "shared::badge::badgeLabel", calls, bind),
-        (edge_category::INHERITS_FROM, vip, "core::models::user.model::User", refs, bind),
+        (
+            edge_category::INJECTS,
+            page,
+            "core::services::user.service::UserService",
+            refs,
+            bind,
+        ),
+        (
+            edge_category::INJECTS,
+            page,
+            "core::services::audit::AuditLog",
+            refs,
+            bind,
+        ),
+        (
+            edge_category::CALLS,
+            load,
+            "core::services::user.service::UserService::find",
+            calls,
+            "receiver_type",
+        ),
+        (
+            edge_category::CALLS,
+            load,
+            "core::services::audit::AuditLog::record",
+            calls,
+            "receiver_type",
+        ),
+        (
+            edge_category::CALLS,
+            load,
+            "core::util::format::shout",
+            calls,
+            "attribute",
+        ),
+        (
+            edge_category::CALLS,
+            total,
+            "core::models::order.model::orderTotal",
+            calls,
+            bind,
+        ),
+        (
+            edge_category::CALLS,
+            label,
+            "shared::badge::badgeLabel",
+            calls,
+            bind,
+        ),
+        (
+            edge_category::INHERITS_FROM,
+            vip,
+            "core::models::user.model::User",
+            refs,
+            bind,
+        ),
     ] {
         want.push((cat, q(from), q(to), emitter, rule, None));
     }
     assert_eq!(want.len(), 16);
     for (cat, from, to, emitter, rule, line) in want {
-        let hit = got.iter().find(|(c, f, t, ..)| *c == cat.0 && *f == from && *t == to);
+        let hit = got
+            .iter()
+            .find(|(c, f, t, ..)| *c == cat.0 && *f == from && *t == to);
         let Some((_, _, _, e, r, l)) = hit else {
             panic!("missing {cat:?} {from} -> {to}");
         };
@@ -179,13 +248,37 @@ fn ambiguity_and_name_guesses_bind_nothing() {
     let load = q("features::profile::profile.page::ProfilePage::load");
     let page = q("features::profile::profile.page::ProfilePage");
     let forbid = [
-        (edge_category::CALLS, load.clone(), q("core::models::user.model::displayName")),
-        (edge_category::CALLS, load.clone(), q("core::models::order.model::displayName")),
-        (edge_category::INJECTS, page.clone(), q("legacy::user.service::UserService")),
-        (edge_category::CALLS, load.clone(), q("legacy::user.service::UserService::find")),
+        (
+            edge_category::CALLS,
+            load.clone(),
+            q("core::models::user.model::displayName"),
+        ),
+        (
+            edge_category::CALLS,
+            load.clone(),
+            q("core::models::order.model::displayName"),
+        ),
+        (
+            edge_category::INJECTS,
+            page.clone(),
+            q("legacy::user.service::UserService"),
+        ),
+        (
+            edge_category::CALLS,
+            load.clone(),
+            q("legacy::user.service::UserService::find"),
+        ),
         (edge_category::CALLS, load, q("legacy::user.service::shout")),
-        (edge_category::IMPORTS, q("core::index"), q("core::models::user.model")),
-        (edge_category::IMPORTS, q("features::profile::profile.page"), q("core::services::user.service")),
+        (
+            edge_category::IMPORTS,
+            q("core::index"),
+            q("core::models::user.model"),
+        ),
+        (
+            edge_category::IMPORTS,
+            q("features::profile::profile.page"),
+            q("core::services::user.service"),
+        ),
         (
             edge_category::INJECTS,
             q("features::reports::report.page::ReportPage"),
@@ -198,14 +291,19 @@ fn ambiguity_and_name_guesses_bind_nothing() {
         ),
     ];
     for (cat, from, to) in &forbid {
-        assert!(!has_edge(m, *cat, from, to), "forbidden {cat:?} {from} -> {to}");
+        assert!(
+            !has_edge(m, *cat, from, to),
+            "forbidden {cat:?} {from} -> {to}"
+        );
     }
 
     let g = graph_of(m, &q("core::index"));
     let syms = |module: &str| -> BTreeMap<String, NodeId> {
         let id = id_of(m, &q(module));
         let table = g.symbols.module_symbols.get(&id);
-        table.map(|s| s.iter().map(|(k, v)| (k.clone(), *v)).collect()).unwrap_or_default()
+        table
+            .map(|s| s.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default()
     };
     let core = syms("core::index");
     for (name, decl) in [
@@ -222,11 +320,21 @@ fn ambiguity_and_name_guesses_bind_nothing() {
     assert!(!syms("core::models::index").contains_key("displayName"));
 
     let bound = |module: &str, name: &str| {
-        g.symbols.module_import_bindings.get(&id_of(m, &q(module)))?.get(name).copied()
+        g.symbols
+            .module_import_bindings
+            .get(&id_of(m, &q(module)))?
+            .get(name)
+            .copied()
     };
     let profile = "features::profile::profile.page";
-    assert_eq!(bound(profile, "Journal"), Some(id_of(m, &q("core::services::audit::AuditLog"))));
-    assert_eq!(bound(profile, "fmt"), Some(id_of(m, &q("core::util::format"))));
+    assert_eq!(
+        bound(profile, "Journal"),
+        Some(id_of(m, &q("core::services::audit::AuditLog")))
+    );
+    assert_eq!(
+        bound(profile, "fmt"),
+        Some(id_of(m, &q("core::util::format")))
+    );
     assert_eq!(bound(profile, "displayName"), None);
     let user = id_of(m, &q("core::models::user.model::User"));
     assert_eq!(bound("features::profile::vip", "Customer"), Some(user));
@@ -235,13 +343,23 @@ fn ambiguity_and_name_guesses_bind_nothing() {
 #[test]
 fn liveness_follows_barrel_bindings() {
     let (_td, r) = build();
-    let roots: Vec<(u64, PathBuf)> = r.repo_roots.iter().map(|(id, p)| (*id, PathBuf::from(p))).collect();
+    let roots: Vec<(u64, PathBuf)> = r
+        .repo_roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
     let report = gaps_report(&r.merged, &roots, &GapsOptions::default()).expect("known categories");
     let dead: BTreeSet<String> = report
         .rows
         .iter()
         .filter(|row| row.category == "dead_symbol")
-        .map(|row| row.qname.split(" @").next().unwrap_or(&row.qname).to_string())
+        .map(|row| {
+            row.qname
+                .split(" @")
+                .next()
+                .unwrap_or(&row.qname)
+                .to_string()
+        })
         .collect();
     // Reached from the live ProfilePage, called, or inherited from.
     for live in [
@@ -283,8 +401,14 @@ fn the_layout_keeps_the_export_tables() {
     let loaded = load_layout(&dir).expect("load");
     let core = q("core::index");
     let (built, back) = (graph_of(&r.merged, &core), graph_of(&loaded.merged, &core));
-    assert_eq!(table(&back.symbols.module_symbols), table(&built.symbols.module_symbols));
-    assert_eq!(table(&back.symbols.module_import_bindings), table(&built.symbols.module_import_bindings));
+    assert_eq!(
+        table(&back.symbols.module_symbols),
+        table(&built.symbols.module_symbols)
+    );
+    assert_eq!(
+        table(&back.symbols.module_import_bindings),
+        table(&built.symbols.module_import_bindings)
+    );
     // The barrel's same-name rows and the importers' bindings are among them.
     let barrel = id_of(&loaded.merged, &core);
     assert!(back.symbols.module_symbols[&barrel].contains_key("UserService"));
@@ -306,10 +430,23 @@ fn the_parse_cache_keeps_the_export_facts() {
     cache.save(&repo).expect("save");
     let mut cache = ParseCache::load(&repo);
     let warm = generate_one_with_cache(&repo, &mut cache).expect("warm");
-    assert!(cache.stats.reused > 0 && cache.stats.reparsed == 0, "{:?}", cache.stats);
+    assert!(
+        cache.stats.reused > 0 && cache.stats.reparsed == 0,
+        "{:?}",
+        cache.stats
+    );
     assert_eq!(rows(&warm.merged), rows(&clean.merged));
     let core = q("core::index");
-    let (a, b) = (graph_of(&warm.merged, &core), graph_of(&clean.merged, &core));
-    assert_eq!(table(&a.symbols.module_symbols), table(&b.symbols.module_symbols));
-    assert_eq!(table(&a.symbols.module_import_bindings), table(&b.symbols.module_import_bindings));
+    let (a, b) = (
+        graph_of(&warm.merged, &core),
+        graph_of(&clean.merged, &core),
+    );
+    assert_eq!(
+        table(&a.symbols.module_symbols),
+        table(&b.symbols.module_symbols)
+    );
+    assert_eq!(
+        table(&a.symbols.module_import_bindings),
+        table(&b.symbols.module_import_bindings)
+    );
 }

@@ -287,7 +287,10 @@ pub(crate) fn visit_call(call: TsNode, ctx: &Body, file: &File, acc: &mut Acc) {
 /// a Ktor-client call too (`restClient.delete("/x")` in a Ktor-importing file).
 fn spring_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) -> bool {
     let src = file.src;
-    let Some(head) = call.named_child(0).filter(|h| h.kind() == "navigation_expression") else {
+    let Some(head) = call
+        .named_child(0)
+        .filter(|h| h.kind() == "navigation_expression")
+    else {
         return false;
     };
     let Some((base, name)) = nav_parts(head, src) else {
@@ -493,8 +496,8 @@ fn webclient_verb(receiver: TsNode, src: &[u8]) -> Option<&'static str> {
             return Some(verb);
         }
         if name == "method"
-            && let Some(verb) =
-                named_child_of_kind(cur, &["value_arguments"]).and_then(|a| http_method_arg_verb(a, src))
+            && let Some(verb) = named_child_of_kind(cur, &["value_arguments"])
+                .and_then(|a| http_method_arg_verb(a, src))
         {
             return Some(verb);
         }
@@ -519,7 +522,9 @@ fn first_arg_value(args: TsNode) -> Option<TsNode> {
         .named_children(&mut cursor)
         .find(|a| a.kind() == "value_argument")?;
     let mut ac = first.walk();
-    let has_key = first.children(&mut ac).any(|c| !c.is_named() && c.kind() == "=");
+    let has_key = first
+        .children(&mut ac)
+        .any(|c| !c.is_named() && c.kind() == "=");
     if has_key {
         return None;
     }
@@ -740,7 +745,12 @@ fn record_declared(decl: TsNode, from: NodeId, src: &[u8], acc: &mut Acc) {
 ///   `this` in an extension function is the extension receiver: `""`;
 /// - anything else (a call chain, a factory, another local): `""`.
 fn initializer_type(init: TsNode, declared: &str, ctx: &Body, src: &[u8]) -> String {
-    let property = |name: &str| ctx.scope.fields.contains(name).then(|| format!("self.{name}"));
+    let property = |name: &str| {
+        ctx.scope
+            .fields
+            .contains(name)
+            .then(|| format!("self.{name}"))
+    };
     let ty = match init.kind() {
         "call_expression" => init
             .named_child(0)
@@ -980,23 +990,30 @@ pub(crate) fn marker(parses: &[glia_code_domain::FileParse], repo_label: &str) -
 /// off `nav.local_types` so cache-served files count too: `scopes` function
 /// bodies that bind a local, `typed` locals with a receiver type (an alias
 /// `self.<p>` included), `unknown` locals of unknown type (`""`).
-pub(crate) fn local_types_marker(parses: &[glia_code_domain::FileParse], repo_label: &str) -> String {
+pub(crate) fn local_types_marker(
+    parses: &[glia_code_domain::FileParse],
+    repo_label: &str,
+) -> String {
     let scopes: usize = parses.iter().map(|fp| fp.nav.local_types.len()).sum();
     let (typed, unknown) = parses
         .iter()
         .flat_map(|fp| fp.nav.local_types.values())
         .flat_map(|locals| locals.values())
         .fold((0usize, 0usize), |(t, u), ty| {
-            if ty.is_empty() { (t, u + 1) } else { (t + 1, u) }
+            if ty.is_empty() {
+                (t, u + 1)
+            } else {
+                (t + 1, u)
+            }
         });
-    format!("[kotlin] local types: scopes={scopes} typed={typed} unknown={unknown} repo={repo_label}")
+    format!(
+        "[kotlin] local types: scopes={scopes} typed={typed} unknown={unknown} repo={repo_label}"
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use glia_code_domain::{
-        CallQualifier, FileParse, UnresolvedRef, edge_category, node_kind,
-    };
+    use glia_code_domain::{CallQualifier, FileParse, UnresolvedRef, edge_category, node_kind};
     use glia_core::{EdgeCategoryId, NodeId, RepoId};
 
     use crate::{GRAPH_TYPE, parse_file};
@@ -1402,17 +1419,37 @@ class UserClient {
         assert_eq!(
             endpoint_calls(&fp),
             vec![
-                ("endpoint:GET:/api/users".to_string(), "UserClient::fetch".to_string()),
-                ("endpoint:POST:/api/orders".to_string(), "UserClient::post".to_string()),
-                ("endpoint:PUT:/api/users/${…}".to_string(), "UserClient::more".to_string()),
-                ("endpoint:PATCH:/api/items/${…}".to_string(), "UserClient::more".to_string()),
-                ("endpoint:DELETE:/api/users/${…}".to_string(), "UserClient::more".to_string()),
-                ("endpoint:GET:/api/health".to_string(), "UserClient::more".to_string()),
+                (
+                    "endpoint:GET:/api/users".to_string(),
+                    "UserClient::fetch".to_string()
+                ),
+                (
+                    "endpoint:POST:/api/orders".to_string(),
+                    "UserClient::post".to_string()
+                ),
+                (
+                    "endpoint:PUT:/api/users/${…}".to_string(),
+                    "UserClient::more".to_string()
+                ),
+                (
+                    "endpoint:PATCH:/api/items/${…}".to_string(),
+                    "UserClient::more".to_string()
+                ),
+                (
+                    "endpoint:DELETE:/api/users/${…}".to_string(),
+                    "UserClient::more".to_string()
+                ),
+                (
+                    "endpoint:GET:/api/health".to_string(),
+                    "UserClient::more".to_string()
+                ),
             ]
         );
         // The ordinary CallSites are still there beside the ENDPOINT edge.
-        assert!(calls_of(&fp, id(node_kind::METHOD, "UserClient::fetch"))
-            .contains(&attr("restTemplate", "getForObject")));
+        assert!(
+            calls_of(&fp, id(node_kind::METHOD, "UserClient::fetch"))
+                .contains(&attr("restTemplate", "getForObject"))
+        );
         // Literal: Strong; the absolute URL's authority rides as `host`.
         let hit = |q: &str| {
             let n = fp
@@ -1430,7 +1467,10 @@ class UserClient {
         assert_eq!(hit("endpoint:GET:/api/users")["confidence"], "strong");
         assert_eq!(hit("endpoint:GET:/api/users")["line"], 6, "1-based");
         assert_eq!(hit("endpoint:PUT:/api/users/${…}")["confidence"], "medium");
-        assert_eq!(hit("endpoint:DELETE:/api/users/${…}")["host"], "users.svc:8080");
+        assert_eq!(
+            hit("endpoint:DELETE:/api/users/${…}")["host"],
+            "users.svc:8080"
+        );
         let counts = crate::parse_all(
             "fun f() {\n    rest.getForEntity(\"/a\", A::class.java)\n}\n",
             "f.kt",
@@ -1479,7 +1519,9 @@ fun main() {
     }
 
     fn owned(want: &[(&str, &str)]) -> Vec<(String, String)> {
-        want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        want.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     /// CA.6b: the kotlin-ktor-client fixture's OrdersClient.kt.
@@ -1514,19 +1556,30 @@ class OrdersClient(private val client: HttpClient) {
             ])
         );
         // The ordinary CallSite stays beside the ENDPOINT edge.
-        assert!(calls_of(&fp, id(node_kind::METHOD, "OrdersClient::listOrders"))
-            .contains(&attr("client", "get")));
+        assert!(
+            calls_of(&fp, id(node_kind::METHOD, "OrdersClient::listOrders"))
+                .contains(&attr("client", "get"))
+        );
         // The literal authority rides as `host`; a literal is Strong, a
         // template Medium; the line is the call's, 1-based.
         let list = hit_of(&fp, "endpoint:GET:/api/orders");
         assert_eq!(list["host"], "orders:8080");
         assert_eq!(list["confidence"], "strong");
         assert_eq!(list["line"], 11);
-        assert!(hit_of(&fp, "endpoint:POST:/api/orders").get("host").is_none());
-        assert_eq!(hit_of(&fp, "endpoint:GET:/api/orders/${…}")["confidence"], "medium");
+        assert!(
+            hit_of(&fp, "endpoint:POST:/api/orders")
+                .get("host")
+                .is_none()
+        );
+        assert_eq!(
+            hit_of(&fp, "endpoint:GET:/api/orders/${…}")["confidence"],
+            "medium"
+        );
         // No ROUTE: a client call is never a server route.
         assert!(!fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE));
-        let counts = crate::parse_all(ORDERS_CLIENT, "o.kt", "o", RepoId(1)).unwrap().clients;
+        let counts = crate::parse_all(ORDERS_CLIENT, "o.kt", "o", RepoId(1))
+            .unwrap()
+            .clients;
         assert_eq!((counts.ktor_clients, counts.spring_clients), (3, 0));
     }
 
@@ -1567,11 +1620,16 @@ fun calls(client: HttpClient, m: HttpMethod) {
                 ("endpoint:DELETE:/both", "svc::calls"),
             ])
         );
-        assert_eq!(hit_of(&fp, "endpoint:PATCH:/items/${…}")["host"], "api.acme.io");
+        assert_eq!(
+            hit_of(&fp, "endpoint:PATCH:/items/${…}")["host"],
+            "api.acme.io"
+        );
         // `restClient.delete` is Spring's (a rest-named receiver): counted
         // once, never as a Ktor call too.
         let src = "import io.ktor.client.HttpClient\n\nfun f() {\n    restClient.delete(\"/both\")\n    client.delete(\"/k\")\n}\n";
-        let counts = crate::parse_all(src, "f.kt", "f", RepoId(1)).unwrap().clients;
+        let counts = crate::parse_all(src, "f.kt", "f", RepoId(1))
+            .unwrap()
+            .clients;
         assert_eq!((counts.spring_clients, counts.ktor_clients), (1, 1));
     }
 
@@ -1594,7 +1652,11 @@ class Cache(private val entries: MutableMap<String, String>) {
         let server = parse(
             "import io.ktor.server.routing.*\n\nfun f(client: Any) {\n    client.get(\"/api/orders\")\n}\n",
         );
-        assert!(endpoint_calls(&server).is_empty(), "{:?}", endpoint_calls(&server));
+        assert!(
+            endpoint_calls(&server).is_empty(),
+            "{:?}",
+            endpoint_calls(&server)
+        );
     }
 
     #[test]
@@ -1642,7 +1704,17 @@ fun Application.proxy(client: HttpClient) {
         assert_eq!(ktor_verb("prepareHead"), Some(KtorVerb::Named("HEAD")));
         assert_eq!(ktor_verb("request"), Some(KtorVerb::FromBlock));
         assert_eq!(ktor_verb("prepareRequest"), Some(KtorVerb::FromBlock));
-        for no in ["GET", "Get", "prepare", "prepareget", "preparerequest", "getForObject", "submitForm", "webSocket", "body"] {
+        for no in [
+            "GET",
+            "Get",
+            "prepare",
+            "prepareget",
+            "preparerequest",
+            "getForObject",
+            "submitForm",
+            "webSocket",
+            "body",
+        ] {
             assert_eq!(ktor_verb(no), None, "{no}");
         }
     }
@@ -1660,7 +1732,9 @@ fun Application.proxy(client: HttpClient) {
     }
 
     fn pairs(want: &[(&str, &str)]) -> Vec<(String, String)> {
-        want.iter().map(|(n, t)| (n.to_string(), t.to_string())).collect()
+        want.iter()
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .collect()
     }
 
     #[test]
@@ -1694,7 +1768,10 @@ class Service {
 "#,
         );
         let m = |n: &str| id(node_kind::METHOD, &format!("Service::{n}"));
-        assert_eq!(locals_of(&fp, m("listAll")), pairs(&[("store", "ItemStore")]));
+        assert_eq!(
+            locals_of(&fp, m("listAll")),
+            pairs(&[("store", "ItemStore")])
+        );
         assert_eq!(locals_of(&fp, m("audited")), pairs(&[("log", "AuditLog")]));
         assert_eq!(locals_of(&fp, m("inferred")), pairs(&[("log", "AuditLog")]));
         assert_eq!(
@@ -1743,7 +1820,10 @@ fun top() {
         assert_eq!(locals_of(&fp, m("f")), pairs(&[("r", "self.repo")]));
         // A parameter named like the property is the parameter: `r` is a local
         // of unknown type.
-        assert_eq!(locals_of(&fp, m("g")), pairs(&[("r", ""), ("repo", "Other")]));
+        assert_eq!(
+            locals_of(&fp, m("g")),
+            pairs(&[("r", ""), ("repo", "Other")])
+        );
         // `val repo = repo` reads the property (a local is not in scope in its
         // own initializer); `this.missing` / `other` name no property.
         assert_eq!(
@@ -1841,7 +1921,12 @@ class Job {
         );
         // A local class is another receiver's code: its fun records nothing
         // on `run`, and is no declared function of this file's walk.
-        assert!(!fp.nav.local_types.values().any(|l| l.contains_key("z") || l.contains_key("y")));
+        assert!(
+            !fp.nav
+                .local_types
+                .values()
+                .any(|l| l.contains_key("z") || l.contains_key("y"))
+        );
     }
 
     #[test]

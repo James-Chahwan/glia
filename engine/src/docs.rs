@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::project_roots::ProjectRoot;
-use glia_code_domain::{
-    CodeNav, DocProvenance, DocRecord, GRAPH_TYPE, edge_category, node_kind,
-};
+use glia_code_domain::{CodeNav, DocProvenance, DocRecord, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 /// A well-known documentation FILE NAME, ASCII case-folded (CJ.2): any
@@ -104,7 +102,9 @@ fn include_doc(rel: &str, project_dirs: &[&str]) -> Option<DocRule> {
     if below_roots().any(|rest| rest.starts_with("docs/")) {
         return Some(DocRule::ProjectDocsTree);
     }
-    std::iter::once(rel.as_str()).chain(below_roots()).find_map(sdd_rule)
+    std::iter::once(rel.as_str())
+        .chain(below_roots())
+        .find_map(sdd_rule)
 }
 
 /// EB.5a: does a build of this tree ingest the markdown file `rel`
@@ -125,12 +125,18 @@ pub(crate) fn sdd_scope(rel: &str, project_dirs: &[&str]) -> Option<String> {
         sdd_rule(rest)?;
         let mut segments = rest.split('/');
         let (top, dir) = (segments.next()?, segments.next()?);
-        Some(if prefix.is_empty() { format!("{top}/{dir}") } else { format!("{prefix}/{top}/{dir}") })
+        Some(if prefix.is_empty() {
+            format!("{top}/{dir}")
+        } else {
+            format!("{prefix}/{top}/{dir}")
+        })
     };
     scope_at("", &rel).or_else(|| {
-        project_dirs
-            .iter()
-            .find_map(|d| rel.strip_prefix(d).and_then(|r| r.strip_prefix('/')).and_then(|rest| scope_at(d, rest)))
+        project_dirs.iter().find_map(|d| {
+            rel.strip_prefix(d)
+                .and_then(|r| r.strip_prefix('/'))
+                .and_then(|rest| scope_at(d, rest))
+        })
     })
 }
 
@@ -342,7 +348,13 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
             s
         });
         let slug = slugs.unique(slug);
-        chunks.push(DocChunk { slug, text: body, start_line: start, end_line: end, truncated });
+        chunks.push(DocChunk {
+            slug,
+            text: body,
+            start_line: start,
+            end_line: end,
+            truncated,
+        });
     };
 
     for (i, line) in lines.iter().enumerate() {
@@ -356,7 +368,15 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
         }
         if !in_fence && (t.starts_with("# ") || t.starts_with("## ")) {
             let end = last_content.unwrap_or(cur_start);
-            flush(&mut chunks, &mut slugs, &cur_slug, &buf, cur_start, end, &mut seq);
+            flush(
+                &mut chunks,
+                &mut slugs,
+                &cur_slug,
+                &buf,
+                cur_start,
+                end,
+                &mut seq,
+            );
             buf.clear();
             last_content = None;
             // An emoji/punctuation-only heading slugs to "" — fall through to the
@@ -371,7 +391,15 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
         }
     }
     let end = last_content.unwrap_or(cur_start);
-    flush(&mut chunks, &mut slugs, &cur_slug, &buf, cur_start, end, &mut seq);
+    flush(
+        &mut chunks,
+        &mut slugs,
+        &cur_slug,
+        &buf,
+        cur_start,
+        end,
+        &mut seq,
+    );
 
     // Fallback: no headings → one chunk of the whole file, ending on its last
     // non-blank row (0 for an all-blank file, which `bound_section` already
@@ -379,8 +407,17 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     if chunks.is_empty() {
         let (body, truncated) = bound_section(text);
         if !body.is_empty() {
-            let end_line = lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(0) as u32;
-            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line, truncated });
+            let end_line = lines
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .unwrap_or(0) as u32;
+            chunks.push(DocChunk {
+                slug: "overview".into(),
+                text: body,
+                start_line: 0,
+                end_line,
+                truncated,
+            });
         }
     }
     chunks
@@ -564,7 +601,9 @@ pub(crate) fn build_docs_graph(
                     DocSourceKind::Notion | DocSourceKind::Wiki => {
                         format!("{}::{container}::{stem}", source_tag(rec.provenance.kind))
                     }
-                    DocSourceKind::File | DocSourceKind::Confluence => format!("{container}::{stem}"),
+                    DocSourceKind::File | DocSourceKind::Confluence => {
+                        format!("{container}::{stem}")
+                    }
                 }
             }
             None => glia_code_domain::dir_stem_qname(path),
@@ -608,9 +647,18 @@ pub(crate) fn build_docs_graph(
                 repo,
                 confidence: Confidence::Strong,
                 cells: vec![
-                    Cell { kind: cell_type::CODE, payload: CellPayload::Text(chunk.text) },
-                    Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
-                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) },
+                    Cell {
+                        kind: cell_type::CODE,
+                        payload: CellPayload::Text(chunk.text),
+                    },
+                    Cell {
+                        kind: cell_type::POSITION,
+                        payload: CellPayload::Json(pos),
+                    },
+                    Cell {
+                        kind: cell_type::ORIGIN,
+                        payload: CellPayload::Json(origin),
+                    },
                 ],
             });
             nav.record(id, &chunk.slug, &qname, node_kind::DOC_SECTION, space_id);
@@ -690,7 +738,11 @@ mod docs_tests {
 
         // LG.10a: rows are 0-indexed and end-INCLUSIVE, like every code POSITION
         // cell - a section ends on its last content row, not the next heading.
-        let rows = |c: &[DocChunk]| c.iter().map(|c| (c.start_line, c.end_line)).collect::<Vec<_>>();
+        let rows = |c: &[DocChunk]| {
+            c.iter()
+                .map(|c| (c.start_line, c.end_line))
+                .collect::<Vec<_>>()
+        };
         let md = "# Overview\nIntro text.\n\n## Setup\nRun the thing.\n";
         assert_eq!(rows(&chunk_markdown(md)), vec![(0, 1), (3, 4)]);
         // A heading followed directly by another heading ends on its own row.
@@ -703,7 +755,10 @@ mod docs_tests {
         // last content row; blank rows between it and the heading are dropped.
         let md = "\nlead-in\n\n# Title\nbody\n";
         let c = chunk_markdown(md);
-        assert_eq!((c[0].slug.as_str(), c[1].slug.as_str()), ("overview", "title"));
+        assert_eq!(
+            (c[0].slug.as_str(), c[1].slug.as_str()),
+            ("overview", "title")
+        );
         assert_eq!(rows(&c), vec![(0, 1), (3, 4)]);
         // The docs-md-section-lines fixture: 0-2 / 4-6 / 9-11 (HEAD: 4 / 9 / 12).
         let md = "# Orders\n\nSome intro text.\n\n## Placing orders\n\n\
@@ -743,14 +798,23 @@ mod docs_tests {
     /// sections are byte-identical to the old cap.
     #[test]
     fn a_long_section_keeps_its_whole_text() {
-        let md = include_str!("../../bench/substrate-gap/fixtures/docs-link-past-cap/docs/orders.md");
+        let md =
+            include_str!("../../bench/substrate-gap/fixtures/docs-link-past-cap/docs/orders.md");
         let chunks = chunk_markdown(md);
         let slugs: Vec<&str> = chunks.iter().map(|c| c.slug.as_str()).collect();
         assert_eq!(slugs, ["orders", "placing-orders", "refunds"]);
         let refunds = &chunks[2];
         assert!(refunds.text.len() > 500, "{}", refunds.text.len());
-        assert!(refunds.text.starts_with("## Refunds\n"), "{:?}", refunds.text);
-        assert!(refunds.text.ends_with("can still be traced."), "{:?}", refunds.text);
+        assert!(
+            refunds.text.starts_with("## Refunds\n"),
+            "{:?}",
+            refunds.text
+        );
+        assert!(
+            refunds.text.ends_with("can still be traced."),
+            "{:?}",
+            refunds.text
+        );
         assert!(refunds.text.contains("`OrderService.refund`"));
         assert!(!refunds.truncated);
         assert!(
@@ -758,9 +822,17 @@ mod docs_tests {
             "the mention sits past the old cap"
         );
         let placing = &chunks[1];
-        assert_eq!(placing.text, "## Placing orders\n\nCall `OrderService.place` to place an order.");
+        assert_eq!(
+            placing.text,
+            "## Placing orders\n\nCall `OrderService.place` to place an order."
+        );
         for c in &chunks[..2] {
-            assert_eq!(c.text, old_cap_prose(&c.text), "{}: a short section is unchanged", c.slug);
+            assert_eq!(
+                c.text,
+                old_cap_prose(&c.text),
+                "{}: a short section is unchanged",
+                c.slug
+            );
             assert!(!c.truncated);
         }
         // The section's rows are unchanged: its POSITION already spanned it.
@@ -774,14 +846,21 @@ mod docs_tests {
         let Some(g) = build_docs_graph(&[rec], RepoId(11), &[]) else {
             panic!("a doc with sections builds a graph");
         };
-        let id = NodeId::from_parts(GRAPH_TYPE, RepoId(11), node_kind::DOC_SECTION, "docs::docs::orders::refunds");
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(11),
+            node_kind::DOC_SECTION,
+            "docs::docs::orders::refunds",
+        );
         let code = g
             .nodes
             .iter()
             .find(|n| n.id == id)
             .and_then(|n| {
                 n.cells.iter().find_map(|c| match &c.payload {
-                    glia_core::CellPayload::Text(t) if c.kind == glia_code_domain::cell_type::CODE => {
+                    glia_core::CellPayload::Text(t)
+                        if c.kind == glia_code_domain::cell_type::CODE =>
+                    {
                         Some(t.as_str())
                     }
                     _ => None,
@@ -806,10 +885,18 @@ mod docs_tests {
         let c = &chunks[0];
         assert!(c.truncated);
         assert!(c.text.len() <= SECTION_TEXT_CAP, "{}", c.text.len());
-        assert!(c.text.len() > SECTION_TEXT_CAP - 64, "cut near the bound: {}", c.text.len());
+        assert!(
+            c.text.len() > SECTION_TEXT_CAP - 64,
+            "cut near the bound: {}",
+            c.text.len()
+        );
         // It ends where a line of the document ended.
         assert!(md.contains(&format!("{}\n", c.text)), "cut at a line end");
-        assert!(c.text.ends_with(&"x".repeat(20)), "{:?}", &c.text[c.text.len() - 40..]);
+        assert!(
+            c.text.ends_with(&"x".repeat(20)),
+            "{:?}",
+            &c.text[c.text.len() - 40..]
+        );
 
         // At the bound: whole, not truncated.
         let at = "y".repeat(SECTION_TEXT_CAP);
@@ -852,8 +939,14 @@ mod docs_tests {
         ] {
             assert!(!is_adr_path(rel), "{rel} is not an ADR path");
         }
-        assert!(include_doc("doc/notes.md", &[]).is_none(), "the widening is ADR-only");
-        assert!(include_doc("doc/adr/LICENSE.md", &[]).is_none(), "licence boilerplate stays out");
+        assert!(
+            include_doc("doc/notes.md", &[]).is_none(),
+            "the widening is ADR-only"
+        );
+        assert!(
+            include_doc("doc/adr/LICENSE.md", &[]).is_none(),
+            "licence boilerplate stays out"
+        );
     }
 
     /// CJ.2: the well-known docs and the `docs/` tree at every PROJECT root,
@@ -926,8 +1019,14 @@ mod docs_tests {
         assert_eq!(include_doc("services/orders/docs/runbook.md", &[]), None);
         // Nested roots: either one admits.
         let nested = ["app", "app/android"];
-        assert_eq!(include_doc("app/android/README.md", &nested), Some(ProjectWellKnown));
-        assert_eq!(include_doc("app/android/docs/x.md", &nested), Some(ProjectDocsTree));
+        assert_eq!(
+            include_doc("app/android/README.md", &nested),
+            Some(ProjectWellKnown)
+        );
+        assert_eq!(
+            include_doc("app/android/docs/x.md", &nested),
+            Some(ProjectDocsTree)
+        );
         assert_eq!(include_doc("app/features/f/x.md", &nested), Some(Feature));
     }
 
@@ -938,7 +1037,10 @@ mod docs_tests {
         let dirs = ["services/orders", "web", "svc"];
         for (rel, want) in [
             ("specs/003-billing/tasks.md", Some("specs/003-billing")),
-            ("specs/001-refunds/contracts/api.md", Some("specs/001-refunds")),
+            (
+                "specs/001-refunds/contracts/api.md",
+                Some("specs/001-refunds"),
+            ),
             ("features/checkout/backend.md", Some("features/checkout")),
             ("web/features/checkout/ui.md", Some("web/features/checkout")),
             ("svc/specs/002-x/plan.md", Some("svc/specs/002-x")),
@@ -951,7 +1053,10 @@ mod docs_tests {
         ] {
             assert_eq!(sdd_scope(rel, &dirs).as_deref(), want, "{rel}");
             if want.is_some() {
-                assert!(admits_doc(rel, &dirs), "{rel}: a scoped doc is an ingested doc");
+                assert!(
+                    admits_doc(rel, &dirs),
+                    "{rel}: a scoped doc is an ingested doc"
+                );
             }
         }
         assert!(!admits_doc("src/notes.md", &dirs));
@@ -977,13 +1082,25 @@ mod docs_tests {
             ProjectRoot::new("services/orders".to_string(), "go", "go.mod", None),
         ];
         let qnames = |roots: &[ProjectRoot]| {
-            build_docs_graph(&records, RepoId(4), roots).map(|g| sections(&g).0).unwrap_or_default()
+            build_docs_graph(&records, RepoId(4), roots)
+                .map(|g| sections(&g).0)
+                .unwrap_or_default()
         };
         assert_eq!(
             qnames(&roots),
-            ["docs::README::notes", "docs::features::checkout::backend::notes", "docs::services::orders::README::notes"]
+            [
+                "docs::README::notes",
+                "docs::features::checkout::backend::notes",
+                "docs::services::orders::README::notes"
+            ]
         );
-        assert_eq!(qnames(&[]), ["docs::README::notes", "docs::features::checkout::backend::notes"]);
+        assert_eq!(
+            qnames(&[]),
+            [
+                "docs::README::notes",
+                "docs::features::checkout::backend::notes"
+            ]
+        );
     }
 
     /// LB.12: a repo doc's sections are scoped by its directories + stem, so
@@ -1008,7 +1125,12 @@ mod docs_tests {
                 version: None,
             },
         };
-        let records = [file("docs/a/guide.md"), file("docs/b/guide.md"), file("README.md"), page];
+        let records = [
+            file("docs/a/guide.md"),
+            file("docs/b/guide.md"),
+            file("README.md"),
+            page,
+        ];
         let repo = RepoId(7);
         let Some(g) = build_docs_graph(&records, repo, &[]) else {
             panic!("four docs, no graph");
@@ -1040,9 +1162,23 @@ mod docs_tests {
         let sections = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!((sections, ids.len()), (7, 7), "3 files x 2 sections + 1 page section");
-        let a = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, "docs::docs::a::guide::setup");
-        let b = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, "docs::docs::b::guide::setup");
+        assert_eq!(
+            (sections, ids.len()),
+            (7, 7),
+            "3 files x 2 sections + 1 page section"
+        );
+        let a = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::DOC_SECTION,
+            "docs::docs::a::guide::setup",
+        );
+        let b = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::DOC_SECTION,
+            "docs::docs::b::guide::setup",
+        );
         assert_ne!(a, b);
         assert!(g.nav.qname_by_id.contains_key(&a) && g.nav.qname_by_id.contains_key(&b));
     }
@@ -1075,9 +1211,15 @@ mod docs_tests {
         // A literal `b-1` heading is taken, so the next repeat moves on.
         assert_eq!(slugs("## B\n## B-1\n## B\n"), ["b", "b-1", "b-2"]);
         // The preamble's `overview` fallback and an `Overview` heading are two slugs.
-        assert_eq!(slugs("lead-in\n# Overview\nbody\n"), ["overview", "overview-1"]);
+        assert_eq!(
+            slugs("lead-in\n# Overview\nbody\n"),
+            ["overview", "overview-1"]
+        );
         // An empty-slug heading keeps the ordinal fallback.
-        assert_eq!(slugs("# A\n## !!\ntext\n## ??\nmore\n"), ["a", "overview", "section-1"]);
+        assert_eq!(
+            slugs("# A\n## !!\ntext\n## ??\nmore\n"),
+            ["a", "overview", "section-1"]
+        );
     }
 
     /// CE.4a: `#` lines inside a fenced block are the enclosing section's text
@@ -1085,7 +1227,10 @@ mod docs_tests {
     #[test]
     fn fenced_comments_are_not_headings() {
         let c = chunk_markdown("# T\n```bash\n# run it\nmake\n```\n## U");
-        assert_eq!(c.iter().map(|c| c.slug.as_str()).collect::<Vec<_>>(), ["t", "u"]);
+        assert_eq!(
+            c.iter().map(|c| c.slug.as_str()).collect::<Vec<_>>(),
+            ["t", "u"]
+        );
         assert!(c[0].text.contains("# run it"), "{:?}", c[0].text);
         assert_eq!((c[0].start_line, c[0].end_line), (0, 4));
         // `~~~` fences too, and a ``` line does not close a ~~~ fence.
@@ -1118,7 +1263,11 @@ mod docs_tests {
         assert!(q.iter().all(|q| !q.contains("xstack-go-http")), "{q:?}");
         assert_eq!(
             q,
-            ["docs::docs::skill::after", "docs::docs::skill::skill", "docs::docs::skill::worked-examples"]
+            [
+                "docs::docs::skill::after",
+                "docs::docs::skill::skill",
+                "docs::docs::skill::worked-examples"
+            ]
         );
     }
 
@@ -1149,7 +1298,11 @@ mod docs_tests {
         assert!(!dup, "{q:?}");
         assert_eq!(
             q,
-            ["docs::ENG::orders::orders", "docs::notion::db1::orders::orders", "docs::wiki::db1::orders::orders"]
+            [
+                "docs::ENG::orders::orders",
+                "docs::notion::db1::orders::orders",
+                "docs::wiki::db1::orders::orders"
+            ]
         );
         let mut spaces: Vec<&str> = g
             .nav
@@ -1159,7 +1312,14 @@ mod docs_tests {
             .filter(|q| q.starts_with("docspace::"))
             .collect();
         spaces.sort();
-        assert_eq!(spaces, ["docspace::confluence::ENG", "docspace::notion::db1", "docspace::wiki::db1"]);
+        assert_eq!(
+            spaces,
+            [
+                "docspace::confluence::ENG",
+                "docspace::notion::db1",
+                "docspace::wiki::db1"
+            ]
+        );
     }
 
     /// CE.4a: a snapshot written before the fix (`# Billing` prepended to a
@@ -1181,8 +1341,17 @@ mod docs_tests {
             },
         };
         for (text, want) in [
-            ("# Billing\n\n## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing", "docs::OPS::billing::billing-1"]),
-            ("## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing"]),
+            (
+                "# Billing\n\n## Billing\n\nsee `BillingService`",
+                vec![
+                    "docs::OPS::billing::billing",
+                    "docs::OPS::billing::billing-1",
+                ],
+            ),
+            (
+                "## Billing\n\nsee `BillingService`",
+                vec!["docs::OPS::billing::billing"],
+            ),
         ] {
             let Some(g) = build_docs_graph(&[page(text)], RepoId(9), &[]) else {
                 panic!("one page, no graph");
@@ -1190,11 +1359,16 @@ mod docs_tests {
             let (q, dup) = sections(&g);
             assert!(!dup, "{text:?}: {q:?}");
             assert_eq!(q, want, "{text:?}");
-            let mut contains: Vec<(u64, u64)> = g.edges.iter().map(|e| (e.from.0, e.to.0)).collect();
+            let mut contains: Vec<(u64, u64)> =
+                g.edges.iter().map(|e| (e.from.0, e.to.0)).collect();
             let n = contains.len();
             contains.sort_unstable();
             contains.dedup();
-            assert_eq!((n, contains.len()), (want.len(), want.len()), "one CONTAINS per section");
+            assert_eq!(
+                (n, contains.len()),
+                (want.len(), want.len()),
+                "one CONTAINS per section"
+            );
         }
     }
 }

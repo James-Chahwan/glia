@@ -22,9 +22,9 @@ use crate::answers::Locator;
 /// Extensions a MODULE node may sit on that are not code (docs, data,
 /// lockfiles, manifests): rank_eval.rs `NOT_CODE`, verbatim and in its order.
 pub const NOT_CODE_EXTS: [&str; 36] = [
-    "md", "mdx", "markdown", "rst", "txt", "json", "jsonc", "lock", "yaml", "yml", "toml", "csv", "tsv",
-    "map", "svg", "png", "jpg", "gif", "ico", "xml", "ini", "cfg", "conf", "env", "example", "sum", "mod",
-    "gitkeep", "pdf", "snap", "golden", "out", "log", "html", "css", "scss",
+    "md", "mdx", "markdown", "rst", "txt", "json", "jsonc", "lock", "yaml", "yml", "toml", "csv",
+    "tsv", "map", "svg", "png", "jpg", "gif", "ico", "xml", "ini", "cfg", "conf", "env", "example",
+    "sum", "mod", "gitkeep", "pdf", "snap", "golden", "out", "log", "html", "css", "scss",
 ];
 
 /// rank_eval's `ext_of`: the basename's text after its last '.', when the
@@ -47,7 +47,10 @@ fn payload_text(p: &CellPayload) -> &str {
 /// The label a repo id sorts and prints by: the given label, else
 /// `repo#<id % 1000>` (engine/src/identity.rs's fallback).
 fn label_of(labels: &BTreeMap<u64, String>, repo: u64) -> String {
-    labels.get(&repo).cloned().unwrap_or_else(|| format!("repo#{}", repo % 1000))
+    labels
+        .get(&repo)
+        .cloned()
+        .unwrap_or_else(|| format!("repo#{}", repo % 1000))
 }
 
 /// The candidate files of one graph, each with its nodes and degree.
@@ -84,10 +87,10 @@ impl FileIndex {
                 if g.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::MODULE)
                     && let Some(f) = &file
                 {
-                    let gen_origin = n
-                        .cells
-                        .iter()
-                        .any(|c| c.kind == cell_type::ORIGIN && payload_text(&c.payload).contains("generated"));
+                    let gen_origin = n.cells.iter().any(|c| {
+                        c.kind == cell_type::ORIGIN
+                            && payload_text(&c.payload).contains("generated")
+                    });
                     if gen_origin {
                         generated.insert((g.repo.0, f.clone()));
                     } else {
@@ -112,8 +115,11 @@ impl FileIndex {
         }
         keyed.sort();
         let files: Vec<(u64, String)> = keyed.into_iter().map(|(_, p, r)| (r, p)).collect();
-        let by_key: HashMap<(u64, String), u32> =
-            files.iter().enumerate().map(|(i, k)| (k.clone(), i as u32)).collect();
+        let by_key: HashMap<(u64, String), u32> = files
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), i as u32))
+            .collect();
         let mut nodes: Vec<Vec<NodeId>> = vec![Vec::new(); files.len()];
         let mut by_node: HashMap<NodeId, u32> = HashMap::new();
         for (id, repo, file) in walked {
@@ -134,10 +140,27 @@ impl FileIndex {
         }
         let degree: Vec<f64> = nodes
             .iter()
-            .map(|ns| ns.iter().map(|n| deg_node.get(n).copied().unwrap_or(0.0)).sum())
+            .map(|ns| {
+                ns.iter()
+                    .map(|n| deg_node.get(n).copied().unwrap_or(0.0))
+                    .sum()
+            })
             .collect();
-        let repos = files.iter().map(|(r, _)| *r).collect::<BTreeSet<u64>>().len();
-        FileIndex { files, nodes, degree, by_key, by_node, repos, generated: generated.len(), not_code }
+        let repos = files
+            .iter()
+            .map(|(r, _)| *r)
+            .collect::<BTreeSet<u64>>()
+            .len();
+        FileIndex {
+            files,
+            nodes,
+            degree,
+            by_key,
+            by_node,
+            repos,
+            generated: generated.len(),
+            not_code,
+        }
     }
 
     pub fn len(&self) -> usize {

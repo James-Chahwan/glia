@@ -81,7 +81,11 @@ fn main() -> Result<()> {
     eprintln!("[parse] {} Python files", parses.len());
 
     let graph = build_python(repo, parses).map_err(|e| anyhow!("build_python: {e:?}"))?;
-    eprintln!("[graph] {} nodes, {} edges", graph.nodes.len(), graph.edges.len());
+    eprintln!(
+        "[graph] {} nodes, {} edges",
+        graph.nodes.len(),
+        graph.edges.len()
+    );
 
     let seeds: SeedsFile = serde_json::from_slice(
         &fs::read(&args.seeds).with_context(|| format!("read {}", args.seeds.display()))?,
@@ -107,27 +111,47 @@ fn main() -> Result<()> {
         missed.len()
     );
     if !missed.is_empty() {
-        let show = missed.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+        let show = missed
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
         eprintln!("[resolve] first unmatched: {show}");
     }
 
-    let hook = AccessPathSynth { max_hops: args.max_hops };
+    let hook = AccessPathSynth {
+        max_hops: args.max_hops,
+    };
     let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
     let mut view = ActivatedView::from_ranked(scores);
     plan.synthesize(&graph, &mut view);
-    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), view.synth.len());
+    eprintln!(
+        "[synth] plan hooks=[{}] cells={}",
+        view.applied.join(","),
+        view.synth.len()
+    );
     let cells: Vec<SummaryEntry> = view
         .synth
         .into_iter()
-        .map(|c| SummaryEntry { id: c.id, qname: c.key, score: c.score, summary: c.text })
+        .map(|c| SummaryEntry {
+            id: c.id,
+            qname: c.key,
+            score: c.score,
+            summary: c.text,
+        })
         .collect();
 
     let existing: Vec<SummaryEntry> = serde_json::from_slice(
-        &fs::read(&args.summaries)
-            .with_context(|| format!("read {}", args.summaries.display()))?,
+        &fs::read(&args.summaries).with_context(|| format!("read {}", args.summaries.display()))?,
     )
     .context("parse summaries JSON")?;
-    eprintln!("[append] {} existing + {} new = {}", existing.len(), cells.len(), existing.len() + cells.len());
+    eprintln!(
+        "[append] {} existing + {} new = {}",
+        existing.len(),
+        cells.len(),
+        existing.len() + cells.len()
+    );
 
     let mut out: Vec<SummaryEntry> = existing;
     out.extend(cells);
@@ -154,9 +178,7 @@ fn parse_tree(src: &Path, repo: RepoId) -> Result<Vec<FileParse>> {
             .unwrap_or(entry.path())
             .to_path_buf();
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        let module_qname = rel_str
-            .trim_end_matches(".py")
-            .replace('/', "::");
+        let module_qname = rel_str.trim_end_matches(".py").replace('/', "::");
         let source = match fs::read_to_string(entry.path()) {
             Ok(s) => s,
             Err(e) => {
@@ -185,4 +207,3 @@ fn reverse_qname_index(graph: &RepoGraph) -> HashMap<&str, NodeId> {
     }
     out
 }
-

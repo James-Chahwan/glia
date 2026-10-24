@@ -70,7 +70,10 @@ fn node_ids_ignore_path_spelling_and_clone_location() {
     copy_tree(&one, &two);
 
     let base = node_ids(&generate_one(&s(&one)).unwrap());
-    assert!(base.len() >= 3, "fixture must produce the module and its two functions");
+    assert!(
+        base.len() >= 3,
+        "fixture must produce the module and its two functions"
+    );
     for spelling in [
         format!("{}/.", s(&one)),
         format!("{}/x/..", s(&one)),
@@ -103,7 +106,10 @@ fn worktree_and_main_checkout_share_ids() {
     let a = node_ids(&generate_one(&s(&main)).unwrap());
     let b = node_ids(&generate_one(&s(&wt2)).unwrap());
     assert!(!a.is_empty());
-    assert_eq!(a, b, "a worktree minted different NodeIds from its main checkout");
+    assert_eq!(
+        a, b,
+        "a worktree minted different NodeIds from its main checkout"
+    );
     let id = repo_identity(&wt2);
     assert_eq!(id.key, "git:github.com/example/shop");
     assert_eq!(id.source, IdentitySource::GitRemote);
@@ -127,9 +133,19 @@ fn same_basename_repos_stay_distinct_in_a_merge() {
     let mut repos: Vec<u64> = r.merged.graphs.iter().map(|g| g.repo.0).collect();
     repos.sort_unstable();
     repos.dedup();
-    assert_eq!(repos.len(), 2, "same-basename repos collapsed onto one RepoId");
-    assert!(!r.merged.qnames_containing("alpha_only").is_empty(), "repo a's nodes lost");
-    assert!(!r.merged.qnames_containing("beta_only").is_empty(), "repo b's nodes lost");
+    assert_eq!(
+        repos.len(),
+        2,
+        "same-basename repos collapsed onto one RepoId"
+    );
+    assert!(
+        !r.merged.qnames_containing("alpha_only").is_empty(),
+        "repo a's nodes lost"
+    );
+    assert!(
+        !r.merged.qnames_containing("beta_only").is_empty(),
+        "repo b's nodes lost"
+    );
     assert_eq!(r.repo_labels.len(), 2, "one human label per input");
 }
 
@@ -149,6 +165,9 @@ fn moved_repo_reuses_its_parse_cache() {
     std::fs::create_dir_all(after.parent().unwrap()).unwrap();
     std::fs::rename(&before, &after).unwrap();
     let warm = generate_one_with_cache(&s(&after), &mut cache).unwrap();
-    assert_eq!(cache.stats.reused, 1, "a moved repo discarded its parse cache");
+    assert_eq!(
+        cache.stats.reused, 1,
+        "a moved repo discarded its parse cache"
+    );
     assert_eq!(node_ids(&warm), node_ids(&cold));
 }

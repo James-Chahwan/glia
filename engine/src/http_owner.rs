@@ -98,7 +98,16 @@ impl OwnerIndex {
     pub(crate) fn from_roots(roots: &[ProjectRoot]) -> Self {
         let pairs: Vec<(&str, &str)> = roots
             .iter()
-            .map(|r| (if r.rel_path.is_empty() { "." } else { r.rel_path.as_str() }, r.ecosystem))
+            .map(|r| {
+                (
+                    if r.rel_path.is_empty() {
+                        "."
+                    } else {
+                        r.rel_path.as_str()
+                    },
+                    r.ecosystem,
+                )
+            })
             .collect();
         let hosts = crate::arch::platform_host_owners(&pairs);
         let mut owners: Vec<String> = roots
@@ -124,7 +133,9 @@ impl OwnerIndex {
             .iter()
             .filter(|r| {
                 file == r.as_str()
-                    || file.strip_prefix(r.as_str()).is_some_and(|rest| rest.starts_with('/'))
+                    || file
+                        .strip_prefix(r.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
             })
             .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
             .map(String::as_str)
@@ -185,7 +196,11 @@ const OWNED: &[(NodeKindId, Mechanism, &str)] = &[
     (node_kind::WS_CLIENT, Mechanism::Ws, ""),
     (node_kind::GRAPHQL_RESOLVER, Mechanism::Graphql, ""),
     (node_kind::GRAPHQL_OPERATION, Mechanism::Graphql, ""),
-    (node_kind::MESSAGE_TYPE, Mechanism::Graphql, GRAPHQL_TYPE_PREFIX),
+    (
+        node_kind::MESSAGE_TYPE,
+        Mechanism::Graphql,
+        GRAPHQL_TYPE_PREFIX,
+    ),
     (node_kind::GRPC_CLIENT, Mechanism::Grpc, ""),
     (node_kind::GRPC_SERVER, Mechanism::Grpc, ""),
     (node_kind::RPC_PROCEDURE, Mechanism::Rpc, "rpc:"),
@@ -200,7 +215,10 @@ const GRAPHQL_TYPE_PREFIX: &str = "message:graphql:";
 
 /// The mechanism and required qname prefix of an owned kind.
 fn owned_row(kind: NodeKindId) -> Option<(Mechanism, &'static str)> {
-    OWNED.iter().find(|(k, _, _)| *k == kind).map(|(_, m, p)| (*m, *p))
+    OWNED
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, m, p)| (*m, *p))
 }
 
 /// Which marker bucket a qualified node counts in.
@@ -403,8 +421,11 @@ pub(crate) fn qualify_repo<'a>(
     // The foreign census, before anything moves. The value says whether the
     // moved id is an HTTP node (`foreign`), a channel side (`chan_foreign`)
     // or an RPC / event side (`rpc_event_foreign`).
-    let moved: HashMap<NodeId, Family> =
-        plans.iter().flatten().map(|m| (m.old, m.class.family())).collect();
+    let moved: HashMap<NodeId, Family> = plans
+        .iter()
+        .flatten()
+        .map(|m| (m.old, m.class.family()))
+        .collect();
     if !moved.is_empty() {
         for fp in &parses {
             let own: HashSet<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
@@ -502,7 +523,11 @@ fn plan_parse<'o>(
         // DT.1j: a shared-contract message (proto / Avro / JSON Schema) is
         // not a channel side: skipped before any census, never `declared`.
         if kind == node_kind::MESSAGE_TYPE
-            && !fp.nav.qname_by_id.get(&node.id).is_some_and(|q| q.starts_with(prefix))
+            && !fp
+                .nav
+                .qname_by_id
+                .get(&node.id)
+                .is_some_and(|q| q.starts_with(prefix))
         {
             continue;
         }
@@ -523,8 +548,8 @@ fn plan_parse<'o>(
         if split_owner(qname).1.is_some() {
             continue;
         }
-        let file = node_file(node)
-            .or_else(|| parse_file.get_or_insert_with(|| module_file(fp)).clone());
+        let file =
+            node_file(node).or_else(|| parse_file.get_or_insert_with(|| module_file(fp)).clone());
         let Some(file) = file else {
             match family {
                 Family::Http => census.unplaced.insert(node.id),
@@ -587,13 +612,20 @@ mod tests {
     fn position(file: &str) -> Cell {
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":1}}"#
+            )),
         }
     }
 
     fn push(fp: &mut FileParse, kind: NodeKindId, name: &str, q: &str, cells: Vec<Cell>) -> NodeId {
         let n = id(kind, q);
-        fp.nodes.push(Node { id: n, repo: REPO, confidence: Confidence::Strong, cells });
+        fp.nodes.push(Node {
+            id: n,
+            repo: REPO,
+            confidence: Confidence::Strong,
+            cells,
+        });
         fp.nav.record(n, name, q, kind, None);
         n
     }
@@ -603,11 +635,38 @@ mod tests {
     fn flask(file: &str, handler: &str) -> (FileParse, NodeId, NodeId) {
         let mut fp = FileParse::default();
         let module = file.trim_end_matches(".py").replace('/', "::");
-        push(&mut fp, node_kind::MODULE, "app", &module, vec![position(file)]);
-        let h = push(&mut fp, node_kind::FUNCTION, handler, &format!("{module}::{handler}"), vec![position(file)]);
-        let verb = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) };
-        let r = push(&mut fp, node_kind::ROUTE, "GET /health", "GET /health", vec![verb]);
-        fp.edges.push(Edge { from: r, to: h, category: edge_category::HANDLED_BY, confidence: Confidence::Strong, cells: Vec::new() });
+        push(
+            &mut fp,
+            node_kind::MODULE,
+            "app",
+            &module,
+            vec![position(file)],
+        );
+        let h = push(
+            &mut fp,
+            node_kind::FUNCTION,
+            handler,
+            &format!("{module}::{handler}"),
+            vec![position(file)],
+        );
+        let verb = Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Text("GET".into()),
+        };
+        let r = push(
+            &mut fp,
+            node_kind::ROUTE,
+            "GET /health",
+            "GET /health",
+            vec![verb],
+        );
+        fp.edges.push(Edge {
+            from: r,
+            to: h,
+            category: edge_category::HANDLED_BY,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
         (fp, r, h)
     }
 
@@ -619,11 +678,19 @@ mod tests {
             root("services/api", "go"),
             root("web", "npm"),
         ]);
-        assert_eq!(idx.0, ["services", "services/api", "web"], "the repo root is never an owner");
+        assert_eq!(
+            idx.0,
+            ["services", "services/api", "web"],
+            "the repo root is never an owner"
+        );
         assert_eq!(idx.owner_of("services/api/main.go"), Some("services/api"));
         assert_eq!(idx.owner_of("services/other/x.go"), Some("services"));
         assert_eq!(idx.owner_of("web"), Some("web"));
-        assert_eq!(idx.owner_of("webx/a.ts"), None, "segment boundary, not a string prefix");
+        assert_eq!(
+            idx.owner_of("webx/a.ts"),
+            None,
+            "segment boundary, not a string prefix"
+        );
         assert_eq!(idx.owner_of("main.go"), None);
     }
 
@@ -636,7 +703,10 @@ mod tests {
             root("server", "go"),
         ]);
         assert_eq!(idx.0, ["mobile", "server"]);
-        assert_eq!(idx.owner_of("mobile/android/app/src/Main.kt"), Some("mobile"));
+        assert_eq!(
+            idx.owner_of("mobile/android/app/src/Main.kt"),
+            Some("mobile")
+        );
         assert!(OwnerIndex::from_roots(&[root("", "go")]).is_empty());
     }
 
@@ -654,7 +724,10 @@ mod tests {
     /// HANDLED_BY its own handler; a root-level route is untouched.
     #[test]
     fn nested_routes_split_and_root_routes_stay() {
-        let idx = OwnerIndex::from_roots(&[root("services/admin", "python"), root("services/users", "python")]);
+        let idx = OwnerIndex::from_roots(&[
+            root("services/admin", "python"),
+            root("services/users", "python"),
+        ]);
         let (mut admin, old, admin_h) = flask("services/admin/app.py", "admin_health");
         let (mut users, _, users_h) = flask("services/users/app.py", "users_health");
         let (mut top, top_route, _) = flask("app.py", "top_health");
@@ -666,9 +739,18 @@ mod tests {
         assert_eq!(admin.edges[0].to, admin_h);
         assert_eq!(users.edges[0].from, users_r);
         assert_eq!(users.edges[0].to, users_h);
-        assert_eq!(admin.nav.name_by_id.get(&admin_r).map(String::as_str), Some("GET /health"));
-        assert_eq!(top.edges[0].from, top_route, "outside every nested root: unchanged");
-        assert_eq!(top_route, old, "the root-level route keeps the pre-owner id");
+        assert_eq!(
+            admin.nav.name_by_id.get(&admin_r).map(String::as_str),
+            Some("GET /health")
+        );
+        assert_eq!(
+            top.edges[0].from, top_route,
+            "outside every nested root: unchanged"
+        );
+        assert_eq!(
+            top_route, old,
+            "the root-level route keeps the pre-owner id"
+        );
         assert_eq!(
             stats,
             OwnerStats {
@@ -687,19 +769,50 @@ mod tests {
     fn foreign_unplaced_pages_and_endpoints_are_counted() {
         let idx = OwnerIndex::from_roots(&[root("web", "npm")]);
         let mut fp = FileParse::default();
-        push(&mut fp, node_kind::MODULE, "api", "web::api", vec![position("web/api.ts")]);
+        push(
+            &mut fp,
+            node_kind::MODULE,
+            "api",
+            "web::api",
+            vec![position("web/api.ts")],
+        );
         let hit = Cell {
             kind: cell_type::ENDPOINT_HIT,
-            payload: CellPayload::Json(r#"{"method":"GET","path":"/x","file":"web/api.ts","line":3}"#.into()),
+            payload: CellPayload::Json(
+                r#"{"method":"GET","path":"/x","file":"web/api.ts","line":3}"#.into(),
+            ),
         };
-        let ep = push(&mut fp, node_kind::ENDPOINT, "GET /x", "endpoint:GET:/x", vec![hit.clone()]);
-        fp.nodes.push(Node { id: ep, repo: REPO, confidence: Confidence::Strong, cells: vec![hit] });
+        let ep = push(
+            &mut fp,
+            node_kind::ENDPOINT,
+            "GET /x",
+            "endpoint:GET:/x",
+            vec![hit.clone()],
+        );
+        fp.nodes.push(Node {
+            id: ep,
+            repo: REPO,
+            confidence: Confidence::Strong,
+            cells: vec![hit],
+        });
         push(&mut fp, node_kind::ROUTE, "/users", "page:/users", vec![]);
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: ep, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() });
+        other.edges.push(Edge {
+            from: caller,
+            to: ep,
+            category: edge_category::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
         let mut bare = FileParse::default();
-        let lost = push(&mut bare, node_kind::ROUTE, "ANY /legacy", "ANY /legacy", vec![]);
+        let lost = push(
+            &mut bare,
+            node_kind::ROUTE,
+            "ANY /legacy",
+            "ANY /legacy",
+            vec![],
+        );
 
         let stats = qualify_repo([&mut fp, &mut other, &mut bare], &idx, REPO);
         assert_eq!(
@@ -715,19 +828,30 @@ mod tests {
             }
         );
         let new_ep = id(node_kind::ENDPOINT, "endpoint:GET:/x @web");
-        assert_eq!(fp.nodes.iter().filter(|n| n.id == new_ep).count(), 2, "both call-site entries move");
+        assert_eq!(
+            fp.nodes.iter().filter(|n| n.id == new_ep).count(),
+            2,
+            "both call-site entries move"
+        );
         assert!(fp.nav.qname_by_id.values().any(|q| q == "page:/users @web"));
         assert_eq!(bare.nodes[0].id, lost);
 
         // Idempotent: a second run finds every node already qualified.
         let again = qualify_repo([&mut fp], &idx, REPO);
-        assert_eq!((again.routes, again.endpoints, again.pages, again.seen), (0, 0, 0, 2));
+        assert_eq!(
+            (again.routes, again.endpoints, again.pages, again.seen),
+            (0, 0, 0, 2)
+        );
     }
 
     #[test]
     fn a_repo_without_nested_roots_is_untouched() {
         let (mut fp, route, _) = flask("services/admin/app.py", "admin_health");
-        let stats = qualify_repo([&mut fp], &OwnerIndex::from_roots(&[root("", "python")]), REPO);
+        let stats = qualify_repo(
+            [&mut fp],
+            &OwnerIndex::from_roots(&[root("", "python")]),
+            REPO,
+        );
         assert_eq!(stats, OwnerStats::default());
         assert_eq!(fp.edges[0].from, route);
     }
@@ -740,8 +864,20 @@ mod tests {
         let idx = OwnerIndex::from_roots(&[root("services/orders", "python"), root("web", "npm")]);
         let mut fp = FileParse::default();
         let file = "services/orders/app.py";
-        push(&mut fp, node_kind::MODULE, "app", "services::orders::app", vec![position(file)]);
-        let f = push(&mut fp, node_kind::FUNCTION, "place", "services::orders::app::place", vec![position(file)]);
+        push(
+            &mut fp,
+            node_kind::MODULE,
+            "app",
+            "services::orders::app",
+            vec![position(file)],
+        );
+        let f = push(
+            &mut fp,
+            node_kind::FUNCTION,
+            "place",
+            "services::orders::app::place",
+            vec![position(file)],
+        );
         let sides = [
             (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created"),
             (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created"),
@@ -754,15 +890,40 @@ mod tests {
         ];
         for (kind, q) in sides {
             let n = push(&mut fp, kind, q, q, vec![position(file)]);
-            fp.edges.push(Edge { from: f, to: n, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
+            fp.edges.push(Edge {
+                from: f,
+                to: n,
+                category: edge_category::USES,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            });
         }
-        let svc = push(&mut fp, node_kind::GRPC_SERVICE, "UserService", "grpc:user.UserService", vec![position(file)]);
-        let msg = push(&mut fp, node_kind::MESSAGE_TYPE, "User", "message:proto:user.User", vec![position(file)]);
+        let svc = push(
+            &mut fp,
+            node_kind::GRPC_SERVICE,
+            "UserService",
+            "grpc:user.UserService",
+            vec![position(file)],
+        );
+        let msg = push(
+            &mut fp,
+            node_kind::MESSAGE_TYPE,
+            "User",
+            "message:proto:user.User",
+            vec![position(file)],
+        );
 
         let stats = qualify_repo([&mut fp], &idx, REPO);
         assert_eq!(
             stats,
-            OwnerStats { queue: 2, ws: 2, graphql: 2, grpc: 2, chan_owners: 1, ..OwnerStats::default() }
+            OwnerStats {
+                queue: 2,
+                ws: 2,
+                graphql: 2,
+                grpc: 2,
+                chan_owners: 1,
+                ..OwnerStats::default()
+            }
         );
         for (kind, q) in sides {
             let new = id(kind, &format!("{q} @services/orders"));
@@ -771,10 +932,20 @@ mod tests {
                 fp.edges.iter().any(|e| e.from == f && e.to == new),
                 "{q}: the USES edge follows the rekey"
             );
-            assert_eq!(fp.nav.name_by_id.get(&new).map(String::as_str), Some(q), "display name kept");
+            assert_eq!(
+                fp.nav.name_by_id.get(&new).map(String::as_str),
+                Some(q),
+                "display name kept"
+            );
         }
-        assert!(fp.nodes.iter().any(|n| n.id == svc), "GRPC_SERVICE is a shared contract");
-        assert!(fp.nodes.iter().any(|n| n.id == msg), "MESSAGE_TYPE is a shared contract");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == svc),
+            "GRPC_SERVICE is a shared contract"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == msg),
+            "MESSAGE_TYPE is a shared contract"
+        );
     }
 
     /// DT.1j: a GraphQL SDL type in a nested project takes the owner its
@@ -787,27 +958,91 @@ mod tests {
         let idx = OwnerIndex::from_roots(&[root("api", "go")]);
         let mut fp = FileParse::default();
         let file = "api/graph/schema.graphqls";
-        let module = push(&mut fp, node_kind::MODULE, "schema", "api::graph::schema.graphqls", vec![position(file)]);
-        let field = push(&mut fp, node_kind::GRAPHQL_RESOLVER, "items", "graphql_resolver:items", vec![position(file)]);
-        let item = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:graphql:Item", vec![position(file)]);
-        fp.edges.push(Edge { from: module, to: item, category: edge_category::DEFINES, confidence: Confidence::Strong, cells: Vec::new() });
-        let proto = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:proto:stock.Item", vec![position("api/stock.proto")]);
-        let avro = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:avro:stock.Item", vec![position("api/item.avsc")]);
-        let json = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:jsonschema:Item", vec![position("api/item.schema.json")]);
+        let module = push(
+            &mut fp,
+            node_kind::MODULE,
+            "schema",
+            "api::graph::schema.graphqls",
+            vec![position(file)],
+        );
+        let field = push(
+            &mut fp,
+            node_kind::GRAPHQL_RESOLVER,
+            "items",
+            "graphql_resolver:items",
+            vec![position(file)],
+        );
+        let item = push(
+            &mut fp,
+            node_kind::MESSAGE_TYPE,
+            "Item",
+            "message:graphql:Item",
+            vec![position(file)],
+        );
+        fp.edges.push(Edge {
+            from: module,
+            to: item,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        let proto = push(
+            &mut fp,
+            node_kind::MESSAGE_TYPE,
+            "Item",
+            "message:proto:stock.Item",
+            vec![position("api/stock.proto")],
+        );
+        let avro = push(
+            &mut fp,
+            node_kind::MESSAGE_TYPE,
+            "Item",
+            "message:avro:stock.Item",
+            vec![position("api/item.avsc")],
+        );
+        let json = push(
+            &mut fp,
+            node_kind::MESSAGE_TYPE,
+            "Item",
+            "message:jsonschema:Item",
+            vec![position("api/item.schema.json")],
+        );
 
         let stats = qualify_repo([&mut fp], &idx, REPO);
-        assert_eq!(stats, OwnerStats { graphql: 2, chan_owners: 1, ..OwnerStats::default() });
+        assert_eq!(
+            stats,
+            OwnerStats {
+                graphql: 2,
+                chan_owners: 1,
+                ..OwnerStats::default()
+            }
+        );
         let owned = id(node_kind::MESSAGE_TYPE, "message:graphql:Item @api");
-        assert!(fp.nodes.iter().any(|n| n.id == owned), "the SDL type is qualified");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == owned),
+            "the SDL type is qualified"
+        );
         assert!(!fp.nodes.iter().any(|n| n.id == item));
         assert!(
-            fp.edges.iter().any(|e| e.from == module && e.to == owned && e.category == edge_category::DEFINES),
+            fp.edges
+                .iter()
+                .any(|e| e.from == module && e.to == owned && e.category == edge_category::DEFINES),
             "its DEFINES edge follows the rekey"
         );
-        assert_eq!(fp.nav.name_by_id.get(&owned).map(String::as_str), Some("Item"), "display name kept");
-        assert!(fp.nodes.iter().all(|n| n.id != field), "the resolver sibling takes the same owner");
+        assert_eq!(
+            fp.nav.name_by_id.get(&owned).map(String::as_str),
+            Some("Item"),
+            "display name kept"
+        );
+        assert!(
+            fp.nodes.iter().all(|n| n.id != field),
+            "the resolver sibling takes the same owner"
+        );
         for shared in [proto, avro, json] {
-            assert!(fp.nodes.iter().any(|n| n.id == shared), "a shared-contract message stays");
+            assert!(
+                fp.nodes.iter().any(|n| n.id == shared),
+                "a shared-contract message stays"
+            );
         }
     }
 
@@ -818,20 +1053,47 @@ mod tests {
     fn channel_unplaced_and_foreign_are_counted_apart_from_http() {
         let idx = OwnerIndex::from_roots(&[root("web", "npm")]);
         let mut fp = FileParse::default();
-        let client = push(&mut fp, node_kind::WS_CLIENT, "/ws", "ws_client:/ws", vec![position("web/chat.ts")]);
+        let client = push(
+            &mut fp,
+            node_kind::WS_CLIENT,
+            "/ws",
+            "ws_client:/ws",
+            vec![position("web/chat.ts")],
+        );
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: client, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
+        other.edges.push(Edge {
+            from: caller,
+            to: client,
+            category: edge_category::USES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
         let mut bare = FileParse::default();
-        let lost = push(&mut bare, node_kind::QUEUE_PRODUCER, "t", "queue_producer:t", vec![]);
+        let lost = push(
+            &mut bare,
+            node_kind::QUEUE_PRODUCER,
+            "t",
+            "queue_producer:t",
+            vec![],
+        );
 
         let stats = qualify_repo([&mut fp, &mut other, &mut bare], &idx, REPO);
         assert_eq!(
             stats,
-            OwnerStats { ws: 1, chan_owners: 1, chan_unplaced: 1, chan_foreign: 1, ..OwnerStats::default() }
+            OwnerStats {
+                ws: 1,
+                chan_owners: 1,
+                chan_unplaced: 1,
+                chan_foreign: 1,
+                ..OwnerStats::default()
+            }
         );
         assert_eq!(bare.nodes[0].id, lost);
-        assert_eq!(fp.nodes[0].id, id(node_kind::WS_CLIENT, "ws_client:/ws @web"));
+        assert_eq!(
+            fp.nodes[0].id,
+            id(node_kind::WS_CLIENT, "ws_client:/ws @web")
+        );
     }
 
     /// LB.8b: RPC and event sides are owned and counted apart from LB.8's
@@ -840,14 +1102,22 @@ mod tests {
     /// cell rides the rekey, so an extractor's transport ORIGIN survives.
     #[test]
     fn rpc_and_event_sides_are_owned_and_code_qname_events_are_declared() {
-        let idx = OwnerIndex::from_roots(&[root("services/users", "npm"), root("contracts", "npm")]);
+        let idx =
+            OwnerIndex::from_roots(&[root("services/users", "npm"), root("contracts", "npm")]);
         let mut fp = FileParse::default();
         let file = "services/users/router.ts";
-        push(&mut fp, node_kind::MODULE, "router", "services::users::router", vec![position(file)]);
+        push(
+            &mut fp,
+            node_kind::MODULE,
+            "router",
+            "services::users::router",
+            vec![position(file)],
+        );
         let transport = Cell {
             kind: cell_type::ORIGIN,
             payload: CellPayload::Json(
-                r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#.into(),
+                r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#
+                    .into(),
             ),
         };
         let sides = [
@@ -862,22 +1132,45 @@ mod tests {
         }
         let mut sol = FileParse::default();
         let bid_q = "contracts::Auction::Auction::BidPlaced";
-        let bid = push(&mut sol, node_kind::EVENT_EMITTER, "BidPlaced", bid_q, vec![position("contracts/Auction.sol")]);
+        let bid = push(
+            &mut sol,
+            node_kind::EVENT_EMITTER,
+            "BidPlaced",
+            bid_q,
+            vec![position("contracts/Auction.sol")],
+        );
 
         let stats = qualify_repo([&mut fp, &mut sol], &idx, REPO);
         assert_eq!(
             stats,
-            OwnerStats { rpc: 2, event: 2, rpc_event_owners: 1, declared: 1, ..OwnerStats::default() }
+            OwnerStats {
+                rpc: 2,
+                event: 2,
+                rpc_event_owners: 1,
+                declared: 1,
+                ..OwnerStats::default()
+            }
         );
         for (kind, q) in sides {
             let new = id(kind, &format!("{q} @services/users"));
             let node = fp.nodes.iter().find(|n| n.id == new);
             assert!(node.is_some(), "{q} qualified");
-            assert_eq!(node.map(|n| n.cells.clone()), Some(vec![transport.clone()]), "{q}: cells ride the rekey");
-            assert_eq!(fp.nav.name_by_id.get(&new).map(String::as_str), Some(q), "display name kept");
+            assert_eq!(
+                node.map(|n| n.cells.clone()),
+                Some(vec![transport.clone()]),
+                "{q}: cells ride the rekey"
+            );
+            assert_eq!(
+                fp.nav.name_by_id.get(&new).map(String::as_str),
+                Some(q),
+                "display name kept"
+            );
         }
         assert_eq!(sol.nodes[0].id, bid, "a code-qname event is never owned");
-        assert_eq!(sol.nav.qname_by_id.get(&bid).map(String::as_str), Some(bid_q));
+        assert_eq!(
+            sol.nav.qname_by_id.get(&bid).map(String::as_str),
+            Some(bid_q)
+        );
     }
 
     /// An RPC / event side with no file is counted on the LB.8b tallies, and a
@@ -887,12 +1180,30 @@ mod tests {
     fn rpc_event_unplaced_and_foreign_are_counted_apart_from_channels() {
         let idx = OwnerIndex::from_roots(&[root("web", "npm")]);
         let mut fp = FileParse::default();
-        let call = push(&mut fp, node_kind::RPC_CALL, "user.list", "rpc_call:user.list", vec![position("web/users.tsx")]);
+        let call = push(
+            &mut fp,
+            node_kind::RPC_CALL,
+            "user.list",
+            "rpc_call:user.list",
+            vec![position("web/users.tsx")],
+        );
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: call, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
+        other.edges.push(Edge {
+            from: caller,
+            to: call,
+            category: edge_category::USES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
         let mut bare = FileParse::default();
-        let lost = push(&mut bare, node_kind::EVENT_HANDLER, "x", "event_handle:x", vec![]);
+        let lost = push(
+            &mut bare,
+            node_kind::EVENT_HANDLER,
+            "x",
+            "event_handle:x",
+            vec![],
+        );
 
         let stats = qualify_repo([&mut fp, &mut other, &mut bare], &idx, REPO);
         assert_eq!(
@@ -906,6 +1217,9 @@ mod tests {
             }
         );
         assert_eq!(bare.nodes[0].id, lost);
-        assert_eq!(fp.nodes[0].id, id(node_kind::RPC_CALL, "rpc_call:user.list @web"));
+        assert_eq!(
+            fp.nodes[0].id,
+            id(node_kind::RPC_CALL, "rpc_call:user.list @web")
+        );
     }
 }

@@ -128,7 +128,10 @@ impl ActivatedView {
     /// A view over scores ranked elsewhere, kept in the given order: the
     /// input to [`ActivationPlan::synthesize`].
     pub fn from_ranked(scores: Vec<(NodeId, f64)>) -> Self {
-        Self { scores, ..Self::default() }
+        Self {
+            scores,
+            ..Self::default()
+        }
     }
 
     /// The ranked node ids, in view order.
@@ -177,7 +180,11 @@ const DEGREE_SPECIFICITY: &str = "degree_specificity";
 
 /// Scale each score by its node's degree. The arithmetic is the pre-plan
 /// `activate()`'s: `degree as f64`, then `/= 1.0 + d` or `*= (1.0 + d).ln_1p()`.
-fn specificity<'e>(spec: Specificity, edges: impl Iterator<Item = &'e Edge>, scores: &mut [(NodeId, f64)]) {
+fn specificity<'e>(
+    spec: Specificity,
+    edges: impl Iterator<Item = &'e Edge>,
+    scores: &mut [(NodeId, f64)],
+) {
     if spec == Specificity::None || scores.is_empty() {
         return;
     }
@@ -246,7 +253,12 @@ impl<G: ?Sized> fmt::Debug for ActivationPlan<'_, G> {
 
 impl<'h, G: ?Sized> ActivationPlan<'h, G> {
     fn pass(&self) -> Pass<'_, 'h, G> {
-        Pass { config: &self.config, signals: &self.signals, filters: &self.filters, synths: &self.synths }
+        Pass {
+            config: &self.config,
+            signals: &self.signals,
+            filters: &self.filters,
+            synths: &self.synths,
+        }
     }
 }
 
@@ -254,7 +266,12 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// A plan with no hooks: [`Self::run`] then returns what
     /// [`crate::activate`] returns.
     pub fn new(config: ActivationConfig) -> Self {
-        Self { config, signals: Vec::new(), filters: Vec::new(), synths: Vec::new() }
+        Self {
+            config,
+            signals: Vec::new(),
+            filters: Vec::new(),
+            synths: Vec::new(),
+        }
     }
 
     /// Add a ranking signal, run after the ones already added.
@@ -279,7 +296,8 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// [`crate::activate`] ranks them. No seeds or no nodes: an empty view,
     /// no hook run.
     pub fn run(&self, g: &G, seeds: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, None, Universe::Reached, "run")
+        self.pass()
+            .execute(g, seeds, None, Universe::Reached, "run")
     }
 
     /// [`Self::run`] over a prebuilt [`PprIndex`] (EA.1): the node list is
@@ -290,7 +308,8 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// for another config ([`PprIndex::matches`] false) is ignored, and
     /// `[activation] index mismatch mode=run` printed on stderr.
     pub fn run_indexed(&self, g: &G, index: &PprIndex, seeds: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, Some(index), Universe::Reached, "run")
+        self.pass()
+            .execute(g, seeds, Some(index), Universe::Reached, "run")
     }
 
     /// The whole pass over `candidates` (first occurrence kept): each at its
@@ -299,13 +318,26 @@ impl<'h, G: GraphSource + ?Sized> ActivationPlan<'h, G> {
     /// over `activate()`'s scores. No seeds or no nodes: an empty view, no
     /// hook run.
     pub fn rank(&self, g: &G, seeds: &[NodeId], candidates: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, None, Universe::Candidates(candidates), "rank")
+        self.pass()
+            .execute(g, seeds, None, Universe::Candidates(candidates), "rank")
     }
 
     /// [`Self::rank`] over a prebuilt [`PprIndex`], as [`Self::run_indexed`]
     /// is [`Self::run`] over one.
-    pub fn rank_indexed(&self, g: &G, index: &PprIndex, seeds: &[NodeId], candidates: &[NodeId]) -> ActivatedView {
-        self.pass().execute(g, seeds, Some(index), Universe::Candidates(candidates), "rank")
+    pub fn rank_indexed(
+        &self,
+        g: &G,
+        index: &PprIndex,
+        seeds: &[NodeId],
+        candidates: &[NodeId],
+    ) -> ActivatedView {
+        self.pass().execute(
+            g,
+            seeds,
+            Some(index),
+            Universe::Candidates(candidates),
+            "rank",
+        )
     }
 
     /// Only the synth hooks, over a view built elsewhere
@@ -445,7 +477,13 @@ impl<G: GraphSource + ?Sized> Pass<'_, '_, G> {
         sort_ranked(&mut ranked);
         ranked.truncate(config.top_k);
 
-        let mut view = ActivatedView { scores: ranked, dropped, synth: Vec::new(), iterations, applied };
+        let mut view = ActivatedView {
+            scores: ranked,
+            dropped,
+            synth: Vec::new(),
+            iterations,
+            applied,
+        };
         let added = self.synthesize(g, &mut view);
         if activation_debug() {
             let mut signals = Vec::with_capacity(self.signals.len() + 1);
@@ -511,8 +549,18 @@ fn sort_ranked(ranked: &mut [(NodeId, f64)]) {
 }
 
 /// [`crate::activate`]: the pass with no hooks over two slices.
-pub(crate) fn activate_view(g: &SliceGraph<'_>, seeds: &[NodeId], config: &ActivationConfig) -> ActivatedView {
-    Pass { config, signals: &[], filters: &[], synths: &[] }.execute(g, seeds, None, Universe::Reached, "activate")
+pub(crate) fn activate_view(
+    g: &SliceGraph<'_>,
+    seeds: &[NodeId],
+    config: &ActivationConfig,
+) -> ActivatedView {
+    Pass {
+        config,
+        signals: &[],
+        filters: &[],
+        synths: &[],
+    }
+    .execute(g, seeds, None, Universe::Reached, "activate")
 }
 
 /// [`crate::activate_indexed`]: the pass with no hooks over a prebuilt index.
@@ -522,7 +570,13 @@ pub(crate) fn activate_view_indexed(
     seeds: &[NodeId],
     config: &ActivationConfig,
 ) -> ActivatedView {
-    Pass { config, signals: &[], filters: &[], synths: &[] }.execute(g, seeds, Some(index), Universe::Reached, "activate")
+    Pass {
+        config,
+        signals: &[],
+        filters: &[],
+        synths: &[],
+    }
+    .execute(g, seeds, Some(index), Universe::Reached, "activate")
 }
 
 // ============================================================================
@@ -557,7 +611,11 @@ struct Marker<'a> {
 
 impl fmt::Display for Marker<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let dropped: Vec<String> = self.dropped.iter().map(|(n, c)| format!("{n}:{c}")).collect();
+        let dropped: Vec<String> = self
+            .dropped
+            .iter()
+            .map(|(n, c)| format!("{n}:{c}"))
+            .collect();
         write!(
             f,
             "[activation] plan mode={} signals=[{}] filters=[{}] synth=[{}] universe={} kept={} dropped=[{}] synth_cells={} index={}",
@@ -602,8 +660,11 @@ mod oracle {
             };
         }
 
-        let id_to_idx: HashMap<NodeId, usize> =
-            node_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let id_to_idx: HashMap<NodeId, usize> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i))
+            .collect();
 
         // Build adjacency: incoming[i] = [(source_idx, weight)] — who can send
         // activation to node i. out_weight[j] = total outgoing weight from j.
@@ -646,10 +707,7 @@ mod oracle {
 
         // Personalization vector: equal weight on seed nodes.
         let mut personalization = vec![0.0; n];
-        let seed_count = seeds
-            .iter()
-            .filter(|s| id_to_idx.contains_key(s))
-            .count();
+        let seed_count = seeds.iter().filter(|s| id_to_idx.contains_key(s)).count();
         if seed_count == 0 {
             return ActivationResult {
                 scores: vec![],
@@ -691,8 +749,8 @@ mod oracle {
                     })
                     .sum();
 
-                new_scores[i] =
-                    (1.0 - d) * personalization[i] + d * (propagated + dangling_sum * personalization[i]);
+                new_scores[i] = (1.0 - d) * personalization[i]
+                    + d * (propagated + dangling_sum * personalization[i]);
             }
 
             let diff: f64 = scores
@@ -784,7 +842,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0 >> 33
         }
 
@@ -819,7 +880,15 @@ mod tests {
         let seeds = (0..k).map(|_| some_id(rng, &nodes)).collect();
         let mut edge_weights = HashMap::new();
         for c in 0..5 {
-            let w: Option<f64> = rng.pick(&[None, Some(0.0), Some(-1.0), Some(0.5), Some(1.0), Some(3.0), Some(10.0)]);
+            let w: Option<f64> = rng.pick(&[
+                None,
+                Some(0.0),
+                Some(-1.0),
+                Some(0.5),
+                Some(1.0),
+                Some(3.0),
+                Some(10.0),
+            ]);
             if let Some(w) = w {
                 edge_weights.insert(EdgeCategoryId(c), w);
             }
@@ -831,7 +900,12 @@ mod tests {
             epsilon: rng.pick(&[1e-6, 1e-12, 0.0]),
             ..Default::default()
         };
-        Case { nodes, edges, seeds, config }
+        Case {
+            nodes,
+            edges,
+            seeds,
+            config,
+        }
     }
 
     /// Three times in four a node of `nodes` (when there is one), else any id
@@ -844,8 +918,13 @@ mod tests {
         }
     }
 
-    const DIRECTIONS: [Direction; 3] = [Direction::Forward, Direction::Backward, Direction::Undirected];
-    const SPECIFICITIES: [Specificity; 3] = [Specificity::None, Specificity::Idf, Specificity::InverseIdf];
+    const DIRECTIONS: [Direction; 3] = [
+        Direction::Forward,
+        Direction::Backward,
+        Direction::Undirected,
+    ];
+    const SPECIFICITIES: [Specificity; 3] =
+        [Specificity::None, Specificity::Idf, Specificity::InverseIdf];
     const TOP_KS: [usize; 3] = [1, 5, usize::MAX];
 
     /// Every (case, direction, specificity, top_k) of 300 LCG graphs.
@@ -856,7 +935,12 @@ mod tests {
             for direction in DIRECTIONS {
                 for node_specificity in SPECIFICITIES {
                     for top_k in TOP_KS {
-                        let config = ActivationConfig { direction, node_specificity, top_k, ..c.config.clone() };
+                        let config = ActivationConfig {
+                            direction,
+                            node_specificity,
+                            top_k,
+                            ..c.config.clone()
+                        };
                         f(i, &c, &config);
                     }
                 }
@@ -874,7 +958,12 @@ mod tests {
         for_each_config(0x1d12a, |i, c, config| {
             let old = oracle::activate(&c.nodes, &c.edges, &c.seeds, config);
             let new = activate(&c.nodes, &c.edges, &c.seeds, config);
-            assert!(same(&old, &new), "case {i} {config:?}\nold {:?}\nnew {:?}", old, new);
+            assert!(
+                same(&old, &new),
+                "case {i} {config:?}\nold {:?}\nnew {:?}",
+                old,
+                new
+            );
             runs += 1;
             if !old.scores.is_empty() {
                 nonempty += 1;
@@ -886,23 +975,35 @@ mod tests {
         assert_eq!(runs, 300 * 27);
         // Not vacuous: most graphs activate something, with and without the
         // specificity step.
-        assert!(nonempty > runs / 3, "only {nonempty} of {runs} runs scored a node");
-        assert!(with_specificity > runs / 5, "only {with_specificity} specificity runs scored a node");
+        assert!(
+            nonempty > runs / 3,
+            "only {nonempty} of {runs} runs scored a node"
+        );
+        assert!(
+            with_specificity > runs / 5,
+            "only {with_specificity} specificity runs scored a node"
+        );
     }
 
     #[test]
     fn plan_run_equals_activate_without_hooks() {
         let mut checked = 0usize;
         for_each_config(0x5eed, |i, c, config| {
-            let g = SliceGraph { nodes: &c.nodes, edges: &c.edges };
+            let g = SliceGraph {
+                nodes: &c.nodes,
+                edges: &c.edges,
+            };
             let view = ActivationPlan::new(config.clone()).run(&g, &c.seeds);
             let old = activate(&c.nodes, &c.edges, &c.seeds, config);
             assert_eq!(bits(&view.scores), bits(&old.scores), "case {i} {config:?}");
             assert_eq!(view.iterations, old.iterations, "case {i}");
             assert!(view.dropped.is_empty() && view.synth.is_empty());
             let ran = !c.nodes.is_empty() && !c.seeds.is_empty();
-            let expect: Vec<&str> =
-                if ran && config.node_specificity != Specificity::None { vec![DEGREE_SPECIFICITY] } else { vec![] };
+            let expect: Vec<&str> = if ran && config.node_specificity != Specificity::None {
+                vec![DEGREE_SPECIFICITY]
+            } else {
+                vec![]
+            };
             assert_eq!(view.applied, expect, "case {i}");
             checked += usize::from(!view.scores.is_empty());
         });
@@ -919,14 +1020,23 @@ mod tests {
         for_each_config(0xb1a57, |i, c, config| {
             let n = rng.below(12);
             let candidates: Vec<NodeId> = (0..n).map(|_| some_id(&mut rng, &c.nodes)).collect();
-            let g = SliceGraph { nodes: &c.nodes, edges: &c.edges };
+            let g = SliceGraph {
+                nodes: &c.nodes,
+                edges: &c.edges,
+            };
             let view = ActivationPlan::new(config.clone()).rank(&g, &c.seeds, &candidates);
             if c.nodes.is_empty() || c.seeds.is_empty() {
                 assert_eq!(view, ActivatedView::default(), "case {i}");
                 return;
             }
-            let all = ActivationConfig { top_k: usize::MAX, ..config.clone() };
-            let at: HashMap<NodeId, f64> = activate(&c.nodes, &c.edges, &c.seeds, &all).scores.into_iter().collect();
+            let all = ActivationConfig {
+                top_k: usize::MAX,
+                ..config.clone()
+            };
+            let at: HashMap<NodeId, f64> = activate(&c.nodes, &c.edges, &c.seeds, &all)
+                .scores
+                .into_iter()
+                .collect();
             let mut seen = HashSet::new();
             let mut expect: Vec<(NodeId, f64)> = candidates
                 .iter()
@@ -935,10 +1045,17 @@ mod tests {
                 .collect();
             sort_ranked(&mut expect);
             expect.truncate(config.top_k);
-            assert_eq!(bits(&view.scores), bits(&expect), "case {i} {config:?} candidates {candidates:?}");
+            assert_eq!(
+                bits(&view.scores),
+                bits(&expect),
+                "case {i} {config:?} candidates {candidates:?}"
+            );
             checked += usize::from(view.scores.iter().any(|(_, s)| *s > 0.0));
         });
-        assert!(checked > 500, "only {checked} ranked views held a positive score");
+        assert!(
+            checked > 500,
+            "only {checked} ranked views held a positive score"
+        );
     }
 
     /// (EA.1 a) Over 300 LCG graphs (repeated ids, non-node endpoints,
@@ -956,9 +1073,19 @@ mod tests {
             let old = crate::ppr_index::ppr_vector_head(&c.nodes, c.edges.iter(), &c.seeds, config);
             let ix = PprIndex::build(&c.nodes, c.edges.iter(), config);
             let new = ix.vector(&c.seeds);
-            let fb = |v: &(Vec<f64>, usize)| (v.0.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), v.1);
+            let fb =
+                |v: &(Vec<f64>, usize)| (v.0.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), v.1);
             assert_eq!(fb(&old), fb(&new), "case {i} {config:?}");
-            assert_eq!(fb(&old), fb(&crate::ppr_vector(&c.nodes, c.edges.iter(), &c.seeds, config)), "case {i}");
+            assert_eq!(
+                fb(&old),
+                fb(&crate::ppr_vector(
+                    &c.nodes,
+                    c.edges.iter(),
+                    &c.seeds,
+                    config
+                )),
+                "case {i}"
+            );
             nonempty += usize::from(!new.0.is_empty());
             let other: Vec<NodeId> = (0..3).map(|_| some_id(&mut rng, &c.nodes)).collect();
             let again = crate::ppr_index::ppr_vector_head(&c.nodes, c.edges.iter(), &other, config);
@@ -982,9 +1109,14 @@ mod tests {
         let mut rng = Lcg(0x1dc);
         let mut checked = 0usize;
         for_each_config(0x1dc, |i, c, config| {
-            let g = SliceGraph { nodes: &c.nodes, edges: &c.edges };
+            let g = SliceGraph {
+                nodes: &c.nodes,
+                edges: &c.edges,
+            };
             let drop = DropIds("drop", c.nodes.iter().copied().take(2).collect());
-            let plan = ActivationPlan::new(config.clone()).signal(&AddOne).filter(&drop);
+            let plan = ActivationPlan::new(config.clone())
+                .signal(&AddOne)
+                .filter(&drop);
             let ix = PprIndex::build(&c.nodes, c.edges.iter(), config);
             let a = plan.run(&g, &c.seeds);
             let b = plan.run_indexed(&g, &ix, &c.seeds);
@@ -1011,12 +1143,27 @@ mod tests {
     #[test]
     fn mismatched_index_gives_unindexed_answer() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
-        let config = ActivationConfig { direction: Direction::Undirected, ..Default::default() };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
+        let config = ActivationConfig {
+            direction: Direction::Undirected,
+            ..Default::default()
+        };
         let others = [
-            ActivationConfig { damping: 0.85, ..config.clone() },
-            ActivationConfig { direction: Direction::Forward, ..config.clone() },
-            ActivationConfig { edge_weights: HashMap::from([(EdgeCategoryId(1), 0.0)]), ..config.clone() },
+            ActivationConfig {
+                damping: 0.85,
+                ..config.clone()
+            },
+            ActivationConfig {
+                direction: Direction::Forward,
+                ..config.clone()
+            },
+            ActivationConfig {
+                edge_weights: HashMap::from([(EdgeCategoryId(1), 0.0)]),
+                ..config.clone()
+            },
         ];
         let plan: ActivationPlan<'_, SliceGraph<'_>> = ActivationPlan::new(config.clone());
         let seeds = ids(&[2]);
@@ -1025,18 +1172,31 @@ mod tests {
             let ix = PprIndex::build(&nodes, edges.iter(), other);
             assert!(!ix.matches(&config));
             // The wrong index alone would answer differently.
-            let wrong = ActivationPlan::<SliceGraph<'_>>::new(other.clone()).run_indexed(&g, &ix, &seeds);
+            let wrong =
+                ActivationPlan::<SliceGraph<'_>>::new(other.clone()).run_indexed(&g, &ix, &seeds);
             assert!(!same_view(&want, &wrong), "{other:?}");
-            assert!(same_view(&want, &plan.run_indexed(&g, &ix, &seeds)), "{other:?}");
-            assert!(same_view(&plan.rank(&g, &seeds, &nodes), &plan.rank_indexed(&g, &ix, &seeds, &nodes)));
+            assert!(
+                same_view(&want, &plan.run_indexed(&g, &ix, &seeds)),
+                "{other:?}"
+            );
+            assert!(same_view(
+                &plan.rank(&g, &seeds, &nodes),
+                &plan.rank_indexed(&g, &ix, &seeds, &nodes)
+            ));
             let a = activate(&nodes, &edges, &seeds, &config);
-            assert!(same(&a, &crate::activate_indexed(&ix, &edges, &seeds, &config)));
+            assert!(same(
+                &a,
+                &crate::activate_indexed(&ix, &edges, &seeds, &config)
+            ));
         }
     }
 
     /// Star 1 -> {2, 3, 4, 5}, seed 1: node 1 ranks first.
     fn star() -> (Vec<NodeId>, Vec<Edge>) {
-        (ids(&[1, 2, 3, 4, 5]), vec![edge(1, 2, 1), edge(1, 3, 1), edge(1, 4, 1), edge(1, 5, 1)])
+        (
+            ids(&[1, 2, 3, 4, 5]),
+            vec![edge(1, 2, 1), edge(1, 3, 1), edge(1, 4, 1), edge(1, 5, 1)],
+        )
     }
 
     struct DropIds(&'static str, Vec<NodeId>);
@@ -1054,14 +1214,30 @@ mod tests {
     #[test]
     fn filters_apply_before_top_k_and_count_drops() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
-        let config = ActivationConfig { top_k: 2, ..Default::default() };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
+        let config = ActivationConfig {
+            top_k: 2,
+            ..Default::default()
+        };
         let plain = ActivationPlan::new(config.clone()).run(&g, &[NodeId(1)]);
-        assert_eq!(plain.scores[0].0, NodeId(1), "the seed ranks first unfiltered");
+        assert_eq!(
+            plain.scores[0].0,
+            NodeId(1),
+            "the seed ranks first unfiltered"
+        );
 
         let drop_seed = DropIds("drop_seed", vec![NodeId(1)]);
-        let view = ActivationPlan::new(config).filter(&drop_seed).run(&g, &[NodeId(1)]);
-        assert_eq!(view.scores.len(), 2, "the dropped node's slot goes to the next one");
+        let view = ActivationPlan::new(config)
+            .filter(&drop_seed)
+            .run(&g, &[NodeId(1)]);
+        assert_eq!(
+            view.scores.len(),
+            2,
+            "the dropped node's slot goes to the next one"
+        );
         assert!(view.score_of(NodeId(1)).is_none());
         let all = activate(&nodes, &edges, &[NodeId(1)], &ActivationConfig::default());
         assert_eq!(bits(&view.scores), bits(&all.scores[1..3]));
@@ -1072,16 +1248,28 @@ mod tests {
     #[test]
     fn filters_run_in_order_and_count_only_their_own_drops() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         let evens = DropIds("evens", ids(&[2, 4]));
         let low = DropIds("low", ids(&[1, 2, 3]));
-        let view = ActivationPlan::new(ActivationConfig::default()).filter(&evens).filter(&low).run(&g, &[NodeId(1)]);
+        let view = ActivationPlan::new(ActivationConfig::default())
+            .filter(&evens)
+            .filter(&low)
+            .run(&g, &[NodeId(1)]);
         // `low` never sees 2: `evens` dropped it first.
         assert_eq!(view.dropped, vec![("evens", 2), ("low", 2)]);
         assert_eq!(view.ids(), ids(&[5]));
         let none = DropIds("none", vec![]);
-        let view = ActivationPlan::new(ActivationConfig::default()).filter(&none).run(&g, &[NodeId(1)]);
-        assert_eq!(view.dropped, vec![("none", 0)], "a filter that drops nothing still reports 0");
+        let view = ActivationPlan::new(ActivationConfig::default())
+            .filter(&none)
+            .run(&g, &[NodeId(1)]);
+        assert_eq!(
+            view.dropped,
+            vec![("none", 0)],
+            "a filter that drops nothing still reports 0"
+        );
     }
 
     struct AddOne;
@@ -1111,12 +1299,19 @@ mod tests {
     fn signals_run_in_registration_order() {
         let nodes = ids(&[1, 2, 3]);
         let edges = vec![edge(1, 2, 1), edge(2, 3, 1)];
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         let base = ActivationPlan::new(ActivationConfig::default()).run(&g, &[NodeId(1)]);
-        let add_then_double =
-            ActivationPlan::new(ActivationConfig::default()).signal(&AddOne).signal(&Double).run(&g, &[NodeId(1)]);
-        let double_then_add =
-            ActivationPlan::new(ActivationConfig::default()).signal(&Double).signal(&AddOne).run(&g, &[NodeId(1)]);
+        let add_then_double = ActivationPlan::new(ActivationConfig::default())
+            .signal(&AddOne)
+            .signal(&Double)
+            .run(&g, &[NodeId(1)]);
+        let double_then_add = ActivationPlan::new(ActivationConfig::default())
+            .signal(&Double)
+            .signal(&AddOne)
+            .run(&g, &[NodeId(1)]);
         assert_eq!(add_then_double.applied, vec!["add_one", "double"]);
         assert_eq!(double_then_add.applied, vec!["double", "add_one"]);
         assert_eq!(base.scores.len(), 3);
@@ -1130,20 +1325,39 @@ mod tests {
     #[test]
     fn degree_specificity_as_a_signal_matches_the_config_step() {
         let nodes = ids(&[1, 2, 3, 4, 5, 6]);
-        let edges = vec![edge(1, 2, 1), edge(1, 3, 1), edge(1, 4, 1), edge(1, 5, 1), edge(2, 6, 1), edge(6, 6, 2)];
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let edges = vec![
+            edge(1, 2, 1),
+            edge(1, 3, 1),
+            edge(1, 4, 1),
+            edge(1, 5, 1),
+            edge(2, 6, 1),
+            edge(6, 6, 2),
+        ];
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         for spec in [Specificity::Idf, Specificity::InverseIdf] {
-            let by_config = ActivationPlan::new(ActivationConfig { node_specificity: spec, ..Default::default() })
-                .run(&g, &[NodeId(1)]);
+            let by_config = ActivationPlan::new(ActivationConfig {
+                node_specificity: spec,
+                ..Default::default()
+            })
+            .run(&g, &[NodeId(1)]);
             let signal = DegreeSpecificity(spec);
-            let by_signal = ActivationPlan::new(ActivationConfig::default()).signal(&signal).run(&g, &[NodeId(1)]);
+            let by_signal = ActivationPlan::new(ActivationConfig::default())
+                .signal(&signal)
+                .run(&g, &[NodeId(1)]);
             assert_eq!(bits(&by_config.scores), bits(&by_signal.scores), "{spec:?}");
             assert_eq!(by_config.applied, vec![DEGREE_SPECIFICITY]);
             assert_eq!(by_signal.applied, vec![DEGREE_SPECIFICITY]);
         }
         // None is a no-op arm, never a panic.
         let mut scores = vec![(NodeId(1), 0.25)];
-        RankingSignal::<SliceGraph<'_>>::apply(&DegreeSpecificity(Specificity::None), &g, &mut scores);
+        RankingSignal::<SliceGraph<'_>>::apply(
+            &DegreeSpecificity(Specificity::None),
+            &g,
+            &mut scores,
+        );
         assert_eq!(scores, vec![(NodeId(1), 0.25)]);
     }
 
@@ -1152,15 +1366,25 @@ mod tests {
         // 1 -> 2 forward from 1: 3 is a node PPR never reaches, 99 no node.
         let nodes = ids(&[1, 2, 3]);
         let edges = vec![edge(1, 2, 1)];
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         let plan = ActivationPlan::new(ActivationConfig::default());
         let view = plan.rank(&g, &[NodeId(1)], &ids(&[99, 3, 2, 3]));
-        assert_eq!(view.ids(), ids(&[2, 3, 99]), "reached first, then the 0.0 ties by id; 3 once");
+        assert_eq!(
+            view.ids(),
+            ids(&[2, 3, 99]),
+            "reached first, then the 0.0 ties by id; 3 once"
+        );
         assert!(view.score_of(NodeId(2)).is_some_and(|s| s > 0.0));
         assert_eq!(view.score_of(NodeId(3)), Some(0.0));
         assert_eq!(view.score_of(NodeId(99)), Some(0.0));
         assert_eq!(view.score_of(NodeId(1)), None, "the seed is no candidate");
-        assert!(plan.run(&g, &[NodeId(1)]).score_of(NodeId(3)).is_none(), "run drops what rank keeps");
+        assert!(
+            plan.run(&g, &[NodeId(1)]).score_of(NodeId(3)).is_none(),
+            "run drops what rank keeps"
+        );
         // A seed that is no node: PPR gives nothing, every candidate is 0.0.
         let missed = plan.rank(&g, &[NodeId(42)], &ids(&[2, 1]));
         assert_eq!(missed.scores, vec![(NodeId(1), 0.0), (NodeId(2), 0.0)]);
@@ -1216,7 +1440,10 @@ mod tests {
     #[test]
     fn later_synth_sees_earlier_cells_and_order_is_preserved() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         let emit = EmitKeys(&["c", "a", "b"]);
         let drop_five = DropIds("drop_five", vec![NodeId(5)]);
         let view = ActivationPlan::new(ActivationConfig::default())
@@ -1225,19 +1452,36 @@ mod tests {
             .synth(&JoinKeys)
             .run(&g, &[NodeId(1)]);
         let keys: Vec<&str> = view.synth.iter().map(|c| c.key.as_str()).collect();
-        assert_eq!(keys, vec!["c", "a", "b", "joined"], "emission order kept, hooks in order");
+        assert_eq!(
+            keys,
+            vec!["c", "a", "b", "joined"],
+            "emission order kept, hooks in order"
+        );
         let joined: Vec<&SynthCell> = view.cells_of("join_keys").collect();
         assert_eq!(joined.len(), 1);
-        assert_eq!(joined[0].text, "c,a,b", "the later hook read the earlier hook's cells");
-        assert_eq!(joined[0].attrs, vec![("seen_applied", "drop_five,emit_keys".to_string())]);
+        assert_eq!(
+            joined[0].text, "c,a,b",
+            "the later hook read the earlier hook's cells"
+        );
+        assert_eq!(
+            joined[0].attrs,
+            vec![("seen_applied", "drop_five,emit_keys".to_string())]
+        );
         assert_eq!(view.applied, vec!["drop_five", "emit_keys", "join_keys"]);
-        assert_eq!(view.synth[0].anchor, Some(view.scores[0].0), "hooks see the final ranked view");
+        assert_eq!(
+            view.synth[0].anchor,
+            Some(view.scores[0].0),
+            "hooks see the final ranked view"
+        );
     }
 
     #[test]
     fn synthesize_appends_to_a_view_ranked_elsewhere() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         // Deliberately not sorted: from_ranked keeps the caller's order.
         let mut view = ActivatedView::from_ranked(vec![(NodeId(4), 0.1), (NodeId(2), 0.9)]);
         view.synth.push(SynthCell {
@@ -1250,7 +1494,9 @@ mod tests {
             attrs: vec![],
         });
         let emit = EmitKeys(&["x"]);
-        let plan = ActivationPlan::new(ActivationConfig::default()).synth(&emit).synth(&JoinKeys);
+        let plan = ActivationPlan::new(ActivationConfig::default())
+            .synth(&emit)
+            .synth(&JoinKeys);
         plan.synthesize(&g, &mut view);
         assert_eq!(view.ids(), ids(&[4, 2]), "synthesize never reranks");
         let keys: Vec<&str> = view.synth.iter().map(|c| c.key.as_str()).collect();
@@ -1263,22 +1509,37 @@ mod tests {
     #[test]
     fn empty_seeds_or_empty_graph_give_empty_view() {
         let (nodes, edges) = star();
-        let g = SliceGraph { nodes: &nodes, edges: &edges };
+        let g = SliceGraph {
+            nodes: &nodes,
+            edges: &edges,
+        };
         let emit = EmitKeys(&["a"]);
         let drop_none = DropIds("drop_none", vec![]);
-        let plan = ActivationPlan::new(ActivationConfig { node_specificity: Specificity::Idf, ..Default::default() })
-            .signal(&AddOne)
-            .filter(&drop_none)
-            .synth(&emit);
+        let plan = ActivationPlan::new(ActivationConfig {
+            node_specificity: Specificity::Idf,
+            ..Default::default()
+        })
+        .signal(&AddOne)
+        .filter(&drop_none)
+        .synth(&emit);
         assert_eq!(plan.run(&g, &[]), ActivatedView::default());
         assert_eq!(plan.rank(&g, &[], &ids(&[1, 2])), ActivatedView::default());
-        let empty = SliceGraph { nodes: &[], edges: &edges };
+        let empty = SliceGraph {
+            nodes: &[],
+            edges: &edges,
+        };
         assert_eq!(plan.run(&empty, &[NodeId(1)]), ActivatedView::default());
-        assert_eq!(plan.rank(&empty, &[NodeId(1)], &ids(&[1])), ActivatedView::default());
+        assert_eq!(
+            plan.rank(&empty, &[NodeId(1)], &ids(&[1])),
+            ActivatedView::default()
+        );
         // Seeds that miss the graph are a query: the pass runs, over nothing.
         let missed = plan.run(&g, &[NodeId(42)]);
         assert!(missed.scores.is_empty());
-        assert_eq!(missed.applied, vec![DEGREE_SPECIFICITY, "add_one", "drop_none", "emit_keys"]);
+        assert_eq!(
+            missed.applied,
+            vec![DEGREE_SPECIFICITY, "add_one", "drop_none", "emit_keys"]
+        );
     }
 
     #[test]
@@ -1286,13 +1547,22 @@ mod tests {
         // Every HashMap gets its own RandomState, so 20 runs in one process
         // exercise 20 hash seeds for the PPR index and the degree map.
         let mut rng = Lcg(0xde7);
-        let c = (0..50).map(|_| case(&mut rng)).max_by_key(|c| c.edges.len() * usize::from(!c.nodes.is_empty()));
+        let c = (0..50)
+            .map(|_| case(&mut rng))
+            .max_by_key(|c| c.edges.len() * usize::from(!c.nodes.is_empty()));
         let c = c.expect("50 cases");
-        let g = SliceGraph { nodes: &c.nodes, edges: &c.edges };
+        let g = SliceGraph {
+            nodes: &c.nodes,
+            edges: &c.edges,
+        };
         let seeds: Vec<NodeId> = c.nodes.iter().take(2).copied().collect();
         let drop_first = DropIds("drop_first", c.nodes.iter().take(1).copied().collect());
         let emit = EmitKeys(&["k", "j"]);
-        let config = ActivationConfig { node_specificity: Specificity::InverseIdf, top_k: 8, ..Default::default() };
+        let config = ActivationConfig {
+            node_specificity: Specificity::InverseIdf,
+            top_k: 8,
+            ..Default::default()
+        };
         let plan = ActivationPlan::new(config).filter(&drop_first).synth(&emit);
         let first = plan.run(&g, &seeds);
         assert!(!first.scores.is_empty());
@@ -1342,7 +1612,8 @@ mod tests {
             marker.to_string(),
             "[activation] plan mode=rank signals=[degree_specificity] filters=[live] synth=[] universe=5712 kept=812 dropped=[live:37] synth_cells=0 index=built"
         );
-        let plan: ActivationPlan<'_, SliceGraph<'_>> = ActivationPlan::new(ActivationConfig::default()).signal(&AddOne);
+        let plan: ActivationPlan<'_, SliceGraph<'_>> =
+            ActivationPlan::new(ActivationConfig::default()).signal(&AddOne);
         let debug = format!("{plan:?}");
         assert!(debug.contains("signals: [\"add_one\"]"), "{debug}");
     }

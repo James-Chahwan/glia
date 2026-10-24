@@ -20,15 +20,15 @@ use std::path::PathBuf;
 
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Confidence, NodeId, RepoId};
-use glia_graph::{
-    CrossGraphResolver, HttpStackResolver, MergedGraph, build_go, build_typescript,
-};
+use glia_graph::{CrossGraphResolver, HttpStackResolver, MergedGraph, build_go, build_typescript};
 
 const BACKEND_MODULE_PREFIX: &str = "example.com/backend";
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap().join("tests/fixtures/http_stack_smoke")
+    here.parent()
+        .unwrap()
+        .join("tests/fixtures/http_stack_smoke")
 }
 
 fn backend_repo() -> RepoId {
@@ -40,10 +40,7 @@ fn frontend_repo() -> RepoId {
 
 fn parse_backend() -> glia_graph::RepoGraph {
     let root = fixture_root().join("backend");
-    let files = [
-        ("users/users.go", "users"),
-        ("server/server.go", "server"),
-    ];
+    let files = [("users/users.go", "users"), ("server/server.go", "server")];
     let parses: Vec<_> = files
         .iter()
         .map(|(rel, pkg)| {
@@ -59,13 +56,9 @@ fn parse_frontend() -> glia_graph::RepoGraph {
     let root = fixture_root().join("frontend");
     let rel = "src/app/user.service.ts";
     let src = std::fs::read_to_string(root.join(rel)).unwrap();
-    let parse = glia_parser_typescript::parse_file(
-        &src,
-        rel,
-        "src::app::user_service",
-        frontend_repo(),
-    )
-    .unwrap();
+    let parse =
+        glia_parser_typescript::parse_file(&src, rel, "src::app::user_service", frontend_repo())
+            .unwrap();
     // No cross-file imports in this fixture — resolver is a no-op.
     build_typescript(frontend_repo(), vec![parse], |_, _| None).unwrap()
 }
@@ -134,7 +127,10 @@ fn frontend_endpoints_link_to_backend_routes_via_http_calls_edges() {
         backend.nodes.iter().any(|n| n.id == user_by_id_route),
         "backend GET /api/users/:id Route node present"
     );
-    assert_eq!(route_method_cells(&backend, users_route), vec!["GET".to_string()]);
+    assert_eq!(
+        route_method_cells(&backend, users_route),
+        vec!["GET".to_string()]
+    );
     assert_eq!(
         route_method_cells(&backend, create_user_route),
         vec!["POST".to_string()]
@@ -189,11 +185,15 @@ fn frontend_endpoints_link_to_backend_routes_via_http_calls_edges() {
         .expect("POST endpoint → POST /api/users route edge");
     assert_eq!(e2.confidence, Confidence::Strong);
     assert!(
-        !cross.iter().any(|e| e.from == ep_post_users && e.to == users_route),
+        !cross
+            .iter()
+            .any(|e| e.from == ep_post_users && e.to == users_route),
         "a POST call never pairs with the GET route"
     );
     assert!(
-        !cross.iter().any(|e| e.from == ep_get_users && e.to == create_user_route),
+        !cross
+            .iter()
+            .any(|e| e.from == ep_get_users && e.to == create_user_route),
         "a GET call never pairs with the POST route"
     );
 

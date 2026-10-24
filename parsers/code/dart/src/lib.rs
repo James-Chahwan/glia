@@ -44,8 +44,13 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     // CH.5c: the receivers bound to a Dio, read before the body walks (the
     // client-call detector) and the route scan consult them.
@@ -62,7 +67,15 @@ pub fn parse_file(
     // DT.1l: read before the class walk, which writes no model schema in a
     // generated file.
     acc.generated = dart_generated(file_rel_path, source);
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
     // DT.5e: every member is declared now, so a name passed by value can be
     // checked against the METHOD / FUNCTION it would name.
     resolve_name_refs(&mut acc, module_qname, repo);
@@ -502,7 +515,16 @@ fn visit_top(
                 visit_container(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             "extension_declaration" => {
-                visit_extension(child, &file_types, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_extension(
+                    child,
+                    &file_types,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    repo,
+                    acc,
+                );
             }
             // LA.37a: a top-level function / getter / setter's body is the
             // signature's SIBLING under the program root, not its child. The
@@ -510,7 +532,16 @@ fn visit_top(
             // through to `_ => {}`.
             "function_signature" | "getter_signature" | "setter_signature" => {
                 let body = sibling_body(child);
-                visit_function(child, body, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_function(
+                    child,
+                    body,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    repo,
+                    acc,
+                );
             }
             // G19 — library-level `const`/`final NAME = expr;`. The hidden
             // `_top_level_definition` rule inlines the keyword + this list as
@@ -559,7 +590,8 @@ fn visit_class(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
+    acc.nav
+        .record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
     // LA.37b: a later container of the same name adds no second Node.
     acc.declared_ids.insert(id);
 
@@ -576,7 +608,13 @@ fn visit_class(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        acc.nav.record(overlay, &name, &qname, node_kind::COMPONENT, Some(parent_id));
+        acc.nav.record(
+            overlay,
+            &name,
+            &qname,
+            node_kind::COMPONENT,
+            Some(parent_id),
+        );
         if FLUTTER_STATE_BASES.contains(&base) {
             acc.flutter.states += 1;
         } else {
@@ -796,7 +834,17 @@ fn visit_container(
         "extension_declaration" => acc.members.extensions += 1,
         _ => acc.members.extension_types += 1,
     }
-    emit_container(node, body, &name, src, file_rel, parent_qname, parent_id, repo, acc);
+    emit_container(
+        node,
+        body,
+        &name,
+        src,
+        file_rel,
+        parent_qname,
+        parent_id,
+        repo,
+        acc,
+    );
 }
 
 /// The CLASS `<module>::<name>` a member container declaration `node` mints
@@ -831,7 +879,8 @@ fn emit_container(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+        acc.nav
+            .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
     }
     let members = container_member_names(node, body, src);
     let elems = collect_dart_field_elem_types(body, src);
@@ -883,7 +932,17 @@ fn visit_extension(
         };
         acc.members.unnamed_ext_containers += 1;
         let name = format!("extension<{on}>");
-        emit_container(node, body, &name, src, file_rel, parent_qname, parent_id, repo, acc);
+        emit_container(
+            node,
+            body,
+            &name,
+            src,
+            file_rel,
+            parent_qname,
+            parent_id,
+            repo,
+            acc,
+        );
         return;
     };
     // The extension's own members, then the on-type's that no library-level
@@ -956,7 +1015,8 @@ fn visit_members(
     let mut declared = 0;
     let mut cursor = body.walk();
     for member in body.named_children(&mut cursor) {
-        if member.kind() == "class_member" && visit_class_member(member, src, file_rel, owner, repo, acc)
+        if member.kind() == "class_member"
+            && visit_class_member(member, src, file_rel, owner, repo, acc)
         {
             declared += 1;
         }
@@ -1058,7 +1118,14 @@ fn visit_class_heritage(node: TsNode, src: &[u8], id: NodeId, module_id: NodeId,
         // field is the hidden `_type_not_void`); mixins (`with`) nest as a
         // `mixins` child holding one or more types.
         for head in heritage_type_heads(superclass, src) {
-            emit_heritage_ref(head, edge_category::INHERITS_FROM, id, module_id, line_at(superclass), acc);
+            emit_heritage_ref(
+                head,
+                edge_category::INHERITS_FROM,
+                id,
+                module_id,
+                line_at(superclass),
+                acc,
+            );
         }
         let mut sc_cursor = superclass.walk();
         for child in superclass.named_children(&mut sc_cursor) {
@@ -1082,7 +1149,14 @@ fn emit_mixin_or_interface_refs(
     acc: &mut Acc,
 ) {
     for head in heritage_type_heads(clause, src) {
-        emit_heritage_ref(head, edge_category::IMPLEMENTS, id, module_id, line_at(clause), acc);
+        emit_heritage_ref(
+            head,
+            edge_category::IMPLEMENTS,
+            id,
+            module_id,
+            line_at(clause),
+            acc,
+        );
     }
 }
 
@@ -1168,7 +1242,10 @@ const FLUTTER_IMPORT_PREFIXES: &[&str] = &[
 /// ([`extends_head`]).
 fn flutter_component_base(class: TsNode, src: &[u8]) -> Option<&'static str> {
     let simple = extends_head(class, src)?;
-    FLUTTER_COMPONENT_BASES.iter().copied().find(|b| *b == simple)
+    FLUTTER_COMPONENT_BASES
+        .iter()
+        .copied()
+        .find(|b| *b == simple)
 }
 
 /// A `class_declaration`'s `extends` head (the `type_identifier`s directly
@@ -1356,17 +1433,25 @@ fn visit_field_initializers(
 ) {
     let mut lists = decl.walk();
     for list in decl.named_children(&mut lists) {
-        if !matches!(list.kind(), "initialized_identifier_list" | "static_final_declaration_list") {
+        if !matches!(
+            list.kind(),
+            "initialized_identifier_list" | "static_final_declaration_list"
+        ) {
             continue;
         }
         let mut items = list.walk();
         for item in list.named_children(&mut items) {
-            if !matches!(item.kind(), "initialized_identifier" | "static_final_declaration")
-                || item.child_by_field_name("value").is_none()
+            if !matches!(
+                item.kind(),
+                "initialized_identifier" | "static_final_declaration"
+            ) || item.child_by_field_name("value").is_none()
             {
                 continue;
             }
-            let Bindings { names: mut locals, rebound } = local_bindings(None, item, src);
+            let Bindings {
+                names: mut locals,
+                rebound,
+            } = local_bindings(None, item, src);
             if let Some(name) = item.child_by_field_name("name") {
                 locals.remove(text_of(name, src));
             }
@@ -1394,7 +1479,8 @@ fn visit_enum(
 ) {
     let Some(name_node) = node.child_by_field_name("name").or_else(|| {
         let mut c = node.walk();
-        node.named_children(&mut c).find(|ch| ch.kind() == "identifier")
+        node.named_children(&mut c)
+            .find(|ch| ch.kind() == "identifier")
     }) else {
         return;
     };
@@ -1606,7 +1692,16 @@ fn visit_top_level_consts(
     let mut cursor = list.walk();
     for decl in list.named_children(&mut cursor) {
         if decl.kind() == "static_final_declaration" {
-            emit_top_level_var(decl, doc.as_deref(), src, file_rel, parent_qname, parent_id, repo, acc);
+            emit_top_level_var(
+                decl,
+                doc.as_deref(),
+                src,
+                file_rel,
+                parent_qname,
+                parent_id,
+                repo,
+                acc,
+            );
         }
     }
 }
@@ -1631,7 +1726,16 @@ fn visit_top_level_vars(
     let mut cursor = list.walk();
     for decl in list.named_children(&mut cursor) {
         if decl.kind() == "initialized_identifier" {
-            emit_top_level_var(decl, doc.as_deref(), src, file_rel, parent_qname, parent_id, repo, acc);
+            emit_top_level_var(
+                decl,
+                doc.as_deref(),
+                src,
+                file_rel,
+                parent_qname,
+                parent_id,
+                repo,
+                acc,
+            );
         }
     }
 }
@@ -1750,7 +1854,8 @@ fn emit_top_level_var(
         && let Some((read, notifier)) = riverpod_provider(decl, src)
         && !(read.is_empty() && notifier.is_empty())
     {
-        acc.nav.record_fact(id, NavFact::RiverpodProvider { read, notifier });
+        acc.nav
+            .record_fact(id, NavFact::RiverpodProvider { read, notifier });
         acc.riverpod.providers += 1;
     }
     acc.top_level.initialisers += 1;
@@ -1759,7 +1864,10 @@ fn emit_top_level_var(
     // ..)`) binds its parameters; the variable's own name is no local.
     // The value is several `value` siblings (a primary and its selectors), so
     // the bindings are read over the whole declarator.
-    let Bindings { names: mut locals, rebound } = local_bindings(None, decl, src);
+    let Bindings {
+        names: mut locals,
+        rebound,
+    } = local_bindings(None, decl, src);
     locals.remove(name);
     let no_elems = HashMap::new();
     let scope = CallScope {
@@ -1850,7 +1958,10 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     else {
         return;
     };
-    let Some(path) = spec.child_by_field_name("uri").and_then(|u| import_uri(u, src)) else {
+    let Some(path) = spec
+        .child_by_field_name("uri")
+        .and_then(|u| import_uri(u, src))
+    else {
         return;
     };
     let alias = spec
@@ -2056,7 +2167,8 @@ fn push_tearoff_call(n: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc
     else {
         return;
     };
-    if let Some(qualifier) = scope.classify(CallQualifier::Bare(class.to_string()), &mut acc.bare_calls)
+    if let Some(qualifier) =
+        scope.classify(CallQualifier::Bare(class.to_string()), &mut acc.bare_calls)
     {
         acc.calls.push(CallSite {
             from,
@@ -2152,7 +2264,10 @@ fn is_name_reference(id: TsNode, src: &[u8]) -> bool {
     }
     !next.is_some_and(|sel| {
         sel.kind() == "selector"
-            && matches!(selector_part(sel, src), SelectorPart::Call | SelectorPart::TypeArgs)
+            && matches!(
+                selector_part(sel, src),
+                SelectorPart::Call | SelectorPart::TypeArgs
+            )
     })
 }
 
@@ -2164,7 +2279,10 @@ fn is_assignment_target(id: TsNode) -> bool {
         return false;
     };
     let mut cursor = left.walk();
-    if left.named_children(&mut cursor).any(|k| k.id() != id.id() && k.kind() != "comment") {
+    if left
+        .named_children(&mut cursor)
+        .any(|k| k.id() != id.id() && k.kind() != "comment")
+    {
         return false;
     }
     left.parent()
@@ -2228,7 +2346,8 @@ fn resolve_name_refs(acc: &mut Acc, module_qname: &str, repo: RepoId) {
         let ev = glia_code_domain::evidence::Evidence::emitter("parser:dart")
             .rule(rule)
             .line(r.line);
-        acc.edges.push(Edge::new(r.from, to, category, Confidence::Strong).with_cell(ev.to_cell()));
+        acc.edges
+            .push(Edge::new(r.from, to, category, Confidence::Strong).with_cell(ev.to_cell()));
         if accessor {
             acc.bare_calls.accessor_refs += 1;
         } else {
@@ -2263,7 +2382,12 @@ fn finish_member_reads(acc: &mut Acc) {
             name: r.name,
             line: r.line,
         };
-        if acc.nav.nav_facts.get(&r.from).is_some_and(|f| f.contains(&fact)) {
+        if acc
+            .nav
+            .nav_facts
+            .get(&r.from)
+            .is_some_and(|f| f.contains(&fact))
+        {
             continue;
         }
         acc.nav.record_fact(r.from, fact);
@@ -2362,7 +2486,11 @@ fn push_selector_chain_calls(
         for (qualifier, line) in chain_call_sites(primary, &selectors, src) {
             if let Some(qualifier) = scope.classify(qualifier, &mut acc.bare_calls) {
                 record_type_receiver(&qualifier, from, scope, acc);
-                acc.calls.push(CallSite { from, qualifier, line });
+                acc.calls.push(CallSite {
+                    from,
+                    qualifier,
+                    line,
+                });
             }
         }
         push_chain_reads(primary, &selectors, src, from, scope, acc);
@@ -2409,12 +2537,19 @@ fn push_chain_reads(
         let SelectorPart::Member(name) = part else {
             continue;
         };
-        if matches!(parts.get(j + 1), Some(SelectorPart::Call | SelectorPart::TypeArgs)) {
+        if matches!(
+            parts.get(j + 1),
+            Some(SelectorPart::Call | SelectorPart::TypeArgs)
+        ) {
             continue;
         }
-        let line = selectors.get(j).map_or(line_at(primary), |sel| line_at(*sel));
+        let line = selectors
+            .get(j)
+            .map_or(line_at(primary), |sel| line_at(*sel));
         if *name == "new" {
-            let only_type_args = parts[..j].iter().all(|p| matches!(p, SelectorPart::TypeArgs));
+            let only_type_args = parts[..j]
+                .iter()
+                .all(|p| matches!(p, SelectorPart::TypeArgs));
             if !is_this && only_type_args && is_dart_class_name(head) {
                 let bare = CallQualifier::Bare(head.to_string());
                 if let Some(qualifier) = scope.classify(bare, &mut acc.bare_calls) {
@@ -2535,7 +2670,10 @@ fn type_element_closure(
     if !ELEMENT_CALLBACKS.contains(cb) {
         return;
     }
-    let Some(closure) = selectors.get(cb_at + 1).and_then(|sel| first_positional_closure(*sel)) else {
+    let Some(closure) = selectors
+        .get(cb_at + 1)
+        .and_then(|sel| first_positional_closure(*sel))
+    else {
         return;
     };
     let Some(param) = sole_untyped_parameter(closure, src) else {
@@ -2551,12 +2689,18 @@ fn type_element_closure(
 /// The `function_expression` a call selector passes as its first positional
 /// argument (a `named_argument` is skipped, comments too), or None.
 fn first_positional_closure(call: TsNode) -> Option<TsNode> {
-    let part = call.named_child(0).filter(|p| p.kind() == "argument_part")?;
+    let part = call
+        .named_child(0)
+        .filter(|p| p.kind() == "argument_part")?;
     let mut cursor = part.walk();
-    let args = part.named_children(&mut cursor).find(|k| k.kind() == "arguments")?;
+    let args = part
+        .named_children(&mut cursor)
+        .find(|k| k.kind() == "arguments")?;
     let mut cursor = args.walk();
     let first = args.named_children(&mut cursor).find(|k| {
-        k.kind() == "argument" && k.named_child(0).is_some_and(|v| v.kind() != "named_argument")
+        k.kind() == "argument"
+            && k.named_child(0)
+                .is_some_and(|v| v.kind() != "named_argument")
     })?;
     let mut cursor = first.walk();
     let kids: Vec<TsNode> = first
@@ -2624,13 +2768,15 @@ fn closure_owns_receiver(closure: TsNode, param: &str, src: &[u8]) -> bool {
         if n.id() == closure.id() {
             continue;
         }
-        if n.kind() == "identifier" && !inside.contains(&n.start_byte()) && text_of(n, src) == param {
+        if n.kind() == "identifier" && !inside.contains(&n.start_byte()) && text_of(n, src) == param
+        {
             let mut next = n.next_named_sibling();
             while let Some(c) = next.filter(|c| c.kind() == "comment") {
                 next = c.next_named_sibling();
             }
             if next.is_some_and(|sel| {
-                sel.kind() == "selector" && matches!(selector_part(sel, src), SelectorPart::Member(_))
+                sel.kind() == "selector"
+                    && matches!(selector_part(sel, src), SelectorPart::Member(_))
             }) {
                 return false;
             }
@@ -2666,7 +2812,8 @@ fn record_type_receiver(qualifier: &CallQualifier, from: NodeId, scope: &CallSco
     let CallQualifier::Attribute { base, .. } = qualifier else {
         return;
     };
-    if !acc.type_names.contains(base) || scope.locals.contains(base) || scope.members.contains(base) {
+    if !acc.type_names.contains(base) || scope.locals.contains(base) || scope.members.contains(base)
+    {
         return;
     }
     acc.nav.record_local_type(from, base, base);
@@ -2915,7 +3062,8 @@ fn local_bindings(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> Bindin
         // signature itself. LA.37b / CB.9: a constructor / factory / operator
         // body and a constructor's initializer list are walked too, and its
         // parameters are locals (`this.x` field formals bind nothing here).
-        let parts: Vec<TsNode> = if matches!(sig.kind(), "function_signature" | "setter_signature") {
+        let parts: Vec<TsNode> = if matches!(sig.kind(), "function_signature" | "setter_signature")
+        {
             vec![sig]
         } else {
             let mut c = sig.walk();
@@ -2973,9 +3121,9 @@ fn local_bindings(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> Bindin
             // `var (a, b) = ..`, `for (final (k, v) in ..)`: an untyped
             // pattern variable is a plain identifier inside the pattern.
             "record_pattern" | "list_pattern" | "map_pattern" | "object_pattern"
-                if n
-                    .parent()
-                    .is_some_and(|p| matches!(p.kind(), "pattern_variable_declaration" | "for_statement")) =>
+                if n.parent().is_some_and(|p| {
+                    matches!(p.kind(), "pattern_variable_declaration" | "for_statement")
+                }) =>
             {
                 pattern_identifiers(n, src, &mut names);
             }
@@ -3311,7 +3459,13 @@ fn type_argument_heads(type_arguments: TsNode, src: &[u8]) -> Vec<String> {
     }
     heads
         .into_iter()
-        .map(|h| if DART_BUILTIN_TYPES.contains(&h.as_str()) { String::new() } else { h })
+        .map(|h| {
+            if DART_BUILTIN_TYPES.contains(&h.as_str()) {
+                String::new()
+            } else {
+                h
+            }
+        })
         .collect()
 }
 
@@ -3438,7 +3592,9 @@ fn riverpod_provider(decl: TsNode, src: &[u8]) -> Option<(String, String)> {
 /// (`Chat.new`), or an arrow closure whose body is `T(..)`, `T.named(..)` or
 /// `const` / `new T(..)`. A builtin, a block body or anything else -> None.
 fn factory_type(call: TsNode, src: &[u8]) -> Option<String> {
-    let part = call.named_child(0).filter(|p| p.kind() == "argument_part")?;
+    let part = call
+        .named_child(0)
+        .filter(|p| p.kind() == "argument_part")?;
     let arg = first_positional(part)?;
     let kids = named_kids(arg);
     let [value] = kids.as_slice() else {
@@ -3460,13 +3616,20 @@ fn factory_type(call: TsNode, src: &[u8]) -> Option<String> {
             }
             let expr = named_kids(body);
             match expr.as_slice() {
-                [creation] if matches!(creation.kind(), "const_object_expression" | "new_expression") => {
+                [creation]
+                    if matches!(
+                        creation.kind(),
+                        "const_object_expression" | "new_expression"
+                    ) =>
+                {
                     creation_class(*creation, src)?
                 }
                 [head, sels @ ..]
-                    if head.kind() == "identifier" && sels.iter().all(|s| s.kind() == "selector") =>
+                    if head.kind() == "identifier"
+                        && sels.iter().all(|s| s.kind() == "selector") =>
                 {
-                    let parts: Vec<SelectorPart> = sels.iter().map(|s| selector_part(*s, src)).collect();
+                    let parts: Vec<SelectorPart> =
+                        sels.iter().map(|s| selector_part(*s, src)).collect();
                     match parts.as_slice() {
                         [SelectorPart::Call] | [SelectorPart::Member(_), SelectorPart::Call] => {
                             text_of(*head, src).trim()
@@ -3495,9 +3658,10 @@ fn creation_class<'a>(n: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
         .filter(|t| !t.is_empty())
         .collect();
     match parts.as_slice() {
-        [class, named] if n.child_by_field_name("constructor").is_none()
-            && is_dart_class_name(class)
-            && !is_dart_class_name(named) =>
+        [class, named]
+            if n.child_by_field_name("constructor").is_none()
+                && is_dart_class_name(class)
+                && !is_dart_class_name(named) =>
         {
             Some(*class)
         }
@@ -3538,7 +3702,10 @@ fn provider_generic_misparse<'a>(rel: TsNode<'a>, src: &'a [u8]) -> Option<(&'a 
     }
     let mods_ok = mods.iter().all(|m| {
         m.kind() == "selector"
-            && matches!(selector_part(*m, src), SelectorPart::Member("autoDispose" | "family"))
+            && matches!(
+                selector_part(*m, src),
+                SelectorPart::Member("autoDispose" | "family")
+            )
     });
     if !mods_ok {
         return None;
@@ -3568,14 +3735,21 @@ fn provider_read_text(primary: TsNode, sels: &[TsNode], src: &[u8]) -> Option<St
     let [read, call] = sels else {
         return None;
     };
-    if !matches!(selector_part(*read, src), SelectorPart::Member("read" | "watch"))
-        || !matches!(selector_part(*call, src), SelectorPart::Call)
+    if !matches!(
+        selector_part(*read, src),
+        SelectorPart::Member("read" | "watch")
+    ) || !matches!(selector_part(*call, src), SelectorPart::Call)
     {
         return None;
     }
     let part = call.named_child(0)?;
-    let args = named_kids(part).into_iter().find(|k| k.kind() == "arguments")?;
-    let list: Vec<TsNode> = named_kids(args).into_iter().filter(|k| k.kind() == "argument").collect();
+    let args = named_kids(part)
+        .into_iter()
+        .find(|k| k.kind() == "arguments")?;
+    let list: Vec<TsNode> = named_kids(args)
+        .into_iter()
+        .filter(|k| k.kind() == "argument")
+        .collect();
     let [arg] = list.as_slice() else {
         return None;
     };
@@ -3621,7 +3795,10 @@ fn provider_argument(arg: TsNode, src: &[u8]) -> bool {
 /// the scope binds twice or more ([`CallScope::rebound`]) is never typed:
 /// the one local type per scope could belong to either binding.
 fn record_provider_local(def: TsNode, src: &[u8], from: NodeId, scope: &CallScope, acc: &mut Acc) {
-    let Some(name) = def.child_by_field_name("name").map(|n| text_of(n, src).trim()) else {
+    let Some(name) = def
+        .child_by_field_name("name")
+        .map(|n| text_of(n, src).trim())
+    else {
         return;
     };
     if name.is_empty() || scope.rebound.contains(name) {
@@ -3687,11 +3864,17 @@ fn state_holder_field(class: TsNode, src: &[u8], id: NodeId, acc: &mut Acc) {
         return;
     };
     let mut cursor = superclass.walk();
-    let Some(args) = superclass.named_children(&mut cursor).find(|k| k.kind() == "type_arguments")
+    let Some(args) = superclass
+        .named_children(&mut cursor)
+        .find(|k| k.kind() == "type_arguments")
     else {
         return;
     };
-    let Some(ty) = type_argument_heads(args, src).into_iter().next().filter(|t| !t.is_empty()) else {
+    let Some(ty) = type_argument_heads(args, src)
+        .into_iter()
+        .next()
+        .filter(|t| !t.is_empty())
+    else {
         return;
     };
     acc.nav.record_field_type(id, field, &ty);
@@ -4793,7 +4976,12 @@ fn construction_binding(value: &[TsNode], src: &[u8]) -> Option<Binding> {
 // call names no handler. go_router pages get none: their `builder:` is a
 // closure and nav links are LA.6's.
 
-fn scan_dart_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) -> ShelfRouteStats {
+fn scan_dart_routes(
+    source: &str,
+    repo: RepoId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) -> ShelfRouteStats {
     // Track emitted routes to dedup — a file may hit the same path twice
     // between the tree walk and the text scan.
     let mut seen = std::collections::HashSet::new();
@@ -5220,7 +5408,11 @@ const DART_BANNER_LINES: usize = 40;
 /// `generated` beside `do not modify` / `do not edit` (protoc's
 /// `Generated code. Do not modify.`).
 fn dart_generated(file_rel: &str, source: &str) -> bool {
-    let base = file_rel.rsplit(['/', '\\']).next().unwrap_or(file_rel).to_ascii_lowercase();
+    let base = file_rel
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_rel)
+        .to_ascii_lowercase();
     if DART_GENERATED_SUFFIXES.iter().any(|s| base.ends_with(s)) {
         return true;
     }
@@ -5248,7 +5440,12 @@ fn dart_generated(file_rel: &str, source: &str) -> bool {
 /// `@JsonSerializable` fields, else its `fromJson` factory's keys (see the
 /// section head). `None` for a class that is neither, a generated file's
 /// model (counted) and a schema with no field.
-fn dart_model_schema(class: TsNode, body: TsNode, src: &[u8], acc: &mut Acc) -> Option<ModelSchema> {
+fn dart_model_schema(
+    class: TsNode,
+    body: TsNode,
+    src: &[u8],
+    acc: &mut Acc,
+) -> Option<ModelSchema> {
     let serializable = class_annotation(class, "JsonSerializable", src);
     let factory = from_json_factory(body, src);
     if serializable.is_none() && factory.is_none() {
@@ -5299,7 +5496,11 @@ fn from_json_factory<'t>(body: TsNode<'t>, src: &[u8]) -> Option<FromJson<'t>> {
         let Some(sig) = kids
             .iter()
             .filter(|k| k.kind() == "method_signature")
-            .find_map(|m| named_kids(*m).into_iter().find(|p| p.kind() == "factory_constructor_signature"))
+            .find_map(|m| {
+                named_kids(*m)
+                    .into_iter()
+                    .find(|p| p.kind() == "factory_constructor_signature")
+            })
         else {
             continue;
         };
@@ -5320,7 +5521,10 @@ fn from_json_factory<'t>(body: TsNode<'t>, src: &[u8]) -> Option<FromJson<'t>> {
             };
             map_like.then(|| text_of(name, src).to_string())
         });
-        return Some(FromJson { body: fn_body, map_param });
+        return Some(FromJson {
+            body: fn_body,
+            map_param,
+        });
     }
     None
 }
@@ -5364,11 +5568,19 @@ fn from_json_schema(f: &FromJson, fields: &[(String, String)], src: &[u8]) -> Op
             .models
             .first()
             .cloned()
-            .or_else(|| t.each.as_ref().and_then(|e| e.models.first()).map(|m| format!("List<{m}>")))
+            .or_else(|| {
+                t.each
+                    .as_ref()
+                    .and_then(|e| e.models.first())
+                    .map(|m| format!("List<{m}>"))
+            })
             .or_else(|| t.casts.first().cloned())
             .or_else(|| declared.clone())
             .unwrap_or_else(|| "dynamic".to_string());
-        let required = t.required() || declared.as_deref().is_some_and(|d| !dart_nullable(d) && !t.defaulted);
+        let required = t.required()
+            || declared
+                .as_deref()
+                .is_some_and(|d| !dart_nullable(d) && !t.defaulted);
         let mut field = ModelField::new(key, &ty, required);
         field.field = label.filter(|l| l != key);
         schema.fields.push(field);
@@ -5383,7 +5595,12 @@ fn from_json_schema(f: &FromJson, fields: &[(String, String)], src: &[u8]) -> Op
 /// so the field's declared type describes the wire value. Through a call or
 /// a conversion (`joinStatusFrom(j['s'])`, `(j['n'] as num?)?.toInt()`) the
 /// field is still named, its type is not.
-fn assigned_field(sel: TsNode, top: TsNode, fields: &[(String, String)], src: &[u8]) -> Option<(String, bool)> {
+fn assigned_field(
+    sel: TsNode,
+    top: TsNode,
+    fields: &[(String, String)],
+    src: &[u8],
+) -> Option<(String, bool)> {
     let only_bangs = |n: TsNode| {
         let mut next = n.next_named_sibling();
         while let Some(k) = next {
@@ -5427,7 +5644,9 @@ fn dart_nullable(ty: &str) -> bool {
 /// The class's annotation `@<name>` / `@<name>(..)`.
 fn class_annotation<'t>(class: TsNode<'t>, name: &str, src: &[u8]) -> Option<TsNode<'t>> {
     named_kids(class).into_iter().find(|a| {
-        a.kind() == "annotation" && a.child_by_field_name("name").is_some_and(|n| text_of(n, src) == name)
+        a.kind() == "annotation"
+            && a.child_by_field_name("name")
+                .is_some_and(|n| text_of(n, src) == name)
     })
 }
 
@@ -5446,8 +5665,15 @@ fn annotation_args<'t>(annotation: TsNode<'t>, src: &[u8]) -> Vec<(String, Vec<T
         .filter_map(|na| {
             let kids = named_kids(na);
             let (label, value) = kids.split_first()?;
-            (label.kind() == "label")
-                .then(|| (text_of(*label, src).trim_end_matches(':').trim().to_string(), value.to_vec()))
+            (label.kind() == "label").then(|| {
+                (
+                    text_of(*label, src)
+                        .trim_end_matches(':')
+                        .trim()
+                        .to_string(),
+                    value.to_vec(),
+                )
+            })
         })
         .collect()
 }
@@ -5511,9 +5737,16 @@ fn type_text(node: TsNode, stop: usize, src: &[u8]) -> Option<String> {
             break;
         }
         match child.kind() {
-            "type_identifier" if text_of(child, src) != "required" => out.push_str(text_of(child, src)),
+            "type_identifier" if text_of(child, src) != "required" => {
+                out.push_str(text_of(child, src))
+            }
             "type_arguments" | "function_type" | "record_type" | "void_type" => {
-                out.push_str(&text_of(child, src).split_whitespace().collect::<Vec<_>>().join(" "));
+                out.push_str(
+                    &text_of(child, src)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
             }
             "?" | "." if !out.is_empty() => out.push_str(child.kind()),
             _ => {}
@@ -5532,7 +5765,11 @@ fn serializable_schema(annotation: TsNode, body: TsNode, src: &[u8]) -> ModelSch
     let rename = annotation_args(annotation, src)
         .into_iter()
         .find(|(l, _)| l == "fieldRename")
-        .and_then(|(_, v)| v.iter().rev().find_map(|n| first_identifier_text(*n, src).filter(|_| n.kind() == "selector")))
+        .and_then(|(_, v)| {
+            v.iter()
+                .rev()
+                .find_map(|n| first_identifier_text(*n, src).filter(|_| n.kind() == "selector"))
+        })
         .unwrap_or_default();
     let defaults = constructor_defaults(body, src);
     let mut schema = ModelSchema::new(WireFormat::Dart);
@@ -5542,7 +5779,11 @@ fn serializable_schema(annotation: TsNode, body: TsNode, src: &[u8]) -> ModelSch
         }
         let key = named_kids(member)
             .into_iter()
-            .find(|a| a.kind() == "annotation" && a.child_by_field_name("name").is_some_and(|n| text_of(n, src) == "JsonKey"))
+            .find(|a| {
+                a.kind() == "annotation"
+                    && a.child_by_field_name("name")
+                        .is_some_and(|n| text_of(n, src) == "JsonKey")
+            })
             .map(|a| annotation_args(a, src))
             .unwrap_or_default();
         let flag = |name: &str, want: &str| {
@@ -5558,7 +5799,9 @@ fn serializable_schema(annotation: TsNode, body: TsNode, src: &[u8]) -> ModelSch
             .and_then(|(_, v)| v.first().and_then(|n| literal_text(*n, src)));
         let has_default = key.iter().any(|(l, _)| l == "defaultValue");
         for (name, ty) in member_fields(member, src) {
-            let json = renamed.clone().unwrap_or_else(|| field_rename(&name, &rename));
+            let json = renamed
+                .clone()
+                .unwrap_or_else(|| field_rename(&name, &rename));
             let required = flag("required", "true")
                 || (!dart_nullable(&ty) && !has_default && !defaults.contains(&name));
             let mut field = ModelField::new(&json, &ty, required);
@@ -5580,13 +5823,17 @@ fn constructor_defaults(body: TsNode, src: &[u8]) -> HashSet<String> {
                 "optional_formal_parameters" => walk(*p, src, out),
                 "formal_parameter" => {
                     let defaulted = optional
-                        && kids
-                            .get(i + 1)
-                            .is_some_and(|n| !matches!(n.kind(), "formal_parameter" | "annotation"));
+                        && kids.get(i + 1).is_some_and(|n| {
+                            !matches!(n.kind(), "formal_parameter" | "annotation")
+                        });
                     let field = named_kids(*p)
                         .into_iter()
                         .find(|c| c.kind() == "constructor_param")
-                        .and_then(|c| named_kids(c).into_iter().rfind(|i| i.kind() == "identifier"));
+                        .and_then(|c| {
+                            named_kids(c)
+                                .into_iter()
+                                .rfind(|i| i.kind() == "identifier")
+                        });
                     if let (true, Some(f)) = (defaulted, field) {
                         out.insert(text_of(f, src).to_string());
                     }
@@ -5704,7 +5951,10 @@ enum FlowRoot<'t> {
     Param(String),
     /// A Dio call: `.data` of its result variable (`var`), or of the
     /// awaited call itself.
-    Dio { var: Option<String>, call: TsNode<'t> },
+    Dio {
+        var: Option<String>,
+        call: TsNode<'t>,
+    },
 }
 
 /// What an expression evaluates to.
@@ -5778,7 +6028,10 @@ impl<'t, 's> JsonFlow<'t, 's> {
             let kids = named_kids(n);
             let mut i = 0;
             while i < kids.len() {
-                let len = kids[i + 1..].iter().take_while(|k| k.kind() == "selector").count();
+                let len = kids[i + 1..]
+                    .iter()
+                    .take_while(|k| k.kind() == "selector")
+                    .count();
                 if kids[i].kind() != "selector" && len > 0 {
                     self.eval_parts(&kids[i..=i + len]);
                 }
@@ -5806,7 +6059,10 @@ impl<'t, 's> JsonFlow<'t, 's> {
     }
 
     fn bind(&mut self, def: TsNode<'t>) {
-        let Some(name) = def.child_by_field_name("name").map(|n| text_of(n, self.src).to_string()) else {
+        let Some(name) = def
+            .child_by_field_name("name")
+            .map(|n| text_of(n, self.src).to_string())
+        else {
             return;
         };
         let mut c = def.walk();
@@ -5847,14 +6103,18 @@ impl<'t, 's> JsonFlow<'t, 's> {
     /// conditional, an `if`, a collection `if`, a loop, a `switch` case, a
     /// `catch`, a closure, the right side of `&&` / `||` / `??`.
     fn guarded(&self, n: TsNode) -> bool {
-        let first_holds = |p: TsNode, at: TsNode| named_kids(p).first().is_some_and(|c| c.id() == at.id());
+        let first_holds =
+            |p: TsNode, at: TsNode| named_kids(p).first().is_some_and(|c| c.id() == at.id());
         let mut at = n;
         while let Some(p) = at.parent() {
             if self.top.is_some_and(|t| t.id() == p.id()) {
                 return false;
             }
             let guarded = match p.kind() {
-                "conditional_expression" | "if_statement" | "if_element" | "logical_and_expression"
+                "conditional_expression"
+                | "if_statement"
+                | "if_element"
+                | "logical_and_expression"
                 | "logical_or_expression" => !first_holds(p, at),
                 "if_null_expression" => {
                     let mut c = p.walk();
@@ -5862,8 +6122,13 @@ impl<'t, 's> JsonFlow<'t, 's> {
                         .take_while(|k| k.kind() != "??")
                         .all(|k| k.id() != at.id())
                 }
-                "function_expression" | "for_statement" | "while_statement" | "do_statement"
-                | "switch_statement_case" | "switch_expression_case" | "catch_clause" => true,
+                "function_expression"
+                | "for_statement"
+                | "while_statement"
+                | "do_statement"
+                | "switch_statement_case"
+                | "switch_expression_case"
+                | "catch_clause" => true,
                 _ => false,
             };
             if guarded {
@@ -5893,7 +6158,10 @@ impl<'t, 's> JsonFlow<'t, 's> {
             if at.id() == call.id() {
                 return true;
             }
-            if !matches!(at.kind(), "unary_expression" | "await_expression" | "parenthesized_expression") {
+            if !matches!(
+                at.kind(),
+                "unary_expression" | "await_expression" | "parenthesized_expression"
+            ) {
                 return false;
             }
             match named_kids(at).as_slice() {
@@ -5971,7 +6239,9 @@ impl<'t, 's> JsonFlow<'t, 's> {
             return None;
         }
         let chain = named_kids(*inner);
-        let open = chain.iter().position(|k| k.kind() == "relational_operator")?;
+        let open = chain
+            .iter()
+            .position(|k| k.kind() == "relational_operator")?;
         if text_of(chain[open], self.src) != "<" {
             return None;
         }
@@ -6058,7 +6328,9 @@ impl<'t, 's> JsonFlow<'t, 's> {
         }
         match selector_part(sel, self.src) {
             SelectorPart::TypeArgs => Some(Flow::Json(path, defaulted)),
-            SelectorPart::Opaque if text_of(sel, self.src).trim() == "!" => Some(Flow::Json(path, defaulted)),
+            SelectorPart::Opaque if text_of(sel, self.src).trim() == "!" => {
+                Some(Flow::Json(path, defaulted))
+            }
             SelectorPart::Member("map") => {
                 let call = sels
                     .get(*i)
@@ -6112,17 +6384,28 @@ impl<'t, 's> JsonFlow<'t, 's> {
         }
         let params: Vec<TsNode> = cb
             .child_by_field_name("parameters")
-            .map(|l| named_kids(l).into_iter().filter(|p| p.kind() == "formal_parameter").collect())
+            .map(|l| {
+                named_kids(l)
+                    .into_iter()
+                    .filter(|p| p.kind() == "formal_parameter")
+                    .collect()
+            })
             .unwrap_or_default();
         let [param] = params.as_slice() else {
             // A two-parameter callback is a Map's `.map((k, v) => ..)`: over
             // the factory's own parameter it reads every key.
-            self.escaped |= params.len() == 2 && elem == [Step::Each] && matches!(self.root, FlowRoot::Param(_));
+            self.escaped |= params.len() == 2
+                && elem == [Step::Each]
+                && matches!(self.root, FlowRoot::Param(_));
             return;
         };
         let Some(name) = param
             .child_by_field_name("name")
-            .or_else(|| named_kids(*param).into_iter().rfind(|k| k.kind() == "identifier"))
+            .or_else(|| {
+                named_kids(*param)
+                    .into_iter()
+                    .rfind(|k| k.kind() == "identifier")
+            })
             .map(|n| text_of(n, self.src).to_string())
         else {
             return;
@@ -6148,12 +6431,18 @@ impl<'t, 's> JsonFlow<'t, 's> {
 
 /// `C.fromJson(..)` / `p.C.fromJson(..)` at `head` + `sels`: the model name
 /// and the call selector.
-fn from_json_call<'t>(head: TsNode<'t>, sels: &[TsNode<'t>], src: &[u8]) -> Option<(String, TsNode<'t>)> {
+fn from_json_call<'t>(
+    head: TsNode<'t>,
+    sels: &[TsNode<'t>],
+    src: &[u8],
+) -> Option<(String, TsNode<'t>)> {
     let name = text_of(head, src);
     let (model, rest) = match sels {
         [m, rest @ ..] if is_dart_class_name(name) => (name.to_string(), (m, rest)),
         [c, m, rest @ ..] if !is_dart_class_name(name) => match selector_part(*c, src) {
-            SelectorPart::Member(cls) if is_dart_class_name(cls) => (format!("{name}.{cls}"), (m, rest)),
+            SelectorPart::Member(cls) if is_dart_class_name(cls) => {
+                (format!("{name}.{cls}"), (m, rest))
+            }
             _ => return None,
         },
         _ => return None,
@@ -6175,7 +6464,9 @@ fn from_json_tear_off(kids: &[TsNode], src: &[u8]) -> Option<String> {
     let parts: Vec<SelectorPart> = sels.iter().map(|s| selector_part(*s, src)).collect();
     match parts.as_slice() {
         [SelectorPart::Member("fromJson")] if is_dart_class_name(name) => Some(name.to_string()),
-        [SelectorPart::Member(cls), SelectorPart::Member("fromJson")] if is_dart_class_name(cls) => {
+        [SelectorPart::Member(cls), SelectorPart::Member("fromJson")]
+            if is_dart_class_name(cls) =>
+        {
             Some(format!("{name}.{cls}"))
         }
         _ => None,
@@ -6188,7 +6479,10 @@ fn first_positional(call: TsNode) -> Option<TsNode> {
     named_kids(args)
         .into_iter()
         .filter(|a| a.kind() == "argument")
-        .find(|a| a.named_child(0).is_some_and(|n| n.kind() != "named_argument"))
+        .find(|a| {
+            a.named_child(0)
+                .is_some_and(|n| n.kind() != "named_argument")
+        })
 }
 
 /// What a subscript selector indexes with.
@@ -6210,7 +6504,10 @@ fn subscript(sel: TsNode, src: &[u8]) -> Option<Index> {
     ) {
         return None;
     }
-    if !inner.child(0).is_some_and(|t| matches!(t.kind(), "[" | "?[" | "?")) {
+    if !inner
+        .child(0)
+        .is_some_and(|t| matches!(t.kind(), "[" | "?[" | "?"))
+    {
         return None;
     }
     let index = named_kids(inner).into_iter().next()?;
@@ -6300,7 +6597,10 @@ impl ReadTree {
                 .iter()
                 .map(|(k, _, t)| ShapeField::new(k, t.required(), t.value_shape(depth + 1)))
                 .collect();
-            members.push(Shape::Object { fields, open: false });
+            members.push(Shape::Object {
+                fields,
+                open: false,
+            });
         }
         for m in &self.models {
             members.push(Shape::Named {
@@ -6412,7 +6712,9 @@ fn result_var(call: TsNode, src: &[u8]) -> Option<String> {
     {
         at = p;
     }
-    let def = at.parent().filter(|p| p.kind() == "initialized_variable_definition")?;
+    let def = at
+        .parent()
+        .filter(|p| p.kind() == "initialized_variable_definition")?;
     let mut c = def.walk();
     let value: Vec<TsNode> = def
         .children_by_field_name("value", &mut c)
@@ -6422,7 +6724,10 @@ fn result_var(call: TsNode, src: &[u8]) -> Option<String> {
         return None;
     };
     (only.id() == at.id())
-        .then(|| def.child_by_field_name("name").map(|n| text_of(n, src).to_string()))
+        .then(|| {
+            def.child_by_field_name("name")
+                .map(|n| text_of(n, src).to_string())
+        })
         .flatten()
 }
 
@@ -6442,8 +6747,9 @@ fn dio_request_shape(args: TsNode, src: &[u8]) -> Option<Shape> {
         .filter(|a| a.kind() == "argument")
         .filter_map(|a| a.named_child(0).filter(|n| n.kind() == "named_argument"))
         .find(|na| {
-            na.named_child(0)
-                .is_some_and(|l| l.kind() == "label" && text_of(l, src).trim_end_matches(':').trim() == "data")
+            na.named_child(0).is_some_and(|l| {
+                l.kind() == "label" && text_of(l, src).trim_end_matches(':').trim() == "data"
+            })
         })?;
     let value: Vec<TsNode> = named_kids(data).into_iter().skip(1).collect();
     match value.as_slice() {
@@ -6459,7 +6765,9 @@ fn to_json_type(parts: &[TsNode], at: TsNode, src: &[u8]) -> Option<String> {
     };
     let empty_call = matches!(selector_part(*call, src), SelectorPart::Call)
         && first_descendant_of_kind(*call, "argument").is_none();
-    (recv.kind() == "identifier" && matches!(selector_part(*m, src), SelectorPart::Member("toJson")) && empty_call)
+    (recv.kind() == "identifier"
+        && matches!(selector_part(*m, src), SelectorPart::Member("toJson"))
+        && empty_call)
         .then(|| declared_type(text_of(*recv, src), at, src))
         .flatten()
 }
@@ -6468,10 +6776,19 @@ fn to_json_type(parts: &[TsNode], at: TsNode, src: &[u8]) -> Option<String> {
 /// A collection-`if` key is not required; a spread, a `for` or a computed key
 /// leaves it open. `depth` bounds nested literals.
 fn map_literal_shape(lit: TsNode, src: &[u8], depth: u8) -> Option<Shape> {
-    fn entries(node: TsNode, required: bool, src: &[u8], depth: u8, fields: &mut Vec<ShapeField>, open: &mut bool) -> bool {
+    fn entries(
+        node: TsNode,
+        required: bool,
+        src: &[u8],
+        depth: u8,
+        fields: &mut Vec<ShapeField>,
+        open: &mut bool,
+    ) -> bool {
         match node.kind() {
             "pair" => {
-                let key = node.child_by_field_name("key").and_then(|k| literal_text(k, src));
+                let key = node
+                    .child_by_field_name("key")
+                    .and_then(|k| literal_text(k, src));
                 let Some(key) = key else {
                     *open = true;
                     return true;
@@ -6529,12 +6846,10 @@ fn literal_value_shape(value: &[TsNode], at: TsNode, src: &[u8], depth: u8) -> S
             "true" | "false" => named("bool"),
             "null_literal" => named("Null"),
             "list_literal" => named("List"),
-            "set_or_map_literal" if depth > 0 => {
-                map_literal_shape(*v, src, depth - 1).unwrap_or_else(|| Shape::open(text_of(*v, src)))
-            }
-            "identifier" => {
-                declared_type(text_of(*v, src), at, src).map_or_else(|| Shape::open(text_of(*v, src)), |t| named(&t))
-            }
+            "set_or_map_literal" if depth > 0 => map_literal_shape(*v, src, depth - 1)
+                .unwrap_or_else(|| Shape::open(text_of(*v, src))),
+            "identifier" => declared_type(text_of(*v, src), at, src)
+                .map_or_else(|| Shape::open(text_of(*v, src)), |t| named(&t)),
             "type_cast_expression" => named_kids(*v)
                 .last()
                 .filter(|c| c.kind() == "type_cast")
@@ -6545,7 +6860,11 @@ fn literal_value_shape(value: &[TsNode], at: TsNode, src: &[u8], depth: u8) -> S
         parts => match to_json_type(parts, at, src) {
             Some(t) => named(&t),
             None => Shape::open(&collapse_ws(
-                &parts.iter().map(|p| text_of(*p, src)).collect::<Vec<_>>().join(""),
+                &parts
+                    .iter()
+                    .map(|p| text_of(*p, src))
+                    .collect::<Vec<_>>()
+                    .join(""),
             )),
         },
     }
@@ -6574,7 +6893,9 @@ fn declared_type(name: &str, at: TsNode, src: &[u8]) -> Option<String> {
                         let Some(n) = def.child_by_field_name("name") else {
                             continue;
                         };
-                        if def.kind() == "initialized_variable_definition" && text_of(n, src) == name {
+                        if def.kind() == "initialized_variable_definition"
+                            && text_of(n, src) == name
+                        {
                             return type_text(def, n.id(), src);
                         }
                     }
@@ -6589,7 +6910,10 @@ fn declared_type(name: &str, at: TsNode, src: &[u8]) -> Option<String> {
                 }
             }
             "function_expression" => {
-                if let Some(t) = p.child_by_field_name("parameters").and_then(|l| param_type(l, name, src)) {
+                if let Some(t) = p
+                    .child_by_field_name("parameters")
+                    .and_then(|l| param_type(l, name, src))
+                {
                     return Some(t);
                 }
             }
@@ -6649,8 +6973,22 @@ class User {
 enum Status { active, inactive }
 "#;
         let fp = parse_file(source, "lib/user.dart", "lib::user", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -6671,7 +7009,14 @@ void main() {
 }
 "#;
         let fp = parse_file(source, "lib/main.dart", "lib::main", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            1
+        );
     }
 
     /// A6.5: the Bare heritage refs `class_id` carries, as (name, category),
@@ -6682,7 +7027,10 @@ void main() {
             .iter()
             .filter(|r| r.from == class_id)
             .map(|r| {
-                assert_eq!(r.from_module, module_id, "heritage ref must come from the file MODULE");
+                assert_eq!(
+                    r.from_module, module_id,
+                    "heritage ref must come from the file MODULE"
+                );
                 let CallQualifier::Bare(name) = &r.qualifier else {
                     panic!("heritage ref must be Bare, got {:?}", r.qualifier);
                 };
@@ -6799,18 +7147,21 @@ class X extends Base with Mix implements IFoo {
         let fp = parse_file(source, "lib/cfg.dart", "lib::cfg", repo()).unwrap();
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "lib::cfg::feeBps");
         // STATE_VAR node emitted (documented primitive survives the noise gate).
-        let node = fp.nodes.iter().find(|n| n.id == id).expect("feeBps STATE_VAR node");
-        assert_eq!(
-            *fp.nav.kind_by_id.get(&id).unwrap(),
-            node_kind::STATE_VAR
-        );
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("feeBps STATE_VAR node");
+        assert_eq!(*fp.nav.kind_by_id.get(&id).unwrap(), node_kind::STATE_VAR);
         // Doc cell carried through.
         assert!(node.cells.iter().any(|c| c.kind == cell_type::DOC));
         // DEFINES edge module→const.
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::cfg");
-        assert!(fp.edges.iter().any(|e| e.from == module_id
-            && e.to == id
-            && e.category == edge_category::DEFINES));
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == module_id && e.to == id && e.category == edge_category::DEFINES)
+        );
     }
 
     #[test]
@@ -6935,8 +7286,18 @@ final app = Router()
 }
 "#;
         let fp = parse_file(source, "lib/api.dart", "lib::api", repo()).unwrap();
-        let ep_get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
-        let ep_post = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/users");
+        let ep_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users/${…}",
+        );
+        let ep_post = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:POST:/users",
+        );
         assert!(
             fp.nodes.iter().any(|n| n.id == ep_get),
             "expected GET /users/${{…}} ENDPOINT node"
@@ -6947,7 +7308,9 @@ final app = Router()
         );
         // Must NOT emit phantom ROUTE nodes for the client calls.
         assert!(
-            !fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/$id")),
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/users/$id")),
             "client dio.get must not become a server ROUTE"
         );
         // CALLS edge from the enclosing method to each endpoint.
@@ -7003,7 +7366,12 @@ class ApiClient {
 "#;
         let fp = parse_file(source, "lib/api_client.dart", "lib::api_client", repo()).unwrap();
         let ep = |m: &str, p: &str| {
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, &format!("endpoint:{m}:{p}"))
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::ENDPOINT,
+                &format!("endpoint:{m}:{p}"),
+            )
         };
 
         let post = ep("POST", "/users");
@@ -7042,7 +7410,10 @@ class ApiClient {
 
         // An unchanged path carries no `raw`.
         let plain = endpoint_hit(&fp, ep("DELETE", "/users")).expect("DELETE /users");
-        assert!(!plain.contains("\"raw\""), "unchanged path must not carry raw: {plain}");
+        assert!(
+            !plain.contains("\"raw\""),
+            "unchanged path must not carry raw: {plain}"
+        );
         // A11.5: nor a `host`; the interpolated base has none either.
         assert!(
             !plain.contains("\"host\""),
@@ -7055,7 +7426,11 @@ class ApiClient {
 
         // And no phantom server ROUTE for any of these client calls.
         assert!(!fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
-        assert!(!fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users")));
+        assert!(
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("DELETE", "/users"))
+        );
     }
 
     /// A11.5 — the dio literal's authority lands on ENDPOINT_HIT as `host`,
@@ -7293,7 +7668,10 @@ class ApiClient {
         let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::a::A");
         assert_eq!(calls_from(&fp, "lib::a::A::A"), vec![attr("repo", "init")]);
-        assert_eq!(calls_from(&fp, "lib::a::A::name"), vec![attr("repo", "name")]);
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::name"),
+            vec![attr("repo", "name")]
+        );
         assert_eq!(calls_from(&fp, "lib::a::A::first"), vec![]);
         assert!(!fp.calls.iter().any(|c| c.from == class), "{:?}", fp.calls);
         assert_eq!(fp.calls.len(), 2, "{:?}", fp.calls);
@@ -7495,7 +7873,10 @@ int helper(int x) => x + 1;
     #[test]
     fn bare_member_call_is_self_method() {
         let fp = bare_calls_fixture();
-        assert_eq!(calls_from(&fp, "lib::calc::Calc::total"), vec![self_m("add")]);
+        assert_eq!(
+            calls_from(&fp, "lib::calc::Calc::total"),
+            vec![self_m("add")]
+        );
     }
 
     /// The top-level `add` shares the member's name: inside the class the
@@ -7513,13 +7894,19 @@ int helper(int x) => x + 1;
     #[test]
     fn static_member_bare_call_is_self_method() {
         let fp = bare_calls_fixture();
-        assert_eq!(calls_from(&fp, "lib::calc::Calc::useStatic"), vec![self_m("make")]);
+        assert_eq!(
+            calls_from(&fp, "lib::calc::Calc::useStatic"),
+            vec![self_m("make")]
+        );
     }
 
     #[test]
     fn bare_call_to_a_non_member_stays_bare() {
         let fp = bare_calls_fixture();
-        assert_eq!(calls_from(&fp, "lib::calc::Calc::viaTop"), vec![bare("helper")]);
+        assert_eq!(
+            calls_from(&fp, "lib::calc::Calc::viaTop"),
+            vec![bare("helper")]
+        );
     }
 
     /// `final twice = (v) => ..; twice(a)`: the local closure shadows the
@@ -7553,7 +7940,10 @@ int helper(int x) => x + 1;
 "#;
         let fp = parse_file(source, "lib/c.dart", "lib::c", repo()).unwrap();
         assert_eq!(calls_from(&fp, "lib::c::Calc::copy"), vec![bare("Calc")]);
-        assert_eq!(calls_from(&fp, "lib::c::Calc::other"), vec![attr("Calc", "named")]);
+        assert_eq!(
+            calls_from(&fp, "lib::c::Calc::other"),
+            vec![attr("Calc", "named")]
+        );
     }
 
     /// `local_names` of every member of the first class in `source`, keyed by
@@ -7571,7 +7961,10 @@ int helper(int x) => x + 1;
         for member in body.named_children(&mut c) {
             let mut k = member.walk();
             let kids: Vec<TsNode> = member.named_children(&mut k).collect();
-            let sig = kids.iter().copied().find(|n| n.kind() == "method_signature");
+            let sig = kids
+                .iter()
+                .copied()
+                .find(|n| n.kind() == "method_signature");
             let Some(fbody) = kids.iter().copied().find(|n| n.kind() == "function_body") else {
                 continue;
             };
@@ -7788,7 +8181,13 @@ abstract class A {
 
     #[test]
     fn top_level_body_is_walked() {
-        let fp = parse_file("void f() { g(); }\nvoid g() {}\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        let fp = parse_file(
+            "void f() { g(); }\nvoid g() {}\n",
+            "lib/m.dart",
+            "lib::m",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(fn_calls(&fp, "lib::m::f"), vec![bare("g")]);
         assert_eq!(fn_calls(&fp, "lib::m::g"), vec![]);
     }
@@ -7797,12 +8196,19 @@ abstract class A {
     fn top_level_endpoint_has_the_function_as_caller() {
         let source = "Future<void> load() async {\n  await dio.get('/users');\n}\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
-        let ep = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users");
+        let ep = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users",
+        );
         assert!(fp.nodes.iter().any(|n| n.id == ep), "{:?}", fp.nodes);
         assert!(
-            fp.edges.iter().any(|e| e.from == function_id("lib::m::load")
-                && e.to == ep
-                && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.from == function_id("lib::m::load")
+                    && e.to == ep
+                    && e.category == edge_category::CALLS),
             "{:?}",
             fp.edges
         );
@@ -7810,8 +8216,17 @@ abstract class A {
 
     #[test]
     fn top_level_getter_is_a_function_and_owns_its_body() {
-        let fp = parse_file("String get banner => describe();\n", "lib/m.dart", "lib::m", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.get(&function_id("lib::m::banner")), Some(&node_kind::FUNCTION));
+        let fp = parse_file(
+            "String get banner => describe();\n",
+            "lib/m.dart",
+            "lib::m",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.nav.kind_by_id.get(&function_id("lib::m::banner")),
+            Some(&node_kind::FUNCTION)
+        );
         assert_eq!(fn_calls(&fp, "lib::m::banner"), vec![bare("describe")]);
     }
 
@@ -7820,8 +8235,17 @@ abstract class A {
     /// FUNCTION `x` owning the body.
     #[test]
     fn void_setter_signature_is_a_function_and_owns_its_body() {
-        let fp = parse_file("void set x(int v) { a(); }\n", "lib/m.dart", "lib::m", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.get(&function_id("lib::m::x")), Some(&node_kind::FUNCTION));
+        let fp = parse_file(
+            "void set x(int v) { a(); }\n",
+            "lib/m.dart",
+            "lib::m",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.nav.kind_by_id.get(&function_id("lib::m::x")),
+            Some(&node_kind::FUNCTION)
+        );
         assert_eq!(fn_calls(&fp, "lib::m::x"), vec![bare("a")]);
         let fp = parse_file("set y(int v) { b(); }\n", "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(fn_calls(&fp, "lib::m::y"), vec![bare("b")]);
@@ -7832,7 +8256,12 @@ abstract class A {
         let source = "int get level => h();\nvoid set level(int v) => s(v);\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         let id = function_id("lib::m::level");
-        assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1, "{:?}", fp.nodes);
+        assert_eq!(
+            fp.nodes.iter().filter(|n| n.id == id).count(),
+            1,
+            "{:?}",
+            fp.nodes
+        );
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::m");
         assert_eq!(
             fp.edges
@@ -7862,7 +8291,10 @@ abstract class A {
         assert_eq!(fn_calls(&fp, "lib::m::n"), vec![]);
         assert_eq!(fn_calls(&fp, "lib::m::m"), vec![bare("h")]);
         // Both are FUNCTIONs; the external one keeps its signature-only CODE.
-        assert_eq!(cell_text(&fp, function_id("lib::m::n"), cell_type::CODE), "void n()");
+        assert_eq!(
+            cell_text(&fp, function_id("lib::m::n"), cell_type::CODE),
+            "void n()"
+        );
         // A trailing comment after the external signature changes nothing.
         let source = "external int e(); // trailing\nint after() => d();\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
@@ -7900,7 +8332,10 @@ Future<void> loadUsers() async {
         let fp = parse_file(source, "lib/app.dart", "lib::app", repo()).unwrap();
         let id = function_id("lib::app::loadUsers");
         let code = cell_text(&fp, id, cell_type::CODE);
-        assert!(code.starts_with("Future<void> loadUsers() async {"), "{code}");
+        assert!(
+            code.starts_with("Future<void> loadUsers() async {"),
+            "{code}"
+        );
         assert!(code.contains("client.get('/users')"), "{code}");
         assert!(code.ends_with('}'), "{code}");
         assert_eq!(
@@ -7961,11 +8396,21 @@ Future<void> loadUsers() async {
         let greets = class_id("lib::app::Greets");
         assert_eq!(fp.nav.kind_by_id.get(&greets), Some(&node_kind::CLASS));
         for m in ["lib::app::Greets::greet", "lib::app::Greets::hello"] {
-            assert_eq!(fp.nav.kind_by_id.get(&method_id(m)), Some(&node_kind::METHOD), "{m}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&method_id(m)),
+                Some(&node_kind::METHOD),
+                "{m}"
+            );
             assert_eq!(parent(&fp, method_id(m)), Some(greets), "{m}");
         }
-        assert_eq!(defines(&fp, greets, method_id("lib::app::Greets::greet")), 1);
-        assert_eq!(calls_from(&fp, "lib::app::Greets::greet"), vec![self_m("hello")]);
+        assert_eq!(
+            defines(&fp, greets, method_id("lib::app::Greets::greet")),
+            1
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::app::Greets::greet"),
+            vec![self_m("hello")]
+        );
     }
 
     #[test]
@@ -7975,8 +8420,14 @@ Future<void> loadUsers() async {
         assert_eq!(fp.nav.kind_by_id.get(&shout), Some(&node_kind::CLASS));
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::app");
         assert_eq!(defines(&fp, module, shout), 1);
-        assert_eq!(parent(&fp, method_id("lib::app::Shout::shout")), Some(shout));
-        assert_eq!(calls_from(&fp, "lib::app::Shout::shout"), vec![self_m("twice")]);
+        assert_eq!(
+            parent(&fp, method_id("lib::app::Shout::shout")),
+            Some(shout)
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::app::Shout::shout"),
+            vec![self_m("twice")]
+        );
     }
 
     #[test]
@@ -7989,7 +8440,8 @@ Future<void> loadUsers() async {
         assert_eq!(defines(&fp, api, doubled), 1);
         // Declared before its on-type or after, the extension adds no second
         // Api node.
-        let source = "extension on Api { int d() => compute(); }\nclass Api { int compute() => 1; }\n";
+        let source =
+            "extension on Api { int d() => compute(); }\nclass Api { int compute() => 1; }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         let api = class_id("lib::m::Api");
         assert_eq!(fp.nodes.iter().filter(|n| n.id == api).count(), 1);
@@ -8036,25 +8488,44 @@ extension on Api {
         let container = class_id("lib::app::extension<String>");
         let whisper = method_id("lib::app::extension<String>::whisper");
         assert_eq!(fp.nav.kind_by_id.get(&container), Some(&node_kind::CLASS));
-        assert_eq!(fp.nav.name_by_id.get(&container).map(String::as_str), Some("extension<String>"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&container).map(String::as_str),
+            Some("extension<String>")
+        );
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::app");
         assert_eq!(defines(&fp, module, container), 1);
         assert_eq!(defines(&fp, container, whisper), 1);
         assert_eq!(parent(&fp, whisper), Some(container));
         // `toLowerCase` is the on-type's member, unknown here: library scope.
-        assert_eq!(calls_from(&fp, "lib::app::extension<String>::whisper"), vec![bare("toLowerCase")]);
+        assert_eq!(
+            calls_from(&fp, "lib::app::extension<String>::whisper"),
+            vec![bare("toLowerCase")]
+        );
         // An import-prefixed on-type is never this file's, even when this
         // file declares a type of the same simple name; a type argument of a
         // foreign type does not make it this file's either.
         let source = "class Api {}\nextension on p.Api { void q() {} }\nextension on List<Api> { void r() {} }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
-        assert!(!fp.nodes.iter().any(|n| n.id == method_id("lib::m::Api::q")), "{:?}", fp.nav.qname_by_id);
-        assert_eq!(parent(&fp, method_id("lib::m::extension<Api>::q")), Some(class_id("lib::m::extension<Api>")));
-        assert_eq!(parent(&fp, method_id("lib::m::extension<List>::r")), Some(class_id("lib::m::extension<List>")));
+        assert!(
+            !fp.nodes.iter().any(|n| n.id == method_id("lib::m::Api::q")),
+            "{:?}",
+            fp.nav.qname_by_id
+        );
+        assert_eq!(
+            parent(&fp, method_id("lib::m::extension<Api>::q")),
+            Some(class_id("lib::m::extension<Api>"))
+        );
+        assert_eq!(
+            parent(&fp, method_id("lib::m::extension<List>::r")),
+            Some(class_id("lib::m::extension<List>"))
+        );
         // A generic / nullable spelling of a same-file type still hangs on it.
         let source = "class Box<T> {}\nextension on Box<int>? { void s() {} }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
-        assert_eq!(parent(&fp, method_id("lib::m::Box::s")), Some(class_id("lib::m::Box")));
+        assert_eq!(
+            parent(&fp, method_id("lib::m::Box::s")),
+            Some(class_id("lib::m::Box"))
+        );
     }
 
     #[test]
@@ -8062,15 +8533,22 @@ extension on Api {
         let fp = body_owners();
         let meters = class_id("lib::app::Meters");
         assert_eq!(fp.nav.kind_by_id.get(&meters), Some(&node_kind::CLASS));
-        assert_eq!(fp.nav.name_by_id.get(&meters).map(String::as_str), Some("Meters"));
-        assert_eq!(parent(&fp, method_id("lib::app::Meters::plus")), Some(meters));
+        assert_eq!(
+            fp.nav.name_by_id.get(&meters).map(String::as_str),
+            Some("Meters")
+        );
+        assert_eq!(
+            parent(&fp, method_id("lib::app::Meters::plus")),
+            Some(meters)
+        );
         assert_eq!(
             calls_from(&fp, "lib::app::Meters::twicePlus"),
             vec![self_m("plus"), self_m("plus")]
         );
         // The representation field is a member: `value()` binds to it, not
         // to a same-named top-level function.
-        let source = "int value() => 0;\nextension type V(int Function() value) { int f() => value(); }\n";
+        let source =
+            "int value() => 0;\nextension type V(int Function() value) { int f() => value(); }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(calls_from(&fp, "lib::m::V::f"), vec![self_m("value")]);
     }
@@ -8080,16 +8558,30 @@ extension on Api {
         let fp = body_owners();
         let color = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::app::Color");
         for m in ["lib::app::Color::label", "lib::app::Color::describe"] {
-            assert_eq!(fp.nav.kind_by_id.get(&method_id(m)), Some(&node_kind::METHOD), "{m}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&method_id(m)),
+                Some(&node_kind::METHOD),
+                "{m}"
+            );
             assert_eq!(parent(&fp, method_id(m)), Some(color), "{m}");
         }
         assert_eq!(defines(&fp, color, method_id("lib::app::Color::label")), 1);
-        assert_eq!(calls_from(&fp, "lib::app::Color::label"), vec![self_m("describe")]);
+        assert_eq!(
+            calls_from(&fp, "lib::app::Color::label"),
+            vec![self_m("describe")]
+        );
         // Enum constants are members; a plain enum still has no METHOD.
         let source = "void red() {}\nenum C { red, blue; void f() => red(); }\nenum S { a, b }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(calls_from(&fp, "lib::m::C::f"), vec![self_m("red")]);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -8098,13 +8590,23 @@ extension on Api {
         let status = method_id("lib::app::Api::status");
         assert_eq!(fp.nav.kind_by_id.get(&status), Some(&node_kind::METHOD));
         assert_eq!(parent(&fp, status), Some(class_id("lib::app::Api")));
-        let ep = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/status");
+        let ep = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/status",
+        );
         assert!(
-            fp.edges.iter().any(|e| e.from == status && e.to == ep && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.from == status && e.to == ep && e.category == edge_category::CALLS),
             "{:?}",
             fp.edges
         );
-        assert_eq!(calls_from(&fp, "lib::app::Api::area"), vec![self_m("compute"), self_m("store")]);
+        assert_eq!(
+            calls_from(&fp, "lib::app::Api::area"),
+            vec![self_m("compute"), self_m("store")]
+        );
         assert_eq!(calls_from(&fp, "lib::app::Api::compute"), vec![]);
     }
 
@@ -8115,7 +8617,10 @@ extension on Api {
         assert_eq!(fp.nodes.iter().filter(|n| n.id == area).count(), 1);
         assert_eq!(defines(&fp, class_id("lib::app::Api"), area), 1);
         // The pair's cells are the first declaration's (the getter's).
-        assert_eq!(cell_text(&fp, area, cell_type::CODE), "int get area => compute();");
+        assert_eq!(
+            cell_text(&fp, area, cell_type::CODE),
+            "int get area => compute();"
+        );
         // The setter parameter is a local of the setter body.
         let source = "class A {\n  set v(void Function() cb) => cb();\n  void cb() {}\n}\n";
         let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
@@ -8130,7 +8635,12 @@ extension on Api {
         let fp = body_owners();
         let api_ctor = method_id("lib::app::Api::Api");
         let warm = method_id("lib::app::Api::warm");
-        let boot = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/boot");
+        let boot = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/boot",
+        );
         let calls_to_boot: Vec<NodeId> = fp
             .edges
             .iter()
@@ -8154,9 +8664,16 @@ class Box {
         // passes `helper` and constructs the class, a call of its own.
         assert_eq!(calls_from(&fp, "lib::b::Box::Box"), vec![bare("helper")]);
         assert_eq!(calls_from(&fp, "lib::b::Box::make"), vec![bare("Box")]);
-        assert_eq!(calls_from(&fp, "lib::b::Box::operator+"), vec![bare("helper")]);
+        assert_eq!(
+            calls_from(&fp, "lib::b::Box::operator+"),
+            vec![bare("helper")]
+        );
         assert_eq!(calls_from(&fp, "lib::b::Box::first"), vec![]);
-        assert!(!fp.calls.iter().any(|c| c.from == class_id("lib::b::Box")), "{:?}", fp.calls);
+        assert!(
+            !fp.calls.iter().any(|c| c.from == class_id("lib::b::Box")),
+            "{:?}",
+            fp.calls
+        );
     }
 
     #[test]
@@ -8170,8 +8687,16 @@ class Box {
             .map(|(id, _)| *id)
             .collect();
         assert_eq!(endpoints.len(), 2, "{:?}", fp.nav.qname_by_id);
-        assert!(!fp.edges.iter().any(|e| endpoints.contains(&e.from)), "{:?}", fp.edges);
-        assert!(!fp.calls.iter().any(|c| endpoints.contains(&c.from)), "{:?}", fp.calls);
+        assert!(
+            !fp.edges.iter().any(|e| endpoints.contains(&e.from)),
+            "{:?}",
+            fp.edges
+        );
+        assert!(
+            !fp.calls.iter().any(|c| endpoints.contains(&c.from)),
+            "{:?}",
+            fp.calls
+        );
     }
 
     /// Every member body in the fixture has an owner: the nine member nodes
@@ -8219,15 +8744,28 @@ class Box {
         include_str!("../../../../bench/substrate-gap/fixtures/dart-members/lib/src/money.dart");
 
     fn members() -> FileParse {
-        parse_file(MEMBERS_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap()
+        parse_file(
+            MEMBERS_FIXTURE,
+            "lib/src/money.dart",
+            "lib::src::money",
+            repo(),
+        )
+        .unwrap()
     }
 
     fn attribute_id(qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, qname)
     }
 
-    fn has_edge(fp: &FileParse, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> bool {
-        fp.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
+    fn has_edge(
+        fp: &FileParse,
+        from: NodeId,
+        to: NodeId,
+        category: glia_core::EdgeCategoryId,
+    ) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == category)
     }
 
     /// The unnamed constructor is `<T>::<T>`, a named constructor or factory
@@ -8244,12 +8782,19 @@ class Box {
         ] {
             let id = method_id(q);
             assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::METHOD), "{q}");
-            assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some(name), "{q}");
+            assert_eq!(
+                fp.nav.name_by_id.get(&id).map(String::as_str),
+                Some(name),
+                "{q}"
+            );
             assert_eq!(parent(&fp, id), Some(money), "{q}");
             assert_eq!(defines(&fp, money, id), 1, "{q}");
             assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1, "{q}");
         }
-        assert_eq!(calls_from(&fp, "lib::src::money::Money::Money"), vec![self_m("validate")]);
+        assert_eq!(
+            calls_from(&fp, "lib::src::money::Money::Money"),
+            vec![self_m("validate")]
+        );
         // `Money(int.parse(s))` constructs the class; `int.parse` is a call too.
         assert_eq!(
             calls_from(&fp, "lib::src::money::Money::parse"),
@@ -8275,7 +8820,10 @@ class Box {
     #[test]
     fn initializer_list_calls_come_from_the_constructor() {
         let fp = members();
-        assert_eq!(calls_from(&fp, "lib::src::money::Money::zero"), vec![bare("round2")]);
+        assert_eq!(
+            calls_from(&fp, "lib::src::money::Money::zero"),
+            vec![bare("round2")]
+        );
         let money = class_id("lib::src::money::Money");
         assert!(!fp.calls.iter().any(|c| c.from == money), "{:?}", fp.calls);
         let source = r#"class A extends B {
@@ -8287,11 +8835,18 @@ class Box {
 }
 "#;
         let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
-        assert_eq!(calls_from(&fp, "lib::a::A::s"), sorted(vec![bare("f"), bare("g"), bare("h")]));
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::s"),
+            sorted(vec![bare("f"), bare("g"), bare("h")])
+        );
         assert_eq!(calls_from(&fp, "lib::a::A::p"), vec![]);
         assert_eq!(calls_from(&fp, "lib::a::A::r"), vec![bare("mk")]);
         assert_eq!(calls_from(&fp, "lib::a::A::q"), vec![bare("ok")]);
-        assert!(!fp.calls.iter().any(|c| c.from == class_id("lib::a::A")), "{:?}", fp.calls);
+        assert!(
+            !fp.calls.iter().any(|c| c.from == class_id("lib::a::A")),
+            "{:?}",
+            fp.calls
+        );
     }
 
     /// An operator is `<T>::operator<op>`, the token verbatim with no space.
@@ -8301,7 +8856,10 @@ class Box {
         let fp = members();
         let plus = method_id("lib::src::money::Money::operator+");
         assert_eq!(fp.nav.kind_by_id.get(&plus), Some(&node_kind::METHOD));
-        assert_eq!(fp.nav.name_by_id.get(&plus).map(String::as_str), Some("operator+"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&plus).map(String::as_str),
+            Some("operator+")
+        );
         assert_eq!(
             calls_from(&fp, "lib::src::money::Money::operator+"),
             sorted(vec![bare("Money"), bare("round2")])
@@ -8327,7 +8885,11 @@ class Box {
             ("operator-", sorted(vec![bare("neg"), bare("sub")])),
         ] {
             let q = format!("lib::v::V::{op}");
-            assert_eq!(fp.nav.kind_by_id.get(&method_id(&q)), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&method_id(&q)),
+                Some(&node_kind::METHOD),
+                "{q}"
+            );
             assert_eq!(parent(&fp, method_id(&q)), Some(v), "{q}");
             assert_eq!(calls_from(&fp, &q), calls, "{q}");
         }
@@ -8343,13 +8905,21 @@ class Box {
         let fp = members();
         let repo_class = class_id("lib::src::money::Repo");
         for q in ["lib::src::money::Repo::load", "lib::src::money::Repo::save"] {
-            assert_eq!(fp.nav.kind_by_id.get(&method_id(q)), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&method_id(q)),
+                Some(&node_kind::METHOD),
+                "{q}"
+            );
             assert_eq!(parent(&fp, method_id(q)), Some(repo_class), "{q}");
             assert_eq!(defines(&fp, repo_class, method_id(q)), 1, "{q}");
             assert_eq!(calls_from(&fp, q), vec![], "{q}");
         }
         assert_eq!(
-            cell_text(&fp, method_id("lib::src::money::Repo::load"), cell_type::CODE),
+            cell_text(
+                &fp,
+                method_id("lib::src::money::Repo::load"),
+                cell_type::CODE
+            ),
             "Money load();"
         );
         let source = r#"abstract mixin class M {
@@ -8370,7 +8940,10 @@ class Box {
             .collect();
         methods.sort();
         // The getter + setter pair is one METHOD; the field is no METHOD.
-        assert_eq!(methods, vec!["lib::m::M::ext", "lib::m::M::level", "lib::m::M::operator+"]);
+        assert_eq!(
+            methods,
+            vec!["lib::m::M::ext", "lib::m::M::level", "lib::m::M::operator+"]
+        );
         assert!(fp.calls.is_empty(), "{:?}", fp.calls);
     }
 
@@ -8387,8 +8960,16 @@ class Box {
 "#;
         let fp = parse_file(source, "lib/p.dart", "lib::p", repo()).unwrap();
         let point = class_id("lib::p::Point");
-        for q in ["lib::p::Point::Point", "lib::p::Point::origin", "lib::p::Point::polar"] {
-            assert_eq!(fp.nav.kind_by_id.get(&method_id(q)), Some(&node_kind::METHOD), "{q}");
+        for q in [
+            "lib::p::Point::Point",
+            "lib::p::Point::origin",
+            "lib::p::Point::polar",
+        ] {
+            assert_eq!(
+                fp.nav.kind_by_id.get(&method_id(q)),
+                Some(&node_kind::METHOD),
+                "{q}"
+            );
             assert_eq!(defines(&fp, point, method_id(q)), 1, "{q}");
         }
         assert_eq!(
@@ -8410,15 +8991,37 @@ class Box {
     #[test]
     fn enum_constants_are_attributes() {
         let fp = members();
-        let currency = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::src::money::Currency");
-        for (q, name) in [("lib::src::money::Currency::aud", "aud"), ("lib::src::money::Currency::usd", "usd")] {
+        let currency = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENUM,
+            "lib::src::money::Currency",
+        );
+        for (q, name) in [
+            ("lib::src::money::Currency::aud", "aud"),
+            ("lib::src::money::Currency::usd", "usd"),
+        ] {
             let id = attribute_id(q);
-            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::ATTRIBUTE), "{q}");
-            assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some(name), "{q}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&id),
+                Some(&node_kind::ATTRIBUTE),
+                "{q}"
+            );
+            assert_eq!(
+                fp.nav.name_by_id.get(&id).map(String::as_str),
+                Some(name),
+                "{q}"
+            );
             assert_eq!(parent(&fp, id), Some(currency), "{q}");
-            assert!(has_edge(&fp, currency, id, edge_category::HAS_ATTRIBUTE), "{q}");
+            assert!(
+                has_edge(&fp, currency, id, edge_category::HAS_ATTRIBUTE),
+                "{q}"
+            );
             assert!(!has_edge(&fp, currency, id, edge_category::DEFINES), "{q}");
-            assert!(cell_text(&fp, id, cell_type::POSITION).contains(r#""start_line":20"#), "{q}");
+            assert!(
+                cell_text(&fp, id, cell_type::POSITION).contains(r#""start_line":20"#),
+                "{q}"
+            );
         }
         let source = r#"int round2(int v) => v;
 enum E {
@@ -8432,15 +9035,31 @@ enum E {
         let fp = parse_file(source, "lib/e.dart", "lib::e", repo()).unwrap();
         let e = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::e::E");
         let aud = attribute_id("lib::e::E::aud");
-        let aud_calls: Vec<&CallQualifier> =
-            fp.calls.iter().filter(|c| c.from == aud).map(|c| &c.qualifier).collect();
+        let aud_calls: Vec<&CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == aud)
+            .map(|c| &c.qualifier)
+            .collect();
         assert_eq!(aud_calls, vec![&bare("round2")]);
-        assert!(has_edge(&fp, e, attribute_id("lib::e::E::usd"), edge_category::HAS_ATTRIBUTE));
+        assert!(has_edge(
+            &fp,
+            e,
+            attribute_id("lib::e::E::usd"),
+            edge_category::HAS_ATTRIBUTE
+        ));
         // The enum's constructors are METHODs; its field is not.
         for q in ["lib::e::E::E", "lib::e::E::named"] {
             assert_eq!(parent(&fp, method_id(q)), Some(e), "{q}");
         }
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            2
+        );
         assert_eq!(fp.calls.len(), 1, "{:?}", fp.calls);
     }
 
@@ -8452,10 +9071,17 @@ enum E {
     fn named_constructor_call_binds() {
         let fp = members();
         let total = function_id("lib::src::money::total");
-        let mut calls: Vec<CallQualifier> =
-            fp.calls.iter().filter(|c| c.from == total).map(|c| c.qualifier.clone()).collect();
+        let mut calls: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == total)
+            .map(|c| c.qualifier.clone())
+            .collect();
         calls.sort_by_key(|q| format!("{q:?}"));
-        assert_eq!(calls, sorted(vec![attr("Money", "zero"), attr("Money", "parse")]));
+        assert_eq!(
+            calls,
+            sorted(vec![attr("Money", "zero"), attr("Money", "parse")])
+        );
         let money = class_id("lib::src::money::Money");
         let children: Vec<&str> = fp.nav.children_of[&money]
             .iter()
@@ -8476,7 +9102,11 @@ enum E {
         let fp = members();
         let total = function_id("lib::src::money::total");
         assert_eq!(
-            fp.nav.local_types.get(&total).and_then(|l| l.get("Money")).map(String::as_str),
+            fp.nav
+                .local_types
+                .get(&total)
+                .and_then(|l| l.get("Money"))
+                .map(String::as_str),
             Some("Money")
         );
         let source = r#"class Money { static Money make() => Money(); }
@@ -8494,10 +9124,20 @@ class Wallet {
 "#;
         let fp = parse_file(source, "lib/w.dart", "lib::w", repo()).unwrap();
         let typed = |scope: NodeId, name: &str| {
-            fp.nav.local_types.get(&scope).and_then(|l| l.get(name)).cloned()
+            fp.nav
+                .local_types
+                .get(&scope)
+                .and_then(|l| l.get(name))
+                .cloned()
         };
-        assert_eq!(typed(function_id("lib::w::a"), "Money").as_deref(), Some("Money"));
-        assert_eq!(typed(function_id("lib::w::b"), "Color").as_deref(), Some("Color"));
+        assert_eq!(
+            typed(function_id("lib::w::a"), "Money").as_deref(),
+            Some("Money")
+        );
+        assert_eq!(
+            typed(function_id("lib::w::b"), "Color").as_deref(),
+            Some("Color")
+        );
         // A parameter named `Money` shadows the class.
         assert_eq!(typed(function_id("lib::w::c"), "Money"), None);
         // `Other` is declared elsewhere; `m` is a plain receiver.
@@ -8505,16 +9145,22 @@ class Wallet {
         assert_eq!(typed(function_id("lib::w::e"), "m"), None);
         // A member field named `Money` shadows the class inside `Wallet`.
         assert_eq!(typed(method_id("lib::w::Wallet::f"), "Money"), None);
-        assert!(!fp.nav.local_types.contains_key(&method_id("lib::w::Wallet::g")));
+        assert!(
+            !fp.nav
+                .local_types
+                .contains_key(&method_id("lib::w::Wallet::g"))
+        );
     }
 
     // ---- CB.17: unnamed-extension containers, top-level initialisers, import combinators
 
     /// The committed `dart-extensions-imports` fixture's two files.
-    const EXT_FIXTURE: &str =
-        include_str!("../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/ext.dart");
-    const MONEY_FIXTURE: &str =
-        include_str!("../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/money.dart");
+    const EXT_FIXTURE: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/ext.dart"
+    );
+    const MONEY_FIXTURE: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/money.dart"
+    );
 
     fn state_var_id(qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, qname)
@@ -8522,8 +9168,12 @@ class Wallet {
 
     /// The call qualifiers emitted from the node `id`, sorted.
     fn calls_of(fp: &FileParse, id: NodeId) -> Vec<CallQualifier> {
-        let mut out: Vec<CallQualifier> =
-            fp.calls.iter().filter(|c| c.from == id).map(|c| c.qualifier.clone()).collect();
+        let mut out: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect();
         out.sort_by_key(|q| format!("{q:?}"));
         out
     }
@@ -8569,7 +9219,11 @@ class Wallet {
             vec![attr("m", "Money"), attr("m", "round2")]
         );
         // Never a node for the prefix or the on-type itself.
-        for q in ["lib::src::ext::Money", "lib::src::ext::m", "lib::src::ext::m::Money"] {
+        for q in [
+            "lib::src::ext::Money",
+            "lib::src::ext::m",
+            "lib::src::ext::m::Money",
+        ] {
             assert!(!fp.nodes.iter().any(|n| n.id == class_id(q)), "{q}");
         }
         assert_eq!(fp.nodes.iter().filter(|n| n.id == container).count(), 1);
@@ -8583,7 +9237,11 @@ class Wallet {
             ("lib::m::extension<Record>", "c"),
             ("lib::m::extension<T>", "d"),
         ] {
-            assert_eq!(parent(&fp, method_id(&format!("{owner}::{m}"))), Some(class_id(owner)), "{owner}");
+            assert_eq!(
+                parent(&fp, method_id(&format!("{owner}::{m}"))),
+                Some(class_id(owner)),
+                "{owner}"
+            );
         }
     }
 
@@ -8595,22 +9253,45 @@ class Wallet {
         let fp = parse_file(EXT_FIXTURE, "lib/src/ext.dart", "lib::src::ext", repo()).unwrap();
         let container = class_id("lib::src::ext::extension<String>");
         let to_cents = method_id("lib::src::ext::extension<String>::toCents");
-        assert_eq!(fp.nav.name_by_id.get(&container).map(String::as_str), Some("extension<String>"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&container).map(String::as_str),
+            Some("extension<String>")
+        );
         assert_eq!(parent(&fp, to_cents), Some(container));
-        assert_eq!(calls_from(&fp, "lib::src::ext::extension<String>::toCents"), vec![attr("m", "round2")]);
+        assert_eq!(
+            calls_from(&fp, "lib::src::ext::extension<String>::toCents"),
+            vec![attr("m", "round2")]
+        );
         let source = "int twice() => 2;\nextension on String { int a() => twice(); int twice() => 1; }\n\
                       extension on String { int b() => a(); }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         let container = class_id("lib::m::extension<String>");
         assert_eq!(fp.nodes.iter().filter(|n| n.id == container).count(), 1);
-        assert_eq!(defines(&fp, NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::m"), container), 1);
+        assert_eq!(
+            defines(
+                &fp,
+                NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::m"),
+                container
+            ),
+            1
+        );
         for m in ["a", "twice", "b"] {
-            assert_eq!(parent(&fp, method_id(&format!("lib::m::extension<String>::{m}"))), Some(container), "{m}");
+            assert_eq!(
+                parent(&fp, method_id(&format!("lib::m::extension<String>::{m}"))),
+                Some(container),
+                "{m}"
+            );
         }
         // The extension's own `twice` wins over the top-level one; each
         // extension's member scope is its own body's.
-        assert_eq!(calls_from(&fp, "lib::m::extension<String>::a"), vec![self_m("twice")]);
-        assert_eq!(calls_from(&fp, "lib::m::extension<String>::b"), vec![bare("a")]);
+        assert_eq!(
+            calls_from(&fp, "lib::m::extension<String>::a"),
+            vec![self_m("twice")]
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::m::extension<String>::b"),
+            vec![bare("a")]
+        );
     }
 
     /// LA.37b control: an unnamed extension on a type this file declares
@@ -8621,26 +9302,56 @@ class Wallet {
                       extension on Money { int quarter() => half() ~/ 2; }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         let money = class_id("lib::m::Money");
-        assert_eq!(parent(&fp, method_id("lib::m::Money::quarter")), Some(money));
-        assert_eq!(calls_from(&fp, "lib::m::Money::quarter"), vec![self_m("half")]);
-        assert!(!fp.nav.qname_by_id.values().any(|q| q.contains("extension<")), "{:?}", fp.nav.qname_by_id);
+        assert_eq!(
+            parent(&fp, method_id("lib::m::Money::quarter")),
+            Some(money)
+        );
+        assert_eq!(
+            calls_from(&fp, "lib::m::Money::quarter"),
+            vec![self_m("half")]
+        );
+        assert!(
+            !fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q.contains("extension<")),
+            "{:?}",
+            fp.nav.qname_by_id
+        );
         let fp = body_owners();
-        assert_eq!(parent(&fp, method_id("lib::app::Api::doubled")), Some(class_id("lib::app::Api")));
-        assert!(!fp.nav.qname_by_id.values().any(|q| q.contains("extension<Api>")));
+        assert_eq!(
+            parent(&fp, method_id("lib::app::Api::doubled")),
+            Some(class_id("lib::app::Api"))
+        );
+        assert!(
+            !fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q.contains("extension<Api>"))
+        );
     }
 
     /// D5: a `final` / `const` top-level initialiser's calls come FROM its
     /// STATE_VAR (G19 minted the node and never walked the value).
     #[test]
     fn final_initialiser_calls_from_its_state_var() {
-        let fp = parse_file(MONEY_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap();
+        let fp = parse_file(
+            MONEY_FIXTURE,
+            "lib/src/money.dart",
+            "lib::src::money",
+            repo(),
+        )
+        .unwrap();
         let tax = state_var_id("lib::src::money::defaultTax");
         assert_eq!(fp.nav.kind_by_id.get(&tax), Some(&node_kind::STATE_VAR));
         assert_eq!(calls_of(&fp, tax), vec![bare("seed")]);
         let source = "const k = h();\nfinal client = Dio();\nfinal f = () => g();\nfinal r = a.b().c(d());\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(calls_of(&fp, state_var_id("lib::m::k")), vec![bare("h")]);
-        assert_eq!(calls_of(&fp, state_var_id("lib::m::client")), vec![bare("Dio")]);
+        assert_eq!(
+            calls_of(&fp, state_var_id("lib::m::client")),
+            vec![bare("Dio")]
+        );
         // DT.5e: a closure's call is the initialiser's, as a member's
         // closure's call is the member's.
         assert_eq!(calls_of(&fp, state_var_id("lib::m::f")), vec![bare("g")]);
@@ -8649,7 +9360,11 @@ class Wallet {
             sorted(vec![attr("a", "b"), complex("a.b()", "c"), bare("d")])
         );
         // The declared name is never a call; the noise gate still holds.
-        assert!(!fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "k" || n == "r")));
+        assert!(
+            !fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "k" || n == "r"))
+        );
         let fp = parse_file("const k = 1;\n", "lib/m.dart", "lib::m", repo()).unwrap();
         assert!(fp.nodes.iter().all(|n| n.id != state_var_id("lib::m::k")));
     }
@@ -8660,17 +9375,37 @@ class Wallet {
     /// primitive literal is gated as G19 gates it.
     #[test]
     fn var_list_entries_are_state_vars() {
-        let fp = parse_file(MONEY_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap();
+        let fp = parse_file(
+            MONEY_FIXTURE,
+            "lib/src/money.dart",
+            "lib::src::money",
+            repo(),
+        )
+        .unwrap();
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::src::money");
         for q in ["lib::src::money::cache", "lib::src::money::hits"] {
             let id = state_var_id(q);
-            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::STATE_VAR), "{q}");
+            assert_eq!(
+                fp.nav.kind_by_id.get(&id),
+                Some(&node_kind::STATE_VAR),
+                "{q}"
+            );
             assert_eq!(defines(&fp, module, id), 1, "{q}");
         }
-        assert_eq!(calls_of(&fp, state_var_id("lib::src::money::hits")), vec![bare("round2")]);
-        assert_eq!(calls_of(&fp, state_var_id("lib::src::money::cache")), vec![]);
         assert_eq!(
-            cell_text(&fp, state_var_id("lib::src::money::hits"), cell_type::POSITION),
+            calls_of(&fp, state_var_id("lib::src::money::hits")),
+            vec![bare("round2")]
+        );
+        assert_eq!(
+            calls_of(&fp, state_var_id("lib::src::money::cache")),
+            vec![]
+        );
+        assert_eq!(
+            cell_text(
+                &fp,
+                state_var_id("lib::src::money::hits"),
+                cell_type::POSITION
+            ),
             r#"{"file":"lib/src/money.dart","start_line":4,"end_line":4}"#
         );
         let source = "late final String z = f();\nint counter;\nString a = 'x', b = g();\n\
@@ -8678,13 +9413,26 @@ class Wallet {
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(calls_of(&fp, state_var_id("lib::m::z")), vec![bare("f")]);
         assert_eq!(calls_of(&fp, state_var_id("lib::m::b")), vec![bare("g")]);
-        assert!(fp.nodes.iter().any(|n| n.id == state_var_id("lib::m::counter")));
-        assert_eq!(cell_text(&fp, state_var_id("lib::m::documented"), cell_type::DOC), "Documented.");
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == state_var_id("lib::m::counter"))
+        );
+        assert_eq!(
+            cell_text(&fp, state_var_id("lib::m::documented"), cell_type::DOC),
+            "Documented."
+        );
         for gated in ["lib::m::a", "lib::m::plain"] {
-            assert!(fp.nodes.iter().all(|n| n.id != state_var_id(gated)), "{gated}");
+            assert!(
+                fp.nodes.iter().all(|n| n.id != state_var_id(gated)),
+                "{gated}"
+            );
         }
         // The doc of one declaration never reaches the next.
-        assert_eq!(cell_text(&fp, state_var_id("lib::m::counter"), cell_type::DOC), "");
+        assert_eq!(
+            cell_text(&fp, state_var_id("lib::m::counter"), cell_type::DOC),
+            ""
+        );
     }
 
     /// D6: `as` binds the prefix (whatever it shows), `show` without a prefix
@@ -8692,16 +9440,31 @@ class Wallet {
     /// string without quotes; `export` is not an import.
     #[test]
     fn import_as_show_hide() {
-        assert_eq!(import_targets("import 'a.dart' as m show X;\n"), vec![module("a.dart", Some("m"))]);
+        assert_eq!(
+            import_targets("import 'a.dart' as m show X;\n"),
+            vec![module("a.dart", Some("m"))]
+        );
         assert_eq!(
             import_targets("import 'a.dart' show X, y;\n"),
             vec![symbol("a.dart", "X"), symbol("a.dart", "y")]
         );
-        assert_eq!(import_targets("import 'a.dart' hide Z;\n"), vec![module("a.dart", None)]);
-        assert_eq!(import_targets("import 'b.dart' deferred as d;\n"), vec![module("b.dart", Some("d"))]);
+        assert_eq!(
+            import_targets("import 'a.dart' hide Z;\n"),
+            vec![module("a.dart", None)]
+        );
+        assert_eq!(
+            import_targets("import 'b.dart' deferred as d;\n"),
+            vec![module("b.dart", Some("d"))]
+        );
         // `show A, B hide B` / `show A, B show B` narrow the shown names.
-        assert_eq!(import_targets("import 'a.dart' show A, B hide B;\n"), vec![symbol("a.dart", "A")]);
-        assert_eq!(import_targets("import 'a.dart' show A, B show B;\n"), vec![symbol("a.dart", "B")]);
+        assert_eq!(
+            import_targets("import 'a.dart' show A, B hide B;\n"),
+            vec![symbol("a.dart", "A")]
+        );
+        assert_eq!(
+            import_targets("import 'a.dart' show A, B show B;\n"),
+            vec![symbol("a.dart", "B")]
+        );
         // A conditional import is its default uri.
         assert_eq!(
             import_targets("import 'c.dart' if (dart.library.io) 'c_io.dart' as c;\n"),
@@ -8721,14 +9484,22 @@ class Wallet {
     #[test]
     fn plain_import_unchanged() {
         assert_eq!(
-            import_targets("import 'package:flutter/material.dart';\nimport \"dart:async\";\nimport 'models.dart';\n"),
+            import_targets(
+                "import 'package:flutter/material.dart';\nimport \"dart:async\";\nimport 'models.dart';\n"
+            ),
             vec![
                 module("package:flutter/material.dart", None),
                 module("dart:async", None),
                 module("models.dart", None),
             ]
         );
-        let fp = parse_file("\n\nimport 'models.dart';\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        let fp = parse_file(
+            "\n\nimport 'models.dart';\n",
+            "lib/m.dart",
+            "lib::m",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(fp.imports[0].line, 2);
     }
 
@@ -9094,7 +9865,11 @@ class Other {
 "#;
         let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/things")));
-        assert!(!fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/things")));
+        assert!(
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == endpoint_id("GET", "/things"))
+        );
         // `svc` is a Dio field and a String parameter: not in the set, so
         // today's name heuristic decides (no client name: a route).
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/both")));
@@ -9154,10 +9929,20 @@ class HomeController {
     fn injectable_this_field_param() {
         // `HomeController(this.api)`: the field formal's type is the field's
         // declared type, read through collect_dart_field_types.
-        let fp = parse_file(HOME_CONTROLLER, "home_controller.dart", "home_controller", repo()).unwrap();
+        let fp = parse_file(
+            HOME_CONTROLLER,
+            "home_controller.dart",
+            "home_controller",
+            repo(),
+        )
+        .unwrap();
         let ctl = class_id("home_controller::HomeController");
         assert_eq!(injects_refs(&fp), vec![(ctl, "ApiService".to_string(), 8)]);
-        let r = fp.refs.iter().find(|r| r.category == edge_category::INJECTS).unwrap();
+        let r = fp
+            .refs
+            .iter()
+            .find(|r| r.category == edge_category::INJECTS)
+            .unwrap();
         assert_eq!(r.from_module, module_id("home_controller"));
     }
 
@@ -9214,7 +9999,15 @@ class Closing {
         // caller's argument, never a container lookup.
         assert_eq!(
             of("AuthRepoImpl"),
-            ["TokenStore", "HttpClient", "Cache", "Logger", "Clock", "Audit", "Metrics"]
+            [
+                "TokenStore",
+                "HttpClient",
+                "Cache",
+                "Logger",
+                "Clock",
+                "Audit",
+                "Metrics"
+            ]
         );
         assert_eq!(of("Ticking"), ["Ticker", "Zone"]);
         assert_eq!(of("Plain"), ["Foo"]);
@@ -9326,7 +10119,11 @@ final admin = Router()
             vec![
                 (route_id("GET", "/users/<id>"), bare("getUser"), 8),
                 (route_id("POST", "/users"), bare("createUser"), 9),
-                (route_id("PUT", "/users/<id>"), attr("handlers", "updateUser"), 12),
+                (
+                    route_id("PUT", "/users/<id>"),
+                    attr("handlers", "updateUser"),
+                    12
+                ),
                 (route_id("DELETE", "/users/<id>"), attr("h", "remove"), 13),
             ]
         );
@@ -9352,13 +10149,20 @@ final nav = GoRouter(routes: [GoRoute(path: '/page', builder: buildPage)]);
 "#;
         let fp = parse_file(source, "bin/app.dart", "bin::app", repo()).unwrap();
         for path in ["/hi", "/made", "/bare"] {
-            assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", path)), "route {path}");
+            assert!(
+                fp.nodes.iter().any(|n| n.id == route_id("GET", path)),
+                "route {path}"
+            );
         }
         // `base` is argument #1 of `/opts`: a handler, its named argument
         // after it notwithstanding.
         assert_eq!(
             handler_refs(&fp),
-            vec![(route_id("GET", "/opts"), CallQualifier::Bare("base".to_string()), 6)]
+            vec![(
+                route_id("GET", "/opts"),
+                CallQualifier::Bare("base".to_string()),
+                6
+            )]
         );
     }
 
@@ -9505,7 +10309,10 @@ class Detail {
     #[test]
     fn local_function_calls_stay_the_members() {
         let fp = parse_file(CLOSURES_FIXTURE, "lib/page.dart", "lib::page", repo()).unwrap();
-        assert_eq!(calls_from(&fp, "lib::page::Page::local"), vec![bare("target")]);
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::local"),
+            vec![bare("target")]
+        );
     }
 
     /// `items.map((save) => save())`: the closure parameter shadows the
@@ -9513,7 +10320,10 @@ class Detail {
     #[test]
     fn closure_parameter_shadows_a_member() {
         let fp = parse_file(CLOSURES_FIXTURE, "lib/page.dart", "lib::page", repo()).unwrap();
-        assert_eq!(calls_from(&fp, "lib::page::Page::shadow"), vec![attr("items", "map")]);
+        assert_eq!(
+            calls_from(&fp, "lib::page::Page::shadow"),
+            vec![attr("items", "map")]
+        );
     }
 
     /// `const T(..)`, `new T(..)`, `const T.named(..)`, `new T.named(..)` and
@@ -9555,7 +10365,11 @@ class Page {
         // file declares, so `Dot` is recorded as the caller's type `Dot`.
         let make = method_id("lib::page::Page::make");
         assert_eq!(
-            fp.nav.local_types.get(&make).and_then(|t| t.get("Dot")).map(String::as_str),
+            fp.nav
+                .local_types
+                .get(&make)
+                .and_then(|t| t.get("Dot"))
+                .map(String::as_str),
             Some("Dot")
         );
     }
@@ -9630,10 +10444,18 @@ class Card {
     #[test]
     fn an_imported_name_passed_by_name_binds_nothing() {
         let fp = parse_file(BY_NAME_FIXTURE, "lib/card.dart", "lib::card", repo()).unwrap();
-        assert!(!fp.refs.iter().any(|r| r.category == edge_category::USES), "{:?}", fp.refs);
+        assert!(
+            !fp.refs.iter().any(|r| r.category == edge_category::USES),
+            "{:?}",
+            fp.refs
+        );
         let wire = method_id("lib::card::Card::wire");
         let named = |to: &NodeId| fp.nav.name_by_id.get(to).cloned().unwrap_or_default();
-        assert!(uses_edges(&fp, wire).iter().all(|(to, _)| named(to) != "shared"));
+        assert!(
+            uses_edges(&fp, wire)
+                .iter()
+                .all(|(to, _)| named(to) != "shared")
+        );
     }
 
     /// A local (`onLocal`), a field (`onTap`), a getter (`ready`, `title`), a
@@ -9644,20 +10466,39 @@ class Card {
         let fp = parse_file(BY_NAME_FIXTURE, "lib/card.dart", "lib::card", repo()).unwrap();
         let card = "lib::card::Card";
         let wire = method_id(&format!("{card}::wire"));
-        let targets: Vec<NodeId> = uses_edges(&fp, wire).into_iter().map(|(to, _)| to).collect();
-        assert!(!targets.contains(&method_id(&format!("{card}::ready"))), "a getter");
-        assert!(!targets.contains(&function_id("lib::card::title")), "a top-level getter");
+        let targets: Vec<NodeId> = uses_edges(&fp, wire)
+            .into_iter()
+            .map(|(to, _)| to)
+            .collect();
+        assert!(
+            !targets.contains(&method_id(&format!("{card}::ready"))),
+            "a getter"
+        );
+        assert!(
+            !targets.contains(&function_id("lib::card::title")),
+            "a top-level getter"
+        );
         let relisten = method_id(&format!("{card}::_relisten"));
         assert_eq!(uses_edges(&fp, relisten), vec![], "a self-reference");
-        assert!(!targets.contains(&state_var_id("lib::card::kAction")), "a variable");
+        assert!(
+            !targets.contains(&state_var_id("lib::card::kAction")),
+            "a variable"
+        );
         // The two edges from `wire` (`_save` and `_noop`), and DT.5h's
         // `final kAction = _noop;`: a library initialiser names `_noop`, a
         // USES from the STATE_VAR.
-        let uses = fp.edges.iter().filter(|e| e.category == edge_category::USES).count();
+        let uses = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .count();
         assert_eq!(uses, 3);
         assert_eq!(
             uses_edges(&fp, state_var_id("lib::card::kAction")),
-            vec![(function_id("lib::card::_noop"), Some("method_ref".to_string()))]
+            vec![(
+                function_id("lib::card::_noop"),
+                Some("method_ref".to_string())
+            )]
         );
     }
 
@@ -9841,14 +10682,28 @@ class MemberService {
     /// needs a non-nullable type and no `??` default.
     #[test]
     fn dt1l_from_json_keys_types_and_required() {
-        let fp = parse_file(MEMBER_DART, "lib/models/member.dart", "lib::models::member", repo()).unwrap();
-        let schema = schema_of(&fp, "lib::models::member::Member").expect("SCHEMA_FIELDS on Member");
+        let fp = parse_file(
+            MEMBER_DART,
+            "lib/models/member.dart",
+            "lib::models::member",
+            repo(),
+        )
+        .unwrap();
+        let schema =
+            schema_of(&fp, "lib::models::member::Member").expect("SCHEMA_FIELDS on Member");
         assert_eq!(schema.format, WireFormat::Dart);
         assert!(!schema.open);
         let rows: Vec<(&str, Option<&str>, &str, bool)> = schema
             .fields
             .iter()
-            .map(|f| (f.name.as_str(), f.field.as_deref(), f.ty.as_str(), f.required))
+            .map(|f| {
+                (
+                    f.name.as_str(),
+                    f.field.as_deref(),
+                    f.ty.as_str(),
+                    f.required,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -9921,10 +10776,24 @@ class Child {
             ]
         );
         assert!(!schema.open);
-        assert_eq!(schema_of(&fp, "lib::order::Loose"), None, "zero literal keys, no cell");
+        assert_eq!(
+            schema_of(&fp, "lib::order::Loose"),
+            None,
+            "zero literal keys, no cell"
+        );
         let child = schema_of(&fp, "lib::order::Child").expect("Child schema");
-        assert!(child.open, "the map passed whole carries keys the body does not list");
-        assert_eq!(child.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["extra"]);
+        assert!(
+            child.open,
+            "the map passed whole carries keys the body does not list"
+        );
+        assert_eq!(
+            child
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["extra"]
+        );
     }
 
     /// DT.1l: a `@JsonSerializable` class lists its instance fields: a
@@ -9977,7 +10846,14 @@ class Pascal {
         let rows: Vec<(&str, Option<&str>, &str, bool)> = schema
             .fields
             .iter()
-            .map(|f| (f.name.as_str(), f.field.as_deref(), f.ty.as_str(), f.required))
+            .map(|f| {
+                (
+                    f.name.as_str(),
+                    f.field.as_deref(),
+                    f.ty.as_str(),
+                    f.required,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -10014,13 +10890,23 @@ class ChatMessage extends $pb.GeneratedMessage {
   factory ChatMessage.fromMap(Map<String, dynamic> j) => ChatMessage(j['id']);
 }
 "#;
-        let fp = parse_file(pb, "lib/core/generated/quokka_chat.pb.dart", "lib::core::generated::quokka_chat.pb", repo())
-            .unwrap();
-        assert_eq!(schema_of(&fp, "lib::core::generated::quokka_chat.pb::ChatMessage"), None);
+        let fp = parse_file(
+            pb,
+            "lib/core/generated/quokka_chat.pb.dart",
+            "lib::core::generated::quokka_chat.pb",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema_of(&fp, "lib::core::generated::quokka_chat.pb::ChatMessage"),
+            None
+        );
         let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
         assert_eq!(stats.skipped_generated, 1);
         assert_eq!(
-            stats.marker("lib/core/generated/quokka_chat.pb.dart").as_deref(),
+            stats
+                .marker("lib/core/generated/quokka_chat.pb.dart")
+                .as_deref(),
             Some(
                 "[dart-wire] models=0 (fromjson=0 serializable=0) skipped_generated=1 responses=0 \
                  requests=0 skipped_multi_call=0 file=lib/core/generated/quokka_chat.pb.dart"
@@ -10029,18 +10915,33 @@ class ChatMessage extends $pb.GeneratedMessage {
 
         // The same protobuf factory in a hand-written file is still no map
         // reader: its first parameter is a String.
-        let fp = parse_file(pb.replace("Generated code. Do not modify.", "chat").as_str(), "lib/chat.dart", "lib::chat", repo())
-            .unwrap();
+        let fp = parse_file(
+            pb.replace("Generated code. Do not modify.", "chat")
+                .as_str(),
+            "lib/chat.dart",
+            "lib::chat",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(schema_of(&fp, "lib::chat::ChatMessage"), None);
 
         // A build_runner banner marks a file whatever its name.
         let banner = format!("// GENERATED CODE - DO NOT MODIFY BY HAND\n\n{MEMBER_DART}");
-        let fp = parse_file(&banner, "lib/models/member.dart", "lib::models::member", repo()).unwrap();
+        let fp = parse_file(
+            &banner,
+            "lib/models/member.dart",
+            "lib::models::member",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(schema_of(&fp, "lib::models::member::Member"), None);
         assert!(dart_generated("lib/a.freezed.dart", ""));
         assert!(dart_generated("lib/a.g.dart", ""));
         assert!(!dart_generated("lib/a.dart", MEMBER_DART));
-        assert!(!dart_generated("lib/a.dart", "// Generated by hand, edit freely\nclass A {}\n"));
+        assert!(!dart_generated(
+            "lib/a.dart",
+            "// Generated by hand, edit freely\nclass A {}\n"
+        ));
     }
 
     /// DT.1l: the fixture's three calls: a direct response (`Member.fromJson`
@@ -10056,12 +10957,18 @@ class ChatMessage extends $pb.GeneratedMessage {
             repo(),
         )
         .unwrap();
-        assert_eq!(shapes_of(&fp, "GET", "/api/members/${…}"), (Some(named("Member", false)), None));
+        assert_eq!(
+            shapes_of(&fp, "GET", "/api/members/${…}"),
+            (Some(named("Member", false)), None)
+        );
         let envelope = Shape::Object {
             fields: vec![ShapeField::new("members", true, named("Member", true))],
             open: false,
         };
-        assert_eq!(shapes_of(&fp, "GET", "/api/members"), (Some(envelope), None));
+        assert_eq!(
+            shapes_of(&fp, "GET", "/api/members"),
+            (Some(envelope), None)
+        );
         let request = Shape::Object {
             fields: vec![
                 ShapeField::new("handle", true, named("String", false)),
@@ -10069,7 +10976,10 @@ class ChatMessage extends $pb.GeneratedMessage {
             ],
             open: false,
         };
-        assert_eq!(shapes_of(&fp, "PUT", "/api/members/${…}"), (None, Some(request)));
+        assert_eq!(
+            shapes_of(&fp, "PUT", "/api/members/${…}"),
+            (None, Some(request))
+        );
         // The shapes follow every other key, so the old bytes are a prefix.
         assert_eq!(
             endpoint_hit(&fp, endpoint_id("GET", "/api/members/${…}")).as_deref(),
@@ -10078,7 +10988,10 @@ class ChatMessage extends $pb.GeneratedMessage {
             )
         );
         let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
-        assert_eq!((stats.responses, stats.requests, stats.skipped_multi_call), (2, 1, 0));
+        assert_eq!(
+            (stats.responses, stats.requests, stats.skipped_multi_call),
+            (2, 1, 0)
+        );
         assert_eq!(
             stats.marker("lib/services/member_service.dart").as_deref(),
             Some(
@@ -10133,9 +11046,19 @@ class ChatMessage extends $pb.GeneratedMessage {
   }
 }
 "#;
-        let fp = parse_file(source, "lib/activity_service.dart", "lib::activity_service", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "lib/activity_service.dart",
+            "lib::activity_service",
+            repo(),
+        )
+        .unwrap();
         let result = Shape::Object {
-            fields: vec![ShapeField::new("result", false, named("ActivitySummary", false))],
+            fields: vec![ShapeField::new(
+                "result",
+                false,
+                named("ActivitySummary", false),
+            )],
             open: false,
         };
         assert_eq!(
@@ -10147,7 +11070,10 @@ class ChatMessage extends $pb.GeneratedMessage {
             Some(named("ActivitySummary", true))
         );
         assert_eq!(shapes_of(&fp, "GET", "/tags").0, Some(named("Tag", true)));
-        assert_eq!(shapes_of(&fp, "GET", "/tags/first").0, Some(named("Tag", true)));
+        assert_eq!(
+            shapes_of(&fp, "GET", "/tags/first").0,
+            Some(named("Tag", true))
+        );
     }
 
     /// DT.1l: a callable holding two Dio calls reads no response for either
@@ -10173,10 +11099,15 @@ class ChatMessage extends $pb.GeneratedMessage {
         assert!(request.is_some(), "a request is read off the call itself");
         assert_eq!(
             endpoint_hit(&fp, endpoint_id("DELETE", "/members")).as_deref(),
-            Some(r#"{"method":"DELETE","path":"/members","file":"lib/s.dart","line":8,"col":5,"confidence":"strong"}"#)
+            Some(
+                r#"{"method":"DELETE","path":"/members","file":"lib/s.dart","line":8,"col":5,"confidence":"strong"}"#
+            )
         );
         let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
-        assert_eq!((stats.responses, stats.requests, stats.skipped_multi_call), (0, 1, 2));
+        assert_eq!(
+            (stats.responses, stats.requests, stats.skipped_multi_call),
+            (0, 1, 2)
+        );
     }
 
     /// DT.1l: requests. A map literal's keys (a collection-`if` key not
@@ -10236,9 +11167,18 @@ class ChatMessage extends $pb.GeneratedMessage {
             open: true,
         };
         assert_eq!(shapes_of(&fp, "POST", "/auth/login").1, Some(login));
-        assert_eq!(shapes_of(&fp, "PUT", "/user").1, Some(named("UpdateUser", false)));
-        assert_eq!(shapes_of(&fp, "POST", "/groups").1, Some(named("NewGroup", false)));
-        assert_eq!(shapes_of(&fp, "PUT", "/profile").1, Some(named("ProfileDraft", false)));
+        assert_eq!(
+            shapes_of(&fp, "PUT", "/user").1,
+            Some(named("UpdateUser", false))
+        );
+        assert_eq!(
+            shapes_of(&fp, "POST", "/groups").1,
+            Some(named("NewGroup", false))
+        );
+        assert_eq!(
+            shapes_of(&fp, "PUT", "/profile").1,
+            Some(named("ProfileDraft", false))
+        );
         assert_eq!(shapes_of(&fp, "POST", "/raw"), (None, None));
         assert_eq!(shapes_of(&fp, "POST", "/form"), (None, None));
     }
@@ -10270,7 +11210,9 @@ class ChatMessage extends $pb.GeneratedMessage {
             .into_iter()
             .flatten()
             .filter_map(|f| match f {
-                NavFact::MemberRead { receiver, name, .. } => Some((receiver.clone(), name.clone())),
+                NavFact::MemberRead { receiver, name, .. } => {
+                    Some((receiver.clone(), name.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -10279,7 +11221,11 @@ class ChatMessage extends $pb.GeneratedMessage {
     }
 
     fn local_type_of(fp: &FileParse, scope: NodeId, name: &str) -> Option<String> {
-        fp.nav.local_types.get(&scope).and_then(|t| t.get(name)).cloned()
+        fp.nav
+            .local_types
+            .get(&scope)
+            .and_then(|t| t.get(name))
+            .cloned()
     }
 
     const VALUE_POSITIONS: &str = r#"import 'package:x/p.dart' as p;
@@ -10435,7 +11381,10 @@ class Page {
         assert!(calls.contains(&bare("Box")), "{calls:?}");
         assert_eq!(
             parser_calls_edges(&fp, read),
-            vec![(method_id("lib::page::Page::_ok"), Some("accessor_read".to_string()))]
+            vec![(
+                method_id("lib::page::Page::_ok"),
+                Some("accessor_read".to_string())
+            )]
         );
         assert_eq!(local_type_of(&fp, read, "i").as_deref(), Some("Item"));
         assert_eq!(local_type_of(&fp, read, "j"), None);
@@ -10499,9 +11448,20 @@ class Page {
         assert_eq!(local_type_of(&fp, q("tags"), "t").as_deref(), Some("Tag"));
         assert_eq!(local_type_of(&fp, q("ints"), "n"), None, "List<int>");
         assert_eq!(local_type_of(&fp, q("byId"), "k"), None, "a Map");
-        assert_eq!(local_type_of(&fp, q("shadowed"), "s"), None, "a shadowing local");
-        assert_eq!(local_type_of(&fp, q("nested"), "r"), None, "a nested rebinding");
-        assert_eq!(local_type_of(&fp, q("viaThis"), "w").as_deref(), Some("Item"));
+        assert_eq!(
+            local_type_of(&fp, q("shadowed"), "s"),
+            None,
+            "a shadowing local"
+        );
+        assert_eq!(
+            local_type_of(&fp, q("nested"), "r"),
+            None,
+            "a nested rebinding"
+        );
+        assert_eq!(
+            local_type_of(&fp, q("viaThis"), "w").as_deref(),
+            Some("Item")
+        );
     }
 
     /// DT.5h: a class field's initialiser is the class's code: its calls
@@ -10530,7 +11490,12 @@ class Page {
     /// The (read, notifier) of the RiverpodProvider fact on the top-level
     /// STATE_VAR `lib::p::<name>`, if any.
     fn provider_fact(fp: &FileParse, name: &str) -> Option<(String, String)> {
-        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, &format!("lib::p::{name}"));
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            &format!("lib::p::{name}"),
+        );
         fp.nav.nav_facts.get(&id)?.iter().find_map(|f| match f {
             NavFact::RiverpodProvider { read, notifier } => Some((read.clone(), notifier.clone())),
             _ => None,
@@ -10588,7 +11553,15 @@ final block = Provider((ref) {
         for none in ["futures", "count", "selected", "block"] {
             assert_eq!(provider_fact(&fp, none), None, "{none}");
         }
-        assert_eq!(fp.nav.nav_facts.values().flatten().filter(|f| matches!(f, NavFact::RiverpodProvider { .. })).count(), 13);
+        assert_eq!(
+            fp.nav
+                .nav_facts
+                .values()
+                .flatten()
+                .filter(|f| matches!(f, NavFact::RiverpodProvider { .. }))
+                .count(),
+            13
+        );
 
         // package:provider's `Provider<T>(create: ..)` is no Riverpod provider.
         let other = "import 'package:provider/provider.dart';\n\nfinal api = Provider<Api>(create: (_) => Api());\n";
@@ -10624,19 +11597,42 @@ class Page {
 }
 "#;
         let fp = parse_file(source, "lib/page.dart", "lib::page", repo()).unwrap();
-        let m = |n: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &format!("lib::page::Page::{n}"));
+        let m = |n: &str| {
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::METHOD,
+                &format!("lib::page::Page::{n}"),
+            )
+        };
         let a = m("a");
-        assert_eq!(local_type_of(&fp, a, "svc").as_deref(), Some("ref.read(friendServiceProvider)"));
-        assert_eq!(local_type_of(&fp, a, "n").as_deref(), Some("_ref.watch(authProvider.notifier)"));
-        assert_eq!(local_type_of(&fp, a, "f").as_deref(), Some("ref.read(fam(widget.id))"));
+        assert_eq!(
+            local_type_of(&fp, a, "svc").as_deref(),
+            Some("ref.read(friendServiceProvider)")
+        );
+        assert_eq!(
+            local_type_of(&fp, a, "n").as_deref(),
+            Some("_ref.watch(authProvider.notifier)")
+        );
+        assert_eq!(
+            local_type_of(&fp, a, "f").as_deref(),
+            Some("ref.read(fam(widget.id))")
+        );
         for none in ["api", "v", "all"] {
             assert_eq!(local_type_of(&fp, a, none), None, "{none}");
         }
-        assert_eq!(local_type_of(&fp, m("b"), "svc"), None, "svc is bound twice in b");
+        assert_eq!(
+            local_type_of(&fp, m("b"), "svc"),
+            None,
+            "svc is bound twice in b"
+        );
         assert_eq!(
             member_reads_of(&fp, a),
             vec![
-                ("ref.watch(authProvider)".to_string(), "isSignedIn".to_string()),
+                (
+                    "ref.watch(authProvider)".to_string(),
+                    "isSignedIn".to_string()
+                ),
                 ("svc".to_string(), "isReady".to_string()),
             ]
         );
@@ -10662,18 +11658,31 @@ class Ints extends StateNotifier<int> {}
 "#;
         let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
         let field = |class: &str, f: &str| {
-            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &format!("lib::s::{class}"));
+            let id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::CLASS,
+                &format!("lib::s::{class}"),
+            );
             fp.nav.field_types.get(&id).and_then(|t| t.get(f)).cloned()
         };
         assert_eq!(field("AuthService", "state").as_deref(), Some("AuthState"));
         assert_eq!(field("Counter", "state").as_deref(), Some("Count"));
         assert_eq!(field("Picker", "value").as_deref(), Some("Choice"));
-        assert_eq!(field("Own", "state").as_deref(), Some("Draft"), "a declared field wins");
+        assert_eq!(
+            field("Own", "state").as_deref(),
+            Some("Draft"),
+            "a declared field wins"
+        );
         assert_eq!(field("Ints", "state"), None, "a builtin state");
 
         let bare = "class AuthService extends StateNotifier<AuthState> {}\n";
         let fp = parse_file(bare, "lib/s.dart", "lib::s", repo()).unwrap();
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::s::AuthService");
-        assert_eq!(fp.nav.field_types.get(&id).and_then(|t| t.get("state")), None, "no import");
+        assert_eq!(
+            fp.nav.field_types.get(&id).and_then(|t| t.get("state")),
+            None,
+            "no import"
+        );
     }
 }

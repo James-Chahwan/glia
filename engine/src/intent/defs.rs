@@ -39,8 +39,8 @@ use serde_json::Value;
 
 use super::ids::{IdMention, IdVocab};
 use crate::docs::{admits_doc, fence_marker, sdd_scope};
-use crate::git_rev::read_paths_at;
 pub use crate::git_rev::Tree;
+use crate::git_rev::read_paths_at;
 
 /// The most raw path tokens one row keeps.
 const MAX_ROW_NAMES: usize = 256;
@@ -124,12 +124,18 @@ pub struct IdDefs {
 impl IdDefs {
     /// Rows in the pending state.
     pub fn pending(&self) -> usize {
-        self.rows.iter().filter(|r| r.state == RowState::Pending).count()
+        self.rows
+            .iter()
+            .filter(|r| r.state == RowState::Pending)
+            .count()
     }
 
     /// Rows in the done state.
     pub fn done(&self) -> usize {
-        self.rows.iter().filter(|r| r.state == RowState::Done).count()
+        self.rows
+            .iter()
+            .filter(|r| r.state == RowState::Done)
+            .count()
     }
 
     /// Lineage pairs over every row.
@@ -166,21 +172,32 @@ pub fn read_defs(
     vocab: &IdVocab,
     snapshot_docs: Option<(&MergedGraph, RepoId)>,
 ) -> IdDefs {
-    let mut defs = IdDefs { rev: tree.label(), ..IdDefs::default() };
+    let mut defs = IdDefs {
+        rev: tree.label(),
+        ..IdDefs::default()
+    };
     let markdown = vocab.markdown_globs();
-    let trackers: Vec<_> = (0..vocab.trackers.len()).map(|i| vocab.tracker_globs(i)).collect();
+    let trackers: Vec<_> = (0..vocab.trackers.len())
+        .map(|i| vocab.tracker_globs(i))
+        .collect();
     let is_doc = |p: &str| {
         p.to_ascii_lowercase().ends_with(".md")
             && (admits_doc(p, project_dirs) || markdown.as_ref().is_some_and(|g| g.matches(p)))
     };
-    let tracker_of = |p: &str| trackers.iter().position(|g| g.as_ref().is_some_and(|g| g.matches(p)));
+    let tracker_of = |p: &str| {
+        trackers
+            .iter()
+            .position(|g| g.as_ref().is_some_and(|g| g.matches(p)))
+    };
     let keep = |p: &str| is_doc(p) || tracker_of(p).is_some();
     match read_paths_at(tree, &keep) {
         Ok(read) => {
             defs.too_large = read.too_large;
             for (path, bytes) in &read.files {
                 if is_doc(path) {
-                    let Ok(text) = std::str::from_utf8(bytes) else { continue };
+                    let Ok(text) = std::str::from_utf8(bytes) else {
+                        continue;
+                    };
                     defs.pages += 1;
                     let scope = sdd_scope(path, project_dirs);
                     read_page(path, scope, &[(0, text)], vocab, &mut defs);
@@ -195,7 +212,8 @@ pub fn read_defs(
         for (page, sections) in snapshot_pages(merged, repo) {
             defs.pages += 1;
             defs.snapshot_sections += sections.len();
-            let segments: Vec<(i64, &str)> = sections.iter().map(|(l, t)| (*l, t.as_str())).collect();
+            let segments: Vec<(i64, &str)> =
+                sections.iter().map(|(l, t)| (*l, t.as_str())).collect();
             let scope = sdd_scope(&page, project_dirs);
             read_page(&page, scope, &segments, vocab, &mut defs);
         }
@@ -222,7 +240,9 @@ fn snapshot_pages(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, Vec<(i
             {
                 continue;
             }
-            let (Some((file, row)), Some(text)) = (position(&n.cells), code_text(&n.cells)) else { continue };
+            let (Some((file, row)), Some(text)) = (position(&n.cells), code_text(&n.cells)) else {
+                continue;
+            };
             pages.entry(file).or_default().push((row, text.to_string()));
         }
     }
@@ -234,10 +254,13 @@ fn snapshot_pages(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, Vec<(i
 
 fn is_external_doc(cells: &[Cell]) -> bool {
     cells.iter().any(|c| match &c.payload {
-        CellPayload::Json(s) if c.kind == cell_type::ORIGIN => serde_json::from_str::<Value>(s).is_ok_and(|v| {
-            v.get("provenance").and_then(Value::as_str) == Some("documentation")
-                && v.get("source").and_then(Value::as_str).is_some_and(|t| t != "file")
-        }),
+        CellPayload::Json(s) if c.kind == cell_type::ORIGIN => serde_json::from_str::<Value>(s)
+            .is_ok_and(|v| {
+                v.get("provenance").and_then(Value::as_str) == Some("documentation")
+                    && v.get("source")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t != "file")
+            }),
         _ => false,
     })
 }
@@ -246,7 +269,10 @@ fn position(cells: &[Cell]) -> Option<(String, i64)> {
     cells.iter().find_map(|c| match &c.payload {
         CellPayload::Json(s) if c.kind == cell_type::POSITION => {
             let v: Value = serde_json::from_str(s).ok()?;
-            Some((v.get("file")?.as_str()?.replace('\\', "/"), v.get("start_line")?.as_i64()?))
+            Some((
+                v.get("file")?.as_str()?.replace('\\', "/"),
+                v.get("start_line")?.as_i64()?,
+            ))
         }
         _ => None,
     })
@@ -282,7 +308,9 @@ struct RowShape {
 
 /// A `|---|:--|` table separator line.
 fn is_table_separator(t: &str) -> bool {
-    t.starts_with('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+    t.starts_with('|')
+        && t.contains('-')
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
 }
 
 /// The row a line is, if any (the caller skips fenced lines).
@@ -300,7 +328,11 @@ fn row_shape(line: &str) -> Option<RowShape> {
             return None;
         }
         (RowKind::Table, cells)
-    } else if let Some(r) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("+ ")) {
+    } else if let Some(r) = t
+        .strip_prefix("- ")
+        .or_else(|| t.strip_prefix("* "))
+        .or_else(|| t.strip_prefix("+ "))
+    {
         (RowKind::List, r)
     } else {
         let d = t.bytes().take_while(u8::is_ascii_digit).count();
@@ -315,7 +347,10 @@ fn row_shape(line: &str) -> Option<RowShape> {
         if let Some(r) = body.strip_prefix("[ ]") {
             state = RowState::Pending;
             body = r;
-        } else if let Some(r) = body.strip_prefix("[x]").or_else(|| body.strip_prefix("[X]")) {
+        } else if let Some(r) = body
+            .strip_prefix("[x]")
+            .or_else(|| body.strip_prefix("[X]"))
+        {
             state = RowState::Done;
             body = r;
         }
@@ -323,11 +358,21 @@ fn row_shape(line: &str) -> Option<RowShape> {
     let head = body.replace("**", "").replace("__", "").replace('`', "");
     let head = head.trim_start().to_string();
     let first_cell = if kind == RowKind::Table {
-        body.split('|').next().unwrap_or("").trim_matches(|c| c == '*' || c == '`' || c == ' ').to_string()
+        body.split('|')
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == '*' || c == '`' || c == ' ')
+            .to_string()
     } else {
         String::new()
     };
-    Some(RowShape { kind, indent, state, head, first_cell })
+    Some(RowShape {
+        kind,
+        indent,
+        state,
+        head,
+        first_cell,
+    })
 }
 
 /// The id a row's head defines: its first mention, starting the head and
@@ -348,7 +393,13 @@ fn defined_id(head: &str, vocab: &IdVocab) -> Option<IdMention> {
 /// Read one markdown page's rows into `defs`. `segments` are `(0-based first
 /// row, text)` in order (a tree file: one, at 0; a snapshot page: its
 /// sections); the heading stack runs across them.
-fn read_page(page: &str, scope: Option<String>, segments: &[(i64, &str)], vocab: &IdVocab, defs: &mut IdDefs) {
+fn read_page(
+    page: &str,
+    scope: Option<String>,
+    segments: &[(i64, &str)],
+    vocab: &IdVocab,
+    defs: &mut IdDefs,
+) {
     let file = page.rsplit('/').next().unwrap_or(page).to_ascii_lowercase();
     // (level, lowercased heading text), the innermost last.
     let mut stack: Vec<(usize, String)> = Vec::new();
@@ -359,7 +410,9 @@ fn read_page(page: &str, scope: Option<String>, segments: &[(i64, &str)], vocab:
             if fenced[i] {
                 continue;
             }
-            let Some(shape) = row_shape(line) else { continue };
+            let Some(shape) = row_shape(line) else {
+                continue;
+            };
             if shape.kind == RowKind::Heading {
                 let t = line.trim_start();
                 let level = t.bytes().take_while(|&c| c == b'#').count();
@@ -368,7 +421,9 @@ fn read_page(page: &str, scope: Option<String>, segments: &[(i64, &str)], vocab:
                 }
                 stack.push((level, t.trim_start_matches('#').trim().to_ascii_lowercase()));
             }
-            let Some(m) = defined_id(&shape.head, vocab) else { continue };
+            let Some(m) = defined_id(&shape.head, vocab) else {
+                continue;
+            };
             if shape.kind == RowKind::Table && shape.first_cell != m.id {
                 defs.label_rows += 1;
                 continue;
@@ -457,7 +512,10 @@ pub(crate) fn kpath_tokens(line: &str) -> Vec<String> {
     let mut depth = 0usize;
     for c in line.chars() {
         let sep = c.is_whitespace()
-            || matches!(c, '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>' | ';' | '|' | '=')
+            || matches!(
+                c,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>' | ';' | '|' | '='
+            )
             || (c == ',' && depth == 0);
         if c == '{' {
             depth += 1;
@@ -506,7 +564,11 @@ const KLIN_PHRASES: &[(&str, &str, bool)] = &[
 /// after the phrase, the subject the last mention ending at most 40 bytes
 /// before it, else the row's own id; `(new, old, phrase)`, the subject the new
 /// id unless the phrase names the new one. A pair of one id is dropped.
-fn lineage_phrases(line: &str, ids: &[IdMention], own: &str) -> Vec<(String, String, &'static str)> {
+fn lineage_phrases(
+    line: &str,
+    ids: &[IdMention],
+    own: &str,
+) -> Vec<(String, String, &'static str)> {
     let lower = line.to_ascii_lowercase();
     let mut out = Vec::new();
     for (ph, name, names_new) in KLIN_PHRASES {
@@ -515,7 +577,9 @@ fn lineage_phrases(line: &str, ids: &[IdMention], own: &str) -> Vec<(String, Str
             let s = from + p;
             let e = s + ph.len();
             from = e;
-            let Some(obj) = ids.iter().find(|x| x.start >= e && x.start <= e + 3) else { continue };
+            let Some(obj) = ids.iter().find(|x| x.start >= e && x.start <= e + 3) else {
+                continue;
+            };
             let subj = ids
                 .iter()
                 .rev()
@@ -524,7 +588,11 @@ fn lineage_phrases(line: &str, ids: &[IdMention], own: &str) -> Vec<(String, Str
             if subj == obj.id {
                 continue;
             }
-            let (new, old) = if *names_new { (obj.id.as_str(), subj) } else { (subj, obj.id.as_str()) };
+            let (new, old) = if *names_new {
+                (obj.id.as_str(), subj)
+            } else {
+                (subj, obj.id.as_str())
+            };
             out.push((new.to_string(), old.to_string(), *name));
         }
     }
@@ -551,8 +619,14 @@ fn read_tracker(path: &str, bytes: &[u8], decl: &TrackerDecl, vocab: &IdVocab, d
     let text = String::from_utf8_lossy(bytes);
     let mut cursor = 0usize;
     for item in items {
-        let Some(id) = item.get(decl.id.as_str()).and_then(Value::as_str) else { continue };
-        let whole = vocab.mentions(id).into_iter().next().filter(|m| m.start == 0 && m.end == id.len());
+        let Some(id) = item.get(decl.id.as_str()).and_then(Value::as_str) else {
+            continue;
+        };
+        let whole = vocab
+            .mentions(id)
+            .into_iter()
+            .next()
+            .filter(|m| m.start == 0 && m.end == id.len());
         let Some(m) = whole else { continue };
         let line = match id_field_at(&text, cursor, &decl.id, id) {
             Some((at, end)) => {
@@ -561,14 +635,27 @@ fn read_tracker(path: &str, bytes: &[u8], decl: &TrackerDecl, vocab: &IdVocab, d
             }
             None => cursor,
         };
-        let line = text[..line.min(text.len())].bytes().filter(|&b| b == b'\n').count() as i64 + 1;
-        let state = match decl.state.as_deref().and_then(|f| item.get(f)).and_then(Value::as_str) {
+        let line = text[..line.min(text.len())]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count() as i64
+            + 1;
+        let state = match decl
+            .state
+            .as_deref()
+            .and_then(|f| item.get(f))
+            .and_then(Value::as_str)
+        {
             Some(v) if decl.done.iter().any(|d| d == v) => RowState::Done,
             _ => RowState::Pending,
         };
         let names: Vec<String> = match item.get(decl.files.as_str()) {
             Some(Value::String(s)) => vec![s.clone()],
-            Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
             _ => Vec::new(),
         };
         defs.rows.push(DefRow {
@@ -578,7 +665,11 @@ fn read_tracker(path: &str, bytes: &[u8], decl: &TrackerDecl, vocab: &IdVocab, d
             line,
             scope: None,
             state,
-            head: item.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+            head: item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             names: names.into_iter().take(MAX_ROW_NAMES).collect(),
             lineage: Vec::new(),
             heading_words: String::new(),
@@ -719,13 +810,20 @@ impl RouteCounts {
 
     /// `<route>:<n>,..` in route-name order.
     pub fn render(&self) -> String {
-        self.counts.iter().map(|(k, n)| format!("{k}:{n}")).collect::<Vec<_>>().join(",")
+        self.counts
+            .iter()
+            .map(|(k, n)| format!("{k}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
 /// rank_eval `law_words`: alphanumeric runs, lowercased.
 fn dice_words(s: &str) -> Vec<String> {
-    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// rank_eval `law_dice`: Dice over word multisets; empty against empty is 1.0.
@@ -746,7 +844,11 @@ fn word_dice(a: &str, b: &str) -> f64 {
         }
     }
     let tot = (wa.len() + wb.len()) as f64;
-    if tot == 0.0 { 1.0 } else { 2.0 * inter as f64 / tot }
+    if tot == 0.0 {
+        1.0
+    } else {
+        2.0 * inter as f64 / tot
+    }
 }
 
 fn uf_find(p: &mut [usize], mut x: usize) -> usize {
@@ -776,12 +878,16 @@ impl IdDefs {
     /// lineage classes (`KLin::build`). `local_words` are `[ids] local_words`
     /// (compared lowercased). The result does not depend on row order.
     pub fn namespaces(&self, local_words: &[String]) -> Namespaces {
-        let words: Vec<String> =
-            local_words.iter().map(|w| w.to_lowercase()).filter(|w| !w.is_empty()).collect();
+        let words: Vec<String> = local_words
+            .iter()
+            .map(|w| w.to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
         let mut order: Vec<usize> = (0..self.rows.len()).collect();
         order.sort_by(|&a, &b| {
             let (ra, rb) = (&self.rows[a], &self.rows[b]);
-            (&ra.page, ra.line, &ra.id, &ra.family, &ra.head).cmp(&(&rb.page, rb.line, &rb.id, &rb.family, &rb.head))
+            (&ra.page, ra.line, &ra.id, &ra.family, &ra.head)
+                .cmp(&(&rb.page, rb.line, &rb.id, &rb.family, &rb.head))
         });
         let mut ser: BTreeMap<(String, String), SerAcc> = BTreeMap::new();
         for &i in &order {
@@ -791,35 +897,54 @@ impl IdDefs {
             let is_local = !tracker
                 && words.iter().any(|w| r.heading_words.contains(w.as_str()))
                 && !r.nearest_heading.contains("decision");
-            let e = ser.entry((r.page.clone(), r.family.clone())).or_insert_with(|| SerAcc {
-                tracker,
-                local: is_local,
-                scope: r.scope.clone(),
-                ids: BTreeMap::new(),
-            });
+            let e = ser
+                .entry((r.page.clone(), r.family.clone()))
+                .or_insert_with(|| SerAcc {
+                    tracker,
+                    local: is_local,
+                    scope: r.scope.clone(),
+                    ids: BTreeMap::new(),
+                });
             e.local = e.local && is_local;
             e.ids.entry(r.id.clone()).or_default().push(i);
         }
         let keys: Vec<&(String, String)> = ser.keys().collect();
         let accs: Vec<&SerAcc> = ser.values().collect();
-        let mut out = Namespaces { series: keys.len(), ..Namespaces::default() };
+        let mut out = Namespaces {
+            series: keys.len(),
+            ..Namespaces::default()
+        };
         out.local = accs.iter().filter(|a| a.local).count();
         let mut parent: Vec<usize> = (0..keys.len()).collect();
         let head = |a: &SerAcc, id: &str| -> String {
-            a.ids.get(id).and_then(|v| v.first()).map(|&i| self.rows[i].head.clone()).unwrap_or_default()
+            a.ids
+                .get(id)
+                .and_then(|v| v.first())
+                .map(|&i| self.rows[i].head.clone())
+                .unwrap_or_default()
         };
         for i in 0..keys.len() {
             for j in i + 1..keys.len() {
                 let (a, b) = (accs[i], accs[j]);
-                if keys[i].1 != keys[j].1 || keys[i].0 == keys[j].0 || a.local || b.local || a.tracker || b.tracker {
+                if keys[i].1 != keys[j].1
+                    || keys[i].0 == keys[j].0
+                    || a.local
+                    || b.local
+                    || a.tracker
+                    || b.tracker
+                {
                     continue;
                 }
-                let shared: Vec<&String> = a.ids.keys().filter(|k| b.ids.contains_key(*k)).collect();
+                let shared: Vec<&String> =
+                    a.ids.keys().filter(|k| b.ids.contains_key(*k)).collect();
                 if shared.len() < 3 {
                     continue;
                 }
-                let dice: f64 =
-                    shared.iter().map(|k| word_dice(&head(a, k), &head(b, k))).sum::<f64>() / shared.len() as f64;
+                let dice: f64 = shared
+                    .iter()
+                    .map(|k| word_dice(&head(a, k), &head(b, k)))
+                    .sum::<f64>()
+                    / shared.len() as f64;
                 if dice >= 0.3 {
                     let (ra, rb) = (uf_find(&mut parent, i), uf_find(&mut parent, j));
                     if ra != rb {
@@ -843,27 +968,47 @@ impl IdDefs {
             }
         };
         for members in comp.values() {
-            let scoped = members.iter().filter(|&&i| accs[i].scope.is_some()).min_by_key(|&&i| name0(i));
+            let scoped = members
+                .iter()
+                .filter(|&&i| accs[i].scope.is_some())
+                .min_by_key(|&&i| name0(i));
             let (name, scope) = match scoped {
                 Some(&i) => (name0(i), accs[i].scope.clone()),
-                None => (members.iter().map(|&i| name0(i)).min().unwrap_or_default(), None),
+                None => (
+                    members.iter().map(|&i| name0(i)).min().unwrap_or_default(),
+                    None,
+                ),
             };
             for &i in members {
                 let acc = accs[i];
                 let page = &keys[i].0;
                 if let Some(s) = &acc.scope {
-                    out.scopes.entry(name.clone()).or_default().insert(s.clone());
+                    out.scopes
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(s.clone());
                     out.all_scopes.insert(s.clone());
                 }
                 for (id, idxs) in &acc.ids {
-                    out.rows.entry((name.clone(), id.clone())).or_default().extend(idxs.iter().copied());
-                    if idxs.iter().any(|&x| self.rows[x].state == RowState::Pending) {
+                    out.rows
+                        .entry((name.clone(), id.clone()))
+                        .or_default()
+                        .extend(idxs.iter().copied());
+                    if idxs
+                        .iter()
+                        .any(|&x| self.rows[x].state == RowState::Pending)
+                    {
                         out.pending.insert((name.clone(), id.clone()));
                     }
                     out.def.insert((page.clone(), id.clone()), name.clone());
                     let v = out.by_id.entry(id.clone()).or_default();
                     if !v.iter().any(|x| x.ns == name) {
-                        v.push(Series { ns: name.clone(), local: acc.local, scope: scope.clone(), page: page.clone() });
+                        v.push(Series {
+                            ns: name.clone(),
+                            local: acc.local,
+                            scope: scope.clone(),
+                            page: page.clone(),
+                        });
                     }
                 }
             }
@@ -891,9 +1036,15 @@ impl Namespaces {
             if r.lineage.is_empty() {
                 continue;
             }
-            let cx = Ctx { own_page: Some(r.page.as_str()), own_scope: r.scope.as_deref(), ..Ctx::default() };
+            let cx = Ctx {
+                own_page: Some(r.page.as_str()),
+                own_scope: r.scope.as_deref(),
+                ..Ctx::default()
+            };
             for (new, old, _) in &r.lineage {
-                let (Ok(n), Ok(o)) = (self.resolve(new, &cx), self.resolve(old, &cx)) else { continue };
+                let (Ok(n), Ok(o)) = (self.resolve(new, &cx), self.resolve(old, &cx)) else {
+                    continue;
+                };
                 let (kn, ko) = (Namespaces::key(&n.ns, new), Namespaces::key(&o.ns, old));
                 if kn != ko {
                     pairs.insert((kn, ko));
@@ -941,7 +1092,11 @@ impl Namespaces {
                 self.lineage_capped += 1;
                 continue;
             }
-            let (big, small) = if size[ra] >= size[rb] { (ra, rb) } else { (rb, ra) };
+            let (big, small) = if size[ra] >= size[rb] {
+                (ra, rb)
+            } else {
+                (rb, ra)
+            };
             parent[small] = big;
             size[big] += size[small];
             self.lineage_merges += 1;
@@ -1016,18 +1171,27 @@ impl Namespaces {
     /// recent-scope, newest-scope).
     pub fn resolve(&self, id: &str, cx: &Ctx) -> Result<Resolved, &'static str> {
         let ok = |ns: String, tier: &'static str, route: &'static str| {
-            Ok(Resolved { id: id.to_string(), ns, tier, route })
+            Ok(Resolved {
+                id: id.to_string(),
+                ns,
+                tier,
+                route,
+            })
         };
         if let Some(p) = cx.own_page
             && let Some(n) = self.def.get(&(p.to_string(), id.to_string()))
         {
             return ok(n.clone(), "fact", "own-page");
         }
-        let Some(all) = self.by_id.get(id) else { return Err("undefined") };
+        let Some(all) = self.by_id.get(id) else {
+            return Err("undefined");
+        };
         let vis: Vec<&Series> = all
             .iter()
             .filter(|x| {
-                !x.local || Some(x.page.as_str()) == cx.own_page || (x.scope.is_some() && x.scope.as_deref() == cx.own_scope)
+                !x.local
+                    || Some(x.page.as_str()) == cx.own_page
+                    || (x.scope.is_some() && x.scope.as_deref() == cx.own_scope)
             })
             .collect();
         match vis.len() {
@@ -1046,15 +1210,30 @@ impl Namespaces {
         if global.len() == 1 {
             return ok(global[0].ns.clone(), "derived", "global");
         }
-        let pend: Vec<&Series> =
-            vis.iter().copied().filter(|x| self.pending.contains(&(x.ns.clone(), id.to_string()))).collect();
-        let pool: Vec<&Series> = if pend.is_empty() { vis.clone() } else { pend.clone() };
+        let pend: Vec<&Series> = vis
+            .iter()
+            .copied()
+            .filter(|x| self.pending.contains(&(x.ns.clone(), id.to_string())))
+            .collect();
+        let pool: Vec<&Series> = if pend.is_empty() {
+            vis.clone()
+        } else {
+            pend.clone()
+        };
         if pool.len() == 1 {
-            let route = if vis.len() > 1 && pend.len() == 1 { "open-row" } else { "one-left" };
+            let route = if vis.len() > 1 && pend.len() == 1 {
+                "open-row"
+            } else {
+                "one-left"
+            };
             return ok(pool[0].ns.clone(), "derived", route);
         }
         for r in cx.recent {
-            let mut hit: Vec<&Series> = pool.iter().copied().filter(|p| self.in_scope(p, r)).collect();
+            let mut hit: Vec<&Series> = pool
+                .iter()
+                .copied()
+                .filter(|p| self.in_scope(p, r))
+                .collect();
             hit.sort_by(|a, b| (a.local, &a.ns).cmp(&(b.local, &b.ns)));
             if let Some(h) = hit.first() {
                 return ok(h.ns.clone(), "heuristic", "recent-scope");
@@ -1062,7 +1241,12 @@ impl Namespaces {
         }
         let newest = pool
             .iter()
-            .filter_map(|p| p.scope.as_deref().filter(|s| is_spec_scope(s)).map(|s| (s, p)))
+            .filter_map(|p| {
+                p.scope
+                    .as_deref()
+                    .filter(|s| is_spec_scope(s))
+                    .map(|s| (s, p))
+            })
             .max_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| b.ns.cmp(&a.ns)));
         let n = match newest {
             Some((_, p)) => p.ns.clone(),
@@ -1076,7 +1260,12 @@ impl Namespaces {
     /// a same-family mention of the line got by another route, when that
     /// namespace defines it (route `sibling`, derived). When `cx.line_scopes`
     /// is empty the line's own [`line_scopes`] are read.
-    pub fn resolve_line(&self, line: &str, mentions: &[IdMention], cx: &Ctx) -> Vec<Result<Resolved, &'static str>> {
+    pub fn resolve_line(
+        &self,
+        line: &str,
+        mentions: &[IdMention],
+        cx: &Ctx,
+    ) -> Vec<Result<Resolved, &'static str>> {
         let own;
         let cx = if cx.line_scopes.is_empty() {
             let mut c = cx.clone();
@@ -1086,7 +1275,8 @@ impl Namespaces {
         } else {
             cx
         };
-        let mut res: Vec<Result<Resolved, &'static str>> = mentions.iter().map(|m| self.resolve(&m.id, cx)).collect();
+        let mut res: Vec<Result<Resolved, &'static str>> =
+            mentions.iter().map(|m| self.resolve(&m.id, cx)).collect();
         let weak = |r: &str| matches!(r, "recent-scope" | "newest-scope");
         for i in 0..mentions.len() {
             let Ok(ri) = &res[i] else { continue };
@@ -1101,14 +1291,22 @@ impl Namespaces {
                 }
                 if let Ok(rj) = &res[j]
                     && !weak(rj.route)
-                    && self.by_id.get(id).is_some_and(|v| v.iter().any(|x| x.ns == rj.ns))
+                    && self
+                        .by_id
+                        .get(id)
+                        .is_some_and(|v| v.iter().any(|x| x.ns == rj.ns))
                 {
                     got = Some(rj.ns.clone());
                     break;
                 }
             }
             if let Some(n) = got {
-                res[i] = Ok(Resolved { id: id.clone(), ns: n, tier: "derived", route: "sibling" });
+                res[i] = Ok(Resolved {
+                    id: id.clone(),
+                    ns: n,
+                    tier: "derived",
+                    route: "sibling",
+                });
             }
         }
         res
@@ -1137,7 +1335,9 @@ impl Namespaces {
 pub fn line_scopes(line: &str, ns: &Namespaces) -> Vec<String> {
     let toks: Vec<&str> = line
         .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))))
+        .map(|t| {
+            t.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')))
+        })
         .map(|t| t.trim_end_matches('.'))
         .collect();
     let mut out: Vec<String> = Vec::new();
@@ -1151,7 +1351,10 @@ pub fn line_scopes(line: &str, ns: &Namespaces) -> Vec<String> {
             continue;
         }
         for s in &ns.all_scopes {
-            let under = *tok == s.as_str() || tok.strip_prefix(s.as_str()).is_some_and(|r| r.starts_with('/'));
+            let under = *tok == s.as_str()
+                || tok
+                    .strip_prefix(s.as_str())
+                    .is_some_and(|r| r.starts_with('/'));
             let last = s.rsplit('/').next() == Some(*tok);
             if under || last {
                 push(s, &mut out);
@@ -1161,7 +1364,12 @@ pub fn line_scopes(line: &str, ns: &Namespaces) -> Vec<String> {
         if lower != "spec" && lower != "specs" {
             continue;
         }
-        let near = toks.iter().enumerate().skip(t.saturating_sub(2)).take(t + 3 - t.saturating_sub(2)).filter(|(j, _)| *j != t);
+        let near = toks
+            .iter()
+            .enumerate()
+            .skip(t.saturating_sub(2))
+            .take(t + 3 - t.saturating_sub(2))
+            .filter(|(j, _)| *j != t);
         for (_, near_tok) in near {
             let digits: String = near_tok.chars().take_while(char::is_ascii_digit).collect();
             if digits.len() < 3 {
@@ -1171,7 +1379,9 @@ pub fn line_scopes(line: &str, ns: &Namespaces) -> Vec<String> {
             let named: Vec<&String> = ns
                 .all_scopes
                 .iter()
-                .filter(|s| is_spec_scope(s) && s.rsplit('/').next().is_some_and(|d| d.starts_with(&prefix)))
+                .filter(|s| {
+                    is_spec_scope(s) && s.rsplit('/').next().is_some_and(|d| d.starts_with(&prefix))
+                })
                 .collect();
             if let [one] = named.as_slice() {
                 push(one, &mut out);
@@ -1189,14 +1399,26 @@ mod tests {
     fn kpath_tokens_keep_brace_globs_whole() {
         assert_eq!(
             kpath_tokens("touch `src/{a,b}.rs`, docs/x.md (new); see [y](z/w.md)"),
-            ["touch", "src/{a,b}.rs", "docs/x.md", "new", "see", "y", "z/w.md"]
+            [
+                "touch",
+                "src/{a,b}.rs",
+                "docs/x.md",
+                "new",
+                "see",
+                "y",
+                "z/w.md"
+            ]
         );
     }
 
     #[test]
     fn rows_define_only_at_the_head() {
         let v = IdVocab::default();
-        let id = |l: &str| row_shape(l).and_then(|s| defined_id(&s.head, &v)).map(|m| m.id);
+        let id = |l: &str| {
+            row_shape(l)
+                .and_then(|s| defined_id(&s.head, &v))
+                .map(|m| m.id)
+        };
         assert_eq!(id("- **FR-001**: users can pay").as_deref(), Some("FR-001"));
         assert_eq!(id("- [x] T013 done").as_deref(), Some("T013"));
         assert_eq!(id("1. T020: numbered").as_deref(), Some("T020"));

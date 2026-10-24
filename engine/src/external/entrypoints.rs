@@ -146,20 +146,26 @@ pub(super) fn apply_declared_entrypoints(
         }
     }
 
-    let mut t = Tally { patterns: patterns.len(), ..Tally::default() };
+    let mut t = Tally {
+        patterns: patterns.len(),
+        ..Tally::default()
+    };
     for spanned in patterns {
         let pattern = spanned.get_ref().as_str();
         let decl = cfg.decl_of(spanned.span());
         let mut ids = own.matches(pattern);
         if ids.is_empty() {
-            ids = all.get_or_insert_with(|| QnameTable::build(merged, None)).matches(pattern);
+            ids = all
+                .get_or_insert_with(|| QnameTable::build(merged, None))
+                .matches(pattern);
             if !ids.is_empty() {
                 t.cross_repo += 1;
             }
         }
         if ids.is_empty() {
             t.unmatched += 1;
-            t.details.push(format!("unmatched pattern={pattern} {decl}"));
+            t.details
+                .push(format!("unmatched pattern={pattern} {decl}"));
             continue;
         }
         let cell = payload(pattern, &decl);
@@ -169,7 +175,10 @@ pub(super) fn apply_declared_entrypoints(
             }
             for &(gi, ni) in at.get(&id).map_or(&[][..], Vec::as_slice) {
                 if let Some(node) = merged.graphs.get_mut(gi).and_then(|g| g.nodes.get_mut(ni)) {
-                    node.cells.push(Cell { kind: cell_type::ENTRYPOINT, payload: cell.clone() });
+                    node.cells.push(Cell {
+                        kind: cell_type::ENTRYPOINT,
+                        payload: cell.clone(),
+                    });
                 }
             }
             t.matched_nodes += 1;
@@ -180,7 +189,11 @@ pub(super) fn apply_declared_entrypoints(
 }
 
 fn report(label: &str, t: &Tally) {
-    let cross = if t.cross_repo > 0 { format!(" cross_repo={}", t.cross_repo) } else { String::new() };
+    let cross = if t.cross_repo > 0 {
+        format!(" cross_repo={}", t.cross_repo)
+    } else {
+        String::new()
+    };
     eprintln!(
         "[entrypoints] declared repo={label} patterns={} matched_nodes={} unmatched_patterns={}{cross}",
         t.patterns, t.matched_nodes, t.unmatched,
@@ -189,7 +202,10 @@ fn report(label: &str, t: &Tally) {
         eprintln!("[entrypoints] {line}");
     }
     if t.details.len() > MAX_DETAIL_LINES {
-        eprintln!("[entrypoints] ... {} more detail lines", t.details.len() - MAX_DETAIL_LINES);
+        eprintln!(
+            "[entrypoints] ... {} more detail lines",
+            t.details.len() - MAX_DETAIL_LINES
+        );
     }
 }
 
@@ -206,7 +222,12 @@ mod tests {
         for (kind, q) in qnames {
             let id = NodeId::from_parts("code", repo, *kind, q);
             nav.record(id, q.rsplit("::").next().unwrap_or(q), q, *kind, None);
-            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells: Vec::new() });
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            });
         }
         RepoGraph {
             repo,
@@ -222,19 +243,33 @@ mod tests {
 
     fn table(qnames: &[&str]) -> QnameTable {
         let repo = RepoId::from_canonical("test://entrypoints");
-        let rows: Vec<(NodeKindId, &str)> = qnames.iter().map(|q| (node_kind::FUNCTION, *q)).collect();
+        let rows: Vec<(NodeKindId, &str)> =
+            qnames.iter().map(|q| (node_kind::FUNCTION, *q)).collect();
         QnameTable::build(&MergedGraph::new(vec![graph(repo, &rows)]), None)
     }
 
     fn names(t: &QnameTable, pattern: &str) -> Vec<String> {
         let ids = t.matches(pattern);
-        t.by_qname.iter().filter(|(_, v)| v.iter().any(|id| ids.contains(id))).map(|(q, _)| q.clone()).collect()
+        t.by_qname
+            .iter()
+            .filter(|(_, v)| v.iter().any(|id| ids.contains(id)))
+            .map(|(q, _)| q.clone())
+            .collect()
     }
 
     #[test]
     fn prefix_matches_descendants_not_the_prefix_node() {
-        let t = table(&["app::jobs", "app::jobs::a", "app::jobs::b::c", "app::jobsx::d", "app::job"]);
-        assert_eq!(names(&t, "app::jobs::*"), ["app::jobs::a", "app::jobs::b::c"]);
+        let t = table(&[
+            "app::jobs",
+            "app::jobs::a",
+            "app::jobs::b::c",
+            "app::jobsx::d",
+            "app::job",
+        ]);
+        assert_eq!(
+            names(&t, "app::jobs::*"),
+            ["app::jobs::a", "app::jobs::b::c"]
+        );
         assert_eq!(names(&t, "app::jobs"), ["app::jobs"]);
         assert!(t.matches("app::none::*").is_empty());
         assert!(t.matches("app::jobs::zz").is_empty());
@@ -243,7 +278,13 @@ mod tests {
     #[test]
     fn exact_matches_every_node_sharing_the_qname() {
         let repo = RepoId::from_canonical("test://entrypoints");
-        let g = graph(repo, &[(node_kind::CLASS, "ui::Page"), (node_kind::COMPONENT, "ui::Page")]);
+        let g = graph(
+            repo,
+            &[
+                (node_kind::CLASS, "ui::Page"),
+                (node_kind::COMPONENT, "ui::Page"),
+            ],
+        );
         let t = QnameTable::build(&MergedGraph::new(vec![g]), Some(repo));
         assert_eq!(t.matches("ui::Page").len(), 2);
     }
@@ -253,6 +294,9 @@ mod tests {
         let CellPayload::Json(s) = payload("a::*", ".glia/overlay.toml:4") else {
             panic!("ENTRYPOINT is a Json cell");
         };
-        assert_eq!(s, r#"{"decl":".glia/overlay.toml:4","pattern":"a::*","source":"config"}"#);
+        assert_eq!(
+            s,
+            r#"{"decl":".glia/overlay.toml:4","pattern":"a::*","source":"config"}"#
+        );
     }
 }

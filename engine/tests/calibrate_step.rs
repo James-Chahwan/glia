@@ -27,9 +27,9 @@ use glia_engine::calibrate::record::{
     CALIBRATION_FILE, CalibrationRead, calibration_dir, read_calibration,
 };
 use glia_engine::calibrate::{
-    COCHANGE_CANDIDATES, COCHANGE_FALLBACK, CalibrateOptions, CalibrationSummary,
-    FIND_CANDIDATES, FIND_FALLBACK, REVIEW_CANDIDATES, REVIEW_FALLBACK, STRUCTURE_CANDIDATES,
-    STRUCTURE_FALLBACK, SetSummary, Shape, bootstrap_ci, calibrate, calibrate_snapshot, select,
+    COCHANGE_CANDIDATES, COCHANGE_FALLBACK, CalibrateOptions, CalibrationSummary, FIND_CANDIDATES,
+    FIND_FALLBACK, REVIEW_CANDIDATES, REVIEW_FALLBACK, STRUCTURE_CANDIDATES, STRUCTURE_FALLBACK,
+    SetSummary, Shape, bootstrap_ci, calibrate, calibrate_snapshot, select,
 };
 
 /// Files per cluster.
@@ -321,7 +321,12 @@ fn text_commit_files(i: usize) -> (&'static str, Vec<String>) {
     let c = if i.is_multiple_of(2) { "alpha" } else { "zeta" };
     let size = 2 + (i / 2) % 5;
     let start = (i * 5) % N;
-    (c, (0..size).map(|j| cluster_path(c, (start + j) % N)).collect())
+    (
+        c,
+        (0..size)
+            .map(|j| cluster_path(c, (start + j) % N))
+            .collect(),
+    )
 }
 
 /// `COMMITS` commits alternating between the clusters, each subject naming
@@ -357,8 +362,7 @@ fn text_history(root: &Path) {
     commits.reverse();
     messages.reverse();
     let meta = HistoryMeta::new(format!("{:040x}", COMMITS), COMMITS, None, String::new());
-    write_history_with_messages(root, meta, &commits, &[], Some(&messages))
-        .expect("write history");
+    write_history_with_messages(root, meta, &commits, &[], Some(&messages)).expect("write history");
 }
 
 /// EC.11 / EC.12: with commit messages, the review group's SELt2 rows (14
@@ -383,17 +387,19 @@ fn review_text_selection_calibrates_on_messages() {
         .collect();
     assert_eq!(
         rows,
-        [("SELt2", "k1"), ("SELt2", "k2"), ("SELt2", "k3"), ("SELt2", "half")]
+        [
+            ("SELt2", "k1"),
+            ("SELt2", "k2"),
+            ("SELt2", "k3"),
+            ("SELt2", "half")
+        ]
     );
     let k1 = row(&s, "SELt2", "k1");
     assert_eq!(k1.fallback, REVIEW_FALLBACK);
     assert!(k1.queries > 0);
     assert!(REVIEW_CANDIDATES.contains(&k1.pick.as_str()), "{k1:?}");
     assert_ne!(k1.pick, "H10[PT*]", "a text fusion is the k1 pick: {k1:?}");
-    assert!(
-        k1.selection_recall10 >= k1.fallback_recall10,
-        "{k1:?}"
-    );
+    assert!(k1.selection_recall10 >= k1.fallback_recall10, "{k1:?}");
     let CalibrationRead::Loaded(cal) = read_calibration(&root) else {
         panic!("record not loaded");
     };
@@ -401,7 +407,11 @@ fn review_text_selection_calibrates_on_messages() {
         assert_eq!(r.candidates, REVIEW_CANDIDATES, "{} {}", r.set, r.shape);
         assert_eq!(r.recall10.len(), 14);
         let sum = |n: &str| {
-            let i = r.candidates.iter().position(|c| c == n).unwrap_or_else(|| panic!("{n}"));
+            let i = r
+                .candidates
+                .iter()
+                .position(|c| c == n)
+                .unwrap_or_else(|| panic!("{n}"));
             r.recall10[i].to_bits()
         };
         for (a, b) in [
@@ -420,7 +430,10 @@ fn review_text_selection_calibrates_on_messages() {
         &REVIEW_CANDIDATES,
         REVIEW_FALLBACK,
     );
-    assert_eq!((sel.pick.as_str(), sel.source), (k1.pick.as_str(), "calibrated"));
+    assert_eq!(
+        (sel.pick.as_str(), sel.source),
+        (k1.pick.as_str(), "calibrated")
+    );
 
     // Without the messages every T1s is 0: the replay still writes the rows.
     let snap = read_history(&root).expect("snapshot");
@@ -437,8 +450,15 @@ fn review_text_selection_calibrates_on_messages() {
     let (_, again) =
         calibrate_snapshot(&r.merged, &root, &snap, Some(&msgs), &opts).expect("again");
     assert_eq!(
-        again.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>(),
-        s.sets.iter().map(|x| (&x.pick, x.selection_recall10)).collect::<Vec<_>>()
+        again
+            .sets
+            .iter()
+            .map(|x| (&x.pick, x.selection_recall10))
+            .collect::<Vec<_>>(),
+        s.sets
+            .iter()
+            .map(|x| (&x.pick, x.selection_recall10))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -461,8 +481,14 @@ fn idr_routes_each_test_commit_at_its_parent() {
     g.write("pkg/a.py", "from pkg.b import bill\nfrom pkg.c import other\n\ndef run():\n    other()\n    return bill()\n");
     g.write("pkg/b.py", "def bill():\n    return 1\n");
     g.write("pkg/c.py", "def other():\n    return 2\n");
-    g.write("pkg/d.py", "from pkg.c import other\n\ndef misc():\n    return other()\n");
-    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n");
+    g.write(
+        "pkg/d.py",
+        "from pkg.c import other\n\ndef misc():\n    return other()\n",
+    );
+    g.write(
+        "specs/001-billing/tasks.md",
+        "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n",
+    );
     let first = g.commit("initial skeleton");
     g.write("pkg/b.py", "def bill():\n    return 3\n");
     g.write("pkg/a.py", "from pkg.b import bill\nfrom pkg.c import other\n\ndef run():\n    other()\n    return bill() + 1\n");
@@ -480,11 +506,22 @@ fn idr_routes_each_test_commit_at_its_parent() {
     let repo = built.merged.graphs[0].repo.0;
     let labels = std::collections::BTreeMap::from([(repo, "repo".to_string())]);
     let cands = Candidates::of(&FileIndex::of(&built.merged, &labels), repo);
-    let pos = |p: &str| cands.position(p).unwrap_or_else(|| panic!("{p} in {:?}", cands.paths));
+    let pos = |p: &str| {
+        cands
+            .position(p)
+            .unwrap_or_else(|| panic!("{p} in {:?}", cands.paths))
+    };
     let (a, b) = (pos("pkg/a.py"), pos("pkg/b.py"));
 
-    let idr = idr_at_parent(g.root(), &built.merged, &cands, &second, "T012 billing export", &[])
-        .expect("parent");
+    let idr = idr_at_parent(
+        g.root(),
+        &built.merged,
+        &cands,
+        &second,
+        "T012 billing export",
+        &[],
+    )
+    .expect("parent");
     assert_eq!(idr.len(), cands.len());
     assert_eq!(idr[b], 1.0, "pending at the parent: {idr:?}");
     assert_eq!(idr.iter().filter(|&&x| x > 0.0).count(), 1, "{idr:?}");
@@ -500,23 +537,56 @@ fn idr_routes_each_test_commit_at_its_parent() {
     let keys = seeded_keys("LX[IDR,H18s[PT*]]", &s, &excluded).expect("keys");
     assert_eq!(seeded_order(&keys, &tie, &excluded)[0], b);
     let base = seeded_keys("H18s[PT*]", &s, &excluded).expect("keys");
-    assert_ne!(seeded_order(&base, &tie, &excluded)[0], b, "without IDR another file leads");
+    assert_ne!(
+        seeded_order(&base, &tie, &excluded)[0],
+        b,
+        "without IDR another file leads"
+    );
 
     // T020 exists only in the commit itself: nothing at its parent.
-    let leak = idr_at_parent(g.root(), &built.merged, &cands, &second, "T020 new work", &[])
-        .expect("parent");
+    let leak = idr_at_parent(
+        g.root(),
+        &built.merged,
+        &cands,
+        &second,
+        "T020 new work",
+        &[],
+    )
+    .expect("parent");
     assert!(leak.iter().all(|&x| x == 0.0), "{leak:?}");
     // no id, no scope: nothing
-    let none = idr_at_parent(g.root(), &built.merged, &cands, &second, "billing export", &[])
-        .expect("parent");
+    let none = idr_at_parent(
+        g.root(),
+        &built.merged,
+        &cands,
+        &second,
+        "billing export",
+        &[],
+    )
+    .expect("parent");
     assert!(none.iter().all(|&x| x == 0.0));
     // the root commit has no parent
-    assert!(idr_at_parent(g.root(), &built.merged, &cands, &first, "T012 billing export", &[]).is_err());
+    assert!(
+        idr_at_parent(
+            g.root(),
+            &built.merged,
+            &cands,
+            &first,
+            "T012 billing export",
+            &[]
+        )
+        .is_err()
+    );
 
     // The calibration over this tree's real history.
     let files = |ps: &[&str]| -> Vec<HistoryFile> {
         ps.iter()
-            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .map(|p| HistoryFile {
+                p: p.to_string(),
+                a: Some(1),
+                d: Some(0),
+                from: None,
+            })
             .collect()
     };
     let commits = vec![
@@ -528,10 +598,22 @@ fn idr_routes_each_test_commit_at_its_parent() {
         HistoryCommit {
             c: first.clone(),
             t: 1_700_000_000,
-            files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py", "pkg/d.py", "specs/001-billing/tasks.md"]),
+            files: files(&[
+                "pkg/a.py",
+                "pkg/b.py",
+                "pkg/c.py",
+                "pkg/d.py",
+                "specs/001-billing/tasks.md",
+            ]),
         },
     ];
-    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage {
+        c: c.to_string(),
+        at,
+        s: s.to_string(),
+        b: String::new(),
+        br: None,
+    };
     let messages = vec![
         msg(&second, 1_700_000_100, "T012 billing export"),
         msg(&first, 1_700_000_000, "initial skeleton"),
@@ -549,7 +631,6 @@ fn idr_routes_each_test_commit_at_its_parent() {
     assert!(cal.sets.iter().all(|r| r.candidates == REVIEW_CANDIDATES));
 }
 
-
 /// Two clusters of `N` stand-alone modules (no import, no call): a find
 /// query's PPR stays on its seed files, so only the text and the co-change
 /// of its top files rank.
@@ -557,7 +638,11 @@ fn isolated(root: &Path) {
     for c in ["alpha", "zeta"] {
         write(root, &format!("{c}/__init__.py"), "");
         for i in 0..N {
-            write(root, &cluster_path(c, i), &format!("def {c}{i:02}_f():\n    return {i}\n"));
+            write(
+                root,
+                &cluster_path(c, i),
+                &format!("def {c}{i:02}_f():\n    return {i}\n"),
+            );
         }
     }
 }
@@ -580,12 +665,19 @@ fn find_selection_calibrates_on_messages() {
     let mut opts = CalibrateOptions::default();
     opts.groups = vec!["find"];
     let s = calibrate(&root, &r.merged, &opts).expect("calibrate");
-    let rows: Vec<(&str, &str)> = s.sets.iter().map(|x| (x.set.as_str(), x.shape.as_str())).collect();
+    let rows: Vec<(&str, &str)> = s
+        .sets
+        .iter()
+        .map(|x| (x.set.as_str(), x.shape.as_str()))
+        .collect();
     assert_eq!(rows, [("SELf2t", "find")]);
     let f = row(&s, "SELf2t", "find");
     assert_eq!(f.fallback, FIND_FALLBACK);
     assert_eq!(f.test_commits, COMMITS);
-    assert_eq!(f.queries as usize, COMMITS, "one find query per test commit");
+    assert_eq!(
+        f.queries as usize, COMMITS,
+        "one find query per test commit"
+    );
     assert!(FIND_CANDIDATES.contains(&f.pick.as_str()), "{f:?}");
     assert_eq!(f.pick, "H10x", "co-change from the text's top files: {f:?}");
     assert!(f.selection_recall10 >= f.fallback_recall10, "{f:?}");
@@ -599,7 +691,11 @@ fn find_selection_calibrates_on_messages() {
     assert_eq!(rec.recall10.len(), 11);
     // no git: IDR routes nothing, so each LX[IDR, X] scores exactly as X
     let sum = |n: &str| {
-        let i = rec.candidates.iter().position(|c| c == n).unwrap_or_else(|| panic!("{n}"));
+        let i = rec
+            .candidates
+            .iter()
+            .position(|c| c == n)
+            .unwrap_or_else(|| panic!("{n}"));
         rec.recall10[i].to_bits()
     };
     assert_eq!(sum("LX[IDR,H18x]"), sum("H18x"));
@@ -612,14 +708,21 @@ fn find_selection_calibrates_on_messages() {
         &FIND_CANDIDATES,
         FIND_FALLBACK,
     );
-    assert_eq!((sel.pick.as_str(), sel.source), (f.pick.as_str(), "calibrated"));
+    assert_eq!(
+        (sel.pick.as_str(), sel.source),
+        (f.pick.as_str(), "calibrated")
+    );
 
     // Without the messages there is no text, hence no seed: every candidate
     // ranks by degree and the rows are still written.
     let snap = read_history(&root).expect("snapshot");
     let (_, bare) = calibrate_snapshot(&r.merged, &root, &snap, None, &opts).expect("bare");
     assert_eq!(bare.sets.len(), 1);
-    assert!(f.selection_recall10 > bare.sets[0].selection_recall10, "{f:?} vs {:?}", bare.sets[0]);
+    assert!(
+        f.selection_recall10 > bare.sets[0].selection_recall10,
+        "{f:?} vs {:?}",
+        bare.sets[0]
+    );
 }
 
 const CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_IDR_CHILD";
@@ -628,13 +731,22 @@ const CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_IDR_CHILD";
 /// snapshot: two commits, the second's subject naming T012.
 fn idr_tree() -> (git_fixture::GitRepo, String, String) {
     let g = git_fixture::GitRepo::init();
-    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill()\n");
+    g.write(
+        "pkg/a.py",
+        "from pkg.b import bill\n\ndef run():\n    return bill()\n",
+    );
     g.write("pkg/b.py", "def bill():\n    return 1\n");
     g.write("pkg/c.py", "def other():\n    return 2\n");
-    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n");
+    g.write(
+        "specs/001-billing/tasks.md",
+        "# Tasks\n\n- [ ] T012 billing export in pkg/b.py\n",
+    );
     let first = g.commit("initial skeleton");
     g.write("pkg/b.py", "def bill():\n    return 3\n");
-    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n");
+    g.write(
+        "pkg/a.py",
+        "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n",
+    );
     let second = g.commit("T012 billing export");
     (g, first, second)
 }
@@ -662,14 +774,33 @@ fn replay_routes_print_one_aggregate_idr_line() {
     let (g, first, second) = idr_tree();
     let files = |ps: &[&str]| -> Vec<HistoryFile> {
         ps.iter()
-            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .map(|p| HistoryFile {
+                p: p.to_string(),
+                a: Some(1),
+                d: Some(0),
+                from: None,
+            })
             .collect()
     };
     let commits = vec![
-        HistoryCommit { c: second.clone(), t: 1_700_000_100, files: files(&["pkg/a.py", "pkg/b.py"]) },
-        HistoryCommit { c: first.clone(), t: 1_700_000_000, files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]) },
+        HistoryCommit {
+            c: second.clone(),
+            t: 1_700_000_100,
+            files: files(&["pkg/a.py", "pkg/b.py"]),
+        },
+        HistoryCommit {
+            c: first.clone(),
+            t: 1_700_000_000,
+            files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]),
+        },
     ];
-    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage {
+        c: c.to_string(),
+        at,
+        s: s.to_string(),
+        b: String::new(),
+        br: None,
+    };
     let messages = vec![
         msg(&second, 1_700_000_100, "T012 billing export"),
         msg(&first, 1_700_000_000, "initial skeleton"),
@@ -679,35 +810,69 @@ fn replay_routes_print_one_aggregate_idr_line() {
 
     let exe = std::env::current_exe().expect("test binary path");
     let out = std::process::Command::new(exe)
-        .args(["--exact", "child_calibrate_idr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_calibrate_idr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, g.root())
         .output()
         .expect("re-run the test binary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "child failed: {stderr}");
-    let lines = |p: &str| stderr.lines().filter(|l| l.starts_with(p)).collect::<Vec<_>>();
+    let lines = |p: &str| {
+        stderr
+            .lines()
+            .filter(|l| l.starts_with(p))
+            .collect::<Vec<_>>()
+    };
     let agg = lines("[idr] replay ");
     assert_eq!(agg.len(), 1, "one aggregate line: {stderr}");
     eprintln!("{}", agg[0]);
     assert!(
-        agg[0].starts_with("[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="),
+        agg[0].starts_with(
+            "[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="
+        ),
         "{}",
         agg[0]
     );
-    for quiet in ["[idr] repo=", "[ids] vocab", "[id-defs]", "[id-ns]", "[id-paths]"] {
-        assert!(lines(quiet).is_empty(), "{quiet} printed by the replay: {stderr}");
+    for quiet in [
+        "[idr] repo=",
+        "[ids] vocab",
+        "[id-defs]",
+        "[id-ns]",
+        "[id-paths]",
+    ] {
+        assert!(
+            lines(quiet).is_empty(),
+            "{quiet} printed by the replay: {stderr}"
+        );
     }
     let find = lines("[calibrate] set=SELf2t shape=find candidates=11 ");
     assert_eq!(find.len(), 1, "{stderr}");
     eprintln!("{}", find[0]);
-    assert_eq!(lines("[calibrate] idr unavailable commits=1").len(), 1, "{stderr}");
+    assert_eq!(
+        lines("[calibrate] idr unavailable commits=1").len(),
+        1,
+        "{stderr}"
+    );
     // EG.7 (routed from EC.13): the calibration's rank cache prints no
     // per-lookup line, one summary after the replay.
-    assert!(lines("[rank-cache] holder=calibrate source=").is_empty(), "per-lookup line: {stderr}");
+    assert!(
+        lines("[rank-cache] holder=calibrate source=").is_empty(),
+        "per-lookup line: {stderr}"
+    );
     let summary = lines("[rank-cache] holder=calibrate summary lookups=");
     assert_eq!(summary.len(), 1, "one calibrate summary: {stderr}");
     eprintln!("{}", summary[0]);
-    assert!(summary[0].contains(" built=") && summary[0].contains(" hits=") && summary[0].contains(" build_ms="), "{}", summary[0]);
+    assert!(
+        summary[0].contains(" built=")
+            && summary[0].contains(" hits=")
+            && summary[0].contains(" build_ms="),
+        "{}",
+        summary[0]
+    );
 }
 
 const VOCAB_CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_VOCAB_CHILD";
@@ -717,13 +882,22 @@ const VOCAB_CHILD_ENV: &str = "GLIA_TEST_CALIBRATE_VOCAB_CHILD";
 /// matches, and no `.glia/overlay.toml` at the root.
 fn vocab_tree() -> (git_fixture::GitRepo, String, String) {
     let g = git_fixture::GitRepo::init();
-    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill()\n");
+    g.write(
+        "pkg/a.py",
+        "from pkg.b import bill\n\ndef run():\n    return bill()\n",
+    );
     g.write("pkg/b.py", "def bill():\n    return 1\n");
     g.write("pkg/c.py", "def other():\n    return 2\n");
-    g.write("specs/001-billing/tasks.md", "# Tasks\n\n- [ ] PX7 billing export in pkg/b.py\n");
+    g.write(
+        "specs/001-billing/tasks.md",
+        "# Tasks\n\n- [ ] PX7 billing export in pkg/b.py\n",
+    );
     let first = g.commit("initial skeleton");
     g.write("pkg/b.py", "def bill():\n    return 3\n");
-    g.write("pkg/a.py", "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n");
+    g.write(
+        "pkg/a.py",
+        "from pkg.b import bill\n\ndef run():\n    return bill() + 1\n",
+    );
     let second = g.commit("PX7 billing export");
     (g, first, second)
 }
@@ -739,9 +913,8 @@ fn child_calibrate_vocab() {
         let mut opts = CalibrateOptions::default();
         opts.groups = vec!["review"];
         if std::env::var_os(format!("{VOCAB_CHILD_ENV}_OVERRIDE")).is_some() {
-            opts.vocab = Some(
-                glia_engine::intent::ids::IdVocab::from_patterns(&["PX{N}"]).expect("shape"),
-            );
+            opts.vocab =
+                Some(glia_engine::intent::ids::IdVocab::from_patterns(&["PX{N}"]).expect("shape"));
         }
         calibrate(&root, &built.merged, &opts).expect("calibrate");
     }
@@ -758,14 +931,33 @@ fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
     assert!(!g.root().join(".glia/overlay.toml").exists());
     let files = |ps: &[&str]| -> Vec<HistoryFile> {
         ps.iter()
-            .map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None })
+            .map(|p| HistoryFile {
+                p: p.to_string(),
+                a: Some(1),
+                d: Some(0),
+                from: None,
+            })
             .collect()
     };
     let commits = vec![
-        HistoryCommit { c: second.clone(), t: 1_700_000_100, files: files(&["pkg/a.py", "pkg/b.py"]) },
-        HistoryCommit { c: first.clone(), t: 1_700_000_000, files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]) },
+        HistoryCommit {
+            c: second.clone(),
+            t: 1_700_000_100,
+            files: files(&["pkg/a.py", "pkg/b.py"]),
+        },
+        HistoryCommit {
+            c: first.clone(),
+            t: 1_700_000_000,
+            files: files(&["pkg/a.py", "pkg/b.py", "pkg/c.py"]),
+        },
     ];
-    let msg = |c: &str, at: i64, s: &str| HistoryMessage { c: c.to_string(), at, s: s.to_string(), b: String::new(), br: None };
+    let msg = |c: &str, at: i64, s: &str| HistoryMessage {
+        c: c.to_string(),
+        at,
+        s: s.to_string(),
+        b: String::new(),
+        br: None,
+    };
     let messages = vec![
         msg(&second, 1_700_000_100, "PX7 billing export"),
         msg(&first, 1_700_000_000, "initial skeleton"),
@@ -776,8 +968,13 @@ fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
     let run = |overlay: bool| -> String {
         let exe = std::env::current_exe().expect("test binary path");
         let mut cmd = std::process::Command::new(exe);
-        cmd.args(["--exact", "child_calibrate_vocab", "--nocapture", "--test-threads=1"])
-            .env(VOCAB_CHILD_ENV, g.root());
+        cmd.args([
+            "--exact",
+            "child_calibrate_vocab",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(VOCAB_CHILD_ENV, g.root());
         if overlay {
             cmd.env(format!("{VOCAB_CHILD_ENV}_OVERRIDE"), "1");
         }
@@ -786,26 +983,42 @@ fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
         assert!(out.status.success(), "child failed: {stderr}");
         stderr
     };
-    let lines = |s: &str, p: &str| s.lines().filter(|l| l.starts_with(p)).map(str::to_string).collect::<Vec<_>>();
+    let lines = |s: &str, p: &str| {
+        s.lines()
+            .filter(|l| l.starts_with(p))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
 
     let plain = run(false);
     let agg = lines(&plain, "[idr] replay ");
     assert_eq!(agg.len(), 1, "{plain}");
     eprintln!("without: {}", agg[0]);
     assert!(agg[0].contains(" resolved=0 "), "{}", agg[0]);
-    assert!(lines(&plain, "[ids] vocab").is_empty(), "no override, no vocab line: {plain}");
+    assert!(
+        lines(&plain, "[ids] vocab").is_empty(),
+        "no override, no vocab line: {plain}"
+    );
 
     let over = run(true);
     let agg = lines(&over, "[idr] replay ");
     assert_eq!(agg.len(), 1, "{over}");
     eprintln!("with: {}", agg[0]);
     assert!(
-        agg[0].starts_with("[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="),
+        agg[0].starts_with(
+            "[idr] replay surface=calibrate sides=1 routed=1 resolved=1 unavailable=1 ms="
+        ),
         "{}",
         agg[0]
     );
     let vocab = lines(&over, "[ids] vocab ");
     assert_eq!(vocab.len(), 1, "one override line: {over}");
     eprintln!("{}", vocab[0]);
-    assert!(vocab[0].contains(" surface=calibrate patterns=1 source=override trackers=0 rejected=0 markdown=0"), "{}", vocab[0]);
+    assert!(
+        vocab[0].contains(
+            " surface=calibrate patterns=1 source=override trackers=0 rejected=0 markdown=0"
+        ),
+        "{}",
+        vocab[0]
+    );
 }

@@ -52,7 +52,12 @@ impl Scratch {
         std::fs::create_dir_all(&home).expect("scratch HOME dir");
         let gitconfig = root.join("gitconfig");
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
-        let s = Scratch { root, top, home, gitconfig };
+        let s = Scratch {
+            root,
+            top,
+            home,
+            gitconfig,
+        };
         s.git(&["init", "-q"]);
         s
     }
@@ -144,14 +149,20 @@ fn marker_rows(o: &Output) -> Option<usize> {
 }
 
 fn json(o: &Output) -> Value {
-    serde_json::from_str(&stdout(o))
-        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}\nstderr:\n{}", stdout(o), stderr(o)))
+    serde_json::from_str(&stdout(o)).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not JSON ({e}):\n{}\nstderr:\n{}",
+            stdout(o),
+            stderr(o)
+        )
+    })
 }
 
 fn has_edge(v: &Value, change: &str, category: &str) -> bool {
-    v["edges"]
-        .as_array()
-        .is_some_and(|es| es.iter().any(|e| e["change"] == change && e["category"] == category))
+    v["edges"].as_array().is_some_and(|es| {
+        es.iter()
+            .any(|e| e["change"] == change && e["category"] == category)
+    })
 }
 
 #[test]
@@ -161,19 +172,29 @@ fn delta_json_reports_added_call() {
     let o = s.glia(&["delta", s.path(), "--json"]);
     assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
     let v = json(&o);
-    let keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
+    let keys: Vec<&str> = v
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     for k in ["base", "files", "counts", "nodes", "edges"] {
         assert!(keys.contains(&k), "key {k} missing: {keys:?}");
     }
     assert_eq!(v["base"], "HEAD");
-    assert!(has_edge(&v, "added", "CALLS"), "an added CALLS edge:\n{v:#}");
+    assert!(
+        has_edge(&v, "added", "CALLS"),
+        "an added CALLS edge:\n{v:#}"
+    );
     let call = v["edges"]
         .as_array()
         .and_then(|es| {
             es.iter().find(|e| {
                 e["change"] == "added"
                     && e["category"] == "CALLS"
-                    && e["to_qname"].as_str().is_some_and(|q| q.ends_with("::audit"))
+                    && e["to_qname"]
+                        .as_str()
+                        .is_some_and(|q| q.ends_with("::audit"))
             })
         })
         .unwrap_or_else(|| panic!("place -> audit CALLS added:\n{v:#}"));
@@ -184,8 +205,13 @@ fn delta_json_reports_added_call() {
         err.lines().any(|l| l.starts_with("[delta] base=HEAD")),
         "the engine's marker:\n{err}"
     );
-    let rows = v["nodes"].as_array().map_or(0, Vec::len) + v["edges"].as_array().map_or(0, Vec::len);
-    assert_eq!(marker_rows(&o), Some(rows), "surface marker counts the rows printed:\n{err}");
+    let rows =
+        v["nodes"].as_array().map_or(0, Vec::len) + v["edges"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        marker_rows(&o),
+        Some(rows),
+        "surface marker counts the rows printed:\n{err}"
+    );
     // The engine line precedes the surface line.
     let engine_at = err.find("[delta] base=").expect("engine marker");
     let surface_at = err.find("[delta] surface=cli").expect("surface marker");
@@ -203,19 +229,34 @@ fn delta_table_rows_are_located_one_based() {
     let o = s.glia(&["delta", s.path()]);
     assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
     let out = stdout(&o);
-    assert!(out.starts_with(&format!("# glia delta `{}` vs HEAD\n", s.path())), "{out}");
-    assert!(out.contains("| change | kind | qname | location |"), "{out}");
-    assert!(out.contains("| change | category | from | to | site |"), "{out}");
+    assert!(
+        out.starts_with(&format!("# glia delta `{}` vs HEAD\n", s.path())),
+        "{out}"
+    );
+    assert!(
+        out.contains("| change | kind | qname | location |"),
+        "{out}"
+    );
+    assert!(
+        out.contains("| change | category | from | to | site |"),
+        "{out}"
+    );
     let audit = out
         .lines()
         .find(|l| l.starts_with("| added | FUNCTION |") && l.contains("::audit`"))
         .unwrap_or_else(|| panic!("audit added row:\n{out}"));
-    assert!(audit.ends_with("| shop/a.py:10 |"), "the record's own 1-based line: {audit}");
+    assert!(
+        audit.ends_with("| shop/a.py:10 |"),
+        "the record's own 1-based line: {audit}"
+    );
     let call = out
         .lines()
         .find(|l| l.starts_with("| added | CALLS |") && l.contains("::audit`"))
         .unwrap_or_else(|| panic!("place -> audit CALLS row:\n{out}"));
-    assert!(call.ends_with("| shop/a.py:2 |"), "the call site, 1-based: {call}");
+    assert!(
+        call.ends_with("| shop/a.py:2 |"),
+        "the call site, 1-based: {call}"
+    );
     assert!(marker_rows(&o).is_some_and(|n| n >= 2), "{}", stderr(&o));
 }
 
@@ -230,20 +271,40 @@ fn delta_removed_rows_are_located_in_the_base() {
         .lines()
         .find(|l| l.starts_with("| removed | FUNCTION |") && l.contains("::price`"))
         .unwrap_or_else(|| panic!("price removed row:\n{out}"));
-    assert!(price.ends_with("| shop/a.py:5 (at HEAD) |"), "its def line at HEAD: {price}");
+    assert!(
+        price.ends_with("| shop/a.py:5 (at HEAD) |"),
+        "its def line at HEAD: {price}"
+    );
 }
 
 #[test]
 fn delta_filters_edges_only_and_category() {
     let s = Scratch::shop("filters");
     s.write("shop/a.py", A_PY_AUDIT);
-    let o = s.glia(&["delta", s.path(), "--json", "--edges-only", "--category", "calls"]);
+    let o = s.glia(&[
+        "delta",
+        s.path(),
+        "--json",
+        "--edges-only",
+        "--category",
+        "calls",
+    ]);
     assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
     let v = json(&o);
-    assert_eq!(v["nodes"].as_array().map(Vec::len), Some(0), "--edges-only:\n{v:#}");
+    assert_eq!(
+        v["nodes"].as_array().map(Vec::len),
+        Some(0),
+        "--edges-only:\n{v:#}"
+    );
     let edges = v["edges"].as_array().expect("edges");
-    assert!(!edges.is_empty() && edges.iter().all(|e| e["category"] == "CALLS"), "{v:#}");
-    assert!(v["counts"]["nodes_added"].as_u64().is_some_and(|n| n >= 1), "counts stay whole: {v:#}");
+    assert!(
+        !edges.is_empty() && edges.iter().all(|e| e["category"] == "CALLS"),
+        "{v:#}"
+    );
+    assert!(
+        v["counts"]["nodes_added"].as_u64().is_some_and(|n| n >= 1),
+        "counts stay whole: {v:#}"
+    );
     assert_eq!(marker_rows(&o), Some(edges.len()), "{}", stderr(&o));
 }
 
@@ -251,12 +312,24 @@ fn delta_filters_edges_only_and_category() {
 fn delta_unknown_category_exits_2() {
     let s = Scratch::shop("category");
     let o = s.glia(&["delta", s.path(), "--category", "CALL"]);
-    assert_eq!(o.status.code(), Some(2), "stdout:\n{}\nstderr:\n{}", stdout(&o), stderr(&o));
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&o),
+        stderr(&o)
+    );
     let err = stderr(&o);
     assert!(err.contains("unknown edge category `CALL`"), "{err}");
-    assert!(err.contains("CALLS") && err.contains("HTTP_CALLS") && err.contains("CO_CHANGES"), "{err}");
+    assert!(
+        err.contains("CALLS") && err.contains("HTTP_CALLS") && err.contains("CO_CHANGES"),
+        "{err}"
+    );
     assert!(stdout(&o).is_empty(), "nothing printed on stdout");
-    assert!(!s.top.join(".glia").exists(), "rejected before anything is built or saved");
+    assert!(
+        !s.top.join(".glia").exists(),
+        "rejected before anything is built or saved"
+    );
 }
 
 #[test]
@@ -266,8 +339,14 @@ fn delta_clean_tree_table_says_no_change() {
     assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
     let out = stdout(&o);
     assert!(out.contains("_(no graph change)_"), "{out}");
-    assert!(!out.contains("| change |"), "no table for an empty delta:\n{out}");
-    assert!(out.contains("- nodes: +0 added, -0 removed, ~0 modified, >0 moved"), "{out}");
+    assert!(
+        !out.contains("| change |"),
+        "no table for an empty delta:\n{out}"
+    );
+    assert!(
+        out.contains("- nodes: +0 added, -0 removed, ~0 modified, >0 moved"),
+        "{out}"
+    );
     assert_eq!(marker_rows(&o), Some(0), "{}", stderr(&o));
 }
 
@@ -276,10 +355,18 @@ fn delta_git_errors_exit_2() {
     let s = Scratch::shop("errors");
     let o = s.glia(&["delta", s.path(), "--base", "no-such-rev"]);
     assert_eq!(o.status.code(), Some(2), "stderr:\n{}", stderr(&o));
-    assert!(stderr(&o).contains("error: not a git work tree or unknown rev no-such-rev"), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("error: not a git work tree or unknown rev no-such-rev"),
+        "{}",
+        stderr(&o)
+    );
     assert_eq!(marker_rows(&o), None, "no surface marker on an error");
 
     let o = s.glia(&["--no-overlay", "delta", s.path()]);
     assert_eq!(o.status.code(), Some(2), "stderr:\n{}", stderr(&o));
-    assert!(stderr(&o).contains("error: --no-overlay does not apply to delta"), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("error: --no-overlay does not apply to delta"),
+        "{}",
+        stderr(&o)
+    );
 }

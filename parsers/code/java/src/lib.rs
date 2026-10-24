@@ -3,16 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::data_entity;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras, push_client_endpoint_with};
+use glia_code_domain::jvm;
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use glia_code_domain::endpoint::{
-    self, ClientEndpoint, HitExtras, push_client_endpoint_with,
-};
-use glia_code_domain::data_entity;
-use glia_code_domain::jvm;
-use glia_code_domain::di_stats::{self, DiShape};
 
 pub fn parse_file(
     source: &str,
@@ -39,8 +37,13 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     // LB.2: top-level types are members of the PACKAGE (the directory), so
     // their qnames hang off the directory scope, not the file module. The
@@ -52,10 +55,23 @@ pub fn parse_file(
     for child in root.named_children(&mut cursor) {
         match child.kind() {
             "import_declaration" => collect_import(child, src, module_qname, &mut acc),
-            "class_declaration" | "interface_declaration" | "enum_declaration"
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
             | "record_declaration" => {
-                let at = TypeScope { scope, parent_id: module_id, module_id };
-                top_level_types += usize::from(visit_type_decl(child, src, file_rel_path, at, repo, &mut acc));
+                let at = TypeScope {
+                    scope,
+                    parent_id: module_id,
+                    module_id,
+                };
+                top_level_types += usize::from(visit_type_decl(
+                    child,
+                    src,
+                    file_rel_path,
+                    at,
+                    repo,
+                    &mut acc,
+                ));
             }
             _ => {}
         }
@@ -129,7 +145,9 @@ pub fn parse_file(
 /// file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
 /// ranks the declaration over the container, so qname lookups land on the type.
 fn type_scope(module_qname: &str) -> &str {
-    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
 }
 
 /// `scope::name`, or the bare `name` for the empty (repo-root) scope.
@@ -146,9 +164,8 @@ fn scoped(scope: &str, name: &str) -> String {
 ///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] java:'`
 fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 #[derive(Default)]
@@ -387,7 +404,12 @@ fn upper_verb_annotation(name: &str) -> Option<&'static str> {
 /// `RequestMethod.POST`, `{RequestMethod.GET}`, `"get"`.
 fn verb_in_text(text: &str) -> Option<&'static str> {
     text.split(|c: char| !c.is_ascii_alphanumeric())
-        .find_map(|tok| HTTP_VERBS.iter().copied().find(|v| v.eq_ignore_ascii_case(tok)))
+        .find_map(|tok| {
+            HTTP_VERBS
+                .iter()
+                .copied()
+                .find(|v| v.eq_ignore_ascii_case(tok))
+        })
 }
 
 /// Methods declared directly in a type body.
@@ -453,9 +475,13 @@ fn client_iface_of(node: TsNode, src: &[u8], libs: JavaHttpLibs) -> Option<Clien
         let (host, url_path) = ann_pair(feign, "url", src)
             .map(|u| base_url_parts(&u))
             .unwrap_or_default();
-        let path = ann_pair(feign, "path", src).map(|p| prefix_parts(&p).1).unwrap_or_default();
+        let path = ann_pair(feign, "path", src)
+            .map(|p| prefix_parts(&p).1)
+            .unwrap_or_default();
         // Feign honours a type-level Spring `@RequestMapping` as a prefix too.
-        let mapping = arg("RequestMapping").map(|p| prefix_parts(&p).1).unwrap_or_default();
+        let mapping = arg("RequestMapping")
+            .map(|p| prefix_parts(&p).1)
+            .unwrap_or_default();
         return Some(ClientIface {
             prefix: join(join(url_path, path), mapping),
             host,
@@ -538,14 +564,22 @@ fn client_mappings<'a>(
                 if name.ends_with("Mapping")
                     && let Some(verb) = endpoint::mapping_verb(name)
                 {
-                    out.push((verb.to_string(), ann_path(*ann, &["value", "path"], src), *ann));
+                    out.push((
+                        verb.to_string(),
+                        ann_path(*ann, &["value", "path"], src),
+                        *ann,
+                    ));
                 } else if name == "RequestMapping" {
                     // Feign's SpringMvcContract defaults a method-less
                     // `@RequestMapping` to GET.
                     let verb = ann_pair_text(*ann, "method", src)
                         .and_then(verb_in_text)
                         .unwrap_or("GET");
-                    out.push((verb.to_string(), ann_path(*ann, &["value", "path"], src), *ann));
+                    out.push((
+                        verb.to_string(),
+                        ann_path(*ann, &["value", "path"], src),
+                        *ann,
+                    ));
                 } else if name == "RequestLine"
                     && let Some(line) = ann_path(*ann, &["value"], src)
                 {
@@ -562,11 +596,19 @@ fn client_mappings<'a>(
         ClientFlavour::Exchange => {
             for (name, ann) in &anns {
                 if let Some(verb) = exchange_verb(name) {
-                    out.push((verb.to_string(), ann_path(*ann, &["value", "url"], src), *ann));
+                    out.push((
+                        verb.to_string(),
+                        ann_path(*ann, &["value", "url"], src),
+                        *ann,
+                    ));
                 } else if name == "HttpExchange"
                     && let Some(verb) = ann_pair_text(*ann, "method", src).and_then(verb_in_text)
                 {
-                    out.push((verb.to_string(), ann_path(*ann, &["value", "url"], src), *ann));
+                    out.push((
+                        verb.to_string(),
+                        ann_path(*ann, &["value", "url"], src),
+                        *ann,
+                    ));
                 }
             }
         }
@@ -677,7 +719,15 @@ fn would_mint_routes(
     class_prefix: &str,
 ) -> usize {
     let mut scratch = Acc::default();
-    check_route_annotations(node, src, file_rel, handler_id, repo, class_prefix, &mut scratch)
+    check_route_annotations(
+        node,
+        src,
+        file_rel,
+        handler_id,
+        repo,
+        class_prefix,
+        &mut scratch,
+    )
 }
 
 /// Where a type declaration hangs ([`visit_type_decl`]): the qname scope it
@@ -693,8 +743,19 @@ struct TypeScope<'a> {
 /// type hangs off: the package scope ([`type_scope`]) for a top-level type,
 /// the outer type's qname for a nested one. Returns whether a type node was
 /// emitted (the `[qname] java:` marker counts them).
-fn visit_type_decl(node: TsNode, src: &[u8], file_rel: &str, at: TypeScope<'_>, repo: RepoId, acc: &mut Acc) -> bool {
-    let TypeScope { scope, parent_id, module_id } = at;
+fn visit_type_decl(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    at: TypeScope<'_>,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> bool {
+    let TypeScope {
+        scope,
+        parent_id,
+        module_id,
+    } = at;
     let Some(name_node) = node.child_by_field_name("name") else {
         return false;
     };
@@ -731,7 +792,14 @@ fn visit_type_decl(node: TsNode, src: &[u8], file_rel: &str, at: TypeScope<'_>, 
     if let Some(superclass) = node.child_by_field_name("superclass") {
         let mut sc_cursor = superclass.walk();
         for sc in superclass.named_children(&mut sc_cursor) {
-            emit_heritage_ref(text_of(sc, src), edge_category::INHERITS_FROM, id, module_id, line_at(sc), acc);
+            emit_heritage_ref(
+                text_of(sc, src),
+                edge_category::INHERITS_FROM,
+                id,
+                module_id,
+                line_at(sc),
+                acc,
+            );
         }
     }
     if let Some(interfaces) = node.child_by_field_name("interfaces") {
@@ -740,7 +808,14 @@ fn visit_type_decl(node: TsNode, src: &[u8], file_rel: &str, at: TypeScope<'_>, 
         for type_list in interfaces.named_children(&mut if_cursor) {
             let mut tl_cursor = type_list.walk();
             for iface in type_list.named_children(&mut tl_cursor) {
-                emit_heritage_ref(text_of(iface, src), edge_category::IMPLEMENTS, id, module_id, line_at(iface), acc);
+                emit_heritage_ref(
+                    text_of(iface, src),
+                    edge_category::IMPLEMENTS,
+                    id,
+                    module_id,
+                    line_at(iface),
+                    acc,
+                );
             }
         }
     }
@@ -761,7 +836,14 @@ fn visit_type_decl(node: TsNode, src: &[u8], file_rel: &str, at: TypeScope<'_>, 
                     if sup.kind() == "comment" {
                         continue;
                     }
-                    emit_heritage_ref(text_of(sup, src), edge_category::INHERITS_FROM, id, module_id, line_at(sup), acc);
+                    emit_heritage_ref(
+                        text_of(sup, src),
+                        edge_category::INHERITS_FROM,
+                        id,
+                        module_id,
+                        line_at(sup),
+                        acc,
+                    );
                 }
             }
         }
@@ -937,7 +1019,11 @@ fn visit_type_member(
         | "interface_declaration"
         | "enum_declaration"
         | "record_declaration" => {
-            let at = TypeScope { scope: owner.qname, parent_id: owner.id, module_id: owner.module_id };
+            let at = TypeScope {
+                scope: owner.qname,
+                parent_id: owner.id,
+                module_id: owner.module_id,
+            };
             visit_type_decl(child, src, file_rel, at, repo, acc);
             0
         }
@@ -1247,8 +1333,13 @@ fn emit_data_entity(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav
-        .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.nav.record(
+        entity_id,
+        name,
+        &qname,
+        node_kind::DATA_ENTITY,
+        Some(class_id),
+    );
 }
 
 /// Detect `extends <RepositoryBase>< Entity, … >` on a class or interface and emit
@@ -1469,7 +1560,8 @@ fn di_gate(node: TsNode, src: &[u8]) -> DiGate {
         };
         let inject_on_ctor = ann.child_by_field_name("arguments").is_some_and(|args| {
             let text = text_of(args, src);
-            text.contains("onConstructor") && INJECT_ANNOTATIONS.iter().any(|a| has_annotation(text, a))
+            text.contains("onConstructor")
+                && INJECT_ANNOTATIONS.iter().any(|a| has_annotation(text, a))
         });
         *slot |= is_bean || inject_on_ctor;
     }
@@ -1583,8 +1675,14 @@ fn injectable_type_name<'a>(type_node: TsNode<'a>, src: &'a [u8]) -> Option<Stri
         // `collect_field_types` gates on the node kind before calling this, so
         // a `Provider<Foo>` field never types `foo.get()` as `Foo::get`.
         "generic_type" => {
-            const DI_WRAPPERS: [&str; 6] =
-                ["Provider", "Lazy", "ObjectProvider", "ObjectFactory", "Optional", "Instance"];
+            const DI_WRAPPERS: [&str; 6] = [
+                "Provider",
+                "Lazy",
+                "ObjectProvider",
+                "ObjectFactory",
+                "Optional",
+                "Instance",
+            ];
             let mut c = type_node.walk();
             let mut parts = type_node.named_children(&mut c);
             let head = parts.next()?;
@@ -1690,7 +1788,14 @@ fn emit_field_inject(
         return;
     };
     if let Some(name) = injectable_type_name(ty, src) {
-        push_inject_ref(class_id, module_id, name, DiShape::JavaField, line_at(ty), acc);
+        push_inject_ref(
+            class_id,
+            module_id,
+            name,
+            DiShape::JavaField,
+            line_at(ty),
+            acc,
+        );
     }
 }
 
@@ -1737,7 +1842,14 @@ fn emit_lombok_field_inject(
         return;
     };
     if let Some(name) = injectable_type_name(ty, src) {
-        push_inject_ref(class_id, module_id, name, DiShape::JavaLombok, line_at(ty), acc);
+        push_inject_ref(
+            class_id,
+            module_id,
+            name,
+            DiShape::JavaLombok,
+            line_at(ty),
+            acc,
+        );
     }
 }
 
@@ -1847,7 +1959,10 @@ fn ann_pair_value<'a>(ann: TsNode<'a>, key: &str, src: &[u8]) -> Option<TsNode<'
     let mut cursor = args.walk();
     args.named_children(&mut cursor)
         .filter(|c| c.kind() == "element_value_pair")
-        .find(|c| c.child_by_field_name("key").is_some_and(|k| text_of(k, src) == key))
+        .find(|c| {
+            c.child_by_field_name("key")
+                .is_some_and(|k| text_of(k, src) == key)
+        })
         .and_then(|c| c.child_by_field_name("value"))
 }
 
@@ -1872,7 +1987,12 @@ fn ann_path(ann: TsNode, keys: &[&str], src: &[u8]) -> Option<String> {
     let args = ann.child_by_field_name("arguments")?;
     let mut cursor = args.walk();
     args.named_children(&mut cursor)
-        .find(|c| matches!(c.kind(), "string_literal" | "element_value_array_initializer"))
+        .find(|c| {
+            matches!(
+                c.kind(),
+                "string_literal" | "element_value_array_initializer"
+            )
+        })
         .and_then(|c| element_string(c, src))
 }
 
@@ -2200,7 +2320,11 @@ fn collect_calls_in(
             // HttpStackResolver can pair it with a server ROUTE.
             try_detect_java_endpoint(n, src, from, repo, file_rel, acc);
             let qualifier = classify_method_invocation(n, src);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
         } else if n.kind() == "object_creation_expression" {
             // LA.22a: Apache `new HttpGet(url)` is a request, not a call.
             try_detect_java_request_object(n, src, from, repo, file_rel, acc);
@@ -3045,7 +3169,10 @@ class LineItem {
             ]
         );
         assert!(
-            !fp.nav.qname_by_id.values().any(|q| q.contains("InvoiceService::InvoiceService")),
+            !fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q.contains("InvoiceService::InvoiceService")),
             "no qname doubles the file stem: {:?}",
             fp.nav.qname_by_id.values().collect::<Vec<_>>()
         );
@@ -3056,7 +3183,10 @@ class LineItem {
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
         let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, module);
         assert_ne!(module_id, class_id);
-        assert!(fp.nodes.iter().any(|n| n.id == class_id), "the CLASS node is emitted");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == class_id),
+            "the CLASS node is emitted"
+        );
         assert!(
             fp.edges.iter().any(|e| e.from == module_id
                 && e.to == class_id
@@ -3104,13 +3234,33 @@ public class UserService {
     private void validate(User u) {}
 }
 "#;
-        let fp = parse_file(source, "src/main/java/UserService.java", "com::example::UserService", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/main/java/UserService.java",
+            "com::example::UserService",
+            repo(),
+        )
+        .unwrap();
         let names: Vec<&str> = fp.nav.name_by_id.values().map(|s| s.as_str()).collect();
         assert!(names.contains(&"UserService"));
         assert!(names.contains(&"getUser"));
         assert!(names.contains(&"validate"));
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -3126,9 +3276,29 @@ public enum Color {
     RED, GREEN, BLUE;
 }
 "#;
-        let fp = parse_file(source, "src/main/java/Types.java", "com::example::Types", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+        let fp = parse_file(
+            source,
+            "src/main/java/Types.java",
+            "com::example::Types",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
         // LA.30b: one ATTRIBUTE per constant.
         assert_eq!(
             fp.nav
@@ -3197,7 +3367,8 @@ public class X extends Base implements IFoo, IBar {
         // The heritage ref must originate from the class node and carry the
         // enclosing module id (so the resolver can scope the lookup).
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "com::example::X");
-        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "com::example::X");
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "com::example::X");
         assert!(inherits[0].from == x_id && inherits[0].from_module == module_id);
     }
 
@@ -3214,15 +3385,26 @@ public interface Catalog extends Readable, shop.Paged<String> {
     String search(String q);
 }
 "#;
-        let fp = parse_file(source, "src/main/java/shop/Catalog.java", "shop::Catalog", repo()).unwrap();
-        let iface_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "shop::Catalog");
+        let fp = parse_file(
+            source,
+            "src/main/java/shop/Catalog.java",
+            "shop::Catalog",
+            repo(),
+        )
+        .unwrap();
+        let iface_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "shop::Catalog");
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::Catalog");
         let inherits: Vec<&UnresolvedRef> = fp
             .refs
             .iter()
             .filter(|r| r.category == edge_category::INHERITS_FROM)
             .collect();
-        assert_eq!(inherits.len(), 2, "one ref per super-interface: {inherits:?}");
+        assert_eq!(
+            inherits.len(),
+            2,
+            "one ref per super-interface: {inherits:?}"
+        );
         for name in ["Readable", "Paged"] {
             assert!(
                 inherits.iter().any(|r| r.from == iface_id
@@ -3232,16 +3414,22 @@ public interface Catalog extends Readable, shop.Paged<String> {
             );
         }
         assert!(
-            !fp.refs.iter().any(|r| r.category == edge_category::IMPLEMENTS),
+            !fp.refs
+                .iter()
+                .any(|r| r.category == edge_category::IMPLEMENTS),
             "an interface's extends is not IMPLEMENTS: {:?}",
             fp.refs
         );
         // A class's `extends` stays on the superclass path: exactly one
         // INHERITS_FROM, never a second one through extends_interfaces.
-        let class_src = "package shop;\npublic class PgCatalog extends Base implements Catalog {}\n";
+        let class_src =
+            "package shop;\npublic class PgCatalog extends Base implements Catalog {}\n";
         let cp = parse_file(class_src, "PgCatalog.java", "shop::PgCatalog", repo()).unwrap();
         assert_eq!(
-            cp.refs.iter().filter(|r| r.category == edge_category::INHERITS_FROM).count(),
+            cp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INHERITS_FROM)
+                .count(),
             1
         );
     }
@@ -3271,7 +3459,13 @@ interface UserRepository extends JpaRepository<User, Long> {
     User findByName(String name);
 }
 "#;
-        let fp = parse_file(source, "UserRepository.java", "com::example::UserRepository", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "UserRepository.java",
+            "com::example::UserRepository",
+            repo(),
+        )
+        .unwrap();
 
         // @Entity → DATA_ENTITY node named User, qname carrying the `sql` flavor.
         let entity_id = NodeId::from_parts(
@@ -3284,7 +3478,10 @@ interface UserRepository extends JpaRepository<User, Long> {
             fp.nodes.iter().any(|n| n.id == entity_id),
             "expected DATA_ENTITY data_entity:sql:User node"
         );
-        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("User"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&entity_id).map(String::as_str),
+            Some("User")
+        );
         assert_eq!(
             fp.nav.qname_by_id.get(&entity_id).map(String::as_str),
             Some("data_entity:sql:User")
@@ -3334,7 +3531,13 @@ class Session {
 interface SessionRepo extends MongoRepository<Session, String> {
 }
 "#;
-        let fp = parse_file(source, "SessionRepo.java", "com::example::SessionRepo", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "SessionRepo.java",
+            "com::example::SessionRepo",
+            repo(),
+        )
+        .unwrap();
         let entity_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -3348,9 +3551,16 @@ interface SessionRepo extends MongoRepository<Session, String> {
             .filter(|(_, k)| **k == node_kind::DATA_ENTITY)
             .map(|(id, _)| id)
             .collect();
-        assert_eq!(entities, vec![&entity_id], "exactly one DATA_ENTITY, nosql-flavored");
+        assert_eq!(
+            entities,
+            vec![&entity_id],
+            "exactly one DATA_ENTITY, nosql-flavored"
+        );
         assert!(fp.nodes.iter().any(|n| n.id == entity_id));
-        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("Session"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&entity_id).map(String::as_str),
+            Some("Session")
+        );
         let repo_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -3378,8 +3588,12 @@ class Audit {
 }
 "#;
         let fp = parse_file(both, "Audit.java", "com::example::Audit", repo()).unwrap();
-        let audit_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "data_entity:nosql:Audit");
+        let audit_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:nosql:Audit",
+        );
         assert!(
             fp.nodes.iter().any(|n| n.id == audit_id),
             "@Entity + @Document must mint the nosql id"
@@ -3413,10 +3627,20 @@ public class User {
 }
 "#;
         let fp = parse_file(entity, "User.java", "com::example::User", repo()).unwrap();
-        let entity_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "data_entity:sql:User");
-        assert_eq!(qnames_of(&fp, node_kind::DATA_ENTITY), vec!["data_entity:sql:User"]);
-        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("User"));
+        let entity_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:User",
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::DATA_ENTITY),
+            vec!["data_entity:sql:User"]
+        );
+        assert_eq!(
+            fp.nav.name_by_id.get(&entity_id).map(String::as_str),
+            Some("User")
+        );
         assert_eq!(
             entity_table(&fp, "data_entity:sql:User").as_deref(),
             Some("app_users"),
@@ -3442,8 +3666,13 @@ public interface UserRepository extends JpaRepository<User, Long> {
     User findByEmail(String e);
 }
 "#;
-        let rp = parse_file(repository, "UserRepository.java", "com::example::UserRepository", repo())
-            .unwrap();
+        let rp = parse_file(
+            repository,
+            "UserRepository.java",
+            "com::example::UserRepository",
+            repo(),
+        )
+        .unwrap();
         assert!(
             rp.edges
                 .iter()
@@ -3455,7 +3684,10 @@ public interface UserRepository extends JpaRepository<User, Long> {
         // The bare positional form (Spring Data JDBC / R2DBC `@Table("x")`).
         let bare = "package p;\n@Entity\n@Table(\"orders\")\nclass Order {}\n";
         let bp = parse_file(bare, "Order.java", "p::Order", repo()).unwrap();
-        assert_eq!(entity_table(&bp, "data_entity:sql:Order").as_deref(), Some("orders"));
+        assert_eq!(
+            entity_table(&bp, "data_entity:sql:Order").as_deref(),
+            Some("orders")
+        );
     }
 
     #[test]
@@ -3468,7 +3700,8 @@ public interface UserRepository extends JpaRepository<User, Long> {
             (r#"@Document(value = "audit_events")"#, "audit_events"),
             (r#"@Document("audit_events")"#, "audit_events"),
         ] {
-            let source = format!("package p;\n{annotation}\nclass AuditEvent {{ private String id; }}\n");
+            let source =
+                format!("package p;\n{annotation}\nclass AuditEvent {{ private String id; }}\n");
             let fp = parse_file(&source, "AuditEvent.java", "p::AuditEvent", repo()).unwrap();
             assert_eq!(
                 qnames_of(&fp, node_kind::DATA_ENTITY),
@@ -3504,13 +3737,16 @@ public interface UserRepository extends JpaRepository<User, Long> {
         ] {
             let source = format!("package p;\n{header}\nclass User {{ @Id private Long id; }}\n");
             let fp = parse_file(&source, "User.java", "p::User", repo()).unwrap();
-            assert_eq!(qnames_of(&fp, node_kind::DATA_ENTITY), vec!["data_entity:sql:User"], "{header}");
+            assert_eq!(
+                qnames_of(&fp, node_kind::DATA_ENTITY),
+                vec!["data_entity:sql:User"],
+                "{header}"
+            );
             assert_eq!(entity_table(&fp, "data_entity:sql:User"), None, "{header}");
             assert!(
-                fp.nodes
-                    .iter()
-                    .flat_map(|n| &n.cells)
-                    .all(|c| !matches!(&c.payload, CellPayload::Json(j) if j.contains("\"table\""))),
+                fp.nodes.iter().flat_map(|n| &n.cells).all(
+                    |c| !matches!(&c.payload, CellPayload::Json(j) if j.contains("\"table\""))
+                ),
                 "{header}: no table cell anywhere"
             );
         }
@@ -3529,7 +3765,10 @@ class Basket {
 "#;
         let fp = parse_file(source, "Basket.java", "com::example::Basket", repo()).unwrap();
         assert!(
-            !fp.nav.kind_by_id.values().any(|k| *k == node_kind::DATA_ENTITY),
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::DATA_ENTITY),
             "plain class must not emit a DATA_ENTITY"
         );
         assert!(
@@ -3549,7 +3788,13 @@ import com.example.models.User;
 import java.util.*;
 import static org.junit.Assert.assertEquals;
 "#;
-        let fp = parse_file(source, "src/main/java/App.java", "com::example::App", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/main/java/App.java",
+            "com::example::App",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(fp.imports.len(), 3);
     }
 
@@ -3566,7 +3811,13 @@ public class UserController {
     public User create() { return null; }
 }
 "#;
-        let fp = parse_file(source, "src/main/java/UserController.java", "com::example::UserController", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/main/java/UserController.java",
+            "com::example::UserController",
+            repo(),
+        )
+        .unwrap();
         let routes: Vec<_> = fp
             .nav
             .kind_by_id
@@ -3598,7 +3849,13 @@ public class ThingsController {
     public void destroy() {}
 }
 "#;
-        let fp = parse_file(source, "ThingsController.java", "com::example::ThingsController", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "ThingsController.java",
+            "com::example::ThingsController",
+            repo(),
+        )
+        .unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -3650,7 +3907,10 @@ public class UserController {
             routes.contains(&"POST /api/v1/users"),
             "a bare @PostMapping marker must inherit the class prefix: {routes:?}"
         );
-        assert!(routes.contains(&"ANY /api/v1/users"), "class base route: {routes:?}");
+        assert!(
+            routes.contains(&"ANY /api/v1/users"),
+            "class base route: {routes:?}"
+        );
         assert!(
             !routes.contains(&"GET /{id}"),
             "the uncomposed relative template must not survive: {routes:?}"
@@ -3706,7 +3966,13 @@ fun Application.module() {
     }
 }
 "#;
-        let fp = parse_file(source, "Application.kt", "com::example::Application", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Application.kt",
+            "com::example::Application",
+            repo(),
+        )
+        .unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -3734,7 +4000,13 @@ public class RouterConfig {
     }
 }
 "#;
-        let fp = parse_file(source, "RouterConfig.java", "com::example::RouterConfig", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "RouterConfig.java",
+            "com::example::RouterConfig",
+            repo(),
+        )
+        .unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -3789,7 +4061,10 @@ public class Svc {
 "#;
         let fp = parse_file(source, "Svc.java", "com::example::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
-        assert!(!has_route, "single-arg `.get(\"/key\")` must not emit a route");
+        assert!(
+            !has_route,
+            "single-arg `.get(\"/key\")` must not emit a route"
+        );
     }
 
     #[test]
@@ -3833,17 +4108,41 @@ public class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "client/ApiClient.java", "com::example::client::ApiClient", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "client/ApiClient.java",
+            "com::example::client::ApiClient",
+            repo(),
+        )
+        .unwrap();
 
-        let ep_get =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
-        let ep_post =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/users");
-        let ep_del =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:DELETE:/users");
+        let ep_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users/${…}",
+        );
+        let ep_post = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:POST:/users",
+        );
+        let ep_del = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:DELETE:/users",
+        );
 
-        assert!(fp.nodes.iter().any(|n| n.id == ep_get), "expected GET /users/${{…}} ENDPOINT");
-        assert!(fp.nodes.iter().any(|n| n.id == ep_post), "expected POST /users ENDPOINT");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_get),
+            "expected GET /users/${{…}} ENDPOINT"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_post),
+            "expected POST /users ENDPOINT"
+        );
         assert!(
             fp.nodes.iter().any(|n| n.id == ep_del),
             "expected DELETE /users ENDPOINT (verb from HttpMethod arg, host stripped)"
@@ -3857,11 +4156,15 @@ public class ApiClient {
 
         // CALLS edge from the enclosing method into each endpoint.
         assert!(
-            fp.edges.iter().any(|e| e.to == ep_get && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_get && e.category == edge_category::CALLS),
             "expected CALLS edge into the GET endpoint"
         );
         assert!(
-            fp.edges.iter().any(|e| e.to == ep_post && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_post && e.category == edge_category::CALLS),
             "expected CALLS edge into the POST endpoint"
         );
     }
@@ -3915,14 +4218,30 @@ public class Client {
 }
 "#;
         let fp = parse_file(source, "Client.java", "com::example::Client", repo()).unwrap();
-        let ep_get =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/{id}");
-        let ep_post =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/orders");
-        assert!(fp.nodes.iter().any(|n| n.id == ep_get), "expected WebClient GET /users/{{id}}");
-        assert!(fp.nodes.iter().any(|n| n.id == ep_post), "expected WebClient POST /orders");
+        let ep_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users/{id}",
+        );
+        let ep_post = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:POST:/orders",
+        );
         assert!(
-            fp.edges.iter().any(|e| e.to == ep_post && e.category == edge_category::CALLS),
+            fp.nodes.iter().any(|n| n.id == ep_get),
+            "expected WebClient GET /users/{{id}}"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_post),
+            "expected WebClient POST /orders"
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_post && e.category == edge_category::CALLS),
             "expected CALLS edge into the WebClient POST endpoint"
         );
     }
@@ -3940,7 +4259,10 @@ public class Cache {
 "#;
         let fp = parse_file(source, "Cache.java", "com::example::Cache", repo()).unwrap();
         assert!(
-            !fp.nav.kind_by_id.values().any(|k| *k == node_kind::ENDPOINT),
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::ENDPOINT),
             "map.put(\"key\", …) must not emit an ENDPOINT"
         );
     }
@@ -4208,7 +4530,13 @@ class UserController {
     }
 }
 "#;
-        let fp = parse_file(source, "UserController.java", "com::example::UserController", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "UserController.java",
+            "com::example::UserController",
+            repo(),
+        )
+        .unwrap();
 
         let injects: Vec<&UnresolvedRef> = fp
             .refs
@@ -4238,9 +4566,9 @@ class UserController {
         );
         // Primitive (int) and value type (String) constructor params are skipped.
         assert!(
-            !injects
-                .iter()
-                .any(|r| matches!(&r.qualifier, CallQualifier::Bare(n) if n == "String" || n == "count")),
+            !injects.iter().any(
+                |r| matches!(&r.qualifier, CallQualifier::Bare(n) if n == "String" || n == "count")
+            ),
             "primitives / value types must not be injected"
         );
         assert_eq!(injects.len(), 2, "exactly two DI dependencies: {injects:?}");
@@ -4304,8 +4632,13 @@ class OrderController {
     @Qualifier("static") private final Pool pool;
 }
 "#;
-        let fp = parse_file(source, "OrderController.java", "com::example::OrderController", repo())
-            .unwrap();
+        let fp = parse_file(
+            source,
+            "OrderController.java",
+            "com::example::OrderController",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             injects_from(&fp, "OrderController"),
             ["OrderService", "Validator", "OrderRepo", "Pool"],
@@ -4371,8 +4704,14 @@ class Engine {
 }
 "#;
         let fp = parse_file(source, "OrderDto.java", "com::example::OrderDto", repo()).unwrap();
-        assert!(injects_from(&fp, "OrderDto").is_empty(), "a DTO is not a DI consumer");
-        assert!(injects_from(&fp, "Order").is_empty(), "an entity is not a DI consumer");
+        assert!(
+            injects_from(&fp, "OrderDto").is_empty(),
+            "a DTO is not a DI consumer"
+        );
+        assert!(
+            injects_from(&fp, "Order").is_empty(),
+            "an entity is not a DI consumer"
+        );
         let enum_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "com::example::Status");
         assert!(
@@ -4381,7 +4720,11 @@ class Engine {
                 .any(|r| r.category == edge_category::INJECTS && r.from == enum_id),
             "an enum is not a DI consumer"
         );
-        assert_eq!(injects_from(&fp, "Engine"), ["Ignition"], "onConstructor @Inject");
+        assert_eq!(
+            injects_from(&fp, "Engine"),
+            ["Ignition"],
+            "onConstructor @Inject"
+        );
     }
 
     /// A7.2: JSR-330 `@Inject` on the constructor itself (Dagger / Guice)
@@ -4404,8 +4747,13 @@ class CheckoutFlow {
     CheckoutFlow(Fallback fallback) {}
 }
 "#;
-        let fp = parse_file(source, "CheckoutFlow.java", "com::example::CheckoutFlow", repo())
-            .unwrap();
+        let fp = parse_file(
+            source,
+            "CheckoutFlow.java",
+            "com::example::CheckoutFlow",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             injects_from(&fp, "CheckoutFlow"),
             ["PaymentGateway"],
@@ -4452,10 +4800,18 @@ record OrderHandler(OrderService orders, String name) {}
 
 record Point(Helper helper, int x) {}
 "#;
-        let fp = parse_file(source, "OrderHandler.java", "com::example::OrderHandler", repo())
-            .unwrap();
+        let fp = parse_file(
+            source,
+            "OrderHandler.java",
+            "com::example::OrderHandler",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(injects_from(&fp, "OrderHandler"), ["OrderService"]);
-        assert!(injects_from(&fp, "Point").is_empty(), "a plain record is data");
+        assert!(
+            injects_from(&fp, "Point").is_empty(),
+            "a plain record is data"
+        );
     }
 
     /// A7.2 (breaking: edge_removal): a class that reaches one dependency
@@ -4483,10 +4839,22 @@ class Other {
     private FooService foo;
 }
 "#;
-        let fp = parse_file(source, "UserController.java", "com::example::UserController", repo())
-            .unwrap();
-        assert_eq!(injects_from(&fp, "UserController"), ["FooService", "BarService"]);
-        assert_eq!(injects_from(&fp, "Other"), ["FooService"], "the dedupe is per class");
+        let fp = parse_file(
+            source,
+            "UserController.java",
+            "com::example::UserController",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            injects_from(&fp, "UserController"),
+            ["FooService", "BarService"]
+        );
+        assert_eq!(
+            injects_from(&fp, "Other"),
+            ["FooService"],
+            "the dedupe is per class"
+        );
     }
 
     #[test]
@@ -4545,7 +4913,13 @@ public class Service {
     private void validate() {}
 }
 "#;
-        let fp = parse_file(source, "src/main/java/Service.java", "com::example::Service", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/main/java/Service.java",
+            "com::example::Service",
+            repo(),
+        )
+        .unwrap();
         let self_calls: Vec<_> = fp
             .calls
             .iter()
@@ -4579,7 +4953,9 @@ public class Service {
             "a client interface must mint no server ROUTE"
         );
         assert!(
-            !fp.edges.iter().any(|e| e.category == edge_category::HANDLED_BY),
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::HANDLED_BY),
             "a client interface method handles no route"
         );
     }
@@ -4613,14 +4989,28 @@ interface ExchangeClient {
         let fp = parse_file(source, "UserClient.java", "UserClient", repo()).unwrap();
         assert_eq!(
             qnames_of(&fp, node_kind::ENDPOINT),
-            vec!["endpoint:GET:/exchange/users/{id}", "endpoint:GET:/feign/users/{id}"]
+            vec![
+                "endpoint:GET:/exchange/users/{id}",
+                "endpoint:GET:/feign/users/{id}"
+            ]
         );
         no_routes_or_handled_by(&fp);
-        assert!(method_calls_endpoint(&fp, "UserClient::getUser", "endpoint:GET:/feign/users/{id}"));
-        assert!(method_calls_endpoint(&fp, "ExchangeClient::get", "endpoint:GET:/exchange/users/{id}"));
+        assert!(method_calls_endpoint(
+            &fp,
+            "UserClient::getUser",
+            "endpoint:GET:/feign/users/{id}"
+        ));
+        assert!(method_calls_endpoint(
+            &fp,
+            "ExchangeClient::get",
+            "endpoint:GET:/exchange/users/{id}"
+        ));
         let feign = endpoint_hit(&fp, "endpoint:GET:/feign/users/{id}");
         assert!(feign.ends_with(r#","host":"users-svc"}"#), "{feign}");
-        assert!(feign.contains(r#""line":12,"col":5"#), "positioned at the annotation: {feign}");
+        assert!(
+            feign.contains(r#""line":12,"col":5"#),
+            "positioned at the annotation: {feign}"
+        );
         let exchange = endpoint_hit(&fp, "endpoint:GET:/exchange/users/{id}");
         assert!(!exchange.contains("host"), "{exchange}");
     }
@@ -4670,7 +5060,10 @@ interface OrderClient {
         let hit = endpoint_hit(&fp, "endpoint:POST:/base/api/v1/users");
         assert!(hit.ends_with(r#","host":"users-svc:8080"}"#), "{hit}");
         let orders = endpoint_hit(&fp, "endpoint:PUT:/orders/{id}");
-        assert!(!orders.contains("host"), "a property placeholder names no host: {orders}");
+        assert!(
+            !orders.contains("host"),
+            "a property placeholder names no host: {orders}"
+        );
     }
 
     /// Feign-native `@RequestLine("VERB /path")`, with no `@FeignClient`, in a
@@ -4744,7 +5137,11 @@ interface ItemClient {
                 "endpoint:PUT:/api/users/{id}",
             ]
         );
-        assert!(method_calls_endpoint(&fp, "ItemClient::remove", "endpoint:DELETE:/items/{id}"));
+        assert!(method_calls_endpoint(
+            &fp,
+            "ItemClient::remove",
+            "endpoint:DELETE:/items/{id}"
+        ));
         no_routes_or_handled_by(&fp);
     }
 
@@ -4786,7 +5183,11 @@ public interface RepoApi {
                 "endpoint:POST:/repos",
             ]
         );
-        assert!(method_calls_endpoint(&fp, "RepoApi::create", "endpoint:POST:/repos"));
+        assert!(method_calls_endpoint(
+            &fp,
+            "RepoApi::create",
+            "endpoint:POST:/repos"
+        ));
         let meta = endpoint_hit(&fp, "endpoint:GET:/meta");
         assert!(meta.ends_with(r#","host":"api.github.com"}"#), "{meta}");
         no_routes_or_handled_by(&fp);
@@ -4830,7 +5231,11 @@ interface OrdersClient {
                 "endpoint:POST:/users",
             ]
         );
-        assert!(method_calls_endpoint(&fp, "UsersClient::get", "endpoint:GET:/users/{id}"));
+        assert!(method_calls_endpoint(
+            &fp,
+            "UsersClient::get",
+            "endpoint:GET:/users/{id}"
+        ));
         let orders = endpoint_hit(&fp, "endpoint:GET:/api/orders");
         assert!(orders.ends_with(r#","host":"orders:9000"}"#), "{orders}");
         no_routes_or_handled_by(&fp);
@@ -4862,15 +5267,30 @@ public class UsersController implements UsersApi {
     public List<User> list() { return List.of(); }
 }
 "#;
-        let fp = parse_file(source, "UsersApi.java", "com::example::api::UsersApi", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "UsersApi.java",
+            "com::example::api::UsersApi",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             qnames_of(&fp, node_kind::ROUTE),
-            vec!["ANY /api", "ANY /items", "GET /api/users", "GET /items/{id}"]
+            vec![
+                "ANY /api",
+                "ANY /items",
+                "GET /api/users",
+                "GET /items/{id}"
+            ]
         );
         assert!(qnames_of(&fp, node_kind::ENDPOINT).is_empty());
         let route = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /api/users");
-        let handler =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "com::example::api::UsersApi::list");
+        let handler = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "com::example::api::UsersApi::list",
+        );
         assert!(fp.edges.iter().any(|e| e.from == route
             && e.to == handler
             && e.category == edge_category::HANDLED_BY));
@@ -4967,12 +5387,7 @@ public enum Color {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
-    fn has_edge(
-        fp: &FileParse,
-        from: NodeId,
-        to: NodeId,
-        cat: glia_core::EdgeCategoryId,
-    ) -> bool {
+    fn has_edge(fp: &FileParse, from: NodeId, to: NodeId, cat: glia_core::EdgeCategoryId) -> bool {
         fp.edges
             .iter()
             .any(|e| e.from == from && e.to == to && e.category == cat)

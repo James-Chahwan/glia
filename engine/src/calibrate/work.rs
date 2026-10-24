@@ -181,8 +181,14 @@ impl WorkState {
         {
             return (files.iter().map(|(&f, &v)| (f, v)).collect(), "Mbr");
         }
-        let joined = self.recent_at.last().is_some_and(|&prev| at - prev <= GAP_S);
-        if joined && let Some(seg) = self.seg_files.last() && !seg.is_empty() {
+        let joined = self
+            .recent_at
+            .last()
+            .is_some_and(|&prev| at - prev <= GAP_S);
+        if joined
+            && let Some(seg) = self.seg_files.last()
+            && !seg.is_empty()
+        {
             return (seg.iter().map(|(&f, &v)| (f, v)).collect(), "Mgap");
         }
         (Vec::new(), "none")
@@ -260,7 +266,11 @@ impl StateHook for WorkState {
 }
 
 fn work_clock(author_time: bool) -> &'static str {
-    if author_time { "author_time" } else { "committer_time" }
+    if author_time {
+        "author_time"
+    } else {
+        "committer_time"
+    }
 }
 
 fn dense(n: usize, sparse: &[(u32, f64)]) -> Vec<f64> {
@@ -277,10 +287,11 @@ fn dense(n: usize, sparse: &[(u32, f64)]) -> Vec<f64> {
 /// (the same for every query of one test commit); zeros when no
 /// [`WorkState`] is registered.
 pub fn w5_scores(q: &QueryCtx<'_>) -> Arc<Vec<f64>> {
-    q.memo.get_or(MEMO_W5, || match q.state.hook::<WorkState>() {
-        Some(w) => w.cur_w5.to_vec(),
-        None => vec![0.0; q.cands.len()],
-    })
+    q.memo
+        .get_or(MEMO_W5, || match q.state.hook::<WorkState>() {
+            Some(w) => w.cur_w5.to_vec(),
+            None => vec![0.0; q.cands.len()],
+        })
 }
 
 /// The query's dense M over its candidates, through memo key [`MEMO_M`];
@@ -309,7 +320,8 @@ pub fn work_at_head(
     surface: &str,
 ) -> (Vec<f64>, Vec<f64>) {
     let max_files = ReplayParams::default().max_files;
-    let msgs = (!messages.is_empty() && messages.len() == snapshot.commits.len()).then_some(messages);
+    let msgs =
+        (!messages.is_empty() && messages.len() == snapshot.commits.len()).then_some(messages);
     let mut st = WorkState::new(cands.len(), max_files, msgs.is_some());
     for (i, c) in snapshot.commits.iter().enumerate().rev() {
         if exclude.contains(&c.c) {

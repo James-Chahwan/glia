@@ -702,15 +702,33 @@ mod tests {
     /// or not, whatever its confidence.
     #[test]
     fn name_hint_and_abi_hint_are_heuristic() {
-        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::RPC_CALLS, Confidence::Weak);
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::RPC_CALLS,
+            Confidence::Weak,
+        );
         for rule in ["name_hint", "abi_hint"] {
             let note = Some(format!("name-matched contract ({rule})"));
             let bare = Evidence::emitter("resolver:evm").rule(rule);
-            assert_eq!(tier_of(Some(&bare), &edge), (HEURISTIC, note.clone()), "{rule}");
+            assert_eq!(
+                tier_of(Some(&bare), &edge),
+                (HEURISTIC, note.clone()),
+                "{rule}"
+            );
             let placed = bare.at("web/src/pay.ts", 4);
-            assert_eq!(tier_of(Some(&placed), &edge), (HEURISTIC, note), "{rule} located");
+            assert_eq!(
+                tier_of(Some(&placed), &edge),
+                (HEURISTIC, note),
+                "{rule} located"
+            );
         }
-        let flows = Edge::new(NodeId(3), NodeId(4), edge_category::EVENT_FLOWS, Confidence::Weak);
+        let flows = Edge::new(
+            NodeId(3),
+            NodeId(4),
+            edge_category::EVENT_FLOWS,
+            Confidence::Weak,
+        );
         let ev = Evidence::emitter("resolver:evm").rule("name_hint");
         assert_eq!(tier_of(Some(&ev), &flows).0, HEURISTIC);
     }
@@ -719,12 +737,20 @@ mod tests {
     /// derived; the hint rules of another emitter are not demoted.
     #[test]
     fn contract_and_abi_stay_derived() {
-        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::RPC_CALLS, Confidence::Strong);
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::RPC_CALLS,
+            Confidence::Strong,
+        );
         for rule in ["contract", "abi"] {
             let ev = Evidence::emitter("resolver:evm").rule(rule);
             assert_eq!(tier_of(Some(&ev), &edge), (DERIVED, None), "{rule}");
         }
-        assert_eq!(tier_of(Some(&Evidence::emitter("resolver:evm")), &edge), (DERIVED, None));
+        assert_eq!(
+            tier_of(Some(&Evidence::emitter("resolver:evm")), &edge),
+            (DERIVED, None)
+        );
         let other = Evidence::emitter("resolver:rpc").rule("name_hint");
         assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
     }
@@ -783,22 +809,46 @@ mod tests {
     /// the `resolver` stage (derived, no note). Location plays no part.
     #[test]
     fn identity_edges_tier_by_rule() {
-        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::SAME_AS, Confidence::Strong);
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::SAME_AS,
+            Confidence::Strong,
+        );
         let tier = |rule: &str| {
             let ev = Evidence::emitter("resolver:identity").rule(rule);
             tier_of(Some(&ev), &edge)
         };
         let noted = |t: &'static str, n: &str| (t, Some(n.to_string()));
-        assert_eq!(tier("package_name"), noted(FACT, "identity class (package_name)"));
-        assert_eq!(tier("manifest_name"), noted(FACT, "identity class (manifest_name)"));
-        assert_eq!(tier("contract_op"), noted(DERIVED, "identity class (contract_op)"));
-        assert_eq!(tier("contract_route"), noted(DERIVED, "identity class (contract_route)"));
+        assert_eq!(
+            tier("package_name"),
+            noted(FACT, "identity class (package_name)")
+        );
+        assert_eq!(
+            tier("manifest_name"),
+            noted(FACT, "identity class (manifest_name)")
+        );
+        assert_eq!(
+            tier("contract_op"),
+            noted(DERIVED, "identity class (contract_op)")
+        );
+        assert_eq!(
+            tier("contract_route"),
+            noted(DERIVED, "identity class (contract_route)")
+        );
         assert_eq!(
             tier("message_fqname/diverged"),
             noted(FACT, "identity class (message_fqname, diverged)")
         );
-        assert_eq!(tier("body_hash"), noted(HEURISTIC, "identity class (body_hash)"));
-        assert_eq!(tier("zzz"), (DERIVED, None), "an undeclared rule is the stage's tier");
+        assert_eq!(
+            tier("body_hash"),
+            noted(HEURISTIC, "identity class (body_hash)")
+        );
+        assert_eq!(
+            tier("zzz"),
+            (DERIVED, None),
+            "an undeclared rule is the stage's tier"
+        );
         let bare = Evidence::emitter("resolver:identity");
         assert_eq!(tier_of(Some(&bare), &edge), (DERIVED, None));
         // DT.1h: the models resolver's rule reads the same table.
@@ -815,11 +865,21 @@ mod tests {
     /// CE.1d: a SCIP edge is a located fact, noted with its indexer.
     #[test]
     fn scip_edge_is_fact_with_its_tool() {
-        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::CALLS, Confidence::Strong);
-        let ev = Evidence::emitter("scip:scip-python").rule("call_site").at("svc/h.py", 5);
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::CALLS,
+            Confidence::Strong,
+        );
+        let ev = Evidence::emitter("scip:scip-python")
+            .rule("call_site")
+            .at("svc/h.py", 5);
         assert_eq!(
             tier_of(Some(&ev), &edge),
-            (FACT, Some("resolved by a SCIP index (scip-python)".to_string()))
+            (
+                FACT,
+                Some("resolved by a SCIP index (scip-python)".to_string())
+            )
         );
     }
 
@@ -827,7 +887,12 @@ mod tests {
     /// still names its first emitter and rule.
     #[test]
     fn scip_confirmed_edge_names_its_first_emitter() {
-        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::INHERITS_FROM, Confidence::Strong);
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::INHERITS_FROM,
+            Confidence::Strong,
+        );
         let ev = Evidence::emitter("scip:scip-python")
             .rule("confirms:graph:refs/global_unique")
             .at("app/admin.py", 3);
@@ -846,7 +911,9 @@ mod tests {
             .at("src/lib.rs", 0);
         assert_eq!(
             tier_of(Some(&ruleless), &edge).1.as_deref(),
-            Some("confirmed by a SCIP index (rust-analyzer) at src/lib.rs:1; first emitted by parser:rust")
+            Some(
+                "confirmed by a SCIP index (rust-analyzer) at src/lib.rs:1; first emitted by parser:rust"
+            )
         );
     }
 

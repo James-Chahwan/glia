@@ -46,7 +46,9 @@ fn copy_tree(from: &Path, to: &Path) {
 fn build() -> (tempfile::TempDir, MergedGraph) {
     let td = tempfile::tempdir().unwrap();
     copy_tree(&fixture(), td.path());
-    let m = generate_one(td.path().to_str().unwrap()).expect("solidity-abi-procedures builds").merged;
+    let m = generate_one(td.path().to_str().unwrap())
+        .expect("solidity-abi-procedures builds")
+        .merged;
     (td, m)
 }
 
@@ -81,10 +83,16 @@ fn contract_surface_is_live_and_library_stays_dead() {
         (node_kind::INTERFACE, "contracts::Escrow::IEscrow"),
         (node_kind::RPC_PROCEDURE, "evm:Escrow.deposit"),
     ] {
-        assert!(live.contains(&id_of(&m, kind, qname)), "{qname} should be live");
+        assert!(
+            live.contains(&id_of(&m, kind, qname)),
+            "{qname} should be live"
+        );
     }
     let cut = id_of(&m, node_kind::METHOD, "contracts::Escrow::Fees::cut");
-    assert!(!live.contains(&cut), "an unused library function stays unreached");
+    assert!(
+        !live.contains(&cut),
+        "an unused library function stays unreached"
+    );
 }
 
 #[test]

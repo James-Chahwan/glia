@@ -286,7 +286,10 @@ fn canned_headers_reach_the_client() {
             assert_eq!(resp.header("content-type"), Some("application/json"));
             assert_eq!(resp.into_string().unwrap_or_default(), "slow down");
         }
-        other => panic!("a 429 must be a status error, got {:?}", other.map(|r| r.status())),
+        other => panic!(
+            "a 429 must be a status error, got {:?}",
+            other.map(|r| r.status())
+        ),
     }
     let plain = plain.expect("a 200");
     assert_eq!(

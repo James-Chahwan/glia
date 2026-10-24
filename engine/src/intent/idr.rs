@@ -46,10 +46,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot};
 use serde::Serialize;
 
-use super::defs::{kpath_tokens, line_scopes, read_defs, Ctx, IdDefs, Namespaces, Resolved, RouteCounts, RowState, Tree};
+use super::defs::{
+    Ctx, IdDefs, Namespaces, Resolved, RouteCounts, RowState, Tree, kpath_tokens, line_scopes,
+    read_defs,
+};
 use super::ids::{IdMention, IdVocab};
 use super::paths::PathResolver;
-use super::text::{subject, Candidates};
+use super::text::{Candidates, subject};
 use crate::git_rev::{grep_words_at, read_paths_at};
 
 /// rank_eval `R2_W_NAMED`: a file a pending (or checkbox-less) defining row names.
@@ -208,11 +211,20 @@ impl IdrInputs {
     ) -> IdrInputs {
         let defs = read_defs(tree, project_dirs, vocab, None);
         let ns = defs.namespaces(&vocab.local_words);
-        IdrInputs { defs, ns, paths: PathResolver::new(cands, renames) }
+        IdrInputs {
+            defs,
+            ns,
+            paths: PathResolver::new(cands, renames),
+        }
     }
 
     /// The side these inputs make.
-    pub fn side<'a>(&'a self, cands: &'a Candidates, vocab: &'a IdVocab, tree: &'a Tree<'a>) -> IdrSide<'a> {
+    pub fn side<'a>(
+        &'a self,
+        cands: &'a Candidates,
+        vocab: &'a IdVocab,
+        tree: &'a Tree<'a>,
+    ) -> IdrSide<'a> {
         IdrSide::new(cands, &self.paths, &self.defs, &self.ns, vocab, tree)
     }
 }
@@ -231,19 +243,27 @@ pub fn comment_part(l: &str) -> Option<&str> {
     if t.starts_with("* ") || t.starts_with('#') || t.starts_with("--") || t.starts_with("*/") {
         return Some(t);
     }
-    ["//", "/*", "<!--", " -- ", " # "].iter().filter_map(|m| l.find(m)).min().map(|i| &l[i..])
+    ["//", "/*", "<!--", " -- ", " # "]
+        .iter()
+        .filter_map(|m| l.find(m))
+        .min()
+        .map(|i| &l[i..])
 }
 
 /// rank_eval `r2_scopes`: the conventional-commit scopes of a subject,
 /// `feat(a,b): ..` / `feat(a)!: ..` -> `[a, b]`, lowercased, each at least 3
 /// chars of `[a-z0-9_-]`.
 pub fn conventional_scopes(subj: &str) -> Vec<String> {
-    let Some(open) = subj.find('(') else { return Vec::new() };
+    let Some(open) = subj.find('(') else {
+        return Vec::new();
+    };
     let head = &subj[..open];
     if head.is_empty() || !head.chars().all(|c| c.is_ascii_alphabetic()) {
         return Vec::new();
     }
-    let Some(close) = subj[open..].find(')') else { return Vec::new() };
+    let Some(close) = subj[open..].find(')') else {
+        return Vec::new();
+    };
     let after = &subj[open + close + 1..];
     if !(after.starts_with(':') || after.starts_with("!:")) {
         return Vec::new();
@@ -251,7 +271,11 @@ pub fn conventional_scopes(subj: &str) -> Vec<String> {
     subj[open + 1..open + close]
         .split(',')
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| s.len() >= 3 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .filter(|s| {
+            s.len() >= 3
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
         .collect()
 }
 
@@ -280,7 +304,11 @@ fn family_members<'n>(ns: &'n Namespaces, id: &str) -> Vec<&'n str> {
 /// Each id's first mention, in text order.
 fn first_mentions(vocab: &IdVocab, text: &str) -> Vec<IdMention> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    vocab.mentions(text).into_iter().filter(|m| seen.insert(m.id.clone())).collect()
+    vocab
+        .mentions(text)
+        .into_iter()
+        .filter(|m| seen.insert(m.id.clone()))
+        .collect()
 }
 
 /// One resolved key: (namespace, id, tier, route).
@@ -292,7 +320,12 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
     side.report_once();
     let ns = side.ns;
     let n = side.cands.len();
-    let mut out = Idr { idr: vec![0.0; n], named: vec![0.0; n], cited: vec![0.0; n], ..Idr::default() };
+    let mut out = Idr {
+        idr: vec![0.0; n],
+        named: vec![0.0; n],
+        cited: vec![0.0; n],
+        ..Idr::default()
+    };
     let mut counts = RouteCounts::default();
     let mentions = first_mentions(side.vocab, text);
     let (mut resolved, mut unresolved) = (0usize, 0usize);
@@ -303,13 +336,21 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
     let mut line_start = 0usize;
     for line in text.split('\n') {
         let end = line_start + line.len();
-        let ms: Vec<IdMention> =
-            mentions.iter().filter(|m| m.start >= line_start && m.start < end).cloned().collect();
+        let ms: Vec<IdMention> = mentions
+            .iter()
+            .filter(|m| m.start >= line_start && m.start < end)
+            .cloned()
+            .collect();
         line_start = end + 1;
         if ms.is_empty() {
             continue;
         }
-        let cx = Ctx { recent, text: line, line_scopes: line_scopes(line, ns), ..Ctx::default() };
+        let cx = Ctx {
+            recent,
+            text: line,
+            line_scopes: line_scopes(line, ns),
+            ..Ctx::default()
+        };
         let res = ns.resolve_line(line, &ms, &cx);
         for (m, r) in ms.iter().zip(res) {
             let mut got: Vec<usize> = Vec::new();
@@ -328,7 +369,10 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
                 }
                 Err(e) => {
                     let fam: Vec<Resolved> = if *e == "undefined" {
-                        family_members(ns, &m.id).into_iter().filter_map(|id| ns.resolve(id, &cx).ok()).collect()
+                        family_members(ns, &m.id)
+                            .into_iter()
+                            .filter_map(|id| ns.resolve(id, &cx).ok())
+                            .collect()
                     } else {
                         Vec::new()
                     };
@@ -347,7 +391,12 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
                         }));
                         continue;
                     }
-                    counts.add(&Ok(Resolved { id: m.id.clone(), ns: String::new(), tier: "derived", route: "family" }));
+                    counts.add(&Ok(Resolved {
+                        id: m.id.clone(),
+                        ns: String::new(),
+                        tier: "derived",
+                        route: "family",
+                    }));
                     resolved += 1;
                     for x in fam {
                         push((x.ns, x.id, "derived", "family"), &mut got);
@@ -363,13 +412,25 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
         .map(|(kns, kid, _, _)| {
             ns.expand(&Namespaces::key(kns, kid))
                 .into_iter()
-                .filter_map(|k| k.rsplit_once('|').map(|(a, b)| (a.to_string(), b.to_string())))
+                .filter_map(|k| {
+                    k.rsplit_once('|')
+                        .map(|(a, b)| (a.to_string(), b.to_string()))
+                })
                 .collect()
         })
         .collect();
-    let lineage_keys: usize = members.iter().zip(&keys).map(|(ms, k)| ms.iter().filter(|m| (&m.0, &m.1) != (&k.0, &k.1)).count()).sum();
-    let words: Vec<String> =
-        members.iter().flatten().map(|m| m.1.clone()).collect::<BTreeSet<_>>().into_iter().collect();
+    let lineage_keys: usize = members
+        .iter()
+        .zip(&keys)
+        .map(|(ms, k)| ms.iter().filter(|m| (&m.0, &m.1) != (&k.0, &k.1)).count())
+        .sum();
+    let words: Vec<String> = members
+        .iter()
+        .flatten()
+        .map(|m| m.1.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let only: &[String] = match side.tree {
         Tree::Work(_) => &side.cands.paths,
         _ => &[],
@@ -378,7 +439,10 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
         Vec::new()
     } else {
         grep_words_at(side.tree, &words, only).unwrap_or_else(|e| {
-            eprintln!("[idr] repo={} surface={} cite grep failed: {e}", side.label, side.surface);
+            eprintln!(
+                "[idr] repo={} surface={} cite grep failed: {e}",
+                side.label, side.surface
+            );
             Vec::new()
         })
     };
@@ -398,18 +462,36 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
         let mut named: BTreeMap<usize, f64> = BTreeMap::new();
         let mut cited: BTreeMap<usize, f64> = BTreeMap::new();
         for (mns, mid) in ms {
-            for &ri in ns.rows.get(&(mns.clone(), mid.clone())).into_iter().flatten() {
-                let Some(row) = side.defs.rows.get(ri) else { continue };
-                let w = if row.state == RowState::Done { W_DONE } else { W_NAMED };
-                let files =
-                    blocks.entry(ri).or_insert_with(|| side.paths.block(&row.names).into_iter().map(|x| x.0).collect());
+            for &ri in ns
+                .rows
+                .get(&(mns.clone(), mid.clone()))
+                .into_iter()
+                .flatten()
+            {
+                let Some(row) = side.defs.rows.get(ri) else {
+                    continue;
+                };
+                let w = if row.state == RowState::Done {
+                    W_DONE
+                } else {
+                    W_NAMED
+                };
+                let files = blocks.entry(ri).or_insert_with(|| {
+                    side.paths
+                        .block(&row.names)
+                        .into_iter()
+                        .map(|x| x.0)
+                        .collect()
+                });
                 for &f in files.iter() {
                     put_max(&mut named, f, w);
                 }
             }
             let one_series = ns.by_id.get(mid).is_some_and(|v| v.len() == 1);
             for (f, line, c, cms) in &cites {
-                let Some(i) = cms.iter().position(|m| &m.id == mid) else { continue };
+                let Some(i) = cms.iter().position(|m| &m.id == mid) else {
+                    continue;
+                };
                 let ok = one_series || {
                     let own = side.scope_of(*f);
                     let cx = Ctx {
@@ -418,7 +500,9 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
                         text: line,
                         ..Ctx::default()
                     };
-                    ns.resolve_line(c, cms, &cx).get(i).is_some_and(|r| r.as_ref().is_ok_and(|r| &r.ns == mns))
+                    ns.resolve_line(c, cms, &cx)
+                        .get(i)
+                        .is_some_and(|r| r.as_ref().is_ok_and(|r| &r.ns == mns))
                 };
                 if ok {
                     put_max(&mut cited, *f, W_CITED);
@@ -433,7 +517,11 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
             out.idr[f] += w;
             out.cited[f] += w;
         }
-        let first = ns.rows.get(&(kns.clone(), kid.clone())).and_then(|v| v.first()).and_then(|&i| side.defs.rows.get(i));
+        let first = ns
+            .rows
+            .get(&(kns.clone(), kid.clone()))
+            .and_then(|v| v.first())
+            .and_then(|&i| side.defs.rows.get(i));
         routed.push(RoutedId {
             id: kid.clone(),
             ns: Some(kns.clone()),
@@ -448,7 +536,9 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
     out.has_id = !keys.is_empty();
     for slot in slots {
         match slot {
-            Ok(ix) => out.ids.extend(ix.into_iter().filter_map(|i| routed.get(i).cloned())),
+            Ok(ix) => out
+                .ids
+                .extend(ix.into_iter().filter_map(|i| routed.get(i).cloned())),
             Err(r) => out.ids.push(r),
         }
     }
@@ -490,12 +580,17 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
     let keep = |p: &str| {
         p.ends_with(".md")
             && !p.split('/').any(|s| s == "node_modules")
-            && dir_segs(p).iter().any(|seg| scopes.iter().any(|s| names_scope(seg, s)))
+            && dir_segs(p)
+                .iter()
+                .any(|seg| scopes.iter().any(|s| names_scope(seg, s)))
     };
     let read = match read_paths_at(side.tree, &keep) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[idr] repo={} surface={} scope docs unreadable: {e}", side.label, side.surface);
+            eprintln!(
+                "[idr] repo={} surface={} scope docs unreadable: {e}",
+                side.label, side.surface
+            );
             return 0;
         }
     };
@@ -504,14 +599,17 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
         let mut named: BTreeMap<usize, f64> = BTreeMap::new();
         let mut any = false;
         for (p, bytes) in &read.files {
-            if !dir_segs(p).iter().any(|seg| names_scope(seg, s)) || bytes[..bytes.len().min(8000)].contains(&0) {
+            if !dir_segs(p).iter().any(|seg| names_scope(seg, s))
+                || bytes[..bytes.len().min(8000)].contains(&0)
+            {
                 continue;
             }
             let text = String::from_utf8_lossy(bytes);
             for l in text.split_terminator('\n') {
                 any = true;
                 let t = l.trim_start();
-                let done = t.starts_with("- [x]") || t.starts_with("- [X]") || t.starts_with("* [x]");
+                let done =
+                    t.starts_with("- [x]") || t.starts_with("- [X]") || t.starts_with("* [x]");
                 for (f, _, _) in side.paths.block(&kpath_tokens(l)) {
                     put_max(&mut named, f, if done { W_DONE } else { W_NAMED });
                 }
@@ -521,7 +619,12 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
             continue;
         }
         with_docs += 1;
-        counts.add(&Ok(Resolved { id: format!("scope:{s}"), ns: String::new(), tier: "derived", route: "scope-dir" }));
+        counts.add(&Ok(Resolved {
+            id: format!("scope:{s}"),
+            ns: String::new(),
+            tier: "derived",
+            route: "scope-dir",
+        }));
         for (&f, &w) in &named {
             out.idr[f] += w;
             out.named[f] += w;
@@ -544,7 +647,11 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
 /// newest, each subject's mentions resolved with the list so far, every
 /// resolved namespace's scope pushed to the front (deduped, at most
 /// [`RECENT`]). Newest first.
-pub fn recent_scopes(subjects_newest_first: &[&str], ns: &Namespaces, vocab: &IdVocab) -> Vec<String> {
+pub fn recent_scopes(
+    subjects_newest_first: &[&str],
+    ns: &Namespaces,
+    vocab: &IdVocab,
+) -> Vec<String> {
     let mut recent: Vec<String> = Vec::new();
     for subj in subjects_newest_first.iter().rev() {
         let ms = first_mentions(vocab, subj);
@@ -552,12 +659,19 @@ pub fn recent_scopes(subjects_newest_first: &[&str], ns: &Namespaces, vocab: &Id
             continue;
         }
         let got: Vec<String> = {
-            let cx = Ctx { recent: &recent, text: subj, ..Ctx::default() };
+            let cx = Ctx {
+                recent: &recent,
+                text: subj,
+                ..Ctx::default()
+            };
             ns.resolve_line(subj, &ms, &cx)
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter_map(|r| {
-                    ns.by_id.get(&r.id).and_then(|v| v.iter().find(|x| x.ns == r.ns)).and_then(|x| x.scope.clone())
+                    ns.by_id
+                        .get(&r.id)
+                        .and_then(|v| v.iter().find(|x| x.ns == r.ns))
+                        .and_then(|x| x.scope.clone())
                 })
                 .collect()
         };
@@ -580,13 +694,18 @@ pub fn recent_subjects<'m>(
     cands: &Candidates,
     exclude: &BTreeSet<String>,
 ) -> Vec<&'m str> {
-    let by_sha: BTreeMap<&str, &HistoryMessage> = messages.iter().map(|m| (m.c.as_str(), m)).collect();
+    let by_sha: BTreeMap<&str, &HistoryMessage> =
+        messages.iter().map(|m| (m.c.as_str(), m)).collect();
     snapshot
         .commits
         .iter()
         .filter(|c| !exclude.contains(&c.c))
         .filter(|c| {
-            let files: BTreeSet<usize> = c.files.iter().filter_map(|f| cands.position(&f.p)).collect();
+            let files: BTreeSet<usize> = c
+                .files
+                .iter()
+                .filter_map(|f| cands.position(&f.p))
+                .collect();
             (2..=MAX_TEST_FILES).contains(&files.len())
         })
         .filter_map(|c| by_sha.get(c.c.as_str()).map(|m| m.s.as_str()))

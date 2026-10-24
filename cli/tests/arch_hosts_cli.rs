@@ -83,11 +83,19 @@ fn arch_folds_platform_host_roots_into_their_app() {
             .collect()
     };
     let mobile = langs("mobile");
-    assert!(mobile.iter().any(|l| l == "dart"), "mobile languages: {mobile:?}");
+    assert!(
+        mobile.iter().any(|l| l == "dart"),
+        "mobile languages: {mobile:?}"
+    );
     // The shells' files now count under the app: Dart + the android Kotlin
     // activity + the linux runner.
     assert_eq!(svc("mobile")["files"], 3, "mobile: {}", svc("mobile"));
     // RN app: index.js + the android Java activity.
     assert_eq!(svc("rn")["files"], 2, "rn: {}", svc("rn"));
-    assert_eq!(svc("tools/plugin")["files"], 1, "tools/plugin: {}", svc("tools/plugin"));
+    assert_eq!(
+        svc("tools/plugin")["files"],
+        1,
+        "tools/plugin: {}",
+        svc("tools/plugin")
+    );
 }

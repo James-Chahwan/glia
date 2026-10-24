@@ -848,7 +848,11 @@ fn plan_entry(
         .and_then(|t| fold_interpolations(t, consts));
     // LF.2d: the overlay constants that fold read, if it folded at all.
     let mut pins: Vec<String> = match (&folded, fields.str("template")) {
-        (Some(_), Some(t)) => consts.pinned_keys_in(t).into_iter().map(String::from).collect(),
+        (Some(_), Some(t)) => consts
+            .pinned_keys_in(t)
+            .into_iter()
+            .map(String::from)
+            .collect(),
         _ => Vec::new(),
     };
     let input = folded
@@ -1145,9 +1149,14 @@ fn site_of(host: &str) -> String {
     let n = labels.len();
     let registry = n >= 3
         && labels.get(n - 1).is_some_and(|tld| tld.len() == 2)
-        && labels.get(n - 2).is_some_and(|sld| REGISTRY_SLDS.contains(sld));
+        && labels
+            .get(n - 2)
+            .is_some_and(|sld| REGISTRY_SLDS.contains(sld));
     let keep = if registry { 3 } else { 2 };
-    labels.get(n.saturating_sub(keep)..).unwrap_or_default().join(".")
+    labels
+        .get(n.saturating_sub(keep)..)
+        .unwrap_or_default()
+        .join(".")
 }
 
 /// A host name (already [`host_only`]) that can only be a public DNS name:
@@ -1845,7 +1854,9 @@ mod tests {
         // Before A11.4: 4 (each endpoint paired with both services).
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert!(
-            calls.iter().all(|e| route_repo.get(&e.to) == Some(&users_repo)),
+            calls
+                .iter()
+                .all(|e| route_repo.get(&e.to) == Some(&users_repo)),
             "every HTTP_CALLS target must be a users-service route"
         );
         for q in ["endpoint:GET:/users", "endpoint:GET:/users/${…}"] {
@@ -2004,13 +2015,17 @@ mod tests {
     #[test]
     fn pinned_base_folds_marks_overlay_and_weakens() {
         let json = r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${GATEWAY}/users"}"#;
-        let mut consts = ConstTable::scan_file("const GATEWAY = process.env.GATEWAY_URL;\n", "typescript");
+        let mut consts =
+            ConstTable::scan_file("const GATEWAY = process.env.GATEWAY_URL;\n", "typescript");
         assert!(consts.get("GATEWAY").is_none(), "an env read never binds");
 
         let mut fp = file();
         push_call(&mut fp, "${…}/users", json);
         let before = fp.clone();
-        assert_eq!(fold_endpoint_paths(&mut fp, &consts, repo()), FoldStats::default());
+        assert_eq!(
+            fold_endpoint_paths(&mut fp, &consts, repo()),
+            FoldStats::default()
+        );
         assert!(same(&fp, &before));
 
         assert!(consts.pin("GATEWAY", "/orders-svc"));
@@ -2019,12 +2034,18 @@ mod tests {
         let new = ep_id("GET", "/orders-svc/users");
         assert_eq!(fp.nodes[1].id, new);
         assert_eq!(fp.nodes[1].confidence, Confidence::Weak);
-        assert_eq!(fp.nav.qname_by_id.get(&new).map(String::as_str), Some("endpoint:GET:/orders-svc/users"));
+        assert_eq!(
+            fp.nav.qname_by_id.get(&new).map(String::as_str),
+            Some("endpoint:GET:/orders-svc/users")
+        );
         let v: Value = serde_json::from_str(payload(&fp, 1)).unwrap();
         assert_eq!(v["overlay"], "const:GATEWAY");
         assert_eq!(v["path"], "/orders-svc/users");
         assert_eq!(v["folded_from"], "${…}/users");
-        assert!(fp.edges.iter().any(|e| e.to == new), "the CALLS edge follows the node");
+        assert!(
+            fp.edges.iter().any(|e| e.to == new),
+            "the CALLS edge follows the node"
+        );
 
         // A source binding folds without the overlay mark or a confidence change.
         let mut fp = file();
@@ -2033,7 +2054,10 @@ mod tests {
             "${…}/users",
             r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${environment.apiUrl}/users"}"#,
         );
-        assert_eq!(fold_endpoint_paths(&mut fp, &consts_with_source(), repo()).folded, 1);
+        assert_eq!(
+            fold_endpoint_paths(&mut fp, &consts_with_source(), repo()).folded,
+            1
+        );
         assert_eq!(fp.nodes[1].confidence, Confidence::Medium);
         assert!(!payload(&fp, 1).contains("overlay"));
     }
@@ -2066,13 +2090,19 @@ mod tests {
         fp.nav.record(module, file, file, node_kind::MODULE, None);
         let cq = format!("{file}::{class}");
         let cid = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &cq);
-        fp.nav.record(cid, class, &cq, node_kind::CLASS, Some(module));
+        fp.nav
+            .record(cid, class, &cq, node_kind::CLASS, Some(module));
         for (name, key) in methods {
             let mq = format!("{cq}::{name}");
             let mid = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &mq);
             fp.nav.record(mid, name, &mq, node_kind::METHOD, Some(cid));
             if let Some(key) = key {
-                fp.nav.record_fact(mid, NavFact::UrlPrefixKey { key: key.to_string() });
+                fp.nav.record_fact(
+                    mid,
+                    NavFact::UrlPrefixKey {
+                        key: key.to_string(),
+                    },
+                );
             }
         }
         fp
@@ -2084,12 +2114,17 @@ mod tests {
         builder_parse(
             "src/app/api-url-builder.service.ts",
             "ApiUrlBuilderService",
-            &[("buildApiUrl", Some("apiPrefix")), ("buildApiRootUrl", None)],
+            &[
+                ("buildApiUrl", Some("apiPrefix")),
+                ("buildApiRootUrl", None),
+            ],
         )
     }
 
     fn env_prefix(value: &str) -> ConstTable {
-        ts_table(&format!("export const environment = {{\n  apiPrefix: '{value}',\n}};\n"))
+        ts_table(&format!(
+            "export const environment = {{\n  apiPrefix: '{value}',\n}};\n"
+        ))
     }
 
     /// A builder-read call site's ENDPOINT_HIT, the way CH.3a / CH.3b write it.
@@ -2101,7 +2136,11 @@ mod tests {
     }
 
     /// Fold `caller` beside `builder` over one repo with no nested roots.
-    fn fold_pair(builder: &mut FileParse, caller: &mut FileParse, consts: &ConstTable) -> FoldStats {
+    fn fold_pair(
+        builder: &mut FileParse,
+        caller: &mut FileParse,
+        consts: &ConstTable,
+    ) -> FoldStats {
         fold_repo(vec![builder, caller], consts, repo(), &[])
     }
 
@@ -2116,7 +2155,12 @@ mod tests {
         let old = push_call(
             &mut caller,
             "/protected/friends",
-            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+            &builder_hit(
+                "/protected/friends",
+                "protected/friends",
+                "buildApiUrl",
+                Some("ApiUrlBuilderService"),
+            ),
         );
         caller.nodes[1].confidence = Confidence::Weak;
         let stats = fold_pair(&mut builder, &mut caller, &env_prefix("/api"));
@@ -2131,7 +2175,11 @@ mod tests {
         );
         let new = ep_id("GET", "/api/protected/friends");
         assert_eq!(caller.nodes[1].id, new);
-        assert_eq!(caller.nodes[1].confidence, Confidence::Medium, "Weak -> Medium, never Strong");
+        assert_eq!(
+            caller.nodes[1].confidence,
+            Confidence::Medium,
+            "Weak -> Medium, never Strong"
+        );
         assert_eq!(
             payload(&caller, 1),
             r#"{"method":"GET","path":"/api/protected/friends","file":"src/app/friend.service.ts","line":11,"col":21,"confidence":"weak","raw":"protected/friends","wrapper":"buildApiUrl","wrapper_of":"ApiUrlBuilderService","folded_from":"/protected/friends","prefix":"/api","prefix_from":"apiPrefix"}"#
@@ -2147,15 +2195,25 @@ mod tests {
         // A trailing `/` on the configured value and a second, agreeing
         // binding (`environment.prod.ts`) give the same prefix.
         let mut consts = env_prefix("/api/");
-        consts.merge_from(&ts_table("export const DEFAULT_CONFIG = { apiPrefix: '/api' };\n"));
+        consts.merge_from(&ts_table(
+            "export const DEFAULT_CONFIG = { apiPrefix: '/api' };\n",
+        ));
         let mut builder = quokka_builder();
         let mut caller = file();
         push_call(
             &mut caller,
             "/protected/friends",
-            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+            &builder_hit(
+                "/protected/friends",
+                "protected/friends",
+                "buildApiUrl",
+                Some("ApiUrlBuilderService"),
+            ),
         );
-        assert_eq!(fold_pair(&mut builder, &mut caller, &consts).prefixed_wrapper, 1);
+        assert_eq!(
+            fold_pair(&mut builder, &mut caller, &consts).prefixed_wrapper,
+            1
+        );
         assert_eq!(caller.nodes[1].id, new);
 
         // LF.2d: a prefix read off an overlay pin is Weak and says so.
@@ -2166,14 +2224,21 @@ mod tests {
         push_call(
             &mut caller,
             "/protected/friends",
-            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+            &builder_hit(
+                "/protected/friends",
+                "protected/friends",
+                "buildApiUrl",
+                Some("ApiUrlBuilderService"),
+            ),
         );
         fold_pair(&mut builder, &mut caller, &pinned);
         assert_eq!(caller.nodes[1].id, ep_id("GET", "/gw/protected/friends"));
         assert_eq!(caller.nodes[1].confidence, Confidence::Weak);
-        assert!(payload(&caller, 1).ends_with(
-            r#""prefix":"/gw","prefix_from":"apiPrefix","overlay":"const:apiPrefix"}"#
-        ));
+        assert!(
+            payload(&caller, 1).ends_with(
+                r#""prefix":"/gw","prefix_from":"apiPrefix","overlay":"const:apiPrefix"}"#
+            )
+        );
     }
 
     /// CH.5b (b): the root builder reads no prefix (quokka's
@@ -2186,7 +2251,12 @@ mod tests {
         push_call(
             &mut caller,
             "/healthz",
-            &builder_hit("/healthz", "healthz", "buildApiRootUrl", Some("ApiUrlBuilderService")),
+            &builder_hit(
+                "/healthz",
+                "healthz",
+                "buildApiRootUrl",
+                Some("ApiUrlBuilderService"),
+            ),
         );
         push_call(
             &mut caller,
@@ -2206,17 +2276,33 @@ mod tests {
         let mut two = env_prefix("/api");
         two.merge_from(&env_prefix("/v2"));
         let mut nested = ts_table("const apiPrefix = '/api';\n");
-        nested.merge_from(&ts_table("export const DEFAULT_CONFIG = { apiPrefix: '/v2' };\n"));
-        for consts in [two, nested, env_prefix("api"), env_prefix("/"), ConstTable::default()] {
+        nested.merge_from(&ts_table(
+            "export const DEFAULT_CONFIG = { apiPrefix: '/v2' };\n",
+        ));
+        for consts in [
+            two,
+            nested,
+            env_prefix("api"),
+            env_prefix("/"),
+            ConstTable::default(),
+        ] {
             let mut builder = quokka_builder();
             let mut caller = file();
             push_call(
                 &mut caller,
                 "/protected/friends",
-                &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+                &builder_hit(
+                    "/protected/friends",
+                    "protected/friends",
+                    "buildApiUrl",
+                    Some("ApiUrlBuilderService"),
+                ),
             );
             let before = caller.clone();
-            assert_eq!(fold_pair(&mut builder, &mut caller, &consts), FoldStats::default());
+            assert_eq!(
+                fold_pair(&mut builder, &mut caller, &consts),
+                FoldStats::default()
+            );
             assert!(same(&caller, &before));
         }
         assert!(configured_prefix("apiPrefix", &env_prefix("${base}/api")).is_none());
@@ -2236,7 +2322,12 @@ mod tests {
         push_call(
             &mut caller,
             "/api/protected/x",
-            &builder_hit("/api/protected/x", "api/protected/x", "buildApiUrl", Some("ApiUrlBuilderService")),
+            &builder_hit(
+                "/api/protected/x",
+                "api/protected/x",
+                "buildApiUrl",
+                Some("ApiUrlBuilderService"),
+            ),
         );
         push_call(
             &mut caller,
@@ -2244,7 +2335,10 @@ mod tests {
             &builder_hit("/api", "/api", "buildApiUrl", Some("ApiUrlBuilderService")),
         );
         let before = caller.clone();
-        assert_eq!(fold_pair(&mut builder, &mut caller, &env_prefix("/api")), FoldStats::default());
+        assert_eq!(
+            fold_pair(&mut builder, &mut caller, &env_prefix("/api")),
+            FoldStats::default()
+        );
         assert!(same(&caller, &before));
         assert!(under_prefix("/api/x", "/api") && under_prefix("/api", "/api"));
         assert!(!under_prefix("/apiary/x", "/api"));
@@ -2261,18 +2355,44 @@ mod tests {
         push_call(
             &mut caller,
             "/protected/friends",
-            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("OtherBuilder")),
+            &builder_hit(
+                "/protected/friends",
+                "protected/friends",
+                "buildApiUrl",
+                Some("OtherBuilder"),
+            ),
         );
         let before = caller.clone();
-        assert_eq!(fold_pair(&mut builder, &mut caller, &env_prefix("/api")), FoldStats::default());
+        assert_eq!(
+            fold_pair(&mut builder, &mut caller, &env_prefix("/api")),
+            FoldStats::default()
+        );
         assert!(same(&caller, &before));
 
         let mut module_fn = FileParse::default();
-        let f = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "urls::buildApiUrlFrom");
+        let f = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "urls::buildApiUrlFrom",
+        );
         let m = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "urls");
-        module_fn.nav.record(m, "urls", "urls", node_kind::MODULE, None);
-        module_fn.nav.record(f, "buildApiUrlFrom", "urls::buildApiUrlFrom", node_kind::FUNCTION, Some(m));
-        module_fn.nav.record_fact(f, NavFact::UrlPrefixKey { key: "apiPrefix".into() });
+        module_fn
+            .nav
+            .record(m, "urls", "urls", node_kind::MODULE, None);
+        module_fn.nav.record(
+            f,
+            "buildApiUrlFrom",
+            "urls::buildApiUrlFrom",
+            node_kind::FUNCTION,
+            Some(m),
+        );
+        module_fn.nav.record_fact(
+            f,
+            NavFact::UrlPrefixKey {
+                key: "apiPrefix".into(),
+            },
+        );
         let ctx = PrefixContext::build(&[&mut module_fn], &env_prefix("/api"), &[]);
         assert!(ctx.builders.is_empty(), "{ctx:?}");
 
@@ -2283,8 +2403,13 @@ mod tests {
             ProjectRoot::new("shared".into(), "npm", "package.json", None),
         ];
         let hit = |file: &str| {
-            builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService"))
-                .replace("src/app/friend.service.ts", file)
+            builder_hit(
+                "/protected/friends",
+                "protected/friends",
+                "buildApiUrl",
+                Some("ApiUrlBuilderService"),
+            )
+            .replace("src/app/friend.service.ts", file)
         };
         let mut shared = builder_parse(
             "shared/src/api-url-builder.service.ts",
@@ -2292,23 +2417,45 @@ mod tests {
             &[("buildApiUrl", Some("apiPrefix"))],
         );
         let mut caller = file();
-        push_call(&mut caller, "/protected/friends", &hit("web/src/friend.service.ts"));
-        let stats = fold_repo(vec![&mut shared, &mut caller], &env_prefix("/api"), repo(), &roots);
+        push_call(
+            &mut caller,
+            "/protected/friends",
+            &hit("web/src/friend.service.ts"),
+        );
+        let stats = fold_repo(
+            vec![&mut shared, &mut caller],
+            &env_prefix("/api"),
+            repo(),
+            &roots,
+        );
         assert_eq!(stats.prefixed_wrapper, 1);
         assert_eq!(caller.nodes[1].id, ep_id("GET", "/api/protected/friends"));
 
         // `web` declares its own ApiUrlBuilderService.buildApiUrl, which
         // reads no prefix: `web`'s call site is not prefixed through `shared`.
-        let mut own = builder_parse("web/src/api-url-builder.service.ts", "ApiUrlBuilderService", &[("buildApiUrl", None)]);
+        let mut own = builder_parse(
+            "web/src/api-url-builder.service.ts",
+            "ApiUrlBuilderService",
+            &[("buildApiUrl", None)],
+        );
         let mut shared = builder_parse(
             "shared/src/api-url-builder.service.ts",
             "ApiUrlBuilderService",
             &[("buildApiUrl", Some("apiPrefix"))],
         );
         let mut caller = file();
-        push_call(&mut caller, "/protected/friends", &hit("web/src/friend.service.ts"));
+        push_call(
+            &mut caller,
+            "/protected/friends",
+            &hit("web/src/friend.service.ts"),
+        );
         let before = caller.clone();
-        let stats = fold_repo(vec![&mut own, &mut shared, &mut caller], &env_prefix("/api"), repo(), &roots);
+        let stats = fold_repo(
+            vec![&mut own, &mut shared, &mut caller],
+            &env_prefix("/api"),
+            repo(),
+            &roots,
+        );
         assert_eq!(stats.prefixed_wrapper, 0);
         assert!(same(&caller, &before));
     }
@@ -2348,7 +2495,10 @@ mod tests {
         let r = crate::generate_many(&[format!("{root}/web"), format!("{root}/server")])
             .expect("fixture builds");
         let m = &r.merged;
-        for gone in ["endpoint:GET:/protected/friends", "endpoint:GET:/api/healthz"] {
+        for gone in [
+            "endpoint:GET:/protected/friends",
+            "endpoint:GET:/api/healthz",
+        ] {
             assert!(m.node_id_by_qname(gone).is_none(), "{gone} must not exist");
         }
         let hit_of = |ep: NodeId| -> String {
@@ -2364,12 +2514,24 @@ mod tests {
                 .unwrap_or_default()
         };
         for (ep, route, prefixed) in [
-            ("endpoint:GET:/api/protected/friends", "GET /api/protected/friends", true),
-            ("endpoint:POST:/api/protected/friends/accept/${…}", "POST /api/protected/friends/accept/:publicId", true),
+            (
+                "endpoint:GET:/api/protected/friends",
+                "GET /api/protected/friends",
+                true,
+            ),
+            (
+                "endpoint:POST:/api/protected/friends/accept/${…}",
+                "POST /api/protected/friends/accept/:publicId",
+                true,
+            ),
             ("endpoint:GET:/healthz", "GET /healthz", false),
         ] {
-            let e = m.node_id_by_qname(ep).unwrap_or_else(|| panic!("{ep} missing"));
-            let to = m.node_id_by_qname(route).unwrap_or_else(|| panic!("{route} missing"));
+            let e = m
+                .node_id_by_qname(ep)
+                .unwrap_or_else(|| panic!("{ep} missing"));
+            let to = m
+                .node_id_by_qname(route)
+                .unwrap_or_else(|| panic!("{route} missing"));
             let call = m
                 .cross_edges
                 .iter()
@@ -2385,7 +2547,11 @@ mod tests {
                 })
                 .unwrap_or_default();
             assert!(evidence.contains(r#""rule":"exact""#), "{ep}: {evidence}");
-            assert_eq!(hit_of(e).contains(r#""prefix":"/api","prefix_from":"apiPrefix""#), prefixed, "{ep}");
+            assert_eq!(
+                hit_of(e).contains(r#""prefix":"/api","prefix_from":"apiPrefix""#),
+                prefixed,
+                "{ep}"
+            );
         }
     }
 
@@ -2444,7 +2610,10 @@ mod tests {
         (
             dart_module(
                 "app/lib/core/api_client.dart",
-                vec![client_base("Env.apiBaseUrl", 20), client_base("Env.apiBaseUrl", 34)],
+                vec![
+                    client_base("Env.apiBaseUrl", 20),
+                    client_base("Env.apiBaseUrl", 34),
+                ],
             ),
             dart_module(
                 "app/lib/core/env.dart",
@@ -2471,7 +2640,12 @@ mod tests {
     /// One Dart caller file under `app` with a `POST <path>` call site.
     fn dart_caller(path: &str) -> FileParse {
         let mut caller = file();
-        push_call_as(&mut caller, "POST", path, &dart_hit("POST", path, "app/lib/f.dart"));
+        push_call_as(
+            &mut caller,
+            "POST",
+            path,
+            &dart_hit("POST", path, "app/lib/f.dart"),
+        );
         caller.nodes[1].confidence = Confidence::Strong;
         caller
     }
@@ -2490,7 +2664,10 @@ mod tests {
         let (mut client, mut env) = quokka_android();
         let mut caller = dart_caller("/protected/friends");
         let old = caller.nodes[1].id;
-        let stats = fold_dart(vec![&mut client, &mut env, &mut caller], &ConstTable::default());
+        let stats = fold_dart(
+            vec![&mut client, &mut env, &mut caller],
+            &ConstTable::default(),
+        );
         assert_eq!(
             stats,
             FoldStats {
@@ -2502,7 +2679,11 @@ mod tests {
         );
         let new = ep_id("POST", "/api/protected/friends");
         assert_eq!(caller.nodes[1].id, new);
-        assert_eq!(caller.nodes[1].confidence, Confidence::Medium, "Strong -> Medium");
+        assert_eq!(
+            caller.nodes[1].confidence,
+            Confidence::Medium,
+            "Strong -> Medium"
+        );
         assert_eq!(
             payload(&caller, 1),
             r#"{"method":"POST","path":"/api/protected/friends","file":"app/lib/f.dart","line":9,"col":11,"confidence":"strong","folded_from":"/protected/friends","prefix":"/api","prefix_from":"Env.apiBaseUrl"}"#
@@ -2517,7 +2698,10 @@ mod tests {
         // The parse order never shows.
         let (mut client, mut env) = quokka_android();
         let mut again = dart_caller("/protected/friends");
-        fold_dart(vec![&mut again, &mut env, &mut client], &ConstTable::default());
+        fold_dart(
+            vec![&mut again, &mut env, &mut client],
+            &ConstTable::default(),
+        );
         assert!(same(&caller, &again));
     }
 
@@ -2592,9 +2776,8 @@ mod tests {
     /// lookup does not, so with no ValueLiteral the project is blocked.
     #[test]
     fn lenient_const_never_answers_a_dart_base() {
-        let consts = ts_table(
-            "export const environment = {\n  apiBaseUrl: 'http://localhost:8080',\n};\n",
-        );
+        let consts =
+            ts_table("export const environment = {\n  apiBaseUrl: 'http://localhost:8080',\n};\n");
         assert_eq!(
             consts.resolve_expr("AppConfig.apiBaseUrl"),
             Some("http://localhost:8080"),
@@ -2640,21 +2823,47 @@ mod tests {
     fn other_project_and_host_entries_untouched() {
         let (mut client, mut env) = quokka_android();
         let mut caller = file();
-        push_call_as(&mut caller, "GET", "/x", &dart_hit("GET", "/x", "other/lib/x.dart"));
+        push_call_as(
+            &mut caller,
+            "GET",
+            "/x",
+            &dart_hit("GET", "/x", "other/lib/x.dart"),
+        );
         push_call_as(
             &mut caller,
             "GET",
             "/hosted",
             r#"{"method":"GET","path":"/hosted","file":"app/lib/f.dart","line":2,"col":3,"confidence":"strong","raw":"https://api.example.net/hosted","host":"api.example.net"}"#,
         );
-        push_call_as(&mut caller, "GET", "${…}/based", &dart_hit("GET", "${…}/based", "app/lib/f.dart"));
-        push_call_as(&mut caller, "GET", "/api/already", &dart_hit("GET", "/api/already", "app/lib/f.dart"));
-        push_call_as(&mut caller, "GET", "/ts", &dart_hit("GET", "/ts", "app/src/a.ts"));
+        push_call_as(
+            &mut caller,
+            "GET",
+            "${…}/based",
+            &dart_hit("GET", "${…}/based", "app/lib/f.dart"),
+        );
+        push_call_as(
+            &mut caller,
+            "GET",
+            "/api/already",
+            &dart_hit("GET", "/api/already", "app/lib/f.dart"),
+        );
+        push_call_as(
+            &mut caller,
+            "GET",
+            "/ts",
+            &dart_hit("GET", "/ts", "app/src/a.ts"),
+        );
         let before = caller.clone();
-        let stats = fold_dart(vec![&mut client, &mut env, &mut caller], &ConstTable::default());
+        let stats = fold_dart(
+            vec![&mut client, &mut env, &mut caller],
+            &ConstTable::default(),
+        );
         assert_eq!(stats.prefixed_base, 0);
         assert_eq!(stats.folded, 0);
-        assert_eq!(stats.preset, 1, "the parser's host is counted, never re-recorded");
+        assert_eq!(
+            stats.preset, 1,
+            "the parser's host is counted, never re-recorded"
+        );
         assert!(same(&caller, &before));
     }
 
@@ -2680,7 +2889,11 @@ mod tests {
         assert_eq!(at("'a' + b"), Base::Unresolved);
         assert_eq!(at("Env.apiBaseUrl"), path("/api"));
         assert_eq!(at("core.Env.apiBaseUrl"), path("/api"), "an import prefix");
-        assert_eq!(at("Shared.base"), path("/shared"), "another project's value");
+        assert_eq!(
+            at("Shared.base"),
+            path("/shared"),
+            "another project's value"
+        );
         assert_eq!(at("Twice.base"), Base::Unresolved, "bound to two values");
         assert_eq!(at("retry.baseUrl"), Base::Copy);
         assert_eq!(at("cfg.url"), Base::Unresolved);
@@ -2721,7 +2934,10 @@ mod tests {
                 "export const environment = {\n  apiUrl: 'https://api.kinaswap.com/api',\n};\n",
                 "${environment.apiUrl}/trades",
             ),
-            ("const base = 'https://api.kinaswap.com/api';\n", "${base}/trades"),
+            (
+                "const base = 'https://api.kinaswap.com/api';\n",
+                "${base}/trades",
+            ),
         ] {
             let mut fp = file();
             push_call(
@@ -2732,7 +2948,11 @@ mod tests {
                 ),
             );
             let stats = fold_one(&mut fp, &ts_table(src));
-            assert_eq!((stats.folded, stats.hosts, stats.external), (1, 1, 0), "{src}");
+            assert_eq!(
+                (stats.folded, stats.hosts, stats.external),
+                (1, 1, 0),
+                "{src}"
+            );
             assert!(payload(&fp, 1).contains(r#""host":"api.kinaswap.com""#));
             assert!(!payload(&fp, 1).contains("external"), "{}", payload(&fp, 1));
         }
@@ -2744,7 +2964,8 @@ mod tests {
     #[test]
     fn configured_site_is_not_external() {
         let json = r#"{"method":"GET","path":"/orders","file":"a.ts","line":1,"col":1,"confidence":"strong","raw":"https://api.shop.io/orders"}"#;
-        let configured = ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
+        let configured =
+            ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
         let mut fp = file();
         push_call(&mut fp, "/orders", json);
         let stats = fold_one(&mut fp, &configured);
@@ -2817,12 +3038,28 @@ mod tests {
             _ => false,
         }));
         for h in [
-            "localhost", "10.0.0.5", "users-svc", "api.example.com", "example.net", "x.test",
-            "[::1]", "fe80::1", "a.localdomain", "home.arpa", "x.invalid", "x.example", "",
+            "localhost",
+            "10.0.0.5",
+            "users-svc",
+            "api.example.com",
+            "example.net",
+            "x.test",
+            "[::1]",
+            "fe80::1",
+            "a.localdomain",
+            "home.arpa",
+            "x.invalid",
+            "x.example",
+            "",
         ] {
             assert!(!is_public_host(h), "{h}");
         }
-        for h in ["nominatim.openstreetmap.org", "api.stripe.com", "a.b.co.uk", "example.io"] {
+        for h in [
+            "nominatim.openstreetmap.org",
+            "api.stripe.com",
+            "a.b.co.uk",
+            "example.io",
+        ] {
             assert!(is_public_host(h), "{h}");
         }
     }
@@ -2835,7 +3072,11 @@ mod tests {
         assert_eq!(site_of("nominatim.openstreetmap.org"), "openstreetmap.org");
         assert_eq!(site_of("www.gov.au"), "www.gov.au");
         assert_eq!(site_of("x.y.com.au"), "y.com.au");
-        assert_eq!(site_of("x.y.ab.uk"), "ab.uk", "an unknown SLD falls back to two labels");
+        assert_eq!(
+            site_of("x.y.ab.uk"),
+            "ab.uk",
+            "an unknown SLD falls back to two labels"
+        );
         assert_eq!(site_of("localhost"), "localhost");
         assert_eq!(host_only("u:p@API.Shop.io:8443"), "api.shop.io");
         assert_eq!(host_only("[::1]:8080"), "[::1]");
@@ -2859,7 +3100,14 @@ mod tests {
         // Without the pin, a lower-case key configures nothing.
         let mut fp = file();
         push_call(&mut fp, "/search", json);
-        assert_eq!(fold_one(&mut fp, &ts_table("const geoBase = 'https://nominatim.openstreetmap.org';\n")).external, 1);
+        assert_eq!(
+            fold_one(
+                &mut fp,
+                &ts_table("const geoBase = 'https://nominatim.openstreetmap.org';\n")
+            )
+            .external,
+            1
+        );
     }
 
     /// Sites come from EVERY parse of the repo before any entry is marked, so
@@ -2875,7 +3123,11 @@ mod tests {
             push_call(&mut a, "/orders", literal);
             let mut b = file();
             push_call(&mut b, "${…}/users", sourced);
-            let parses: Vec<&mut FileParse> = if flip { vec![&mut b, &mut a] } else { vec![&mut a, &mut b] };
+            let parses: Vec<&mut FileParse> = if flip {
+                vec![&mut b, &mut a]
+            } else {
+                vec![&mut a, &mut b]
+            };
             let stats = fold_repo(parses, &consts, repo(), &[]);
             assert_eq!((stats.external, stats.configured), (0, 1), "flip={flip}");
             assert!(!payload(&a, 1).contains("external"));
@@ -2895,7 +3147,12 @@ mod tests {
     #[test]
     fn only_endpoint_entries_are_marked() {
         let mut fp = file();
-        let ws = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::WS_CLIENT, "ws_client:/stream");
+        let ws = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::WS_CLIENT,
+            "ws_client:/stream",
+        );
         fp.nodes.push(Node {
             id: ws,
             repo: repo(),
@@ -2905,9 +3162,18 @@ mod tests {
                 payload: CellPayload::Json(r#"{"via":"ws","host":"stream.binance.com"}"#.into()),
             }],
         });
-        fp.nav.record(ws, "/stream", "ws_client:/stream", node_kind::WS_CLIENT, Some(func()));
+        fp.nav.record(
+            ws,
+            "/stream",
+            "ws_client:/stream",
+            node_kind::WS_CLIENT,
+            Some(func()),
+        );
         let before = fp.clone();
-        assert_eq!(fold_one(&mut fp, &ConstTable::default()), FoldStats::default());
+        assert_eq!(
+            fold_one(&mut fp, &ConstTable::default()),
+            FoldStats::default()
+        );
         assert!(same(&fp, &before));
     }
 
@@ -2963,9 +3229,17 @@ mod tests {
         let stats = mark_one(&mut fp, &ConstTable::default());
         assert_eq!(
             stats,
-            ClientMarkStats { ws: 1, grpc: 0, graphql: 0, configured: 0 }
+            ClientMarkStats {
+                ws: 1,
+                grpc: 0,
+                graphql: 0,
+                configured: 0
+            }
         );
-        assert_eq!(hit(&fp, ws, 0), r#"{"via":"ws","host":"stream.binance.com","external":true}"#);
+        assert_eq!(
+            hit(&fp, ws, 0),
+            r#"{"via":"ws","host":"stream.binance.com","external":true}"#
+        );
         assert_eq!(fp.edges, edges);
         assert_eq!(fp.nav.qname_by_id, nav);
         assert_eq!(fp.nodes[ws].confidence, Confidence::Medium);
@@ -2980,7 +3254,10 @@ mod tests {
         let mut fp = file();
         let alone = push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/feed", &[bare]);
         let before = fp.clone();
-        assert_eq!(mark_one(&mut fp, &ConstTable::default()), ClientMarkStats::default());
+        assert_eq!(
+            mark_one(&mut fp, &ConstTable::default()),
+            ClientMarkStats::default()
+        );
         assert!(same(&fp, &before));
         assert_eq!(hit(&fp, alone, 0), bare);
 
@@ -2991,7 +3268,10 @@ mod tests {
             &[r#"{"via":"ws","host":"stream.binance.com"}"#, bare],
         );
         assert_eq!(mark_one(&mut fp, &ConstTable::default()).ws, 1);
-        assert_eq!(hit(&fp, both, 0), r#"{"via":"ws","host":"stream.binance.com","external":true}"#);
+        assert_eq!(
+            hit(&fp, both, 0),
+            r#"{"via":"ws","host":"stream.binance.com","external":true}"#
+        );
         assert_eq!(hit(&fp, both, 1), bare);
         assert_eq!(hit(&fp, alone, 0), bare);
     }
@@ -3002,9 +3282,14 @@ mod tests {
     fn grpc_internal_host_is_not() {
         let mut fp = file();
         let mut internal = Vec::new();
-        for (i, host) in ["users-svc:50051", "localhost:50051", "users.default.svc.cluster.local:50051", "10.0.0.7:50051"]
-            .iter()
-            .enumerate()
+        for (i, host) in [
+            "users-svc:50051",
+            "localhost:50051",
+            "users.default.svc.cluster.local:50051",
+            "10.0.0.7:50051",
+        ]
+        .iter()
+        .enumerate()
         {
             internal.push(push_client(
                 &mut fp,
@@ -3056,10 +3341,23 @@ mod tests {
         let mut fp = file();
         let mixed = r#"{"via":"graphql","hosts":["api.github.com","users-svc"]}"#;
         let empty = r#"{"via":"graphql","hosts":[]}"#;
-        let a = push_client(&mut fp, node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[mixed]);
-        let b = push_client(&mut fp, node_kind::GRAPHQL_OPERATION, "graphql_op:ListUsers", &[empty]);
+        let a = push_client(
+            &mut fp,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:GetUser",
+            &[mixed],
+        );
+        let b = push_client(
+            &mut fp,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:ListUsers",
+            &[empty],
+        );
         let before = fp.clone();
-        assert_eq!(mark_one(&mut fp, &ConstTable::default()), ClientMarkStats::default());
+        assert_eq!(
+            mark_one(&mut fp, &ConstTable::default()),
+            ClientMarkStats::default()
+        );
         assert!(same(&fp, &before));
         assert_eq!(hit(&fp, a, 0), mixed);
         assert_eq!(hit(&fp, b, 0), empty);
@@ -3071,13 +3369,19 @@ mod tests {
     #[test]
     fn configured_site_not_marked() {
         let ws = r#"{"via":"ws","host":"stream.binance.com"}"#;
-        let configured = ts_table("export const environment = {\n  wsUrl: 'wss://stream.binance.com/ws',\n};\n");
+        let configured =
+            ts_table("export const environment = {\n  wsUrl: 'wss://stream.binance.com/ws',\n};\n");
         let mut fp = file();
         let n = push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/ws", &[ws]);
         let stats = mark_one(&mut fp, &configured);
         assert_eq!(
             stats,
-            ClientMarkStats { ws: 0, grpc: 0, graphql: 0, configured: 1 }
+            ClientMarkStats {
+                ws: 0,
+                grpc: 0,
+                graphql: 0,
+                configured: 1
+            }
         );
         assert_eq!(hit(&fp, n, 0), ws);
 
@@ -3133,12 +3437,23 @@ mod tests {
                 payload: CellPayload::Json(r#"{"via":"ws","host":"stream.binance.com"}"#.into()),
             }],
         });
-        fp.nav.record(ws_server, "/ws", "ws:/ws", node_kind::WS_HANDLER, Some(func()));
+        fp.nav.record(
+            ws_server,
+            "/ws",
+            "ws:/ws",
+            node_kind::WS_HANDLER,
+            Some(func()),
+        );
         let before = fp.clone();
         let stats = mark_one(&mut fp, &ConstTable::default());
         assert_eq!(
             stats,
-            ClientMarkStats { ws: 0, grpc: 0, graphql: 0, configured: 1 }
+            ClientMarkStats {
+                ws: 0,
+                grpc: 0,
+                graphql: 0,
+                configured: 1
+            }
         );
         assert!(same(&fp, &before));
 
@@ -3158,7 +3473,8 @@ mod tests {
     /// the same hits), and a second run marks nothing.
     #[test]
     fn stats_count_per_kind() {
-        let consts = ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
+        let consts =
+            ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
         let build = || {
             let mut a = file();
             push_client(
@@ -3199,25 +3515,43 @@ mod tests {
             );
             (a, b)
         };
-        let want = ClientMarkStats { ws: 1, grpc: 1, graphql: 1, configured: 2 };
+        let want = ClientMarkStats {
+            ws: 1,
+            grpc: 1,
+            graphql: 1,
+            configured: 2,
+        };
         let mut runs = Vec::new();
         for flip in [false, true] {
             let (mut a, mut b) = build();
-            let parses: Vec<&mut FileParse> = if flip { vec![&mut b, &mut a] } else { vec![&mut a, &mut b] };
+            let parses: Vec<&mut FileParse> = if flip {
+                vec![&mut b, &mut a]
+            } else {
+                vec![&mut a, &mut b]
+            };
             assert_eq!(mark_external_clients(parses, &consts), want, "flip={flip}");
             runs.push((a, b));
         }
         let ((a0, b0), (a1, b1)) = (&runs[0], &runs[1]);
         assert!(same(a0, a1) && same(b0, b1));
         assert!(hit(a0, 1, 0).ends_with(r#""host":"stream.binance.com","external":true}"#));
-        assert!(!hit(a0, 1, 1).contains("external"), "kraken's site is configured");
+        assert!(
+            !hit(a0, 1, 1).contains("external"),
+            "kraken's site is configured"
+        );
         assert!(!hit(a0, 1, 2).contains("external"));
         assert!(!hit(b0, 2, 0).contains("external"), "shop.io is configured");
 
         let (mut a, mut b) = runs.swap_remove(0);
         let (once_a, once_b) = (a.clone(), b.clone());
         let again = mark_external_clients(vec![&mut a, &mut b], &consts);
-        assert_eq!(again, ClientMarkStats { configured: 2, ..ClientMarkStats::default() });
+        assert_eq!(
+            again,
+            ClientMarkStats {
+                configured: 2,
+                ..ClientMarkStats::default()
+            }
+        );
         assert!(same(&a, &once_a) && same(&b, &once_b));
     }
 }

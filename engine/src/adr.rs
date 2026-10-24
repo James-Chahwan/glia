@@ -55,7 +55,13 @@ use serde_json::{Map, Value};
 use crate::docs::is_adr_path;
 
 /// The status words the marker counts by name; any other is `other`.
-const STATUSES: [&str; 5] = ["accepted", "proposed", "superseded", "deprecated", "rejected"];
+const STATUSES: [&str; 5] = [
+    "accepted",
+    "proposed",
+    "superseded",
+    "deprecated",
+    "rejected",
+];
 
 /// One DOC_SECTION of a repo markdown file.
 struct Section {
@@ -114,7 +120,11 @@ impl AdrStats {
             return;
         }
         let [accepted, proposed, superseded, deprecated, rejected, other] = self.statuses;
-        let skipped = if self.skipped > 0 { format!(" skipped={}", self.skipped) } else { String::new() };
+        let skipped = if self.skipped > 0 {
+            format!(" skipped={}", self.skipped)
+        } else {
+            String::new()
+        };
         eprintln!(
             "[adr] files={} decisions={} nodes={} (accepted={accepted} proposed={proposed} \
              superseded={superseded} deprecated={deprecated} rejected={rejected} other={other}){skipped}",
@@ -181,14 +191,20 @@ pub(crate) fn fill_adr_decisions(merged: &mut MergedGraph) -> AdrStats {
                 let Some(node) = merged.graphs.get_mut(gi).and_then(|g| g.nodes.get_mut(ni)) else {
                     continue;
                 };
-                let slot = node.cells.iter().position(|c| c.kind == cell_type::DECISION);
+                let slot = node
+                    .cells
+                    .iter()
+                    .position(|c| c.kind == cell_type::DECISION);
                 let existing = slot.and_then(|i| node.cells.get(i)).map(|c| &c.payload);
                 let Ok(payload) = merge_entry(existing, entry) else {
                     continue;
                 };
                 match slot.and_then(|i| node.cells.get_mut(i)) {
                     Some(cell) => cell.payload = payload,
-                    None => node.cells.push(Cell { kind: cell_type::DECISION, payload }),
+                    None => node.cells.push(Cell {
+                        kind: cell_type::DECISION,
+                        payload,
+                    }),
                 }
                 wrote = true;
             }
@@ -217,7 +233,8 @@ fn find_adrs(merged: &MergedGraph, stats: &mut AdrStats) -> (Vec<Adr>, HashMap<N
             {
                 continue;
             }
-            let (Some((file, start_line)), Some(text)) = (position(&n.cells), code_text(&n.cells)) else {
+            let (Some((file, start_line)), Some(text)) = (position(&n.cells), code_text(&n.cells))
+            else {
                 continue;
             };
             let slug = g.nav.name_by_id.get(&n.id).cloned().unwrap_or_default();
@@ -225,7 +242,13 @@ fn find_adrs(merged: &MergedGraph, stats: &mut AdrStats) -> (Vec<Adr>, HashMap<N
             files
                 .entry((n.repo.0, file.replace('\\', "/")))
                 .or_default()
-                .push(Section { id: n.id, slug, qname, text: text.to_string(), start_line });
+                .push(Section {
+                    id: n.id,
+                    slug,
+                    qname,
+                    text: text.to_string(),
+                    start_line,
+                });
         }
     }
 
@@ -252,7 +275,12 @@ fn find_adrs(merged: &MergedGraph, stats: &mut AdrStats) -> (Vec<Adr>, HashMap<N
         for s in &sections {
             section_adr.insert(s.id, idx);
         }
-        adrs.push(Adr { title: adr_title(&sections, &file), status, section, file });
+        adrs.push(Adr {
+            title: adr_title(&sections, &file),
+            status,
+            section,
+            file,
+        });
     }
     (adrs, section_adr)
 }
@@ -265,7 +293,9 @@ fn is_file_doc(cells: &[Cell]) -> bool {
         CellPayload::Json(s) if c.kind == cell_type::ORIGIN => serde_json::from_str::<Value>(s)
             .is_ok_and(|v| {
                 v.get("provenance").and_then(Value::as_str) == Some("documentation")
-                    && v.get("source").and_then(Value::as_str).is_none_or(|t| t == "file")
+                    && v.get("source")
+                        .and_then(Value::as_str)
+                        .is_none_or(|t| t == "file")
             }),
         _ => false,
     })
@@ -276,7 +306,10 @@ fn position(cells: &[Cell]) -> Option<(String, u64)> {
     cells.iter().find_map(|c| match &c.payload {
         CellPayload::Json(s) if c.kind == cell_type::POSITION => {
             let v: Value = serde_json::from_str(s).ok()?;
-            Some((v.get("file")?.as_str()?.to_string(), v.get("start_line")?.as_u64()?))
+            Some((
+                v.get("file")?.as_str()?.to_string(),
+                v.get("start_line")?.as_u64()?,
+            ))
         }
         _ => None,
     })
@@ -293,7 +326,10 @@ fn code_text(cells: &[Cell]) -> Option<&str> {
 /// Is this file an ADR (module docs)? `sections` is its sections in order.
 fn is_adr_file(file: &str, sections: &[Section]) -> bool {
     let name = file.rsplit('/').next().unwrap_or(file);
-    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s).to_ascii_lowercase();
+    let stem = name
+        .rsplit_once('.')
+        .map_or(name, |(s, _)| s)
+        .to_ascii_lowercase();
     let index = matches!(stem.as_str(), "readme" | "index" | "toc") || stem.contains("template");
     if is_adr_path(file) && !index {
         return true;
@@ -376,12 +412,16 @@ fn adr_status(sections: &[Section]) -> Option<String> {
 /// What follows a `Status:` label: `Status: X`, `* Status: X`,
 /// `* **Status:** X`, `**Status**: X`, front-matter `status: X`.
 fn status_label(line: &str) -> Option<&str> {
-    let l = line.trim().trim_start_matches(['*', '-', '+', '_', ' ', '\t']);
+    let l = line
+        .trim()
+        .trim_start_matches(['*', '-', '+', '_', ' ', '\t']);
     let head = l.get(..6)?;
     if !head.eq_ignore_ascii_case("status") {
         return None;
     }
-    l.get(6..)?.trim_start_matches(['*', '_', ' ']).strip_prefix(':')
+    l.get(6..)?
+        .trim_start_matches(['*', '_', ' '])
+        .strip_prefix(':')
 }
 
 /// The first alphabetic word, lowercased: `**Accepted**` -> `accepted`,
@@ -426,9 +466,15 @@ mod tests {
     #[test]
     fn adr_tools_title_status_and_decision_section() {
         let s = adr_tools();
-        assert_eq!(adr_title(&s, "doc/adr/0001-use-flask-for-orders.md"), "Use Flask for orders");
+        assert_eq!(
+            adr_title(&s, "doc/adr/0001-use-flask-for-orders.md"),
+            "Use Flask for orders"
+        );
         assert_eq!(adr_status(&s).as_deref(), Some("accepted"));
-        assert_eq!(decision_section(&s).map(|s| s.qname.as_str()), Some("docs::f::decision"));
+        assert_eq!(
+            decision_section(&s).map(|s| s.qname.as_str()),
+            Some("docs::f::decision")
+        );
     }
 
     #[test]
@@ -440,7 +486,10 @@ mod tests {
         ]);
         assert_eq!(adr_status(&s).as_deref(), Some("superseded"));
         // MADR 2: a `* Status:` bullet in the title section.
-        let s = sections(&[("t", "# Use Postgres\n\n* Status: proposed\n* Deciders: team")]);
+        let s = sections(&[(
+            "t",
+            "# Use Postgres\n\n* Status: proposed\n* Deciders: team",
+        )]);
         assert_eq!(adr_status(&s).as_deref(), Some("proposed"));
         // Bold labels, and a label inside the status section.
         let s = sections(&[("t", "# T\n\n* **Status:** Deprecated")]);
@@ -449,14 +498,23 @@ mod tests {
         assert_eq!(adr_status(&s).as_deref(), Some("rejected"));
         // MADR 3: YAML front matter is the preamble before the title.
         let s = sections(&[
-            ("overview", "---\nstatus: \"accepted\"\ndate: 2026-01-01\n---"),
+            (
+                "overview",
+                "---\nstatus: \"accepted\"\ndate: 2026-01-01\n---",
+            ),
             ("use-postgres", "# Use Postgres"),
         ]);
         assert_eq!(adr_status(&s).as_deref(), Some("accepted"));
-        assert_eq!(adr_title(&s, "docs/decisions/0002-use-postgres.md"), "Use Postgres");
+        assert_eq!(
+            adr_title(&s, "docs/decisions/0002-use-postgres.md"),
+            "Use Postgres"
+        );
         // No status anywhere; `Status quo` is not a label; a later section's
         // label is not the head's.
-        let s = sections(&[("t", "# T\n\nStatus quo: fine."), ("more", "## More\nStatus: accepted")]);
+        let s = sections(&[
+            ("t", "# T\n\nStatus quo: fine."),
+            ("more", "## More\nStatus: accepted"),
+        ]);
         assert_eq!(adr_status(&s), None);
     }
 
@@ -476,7 +534,10 @@ mod tests {
             ("decision-drivers", "## Decision Drivers"),
             ("decision-outcome", "## Decision Outcome"),
         ]);
-        assert_eq!(decision_section(&s).map(|s| s.slug.as_str()), Some("decision-outcome"));
+        assert_eq!(
+            decision_section(&s).map(|s| s.slug.as_str()),
+            Some("decision-outcome")
+        );
         let s = sections(&[("t", "# T"), ("context", "## Context")]);
         assert_eq!(decision_section(&s).map(|s| s.slug.as_str()), Some("t"));
     }
@@ -492,8 +553,14 @@ mod tests {
         assert!(!is_adr_file("docs/decisions/adr-template.md", &plain));
         assert!(!is_adr_file("docs/adr/index.md", &plain));
         // Elsewhere: a sequence number AND the ADR shape.
-        assert!(is_adr_file("docs/architecture/0005-queue-choice.md", &shaped));
-        assert!(!is_adr_file("docs/architecture/0005-queue-choice.md", &plain));
+        assert!(is_adr_file(
+            "docs/architecture/0005-queue-choice.md",
+            &shaped
+        ));
+        assert!(!is_adr_file(
+            "docs/architecture/0005-queue-choice.md",
+            &plain
+        ));
         assert!(!is_adr_file("docs/architecture/queue-choice.md", &shaped));
         assert!(!is_adr_file("docs/12-steps.md", &shaped));
         assert!(!is_adr_file("docs/20260101-log.md", &shaped));
@@ -511,7 +578,11 @@ mod tests {
         };
         let v = adr.entry();
         assert!(validate_entry(cell_type::DECISION, &v).is_ok());
-        assert_eq!(v.get("status"), None, "a missing status is omitted, not invented");
+        assert_eq!(
+            v.get("status"),
+            None,
+            "a missing status is omitted, not invented"
+        );
         let Ok(CellPayload::Json(p)) = merge_entry(None, &v) else {
             panic!("an entry merges into an empty cell");
         };

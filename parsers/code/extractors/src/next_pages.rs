@@ -155,7 +155,9 @@ impl NextRoots {
 /// The route a file serves, given its path relative to the Next root (see the
 /// module doc's table). `None` for anything that is not a page.
 pub fn page_route(rel_under_root: &str) -> Option<PageRoute> {
-    let body = rel_under_root.strip_prefix("src/").unwrap_or(rel_under_root);
+    let body = rel_under_root
+        .strip_prefix("src/")
+        .unwrap_or(rel_under_root);
     if let Some(rest) = body.strip_prefix("pages/") {
         return pages_router(rest);
     }
@@ -371,7 +373,9 @@ fn export_list_default(rest: &str) -> Option<&str> {
     body.split(',').find_map(|item| {
         let mut words = item.split_whitespace();
         match (words.next(), words.next(), words.next(), words.next()) {
-            (Some(name), Some("as"), Some("default"), None) => ident_at(name).filter(|i| *i == name),
+            (Some(name), Some("as"), Some("default"), None) => {
+                ident_at(name).filter(|i| *i == name)
+            }
             _ => None,
         }
     })
@@ -448,24 +452,26 @@ fn word_bounded(text: &str, at: usize, len: usize) -> bool {
 /// `name` is declared at any depth of `text` by `function` / `class` /
 /// `const` / `let` / `var`.
 fn declared_in(text: &str, name: &str) -> bool {
-    ["function", "class", "const", "let", "var"].iter().any(|kw| {
-        let mut from = 0;
-        while let Some(rel) = text.get(from..).and_then(|s| s.find(kw)) {
-            let at = from + rel;
-            from = at + kw.len();
-            if !word_bounded(text, at, kw.len()) {
-                continue;
+    ["function", "class", "const", "let", "var"]
+        .iter()
+        .any(|kw| {
+            let mut from = 0;
+            while let Some(rel) = text.get(from..).and_then(|s| s.find(kw)) {
+                let at = from + rel;
+                from = at + kw.len();
+                if !word_bounded(text, at, kw.len()) {
+                    continue;
+                }
+                let rest = text
+                    .get(from..)
+                    .unwrap_or("")
+                    .trim_start_matches(|c: char| c.is_whitespace() || c == '*');
+                if ident_at(rest) == Some(name) {
+                    return true;
+                }
             }
-            let rest = text
-                .get(from..)
-                .unwrap_or("")
-                .trim_start_matches(|c: char| c.is_whitespace() || c == '*');
-            if ident_at(rest) == Some(name) {
-                return true;
-            }
-        }
-        false
-    })
+            false
+        })
 }
 
 /// `src` with comments and the contents of string / template literals blanked
@@ -571,15 +577,30 @@ mod tests {
         assert_eq!(route("pages/users/[id].tsx"), plain("/users/:id"));
         assert_eq!(route("pages/users/[id]/edit.js"), plain("/users/:id/edit"));
         assert_eq!(route("pages/[org]/[repo]/index.tsx"), plain("/:org/:repo"));
-        assert_eq!(page_route("pages/users/[id].tsx").map(|r| r.router), Some(PageRouter::Pages));
+        assert_eq!(
+            page_route("pages/users/[id].tsx").map(|r| r.router),
+            Some(PageRouter::Pages)
+        );
     }
 
     #[test]
     fn page_route_catch_alls_keep_their_brackets() {
-        assert_eq!(route("pages/docs/[...slug].tsx"), Some(("/docs/[...slug]".into(), true)));
-        assert_eq!(route("pages/shop/[[...slug]].tsx"), Some(("/shop/[[...slug]]".into(), true)));
-        assert_eq!(route("app/blog/[...parts]/page.tsx"), Some(("/blog/[...parts]".into(), true)));
-        assert_eq!(route("pages/[[...all]].tsx"), Some(("/[[...all]]".into(), true)));
+        assert_eq!(
+            route("pages/docs/[...slug].tsx"),
+            Some(("/docs/[...slug]".into(), true))
+        );
+        assert_eq!(
+            route("pages/shop/[[...slug]].tsx"),
+            Some(("/shop/[[...slug]]".into(), true))
+        );
+        assert_eq!(
+            route("app/blog/[...parts]/page.tsx"),
+            Some(("/blog/[...parts]".into(), true))
+        );
+        assert_eq!(
+            route("pages/[[...all]].tsx"),
+            Some(("/[[...all]]".into(), true))
+        );
         // A catch-all must be the last segment.
         assert_eq!(route("app/[...slug]/edit/page.tsx"), None);
         // Malformed brackets are not routes.
@@ -621,7 +642,10 @@ mod tests {
         assert_eq!(route("app/(marketing)/about/page.tsx"), plain("/about"));
         assert_eq!(route("app/(shop)/(cart)/cart/page.jsx"), plain("/cart"));
         assert_eq!(route("app/@modal/login/page.tsx"), plain("/login"));
-        assert_eq!(page_route("app/page.tsx").map(|r| r.router), Some(PageRouter::App));
+        assert_eq!(
+            page_route("app/page.tsx").map(|r| r.router),
+            Some(PageRouter::App)
+        );
         // Intercepting routes shadow another route; private folders opt out.
         assert_eq!(route("app/feed/(.)photo/[id]/page.tsx"), None);
         assert_eq!(route("app/feed/(..)photo/[id]/page.tsx"), None);
@@ -640,14 +664,18 @@ mod tests {
 
     #[test]
     fn declares_next_reads_the_three_dependency_maps() {
-        assert!(declares_next(r#"{"dependencies":{"next":"14.2.0","react":"18"}}"#));
+        assert!(declares_next(
+            r#"{"dependencies":{"next":"14.2.0","react":"18"}}"#
+        ));
         assert!(declares_next(r#"{"devDependencies":{"next":"^13"}}"#));
         assert!(declares_next(r#"{"peerDependencies":{"next":">=12"}}"#));
         assert!(!declares_next(
             r#"{"dependencies":{"react":"18","react-router-dom":"6","vite":"5"}}"#
         ));
         // A `next` key anywhere else, or a lookalike package, is not Next.
-        assert!(!declares_next(r#"{"name":"next","scripts":{"next":"next dev"}}"#));
+        assert!(!declares_next(
+            r#"{"name":"next","scripts":{"next":"next dev"}}"#
+        ));
         assert!(!declares_next(r#"{"dependencies":{"next-auth":"4"}}"#));
         assert!(!declares_next(r#"{"dependencies": {"next": "14""#));
         assert!(!declares_next(""));
@@ -665,13 +693,19 @@ mod tests {
             ("apps/web/pages/index.tsx", ""),
         ]);
         assert_eq!(roots.next_count(), 2);
-        assert_eq!(roots.rel_under_next_root("pages/index.tsx"), Some("pages/index.tsx"));
+        assert_eq!(
+            roots.rel_under_next_root("pages/index.tsx"),
+            Some("pages/index.tsx")
+        );
         assert_eq!(
             roots.rel_under_next_root("apps/web/pages/index.tsx"),
             Some("pages/index.tsx")
         );
         // The Vite app's pages/ folder belongs to the Vite root.
-        assert_eq!(roots.rel_under_next_root("apps/spa/src/pages/Home.tsx"), None);
+        assert_eq!(
+            roots.rel_under_next_root("apps/spa/src/pages/Home.tsx"),
+            None
+        );
         // Segment-bounded: `apps/webx` is not under `apps/web`.
         assert_eq!(
             roots.rel_under_next_root("apps/webx/pages/a.tsx"),
@@ -681,26 +715,49 @@ mod tests {
         let none = NextRoots::from_files([("package.json", vite), ("src/pages/Home.tsx", "")]);
         assert_eq!(none.next_count(), 0);
         assert_eq!(none.rel_under_next_root("src/pages/Home.tsx"), None);
-        assert_eq!(NextRoots::default().rel_under_next_root("pages/a.tsx"), None);
+        assert_eq!(
+            NextRoots::default().rel_under_next_root("pages/a.tsx"),
+            None
+        );
     }
 
     #[test]
     fn default_export_component_forms() {
         let d = |s: &str| default_export_component(s);
-        assert_eq!(d("export default function Home() { return <div/>; }"), Some("Home".into()));
-        assert_eq!(d("export default async function Page() {}"), Some("Page".into()));
-        assert_eq!(d("export default class Dashboard extends React.Component {}"), Some("Dashboard".into()));
-        assert_eq!(d("function About() {}\nexport default About;\n"), Some("About".into()));
-        assert_eq!(d("const About = () => <div/>;\nexport default About\n"), Some("About".into()));
         assert_eq!(
-            d("import withAuth from '../auth';\nfunction Admin() {}\nexport default withAuth(Admin);"),
+            d("export default function Home() { return <div/>; }"),
+            Some("Home".into())
+        );
+        assert_eq!(
+            d("export default async function Page() {}"),
+            Some("Page".into())
+        );
+        assert_eq!(
+            d("export default class Dashboard extends React.Component {}"),
+            Some("Dashboard".into())
+        );
+        assert_eq!(
+            d("function About() {}\nexport default About;\n"),
+            Some("About".into())
+        );
+        assert_eq!(
+            d("const About = () => <div/>;\nexport default About\n"),
+            Some("About".into())
+        );
+        assert_eq!(
+            d(
+                "import withAuth from '../auth';\nfunction Admin() {}\nexport default withAuth(Admin);"
+            ),
             Some("Admin".into())
         );
         assert_eq!(
             d("const Page = () => null;\nexport default connect(mapState)(Page);"),
             Some("Page".into())
         );
-        assert_eq!(d("function Settings() {}\nexport { Settings as default };"), Some("Settings".into()));
+        assert_eq!(
+            d("function Settings() {}\nexport { Settings as default };"),
+            Some("Settings".into())
+        );
     }
 
     #[test]
@@ -708,7 +765,10 @@ mod tests {
         let d = |s: &str| default_export_component(s);
         // Anonymous function, arrow, object literal.
         assert_eq!(d("export default function () { return null; }"), None);
-        assert_eq!(d("export default () => <Layout />;\nfunction Layout() {}"), None);
+        assert_eq!(
+            d("export default () => <Layout />;\nfunction Layout() {}"),
+            None
+        );
         assert_eq!(d("export default { title: 'x' };"), None);
         // Not declared in the file (an import), or not capitalised.
         assert_eq!(d("import Home from './Home';\nexport default Home;"), None);
@@ -719,7 +779,10 @@ mod tests {
         // Inside a string.
         assert_eq!(d("const s = 'export default function Fake() {}';"), None);
         // Two in-file candidates: ambiguous.
-        assert_eq!(d("function A() {}\nfunction B() {}\nexport default pick(A, B);"), None);
+        assert_eq!(
+            d("function A() {}\nfunction B() {}\nexport default pick(A, B);"),
+            None
+        );
         assert_eq!(d("export const x = 1;"), None);
         assert_eq!(d(""), None);
     }
@@ -738,11 +801,24 @@ mod tests {
         assert_eq!(g.route.path, "/users/:id");
         assert_eq!(g.out.nodes.len(), 1);
         let id = g.out.nodes[0].id;
-        assert_eq!(g.out.nav.qname_by_id.get(&id).map(String::as_str), Some("page:/users/:id"));
+        assert_eq!(
+            g.out.nav.qname_by_id.get(&id).map(String::as_str),
+            Some("page:/users/:id")
+        );
         assert_eq!(g.out.nav.kind_by_id.get(&id), Some(&node_kind::ROUTE));
-        assert!(g.out.nodes[0].cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD
-            && matches!(&c.payload, CellPayload::Text(t) if t == "GET")));
-        assert!(g.out.nodes[0].cells.iter().any(|c| c.kind == cell_type::ORIGIN));
+        assert!(
+            g.out.nodes[0]
+                .cells
+                .iter()
+                .any(|c| c.kind == cell_type::ROUTE_METHOD
+                    && matches!(&c.payload, CellPayload::Text(t) if t == "GET"))
+        );
+        assert!(
+            g.out.nodes[0]
+                .cells
+                .iter()
+                .any(|c| c.kind == cell_type::ORIGIN)
+        );
         assert_eq!(g.out.refs.len(), 1);
         assert_eq!(g.out.refs[0].category, edge_category::HANDLED_BY);
         assert_eq!(g.out.refs[0].from_module, module);
@@ -750,10 +826,23 @@ mod tests {
 
         // A catch-all is counted; a page with no nameable default keeps its
         // ROUTE without a HANDLED_BY.
-        let c = graft_page("pages/docs/[...slug].tsx", "export default () => null;", module, repo)
-            .unwrap();
+        let c = graft_page(
+            "pages/docs/[...slug].tsx",
+            "export default () => null;",
+            module,
+            repo,
+        )
+        .unwrap();
         assert_eq!(c.out.catchalls, 1);
         assert!(c.out.refs.is_empty());
-        assert!(graft_page("pages/_app.tsx", "export default function App() {}", module, repo).is_none());
+        assert!(
+            graft_page(
+                "pages/_app.tsx",
+                "export default function App() {}",
+                module,
+                repo
+            )
+            .is_none()
+        );
     }
 }

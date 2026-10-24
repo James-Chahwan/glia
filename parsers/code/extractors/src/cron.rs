@@ -198,12 +198,7 @@ fn script_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<Stri
     })
 }
 
-pub fn extract_cron_nodes(
-    source: &str,
-    path: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> CronNodes {
+pub fn extract_cron_nodes(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> CronNodes {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut nav = CodeNav::default();
@@ -374,7 +369,9 @@ fn extract_github_actions(source: &str, path: &str) -> Vec<CronJob> {
         // Match `cron: '* * * * *'` and `cron: "..."`. Indented under `schedule:`
         // — we don't validate the parent key (cheap; false-positives elsewhere
         // require the literal `cron:` key which is rare outside this context).
-        if let Some(rest) = t.strip_prefix("- cron:").or_else(|| t.strip_prefix("cron:"))
+        if let Some(rest) = t
+            .strip_prefix("- cron:")
+            .or_else(|| t.strip_prefix("cron:"))
             && let Some(schedule) = first_yaml_string(rest)
             && looks_like_cron_expr(&schedule)
         {
@@ -777,9 +774,7 @@ fn method_name_after_annotation(after_close: &str) -> Option<String> {
             if let Some(start) = last_ident_start {
                 // Walk back to ident start.
                 let mut s = start;
-                while s > 0
-                    && (bytes[s - 1].is_ascii_alphanumeric() || bytes[s - 1] == b'_')
-                {
+                while s > 0 && (bytes[s - 1].is_ascii_alphanumeric() || bytes[s - 1] == b'_') {
                     s -= 1;
                 }
                 let end = start + 1;
@@ -795,9 +790,10 @@ fn method_name_after_annotation(after_close: &str) -> Option<String> {
             && (last_ident_start.is_none() || {
                 let prev = if i == 0 { 0 } else { bytes[i - 1] };
                 !(prev.is_ascii_alphanumeric() || prev == b'_')
-            }) {
-                last_ident_start = Some(i);
-            }
+            })
+        {
+            last_ident_start = Some(i);
+        }
         i += 1;
     }
     None
@@ -3212,8 +3208,10 @@ fn sidekiq_job(
         return None;
     }
     let handler = handler_line.and_then(|line| {
-        ruby_const_path(class)
-            .and_then(|segs| segs.last().map(|s| (CallQualifier::Bare(s.to_string()), line)))
+        ruby_const_path(class).and_then(|segs| {
+            segs.last()
+                .map(|s| (CallQualifier::Bare(s.to_string()), line))
+        })
     });
     Some(CronJob {
         schedule,
@@ -3790,9 +3788,7 @@ fn first_yaml_string(s: &str) -> Option<String> {
         return None;
     }
     // Bare scalar — take to end of line / comment.
-    let end = s
-        .find(['#', '\n'])
-        .unwrap_or(s.len());
+    let end = s.find(['#', '\n']).unwrap_or(s.len());
     let v = s[..end].trim().to_string();
     if v.is_empty() { None } else { Some(v) }
 }
@@ -3975,12 +3971,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
 "#;
-        let out = extract_cron_nodes(
-            src,
-            ".github/workflows/nightly.yml",
-            module_id(repo),
-            repo,
-        );
+        let out = extract_cron_nodes(src, ".github/workflows/nightly.yml", module_id(repo), repo);
         let qnames = cron_qnames(&out);
         assert!(qnames.contains(&"cron:0 4 * * *:nightly".to_string()));
     }
@@ -3991,7 +3982,10 @@ jobs:
         let repo = RepoId(1);
         let src = "schedule:\n  - cron: '0 4 * * *'";
         let out = extract_cron_nodes(src, "docs/example.yml", module_id(repo), repo);
-        assert!(out.nodes.is_empty(), "GHA cron only inside .github/workflows/");
+        assert!(
+            out.nodes.is_empty(),
+            "GHA cron only inside .github/workflows/"
+        );
     }
 
     #[test]
@@ -4238,12 +4232,7 @@ on:
   schedule:
     - cron: 'false'
 "#;
-        let out = extract_cron_nodes(
-            src,
-            ".github/workflows/x.yml",
-            module_id(repo),
-            repo,
-        );
+        let out = extract_cron_nodes(src, ".github/workflows/x.yml", module_id(repo), repo);
         assert!(out.nodes.is_empty(), "non-schedule string must not emit");
     }
 
@@ -4308,28 +4297,43 @@ cron.schedule('*/5 * * * *', cleanupSessions);
     #[test]
     fn literal_schedules_mint_nothing_in_rust() {
         let src = "fn t() {\n    let s = \"cron.schedule('*/5 * * * *', tick);\";\n    let c = \"new CronJob({ cronTime: '0 12 * * *', onTick: report })\";\n}\n// @Scheduled(cron = \"0 4 * * * *\")\nfn job() {}\n";
-        assert!(run(src, "src/x.rs").nodes.is_empty(), "{:?}", sorted_qnames(&run(src, "src/x.rs")));
+        assert!(
+            run(src, "src/x.rs").nodes.is_empty(),
+            "{:?}",
+            sorted_qnames(&run(src, "src/x.rs"))
+        );
         // The same text in a JS / Java file reads as at HEAD.
         let js = sorted_qnames(&run(src, "src/x.js"));
         assert!(js.contains(&"cron:*/5 * * * *:tick".to_string()), "{js:?}");
         assert!(js.contains(&"cron:0 12 * * *:report".to_string()), "{js:?}");
         let java = sorted_qnames(&run(src, "src/X.java"));
-        assert!(java.contains(&"cron:0 4 * * * *:job".to_string()), "{java:?}");
+        assert!(
+            java.contains(&"cron:0 4 * * * *:job".to_string()),
+            "{java:?}"
+        );
         // A real call in Rust code after a refused one is still read.
         let mixed = "// cron.schedule('0 0 * * 0', old);\ncron.schedule('*/5 * * * *', tick);\n";
-        assert_eq!(sorted_qnames(&run(mixed, "src/x.rs")), ["cron:*/5 * * * *:tick"]);
+        assert_eq!(
+            sorted_qnames(&run(mixed, "src/x.rs")),
+            ["cron:*/5 * * * *:tick"]
+        );
     }
 
     #[test]
     fn celery_beat_key_must_open_its_literal() {
         // A real Python dict: the key opens its own literal.
-        let single = "BEAT = {\n    'c': {'task': 'tasks.cleanup', 'schedule': crontab(minute=0)},\n}\n";
+        let single =
+            "BEAT = {\n    'c': {'task': 'tasks.cleanup', 'schedule': crontab(minute=0)},\n}\n";
         assert_eq!(
             sorted_qnames(&run(single, "app/x.py")),
             ["cron:crontab(minute=0):tasks.cleanup"]
         );
-        let double = "BEAT = {\n    \"t\": {\"task\": \"tasks.tick\", \"schedule\": EVERY_MINUTE},\n}\n";
-        assert_eq!(sorted_qnames(&run(double, "app/x.py")), ["cron:EVERY_MINUTE:tasks.tick"]);
+        let double =
+            "BEAT = {\n    \"t\": {\"task\": \"tasks.tick\", \"schedule\": EVERY_MINUTE},\n}\n";
+        assert_eq!(
+            sorted_qnames(&run(double, "app/x.py")),
+            ["cron:EVERY_MINUTE:tasks.tick"]
+        );
         // A key inside a larger Python string or a `#` comment is no entry.
         for src in [
             "S = \"{'task': 'tasks.cleanup', 'schedule': crontab()}\"\n",
@@ -4341,9 +4345,16 @@ cron.schedule('*/5 * * * *', cleanupSessions);
         // Rust: a key inside a string is held by it; the same text in a TS
         // file reads as at HEAD.
         let rs = "let s = \"{'task': 'tasks.cleanup', 'schedule': crontab()}\";\nlet r = r#\"{\"schedule\": \"* * * * *\"}\"#;\n";
-        assert!(run(rs, "src/x.rs").nodes.is_empty(), "{:?}", sorted_qnames(&run(rs, "src/x.rs")));
+        assert!(
+            run(rs, "src/x.rs").nodes.is_empty(),
+            "{:?}",
+            sorted_qnames(&run(rs, "src/x.rs"))
+        );
         let ts = sorted_qnames(&run(rs, "src/x.ts"));
-        assert!(ts.contains(&"cron:crontab():tasks.cleanup".to_string()), "{ts:?}");
+        assert!(
+            ts.contains(&"cron:crontab():tasks.cleanup".to_string()),
+            "{ts:?}"
+        );
     }
 
     // ---- LA.19a: framework schedulers ------------------------------------

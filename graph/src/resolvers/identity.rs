@@ -1367,7 +1367,12 @@ mod tests {
         ]);
         assert_eq!(
             stars(&m),
-            [row("message:proto:shop.A", "message:proto:shop.A", "message_fqname", Confidence::Strong)],
+            [row(
+                "message:proto:shop.A",
+                "message:proto:shop.A",
+                "message_fqname",
+                Confidence::Strong
+            )],
             "only the proto message stars"
         );
     }

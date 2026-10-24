@@ -122,7 +122,9 @@ use std::path::Path;
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
 use glia_code_domain::same_as::scip_identity_key;
-use glia_code_domain::snapshots::{ScipDocumentRecord, ScipSnapshot, ScipSymbolRecord, read_scip, source_hash};
+use glia_code_domain::snapshots::{
+    ScipDocumentRecord, ScipSnapshot, ScipSymbolRecord, read_scip, source_hash,
+};
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
@@ -154,8 +156,12 @@ pub(crate) const RULE_CONFIRMS: &str = "confirms:";
 const RESTAMP_STAGES: [&str; 3] = ["parser", "extractor", "graph"];
 
 /// The categories a contradiction is looked for on.
-const CONTRADICT_CATEGORIES: [EdgeCategoryId; 4] =
-    [edge_category::CALLS, edge_category::USES, edge_category::INHERITS_FROM, edge_category::IMPLEMENTS];
+const CONTRADICT_CATEGORIES: [EdgeCategoryId; 4] = [
+    edge_category::CALLS,
+    edge_category::USES,
+    edge_category::INHERITS_FROM,
+    edge_category::IMPLEMENTS,
+];
 
 /// Most `[scip] contradicts` lines one repo prints; the marker counts all.
 const MAX_CONTRADICTION_LINES: usize = 20;
@@ -178,7 +184,12 @@ const DEF_KINDS: [NodeKindId; 8] = [
 const CALLABLE_KINDS: [NodeKindId; 2] = [node_kind::FUNCTION, node_kind::METHOD];
 
 /// Owners of a reference no callable span holds.
-const TYPE_KINDS: [NodeKindId; 4] = [node_kind::CLASS, node_kind::STRUCT, node_kind::INTERFACE, node_kind::ENUM];
+const TYPE_KINDS: [NodeKindId; 4] = [
+    node_kind::CLASS,
+    node_kind::STRUCT,
+    node_kind::INTERFACE,
+    node_kind::ENUM,
+];
 
 /// What one repo's snapshot did to its graph: the marker's counts (module doc).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -249,17 +260,28 @@ impl SpanIndex {
         let mut files: BTreeMap<String, FileSpans> = BTreeMap::new();
         for g in merged.graphs.iter().filter(|g| g.repo == repo) {
             for n in &g.nodes {
-                let Some(&kind) = g.nav.kind_by_id.get(&n.id) else { continue };
+                let Some(&kind) = g.nav.kind_by_id.get(&n.id) else {
+                    continue;
+                };
                 let is_def = DEF_KINDS.contains(&kind);
                 let is_owner = CALLABLE_KINDS.contains(&kind) || TYPE_KINDS.contains(&kind);
                 if !is_def && !is_owner {
                     continue;
                 }
-                let Some((file, Some(s0), e0)) = position(n) else { continue };
-                let (Ok(start), Ok(end)) = (u32::try_from(s0), u32::try_from(e0.unwrap_or(s0).max(s0))) else {
+                let Some((file, Some(s0), e0)) = position(n) else {
                     continue;
                 };
-                let span = Span { start, end, id: n.id, kind };
+                let (Ok(start), Ok(end)) =
+                    (u32::try_from(s0), u32::try_from(e0.unwrap_or(s0).max(s0)))
+                else {
+                    continue;
+                };
+                let span = Span {
+                    start,
+                    end,
+                    id: n.id,
+                    kind,
+                };
                 let fs = files.entry(file).or_default();
                 if is_def && let Some(name) = g.nav.name_by_id.get(&n.id) {
                     fs.defs.entry(name.clone()).or_default().push(span);
@@ -275,12 +297,21 @@ impl SpanIndex {
             }
             innermost_first(&mut fs.owners);
         }
-        SpanIndex { files, modules: module_files(merged, repo) }
+        SpanIndex {
+            files,
+            modules: module_files(merged, repo),
+        }
     }
 
     /// The innermost [`DEF_KINDS`] span of `file` named `name` holding `line`.
     fn def_at(&self, file: &str, name: &str, line: u32) -> Option<Span> {
-        self.files.get(file)?.defs.get(name)?.iter().find(|s| s.holds(line)).copied()
+        self.files
+            .get(file)?
+            .defs
+            .get(name)?
+            .iter()
+            .find(|s| s.holds(line))
+            .copied()
     }
 }
 
@@ -317,9 +348,19 @@ pub(crate) fn tool_tag(tool: &str) -> String {
     let tag: String = tool
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if tag.is_empty() { "index".to_string() } else { tag }
+    if tag.is_empty() {
+        "index".to_string()
+    } else {
+        tag
+    }
 }
 
 /// A fresh document and its row count (`\n`s + 1).
@@ -351,7 +392,11 @@ struct Bound<'a> {
 
 /// Bind every definition row of `fresh` (module doc: BIND). Symbol id ->
 /// its node, kind and first definition row.
-fn bind_defs<'a>(fresh: &[Fresh<'a>], index: &SpanIndex, tally: &mut ScipTally) -> BTreeMap<u32, Bound<'a>> {
+fn bind_defs<'a>(
+    fresh: &[Fresh<'a>],
+    index: &SpanIndex,
+    tally: &mut ScipTally,
+) -> BTreeMap<u32, Bound<'a>> {
     // Symbol -> the distinct nodes its rows bind, in first-seen order.
     let mut seen: BTreeMap<u32, Vec<Bound<'a>>> = BTreeMap::new();
     for f in fresh {
@@ -363,7 +408,12 @@ fn bind_defs<'a>(fresh: &[Fresh<'a>], index: &SpanIndex, tally: &mut ScipTally) 
                 Some(span) => {
                     let nodes = seen.entry(row.s).or_default();
                     if !nodes.iter().any(|n| n.id == span.id) {
-                        nodes.push(Bound { id: span.id, kind: span.kind, file: doc.path.as_str(), line: row.line });
+                        nodes.push(Bound {
+                            id: span.id,
+                            kind: span.kind,
+                            file: doc.path.as_str(),
+                            line: row.line,
+                        });
                     }
                 }
             }
@@ -414,7 +464,9 @@ fn relationships<'a>(
     let mut out: BTreeMap<(u64, u64, u32), Candidate<'a>> = BTreeMap::new();
     let mut other: BTreeSet<(u64, u64)> = BTreeSet::new();
     for sym in symbols {
-        let Some(a) = bound.get(&sym.id) else { continue };
+        let Some(a) = bound.get(&sym.id) else {
+            continue;
+        };
         for b in sym.implements.iter().filter_map(|id| bound.get(id)) {
             if a.id == b.id {
                 continue;
@@ -461,7 +513,11 @@ type SiteRows<'a> = BTreeMap<&'a str, BTreeMap<u32, Vec<SiteRow>>>;
 
 /// Every non-import reference to a bound symbol, and every bound symbol a
 /// bound definition implements, by `(file, line)`.
-fn site_rows<'a>(fresh: &[Fresh<'a>], symbols: &[ScipSymbolRecord], bound: &BTreeMap<u32, Bound<'a>>) -> SiteRows<'a> {
+fn site_rows<'a>(
+    fresh: &[Fresh<'a>],
+    symbols: &[ScipSymbolRecord],
+    bound: &BTreeMap<u32, Bound<'a>>,
+) -> SiteRows<'a> {
     let mut out: SiteRows<'a> = BTreeMap::new();
     for f in fresh {
         let doc: &'a ScipDocumentRecord = f.doc;
@@ -477,7 +533,9 @@ fn site_rows<'a>(fresh: &[Fresh<'a>], symbols: &[ScipSymbolRecord], bound: &BTre
             }
         }
         for row in &doc.defs {
-            let (Some(a), Some(sym)) = (bound.get(&row.s), symbols.get(row.s as usize)) else { continue };
+            let (Some(a), Some(sym)) = (bound.get(&row.s), symbols.get(row.s as usize)) else {
+                continue;
+            };
             for b in sym.implements.iter().filter_map(|id| bound.get(id)) {
                 lines.entry(row.line).or_default().push(SiteRow {
                     node: b.id,
@@ -493,13 +551,20 @@ fn site_rows<'a>(fresh: &[Fresh<'a>], symbols: &[ScipSymbolRecord], bound: &BTre
 
 /// The rows at `(file, line)`; empty for a stale or unknown document.
 fn rows_at<'s>(sites: &'s SiteRows<'_>, file: &str, line: u32) -> &'s [SiteRow] {
-    sites.get(file).and_then(|lines| lines.get(&line)).map_or(&[], Vec::as_slice)
+    sites
+        .get(file)
+        .and_then(|lines| lines.get(&line))
+        .map_or(&[], Vec::as_slice)
 }
 
 /// The nodes `rows` bind for an edge `from -[category]->`: call references
 /// for CALLS, every reference for USES, what `from`'s definition there
 /// implements for IMPLEMENTS / INHERITS_FROM.
-fn site_targets(rows: &[SiteRow], from: NodeId, category: EdgeCategoryId) -> impl Iterator<Item = NodeId> + '_ {
+fn site_targets(
+    rows: &[SiteRow],
+    from: NodeId,
+    category: EdgeCategoryId,
+) -> impl Iterator<Item = NodeId> + '_ {
     let heritage = is_heritage(category);
     rows.iter()
         .filter(move |r| {
@@ -548,7 +613,12 @@ fn node_at(merged: &MergedGraph) -> NodeAt {
     let mut at = NodeAt::new();
     for g in &merged.graphs {
         for n in &g.nodes {
-            at.entry(n.id).or_insert_with(|| (evidence::locate(&n.cells), g.nav.kind_by_id.get(&n.id).copied()));
+            at.entry(n.id).or_insert_with(|| {
+                (
+                    evidence::locate(&n.cells),
+                    g.nav.kind_by_id.get(&n.id).copied(),
+                )
+            });
         }
     }
     at
@@ -565,7 +635,12 @@ fn settle(ev: &Evidence, e: &Edge, at: &NodeAt) -> Evidence {
     if ev.file.is_none() {
         let from = at.get(&e.from);
         let to = at.get(&e.to);
-        ev.fill(e.category, to.and_then(|t| t.1), from.and_then(|f| f.0.as_ref()), to.and_then(|t| t.0.as_ref()));
+        ev.fill(
+            e.category,
+            to.and_then(|t| t.1),
+            from.and_then(|f| f.0.as_ref()),
+            to.and_then(|t| t.0.as_ref()),
+        );
     }
     ev
 }
@@ -597,12 +672,25 @@ struct Confirm<'c, 'a> {
 impl Confirm<'_, '_> {
     /// Confirm `c` when glia has its triple; else add it unless glia joins the
     /// pair by a category `blocks` accepts.
-    fn confirm_or_add(&mut self, c: &Candidate<'_>, blocks: fn(EdgeCategoryId) -> bool, tally: &mut ScipTally) -> Outcome {
+    fn confirm_or_add(
+        &mut self,
+        c: &Candidate<'_>,
+        blocks: fn(EdgeCategoryId) -> bool,
+        tally: &mut ScipTally,
+    ) -> Outcome {
         let (same, blocked) = {
-            let entries = self.existing.get(&(c.from, c.to)).map_or(&[][..], Vec::as_slice);
-            let same: Option<Vec<EdgePos>> = entries.iter().any(|(k, _)| *k == c.category).then(|| {
-                entries.iter().filter(|(k, p)| *k == c.category && *p != EdgePos::Added).map(|(_, p)| *p).collect()
-            });
+            let entries = self
+                .existing
+                .get(&(c.from, c.to))
+                .map_or(&[][..], Vec::as_slice);
+            let same: Option<Vec<EdgePos>> =
+                entries.iter().any(|(k, _)| *k == c.category).then(|| {
+                    entries
+                        .iter()
+                        .filter(|(k, p)| *k == c.category && *p != EdgePos::Added)
+                        .map(|(_, p)| *p)
+                        .collect()
+                });
             (same, entries.iter().any(|(k, _)| blocks(*k)))
         };
         if let Some(positions) = same {
@@ -614,15 +702,23 @@ impl Confirm<'_, '_> {
         if blocked {
             return Outcome::Differs;
         }
-        let ev = Evidence::emitter(self.emitter).rule(c.rule).at(c.file, c.line);
-        self.added.push(Edge::new(c.from, c.to, c.category, Confidence::Strong).with_cell(ev.to_cell()));
-        self.existing.entry((c.from, c.to)).or_default().push((c.category, EdgePos::Added));
+        let ev = Evidence::emitter(self.emitter)
+            .rule(c.rule)
+            .at(c.file, c.line);
+        self.added
+            .push(Edge::new(c.from, c.to, c.category, Confidence::Strong).with_cell(ev.to_cell()));
+        self.existing
+            .entry((c.from, c.to))
+            .or_default()
+            .push((c.category, EdgePos::Added));
         Outcome::Added
     }
 
     /// The confirm rule on the glia edge at `pos`, which carries `c`'s triple.
     fn confirm(&mut self, pos: EdgePos, c: &Candidate<'_>, tally: &mut ScipTally) {
-        let Some(e) = edge_at(self.merged, pos) else { return };
+        let Some(e) = edge_at(self.merged, pos) else {
+            return;
+        };
         let Some(old) = Evidence::of(e) else {
             tally.confirmed_other += 1;
             return;
@@ -641,7 +737,8 @@ impl Confirm<'_, '_> {
         // call sites stay two sites), else the triple's.
         let own = match (&settled.file, settled.line, settled.basis) {
             (Some(file), Some(line), Basis::Site)
-                if site_targets(rows_at(self.sites, file, line), e.from, e.category).any(|n| n == e.to) =>
+                if site_targets(rows_at(self.sites, file, line), e.from, e.category)
+                    .any(|n| n == e.to) =>
             {
                 Some((file.clone(), line))
             }
@@ -652,7 +749,10 @@ impl Confirm<'_, '_> {
             Some(r) => format!("{RULE_CONFIRMS}{}/{r}", old.emitter),
             None => format!("{RULE_CONFIRMS}{}", old.emitter),
         };
-        self.restamp.push((pos, Evidence::emitter(self.emitter).rule(rule).at(file, line)));
+        self.restamp.push((
+            pos,
+            Evidence::emitter(self.emitter).rule(rule).at(file, line),
+        ));
         tally.upgraded += 1;
     }
 }
@@ -689,7 +789,17 @@ fn contradictions(
         .iter()
         .enumerate()
         .filter(|(_, g)| g.repo == repo)
-        .flat_map(|(gi, g)| g.edges.iter().enumerate().map(move |(ei, e)| (EdgePos::Intra { graph: gi, edge: ei }, e)));
+        .flat_map(|(gi, g)| {
+            g.edges.iter().enumerate().map(move |(ei, e)| {
+                (
+                    EdgePos::Intra {
+                        graph: gi,
+                        edge: ei,
+                    },
+                    e,
+                )
+            })
+        });
     let cross = merged
         .cross_edges
         .iter()
@@ -698,7 +808,10 @@ fn contradictions(
         .map(|(i, e)| (EdgePos::Cross(i), e));
     let mut out: Vec<(String, u32, String)> = Vec::new();
     for (pos, e) in intra.chain(cross) {
-        if !CONTRADICT_CATEGORIES.contains(&e.category) || !known.contains(&e.to) || restamped.contains(&pos) {
+        if !CONTRADICT_CATEGORIES.contains(&e.category)
+            || !known.contains(&e.to)
+            || restamped.contains(&pos)
+        {
             continue;
         }
         let Some(ev) = Evidence::of(e) else { continue };
@@ -706,13 +819,22 @@ fn contradictions(
         if why::tier_of(Some(&ev), e).0 != why::HEURISTIC {
             continue;
         }
-        let (Some(file), Some(line), Basis::Site) = (&ev.file, ev.line, ev.basis) else { continue };
-        let targets: Vec<NodeId> = site_targets(rows_at(sites, file, line), e.from, e.category).collect();
-        let Some(&says) = targets.first() else { continue };
+        let (Some(file), Some(line), Basis::Site) = (&ev.file, ev.line, ev.basis) else {
+            continue;
+        };
+        let targets: Vec<NodeId> =
+            site_targets(rows_at(sites, file, line), e.from, e.category).collect();
+        let Some(&says) = targets.first() else {
+            continue;
+        };
         if targets.contains(&e.to) {
             continue;
         }
-        let rule = ev.rule.as_deref().map(|r| format!("/{r}")).unwrap_or_default();
+        let rule = ev
+            .rule
+            .as_deref()
+            .map(|r| format!("/{r}"))
+            .unwrap_or_default();
         let text = format!(
             "[scip] contradicts {} -[{} {}{rule}]-> {} at {file}:{}; index says {}",
             qname_of(merged, e.from),
@@ -743,14 +865,24 @@ fn ref_candidates<'a>(
         // Built on the document's first owned reference.
         let mut table: Option<Vec<Option<NodeId>>> = None;
         for row in &f.doc.refs {
-            let Some(&Bound { id: target, kind: target_kind, .. }) = bound.get(&row.s) else { continue };
+            let Some(&Bound {
+                id: target,
+                kind: target_kind,
+                ..
+            }) = bound.get(&row.s)
+            else {
+                continue;
+            };
             tally.refs += 1;
             if row.import {
                 tally.imports += 1;
                 continue;
             }
             let table = table.get_or_insert_with(|| {
-                let owners = index.files.get(path).map_or(&[][..], |fs| fs.owners.as_slice());
+                let owners = index
+                    .files
+                    .get(path)
+                    .map_or(&[][..], |fs| fs.owners.as_slice());
                 owner_table(owners, f.lines)
             });
             let owner = match table.get(row.line as usize) {
@@ -773,14 +905,15 @@ fn ref_candidates<'a>(
                 tally.self_refs += 1;
                 continue;
             }
-            out.entry((owner.0, target.0, category.0)).or_insert(Candidate {
-                from: owner,
-                to: target,
-                category,
-                rule,
-                file: path,
-                line: row.line,
-            });
+            out.entry((owner.0, target.0, category.0))
+                .or_insert(Candidate {
+                    from: owner,
+                    to: target,
+                    category,
+                    rule,
+                    file: path,
+                    line: row.line,
+                });
         }
     }
     out
@@ -788,7 +921,11 @@ fn ref_candidates<'a>(
 
 /// The documents of `snap` whose file under `root` still hashes to the bytes
 /// the import read (module doc: STALE); every other one counts `stale`.
-fn fresh_documents<'a>(snap: &'a ScipSnapshot, root: &Path, tally: &mut ScipTally) -> Vec<Fresh<'a>> {
+fn fresh_documents<'a>(
+    snap: &'a ScipSnapshot,
+    root: &Path,
+    tally: &mut ScipTally,
+) -> Vec<Fresh<'a>> {
     let mut fresh: Vec<Fresh<'a>> = Vec::new();
     for doc in &snap.documents {
         match std::fs::read(root.join(&doc.path)) {
@@ -807,8 +944,15 @@ fn fresh_documents<'a>(snap: &'a ScipSnapshot, root: &Path, tally: &mut ScipTall
 /// by, sorted by (NodeId, symbol). A symbol `same_as::scip_identity_key`
 /// reads as no identity (`local <id>`, a malformed one) keys nothing. Empty
 /// without a complete snapshot; prints `[scip] identity` with one.
-pub(crate) fn identity_symbols(merged: &MergedGraph, repo: RepoId, root: &Path, label: &str) -> Vec<(NodeId, String)> {
-    let Some(snap) = read_scip(root) else { return Vec::new() };
+pub(crate) fn identity_symbols(
+    merged: &MergedGraph,
+    repo: RepoId,
+    root: &Path,
+    label: &str,
+) -> Vec<(NodeId, String)> {
+    let Some(snap) = read_scip(root) else {
+        return Vec::new();
+    };
     // A throwaway tally: the stage's own marker counts the real ones.
     let mut tally = ScipTally::default();
     let fresh = fresh_documents(&snap, root, &mut tally);
@@ -823,7 +967,11 @@ pub(crate) fn identity_symbols(merged: &MergedGraph, repo: RepoId, root: &Path, 
         .collect();
     keys.sort_by(|a, b| (a.0.0, &a.1).cmp(&(b.0.0, &b.1)));
     keys.dedup();
-    eprintln!("[scip] identity repo={label} defs={} keyed={}", bound.len(), keys.len());
+    eprintln!(
+        "[scip] identity repo={label} defs={} keyed={}",
+        bound.len(),
+        keys.len()
+    );
     keys
 }
 
@@ -832,7 +980,11 @@ pub(crate) fn identity_symbols(merged: &MergedGraph, repo: RepoId, root: &Path, 
 pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option<ScipTally> {
     let snap = read_scip(&input.root)?;
     let tool = tool_tag(&snap.meta.tool);
-    let mut tally = ScipTally { tool: tool.clone(), documents: snap.documents.len(), ..ScipTally::default() };
+    let mut tally = ScipTally {
+        tool: tool.clone(),
+        documents: snap.documents.len(),
+        ..ScipTally::default()
+    };
 
     let fresh = fresh_documents(&snap, &input.root, &mut tally);
 
@@ -844,13 +996,27 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
 
     // Glia's edges between each asserted pair: one pass over the repo's
     // edges and every cross edge, lookup-only.
-    let mut existing: HashMap<(NodeId, NodeId), Vec<(EdgeCategoryId, EdgePos)>> =
-        candidates.values().chain(relations.values()).map(|c| ((c.from, c.to), Vec::new())).collect();
+    let mut existing: HashMap<(NodeId, NodeId), Vec<(EdgeCategoryId, EdgePos)>> = candidates
+        .values()
+        .chain(relations.values())
+        .map(|c| ((c.from, c.to), Vec::new()))
+        .collect();
     if !existing.is_empty() {
-        for (gi, g) in merged.graphs.iter().enumerate().filter(|(_, g)| g.repo == input.repo) {
+        for (gi, g) in merged
+            .graphs
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.repo == input.repo)
+        {
             for (ei, e) in g.edges.iter().enumerate() {
                 if let Some(v) = existing.get_mut(&(e.from, e.to)) {
-                    v.push((e.category, EdgePos::Intra { graph: gi, edge: ei }));
+                    v.push((
+                        e.category,
+                        EdgePos::Intra {
+                            graph: gi,
+                            edge: ei,
+                        },
+                    ));
                 }
             }
         }
@@ -878,7 +1044,9 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
         match stage.confirm_or_add(r, is_heritage, &mut tally) {
             Outcome::Confirmed => {}
             Outcome::Differs => tally.category_differs += 1,
-            Outcome::Added if r.category == edge_category::IMPLEMENTS => tally.added_implements += 1,
+            Outcome::Added if r.category == edge_category::IMPLEMENTS => {
+                tally.added_implements += 1
+            }
             Outcome::Added => tally.added_inherits += 1,
         }
     }
@@ -890,7 +1058,9 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
             Outcome::Added => tally.uses += 1,
         }
     }
-    let Confirm { mut restamp, added, .. } = stage;
+    let Confirm {
+        mut restamp, added, ..
+    } = stage;
     tally.added = tally.calls + tally.uses;
 
     let restamped: HashSet<EdgePos> = restamp.iter().map(|(p, _)| *p).collect();
@@ -948,13 +1118,20 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
 #[cfg(test)]
 mod tests {
     use glia_code_domain::cell_type;
-    use glia_code_domain::snapshots::{ScipDefRow, ScipMeta, ScipRefRow, ScipSymbolRecord, write_scip};
+    use glia_code_domain::snapshots::{
+        ScipDefRow, ScipMeta, ScipRefRow, ScipSymbolRecord, write_scip,
+    };
     use glia_core::{Cell, CellPayload, Node};
 
     use super::*;
 
     fn span(start: u32, end: u32, id: u64, kind: NodeKindId) -> Span {
-        Span { start, end, id: NodeId(id), kind }
+        Span {
+            start,
+            end,
+            id: NodeId(id),
+            kind,
+        }
     }
 
     #[test]
@@ -981,19 +1158,29 @@ mod tests {
         innermost_first(&mut owners);
         let t = owner_table(&owners, 15);
         assert_eq!(t[0], Some(NodeId(10)));
-        assert_eq!(t[2], Some(NodeId(10)), "the class line is inside f: f owns it");
+        assert_eq!(
+            t[2],
+            Some(NodeId(10)),
+            "the class line is inside f: f owns it"
+        );
         assert_eq!(t[3], Some(NodeId(30)));
         assert_eq!(t[5], Some(NodeId(10)));
         assert_eq!(t[10], None);
         assert_eq!(t[12], Some(NodeId(40)));
         assert_eq!(t[14], None);
         // A span running past the file is clamped, not an out-of-range write.
-        assert_eq!(owner_table(&[span(1, 99, 7, node_kind::CLASS)], 3), vec![None, Some(NodeId(7)), Some(NodeId(7))]);
+        assert_eq!(
+            owner_table(&[span(1, 99, 7, node_kind::CLASS)], 3),
+            vec![None, Some(NodeId(7)), Some(NodeId(7))]
+        );
     }
 
     #[test]
     fn equal_spans_break_ties_by_id() {
-        let mut owners = vec![span(1, 3, 9, node_kind::FUNCTION), span(1, 3, 4, node_kind::FUNCTION)];
+        let mut owners = vec![
+            span(1, 3, 9, node_kind::FUNCTION),
+            span(1, 3, 4, node_kind::FUNCTION),
+        ];
         innermost_first(&mut owners);
         assert_eq!(owner_table(&owners, 4)[2], Some(NodeId(4)));
     }
@@ -1005,7 +1192,9 @@ mod tests {
             confidence: Confidence::Strong,
             cells: vec![Cell {
                 kind: cell_type::POSITION,
-                payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":{start},"end_line":{end}}}"#)),
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"{file}","start_line":{start},"end_line":{end}}}"#
+                )),
             }],
         }
     }
@@ -1016,7 +1205,12 @@ mod tests {
         let mut g = glia_graph::RepoGraph {
             repo,
             nodes: Vec::new(),
-            edges: vec![Edge::new(NodeId(2), NodeId(3), edge_category::USES, Confidence::Strong)],
+            edges: vec![Edge::new(
+                NodeId(2),
+                NodeId(3),
+                edge_category::USES,
+                Confidence::Strong,
+            )],
             nav: Default::default(),
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
@@ -1046,15 +1240,43 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.py"), A_PY).unwrap();
         let symbols = vec![
-            ScipSymbolRecord { id: 0, symbol: "scip-python python app 0.1 `a`/helper().".into(), implements: vec![] },
-            ScipSymbolRecord { id: 1, symbol: "scip-python python app 0.1 `a`/run().".into(), implements: vec![] },
+            ScipSymbolRecord {
+                id: 0,
+                symbol: "scip-python python app 0.1 `a`/helper().".into(),
+                implements: vec![],
+            },
+            ScipSymbolRecord {
+                id: 1,
+                symbol: "scip-python python app 0.1 `a`/run().".into(),
+                implements: vec![],
+            },
         ];
         let documents = vec![ScipDocumentRecord {
             path: "a.py".into(),
             language: "python".into(),
             source_hash: source_hash(A_PY.as_bytes()),
-            defs: vec![ScipDefRow { s: 1, line: 0, name: "run".into() }, ScipDefRow { s: 0, line: 4, name: "helper".into() }],
-            refs: refs.iter().map(|&(s, line, call)| ScipRefRow { s, line, call, write: false, import: false }).collect(),
+            defs: vec![
+                ScipDefRow {
+                    s: 1,
+                    line: 0,
+                    name: "run".into(),
+                },
+                ScipDefRow {
+                    s: 0,
+                    line: 4,
+                    name: "helper".into(),
+                },
+            ],
+            refs: refs
+                .iter()
+                .map(|&(s, line, call)| ScipRefRow {
+                    s,
+                    line,
+                    call,
+                    write: false,
+                    import: false,
+                })
+                .collect(),
         }];
         let meta = ScipMeta::new("scip-python".into(), "0.6.0".into(), String::new(), 0);
         write_scip(&dir, meta, &documents, &symbols).unwrap();
@@ -1069,12 +1291,25 @@ mod tests {
         let dir = a_py_snapshot("stage", &[(0, 1, true), (0, 2, false), (1, 5, true)]);
         let repo = RepoId::from_canonical("test://scip-stage");
         let mut merged = graph(repo);
-        let input = RepoInputs { repo, root: dir.clone(), label: "stage".into(), config: None };
+        let input = RepoInputs {
+            repo,
+            root: dir.clone(),
+            label: "stage".into(),
+            config: None,
+        };
         let tally = scip_edges(&mut merged, &input).expect("a complete snapshot");
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(
-            (tally.defs, tally.bound, tally.refs, tally.added, tally.calls, tally.confirmed, tally.category_differs),
+            (
+                tally.defs,
+                tally.bound,
+                tally.refs,
+                tally.added,
+                tally.calls,
+                tally.confirmed,
+                tally.category_differs
+            ),
             (2, 2, 3, 1, 1, 1, 1),
             "{tally:?}"
         );
@@ -1083,10 +1318,17 @@ mod tests {
         assert_eq!((tally.confirmed_other, tally.upgraded), (1, 0), "{tally:?}");
         assert_eq!(merged.cross_edges.len(), 1);
         let e = &merged.cross_edges[0];
-        assert_eq!((e.from, e.to, e.category), (NodeId(3), NodeId(2), edge_category::CALLS));
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (NodeId(3), NodeId(2), edge_category::CALLS)
+        );
         assert_eq!(
             Evidence::of(e),
-            Some(Evidence::emitter("scip:scip-python").rule(RULE_CALL).at("a.py", 5))
+            Some(
+                Evidence::emitter("scip:scip-python")
+                    .rule(RULE_CALL)
+                    .at("a.py", 5)
+            )
         );
     }
 
@@ -1100,17 +1342,34 @@ mod tests {
         let repo = RepoId::from_canonical("test://scip-resolver");
         let mut merged = graph(repo);
         let ev = Evidence::emitter("resolver:rpc").rule("exact");
-        merged
-            .cross_edges
-            .push(Edge::new(NodeId(3), NodeId(2), edge_category::CALLS, Confidence::Medium).with_cell(ev.to_cell()));
+        merged.cross_edges.push(
+            Edge::new(
+                NodeId(3),
+                NodeId(2),
+                edge_category::CALLS,
+                Confidence::Medium,
+            )
+            .with_cell(ev.to_cell()),
+        );
         let before = merged.cross_edges.clone();
-        let input = RepoInputs { repo, root: dir.clone(), label: "resolver".into(), config: None };
+        let input = RepoInputs {
+            repo,
+            root: dir.clone(),
+            label: "resolver".into(),
+            config: None,
+        };
         let tally = scip_edges(&mut merged, &input).expect("a complete snapshot");
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(merged.cross_edges, before, "a resolver edge was changed");
         assert_eq!(
-            (tally.confirmed, tally.confirmed_other, tally.confirmed_fact, tally.upgraded, tally.added),
+            (
+                tally.confirmed,
+                tally.confirmed_other,
+                tally.confirmed_fact,
+                tally.upgraded,
+                tally.added
+            ),
             (1, 1, 0, 0, 0),
             "{tally:?}"
         );
@@ -1124,22 +1383,53 @@ mod tests {
         let dir = a_py_snapshot("upgrade", &[(0, 1, true), (1, 5, true)]);
         let repo = RepoId::from_canonical("test://scip-upgrade");
         let mut merged = graph(repo);
-        let name_only = Evidence::emitter("graph:refs").rule("global_unique_method").at("a.py", 1);
-        let fact = Evidence::emitter("graph:calls").rule("import_binding").at("a.py", 5);
+        let name_only = Evidence::emitter("graph:refs")
+            .rule("global_unique_method")
+            .at("a.py", 1);
+        let fact = Evidence::emitter("graph:calls")
+            .rule("import_binding")
+            .at("a.py", 5);
         merged.graphs[0].edges = vec![
-            Edge::new(NodeId(2), NodeId(3), edge_category::CALLS, Confidence::Medium).with_cell(name_only.to_cell()),
-            Edge::new(NodeId(3), NodeId(2), edge_category::CALLS, Confidence::Strong).with_cell(fact.to_cell()),
+            Edge::new(
+                NodeId(2),
+                NodeId(3),
+                edge_category::CALLS,
+                Confidence::Medium,
+            )
+            .with_cell(name_only.to_cell()),
+            Edge::new(
+                NodeId(3),
+                NodeId(2),
+                edge_category::CALLS,
+                Confidence::Strong,
+            )
+            .with_cell(fact.to_cell()),
         ];
-        let input = RepoInputs { repo, root: dir.clone(), label: "upgrade".into(), config: None };
+        let input = RepoInputs {
+            repo,
+            root: dir.clone(),
+            label: "upgrade".into(),
+            config: None,
+        };
         let tally = scip_edges(&mut merged, &input).expect("a complete snapshot");
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!((tally.upgraded, tally.confirmed_fact, tally.added), (1, 1, 0), "{tally:?}");
-        let [up, kept] = merged.graphs[0].edges.as_slice() else { panic!("two edges") };
+        assert_eq!(
+            (tally.upgraded, tally.confirmed_fact, tally.added),
+            (1, 1, 0),
+            "{tally:?}"
+        );
+        let [up, kept] = merged.graphs[0].edges.as_slice() else {
+            panic!("two edges")
+        };
         assert_eq!(up.confidence, Confidence::Strong);
         assert_eq!(
             Evidence::of(up),
-            Some(Evidence::emitter("scip:scip-python").rule("confirms:graph:refs/global_unique_method").at("a.py", 1))
+            Some(
+                Evidence::emitter("scip:scip-python")
+                    .rule("confirms:graph:refs/global_unique_method")
+                    .at("a.py", 1)
+            )
         );
         assert_eq!(Evidence::of(kept), Some(fact));
     }
@@ -1165,8 +1455,14 @@ mod tests {
         assert_eq!(
             keys,
             [
-                (NodeId(2), "scip-python python app 0.1 `a`/run().".to_string()),
-                (NodeId(3), "scip-python python app 0.1 `a`/helper().".to_string()),
+                (
+                    NodeId(2),
+                    "scip-python python app 0.1 `a`/run().".to_string()
+                ),
+                (
+                    NodeId(3),
+                    "scip-python python app 0.1 `a`/helper().".to_string()
+                ),
             ]
         );
         // The source edited since the snapshot: its document keys nothing.

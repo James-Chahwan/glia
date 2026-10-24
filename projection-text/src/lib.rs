@@ -112,7 +112,12 @@ pub fn render_prose(m: &MergedGraph) -> String {
     let mut out = String::new();
     for g in &m.graphs {
         for n in &g.nodes {
-            let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+            let qname = g
+                .nav
+                .qname_by_id
+                .get(&n.id)
+                .map(|s| s.as_str())
+                .unwrap_or("");
             let kind = g
                 .nav
                 .kind_by_id
@@ -196,8 +201,15 @@ fn entry_nodes(graphs: &[&RepoGraph]) -> HashSet<NodeId> {
 /// Is `n` (a node of `g`) an entrypoint? See [`entry_nodes`].
 fn is_entry_node(g: &RepoGraph, n: &Node) -> bool {
     let kind = g.nav.kind_by_id.get(&n.id).copied();
-    let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-    CODE_TABLES.entry.is_entry_at(kind, name, &roles_in(kind, &n.cells), || node_ext(&n.cells))
+    let name = g
+        .nav
+        .name_by_id
+        .get(&n.id)
+        .map(String::as_str)
+        .unwrap_or("");
+    CODE_TABLES
+        .entry
+        .is_entry_at(kind, name, &roles_in(kind, &n.cells), || node_ext(&n.cells))
         || n.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
 }
 
@@ -436,9 +448,7 @@ fn find_owning_graph<'a>(graphs: &'a [&'a RepoGraph], id: NodeId) -> Option<&'a 
 }
 
 fn is_depends_category(c: EdgeCategoryId) -> bool {
-    c == edge_category::CALLS
-        || c == edge_category::HANDLED_BY
-        || c == edge_category::HTTP_CALLS
+    c == edge_category::CALLS || c == edge_category::HANDLED_BY || c == edge_category::HTTP_CALLS
 }
 
 // ============================================================================
@@ -505,11 +515,7 @@ fn render_node_block(
 }
 
 fn has_multi_file_code(n: &Node) -> bool {
-    n.cells
-        .iter()
-        .filter(|c| c.kind == cell_type::CODE)
-        .count()
-        > 1
+    n.cells.iter().filter(|c| c.kind == cell_type::CODE).count() > 1
 }
 
 fn render_module_files(out: &mut String, n: &Node, full_bodies: bool) {
@@ -610,9 +616,7 @@ pub struct NodePosition {
 /// every consumer reads spans the same way instead of re-scraping JSON.
 pub fn node_position(node: &glia_core::Node) -> Option<NodePosition> {
     let json = node.cells.iter().find_map(|c| match &c.payload {
-        glia_core::CellPayload::Json(j) if c.kind == cell_type::POSITION => {
-            Some(j.as_str())
-        }
+        glia_core::CellPayload::Json(j) if c.kind == cell_type::POSITION => Some(j.as_str()),
         _ => None,
     })?;
     Some(NodePosition {
@@ -632,7 +636,10 @@ fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 fn extract_json_num(json: &str, key: &str) -> Option<u32> {
     let marker = format!("\"{key}\":");
     let start = json.find(&marker)? + marker.len();
-    let num_str: String = json[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let num_str: String = json[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     num_str.parse().ok()
 }
 
@@ -799,7 +806,12 @@ mod tests {
         assert_eq!(p.end_line, 87);
 
         // No POSITION cell → None (synthetic / cross-stack endpoints).
-        let no_pos = Node { id, repo, confidence: Confidence::Strong, cells: vec![] };
+        let no_pos = Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
         assert!(node_position(&no_pos).is_none());
     }
 
@@ -856,8 +868,7 @@ mod tests {
         };
         g.nav
             .record(route_id, "/x", "route:/x", node_kind::ROUTE, None);
-        g.nav
-            .record(fn_id, "h", "m::h", node_kind::FUNCTION, None);
+        g.nav.record(fn_id, "h", "m::h", node_kind::FUNCTION, None);
 
         let s = render_repo_graph(&g);
         assert!(
@@ -909,12 +920,8 @@ mod tests {
         let be_repo = RepoId::from_canonical("test://be");
         let fe_repo = RepoId::from_canonical("test://fe");
         let route_id = NodeId::from_parts("code", be_repo, node_kind::ROUTE, "route:/api/x");
-        let endpoint_id = NodeId::from_parts(
-            "code",
-            fe_repo,
-            node_kind::ENDPOINT,
-            "endpoint:GET:/api/x",
-        );
+        let endpoint_id =
+            NodeId::from_parts("code", fe_repo, node_kind::ENDPOINT, "endpoint:GET:/api/x");
 
         let mut be = RepoGraph {
             repo: be_repo,
@@ -974,7 +981,10 @@ mod tests {
             "missing cross-repo topology line:\n{s}"
         );
         assert!(s.contains("[route:/api/x] *"));
-        assert!(s.contains("[endpoint:GET:/api/x]\n"), "an ENDPOINT carries no star:\n{s}");
+        assert!(
+            s.contains("[endpoint:GET:/api/x]\n"),
+            "an ENDPOINT carries no star:\n{s}"
+        );
     }
 
     /// LD.6: the `*` sigil reads `CODE_TABLES.entry`, the rule liveness seeds
@@ -990,7 +1000,12 @@ mod tests {
             let id = NodeId::from_parts("code", repo, kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);
             nav.record(id, name, qname, kind, None);
-            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells,
+            });
         };
         let role = Cell {
             kind: cell_type::ROLE,
@@ -1027,7 +1042,10 @@ mod tests {
             "m::test_login",
             "ui::Page",
         ] {
-            assert!(s.contains(&format!("[{q}] *\n")), "{q} carries the entry star:\n{s}");
+            assert!(
+                s.contains(&format!("[{q}] *\n")),
+                "{q} carries the entry star:\n{s}"
+            );
         }
         for q in ["m::helper", "m::Plain"] {
             assert!(s.contains(&format!("[{q}]\n")), "{q} carries no star:\n{s}");
@@ -1149,8 +1167,13 @@ mod tests {
                 confidence: Confidence::Strong,
                 cells: vec![],
             });
-            g.nav
-                .record(id, &format!("f{i}"), &format!("f{i}"), node_kind::FUNCTION, None);
+            g.nav.record(
+                id,
+                &format!("f{i}"),
+                &format!("f{i}"),
+                node_kind::FUNCTION,
+                None,
+            );
         }
         let mod_id = NodeId::from_parts("code", repo, node_kind::MODULE, "mod");
         g.nodes.push(Node {
@@ -1159,8 +1182,7 @@ mod tests {
             confidence: Confidence::Medium,
             cells: vec![],
         });
-        g.nav
-            .record(mod_id, "mod", "mod", node_kind::MODULE, None);
+        g.nav.record(mod_id, "mod", "mod", node_kind::MODULE, None);
 
         let s = render_repo_graph(&g);
         assert!(s.contains("[DEFAULTS]"), "missing defaults:\n{s}");
@@ -1233,8 +1255,7 @@ mod tests {
             properties: HashSet::new(),
         };
         let mut gg = g;
-        gg.nav
-            .record(mod_id, "pkg", "pkg", node_kind::MODULE, None);
+        gg.nav.record(mod_id, "pkg", "pkg", node_kind::MODULE, None);
 
         let s = render_repo_graph(&gg);
         assert!(
@@ -1271,7 +1292,10 @@ mod tests {
         assert_eq!(cell_label(cell_type::ENTRYPOINT), "entry");
         let mut g = mini_graph();
         let f = g.nodes[1].id;
-        assert!(!is_entry_node(&g, &g.nodes[1]), "m::a::f is no entry by kind or name");
+        assert!(
+            !is_entry_node(&g, &g.nodes[1]),
+            "m::a::f is no entry by kind or name"
+        );
         g.nodes[1].cells.push(Cell {
             kind: cell_type::ENTRYPOINT,
             payload: CellPayload::Json(

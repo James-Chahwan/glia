@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use engram_core::{Content, Gmap, GmapDiff};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: inspect <path.engram-gmap[.diff]>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: inspect <path.engram-gmap[.diff]>");
     let bytes = std::fs::read(&path).expect("read gmap");
     if path.ends_with(".diff") {
         inspect_diff(&bincode::deserialize(&bytes).expect("decode diff"));
@@ -46,31 +48,52 @@ fn main() {
 
     println!("format_version : {}", g.format_version);
     println!("nodes          : {n}");
-    println!("  concept_hint : {with_concept} ({:.0}%)", pct(with_concept, n));
-    println!("  identity_hint: {with_identity} ({:.0}%)", pct(with_identity, n));
+    println!(
+        "  concept_hint : {with_concept} ({:.0}%)",
+        pct(with_concept, n)
+    );
+    println!(
+        "  identity_hint: {with_identity} ({:.0}%)",
+        pct(with_identity, n)
+    );
     println!("  qname        : {with_qname} ({:.0}%)", pct(with_qname, n));
     println!("  doc          : {with_doc} ({:.0}%)", pct(with_doc, n));
-    println!("  imports      : {with_imports} ({:.0}%)", pct(with_imports, n));
+    println!(
+        "  imports      : {with_imports} ({:.0}%)",
+        pct(with_imports, n)
+    );
     println!("  propositions : {propositions} (docs)");
     println!("  files map    : {} entries", g.files.len());
     for x in &g.nodes {
-        if let Content::Symbol { imports: Some(v), .. } = &x.content
+        if let Content::Symbol {
+            imports: Some(v), ..
+        } = &x.content
             && !v.is_empty()
         {
-            println!("    e.g. imports {:?} on {}", v, x.key.rsplit("::").next().unwrap_or(""));
+            println!(
+                "    e.g. imports {:?} on {}",
+                v,
+                x.key.rsplit("::").next().unwrap_or("")
+            );
             break;
         }
     }
     for x in g.nodes.iter().take(400) {
         if let Content::Symbol { doc: Some(d), .. } = &x.content {
-            println!("    e.g. {} :: {}", x.key.rsplit("::").next().unwrap_or(""), d.chars().take(70).collect::<String>());
+            println!(
+                "    e.g. {} :: {}",
+                x.key.rsplit("::").next().unwrap_or(""),
+                d.chars().take(70).collect::<String>()
+            );
             break;
         }
     }
 
     let mut prov: BTreeMap<String, usize> = BTreeMap::new();
     for x in &g.nodes {
-        *prov.entry(x.provenance.clone().unwrap_or_else(|| "authored".into())).or_default() += 1;
+        *prov
+            .entry(x.provenance.clone().unwrap_or_else(|| "authored".into()))
+            .or_default() += 1;
     }
     println!("provenance:");
     for (k, v) in &prov {
@@ -124,7 +147,11 @@ fn inspect_diff(d: &GmapDiff) {
             } else {
                 format!(" (was {})", c.prior_key)
             };
-            let loc = if c.location_only { " [location only]" } else { "" };
+            let loc = if c.location_only {
+                " [location only]"
+            } else {
+                ""
+            };
             format!("{}{moved}{loc}", c.node.key)
         })
         .collect();
@@ -141,9 +168,10 @@ fn inspect_diff(d: &GmapDiff) {
     let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
     for c in &d.modified {
         let file = match &c.node.content {
-            Content::Symbol { span, .. } | Content::Proposition { span: Some(span), .. } => {
-                d.files.get(&span.file).map_or("<no file>", String::as_str)
-            }
+            Content::Symbol { span, .. }
+            | Content::Proposition {
+                span: Some(span), ..
+            } => d.files.get(&span.file).map_or("<no file>", String::as_str),
             _ => "<no span>",
         };
         *by_file.entry(file).or_default() += 1;
@@ -151,7 +179,11 @@ fn inspect_diff(d: &GmapDiff) {
     for (file, n) in &by_file {
         println!("  in {file}: {n}");
     }
-    println!("edges          : +{} / -{}", d.edges_added.len(), d.edges_removed.len());
+    println!(
+        "edges          : +{} / -{}",
+        d.edges_added.len(),
+        d.edges_removed.len()
+    );
     println!("files map      : {} entries", d.files.len());
 }
 
@@ -163,5 +195,9 @@ fn print_keys<S: AsRef<str>>(label: &str, keys: &[S]) {
 }
 
 fn pct(a: usize, b: usize) -> f64 {
-    if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 }
+    if b == 0 {
+        0.0
+    } else {
+        100.0 * a as f64 / b as f64
+    }
 }

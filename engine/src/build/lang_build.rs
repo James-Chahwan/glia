@@ -17,12 +17,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glia_code_domain::project_roots::{LABEL_MANIFEST, ProjectRoot};
-use glia_code_domain::{
-    FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
-};
+use glia_code_domain::{FileParse, cell_type, edge_category, evidence, node_kind, recv_stats};
 use glia_core::{EdgeCategoryId, NodeId, RepoId};
-use glia_graph::{GraphError, RepoGraph};
 use glia_graph::rust_paths::RustCrate;
+use glia_graph::{GraphError, RepoGraph};
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 use crate::passes::{GroupFill, fill_group_evidence};
@@ -185,9 +183,16 @@ pub(crate) fn plan_groups(
     // build group, not a language tag of `groups` (no tag of the family
     // reaches the loop's `else` arm), and it takes the aliased resolver.
     if !ts_family.is_empty() {
-        groups.push(GroupInput { key: TS_GROUP, parses: ts_family });
+        groups.push(GroupInput {
+            key: TS_GROUP,
+            parses: ts_family,
+        });
     }
-    GroupPlan { groups, di_refs, recv_fields }
+    GroupPlan {
+        groups,
+        di_refs,
+        recv_fields,
+    }
 }
 
 /// Stage 2: one [`LangBuild`] per group of a plan, in plan order. `reuse` is
@@ -222,8 +227,11 @@ pub(crate) fn build_groups(
             (input, taken)
         })
         .collect();
-    let built: Vec<&'static str> =
-        items.iter().filter(|(_, taken)| taken.is_none()).map(|(input, _)| input.key).collect();
+    let built: Vec<&'static str> = items
+        .iter()
+        .filter(|(_, taken)| taken.is_none())
+        .map(|(input, _)| input.key)
+        .collect();
     let reused = items.len() - built.len();
     let (builds, _threads) = crate::parallel::par_map_owned(items, |(input, taken)| match taken {
         Some(build) => Ok(build),
@@ -233,7 +241,11 @@ pub(crate) fn build_groups(
         .into_iter()
         .map(|build| build.unwrap_or_else(|payload| std::panic::resume_unwind(payload)))
         .collect();
-    let keys = if built.is_empty() { "-".to_string() } else { built.join(",") };
+    let keys = if built.is_empty() {
+        "-".to_string()
+    } else {
+        built.join(",")
+    };
     eprintln!(
         "[groups] repo={} built={} reused={reused} keys={keys}",
         ctx.repo_label,
@@ -296,7 +308,12 @@ pub(crate) fn fold_groups(
         eprintln!("{line}");
     }
 
-    LanguageGraphs { graphs, keys, fills, pooled }
+    LanguageGraphs {
+        graphs,
+        keys,
+        fills,
+        pooled,
+    }
 }
 
 /// One non-TS build group's graph: the `build_*` its language takes, with
@@ -311,7 +328,14 @@ fn build_solo(
     parses: Vec<FileParse>,
     ctx: &GroupCtx<'_>,
 ) -> Result<RepoGraph, GraphError> {
-    let GroupCtx { repo, repo_label, rust_crates, c_includes, dart_packages, .. } = *ctx;
+    let GroupCtx {
+        repo,
+        repo_label,
+        rust_crates,
+        c_includes,
+        dart_packages,
+        ..
+    } = *ctx;
     match lang {
         "python" => glia_graph::build_python(repo, parses),
         "go" => glia_graph::build_go(repo, parses),
@@ -327,7 +351,10 @@ fn build_solo(
             let resolver = c_includes.resolver(&modules);
             let graph =
                 glia_graph::build_c_cpp(repo, parses, |from, spec| resolver.resolve(from, spec));
-            eprintln!("{}", c_includes.marker(angle, resolver.bound_via_roots(), repo_label));
+            eprintln!(
+                "{}",
+                c_includes.marker(angle, resolver.bound_via_roots(), repo_label)
+            );
             graph
         }
         "swift" => glia_graph::build_swift(repo, parses, resolve_relative_source),
@@ -367,7 +394,11 @@ impl LangBuild {
     /// real build).
     #[cfg(test)]
     pub(crate) fn failed(key: &'static str, line: &str) -> Self {
-        Self { lang: key, graph: Err(line.to_string()), recv_bound: 0 }
+        Self {
+            lang: key,
+            graph: Err(line.to_string()),
+            recv_bound: 0,
+        }
     }
 
     /// Append this build to the repo's lists: the sequential loop's
@@ -503,7 +534,9 @@ impl LineTally {
         let mut t = LineTally::default();
         for e in &g.edges {
             let ev = evidence::Evidence::of(e);
-            let site = ev.as_ref().is_some_and(|ev| ev.basis == evidence::Basis::Site);
+            let site = ev
+                .as_ref()
+                .is_some_and(|ev| ev.basis == evidence::Basis::Site);
             let (total, sited) = if e.category == edge_category::CALLS {
                 let to_site_kind = g
                     .nav
@@ -576,8 +609,16 @@ impl HeritageTally {
                     && g.nav.kind_by_id.get(&e.from) != Some(&node_kind::METHOD)
             })
             .count();
-        let unresolved = g.unresolved_refs.iter().filter(|r| is_heritage(r.category)).count();
-        HeritageTally { lang, bound, unresolved }
+        let unresolved = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| is_heritage(r.category))
+            .count();
+        HeritageTally {
+            lang,
+            bound,
+            unresolved,
+        }
     }
 }
 
@@ -593,9 +634,14 @@ fn heritage_marker(tallies: &mut [HeritageTally], repo_label: &str) -> Option<St
         return None;
     }
     tallies.sort_by_key(|t| t.lang);
-    let bound: Vec<String> = tallies.iter().map(|t| format!("{}={}", t.lang, t.bound)).collect();
-    let unresolved: Vec<String> =
-        tallies.iter().map(|t| format!("{}={}", t.lang, t.unresolved)).collect();
+    let bound: Vec<String> = tallies
+        .iter()
+        .map(|t| format!("{}={}", t.lang, t.bound))
+        .collect();
+    let unresolved: Vec<String> = tallies
+        .iter()
+        .map(|t| format!("{}={}", t.lang, t.unresolved))
+        .collect();
     Some(format!(
         "[heritage] refs bound: {} unresolved: {} repo={repo_label}",
         bound.join(" "),
@@ -621,7 +667,9 @@ pub(crate) fn rust_crates(files: &[(String, String)], roots: &[ProjectRoot]) -> 
         let mut lib_root = None;
         let mut other_roots = Vec::new();
         for (path, _) in files {
-            let Some(rel) = path.strip_prefix(prefix.as_str()).filter(|r| r.ends_with(".rs"))
+            let Some(rel) = path
+                .strip_prefix(prefix.as_str())
+                .filter(|r| r.ends_with(".rs"))
             else {
                 continue;
             };
@@ -660,7 +708,10 @@ fn join_jvm_family(parses_by_lang: &mut Vec<(&'static str, Vec<FileParse>)>) {
     else {
         return;
     };
-    let Some(host) = parses_by_lang.iter().position(|(lang, _)| *lang == JVM_HOST) else {
+    let Some(host) = parses_by_lang
+        .iter()
+        .position(|(lang, _)| *lang == JVM_HOST)
+    else {
         return;
     };
     let (_, kotlin) = parses_by_lang.remove(guest);
@@ -761,13 +812,16 @@ impl TsAliases {
     /// The module qname `spec` names through the first key that matches it,
     /// or `None`: no key matches, or the best match's target leaves the repo.
     fn map(&self, spec: &str) -> Option<String> {
-        let target = self.entries.iter().find_map(|(key, target)| match key.split_once('*') {
-            None => (key == spec).then(|| target.clone()),
-            Some((prefix, suffix)) => spec
-                .strip_prefix(prefix)
-                .and_then(|rest| rest.strip_suffix(suffix))
-                .map(|star| target.replacen('*', star, 1)),
-        })?;
+        let target = self
+            .entries
+            .iter()
+            .find_map(|(key, target)| match key.split_once('*') {
+                None => (key == spec).then(|| target.clone()),
+                Some((prefix, suffix)) => spec
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.strip_suffix(suffix))
+                    .map(|star| target.replacen('*', star, 1)),
+            })?;
         ts_path_qname(&format!("{}/{}/{target}", self.dir, self.base_url))
     }
 
@@ -836,7 +890,9 @@ impl TsAliasSet {
     /// Every `paths` key of every scope, as written (`@core/*`), for the
     /// A16.4 IMPORTS-cell filter (`LocalModuleIndex::add_alias_prefix`).
     pub(super) fn keys(&self) -> impl Iterator<Item = &str> + '_ {
-        self.scopes.iter().flat_map(|s| s.entries.iter().map(|(k, _)| k.as_str()))
+        self.scopes
+            .iter()
+            .flat_map(|s| s.entries.iter().map(|(k, _)| k.as_str()))
     }
 }
 
@@ -853,7 +909,12 @@ pub(super) fn read_tsconfig_paths(dir: &Path) -> TsAliases {
         };
         match parse_tsconfig_paths(&text) {
             Some((base_url, entries)) if !entries.is_empty() => {
-                return TsAliases { file, base_url, entries, ..TsAliases::default() };
+                return TsAliases {
+                    file,
+                    base_url,
+                    entries,
+                    ..TsAliases::default()
+                };
             }
             Some(_) => {}
             None => eprintln!("[tsconfig] unparsed file={}", path.display()),
@@ -1032,7 +1093,10 @@ impl DartPackages {
                 .and_modify(|slot| *slot = None)
                 .or_insert(Some(qname));
         }
-        Self { by_name, resolved: AtomicUsize::new(0) }
+        Self {
+            by_name,
+            resolved: AtomicUsize::new(0),
+        }
     }
 
     /// The project-root qname of in-repo package `name`, unless two pubspecs
@@ -1083,7 +1147,10 @@ fn resolve_dart_source(from_module: &str, specifier: &str, pkgs: &DartPackages) 
     };
     let (name, rest) = uri.split_once('/')?;
     let root = pkgs.root_of(name)?;
-    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+    let parts: Vec<&str> = rest
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
     // A package URI never leaves its package's `lib/`.
     if parts.contains(&"..") {
         return None;
@@ -1126,10 +1193,7 @@ fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String>
                 segs.pop();
             }
             p => {
-                let stem = SRC_EXT
-                    .iter()
-                    .find_map(|e| p.strip_suffix(e))
-                    .unwrap_or(p);
+                let stem = SRC_EXT.iter().find_map(|e| p.strip_suffix(e)).unwrap_or(p);
                 segs.push(stem.to_string());
             }
         }
@@ -1176,7 +1240,11 @@ mod tests {
     fn resolve_include_source_keeps_the_file_name() {
         for (from, spec, want) in [
             ("src::main.cpp", "Widget.h", Some("src::Widget.h")),
-            ("src::cart.cpp", "../include/shop/cart.hpp", Some("include::shop::cart.hpp")),
+            (
+                "src::cart.cpp",
+                "../include/shop/cart.hpp",
+                Some("include::shop::cart.hpp"),
+            ),
             ("main.cpp", "mathutil.h", Some("mathutil.h")),
             ("src::a.cpp", "./detail/b.h", Some("src::detail::b.h")),
             ("src::a.cpp", "\"quoted.h\"", Some("src::quoted.h")),
@@ -1185,12 +1253,20 @@ mod tests {
             ("src::a.c", "/usr/include/x.h", None),
             ("src::a.c", "", None),
         ] {
-            assert_eq!(resolve_include_source(from, spec).as_deref(), want, "{from} {spec}");
+            assert_eq!(
+                resolve_include_source(from, spec).as_deref(),
+                want,
+                "{from} {spec}"
+            );
         }
     }
 
     fn tally(lang: &'static str, bound: usize, unresolved: usize) -> HeritageTally {
-        HeritageTally { lang, bound, unresolved }
+        HeritageTally {
+            lang,
+            bound,
+            unresolved,
+        }
     }
 
     /// Every language graph built gets one token per half, sorted by name
@@ -1198,7 +1274,11 @@ mod tests {
     /// ` solidity=` / ` dart=` off the same line.
     #[test]
     fn heritage_marker_lists_every_built_language_sorted() {
-        let mut t = vec![tally("solidity", 0, 1), tally("dart", 0, 0), tally("typescript", 2, 0)];
+        let mut t = vec![
+            tally("solidity", 0, 1),
+            tally("dart", 0, 0),
+            tally("typescript", 2, 0),
+        ];
         assert_eq!(
             heritage_marker(&mut t, "fx").as_deref(),
             Some(
@@ -1247,18 +1327,45 @@ mod tests {
         let site = |e: &str| Evidence::emitter(e).line(4);
         g.edges = vec![
             edge(1, 2, edge_category::CALLS, Some(site("graph:calls"))),
-            edge(1, 2, edge_category::CALLS, Some(Evidence::emitter("graph:build"))),
-            edge(1, 3, edge_category::CALLS, Some(Evidence::emitter("parser:python"))),
+            edge(
+                1,
+                2,
+                edge_category::CALLS,
+                Some(Evidence::emitter("graph:build")),
+            ),
+            edge(
+                1,
+                3,
+                edge_category::CALLS,
+                Some(Evidence::emitter("parser:python")),
+            ),
             edge(1, 2, edge_category::IMPORTS, Some(site("graph:imports"))),
             edge(1, 2, edge_category::HANDLED_BY, Some(site("graph:refs"))),
-            edge(1, 2, edge_category::USES, Some(Evidence::emitter("graph:rust_paths").rule("enum_variant"))),
-            edge(1, 2, edge_category::USES, Some(site("graph:rust_paths").rule("glob"))),
+            edge(
+                1,
+                2,
+                edge_category::USES,
+                Some(Evidence::emitter("graph:rust_paths").rule("enum_variant")),
+            ),
+            edge(
+                1,
+                2,
+                edge_category::USES,
+                Some(site("graph:rust_paths").rule("glob")),
+            ),
             edge(1, 2, edge_category::DEFINES, None),
         ];
         let t = LineTally::of(&g);
         assert_eq!(
             t,
-            LineTally { calls: 2, calls_site: 1, imports: 1, imports_site: 1, refs: 2, refs_site: 1 }
+            LineTally {
+                calls: 2,
+                calls_site: 1,
+                imports: 1,
+                imports_site: 1,
+                refs: 2,
+                refs_site: 1
+            }
         );
         assert_eq!(
             t.marker("rust").as_deref(),
@@ -1331,11 +1438,21 @@ mod ts_alias_tests {
             Some("src::environments::environment"),
             "an exact key; the target's extension goes"
         );
-        assert_eq!(resolve_ts_source_aliased(page, "@angular/core", &aliases), None);
-        assert_eq!(resolve_ts_source_aliased(page, "@environment", &aliases), None, "exact is whole");
+        assert_eq!(
+            resolve_ts_source_aliased(page, "@angular/core", &aliases),
+            None
+        );
+        assert_eq!(
+            resolve_ts_source_aliased(page, "@environment", &aliases),
+            None,
+            "exact is whole"
+        );
         assert_eq!(resolve_ts_source_aliased(page, "rxjs", &aliases), None);
         // No tsconfig: every bare specifier is a package, as before A6.8.
-        assert_eq!(resolve_ts_source_aliased(page, "@core/x", &TsAliasSet::default()), None);
+        assert_eq!(
+            resolve_ts_source_aliased(page, "@core/x", &TsAliasSet::default()),
+            None
+        );
     }
 
     #[test]
@@ -1364,17 +1481,26 @@ mod ts_alias_tests {
         assert_eq!(
             entries,
             [
-                ("@env".to_string(), "environments/environment.ts".to_string()),
+                (
+                    "@env".to_string(),
+                    "environments/environment.ts".to_string()
+                ),
                 ("@core/*".to_string(), "app/core/*".to_string()),
             ],
             "exact keys first"
         );
         let stripped = strip_jsonc(ANGULAR);
-        assert!(stripped.contains("./dist//out"), "a `//` inside a string stays: {stripped}");
+        assert!(
+            stripped.contains("./dist//out"),
+            "a `//` inside a string stays: {stripped}"
+        );
         assert!(!stripped.contains("angular.dev"), "a block comment goes");
         // No `compilerOptions.paths` is no aliases, not a parse failure; bad
         // JSON is a failure; `baseUrl` defaults to the tsconfig's dir.
-        assert_eq!(parse_tsconfig_paths("{ // x\n}"), Some((".".to_string(), vec![])));
+        assert_eq!(
+            parse_tsconfig_paths("{ // x\n}"),
+            Some((".".to_string(), vec![]))
+        );
         assert_eq!(parse_tsconfig_paths("{ \"compilerOptions\": "), None);
         let (base_url, _) =
             parse_tsconfig_paths(r#"{"compilerOptions":{"paths":{"~/*":["./src/*"]}}}"#).unwrap();
@@ -1397,10 +1523,21 @@ mod ts_alias_tests {
         )]);
         let from = "apps::web::main";
         let r = |spec| resolve_ts_source_aliased(from, spec, &aliases);
-        assert_eq!(r("@app/shared/button").as_deref(), Some("libs::shared::src::button"));
+        assert_eq!(
+            r("@app/shared/button").as_deref(),
+            Some("libs::shared::src::button")
+        );
         assert_eq!(r("@app/home").as_deref(), Some("libs::app::home"));
-        assert_eq!(r("@app/config").as_deref(), Some("config::index"), "exact beats `@app/*`");
-        assert_eq!(r("logo.svg").as_deref(), Some("assets::logo.svg"), "prefix + suffix pattern");
+        assert_eq!(
+            r("@app/config").as_deref(),
+            Some("config::index"),
+            "exact beats `@app/*`"
+        );
+        assert_eq!(
+            r("logo.svg").as_deref(),
+            Some("assets::logo.svg"),
+            "prefix + suffix pattern"
+        );
         assert_eq!(r("@up/x"), None, "climbs out of the repo");
     }
 
@@ -1425,7 +1562,10 @@ mod ts_alias_tests {
             Some("libs::x"),
             "`webapp` is not under `web`"
         );
-        assert_eq!(resolve_ts_source_aliased("api::main", "@app/core", &aliases), None);
+        assert_eq!(
+            resolve_ts_source_aliased("api::main", "@app/core", &aliases),
+            None
+        );
     }
 
     fn write(dir: &Path, rel: &str, body: &str) {
@@ -1437,7 +1577,11 @@ mod ts_alias_tests {
     #[test]
     fn read_falls_back_to_tsconfig_base_json() {
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "tsconfig.json", r#"{"extends":"./tsconfig.base.json"}"#);
+        write(
+            tmp.path(),
+            "tsconfig.json",
+            r#"{"extends":"./tsconfig.base.json"}"#,
+        );
         write(
             tmp.path(),
             "tsconfig.base.json",
@@ -1446,7 +1590,10 @@ mod ts_alias_tests {
         let a = read_tsconfig_paths(tmp.path());
         assert_eq!(a.file, "tsconfig.base.json");
         assert_eq!(a.entries.len(), 1);
-        assert_eq!(read_tsconfig_paths(&tmp.path().join("missing")), TsAliases::default());
+        assert_eq!(
+            read_tsconfig_paths(&tmp.path().join("missing")),
+            TsAliases::default()
+        );
     }
 
     /// End to end, in a nested Angular project root (the quokka-stack shape):
@@ -1457,13 +1604,21 @@ mod ts_alias_tests {
         use glia_core::CellPayload;
 
         let tmp = tempfile::tempdir().unwrap();
-        write(tmp.path(), "web/package.json", r#"{"name":"web","dependencies":{"@angular/core":"18.0.0"}}"#);
+        write(
+            tmp.path(),
+            "web/package.json",
+            r#"{"name":"web","dependencies":{"@angular/core":"18.0.0"}}"#,
+        );
         write(
             tmp.path(),
             "web/tsconfig.json",
             "{\n  // Angular CLI\n  \"compilerOptions\": {\"baseUrl\": \"./\", \"paths\": {\"@app/core\": [\"src/app/core/index.ts\"],}}\n}\n",
         );
-        write(tmp.path(), "web/src/app/core/index.ts", "export class AuthService {}\n");
+        write(
+            tmp.path(),
+            "web/src/app/core/index.ts",
+            "export class AuthService {}\n",
+        );
         write(
             tmp.path(),
             "web/src/app/page.ts",
@@ -1504,7 +1659,12 @@ mod dart_import_tests {
     /// A `pubspec.yaml` root at `rel` declaring `name: <name>`, as the walk
     /// detects it.
     fn pubspec(rel: &str, name: &str) -> ProjectRoot {
-        ProjectRoot::new(rel.to_string(), "dart", "pubspec.yaml", Some(name.to_string()))
+        ProjectRoot::new(
+            rel.to_string(),
+            "dart",
+            "pubspec.yaml",
+            Some(name.to_string()),
+        )
     }
 
     fn pkgs(roots: &[ProjectRoot]) -> DartPackages {
@@ -1534,8 +1694,12 @@ mod dart_import_tests {
 
         let nested = pkgs(&[pubspec("apps/mobile", "shop")]);
         assert_eq!(
-            resolve_dart_source("apps::mobile::lib::cart", "package:shop/src/util.dart", &nested)
-                .as_deref(),
+            resolve_dart_source(
+                "apps::mobile::lib::cart",
+                "package:shop/src/util.dart",
+                &nested
+            )
+            .as_deref(),
             Some("apps::mobile::lib::src::util")
         );
         assert_eq!(
@@ -1561,7 +1725,11 @@ mod dart_import_tests {
             "package:shop/.dart",
             "package:shop/../web/main.dart",
         ] {
-            assert_eq!(resolve_dart_source("lib::cart", spec, &root), None, "{spec}");
+            assert_eq!(
+                resolve_dart_source("lib::cart", spec, &root),
+                None,
+                "{spec}"
+            );
         }
         assert_eq!(root.marker("fx"), None, "nothing resolved, no marker");
         let none = DartPackages::default();
@@ -1583,14 +1751,22 @@ mod dart_import_tests {
             ("lib::src::fmt", "./money.dart", Some("lib::src::money")),
             ("lib::cart", "\"models.dart\"", Some("lib::models")),
         ] {
-            assert_eq!(resolve_dart_source(from, spec, &root).as_deref(), want, "{spec}");
+            assert_eq!(
+                resolve_dart_source(from, spec, &root).as_deref(),
+                want,
+                "{spec}"
+            );
             assert_eq!(
                 resolve_dart_source(from, spec, &root),
                 resolve_relative_source(from, spec),
                 "{spec}"
             );
         }
-        assert_eq!(root.marker("fx"), None, "a relative import is not an own-package URI");
+        assert_eq!(
+            root.marker("fx"),
+            None,
+            "a relative import is not an own-package URI"
+        );
     }
 
     /// A name two pubspecs claim resolves to neither; the repo's other
@@ -1602,7 +1778,10 @@ mod dart_import_tests {
             pubspec("apps/twin_b", "twin"),
             pubspec("", "shop"),
         ]);
-        assert_eq!(resolve_dart_source("apps::twin_a::lib::a", "package:twin/b.dart", &p), None);
+        assert_eq!(
+            resolve_dart_source("apps::twin_a::lib::a", "package:twin/b.dart", &p),
+            None
+        );
         assert_eq!(
             resolve_dart_source("apps::twin_a::lib::a", "package:shop/cart.dart", &p).as_deref(),
             Some("lib::cart")
@@ -1621,7 +1800,12 @@ mod dart_import_tests {
         let roots = [
             pubspec("", "shop"),
             ProjectRoot::new("web".into(), "npm", "package.json", Some("web".into())),
-            ProjectRoot::new("crates/core".into(), "cargo", "Cargo.toml", Some("core".into())),
+            ProjectRoot::new(
+                "crates/core".into(),
+                "cargo",
+                "Cargo.toml",
+                Some("core".into()),
+            ),
             ProjectRoot::new("apps/nameless".into(), "dart", "pubspec.yaml", None),
             pubspec("pkgs/ui", "ui"),
         ];
@@ -1664,9 +1848,21 @@ mod dart_import_tests {
                 "}\n",
             ),
         );
-        write(tmp.path(), "lib/src/util.dart", "String shout(String s) {\n  return s;\n}\n");
-        write(tmp.path(), "lib/src/money.dart", "double zero() {\n  return 0.0;\n}\n");
-        write(tmp.path(), "lib/src/fmt.dart", "String formatPrice(double x) {\n  return '';\n}\n");
+        write(
+            tmp.path(),
+            "lib/src/util.dart",
+            "String shout(String s) {\n  return s;\n}\n",
+        );
+        write(
+            tmp.path(),
+            "lib/src/money.dart",
+            "double zero() {\n  return 0.0;\n}\n",
+        );
+        write(
+            tmp.path(),
+            "lib/src/fmt.dart",
+            "String formatPrice(double x) {\n  return '';\n}\n",
+        );
         let result = crate::build::generate_one(tmp.path().to_str().unwrap()).unwrap();
         let m = &result.merged;
         let id_of = |q: &str| {
@@ -1681,7 +1877,8 @@ mod dart_import_tests {
             let (Some(f), Some(t)) = (id_of(from), id_of(to)) else {
                 return None;
             };
-            m.all_edges().find(|e| e.category == cat && e.from == f && e.to == t)
+            m.all_edges()
+                .find(|e| e.category == cat && e.from == f && e.to == t)
         };
         for (target, rule) in [("lib::src::util", "symbol"), ("lib::src::money", "module")] {
             let imports = edge(edge_category::IMPORTS, "lib::cart", target)
@@ -1695,11 +1892,21 @@ mod dart_import_tests {
             "the relative import keeps its edge"
         );
         assert!(
-            edge(edge_category::CALLS, "lib::cart::total", "lib::src::util::shout").is_some(),
+            edge(
+                edge_category::CALLS,
+                "lib::cart::total",
+                "lib::src::util::shout"
+            )
+            .is_some(),
             "the `show` binding behind the import binds the call"
         );
         assert!(
-            edge(edge_category::CALLS, "lib::cart::total", "lib::src::money::zero").is_some(),
+            edge(
+                edge_category::CALLS,
+                "lib::cart::total",
+                "lib::src::money::zero"
+            )
+            .is_some(),
             "the `as` prefix behind the import binds the call"
         );
         let cart = id_of("lib::cart").expect("importer");
@@ -1708,6 +1915,10 @@ mod dart_import_tests {
             .filter(|e| e.category == edge_category::IMPORTS && e.from == cart)
             .map(|e| e.to)
             .collect();
-        assert_eq!(targets.len(), 3, "no edge for `dart:async` or `package:flutter`");
+        assert_eq!(
+            targets.len(),
+            3,
+            "no edge for `dart:async` or `package:flutter`"
+        );
     }
 }

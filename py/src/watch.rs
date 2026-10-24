@@ -109,10 +109,7 @@ fn persist_default(
         .persist(&dir)
         .map_err(|e| PersistError::Write(format!("persist({}): {e}", dir.display())))?;
     session.save_cache().map_err(|e| {
-        PersistError::Write(format!(
-            "persist({}): parse cache: {e}",
-            dir.display()
-        ))
+        PersistError::Write(format!("persist({}): parse cache: {e}", dir.display()))
     })?;
     Ok(dir)
 }
@@ -174,7 +171,10 @@ impl PyWatchSession {
     /// RuntimeError as `apply`.
     fn poll(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let session = &mut self.session;
-        match py.detach(|| session.poll()).map_err(PyRuntimeError::new_err)? {
+        match py
+            .detach(|| session.poll())
+            .map_err(PyRuntimeError::new_err)?
+        {
             Some(update) => Ok(Some(to_py(py, update_json(&update))?)),
             None => Ok(None),
         }
@@ -191,7 +191,8 @@ impl PyWatchSession {
         // The clone's graph is the session's, so the session's ranking
         // indexes serve it (EA.7): a second snapshot's first ranked answer
         // reads them warm.
-        PyGraph::from_result_with_rank(result, session.rank_cache()).with_overlay_applied(self.overlay)
+        PyGraph::from_result_with_rank(result, session.rank_cache())
+            .with_overlay_applied(self.overlay)
     }
 
     /// Write the current graph as the repo's layout `<repo>/.glia/graph/`
@@ -239,8 +240,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("glia-dc9-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp dir");
-        std::fs::write(root.join("a.py"), "def foo():\n    return bar()\n\ndef bar():\n    return 1\n")
-            .expect("write a.py");
+        std::fs::write(
+            root.join("a.py"),
+            "def foo():\n    return bar()\n\ndef bar():\n    return 1\n",
+        )
+        .expect("write a.py");
         std::fs::write(root.join("b.py"), "def b():\n    return 2\n").expect("write b.py");
         root
     }
@@ -335,7 +339,11 @@ mod tests {
 
         let mut s = open_session(&path, true).expect("open");
         s.apply(&[root.join("b.py")]).expect("apply");
-        assert_eq!(tree(&root), before, "open and apply write nothing under the repo");
+        assert_eq!(
+            tree(&root),
+            before,
+            "open and apply write nothing under the repo"
+        );
         let dir = persist_default(&s, &path, true).expect("persist");
         assert!(dir.join("manifest.json").is_file(), "{:?}", tree(&root));
         assert!(dir.join("parse_cache.bin").is_file(), "{:?}", tree(&root));

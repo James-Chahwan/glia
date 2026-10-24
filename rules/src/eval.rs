@@ -121,7 +121,11 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { max_rows: DEFAULT_MAX_ROWS, outputs: Vec::new(), magic: true }
+        Options {
+            max_rows: DEFAULT_MAX_ROWS,
+            outputs: Vec::new(),
+            magic: true,
+        }
     }
 }
 
@@ -237,7 +241,12 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
     let wanted = resolve_outputs(&original, &opts.outputs)?;
     let wanted_sigs: Vec<(String, usize)> = wanted
         .iter()
-        .map(|&p| (original.preds[p as usize].name.clone(), original.preds[p as usize].arity))
+        .map(|&p| {
+            (
+                original.preds[p as usize].name.clone(),
+                original.preds[p as usize].arity,
+            )
+        })
         .collect();
     let (evaluated, an, magic_rewrites) = if opts.magic {
         demand(program, original, &declared.catalog, &wanted)
@@ -245,8 +254,11 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
         (program.clone(), original, 0)
     };
     if an.rules.len() > usize::from(EDB_RULE) {
-        let message =
-            format!("a program may hold at most {} rules (found {})", EDB_RULE, an.rules.len());
+        let message = format!(
+            "a program may hold at most {} rules (found {})",
+            EDB_RULE,
+            an.rules.len()
+        );
         return Err(RulesError::Invalid(vec![Diagnostic::error(
             Span::default(),
             source,
@@ -265,17 +277,28 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
         .collect();
     outputs.sort_by_key(|&p| an.preds[p as usize].signature());
 
-    let tiers = if reads_edges(&an, &declared.catalog) { edge_tiers(src) } else { Vec::new() };
+    let tiers = if reads_edges(&an, &declared.catalog) {
+        edge_tiers(src)
+    } else {
+        Vec::new()
+    };
     let mut st = State {
         src,
         values: ValueTable::new(),
-        rels: an.preds.iter().map(|p| Relation::new(p.arity, &[])).collect(),
+        rels: an
+            .preds
+            .iter()
+            .map(|p| Relation::new(p.arity, &[]))
+            .collect(),
         at_level: vec![[0; 3]; an.preds.len()],
         scc: Vec::new(),
         closure: Closure::new(src, &tiers),
         memo: Memo::new(),
         budget: Budget::new(opts.max_rows),
-        stats: EvalStats { magic_rewrites, ..EvalStats::default() },
+        stats: EvalStats {
+            magic_rewrites,
+            ..EvalStats::default()
+        },
     };
     st.load(&an, &declared.catalog, &tiers);
     let mut plans = Vec::with_capacity(an.strata.len());
@@ -285,7 +308,15 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
         plans.push(plan);
         multi.push(states);
     }
-    let State { values, rels, scc, closure, memo, mut stats, .. } = st;
+    let State {
+        values,
+        rels,
+        scc,
+        closure,
+        memo,
+        mut stats,
+        ..
+    } = st;
     let closure_stats = closure.stats().clone();
     drop(closure);
     stats.strata = an.strata.len();
@@ -322,7 +353,10 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
 impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
     /// The outputs as `name/arity`, sorted.
     pub fn outputs(&self) -> Vec<String> {
-        self.outputs.iter().map(|&p| self.analysis.preds[p as usize].signature()).collect()
+        self.outputs
+            .iter()
+            .map(|&p| self.analysis.preds[p as usize].signature())
+            .collect()
     }
 
     /// The rows of output `pred` (`name` or `name/arity`), sorted by rendered values
@@ -333,14 +367,25 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
             info.name == pred || info.signature() == pred
         });
         let Some(p) = found else {
-            return Err(RulesError::Unknown { predicate: pred.to_string(), known: self.outputs() });
+            return Err(RulesError::Unknown {
+                predicate: pred.to_string(),
+                known: self.outputs(),
+            });
         };
         let mut raw: Vec<(Vec<Handle>, Tier, RowMeta)> = Vec::new();
         if let Some(rel) = self.relations.get(p as usize) {
-            let view = View { levels: EVERY_ROW, which: Which::Both, max_height: None };
+            let view = View {
+                levels: EVERY_ROW,
+                which: Which::Both,
+                max_height: None,
+            };
             rel.scan(0, view, &mut |r, t, m, _| raw.push((r.to_vec(), t, m)));
         }
-        let keys = Keys::new(self.src, &self.values, raw.iter().flat_map(|r| r.0.iter().copied()));
+        let keys = Keys::new(
+            self.src,
+            &self.values,
+            raw.iter().flat_map(|r| r.0.iter().copied()),
+        );
         raw.sort_by(|a, b| {
             a.0.iter()
                 .zip(&b.0)
@@ -349,16 +394,33 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
                 .unwrap_or(Ordering::Equal)
         });
         // An aggregate row is loaded, so it names no rule: its predicate has exactly one.
-        let only = self.analysis.rules.iter().find(|r| r.head == p).map(|r| r.index);
+        let only = self
+            .analysis
+            .rules
+            .iter()
+            .find(|r| r.head == p)
+            .map(|r| r.index);
         Ok(raw
             .into_iter()
             .map(|(row, tier, meta)| {
-                let rule = if meta.rule == EDB_RULE { only } else { Some(usize::from(meta.rule)) };
+                let rule = if meta.rule == EDB_RULE {
+                    only
+                } else {
+                    Some(usize::from(meta.rule))
+                };
                 Row {
                     values: row.iter().map(|h| self.values.get(*h).to_owned()).collect(),
                     tier,
-                    absence: rule.and_then(|r| self.caveats.get(r)).cloned().unwrap_or_default(),
-                    at: RowAt { pred: p, level: tier, meta, row },
+                    absence: rule
+                        .and_then(|r| self.caveats.get(r))
+                        .cloned()
+                        .unwrap_or_default(),
+                    at: RowAt {
+                        pred: p,
+                        level: tier,
+                        meta,
+                        row,
+                    },
                 }
             })
             .collect())
@@ -411,7 +473,10 @@ fn closure_lines(stats: &ClosureStats, registries: &Registries) -> Vec<String> {
         .iter()
         .map(|s| {
             let (cats, mode) = (s.label(registries), s.modes());
-            format!("[rules] closure cats={cats} mode={mode} bfs={} rows={}", s.bfs, s.rows)
+            format!(
+                "[rules] closure cats={cats} mode={mode} bfs={} rows={}",
+                s.bfs, s.rows
+            )
         })
         .collect()
 }
@@ -429,7 +494,10 @@ pub(crate) fn user_predicate(an: &Analysis, p: PredId) -> Option<(String, usize)
         None => (info.name.strip_prefix("__m_")?, true),
     };
     let (name, adornment) = rest.rsplit_once("__")?;
-    Some((name.to_string(), if magic { adornment.len() } else { info.arity }))
+    Some((
+        name.to_string(),
+        if magic { adornment.len() } else { info.arity },
+    ))
 }
 
 /// The outputs `wanted` names in `an` (module doc: empty is every sink), deduplicated.
@@ -455,10 +523,15 @@ fn resolve_outputs(an: &Analysis, wanted: &[String]) -> Result<Vec<PredId>, Rule
     let mut out = Vec::new();
     for w in wanted {
         let info = |p: &PredId| &an.preds[*p as usize];
-        let Some(p) =
-            user.iter().copied().find(|p| info(p).name == *w || info(p).signature() == *w)
+        let Some(p) = user
+            .iter()
+            .copied()
+            .find(|p| info(p).name == *w || info(p).signature() == *w)
         else {
-            return Err(RulesError::Unknown { predicate: w.clone(), known: an.predicates() });
+            return Err(RulesError::Unknown {
+                predicate: w.clone(),
+                known: an.predicates(),
+            });
         };
         if !out.contains(&p) {
             out.push(p);
@@ -479,7 +552,11 @@ fn demand(
     let Some((rewritten, report)) = magic::rewrite(program, &original, catalog, outputs) else {
         return (program.clone(), original, 0);
     };
-    let mut names: Vec<&str> = report.rewritten.iter().map(|(p, _, _)| p.as_str()).collect();
+    let mut names: Vec<&str> = report
+        .rewritten
+        .iter()
+        .map(|(p, _, _)| p.as_str())
+        .collect();
     names.dedup();
     match analyse_with(&rewritten, catalog, true) {
         Ok(an) => (rewritten, an, names.len()),
@@ -529,13 +606,27 @@ fn narrow<I: Copy + PartialEq>(
 /// names and the cell types every cell / edge_cell atom names (`None`: keep all).
 fn restriction(an: &Analysis, catalog: &Catalog) -> Restrict {
     let reg = &catalog.registries;
-    let category = |n: &str| reg.edge_categories.iter().find(|(_, x)| *x == n).map(|(id, _)| *id);
-    let cell_type = |n: &str| reg.cell_types.iter().find(|(_, x)| *x == n).map(|(id, _)| *id);
+    let category = |n: &str| {
+        reg.edge_categories
+            .iter()
+            .find(|(_, x)| *x == n)
+            .map(|(id, _)| *id)
+    };
+    let cell_type = |n: &str| {
+        reg.cell_types
+            .iter()
+            .find(|(_, x)| *x == n)
+            .map(|(id, _)| *id)
+    };
     let mut cats: Option<Vec<EdgeCategoryId>> = Some(Vec::new());
     let mut cells: Option<Vec<CellTypeId>> = Some(Vec::new());
     for lit in an.rules.iter().flat_map(|r| &r.body) {
-        let (CLit::Pos(p, terms, _) | CLit::Neg(p, terms, _)) = lit else { continue };
-        let Some(PredKind::Edb(e)) = an.preds.get(*p as usize).map(|i| i.kind) else { continue };
+        let (CLit::Pos(p, terms, _) | CLit::Neg(p, terms, _)) = lit else {
+            continue;
+        };
+        let Some(PredKind::Edb(e)) = an.preds.get(*p as usize).map(|i| i.kind) else {
+            continue;
+        };
         if matches!(e, EdbPred::Edge | EdbPred::EdgeConf | EdbPred::EdgeCell) {
             narrow(&mut cats, terms.get(2), category);
         }
@@ -551,7 +642,10 @@ fn restriction(an: &Analysis, catalog: &Catalog) -> Restrict {
     if let Some(ids) = cells.as_mut() {
         ids.sort_by_key(|c| c.0);
     }
-    Restrict { categories: cats, cell_types: cells }
+    Restrict {
+        categories: cats,
+        cell_types: cells,
+    }
 }
 
 /// A head part resolved before the body runs: a constant's handle or a variable.
@@ -583,10 +677,20 @@ fn push_head(head: &[Out], b: &Binding<'_>, rows: &mut Vec<Handle>) -> bool {
 fn scc_sets(steps: &[Step], catalog: &Catalog, out: &mut Vec<CatSet>) {
     for s in steps {
         match s {
-            Step::Call { builtin, cats: Some(c), .. }
-            | Step::NegCall { builtin, cats: Some(c), .. }
-                if catalog.builtins.get(*builtin).is_some_and(|d| d.kind == BuiltinKind::Scc)
-                    && !out.contains(c) =>
+            Step::Call {
+                builtin,
+                cats: Some(c),
+                ..
+            }
+            | Step::NegCall {
+                builtin,
+                cats: Some(c),
+                ..
+            } if catalog
+                .builtins
+                .get(*builtin)
+                .is_some_and(|d| d.kind == BuiltinKind::Scc)
+                && !out.contains(c) =>
             {
                 out.push(c.clone());
             }
@@ -616,7 +720,10 @@ impl Waiting {
     /// most one above the lowest height among them; the rest wait. `None` when both are
     /// empty. `arity` is per slot.
     fn next(&mut self, mut adds: Candidates, arity: &[usize]) -> Option<Candidates> {
-        let fresh_low = adds.iter().flat_map(|(_, metas)| metas.iter().map(|m| m.height)).min();
+        let fresh_low = adds
+            .iter()
+            .flat_map(|(_, metas)| metas.iter().map(|m| m.height))
+            .min();
         let waiting_low = self.by_height.keys().next().copied();
         let low = match (fresh_low, waiting_low) {
             (Some(a), Some(b)) => a.min(b),
@@ -631,7 +738,9 @@ impl Waiting {
             let a = arity.get(slot).copied().unwrap_or(0);
             let (mut keep_rows, mut keep_metas) = (Vec::new(), Vec::new());
             for (i, meta) in metas.iter().enumerate() {
-                let Some(row) = rows.get(i * a..(i + 1) * a) else { continue };
+                let Some(row) = rows.get(i * a..(i + 1) * a) else {
+                    continue;
+                };
                 if meta.height <= cut {
                     keep_rows.extend_from_slice(row);
                     keep_metas.push(*meta);
@@ -703,7 +812,9 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
     fn load(&mut self, an: &Analysis, catalog: &Catalog, tiers: &[Tier]) {
         let restrict = restriction(an, catalog);
         for (p, info) in an.preds.iter().enumerate() {
-            let PredKind::Edb(e) = info.kind else { continue };
+            let PredKind::Edb(e) = info.kind else {
+                continue;
+            };
             let rows = load_edb(self.src, e, &restrict, tiers, &mut self.values);
             for l in &rows.levels {
                 self.at_level[p][usize::from(l.level())] += 1;
@@ -736,14 +847,24 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         };
         let mut map = Vec::with_capacity(plan.indexes.len());
         for (p, perm) in &plan.indexes {
-            match self.rels.get_mut(*p as usize).and_then(|r| r.ensure_index(perm)) {
+            match self
+                .rels
+                .get_mut(*p as usize)
+                .and_then(|r| r.ensure_index(perm))
+            {
                 Some(i) => map.push(i),
                 None => {
-                    let sig = an.preds.get(*p as usize).map_or_else(String::new, |i| i.signature());
+                    let sig = an
+                        .preds
+                        .get(*p as usize)
+                        .map_or_else(String::new, |i| i.signature());
                     let message = format!(
                         "`{sig}` is too wide to index: a relation key holds at most 256 columns"
                     );
-                    return Err(RulesError::Type { predicate: sig, message });
+                    return Err(RulesError::Type {
+                        predicate: sig,
+                        message,
+                    });
                 }
             }
         }
@@ -775,7 +896,10 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
 
     /// scc's `(x, rep)` rows over `set`, with a `[1, 0]` index for a bound `rep`.
     fn materialise_scc(&mut self, set: CatSet) {
-        let mut rows = EdbRows { arity: 2, ..EdbRows::default() };
+        let mut rows = EdbRows {
+            arity: 2,
+            ..EdbRows::default()
+        };
         for (x, rep, t) in self.closure.scc_rows(&set) {
             rows.rows.push(self.values.intern(ValueRef::Node(x)));
             rows.rows.push(self.values.intern(ValueRef::Node(rep)));
@@ -815,7 +939,11 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                         })
                         .collect();
                     names.sort();
-                    text = if *set == CatSet::All { "*".to_string() } else { names.join("|") };
+                    text = if *set == CatSet::All {
+                        "*".to_string()
+                    } else {
+                        names.join("|")
+                    };
                     ValueRef::Str(&text)
                 }
             };
@@ -837,10 +965,16 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         if first && level == Tier::Fact {
             return delta.is_none();
         }
-        let Some(CLit::Pos(p, ..)) = delta.and_then(|d| rule.body.get(d)) else { return false };
+        let Some(CLit::Pos(p, ..)) = delta.and_then(|d| rule.body.get(d)) else {
+            return false;
+        };
         let mine = own.contains(p);
         if !first {
-            return mine && self.rels.get(*p as usize).is_some_and(|r| r.recent_len() > 0);
+            return mine
+                && self
+                    .rels
+                    .get(*p as usize)
+                    .is_some_and(|r| r.recent_len() > 0);
         }
         match an.preds.get(*p as usize).map(|i| i.kind) {
             Some(PredKind::Builtin(_)) => true,
@@ -866,8 +1000,10 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         user: &Program,
     ) -> Result<(), RulesError> {
         let own = stratum.preds.as_slice();
-        let arity: Vec<usize> =
-            own.iter().map(|&p| an.preds.get(p as usize).map_or(0, |i| i.arity)).collect();
+        let arity: Vec<usize> = own
+            .iter()
+            .map(|&p| an.preds.get(p as usize).map_or(0, |i| i.arity))
+            .collect();
         for level in Tier::ALL {
             let mut first = true;
             let mut waiting = Waiting::default();
@@ -876,8 +1012,12 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                     vec![(Vec::new(), Vec::new()); own.len()];
                 let mut ran = false;
                 for rp in &plan.rules {
-                    let Some(rule) = an.rules.get(rp.rule) else { continue };
-                    let Some(slot) = own.iter().position(|p| *p == rule.head) else { continue };
+                    let Some(rule) = an.rules.get(rp.rule) else {
+                        continue;
+                    };
+                    let Some(slot) = own.iter().position(|p| *p == rule.head) else {
+                        continue;
+                    };
                     // evaluate checked that every rule index fits below EDB_RULE.
                     let meta_rule = u16::try_from(rp.rule).unwrap_or(EDB_RULE);
                     for v in &rp.variants {
@@ -887,7 +1027,10 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                         ran = true;
                         let head = self.head(&v.head);
                         let (rows, metas) = &mut adds[slot];
-                        let mode = Mode::Eval { level, first_round: first };
+                        let mode = Mode::Eval {
+                            level,
+                            first_round: first,
+                        };
                         run_body(&mut self.ctx(declared, multi), &v.steps, mode, &mut |b| {
                             if push_head(&head, b, rows) {
                                 metas.push(RowMeta {
@@ -943,14 +1086,19 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         multi: &mut Vec<MultiState>,
         user: &Program,
     ) -> Result<(), RulesError> {
-        let (Some(rp), Some(spec)) = (plan.rules.first(), plan.agg.as_ref()) else { return Ok(()) };
+        let (Some(rp), Some(spec)) = (plan.rules.first(), plan.agg.as_ref()) else {
+            return Ok(());
+        };
         let (Some(rule), Some(v)) = (an.rules.get(rp.rule), rp.variants.first()) else {
             return Ok(());
         };
         let p = rule.head;
         let head = self.head(&v.head);
         let (mut bindings, mut levels, mut heights) = (Vec::new(), Vec::new(), Vec::new());
-        let mode = Mode::Eval { level: Tier::Heuristic, first_round: true };
+        let mode = Mode::Eval {
+            level: Tier::Heuristic,
+            first_round: true,
+        };
         run_body(&mut self.ctx(declared, multi), &v.steps, mode, &mut |b| {
             if push_head(&head, b, &mut bindings) {
                 levels.push(b.level);
@@ -980,7 +1128,12 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
             self.at_level[p as usize][usize::from(l.level())] += 1;
         }
         let arity = an.preds[p as usize].arity;
-        let rows = EdbRows { arity, rows: out.rows, levels: out.levels, ordinals: Vec::new() };
+        let rows = EdbRows {
+            arity,
+            rows: out.rows,
+            levels: out.levels,
+            ordinals: Vec::new(),
+        };
         let n = self.rels[p as usize].load(rows, Some(&out.heights));
         self.stats.derived_rows += n;
         if self.budget.charge(n) {
@@ -995,14 +1148,26 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
     fn budget_error(&self, an: &Analysis, p: PredId, user: &Program) -> RulesError {
         let (name, arity) = user_predicate(an, p).unwrap_or_default();
         let predicate = format!("{name}/{arity}");
-        let first = user.rules.iter().find(|r| r.head.pred == name && r.head.arity() == arity);
+        let first = user
+            .rules
+            .iter()
+            .find(|r| r.head.pred == name && r.head.arity() == arity);
         let (source, line) = match first {
             Some(r) => (user.source_name(r.span.source).to_string(), r.span.line),
             None => (user.source_name(0).to_string(), 0),
         };
-        let (rows, cap) = (self.budget.tripped.unwrap_or(self.budget.used), self.budget.cap);
+        let (rows, cap) = (
+            self.budget.tripped.unwrap_or(self.budget.used),
+            self.budget.cap,
+        );
         eprintln!("[rules] budget pred={predicate} rows={rows} cap={cap}");
-        RulesError::Budget { predicate, source, line, rows, cap }
+        RulesError::Budget {
+            predicate,
+            source,
+            line,
+            rows,
+            cap,
+        }
     }
 }
 
@@ -1042,7 +1207,9 @@ fn rule_caveats(an: &Analysis) -> Vec<Vec<AbsenceCaveat>> {
             seen[start as usize] = true;
             while let Some(q) = stack.pop() {
                 for &r in &rules_of[q as usize] {
-                    let Some(rule) = an.rules.get(r) else { continue };
+                    let Some(rule) = an.rules.get(r) else {
+                        continue;
+                    };
                     out.extend(&rule.negated_reads);
                     for next in reads(rule) {
                         if !seen[next as usize] {
@@ -1061,7 +1228,11 @@ fn rule_caveats(an: &Analysis) -> Vec<Vec<AbsenceCaveat>> {
             let mut all: Vec<AbsenceCaveat> = r
                 .negated_reads
                 .iter()
-                .chain(reads(r).into_iter().flat_map(|q| cones[q as usize].iter().copied()))
+                .chain(
+                    reads(r)
+                        .into_iter()
+                        .flat_map(|q| cones[q as usize].iter().copied()),
+                )
                 .map(|n| AbsenceCaveat {
                     negated: n.negated.clone(),
                     categories: n.categories.clone(),
@@ -1097,8 +1268,9 @@ impl<'v> Keys<'v> {
         values: &'v ValueTable,
         handles: impl Iterator<Item = Handle>,
     ) -> Self {
-        let mut hs: Vec<Handle> =
-            handles.filter(|h| matches!(values.get(*h), ValueRef::Node(_))).collect();
+        let mut hs: Vec<Handle> = handles
+            .filter(|h| matches!(values.get(*h), ValueRef::Node(_)))
+            .collect();
         hs.sort_unstable();
         hs.dedup();
         let nodes = hs
@@ -1112,7 +1284,9 @@ impl<'v> Keys<'v> {
     }
 
     fn key(&self, h: Handle) -> &str {
-        self.nodes.binary_search_by_key(&h, |(k, _)| *k).map_or("", |i| self.nodes[i].1.as_str())
+        self.nodes
+            .binary_search_by_key(&h, |(k, _)| *k)
+            .map_or("", |i| self.nodes[i].1.as_str())
     }
 
     fn cmp(&self, a: Handle, b: Handle) -> Ordering {
@@ -1170,7 +1344,11 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
         let mut g = MemSource::new(tables());
         let names = ["r1", "r2", "f1", "f2", "f3", "f4"];
         for (i, name) in names.iter().enumerate() {
-            let kind = if name.starts_with('r') { ROUTE } else { FUNCTION };
+            let kind = if name.starts_with('r') {
+                ROUTE
+            } else {
+                FUNCTION
+            };
             g.node(node_id(0, i as u32), kind, *name);
         }
         let at = |n: &str| node_id(0, names.iter().position(|x| *x == n).unwrap_or(0) as u32);
@@ -1202,7 +1380,13 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
     }
 
     fn edge(g: &mut MemSource, from: u32, to: u32, cat: &str, tier: Tier) {
-        g.edge(node_id(0, from), node_id(0, to), category_id(cat), Confidence::Strong, tier);
+        g.edge(
+            node_id(0, from),
+            node_id(0, to),
+            category_id(cat),
+            Confidence::Strong,
+            tier,
+        );
     }
 
     fn eval<'s, S: FactSource + ?Sized>(text: &str, g: &'s S, opts: &Options) -> Evaluation<'s, S> {
@@ -1211,9 +1395,20 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
 
     /// Each row of `pred` as its rendered values joined by spaces, with its tier.
     fn rendered<S: FactSource + ?Sized>(ev: &Evaluation<'_, S>, pred: &str) -> Vec<(String, Tier)> {
-        let rows = ev.rows(pred).unwrap_or_else(|e| panic!("rows({pred}): {e}"));
+        let rows = ev
+            .rows(pred)
+            .unwrap_or_else(|e| panic!("rows({pred}): {e}"));
         rows.iter()
-            .map(|r| (r.values.iter().map(|v| ev.render(v)).collect::<Vec<_>>().join(" "), r.tier))
+            .map(|r| {
+                (
+                    r.values
+                        .iter()
+                        .map(|v| ev.render(v))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    r.tier,
+                )
+            })
             .collect()
     }
 
@@ -1263,14 +1458,26 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
             vec![Value::Node(node_id(0, 3)), Value::Int(2)]
         );
         // One multi-source walk from r1 and r2: the best tier over both sources.
-        assert_eq!(rendered(&ev, "far"), rows(&[("f1", D), ("f2", F), ("f3", D), ("f4", D)]));
+        assert_eq!(
+            rendered(&ev, "far"),
+            rows(&[("f1", D), ("f2", F), ("f3", D), ("f4", D)])
+        );
         for p in ["tc", "fan", "far"] {
-            assert!(ev.rows(p).unwrap_or_default().iter().all(|r| r.absence.is_empty()), "{p}");
+            assert!(
+                ev.rows(p)
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|r| r.absence.is_empty()),
+                "{p}"
+            );
         }
         // The warning: tc's base rule starts from every CALLS edge.
         let warnings: Vec<String> = ev.warnings().iter().map(|d| d.message.clone()).collect();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].starts_with("recursive predicate `tc/2` is unseeded"), "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("recursive predicate `tc/2` is unseeded"),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -1298,24 +1505,44 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
     #[test]
     fn budget_stops_with_the_text() {
         let g = clique_ring(60, 120, "CALLS", 1);
-        let opts = Options { max_rows: 1000, ..Options::default() };
+        let opts = Options {
+            max_rows: 1000,
+            ..Options::default()
+        };
         let err = match run("rules", TC, &g, &opts) {
             Ok(_) => panic!("an unseeded closure of 3,600 rows passed a budget of 1,000"),
             Err(e) => e,
         };
-        let RulesError::Budget { predicate, source, line, rows, cap } = &err else {
+        let RulesError::Budget {
+            predicate,
+            source,
+            line,
+            rows,
+            cap,
+        } = &err
+        else {
             panic!("expected a budget error, got {err:?}")
         };
-        assert_eq!((predicate.as_str(), source.as_str(), *line, *cap), ("tc/2", "rules", 1, 1000));
+        assert_eq!(
+            (predicate.as_str(), source.as_str(), *line, *cap),
+            ("tc/2", "rules", 1, 1000)
+        );
         assert!(*rows > 1000, "{rows}");
         assert!(
-            err.to_string().starts_with("rule evaluation stopped: `tc/2` (rules:1) reached "),
+            err.to_string()
+                .starts_with("rule evaluation stopped: `tc/2` (rules:1) reached "),
             "{err}"
         );
         // The default budget is the spec's and the same closure runs under it.
         assert_eq!(Options::default().max_rows, DEFAULT_MAX_ROWS);
         assert_eq!(DEFAULT_MAX_ROWS, 5_000_000);
-        assert_eq!(eval(TC, &g, &Options::default()).rows("tc").map(|r| r.len()).ok(), Some(3600));
+        assert_eq!(
+            eval(TC, &g, &Options::default())
+                .rows("tc")
+                .map(|r| r.len())
+                .ok(),
+            Some(3600)
+        );
     }
 
     #[test]
@@ -1333,7 +1560,10 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
             })
         );
         // handled/1 is read by unhandled, so it is no output and rows() does not answer it.
-        assert!(matches!(ev.rows("handled"), Err(RulesError::Unknown { .. })));
+        assert!(matches!(
+            ev.rows("handled"),
+            Err(RulesError::Unknown { .. })
+        ));
         // Named outputs: by name or signature, deduplicated, sorted.
         let opts = Options {
             outputs: vec!["unhandled".into(), "handled/1".into(), "handled".into()],
@@ -1343,12 +1573,19 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
         assert_eq!(named.outputs(), ["handled/1", "unhandled/1"]);
         assert_eq!(rendered(&named, "handled"), rows(&[("r1", Tier::Fact)]));
         // A name the program does not define lists what it does, in source order.
-        let opts = Options { outputs: vec!["tc/3".into()], ..Options::default() };
-        let known =
-            ["tc/2", "handled/1", "unhandled/1", "fan/2", "far/1"].map(String::from).to_vec();
+        let opts = Options {
+            outputs: vec!["tc/3".into()],
+            ..Options::default()
+        };
+        let known = ["tc/2", "handled/1", "unhandled/1", "fan/2", "far/1"]
+            .map(String::from)
+            .to_vec();
         assert_eq!(
             run("rules", MIXED, &g, &opts).map(|e| e.outputs()),
-            Err(RulesError::Unknown { predicate: "tc/3".into(), known })
+            Err(RulesError::Unknown {
+                predicate: "tc/3".into(),
+                known
+            })
         );
         // run reports a parse error as the parser gives it.
         assert!(matches!(
@@ -1405,10 +1642,21 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
         let mut inner = chain(4, "CALLS", &[Tier::Fact]);
         edge(&mut inner, 0, 2, "USES", Tier::Fact);
         edge(&mut inner, 1, 3, "USES", Tier::Derived);
-        let g =
-            Counting { inner, cell_walks: Counter::new(0), attr_reads: RefCell::new(Vec::new()) };
-        let calls = eval(r#"p(x, y) :- edge(x, y, "CALLS")."#, &g, &Options::default());
-        assert_eq!(calls.stats().edb_rows, 3, "every edge atom says CALLS: only CALLS loads");
+        let g = Counting {
+            inner,
+            cell_walks: Counter::new(0),
+            attr_reads: RefCell::new(Vec::new()),
+        };
+        let calls = eval(
+            r#"p(x, y) :- edge(x, y, "CALLS")."#,
+            &g,
+            &Options::default(),
+        );
+        assert_eq!(
+            calls.stats().edb_rows,
+            3,
+            "every edge atom says CALLS: only CALLS loads"
+        );
         assert_eq!(calls.rows("p").map(|r| r.len()).ok(), Some(3));
         assert!(g.attr_reads.borrow().is_empty());
         assert_eq!(g.cell_walks.get(), 0);
@@ -1418,9 +1666,21 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
             &g,
             &Options::default(),
         );
-        assert_eq!(two.stats().edb_rows, 5 + 5, "edge and edge_conf each keep CALLS | USES");
-        let any = eval("p(x, y) :- edge(x, y, c), category(c).", &g, &Options::default());
-        assert_eq!(any.stats().edb_rows, 5 + 6, "five edges, six registered categories");
+        assert_eq!(
+            two.stats().edb_rows,
+            5 + 5,
+            "edge and edge_conf each keep CALLS | USES"
+        );
+        let any = eval(
+            "p(x, y) :- edge(x, y, c), category(c).",
+            &g,
+            &Options::default(),
+        );
+        assert_eq!(
+            any.stats().edb_rows,
+            5 + 6,
+            "five edges, six registered categories"
+        );
         assert!(g.attr_reads.borrow().is_empty());
         assert_eq!(g.cell_walks.get(), 0);
         // An attribute is read when, and only when, a rule names it.
@@ -1443,7 +1703,11 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
              magic=0 values=12 warnings=1 ms=0.0"
         );
         s.elapsed_ms = 12.36;
-        assert!(eval_line(&s, 0).ends_with(" warnings=0 ms=12.3"), "{}", eval_line(&s, 0));
+        assert!(
+            eval_line(&s, 0).ends_with(" warnings=0 ms=12.3"),
+            "{}",
+            eval_line(&s, 0)
+        );
         let registries = tables().registries;
         assert_eq!(
             closure_lines(&ev.closure_stats, &registries),
@@ -1463,8 +1727,14 @@ r(x) :- seed2(x), tc(x, _z).
     #[test]
     fn magic_fallback() {
         let g = chain(5, "CALLS", &[Tier::Fact]);
-        let on = Options { outputs: vec!["q".into()], ..Options::default() };
-        let off = Options { magic: false, ..on.clone() };
+        let on = Options {
+            outputs: vec!["q".into()],
+            ..Options::default()
+        };
+        let off = Options {
+            magic: false,
+            ..on.clone()
+        };
         let (a, b) = (eval(FALLBACK, &g, &on), eval(FALLBACK, &g, &off));
         // The rewrite would put `!r` inside recursion, so the original program runs.
         assert_eq!(a.stats().magic_rewrites, 0);
@@ -1484,7 +1754,12 @@ r(x) :- seed2(x), tc(x, _z).
             categories: vec!["CALLS".into()],
             any_category: false,
         };
-        assert!(a.rows("q").unwrap_or_default().iter().all(|r| r.absence == [caveat.clone()]));
+        assert!(
+            a.rows("q")
+                .unwrap_or_default()
+                .iter()
+                .all(|r| r.absence == [caveat.clone()])
+        );
     }
 
     #[test]
@@ -1492,7 +1767,14 @@ r(x) :- seed2(x), tc(x, _z).
         let g = clique_ring(30, 40, "CALLS", 3);
         let text = format!("seed(x) :- index(x, 0).\n{TC}out(b) :- seed(a), tc(a, b).\n");
         let on = eval(&text, &g, &Options::default());
-        let off = eval(&text, &g, &Options { magic: false, ..Options::default() });
+        let off = eval(
+            &text,
+            &g,
+            &Options {
+                magic: false,
+                ..Options::default()
+            },
+        );
         assert_eq!(on.outputs(), ["out/1"]);
         assert_eq!(on.stats().magic_rewrites, 1);
         assert_eq!(off.stats().magic_rewrites, 0);
@@ -1504,12 +1786,21 @@ r(x) :- seed2(x), tc(x, _z).
         assert!(on.stats().derived_rows < 100, "{:?}", on.stats());
         // tc is no output, and with magic on only its demanded copy exists.
         assert!(matches!(on.rows("tc"), Err(RulesError::Unknown { .. })));
-        assert_eq!(on.warnings(), off.warnings(), "warnings are the original program's");
+        assert_eq!(
+            on.warnings(),
+            off.warnings(),
+            "warnings are the original program's"
+        );
         // A budget stop inside the copy names the user predicate and its first rule.
-        let tight = Options { max_rows: 40, ..Options::default() };
+        let tight = Options {
+            max_rows: 40,
+            ..Options::default()
+        };
         let err = run("rules", &text, &g, &tight).map(|e| e.outputs());
         let named = match &err {
-            Err(RulesError::Budget { predicate, line, .. }) => Some((predicate.as_str(), *line)),
+            Err(RulesError::Budget {
+                predicate, line, ..
+            }) => Some((predicate.as_str(), *line)),
             _ => None,
         };
         assert_eq!(named, Some(("tc/2", 2)), "{err:?}");
@@ -1548,9 +1839,12 @@ r(x) :- seed2(x), tc(x, _z).
     fn scc_and_reaches_rows_carry_their_tiers() {
         // 0 -> 1 -> 2 -> 0 with 2 -> 0 DERIVED; 3 -> 0 FACT.
         let mut h = nodes(4);
-        for (f, t, tier) in
-            [(0, 1, Tier::Fact), (1, 2, Tier::Fact), (2, 0, Tier::Derived), (3, 0, Tier::Fact)]
-        {
+        for (f, t, tier) in [
+            (0, 1, Tier::Fact),
+            (1, 2, Tier::Fact),
+            (2, 0, Tier::Derived),
+            (3, 0, Tier::Fact),
+        ] {
             edge(&mut h, f, t, "CALLS", tier);
         }
         let text = r#"cyc(x, r) :- scc(x, r, "CALLS").
@@ -1560,11 +1854,18 @@ hit(x, y) :- node(x, _), reaches(x, y, "CALLS").
         use Tier::{Derived as D, Fact as F};
         assert_eq!(
             rendered(&ev, "cyc"),
-            rows(&[("n00000 n00000", D), ("n00001 n00000", D), ("n00002 n00000", D)])
+            rows(&[
+                ("n00000 n00000", D),
+                ("n00001 n00000", D),
+                ("n00002 n00000", D)
+            ])
         );
         let hit = rendered(&ev, "hit");
         assert!(hit.contains(&("n00003 n00001".into(), F)), "{hit:?}");
-        assert!(!hit.iter().any(|(r, _)| r == "n00003 n00003"), "n00003 is on no cycle: {hit:?}");
+        assert!(
+            !hit.iter().any(|(r, _)| r == "n00003 n00003"),
+            "n00003 is on no cycle: {hit:?}"
+        );
         assert!(hit.contains(&("n00000 n00000".into(), D)), "{hit:?}");
     }
 }

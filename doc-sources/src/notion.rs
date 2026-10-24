@@ -294,11 +294,21 @@ pub fn pull_database(
     let client = Client::new(cfg)?;
     let mut stats = NotionStats::default();
 
-    let db = client.send("GET", &format!("/v1/databases/{}", database_id.trim()), None, &mut stats)?;
+    let db = client.send(
+        "GET",
+        &format!("/v1/databases/{}", database_id.trim()),
+        None,
+        &mut stats,
+    )?;
     let mut sources: Vec<String> = Vec::new();
-    for ds in db["data_sources"].as_array().map(Vec::as_slice).unwrap_or_default() {
+    for ds in db["data_sources"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
         let id = ds["id"].as_str().unwrap_or("");
-        check_id(id).map_err(|e| format!("database {container} lists a data source whose id {e}"))?;
+        check_id(id)
+            .map_err(|e| format!("database {container} lists a data source whose id {e}"))?;
         sources.push(id.to_string());
     }
     sources.sort();
@@ -329,7 +339,11 @@ pub fn pull_database(
             let v = client.send("POST", &path, Some(&body), &mut stats)?;
             let before = stats.fetched;
             let mut capped = false;
-            for page in v["results"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            for page in v["results"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
                 if page["object"].as_str().is_some_and(|o| o != "page") {
                     continue;
                 }
@@ -355,7 +369,12 @@ pub fn pull_database(
                 break;
             }
             idle = if stats.fetched == before { idle + 1 } else { 0 };
-            cursor = Some(next_cursor(&v, cursor.as_deref(), idle, &format!("data source {ds}"))?);
+            cursor = Some(next_cursor(
+                &v,
+                cursor.as_deref(),
+                idle,
+                &format!("data source {ds}"),
+            )?);
         }
     }
 
@@ -378,7 +397,9 @@ pub fn pull_database(
         }
         let id = page["id"].as_str().unwrap_or("");
         let blocks = client.children_tree(id, 0, &mut stats)?;
-        out.push(to_page(page, id, &blocks, &container, &mut stems, &mut stats));
+        out.push(to_page(
+            page, id, &blocks, &container, &mut stems, &mut stats,
+        ));
     }
     Ok((out, stats))
 }
@@ -447,7 +468,9 @@ pub fn pull_page_tree(
                 queue.push_back((child.to_string(), depth + 1));
             }
         }
-        out.push(to_page(&page, &id, &blocks, &container, &mut stems, &mut stats));
+        out.push(to_page(
+            &page, &id, &blocks, &container, &mut stems, &mut stats,
+        ));
     }
     Ok((out, stats))
 }
@@ -534,7 +557,9 @@ fn next_cursor(v: &Value, sent: Option<&str>, idle: usize, what: &str) -> Result
         return Err(format!("{what}: has_more without a next_cursor; stopping"));
     };
     if sent == Some(next) {
-        return Err(format!("{what}: the API sent the same cursor twice; stopping"));
+        return Err(format!(
+            "{what}: the API sent the same cursor twice; stopping"
+        ));
     }
     if idle >= MAX_IDLE {
         return Err(format!(
@@ -589,7 +614,9 @@ impl<'a> Client<'a> {
             if original.is_none() && block["has_children"].as_bool() != Some(true) {
                 continue;
             }
-            let Some(read_from) = original.clone().or_else(|| block["id"].as_str().map(str::to_string))
+            let Some(read_from) = original
+                .clone()
+                .or_else(|| block["id"].as_str().map(str::to_string))
             else {
                 continue;
             };
@@ -627,13 +654,21 @@ impl<'a> Client<'a> {
                 path.push_str(&encode(c));
             }
             let v = self.send("GET", &path, None, stats)?;
-            let results = v["results"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let results = v["results"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             blocks.extend(results.iter().cloned());
             if !v["has_more"].as_bool().unwrap_or(false) {
                 return Ok(blocks);
             }
             idle = if results.is_empty() { idle + 1 } else { 0 };
-            cursor = Some(next_cursor(&v, cursor.as_deref(), idle, &format!("block {block_id}"))?);
+            cursor = Some(next_cursor(
+                &v,
+                cursor.as_deref(),
+                idle,
+                &format!("block {block_id}"),
+            )?);
         }
     }
 
@@ -727,7 +762,10 @@ impl From<SendError> for String {
 
 impl From<String> for SendError {
     fn from(message: String) -> SendError {
-        SendError { status: None, message }
+        SendError {
+            status: None,
+            message,
+        }
     }
 }
 
@@ -796,8 +834,14 @@ mod tests {
 
     #[test]
     fn origins_are_scheme_and_authority_only() {
-        assert_eq!(parse_origin("HTTPS://api.notion.com/"), Ok("https://api.notion.com".into()));
-        assert_eq!(parse_origin("http://127.0.0.1:9"), Ok("http://127.0.0.1:9".into()));
+        assert_eq!(
+            parse_origin("HTTPS://api.notion.com/"),
+            Ok("https://api.notion.com".into())
+        );
+        assert_eq!(
+            parse_origin("http://127.0.0.1:9"),
+            Ok("http://127.0.0.1:9".into())
+        );
         assert!(parse_origin("https://api.notion.com/v1").is_err());
         assert!(parse_origin("https://api.notion.com?x=1").is_err());
         assert!(parse_origin("https://tok@api.notion.com").is_err());
@@ -820,8 +864,14 @@ mod tests {
     #[test]
     fn errors_name_status_code_and_message_and_mask_the_token() {
         let body = r#"{"object":"error","status":401,"code":"unauthorized","message":"API token is invalid."}"#;
-        assert_eq!(api_error(401, body), "401: unauthorized - API token is invalid.");
-        assert_eq!(api_error(502, "<html>bad gateway</html>"), "502: error - <html>bad gateway</html>");
+        assert_eq!(
+            api_error(401, body),
+            "401: unauthorized - API token is invalid."
+        );
+        assert_eq!(
+            api_error(502, "<html>bad gateway</html>"),
+            "502: error - <html>bad gateway</html>"
+        );
         assert_eq!(
             mask("401: unauthorized - token secret_t rejected", "secret_t"),
             "401: unauthorized - token <token> rejected"
@@ -856,7 +906,10 @@ mod tests {
         assert_eq!(wait_secs(Some("0")), 0);
         assert_eq!(wait_secs(Some(" 7 ")), 7);
         assert_eq!(wait_secs(Some("600")), MAX_WAIT_SECS);
-        assert_eq!(wait_secs(Some("Wed, 21 Oct 2026 07:28:00 GMT")), DEFAULT_WAIT_SECS);
+        assert_eq!(
+            wait_secs(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            DEFAULT_WAIT_SECS
+        );
         assert_eq!(wait_secs(None), DEFAULT_WAIT_SECS);
     }
 
@@ -890,7 +943,11 @@ mod tests {
             stats.tree_marker("r1", 3),
             "[docs] sync source=notion root=r1 data_sources=0 fetched=3 kept=3 blocks=9 unsupported=0 requests=7 retries=1 depth_capped=0"
         );
-        assert!(stats.sync_marker("db1", 2).starts_with("[docs] sync source=notion database=db1 data_sources=0 "));
+        assert!(
+            stats
+                .sync_marker("db1", 2)
+                .starts_with("[docs] sync source=notion database=db1 data_sources=0 ")
+        );
     }
 
     #[test]
@@ -899,7 +956,15 @@ mod tests {
         assert_eq!(next_cursor(&v, None, 0, "x"), Ok("c2".into()));
         assert!(next_cursor(&v, Some("c2"), 0, "x").is_err());
         assert!(next_cursor(&v, None, MAX_IDLE, "x").is_err());
-        assert!(next_cursor(&json!({ "has_more": true, "next_cursor": null }), None, 0, "x").is_err());
+        assert!(
+            next_cursor(
+                &json!({ "has_more": true, "next_cursor": null }),
+                None,
+                0,
+                "x"
+            )
+            .is_err()
+        );
         assert_eq!(encode("a b/c"), "a%20b%2Fc");
     }
 }

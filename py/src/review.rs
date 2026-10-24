@@ -60,7 +60,11 @@ fn engine_args(
     title: Option<&str>,
 ) -> Result<ReviewArgs, String> {
     let (ranking, select) = ranking_selected(ranking, cochange)?;
-    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+    let Some(tier) = MODEL_MIN_TIERS
+        .iter()
+        .copied()
+        .find(|t| *t == models_min_tier)
+    else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
             MODEL_MIN_TIERS.join(", ")
@@ -126,7 +130,15 @@ impl Default for Kw<'_> {
 /// checked before anything is built.
 fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String> {
     let format = check_format(kw.format)?;
-    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier, kw.ranking, kw.cochange, kw.title)?;
+    let args = engine_args(
+        kw.depth,
+        kw.max_tests,
+        kw.max_impact,
+        kw.models_min_tier,
+        kw.ranking,
+        kw.cochange,
+        kw.title,
+    )?;
     let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
@@ -436,21 +448,62 @@ mod tests {
 
     #[test]
     fn engine_args_carry_the_keywords() {
-        let a = engine_args(2, 7, 9, "derived", Some("ppr-wide"), false, Some("T012 export")).expect("a tier");
+        let a = engine_args(
+            2,
+            7,
+            9,
+            "derived",
+            Some("ppr-wide"),
+            false,
+            Some("T012 export"),
+        )
+        .expect("a tier");
         assert_eq!(
-            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking.harness_name(), a.blast.select),
+            (
+                a.blast.depth,
+                a.max_tests,
+                a.max_impact,
+                a.models_min_tier,
+                a.blast.ranking.harness_name(),
+                a.blast.select
+            ),
             (2, 7, 9, "derived", "PT*", false)
         );
         let c = engine_args(4, 50, 50, "fact", None, true, None).expect("calibrated");
-        assert_eq!((c.blast.ranking.harness_name(), c.blast.select), ("H10", true), "EC.8: None selects");
-        assert_eq!(a.title.as_deref(), Some("T012 export"), "EB.7: title reaches the engine");
+        assert_eq!(
+            (c.blast.ranking.harness_name(), c.blast.select),
+            ("H10", true),
+            "EC.8: None selects"
+        );
+        assert_eq!(
+            a.title.as_deref(),
+            Some("T012 export"),
+            "EB.7: title reaches the engine"
+        );
         let d = ReviewArgs::default();
         assert_eq!(d.blast.depth, 4, "the signature's depth default");
-        assert_eq!(d.models_min_tier, "fact", "the signature's models_min_tier default");
-        assert_eq!(d.blast.ranking.harness_name(), "H10", "the signature's ranking / cochange defaults");
+        assert_eq!(
+            d.models_min_tier, "fact",
+            "the signature's models_min_tier default"
+        );
+        assert_eq!(
+            d.blast.ranking.harness_name(),
+            "H10",
+            "the signature's ranking / cochange defaults"
+        );
         let k = Kw::default();
         assert_eq!(
-            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier, k.ranking, k.cochange, k.title),
+            (
+                k.format,
+                k.markdown_rows,
+                k.depth,
+                k.max_tests,
+                k.max_impact,
+                k.models_min_tier,
+                k.ranking,
+                k.cochange,
+                k.title
+            ),
             ("dict", 20, 4, 50, 50, "fact", None, true, None),
             "Kw::default is the pyo3 signature's"
         );

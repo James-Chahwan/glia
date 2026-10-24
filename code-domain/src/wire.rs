@@ -84,7 +84,12 @@ pub enum WireFormat {
 
 impl WireFormat {
     /// Every format, in declaration order.
-    pub const ALL: [WireFormat; 4] = [WireFormat::Ts, WireFormat::Go, WireFormat::Dart, WireFormat::Graphql];
+    pub const ALL: [WireFormat; 4] = [
+        WireFormat::Ts,
+        WireFormat::Go,
+        WireFormat::Dart,
+        WireFormat::Graphql,
+    ];
 
     /// The `format` text: `ts`, `go`, `dart` or `graphql`.
     pub fn as_str(self) -> &'static str {
@@ -417,7 +422,11 @@ impl Shape {
     /// type, `array` when one array layer was peeled off.
     pub fn named(text: &str) -> Shape {
         let (ty, array) = element_type(text);
-        Shape::Named { ty, array, model: None }
+        Shape::Named {
+            ty,
+            array,
+            model: None,
+        }
     }
 
     /// An [`Shape::Open`] whose `raw` is `raw` clipped to [`RAW_MAX`] chars.
@@ -428,7 +437,9 @@ impl Shape {
     /// The in-repo model a builder resolved this shape to.
     pub fn model(&self) -> Option<&str> {
         match self {
-            Shape::Named { model, .. } | Shape::Call { model, .. } | Shape::Chain { model, .. } => model.as_deref(),
+            Shape::Named { model, .. } | Shape::Call { model, .. } | Shape::Chain { model, .. } => {
+                model.as_deref()
+            }
             _ => None,
         }
     }
@@ -449,7 +460,9 @@ impl Shape {
     pub fn is_array(&self) -> bool {
         matches!(
             self,
-            Shape::Named { array: true, .. } | Shape::Call { array: true, .. } | Shape::Chain { array: true, .. }
+            Shape::Named { array: true, .. }
+                | Shape::Call { array: true, .. }
+                | Shape::Chain { array: true, .. }
         )
     }
 
@@ -553,7 +566,11 @@ impl Shape {
                 }
                 o.str("type", ty);
             }
-            Shape::Call { chain, array, model } => {
+            Shape::Call {
+                chain,
+                array,
+                model,
+            } => {
                 if *array {
                     o.bool("array", true);
                 }
@@ -562,7 +579,11 @@ impl Shape {
                     o.str("model", m);
                 }
             }
-            Shape::Chain { chain, array, model } => {
+            Shape::Chain {
+                chain,
+                array,
+                model,
+            } => {
                 if *array {
                     o.bool("array", true);
                 }
@@ -708,7 +729,11 @@ impl ServerWire {
 /// `,"request":S` spliced in before its last `}`. The old bytes up to that
 /// `}` stay a prefix; with neither shape (or no `}`) the payload comes back
 /// unchanged. Called once per hit, by the parser that wrote it.
-pub fn append_hit_fields(payload: &str, response: Option<&Shape>, request: Option<&Shape>) -> String {
+pub fn append_hit_fields(
+    payload: &str,
+    response: Option<&Shape>,
+    request: Option<&Shape>,
+) -> String {
     let Some(end) = payload.rfind('}') else {
         return payload.to_string();
     };
@@ -848,7 +873,11 @@ fn one_kind(kinds: Vec<JsonKind>) -> JsonKind {
     let Some(first) = left.next() else {
         return JsonKind::Null;
     };
-    if left.all(|k| k == first) { first } else { JsonKind::Any }
+    if left.all(|k| k == first) {
+        first
+    } else {
+        JsonKind::Any
+    }
 }
 
 fn ts_kind(ty: &str, depth: usize) -> JsonKind {
@@ -856,7 +885,10 @@ fn ts_kind(ty: &str, depth: usize) -> JsonKind {
     if depth > 8 {
         return JsonKind::Any;
     }
-    let union: Vec<&str> = split_top(t, '|').into_iter().filter(|m| !m.is_empty()).collect();
+    let union: Vec<&str> = split_top(t, '|')
+        .into_iter()
+        .filter(|m| !m.is_empty())
+        .collect();
     if union.len() > 1 {
         return one_kind(union.into_iter().map(|m| ts_kind(m, depth + 1)).collect());
     }
@@ -878,7 +910,9 @@ fn ts_kind(ty: &str, depth: usize) -> JsonKind {
     }
     // A numeric literal type (`1 | 2`); the leading-char gate keeps `inf` /
     // `NaN`-named types, which `f64::from_str` accepts, out.
-    if t.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.') && t.parse::<f64>().is_ok() {
+    if t.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.')
+        && t.parse::<f64>().is_ok()
+    {
         return JsonKind::Number;
     }
     if t.starts_with('{') || generic_arg(t, "Record").is_some() {
@@ -924,7 +958,8 @@ fn is_go_number(t: &str) -> bool {
 
 /// `t` is `<kw>{..}` or `<kw> {..}` (a Go inline struct / interface type).
 fn keyword_block(t: &str, kw: &str) -> bool {
-    t.strip_prefix(kw).is_some_and(|r| r.trim_start().starts_with('{'))
+    t.strip_prefix(kw)
+        .is_some_and(|r| r.trim_start().starts_with('{'))
 }
 
 fn dart_kind(ty: &str) -> JsonKind {
@@ -998,7 +1033,10 @@ fn strip_nullish(t: &str) -> &str {
     if let Some(r) = t.strip_suffix('?').or_else(|| t.strip_suffix('!')) {
         t = r.trim_end();
     }
-    let members: Vec<&str> = split_top(t, '|').into_iter().filter(|m| !m.is_empty()).collect();
+    let members: Vec<&str> = split_top(t, '|')
+        .into_iter()
+        .filter(|m| !m.is_empty())
+        .collect();
     if members.len() > 1 {
         let kept: Vec<&str> = members
             .into_iter()
@@ -1309,7 +1347,8 @@ mod tests {
     fn sorted(t: &Tree, skip_top: bool) -> bool {
         match t {
             Tree::Obj(kv) => {
-                (skip_top || kv.windows(2).all(|w| w[0].0 < w[1].0)) && kv.iter().all(|(_, v)| sorted(v, false))
+                (skip_top || kv.windows(2).all(|w| w[0].0 < w[1].0))
+                    && kv.iter().all(|(_, v)| sorted(v, false))
             }
             Tree::Arr(xs) => xs.iter().all(|x| sorted(x, false)),
             Tree::Leaf => true,
@@ -1403,7 +1442,11 @@ mod tests {
     fn every_shape() -> Vec<Shape> {
         let object = Shape::Object {
             fields: vec![
-                ShapeField::new("offers", true, named("Offer", true, Some("src::models::Offer"))),
+                ShapeField::new(
+                    "offers",
+                    true,
+                    named("Offer", true, Some("src::models::Offer")),
+                ),
                 ShapeField {
                     name: "total".into(),
                     field: Some("count".into()),
@@ -1441,7 +1484,11 @@ mod tests {
                 fields: vec![],
                 open: false,
             },
-            Shape::Union(vec![named("Ticket", false, None), Shape::open("any"), object]),
+            Shape::Union(vec![
+                named("Ticket", false, None),
+                Shape::open("any"),
+                object,
+            ]),
             Shape::open("someCall(a, b)"),
         ]
     }
@@ -1518,14 +1565,19 @@ mod tests {
         assert_eq!(back.fields[0].field, None);
         assert_eq!(back.fields[0].member(), "id");
         assert_eq!(full_field().member(), "Items");
-        assert_eq!(full_schema().field("note").map(|f| f.ty.as_str()), Some("*string"));
+        assert_eq!(
+            full_schema().field("note").map(|f| f.ty.as_str()),
+            Some("*string")
+        );
     }
 
     #[test]
     fn model_schema_reader_rejects_foreign_and_mistyped_payloads() {
         // A proto / OpenAPI SCHEMA_FIELDS payload is not a model schema.
         assert_eq!(
-            ModelSchema::parse(r#"{"format":"proto","fields":[{"name":"id","type":"string","number":1}]}"#),
+            ModelSchema::parse(
+                r#"{"format":"proto","fields":[{"name":"id","type":"string","number":1}]}"#
+            ),
             None
         );
         assert_eq!(
@@ -1534,7 +1586,9 @@ mod tests {
         );
         // A mistyped known key rejects the payload; an unknown key is ignored.
         assert_eq!(
-            ModelSchema::parse(r#"{"fields":[{"name":"a","required":"yes","type":"x"}],"format":"ts"}"#),
+            ModelSchema::parse(
+                r#"{"fields":[{"name":"a","required":"yes","type":"x"}],"format":"ts"}"#
+            ),
             None
         );
         assert_eq!(
@@ -1543,9 +1597,13 @@ mod tests {
             ),
             None
         );
-        assert_eq!(ModelSchema::parse(r#"{"fields":[],"format":"ts","open":"yes"}"#), None);
+        assert_eq!(
+            ModelSchema::parse(r#"{"fields":[],"format":"ts","open":"yes"}"#),
+            None
+        );
         assert_eq!(ModelSchema::parse("not json"), None);
-        let extra = r#"{"fields":[{"name":"a","required":true,"type":"x","zz":1}],"format":"ts","zz":2}"#;
+        let extra =
+            r#"{"fields":[{"name":"a","required":true,"type":"x","zz":1}],"format":"ts","zz":2}"#;
         assert_eq!(ModelSchema::parse(extra).unwrap().fields[0].name, "a");
         // contract_fields' field reader (name / type / required) reads every field.
         let v: Value = serde_json::from_str(&full_schema().to_payload()).unwrap();
@@ -1582,7 +1640,10 @@ mod tests {
         for s in every_shape() {
             let j = s.to_json();
             assert_eq!(Shape::parse(&j), Some(s.clone()), "{j}");
-            assert_eq!(Shape::from_value(&serde_json::from_str(&j).unwrap()), Some(s));
+            assert_eq!(
+                Shape::from_value(&serde_json::from_str(&j).unwrap()),
+                Some(s)
+            );
         }
         assert_eq!(Shape::parse(r#"{"open":false,"raw":"x"}"#), None);
         assert_eq!(Shape::parse(r#"{"array":"yes","type":"X"}"#), None);
@@ -1675,7 +1736,10 @@ mod tests {
         assert!(!Shape::Union(vec![named("A", false, None)]).is_open());
         assert_eq!(named("src::m::Order", false, None).simple_name(), "Order");
         assert_eq!(named("models.Page[T]", false, None).simple_name(), "Page");
-        assert_eq!(named("Api.Envelope<Order>", false, None).simple_name(), "Envelope");
+        assert_eq!(
+            named("Api.Envelope<Order>", false, None).simple_name(),
+            "Envelope"
+        );
         assert_eq!(
             Shape::Call {
                 chain: "f()".into(),
@@ -1711,7 +1775,12 @@ mod tests {
             let p = w.to_payload();
             assert_eq!(ServerWire::parse(&p), Some(w.clone()), "{p}");
         }
-        let mut w = ServerWire::new(WireForm::JsonResponse, "orders", 42, Shape::named("[]models.Order"));
+        let mut w = ServerWire::new(
+            WireForm::JsonResponse,
+            "orders",
+            42,
+            Shape::named("[]models.Order"),
+        );
         w.status = Some(200);
         assert_eq!(w.ty, "Order");
         assert_eq!(
@@ -1744,11 +1813,15 @@ mod tests {
     fn server_wire_reader_rejects_queue_cells() {
         // A12.1's queue MESSAGE_TYPE cell (queues.rs message_type_cell).
         assert_eq!(
-            ServerWire::parse(r#"{"type":"OrderCreated","raw":"pb.OrderCreated","form":"generic","window":"near"}"#),
+            ServerWire::parse(
+                r#"{"type":"OrderCreated","raw":"pb.OrderCreated","form":"generic","window":"near"}"#
+            ),
             None
         );
         assert_eq!(
-            ServerWire::parse(r#"{"type":"X","raw":"X{}","form":"struct_literal","window":"file"}"#),
+            ServerWire::parse(
+                r#"{"type":"X","raw":"X{}","form":"struct_literal","window":"file"}"#
+            ),
             None
         );
         // A site window with an unknown form, a status out of range, or no shape.
@@ -1760,7 +1833,9 @@ mod tests {
             None
         );
         assert_eq!(
-            ServerWire::parse(r#"{"type":"","raw":"v","form":"json_bind","window":"site","line":1}"#),
+            ServerWire::parse(
+                r#"{"type":"","raw":"v","form":"json_bind","window":"site","line":1}"#
+            ),
             None
         );
     }
@@ -1793,7 +1868,11 @@ mod tests {
         // No shape: unchanged.
         assert_eq!(append_hit_fields(HIT, None, None), HIT);
         let stem = &HIT[..HIT.len() - 1];
-        for (r, q) in [(Some(&resp), None), (None, Some(&req)), (Some(&resp), Some(&req))] {
+        for (r, q) in [
+            (Some(&resp), None),
+            (None, Some(&req)),
+            (Some(&resp), Some(&req)),
+        ] {
             let out = append_hit_fields(HIT, r, q);
             assert!(out.starts_with(stem) && out.ends_with('}'), "{out}");
             assert_eq!(hit_shapes(&out), (r.cloned(), q.cloned()));
@@ -1801,7 +1880,11 @@ mod tests {
         }
         assert_eq!(
             append_hit_fields(HIT, Some(&resp), Some(&req)),
-            format!(r#"{stem},"response":{},"request":{}}}"#, resp.to_json(), req.to_json())
+            format!(
+                r#"{stem},"response":{},"request":{}}}"#,
+                resp.to_json(),
+                req.to_json()
+            )
         );
         // An empty object takes no leading comma; a non-object is untouched.
         assert_eq!(
@@ -1848,7 +1931,10 @@ mod tests {
         assert_eq!(k("Order"), JsonKind::Unknown("Order".into()));
         assert_eq!(k("Ticket | null"), JsonKind::Unknown("Ticket".into()));
         assert_eq!(k("Models.Order"), JsonKind::Unknown("Models.Order".into()));
-        assert_eq!(k("Partial<Order>"), JsonKind::Unknown("Partial<Order>".into()));
+        assert_eq!(
+            k("Partial<Order>"),
+            JsonKind::Unknown("Partial<Order>".into())
+        );
         assert_eq!(
             k("(a: string) => void"),
             JsonKind::Unknown("(a: string) => void".into())
@@ -1890,7 +1976,10 @@ mod tests {
         assert_eq!(k("interface{}"), JsonKind::Any);
         assert_eq!(k("json.RawMessage"), JsonKind::Any);
         assert_eq!(k("*models.Order"), JsonKind::Unknown("models.Order".into()));
-        assert_eq!(k("sql.NullString"), JsonKind::Unknown("sql.NullString".into()));
+        assert_eq!(
+            k("sql.NullString"),
+            JsonKind::Unknown("sql.NullString".into())
+        );
         assert_eq!(k("Page[T]"), JsonKind::Unknown("Page[T]".into()));
     }
 
@@ -2025,7 +2114,12 @@ mod tests {
         for (format, types) in cases {
             for t in *types {
                 if element_type(t).1 {
-                    assert_eq!(json_kind(*format, t), JsonKind::Array, "{} {t}", format.as_str());
+                    assert_eq!(
+                        json_kind(*format, t),
+                        JsonKind::Array,
+                        "{} {t}",
+                        format.as_str()
+                    );
                 }
             }
         }

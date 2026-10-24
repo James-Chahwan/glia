@@ -3,12 +3,12 @@ use std::sync::OnceLock;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use glia_code_domain::di_stats::{self, DiShape};
-use glia_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 
 pub fn parse_file(
     source: &str,
@@ -54,8 +54,13 @@ fn parse_acc(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     // LB.7a: top-level types are members of the PACKAGE (the directory), so
     // their qnames hang off the directory scope, not the file module. The
@@ -107,7 +112,9 @@ fn parse_acc(
 /// the file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
 /// ranks the declaration over the container, so qname lookups land on the type.
 fn type_scope(module_qname: &str) -> &str {
-    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
 }
 
 /// `scope::name`, or the bare `name` for the empty (repo-root) scope.
@@ -124,9 +131,8 @@ fn scoped(scope: &str, name: &str) -> String {
 ///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] scala:'`
 fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 #[derive(Default)]
@@ -172,12 +178,28 @@ fn visit_top(
             "package_clause" => collect_package(child, src, parent_qname, acc),
             "object_definition" | "class_definition" => {
                 top_level_types += usize::from(visit_type_def(
-                    child, src, file_rel, scope, parent_id, module_id, repo, node_kind::CLASS, acc,
+                    child,
+                    src,
+                    file_rel,
+                    scope,
+                    parent_id,
+                    module_id,
+                    repo,
+                    node_kind::CLASS,
+                    acc,
                 ));
             }
             "trait_definition" => {
                 top_level_types += usize::from(visit_type_def(
-                    child, src, file_rel, scope, parent_id, module_id, repo, node_kind::INTERFACE, acc,
+                    child,
+                    src,
+                    file_rel,
+                    scope,
+                    parent_id,
+                    module_id,
+                    repo,
+                    node_kind::INTERFACE,
+                    acc,
                 ));
             }
             "function_definition" | "val_definition" | "var_definition" => {
@@ -241,7 +263,11 @@ fn visit_type_def(
     emit_class_injects(node, src, name, id, module_id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
-        let owner = BodyOwner { qname: &qname, id, module_id };
+        let owner = BodyOwner {
+            qname: &qname,
+            id,
+            module_id,
+        };
         visit_body_members(body, src, file_rel, owner, repo, acc);
         if is_test_suite(node, src) {
             acc.tests.suites += 1;
@@ -258,7 +284,13 @@ fn visit_type_def(
 /// trait after `with` becomes IMPLEMENTS. We emit an `UnresolvedRef` with a
 /// `Bare(TypeName)` qualifier; `resolve_refs` binds it to the uniquely-named
 /// class/interface node across the repo and forms the heritage edge.
-fn emit_heritage_refs(node: &TsNode, src: &[u8], from_id: NodeId, module_id: NodeId, acc: &mut Acc) {
+fn emit_heritage_refs(
+    node: &TsNode,
+    src: &[u8],
+    from_id: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
     let Some(ext) = node.child_by_field_name("extend") else {
         return;
     };
@@ -298,8 +330,19 @@ struct BodyOwner<'a> {
     module_id: NodeId,
 }
 
-fn visit_body_members(body: TsNode, src: &[u8], file_rel: &str, owner: BodyOwner<'_>, repo: RepoId, acc: &mut Acc) {
-    let BodyOwner { qname: parent_qname, id: parent_id, module_id } = owner;
+fn visit_body_members(
+    body: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    owner: BodyOwner<'_>,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let BodyOwner {
+        qname: parent_qname,
+        id: parent_id,
+        module_id,
+    } = owner;
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
         match child.kind() {
@@ -317,10 +360,30 @@ fn visit_body_members(body: TsNode, src: &[u8], file_rel: &str, owner: BodyOwner
                 );
             }
             "object_definition" | "class_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
+                visit_type_def(
+                    child,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    module_id,
+                    repo,
+                    node_kind::CLASS,
+                    acc,
+                );
             }
             "trait_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::INTERFACE, acc);
+                visit_type_def(
+                    child,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    module_id,
+                    repo,
+                    node_kind::INTERFACE,
+                    acc,
+                );
             }
             _ => {}
         }
@@ -451,13 +514,20 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, in_type: bool, acc: 
             && let Some(func) = n.child_by_field_name("function")
         {
             let qualifier = classify_call(func, src, in_type);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
             if !matches!(
                 child.kind(),
-                "function_definition" | "class_definition" | "object_definition" | "lambda_expression"
+                "function_definition"
+                    | "class_definition"
+                    | "object_definition"
+                    | "lambda_expression"
             ) {
                 stack.push(child);
             }
@@ -907,7 +977,11 @@ fn akka_http_request(args: TsNode, src: &[u8]) -> Option<(String, String, bool)>
     }
     let (raw, interp) = url?;
     let inferred = method.is_none();
-    Some((method.unwrap_or_else(|| "GET".to_string()), raw, interp || inferred))
+    Some((
+        method.unwrap_or_else(|| "GET".to_string()),
+        raw,
+        interp || inferred,
+    ))
 }
 
 /// `GET` (identifier) or `HttpMethods.POST` (field_expression) → the verb.
@@ -1475,7 +1549,13 @@ fn scan_scala_routes(
             let composed = composed || own.len() > 1;
             segments.extend(own);
             let before = seen.len();
-            emit_scala_route("ANY", &format!("/{}", segments.join("/")), repo, acc, &mut seen);
+            emit_scala_route(
+                "ANY",
+                &format!("/{}", segments.join("/")),
+                repo,
+                acc,
+                &mut seen,
+            );
             if composed && seen.len() > before {
                 tally.akka_composed += 1;
             }
@@ -1494,7 +1574,11 @@ fn scan_scala_routes(
             let after = &source[start..];
             let path = collect_http4s_path(after);
             // Bare `METHOD -> Root` with no segments = root path.
-            let path = if path.is_empty() { "/".to_string() } else { path };
+            let path = if path.is_empty() {
+                "/".to_string()
+            } else {
+                path
+            };
             let route_id = emit_scala_route(method, &path, repo, acc, &mut seen);
             if let Some((qualifier, line)) = http4s_handler(root, src, site, method.len()) {
                 let duplicate = acc.refs.iter().any(|r| {
@@ -1526,7 +1610,9 @@ fn collect_http4s_path(after: &str) -> String {
     let mut rest = after;
     loop {
         let trimmed = rest.trim_start();
-        let Some(slash_off) = trimmed.strip_prefix('/') else { break };
+        let Some(slash_off) = trimmed.strip_prefix('/') else {
+            break;
+        };
         let next = slash_off.trim_start();
         if let Some(lit_rest) = next.strip_prefix('"')
             && let Some(end) = lit_rest.find('"')
@@ -1538,7 +1624,10 @@ fn collect_http4s_path(after: &str) -> String {
         }
         // Segment variable: IntVar / LongVar / UUIDVar → treat as :id
         let next_bytes = next.as_bytes();
-        if next_bytes.first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
+        if next_bytes
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        {
             let end = next
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .unwrap_or(next.len());
@@ -1662,7 +1751,10 @@ fn handler_callee<'a>(expr: TsNode<'a>, src: &'a [u8]) -> Option<(Option<&'a str
 fn enclosing_type_declaring<'a>(node: TsNode<'a>, src: &'a [u8], method: &str) -> Option<&'a str> {
     let mut cur = node.parent();
     while let Some(n) = cur {
-        if matches!(n.kind(), "object_definition" | "class_definition" | "trait_definition") {
+        if matches!(
+            n.kind(),
+            "object_definition" | "class_definition" | "trait_definition"
+        ) {
             let body = n.child_by_field_name("body")?;
             let mut cursor = body.walk();
             let declares = body.named_children(&mut cursor).any(|m| {
@@ -1765,7 +1857,11 @@ impl<'a> ScalaText<'a> {
         let n = needle.as_bytes();
         let mut out = Vec::new();
         let mut i = 0;
-        while let Some(p) = self.src.get(i..).and_then(|s| s.windows(n.len()).position(|w| w == n)) {
+        while let Some(p) = self
+            .src
+            .get(i..)
+            .and_then(|s| s.windows(n.len()).position(|w| w == n))
+        {
             let at = i + p;
             let boundary = at == 0 || !is_ident_byte(self.src[at - 1]);
             if boundary && self.is_code(at) {
@@ -1851,7 +1947,9 @@ impl<'a> ScalaText<'a> {
                     conjoined = true;
                     at = self.skip_blank(at + 1);
                     let start = at;
-                    while at < self.src.len() && (is_ident_byte(self.src[at]) || self.src[at] == b'.') {
+                    while at < self.src.len()
+                        && (is_ident_byte(self.src[at]) || self.src[at] == b'.')
+                    {
                         at += 1;
                     }
                     if at == start {
@@ -1927,7 +2025,13 @@ fn akka_matcher_path(args: &str) -> Option<Vec<String>> {
         // to one char, so a non-ASCII token reads garbled, and is rejected:
         // is_pathlike and the matcher names are ASCII.
         let token: String = (s..e)
-            .map(|j| if text.class[j] == COMMENT { ' ' } else { char::from(src[j]) })
+            .map(|j| {
+                if text.class[j] == COMMENT {
+                    ' '
+                } else {
+                    char::from(src[j])
+                }
+            })
             .collect();
         let token = token.trim();
         let segment = if let Some(lit) = token
@@ -2100,7 +2204,10 @@ mod tests {
             node_kind::CLASS,
             "src::main::scala::shop::Widget",
         );
-        assert_ne!(module_id, class_id, "type and file MODULE share a qname, not an id");
+        assert_ne!(
+            module_id, class_id,
+            "type and file MODULE share a qname, not an id"
+        );
         assert_eq!(fp.nav.parent_of.get(&class_id), Some(&module_id));
         for member in ["run", "make"] {
             let id = NodeId::from_parts(
@@ -2146,8 +2253,14 @@ object Outer {
             qnames_of(&fp, node_kind::CLASS),
             vec!["app::Outer", "app::Outer::Inner"]
         );
-        assert_eq!(qnames_of(&fp, node_kind::INTERFACE), vec!["app::Outer::Port"]);
-        assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["app::Outer::Inner::go"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::INTERFACE),
+            vec!["app::Outer::Port"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["app::Outer::Inner::go"]
+        );
     }
 
     /// LB.7a — a file at the repo root has an empty package scope: its type's
@@ -2160,7 +2273,10 @@ object Outer {
         assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["App::run"]);
         assert_eq!(qnames_of(&fp, node_kind::MODULE), vec!["App"]);
         assert_eq!(type_scope("App"), "");
-        assert_eq!(type_scope("src::main::scala::shop::Widget"), "src::main::scala::shop");
+        assert_eq!(
+            type_scope("src::main::scala::shop::Widget"),
+            "src::main::scala::shop"
+        );
         assert_eq!(scoped("", "App"), "App");
         assert_eq!(scoped("shop", "Widget"), "shop::Widget");
     }
@@ -2179,11 +2295,31 @@ object UserServiceImpl {
 }
 "#;
         let fp = parse_file(source, "src/UserService.scala", "src::UserService", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
         // LB.7a: package-scoped, not `src::UserService::UserService`.
-        assert_eq!(qnames_of(&fp, node_kind::INTERFACE), vec!["src::UserService"]);
-        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["src::UserServiceImpl"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::INTERFACE),
+            vec!["src::UserService"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["src::UserServiceImpl"]
+        );
     }
 
     #[test]
@@ -2197,7 +2333,14 @@ class Config {
 }
 "#;
         let fp = parse_file(source, "src/Config.scala", "src::Config", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            2
+        );
         // LB.7a: package-scoped, not `src::Config::Config::load`.
         assert_eq!(
             qnames_of(&fp, node_kind::METHOD),
@@ -2376,7 +2519,13 @@ class ApiClient(ws: WSClient) {
   def headers(body: String) = ws.url("/api/orders").addHttpHeaders("a" -> "b").put(body)
 }
 "#;
-        let fp = parse_file(source, "client/ApiClient.scala", "client::ApiClient", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "client/ApiClient.scala",
+            "client::ApiClient",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             endpoint_names(&fp),
             vec![
@@ -2466,7 +2615,13 @@ class ApiClient(ws: WSClient) {
   def fetchUser(id: String) = ws.url("/api/users").get()
 }
 "#;
-        let fp = parse_file(source, "client/ApiClient.scala", "client::ApiClient", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "client/ApiClient.scala",
+            "client::ApiClient",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             fp.nav
                 .kind_by_id
@@ -2491,7 +2646,13 @@ class ApiClient(ws: WSClient, config: Config) {
   def named() = client.post("/api/x")
 }
 "#;
-        let fp = parse_file(source, "client/ApiClient.scala", "client::ApiClient", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "client/ApiClient.scala",
+            "client::ApiClient",
+            repo(),
+        )
+        .unwrap();
         assert!(
             endpoint_names(&fp).is_empty(),
             "non-HTTP calls produced ENDPOINTs: {:?}",
@@ -2511,7 +2672,11 @@ val service = HttpRoutes.of[IO] {
         let fp = parse_file(source, "src/Api.scala", "src::Api", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/:id")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/users/:id"))
+        );
     }
 
     /// Sorted bare type names of the INJECTS refs from the node named `from`.
@@ -2670,7 +2835,10 @@ object AppWiring {
     }
 
     fn attr(base: &str, name: &str) -> CallQualifier {
-        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 
     #[test]
@@ -2681,8 +2849,14 @@ object AppWiring {
             "../../../../bench/substrate-gap/matrix/scala/http_server/server/UserRoutes.scala"
         );
         let fp = parse_file(source, "UserRoutes.scala", "UserRoutes", repo()).unwrap();
-        assert_eq!(handled_by(&fp, "GET", "/users/:id"), vec![(attr("UserRoutes", "getUser"), 10)]);
-        assert_eq!(handled_by(&fp, "POST", "/users"), vec![(attr("UserRoutes", "createUser"), 11)]);
+        assert_eq!(
+            handled_by(&fp, "GET", "/users/:id"),
+            vec![(attr("UserRoutes", "getUser"), 10)]
+        );
+        assert_eq!(
+            handled_by(&fp, "POST", "/users"),
+            vec![(attr("UserRoutes", "createUser"), 11)]
+        );
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "UserRoutes");
         assert!(
             fp.refs
@@ -2712,17 +2886,32 @@ object Api {
 }
 "#;
         let fp = parse_file(source, "src/Api.scala", "src::Api", repo()).unwrap();
-        assert!(handled_by(&fp, "GET", "/ok").is_empty(), "`Ok(..)` is a status, not a handler");
-        assert_eq!(handled_by(&fp, "GET", "/find/:id"), vec![(attr("svc", "find"), 4)]);
+        assert!(
+            handled_by(&fp, "GET", "/ok").is_empty(),
+            "`Ok(..)` is a status, not a handler"
+        );
+        assert_eq!(
+            handled_by(&fp, "GET", "/find/:id"),
+            vec![(attr("svc", "find"), 4)]
+        );
         // `Api` declares no `helper`: the ref stays Bare for the module lookup.
         assert_eq!(
             handled_by(&fp, "GET", "/bare"),
             vec![(CallQualifier::Bare("helper".to_string()), 5)]
         );
-        assert_eq!(handled_by(&fp, "GET", "/gen"), vec![(attr("Api", "typed"), 6)]);
-        assert_eq!(handled_by(&fp, "GET", "/self"), vec![(attr("Api", "typed"), 7)]);
+        assert_eq!(
+            handled_by(&fp, "GET", "/gen"),
+            vec![(attr("Api", "typed"), 6)]
+        );
+        assert_eq!(
+            handled_by(&fp, "GET", "/self"),
+            vec![(attr("Api", "typed"), 7)]
+        );
         // A multi-statement body evaluates to its last statement.
-        assert_eq!(handled_by(&fp, "POST", "/multi"), vec![(attr("Api", "create"), 8)]);
+        assert_eq!(
+            handled_by(&fp, "POST", "/multi"),
+            vec![(attr("Api", "create"), 8)]
+        );
         // The commented-out site still mints its ROUTE (the text scan, as at
         // HEAD) but sits in another case's body, so it names no handler.
         assert!(route_names(&fp).contains(&"GET /ghost".to_string()));
@@ -2730,7 +2919,10 @@ object Api {
         assert!(handled_by(&fp, "GET", "/for").is_empty());
         assert!(handled_by(&fp, "GET", "/status").is_empty());
         assert_eq!(
-            fp.refs.iter().filter(|r| r.category == edge_category::HANDLED_BY).count(),
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::HANDLED_BY)
+                .count(),
             5,
             "refs: {:?}",
             fp.refs
@@ -2740,9 +2932,8 @@ object Api {
     #[test]
     fn akka_path_matchers_compose() {
         // The matrix scala/ws file: every segment, not the first literal.
-        let source = include_str!(
-            "../../../../bench/substrate-gap/matrix/scala/ws/server/ChatRoutes.scala"
-        );
+        let source =
+            include_str!("../../../../bench/substrate-gap/matrix/scala/ws/server/ChatRoutes.scala");
         let fp = parse_file(source, "ChatRoutes.scala", "ChatRoutes", repo()).unwrap();
         assert_eq!(route_names(&fp), vec!["ANY /ws/chat".to_string()]);
 
@@ -2788,7 +2979,9 @@ object Routes {
             "a val matcher, separateOnSlashes and an unreadable prefix mint nothing"
         );
         assert!(
-            fp.refs.iter().all(|r| r.category != edge_category::HANDLED_BY),
+            fp.refs
+                .iter()
+                .all(|r| r.category != edge_category::HANDLED_BY),
             "an Akka route names no handler: {:?}",
             fp.refs
         );
@@ -2800,17 +2993,44 @@ object Routes {
             p.parse(source, None).unwrap()
         };
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Routes");
-        let tally = scan_scala_routes(source, tree.root_node(), module_id, repo(), &mut Acc::default());
-        assert_eq!(tally, RouteTally { routes: 5, handled: 0, akka_composed: 5 });
+        let tally = scan_scala_routes(
+            source,
+            tree.root_node(),
+            module_id,
+            repo(),
+            &mut Acc::default(),
+        );
+        assert_eq!(
+            tally,
+            RouteTally {
+                routes: 5,
+                handled: 0,
+                akka_composed: 5
+            }
+        );
     }
 
     #[test]
     fn akka_matcher_table() {
         let read = |s: &str| akka_matcher_path(s).map(|v| v.join("/"));
         assert_eq!(read(r#""ws" / "chat""#).as_deref(), Some("ws/chat"));
-        assert_eq!(read(r#""api/v1" / Segment"#).as_deref(), Some("api/v1/:segment"));
-        for m in ["IntNumber", "LongNumber", "HexIntNumber", "HexLongNumber", "DoubleNumber", "JavaUUID"] {
-            assert_eq!(read(&format!(r#""u" / {m}"#)).as_deref(), Some("u/:id"), "{m}");
+        assert_eq!(
+            read(r#""api/v1" / Segment"#).as_deref(),
+            Some("api/v1/:segment")
+        );
+        for m in [
+            "IntNumber",
+            "LongNumber",
+            "HexIntNumber",
+            "HexLongNumber",
+            "DoubleNumber",
+            "JavaUUID",
+        ] {
+            assert_eq!(
+                read(&format!(r#""u" / {m}"#)).as_deref(),
+                Some("u/:id"),
+                "{m}"
+            );
         }
         assert_eq!(read("Remaining").as_deref(), Some("*"));
         assert_eq!(read(r#""f" / RemainingPath"#).as_deref(), Some("f/*"));
@@ -2898,7 +3118,13 @@ object Users {
         p.set_language(&lang).unwrap();
         let tree = p.parse(source, None).unwrap();
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "UserRoutes");
-        let tally = scan_scala_routes(source, tree.root_node(), module_id, repo(), &mut Acc::default());
+        let tally = scan_scala_routes(
+            source,
+            tree.root_node(),
+            module_id,
+            repo(),
+            &mut Acc::default(),
+        );
         assert_eq!(
             tally.marker("UserRoutes.scala"),
             "[scala-routes] routes=2 handled=2 akka_composed=0 path=UserRoutes.scala"

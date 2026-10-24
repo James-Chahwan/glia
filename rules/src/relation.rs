@@ -128,7 +128,10 @@ impl Batch {
     }
 
     fn meta(&self, i: usize) -> RowMeta {
-        RowMeta { height: self.heights[i], rule: self.rules[i] }
+        RowMeta {
+            height: self.heights[i],
+            rule: self.rules[i],
+        }
     }
 
     fn ordinal(&self, i: usize) -> u32 {
@@ -267,7 +270,10 @@ fn push_run(stable: &mut Vec<Batch>, mut run: Batch, arity: usize) {
     if run.len() == 0 {
         return;
     }
-    while stable.last().is_some_and(|last| last.len() <= 2 * run.len()) {
+    while stable
+        .last()
+        .is_some_and(|last| last.len() <= 2 * run.len())
+    {
         if let Some(last) = stable.pop() {
             run = Batch::merge(last, run, arity);
         }
@@ -278,7 +284,9 @@ fn push_run(stable: &mut Vec<Batch>, mut run: Batch, arity: usize) {
 /// The whole rows `handles` handles and `rows` metas (or levels) describe: a
 /// caller's surplus handles or metas are ignored.
 fn row_count(arity: usize, handles: usize, rows: usize) -> usize {
-    handles.checked_div(arity).map_or(rows, |whole| rows.min(whole))
+    handles
+        .checked_div(arity)
+        .map_or(rows, |whole| rows.min(whole))
 }
 
 /// `perm` lists each of the `arity` columns exactly once.
@@ -304,9 +312,18 @@ impl Relation {
     /// that is not a permutation of the columns gets no index ([`Relation::index_of`]
     /// says so).
     pub(crate) fn new(arity: usize, perms: &[Vec<u8>]) -> Self {
-        let identity = (0..arity).map(|c| u8::try_from(c).unwrap_or(u8::MAX)).collect();
-        let index = |perm| Index { perm, parts: Default::default() };
-        let mut rel = Relation { arity, indexes: vec![index(identity)], len: 0 };
+        let identity = (0..arity)
+            .map(|c| u8::try_from(c).unwrap_or(u8::MAX))
+            .collect();
+        let index = |perm| Index {
+            perm,
+            parts: Default::default(),
+        };
+        let mut rel = Relation {
+            arity,
+            indexes: vec![index(identity)],
+            len: 0,
+        };
         for p in perms {
             if rel.index_of(p).is_none() && is_perm(p, arity) {
                 rel.indexes.push(index(p.clone()));
@@ -333,10 +350,17 @@ impl Relation {
         let arity = self.arity;
         let id = &self.indexes[0].parts;
         let parts = std::array::from_fn(|l| Part {
-            stable: id[l].stable.iter().map(|b| b.permuted(arity, perm)).collect(),
+            stable: id[l]
+                .stable
+                .iter()
+                .map(|b| b.permuted(arity, perm))
+                .collect(),
             recent: id[l].recent.permuted(arity, perm),
         });
-        self.indexes.push(Index { perm: perm.to_vec(), parts });
+        self.indexes.push(Index {
+            perm: perm.to_vec(),
+            parts,
+        });
         Some(self.indexes.len() - 1)
     }
 
@@ -362,10 +386,18 @@ impl Relation {
         for ix in self.indexes.iter_mut().skip(1) {
             let p = batch.permuted(arity, &ix.perm);
             let part = &mut ix.parts[l];
-            if recent { part.recent = p } else { push_run(&mut part.stable, p, arity) }
+            if recent {
+                part.recent = p
+            } else {
+                push_run(&mut part.stable, p, arity)
+            }
         }
         let part = &mut self.indexes[0].parts[l];
-        if recent { part.recent = batch } else { push_run(&mut part.stable, batch, arity) }
+        if recent {
+            part.recent = batch
+        } else {
+            push_run(&mut part.stable, batch, arity)
+        }
     }
 
     /// Load EDB, aggregate, builtin or scc rows as stable runs, one per level they
@@ -398,7 +430,16 @@ impl Relation {
             let picked = order.iter().filter(|&&i| rows.levels[i] == level);
             let batch = Batch::collect(
                 arity,
-                picked.map(|&i| (row(i), RowMeta { height: height(i), rule: EDB_RULE }, ord(i))),
+                picked.map(|&i| {
+                    (
+                        row(i),
+                        RowMeta {
+                            height: height(i),
+                            rule: EDB_RULE,
+                        },
+                        ord(i),
+                    )
+                }),
             );
             added += batch.len();
             self.store(level, batch, false);
@@ -457,7 +498,8 @@ impl Relation {
             if part.stable.len() > 1 {
                 // Newest (smallest) first: runs shrink geometrically, so this is linear.
                 let runs = std::mem::take(&mut part.stable).into_iter().rev();
-                part.stable.extend(runs.reduce(|acc, earlier| Batch::merge(earlier, acc, arity)));
+                part.stable
+                    .extend(runs.reduce(|acc, earlier| Batch::merge(earlier, acc, arity)));
             }
         }
     }
@@ -517,11 +559,14 @@ impl Relation {
 
     /// A cursor over `index` under `view`.
     pub(crate) fn cursor(&self, index: usize, view: View) -> Cursor<'_> {
-        let runs = self.selected(index, &view).into_iter().map(|(batch, tier)| Run {
-            batch,
-            tier,
-            pos: 0,
-        });
+        let runs = self
+            .selected(index, &view)
+            .into_iter()
+            .map(|(batch, tier)| Run {
+                batch,
+                tier,
+                pos: 0,
+            });
         Cursor {
             arity: self.arity,
             runs: runs.collect(),
@@ -567,8 +612,11 @@ impl Cursor<'_> {
         let forward = self.started && key >= self.last.as_slice();
         for run in &mut self.runs {
             let b = run.batch;
-            run.pos =
-                if forward { b.gallop(arity, run.pos, key) } else { b.lower_bound(arity, key) };
+            run.pos = if forward {
+                b.gallop(arity, run.pos, key)
+            } else {
+                b.lower_bound(arity, key)
+            };
             let mut i = run.pos;
             while i < b.len() && b.has_prefix(arity, i, key) {
                 if max_height.is_none_or(|h| b.heights[i] < h) {
@@ -594,7 +642,11 @@ mod tests {
     }
 
     fn view(levels: RangeInclusive<u8>, which: Which) -> View {
-        View { levels, which, max_height: None }
+        View {
+            levels,
+            which,
+            max_height: None,
+        }
     }
 
     fn all() -> View {
@@ -624,7 +676,9 @@ mod tests {
 
     fn scanned(rel: &Relation, index: usize, v: View) -> Vec<Seen> {
         let mut out = Vec::new();
-        rel.scan(index, v, &mut |r, t, meta, o| out.push((r.to_vec(), t, meta, o)));
+        rel.scan(index, v, &mut |r, t, meta, o| {
+            out.push((r.to_vec(), t, meta, o))
+        });
         out
     }
 
@@ -642,7 +696,10 @@ mod tests {
     fn check(rel: &Relation) {
         let a = rel.arity;
         let shape = |ix: &Index| -> Vec<Vec<usize>> {
-            ix.parts.iter().map(|p| p.batches().map(Batch::len).collect()).collect()
+            ix.parts
+                .iter()
+                .map(|p| p.batches().map(Batch::len).collect())
+                .collect()
         };
         for (k, ix) in rel.indexes.iter().enumerate() {
             assert_eq!(shape(ix), shape(&rel.indexes[0]), "index {k}");
@@ -662,7 +719,11 @@ mod tests {
     #[test]
     fn insert_round_dedups_and_keeps_lowest_height() {
         let mut r = Relation::new(2, &[]);
-        let n = insert(&mut r, Tier::Fact, &[(&[1, 2], 5, 0), (&[1, 2], 3, 1), (&[2, 3], 4, 0)]);
+        let n = insert(
+            &mut r,
+            Tier::Fact,
+            &[(&[1, 2], 5, 0), (&[1, 2], 3, 1), (&[2, 3], 4, 0)],
+        );
         assert_eq!(n, 2);
         assert_eq!(r.len(), 2);
         assert_eq!(r.recent_len(), 2);
@@ -674,7 +735,11 @@ mod tests {
             ]
         );
         // At equal heights the lower rule index wins, whatever the input order.
-        let n = insert(&mut r, Tier::Fact, &[(&[7, 7], 2, 4), (&[7, 7], 2, 3), (&[7, 7], 9, 0)]);
+        let n = insert(
+            &mut r,
+            Tier::Fact,
+            &[(&[7, 7], 2, 4), (&[7, 7], 2, 3), (&[7, 7], 9, 0)],
+        );
         assert_eq!(n, 1);
         assert_eq!(r.contains(&[7, 7]), Some((Tier::Fact, m(2, 3), NO_ORDINAL)));
         check(&r);
@@ -685,13 +750,25 @@ mod tests {
         let mut r = Relation::new(2, &[vec![1, 0]]);
         assert_eq!(insert(&mut r, Tier::Fact, &[(&[1, 2], 1, 0)]), 1);
         // Still recent at FACT: the next round advances it, then drops it.
-        assert_eq!(insert(&mut r, Tier::Derived, &[(&[1, 2], 0, 0), (&[3, 4], 2, 1)]), 1);
+        assert_eq!(
+            insert(&mut r, Tier::Derived, &[(&[1, 2], 0, 0), (&[3, 4], 2, 1)]),
+            1
+        );
         assert_eq!(r.contains(&[1, 2]), Some((Tier::Fact, m(1, 0), NO_ORDINAL)));
-        assert_eq!(r.contains(&[3, 4]), Some((Tier::Derived, m(2, 1), NO_ORDINAL)));
+        assert_eq!(
+            r.contains(&[3, 4]),
+            Some((Tier::Derived, m(2, 1), NO_ORDINAL))
+        );
         // Any level blocks: a DERIVED row is not re-derived at HEURISTIC, or at FACT.
-        assert_eq!(insert(&mut r, Tier::Heuristic, &[(&[3, 4], 0, 0), (&[1, 2], 0, 0)]), 0);
+        assert_eq!(
+            insert(&mut r, Tier::Heuristic, &[(&[3, 4], 0, 0), (&[1, 2], 0, 0)]),
+            0
+        );
         assert_eq!(insert(&mut r, Tier::Fact, &[(&[3, 4], 0, 0)]), 0);
-        assert_eq!(r.contains(&[3, 4]), Some((Tier::Derived, m(2, 1), NO_ORDINAL)));
+        assert_eq!(
+            r.contains(&[3, 4]),
+            Some((Tier::Derived, m(2, 1), NO_ORDINAL))
+        );
         assert_eq!(r.contains(&[4, 3]), None);
         assert_eq!(r.contains(&[1]), None);
         assert_eq!((r.len(), r.recent_len()), (2, 0));
@@ -700,16 +777,34 @@ mod tests {
 
     #[test]
     fn indexes_stay_consistent() {
-        let mut r = Relation::new(2, &[vec![0, 1], vec![1, 0], vec![1, 0], vec![0, 0], vec![2, 0]]);
-        assert_eq!(r.indexes.len(), 2, "identity deduped, invalid perms dropped");
+        let mut r = Relation::new(
+            2,
+            &[vec![0, 1], vec![1, 0], vec![1, 0], vec![0, 0], vec![2, 0]],
+        );
         assert_eq!(
-            (r.index_of(&[0, 1]), r.index_of(&[1, 0]), r.index_of(&[0, 0])),
+            r.indexes.len(),
+            2,
+            "identity deduped, invalid perms dropped"
+        );
+        assert_eq!(
+            (
+                r.index_of(&[0, 1]),
+                r.index_of(&[1, 0]),
+                r.index_of(&[0, 0])
+            ),
             (Some(0), Some(1), None)
         );
         let mut rng = Rng(7);
         let views = [Which::Stable, Which::Recent, Which::Both]
             .into_iter()
-            .flat_map(|w| [view(0..=0, w), view(1..=1, w), view(2..=2, w), view(0..=2, w)]);
+            .flat_map(|w| {
+                [
+                    view(0..=0, w),
+                    view(1..=1, w),
+                    view(2..=2, w),
+                    view(0..=2, w),
+                ]
+            });
         let views: Vec<View> = views.collect();
         for _ in 0..50 {
             if rng.below(4) == 0 {
@@ -754,13 +849,28 @@ mod tests {
             }
         }
         check(&r);
-        assert!(r.indexes[0].parts.iter().map(|p| p.stable.len()).sum::<usize>() > 3);
+        assert!(
+            r.indexes[0]
+                .parts
+                .iter()
+                .map(|p| p.stable.len())
+                .sum::<usize>()
+                > 3
+        );
         let mut keys: Vec<Vec<Handle>> = (0..500)
-            .map(|_| (0..1 + rng.below(2)).map(|_| rng.below(15) as Handle).collect())
+            .map(|_| {
+                (0..1 + rng.below(2))
+                    .map(|_| rng.below(15) as Handle)
+                    .collect()
+            })
             .collect();
         let shuffled = keys.clone();
         keys.sort();
-        let v = View { levels: 0..=2, which: Which::Both, max_height: Some(6) };
+        let v = View {
+            levels: 0..=2,
+            which: Which::Both,
+            max_height: Some(6),
+        };
         for perm in &perms {
             let ix = r.index_of(perm).expect("planned index");
             let rows = scanned(&r, ix, v.clone());
@@ -769,9 +879,14 @@ mod tests {
                 let mut hits = 0;
                 for key in seq.iter() {
                     let mut got = Vec::new();
-                    cur.seek(key, &mut |row, t, meta, o| got.push((row.to_vec(), t, meta, o)));
-                    let want: Vec<Seen> =
-                        rows.iter().filter(|s| s.0.starts_with(key)).cloned().collect();
+                    cur.seek(key, &mut |row, t, meta, o| {
+                        got.push((row.to_vec(), t, meta, o))
+                    });
+                    let want: Vec<Seen> = rows
+                        .iter()
+                        .filter(|s| s.0.starts_with(key))
+                        .cloned()
+                        .collect();
                     hits += want.len();
                     assert_eq!(sorted(got), sorted(want), "perm {perm:?} key {key:?}");
                 }
@@ -787,7 +902,10 @@ mod tests {
 
     /// The single-column rows `v` sees, sorted; a scan and an empty-key seek agree.
     fn seen(r: &Relation, v: View) -> Vec<Handle> {
-        let mut a: Vec<Handle> = scanned(r, 0, v.clone()).into_iter().map(|s| s.0[0]).collect();
+        let mut a: Vec<Handle> = scanned(r, 0, v.clone())
+            .into_iter()
+            .map(|s| s.0[0])
+            .collect();
         let mut b = Vec::new();
         r.cursor(0, v).seek(&[], &mut |row, _, _, _| b.push(row[0]));
         a.sort();
@@ -809,13 +927,27 @@ mod tests {
         assert_eq!(seen(&r, view(1..=2, Which::Stable)), [3, 4]);
         assert_eq!(seen(&r, view(0..=0, Which::Recent)), Vec::<Handle>::new());
         // `levels < FACT`, the Old view of FACT's first round: empty.
-        assert_eq!(seen(&r, view(RangeInclusive::new(1, 0), Which::Both)), Vec::<Handle>::new());
-        let low = View { levels: 0..=2, which: Which::Both, max_height: Some(4) };
+        assert_eq!(
+            seen(&r, view(RangeInclusive::new(1, 0), Which::Both)),
+            Vec::<Handle>::new()
+        );
+        let low = View {
+            levels: 0..=2,
+            which: Which::Both,
+            max_height: Some(4),
+        };
         assert_eq!(seen(&r, low), [1, 3, 6]);
         let levels: Vec<Tier> = scanned(&r, 0, all()).into_iter().map(|s| s.1).collect();
         assert_eq!(
             levels,
-            [Tier::Fact, Tier::Fact, Tier::Derived, Tier::Derived, Tier::Derived, Tier::Derived]
+            [
+                Tier::Fact,
+                Tier::Fact,
+                Tier::Derived,
+                Tier::Derived,
+                Tier::Derived,
+                Tier::Derived
+            ]
         );
         r.advance();
         assert_eq!(seen(&r, view(0..=2, Which::Recent)), Vec::<Handle>::new());
@@ -833,7 +965,11 @@ mod tests {
         }
         r.advance();
         let runs = &r.indexes[0].parts[0].stable;
-        assert!(runs.len() <= 11 && most <= 11, "{} runs, at most {most}", runs.len());
+        assert!(
+            runs.len() <= 11 && most <= 11,
+            "{} runs, at most {most}",
+            runs.len()
+        );
         for w in runs.windows(2) {
             assert!(w[0].len() > 2 * w[1].len(), "runs shrink geometrically");
         }
@@ -868,10 +1004,18 @@ mod tests {
         let mut rng = Rng(3);
         for round in 0..40 {
             let rows: Vec<(Vec<Handle>, u32, u16)> = (0..rng.below(9))
-                .map(|_| (vec![rng.below(30) as Handle, rng.below(30) as Handle], round, 0))
+                .map(|_| {
+                    (
+                        vec![rng.below(30) as Handle, rng.below(30) as Handle],
+                        round,
+                        0,
+                    )
+                })
                 .collect();
-            let rows: Vec<(&[Handle], u32, u16)> =
-                rows.iter().map(|(a, h, k)| (a.as_slice(), *h, *k)).collect();
+            let rows: Vec<(&[Handle], u32, u16)> = rows
+                .iter()
+                .map(|(a, h, k)| (a.as_slice(), *h, *k))
+                .collect();
             insert(&mut r, Tier::ALL[(round / 14) as usize], &rows);
         }
         assert!(r.indexes[0].parts.iter().any(|p| p.stable.len() > 1));
@@ -900,7 +1044,13 @@ mod tests {
         EdbRows {
             arity: 2,
             rows: vec![4, 1, 1, 2, 3, 9, 2, 2, 4, 1],
-            levels: vec![Tier::Fact, Tier::Fact, Tier::Derived, Tier::Fact, Tier::Derived],
+            levels: vec![
+                Tier::Fact,
+                Tier::Fact,
+                Tier::Derived,
+                Tier::Fact,
+                Tier::Derived,
+            ],
             ordinals: vec![7, 3, NO_ORDINAL, 12, 5],
         }
     }
@@ -908,7 +1058,11 @@ mod tests {
     fn build(perms: &[Vec<u8>]) -> Relation {
         let mut r = Relation::new(2, perms);
         assert_eq!(r.load(edges(), None), 4, "(4,1) twice: FACT wins");
-        insert(&mut r, Tier::Derived, &[(&[1, 2], 0, 0), (&[8, 1], 2, 1), (&[0, 5], 1, 2)]);
+        insert(
+            &mut r,
+            Tier::Derived,
+            &[(&[1, 2], 0, 0), (&[8, 1], 2, 1), (&[0, 5], 1, 2)],
+        );
         insert(&mut r, Tier::Heuristic, &[(&[6, 6], 3, 0), (&[2, 0], 4, 1)]);
         r
     }
@@ -929,23 +1083,52 @@ mod tests {
             view(2..=2, Which::Stable),
         ];
         for v in views {
-            assert_eq!(scanned(&late, 1, v.clone()), scanned(&planned, 1, v.clone()), "{v:?}");
+            assert_eq!(
+                scanned(&late, 1, v.clone()),
+                scanned(&planned, 1, v.clone()),
+                "{v:?}"
+            );
         }
         let kept = late.indexes[1].parts[0].stable[0].rows.as_ptr();
         assert_eq!(late.ensure_index(&[1, 0]), Some(1));
         assert_eq!(late.ensure_index(&[0, 1]), Some(0));
         assert_eq!(late.indexes.len(), 2);
-        assert_eq!(late.indexes[1].parts[0].stable[0].rows.as_ptr(), kept, "not rebuilt");
-        assert_eq!((late.ensure_index(&[0, 0]), late.ensure_index(&[1])), (None, None));
+        assert_eq!(
+            late.indexes[1].parts[0].stable[0].rows.as_ptr(),
+            kept,
+            "not rebuilt"
+        );
+        assert_eq!(
+            (late.ensure_index(&[0, 0]), late.ensure_index(&[1])),
+            (None, None)
+        );
         // The identity index keeps the witness ordinals; the permuted one reports none.
-        assert_eq!(late.contains(&[4, 1]), Some((Tier::Fact, m(0, EDB_RULE), 7)));
-        assert_eq!(late.contains(&[2, 2]), Some((Tier::Fact, m(0, EDB_RULE), 12)));
-        assert_eq!(late.contains(&[3, 9]), Some((Tier::Derived, m(0, EDB_RULE), NO_ORDINAL)));
-        assert_eq!(late.contains(&[8, 1]), Some((Tier::Derived, m(2, 1), NO_ORDINAL)));
-        assert_eq!(late.contains(&[1, 2]), Some((Tier::Fact, m(0, EDB_RULE), 3)), "loaded first");
+        assert_eq!(
+            late.contains(&[4, 1]),
+            Some((Tier::Fact, m(0, EDB_RULE), 7))
+        );
+        assert_eq!(
+            late.contains(&[2, 2]),
+            Some((Tier::Fact, m(0, EDB_RULE), 12))
+        );
+        assert_eq!(
+            late.contains(&[3, 9]),
+            Some((Tier::Derived, m(0, EDB_RULE), NO_ORDINAL))
+        );
+        assert_eq!(
+            late.contains(&[8, 1]),
+            Some((Tier::Derived, m(2, 1), NO_ORDINAL))
+        );
+        assert_eq!(
+            late.contains(&[1, 2]),
+            Some((Tier::Fact, m(0, EDB_RULE), 3)),
+            "loaded first"
+        );
         let mut cur = late.cursor(1, all());
         let mut got = Vec::new();
-        cur.seek(&[1], &mut |row, t, meta, o| got.push((row.to_vec(), t, meta, o)));
+        cur.seek(&[1], &mut |row, t, meta, o| {
+            got.push((row.to_vec(), t, meta, o))
+        });
         assert_eq!(
             got,
             [
@@ -973,11 +1156,24 @@ mod tests {
             ordinals: Vec::new(),
         };
         assert_eq!(r.load(agg, Some(&[4, 1, 2, 3])), 2);
-        assert_eq!(r.contains(&[5, 6]), Some((Tier::Derived, m(3, EDB_RULE), NO_ORDINAL)));
-        assert_eq!(r.contains(&[7, 8]), Some((Tier::Derived, m(2, EDB_RULE), NO_ORDINAL)));
+        assert_eq!(
+            r.contains(&[5, 6]),
+            Some((Tier::Derived, m(3, EDB_RULE), NO_ORDINAL))
+        );
+        assert_eq!(
+            r.contains(&[7, 8]),
+            Some((Tier::Derived, m(2, EDB_RULE), NO_ORDINAL))
+        );
         assert_eq!(r.contains(&[2, 2]), Some((Tier::Fact, m(1, 0), NO_ORDINAL)));
-        assert_eq!((r.len(), r.recent_len()), (3, 1), "a load leaves recent alone");
-        let wrong = EdbRows { arity: 3, ..EdbRows::default() };
+        assert_eq!(
+            (r.len(), r.recent_len()),
+            (3, 1),
+            "a load leaves recent alone"
+        );
+        let wrong = EdbRows {
+            arity: 3,
+            ..EdbRows::default()
+        };
         assert_eq!(r.load(wrong, None), 0);
         check(&r);
     }

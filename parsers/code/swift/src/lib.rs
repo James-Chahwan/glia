@@ -4,12 +4,12 @@ use std::sync::OnceLock;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::endpoint::{
+    ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with,
+};
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
-};
-use glia_code_domain::endpoint::{
-    ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with,
 };
 
 pub fn parse_file(
@@ -37,10 +37,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    let top = visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    let top = visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
     if top.types > 0 && qname_debug() {
         eprintln!(
             "[qname] swift: {} top-level types scoped to {} ({} extensions, {} file-private kept) file={file_rel_path}",
@@ -68,7 +81,10 @@ pub fn parse_file(
     // DT.5l fired_on marker, once per file with an app entry type:
     //   `[swift-app] entry types=<n> file=<file>`
     if acc.app_entries > 0 {
-        eprintln!("[swift-app] entry types={} file={file_rel_path}", acc.app_entries);
+        eprintln!(
+            "[swift-app] entry types={} file={file_rel_path}",
+            acc.app_entries
+        );
     }
 
     scan_vapor_routes(root, src, file_rel_path, module_id, repo, &mut acc);
@@ -154,7 +170,9 @@ struct Acc {
 /// file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
 /// ranks the declaration over the container, so qname lookups land on it.
 fn type_scope(module_qname: &str) -> &str {
-    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
 }
 
 /// `scope::name`, or the bare `name` for the empty (repo-root) scope.
@@ -171,9 +189,8 @@ fn scoped(scope: &str, name: &str) -> String {
 ///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] swift:'`
 fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// `GLIA_SWIFT_DEBUG=1` turns on the per-file `[swift-calls]` marker (self /
@@ -184,9 +201,8 @@ fn qname_debug() -> bool {
 ///   `GLIA_SWIFT_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[swift\] members'`
 fn swift_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_SWIFT_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_SWIFT_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Top-level type declarations of one file, for the `[qname] swift:` marker.
@@ -296,7 +312,9 @@ fn is_app_entry(node: TsNode, src: &[u8]) -> bool {
         "attribute" => is_entry_attr(child),
         "modifiers" => {
             let mut mc = child.walk();
-            child.named_children(&mut mc).any(|a| a.kind() == "attribute" && is_entry_attr(a))
+            child
+                .named_children(&mut mc)
+                .any(|a| a.kind() == "attribute" && is_entry_attr(a))
         }
         _ => false,
     })
@@ -429,7 +447,12 @@ fn visit_type(
         // requirements (its funcs are `protocol_function_declaration`s, never
         // minted), so members are read from class / enum / extension bodies.
         let members = body.kind() != "protocol_body";
-        let owner = Owner { qname: &qname, id, repo, file_rel };
+        let owner = Owner {
+            qname: &qname,
+            id,
+            repo,
+            file_rel,
+        };
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             match child.kind() {
@@ -705,7 +728,10 @@ fn record_param(p: TsNode, scope: NodeId, src: &[u8], acc: &mut Acc) {
     let Some(local) = names.next().filter(|n| n.kind() == "simple_identifier") else {
         return;
     };
-    let ty = names.next().and_then(|t| simple_type_name(t, src)).unwrap_or("");
+    let ty = names
+        .next()
+        .and_then(|t| simple_type_name(t, src))
+        .unwrap_or("");
     record_local(scope, text_of(local, src), ty, acc);
 }
 
@@ -834,13 +860,7 @@ fn flush_binding(open: Option<(&str, Option<String>)>, scope: NodeId, acc: &mut 
 /// where the context binds, `bound`: a `for` item, a tuple `let`), a nested
 /// pattern that is a lone identifier (`case let .pair(a, b)`). Without a
 /// `let` a lone identifier is an expression pattern, matched, not bound.
-fn record_unknown_pattern(
-    pattern: TsNode,
-    bound: bool,
-    scope: NodeId,
-    src: &[u8],
-    acc: &mut Acc,
-) {
+fn record_unknown_pattern(pattern: TsNode, bound: bool, scope: NodeId, src: &[u8], acc: &mut Acc) {
     let mut stack = vec![(pattern, bound)];
     while let Some((node, bound)) = stack.pop() {
         let mut cursor = node.walk();
@@ -1016,7 +1036,12 @@ fn visit_method(
 /// grammar gives no identifier.
 fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     let path = first_named_child_of_kind(node, "identifier").map_or_else(
-        || text_of(node, src).trim().trim_start_matches("import ").trim(),
+        || {
+            text_of(node, src)
+                .trim()
+                .trim_start_matches("import ")
+                .trim()
+        },
         |ident| text_of(ident, src).trim(),
     );
     acc.imports.push(ImportStmt {
@@ -1042,7 +1067,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                 _ => {}
             }
             acc.members.infix_calls += usize::from(through_infix);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -1158,7 +1187,10 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> (CallQualifier, bool) {
                         (rhs, text_of(rhs, src))
                     } else if let Some(start) = infix_receiver_start(target) {
                         through_infix = true;
-                        (target, text_between(src, start.start_byte(), target.end_byte()))
+                        (
+                            target,
+                            text_between(src, start.start_byte(), target.end_byte()),
+                        )
                     } else {
                         (target, text_of(target, src))
                     };
@@ -1461,17 +1493,26 @@ fn scan_vapor_routes(
 /// `call` as a Vapor verb call: its callee is a navigation whose member is a
 /// [`VAPOR_VERBS`] name. None for any other call.
 fn vapor_call(call: TsNode, src: &[u8]) -> Option<VaporCall> {
-    let callee = call.named_child(0).filter(|c| c.kind() == "navigation_expression")?;
+    let callee = call
+        .named_child(0)
+        .filter(|c| c.kind() == "navigation_expression")?;
     let member = nav_member_name(callee, src);
-    let method = VAPOR_VERBS.iter().find(|(verb, _)| *verb == member).map(|(_, m)| *m)?;
+    let method = VAPOR_VERBS
+        .iter()
+        .find(|(verb, _)| *verb == member)
+        .map(|(_, m)| *m)?;
     let suffix = first_named_child_of_kind(call, "call_suffix")?;
     let args = first_named_child_of_kind(suffix, "value_arguments");
     let trailing_closure = first_named_child_of_kind(suffix, "lambda_literal").is_some();
     let responder = args.and_then(|a| labelled_argument(a, "use", src));
-    let line = callee.child_by_field_name("suffix").map_or_else(|| line_at(call), line_at);
+    let line = callee
+        .child_by_field_name("suffix")
+        .map_or_else(|| line_at(call), line_at);
     Some(VaporCall {
         method,
-        path: args.map(|a| vapor_path_from_args(a, src)).unwrap_or_default(),
+        path: args
+            .map(|a| vapor_path_from_args(a, src))
+            .unwrap_or_default(),
         registers: responder.is_some() || trailing_closure,
         handler: responder.and_then(|v| vapor_handler(v, src)),
         line,
@@ -1617,13 +1658,34 @@ mod tests {
     fn app_entry_types_carry_the_component_role() {
         const ROLE: &str = r#"{"roles":["COMPONENT"]}"#;
         for (src, ty) in [
-            ("@main\n@objc class AppDelegate: FlutterAppDelegate {\n  func helper() {}\n}\n", "AppDelegate"),
-            ("@main @objc class AppDelegate: FlutterAppDelegate {}\n", "AppDelegate"),
-            ("@UIApplicationMain\nclass AppDelegate: UIResponder, UIApplicationDelegate {}\n", "AppDelegate"),
-            ("@NSApplicationMain\nclass AppDelegate: NSObject, NSApplicationDelegate {}\n", "AppDelegate"),
-            ("@main\nstruct MyApp: App {\n  var body: some Scene { WindowGroup {} }\n}\n", "MyApp"),
+            (
+                "@main\n@objc class AppDelegate: FlutterAppDelegate {\n  func helper() {}\n}\n",
+                "AppDelegate",
+            ),
+            (
+                "@main @objc class AppDelegate: FlutterAppDelegate {}\n",
+                "AppDelegate",
+            ),
+            (
+                "@UIApplicationMain\nclass AppDelegate: UIResponder, UIApplicationDelegate {}\n",
+                "AppDelegate",
+            ),
+            (
+                "@NSApplicationMain\nclass AppDelegate: NSObject, NSApplicationDelegate {}\n",
+                "AppDelegate",
+            ),
+            (
+                "@main\nstruct MyApp: App {\n  var body: some Scene { WindowGroup {} }\n}\n",
+                "MyApp",
+            ),
         ] {
-            let fp = parse_file(src, "Runner/AppDelegate.swift", "Runner::AppDelegate", repo()).unwrap();
+            let fp = parse_file(
+                src,
+                "Runner/AppDelegate.swift",
+                "Runner::AppDelegate",
+                repo(),
+            )
+            .unwrap();
             assert_eq!(app_roles(&fp, &format!("Runner::{ty}")), [ROLE], "{src}");
         }
         for src in [
@@ -1637,7 +1699,13 @@ mod tests {
         }
         // An extension before the @main declaration in one file: one cell.
         let src = "extension AppDelegate {\n  func more() {}\n}\n\n@main\nclass AppDelegate: NSObject {}\n\nextension AppDelegate {\n  func last() {}\n}\n";
-        let fp = parse_file(src, "Runner/AppDelegate.swift", "Runner::AppDelegate", repo()).unwrap();
+        let fp = parse_file(
+            src,
+            "Runner/AppDelegate.swift",
+            "Runner::AppDelegate",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(app_roles(&fp, "Runner::AppDelegate"), [ROLE]);
     }
 
@@ -1667,7 +1735,10 @@ struct Point {
         assert!(qnames.contains(&"Sources::User"), "{qnames:?}");
         assert!(qnames.contains(&"Sources::Point"), "{qnames:?}");
         assert!(qnames.contains(&"Sources::User::greet"), "{qnames:?}");
-        assert!(!qnames.iter().any(|q| q.starts_with("Sources::Models::")), "{qnames:?}");
+        assert!(
+            !qnames.iter().any(|q| q.starts_with("Sources::Models::")),
+            "{qnames:?}"
+        );
     }
 
     fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
@@ -1736,7 +1807,13 @@ struct Point {
         let class = id(node_kind::CLASS, "Sources::Shop::Widget");
         assert_eq!(node_count(&widget, class), 1);
         assert_eq!(widget.nav.kind_by_id.get(&class), Some(&node_kind::CLASS));
-        assert!(!widget.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Widget::Widget"));
+        assert!(
+            !widget
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "Sources::Shop::Widget::Widget")
+        );
         for m in ["run", "helper", "extra"] {
             let mid = id(node_kind::METHOD, &format!("Sources::Shop::Widget::{m}"));
             assert_eq!(widget.nav.parent_of.get(&mid), Some(&class), "{m}");
@@ -1748,9 +1825,17 @@ struct Point {
                 .filter(|e| e.from == from && e.to == to && e.category == edge_category::DEFINES)
                 .count()
         };
-        assert_eq!(defines(&widget, module, class), 1, "one DEFINES for class + extension");
         assert_eq!(
-            widget.nav.children_of.get(&module).map(|c| c.iter().filter(|x| **x == class).count()),
+            defines(&widget, module, class),
+            1,
+            "one DEFINES for class + extension"
+        );
+        assert_eq!(
+            widget
+                .nav
+                .children_of
+                .get(&module)
+                .map(|c| c.iter().filter(|x| **x == class).count()),
             Some(1)
         );
         // The declaration's POSITION first (line 0), the extension's second.
@@ -1760,7 +1845,13 @@ struct Point {
         assert_eq!(node_count(&extras, class), 1);
         let more = id(node_kind::METHOD, "Sources::Shop::Widget::more");
         assert_eq!(extras.nav.parent_of.get(&more), Some(&class));
-        assert!(!extras.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Widget+Extras::Widget"));
+        assert!(
+            !extras
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "Sources::Shop::Widget+Extras::Widget")
+        );
 
         // Control: the private enums keep their file segment, two nodes.
         let c1 = id(node_kind::ENUM, "Sources::Shop::Widget::Constants");
@@ -1769,14 +1860,22 @@ struct Point {
         assert_eq!(node_count(&widget, c1), 1);
         assert_eq!(node_count(&extras, c2), 1);
         for fp in [&widget, &extras] {
-            assert!(!fp.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Constants"));
+            assert!(
+                !fp.nav
+                    .qname_by_id
+                    .values()
+                    .any(|q| q == "Sources::Shop::Constants")
+            );
         }
 
         // struct Part + extension Part: one STRUCT node, no CLASS twin.
         let strukt = id(node_kind::STRUCT, "Sources::Shop::Part");
         assert_eq!(node_count(&part, strukt), 1);
         assert_eq!(part.nav.kind_by_id.get(&strukt), Some(&node_kind::STRUCT));
-        assert_eq!(node_count(&part, id(node_kind::CLASS, "Sources::Shop::Part")), 0);
+        assert_eq!(
+            node_count(&part, id(node_kind::CLASS, "Sources::Shop::Part")),
+            0
+        );
         for m in ["weight", "heavy"] {
             let mid = id(node_kind::METHOD, &format!("Sources::Shop::Part::{m}"));
             assert_eq!(part.nav.parent_of.get(&mid), Some(&strukt), "{m}");
@@ -1829,8 +1928,15 @@ func topLevel() -> Int { return 0 }
 
         let late = id(node_kind::STRUCT, "Sources::Shop::Late");
         assert_eq!(node_count(&fp, late), 1);
-        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Late")), 0);
-        assert_eq!(start_lines(&fp, late), vec!["6", "1"], "declaration POSITION first");
+        assert_eq!(
+            node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Late")),
+            0
+        );
+        assert_eq!(
+            start_lines(&fp, late),
+            vec!["6", "1"],
+            "declaration POSITION first"
+        );
         let a = id(node_kind::METHOD, "Sources::Shop::Late::a");
         assert_eq!(fp.nav.parent_of.get(&a), Some(&late));
         let inner = id(node_kind::STRUCT, "Sources::Shop::Late::Inner");
@@ -1842,9 +1948,18 @@ func topLevel() -> Int { return 0 }
         assert_eq!(fp.nav.parent_of.get(&h), Some(&helper));
         assert!(!qnames.contains(&"Sources::Shop::Helper"), "{qnames:?}");
 
-        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::A::Box")), 1);
-        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Open")), 1);
-        assert_eq!(node_count(&fp, id(node_kind::FUNCTION, "Sources::Shop::A::topLevel")), 1);
+        assert_eq!(
+            node_count(&fp, id(node_kind::CLASS, "Sources::Shop::A::Box")),
+            1
+        );
+        assert_eq!(
+            node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Open")),
+            1
+        );
+        assert_eq!(
+            node_count(&fp, id(node_kind::FUNCTION, "Sources::Shop::A::topLevel")),
+            1
+        );
 
         let root = parse_file("class Widget {}\n", "Widget.swift", "Widget", repo()).unwrap();
         assert_eq!(node_count(&root, id(node_kind::CLASS, "Widget")), 1);
@@ -1864,8 +1979,22 @@ enum Color {
 }
 "#;
         let fp = parse_file(source, "Sources/Types.swift", "Sources::Types", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1880,7 +2009,13 @@ func routes(_ app: Application) throws {
     app.delete("users", ":id") { req in "destroy" }
 }
 "#;
-        let fp = parse_file(source, "Sources/App/routes.swift", "Sources::App::routes", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Sources/App/routes.swift",
+            "Sources::App::routes",
+            repo(),
+        )
+        .unwrap();
         let route_names: Vec<&str> = fp
             .nav
             .name_by_id
@@ -1955,8 +2090,16 @@ func routes(_ app: Application) throws {
         assert_eq!(
             vapor_handlers(&fp),
             vec![
-                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into()), 12),
-                ("POST /users".to_string(), CallQualifier::Bare("createUser".into()), 13),
+                (
+                    "GET /users/:id".to_string(),
+                    CallQualifier::Bare("getUser".into()),
+                    12
+                ),
+                (
+                    "POST /users".to_string(),
+                    CallQualifier::Bare("createUser".into()),
+                    13
+                ),
             ]
         );
         assert!(
@@ -2003,7 +2146,10 @@ func routes(_ app: Application) throws {
 "#;
         let fp = parse_file(source, "routes.swift", "routes", repo()).unwrap();
         assert_eq!(vapor_routes(&fp), vec!["GET /hello", "GET /hello/:name"]);
-        assert!(vapor_handlers(&fp).is_empty(), "a closure responder names no handler");
+        assert!(
+            vapor_handlers(&fp).is_empty(),
+            "a closure responder names no handler"
+        );
     }
 
     #[test]
@@ -2037,10 +2183,17 @@ struct TodoController: RouteCollection {
             vec![
                 (
                     "GET /todos".to_string(),
-                    CallQualifier::Attribute { base: "controller".into(), name: "index".into() },
+                    CallQualifier::Attribute {
+                        base: "controller".into(),
+                        name: "index".into()
+                    },
                     5,
                 ),
-                ("POST /todos".to_string(), CallQualifier::SelfMethod("create".into()), 6),
+                (
+                    "POST /todos".to_string(),
+                    CallQualifier::SelfMethod("create".into()),
+                    6
+                ),
                 (
                     "DELETE /todos/:todoID".to_string(),
                     CallQualifier::SelfMethod("delete".into()),
@@ -2064,8 +2217,16 @@ func routes(_ app: Application) throws {
         assert_eq!(
             vapor_handlers(&fp),
             vec![
-                ("GET /files/**".to_string(), CallQualifier::Bare("serveFile".into()), 3),
-                ("GET /any/*/tail".to_string(), CallQualifier::Bare("anything".into()), 4),
+                (
+                    "GET /files/**".to_string(),
+                    CallQualifier::Bare("serveFile".into()),
+                    3
+                ),
+                (
+                    "GET /any/*/tail".to_string(),
+                    CallQualifier::Bare("anything".into()),
+                    4
+                ),
             ]
         );
     }
@@ -2107,10 +2268,18 @@ func createUser(body: Data) {
 "#;
         let fp = parse_file(source, "Sources/Api.swift", "Sources::Api", repo()).unwrap();
 
-        let ep_get =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
-        let ep_post =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/users");
+        let ep_get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users/${…}",
+        );
+        let ep_post = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:POST:/users",
+        );
 
         assert!(
             fp.nodes.iter().any(|n| n.id == ep_get),
@@ -2199,20 +2368,32 @@ func listOrders(base: String) {
     fn optional_self_in_a_closure_is_self_method() {
         let source = "class W {\n func a() {\n  schedule { [weak self] in\n   self?.g()\n  }\n }\n func g() {}\n}\n";
         let calls = calls_from(source, "a");
-        assert!(calls.contains(&CallQualifier::SelfMethod("g".into())), "{calls:?}");
-        assert!(calls.contains(&CallQualifier::Bare("schedule".into())), "{calls:?}");
+        assert!(
+            calls.contains(&CallQualifier::SelfMethod("g".into())),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&CallQualifier::Bare("schedule".into())),
+            "{calls:?}"
+        );
     }
 
     #[test]
     fn upper_self_is_self_method() {
         let source = "class W {\n func a() -> W { return Self.make() }\n static func make() -> W { return W() }\n}\n";
-        assert_eq!(calls_from(source, "a"), vec![CallQualifier::SelfMethod("make".into())]);
+        assert_eq!(
+            calls_from(source, "a"),
+            vec![CallQualifier::SelfMethod("make".into())]
+        );
     }
 
     #[test]
     fn super_call_is_super_method() {
         let source = "class W: Base {\n override func k() { super.k() }\n}\n";
-        assert_eq!(calls_from(source, "k"), vec![CallQualifier::SuperMethod("k".into())]);
+        assert_eq!(
+            calls_from(source, "k"),
+            vec![CallQualifier::SuperMethod("k".into())]
+        );
     }
 
     #[test]
@@ -2220,7 +2401,10 @@ func listOrders(base: String) {
         let source = "class W {\n func a() { repo.find() }\n}\n";
         assert_eq!(
             calls_from(source, "a"),
-            vec![CallQualifier::Attribute { base: "repo".into(), name: "find".into() }]
+            vec![CallQualifier::Attribute {
+                base: "repo".into(),
+                name: "find".into()
+            }]
         );
     }
 
@@ -2265,16 +2449,25 @@ func listOrders(base: String) {
             }\n";
         let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
         let calls = calls_of(&fp, id(node_kind::FUNCTION, "W::f"));
-        assert_eq!(calls.iter().filter(|c| **c == bare("tax")).count(), 2, "{calls:?}");
+        assert_eq!(
+            calls.iter().filter(|c| **c == bare("tax")).count(),
+            2,
+            "{calls:?}"
+        );
         for want in [bare("g"), bare("h")] {
             assert!(calls.contains(&want), "{want:?} in {calls:?}");
         }
         assert!(
-            calls.contains(&CallQualifier::Attribute { base: "items".into(), name: "reduce".into() }),
+            calls.contains(&CallQualifier::Attribute {
+                base: "items".into(),
+                name: "reduce".into()
+            }),
             "{calls:?}"
         );
         assert!(
-            !calls.iter().any(|c| matches!(c, CallQualifier::ComplexReceiver { name, .. } if name.is_empty())),
+            !calls.iter().any(
+                |c| matches!(c, CallQualifier::ComplexReceiver { name, .. } if name.is_empty())
+            ),
             "no whole-callee fallback left: {calls:?}"
         );
     }
@@ -2283,7 +2476,10 @@ func listOrders(base: String) {
     fn nested_infix() {
         let source = "func m() -> Bool {\n let a = x + b * f(y)\n return a > 0 && ok(z)\n}\n";
         let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
-        assert_eq!(calls_of(&fp, id(node_kind::FUNCTION, "W::m")), vec![bare("f"), bare("ok")]);
+        assert_eq!(
+            calls_of(&fp, id(node_kind::FUNCTION, "W::m")),
+            vec![bare("f"), bare("ok")]
+        );
     }
 
     /// `base + self.repo.load()`: the infix is the innermost target of the
@@ -2298,13 +2494,19 @@ func listOrders(base: String) {
             }\n";
         assert_eq!(
             calls_from(source, "a"),
-            vec![CallQualifier::ComplexReceiver { receiver: "self.repo".into(), name: "load".into() }]
+            vec![CallQualifier::ComplexReceiver {
+                receiver: "self.repo".into(),
+                name: "load".into()
+            }]
         );
         assert_eq!(calls_from(source, "b"), vec![self_method("c")]);
         let d = calls_from(source, "d");
         assert!(d.contains(&bare("foo")), "{d:?}");
         assert!(
-            d.contains(&CallQualifier::ComplexReceiver { receiver: "foo()".into(), name: "bar".into() }),
+            d.contains(&CallQualifier::ComplexReceiver {
+                receiver: "foo()".into(),
+                name: "bar".into()
+            }),
             "{d:?}"
         );
     }
@@ -2323,14 +2525,21 @@ func listOrders(base: String) {
         let class = id(node_kind::CLASS, "W");
         let init = id(node_kind::METHOD, "W::init");
         assert_eq!(node_count(&fp, init), 1, "two overloads fold onto one node");
-        assert_eq!(start_lines(&fp, init), vec!["1", "2"], "each overload's POSITION, in order");
+        assert_eq!(
+            start_lines(&fp, init),
+            vec!["1", "2"],
+            "each overload's POSITION, in order"
+        );
         let defines = fp
             .edges
             .iter()
             .filter(|e| e.from == class && e.to == init && e.category == edge_category::DEFINES)
             .count();
         assert_eq!(defines, 1);
-        assert_eq!(calls_from(source, "init"), vec![self_method("a"), self_method("b")]);
+        assert_eq!(
+            calls_from(source, "init"),
+            vec![self_method("a"), self_method("b")]
+        );
         assert_eq!(calls_from(source, "deinit"), vec![self_method("c")]);
         assert_eq!(calls_from(source, "subscript"), vec![self_method("d")]);
         for m in ["init", "deinit", "subscript"] {
@@ -2361,7 +2570,11 @@ func listOrders(base: String) {
             assert_eq!(fp.nav.parent_of.get(&pid), Some(&class), "{p}");
         }
         assert_eq!(fp.properties.len(), 3);
-        assert_eq!(node_count(&fp, id(node_kind::METHOD, "W::plain")), 0, "stored: no node");
+        assert_eq!(
+            node_count(&fp, id(node_kind::METHOD, "W::plain")),
+            0,
+            "stored: no node"
+        );
         assert_eq!(calls_from(source, "total"), vec![bare("tax")]);
         assert_eq!(
             calls_of(&fp, id(node_kind::METHOD, "W::gs")),
@@ -2372,7 +2585,10 @@ func listOrders(base: String) {
         let fields = &fp.nav.field_types[&class];
         assert_eq!(fields.get("w").map(String::as_str), Some("Int"));
         assert_eq!(fields.get("plain").map(String::as_str), Some("Int"));
-        assert!(!fields.contains_key("total") && !fields.contains_key("gs"), "{fields:?}");
+        assert!(
+            !fields.contains_key("total") && !fields.contains_key("gs"),
+            "{fields:?}"
+        );
     }
 
     #[test]
@@ -2433,7 +2649,9 @@ func listOrders(base: String) {
     }
 
     fn pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
-        rows.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        rows.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     /// DF.3: the swift-local-receivers fixture's Service.swift: a method
@@ -2447,8 +2665,13 @@ func listOrders(base: String) {
             env!("CARGO_MANIFEST_DIR")
         );
         let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let fp = parse_file(&source, "Sources/App/Service.swift", "Sources::App::Service", repo())
-            .unwrap();
+        let fp = parse_file(
+            &source,
+            "Sources/App/Service.swift",
+            "Sources::App::Service",
+            repo(),
+        )
+        .unwrap();
         let method = node_kind::METHOD;
         assert_eq!(
             locals_of(&fp, method, "Sources::App::Service::run"),
@@ -2456,7 +2679,12 @@ func listOrders(base: String) {
         );
         assert_eq!(
             locals_of(&fp, method, "Sources::App::Service::local"),
-            pairs(&[("o", "Store"), ("s", "Store"), ("t", "Store"), ("u", "Store")])
+            pairs(&[
+                ("o", "Store"),
+                ("s", "Store"),
+                ("t", "Store"),
+                ("u", "Store")
+            ])
         );
         assert_eq!(
             locals_of(&fp, node_kind::FUNCTION, "Sources::App::Service::freeRun"),
@@ -2478,8 +2706,14 @@ func listOrders(base: String) {
             }\n";
         let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
         let method = node_kind::METHOD;
-        assert_eq!(locals_of(&fp, method, "W::init"), pairs(&[("r", "Repo"), ("store", "Store")]));
-        assert_eq!(locals_of(&fp, method, "W::subscript"), pairs(&[("i", "Int"), ("s", "Store")]));
+        assert_eq!(
+            locals_of(&fp, method, "W::init"),
+            pairs(&[("r", "Repo"), ("store", "Store")])
+        );
+        assert_eq!(
+            locals_of(&fp, method, "W::subscript"),
+            pairs(&[("i", "Int"), ("s", "Store")])
+        );
         assert_eq!(locals_of(&fp, method, "W::total"), pairs(&[("k", "Store")]));
         assert_eq!(
             locals_of(&fp, method, "W::m"),
@@ -2584,7 +2818,13 @@ func listOrders(base: String) {
     #[test]
     fn testable_import_path() {
         let source = "@testable import App\nimport struct Foundation.Date\nimport XCTest\n";
-        let fp = parse_file(source, "Tests/AppTests/T.swift", "Tests::AppTests::T", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Tests/AppTests/T.swift",
+            "Tests::AppTests::T",
+            repo(),
+        )
+        .unwrap();
         let paths: Vec<&str> = fp
             .imports
             .iter()
@@ -2596,7 +2836,10 @@ func listOrders(base: String) {
         assert_eq!(paths, vec!["App", "Foundation.Date", "XCTest"]);
         assert_eq!(
             fp.imports[0].target,
-            ImportTarget::Module { path: "App".into(), alias: None }
+            ImportTarget::Module {
+                path: "App".into(),
+                alias: None
+            }
         );
     }
 
@@ -2610,13 +2853,22 @@ func listOrders(base: String) {
             convenience init(x: Int) { self.init() }\n\
             var count: Int { return 0 }\n\
             }\n";
-        let fp = parse_file(source, "Sources/Shop/Cart.swift", "Sources::Shop::Cart", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "Sources/Shop/Cart.swift",
+            "Sources::Shop::Cart",
+            repo(),
+        )
+        .unwrap();
         let class = id(node_kind::CLASS, "Sources::Shop::Cart");
         let init = id(node_kind::METHOD, "Sources::Shop::Cart::init");
         assert_eq!(node_count(&fp, init), 1);
         assert_eq!(start_lines(&fp, init), vec!["1", "5"]);
         assert_eq!(fp.nav.parent_of.get(&init), Some(&class));
-        assert_eq!(calls_of(&fp, init), vec![self_method("a"), self_method("init")]);
+        assert_eq!(
+            calls_of(&fp, init),
+            vec![self_method("a"), self_method("init")]
+        );
         let count = id(node_kind::METHOD, "Sources::Shop::Cart::count");
         assert_eq!(fp.nav.parent_of.get(&count), Some(&class));
         assert!(fp.properties.contains(&count));

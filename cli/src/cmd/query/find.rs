@@ -24,12 +24,12 @@
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
+use glia_engine::GenerateResult;
+use glia_engine::calibrate::Selection;
 use glia_engine::find::{
     DEFAULT_TOP_K, FindFilesOptions, FindOptions, FoundNode, find_files_with_ids, find_nodes,
 };
-use glia_engine::calibrate::Selection;
 use glia_engine::identity::Collapse;
-use glia_engine::GenerateResult;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{generate_for, rank_cache};
@@ -202,7 +202,11 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
         let ids = if r.ids.is_empty() {
             "—".to_string()
         } else {
-            r.ids.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(", ")
+            r.ids
+                .iter()
+                .map(|i| format!("`{i}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         println!(
             "| {} | `{}` | {} | {:.3} | {ids} |",

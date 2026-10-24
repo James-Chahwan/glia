@@ -74,8 +74,8 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
 pub use glia_code_domain::{
-    CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError, cell_type,
-    edge_category, node_kind,
+    CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError, cell_type, edge_category,
+    node_kind,
 };
 
 /// Parse one Kotlin file. Same signature as the Java parser's `parse_file`,
@@ -141,8 +141,13 @@ fn parse_all(
         cells: cells_of(&root, src, file_rel_path, false),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
     let file = File {
         src,
@@ -595,7 +600,9 @@ fn named_child_of_kind<'a>(node: TsNode<'a>, kinds: &[&str]) -> Option<TsNode<'a
 /// LB.2: a top-level type belongs to its package (the directory), not its
 /// file: the module qname minus its file-stem segment, `""` at the repo root.
 fn type_scope(module_qname: &str) -> &str {
-    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
 }
 
 /// `scope::name`, or the bare `name` for the empty (repo-root) scope.
@@ -721,8 +728,14 @@ object Registry {
             ]
         );
         // Each type is DEFINED by its parent: the module, or its outer type.
-        assert_eq!(parent_qname(&fp, "src::api::Auditable"), Some("src::api::Types"));
-        assert_eq!(parent_qname(&fp, "src::api::Shape::Circle"), Some("src::api::Shape"));
+        assert_eq!(
+            parent_qname(&fp, "src::api::Auditable"),
+            Some("src::api::Types")
+        );
+        assert_eq!(
+            parent_qname(&fp, "src::api::Shape::Circle"),
+            Some("src::api::Shape")
+        );
         let defines = fp
             .edges
             .iter()
@@ -740,7 +753,10 @@ object Registry {
         let fp = parse_file(source, "a/b/Foo.kt", "a::b::Foo", repo()).unwrap();
         assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["a::b::Foo"]);
         assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["a::b::Foo::run"]);
-        assert_eq!(qnames_of(&fp, node_kind::FUNCTION), vec!["a::b::Foo::helper"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::FUNCTION),
+            vec!["a::b::Foo::helper"]
+        );
         let root = parse_file(source, "svc.kt", "svc", repo()).unwrap();
         assert_eq!(qnames_of(&root, node_kind::CLASS), vec!["Foo"]);
         assert_eq!(qnames_of(&root, node_kind::FUNCTION), vec!["svc::helper"]);
@@ -777,7 +793,10 @@ class UserService {
         assert_eq!(fp.nodes.iter().filter(|n| n.id == save).count(), 1);
         assert_eq!(fp.edges.iter().filter(|e| e.to == save).count(), 1);
         assert_eq!(parent_qname(&fp, "svc::topLevelHelper"), Some("svc"));
-        assert_eq!(parent_qname(&fp, "UserService::findById"), Some("UserService"));
+        assert_eq!(
+            parent_qname(&fp, "UserService::findById"),
+            Some("UserService")
+        );
     }
 
     #[test]
@@ -794,8 +813,15 @@ class Foo(val x: Int) {
 }
 "#;
         let fp = parse_file(source, "Foo.kt", "Foo", repo()).unwrap();
-        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["Foo"], "no companion node");
-        assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["Foo::create", "Foo::own"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["Foo"],
+            "no companion node"
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["Foo::create", "Foo::own"]
+        );
         assert_eq!(qnames_of(&fp, node_kind::ATTRIBUTE), vec!["Foo::MAX"]);
         assert_eq!(parent_qname(&fp, "Foo::create"), Some("Foo"));
         assert_eq!(parent_qname(&fp, "Foo::MAX"), Some("Foo"));
@@ -829,7 +855,10 @@ class Box(val size: Int) {
 }
 "#;
         let fp = parse_file(source, "box.kt", "box", repo()).unwrap();
-        assert_eq!(qnames_of(&fp, node_kind::STATE_VAR), vec!["box::TOP", "box::derived"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::STATE_VAR),
+            vec!["box::TOP", "box::derived"]
+        );
         assert_eq!(
             qnames_of(&fp, node_kind::ATTRIBUTE),
             vec![
@@ -841,7 +870,8 @@ class Box(val size: Int) {
                 "Box::template",
             ]
         );
-        let computed = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "Box::computed");
+        let computed =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "Box::computed");
         assert_eq!(fp.properties, HashSet::from([computed]));
         let documented =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "Box::documented");
@@ -958,20 +988,34 @@ fun Application.itemRoutes() {
 }
 "#;
         let fp = parse_file(source, "broken.kt", "broken", repo()).unwrap();
-        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["Broken", "Fine", "Single"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["Broken", "Fine", "Single"]
+        );
         assert_eq!(
             qnames_of(&fp, node_kind::METHOD),
             vec!["Broken::a", "Fine::b", "Single::go"]
         );
-        assert_eq!(qnames_of(&fp, node_kind::FUNCTION), vec!["broken::itemRoutes"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::FUNCTION),
+            vec!["broken::itemRoutes"]
+        );
         assert_eq!(route_names(&fp), vec!["GET /api/items"]);
         // The AST route scan survives the recovered tree: bound to its fun.
         let route = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /api/items");
-        let handler =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "broken::itemRoutes");
-        assert!(fp.edges.iter().any(|e| e.category == edge_category::HANDLED_BY
-            && e.from == route
-            && e.to == handler));
+        let handler = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "broken::itemRoutes",
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::HANDLED_BY
+                    && e.from == route
+                    && e.to == handler)
+        );
     }
 
     #[test]
@@ -980,7 +1024,10 @@ fun Application.itemRoutes() {
         let fp = parse_file(source, "src/A.kt", "src::A", repo()).unwrap();
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::A");
         assert_eq!(fp.nodes[0].id, module);
-        assert_eq!(fp.nav.name_by_id.get(&module).map(String::as_str), Some("A"));
+        assert_eq!(
+            fp.nav.name_by_id.get(&module).map(String::as_str),
+            Some("A")
+        );
         let method = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "src::A::a");
         let pos = fp
             .nodes

@@ -362,11 +362,7 @@ pub fn extract_grpc_service_nodes(
         }
     }
 
-    let module_cells = vec![position_cell(
-        path,
-        0,
-        proto.line_count.saturating_sub(1),
-    )];
+    let module_cells = vec![position_cell(path, 0, proto.line_count.saturating_sub(1))];
 
     GrpcOut {
         service_count: proto.services.len(),
@@ -646,7 +642,10 @@ fn dial_target(args: &str, host_port: bool) -> Option<String> {
         .enumerate()
         .find_map(|(i, a)| string_literal(a).map(|l| (i, l)))?;
     if host_port {
-        let port = parts.get(i + 1).map(|p| p.trim()).filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        let port = parts
+            .get(i + 1)
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
         return match port {
             Some(port) => dial_authority(&format!("{lit}:{port}")),
             None => dial_authority(lit),
@@ -657,7 +656,14 @@ fn dial_target(args: &str, host_port: bool) -> Option<String> {
 
 /// gRPC name-resolver schemes that name no service host: a socket path, an
 /// xDS service name, or IP literals, which no service alias can match.
-const NON_HOST_SCHEMES: &[&str] = &["unix:", "unix-abstract:", "vsock:", "xds:", "ipv4:", "ipv6:"];
+const NON_HOST_SCHEMES: &[&str] = &[
+    "unix:",
+    "unix-abstract:",
+    "vsock:",
+    "xds:",
+    "ipv4:",
+    "ipv6:",
+];
 
 /// A dial target as `host[:port]`: a `dns:///` / `dns:` / `passthrough:///`
 /// resolver prefix or an `http(s)://` scheme stripped, any path dropped, and
@@ -673,7 +679,10 @@ fn dial_authority(target: &str) -> Option<String> {
         r.split_once('/')?.1
     } else if let Some(r) = t.strip_prefix("passthrough:///") {
         r
-    } else if let Some(r) = t.strip_prefix("http://").or_else(|| t.strip_prefix("https://")) {
+    } else if let Some(r) = t
+        .strip_prefix("http://")
+        .or_else(|| t.strip_prefix("https://"))
+    {
         r
     } else if let Some(r) = t.strip_prefix("dns:") {
         r
@@ -685,9 +694,9 @@ fn dial_authority(target: &str) -> Option<String> {
     let authority = rest.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let literal = !authority.is_empty()
-        && authority
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~' | ':' | '[' | ']'));
+        && authority.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~' | ':' | '[' | ']')
+        });
     literal.then(|| authority.to_string())
 }
 
@@ -757,9 +766,29 @@ fn indent_of(line: &str) -> usize {
 
 /// Words that may precede a declaration's keyword or return type.
 const DECL_MODIFIERS: &[&str] = &[
-    "pub", "pub(crate)", "pub(super)", "async", "private", "public", "protected", "internal",
-    "static", "override", "suspend", "final", "abstract", "virtual", "export", "default",
-    "open", "unsafe", "extern", "inline", "sealed", "partial", "readonly",
+    "pub",
+    "pub(crate)",
+    "pub(super)",
+    "async",
+    "private",
+    "public",
+    "protected",
+    "internal",
+    "static",
+    "override",
+    "suspend",
+    "final",
+    "abstract",
+    "virtual",
+    "export",
+    "default",
+    "open",
+    "unsafe",
+    "extern",
+    "inline",
+    "sealed",
+    "partial",
+    "readonly",
 ];
 
 /// Keywords that open a function in the languages the client passes read
@@ -769,9 +798,36 @@ const FUNCTION_WORDS: &[&str] = &["func", "def", "defp", "function", "fn", "fun"
 /// Words that open a block that is not a function (or a statement that is
 /// not a declaration): a line starting with one never bounds the search.
 const BLOCK_WORDS: &[&str] = &[
-    "if", "else", "elif", "for", "foreach", "while", "do", "switch", "match", "case", "try",
-    "catch", "except", "finally", "with", "using", "lock", "synchronized", "select", "go",
-    "defer", "return", "throw", "await", "yield", "new", "var", "let", "const", "val",
+    "if",
+    "else",
+    "elif",
+    "for",
+    "foreach",
+    "while",
+    "do",
+    "switch",
+    "match",
+    "case",
+    "try",
+    "catch",
+    "except",
+    "finally",
+    "with",
+    "using",
+    "lock",
+    "synchronized",
+    "select",
+    "go",
+    "defer",
+    "return",
+    "throw",
+    "await",
+    "yield",
+    "new",
+    "var",
+    "let",
+    "const",
+    "val",
 ];
 
 /// Whether `line` opens a function or method: a function keyword after any
@@ -830,7 +886,9 @@ fn first_quoted(s: &str) -> Option<&str> {
 /// `from './x'` qualifies, `from users where` does not.
 fn leading_quoted(s: &str) -> Option<&str> {
     let t = s.trim_start();
-    t.starts_with(['"', '\'', '`']).then(|| first_quoted(t)).flatten()
+    t.starts_with(['"', '\'', '`'])
+        .then(|| first_quoted(t))
+        .flatten()
 }
 
 /// An unquoted import path: up to the first whitespace or `; { ( , =`, minus a
@@ -852,7 +910,8 @@ fn bare_path(s: &str) -> &str {
 /// `line` minus the keyword `kw`, when `kw` is a whole leading word.
 fn after_keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
     let rest = line.strip_prefix(kw)?;
-    rest.starts_with(char::is_whitespace).then(|| rest.trim_start())
+    rest.starts_with(char::is_whitespace)
+        .then(|| rest.trim_start())
 }
 
 /// The import path one head-of-file line names, if any. `in_go_block` carries
@@ -897,12 +956,17 @@ fn import_path_of(line: &str, in_go_block: &mut bool) -> Option<String> {
         }
         let rest = rest.strip_prefix("static ").unwrap_or(rest);
         // `using Alias = Some.Namespace;` names the namespace after the `=`.
-        let rest = rest.split_once('=').map_or(rest, |(_, target)| target.trim_start());
+        let rest = rest
+            .split_once('=')
+            .map_or(rest, |(_, target)| target.trim_start());
         bare_path(rest)
     } else if let Some(rest) = after_keyword(line, "use") {
         // Rust `use billing::client::X;`, PHP `use Billing\X;`.
         bare_path(rest)
-    } else if let Some(rest) = line.strip_prefix("#include").or_else(|| line.strip_prefix("# include")) {
+    } else if let Some(rest) = line
+        .strip_prefix("#include")
+        .or_else(|| line.strip_prefix("# include"))
+    {
         let rest = rest.trim_start();
         match rest.strip_prefix('<') {
             Some(angled) => angled.split_once('>').map(|(p, _)| p)?,
@@ -932,10 +996,16 @@ pub fn client_package_evidence(source: &str) -> Vec<String> {
     let mut in_go_block = false;
     for raw in source.lines().take(EVIDENCE_SCAN_LINES) {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+        {
             continue;
         }
-        let Some(path) = import_path_of(line, &mut in_go_block) else { continue };
+        let Some(path) = import_path_of(line, &mut in_go_block) else {
+            continue;
+        };
         if path.is_empty() || path.len() > EVIDENCE_MAX_PATH_LEN || out.contains(&path) {
             continue;
         }
@@ -1214,7 +1284,8 @@ pub fn extract_known_grpc_client_nodes(
         nav: CodeNav::default(),
         anchors: Vec::new(),
     };
-    if known.is_empty() || !file_has_grpc_context(source) || skips_generated("known", path, source) {
+    if known.is_empty() || !file_has_grpc_context(source) || skips_generated("known", path, source)
+    {
         return out;
     }
     // The fallback's names count as already emitted: one node per client.
@@ -1263,7 +1334,15 @@ pub fn extract_known_grpc_client_nodes(
             seen.insert(name.to_string());
             let cell = evidence.get_or_insert_with(|| client_evidence_cell(source));
             sites_seen += sites.len();
-            hosted += push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
+            hosted += push_client_node(
+                &mut out,
+                source,
+                &sites,
+                name,
+                module_id,
+                repo,
+                cell.as_ref(),
+            );
         }
     }
     guard.report("grpc_client");
@@ -1307,28 +1386,88 @@ struct ServerNeedle {
 /// `.proto` files declare.
 const SERVER_NEEDLES: &[ServerNeedle] = &[
     // Go: `type server struct { pb.UnimplementedGreeterServer }`
-    ServerNeedle { pre: "Unimplemented", post: "Server", shape: ServerShape::Base, strict: true },
+    ServerNeedle {
+        pre: "Unimplemented",
+        post: "Server",
+        shape: ServerShape::Base,
+        strict: true,
+    },
     // Java: `class GreeterImpl extends GreeterGrpc.GreeterImplBase`
-    ServerNeedle { pre: "", post: "ImplBase", shape: ServerShape::Base, strict: true },
+    ServerNeedle {
+        pre: "",
+        post: "ImplBase",
+        shape: ServerShape::Base,
+        strict: true,
+    },
     // Kotlin (grpc-kotlin): `: GreeterGrpcKt.GreeterCoroutineImplBase()`
-    ServerNeedle { pre: "", post: "CoroutineImplBase", shape: ServerShape::Base, strict: true },
+    ServerNeedle {
+        pre: "",
+        post: "CoroutineImplBase",
+        shape: ServerShape::Base,
+        strict: true,
+    },
     // Python: `class Greeter(greeter_pb2_grpc.GreeterServicer)`
-    ServerNeedle { pre: "", post: "Servicer", shape: ServerShape::Base, strict: true },
+    ServerNeedle {
+        pre: "",
+        post: "Servicer",
+        shape: ServerShape::Base,
+        strict: true,
+    },
     // C#: `class GreeterService : Greeter.GreeterBase`
-    ServerNeedle { pre: "", post: "Base", shape: ServerShape::Base, strict: false },
+    ServerNeedle {
+        pre: "",
+        post: "Base",
+        shape: ServerShape::Base,
+        strict: false,
+    },
     // C++ `: public Greeter::Service`, Ruby `< Helloworld::Greeter::Service`
-    ServerNeedle { pre: "", post: "::Service", shape: ServerShape::Base, strict: false },
+    ServerNeedle {
+        pre: "",
+        post: "::Service",
+        shape: ServerShape::Base,
+        strict: false,
+    },
     // Dart: `class GreeterService extends GreeterServiceBase`
-    ServerNeedle { pre: "", post: "ServiceBase", shape: ServerShape::Base, strict: false },
+    ServerNeedle {
+        pre: "",
+        post: "ServiceBase",
+        shape: ServerShape::Base,
+        strict: false,
+    },
     // Go: `pb.RegisterGreeterServer(s, &server{})`
-    ServerNeedle { pre: "Register", post: "Server(", shape: ServerShape::Register, strict: false },
+    ServerNeedle {
+        pre: "Register",
+        post: "Server(",
+        shape: ServerShape::Register,
+        strict: false,
+    },
     // Python: `greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)`
-    ServerNeedle { pre: "add_", post: "Servicer_to_server(", shape: ServerShape::Register, strict: true },
+    ServerNeedle {
+        pre: "add_",
+        post: "Servicer_to_server(",
+        shape: ServerShape::Register,
+        strict: true,
+    },
     // Rust tonic: `.add_service(GreeterServer::new(greeter))`
-    ServerNeedle { pre: "", post: "Server::new(", shape: ServerShape::Register, strict: false },
-    ServerNeedle { pre: "", post: "Server::with_interceptor(", shape: ServerShape::Register, strict: false },
+    ServerNeedle {
+        pre: "",
+        post: "Server::new(",
+        shape: ServerShape::Register,
+        strict: false,
+    },
+    ServerNeedle {
+        pre: "",
+        post: "Server::with_interceptor(",
+        shape: ServerShape::Register,
+        strict: false,
+    },
     // Scala (ScalaPB): `GreeterGrpc.bindService(new GreeterImpl, ec)`
-    ServerNeedle { pre: "", post: "Grpc.bindService(", shape: ServerShape::Register, strict: false },
+    ServerNeedle {
+        pre: "",
+        post: "Grpc.bindService(",
+        shape: ServerShape::Register,
+        strict: false,
+    },
 ];
 
 /// Tokens every strict [`SERVER_NEEDLES`] entry contains. A file with neither
@@ -1340,8 +1479,19 @@ const STRICT_SERVER_TOKENS: &[&str] = &["Unimplemented", "ImplBase", "Servicer"]
 /// base itself (`type UnimplementedGreeterServer struct`, `class
 /// GreeterServicer(object)`, `def add_GreeterServicer_to_server`), not a use.
 const DECL_KEYWORDS: &[&str] = &[
-    "class", "struct", "type", "func", "def", "interface", "trait", "fn", "enum", "object",
-    "module", "record", "protocol",
+    "class",
+    "struct",
+    "type",
+    "func",
+    "def",
+    "interface",
+    "trait",
+    "fn",
+    "enum",
+    "object",
+    "module",
+    "record",
+    "protocol",
 ];
 
 /// Cheap pre-check for [`extract_grpc_server_nodes`]: false only when the file
@@ -1371,7 +1521,10 @@ fn line_start(source: &str, at: usize) -> usize {
 /// with `//`, `#`, `*` or `/*`).
 fn in_comment_line(source: &str, at: usize) -> bool {
     let head = source[line_start(source, at)..at].trim_start();
-    head.starts_with("//") || head.starts_with('#') || head.starts_with('*') || head.starts_with("/*")
+    head.starts_with("//")
+        || head.starts_with('#')
+        || head.starts_with('*')
+        || head.starts_with("/*")
 }
 
 /// True when the identifier before `at` (whitespace skipped) is a declaration
@@ -1391,10 +1544,18 @@ fn follows_decl_keyword(source: &str, at: usize) -> bool {
 
 /// Every `pre` + known name + `post` hit of `needle` in `source`, as
 /// (name, byte offset of the needle start).
-fn needle_hits(source: &str, needle: &ServerNeedle, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<(String, usize)> {
+fn needle_hits(
+    source: &str,
+    needle: &ServerNeedle,
+    known: &BTreeMap<&str, BTreeSet<String>>,
+) -> Vec<(String, usize)> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
-    let post_ident_len = needle.post.bytes().take_while(|b| is_ident_byte(*b)).count();
+    let post_ident_len = needle
+        .post
+        .bytes()
+        .take_while(|b| is_ident_byte(*b))
+        .count();
     let (post_ident, post_rest) = needle.post.split_at(post_ident_len);
     let tail_is_ident = needle.post.bytes().last().is_some_and(is_ident_byte);
     if needle.pre.is_empty() {
@@ -1428,7 +1589,9 @@ fn needle_hits(source: &str, needle: &ServerNeedle, known: &BTreeMap<&str, BTree
             while run_end < bytes.len() && is_ident_byte(bytes[run_end]) {
                 run_end += 1;
             }
-            let Some(name) = source[run_start..run_end].strip_suffix(post_ident) else { continue };
+            let Some(name) = source[run_start..run_end].strip_suffix(post_ident) else {
+                continue;
+            };
             if name.is_empty() || !source[run_end..].starts_with(post_rest) {
                 continue;
             }
@@ -1472,17 +1635,23 @@ fn rust_trait_impl_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) 
         let at = offset;
         offset += line.len();
         let code = line.trim_start();
-        let Some(rest) = code.strip_prefix("impl") else { continue };
+        let Some(rest) = code.strip_prefix("impl") else {
+            continue;
+        };
         if !rest.starts_with([' ', '<']) {
             continue;
         }
-        let Some((trait_part, type_part)) = rest.split_once(" for ") else { continue };
+        let Some((trait_part, type_part)) = rest.split_once(" for ") else {
+            continue;
+        };
         let name = last_path_segment(trait_part.trim());
         if !known.contains_key(name) || !source.contains(&format!("{}_server", snake_case(name))) {
             continue;
         }
         let ty = type_part.trim_start().trim_start_matches('&');
-        let end = ty.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).unwrap_or(ty.len());
+        let end = ty
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .unwrap_or(ty.len());
         let ty = last_path_segment(&ty[..end]);
         if ty.is_empty() {
             continue;
@@ -1571,7 +1740,10 @@ fn server_hits(
 /// An rpc or method name folded for comparison across bindings: `SayHello`
 /// (Go, C#, Python), `sayHello` (Java, Node) and `say_hello` (Rust, Ruby) agree.
 fn fold_rpc_name(name: &str) -> String {
-    name.chars().filter(|c| *c != '_').map(|c| c.to_ascii_lowercase()).collect()
+    name.chars()
+        .filter(|c| *c != '_')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 /// The server pass (A5.3): one GRPC_SERVER per (proto service, file) for every
@@ -2210,11 +2382,10 @@ pub fn extract_proto_rpc_nodes(
                 .cloned()
                 .unwrap_or_else(|| anchor::position_cell(path, registration));
             match method {
-                Some(m) => out.edges.push(edge(
-                    id,
-                    m.id,
-                    glia_code_domain::edge_category::HANDLED_BY,
-                )),
+                Some(m) => {
+                    out.edges
+                        .push(edge(id, m.id, glia_code_domain::edge_category::HANDLED_BY))
+                }
                 None => {
                     out.edges.push(edge(
                         module_id,
@@ -2291,11 +2462,7 @@ pub fn extract_proto_rpc_nodes(
                 if !linked.contains(&owner) {
                     linked.push(owner);
                     out.edges.push(if owner == module_id {
-                        edge(
-                            module_id,
-                            id,
-                            glia_code_domain::edge_category::CONTAINS,
-                        )
+                        edge(module_id, id, glia_code_domain::edge_category::CONTAINS)
                     } else {
                         edge(owner, id, glia_code_domain::edge_category::USES)
                     });
@@ -2371,8 +2538,14 @@ service Users {
         let result = extract_grpc_service_nodes(source, "order.proto", module_id(), repo());
         // One GRPC_SERVICE + one METHOD per rpc.
         assert_eq!(result.nodes.len(), 2);
-        assert_eq!(result.nav.kind_by_id[&result.nodes[0].id], node_kind::GRPC_SERVICE);
-        assert_eq!(result.nav.kind_by_id[&result.nodes[1].id], node_kind::METHOD);
+        assert_eq!(
+            result.nav.kind_by_id[&result.nodes[0].id],
+            node_kind::GRPC_SERVICE
+        );
+        assert_eq!(
+            result.nav.kind_by_id[&result.nodes[1].id],
+            node_kind::METHOD
+        );
     }
 
     #[test]
@@ -2396,7 +2569,10 @@ service Users {
         match &pos.payload {
             CellPayload::Json(j) => {
                 assert!(j.contains("\"file\":\"server/user.proto\""), "got {j}");
-                assert!(j.contains("\"start_line\":6"), "service keyword is line 6: {j}");
+                assert!(
+                    j.contains("\"start_line\":6"),
+                    "service keyword is line 6: {j}"
+                );
                 assert!(j.contains("\"end_line\":9"), "closing brace is line 9: {j}");
             }
             other => panic!("POSITION must be Json, got {other:?}"),
@@ -2408,8 +2584,14 @@ service Users {
         match &pkg.payload {
             CellPayload::Json(j) => {
                 assert!(j.contains("\"package\":\"user\""), "got {j}");
-                assert!(j.contains("\"go_package\":\"example.com/proto/user\""), "got {j}");
-                assert!(!j.contains("java_package"), "absent options are omitted, not null: {j}");
+                assert!(
+                    j.contains("\"go_package\":\"example.com/proto/user\""),
+                    "got {j}"
+                );
+                assert!(
+                    !j.contains("java_package"),
+                    "absent options are omitted, not null: {j}"
+                );
             }
             other => panic!("RPC_PACKAGE must be Json, got {other:?}"),
         }
@@ -2455,7 +2637,11 @@ service Users {
         assert_eq!(result.service_count, 1);
         assert_eq!(result.rpc_count, 2);
         assert_eq!(result.package.as_deref(), Some("user"));
-        assert_eq!(result.module_cells.len(), 1, "module gets a whole-file POSITION");
+        assert_eq!(
+            result.module_cells.len(),
+            1,
+            "module gets a whole-file POSITION"
+        );
     }
 
     #[test]
@@ -2463,7 +2649,10 @@ service Users {
         let source = "conn := grpc.Dial(addr)\nclient := pb.NewOrderServiceClient(conn)";
         let result = extract_grpc_client_nodes(source, "", module_id(), repo());
         assert_eq!(result.nodes.len(), 1);
-        assert_eq!(result.nav.kind_by_id[&result.nodes[0].id], node_kind::GRPC_CLIENT);
+        assert_eq!(
+            result.nav.kind_by_id[&result.nodes[0].id],
+            node_kind::GRPC_CLIENT
+        );
         let qname = result.nav.qname_by_id.values().next().unwrap();
         // Must reconstruct the canonical proto service name (`OrderService`),
         // not the bare prefix or `New`-prefixed variant.
@@ -2486,12 +2675,7 @@ var blocking = CartServiceGrpc.newBlockingStub(channel)
 var client2 = new pb.CartServiceClient(channel)
 "#;
         let result = extract_grpc_client_nodes(source, "", module_id(), repo());
-        let names: Vec<String> = result
-            .nav
-            .qname_by_id
-            .values()
-            .cloned()
-            .collect();
+        let names: Vec<String> = result.nav.qname_by_id.values().cloned().collect();
         assert_eq!(names.len(), 1, "all four lines collapse onto CartService");
         assert_eq!(names[0], "grpc_client:CartService");
     }
@@ -2541,14 +2725,19 @@ let db = makeDbClient(uri);
     #[test]
     fn data_driven_needle_matches_suffixless_service() {
         let source = "using Grpc.Net.Client;\nvar c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
+        let out =
+            extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
         let id = out.nodes[0].id;
         assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_CLIENT);
         assert_eq!(out.nav.name_by_id[&id], "Greeter");
         assert_eq!(out.nav.parent_of[&id], module_id());
         // The suffix fallback alone is blind to it — that is the gap.
-        assert!(extract_grpc_client_nodes(source, "", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_grpc_client_nodes(source, "", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2556,7 +2745,10 @@ let db = makeDbClient(uri);
         // Suffix pass: two stubs of one service in two functions.
         let go = "import \"google.golang.org/grpc\"\n\nfunc A() {\n\tc := pb.NewUserServiceClient(conn)\n}\n\nfunc B() {\n\tc := pb.NewUserServiceClient(conn)\n}\n";
         let out = extract_grpc_client_nodes(go, "", module_id(), repo());
-        assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:UserService".to_string()]
+        );
         let id = out.nodes[0].id;
         assert_eq!(
             out.anchors,
@@ -2566,7 +2758,13 @@ let db = makeDbClient(uri);
         // Data-driven pass: the C# fixture shape, one site.
         let cs = "using Grpc.Net.Client;\nclass H {\n  void F() {\n    var c = new Greeter.GreeterClient(ch);\n  }\n}";
         let out = extract_known_grpc_client_nodes(cs, "", module_id(), repo(), &[svc("Greeter")]);
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 3
+            }]
+        );
 
         // No client, no anchor.
         let none = extract_grpc_client_nodes("package main\n", "", module_id(), repo());
@@ -2576,8 +2774,12 @@ let db = makeDbClient(uri);
     #[test]
     fn data_driven_needle_requires_grpc_context() {
         let source = "var c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
-        assert!(out.nodes.is_empty(), "no gRPC context in the file → no client");
+        let out =
+            extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
+        assert!(
+            out.nodes.is_empty(),
+            "no gRPC context in the file → no client"
+        );
         // A service literally named `Http` must not turn HttpClient into gRPC.
         let http = "let http = new HttpClient(config);";
         let out = extract_known_grpc_client_nodes(http, "", module_id(), repo(), &[svc("Http")]);
@@ -2587,7 +2789,8 @@ let db = makeDbClient(uri);
     #[test]
     fn data_driven_needle_does_not_match_longer_identifier() {
         let source = "import \"google.golang.org/grpc\"\nc := pb.NewLegacyPaymentsClient(conn)";
-        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Payments")]);
+        let out =
+            extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Payments")]);
         assert!(out.nodes.is_empty(), "LegacyPayments is not Payments");
     }
 
@@ -2636,8 +2839,15 @@ let db = makeDbClient(uri);
         let backward = [other_pkg, svc("Users"), svc("Auth")];
         let a = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &forward);
         let b = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &backward);
-        let expected = vec!["grpc_client:Users".to_string(), "grpc_client:Auth".to_string()];
-        assert_eq!(client_qnames(&a), expected, "one node per name, longest first");
+        let expected = vec![
+            "grpc_client:Users".to_string(),
+            "grpc_client:Auth".to_string(),
+        ];
+        assert_eq!(
+            client_qnames(&a),
+            expected,
+            "one node per name, longest first"
+        );
         assert_eq!(client_qnames(&b), expected);
     }
 
@@ -2646,12 +2856,20 @@ let db = makeDbClient(uri);
         // Program.cs of the ASP.NET Core client factory: no `using Grpc.*` at
         // all, only the registration. `AddGrpcClient<` is the gRPC context.
         let program = "using Demo;\n\nvar builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddGrpcClient<Greeter.GreeterClient>(o =>\n{\n    o.Address = new Uri(\"https://localhost:5001\");\n});\n";
-        let out = extract_known_grpc_client_nodes(program, "", module_id(), repo(), &[svc("Greeter")]);
+        let out =
+            extract_known_grpc_client_nodes(program, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 3
+            }]
+        );
         // A generic that is not the generated client is no hit.
         let other = "builder.Services.AddGrpcClient<Greeter.GreeterClient>(o => {});\nvar x = Get<LegacyGreeterClient>(y);\n";
-        let out = extract_known_grpc_client_nodes(other, "", module_id(), repo(), &[svc("Greeter")]);
+        let out =
+            extract_known_grpc_client_nodes(other, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(out.anchors.len(), 1, "LegacyGreeterClient is not Greeter");
     }
 
@@ -2666,7 +2884,15 @@ let db = makeDbClient(uri);
 
     /// The server pass over `source` with no parse (no types, no methods).
     fn servers(source: &str) -> GrpcNodes {
-        extract_grpc_server_nodes(source, "", module_id(), repo(), &[greeter()], &[], &CodeNav::default())
+        extract_grpc_server_nodes(
+            source,
+            "",
+            module_id(),
+            repo(),
+            &[greeter()],
+            &[],
+            &CodeNav::default(),
+        )
     }
 
     fn server_lines(out: &GrpcNodes) -> Vec<u32> {
@@ -2752,7 +2978,11 @@ let db = makeDbClient(uri);
             assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_SERVER, "{lang}");
             assert_eq!(out.nav.name_by_id[&id], "Greeter", "{lang}");
             assert_eq!(out.nav.parent_of[&id], module_id(), "{lang}");
-            assert_eq!(server_lines(&out), vec![*line], "{lang}: anchored at the needle");
+            assert_eq!(
+                server_lines(&out),
+                vec![*line],
+                "{lang}: anchored at the needle"
+            );
         }
     }
 
@@ -2774,17 +3004,42 @@ let db = makeDbClient(uri);
     #[test]
     fn server_pass_ignores_files_with_no_server_shape() {
         let negatives: &[(&str, &str)] = &[
-            ("client stub", "using Grpc.Net.Client;\nvar c = new Greeter.GreeterClient(channel);\nawait c.SayHelloAsync(req);\n"),
-            ("prose", "// The Greeter service greets. See GreeterBase docs.\nfn main() {}\n"),
-            ("longer name", "using Grpc.Core;\nclass X : LegacyGreeterBase {}\nclass Y : GreeterBaseline {}\n"),
-            ("no context for a loose needle", "class UserRepo : GreeterBase {}\n"),
-            ("commented out", "import grpc\n# class G(pb2_grpc.GreeterServicer):\n"),
-            ("unknown service", "import grpc\nclass G(pb2_grpc.FarewellServicer):\n    pass\n"),
-            ("tonic trait of another service", "use tonic::Request;\nimpl Greeter for MyGreeter {}\n"),
+            (
+                "client stub",
+                "using Grpc.Net.Client;\nvar c = new Greeter.GreeterClient(channel);\nawait c.SayHelloAsync(req);\n",
+            ),
+            (
+                "prose",
+                "// The Greeter service greets. See GreeterBase docs.\nfn main() {}\n",
+            ),
+            (
+                "longer name",
+                "using Grpc.Core;\nclass X : LegacyGreeterBase {}\nclass Y : GreeterBaseline {}\n",
+            ),
+            (
+                "no context for a loose needle",
+                "class UserRepo : GreeterBase {}\n",
+            ),
+            (
+                "commented out",
+                "import grpc\n# class G(pb2_grpc.GreeterServicer):\n",
+            ),
+            (
+                "unknown service",
+                "import grpc\nclass G(pb2_grpc.FarewellServicer):\n    pass\n",
+            ),
+            (
+                "tonic trait of another service",
+                "use tonic::Request;\nimpl Greeter for MyGreeter {}\n",
+            ),
         ];
         for (what, source) in negatives {
             let out = servers(source);
-            assert!(out.nodes.is_empty() && out.anchors.is_empty(), "{what}: got {:?}", out.nav.qname_by_id);
+            assert!(
+                out.nodes.is_empty() && out.anchors.is_empty(),
+                "{what}: got {:?}",
+                out.nav.qname_by_id
+            );
         }
     }
 
@@ -2813,12 +3068,25 @@ let db = makeDbClient(uri);
     fn client_passes_skip_generated_code() {
         let shop = [svc("CartService"), svc("CatalogService"), svc("AdService")];
         let both = |source: &str, path: &str, known: &[ProtoServiceRef]| {
-            let mut names = client_qnames(&extract_grpc_client_nodes(source, path, module_id(), repo()));
-            names.extend(client_qnames(&extract_known_grpc_client_nodes(source, path, module_id(), repo(), known)));
+            let mut names = client_qnames(&extract_grpc_client_nodes(
+                source,
+                path,
+                module_id(),
+                repo(),
+            ));
+            names.extend(client_qnames(&extract_known_grpc_client_nodes(
+                source,
+                path,
+                module_id(),
+                repo(),
+                known,
+            )));
             names
         };
         let stub_go = |banner: &str| {
-            let mut go = format!("{banner}package genproto\n\nimport (\n\tcontext \"context\"\n\n\tgrpc \"google.golang.org/grpc\"\n)\n");
+            let mut go = format!(
+                "{banner}package genproto\n\nimport (\n\tcontext \"context\"\n\n\tgrpc \"google.golang.org/grpc\"\n)\n"
+            );
             for svc in ["CartService", "CatalogService", "AdService"] {
                 go.push_str(&format!(
                     "\ntype {svc}Client interface {{}}\n\nfunc New{svc}Client(cc grpc.ClientConnInterface) {svc}Client {{\n\treturn &client{{cc}}\n}}\n\nfunc (c *client) Get(ctx context.Context) error {{\n\treturn c.cc.Invoke(ctx, \"/shop.{svc}/Get\", nil, nil)\n}}\n"
@@ -2835,7 +3103,8 @@ let db = makeDbClient(uri);
             }
             py
         };
-        let go_banner = "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n// source: demo.proto\n\n";
+        let go_banner =
+            "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n// source: demo.proto\n\n";
         let py_banner = "# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!\n";
         let all = |owner: &str| -> Vec<String> {
             ["CartService", "CatalogService", "AdService"]
@@ -2859,7 +3128,10 @@ let db = makeDbClient(uri);
             (stub_py(""), "recs/demo_pb2_grpc.py"),
         ] {
             assert!(is_generated(path, &source), "{path}");
-            assert!(both(&source, path, &shop).is_empty(), "{path}: generated stubs minted clients");
+            assert!(
+                both(&source, path, &shop).is_empty(),
+                "{path}: generated stubs minted clients"
+            );
         }
 
         // The data-driven pass on its own: `Greeter` is no suffix-convention
@@ -2867,29 +3139,76 @@ let db = makeDbClient(uri);
         // skip keeps a generated file silent.
         let greeter = "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\npackage pb\n\nimport grpc \"google.golang.org/grpc\"\n\nfunc NewGreeterClient(cc grpc.ClientConnInterface) GreeterClient {\n\treturn &greeterClient{cc}\n}\n";
         let known = [svc("Greeter")];
-        assert!(extract_known_grpc_client_nodes(greeter, "pb/greeter_grpc.pb.go", module_id(), repo(), &known).nodes.is_empty());
-        assert!(extract_known_grpc_client_nodes(greeter, "pb/greeter.go", module_id(), repo(), &known).nodes.is_empty());
-        let unbannered = greeter.replacen("// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n", "", 1);
+        assert!(
+            extract_known_grpc_client_nodes(
+                greeter,
+                "pb/greeter_grpc.pb.go",
+                module_id(),
+                repo(),
+                &known
+            )
+            .nodes
+            .is_empty()
+        );
+        assert!(
+            extract_known_grpc_client_nodes(greeter, "pb/greeter.go", module_id(), repo(), &known)
+                .nodes
+                .is_empty()
+        );
+        let unbannered = greeter.replacen(
+            "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n",
+            "",
+            1,
+        );
         assert_eq!(
-            client_qnames(&extract_known_grpc_client_nodes(&unbannered, "pb/greeter.go", module_id(), repo(), &known)),
+            client_qnames(&extract_known_grpc_client_nodes(
+                &unbannered,
+                "pb/greeter.go",
+                module_id(),
+                repo(),
+                &known
+            )),
             vec!["grpc_client:Greeter".to_string()]
         );
-        assert!(extract_known_grpc_client_nodes(&unbannered, "pb/greeter_grpc.pb.go", module_id(), repo(), &known).nodes.is_empty());
+        assert!(
+            extract_known_grpc_client_nodes(
+                &unbannered,
+                "pb/greeter_grpc.pb.go",
+                module_id(),
+                repo(),
+                &known
+            )
+            .nodes
+            .is_empty()
+        );
 
         // The fixture's hand-written sites keep their clients, anchored there.
         let rpc_go = "package main\n\nimport (\n\t\"context\"\n\n\tpb \"example.com/frontend/genproto\"\n\t\"google.golang.org/grpc\"\n)\n\nfunc getCart(ctx context.Context, conn *grpc.ClientConn, userID string) (*pb.Cart, error) {\n\treturn pb.NewCartServiceClient(conn).GetCart(ctx, &pb.GetCartRequest{UserId: userID})\n}\n\nfunc listProducts(ctx context.Context, conn *grpc.ClientConn) (*pb.ListProductsResponse, error) {\n\treturn pb.NewCatalogServiceClient(conn).ListProducts(ctx, &pb.Empty{})\n}\n";
         let out = extract_grpc_client_nodes(rpc_go, "frontend/rpc.go", module_id(), repo());
         assert_eq!(
             client_qnames(&out),
-            vec!["grpc_client:CartService".to_string(), "grpc_client:CatalogService".to_string()]
+            vec![
+                "grpc_client:CartService".to_string(),
+                "grpc_client:CatalogService".to_string()
+            ]
         );
-        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![10, 14]);
+        assert_eq!(
+            out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![10, 14]
+        );
         // The data-driven pass adds nothing the fallback already emitted.
-        assert!(extract_known_grpc_client_nodes(rpc_go, "frontend/rpc.go", module_id(), repo(), &shop).nodes.is_empty());
+        assert!(
+            extract_known_grpc_client_nodes(rpc_go, "frontend/rpc.go", module_id(), repo(), &shop)
+                .nodes
+                .is_empty()
+        );
 
         let server_py = "import grpc\n\nimport demo_pb2\nimport demo_pb2_grpc\n\n\ndef recommend(target):\n    channel = grpc.insecure_channel(target)\n    stub = demo_pb2_grpc.CatalogServiceStub(channel)\n    return stub.ListProducts(demo_pb2.Empty())\n";
         assert!(!is_generated("recs/server.py", server_py));
-        assert_eq!(both(server_py, "recs/server.py", &shop), vec!["grpc_client:CatalogService".to_string()]);
+        assert_eq!(
+            both(server_py, "recs/server.py", &shop),
+            vec!["grpc_client:CatalogService".to_string()]
+        );
     }
 
     /// A node of `kind` named `name` spanning `start..=end`, recorded in `nav`.
@@ -2916,11 +3235,46 @@ let db = makeDbClient(uri);
         let source = "using Grpc.Core;\n\npublic class GreeterService : Greeter.GreeterBase\n{\n    public override Task<HelloReply> SayHello(HelloRequest r, ServerCallContext c)\n    {\n        return Helper();\n    }\n\n    Task<HelloReply> Helper() => null;\n}\n\npublic class Wrapper\n{\n    public void SayHello() {}\n}\n";
         let mut nav = CodeNav::default();
         let m = module_id();
-        let impl_class = parse_node(&mut nav, node_kind::CLASS, "GreeterService", "svc::GreeterService", (2, 10), m);
-        let say = parse_node(&mut nav, node_kind::METHOD, "SayHello", "svc::GreeterService::SayHello", (4, 7), impl_class.id);
-        let helper = parse_node(&mut nav, node_kind::METHOD, "Helper", "svc::GreeterService::Helper", (9, 9), impl_class.id);
-        let wrapper = parse_node(&mut nav, node_kind::CLASS, "Wrapper", "svc::Wrapper", (12, 15), m);
-        let decoy = parse_node(&mut nav, node_kind::METHOD, "SayHello", "svc::Wrapper::SayHello", (14, 14), wrapper.id);
+        let impl_class = parse_node(
+            &mut nav,
+            node_kind::CLASS,
+            "GreeterService",
+            "svc::GreeterService",
+            (2, 10),
+            m,
+        );
+        let say = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "SayHello",
+            "svc::GreeterService::SayHello",
+            (4, 7),
+            impl_class.id,
+        );
+        let helper = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "Helper",
+            "svc::GreeterService::Helper",
+            (9, 9),
+            impl_class.id,
+        );
+        let wrapper = parse_node(
+            &mut nav,
+            node_kind::CLASS,
+            "Wrapper",
+            "svc::Wrapper",
+            (12, 15),
+            m,
+        );
+        let decoy = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "SayHello",
+            "svc::Wrapper::SayHello",
+            (14, 14),
+            wrapper.id,
+        );
         let nodes = vec![impl_class, say, helper, wrapper, decoy];
         let out = extract_grpc_server_nodes(source, "", m, repo(), &[greeter()], &nodes, &nav);
         assert_eq!(out.nodes.len(), 1);
@@ -2933,7 +3287,14 @@ let db = makeDbClient(uri);
         // is not anchored once one is found.
         let node_src = "import { Server } from \"@grpc/grpc-js\";\n\nfunction sayHello(call, cb) {\n  cb(null, null);\n}\n\nconst server = new Server();\nserver.addService(GreeterService, { sayHello });\n";
         let mut nav = CodeNav::default();
-        let f = parse_node(&mut nav, node_kind::FUNCTION, "sayHello", "server::sayHello", (2, 4), m);
+        let f = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "sayHello",
+            "server::sayHello",
+            (2, 4),
+            m,
+        );
         let out = extract_grpc_server_nodes(node_src, "", m, repo(), &[greeter()], &[f], &nav);
         assert_eq!(server_lines(&out), vec![2]);
 
@@ -2941,8 +3302,22 @@ let db = makeDbClient(uri);
         // by the name after `for`, and `say_hello` folds to `SayHello`.
         let rs = "use tonic::Request;\nuse hello::greeter_server::Greeter;\n\npub struct MyGreeter {}\n\nimpl Greeter for MyGreeter {\n    async fn say_hello(&self) {}\n}\n";
         let mut nav = CodeNav::default();
-        let st = parse_node(&mut nav, node_kind::STRUCT, "MyGreeter", "main::MyGreeter", (3, 3), m);
-        let method = parse_node(&mut nav, node_kind::METHOD, "say_hello", "main::MyGreeter::say_hello", (6, 6), st.id);
+        let st = parse_node(
+            &mut nav,
+            node_kind::STRUCT,
+            "MyGreeter",
+            "main::MyGreeter",
+            (3, 3),
+            m,
+        );
+        let method = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "say_hello",
+            "main::MyGreeter::say_hello",
+            (6, 6),
+            st.id,
+        );
         let out = extract_grpc_server_nodes(rs, "", m, repo(), &[greeter()], &[st, method], &nav);
         assert_eq!(server_lines(&out), vec![5, 6]);
     }
@@ -2972,10 +3347,23 @@ let db = makeDbClient(uri);
         let refs = proto_service_refs(source);
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["Greeter", "Health"]);
-        assert!(refs.iter().all(|r| r.package.as_deref() == Some("helloworld")));
-        assert!(refs.iter().all(|r| r.csharp_namespace.as_deref() == Some("GreeterApi")));
-        assert!(refs.iter().all(|r| r.go_package.is_none() && r.java_package.is_none()));
-        assert_eq!(refs[0].rpcs, vec!["SayHello".to_string()], "A5.3: the rpc names ride along");
+        assert!(
+            refs.iter()
+                .all(|r| r.package.as_deref() == Some("helloworld"))
+        );
+        assert!(
+            refs.iter()
+                .all(|r| r.csharp_namespace.as_deref() == Some("GreeterApi"))
+        );
+        assert!(
+            refs.iter()
+                .all(|r| r.go_package.is_none() && r.java_package.is_none())
+        );
+        assert_eq!(
+            refs[0].rpcs,
+            vec!["SayHello".to_string()],
+            "A5.3: the rpc names ride along"
+        );
         assert!(refs[1].rpcs.is_empty());
     }
 
@@ -2998,24 +3386,78 @@ let db = makeDbClient(uri);
         let block = "package main\n\nimport (\n\t\"context\"\n\n\t\"google.golang.org/grpc\"\n\n\tpb \"example.com/gen/billing\"\n)\n\nfunc main() {}\n";
         assert_eq!(
             client_package_evidence(block),
-            vec!["context", "google.golang.org/grpc", "example.com/gen/billing"]
+            vec![
+                "context",
+                "google.golang.org/grpc",
+                "example.com/gen/billing"
+            ]
         );
         let single = "package main\nimport pb \"example.com/gen/legacy\"\nimport \"fmt\"\n";
-        assert_eq!(client_package_evidence(single), vec!["example.com/gen/legacy", "fmt"]);
+        assert_eq!(
+            client_package_evidence(single),
+            vec!["example.com/gen/legacy", "fmt"]
+        );
     }
 
     #[test]
     fn evidence_reads_each_binding_shape() {
         let cases: &[(&str, &[&str])] = &[
-            ("using Grpc.Net.Client;\nusing static GreeterApi.Helpers;\nusing Api = GreeterApi.V2;\nglobal using GreeterApi;\n", &["Grpc.Net.Client", "GreeterApi.Helpers", "GreeterApi.V2", "GreeterApi"]),
-            ("import io.grpc.ManagedChannel;\nimport shop.billing.*;\nimport static shop.legacy.Util.helper;\n", &["io.grpc.ManagedChannel", "shop.billing", "shop.legacy.Util.helper"]),
-            ("import grpc\nfrom gen.billing import payments_pb2_grpc\nimport gen.legacy.payments_pb2 as lp\n", &["grpc", "gen.billing", "gen.legacy.payments_pb2"]),
-            ("import * as grpc from '@grpc/grpc-js';\nimport {\n  PaymentsServiceClient,\n} from './gen/billing/payments_grpc_pb';\nconst x = require(\"./gen/legacy/payments_pb\");\n", &["@grpc/grpc-js", "./gen/billing/payments_grpc_pb", "./gen/legacy/payments_pb"]),
-            ("use tonic::transport::Channel;\npub mod billing { tonic::include_proto!(\"billing\"); }\nuse billing::payments_service_client::{PaymentsServiceClient};\n", &["tonic::transport::Channel", "billing", "billing::payments_service_client"]),
-            ("require 'grpc'\nrequire_relative 'gen/billing/payments_services_pb'\n", &["grpc", "gen/billing/payments_services_pb"]),
-            ("#include <grpcpp/grpcpp.h>\n#include \"billing/payments.grpc.pb.h\"\n", &["grpcpp/grpcpp.h", "billing/payments.grpc.pb.h"]),
-            ("<?php\nuse Billing\\PaymentsServiceClient;\n", &["Billing\\PaymentsServiceClient"]),
-            ("import 'package:grpc/grpc.dart';\nimport 'package:shop/gen/billing/payments.pbgrpc.dart';\n", &["package:grpc/grpc.dart", "package:shop/gen/billing/payments.pbgrpc.dart"]),
+            (
+                "using Grpc.Net.Client;\nusing static GreeterApi.Helpers;\nusing Api = GreeterApi.V2;\nglobal using GreeterApi;\n",
+                &[
+                    "Grpc.Net.Client",
+                    "GreeterApi.Helpers",
+                    "GreeterApi.V2",
+                    "GreeterApi",
+                ],
+            ),
+            (
+                "import io.grpc.ManagedChannel;\nimport shop.billing.*;\nimport static shop.legacy.Util.helper;\n",
+                &[
+                    "io.grpc.ManagedChannel",
+                    "shop.billing",
+                    "shop.legacy.Util.helper",
+                ],
+            ),
+            (
+                "import grpc\nfrom gen.billing import payments_pb2_grpc\nimport gen.legacy.payments_pb2 as lp\n",
+                &["grpc", "gen.billing", "gen.legacy.payments_pb2"],
+            ),
+            (
+                "import * as grpc from '@grpc/grpc-js';\nimport {\n  PaymentsServiceClient,\n} from './gen/billing/payments_grpc_pb';\nconst x = require(\"./gen/legacy/payments_pb\");\n",
+                &[
+                    "@grpc/grpc-js",
+                    "./gen/billing/payments_grpc_pb",
+                    "./gen/legacy/payments_pb",
+                ],
+            ),
+            (
+                "use tonic::transport::Channel;\npub mod billing { tonic::include_proto!(\"billing\"); }\nuse billing::payments_service_client::{PaymentsServiceClient};\n",
+                &[
+                    "tonic::transport::Channel",
+                    "billing",
+                    "billing::payments_service_client",
+                ],
+            ),
+            (
+                "require 'grpc'\nrequire_relative 'gen/billing/payments_services_pb'\n",
+                &["grpc", "gen/billing/payments_services_pb"],
+            ),
+            (
+                "#include <grpcpp/grpcpp.h>\n#include \"billing/payments.grpc.pb.h\"\n",
+                &["grpcpp/grpcpp.h", "billing/payments.grpc.pb.h"],
+            ),
+            (
+                "<?php\nuse Billing\\PaymentsServiceClient;\n",
+                &["Billing\\PaymentsServiceClient"],
+            ),
+            (
+                "import 'package:grpc/grpc.dart';\nimport 'package:shop/gen/billing/payments.pbgrpc.dart';\n",
+                &[
+                    "package:grpc/grpc.dart",
+                    "package:shop/gen/billing/payments.pbgrpc.dart",
+                ],
+            ),
         ];
         for (source, want) in cases {
             assert_eq!(&client_package_evidence(source), want, "source: {source}");
@@ -3025,10 +3467,17 @@ let db = makeDbClient(uri);
     #[test]
     fn evidence_ignores_statements_prose_and_the_file_body() {
         let source = "using (var channel = GrpcChannel.ForAddress(url)) {}\nusing var ch = GrpcChannel.ForAddress(url);\nselect id\nfrom users where id = 1\n// import billing.Nope;\n";
-        assert!(client_package_evidence(source).is_empty(), "got {:?}", client_package_evidence(source));
+        assert!(
+            client_package_evidence(source).is_empty(),
+            "got {:?}",
+            client_package_evidence(source)
+        );
         let mut deep = "x = 1\n".repeat(EVIDENCE_SCAN_LINES);
         deep.push_str("from gen.billing import payments_pb2_grpc\n");
-        assert!(client_package_evidence(&deep).is_empty(), "past the head-of-file bound");
+        assert!(
+            client_package_evidence(&deep).is_empty(),
+            "past the head-of-file bound"
+        );
     }
 
     #[test]
@@ -3046,27 +3495,49 @@ let db = makeDbClient(uri);
     fn fallback_client_carries_its_files_package_evidence() {
         let source = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/gen/billing\"\n)\n\nfunc Charge() {\n\tc := pb.NewPaymentsServiceClient(conn)\n}\n";
         let out = extract_grpc_client_nodes(source, "", module_id(), repo());
-        assert_eq!(client_qnames(&out), vec!["grpc_client:PaymentsService".to_string()], "qname stays bare");
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:PaymentsService".to_string()],
+            "qname stays bare"
+        );
         let evidence = evidence_of(&out);
         assert_eq!(evidence.len(), 1);
-        assert_eq!(evidence[0].imports, vec!["google.golang.org/grpc", "example.com/gen/billing"]);
-        assert_eq!(evidence[0].package, None, "a client names no package of its own");
+        assert_eq!(
+            evidence[0].imports,
+            vec!["google.golang.org/grpc", "example.com/gen/billing"]
+        );
+        assert_eq!(
+            evidence[0].package, None,
+            "a client names no package of its own"
+        );
     }
 
     #[test]
     fn data_driven_client_carries_evidence_and_no_evidence_means_no_cell() {
         let source = "using Grpc.Net.Client;\nusing GreeterApi;\nvar c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
+        let out =
+            extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
         let evidence = evidence_of(&out);
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].imports, vec!["Grpc.Net.Client", "GreeterApi"]);
 
         // A stub with no import line at all carries no RPC_PACKAGE cell.
-        let bare = extract_grpc_client_nodes("c := pb.NewOrderServiceClient(conn)", "", module_id(), repo());
+        let bare = extract_grpc_client_nodes(
+            "c := pb.NewOrderServiceClient(conn)",
+            "",
+            module_id(),
+            repo(),
+        );
         assert_eq!(bare.nodes.len(), 1);
-        assert!(evidence_of(&bare).is_empty(), "null-free: no evidence, no cell");
+        assert!(
+            evidence_of(&bare).is_empty(),
+            "null-free: no evidence, no cell"
+        );
         // CB.21: the site's hostless ENDPOINT_HIT is its only cell.
-        assert_eq!(dial_hits(&bare), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&bare),
+            vec![vec![r#"{"via":"grpc"}"#.to_string()]]
+        );
     }
 
     // ---- CB.21: the dial host ---------------------------------------------
@@ -3107,18 +3578,33 @@ let db = makeDbClient(uri);
                   \tc := pb.NewUserServiceClient(conn)\n\
                   \t_ = c\n}\n";
         let out = extract_grpc_client_nodes(go, "", module_id(), repo());
-        assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
-        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:UserService".to_string()]
+        );
+        assert_eq!(
+            dial_hits(&out),
+            vec![vec![
+                host("users-svc:50051"),
+                r#"{"via":"grpc"}"#.to_string()
+            ]]
+        );
         // DialContext's target is its first string literal; dns:/// is stripped;
         // the nearest dial wins.
         let ctx = "func f(ctx context.Context) {\n\
                    \told, _ := grpc.Dial(\"legacy:1\")\n\
                    \tconn, _ := grpc.DialContext(ctx, \"dns:///orders-svc:9000\", opts...)\n\
                    \tc := pb.NewOrderServiceClient(conn)\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(ctx, "", module_id(), repo())), vec![vec![host("orders-svc:9000")]]);
+        assert_eq!(
+            dial_hits(&extract_grpc_client_nodes(ctx, "", module_id(), repo())),
+            vec![vec![host("orders-svc:9000")]]
+        );
         // A dynamic target names nothing.
         let dynamic = "func f(addr string) {\n\tconn, _ := grpc.NewClient(addr)\n\tc := pb.NewOrderServiceClient(conn)\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(dynamic, "", module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&extract_grpc_client_nodes(dynamic, "", module_id(), repo())),
+            vec![vec![r#"{"via":"grpc"}"#.to_string()]]
+        );
     }
 
     #[test]
@@ -3132,10 +3618,16 @@ let db = makeDbClient(uri);
                   async def run_aio():\n\
                   \x20   stub = users_pb2_grpc.UserServiceStub(grpc.aio.insecure_channel(target=\"http://admin-svc:8443/x\"))\n";
         let out = extract_grpc_client_nodes(py, "", module_id(), repo());
-        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), host("admin-svc:8443")]]);
+        assert_eq!(
+            dial_hits(&out),
+            vec![vec![host("users-svc:50051"), host("admin-svc:8443")]]
+        );
         // A formatted target is not a literal authority.
         let fmt = "def run(h):\n    channel = grpc.insecure_channel('%s:50051' % h)\n    stub = pb.UserServiceStub(channel)\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(fmt, "", module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&extract_grpc_client_nodes(fmt, "", module_id(), repo())),
+            vec![vec![r#"{"via":"grpc"}"#.to_string()]]
+        );
     }
 
     #[test]
@@ -3153,9 +3645,18 @@ let db = makeDbClient(uri);
                     \x20   var t = UserServiceGrpc.newBlockingStub(ch);\n\
                     \x20 }\n}\n";
         let out = extract_grpc_client_nodes(java, "", module_id(), repo());
-        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&out),
+            vec![vec![
+                host("users-svc:50051"),
+                r#"{"via":"grpc"}"#.to_string()
+            ]]
+        );
         let target = "void f() {\n  var ch = ManagedChannelBuilder.forTarget(\"dns:///users-svc:443\").build();\n  var s = UserServiceGrpc.newStub(ch);\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(target, "", module_id(), repo())), vec![vec![host("users-svc:443")]]);
+        assert_eq!(
+            dial_hits(&extract_grpc_client_nodes(target, "", module_id(), repo())),
+            vec![vec![host("users-svc:443")]]
+        );
     }
 
     #[test]
@@ -3164,22 +3665,58 @@ let db = makeDbClient(uri);
                   const client = new proto.UserServiceClient('users-svc:50051', grpc.credentials.createInsecure());\n\
                   const other = new proto.UserServiceClient(address, grpc.credentials.createInsecure());\n";
         let out = extract_grpc_client_nodes(js, "", module_id(), repo());
-        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&out),
+            vec![vec![
+                host("users-svc:50051"),
+                r#"{"via":"grpc"}"#.to_string()
+            ]]
+        );
         // The data-driven pass reads the same way; a unix socket names no host.
         let cs = "using Grpc.Net.Client;\nvar a = new Greeter.GreeterClient(GrpcChannel.ForAddress(\"https://greeter-svc:5001\"));\nvar b = new Greeter.GreeterClient(\"unix:///tmp/g.sock\");\n";
         let known = extract_known_grpc_client_nodes(cs, "", module_id(), repo(), &[svc("Greeter")]);
-        assert_eq!(dial_hits(&known), vec![vec![host("greeter-svc:5001"), r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(
+            dial_hits(&known),
+            vec![vec![
+                host("greeter-svc:5001"),
+                r#"{"via":"grpc"}"#.to_string()
+            ]]
+        );
     }
 
     #[test]
     fn dial_authority_strips_resolvers_and_rejects_non_hosts() {
-        assert_eq!(dial_authority("users:50051").as_deref(), Some("users:50051"));
-        assert_eq!(dial_authority("dns:///users:50051").as_deref(), Some("users:50051"));
-        assert_eq!(dial_authority("dns://8.8.8.8/users:50051").as_deref(), Some("users:50051"));
+        assert_eq!(
+            dial_authority("users:50051").as_deref(),
+            Some("users:50051")
+        );
+        assert_eq!(
+            dial_authority("dns:///users:50051").as_deref(),
+            Some("users:50051")
+        );
+        assert_eq!(
+            dial_authority("dns://8.8.8.8/users:50051").as_deref(),
+            Some("users:50051")
+        );
         assert_eq!(dial_authority("dns:users").as_deref(), Some("users"));
-        assert_eq!(dial_authority("passthrough:///users:1").as_deref(), Some("users:1"));
-        assert_eq!(dial_authority("https://u:p@users:443/api").as_deref(), Some("users:443"));
-        for none in ["unix:///tmp/s", "unix:s", "xds:///users", "vsock:3:50051", "ftp://x/y", "", "${host}:1", "%s:%d"] {
+        assert_eq!(
+            dial_authority("passthrough:///users:1").as_deref(),
+            Some("users:1")
+        );
+        assert_eq!(
+            dial_authority("https://u:p@users:443/api").as_deref(),
+            Some("users:443")
+        );
+        for none in [
+            "unix:///tmp/s",
+            "unix:s",
+            "xds:///users",
+            "vsock:3:50051",
+            "ftp://x/y",
+            "",
+            "${host}:1",
+            "%s:%d",
+        ] {
             assert_eq!(dial_authority(none), None, "{none}");
         }
     }
@@ -3222,14 +3759,22 @@ let db = makeDbClient(uri);
         let payload = out.nodes[0]
             .cells
             .iter()
-            .find_map(|c| match (&c.payload, c.kind == glia_code_domain::cell_type::RPC_PACKAGE) {
-                (CellPayload::Json(j), true) => Some(j.clone()),
-                _ => None,
+            .find_map(|c| {
+                match (
+                    &c.payload,
+                    c.kind == glia_code_domain::cell_type::RPC_PACKAGE,
+                ) {
+                    (CellPayload::Json(j), true) => Some(j.clone()),
+                    _ => None,
+                }
             })
             .expect("service carries RPC_PACKAGE");
         let decoded = RpcPackageCell::parse(&payload).expect("decodes");
         assert_eq!(decoded.package.as_deref(), Some("billing"));
-        assert_eq!(decoded.go_package.as_deref(), Some("example.com/gen/billing;billingpb"));
+        assert_eq!(
+            decoded.go_package.as_deref(),
+            Some("example.com/gen/billing;billingpb")
+        );
         assert_eq!(decoded.csharp_namespace.as_deref(), Some("Shop.Billing"));
         assert_eq!(decoded.java_package, None);
         assert!(decoded.imports.is_empty());
@@ -3320,10 +3865,7 @@ let db = makeDbClient(uri);
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
-    fn edges_of(
-        out: &ProtoRpcNodes,
-        cat: glia_core::EdgeCategoryId,
-    ) -> Vec<(NodeId, NodeId)> {
+    fn edges_of(out: &ProtoRpcNodes, cat: glia_core::EdgeCategoryId) -> Vec<(NodeId, NodeId)> {
         out.edges
             .iter()
             .filter(|e| e.category == cat)
@@ -3735,32 +4277,74 @@ let db = makeDbClient(uri);
              }}\n"
         );
         // Suffix pass.
-        assert!(client_qnames(&extract_grpc_client_nodes(&rust, "src/x.rs", module_id(), repo())).is_empty());
+        assert!(
+            client_qnames(&extract_grpc_client_nodes(
+                &rust,
+                "src/x.rs",
+                module_id(),
+                repo()
+            ))
+            .is_empty()
+        );
         assert_eq!(
-            client_qnames(&extract_grpc_client_nodes(&rust, "src/x.go", module_id(), repo())),
+            client_qnames(&extract_grpc_client_nodes(
+                &rust,
+                "src/x.go",
+                module_id(),
+                repo()
+            )),
             vec!["grpc_client:OrderService".to_string()]
         );
 
         // Known-client pass: the literal names a known service's stub.
         let known_rs = "fn sample() {\n    let src = \"conn := grpc.Dial(addr)\\nc := pb.NewGreeterClient(conn)\";\n}\n";
         let known = [svc("Greeter")];
-        assert!(extract_known_grpc_client_nodes(known_rs, "src/x.rs", module_id(), repo(), &known).nodes.is_empty());
+        assert!(
+            extract_known_grpc_client_nodes(known_rs, "src/x.rs", module_id(), repo(), &known)
+                .nodes
+                .is_empty()
+        );
         assert_eq!(
-            client_qnames(&extract_known_grpc_client_nodes(known_rs, "src/x.go", module_id(), repo(), &known)),
+            client_qnames(&extract_known_grpc_client_nodes(
+                known_rs,
+                "src/x.go",
+                module_id(),
+                repo(),
+                &known
+            )),
             vec!["grpc_client:Greeter".to_string()]
         );
 
         // Server pass over a Rust test literal holding the Go embed.
         let server_rs = "#[test]\nfn reads() {\n    let src = \"import \\\"google.golang.org/grpc\\\"\\ntype server struct {\\n\\tpb.UnimplementedGreeterServer\\n}\";\n}\n";
         let server = |path: &str| {
-            extract_grpc_server_nodes(server_rs, path, module_id(), repo(), &[greeter()], &[], &CodeNav::default())
+            extract_grpc_server_nodes(
+                server_rs,
+                path,
+                module_id(),
+                repo(),
+                &[greeter()],
+                &[],
+                &CodeNav::default(),
+            )
         };
         assert!(server("src/x.rs").nodes.is_empty());
-        assert_eq!(client_qnames(&server("src/x.go")), vec!["grpc_server:Greeter".to_string()]);
+        assert_eq!(
+            client_qnames(&server("src/x.go")),
+            vec!["grpc_server:Greeter".to_string()]
+        );
 
         // tonic registration in Rust code stays.
         let tonic = "use tonic::transport::Server;\n\nasync fn serve(svc: MyGreeter) {\n    Server::builder().add_service(GreeterServer::new(svc));\n}\n";
-        let out = extract_grpc_server_nodes(tonic, "src/main.rs", module_id(), repo(), &[greeter()], &[], &CodeNav::default());
+        let out = extract_grpc_server_nodes(
+            tonic,
+            "src/main.rs",
+            module_id(),
+            repo(),
+            &[greeter()],
+            &[],
+            &CodeNav::default(),
+        );
         assert_eq!(client_qnames(&out), vec!["grpc_server:Greeter".to_string()]);
         assert_eq!(server_lines(&out), vec![3]);
 
@@ -3771,10 +4355,26 @@ let db = makeDbClient(uri);
                      async fn orders() {\n\
                      \x20   let c = OrderServiceClient::connect(\"http://orders:50051\").await;\n\
                      }\n";
-        assert!(extract_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo()).nodes.is_empty());
-        let out = extract_known_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo(), &[svc("OrderService")]);
-        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
-        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![3]);
+        assert!(
+            extract_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
+        let out = extract_known_grpc_client_nodes(
+            mixed,
+            "src/orders.rs",
+            module_id(),
+            repo(),
+            &[svc("OrderService")],
+        );
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:OrderService".to_string()]
+        );
+        assert_eq!(
+            out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![3]
+        );
     }
 
     // ---- DH.12: elixir-grpc stubs -----------------------------------------
@@ -3785,9 +4385,14 @@ let db = makeDbClient(uri);
     /// name. The stub module's own definition and an `alias` of it call nothing.
     #[test]
     fn elixir_stub_call_mints_client() {
-        let ex = include_str!("../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex");
+        let ex = include_str!(
+            "../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex"
+        );
         let out = extract_grpc_client_nodes(ex, "lib/order_client.ex", module_id(), repo());
-        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:OrderService".to_string()]
+        );
         let id = out.nodes[0].id;
         assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_CLIENT);
         assert_eq!(out.nav.name_by_id[&id], "OrderService");
@@ -3800,8 +4405,18 @@ let db = makeDbClient(uri);
         assert_eq!(client_qnames(&out), vec!["grpc_client:PaySvc".to_string()]);
 
         let decl = "defmodule Shop.OrderService.Stub do\n  use GRPC.Stub, service: Shop.OrderService.Service\nend\n\ndefmodule Shop.Other do\n  alias Shop.OrderService.Stub\nend\n";
-        assert!(extract_grpc_client_nodes(decl, "lib/stub.ex", module_id(), repo()).nodes.is_empty());
-        let known = extract_known_grpc_client_nodes(decl, "lib/stub.ex", module_id(), repo(), &[svc("OrderService")]);
+        assert!(
+            extract_grpc_client_nodes(decl, "lib/stub.ex", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
+        let known = extract_known_grpc_client_nodes(
+            decl,
+            "lib/stub.ex",
+            module_id(),
+            repo(),
+            &[svc("OrderService")],
+        );
         assert!(known.nodes.is_empty(), "a definition is no call site");
     }
 
@@ -3825,15 +4440,24 @@ let db = makeDbClient(uri);
                   \x20 end\n\
                   end\n";
         let out = extract_grpc_client_nodes(ex, "lib/orders.ex", module_id(), repo());
-        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:OrderService".to_string()]
+        );
         assert_eq!(
             dial_hits(&out),
-            vec![vec![host("orders:50051"), host("orders:50051"), r#"{"via":"grpc"}"#.to_string()]]
+            vec![vec![
+                host("orders:50051"),
+                host("orders:50051"),
+                r#"{"via":"grpc"}"#.to_string()
+            ]]
         );
         assert!(opens_function("defp handed(channel, id) do"));
         assert!(opens_function("def get do"));
         // The probe's own client file.
-        let probe = include_str!("../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex");
+        let probe = include_str!(
+            "../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex"
+        );
         let out = extract_grpc_client_nodes(probe, "lib/order_client.ex", module_id(), repo());
         assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
     }
@@ -3846,31 +4470,71 @@ let db = makeDbClient(uri);
     fn elixir_stub_needs_grpc_context_for_known_pass() {
         let with = "defmodule Hello do\n  def run do\n    {:ok, channel} = GRPC.Stub.connect(\"localhost:50051\")\n    {:ok, reply} = channel |> Helloworld.Greeter.Stub.say_hello(Helloworld.HelloRequest.new(name: \"x\"))\n    reply\n  end\nend\n";
         assert!(file_has_grpc_context(with));
-        let out = extract_known_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(
+            with,
+            "lib/hello.ex",
+            module_id(),
+            repo(),
+            &[svc("Greeter")],
+        );
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 3
+            }]
+        );
         assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
         assert!(
-            extract_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo()).nodes.is_empty(),
+            extract_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo())
+                .nodes
+                .is_empty(),
             "Greeter has no Service suffix: the suffix pass is blind to it"
         );
 
         // A channel handed in and nothing naming GRPC.Stub: no context, no client.
         let without = "defmodule Hello do\n  def run(channel, req) do\n    Helloworld.Greeter.Stub.say_hello(channel, req)\n  end\nend\n";
         assert!(!file_has_grpc_context(without));
-        assert!(extract_known_grpc_client_nodes(without, "lib/hello.ex", module_id(), repo(), &[svc("Greeter")]).nodes.is_empty());
+        assert!(
+            extract_known_grpc_client_nodes(
+                without,
+                "lib/hello.ex",
+                module_id(),
+                repo(),
+                &[svc("Greeter")]
+            )
+            .nodes
+            .is_empty()
+        );
 
         let generated = "defmodule Shop.OrderService.Stub do\n  use GRPC.Stub, service: Shop.OrderService.Service\nend\n\ndefmodule Shop.Warm do\n  def warm(ch), do: Shop.OrderService.Stub.get_order(ch, nil)\nend\n";
-        assert!(extract_grpc_client_nodes(generated, "lib/shop.pb.ex", module_id(), repo()).nodes.is_empty());
         assert!(
-            extract_known_grpc_client_nodes(generated, "lib/shop.pb.ex", module_id(), repo(), &[svc("OrderService")])
+            extract_grpc_client_nodes(generated, "lib/shop.pb.ex", module_id(), repo())
                 .nodes
                 .is_empty()
         );
+        assert!(
+            extract_known_grpc_client_nodes(
+                generated,
+                "lib/shop.pb.ex",
+                module_id(),
+                repo(),
+                &[svc("OrderService")]
+            )
+            .nodes
+            .is_empty()
+        );
         // The same text hand-written mints its one call site.
         let hand = extract_grpc_client_nodes(generated, "lib/shop.ex", module_id(), repo());
-        assert_eq!(client_qnames(&hand), vec!["grpc_client:OrderService".to_string()]);
-        assert_eq!(hand.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(
+            client_qnames(&hand),
+            vec!["grpc_client:OrderService".to_string()]
+        );
+        assert_eq!(
+            hand.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![5]
+        );
     }
 
     /// Ruby's `Shop::OrderService::Stub.new(` still reads through the known
@@ -3879,10 +4543,29 @@ let db = makeDbClient(uri);
     #[test]
     fn ruby_stub_new_unchanged() {
         let rb = "require 'grpc'\nrequire 'order_services_pb'\n\ndef fetch\n  stub = Shop::OrderService::Stub.new('orders:50051', :this_channel_is_insecure)\n  stub.get_order(Shop::OrderRequest.new(id: '1'))\nend\n";
-        let out = extract_known_grpc_client_nodes(rb, "lib/fetch.rb", module_id(), repo(), &[svc("OrderService")]);
-        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
-        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 4 }]);
+        let out = extract_known_grpc_client_nodes(
+            rb,
+            "lib/fetch.rb",
+            module_id(),
+            repo(),
+            &[svc("OrderService")],
+        );
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:OrderService".to_string()]
+        );
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 4
+            }]
+        );
         assert_eq!(dial_hits(&out), vec![vec![host("orders:50051")]]);
-        assert!(extract_grpc_client_nodes(rb, "lib/fetch.rb", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_grpc_client_nodes(rb, "lib/fetch.rb", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
     }
 }

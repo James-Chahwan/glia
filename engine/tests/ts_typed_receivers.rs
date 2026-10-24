@@ -28,7 +28,9 @@ use glia_graph::MergedGraph;
 const FIXTURE: &str = "ts-typed-receivers";
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(FIXTURE)
 }
 
 /// Copy a fixture's sources (never its key.json or a stray `.ai/` / `.glia/`).
@@ -50,7 +52,9 @@ fn copy_tree(from: &Path, to: &Path) {
 fn build(tmp: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), tmp);
     let root = tmp.display().to_string();
-    generate_one(&root).unwrap_or_else(|e| panic!("generate_one: {e}")).merged
+    generate_one(&root)
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged
 }
 
 const APP: &str = "src::app";
@@ -64,7 +68,12 @@ fn node(m: &MergedGraph, rel: &str) -> NodeId {
 }
 
 /// The evidence of the first `category` edge `from -> to`, if any.
-fn edge_evidence(m: &MergedGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) -> Option<Evidence> {
+fn edge_evidence(
+    m: &MergedGraph,
+    from: NodeId,
+    to: NodeId,
+    category: EdgeCategoryId,
+) -> Option<Evidence> {
     m.all_edges()
         .find(|e| e.from == from && e.to == to && e.category == category)
         .map(|e| Evidence::of(e).expect("every edge carries EVIDENCE"))
@@ -77,7 +86,10 @@ fn site_text(root: &Path, ev: &Evidence) -> String {
         panic!("site evidence without a file and line: {ev:?}");
     };
     let text = std::fs::read_to_string(root.join(file)).expect("read site file");
-    text.lines().nth(line as usize).unwrap_or_default().to_string()
+    text.lines()
+        .nth(line as usize)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The 14 key.json expect_edges, each with the rule that binds it and a
@@ -94,30 +106,122 @@ fn typed_receivers_are_edges() {
     let auth = |member: &str| n(&format!("core::auth.service::AuthService::{member}"));
     let init = n("pages::connect.component::ConnectComponent::ngOnInit");
     let spec = n("features::drafts::draft.store.spec");
-    let store = |member: &str| n(&format!("features::drafts::draft.store::DraftStore::{member}"));
+    let store = |member: &str| {
+        n(&format!(
+            "features::drafts::draft.store::DraftStore::{member}"
+        ))
+    };
     let inject_line = "inject(CountriesService).list()";
     let rows = [
-        (save, n("shared::filing-form.component::FilingForm::reset"), edge_category::CALLS, "receiver_type", "this.form()?.reset()"),
-        (save, n("shared::toggle.component::Toggle::sync"), edge_category::CALLS, "receiver_type", "this.sw()?.sync(true)"),
-        (save, n("shared::dropzone.component::Dropzone::clear"), edge_category::CALLS, "receiver_type", "this.zone().clear()"),
-        (countries, n("core::countries.service::CountriesService::list"), edge_category::CALLS, "receiver_type", inject_line),
-        (countries, service, edge_category::INJECTS, "import_binding", inject_line),
-        (countries, service, edge_category::USES, "static_member", "CountriesService.FALLBACK"),
-        (guard, n("core::auth.service::AuthService"), edge_category::INJECTS, "import_binding", "inject(AuthService, OPTIONAL)"),
-        (guard, auth("isLoggedOut"), edge_category::CALLS, "receiver_accessor_read", "auth.isLoggedOut"),
-        (guard, auth("isAuthenticated"), edge_category::CALLS, "receiver_accessor_read", "auth.isAuthenticated"),
-        (guard, n("core::auth.guard::OPTIONAL"), edge_category::USES, "value_ref", "inject(AuthService, OPTIONAL)"),
-        (init, auth("isAuthenticated"), edge_category::CALLS, "receiver_accessor_read", "this.auth.isAuthenticated"),
-        (init, auth("session"), edge_category::CALLS, "receiver_accessor_write", "this.auth.session = 'guest'"),
-        (spec, store("reset"), edge_category::CALLS, "receiver_return", "store.reset()"),
-        (spec, store("patch"), edge_category::CALLS, "receiver_return", "other.patch('x')"),
+        (
+            save,
+            n("shared::filing-form.component::FilingForm::reset"),
+            edge_category::CALLS,
+            "receiver_type",
+            "this.form()?.reset()",
+        ),
+        (
+            save,
+            n("shared::toggle.component::Toggle::sync"),
+            edge_category::CALLS,
+            "receiver_type",
+            "this.sw()?.sync(true)",
+        ),
+        (
+            save,
+            n("shared::dropzone.component::Dropzone::clear"),
+            edge_category::CALLS,
+            "receiver_type",
+            "this.zone().clear()",
+        ),
+        (
+            countries,
+            n("core::countries.service::CountriesService::list"),
+            edge_category::CALLS,
+            "receiver_type",
+            inject_line,
+        ),
+        (
+            countries,
+            service,
+            edge_category::INJECTS,
+            "import_binding",
+            inject_line,
+        ),
+        (
+            countries,
+            service,
+            edge_category::USES,
+            "static_member",
+            "CountriesService.FALLBACK",
+        ),
+        (
+            guard,
+            n("core::auth.service::AuthService"),
+            edge_category::INJECTS,
+            "import_binding",
+            "inject(AuthService, OPTIONAL)",
+        ),
+        (
+            guard,
+            auth("isLoggedOut"),
+            edge_category::CALLS,
+            "receiver_accessor_read",
+            "auth.isLoggedOut",
+        ),
+        (
+            guard,
+            auth("isAuthenticated"),
+            edge_category::CALLS,
+            "receiver_accessor_read",
+            "auth.isAuthenticated",
+        ),
+        (
+            guard,
+            n("core::auth.guard::OPTIONAL"),
+            edge_category::USES,
+            "value_ref",
+            "inject(AuthService, OPTIONAL)",
+        ),
+        (
+            init,
+            auth("isAuthenticated"),
+            edge_category::CALLS,
+            "receiver_accessor_read",
+            "this.auth.isAuthenticated",
+        ),
+        (
+            init,
+            auth("session"),
+            edge_category::CALLS,
+            "receiver_accessor_write",
+            "this.auth.session = 'guest'",
+        ),
+        (
+            spec,
+            store("reset"),
+            edge_category::CALLS,
+            "receiver_return",
+            "store.reset()",
+        ),
+        (
+            spec,
+            store("patch"),
+            edge_category::CALLS,
+            "receiver_return",
+            "other.patch('x')",
+        ),
     ];
     for (from, to, category, rule, site) in rows {
         let ev = edge_evidence(&m, from, to, category)
             .unwrap_or_else(|| panic!("{site}: no edge {from:?} -> {to:?}"));
         assert_eq!(ev.rule.as_deref(), Some(rule), "{site}: {ev:?}");
         let text = site_text(tmp.path(), &ev);
-        assert!(text.contains(site), "{site}: the site line is `{}`", text.trim());
+        assert!(
+            text.contains(site),
+            "{site}: the site line is `{}`",
+            text.trim()
+        );
     }
 }
 
@@ -138,27 +242,61 @@ fn look_alikes_bind_nothing() {
     let router = n("legacy::router::Router");
     let url = n("legacy::router::Router::url");
     let forbid = [
-        (reload, n("shared::dropzone.component::Dropzone::clear"), edge_category::CALLS),
-        (n("core::countries.service::LegacyCodes::first"), n("core::countries.service::LegacyCodes"), edge_category::USES),
-        (n("core::auth.guard::describeAuth"), n("core::auth.service::AuthService::check"), edge_category::CALLS),
-        (n("features::drafts::draft.store.spec::withFactory"), drop, edge_category::CALLS),
+        (
+            reload,
+            n("shared::dropzone.component::Dropzone::clear"),
+            edge_category::CALLS,
+        ),
+        (
+            n("core::countries.service::LegacyCodes::first"),
+            n("core::countries.service::LegacyCodes"),
+            edge_category::USES,
+        ),
+        (
+            n("core::auth.guard::describeAuth"),
+            n("core::auth.service::AuthService::check"),
+            edge_category::CALLS,
+        ),
+        (
+            n("features::drafts::draft.store.spec::withFactory"),
+            drop,
+            edge_category::CALLS,
+        ),
         (spec, drop, edge_category::CALLS),
-        (n("legacy::probe::probe"), n("core::auth.service::AuthService"), edge_category::INJECTS),
-        (reload, n("shared::chip.component::Chip::filter"), edge_category::CALLS),
+        (
+            n("legacy::probe::probe"),
+            n("core::auth.service::AuthService"),
+            edge_category::INJECTS,
+        ),
+        (
+            reload,
+            n("shared::chip.component::Chip::filter"),
+            edge_category::CALLS,
+        ),
         (guard, router, edge_category::INJECTS),
         (guard, url, edge_category::CALLS),
         (spec, url, edge_category::CALLS),
-        (guard, n("core::auth.guard::OPTIONAL"), edge_category::INJECTS),
+        (
+            guard,
+            n("core::auth.guard::OPTIONAL"),
+            edge_category::INJECTS,
+        ),
     ];
     for (from, to, category) in forbid {
-        assert!(edge_evidence(&m, from, to, category).is_none(), "{from:?} -> {to:?} ({category:?})");
+        assert!(
+            edge_evidence(&m, from, to, category).is_none(),
+            "{from:?} -> {to:?} ({category:?})"
+        );
     }
     let into_router: Vec<NodeId> = m
         .all_edges()
         .filter(|e| (e.to == router || e.to == url) && e.category != edge_category::DEFINES)
         .map(|e| e.from)
         .collect();
-    assert!(into_router.is_empty(), "the legacy Router is used by nothing: {into_router:?}");
+    assert!(
+        into_router.is_empty(),
+        "the legacy Router is used by nothing: {into_router:?}"
+    );
 }
 
 /// dead_symbol by membership: the 10 members and classes the new edges
@@ -168,8 +306,12 @@ fn typed_receiver_targets_leave_dead_symbol() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let m = build(tmp.path());
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     let q = |rel: &str| format!("{APP}::{rel}");
     for gone in [
         "core::auth.service::AuthService::isAuthenticated",
@@ -203,6 +345,9 @@ fn typed_receiver_targets_leave_dead_symbol() {
         "shared::filing-form.component::FilingForm::submit",
         "shared::toggle.component::Toggle::flip",
     ] {
-        assert!(rows.contains(&q(stays)), "{stays} is run by nothing, a row: {rows:#?}");
+        assert!(
+            rows.contains(&q(stays)),
+            "{stays} is run by nothing, a row: {rows:#?}"
+        );
     }
 }

@@ -50,7 +50,9 @@ fn copy_tree(from: &Path, to: &Path) {
 
 fn build_in(dir: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), dir);
-    generate_one(&dir.display().to_string()).expect("fixture builds").merged
+    generate_one(&dir.display().to_string())
+        .expect("fixture builds")
+        .merged
 }
 
 fn build() -> (tempfile::TempDir, MergedGraph) {
@@ -104,17 +106,42 @@ fn closures_creations_and_names_passed_by_value_become_edges() {
     let (_tmp, m) = build();
     let calls = edges(&m, edge_category::CALLS);
     for (from, to, why) in [
-        ("lib::main::App::build", format!("{CARD}::CardPage"), "inside the Builder closure"),
-        (&format!("{CARD}::_CardPageState::build"), format!("{CARD}::_Dot"), "const _Dot()"),
-        (&format!("{CARD}::_CardPageState::build"), format!("{CARD}::_Label"), "new _Label(..)"),
-        ("lib::main::main", "lib::main::App".to_string(), "the HEAD control"),
+        (
+            "lib::main::App::build",
+            format!("{CARD}::CardPage"),
+            "inside the Builder closure",
+        ),
+        (
+            &format!("{CARD}::_CardPageState::build"),
+            format!("{CARD}::_Dot"),
+            "const _Dot()",
+        ),
+        (
+            &format!("{CARD}::_CardPageState::build"),
+            format!("{CARD}::_Label"),
+            "new _Label(..)",
+        ),
+        (
+            "lib::main::main",
+            "lib::main::App".to_string(),
+            "the HEAD control",
+        ),
     ] {
-        assert!(has(&calls, from, &to), "{why}: CALLS {from} -> {to}; CALLS = {calls:?}");
+        assert!(
+            has(&calls, from, &to),
+            "{why}: CALLS {from} -> {to}; CALLS = {calls:?}"
+        );
     }
     let uses = edges(&m, edge_category::USES);
     for (from, to) in [
-        ("lib::main::App::build".to_string(), "lib::main::_noop".to_string()),
-        (format!("{CARD}::_CardPageState::build"), format!("{CARD}::_CardPageState::_save")),
+        (
+            "lib::main::App::build".to_string(),
+            "lib::main::_noop".to_string(),
+        ),
+        (
+            format!("{CARD}::_CardPageState::build"),
+            format!("{CARD}::_CardPageState::_save"),
+        ),
     ] {
         let ev = uses
             .iter()
@@ -126,8 +153,16 @@ fn closures_creations_and_names_passed_by_value_become_edges() {
     }
     // The fixture's forbid rows: `onTap: onTap` is the local `final onTap`,
     // and no lifecycle hop is stored as an edge.
-    assert!(!has(&uses, &format!("{CARD}::_CardPageState::build"), &format!("{CARD}::_CardPageState::onTap")));
-    assert!(!has(&calls, &format!("{CARD}::CartModel"), &format!("{CARD}::CartModel::dispose")));
+    assert!(!has(
+        &uses,
+        &format!("{CARD}::_CardPageState::build"),
+        &format!("{CARD}::_CardPageState::onTap")
+    ));
+    assert!(!has(
+        &calls,
+        &format!("{CARD}::CartModel"),
+        &format!("{CARD}::CartModel::dispose")
+    ));
     assert_eq!(uses.len(), 2, "the two names passed by value: {uses:?}");
 }
 
@@ -143,13 +178,24 @@ fn widget_and_state_classes_carry_role_component() {
     ] {
         assert_eq!(roles(&m, &q), [node_kind::COMPONENT], "{q}");
         let id = node(&m, &q);
-        let kind = m.graphs.iter().find_map(|g| g.nav.kind_by_id.get(&id).copied());
+        let kind = m
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.kind_by_id.get(&id).copied());
         assert_eq!(kind, Some(node_kind::CLASS), "{q} keeps its kind");
     }
-    assert!(roles(&m, &format!("{CARD}::CartModel")).is_empty(), "a ChangeNotifier is no component");
+    assert!(
+        roles(&m, &format!("{CARD}::CartModel")).is_empty(),
+        "a ChangeNotifier is no component"
+    );
     // Every overlay folded into its CLASS: no COMPONENT node is left.
     for g in &m.graphs {
-        assert!(!g.nav.kind_by_id.values().any(|k| *k == node_kind::COMPONENT));
+        assert!(
+            !g.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::COMPONENT)
+        );
         for n in &g.nodes {
             let role_cells = n.cells.iter().filter(|c| c.kind == cell_type::ROLE).count();
             assert!(role_cells <= 1, "one ROLE cell per node");
@@ -161,8 +207,12 @@ fn widget_and_state_classes_carry_role_component() {
 fn dead_symbol_is_exactly_the_change_notifier_and_the_shadowed_method() {
     let (_tmp, m) = build();
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let mut rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let mut rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     rows.sort();
     let mut want = vec![
         format!("{CARD}::CartModel"),
@@ -192,16 +242,28 @@ fn markers_name_the_components_and_the_new_sites() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, tmp.path())
         .env("GLIA_THREADS", "1")
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let lines = |prefix: &str| -> Vec<String> {
-        let mut v: Vec<String> =
-            stderr.lines().filter(|l| l.starts_with(prefix)).map(String::from).collect();
+        let mut v: Vec<String> = stderr
+            .lines()
+            .filter(|l| l.starts_with(prefix))
+            .map(String::from)
+            .collect();
         v.sort();
         v
     };
@@ -214,8 +276,20 @@ fn markers_name_the_components_and_the_new_sites() {
     );
     let calls = lines("[dart-calls]");
     assert_eq!(calls.len(), 2, "{calls:?}");
-    let card = calls.iter().find(|l| l.ends_with("file=lib/features/card.dart")).expect("card");
-    assert!(card.contains(" closures=1 creations=4 method_refs=1 "), "{card}");
-    let main = calls.iter().find(|l| l.ends_with("file=lib/main.dart")).expect("main");
-    assert!(main.contains(" closures=1 creations=1 method_refs=1 "), "{main}");
+    let card = calls
+        .iter()
+        .find(|l| l.ends_with("file=lib/features/card.dart"))
+        .expect("card");
+    assert!(
+        card.contains(" closures=1 creations=4 method_refs=1 "),
+        "{card}"
+    );
+    let main = calls
+        .iter()
+        .find(|l| l.ends_with("file=lib/main.dart"))
+        .expect("main");
+    assert!(
+        main.contains(" closures=1 creations=1 method_refs=1 "),
+        "{main}"
+    );
 }

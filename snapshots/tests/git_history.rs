@@ -7,11 +7,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use glia_snapshots::{HistoryOptions, history_sync};
 use glia_code_domain::snapshots::{
-    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_MESSAGES_FILE, HistoryFile, META_FILE, data_hash,
-    history_dir, read_history, read_history_messages,
+    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_MESSAGES_FILE, HistoryFile, META_FILE,
+    data_hash, history_dir, read_history, read_history_messages,
 };
+use glia_snapshots::{HistoryOptions, history_sync};
 
 const AUTHOR_NAME: &str = "Quillon Identitymarker";
 const AUTHOR_EMAIL: &str = "quillon.author@identity.invalid";
@@ -34,7 +34,11 @@ impl Repo {
         std::fs::create_dir_all(&top).unwrap();
         let gitconfig = tmp.path().join("gitconfig");
         std::fs::write(&gitconfig, "").unwrap();
-        let repo = Repo { _tmp: tmp, top, gitconfig };
+        let repo = Repo {
+            _tmp: tmp,
+            top,
+            gitconfig,
+        };
         repo.git(&["init", "-q", "-b", "main"]);
         repo
     }
@@ -121,11 +125,19 @@ fn probe_g1() -> Repo {
 }
 
 fn file(p: &str, a: u32, d: u32) -> HistoryFile {
-    HistoryFile { p: p.into(), a: Some(a), d: Some(d), from: None }
+    HistoryFile {
+        p: p.into(),
+        a: Some(a),
+        d: Some(d),
+        from: None,
+    }
 }
 
 fn with_blame() -> HistoryOptions {
-    HistoryOptions { blame: true, ..HistoryOptions::default() }
+    HistoryOptions {
+        blame: true,
+        ..HistoryOptions::default()
+    }
 }
 
 #[test]
@@ -133,7 +145,14 @@ fn probe_g1_shape() {
     let r = probe_g1();
     let s = history_sync(&r.top, &HistoryOptions::default()).expect("sync");
     assert_eq!(
-        (s.commits, s.files, s.renames, s.binary, s.blame_files, s.runs),
+        (
+            s.commits,
+            s.files,
+            s.renames,
+            s.binary,
+            s.blame_files,
+            s.runs
+        ),
         (5, 3, 1, 0, 0, 0),
         "{s:?}"
     );
@@ -150,7 +169,10 @@ fn probe_g1_shape() {
 
     // Newest first, as git gives, with committer times.
     let times: Vec<i64> = snap.commits.iter().map(|c| c.t).collect();
-    assert_eq!(times, [T0 + 4 * DAY, T0 + 3 * DAY, T0 + 2 * DAY, T0 + DAY, T0]);
+    assert_eq!(
+        times,
+        [T0 + 4 * DAY, T0 + 3 * DAY, T0 + 2 * DAY, T0 + DAY, T0]
+    );
     assert!(snap.commits.iter().all(|c| c.c.len() == 40));
     assert_eq!(snap.commits[0].c, r.head());
 
@@ -164,21 +186,39 @@ fn probe_g1_shape() {
         }]
     );
     for commit in &snap.commits[1..4] {
-        assert_eq!(commit.files, [file("svc/a.py", 1, 0), file("svc/b.py", 1, 0)]);
+        assert_eq!(
+            commit.files,
+            [file("svc/a.py", 1, 0), file("svc/b.py", 1, 0)]
+        );
     }
     assert_eq!(
         snap.commits[4].files,
-        [file("svc/a.py", 2, 0), file("svc/b.py", 2, 0), file("svc/c.py", 2, 0)]
+        [
+            file("svc/a.py", 2, 0),
+            file("svc/b.py", 2, 0),
+            file("svc/c.py", 2, 0)
+        ]
     );
 
     // Blame off: blame.jsonl is written, empty.
     assert!(snap.blame.is_empty());
-    assert_eq!(std::fs::read(history_dir(&r.top).join(HISTORY_BLAME_FILE)).unwrap(), b"");
+    assert_eq!(
+        std::fs::read(history_dir(&r.top).join(HISTORY_BLAME_FILE)).unwrap(),
+        b""
+    );
 
     // .glia/.gitignore lists the regenerable inputs, never the checked-in ones.
     let gitignore = std::fs::read_to_string(r.top.join(".glia/.gitignore")).unwrap();
-    for line in ["vectors.jsonl", "docs-snapshot/", "history-snapshot/", "test-snapshot/"] {
-        assert!(gitignore.lines().any(|l| l == line), "{line} missing from {gitignore}");
+    for line in [
+        "vectors.jsonl",
+        "docs-snapshot/",
+        "history-snapshot/",
+        "test-snapshot/",
+    ] {
+        assert!(
+            gitignore.lines().any(|l| l == line),
+            "{line} missing from {gitignore}"
+        );
     }
     assert!(!gitignore.contains("overlay.toml") && !gitignore.contains("cells.jsonl"));
     // The sync commits nothing and leaves the history untouched.
@@ -191,11 +231,18 @@ fn identity_never_captured() {
     r.append("svc/a.py", "# message sentinel edit\n");
     r.commit("MessageSentinel subject line", T0 + 5 * DAY);
     let s = history_sync(&r.top, &with_blame()).expect("sync");
-    assert!(s.blame_files > 0 && s.runs > 0, "blame must actually run: {s:?}");
+    assert!(
+        s.blame_files > 0 && s.runs > 0,
+        "blame must actually run: {s:?}"
+    );
 
     let [commits, blame, meta] = r.snapshot_bytes(&r.top);
     assert!(!blame.is_empty());
-    for (name, bytes) in [("commits.jsonl", &commits), ("blame.jsonl", &blame), ("meta.json", &meta)] {
+    for (name, bytes) in [
+        ("commits.jsonl", &commits),
+        ("blame.jsonl", &blame),
+        ("meta.json", &meta),
+    ] {
         let text = String::from_utf8_lossy(bytes);
         for needle in [
             AUTHOR_NAME,
@@ -207,14 +254,30 @@ fn identity_never_captured() {
             "identity.invalid",
             "MessageSentinel",
         ] {
-            assert!(!text.contains(needle), "{name} captured {needle:?}:\n{text}");
+            assert!(
+                !text.contains(needle),
+                "{name} captured {needle:?}:\n{text}"
+            );
         }
     }
     // EB.1: the message sidecar holds the subject, never an identity.
-    let messages = std::fs::read_to_string(history_dir(&r.top).join(HISTORY_MESSAGES_FILE)).unwrap();
-    assert!(messages.contains("MessageSentinel subject line"), "{messages}");
-    for needle in [AUTHOR_NAME, AUTHOR_EMAIL, COMMITTER_NAME, COMMITTER_EMAIL, "identity.invalid"] {
-        assert!(!messages.contains(needle), "messages.jsonl captured {needle:?}:\n{messages}");
+    let messages =
+        std::fs::read_to_string(history_dir(&r.top).join(HISTORY_MESSAGES_FILE)).unwrap();
+    assert!(
+        messages.contains("MessageSentinel subject line"),
+        "{messages}"
+    );
+    for needle in [
+        AUTHOR_NAME,
+        AUTHOR_EMAIL,
+        COMMITTER_NAME,
+        COMMITTER_EMAIL,
+        "identity.invalid",
+    ] {
+        assert!(
+            !messages.contains(needle),
+            "messages.jsonl captured {needle:?}:\n{messages}"
+        );
     }
 }
 
@@ -224,7 +287,10 @@ fn binary_file_counts_are_none() {
     r.write("app.py", b"print('hi')\n");
     r.write("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x01");
     r.commit("add", T0);
-    r.write("logo.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x02\x00");
+    r.write(
+        "logo.png",
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x02\x00",
+    );
     r.commit("new logo", T0 + DAY);
 
     let s = history_sync(&r.top, &with_blame()).expect("sync");
@@ -232,15 +298,31 @@ fn binary_file_counts_are_none() {
     let snap = read_history(&r.top).expect("snapshot");
     assert_eq!(
         snap.commits[0].files,
-        [HistoryFile { p: "logo.png".into(), a: None, d: None, from: None }]
+        [HistoryFile {
+            p: "logo.png".into(),
+            a: None,
+            d: None,
+            from: None
+        }]
     );
     assert_eq!(snap.commits[1].files[0], file("app.py", 1, 0));
-    assert_eq!(snap.commits[1].files[1], HistoryFile { p: "logo.png".into(), a: None, d: None, from: None });
+    assert_eq!(
+        snap.commits[1].files[1],
+        HistoryFile {
+            p: "logo.png".into(),
+            a: None,
+            d: None,
+            from: None
+        }
+    );
     // Binary files are not blamed.
     let blamed: Vec<&str> = snap.blame.iter().map(|b| b.p.as_str()).collect();
     assert_eq!(blamed, ["app.py"]);
     let text = std::fs::read_to_string(history_dir(&r.top).join(HISTORY_COMMITS_FILE)).unwrap();
-    assert!(text.contains(r#"{"p":"logo.png","a":null,"d":null}"#), "{text}");
+    assert!(
+        text.contains(r#"{"p":"logo.png","a":null,"d":null}"#),
+        "{text}"
+    );
 }
 
 #[test]
@@ -260,12 +342,19 @@ fn subdir_repo_uses_relative() {
     let snap = read_history(&root).expect("snapshot under the sub root");
     assert_eq!(snap.meta.relative_to, "sub/");
     let times: Vec<i64> = snap.commits.iter().map(|c| c.t).collect();
-    assert_eq!(times, [T0 + 2 * DAY, T0], "a commit touching only out/ is outside the window");
+    assert_eq!(
+        times,
+        [T0 + 2 * DAY, T0],
+        "a commit touching only out/ is outside the window"
+    );
     assert_eq!(snap.commits[0].files, [file("x.py", 1, 0)]);
     assert_eq!(snap.commits[1].files, [file("x.py", 2, 0)]);
     let blamed: Vec<&str> = snap.blame.iter().map(|b| b.p.as_str()).collect();
     assert_eq!(blamed, ["x.py"]);
-    assert!(!r.top.join(".glia").exists(), "the snapshot belongs to the sub root");
+    assert!(
+        !r.top.join(".glia").exists(),
+        "the snapshot belongs to the sub root"
+    );
 }
 
 #[test]
@@ -289,7 +378,10 @@ fn not_a_git_repo_is_a_clean_error() {
 
     r.write("a.py", b"x = 1\n");
     r.commit("one", T0);
-    let zero = HistoryOptions { max_commits: 0, ..HistoryOptions::default() };
+    let zero = HistoryOptions {
+        max_commits: 0,
+        ..HistoryOptions::default()
+    };
     let err = history_sync(&r.top, &zero).unwrap_err();
     assert!(err.contains("max_commits"), "{err}");
     assert!(!r.top.join(".glia").exists());
@@ -306,7 +398,10 @@ fn resync_is_byte_identical() {
     let second_summary = history_sync(&r.top, &with_blame()).expect("second sync");
     assert_eq!(first_summary, second_summary);
     assert_eq!(first, r.snapshot_bytes(&r.top));
-    assert_eq!(std::fs::read_to_string(r.top.join(".glia/.gitignore")).unwrap(), "keep-me\n");
+    assert_eq!(
+        std::fs::read_to_string(r.top.join(".glia/.gitignore")).unwrap(),
+        "keep-me\n"
+    );
 }
 
 #[test]
@@ -370,7 +465,11 @@ fn blame_cap_respected() {
     }
 
     let blamed = |cap: usize| -> Vec<String> {
-        let opts = HistoryOptions { blame: true, blame_max_files: cap, ..HistoryOptions::default() };
+        let opts = HistoryOptions {
+            blame: true,
+            blame_max_files: cap,
+            ..HistoryOptions::default()
+        };
         let s = history_sync(&r.top, &opts).expect("sync");
         let snap = read_history(&r.top).expect("snapshot");
         assert_eq!(s.blame_files, snap.blame.len());
@@ -388,15 +487,24 @@ fn blame_cap_respected() {
 #[test]
 fn since_and_max_commits_bound_the_window() {
     let r = probe_g1();
-    let opts = HistoryOptions { max_commits: 2, ..HistoryOptions::default() };
+    let opts = HistoryOptions {
+        max_commits: 2,
+        ..HistoryOptions::default()
+    };
     let s = history_sync(&r.top, &opts).expect("sync");
     assert_eq!(s.commits, 2);
     let snap = read_history(&r.top).expect("snapshot");
     assert_eq!(snap.meta.max_commits, 2);
-    assert_eq!(snap.commits.iter().map(|c| c.t).collect::<Vec<_>>(), [T0 + 4 * DAY, T0 + 3 * DAY]);
+    assert_eq!(
+        snap.commits.iter().map(|c| c.t).collect::<Vec<_>>(),
+        [T0 + 4 * DAY, T0 + 3 * DAY]
+    );
 
     let since = "2026-01-02T12:00:00Z".to_string();
-    let opts = HistoryOptions { since: Some(since.clone()), ..HistoryOptions::default() };
+    let opts = HistoryOptions {
+        since: Some(since.clone()),
+        ..HistoryOptions::default()
+    };
     let s = history_sync(&r.top, &opts).expect("sync");
     assert_eq!(s.commits, 3, "{s:?}");
     let snap = read_history(&r.top).expect("snapshot");
@@ -417,19 +525,29 @@ fn child_stderr(name: &str) -> String {
         .env(CHILD_ENV, "1")
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child {name} failed:\n{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "child {name} failed:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 fn messages_off() -> HistoryOptions {
-    HistoryOptions { messages: false, ..HistoryOptions::default() }
+    HistoryOptions {
+        messages: false,
+        ..HistoryOptions::default()
+    }
 }
 
 /// Three commits whose messages carry trailers, an identity line and a secret.
 fn probe_messages() -> Repo {
     let r = Repo::new();
     r.write("a.py", b"x = 1\n");
-    r.commit("init the app\n\nFirst body line.\n\nCo-Authored-By: Helper Bot <bot@identity.invalid>\n", T0);
+    r.commit(
+        "init the app\n\nFirst body line.\n\nCo-Authored-By: Helper Bot <bot@identity.invalid>\n",
+        T0,
+    );
     r.append("a.py", "x = 2\n");
     r.commit("second edit\n\nDeploy with token=sk-abcdefghijklmnopqrstuv\nSigned-off-by: Someone <s@identity.invalid>\n", T0 + DAY);
     r.append("a.py", "x = 3\n");
@@ -448,17 +566,36 @@ fn messages_sidecar_written() {
     let msgs = read_history_messages(&r.top, &snap).expect("aligned messages");
     let shas: Vec<&str> = msgs.iter().map(|m| m.c.as_str()).collect();
     let commit_shas: Vec<&str> = snap.commits.iter().map(|c| c.c.as_str()).collect();
-    assert_eq!(shas, commit_shas, "messages.jsonl is in commits.jsonl order");
+    assert_eq!(
+        shas, commit_shas,
+        "messages.jsonl is in commits.jsonl order"
+    );
     let subjects: Vec<&str> = msgs.iter().map(|m| m.s.as_str()).collect();
     assert_eq!(subjects, ["third edit", "second edit", "init the app"]);
     assert_eq!(msgs[2].b, "First body line.");
-    assert!(msgs[1].b.starts_with("Deploy with token="), "{:?}", msgs[1].b);
+    assert!(
+        msgs[1].b.starts_with("Deploy with token="),
+        "{:?}",
+        msgs[1].b
+    );
     let text = std::fs::read_to_string(history_dir(&r.top).join(HISTORY_MESSAGES_FILE)).unwrap();
     assert_eq!(text.lines().count(), 3);
-    for needle in ["Co-Authored-By", "Signed-off-by", "sk-abcdefghijklmnopqrstuv", "identity.invalid", AUTHOR_NAME] {
-        assert!(!text.contains(needle), "messages.jsonl kept {needle:?}:\n{text}");
+    for needle in [
+        "Co-Authored-By",
+        "Signed-off-by",
+        "sk-abcdefghijklmnopqrstuv",
+        "identity.invalid",
+        AUTHOR_NAME,
+    ] {
+        assert!(
+            !text.contains(needle),
+            "messages.jsonl kept {needle:?}:\n{text}"
+        );
     }
-    let at: i64 = r.git(&["log", "-1", "--format=%at", &msgs[0].c]).parse().unwrap();
+    let at: i64 = r
+        .git(&["log", "-1", "--format=%at", &msgs[0].c])
+        .parse()
+        .unwrap();
     assert_eq!(msgs[0].at, at);
     assert!(msgs.iter().all(|m| m.br.is_none()), "no merge, no label");
 }
@@ -467,7 +604,15 @@ fn messages_sidecar_written() {
 fn inputs_unchanged() {
     let r = probe_messages();
     let off = history_sync(&r.top, &messages_off()).expect("sync without messages");
-    assert_eq!((off.messages, off.redacted, off.trailers_dropped, off.branch_labels), (0, 0, 0, 0));
+    assert_eq!(
+        (
+            off.messages,
+            off.redacted,
+            off.trailers_dropped,
+            off.branch_labels
+        ),
+        (0, 0, 0, 0)
+    );
     let [commits_off, blame_off, _] = r.snapshot_bytes(&r.top);
     let meta_off = read_history(&r.top).expect("snapshot").meta;
     history_sync(&r.top, &HistoryOptions::default()).expect("sync with messages");
@@ -497,7 +642,10 @@ fn v1_snapshot_reads() {
         return;
     }
     let err = child_stderr("v1_snapshot_reads");
-    assert!(!err.contains("[history] messages incomplete") && !err.contains("snapshot incomplete"), "{err}");
+    assert!(
+        !err.contains("[history] messages incomplete") && !err.contains("snapshot incomplete"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -523,9 +671,16 @@ fn misaligned_messages_rejected() {
         return;
     }
     let err = child_stderr("misaligned_messages_rejected");
-    let lines: Vec<&str> = err.lines().filter(|l| l.starts_with("[history] messages incomplete dir=")).collect();
+    let lines: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("[history] messages incomplete dir="))
+        .collect();
     assert_eq!(lines.len(), 1, "{err}");
-    assert!(lines[0].contains(" reason=row 1 names commit "), "{}", lines[0]);
+    assert!(
+        lines[0].contains(" reason=row 1 names commit "),
+        "{}",
+        lines[0]
+    );
 }
 
 #[test]
@@ -553,16 +708,35 @@ fn branch_labels_and_author_time() {
     r.git(&["checkout", "-q", "main"]);
     r.append("a.py", "x = 2\n");
     r.commit("main edit", T0 + 3 * DAY);
-    r.git_at(&r.top, &["merge", "-q", "--no-ff", "-m", "Merge branch 'feat-x'", "feat-x"], T0 + 4 * DAY);
+    r.git_at(
+        &r.top,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat-x'",
+            "feat-x",
+        ],
+        T0 + 4 * DAY,
+    );
 
     let s = history_sync(&r.top, &HistoryOptions::default()).expect("sync");
     assert_eq!((s.commits, s.messages, s.branch_labels), (4, 4, 2), "{s:?}");
     let snap = read_history(&r.top).expect("snapshot");
     let msgs = read_history_messages(&r.top, &snap).expect("messages");
-    let labels: Vec<(&str, Option<&str>)> = msgs.iter().map(|m| (m.s.as_str(), m.br.as_deref())).collect();
+    let labels: Vec<(&str, Option<&str>)> = msgs
+        .iter()
+        .map(|m| (m.s.as_str(), m.br.as_deref()))
+        .collect();
     assert_eq!(
         labels,
-        [("main edit", None), ("feat two", Some("feat-x")), ("feat one", Some("feat-x")), ("main init", None)]
+        [
+            ("main edit", None),
+            ("feat two", Some("feat-x")),
+            ("feat one", Some("feat-x")),
+            ("main init", None)
+        ]
     );
     for m in &msgs {
         let at: i64 = r.git(&["log", "-1", "--format=%at", &m.c]).parse().unwrap();
@@ -587,13 +761,45 @@ fn branch_labels_take_the_smallest_side() {
     r.write("l.py", b"l = 1\n");
     r.commit("lane own", T0 + 2 * DAY);
     r.git(&["checkout", "-q", "wave"]);
-    r.git_at(&r.top, &["merge", "-q", "--no-ff", "-m", "Merge branch 'lane' into wave", "lane"], T0 + 3 * DAY);
+    r.git_at(
+        &r.top,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'lane' into wave",
+            "lane",
+        ],
+        T0 + 3 * DAY,
+    );
     r.git(&["checkout", "-q", "main"]);
-    r.git_at(&r.top, &["merge", "-q", "--no-ff", "-m", "Merge branch 'wave'", "wave"], T0 + 4 * DAY);
+    r.git_at(
+        &r.top,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'wave'",
+            "wave",
+        ],
+        T0 + 4 * DAY,
+    );
     history_sync(&r.top, &HistoryOptions::default()).expect("sync");
     let snap = read_history(&r.top).expect("snapshot");
     let msgs = read_history_messages(&r.top, &snap).expect("messages");
-    let mut labels: Vec<(&str, Option<&str>)> = msgs.iter().map(|m| (m.s.as_str(), m.br.as_deref())).collect();
+    let mut labels: Vec<(&str, Option<&str>)> = msgs
+        .iter()
+        .map(|m| (m.s.as_str(), m.br.as_deref()))
+        .collect();
     labels.sort();
-    assert_eq!(labels, [("lane own", Some("lane")), ("main init", None), ("wave own", Some("wave"))]);
+    assert_eq!(
+        labels,
+        [
+            ("lane own", Some("lane")),
+            ("main init", None),
+            ("wave own", Some("wave"))
+        ]
+    );
 }

@@ -81,7 +81,12 @@ fn main() -> Result<()> {
                 continue;
             }
         };
-        let summary = build_summary(node, graph.nav.kind_by_id.get(&node.id).copied(), qname, args.max_chars);
+        let summary = build_summary(
+            node,
+            graph.nav.kind_by_id.get(&node.id).copied(),
+            qname,
+            args.max_chars,
+        );
         if summary.has_source {
             with_source += 1;
         } else {
@@ -135,8 +140,12 @@ fn build_summary(
     // in real-code embedding space.
     let name = qname.rsplit("::").next().unwrap_or("?");
     let fallback = match kind {
-        Some(k) if k == node_kind::METHOD => format!("def {name}(self, *args, **kwargs): ...  # {qname}"),
-        Some(k) if k == node_kind::FUNCTION => format!("def {name}(*args, **kwargs): ...  # {qname}"),
+        Some(k) if k == node_kind::METHOD => {
+            format!("def {name}(self, *args, **kwargs): ...  # {qname}")
+        }
+        Some(k) if k == node_kind::FUNCTION => {
+            format!("def {name}(*args, **kwargs): ...  # {qname}")
+        }
         Some(k) if k == node_kind::CLASS => format!("class {name}: ...  # {qname}"),
         Some(k) if k == node_kind::MODULE => format!("import {}", qname.replace("::", ".")),
         _ => format!("# {qname}"),

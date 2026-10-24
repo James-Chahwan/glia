@@ -412,8 +412,8 @@ pub(crate) fn scan_guarded(
             // DH.4: the keyed option, or no site at all when no region holds
             // one of its keys (see the doc above).
             TopicRule::KeyedIn(keys) => {
-                let region = arg_region(source, after, needle)
-                    .or_else(|| enclosing_region(source, offset));
+                let region =
+                    arg_region(source, after, needle).or_else(|| enclosing_region(source, offset));
                 match region.and_then(|r| keyed_in(r, keys)) {
                     Some(read) => read,
                     None => continue,
@@ -604,10 +604,7 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
 fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
     if matches!(
         rule,
-        TopicRule::Declared
-            | TopicRule::BareArg
-            | TopicRule::CommandArg(_)
-            | TopicRule::KeyedIn(_)
+        TopicRule::Declared | TopicRule::BareArg | TopicRule::CommandArg(_) | TopicRule::KeyedIn(_)
     ) {
         return None;
     }
@@ -1429,11 +1426,10 @@ fn bare_word_ok(source: &str, offset: usize, needle: &str, rule: TopicRule) -> b
     let bare = matches!(
         rule,
         TopicRule::Receiver | TopicRule::BareArg | TopicRule::CtorArgLiteral
-    )
-        && needle
-            .as_bytes()
-            .first()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+    ) && needle
+        .as_bytes()
+        .first()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
     if !bare {
         return true;
     }
@@ -2814,7 +2810,9 @@ fn go_single_return(source: &str, name: &str) -> Option<String> {
         if at > 0 && b.get(at - 1) != Some(&b'\n') {
             continue;
         }
-        let rest = source.get(at + "func ".len()..)?.trim_start_matches([' ', '\t']);
+        let rest = source
+            .get(at + "func ".len()..)?
+            .trim_start_matches([' ', '\t']);
         let Some(params) = rest
             .strip_prefix(name)
             .map(|r| r.trim_start_matches([' ', '\t']))
@@ -3897,8 +3895,14 @@ mod tests {
     #[test]
     fn skip_scala_type_args_balances_and_aborts() {
         // Balanced, nested, and the rest handed back unconsumed.
-        assert_eq!(skip_scala_type_args("[String, String](\"o\")"), Some("(\"o\")"));
-        assert_eq!(skip_scala_type_args("[F[_], Map[K, List[V]]](x)"), Some("(x)"));
+        assert_eq!(
+            skip_scala_type_args("[String, String](\"o\")"),
+            Some("(\"o\")")
+        );
+        assert_eq!(
+            skip_scala_type_args("[F[_], Map[K, List[V]]](x)"),
+            Some("(x)")
+        );
         // A function type's `=>` is no stop; a quote holding `]` is stepped over.
         assert_eq!(skip_scala_type_args("[String => Int](f)"), Some("(f)"));
         assert_eq!(skip_scala_type_args("[\"]\" , A]]"), Some("]"));
@@ -3921,20 +3925,41 @@ mod tests {
     fn ctor_arg_literal_reads_arg0_after_type_arguments() {
         let rule = TopicRule::CtorArgLiteral;
         let topics = |src: &str| -> Vec<Option<String>> {
-            scan(src, "ProducerRecord", rule).into_iter().map(|h| h.topic).collect()
+            scan(src, "ProducerRecord", rule)
+                .into_iter()
+                .map(|h| h.topic)
+                .collect()
         };
         let o = || vec![Some("orders".to_string())];
         // Java explicit generics, Java diamond, Scala `[..]`, Kotlin without
         // `new`, and no type arguments at all.
-        assert_eq!(topics("new ProducerRecord<String, String>(\"orders\", v)"), o());
+        assert_eq!(
+            topics("new ProducerRecord<String, String>(\"orders\", v)"),
+            o()
+        );
         assert_eq!(topics("new ProducerRecord<>(\"orders\", v)"), o());
-        assert_eq!(topics("new ProducerRecord[String, String](\"orders\", body)"), o());
-        assert_eq!(topics("val r = ProducerRecord<String, String>(\"orders\", v)"), o());
+        assert_eq!(
+            topics("new ProducerRecord[String, String](\"orders\", body)"),
+            o()
+        );
+        assert_eq!(
+            topics("val r = ProducerRecord<String, String>(\"orders\", v)"),
+            o()
+        );
         assert_eq!(topics("new ProducerRecord(\"orders\", v)"), o());
-        assert_eq!(topics("new ProducerRecord<Map<K, V>, String>(\n  \"orders\", v)"), o());
+        assert_eq!(
+            topics("new ProducerRecord<Map<K, V>, String>(\n  \"orders\", v)"),
+            o()
+        );
         // Spaces around the type-argument list are the constructor's too.
-        assert_eq!(topics("new ProducerRecord <String, String> (\"orders\", v)"), o());
-        assert_eq!(topics("new ProducerRecord[String, String] (\"orders\", v)"), o());
+        assert_eq!(
+            topics("new ProducerRecord <String, String> (\"orders\", v)"),
+            o()
+        );
+        assert_eq!(
+            topics("new ProducerRecord[String, String] (\"orders\", v)"),
+            o()
+        );
         // No construction: no site at all, not a site without a topic.
         for src in [
             "import org.apache.kafka.clients.producer.ProducerRecord;",
@@ -3954,12 +3979,23 @@ mod tests {
             o()
         );
         // A non-literal arg #0 is a hit carrying its expression (LA.4).
-        let hits = scan("new ProducerRecord<String, String>(Topics.ORDERS, v)", "ProducerRecord", rule);
+        let hits = scan(
+            "new ProducerRecord<String, String>(Topics.ORDERS, v)",
+            "ProducerRecord",
+            rule,
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].topic, None);
         assert_eq!(hits[0].expr.as_deref(), Some("Topics.ORDERS"));
         // The dotless ArgLiteral rule still does not step over the list.
-        assert_eq!(one("new ProducerRecord<String, String>(\"orders\", v)", "ProducerRecord", TopicRule::ArgLiteral), None);
+        assert_eq!(
+            one(
+                "new ProducerRecord<String, String>(\"orders\", v)",
+                "ProducerRecord",
+                TopicRule::ArgLiteral
+            ),
+            None
+        );
     }
 
     #[test]
@@ -4496,7 +4532,11 @@ mod tests {
     // ---- DH.4: KeyedIn and the Oban pipe ------------------------------------
 
     /// (topic, expr) of every KeyedIn hit, in order.
-    fn keyed_in_hits(src: &str, needle: &str, keys: &'static [&'static str]) -> Vec<(Option<String>, Option<String>)> {
+    fn keyed_in_hits(
+        src: &str,
+        needle: &str,
+        keys: &'static [&'static str],
+    ) -> Vec<(Option<String>, Option<String>)> {
         scan(src, needle, TopicRule::KeyedIn(keys))
             .into_iter()
             .map(|h| (h.topic, h.expr))
@@ -4528,12 +4568,21 @@ mod tests {
         // A needle that opens its bracket reads that one (Tortoise's call).
         let call = "Tortoise311.Supervisor.start_child(client_id: \"l\", subscriptions: [{\"sensors/temp\", 0}])\n";
         assert_eq!(
-            keyed_in_hits(call, "Tortoise311.Supervisor.start_child(", &["subscriptions"]),
+            keyed_in_hits(
+                call,
+                "Tortoise311.Supervisor.start_child(",
+                &["subscriptions"]
+            ),
             vec![(Some("sensors/temp".to_string()), None)]
         );
         // A GCP subscription path folds (the A2.6 rule).
-        let gcp = "{BroadwayCloudPubSub.Producer, subscription: \"projects/shop/subscriptions/orders\"}";
-        let hits = scan(gcp, "BroadwayCloudPubSub.Producer", TopicRule::KeyedIn(&["subscription"]));
+        let gcp =
+            "{BroadwayCloudPubSub.Producer, subscription: \"projects/shop/subscriptions/orders\"}";
+        let hits = scan(
+            gcp,
+            "BroadwayCloudPubSub.Producer",
+            TopicRule::KeyedIn(&["subscription"]),
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].topic.as_deref(), Some("orders"));
         assert_eq!(hits[0].form, TopicForm::Path);
@@ -4544,17 +4593,45 @@ mod tests {
         // Tortoise's subscription tuple, a list of them (the first), Gnat's
         // list of maps under the key `topic`, and a map value.
         let cases: [(&str, &str, &'static [&'static str], &str); 4] = [
-            ("Tortoise.Connection.start_link(subscriptions: [{\"a/b\", 0}, {\"c/d\", 1}])", "Tortoise.Connection.start_link(", &["subscriptions"], "a/b"),
-            ("{Gnat.ConsumerSupervisor, %{connection_name: :gnat, module: S, subscription_topics: [%{topic: \"rpc.example\"}]}}", "Gnat.ConsumerSupervisor", &["topic"], "rpc.example"),
-            ("{X.Producer, opts: %{topics: [ \"spaced\" ]}}", "X.Producer", &["topics"], "spaced"),
-            ("{X.Producer, topics: \"plain\"}", "X.Producer", &["topics"], "plain"),
+            (
+                "Tortoise.Connection.start_link(subscriptions: [{\"a/b\", 0}, {\"c/d\", 1}])",
+                "Tortoise.Connection.start_link(",
+                &["subscriptions"],
+                "a/b",
+            ),
+            (
+                "{Gnat.ConsumerSupervisor, %{connection_name: :gnat, module: S, subscription_topics: [%{topic: \"rpc.example\"}]}}",
+                "Gnat.ConsumerSupervisor",
+                &["topic"],
+                "rpc.example",
+            ),
+            (
+                "{X.Producer, opts: %{topics: [ \"spaced\" ]}}",
+                "X.Producer",
+                &["topics"],
+                "spaced",
+            ),
+            (
+                "{X.Producer, topics: \"plain\"}",
+                "X.Producer",
+                &["topics"],
+                "plain",
+            ),
         ];
         for (src, needle, keys, want) in cases {
-            assert_eq!(keyed_in_hits(src, needle, keys), vec![(Some(want.to_string()), None)], "{src}");
+            assert_eq!(
+                keyed_in_hits(src, needle, keys),
+                vec![(Some(want.to_string()), None)],
+                "{src}"
+            );
         }
         // At most two levels: a literal three brackets deep is no value.
         assert_eq!(
-            keyed_in_hits("{X.Producer, topics: [[[\"deep\"]]]}", "X.Producer", &["topics"]),
+            keyed_in_hits(
+                "{X.Producer, topics: [[[\"deep\"]]]}",
+                "X.Producer",
+                &["topics"]
+            ),
             vec![(None, None)]
         );
         // `subscription_topics` is not the key `topic`, nor `topics`.
@@ -4579,17 +4656,36 @@ mod tests {
         // No key at all, or no group around the needle: no site. A Tortoise
         // connection that subscribes to nothing is a publisher's.
         let no_site: [(&str, &str, &'static [&'static str]); 4] = [
-            ("{BroadwayKafka.Producer, kafka_opts()}", "BroadwayKafka.Producer", &["topics"]),
-            ("{Gnat.ConsumerSupervisor, consumer_supervisor_settings}", "Gnat.ConsumerSupervisor", &["topic"]),
-            ("defmodule X do\n  alias BroadwayKafka.Producer\nend\n", "BroadwayKafka.Producer", &["topics"]),
-            ("Tortoise311.Supervisor.start_child(client_id: \"pub\", server: {Tcp, host: \"b\"})", "Tortoise311.Supervisor.start_child(", &["subscriptions"]),
+            (
+                "{BroadwayKafka.Producer, kafka_opts()}",
+                "BroadwayKafka.Producer",
+                &["topics"],
+            ),
+            (
+                "{Gnat.ConsumerSupervisor, consumer_supervisor_settings}",
+                "Gnat.ConsumerSupervisor",
+                &["topic"],
+            ),
+            (
+                "defmodule X do\n  alias BroadwayKafka.Producer\nend\n",
+                "BroadwayKafka.Producer",
+                &["topics"],
+            ),
+            (
+                "Tortoise311.Supervisor.start_child(client_id: \"pub\", server: {Tcp, host: \"b\"})",
+                "Tortoise311.Supervisor.start_child(",
+                &["subscriptions"],
+            ),
         ];
         for (src, needle, keys) in no_site {
             assert!(keyed_in_hits(src, needle, keys).is_empty(), "{src}");
         }
         // The walk back is bounded: a group opened more than MAX_REGION bytes
         // before the needle is never found.
-        let far = format!("{{topics: [\"x\"], {}BroadwayKafka.Producer}}", " ".repeat(MAX_REGION + 1));
+        let far = format!(
+            "{{topics: [\"x\"], {}BroadwayKafka.Producer}}",
+            " ".repeat(MAX_REGION + 1)
+        );
         assert!(keyed_in_hits(&far, "BroadwayKafka.Producer", &["topics"]).is_empty());
         // Byte walks never slice a char: multi-byte text around the needle.
         let utf8 = "{é: \"ü\", BroadwayKafka.Producer, topics: [\"ørders\"]}";
@@ -4614,7 +4710,10 @@ mod tests {
     fn arg_receiver_reads_the_pipe_stage() {
         // matrix/elixir/taskq signup.ex: the stage on the line before.
         let signup = "defmodule MyApp.Signup do\n  def register(user_id) do\n    %{user_id: user_id}\n    |> MyApp.MailerWorker.new()\n    |> Oban.insert()\n  end\nend\n";
-        assert_eq!(one(signup, "Oban.insert", TopicRule::ArgReceiver), Some("MailerWorker".into()));
+        assert_eq!(
+            one(signup, "Oban.insert", TopicRule::ArgReceiver),
+            Some("MailerWorker".into())
+        );
         // One line, arguments to `new`, a multi-line argument list, a match
         // on the result, and the `!` / `_all` spellings of the same needle.
         for src in [
@@ -4625,7 +4724,11 @@ mod tests {
             "%{id: 1} |> EmailWorker.new() |> Oban.insert!()",
             "%{id: 1} |> EmailWorker.new() |> Oban.insert",
         ] {
-            assert_eq!(one(src, "Oban.insert", TopicRule::ArgReceiver), Some("EmailWorker".into()), "{src}");
+            assert_eq!(
+                one(src, "Oban.insert", TopicRule::ArgReceiver),
+                Some("EmailWorker".into()),
+                "{src}"
+            );
         }
     }
 
@@ -4645,15 +4748,27 @@ mod tests {
             // `.new` with no chain before it.
             "x |> .new() |> Oban.insert()",
         ] {
-            assert_eq!(one(src, "Oban.insert", TopicRule::ArgReceiver), None, "{src}");
+            assert_eq!(
+                one(src, "Oban.insert", TopicRule::ArgReceiver),
+                None,
+                "{src}"
+            );
         }
         // A present argument #0 reads exactly as before, pipe or no pipe.
         assert_eq!(
-            one("Oban.insert(EmailWorker.new(%{}))", "Oban.insert", TopicRule::ArgReceiver),
+            one(
+                "Oban.insert(EmailWorker.new(%{}))",
+                "Oban.insert",
+                TopicRule::ArgReceiver
+            ),
             Some("EmailWorker".into())
         );
         assert_eq!(
-            one("x |> Other.new() |> Oban.insert(MyApp.Oban)", "Oban.insert", TopicRule::ArgReceiver),
+            one(
+                "x |> Other.new() |> Oban.insert(MyApp.Oban)",
+                "Oban.insert",
+                TopicRule::ArgReceiver
+            ),
             None
         );
     }
@@ -4684,8 +4799,14 @@ mod tests {
             nats_subject("\"shop.shipments.\" + id", ""),
             folded_as("shop.shipments.*", SubjectFold::Concat)
         );
-        assert_eq!(nats_subject("id + \".created\"", ""), folded_as("*.created", SubjectFold::Concat));
-        assert_eq!(nats_subject("\"a.\" + \"b\"", ""), folded_as("a.b", SubjectFold::Concat));
+        assert_eq!(
+            nats_subject("id + \".created\"", ""),
+            folded_as("*.created", SubjectFold::Concat)
+        );
+        assert_eq!(
+            nats_subject("\"a.\" + \"b\"", ""),
+            folded_as("a.b", SubjectFold::Concat)
+        );
         assert_eq!(
             nats_subject("\"orders.\" + strconv.Itoa(n)", ""),
             folded_as("orders.*", SubjectFold::Concat)
@@ -4713,7 +4834,11 @@ mod tests {
         ] {
             assert_eq!(nats_subject(arg, ""), SubjectRead::Dynamic, "{arg}");
         }
-        let h = nats("nc.Publish(\"orders-\"+region, nil)", "nc.Publish", TopicRule::NatsSubject);
+        let h = nats(
+            "nc.Publish(\"orders-\"+region, nil)",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(h.topic, None, "never the leading literal `orders-`");
         assert!(h.dynamic && h.expr.is_none() && h.fold.is_none());
     }
@@ -4750,9 +4875,18 @@ mod tests {
         ] {
             assert_eq!(nats_subject(arg, ""), SubjectRead::Dynamic, "{arg}");
         }
-        assert_eq!(subject_from_format("rate.100%%"), Some("rate.100%".to_string()));
-        assert_eq!(subject_from_format("shop.refunds.%d").as_deref(), Some("shop.refunds.*"));
-        assert_eq!(subject_from_format("plain.subject").as_deref(), Some("plain.subject"));
+        assert_eq!(
+            subject_from_format("rate.100%%"),
+            Some("rate.100%".to_string())
+        );
+        assert_eq!(
+            subject_from_format("shop.refunds.%d").as_deref(),
+            Some("shop.refunds.*")
+        );
+        assert_eq!(
+            subject_from_format("plain.subject").as_deref(),
+            Some("plain.subject")
+        );
         let h = nats(
             "nc.Publish(fmt.Sprintf(\"shop.orders.%s.placed\", id), nil)",
             "nc.Publish",
@@ -4779,7 +4913,11 @@ mod tests {
         assert_eq!(h.expr.as_deref(), Some("p.template"));
         assert!(h.format && h.topic.is_none() && !h.dynamic);
         // A plain identifier is the LA.4 expression it always was.
-        let h = nats("nc.Publish(SubjectOrders, d)", "nc.Publish", TopicRule::NatsSubject);
+        let h = nats(
+            "nc.Publish(SubjectOrders, d)",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(h.expr.as_deref(), Some("SubjectOrders"));
         assert!(!h.format);
     }
@@ -4796,8 +4934,14 @@ mod tests {
         assert_eq!(h.fold, Some(SubjectFold::Func));
         // A literal or a Sprintf body folds the same way, at depth 1.
         let src = "func subj() string {\n\treturn \"orders.created\"\n}\nfunc fs(id string) string { return fmt.Sprintf(\"orders.%s\", id) }\n";
-        assert_eq!(nats_subject("subj()", src), folded_as("orders.created", SubjectFold::Func));
-        assert_eq!(nats_subject("fs(id)", src), folded_as("orders.*", SubjectFold::Func));
+        assert_eq!(
+            nats_subject("subj()", src),
+            folded_as("orders.created", SubjectFold::Func)
+        );
+        assert_eq!(
+            nats_subject("fs(id)", src),
+            folded_as("orders.*", SubjectFold::Func)
+        );
     }
 
     #[test]
@@ -4839,12 +4983,24 @@ mod tests {
             ("$\"orders.{id}.placed\"", "orders.*.placed"),
         ];
         for (arg, want) in cases {
-            assert_eq!(nats_subject(arg, ""), folded_as(want, SubjectFold::Template), "{arg}");
+            assert_eq!(
+                nats_subject(arg, ""),
+                folded_as(want, SubjectFold::Template),
+                "{arg}"
+            );
         }
         // The measured HEAD shapes, through the needles that read them.
-        let js = nats("nc.publish(`orders.${id}.placed`)", "nc.publish", TopicRule::NatsSubject);
+        let js = nats(
+            "nc.publish(`orders.${id}.placed`)",
+            "nc.publish",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(js.topic.as_deref(), Some("orders.*.placed"));
-        let js = nats("nc.publish('orders.' + id)", "nc.publish", TopicRule::NatsSubject);
+        let js = nats(
+            "nc.publish('orders.' + id)",
+            "nc.publish",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(js.topic.as_deref(), Some("orders.*"));
         let py = nats(
             "await nc.publish(f\"orders.{order_id}.placed\", b\"\")",
@@ -4854,8 +5010,14 @@ mod tests {
         assert_eq!(py.topic.as_deref(), Some("orders.*.placed"));
         // No interpolation reads as the literal; a NATS system subject's
         // `$JS` is text; a partial interpolated token is dynamic.
-        assert_eq!(nats_subject("\"orders.created\"", ""), lit("orders.created"));
-        assert_eq!(nats_subject("'$JS.API.STREAM.INFO'", ""), lit("$JS.API.STREAM.INFO"));
+        assert_eq!(
+            nats_subject("\"orders.created\"", ""),
+            lit("orders.created")
+        );
+        assert_eq!(
+            nats_subject("'$JS.API.STREAM.INFO'", ""),
+            lit("$JS.API.STREAM.INFO")
+        );
         assert_eq!(nats_subject("`orders-${region}`", ""), SubjectRead::Dynamic);
         assert_eq!(nats_subject("`orders.${id`", ""), SubjectRead::Dynamic);
         // A named argument reads its value.
@@ -4886,7 +5048,11 @@ mod tests {
         ] {
             assert_eq!(nats_filter(arg), SubjectRead::Dynamic, "{arg}");
         }
-        let h = nats("nc.Subscribe(\"orders.\"+r, h)", "nc.Subscribe", TopicRule::NatsFilter);
+        let h = nats(
+            "nc.Subscribe(\"orders.\"+r, h)",
+            "nc.Subscribe",
+            TopicRule::NatsFilter,
+        );
         assert_eq!(h.topic, None, "never the leading literal `orders.`");
         assert!(h.dynamic);
     }
@@ -4895,16 +5061,32 @@ mod tests {
     fn nats_hits_keep_the_head_slot_rules() {
         // Behind a context the subject is argument #1; a prefix-matched
         // `nc.PublishMsg(` holds no region and reads nothing, not dynamic.
-        let h = nats("js.Publish(ctx, \"orders.\" + id, d)", ".Publish(", TopicRule::NatsSubject);
+        let h = nats(
+            "js.Publish(ctx, \"orders.\" + id, d)",
+            ".Publish(",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(h.topic.as_deref(), Some("orders.*"));
-        let h = nats("nc.PublishMsg(&nats.Msg{Subject: \"orders\"})", "nc.Publish", TopicRule::NatsSubject);
+        let h = nats(
+            "nc.PublishMsg(&nats.Msg{Subject: \"orders\"})",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
         assert!(h.topic.is_none() && h.expr.is_none() && !h.dynamic);
         let h = nats("nc.Publish()", "nc.Publish", TopicRule::NatsSubject);
         assert!(h.topic.is_none() && h.expr.is_none() && !h.dynamic);
         // A multibyte subject never panics.
-        let h = nats("nc.Publish(\"ordérs.\" + id, nil)", "nc.Publish", TopicRule::NatsSubject);
+        let h = nats(
+            "nc.Publish(\"ordérs.\" + id, nil)",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
         assert_eq!(h.topic.as_deref(), Some("ordérs.*"));
-        let h = nats("nc.Publish(`é${x}`, nil)", "nc.Publish", TopicRule::NatsSubject);
+        let h = nats(
+            "nc.Publish(`é${x}`, nil)",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
         assert!(h.dynamic);
     }
 }

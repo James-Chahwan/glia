@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use glia_code_domain::snapshots::{
-    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_GENERATOR, HISTORY_MESSAGES_FILE, META_FILE, history_dir,
+    HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_GENERATOR, HISTORY_MESSAGES_FILE, META_FILE,
+    history_dir,
 };
 use serde_json::Value;
 
@@ -203,7 +204,12 @@ fn sync_writes_the_snapshot_and_names_the_cli_surface() {
         "{marker}"
     );
 
-    for file in [HISTORY_COMMITS_FILE, HISTORY_BLAME_FILE, HISTORY_MESSAGES_FILE, META_FILE] {
+    for file in [
+        HISTORY_COMMITS_FILE,
+        HISTORY_BLAME_FILE,
+        HISTORY_MESSAGES_FILE,
+        META_FILE,
+    ] {
         assert!(
             snapshot.join(file).is_file(),
             "{file} not written under {}",
@@ -219,7 +225,11 @@ fn sync_writes_the_snapshot_and_names_the_cli_surface() {
     assert_eq!(r.snapshot_file(HISTORY_MESSAGES_FILE).lines().count(), 5);
     let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
     assert_eq!(meta["generator"], HISTORY_GENERATOR, "{meta}");
-    assert_eq!((meta["version"].as_u64(), meta["messages"].as_u64()), (Some(2), Some(5)), "{meta}");
+    assert_eq!(
+        (meta["version"].as_u64(), meta["messages"].as_u64()),
+        (Some(2), Some(5)),
+        "{meta}"
+    );
 }
 
 #[test]
@@ -232,11 +242,24 @@ fn no_messages_flag_keeps_no_sidecar() {
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let marker = sync_marker(&stderr);
-    assert!(marker.ends_with(" window=max:2000 messages=off surface=cli"), "{marker}");
-    assert!(!history_dir(&r.top).join(HISTORY_MESSAGES_FILE).exists(), "--no-messages removes the sidecar");
-    assert_eq!(r.snapshot_file(HISTORY_COMMITS_FILE), commits, "the build's input is unchanged");
+    assert!(
+        marker.ends_with(" window=max:2000 messages=off surface=cli"),
+        "{marker}"
+    );
+    assert!(
+        !history_dir(&r.top).join(HISTORY_MESSAGES_FILE).exists(),
+        "--no-messages removes the sidecar"
+    );
+    assert_eq!(
+        r.snapshot_file(HISTORY_COMMITS_FILE),
+        commits,
+        "the build's input is unchanged"
+    );
     let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
-    assert!(meta.get("messages").is_none() && meta.get("messages_hash").is_none(), "{meta}");
+    assert!(
+        meta.get("messages").is_none() && meta.get("messages_hash").is_none(),
+        "{meta}"
+    );
 }
 
 #[test]
@@ -289,7 +312,9 @@ fn window_flags_reach_the_capture() {
     assert!(stdout.starts_with("synced 2 commits (head "), "{stdout}");
     let marker = sync_marker(&stderr);
     assert!(
-        marker.contains(" commits=2 ") && marker.contains(" window=max:2 messages=2 ") && marker.ends_with(" surface=cli"),
+        marker.contains(" commits=2 ")
+            && marker.contains(" window=max:2 messages=2 ")
+            && marker.ends_with(" surface=cli"),
         "{marker}"
     );
     assert_eq!(r.snapshot_file(HISTORY_COMMITS_FILE).lines().count(), 2);
@@ -510,7 +535,12 @@ fn calibrate_history(s: &Scratch) {
         })
         .collect();
     commits.reverse();
-    let meta = HistoryMeta::new(format!("{:040x}", CAL_COMMITS), CAL_COMMITS, None, String::new());
+    let meta = HistoryMeta::new(
+        format!("{:040x}", CAL_COMMITS),
+        CAL_COMMITS,
+        None,
+        String::new(),
+    );
     write_history(&s.top, meta, &commits, &[]).expect("write history");
 }
 
@@ -533,8 +563,10 @@ fn calibrate_writes_the_record_and_prints_each_pick() {
     assert!(stdout.contains("SELf2t find: pick "), "{stdout}");
     assert!(stdout.contains(" queries (online recall@10 "), "{stdout}");
     assert!(
-        stdout.lines().last().is_some_and(|l| l.starts_with("wrote ")
-            && l.ends_with("calibration-snapshot")),
+        stdout
+            .lines()
+            .last()
+            .is_some_and(|l| l.starts_with("wrote ") && l.ends_with("calibration-snapshot")),
         "{stdout}"
     );
     let marker = stderr
@@ -597,7 +629,10 @@ fn calibrate_an_unknown_set_exits_1_listing_the_known_ones() {
     let out = s.glia(&["history", "calibrate", s.path(), "--sets", "nope"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("nope") && stderr.contains("structure"), "{stderr}");
+    assert!(
+        stderr.contains("nope") && stderr.contains("structure"),
+        "{stderr}"
+    );
     assert!(!calibration_record(&s).exists(), "nothing written");
 }
 

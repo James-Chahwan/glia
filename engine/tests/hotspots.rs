@@ -7,7 +7,9 @@
 
 use std::path::Path;
 
-use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history};
+use glia_code_domain::snapshots::{
+    BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history,
+};
 use glia_engine::generate_one;
 use glia_engine::hotspots::{HotspotArgs, Hotspots, hotspots};
 use glia_graph::MergedGraph;
@@ -15,8 +17,10 @@ use glia_graph::MergedGraph;
 const UTIL_PY: &str = "\"\"\"Shared helpers.\"\"\"\n\n\ndef helper(x):\n    total = x + 1\n    total = total * 2\n    return total\n\n\ndef wrap(x):\n    return helper(x) + 1\n";
 const A_PY: &str = "from core.util import helper\n\n\ndef get_a(x):\n    return helper(x)\n\n\ndef list_a(xs):\n    return [helper(x) for x in xs]\n";
 const B_PY: &str = "from core.util import helper\n\n\ndef get_b(x):\n    return helper(x) * 3\n\n\ndef list_b(xs):\n    return [helper(x) - 1 for x in xs]\n";
-const ONCE_PY: &str = "def run_once(n):\n    acc = 0\n    for i in range(n):\n        acc += i\n    return acc\n";
-const UTIL_TEST_PY: &str = "from core.util import helper\n\n\ndef test_helper():\n    assert helper(1) == 4\n";
+const ONCE_PY: &str =
+    "def run_once(n):\n    acc = 0\n    for i in range(n):\n        acc += i\n    return acc\n";
+const UTIL_TEST_PY: &str =
+    "from core.util import helper\n\n\ndef test_helper():\n    assert helper(1) == 4\n";
 
 const UTIL: &str = "core/util.py";
 const A: &str = "api/a.py";
@@ -33,7 +37,15 @@ fn commit(i: i64, paths: &[&str]) -> HistoryCommit {
     HistoryCommit {
         c: format!("{i:02}{}", "0".repeat(38)),
         t: t(i),
-        files: paths.iter().map(|p| HistoryFile { p: p.to_string(), a: Some(2), d: Some(1), from: None }).collect(),
+        files: paths
+            .iter()
+            .map(|p| HistoryFile {
+                p: p.to_string(),
+                a: Some(2),
+                d: Some(1),
+                from: None,
+            })
+            .collect(),
     }
 }
 
@@ -56,15 +68,24 @@ fn commits() -> Vec<HistoryCommit> {
 /// get_a's (4..=5) at two, list_a's at one.
 fn blame() -> Vec<BlameFile> {
     vec![
-        BlameFile { p: UTIL.into(), runs: vec![[1, 4, t(1)], [5, 5, t(3)], [6, 7, t(6)], [8, 11, t(1)]] },
-        BlameFile { p: A.into(), runs: vec![[1, 4, t(1)], [5, 5, t(4)], [6, 9, t(1)]] },
+        BlameFile {
+            p: UTIL.into(),
+            runs: vec![[1, 4, t(1)], [5, 5, t(3)], [6, 7, t(6)], [8, 11, t(1)]],
+        },
+        BlameFile {
+            p: A.into(),
+            runs: vec![[1, 4, t(1)], [5, 5, t(4)], [6, 9, t(1)]],
+        },
     ]
 }
 
 /// A fresh tree with the five sources, plus `extra` files.
 fn tree(extra: &[(&str, &str)]) -> tempfile::TempDir {
     let d = tempfile::tempdir().expect("tempdir");
-    for (p, text) in [(UTIL, UTIL_PY), (A, A_PY), (B, B_PY), (ONCE, ONCE_PY)].iter().chain(extra) {
+    for (p, text) in [(UTIL, UTIL_PY), (A, A_PY), (B, B_PY), (ONCE, ONCE_PY)]
+        .iter()
+        .chain(extra)
+    {
         let path = d.path().join(p);
         std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
         std::fs::write(path, text).unwrap();
@@ -73,8 +94,16 @@ fn tree(extra: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 fn snapshot(root: &Path, commits: &[HistoryCommit], blame: &[BlameFile]) {
-    let head = commits.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
-    write_history(root, HistoryMeta::new(head, 2000, None, String::new()), commits, blame).expect("write snapshot");
+    let head = commits
+        .first()
+        .map_or_else(|| "0".repeat(40), |c| c.c.clone());
+    write_history(
+        root,
+        HistoryMeta::new(head, 2000, None, String::new()),
+        commits,
+        blame,
+    )
+    .expect("write snapshot");
 }
 
 fn build(root: &Path) -> MergedGraph {
@@ -98,9 +127,16 @@ fn qnames(rows: &[glia_engine::hotspots::Hotspot]) -> Vec<&str> {
 fn module_rows_join_churn_and_centrality() {
     let m = acceptance();
     let h = hotspots(&m, &HotspotArgs::default());
-    assert_eq!(qnames(&h.modules), ["core::util", "scripts::once", "api::a"], "{h:#?}");
-    let ranks: Vec<(usize, usize, usize)> =
-        h.modules.iter().map(|r| (r.churn_rank, r.centrality_rank, r.ranked)).collect();
+    assert_eq!(
+        qnames(&h.modules),
+        ["core::util", "scripts::once", "api::a"],
+        "{h:#?}"
+    );
+    let ranks: Vec<(usize, usize, usize)> = h
+        .modules
+        .iter()
+        .map(|r| (r.churn_rank, r.centrality_rank, r.ranked))
+        .collect();
     assert_eq!(ranks, [(2, 1, 3), (1, 3, 3), (3, 2, 3)]);
     let util = &h.modules[0];
     assert_eq!((util.level, util.kind, util.churn), ("module", "MODULE", 6));
@@ -117,14 +153,28 @@ fn module_rows_join_churn_and_centrality() {
     let h = hotspots(&m, &args);
     assert!(h.symbols.is_empty());
     assert_eq!(qnames(&h.modules), ["core::util"]);
-    assert_eq!((h.modules[0].churn_rank, h.modules[0].centrality_rank, h.modules[0].ranked), (2, 1, 3));
+    assert_eq!(
+        (
+            h.modules[0].churn_rank,
+            h.modules[0].centrality_rank,
+            h.modules[0].ranked
+        ),
+        (2, 1, 3)
+    );
 
     // `scope` narrows the population the ranks range over.
     let mut args = HotspotArgs::default();
     args.scope = Some("api".into());
     let h = hotspots(&m, &args);
     assert_eq!(qnames(&h.modules), ["api::a"]);
-    assert_eq!((h.modules[0].churn_rank, h.modules[0].centrality_rank, h.modules[0].ranked), (1, 1, 1));
+    assert_eq!(
+        (
+            h.modules[0].churn_rank,
+            h.modules[0].centrality_rank,
+            h.modules[0].ranked
+        ),
+        (1, 1, 1)
+    );
     assert_eq!(qnames(&h.symbols), ["api::a::get_a"]);
 }
 
@@ -134,10 +184,20 @@ fn module_rows_join_churn_and_centrality() {
 fn symbol_rows() {
     let m = acceptance();
     let h = hotspots(&m, &HotspotArgs::default());
-    assert_eq!(qnames(&h.symbols), ["core::util::helper", "api::a::get_a"], "{h:#?}");
+    assert_eq!(
+        qnames(&h.symbols),
+        ["core::util::helper", "api::a::get_a"],
+        "{h:#?}"
+    );
     let helper = &h.symbols[0];
-    assert_eq!((helper.level, helper.kind, helper.churn), ("symbol", "FUNCTION", 3));
-    assert_eq!((helper.churn_rank, helper.centrality_rank, helper.ranked), (1, 1, 2));
+    assert_eq!(
+        (helper.level, helper.kind, helper.churn),
+        ("symbol", "FUNCTION", 3)
+    );
+    assert_eq!(
+        (helper.churn_rank, helper.centrality_rank, helper.ranked),
+        (1, 1, 2)
+    );
     assert_eq!((helper.lines_changed, helper.last_change), (None, t(6)));
     assert_eq!((helper.file.as_deref(), helper.line), (Some(UTIL), Some(4)));
 
@@ -185,10 +245,23 @@ fn ties_share_rank() {
     ];
     snapshot(d.path(), &history, &[]);
     let h = hotspots(&build(d.path()), &HotspotArgs::default());
-    let churn: Vec<(&str, usize)> = h.modules.iter().map(|r| (r.qname.as_str(), r.churn_rank)).collect();
+    let churn: Vec<(&str, usize)> = h
+        .modules
+        .iter()
+        .map(|r| (r.qname.as_str(), r.churn_rank))
+        .collect();
     let mut sorted = churn.clone();
     sorted.sort();
-    assert_eq!(sorted, [("api::a", 2), ("api::b", 4), ("core::util", 2), ("scripts::once", 1)], "{h:#?}");
+    assert_eq!(
+        sorted,
+        [
+            ("api::a", 2),
+            ("api::b", 4),
+            ("core::util", 2),
+            ("scripts::once", 1)
+        ],
+        "{h:#?}"
+    );
     assert!(h.modules.iter().all(|r| r.ranked == 4));
 }
 
@@ -197,8 +270,18 @@ fn ties_share_rank() {
 fn tests_excluded_unless_asked() {
     let d = tree(&[(UTIL_TEST, UTIL_TEST_PY)]);
     let mut history = commits();
-    history[0].files.push(HistoryFile { p: UTIL_TEST.into(), a: Some(1), d: Some(0), from: None });
-    history[1].files.push(HistoryFile { p: UTIL_TEST.into(), a: Some(1), d: Some(0), from: None });
+    history[0].files.push(HistoryFile {
+        p: UTIL_TEST.into(),
+        a: Some(1),
+        d: Some(0),
+        from: None,
+    });
+    history[1].files.push(HistoryFile {
+        p: UTIL_TEST.into(),
+        a: Some(1),
+        d: Some(0),
+        from: None,
+    });
     snapshot(d.path(), &history, &blame());
     let m = build(d.path());
     let h = hotspots(&m, &HotspotArgs::default());

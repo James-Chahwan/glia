@@ -57,8 +57,7 @@ pub const TIMELINE_OPEN: u32 = u32::MAX;
 pub const TIMELINE_SUBJECT_CAP: usize = 120;
 
 /// A repo's graph history over a window of commits: the sidecar's one section.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct TimelineStore {
     /// The `RepoId.0` of the repo the revs were built from; also the core's
@@ -73,8 +72,7 @@ pub struct TimelineStore {
 }
 
 /// One commit of the window.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct TimelineRev {
     /// The full commit id: 40 (sha-1) or 64 (sha-256) lowercase hex chars.
@@ -86,8 +84,7 @@ pub struct TimelineRev {
 }
 
 /// One node's validity span.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct TimelineNode {
     /// `NodeId.0` as last seen in the window.
@@ -110,8 +107,7 @@ pub struct TimelineNode {
 }
 
 /// One edge's validity span.
-#[derive(Debug, Clone, PartialEq, Default)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct TimelineEdge {
     /// `NodeId.0` of each end as last seen.
@@ -156,24 +152,35 @@ impl TimelineStore {
             .ok_or_else(|| format!("{} revs do not fit a u32 rev index", self.revs.len()))?;
         for (i, r) in self.revs.iter().enumerate() {
             if !is_oid(&r.sha) {
-                return Err(format!("rev {i}: sha {:?} is not 40 or 64 lowercase hex chars", r.sha));
+                return Err(format!(
+                    "rev {i}: sha {:?} is not 40 or 64 lowercase hex chars",
+                    r.sha
+                ));
             }
             if r.subject.contains(['\n', '\r']) {
                 return Err(format!("rev {i}: subject is more than one line"));
             }
             if r.subject.chars().count() > TIMELINE_SUBJECT_CAP {
-                return Err(format!("rev {i}: subject is over {TIMELINE_SUBJECT_CAP} chars"));
+                return Err(format!(
+                    "rev {i}: subject is over {TIMELINE_SUBJECT_CAP} chars"
+                ));
             }
             if redact_untrusted(&r.subject).1 > 0 {
-                return Err(format!("rev {i}: subject holds a secret (store timeline_subject(..))"));
+                return Err(format!(
+                    "rev {i}: subject holds a secret (store timeline_subject(..))"
+                ));
             }
         }
         let span = |what: &str, from: u32, until: u32| -> Result<(), String> {
             if from >= revs {
-                return Err(format!("{what}: from_rev {from} is outside the {revs} revs"));
+                return Err(format!(
+                    "{what}: from_rev {from} is outside the {revs} revs"
+                ));
             }
             if until != TIMELINE_OPEN && (until <= from || until >= revs) {
-                return Err(format!("{what}: until_rev {until} does not close [{from}, ..) in {revs} revs"));
+                return Err(format!(
+                    "{what}: until_rev {until} does not close [{from}, ..) in {revs} revs"
+                ));
             }
             Ok(())
         };
@@ -181,18 +188,30 @@ impl TimelineStore {
         for (i, n) in self.nodes.iter().enumerate() {
             let what = format!("node {i} ({})", n.id);
             if n.qname as usize >= strings {
-                return Err(format!("{what}: qname index {} is outside the {strings} strings", n.qname));
+                return Err(format!(
+                    "{what}: qname index {} is outside the {strings} strings",
+                    n.qname
+                ));
             }
             if n.file as usize > strings {
-                return Err(format!("{what}: file index {} is outside the {strings} strings", n.file - 1));
+                return Err(format!(
+                    "{what}: file index {} is outside the {strings} strings",
+                    n.file - 1
+                ));
             }
             span(&what, n.from_rev, n.until_rev)?;
             if let Some((rev, _)) = n.prior.iter().find(|(rev, _)| *rev >= revs) {
-                return Err(format!("{what}: prior id changed at rev {rev}, outside the {revs} revs"));
+                return Err(format!(
+                    "{what}: prior id changed at rev {rev}, outside the {revs} revs"
+                ));
             }
         }
         for (i, e) in self.edges.iter().enumerate() {
-            span(&format!("edge {i} ({} -> {})", e.from, e.to), e.from_rev, e.until_rev)?;
+            span(
+                &format!("edge {i} ({} -> {})", e.from, e.to),
+                e.from_rev,
+                e.until_rev,
+            )?;
         }
         Ok(())
     }
@@ -253,7 +272,8 @@ fn is_oid(s: &str) -> bool {
 /// The bytes of `timeline.gmap` for `t`: a code-header core with `t.repo` and
 /// no nodes or edges, and `t` archived as the [`TIMELINE_SECTION`].
 fn encode_timeline(t: &TimelineStore) -> Result<Vec<u8>, StoreError> {
-    t.check().map_err(|why| StoreError::Invalid(format!("timeline: {why}")))?;
+    t.check()
+        .map_err(|why| StoreError::Invalid(format!("timeline: {why}")))?;
     let mut core = Container {
         header: Header::for_code(),
         repo: RepoId(t.repo),
@@ -309,23 +329,35 @@ pub fn read_timeline(dir: &Path) -> Result<Option<TimelineStore>, StoreError> {
 /// other shape is `Corrupt`. `bytes` need not be aligned: the core and the
 /// section are copied into 16-aligned buffers before rkyv reads them.
 pub fn decode_timeline(bytes: &[u8]) -> Result<TimelineStore, StoreError> {
-    let corrupt = |detail: String| StoreError::Corrupt { detail: format!("{TIMELINE_FILE}: {detail}") };
+    let corrupt = |detail: String| StoreError::Corrupt {
+        detail: format!("{TIMELINE_FILE}: {detail}"),
+    };
     let core_range = split_file(bytes)?;
     let mut core_bytes = AlignedVec::<16>::new();
     core_bytes.extend_from_slice(&bytes[core_range.clone()]);
     let core = rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core_bytes)
         .map_err(|_| corrupt("the core archive does not validate".to_string()))?;
     if core.header.magic != MAGIC {
-        return Err(StoreError::BadMagic { expected: MAGIC, got: core.header.magic });
+        return Err(StoreError::BadMagic {
+            expected: MAGIC,
+            got: core.header.magic,
+        });
     }
     let version = core.header.version.to_native();
     if version != FORMAT_VERSION {
         return Err(StoreError::UnsupportedVersion(version, FORMAT_VERSION));
     }
-    let mut named = core.sections.iter().filter(|s| s.name.as_str() == TIMELINE_SECTION);
-    let entry = named.next().ok_or_else(|| corrupt(format!("no '{TIMELINE_SECTION}' section")))?;
+    let mut named = core
+        .sections
+        .iter()
+        .filter(|s| s.name.as_str() == TIMELINE_SECTION);
+    let entry = named
+        .next()
+        .ok_or_else(|| corrupt(format!("no '{TIMELINE_SECTION}' section")))?;
     if named.next().is_some() {
-        return Err(corrupt(format!("the '{TIMELINE_SECTION}' section is named twice")));
+        return Err(corrupt(format!(
+            "the '{TIMELINE_SECTION}' section is named twice"
+        )));
     }
     let (offset, len) = (entry.offset.to_native(), entry.len.to_native());
     let range = usize::try_from(offset)
@@ -346,7 +378,10 @@ pub fn decode_timeline(bytes: &[u8]) -> Result<TimelineStore, StoreError> {
         .map_err(|_| corrupt(format!("section '{TIMELINE_SECTION}' does not validate")))?;
     let repo = core.repo.0.to_native();
     if store.repo != repo {
-        return Err(corrupt(format!("the section's repo {} is not the core's {repo}", store.repo)));
+        return Err(corrupt(format!(
+            "the section's repo {} is not the core's {repo}",
+            store.repo
+        )));
     }
     store.check().map_err(corrupt)?;
     Ok(store)

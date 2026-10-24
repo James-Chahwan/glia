@@ -122,7 +122,10 @@ impl PackRankingArgs {
     /// unless `--no-cochange`. clap has already refused any other name; one
     /// that slipped through is the default base.
     fn ranking(&self) -> Ranking {
-        Ranking::new(RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr), !self.no_cochange)
+        Ranking::new(
+            RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr),
+            !self.no_cochange,
+        )
     }
 }
 

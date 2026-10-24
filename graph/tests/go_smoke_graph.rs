@@ -180,7 +180,12 @@ fn routes_emit_handled_by_edges_via_unresolved_ref_resolution() {
 
     // --- Bare handler resolves to a same-package fn.
     assert!(
-        has_edge(tuples.clone(), health, server_health, edge_category::HANDLED_BY),
+        has_edge(
+            tuples.clone(),
+            health,
+            server_health,
+            edge_category::HANDLED_BY
+        ),
         "/health → server.health (Bare → module_symbols)"
     );
 
@@ -192,7 +197,12 @@ fn routes_emit_handled_by_edges_via_unresolved_ref_resolution() {
 
     // --- Group-chained route resolves the same way.
     assert!(
-        has_edge(tuples.clone(), api_users, users_list, edge_category::HANDLED_BY),
+        has_edge(
+            tuples.clone(),
+            api_users,
+            users_list,
+            edge_category::HANDLED_BY
+        ),
         "/api/users → users.List"
     );
 

@@ -19,8 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
-use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::edge_category;
+use glia_code_domain::evidence::{Basis, Evidence};
 use glia_core::{EdgeCategoryId, NodeId};
 use glia_engine::gaps::{DEAD_SYMBOL, GapsOptions, gaps_report};
 use glia_engine::generate_one;
@@ -29,7 +29,9 @@ use glia_graph::MergedGraph;
 const FIXTURE: &str = "ts-value-references";
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(FIXTURE)
 }
 
 /// Copy a fixture's sources (never its key.json or a stray `.ai/` / `.glia/`).
@@ -51,7 +53,9 @@ fn copy_tree(from: &Path, to: &Path) {
 fn build(tmp: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), tmp);
     let root = tmp.display().to_string();
-    generate_one(&root).unwrap_or_else(|e| panic!("generate_one: {e}")).merged
+    generate_one(&root)
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged
 }
 
 const APP: &str = "src::app";
@@ -65,7 +69,12 @@ fn node(m: &MergedGraph, rel: &str) -> NodeId {
 }
 
 /// The evidence of the one `category` edge `from -> to`, if any.
-fn edge_evidence(m: &MergedGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) -> Option<Evidence> {
+fn edge_evidence(
+    m: &MergedGraph,
+    from: NodeId,
+    to: NodeId,
+    category: EdgeCategoryId,
+) -> Option<Evidence> {
     m.all_edges()
         .find(|e| e.from == from && e.to == to && e.category == category)
         .map(|e| Evidence::of(e).expect("every edge carries EVIDENCE"))
@@ -78,7 +87,10 @@ fn site_text(root: &Path, ev: &Evidence) -> String {
         panic!("site evidence without a file and line: {ev:?}");
     };
     let text = std::fs::read_to_string(root.join(file)).expect("read site file");
-    text.lines().nth(line as usize).unwrap_or_default().to_string()
+    text.lines()
+        .nth(line as usize)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The eight key.json expect_edges, each with the rule that binds it and a
@@ -92,21 +104,73 @@ fn value_references_and_getter_reads_are_edges() {
     let config = n("app.config::appConfig");
     let page = n("home::home.page::HomePage");
     let rows = [
-        (routes, n("core::guards::auth.guard::authGuard"), edge_category::USES, "import_binding", "canActivate: [authGuard]"),
-        (config, n("core::interceptors::jwt.interceptor::jwtInterceptor"), edge_category::USES, "import_binding", "withInterceptors([jwtInterceptor])"),
-        (config, n("core::i18n::provideI18n"), edge_category::CALLS, "import_binding", "provideI18n()"),
-        (config, n("core::interceptors::auth.interceptor::AuthInterceptor"), edge_category::USES, "import_binding", "useClass: AuthInterceptor"),
-        (n("home::home.page::HomePage::sorted"), n("home::home.page::byUrgency"), edge_category::USES, "value_ref", "sort(byUrgency)"),
-        (n("home::home.page::HomePage::sortedBy"), n("home::home.page::sortWith"), edge_category::CALLS, "intra_file", "sortWith(byUrgency"),
-        (n("core::services::trade.service::TradeService::list"), n("core::services::trade.service::TradeService::apiUrl"), edge_category::CALLS, "accessor_read", "${this.apiUrl}/trades"),
-        (page, n("shared::time-ago.pipe::TimeAgoPipe"), edge_category::USES, "import_binding", "imports: [TimeAgoPipe]"),
+        (
+            routes,
+            n("core::guards::auth.guard::authGuard"),
+            edge_category::USES,
+            "import_binding",
+            "canActivate: [authGuard]",
+        ),
+        (
+            config,
+            n("core::interceptors::jwt.interceptor::jwtInterceptor"),
+            edge_category::USES,
+            "import_binding",
+            "withInterceptors([jwtInterceptor])",
+        ),
+        (
+            config,
+            n("core::i18n::provideI18n"),
+            edge_category::CALLS,
+            "import_binding",
+            "provideI18n()",
+        ),
+        (
+            config,
+            n("core::interceptors::auth.interceptor::AuthInterceptor"),
+            edge_category::USES,
+            "import_binding",
+            "useClass: AuthInterceptor",
+        ),
+        (
+            n("home::home.page::HomePage::sorted"),
+            n("home::home.page::byUrgency"),
+            edge_category::USES,
+            "value_ref",
+            "sort(byUrgency)",
+        ),
+        (
+            n("home::home.page::HomePage::sortedBy"),
+            n("home::home.page::sortWith"),
+            edge_category::CALLS,
+            "intra_file",
+            "sortWith(byUrgency",
+        ),
+        (
+            n("core::services::trade.service::TradeService::list"),
+            n("core::services::trade.service::TradeService::apiUrl"),
+            edge_category::CALLS,
+            "accessor_read",
+            "${this.apiUrl}/trades",
+        ),
+        (
+            page,
+            n("shared::time-ago.pipe::TimeAgoPipe"),
+            edge_category::USES,
+            "import_binding",
+            "imports: [TimeAgoPipe]",
+        ),
     ];
     for (from, to, category, rule, site) in rows {
         let ev = edge_evidence(&m, from, to, category)
             .unwrap_or_else(|| panic!("{site}: no edge {from:?} -> {to:?}"));
         assert_eq!(ev.rule.as_deref(), Some(rule), "{site}: {ev:?}");
         let text = site_text(tmp.path(), &ev);
-        assert!(text.contains(site), "{site}: the site line is `{}`", text.trim());
+        assert!(
+            text.contains(site),
+            "{site}: the site line is `{}`",
+            text.trim()
+        );
     }
     // The lazy route's arrow parameter (`(m) => m.HomePage`) is a local: the
     // routes STATE_VAR USES its guard and nothing else.
@@ -128,21 +192,42 @@ fn shadowed_and_unreferenced_names_bind_nothing() {
     let by_name = n("home::home.page::byName");
     let forbid = [
         (n("home::home.page::sortWith"), by_name, edge_category::USES),
-        (n("home::home.page::HomePage::sorted"), by_name, edge_category::USES),
-        (n("app.routes::routes"), n("core::guards::auth.guard::adminGuard"), edge_category::USES),
+        (
+            n("home::home.page::HomePage::sorted"),
+            by_name,
+            edge_category::USES,
+        ),
+        (
+            n("app.routes::routes"),
+            n("core::guards::auth.guard::adminGuard"),
+            edge_category::USES,
+        ),
         (
             n("core::services::trade.service::TradeService::list"),
             n("core::services::trade.service::TradeService::unused"),
             edge_category::CALLS,
         ),
-        (n("home::home.page::HomePage"), n("shared::initials.pipe::InitialsPipe"), edge_category::USES),
+        (
+            n("home::home.page::HomePage"),
+            n("shared::initials.pipe::InitialsPipe"),
+            edge_category::USES,
+        ),
     ];
     for (from, to, category) in forbid {
-        assert!(edge_evidence(&m, from, to, category).is_none(), "{from:?} -> {to:?}");
+        assert!(
+            edge_evidence(&m, from, to, category).is_none(),
+            "{from:?} -> {to:?}"
+        );
     }
-    let into_by_name: Vec<NodeId> =
-        m.all_edges().filter(|e| e.to == by_name && e.category != edge_category::DEFINES).map(|e| e.from).collect();
-    assert!(into_by_name.is_empty(), "byName is referenced by nothing: {into_by_name:?}");
+    let into_by_name: Vec<NodeId> = m
+        .all_edges()
+        .filter(|e| e.to == by_name && e.category != edge_category::DEFINES)
+        .map(|e| e.from)
+        .collect();
+    assert!(
+        into_by_name.is_empty(),
+        "byName is referenced by nothing: {into_by_name:?}"
+    );
 }
 
 /// dead_symbol by membership: the by-value referenced guard, interceptors,
@@ -153,8 +238,12 @@ fn referenced_symbols_leave_dead_symbol() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let m = build(tmp.path());
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     let q = |rel: &str| format!("{APP}::{rel}");
     for gone in [
         "core::guards::auth.guard::authGuard",
@@ -165,7 +254,10 @@ fn referenced_symbols_leave_dead_symbol() {
         "home::home.page::byUrgency",
         "shared::time-ago.pipe::TimeAgoPipe",
     ] {
-        assert!(!rows.contains(&q(gone)), "{gone} is referenced, no row: {rows:#?}");
+        assert!(
+            !rows.contains(&q(gone)),
+            "{gone} is referenced, no row: {rows:#?}"
+        );
     }
     for stays in [
         "core::guards::auth.guard::adminGuard",
@@ -178,6 +270,9 @@ fn referenced_symbols_leave_dead_symbol() {
         "shared::initials.pipe::InitialsPipe",
         "shared::initials.pipe::InitialsPipe::transform",
     ] {
-        assert!(rows.contains(&q(stays)), "{stays} is used by nothing, a row: {rows:#?}");
+        assert!(
+            rows.contains(&q(stays)),
+            "{stays} is used by nothing, a row: {rows:#?}"
+        );
     }
 }

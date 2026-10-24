@@ -195,10 +195,9 @@ fn side_parts_in(m: &MergedGraph, ids: Option<&HashSet<u64>>) -> SideParts {
             if ids.is_some_and(|s| !s.contains(&n.id.0)) {
                 continue;
             }
-            let json_schema = n
-                .cells
-                .iter()
-                .any(|c| c.kind == cell_type::SCHEMA_FIELDS && matches!(c.payload, CellPayload::Json(_)));
+            let json_schema = n.cells.iter().any(|c| {
+                c.kind == cell_type::SCHEMA_FIELDS && matches!(c.payload, CellPayload::Json(_))
+            });
             if !json_schema {
                 continue;
             }
@@ -207,17 +206,27 @@ fn side_parts_in(m: &MergedGraph, ids: Option<&HashSet<u64>>) -> SideParts {
                 .iter()
                 .filter(|c| CONTENT_CELLS.contains(&c.kind))
                 .map(|c| match &c.payload {
-                    CellPayload::Json(j) if c.kind == cell_type::SCHEMA_FIELDS => {
-                        Cell { kind: c.kind, payload: CellPayload::Text(j.clone()) }
-                    }
+                    CellPayload::Json(j) if c.kind == cell_type::SCHEMA_FIELDS => Cell {
+                        kind: c.kind,
+                        payload: CellPayload::Text(j.clone()),
+                    },
                     _ => c.clone(),
                 })
                 .collect();
-            schema_copies.push(Node { id: n.id, repo: n.repo, confidence: n.confidence, cells });
+            schema_copies.push(Node {
+                id: n.id,
+                repo: n.repo,
+                confidence: n.confidence,
+                cells,
+            });
             replaced.insert((gi, ni));
         }
     }
-    SideParts { regions, schema_copies, replaced }
+    SideParts {
+        regions,
+        schema_copies,
+        replaced,
+    }
 }
 
 /// One graph as a delta side: every graph's nodes in order and
@@ -225,7 +234,10 @@ fn side_parts_in(m: &MergedGraph, ids: Option<&HashSet<u64>>) -> SideParts {
 /// with each node that carries a JSON SCHEMA_FIELDS payload stood in for by
 /// its Text copy in `parts` (module docs).
 pub(crate) fn side<'a>(m: &'a MergedGraph, parts: &'a SideParts) -> DeltaSide<'a> {
-    DeltaSide::new(side_nodes(m, parts, |_| true), side_edges(m, parts.regions(), |_| true))
+    DeltaSide::new(
+        side_nodes(m, parts, |_| true),
+        side_edges(m, parts.regions(), |_| true),
+    )
 }
 
 /// Every node of every graph in graph order whose id passes `keep`, minus
@@ -241,21 +253,32 @@ fn side_nodes<'a>(
         .iter()
         .enumerate()
         .flat_map(|(gi, g)| g.nodes.iter().enumerate().map(move |(ni, n)| (gi, ni, n)))
-        .filter(move |&(gi, ni, n)| keep(n.id.0) && !regions.contains(&n.id.0) && !parts.replaced.contains(&(gi, ni)))
+        .filter(move |&(gi, ni, n)| {
+            keep(n.id.0) && !regions.contains(&n.id.0) && !parts.replaced.contains(&(gi, ni))
+        })
         .map(|(_, _, n)| n)
         .chain(parts.schema_copies.iter())
 }
 
 /// Every edge of `all_edges()` (in that order) that passes `keep` and has no
 /// endpoint in `regions`.
-fn side_edges<'a>(m: &'a MergedGraph, regions: &BTreeSet<u64>, keep: impl Fn(&Edge) -> bool) -> Vec<&'a Edge> {
-    m.all_edges().filter(|e| !regions.contains(&e.from.0) && !regions.contains(&e.to.0) && keep(e)).collect()
+fn side_edges<'a>(
+    m: &'a MergedGraph,
+    regions: &BTreeSet<u64>,
+    keep: impl Fn(&Edge) -> bool,
+) -> Vec<&'a Edge> {
+    m.all_edges()
+        .filter(|e| !regions.contains(&e.from.0) && !regions.contains(&e.to.0) && keep(e))
+        .collect()
 }
 
 /// [`located_delta_with`] with no declared renames: move detection pairs
 /// files by body hash, then by basename. The graph-pair entry, also usable on
 /// a loaded prior `.gmap`.
-pub fn located_delta(before: &MergedGraph, after: &MergedGraph) -> (GraphDelta, Vec<DeltaNode>, Vec<DeltaEdge>) {
+pub fn located_delta(
+    before: &MergedGraph,
+    after: &MergedGraph,
+) -> (GraphDelta, Vec<DeltaNode>, Vec<DeltaEdge>) {
     let l = located_delta_counted(before, after, &[]);
     (l.delta, l.nodes, l.edges)
 }
@@ -309,11 +332,31 @@ pub(crate) fn located_delta_counted(
     let (old_parts, new_parts) = (side_parts(before), side_parts(after));
     let old_edges = side_edges(before, old_parts.regions(), |_| true);
     let new_edges = side_edges(after, new_parts.regions(), |_| true);
-    let old_side = DeltaSide::new(side_nodes(before, &old_parts, |_| true), old_edges.iter().copied());
-    let new_side = DeltaSide::new(side_nodes(after, &new_parts, |_| true), new_edges.iter().copied());
-    let delta = graph_delta(&old_side, &new_side, &DeltaOptions { content_cells: CONTENT_CELLS, moves: &pairs });
+    let old_side = DeltaSide::new(
+        side_nodes(before, &old_parts, |_| true),
+        old_edges.iter().copied(),
+    );
+    let new_side = DeltaSide::new(
+        side_nodes(after, &new_parts, |_| true),
+        new_edges.iter().copied(),
+    );
+    let delta = graph_delta(
+        &old_side,
+        &new_side,
+        &DeltaOptions {
+            content_cells: CONTENT_CELLS,
+            moves: &pairs,
+        },
+    );
     let regions_excluded = old_parts.regions().union(new_parts.regions()).count();
-    locate_rows(before, after, delta, &old_edges, &new_edges, regions_excluded)
+    locate_rows(
+        before,
+        after,
+        delta,
+        &old_edges,
+        &new_edges,
+        regions_excluded,
+    )
 }
 
 /// [`located_delta_counted`] restricted to what `scope` can change (DC.6):
@@ -353,32 +396,75 @@ pub(crate) fn located_delta_counted(
 /// Prints `[delta] scoped graphs before=<b> after=<a> ids=<i> keys=<k> moves=<on|off>`:
 /// the scoped graph count of each side, the non-REGION ids of D, and the
 /// distinct edge keys both sides hold.
-pub(crate) fn located_delta_scoped(before: &MergedGraph, after: &MergedGraph, scope: &DeltaScope) -> LocatedRows {
+pub(crate) fn located_delta_scoped(
+    before: &MergedGraph,
+    after: &MergedGraph,
+    scope: &DeltaScope,
+) -> LocatedRows {
     let scoped = |m: &'_ MergedGraph, at: &BTreeSet<usize>| -> Vec<usize> {
         at.iter().copied().filter(|&i| i < m.graphs.len()).collect()
     };
     let (in_before, in_after) = (scoped(before, &scope.before), scoped(after, &scope.after));
     let mut ids: HashSet<u64> = HashSet::new();
     let mut keys: HashSet<EdgeKey> = HashSet::new();
-    let graphs = in_before.iter().map(|&i| &before.graphs[i]).chain(in_after.iter().map(|&i| &after.graphs[i]));
+    let graphs = in_before
+        .iter()
+        .map(|&i| &before.graphs[i])
+        .chain(in_after.iter().map(|&i| &after.graphs[i]));
     for g in graphs {
         ids.extend(g.nodes.iter().map(|n| n.id.0));
         keys.extend(g.edges.iter().map(EdgeKey::from));
     }
-    keys.extend(before.cross_edges.iter().chain(&after.cross_edges).map(EdgeKey::from));
-    let in_scope = |e: &Edge| keys.contains(&EdgeKey::from(e)) || ids.contains(&e.from.0) || ids.contains(&e.to.0);
+    keys.extend(
+        before
+            .cross_edges
+            .iter()
+            .chain(&after.cross_edges)
+            .map(EdgeKey::from),
+    );
+    let in_scope = |e: &Edge| {
+        keys.contains(&EdgeKey::from(e)) || ids.contains(&e.from.0) || ids.contains(&e.to.0)
+    };
 
-    let pairs = if scope.moves { move_pairs(before, after, &[]) } else { Vec::new() };
-    let (old_parts, new_parts) = (side_parts_in(before, Some(&ids)), side_parts_in(after, Some(&ids)));
+    let pairs = if scope.moves {
+        move_pairs(before, after, &[])
+    } else {
+        Vec::new()
+    };
+    let (old_parts, new_parts) = (
+        side_parts_in(before, Some(&ids)),
+        side_parts_in(after, Some(&ids)),
+    );
     let old_edges = side_edges(before, old_parts.regions(), in_scope);
     let new_edges = side_edges(after, new_parts.regions(), in_scope);
     let id_in = |id: u64| ids.contains(&id);
-    let old_side = DeltaSide::new(side_nodes(before, &old_parts, id_in), old_edges.iter().copied());
-    let new_side = DeltaSide::new(side_nodes(after, &new_parts, id_in), new_edges.iter().copied());
-    let delta = graph_delta(&old_side, &new_side, &DeltaOptions { content_cells: CONTENT_CELLS, moves: &pairs });
-    let regions: BTreeSet<u64> = old_parts.regions().union(new_parts.regions()).copied().collect();
+    let old_side = DeltaSide::new(
+        side_nodes(before, &old_parts, id_in),
+        old_edges.iter().copied(),
+    );
+    let new_side = DeltaSide::new(
+        side_nodes(after, &new_parts, id_in),
+        new_edges.iter().copied(),
+    );
+    let delta = graph_delta(
+        &old_side,
+        &new_side,
+        &DeltaOptions {
+            content_cells: CONTENT_CELLS,
+            moves: &pairs,
+        },
+    );
+    let regions: BTreeSet<u64> = old_parts
+        .regions()
+        .union(new_parts.regions())
+        .copied()
+        .collect();
 
-    let held: HashSet<EdgeKey> = old_edges.iter().chain(&new_edges).map(|&e| EdgeKey::from(e)).collect();
+    let held: HashSet<EdgeKey> = old_edges
+        .iter()
+        .chain(&new_edges)
+        .map(|&e| EdgeKey::from(e))
+        .collect();
     eprintln!(
         "[delta] scoped graphs before={} after={} ids={} keys={} moves={}",
         in_before.len(),
@@ -391,8 +477,16 @@ pub(crate) fn located_delta_scoped(before: &MergedGraph, after: &MergedGraph, sc
 }
 
 /// `(before, after)` id pairs of every move `detect_moves_with` finds.
-fn move_pairs(before: &MergedGraph, after: &MergedGraph, renames: &[(String, String)]) -> Vec<(NodeId, NodeId)> {
-    detect_moves_with(before, after, renames).nodes.iter().map(|m| (m.old_id, m.new_id)).collect()
+fn move_pairs(
+    before: &MergedGraph,
+    after: &MergedGraph,
+    renames: &[(String, String)],
+) -> Vec<(NodeId, NodeId)> {
+    detect_moves_with(before, after, renames)
+        .nodes
+        .iter()
+        .map(|m| (m.old_id, m.new_id))
+        .collect()
 }
 
 /// Name, locate, sort and count `delta`'s rows. `old_edges` / `new_edges` are
@@ -411,7 +505,10 @@ fn locate_rows(
     // After id -> before id, for the moves LE.1a applied.
     let was: HashMap<NodeId, NodeId> = delta.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
     let mut nodes = Vec::with_capacity(
-        delta.added_nodes.len() + delta.removed_nodes.len() + delta.modified_nodes.len() + delta.moved_nodes.len(),
+        delta.added_nodes.len()
+            + delta.removed_nodes.len()
+            + delta.modified_nodes.len()
+            + delta.moved_nodes.len(),
     );
     for &id in &delta.added_nodes {
         nodes.push(node_row("added", now.locate(id), None, "after"));
@@ -424,7 +521,12 @@ fn locate_rows(
         nodes.push(node_row("modified", now.locate(id), prior, "after"));
     }
     for &(b, a) in &delta.moved_nodes {
-        nodes.push(node_row("moved", now.locate(a), Some(then.locate(b)), "after"));
+        nodes.push(node_row(
+            "moved",
+            now.locate(a),
+            Some(then.locate(b)),
+            "after",
+        ));
     }
     nodes.sort_by(|x, y| (x.change, &x.qname, x.id).cmp(&(y.change, &y.qname, y.id)));
 
@@ -433,16 +535,39 @@ fn locate_rows(
         delta.added_edges.len() + delta.removed_edges.len() + delta.reconfidenced_edges.len(),
     );
     for key in &delta.added_edges {
-        edges.push(edge_row("added", key, &now, new_edges.get(key).copied(), None));
+        edges.push(edge_row(
+            "added",
+            key,
+            &now,
+            new_edges.get(key).copied(),
+            None,
+        ));
     }
     for key in &delta.removed_edges {
-        edges.push(edge_row("removed", key, &then, old_edges.get(key).copied(), None));
+        edges.push(edge_row(
+            "removed",
+            key,
+            &then,
+            old_edges.get(key).copied(),
+            None,
+        ));
     }
     for (key, was_conf, _) in &delta.reconfidenced_edges {
-        edges.push(edge_row("reconfidenced", key, &now, new_edges.get(key).copied(), Some(*was_conf)));
+        edges.push(edge_row(
+            "reconfidenced",
+            key,
+            &now,
+            new_edges.get(key).copied(),
+            Some(*was_conf),
+        ));
     }
     edges.sort_by(|x, y| {
-        (x.change, x.category, &x.from_qname, &x.to_qname).cmp(&(y.change, y.category, &y.from_qname, &y.to_qname))
+        (x.change, x.category, &x.from_qname, &x.to_qname).cmp(&(
+            y.change,
+            y.category,
+            &y.from_qname,
+            &y.to_qname,
+        ))
     });
     let counts = DeltaCounts {
         nodes_added: delta.added_nodes.len(),
@@ -455,7 +580,12 @@ fn locate_rows(
         regions_excluded,
         moves_ignored: delta.ignored_moves,
     };
-    LocatedRows { delta, nodes, edges, counts }
+    LocatedRows {
+        delta,
+        nodes,
+        edges,
+        counts,
+    }
 }
 
 /// Key -> the first edge (in `all_edges` order) with that key.
@@ -467,7 +597,12 @@ fn first_edges<'a>(edges: &[&'a Edge]) -> BTreeMap<EdgeKey, &'a Edge> {
     out
 }
 
-fn node_row(change: &'static str, at: Located, prior: Option<Located>, side: &'static str) -> DeltaNode {
+fn node_row(
+    change: &'static str,
+    at: Located,
+    prior: Option<Located>,
+    side: &'static str,
+) -> DeltaNode {
     DeltaNode {
         change,
         id: at.id,
@@ -549,10 +684,19 @@ pub fn graph_delta_vs_rev(repo_path: &str, base: &str) -> Result<RevDelta, Strin
     drop(tree);
     let files = cache
         .last_diff()
-        .map(|d| DeltaFiles { reused: d.reused.len(), reparsed: d.reparsed.len(), evicted: d.evicted.len() })
+        .map(|d| DeltaFiles {
+            reused: d.reused.len(),
+            reparsed: d.reparsed.len(),
+            evicted: d.evicted.len(),
+        })
         .unwrap_or_default();
     let renames = git_rev::declared_renames(repo, &rev);
-    let LocatedRows { delta, nodes, edges, counts } = located_delta_counted(&before.merged, &after.merged, &renames);
+    let LocatedRows {
+        delta,
+        nodes,
+        edges,
+        counts,
+    } = located_delta_counted(&before.merged, &after.merged, &renames);
     eprintln!(
         "[delta] base={} files: reused={} reparsed={} evicted={} | nodes +{} -{} ~{} >{} | edges +{} -{} ~{} | regions_excluded={} ignored_moves={}",
         rev.given,
@@ -569,8 +713,19 @@ pub fn graph_delta_vs_rev(repo_path: &str, base: &str) -> Result<RevDelta, Strin
         counts.regions_excluded,
         counts.moves_ignored,
     );
-    let answer = GraphDeltaAnswer { base: rev.given, files, counts, nodes, edges };
-    Ok(RevDelta { answer, before, after, delta })
+    let answer = GraphDeltaAnswer {
+        base: rev.given,
+        files,
+        counts,
+        nodes,
+        edges,
+    };
+    Ok(RevDelta {
+        answer,
+        before,
+        after,
+        delta,
+    })
 }
 
 #[cfg(test)]
@@ -600,7 +755,9 @@ mod tests {
     }
 
     fn build(root: &Path) -> MergedGraph {
-        crate::generate_one(root.to_str().expect("utf-8 tempdir")).expect("build").merged
+        crate::generate_one(root.to_str().expect("utf-8 tempdir"))
+            .expect("build")
+            .merged
     }
 
     /// `<tmp>/proj`: python and TS calling one `/users` endpoint, a TS client
@@ -616,7 +773,11 @@ mod tests {
         write(&root, "README.md", README);
         write(&root, "package.json", "{\"name\": \"demo\"}\n");
         write(&root, "svc/main.go", GO_MAIN);
-        write(&root, "node_modules/left-pad/index.js", "module.exports = 1;\n");
+        write(
+            &root,
+            "node_modules/left-pad/index.js",
+            "module.exports = 1;\n",
+        );
         (tmp, root)
     }
 
@@ -629,17 +790,37 @@ mod tests {
                     && loc.locate(n.id).file.is_some_and(|f| f.ends_with(ext))
             })
         };
-        m.graphs.iter().enumerate().filter(|(_, g)| holds(g)).map(|(i, _)| i).collect()
+        m.graphs
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| holds(g))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// The regions, projects and docs graphs: a watch update rebuilds them
     /// every time.
     fn always_graphs(m: &MergedGraph) -> BTreeSet<usize> {
-        let kinds = [node_kind::REGION, node_kind::PROJECT, node_kind::DOC_SECTION, node_kind::DOC_SPACE];
+        let kinds = [
+            node_kind::REGION,
+            node_kind::PROJECT,
+            node_kind::DOC_SECTION,
+            node_kind::DOC_SPACE,
+        ];
         let holds = |g: &glia_graph::RepoGraph| {
-            g.nodes.iter().any(|n| g.nav.kind_by_id.get(&n.id).is_some_and(|k| kinds.contains(k)))
+            g.nodes.iter().any(|n| {
+                g.nav
+                    .kind_by_id
+                    .get(&n.id)
+                    .is_some_and(|k| kinds.contains(k))
+            })
         };
-        m.graphs.iter().enumerate().filter(|(_, g)| holds(g)).map(|(i, _)| i).collect()
+        m.graphs
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| holds(g))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// The scope a watch update passes when the groups of `exts` were rebuilt.
@@ -654,10 +835,18 @@ mod tests {
                 assert!(!langs.is_empty(), "no graph holds a {ext} module");
                 s.extend(langs);
             }
-            assert!(s.len() < m.graphs.len(), "scope {s:?} covers all {} graphs", m.graphs.len());
+            assert!(
+                s.len() < m.graphs.len(),
+                "scope {s:?} covers all {} graphs",
+                m.graphs.len()
+            );
             s
         };
-        DeltaScope { before: pick(before), after: pick(after), moves }
+        DeltaScope {
+            before: pick(before),
+            after: pick(after),
+            moves,
+        }
     }
 
     fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
@@ -666,14 +855,21 @@ mod tests {
 
     /// Scoped == full on the raw delta, every row and every count; returns
     /// the full rows for the caller's own checks.
-    fn assert_scoped_equals_full(before: &MergedGraph, after: &MergedGraph, scope: &DeltaScope) -> LocatedRows {
+    fn assert_scoped_equals_full(
+        before: &MergedGraph,
+        after: &MergedGraph,
+        scope: &DeltaScope,
+    ) -> LocatedRows {
         let full = located_delta_counted(before, after, &[]);
         let scoped = located_delta_scoped(before, after, scope);
         assert_eq!(scoped.delta, full.delta);
         assert_eq!(json(&scoped.nodes), json(&full.nodes));
         assert_eq!(json(&scoped.edges), json(&full.edges));
         assert_eq!(json(&scoped.counts), json(&full.counts));
-        assert!(full.counts.regions_excluded > 0, "the node_modules REGION is counted");
+        assert!(
+            full.counts.regions_excluded > 0,
+            "the node_modules REGION is counted"
+        );
         full
     }
 
@@ -687,18 +883,33 @@ mod tests {
                 }
             }
         }
-        graphs_of.into_iter().filter(|(_, gs)| gs.len() > 1).map(|(id, _)| id).collect()
+        graphs_of
+            .into_iter()
+            .filter(|(_, gs)| gs.len() > 1)
+            .map(|(id, _)| id)
+            .collect()
     }
 
     #[test]
     fn scoped_equals_full_on_a_body_edit() {
         let (_tmp, root) = repo();
         let before = build(&root);
-        assert!(!shared_endpoints(&before).is_empty(), "the /users ENDPOINT sits in the python and TS graphs");
-        write(&root, "api/users.py", &USERS_PY.replace("len(list_users())", "len(list_users()) + 0"));
+        assert!(
+            !shared_endpoints(&before).is_empty(),
+            "the /users ENDPOINT sits in the python and TS graphs"
+        );
+        write(
+            &root,
+            "api/users.py",
+            &USERS_PY.replace("len(list_users())", "len(list_users()) + 0"),
+        );
         let after = build(&root);
-        let full = assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".py"], false));
-        assert!(full.counts.nodes_modified > 0, "the edited function is modified");
+        let full =
+            assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".py"], false));
+        assert!(
+            full.counts.nodes_modified > 0,
+            "the edited function is modified"
+        );
     }
 
     #[test]
@@ -707,18 +918,33 @@ mod tests {
         let before = build(&root);
         std::fs::rename(root.join("api/users.py"), root.join("api/people.py")).expect("rename");
         let after = build(&root);
-        let full = assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".py"], true));
-        assert!(full.counts.nodes_moved > 0, "the renamed file's nodes are moved");
+        let full =
+            assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".py"], true));
+        assert!(
+            full.counts.nodes_moved > 0,
+            "the renamed file's nodes are moved"
+        );
     }
 
     #[test]
     fn scoped_equals_full_on_same_stem_add() {
         let (_tmp, root) = repo();
         let before = build(&root);
-        write(&root, "api/users.ts", "export function countUsers() {\n  return 0;\n}\n");
+        write(
+            &root,
+            "api/users.ts",
+            "export function countUsers() {\n  return 0;\n}\n",
+        );
         let after = build(&root);
-        let full = assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".py", ".ts"], true));
-        assert!(full.counts.nodes_moved > 0, "the python MODULE is renamed by the same-stem add and paired");
+        let full = assert_scoped_equals_full(
+            &before,
+            &after,
+            &scope(&before, &after, &[".py", ".ts"], true),
+        );
+        assert!(
+            full.counts.nodes_moved > 0,
+            "the python MODULE is renamed by the same-stem add and paired"
+        );
         assert!(full.counts.nodes_added > 0, "the TS module is added");
     }
 
@@ -731,21 +957,47 @@ mod tests {
         let (_tmp, root) = repo();
         let before = build(&root);
         let shared = shared_endpoints(&before);
-        assert_eq!(shared.len(), 1, "the /users ENDPOINT sits in the python and TS graphs");
-        write(&root, "web/client.ts", &CLIENT_TS.replace("fetch(\"/users\")", "fetch(\"/people\")"));
+        assert_eq!(
+            shared.len(),
+            1,
+            "the /users ENDPOINT sits in the python and TS graphs"
+        );
+        write(
+            &root,
+            "web/client.ts",
+            &CLIENT_TS.replace("fetch(\"/users\")", "fetch(\"/people\")"),
+        );
         let after = build(&root);
         let users = NodeId(*shared.iter().next().expect("one shared id"));
         let holders = |m: &MergedGraph| -> Vec<usize> {
-            m.graphs.iter().enumerate().filter(|(_, g)| g.nodes.iter().any(|n| n.id == users)).map(|(i, _)| i).collect()
+            m.graphs
+                .iter()
+                .enumerate()
+                .filter(|(_, g)| g.nodes.iter().any(|n| n.id == users))
+                .map(|(i, _)| i)
+                .collect()
         };
         let (ts_before, ts_after) = (lang_graphs(&before, ".ts"), lang_graphs(&after, ".ts"));
-        assert!(holders(&before).iter().any(|i| ts_before.contains(i)), "the TS graph held a copy");
-        assert!(!holders(&after).iter().any(|i| ts_after.contains(i)), "the edit took the TS copy away");
+        assert!(
+            holders(&before).iter().any(|i| ts_before.contains(i)),
+            "the TS graph held a copy"
+        );
+        assert!(
+            !holders(&after).iter().any(|i| ts_after.contains(i)),
+            "the edit took the TS copy away"
+        );
         assert_eq!(holders(&after).len(), 1, "the python copy stays");
-        let full = assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".ts"], false));
-        assert!(!full.delta.removed_nodes.contains(&users), "the ENDPOINT is still in the after graph");
+        let full =
+            assert_scoped_equals_full(&before, &after, &scope(&before, &after, &[".ts"], false));
+        assert!(
+            !full.delta.removed_nodes.contains(&users),
+            "the ENDPOINT is still in the after graph"
+        );
         assert!(full.counts.nodes_added > 0, "the /people ENDPOINT is added");
-        assert!(full.counts.nodes_modified > 0, "the edited TS function is modified");
+        assert!(
+            full.counts.nodes_modified > 0,
+            "the edited TS function is modified"
+        );
     }
 
     /// The rebuilt python graph adds a `GET /items` route, and the HTTP
@@ -761,16 +1013,32 @@ mod tests {
         let scope = scope(&before, &after, &[".py"], false);
         let full = assert_scoped_equals_full(&before, &after, &scope);
         let held = |m: &MergedGraph, at: &BTreeSet<usize>| -> Vec<NodeId> {
-            at.iter().flat_map(|&i| m.graphs[i].nodes.iter().map(|n| n.id)).collect()
+            at.iter()
+                .flat_map(|&i| m.graphs[i].nodes.iter().map(|n| n.id))
+                .collect()
         };
-        let d: HashSet<NodeId> = held(&before, &scope.before).into_iter().chain(held(&after, &scope.after)).collect();
+        let d: HashSet<NodeId> = held(&before, &scope.before)
+            .into_iter()
+            .chain(held(&after, &scope.after))
+            .collect();
         let clean: Vec<&EdgeKey> = full
             .delta
             .removed_edges
             .iter()
-            .filter(|k| k.category == edge_category::HTTP_CALLS && !d.contains(&k.from) && !d.contains(&k.to))
+            .filter(|k| {
+                k.category == edge_category::HTTP_CALLS
+                    && !d.contains(&k.from)
+                    && !d.contains(&k.to)
+            })
             .collect();
-        assert_eq!(clean.len(), 1, "the TS -> Go HTTP_CALLS edge, both ends clean, is removed");
-        assert_eq!(full.counts.edges_added, 3, "DEFINES, HANDLED_BY and the TS -> python HTTP_CALLS");
+        assert_eq!(
+            clean.len(),
+            1,
+            "the TS -> Go HTTP_CALLS edge, both ends clean, is removed"
+        );
+        assert_eq!(
+            full.counts.edges_added, 3,
+            "DEFINES, HANDLED_BY and the TS -> python HTTP_CALLS"
+        );
     }
 }

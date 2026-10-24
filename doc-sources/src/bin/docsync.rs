@@ -85,10 +85,16 @@ fn main() -> std::process::ExitCode {
     }
 
     if by_space.is_empty() {
-        eprintln!("docsync: no pages in {}; snapshot unchanged", pages_path.display());
+        eprintln!(
+            "docsync: no pages in {}; snapshot unchanged",
+            pages_path.display()
+        );
     }
     for (space, (records, redacted)) in by_space {
-        let source = SnapshotSource { kind: DocSourceKind::Confluence, container: space };
+        let source = SnapshotSource {
+            kind: DocSourceKind::Confluence,
+            container: space,
+        };
         match write_snapshot(&repo_root, &source, &records, redacted) {
             Ok(w) => eprintln!(
                 "docsync: wrote {} record(s) for space {} → {}",

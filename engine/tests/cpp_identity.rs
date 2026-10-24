@@ -84,7 +84,9 @@ fn nav(merged: &MergedGraph) -> HashMap<NodeId, (String, String, NodeKindId)> {
     for g in &merged.graphs {
         for (id, q) in &g.nav.qname_by_id {
             let name = g.nav.name_by_id.get(id).cloned().unwrap_or_default();
-            let Some(kind) = g.nav.kind_by_id.get(id).copied() else { continue };
+            let Some(kind) = g.nav.kind_by_id.get(id).copied() else {
+                continue;
+            };
             out.insert(*id, (q.clone(), name, kind));
         }
     }
@@ -143,11 +145,23 @@ fn header_and_impl_are_two_modules() {
 
     // (1) One MODULE per file, named by its full file name.
     let modules = qnames_of(&merged, node_kind::MODULE);
-    for want in ["src::Widget.h", "src::Widget.cpp", "src::main.cpp", "c::point.h", "c::point.c"] {
-        assert!(modules.contains(&want.to_string()), "{want} missing from {modules:?}");
+    for want in [
+        "src::Widget.h",
+        "src::Widget.cpp",
+        "src::main.cpp",
+        "c::point.h",
+        "c::point.c",
+    ] {
+        assert!(
+            modules.contains(&want.to_string()),
+            "{want} missing from {modules:?}"
+        );
     }
     for gone in ["src::Widget", "c::point", "src::main"] {
-        assert!(!modules.contains(&gone.to_string()), "{gone} still a MODULE: {modules:?}");
+        assert!(
+            !modules.contains(&gone.to_string()),
+            "{gone} still a MODULE: {modules:?}"
+        );
     }
     // The stem stays each MODULE's display name.
     let nav = nav(&merged);
@@ -164,13 +178,22 @@ fn header_and_impl_are_two_modules() {
         ("src::main.cpp", "src::Widget.h"),
         ("c::point.c", "c::point.h"),
     ] {
-        assert!(imports.contains(&pair(from, to)), "{from} -> {to} missing: {imports:?}");
+        assert!(
+            imports.contains(&pair(from, to)),
+            "{from} -> {to} missing: {imports:?}"
+        );
     }
-    assert!(imports.iter().all(|(f, t)| f != t), "self-IMPORTS: {imports:?}");
+    assert!(
+        imports.iter().all(|(f, t)| f != t),
+        "self-IMPORTS: {imports:?}"
+    );
     // `<stdlib.h>` is an angle include naming no repo file: no edge (CB.22).
     assert_eq!(imports.len(), 3, "{imports:?}");
     // Every IMPORTS edge is a located site (LC.3b evidence, carried through).
-    for e in merged.all_edges().filter(|e| e.category == edge_category::IMPORTS) {
+    for e in merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::IMPORTS)
+    {
         let ev = Evidence::of(e).expect("IMPORTS edge carries EVIDENCE");
         assert_eq!(ev.basis, Basis::Site, "{ev:?}");
     }
@@ -180,9 +203,16 @@ fn header_and_impl_are_two_modules() {
     // a header's global types take its directory, not its file, as scope.)
     assert!(names_of(&merged, node_kind::CLASS).contains(&"Widget".to_string()));
     let methods = qnames_of(&merged, node_kind::METHOD);
-    assert!(methods.contains(&"src::Widget::helper".to_string()), "{methods:?}");
+    assert!(
+        methods.contains(&"src::Widget::helper".to_string()),
+        "{methods:?}"
+    );
     let structs = qnames_of(&merged, node_kind::STRUCT);
-    assert_eq!(structs, ["c::point"], "the declaration's `struct point` mints nothing");
+    assert_eq!(
+        structs,
+        ["c::point"],
+        "the declaration's `struct point` mints nothing"
+    );
     // A header misread by the C grammar turns `class Widget {..}` into a
     // FUNCTION named Widget.
     assert!(!names_of(&merged, node_kind::FUNCTION).contains(&"Widget".to_string()));
@@ -191,16 +221,24 @@ fn header_and_impl_are_two_modules() {
     assert!(
         nav.values().all(|(_, name, _)| name != "Gadget"),
         "a node named Gadget: {:?}",
-        nav.values().filter(|(_, n, _)| n == "Gadget").collect::<Vec<_>>()
+        nav.values()
+            .filter(|(_, n, _)| n == "Gadget")
+            .collect::<Vec<_>>()
     );
 
     // (5) Free functions follow their file's MODULE; `Widget::run` is an
     // out-of-line member, a METHOD at the header class's qname (LB.10b).
     let functions = qnames_of(&merged, node_kind::FUNCTION);
     for want in ["c::point.c::point_new", "src::main.cpp::main"] {
-        assert!(functions.contains(&want.to_string()), "{want} missing: {functions:?}");
+        assert!(
+            functions.contains(&want.to_string()),
+            "{want} missing: {functions:?}"
+        );
     }
-    assert!(methods.contains(&"src::Widget::run".to_string()), "{methods:?}");
+    assert!(
+        methods.contains(&"src::Widget::run".to_string()),
+        "{methods:?}"
+    );
 
     // (6) The IMPORTS-cell local filter still knows every quoted include is
     // the repo's own header: the file-named MODULE keeps its stem as nav
@@ -258,11 +296,23 @@ fn incremental_builds_match_a_clean_build() {
     let repo = tmp.path().join("repo");
     let repo = repo.to_str().expect("utf-8 tempdir");
     let clean = build(&tmp);
-    let cold = glia_engine::generate_one_incremental(repo).expect("cold").merged;
-    let warm = glia_engine::generate_one_incremental(repo).expect("warm").merged;
+    let cold = glia_engine::generate_one_incremental(repo)
+        .expect("cold")
+        .merged;
+    let warm = glia_engine::generate_one_incremental(repo)
+        .expect("warm")
+        .merged;
     let clean_bytes = store_bytes(&clean, &tmp.path().join("clean"));
-    assert_eq!(store_bytes(&cold, &tmp.path().join("cold")), clean_bytes, "cold vs clean");
-    assert_eq!(store_bytes(&warm, &tmp.path().join("warm")), clean_bytes, "warm vs clean");
+    assert_eq!(
+        store_bytes(&cold, &tmp.path().join("cold")),
+        clean_bytes,
+        "cold vs clean"
+    );
+    assert_eq!(
+        store_bytes(&warm, &tmp.path().join("warm")),
+        clean_bytes,
+        "warm vs clean"
+    );
 }
 
 /// LB.10b on `cpp-namespace-qnames`: header types by C++ name, source-file
@@ -278,7 +328,10 @@ fn types_take_their_cpp_name() {
     let methods = qnames_of(&merged, node_kind::METHOD);
 
     for want in ["src::Widget", "shop::Cart", "src::Widget.cpp::Local"] {
-        assert!(classes.contains(&want.to_string()), "CLASS {want} missing: {classes:?}");
+        assert!(
+            classes.contains(&want.to_string()),
+            "CLASS {want} missing: {classes:?}"
+        );
     }
     assert!(structs.contains(&"src::Point".to_string()), "{structs:?}");
     for want in [
@@ -289,7 +342,10 @@ fn types_take_their_cpp_name() {
         "src::Widget::run",
         "shop::Cart::total",
     ] {
-        assert!(methods.contains(&want.to_string()), "METHOD {want} missing: {methods:?}");
+        assert!(
+            methods.contains(&want.to_string()),
+            "METHOD {want} missing: {methods:?}"
+        );
     }
     for q in classes.iter().chain(&structs) {
         assert!(
@@ -303,7 +359,10 @@ fn types_take_their_cpp_name() {
 
     let calls = edges(&merged, edge_category::CALLS);
     assert!(
-        calls.contains(&pair("src::Widget.cpp::Local::a", "src::Widget.cpp::Local::b")),
+        calls.contains(&pair(
+            "src::Widget.cpp::Local::a",
+            "src::Widget.cpp::Local::b"
+        )),
         "{calls:?}"
     );
     // The in-file-bound member hangs off its class: DEFINES Local -> a.
@@ -314,10 +373,22 @@ fn types_take_their_cpp_name() {
     );
     // The defining file keeps its DEFINES after LB.10c joins them to the
     // header class, which DEFINES them too.
-    assert!(defines.contains(&pair("src::Widget.cpp", "src::Widget::run")), "{defines:?}");
-    assert!(defines.contains(&pair("src::cart.cpp::shop", "shop::Cart::total")), "{defines:?}");
-    assert!(defines.contains(&pair("src::Widget", "src::Widget::run")), "{defines:?}");
-    assert!(defines.contains(&pair("shop::Cart", "shop::Cart::total")), "{defines:?}");
+    assert!(
+        defines.contains(&pair("src::Widget.cpp", "src::Widget::run")),
+        "{defines:?}"
+    );
+    assert!(
+        defines.contains(&pair("src::cart.cpp::shop", "shop::Cart::total")),
+        "{defines:?}"
+    );
+    assert!(
+        defines.contains(&pair("src::Widget", "src::Widget::run")),
+        "{defines:?}"
+    );
+    assert!(
+        defines.contains(&pair("shop::Cart", "shop::Cart::total")),
+        "{defines:?}"
+    );
 }
 
 const OUT_OF_LINE_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-out-of-line-members";
@@ -356,13 +427,22 @@ fn out_of_line_members_meet_their_class() {
         ("src::Widget::run", "src::Widget.cpp::file_helper"),
         ("shop::Cart::total", "shop::Cart::tax"),
     ] {
-        assert!(calls.contains(&pair(from, to)), "CALLS {from} -> {to} missing: {calls:?}");
+        assert!(
+            calls.contains(&pair(from, to)),
+            "CALLS {from} -> {to} missing: {calls:?}"
+        );
     }
 
     let functions = qnames_of(&merged, node_kind::FUNCTION);
-    assert!(functions.contains(&"src::cart.cpp::shop::init".to_string()), "{functions:?}");
+    assert!(
+        functions.contains(&"src::cart.cpp::shop::init".to_string()),
+        "{functions:?}"
+    );
     let methods = qnames_of(&merged, node_kind::METHOD);
-    assert!(!methods.contains(&"src::shop::init".to_string()), "{methods:?}");
+    assert!(
+        !methods.contains(&"src::shop::init".to_string()),
+        "{methods:?}"
+    );
     // No out-of-line member is left named `Q::m`.
     let nav = nav(&merged);
     for (q, name, kind) in nav.values() {
@@ -409,9 +489,16 @@ fn lambda_and_auto_receivers_bind() {
             .all_edges()
             .filter(|e| e.category == edge_category::CALLS)
             .filter(|e| q(&e.from) == "src::main.cpp::main" && q(&e.to) == to)
-            .map(|e| Evidence::of(e).unwrap_or_else(|| panic!("CALLS main -> {to} without EVIDENCE")))
+            .map(|e| {
+                Evidence::of(e).unwrap_or_else(|| panic!("CALLS main -> {to} without EVIDENCE"))
+            })
             .collect();
-        assert_eq!(found.len(), 1, "CALLS main -> {to}: {:?}", edges(&merged, edge_category::CALLS));
+        assert_eq!(
+            found.len(),
+            1,
+            "CALLS main -> {to}: {:?}",
+            edges(&merged, edge_category::CALLS)
+        );
         if let Some(rule) = rule {
             assert_eq!(found[0].emitter, "graph:cpp_scope", "{to}");
             assert_eq!(found[0].rule.as_deref(), Some(rule), "{to}");
@@ -419,7 +506,10 @@ fn lambda_and_auto_receivers_bind() {
     }
     // The lambda's own invocation `f(3)` binds nothing (f is a local).
     let calls = edges(&merged, edge_category::CALLS);
-    assert!(calls.iter().all(|(_, to)| !to.ends_with("::f")), "{calls:?}");
+    assert!(
+        calls.iter().all(|(_, to)| !to.ends_with("::f")),
+        "{calls:?}"
+    );
     for e in merged.all_edges() {
         assert!(Evidence::of(e).is_some(), "edge without EVIDENCE: {e:?}");
     }

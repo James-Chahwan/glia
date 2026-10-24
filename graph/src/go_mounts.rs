@@ -185,8 +185,7 @@ pub(crate) fn bind(g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> MountSta
         let prefixes = slot_of(&p.base, &fn_ids).and_then(|s| slots.get(&s));
         let paths: BTreeSet<String> = match (&p.base, prefixes) {
             (Mount::Const(prefix), _) => {
-                let (path, resolved) =
-                    substitute(&join_path(prefix, &p.path), &consts, &mut stats);
+                let (path, resolved) = substitute(&join_path(prefix, &p.path), &consts, &mut stats);
                 if resolved > 0 {
                     stats.mounted += 1;
                 } else {
@@ -1126,8 +1125,14 @@ func Register(r any) {
 func thing() {}
 func ping()  {}
 ";
-        let consts = parse("api/consts.go", "package api\n\nconst OtherFilePrefix = \"/other\"\n");
-        let shared = parse("paths/paths.go", "package paths\n\nconst Shared = \"/shared\"\n");
+        let consts = parse(
+            "api/consts.go",
+            "package api\n\nconst OtherFilePrefix = \"/other\"\n",
+        );
+        let shared = parse(
+            "paths/paths.go",
+            "package paths\n\nconst Shared = \"/shared\"\n",
+        );
         let mut fp = parse("api/routes.go", routes_src);
         let at = row(routes_src, "func Register");
         let other = konst(&const_placeholder("api", "OtherFilePrefix"));
@@ -1145,7 +1150,10 @@ func ping()  {}
             handlers(&g, route("GET /shared/x/ping")),
             vec![func("api::routes::ping")]
         );
-        assert_eq!(g.nav.name_by_id[&route("GET /other/thing")], "GET /other/thing");
+        assert_eq!(
+            g.nav.name_by_id[&route("GET /other/thing")],
+            "GET /other/thing"
+        );
         assert_no_provisional(&g);
         assert_eq!(
             stats,
@@ -1190,7 +1198,10 @@ func thing() {}
         let (g, stats) = build_go_with_mounts(repo(), vec![a, b, t, fp]);
 
         assert_eq!(routes(&g), vec!["GET /one", "GET /two", "GET /three"]);
-        assert_eq!(handlers(&g, route("GET /two")), vec![func("api::routes::thing")]);
+        assert_eq!(
+            handlers(&g, route("GET /two")),
+            vec![func("api::routes::thing")]
+        );
         assert_no_provisional(&g);
         assert_eq!(
             stats,
@@ -1227,7 +1238,13 @@ func deep() {}
             "package api\n\nconst P = \"/api/v1\"\n\nconst Other = \"/other/\"\n",
         );
         let mut fp = parse("api/routes.go", src);
-        mount_arg(&mut fp, "api::routes::Wire", row(src, "Mount(nil)"), "Mount", konst("/m"));
+        mount_arg(
+            &mut fp,
+            "api::routes::Wire",
+            row(src, "Mount(nil)"),
+            "Mount",
+            konst("/m"),
+        );
         mount_arg(
             &mut fp,
             "api::routes::Wire",
@@ -1236,7 +1253,15 @@ func deep() {}
             konst(&format!("/v/{}", const_placeholder("api", "Other"))),
         );
         let reg = param("api::routes::Mount", &const_placeholder("api", "P"));
-        provisional(&mut fp, "GET", &reg, "/deep", "", "deep", row(src, "func Mount"));
+        provisional(
+            &mut fp,
+            "GET",
+            &reg,
+            "/deep",
+            "",
+            "deep",
+            row(src, "func Mount"),
+        );
         let (g, stats) = build_go_with_mounts(repo(), vec![consts, fp]);
 
         let mut got = routes(&g);

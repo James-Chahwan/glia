@@ -736,7 +736,11 @@ shop/a.py:2: in price\n    return o * 2\nE   AssertionError";
 
     // A seed off the trace: place's own tests carry nothing.
     let b = tests_for(&g.merged, &["shop::a::place"], &TestsForArgs::default()).expect("answer");
-    assert!(b.tests.iter().all(|t| t.signals.is_empty()), "{:#?}", b.tests);
+    assert!(
+        b.tests.iter().all(|t| t.signals.is_empty()),
+        "{:#?}",
+        b.tests
+    );
 }
 
 /// A pts failure at its def line whose trace runs through `price`.
@@ -780,7 +784,9 @@ fn window_ranks_by_failure() {
     // newest), test_price_doubles in run 1 only.
     let place: &[(&str, &str)] = &[("test_place", "test_place_prices")];
     let doubles: &[(&str, &str)] = &[("test_price", "test_price_doubles")];
-    let (_dir, g) = build_with(&pts_files(), |root| window_snapshot(root, &[place, doubles, place]));
+    let (_dir, g) = build_with(&pts_files(), |root| {
+        window_snapshot(root, &[place, doubles, place])
+    });
     let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
     assert_eq!(
         fail_shape(&a),
@@ -808,7 +814,9 @@ fn window_ranks_by_failure() {
         ("test_place", "test_place_prices"),
         ("test_price", "test_price_doubles"),
     ];
-    let (_dir, g) = build_with(&pts_files(), |root| window_snapshot(root, &[place, both, &[]]));
+    let (_dir, g) = build_with(&pts_files(), |root| {
+        window_snapshot(root, &[place, both, &[]])
+    });
     let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
     assert_eq!(
         fail_shape(&a),
@@ -896,7 +904,11 @@ fn cochange_row_and_permille() {
         [
             (TEST_PRICE_DOUBLES.to_string(), "fact", vec![]),
             (TEST_PLACE_PRICES.to_string(), "derived", vec!["cochange"]),
-            ("tests::test_legacy".to_string(), "heuristic", vec!["cochange"]),
+            (
+                "tests::test_legacy".to_string(),
+                "heuristic",
+                vec!["cochange"]
+            ),
         ],
         "{:#?}",
         a.tests
@@ -973,7 +985,11 @@ fn cochange_only_seed_stays_untested() {
     let a = tests_for(&g.merged, &["shop::b::refund"], &TestsForArgs::default()).expect("answer");
     assert_eq!(
         signal_shape(&a),
-        [("tests::test_legacy".to_string(), "heuristic", vec!["cochange"])],
+        [(
+            "tests::test_legacy".to_string(),
+            "heuristic",
+            vec!["cochange"]
+        )],
         "{:#?}",
         a.tests
     );
@@ -1032,7 +1048,11 @@ fn failing_test_marks_its_module_row() {
     let a = tests_for(&g.merged, &[DISCOUNT], &TestsForArgs::default()).expect("answer");
     assert_eq!(
         signal_shape(&a),
-        [(TEST_SERVICE.to_string(), "heuristic", vec!["failed_last_run"])],
+        [(
+            TEST_SERVICE.to_string(),
+            "heuristic",
+            vec!["failed_last_run"]
+        )],
         "{:#?}",
         a.tests
     );

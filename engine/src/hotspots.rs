@@ -190,7 +190,13 @@ pub fn hotspots(merged: &MergedGraph, args: &HotspotArgs) -> Hotspots {
     let module_ids: HashSet<NodeId> = scan.modules.iter().map(|c| c.id).collect();
     let module_centrality = module_centrality(merged, &pagerank, &module_ids);
 
-    let (modules, ranked_modules) = rank(&loc, &scan.modules, LEVEL_MODULE, &module_centrality, args.top);
+    let (modules, ranked_modules) = rank(
+        &loc,
+        &scan.modules,
+        LEVEL_MODULE,
+        &module_centrality,
+        args.top,
+    );
     let (symbols, ranked_symbols) = rank(&loc, &scan.symbols, LEVEL_SYMBOL, &pagerank, args.top);
     eprintln!(
         "[hotspots] modules={}/{ranked_modules} symbols={}/{ranked_symbols} pagerank_iterations={iterations} head={}",
@@ -198,8 +204,14 @@ pub fn hotspots(merged: &MergedGraph, args: &HotspotArgs) -> Hotspots {
         symbols.len(),
         head.map_or_else(|| "-".to_string(), |t| t.to_string())
     );
-    let absence = (modules.is_empty() && symbols.is_empty()).then(|| no_rows(merged, args, &scan, head));
-    Hotspots { modules, symbols, history_head: head, absence }
+    let absence =
+        (modules.is_empty() && symbols.is_empty()).then(|| no_rows(merged, args, &scan, head));
+    Hotspots {
+        modules,
+        symbols,
+        history_head: head,
+        absence,
+    }
 }
 
 /// The populations of the wanted levels, in graph order, each node once.
@@ -210,28 +222,34 @@ fn scan(merged: &MergedGraph, loc: &Locator<'_>, args: &HotspotArgs, scope: Opti
     let mut taken: HashSet<NodeId> = HashSet::new();
     for g in &merged.graphs {
         for n in &g.nodes {
-            let Some(&kind) = g.nav.kind_by_id.get(&n.id) else { continue };
+            let Some(&kind) = g.nav.kind_by_id.get(&n.id) else {
+                continue;
+            };
             let candidate = if kind == node_kind::MODULE {
-                signals::module_churn(&n.cells).filter(|m| want_modules && m.commits >= args.min_churn).map(|m| {
-                    let lines = m.lines_added.saturating_add(m.lines_deleted);
-                    Candidate {
-                        id: n.id,
-                        churn: m.commits,
-                        tie: i128::from(lines),
-                        lines_changed: Some(lines),
-                        last_change: m.last,
-                    }
-                })
+                signals::module_churn(&n.cells)
+                    .filter(|m| want_modules && m.commits >= args.min_churn)
+                    .map(|m| {
+                        let lines = m.lines_added.saturating_add(m.lines_deleted);
+                        Candidate {
+                            id: n.id,
+                            churn: m.commits,
+                            tie: i128::from(lines),
+                            lines_changed: Some(lines),
+                            last_change: m.last,
+                        }
+                    })
             } else if SYMBOL_KINDS.contains(&kind) {
                 let blame = signals::symbol_blame(&n.cells);
                 out.blame_seen |= blame.is_some();
-                blame.filter(|b| want_symbols && b.span_changes >= args.min_churn as usize).map(|b| Candidate {
-                    id: n.id,
-                    churn: u32::try_from(b.span_changes).unwrap_or(u32::MAX),
-                    tie: i128::from(b.last),
-                    lines_changed: None,
-                    last_change: b.last,
-                })
+                blame
+                    .filter(|b| want_symbols && b.span_changes >= args.min_churn as usize)
+                    .map(|b| Candidate {
+                        id: n.id,
+                        churn: u32::try_from(b.span_changes).unwrap_or(u32::MAX),
+                        tie: i128::from(b.last),
+                        lines_changed: None,
+                        last_change: b.last,
+                    })
             } else {
                 None
             };
@@ -239,7 +257,11 @@ fn scan(merged: &MergedGraph, loc: &Locator<'_>, args: &HotspotArgs, scope: Opti
             if taken.contains(&c.id) {
                 continue;
             }
-            if !args.include_tests && EXCLUDED_PROVENANCE.iter().any(|p| has_provenance(&n.cells, p)) {
+            if !args.include_tests
+                && EXCLUDED_PROVENANCE
+                    .iter()
+                    .any(|p| has_provenance(&n.cells, p))
+            {
                 out.excluded += 1;
                 continue;
             }
@@ -273,8 +295,12 @@ fn has_provenance(cells: &[Cell], provenance: &str) -> bool {
 /// over the domain's centrality preset, and the power-iteration rounds.
 fn pagerank(merged: &MergedGraph) -> (HashMap<NodeId, f64>, usize) {
     let mut seen: HashSet<NodeId> = HashSet::new();
-    let ids: Vec<NodeId> =
-        merged.graphs.iter().flat_map(|g| g.nodes.iter().map(|n| n.id)).filter(|id| seen.insert(*id)).collect();
+    let ids: Vec<NodeId> = merged
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter().map(|n| n.id))
+        .filter(|id| seen.insert(*id))
+        .collect();
     let mut cfg = CODE_TABLES.activation_config(Some(CENTRALITY_PRESET));
     cfg.damping = DAMPING;
     cfg.direction = Direction::Forward;
@@ -332,9 +358,15 @@ fn rank(
     top: usize,
 ) -> (Vec<Hotspot>, usize) {
     let located: Vec<_> = population.iter().map(|c| loc.locate(c.id)).collect();
-    let pr: Vec<f64> = population.iter().map(|c| centrality.get(&c.id).copied().unwrap_or(0.0)).collect();
+    let pr: Vec<f64> = population
+        .iter()
+        .map(|c| centrality.get(&c.id).copied().unwrap_or(0.0))
+        .collect();
     let total = |a: usize, b: usize| {
-        located[a].qname.cmp(&located[b].qname).then(population[a].id.0.cmp(&population[b].id.0))
+        located[a]
+            .qname
+            .cmp(&located[b].qname)
+            .then(population[a].id.0.cmp(&population[b].id.0))
     };
     let churn_rank = competition_ranks(
         population.len(),
@@ -344,7 +376,8 @@ fn rank(
         },
         total,
     );
-    let centrality_rank = competition_ranks(population.len(), |a, b| pr[b].total_cmp(&pr[a]), total);
+    let centrality_rank =
+        competition_ranks(population.len(), |a, b| pr[b].total_cmp(&pr[a]), total);
 
     let mut order: Vec<usize> = (0..population.len()).collect();
     let key = |i: usize| {
@@ -400,7 +433,11 @@ fn competition_ranks(
 
 /// Why no row came back: no history at all, or none past the filters.
 fn no_rows(merged: &MergedGraph, args: &HotspotArgs, scan: &Scan, head: Option<i64>) -> Absence {
-    let scope = args.scope.as_deref().map(|s| format!(" scope={s}")).unwrap_or_default();
+    let scope = args
+        .scope
+        .as_deref()
+        .map(|s| format!(" scope={s}"))
+        .unwrap_or_default();
     let query = format!(
         "level={} min_churn={} include_tests={}{scope}",
         args.level, args.min_churn, args.include_tests
@@ -419,7 +456,10 @@ fn no_rows(merged: &MergedGraph, args: &HotspotArgs, scan: &Scan, head: Option<i
         } else {
             " (no blame ATTN: run `glia history sync <repo> --blame` for symbol rows)"
         };
-        missing.push(format!("no FUNCTION / METHOD / CLASS has >= {} blame span changes{hint}", args.min_churn));
+        missing.push(format!(
+            "no FUNCTION / METHOD / CLASS has >= {} blame span changes{hint}",
+            args.min_churn
+        ));
     }
     let note = format!(
         "{} in the history window ({} test / generated and {} out-of-scope nodes left out)",

@@ -85,7 +85,11 @@ impl CrossGraphResolver for DbResolver {
             eprintln!(
                 "[db-entity] buckets={} exact_paired={} folded_paired={} \
                  skipped_fanout={} prefixless={} table_cells={}",
-                s.buckets, s.exact_paired, s.folded_paired, s.skipped_fanout, s.prefixless,
+                s.buckets,
+                s.exact_paired,
+                s.folded_paired,
+                s.skipped_fanout,
+                s.prefixless,
                 s.table_cells,
             );
         }
@@ -96,8 +100,7 @@ impl CrossGraphResolver for DbResolver {
         // a closed vocabulary from the extractor's PATTERNS table, so there is
         // nothing to canonicalise and any normalisation would only collide
         // distinct providers.
-        let mut source_index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> =
-            HashMap::new();
+        let mut source_index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 let Some(kind) = g.nav.kind_by_id.get(&n.id) else {
@@ -283,14 +286,17 @@ fn singularise(word: &str) -> String {
     {
         return format!("{stem}y");
     }
-    if ["sses", "shes", "ches", "xes", "zes"].iter().any(|s| word.ends_with(s))
+    if ["sses", "shes", "ches", "xes", "zes"]
+        .iter()
+        .any(|s| word.ends_with(s))
         && let Some(stem) = word.strip_suffix("es")
     {
         return stem.to_owned();
     }
     if let Some(stem) = word.strip_suffix('s')
         && let Some(prev) = stem.chars().last()
-        && prev.is_ascii_alphabetic() && !matches!(prev, 's' | 'u' | 'i')
+        && prev.is_ascii_alphabetic()
+        && !matches!(prev, 's' | 'u' | 'i')
     {
         return stem.to_owned();
     }
@@ -311,8 +317,7 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
     let mut exact_index: HashMap<&str, Vec<EntityRef>> = HashMap::new();
     // join key -> raw qname -> nodes. BTreeMap so the sub-groups (and thus the
     // direction of every fold edge) come out in a fixed order.
-    let mut buckets: HashMap<(String, String), BTreeMap<&str, Vec<EntityRef>>> =
-        HashMap::new();
+    let mut buckets: HashMap<(String, String), BTreeMap<&str, Vec<EntityRef>>> = HashMap::new();
     let mut prefixless_keys: HashSet<(String, String)> = HashSet::new();
     for g in graphs {
         for n in &g.nodes {
@@ -408,9 +413,9 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{RepoGraph, SymbolTable};
     use glia_code_domain::{CodeNav, GRAPH_TYPE};
     use glia_core::Node;
-    use crate::types::{RepoGraph, SymbolTable};
 
     /// Build a single-node RepoGraph holding one DATA_ENTITY for `qname` in
     /// `repo_id`. Used to assemble cross-repo fixtures for DbResolver tests.
@@ -452,7 +457,13 @@ mod tests {
     fn graph_with_data_source(repo_id: RepoId, kind: NodeKindId, qname: &str) -> RepoGraph {
         let id = NodeId::from_parts(GRAPH_TYPE, repo_id, kind, qname);
         let mut nav = CodeNav::default();
-        nav.record(id, qname.rsplit(':').next().unwrap_or(qname), qname, kind, None);
+        nav.record(
+            id,
+            qname.rsplit(':').next().unwrap_or(qname),
+            qname,
+            kind,
+            None,
+        );
         RepoGraph {
             repo: repo_id,
             nodes: vec![Node {
@@ -485,7 +496,11 @@ mod tests {
             .iter()
             .filter(|e| e.category == edge_category::SHARES_DATA_SOURCE)
             .collect();
-        assert_eq!(edges.len(), 1, "expected one cross-repo SHARES_DATA_SOURCE edge");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected one cross-repo SHARES_DATA_SOURCE edge"
+        );
         assert_eq!(
             edges[0].confidence,
             Confidence::Weak,
@@ -497,8 +512,7 @@ mod tests {
     fn db_resolver_keeps_providers_separate() {
         // postgres and redis are distinct keys even across repos.
         let g_a = graph_with_data_source(RepoId(11), node_kind::CACHE, "data_source:redis");
-        let g_b =
-            graph_with_data_source(RepoId(12), node_kind::DATABASE, "data_source:postgres");
+        let g_b = graph_with_data_source(RepoId(12), node_kind::DATABASE, "data_source:postgres");
         let mut merged = MergedGraph::new(vec![g_a, g_b]);
         merged.run(&DbResolver);
         assert!(
@@ -515,9 +529,7 @@ mod tests {
         // 9 distinct repos on one provider is the all-to-all noise shape the
         // cap exists to refuse: nothing at all, not 36 edges.
         let graphs: Vec<RepoGraph> = (0..(MAX_DATA_SOURCE_FANOUT as u64 + 1))
-            .map(|i| {
-                graph_with_data_source(RepoId(100 + i), node_kind::CACHE, "data_source:redis")
-            })
+            .map(|i| graph_with_data_source(RepoId(100 + i), node_kind::CACHE, "data_source:redis"))
             .collect();
         let mut merged = MergedGraph::new(graphs);
         merged.run(&DbResolver);
@@ -544,7 +556,11 @@ mod tests {
             .iter()
             .filter(|e| e.category == edge_category::SHARES_DATA_ENTITY)
             .collect();
-        assert_eq!(edges.len(), 1, "expected one cross-repo SHARES_DATA_ENTITY edge");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected one cross-repo SHARES_DATA_ENTITY edge"
+        );
     }
 
     #[test]
@@ -606,7 +622,11 @@ mod tests {
         merged.run(&DbResolver);
 
         let edges = entity_edges(&merged);
-        assert_eq!(edges.len(), 1, "expected one folded SHARES_DATA_ENTITY edge");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected one folded SHARES_DATA_ENTITY edge"
+        );
         assert_eq!(edges[0].from, entity_id(RepoId(11), "User"));
         assert_eq!(edges[0].to, entity_id(RepoId(12), "data_entity:sql:users"));
         assert_eq!(
@@ -616,7 +636,12 @@ mod tests {
         );
         let stats = entity_pass(&merged.graphs).stats;
         assert_eq!(
-            (stats.buckets, stats.exact_paired, stats.folded_paired, stats.prefixless),
+            (
+                stats.buckets,
+                stats.exact_paired,
+                stats.folded_paired,
+                stats.prefixless
+            ),
             (1, 0, 1, 1)
         );
     }
@@ -635,7 +660,11 @@ mod tests {
         merged.run(&DbResolver);
 
         let edges = entity_edges(&merged);
-        assert_eq!(edges.len(), 1, "table cell must key the model onto app_users");
+        assert_eq!(
+            edges.len(),
+            1,
+            "table cell must key the model onto app_users"
+        );
         assert_eq!(edges[0].confidence, Confidence::Weak);
         let stats = entity_pass(&merged.graphs).stats;
         assert_eq!((stats.table_cells, stats.folded_paired), (1, 1));
@@ -672,7 +701,11 @@ mod tests {
 
         let edges = entity_edges(&merged);
         assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].confidence, Confidence::Medium, "exact pairs keep weakest(a, b)");
+        assert_eq!(
+            edges[0].confidence,
+            Confidence::Medium,
+            "exact pairs keep weakest(a, b)"
+        );
     }
 
     #[test]
@@ -684,7 +717,10 @@ mod tests {
         let g_b = graph_with_entity(RepoId(12), "data_entity:nosql:User");
         let mut merged = MergedGraph::new(vec![g_a, g_b]);
         merged.run(&DbResolver);
-        assert!(entity_edges(&merged).is_empty(), "flavor mismatch must not fold");
+        assert!(
+            entity_edges(&merged).is_empty(),
+            "flavor mismatch must not fold"
+        );
     }
 
     #[test]
@@ -722,7 +758,11 @@ mod tests {
         assert_eq!(entity_edges(&merged).len(), 78);
         let stats = entity_pass(&merged.graphs).stats;
         assert_eq!(
-            (stats.exact_paired, stats.folded_paired, stats.skipped_fanout),
+            (
+                stats.exact_paired,
+                stats.folded_paired,
+                stats.skipped_fanout
+            ),
             (78, 0, 1)
         );
     }
@@ -776,13 +816,36 @@ mod tests {
     #[test]
     fn canonical_entity_name_is_idempotent() {
         for raw in [
-            "users", "User", "public.users", "[dbo].[Users]", "UserAccount", "user_accounts",
-            "APIKey", "HTTPRequests", "categories", "boxes", "classes", "statuses", "series",
-            "ab's", "user2Accounts", "_Users", "users_", "a.b.", "\"\"", "s", "ies", "Ünits",
+            "users",
+            "User",
+            "public.users",
+            "[dbo].[Users]",
+            "UserAccount",
+            "user_accounts",
+            "APIKey",
+            "HTTPRequests",
+            "categories",
+            "boxes",
+            "classes",
+            "statuses",
+            "series",
+            "ab's",
+            "user2Accounts",
+            "_Users",
+            "users_",
+            "a.b.",
+            "\"\"",
+            "s",
+            "ies",
+            "Ünits",
             "",
         ] {
             let once = canonical_entity_name(raw);
-            assert_eq!(canonical_entity_name(&once), once, "fold of {raw:?} is not idempotent");
+            assert_eq!(
+                canonical_entity_name(&once),
+                once,
+                "fold of {raw:?} is not idempotent"
+            );
         }
     }
 
@@ -801,7 +864,10 @@ mod tests {
             glia_code_domain::data_entity::orm::DJANGO,
         );
         let k = join_key("data_entity:sql:Order", &[cell]);
-        assert_eq!((k.flavor.as_str(), k.canonical.as_str()), ("sql", "order_line"));
+        assert_eq!(
+            (k.flavor.as_str(), k.canonical.as_str()),
+            ("sql", "order_line")
+        );
         assert!(k.from_table_cell);
     }
 }

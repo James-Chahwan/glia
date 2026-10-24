@@ -63,9 +63,9 @@ impl CrossGraphResolver for CronResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{RepoGraph, SymbolTable};
     use glia_code_domain::{CodeNav, GRAPH_TYPE};
     use glia_core::Node;
-    use crate::types::{RepoGraph, SymbolTable};
 
     fn graph_with_cron(repo_id: RepoId, qname: &str) -> RepoGraph {
         let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::CRON_JOB, qname);

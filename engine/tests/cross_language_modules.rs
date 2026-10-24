@@ -45,7 +45,11 @@ fn fixture_copy() -> tempfile::TempDir {
 }
 
 fn repo_of(tmp: &tempfile::TempDir) -> String {
-    tmp.path().join("repo").to_str().expect("utf-8 tempdir").to_string()
+    tmp.path()
+        .join("repo")
+        .to_str()
+        .expect("utf-8 tempdir")
+        .to_string()
 }
 
 /// id -> qname over every graph of the build.
@@ -124,8 +128,14 @@ fn same_stem_files_of_two_build_groups_keep_separate_identities() {
 
     // (3) The bare-path imports bind through each graph's alias.
     let imports = edges(&merged, edge_category::IMPORTS);
-    assert!(imports.contains(&pair("api::main", "api::user.py")), "{imports:?}");
-    assert!(imports.contains(&pair("api::index", "api::user.ts")), "{imports:?}");
+    assert!(
+        imports.contains(&pair("api::main", "api::user.py")),
+        "{imports:?}"
+    );
+    assert!(
+        imports.contains(&pair("api::index", "api::user.ts")),
+        "{imports:?}"
+    );
 
     // (4) The Python test pairs the Python module once, never the TS one.
     let tests: Vec<(String, String)> = edges(&merged, edge_category::TESTS)
@@ -185,11 +195,23 @@ fn a_sibling_arriving_requalifies_cached_parses() {
     let tmp = fixture_copy();
     let repo = repo_of(&tmp);
     let clean = generate_one(&repo).expect("generate_one").merged;
-    let cold = generate_one_incremental(&repo).expect("cold incremental").merged;
-    let warm = generate_one_incremental(&repo).expect("warm incremental").merged;
+    let cold = generate_one_incremental(&repo)
+        .expect("cold incremental")
+        .merged;
+    let warm = generate_one_incremental(&repo)
+        .expect("warm incremental")
+        .merged;
     let clean_bytes = store_bytes(&clean, &tmp.path().join("clean"));
-    assert_eq!(store_bytes(&cold, &tmp.path().join("cold")), clean_bytes, "cold vs clean");
-    assert_eq!(store_bytes(&warm, &tmp.path().join("warm")), clean_bytes, "warm vs clean");
+    assert_eq!(
+        store_bytes(&cold, &tmp.path().join("cold")),
+        clean_bytes,
+        "cold vs clean"
+    );
+    assert_eq!(
+        store_bytes(&warm, &tmp.path().join("warm")),
+        clean_bytes,
+        "warm vs clean"
+    );
 
     // `api/user.rb`: the key already had two groups, so .py and .ts keep
     // their names; a Ruby file joins them as `api::user.rb`.
@@ -198,7 +220,9 @@ fn a_sibling_arriving_requalifies_cached_parses() {
         "def validate(x)\n  x\nend\n",
     )
     .expect("write user.rb");
-    let warm2 = generate_one_incremental(&repo).expect("warm incremental + rb").merged;
+    let warm2 = generate_one_incremental(&repo)
+        .expect("warm incremental + rb")
+        .merged;
     let clean2 = generate_one(&repo).expect("clean + rb").merged;
     assert!(module_qnames(&clean2).contains(&"api::user.rb".to_string()));
     assert_eq!(
@@ -213,11 +237,16 @@ fn a_sibling_arriving_requalifies_cached_parses() {
     std::fs::remove_file(Path::new(&repo).join("api/user.ts")).expect("rm user.ts");
     std::fs::remove_file(Path::new(&repo).join("api/index.ts")).expect("rm index.ts");
     std::fs::remove_file(Path::new(&repo).join("api/user.rb")).expect("rm user.rb");
-    let warm3 = generate_one_incremental(&repo).expect("warm incremental, py alone").merged;
+    let warm3 = generate_one_incremental(&repo)
+        .expect("warm incremental, py alone")
+        .merged;
     let clean3 = generate_one(&repo).expect("clean, py alone").merged;
     let modules = module_qnames(&clean3);
     assert!(modules.contains(&"api::user".to_string()), "{modules:?}");
-    assert!(!modules.contains(&"api::user.py".to_string()), "{modules:?}");
+    assert!(
+        !modules.contains(&"api::user.py".to_string()),
+        "{modules:?}"
+    );
     assert_eq!(
         store_bytes(&warm3, &tmp.path().join("warm3")),
         store_bytes(&clean3, &tmp.path().join("clean3")),
@@ -230,7 +259,9 @@ fn a_sibling_arriving_requalifies_cached_parses() {
     for f in ["api/user.ts", "api/index.ts"] {
         std::fs::copy(src.join(f), Path::new(&repo).join(f)).expect("restore ts file");
     }
-    let warm4 = generate_one_incremental(&repo).expect("warm incremental, ts back").merged;
+    let warm4 = generate_one_incremental(&repo)
+        .expect("warm incremental, ts back")
+        .merged;
     let clean4 = generate_one(&repo).expect("clean, ts back").merged;
     assert!(module_qnames(&clean4).contains(&"api::user.py".to_string()));
     assert_eq!(
@@ -238,7 +269,10 @@ fn a_sibling_arriving_requalifies_cached_parses() {
         store_bytes(&clean4, &tmp.path().join("clean4")),
         "incremental vs clean after the TypeScript siblings returned"
     );
-    assert_eq!(store_bytes(&clean4, &tmp.path().join("clean4b")), clean_bytes);
+    assert_eq!(
+        store_bytes(&clean4, &tmp.path().join("clean4b")),
+        clean_bytes
+    );
 }
 
 #[test]
@@ -252,9 +286,18 @@ fn the_requalified_file_counts_as_reparsed() {
     std::fs::remove_file(Path::new(&repo).join("api/user.ts")).expect("rm user.ts");
     glia_engine::generate_one_with_cache(&repo, &mut cache).expect("warm");
     let diff = cache.last_diff().expect("a recorded diff");
-    assert!(diff.reparsed.contains(&"api/user.py".to_string()), "{diff:?}");
-    assert!(!diff.reused.contains(&"api/user.py".to_string()), "{diff:?}");
-    assert!(diff.evicted.contains(&"api/user.ts".to_string()), "{diff:?}");
+    assert!(
+        diff.reparsed.contains(&"api/user.py".to_string()),
+        "{diff:?}"
+    );
+    assert!(
+        !diff.reused.contains(&"api/user.py".to_string()),
+        "{diff:?}"
+    );
+    assert!(
+        diff.evicted.contains(&"api/user.ts".to_string()),
+        "{diff:?}"
+    );
 }
 
 /// LB.9b (the LC.3a / LC.3b handoff): a non-code MODULE carries no POSITION,
@@ -273,8 +316,11 @@ fn synthetic_module_edges_are_placed_at_their_file() {
         r#"{"name": "web", "dependencies": {"react": "18.0.0", "lodash": "4.17.21"}}"#,
     )
     .expect("write package.json");
-    std::fs::write(repo.join("web/app.ts"), "export function app() { return 1; }\n")
-        .expect("write app.ts");
+    std::fs::write(
+        repo.join("web/app.ts"),
+        "export function app() { return 1; }\n",
+    )
+    .expect("write app.ts");
     let merged = generate_one(repo.to_str().expect("utf-8 tempdir"))
         .expect("generate_one")
         .merged;
@@ -301,5 +347,8 @@ fn synthetic_module_edges_are_placed_at_their_file() {
         .map(|e| Evidence::of(e).expect("evidence"))
         .collect();
     assert!(!defines.is_empty());
-    assert!(defines.iter().all(|ev| ev.basis == Basis::ToNode), "{defines:?}");
+    assert!(
+        defines.iter().all(|ev| ev.basis == Basis::ToNode),
+        "{defines:?}"
+    );
 }

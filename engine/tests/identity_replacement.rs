@@ -61,7 +61,11 @@ type Row = (String, String, u32, u32, Option<String>);
 /// Every edge of `category` (repo and cross edges), sorted.
 fn edges_of(r: &GenerateResult, category: EdgeCategoryId) -> Vec<Row> {
     let nav = nav(r);
-    let at = |id: NodeId| nav.get(&id).cloned().unwrap_or((NodeKindId(u32::MAX), String::new()));
+    let at = |id: NodeId| {
+        nav.get(&id)
+            .cloned()
+            .unwrap_or((NodeKindId(u32::MAX), String::new()))
+    };
     let mut out: Vec<_> = r
         .merged
         .all_edges()
@@ -98,14 +102,25 @@ fn no_shares_dependency() {
 
 #[test]
 fn no_message_shares_schema() {
-    let r = build("identity-proto-diverged", &["orders", "billing", "shipping"]);
+    let r = build(
+        "identity-proto-diverged",
+        &["orders", "billing", "shipping"],
+    );
     let message = node_kind::MESSAGE_TYPE.0;
-    let messages = |rows: &[Row]| rows.iter().filter(|r| r.2 == message && r.3 == message).count();
+    let messages = |rows: &[Row]| {
+        rows.iter()
+            .filter(|r| r.2 == message && r.3 == message)
+            .count()
+    };
     let shares = edges_of(&r, edge_category::SHARES_SCHEMA);
     assert_eq!(messages(&shares), 0, "{shares:?}");
     let same = edges_of(&r, edge_category::SAME_AS);
     assert_eq!(messages(&same), 2, "a star of three copies: {same:?}");
-    assert_eq!(with_rule(&same, same_as::RULE_MESSAGE_FQNAME), 2, "{same:?}");
+    assert_eq!(
+        with_rule(&same, same_as::RULE_MESSAGE_FQNAME),
+        2,
+        "{same:?}"
+    );
 
     // The two-copy message fixtures whose key.json forbids the pair: one star
     // edge per shared message (xschema-jsonschema-shared shares OrderCreated
@@ -120,8 +135,15 @@ fn no_message_shares_schema() {
         assert_eq!(messages(&shares), 0, "{name}: {shares:?}");
         let same = edges_of(&r, edge_category::SAME_AS);
         assert_eq!(messages(&same), shared, "{name}: {same:?}");
-        assert_eq!(with_rule(&same, same_as::RULE_MESSAGE_FQNAME), shared, "{name}: {same:?}");
-        assert!(same.iter().all(|r| r.0 == r.1), "{name}: equal qnames: {same:?}");
+        assert_eq!(
+            with_rule(&same, same_as::RULE_MESSAGE_FQNAME),
+            shared,
+            "{name}: {same:?}"
+        );
+        assert!(
+            same.iter().all(|r| r.0 == r.1),
+            "{name}: equal qnames: {same:?}"
+        );
     }
 
     // SharedSchemaResolver's DTO pair is sharing, not identity: it stays.
@@ -145,7 +167,10 @@ fn no_message_shares_schema() {
 /// clique did (three copies, three rows), not only the two star edges.
 #[test]
 fn schema_copy_pairs_the_whole_class() {
-    let r = build("identity-proto-diverged", &["orders", "billing", "shipping"]);
+    let r = build(
+        "identity-proto-diverged",
+        &["orders", "billing", "shipping"],
+    );
     let rows = contract_fields(&r.merged);
     let copies: Vec<_> = rows.iter().filter(|r| r.pairing == "schema_copy").collect();
     assert_eq!(copies.len(), 3, "{rows:#?}");
@@ -158,7 +183,10 @@ fn schema_copy_pairs_the_whole_class() {
 #[test]
 fn live_set_unchanged() {
     for (name, ds) in [
-        ("identity-proto-diverged", &["orders", "billing", "shipping"][..]),
+        (
+            "identity-proto-diverged",
+            &["orders", "billing", "shipping"][..],
+        ),
         ("proto-field-drift", &["producer", "consumer"][..]),
     ] {
         let r = build(name, ds);
@@ -197,10 +225,19 @@ fn child_build_for_stderr() {
 #[test]
 fn marker() {
     let out = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(
             CHILD_ENV,
-            dirs("identity-proto-diverged", &["orders", "billing", "shipping"]).join("|"),
+            dirs(
+                "identity-proto-diverged",
+                &["orders", "billing", "shipping"],
+            )
+            .join("|"),
         )
         .output()
         .expect("re-run the test binary");

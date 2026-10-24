@@ -126,7 +126,10 @@ impl Reader<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, String> {
-        let digits = self.b.get(self.i..self.i + 4).ok_or_else(|| self.err("short \\u"))?;
+        let digits = self
+            .b
+            .get(self.i..self.i + 4)
+            .ok_or_else(|| self.err("short \\u"))?;
         let text = std::str::from_utf8(digits).map_err(|_| self.err("bad \\u"))?;
         self.i += 4;
         u32::from_str_radix(text, 16).map_err(|_| self.err("bad \\u"))
@@ -136,13 +139,19 @@ impl Reader<'_> {
         self.eat(b'"')?;
         let mut out: Vec<u8> = Vec::new();
         loop {
-            let run = self.b[self.i..].iter().position(|c| *c == b'"' || *c == b'\\' || *c < 0x20);
+            let run = self.b[self.i..]
+                .iter()
+                .position(|c| *c == b'"' || *c == b'\\' || *c < 0x20);
             let end = self.i + run.ok_or_else(|| self.err("unterminated string"))?;
             out.extend_from_slice(&self.b[self.i..end]);
             self.i = end + 1;
             let esc = match self.b[end] {
                 b'"' => break,
-                b'\\' => self.b.get(self.i).copied().ok_or_else(|| self.err("bad escape"))?,
+                b'\\' => self
+                    .b
+                    .get(self.i)
+                    .copied()
+                    .ok_or_else(|| self.err("bad escape"))?,
                 _ => return Err(self.err("control byte in string")),
             };
             self.i += 1;
@@ -263,7 +272,10 @@ impl Reader<'_> {
 fn read_dump(path: &str) -> Result<Dump, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let mut r = Reader { b: &bytes, i: 0 };
-    let mut dump = Dump { nodes: Vec::new(), edges: Vec::new() };
+    let mut dump = Dump {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+    };
     r.eat(b'{')?;
     loop {
         match r.string()?.as_str() {
@@ -296,7 +308,11 @@ fn read_dump(path: &str) -> Result<Dump, String> {
             "edges" => {
                 r.eat(b':')?;
                 r.rows(&mut |r| {
-                    let mut e = DumpEdge { from: 0, to: 0, category: String::new() };
+                    let mut e = DumpEdge {
+                        from: 0,
+                        to: 0,
+                        category: String::new(),
+                    };
                     let mut seen = 0;
                     r.object(&mut |k, v| match (k, v) {
                         ("from", J::UInt(x)) => (e.from, seen) = (x, seen + 1),
@@ -397,7 +413,9 @@ struct InScope {
 }
 
 fn in_scope(qname: &str, scope: &str) -> bool {
-    qname.strip_prefix(scope).is_some_and(|rest| rest.starts_with("::"))
+    qname
+        .strip_prefix(scope)
+        .is_some_and(|rest| rest.starts_with("::"))
 }
 
 impl Builtin for InScope {
@@ -415,14 +433,19 @@ impl Builtin for InScope {
         let [node, Some(scope)] = args else {
             return Err("takes (node, bound scope)".to_string());
         };
-        let ValueRef::Str(scope) = *scope else { return Ok(()) };
+        let ValueRef::Str(scope) = *scope else {
+            return Ok(());
+        };
         let row = |id: NodeId| BuiltinRow {
             values: vec![Value::Node(id), Value::Str(scope.to_string())],
             tier: Tier::Fact,
         };
         match node {
             Some(ValueRef::Node(id)) => {
-                let q = self.position.get(id).map(|p| self.qnames[*p as usize].as_str());
+                let q = self
+                    .position
+                    .get(id)
+                    .map(|p| self.qnames[*p as usize].as_str());
                 if q.is_some_and(|q| in_scope(q, scope)) {
                     out.push(row(*id));
                 }
@@ -430,15 +453,18 @@ impl Builtin for InScope {
             Some(_) => {}
             None => {
                 let members = Rc::clone(
-                    self.memo.borrow_mut().entry(scope.to_string()).or_insert_with(|| {
-                        let ids = self.order.iter().copied();
-                        Rc::new(
-                            ids.filter(|id| {
-                                in_scope(&self.qnames[self.position[id] as usize], scope)
-                            })
-                            .collect(),
-                        )
-                    }),
+                    self.memo
+                        .borrow_mut()
+                        .entry(scope.to_string())
+                        .or_insert_with(|| {
+                            let ids = self.order.iter().copied();
+                            Rc::new(
+                                ids.filter(|id| {
+                                    in_scope(&self.qnames[self.position[id] as usize], scope)
+                                })
+                                .collect(),
+                            )
+                        }),
                 );
                 out.extend(members.iter().map(|id| row(*id)));
             }
@@ -457,13 +483,27 @@ struct Graph {
 
 fn register(mut src: MemSource, x1: usize, qnames: &Rc<Vec<String>>) -> Graph {
     let order = src.node_ids();
-    let position = order.iter().enumerate().map(|(i, id)| (*id, (i % x1) as u32)).collect();
+    let position = order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, (i % x1) as u32))
+        .collect();
     let memo = Rc::new(RefCell::new(HashMap::new()));
     let edges = src.edges().count();
     let nodes = order.len();
-    let b = InScope { position, order, qnames: Rc::clone(qnames), memo: Rc::clone(&memo) };
+    let b = InScope {
+        position,
+        order,
+        qnames: Rc::clone(qnames),
+        memo: Rc::clone(&memo),
+    };
     src.builtin(Box::new(b));
-    Graph { src, nodes, edges, memo }
+    Graph {
+        src,
+        nodes,
+        edges,
+        memo,
+    }
 }
 
 /// The dump as a MemSource (module doc), its builtin registered, and the x1 qnames.
@@ -486,8 +526,16 @@ fn glia_x1(dump: &Dump) -> (Graph, Rc<Vec<String>>) {
     let carry: Vec<EdgeCategoryId> = CARRY.iter().filter_map(|c| cat_id(c)).collect();
     let tables = DomainTables {
         graph_type: "glia-analyze-dump",
-        registries: Registries { node_kinds: kinds, edge_categories: cats, cell_types: &[] },
-        entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+        registries: Registries {
+            node_kinds: kinds,
+            edge_categories: cats,
+            cell_types: &[],
+        },
+        entry: EntryRule {
+            kinds: &[],
+            roles: &[],
+            named: &[],
+        },
         carry_edges: Box::leak(carry.into_boxed_slice()),
         effect_sinks: &[],
         activation_weights: &[],
@@ -496,7 +544,10 @@ fn glia_x1(dump: &Dump) -> (Graph, Rc<Vec<String>>) {
         identity_rules: &[],
     };
     let mut src = MemSource::new(tables);
-    src.attr(AttrDecl { name: "name", ty: ColType::Str });
+    src.attr(AttrDecl {
+        name: "name",
+        ty: ColType::Str,
+    });
     let mut seen: HashSet<u64> = HashSet::new();
     let mut qnames = Vec::new();
     for n in dump.nodes.iter().filter(|n| seen.insert(n.id)) {
@@ -517,9 +568,16 @@ fn glia_x1(dump: &Dump) -> (Graph, Rc<Vec<String>>) {
         src.edge(NodeId(e.from), NodeId(e.to), cat, conf, tier);
     }
     let qnames = Rc::new(qnames);
-    assert!(qnames.len() >= 20_000, "{} distinct node ids: not a dump of glia", qnames.len());
+    assert!(
+        qnames.len() >= 20_000,
+        "{} distinct node ids: not a dump of glia",
+        qnames.len()
+    );
     for s in SCOPES {
-        assert!(qnames.iter().any(|q| in_scope(q, s)), "scope `{s}` holds no node");
+        assert!(
+            qnames.iter().any(|q| in_scope(q, s)),
+            "scope `{s}` holds no node"
+        );
     }
     let n = qnames.len();
     (register(src, n, &qnames), qnames)
@@ -605,7 +663,9 @@ fn options(outputs: &[&str]) -> Options {
 /// A `/proc/self/status` field in kB.
 fn vm(field: &str) -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
-    let line = status.lines().find_map(|l| l.strip_prefix(field)?.strip_prefix(':'));
+    let line = status
+        .lines()
+        .find_map(|l| l.strip_prefix(field)?.strip_prefix(':'));
     let kb = line.and_then(|l| l.split_whitespace().next()?.parse().ok());
     kb.unwrap_or_else(|| panic!("no {field} in /proc/self/status"))
 }
@@ -640,12 +700,18 @@ fn reset_hwm() -> Baseline {
     std::fs::write("/proc/self/clear_refs", "5").expect("/proc/self/clear_refs");
     let rss = vm("VmRSS");
     let hwm = vm("VmHWM");
-    assert!(hwm <= rss + 4_096, "clear_refs did not reset VmHWM ({hwm} kB, VmRSS {rss} kB)");
+    assert!(
+        hwm <= rss + 4_096,
+        "clear_refs did not reset VmHWM ({hwm} kB, VmRSS {rss} kB)"
+    );
     Baseline { rss, build_hwm }
 }
 
 fn rows(ev: &Evaluation<'_, MemSource>, outputs: &[&str]) -> usize {
-    outputs.iter().map(|p| ev.rows(p).unwrap_or_else(|e| panic!("{e}")).len()).sum()
+    outputs
+        .iter()
+        .map(|p| ev.rows(p).unwrap_or_else(|e| panic!("{e}")).len())
+        .sum()
 }
 
 /// Print the `[rules-bench]` line and return the evaluator's increment: VmHWM since
@@ -742,6 +808,9 @@ fn cost_blowup_x10() {
         }
         other => panic!("the unseeded carry closure at x10 must stop at the budget: {other:?}"),
     }
-    assert!(inc < 524_288, "blowup over glia x10: evaluator peak {inc} kB, gate 524,288 kB");
+    assert!(
+        inc < 524_288,
+        "blowup over glia x10: evaluator peak {inc} kB, gate 524,288 kB"
+    );
     drop((g10, g1, dump));
 }

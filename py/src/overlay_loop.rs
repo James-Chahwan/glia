@@ -86,11 +86,16 @@ fn propose_of(
 /// file=-` marker, then the engine's try. `Err` when there is no path (before
 /// any marker), the candidate is refused, it does not merge into the file, or
 /// a build fails.
-fn try_of(repo_paths: &[String], candidate: &str, leave_one_out: bool) -> Result<TryReport, String> {
+fn try_of(
+    repo_paths: &[String],
+    candidate: &str,
+    leave_one_out: bool,
+) -> Result<TryReport, String> {
     if repo_paths.is_empty() {
         return Err("overlay try: no repo paths".to_string());
     }
-    report_candidate(None, candidate).map_err(|e| format!("overlay try: candidate refused: {e}"))?;
+    report_candidate(None, candidate)
+        .map_err(|e| format!("overlay try: candidate refused: {e}"))?;
     let mut opts = TryOptions::default();
     opts.leave_one_out = leave_one_out;
     opts.surface = SURFACE;
@@ -359,7 +364,10 @@ mod tests {
     /// [`cand`] with the wrapper's `flavor` misspelt: refused by the loader.
     fn bad() -> String {
         let bad = cand().replace("flavor = \"nosql\"", "flavour = \"nosql\"");
-        assert!(bad.contains("flavour"), "the fixture wrapper's flavor moved");
+        assert!(
+            bad.contains("flavour"),
+            "the fixture wrapper's flavor moved"
+        );
         bad
     }
 
@@ -386,7 +394,10 @@ mod tests {
     /// The signature literals are the engine's defaults.
     #[test]
     fn defaults_match_the_engine() {
-        assert_eq!(DEFAULT_TOP_K, 20, "update `top_k=20` in overlay_propose's signature");
+        assert_eq!(
+            DEFAULT_TOP_K, 20,
+            "update `top_k=20` in overlay_propose's signature"
+        );
         assert_eq!(
             DEFAULT_SNIPPET_LINES, 3,
             "update `snippet_lines=3` in overlay_propose's signature"
@@ -467,7 +478,11 @@ mod tests {
             .iter()
             .map(|s| (s.stanza.as_str(), s.verdict))
             .collect();
-        assert_eq!(verdicts, [("wrapper#1", "keep"), ("edge#1", "drop")], "{t:?}");
+        assert_eq!(
+            verdicts,
+            [("wrapper#1", "keep"), ("edge#1", "drop")],
+            "{t:?}"
+        );
         assert_eq!(t.builds, 4, "{t:?}");
         assert_eq!(t.verdict, "keep", "{t:?}");
         assert!(t.closed.is_empty(), "{t:?}");
@@ -502,7 +517,11 @@ mod tests {
         assert!(!overlay.exists(), "a dry run writes nothing");
         let a = accept_of(&repo, Some(&cand), Vec::new(), Vec::new(), false).expect("accept");
         let (text, v) = to_json!(&a);
-        assert_eq!(v["added"], serde_json::json!({"edge": 1, "wrapper": 1}), "{text}");
+        assert_eq!(
+            v["added"],
+            serde_json::json!({"edge": 1, "wrapper": 1}),
+            "{text}"
+        );
         assert!(a.written, "{text}");
         assert_in_order(
             &text,

@@ -107,7 +107,10 @@ fn fixture_receiver_calls_bind_the_nearest_superclass() {
     let (_tmp, m) = build(&FIXTURE);
     let nodes = by_qname(&m);
     let method = |q: &str| node(&nodes, q, node_kind::METHOD);
-    let (save, load) = (method(&format!("{BASE}::save")), method(&format!("{BASE}::load")));
+    let (save, load) = (
+        method(&format!("{BASE}::save")),
+        method(&format!("{BASE}::load")),
+    );
     let on_requested = method(&format!("{USERS}::onRequested"));
     let sync = method(&format!("{USERS}::sync"));
     let rebuild = method(&format!("{USERS}::rebuild"));
@@ -129,7 +132,10 @@ fn fixture_receiver_calls_bind_the_nearest_superclass() {
     // `repo.load(id)` in `stale` reads the module-level `repo`: a bare name
     // outside the constructor is not the field `repo: UserStore`.
     let stale = method(&format!("{USERS}::stale"));
-    assert!(calls_evidence(&m, stale, load).is_empty(), "A6.2a's gate keeps `repo` unbound");
+    assert!(
+        calls_evidence(&m, stale, load).is_empty(),
+        "A6.2a's gate keeps `repo` unbound"
+    );
 }
 
 #[test]

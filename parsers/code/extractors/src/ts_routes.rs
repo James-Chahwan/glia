@@ -59,7 +59,9 @@ pub struct RouteNodes {
     pub any: usize,
 }
 
-const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head", "all"];
+const HTTP_METHODS: &[&str] = &[
+    "get", "post", "put", "delete", "patch", "options", "head", "all",
+];
 
 /// The method token of a method-agnostic ROUTE — the one every server parser
 /// writes and the HTTP resolver's any tier keys on.
@@ -110,7 +112,9 @@ pub fn extract_ts_backend_routes(
             else {
                 continue;
             };
-            let Some(end) = rest.find(quote) else { continue };
+            let Some(end) = rest.find(quote) else {
+                continue;
+            };
             let route = &rest[..end];
             if !route.starts_with('/') || route.len() > 256 {
                 continue;
@@ -137,7 +141,9 @@ pub fn extract_ts_backend_routes(
             if let Some(key) = add_method(&mut by_route, route, method, handler.unwrap_or(""), row)
                 && let Some(h) = handler
             {
-                handled_by.entry((key.0, key.1, h.to_string())).or_insert(row);
+                handled_by
+                    .entry((key.0, key.1, h.to_string()))
+                    .or_insert(row);
             }
         }
     }
@@ -191,7 +197,10 @@ pub fn extract_ts_backend_routes(
         let mut rows = entry.rows;
         rows.sort_unstable();
         rows.dedup();
-        let mut cells: Vec<Cell> = rows.iter().map(|&r| anchor::position_cell(path, r)).collect();
+        let mut cells: Vec<Cell> = rows
+            .iter()
+            .map(|&r| anchor::position_cell(path, r))
+            .collect();
         positioned += cells.len();
         let line = rows.first().map_or(0, |r| u64::from(*r) + 1);
         cells.push(Cell {
@@ -233,7 +242,14 @@ pub fn extract_ts_backend_routes(
         })
         .collect();
 
-    RouteNodes { nodes, nav, refs, skipped_client_calls, positioned, any }
+    RouteNodes {
+        nodes,
+        nav,
+        refs,
+        skipped_client_calls,
+        positioned,
+        any,
+    }
 }
 
 /// The upper-case ROUTE method token for a lower- or upper-case verb:
@@ -368,11 +384,14 @@ fn has_inline_handler(after_literal: &str) -> bool {
 
 fn is_inline_function(arg: &str) -> bool {
     let keyword = |s: &str, kw: &str| -> bool {
-        s.strip_prefix(kw).is_some_and(|r| {
-            r.starts_with(|c: char| c.is_whitespace() || c == '(' || c == '*')
-        })
+        s.strip_prefix(kw)
+            .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace() || c == '(' || c == '*'))
     };
-    let a = if keyword(arg, "async") { arg["async".len()..].trim_start() } else { arg };
+    let a = if keyword(arg, "async") {
+        arg["async".len()..].trim_start()
+    } else {
+        arg
+    };
     if keyword(a, "function") {
         return true;
     }
@@ -393,7 +412,10 @@ fn is_handler_reference(s: &str) -> bool {
         cs.next()
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
             && cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-            && !matches!(p, "this" | "null" | "undefined" | "true" | "false" | "function" | "async" | "new")
+            && !matches!(
+                p,
+                "this" | "null" | "undefined" | "true" | "false" | "function" | "async" | "new"
+            )
     }
     match s.split_once('.') {
         Some((base, name)) => ident(base) && ident(name),
@@ -482,7 +504,9 @@ fn sveltekit_route_from_path(path: &str) -> Option<String> {
     let file = ["+server.ts", "+server.js"]
         .iter()
         .find(|ext| norm.ends_with(*ext))?;
-    let idx = norm.find("src/routes/").map(|i| i + "src/routes/".len())
+    let idx = norm
+        .find("src/routes/")
+        .map(|i| i + "src/routes/".len())
         .or_else(|| norm.find("routes/").map(|i| i + "routes/".len()))?;
     let tail = &norm[idx..norm.len() - file.len()];
     let tail = tail.trim_end_matches('/');
@@ -743,7 +767,9 @@ fn obj_method_field(obj: &str) -> Vec<&'static str> {
             return list
                 .split(',')
                 .filter_map(|tok| {
-                    let s = tok.trim().trim_matches(|c| c == '\'' || c == '"' || c == '`');
+                    let s = tok
+                        .trim()
+                        .trim_matches(|c| c == '\'' || c == '"' || c == '`');
                     canonical_http_method(s)
                 })
                 .collect();
@@ -828,7 +854,10 @@ fn bun_serve_routes(source: &str) -> Vec<(&'static str, String, u32)> {
         };
         let routes_obj = &after[1..1 + routes_close];
         let routes_start = after_start + 1;
-        debug_assert_eq!(source.get(routes_start..routes_start + routes_obj.len()), Some(routes_obj));
+        debug_assert_eq!(
+            source.get(routes_start..routes_start + routes_obj.len()),
+            Some(routes_obj)
+        );
         for (method, path, at) in parse_bun_routes_object(routes_obj) {
             out.push((method, path, anchor::line_of(source, routes_start + at)));
         }
@@ -1065,10 +1094,19 @@ mod tests {
         assert_eq!(qnames(&r), vec!["GET /users/:id"]);
         // LB.11b: the name is the qname, like every other server parser.
         let id = r.nodes[0].id;
-        assert_eq!(r.nav.name_by_id.get(&id).map(String::as_str), Some("GET /users/:id"));
+        assert_eq!(
+            r.nav.name_by_id.get(&id).map(String::as_str),
+            Some("GET /users/:id")
+        );
         let c = cells(&r.nodes[0]);
         assert_eq!(c.len(), 2, "{c:?}");
-        assert_eq!(c[0], (cell_type::POSITION, r#"{"file":"server.ts","start_line":0,"end_line":0}"#.to_string()));
+        assert_eq!(
+            c[0],
+            (
+                cell_type::POSITION,
+                r#"{"file":"server.ts","start_line":0,"end_line":0}"#.to_string()
+            )
+        );
         assert_eq!(c[1].0, cell_type::ROUTE_METHOD);
         assert_eq!(
             c[1].1,
@@ -1113,7 +1151,10 @@ mod tests {
         for (q, row) in [("GET /api/widgets", 0), ("POST /api/widgets", 1)] {
             let n = node(&r, q);
             assert_eq!(position_rows(n), vec![row], "{q}");
-            let methods = cells(n).into_iter().filter(|(k, _)| *k == cell_type::ROUTE_METHOD).count();
+            let methods = cells(n)
+                .into_iter()
+                .filter(|(k, _)| *k == cell_type::ROUTE_METHOD)
+                .count();
             assert_eq!(methods, 1, "{q}");
         }
         assert_eq!((r.positioned, r.any), (2, 0));
@@ -1150,7 +1191,13 @@ export class UsersController {
         let r = extract_ts_backend_routes(src, "src/users.controller.ts", module_id(), repo());
         assert_eq!(
             qnames(&r),
-            vec!["DELETE /users/:id", "GET /users", "GET /users/:id", "POST /users", "PUT /users/:id"]
+            vec![
+                "DELETE /users/:id",
+                "GET /users",
+                "GET /users/:id",
+                "POST /users",
+                "PUT /users/:id"
+            ]
         );
         // Each located at its decorator's 0-based row.
         for (q, row) in [
@@ -1176,7 +1223,12 @@ export class UsersController {
     #[test]
     fn detects_sveltekit_plus_server() {
         let src = "export async function GET() {}\nexport async function POST() {}";
-        let r = extract_ts_backend_routes(src, "src/routes/api/widgets/+server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(
+            src,
+            "src/routes/api/widgets/+server.ts",
+            module_id(),
+            repo(),
+        );
         assert_eq!(qnames(&r), vec!["GET /api/widgets", "POST /api/widgets"]);
         assert_eq!(position_rows(node(&r, "POST /api/widgets")), vec![1]);
     }
@@ -1184,7 +1236,12 @@ export class UsersController {
     #[test]
     fn sveltekit_dynamic_segment() {
         let src = "export function GET() {}";
-        let r = extract_ts_backend_routes(src, "src/routes/api/users/[id]/+server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(
+            src,
+            "src/routes/api/users/[id]/+server.ts",
+            module_id(),
+            repo(),
+        );
         assert_eq!(qnames(&r), vec!["GET /api/users/:id"]);
     }
 
@@ -1195,18 +1252,37 @@ export class UsersController {
     #[test]
     fn add_method_keys_on_the_canonical_path_and_method() {
         let mut m: RouteMap = BTreeMap::new();
-        assert_eq!(add_method(&mut m, "users", "get", "listUsers", 0), Some(("/users".into(), "GET")));
-        assert_eq!(add_method(&mut m, "/users", "get", "", 3), Some(("/users".into(), "GET")));
-        assert_eq!(add_method(&mut m, "/users", "post", "", 1), Some(("/users".into(), "POST")));
-        assert_eq!(add_method(&mut m, "/users", "all", "", 2), Some(("/users".into(), "ANY")));
+        assert_eq!(
+            add_method(&mut m, "users", "get", "listUsers", 0),
+            Some(("/users".into(), "GET"))
+        );
+        assert_eq!(
+            add_method(&mut m, "/users", "get", "", 3),
+            Some(("/users".into(), "GET"))
+        );
+        assert_eq!(
+            add_method(&mut m, "/users", "post", "", 1),
+            Some(("/users".into(), "POST"))
+        );
+        assert_eq!(
+            add_method(&mut m, "/users", "all", "", 2),
+            Some(("/users".into(), "ANY"))
+        );
         assert_eq!(add_method(&mut m, "/${x}", "get", "", 2), None);
         assert_eq!(add_method(&mut m, "/users", "trace", "", 2), None);
         assert_eq!(
             m.keys().cloned().collect::<Vec<_>>(),
-            vec![("/users".to_string(), "ANY"), ("/users".to_string(), "GET"), ("/users".to_string(), "POST")]
+            vec![
+                ("/users".to_string(), "ANY"),
+                ("/users".to_string(), "GET"),
+                ("/users".to_string(), "POST")
+            ]
         );
         let get = &m[&("/users".to_string(), "GET")];
-        assert_eq!((get.handler.as_str(), get.rows.clone()), ("listUsers", vec![0, 3]));
+        assert_eq!(
+            (get.handler.as_str(), get.rows.clone()),
+            ("listUsers", vec![0, 3])
+        );
     }
 
     /// The ROUTE_METHOD method of every node whose qname's path part (after
@@ -1331,7 +1407,10 @@ server.route({ method: 'POST', path: '/api/v1/users', handler: h });
 server.route({ method: 'GET', path: 'cache-key', handler: h });
 "#;
         let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
-        assert!(r.nodes.is_empty(), "non-`/` path must not emit a Hapi route");
+        assert!(
+            r.nodes.is_empty(),
+            "non-`/` path must not emit a Hapi route"
+        );
     }
 
     #[test]
@@ -1404,7 +1483,12 @@ Bun.serve({
         let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
         assert_eq!(
             qnames(&r),
-            vec!["DELETE /users/:id", "GET /users", "GET /users/:id", "POST /users"]
+            vec![
+                "DELETE /users/:id",
+                "GET /users",
+                "GET /users/:id",
+                "POST /users"
+            ]
         );
         assert!(!qnames(&r).iter().any(|q| q.starts_with("route:")));
         let mut refs = handled_by(&r);
@@ -1412,10 +1496,22 @@ Bun.serve({
         assert_eq!(
             refs,
             vec![
-                ("DELETE /users/:id".to_string(), CallQualifier::Bare("deleteUser".into())),
-                ("GET /users".to_string(), CallQualifier::Bare("listUsers".into())),
-                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into())),
-                ("POST /users".to_string(), CallQualifier::Bare("createUser".into())),
+                (
+                    "DELETE /users/:id".to_string(),
+                    CallQualifier::Bare("deleteUser".into())
+                ),
+                (
+                    "GET /users".to_string(),
+                    CallQualifier::Bare("listUsers".into())
+                ),
+                (
+                    "GET /users/:id".to_string(),
+                    CallQualifier::Bare("getUser".into())
+                ),
+                (
+                    "POST /users".to_string(),
+                    CallQualifier::Bare("createUser".into())
+                ),
             ]
         );
     }
@@ -1438,7 +1534,10 @@ Bun.serve({
         let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
         let n = node(&r, "POST /users");
         assert_eq!(position_rows(n), vec![1]);
-        let rm = cells(n).into_iter().find(|(k, _)| *k == cell_type::ROUTE_METHOD).expect("ROUTE_METHOD");
+        let rm = cells(n)
+            .into_iter()
+            .find(|(k, _)| *k == cell_type::ROUTE_METHOD)
+            .expect("ROUTE_METHOD");
         assert!(rm.1.contains(r#""line":2,"col":0"#), "{}", rm.1);
     }
 
@@ -1459,7 +1558,10 @@ Bun.serve({
             .collect();
         assert_eq!(
             rm,
-            vec![r#"{"method":"GET","handler":"getX","file":"server.ts","line":1,"col":0}"#.to_string()]
+            vec![
+                r#"{"method":"GET","handler":"getX","file":"server.ts","line":1,"col":0}"#
+                    .to_string()
+            ]
         );
         assert_eq!(r.positioned, 2);
     }
@@ -1506,7 +1608,8 @@ Bun.serve({
     /// A3.5 it minted a phantom server `route:/users` in the client repo.
     #[test]
     fn client_receiver_calls_are_not_routes() {
-        let src = "class S { constructor(private http: any) {} f() { return this.http.get('/users'); } }";
+        let src =
+            "class S { constructor(private http: any) {} f() { return this.http.get('/users'); } }";
         let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
         assert!(r.nodes.is_empty(), "no ROUTE from a client call");
         assert!(r.refs.is_empty());
@@ -1528,25 +1631,46 @@ Bun.serve({
         let r = extract_ts_backend_routes(src, "src/api.ts", module_id(), repo());
         assert_eq!(r.skipped_client_calls, 0);
         let posts = route_methods(&r, "/posts");
-        assert!(posts.contains(&"GET".to_string()) && posts.contains(&"POST".to_string()), "{posts:?}");
+        assert!(
+            posts.contains(&"GET".to_string()) && posts.contains(&"POST".to_string()),
+            "{posts:?}"
+        );
         assert_eq!(route_methods(&r, "/posts/:id"), vec!["DELETE".to_string()]);
         assert_eq!(route_methods(&r, "/legacy"), vec!["GET".to_string()]);
 
         let src = "this.http.get('/x', { transform: (d) => d });\nthis.http.get('/y').pipe(map((r) => r));\nthis.http.post('/z', body).subscribe(() => done());";
         let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
-        assert!(r.nodes.is_empty(), "arrows outside the argument list are not handlers");
+        assert!(
+            r.nodes.is_empty(),
+            "arrows outside the argument list are not handlers"
+        );
         assert_eq!(r.skipped_client_calls, 3);
     }
 
     #[test]
     fn inline_function_shapes() {
-        for yes in ["(req, res) => res.end()", "async (c) => {", "c => c.text('x')", "async c => 1",
-                    "function (req, res) {", "async function(req, res) {", "function* gen() {",
-                    "(req: Request, res: Response): Promise<void> => {"] {
+        for yes in [
+            "(req, res) => res.end()",
+            "async (c) => {",
+            "c => c.text('x')",
+            "async c => 1",
+            "function (req, res) {",
+            "async function(req, res) {",
+            "function* gen() {",
+            "(req: Request, res: Response): Promise<void> => {",
+        ] {
             assert!(is_inline_function(yes), "{yes}");
         }
-        for no in ["getUser", "users.list", "{ transform: (d) => d }", "body", "asyncHandler(fn)",
-                   "functionsConfig", "a.b => 1", ""] {
+        for no in [
+            "getUser",
+            "users.list",
+            "{ transform: (d) => d }",
+            "body",
+            "asyncHandler(fn)",
+            "functionsConfig",
+            "a.b => 1",
+            "",
+        ] {
             assert!(!is_inline_function(no), "{no}");
         }
     }
@@ -1577,11 +1701,20 @@ Bun.serve({
         assert_eq!(
             refs,
             vec![
-                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into())),
-                ("POST /users".to_string(), CallQualifier::Bare("createUser".into())),
+                (
+                    "GET /users/:id".to_string(),
+                    CallQualifier::Bare("getUser".into())
+                ),
+                (
+                    "POST /users".to_string(),
+                    CallQualifier::Bare("createUser".into())
+                ),
                 (
                     "PUT /users/:id".to_string(),
-                    CallQualifier::Attribute { base: "users".into(), name: "update".into() }
+                    CallQualifier::Attribute {
+                        base: "users".into(),
+                        name: "update".into()
+                    }
                 ),
             ]
         );
@@ -1594,8 +1727,18 @@ Bun.serve({
                 _ => None,
             })
             .collect();
-        assert!(payloads.iter().any(|p| p.contains("\"handler\":\"getUser\"")), "{payloads:?}");
-        assert!(payloads.iter().any(|p| p.contains("\"handler\":\"createUser\"")), "{payloads:?}");
+        assert!(
+            payloads
+                .iter()
+                .any(|p| p.contains("\"handler\":\"getUser\"")),
+            "{payloads:?}"
+        );
+        assert!(
+            payloads
+                .iter()
+                .any(|p| p.contains("\"handler\":\"createUser\"")),
+            "{payloads:?}"
+        );
     }
 
     /// Inline and wrapped handlers keep their route and name no handler: there
@@ -1621,7 +1764,10 @@ app.patch("/f", auth,
     #[test]
     fn named_handler_reads_the_last_argument() {
         assert_eq!(named_handler(", getUser);"), Some("getUser"));
-        assert_eq!(named_handler(" , auth, rateLimit({ max: 5, window: '1,2' }), getUser)"), Some("getUser"));
+        assert_eq!(
+            named_handler(" , auth, rateLimit({ max: 5, window: '1,2' }), getUser)"),
+            Some("getUser")
+        );
         assert_eq!(named_handler(", h,)"), Some("h"));
         assert_eq!(named_handler(", ctrl.list)"), Some("ctrl.list"));
         assert_eq!(named_handler(", a.b.c)"), None);

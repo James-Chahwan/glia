@@ -381,7 +381,9 @@ pub struct CoverageNote {
 pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     let langs = languages_present(merged);
     if langs.contains("kotlin") {
-        eprintln!("[coverage] kotlin: residual rows declared for calls/heritage/imports/routes/http clients");
+        eprintln!(
+            "[coverage] kotlin: residual rows declared for calls/heritage/imports/routes/http clients"
+        );
     }
     // CB.26: a C/C++ repo is told its CALLS / IMPORTS residual.
     if langs.contains("c_cpp") {
@@ -529,8 +531,17 @@ mod tests {
             .iter()
             .filter(|n| n.language == "*" && n.edge_category == "DOCUMENTS")
             .collect();
-        assert_eq!(docs.len(), 2, "{:?}", docs.iter().map(|n| n.note).collect::<Vec<_>>());
-        assert!(docs[0].note.starts_with("contract JSON"), "{}", docs[0].note);
+        assert_eq!(
+            docs.len(),
+            2,
+            "{:?}",
+            docs.iter().map(|n| n.note).collect::<Vec<_>>()
+        );
+        assert!(
+            docs[0].note.starts_with("contract JSON"),
+            "{}",
+            docs[0].note
+        );
         let note = docs[1].note;
         for needle in [
             "features/<feature>/*.md",
@@ -683,12 +694,17 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let note = rows[0].note;
         // DG.1: apalis workers bind their handler fn too (DF.21).
-        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika", "asynq", "apalis"] {
+        for client in [
+            "kafkajs", "amqplib", "BullMQ", "nats", "pika", "asynq", "apalis",
+        ] {
             assert!(note.contains(client), "{client}: {note}");
         }
         assert!(note.contains("the function that subscribes"), "{note}");
         // DH.2: a Laravel job consumer is anchored on its class line (DF.21).
-        assert!(note.contains("Laravel") && note.contains("HANDLED_BY nothing"), "{note}");
+        assert!(
+            note.contains("Laravel") && note.contains("HANDLED_BY nothing"),
+            "{note}"
+        );
         assert_eq!(rows[0].edges_found, 0);
         assert_eq!(
             edge_category::name(edge_category::HANDLED_BY),
@@ -741,7 +757,10 @@ mod tests {
         assert_eq!((nav[0].language, nav[0].edges_found), ("typescript", 0));
         assert!(nav[0].note.contains("navigate([path])"));
         assert!(nav[0].note.contains("never reported dead"));
-        assert!(nav[0].note.contains("createUrlTree"), "guard redirects are declared");
+        assert!(
+            nav[0].note.contains("createUrlTree"),
+            "guard redirects are declared"
+        );
         assert!(nav[0].verify.contains("routerLink") && nav[0].verify.contains("createUrlTree"));
         assert_eq!(
             edge_category::name(edge_category::NAVIGATES_TO),
@@ -800,7 +819,9 @@ mod tests {
         // DH.14: PHP heritage is extracted; only the trait residual is left.
         assert_eq!(rows("Repo.php"), [("php", "INHERITS_FROM")]);
         let php = coverage_report(&graph_with_file("Repo.php"));
-        let php_row = php.iter().find(|n| n.language == "php" && n.edge_category == "INHERITS_FROM");
+        let php_row = php
+            .iter()
+            .find(|n| n.language == "php" && n.edge_category == "INHERITS_FROM");
         assert!(
             php_row.is_some_and(|n| n.note.contains("traits") && !n.note.contains("not extracted")),
             "{:?}",
@@ -828,7 +849,10 @@ mod tests {
         );
         // CI.3: root-package imports are recorded, so nothing is assumed
         // reachable; a test-file side pairs only through a direct import.
-        assert!(go_row.is_some_and(|n| !n.contains("assumed reachable")), "{go_row:?}");
+        assert!(
+            go_row.is_some_and(|n| !n.contains("assumed reachable")),
+            "{go_row:?}"
+        );
         assert!(
             go_row.is_some_and(|n| n.contains("imports the other side's package directly")),
             "{go_row:?}"
@@ -852,10 +876,20 @@ mod tests {
         cats.sort_unstable();
         assert_eq!(
             cats,
-            ["*", "CALLS", "HANDLED_BY", "HTTP_CALLS", "IMPORTS", "INHERITS_FROM"],
+            [
+                "*",
+                "CALLS",
+                "HANDLED_BY",
+                "HTTP_CALLS",
+                "IMPORTS",
+                "INHERITS_FROM"
+            ],
             "the Kotlin residual rows, one per category"
         );
-        let star = kotlin.iter().find(|n| n.edge_category == "*").map(|n| n.note);
+        let star = kotlin
+            .iter()
+            .find(|n| n.edge_category == "*")
+            .map(|n| n.note);
         assert!(
             star.is_some_and(|n| !n.contains("no Kotlin parser") && !n.contains("ungraphed")),
             "the parser landed: the `*` row describes its residual, not a missing parser"
@@ -928,9 +962,15 @@ mod tests {
     fn c_cpp_files_get_their_caveats() {
         // CB.26: every extension detect_language routes to the C/C++ parser
         // maps to its tag, so a caveat keyed "c_cpp" reaches a C/C++ repo.
-        for ext in ["c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "inl", "ipp", "tpp"] {
+        for ext in [
+            "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "inl", "ipp", "tpp",
+        ] {
             let path = format!("src/a.{ext}");
-            assert_eq!(crate::extract::detect_language(&path), Some("c_cpp"), "{path}");
+            assert_eq!(
+                crate::extract::detect_language(&path),
+                Some("c_cpp"),
+                "{path}"
+            );
             assert_eq!(ext_to_language(&path), Some("c_cpp"), "{path}");
         }
         let want = [("c_cpp", "CALLS"), ("c_cpp", "IMPORTS")];
@@ -992,10 +1032,22 @@ mod tests {
         assert!(lang_rows("src/app.ts", "typescript").contains(&("typescript", "CALLS")));
         let note = row_note("src/app.ts", "typescript", "CALLS");
         let (bound, unbound) = bound_split(note);
-        for part in ["parameter", "nearest superclass", "IMPLEMENTS", "`inject(T)`", "`new T(..)`"] {
+        for part in [
+            "parameter",
+            "nearest superclass",
+            "IMPLEMENTS",
+            "`inject(T)`",
+            "`new T(..)`",
+        ] {
             assert!(bound.contains(part), "bound {part}: {note}");
         }
-        for part in ["interface", "a call's result", "a chain", "module-level const", "two types"] {
+        for part in [
+            "interface",
+            "a call's result",
+            "a chain",
+            "module-level const",
+            "two types",
+        ] {
             assert!(unbound.contains(part), "not bound {part}: {note}");
         }
         // Control: a repo with no TypeScript file gets no typescript CALLS row.
@@ -1010,7 +1062,13 @@ mod tests {
         assert!(lang_rows("Sources/App/Cart.swift", "swift").contains(&("swift", "CALLS")));
         let swift = row_note("Sources/App/Cart.swift", "swift", "CALLS");
         let (bound, unbound) = bound_split(swift);
-        for part in ["extension", "stored property", "parameter", "a local", "Repo.init()"] {
+        for part in [
+            "extension",
+            "stored property",
+            "parameter",
+            "a local",
+            "Repo.init()",
+        ] {
             assert!(bound.contains(part), "bound {part}: {swift}");
         }
         for part in [
@@ -1042,7 +1100,12 @@ mod tests {
         ] {
             assert!(bound.contains(part), "bound {part}: {dart}");
         }
-        for part in ["`export`", "`dynamic`", "a parameter or a local", "inside a closure"] {
+        for part in [
+            "`export`",
+            "`dynamic`",
+            "a parameter or a local",
+            "inside a closure",
+        ] {
             assert!(unbound.contains(part), "not bound {part}: {dart}");
         }
         // Control: neither row reaches a repo without the language.
@@ -1100,13 +1163,25 @@ mod tests {
         assert!(gql_verify.contains(".graphqls"), "{gql_verify}");
         let ws = note("WS_CONNECTS");
         assert_eq!(ws.len(), 1);
-        assert!(ws[0].contains("literal") && ws[0].contains("IaC"), "{}", ws[0]);
+        assert!(
+            ws[0].contains("literal") && ws[0].contains("IaC"),
+            "{}",
+            ws[0]
+        );
         let rpc = note("RPC_CALLS");
         assert_eq!(rpc.len(), 1);
-        assert!(rpc[0].contains("tRPC") && rpc[0].contains("literal absolute URL"), "{}", rpc[0]);
+        assert!(
+            rpc[0].contains("tRPC") && rpc[0].contains("literal absolute URL"),
+            "{}",
+            rpc[0]
+        );
         let grpc = note("GRPC_CALLS");
         assert_eq!(grpc.len(), 1, "the gRPC row is keyed by its own mechanism");
-        assert!(grpc[0].contains("dial target") && grpc[0].contains("IaC"), "{}", grpc[0]);
+        assert!(
+            grpc[0].contains("dial target") && grpc[0].contains("IaC"),
+            "{}",
+            grpc[0]
+        );
         // DF.8 / DF.9: an all-external client pairs nothing, on each channel.
         for row in [gql[0], ws[0], grpc[0]] {
             assert!(
@@ -1140,7 +1215,10 @@ mod tests {
         let calls = row_note("src/a.cpp", "c_cpp", "CALLS");
         let (bound, unbound) = bound_split(calls);
         assert!(!unbound.contains("lambda body"), "DF.5: {calls}");
-        assert!(!unbound.contains("a receiver declared `auto`"), "DF.5: {calls}");
+        assert!(
+            !unbound.contains("a receiver declared `auto`"),
+            "DF.5: {calls}"
+        );
         assert!(bound.contains("auto b = make_box()"), "DF.5: {calls}");
         assert!(unbound.contains("(`make().f()`)"), "{calls}");
         // The bound half no longer claims an inherited member binds.
@@ -1151,7 +1229,10 @@ mod tests {
             !imports.contains("an argument holding a generator expression"),
             "DF.6: {imports}"
         );
-        assert!(imports.contains("`$<BUILD_INTERFACE:..>`"), "DF.6: {imports}");
+        assert!(
+            imports.contains("`$<BUILD_INTERFACE:..>`"),
+            "DF.6: {imports}"
+        );
         assert!(imports.contains("`$<IF:..>`"), "{imports}");
 
         let go = row_note("main.go", "go", "HANDLED_BY");
@@ -1165,8 +1246,18 @@ mod tests {
             .map(|n| n.note)
             .collect();
         assert_eq!(pubsub.len(), 1, "{pubsub:?}");
-        assert!(!pubsub[0].contains("pair only when both name the topic"), "DF.14: {}", pubsub[0]);
-        for part in ["Terraform", "google_pubsub_subscription", "rule binding", "created in code", "another repo"] {
+        assert!(
+            !pubsub[0].contains("pair only when both name the topic"),
+            "DF.14: {}",
+            pubsub[0]
+        );
+        for part in [
+            "Terraform",
+            "google_pubsub_subscription",
+            "rule binding",
+            "created in code",
+            "another repo",
+        ] {
             assert!(pubsub[0].contains(part), "{part}: {}", pubsub[0]);
         }
         let pubsub_verify = report
@@ -1174,7 +1265,10 @@ mod tests {
             .find(|n| n.edge_category == "QUEUE_FLOWS" && n.note.contains("Pub/Sub"))
             .map(|n| n.verify)
             .unwrap_or_default();
-        assert!(pubsub_verify.contains("google_pubsub_subscription"), "{pubsub_verify}");
+        assert!(
+            pubsub_verify.contains("google_pubsub_subscription"),
+            "{pubsub_verify}"
+        );
 
         for cat in ["WS_CONNECTS", "GRAPHQL_CALLS", "GRPC_CALLS"] {
             let row = report
@@ -1241,7 +1335,13 @@ mod tests {
         }
         // The rows each packet left unchanged keep their CB.21 / CB.24 /
         // DF.9 sentences after the new text.
-        assert!(gql.find("root fields") < gql.find("literal absolute URL"), "{gql}");
-        assert!(ws.find("no static path") < ws.find("narrows to one service"), "{ws}");
+        assert!(
+            gql.find("root fields") < gql.find("literal absolute URL"),
+            "{gql}"
+        );
+        assert!(
+            ws.find("no static path") < ws.find("narrows to one service"),
+            "{ws}"
+        );
     }
 }

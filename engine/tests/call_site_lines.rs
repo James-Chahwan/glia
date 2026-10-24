@@ -54,7 +54,10 @@ const PROGRAMS: &[Program] = &[
     (
         "typescript",
         &[
-            ("src/a.ts", "export function bar(): number {\n  return 1;\n}\n"),
+            (
+                "src/a.ts",
+                "export function bar(): number {\n  return 1;\n}\n",
+            ),
             (
                 "src/b.ts",
                 "import { bar } from \"./a\";\n\nfunction local(): number {\n  return 2;\n}\n\n\
@@ -115,7 +118,10 @@ const PROGRAMS: &[Program] = &[
     (
         "ruby",
         &[
-            ("user_repo.rb", "class UserRepo\n  def find(id)\n    id\n  end\nend\n"),
+            (
+                "user_repo.rb",
+                "class UserRepo\n  def find(id)\n    id\n  end\nend\n",
+            ),
             (
                 "user_service.rb",
                 "require_relative \"user_repo\"\n\ndef normalize(id)\n  id\nend\n\n\
@@ -191,7 +197,10 @@ const PROGRAMS: &[Program] = &[
     (
         "clojure",
         &[
-            ("util.clj", "(ns app.util)\n\n(defn process [x]\n  (inc x))\n"),
+            (
+                "util.clj",
+                "(ns app.util)\n\n(defn process [x]\n  (inc x))\n",
+            ),
             (
                 "core.clj",
                 "(ns app.core\n  (:require [app.util :as util]))\n\n(defn local [x]\n  (* x 2))\n\n\
@@ -289,15 +298,13 @@ const REF_PROGRAMS: &[Program] = &[
     ),
     (
         "go",
-        &[
-            (
-                "main.go",
-                "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/go-chi/chi/v5\"\n)\n\n\
+        &[(
+            "main.go",
+            "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/go-chi/chi/v5\"\n)\n\n\
                  func listUsers(w http.ResponseWriter, r *http.Request) {}\n\n\
                  func main() {\n\tr := chi.NewRouter()\n\tr.Get(\"/users\", listUsers)\n\
                  \thttp.ListenAndServe(\":8080\", r)\n}\n",
-            ),
-        ],
+        )],
     ),
     (
         "typescript",
@@ -378,7 +385,10 @@ fn every_ref_edge_points_at_its_reference() {
                 if text.contains(name) {
                     Ok(())
                 } else {
-                    Err(format!("{file}:{line} `{}` does not name `{name}`", text.trim()))
+                    Err(format!(
+                        "{file}:{line} `{}` does not name `{name}`",
+                        text.trim()
+                    ))
                 }
             });
             if let Err(why) = checked {
@@ -394,7 +404,12 @@ fn every_ref_edge_points_at_its_reference() {
         }
     }
     eprintln!("[ref-site-lines]\n  {}", report.join("\n  "));
-    assert!(failures.is_empty(), "{} failures:\n  {}", failures.len(), failures.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
 }
 
 /// Keywords an import statement's line may carry instead of its target's
@@ -427,7 +442,9 @@ fn node_index(m: &MergedGraph) -> HashMap<NodeId, (NodeKindId, String, Option<St
     let mut out = HashMap::new();
     for g in &m.graphs {
         for n in &g.nodes {
-            let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else { continue };
+            let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
+                continue;
+            };
             let name = g.nav.name_by_id.get(&n.id).cloned().unwrap_or_default();
             let file = glia_code_domain::evidence::locate(&n.cells).map(|(f, _)| f);
             out.entry(n.id).or_insert((kind, name, file));
@@ -470,7 +487,9 @@ fn every_call_edge_points_at_its_call_expression() {
             let to_name = to.map(|n| n.1.as_str()).unwrap_or("?");
             let from_name = nodes.get(&e.from).map(|n| n.1.as_str()).unwrap_or("?");
             if e.category == edge_category::CALLS {
-                let Some((kind, name, to_file)) = to else { continue };
+                let Some((kind, name, to_file)) = to else {
+                    continue;
+                };
                 if *kind != node_kind::FUNCTION && *kind != node_kind::METHOD {
                     continue;
                 }
@@ -486,7 +505,10 @@ fn every_call_edge_points_at_its_call_expression() {
                     if text.contains(name.as_str()) {
                         Ok(())
                     } else {
-                        Err(format!("{file}:{line} `{}` does not name `{name}`", text.trim()))
+                        Err(format!(
+                            "{file}:{line} `{}` does not name `{name}`",
+                            text.trim()
+                        ))
                     }
                 });
                 if let Err(why) = checked {
@@ -500,7 +522,10 @@ fn every_call_edge_points_at_its_call_expression() {
                     if named || IMPORT_WORDS.iter().any(|w| text.contains(w)) {
                         Ok(())
                     } else {
-                        Err(format!("{file}:{line} `{}` is not an import of `{to_name}`", text.trim()))
+                        Err(format!(
+                            "{file}:{line} `{}` is not an import of `{to_name}`",
+                            text.trim()
+                        ))
                     }
                 });
                 if let Err(why) = checked {
@@ -529,7 +554,12 @@ fn every_call_edge_points_at_its_call_expression() {
         }
     }
     eprintln!("[call-site-lines]\n  {}", report.join("\n  "));
-    assert!(failures.is_empty(), "{} failures:\n  {}", failures.len(), failures.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
 }
 
 /// CA.1: a call inside a Go func literal (`once.Do(func() { local() })`) is a

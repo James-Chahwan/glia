@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{CellPayload, NodeKindId};
 use glia_engine::{BlastOptions, blast_radius, generate_one};
-use glia_graph::{MergedGraph, Reach};
 use glia_graph::roles::{ROLE_KINDS, roles_in};
+use glia_graph::{MergedGraph, Reach};
 
 fn fixture(name: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -35,7 +35,10 @@ fn blast_radius_from_a_component_lands_on_the_located_service_class() {
         let mut opts = BlastOptions::default();
         opts.direction = direction;
         let answer = blast_radius(&merged, &["users.component::UsersComponent"], &opts);
-        assert!(answer.unresolved.is_empty(), "{direction:?}: the component resolves");
+        assert!(
+            answer.unresolved.is_empty(),
+            "{direction:?}: the component resolves"
+        );
         let hits = answer.results;
         assert_eq!(
             hits.len(),
@@ -47,7 +50,11 @@ fn blast_radius_from_a_component_lands_on_the_located_service_class() {
         assert_eq!(hit.kind, "CLASS", "{direction:?}");
         assert_eq!(hit.qname, "user.service::UserService", "{direction:?}");
         assert_eq!(hit.reason, "INJECTS", "{direction:?}");
-        assert_eq!(hit.file.as_deref(), Some("user.service.ts"), "{direction:?}");
+        assert_eq!(
+            hit.file.as_deref(),
+            Some("user.service.ts"),
+            "{direction:?}"
+        );
         assert!(hit.line.is_some(), "{direction:?}: the class is located");
     }
 }

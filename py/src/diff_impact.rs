@@ -52,15 +52,30 @@ impl Default for RankKw {
     /// top_files=10` (the calibrated pick, else `ppr`), no held cache.
     fn default() -> Self {
         let blast = BlastOptions::default();
-        RankKw { ranking: blast.ranking, select: blast.select, top_files: blast.top_files, cache: None }
+        RankKw {
+            ranking: blast.ranking,
+            select: blast.select,
+            top_files: blast.top_files,
+            cache: None,
+        }
     }
 }
 
 impl RankKw {
     /// The keywords as given; `Err` names an unknown `ranking`.
-    fn named(ranking: Option<&str>, cochange: bool, top_files: usize, cache: Option<Arc<RankCache>>) -> Result<Self, String> {
+    fn named(
+        ranking: Option<&str>,
+        cochange: bool,
+        top_files: usize,
+        cache: Option<Arc<RankCache>>,
+    ) -> Result<Self, String> {
         let (ranking, select) = ranking_selected(ranking, cochange)?;
-        Ok(RankKw { ranking, select, top_files, cache })
+        Ok(RankKw {
+            ranking,
+            select,
+            top_files,
+            cache,
+        })
     }
 }
 
@@ -109,7 +124,10 @@ fn diff_answer(
     scope: Option<&str>,
     rank: &RankKw,
 ) -> Result<DiffImpact, String> {
-    let opts = labelled(options(direction, depth, top_k, live_only, scope, rank)?, labels);
+    let opts = labelled(
+        options(direction, depth, top_k, live_only, scope, rank)?,
+        labels,
+    );
     Ok(diff_impact_from_diff(merged, diff_text, &opts))
 }
 
@@ -129,7 +147,10 @@ fn rev_answer(
 ) -> Result<DiffImpact, String> {
     let opts = options(direction, depth, top_k, live_only, scope, rank)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
-    Ok(diff_impact_from_delta(&rev, &labelled(opts, &rev.after.repo_labels)))
+    Ok(diff_impact_from_delta(
+        &rev,
+        &labelled(opts, &rev.after.repo_labels),
+    ))
 }
 
 #[pymethods]
@@ -169,9 +190,20 @@ impl PyGraph {
         cochange: bool,
         top_files: usize,
     ) -> PyResult<Py<PyAny>> {
-        let rank = RankKw::named(ranking, cochange, top_files, Some(self.rank.clone())).map_err(PyValueError::new_err)?;
-        let answer = diff_answer(&self.merged, &self.repo_labels, diff_text, direction, depth, top_k, live_only, scope, &rank)
+        let rank = RankKw::named(ranking, cochange, top_files, Some(self.rank.clone()))
             .map_err(PyValueError::new_err)?;
+        let answer = diff_answer(
+            &self.merged,
+            &self.repo_labels,
+            diff_text,
+            direction,
+            depth,
+            top_k,
+            live_only,
+            scope,
+            &rank,
+        )
+        .map_err(PyValueError::new_err)?;
         // The token comes from `attach` (the GIL is already held), not a
         // parameter: the keyword list is the Python surface.
         Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
@@ -209,8 +241,10 @@ fn diff_impact_vs_rev_py(
     top_files: usize,
 ) -> PyResult<Py<PyAny>> {
     let rank = RankKw::named(ranking, cochange, top_files, None).map_err(PyValueError::new_err)?;
-    let answer = rev_answer(repo_path, base, direction, depth, top_k, live_only, scope, &rank)
-        .map_err(PyValueError::new_err)?;
+    let answer = rev_answer(
+        repo_path, base, direction, depth, top_k, live_only, scope, &rank,
+    )
+    .map_err(PyValueError::new_err)?;
     Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
 }
 
@@ -281,8 +315,18 @@ mod tests {
 
     fn git(top: &Path, gitconfig: &Path, args: &[&str]) {
         let out = Command::new("git")
-            .args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "user.name=glia",
+                "-c",
+                "user.email=glia@example.invalid",
+            ])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .arg("-C")
             .arg(top)
             .args(args)
@@ -293,7 +337,11 @@ mod tests {
             .env_remove("GIT_INDEX_FILE")
             .output()
             .unwrap_or_else(|e| panic!("LE.2 diff_impact_vs_rev test needs a `git` binary: {e}"));
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// LE.2: the helper behind pyo3 `diff_impact` returns the documented
@@ -304,7 +352,18 @@ mod tests {
     fn diff_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("diff");
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let a = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 4, None, false, None, &RankKw::default()).expect("answer");
+        let a = diff_answer(
+            &built.merged,
+            &built.repo_labels,
+            DIFF,
+            "backward",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [
             "\"base\":",
@@ -321,31 +380,104 @@ mod tests {
         let v = value(&a);
         assert!(v["base"].is_null());
         assert_eq!(v["changed"][0]["qname"], "shop::a::price");
-        assert_eq!((v["changed"][0]["change"].as_str(), v["changed"][0]["seed"].as_bool()), (Some("diff_hit"), Some(true)));
+        assert_eq!(
+            (
+                v["changed"][0]["change"].as_str(),
+                v["changed"][0]["seed"].as_bool()
+            ),
+            (Some("diff_hit"), Some(true))
+        );
         assert_eq!(
             rows(&v),
             [
-                ("shop::a::place".to_string(), 1, "shop::a::price".to_string()),
-                ("shop::b::checkout".to_string(), 2, "shop::a::price".to_string()),
+                (
+                    "shop::a::place".to_string(),
+                    1,
+                    "shop::a::price".to_string()
+                ),
+                (
+                    "shop::b::checkout".to_string(),
+                    2,
+                    "shop::a::price".to_string()
+                ),
             ]
         );
-        let cut = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 1, None, false, None, &RankKw::default()).expect("depth 1");
-        assert_eq!(rows(&value(&cut)), [("shop::a::place".to_string(), 1, "shop::a::price".to_string())]);
-        let fwd = diff_answer(&built.merged, &built.repo_labels, DIFF, "forward", 4, None, false, None, &RankKw::default()).expect("forward");
+        let cut = diff_answer(
+            &built.merged,
+            &built.repo_labels,
+            DIFF,
+            "backward",
+            1,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("depth 1");
+        assert_eq!(
+            rows(&value(&cut)),
+            [(
+                "shop::a::place".to_string(),
+                1,
+                "shop::a::price".to_string()
+            )]
+        );
+        let fwd = diff_answer(
+            &built.merged,
+            &built.repo_labels,
+            DIFF,
+            "forward",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("forward");
         assert!(fwd.impact.results.is_empty() && fwd.impact.absence.is_some());
-        let err = diff_answer(&built.merged, &built.repo_labels, DIFF, "sideways", 4, None, false, None, &RankKw::default()).expect_err("bad direction");
+        let err = diff_answer(
+            &built.merged,
+            &built.repo_labels,
+            DIFF,
+            "sideways",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect_err("bad direction");
         assert!(err.contains("sideways"), "{err}");
-        let o = options("both", 2, Some(3), true, Some("shop"), &RankKw::default()).expect("options");
-        assert_eq!((o.depth, o.top_k, o.live_only, o.scope.as_deref()), (2, Some(3), true, Some("shop")));
-        assert_eq!((o.ranking, o.select, o.top_files, o.rank_cache.is_none()), (Ranking::default(), true, 10, true));
+        let o =
+            options("both", 2, Some(3), true, Some("shop"), &RankKw::default()).expect("options");
+        assert_eq!(
+            (o.depth, o.top_k, o.live_only, o.scope.as_deref()),
+            (2, Some(3), true, Some("shop"))
+        );
+        assert_eq!(
+            (o.ranking, o.select, o.top_files, o.rank_cache.is_none()),
+            (Ranking::default(), true, 10, true)
+        );
         // EA.7: the ranking keywords reach the engine's options.
-        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let held = Arc::new(RankCache::new(
+            "pygraph",
+            &built.repo_roots,
+            &built.repo_labels,
+        ));
         let rank = RankKw::named(Some("bfs"), false, 3, Some(held.clone())).expect("bfs");
         let o = options("both", 2, None, false, None, &rank).expect("options");
-        assert_eq!((o.ranking.harness_name(), o.select, o.top_files), ("B0", false, 3));
+        assert_eq!(
+            (o.ranking.harness_name(), o.select, o.top_files),
+            ("B0", false, 3)
+        );
         assert!(o.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
-        let err = RankKw::named(Some("x"), true, 10, None).err().expect("x is no ranking");
-        assert_eq!(err, "unknown ranking `x`: expected one of ppr, ppr-wide, bfs");
+        let err = RankKw::named(Some("x"), true, 10, None)
+            .err()
+            .expect("x is no ranking");
+        assert_eq!(
+            err,
+            "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
     }
 
     /// LE.2: the helper behind the module function `diff_impact_vs_rev`
@@ -359,19 +491,51 @@ mod tests {
         git(&top, &gitconfig, &["init", "-q"]);
         git(&top, &gitconfig, &["add", "-A"]);
         git(&top, &gitconfig, &["commit", "-q", "-m", "shop"]);
-        std::fs::write(top.join("shop/a.py"), A_PY.replace("return o\n", "return o or 0\n")).expect("edit");
+        std::fs::write(
+            top.join("shop/a.py"),
+            A_PY.replace("return o\n", "return o or 0\n"),
+        )
+        .expect("edit");
         let repo = top.to_str().expect("utf-8");
-        let a = rev_answer(repo, "HEAD", "backward", 4, None, false, None, &RankKw::default()).expect("answer");
+        let a = rev_answer(
+            repo,
+            "HEAD",
+            "backward",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("answer");
         let v = value(&a);
         assert_eq!(v["base"], "HEAD");
         assert_eq!(
             rows(&v),
             [
-                ("shop::a::place".to_string(), 1, "shop::a::price".to_string()),
-                ("shop::b::checkout".to_string(), 2, "shop::a::price".to_string()),
+                (
+                    "shop::a::place".to_string(),
+                    1,
+                    "shop::a::price".to_string()
+                ),
+                (
+                    "shop::b::checkout".to_string(),
+                    2,
+                    "shop::a::price".to_string()
+                ),
             ]
         );
-        let err = rev_answer(repo, "no-such-rev", "both", 4, None, false, None, &RankKw::default()).expect_err("unknown rev");
+        let err = rev_answer(
+            repo,
+            "no-such-rev",
+            "both",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
     }
 
@@ -401,8 +565,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let scratch = Scratch(root.clone());
         let top = root.join("repo");
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures/identity-contract-ops");
-        for rel in ["go.mod", "main.go", "docs/swagger.yaml", "features/orders/feature.yaml"] {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../bench/substrate-gap/fixtures/identity-contract-ops");
+        for rel in [
+            "go.mod",
+            "main.go",
+            "docs/swagger.yaml",
+            "features/orders/feature.yaml",
+        ] {
             let to = top.join(rel);
             std::fs::create_dir_all(to.parent().expect("parent")).expect("scratch dir");
             std::fs::copy(src.join(rel), &to).expect("copy fixture file");
@@ -411,11 +581,24 @@ mod tests {
         let at = main.find("\tc.JSON(200").expect("listOrders' body");
         let line = main[..at].lines().count() + 1;
         let added = "\tc.Header(\"X-Total\", \"0\")\n";
-        let hunk = format!("--- a/main.go\n+++ b/main.go\n@@ -{line},2 +{line},3 @@\n+{added} \tc.JSON(200, []string{{}})\n }}\n");
+        let hunk = format!(
+            "--- a/main.go\n+++ b/main.go\n@@ -{line},2 +{line},3 @@\n+{added} \tc.JSON(200, []string{{}})\n }}\n"
+        );
         let repo = top.to_str().expect("utf-8");
 
         let built = glia_engine::generate_one(repo).expect("build");
-        let a = diff_answer(&built.merged, &built.repo_labels, &hunk, "both", 4, None, false, None, &RankKw::default()).expect("answer");
+        let a = diff_answer(
+            &built.merged,
+            &built.repo_labels,
+            &hunk,
+            "both",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("answer");
         assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
 
         let gitconfig = scratch.0.join("gitconfig");
@@ -423,8 +606,22 @@ mod tests {
         git(&top, &gitconfig, &["init", "-q"]);
         git(&top, &gitconfig, &["add", "-A"]);
         git(&top, &gitconfig, &["commit", "-q", "-m", "orders"]);
-        std::fs::write(top.join("main.go"), format!("{}{added}{}", &main[..at], &main[at..])).expect("edit");
-        let a = rev_answer(repo, "HEAD", "both", 4, None, false, None, &RankKw::default()).expect("answer");
+        std::fs::write(
+            top.join("main.go"),
+            format!("{}{added}{}", &main[..at], &main[at..]),
+        )
+        .expect("edit");
+        let a = rev_answer(
+            repo,
+            "HEAD",
+            "both",
+            4,
+            None,
+            false,
+            None,
+            &RankKw::default(),
+        )
+        .expect("answer");
         assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
     }
 }

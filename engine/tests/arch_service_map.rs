@@ -32,7 +32,10 @@ fn single_repo_monorepo_splits_into_services_with_links() {
     );
 
     let map = service_map(&r.merged, &r.repo_labels);
-    assert_eq!(map.keying, "top_level_dir", "one repo → key on the directory");
+    assert_eq!(
+        map.keying, "top_level_dir",
+        "one repo → key on the directory"
+    );
     let ids: Vec<&str> = map.services.iter().map(|s| s.id.as_str()).collect();
     assert!(
         ids.contains(&"client") && ids.contains(&"server"),
@@ -59,5 +62,8 @@ fn single_repo_monorepo_splits_into_services_with_links() {
     // would lose their route/endpoint counts.
     let routes: usize = map.services.iter().map(|s| s.routes).sum();
     let endpoints: usize = map.services.iter().map(|s| s.endpoints).sum();
-    assert!(routes >= 1 && endpoints >= 1, "routes={routes} endpoints={endpoints}");
+    assert!(
+        routes >= 1 && endpoints >= 1,
+        "routes={routes} endpoints={endpoints}"
+    );
 }

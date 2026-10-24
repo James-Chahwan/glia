@@ -62,7 +62,10 @@ fn assert_score_sorted(r: &BlastRadius) {
         assert!(
             w[0].score > w[1].score || (w[0].score == w[1].score && w[0].id < w[1].id),
             "one ranking, score desc then id asc: {:?}",
-            r.results.iter().map(|a| (&a.qname, a.score)).collect::<Vec<_>>()
+            r.results
+                .iter()
+                .map(|a| (&a.qname, a.score))
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -70,67 +73,150 @@ fn assert_score_sorted(r: &BlastRadius) {
 #[test]
 fn two_seeds_backward_are_one_walk_attributed_to_the_first_seed() {
     let (_dir, m) = fixture();
-    let r = blast_radius(&m, &["app::save", "app::publish"], &opts(Reach::Backward, 6));
-    assert!(r.unresolved.is_empty() && r.absence.is_none(), "{:?}", r.unresolved);
-    let seeds: Vec<(&str, &str, &str)> =
-        r.seeds.iter().map(|s| (s.query.as_str(), s.qname.as_str(), s.kind)).collect();
+    let r = blast_radius(
+        &m,
+        &["app::save", "app::publish"],
+        &opts(Reach::Backward, 6),
+    );
+    assert!(
+        r.unresolved.is_empty() && r.absence.is_none(),
+        "{:?}",
+        r.unresolved
+    );
+    let seeds: Vec<(&str, &str, &str)> = r
+        .seeds
+        .iter()
+        .map(|s| (s.query.as_str(), s.qname.as_str(), s.kind))
+        .collect();
     assert_eq!(
         seeds,
-        [("app::save", "app::save", "FUNCTION"), ("app::publish", "app::publish", "FUNCTION")]
+        [
+            ("app::save", "app::save", "FUNCTION"),
+            ("app::publish", "app::publish", "FUNCTION")
+        ]
     );
-    assert_eq!((r.seeds[0].file.as_deref(), r.seeds[0].line), (Some("app.py"), Some(16)));
-    assert!(r.seeds.iter().all(|s| s.linked_seeds.is_empty()), "neither calls the other");
+    assert_eq!(
+        (r.seeds[0].file.as_deref(), r.seeds[0].line),
+        (Some("app.py"), Some(16))
+    );
+    assert!(
+        r.seeds.iter().all(|s| s.linked_seeds.is_empty()),
+        "neither calls the other"
+    );
     // EC.8: no rank cache, so no record: the default ranking, explicit.
     let sel = r.selection.as_ref().expect("a selection");
     assert_eq!(
-        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        (
+            sel.set.as_str(),
+            sel.shape.as_str(),
+            sel.pick.as_str(),
+            sel.source,
+            sel.reason
+        ),
         ("SELh0", "k1", "H10", "explicit", None)
     );
 
     // Both seeds' only caller is create_order; save is listed first and the
     // multi-source walk expands seeds in input order, so save reached it.
     let create = row(&r, "app::create_order");
-    assert_eq!((create.seed.as_str(), create.depth, create.reason), ("app::save", 1, "CALLS"));
-    let route = r.results.iter().find(|a| a.kind == "ROUTE").expect("the POST /orders ROUTE");
-    let endpoint =
-        r.results.iter().find(|a| a.kind == "ENDPOINT").expect("the POST /orders ENDPOINT");
+    assert_eq!(
+        (create.seed.as_str(), create.depth, create.reason),
+        ("app::save", 1, "CALLS")
+    );
+    let route = r
+        .results
+        .iter()
+        .find(|a| a.kind == "ROUTE")
+        .expect("the POST /orders ROUTE");
+    let endpoint = r
+        .results
+        .iter()
+        .find(|a| a.kind == "ENDPOINT")
+        .expect("the POST /orders ENDPOINT");
     assert_eq!((route.name.as_str(), route.depth), ("POST /orders", 2));
-    assert_eq!((endpoint.name.as_str(), endpoint.depth), ("POST /orders", 3));
+    assert_eq!(
+        (endpoint.name.as_str(), endpoint.depth),
+        ("POST /orders", 3)
+    );
     assert_eq!(row(&r, "checkout::placeOrder").depth, 4);
     assert_eq!(r.results.len(), 4, "{:?}", qnames(&r));
-    assert!(r.results.iter().all(|a| a.seed == "app::save"), "one chain, rooted at save");
+    assert!(
+        r.results.iter().all(|a| a.seed == "app::save"),
+        "one chain, rooted at save"
+    );
     assert!(!qnames(&r).contains(&"app::save") && !qnames(&r).contains(&"app::publish"));
     assert_score_sorted(&r);
 
     // Listed the other way round, publish's wave reaches the caller first.
-    let swapped = blast_radius(&m, &["app::publish", "app::save"], &opts(Reach::Backward, 6));
+    let swapped = blast_radius(
+        &m,
+        &["app::publish", "app::save"],
+        &opts(Reach::Backward, 6),
+    );
     assert!(swapped.results.iter().all(|a| a.seed == "app::publish"));
     let rows = |r: &BlastRadius| {
-        r.results.iter().map(|a| (a.qname.clone(), a.depth, a.score.to_bits())).collect::<Vec<_>>()
+        r.results
+            .iter()
+            .map(|a| (a.qname.clone(), a.depth, a.score.to_bits()))
+            .collect::<Vec<_>>()
     };
-    assert_eq!(rows(&swapped), rows(&r), "seed order moves attribution, never rows or scores");
+    assert_eq!(
+        rows(&swapped),
+        rows(&r),
+        "seed order moves attribution, never rows or scores"
+    );
 }
 
 #[test]
 fn a_seed_reached_by_another_seed_is_a_linked_seed_not_a_lost_row() {
     let (_dir, m) = fixture();
-    let r = blast_radius(&m, &["app::create_order", "app::save"], &opts(Reach::Forward, 4));
-    assert_eq!(r.seeds[0].linked_seeds, ["app::save"], "create_order calls save");
-    assert!(r.seeds[1].linked_seeds.is_empty(), "save does not call create_order");
+    let r = blast_radius(
+        &m,
+        &["app::create_order", "app::save"],
+        &opts(Reach::Forward, 4),
+    );
+    assert_eq!(
+        r.seeds[0].linked_seeds,
+        ["app::save"],
+        "create_order calls save"
+    );
+    assert!(
+        r.seeds[1].linked_seeds.is_empty(),
+        "save does not call create_order"
+    );
     assert!(!qnames(&r).contains(&"app::save"), "a seed is never a row");
     let audit = row(&r, "app::audit");
-    assert_eq!((audit.seed.as_str(), audit.depth), ("app::save", 1), "one hop from save, not two from create_order");
+    assert_eq!(
+        (audit.seed.as_str(), audit.depth),
+        ("app::save", 1),
+        "one hop from save, not two from create_order"
+    );
     let publish = row(&r, "app::publish");
-    assert_eq!((publish.seed.as_str(), publish.depth), ("app::create_order", 1));
-    assert_eq!(row(&r, "queue_producer:orders").seed, "app::create_order", "via publish");
+    assert_eq!(
+        (publish.seed.as_str(), publish.depth),
+        ("app::create_order", 1)
+    );
+    assert_eq!(
+        row(&r, "queue_producer:orders").seed,
+        "app::create_order",
+        "via publish"
+    );
     assert_score_sorted(&r);
 
     // Backward, the link runs the other way: save's caller is a seed.
-    let back = blast_radius(&m, &["app::save", "app::create_order"], &opts(Reach::Backward, 4));
+    let back = blast_radius(
+        &m,
+        &["app::save", "app::create_order"],
+        &opts(Reach::Backward, 4),
+    );
     assert_eq!(back.seeds[0].linked_seeds, ["app::create_order"]);
     assert!(back.seeds[1].linked_seeds.is_empty());
     // Both ways, each is the other's neighbour.
-    let both = blast_radius(&m, &["app::save", "app::create_order"], &opts(Reach::Both, 4));
+    let both = blast_radius(
+        &m,
+        &["app::save", "app::create_order"],
+        &opts(Reach::Both, 4),
+    );
     assert_eq!(both.seeds[0].linked_seeds, ["app::create_order"]);
     assert_eq!(both.seeds[1].linked_seeds, ["app::save"]);
 }
@@ -141,7 +227,10 @@ fn an_unresolved_query_is_reported_and_the_rest_still_answer() {
     let r = blast_radius(&m, &["app::save", "nope", "nope"], &BlastOptions::default());
     assert_eq!(r.unresolved, ["nope"], "each unresolved query once");
     assert!(!r.results.is_empty());
-    assert!(r.absence.is_none(), "an answer with rows carries no absence");
+    assert!(
+        r.absence.is_none(),
+        "an answer with rows carries no absence"
+    );
     assert_eq!(r.seeds.len(), 1);
 
     // Two queries naming one node are one seed, the first query kept.
@@ -157,13 +246,20 @@ fn every_query_unresolved_is_an_unknown_symbol_absence() {
     assert!(r.results.is_empty() && r.seeds.is_empty());
     assert_eq!(r.unresolved, ["nope"]);
     let a = r.absence.expect("an empty answer says why");
-    assert_eq!((a.reason, a.query.as_str(), a.tier), ("unknown_symbol", "nope", "FACT"));
+    assert_eq!(
+        (a.reason, a.query.as_str(), a.tier),
+        ("unknown_symbol", "nope", "FACT")
+    );
 
     // A near miss is suggested.
     let r = blast_radius(&m, &["create_ordr"], &BlastOptions::default());
     let a = r.absence.expect("absence");
     assert_eq!(a.reason, "unknown_symbol");
-    assert!(a.suggestions.iter().any(|s| s == "app::create_order"), "{:?}", a.suggestions);
+    assert!(
+        a.suggestions.iter().any(|s| s == "app::create_order"),
+        "{:?}",
+        a.suggestions
+    );
 
     // No query at all is an empty answer too, not a panic.
     let none = blast_radius(&m, &[], &BlastOptions::default());
@@ -178,14 +274,24 @@ fn an_emptied_answer_says_what_emptied_it() {
     let a = r.absence.expect("no carry edge reaches placeOrder");
     assert_eq!(a.reason, "no_edges");
     assert_eq!(a.mechanisms, ["CALLS"], "a FUNCTION seed depends on CALLS");
-    assert!(a.note.contains("no carry edge reaches `checkout::placeOrder`"), "{}", a.note);
+    assert!(
+        a.note
+            .contains("no carry edge reaches `checkout::placeOrder`"),
+        "{}",
+        a.note
+    );
 
     // A MODULE seed is told structural edges do not carry.
     let module = blast_radius(&m, &["checkout"], &opts(Reach::Backward, 4));
     assert_eq!(module.seeds[0].kind, "MODULE");
     let a = module.absence.expect("a module has no carry edge in");
     assert_eq!(a.reason, "no_edges");
-    assert!(a.note.contains("structural IMPORTS/CONTAINS/DEFINES are not carry edges"), "{}", a.note);
+    assert!(
+        a.note
+            .contains("structural IMPORTS/CONTAINS/DEFINES are not carry edges"),
+        "{}",
+        a.note
+    );
 
     // top_k 0 and live_only both empty a reached radius: no_match.
     let mut zero = BlastOptions::default();
@@ -199,7 +305,9 @@ fn an_emptied_answer_says_what_emptied_it() {
     );
     let mut live = opts(Reach::Forward, 1);
     live.live_only = true;
-    let a = blast_radius(&m, &["checkout::placeOrder"], &live).absence.expect("live_only dropped every row");
+    let a = blast_radius(&m, &["checkout::placeOrder"], &live)
+        .absence
+        .expect("live_only dropped every row");
     assert_eq!(a.reason, "no_match");
     assert!(a.note.contains("live_only"), "{}", a.note);
 }
@@ -211,8 +319,15 @@ fn one_seed_is_the_answer_it_replaces() {
     let mut got = serde_json::to_value(&r.results).expect("rows serialise");
     for row in got.as_array_mut().expect("rows") {
         let seed = row.as_object_mut().expect("a row object").remove("seed");
-        assert_eq!(seed, Some(serde_json::json!("app::save")), "one seed owns every row");
+        assert_eq!(
+            seed,
+            Some(serde_json::json!("app::save")),
+            "one seed owns every row"
+        );
     }
     let before: serde_json::Value = serde_json::from_str(BEFORE_SINGLE_SEED).expect("before-file");
-    assert_eq!(got, before, "rows, order and scores of the pre-LD.5 single-seed answer");
+    assert_eq!(
+        got, before,
+        "rows, order and scores of the pre-LD.5 single-seed answer"
+    );
 }

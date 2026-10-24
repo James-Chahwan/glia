@@ -62,10 +62,7 @@ pub fn storage_to_markdown(xhtml: &str) -> String {
     let mut in_param = false;
     let mut param_buf = String::new();
 
-    let sink = |in_param: bool,
-                in_plain_body: bool,
-                link_href: &Option<String>|
-     -> Sink {
+    let sink = |in_param: bool, in_plain_body: bool, link_href: &Option<String>| -> Sink {
         if in_param {
             Sink::CodeParam
         } else if in_plain_body {
@@ -83,7 +80,8 @@ pub fn storage_to_markdown(xhtml: &str) -> String {
 
             Ok(Event::Start(e)) => match local(e.name().as_ref()) {
                 b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
-                    let level = (e.name().as_ref()[local_off(e.name().as_ref()) + 1] - b'0') as usize;
+                    let level =
+                        (e.name().as_ref()[local_off(e.name().as_ref()) + 1] - b'0') as usize;
                     out.push('\n');
                     for _ in 0..level {
                         out.push('#');

@@ -80,9 +80,9 @@ use glia_graph::MergedGraph;
 
 use crate::absence;
 use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded_on};
-use crate::rank::RankCache;
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
 use crate::profile::CODE_PROFILE;
+use crate::rank::RankCache;
 use crate::tests_for::CodeText;
 
 /// The primitive name in the `[absence]` marker.
@@ -131,7 +131,11 @@ pub struct DiffImpact {
 /// docs). `Err` on `delta::graph_delta_vs_rev`'s errors: not a directory,
 /// not a git work tree, an unknown rev, a failed build. Like the delta, it
 /// saves the working tree's parse-cache sidecar, never a layout.
-pub fn diff_impact_vs_rev(repo_path: &str, base: &str, opts: &BlastOptions) -> Result<DiffImpact, String> {
+pub fn diff_impact_vs_rev(
+    repo_path: &str,
+    base: &str,
+    opts: &BlastOptions,
+) -> Result<DiffImpact, String> {
     let rev = graph_delta_vs_rev(repo_path, base)?;
     Ok(diff_impact_from_delta(&rev, opts))
 }
@@ -152,11 +156,19 @@ pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact
 
 /// [`diff_impact_from_delta`] for an outer answer: `surface` names it in the
 /// `[rank]` marker (`review`).
-pub(crate) fn diff_impact_from_delta_on(rev: &RevDelta, opts: &BlastOptions, surface: &'static str) -> DiffImpact {
+pub(crate) fn diff_impact_from_delta_on(
+    rev: &RevDelta,
+    opts: &BlastOptions,
+    surface: &'static str,
+) -> DiffImpact {
     let opts_owned;
     let opts = if opts.rank_cache.is_none() {
         let mut o = opts.clone();
-        o.rank_cache = Some(Arc::new(RankCache::new("answer", &rev.after.repo_roots, &rev.after.repo_labels)));
+        o.rank_cache = Some(Arc::new(RankCache::new(
+            "answer",
+            &rev.after.repo_roots,
+            &rev.after.repo_labels,
+        )));
         opts_owned = o;
         &opts_owned
     } else {
@@ -182,7 +194,11 @@ pub(crate) fn diff_impact_from_delta_on(rev: &RevDelta, opts: &BlastOptions, sur
             seed: n.change != "removed" && is_seed.contains(&NodeId(n.id)),
         })
         .collect();
-    let listed: HashSet<u64> = changed.iter().filter(|c| c.change != "removed").map(|c| c.id).collect();
+    let listed: HashSet<u64> = changed
+        .iter()
+        .filter(|c| c.change != "removed")
+        .map(|c| c.id)
+        .collect();
     let mut endpoints: Vec<ChangedNode> = candidates
         .iter()
         .filter(|id| !listed.contains(&id.0))
@@ -192,7 +208,12 @@ pub(crate) fn diff_impact_from_delta_on(rev: &RevDelta, opts: &BlastOptions, sur
     changed.extend(endpoints);
 
     let edges = |change: &str| -> Vec<DeltaEdge> {
-        rev.answer.edges.iter().filter(|e| e.change == change).cloned().collect()
+        rev.answer
+            .edges
+            .iter()
+            .filter(|e| e.change == change)
+            .cloned()
+            .collect()
     };
     let (edges_added, edges_removed) = (edges("added"), edges("removed"));
     let given = rev.answer.base.clone();
@@ -228,7 +249,11 @@ pub(crate) fn diff_impact_from_delta_on(rev: &RevDelta, opts: &BlastOptions, sur
 
 /// The impact of a pasted unified diff, or a changed-file list, over
 /// `merged` (module docs): the graph the diff's new side describes.
-pub fn diff_impact_from_diff(merged: &MergedGraph, diff_text: &str, opts: &BlastOptions) -> DiffImpact {
+pub fn diff_impact_from_diff(
+    merged: &MergedGraph,
+    diff_text: &str,
+    opts: &BlastOptions,
+) -> DiffImpact {
     let items = diff_items(diff_text);
     let queries: Vec<(&str, &str)> = items
         .iter()
@@ -246,7 +271,11 @@ pub fn diff_impact_from_diff(merged: &MergedGraph, diff_text: &str, opts: &Blast
     let mut ids: Vec<NodeId> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     for item in &items {
-        let found = if item.text.is_some() { hits.next().unwrap_or_default() } else { Vec::new() };
+        let found = if item.text.is_some() {
+            hits.next().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if !files.contains(&item.file.as_str()) {
             files.push(&item.file);
         }
@@ -255,16 +284,25 @@ pub fn diff_impact_from_diff(merged: &MergedGraph, diff_text: &str, opts: &Blast
         }
         ids.extend(found.into_iter().filter(|id| seen.insert(*id)));
     }
-    let unresolved_diff_files: Vec<String> =
-        files.iter().filter(|f| !placed.contains(*f)).map(|f| f.to_string()).collect();
+    let unresolved_diff_files: Vec<String> = files
+        .iter()
+        .filter(|f| !placed.contains(*f))
+        .map(|f| f.to_string())
+        .collect();
 
     let loc = Locator::new(merged);
     let seeds = seed_list(&loc, &ids);
     let is_seed: HashSet<NodeId> = seeds.iter().map(|&(_, id)| id).collect();
-    let changed: Vec<ChangedNode> =
-        ids.iter().map(|&id| row(loc.locate(id), "diff_hit", is_seed.contains(&id))).collect();
+    let changed: Vec<ChangedNode> = ids
+        .iter()
+        .map(|&id| row(loc.locate(id), "diff_hit", is_seed.contains(&id)))
+        .collect();
     let impact = if seeds.is_empty() {
-        let query = if files.is_empty() { "diff".to_string() } else { format!("diff: {}", files.join(", ")) };
+        let query = if files.is_empty() {
+            "diff".to_string()
+        } else {
+            format!("diff: {}", files.join(", "))
+        };
         let note = if unresolved_diff_files.is_empty() {
             "the diff resolved to no node".to_string()
         } else {
@@ -293,10 +331,16 @@ pub fn diff_impact_from_diff(merged: &MergedGraph, diff_text: &str, opts: &Blast
 /// check and the MODULE rule (module docs).
 fn rev_candidates(rev: &RevDelta) -> Vec<NodeId> {
     let d = &rev.delta;
-    let (old, new) = (CodeText::new(&rev.before.merged), CodeText::new(&rev.after.merged));
-    let moved_to: std::collections::HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (b, a)).collect();
-    let was: std::collections::HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
-    let carries = |k: &&glia_activation::algo::delta::EdgeKey| CODE_PROFILE.tables.carries(k.category);
+    let (old, new) = (
+        CodeText::new(&rev.before.merged),
+        CodeText::new(&rev.after.merged),
+    );
+    let moved_to: std::collections::HashMap<NodeId, NodeId> =
+        d.moved_nodes.iter().map(|&(b, a)| (b, a)).collect();
+    let was: std::collections::HashMap<NodeId, NodeId> =
+        d.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
+    let carries =
+        |k: &&glia_activation::algo::delta::EdgeKey| CODE_PROFILE.tables.carries(k.category);
     let mut ids: Vec<NodeId> = Vec::new();
     ids.extend(d.added_nodes.iter().copied());
     ids.extend(d.moved_nodes.iter().map(|&(_, a)| a));
@@ -322,7 +366,12 @@ fn rev_candidates(rev: &RevDelta) -> Vec<NodeId> {
 fn present(merged: &MergedGraph, ids: Vec<NodeId>) -> Vec<NodeId> {
     let mut seen: HashSet<NodeId> = HashSet::new();
     ids.into_iter()
-        .filter(|id| merged.graphs.iter().any(|g| g.nav.qname_by_id.contains_key(id)))
+        .filter(|id| {
+            merged
+                .graphs
+                .iter()
+                .any(|g| g.nav.qname_by_id.contains_key(id))
+        })
         .filter(|id| seen.insert(*id))
         .collect()
 }
@@ -367,7 +416,15 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
         results: Vec::new(),
         files: Vec::new(),
         selection: None,
-        absence: Some(absence::empty(merged, PRIMITIVE, query, "no_match", note, &[], None)),
+        absence: Some(absence::empty(
+            merged,
+            PRIMITIVE,
+            query,
+            "no_match",
+            note,
+            &[],
+            None,
+        )),
     }
 }
 
@@ -402,7 +459,10 @@ fn diff_items(text: &str) -> Vec<DiffItem> {
             .lines()
             .map(str::trim)
             .filter(|p| !p.is_empty() && p.contains('.'))
-            .map(|p| DiffItem { file: p.to_string(), text: Some(p.to_string()) })
+            .map(|p| DiffItem {
+                file: p.to_string(),
+                text: Some(p.to_string()),
+            })
             .collect();
     }
     let mut out: Vec<DiffItem> = Vec::new();
@@ -420,7 +480,11 @@ fn diff_items(text: &str) -> Vec<DiffItem> {
             flush(cur.take(), &mut out);
             let p = header_path(p, "b/");
             let gone = p == "/dev/null";
-            let file = if gone { minus.take().unwrap_or_default() } else { p.to_string() };
+            let file = if gone {
+                minus.take().unwrap_or_default()
+            } else {
+                p.to_string()
+            };
             cur = Some((file, format!("{line}\n"), 0, gone));
             continue;
         }
@@ -451,7 +515,10 @@ mod tests {
     use super::*;
 
     fn shape(items: &[DiffItem]) -> Vec<(&str, bool)> {
-        items.iter().map(|i| (i.file.as_str(), i.text.is_some())).collect()
+        items
+            .iter()
+            .map(|i| (i.file.as_str(), i.text.is_some()))
+            .collect()
     }
 
     #[test]
@@ -463,10 +530,18 @@ diff --git a/shop/c.py b/shop/c.py\ndeleted file mode 100644\n--- a/shop/c.py\n+
         let items = diff_items(diff);
         assert_eq!(
             shape(&items),
-            [("shop/a.py", true), ("shop/b.py", false), ("shop/c.py", false), ("shop/d.py", true)]
+            [
+                ("shop/a.py", true),
+                ("shop/b.py", false),
+                ("shop/c.py", false),
+                ("shop/d.py", true)
+            ]
         );
         let a = items[0].text.as_deref().unwrap_or("");
-        assert!(a.starts_with("+++ b/shop/a.py\n@@ -1,3 +1,3 @@\n") && a.contains("+    y\n"), "{a}");
+        assert!(
+            a.starts_with("+++ b/shop/a.py\n@@ -1,3 +1,3 @@\n") && a.contains("+    y\n"),
+            "{a}"
+        );
     }
 
     #[test]

@@ -29,14 +29,24 @@ fn incremental_build_records_the_file_diff() {
     write(dir, "c.py", "def c():\n    return 3\n");
 
     let mut cache = ParseCache::new();
-    assert!(cache.last_diff().is_none(), "a fresh cache has built nothing");
+    assert!(
+        cache.last_diff().is_none(),
+        "a fresh cache has built nothing"
+    );
 
     // Cold: every input is new to the cache.
     generate_one_with_cache(repo, &mut cache).expect("cold build");
-    let cold = cache.last_diff().expect("cold build recorded a diff").clone();
+    let cold = cache
+        .last_diff()
+        .expect("cold build recorded a diff")
+        .clone();
     assert_eq!(
         cold,
-        CacheDiff { reused: vec![], reparsed: names(&["a.py", "b.py", "c.py"]), evicted: vec![] }
+        CacheDiff {
+            reused: vec![],
+            reparsed: names(&["a.py", "b.py", "c.py"]),
+            evicted: vec![]
+        }
     );
 
     // Edit b, delete c, add d.
@@ -47,7 +57,10 @@ fn incremental_build_records_the_file_diff() {
     write(dir, "d.py", d_text);
 
     generate_one_with_cache(repo, &mut cache).expect("warm build");
-    let warm = cache.last_diff().expect("warm build recorded a diff").clone();
+    let warm = cache
+        .last_diff()
+        .expect("warm build recorded a diff")
+        .clone();
     assert_eq!(
         warm,
         CacheDiff {
@@ -59,13 +72,21 @@ fn incremental_build_records_the_file_diff() {
 
     // The marker counters ARE the diff's lengths.
     assert_eq!(
-        (cache.stats.reused, cache.stats.reparsed, cache.stats.evicted),
+        (
+            cache.stats.reused,
+            cache.stats.reparsed,
+            cache.stats.evicted
+        ),
         (warm.reused.len(), warm.reparsed.len(), warm.evicted.len())
     );
 
     // iter(): path order, one row per surviving file, each carrying the hash
     // of the text it was parsed from.
-    let texts = [("a.py", "def a():\n    return 1\n"), ("b.py", b_text), ("d.py", d_text)];
+    let texts = [
+        ("a.py", "def a():\n    return 1\n"),
+        ("b.py", b_text),
+        ("d.py", d_text),
+    ];
     let held: Vec<(String, u64, String)> = cache
         .iter()
         .map(|f| (f.path.to_string(), f.content_hash, f.lang.to_string()))
@@ -84,7 +105,18 @@ fn incremental_build_records_the_file_diff() {
     generate_one_with_cache(repo, &mut cache).expect("idle build");
     assert_eq!(
         cache.last_diff(),
-        Some(&CacheDiff { reused: names(&["a.py", "b.py", "d.py"]), reparsed: vec![], evicted: vec![] })
+        Some(&CacheDiff {
+            reused: names(&["a.py", "b.py", "d.py"]),
+            reparsed: vec![],
+            evicted: vec![]
+        })
     );
-    assert_eq!((cache.stats.reused, cache.stats.reparsed, cache.stats.evicted), (3, 0, 0));
+    assert_eq!(
+        (
+            cache.stats.reused,
+            cache.stats.reparsed,
+            cache.stats.evicted
+        ),
+        (3, 0, 0)
+    );
 }

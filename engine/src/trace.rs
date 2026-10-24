@@ -324,8 +324,14 @@ pub fn cross_stack_trace_with_live(
     let quotient = view.quotient(merged);
     let walk = WalkNodes::new(merged, &view, live, quotient.is_some());
     let (adj, succ) = match &quotient {
-        Some(q) => (Adjacency::carry(q, &CODE_PROFILE.tables), Successors::carry_over(q)),
-        None => (Adjacency::carry(merged, &CODE_PROFILE.tables), Successors::carry(merged)),
+        Some(q) => (
+            Adjacency::carry(q, &CODE_PROFILE.tables),
+            Successors::carry_over(q),
+        ),
+        None => (
+            Adjacency::carry(merged, &CODE_PROFILE.tables),
+            Successors::carry(merged),
+        ),
     };
     // The entry-flow tier (LD.4b, module doc): one-node mode, a dead end or
     // nothing resolved, and an entry key naming the feature.
@@ -1259,8 +1265,14 @@ fn rank(cands: &mut Vec<Candidate>, succ: &Successors, sides: &Sides<'_>, max_pa
             .then_with(|| b.mechanisms.cmp(&a.mechanisms))
             .then_with(|| b.cats.len().cmp(&a.cats.len()))
             .then_with(|| {
-                let qa = a.nodes.iter().map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
-                let qb = b.nodes.iter().map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
+                let qa = a
+                    .nodes
+                    .iter()
+                    .map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
+                let qb = b
+                    .nodes
+                    .iter()
+                    .map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
                 qa.cmp(qb)
             })
             .then_with(|| {
@@ -1285,12 +1297,7 @@ fn materialize(succ: &Successors, sides: &mut Sides<'_>, kept: &[Candidate]) -> 
                 .zip(&c.cats)
                 .enumerate()
                 .map(|(d, (w, &cat))| {
-                    sides.hop(
-                        d + 1,
-                        succ.ids[w[0] as usize],
-                        succ.ids[w[1] as usize],
-                        cat,
-                    )
+                    sides.hop(d + 1, succ.ids[w[0] as usize], succ.ids[w[1] as usize], cat)
                 })
                 .collect();
             path_of(i + 1, hops, true)
@@ -1341,6 +1348,10 @@ mod tests {
     fn default_options() {
         let o = TraceOptions::default();
         assert_eq!((o.depth, o.to.as_deref(), o.max_paths), (6, None, 10));
-        assert_eq!(o.collapse, Collapse::default(), "identity collapse on by default");
+        assert_eq!(
+            o.collapse,
+            Collapse::default(),
+            "identity collapse on by default"
+        );
     }
 }

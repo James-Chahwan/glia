@@ -144,11 +144,20 @@ fn child_build_for_stderr() {
 fn build_stderr(dir: &Path, prefix: &str) -> Vec<String> {
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, dir)
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.starts_with(prefix))
@@ -162,11 +171,17 @@ fn monorepo_rpc_and_event_sides_carry_their_owner() {
     let m = &r.merged;
     assert_eq!(
         qnames_of(m, node_kind::RPC_PROCEDURE),
-        ["rpc:user.list @services/legacy", "rpc:user.list @services/users"]
+        [
+            "rpc:user.list @services/legacy",
+            "rpc:user.list @services/users"
+        ]
     );
     assert_eq!(
         qnames_of(m, node_kind::RPC_CALL),
-        ["rpc_call:user.list @apps/admin", "rpc_call:user.list @apps/web"]
+        [
+            "rpc_call:user.list @apps/admin",
+            "rpc_call:user.list @apps/web"
+        ]
     );
     assert_eq!(
         qnames_of(m, node_kind::EVENT_EMITTER),
@@ -210,7 +225,8 @@ fn monorepo_rpc_and_event_sides_carry_their_owner() {
 
     // The delivery scope rides the rekey: the transport sides carry the
     // extractor's ORIGIN, the in-process ones post_passes' plain synthetic one.
-    let transport = r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#;
+    let transport =
+        r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#;
     let synthetic = r#"{"provenance":"synthetic"}"#;
     for (q, want) in [
         ("event_emit:orderShipped @services/orders", transport),
@@ -226,10 +242,16 @@ fn monorepo_rpc_and_event_sides_carry_their_owner() {
         for (id, q) in &g.nav.qname_by_id {
             match q.as_str() {
                 "rpc:user.list @services/users" => {
-                    assert_eq!(g.nav.name_by_id.get(id).map(String::as_str), Some("user.list"));
+                    assert_eq!(
+                        g.nav.name_by_id.get(id).map(String::as_str),
+                        Some("user.list")
+                    );
                 }
                 "event_emit:orderPlaced @services/orders" => {
-                    assert_eq!(g.nav.name_by_id.get(id).map(String::as_str), Some("orderPlaced"));
+                    assert_eq!(
+                        g.nav.name_by_id.get(id).map(String::as_str),
+                        Some("orderPlaced")
+                    );
                 }
                 _ => {}
             }
@@ -241,21 +263,37 @@ fn monorepo_rpc_and_event_sides_carry_their_owner() {
 fn rpc_pairs_across_owners_in_process_events_do_not() {
     let (_td, r) = monorepo();
     let m = &r.merged;
-    let rpc = |c: &str, p: &str| (format!("rpc_call:user.list @apps/{c}"), format!("rpc:user.list @services/{p}"));
+    let rpc = |c: &str, p: &str| {
+        (
+            format!("rpc_call:user.list @apps/{c}"),
+            format!("rpc:user.list @services/{p}"),
+        )
+    };
     assert_eq!(
         edges(m, edge_category::RPC_CALLS),
-        [rpc("admin", "legacy"), rpc("admin", "users"), rpc("web", "legacy"), rpc("web", "users")],
+        [
+            rpc("admin", "legacy"),
+            rpc("admin", "users"),
+            rpc("web", "legacy"),
+            rpc("web", "users")
+        ],
         "a network RPC: every call pairs every same-path procedure"
     );
     assert_eq!(
         edges(m, edge_category::EVENT_FLOWS),
         [
-            (s("event_emit:orderPlaced @services/billing"), s("event_handle:orderPlaced")),
+            (
+                s("event_emit:orderPlaced @services/billing"),
+                s("event_handle:orderPlaced")
+            ),
             (
                 s("event_emit:orderPlaced @services/billing"),
                 s("event_handle:orderPlaced @services/billing")
             ),
-            (s("event_emit:orderPlaced @services/orders"), s("event_handle:orderPlaced")),
+            (
+                s("event_emit:orderPlaced @services/orders"),
+                s("event_handle:orderPlaced")
+            ),
             (
                 s("event_emit:orderPlaced @services/orders"),
                 s("event_handle:orderPlaced @services/orders")
@@ -289,7 +327,9 @@ fn monorepo_markers_count_every_side_and_pair() {
         build_stderr(td.path(), "[eventbus-owner]"),
         // CB.5: `same-process=` counts pairs a workspace dependency keeps;
         // this fixture's service manifests declare none.
-        ["[eventbus-owner] same-owner=2 unowned-side=2 transport=1 same-process=0 cross-owner-dropped=2"]
+        [
+            "[eventbus-owner] same-owner=2 unowned-side=2 transport=1 same-process=0 cross-owner-dropped=2"
+        ]
     );
 }
 
@@ -313,9 +353,19 @@ fn service_map_places_every_rpc_and_event_side() {
         }
     }
     for e in ["services/billing", "services/orders"] {
-        want.insert((s(e), s("(outside projects)"), "EVENT_FLOWS", s("orderPlaced")));
+        want.insert((
+            s(e),
+            s("(outside projects)"),
+            "EVENT_FLOWS",
+            s("orderPlaced"),
+        ));
     }
-    want.insert((s("services/orders"), s("services/notify"), "EVENT_FLOWS", s("orderShipped")));
+    want.insert((
+        s("services/orders"),
+        s("services/notify"),
+        "EVENT_FLOWS",
+        s("orderShipped"),
+    ));
     assert_eq!(links, want);
     assert_eq!(map.links.len(), 7);
     assert_eq!(map.self_links, 2, "orders -> orders and billing -> billing");
@@ -335,16 +385,31 @@ fn connect_procedures_take_the_owner() {
     let m = build(d).merged;
     let say = "connectrpc.eliza.v1.ElizaService.Say";
     let procedures = qnames_of(&m, node_kind::RPC_PROCEDURE);
-    assert!(procedures.contains(&format!("rpc:{say} @services/eliza")), "{procedures:?}");
-    assert!(procedures.iter().all(|q| q.ends_with(" @services/eliza")), "{procedures:?}");
-    assert_eq!(qnames_of(&m, node_kind::RPC_CALL), [format!("rpc_call:{say} @apps/web")]);
+    assert!(
+        procedures.contains(&format!("rpc:{say} @services/eliza")),
+        "{procedures:?}"
+    );
+    assert!(
+        procedures.iter().all(|q| q.ends_with(" @services/eliza")),
+        "{procedures:?}"
+    );
+    assert_eq!(
+        qnames_of(&m, node_kind::RPC_CALL),
+        [format!("rpc_call:{say} @apps/web")]
+    );
     assert_eq!(
         edges(&m, edge_category::RPC_CALLS),
-        [(format!("rpc_call:{say} @apps/web"), format!("rpc:{say} @services/eliza"))]
+        [(
+            format!("rpc_call:{say} @apps/web"),
+            format!("rpc:{say} @services/eliza")
+        )]
     );
     let services = qnames_of(&m, node_kind::GRPC_SERVICE);
     assert!(!services.is_empty(), "the proto declares ElizaService");
-    assert!(services.iter().all(|q| !q.contains(" @")), "a GRPC_SERVICE is never owned: {services:?}");
+    assert!(
+        services.iter().all(|q| !q.contains(" @")),
+        "a GRPC_SERVICE is never owned: {services:?}"
+    );
 }
 
 /// A Solidity `event` is an EVENT_EMITTER with a code qname: never owned, and
@@ -363,7 +428,10 @@ fn solidity_declared_events_keep_code_qnames() {
          function bid() public {\n        emit BidPlaced(msg.sender);\n    }\n}\n",
     );
     let m = build(d).merged;
-    assert_eq!(qnames_of(&m, node_kind::EVENT_EMITTER), ["contracts::Auction::Auction::BidPlaced"]);
+    assert_eq!(
+        qnames_of(&m, node_kind::EVENT_EMITTER),
+        ["contracts::Auction::Auction::BidPlaced"]
+    );
     let owner = build_stderr(d, "[channel-owner]");
     assert_eq!(owner.len(), 1, "{owner:?}");
     assert!(
@@ -391,7 +459,12 @@ fn incremental_matches_clean() {
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&out)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect();
         files.sort();
         files
@@ -405,6 +478,14 @@ fn incremental_matches_clean() {
         "the warm build qualifies cache-served parses too"
     );
     let clean_bytes = write_gmap(&clean, "clean");
-    assert_eq!(write_gmap(&cold, "cold"), clean_bytes, "cold incremental == clean");
-    assert_eq!(write_gmap(&warm, "warm"), clean_bytes, "warm incremental == clean");
+    assert_eq!(
+        write_gmap(&cold, "cold"),
+        clean_bytes,
+        "cold incremental == clean"
+    );
+    assert_eq!(
+        write_gmap(&warm, "warm"),
+        clean_bytes,
+        "warm incremental == clean"
+    );
 }

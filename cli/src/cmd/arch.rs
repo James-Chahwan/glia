@@ -130,7 +130,11 @@ fn print_service_table(repo: &str, map: &glia_engine::ServiceMap) {
         println!("| from | → to | mechanism | channel | × |");
         println!("|---|---|---|---|--:|");
         for l in &map.links {
-            let channel = if l.channel.is_empty() { "—" } else { &l.channel };
+            let channel = if l.channel.is_empty() {
+                "—"
+            } else {
+                &l.channel
+            };
             println!(
                 "| {} | {} | {} | {} | {} |",
                 l.from, l.to, l.mechanism, channel, l.count

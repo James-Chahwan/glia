@@ -23,8 +23,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_projection_text::driver_utils::{read_json, write_json};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -79,7 +79,11 @@ struct ConstantDecl {
     line: usize,
 }
 
-fn extract_constants_from_file(content: &str, module_qname: &str, file_rel: &str) -> Vec<ConstantDecl> {
+fn extract_constants_from_file(
+    content: &str,
+    module_qname: &str,
+    file_rel: &str,
+) -> Vec<ConstantDecl> {
     let assign_re = Regex::new(r"(?m)^([A-Z][A-Z0-9_]{2,})\s*=\s*(.+?)$").unwrap();
     let mut out = Vec::new();
     for cap in assign_re.captures_iter(content) {
@@ -123,11 +127,16 @@ fn main() -> Result<()> {
     let issue = fs::read_to_string(&args.issue)
         .with_context(|| format!("read {}", args.issue.display()))?;
     let (issue_tokens, issue_token_counts) = extract_issue_uppercase_tokens(&issue);
-    eprintln!("[constdecl] {} UPPERCASE issue tokens: {}",
+    eprintln!(
+        "[constdecl] {} UPPERCASE issue tokens: {}",
         issue_tokens.len(),
-        issue_tokens.iter().take(8)
+        issue_tokens
+            .iter()
+            .take(8)
             .map(|t| format!("{}×{}", t, issue_token_counts.get(t).copied().unwrap_or(0)))
-            .collect::<Vec<_>>().join(", "));
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     if issue_tokens.is_empty() {
         eprintln!("[constdecl] no issue tokens; emitting 0 cells");
@@ -142,8 +151,12 @@ fn main() -> Result<()> {
     let mut by_module: HashMap<String, Vec<ConstantDecl>> = HashMap::new();
     let mut files_scanned = 0usize;
     for entry in WalkDir::new(&args.src).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() { continue; }
-        if entry.path().extension().map_or(true, |x| x != "py") { continue; }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().map_or(true, |x| x != "py") {
+            continue;
+        }
         let rel = entry.path().strip_prefix(&args.src).unwrap_or(entry.path());
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let module_qname = rel_str.trim_end_matches(".py").replace('/', "::");
@@ -157,8 +170,11 @@ fn main() -> Result<()> {
             by_module.insert(module_qname, consts);
         }
     }
-    eprintln!("[constdecl] scanned {} files, {} have UPPERCASE constants",
-        files_scanned, by_module.len());
+    eprintln!(
+        "[constdecl] scanned {} files, {} have UPPERCASE constants",
+        files_scanned,
+        by_module.len()
+    );
 
     // Match issue tokens against per-module constants. Emit one cell per
     // (module, matched-name) pair. Stable order for reproducibility.
@@ -173,7 +189,8 @@ fn main() -> Result<()> {
             if !issue_token_set.contains(c.name.as_str()) {
                 continue;
             }
-            let co_located: Vec<&str> = names_in_module.iter()
+            let co_located: Vec<&str> = names_in_module
+                .iter()
                 .filter(|n| **n != c.name.as_str())
                 .copied()
                 .take(args.colocated_cap)
@@ -185,7 +202,11 @@ fn main() -> Result<()> {
                 c.line,
                 c.name,
                 c.value,
-                if co_located.is_empty() { "(none)".to_string() } else { co_located.join(", ") },
+                if co_located.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    co_located.join(", ")
+                },
             );
             // Score by issue mention count × 5.0 — N=2 lesson from django-10914:
             // a constant mentioned 3× ("FILE_UPLOAD_PERMISSIONS") in the issue is
@@ -193,7 +214,10 @@ fn main() -> Result<()> {
             // loop sorts by this score descending and takes top-3 for the prefix
             // constants block, so multi-mentioned constants outrank tangential
             // ones (e.g. FILE_UPLOAD_HANDLERS mentioned only as co-located noise).
-            let mention_count = issue_token_counts.get(c.name.as_str()).copied().unwrap_or(1);
+            let mention_count = issue_token_counts
+                .get(c.name.as_str())
+                .copied()
+                .unwrap_or(1);
             let score = (mention_count as f64) * 5.0;
             new_cells.push(SummaryEntry {
                 id: next_id,
@@ -207,7 +231,9 @@ fn main() -> Result<()> {
                 break;
             }
         }
-        if new_cells.len() >= args.max_cells { break; }
+        if new_cells.len() >= args.max_cells {
+            break;
+        }
     }
 
     eprintln!("[constdecl] {} ConstantDecl cells emitted", new_cells.len());
@@ -218,7 +244,11 @@ fn main() -> Result<()> {
     let mut existing: Vec<SummaryEntry> = read_json(&args.summaries)?;
     existing.extend(new_cells);
     write_json(&args.out, &existing)?;
-    eprintln!("[constdecl] wrote {} ({} total cells)", args.out.display(), existing.len());
+    eprintln!(
+        "[constdecl] wrote {} ({} total cells)",
+        args.out.display(),
+        existing.len()
+    );
 
     Ok(())
 }

@@ -89,7 +89,12 @@ pub fn hint_rows_with(
         .enumerate()
         .map(|(i, node)| HintRow {
             key: node.key.clone(),
-            hint: fact_nodes.get(i).copied().flatten().and_then(|id| ids.get(&id)).map(Identity::hint),
+            hint: fact_nodes
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|id| ids.get(&id))
+                .map(Identity::hint),
         })
         .collect();
     rows.sort_by(|a, b| a.key.cmp(&b.key));
@@ -99,7 +104,10 @@ pub fn hint_rows_with(
 /// The side file's bytes for `rows` (of a gmap whose `content_digest` is
 /// `digest`).
 fn side_bytes(rows: &[HintRow], digest: u64) -> serde_json::Result<(Vec<u8>, HintsSideStats)> {
-    let stats = HintsSideStats { facts: rows.len(), hinted: rows.iter().filter(|r| r.hint.is_some()).count() };
+    let stats = HintsSideStats {
+        facts: rows.len(),
+        hinted: rows.iter().filter(|r| r.hint.is_some()).count(),
+    };
     let header: BTreeMap<&str, serde_json::Value> = BTreeMap::from([
         ("facts", stats.facts.into()),
         ("gmap_digest", format!("{digest:016x}").into()),
@@ -110,7 +118,10 @@ fn side_bytes(rows: &[HintRow], digest: u64) -> serde_json::Result<(Vec<u8>, Hin
     let mut out = serde_json::to_vec(&header)?;
     out.push(b'\n');
     for row in rows {
-        let hint = row.hint.as_deref().map_or(serde_json::Value::Null, serde_json::Value::from);
+        let hint = row
+            .hint
+            .as_deref()
+            .map_or(serde_json::Value::Null, serde_json::Value::from);
         let line: BTreeMap<&str, serde_json::Value> =
             BTreeMap::from([("hint", hint), ("key", row.key.as_str().into())]);
         out.extend(serde_json::to_vec(&line)?);
@@ -166,9 +177,16 @@ mod tests {
         let repo = RepoId(1);
         let pos = |row: u32| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"src/m.py","start_line":{row},"end_line":{row}}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"src/m.py","start_line":{row},"end_line":{row}}}"#
+            )),
         };
-        let node = |id: NodeId, cells: Vec<Cell>| Node { id, repo, confidence: Confidence::Strong, cells };
+        let node = |id: NodeId, cells: Vec<Cell>| Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        };
         let mut nav = CodeNav::default();
         nav.record(MODULE, "m", "app::m", node_kind::MODULE, None);
         nav.record(FUNC, "f", "app::m::f", node_kind::FUNCTION, Some(MODULE));
@@ -178,7 +196,16 @@ mod tests {
             repo,
             nodes: vec![
                 node(MODULE, vec![pos(0)]),
-                node(FUNC, vec![pos(0), Cell { kind: cell_type::CODE, payload: CellPayload::Text(body.into()) }]),
+                node(
+                    FUNC,
+                    vec![
+                        pos(0),
+                        Cell {
+                            kind: cell_type::CODE,
+                            payload: CellPayload::Text(body.into()),
+                        },
+                    ],
+                ),
                 node(ROUTE, Vec::new()),
             ],
             edges: Vec::new(),
@@ -211,7 +238,11 @@ mod tests {
     fn gmap() -> (Gmap, Vec<Option<NodeId>>) {
         let gmap = Gmap {
             format_version: engram_core::GMAP_FORMAT_VERSION,
-            nodes: vec![fact("app::m::f"), fact("GET /x"), fact("app::m::f#natspec:notice")],
+            nodes: vec![
+                fact("app::m::f"),
+                fact("GET /x"),
+                fact("app::m::f#natspec:notice"),
+            ],
             edges: Vec::new(),
             files: BTreeMap::new(),
         };
@@ -222,7 +253,13 @@ mod tests {
     fn header_and_rows_have_the_documented_bytes() {
         let (m, (g, nodes)) = (merged(), gmap());
         let (bytes, stats) = side_bytes(&hint_rows(&m, &g, &nodes), 0xabc).unwrap();
-        assert_eq!(stats, HintsSideStats { facts: 3, hinted: 1 });
+        assert_eq!(
+            stats,
+            HintsSideStats {
+                facts: 3,
+                hinted: 1
+            }
+        );
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.ends_with('\n'));
         let lines: Vec<&str> = text.lines().collect();
@@ -230,9 +267,17 @@ mod tests {
             lines[0],
             r#"{"facts":3,"gmap_digest":"0000000000000abc","hint_version":"v1","hinted":1,"hints_side":1}"#
         );
-        let hint = identity_of(&m, FUNC).expect("the function has a MODULE and a file").hint();
-        assert!(hint.starts_with(&format!("v1|{}|m.py|", node_kind::FUNCTION.0)), "{hint}");
-        assert!(hint.ends_with("|f") && !hint.contains("|0000000000000000|"), "a hashed body: {hint}");
+        let hint = identity_of(&m, FUNC)
+            .expect("the function has a MODULE and a file")
+            .hint();
+        assert!(
+            hint.starts_with(&format!("v1|{}|m.py|", node_kind::FUNCTION.0)),
+            "{hint}"
+        );
+        assert!(
+            hint.ends_with("|f") && !hint.contains("|0000000000000000|"),
+            "a hashed body: {hint}"
+        );
         assert_eq!(
             &lines[1..],
             [
@@ -263,7 +308,11 @@ mod tests {
         assert!(hint_rows(&m, &g, &[]).iter().all(|r| r.hint.is_none()));
         // Out of range past the first entry: only the first fact is hinted.
         let rows = hint_rows(&m, &g, &[Some(FUNC)]);
-        let hinted: Vec<&str> = rows.iter().filter(|r| r.hint.is_some()).map(|r| r.key.as_str()).collect();
+        let hinted: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.hint.is_some())
+            .map(|r| r.key.as_str())
+            .collect();
         assert_eq!(hinted, ["app::m::f"]);
         // A node with no identity, or one the graph does not have.
         let rows = hint_rows(&m, &g, &[Some(ROUTE), Some(NodeId(99)), None]);

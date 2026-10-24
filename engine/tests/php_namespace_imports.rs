@@ -26,7 +26,9 @@ type Row = (u32, String, u32, String, String);
 /// Copy every source file of fixture `name` (not its key.json) into a fresh
 /// tempdir.
 fn copy_fixture(name: &str) -> tempfile::TempDir {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(name);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(name);
     let dst = tempfile::tempdir().expect("tempdir");
     let mut stack = vec![src.clone()];
     while let Some(dir) = stack.pop() {
@@ -75,12 +77,18 @@ fn rule_of(rows: &[Row], from: (NodeKindId, &str), to: (NodeKindId, &str)) -> Op
         (*fk, f.as_str()) == (from.0.0, from.1) && (*tk, t.as_str()) == (to.0.0, to.1)
     });
     let hit = hits.next().map(|r| r.4.clone());
-    assert!(hits.next().is_none(), "one edge {from:?} -> {to:?}; rows = {rows:?}");
+    assert!(
+        hits.next().is_none(),
+        "one edge {from:?} -> {to:?}; rows = {rows:?}"
+    );
     hit
 }
 
 fn targets_of<'a>(rows: &'a [Row], from: &str) -> Vec<&'a str> {
-    rows.iter().filter(|r| r.1 == from).map(|r| r.3.as_str()).collect()
+    rows.iter()
+        .filter(|r| r.1 == from)
+        .map(|r| r.3.as_str())
+        .collect()
 }
 
 const ORDER: &str = "src::Orders::OrderService";
@@ -94,8 +102,16 @@ fn two_invoicers_each_bind_their_own_namespace() {
     let imports = edges("php-use-qualified-binding", edge_category::IMPORTS);
     let m = node_kind::MODULE;
     let c = node_kind::CLASS;
-    assert_eq!(rule_of(&imports, (m, ORDER), (c, BILLING)).as_deref(), Some("namespace"), "{imports:?}");
-    assert_eq!(rule_of(&imports, (m, SHIPMENT), (c, SHIPPING)).as_deref(), Some("namespace"), "{imports:?}");
+    assert_eq!(
+        rule_of(&imports, (m, ORDER), (c, BILLING)).as_deref(),
+        Some("namespace"),
+        "{imports:?}"
+    );
+    assert_eq!(
+        rule_of(&imports, (m, SHIPMENT), (c, SHIPPING)).as_deref(),
+        Some("namespace"),
+        "{imports:?}"
+    );
     assert_eq!(targets_of(&imports, ORDER), [BILLING], "{imports:?}");
     assert_eq!(targets_of(&imports, SHIPMENT), [SHIPPING], "{imports:?}");
     // `use App\Legal\Invoicer`: no file declares App\Legal.
@@ -105,24 +121,47 @@ fn two_invoicers_each_bind_their_own_namespace() {
     let fq = node_kind::METHOD;
     let place = (fq, "src::Orders::OrderService::place");
     let ship = (fq, "src::Orders::ShipmentService::ship");
-    assert!(rule_of(&calls, place, (fq, "src::Billing::Invoicer::issue")).is_some(), "{calls:?}");
-    assert!(rule_of(&calls, ship, (fq, "src::Shipping::Invoicer::issue")).is_some(), "{calls:?}");
-    assert!(rule_of(&calls, ship, (fq, "src::Billing::Invoicer::issue")).is_none(), "{calls:?}");
-    assert!(targets_of(&calls, "src::Orders::LegalService::check").is_empty(), "{calls:?}");
+    assert!(
+        rule_of(&calls, place, (fq, "src::Billing::Invoicer::issue")).is_some(),
+        "{calls:?}"
+    );
+    assert!(
+        rule_of(&calls, ship, (fq, "src::Shipping::Invoicer::issue")).is_some(),
+        "{calls:?}"
+    );
+    assert!(
+        rule_of(&calls, ship, (fq, "src::Billing::Invoicer::issue")).is_none(),
+        "{calls:?}"
+    );
+    assert!(
+        targets_of(&calls, "src::Orders::LegalService::check").is_empty(),
+        "{calls:?}"
+    );
 }
 
 #[test]
 fn an_undeclared_namespace_under_the_repo_root_binds_nothing() {
     let imports = edges("php-use-unique-wrong-namespace", edge_category::IMPORTS);
-    assert!(targets_of(&imports, LEGAL).is_empty(), "HEAD's tail guess bound Billing's; {imports:?}");
+    assert!(
+        targets_of(&imports, LEGAL).is_empty(),
+        "HEAD's tail guess bound Billing's; {imports:?}"
+    );
     // The control: the declared namespace binds, now by rule `namespace`.
     assert_eq!(
-        rule_of(&imports, (node_kind::MODULE, ORDER), (node_kind::CLASS, BILLING)).as_deref(),
+        rule_of(
+            &imports,
+            (node_kind::MODULE, ORDER),
+            (node_kind::CLASS, BILLING)
+        )
+        .as_deref(),
         Some("namespace"),
         "{imports:?}"
     );
     let calls = edges("php-use-unique-wrong-namespace", edge_category::CALLS);
-    assert!(targets_of(&calls, "src::Orders::LegalService::check").is_empty(), "{calls:?}");
+    assert!(
+        targets_of(&calls, "src::Orders::LegalService::check").is_empty(),
+        "{calls:?}"
+    );
     assert_eq!(
         targets_of(&calls, "src::Orders::OrderService::place"),
         ["src::Billing::Invoicer::issue"],

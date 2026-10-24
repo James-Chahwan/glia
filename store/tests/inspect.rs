@@ -15,8 +15,12 @@ use glia_store::{
 };
 
 fn entries(pairs: impl Iterator<Item = (u32, &'static str)>) -> Vec<RegistryEntry> {
-    let mut out: Vec<RegistryEntry> =
-        pairs.map(|(id, name)| RegistryEntry { id, name: name.to_string() }).collect();
+    let mut out: Vec<RegistryEntry> = pairs
+        .map(|(id, name)| RegistryEntry {
+            id,
+            name: name.to_string(),
+        })
+        .collect();
     out.sort_by_key(|e| e.id);
     out
 }
@@ -27,8 +31,16 @@ fn header_registries_match_code_domain() {
     let kinds = entries(node_kind::ALL.iter().map(|(id, n)| (id.0, *n)));
     let cats = entries(edge_category::ALL.iter().map(|(id, n)| (id.0, *n)));
     let cells = entries(cell_type::ALL.iter().map(|(id, n)| (id.0, *n)));
-    assert_eq!(h.node_kind_registry.len(), node_kind::ALL.len(), "node kinds");
-    assert_eq!(h.edge_category_registry.len(), edge_category::ALL.len(), "edge categories");
+    assert_eq!(
+        h.node_kind_registry.len(),
+        node_kind::ALL.len(),
+        "node kinds"
+    );
+    assert_eq!(
+        h.edge_category_registry.len(),
+        edge_category::ALL.len(),
+        "edge categories"
+    );
     assert_eq!(h.cell_registry.len(), cell_type::ALL.len(), "cell types");
     assert_eq!(h.node_kind_registry, kinds);
     assert_eq!(h.edge_category_registry, cats);
@@ -41,15 +53,28 @@ fn repo() -> RepoId {
 }
 
 fn node(id: u64, cells: Vec<Cell>) -> Node {
-    Node { id: NodeId(id), repo: repo(), confidence: Confidence::Strong, cells }
+    Node {
+        id: NodeId(id),
+        repo: repo(),
+        confidence: Confidence::Strong,
+        cells,
+    }
 }
 
 fn cell(kind: u32) -> Cell {
-    Cell { kind: CellTypeId(kind), payload: CellPayload::Text("x".into()) }
+    Cell {
+        kind: CellTypeId(kind),
+        payload: CellPayload::Text("x".into()),
+    }
 }
 
 /// Write a toy core (no sections) and return its path inside `dir`.
-fn write_toy(dir: &std::path::Path, header: Header, kinds: &[(u64, u32)], edge_cells: Vec<Cell>) -> std::path::PathBuf {
+fn write_toy(
+    dir: &std::path::Path,
+    header: Header,
+    kinds: &[(u64, u32)],
+    edge_cells: Vec<Cell>,
+) -> std::path::PathBuf {
     let path = dir.join("toy.gmap");
     let mut core = Container {
         header,
@@ -62,7 +87,10 @@ fn write_toy(dir: &std::path::Path, header: Header, kinds: &[(u64, u32)], edge_c
             confidence: Confidence::Strong,
             cells: edge_cells,
         }],
-        node_kinds: kinds.iter().map(|(n, k)| (NodeId(*n), NodeKindId(*k))).collect(),
+        node_kinds: kinds
+            .iter()
+            .map(|(n, k)| (NodeId(*n), NodeKindId(*k)))
+            .collect(),
         sections: Vec::new(),
     };
     write_container(&path, &mut core, &[]).unwrap();
@@ -126,7 +154,11 @@ fn unregistered_ids_are_counted() {
     assert_eq!(flat(&s.edge_cells), vec![nc(1, "CHARGE", 1)]);
     assert_eq!(s.unregistered, 1);
     assert_eq!(ins.totals.unregistered, 1);
-    assert!(ins.marker().ends_with("edge_cells=1 unregistered=1"), "{}", ins.marker());
+    assert!(
+        ins.marker().ends_with("edge_cells=1 unregistered=1"),
+        "{}",
+        ins.marker()
+    );
 
     // A header with empty registries (`Header::new`) names nothing: every id
     // is `#<id>`, never a code-domain name.
@@ -144,7 +176,10 @@ fn inspect_reports_what_it_cannot_read() {
     let old = tmp.path().join("old.gmap");
     std::fs::write(&old, b"pre-0.5.0 bytes, no preamble").unwrap();
     let err = inspect_path(&old).unwrap_err();
-    assert!(matches!(err, StoreError::OldFormat { found: None }), "{err:?}");
+    assert!(
+        matches!(err, StoreError::OldFormat { found: None }),
+        "{err:?}"
+    );
     assert!(err.to_string().contains("rebuild the graph"), "{err}");
 
     let missing = inspect_path(&tmp.path().join("nope.gmap")).unwrap_err();

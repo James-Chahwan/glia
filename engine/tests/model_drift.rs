@@ -770,7 +770,14 @@ fn a_required_bind_the_client_may_omit_breaks_the_request_row() {
     let text = std::fs::read_to_string(&ts).unwrap();
     let old = "export interface NewInvoice {\n  customerName: string;";
     assert!(text.contains(old), "the fixture's NewInvoice moved");
-    std::fs::write(&ts, text.replace(old, "export interface NewInvoice {\n  customerName?: string;")).unwrap();
+    std::fs::write(
+        &ts,
+        text.replace(
+            old,
+            "export interface NewInvoice {\n  customerName?: string;",
+        ),
+    )
+    .unwrap();
     let dirs: Vec<String> = ["web", "api"]
         .iter()
         .map(|d| tmp.path().join(d).to_str().unwrap().to_string())
@@ -778,7 +785,12 @@ fn a_required_bind_the_client_may_omit_breaks_the_request_row() {
     assert_eq!(
         fixture_dirs("models-http-shop")
             .iter()
-            .map(|d| Path::new(d).file_name().unwrap().to_str().unwrap().to_string())
+            .map(|d| Path::new(d)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string())
             .collect::<Vec<_>>(),
         ["web", "api"],
         "the variant builds the fixture's dirs"

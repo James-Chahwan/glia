@@ -52,7 +52,9 @@ impl RankBase {
             "ppr" => Ok(RankBase::Ppr),
             "ppr-wide" => Ok(RankBase::PprWide),
             "bfs" => Ok(RankBase::Bfs),
-            _ => Err(format!("unknown ranking `{s}`: expected one of ppr, ppr-wide, bfs")),
+            _ => Err(format!(
+                "unknown ranking `{s}`: expected one of ppr, ppr-wide, bfs"
+            )),
         }
     }
 
@@ -110,23 +112,36 @@ impl Default for Ranking {
     /// the first run; round 3's review shape H10 - P1 above 0 on 5 / 4 / 4 of
     /// 12 repos, below on 0 / 0 / 1.
     fn default() -> Self {
-        Ranking { base: RankBase::Ppr, cochange_first: true }
+        Ranking {
+            base: RankBase::Ppr,
+            cochange_first: true,
+        }
     }
 }
 
 impl Ranking {
     /// `P1`: the 0.5.2 row order.
     pub const fn head() -> Self {
-        Ranking { base: RankBase::Ppr, cochange_first: false }
+        Ranking {
+            base: RankBase::Ppr,
+            cochange_first: false,
+        }
     }
 
     pub const fn new(base: RankBase, cochange_first: bool) -> Self {
-        Ranking { base, cochange_first }
+        Ranking {
+            base,
+            cochange_first,
+        }
     }
 
     /// `ppr`, `ppr-wide`, `bfs`, or `cochange+<base>`.
     pub fn name(&self) -> String {
-        if self.cochange_first { format!("cochange+{}", self.base.name()) } else { self.base.name().to_string() }
+        if self.cochange_first {
+            format!("cochange+{}", self.base.name())
+        } else {
+            self.base.name().to_string()
+        }
     }
 
     /// The rank_eval ranker this ranking ports: `P1`, `PT*`, `B0`, `H10`,
@@ -190,9 +205,15 @@ mod tests {
 
     #[test]
     fn structure_candidates_are_sels0() {
-        let names: Vec<&str> = STRUCTURE_CANDIDATES.iter().map(|b| b.harness_name()).collect();
+        let names: Vec<&str> = STRUCTURE_CANDIDATES
+            .iter()
+            .map(|b| b.harness_name())
+            .collect();
         assert_eq!(names, ["P1", "PT*", "B0"]);
-        let h: Vec<&str> = STRUCTURE_CANDIDATES.iter().map(|&b| Ranking::new(b, true).harness_name()).collect();
+        let h: Vec<&str> = STRUCTURE_CANDIDATES
+            .iter()
+            .map(|&b| Ranking::new(b, true).harness_name())
+            .collect();
         assert_eq!(h, ["H10", "H10[PT*]", "H10[B0]"]);
     }
 
@@ -207,8 +228,22 @@ mod tests {
         for bad in ["", "p1", "H10[P1]", "H9s50", "LX[C0,W5,P1]"] {
             assert_eq!(Ranking::from_harness_name(bad), None, "{bad}");
         }
-        let names: Vec<String> = six.iter().filter_map(|n| Ranking::from_harness_name(n)).map(|r| r.name()).collect();
-        assert_eq!(names, ["ppr", "ppr-wide", "bfs", "cochange+ppr", "cochange+ppr-wide", "cochange+bfs"]);
+        let names: Vec<String> = six
+            .iter()
+            .filter_map(|n| Ranking::from_harness_name(n))
+            .map(|r| r.name())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ppr",
+                "ppr-wide",
+                "bfs",
+                "cochange+ppr",
+                "cochange+ppr-wide",
+                "cochange+bfs"
+            ]
+        );
     }
 
     #[test]

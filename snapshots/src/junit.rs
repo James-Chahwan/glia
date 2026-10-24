@@ -19,9 +19,9 @@
 
 use std::borrow::Cow;
 
+use glia_code_domain::snapshots::{SOURCE_JUNIT, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
-use glia_code_domain::snapshots::{SOURCE_JUNIT, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
 use serde::Serialize;
 
 use crate::MAX_REPORT_BYTES;
@@ -87,9 +87,16 @@ struct State {
 /// counts. Malformed XML, a document cut off inside an element, a root other
 /// than `<testsuites>` / `<testsuite>`, or more than 50 MiB is an error for
 /// this report only.
-pub fn parse_junit(bytes: &[u8], report: &str) -> Result<(Vec<TestCaseRecord>, JunitCounts), String> {
+pub fn parse_junit(
+    bytes: &[u8],
+    report: &str,
+) -> Result<(Vec<TestCaseRecord>, JunitCounts), String> {
     if bytes.len() > MAX_REPORT_BYTES {
-        return Err(format!("{} bytes is over the {} MiB report cap", bytes.len(), MAX_REPORT_BYTES >> 20));
+        return Err(format!(
+            "{} bytes is over the {} MiB report cap",
+            bytes.len(),
+            MAX_REPORT_BYTES >> 20
+        ));
     }
     let text = String::from_utf8_lossy(bytes);
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -113,7 +120,9 @@ pub fn parse_junit(bytes: &[u8], report: &str) -> Result<(Vec<TestCaseRecord>, J
                 st.end(kind, report);
             }
             Event::Text(t) if st.capturing() => {
-                let text = t.unescape().unwrap_or_else(|_| Cow::Owned(String::from_utf8_lossy(&t).into_owned()));
+                let text = t
+                    .unescape()
+                    .unwrap_or_else(|_| Cow::Owned(String::from_utf8_lossy(&t).into_owned()));
                 st.push_body(&text);
             }
             Event::CData(c) if st.capturing() => {
@@ -124,7 +133,10 @@ pub fn parse_junit(bytes: &[u8], report: &str) -> Result<(Vec<TestCaseRecord>, J
         }
     }
     if !st.open.is_empty() {
-        return Err(format!("document ends with {} element(s) still open", st.open.len()));
+        return Err(format!(
+            "document ends with {} element(s) still open",
+            st.open.len()
+        ));
     }
     if !st.root_seen {
         return Err("no <testsuites> or <testsuite> element".to_string());
@@ -139,14 +151,18 @@ impl State {
         let tag = local.as_ref();
         if !self.root_seen {
             if tag != b"testsuites" && tag != b"testsuite" {
-                return Err(format!("root element <{}> is not <testsuites> or <testsuite>", String::from_utf8_lossy(tag)));
+                return Err(format!(
+                    "root element <{}> is not <testsuites> or <testsuite>",
+                    String::from_utf8_lossy(tag)
+                ));
             }
             self.root_seen = true;
         }
         let parent = self.open.last().copied();
         let kind = match tag {
             b"testsuites" => {
-                let pytest = self.in_pytest() || attr(e, b"name").is_some_and(|n| n.starts_with("pytest"));
+                let pytest =
+                    self.in_pytest() || attr(e, b"name").is_some_and(|n| n.starts_with("pytest"));
                 self.suites.push(Suite { name: None, pytest });
                 Open::Suite
             }
@@ -159,7 +175,11 @@ impl State {
             b"testcase" if self.case.is_none() => {
                 let pytest = self.in_pytest();
                 let line = attr(e, b"line").and_then(|l| l.trim().parse::<u32>().ok());
-                let line = if pytest { line.map(|l| l.saturating_add(1)) } else { line.filter(|&l| l > 0) };
+                let line = if pytest {
+                    line.map(|l| l.saturating_add(1))
+                } else {
+                    line.filter(|&l| l > 0)
+                };
                 self.case = Some(Case {
                     suite: self.suites.iter().rev().find_map(|s| s.name.clone()),
                     classname: attr(e, b"classname").or_else(|| attr(e, b"class")),
@@ -173,8 +193,16 @@ impl State {
             }
             b"failure" | b"error" if parent == Some(Open::Case) => match &mut self.case {
                 Some(case) if case.outcome.is_none() => {
-                    let status = if tag == b"failure" { STATUS_FAILED } else { STATUS_ERROR };
-                    case.outcome = Some(Outcome { status, message: attr(e, b"message"), body: String::new() });
+                    let status = if tag == b"failure" {
+                        STATUS_FAILED
+                    } else {
+                        STATUS_ERROR
+                    };
+                    case.outcome = Some(Outcome {
+                        status,
+                        message: attr(e, b"message"),
+                        body: String::new(),
+                    });
                     Open::Outcome
                 }
                 _ => Open::Other,
@@ -224,7 +252,12 @@ impl State {
             .message
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty())
-            .or_else(|| body.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string));
+            .or_else(|| {
+                body.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string)
+            });
         let mut record = TestCaseRecord {
             // `append_tests_run` stamps the run's seq.
             seq: 0,
@@ -254,7 +287,9 @@ impl State {
     }
 
     fn push_body(&mut self, text: &str) {
-        let Some(outcome) = self.case.as_mut().and_then(|c| c.outcome.as_mut()) else { return };
+        let Some(outcome) = self.case.as_mut().and_then(|c| c.outcome.as_mut()) else {
+            return;
+        };
         let room = BODY_READ_CAP.saturating_sub(outcome.body.len());
         let mut cut = text.len().min(room);
         while !text.is_char_boundary(cut) {
@@ -266,11 +301,14 @@ impl State {
 
 /// An attribute's unescaped value, matched on its local name (`xsi:x` is `x`).
 fn attr(e: &BytesStart, key: &[u8]) -> Option<String> {
-    e.attributes().flatten().find(|a| a.key.local_name().as_ref() == key).map(|a| {
-        a.unescape_value()
-            .map(Cow::into_owned)
-            .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned())
-    })
+    e.attributes()
+        .flatten()
+        .find(|a| a.key.local_name().as_ref() == key)
+        .map(|a| {
+            a.unescape_value()
+                .map(Cow::into_owned)
+                .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned())
+        })
 }
 
 #[cfg(test)]
@@ -283,7 +321,16 @@ mod tests {
             <testcase classname="c" name="t"><failure message="first">a</failure><error message="second">b</error></testcase>
           </testsuite><testcase name="u"><skipped/></testcase></testsuite></testsuites>"#;
         let (rows, counts) = parse_junit(xml, "r.xml").unwrap();
-        assert_eq!(counts, JunitCounts { cases: 2, failed: 1, errors: 0, skipped: 1, passed: 0 });
+        assert_eq!(
+            counts,
+            JunitCounts {
+                cases: 2,
+                failed: 1,
+                errors: 0,
+                skipped: 1,
+                passed: 0
+            }
+        );
         assert_eq!(rows[0].suite.as_deref(), Some("inner"));
         assert_eq!(rows[0].message.as_deref(), Some("first"));
         assert_eq!(rows[0].trace.as_deref(), Some("a"));
@@ -291,9 +338,14 @@ mod tests {
 
     #[test]
     fn a_non_junit_document_is_an_error() {
-        let err = parse_junit(b"<project><modelVersion>4</modelVersion></project>", "pom.xml").unwrap_err();
+        let err = parse_junit(
+            b"<project><modelVersion>4</modelVersion></project>",
+            "pom.xml",
+        )
+        .unwrap_err();
         assert!(err.contains("<project>"), "{err}");
-        let err = parse_junit(b"<testsuite name=\"s\"><testcase name=\"t\">", "cut.xml").unwrap_err();
+        let err =
+            parse_junit(b"<testsuite name=\"s\"><testcase name=\"t\">", "cut.xml").unwrap_err();
         assert!(err.contains("still open"), "{err}");
     }
 

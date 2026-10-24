@@ -40,10 +40,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_body(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_body(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
     flush_ivar_types(&mut acc);
 
     if is_rails_routes_file(file_rel_path) {
@@ -196,7 +209,8 @@ fn visit_class(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+    acc.nav
+        .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
 
     emit_ar_model_entity(node, name, src, id, repo, acc);
     emit_superclass_ref(node, src, id, acc);
@@ -557,7 +571,10 @@ fn collect_calls_in(
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
-            if !matches!(child.kind(), "method" | "singleton_method" | "class" | "module") {
+            if !matches!(
+                child.kind(),
+                "method" | "singleton_method" | "class" | "module"
+            ) {
                 stack.push(child);
             }
         }
@@ -622,7 +639,9 @@ fn emit_superclass_ref(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Ac
     let (Some(name), Some(module_id)) = (superclass_name(class, src), acc.module_id) else {
         return;
     };
-    let line = class.child_by_field_name("superclass").map_or_else(|| line_at(class), line_at);
+    let line = class
+        .child_by_field_name("superclass")
+        .map_or_else(|| line_at(class), line_at);
     acc.refs.push(UnresolvedRef {
         from: class_id,
         from_module: module_id,
@@ -822,7 +841,9 @@ fn registered_class(call: TsNode, src: &[u8]) -> Option<String> {
         None => {
             let args = call.child_by_field_name("arguments")?;
             let mut cursor = args.walk();
-            let mut positional = args.named_children(&mut cursor).filter(|a| a.kind() != "pair");
+            let mut positional = args
+                .named_children(&mut cursor)
+                .filter(|a| a.kind() != "pair");
             positional.nth(1)?
         }
     };
@@ -1029,8 +1050,13 @@ fn emit_ar_model_entity(
             confidence: Confidence::Strong,
             cells: table_cell.into_iter().collect(),
         });
-        acc.nav
-            .record(entity_id, model, &qname, node_kind::DATA_ENTITY, Some(class_id));
+        acc.nav.record(
+            entity_id,
+            model,
+            &qname,
+            node_kind::DATA_ENTITY,
+            Some(class_id),
+        );
     } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == entity_id) {
         // A query earlier in this file already minted the entity: the
         // declaration is the authoritative site, so it lifts the confidence
@@ -1264,7 +1290,10 @@ fn collect_client_endpoints_in(
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
             // A nested definition is visited (and attributed) on its own.
-            if !matches!(child.kind(), "method" | "singleton_method" | "class" | "module") {
+            if !matches!(
+                child.kind(),
+                "method" | "singleton_method" | "class" | "module"
+            ) {
                 stack.push(child);
             }
         }
@@ -1550,7 +1579,10 @@ fn find_to_handler(args: TsNode, src: &[u8]) -> Option<String> {
         if !key_ok {
             continue;
         }
-        if let Some(val) = arg.child_by_field_name("value").filter(|n| n.kind() == "string") {
+        if let Some(val) = arg
+            .child_by_field_name("value")
+            .filter(|n| n.kind() == "string")
+        {
             return Some(string_inner(val, src));
         }
     }
@@ -1631,7 +1663,13 @@ fn scan_sinatra_routes(root: TsNode, src: &[u8], module_id: NodeId, repo: RepoId
     }
 }
 
-fn try_emit_sinatra_route(call: TsNode, src: &[u8], module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+fn try_emit_sinatra_route(
+    call: TsNode,
+    src: &[u8],
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     // Filter 1: no explicit receiver (DSL call, not `obj.get(...)`).
     if call.child_by_field_name("receiver").is_some() {
         return;
@@ -1799,8 +1837,22 @@ module Auth
 end
 "#;
         let fp = parse_file(source, "lib/auth.rb", "lib::auth", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::PACKAGE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1883,8 +1935,16 @@ end
         let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("PUT", "/users/:id")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users/:id")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("PUT", "/users/:id"))
+        );
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("DELETE", "/users/:id"))
+        );
     }
 
     fn has_handled_by(fp: &FileParse, base: &str, name: &str) -> bool {
@@ -2009,7 +2069,9 @@ end
             "namespace+scope must compose onto the verb route"
         );
         assert!(
-            !fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/:id")),
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/users/:id")),
             "the un-prefixed route must not also be emitted"
         );
         // The HANDLED_BY ref still hangs off the (renamed) route node.
@@ -2063,7 +2125,11 @@ Rails.application.routes.draw do
 end
 "#;
         let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/api/users")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/api/users"))
+        );
         // `scope module:` scopes the controller module, not the path.
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/reports")));
         // Sibling declared after the blocks keeps its bare path.
@@ -2096,13 +2162,14 @@ class UsersController
   end
 end
 "#;
-        let fp = parse_file(source, "app/controllers/users.rb", "app::controllers::users", repo())
-            .unwrap();
-        let has_route = fp
-            .nav
-            .kind_by_id
-            .values()
-            .any(|k| *k == node_kind::ROUTE);
+        let fp = parse_file(
+            source,
+            "app/controllers/users.rb",
+            "app::controllers::users",
+            repo(),
+        )
+        .unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "non-routes.rb file should not emit ROUTE nodes");
     }
 
@@ -2211,7 +2278,13 @@ class Report
   end
 end
 "#;
-        let fp = parse_file(source, "app/models/report.rb", "app::models::report", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "app/models/report.rb",
+            "app::models::report",
+            repo(),
+        )
+        .unwrap();
         assert!(
             !fp.nav
                 .kind_by_id
@@ -2294,9 +2367,11 @@ end
         assert!(fp.nodes.iter().any(|n| n.id == entity_id));
         assert_eq!(table_on(&fp, entity_id), None);
         assert!(
-            fp.edges.iter().any(|e| e.from == class_id("app::models::user::User")
-                && e.to == entity_id
-                && e.category == edge_category::DEFINES),
+            fp.edges
+                .iter()
+                .any(|e| e.from == class_id("app::models::user::User")
+                    && e.to == entity_id
+                    && e.category == edge_category::DEFINES),
             "expected User CLASS -DEFINES-> its DATA_ENTITY"
         );
         assert_eq!(data_entity_count(&fp), 1);
@@ -2351,7 +2426,11 @@ end
             repo(),
         )
         .unwrap();
-        assert_eq!(data_entity_count(&fp), 0, "abstract/non-AR classes mint no entity");
+        assert_eq!(
+            data_entity_count(&fp),
+            0,
+            "abstract/non-AR classes mint no entity"
+        );
         assert!(
             !fp.edges.iter().any(|e| e.category == edge_category::DEFINES
                 && fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::DATA_ENTITY)),
@@ -2478,7 +2557,10 @@ end
 "#;
         let fp = parse_file(source, "lib/svc.rb", "lib::svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
-        assert!(!has_route, "calls with receivers must not emit Sinatra routes");
+        assert!(
+            !has_route,
+            "calls with receivers must not emit Sinatra routes"
+        );
     }
 
     #[test]
@@ -2491,7 +2573,10 @@ end
 "#;
         let fp = parse_file(source, "lib/store.rb", "lib::store", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
-        assert!(!has_route, "non-`/` first arg must not emit a Sinatra route");
+        assert!(
+            !has_route,
+            "non-`/` first arg must not emit a Sinatra route"
+        );
     }
 
     #[test]
@@ -2519,7 +2604,10 @@ end
 "#;
         let fp = parse_file(source, "lib/client.rb", "lib::client", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
-        assert!(!has_route, "call without trailing block must not emit a route");
+        assert!(
+            !has_route,
+            "call without trailing block must not emit a route"
+        );
     }
 
     // ---- client HTTP calls -> ENDPOINT (A4.9) ----------------------------
@@ -2564,9 +2652,9 @@ end
             "client::api_client::ApiClient::fetch_user",
         );
         assert!(
-            fp.edges.iter().any(|e| e.from == from_id
-                && e.to == ep_id
-                && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.from == from_id && e.to == ep_id && e.category == edge_category::CALLS),
             "enclosing method -> ENDPOINT CALLS edge"
         );
     }
@@ -2683,7 +2771,12 @@ class UserService
 end
 "#;
         let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
-        let get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "svc::UserService::get");
+        let get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "svc::UserService::get",
+        );
         let site = fp
             .calls
             .iter()
@@ -2692,7 +2785,10 @@ end
         assert_eq!(site.from, get);
         assert_eq!(
             site.qualifier,
-            CallQualifier::ComplexReceiver { receiver: "@repo".into(), name: "find".into() }
+            CallQualifier::ComplexReceiver {
+                receiver: "@repo".into(),
+                name: "find".into()
+            }
         );
         // No constructor writer: the call site exists, but nothing is typed.
         assert!(ivar_types_of(&fp, "svc::UserService").is_empty());
@@ -2729,7 +2825,10 @@ end
             ivar_types_of(&fp, "svc::UserService"),
             vec![("@log".to_string(), "AuditLog".to_string())]
         );
-        assert_eq!(ivar_call_sites(&fp), vec![("@log".to_string(), "write".to_string())]);
+        assert_eq!(
+            ivar_call_sites(&fp),
+            vec![("@log".to_string(), "write".to_string())]
+        );
     }
 
     #[test]
@@ -2840,9 +2939,16 @@ def helper
 end
 "#;
         let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
-        assert!(fp.nav.field_types.is_empty(), "got {:?}", fp.nav.field_types);
+        assert!(
+            fp.nav.field_types.is_empty(),
+            "got {:?}",
+            fp.nav.field_types
+        );
         // The call site is still visible (unresolved diagnostics), not dropped.
-        assert_eq!(ivar_call_sites(&fp), vec![("@log".to_string(), "write".to_string())]);
+        assert_eq!(
+            ivar_call_sites(&fp),
+            vec![("@log".to_string(), "write".to_string())]
+        );
     }
 
     #[test]
@@ -2862,8 +2968,17 @@ class UserService
 end
 "#;
         let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
-        assert!(fp.nav.field_types.is_empty(), "got {:?}", fp.nav.field_types);
-        let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "svc::UserService::run");
+        assert!(
+            fp.nav.field_types.is_empty(),
+            "got {:?}",
+            fp.nav.field_types
+        );
+        let run = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "svc::UserService::run",
+        );
         let sites: Vec<NodeId> = fp
             .calls
             .iter()
@@ -2936,9 +3051,17 @@ end
         let fp = parse_file(source, "user_repository.rb", "user_repository", repo()).unwrap();
         assert_eq!(
             bare_refs(&fp, edge_category::INHERITS_FROM),
-            vec![("user_repository::UserRepository".into(), "BaseRepository".into(), 2)]
+            vec![(
+                "user_repository::UserRepository".into(),
+                "BaseRepository".into(),
+                2
+            )]
         );
-        assert!(fp.refs.iter().all(|r| r.from_module == module_of("user_repository")));
+        assert!(
+            fp.refs
+                .iter()
+                .all(|r| r.from_module == module_of("user_repository"))
+        );
     }
 
     /// A scoped superclass is reduced to its last segment (the Java G12.5
@@ -2993,7 +3116,11 @@ end
                 (c, "Users".into(), 4),
             ]
         );
-        assert!(fp.refs.iter().all(|r| r.from_module == module_of("order_controller")));
+        assert!(
+            fp.refs
+                .iter()
+                .all(|r| r.from_module == module_of("order_controller"))
+        );
     }
 
     /// A key the same file's container registers resolves to the registered
@@ -3065,7 +3192,11 @@ end
 include Import["top_level"]
 "#;
         let fp = parse_file(source, "a.rb", "a", repo()).unwrap();
-        assert!(bare_refs(&fp, edge_category::INJECTS).is_empty(), "{:?}", fp.refs);
+        assert!(
+            bare_refs(&fp, edge_category::INJECTS).is_empty(),
+            "{:?}",
+            fp.refs
+        );
     }
 
     /// `Calc.new.add(2, 3)`: the receiver is a constructor call, emitted as

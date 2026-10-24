@@ -26,9 +26,9 @@
 
 use std::collections::HashSet;
 
-use regex::Regex;
 use glia_activation::plan::{ActivatedView, SynthCell, SynthHook};
 use glia_graph::RepoGraph;
+use regex::Regex;
 
 use crate::hooks::{ACCESS_PATH, CALLSITE_ARGFLOW};
 use crate::research::key_symbols::{KEY_SYMBOLS, SUMMARY};
@@ -73,7 +73,10 @@ impl SynthHook<RepoGraph> for DerivedNotesSynth {
     fn synth(&self, _graph: &RepoGraph, view: &ActivatedView) -> Vec<SynthCell> {
         let cells: Vec<SourceCell<'_>> = view
             .cells_of(KEY_SYMBOLS)
-            .map(|c| SourceCell { qname: &c.key, source: &c.text })
+            .map(|c| SourceCell {
+                qname: &c.key,
+                source: &c.text,
+            })
             .collect();
         let summaries: Vec<SummaryCell<'_>> = view
             .synth
@@ -129,8 +132,7 @@ fn render_block(
     // class for the candidate's polymorphic method.
     let walker_binder = derive_top_level_binder(cells);
     let mut poly_facts =
-        select_best_callsite(summaries, issue, walker_binder.as_deref())
-            .unwrap_or_default();
+        select_best_callsite(summaries, issue, walker_binder.as_deref()).unwrap_or_default();
     if poly_facts.top_level_binder.is_none() {
         poly_facts.top_level_binder = walker_binder;
     }
@@ -341,7 +343,10 @@ fn parse_callsite_summary(summary: &str) -> (String, Vec<String>, Vec<String>) {
         let Some(am) = arg_re.captures(callsite) else {
             continue;
         };
-        let container = am.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let container = am
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         if receiver != "self" && !delegating.contains(&container) {
             delegating.push(container);
         }
@@ -356,11 +361,11 @@ fn parse_callsite_summary(summary: &str) -> (String, Vec<String>, Vec<String>) {
 /// `feedback_derived_notes_bullets_need_cross_coupling.md`).
 #[derive(Default, Clone)]
 struct PolyFacts {
-    method: String,                    // e.g. "_bind_to_schema"
-    leaf: String,                      // e.g. "DateTime"
-    delegating: Vec<String>,           // e.g. ["List", "Tuple"]  (top-level binders filtered, sorted by issue-mention count)
-    defined: Vec<String>,              // raw defined list from the Build 3 cell
-    top_level_binder: Option<String>,  // the class the filter removed (e.g. "Schema"); used as the "outer X" anchor in the polymorphism bullet
+    method: String,                   // e.g. "_bind_to_schema"
+    leaf: String,                     // e.g. "DateTime"
+    delegating: Vec<String>, // e.g. ["List", "Tuple"]  (top-level binders filtered, sorted by issue-mention count)
+    defined: Vec<String>,    // raw defined list from the Build 3 cell
+    top_level_binder: Option<String>, // the class the filter removed (e.g. "Schema"); used as the "outer X" anchor in the polymorphism bullet
 }
 
 /// Derive the top-level binder class name from chain-walker source cells.
@@ -371,10 +376,7 @@ struct PolyFacts {
 /// (e.g. the caller-side binding lives in a sibling polymorphic method whose
 /// cell wasn't picked as `best`).
 fn derive_top_level_binder(cells: &[SourceCell<'_>]) -> Option<String> {
-    let walker = Regex::new(
-        r#"while\s+hasattr\(\s*(\w+)\s*,\s*["'](\w+)["']\s*\)"#,
-    )
-    .ok()?;
+    let walker = Regex::new(r#"while\s+hasattr\(\s*(\w+)\s*,\s*["'](\w+)["']\s*\)"#).ok()?;
     let terminal = Regex::new(r"isinstance\(\s*\w+\s*,\s*(\w+)\s*\)").ok()?;
     for cell in cells {
         if walker.is_match(cell.source) {
@@ -423,8 +425,10 @@ fn select_best_callsite(
                 binders.insert(b.to_string());
             }
             let is_dunder = name.starts_with("__") && name.ends_with("__");
-            let delegating_filt: Vec<&String> =
-                delegating.iter().filter(|c| !binders.contains(*c)).collect();
+            let delegating_filt: Vec<&String> = delegating
+                .iter()
+                .filter(|c| !binders.contains(*c))
+                .collect();
             let has_delegation = if delegating_filt.is_empty() { 0 } else { 1 };
             let in_issue = if issue.contains(&name) { 1 } else { 0 };
             let def_count = defined.len() as i32;
@@ -484,8 +488,10 @@ fn select_best_callsite(
         .iter()
         .filter(|c| !delegating.contains(c) && !binders.contains(*c))
         .collect();
-    let issue_leafs: Vec<&&String> =
-        non_delegating.iter().filter(|c| issue.contains(c.as_str())).collect();
+    let issue_leafs: Vec<&&String> = non_delegating
+        .iter()
+        .filter(|c| issue.contains(c.as_str()))
+        .collect();
     let leaf = if let Some(l) = issue_leafs.first() {
         (**l).clone()
     } else if let Some(l) = non_delegating.first() {
@@ -495,7 +501,13 @@ fn select_best_callsite(
     } else {
         String::new()
     };
-    Some(PolyFacts { method, leaf, delegating, defined, top_level_binder })
+    Some(PolyFacts {
+        method,
+        leaf,
+        delegating,
+        defined,
+        top_level_binder,
+    })
 }
 
 /// Build 3 → outcome-style polymorphism bullet. When `attr_name` is provided
@@ -514,7 +526,11 @@ fn polymorphism_bullet(facts: &PolyFacts, attr_name: Option<&str>) -> Option<Str
             .map(|c| format!("`{c}`"))
             .collect::<Vec<_>>()
             .join("/");
-        let leaf = if facts.leaf.is_empty() { "the leaf class".to_string() } else { facts.leaf.clone() };
+        let leaf = if facts.leaf.is_empty() {
+            "the leaf class".to_string()
+        } else {
+            facts.leaf.clone()
+        };
         // Anchor phrase: name the top-level binder (e.g. `Schema`) explicitly.
         // The word that names what `self.root` returns is load-bearing — it
         // steers the model toward the `self.root.X` composition fix. Abstract
@@ -531,7 +547,9 @@ fn polymorphism_bullet(facts: &PolyFacts, attr_name: Option<&str>) -> Option<Str
             name = facts.method,
         );
         if let Some(a) = attr_name {
-            out.push_str(&format!(" That container does not have a `.{a}` attribute."));
+            out.push_str(&format!(
+                " That container does not have a `.{a}` attribute."
+            ));
         }
         return Some(out);
     }
@@ -610,16 +628,15 @@ fn attr_presence_bullet(
             .captures(cell.source)
             .and_then(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
             .unwrap_or_default();
-        let mut absent_list: Vec<String> =
-            if absent_raw.is_empty() || absent_raw == "(none)" {
-                Vec::new()
-            } else {
-                absent_raw
-                    .split(',')
-                    .map(|t| t.trim().to_string())
-                    .filter(|t| !t.is_empty())
-                    .collect()
-            };
+        let mut absent_list: Vec<String> = if absent_raw.is_empty() || absent_raw == "(none)" {
+            Vec::new()
+        } else {
+            absent_raw
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        };
 
         // Augment: any CamelCase class in the issue that also appears as a
         // qname parent in source_cells, but isn't the defining class and isn't
@@ -649,9 +666,7 @@ fn attr_presence_bullet(
             }
         }
         for cname in issue_classes {
-            if augment_sources.contains(&cname)
-                && cname != defined
-                && !absent_list.contains(&cname)
+            if augment_sources.contains(&cname) && cname != defined && !absent_list.contains(&cname)
             {
                 absent_list.push(cname);
             }
@@ -676,4 +691,3 @@ fn attr_presence_bullet(
     }
     None
 }
-

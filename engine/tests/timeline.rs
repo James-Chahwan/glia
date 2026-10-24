@@ -11,7 +11,8 @@ use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::edge_category;
 use glia_core::NodeId;
 use glia_engine::timeline::{
-    AsOfView, EdgeHistoryRow, TimelineArgs, TimelineBuilt, as_of, build_timeline, edge_history, load_timeline,
+    AsOfView, EdgeHistoryRow, TimelineArgs, TimelineBuilt, as_of, build_timeline, edge_history,
+    load_timeline,
 };
 use glia_engine::{generate_one, generate_one_incremental};
 use glia_store::TimelineStore;
@@ -19,9 +20,11 @@ use glia_store::TimelineStore;
 /// Commit 1: `f` calls `g`.
 const C1: &str = "def f():\n    return g()\n\n\ndef g():\n    return 1\n";
 /// Commit 2: `h` added, `f` calls both.
-const C2: &str = "def f():\n    g()\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n";
+const C2: &str =
+    "def f():\n    g()\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n";
 /// Commit 4 (in the moved file): `f` calls `h` only.
-const C4: &str = "def f():\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n";
+const C4: &str =
+    "def f():\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n";
 
 /// The four-commit history of the acceptance: f -> g (1), + h and f -> h (2),
 /// `git mv app/a.py app/b.py` (3), f -> g removed (4).
@@ -74,16 +77,20 @@ fn show(rows: &[EdgeHistoryRow]) -> String {
 
 fn calls_to<'a>(rows: &'a [EdgeHistoryRow], suffix: &str) -> Vec<&'a EdgeHistoryRow> {
     rows.iter()
-        .filter(|r| r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with(suffix))
+        .filter(|r| {
+            r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with(suffix)
+        })
         .collect()
 }
 
 fn has_edge(v: &AsOfView, from: NodeId, to: NodeId) -> bool {
-    v.edges().any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+    v.edges()
+        .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
 }
 
 fn named(v: &AsOfView, q: &str) -> NodeId {
-    v.node_named(q).unwrap_or_else(|| panic!("`{q}` at rev {}", v.rev.index))
+    v.node_named(q)
+        .unwrap_or_else(|| panic!("`{q}` at rev {}", v.rev.index))
 }
 
 #[test]
@@ -92,20 +99,35 @@ fn build_over_four_revs() {
     let built = build(&repo, 4);
     assert!(built.skipped.is_empty(), "{:?}", built.skipped);
     let subjects: Vec<&str> = built.revs.iter().map(|r| r.subject.as_str()).collect();
-    assert_eq!(subjects, ["f calls g", "f calls h", "move a to b", "f drops g"], "oldest first");
+    assert_eq!(
+        subjects,
+        ["f calls g", "f calls h", "move a to b", "f drops g"],
+        "oldest first"
+    );
     let indexes: Vec<u32> = built.revs.iter().map(|r| r.index).collect();
     assert_eq!(indexes, [0, 1, 2, 3]);
     let head = repo.git(&["rev-parse", "HEAD"]);
-    assert_eq!(built.revs[3].sha, String::from_utf8_lossy(&head.stdout).trim());
+    assert_eq!(
+        built.revs[3].sha,
+        String::from_utf8_lossy(&head.stdout).trim()
+    );
     assert!(built.revs.iter().all(|r| r.sha.len() == 40 && r.time > 0));
-    assert!(built.moves >= 4, "the MODULE and f, g, h moved at rev 2: {}", built.moves);
+    assert!(
+        built.moves >= 4,
+        "the MODULE and f, g, h moved at rev 2: {}",
+        built.moves
+    );
     assert!(built.closed >= 1 && built.edge_spans >= built.edges && built.nodes > 0);
     let path = timeline_file(&repo);
     assert_eq!(built.written.as_deref(), path.to_str());
     assert!(path.is_file());
     // The sidecar dir hides itself: the work tree stays clean.
     let status = repo.git(&["status", "--porcelain"]);
-    assert!(status.stdout.is_empty(), "{}", String::from_utf8_lossy(&status.stdout));
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
     let s = store(&repo);
     assert_eq!(s.revs.len(), 4);
     assert_eq!(s.revs[0].subject, "f calls g");
@@ -118,10 +140,16 @@ fn build_over_four_revs() {
 fn history_of_f() {
     let repo = four_commits();
     build(&repo, 4);
-    let merged = generate_one(repo.path()).expect("working-tree build").merged;
+    let merged = generate_one(repo.path())
+        .expect("working-tree build")
+        .merged;
     let s = store(&repo);
     // f is ONE node span despite the rename, under its new module.
-    let f: Vec<_> = s.nodes.iter().filter(|n| s.node_qname(n).is_some_and(|q| q.ends_with("::f"))).collect();
+    let f: Vec<_> = s
+        .nodes
+        .iter()
+        .filter(|n| s.node_qname(n).is_some_and(|q| q.ends_with("::f")))
+        .collect();
     assert_eq!(f.len(), 1, "one span for f");
     assert_eq!(s.node_qname(f[0]), Some("app::b::f"));
     assert_eq!(s.node_file(f[0]), Some("app/b.py"));
@@ -136,9 +164,15 @@ fn history_of_f() {
     assert_eq!(g[0].other_qname, "app::b::g");
     assert_eq!(g[0].other_kind, "FUNCTION");
     assert_eq!(g[0].since.index, 0);
-    assert!(g[0].since_window_start, "present at the first rev: its true start is unknown");
+    assert!(
+        g[0].since_window_start,
+        "present at the first rev: its true start is unknown"
+    );
     assert_eq!(g[0].until.as_ref().map(|u| u.index), Some(3));
-    assert_eq!(g[0].until.as_ref().map(|u| u.subject.as_str()), Some("f drops g"));
+    assert_eq!(
+        g[0].until.as_ref().map(|u| u.subject.as_str()),
+        Some("f drops g")
+    );
     assert_eq!(g[0].tier, "derived");
     assert_eq!(g[0].file.as_deref(), Some("app/b.py"));
     assert_eq!(g[0].line, Some(5), "g's def line, 1-based, as last seen");
@@ -149,8 +183,10 @@ fn history_of_f() {
     assert!(!h[0].since_window_start);
     assert!(h[0].until.is_none(), "still present");
     // Sorted by (since, category, other).
-    let keys: Vec<(u32, &str, &str)> =
-        rows.iter().map(|r| (r.since.index, r.category, r.other_qname.as_str())).collect();
+    let keys: Vec<(u32, &str, &str)> = rows
+        .iter()
+        .map(|r| (r.since.index, r.category, r.other_qname.as_str()))
+        .collect();
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
@@ -162,7 +198,10 @@ fn history_of_f() {
     // g is called: an `in` row from f.
     let into_g = edge_history(&merged, &s, "app::b::g", Some("CALLS"));
     assert!(
-        into_g.results.iter().any(|r| r.direction == "in" && r.other_qname == "app::b::f"),
+        into_g
+            .results
+            .iter()
+            .any(|r| r.direction == "in" && r.other_qname == "app::b::f"),
         "{}",
         show(&into_g.results)
     );
@@ -187,7 +226,10 @@ fn as_of_views() {
     assert!(has_edge(&v1, f, g) && has_edge(&v1, f, h));
     let sum = v1.summary();
     assert!(sum.edges >= 2 && sum.nodes >= 4, "{sum:?}");
-    assert!(sum.by_category.get("CALLS").is_some_and(|n| *n >= 2), "{sum:?}");
+    assert!(
+        sum.by_category.get("CALLS").is_some_and(|n| *n >= 2),
+        "{sum:?}"
+    );
 
     // By sha prefix: the same rev.
     let v3 = as_of(&s, &s.revs[3].sha[..7]).expect("rev 3 by sha");
@@ -195,7 +237,10 @@ fn as_of_views() {
     let (f3, g3, h3) = (named(&v3, "f"), named(&v3, "g"), named(&v3, "h"));
     assert!(has_edge(&v3, f3, h3));
     assert!(!has_edge(&v3, f3, g3), "f -> g is gone at rev 3");
-    assert!(v3.edges().all(|e| e.category != edge_category::CALLS || e.to != g3));
+    assert!(
+        v3.edges()
+            .all(|e| e.category != edge_category::CALLS || e.to != g3)
+    );
 
     // Ids are the ones each rev had: f moved at rev 2.
     let v0 = as_of(&s, "0").expect("rev 0");
@@ -205,7 +250,10 @@ fn as_of_views() {
     // GraphSource: reachability over the view.
     let adj = Adjacency::build(&v0, &CategorySet::of(&[edge_category::CALLS]));
     let walk = reach::bfs(&adj, &[f0], Walk::Forward, 4);
-    assert!(walk.reached.iter().any(|r| r.id == g0), "f reaches g at rev 0");
+    assert!(
+        walk.reached.iter().any(|r| r.id == g0),
+        "f reaches g at rev 0"
+    );
     assert!(!v0.node_ids().contains(&h3), "h does not exist at rev 0");
 
     assert!(as_of(&s, "4").is_err(), "no rev 4");
@@ -227,14 +275,36 @@ fn empty_rev_closes_and_reopens() {
     let s = store(&repo);
     // Presence is observed per rev: every span open at rev 0 closes at the
     // empty rev, and the restore opens new ones.
-    assert!(s.nodes.iter().filter(|n| n.from_rev == 0).all(|n| n.until() == Some(1)));
-    assert!(s.edges.iter().filter(|e| e.from_rev == 0).all(|e| e.until() == Some(1)));
-    assert!(s.nodes.iter().all(|n| !n.covers(1)), "nothing at the empty rev");
-    let merged = generate_one(repo.path()).expect("working-tree build").merged;
+    assert!(
+        s.nodes
+            .iter()
+            .filter(|n| n.from_rev == 0)
+            .all(|n| n.until() == Some(1))
+    );
+    assert!(
+        s.edges
+            .iter()
+            .filter(|e| e.from_rev == 0)
+            .all(|e| e.until() == Some(1))
+    );
+    assert!(
+        s.nodes.iter().all(|n| !n.covers(1)),
+        "nothing at the empty rev"
+    );
+    let merged = generate_one(repo.path())
+        .expect("working-tree build")
+        .merged;
     let rows = edge_history(&merged, &s, "f", Some("CALLS")).results;
-    let spans: Vec<(u32, Option<u32>)> =
-        calls_to(&rows, "::g").iter().map(|r| (r.since.index, r.until.as_ref().map(|u| u.index))).collect();
-    assert_eq!(spans, [(0, Some(1)), (2, None)], "the gap is not bridged:\n{}", show(&rows));
+    let spans: Vec<(u32, Option<u32>)> = calls_to(&rows, "::g")
+        .iter()
+        .map(|r| (r.since.index, r.until.as_ref().map(|u| u.index)))
+        .collect();
+    assert_eq!(
+        spans,
+        [(0, Some(1)), (2, None)],
+        "the gap is not bridged:\n{}",
+        show(&rows)
+    );
     let v1 = as_of(&s, "1").expect("the empty rev");
     assert_eq!(v1.summary().edges, 0);
 }
@@ -247,7 +317,10 @@ fn cache_untouched() {
     let before = std::fs::read(&cache).expect("parse cache written");
     build(&repo, 4);
     let after = std::fs::read(&cache).expect("parse cache still there");
-    assert!(before == after, "the rev builds must not save the parse cache");
+    assert!(
+        before == after,
+        "the rev builds must not save the parse cache"
+    );
 }
 
 #[test]
@@ -269,7 +342,10 @@ fn deterministic() {
     std::fs::remove_file(timeline_file(&repo)).expect("remove sidecar");
     build(&repo, 4);
     let second = std::fs::read(timeline_file(&repo)).expect("sidecar");
-    assert!(first == second, "two builds of one history write the same bytes");
+    assert!(
+        first == second,
+        "two builds of one history write the same bytes"
+    );
 }
 
 #[test]
@@ -280,11 +356,20 @@ fn errors_are_named() {
     let err = build_timeline(path, &args(4, false)).expect_err("not a git work tree");
     assert!(err.contains("git"), "{err}");
     let repo = four_commits();
-    assert!(build_timeline(repo.path(), &args(0, false)).is_err(), "an empty window");
-    assert!(build_timeline(repo.path(), &args(201, false)).is_err(), "over the cap");
+    assert!(
+        build_timeline(repo.path(), &args(0, false)).is_err(),
+        "an empty window"
+    );
+    assert!(
+        build_timeline(repo.path(), &args(201, false)).is_err(),
+        "over the cap"
+    );
     let mut bad = args(4, false);
     bad.head = "--output=x".to_string();
-    assert!(build_timeline(repo.path(), &bad).is_err(), "an option is never a rev");
+    assert!(
+        build_timeline(repo.path(), &bad).is_err(),
+        "an option is never a rev"
+    );
 }
 
 /// DD.15 (DD.9's handoff): the suggestions of an unknown-node absence are raw
@@ -295,11 +380,17 @@ fn errors_are_named() {
 /// suggestion was gone.
 #[test]
 fn unknown_node_suggestions_stay_raw() {
-    let npm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures/identity-npm-package");
+    let npm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/identity-npm-package");
     let repos = [npm.join("web"), npm.join("admin")].map(|p| p.to_string_lossy().into_owned());
-    let built = glia_engine::generate_many(&repos).unwrap_or_else(|e| panic!("{repos:?} builds: {e}"));
+    let built =
+        glia_engine::generate_many(&repos).unwrap_or_else(|e| panic!("{repos:?} builds: {e}"));
     let answer = edge_history(&built.merged, &TimelineStore::default(), "react", None);
     let why = answer.absence.expect("an unknown node carries its absence");
     assert_eq!(why.reason, "unknown_symbol");
-    assert_eq!(why.suggestions, ["package:npm:react", "package:npm:react"], "{why:?}");
+    assert_eq!(
+        why.suggestions,
+        ["package:npm:react", "package:npm:react"],
+        "{why:?}"
+    );
 }

@@ -24,8 +24,7 @@ use glia_parser_go::parse_file;
 use glia_store::{
     CodeSource, FsCodeSource, LayoutMeta, MANIFEST_NAME, MmapContainer, RepoMeta,
     decode_repo_graph, decode_repo_graph_with, encode_repo_graph_with, read_merged_sharded,
-    read_merged_sharded_meta, upsert_cell_sharded, write_merged_sharded,
-    write_merged_sharded_meta,
+    read_merged_sharded_meta, upsert_cell_sharded, write_merged_sharded, write_merged_sharded_meta,
 };
 
 const MODULE_PREFIX: &str = "example.com/backend";
@@ -104,14 +103,17 @@ struct Slice {
 }
 
 fn position(cells: &[Cell]) -> Option<(String, usize)> {
-    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| {
-        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
-            return None;
-        };
-        let v: serde_json::Value = serde_json::from_str(s).ok()?;
-        let file = v["file"].as_str().filter(|f| !f.is_empty())?.to_string();
-        Some((file, v["start_line"].as_u64()? as usize))
-    })
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .find_map(|c| {
+            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(s).ok()?;
+            let file = v["file"].as_str().filter(|f| !f.is_empty())?.to_string();
+            Some((file, v["start_line"].as_u64()? as usize))
+        })
 }
 
 fn slices(g: &RepoGraph, repo: &Path) -> Vec<Slice> {
@@ -137,7 +139,10 @@ fn slices(g: &RepoGraph, repo: &Path) -> Vec<Slice> {
         if line_start == usize::MAX {
             continue;
         }
-        let line_end = src[line_start..].iter().position(|&b| b == b'\n').map_or(src.len(), |p| line_start + p);
+        let line_end = src[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(src.len(), |p| line_start + p);
         for c in n.cells.iter().filter(|c| c.kind == cell_type::CODE) {
             let CellPayload::Text(text) = &c.payload else {
                 continue;
@@ -148,7 +153,12 @@ fn slices(g: &RepoGraph, repo: &Path) -> Vec<Slice> {
             if let Some(start) =
                 (line_start..=line_end).find(|&k| src[k..].starts_with(text.as_bytes()))
             {
-                out.push(Slice { node: n.id, file: file.clone(), start, text: text.clone() });
+                out.push(Slice {
+                    node: n.id,
+                    file: file.clone(),
+                    start,
+                    text: text.clone(),
+                });
             }
         }
     }
@@ -156,7 +166,11 @@ fn slices(g: &RepoGraph, repo: &Path) -> Vec<Slice> {
 }
 
 fn code_cells(g: &RepoGraph) -> usize {
-    g.nodes.iter().flat_map(|n| &n.cells).filter(|c| c.kind == cell_type::CODE).count()
+    g.nodes
+        .iter()
+        .flat_map(|n| &n.cells)
+        .filter(|c| c.kind == cell_type::CODE)
+        .count()
 }
 
 fn shard_paths(layout: &Path) -> Vec<PathBuf> {
@@ -171,7 +185,10 @@ fn shard_paths(layout: &Path) -> Vec<PathBuf> {
 }
 
 fn gmap_bytes(layout: &Path) -> u64 {
-    shard_paths(layout).iter().map(|p| std::fs::metadata(p).unwrap().len()).sum()
+    shard_paths(layout)
+        .iter()
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .sum()
 }
 
 fn code_of(g: &RepoGraph, id: NodeId) -> Vec<CellPayload> {
@@ -215,7 +232,12 @@ fn child_process_entry() {
 /// Run [`child_process_entry`] in a child process in `mode`; its stderr.
 fn child(mode: &str, repo: &Path, layout: &Path) -> String {
     let out = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "child_process_entry", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_process_entry",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_MODE, mode)
         .env(CHILD_REPO, repo)
         .env(CHILD_LAYOUT, layout)
@@ -254,30 +276,52 @@ fn spans_round_trip() {
     let layout = tmp.path().join("layout");
     let g = build(&repo);
     let expect = slices(&g, &repo);
-    assert!(expect.len() >= 5, "the fixture has CODE slices to span: {}", expect.len());
+    assert!(
+        expect.len() >= 5,
+        "the fixture has CODE slices to span: {}",
+        expect.len()
+    );
 
     let wrote = child("write", &repo, &layout);
     let spanned = marker_field(&wrote, WRITE_MARKER, "spanned");
     assert_eq!(spanned, expect.len() as i64, "{wrote}");
-    assert_eq!(marker_field(&wrote, WRITE_MARKER, "inline"), (code_cells(&g) - expect.len()) as i64);
+    assert_eq!(
+        marker_field(&wrote, WRITE_MARKER, "inline"),
+        (code_cells(&g) - expect.len()) as i64
+    );
     let saved = marker_field(&wrote, WRITE_MARKER, "saved");
     let text_bytes: usize = expect.iter().map(|s| s.text.len()).sum();
-    assert!(saved > 0 && saved < text_bytes as i64, "saved={saved} of {text_bytes} text bytes");
+    assert!(
+        saved > 0 && saved < text_bytes as i64,
+        "saved={saved} of {text_bytes} text bytes"
+    );
 
     let (back, meta) = read_merged_sharded_meta(&layout).unwrap();
     assert_eq!(meta.code_spans_unresolved, 0);
     assert_eq!(back.graphs.len(), 1);
-    assert_eq!(back.graphs[0].nodes, g.nodes, "every node's cells equal the pre-write graph's");
+    assert_eq!(
+        back.graphs[0].nodes, g.nodes,
+        "every node's cells equal the pre-write graph's"
+    );
 
     let read = child("read", &repo, &layout);
-    assert_eq!(marker_field(&read, READ_MARKER, "rehydrated"), spanned, "{read}");
+    assert_eq!(
+        marker_field(&read, READ_MARKER, "rehydrated"),
+        spanned,
+        "{read}"
+    );
     assert_eq!(marker_field(&read, READ_MARKER, "unresolved"), 0);
 
     // Deterministic: a second layout beside it (same relative root) is the
     // same bytes, shard for shard.
     let again = tmp.path().join("again");
     write_rooted(&repo, &again);
-    let bytes = |d: &Path| shard_paths(d).iter().map(|p| std::fs::read(p).unwrap()).collect::<Vec<_>>();
+    let bytes = |d: &Path| {
+        shard_paths(d)
+            .iter()
+            .map(|p| std::fs::read(p).unwrap())
+            .collect::<Vec<_>>()
+    };
     assert_eq!(bytes(&layout), bytes(&again));
 }
 
@@ -304,7 +348,11 @@ fn shards_shrink() {
     // Two files: each index is one varint byte.
     let payload_bytes: u64 = spans
         .iter()
-        .map(|s| CodeSpan::of(&s.file, s.start as u64, s.text.as_bytes()).encode(0).len() as u64)
+        .map(|s| {
+            CodeSpan::of(&s.file, s.start as u64, s.text.as_bytes())
+                .encode(0)
+                .len() as u64
+        })
         .sum();
     let net = text_bytes - payload_bytes;
     let (inline, spanned) = (gmap_bytes(&inline_dir), gmap_bytes(&spanned_dir));
@@ -314,15 +362,28 @@ fn shards_shrink() {
         "inline {inline} B - spanned {spanned} B = {shrink} B < 90% of {net} B saved \
          ({text_bytes} B of CODE text, {payload_bytes} B of span payloads)"
     );
-    assert!(shrink * 100 >= text_bytes * 85, "{shrink} B < 85% of {text_bytes} B of CODE text");
+    assert!(
+        shrink * 100 >= text_bytes * 85,
+        "{shrink} B < 85% of {text_bytes} B of CODE text"
+    );
 }
 
 /// Change one lowercase letter inside a span of a node of kind `kind`, the
 /// one the fewest spans cover; the slices that cover the changed byte.
-fn edit_inside<'a>(g: &RepoGraph, repo: &Path, all: &'a [Slice], kind: NodeKindId) -> Vec<&'a Slice> {
-    let covers = |o: &Slice, file: &str, k: usize| o.file == file && (o.start..o.start + o.text.len()).contains(&k);
+fn edit_inside<'a>(
+    g: &RepoGraph,
+    repo: &Path,
+    all: &'a [Slice],
+    kind: NodeKindId,
+) -> Vec<&'a Slice> {
+    let covers = |o: &Slice, file: &str, k: usize| {
+        o.file == file && (o.start..o.start + o.text.len()).contains(&k)
+    };
     let mut best: Option<(usize, &Slice, usize)> = None;
-    for s in all.iter().filter(|s| g.nav.kind_by_id.get(&s.node) == Some(&kind)) {
+    for s in all
+        .iter()
+        .filter(|s| g.nav.kind_by_id.get(&s.node) == Some(&kind))
+    {
         let src = std::fs::read(repo.join(&s.file)).unwrap();
         for (k, byte) in src.iter().enumerate().skip(s.start).take(s.text.len()) {
             let covering = all.iter().filter(|o| covers(o, &s.file, k)).count();
@@ -377,7 +438,10 @@ fn edited_source_is_unresolved() {
     }
     let read = child("read", &repo, &layout);
     assert_eq!(marker_field(&read, READ_MARKER, "unresolved"), 2, "{read}");
-    assert_eq!(marker_field(&read, READ_MARKER, "rehydrated"), all.len() as i64 - 2);
+    assert_eq!(
+        marker_field(&read, READ_MARKER, "rehydrated"),
+        all.len() as i64 - 2
+    );
 
     // A byte outside every function (the `package` clause): one span.
     let tmp = tempfile::tempdir().unwrap();
@@ -450,9 +514,14 @@ fn one_node_graph(file: &str, text: &str) -> RepoGraph {
         cells: vec![
             Cell {
                 kind: cell_type::POSITION,
-                payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":0}}"#)),
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"{file}","start_line":0,"end_line":0}}"#
+                )),
             },
-            Cell { kind: cell_type::CODE, payload: CellPayload::Text(text.into()) },
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text(text.into()),
+            },
         ],
     });
     g
@@ -473,14 +542,24 @@ fn escape_refused() {
 
     // The source itself.
     assert!(fs.read(repo_id(), "../outside").is_none());
-    assert!(fs.read(repo_id(), tmp.path().join("outside").to_str().unwrap()).is_none());
+    assert!(
+        fs.read(repo_id(), tmp.path().join("outside").to_str().unwrap())
+            .is_none()
+    );
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(tmp.path().join("outside"), root.join("link")).unwrap();
-        assert!(fs.read(repo_id(), "link").is_none(), "a symlink out of the root");
+        assert!(
+            fs.read(repo_id(), "link").is_none(),
+            "a symlink out of the root"
+        );
         std::fs::write(root.join("inside.rs"), "x").unwrap();
         std::os::unix::fs::symlink(root.join("inside.rs"), root.join("alias.rs")).unwrap();
-        assert_eq!(fs.read(repo_id(), "alias.rs").as_deref(), Some(&b"x"[..]), "inside is fine");
+        assert_eq!(
+            fs.read(repo_id(), "alias.rs").as_deref(),
+            Some(&b"x"[..]),
+            "inside is fine"
+        );
     }
 
     // The writer keeps it inline.
@@ -492,7 +571,11 @@ fn escape_refused() {
 
     // A span naming ../outside (a writer that read anywhere) is refused on read.
     let path = tmp.path().join("anywhere.gmap");
-    std::fs::write(&path, encode_repo_graph_with(&g, Some(&Anywhere(root.clone()))).unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        encode_repo_graph_with(&g, Some(&Anywhere(root.clone()))).unwrap(),
+    )
+    .unwrap();
     let m = MmapContainer::open(&path).unwrap();
     let back = decode_repo_graph_with(&m, Some(&fs)).unwrap();
     let code = code_of(&back, NodeId(42));
@@ -500,7 +583,10 @@ fn escape_refused() {
     assert_eq!(span.file, "../outside");
     // Control: the permissive source reads it, so the span itself is valid.
     let open = decode_repo_graph_with(&m, Some(&Anywhere(root))).unwrap();
-    assert_eq!(code_of(&open, NodeId(42)), vec![CellPayload::Text(text.into())]);
+    assert_eq!(
+        code_of(&open, NodeId(42)),
+        vec![CellPayload::Text(text.into())]
+    );
 }
 
 /// (6) With no source every span decodes as JSON whose start / end slice the
@@ -511,13 +597,24 @@ fn decode_without_source() {
     let repo = repo_copy(tmp.path());
     let layout = tmp.path().join("layout");
     let merged = write_rooted(&repo, &layout);
-    let original: BTreeMap<u64, Vec<CellPayload>> =
-        merged.graphs[0].nodes.iter().map(|n| (n.id.0, code_of(&merged.graphs[0], n.id))).collect();
+    let original: BTreeMap<u64, Vec<CellPayload>> = merged.graphs[0]
+        .nodes
+        .iter()
+        .map(|n| (n.id.0, code_of(&merged.graphs[0], n.id)))
+        .collect();
     let mut seen = 0usize;
-    for shard in shard_paths(&layout).iter().filter(|p| !p.ends_with("cross_stack.gmap")) {
+    for shard in shard_paths(&layout)
+        .iter()
+        .filter(|p| !p.ends_with("cross_stack.gmap"))
+    {
         let raw = decode_repo_graph(&MmapContainer::open(shard).unwrap()).unwrap();
         for n in &raw.nodes {
-            for (i, c) in n.cells.iter().filter(|c| c.kind == cell_type::CODE).enumerate() {
+            for (i, c) in n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::CODE)
+                .enumerate()
+            {
                 let Some(span) = CodeSpan::from_payload(&c.payload) else {
                     continue;
                 };
@@ -544,11 +641,20 @@ fn upsert_keeps_spans_readable() {
     let layout = tmp.path().join("layout");
     let merged = write_rooted(&repo, &layout);
     let target = slices(&merged.graphs[0], &repo)[0].node;
-    upsert_cell_sharded(&layout, target, cell_type::INTENT, CellPayload::Text("why".into())).unwrap();
+    upsert_cell_sharded(
+        &layout,
+        target,
+        cell_type::INTENT,
+        CellPayload::Text("why".into()),
+    )
+    .unwrap();
     let (back, meta) = read_merged_sharded_meta(&layout).unwrap();
     assert_eq!(meta.code_spans_unresolved, 0);
     for n in &merged.graphs[0].nodes {
-        assert_eq!(code_of(&back.graphs[0], n.id), code_of(&merged.graphs[0], n.id));
+        assert_eq!(
+            code_of(&back.graphs[0], n.id),
+            code_of(&merged.graphs[0], n.id)
+        );
     }
     assert!(layout.join(MANIFEST_NAME).is_file());
 }

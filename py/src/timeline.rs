@@ -34,8 +34,8 @@ use pyo3::prelude::*;
 use glia_engine::absence::Answer;
 use glia_engine::persist::{default_layout_dir, load_or_rebuild};
 use glia_engine::timeline::{
-    AsOfSummary, EdgeHistoryRow, MAX_REVS, TimelineArgs, TimelineBuilt, as_of, build_timeline, edge_history,
-    load_timeline,
+    AsOfSummary, EdgeHistoryRow, MAX_REVS, TimelineArgs, TimelineBuilt, as_of, build_timeline,
+    edge_history, load_timeline,
 };
 
 use crate::convert::to_py;
@@ -62,9 +62,16 @@ impl From<Fail> for PyErr {
 /// The body of [`timeline_build`], minus pyo3. `persist` overrides the
 /// default (write unless `GLIA_NO_PERSIST=1`) when given; the pyfunction
 /// passes `None`.
-fn build_answer(repo_path: &str, revs: usize, head: &str, persist: Option<bool>) -> Result<TimelineBuilt, Fail> {
+fn build_answer(
+    repo_path: &str,
+    revs: usize,
+    head: &str,
+    persist: Option<bool>,
+) -> Result<TimelineBuilt, Fail> {
     if revs == 0 || revs > MAX_REVS {
-        return Err(Fail::Value(format!("timeline_build: revs must be 1..={MAX_REVS}, not {revs}")));
+        return Err(Fail::Value(format!(
+            "timeline_build: revs must be 1..={MAX_REVS}, not {revs}"
+        )));
     }
     let mut a = TimelineArgs::default();
     a.revs = revs;
@@ -72,29 +79,45 @@ fn build_answer(repo_path: &str, revs: usize, head: &str, persist: Option<bool>)
     if let Some(p) = persist {
         a.persist = p;
     }
-    let built = build_timeline(repo_path, &a).map_err(|e| Fail::Runtime(format!("timeline_build: {e}")))?;
+    let built =
+        build_timeline(repo_path, &a).map_err(|e| Fail::Runtime(format!("timeline_build: {e}")))?;
     eprintln!("[timeline] surface=pyo3 build rows={}", built.revs.len());
     Ok(built)
 }
 
 /// The body of [`timeline_history`], minus pyo3.
-fn history_answer(repo_path: &str, qname: &str, category: Option<&str>) -> Result<Answer<EdgeHistoryRow>, Fail> {
-    let store = load_timeline(repo_path).map_err(|e| Fail::Runtime(format!("timeline_history: {e}")))?;
+fn history_answer(
+    repo_path: &str,
+    qname: &str,
+    category: Option<&str>,
+) -> Result<Answer<EdgeHistoryRow>, Fail> {
+    let store =
+        load_timeline(repo_path).map_err(|e| Fail::Runtime(format!("timeline_history: {e}")))?;
     let root = Path::new(repo_path);
     let (current, _outcome) = load_or_rebuild(&default_layout_dir(root), Some(root), true)
-        .map_err(|e| Fail::Runtime(format!("timeline_history: the current graph of {repo_path}: {e}")))?;
+        .map_err(|e| {
+            Fail::Runtime(format!(
+                "timeline_history: the current graph of {repo_path}: {e}"
+            ))
+        })?;
     let mut answer = edge_history(&current.merged, &store, qname, category);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = current.parse_errors.len();
     }
-    eprintln!("[timeline] surface=pyo3 history rows={}", answer.results.len());
+    eprintln!(
+        "[timeline] surface=pyo3 history rows={}",
+        answer.results.len()
+    );
     Ok(answer)
 }
 
 /// The body of [`timeline_as_of`], minus pyo3.
 fn as_of_answer(repo_path: &str, rev: &str) -> Result<AsOfSummary, Fail> {
-    let store = load_timeline(repo_path).map_err(|e| Fail::Runtime(format!("timeline_as_of: {e}")))?;
-    let summary = as_of(&store, rev).map_err(|e| Fail::Value(format!("timeline_as_of: {e}")))?.summary();
+    let store =
+        load_timeline(repo_path).map_err(|e| Fail::Runtime(format!("timeline_as_of: {e}")))?;
+    let summary = as_of(&store, rev)
+        .map_err(|e| Fail::Value(format!("timeline_as_of: {e}")))?
+        .summary();
     eprintln!("[timeline] surface=pyo3 as_of rows={}", summary.edges);
     Ok(summary)
 }
@@ -148,7 +171,12 @@ fn timeline_build(py: Python<'_>, repo_path: &str, revs: usize, head: &str) -> P
 /// cannot be loaded.
 #[pyfunction]
 #[pyo3(signature = (repo_path, qname, category=None))]
-fn timeline_history(py: Python<'_>, repo_path: &str, qname: &str, category: Option<&str>) -> PyResult<Py<PyAny>> {
+fn timeline_history(
+    py: Python<'_>,
+    repo_path: &str,
+    qname: &str,
+    category: Option<&str>,
+) -> PyResult<Py<PyAny>> {
     let answer = history_answer(repo_path, qname, category)?;
     to_py(py, serde_json::to_string(&answer))
 }
@@ -214,8 +242,18 @@ mod tests {
         std::fs::write(&gitconfig, "").expect("empty gitconfig");
         let git = |args: &[&str]| {
             let out = Command::new("git")
-                .args(["-c", "user.name=glia", "-c", "user.email=glia@example.invalid"])
-                .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+                .args([
+                    "-c",
+                    "user.name=glia",
+                    "-c",
+                    "user.email=glia@example.invalid",
+                ])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
                 .arg("-C")
                 .arg(&top)
                 .args(args)
@@ -226,19 +264,33 @@ mod tests {
                 .env_remove("GIT_INDEX_FILE")
                 .output()
                 .unwrap_or_else(|e| panic!("CD.5d timeline test needs a `git` binary: {e}"));
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
-        let write = |rel: &str, text: &str| std::fs::write(top.join(rel), text).expect("fixture write");
+        let write =
+            |rel: &str, text: &str| std::fs::write(top.join(rel), text).expect("fixture write");
         git(&["init", "-q"]);
-        write("app/a.py", "def f():\n    return g()\n\n\ndef g():\n    return 1\n");
+        write(
+            "app/a.py",
+            "def f():\n    return g()\n\n\ndef g():\n    return 1\n",
+        );
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "f calls g"]);
-        write("app/a.py", "def f():\n    g()\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n");
+        write(
+            "app/a.py",
+            "def f():\n    g()\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n",
+        );
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "f calls h"]);
         git(&["mv", "app/a.py", "app/b.py"]);
         git(&["commit", "-q", "-m", "move a to b"]);
-        write("app/b.py", "def f():\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n");
+        write(
+            "app/b.py",
+            "def f():\n    return h()\n\n\ndef g():\n    return 1\n\n\ndef h():\n    return 2\n",
+        );
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "f drops g"]);
         (Scratch(root), top)
@@ -262,7 +314,12 @@ mod tests {
             .as_object()
             .expect("an object")
             .keys()
-            .map(|k| (text.find(&format!("\"{k}\":")).unwrap_or(usize::MAX), k.clone()))
+            .map(|k| {
+                (
+                    text.find(&format!("\"{k}\":")).unwrap_or(usize::MAX),
+                    k.clone(),
+                )
+            })
             .collect();
         keys.sort();
         keys.into_iter().map(|(_, k)| k).collect()
@@ -271,7 +328,10 @@ mod tests {
     /// The pyo3 signature's literal default is the engine's.
     #[test]
     fn default_revs_matches_the_engine() {
-        assert_eq!(DEFAULT_REVS, 20, "update `revs=20` in timeline_build's signature");
+        assert_eq!(
+            DEFAULT_REVS, 20,
+            "update `revs=20` in timeline_build's signature"
+        );
     }
 
     /// CD.5d: the three helpers return the documented objects over CD.5c's
@@ -290,8 +350,14 @@ mod tests {
         }
         assert!(matches!(as_of_answer(repo, "0"), Err(Fail::Runtime(_))));
 
-        assert!(matches!(build_answer(repo, 0, "HEAD", Some(true)), Err(Fail::Value(_))));
-        assert!(matches!(build_answer(repo, MAX_REVS + 1, "HEAD", Some(true)), Err(Fail::Value(_))));
+        assert!(matches!(
+            build_answer(repo, 0, "HEAD", Some(true)),
+            Err(Fail::Value(_))
+        ));
+        assert!(matches!(
+            build_answer(repo, MAX_REVS + 1, "HEAD", Some(true)),
+            Err(Fail::Value(_))
+        ));
         match build_answer(repo, 4, "no-such-rev", Some(true)) {
             Err(Fail::Runtime(m)) => assert!(m.contains("unknown rev no-such-rev"), "{m}"),
             other => panic!("unknown head: {other:?}"),
@@ -300,7 +366,16 @@ mod tests {
         let built = build_answer(repo, 4, "HEAD", Some(true)).expect("build 4 revs");
         assert_eq!(
             keys_in_order(&text!(&built)),
-            ["revs", "skipped", "nodes", "edges", "edge_spans", "closed", "moves", "written"]
+            [
+                "revs",
+                "skipped",
+                "nodes",
+                "edges",
+                "edge_spans",
+                "closed",
+                "moves",
+                "written"
+            ]
         );
         let b = value(&text!(&built));
         assert_eq!(b["revs"].as_array().map(Vec::len), Some(4));
@@ -314,13 +389,17 @@ mod tests {
         let rows = &history.results;
         let g = rows
             .iter()
-            .find(|r| r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with("::g"))
+            .find(|r| {
+                r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with("::g")
+            })
             .unwrap_or_else(|| panic!("f -> g row: {}", text!(&history)));
         assert_eq!(g.until.as_ref().map(|u| u.index), Some(3));
         assert!(g.since_window_start);
         let h = rows
             .iter()
-            .find(|r| r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with("::h"))
+            .find(|r| {
+                r.category == "CALLS" && r.direction == "out" && r.other_qname.ends_with("::h")
+            })
             .unwrap_or_else(|| panic!("f -> h row: {}", text!(&history)));
         assert!(h.until.is_none(), "f -> h still present");
         assert_eq!(
@@ -343,9 +422,16 @@ mod tests {
         assert_eq!(none.absence.as_ref().map(|a| a.reason), Some("no_edges"));
 
         let summary = as_of_answer(repo, "1").expect("as of rev 1");
-        assert_eq!(keys_in_order(&text!(&summary)), ["rev", "nodes", "edges", "by_category"]);
+        assert_eq!(
+            keys_in_order(&text!(&summary)),
+            ["rev", "nodes", "edges", "by_category"]
+        );
         assert_eq!(summary.rev.index, 1);
-        assert!(summary.by_category.get("CALLS").is_some_and(|n| *n >= 2), "{}", text!(&summary));
+        assert!(
+            summary.by_category.get("CALLS").is_some_and(|n| *n >= 2),
+            "{}",
+            text!(&summary)
+        );
         let by_sha = as_of_answer(repo, &built.revs[1].sha[..7]).expect("as of rev 1 by sha");
         assert_eq!(by_sha.rev.index, 1);
         match as_of_answer(repo, "9") {

@@ -59,8 +59,14 @@ pub fn parse_file(
     if dialect == Dialect::Header && qname_debug() {
         // LB.10a debug marker:
         //   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] c_cpp:'`
-        let chosen = if parsed.dialect == Dialect::C { "c" } else { "cpp" };
-        let c_bytes = parsed.c_error_bytes.map_or_else(|| "-".to_string(), |b| b.to_string());
+        let chosen = if parsed.dialect == Dialect::C {
+            "c"
+        } else {
+            "cpp"
+        };
+        let c_bytes = parsed
+            .c_error_bytes
+            .map_or_else(|| "-".to_string(), |b| b.to_string());
         eprintln!(
             "[qname] c_cpp: header parsed as {chosen} (cpp_error_bytes={}, c_error_bytes={c_bytes}) file={file_rel_path}",
             parsed.cpp_error_bytes
@@ -68,7 +74,9 @@ pub fn parse_file(
     }
     let (fp, stats, lambdas, http) =
         parse_tree_into(&parsed.tree, source, file_rel_path, module_qname, repo);
-    if qname_debug() && let Some(line) = stats.marker(file_rel_path) {
+    if qname_debug()
+        && let Some(line) = stats.marker(file_rel_path)
+    {
         // LB.10b debug marker:
         //   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] c_cpp: .* header types scoped'`
         eprintln!("{line}");
@@ -143,7 +151,11 @@ fn parse_tree_into(
 fn module_name(file_rel_path: &str, module_qname: &str) -> String {
     match Path::new(file_rel_path).file_stem() {
         Some(stem) if !stem.is_empty() => stem.to_string_lossy().into_owned(),
-        _ => module_qname.rsplit("::").next().unwrap_or(module_qname).to_string(),
+        _ => module_qname
+            .rsplit("::")
+            .next()
+            .unwrap_or(module_qname)
+            .to_string(),
     }
 }
 
@@ -181,7 +193,12 @@ fn parse_tree(source: &str, dialect: Dialect) -> Result<Parsed, ParseError> {
         Dialect::Cpp | Dialect::Header => {
             let cpp = parse_with(source, tree_sitter_cpp::LANGUAGE.into())?;
             if dialect == Dialect::Cpp || !cpp.root_node().has_error() {
-                return Ok(Parsed { tree: cpp, dialect: Dialect::Cpp, cpp_error_bytes: 0, c_error_bytes: None });
+                return Ok(Parsed {
+                    tree: cpp,
+                    dialect: Dialect::Cpp,
+                    cpp_error_bytes: 0,
+                    c_error_bytes: None,
+                });
             }
             let cpp_error_bytes = error_weight(cpp.root_node());
             let c = parse_with(source, tree_sitter_c::LANGUAGE.into())?;
@@ -191,7 +208,12 @@ fn parse_tree(source: &str, dialect: Dialect) -> Result<Parsed, ParseError> {
             } else {
                 (cpp, Dialect::Cpp)
             };
-            Ok(Parsed { tree, dialect, cpp_error_bytes, c_error_bytes: Some(c_error_bytes) })
+            Ok(Parsed {
+                tree,
+                dialect,
+                cpp_error_bytes,
+                c_error_bytes: Some(c_error_bytes),
+            })
         }
     }
 }
@@ -231,9 +253,8 @@ fn error_weight(root: TsNode) -> usize {
 /// once. Off by default: it would print for every header of a build.
 fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
-    *DEBUG.get_or_init(|| {
-        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
-    })
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 struct Acc {
@@ -288,7 +309,10 @@ impl Acc {
             refs: Vec::new(),
             nav: CodeNav::default(),
             emitted: HashMap::new(),
-            dir: module_qname.rsplit_once("::").map_or("", |(d, _)| d).to_string(),
+            dir: module_qname
+                .rsplit_once("::")
+                .map_or("", |(d, _)| d)
+                .to_string(),
             is_header: is_header_path(file_rel),
             local_types: HashMap::new(),
             stats: IdentityStats::default(),
@@ -438,7 +462,10 @@ impl LambdaStats {
     /// lambda walked.
     fn marker(&self, file_rel: &str) -> Option<String> {
         (self.bodies > 0).then(|| {
-            format!("[c-lambda] bodies={} calls={} file={file_rel}", self.bodies, self.calls)
+            format!(
+                "[c-lambda] bodies={} calls={} file={file_rel}",
+                self.bodies, self.calls
+            )
         })
     }
 }
@@ -456,7 +483,10 @@ impl HttpClientStats {
     fn marker(&self, file_rel: &str) -> Option<String> {
         let endpoints = self.libcurl;
         (endpoints > 0).then(|| {
-            format!("[c-http-client] endpoints={endpoints} (libcurl={}) path={file_rel}", self.libcurl)
+            format!(
+                "[c-http-client] endpoints={endpoints} (libcurl={}) path={file_rel}",
+                self.libcurl
+            )
         })
     }
 }
@@ -606,7 +636,10 @@ fn visit_one(
             // (`struct P { int x; } p;`); a bodiless one declares nothing.
             let mut c2 = child.walk();
             for gc in child.named_children(&mut c2) {
-                if matches!(gc.kind(), "struct_specifier" | "class_specifier" | "union_specifier") {
+                if matches!(
+                    gc.kind(),
+                    "struct_specifier" | "class_specifier" | "union_specifier"
+                ) {
                     visit_type(gc, src, file_rel, scope, None, repo, acc);
                 }
             }
@@ -639,7 +672,10 @@ fn visit_linkage(
     let is_c = node
         .child_by_field_name("value")
         .is_some_and(|v| text_of(v, src).trim_matches('"') == "C");
-    let inner = Scope { extern_c: scope.extern_c || is_c, ..*scope };
+    let inner = Scope {
+        extern_c: scope.extern_c || is_c,
+        ..*scope
+    };
     if body.kind() == "declaration_list" {
         visit_children(body, src, file_rel, &inner, repo, acc);
     } else {
@@ -680,8 +716,12 @@ fn visit_template(
             (Some(o), _) => visit_member(child, src, file_rel, scope, o, repo, acc),
             (
                 None,
-                "class_specifier" | "struct_specifier" | "union_specifier" | "function_definition"
-                | "declaration" | "template_declaration",
+                "class_specifier"
+                | "struct_specifier"
+                | "union_specifier"
+                | "function_definition"
+                | "declaration"
+                | "template_declaration",
             ) => visit_one(child, src, file_rel, scope, repo, acc),
             _ => {}
         }
@@ -733,7 +773,10 @@ fn visit_namespace(
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
         if let Some(body) = node.child_by_field_name("body") {
-            let inner = Scope { anon: true, ..*scope };
+            let inner = Scope {
+                anon: true,
+                ..*scope
+            };
             visit_children(body, src, file_rel, &inner, repo, acc);
         }
         return;
@@ -756,13 +799,23 @@ fn visit_namespace(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        acc.nav
-            .record(ns_id, name, &qname, node_kind::PACKAGE, Some(scope.parent_id));
+        acc.nav.record(
+            ns_id,
+            name,
+            &qname,
+            node_kind::PACKAGE,
+            Some(scope.parent_id),
+        );
     }
 
     if let Some(body) = node.child_by_field_name("body") {
         let ns_path = join(scope.ns_path, name);
-        let inner = Scope { parent_qname: &qname, parent_id: ns_id, ns_path: &ns_path, ..*scope };
+        let inner = Scope {
+            parent_qname: &qname,
+            parent_id: ns_id,
+            ns_path: &ns_path,
+            ..*scope
+        };
         visit_children(body, src, file_rel, &inner, repo, acc);
     }
 }
@@ -802,7 +855,11 @@ fn visit_type(
     };
     let (qname, parent_id, key) = match outer {
         Some(o) => (format!("{}::{name}", o.qname), o.id, join(o.key, &name)),
-        None => (type_qname(acc, scope, &name), scope.parent_id, join(scope.ns_path, &name)),
+        None => (
+            type_qname(acc, scope, &name),
+            scope.parent_id,
+            join(scope.ns_path, &name),
+        ),
     };
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
 
@@ -833,7 +890,11 @@ fn visit_type(
         .entry(key.clone())
         .or_insert_with(|| (id, qname.clone()));
 
-    let me = Outer { qname: &qname, id, key: &key };
+    let me = Outer {
+        qname: &qname,
+        id,
+        key: &key,
+    };
     visit_members(body, src, file_rel, scope, me, repo, acc);
 }
 
@@ -1062,8 +1123,13 @@ fn visit_function(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        acc.nav
-            .record(id, &name, &qname, node_kind::FUNCTION, Some(scope.parent_id));
+        acc.nav.record(
+            id,
+            &name,
+            &qname,
+            node_kind::FUNCTION,
+            Some(scope.parent_id),
+        );
         acc.stats.count_linkage(scope);
     }
     // CB.19 (C6): a `static` free function, or one in an anonymous
@@ -1106,7 +1172,10 @@ fn record_return_type(def: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
     if acc.nav.return_types.contains_key(&fn_id) {
         return;
     }
-    if let Some(ty) = def.child_by_field_name("type").and_then(|t| simple_type(t, src, acc)) {
+    if let Some(ty) = def
+        .child_by_field_name("type")
+        .and_then(|t| simple_type(t, src, acc))
+    {
         acc.nav.record_return_type(fn_id, &ty);
     }
 }
@@ -1145,8 +1214,16 @@ fn visit_out_of_line(
         None => {
             acc.stats.provisional += 1;
             let full = join(scope.ns_path, q);
-            let owner = if full.contains("::") { full } else { join(&acc.dir, &full) };
-            (format!("{owner}::{m}"), format!("{q}::{m}"), scope.parent_id)
+            let owner = if full.contains("::") {
+                full
+            } else {
+                join(&acc.dir, &full)
+            };
+            (
+                format!("{owner}::{m}"),
+                format!("{q}::{m}"),
+                scope.parent_id,
+            )
         }
     };
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
@@ -1233,7 +1310,12 @@ fn extract_func_name(declarator: TsNode, src: &[u8]) -> String {
         ) {
             return text_of(node, src).to_string();
         } else {
-            return text_of(node, src).split('(').next().unwrap_or("").trim().to_string();
+            return text_of(node, src)
+                .split('(')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
         }
     }
 }
@@ -1285,7 +1367,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             && let Some(func) = n.child_by_field_name("function")
         {
             let qualifier = classify_call(func, src);
-            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.calls.push(CallSite {
+                from,
+                qualifier,
+                line: line_at(n),
+            });
             acc.lambdas.calls += usize::from(in_lambda);
         }
         let mut cursor = n.walk();
@@ -1392,7 +1478,11 @@ impl CurlHandle {
                 }
                 if let Some(raw) = c_string_literal(value, src).filter(|r| !r.trim().is_empty()) {
                     let pos = call.start_position();
-                    self.urls.push(CurlUrl { raw, row: pos.row, col: pos.column });
+                    self.urls.push(CurlUrl {
+                        raw,
+                        row: pos.row,
+                        col: pos.column,
+                    });
                 }
             }
             "CURLOPT_POSTFIELDS" | "CURLOPT_COPYPOSTFIELDS" => self.method = CurlMethod::Post,
@@ -1422,10 +1512,13 @@ impl CurlHandle {
             }
             "CURLOPT_CUSTOMREQUEST" => {
                 let token = |v: &String| {
-                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_')
+                    !v.is_empty()
+                        && v.bytes()
+                            .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_')
                 };
-                self.custom =
-                    c_string_literal(value, src).map(|v| v.trim().to_ascii_uppercase()).filter(token);
+                self.custom = c_string_literal(value, src)
+                    .map(|v| v.trim().to_ascii_uppercase())
+                    .filter(token);
             }
             _ => {}
         }
@@ -1449,7 +1542,11 @@ fn curl_long_on(value: TsNode, src: &[u8]) -> bool {
 fn c_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
     let mut cursor = node.walk();
     match node.kind() {
-        "string_literal" => Some(node.named_children(&mut cursor).map(|p| text_of(p, src)).collect()),
+        "string_literal" => Some(
+            node.named_children(&mut cursor)
+                .map(|p| text_of(p, src))
+                .collect(),
+        ),
         "raw_string_literal" => Some(
             node.named_children(&mut cursor)
                 .find(|p| p.kind() == "raw_string_content")
@@ -1457,7 +1554,10 @@ fn c_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
         ),
         "concatenated_string" => {
             let parts: Vec<TsNode> = node.named_children(&mut cursor).collect();
-            parts.into_iter().map(|p| c_string_literal(p, src)).collect()
+            parts
+                .into_iter()
+                .map(|p| c_string_literal(p, src))
+                .collect()
         }
         "parenthesized_expression" => c_string_literal(node.named_child(0)?, src),
         _ => None,
@@ -1470,7 +1570,9 @@ fn c_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
 /// segment.
 fn curl_url_split(raw: &str) -> (Option<String>, Option<String>) {
     let raw = raw.trim();
-    let has_scheme = raw.find("://").is_some_and(|i| !raw[..i].contains(['/', '?', '#']));
+    let has_scheme = raw
+        .find("://")
+        .is_some_and(|i| !raw[..i].contains(['/', '?', '#']));
     if has_scheme || raw.starts_with('/') {
         client_url_split(raw)
     } else {
@@ -1484,7 +1586,9 @@ fn call_args(call: TsNode) -> Vec<TsNode> {
         return Vec::new();
     };
     let mut cursor = list.walk();
-    list.named_children(&mut cursor).filter(|n| n.kind() != "comment").collect()
+    list.named_children(&mut cursor)
+        .filter(|n| n.kind() != "comment")
+        .collect()
 }
 
 /// DH.21: the libcurl client requests of a function body (see the section
@@ -1502,7 +1606,10 @@ fn collect_curl_endpoints(body: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc
             calls.push(n);
         }
         let mut cursor = n.walk();
-        stack.extend(n.named_children(&mut cursor).filter(|c| c.kind() != "function_definition"));
+        stack.extend(
+            n.named_children(&mut cursor)
+                .filter(|c| c.kind() != "function_definition"),
+        );
     }
     calls.sort_by_key(|n| n.start_byte());
 
@@ -1523,11 +1630,17 @@ fn collect_curl_endpoints(body: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc
         let Some(handle) = args.get(at) else {
             continue;
         };
-        let key: String = text_of(*handle, src).chars().filter(|c| !c.is_whitespace()).collect();
+        let key: String = text_of(*handle, src)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         let i = match handles.iter().position(|h| h.key == key) {
             Some(i) => i,
             None => {
-                handles.push(CurlHandle { key, ..CurlHandle::default() });
+                handles.push(CurlHandle {
+                    key,
+                    ..CurlHandle::default()
+                });
                 handles.len() - 1
             }
         };
@@ -1546,7 +1659,10 @@ fn collect_curl_endpoints(body: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc
                 if !h.performed {
                     emit_curl_requests(h, fn_id, &mut emitted, acc);
                 }
-                *h = CurlHandle { key: std::mem::take(&mut h.key), ..CurlHandle::default() };
+                *h = CurlHandle {
+                    key: std::mem::take(&mut h.key),
+                    ..CurlHandle::default()
+                };
             }
         }
     }
@@ -1582,7 +1698,10 @@ fn emit_curl_requests(
             col: url.col + 1,
             confidence: Confidence::Medium,
         };
-        let extras = HitExtras { host: host.as_deref(), ..HitExtras::default() };
+        let extras = HitExtras {
+            host: host.as_deref(),
+            ..HitExtras::default()
+        };
         push_client_endpoint_with(
             acc.repo,
             &ep,
@@ -1595,7 +1714,10 @@ fn emit_curl_requests(
         );
         if let Some(edge) = acc.edges.last_mut() {
             let row = u32::try_from(url.row).unwrap_or(u32::MAX);
-            evidence::attach(edge, Evidence::emitter("parser:c_cpp").rule("libcurl").line(row));
+            evidence::attach(
+                edge,
+                Evidence::emitter("parser:c_cpp").rule("libcurl").line(row),
+            );
         }
         acc.http.libcurl += 1;
     }
@@ -1634,7 +1756,10 @@ fn record_prototypes(decl: TsNode, src: &[u8], scope: &Scope, acc: &mut Acc) {
         let fact = if internal {
             NavFact::InternalLinkage { name }
         } else {
-            NavFact::DeclaresFn { ns: scope.ns_path.to_string(), name }
+            NavFact::DeclaresFn {
+                ns: scope.ns_path.to_string(),
+                name,
+            }
         };
         if acc.fact(fact) {
             acc.stats.prototypes += 1;
@@ -1660,7 +1785,9 @@ fn prototype_name<'a>(declarator: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> 
                 .then(|| text_of(name, src));
             }
             "pointer_declarator" | "attributed_declarator" => {
-                node = node.child_by_field_name("declarator").or_else(|| node.named_child(0))?;
+                node = node
+                    .child_by_field_name("declarator")
+                    .or_else(|| node.named_child(0))?;
             }
             "reference_declarator" => node = node.named_child(0)?,
             _ => return None,
@@ -1746,12 +1873,16 @@ fn record_params(declarator: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
 fn record_param(p: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
     if !matches!(
         p.kind(),
-        "parameter_declaration" | "optional_parameter_declaration" | "variadic_parameter_declaration"
+        "parameter_declaration"
+            | "optional_parameter_declaration"
+            | "variadic_parameter_declaration"
     ) {
         return;
     }
-    let (Some(ty), Some(d)) = (p.child_by_field_name("type"), p.child_by_field_name("declarator"))
-    else {
+    let (Some(ty), Some(d)) = (
+        p.child_by_field_name("type"),
+        p.child_by_field_name("declarator"),
+    ) else {
         return;
     };
     if let (Some(ty), Some(name)) = (simple_type(ty, src, acc), declared_name(d, src)) {
@@ -1773,7 +1904,9 @@ fn collect_body_facts(body: TsNode, src: &[u8], fn_id: NodeId, ns_path: &str, ac
             "declaration" => record_locals(n, src, fn_id, acc),
             "for_range_loop" => {
                 let ty = n.child_by_field_name("type");
-                let name = n.child_by_field_name("declarator").and_then(|d| declared_name(d, src));
+                let name = n
+                    .child_by_field_name("declarator")
+                    .and_then(|d| declared_name(d, src));
                 if let (Some(ty), Some(name)) = (ty, name) {
                     // `for (auto& x : xs)`: an element of unknown type.
                     let simple = if ty.kind() == "placeholder_type_specifier" {
@@ -1835,7 +1968,11 @@ fn record_lambda_params(lambda: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc
         let generic = p
             .child_by_field_name("type")
             .is_some_and(|t| t.kind() == "placeholder_type_specifier");
-        match (generic, p.child_by_field_name("declarator").and_then(|d| declared_name(d, src))) {
+        match (
+            generic,
+            p.child_by_field_name("declarator")
+                .and_then(|d| declared_name(d, src)),
+        ) {
             (true, Some(name)) => acc.nav.record_local_type(fn_id, name, ""),
             _ => record_param(p, src, fn_id, acc),
         }
@@ -1851,13 +1988,21 @@ fn record_locals(decl: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
         return;
     };
     let is_auto = ty.kind() == "placeholder_type_specifier";
-    let declared = if is_auto { None } else { simple_type(ty, src, acc) };
+    let declared = if is_auto {
+        None
+    } else {
+        simple_type(ty, src, acc)
+    };
     let mut cursor = decl.walk();
     for d in decl.children_by_field_name("declarator", &mut cursor) {
         let Some(name) = declared_name(d, src) else {
             continue;
         };
-        let ty = if is_auto { init_type(d, src, acc) } else { declared.clone() };
+        let ty = if is_auto {
+            init_type(d, src, acc)
+        } else {
+            declared.clone()
+        };
         if let Some(ty) = ty {
             acc.nav.record_local_type(fn_id, name, &ty);
         }
@@ -1876,7 +2021,9 @@ fn init_type(declarator: TsNode, src: &[u8], acc: &Acc) -> Option<String> {
         return Some(String::new());
     };
     let named = match value.kind() {
-        "call_expression" => value.child_by_field_name("function").map(|f| callee_type(f, src, acc)),
+        "call_expression" => value
+            .child_by_field_name("function")
+            .map(|f| callee_type(f, src, acc)),
         "new_expression" | "compound_literal_expression" => value
             .child_by_field_name("type")
             .and_then(|t| simple_type(t, src, acc)),
@@ -1920,10 +2067,12 @@ fn simple_type(ty: TsNode, src: &[u8], acc: &Acc) -> Option<String> {
                 Some(name.to_string())
             }
         }
-        "qualified_identifier" | "template_type" | "struct_specifier" | "class_specifier"
-        | "union_specifier" | "enum_specifier" => {
-            simple_type(ty.child_by_field_name("name")?, src, acc)
-        }
+        "qualified_identifier"
+        | "template_type"
+        | "struct_specifier"
+        | "class_specifier"
+        | "union_specifier"
+        | "enum_specifier" => simple_type(ty.child_by_field_name("name")?, src, acc),
         _ => Some(String::new()),
     }
 }
@@ -1932,10 +2081,34 @@ fn simple_type(ty: TsNode, src: &[u8], acc: &Acc) -> Option<String> {
 fn is_primitive_name(name: &str) -> bool {
     matches!(
         name,
-        "void" | "bool" | "char" | "short" | "int" | "long" | "float" | "double" | "signed"
-            | "unsigned" | "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t"
-            | "wchar_t" | "char8_t" | "char16_t" | "char32_t" | "int8_t" | "int16_t" | "int32_t"
-            | "int64_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "auto"
+        "void"
+            | "bool"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "size_t"
+            | "ssize_t"
+            | "ptrdiff_t"
+            | "intptr_t"
+            | "uintptr_t"
+            | "wchar_t"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "auto"
     )
 }
 
@@ -1948,8 +2121,13 @@ fn declared_name<'a>(declarator: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
     loop {
         match node.kind() {
             "identifier" | "field_identifier" => return Some(text_of(node, src)),
-            "init_declarator" | "pointer_declarator" | "array_declarator" | "attributed_declarator" => {
-                node = node.child_by_field_name("declarator").or_else(|| node.named_child(0))?;
+            "init_declarator"
+            | "pointer_declarator"
+            | "array_declarator"
+            | "attributed_declarator" => {
+                node = node
+                    .child_by_field_name("declarator")
+                    .or_else(|| node.named_child(0))?;
             }
             "reference_declarator" | "parenthesized_declarator" => node = node.named_child(0)?,
             _ => return None,
@@ -2062,8 +2240,22 @@ int add(int a, int b) {
 }
 "#;
         let fp = parse_file(source, "src/math.c", "src::math.c", Dialect::C, repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            1
+        );
         assert_eq!(fp.imports.len(), 1);
     }
 
@@ -2078,9 +2270,30 @@ public:
     void validate(int id) {}
 };
 "#;
-        let fp = parse_file(source, "src/service.cpp", "src::service.cpp", Dialect::Cpp, repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        let fp = parse_file(
+            source,
+            "src/service.cpp",
+            "src::service.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::CLASS)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::METHOD)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -2092,7 +2305,14 @@ namespace app {
 }
 "#;
         let fp = parse_file(source, "src/app.cpp", "src::app.cpp", Dialect::Cpp, repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::PACKAGE)
+                .count(),
+            1
+        );
     }
     fn count(fp: &FileParse, kind: glia_core::NodeKindId) -> usize {
         fp.nav.kind_by_id.values().filter(|k| **k == kind).count()
@@ -2102,7 +2322,9 @@ namespace app {
         fp.nav
             .kind_by_id
             .iter()
-            .find(|(id, k)| **k == kind && fp.nav.name_by_id.get(id).map(String::as_str) == Some(name))
+            .find(|(id, k)| {
+                **k == kind && fp.nav.name_by_id.get(id).map(String::as_str) == Some(name)
+            })
             .map(|(id, _)| *id)
     }
 
@@ -2126,11 +2348,18 @@ namespace app {
         let cpp = "class W { public: int a() { return 1; } };\n";
         let parsed = parse_tree(cpp, Dialect::Header).unwrap();
         assert_eq!(parsed.dialect, Dialect::Cpp);
-        assert_eq!(parsed.c_error_bytes, None, "a clean C++ tree never re-parses");
+        assert_eq!(
+            parsed.c_error_bytes, None,
+            "a clean C++ tree never re-parses"
+        );
         let fp = parse_file(cpp, "src/W.h", "src::W.h", Dialect::Header, repo()).unwrap();
         assert_eq!(count(&fp, node_kind::CLASS), 1);
         assert_eq!(count(&fp, node_kind::METHOD), 1);
-        assert_eq!(count(&fp, node_kind::FUNCTION), 0, "the C grammar misreads the class as a FUNCTION");
+        assert_eq!(
+            count(&fp, node_kind::FUNCTION),
+            0,
+            "the C grammar misreads the class as a FUNCTION"
+        );
 
         // `template` is a C identifier and a C++ keyword. tree-sitter-cpp
         // reads `class` / `new` / `this` as identifiers without an error, so
@@ -2165,9 +2394,14 @@ namespace app {
     /// weighs 0.
     #[test]
     fn error_weight_counts_error_bytes() {
-        let clean = parse_with("int f(void) { return 1; }\n", tree_sitter_c::LANGUAGE.into()).unwrap();
+        let clean = parse_with(
+            "int f(void) { return 1; }\n",
+            tree_sitter_c::LANGUAGE.into(),
+        )
+        .unwrap();
         assert_eq!(error_weight(clean.root_node()), 0);
-        let broken = parse_with("int f(void) { return 1 }\n", tree_sitter_c::LANGUAGE.into()).unwrap();
+        let broken =
+            parse_with("int f(void) { return 1 }\n", tree_sitter_c::LANGUAGE.into()).unwrap();
         assert!(broken.root_node().has_error());
         assert!(error_weight(broken.root_node()) > 0);
     }
@@ -2180,7 +2414,11 @@ namespace app {
         let guarded = "#ifndef X_H\n#define X_H\nclass X {\n public:\n  int a() { return 1; }\n#ifdef DEBUG\n  int dbg() { return 2; }\n#endif\n};\n#endif\n";
         let fp = parse_file(guarded, "src/X.h", "src::X.h", Dialect::Header, repo()).unwrap();
         assert_eq!(count(&fp, node_kind::CLASS), 1);
-        assert_eq!(count(&fp, node_kind::METHOD), 2, "a method inside a class-body #ifdef is walked");
+        assert_eq!(
+            count(&fp, node_kind::METHOD),
+            2,
+            "a method inside a class-body #ifdef is walked"
+        );
 
         let dead = "#if 0\nint dead(void){return 0;}\n#else\nint live(void){return 1;}\n#endif\n";
         let fp = parse_file(dead, "src/d.c", "src::d.c", Dialect::C, repo()).unwrap();
@@ -2194,12 +2432,25 @@ namespace app {
         assert_eq!(count(&fp, node_kind::FUNCTION), 1);
         assert_eq!(fp.nodes.iter().filter(|n| n.id == g).count(), 1);
         assert_eq!(
-            fp.edges.iter().filter(|e| e.to == g && e.category == edge_category::DEFINES).count(),
+            fp.edges
+                .iter()
+                .filter(|e| e.to == g && e.category == edge_category::DEFINES)
+                .count(),
             1
         );
         let module = fp.nodes[0].id;
-        assert_eq!(fp.nav.children_of[&module].iter().filter(|c| **c == g).count(), 1);
-        assert_eq!(code_cells(&fp, g).len(), 2, "both branches' bodies stack on the one node");
+        assert_eq!(
+            fp.nav.children_of[&module]
+                .iter()
+                .filter(|c| **c == g)
+                .count(),
+            1
+        );
+        assert_eq!(
+            code_cells(&fp, g).len(),
+            2,
+            "both branches' bodies stack on the one node"
+        );
 
         // `#include` inside a guard still records the import; nested
         // `#if` / `#elif` branches are all walked.
@@ -2224,7 +2475,11 @@ namespace app {
         assert_eq!(code.len(), 1);
         assert!(code[0].starts_with("struct point {"), "{code:?}");
         // One DEFINES per emitted node: none dangle towards a stub.
-        let defines = fp.edges.iter().filter(|e| e.category == edge_category::DEFINES).count();
+        let defines = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::DEFINES)
+            .count();
         assert_eq!(defines, 1);
     }
 
@@ -2242,12 +2497,20 @@ namespace app {
     /// stem, so `bare_module_qname` reads back `src::Widget`.
     #[test]
     fn module_nav_name_is_the_stem() {
-        let fp = parse_file("class Widget {};\n", "src/Widget.h", "src::Widget.h", Dialect::Header, repo()).unwrap();
+        let fp = parse_file(
+            "class Widget {};\n",
+            "src/Widget.h",
+            "src::Widget.h",
+            Dialect::Header,
+            repo(),
+        )
+        .unwrap();
         let module = fp.nodes[0].id;
         assert_eq!(fp.nav.name_by_id[&module], "Widget");
         assert_eq!(fp.nav.qname_by_id[&module], "src::Widget.h");
         assert_eq!(
-            glia_code_domain::bare_module_qname("src::Widget.h", &fp.nav.name_by_id[&module]).as_deref(),
+            glia_code_domain::bare_module_qname("src::Widget.h", &fp.nav.name_by_id[&module])
+                .as_deref(),
             Some("src::Widget")
         );
         assert_eq!(module_name("", "src::x.c"), "x.c");
@@ -2256,8 +2519,9 @@ namespace app {
     /// The id of the `kind` node at `qname`, when the parse recorded it.
     fn node_at(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Option<NodeId> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
-        (fp.nav.kind_by_id.get(&id) == Some(&kind) && fp.nav.qname_by_id.get(&id).map(String::as_str) == Some(qname))
-            .then_some(id)
+        (fp.nav.kind_by_id.get(&id) == Some(&kind)
+            && fp.nav.qname_by_id.get(&id).map(String::as_str) == Some(qname))
+        .then_some(id)
     }
 
     fn all_qnames(fp: &FileParse) -> Vec<&str> {
@@ -2279,25 +2543,53 @@ namespace app {
     #[test]
     fn header_types_take_their_cpp_name() {
         let widget = "#ifndef W_H\n#define W_H\nclass Widget {\n public:\n  void run();\n  int helper() { return 1; }\n};\nstruct Point { int x; };\nenum Color { Red };\n#endif\n";
-        let fp = parse_file(widget, "src/Widget.h", "src::Widget.h", Dialect::Header, repo()).unwrap();
+        let fp = parse_file(
+            widget,
+            "src/Widget.h",
+            "src::Widget.h",
+            Dialect::Header,
+            repo(),
+        )
+        .unwrap();
         let module = fp.nodes[0].id;
-        let class = node_at(&fp, node_kind::CLASS, "src::Widget").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        let helper = node_at(&fp, node_kind::METHOD, "src::Widget::helper").expect("METHOD src::Widget::helper");
+        let class = node_at(&fp, node_kind::CLASS, "src::Widget")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let helper = node_at(&fp, node_kind::METHOD, "src::Widget::helper")
+            .expect("METHOD src::Widget::helper");
         let point = node_at(&fp, node_kind::STRUCT, "src::Point").expect("STRUCT src::Point");
-        assert!(node_at(&fp, node_kind::ENUM, "src::Color").is_some(), "{:?}", all_qnames(&fp));
+        assert!(
+            node_at(&fp, node_kind::ENUM, "src::Color").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
         assert_eq!(fp.nav.parent_of[&class], module);
         assert_eq!(fp.nav.parent_of[&point], module);
         assert_eq!(fp.nav.parent_of[&helper], class);
         assert_eq!(fp.nav.name_by_id[&class], "Widget");
         assert_eq!(defines(&fp, module, class), 1);
         assert_eq!(defines(&fp, class, helper), 1);
-        assert!(all_qnames(&fp).iter().all(|q| !q.starts_with("src::Widget.h::")), "{:?}", all_qnames(&fp));
+        assert!(
+            all_qnames(&fp)
+                .iter()
+                .all(|q| !q.starts_with("src::Widget.h::")),
+            "{:?}",
+            all_qnames(&fp)
+        );
 
         let cart = "#pragma once\nnamespace shop {\nclass Cart {\n public:\n  int total();\n  int tax() { return 1; }\n};\n}\n";
-        let fp = parse_file(cart, "include/shop/cart.hpp", "include::shop::cart.hpp", Dialect::Cpp, repo()).unwrap();
-        let class = node_at(&fp, node_kind::CLASS, "shop::Cart").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let fp = parse_file(
+            cart,
+            "include/shop/cart.hpp",
+            "include::shop::cart.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let class = node_at(&fp, node_kind::CLASS, "shop::Cart")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert!(node_at(&fp, node_kind::METHOD, "shop::Cart::tax").is_some());
-        let package = node_at(&fp, node_kind::PACKAGE, "include::shop::cart.hpp::shop").expect("PACKAGE keeps its shape");
+        let package = node_at(&fp, node_kind::PACKAGE, "include::shop::cart.hpp::shop")
+            .expect("PACKAGE keeps its shape");
         assert_eq!(fp.nav.parent_of[&class], package);
         assert_eq!(defines(&fp, package, class), 1);
 
@@ -2312,15 +2604,34 @@ namespace app {
             (node_kind::PACKAGE, "inc::n.hh::a::b"),
             (node_kind::PACKAGE, "inc::n.hh::lib::v1"),
         ] {
-            assert!(node_at(&fp, kind, q).is_some(), "{q} missing: {:?}", all_qnames(&fp));
+            assert!(
+                node_at(&fp, kind, q).is_some(),
+                "{q} missing: {:?}",
+                all_qnames(&fp)
+            );
         }
 
         // A root-level header: the directory is empty.
         let fp = parse_file("class W {};\n", "W.h", "W.h", Dialect::Header, repo()).unwrap();
-        assert!(node_at(&fp, node_kind::CLASS, "W").is_some(), "{:?}", all_qnames(&fp));
+        assert!(
+            node_at(&fp, node_kind::CLASS, "W").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
         // A C header's struct follows the same rule.
-        let fp = parse_file("struct point { int x; };\n", "c/point.h", "c::point.h", Dialect::Header, repo()).unwrap();
-        assert!(node_at(&fp, node_kind::STRUCT, "c::point").is_some(), "{:?}", all_qnames(&fp));
+        let fp = parse_file(
+            "struct point { int x; };\n",
+            "c/point.h",
+            "c::point.h",
+            Dialect::Header,
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            node_at(&fp, node_kind::STRUCT, "c::point").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
     }
 
     /// LB.10b: a source file's types, namespace blocks and free functions
@@ -2328,7 +2639,14 @@ namespace app {
     #[test]
     fn source_types_stay_file_local() {
         let source = "class Local { public: int b() { return 4; } };\nnamespace n { class K {}; }\nint f() { return 1; }\nstruct S { int x; };\n";
-        let fp = parse_file(source, "src/Widget.cpp", "src::Widget.cpp", Dialect::Cpp, repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/Widget.cpp",
+            "src::Widget.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
         for (kind, q) in [
             (node_kind::CLASS, "src::Widget.cpp::Local"),
             (node_kind::METHOD, "src::Widget.cpp::Local::b"),
@@ -2337,13 +2655,39 @@ namespace app {
             (node_kind::FUNCTION, "src::Widget.cpp::f"),
             (node_kind::STRUCT, "src::Widget.cpp::S"),
         ] {
-            assert!(node_at(&fp, kind, q).is_some(), "{q} missing: {:?}", all_qnames(&fp));
+            assert!(
+                node_at(&fp, kind, q).is_some(),
+                "{q} missing: {:?}",
+                all_qnames(&fp)
+            );
         }
         // A C file too; a header's free function keeps its file scope.
-        let fp = parse_file("struct p { int x; };\nint g(void) { return 0; }\n", "c/p.c", "c::p.c", Dialect::C, repo()).unwrap();
-        assert!(node_at(&fp, node_kind::STRUCT, "c::p.c::p").is_some(), "{:?}", all_qnames(&fp));
-        let fp = parse_file("static inline int sq(int x) { return x * x; }\n", "src/a.h", "src::a.h", Dialect::Header, repo()).unwrap();
-        assert!(node_at(&fp, node_kind::FUNCTION, "src::a.h::sq").is_some(), "{:?}", all_qnames(&fp));
+        let fp = parse_file(
+            "struct p { int x; };\nint g(void) { return 0; }\n",
+            "c/p.c",
+            "c::p.c",
+            Dialect::C,
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            node_at(&fp, node_kind::STRUCT, "c::p.c::p").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
+        let fp = parse_file(
+            "static inline int sq(int x) { return x * x; }\n",
+            "src/a.h",
+            "src::a.h",
+            Dialect::Header,
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            node_at(&fp, node_kind::FUNCTION, "src::a.h::sq").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
     }
 
     /// CB.1: `.inl` / `.ipp` / `.tpp` are included implementation files:
@@ -2354,20 +2698,43 @@ namespace app {
     #[test]
     fn included_implementation_files_take_the_header_rule() {
         let source = "struct P {};\ntemplate <typename T> inline T twice(T v) { return v * 2; }\n";
-        for (file, module) in [("src/x.inl", "src::x.inl"), ("src/x.ipp", "src::x.ipp"), ("src/x.tpp", "src::x.tpp")] {
+        for (file, module) in [
+            ("src/x.inl", "src::x.inl"),
+            ("src/x.ipp", "src::x.ipp"),
+            ("src/x.tpp", "src::x.tpp"),
+        ] {
             let dialect = Dialect::from_path(file);
             assert_eq!(dialect, Dialect::Cpp, "{file}");
             let fp = parse_file(source, file, module, dialect, repo()).unwrap();
-            assert!(node_at(&fp, node_kind::STRUCT, "src::P").is_some(), "{file}: {:?}", all_qnames(&fp));
+            assert!(
+                node_at(&fp, node_kind::STRUCT, "src::P").is_some(),
+                "{file}: {:?}",
+                all_qnames(&fp)
+            );
             assert!(
                 node_at(&fp, node_kind::FUNCTION, &format!("{module}::twice")).is_some(),
                 "{file}: {:?}",
                 all_qnames(&fp)
             );
         }
-        let fp = parse_file(source, "src/x.cpp", "src::x.cpp", Dialect::from_path("src/x.cpp"), repo()).unwrap();
-        assert!(node_at(&fp, node_kind::STRUCT, "src::x.cpp::P").is_some(), "{:?}", all_qnames(&fp));
-        assert!(node_at(&fp, node_kind::STRUCT, "src::P").is_none(), "{:?}", all_qnames(&fp));
+        let fp = parse_file(
+            source,
+            "src/x.cpp",
+            "src::x.cpp",
+            Dialect::from_path("src/x.cpp"),
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            node_at(&fp, node_kind::STRUCT, "src::x.cpp::P").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
+        assert!(
+            node_at(&fp, node_kind::STRUCT, "src::P").is_none(),
+            "{:?}",
+            all_qnames(&fp)
+        );
     }
 
     /// LB.10b: an out-of-line member binds to a class this file defines
@@ -2392,50 +2759,80 @@ namespace n { struct K { int f(); }; }
 namespace n { namespace m { int K::f() { return 0; } } }
 int& g() { static int y; return y; }
 ";
-        let fp = parse_file(source, "src/Widget.cpp", "src::Widget.cpp", Dialect::Cpp, repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/Widget.cpp",
+            "src::Widget.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
         let module = fp.nodes[0].id;
         let local = node_at(&fp, node_kind::CLASS, "src::Widget.cpp::Local").expect("CLASS Local");
 
         // In-file: bound to the class.
-        let a = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::Local::a").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let a = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::Local::a")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&a], "a");
         assert_eq!(fp.nav.parent_of[&a], local);
         assert_eq!(defines(&fp, local, a), 1);
         assert_eq!(defines(&fp, module, a), 0);
         let calls: Vec<&CallSite> = fp.calls.iter().filter(|c| c.from == a).collect();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].qualifier, CallQualifier::SelfMethod("b".to_string()));
-        let r = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::Local::ref").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        assert_eq!(fp.nav.name_by_id[&r], "ref", "a reference_declarator loses its `& `");
+        assert_eq!(
+            calls[0].qualifier,
+            CallQualifier::SelfMethod("b".to_string())
+        );
+        let r = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::Local::ref")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        assert_eq!(
+            fp.nav.name_by_id[&r], "ref",
+            "a reference_declarator loses its `& `"
+        );
         assert_eq!(fp.nav.parent_of[&r], local);
         // Looked up outward: `K::f` inside `n::m` binds to `n::K`.
         let k = node_at(&fp, node_kind::STRUCT, "src::Widget.cpp::n::K").expect("STRUCT n::K");
-        let f = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::n::K::f").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let f = node_at(&fp, node_kind::METHOD, "src::Widget.cpp::n::K::f")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&f], k);
 
         // Provisional: the header rule's qname, the lexical parent.
-        let run = node_at(&fp, node_kind::METHOD, "src::Widget::run").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let run = node_at(&fp, node_kind::METHOD, "src::Widget::run")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&run], "Widget::run");
         assert_eq!(fp.nav.parent_of[&run], module);
         assert_eq!(defines(&fp, module, run), 1);
-        let package = node_at(&fp, node_kind::PACKAGE, "src::Widget.cpp::shop").expect("PACKAGE shop");
-        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::total").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let package =
+            node_at(&fp, node_kind::PACKAGE, "src::Widget.cpp::shop").expect("PACKAGE shop");
+        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::total")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&total], "Cart::total");
         assert_eq!(fp.nav.parent_of[&total], package);
         assert_eq!(fp.calls.iter().filter(|c| c.from == total).count(), 1);
-        let init = node_at(&fp, node_kind::METHOD, "src::shop::init").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let init = node_at(&fp, node_kind::METHOD, "src::shop::init")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&init], "shop::init");
 
         // Free functions stay FUNCTIONs in the file scope, `& ` dropped.
-        let g = node_at(&fp, node_kind::FUNCTION, "src::Widget.cpp::g").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let g = node_at(&fp, node_kind::FUNCTION, "src::Widget.cpp::g")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&g], "g");
         assert_eq!(count(&fp, node_kind::FUNCTION), 1, "{:?}", all_qnames(&fp));
 
         // The marker's counts: Local, n::K file-local; a, ref, K::f bound;
         // run, total, init provisional.
         let tree = parse_tree(source, Dialect::Cpp).unwrap().tree;
-        let (_, stats, _, _) = parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
-        assert_eq!(stats, IdentityStats { file_local: 2, bound: 3, provisional: 3, ..IdentityStats::default() });
+        let (_, stats, _, _) =
+            parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
+        assert_eq!(
+            stats,
+            IdentityStats {
+                file_local: 2,
+                bound: 3,
+                provisional: 3,
+                ..IdentityStats::default()
+            }
+        );
         assert_eq!(
             stats.marker("src/Widget.cpp").as_deref(),
             Some(
@@ -2485,8 +2882,10 @@ int& g() { static int y; return y; }
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> =
-            list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let mut out: Vec<(String, String)> = list
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         out.sort();
         out
     }
@@ -2515,13 +2914,25 @@ extern \"C++\" { int cpp_fn() { return 2; } }
             (node_kind::FUNCTION, "src::a.cpp::cpp_fn"),
             (node_kind::STRUCT, "src::a.cpp::CS"),
         ] {
-            let id = node_at(&fp, kind, q).unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
+            let id = node_at(&fp, kind, q)
+                .unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
             assert_eq!(fp.nav.parent_of[&id], module, "{q}");
         }
         let legacy = node_at(&fp, node_kind::FUNCTION, "src::a.cpp::legacy_entry").unwrap();
-        let calls: Vec<&CallQualifier> = fp.calls.iter().filter(|c| c.from == legacy).map(|c| &c.qualifier).collect();
+        let calls: Vec<&CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == legacy)
+            .map(|c| &c.qualifier)
+            .collect();
         assert_eq!(calls, [&CallQualifier::Bare("c_fn".to_string())]);
-        assert_eq!(module_facts(&fp), [NavFact::DeclaresFn { ns: String::new(), name: "c_proto".to_string() }]);
+        assert_eq!(
+            module_facts(&fp),
+            [NavFact::DeclaresFn {
+                ns: String::new(),
+                name: "c_proto".to_string()
+            }]
+        );
         assert!(
             marker_of(source, "src/a.cpp", "src::a.cpp").contains(" extern_c=4 prototypes=1 "),
             "{}",
@@ -2529,12 +2940,26 @@ extern \"C++\" { int cpp_fn() { return 2; } }
         );
 
         let codec = "#pragma once\n#ifdef __cplusplus\nextern \"C\" {\n#endif\nint codec_encode(const char *in, char *out);\n#ifdef __cplusplus\n}\n#endif\n";
-        let fp = parse_file(codec, "src/codec.h", "src::codec.h", Dialect::Header, repo()).unwrap();
+        let fp = parse_file(
+            codec,
+            "src/codec.h",
+            "src::codec.h",
+            Dialect::Header,
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             module_facts(&fp),
-            [NavFact::DeclaresFn { ns: String::new(), name: "codec_encode".to_string() }]
+            [NavFact::DeclaresFn {
+                ns: String::new(),
+                name: "codec_encode".to_string()
+            }]
         );
-        assert_eq!(count(&fp, node_kind::FUNCTION), 0, "a prototype mints no node");
+        assert_eq!(
+            count(&fp, node_kind::FUNCTION),
+            0,
+            "a prototype mints no node"
+        );
         assert_eq!(
             marker_of(codec, "src/codec.h", "src::codec.h"),
             "[qname] c_cpp: 0 header types scoped (0 namespace, 0 directory), 0 file-local types kept, \
@@ -2560,18 +2985,46 @@ namespace shop { namespace { int inner() { return clamp(1); } } }
 static int s() { return 0; }
 int pub_fn() { return clamp(2); }
 ";
-        let fp = parse_file(source, "src/cart.cpp", "src::cart.cpp", Dialect::Cpp, repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/cart.cpp",
+            "src::cart.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
         let module = fp.nodes[0].id;
-        let clamp = node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::clamp").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let clamp = node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::clamp")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&clamp], module);
         assert_eq!(defines(&fp, module, clamp), 1);
-        assert!(node_at(&fp, node_kind::STRUCT, "src::cart.cpp::Hidden").is_some(), "{:?}", all_qnames(&fp));
+        assert!(
+            node_at(&fp, node_kind::STRUCT, "src::cart.cpp::Hidden").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
         let shop = node_at(&fp, node_kind::PACKAGE, "src::cart.cpp::shop").expect("PACKAGE shop");
-        let inner = node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::shop::inner").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let inner = node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::shop::inner")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&inner], shop);
-        assert_eq!(count(&fp, node_kind::PACKAGE), 1, "an anonymous namespace is no PACKAGE: {:?}", all_qnames(&fp));
-        let internal = |n: &str| NavFact::InternalLinkage { name: n.to_string() };
-        assert_eq!(module_facts(&fp), [internal("clamp"), internal("later"), internal("inner"), internal("s")]);
+        assert_eq!(
+            count(&fp, node_kind::PACKAGE),
+            1,
+            "an anonymous namespace is no PACKAGE: {:?}",
+            all_qnames(&fp)
+        );
+        let internal = |n: &str| NavFact::InternalLinkage {
+            name: n.to_string(),
+        };
+        assert_eq!(
+            module_facts(&fp),
+            [
+                internal("clamp"),
+                internal("later"),
+                internal("inner"),
+                internal("s")
+            ]
+        );
 
         // The fixture's cart.cpp: one anonymous-namespace function, one
         // extern "C" definition, two provisional out-of-line members.
@@ -2583,8 +3036,16 @@ int pub_fn() { return clamp(2); }
              anon_ns=1 extern_c=1 prototypes=0 usings=0 file=src/cart.cpp"
         );
         let fp = parse_file(cart, "src/cart.cpp", "src::cart.cpp", Dialect::Cpp, repo()).unwrap();
-        assert!(node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::legacy_entry").is_some(), "{:?}", all_qnames(&fp));
-        assert!(node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total").is_some(), "{:?}", all_qnames(&fp));
+        assert!(
+            node_at(&fp, node_kind::FUNCTION, "src::cart.cpp::legacy_entry").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
+        assert!(
+            node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
     }
 
     /// CB.19 (C1): a template's inner declaration is the entity, named
@@ -2607,16 +3068,30 @@ template <class T> T max2(T a, T b) { return a > b ? a : b; }
 template <class T> T Box<T>::peek() const { return value; }
 }
 ";
-        let fp = parse_file(source, "include/box.hpp", "include::box.hpp", Dialect::Cpp, repo()).unwrap();
-        let class = node_at(&fp, node_kind::CLASS, "shop::Box").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let fp = parse_file(
+            source,
+            "include/box.hpp",
+            "include::box.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let class = node_at(&fp, node_kind::CLASS, "shop::Box")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&class], "Box");
         for q in ["shop::Box::get", "shop::Box::each", "shop::Box::peek"] {
-            let m = node_at(&fp, node_kind::METHOD, q).unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
+            let m = node_at(&fp, node_kind::METHOD, q)
+                .unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
             assert_eq!(fp.nav.parent_of[&m], class, "{q}");
         }
-        let max2 = node_at(&fp, node_kind::FUNCTION, "include::box.hpp::shop::max2").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let max2 = node_at(&fp, node_kind::FUNCTION, "include::box.hpp::shop::max2")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.name_by_id[&max2], "max2");
-        assert!(all_qnames(&fp).iter().all(|q| !q.contains('<')), "{:?}", all_qnames(&fp));
+        assert!(
+            all_qnames(&fp).iter().all(|q| !q.contains('<')),
+            "{:?}",
+            all_qnames(&fp)
+        );
         // `T value` is a template parameter: no field type; `Box<T>* next`
         // is `Box`. `U u` / `T a` are locals of unknown type.
         assert_eq!(fields(&fp, class), pairs(&[("next", "Box")]));
@@ -2641,14 +3116,23 @@ template <> class Box<int> { public: int get() const { return 0; } int extra() {
 ";
         let fp = parse_file(source, "src/box.h", "src::box.h", Dialect::Header, repo()).unwrap();
         let module = fp.nodes[0].id;
-        let class = node_at(&fp, node_kind::CLASS, "src::Box").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let class = node_at(&fp, node_kind::CLASS, "src::Box")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(count(&fp, node_kind::CLASS), 1);
         assert_eq!(defines(&fp, module, class), 1);
-        assert_eq!(code_cells(&fp, class).len(), 2, "the specialisation's body stacks on the primary");
+        assert_eq!(
+            code_cells(&fp, class).len(),
+            2,
+            "the specialisation's body stacks on the primary"
+        );
         let get = node_at(&fp, node_kind::METHOD, "src::Box::get").expect("METHOD get");
         assert_eq!(code_cells(&fp, get).len(), 2);
         assert_eq!(defines(&fp, class, get), 1);
-        assert!(node_at(&fp, node_kind::METHOD, "src::Box::extra").is_some(), "{:?}", all_qnames(&fp));
+        assert!(
+            node_at(&fp, node_kind::METHOD, "src::Box::extra").is_some(),
+            "{:?}",
+            all_qnames(&fp)
+        );
     }
 
     /// CB.19 (C4): a union is a STRUCT - at namespace scope, in a
@@ -2663,13 +3147,20 @@ struct S { union { int x; } anon; union Inner { int y; } in; };
 ";
         let fp = parse_file(source, "src/n.hpp", "src::n.hpp", Dialect::Cpp, repo()).unwrap();
         for q in ["shop::Number", "src::Tagged", "src::S", "src::S::Inner"] {
-            assert!(node_at(&fp, node_kind::STRUCT, q).is_some(), "{q} missing: {:?}", all_qnames(&fp));
+            assert!(
+                node_at(&fp, node_kind::STRUCT, q).is_some(),
+                "{q} missing: {:?}",
+                all_qnames(&fp)
+            );
         }
         assert_eq!(count(&fp, node_kind::STRUCT), 4, "{:?}", all_qnames(&fp));
         assert_eq!(count(&fp, node_kind::CLASS), 0);
         let s = node_at(&fp, node_kind::STRUCT, "src::S").unwrap();
         assert_eq!(fields(&fp, s), pairs(&[("in", "Inner")]));
-        assert!(marker_of(source, "src/n.hpp", "src::n.hpp").contains(" nested=1 templates=0 unions=3 "));
+        assert!(
+            marker_of(source, "src/n.hpp", "src::n.hpp")
+                .contains(" nested=1 templates=0 unions=3 ")
+        );
     }
 
     /// CB.19 (C1): a nested type is `<outer qname>::<name>` with the outer
@@ -2678,16 +3169,27 @@ struct S { union { int x; } anon; union Inner { int y; } in; };
     #[test]
     fn nested_type_and_member() {
         let source = "#pragma once\nnamespace shop {\n#include \"detail.hpp\"\n\ntemplate <typename T>\nclass Box {\npublic:\n    T get() const { return value; }\n    T value;\n};\n\nunion Number {\n    int i;\n    float f;\n};\n\nclass Cart {\npublic:\n    struct Line {\n        int qty;\n        int total() const { return qty * 2; }\n        enum class Kind { A };\n    };\n    int add(int qty);\n    Line first;\n};\n}\n";
-        let fp = parse_file(source, "src/cart.hpp", "src::cart.hpp", Dialect::Cpp, repo()).unwrap();
-        let cart = node_at(&fp, node_kind::CLASS, "shop::Cart").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        let line = node_at(&fp, node_kind::STRUCT, "shop::Cart::Line").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let fp = parse_file(
+            source,
+            "src/cart.hpp",
+            "src::cart.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let cart = node_at(&fp, node_kind::CLASS, "shop::Cart")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let line = node_at(&fp, node_kind::STRUCT, "shop::Cart::Line")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&line], cart);
         assert_eq!(fp.nav.name_by_id[&line], "Line");
         assert_eq!(defines(&fp, cart, line), 1);
-        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&total], line);
         assert_eq!(defines(&fp, line, total), 1);
-        let kind = node_at(&fp, node_kind::ENUM, "shop::Cart::Line::Kind").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let kind = node_at(&fp, node_kind::ENUM, "shop::Cart::Line::Kind")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&kind], line);
         assert_eq!(fields(&fp, cart), pairs(&[("first", "Line")]));
         assert!(node_at(&fp, node_kind::METHOD, "shop::Box::get").is_some());
@@ -2701,8 +3203,10 @@ struct S { union { int x; } anon; union Inner { int y; } in; };
         // A source file's nested type keeps its outermost type's file scope.
         let local = "class Outer { struct Inner { int f() { return 1; } }; };\n";
         let fp = parse_file(local, "src/a.cpp", "src::a.cpp", Dialect::Cpp, repo()).unwrap();
-        let inner = node_at(&fp, node_kind::STRUCT, "src::a.cpp::Outer::Inner").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        let f = node_at(&fp, node_kind::METHOD, "src::a.cpp::Outer::Inner::f").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let inner = node_at(&fp, node_kind::STRUCT, "src::a.cpp::Outer::Inner")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let f = node_at(&fp, node_kind::METHOD, "src::a.cpp::Outer::Inner::f")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&f], inner);
     }
 
@@ -2718,20 +3222,44 @@ int Cart::Line::total() const { return 1; }
 }
 int shop::Cart::Line::twice() const { return total() * 2; }
 ";
-        let fp = parse_file(source, "src/cart.cpp", "src::cart.cpp", Dialect::Cpp, repo()).unwrap();
-        let line = node_at(&fp, node_kind::STRUCT, "src::cart.cpp::shop::Cart::Line").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        for q in ["src::cart.cpp::shop::Cart::Line::total", "src::cart.cpp::shop::Cart::Line::twice"] {
-            let m = node_at(&fp, node_kind::METHOD, q).unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
+        let fp = parse_file(
+            source,
+            "src/cart.cpp",
+            "src::cart.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let line = node_at(&fp, node_kind::STRUCT, "src::cart.cpp::shop::Cart::Line")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        for q in [
+            "src::cart.cpp::shop::Cart::Line::total",
+            "src::cart.cpp::shop::Cart::Line::twice",
+        ] {
+            let m = node_at(&fp, node_kind::METHOD, q)
+                .unwrap_or_else(|| panic!("{q} missing: {:?}", all_qnames(&fp)));
             assert_eq!(fp.nav.parent_of[&m], line, "{q}");
             assert_eq!(defines(&fp, line, m), 1, "{q}");
         }
         assert_eq!(count(&fp, node_kind::FUNCTION), 0, "{:?}", all_qnames(&fp));
-        assert!(marker_of(source, "src/cart.cpp", "src::cart.cpp").contains("(2 bound in-file, 0 provisional)"));
+        assert!(
+            marker_of(source, "src/cart.cpp", "src::cart.cpp")
+                .contains("(2 bound in-file, 0 provisional)")
+        );
 
         // The same in a header: the nested type's C++ name is its qname.
-        let fp = parse_file(source, "src/cart.hpp", "src::cart.hpp", Dialect::Cpp, repo()).unwrap();
-        let line = node_at(&fp, node_kind::STRUCT, "shop::Cart::Line").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
-        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let fp = parse_file(
+            source,
+            "src/cart.hpp",
+            "src::cart.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let line = node_at(&fp, node_kind::STRUCT, "shop::Cart::Line")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let total = node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&total], line);
     }
 
@@ -2789,9 +3317,27 @@ int shop::Cart::Line::twice() const { return total() * 2; }
     #[test]
     fn include_inside_namespace_is_the_files() {
         let source = "#pragma once\nnamespace shop {\n#include \"detail.hpp\"\nnamespace inner {\n#include \"more.hpp\"\n}\n}\n#include \"top.hpp\"\n";
-        let fp = parse_file(source, "src/cart.hpp", "src::cart.hpp", Dialect::Cpp, repo()).unwrap();
-        let got: Vec<(&str, u32)> = fp.imports.iter().map(|i| (i.from_module.as_str(), i.line)).collect();
-        assert_eq!(got, [("src::cart.hpp", 2), ("src::cart.hpp", 4), ("src::cart.hpp", 7)]);
+        let fp = parse_file(
+            source,
+            "src/cart.hpp",
+            "src::cart.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let got: Vec<(&str, u32)> = fp
+            .imports
+            .iter()
+            .map(|i| (i.from_module.as_str(), i.line))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("src::cart.hpp", 2),
+                ("src::cart.hpp", 4),
+                ("src::cart.hpp", 7)
+            ]
+        );
     }
 
     /// CB.19 (C5): field types of a class body and the parameter / local
@@ -2825,10 +3371,16 @@ class Cart {
 int run(Cart c) { Cart d; return c.add(d); }
 ";
         let fp = parse_file(source, "src/run.cpp", "src::run.cpp", Dialect::Cpp, repo()).unwrap();
-        let cart = node_at(&fp, node_kind::CLASS, "src::run.cpp::Cart").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
+        let cart = node_at(&fp, node_kind::CLASS, "src::run.cpp::Cart")
+            .unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(
             fields(&fp, cart),
-            pairs(&[("box", "Box"), ("owned", "unique_ptr"), ("second", "unique_ptr"), ("ref", "Cart")])
+            pairs(&[
+                ("box", "Box"),
+                ("owned", "unique_ptr"),
+                ("second", "unique_ptr"),
+                ("ref", "Cart")
+            ])
         );
         let add = node_at(&fp, node_kind::METHOD, "src::run.cpp::Cart::add").unwrap();
         assert_eq!(
@@ -2852,7 +3404,11 @@ int run(Cart c) { Cart d; return c.add(d); }
         assert_eq!(locals(&fp, run), pairs(&[("c", "Cart"), ("d", "Cart")]));
         // The call sites the receiver pass reads them for.
         assert!(fp.calls.iter().any(|c| c.from == add
-            && c.qualifier == CallQualifier::Attribute { base: "box".to_string(), name: "get".to_string() }));
+            && c.qualifier
+                == CallQualifier::Attribute {
+                    base: "box".to_string(),
+                    name: "get".to_string()
+                }));
     }
 
     /// The fixture `cpp-lambda-auto-receivers`' src/main.cpp (DF.5).
@@ -2887,7 +3443,10 @@ int main() {
     }
 
     fn attr(base: &str, name: &str) -> CallQualifier {
-        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 
     /// DF.5: a lambda's call sites are its enclosing function's; the
@@ -2923,14 +3482,25 @@ int main() {
         assert_eq!(from_main, want);
         // Every call site of the file is main's: none is left to the lambda.
         assert!(fp.calls.iter().all(|c| c.from == main), "{:?}", fp.calls);
-        assert_eq!(lambdas, LambdaStats { bodies: 1, calls: 2 });
+        assert_eq!(
+            lambdas,
+            LambdaStats {
+                bodies: 1,
+                calls: 2
+            }
+        );
         assert_eq!(
             lambdas.marker("src/main.cpp").as_deref(),
             Some("[c-lambda] bodies=1 calls=2 file=src/main.cpp")
         );
         assert_eq!(
             locals(&fp, main),
-            pairs(&[("b", "make_box"), ("p", "find_box"), ("f", ""), ("inner", "Box")])
+            pairs(&[
+                ("b", "make_box"),
+                ("p", "find_box"),
+                ("f", ""),
+                ("inner", "Box")
+            ])
         );
         // A file with no lambda prints no marker.
         let (_, none) = walk_with_lambdas("int g() { return h(); }", "src/g.cpp", "src::g.cpp");
@@ -2977,8 +3547,18 @@ int main() {
                 ("inner", "Cart"),
             ])
         );
-        assert_eq!(lambdas, LambdaStats { bodies: 6, calls: 5 });
-        assert!(fp.calls.iter().any(|c| c.from == main && c.qualifier == attr("inner", "add")));
+        assert_eq!(
+            lambdas,
+            LambdaStats {
+                bodies: 6,
+                calls: 5
+            }
+        );
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.from == main && c.qualifier == attr("inner", "add"))
+        );
     }
 
     /// DF.5: a definition's declared return type is its simple type, a
@@ -3008,15 +3588,39 @@ class Repo {
             let id = node_at(&fp, kind, q).unwrap_or_else(|| panic!("{q}: {:?}", all_qnames(&fp)));
             fp.nav.return_types.get(&id).cloned()
         };
-        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::make_box").as_deref(), Some("Box"));
-        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::find_box").as_deref(), Some("Box"));
-        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::ref_box").as_deref(), Some("Box"));
+        assert_eq!(
+            ret(node_kind::FUNCTION, "src::box.cpp::make_box").as_deref(),
+            Some("Box")
+        );
+        assert_eq!(
+            ret(node_kind::FUNCTION, "src::box.cpp::find_box").as_deref(),
+            Some("Box")
+        );
+        assert_eq!(
+            ret(node_kind::FUNCTION, "src::box.cpp::ref_box").as_deref(),
+            Some("Box")
+        );
         assert_eq!(ret(node_kind::METHOD, "src::Box::get"), None, "int");
         assert_eq!(ret(node_kind::METHOD, "src::Box::put"), None, "void");
-        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::later"), None, "auto");
-        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::same"), None, "template parameter");
-        assert_eq!(ret(node_kind::METHOD, "src::box.cpp::Repo::Repo"), None, "constructor");
-        assert_eq!(ret(node_kind::METHOD, "src::box.cpp::Repo::find").as_deref(), Some("Box"));
+        assert_eq!(
+            ret(node_kind::FUNCTION, "src::box.cpp::later"),
+            None,
+            "auto"
+        );
+        assert_eq!(
+            ret(node_kind::FUNCTION, "src::box.cpp::same"),
+            None,
+            "template parameter"
+        );
+        assert_eq!(
+            ret(node_kind::METHOD, "src::box.cpp::Repo::Repo"),
+            None,
+            "constructor"
+        );
+        assert_eq!(
+            ret(node_kind::METHOD, "src::box.cpp::Repo::find").as_deref(),
+            Some("Box")
+        );
         assert_eq!(fp.nav.return_types.len(), 4, "{:?}", fp.nav.return_types);
     }
 
@@ -3042,7 +3646,13 @@ int run() {
             .map(|c| format!("{:?}", c.qualifier))
             .collect();
         assert_eq!(names, vec![format!("{:?}", bare("ran"))]);
-        assert_eq!(lambdas, LambdaStats { bodies: 1, calls: 1 });
+        assert_eq!(
+            lambdas,
+            LambdaStats {
+                bodies: 1,
+                calls: 1
+            }
+        );
     }
 
     /// CB.19 (C6 / C7): file / namespace-scope prototypes are `DeclaresFn`
@@ -3073,9 +3683,21 @@ int twice(int);
 int twice(int);
 #endif
 ";
-        let fp = parse_file(source, "src/codec.hpp", "src::codec.hpp", Dialect::Cpp, repo()).unwrap();
-        let declares = |ns: &str, n: &str| NavFact::DeclaresFn { ns: ns.to_string(), name: n.to_string() };
-        let internal = |n: &str| NavFact::InternalLinkage { name: n.to_string() };
+        let fp = parse_file(
+            source,
+            "src/codec.hpp",
+            "src::codec.hpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let declares = |ns: &str, n: &str| NavFact::DeclaresFn {
+            ns: ns.to_string(),
+            name: n.to_string(),
+        };
+        let internal = |n: &str| NavFact::InternalLinkage {
+            name: n.to_string(),
+        };
         assert_eq!(
             module_facts(&fp),
             [
@@ -3083,16 +3705,30 @@ int twice(int);
                 declares("", "point_new"),
                 internal("s_proto"),
                 declares("shop", "ns_fn"),
-                NavFact::UsingNamespace { within: "shop".to_string(), ns: "detail".to_string() },
-                NavFact::UsingNamespace { within: String::new(), ns: "std".to_string() },
-                NavFact::UsingName { within: String::new(), ns: "shop".to_string(), name: "Cart".to_string() },
+                NavFact::UsingNamespace {
+                    within: "shop".to_string(),
+                    ns: "detail".to_string()
+                },
+                NavFact::UsingNamespace {
+                    within: String::new(),
+                    ns: "std".to_string()
+                },
+                NavFact::UsingName {
+                    within: String::new(),
+                    ns: "shop".to_string(),
+                    name: "Cart".to_string()
+                },
                 internal("helper"),
-                NavFact::UsingNamespace { within: String::new(), ns: "inner::deep".to_string() },
+                NavFact::UsingNamespace {
+                    within: String::new(),
+                    ns: "inner::deep".to_string()
+                },
                 declares("", "twice"),
             ]
         );
         assert!(
-            marker_of(source, "src/codec.hpp", "src::codec.hpp").contains(" prototypes=5 usings=4 "),
+            marker_of(source, "src/codec.hpp", "src::codec.hpp")
+                .contains(" prototypes=5 usings=4 "),
             "{}",
             marker_of(source, "src/codec.hpp", "src::codec.hpp")
         );
@@ -3107,7 +3743,10 @@ int twice(int);
     /// The outward namespace search order and the header extensions.
     #[test]
     fn scope_helpers() {
-        assert_eq!(ns_prefixes("a::b::c").collect::<Vec<_>>(), ["a::b::c", "a::b", "a", ""]);
+        assert_eq!(
+            ns_prefixes("a::b::c").collect::<Vec<_>>(),
+            ["a::b::c", "a::b", "a", ""]
+        );
         assert_eq!(ns_prefixes("").collect::<Vec<_>>(), [""]);
         assert_eq!(join("", "x"), "x");
         assert_eq!(join("a", "x"), "a::x");
@@ -3172,7 +3811,10 @@ int create_user(const char *json) {
             })
             .map(|e| {
                 let name = fp.nav.name_by_id.get(&e.from).cloned().unwrap_or_default();
-                (name, fp.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default())
+                (
+                    name,
+                    fp.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default(),
+                )
             })
             .collect()
     }
@@ -3207,7 +3849,8 @@ int create_user(const char *json) {
     fn libcurl_marker() {
         let file = "client/api_client.c";
         let tree = parse_tree(CURL_PROBE, Dialect::C).unwrap().tree;
-        let (_, _, _, http) = parse_tree_into(&tree, CURL_PROBE, file, "client::api_client.c", repo());
+        let (_, _, _, http) =
+            parse_tree_into(&tree, CURL_PROBE, file, "client::api_client.c", repo());
         assert_eq!(
             http.marker(file).as_deref(),
             Some("[c-http-client] endpoints=2 (libcurl=2) path=client/api_client.c")
@@ -3221,8 +3864,19 @@ int create_user(const char *json) {
     /// at the CURLOPT_URL call.
     #[test]
     fn libcurl_default_get() {
-        let fp = parse_file(CURL_PROBE, "api_client.c", "api_client.c", Dialect::C, repo()).unwrap();
-        assert!(endpoints(&fp).contains(&"endpoint:GET:/users".to_string()), "{:?}", endpoints(&fp));
+        let fp = parse_file(
+            CURL_PROBE,
+            "api_client.c",
+            "api_client.c",
+            Dialect::C,
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            endpoints(&fp).contains(&"endpoint:GET:/users".to_string()),
+            "{:?}",
+            endpoints(&fp)
+        );
         assert!(endpoint_calls(&fp).contains(&pair("list_users", "endpoint:GET:/users")));
         let hit = endpoint_hit(&fp, "endpoint:GET:/users");
         assert!(hit.contains(r#""method":"GET""#), "{hit}");
@@ -3232,7 +3886,9 @@ int create_user(const char *json) {
         let edge = fp
             .edges
             .iter()
-            .find(|e| fp.nav.qname_by_id.get(&e.to).map(String::as_str) == Some("endpoint:GET:/users"))
+            .find(|e| {
+                fp.nav.qname_by_id.get(&e.to).map(String::as_str) == Some("endpoint:GET:/users")
+            })
             .unwrap();
         let ev = glia_code_domain::evidence::Evidence::of(edge).unwrap();
         assert_eq!(ev.emitter, "parser:c_cpp");
@@ -3245,21 +3901,42 @@ int create_user(const char *json) {
     /// ENDPOINTs (its forbid: create_user must not reach GET /users).
     #[test]
     fn libcurl_postfields_is_post() {
-        let fp = parse_file(CURL_PROBE, "api_client.c", "api_client.c", Dialect::C, repo()).unwrap();
-        assert_eq!(endpoints(&fp), ["endpoint:GET:/users", "endpoint:POST:/users"]);
+        let fp = parse_file(
+            CURL_PROBE,
+            "api_client.c",
+            "api_client.c",
+            Dialect::C,
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            endpoints(&fp),
+            ["endpoint:GET:/users", "endpoint:POST:/users"]
+        );
         assert_eq!(
             endpoint_calls(&fp),
-            [pair("list_users", "endpoint:GET:/users"), pair("create_user", "endpoint:POST:/users")]
+            [
+                pair("list_users", "endpoint:GET:/users"),
+                pair("create_user", "endpoint:POST:/users")
+            ]
         );
         assert!(endpoint_hit(&fp, "endpoint:POST:/users").contains(r#""method":"POST""#));
 
         // COPYPOSTFIELDS, POST and MIMEPOST are POSTs too.
-        for opt in ["CURLOPT_COPYPOSTFIELDS, \"a=1\"", "CURLOPT_POST, 1L", "CURLOPT_MIMEPOST, mime"] {
+        for opt in [
+            "CURLOPT_COPYPOSTFIELDS, \"a=1\"",
+            "CURLOPT_POST, 1L",
+            "CURLOPT_MIMEPOST, mime",
+        ] {
             let src = format!(
                 "void f(curl_mime *mime) {{ CURL *h = curl_easy_init();\n curl_easy_setopt(h, CURLOPT_URL, \"https://x/items\");\n curl_easy_setopt(h, {opt});\n curl_easy_perform(h); }}\n"
             );
             let fp = parse_file(&src, "c.c", "c.c", Dialect::C, repo()).unwrap();
-            assert_eq!(endpoint_calls(&fp), [pair("f", "endpoint:POST:/items")], "{opt}");
+            assert_eq!(
+                endpoint_calls(&fp),
+                [pair("f", "endpoint:POST:/items")],
+                "{opt}"
+            );
         }
     }
 
@@ -3287,7 +3964,10 @@ void any(const char *verb) {
         let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
         assert_eq!(
             endpoint_calls(&fp),
-            [pair("del", "endpoint:DELETE:/users/1"), pair("any", "endpoint:POST:/orders")]
+            [
+                pair("del", "endpoint:DELETE:/users/1"),
+                pair("any", "endpoint:POST:/orders")
+            ]
         );
     }
 
@@ -3391,7 +4071,9 @@ void dyn(const char *url, int id) {
         let src = "CURL *mk(void) {\n CURL *h = curl_easy_init();\n curl_easy_setopt(h, CURLOPT_URL, \"localhost:8080/v1\" \"/health\");\n return h;\n}\n";
         let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
         assert_eq!(endpoint_calls(&fp), [pair("mk", "endpoint:GET:/v1/health")]);
-        assert!(endpoint_hit(&fp, "endpoint:GET:/v1/health").contains(r#""host":"localhost:8080""#));
+        assert!(
+            endpoint_hit(&fp, "endpoint:GET:/v1/health").contains(r#""host":"localhost:8080""#)
+        );
     }
 
     /// DH.21: the same calls inside C++ methods (inline and out-of-line)
@@ -3419,9 +4101,16 @@ int Api::create(const std::string &body) {
         let fp = parse_file(src, "src/api.cpp", "src::api.cpp", Dialect::Cpp, repo()).unwrap();
         assert_eq!(
             endpoint_calls(&fp),
-            [pair("list", "endpoint:GET:/users"), pair("create", "endpoint:POST:/users")]
+            [
+                pair("list", "endpoint:GET:/users"),
+                pair("create", "endpoint:POST:/users")
+            ]
         );
-        for e in fp.edges.iter().filter(|e| fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT)) {
+        for e in fp
+            .edges
+            .iter()
+            .filter(|e| fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT))
+        {
             assert_eq!(fp.nav.kind_by_id.get(&e.from), Some(&node_kind::METHOD));
         }
     }

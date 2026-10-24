@@ -113,8 +113,13 @@ fn build_with(files: Vec<(&'static str, String)>, hist: Option<Vec<HistoryCommit
     }
     if let Some(h) = hist {
         let head = h.first().map_or_else(|| "0".repeat(40), |c| c.c.clone());
-        write_history(root, HistoryMeta::new(head, 2000, None, String::new()), &h, &[])
-            .expect("write snapshot");
+        write_history(
+            root,
+            HistoryMeta::new(head, 2000, None, String::new()),
+            &h,
+            &[],
+        )
+        .expect("write snapshot");
     }
     let r = generate_one(&root.to_string_lossy()).expect("build");
     Built {
@@ -205,20 +210,32 @@ fn head_ranking_without_a_cache_is_the_0_5_2_pack() {
     let got: Vec<(usize, String, &str)> = manifest(&p);
     let mut at = 0usize;
     for tier in HEAD_TIERS {
-        let mut names: Vec<&str> = got[at..at + tier.len()].iter().map(|(_, q, _)| q.as_str()).collect();
+        let mut names: Vec<&str> = got[at..at + tier.len()]
+            .iter()
+            .map(|(_, q, _)| q.as_str())
+            .collect();
         names.sort_unstable();
         assert_eq!(names, tier.to_vec(), "{got:?}");
         at += tier.len();
     }
     assert_eq!(at, got.len());
-    assert!(got.iter().enumerate().all(|(i, (r, _, f))| *r == i + 1 && *f == "full"), "{got:?}");
+    assert!(
+        got.iter()
+            .enumerate()
+            .all(|(i, (r, _, f))| *r == i + 1 && *f == "full"),
+        "{got:?}"
+    );
     let ids: Vec<u64> = p.nodes.iter().skip(1).map(|n| n.id).collect();
     let mut want = head_neighbours(&b.merged, &[b.core()]);
     want.truncate(5);
     assert_eq!(ids, want, "the 0.5.2 order");
     // With the snapshot cache too: head is co-change-blind and P1 keeps the
     // input order, so the JSON is the same.
-    let with_cache = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), Some(b.cache()), 6));
+    let with_cache = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::head(), Some(b.cache()), 6),
+    );
     assert_eq!(json(&with_cache), json(&p));
 }
 
@@ -262,13 +279,27 @@ fn max_share(p: &Pack) -> usize {
 #[test]
 fn cochange_first_lifts_the_cochanged_files_best_rows() {
     let b = build(true);
-    let head_all = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, usize::MAX));
-    let ranked = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(b.cache()), 6));
+    let head_all = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::head(), None, usize::MAX),
+    );
+    let ranked = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::default(), Some(b.cache()), 6),
+    );
 
     // The head order of every neighbour, by file.
     let all = files_of(&head_all);
-    assert!(all.iter().any(|f| f == C) && all.iter().any(|f| f == B), "{all:?}");
-    assert!(!all.iter().any(|f| f == PAGE), "page.ts is not PPR-reached: {all:?}");
+    assert!(
+        all.iter().any(|f| f == C) && all.iter().any(|f| f == B),
+        "{all:?}"
+    );
+    assert!(
+        !all.iter().any(|f| f == PAGE),
+        "page.ts is not PPR-reached: {all:?}"
+    );
     // c.py's best row, then b.py's best row, then every other row (c.py's and
     // b.py's later rows included) in head order.
     let mut want = file_lift(&neighbours(&head_all), &[C, B]);
@@ -283,18 +314,33 @@ fn cochange_first_lifts_the_cochanged_files_best_rows() {
     assert_eq!(got, want, "{}", json(&ranked));
     assert_eq!(ranked.nodes[0].reason, "seed");
     let ranks: Vec<usize> = ranked.nodes.iter().map(|n| n.rank).collect();
-    assert_eq!(ranks, (1..=ranks.len()).collect::<Vec<_>>(), "every candidate packs");
+    assert_eq!(
+        ranks,
+        (1..=ranks.len()).collect::<Vec<_>>(),
+        "every candidate packs"
+    );
     let f = files_of(&ranked);
     assert_eq!(&f[..2], [C, B], "{f:?}");
     assert_eq!(got[..2], ["svc::c::c", "svc::b::b"], "measured at landing");
-    assert_ne!(json(&ranked), json(&pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, 6))));
+    assert_ne!(
+        json(&ranked),
+        json(&pack_ids(
+            &b.merged,
+            &[b.core()],
+            &args(Ranking::head(), None, 6)
+        ))
+    );
 }
 
 #[test]
 fn without_a_snapshot_the_default_is_the_head_pack() {
     let b = build(false);
     let head = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, 6));
-    let def = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(b.cache()), 6));
+    let def = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::default(), Some(b.cache()), 6),
+    );
     assert_eq!(json(&def), json(&head));
     let def_nocache = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), None, 6));
     assert_eq!(json(&def_nocache), json(&head));
@@ -304,10 +350,18 @@ fn without_a_snapshot_the_default_is_the_head_pack() {
 fn a_second_call_on_one_cache_hits_the_index() {
     let b = build(true);
     let cache = b.cache();
-    let first = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(cache.clone()), 6));
+    let first = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::default(), Some(cache.clone()), 6),
+    );
     let built = cache.stats().built;
     let hits = cache.stats().hits;
-    let second = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(cache.clone()), 6));
+    let second = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::default(), Some(cache.clone()), 6),
+    );
     assert_eq!(cache.stats().built, built, "no index rebuilt");
     assert!(cache.stats().hits > hits, "the second call hits");
     assert_eq!(json(&first), json(&second));
@@ -318,8 +372,16 @@ fn ppr_wide_groups_neighbours_by_the_file_order() {
     let b = build(false);
     let cache = b.cache();
     let wide = Ranking::new(RankBase::PprWide, false);
-    let head_all = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, usize::MAX));
-    let got = pack_ids(&b.merged, &[b.core()], &args(wide, Some(cache.clone()), usize::MAX));
+    let head_all = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::head(), None, usize::MAX),
+    );
+    let got = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(wide, Some(cache.clone()), usize::MAX),
+    );
 
     let files = cache.files(&b.merged);
     let core_file = files.file_of_node(b.core()).expect("core's file");
@@ -331,7 +393,8 @@ fn ppr_wide_groups_neighbours_by_the_file_order() {
         .map(|n| NodeId(n.id))
         .collect();
     let row_files: Vec<Option<u32>> = neigh.iter().map(|&id| files.file_of_node(id)).collect();
-    let perm = order_rows(&row_files, &[core_file], &fr).unwrap_or_else(|| (0..neigh.len()).collect());
+    let perm =
+        order_rows(&row_files, &[core_file], &fr).unwrap_or_else(|| (0..neigh.len()).collect());
     let want: Vec<u64> = perm.iter().map(|&i| neigh[i].0).collect();
     let got_ids: Vec<u64> = got
         .nodes
@@ -341,7 +404,10 @@ fn ppr_wide_groups_neighbours_by_the_file_order() {
         .collect();
     assert_eq!(got_ids, want);
     // Each file's rows are contiguous.
-    let fs: Vec<Option<u32>> = got_ids.iter().map(|&id| files.file_of_node(NodeId(id))).collect();
+    let fs: Vec<Option<u32>> = got_ids
+        .iter()
+        .map(|&id| files.file_of_node(NodeId(id)))
+        .collect();
     let mut seen: Vec<Option<u32>> = Vec::new();
     for w in fs.iter() {
         if seen.last() != Some(w) {
@@ -372,11 +438,22 @@ fn a_big_cochanged_file_does_not_crowd_out_the_others() {
     let b = build_with(files, Some(hist));
     let cut = 6;
     let head = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, cut));
-    let head_all = pack_ids(&b.merged, &[b.core()], &args(Ranking::head(), None, usize::MAX));
-    let ranked = pack_ids(&b.merged, &[b.core()], &args(Ranking::default(), Some(b.cache()), cut));
+    let head_all = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::head(), None, usize::MAX),
+    );
+    let ranked = pack_ids(
+        &b.merged,
+        &[b.core()],
+        &args(Ranking::default(), Some(b.cache()), cut),
+    );
 
     let big_rows = files_of(&head_all).iter().filter(|f| *f == BIG).count();
-    assert!(big_rows > cut, "big.py holds more rows than the cut: {big_rows}");
+    assert!(
+        big_rows > cut,
+        "big.py holds more rows than the cut: {big_rows}"
+    );
 
     let mut want = file_lift(&neighbours(&head_all), &[BIG]);
     want.truncate(cut - 1);
@@ -386,7 +463,11 @@ fn a_big_cochanged_file_does_not_crowd_out_the_others() {
 
     let kept = files_of(&ranked);
     for f in files_of(&head) {
-        assert!(kept.contains(&f), "{f} dropped: head {:?} ranked {kept:?}", files_of(&head));
+        assert!(
+            kept.contains(&f),
+            "{f} dropped: head {:?} ranked {kept:?}",
+            files_of(&head)
+        );
     }
     assert!(
         max_share(&ranked) <= max_share(&head),
@@ -410,5 +491,8 @@ fn a_big_cochanged_file_does_not_crowd_out_the_others() {
     let row_files: Vec<Option<u32>> = neigh.iter().map(|&id| fi.file_of_node(id)).collect();
     let perm = order_rows(&row_files, &[core_file], &fr).expect("EA.6 lifts");
     let big_file = fi.file_of_node(neigh[perm[0]]);
-    assert!(perm.iter().take(cut - 1).all(|&i| row_files[i] == big_file), "EA.6 crowds");
+    assert!(
+        perm.iter().take(cut - 1).all(|&i| row_files[i] == big_file),
+        "EA.6 crowds"
+    );
 }

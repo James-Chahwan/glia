@@ -32,7 +32,11 @@ const API_TS: &str =
 fn build() -> (tempfile::TempDir, MergedGraph) {
     let td = tempfile::tempdir().expect("tempdir");
     let root = td.path();
-    for (rel, src) in [("api/go.mod", GO_MOD), ("api/main.go", MAIN_GO), ("web/api.ts", API_TS)] {
+    for (rel, src) in [
+        ("api/go.mod", GO_MOD),
+        ("api/main.go", MAIN_GO),
+        ("web/api.ts", API_TS),
+    ] {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().expect("file has a parent")).expect("mkdir");
         std::fs::write(&path, src).unwrap_or_else(|e| panic!("write {FIXTURE}/{rel}: {e}"));
@@ -156,12 +160,23 @@ fn a_get_trace_never_reaches_the_post_handler() {
     let reached: Vec<&str> = hops.iter().map(|h| h.to_qname.as_str()).collect();
     assert!(reached.contains(&"GET /users"), "{reached:?}");
     assert!(reached.contains(&"main::listUsers"), "{reached:?}");
-    for wrong in ["main::createUser", "POST /users", "main::deleteUser", "main::getUser"] {
-        assert!(!reached.contains(&wrong), "loadUsers reached {wrong}: {reached:?}");
+    for wrong in [
+        "main::createUser",
+        "POST /users",
+        "main::deleteUser",
+        "main::getUser",
+    ] {
+        assert!(
+            !reached.contains(&wrong),
+            "loadUsers reached {wrong}: {reached:?}"
+        );
     }
 
     let hops = trace_hops(&m, "dropUser");
     let reached: Vec<&str> = hops.iter().map(|h| h.to_qname.as_str()).collect();
     assert!(reached.contains(&"main::deleteUser"), "{reached:?}");
-    assert!(!reached.contains(&"main::getUser"), "a DELETE never traces into GET: {reached:?}");
+    assert!(
+        !reached.contains(&"main::getUser"),
+        "a DELETE never traces into GET: {reached:?}"
+    );
 }

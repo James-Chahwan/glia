@@ -68,7 +68,9 @@ impl Built {
     }
 
     fn has_edge(&self, from: &str, to: &str, cat: EdgeCategoryId) -> bool {
-        self.edges.iter().any(|(f, t, c)| f == from && t == to && *c == cat)
+        self.edges
+            .iter()
+            .any(|(f, t, c)| f == from && t == to && *c == cat)
     }
 
     fn of(&self, cat: EdgeCategoryId) -> Vec<(&str, &str)> {
@@ -84,11 +86,21 @@ impl Built {
 fn constants_are_attributes_of_the_enum() {
     let b = build();
     let color = q("Color");
-    assert!(b.has_node(node_kind::ENUM, &color), "ENUM missing; nodes = {:?}", b.nodes);
+    assert!(
+        b.has_node(node_kind::ENUM, &color),
+        "ENUM missing; nodes = {:?}",
+        b.nodes
+    );
     for c in ["RED", "GREEN", "BLUE"] {
         let cq = q(&format!("Color::{c}"));
-        assert!(b.has_node(node_kind::ATTRIBUTE, &cq), "ATTRIBUTE {cq} missing");
-        assert!(b.has_edge(&color, &cq, edge_category::HAS_ATTRIBUTE), "HAS_ATTRIBUTE {cq}");
+        assert!(
+            b.has_node(node_kind::ATTRIBUTE, &cq),
+            "ATTRIBUTE {cq} missing"
+        );
+        assert!(
+            b.has_edge(&color, &cq, edge_category::HAS_ATTRIBUTE),
+            "HAS_ATTRIBUTE {cq}"
+        );
     }
 }
 
@@ -99,11 +111,17 @@ fn enum_body_and_constant_body_methods_are_nodes() {
     for m in ["Color", "label", "pick", "warm", "isRed"] {
         let mq = q(&format!("Color::{m}"));
         assert!(b.has_node(node_kind::METHOD, &mq), "METHOD {mq} missing");
-        assert!(b.has_edge(&color, &mq, edge_category::DEFINES), "DEFINES {mq}");
+        assert!(
+            b.has_edge(&color, &mq, edge_category::DEFINES),
+            "DEFINES {mq}"
+        );
     }
     let green = q("Color::GREEN");
     let body_label = q("Color::GREEN::label");
-    assert!(b.has_node(node_kind::METHOD, &body_label), "constant-body METHOD missing");
+    assert!(
+        b.has_node(node_kind::METHOD, &body_label),
+        "constant-body METHOD missing"
+    );
     assert!(b.has_edge(&green, &body_label, edge_category::DEFINES));
     assert!(!b.has_edge(&color, &body_label, edge_category::DEFINES));
 }
@@ -138,12 +156,20 @@ fn constant_references_are_uses_edges_same_file_and_imported() {
             "USES {from} -> {to} missing; USES = {uses:?}"
         );
     }
-    assert_eq!(uses.len(), want.len(), "exactly the three constant reads; USES = {uses:?}");
+    assert_eq!(
+        uses.len(),
+        want.len(),
+        "exactly the three constant reads; USES = {uses:?}"
+    );
 }
 
 #[test]
 fn only_the_named_constant_and_never_the_override() {
     let b = build();
     assert!(!b.has_edge(&q("Color::pick"), &q("Color::GREEN"), edge_category::USES));
-    assert!(!b.has_edge(&q("web::Picker::lbl"), &q("Color::GREEN::label"), edge_category::CALLS));
+    assert!(!b.has_edge(
+        &q("web::Picker::lbl"),
+        &q("Color::GREEN::label"),
+        edge_category::CALLS
+    ));
 }

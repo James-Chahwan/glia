@@ -218,7 +218,10 @@ pub fn wanted(repo_path: &str) -> Result<Wanted, String> {
 fn check(row: &CacheRow, payload: &[u8]) -> Result<CacheEntry, String> {
     let entry = CacheEntry::from_payload(payload)?;
     if entry.lang != row.lang {
-        return Err(format!("parsed as another language (the checkout parses it as {})", row.lang));
+        return Err(format!(
+            "parsed as another language (the checkout parses it as {})",
+            row.lang
+        ));
     }
     if entry.content_hash != row.content_hash {
         return Err("parsed from other content than the checked-out file".to_string());
@@ -263,8 +266,11 @@ pub fn import_entries(
         .into_iter()
         .filter(|p| is_wanted(&cache, &p.row))
         .collect();
-    let by_key: BTreeMap<CacheKey, usize> =
-        planned.iter().enumerate().map(|(i, p)| (p.row.key, i)).collect();
+    let by_key: BTreeMap<CacheKey, usize> = planned
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.row.key, i))
+        .collect();
 
     // Slot i holds row i's accepted (payload, entry); the first acceptable
     // offer for a row takes it.
@@ -299,7 +305,9 @@ pub fn import_entries(
         .collect();
     let modules = ModuleQnames::plan(&co.files);
     let (checks, _threads) = crate::parallel::par_map_ordered(&sample, |&i| {
-        let offered = taken[i].as_ref().map_or(&[][..], |(payload, _)| payload.as_slice());
+        let offered = taken[i]
+            .as_ref()
+            .map_or(&[][..], |(payload, _)| payload.as_slice());
         verify_one(&planned[i], offered, co.repo, &co.go, &modules)
     });
     // Sample in path order, so the error names the first mismatching path.
@@ -450,7 +458,10 @@ mod tests {
         for _ in 0..2000 {
             let s = sample_indices(10, 3, &mut rng);
             assert_eq!(s.len(), 3);
-            assert!(s.windows(2).all(|w| w[0] < w[1]), "{s:?} not sorted and distinct");
+            assert!(
+                s.windows(2).all(|w| w[0] < w[1]),
+                "{s:?} not sorted and distinct"
+            );
             for i in s {
                 seen[i] += 1;
             }

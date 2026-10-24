@@ -128,19 +128,19 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
 use crate::answers::Locator;
+use crate::build::{BuildOptions, GenerateResult, generate_many_as};
 use crate::contract_fields::{
     Diff, Field, FieldChange, FieldSide, Gap, Holder, Schema, TypeChange, UNKNOWN, ancestors,
     avro_rules, collect_holders, is_ref, json_type_change, proto_rules, qualified_name,
 };
-use crate::build::{BuildOptions, GenerateResult, generate_many_as};
 use crate::delta::{RevDelta, graph_delta_vs_rev, located_delta_with};
 use crate::git_rev;
 
 mod models;
 
 pub use models::{
-    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelBreaks, ModelChange, ModelExchange, ModelSite,
-    model_breaks,
+    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelBreaks, ModelChange, ModelExchange,
+    ModelSite, model_breaks,
 };
 // DT.1p: review folds the same judge into its own answer.
 pub(crate) use models::model_breaks_of;
@@ -371,7 +371,10 @@ pub(crate) fn check_models_min_tier(tier: &str) -> Result<(), String> {
 /// directory.
 fn distinct_clients(repo_path: &str, clients: &[String]) -> Result<Vec<String>, String> {
     let canonical = |p: &str| -> Option<PathBuf> {
-        Path::new(p).is_dir().then(|| std::fs::canonicalize(p).ok()).flatten()
+        Path::new(p)
+            .is_dir()
+            .then(|| std::fs::canonicalize(p).ok())
+            .flatten()
     };
     let mut seen: Vec<PathBuf> = canonical(repo_path).into_iter().collect();
     let mut out = Vec::new();
@@ -390,7 +393,13 @@ fn distinct_clients(repo_path: &str, clients: &[String]) -> Result<Vec<String>, 
 /// The contract breaks of an already computed rev delta (module docs).
 /// Nothing is built; `base` is `rev.answer.base`.
 pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBreaks {
-    breaks_of(&rev.answer.base, &rev.before.merged, &rev.after, &rev.delta, args)
+    breaks_of(
+        &rev.answer.base,
+        &rev.before.merged,
+        &rev.after,
+        &rev.delta,
+        args,
+    )
 }
 
 /// The answer over a rev pair (module docs): `before` is the rev's graph,
@@ -406,11 +415,7 @@ fn breaks_of(
     let after = &after_build.merged;
     let (old, new) = (contract_holders(before), contract_holders(after));
     let (then, now) = (Locator::new(before), Locator::new(after));
-    let moved: HashMap<u64, u64> = delta
-        .moved_nodes
-        .iter()
-        .map(|&(b, a)| (b.0, a.0))
-        .collect();
+    let moved: HashMap<u64, u64> = delta.moved_nodes.iter().map(|&(b, a)| (b.0, a.0)).collect();
     let old_ids: BTreeSet<u64> = old.keys().copied().collect();
     let new_ids: BTreeSet<u64> = new.keys().copied().collect();
     let pairing = pair(&old_ids, &new_ids, &moved);

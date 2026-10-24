@@ -64,7 +64,10 @@ pub struct QnameIndex {
 impl QnameIndex {
     /// Index `merged`'s nodes; `repo = Some(r)` keeps only graphs of repo `r`.
     pub fn build(merged: &MergedGraph, repo: Option<RepoId>) -> Self {
-        let mut idx = QnameIndex { identity: IdentityIndex::build(merged), ..QnameIndex::default() };
+        let mut idx = QnameIndex {
+            identity: IdentityIndex::build(merged),
+            ..QnameIndex::default()
+        };
         for (gi, g) in merged.graphs.iter().enumerate() {
             if repo.is_some_and(|r| r != g.repo) {
                 continue;
@@ -75,12 +78,16 @@ impl QnameIndex {
                 if seen {
                     continue;
                 }
-                if let (Some(q), Some(k)) = (g.nav.qname_by_id.get(&n.id), g.nav.kind_by_id.get(&n.id)) {
+                if let (Some(q), Some(k)) =
+                    (g.nav.qname_by_id.get(&n.id), g.nav.kind_by_id.get(&n.id))
+                {
                     idx.by_qname.entry(q.clone()).or_default().push((n.id, *k));
                 }
             }
         }
-        idx.by_qname.values_mut().for_each(|v| v.sort_by_key(|(id, _)| id.0));
+        idx.by_qname
+            .values_mut()
+            .for_each(|v| v.sort_by_key(|(id, _)| id.0));
         idx
     }
 
@@ -133,7 +140,10 @@ pub fn apply_cell_write(
     w: &CellWrite,
 ) -> Result<CellTarget, String> {
     if !WRITABLE.contains(&w.cell) {
-        return Ok(CellTarget::Rejected(format!("cell type {} is not externally writable", cell_name(w.cell))));
+        return Ok(CellTarget::Rejected(format!(
+            "cell type {} is not externally writable",
+            cell_name(w.cell)
+        )));
     }
     let is_vector_cell = w.cell == cell_type::VECTOR;
     match &w.payload {
@@ -166,7 +176,12 @@ pub fn apply_cell_write(
             .get_mut(gi)
             .and_then(|g| g.nodes.get_mut(ni))
             .filter(|n| n.id == id)
-            .ok_or_else(|| format!("stale QnameIndex: node {} is not at graph {gi} node {ni}", id.0))?;
+            .ok_or_else(|| {
+                format!(
+                    "stale QnameIndex: node {} is not at graph {gi} node {ni}",
+                    id.0
+                )
+            })?;
         let slot = node.cells.iter().position(|c| c.kind == w.cell);
         let payload = match &w.payload {
             WritePayload::Entry(v) => {
@@ -182,7 +197,10 @@ pub fn apply_cell_write(
         };
         match slot.and_then(|i| node.cells.get_mut(i)) {
             Some(cell) => cell.payload = payload,
-            None => node.cells.push(Cell { kind: w.cell, payload }),
+            None => node.cells.push(Cell {
+                kind: w.cell,
+                payload,
+            }),
         }
     }
     Ok(target)
@@ -207,7 +225,12 @@ mod tests {
     use crate::types::{RepoGraph, SymbolTable};
 
     fn node(id: NodeId, cells: Vec<Cell>) -> Node {
-        Node { id, repo: repo(), confidence: Confidence::Strong, cells }
+        Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells,
+        }
     }
 
     /// A CLASS and a SERVICE that share the qname `m::Svc`, plus a FUNCTION.
@@ -235,14 +258,29 @@ mod tests {
     fn resolve_prefers_kind_filter() {
         let (m, class, service) = twins();
         let idx = QnameIndex::build(&m, Some(repo()));
-        assert_eq!(idx.resolve("m::Svc", Some("SERVICE"), None), CellTarget::Bound(service));
-        assert_eq!(idx.resolve("m::Svc", Some("CLASS"), None), CellTarget::Bound(class));
-        assert_eq!(idx.resolve("m::a", None, None), CellTarget::Bound(m.graphs[1].nodes[0].id));
+        assert_eq!(
+            idx.resolve("m::Svc", Some("SERVICE"), None),
+            CellTarget::Bound(service)
+        );
+        assert_eq!(
+            idx.resolve("m::Svc", Some("CLASS"), None),
+            CellTarget::Bound(class)
+        );
+        assert_eq!(
+            idx.resolve("m::a", None, None),
+            CellTarget::Bound(m.graphs[1].nodes[0].id)
+        );
         assert_eq!(idx.resolve("m::gone", None, None), CellTarget::Orphaned);
-        assert!(matches!(idx.resolve("m::Svc", Some("NOPE"), None), CellTarget::Rejected(_)));
+        assert!(matches!(
+            idx.resolve("m::Svc", Some("NOPE"), None),
+            CellTarget::Rejected(_)
+        ));
         // Another repo's scope sees none of them.
         let other = QnameIndex::build(&m, Some(RepoId::from_canonical("test://other")));
-        assert_eq!(other.resolve("m::Svc", Some("SERVICE"), None), CellTarget::Orphaned);
+        assert_eq!(
+            other.resolve("m::Svc", Some("SERVICE"), None),
+            CellTarget::Orphaned
+        );
     }
 
     #[test]
@@ -250,10 +288,16 @@ mod tests {
         let (mut m, class, service) = twins();
         let idx = QnameIndex::build(&m, None);
         let smaller = if class.0 < service.0 { class } else { service };
-        assert_eq!(idx.resolve("m::Svc", None, None), CellTarget::Ambiguous(smaller));
+        assert_eq!(
+            idx.resolve("m::Svc", None, None),
+            CellTarget::Ambiguous(smaller)
+        );
         // An ambiguous write is reported, never applied.
         let w = CellWrite::vector("m::Svc", vec![0; 8], None, Some(2));
-        assert_eq!(apply_cell_write(&mut m, &idx, &w), Ok(CellTarget::Ambiguous(smaller)));
+        assert_eq!(
+            apply_cell_write(&mut m, &idx, &w),
+            Ok(CellTarget::Ambiguous(smaller))
+        );
         assert!(m.graphs[0].nodes.iter().all(|n| n.cells.is_empty()));
     }
 
@@ -262,16 +306,28 @@ mod tests {
         let mut m = MergedGraph::new(vec![flow_graph()]);
         let idx = QnameIndex::build(&m, None);
         let w = CellWrite::entry("m::a", cell_type::CODE, Default::default());
-        assert!(matches!(apply_cell_write(&mut m, &idx, &w), Ok(CellTarget::Rejected(_))));
+        assert!(matches!(
+            apply_cell_write(&mut m, &idx, &w),
+            Ok(CellTarget::Rejected(_))
+        ));
         // A vector payload on an entry cell, and an entry on VECTOR, too.
         let mut w = CellWrite::vector("m::a", vec![0; 4], None, None);
         w.cell = cell_type::CONV;
-        assert!(matches!(apply_cell_write(&mut m, &idx, &w), Ok(CellTarget::Rejected(_))));
+        assert!(matches!(
+            apply_cell_write(&mut m, &idx, &w),
+            Ok(CellTarget::Rejected(_))
+        ));
         let w = CellWrite::entry("m::a", cell_type::VECTOR, Default::default());
-        assert!(matches!(apply_cell_write(&mut m, &idx, &w), Ok(CellTarget::Rejected(_))));
+        assert!(matches!(
+            apply_cell_write(&mut m, &idx, &w),
+            Ok(CellTarget::Rejected(_))
+        ));
         // A CONV entry that is not an object fails its rules.
         let w = CellWrite::entry("m::a", cell_type::CONV, Default::default());
-        assert!(matches!(apply_cell_write(&mut m, &idx, &w), Ok(CellTarget::Rejected(_))));
+        assert!(matches!(
+            apply_cell_write(&mut m, &idx, &w),
+            Ok(CellTarget::Rejected(_))
+        ));
         assert!(m.graphs[0].nodes.iter().all(|n| n.cells.is_empty()));
     }
 
@@ -281,17 +337,29 @@ mod tests {
         let idx = QnameIndex::build(&m, None);
         let bytes = vec![0u8, 0, 128, 63, 0, 0, 0, 64];
         let bad = CellWrite::vector("m::a", bytes.clone(), None, Some(3));
-        assert!(matches!(apply_cell_write(&mut m, &idx, &bad), Ok(CellTarget::Rejected(_))));
+        assert!(matches!(
+            apply_cell_write(&mut m, &idx, &bad),
+            Ok(CellTarget::Rejected(_))
+        ));
         assert!(m.graphs[0].nodes[0].cells.is_empty());
         let good = CellWrite::vector("m::a", bytes.clone(), None, Some(2));
         let a = m.graphs[0].nodes[0].id;
-        assert_eq!(apply_cell_write(&mut m, &idx, &good), Ok(CellTarget::Bound(a)));
+        assert_eq!(
+            apply_cell_write(&mut m, &idx, &good),
+            Ok(CellTarget::Bound(a))
+        );
         // A second write replaces the VECTOR cell, never adds one.
         let again = CellWrite::vector("m::a", vec![1; 4], None, Some(1));
-        assert_eq!(apply_cell_write(&mut m, &idx, &again), Ok(CellTarget::Bound(a)));
+        assert_eq!(
+            apply_cell_write(&mut m, &idx, &again),
+            Ok(CellTarget::Bound(a))
+        );
         assert_eq!(
             m.graphs[0].nodes[0].cells,
-            vec![Cell { kind: cell_type::VECTOR, payload: CellPayload::Bytes(vec![1; 4]) }]
+            vec![Cell {
+                kind: cell_type::VECTOR,
+                payload: CellPayload::Bytes(vec![1; 4])
+            }]
         );
     }
 

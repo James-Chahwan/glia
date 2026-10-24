@@ -113,10 +113,14 @@ fn main() -> Result<()> {
     // Channel 1: traceback.
     let tb_path = channels_dir.join("traceback.md");
     let tb_status = Command::new(bin_dir.join("synth_traceback_target"))
-        .arg("--src").arg(&args.src)
-        .arg("--issue").arg(&args.issue)
-        .arg("--text-out").arg(&tb_path)
-        .arg("--repo-canonical").arg(&args.repo_canonical)
+        .arg("--src")
+        .arg(&args.src)
+        .arg("--issue")
+        .arg(&args.issue)
+        .arg("--text-out")
+        .arg(&tb_path)
+        .arg("--repo-canonical")
+        .arg(&args.repo_canonical)
         .status()
         .context("spawn synth_traceback_target")?;
     if tb_status.success() && tb_path.exists() {
@@ -130,18 +134,26 @@ fn main() -> Result<()> {
             resolved_targets: targets,
         });
     } else {
-        eprintln!("[synth_directive] traceback channel: skipped (exit {:?})", tb_status.code());
+        eprintln!(
+            "[synth_directive] traceback channel: skipped (exit {:?})",
+            tb_status.code()
+        );
     }
 
     // Channel 2: test_expectation (skipped if --test-patch missing).
     if let Some(tp) = &args.test_patch {
         let te_path = channels_dir.join("test_expectation.md");
         let te_status = Command::new(bin_dir.join("synth_test_expectation"))
-            .arg("--src").arg(&args.src)
-            .arg("--test-patch").arg(tp)
-            .arg("--text-out").arg(&te_path)
-            .arg("--issue").arg(&args.issue)
-            .arg("--repo-canonical").arg(&args.repo_canonical)
+            .arg("--src")
+            .arg(&args.src)
+            .arg("--test-patch")
+            .arg(tp)
+            .arg("--text-out")
+            .arg(&te_path)
+            .arg("--issue")
+            .arg(&args.issue)
+            .arg("--repo-canonical")
+            .arg(&args.repo_canonical)
             .status()
             .context("spawn synth_test_expectation")?;
         if te_status.success() && te_path.exists() {
@@ -155,7 +167,10 @@ fn main() -> Result<()> {
                 resolved_targets: targets,
             });
         } else {
-            eprintln!("[synth_directive] test_expectation: skipped (exit {:?})", te_status.code());
+            eprintln!(
+                "[synth_directive] test_expectation: skipped (exit {:?})",
+                te_status.code()
+            );
         }
     } else {
         eprintln!("[synth_directive] test_expectation: skipped (no --test-patch)");
@@ -167,9 +182,12 @@ fn main() -> Result<()> {
     if let Some(ht) = &args.hints_text {
         let ph_path = channels_dir.join("pr_hint.md");
         let ph_status = Command::new(bin_dir.join("synth_pr_hint"))
-            .arg("--hints-text").arg(ht)
-            .arg("--text-out").arg(&ph_path)
-            .arg("--repo-canonical").arg(&args.repo_canonical)
+            .arg("--hints-text")
+            .arg(ht)
+            .arg("--text-out")
+            .arg(&ph_path)
+            .arg("--repo-canonical")
+            .arg(&args.repo_canonical)
             .status()
             .context("spawn synth_pr_hint")?;
         if ph_status.success() && ph_path.exists() {
@@ -183,7 +201,10 @@ fn main() -> Result<()> {
                 resolved_targets: targets,
             });
         } else {
-            eprintln!("[synth_directive] pr_hint: skipped (exit {:?})", ph_status.code());
+            eprintln!(
+                "[synth_directive] pr_hint: skipped (exit {:?})",
+                ph_status.code()
+            );
         }
     } else {
         eprintln!("[synth_directive] pr_hint: skipped (no --hints-text)");
@@ -195,10 +216,14 @@ fn main() -> Result<()> {
     {
         let rt_path = channels_dir.join("runtime_type.md");
         let rt_status = Command::new(bin_dir.join("synth_runtime_type"))
-            .arg("--src").arg(&args.src)
-            .arg("--issue").arg(&args.issue)
-            .arg("--text-out").arg(&rt_path)
-            .arg("--repo-canonical").arg(&args.repo_canonical)
+            .arg("--src")
+            .arg(&args.src)
+            .arg("--issue")
+            .arg(&args.issue)
+            .arg("--text-out")
+            .arg(&rt_path)
+            .arg("--repo-canonical")
+            .arg(&args.repo_canonical)
             .status()
             .context("spawn synth_runtime_type")?;
         if rt_status.success() && rt_path.exists() {
@@ -212,7 +237,10 @@ fn main() -> Result<()> {
                 resolved_targets: targets,
             });
         } else {
-            eprintln!("[synth_directive] runtime_type: skipped (exit {:?})", rt_status.code());
+            eprintln!(
+                "[synth_directive] runtime_type: skipped (exit {:?})",
+                rt_status.code()
+            );
         }
     }
 
@@ -224,9 +252,12 @@ fn main() -> Result<()> {
     if let Some(tp) = &args.test_patch {
         let ta_path = channels_dir.join("test_assertion.md");
         let ta_status = Command::new(bin_dir.join("synth_test_assertion"))
-            .arg("--test-patch").arg(tp)
-            .arg("--text-out").arg(&ta_path)
-            .arg("--repo-canonical").arg(&args.repo_canonical)
+            .arg("--test-patch")
+            .arg(tp)
+            .arg("--text-out")
+            .arg(&ta_path)
+            .arg("--repo-canonical")
+            .arg(&args.repo_canonical)
             .status()
             .context("spawn synth_test_assertion")?;
         if ta_status.success() && ta_path.exists() {
@@ -240,7 +271,10 @@ fn main() -> Result<()> {
                 resolved_targets: targets,
             });
         } else {
-            eprintln!("[synth_directive] test_assertion: skipped (exit {:?})", ta_status.code());
+            eprintln!(
+                "[synth_directive] test_assertion: skipped (exit {:?})",
+                ta_status.code()
+            );
         }
     } else {
         eprintln!("[synth_directive] test_assertion: skipped (no --test-patch)");
@@ -249,10 +283,14 @@ fn main() -> Result<()> {
     // Channel 3: prose mention.
     let pm_path = channels_dir.join("prose_mention.md");
     let pm_status = Command::new(bin_dir.join("synth_prose_mention"))
-        .arg("--src").arg(&args.src)
-        .arg("--issue").arg(&args.issue)
-        .arg("--text-out").arg(&pm_path)
-        .arg("--repo-canonical").arg(&args.repo_canonical)
+        .arg("--src")
+        .arg(&args.src)
+        .arg("--issue")
+        .arg(&args.issue)
+        .arg("--text-out")
+        .arg(&pm_path)
+        .arg("--repo-canonical")
+        .arg(&args.repo_canonical)
         .status()
         .context("spawn synth_prose_mention")?;
     if pm_status.success() && pm_path.exists() {
@@ -266,7 +304,10 @@ fn main() -> Result<()> {
             resolved_targets: targets,
         });
     } else {
-        eprintln!("[synth_directive] prose_mention: skipped (exit {:?})", pm_status.code());
+        eprintln!(
+            "[synth_directive] prose_mention: skipped (exit {:?})",
+            pm_status.code()
+        );
     }
 
     for c in &channels {
@@ -342,7 +383,9 @@ fn main() -> Result<()> {
         // Build per-channel keep_targets: union of all OTHER channels' targets.
         let mut keep_targets = std::collections::HashSet::new();
         for (j, c) in keep.iter().enumerate() {
-            if j == idx { continue; }
+            if j == idx {
+                continue;
+            }
             for line in c.text.lines() {
                 let t = line.trim_start();
                 if let Some(rest) = t.strip_prefix("- `") {
@@ -439,8 +482,10 @@ fn score_directive(text: &str, _label: &str) -> (i32, usize) {
         // pairing with a targeting channel). Equality/identity assertions
         // are signal-dense; "raises" assertions strongest because they
         // pin a specific exception class.
-        if t.starts_with("- Expression `") || t.starts_with("- `")
-            && (t.contains(" must equal ") || t.contains(" must NOT equal ")) {
+        if t.starts_with("- Expression `")
+            || t.starts_with("- `")
+                && (t.contains(" must equal ") || t.contains(" must NOT equal "))
+        {
             assertion_bullets += 1;
             score += 3;
         }
@@ -448,7 +493,9 @@ fn score_directive(text: &str, _label: &str) -> (i32, usize) {
             assertion_bullets += 1;
             score += 4;
         }
-        if t.starts_with("- ") && (t.contains("must evaluate truthy") || t.contains("must evaluate falsy")) {
+        if t.starts_with("- ")
+            && (t.contains("must evaluate truthy") || t.contains("must evaluate falsy"))
+        {
             assertion_bullets += 1;
             score += 2;
         }
@@ -517,20 +564,28 @@ fn build_causal_chain(channels: &[ChannelOutput]) -> Option<String> {
     let mut runtime_type: Option<String> = None;
 
     let assert_re = match Regex::new(r"^- Expression `([^`]+)` must equal `([^`]+)`") {
-        Ok(r) => r, Err(_) => return None,
+        Ok(r) => r,
+        Err(_) => return None,
     };
-    let edit_one_re = match Regex::new(r"^Edit ONE function: `([^`]+)` in `([^`]+)` \(function body spans lines (\d+)-(\d+)\)") {
-        Ok(r) => r, Err(_) => return None,
+    let edit_one_re = match Regex::new(
+        r"^Edit ONE function: `([^`]+)` in `([^`]+)` \(function body spans lines (\d+)-(\d+)\)",
+    ) {
+        Ok(r) => r,
+        Err(_) => return None,
     };
     let buggy_intro_re = match Regex::new(r"^The BUGGY LINE \(per traceback line (\d+)\) is:") {
-        Ok(r) => r, Err(_) => return None,
+        Ok(r) => r,
+        Err(_) => return None,
     };
     let exc_re = match Regex::new(r"^The exception is `([^`:]+)(?::[^`]*)?`") {
-        Ok(r) => r, Err(_) => return None,
+        Ok(r) => r,
+        Err(_) => return None,
     };
-    let runtime_re = match Regex::new(r"receiver of the failing[^`]*`\.([^`]+)`[^`]*is a `([^`]+)` instance") {
-        Ok(r) => r, Err(_) => return None,
-    };
+    let runtime_re =
+        match Regex::new(r"receiver of the failing[^`]*`\.([^`]+)`[^`]*is a `([^`]+)` instance") {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
 
     for c in channels {
         let mut lines_iter = c.text.lines().peekable();
@@ -562,8 +617,14 @@ fn build_causal_chain(channels: &[ChannelOutput]) -> Option<String> {
                     // the first non-fence line.
                     while let Some(peek) = lines_iter.peek() {
                         let pt = peek.trim();
-                        if pt == "```" { lines_iter.next(); continue; }
-                        if pt.is_empty() { lines_iter.next(); continue; }
+                        if pt == "```" {
+                            lines_iter.next();
+                            continue;
+                        }
+                        if pt.is_empty() {
+                            lines_iter.next();
+                            continue;
+                        }
                         buggy_line_text = Some(pt.to_string());
                         break;
                     }
@@ -588,8 +649,7 @@ fn build_causal_chain(channels: &[ChannelOutput]) -> Option<String> {
 
     // Require at least 2 of {assertion, traceback-target, exception} to
     // emit a chain. With only 1 signal it's not a chain, just restating.
-    let signal_count =
-        assertion_expr.is_some() as i32
+    let signal_count = assertion_expr.is_some() as i32
         + call_target_qname.is_some() as i32
         + exception_class.is_some() as i32;
     if signal_count < 2 {
@@ -610,7 +670,9 @@ fn build_causal_chain(channels: &[ChannelOutput]) -> Option<String> {
         ));
         step += 1;
     }
-    if let (Some(q), Some(f), Some((l1, l2))) = (&call_target_qname, &call_target_file, &call_target_lines) {
+    if let (Some(q), Some(f), Some((l1, l2))) =
+        (&call_target_qname, &call_target_file, &call_target_lines)
+    {
         s.push_str(&format!(
             "{step}. **Execution reaches**: `{q}` in `{f}` (lines {l1}-{l2}). This is the deepest graph-resolved frame in the traceback.\n",
         ));

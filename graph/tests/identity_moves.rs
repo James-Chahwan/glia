@@ -553,21 +553,40 @@ fn identities_match_identity_of_for_every_node() {
         let mut seen = 0usize;
         for rg in &g.graphs {
             for n in &rg.nodes {
-                assert_eq!(all.get(&n.id), identity_of(g, n.id).as_ref(), "node {}", n.id.0);
+                assert_eq!(
+                    all.get(&n.id),
+                    identity_of(g, n.id).as_ref(),
+                    "node {}",
+                    n.id.0
+                );
                 seen += 1;
             }
         }
         assert!(seen > 0);
         for k in all.keys() {
-            assert!(identity_of(g, *k).is_some(), "id {} has no identity_of", k.0);
+            assert!(
+                identity_of(g, *k).is_some(),
+                "id {} has no identity_of",
+                k.0
+            );
         }
         all
     };
     let (p, c) = (check(&prior()), check(&current()));
-    assert_eq!(p.len(), 6, "every prior node has a MODULE ancestor and a file");
+    assert_eq!(
+        p.len(),
+        6,
+        "every prior node has a MODULE ancestor and a file"
+    );
     assert_eq!(c.len(), 7);
-    assert_ne!(p.get(&id(F, "lib::big::compute_totals")).map(|i| i.body), Some(0));
-    assert!(identity_of(&prior(), id(ME, "a::users::User::get")).is_some_and(|i| i.hint().starts_with(HINT_VERSION)));
+    assert_ne!(
+        p.get(&id(F, "lib::big::compute_totals")).map(|i| i.body),
+        Some(0)
+    );
+    assert!(
+        identity_of(&prior(), id(ME, "a::users::User::get"))
+            .is_some_and(|i| i.hint().starts_with(HINT_VERSION))
+    );
 
     // One id in two graphs, the second with other CODE: the first decides.
     let first = prior().graphs.remove(0);
@@ -575,20 +594,34 @@ fn identities_match_identity_of_for_every_node() {
     let fid = id(F, "lib::big::compute_totals");
     for n in second.nodes.iter_mut().filter(|n| n.id == fid) {
         for cell in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
-            cell.payload = CellPayload::Text("def other(xs):\n    return [x * 2 for x in xs if x > 0]\n".into());
+            cell.payload = CellPayload::Text(
+                "def other(xs):\n    return [x * 2 for x in xs if x > 0]\n".into(),
+            );
         }
     }
     // A second instance of the same id in the first graph, after the first.
     let mut first_dup = first.clone();
-    let dup = second.nodes.iter().find(|n| n.id == fid).cloned().expect("node");
+    let dup = second
+        .nodes
+        .iter()
+        .find(|n| n.id == fid)
+        .cloned()
+        .expect("node");
     first_dup.nodes.push(dup);
     // And a node with no MODULE ancestor: no identity.
-    let route = graph(vec![file("r.py", vec![decl(node_kind::ROUTE, "GET /x", None, "")])]);
+    let route = graph(vec![file(
+        "r.py",
+        vec![decl(node_kind::ROUTE, "GET /x", None, "")],
+    )]);
     let mut graphs = vec![first_dup, second];
     graphs.extend(route.graphs);
     let merged = MergedGraph::new(graphs);
     let all = check(&merged);
     let want = identity_of(&prior(), fid).expect("function");
-    assert_eq!(all.get(&fid), Some(&want), "the first graph's first instance decides");
+    assert_eq!(
+        all.get(&fid),
+        Some(&want),
+        "the first graph's first instance decides"
+    );
     assert!(!all.contains_key(&id(node_kind::ROUTE, "GET /x")));
 }

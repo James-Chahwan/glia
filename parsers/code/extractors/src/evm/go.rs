@@ -2192,10 +2192,19 @@ func FromVar() ([]byte, error) {
     /// ABI.
     #[test]
     fn go_const_values_read_raw_or_unescaped() {
-        let raw = r#"[{"type":"function","name":"release","inputs":[{"name":"id","type":"bytes32"}]}]"#;
-        let want = Some(vec![AbiEntry { kind: EntryKind::Fn, name: "release".into(), arity: Some(1) }]);
+        let raw =
+            r#"[{"type":"function","name":"release","inputs":[{"name":"id","type":"bytes32"}]}]"#;
+        let want = Some(vec![AbiEntry {
+            kind: EntryKind::Fn,
+            name: "release".into(),
+            arity: Some(1),
+        }]);
         assert_eq!(read_go_const_abi(raw), want);
-        assert_eq!(read_go_const_abi(&raw.replace('"', "\\\"")), want, "interpreted, escapes kept");
+        assert_eq!(
+            read_go_const_abi(&raw.replace('"', "\\\"")),
+            want,
+            "interpreted, escapes kept"
+        );
         for no in ["/api/v1", "[1, 2]", "", "{\"type\":\"function\"}", "[\\q]"] {
             assert_eq!(read_go_const_abi(no), None, "{no:?}");
         }

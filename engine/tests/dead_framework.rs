@@ -33,7 +33,9 @@ const FIXTURE: &str = "framework-invoked-members";
 const DIRS: [&str; 3] = ["web", "mobile", "jobs"];
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(FIXTURE)
 }
 
 /// Copy a fixture's sources (never its key.json or a stray `.ai/` / `.glia/`).
@@ -54,8 +56,13 @@ fn copy_tree(from: &Path, to: &Path) {
 /// The fixture copied under `tmp` and built as one merge (web, mobile, jobs).
 fn build_fixture(tmp: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), tmp);
-    let roots: Vec<String> = DIRS.iter().map(|d| tmp.join(d).display().to_string()).collect();
-    generate_many(&roots).unwrap_or_else(|e| panic!("generate_many: {e}")).merged
+    let roots: Vec<String> = DIRS
+        .iter()
+        .map(|d| tmp.join(d).display().to_string())
+        .collect();
+    generate_many(&roots)
+        .unwrap_or_else(|e| panic!("generate_many: {e}"))
+        .merged
 }
 
 fn report(m: &MergedGraph) -> GapsReport {
@@ -64,8 +71,12 @@ fn report(m: &MergedGraph) -> GapsReport {
 
 /// The dead_symbol rows' qnames, sorted.
 fn dead(rep: &GapsReport) -> Vec<String> {
-    let mut rows: Vec<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let mut rows: Vec<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     rows.sort();
     rows
 }
@@ -110,12 +121,19 @@ fn members_of_a_live_owner_are_live() {
         .map(|s| format!("{ORDERS_PAGE}::{s}"))
         .collect();
     reached.extend(
-        ["constructor", "ngOnDestroy", "list"].iter().map(|s| format!("{ORDER_SERVICE}::{s}")),
+        ["constructor", "ngOnDestroy", "list"]
+            .iter()
+            .map(|s| format!("{ORDER_SERVICE}::{s}")),
     );
     reached.extend(
-        ["writeValue", "registerOnChange", "registerOnTouched", "setDisabledState"]
-            .iter()
-            .map(|s| format!("{AMOUNT_INPUT}::{s}")),
+        [
+            "writeValue",
+            "registerOnChange",
+            "registerOnTouched",
+            "setDisabledState",
+        ]
+        .iter()
+        .map(|s| format!("{AMOUNT_INPUT}::{s}")),
     );
     reached.push("worker::Worker::__init__".to_string());
     for q in &reached {
@@ -128,7 +146,10 @@ fn members_of_a_live_owner_are_live() {
         "lib::models::friend::Friend::Friend".to_string(),
         "lib::models::friend::Orphan::Orphan".to_string(),
     ] {
-        assert!(!live.contains(&node(&m, &q)), "{q} stays outside the live set");
+        assert!(
+            !live.contains(&node(&m, &q)),
+            "{q} stays outside the live set"
+        );
     }
 }
 
@@ -190,11 +211,20 @@ fn report_stderr(prefix: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_report_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_report_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, tmp.path())
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.starts_with(prefix))
@@ -235,7 +265,9 @@ fn ctor_live(files: &[(&str, &str)], owner: &str, ctor: &str, other: &str) -> (b
         std::fs::write(path, body).expect("write");
     }
     let root = dir.path().to_str().expect("utf-8 temp path").to_string();
-    let mut m = generate_one(&root).unwrap_or_else(|e| panic!("generate_one: {e}")).merged;
+    let mut m = generate_one(&root)
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged;
     let member = |m: &MergedGraph, name: &str| -> NodeId {
         let found: Vec<NodeId> = m
             .graphs
@@ -321,7 +353,11 @@ fn named_like_owner_constructors() {
     let dart = "class Worker {\n  Worker(this.name);\n  final String name;\n  String other() => name;\n}\n";
     assert_ctor(&[("lib/worker.dart", dart)], "Worker", "Worker");
     let java = "package shop;\n\npublic class Worker {\n    private final String name;\n\n    public Worker(String name) {\n        this.name = name;\n    }\n\n    public String other() {\n        return name;\n    }\n}\n";
-    assert_ctor(&[("src/main/java/shop/Worker.java", java)], "Worker", "Worker");
+    assert_ctor(
+        &[("src/main/java/shop/Worker.java", java)],
+        "Worker",
+        "Worker",
+    );
     let cs = "namespace Shop {\n    public class Worker {\n        private string name;\n        public Worker(string name) { this.name = name; }\n        public string other() { return name; }\n    }\n}\n";
     assert_ctor(&[("Worker.cs", cs)], "Worker", "Worker");
     let cpp = "class Worker {\npublic:\n    Worker(int n) : n_(n) {}\n    int other() { return n_; }\nprivate:\n    int n_;\n};\n";
@@ -332,7 +368,11 @@ fn named_like_owner_constructors() {
     // Out of line: declared in the header, defined in the source.
     let hpp = "class Worker {\npublic:\n    Worker(int n);\n    int other();\nprivate:\n    int n_;\n};\n";
     let out = "#include \"worker.hpp\"\n\nWorker::Worker(int n) : n_(n) {}\n\nint Worker::other() { return n_; }\n";
-    assert_ctor(&[("src/worker.hpp", hpp), ("src/worker.cpp", out)], "Worker", "Worker");
+    assert_ctor(
+        &[("src/worker.hpp", hpp), ("src/worker.cpp", out)],
+        "Worker",
+        "Worker",
+    );
 }
 
 /// The gates: a member named like a hook on a class with no Angular role,

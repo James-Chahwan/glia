@@ -245,7 +245,9 @@ pub struct AbiEntry {
 impl AbiEntry {
     /// `f:<name>/<arity>` or `e:<name>/<arity>`, `?` for an unknown arity.
     pub fn to_key(&self) -> String {
-        let arity = self.arity.map_or_else(|| "?".to_string(), |a| a.to_string());
+        let arity = self
+            .arity
+            .map_or_else(|| "?".to_string(), |a| a.to_string());
         format!("{}:{}/{arity}", self.kind.tag(), self.name)
     }
 
@@ -265,7 +267,11 @@ impl AbiEntry {
             "?" => None,
             n => Some(n.parse::<u32>().ok()?),
         };
-        Some(AbiEntry { kind, name: name.to_string(), arity })
+        Some(AbiEntry {
+            kind,
+            name: name.to_string(),
+            arity,
+        })
     }
 }
 
@@ -334,21 +340,27 @@ pub fn procedure_cell(facts: &ProcedureFacts) -> Cell {
     };
     // A derived struct of strings, integers and booleans always serialises.
     let json = serde_json::to_string(&out).unwrap_or_default();
-    Cell { kind: cell_type::CODE, payload: CellPayload::Json(json) }
+    Cell {
+        kind: cell_type::CODE,
+        payload: CellPayload::Json(json),
+    }
 }
 
 /// The facts of the first `via:evm` CODE cell in `cells`; `None` when there is
 /// none (a METHOD's CODE is its source text, which never reads as one).
 pub fn read_procedure_cell(cells: &[Cell]) -> Option<ProcedureFacts> {
-    cells.iter().filter(|c| c.kind == cell_type::CODE).find_map(|c| {
-        let p: ProcedureIn = serde_json::from_str(payload_text(c)?).ok()?;
-        (p.via == VIA).then_some(ProcedureFacts {
-            arities: p.arities,
-            mutability: p.mutability,
-            getter: p.getter,
-            abstract_: p.abstract_,
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::CODE)
+        .find_map(|c| {
+            let p: ProcedureIn = serde_json::from_str(payload_text(c)?).ok()?;
+            (p.via == VIA).then_some(ProcedureFacts {
+                arities: p.arities,
+                mutability: p.mutability,
+                getter: p.getter,
+                abstract_: p.abstract_,
+            })
         })
-    })
 }
 
 // ---- the client cell ----------------------------------------------------------------
@@ -423,7 +435,11 @@ struct ClientIn {
 /// The ENDPOINT_HIT cell of a client site group:
 /// `{"via":"evm","lib":"..","args":[..][,"abi":[..]]}`.
 pub fn client_cell(facts: &ClientFacts) -> Cell {
-    client_hit_cell(&ClientHit { facts: facts.clone(), abi_ref: None, abi_from: None })
+    client_hit_cell(&ClientHit {
+        facts: facts.clone(),
+        abi_ref: None,
+        abi_from: None,
+    })
 }
 
 /// The ENDPOINT_HIT cell of a client site group with its cross-file ABI
@@ -440,13 +456,20 @@ pub fn client_hit_cell(hit: &ClientHit) -> Cell {
     };
     // A derived struct of strings and integers always serialises.
     let json = serde_json::to_string(&out).unwrap_or_default();
-    Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json) }
+    Cell {
+        kind: cell_type::ENDPOINT_HIT,
+        payload: CellPayload::Json(json),
+    }
 }
 
 /// One [`ClientFacts`] per `via:evm` ENDPOINT_HIT cell of `cells`, in cell
 /// order; every other cell (an HTTP hit, a channel hit) is skipped.
 pub fn read_client_cells(cells: &[Cell]) -> Vec<ClientFacts> {
-    cells.iter().filter_map(read_client_hit).map(|h| h.facts).collect()
+    cells
+        .iter()
+        .filter_map(read_client_hit)
+        .map(|h| h.facts)
+        .collect()
 }
 
 /// One [`ClientHit`] per `via:evm` ENDPOINT_HIT cell of `cells`, in cell
@@ -463,7 +486,11 @@ pub fn read_client_hit(cell: &Cell) -> Option<ClientHit> {
     }
     let p: ClientIn = serde_json::from_str(payload_text(cell)?).ok()?;
     (p.via == VIA).then_some(ClientHit {
-        facts: ClientFacts { lib: p.lib, args: p.args, abi: p.abi },
+        facts: ClientFacts {
+            lib: p.lib,
+            args: p.args,
+            abi: p.abi,
+        },
         abi_ref: p.abi_ref,
         abi_from: p.abi_from,
     })
@@ -494,7 +521,11 @@ mod tests {
         assert_eq!(Scope::parse(""), None);
         assert_eq!(Scope::parse("abi:"), None);
         assert_eq!(Scope::parse("recv:a.b"), None);
-        assert_eq!(Scope::parse("x:Escrow"), None, "a contract name holds no `:`");
+        assert_eq!(
+            Scope::parse("x:Escrow"),
+            None,
+            "a contract name holds no `:`"
+        );
     }
 
     #[test]
@@ -514,20 +545,33 @@ mod tests {
     fn evm_split_client_reads_every_scope() {
         let cases = [
             (Scope::Contract("Escrow".into()), "evm_call:Escrow.deposit"),
-            (Scope::Abi("ESCROW_ABI".into()), "evm_call:abi:ESCROW_ABI.deposit"),
+            (
+                Scope::Abi("ESCROW_ABI".into()),
+                "evm_call:abi:ESCROW_ABI.deposit",
+            ),
             (Scope::Recv("escrow".into()), "evm_call:recv:escrow.deposit"),
         ];
         for (scope, want) in cases {
             let q = call_qname(&scope, "deposit");
             assert_eq!(q, want);
-            assert_eq!(split_client(&q), Some((ClientSide::Call, scope.clone(), "deposit")));
+            assert_eq!(
+                split_client(&q),
+                Some((ClientSide::Call, scope.clone(), "deposit"))
+            );
             let e = event_qname(&scope, "Released");
             assert!(e.starts_with(EVENT_PREFIX), "{e}");
-            assert_eq!(split_client(&e), Some((ClientSide::Event, scope, "Released")));
+            assert_eq!(
+                split_client(&e),
+                Some((ClientSide::Event, scope, "Released"))
+            );
         }
         assert_eq!(ClientSide::Call.prefix(), CALL_PREFIX);
         assert_eq!(ClientSide::Event.prefix(), EVENT_PREFIX);
-        assert_eq!(split_client("evm:Escrow.deposit"), None, "a procedure is no client");
+        assert_eq!(
+            split_client("evm:Escrow.deposit"),
+            None,
+            "a procedure is no client"
+        );
         assert_eq!(split_client("rpc_call:user.list"), None);
         assert_eq!(split_client("evm_call:Escrow"), None);
         assert_eq!(split_client("evm_call:Escrow."), None);
@@ -559,15 +603,43 @@ mod tests {
     #[test]
     fn evm_abi_entry_keys_round_trip() {
         let entries = [
-            (AbiEntry { kind: EntryKind::Fn, name: "deposit".into(), arity: Some(1) }, "f:deposit/1"),
-            (AbiEntry { kind: EntryKind::Event, name: "Released".into(), arity: Some(2) }, "e:Released/2"),
-            (AbiEntry { kind: EntryKind::Fn, name: "deposit".into(), arity: None }, "f:deposit/?"),
+            (
+                AbiEntry {
+                    kind: EntryKind::Fn,
+                    name: "deposit".into(),
+                    arity: Some(1),
+                },
+                "f:deposit/1",
+            ),
+            (
+                AbiEntry {
+                    kind: EntryKind::Event,
+                    name: "Released".into(),
+                    arity: Some(2),
+                },
+                "e:Released/2",
+            ),
+            (
+                AbiEntry {
+                    kind: EntryKind::Fn,
+                    name: "deposit".into(),
+                    arity: None,
+                },
+                "f:deposit/?",
+            ),
         ];
         for (entry, key) in entries {
             assert_eq!(entry.to_key(), key);
             assert_eq!(AbiEntry::from_key(key), Some(entry));
         }
-        for bad in ["deposit/1", "x:deposit/1", "f:/1", "f:deposit", "f:deposit/-1", "f:deposit/a"] {
+        for bad in [
+            "deposit/1",
+            "x:deposit/1",
+            "f:/1",
+            "f:deposit",
+            "f:deposit/-1",
+            "f:deposit/a",
+        ] {
             assert_eq!(AbiEntry::from_key(bad), None, "{bad}");
         }
     }
@@ -591,18 +663,26 @@ mod tests {
             payload: CellPayload::Text("function deposit() external {}".into()),
         };
         let read = read_procedure_cell(&[source, cell]).expect("evm CODE cell");
-        assert_eq!(read, ProcedureFacts { arities: vec![1, 2], ..facts });
+        assert_eq!(
+            read,
+            ProcedureFacts {
+                arities: vec![1, 2],
+                ..facts
+            }
+        );
         let foreign = Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Json(
-                r#"{"via":"rpc","arities":[1],"mutability":"view","getter":true,"abstract":true}"#.into(),
+                r#"{"via":"rpc","arities":[1],"mutability":"view","getter":true,"abstract":true}"#
+                    .into(),
             ),
         };
         assert_eq!(read_procedure_cell(&[foreign]), None);
         let mistyped = Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Json(
-                r#"{"via":"evm","arities":"1","mutability":"view","getter":true,"abstract":true}"#.into(),
+                r#"{"via":"evm","arities":"1","mutability":"view","getter":true,"abstract":true}"#
+                    .into(),
             ),
         };
         assert_eq!(read_procedure_cell(&[mistyped]), None);
@@ -613,7 +693,11 @@ mod tests {
         let facts = ClientFacts {
             lib: "ethers".into(),
             args: vec![2],
-            abi: Some(vec!["f:deposit/1".into(), "e:Released/2".into(), "f:deposit/1".into()]),
+            abi: Some(vec![
+                "f:deposit/1".into(),
+                "e:Released/2".into(),
+                "f:deposit/1".into(),
+            ]),
         };
         let cell = client_cell(&facts);
         assert_eq!(cell.kind, cell_type::ENDPOINT_HIT);
@@ -621,7 +705,11 @@ mod tests {
             json_of(&cell),
             r#"{"via":"evm","lib":"ethers","args":[2],"abi":["e:Released/2","f:deposit/1"]}"#
         );
-        let unknown = client_cell(&ClientFacts { lib: "geth".into(), args: vec![], abi: None });
+        let unknown = client_cell(&ClientFacts {
+            lib: "geth".into(),
+            args: vec![],
+            abi: None,
+        });
         assert_eq!(json_of(&unknown), r#"{"via":"evm","lib":"geth","args":[]}"#);
 
         let http = Cell {
@@ -638,7 +726,9 @@ mod tests {
         // A later stamp's key (CB.24's `hosts`) is ignored, not a rejection.
         let stamped = Cell {
             kind: cell_type::ENDPOINT_HIT,
-            payload: CellPayload::Json(r#"{"via":"evm","lib":"viem","args":[0,1],"hosts":["a"]}"#.into()),
+            payload: CellPayload::Json(
+                r#"{"via":"evm","lib":"viem","args":[0,1],"hosts":["a"]}"#.into(),
+            ),
         };
         let code = procedure_cell(&ProcedureFacts::default());
         let read = read_client_cells(&[http, cell, ws, code, unknown, stamped]);
@@ -650,8 +740,16 @@ mod tests {
                     args: vec![2],
                     abi: Some(vec!["e:Released/2".into(), "f:deposit/1".into()]),
                 },
-                ClientFacts { lib: "geth".into(), args: vec![], abi: None },
-                ClientFacts { lib: "viem".into(), args: vec![0, 1], abi: None },
+                ClientFacts {
+                    lib: "geth".into(),
+                    args: vec![],
+                    abi: None
+                },
+                ClientFacts {
+                    lib: "viem".into(),
+                    args: vec![0, 1],
+                    abi: None
+                },
             ]
         );
     }
@@ -661,9 +759,16 @@ mod tests {
     /// [`read_client_hits`], and [`read_client_cells`] keeps reading its facts.
     #[test]
     fn evm_client_hit_cell_round_trips_the_abi_ref_and_join() {
-        let abi_ref = AbiRef { name: "SHOP_ABI".into(), from: "./abi".into() };
+        let abi_ref = AbiRef {
+            name: "SHOP_ABI".into(),
+            from: "./abi".into(),
+        };
         let unjoined = ClientHit {
-            facts: ClientFacts { lib: "ethers".into(), args: vec![1], abi: None },
+            facts: ClientFacts {
+                lib: "ethers".into(),
+                args: vec![1],
+                abi: None,
+            },
             abi_ref: Some(abi_ref.clone()),
             abi_from: None,
         };
@@ -672,7 +777,10 @@ mod tests {
             json_of(&cell),
             r#"{"via":"evm","lib":"ethers","args":[1],"abi_ref":{"name":"SHOP_ABI","from":"./abi"}}"#
         );
-        assert_eq!(read_client_hits(std::slice::from_ref(&cell)), vec![unjoined.clone()]);
+        assert_eq!(
+            read_client_hits(std::slice::from_ref(&cell)),
+            vec![unjoined.clone()]
+        );
         let joined = ClientHit {
             facts: ClientFacts {
                 abi: Some(vec!["f:release/1".into(), "f:deposit/1".into()]),
@@ -694,9 +802,16 @@ mod tests {
             read_client_cells(&[cell])[0].abi,
             Some(vec!["f:deposit/1".to_string(), "f:release/1".to_string()])
         );
-        let plain = ClientFacts { lib: "geth".into(), args: vec![], abi: None };
+        let plain = ClientFacts {
+            lib: "geth".into(),
+            args: vec![],
+            abi: None,
+        };
         assert_eq!(
-            client_hit_cell(&ClientHit { facts: plain.clone(), ..ClientHit::default() }),
+            client_hit_cell(&ClientHit {
+                facts: plain.clone(),
+                ..ClientHit::default()
+            }),
             client_cell(&plain),
             "no cross-file field: client_cell's bytes"
         );

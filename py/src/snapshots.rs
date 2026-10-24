@@ -599,7 +599,11 @@ mod tests {
         assert_eq!(v["commits"], 30);
         assert_eq!(v["test_commits"], 10, "max_commits reaches the replay");
         let sets = v["sets"].as_array().expect("sets");
-        assert_eq!(sets.len(), 13, "default groups structure + review (EC.11) + find (EC.13)");
+        assert_eq!(
+            sets.len(),
+            13,
+            "default groups structure + review (EC.11) + find (EC.13)"
+        );
         // EC.13: the record sorts SELf2t (one find query per test commit) first
         assert_eq!(
             (sets[0]["set"].as_str(), sets[0]["shape"].as_str()),

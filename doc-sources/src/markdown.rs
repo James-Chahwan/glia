@@ -367,13 +367,19 @@ mod tests {
         assert_eq!(s.matches("<ul>").count(), 1, "got: {s:?}");
         assert_eq!(s.matches("</ul>").count(), 1, "got: {s:?}");
         assert_eq!(s.matches("<li>").count(), 3, "got: {s:?}");
-        assert!(s.contains("<li>one</li><li>two</li><li>three</li>"), "got: {s:?}");
+        assert!(
+            s.contains("<li>one</li><li>two</li><li>three</li>"),
+            "got: {s:?}"
+        );
     }
 
     #[test]
     fn ordered_list_becomes_ol_and_a_blank_line_closes_it() {
         let s = markdown_to_storage("1. one\n2. two\n\ntail");
-        assert!(s.contains("<ol><li>one</li><li>two</li></ol>"), "got: {s:?}");
+        assert!(
+            s.contains("<ol><li>one</li><li>two</li></ol>"),
+            "got: {s:?}"
+        );
         assert!(s.contains("<p>tail</p>"), "got: {s:?}");
     }
 
@@ -449,7 +455,12 @@ mod tests {
         let (storage, st) = markdown_to_storage_with_stats(src);
         assert_eq!(
             st,
-            StorageStats { headings: 1, code_blocks: 1, links: 1, inline_code: 1 }
+            StorageStats {
+                headings: 1,
+                code_blocks: 1,
+                links: 1,
+                inline_code: 1
+            }
         );
         let md = storage_to_markdown(&storage);
         assert!(md.contains("# Ordering"), "got: {md:?}");

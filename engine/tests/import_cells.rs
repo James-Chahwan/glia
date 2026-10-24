@@ -18,7 +18,11 @@ fn write(dir: &Path, rel: &str, body: &str) {
 /// Rust crate with a sibling module, a Python package importing itself, and a
 /// Go file with one third-party import.
 fn write_fixture(dir: &Path) {
-    write(dir, "src/lib.rs", "mod util;\n\nuse crate::util::helper;\n\npub fn run() -> u32 {\n    helper()\n}\n");
+    write(
+        dir,
+        "src/lib.rs",
+        "mod util;\n\nuse crate::util::helper;\n\npub fn run() -> u32 {\n    helper()\n}\n",
+    );
     write(dir, "src/util.rs", "pub fn helper() -> u32 {\n    1\n}\n");
     write(dir, "myapp/__init__.py", "");
     write(
@@ -26,8 +30,16 @@ fn write_fixture(dir: &Path) {
         "myapp/auth.py",
         "from myapp.users import User\n\n\ndef login(name):\n    return User(name)\n",
     );
-    write(dir, "myapp/users.py", "class User:\n    def __init__(self, name):\n        self.name = name\n");
-    write(dir, "svc/server.go", "package svc\n\nimport \"github.com/x/y\"\n\nfunc Serve() {\n\ty.Run()\n}\n");
+    write(
+        dir,
+        "myapp/users.py",
+        "class User:\n    def __init__(self, name):\n        self.name = name\n",
+    );
+    write(
+        dir,
+        "svc/server.go",
+        "package svc\n\nimport \"github.com/x/y\"\n\nfunc Serve() {\n\ty.Run()\n}\n",
+    );
 }
 
 /// Every IMPORTS payload of every node, keyed by qname. A node with several
@@ -64,18 +76,34 @@ fn file_imports(rows: &[(String, Vec<String>)], prefix: &str) -> String {
     assert!(!under.is_empty(), "no nodes under {prefix}: {rows:#?}");
     let mut payloads = std::collections::BTreeSet::new();
     for (q, cells) in &under {
-        assert_eq!(cells.len(), 1, "{q} must carry exactly one IMPORTS cell, got {cells:?}");
+        assert_eq!(
+            cells.len(),
+            1,
+            "{q} must carry exactly one IMPORTS cell, got {cells:?}"
+        );
         payloads.insert(cells[0].clone());
     }
-    assert_eq!(payloads.len(), 1, "nodes under {prefix} disagree: {payloads:?}");
+    assert_eq!(
+        payloads.len(),
+        1,
+        "nodes under {prefix} disagree: {payloads:?}"
+    );
     payloads.into_iter().next().unwrap()
 }
 
 fn assert_filtered(rows: &[(String, Vec<String>)], context: &str) {
     // Rust: `use crate::util::helper` names the sibling module src::util.
-    assert_eq!(file_imports(rows, "src::lib"), "[]", "{context}: rust sibling module leaked");
+    assert_eq!(
+        file_imports(rows, "src::lib"),
+        "[]",
+        "{context}: rust sibling module leaked"
+    );
     // Python: `from myapp.users import User` names the repo's own package.
-    assert_eq!(file_imports(rows, "myapp::auth"), "[]", "{context}: python own package leaked");
+    assert_eq!(
+        file_imports(rows, "myapp::auth"),
+        "[]",
+        "{context}: python own package leaked"
+    );
     // Go: a third-party module path is a real dependency.
     assert_eq!(
         file_imports(rows, "svc::server"),
@@ -107,5 +135,8 @@ fn warm_cache_build_filters_identically() {
     generate_one_with_cache(repo, &mut cache).unwrap();
     let warm = imports_by_qname(&generate_one_with_cache(repo, &mut cache).unwrap());
     assert_filtered(&warm, "warm build");
-    assert_eq!(warm, clean, "warm-cache IMPORTS cells differ from the clean build");
+    assert_eq!(
+        warm, clean,
+        "warm-cache IMPORTS cells differ from the clean build"
+    );
 }

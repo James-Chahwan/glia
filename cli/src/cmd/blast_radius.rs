@@ -32,7 +32,8 @@ use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{
-    CalibratedRankingArgs, ImpactDirection, applied_ranking, generate_for, rank_cache, render_files, render_selection,
+    CalibratedRankingArgs, ImpactDirection, applied_ranking, generate_for, rank_cache,
+    render_files, render_selection,
 };
 
 #[derive(clap::Args, Debug)]
@@ -140,14 +141,22 @@ pub(crate) fn run(args: Args) -> i32 {
 /// seeds' links and the unresolved queries as `>` lines, the absence block
 /// under an empty answer.
 fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
-    let asked = queries.iter().map(|q| format!("`{q}`")).collect::<Vec<_>>().join(", ");
+    let asked = queries
+        .iter()
+        .map(|q| format!("`{q}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     println!("# glia blast-radius {asked} ({dir}, depth ≤ {depth})");
     println!();
     if !answer.unresolved.is_empty() {
         println!("> unresolved: {}", answer.unresolved.join(", "));
     }
     for s in answer.seeds.iter().filter(|s| !s.linked_seeds.is_empty()) {
-        println!("> seed `{}` is one carry edge from: {}", s.qname, s.linked_seeds.join(", "));
+        println!(
+            "> seed `{}` is one carry edge from: {}",
+            s.qname,
+            s.linked_seeds.join(", ")
+        );
     }
     if !answer.unresolved.is_empty() || answer.seeds.iter().any(|s| !s.linked_seeds.is_empty()) {
         println!();
@@ -166,7 +175,11 @@ fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
         println!("|--:|--:|:-:|---|---|---|---|");
     }
     for a in &answer.results {
-        let seed = if many { format!(" `{}` |", a.seed) } else { String::new() };
+        let seed = if many {
+            format!(" `{}` |", a.seed)
+        } else {
+            String::new()
+        };
         println!(
             "| {:.4} | {} | {} | {} | {} | `{}` |{seed} {} |",
             a.score,

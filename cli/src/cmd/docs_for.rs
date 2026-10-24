@@ -63,7 +63,13 @@ pub(crate) fn run(args: Args) -> i32 {
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
-        println!("| {} | {} | `{}` | {} |", live_glyph(d.live), d.kind, d.qname, loc);
+        println!(
+            "| {} | {} | `{}` | {} |",
+            live_glyph(d.live),
+            d.kind,
+            d.qname,
+            loc
+        );
     }
     0
 }

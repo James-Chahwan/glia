@@ -127,9 +127,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let merged = glia_engine::generate_many(&dirs)
-            .expect("build")
-            .merged;
+        let merged = glia_engine::generate_many(&dirs).expect("build").merged;
 
         let json = contract_fields_json(&merged).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");

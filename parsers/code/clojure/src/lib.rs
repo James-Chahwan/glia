@@ -38,10 +38,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
     scan_clojure_routes(source, repo, module_id, &mut acc);
     if acc.clj_routes > 0 {
         eprintln!(
@@ -408,7 +421,9 @@ fn name_meta_doc<'a>(sym: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
         .filter(|c| matches!(c.kind(), "meta_lit" | "old_meta_lit"))
         .collect();
     metas.into_iter().find_map(|m| {
-        let map = m.child_by_field_name("value").filter(|v| v.kind() == "map_lit")?;
+        let map = m
+            .child_by_field_name("value")
+            .filter(|v| v.kind() == "map_lit")?;
         map_doc(map, src)
     })
 }
@@ -542,7 +557,26 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     while let Some(n) = stack.pop() {
         if n.kind() == "list_lit"
             && let Some(head) = first_symbol(n, src)
-            && !matches!(head, "def" | "defn" | "defn-" | "defmacro" | "let" | "if" | "when" | "do" | "fn" | "loop" | "cond" | "case" | "ns" | "require" | "defprotocol" | "defrecord" | "deftype")
+            && !matches!(
+                head,
+                "def"
+                    | "defn"
+                    | "defn-"
+                    | "defmacro"
+                    | "let"
+                    | "if"
+                    | "when"
+                    | "do"
+                    | "fn"
+                    | "loop"
+                    | "cond"
+                    | "case"
+                    | "ns"
+                    | "require"
+                    | "defprotocol"
+                    | "defrecord"
+                    | "deftype"
+            )
         {
             if head.contains('/') {
                 let parts: Vec<&str> = head.splitn(2, '/').collect();
@@ -570,7 +604,10 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
-            if child.kind() != "list_lit" || first_symbol(child, src).is_none_or(|s| !matches!(s, "defn" | "defn-" | "fn" | "defmacro")) {
+            if child.kind() != "list_lit"
+                || first_symbol(child, src)
+                    .is_none_or(|s| !matches!(s, "defn" | "defn-" | "fn" | "defmacro"))
+            {
                 stack.push(child);
             }
         }
@@ -884,7 +921,9 @@ fn scan_clojure_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut 
     let bytes = source.as_bytes();
 
     // Compojure: `(GET "..."`, `(POST "..."`, etc.
-    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"] {
+    for method in [
+        "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY",
+    ] {
         let needle = format!("({method} \"");
         let mut idx = 0;
         while let Some(pos) = source[idx..].find(&needle) {
@@ -1323,8 +1362,22 @@ mod tests {
   (println "private"))
 "#;
         let fp = parse_file(source, "src/greeter.clj", "src::greeter", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1333,7 +1386,14 @@ mod tests {
 (defrecord User [name email])
 "#;
         let fp = parse_file(source, "src/user.clj", "src::user", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1344,7 +1404,11 @@ mod tests {
   (db/save x))
 "#;
         let fp = parse_file(source, "src/proc.clj", "src::proc", repo()).unwrap();
-        assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate")));
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate"))
+        );
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Attribute { base, name } if base == "db" && name == "save")));
     }
 
@@ -1397,7 +1461,11 @@ mod tests {
         let fp = parse_file(source, "src/routes.clj", "src::routes", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users/:id")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("DELETE", "/users/:id"))
+        );
     }
 
     /// LB.5 — compojure's relative `"bolts"` is `GET /bolts`, and a relative
@@ -1431,7 +1499,11 @@ mod tests {
         let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users/:id")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("DELETE", "/users/:id"))
+        );
     }
 
     // ---- LA.22c: clj-http / hato clients, reitit boundary rules ----
@@ -1470,7 +1542,12 @@ mod tests {
     }
 
     fn fn_id(module: &str, name: &str) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, &format!("{module}::{name}"))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            &format!("{module}::{name}"),
+        )
     }
 
     fn ep_id(method: &str, path: &str) -> NodeId {
@@ -1505,8 +1582,12 @@ mod tests {
         let post = ep_id("POST", "/users");
         assert!(has_calls(&fp, fn_id("api_client", "list-users"), get));
         assert!(has_calls(&fp, fn_id("api_client", "create-user"), post));
-        assert!(!fp.edges.iter().any(|e| e.from == fn_id("api_client", "user-count")
-            && e.category == edge_category::CALLS));
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.from == fn_id("api_client", "user-count")
+                    && e.category == edge_category::CALLS)
+        );
         let hit = hit_json(&fp, get);
         assert!(hit.contains(r#""method":"GET""#), "{hit}");
         assert!(hit.contains(r#""file":"api_client.clj""#), "{hit}");
@@ -1519,7 +1600,12 @@ mod tests {
     #[test]
     fn client_call_with_headers_is_not_a_route() {
         let fp = parse_file(PROBE, "api_client.clj", "api_client", repo()).unwrap();
-        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+        assert_eq!(
+            kind_count(&fp, node_kind::ROUTE),
+            0,
+            "{:?}",
+            fp.nav.name_by_id
+        );
         assert!(!fp.nodes.iter().any(|n| n.id == route_id("HEAD", "/users")));
     }
 
@@ -1550,7 +1636,11 @@ mod tests {
         assert!(hit.contains(r#""host":"svc:8080""#), "{hit}");
         let del = hit_json(&fp, ep_id("DELETE", "/items"));
         assert!(del.contains(r#""host":"api.example.com""#), "{del}");
-        assert!(has_calls(&fp, fn_id("src::items", "drop-items"), ep_id("DELETE", "/items")));
+        assert!(has_calls(
+            &fp,
+            fn_id("src::items", "drop-items"),
+            ep_id("DELETE", "/items")
+        ));
     }
 
     #[test]
@@ -1673,7 +1763,12 @@ mod tests {
    ["/b" {:ns/get x ::get y}]])
 "#;
         let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
-        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+        assert_eq!(
+            kind_count(&fp, node_kind::ROUTE),
+            0,
+            "{:?}",
+            fp.nav.name_by_id
+        );
     }
 
     #[test]
@@ -1684,7 +1779,12 @@ mod tests {
 (def zs ["/c" :name {:get x}])
 "#;
         let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
-        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+        assert_eq!(
+            kind_count(&fp, node_kind::ROUTE),
+            0,
+            "{:?}",
+            fp.nav.name_by_id
+        );
     }
 
     // ---- LA.7b: docstrings ----
@@ -1693,10 +1793,12 @@ mod tests {
     fn doc_of(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Option<String> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         let node = fp.nodes.iter().find(|n| n.id == id)?;
-        node.cells.iter().find_map(|c| match (&c.payload, c.kind == cell_type::DOC) {
-            (CellPayload::Text(s), true) => Some(s.clone()),
-            _ => None,
-        })
+        node.cells
+            .iter()
+            .find_map(|c| match (&c.payload, c.kind == cell_type::DOC) {
+                (CellPayload::Text(s), true) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// The fixture file (bench/substrate-gap/fixtures/clojure-docs).
@@ -1736,7 +1838,14 @@ mod tests {
         );
         // Exactly one DOC on the module.
         let module = &fp.nodes[0];
-        assert_eq!(module.cells.iter().filter(|c| c.kind == cell_type::DOC).count(), 1);
+        assert_eq!(
+            module
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::DOC)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1747,7 +1856,10 @@ mod tests {
             Some("Things that greet.")
         );
         // The method signature is not handed the protocol's docstring.
-        assert_eq!(doc_of(&fp, node_kind::METHOD, "src::core::Greeter::greet-all"), None);
+        assert_eq!(
+            doc_of(&fp, node_kind::METHOD, "src::core::Greeter::greet-all"),
+            None
+        );
     }
 
     #[test]
@@ -1822,8 +1934,16 @@ mod tests {
             .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::FUNCTION))
             .collect();
         assert_eq!(fns.len(), 1);
-        let qname = fp.nav.qname_by_id.get(&fns[0].id).cloned().unwrap_or_default();
-        assert_eq!(doc_of(&fp, node_kind::FUNCTION, &qname).as_deref(), Some("Meta doc."));
+        let qname = fp
+            .nav
+            .qname_by_id
+            .get(&fns[0].id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, &qname).as_deref(),
+            Some("Meta doc.")
+        );
 
         // attr-map after the name, and after a docstring (the attr-map wins,
         // as in `defn`'s own metadata merge).
@@ -1833,8 +1953,14 @@ mod tests {
 (defn k {:added "1.0"} [x] x)
 "#;
         let fp = parse_file(source, "src/b.clj", "src::b", repo()).unwrap();
-        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::g").as_deref(), Some("Attr doc."));
-        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::h").as_deref(), Some("Attr wins."));
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::b::g").as_deref(),
+            Some("Attr doc.")
+        );
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::b::h").as_deref(),
+            Some("Attr wins.")
+        );
         assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::k"), None);
 
         // ns with `^{:doc}` metadata on its name (the older clojure.core style).
@@ -1867,7 +1993,10 @@ mod tests {
     fn empty_docstring_falls_back_to_the_comment() {
         let source = ";; kept\n(defn f \"\" [x] x)\n";
         let fp = parse_file(source, "src/z.clj", "src::z", repo()).unwrap();
-        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::z::f").as_deref(), Some("kept"));
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::z::f").as_deref(),
+            Some("kept")
+        );
     }
 
     #[test]
@@ -1881,7 +2010,10 @@ mod tests {
         let pad = " ".repeat(ell + 1 + 32 - q);
         let source = format!("{head}{pad}{tail}\n(def t \"é…\")\n");
         let quote = source.find("\"/users").unwrap();
-        assert!(!source.is_char_boundary(quote - 32), "cut must land inside `…`");
+        assert!(
+            !source.is_char_boundary(quote - 32),
+            "cut must land inside `…`"
+        );
         let fp = parse_file(&source, "src/api.clj", "src::api", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert_eq!(kind_count(&fp, node_kind::ROUTE), 1);

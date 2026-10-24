@@ -1,6 +1,5 @@
 use glia_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
-    node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
@@ -90,7 +89,11 @@ struct CliDecl {
 
 impl CliDecl {
     fn new(framework: CliFramework, name: String, handler: Option<(CallQualifier, u32)>) -> Self {
-        CliDecl { framework, name, handler }
+        CliDecl {
+            framework,
+            name,
+            handler,
+        }
     }
 }
 
@@ -129,11 +132,20 @@ pub fn extract_cli_command_nodes(
     let mut decls: Vec<CliDecl> = Vec::new();
 
     let line_extractors: Vec<(LineExtractor, CliFramework)> = match lang {
-        "go" => vec![(extract_cobra_command_name as LineExtractor, CliFramework::Cobra)],
+        "go" => vec![(
+            extract_cobra_command_name as LineExtractor,
+            CliFramework::Cobra,
+        )],
         "typescript" | "react" | "angular" | "vue" => {
-            vec![(extract_commander_command_name as LineExtractor, CliFramework::Commander)]
+            vec![(
+                extract_commander_command_name as LineExtractor,
+                CliFramework::Commander,
+            )]
         }
-        "rust" => vec![(extract_clap_command_name as LineExtractor, CliFramework::Clap)],
+        "rust" => vec![(
+            extract_clap_command_name as LineExtractor,
+            CliFramework::Clap,
+        )],
         _ => Vec::new(),
     };
     if !line_extractors.is_empty() {
@@ -160,11 +172,15 @@ pub fn extract_cli_command_nodes(
         "java" | "kotlin" if source.contains("picocli") => {
             decls.extend(scan_picocli(source, &CodeMap::new(source)));
         }
-        "csharp" if source.contains("System.CommandLine") || source.contains("Spectre.Console.Cli") => {
+        "csharp"
+            if source.contains("System.CommandLine") || source.contains("Spectre.Console.Cli") =>
+        {
             decls.extend(scan_dotnet_cli(source, &CodeMap::new(source)));
         }
         "python"
-            if source.contains(".command") || source.contains("add_typer") || source.contains("argparse") =>
+            if source.contains(".command")
+                || source.contains("add_typer")
+                || source.contains("argparse") =>
         {
             let code = CodeMap::script(source, Script::Python);
             decls.extend(scan_typer_click(source, &code));
@@ -174,16 +190,25 @@ pub fn extract_cli_command_nodes(
             decls.extend(scan_thor(source, &CodeMap::script(source, Script::Ruby)));
         }
         "php" if source.contains("Command") => {
-            decls.extend(scan_symfony_laravel(source, &CodeMap::script(source, Script::Php)));
+            decls.extend(scan_symfony_laravel(
+                source,
+                &CodeMap::script(source, Script::Php),
+            ));
         }
         "scala" if source.contains("scopt") => {
             decls.extend(scan_scopt(source, &CodeMap::new(source)));
         }
         "dart" if source.contains("package:args/") => {
-            decls.extend(scan_dart_args(source, &CodeMap::script(source, Script::Dart)));
+            decls.extend(scan_dart_args(
+                source,
+                &CodeMap::script(source, Script::Dart),
+            ));
         }
         "elixir" if source.contains("Mix.Task") => {
-            decls.extend(scan_mix_tasks(source, &CodeMap::script(source, Script::Elixir)));
+            decls.extend(scan_mix_tasks(
+                source,
+                &CodeMap::script(source, Script::Elixir),
+            ));
         }
         _ => {}
     }
@@ -205,7 +230,11 @@ pub fn extract_cli_command_nodes(
             None => {
                 let id = add_cli_command(&mut out.nodes, &mut out.nav, &decl.name, module_id, repo);
                 minted.insert(decl.name.clone(), id);
-                match out.per_framework.iter_mut().find(|(f, _)| *f == decl.framework) {
+                match out
+                    .per_framework
+                    .iter_mut()
+                    .find(|(f, _)| *f == decl.framework)
+                {
                     Some((_, n)) => *n += 1,
                     None => out.per_framework.push((decl.framework, 1)),
                 }
@@ -257,8 +286,11 @@ pub fn decl_marker(lang: &str, out: &CliNodes, path: &str) -> Option<String> {
     {
         return Some(manifest_line(ManifestForm::SetupPy, *n, path));
     }
-    let counts: Vec<String> =
-        out.per_framework.iter().map(|(f, n)| format!("{}:{n}", f.label())).collect();
+    let counts: Vec<String> = out
+        .per_framework
+        .iter()
+        .map(|(f, n)| format!("{}:{n}", f.label()))
+        .collect();
     Some(format!(
         "[cli-decl] {lang}={} handler_refs={} path={path}",
         counts.join(","),
@@ -424,14 +456,17 @@ fn skip_string(b: &[u8], at: usize, limit: usize) -> Option<usize> {
 /// lifetime, an apostrophe).
 fn char_literal_end(b: &[u8], at: usize) -> Option<usize> {
     let close_within = |from: usize, to: usize| {
-        (from..to.min(b.len())).find(|&j| b[j] == b'\'').map(|j| j + 1)
+        (from..to.min(b.len()))
+            .find(|&j| b[j] == b'\'')
+            .map(|j| j + 1)
     };
     match *b.get(at + 1)? {
         b'\\' => close_within(at + 3, at + 12),
         b'\'' => None,
         c if c.is_ascii() => (b.get(at + 2) == Some(&b'\'')).then_some(at + 3),
         // One multi-byte char: only non-ASCII bytes up to the closing quote.
-        _ => close_within(at + 2, at + 6).filter(|&end| b[at + 1..end - 1].iter().all(|c| !c.is_ascii())),
+        _ => close_within(at + 2, at + 6)
+            .filter(|&end| b[at + 1..end - 1].iter().all(|c| !c.is_ascii())),
     }
 }
 
@@ -459,10 +494,12 @@ impl CodeMap {
             let end = match b[i] {
                 b'/' if b.get(i + 1) == Some(&b'/') => Some(skip_comment(b, i)),
                 b'/' if b.get(i + 1) == Some(&b'*') => Some(skip_nested_block_comment(b, i)),
-                b'"' if b[i..].starts_with(b"\"\"\"") => Some(
-                    find_bytes(b, i + 3, b"\"\"\"").map_or(b.len(), |j| j + 3),
-                ),
-                b'"' if prev(1) == Some(b'@') || (prev(1) == Some(b'$') && prev(2) == Some(b'@')) => {
+                b'"' if b[i..].starts_with(b"\"\"\"") => {
+                    Some(find_bytes(b, i + 3, b"\"\"\"").map_or(b.len(), |j| j + 3))
+                }
+                b'"' if prev(1) == Some(b'@')
+                    || (prev(1) == Some(b'$') && prev(2) == Some(b'@')) =>
+                {
                     Some(skip_verbatim_string(b, i))
                 }
                 b'"' => Some(skip_string(b, i, b.len()).unwrap_or(b.len())),
@@ -502,7 +539,10 @@ impl CodeMap {
 
 /// First index at or after `from` where `needle` starts.
 fn find_bytes(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
-    b.get(from..)?.windows(needle.len()).position(|w| w == needle).map(|p| from + p)
+    b.get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| from + p)
 }
 
 /// Index just past the (Rust-nesting) `/* */` comment at `at`; the end of
@@ -558,7 +598,10 @@ fn skip_raw_string(b: &[u8], at: usize) -> Option<usize> {
     let hashes = j - at - 1;
     let mut k = j + 1;
     while k < b.len() {
-        if b[k] == b'"' && b.get(k + 1..k + 1 + hashes).is_some_and(|h| h.iter().all(|&c| c == b'#')) {
+        if b[k] == b'"'
+            && b.get(k + 1..k + 1 + hashes)
+                .is_some_and(|h| h.iter().all(|&c| c == b'#'))
+        {
             return Some(k + 1 + hashes);
         }
         k += 1;
@@ -611,7 +654,9 @@ fn is_ident_byte(c: u8) -> bool {
 fn read_ident(source: &str, i: usize) -> (&str, usize) {
     let b = source.as_bytes();
     let mut j = i;
-    if b.get(j).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+    if b.get(j)
+        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
         while b.get(j).copied().is_some_and(is_ident_byte) {
             j += 1;
         }
@@ -731,8 +776,16 @@ fn read_rust_attr(source: &str, at: usize) -> Option<RustAttr<'_>> {
         }
     }
     let i = skip_trivia(b, i);
-    let args = if i < close && b.get(i) == Some(&b'(') { attr_span(source, i) } else { None };
-    Some(RustAttr { name, args, end: close + 1 })
+    let args = if i < close && b.get(i) == Some(&b'(') {
+        attr_span(source, i)
+    } else {
+        None
+    };
+    Some(RustAttr {
+        name,
+        args,
+        end: close + 1,
+    })
 }
 
 /// The run of attributes starting at `at` (comments between them allowed) and
@@ -768,7 +821,11 @@ fn rust_item_keyword(source: &str, i: usize) -> (&str, usize) {
 /// The argument span of a clap command attribute (`#[command(...)]`, and
 /// clap 2 / 3's `#[clap(...)]`).
 fn clap_command_args<'a>(attr: &RustAttr<'a>) -> Option<&'a str> {
-    if matches!(attr.name, "command" | "clap") { attr.args } else { None }
+    if matches!(attr.name, "command" | "clap") {
+        attr.args
+    } else {
+        None
+    }
 }
 
 /// True for a `#[derive(...)]` that lists `Subcommand` or `Parser` (on an
@@ -812,16 +869,26 @@ fn scan_clap_derive(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         if keyword != "enum" || !attrs.iter().any(derives_subcommand) {
             continue;
         }
-        let rule = attrs.iter().filter_map(clap_command_args).find_map(|a| attr_kv(a, "rename_all"));
-        let Some(open) = source.get(after_kw..).and_then(|s| s.find('{')).map(|r| after_kw + r)
+        let rule = attrs
+            .iter()
+            .filter_map(clap_command_args)
+            .find_map(|a| attr_kv(a, "rename_all"));
+        let Some(open) = source
+            .get(after_kw..)
+            .and_then(|s| s.find('{'))
+            .map(|r| after_kw + r)
         else {
             continue;
         };
-        let Some((body_start, body_end)) = balanced(source, open, MAX_ENUM_BODY) else { continue };
+        let Some((body_start, body_end)) = balanced(source, open, MAX_ENUM_BODY) else {
+            continue;
+        };
         for (variant, vattrs) in enum_variants(source, body_start, body_end) {
             let vargs: Vec<&str> = vattrs.iter().filter_map(clap_command_args).collect();
             let unnamed = |a: &&str| {
-                attr_flag(a, "flatten") || attr_flag(a, "external_subcommand") || attr_flag(a, "skip")
+                attr_flag(a, "flatten")
+                    || attr_flag(a, "external_subcommand")
+                    || attr_flag(a, "skip")
             };
             if vargs.iter().any(unnamed) {
                 continue;
@@ -854,7 +921,9 @@ fn enum_variants(source: &str, start: usize, end: usize) -> Vec<(&str, Vec<RustA
         }
         let mut j = skip_trivia(b, after);
         if matches!(b.get(j), Some(b'{' | b'(')) {
-            let Some((_, close)) = balanced(source, j, MAX_ENUM_BODY) else { break };
+            let Some((_, close)) = balanced(source, j, MAX_ENUM_BODY) else {
+                break;
+            };
             j = skip_trivia(b, close + 1);
         }
         if b.get(j) == Some(&b'=') {
@@ -884,7 +953,10 @@ fn heck_words(ident: &str) -> Vec<&str> {
         Upper,
     }
     let mut words = Vec::new();
-    for part in ident.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()) {
+    for part in ident
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|p| !p.is_empty())
+    {
         let mut chars = part.char_indices().peekable();
         let mut init = 0;
         let mut mode = Mode::Boundary;
@@ -920,7 +992,10 @@ fn heck_words(ident: &str) -> Vec<&str> {
 fn capitalise(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect(),
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
         None => String::new(),
     }
 }
@@ -931,8 +1006,20 @@ fn capitalise(word: &str) -> String {
 /// back to the default.
 fn clap_rename(variant: &str, rule: Option<&str>) -> String {
     let words = heck_words(variant);
-    let lower = |sep: &str| words.iter().map(|w| w.to_lowercase()).collect::<Vec<_>>().join(sep);
-    let upper = |sep: &str| words.iter().map(|w| w.to_uppercase()).collect::<Vec<_>>().join(sep);
+    let lower = |sep: &str| {
+        words
+            .iter()
+            .map(|w| w.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(sep)
+    };
+    let upper = |sep: &str| {
+        words
+            .iter()
+            .map(|w| w.to_uppercase())
+            .collect::<Vec<_>>()
+            .join(sep)
+    };
     let rule: String = rule
         .unwrap_or("kebab")
         .chars()
@@ -949,7 +1036,13 @@ fn clap_rename(variant: &str, rule: Option<&str>) -> String {
         "camel" => words
             .iter()
             .enumerate()
-            .map(|(i, w)| if i == 0 { w.to_lowercase() } else { capitalise(w) })
+            .map(|(i, w)| {
+                if i == 0 {
+                    w.to_lowercase()
+                } else {
+                    capitalise(w)
+                }
+            })
             .collect(),
         _ => lower("-"),
     }
@@ -967,14 +1060,17 @@ fn scan_clap_builder(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             u.starts_with(prefix) && (!word_positions(u, word).is_empty() || u.contains('*'))
         })
     };
-    let process_command =
-        uses.iter().any(|u| u.contains("process::") && !word_positions(u, "Command").is_empty());
+    let process_command = uses
+        .iter()
+        .any(|u| u.contains("process::") && !word_positions(u, "Command").is_empty());
     let bare_command = lists("clap::", "Command") && !process_command;
     let bare_app = lists("clap::", "App");
     let mut out = Vec::new();
-    for (needle, bare_ok) in
-        [("Command::new(", bare_command), ("App::new(", bare_app), ("SubCommand::with_name(", true)]
-    {
+    for (needle, bare_ok) in [
+        ("Command::new(", bare_command),
+        ("App::new(", bare_app),
+        ("SubCommand::with_name(", true),
+    ] {
         let mut from = 0;
         while let Some(rel) = source.get(from..).and_then(|s| s.find(needle)) {
             let at = from + rel;
@@ -985,7 +1081,11 @@ fn scan_clap_builder(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             } else if prefix.ends_with("::") {
                 prefix.ends_with("clap::") || prefix.ends_with("clap::builder::")
             } else {
-                bare_ok && !prefix.bytes().last().is_some_and(|c| is_ident_byte(c) || c == b'.')
+                bare_ok
+                    && !prefix
+                        .bytes()
+                        .last()
+                        .is_some_and(|c| is_ident_byte(c) || c == b'.')
             };
             if accepted && let Some(name) = extract_quoted(source[from..].trim_start()) {
                 out.push(CliDecl::new(CliFramework::Clap, name, None));
@@ -1020,12 +1120,20 @@ fn scan_picocli(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             continue;
         }
         let open = skip_trivia(b, name_end);
-        let Some(span) = attr_span(source, open) else { continue };
+        let Some(span) = attr_span(source, open) else {
+            continue;
+        };
         let close = open + 1 + span.len();
         from = close;
-        let Some(name) = attr_kv(span, "name") else { continue };
+        let Some(name) = attr_kv(span, "name") else {
+            continue;
+        };
         let handler = picocli_handler(source, code, close + 1, at);
-        out.push(CliDecl::new(CliFramework::Picocli, name, at_row(handler, source, at)));
+        out.push(CliDecl::new(
+            CliFramework::Picocli,
+            name,
+            at_row(handler, source, at),
+        ));
     }
     out
 }
@@ -1078,12 +1186,18 @@ fn picocli_handler(
         if b.get(i) == Some(&b'(') {
             let method = word.to_string();
             return Some(match enclosing_class(source, code, annotation_at) {
-                Some(class) => CallQualifier::Attribute { base: class.to_string(), name: method },
+                Some(class) => CallQualifier::Attribute {
+                    base: class.to_string(),
+                    name: method,
+                },
                 None => CallQualifier::Bare(method),
             });
         }
         // Generic / array / nullable return types: `List<String> run(`.
-        while matches!(b.get(i), Some(b'<' | b'>' | b'[' | b']' | b',' | b'?' | b'.')) {
+        while matches!(
+            b.get(i),
+            Some(b'<' | b'>' | b'[' | b']' | b',' | b'?' | b'.')
+        ) {
             i = skip_trivia(b, i + 1);
         }
     }
@@ -1093,10 +1207,14 @@ fn picocli_handler(
 /// The class whose declaration most recently precedes `at` (`class Tool`).
 fn enclosing_class<'a>(source: &'a str, code: &CodeMap, at: usize) -> Option<&'a str> {
     let head = source.get(..at)?;
-    word_positions(head, "class").into_iter().rev().filter(|&p| code.is_code(p)).find_map(|p| {
-        let (name, _) = read_ident(source, skip_trivia(source.as_bytes(), p + 5));
-        (!name.is_empty()).then_some(name)
-    })
+    word_positions(head, "class")
+        .into_iter()
+        .rev()
+        .filter(|&p| code.is_code(p))
+        .find_map(|p| {
+            let (name, _) = read_ident(source, skip_trivia(source.as_bytes(), p + 5));
+            (!name.is_empty()).then_some(name)
+        })
 }
 
 // ----------------------------------------------------------------------------
@@ -1122,7 +1240,10 @@ fn scan_dotnet_cli(source: &str, code: &CodeMap) -> Vec<CliDecl> {
 /// description, not a name, so it declares nothing.
 fn scan_system_commandline(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>) {
     let b = source.as_bytes();
-    for at in word_positions(source, "new").into_iter().filter(|&at| code.is_code(at)) {
+    for at in word_positions(source, "new")
+        .into_iter()
+        .filter(|&at| code.is_code(at))
+    {
         let (ty, after) = read_ident(source, skip_trivia(b, at + 3));
         if ty != "Command" {
             continue;
@@ -1135,10 +1256,16 @@ fn scan_system_commandline(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>)
         if source.get(first..).is_some_and(|s| s.starts_with("name:")) {
             first = skip_trivia(b, first + 5);
         }
-        let Some(name) = source.get(first..).and_then(extract_quoted) else { continue };
+        let Some(name) = source.get(first..).and_then(extract_quoted) else {
+            continue;
+        };
         let handler =
             assigned_variable(source, at).and_then(|v| set_handler_target(source, code, v));
-        out.push(CliDecl::new(CliFramework::SystemCommandLine, name, at_row(handler, source, at)));
+        out.push(CliDecl::new(
+            CliFramework::SystemCommandLine,
+            name,
+            at_row(handler, source, at),
+        ));
     }
 }
 
@@ -1146,7 +1273,9 @@ fn scan_system_commandline(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>)
 /// `Command sync = ` -> `sync`. Not for `==`, `+=`, `=>` and friends.
 fn assigned_variable(source: &str, at: usize) -> Option<&str> {
     let head = source.get(..at)?.trim_end().strip_suffix('=')?;
-    if head.ends_with(['=', '!', '<', '>', '+', '-', '*', '/', '%', '&', '|', '^', '?']) {
+    if head.ends_with([
+        '=', '!', '<', '>', '+', '-', '*', '/', '%', '&', '|', '^', '?',
+    ]) {
         return None;
     }
     let head = head.trim_end();
@@ -1164,35 +1293,40 @@ fn assigned_variable(source: &str, at: usize) -> Option<&str> {
 /// handler.
 fn set_handler_target(source: &str, code: &CodeMap, var: &str) -> Option<CallQualifier> {
     let b = source.as_bytes();
-    word_positions(source, var).into_iter().filter(|&at| code.is_code(at)).find_map(|at| {
-        let after_var = at + var.len();
-        let rest = source.get(after_var..)?.strip_prefix('.')?;
-        let method = ["SetHandler(", "SetAction("].into_iter().find(|m| rest.starts_with(m))?;
-        let (head, mut j) = read_ident(source, skip_trivia(b, after_var + 1 + method.len()));
-        if head.is_empty() {
-            return None;
-        }
-        let mut segs = vec![head];
-        while b.get(j) == Some(&b'.') {
-            let (seg, k) = read_ident(source, j + 1);
-            if seg.is_empty() {
+    word_positions(source, var)
+        .into_iter()
+        .filter(|&at| code.is_code(at))
+        .find_map(|at| {
+            let after_var = at + var.len();
+            let rest = source.get(after_var..)?.strip_prefix('.')?;
+            let method = ["SetHandler(", "SetAction("]
+                .into_iter()
+                .find(|m| rest.starts_with(m))?;
+            let (head, mut j) = read_ident(source, skip_trivia(b, after_var + 1 + method.len()));
+            if head.is_empty() {
                 return None;
             }
-            segs.push(seg);
-            j = k;
-        }
-        if !matches!(b.get(skip_trivia(b, j)), Some(b',' | b')')) {
-            return None;
-        }
-        match segs.as_slice() {
-            [only] => Some(CallQualifier::Bare((*only).to_string())),
-            [.., base, name] => Some(CallQualifier::Attribute {
-                base: (*base).to_string(),
-                name: (*name).to_string(),
-            }),
-            [] => None,
-        }
-    })
+            let mut segs = vec![head];
+            while b.get(j) == Some(&b'.') {
+                let (seg, k) = read_ident(source, j + 1);
+                if seg.is_empty() {
+                    return None;
+                }
+                segs.push(seg);
+                j = k;
+            }
+            if !matches!(b.get(skip_trivia(b, j)), Some(b',' | b')')) {
+                return None;
+            }
+            match segs.as_slice() {
+                [only] => Some(CallQualifier::Bare((*only).to_string())),
+                [.., base, name] => Some(CallQualifier::Attribute {
+                    base: (*base).to_string(),
+                    name: (*name).to_string(),
+                }),
+                [] => None,
+            }
+        })
 }
 
 /// Spectre.Console.Cli: `.AddCommand<T>("x")` -> `cli:x` handled by `T`;
@@ -1226,11 +1360,22 @@ fn scan_spectre_cli(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>) {
             if b.get(open) != Some(&b'(') {
                 continue;
             }
-            let Some(name) = source.get(skip_trivia(b, open + 1)..).and_then(extract_quoted) else {
+            let Some(name) = source
+                .get(skip_trivia(b, open + 1)..)
+                .and_then(extract_quoted)
+            else {
                 continue;
             };
-            let handler = if handled { ty.map(|t| CallQualifier::Bare(t.to_string())) } else { None };
-            out.push(CliDecl::new(CliFramework::SpectreCli, name, at_row(handler, source, at)));
+            let handler = if handled {
+                ty.map(|t| CallQualifier::Bare(t.to_string()))
+            } else {
+                None
+            };
+            out.push(CliDecl::new(
+                CliFramework::SpectreCli,
+                name,
+                at_row(handler, source, at),
+            ));
         }
     }
 }
@@ -1292,11 +1437,16 @@ impl CodeMap {
                 b'#' if script == Script::Dart => None,
                 b'#' => Some(line_end(b, i)),
                 b'/' if c_comments && b.get(i + 1) == Some(&b'/') => Some(line_end(b, i)),
-                b'/' if script == Script::Php && b.get(i + 1) == Some(&b'*') => Some(skip_comment(b, i)),
+                b'/' if script == Script::Php && b.get(i + 1) == Some(&b'*') => {
+                    Some(skip_comment(b, i))
+                }
                 b'/' if script == Script::Dart && b.get(i + 1) == Some(&b'*') => {
                     Some(skip_nested_block_comment(b, i))
                 }
-                b'r' if script == Script::Dart && !after_ident && matches!(b.get(i + 1), Some(b'"' | b'\'')) => {
+                b'r' if script == Script::Dart
+                    && !after_ident
+                    && matches!(b.get(i + 1), Some(b'"' | b'\'')) =>
+                {
                     let q = b[i + 1];
                     Some(if b[i + 1..].starts_with(&[q, q, q]) {
                         find_bytes(b, i + 4, &[q, q, q]).map_or(b.len(), |j| j + 3)
@@ -1304,7 +1454,9 @@ impl CodeMap {
                         find_bytes(b, i + 2, &[q]).map_or(b.len(), |j| j + 1)
                     })
                 }
-                b'?' if script == Script::Elixir && !after_ident && i + 1 < b.len() => Some(elixir_char_end(b, i)),
+                b'?' if script == Script::Elixir && !after_ident && i + 1 < b.len() => {
+                    Some(elixir_char_end(b, i))
+                }
                 q @ (b'"' | b'\'') if triple && b[i..].starts_with(&[q, q, q]) => {
                     Some(find_bytes(b, i + 3, &[q, q, q]).map_or(b.len(), |j| j + 3))
                 }
@@ -1390,12 +1542,18 @@ fn heredoc_opener(b: &[u8], at: usize, script: Script) -> Option<(&[u8], usize)>
         Script::Php if b[at..].starts_with(b"<<<") => skip_ws(b, at + 3),
         _ => return None,
     };
-    let quote = b.get(i).copied().filter(|c| matches!(c, b'"' | b'\'' | b'`'));
+    let quote = b
+        .get(i)
+        .copied()
+        .filter(|c| matches!(c, b'"' | b'\'' | b'`'));
     if quote.is_some() {
         i += 1;
     }
     let start = i;
-    if !b.get(i).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+    if !b
+        .get(i)
+        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
         return None;
     }
     while b.get(i).copied().is_some_and(is_ident_byte) {
@@ -1459,7 +1617,12 @@ fn closer_of(open: u8) -> u8 {
 
 /// [`balanced`] for a [`CodeMap::script`] file: brackets count only at code
 /// bytes, so a `)` in a `'...'` string or a `#` comment does not close it.
-fn balanced_code(source: &str, code: &CodeMap, open_at: usize, cap: usize) -> Option<(usize, usize)> {
+fn balanced_code(
+    source: &str,
+    code: &CodeMap,
+    open_at: usize,
+    cap: usize,
+) -> Option<(usize, usize)> {
     let b = source.as_bytes();
     let first = *b.get(open_at)?;
     if !matches!(first, b'(' | b'[' | b'{') || !code.is_code(open_at) {
@@ -1520,15 +1683,23 @@ fn code_words(source: &str, code: &CodeMap, start: usize, end: usize, word: &str
 
 /// The quoted value of `key <sep> "v"` (Python `name="x"`, PHP `name: 'x'`)
 /// at a code position of the span `(start, end)`. Not `==` / `::`.
-fn kwarg_str(source: &str, code: &CodeMap, (start, end): (usize, usize), key: &str, sep: u8) -> Option<String> {
+fn kwarg_str(
+    source: &str,
+    code: &CodeMap,
+    (start, end): (usize, usize),
+    key: &str,
+    sep: u8,
+) -> Option<String> {
     let b = source.as_bytes();
-    code_words(source, code, start, end, key).into_iter().find_map(|at| {
-        let i = skip_ws(b, at + key.len());
-        if b.get(i) != Some(&sep) || matches!(b.get(i + 1), Some(b'=' | b':')) {
-            return None;
-        }
-        source.get(skip_ws(b, i + 1)..end).and_then(extract_quoted)
-    })
+    code_words(source, code, start, end, key)
+        .into_iter()
+        .find_map(|at| {
+            let i = skip_ws(b, at + key.len());
+            if b.get(i) != Some(&sep) || matches!(b.get(i + 1), Some(b'=' | b':')) {
+                return None;
+            }
+            source.get(skip_ws(b, i + 1)..end).and_then(extract_quoted)
+        })
 }
 
 /// The first argument of the span `(start, end)` when it is exactly a string
@@ -1569,7 +1740,9 @@ fn callable_qualifier(segs: &[&str]) -> Option<CallQualifier> {
 fn valid_cli_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && !name.contains(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '$' | '{' | '}' | '\\'))
+        && !name.contains(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '$' | '{' | '}' | '\\')
+        })
 }
 
 /// The raw text inside the `'...'` / `"..."` literal `s` starts with (`\`
@@ -1597,7 +1770,12 @@ fn quoted_literal(s: &str) -> Option<&str> {
 /// True when an `import m`, `import m.x as y`, `from m import ...` or
 /// `from m.x import ...` line names the top-level module `module`.
 fn py_imports(source: &str, module: &str) -> bool {
-    let names = |item: &str| item.trim().split(|c: char| c == '.' || c.is_whitespace()).next() == Some(module);
+    let names = |item: &str| {
+        item.trim()
+            .split(|c: char| c == '.' || c.is_whitespace())
+            .next()
+            == Some(module)
+    };
     source.lines().any(|line| {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("import ") {
@@ -1613,7 +1791,8 @@ fn py_imports(source: &str, module: &str) -> bool {
 /// with neither, LA.20a's rule (Typer when the file mentions typer).
 fn py_cli_framework(source: &str, obj: &str, typer: bool, click: bool) -> CliFramework {
     let typer_app = || {
-        source.contains(&format!("{obj} = typer.Typer(")) || source.contains(&format!("{obj} = Typer("))
+        source.contains(&format!("{obj} = typer.Typer("))
+            || source.contains(&format!("{obj} = Typer("))
     };
     match (typer, click) {
         _ if obj == "click" => CliFramework::Click,
@@ -1657,7 +1836,9 @@ fn py_module_defs<'a>(source: &'a str, code: &CodeMap) -> std::collections::Hash
     for line in source.split_inclusive('\n') {
         if code.is_code(off) {
             let rest = line.strip_prefix("async ").unwrap_or(line);
-            let word = ["def ", "class "].into_iter().find_map(|kw| rest.strip_prefix(kw));
+            let word = ["def ", "class "]
+                .into_iter()
+                .find_map(|kw| rest.strip_prefix(kw));
             if let Some(after) = word {
                 let (name, _) = read_ident(after, skip_ws(after.as_bytes(), 0));
                 if !name.is_empty() {
@@ -1721,7 +1902,11 @@ fn dotted_exact(source: &str, (start, end): (usize, usize)) -> Option<Vec<&str>>
 
 /// True when only spaces / tabs precede byte `at` on its line.
 fn line_head(b: &[u8], at: usize) -> bool {
-    b[..at].iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t')
+    b[..at]
+        .iter()
+        .rev()
+        .take_while(|&&c| c != b'\n')
+        .all(|&c| c == b' ' || c == b'\t')
 }
 
 /// The function a Python decorator ending at `from` decorates: past further
@@ -1777,7 +1962,10 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             continue;
         }
         let (name_end, last) = read_dotted(source, at + 1);
-        let Some(obj) = source.get(at + 1..name_end).and_then(|d| d.strip_suffix(".command")) else {
+        let Some(obj) = source
+            .get(at + 1..name_end)
+            .and_then(|d| d.strip_suffix(".command"))
+        else {
             continue;
         };
         if last != "command" {
@@ -1785,7 +1973,9 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         }
         let framework = py_cli_framework(source, obj, typer, click);
         let (explicit, end) = if b.get(skip_ws(b, name_end)) == Some(&b'(') {
-            let Some(span) = call_args(source, code, name_end) else { continue };
+            let Some(span) = call_args(source, code, name_end) else {
+                continue;
+            };
             (py_explicit_name(source, code, span), span.1 + 1)
         } else if click {
             (None, name_end)
@@ -1794,9 +1984,14 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         };
         from = end;
         let func = py_decorated_function(source, code, end);
-        let Some(name) = py_command_name(explicit, func, framework, typer || click, &defs) else { continue };
+        let Some(name) = py_command_name(explicit, func, framework, typer || click, &defs) else {
+            continue;
+        };
         let handler = func.map(|f| CallQualifier::Bare(f.to_string()));
-        found.push((at, CliDecl::new(framework, name, at_row(handler, source, at))));
+        found.push((
+            at,
+            CliDecl::new(framework, name, at_row(handler, source, at)),
+        ));
     }
     if typer || click {
         // `app.command("x")(fn)`: the decorator applied by hand.
@@ -1812,14 +2007,29 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             if obj.is_empty() || (recv > 0 && b[recv - 1] == b'@') {
                 continue;
             }
-            let Some(span) = call_args(source, code, at + "command".len()) else { continue };
-            let Some(target) = call_args(source, code, span.1 + 1) else { continue };
-            let Some(segs) = dotted_exact(source, target) else { continue };
+            let Some(span) = call_args(source, code, at + "command".len()) else {
+                continue;
+            };
+            let Some(target) = call_args(source, code, span.1 + 1) else {
+                continue;
+            };
+            let Some(segs) = dotted_exact(source, target) else {
+                continue;
+            };
             let framework = py_cli_framework(source, obj, typer, click);
             let func = segs.last().copied();
             let explicit = py_explicit_name(source, code, span);
-            let Some(name) = py_command_name(explicit, func, framework, true, &defs) else { continue };
-            found.push((at, CliDecl::new(framework, name, at_row(callable_qualifier(&segs), source, at))));
+            let Some(name) = py_command_name(explicit, func, framework, true, &defs) else {
+                continue;
+            };
+            found.push((
+                at,
+                CliDecl::new(
+                    framework,
+                    name,
+                    at_row(callable_qualifier(&segs), source, at),
+                ),
+            ));
         }
     }
     if typer {
@@ -1841,34 +2051,40 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
 /// The callable passed as `func=` (or `handler=`) in a `set_defaults(...)`
 /// span: `Bare(H)` / `Attribute { m, H }` for `m.H`. A lambda or a call is
 /// not a handler.
-fn py_set_defaults_handler(source: &str, code: &CodeMap, (start, end): (usize, usize)) -> Option<CallQualifier> {
+fn py_set_defaults_handler(
+    source: &str,
+    code: &CodeMap,
+    (start, end): (usize, usize),
+) -> Option<CallQualifier> {
     let b = source.as_bytes();
     ["func", "handler"].into_iter().find_map(|key| {
-        code_words(source, code, start, end, key).into_iter().find_map(|at| {
-            let i = skip_ws(b, at + key.len());
-            if b.get(i) != Some(&b'=') || b.get(i + 1) == Some(&b'=') {
-                return None;
-            }
-            let mut j = skip_ws(b, i + 1);
-            let mut segs = Vec::new();
-            loop {
-                let (seg, k) = read_ident(source, j);
-                if seg.is_empty() || seg == "lambda" {
+        code_words(source, code, start, end, key)
+            .into_iter()
+            .find_map(|at| {
+                let i = skip_ws(b, at + key.len());
+                if b.get(i) != Some(&b'=') || b.get(i + 1) == Some(&b'=') {
                     return None;
                 }
-                segs.push(seg);
-                j = k;
-                if b.get(j) != Some(&b'.') {
-                    break;
+                let mut j = skip_ws(b, i + 1);
+                let mut segs = Vec::new();
+                loop {
+                    let (seg, k) = read_ident(source, j);
+                    if seg.is_empty() || seg == "lambda" {
+                        return None;
+                    }
+                    segs.push(seg);
+                    j = k;
+                    if b.get(j) != Some(&b'.') {
+                        break;
+                    }
+                    j += 1;
                 }
-                j += 1;
-            }
-            let k = skip_ws(b, j);
-            if k < end && b[k] != b',' {
-                return None;
-            }
-            callable_qualifier(&segs)
-        })
+                let k = skip_ws(b, j);
+                if k < end && b[k] != b',' {
+                    return None;
+                }
+                callable_qualifier(&segs)
+            })
     })
 }
 
@@ -1893,7 +2109,11 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
     let mut calls: Vec<(usize, bool)> = code_words(source, code, 0, len, "ArgumentParser")
         .into_iter()
         .map(|at| (at, true))
-        .chain(code_words(source, code, 0, len, "add_parser").into_iter().map(|at| (at, false)))
+        .chain(
+            code_words(source, code, 0, len, "add_parser")
+                .into_iter()
+                .map(|at| (at, false)),
+        )
         .collect();
     calls.sort_unstable();
     for (at, root) in calls {
@@ -1915,8 +2135,8 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         }
         let var = assigned_variable(source, recv);
         let name = call_args(source, code, at + "add_parser".len()).and_then(|span| {
-            let name =
-                first_positional_str(source, span).or_else(|| kwarg_str(source, code, span, "name", b'='))?;
+            let name = first_positional_str(source, span)
+                .or_else(|| kwarg_str(source, code, span, "name", b'='))?;
             (!defs.contains(name.as_str())).then_some((span, name))
         });
         let minted = name.map(|(span, name)| {
@@ -1925,7 +2145,11 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                 .filter(|rest| rest.starts_with(".set_defaults"))
                 .and_then(|_| call_args(source, code, span.1 + 1 + ".set_defaults".len()))
                 .and_then(|defaults| py_set_defaults_handler(source, code, defaults));
-            out.push(CliDecl::new(CliFramework::Argparse, name, at_row(chained, source, at)));
+            out.push(CliDecl::new(
+                CliFramework::Argparse,
+                name,
+                at_row(chained, source, at),
+            ));
             out.len() - 1
         });
         if let Some(var) = var {
@@ -1937,7 +2161,8 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             continue;
         }
         let var = ident_before(source, at - 1);
-        let Some(&(_, _, Some(idx))) = vars.iter().rev().find(|(pos, v, _)| *pos < at && *v == var) else {
+        let Some(&(_, _, Some(idx))) = vars.iter().rev().find(|(pos, v, _)| *pos < at && *v == var)
+        else {
             continue;
         };
         if let Some(decl) = out.get_mut(idx)
@@ -1962,12 +2187,16 @@ fn thor_class(line: &str) -> Option<&str> {
     }
     let (name, parent) = rest.split_once('<')?;
     let parent = parent.trim_start();
-    let after = parent.strip_prefix("::").unwrap_or(parent).strip_prefix("Thor")?;
+    let after = parent
+        .strip_prefix("::")
+        .unwrap_or(parent)
+        .strip_prefix("Thor")?;
     if after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':') {
         return None;
     }
     let last = name.trim().rsplit("::").next()?;
-    (last.starts_with(|c: char| c.is_ascii_uppercase()) && last.bytes().all(is_ident_byte)).then_some(last)
+    (last.starts_with(|c: char| c.is_ascii_uppercase()) && last.bytes().all(is_ident_byte))
+        .then_some(last)
 }
 
 /// The string a Ruby call's first argument is (`desc "x", ...`,
@@ -2004,7 +2233,9 @@ fn scan_thor(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         if !code.is_code(off + indent) {
             continue;
         }
-        let Some(class) = thor_class(&line[indent..]) else { continue };
+        let Some(class) = thor_class(&line[indent..]) else {
+            continue;
+        };
         let mut member: Option<usize> = None;
         let mut pending: Option<&str> = None;
         let mut private = false;
@@ -2027,31 +2258,56 @@ fn scan_thor(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                 "public" if rest.is_empty() => private = false,
                 "no_commands" => pending = None,
                 "desc" if !rest.starts_with([':', '=']) => {
-                    pending = ruby_first_string(rest).and_then(|(usage, _)| usage.split_whitespace().next());
+                    pending = ruby_first_string(rest)
+                        .and_then(|(usage, _)| usage.split_whitespace().next());
                 }
                 "subcommand" => {
-                    let Some((name, tail)) = ruby_first_string(rest) else { continue };
+                    let Some((name, tail)) = ruby_first_string(rest) else {
+                        continue;
+                    };
                     if !valid_cli_name(name) {
                         continue;
                     }
-                    let klass = tail.trim_start().strip_prefix(',').map(str::trim_start).and_then(|k| {
-                        let end = k.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'));
-                        k[..end.unwrap_or(k.len())].rsplit("::").next().filter(|s| !s.is_empty())
-                    });
+                    let klass = tail
+                        .trim_start()
+                        .strip_prefix(',')
+                        .map(str::trim_start)
+                        .and_then(|k| {
+                            let end = k.find(|c: char| {
+                                !(c.is_ascii_alphanumeric() || c == '_' || c == ':')
+                            });
+                            k[..end.unwrap_or(k.len())]
+                                .rsplit("::")
+                                .next()
+                                .filter(|s| !s.is_empty())
+                        });
                     let handler = klass.map(|k| CallQualifier::Bare(k.to_string()));
-                    out.push(CliDecl::new(CliFramework::Thor, name.to_string(), at_row(handler, source, off)));
+                    out.push(CliDecl::new(
+                        CliFramework::Thor,
+                        name.to_string(),
+                        at_row(handler, source, off),
+                    ));
                 }
                 "def" => {
                     let (method, end) = read_ident(t, skip_ws(t.as_bytes(), after));
-                    let singleton_or_op = matches!(t.as_bytes().get(end), Some(b'.' | b'?' | b'!' | b'='));
+                    let singleton_or_op =
+                        matches!(t.as_bytes().get(end), Some(b'.' | b'?' | b'!' | b'='));
                     if method.is_empty() || singleton_or_op || method == "initialize" || private {
                         continue;
                     }
-                    let Some(usage) = pending.take() else { continue };
-                    let name = if usage.replace('-', "_") == method { usage } else { method };
+                    let Some(usage) = pending.take() else {
+                        continue;
+                    };
+                    let name = if usage.replace('-', "_") == method {
+                        usage
+                    } else {
+                        method
+                    };
                     if valid_cli_name(name) {
-                        let handler =
-                            CallQualifier::Attribute { base: class.to_string(), name: method.to_string() };
+                        let handler = CallQualifier::Attribute {
+                            base: class.to_string(),
+                            name: method.to_string(),
+                        };
                         out.push(CliDecl::new(
                             CliFramework::Thor,
                             name.to_string(),
@@ -2092,17 +2348,28 @@ fn php_classes<'a>(source: &'a str, code: &CodeMap) -> Vec<PhpClass<'a>> {
             continue;
         }
         let limit = b.len().min(after + MAX_ATTR_SPAN);
-        let Some(open) = (after..limit).find(|&i| b[i] == b'{' && code.is_code(i)) else { continue };
-        let console = code_words(source, code, after, open, "extends").first().is_some_and(|&x| {
-            let start = skip_ws(b, x + "extends".len());
-            let mut end = start;
-            while end < open && (is_ident_byte(b[end]) || b[end] == b'\\') {
-                end += 1;
-            }
-            source[start..end].rsplit('\\').next().is_some_and(|t| t.ends_with("Command"))
-        });
+        let Some(open) = (after..limit).find(|&i| b[i] == b'{' && code.is_code(i)) else {
+            continue;
+        };
+        let console = code_words(source, code, after, open, "extends")
+            .first()
+            .is_some_and(|&x| {
+                let start = skip_ws(b, x + "extends".len());
+                let mut end = start;
+                while end < open && (is_ident_byte(b[end]) || b[end] == b'\\') {
+                    end += 1;
+                }
+                source[start..end]
+                    .rsplit('\\')
+                    .next()
+                    .is_some_and(|t| t.ends_with("Command"))
+            });
         let body = balanced_code(source, code, open, MAX_CLASS_BODY).unwrap_or((open + 1, b.len()));
-        out.push(PhpClass { name, body, console });
+        out.push(PhpClass {
+            name,
+            body,
+            console,
+        });
     }
     out
 }
@@ -2156,13 +2423,21 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
     let b = source.as_bytes();
     let classes = php_classes(source, code);
     let mut found: Vec<(usize, CliDecl)> = Vec::new();
-    let mut push = |at: usize, framework: CliFramework, names: &str, aliases: bool, class: Option<&str>| {
-        let names: Vec<&str> = if aliases { names.split('|').collect() } else { vec![names] };
-        for name in names.into_iter().filter(|n| valid_cli_name(n)) {
-            let handler = class.map(|c| CallQualifier::Bare(c.to_string()));
-            found.push((at, CliDecl::new(framework, name.to_string(), at_row(handler, source, at))));
-        }
-    };
+    let mut push =
+        |at: usize, framework: CliFramework, names: &str, aliases: bool, class: Option<&str>| {
+            let names: Vec<&str> = if aliases {
+                names.split('|').collect()
+            } else {
+                vec![names]
+            };
+            for name in names.into_iter().filter(|n| valid_cli_name(n)) {
+                let handler = class.map(|c| CallQualifier::Bare(c.to_string()));
+                found.push((
+                    at,
+                    CliDecl::new(framework, name.to_string(), at_row(handler, source, at)),
+                ));
+            }
+        };
     for at in code_words(source, code, 0, source.len(), "AsCommand") {
         let mut head = at;
         while head > 0 && (is_ident_byte(b[head - 1]) || b[head - 1] == b'\\') {
@@ -2171,8 +2446,11 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         if head < 2 || b[head - 2..head] != *b"#[" {
             continue;
         }
-        let Some(span) = call_args(source, code, at + "AsCommand".len()) else { continue };
-        let Some(names) = first_positional_str(source, span).or_else(|| kwarg_str(source, code, span, "name", b':'))
+        let Some(span) = call_args(source, code, at + "AsCommand".len()) else {
+            continue;
+        };
+        let Some(names) = first_positional_str(source, span)
+            .or_else(|| kwarg_str(source, code, span, "name", b':'))
         else {
             continue;
         };
@@ -2182,21 +2460,30 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
     }
     for class in classes.iter().filter(|c| c.console) {
         let (start, end) = class.body;
-        for (var, framework) in
-            [("$defaultName", CliFramework::Symfony), ("$signature", CliFramework::Laravel), ("$name", CliFramework::Laravel)]
-        {
+        for (var, framework) in [
+            ("$defaultName", CliFramework::Symfony),
+            ("$signature", CliFramework::Laravel),
+            ("$name", CliFramework::Laravel),
+        ] {
             for at in code_words(source, code, start, end, var) {
-                if !matches!(php_prev_word(source, at), "public" | "protected" | "private" | "static" | "var" | "string") {
+                if !matches!(
+                    php_prev_word(source, at),
+                    "public" | "protected" | "private" | "static" | "var" | "string"
+                ) {
                     continue;
                 }
                 let eq = skip_ws(b, at + var.len());
                 if b.get(eq) != Some(&b'=') || matches!(b.get(eq + 1), Some(b'=' | b'>')) {
                     continue;
                 }
-                let Some(lit) = source.get(skip_ws(b, eq + 1)..end).and_then(quoted_literal) else { continue };
+                let Some(lit) = source.get(skip_ws(b, eq + 1)..end).and_then(quoted_literal) else {
+                    continue;
+                };
                 let name = if var == "$signature" {
                     let lit = lit.trim_start();
-                    &lit[..lit.find(|c: char| c.is_whitespace() || c == '{').unwrap_or(lit.len())]
+                    &lit[..lit
+                        .find(|c: char| c.is_whitespace() || c == '{')
+                        .unwrap_or(lit.len())]
                 } else {
                     lit
                 };
@@ -2249,14 +2536,19 @@ fn scan_scopt(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                 };
                 i = close + 1;
             }
-            let Some(span) = call_args(source, code, i) else { continue };
+            let Some(span) = call_args(source, code, i) else {
+                continue;
+            };
             if let Some(name) = first_positional_str(source, span).filter(|n| valid_cli_name(n)) {
                 found.push((at, name));
             }
         }
     }
     found.sort_by_key(|(at, _)| *at);
-    found.into_iter().map(|(_, name)| CliDecl::new(CliFramework::Scopt, name, None)).collect()
+    found
+        .into_iter()
+        .map(|(_, name)| CliDecl::new(CliFramework::Scopt, name, None))
+        .collect()
 }
 
 // ----------------------------------------------------------------------------
@@ -2287,26 +2579,31 @@ fn dart_classes<'a>(source: &'a str, code: &CodeMap) -> Vec<DartClass<'a>> {
             continue;
         }
         let limit = b.len().min(after + MAX_ATTR_SPAN);
-        let Some(open) = (after..limit).find(|&i| matches!(b[i], b'{' | b';') && code.is_code(i)) else { continue };
+        let Some(open) = (after..limit).find(|&i| matches!(b[i], b'{' | b';') && code.is_code(i))
+        else {
+            continue;
+        };
         if b[open] != b'{' {
             continue;
         }
-        let base = code_words(source, code, after, open, "extends").first().map_or("", |&x| {
-            let mut i = skip_ws(b, x + "extends".len());
-            let mut last = "";
-            loop {
-                let (seg, end) = read_ident(source, i);
-                if seg.is_empty() {
-                    break;
+        let base = code_words(source, code, after, open, "extends")
+            .first()
+            .map_or("", |&x| {
+                let mut i = skip_ws(b, x + "extends".len());
+                let mut last = "";
+                loop {
+                    let (seg, end) = read_ident(source, i);
+                    if seg.is_empty() {
+                        break;
+                    }
+                    last = seg;
+                    if b.get(end) != Some(&b'.') {
+                        break;
+                    }
+                    i = end + 1;
                 }
-                last = seg;
-                if b.get(end) != Some(&b'.') {
-                    break;
-                }
-                i = end + 1;
-            }
-            last
-        });
+                last
+            });
         let body = balanced_code(source, code, open, MAX_CLASS_BODY).unwrap_or((open + 1, b.len()));
         out.push(DartClass { name, base, body });
     }
@@ -2342,7 +2639,11 @@ fn dart_type_args_end(b: &[u8], open: usize) -> Option<usize> {
 /// return 'x'; }`. The value must be exactly one plain string literal ending
 /// the statement: an interpolation (`'$prefix-sync'`), a concatenation or a
 /// variable names nothing.
-fn dart_command_name(source: &str, code: &CodeMap, (start, end): (usize, usize)) -> Option<(usize, String)> {
+fn dart_command_name(
+    source: &str,
+    code: &CodeMap,
+    (start, end): (usize, usize),
+) -> Option<(usize, String)> {
     let b = source.as_bytes();
     let mut depth = 0usize;
     let mut i = start;
@@ -2419,7 +2720,9 @@ fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
     for at in code_words(source, code, 0, source.len(), "CommandRunner") {
         let mut i = skip_ws(b, at + "CommandRunner".len());
         if b.get(i) == Some(&b'<') {
-            let Some(close) = dart_type_args_end(b, i) else { continue };
+            let Some(close) = dart_type_args_end(b, i) else {
+                continue;
+            };
             i = close;
         }
         if let Some(name) = first_str(i) {
@@ -2439,7 +2742,14 @@ fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             && let Some((at, name)) = dart_command_name(source, code, class.body)
         {
             let handler = CallQualifier::Bare(class.name.to_string());
-            found.push((at, CliDecl::new(CliFramework::CommandRunner, name, at_row(Some(handler), source, at))));
+            found.push((
+                at,
+                CliDecl::new(
+                    CliFramework::CommandRunner,
+                    name,
+                    at_row(Some(handler), source, at),
+                ),
+            ));
         }
     }
     found.sort_by_key(|(at, _)| *at);
@@ -2505,7 +2815,10 @@ fn uses_mix_task(source: &str, at: usize) -> bool {
     if !matches!(b.get(i), Some(b' ' | b'\t')) {
         return false;
     }
-    matches!(elixir_alias(source, skip_ws(b, i)).0, "Mix.Task" | "Mix.Task.Compiler")
+    matches!(
+        elixir_alias(source, skip_ws(b, i)).0,
+        "Mix.Task" | "Mix.Task.Compiler"
+    )
 }
 
 /// Mix tasks, in an Elixir file that names `Mix.Task`: each `defmodule
@@ -2533,20 +2846,33 @@ fn scan_mix_tasks(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             continue;
         }
         let (alias, after) = elixir_alias(source, skip_ws(b, at + "defmodule".len()));
-        let Some(rest) = alias.strip_prefix("Mix.Tasks.") else { continue };
+        let Some(rest) = alias.strip_prefix("Mix.Tasks.") else {
+            continue;
+        };
         if !matches!(b.get(after), Some(b' ' | b'\t' | b'\r' | b'\n' | b',')) {
             continue;
         }
         let segs: Vec<&str> = rest.split('.').collect();
-        if !segs.iter().all(|s| s.starts_with(|c: char| c.is_ascii_uppercase())) {
+        if !segs
+            .iter()
+            .all(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))
+        {
             continue;
         }
-        let name = segs.iter().map(|s| macro_underscore(s)).collect::<Vec<_>>().join(".");
+        let name = segs
+            .iter()
+            .map(|s| macro_underscore(s))
+            .collect::<Vec<_>>()
+            .join(".");
         if !valid_cli_name(&name) {
             continue;
         }
         let handler = segs.last().map(|s| CallQualifier::Bare((*s).to_string()));
-        out.push(CliDecl::new(CliFramework::MixTask, name, at_row(handler, source, at)));
+        out.push(CliDecl::new(
+            CliFramework::MixTask,
+            name,
+            at_row(handler, source, at),
+        ));
     }
     out
 }
@@ -2629,7 +2955,8 @@ pub fn extract_manifest_binaries(
         }
     }
     if !out.nodes.is_empty() {
-        out.per_framework.push((CliFramework::Manifest, out.nodes.len()));
+        out.per_framework
+            .push((CliFramework::Manifest, out.nodes.len()));
     }
     out
 }
@@ -2667,7 +2994,9 @@ fn is_bin_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with(['.', '-'])
-        && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
 /// The dotted name of a TOML `[table]` header line, key segments trimmed and
@@ -2676,8 +3005,10 @@ fn is_bin_name(name: &str) -> bool {
 fn toml_table_header(line: &str) -> Option<String> {
     let inner = line.strip_prefix('[').filter(|r| !r.starts_with('['))?;
     let (inner, _) = inner.split_once(']')?;
-    let segs: Vec<&str> =
-        inner.split('.').map(|seg| seg.trim().trim_matches(|c| c == '"' || c == '\'')).collect();
+    let segs: Vec<&str> = inner
+        .split('.')
+        .map(|seg| seg.trim().trim_matches(|c| c == '"' || c == '\''))
+        .collect();
     Some(segs.join("."))
 }
 
@@ -2767,7 +3098,9 @@ fn scan_cargo_bins(source: &str) -> Vec<String> {
     for line in source.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("[[") {
-            in_bin = rest.split_once("]]").is_some_and(|(name, _)| name.trim() == "bin");
+            in_bin = rest
+                .split_once("]]")
+                .is_some_and(|(name, _)| name.trim() == "bin");
             continue;
         }
         if t.starts_with('[') {
@@ -2844,14 +3177,19 @@ fn scan_gemspec_executables(source: &str) -> Vec<String> {
                 continue;
             }
             let op = skip_ws(b, at + word.len());
-            let rhs = if b.get(op) == Some(&b'=') && !matches!(b.get(op + 1), Some(b'=' | b'~' | b'>')) {
-                skip_ws(b, op + 1)
-            } else if word == "executables" && b[op..].starts_with(b"<<") {
-                skip_ws(b, op + 2)
-            } else {
-                continue;
-            };
-            found.extend(ruby_string_list(source, &code, rhs).into_iter().map(|name| (at, name)));
+            let rhs =
+                if b.get(op) == Some(&b'=') && !matches!(b.get(op + 1), Some(b'=' | b'~' | b'>')) {
+                    skip_ws(b, op + 1)
+                } else if word == "executables" && b[op..].starts_with(b"<<") {
+                    skip_ws(b, op + 2)
+                } else {
+                    continue;
+                };
+            found.extend(
+                ruby_string_list(source, &code, rhs)
+                    .into_iter()
+                    .map(|name| (at, name)),
+            );
         }
     }
     found.sort_by_key(|(at, _)| *at);
@@ -2888,7 +3226,9 @@ fn ruby_string_list(source: &str, code: &CodeMap, at: usize) -> Vec<String> {
             out
         }
         Some(b'%') if matches!(b.get(at + 1), Some(b'w' | b'W')) => {
-            let Some(&open) = b.get(at + 2) else { return Vec::new() };
+            let Some(&open) = b.get(at + 2) else {
+                return Vec::new();
+            };
             let close = match open {
                 b'[' => b']',
                 b'(' => b')',
@@ -2903,7 +3243,10 @@ fn ruby_string_list(source: &str, code: &CodeMap, at: usize) -> Vec<String> {
                 if b[j] == close {
                     depth -= 1;
                     if depth == 0 {
-                        return source[at + 3..j].split_ascii_whitespace().map(str::to_string).collect();
+                        return source[at + 3..j]
+                            .split_ascii_whitespace()
+                            .map(str::to_string)
+                            .collect();
                     }
                 } else if b[j] == open && open != close {
                     depth += 1;
@@ -2913,7 +3256,9 @@ fn ruby_string_list(source: &str, code: &CodeMap, at: usize) -> Vec<String> {
             Vec::new()
         }
         Some(b'"' | b'\'') => {
-            let Some(lit) = source.get(at..).and_then(quoted_literal) else { return Vec::new() };
+            let Some(lit) = source.get(at..).and_then(quoted_literal) else {
+                return Vec::new();
+            };
             let mut j = at + lit.len() + 2;
             while matches!(b.get(j), Some(b' ' | b'\t')) {
                 j += 1;
@@ -3003,8 +3348,10 @@ fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
                 i += 1;
                 continue;
             }
-            if let Some(name) =
-                source.get(i..stop).and_then(quoted_literal).and_then(entry_point_name)
+            if let Some(name) = source
+                .get(i..stop)
+                .and_then(quoted_literal)
+                .and_then(entry_point_name)
             {
                 out.push(name);
             }
@@ -3079,18 +3426,15 @@ const MAX_ARGV_TOKENS: usize = 8;
 ///
 /// One node per binary per file: a second `exec.Command("docker", "push")`
 /// adds its argv vector to the cell instead of being lost to the dedupe.
-pub fn extract_cli_invocation_nodes(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> CliNodes {
+pub fn extract_cli_invocation_nodes(source: &str, module_id: NodeId, repo: RepoId) -> CliNodes {
     // Keyed by the byte offset the arguments start at: `os.system(` and
     // `system(` (or `Command::new(` inside `std::process::Command::new(`) end at
     // the same `(`, so overlapping needles collapse to one call site, and the
     // iteration is in source order. A nested needle (`ProcessBuilder(List.of(`)
     // ends at a later offset than its outer one, whose hit reads no quoted token
     // and so is never a site.
-    let mut sites: std::collections::BTreeMap<usize, Vec<String>> = std::collections::BTreeMap::new();
+    let mut sites: std::collections::BTreeMap<usize, Vec<String>> =
+        std::collections::BTreeMap::new();
     for &pattern in INVOCATION_PATTERNS {
         let mut search_from = 0;
         while let Some(rel_idx) = source[search_from..].find(pattern) {
@@ -3120,8 +3464,12 @@ pub fn extract_cli_invocation_nodes(
     let mut by_bin: std::collections::BTreeMap<String, Vec<Vec<String>>> =
         std::collections::BTreeMap::new();
     for tokens in sites.into_values() {
-        let Some((head, args)) = tokens.split_first() else { continue };
-        let Some(bin) = binary_name(head) else { continue };
+        let Some((head, args)) = tokens.split_first() else {
+            continue;
+        };
+        let Some(bin) = binary_name(head) else {
+            continue;
+        };
         let argv = by_bin.entry(bin).or_default();
         if !args.is_empty() && !argv.iter().any(|seen| seen.as_slice() == args) {
             argv.push(args.to_vec());
@@ -3142,7 +3490,11 @@ pub fn extract_cli_invocation_nodes(
         nav.record(id, bin, &qname, node_kind::CLI_INVOCATION, Some(module_id));
     }
 
-    CliNodes { nodes, nav, ..CliNodes::default() }
+    CliNodes {
+        nodes,
+        nav,
+        ..CliNodes::default()
+    }
 }
 
 /// The quoted argv at a call site, from the text right after an
@@ -3164,7 +3516,9 @@ fn scan_argv(after: &str) -> Vec<String> {
     }
     let mut tokens: Vec<String> = Vec::new();
     while tokens.len() < MAX_ARGV_TOKENS {
-        let Some(tok) = extract_quoted(rest) else { break };
+        let Some(tok) = extract_quoted(rest) else {
+            break;
+        };
         // Opening quote + literal + closing quote, all ASCII delimiters.
         rest = &rest[tok.len() + 2..];
         tokens.push(tok);
@@ -3174,7 +3528,10 @@ fn scan_argv(after: &str) -> Vec<String> {
             bracket_open = true;
         }
     }
-    if tokens.first().is_some_and(|t| t.contains(|c: char| c.is_ascii_whitespace())) {
+    if tokens
+        .first()
+        .is_some_and(|t| t.contains(|c: char| c.is_ascii_whitespace()))
+    {
         let head = tokens.remove(0);
         let mut split: Vec<String> = head.split_ascii_whitespace().map(str::to_string).collect();
         if split.is_empty() {
@@ -3227,7 +3584,9 @@ fn scala_process_sites(source: &str) -> Vec<(usize, Vec<String>)> {
     let mut out: Vec<(usize, Vec<String>)> = Vec::new();
     for word in ["Seq", "List", "Vector"] {
         for at in code_words(source, &code, 0, source.len(), word) {
-            let Some((start, end)) = scala_list_call(source, &code, at, word) else { continue };
+            let Some((start, end)) = scala_list_call(source, &code, at, word) else {
+                continue;
+            };
             if scala_run_suffix(source, end + 1) {
                 let tokens = scan_argv(&source[start..end]);
                 if !tokens.is_empty() {
@@ -3245,7 +3604,9 @@ fn scala_process_sites(source: &str) -> Vec<(usize, Vec<String>)> {
             }
             i = after;
         }
-        let Some((start, end)) = call_args(source, &code, i) else { continue };
+        let Some((start, end)) = call_args(source, &code, i) else {
+            continue;
+        };
         let tokens = scala_process_argv(source, &code, start, end);
         if !tokens.is_empty() {
             out.push((start, tokens));
@@ -3331,7 +3692,9 @@ fn scala_process_argv(source: &str, code: &CodeMap, start: usize, end: usize) ->
         return Vec::new();
     }
     if b[v] == b'"' {
-        let Some(lit) = source.get(v..end).and_then(extract_quoted) else { return Vec::new() };
+        let Some(lit) = source.get(v..end).and_then(extract_quoted) else {
+            return Vec::new();
+        };
         let after = v + lit.len() + 2;
         let mut tokens = scan_argv(&source[v..after]);
         let comma = skip_ws(b, after);
@@ -3389,7 +3752,10 @@ struct ArgvCellPayload<'a> {
 /// binary invoked from N files carries N cells. Written only here and read only
 /// by [`parse_argv_cell`], so the format lives in one place.
 pub fn argv_cell(bin: &str, argv: &[Vec<String>]) -> Cell {
-    let payload = ArgvCellPayload { bin: std::borrow::Cow::Borrowed(bin), argv: argv.to_vec() };
+    let payload = ArgvCellPayload {
+        bin: std::borrow::Cow::Borrowed(bin),
+        argv: argv.to_vec(),
+    };
     Cell {
         kind: cell_type::CODE,
         payload: CellPayload::Json(serde_json::to_string(&payload).unwrap_or_default()),
@@ -3401,7 +3767,9 @@ pub fn argv_cell(bin: &str, argv: &[Vec<String>]) -> Cell {
 pub fn parse_argv_cell(cell: &Cell) -> Vec<Vec<String>> {
     match &cell.payload {
         CellPayload::Json(json) if cell.kind == cell_type::CODE => {
-            serde_json::from_str::<ArgvCellPayload>(json).map(|p| p.argv).unwrap_or_default()
+            serde_json::from_str::<ArgvCellPayload>(json)
+                .map(|p| p.argv)
+                .unwrap_or_default()
         }
         _ => Vec::new(),
     }
@@ -3440,7 +3808,10 @@ mod tests {
 
     /// The `cli:<name>` qnames, in emission order.
     fn commands(out: &CliNodes) -> Vec<String> {
-        out.nodes.iter().filter_map(|n| out.nav.qname_by_id.get(&n.id).cloned()).collect()
+        out.nodes
+            .iter()
+            .filter_map(|n| out.nav.qname_by_id.get(&n.id).cloned())
+            .collect()
     }
 
     /// Every HANDLED_BY ref as (command qname, handler).
@@ -3450,7 +3821,14 @@ mod tests {
             .map(|r| {
                 assert_eq!(r.category, edge_category::HANDLED_BY);
                 assert_eq!(r.from_module, module_id());
-                (out.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default(), r.qualifier.clone())
+                (
+                    out.nav
+                        .qname_by_id
+                        .get(&r.from)
+                        .cloned()
+                        .unwrap_or_default(),
+                    r.qualifier.clone(),
+                )
             })
             .collect()
     }
@@ -3472,7 +3850,10 @@ mod tests {
         // The one-line name attribute on `GarbageCollect` still comes from the
         // line reader first; the span scan adds the multi-line root and the
         // kebab-cased variant.
-        assert_eq!(commands(&out), vec!["cli:gc", "cli:shopctl", "cli:sync-users"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:gc", "cli:shopctl", "cli:sync-users"]
+        );
         assert_eq!(out.per_framework, vec![(CliFramework::Clap, 3)]);
         assert!(out.refs.is_empty());
         assert_eq!(
@@ -3507,13 +3888,19 @@ pub(crate) enum Ops {
 }
 "#;
         let out = decls(source, "rust");
-        assert_eq!(commands(&out), vec!["cli:sync_users", "cli:gc", "cli:import"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:sync_users", "cli:gc", "cli:import"]
+        );
     }
 
     #[test]
     fn clap_parser_enum_variants_are_commands() {
         let source = "use clap::Parser;\n#[derive(Parser)]\nenum Cli { Build, RunAll(RunArgs) }\n";
-        assert_eq!(commands(&decls(source, "rust")), vec!["cli:build", "cli:run-all"]);
+        assert_eq!(
+            commands(&decls(source, "rust")),
+            vec!["cli:build", "cli:run-all"]
+        );
     }
 
     #[test]
@@ -3534,14 +3921,20 @@ pub(crate) enum Ops {
         assert_eq!(clap_rename("SyncUsers", Some("lower")), "syncusers");
         assert_eq!(clap_rename("SyncUsers", Some("verbatim")), "SyncUsers");
         assert_eq!(clap_rename("SyncUsers", Some("camelCase")), "syncUsers");
-        assert_eq!(clap_rename("SyncUsers", Some("SCREAMING_SNAKE_CASE")), "SYNC_USERS");
+        assert_eq!(
+            clap_rename("SyncUsers", Some("SCREAMING_SNAKE_CASE")),
+            "SYNC_USERS"
+        );
         assert_eq!(clap_rename("SyncUsers", Some("no-such-rule")), "sync-users");
     }
 
     #[test]
     fn clap_builder_names_but_std_process_command_does_not() {
         let builder = "use clap::{Arg, Command};\nfn cli() -> Command {\n    Command::new(\"shopctl\").subcommand(Command::new(\"migrate\"))\n}\n";
-        assert_eq!(commands(&decls(builder, "rust")), vec!["cli:shopctl", "cli:migrate"]);
+        assert_eq!(
+            commands(&decls(builder, "rust")),
+            vec!["cli:shopctl", "cli:migrate"]
+        );
 
         // std's Command is an invocation, even with a clap derive beside it.
         let std_cmd = "use clap::Subcommand;\nuse std::process::{Command, Stdio};\nfn f() { Command::new(\"git\").spawn(); }\n";
@@ -3585,7 +3978,10 @@ final class Export implements Runnable {
 }
 "#;
         let out = decls(source, "java");
-        assert_eq!(commands(&out), vec!["cli:invctl", "cli:purge", "cli:list", "cli:export"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:invctl", "cli:purge", "cli:list", "cli:export"]
+        );
         let attr = |base: &str, name: &str| CallQualifier::Attribute {
             base: base.to_string(),
             name: name.to_string(),
@@ -3606,8 +4002,14 @@ final class Export implements Runnable {
         // Kotlin is read under its own tag (A14.2 moved `.kt` off java), and
         // still under the java tag extract.rs's A14.2 stopgap passes.
         let kt = "import picocli.CommandLine.Command\n@Command(name = \"kt\")\nclass KtTool : Runnable { override fun run() {} }\n";
-        assert_eq!(handlers(&decls(kt, "kotlin")), vec![("cli:kt".to_string(), bare("KtTool"))]);
-        assert_eq!(handlers(&decls(kt, "java")), vec![("cli:kt".to_string(), bare("KtTool"))]);
+        assert_eq!(
+            handlers(&decls(kt, "kotlin")),
+            vec![("cli:kt".to_string(), bare("KtTool"))]
+        );
+        assert_eq!(
+            handlers(&decls(kt, "java")),
+            vec![("cli:kt".to_string(), bare("KtTool"))]
+        );
         // No picocli in the file: no scan.
         assert!(commands(&decls("@Command(name = \"x\") class X {}", "java")).is_empty());
     }
@@ -3626,18 +4028,27 @@ third.SetAction(Handlers.Audit);
 root.AddCommand(sync);
 "#;
         let out = decls(source, "csharp");
-        assert_eq!(commands(&out), vec!["cli:reconcile", "cli:export", "cli:audit"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:reconcile", "cli:export", "cli:audit"]
+        );
         assert_eq!(
             handlers(&out),
             vec![
                 ("cli:reconcile".to_string(), bare("Reconcile")),
                 (
                     "cli:audit".to_string(),
-                    CallQualifier::Attribute { base: "Handlers".into(), name: "Audit".into() }
+                    CallQualifier::Attribute {
+                        base: "Handlers".into(),
+                        name: "Audit".into()
+                    }
                 ),
             ]
         );
-        assert_eq!(out.per_framework, vec![(CliFramework::SystemCommandLine, 3)]);
+        assert_eq!(
+            out.per_framework,
+            vec![(CliFramework::SystemCommandLine, 3)]
+        );
     }
 
     #[test]
@@ -3679,7 +4090,8 @@ public static class SpectreHost
     #[test]
     fn language_gating() {
         // Python keeps its click and Typer explicit decorator names.
-        let typer = "import typer\napp = typer.Typer()\n@app.command(\"purge\")\ndef purge(): ...\n";
+        let typer =
+            "import typer\napp = typer.Typer()\n@app.command(\"purge\")\ndef purge(): ...\n";
         let out = decls(typer, "python");
         assert_eq!(commands(&out), vec!["cli:purge"]);
         assert_eq!(out.per_framework, vec![(CliFramework::Typer, 1)]);
@@ -3690,10 +4102,17 @@ public static class SpectreHost
         // Commander's needle is TS-family only (LA.20b: Python too - pymongo's
         // `db.command("ping")` is not a declaration).
         for lang in ["ruby", "java", "go", "php", "rust", "csharp", "python"] {
-            assert!(commands(&decls("runner.command(\"y\")", lang)).is_empty(), "{lang}");
+            assert!(
+                commands(&decls("runner.command(\"y\")", lang)).is_empty(),
+                "{lang}"
+            );
         }
         for lang in ["typescript", "react", "angular", "vue"] {
-            assert_eq!(commands(&decls("program.command('y')", lang)), vec!["cli:y"], "{lang}");
+            assert_eq!(
+                commands(&decls("program.command('y')", lang)),
+                vec!["cli:y"],
+                "{lang}"
+            );
         }
         // Cobra is Go-only; clap's line form is Rust-only.
         assert!(commands(&decls("x := &cobra.Command{Use: \"m\"}", "typescript")).is_empty());
@@ -3704,7 +4123,10 @@ public static class SpectreHost
     #[test]
     fn attr_span_is_bounded_quote_aware_and_char_safe() {
         let s = "#[command(name = \"é\", about = \"naïve ) (\", c = ')')] x";
-        assert_eq!(attr_span(s, 9), Some("name = \"é\", about = \"naïve ) (\", c = ')'"));
+        assert_eq!(
+            attr_span(s, 9),
+            Some("name = \"é\", about = \"naïve ) (\", c = ')'")
+        );
         assert_eq!(attr_span(s, 0), None, "not an opening bracket");
         assert_eq!(attr_span(s, s.len() + 10), None, "out of range");
         assert_eq!(attr_span("(\"unterminated)", 0), None);
@@ -3712,7 +4134,10 @@ public static class SpectreHost
         assert_eq!(attr_span("(a // )\n)", 0), Some("a // )\n"));
         let long = format!("({})", "é".repeat(MAX_ATTR_SPAN));
         assert_eq!(attr_span(&long, 0), None, "over the cap");
-        assert_eq!(attr_kv("about = \"name = 'x'\", name = \"real\"", "name").as_deref(), Some("real"));
+        assert_eq!(
+            attr_kv("about = \"name = 'x'\", name = \"real\"", "name").as_deref(),
+            Some("real")
+        );
         assert_eq!(attr_kv("bin_name = \"no\"", "name"), None);
     }
 
@@ -3749,9 +4174,18 @@ fn real() { Command::new("real"); }
     fn truncated_and_multibyte_sources_never_panic() {
         let sources = [
             (CLAP_PROBE, "rust"),
-            ("use clap::Command; fn f() { Command::new(\"ä\"); } #[derive(Subcommand)] enum E { Ä, B }", "rust"),
-            ("import picocli.X; @Command(name = \"é\") class Ü { @Command(name=\"m\") void ä() {} }", "java"),
-            ("using System.CommandLine; var ü = new Command(\"é\"); ü.SetHandler(Ä); using Spectre.Console.Cli; c.AddCommand<Ö>(\"x\"); c.AddBranch<", "csharp"),
+            (
+                "use clap::Command; fn f() { Command::new(\"ä\"); } #[derive(Subcommand)] enum E { Ä, B }",
+                "rust",
+            ),
+            (
+                "import picocli.X; @Command(name = \"é\") class Ü { @Command(name=\"m\") void ä() {} }",
+                "java",
+            ),
+            (
+                "using System.CommandLine; var ü = new Command(\"é\"); ü.SetHandler(Ä); using Spectre.Console.Cli; c.AddCommand<Ö>(\"x\"); c.AddBranch<",
+                "csharp",
+            ),
         ];
         for (source, lang) in sources {
             for (cut, _) in source.char_indices() {
@@ -3764,7 +4198,10 @@ fn real() { Command::new("real"); }
     // ---- LA.20b: declarations for scripting languages ----------------------
 
     fn attr(base: &str, name: &str) -> CallQualifier {
-        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 
     const THOR_PROBE: &str = include_str!(concat!(
@@ -3792,7 +4229,10 @@ fn real() { Command::new("real"); }
     fn thor_desc_names_the_next_method() {
         let out = decls(THOR_PROBE, "ruby");
         assert_eq!(commands(&out), vec!["cli:rollout"]);
-        assert_eq!(handlers(&out), vec![("cli:rollout".to_string(), attr("Deployer", "rollout"))]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cli:rollout".to_string(), attr("Deployer", "rollout"))]
+        );
         assert_eq!(
             decl_marker("ruby", &out, "lib/deployer.rb").as_deref(),
             Some("[cli-decl] ruby=thor:1 handler_refs=1 path=lib/deployer.rb")
@@ -3854,7 +4294,13 @@ end
         let out = decls(source, "ruby");
         assert_eq!(
             commands(&out),
-            vec!["cli:rollout-all", "cli:status", "cli:download", "cli:next_public", "cli:db"]
+            vec![
+                "cli:rollout-all",
+                "cli:status",
+                "cli:download",
+                "cli:next_public",
+                "cli:db"
+            ]
         );
         assert_eq!(
             handlers(&out),
@@ -3874,7 +4320,10 @@ end
     #[test]
     fn symfony_attribute_and_default_name() {
         let out = decls(SYMFONY_PROBE, "php");
-        assert_eq!(commands(&out), vec!["cli:app:sync-orders", "cli:app:legacy-import"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:app:sync-orders", "cli:app:legacy-import"]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -3912,7 +4361,14 @@ class Plain
 }
 "#;
         let out = decls(more, "php");
-        assert_eq!(commands(&out), vec!["cli:app:create-user", "cli:app:add-user", "cli:app:configured"]);
+        assert_eq!(
+            commands(&out),
+            vec![
+                "cli:app:create-user",
+                "cli:app:add-user",
+                "cli:app:configured"
+            ]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -3927,7 +4383,10 @@ class Plain
     fn laravel_signature_with_args_and_options() {
         let out = decls(LARAVEL_PROBE, "php");
         assert_eq!(commands(&out), vec!["cli:emails:send"]);
-        assert_eq!(handlers(&out), vec![("cli:emails:send".to_string(), bare("SendEmails"))]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cli:emails:send".to_string(), bare("SendEmails"))]
+        );
         assert_eq!(out.per_framework, vec![(CliFramework::Laravel, 1)]);
         let multi = "<?php\nuse Illuminate\\Console\\Command;\nclass Prune extends \\Illuminate\\Console\\Command\n{\n    protected $signature = \"model:prune\n        {--model=* : Class names}\n        {--pretend}\";\n}\nclass Legacy extends Command\n{\n    protected $name = 'legacy:run';\n    public function handle() { $signature = 'local {x}'; }\n}\n";
         let out = decls(multi, "php");
@@ -3944,7 +4403,10 @@ class Plain
     #[test]
     fn typer_bare_explicit_and_add_typer() {
         let out = decls(TYPER_ARGPARSE_PROBE, "python");
-        assert_eq!(commands(&out), vec!["cli:import-users", "cli:purge", "cli:dbtool", "cli:migrate"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:import-users", "cli:purge", "cli:dbtool", "cli:migrate"]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -3989,7 +4451,16 @@ app.command(name="serve")(start_server)
 app.command()(tasks.run_all)
 "#;
         let out = decls(source, "python");
-        assert_eq!(commands(&out), vec!["cli:users", "cli:list", "cli:sync-now", "cli:serve", "cli:run-all"]);
+        assert_eq!(
+            commands(&out),
+            vec![
+                "cli:users",
+                "cli:list",
+                "cli:sync-now",
+                "cli:serve",
+                "cli:run-all"
+            ]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -4011,7 +4482,10 @@ app.command()(tasks.run_all)
         assert!(handlers(&out).is_empty());
         let source = "import click\n\n@click.group()\ndef cli(): ...\n\n@cli.group()\ndef db(): ...\n\n@db.command()\ndef init_db_command(): ...\n\n@click.command\ndef export_users(): ...\n\n@cli.command('seed')\ndef seed_cmd(): ...\n";
         let out = decls(source, "python");
-        assert_eq!(commands(&out), vec!["cli:init-db", "cli:export-users", "cli:seed"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:init-db", "cli:export-users", "cli:seed"]
+        );
         assert_eq!(out.per_framework, vec![(CliFramework::Click, 3)]);
         // No typer / click import: explicit decorator names only.
         let ungated = "from .main import cli\n\n@cli.command(\"sync\")\ndef sync(): ...\n\n@bot.command()\ndef ping(): ...\n";
@@ -4058,7 +4532,10 @@ def build():
 "#;
         let out = decls(source, "python");
         assert_eq!(commands(&out), vec!["cli:sync", "cli:seed"]);
-        assert_eq!(handlers(&out), vec![("cli:seed".to_string(), bare("migrate"))]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cli:seed".to_string(), bare("migrate"))]
+        );
     }
 
     #[test]
@@ -4081,7 +4558,10 @@ def build():
     return parser
 "#;
         let out = decls(source, "python");
-        assert_eq!(commands(&out), vec!["cli:init", "cli:serve", "cli:check", "cli:lazy"]);
+        assert_eq!(
+            commands(&out),
+            vec!["cli:init", "cli:serve", "cli:check", "cli:lazy"]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -4131,9 +4611,18 @@ def build():
             (SYMFONY_PROBE, "php"),
             (LARAVEL_PROBE, "php"),
             (TYPER_ARGPARSE_PROBE, "python"),
-            ("class Ü < Thor\n  desc \"é ENV\", \"ü\"\n  def é; end\n  subcommand \"ö\", Ä\nend\n", "ruby"),
-            ("<?php #[AsCommand(name: 'é|ü')] class Ä extends Command { protected $signature = 'ö {x}'; } <<<É\n", "php"),
-            ("import typer, argparse\n@app.command()\ndef é(): ...\nm = s.add_parser(\"ü\")\nm.set_defaults(func=ö)\n", "python"),
+            (
+                "class Ü < Thor\n  desc \"é ENV\", \"ü\"\n  def é; end\n  subcommand \"ö\", Ä\nend\n",
+                "ruby",
+            ),
+            (
+                "<?php #[AsCommand(name: 'é|ü')] class Ä extends Command { protected $signature = 'ö {x}'; } <<<É\n",
+                "php",
+            ),
+            (
+                "import typer, argparse\n@app.command()\ndef é(): ...\nm = s.add_parser(\"ü\")\nm.set_defaults(func=ö)\n",
+                "python",
+            ),
         ];
         for (source, lang) in sources {
             for (cut, _) in source.char_indices() {
@@ -4147,7 +4636,13 @@ def build():
     fn detects_exec_command_invocation() {
         let source = "cmd := exec.Command(\"docker\", \"build\", \".\")";
         let result = extract_cli_invocation_nodes(source, module_id(), repo());
-        assert!(result.nav.qname_by_id.values().any(|q| q == "cli_invoke:docker"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "cli_invoke:docker")
+        );
     }
 
     /// The single qname and the argv vectors of its cell(s).
@@ -4158,7 +4653,11 @@ def build():
             .iter()
             .filter_map(|n| result.nav.qname_by_id.get(&n.id).cloned())
             .collect();
-        let argv = result.nodes.iter().flat_map(|n| n.cells.iter().flat_map(parse_argv_cell)).collect();
+        let argv = result
+            .nodes
+            .iter()
+            .flat_map(|n| n.cells.iter().flat_map(parse_argv_cell))
+            .collect();
         (qnames, argv)
     }
 
@@ -4190,14 +4689,25 @@ def build():
         let result = extract_cli_invocation_nodes(source, module_id(), repo());
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].cells.len(), 1);
-        let CellPayload::Json(json) = &result.nodes[0].cells[0].payload else { panic!("argv cell is JSON") };
-        assert_eq!(json, r#"{"bin":"docker","argv":[["build","."],["push","x"]]}"#);
+        let CellPayload::Json(json) = &result.nodes[0].cells[0].payload else {
+            panic!("argv cell is JSON")
+        };
+        assert_eq!(
+            json,
+            r#"{"bin":"docker","argv":[["build","."],["push","x"]]}"#
+        );
     }
 
     #[test]
     fn path_qualified_binary_keys_on_basename() {
-        assert_eq!(invocation("subprocess.run(['/usr/bin/kubectl', 'get'])").0, vec!["cli_invoke:kubectl"]);
-        assert_eq!(invocation("Process.Start(\"C:\\\\tools\\\\deploy.exe\")").0, vec!["cli_invoke:deploy"]);
+        assert_eq!(
+            invocation("subprocess.run(['/usr/bin/kubectl', 'get'])").0,
+            vec!["cli_invoke:kubectl"]
+        );
+        assert_eq!(
+            invocation("Process.Start(\"C:\\\\tools\\\\deploy.exe\")").0,
+            vec!["cli_invoke:deploy"]
+        );
     }
 
     #[test]
@@ -4246,8 +4756,16 @@ def build():
             assert!(!qnames.iter().any(|q| q == "cli_invoke:export"), "{source}");
         }
         // No literal argv, or the argv set later through `command(..)`: not read.
-        assert!(invocation("Process p = new ProcessBuilder(cmd).start();").0.is_empty());
-        assert!(invocation("new ProcessBuilder().command(\"invctl\").start();").0.is_empty());
+        assert!(
+            invocation("Process p = new ProcessBuilder(cmd).start();")
+                .0
+                .is_empty()
+        );
+        assert!(
+            invocation("new ProcessBuilder().command(\"invctl\").start();")
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4257,7 +4775,8 @@ def build():
         assert_eq!(qnames, vec!["cli_invoke:invctl"]);
         assert_eq!(argv, vec![vec!["export", "--all"]]);
 
-        let (qnames, argv) = invocation("new ProcessBuilder(Arrays.asList(\"invctl\", \"import\"));");
+        let (qnames, argv) =
+            invocation("new ProcessBuilder(Arrays.asList(\"invctl\", \"import\"));");
         assert_eq!(qnames, vec!["cli_invoke:invctl"]);
         assert_eq!(argv, vec![vec!["import"]]);
 
@@ -4267,14 +4786,23 @@ def build():
         assert_eq!(argv, vec![vec!["sync"]]);
 
         // A list built elsewhere is not read.
-        assert!(invocation("new ProcessBuilder(List.of(tool, \"x\"));").0.is_empty());
-        assert!(invocation("new ProcessBuilder(Arrays.asList(args));").0.is_empty());
+        assert!(
+            invocation("new ProcessBuilder(List.of(tool, \"x\"));")
+                .0
+                .is_empty()
+        );
+        assert!(
+            invocation("new ProcessBuilder(Arrays.asList(args));")
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
     fn java_runtime_exec_shell_string() {
         // The shell-string form is split on whitespace.
-        let (qnames, argv) = invocation("Process p = Runtime.getRuntime().exec(\"invctl export --all\");");
+        let (qnames, argv) =
+            invocation("Process p = Runtime.getRuntime().exec(\"invctl export --all\");");
         assert_eq!(qnames, vec!["cli_invoke:invctl"]);
         assert_eq!(argv, vec![vec!["export", "--all"]]);
 
@@ -4290,7 +4818,11 @@ def build():
             assert_eq!(argv, vec![vec!["export"]], "{source}");
         }
 
-        assert!(invocation("Runtime.getRuntime().exec(command);").0.is_empty());
+        assert!(
+            invocation("Runtime.getRuntime().exec(command);")
+                .0
+                .is_empty()
+        );
     }
 
     // ---- DG.8: Scala (scopt, scala.sys.process) ------------------------------
@@ -4322,28 +4854,47 @@ def build():
         // scopt 3: the OptionParser's constructor names the program; nested
         // `children(cmd(..))` are commands, `opt` / `head` are not.
         let v3 = "import scopt.OptionParser\nobject Cli {\n  val parser = new scopt.OptionParser[Config](\"shopctl\") {\n    head(\"shopctl\", \"1.x\")\n    opt[Int]('n', \"num\").action((x, c) => c.copy(n = x))\n    cmd(\"sync\").action((_, c) => c).children(cmd(\"orders\"), opt[Unit](\"dry-run\"))\n    cmd(\"gc\")\n  }\n}\n";
-        assert_eq!(commands(&decls(v3, "scala")), vec!["cli:shopctl", "cli:sync", "cli:orders", "cli:gc"]);
-        let extends = "import scopt._\nobject P extends OptionParser[Conf](\"tool\") { cmd(\"run\") }\n";
-        assert_eq!(commands(&decls(extends, "scala")), vec!["cli:tool", "cli:run"]);
+        assert_eq!(
+            commands(&decls(v3, "scala")),
+            vec!["cli:shopctl", "cli:sync", "cli:orders", "cli:gc"]
+        );
+        let extends =
+            "import scopt._\nobject P extends OptionParser[Conf](\"tool\") { cmd(\"run\") }\n";
+        assert_eq!(
+            commands(&decls(extends, "scala")),
+            vec!["cli:tool", "cli:run"]
+        );
         // A qualified builder, without `import builder._`.
         let qualified = "import scopt.OParser\nval b = OParser.builder[C]\nval p = OParser.sequence(b.programName(\"x\"), b.cmd(\"y\"))\n";
         assert_eq!(commands(&decls(qualified, "scala")), vec!["cli:x", "cli:y"]);
 
         // `cmd(..)` in a Scala file that never mentions scopt is any method.
-        assert!(commands(&decls("object M { def cmd(s: String) = s; cmd(\"x\") }", "scala")).is_empty());
+        assert!(
+            commands(&decls(
+                "object M { def cmd(s: String) = s; cmd(\"x\") }",
+                "scala"
+            ))
+            .is_empty()
+        );
         // Needles in strings and comments, interpolations and expressions.
         let guarded = "import scopt.OParser\nval help = \"programName(\\\"fake\\\")\"\n// cmd(\"line\")\n/* cmd(\"block\") */\nval a = cmd(s\"x$y\")\nval b = cmd(name)\nval c = OptionParser(\"no-type-arg\")\nval p = OParser.sequence(programName(\"real\"))\n";
         assert_eq!(commands(&decls(guarded, "scala")), vec!["cli:real"]);
         // The scan is Scala's: the same text in another language reads nothing.
         for lang in ["java", "kotlin", "python", "rust", "typescript"] {
-            assert!(commands(&decls(SCALA_CLI_DEF_MAIN, lang)).is_empty(), "{lang}");
+            assert!(
+                commands(&decls(SCALA_CLI_DEF_MAIN, lang)).is_empty(),
+                "{lang}"
+            );
         }
         // Every truncation of a multi-byte scopt source reads without a panic.
         let multibyte = "import scopt.OParser\nval p = new OptionParser[Ü](\"ä\") { cmd(\"é\").children(cmd(\"ö\")) }\nOParser.sequence(programName(\"ü\"), cmd(";
         for (cut, _) in multibyte.char_indices() {
             let _ = decls(&multibyte[..cut], "scala");
         }
-        assert_eq!(commands(&decls(multibyte, "scala")), vec!["cli:ä", "cli:é", "cli:ö", "cli:ü"]);
+        assert_eq!(
+            commands(&decls(multibyte, "scala")),
+            vec!["cli:ä", "cli:é", "cli:ö", "cli:ü"]
+        );
     }
 
     #[test]
@@ -4355,16 +4906,56 @@ def build():
         assert_eq!(argv, vec![vec!["export"]]);
 
         let cases: &[(&str, &str, &[&str])] = &[
-            ("import sys.process._\nval s = \"git status\".!!", "git", &["status"]),
-            ("import scala.sys.process._\nProcess(Seq(\"docker\", \"build\")).run()", "docker", &["build"]),
-            ("import scala.sys.process._\nList(\"kubectl\", \"apply\").lazyLines", "kubectl", &["apply"]),
-            ("import scala.sys.process._\nVector[String](\"terraform\", \"plan\").!!", "terraform", &["plan"]),
-            ("import scala.sys.process._\nval rc = Seq(\"make\", \"test\") !\n", "make", &["test"]),
-            ("import scala.sys.process._\nSeq(\"helm\", \"lint\")\n  .!<", "helm", &["lint"]),
-            ("import scala.sys.process._\n\"git log\".lazyLines_!", "git", &["log"]),
-            ("import scala.sys.process.Process\nProcess(\"git\", Seq(\"fetch\")).!", "git", &["fetch"]),
-            ("import scala.sys.process._\nProcess.apply(\"ls -la\").!!", "ls", &["-la"]),
-            ("val code = scala.sys.process.Process(List(\"sbt\", \"compile\")).!", "sbt", &["compile"]),
+            (
+                "import sys.process._\nval s = \"git status\".!!",
+                "git",
+                &["status"],
+            ),
+            (
+                "import scala.sys.process._\nProcess(Seq(\"docker\", \"build\")).run()",
+                "docker",
+                &["build"],
+            ),
+            (
+                "import scala.sys.process._\nList(\"kubectl\", \"apply\").lazyLines",
+                "kubectl",
+                &["apply"],
+            ),
+            (
+                "import scala.sys.process._\nVector[String](\"terraform\", \"plan\").!!",
+                "terraform",
+                &["plan"],
+            ),
+            (
+                "import scala.sys.process._\nval rc = Seq(\"make\", \"test\") !\n",
+                "make",
+                &["test"],
+            ),
+            (
+                "import scala.sys.process._\nSeq(\"helm\", \"lint\")\n  .!<",
+                "helm",
+                &["lint"],
+            ),
+            (
+                "import scala.sys.process._\n\"git log\".lazyLines_!",
+                "git",
+                &["log"],
+            ),
+            (
+                "import scala.sys.process.Process\nProcess(\"git\", Seq(\"fetch\")).!",
+                "git",
+                &["fetch"],
+            ),
+            (
+                "import scala.sys.process._\nProcess.apply(\"ls -la\").!!",
+                "ls",
+                &["-la"],
+            ),
+            (
+                "val code = scala.sys.process.Process(List(\"sbt\", \"compile\")).!",
+                "sbt",
+                &["compile"],
+            ),
         ];
         for (source, bin, args) in cases {
             let (qnames, argv) = invocation(source);
@@ -4395,7 +4986,10 @@ def build():
         for (cut, _) in multibyte.char_indices() {
             let _ = invocation(&multibyte[..cut]);
         }
-        assert_eq!(invocation(multibyte).0, vec!["cli_invoke:ß", "cli_invoke:ä", "cli_invoke:ö"]);
+        assert_eq!(
+            invocation(multibyte).0,
+            vec!["cli_invoke:ß", "cli_invoke:ä", "cli_invoke:ö"]
+        );
     }
 
     // ---- DH.10: PHP, Dart and Elixir launches --------------------------------
@@ -4433,8 +5027,16 @@ def build():
         assert_eq!(qnames, vec!["cli_invoke:mytool"]);
         assert_eq!(argv, vec![vec!["sync"]]);
         assert_invocations(&[
-            ("$p = new Process([\"mytool\", \"sync\", \"--force\"]);", "mytool", &["sync", "--force"]),
-            ("$p = Process::fromShellCommandline(\"mytool sync --all\");", "mytool", &["sync", "--all"]),
+            (
+                "$p = new Process([\"mytool\", \"sync\", \"--force\"]);",
+                "mytool",
+                &["sync", "--force"],
+            ),
+            (
+                "$p = Process::fromShellCommandline(\"mytool sync --all\");",
+                "mytool",
+                &["sync", "--all"],
+            ),
         ]);
         // C#'s `new Process()` and a Process built from a variable: no site.
         assert!(invocation("var p = new Process();").0.is_empty());
@@ -4445,9 +5047,21 @@ def build():
     fn php_shell_exec_split() {
         assert_invocations(&[
             ("$out = shell_exec(\"mytool sync\");", "mytool", &["sync"]),
-            ("passthru(\"mytool sync --verbose\");", "mytool", &["sync", "--verbose"]),
-            ("$h = proc_open(\"mytool sync\", $spec, $pipes);", "mytool", &["sync"]),
-            ("$h = proc_open([\"mytool\", \"sync\"], $spec, $pipes);", "mytool", &["sync"]),
+            (
+                "passthru(\"mytool sync --verbose\");",
+                "mytool",
+                &["sync", "--verbose"],
+            ),
+            (
+                "$h = proc_open(\"mytool sync\", $spec, $pipes);",
+                "mytool",
+                &["sync"],
+            ),
+            (
+                "$h = proc_open([\"mytool\", \"sync\"], $spec, $pipes);",
+                "mytool",
+                &["sync"],
+            ),
         ]);
     }
 
@@ -4457,11 +5071,22 @@ def build():
         assert_eq!(qnames, vec!["cli_invoke:mytool"]);
         assert_eq!(argv, vec![vec!["sync"]]);
         assert_invocations(&[
-            ("final r = Process.runSync(\"mytool\", [\"sync\"]);", "mytool", &["sync"]),
-            ("final p = await Process.start(\"mytool\", [\"sync\", \"--watch\"]);", "mytool", &["sync", "--watch"]),
+            (
+                "final r = Process.runSync(\"mytool\", [\"sync\"]);",
+                "mytool",
+                &["sync"],
+            ),
+            (
+                "final p = await Process.start(\"mytool\", [\"sync\", \"--watch\"]);",
+                "mytool",
+                &["sync", "--watch"],
+            ),
         ]);
         // C#'s spelling is its own needle, still read.
-        assert_eq!(invocation("Process.Start(\"mytool\", \"sync\");").0, vec!["cli_invoke:mytool"]);
+        assert_eq!(
+            invocation("Process.Start(\"mytool\", \"sync\");").0,
+            vec!["cli_invoke:mytool"]
+        );
     }
 
     #[test]
@@ -4470,8 +5095,16 @@ def build():
         assert_eq!(qnames, vec!["cli_invoke:mytool"]);
         assert_eq!(argv, vec![vec!["sync"]]);
         assert_invocations(&[
-            ("{out, 0} = System.cmd(\"mytool\", [\"sync\"], into: IO.stream())", "mytool", &["sync"]),
-            ("System.shell(\"mytool sync --all\")", "mytool", &["sync", "--all"]),
+            (
+                "{out, 0} = System.cmd(\"mytool\", [\"sync\"], into: IO.stream())",
+                "mytool",
+                &["sync"],
+            ),
+            (
+                "System.shell(\"mytool sync --all\")",
+                "mytool",
+                &["sync", "--all"],
+            ),
         ]);
         assert!(invocation("System.cmd(tool, [\"sync\"])").0.is_empty());
     }
@@ -4479,7 +5112,11 @@ def build():
     #[test]
     fn regex_exec_is_not_an_invocation() {
         // A bare `exec(` is no needle: a regex match reads no binary.
-        for source in ["const m = re.exec(\"abc\");", "if (/x+/.exec(\"xx\")) {}", "$r = $re->exec(\"abc\");"] {
+        for source in [
+            "const m = re.exec(\"abc\");",
+            "if (/x+/.exec(\"xx\")) {}",
+            "$r = $re->exec(\"abc\");",
+        ] {
             assert!(invocation(source).0.is_empty(), "{source}");
         }
     }
@@ -4503,7 +5140,10 @@ def build():
         // Command subclass's `name` is a subcommand handled by its class.
         let out = decls(DART_CLI_DEF_MYTOOL, "dart");
         assert_eq!(commands(&out), vec!["cli:sync", "cli:mytool"]);
-        assert_eq!(handlers(&out), vec![("cli:sync".to_string(), bare("SyncCommand"))]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cli:sync".to_string(), bare("SyncCommand"))]
+        );
         assert_eq!(out.per_framework, vec![(CliFramework::CommandRunner, 2)]);
         assert_eq!(
             decl_marker("dart", &out, "bin/mytool.dart").as_deref(),
@@ -4513,7 +5153,10 @@ def build():
         let ungated = DART_CLI_DEF_MYTOOL.replace("package:args/", "package:other/");
         assert!(decls(&ungated, "dart").nodes.is_empty());
         for lang in ["typescript", "java", "kotlin", "python", "ruby"] {
-            assert!(commands(&decls(DART_CLI_DEF_MYTOOL, lang)).is_empty(), "{lang}");
+            assert!(
+                commands(&decls(DART_CLI_DEF_MYTOOL, lang)).is_empty(),
+                "{lang}"
+            );
         }
     }
 
@@ -4546,7 +5189,16 @@ class Runner extends CommandRunner<void> {
 final runner = new CommandRunner("legacy", "Old style");
 "#;
         let out = decls(source, "dart");
-        assert_eq!(commands(&out), vec!["cli:deploy", "cli:gc", "cli:plain", "cli:shopctl", "cli:legacy"]);
+        assert_eq!(
+            commands(&out),
+            vec![
+                "cli:deploy",
+                "cli:gc",
+                "cli:plain",
+                "cli:shopctl",
+                "cli:legacy"
+            ]
+        );
         assert_eq!(
             handlers(&out),
             vec![
@@ -4599,7 +5251,10 @@ final runner = CommandRunner(executable, 'built');
     fn mix_task_names() {
         let out = decls(ELIXIR_CLI_DEF_TASK, "elixir");
         assert_eq!(commands(&out), vec!["cli:shop.sync"]);
-        assert_eq!(handlers(&out), vec![("cli:shop.sync".to_string(), bare("Sync"))]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cli:shop.sync".to_string(), bare("Sync"))]
+        );
         assert_eq!(out.per_framework, vec![(CliFramework::MixTask, 1)]);
         assert_eq!(
             decl_marker("elixir", &out, "lib/mix/tasks/shop.sync.ex").as_deref(),
@@ -4612,14 +5267,23 @@ final runner = CommandRunner(executable, 'built');
             ("ShopSync", "shop_sync", "ShopSync"),
             ("Phx2.Gen", "phx2.gen", "Gen"),
         ] {
-            let source = format!("defmodule Mix.Tasks.{module} do\n  use Mix.Task\n  def run(_), do: :ok\nend\n");
+            let source = format!(
+                "defmodule Mix.Tasks.{module} do\n  use Mix.Task\n  def run(_), do: :ok\nend\n"
+            );
             let out = decls(&source, "elixir");
             assert_eq!(commands(&out), vec![format!("cli:{task}")], "{module}");
-            assert_eq!(handlers(&out), vec![(format!("cli:{task}"), bare(handler))], "{module}");
+            assert_eq!(
+                handlers(&out),
+                vec![(format!("cli:{task}"), bare(handler))],
+                "{module}"
+            );
         }
         // A compiler is a task too.
         let compiler = "defmodule Mix.Tasks.Compile.Assets do\n  use Mix.Task.Compiler\n  def run(_), do: {:ok, []}\nend\n";
-        assert_eq!(commands(&decls(compiler, "elixir")), vec!["cli:compile.assets"]);
+        assert_eq!(
+            commands(&decls(compiler, "elixir")),
+            vec!["cli:compile.assets"]
+        );
 
         // Elixir's Macro.underscore, segment by segment.
         for (seg, want) in [
@@ -4678,7 +5342,10 @@ end
     fn argv_cell_round_trips_and_ignores_other_cells() {
         let argv = vec![vec!["migrate".to_string(), "--yes".to_string()]];
         assert_eq!(parse_argv_cell(&argv_cell("mytool", &argv)), argv);
-        let text = Cell { kind: cell_type::CODE, payload: CellPayload::Text("x".into()) };
+        let text = Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Text("x".into()),
+        };
         assert!(parse_argv_cell(&text).is_empty());
     }
 
@@ -4712,7 +5379,9 @@ end
         assert_eq!(manifest_commands(&out), ["cli:mytool"]);
         assert_eq!(
             manifest_marker("pyproject.toml", &out).as_deref(),
-            Some("[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0 composer=0 gemspec=0) path=pyproject.toml")
+            Some(
+                "[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0 composer=0 gemspec=0) path=pyproject.toml"
+            )
         );
 
         let pyproject = "[project]\nname = \"acme\"\ndependencies = [\"click\"]\n\n\
@@ -4720,7 +5389,10 @@ end
 [ project . \"gui-scripts\" ]\nacme-gui = \"acme.gui:run\"\n\n\
 [tool.black]\nline-length = 100\n";
         let out = manifest_bins(pyproject, "pyproject.toml");
-        assert_eq!(manifest_commands(&out), ["cli:acme", "cli:acme-admin", "cli:acme-gui"]);
+        assert_eq!(
+            manifest_commands(&out),
+            ["cli:acme", "cli:acme-admin", "cli:acme-gui"]
+        );
     }
 
     #[test]
@@ -4736,7 +5408,11 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
             ["cli:svc", "cli:svc-file", "cli:svc-long", "cli:svc-after"]
         );
         // A pyproject with no script table declares no binary.
-        assert!(manifest_bins("[project]\nname = \"lib\"\n", "pyproject.toml").nodes.is_empty());
+        assert!(
+            manifest_bins("[project]\nname = \"lib\"\n", "pyproject.toml")
+                .nodes
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4753,9 +5429,15 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
         );
 
         let scoped = r#"{"name": "@acme/deployer", "bin": "./cli.js"}"#;
-        assert_eq!(manifest_commands(&manifest_bins(scoped, "package.json")), ["cli:deployer"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(scoped, "package.json")),
+            ["cli:deployer"]
+        );
         let plain = r#"{"name": "deployer", "bin": "./cli.js"}"#;
-        assert_eq!(manifest_commands(&manifest_bins(plain, "package.json")), ["cli:deployer"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(plain, "package.json")),
+            ["cli:deployer"]
+        );
 
         // No `bin`, or not JSON: nothing, and no marker.
         let lib = manifest_bins(r#"{"name": "lib", "main": "index.js"}"#, "package.json");
@@ -4774,7 +5456,9 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
         assert_eq!(manifest_commands(&out), ["cli:migrate", "cli:seed"]);
         assert_eq!(
             manifest_marker("Cargo.toml", &out).as_deref(),
-            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=0 cargo=2 composer=0 gemspec=0) path=Cargo.toml")
+            Some(
+                "[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=0 cargo=2 composer=0 gemspec=0) path=Cargo.toml"
+            )
         );
         // A package with no [[bin]] is not assumed to be a binary: whether
         // src/main.rs exists is not visible to a per-file extractor.
@@ -4786,8 +5470,15 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
     fn non_manifest_paths_yield_nothing() {
         let scripts = "[project.scripts]\nx = \"x:main\"\n";
         assert!(manifest_bins(scripts, "setup.cfg").nodes.is_empty());
-        assert!(manifest_bins(scripts, "docs/pyproject.toml.txt").nodes.is_empty());
-        assert_eq!(manifest_marker("setup.py", &manifest_bins(scripts, "pyproject.toml")), None);
+        assert!(
+            manifest_bins(scripts, "docs/pyproject.toml.txt")
+                .nodes
+                .is_empty()
+        );
+        assert_eq!(
+            manifest_marker("setup.py", &manifest_bins(scripts, "pyproject.toml")),
+            None
+        );
     }
 
     #[test]
@@ -4809,7 +5500,9 @@ setup(
         assert_eq!(manifest_commands(&out), ["cli:acme", "cli:acme-admin"]);
         assert_eq!(
             decl_marker("python", &out, "setup.py").as_deref(),
-            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=2 npm=0 cargo=0 composer=0 gemspec=0) path=setup.py")
+            Some(
+                "[cli-decl] manifest bins=2 (pyproject=0 setup=2 npm=0 cargo=0 composer=0 gemspec=0) path=setup.py"
+            )
         );
 
         let kwarg = "from setuptools import setup\nsetup(entry_points=dict(console_scripts=['tool = pkg.mod:func']))\n";
@@ -4835,9 +5528,14 @@ note = "console_scripts: ['in = a:string']"
         assert!(out.nodes.is_empty(), "{:?}", commands(&out));
         assert_eq!(decl_marker("python", &out, "tools.py"), None);
         // Other languages never run the setuptools scan.
-        assert!(decls("x = {'console_scripts': ['a = b:c']}", "ruby").nodes.is_empty());
+        assert!(
+            decls("x = {'console_scripts': ['a = b:c']}", "ruby")
+                .nodes
+                .is_empty()
+        );
         // A malformed entry is not a binary.
-        let bad = "setup(entry_points={'console_scripts': ['no-target =', '= x:y', 'two words = a:b']})";
+        let bad =
+            "setup(entry_points={'console_scripts': ['no-target =', '= x:y', 'two words = a:b']})";
         assert!(decls(bad, "python").nodes.is_empty());
     }
 
@@ -4875,20 +5573,39 @@ setup(entry_points={"console_scripts": ["mytool = mytool.cli:cli"]})
 
     #[test]
     fn composer_bin_basenames() {
-        assert_eq!(manifest_commands(&manifest_bins(PHP_CLI_INV_COMPOSER, "composer.json")), ["cli:mytool"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(PHP_CLI_INV_COMPOSER, "composer.json")),
+            ["cli:mytool"]
+        );
         let one = r#"{"name": "acme/tool", "bin": "bin/tool"}"#;
-        assert_eq!(manifest_commands(&manifest_bins(one, "server/composer.json")), ["cli:tool"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(one, "server/composer.json")),
+            ["cli:tool"]
+        );
         let many = r#"{"bin": ["bin/a", "scripts/b.php", "bin/a", 7]}"#;
-        assert_eq!(manifest_commands(&manifest_bins(many, "composer.json")), ["cli:a", "cli:b.php"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(many, "composer.json")),
+            ["cli:a", "cli:b.php"]
+        );
         // No `bin`, a `bin` of another shape, or not JSON: nothing.
-        for source in [r#"{"name": "acme/lib", "require": {"php": "^8.2"}}"#, r#"{"bin": {"x": "y"}}"#, "{ nope"] {
-            assert!(manifest_bins(source, "composer.json").nodes.is_empty(), "{source}");
+        for source in [
+            r#"{"name": "acme/lib", "require": {"php": "^8.2"}}"#,
+            r#"{"bin": {"x": "y"}}"#,
+            "{ nope",
+        ] {
+            assert!(
+                manifest_bins(source, "composer.json").nodes.is_empty(),
+                "{source}"
+            );
         }
     }
 
     #[test]
     fn gemspec_executables_forms() {
-        assert_eq!(manifest_commands(&manifest_bins(RUBY_CLI_INV_GEMSPEC, "mytool.gemspec")), ["cli:mytool"]);
+        assert_eq!(
+            manifest_commands(&manifest_bins(RUBY_CLI_INV_GEMSPEC, "mytool.gemspec")),
+            ["cli:mytool"]
+        );
         let gemspec = r#"# frozen_string_literal: true
 Gem::Specification.new do |spec|
   spec.name = "toolkit"
@@ -4940,7 +5657,9 @@ end
         let out = manifest_bins(PHP_CLI_INV_COMPOSER, "composer.json");
         assert_eq!(
             manifest_marker("composer.json", &out).as_deref(),
-            Some("[cli-decl] manifest bins=1 (pyproject=0 setup=0 npm=0 cargo=0 composer=1 gemspec=0) path=composer.json")
+            Some(
+                "[cli-decl] manifest bins=1 (pyproject=0 setup=0 npm=0 cargo=0 composer=1 gemspec=0) path=composer.json"
+            )
         );
         let out = manifest_bins(RUBY_CLI_INV_GEMSPEC, "server/mytool.gemspec");
         assert_eq!(
@@ -4950,7 +5669,10 @@ end
             )
         );
         // A gemspec that ships no executable prints nothing.
-        let lib = manifest_bins("Gem::Specification.new { |s| s.name = \"lib\" }\n", "lib.gemspec");
+        let lib = manifest_bins(
+            "Gem::Specification.new { |s| s.name = \"lib\" }\n",
+            "lib.gemspec",
+        );
         assert_eq!(manifest_marker("lib.gemspec", &lib), None);
     }
 }

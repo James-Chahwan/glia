@@ -12,11 +12,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn fixture(sub: &str) -> String {
-    format!("{}/../bench/substrate-gap/fixtures/xcut-overlay-edges/{sub}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/fixtures/xcut-overlay-edges/{sub}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 fn glia(args: &[&str]) -> Output {
-    let out = Command::new(env!("CARGO_BIN_EXE_glia")).args(args).output().expect("glia runs");
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(args)
+        .output()
+        .expect("glia runs");
     // Relay the markers so `-- --nocapture | grep '^\[overlay\] '` sees them.
     for line in String::from_utf8_lossy(&out.stderr).lines() {
         if line.starts_with("[overlay] ") {
@@ -67,8 +73,15 @@ fn no_overlay_merge_skips_the_overlay() {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = glia(&args);
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-        assert!(out.status.success(), "{args:?}: exit {:?}\n{stderr}", out.status);
-        assert!(stderr.contains("[overlay] disabled (--no-overlay) repo="), "{args:?}: {stderr}");
+        assert!(
+            out.status.success(),
+            "{args:?}: exit {:?}\n{stderr}",
+            out.status
+        );
+        assert!(
+            stderr.contains("[overlay] disabled (--no-overlay) repo="),
+            "{args:?}: {stderr}"
+        );
         assert!(!stderr.contains("[overlay] edges "), "{args:?}: {stderr}");
         assert!(stdout.contains("- cross-edges: 0"), "{args:?}: {stdout}");
     }
@@ -80,14 +93,33 @@ fn no_overlay_build_needs_out() {
     let web_s = web.to_string_lossy().into_owned();
     let out = glia(&["build", &web_s, "--no-overlay"]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("error: --no-overlay needs --out"), "{}", text(&out.stderr));
-    assert!(!web.join(".glia/graph").exists(), "the refusal wrote nothing");
+    assert!(
+        text(&out.stderr).contains("error: --no-overlay needs --out"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        !web.join(".glia/graph").exists(),
+        "the refusal wrote nothing"
+    );
 
     // With --out the extraction-only layout goes there, never to the default dir.
     let dest = web.parent().unwrap().join("bare-layout");
     let dest_s = dest.to_string_lossy().into_owned();
-    let out = glia(&["--no-overlay", "build", &web_s, "--out", &dest_s, "--no-incremental"]);
-    assert!(out.status.success(), "exit {:?}\n{}", out.status, text(&out.stderr));
+    let out = glia(&[
+        "--no-overlay",
+        "build",
+        &web_s,
+        "--out",
+        &dest_s,
+        "--no-incremental",
+    ]);
+    assert!(
+        out.status.success(),
+        "exit {:?}\n{}",
+        out.status,
+        text(&out.stderr)
+    );
     assert!(dest.join("manifest.json").is_file());
     assert!(!web.join(".glia/graph/manifest.json").exists());
     let _ = std::fs::remove_dir_all(web.parent().unwrap());
@@ -96,8 +128,17 @@ fn no_overlay_build_needs_out() {
 #[test]
 fn no_overlay_layout_merge_is_refused() {
     let web = web_copy("layout");
-    let out = glia(&["--no-overlay", "merge", "--gmap", &web.join(".glia/graph").to_string_lossy()]);
+    let out = glia(&[
+        "--no-overlay",
+        "merge",
+        "--gmap",
+        &web.join(".glia/graph").to_string_lossy(),
+    ]);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("--no-overlay applies to a source merge only"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("--no-overlay applies to a source merge only"),
+        "{}",
+        text(&out.stderr)
+    );
     let _ = std::fs::remove_dir_all(web.parent().unwrap());
 }

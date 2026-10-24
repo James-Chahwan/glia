@@ -31,11 +31,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_core::Node;
 use glia_projection_text::driver_utils::{
     build_repo_graph, extract_position_cell, read_json, write_json,
 };
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -118,9 +118,7 @@ fn main() -> Result<()> {
     //    "buggy line" — typically the next non-blank indented line).
     let issue_text = std::fs::read_to_string(&args.issue)
         .with_context(|| format!("read issue {}", args.issue.display()))?;
-    let traceback_re = Regex::new(
-        r#"File\s+"([^"]+)",\s*line\s+(\d+),\s*in\s+(\w+)"#,
-    )?;
+    let traceback_re = Regex::new(r#"File\s+"([^"]+)",\s*line\s+(\d+),\s*in\s+(\w+)"#)?;
     // Build linear list of (file, line, fn, source_line_opt) by walking the issue lines.
     let issue_lines: Vec<&str> = issue_text.lines().collect();
     let mut tracebacks: Vec<(String, u32, String, Option<String>)> = Vec::new();
@@ -129,7 +127,9 @@ fn main() -> Result<()> {
             let file = c.get(1).unwrap().as_str().to_string();
             let lineno = c.get(2).unwrap().as_str().parse::<u32>().unwrap_or(0);
             let fn_name = c.get(3).unwrap().as_str().to_string();
-            if lineno == 0 { continue; }
+            if lineno == 0 {
+                continue;
+            }
             // Look ahead 1-2 lines for the source-line excerpt.
             let mut src: Option<String> = None;
             for off in 1..=2 {
@@ -154,34 +154,52 @@ fn main() -> Result<()> {
     // for known SWE-bench shapes and fall back to a generic "<Error>: <msg>"
     // capture if none match. The richer the parse, the more targeted the
     // substitution-hint we can synthesize in the directive.
-    let attr_re = Regex::new(
-        r#"^(\w+Error):\s*'([^']+)'\s+object\s+has\s+no\s+attribute\s+'([^']+)'"#,
-    )?;
+    let attr_re =
+        Regex::new(r#"^(\w+Error):\s*'([^']+)'\s+object\s+has\s+no\s+attribute\s+'([^']+)'"#)?;
     let kwarg_re = Regex::new(
         r#"^(\w+Error):\s*(?:(\w+)\(\))?\s*got an unexpected keyword argument\s+'([^']+)'"#,
     )?;
     let arity_re = Regex::new(
         r#"^(\w+Error):\s*(?:(\w+)\(\))?\s*takes\s+(\d+)\s+positional\s+arguments?\s+but\s+(\d+)\s+(?:were|was)\s+given"#,
     )?;
-    let not_subscript_re = Regex::new(
-        r#"^(\w+Error):\s*'([^']+)'\s+object\s+is\s+not\s+subscriptable"#,
-    )?;
+    let not_subscript_re =
+        Regex::new(r#"^(\w+Error):\s*'([^']+)'\s+object\s+is\s+not\s+subscriptable"#)?;
     let not_iter_re = Regex::new(
         r#"^(\w+Error):\s*(?:cannot unpack non-iterable|')([^']+)(?:'\s+object\s+is\s+not\s+iterable)?"#,
     )?;
-    let index_range_re = Regex::new(
-        r#"^(IndexError):\s*(list|tuple|string)\s+index\s+out\s+of\s+range"#,
-    )?;
+    let index_range_re =
+        Regex::new(r#"^(IndexError):\s*(list|tuple|string)\s+index\s+out\s+of\s+range"#)?;
     let generic_exc_re = Regex::new(r#"^(\w+(?:Error|Exception)):\s*(.+)$"#)?;
 
     #[derive(Debug, Clone)]
     enum ExcInfo {
-        Attribute { class: String, obj_type: String, attr: String },
-        UnexpectedKwarg { class: String, callable: Option<String>, kwarg: String },
-        ArityMismatch { class: String, callable: Option<String>, takes: u32, given: u32 },
-        NotSubscriptable { class: String, obj_type: String },
-        IndexOutOfRange { obj_type: String },
-        Generic { class: String, message: String },
+        Attribute {
+            class: String,
+            obj_type: String,
+            attr: String,
+        },
+        UnexpectedKwarg {
+            class: String,
+            callable: Option<String>,
+            kwarg: String,
+        },
+        ArityMismatch {
+            class: String,
+            callable: Option<String>,
+            takes: u32,
+            given: u32,
+        },
+        NotSubscriptable {
+            class: String,
+            obj_type: String,
+        },
+        IndexOutOfRange {
+            obj_type: String,
+        },
+        Generic {
+            class: String,
+            message: String,
+        },
     }
 
     let mut exc_info: Option<ExcInfo> = None;
@@ -247,8 +265,8 @@ fn main() -> Result<()> {
     }
 
     // 2. Build graph for the repo.
-    let graph = build_repo_graph(&args.src, &args.repo_canonical)
-        .context("build_repo_graph failed")?;
+    let graph =
+        build_repo_graph(&args.src, &args.repo_canonical).context("build_repo_graph failed")?;
     eprintln!(
         "[synth_traceback_target] graph: {} nodes",
         graph.nodes.len()
@@ -257,8 +275,7 @@ fn main() -> Result<()> {
     // 3. For each traceback (file, line), find nodes whose POSITION cell
     //    spans that line in a path that ends with the traceback's file.
     let mut matches: Vec<TracebackMatch> = Vec::new();
-    let mut seen_qnames: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_qnames: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (tb_file, tb_line, tb_fn, _tb_src) in &tracebacks {
         // Traceback paths may be unix-style (/home/.../fields.py) OR
         // windows-style (C:\Python36\lib\...\label.py) since SWE-bench
@@ -268,7 +285,9 @@ fn main() -> Result<()> {
             .next()
             .unwrap_or(tb_file.as_str());
         for node in &graph.nodes {
-            let Some(pos_json) = extract_position_cell(node) else { continue };
+            let Some(pos_json) = extract_position_cell(node) else {
+                continue;
+            };
             let Ok(pos) = serde_json::from_str::<PositionPayload>(pos_json) else {
                 continue;
             };
@@ -286,8 +305,8 @@ fn main() -> Result<()> {
             if tb_line_0 < pos.start_line || tb_line_0 > pos.end_line {
                 continue;
             }
-            let qname = qname_of_node(&graph, node)
-                .unwrap_or_else(|| format!("node:{:x}", node.id.0));
+            let qname =
+                qname_of_node(&graph, node).unwrap_or_else(|| format!("node:{:x}", node.id.0));
             if !seen_qnames.insert(qname.clone()) {
                 continue;
             }
@@ -325,7 +344,9 @@ fn main() -> Result<()> {
         eprintln!(
             "[synth_traceback_target] (legacy L2) pool input: {} entries; max score: {:.3}",
             pool.len(),
-            pool.iter().map(|e| e.score).fold(f64::NEG_INFINITY, f64::max),
+            pool.iter()
+                .map(|e| e.score)
+                .fold(f64::NEG_INFINITY, f64::max),
         );
         let mut next_synth_id: u64 = 0xFFFF_FFFF_0000_0000;
         for m in &matches {
@@ -379,7 +400,11 @@ fn main() -> Result<()> {
         // is upstream (caller wrongly invoked a path that reaches the raise).
         // Redirect to the next-deepest-graph-matched frame in that case.
         let raise_re = Regex::new(r#"^\s*raise\b"#)?;
-        let mut graph_matched_frames: Vec<(&TracebackMatch, Option<&String>, bool /*is_raise*/)> = Vec::new();
+        let mut graph_matched_frames: Vec<(
+            &TracebackMatch,
+            Option<&String>,
+            bool, /*is_raise*/
+        )> = Vec::new();
         for (tb_file, tb_line, _tb_fn, src) in tracebacks.iter().rev() {
             if let Some(m) = narrowest_by_loc.get(&(tb_file.clone(), *tb_line)).copied() {
                 let is_raise = src.as_ref().map(|s| raise_re.is_match(s)).unwrap_or(false);
@@ -389,7 +414,9 @@ fn main() -> Result<()> {
         // First non-raise frame wins. If all frames are raises (rare), fall
         // back to the deepest.
         let (target_match, target_src_line): (Option<&TracebackMatch>, Option<&String>) = {
-            let first_non_raise = graph_matched_frames.iter().find(|(_, _, is_raise)| !*is_raise);
+            let first_non_raise = graph_matched_frames
+                .iter()
+                .find(|(_, _, is_raise)| !*is_raise);
             match first_non_raise {
                 Some((m, src, _)) => (Some(*m), *src),
                 None => match graph_matched_frames.first() {
@@ -425,7 +452,9 @@ fn main() -> Result<()> {
             None
         };
         let raise_frame_line: Option<u32> = if redirected_from_raise {
-            graph_matched_frames.first().map(|(m, _, _)| m.traceback_line)
+            graph_matched_frames
+                .first()
+                .map(|(m, _, _)| m.traceback_line)
         } else {
             None
         };
@@ -446,7 +475,9 @@ fn main() -> Result<()> {
         if redirected_from_raise {
             eprintln!(
                 "[synth_traceback_target] deepest frame is a `raise` line; primary target redirected to caller {}, deepest frame {} emitted as SECONDARY site (not anti-target)",
-                target_match.map(|m| m.matched_qname.as_str()).unwrap_or("?"),
+                target_match
+                    .map(|m| m.matched_qname.as_str())
+                    .unwrap_or("?"),
                 raise_frame_qname.as_deref().unwrap_or("?"),
             );
         }
@@ -457,7 +488,11 @@ fn main() -> Result<()> {
         // contradicts itself and produced NO-DIFF in matplotlib-22835.
         let antitarget_qnames: Vec<&String> = narrowest_by_loc
             .values()
-            .filter(|m| target_match.map(|t| t.matched_qname != m.matched_qname).unwrap_or(true))
+            .filter(|m| {
+                target_match
+                    .map(|t| t.matched_qname != m.matched_qname)
+                    .unwrap_or(true)
+            })
             .filter(|m| {
                 raise_frame_qname
                     .as_ref()
@@ -546,12 +581,20 @@ fn main() -> Result<()> {
                 }
             }
             match &exc_info {
-                Some(ExcInfo::Attribute { class, obj_type, attr }) => {
+                Some(ExcInfo::Attribute {
+                    class,
+                    obj_type,
+                    attr,
+                }) => {
                     s.push_str(&format!(
                         "\nThe exception is `{class}: '{obj_type}' object has no attribute '{attr}'`. The receiver of the failing `.{attr}` access is a `{obj_type}` instance at runtime, NOT what the variable name suggests. Replace the failing `<X>.{attr}` access with the access-path that actually resolves to `.{attr}` (consult the '## Reachable access paths:' section in the prefix above; e.g. `self.root.{attr}`).\n",
                     ));
                 }
-                Some(ExcInfo::UnexpectedKwarg { class, callable, kwarg }) => {
+                Some(ExcInfo::UnexpectedKwarg {
+                    class,
+                    callable,
+                    kwarg,
+                }) => {
                     let callable_text = callable
                         .as_deref()
                         .map(|c| format!("`{c}()`"))
@@ -560,7 +603,12 @@ fn main() -> Result<()> {
                         "\nThe exception is `{class}`: {callable_text} received an unexpected keyword argument `{kwarg}`. Either:\n  (a) Remove the `{kwarg}=...` kwarg from the call site, OR\n  (b) Rename `{kwarg}` to the correct parameter name (check the callable's signature for similar names).\nDo NOT add `{kwarg}` to the callable's signature unless that is the documented fix.\n",
                     ));
                 }
-                Some(ExcInfo::ArityMismatch { class, callable, takes, given }) => {
+                Some(ExcInfo::ArityMismatch {
+                    class,
+                    callable,
+                    takes,
+                    given,
+                }) => {
                     let callable_text = callable
                         .as_deref()
                         .map(|c| format!("`{c}()`"))
@@ -644,7 +692,11 @@ fn qname_of_node(graph: &glia_graph::RepoGraph, node: &Node) -> Option<String> {
 ///
 /// Python-only for now. The match looks at indentation-stripped line content
 /// so it works whether the raise is inside `def`/`class`/`with`/etc.
-fn walk_up_to_condition(file_text: &str, raise_line: u32, fn_start_line: u32) -> Option<(u32, String)> {
+fn walk_up_to_condition(
+    file_text: &str,
+    raise_line: u32,
+    fn_start_line: u32,
+) -> Option<(u32, String)> {
     let lines: Vec<&str> = file_text.lines().collect();
     if (raise_line as usize) == 0 || (raise_line as usize) > lines.len() {
         return None;

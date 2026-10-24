@@ -5,7 +5,7 @@
 //! file was being edited by a sibling packet in the same working tree, and a
 //! `git commit --only` on it would have swept their tests into this commit.
 
-use glia_code_domain::{CodeNav, cell_type, edge_category, node_kind, GRAPH_TYPE};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 use glia_graph::*;
 

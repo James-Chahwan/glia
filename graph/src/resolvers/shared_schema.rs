@@ -111,8 +111,18 @@ fn is_schema_type(qname: &str, kind: Option<NodeKindId>) -> bool {
     // `OrderDto`, and `contains("DTO")` never matched that — the packet's own
     // C#-DTO use case was blind twice over.
     let schema_hints = [
-        "Schema", "Validator", "Type", "Model", "Entity", "DTO", "Dto",
-        "Input", "Output", "Params", "Request", "Response",
+        "Schema",
+        "Validator",
+        "Type",
+        "Model",
+        "Entity",
+        "DTO",
+        "Dto",
+        "Input",
+        "Output",
+        "Params",
+        "Request",
+        "Response",
     ];
     let is_type_kind = matches!(
         kind,
@@ -139,7 +149,12 @@ mod tests {
         nav.record(module, "Models", "Models", node_kind::MODULE, None);
         nav.record(pkg, "Contracts", ns, node_kind::PACKAGE, Some(module));
         nav.record(class, ty, &qname, node_kind::CLASS, Some(pkg));
-        let node = |id| Node { id, repo: repo_id, confidence: Confidence::Medium, cells: vec![] };
+        let node = |id| Node {
+            id,
+            repo: repo_id,
+            confidence: Confidence::Medium,
+            cells: vec![],
+        };
         RepoGraph {
             repo: repo_id,
             nodes: vec![node(module), node(pkg), node(class)],
@@ -181,7 +196,12 @@ mod tests {
             let mut nav = CodeNav::default();
             nav.record(module, "models", "models", node_kind::MODULE, None);
             nav.record(class, "UserModel", qname, node_kind::CLASS, Some(module));
-            let node = |id| Node { id, repo: repo_id, confidence: Confidence::Strong, cells: vec![] };
+            let node = |id| Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            };
             RepoGraph {
                 repo: repo_id,
                 nodes: vec![node(module), node(class)],
@@ -193,8 +213,10 @@ mod tests {
                 properties: HashSet::new(),
             }
         }
-        let mut merged =
-            MergedGraph::new(vec![flat(RepoId(31), "models::UserModel"), flat(RepoId(32), "models::UserModel")]);
+        let mut merged = MergedGraph::new(vec![
+            flat(RepoId(31), "models::UserModel"),
+            flat(RepoId(32), "models::UserModel"),
+        ]);
         merged.run(&SharedSchemaResolver);
         assert_eq!(
             merged
@@ -220,8 +242,19 @@ mod tests {
             nav.record(module, "Models", "Models", node_kind::MODULE, None);
             nav.record(pkg, "Ns", "Ns", node_kind::PACKAGE, Some(module));
             nav.record(outer, "Outer", "Ns::Outer", node_kind::CLASS, Some(pkg));
-            nav.record(inner, "InnerDto", "Ns::Outer::InnerDto", node_kind::CLASS, Some(outer));
-            let node = |id| Node { id, repo: repo_id, confidence: Confidence::Medium, cells: vec![] };
+            nav.record(
+                inner,
+                "InnerDto",
+                "Ns::Outer::InnerDto",
+                node_kind::CLASS,
+                Some(outer),
+            );
+            let node = |id| Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            };
             RepoGraph {
                 repo: repo_id,
                 nodes: vec![node(module), node(pkg), node(outer), node(inner)],

@@ -92,7 +92,9 @@ fn arch_mermaid_emits_a_link() {
     let arrows: Vec<&str> = stdout.lines().filter(|l| l.contains(" -->|")).collect();
     assert_eq!(arrows.len(), 1, "{stdout}");
     assert!(
-        arrows[0].trim_start().starts_with("svc1 -->|\"HTTP_CALLS ×2")
+        arrows[0]
+            .trim_start()
+            .starts_with("svc1 -->|\"HTTP_CALLS ×2")
             && arrows[0].trim_end().ends_with("| svc0"),
         "{}",
         arrows[0]
@@ -151,7 +153,11 @@ impl ThreeRepos {
             .output()
             .expect("glia runs");
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert!(out.status.success(), "glia {args:?} exited {:?}\n{stderr}", out.status);
+        assert!(
+            out.status.success(),
+            "glia {args:?} exited {:?}\n{stderr}",
+            out.status
+        );
         for line in stderr.lines() {
             if line.starts_with("[arch] ") || line.starts_with("[identity] collapse surface=arch") {
                 eprintln!("{line}");
@@ -197,16 +203,26 @@ fn arch_same_as_class_links_every_service_pair() {
         ]
     );
     assert!(
-        stderr.contains("[identity] collapse surface=arch classes=1 walk_classes=0 folded=0 rows=3"),
+        stderr
+            .contains("[identity] collapse surface=arch classes=1 walk_classes=0 folded=0 rows=3"),
         "fired_on marker missing or wrong:\n{stderr}"
     );
-    assert!(stderr.contains("[arch] 3 services, 3 links (keying=per_repo "), "{stderr}");
+    assert!(
+        stderr.contains("[arch] 3 services, 3 links (keying=per_repo "),
+        "{stderr}"
+    );
 
     // --no-collapse: the stored star, two links into the center's service.
     let (raw, raw_err) = repos.arch(&["--include-shared", "--json", "--no-collapse"]);
     assert_eq!(raw.len(), 2, "{raw:?}");
-    assert!(raw.iter().all(|r| r.ends_with(" react x1 strong")), "{raw:?}");
-    assert!(!raw_err.contains("[identity] collapse surface=arch"), "off prints no collapse line");
+    assert!(
+        raw.iter().all(|r| r.ends_with(" react x1 strong")),
+        "{raw:?}"
+    );
+    assert!(
+        !raw_err.contains("[identity] collapse surface=arch"),
+        "off prints no collapse line"
+    );
 
     // Without --include-shared no SAME_AS link is shown, collapsed or not.
     let (hidden, _) = repos.arch(&["--json"]);
@@ -222,6 +238,10 @@ fn arch_no_collapse_is_identical_on_a_class_free_stack() {
         .args(["arch", &fixture("arch_monorepo"), "--json", "--no-collapse"])
         .output()
         .expect("glia runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(out.stdout, collapsed.stdout, "no SAME_AS edge: one answer");
 }

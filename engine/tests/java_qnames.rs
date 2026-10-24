@@ -64,7 +64,9 @@ fn no_qname_doubles_the_file_stem() {
     let (_tmp, merged) = build();
     let qnames = all_qnames(&merged);
     assert!(
-        !qnames.iter().any(|q| q.contains("InvoiceService::InvoiceService")),
+        !qnames
+            .iter()
+            .any(|q| q.contains("InvoiceService::InvoiceService")),
         "doubled class segment: {qnames:?}"
     );
     for want in [
@@ -85,7 +87,10 @@ fn blast_radius_by_the_package_scoped_method_qname() {
     let mut forward = BlastOptions::default();
     forward.direction = Reach::Forward;
     let answer = blast_radius(&merged, &[TOTAL], &forward);
-    assert!(answer.unresolved.is_empty(), "the package-scoped method qname resolves");
+    assert!(
+        answer.unresolved.is_empty(),
+        "the package-scoped method qname resolves"
+    );
     let hits = answer.results;
     let round = hits
         .iter()
@@ -104,9 +109,16 @@ fn blast_radius_by_the_package_scoped_method_qname() {
 fn the_class_qname_resolves_to_the_class_not_its_file_module() {
     let (_tmp, merged) = build();
     let shared = merged.qnames_exact(MODULE);
-    let mut kinds: Vec<&str> = shared.iter().map(|id| locate_node(&merged, *id).kind).collect();
+    let mut kinds: Vec<&str> = shared
+        .iter()
+        .map(|id| locate_node(&merged, *id).kind)
+        .collect();
     kinds.sort_unstable();
-    assert_eq!(kinds, vec!["CLASS", "MODULE"], "the public class shares its file's qname");
+    assert_eq!(
+        kinds,
+        vec!["CLASS", "MODULE"],
+        "the public class shares its file's qname"
+    );
 
     let id = merged.node_id_by_qname(MODULE).expect("qname resolves");
     let at = locate_node(&merged, id);

@@ -68,7 +68,10 @@ impl MergedGraph {
                 }
             }
         }
-        eprintln!("[passes] pass undo: entries={} restored={restored}", undo.len());
+        eprintln!(
+            "[passes] pass undo: entries={} restored={restored}",
+            undo.len()
+        );
     }
 
     pub fn run<R: CrossGraphResolver>(&mut self, resolver: &R) {
@@ -185,7 +188,11 @@ impl MergedGraph {
             [] => None,
             [only] => Some(*only),
             many => many.iter().copied().max_by_key(|&id| {
-                (self.is_declaration(id), self.degree(id), std::cmp::Reverse(id.0))
+                (
+                    self.is_declaration(id),
+                    self.degree(id),
+                    std::cmp::Reverse(id.0),
+                )
             }),
         }
     }
@@ -272,8 +279,12 @@ impl MergedGraph {
             .graphs
             .iter()
             .map(|g| {
-                let nodes: Vec<Node> =
-                    g.nodes.iter().filter(|n| keep.contains(&n.id)).cloned().collect();
+                let nodes: Vec<Node> = g
+                    .nodes
+                    .iter()
+                    .filter(|n| keep.contains(&n.id))
+                    .cloned()
+                    .collect();
                 let edges: Vec<Edge> = g
                     .edges
                     .iter()
@@ -328,7 +339,11 @@ impl MergedGraph {
             .filter(|e| keep.contains(&e.from) && keep.contains(&e.to))
             .cloned()
             .collect();
-        MergedGraph { graphs, cross_edges, pass_undo: Vec::new() }
+        MergedGraph {
+            graphs,
+            cross_edges,
+            pass_undo: Vec::new(),
+        }
     }
 
     /// G19 — resolve an OTLP-style dotted span name (`myservice.handlers.users.list_users`)
@@ -537,8 +552,16 @@ pub fn cross_links_with(
         for n in &g.nodes {
             meta.entry(n.id).or_insert_with(|| {
                 (
-                    g.nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or(""),
-                    g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or(""),
+                    g.nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    g.nav
+                        .name_by_id
+                        .get(&n.id)
+                        .map(String::as_str)
+                        .unwrap_or(""),
                 )
             });
         }
@@ -794,9 +817,24 @@ mod tests {
         let g = RepoGraph {
             repo: r,
             nodes: vec![
-                Node { id: class, repo: r, confidence: Confidence::Strong, cells: vec![] },
-                Node { id: comp, repo: r, confidence: Confidence::Strong, cells: vec![] },
-                Node { id: run, repo: r, confidence: Confidence::Strong, cells: vec![] },
+                Node {
+                    id: class,
+                    repo: r,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
+                Node {
+                    id: comp,
+                    repo: r,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
+                Node {
+                    id: run,
+                    repo: r,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                },
             ],
             // Only the CLASS participates in an edge; the COMPONENT is edgeless.
             edges: vec![Edge {
@@ -857,12 +895,25 @@ mod tests {
         for (d, q) in deps.iter().zip(["a", "b", "c"]) {
             nav.record(*d, q, q, node_kind::MODULE, None);
         }
-        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
-        let edge = |from, to, category| Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() };
+        let node = |id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
+        let edge = |from, to, category| Edge {
+            from,
+            to,
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        };
         let mut nodes = vec![node(module), node(class), node(run)];
         nodes.extend(deps.iter().map(|d| node(*d)));
-        let mut edges: Vec<Edge> =
-            deps.iter().map(|d| edge(module, *d, edge_category::IMPORTS)).collect();
+        let mut edges: Vec<Edge> = deps
+            .iter()
+            .map(|d| edge(module, *d, edge_category::IMPORTS))
+            .collect();
         edges.push(edge(class, run, edge_category::DEFINES));
         let m = MergedGraph::new(vec![RepoGraph {
             repo: r,
@@ -874,7 +925,10 @@ mod tests {
             unresolved_refs: vec![],
             properties: HashSet::new(),
         }]);
-        assert!(m.degree(module) > m.degree(class), "precondition: the MODULE has more edges");
+        assert!(
+            m.degree(module) > m.degree(class),
+            "precondition: the MODULE has more edges"
+        );
         assert_eq!(m.pick_primary(&[module, class]), Some(class));
         assert_eq!(m.pick_primary(&[class, module]), Some(class));
         assert_eq!(m.node_id_by_qname("pkg::Dup"), Some(class));
@@ -891,7 +945,10 @@ mod tests {
         assert_eq!(got.len(), 2, "both same-qname nodes returned");
         let mut want = got.clone();
         want.sort_by_key(|id| id.0);
-        assert_eq!(got, want, "qnames_exact must return a stable id-sorted order");
+        assert_eq!(
+            got, want,
+            "qnames_exact must return a stable id-sorted order"
+        );
 
         // Substring search reaches all three (Dup, Dup marker, Dup::run).
         let sub = m.qnames_containing("pkg::Dup");
@@ -944,10 +1001,7 @@ mod tests {
         );
         let g2 = synth_repo_graph(
             r2,
-            &[
-                ("b::C", node_kind::CLASS),
-                ("b::g", node_kind::FUNCTION),
-            ],
+            &[("b::C", node_kind::CLASS), ("b::g", node_kind::FUNCTION)],
         );
         let merged = MergedGraph::new(vec![g1, g2]);
         let classes = merged.nodes_of_kind(node_kind::CLASS);
@@ -1020,7 +1074,13 @@ mod tests {
     }
 
     fn xedge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
-        Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
+        Edge {
+            from,
+            to,
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        }
     }
 
     fn id_of(repo: RepoId, kind: NodeKindId, qname: &str) -> NodeId {
@@ -1029,7 +1089,10 @@ mod tests {
 
     #[test]
     fn channel_of_reads_every_resolver_prefix() {
-        assert_eq!(channel_of("endpoint:GET:/users", "GET /users"), "GET /users");
+        assert_eq!(
+            channel_of("endpoint:GET:/users", "GET /users"),
+            "GET /users"
+        );
         // Method is upper-cased by parse_endpoint_qname, path kept verbatim.
         assert_eq!(channel_of("endpoint:get:/users/:id", ""), "GET /users/:id");
         assert_eq!(channel_of("queue_producer:orders.v2", "kafka"), "orders.v2");
@@ -1038,21 +1101,39 @@ mod tests {
         assert_eq!(channel_of("grpc:Greeter", "Greeter"), "Greeter");
         assert_eq!(channel_of("graphql_op:getUser", "getUser"), "getUser");
         assert_eq!(channel_of("graphql_resolver:getUser", "getUser"), "getUser");
-        assert_eq!(channel_of("ws_client:/notifications", "ws"), "/notifications");
-        assert_eq!(channel_of("event_emit:user.created", "emit"), "user.created");
+        assert_eq!(
+            channel_of("ws_client:/notifications", "ws"),
+            "/notifications"
+        );
+        assert_eq!(
+            channel_of("event_emit:user.created", "emit"),
+            "user.created"
+        );
         assert_eq!(channel_of("cli_invoke:terraform", "run"), "terraform");
         assert_eq!(channel_of("data_entity:sql:users", "users"), "sql:users");
-        assert_eq!(channel_of("config:env:DATABASE_URL", "DATABASE_URL"), "env:DATABASE_URL");
+        assert_eq!(
+            channel_of("config:env:DATABASE_URL", "DATABASE_URL"),
+            "env:DATABASE_URL"
+        );
         assert_eq!(channel_of("infra:image:api", "api"), "image:api");
         assert_eq!(channel_of("route:/users", "/users"), "/users");
         // LB.4a: the owner segment is not part of the channel.
         assert_eq!(channel_of("route:/users @services/api", "/users"), "/users");
-        assert_eq!(channel_of("endpoint:POST:/users @web", "POST /users"), "POST /users");
+        assert_eq!(
+            channel_of("endpoint:POST:/users @web", "POST /users"),
+            "POST /users"
+        );
         assert_eq!(channel_of("GET /users @api", "GET /users"), "GET /users");
         // LB.8: channel sides carry the same segment; the channel is bare.
         for (q, want) in [
-            ("queue_producer:orders.created @services/orders", "orders.created"),
-            ("queue_consumer:orders.created @services/audit", "orders.created"),
+            (
+                "queue_producer:orders.created @services/orders",
+                "orders.created",
+            ),
+            (
+                "queue_consumer:orders.created @services/audit",
+                "orders.created",
+            ),
             ("grpc_client:UserService @services/gateway", "UserService"),
             ("graphql_op:getUser @web", "getUser"),
             ("graphql_resolver:getUser @services/users", "getUser"),
@@ -1070,9 +1151,15 @@ mod tests {
         // and a ` @` followed by whitespace, are part of the channel.
         assert_eq!(channel_of("queue_producer:jobs@v2", "x"), "jobs@v2");
         assert_eq!(channel_of("cron:@daily:sweep", "sweep"), "@daily:sweep");
-        assert_eq!(channel_of("cron:x @ 10:00:sweep", "sweep"), "x @ 10:00:sweep");
+        assert_eq!(
+            channel_of("cron:x @ 10:00:sweep", "sweep"),
+            "x @ 10:00:sweep"
+        );
         // strip_prefix, not split_once — a schedule full of colons survives.
-        assert_eq!(channel_of("cron:0 4 * * *:cleanup", "cleanup"), "0 4 * * *:cleanup");
+        assert_eq!(
+            channel_of("cron:0 4 * * *:cleanup", "cleanup"),
+            "0 4 * * *:cleanup"
+        );
         // Fallbacks: name, then qname.
         assert_eq!(channel_of("UserDto", "UserDto"), "UserDto");
         assert_eq!(channel_of("a::b::UserDto", ""), "a::b::UserDto");
@@ -1085,7 +1172,10 @@ mod tests {
         let g_a = synth_repo_graph(ra, &[("endpoint:GET:/users", node_kind::ENDPOINT)]);
         let g_b = synth_repo_graph(
             rb,
-            &[("route:/users", node_kind::ROUTE), ("route:/users/", node_kind::ROUTE)],
+            &[
+                ("route:/users", node_kind::ROUTE),
+                ("route:/users/", node_kind::ROUTE),
+            ],
         );
         let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
         let ep = id_of(ra, node_kind::ENDPOINT, "endpoint:GET:/users");
@@ -1099,7 +1189,11 @@ mod tests {
 
         let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
         assert_eq!(unplaced, 0);
-        assert_eq!(links.len(), 1, "same (from,to,mechanism,channel) must collapse");
+        assert_eq!(
+            links.len(),
+            1,
+            "same (from,to,mechanism,channel) must collapse"
+        );
         assert_eq!(links[0].from, "a");
         assert_eq!(links[0].to, "b");
         assert_eq!(links[0].mechanism, "HTTP_CALLS");
@@ -1295,8 +1389,14 @@ mod tests {
         assert_eq!(unplaced, 0);
         assert_eq!(links.len(), 1, "{links:?}");
         let l = &links[0];
-        assert_eq!((l.from.as_str(), l.to.as_str(), l.mechanism), ("a", "b", "SAME_AS"));
-        assert_eq!((l.example_from_qname.as_str(), l.example_to_qname.as_str()), ("a::Order", "b::Order"));
+        assert_eq!(
+            (l.from.as_str(), l.to.as_str(), l.mechanism),
+            ("a", "b", "SAME_AS")
+        );
+        assert_eq!(
+            (l.example_from_qname.as_str(), l.example_to_qname.as_str()),
+            ("a::Order", "b::Order")
+        );
         assert_eq!(l.channel, "Order");
     }
 
@@ -1314,7 +1414,12 @@ mod tests {
             .collect();
         let graphs: Vec<RepoGraph> = repos
             .iter()
-            .map(|r| synth_repo_graph(*r, &[(PKG, node_kind::PACKAGE_DEP), ("m::Dto", node_kind::CLASS)]))
+            .map(|r| {
+                synth_repo_graph(
+                    *r,
+                    &[(PKG, node_kind::PACKAGE_DEP), ("m::Dto", node_kind::CLASS)],
+                )
+            })
             .collect();
         // `d` is unplaced; a and c's Dto copies are both keyed "a".
         let mut keys = keys_for(&[(&graphs[0], "a"), (&graphs[1], "b"), (&graphs[2], "c")]);
@@ -1345,7 +1450,15 @@ mod tests {
         assert_eq!(unplaced, 1, "d's copy, once");
         let rows: Vec<(&str, &str, &str, usize, Confidence)> = links
             .iter()
-            .map(|l| (l.from.as_str(), l.to.as_str(), l.channel.as_str(), l.count, l.confidence))
+            .map(|l| {
+                (
+                    l.from.as_str(),
+                    l.to.as_str(),
+                    l.channel.as_str(),
+                    l.count,
+                    l.confidence,
+                )
+            })
             .collect();
         assert_eq!(
             rows,
@@ -1378,14 +1491,34 @@ mod tests {
         let g_w = synth_repo_graph(
             rw,
             &[
-                ("contract::docs::a::openapi::GET:/orders", node_kind::DOC_SECTION),
-                ("contract::docs::b::openapi::GET:/orders", node_kind::DOC_SECTION),
+                (
+                    "contract::docs::a::openapi::GET:/orders",
+                    node_kind::DOC_SECTION,
+                ),
+                (
+                    "contract::docs::b::openapi::GET:/orders",
+                    node_kind::DOC_SECTION,
+                ),
             ],
         );
-        let g_a = synth_repo_graph(ra, &[("GET /orders", node_kind::ROUTE), ("GET /items", node_kind::ROUTE)]);
+        let g_a = synth_repo_graph(
+            ra,
+            &[
+                ("GET /orders", node_kind::ROUTE),
+                ("GET /items", node_kind::ROUTE),
+            ],
+        );
         let keys = keys_for(&[(&g_w, "web"), (&g_a, "api")]);
-        let op_a = id_of(rw, node_kind::DOC_SECTION, "contract::docs::a::openapi::GET:/orders");
-        let op_b = id_of(rw, node_kind::DOC_SECTION, "contract::docs::b::openapi::GET:/orders");
+        let op_a = id_of(
+            rw,
+            node_kind::DOC_SECTION,
+            "contract::docs::a::openapi::GET:/orders",
+        );
+        let op_b = id_of(
+            rw,
+            node_kind::DOC_SECTION,
+            "contract::docs::b::openapi::GET:/orders",
+        );
         let orders = id_of(ra, node_kind::ROUTE, "GET /orders");
         let mut merged = MergedGraph::new(vec![g_w, g_a]);
         merged.cross_edges = vec![
@@ -1404,7 +1537,14 @@ mod tests {
         };
 
         let (raw, _) = cross_links(&merged, &key);
-        let want = |count| vec![("web".to_string(), "api".to_string(), count, Confidence::Weak)];
+        let want = |count| {
+            vec![(
+                "web".to_string(),
+                "api".to_string(),
+                count,
+                Confidence::Weak,
+            )]
+        };
         assert_eq!(documents(&raw), want(2), "control: one per op");
         let (folded, unplaced) = cross_links_with(&merged, &key, Some(&classes), Some(&classes));
         assert_eq!(unplaced, 0);
@@ -1440,7 +1580,10 @@ mod tests {
         let empty = Classes::default();
         let head = cross_links(&merged, &key);
         assert_eq!(head.0[0].count, 2);
-        assert_eq!(cross_links_with(&merged, &key, Some(&empty), Some(&empty)), head);
+        assert_eq!(
+            cross_links_with(&merged, &key, Some(&empty), Some(&empty)),
+            head
+        );
         assert_eq!(cross_links_with(&merged, &key, None, None), head);
     }
 
@@ -1466,10 +1609,7 @@ mod tests {
         assert_eq!(cluster_key_for(find_one, 1, &merged), "svc");
         assert_eq!(cluster_key_for(find_one, 2, &merged), "svc::users");
         // Depth caps at parts-1; leaf never lands in the key.
-        assert_eq!(
-            cluster_key_for(find_one, 99, &merged),
-            "svc::users::repo"
-        );
+        assert_eq!(cluster_key_for(find_one, 99, &merged), "svc::users::repo");
         // Single-segment qname → empty key (no parent cluster).
         let solo = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "solo");
         assert_eq!(cluster_key_for(solo, 1, &merged), "");
@@ -1492,7 +1632,10 @@ mod tests {
         };
         let mut m = MergedGraph::new(vec![demote(flow_graph()), demote(flow_graph())]);
         m.pass_undo = vec![(a, Confidence::Strong)];
-        assert!(m.subset(&[a, b]).pass_undo.is_empty(), "a view carries no undo");
+        assert!(
+            m.subset(&[a, b]).pass_undo.is_empty(),
+            "a view carries no undo"
+        );
 
         m.undo_pass_mutations();
         assert!(m.pass_undo.is_empty());
@@ -1526,12 +1669,14 @@ mod tests {
             payload: CellPayload::Json(format!(r#"{{"line":{line}}}"#)),
         };
         let base = || Edge::new(ep, route, edge_category::HTTP_CALLS, Confidence::Strong);
-        let edges = [base().with_cell(at(4)),
+        let edges = [
+            base().with_cell(at(4)),
             base().with_cell(at(40)),
             base().with_cell(at(4)).with_cell(at(9)),
             base(),
             Edge::new(ep, route, edge_category::HTTP_CALLS, Confidence::Weak),
-            Edge::new(route, ep, edge_category::HTTP_CALLS, Confidence::Strong)];
+            Edge::new(route, ep, edge_category::HTTP_CALLS, Confidence::Strong),
+        ];
         // Every permutation of 0..6, generated by index rotation (no rand).
         fn perms(n: usize) -> Vec<Vec<usize>> {
             if n == 0 {

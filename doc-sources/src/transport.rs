@@ -80,8 +80,16 @@ pub fn b64(input: &[u8]) -> String {
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(T[(n >> 18 & 63) as usize] as char);
         out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -103,27 +111,47 @@ mod tests {
 
     #[test]
     fn checked_origin_refuses_cleartext_to_remote_hosts_only() {
-        assert_eq!(checked_origin("https://example.com"), Ok("https://example.com".to_string()));
-        assert_eq!(checked_origin("http://127.0.0.1:9"), Ok("http://127.0.0.1:9".to_string()));
-        assert_eq!(checked_origin("http://[::1]:9"), Ok("http://[::1]:9".to_string()));
-        let err = checked_origin("http://example.com").err().unwrap_or_default();
+        assert_eq!(
+            checked_origin("https://example.com"),
+            Ok("https://example.com".to_string())
+        );
+        assert_eq!(
+            checked_origin("http://127.0.0.1:9"),
+            Ok("http://127.0.0.1:9".to_string())
+        );
+        assert_eq!(
+            checked_origin("http://[::1]:9"),
+            Ok("http://[::1]:9".to_string())
+        );
+        let err = checked_origin("http://example.com")
+            .err()
+            .unwrap_or_default();
         assert_eq!(
             err,
             "refusing plain http:// to non-loopback host example.com: Basic credentials would travel in cleartext"
         );
         assert!(checked_origin("http://127.0.0.1:80@example.com").is_err());
-        assert!(checked_origin("http://127.0.0.1:9/wiki").is_err(), "an origin carries no path");
+        assert!(
+            checked_origin("http://127.0.0.1:9/wiki").is_err(),
+            "an origin carries no path"
+        );
     }
 
     #[test]
     fn pick_prefers_flag_then_env_then_dotenv() {
-        let dot: HashMap<String, String> =
-            [("GLIA_CE4A_PICK_ONLY_IN_DOTENV".to_string(), "dot".to_string())].into();
+        let dot: HashMap<String, String> = [(
+            "GLIA_CE4A_PICK_ONLY_IN_DOTENV".to_string(),
+            "dot".to_string(),
+        )]
+        .into();
         assert_eq!(
             pick(Some("flag".into()), "GLIA_CE4A_PICK_ONLY_IN_DOTENV", &dot).as_deref(),
             Some("flag")
         );
-        assert_eq!(pick(None, "GLIA_CE4A_PICK_ONLY_IN_DOTENV", &dot).as_deref(), Some("dot"));
+        assert_eq!(
+            pick(None, "GLIA_CE4A_PICK_ONLY_IN_DOTENV", &dot).as_deref(),
+            Some("dot")
+        );
         assert_eq!(pick(None, "GLIA_CE4A_PICK_NOWHERE", &dot), None);
     }
 }

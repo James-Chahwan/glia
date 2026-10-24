@@ -76,7 +76,10 @@ impl CochangeIndex {
         let n = files.len();
         let mut count = vec![0u32; n];
         let mut pair: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-        let mut stats = CochangeStats { repos: repo_roots.len(), ..CochangeStats::default() };
+        let mut stats = CochangeStats {
+            repos: repo_roots.len(),
+            ..CochangeStats::default()
+        };
         for (&repo, root) in repo_roots {
             let Some(snap) = read_history(Path::new(root)) else {
                 stats.missing += 1;
@@ -85,7 +88,11 @@ impl CochangeIndex {
             stats.snapshots += 1;
             stats.commits += snap.commits.len();
             for c in &snap.commits {
-                let mapped: BTreeSet<u32> = c.files.iter().filter_map(|hf| files.index_of(repo, &hf.p)).collect();
+                let mapped: BTreeSet<u32> = c
+                    .files
+                    .iter()
+                    .filter_map(|hf| files.index_of(repo, &hf.p))
+                    .collect();
                 if mapped.is_empty() || mapped.len() > MAX_TRAIN_FILES {
                     continue;
                 }
@@ -104,7 +111,11 @@ impl CochangeIndex {
         for ((a, b), x) in pair {
             pairs[a as usize].push((b, x));
         }
-        let mut idx = CochangeIndex { count, pairs, stats };
+        let mut idx = CochangeIndex {
+            count,
+            pairs,
+            stats,
+        };
         idx.recount();
         idx
     }
@@ -118,7 +129,11 @@ impl CochangeIndex {
         for p in &mut pairs {
             p.sort_unstable();
         }
-        let mut idx = CochangeIndex { count, pairs, stats: CochangeStats::default() };
+        let mut idx = CochangeIndex {
+            count,
+            pairs,
+            stats: CochangeStats::default(),
+        };
         idx.recount();
         idx
     }

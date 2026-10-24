@@ -81,7 +81,9 @@ impl Program {
     /// The name of source `s`, or [`UNNAMED_SOURCE`] when the program holds no such
     /// source.
     pub fn source_name(&self, s: SourceId) -> &str {
-        self.sources.get(usize::from(s)).map_or(UNNAMED_SOURCE, String::as_str)
+        self.sources
+            .get(usize::from(s))
+            .map_or(UNNAMED_SOURCE, String::as_str)
     }
 }
 
@@ -97,7 +99,11 @@ impl Rule {
     /// A rule `head_pred(head_args) :- body.` with default spans.
     pub fn new(head_pred: impl Into<String>, head_args: Vec<HeadArg>, body: Vec<Literal>) -> Self {
         Rule {
-            head: Head { pred: head_pred.into(), args: head_args, span: Span::default() },
+            head: Head {
+                pred: head_pred.into(),
+                args: head_args,
+                span: Span::default(),
+            },
             body,
             span: Span::default(),
         }
@@ -105,7 +111,11 @@ impl Rule {
 
     /// A fact `pred(consts).` with default spans.
     pub fn fact(pred: impl Into<String>, consts: Vec<Term>) -> Self {
-        Self::new(pred, consts.into_iter().map(HeadArg::Term).collect(), Vec::new())
+        Self::new(
+            pred,
+            consts.into_iter().map(HeadArg::Term).collect(),
+            Vec::new(),
+        )
     }
 
     /// Is this clause a fact (no body)?
@@ -237,7 +247,12 @@ impl Literal {
 
     /// A comparison literal `left op right` with a default span.
     pub fn cmp(op: CmpOp, left: Term, right: Term) -> Self {
-        Literal::Cmp(Comparison { op, left, right, span: Span::default() })
+        Literal::Cmp(Comparison {
+            op,
+            left,
+            right,
+            span: Span::default(),
+        })
     }
 
     /// The literal's span.
@@ -260,7 +275,11 @@ pub struct Atom {
 impl Atom {
     /// An atom `pred(args)` with a default span.
     pub fn new(pred: impl Into<String>, args: Vec<Term>) -> Self {
-        Atom { pred: pred.into(), args, span: Span::default() }
+        Atom {
+            pred: pred.into(),
+            args,
+            span: Span::default(),
+        }
     }
 
     /// `name/arity`, the predicate as diagnostics name it.
@@ -281,7 +300,10 @@ pub enum Term {
 impl Term {
     /// A variable with a default span.
     pub fn var(name: impl Into<String>) -> Self {
-        Term::Var { name: name.into(), span: Span::default() }
+        Term::Var {
+            name: name.into(),
+            span: Span::default(),
+        }
     }
 
     /// The wildcard `_` with a default span.
@@ -291,12 +313,18 @@ impl Term {
 
     /// A string constant with a default span.
     pub fn str(value: impl Into<String>) -> Self {
-        Term::Str { value: value.into(), span: Span::default() }
+        Term::Str {
+            value: value.into(),
+            span: Span::default(),
+        }
     }
 
     /// An integer constant with a default span.
     pub fn int(value: i64) -> Self {
-        Term::Int { value, span: Span::default() }
+        Term::Int {
+            value,
+            span: Span::default(),
+        }
     }
 
     /// The term's span.
@@ -577,7 +605,10 @@ pub struct Catalog {
 }
 
 fn pred(name: &str, cols: &[ColType]) -> PredDecl {
-    PredDecl { name: name.to_string(), cols: cols.to_vec() }
+    PredDecl {
+        name: name.to_string(),
+        cols: cols.to_vec(),
+    }
 }
 
 fn builtin(
@@ -587,7 +618,13 @@ fn builtin(
     tiered: bool,
     kind: BuiltinKind,
 ) -> BuiltinDecl {
-    BuiltinDecl { name: name.to_string(), cols: cols.to_vec(), bind: bind.to_vec(), tiered, kind }
+    BuiltinDecl {
+        name: name.to_string(),
+        cols: cols.to_vec(),
+        bind: bind.to_vec(),
+        tiered,
+        kind,
+    }
 }
 
 impl Catalog {
@@ -614,7 +651,13 @@ impl Catalog {
             pred("carry_category", &[Category]),
         ];
         let builtins = vec![
-            builtin("reaches", &[Node, Node], &[May, May], true, BuiltinKind::Reaches),
+            builtin(
+                "reaches",
+                &[Node, Node],
+                &[May, May],
+                true,
+                BuiltinKind::Reaches,
+            ),
             builtin(
                 "reaches",
                 &[Node, Node, CategorySet],
@@ -630,12 +673,41 @@ impl Catalog {
                 BuiltinKind::Reaches,
             ),
             builtin("scc", &[Node, Node], &[May, May], true, BuiltinKind::Scc),
-            builtin("scc", &[Node, Node, CategorySet], &[May, May, Const], true, BuiltinKind::Scc),
-            builtin("starts_with", &[Str, Str], &[Must, Must], false, BuiltinKind::StartsWith),
-            builtin("ends_with", &[Str, Str], &[Must, Must], false, BuiltinKind::EndsWith),
-            builtin("contains", &[Str, Str], &[Must, Must], false, BuiltinKind::Contains),
+            builtin(
+                "scc",
+                &[Node, Node, CategorySet],
+                &[May, May, Const],
+                true,
+                BuiltinKind::Scc,
+            ),
+            builtin(
+                "starts_with",
+                &[Str, Str],
+                &[Must, Must],
+                false,
+                BuiltinKind::StartsWith,
+            ),
+            builtin(
+                "ends_with",
+                &[Str, Str],
+                &[Must, Must],
+                false,
+                BuiltinKind::EndsWith,
+            ),
+            builtin(
+                "contains",
+                &[Str, Str],
+                &[Must, Must],
+                false,
+                BuiltinKind::Contains,
+            ),
         ];
-        Catalog { registries, carry: carry.to_vec(), edb, builtins }
+        Catalog {
+            registries,
+            carry: carry.to_vec(),
+            edb,
+            builtins,
+        }
     }
 
     /// Add each attribute as the EDB predicate `name(Node, ty)`, after those already
@@ -670,7 +742,9 @@ impl Catalog {
 
     /// The builtin named `name` with `arity` arguments.
     pub fn builtin(&self, name: &str, arity: usize) -> Option<&BuiltinDecl> {
-        self.builtins.iter().find(|b| b.name == name && b.cols.len() == arity)
+        self.builtins
+            .iter()
+            .find(|b| b.name == name && b.cols.len() == arity)
     }
 }
 
@@ -686,12 +760,19 @@ mod tests {
     };
 
     fn sp(source: SourceId, start: u32) -> Span {
-        Span { source, start, end: start + 1, line: 1, col: start + 1 }
+        Span {
+            source,
+            start,
+            end: start + 1,
+            line: 1,
+            col: start + 1,
+        }
     }
 
     fn sources_of(rule: &Rule) -> Vec<SourceId> {
         let mut out = Vec::new();
-        rule.clone().visit_spans(&mut |s: &mut Span| out.push(s.source));
+        rule.clone()
+            .visit_spans(&mut |s: &mut Span| out.push(s.source));
         out
     }
 
@@ -699,7 +780,10 @@ mod tests {
     fn display_is_canonical() {
         let mut p = Program::new();
         p.add_source("rules");
-        p.rules.push(Rule::fact("allowed", vec![Term::str("web"), Term::str("a\"b\\c\nd\te")]));
+        p.rules.push(Rule::fact(
+            "allowed",
+            vec![Term::str("web"), Term::str("a\"b\\c\nd\te")],
+        ));
         p.rules.push(Rule::new(
             "v",
             vec![Term::var("x").into()],
@@ -732,7 +816,10 @@ mod tests {
             "w",
             vec![Term::var("a").into(), HeadArg::agg(AggOp::Sum, &["n", "m"])],
             vec![
-                Literal::pos(Atom::new("p", vec![Term::var("a"), Term::var("n"), Term::var("m")])),
+                Literal::pos(Atom::new(
+                    "p",
+                    vec![Term::var("a"), Term::var("n"), Term::var("m")],
+                )),
                 Literal::cmp(CmpOp::Le, Term::var("n"), Term::int(3)),
                 Literal::cmp(CmpOp::Gt, Term::var("m"), Term::int(0)),
             ],
@@ -749,7 +836,11 @@ flag.
         // The spec's one-line example, and the head / atom signatures.
         let r = Rule::new(
             "p",
-            vec![Term::var("a").into(), Term::str("X").into(), Term::int(3).into()],
+            vec![
+                Term::var("a").into(),
+                Term::str("X").into(),
+                Term::int(3).into(),
+            ],
             vec![
                 Literal::pos(Atom::new("q", vec![Term::var("a")])),
                 Literal::neg(Atom::new("r", vec![Term::var("a")])),
@@ -761,7 +852,10 @@ flag.
         assert_eq!(r.head.arity(), 3);
         assert!(!r.is_fact());
         assert!(p.rules[0].is_fact());
-        assert_eq!(Atom::new("edge", vec![Term::wild(); 3]).signature(), "edge/3");
+        assert_eq!(
+            Atom::new("edge", vec![Term::wild(); 3]).signature(),
+            "edge/3"
+        );
     }
 
     #[test]
@@ -771,10 +865,19 @@ flag.
         assert_eq!(base.add_source("overlay"), 1);
         let mut kept = Rule::new(
             "a",
-            vec![Term::Var { name: "x".into(), span: sp(1, 2) }.into()],
+            vec![
+                Term::Var {
+                    name: "x".into(),
+                    span: sp(1, 2),
+                }
+                .into(),
+            ],
             vec![Literal::Pos(Atom {
                 pred: "b".into(),
-                args: vec![Term::Var { name: "x".into(), span: sp(1, 7) }],
+                args: vec![Term::Var {
+                    name: "x".into(),
+                    span: sp(1, 7),
+                }],
                 span: sp(1, 5),
             })],
         );
@@ -797,13 +900,22 @@ flag.
             vec![
                 Literal::Neg(Atom {
                     pred: "d".into(),
-                    args: vec![Term::Str { value: "s".into(), span: sp(0, 12) }],
+                    args: vec![Term::Str {
+                        value: "s".into(),
+                        span: sp(0, 12),
+                    }],
                     span: sp(0, 10),
                 }),
                 Literal::Cmp(Comparison {
                     op: CmpOp::Lt,
-                    left: Term::Var { name: "y".into(), span: sp(0, 16) },
-                    right: Term::Int { value: 4, span: sp(0, 20) },
+                    left: Term::Var {
+                        name: "y".into(),
+                        span: sp(0, 16),
+                    },
+                    right: Term::Int {
+                        value: 4,
+                        span: sp(0, 20),
+                    },
                     span: sp(0, 16),
                 }),
             ],
@@ -821,7 +933,13 @@ flag.
         assert!(after.iter().all(|s| *s == 2), "{after:?}");
         assert_eq!(sources_of(&base.rules[0]), vec![1; 5]);
         // Only the source moved: offsets, lines and columns are untouched.
-        assert_eq!(base.rules[1].body[1].span(), Span { source: 2, ..sp(0, 16) });
+        assert_eq!(
+            base.rules[1].body[1].span(),
+            Span {
+                source: 2,
+                ..sp(0, 16)
+            }
+        );
         assert_eq!(base.source_name(2), "check");
         assert_eq!(base.source_name(1), "overlay");
         assert_eq!(base.source_name(9), UNNAMED_SOURCE);
@@ -863,24 +981,41 @@ flag.
         assert_eq!(c.carry, carry);
         assert_eq!(
             c.edb("edge_conf").map(|p| p.cols.clone()),
-            Some(vec![ColType::Node, ColType::Node, ColType::Category, ColType::Str])
+            Some(vec![
+                ColType::Node,
+                ColType::Node,
+                ColType::Category,
+                ColType::Str
+            ])
         );
         let r4 = c.builtin("reaches", 4).cloned();
         assert_eq!(
             r4,
             Some(BuiltinDecl {
                 name: "reaches".into(),
-                cols: vec![ColType::Node, ColType::Node, ColType::CategorySet, ColType::Int],
+                cols: vec![
+                    ColType::Node,
+                    ColType::Node,
+                    ColType::CategorySet,
+                    ColType::Int
+                ],
                 bind: vec![BindReq::May, BindReq::May, BindReq::Const, BindReq::Const],
                 tiered: true,
                 kind: BuiltinKind::Reaches,
             })
         );
-        assert_eq!(c.builtin("scc", 3).map(|b| (b.kind, b.tiered)), Some((BuiltinKind::Scc, true)));
+        assert_eq!(
+            c.builtin("scc", 3).map(|b| (b.kind, b.tiered)),
+            Some((BuiltinKind::Scc, true))
+        );
         let sw = c.builtin("starts_with", 2).cloned();
         assert_eq!(
             sw.map(|b| (b.bind, b.tiered, b.kind)),
-            Some((vec![BindReq::Must, BindReq::Must], false, BuiltinKind::StartsWith))
+            Some((
+                vec![BindReq::Must, BindReq::Must],
+                false,
+                BuiltinKind::StartsWith
+            ))
         );
         assert!(c.builtin("reaches", 5).is_none());
         assert!(c.edb("reaches").is_none());
@@ -889,15 +1024,33 @@ flag.
     #[test]
     fn with_attrs_adds_name_2() {
         let c = Catalog::core(REG, &[]).with_attrs(&[
-            AttrDecl { name: "qname", ty: ColType::Str },
-            AttrDecl { name: "edge", ty: ColType::Int },
-            AttrDecl { name: "line", ty: ColType::Int },
-            AttrDecl { name: "qname", ty: ColType::Int },
-            AttrDecl { name: "scc", ty: ColType::Str },
+            AttrDecl {
+                name: "qname",
+                ty: ColType::Str,
+            },
+            AttrDecl {
+                name: "edge",
+                ty: ColType::Int,
+            },
+            AttrDecl {
+                name: "line",
+                ty: ColType::Int,
+            },
+            AttrDecl {
+                name: "qname",
+                ty: ColType::Int,
+            },
+            AttrDecl {
+                name: "scc",
+                ty: ColType::Str,
+            },
         ]);
         assert_eq!(
             c.edb("qname"),
-            Some(&PredDecl { name: "qname".into(), cols: vec![ColType::Node, ColType::Str] })
+            Some(&PredDecl {
+                name: "qname".into(),
+                cols: vec![ColType::Node, ColType::Str]
+            })
         );
         // The core wins: `edge` keeps its three columns, the second `qname` and an
         // attribute named like a builtin are dropped.
@@ -913,13 +1066,22 @@ flag.
             tiered: false,
             kind: BuiltinKind::Domain,
         };
-        let shadow =
-            BuiltinDecl { name: "reaches".into(), kind: BuiltinKind::Domain, ..in_scope.clone() };
-        let on_edb = BuiltinDecl { name: "qname".into(), ..in_scope.clone() };
+        let shadow = BuiltinDecl {
+            name: "reaches".into(),
+            kind: BuiltinKind::Domain,
+            ..in_scope.clone()
+        };
+        let on_edb = BuiltinDecl {
+            name: "qname".into(),
+            ..in_scope.clone()
+        };
         let c = c.with_builtins(vec![in_scope.clone(), shadow, on_edb, in_scope.clone()]);
         let builtins: Vec<String> = c.builtins.iter().map(BuiltinDecl::signature).collect();
         assert_eq!(&builtins[8..], ["in_scope/2"]);
-        assert_eq!(c.builtin("reaches", 2).map(|b| b.kind), Some(BuiltinKind::Reaches));
+        assert_eq!(
+            c.builtin("reaches", 2).map(|b| b.kind),
+            Some(BuiltinKind::Reaches)
+        );
         assert_eq!(c.builtin("in_scope", 2), Some(&in_scope));
     }
 }

@@ -117,29 +117,48 @@ fn angular_share_link_is_dead_and_absorbed_by_the_catch_all() {
     angular_app(dir.path());
     let flow = build(dir.path());
 
-    assert_eq!(flow.dead.len(), 1, "exactly the /connect share link: {flow:#?}");
+    assert_eq!(
+        flow.dead.len(),
+        1,
+        "exactly the /connect share link: {flow:#?}"
+    );
     let dead = &flow.dead[0];
     assert_eq!(dead.link, "/connect");
     assert!(
         dead.from_qname.ends_with("ProfileComponent"),
         "lifted onto the page component: {dead:?}"
     );
-    assert_eq!(dead.from_file.as_deref(), Some("src/app/profile.component.ts"));
+    assert_eq!(
+        dead.from_file.as_deref(),
+        Some("src/app/profile.component.ts")
+    );
     assert!(dead.from_line.is_some_and(|l| l >= 1), "1-based: {dead:?}");
     assert_eq!(dead.absorbed_by.as_deref(), Some("/** -> /login"));
 
     let paths: Vec<&str> = flow.pages.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(
         paths,
-        ["/**", "/home", "/login", "/profile", "/user/:publicId", "/verify-email"],
+        [
+            "/**",
+            "/home",
+            "/login",
+            "/profile",
+            "/user/:publicId",
+            "/verify-email"
+        ],
         "every nav route is a page, sorted by path"
     );
     let home = &flow.pages[1];
     assert!(
-        home.handler.as_deref().is_some_and(|h| h.ends_with("HomeComponent")),
+        home.handler
+            .as_deref()
+            .is_some_and(|h| h.ends_with("HomeComponent")),
         "{home:?}"
     );
-    assert_eq!(home.handler_file.as_deref(), Some("src/app/home/home.component.ts"));
+    assert_eq!(
+        home.handler_file.as_deref(),
+        Some("src/app/home/home.component.ts")
+    );
     assert!(home.handler_line.is_some(), "{home:?}");
     assert_eq!(home.inbound_links, 2, "the template and LoginComponent.ok");
     assert!(!home.catchall && home.redirect_to.is_none());
@@ -148,7 +167,10 @@ fn angular_share_link_is_dead_and_absorbed_by_the_catch_all() {
     assert!(catch_all.catchall, "{catch_all:?}");
     assert_eq!(catch_all.redirect_to.as_deref(), Some("/login"));
     assert_eq!(catch_all.handler, None);
-    assert_eq!(flow.pages[2].inbound_links, 1, "/login: the catch-all's redirect");
+    assert_eq!(
+        flow.pages[2].inbound_links, 1,
+        "/login: the catch-all's redirect"
+    );
 
     // Links are page -> page navigations; the redirect is on its page.
     let links: Vec<(String, &str, &str)> = flow
@@ -232,7 +254,10 @@ fn a_link_a_backend_route_serves_is_not_dead() {
     assert_eq!(dead, ["/nowhere"], "{flow:#?}");
     assert_eq!(flow.dead[0].absorbed_by, None, "no catch-all in this app");
     assert_eq!(
-        flow.pages.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+        flow.pages
+            .iter()
+            .map(|p| p.path.as_str())
+            .collect::<Vec<_>>(),
         ["/home"],
         "the Flask route is a server route, never a page"
     );

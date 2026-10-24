@@ -59,14 +59,22 @@ impl Neighbourhoods {
         for ix in 0..n as u32 {
             row.clear();
             row.extend(
-                adj.outgoing(ix).iter().chain(adj.incoming(ix)).map(|inc| inc.other).filter(|&other| other != ix),
+                adj.outgoing(ix)
+                    .iter()
+                    .chain(adj.incoming(ix))
+                    .map(|inc| inc.other)
+                    .filter(|&other| other != ix),
             );
             row.sort_unstable();
             row.dedup();
             nbr.extend_from_slice(&row);
             start.push(nbr.len());
         }
-        Self { index: adj.index.clone(), start, nbr }
+        Self {
+            index: adj.index.clone(),
+            start,
+            nbr,
+        }
     }
 
     /// Distinct neighbours of `id`, either direction, itself excluded; 0 for
@@ -151,7 +159,10 @@ mod tests {
     }
 
     fn nb_of(nodes: &[u64], edges: Vec<glia_core::Edge>) -> Neighbourhoods {
-        let g = ToyGraph { nodes: ids(nodes), edges };
+        let g = ToyGraph {
+            nodes: ids(nodes),
+            edges,
+        };
         Neighbourhoods::from_adjacency(&Adjacency::build(&g, &CategorySet::all()))
     }
 
@@ -160,7 +171,11 @@ mod tests {
     }
 
     fn ps(common: u32, aa: u64, ra: u64) -> PairScore {
-        PairScore { common, adamic_adar_milli: aa, resource_allocation_micro: ra }
+        PairScore {
+            common,
+            adamic_adar_milli: aa,
+            resource_allocation_micro: ra,
+        }
     }
 
     /// x = 1 and y = 2 share z = 3 (degree 2: x, y) and z = 4 (degree 3: x,
@@ -181,14 +196,25 @@ mod tests {
         assert_eq!(adamic_adar_term(2), 1443, "1000 / ln 2 = 1442.695");
         assert_eq!(adamic_adar_term(3), 910, "1000 / ln 3 = 910.239");
         let nb = nb_of(&[1, 2, 3, 4, 5, 6], textbook_edges());
-        assert_eq!((nb.degree(NodeId(3)), nb.degree(NodeId(4)), nb.degree(NodeId(1))), (2, 3, 3));
+        assert_eq!(
+            (
+                nb.degree(NodeId(3)),
+                nb.degree(NodeId(4)),
+                nb.degree(NodeId(1))
+            ),
+            (2, 3, 3)
+        );
         assert_eq!(score(&nb, 1, 2), ps(2, 1443 + 910, 500_000 + 333_333));
         assert_eq!(score(&nb, 1, 2), score(&nb, 2, 1), "symmetric");
         // 3 and 4 share x (degree 3: 3, 4, 6) and y (degree 2: 3, 4), summed
         // in ascending dense order.
         assert_eq!((nb.degree(NodeId(1)), nb.degree(NodeId(2))), (3, 2));
         assert_eq!(score(&nb, 3, 4), ps(2, 910 + 1443, 333_333 + 500_000));
-        assert_eq!(score(&nb, 5, 6), PairScore::default(), "no common neighbour");
+        assert_eq!(
+            score(&nb, 5, 6),
+            PairScore::default(),
+            "no common neighbour"
+        );
     }
 
     #[test]
@@ -224,21 +250,40 @@ mod tests {
         // the textbook graph: reversing the list moves the dangling ids'
         // dense order, never a score or a degree.
         let mut edges = textbook_edges();
-        edges.extend([toy_edge(1, 3, 1), toy_edge(3, 1, 1), toy_edge(3, 3, 1), toy_edge(4, 7, 1), toy_edge(8, 1, 1)]);
+        edges.extend([
+            toy_edge(1, 3, 1),
+            toy_edge(3, 1, 1),
+            toy_edge(3, 3, 1),
+            toy_edge(4, 7, 1),
+            toy_edge(8, 1, 1),
+        ]);
         let mut reversed = edges.clone();
         reversed.reverse();
         let nodes = [1, 2, 3, 4, 5, 6];
         let (fwd, rev) = (nb_of(&nodes, edges), nb_of(&nodes, reversed));
-        let pairs: Vec<(NodeId, NodeId)> = [(1, 2), (2, 1), (3, 4), (7, 1), (8, 4), (5, 7), (6, 8), (1, 1)]
-            .iter()
-            .map(|&(x, y)| (NodeId(x), NodeId(y)))
-            .collect();
+        let pairs: Vec<(NodeId, NodeId)> = [
+            (1, 2),
+            (2, 1),
+            (3, 4),
+            (7, 1),
+            (8, 4),
+            (5, 7),
+            (6, 8),
+            (1, 1),
+        ]
+        .iter()
+        .map(|&(x, y)| (NodeId(x), NodeId(y)))
+        .collect();
         let scores = score_pairs(&fwd, &pairs);
         assert_eq!(scores, score_pairs(&rev, &pairs));
         // 3 stays degree 2 (the parallel edges and the self-loop add nothing);
         // 4 gains the dangling 7, so degree 4: 1000 / ln 4 = 721.35.
         assert_eq!(scores[0], ps(2, 1443 + 721, 500_000 + 250_000));
-        assert_eq!(scores[3], ps(1, 721, 250_000), "7 and 1 share 4 (neighbours 1, 2, 5, 7)");
+        assert_eq!(
+            scores[3],
+            ps(1, 721, 250_000),
+            "7 and 1 share 4 (neighbours 1, 2, 5, 7)"
+        );
         for id in [1, 2, 3, 4, 7, 8] {
             assert_eq!(fwd.degree(NodeId(id)), rev.degree(NodeId(id)));
         }
@@ -248,8 +293,12 @@ mod tests {
     #[test]
     fn unknown_ids_score_zero() {
         let nb = nb_of(&[1, 2, 3, 4, 5, 6], textbook_edges());
-        let pairs =
-            [(NodeId(1), NodeId(99)), (NodeId(99), NodeId(2)), (NodeId(98), NodeId(99)), (NodeId(1), NodeId(2))];
+        let pairs = [
+            (NodeId(1), NodeId(99)),
+            (NodeId(99), NodeId(2)),
+            (NodeId(98), NodeId(99)),
+            (NodeId(1), NodeId(2)),
+        ];
         let scores = score_pairs(&nb, &pairs);
         assert_eq!(scores.len(), pairs.len(), "index-aligned with the pairs");
         assert_eq!(scores[..3], [PairScore::default(); 3]);
@@ -264,9 +313,14 @@ mod tests {
     fn categories_come_from_the_index() {
         // 3 joins 1 and 2 only through category-2 edges; an index that keeps
         // category 1 alone sees no common neighbour.
-        let g =
-            ToyGraph { nodes: ids(&[1, 2, 3]), edges: vec![toy_edge(1, 3, 2), toy_edge(2, 3, 2), toy_edge(1, 2, 1)] };
-        let only_1 = Neighbourhoods::from_adjacency(&Adjacency::build(&g, &CategorySet::of(&[EdgeCategoryId(1)])));
+        let g = ToyGraph {
+            nodes: ids(&[1, 2, 3]),
+            edges: vec![toy_edge(1, 3, 2), toy_edge(2, 3, 2), toy_edge(1, 2, 1)],
+        };
+        let only_1 = Neighbourhoods::from_adjacency(&Adjacency::build(
+            &g,
+            &CategorySet::of(&[EdgeCategoryId(1)]),
+        ));
         assert_eq!(score(&only_1, 1, 2), PairScore::default());
         assert_eq!(only_1.degree(NodeId(3)), 0);
         let both = Neighbourhoods::from_adjacency(&Adjacency::build(&g, &CategorySet::all()));

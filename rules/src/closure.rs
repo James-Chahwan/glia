@@ -107,7 +107,8 @@ impl SetStats {
             CatSet::All => "*".to_string(),
             CatSet::Carry => "carry".to_string(),
             CatSet::Of(ids) => {
-                let mut names: Vec<String> = ids.iter().map(|c| category_name(registries, *c)).collect();
+                let mut names: Vec<String> =
+                    ids.iter().map(|c| category_name(registries, *c)).collect();
                 names.sort();
                 names.dedup();
                 names.join("|")
@@ -117,8 +118,17 @@ impl SetStats {
 
     /// The evaluation modes the set ran in, `multi,per-source,all,scc` order.
     pub(crate) fn modes(&self) -> String {
-        let used = [(self.multi, "multi"), (self.per_source, "per-source"), (self.all, "all"), (self.scc, "scc")];
-        used.iter().filter(|(n, _)| *n > 0).map(|(_, m)| *m).collect::<Vec<_>>().join(",")
+        let used = [
+            (self.multi, "multi"),
+            (self.per_source, "per-source"),
+            (self.all, "all"),
+            (self.scc, "scc"),
+        ];
+        used.iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(_, m)| *m)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -185,7 +195,16 @@ impl CatIndex {
                 adj.kept_edges()
             );
         }
-        CatIndex { keep, adj, kept_level, kept_ordinal, ok, rank: None, pairs: None, comp_of: None }
+        CatIndex {
+            keep,
+            adj,
+            kept_level,
+            kept_ordinal,
+            ok,
+            rank: None,
+            pairs: None,
+            comp_of: None,
+        }
     }
 
     /// The three-pass `+` walk from `seeds` (each at its level).
@@ -226,7 +245,14 @@ impl CatIndex {
             }
             if let (Some(from), Some(to)) = (self.adj.index_of(e.from), self.adj.index_of(e.to)) {
                 let level = self.kept_level.get(kept as usize).copied().unwrap_or(NEVER);
-                out.push(Pair { from, to, level, name: 0, kept, category: e.category });
+                out.push(Pair {
+                    from,
+                    to,
+                    level,
+                    name: 0,
+                    kept,
+                    category: e.category,
+                });
             }
             kept += 1;
         }
@@ -235,14 +261,21 @@ impl CatIndex {
         let mut ids: Vec<u32> = out.iter().map(|p| p.category.0).collect();
         ids.sort_unstable();
         ids.dedup();
-        let mut named: Vec<(String, u32)> =
-            ids.iter().map(|&c| (category_name(&registries, EdgeCategoryId(c)), c)).collect();
+        let mut named: Vec<(String, u32)> = ids
+            .iter()
+            .map(|&c| (category_name(&registries, EdgeCategoryId(c)), c))
+            .collect();
         named.sort_unstable();
-        let mut by_id: Vec<(u32, u32)> =
-            named.iter().enumerate().map(|(r, (_, c))| (*c, u32::try_from(r).unwrap_or(u32::MAX))).collect();
+        let mut by_id: Vec<(u32, u32)> = named
+            .iter()
+            .enumerate()
+            .map(|(r, (_, c))| (*c, u32::try_from(r).unwrap_or(u32::MAX)))
+            .collect();
         by_id.sort_unstable();
         for p in &mut out {
-            p.name = by_id.binary_search_by_key(&p.category.0, |&(c, _)| c).map_or(u32::MAX, |i| by_id[i].1);
+            p.name = by_id
+                .binary_search_by_key(&p.category.0, |&(c, _)| c)
+                .map_or(u32::MAX, |i| by_id[i].1);
         }
         out.sort_unstable_by_key(|p| (p.from, p.to, p.level, p.name, p.kept));
         out
@@ -252,12 +285,18 @@ impl CatIndex {
     fn hop(&self, from: u32, to: u32, level: u8) -> Option<Hop> {
         let pairs = self.pairs.as_deref()?;
         let at = pairs.partition_point(|p| (p.from, p.to) < (from, to));
-        let p = pairs.get(at).filter(|p| p.from == from && p.to == to && p.level <= level)?;
+        let p = pairs
+            .get(at)
+            .filter(|p| p.from == from && p.to == to && p.level <= level)?;
         Some(Hop {
             from: self.adj.id(from),
             to: self.adj.id(to),
             category: p.category,
-            ordinal: self.kept_ordinal.get(p.kept as usize).copied().unwrap_or(u32::MAX),
+            ordinal: self
+                .kept_ordinal
+                .get(p.kept as usize)
+                .copied()
+                .unwrap_or(u32::MAX),
             tier: Tier::from_level(p.level)?,
         })
     }
@@ -275,7 +314,11 @@ impl CatIndex {
     ) -> Option<Vec<Hop>> {
         let rank = self.rank.as_deref()?;
         let goal = self.adj.index_of(target)?;
-        let one: Vec<u8> = self.kept_level.iter().map(|&l| if l <= level { 0 } else { NEVER }).collect();
+        let one: Vec<u8> = self
+            .kept_level
+            .iter()
+            .map(|&l| if l <= level { 0 } else { NEVER })
+            .collect();
         let mut how = LevelWalk::new(direction(backward), 1);
         how.plus = true;
         how.parent_rank = Some(rank);
@@ -349,7 +392,13 @@ pub(crate) struct Closure<'s, S: FactSource + ?Sized> {
 
 impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
     pub(crate) fn new(src: &'s S, tiers: &'s [Tier]) -> Self {
-        Closure { src, tiers, sets: Vec::new(), memo: Lookup::new(), stats: ClosureStats::default() }
+        Closure {
+            src,
+            tiers,
+            sets: Vec::new(),
+            memo: Lookup::new(),
+            stats: ClosureStats::default(),
+        }
     }
 
     /// The set's position, its index built on first use.
@@ -362,7 +411,8 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
             CatSet::Carry => CategorySet::of(self.src.tables().carry_edges),
             CatSet::Of(ids) => CategorySet::of(ids),
         };
-        self.sets.push((cats.clone(), CatIndex::build(self.src, self.tiers, keep)));
+        self.sets
+            .push((cats.clone(), CatIndex::build(self.src, self.tiers, keep)));
         self.stats.sets.push(SetStats::new(cats.clone()));
         self.sets.len() - 1
     }
@@ -392,7 +442,13 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
 
     /// Per source, memoised: the rows of `reaches(source, _)` (backward:
     /// `reaches(_, source)`).
-    pub(crate) fn reach(&mut self, cats: &CatSet, source: NodeId, backward: bool, depth: Option<u32>) -> &[(NodeId, Tier)] {
+    pub(crate) fn reach(
+        &mut self,
+        cats: &CatSet,
+        source: NodeId,
+        backward: bool,
+        depth: Option<u32>,
+    ) -> &[(NodeId, Tier)] {
         let set = self.set(cats);
         let key = (set, source, backward, depth.unwrap_or(u32::MAX));
         let (index, stats) = (&self.sets[set].1, &mut self.stats.sets[set]);
@@ -418,7 +474,12 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
     /// Every `(x, y, tier)` of a `reaches` with both ends free: one walk per indexed
     /// id (the nodes, then the dangling endpoints, in index order), not memoised.
     /// `None` as soon as the rows would pass `limit` (exec's remaining budget).
-    pub(crate) fn reach_all(&mut self, cats: &CatSet, depth: Option<u32>, limit: usize) -> Option<Vec<(NodeId, NodeId, Tier)>> {
+    pub(crate) fn reach_all(
+        &mut self,
+        cats: &CatSet,
+        depth: Option<u32>,
+        limit: usize,
+    ) -> Option<Vec<(NodeId, NodeId, Tier)>> {
         let set = self.set(cats);
         let (index, stats) = (&self.sets[set].1, &mut self.stats.sets[set]);
         stats.all += 1;
@@ -462,7 +523,9 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
             }
             let level = index.kept_level.get(kept).copied().unwrap_or(NEVER);
             kept += 1;
-            let (Some(f), Some(t)) = (index.adj.index_of(e.from), index.adj.index_of(e.to)) else { continue };
+            let (Some(f), Some(t)) = (index.adj.index_of(e.from), index.adj.index_of(e.to)) else {
+                continue;
+            };
             let c = comp_of[f as usize];
             if c != NONE && c == comp_of[t as usize] {
                 inside[c as usize].push((e, level));
@@ -470,12 +533,20 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
         }
         let mut rows = Vec::new();
         for (members, edges) in comps.iter().zip(inside) {
-            let mut ranked: Vec<(String, u64)> = members.iter().map(|&id| (src.render_node(id), id.0)).collect();
+            let mut ranked: Vec<(String, u64)> = members
+                .iter()
+                .map(|&id| (src.render_node(id), id.0))
+                .collect();
             ranked.sort_unstable();
-            let Some(&(_, rep)) = ranked.first() else { continue };
+            let Some(&(_, rep)) = ranked.first() else {
+                continue;
+            };
             let rep = NodeId(rep);
             let levels: Vec<u8> = edges.iter().map(|(_, l)| *l).collect();
-            let sub = Component { ids: ranked.iter().map(|(_, id)| NodeId(*id)).collect(), edges: edges.into_iter().map(|(e, _)| e).collect() };
+            let sub = Component {
+                ids: ranked.iter().map(|(_, id)| NodeId(*id)).collect(),
+                edges: edges.into_iter().map(|(e, _)| e).collect(),
+            };
             let adj = Adjacency::build(&sub, &CategorySet::all());
             let mut how = LevelWalk::new(Walk::Forward, LEVELS);
             how.plus = true;
@@ -485,7 +556,11 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
             stats.bfs += 2;
             // Members are the sub-index's first ids, in rank order.
             for (ix, x) in sub.ids.iter().enumerate() {
-                let level = if *x == rep { to[ix] } else { to[ix].max(back[ix]) };
+                let level = if *x == rep {
+                    to[ix]
+                } else {
+                    to[ix].max(back[ix])
+                };
                 if let Some(tier) = Tier::from_level(level) {
                     rows.push((*x, rep, tier));
                 }
@@ -498,7 +573,14 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
     /// Explain: a shortest `+` path at `level` from the seeds to `target` (forward),
     /// or from `target` to a seed (backward), hops in edge direction, parents chosen
     /// by rendered rank. `None` when `target` is not reached at `level`.
-    pub(crate) fn path(&mut self, cats: &CatSet, seeds: &[NodeId], target: NodeId, level: Tier, backward: bool) -> Option<Vec<Hop>> {
+    pub(crate) fn path(
+        &mut self,
+        cats: &CatSet,
+        seeds: &[NodeId],
+        target: NodeId,
+        level: Tier,
+        backward: bool,
+    ) -> Option<Vec<Hop>> {
         let set = self.set(cats);
         self.stats.sets[set].explain += 1;
         if !self.sets[set].1.ok {
@@ -507,7 +589,9 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
         }
         self.sets[set].1.explain_tables(self.src);
         self.stats.sets[set].bfs += 1;
-        self.sets[set].1.ranked_path(seeds, target, level.level(), backward, None)
+        self.sets[set]
+            .1
+            .ranked_path(seeds, target, level.level(), backward, None)
     }
 
     /// Explain: a shortest cycle at `level` that starts and ends at `rep` and passes
@@ -527,7 +611,12 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
         }
         let index = &self.sets[set].1;
         let comp_of = index.comp_of.as_deref().unwrap_or(&[]);
-        let at = |id: NodeId| index.adj.index_of(id).and_then(|ix| comp_of.get(ix as usize).copied());
+        let at = |id: NodeId| {
+            index
+                .adj
+                .index_of(id)
+                .and_then(|ix| comp_of.get(ix as usize).copied())
+        };
         let c = at(rep).unwrap_or(NONE);
         if c == NONE || at(x) != Some(c) {
             return Vec::new();
@@ -555,12 +644,19 @@ impl<'s, S: FactSource + ?Sized> Closure<'s, S> {
 }
 
 fn direction(backward: bool) -> Walk {
-    if backward { Walk::Backward } else { Walk::Forward }
+    if backward {
+        Walk::Backward
+    } else {
+        Walk::Forward
+    }
 }
 
 /// A walk's rows: every reached node with its tier, in walk order.
 fn rows_of(walk: &LevelBfs) -> Vec<(NodeId, Tier)> {
-    walk.reached.iter().filter_map(|r| Tier::from_level(r.level).map(|t| (r.id, t))).collect()
+    walk.reached
+        .iter()
+        .filter_map(|r| Tier::from_level(r.level).map(|t| (r.id, t)))
+        .collect()
 }
 
 /// Dense index -> the level a walk reached it at, [`NEVER`] when unreached.
@@ -589,7 +685,9 @@ fn component_of(adj: &Adjacency, comps: &[Vec<NodeId>]) -> Vec<u32> {
 
 /// A category's registered name; an unregistered id renders `#<id>`.
 fn category_name(registries: &Registries, c: EdgeCategoryId) -> String {
-    registries.category_name(c).map_or_else(|| format!("#{}", c.0), str::to_string)
+    registries
+        .category_name(c)
+        .map_or_else(|| format!("#{}", c.0), str::to_string)
 }
 
 #[cfg(test)]
@@ -618,7 +716,11 @@ mod tests {
             edge_categories: &[(CALLS, "CALLS"), (USES, "USES"), (IMPORTS, "IMPORTS")],
             cell_types: &[],
         },
-        entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+        entry: EntryRule {
+            kinds: &[],
+            roles: &[],
+            named: &[],
+        },
         carry_edges: &[CALLS, USES],
         effect_sinks: &[],
         activation_weights: &[],
@@ -636,7 +738,12 @@ mod tests {
     }
 
     /// Nodes `0..n` with id `id(i)` rendered `render(i)`; edge ends map through `id`.
-    fn graph_with(n: u64, edges: &[E], id: impl Fn(u64) -> u64, render: impl Fn(u64) -> String) -> MemSource {
+    fn graph_with(
+        n: u64,
+        edges: &[E],
+        id: impl Fn(u64) -> u64,
+        render: impl Fn(u64) -> String,
+    ) -> MemSource {
         let mut g = MemSource::new(TABLES);
         for i in 0..n {
             g.node(NodeId(id(i)), FUNCTION, render(i));
@@ -657,7 +764,10 @@ mod tests {
 
     impl Lcg {
         fn below(&mut self, n: u64) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (self.0 >> 33) % n
         }
     }
@@ -669,8 +779,17 @@ mod tests {
         (0..m)
             .map(|_| {
                 let a = r.below(n);
-                let b = if dangling && r.below(25) == 0 { n + r.below(3) } else { r.below(n) };
-                (a, b, EVERY[r.below(3) as usize], Tier::ALL[r.below(3) as usize])
+                let b = if dangling && r.below(25) == 0 {
+                    n + r.below(3)
+                } else {
+                    r.below(n)
+                };
+                (
+                    a,
+                    b,
+                    EVERY[r.below(3) as usize],
+                    Tier::ALL[r.below(3) as usize],
+                )
             })
             .collect()
     }
@@ -678,10 +797,17 @@ mod tests {
     /// Brute force over the edge list: for each level L, what seeds of tier <= L
     /// reach by one or more hops of `keep` edges of tier <= L (within `depth` hops);
     /// a node's tier is the first such L.
-    fn oracle(edges: &[E], seeds: &[(u64, Tier)], keep: &[EdgeCategoryId], backward: bool, depth: Option<u32>) -> Vec<(u64, Tier)> {
+    fn oracle(
+        edges: &[E],
+        seeds: &[(u64, Tier)],
+        keep: &[EdgeCategoryId],
+        backward: bool,
+        depth: Option<u32>,
+    ) -> Vec<(u64, Tier)> {
         let mut best: Vec<(u64, Tier)> = Vec::new();
         for level in Tier::ALL {
-            let mut frontier: Vec<u64> = seeds.iter().filter(|s| s.1 <= level).map(|s| s.0).collect();
+            let mut frontier: Vec<u64> =
+                seeds.iter().filter(|s| s.1 <= level).map(|s| s.0).collect();
             let mut seen: HashSet<u64> = HashSet::new();
             let mut d = 0u32;
             while !frontier.is_empty() && depth.is_none_or(|m| d < m) {
@@ -711,7 +837,11 @@ mod tests {
     /// it reaches itself; rep is the member with the smallest `render`; a member's
     /// tier is the first level at which it and rep reach each other (rep: the first
     /// level with a cycle through it).
-    fn oracle_scc(nodes: &[u64], edges: &[E], render: &dyn Fn(u64) -> String) -> Vec<(u64, u64, Tier)> {
+    fn oracle_scc(
+        nodes: &[u64],
+        edges: &[E],
+        render: &dyn Fn(u64) -> String,
+    ) -> Vec<(u64, u64, Tier)> {
         let reach = |u: u64| oracle(edges, &[(u, F)], &EVERY, false, None);
         let level = |r: &[(u64, Tier)], v: u64| r.iter().find(|x| x.0 == v).map(|x| x.1);
         let reaches: Vec<Vec<(u64, Tier)>> = nodes.iter().map(|&u| reach(u)).collect();
@@ -724,14 +854,24 @@ mod tests {
             let comp: Vec<u64> = nodes
                 .iter()
                 .copied()
-                .filter(|&v| v == x || (level(&reaches[i], v).is_some() && at(v).and_then(|r| level(r, x)).is_some()))
+                .filter(|&v| {
+                    v == x
+                        || (level(&reaches[i], v).is_some()
+                            && at(v).and_then(|r| level(r, x)).is_some())
+                })
                 .collect();
-            let rep = comp.iter().copied().min_by_key(|&v| (render(v), v)).unwrap_or(x);
+            let rep = comp
+                .iter()
+                .copied()
+                .min_by_key(|&v| (render(v), v))
+                .unwrap_or(x);
             let rr = at(rep).map(Vec::as_slice).unwrap_or(&[]);
             let tier = if x == rep {
                 level(rr, rep)
             } else {
-                level(rr, x).zip(level(&reaches[i], rep)).map(|(a, b)| a.max(b))
+                level(rr, x)
+                    .zip(level(&reaches[i], rep))
+                    .map(|(a, b)| a.max(b))
             };
             rows.push((x, rep, tier.unwrap_or(H)));
         }
@@ -751,13 +891,28 @@ mod tests {
             let seeds = [(r.below(120), F), (r.below(120), D)];
             let starts: Vec<(NodeId, Tier)> = seeds.iter().map(|&(s, t)| (NodeId(s), t)).collect();
             for backward in [false, true] {
-                for (cats, keep) in [(CatSet::All, &EVERY[..]), (CatSet::Of(vec![CALLS, USES]), &[CALLS, USES][..])] {
+                for (cats, keep) in [
+                    (CatSet::All, &EVERY[..]),
+                    (CatSet::Of(vec![CALLS, USES]), &[CALLS, USES][..]),
+                ] {
                     let rows = c.reach_from(&cats, &starts, backward, None);
-                    assert_eq!(ids(&rows), oracle(&edges, &seeds, keep, backward, None), "seed {seed} backward {backward}");
-                    assert_eq!(rows.iter().map(|r| r.0).collect::<HashSet<_>>().len(), rows.len(), "a node is one row");
+                    assert_eq!(
+                        ids(&rows),
+                        oracle(&edges, &seeds, keep, backward, None),
+                        "seed {seed} backward {backward}"
+                    );
+                    assert_eq!(
+                        rows.iter().map(|r| r.0).collect::<HashSet<_>>().len(),
+                        rows.len(),
+                        "a node is one row"
+                    );
                 }
             }
-            tiers_seen.extend(c.reach_from(&CatSet::All, &starts, false, None).iter().map(|r| r.1));
+            tiers_seen.extend(
+                c.reach_from(&CatSet::All, &starts, false, None)
+                    .iter()
+                    .map(|r| r.1),
+            );
             assert_eq!(c.stats().sets.len(), 2, "one index per category set");
             assert_eq!(c.stats().sets[0].multi, 3);
             assert_eq!(c.stats().sets[0].bfs, 3);
@@ -767,12 +922,30 @@ mod tests {
 
     #[test]
     fn carry_default_set() {
-        let g = graph(6, &[(0, 1, CALLS, F), (1, 2, IMPORTS, F), (2, 3, USES, F), (0, 4, IMPORTS, F), (1, 5, USES, F)]);
+        let g = graph(
+            6,
+            &[
+                (0, 1, CALLS, F),
+                (1, 2, IMPORTS, F),
+                (2, 3, USES, F),
+                (0, 4, IMPORTS, F),
+                (1, 5, USES, F),
+            ],
+        );
         let tiers = edge_tiers(&g);
         let mut c = Closure::new(&g, &tiers);
-        assert_eq!(ids(c.reach(&CatSet::Carry, NodeId(0), false, None)), vec![(1, F), (5, F)]);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, None)), vec![(1, F), (2, F), (3, F), (4, F), (5, F)]);
-        assert_eq!(ids(c.reach(&CatSet::Of(vec![IMPORTS]), NodeId(1), false, None)), vec![(2, F)]);
+        assert_eq!(
+            ids(c.reach(&CatSet::Carry, NodeId(0), false, None)),
+            vec![(1, F), (5, F)]
+        );
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, None)),
+            vec![(1, F), (2, F), (3, F), (4, F), (5, F)]
+        );
+        assert_eq!(
+            ids(c.reach(&CatSet::Of(vec![IMPORTS]), NodeId(1), false, None)),
+            vec![(2, F)]
+        );
         assert_eq!(c.stats().sets[0].label(&TABLES.registries), "carry");
         assert_eq!(c.stats().sets[1].label(&TABLES.registries), "*");
         assert_eq!(c.stats().sets[2].label(&TABLES.registries), "IMPORTS");
@@ -788,7 +961,10 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(ids(&first), vec![(1, F), (2, D), (3, H)]);
         let s = &c.stats().sets[0];
-        assert_eq!((s.bfs, s.per_source, s.memo_hits, s.memo_rows), (1, 1, 1, 3));
+        assert_eq!(
+            (s.bfs, s.per_source, s.memo_hits, s.memo_rows),
+            (1, 1, 1, 3)
+        );
         // Direction and depth are part of the key.
         c.reach(&CatSet::All, NodeId(0), true, None);
         c.reach(&CatSet::All, NodeId(0), false, Some(1));
@@ -802,15 +978,30 @@ mod tests {
         let chain = graph(4, &[(0, 1, CALLS, F), (1, 2, CALLS, F), (2, 3, CALLS, F)]);
         let tiers = edge_tiers(&chain);
         let mut c = Closure::new(&chain, &tiers);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, Some(2))), vec![(1, F), (2, F)]);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, Some(0))), vec![]);
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, Some(2))),
+            vec![(1, F), (2, F)]
+        );
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, Some(0))),
+            vec![]
+        );
         // Plus semantics: the source is a row only on a cycle.
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, None)), vec![(1, F), (2, F), (3, F)]);
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, None)),
+            vec![(1, F), (2, F), (3, F)]
+        );
         let cycle = graph(2, &[(0, 1, CALLS, F), (1, 0, CALLS, F)]);
         let tiers = edge_tiers(&cycle);
         let mut c = Closure::new(&cycle, &tiers);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, None)), vec![(0, F), (1, F)]);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, Some(1))), vec![(1, F)]);
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, None)),
+            vec![(0, F), (1, F)]
+        );
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, Some(1))),
+            vec![(1, F)]
+        );
     }
 
     #[test]
@@ -818,10 +1009,15 @@ mod tests {
         let g = graph(4, &[(0, 1, CALLS, F), (1, 2, CALLS, D), (2, 3, CALLS, F)]);
         let tiers = edge_tiers(&g);
         let mut c = Closure::new(&g, &tiers);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(3), true, None)), vec![(0, D), (1, D), (2, F)]);
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(3), true, None)),
+            vec![(0, D), (1, D), (2, F)]
+        );
         assert_eq!(ids(c.reach(&CatSet::All, NodeId(3), false, None)), vec![]);
         // Backward witnesses run in edge direction, from the target.
-        let hops = c.path(&CatSet::All, &[NodeId(3)], NodeId(0), D, true).unwrap_or_default();
+        let hops = c
+            .path(&CatSet::All, &[NodeId(3)], NodeId(0), D, true)
+            .unwrap_or_default();
         let ends: Vec<(u64, u64)> = hops.iter().map(|h| (h.from.0, h.to.0)).collect();
         assert_eq!(ends, vec![(0, 1), (1, 2), (2, 3)]);
         assert_eq!(c.path(&CatSet::All, &[NodeId(3)], NodeId(0), F, true), None);
@@ -833,11 +1029,21 @@ mod tests {
         for seed in 1..=8u64 {
             let n = 40;
             let edges = random_edges(seed, n, 70, true);
-            let render = |i: u64| if i < n { format!("r{:03}", (i * 37) % n) } else { format!("#{i:016x}") };
+            let render = |i: u64| {
+                if i < n {
+                    format!("r{:03}", (i * 37) % n)
+                } else {
+                    format!("#{i:016x}")
+                }
+            };
             let g = graph_with(n, &edges, |i| i, render);
             let tiers = edge_tiers(&g);
             let mut c = Closure::new(&g, &tiers);
-            let mut rows: Vec<(u64, u64, Tier)> = c.scc_rows(&CatSet::All).iter().map(|(x, r, t)| (x.0, r.0, *t)).collect();
+            let mut rows: Vec<(u64, u64, Tier)> = c
+                .scc_rows(&CatSet::All)
+                .iter()
+                .map(|(x, r, t)| (x.0, r.0, *t))
+                .collect();
             rows.sort();
             let mut nodes: Vec<u64> = (0..n).collect();
             nodes.extend(edges.iter().flat_map(|e| [e.0, e.1]).filter(|&v| v >= n));
@@ -846,7 +1052,10 @@ mod tests {
             assert_eq!(rows, oracle_scc(&nodes, &edges, &render), "seed {seed}");
             // Membership is Tarjan's over the full graph.
             let comps = strongly_connected(&Adjacency::build(&g, &CategorySet::all()));
-            let mut want: Vec<Vec<u64>> = comps.iter().map(|m| m.iter().map(|id| id.0).collect()).collect();
+            let mut want: Vec<Vec<u64>> = comps
+                .iter()
+                .map(|m| m.iter().map(|id| id.0).collect())
+                .collect();
             let mut got: Vec<Vec<u64>> = Vec::new();
             for &(_, rep, _) in &rows {
                 let mut m: Vec<u64> = rows.iter().filter(|r| r.1 == rep).map(|r| r.0).collect();
@@ -865,12 +1074,27 @@ mod tests {
         assert_eq!(tiers_seen.len(), 3, "the corpus has members at every tier");
         assert!(widest >= 3, "the corpus has a component of three or more");
         // a <-> b at FACT; c only through the HEURISTIC b -> c.
-        let g = graph(3, &[(0, 1, CALLS, F), (1, 0, CALLS, F), (1, 2, CALLS, H), (2, 0, CALLS, F)]);
+        let g = graph(
+            3,
+            &[
+                (0, 1, CALLS, F),
+                (1, 0, CALLS, F),
+                (1, 2, CALLS, H),
+                (2, 0, CALLS, F),
+            ],
+        );
         let tiers = edge_tiers(&g);
         let mut c = Closure::new(&g, &tiers);
         let mut rows = c.scc_rows(&CatSet::All);
         rows.sort_by_key(|r| r.0.0);
-        assert_eq!(rows, vec![(NodeId(0), NodeId(0), F), (NodeId(1), NodeId(0), F), (NodeId(2), NodeId(0), H)]);
+        assert_eq!(
+            rows,
+            vec![
+                (NodeId(0), NodeId(0), F),
+                (NodeId(1), NodeId(0), F),
+                (NodeId(2), NodeId(0), H)
+            ]
+        );
         assert_eq!(c.stats().sets[0].modes(), "scc");
     }
 
@@ -881,23 +1105,49 @@ mod tests {
         let mut c = Closure::new(&g, &tiers);
         assert_eq!(c.scc_rows(&CatSet::All), vec![(NodeId(0), NodeId(0), D)]);
         let hops = c.cycle(&CatSet::All, NodeId(0), NodeId(0), D);
-        assert_eq!(hops, vec![Hop { from: NodeId(0), to: NodeId(0), category: USES, ordinal: 1, tier: D }]);
+        assert_eq!(
+            hops,
+            vec![Hop {
+                from: NodeId(0),
+                to: NodeId(0),
+                category: USES,
+                ordinal: 1,
+                tier: D
+            }]
+        );
         assert!(c.cycle(&CatSet::All, NodeId(0), NodeId(0), F).is_empty());
-        assert!(c.cycle(&CatSet::All, NodeId(1), NodeId(0), H).is_empty(), "1 is in no component");
+        assert!(
+            c.cycle(&CatSet::All, NodeId(1), NodeId(0), H).is_empty(),
+            "1 is in no component"
+        );
         assert!(c.scc_rows(&CatSet::Carry).iter().any(|r| r.0 == NodeId(0)));
         assert!(c.scc_rows(&CatSet::Of(vec![CALLS])).is_empty());
     }
 
     /// Renders a path's hops.
     fn shown(g: &MemSource, hops: &[Hop]) -> Vec<(String, u32, String, Tier)> {
-        hops.iter().map(|h| (g.render_node(h.from), h.category.0, g.render_node(h.to), h.tier)).collect()
+        hops.iter()
+            .map(|h| {
+                (
+                    g.render_node(h.from),
+                    h.category.0,
+                    g.render_node(h.to),
+                    h.tier,
+                )
+            })
+            .collect()
     }
 
     #[test]
     fn canonical_path() {
         // s = 0, a = 1, b = 2, t = 3; b renders before a, a's edges come first.
         let render = |i: u64| ["s", "m_a", "k_b", "t"][i as usize].to_string();
-        let forward = [(0, 1, CALLS, F), (1, 3, CALLS, F), (0, 2, CALLS, F), (2, 3, CALLS, F)];
+        let forward = [
+            (0, 1, CALLS, F),
+            (1, 3, CALLS, F),
+            (0, 2, CALLS, F),
+            (2, 3, CALLS, F),
+        ];
         let mut reversed = forward;
         reversed.reverse();
         let mut seen = Vec::new();
@@ -905,13 +1155,22 @@ mod tests {
             let g = graph_with(4, edges, |i| i, render);
             let tiers = edge_tiers(&g);
             let mut c = Closure::new(&g, &tiers);
-            let hops = c.path(&CatSet::All, &[NodeId(0)], NodeId(3), F, false).unwrap_or_default();
+            let hops = c
+                .path(&CatSet::All, &[NodeId(0)], NodeId(3), F, false)
+                .unwrap_or_default();
             assert_eq!(
                 shown(&g, &hops),
-                vec![("s".into(), CALLS.0, "k_b".into(), F), ("k_b".into(), CALLS.0, "t".into(), F)]
+                vec![
+                    ("s".into(), CALLS.0, "k_b".into(), F),
+                    ("k_b".into(), CALLS.0, "t".into(), F)
+                ]
             );
             seen.push(shown(&g, &hops));
-            assert_eq!(c.path(&CatSet::All, &[NodeId(0)], NodeId(0), H, false), None, "s is on no cycle");
+            assert_eq!(
+                c.path(&CatSet::All, &[NodeId(0)], NodeId(0), H, false),
+                None,
+                "s is on no cycle"
+            );
             assert_eq!(c.stats().sets[0].explain, 2);
         }
         assert_eq!(seen[0], seen[1]);
@@ -927,7 +1186,13 @@ mod tests {
             reversed.reverse();
             let mut runs = Vec::new();
             for (list, salt) in [(&edges, 0u64), (&reversed, 0x9e37_79b9_7f4a_7c15)] {
-                let id = move |i: u64| if salt == 0 { i } else { i.wrapping_mul(salt) ^ 0xabcdef };
+                let id = move |i: u64| {
+                    if salt == 0 {
+                        i
+                    } else {
+                        i.wrapping_mul(salt) ^ 0xabcdef
+                    }
+                };
                 let g = graph_with(n, list, id, render);
                 let tiers = edge_tiers(&g);
                 let all: Vec<&Edge> = g.edges().collect();
@@ -938,7 +1203,11 @@ mod tests {
                     assert!(!hops.is_empty(), "seed {seed}: a cycle at the row's tier");
                     for h in &hops {
                         let e = all[h.ordinal as usize];
-                        assert_eq!((e.from, e.to, e.category), (h.from, h.to, h.category), "a hop is its edge");
+                        assert_eq!(
+                            (e.from, e.to, e.category),
+                            (h.from, h.to, h.category),
+                            "a hop is its edge"
+                        );
                         assert_eq!(tiers[h.ordinal as usize], h.tier);
                         assert!(h.tier <= tier);
                     }
@@ -948,12 +1217,18 @@ mod tests {
                     if x == rep {
                         // A shortest cycle through rep at the tier.
                         let rep_ix = (0..n).find(|&i| NodeId(id(i)) == rep).unwrap_or(u64::MAX);
-                        let shortest = (1..=n as u32)
-                            .find(|&d| oracle(list, &[(rep_ix, F)], &EVERY, false, Some(d)).iter().any(|r| r.0 == rep_ix && r.1 <= tier));
+                        let shortest = (1..=n as u32).find(|&d| {
+                            oracle(list, &[(rep_ix, F)], &EVERY, false, Some(d))
+                                .iter()
+                                .any(|r| r.0 == rep_ix && r.1 <= tier)
+                        });
                         assert_eq!(Some(hops.len() as u32), shortest);
                     }
                     if let Some(stricter) = tier.level().checked_sub(1).and_then(Tier::from_level) {
-                        assert!(c.cycle(&CatSet::All, x, rep, stricter).is_empty(), "no cycle below the row's tier");
+                        assert!(
+                            c.cycle(&CatSet::All, x, rep, stricter).is_empty(),
+                            "no cycle below the row's tier"
+                        );
                     }
                     run.push((g.render_node(x), g.render_node(rep), tier, shown(&g, &hops)));
                 }
@@ -961,7 +1236,10 @@ mod tests {
                 runs.push(run);
             }
             assert!(!runs[0].is_empty(), "seed {seed} has a cycle");
-            assert_eq!(runs[0], runs[1], "seed {seed}: re-salted ids and reversed edges give the same witnesses");
+            assert_eq!(
+                runs[0], runs[1],
+                "seed {seed}: re-salted ids and reversed edges give the same witnesses"
+            );
         }
     }
 
@@ -970,10 +1248,23 @@ mod tests {
         let g = graph(2, &[(0, 99, CALLS, F), (99, 1, CALLS, D)]);
         let tiers = edge_tiers(&g);
         let mut c = Closure::new(&g, &tiers);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(0), false, None)), vec![(1, D), (99, F)]);
-        assert_eq!(ids(c.reach(&CatSet::All, NodeId(99), true, None)), vec![(0, F)]);
-        let hops = c.path(&CatSet::All, &[NodeId(0)], NodeId(1), D, false).unwrap_or_default();
-        assert_eq!(hops.iter().map(|h| (h.from.0, h.to.0, h.ordinal)).collect::<Vec<_>>(), vec![(0, 99, 0), (99, 1, 1)]);
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(0), false, None)),
+            vec![(1, D), (99, F)]
+        );
+        assert_eq!(
+            ids(c.reach(&CatSet::All, NodeId(99), true, None)),
+            vec![(0, F)]
+        );
+        let hops = c
+            .path(&CatSet::All, &[NodeId(0)], NodeId(1), D, false)
+            .unwrap_or_default();
+        assert_eq!(
+            hops.iter()
+                .map(|h| (h.from.0, h.to.0, h.ordinal))
+                .collect::<Vec<_>>(),
+            vec![(0, 99, 0), (99, 1, 1)]
+        );
         // A dangling id with edges both ways is a component member like any node.
         let g = graph(1, &[(0, 99, CALLS, F), (99, 0, CALLS, F)]);
         let tiers = edge_tiers(&g);
@@ -990,17 +1281,41 @@ mod tests {
             let g = graph(2, edges);
             let tiers = edge_tiers(&g);
             let mut c = Closure::new(&g, &tiers);
-            c.path(&CatSet::All, &[NodeId(0)], NodeId(1), level, false).unwrap_or_default()
+            c.path(&CatSet::All, &[NodeId(0)], NodeId(1), level, false)
+                .unwrap_or_default()
         };
-        let hop = |category, ordinal, tier| vec![Hop { from: NodeId(0), to: NodeId(1), category, ordinal, tier }];
-        assert_eq!(pick(&[(0, 1, USES, F), (0, 1, CALLS, F)], F), hop(CALLS, 1, F));
-        assert_eq!(pick(&[(0, 1, CALLS, F), (0, 1, USES, F)], F), hop(CALLS, 0, F));
-        assert_eq!(pick(&[(0, 1, CALLS, H), (0, 1, USES, F)], H), hop(USES, 1, F));
-        assert_eq!(pick(&[(0, 1, USES, F), (0, 1, CALLS, H)], H), hop(USES, 0, F));
+        let hop = |category, ordinal, tier| {
+            vec![Hop {
+                from: NodeId(0),
+                to: NodeId(1),
+                category,
+                ordinal,
+                tier,
+            }]
+        };
+        assert_eq!(
+            pick(&[(0, 1, USES, F), (0, 1, CALLS, F)], F),
+            hop(CALLS, 1, F)
+        );
+        assert_eq!(
+            pick(&[(0, 1, CALLS, F), (0, 1, USES, F)], F),
+            hop(CALLS, 0, F)
+        );
+        assert_eq!(
+            pick(&[(0, 1, CALLS, H), (0, 1, USES, F)], H),
+            hop(USES, 1, F)
+        );
+        assert_eq!(
+            pick(&[(0, 1, USES, F), (0, 1, CALLS, H)], H),
+            hop(USES, 0, F)
+        );
         // Only the HEURISTIC edge: no FACT path.
         assert_eq!(pick(&[(0, 1, CALLS, H)], F), vec![]);
         // Two call sites: the ordinal breaks the tie.
-        assert_eq!(pick(&[(0, 1, CALLS, D), (0, 1, CALLS, D)], D), hop(CALLS, 0, D));
+        assert_eq!(
+            pick(&[(0, 1, CALLS, D), (0, 1, CALLS, D)], D),
+            hop(CALLS, 0, D)
+        );
     }
 
     #[test]
@@ -1009,8 +1324,12 @@ mod tests {
         let g = graph(25, &edges);
         let tiers = edge_tiers(&g);
         let mut c = Closure::new(&g, &tiers);
-        let mut all: Vec<(u64, u64, Tier)> =
-            c.reach_all(&CatSet::All, None, usize::MAX).unwrap_or_default().iter().map(|(x, y, t)| (x.0, y.0, *t)).collect();
+        let mut all: Vec<(u64, u64, Tier)> = c
+            .reach_all(&CatSet::All, None, usize::MAX)
+            .unwrap_or_default()
+            .iter()
+            .map(|(x, y, t)| (x.0, y.0, *t))
+            .collect();
         all.sort();
         let mut want = Vec::new();
         let mut sources: Vec<u64> = (0..25).collect();
@@ -1018,15 +1337,30 @@ mod tests {
         sources.sort_unstable();
         sources.dedup();
         for x in sources {
-            want.extend(oracle(&edges, &[(x, F)], &EVERY, false, None).into_iter().map(|(y, t)| (x, y, t)));
+            want.extend(
+                oracle(&edges, &[(x, F)], &EVERY, false, None)
+                    .into_iter()
+                    .map(|(y, t)| (x, y, t)),
+            );
         }
         want.sort();
         assert!(!want.is_empty());
         assert_eq!(all, want);
-        assert_eq!(c.reach_all(&CatSet::All, None, want.len() - 1), None, "past the budget");
-        assert_eq!(c.reach_all(&CatSet::All, None, want.len()).map(|r| r.len()), Some(want.len()));
+        assert_eq!(
+            c.reach_all(&CatSet::All, None, want.len() - 1),
+            None,
+            "past the budget"
+        );
+        assert_eq!(
+            c.reach_all(&CatSet::All, None, want.len()).map(|r| r.len()),
+            Some(want.len())
+        );
         assert_eq!(c.stats().sets[0].all, 3);
-        assert_eq!(c.stats().sets[0].memo_rows, 0, "the unbound walk is not memoised");
+        assert_eq!(
+            c.stats().sets[0].memo_rows,
+            0,
+            "the unbound walk is not memoised"
+        );
     }
 
     #[test]
@@ -1035,9 +1369,15 @@ mod tests {
         let short = vec![F];
         let mut c = Closure::new(&g, &short);
         assert!(c.reach(&CatSet::All, NodeId(0), false, None).is_empty());
-        assert!(c.reach_from(&CatSet::All, &[(NodeId(0), F)], false, None).is_empty());
+        assert!(
+            c.reach_from(&CatSet::All, &[(NodeId(0), F)], false, None)
+                .is_empty()
+        );
         assert!(c.scc_rows(&CatSet::All).is_empty());
-        assert_eq!(c.path(&CatSet::All, &[NodeId(0)], NodeId(1), F, false), None);
+        assert_eq!(
+            c.path(&CatSet::All, &[NodeId(0)], NodeId(1), F, false),
+            None
+        );
         assert!(c.cycle(&CatSet::All, NodeId(0), NodeId(0), F).is_empty());
         assert_eq!(c.reach_all(&CatSet::All, None, 10), Some(Vec::new()));
         assert_eq!(c.stats().sets[0].errors, 6);

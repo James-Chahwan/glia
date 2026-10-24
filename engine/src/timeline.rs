@@ -65,8 +65,8 @@ use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 use glia_graph::identity::detect_moves_with;
 use glia_store::{
-    TIMELINE_FILE, TIMELINE_OPEN, TimelineEdge, TimelineNode, TimelineRev, TimelineStore, read_timeline,
-    timeline_subject, write_timeline,
+    TIMELINE_FILE, TIMELINE_OPEN, TimelineEdge, TimelineNode, TimelineRev, TimelineStore,
+    read_timeline, timeline_subject, write_timeline,
 };
 
 use crate::absence::{self, Absence, Answer};
@@ -192,9 +192,16 @@ impl AsOfView {
     pub fn summary(&self) -> AsOfSummary {
         let mut by_category: BTreeMap<&'static str, usize> = BTreeMap::new();
         for e in &self.edges {
-            *by_category.entry(edge_category::name(e.category)).or_insert(0) += 1;
+            *by_category
+                .entry(edge_category::name(e.category))
+                .or_insert(0) += 1;
         }
-        AsOfSummary { rev: self.rev.clone(), nodes: self.nodes.len(), edges: self.edges.len(), by_category }
+        AsOfSummary {
+            rev: self.rev.clone(),
+            nodes: self.nodes.len(),
+            edges: self.edges.len(),
+            by_category,
+        }
     }
 
     /// The node whose last-seen qname is `q`, else the one node whose qname
@@ -205,7 +212,11 @@ impl AsOfView {
             return self.nodes.get(i).copied();
         }
         let suffix = format!("::{q}");
-        let mut hits = self.qnames.iter().enumerate().filter(|(_, n)| n.ends_with(&suffix));
+        let mut hits = self
+            .qnames
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.ends_with(&suffix));
         match (hits.next(), hits.next()) {
             (Some((i, _)), None) => self.nodes.get(i).copied(),
             _ => None,
@@ -214,7 +225,11 @@ impl AsOfView {
 
     /// The last-seen qname of `id`, when it is a node of this view.
     pub fn qname_of(&self, id: NodeId) -> Option<&str> {
-        self.nodes.iter().position(|n| *n == id).and_then(|i| self.qnames.get(i)).map(String::as_str)
+        self.nodes
+            .iter()
+            .position(|n| *n == id)
+            .and_then(|i| self.qnames.get(i))
+            .map(String::as_str)
     }
 }
 
@@ -256,7 +271,10 @@ pub fn build_timeline(repo_path: &str, args: &TimelineArgs) -> Result<TimelineBu
         return Err(format!("not a directory: {repo_path}"));
     }
     if args.revs == 0 || args.revs > MAX_REVS {
-        return Err(format!("a timeline window holds 1..={MAX_REVS} revs, not {}", args.revs));
+        return Err(format!(
+            "a timeline window holds 1..={MAX_REVS} revs, not {}",
+            args.revs
+        ));
     }
     let head = git_rev::resolve_rev(repo, &args.head)?;
     let log = git_rev::first_parent_log(repo, &head, args.revs)?;
@@ -280,23 +298,43 @@ pub fn build_timeline(repo_path: &str, args: &TimelineArgs) -> Result<TimelineBu
         if let (Some(b), Some(p)) = (builder.as_mut(), prev.as_ref()) {
             let renames = git_rev::renames_between(repo, &p.sha, &rev.sha);
             let moves = detect_moves_with(&p.result.merged, &cur.merged, &renames);
-            let pairs: Vec<(NodeId, NodeId)> = moves.nodes.iter().map(|m| (m.old_id, m.new_id)).collect();
+            let pairs: Vec<(NodeId, NodeId)> =
+                moves.nodes.iter().map(|m| (m.old_id, m.new_id)).collect();
             // `prev` is rebuilt from the build pushed last as `next`: the same
             // side, the rule TimelineBuilder::push trusts.
-            b.push(&delta::side(&p.result.merged, &p.parts), &delta::side(&cur.merged, &parts), &pairs);
+            b.push(
+                &delta::side(&p.result.merged, &p.parts),
+                &delta::side(&cur.merged, &parts),
+                &pairs,
+            );
         } else {
             builder = Some(TimelineBuilder::new(&delta::side(&cur.merged, &parts)));
         }
         if repo_meta.is_none() {
-            repo_meta = cur.repo_labels.iter().next().map(|(id, label)| (*id, label.clone()));
+            repo_meta = cur
+                .repo_labels
+                .iter()
+                .next()
+                .map(|(id, label)| (*id, label.clone()));
         }
         built.push(rev);
-        prev = Some(BuiltRev { result: cur, parts, sha: rev.sha.clone() });
+        prev = Some(BuiltRev {
+            result: cur,
+            parts,
+            sha: rev.sha.clone(),
+        });
     }
     drop(prev);
     let Some(builder) = builder else {
-        let why: Vec<String> = skipped.iter().map(|(sha, e)| format!("{}: {e}", short(sha))).collect();
-        return Err(format!("no rev of the {} in the window built ({})", log.len(), why.join("; ")));
+        let why: Vec<String> = skipped
+            .iter()
+            .map(|(sha, e)| format!("{}: {e}", short(sha)))
+            .collect();
+        return Err(format!(
+            "no rev of the {} in the window built ({})",
+            log.len(),
+            why.join("; ")
+        ));
     };
     let tl = builder.finish();
     let (repo_id, label) = repo_meta.unwrap_or_else(|| (0, repo_path.to_string()));
@@ -306,14 +344,21 @@ pub fn build_timeline(repo_path: &str, args: &TimelineArgs) -> Result<TimelineBu
         let dir = default_layout_dir(repo);
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         write_self_ignore(&dir).map_err(|e| format!("write {}/.gitignore: {e}", dir.display()))?;
-        write_timeline(&dir, &store).map_err(|e| format!("write {}: {e}", dir.join(TIMELINE_FILE).display()))?;
+        write_timeline(&dir, &store)
+            .map_err(|e| format!("write {}: {e}", dir.join(TIMELINE_FILE).display()))?;
         Some(dir.join(TIMELINE_FILE).to_string_lossy().into_owned())
     } else {
         None
     };
-    let keys: BTreeSet<(u64, u64, u32)> = store.edges.iter().map(|e| (e.from, e.to, e.category)).collect();
+    let keys: BTreeSet<(u64, u64, u32)> = store
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to, e.category))
+        .collect();
     let out = TimelineBuilt {
-        revs: (0..store.revs.len()).filter_map(|i| rev_ref(&store, i)).collect(),
+        revs: (0..store.revs.len())
+            .filter_map(|i| rev_ref(&store, i))
+            .collect(),
         skipped,
         nodes: store.nodes.len(),
         edges: keys.len(),
@@ -339,8 +384,16 @@ pub fn build_timeline(repo_path: &str, args: &TimelineArgs) -> Result<TimelineBu
 
 /// Materialise `rev` and build it under the working tree's identity on the
 /// shared cache; the checkout is dropped before this returns.
-fn build_rev(repo: &Path, repo_path: &str, rev: &RevInfo, cache: &mut ParseCache) -> Result<GenerateResult, String> {
-    let r = Rev { given: rev.sha.clone(), sha: rev.sha.clone() };
+fn build_rev(
+    repo: &Path,
+    repo_path: &str,
+    rev: &RevInfo,
+    cache: &mut ParseCache,
+) -> Result<GenerateResult, String> {
+    let r = Rev {
+        given: rev.sha.clone(),
+        sha: rev.sha.clone(),
+    };
     let tree = git_rev::materialize_rev(repo, &r)?;
     let tmp = tree
         .dir
@@ -408,7 +461,11 @@ fn to_store(
 ) -> TimelineStore {
     let revs = built
         .iter()
-        .map(|r| TimelineRev { sha: r.sha.clone(), time: r.time, subject: timeline_subject(&r.subject) })
+        .map(|r| TimelineRev {
+            sha: r.sha.clone(),
+            time: r.time,
+            subject: timeline_subject(&r.subject),
+        })
         .collect();
     let mut strings = Strings::default();
     let nodes = tl
@@ -420,7 +477,9 @@ fn to_store(
                 Some(i) => strings.intern(&i.qname),
                 None => strings.intern(&format!("(unknown:{})", s.id.0)),
             };
-            let file = info.and_then(|i| i.file.as_deref()).map_or(0, |f| strings.intern(f).saturating_add(1));
+            let file = info
+                .and_then(|i| i.file.as_deref())
+                .map_or(0, |f| strings.intern(f).saturating_add(1));
             TimelineNode {
                 id: s.id.0,
                 kind: info.map_or(0, |i| i.kind),
@@ -444,7 +503,13 @@ fn to_store(
             until_rev: s.until_rev.unwrap_or(TIMELINE_OPEN),
         })
         .collect();
-    TimelineStore { repo, revs, strings: strings.list, nodes, edges }
+    TimelineStore {
+        repo,
+        revs,
+        strings: strings.list,
+        nodes,
+        edges,
+    }
 }
 
 /// The first 7 chars of a commit id.
@@ -455,7 +520,12 @@ fn short(sha: &str) -> &str {
 /// Rev `i` of `store` as a [`RevRef`].
 fn rev_ref(store: &TimelineStore, i: usize) -> Option<RevRef> {
     let r = store.revs.get(i)?;
-    Some(RevRef { index: u32::try_from(i).ok()?, sha: r.sha.clone(), time: r.time, subject: r.subject.clone() })
+    Some(RevRef {
+        index: u32::try_from(i).ok()?,
+        sha: r.sha.clone(),
+        time: r.time,
+        subject: r.subject.clone(),
+    })
 }
 
 /// The timeline sidecar of the repo at `repo_path` (its default layout dir).
@@ -498,13 +568,20 @@ impl IdIndex {
 
     /// The node span whose id at `rev` is `id`.
     fn span_at(&self, id: u64, rev: u32) -> Option<usize> {
-        self.by_id.get(&id)?.iter().find(|(_, from, until)| *from <= rev && rev < *until).map(|(i, _, _)| *i)
+        self.by_id
+            .get(&id)?
+            .iter()
+            .find(|(_, from, until)| *from <= rev && rev < *until)
+            .map(|(i, _, _)| *i)
     }
 }
 
 /// The id node span `n` had at `rev`.
 fn id_at(n: &TimelineNode, rev: u32) -> u64 {
-    n.prior.iter().find(|(changed, _)| rev < *changed).map_or(n.id, |(_, before)| *before)
+    n.prior
+        .iter()
+        .find(|(changed, _)| rev < *changed)
+        .map_or(n.id, |(_, before)| *before)
 }
 
 /// The last rev edge span `e` is present at.
@@ -523,15 +600,25 @@ fn resolve_spans(store: &TimelineStore, q: &str) -> Result<BTreeSet<usize>, Vec<
         return Err(Vec::new());
     }
     let with = |name: &str| -> BTreeSet<usize> {
-        store.nodes.iter().enumerate().filter(|(_, n)| store.node_qname(n) == Some(name)).map(|(i, _)| i).collect()
+        store
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| store.node_qname(n) == Some(name))
+            .map(|(i, _)| i)
+            .collect()
     };
     let exact = with(q);
     if !exact.is_empty() {
         return Ok(exact);
     }
     let suffix = format!("::{q}");
-    let names: BTreeSet<&str> =
-        store.nodes.iter().filter_map(|n| store.node_qname(n)).filter(|n| n.ends_with(&suffix)).collect();
+    let names: BTreeSet<&str> = store
+        .nodes
+        .iter()
+        .filter_map(|n| store.node_qname(n))
+        .filter(|n| n.ends_with(&suffix))
+        .collect();
     match names.len() {
         1 => Ok(names.into_iter().next().map(with).unwrap_or_default()),
         _ => Err(names.into_iter().map(String::from).collect()),
@@ -567,7 +654,9 @@ pub fn edge_history(
     let asked = category.map(category_named);
     let answer = match resolve_spans(store, q) {
         Ok(spans) => history_rows(merged, store, q, &spans, asked.as_ref()),
-        Err(candidates) => Answer::from_results(Vec::new(), || unknown_node(merged, store, q, &candidates, asked.as_ref())),
+        Err(candidates) => Answer::from_results(Vec::new(), || {
+            unknown_node(merged, store, q, &candidates, asked.as_ref())
+        }),
     };
     eprintln!("[timeline] history {q} rows={}", answer.results.len());
     answer
@@ -589,7 +678,8 @@ fn history_rows(
         .filter_map(|&i| store.nodes.get(i))
         .flat_map(|n| std::iter::once(n.id).chain(n.prior.iter().map(|(_, id)| *id)))
         .collect();
-    let ours = |id: u64, at: Option<usize>| at.map_or_else(|| ids.contains(&id), |s| spans.contains(&s));
+    let ours =
+        |id: u64, at: Option<usize>| at.map_or_else(|| ids.contains(&id), |s| spans.contains(&s));
     let mut rows: Vec<EdgeHistoryRow> = Vec::new();
     for e in &store.edges {
         match asked {
@@ -627,8 +717,20 @@ fn history_rows(
     }
     rows.sort_by(|a, b| {
         let until = |r: &EdgeHistoryRow| r.until.as_ref().map_or(u32::MAX, |u| u.index);
-        (a.since.index, a.category, &a.other_qname, a.direction, until(a))
-            .cmp(&(b.since.index, b.category, &b.other_qname, b.direction, until(b)))
+        (
+            a.since.index,
+            a.category,
+            &a.other_qname,
+            a.direction,
+            until(a),
+        )
+            .cmp(&(
+                b.since.index,
+                b.category,
+                &b.other_qname,
+                b.direction,
+                until(b),
+            ))
     });
     Answer::from_results(rows, || {
         let node = spans.iter().next().and_then(|&i| store.nodes.get(i));
@@ -637,21 +739,40 @@ fn history_rows(
             Some(Err(c)) => (Vec::new(), format!("`{c}` is not an edge category")),
             Some(Ok(c)) => {
                 let cat = edge_category::name(*c);
-                (vec![cat], format!("no {cat} edge touches `{name}` in {}", window(store)))
+                (
+                    vec![cat],
+                    format!("no {cat} edge touches `{name}` in {}", window(store)),
+                )
             }
             None => {
                 let kind = NodeKindId(node.map_or(0, |n| n.kind));
-                (absence::mechanisms_for_kind(kind).to_vec(), format!("no edge touches `{name}` in {}", window(store)))
+                (
+                    absence::mechanisms_for_kind(kind).to_vec(),
+                    format!("no edge touches `{name}` in {}", window(store)),
+                )
             }
         };
-        absence::empty(merged, "timeline", q, "no_edges", note, &mechanisms, node.and_then(|n| store.node_file(n)))
+        absence::empty(
+            merged,
+            "timeline",
+            q,
+            "no_edges",
+            note,
+            &mechanisms,
+            node.and_then(|n| store.node_file(n)),
+        )
     })
 }
 
 /// "the timeline's N revs (<first>..<last>)".
 fn window(store: &TimelineStore) -> String {
     match (store.revs.first(), store.revs.last()) {
-        (Some(a), Some(b)) => format!("the timeline's {} revs ({}..{})", store.revs.len(), short(&a.sha), short(&b.sha)),
+        (Some(a), Some(b)) => format!(
+            "the timeline's {} revs ({}..{})",
+            store.revs.len(),
+            short(&a.sha),
+            short(&b.sha)
+        ),
         _ => "the timeline (no revs)".to_string(),
     }
 }
@@ -673,11 +794,17 @@ fn unknown_node(
     }
     // Raw candidates, as every absence's suggestions: `find::search` never
     // folds an identity class (DD.9), so two copies are two suggestions.
-    let opts = FindOptions { top_k: absence::SUGGESTIONS, ..FindOptions::default() };
+    let opts = FindOptions {
+        top_k: absence::SUGGESTIONS,
+        ..FindOptions::default()
+    };
     let near = find::search(merged, q, &opts).rows;
     let mut a = absence::unknown_symbol(merged, "timeline", q, &mechanisms, &near);
     a.note = if candidates.is_empty() {
-        format!("no node of {} has the qname `{q}` or a qname ending `::{q}`", window(store))
+        format!(
+            "no node of {} has the qname `{q}` or a qname ending `::{q}`",
+            window(store)
+        )
     } else {
         let shown: Vec<&str> = candidates.iter().take(5).map(String::as_str).collect();
         format!(
@@ -685,7 +812,11 @@ fn unknown_node(
             candidates.len(),
             window(store),
             shown.join(", "),
-            if candidates.len() > shown.len() { ", ..." } else { "" }
+            if candidates.len() > shown.len() {
+                ", ..."
+            } else {
+                ""
+            }
         )
     };
     a
@@ -701,11 +832,22 @@ fn rev_index(store: &TimelineStore, rev: &str) -> Result<u32, String> {
     }
     if t.len() >= 7 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
         let lower = t.to_ascii_lowercase();
-        let hits: Vec<usize> = store.revs.iter().enumerate().filter(|(_, r)| r.sha.starts_with(&lower)).map(|(i, _)| i).collect();
+        let hits: Vec<usize> = store
+            .revs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.sha.starts_with(&lower))
+            .map(|(i, _)| i)
+            .collect();
         match hits.as_slice() {
             [i] => return u32::try_from(*i).map_err(|e| e.to_string()),
             [] => {}
-            _ => return Err(format!("`{t}` names {} revs of the timeline: give more of the commit id", hits.len())),
+            _ => {
+                return Err(format!(
+                    "`{t}` names {} revs of the timeline: give more of the commit id",
+                    hits.len()
+                ));
+            }
         }
     } else if let Ok(i) = t.parse::<usize>()
         && i < n
@@ -739,7 +881,10 @@ pub fn as_of(store: &TimelineStore, rev: &str) -> Result<AsOfView, String> {
     // An edge is keyed by its ends as last seen: take each end back to the id
     // its node had at `r`.
     let end = |id: u64, t: u32| -> u64 {
-        idx.span_at(id, t).and_then(|s| store.nodes.get(s)).filter(|n| n.covers(r)).map_or(id, |n| id_at(n, r))
+        idx.span_at(id, t)
+            .and_then(|s| store.nodes.get(s))
+            .filter(|n| n.covers(r))
+            .map_or(id, |n| id_at(n, r))
     };
     let edges: Vec<Edge> = store
         .edges
@@ -747,9 +892,24 @@ pub fn as_of(store: &TimelineStore, rev: &str) -> Result<AsOfView, String> {
         .filter(|e| e.covers(r))
         .map(|e| {
             let t = last_rev(e, store.revs.len());
-            Edge::new(NodeId(end(e.from, t)), NodeId(end(e.to, t)), EdgeCategoryId(e.category), Confidence::Strong)
+            Edge::new(
+                NodeId(end(e.from, t)),
+                NodeId(end(e.to, t)),
+                EdgeCategoryId(e.category),
+                Confidence::Strong,
+            )
         })
         .collect();
-    eprintln!("[timeline] as_of {} nodes={} edges={}", rref.sha, nodes.len(), edges.len());
-    Ok(AsOfView { rev: rref, nodes, qnames, edges })
+    eprintln!(
+        "[timeline] as_of {} nodes={} edges={}",
+        rref.sha,
+        nodes.len(),
+        edges.len()
+    );
+    Ok(AsOfView {
+        rev: rref,
+        nodes,
+        qnames,
+        edges,
+    })
 }

@@ -203,8 +203,11 @@ pub fn page_flow(merged: &MergedGraph) -> PageFlow {
         ));
     }
     links.sort_by(|(a, aq), (b, bq)| {
-        (a.from_qname.as_str(), a.to_path.as_str(), *aq)
-            .cmp(&(b.from_qname.as_str(), b.to_path.as_str(), *bq))
+        (a.from_qname.as_str(), a.to_path.as_str(), *aq).cmp(&(
+            b.from_qname.as_str(),
+            b.to_path.as_str(),
+            *bq,
+        ))
     });
     let links: Vec<NavLinkRecord> = links.into_iter().map(|(l, _)| l).collect();
 
@@ -298,12 +301,13 @@ fn dead_links(
                 continue;
             }
             let from = loc.locate(r.from);
-            let absorbed_by = catchall_for(routes, gi, from.file.as_deref()).map(|(id, route)| {
-                match redirect_of(id) {
-                    Some(to) => format!("{} -> {to}", route.path),
-                    None => route.path.to_string(),
-                }
-            });
+            let absorbed_by =
+                catchall_for(routes, gi, from.file.as_deref()).map(
+                    |(id, route)| match redirect_of(id) {
+                        Some(to) => format!("{} -> {to}", route.path),
+                        None => route.path.to_string(),
+                    },
+                );
             dead.push(DeadLink {
                 from_qname: from.qname,
                 from_file: from.file,
@@ -341,7 +345,12 @@ fn catchall_for<'r, 'a>(
     // `min_by_key` keeps the first of equal keys, so the sort breaks ties.
     let owned = candidates
         .iter()
-        .filter_map(|c| split_owner(c.1.qname).1.filter(|o| encloses(o)).map(|o| (o.len(), *c)))
+        .filter_map(|c| {
+            split_owner(c.1.qname)
+                .1
+                .filter(|o| encloses(o))
+                .map(|o| (o.len(), *c))
+        })
         .min_by_key(|(len, _)| std::cmp::Reverse(*len))
         .map(|(_, c)| c);
     owned.or_else(|| candidates.first().copied())
@@ -383,7 +392,14 @@ mod tests {
     #[test]
     fn root_catch_alls_match_the_graph_s_classifier() {
         // The `Shape::Root` cases of graph/src/nav.rs's `catch_alls_split_root_from_scoped`.
-        for root in ["/**", "*", "/:pathMatch(.*)*", "/[...all]", "/[[...all]]", "/:rest+"] {
+        for root in [
+            "/**",
+            "*",
+            "/:pathMatch(.*)*",
+            "/[...all]",
+            "/[[...all]]",
+            "/:rest+",
+        ] {
             assert!(is_root_catchall(root), "{root}");
         }
         // Scoped catch-alls are pages; parameters and mid-path stars are not wildcards.

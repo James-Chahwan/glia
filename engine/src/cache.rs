@@ -116,9 +116,13 @@ fn split_u64(b: &[u8]) -> Option<(u64, &[u8])> {
 /// stderr as a stamp.
 fn split_stamp(b: &[u8]) -> Option<(&str, &[u8])> {
     let (len, rest) = split_u64(b)?;
-    let len = usize::try_from(len).ok().filter(|l| (1..=MAX_STAMP).contains(l))?;
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|l| (1..=MAX_STAMP).contains(l))?;
     let (s, rest) = rest.split_at_checked(len)?;
-    let s = std::str::from_utf8(s).ok().filter(|s| s.bytes().all(|c| c.is_ascii_graphic()))?;
+    let s = std::str::from_utf8(s)
+        .ok()
+        .filter(|s| s.bytes().all(|c| c.is_ascii_graphic()))?;
     Some((s, rest))
 }
 
@@ -156,17 +160,20 @@ fn frame(stamp: &str, raw: &[u8]) -> Vec<u8> {
 /// Decode a whole framed sidecar: header, bounds, lz4 body, bincode. The
 /// stamp is compared before anything is decompressed.
 fn decode(bytes: &[u8]) -> Result<ParseCache, Discard> {
-    let (raw_len, body) = split_u64(fresh_frame(bytes)?).ok_or(Discard::Corrupt("truncated header"))?;
+    let (raw_len, body) =
+        split_u64(fresh_frame(bytes)?).ok_or(Discard::Corrupt("truncated header"))?;
     if raw_len > MAX_RAW || raw_len > MAX_RATIO.saturating_mul(body.len() as u64) {
         return Err(Discard::Corrupt("raw length out of bounds"));
     }
-    let raw_len = usize::try_from(raw_len).map_err(|_| Discard::Corrupt("raw length out of bounds"))?;
+    let raw_len =
+        usize::try_from(raw_len).map_err(|_| Discard::Corrupt("raw length out of bounds"))?;
     let mut raw = vec![0u8; raw_len];
     match lz4_flex::block::decompress_into(body, &mut raw) {
         Ok(n) if n == raw_len => {}
         _ => return Err(Discard::Corrupt("lz4 body")),
     }
-    let cache: ParseCache = bincode::deserialize(&raw).map_err(|_| Discard::Corrupt("bincode body"))?;
+    let cache: ParseCache =
+        bincode::deserialize(&raw).map_err(|_| Discard::Corrupt("bincode body"))?;
     if cache.stamp != CACHE_VERSION {
         return Err(Discard::Corrupt("header and body stamps differ"));
     }
@@ -304,7 +311,15 @@ impl CacheEntry {
 /// and this function and its helpers go.
 fn canonical_parse<S: serde::Serializer>(p: &FileParse, s: S) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeStruct;
-    let FileParse { nodes, edges, imports, calls, refs, nav, properties } = p;
+    let FileParse {
+        nodes,
+        edges,
+        imports,
+        calls,
+        refs,
+        nav,
+        properties,
+    } = p;
     let mut props: Vec<&NodeId> = properties.iter().collect();
     props.sort_unstable_by_key(|id| id.0);
     let mut st = s.serialize_struct("FileParse", 7)?;
@@ -700,7 +715,11 @@ impl ParseCache {
             return ParseCache::new();
         };
         let mut bytes = Vec::new();
-        if f.by_ref().take(HEADER_MAX as u64).read_to_end(&mut bytes).is_err() {
+        if f.by_ref()
+            .take(HEADER_MAX as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
             return ParseCache::new();
         }
         let discard = |d: Discard| {
@@ -796,7 +815,12 @@ mod tests {
         let mut c = ParseCache::new();
         c.validate_context("dir:a13", "example.com/a13");
         for i in 0..n {
-            c.put(format!("src/f{i:02}.rs"), i as u64, "rust", FileParse::default());
+            c.put(
+                format!("src/f{i:02}.rs"),
+                i as u64,
+                "rust",
+                FileParse::default(),
+            );
         }
         c
     }
@@ -818,8 +842,12 @@ mod tests {
     fn sidecar_bytes_are_stable_for_identical_content() {
         let a = tempfile::tempdir().expect("tempdir a");
         let b = tempfile::tempdir().expect("tempdir b");
-        filled(32).save(a.path().to_string_lossy().as_ref()).expect("save a");
-        filled(32).save(b.path().to_string_lossy().as_ref()).expect("save b");
+        filled(32)
+            .save(a.path().to_string_lossy().as_ref())
+            .expect("save a");
+        filled(32)
+            .save(b.path().to_string_lossy().as_ref())
+            .expect("save b");
         let ba = std::fs::read(sidecar(a.path())).expect("read a");
         let bb = std::fs::read(sidecar(b.path())).expect("read b");
         assert_eq!(
@@ -855,7 +883,10 @@ mod tests {
             }
         );
         assert_eq!(c.len(), 3, "diff must not mutate the cache");
-        assert!(c.last_diff().is_none(), "diff is pure; only record_diff stores one");
+        assert!(
+            c.last_diff().is_none(),
+            "diff is pure; only record_diff stores one"
+        );
 
         // Duplicates collapse, the last pair winning.
         let dup = c.diff(&owned(&[("a", 7), ("b", 2), ("c", 3), ("a", 1)]));
@@ -864,7 +895,10 @@ mod tests {
 
         c.record_diff(d.clone());
         assert_eq!(c.last_diff(), Some(&d));
-        assert_eq!((c.stats.reused, c.stats.reparsed, c.stats.evicted), (1, 2, 1));
+        assert_eq!(
+            (c.stats.reused, c.stats.reparsed, c.stats.evicted),
+            (1, 2, 1)
+        );
     }
 
     #[test]
@@ -874,8 +908,16 @@ mod tests {
             let lang = p.rsplit('.').next().unwrap_or_default();
             c.put(p.to_string(), h, lang, FileParse::default());
         }
-        let rows: Vec<(&str, u64, &str)> = c.iter().map(|f| (f.path, f.content_hash, f.lang)).collect();
-        assert_eq!(rows, [("a.go", 1, "go"), ("src/m.py", 2, "py"), ("src/z.rs", 3, "rs")]);
+        let rows: Vec<(&str, u64, &str)> =
+            c.iter().map(|f| (f.path, f.content_hash, f.lang)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("a.go", 1, "go"),
+                ("src/m.py", 2, "py"),
+                ("src/z.rs", 3, "rs")
+            ]
+        );
     }
 
     /// Two builds of the same repo at once (the repo-graph MCP server plus a
@@ -911,12 +953,21 @@ mod tests {
     /// of place or dropped changes the bytes.
     fn rich_parse(n: u64, order: &[u64]) -> FileParse {
         use glia_code_domain::{
-            CallQualifier, CallSite, ImportStmt, ImportTarget, UnresolvedRef, edge_category, node_kind,
+            CallQualifier, CallSite, ImportStmt, ImportTarget, UnresolvedRef, edge_category,
+            node_kind,
         };
         use glia_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId};
         let mut p = FileParse::default();
-        let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text("code".into()) };
-        let node = Node { id: NodeId(1), repo: RepoId(7), confidence: Confidence::Strong, cells: vec![cell] };
+        let cell = Cell {
+            kind: CellTypeId(1),
+            payload: CellPayload::Text("code".into()),
+        };
+        let node = Node {
+            id: NodeId(1),
+            repo: RepoId(7),
+            confidence: Confidence::Strong,
+            cells: vec![cell],
+        };
         p.nodes.push(node);
         p.edges.push(Edge {
             from: NodeId(1),
@@ -927,10 +978,17 @@ mod tests {
         });
         p.imports.push(ImportStmt {
             from_module: "m".into(),
-            target: ImportTarget::Module { path: "p".into(), alias: None },
+            target: ImportTarget::Module {
+                path: "p".into(),
+                alias: None,
+            },
             line: 3,
         });
-        p.calls.push(CallSite { from: NodeId(1), qualifier: CallQualifier::Bare("f".into()), line: 4 });
+        p.calls.push(CallSite {
+            from: NodeId(1),
+            qualifier: CallQualifier::Bare("f".into()),
+            line: 4,
+        });
         p.refs.push(UnresolvedRef {
             from: NodeId(1),
             from_module: NodeId(9),
@@ -942,15 +1000,35 @@ mod tests {
             let id = NodeId(100 + i);
             p.nav.name_by_id.insert(id, format!("n{i}"));
             p.nav.qname_by_id.insert(id, format!("m::q{i}"));
-            p.nav.kind_by_id.insert(id, if i % 2 == 0 { node_kind::FUNCTION } else { node_kind::METHOD });
+            p.nav.kind_by_id.insert(
+                id,
+                if i % 2 == 0 {
+                    node_kind::FUNCTION
+                } else {
+                    node_kind::METHOD
+                },
+            );
             p.nav.parent_of.insert(id, NodeId(1000 + i));
-            p.nav.children_of.insert(id, vec![NodeId(2000 + i), NodeId(3000 + i)]);
+            p.nav
+                .children_of
+                .insert(id, vec![NodeId(2000 + i), NodeId(3000 + i)]);
             for &j in order.iter().filter(|&&j| j < n) {
-                p.nav.field_types.entry(id).or_default().insert(format!("f{j}"), format!("T{j}"));
-                p.nav.local_types.entry(id).or_default().insert(format!("l{j}"), format!("U{j}"));
+                p.nav
+                    .field_types
+                    .entry(id)
+                    .or_default()
+                    .insert(format!("f{j}"), format!("T{j}"));
+                p.nav
+                    .local_types
+                    .entry(id)
+                    .or_default()
+                    .insert(format!("l{j}"), format!("U{j}"));
             }
             // CB.6: one fact per scope; its Vec keeps parser order.
-            let fact = NavFact::DeclaresFn { ns: format!("ns{i}"), name: format!("proto{i}") };
+            let fact = NavFact::DeclaresFn {
+                ns: format!("ns{i}"),
+                name: format!("proto{i}"),
+            };
             p.nav.record_fact(id, fact);
             // CA.2a: one result type per callable.
             p.nav.record_return_type(id, &format!("pkg.R{i}"));
@@ -1099,9 +1177,15 @@ mod tests {
         let rev: Vec<u64> = (0..24).rev().collect();
         let (a, b) = (rich_parse(24, &fwd), rich_parse(24, &rev));
         let fp = parse_fingerprint(&a).expect("a fingerprint");
-        assert_eq!(Some(fp), parse_fingerprint(&b), "fill order moved the fingerprint");
+        assert_eq!(
+            Some(fp),
+            parse_fingerprint(&b),
+            "fill order moved the fingerprint"
+        );
 
-        let payload = CacheEntry::new(7, "rust", a.clone()).payload().expect("payload");
+        let payload = CacheEntry::new(7, "rust", a.clone())
+            .payload()
+            .expect("payload");
         // bincode fixint: u64 content_hash, then u64 length + the lang bytes.
         let tail = &payload[8 + 8 + "rust".len()..];
         let mut h = twox_hash::XxHash64::with_seed(0);
@@ -1182,7 +1266,12 @@ mod tests {
         b.put("src/x.rs".into(), 1, "rust", rich_parse(24, &rev));
         let ba = bincode::serialize(&a).expect("serialize a");
         let bb = bincode::serialize(&b).expect("serialize b");
-        assert!(ba == bb, "equal parses serialized to different bytes ({} vs {} bytes)", ba.len(), bb.len());
+        assert!(
+            ba == bb,
+            "equal parses serialized to different bytes ({} vs {} bytes)",
+            ba.len(),
+            bb.len()
+        );
     }
 
     /// The canonical order is a reordering, never a new wire shape: with at
@@ -1211,7 +1300,8 @@ mod tests {
         let many = rich_parse(24, &order);
         let mut c = ParseCache::new();
         c.put("a".into(), 1, "rust", many.clone());
-        let back: ParseCache = bincode::deserialize(&bincode::serialize(&c).expect("ser")).expect("de");
+        let back: ParseCache =
+            bincode::deserialize(&bincode::serialize(&c).expect("ser")).expect("de");
         let got = &back.entries["a"].parse;
         assert_eq!(got.nav.name_by_id, many.nav.name_by_id);
         assert_eq!(got.nav.qname_by_id, many.nav.qname_by_id);
@@ -1224,7 +1314,10 @@ mod tests {
         assert_eq!(got.nav.return_types, many.nav.return_types);
         assert_eq!(got.nav.method_sigs, many.nav.method_sigs);
         assert_eq!(got.properties, many.properties);
-        assert_eq!((&got.nodes, &got.edges, &got.imports), (&many.nodes, &many.edges, &many.imports));
+        assert_eq!(
+            (&got.nodes, &got.edges, &got.imports),
+            (&many.nodes, &many.edges, &many.imports)
+        );
         assert_eq!((&got.calls, &got.refs), (&many.calls, &many.refs));
 
         // A sidecar an older glia wrote (derived serializer, hash order) loads:
@@ -1233,7 +1326,10 @@ mod tests {
         let mut old = derived[..header_len].to_vec();
         old.extend(bincode::serialize(&many).expect("derived many"));
         let loaded: ParseCache = bincode::deserialize(&old).expect("old sidecar loads");
-        assert_eq!(loaded.entries["a"].parse.nav.field_types, many.nav.field_types);
+        assert_eq!(
+            loaded.entries["a"].parse.nav.field_types,
+            many.nav.field_types
+        );
     }
 
     /// LC.11: a build that changed no entry writes nothing. The tmp + rename
@@ -1251,13 +1347,20 @@ mod tests {
 
         c.save(&repo).expect("second save");
         let after = std::fs::metadata(&path).expect("stat after second save");
-        assert_eq!(before.ino(), after.ino(), "an unchanged cache was rewritten (new inode)");
+        assert_eq!(
+            before.ino(),
+            after.ino(),
+            "an unchanged cache was rewritten (new inode)"
+        );
         assert_eq!(
             (before.mtime(), before.mtime_nsec()),
             (after.mtime(), after.mtime_nsec()),
             "an unchanged cache was rewritten (mtime moved)"
         );
-        assert!(!gmap_dir(&repo).join(tmp_name()).exists(), "a staging file was left behind");
+        assert!(
+            !gmap_dir(&repo).join(tmp_name()).exists(),
+            "a staging file was left behind"
+        );
     }
 
     /// A changed entry of the same serialized length: the length gate cannot
@@ -1283,7 +1386,11 @@ mod tests {
         c.put("src/f03.rs".to_string(), hash, "rust", FileParse::default());
         c.save(&repo).expect("second save");
         let new = std::fs::read(sidecar(d.path())).expect("read second");
-        assert_eq!(new.len(), old.len(), "fixture must keep the length so the bytes decide");
+        assert_eq!(
+            new.len(),
+            old.len(),
+            "fixture must keep the length so the bytes decide"
+        );
         assert_ne!(new, old, "the changed cache was not written");
         assert_eq!(new, framed(&c), "disk != the new frame");
     }
@@ -1345,11 +1452,17 @@ mod tests {
         c.put("src/rich.rs".into(), 77, "rust", rich_parse(24, &order));
         c.save(&repo).expect("save");
         let bytes = std::fs::read(sidecar(d.path())).expect("read sidecar");
-        assert!(bytes.starts_with(b"GLIAPCZ1"), "the sidecar does not open with the frame magic");
+        assert!(
+            bytes.starts_with(b"GLIAPCZ1"),
+            "the sidecar does not open with the frame magic"
+        );
         assert_eq!(bytes, framed(&c), "disk != the frame of the cache");
         let back = ParseCache::load(&repo);
         assert_eq!(back.len(), c.len());
-        assert!(same(&back, &c), "the loaded cache differs from the saved one");
+        assert!(
+            same(&back, &c),
+            "the loaded cache differs from the saved one"
+        );
         assert!(back.get("src/rich.rs", 77, "rust").is_some());
 
         // A degenerate but legitimate cache (200 empty parses, the most
@@ -1357,7 +1470,11 @@ mod tests {
         let e = tempfile::tempdir().expect("tempdir");
         let empties = e.path().to_string_lossy().into_owned();
         filled(200).save(&empties).expect("save empties");
-        assert_eq!(ParseCache::load(&empties).len(), 200, "a legitimate cache was refused");
+        assert_eq!(
+            ParseCache::load(&empties).len(),
+            200,
+            "a legitimate cache was refused"
+        );
     }
 
     /// Four nodes of a Python view module: hash-like ids (incompressible, as
@@ -1372,10 +1489,20 @@ mod tests {
                 "def handle_{i}_{j}(request, user_id):\n    order = Order.objects.get(pk=user_id)\n    \
                  return render(request, \"orders/detail_{j}.html\", {{\"order\": order}})\n"
             );
-            let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text(code) };
-            p.nodes.push(Node { id, repo: RepoId(7), confidence: Confidence::Strong, cells: vec![cell] });
+            let cell = Cell {
+                kind: CellTypeId(1),
+                payload: CellPayload::Text(code),
+            };
+            p.nodes.push(Node {
+                id,
+                repo: RepoId(7),
+                confidence: Confidence::Strong,
+                cells: vec![cell],
+            });
             p.nav.name_by_id.insert(id, format!("handle_{i}_{j}"));
-            p.nav.qname_by_id.insert(id, format!("app::views::handler_{i:03}::handle_{i}_{j}"));
+            p.nav
+                .qname_by_id
+                .insert(id, format!("app::views::handler_{i:03}::handle_{i}_{j}"));
             p.nav.kind_by_id.insert(id, node_kind::FUNCTION);
         }
         p
@@ -1390,12 +1517,22 @@ mod tests {
         c.validate_context("dir:cd7a", "");
         for i in 0..200u64 {
             let hash = (i + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
-            c.put(format!("app/views/handler_{i:03}.py"), hash, "python", source_like(i));
+            c.put(
+                format!("app/views/handler_{i:03}.py"),
+                hash,
+                "python",
+                source_like(i),
+            );
         }
         let raw = bincode::serialize(&c).expect("serialize").len();
         c.save(&repo).expect("save");
-        let disk = std::fs::metadata(sidecar(d.path())).expect("stat sidecar").len() as usize;
-        assert!(disk * 100 <= raw * 40, "{disk} bytes on disk for {raw} bytes of bincode (> 40%)");
+        let disk = std::fs::metadata(sidecar(d.path()))
+            .expect("stat sidecar")
+            .len() as usize;
+        assert!(
+            disk * 100 <= raw * 40,
+            "{disk} bytes on disk for {raw} bytes of bincode (> 40%)"
+        );
         assert!(same(&ParseCache::load(&repo), &c));
     }
 
@@ -1408,14 +1545,22 @@ mod tests {
         // A literal run claimed longer than the input: lz4 refuses it.
         let garbage = [0xF0u8; 64];
         let stale = hand_frame(OTHER_STAMP, 1024, &garbage);
-        assert_eq!(decode(&stale).err(), Some(Discard::StampMismatch(OTHER_STAMP.into())));
-        assert_eq!(fresh_frame(&stale[..HEADER_MAX.min(stale.len())]).err(), decode(&stale).err());
+        assert_eq!(
+            decode(&stale).err(),
+            Some(Discard::StampMismatch(OTHER_STAMP.into()))
+        );
+        assert_eq!(
+            fresh_frame(&stale[..HEADER_MAX.min(stale.len())]).err(),
+            decode(&stale).err()
+        );
         let control = hand_frame(CACHE_VERSION, 1024, &garbage);
         assert_eq!(decode(&control).err(), Some(Discard::Corrupt("lz4 body")));
         assert!(load_bytes(&stale).is_empty(), "a stale frame was reused");
         assert_eq!(
             Discard::StampMismatch(OTHER_STAMP.into()).line(),
-            format!("[incremental] cache stamp mismatch (disk={OTHER_STAMP} build={CACHE_VERSION}) — full reparse")
+            format!(
+                "[incremental] cache stamp mismatch (disk={OTHER_STAMP} build={CACHE_VERSION}) — full reparse"
+            )
         );
 
         // The header vouches for this build but the body was written by
@@ -1424,7 +1569,10 @@ mod tests {
         other.stamp = OTHER_STAMP.to_string();
         let raw = bincode::serialize(&other).expect("serialize");
         let forged = frame(CACHE_VERSION, &raw);
-        assert_eq!(decode(&forged).err(), Some(Discard::Corrupt("header and body stamps differ")));
+        assert_eq!(
+            decode(&forged).err(),
+            Some(Discard::Corrupt("header and body stamps differ"))
+        );
         assert!(load_bytes(&forged).is_empty());
     }
 
@@ -1436,18 +1584,35 @@ mod tests {
         old.stamp = OTHER_STAMP.to_string();
         let raw = bincode::serialize(&old).expect("serialize");
         assert!(!raw.starts_with(FRAME_MAGIC));
-        assert_eq!(decode(&raw).err(), Some(Discard::StampMismatch(OTHER_STAMP.into())));
-        assert!(load_bytes(&raw).is_empty(), "an unframed 0.5.0 sidecar was reused");
+        assert_eq!(
+            decode(&raw).err(),
+            Some(Discard::StampMismatch(OTHER_STAMP.into()))
+        );
+        assert!(
+            load_bytes(&raw).is_empty(),
+            "an unframed 0.5.0 sidecar was reused"
+        );
 
         // Unframed under this build's own stamp (nothing writes one): not reused.
         let raw_now = bincode::serialize(&filled(8)).expect("serialize");
-        assert_eq!(decode(&raw_now).err(), Some(Discard::Corrupt("no frame header")));
+        assert_eq!(
+            decode(&raw_now).err(),
+            Some(Discard::Corrupt("no frame header"))
+        );
         assert!(load_bytes(&raw_now).is_empty());
 
         // Neither a frame nor a stamp: nothing is echoed as one.
-        let junks: [&[u8]; 3] = [b"", b"not a parse cache", &[0x05, 0, 0, 0, 0, 0, 0, 0, 0x07, 0x1B, b'[', b'2', b'J']];
+        let junks: [&[u8]; 3] = [
+            b"",
+            b"not a parse cache",
+            &[0x05, 0, 0, 0, 0, 0, 0, 0, 0x07, 0x1B, b'[', b'2', b'J'],
+        ];
         for junk in junks {
-            assert_eq!(decode(junk).err(), Some(Discard::Corrupt("no frame header")), "{junk:?}");
+            assert_eq!(
+                decode(junk).err(),
+                Some(Discard::Corrupt("no frame header")),
+                "{junk:?}"
+            );
         }
     }
 
@@ -1471,14 +1636,28 @@ mod tests {
         assert!(load_bytes(&hand_frame(CACHE_VERSION, bound + 1, &body)).is_empty());
 
         let lz4 = Some(Discard::Corrupt("lz4 body"));
-        assert_eq!(claim(raw.len() as u64 + 1), lz4, "a short decompression was accepted");
-        assert_eq!(claim(raw.len() as u64 - 1), lz4, "an overlong decompression was accepted");
+        assert_eq!(
+            claim(raw.len() as u64 + 1),
+            lz4,
+            "a short decompression was accepted"
+        );
+        assert_eq!(
+            claim(raw.len() as u64 - 1),
+            lz4,
+            "an overlong decompression was accepted"
+        );
         let cut = hand_frame(CACHE_VERSION, raw.len() as u64, &body[..body.len() / 2]);
         assert_eq!(decode(&cut).err(), lz4, "a truncated body was accepted");
 
         let header = FRAME_MAGIC.len() + 8 + CACHE_VERSION.len();
-        assert_eq!(decode(&good[..header + 4]).err(), Some(Discard::Corrupt("truncated header")));
-        assert_eq!(decode(&good[..header - 1]).err(), Some(Discard::Corrupt("bad frame stamp")));
+        assert_eq!(
+            decode(&good[..header + 4]).err(),
+            Some(Discard::Corrupt("truncated header"))
+        );
+        assert_eq!(
+            decode(&good[..header - 1]).err(),
+            Some(Discard::Corrupt("bad frame stamp"))
+        );
     }
 
     /// CE.2b: a payload decodes back to the entry that wrote it, and an
@@ -1491,11 +1670,18 @@ mod tests {
         let bytes = e.payload().expect("payload");
         let back = CacheEntry::from_payload(&bytes).expect("decode");
         assert_eq!((back.content_hash, back.lang.as_str()), (0xfeed, "python"));
-        assert_eq!(back.payload().expect("payload again"), bytes, "decode + encode moved the bytes");
+        assert_eq!(
+            back.payload().expect("payload again"),
+            bytes,
+            "decode + encode moved the bytes"
+        );
         // The same entry through the sidecar's own path (`put`, `entry_payload`).
         let mut c = ParseCache::new();
         c.put_entry("a.py".into(), back);
-        assert_eq!(c.entry_payload("a.py", 0xfeed, "python"), Ok(Some(bytes.clone())));
+        assert_eq!(
+            c.entry_payload("a.py", 0xfeed, "python"),
+            Ok(Some(bytes.clone()))
+        );
 
         // `lang`'s length prefix (bytes 8..16) claims 1 TiB: refused, nothing allocated.
         let mut huge = bytes.clone();
@@ -1503,8 +1689,14 @@ mod tests {
         assert!(CacheEntry::from_payload(&huge).is_err());
         let mut trailing = bytes.clone();
         trailing.push(0);
-        assert!(CacheEntry::from_payload(&trailing).is_err(), "trailing bytes accepted");
-        assert!(CacheEntry::from_payload(&bytes[..bytes.len() - 1]).is_err(), "truncation accepted");
+        assert!(
+            CacheEntry::from_payload(&trailing).is_err(),
+            "trailing bytes accepted"
+        );
+        assert!(
+            CacheEntry::from_payload(&bytes[..bytes.len() - 1]).is_err(),
+            "truncation accepted"
+        );
         assert!(CacheEntry::from_payload(&[]).is_err());
     }
 }

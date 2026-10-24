@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
 use glia_engine::calibrate::record::{META_FILE, calibration_dir};
-use glia_engine::calibrate::{CalibrateOptions, CalibrationRead, read_calibration, calibrate};
+use glia_engine::calibrate::{CalibrateOptions, CalibrationRead, calibrate, read_calibration};
 use glia_engine::diff_impact::diff_impact_from_diff;
 use glia_engine::rank::{RankCache, Ranking};
 use glia_engine::{BlastOptions, BlastRadius, GenerateResult};
@@ -66,11 +66,17 @@ fn repo(root: &Path) {
         write(root, &format!("{c}/__init__.py"), "");
     }
     for i in 0..N {
-        write(root, &cluster_path("alpha", i), &format!("import hub\n\ndef alpha{i:02}_f():\n    return {i}\n"));
+        write(
+            root,
+            &cluster_path("alpha", i),
+            &format!("import hub\n\ndef alpha{i:02}_f():\n    return {i}\n"),
+        );
         write(
             root,
             &cluster_path("zeta", i),
-            &format!("from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"),
+            &format!(
+                "from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"
+            ),
         );
     }
 }
@@ -78,7 +84,9 @@ fn repo(root: &Path) {
 fn commit_files(i: usize) -> Vec<String> {
     let size = 2 + i % 5;
     let start = (i * 5) % N;
-    (0..size).map(|j| cluster_path("zeta", (start + j) % N)).collect()
+    (0..size)
+        .map(|j| cluster_path("zeta", (start + j) % N))
+        .collect()
 }
 
 fn history(root: &Path) {
@@ -88,7 +96,12 @@ fn history(root: &Path) {
             t: 1_700_000_000 + i as i64 * 3600,
             files: commit_files(i)
                 .into_iter()
-                .map(|p| HistoryFile { p, a: Some(1), d: Some(0), from: None })
+                .map(|p| HistoryFile {
+                    p,
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
                 .collect(),
         })
         .collect();
@@ -110,7 +123,13 @@ fn cache(r: &GenerateResult) -> Arc<RankCache> {
     Arc::new(RankCache::new("answer", &r.repo_roots, &r.repo_labels))
 }
 
-fn answer(r: &GenerateResult, cache: &Arc<RankCache>, seeds: &[&str], ranking: Ranking, select: bool) -> BlastRadius {
+fn answer(
+    r: &GenerateResult,
+    cache: &Arc<RankCache>,
+    seeds: &[&str],
+    ranking: Ranking,
+    select: bool,
+) -> BlastRadius {
     let mut opts = BlastOptions::default();
     opts.ranking = ranking;
     opts.select = select;
@@ -124,7 +143,13 @@ fn rows(a: &BlastRadius) -> String {
 
 fn summary(a: &BlastRadius) -> (String, String, String, &'static str, Option<&'static str>) {
     let s = a.selection.as_ref().expect("a selection");
-    (s.set.clone(), s.shape.clone(), s.pick.clone(), s.source, s.reason)
+    (
+        s.set.clone(),
+        s.shape.clone(),
+        s.pick.clone(),
+        s.source,
+        s.reason,
+    )
 }
 
 fn h(name: &str) -> Ranking {
@@ -138,7 +163,13 @@ fn no_record_falls_back_to_the_default_ranking() {
     let a = answer(&r, &c, &["zeta00_f"], Ranking::default(), true);
     assert_eq!(
         summary(&a),
-        ("SELh0".into(), "k1".into(), "H10".into(), "fallback", Some("absent"))
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10".into(),
+            "fallback",
+            Some("absent")
+        )
     );
     assert_eq!(a.selection.as_ref().map(|s| s.test_commits), Some(0));
     let ea = answer(&r, &cache(&r), &["zeta00_f"], h("H10"), false);
@@ -148,7 +179,10 @@ fn no_record_falls_back_to_the_default_ranking() {
     let mut opts = BlastOptions::default();
     opts.rank_cache = None;
     let bare = glia_engine::blast_radius(&r.merged, &["zeta00_f"], &opts);
-    assert_eq!(summary(&bare), ("SELh0".into(), "k1".into(), "H10".into(), "explicit", None));
+    assert_eq!(
+        summary(&bare),
+        ("SELh0".into(), "k1".into(), "H10".into(), "explicit", None)
+    );
 }
 
 #[test]
@@ -159,7 +193,11 @@ fn a_calibrated_record_picks_the_ranking() {
         panic!("record not loaded");
     };
     let pick_of = |set: &str, shape: &str| -> String {
-        cal.sets.iter().find(|s| s.set == set && s.shape == shape).map(|s| s.pick.clone()).expect("row")
+        cal.sets
+            .iter()
+            .find(|s| s.set == set && s.shape == shape)
+            .map(|s| s.pick.clone())
+            .expect("row")
     };
     let c = cache(&r);
 
@@ -167,18 +205,38 @@ fn a_calibrated_record_picks_the_ranking() {
     let a = answer(&r, &c, &["zeta00_f"], Ranking::default(), true);
     let want = pick_of("SELh0", "k1");
     assert!(want.starts_with("H10"), "{want}");
-    assert_eq!(summary(&a), ("SELh0".into(), "k1".into(), want.clone(), "calibrated", None));
+    assert_eq!(
+        summary(&a),
+        (
+            "SELh0".into(),
+            "k1".into(),
+            want.clone(),
+            "calibrated",
+            None
+        )
+    );
     assert_eq!(a.selection.as_ref().map(|s| s.test_commits), Some(COMMITS));
     let explicit = answer(&r, &cache(&r), &["zeta00_f"], h(&want), false);
-    assert_eq!(rows(&a), rows(&explicit), "rows ordered by the picked ranking");
+    assert_eq!(
+        rows(&a),
+        rows(&explicit),
+        "rows ordered by the picked ranking"
+    );
 
     // (c) co-change off: SELs0, B0 on this fixture.
     let s = answer(&r, &c, &["zeta00_f"], Ranking::head(), true);
     assert_eq!(pick_of("SELs0", "k1"), "B0");
-    assert_eq!(summary(&s), ("SELs0".into(), "k1".into(), "B0".into(), "calibrated", None));
+    assert_eq!(
+        summary(&s),
+        ("SELs0".into(), "k1".into(), "B0".into(), "calibrated", None)
+    );
     let b0 = answer(&r, &cache(&r), &["zeta00_f"], h("B0"), false);
     let p1 = answer(&r, &cache(&r), &["zeta00_f"], h("P1"), false);
-    assert_eq!(rows(&s), rows(&b0), "rows ordered by carry depth then file degree");
+    assert_eq!(
+        rows(&s),
+        rows(&b0),
+        "rows ordered by carry depth then file degree"
+    );
     assert_ne!(rows(&s), rows(&p1), "the pick moved the order");
 
     // (d) seeds in two files: shape k2.
@@ -191,9 +249,21 @@ fn a_calibrated_record_picks_the_ranking() {
 
     // (e) an explicit ranking is never overridden.
     let e = answer(&r, &c, &["zeta00_f"], h("H10[PT*]"), false);
-    assert_eq!(summary(&e), ("SELh0".into(), "k1".into(), "H10[PT*]".into(), "explicit", None));
+    assert_eq!(
+        summary(&e),
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10[PT*]".into(),
+            "explicit",
+            None
+        )
+    );
     let e = answer(&r, &c, &["zeta00_f"], h("PT*"), false);
-    assert_eq!(summary(&e), ("SELs0".into(), "k1".into(), "PT*".into(), "explicit", None));
+    assert_eq!(
+        summary(&e),
+        ("SELs0".into(), "k1".into(), "PT*".into(), "explicit", None)
+    );
 
     // diff_impact reads the same record through the same radius.
     let diff = "--- a/zeta/zeta00.py\n+++ b/zeta/zeta00.py\n@@ -4,1 +4,1 @@\n-    h()\n+    h()\n";
@@ -214,7 +284,16 @@ fn a_rewritten_build_stamp_falls_back() {
     v["build_stamp"] = serde_json::Value::String("0000-not-this-glia".into());
     std::fs::write(&meta, serde_json::to_vec_pretty(&v).expect("json")).expect("write meta");
     let a = answer(&r, &cache(&r), &["zeta00_f"], Ranking::default(), true);
-    assert_eq!(summary(&a), ("SELh0".into(), "k1".into(), "H10".into(), "fallback", Some("build_stamp")));
+    assert_eq!(
+        summary(&a),
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10".into(),
+            "fallback",
+            Some("build_stamp")
+        )
+    );
     let ea = answer(&r, &cache(&r), &["zeta00_f"], h("H10"), false);
     assert_eq!(rows(&a), rows(&ea));
 }
@@ -227,13 +306,28 @@ fn two_roots_are_multi_repo() {
     roots.insert(u64::MAX, root.join("elsewhere").display().to_string());
     let c = Arc::new(RankCache::new("answer", &roots, &r.repo_labels));
     let a = answer(&r, &c, &["zeta00_f"], Ranking::head(), true);
-    assert_eq!(summary(&a), ("SELs0".into(), "k1".into(), "P1".into(), "fallback", Some("multi_repo")));
+    assert_eq!(
+        summary(&a),
+        (
+            "SELs0".into(),
+            "k1".into(),
+            "P1".into(),
+            "fallback",
+            Some("multi_repo")
+        )
+    );
 }
 
 #[test]
 fn no_seed_has_no_selection() {
     let (_tmp, _root, r) = fixture();
-    let a = answer(&r, &cache(&r), &["no_such_symbol_anywhere"], Ranking::default(), true);
+    let a = answer(
+        &r,
+        &cache(&r),
+        &["no_such_symbol_anywhere"],
+        Ranking::default(),
+        true,
+    );
     assert!(a.selection.is_none());
     let v = serde_json::to_value(&a).expect("json");
     assert!(v.get("selection").is_none(), "skipped when None");
@@ -253,14 +347,38 @@ fn pack_args(c: Option<&Arc<RankCache>>, ranking: Ranking) -> glia_engine::pack:
     a
 }
 
-fn packed(r: &GenerateResult, c: Option<&Arc<RankCache>>, seeds: &[&str], ranking: Ranking) -> glia_engine::pack::Pack {
-    let ids: Vec<_> = seeds.iter().map(|s| r.merged.node_id_by_qname(s).expect(s)).collect();
+fn packed(
+    r: &GenerateResult,
+    c: Option<&Arc<RankCache>>,
+    seeds: &[&str],
+    ranking: Ranking,
+) -> glia_engine::pack::Pack {
+    let ids: Vec<_> = seeds
+        .iter()
+        .map(|s| r.merged.node_id_by_qname(s).expect(s))
+        .collect();
     glia_engine::pack::pack_ids(&r.merged, &ids, &pack_args(c, ranking))
 }
 
-fn pack_summary(p: &glia_engine::pack::Pack) -> (String, String, String, &'static str, Option<&'static str>, usize) {
+fn pack_summary(
+    p: &glia_engine::pack::Pack,
+) -> (
+    String,
+    String,
+    String,
+    &'static str,
+    Option<&'static str>,
+    usize,
+) {
     let s = p.selection.as_ref().expect("a pack selection");
-    (s.set.clone(), s.shape.clone(), s.pick.clone(), s.source, s.reason, s.test_commits)
+    (
+        s.set.clone(),
+        s.shape.clone(),
+        s.pick.clone(),
+        s.source,
+        s.reason,
+        s.test_commits,
+    )
 }
 
 /// The whole pack, selection included, as JSON: what a record must not move.
@@ -279,19 +397,56 @@ fn pack_selection_names_the_ranking_it_applied() {
     assert!(p.nodes.len() > 1);
     assert_eq!(
         pack_summary(&p),
-        ("SELh0".into(), "k1".into(), "H10".into(), "fallback", Some("pack_uncalibrated"), 0)
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10".into(),
+            "fallback",
+            Some("pack_uncalibrated"),
+            0
+        )
     );
     // No cache (no co-change read): the same selection.
-    assert_eq!(packed(&r, None, &[ZETA00], Ranking::default()).selection, p.selection);
+    assert_eq!(
+        packed(&r, None, &[ZETA00], Ranking::default()).selection,
+        p.selection
+    );
     // Any other ranking is explicit.
     let e = packed(&r, Some(&c), &[ZETA00], h("PT*"));
-    assert_eq!(pack_summary(&e), ("SELs0".into(), "k1".into(), "PT*".into(), "explicit", None, 0));
+    assert_eq!(
+        pack_summary(&e),
+        (
+            "SELs0".into(),
+            "k1".into(),
+            "PT*".into(),
+            "explicit",
+            None,
+            0
+        )
+    );
     let b = packed(&r, Some(&c), &[ZETA00], h("H10[B0]"));
-    assert_eq!(pack_summary(&b), ("SELh0".into(), "k1".into(), "H10[B0]".into(), "explicit", None, 0));
+    assert_eq!(
+        pack_summary(&b),
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10[B0]".into(),
+            "explicit",
+            None,
+            0
+        )
+    );
     // Seeds in two files are shape k2.
-    assert_eq!(pack_summary(&packed(&r, Some(&c), &[ZETA00, ZETA01], Ranking::default())).1, "k2");
+    assert_eq!(
+        pack_summary(&packed(&r, Some(&c), &[ZETA00, ZETA01], Ranking::default())).1,
+        "k2"
+    );
     // An empty pack has no selection, and the key is skipped.
-    let none = glia_engine::pack::pack(&r.merged, "no_such_symbol_anywhere", &pack_args(Some(&c), Ranking::default()));
+    let none = glia_engine::pack::pack(
+        &r.merged,
+        "no_such_symbol_anywhere",
+        &pack_args(Some(&c), Ranking::default()),
+    );
     assert!(none.absence.is_some() && none.selection.is_none());
     let v = serde_json::to_value(&none).expect("json");
     assert!(v.get("selection").is_none(), "skipped when None");
@@ -304,7 +459,11 @@ fn pack_ignores_a_calibration_record() {
     let shapes: [&[&str]; 2] = [&[ZETA00], &[ZETA00, ZETA01]];
     let before: Vec<String> = shapes
         .iter()
-        .flat_map(|seeds| rankings.iter().map(|n| pack_json(&packed(&r, Some(&cache(&r)), seeds, h(n)))))
+        .flat_map(|seeds| {
+            rankings
+                .iter()
+                .map(|n| pack_json(&packed(&r, Some(&cache(&r)), seeds, h(n))))
+        })
         .collect();
 
     calibrate(&root, &r.merged, &CalibrateOptions::default()).expect("calibrate");
@@ -314,26 +473,62 @@ fn pack_ignores_a_calibration_record() {
     // The record picks a non-default ranking for a set pack would read, so
     // a pack that followed it would move.
     let pick = |set: &str, shape: &str| -> String {
-        cal.sets.iter().find(|s| s.set == set && s.shape == shape).map(|s| s.pick.clone()).expect("row")
+        cal.sets
+            .iter()
+            .find(|s| s.set == set && s.shape == shape)
+            .map(|s| s.pick.clone())
+            .expect("row")
     };
-    assert_eq!(pick("SELs0", "k1"), "B0", "the fixture's record picks a non-default ranking");
+    assert_eq!(
+        pick("SELs0", "k1"),
+        "B0",
+        "the fixture's record picks a non-default ranking"
+    );
     let b0 = packed(&r, Some(&cache(&r)), &[ZETA00], h("B0"));
     let p1 = packed(&r, Some(&cache(&r)), &[ZETA00], h("P1"));
-    assert_ne!(pack_json(&b0), pack_json(&p1), "the record's pick would move the pack");
+    assert_ne!(
+        pack_json(&b0),
+        pack_json(&p1),
+        "the record's pick would move the pack"
+    );
 
     let c = cache(&r);
     let after: Vec<String> = shapes
         .iter()
-        .flat_map(|seeds| rankings.iter().map(|n| pack_json(&packed(&r, Some(&c), seeds, h(n)))))
+        .flat_map(|seeds| {
+            rankings
+                .iter()
+                .map(|n| pack_json(&packed(&r, Some(&c), seeds, h(n))))
+        })
         .collect();
-    assert_eq!(after, before, "a calibration record moves no pack (ruling EC-9b)");
+    assert_eq!(
+        after, before,
+        "a calibration record moves no pack (ruling EC-9b)"
+    );
     let d = packed(&r, Some(&c), &[ZETA00], Ranking::default());
     assert_eq!(
         pack_summary(&d),
-        ("SELh0".into(), "k1".into(), "H10".into(), "fallback", Some("pack_uncalibrated"), 0)
+        (
+            "SELh0".into(),
+            "k1".into(),
+            "H10".into(),
+            "fallback",
+            Some("pack_uncalibrated"),
+            0
+        )
     );
     let s = packed(&r, Some(&c), &[ZETA00], Ranking::head());
-    assert_eq!(pack_summary(&s), ("SELs0".into(), "k1".into(), "P1".into(), "explicit", None, 0));
+    assert_eq!(
+        pack_summary(&s),
+        (
+            "SELs0".into(),
+            "k1".into(),
+            "P1".into(),
+            "explicit",
+            None,
+            0
+        )
+    );
 }
 
 /// EC.12: `review --title` selects from SELt2: with no record its fallback
@@ -352,7 +547,10 @@ fn review_selects_from_selt2() {
     history(g.root());
     let built = glia_engine::generate_one(g.path()).expect("build");
     // The PR: an edit, a rename and a deletion in the zeta cluster.
-    g.write("zeta/zeta03.py", "from hub import h, g03\n\ndef zeta03_f():\n    h()\n    return 33\n");
+    g.write(
+        "zeta/zeta03.py",
+        "from hub import h, g03\n\ndef zeta03_f():\n    h()\n    return 33\n",
+    );
     g.git_mv("zeta/zeta04.py", "zeta/zeta24.py");
     g.remove("zeta/zeta05.py");
     let mut args = ReviewArgs::default();
@@ -363,8 +561,20 @@ fn review_selects_from_selt2() {
     };
 
     let u = review_vs_rev(g.path(), "HEAD", &args).expect("review");
-    assert_eq!(sel(&u), ("SELt2".into(), "LX[IDR,P1]".into(), "fallback", Some("absent")));
-    let shape = u.selection_intent.as_ref().map(|s| s.shape.clone()).expect("shape");
+    assert_eq!(
+        sel(&u),
+        (
+            "SELt2".into(),
+            "LX[IDR,P1]".into(),
+            "fallback",
+            Some("absent")
+        )
+    );
+    let shape = u
+        .selection_intent
+        .as_ref()
+        .map(|s| s.shape.clone())
+        .expect("shape");
 
     let mut opts = CalibrateOptions::default();
     opts.groups = vec!["review"];
@@ -372,14 +582,21 @@ fn review_selects_from_selt2() {
     let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
         panic!("record not loaded");
     };
-    let k1 = cal.sets.iter().find(|r| r.set == "SELt2" && r.shape == shape).expect("SELt2 row");
+    let k1 = cal
+        .sets
+        .iter()
+        .find(|r| r.set == "SELt2" && r.shape == shape)
+        .expect("SELt2 row");
     let c = review_vs_rev(g.path(), "HEAD", &args).expect("review");
     let (set, pick, source, reason) = sel(&c);
     assert_eq!((set.as_str(), pick.as_str()), ("SELt2", k1.pick.as_str()));
     if k1.candidates.contains(&k1.pick) {
         assert_eq!((source, reason), ("calibrated", None));
     } else {
-        assert_eq!((pick.as_str(), source, reason), ("LX[IDR,P1]", "fallback", Some("refused")));
+        assert_eq!(
+            (pick.as_str(), source, reason),
+            ("LX[IDR,P1]", "fallback", Some("refused"))
+        );
     }
 
     // A pre-EC.12 record: its review rows are set SELt over SELt's ten.
@@ -402,9 +619,22 @@ fn review_selects_from_selt2() {
     let CalibrationRead::Loaded(reread) = read_calibration(g.root()) else {
         panic!("old record not loaded");
     };
-    assert!(reread.sets.iter().all(|r| r.set == "SELt" && r.candidates.len() == 10));
+    assert!(
+        reread
+            .sets
+            .iter()
+            .all(|r| r.set == "SELt" && r.candidates.len() == 10)
+    );
     let old = review_vs_rev(g.path(), "HEAD", &args).expect("review");
-    assert_eq!(sel(&old), ("SELt2".into(), "LX[IDR,P1]".into(), "fallback", Some("no_set")));
+    assert_eq!(
+        sel(&old),
+        (
+            "SELt2".into(),
+            "LX[IDR,P1]".into(),
+            "fallback",
+            Some("no_set")
+        )
+    );
 }
 
 /// Two clusters of `N` stand-alone modules (EC.13; calibrate_step's
@@ -413,7 +643,11 @@ fn isolated(root: &Path) {
     for c in ["alpha", "zeta"] {
         write(root, &format!("{c}/__init__.py"), "");
         for i in 0..N {
-            write(root, &cluster_path(c, i), &format!("def {c}{i:02}_f():\n    return {i}\n"));
+            write(
+                root,
+                &cluster_path(c, i),
+                &format!("def {c}{i:02}_f():\n    return {i}\n"),
+            );
         }
     }
 }
@@ -435,10 +669,21 @@ fn cluster_history(root: &Path) {
             c: sha.clone(),
             t,
             files: (0..size)
-                .map(|j| HistoryFile { p: cluster_path(c, (start + j) % N), a: Some(1), d: Some(0), from: None })
+                .map(|j| HistoryFile {
+                    p: cluster_path(c, (start + j) % N),
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
                 .collect(),
         });
-        messages.push(HistoryMessage { c: sha, at: t, s: format!("{c} cluster work {i}"), b: String::new(), br: None });
+        messages.push(HistoryMessage {
+            c: sha,
+            at: t,
+            s: format!("{c} cluster work {i}"),
+            b: String::new(),
+            br: None,
+        });
     }
     commits.reverse();
     messages.reverse();
@@ -476,7 +721,14 @@ fn find_files_selects_from_self2t() {
     };
     let sel = |a: &glia_engine::absence::Answer<FoundFile>| {
         let s = a.selection.as_ref().expect("a selection");
-        (s.set.clone(), s.shape.clone(), s.pick.clone(), s.source, s.reason, s.test_commits)
+        (
+            s.set.clone(),
+            s.shape.clone(),
+            s.pick.clone(),
+            s.source,
+            s.reason,
+            s.test_commits,
+        )
     };
     let files = |a: &glia_engine::absence::Answer<FoundFile>| -> Vec<String> {
         a.results.iter().map(|x| x.file.clone()).collect()
@@ -484,7 +736,17 @@ fn find_files_selects_from_self2t() {
 
     // uncalibrated: EB.8's LX[IDR,T1s] (no id here: text desc, degree desc, path)
     let u = ask(q, true);
-    assert_eq!(sel(&u), ("SELf2t".into(), "find".into(), "LX[IDR,T1s]".into(), "fallback", Some("absent"), 0));
+    assert_eq!(
+        sel(&u),
+        (
+            "SELf2t".into(),
+            "find".into(),
+            "LX[IDR,T1s]".into(),
+            "fallback",
+            Some("absent"),
+            0
+        )
+    );
     assert!(!u.results.is_empty());
     let mut eb8 = u.results.clone();
     eb8.sort_by(|x, y| {
@@ -494,28 +756,64 @@ fn find_files_selects_from_self2t() {
             .then(y.degree.total_cmp(&x.degree))
             .then(x.file.cmp(&y.file))
     });
-    assert_eq!(files(&u), eb8.iter().map(|x| x.file.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        files(&u),
+        eb8.iter().map(|x| x.file.clone()).collect::<Vec<_>>()
+    );
     assert!(u.results.iter().all(|x| x.text > 0.0));
     let e = ask(q, false);
-    assert_eq!(sel(&e), ("SELf2t".into(), "find".into(), "LX[IDR,T1s]".into(), "explicit", None, 0));
-    assert_eq!(serde_json::to_value(&e.results).ok(), serde_json::to_value(&u.results).ok());
+    assert_eq!(
+        sel(&e),
+        (
+            "SELf2t".into(),
+            "find".into(),
+            "LX[IDR,T1s]".into(),
+            "explicit",
+            None,
+            0
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(&e.results).ok(),
+        serde_json::to_value(&u.results).ok()
+    );
 
     // calibrated
     let mut opts = CalibrateOptions::default();
     opts.groups = vec!["find"];
     calibrate(&root, &r.merged, &opts).expect("calibrate");
     let c = ask(q, true);
-    assert_eq!(sel(&c), ("SELf2t".into(), "find".into(), "H10x".into(), "calibrated", None, COMMITS));
+    assert_eq!(
+        sel(&c),
+        (
+            "SELf2t".into(),
+            "find".into(),
+            "H10x".into(),
+            "calibrated",
+            None,
+            COMMITS
+        )
+    );
     let rc = cache(&r);
     let fi = rc.files(&r.merged);
     let repo = *r.repo_roots.keys().next().expect("repo");
     let cands = Candidates::of(&fi, repo);
-    let t1s = TextIndex::load(&root, &cands, &BTreeSet::new()).expect("text").scores(subject(q));
+    let t1s = TextIndex::load(&root, &cands, &BTreeSet::new())
+        .expect("text")
+        .scores(subject(q));
     let snap = read_history(&root).expect("snapshot");
     let msgs = read_history_messages(&root, &snap).expect("messages");
     let head = FindHead::new(&r.merged, &rc, &cands, Some((&snap, &msgs)));
-    let keys = find_keys("H10x", &find_signals_at_head(&head, "H10x", t1s, vec![0.0; cands.len()])).expect("keys");
-    let want: Vec<String> = find_order(&keys).into_iter().take(20).map(|i| cands.paths[i].clone()).collect();
+    let keys = find_keys(
+        "H10x",
+        &find_signals_at_head(&head, "H10x", t1s, vec![0.0; cands.len()]),
+    )
+    .expect("keys");
+    let want: Vec<String> = find_order(&keys)
+        .into_iter()
+        .take(20)
+        .map(|i| cands.paths[i].clone())
+        .collect();
     assert_eq!(files(&c), want);
     assert_ne!(files(&c), files(&u), "the calibrated pick moves the order");
     assert!(c.results.iter().enumerate().all(|(i, x)| x.rank == i + 1));

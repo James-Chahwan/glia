@@ -117,7 +117,11 @@ fn http_nodes_are_located_by_cell_or_handler() {
     let handler = locate(&m, "app::get_user");
     assert_eq!(handler.0, "FUNCTION");
     assert_eq!(handler.1.as_deref(), Some("app.py"));
-    assert_eq!(handler.2, Some(7), "get_user's span starts on its 1-based `def` line");
+    assert_eq!(
+        handler.2,
+        Some(7),
+        "get_user's span starts on its 1-based `def` line"
+    );
     assert_eq!(
         locate(&m, "GET /users/<int:uid>"),
         ("ROUTE", handler.1.clone(), handler.2),

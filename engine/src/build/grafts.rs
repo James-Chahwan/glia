@@ -93,7 +93,14 @@ pub(super) fn apply_post_cache(
     let inferred = infer_entity_wrappers(parses_by_lang, files, &modules, repo, parse_errors);
     let mut wrappers = WrapperPass::scan(wrappers, inferred, files, parse_errors);
     if let Some(w) = wrappers.as_mut() {
-        w.mint(WrapperPhase::Http, parses_by_lang, files, repo, &modules, parse_errors);
+        w.mint(
+            WrapperPhase::Http,
+            parses_by_lang,
+            files,
+            repo,
+            &modules,
+            parse_errors,
+        );
     }
     // DT.10g: an EVM client whose ABI another file declares (a TS import, a Go
     // constant of another file of the package) takes that file's entries, so
@@ -106,15 +113,26 @@ pub(super) fn apply_post_cache(
     // builder that reads a configured API prefix moves under it; `roots` key
     // the builders by owner. Before nav is dropped (the builder facts live
     // only there) and above the owner pass (it re-keys ENDPOINTs).
-    endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo, roots)
-        .report(repo_label);
+    endpoint_fold::fold_repo(
+        parses_by_lang.values_mut().flatten(),
+        const_table,
+        repo,
+        roots,
+    )
+    .report(repo_label);
     // LA.6d: Next.js file-system pages. Before the owner pass, so a grafted
     // page is owner-qualified like every other nav ROUTE.
     graft_next_pages(parses_by_lang, files, repo, &modules, parse_errors).report(repo_label);
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
-    let folds = FoldInputs { files, repo, modules: &modules, consts: const_table, file_tables };
+    let folds = FoldInputs {
+        files,
+        repo,
+        modules: &modules,
+        consts: const_table,
+        file_tables,
+    };
     let (queue_stats, queue_pool) = apply_queue_const_topics(parses_by_lang, &folds, parse_errors);
     queue_stats.report(repo_label);
     // CB.3b: event sites keyed by a constant fold to its literal through the
@@ -146,7 +164,14 @@ pub(super) fn apply_post_cache(
     // folded file's queue nodes from the queue scan and would drop a wrapper
     // node) and above the owner pass, like every graft that mints an owned kind.
     if let Some(w) = wrappers.as_mut() {
-        w.mint(WrapperPhase::Queue, parses_by_lang, files, repo, &modules, parse_errors);
+        w.mint(
+            WrapperPhase::Queue,
+            parses_by_lang,
+            files,
+            repo,
+            &modules,
+            parse_errors,
+        );
         w.report(repo_label);
     }
 
@@ -469,8 +494,11 @@ fn stamp_client_hosts(
                     done.insert(node.id);
                     continue;
                 }
-                let file = node_file(node)
-                    .or_else(|| parse_file.get_or_insert_with(|| http_owner::module_file(fp)).clone());
+                let file = node_file(node).or_else(|| {
+                    parse_file
+                        .get_or_insert_with(|| http_owner::module_file(fp))
+                        .clone()
+                });
                 let owner = file.and_then(|f| owners.owner_of(&f).map(str::to_string));
                 let Some(set) = hosts.get(&(via, owner)) else {
                     continue;
@@ -645,7 +673,11 @@ fn client_hosts_cell(via: &str, hosts: &BTreeSet<String>) -> Cell {
     let list: Vec<String> = hosts.iter().map(|h| quote(h)).collect();
     Cell {
         kind: cell_type::ENDPOINT_HIT,
-        payload: CellPayload::Json(format!(r#"{{"via":{},"hosts":[{}]}}"#, quote(via), list.join(","))),
+        payload: CellPayload::Json(format!(
+            r#"{{"via":{},"hosts":[{}]}}"#,
+            quote(via),
+            list.join(",")
+        )),
     }
 }
 
@@ -845,11 +877,20 @@ fn apply_queue_const_topics(
         let ev = Evidence::emitter("extractor:queues").rule("const_fold");
         evidence::stamp_missing_with(&mut fold.consumers.edges, &ev);
         evidence::stamp_missing_with(&mut fold.producers.edges, &ev);
-        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+        if let Some(fp) = parses_by_lang
+            .get_mut(t.lang)
+            .and_then(|p| p.get_mut(t.slot))
+        {
             queues::replace_queue_nodes(fp, t.module_id, t.lang, fold);
         }
     }
-    (stats, FoldPool { files: targets.len(), threads })
+    (
+        stats,
+        FoldPool {
+            files: targets.len(),
+            threads,
+        },
+    )
 }
 
 /// DC.3: what both const folds read besides the parses they swap.
@@ -962,7 +1003,12 @@ fn fold_targets(
         }) else {
             continue;
         };
-        targets.push(FoldTarget { file, lang, module_id, slot });
+        targets.push(FoldTarget {
+            file,
+            lang,
+            module_id,
+            slot,
+        });
     }
     targets
 }
@@ -1116,11 +1162,20 @@ fn apply_event_const_names(
         // edges are the anchor pass's), so there is no extractor edge to
         // stamp: the swap stamps what it re-anchors `extractor:anchor` rule
         // `const_fold`.
-        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+        if let Some(fp) = parses_by_lang
+            .get_mut(t.lang)
+            .and_then(|p| p.get_mut(t.slot))
+        {
             eventbus::replace_event_nodes(fp, t.module_id, t.lang, fold);
         }
     }
-    (stats, FoldPool { files: targets.len(), threads })
+    (
+        stats,
+        FoldPool {
+            files: targets.len(),
+            threads,
+        },
+    )
 }
 
 /// DT.3b: a WS_CLIENT node.
@@ -1213,7 +1268,10 @@ fn apply_ws_client_bases(
         // edges are the anchor pass's), so there is no extractor edge to stamp:
         // the swap stamps what it re-anchors `extractor:anchor` rule
         // `const_fold`.
-        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+        if let Some(fp) = parses_by_lang
+            .get_mut(t.lang)
+            .and_then(|p| p.get_mut(t.slot))
+        {
             websocket::replace_ws_client_nodes(fp, t.module_id, t.lang, fold);
         }
     }
@@ -1356,7 +1414,11 @@ impl PySignalTable {
             let dotted = key.replace("::", ".");
             for decl in decls {
                 let identity = decl.event_identity(&dotted);
-                bind_once(by_module.entry(key.clone()).or_default(), &decl.name, &identity);
+                bind_once(
+                    by_module.entry(key.clone()).or_default(),
+                    &decl.name,
+                    &identity,
+                );
             }
         }
         let roots = roots
@@ -1364,7 +1426,11 @@ impl PySignalTable {
             .filter(|r| r.ecosystem == "python" && !r.rel_path.is_empty())
             .map(|r| r.rel_path.clone())
             .collect();
-        PySignalTable { by_module, modules, roots }
+        PySignalTable {
+            by_module,
+            modules,
+            roots,
+        }
     }
 
     /// (bindable declarations, refused ones).
@@ -1470,7 +1536,12 @@ impl PySignalTable {
         }
         for stmt in &fp.imports {
             match &stmt.target {
-                ImportTarget::Symbol { module, name, alias, level } => {
+                ImportTarget::Symbol {
+                    module,
+                    name,
+                    alias,
+                    level,
+                } => {
                     let Some(target) = self.resolve(path, &importer, module, *level) else {
                         continue;
                     };
@@ -1492,7 +1563,10 @@ impl PySignalTable {
                         }
                     }
                 }
-                ImportTarget::Module { path: dotted, alias } => {
+                ImportTarget::Module {
+                    path: dotted,
+                    alias,
+                } => {
                     let Some(target) = self.resolve(path, &importer, dotted, 0) else {
                         continue;
                     };
@@ -1523,7 +1597,11 @@ fn merge_signal_nodes(fold: &mut eventbus::EventFold, sig: eventbus::EventNodes)
         .chain(&fold.handlers.nodes)
         .map(|n| n.id)
         .collect();
-    let eventbus::EventNodes { nodes, nav, anchors } = sig;
+    let eventbus::EventNodes {
+        nodes,
+        nav,
+        anchors,
+    } = sig;
     let mut minted = HashSet::new();
     for node in nodes {
         let id = node.id;
@@ -1551,7 +1629,11 @@ fn merge_signal_nodes(fold: &mut eventbus::EventFold, sig: eventbus::EventNodes)
             side.nav.children_of.entry(parent).or_default().push(id);
         }
     }
-    let mut merge = SignalMerge { minted, emit: 0, handle: 0 };
+    let mut merge = SignalMerge {
+        minted,
+        emit: 0,
+        handle: 0,
+    };
     for a in &anchors {
         match nav.kind_by_id.get(&a.node) {
             Some(&k) if k == node_kind::EVENT_EMITTER => merge.emit += 1,
@@ -1654,7 +1736,8 @@ fn apply_python_signals(
         if names.is_empty() {
             continue;
         }
-        let Ok(found) = crate::parallel::quiet(|| eventbus::python_signal_sites(source, path, &names))
+        let Ok(found) =
+            crate::parallel::quiet(|| eventbus::python_signal_sites(source, path, &names))
         else {
             parse_errors.push(format!("{path}: PANIC (python signals)"));
             continue;
@@ -1669,7 +1752,12 @@ fn apply_python_signals(
         if sites.is_empty() {
             continue;
         }
-        let t = FoldTarget { file, lang: "python", module_id, slot };
+        let t = FoldTarget {
+            file,
+            lang: "python",
+            module_id,
+            slot,
+        };
         let out = event_fold_one(inputs, &t, |source, path, mut fold| {
             let sig = eventbus::python_signal_nodes(source, path, module_id, inputs.repo, &sites);
             let merge = merge_signal_nodes(&mut fold, sig);
@@ -1682,7 +1770,10 @@ fn apply_python_signals(
         if merge.emit + merge.handle == 0 {
             continue;
         }
-        let Some(fp) = parses_by_lang.get_mut("python").and_then(|p| p.get_mut(slot)) else {
+        let Some(fp) = parses_by_lang
+            .get_mut("python")
+            .and_then(|p| p.get_mut(slot))
+        else {
             continue;
         };
         stats.files += 1;
@@ -1793,7 +1884,11 @@ fn filter_imports_cells(
             .any(|n| n.cells.iter().any(|c| c.kind == cell_type::IMPORTS))
     };
     let mut local = LocalModuleIndex::default();
-    for fp in parses_by_lang.values().flatten().filter(|fp| carries_imports(fp)) {
+    for fp in parses_by_lang
+        .values()
+        .flatten()
+        .filter(|fp| carries_imports(fp))
+    {
         local.add_parse(fp);
     }
     for c in rust_crates {
@@ -1904,15 +1999,24 @@ mod next_page_tests {
         assert_eq!(pages(&cold.merged), vec!["page:/users/:id".to_string()]);
         assert_eq!(
             handled_by(&cold.merged),
-            vec![("page:/users/:id".to_string(), "pages::users::[id]::UserPage".to_string())]
+            vec![(
+                "page:/users/:id".to_string(),
+                "pages::users::[id]::UserPage".to_string()
+            )]
         );
 
         // Only package.json changes: the page file is served from the cache
         // and must lose the page its dependency no longer declares.
         write(&repo, "package.json", VITE);
         let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
-        assert_eq!(cache.stats.reused, 1, "the page file must come from the cache");
-        assert!(pages(&warm.merged).is_empty(), "stale Next page replayed from cache");
+        assert_eq!(
+            cache.stats.reused, 1,
+            "the page file must come from the cache"
+        );
+        assert!(
+            pages(&warm.merged).is_empty(),
+            "stale Next page replayed from cache"
+        );
         let clean = generate_one(repo_s).unwrap();
         assert_eq!(
             write_store(&warm.merged, &tmp.path().join("warm")),
@@ -1938,7 +2042,11 @@ mod next_page_tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         write(&repo, "package.json", NEXT);
-        write(&repo, "pages/index.tsx", "export default function Home() {\n  return <main />;\n}\n");
+        write(
+            &repo,
+            "pages/index.tsx",
+            "export default function Home() {\n  return <main />;\n}\n",
+        );
         write(&repo, "apps/spa/package.json", VITE);
         write(
             &repo,
@@ -1991,13 +2099,20 @@ mod client_host_tests {
     fn position(file: &str) -> Cell {
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":1}}"#
+            )),
         }
     }
 
     fn push(fp: &mut FileParse, kind: NodeKindId, q: &str, file: &str) -> NodeId {
         let id = NodeId::from_parts(GRAPH_TYPE, REPO, kind, q);
-        fp.nodes.push(Node { id, repo: REPO, confidence: Confidence::Strong, cells: vec![position(file)] });
+        fp.nodes.push(Node {
+            id,
+            repo: REPO,
+            confidence: Confidence::Strong,
+            cells: vec![position(file)],
+        });
         fp.nav.record(id, q, q, kind, None);
         id
     }
@@ -2005,13 +2120,20 @@ mod client_host_tests {
     /// A parse of `file`: its MODULE first, as the router hands it over.
     fn parse(file: &str) -> (FileParse, NodeId) {
         let mut fp = FileParse::default();
-        let q = file.rsplit_once('.').map_or(file, |(stem, _)| stem).replace('/', "::");
+        let q = file
+            .rsplit_once('.')
+            .map_or(file, |(stem, _)| stem)
+            .replace('/', "::");
         let m = push(&mut fp, node_kind::MODULE, &q, file);
         (fp, m)
     }
 
     fn fact(via: &str, host: &str, line: u32) -> NavFact {
-        NavFact::ClientHost { via: via.into(), host: host.into(), line }
+        NavFact::ClientHost {
+            via: via.into(),
+            host: host.into(),
+            line,
+        }
     }
 
     /// The ENDPOINT_HIT payloads of every copy of `id`, in parse order.
@@ -2043,36 +2165,90 @@ mod client_host_tests {
             ProjectRoot::new("apps/admin".into(), "npm", "manifest", None),
         ]);
         let (mut apollo, m) = parse("apps/web/src/apollo.ts");
-        apollo.nav.record_fact(m, fact("graphql", "users-svc:4000", 5));
+        apollo
+            .nav
+            .record_fact(m, fact("graphql", "users-svc:4000", 5));
         apollo.nav.record_fact(m, fact("graphql", "users-svc", 2));
         apollo.nav.record_fact(m, fact("rpc", "catalog-svc", 7));
         let (mut profile, _) = parse("apps/web/src/profile.ts");
-        let op = push(&mut profile, node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web", "apps/web/src/profile.ts");
-        let call = push(&mut profile, node_kind::RPC_CALL, "rpc_call:item.list @apps/web", "apps/web/src/profile.ts");
+        let op = push(
+            &mut profile,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:getUser @apps/web",
+            "apps/web/src/profile.ts",
+        );
+        let call = push(
+            &mut profile,
+            node_kind::RPC_CALL,
+            "rpc_call:item.list @apps/web",
+            "apps/web/src/profile.ts",
+        );
         let (mut other, _) = parse("apps/web/src/other.tsx");
-        push(&mut other, node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web", "apps/web/src/other.tsx");
+        push(
+            &mut other,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:getUser @apps/web",
+            "apps/web/src/other.tsx",
+        );
         let (mut admin, _) = parse("apps/admin/src/admin.ts");
-        let admin_op = push(&mut admin, node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/admin", "apps/admin/src/admin.ts");
+        let admin_op = push(
+            &mut admin,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:getUser @apps/admin",
+            "apps/admin/src/admin.ts",
+        );
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert("typescript", vec![apollo, profile, admin]);
         by_lang.insert("vue", vec![other]);
 
         let stats = stamp_client_hosts(&mut by_lang, &owners);
-        assert_eq!(stats, ClientHostStats { graphql: 2, rpc: 1, sides: 2 });
-        assert_eq!(hits(&by_lang, op), vec![r#"{"via":"graphql","hosts":["users-svc","users-svc:4000"]}"#]);
-        assert_eq!(hits(&by_lang, call), vec![r#"{"via":"rpc","hosts":["catalog-svc"]}"#]);
-        assert!(hits(&by_lang, admin_op).is_empty(), "apps/admin builds no client");
+        assert_eq!(
+            stats,
+            ClientHostStats {
+                graphql: 2,
+                rpc: 1,
+                sides: 2
+            }
+        );
+        assert_eq!(
+            hits(&by_lang, op),
+            vec![r#"{"via":"graphql","hosts":["users-svc","users-svc:4000"]}"#]
+        );
+        assert_eq!(
+            hits(&by_lang, call),
+            vec![r#"{"via":"rpc","hosts":["catalog-svc"]}"#]
+        );
+        assert!(
+            hits(&by_lang, admin_op).is_empty(),
+            "apps/admin builds no client"
+        );
         let vue_copy = &by_lang["vue"][0].nodes[1];
-        assert!(vue_copy.cells.iter().all(|c| c.kind != cell_type::ENDPOINT_HIT), "one stamp per id");
+        assert!(
+            vue_copy
+                .cells
+                .iter()
+                .all(|c| c.kind != cell_type::ENDPOINT_HIT),
+            "one stamp per id"
+        );
 
         let again = stamp_client_hosts(&mut by_lang, &owners);
-        assert_eq!(again, ClientHostStats { graphql: 2, rpc: 1, sides: 0 });
+        assert_eq!(
+            again,
+            ClientHostStats {
+                graphql: 2,
+                rpc: 1,
+                sides: 0
+            }
+        );
     }
 
     /// DF.19: a contract op DOC_SECTION of `file` whose ORIGIN is `origin`.
     fn op(fp: &mut FileParse, q: &str, file: &str, origin: &str) -> NodeId {
         let id = push(fp, node_kind::DOC_SECTION, q, file);
-        let cell = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin.into()) };
+        let cell = Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(origin.into()),
+        };
         if let Some(n) = fp.nodes.iter_mut().find(|n| n.id == id) {
             n.cells.push(cell);
         }
@@ -2119,7 +2295,12 @@ mod client_host_tests {
         ];
         let base_less = r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","operation_id":"login"}"#;
         let (mut json, _) = parse("services/turps/docs/swagger.json");
-        let login = op(&mut json, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.json", base_less);
+        let login = op(
+            &mut json,
+            "contract::docs::swagger::POST:/auth/login",
+            "services/turps/docs/swagger.json",
+            base_less,
+        );
         let based = op(
             &mut json,
             "contract::docs::swagger::GET:/v2/me",
@@ -2138,9 +2319,19 @@ mod client_host_tests {
             "services/turps/Server/users.go",
             r#"{"provenance":"contract","source":"swaggo","method":"GET","path":"/users","raw_path":"/users"}"#,
         );
-        let billing = op(&mut json, "contract::billing::POST:/auth/login", "services/billing/docs/swagger.json", base_less);
+        let billing = op(
+            &mut json,
+            "contract::billing::POST:/auth/login",
+            "services/billing/docs/swagger.json",
+            base_less,
+        );
         let (mut yaml, _) = parse("services/turps/docs/swagger.yaml");
-        op(&mut yaml, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.yaml", base_less);
+        op(
+            &mut yaml,
+            "contract::docs::swagger::POST:/auth/login",
+            "services/turps/docs/swagger.yaml",
+            base_less,
+        );
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert("json", vec![json]);
         by_lang.insert("yaml", vec![yaml]);
@@ -2148,10 +2339,16 @@ mod client_host_tests {
         let stats = stamp_annotated_bases(&mut by_lang, &files, &owners);
         assert_eq!(stats, AnnotatedBaseStats { ops: 1, bases: 1 });
         let stamped = r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","operation_id":"login","annotated_base":"/api","annotated_at":"services/turps/main.go:4"}"#;
-        assert_eq!(origins(&by_lang, login), vec![stamped, stamped], "both twins, key order kept");
+        assert_eq!(
+            origins(&by_lang, login),
+            vec![stamped, stamped],
+            "both twins, key order kept"
+        );
         for id in [based, listed, annot, billing] {
             assert!(
-                origins(&by_lang, id).iter().all(|o| !o.contains("annotated_base")),
+                origins(&by_lang, id)
+                    .iter()
+                    .all(|o| !o.contains("annotated_base")),
                 "{:?}",
                 origins(&by_lang, id)
             );
@@ -2164,10 +2361,18 @@ mod client_host_tests {
         // `@BasePath /` is the root: no base to stamp.
         let root = vec![("services/turps/main.go".to_string(), general("/"))];
         let (mut json, _) = parse("services/turps/docs/swagger.json");
-        let login = op(&mut json, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.json", base_less);
+        let login = op(
+            &mut json,
+            "contract::docs::swagger::POST:/auth/login",
+            "services/turps/docs/swagger.json",
+            base_less,
+        );
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert("json", vec![json]);
-        assert_eq!(stamp_annotated_bases(&mut by_lang, &root, &owners), AnnotatedBaseStats::default());
+        assert_eq!(
+            stamp_annotated_bases(&mut by_lang, &root, &owners),
+            AnnotatedBaseStats::default()
+        );
         assert_eq!(origins(&by_lang, login), vec![base_less]);
     }
 
@@ -2176,21 +2381,49 @@ mod client_host_tests {
     /// no fact stamps nothing.
     #[test]
     fn a_single_project_repo_stamps_under_the_repo() {
-        let owners = http_owner::OwnerIndex::from_roots(&[ProjectRoot::new(String::new(), "npm", "manifest", None)]);
+        let owners = http_owner::OwnerIndex::from_roots(&[ProjectRoot::new(
+            String::new(),
+            "npm",
+            "manifest",
+            None,
+        )]);
         let (mut client, m) = parse("src/client.ts");
         client.nav.record_fact(m, fact("graphql", "api", 2));
-        let op = push(&mut client, node_kind::GRAPHQL_OPERATION, "graphql_op:User", "src/client.ts");
+        let op = push(
+            &mut client,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:User",
+            "src/client.ts",
+        );
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert("typescript", vec![client]);
         let stats = stamp_client_hosts(&mut by_lang, &owners);
-        assert_eq!(stats, ClientHostStats { graphql: 1, rpc: 0, sides: 1 });
-        assert_eq!(hits(&by_lang, op), vec![r#"{"via":"graphql","hosts":["api"]}"#]);
+        assert_eq!(
+            stats,
+            ClientHostStats {
+                graphql: 1,
+                rpc: 0,
+                sides: 1
+            }
+        );
+        assert_eq!(
+            hits(&by_lang, op),
+            vec![r#"{"via":"graphql","hosts":["api"]}"#]
+        );
 
         let (mut bare, _) = parse("src/profile.ts");
-        let bare_op = push(&mut bare, node_kind::GRAPHQL_OPERATION, "graphql_op:User", "src/profile.ts");
+        let bare_op = push(
+            &mut bare,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:User",
+            "src/profile.ts",
+        );
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert("typescript", vec![bare]);
-        assert_eq!(stamp_client_hosts(&mut by_lang, &owners), ClientHostStats::default());
+        assert_eq!(
+            stamp_client_hosts(&mut by_lang, &owners),
+            ClientHostStats::default()
+        );
         assert!(hits(&by_lang, bare_op).is_empty());
     }
 
@@ -2203,7 +2436,10 @@ mod client_host_tests {
     /// `(from qname, to qname)` of every `category` cross edge, sorted.
     fn pairs(m: &MergedGraph, category: glia_core::EdgeCategoryId) -> Vec<(String, String)> {
         let q = |id: NodeId| {
-            m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
         };
         let mut out: Vec<(String, String)> = m
             .cross_edges
@@ -2223,9 +2459,22 @@ mod client_host_tests {
     fn client_hosts_narrow_graphql_and_rpc_end_to_end() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("shop");
-        write(&repo, "package.json", r#"{ "name": "shop", "private": true, "workspaces": ["apps/*", "services/*"] }"#);
-        for (dir, name) in [("services/users", "users-svc"), ("services/catalog", "catalog-svc")] {
-            write(&repo, &format!("{dir}/package.json"), &format!(r#"{{ "name": "{name}", "dependencies": {{ "@nestjs/graphql": "12.0.0", "@trpc/server": "10.0.0" }} }}"#));
+        write(
+            &repo,
+            "package.json",
+            r#"{ "name": "shop", "private": true, "workspaces": ["apps/*", "services/*"] }"#,
+        );
+        for (dir, name) in [
+            ("services/users", "users-svc"),
+            ("services/catalog", "catalog-svc"),
+        ] {
+            write(
+                &repo,
+                &format!("{dir}/package.json"),
+                &format!(
+                    r#"{{ "name": "{name}", "dependencies": {{ "@nestjs/graphql": "12.0.0", "@trpc/server": "10.0.0" }} }}"#
+                ),
+            );
             write(
                 &repo,
                 &format!("{dir}/src/user.resolver.ts"),
@@ -2237,7 +2486,11 @@ mod client_host_tests {
                 "import { createTRPCRouter, publicProcedure } from \"./trpc\";\n\nexport const itemRouter = createTRPCRouter({\n  list: publicProcedure.query(() => []),\n});\n",
             );
         }
-        write(&repo, "apps/web/package.json", r#"{ "name": "web", "dependencies": { "@apollo/client": "3.8.0", "@trpc/client": "10.0.0" } }"#);
+        write(
+            &repo,
+            "apps/web/package.json",
+            r#"{ "name": "web", "dependencies": { "@apollo/client": "3.8.0", "@trpc/client": "10.0.0" } }"#,
+        );
         write(
             &repo,
             "apps/web/src/apollo.ts",
@@ -2256,11 +2509,17 @@ mod client_host_tests {
         let built = generate_one(repo.to_str().unwrap()).unwrap();
         assert_eq!(
             pairs(&built.merged, edge_category::GRAPHQL_CALLS),
-            vec![("graphql_op:getUser @apps/web".to_string(), "graphql_resolver:getUser @services/users".to_string())]
+            vec![(
+                "graphql_op:getUser @apps/web".to_string(),
+                "graphql_resolver:getUser @services/users".to_string()
+            )]
         );
         assert_eq!(
             pairs(&built.merged, edge_category::RPC_CALLS),
-            vec![("rpc_call:item.list @apps/web".to_string(), "rpc:item.list @services/catalog".to_string())]
+            vec![(
+                "rpc_call:item.list @apps/web".to_string(),
+                "rpc:item.list @services/catalog".to_string()
+            )]
         );
     }
 }
@@ -2292,7 +2551,10 @@ mod const_fold_tests {
             std::fs::write(p, body).unwrap();
         };
         write("go.mod", "module example.com/fx\n");
-        write("subjects.go", "package fx\n\nconst SUBJECT_ORDERS = \"orders.created\"\n");
+        write(
+            "subjects.go",
+            "package fx\n\nconst SUBJECT_ORDERS = \"orders.created\"\n",
+        );
         write(
             "publish.go",
             concat!(
@@ -2373,7 +2635,9 @@ mod const_fold_tests {
             .into_iter()
             .flat_map(|lang| {
                 by_lang[*lang].iter().map(move |fp| {
-                    let bytes = CacheEntry::new(0, lang, fp.clone()).payload().expect("payload");
+                    let bytes = CacheEntry::new(0, lang, fp.clone())
+                        .payload()
+                        .expect("payload");
                     (lang.to_string(), bytes)
                 })
             })
@@ -2389,7 +2653,9 @@ mod const_fold_tests {
                 fp.nav
                     .qname_by_id
                     .iter()
-                    .filter(|&(id, _)| is_queue_node(&fp.nav, *id) || is_event_site_node(&fp.nav, *id))
+                    .filter(|&(id, _)| {
+                        is_queue_node(&fp.nav, *id) || is_event_site_node(&fp.nav, *id)
+                    })
                     .map(|(_, q)| q.clone())
             })
             .collect()
@@ -2417,7 +2683,12 @@ mod const_fold_tests {
         let (files, _regions, _md, roots) = walk_source_files(root);
         let go = go_modules_for(root, &roots, label);
         let (by_lang, errors) = parse_repo_files(&files, repo, &go, None, label);
-        Parsed { files, repo, by_lang, errors }
+        Parsed {
+            files,
+            repo,
+            by_lang,
+            errors,
+        }
     }
 
     /// What both folds left: their stats and pools, the parses, the errors.
@@ -2445,7 +2716,13 @@ mod const_fold_tests {
         let (queue, qp) = apply_queue_const_topics(&mut by_lang, &inputs, &mut errors);
         let (event, ep) = apply_event_const_names(&mut by_lang, &inputs, &mut errors);
         let pools = [(qp.files, qp.threads), (ep.files, ep.threads)];
-        Folded { queue, event, pools, by_lang, errors }
+        Folded {
+            queue,
+            event,
+            pools,
+            by_lang,
+            errors,
+        }
     }
 
     /// DC.3: the const folds on a pool of 8 equal the folds on a pool of 1
@@ -2484,14 +2761,21 @@ mod const_fold_tests {
                     opts: &opts,
                 };
                 let g = parse_and_graft(&files, None, &ctx);
-                (payloads(&g.parses_by_lang), g.parse_errors, site_qnames(&g.parses_by_lang))
+                (
+                    payloads(&g.parses_by_lang),
+                    g.parse_errors,
+                    site_qnames(&g.parses_by_lang),
+                )
             })
         };
         let (seq, seq_errors, seq_sites) = graft(1);
         let (pooled, pooled_errors, pooled_sites) = graft(8);
         assert_eq!(seq_errors, pooled_errors, "parse_and_graft error lines");
         assert_eq!(seq_sites, pooled_sites);
-        assert!(seq == pooled, "parse_and_graft parses differ between 1 and 8 threads");
+        assert!(
+            seq == pooled,
+            "parse_and_graft parses differ between 1 and 8 threads"
+        );
         // Every cross-file constant folded, and the same-file lower-case one.
         let want = [
             "event_emit:order.created",
@@ -2500,7 +2784,10 @@ mod const_fold_tests {
             "queue_producer:orders",
             "queue_producer:orders.created",
         ];
-        assert_eq!(seq_sites, want.map(String::from).into_iter().collect::<BTreeSet<_>>());
+        assert_eq!(
+            seq_sites,
+            want.map(String::from).into_iter().collect::<BTreeSet<_>>()
+        );
 
         // The two folds alone, over a fresh parse and the stage's own scan.
         let p = parsed(&root);
@@ -2514,10 +2801,17 @@ mod const_fold_tests {
         assert_eq!((q.files, q.folded, q.unresolved), (3, 3, 0), "{q:?}");
         let e = &one.event;
         assert_eq!((e.files, e.folded, e.unresolved), (2, 2, 0), "{e:?}");
-        assert_eq!((&one.queue, &one.event), (&eight.queue, &eight.event), "stats by threads");
+        assert_eq!(
+            (&one.queue, &one.event),
+            (&eight.queue, &eight.event),
+            "stats by threads"
+        );
         assert!(one.errors.is_empty(), "{:?}", one.errors);
         assert_eq!(one.errors, eight.errors);
-        assert!(payloads(&one.by_lang) == payloads(&eight.by_lang), "folded parses by threads");
+        assert!(
+            payloads(&one.by_lang) == payloads(&eight.by_lang),
+            "folded parses by threads"
+        );
         // (files, threads) per fold: the targets ran on the installed pool.
         assert_eq!(one.pools, [(3, 1), (2, 1)]);
         assert_eq!(eight.pools, [(3, 8), (2, 8)]);
@@ -2525,15 +2819,30 @@ mod const_fold_tests {
         // The fold reads FileConstTables: with consume.go's scan gone (as
         // when it panicked) its lower-case subject cannot resolve, and the
         // fold reports its own PANIC line instead of re-scanning the file.
-        let consume = p.files.iter().position(|(path, _)| path.ends_with("consume.go")).unwrap();
+        let consume = p
+            .files
+            .iter()
+            .position(|(path, _)| path.ends_with("consume.go"))
+            .unwrap();
         let mut gone: Vec<Option<ConstTable>> =
             (0..p.files.len()).map(|i| tables.get(i).cloned()).collect();
         gone[consume] = None;
         let gone = in_pool(8, || fold_both(&p, &consts, &FileConstTables(gone)));
         let consume_path = &p.files[consume].0;
-        assert_eq!(gone.errors, vec![format!("{consume_path}: PANIC (queue const fold)")]);
-        assert_eq!((gone.queue.files, gone.queue.folded), (2, 2), "{:?}", gone.queue);
-        assert_eq!(gone.event, one.event, "the event fold does not read consume.go");
+        assert_eq!(
+            gone.errors,
+            vec![format!("{consume_path}: PANIC (queue const fold)")]
+        );
+        assert_eq!(
+            (gone.queue.files, gone.queue.folded),
+            (2, 2),
+            "{:?}",
+            gone.queue
+        );
+        assert_eq!(
+            gone.event, one.event,
+            "the event fold does not read consume.go"
+        );
         let sites = site_qnames(&gone.by_lang);
         assert!(!sites.contains("queue_consumer:billing.paid"), "{sites:?}");
         assert!(sites.contains("queue_producer:orders.created"), "{sites:?}");
@@ -2606,7 +2915,11 @@ mod ws_base_tests {
         let go = go_modules_for(root, &roots, label);
         let (by_lang, errors) = parse_repo_files(&files, repo, &go, None, label);
         assert!(errors.is_empty(), "{errors:?}");
-        Parsed { files, repo, by_lang }
+        Parsed {
+            files,
+            repo,
+            by_lang,
+        }
     }
 
     fn client_qnames(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> BTreeSet<String> {
@@ -2630,9 +2943,11 @@ mod ws_base_tests {
         langs
             .into_iter()
             .flat_map(|lang| {
-                by_lang[*lang]
-                    .iter()
-                    .map(move |fp| CacheEntry::new(0, lang, fp.clone()).payload().expect("payload"))
+                by_lang[*lang].iter().map(move |fp| {
+                    CacheEntry::new(0, lang, fp.clone())
+                        .payload()
+                        .expect("payload")
+                })
             })
             .collect()
     }
@@ -2640,7 +2955,11 @@ mod ws_base_tests {
     fn fold(
         p: &Parsed,
         threads: usize,
-    ) -> (WsBaseStats, HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
+    ) -> (
+        WsBaseStats,
+        HashMap<&'static str, Vec<FileParse>>,
+        Vec<String>,
+    ) {
         let mut scan_errors = Vec::new();
         let (consts, tables, _, _) = build_const_table(&p.files, &mut scan_errors);
         assert!(scan_errors.is_empty(), "{scan_errors:?}");
@@ -2673,20 +2992,37 @@ mod ws_base_tests {
         let p = parsed(&root);
         assert_eq!(
             client_qnames(&p.by_lang),
-            ["ws_client:/prices", "ws_client:/ws/chat", "ws_client:/ws/x", "ws_client:ws"]
-                .map(String::from)
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            [
+                "ws_client:/prices",
+                "ws_client:/ws/chat",
+                "ws_client:/ws/x",
+                "ws_client:ws"
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
         );
         let (stats, by_lang, errors) = fold(&p, 1);
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(stats, WsBaseStats { files: 1, folded: 2, unresolved: 1 });
+        assert_eq!(
+            stats,
+            WsBaseStats {
+                files: 1,
+                folded: 2,
+                unresolved: 1
+            }
+        );
         assert_eq!(
             client_qnames(&by_lang),
-            ["ws_client:/rt/feed", "ws_client:/rt/prices", "ws_client:/ws/chat", "ws_client:/ws/x"]
-                .map(String::from)
-                .into_iter()
-                .collect::<BTreeSet<_>>()
+            [
+                "ws_client:/rt/feed",
+                "ws_client:/rt/prices",
+                "ws_client:/ws/chat",
+                "ws_client:/ws/x"
+            ]
+            .map(String::from)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
         );
         // Only live.ts changed: every other parse is byte-identical.
         let before = payloads(&p.by_lang);
@@ -2711,7 +3047,8 @@ mod quartz_conf_tests {
     /// A Scala parse of `path` with its MODULE first and the cron extractor's
     /// output merged in, as the router hands it over.
     fn scala_parse(path: &str, source: &str) -> FileParse {
-        let module = NodeId::from_parts(glia_code_domain::GRAPH_TYPE, REPO, node_kind::MODULE, path);
+        let module =
+            NodeId::from_parts(glia_code_domain::GRAPH_TYPE, REPO, node_kind::MODULE, path);
         let mut fp = FileParse::default();
         fp.nodes.push(glia_core::Node {
             id: module,
@@ -2766,20 +3103,35 @@ mod quartz_conf_tests {
                  pekko.quartz.schedules.Hourly.expression = \"0 0 * * * ?\"\n"
                     .into(),
             ),
-            ("nginx/site.conf".into(), "akka.quartz.schedules.Gone.expression = \"0 0 5 * * ?\"\n".into()),
+            (
+                "nginx/site.conf".into(),
+                "akka.quartz.schedules.Gone.expression = \"0 0 5 * * ?\"\n".into(),
+            ),
         ];
         let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         by_lang.insert(
             "scala",
-            vec![scala_parse("a/Jobs.scala", &start("Nightly")), scala_parse("b/Gone.scala", &start("Gone"))],
+            vec![
+                scala_parse("a/Jobs.scala", &start("Nightly")),
+                scala_parse("b/Gone.scala", &start("Gone")),
+            ],
         );
         by_lang.insert("java", vec![scala_parse("c/Hourly.java", &start("Hourly"))]);
         let stats = graft_quartz_conf_schedules(&mut by_lang, &files, REPO);
         assert_eq!(
             stats,
-            QuartzConfStats { confs: 2, schedules: 2, rekeyed: 2, unresolved: 1, conflicts: 1 }
+            QuartzConfStats {
+                confs: 2,
+                schedules: 2,
+                rekeyed: 2,
+                unresolved: 1,
+                conflicts: 1
+            }
         );
-        assert_eq!(cron_qnames(&by_lang), ["cron:0 0 * * * ?:Hourly", "cron:0 0 3 * * ?:Nightly"]);
+        assert_eq!(
+            cron_qnames(&by_lang),
+            ["cron:0 0 * * * ?:Hourly", "cron:0 0 3 * * ?:Nightly"]
+        );
         // The graft is idempotent over its own output.
         let again = graft_quartz_conf_schedules(&mut by_lang, &files, REPO);
         assert_eq!((again.rekeyed, again.unresolved), (0, 0));
@@ -2787,6 +3139,9 @@ mod quartz_conf_tests {
         // No conf and no REF: no marker input at all.
         let mut none: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
         none.insert("scala", vec![scala_parse("x.scala", "object X\n")]);
-        assert_eq!(graft_quartz_conf_schedules(&mut none, &[], REPO), QuartzConfStats::default());
+        assert_eq!(
+            graft_quartz_conf_schedules(&mut none, &[], REPO),
+            QuartzConfStats::default()
+        );
     }
 }

@@ -47,7 +47,9 @@ fn find(m: &MergedGraph, q: &str) -> Vec<FoundNode> {
 }
 
 fn degree(m: &MergedGraph, id: u64) -> usize {
-    m.all_edges().filter(|e| e.from.0 == id || e.to.0 == id).count()
+    m.all_edges()
+        .filter(|e| e.from.0 == id || e.to.0 == id)
+        .count()
 }
 
 const TIERS: [&str; 9] = [
@@ -63,7 +65,10 @@ const TIERS: [&str; 9] = [
 ];
 
 fn tier_rank(t: &str) -> usize {
-    TIERS.iter().position(|x| *x == t).unwrap_or_else(|| panic!("unknown tier {t}"))
+    TIERS
+        .iter()
+        .position(|x| *x == t)
+        .unwrap_or_else(|| panic!("unknown tier {t}"))
 }
 
 const CONTAINERS: [&str; 5] = ["MODULE", "PACKAGE", "PROJECT", "REGION", "DOC_SPACE"];
@@ -84,15 +89,30 @@ fn assert_follows_the_key(m: &MergedGraph, rows: &[FoundNode]) {
             let decl = |r: &FoundNode| !CONTAINERS.contains(&r.kind);
             (!decl(a), usize::MAX - da, 0, String::new(), a.id)
         } else {
-            (false, usize::MAX - da, a.qname.chars().count(), a.qname.clone(), a.id)
+            (
+                false,
+                usize::MAX - da,
+                a.qname.chars().count(),
+                a.qname.clone(),
+                a.id,
+            )
         };
         let kb = if tb <= 1 {
             let decl = |r: &FoundNode| !CONTAINERS.contains(&r.kind);
             (!decl(b), usize::MAX - db, 0, String::new(), b.id)
         } else {
-            (false, usize::MAX - db, b.qname.chars().count(), b.qname.clone(), b.id)
+            (
+                false,
+                usize::MAX - db,
+                b.qname.chars().count(),
+                b.qname.clone(),
+                b.id,
+            )
         };
-        assert!(ka < kb, "key order broken: {a:?} (deg {da}) before {b:?} (deg {db})");
+        assert!(
+            ka < kb,
+            "key order broken: {a:?} (deg {da}) before {b:?} (deg {db})"
+        );
     }
 }
 
@@ -133,8 +153,11 @@ fn user_ranks_prefix_then_word_then_module_path() {
     }
     assert_eq!(rows[4].qname, "users::get_user");
     assert_eq!(rows[4].r#match, "name_word");
-    let word: Vec<&str> =
-        rows.iter().filter(|r| r.r#match == "name_word").map(|r| r.qname.as_str()).collect();
+    let word: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.r#match == "name_word")
+        .map(|r| r.qname.as_str())
+        .collect();
     assert_eq!(word.len(), 6, "{rows:#?}");
     let last = rows.last().unwrap();
     assert_eq!(last.qname, "users::load");
@@ -168,7 +191,10 @@ fn class_qualified_method_matches_as_qname_suffix() {
     assert_eq!(rows[0].r#match, "qname_suffix");
     // A dotted path is read as a qname too.
     let dotted = find(&m, "UserService.get_user");
-    assert_eq!(dotted[0].qname, "users::UserService::get_user", "{dotted:#?}");
+    assert_eq!(
+        dotted[0].qname, "users::UserService::get_user",
+        "{dotted:#?}"
+    );
     assert_eq!(dotted[0].r#match, "qname_suffix");
 }
 
@@ -204,11 +230,19 @@ fn a_declaration_beats_a_busier_container_as_pick_primary_does() {
     )
     .unwrap();
     std::fs::write(root.join("app.py"), "def handler():\n    return 0\n").unwrap();
-    let m = generate_one(&root.to_string_lossy()).expect("generate_one").merged;
+    let m = generate_one(&root.to_string_lossy())
+        .expect("generate_one")
+        .merged;
 
     let rows = find(&m, "handler");
-    let module = rows.iter().find(|r| r.kind == "MODULE").expect("the handler module");
-    let func = rows.iter().find(|r| r.kind == "FUNCTION").expect("the handler function");
+    let module = rows
+        .iter()
+        .find(|r| r.kind == "MODULE")
+        .expect("the handler module");
+    let func = rows
+        .iter()
+        .find(|r| r.kind == "FUNCTION")
+        .expect("the handler function");
     assert!(
         module.r#match == "exact_name" && func.r#match == "exact_name",
         "fixture must put both in exact_name: {rows:#?}"
@@ -231,7 +265,9 @@ fn exact_qname_outranks_exact_name() {
     let root = dir.path();
     std::fs::write(root.join("handler.py"), "def a():\n    return 1\n").unwrap();
     std::fs::write(root.join("app.py"), "def handler():\n    return 0\n").unwrap();
-    let m = generate_one(&root.to_string_lossy()).expect("generate_one").merged;
+    let m = generate_one(&root.to_string_lossy())
+        .expect("generate_one")
+        .merged;
     let rows = find(&m, "handler");
     assert_eq!(rows[0].r#match, "exact_qname", "{rows:#?}");
     assert_eq!(rows[0].kind, "MODULE");
@@ -263,7 +299,9 @@ fn kinds_filter_before_ranking_and_top_k_truncates_after() {
 fn scope_narrows_within_one_repo_before_top_k() {
     let dir = tempfile::tempdir().unwrap();
     write_sources(dir.path());
-    let m = generate_one(&dir.path().to_string_lossy()).expect("generate_one").merged;
+    let m = generate_one(&dir.path().to_string_lossy())
+        .expect("generate_one")
+        .merged;
     let mut o = opts(3);
     o.scope = Some("web".to_string());
     let rows = find_nodes(&m, "user", &o).results;

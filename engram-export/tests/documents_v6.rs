@@ -139,7 +139,11 @@ fn doc_links_export_as_documents_not_cooccurs() {
     to.sort_unstable();
     assert_eq!(to, [DEPOSIT, PLACE], "edges from {PLACING}: {out:?}");
     for e in &out {
-        assert_eq!((e.kind, e.weight), (EdgeKind::Documents, Some(0.3)), "{e:?}");
+        assert_eq!(
+            (e.kind, e.weight),
+            (EdgeKind::Documents, Some(0.3)),
+            "{e:?}"
+        );
     }
 
     // Nothing a doc section emits is folded into co-occurrence any more.
@@ -148,7 +152,10 @@ fn doc_links_export_as_documents_not_cooccurs() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Cooccurs && e.from.starts_with("docs::"))
         .collect();
-    assert!(folded.is_empty(), "doc edges still exported as Cooccurs: {folded:?}");
+    assert!(
+        folded.is_empty(),
+        "doc edges still exported as Cooccurs: {folded:?}"
+    );
 
     // The untagged `///` line is a notice only: no NatSpec facts, no NatSpec
     // edges, so every Documents edge here is a glia DOCUMENTS edge.
@@ -164,7 +171,10 @@ fn documents_edges_count_apart_from_natspec_edges() {
     let (gmap, stats) = export(&repo);
 
     // The README links are unchanged by the tags.
-    let mut to: Vec<&str> = edges_from(&gmap, PLACING).iter().map(|e| e.to.as_str()).collect();
+    let mut to: Vec<&str> = edges_from(&gmap, PLACING)
+        .iter()
+        .map(|e| e.to.as_str())
+        .collect();
     to.sort_unstable();
     assert_eq!(to, [DEPOSIT, PLACE]);
 
@@ -173,12 +183,20 @@ fn documents_edges_count_apart_from_natspec_edges() {
     assert_eq!(stats.natspec_facts, 3);
     assert_eq!(stats.natspec_edges, 3);
     assert_eq!(stats.documents_edges, 2);
-    assert_eq!(count(&gmap, EdgeKind::Documents), stats.documents_edges + stats.natspec_edges);
+    assert_eq!(
+        count(&gmap, EdgeKind::Documents),
+        stats.documents_edges + stats.natspec_edges
+    );
     let natspec: Vec<&GmapEdge> = gmap
         .edges
         .iter()
         .filter(|e| e.kind == EdgeKind::Documents && e.from.contains("#natspec:"))
         .collect();
     assert_eq!(natspec.len(), stats.natspec_edges);
-    assert!(natspec.iter().all(|e| e.to == DEPOSIT && e.weight == Some(1.0)), "{natspec:?}");
+    assert!(
+        natspec
+            .iter()
+            .all(|e| e.to == DEPOSIT && e.weight == Some(1.0)),
+        "{natspec:?}"
+    );
 }

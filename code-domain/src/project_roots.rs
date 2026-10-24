@@ -631,7 +631,11 @@ fn sbt_tokens(text: &str) -> Vec<SbtTok> {
                 text: c[i + 1..end].iter().collect(),
                 plain,
             });
-            i = if c.get(end) == Some(&'"') { end + 1 } else { end };
+            i = if c.get(end) == Some(&'"') {
+                end + 1
+            } else {
+                end
+            };
         } else if ch == '\'' {
             // A char literal (`'x'`, `'\n'`) is dropped, so a quote inside one
             // never opens a string; a lone `'` (a Scala 2 symbol) is a Punct.
@@ -855,7 +859,16 @@ fn sbt_project_apply(args: &[SbtTok]) -> Option<(SbtBase, Option<String>)> {
             Some((n, v)) => (n, v),
             None => {
                 position += 1;
-                (if position == 1 { "id" } else if position == 2 { "base" } else { "" }, part)
+                (
+                    if position == 1 {
+                        "id"
+                    } else if position == 2 {
+                        "base"
+                    } else {
+                        ""
+                    },
+                    part,
+                )
             }
         };
         match slot {
@@ -931,7 +944,11 @@ pub fn project_name(repo: &Path) -> Option<String> {
                 .filter(|seg| !seg.is_empty())
                 .map(str::to_string)
         })
-        .or_else(|| repo.file_name().and_then(|s| s.to_str()).map(str::to_string))
+        .or_else(|| {
+            repo.file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
 }
 
 /// `3 project roots (cargo=1 go=1 npm=1)` — the `[roots]` marker body.
@@ -1094,8 +1111,16 @@ mod tests {
     /// it, so a basename fallback is never mistaken for a manifest's own name.
     #[test]
     fn label_source_follows_the_fallback() {
-        let r = ProjectRoot::new("apps/web".into(), "npm", "package.json", Some("@shop/web".into()));
-        assert_eq!((r.label.as_str(), r.label_source), ("@shop/web", LABEL_MANIFEST));
+        let r = ProjectRoot::new(
+            "apps/web".into(),
+            "npm",
+            "package.json",
+            Some("@shop/web".into()),
+        );
+        assert_eq!(
+            (r.label.as_str(), r.label_source),
+            ("@shop/web", LABEL_MANIFEST)
+        );
         let r = ProjectRoot::new("packages/utils".into(), "npm", "package.json", None);
         assert_eq!((r.label.as_str(), r.label_source), ("utils", LABEL_DIR));
         let r = ProjectRoot::new(String::new(), "go", "go.mod", None);
@@ -1115,7 +1140,9 @@ mod tests {
         let r = ProjectRoot::new("packages/utils".into(), eco, &base, label);
         assert_eq!((r.label.as_str(), r.label_source), ("utils", LABEL_DIR));
         let distinct: std::collections::BTreeSet<_> =
-            [LABEL_MANIFEST, LABEL_DIR, LABEL_ROOT, LABEL_DECLARED].into_iter().collect();
+            [LABEL_MANIFEST, LABEL_DIR, LABEL_ROOT, LABEL_DECLARED]
+                .into_iter()
+                .collect();
         assert_eq!(distinct.len(), 4, "the four sources are distinct strings");
     }
 
@@ -1196,7 +1223,9 @@ mod tests {
             Some(("npm", "package.json".into(), Some("web".into())))
         );
         assert_eq!(
-            detect_root(&names(&["Pipfile", "pyproject.toml", "x.py"]), |_| String::new()),
+            detect_root(&names(&["Pipfile", "pyproject.toml", "x.py"]), |_| {
+                String::new()
+            }),
             Some(("python", "pyproject.toml".into(), None))
         );
         // ... unless it is not confirmed: a tool-only setup.cfg falls through.
@@ -1208,7 +1237,9 @@ mod tests {
         );
         // requirements.txt outranks Pipfile, both outrank .NET's extension rows.
         assert_eq!(
-            detect_root(&names(&["Pipfile", "requirements.txt", "x.py"]), |_| String::new()),
+            detect_root(&names(&["Pipfile", "requirements.txt", "x.py"]), |_| {
+                String::new()
+            }),
             Some(("python", "requirements.txt".into(), None))
         );
         assert_eq!(
@@ -1230,13 +1261,23 @@ mod tests {
             Some(("npm", "package.json".into()))
         );
         assert_eq!(manifest_label("requirements.txt", "flask==3.0.0\n"), None);
-        assert_eq!(manifest_label("Pipfile", "[packages]\nrequests = \"*\"\n"), None);
+        assert_eq!(
+            manifest_label("Pipfile", "[packages]\nrequests = \"*\"\n"),
+            None
+        );
         // No label, so the directory basename names it (DD.4 label_source dir).
-        let (eco, base, label) =
-            detect_root(&names(&["requirements.txt", "server.py"]), |_| String::new()).unwrap();
+        let (eco, base, label) = detect_root(&names(&["requirements.txt", "server.py"]), |_| {
+            String::new()
+        })
+        .unwrap();
         let r = ProjectRoot::new("svc/email".into(), eco, &base, label);
         assert_eq!(
-            (r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()),
+            (
+                r.label.as_str(),
+                r.label_source,
+                r.ecosystem,
+                r.manifest.as_str()
+            ),
             ("email", LABEL_DIR, "python", "svc/email/requirements.txt")
         );
         // A repo-root requirements.txt is a `root`-labelled python project.
@@ -1281,21 +1322,30 @@ mod tests {
     #[test]
     fn project_name_cargo_toml() {
         let tmp = Scratch::new("cargo");
-        tmp.write("Cargo.toml", "[package]\nname = \"my-lib\"\nversion = \"0.1\"\n");
+        tmp.write(
+            "Cargo.toml",
+            "[package]\nname = \"my-lib\"\nversion = \"0.1\"\n",
+        );
         assert_eq!(project_name(&tmp.0), Some("my-lib".to_string()));
     }
 
     #[test]
     fn project_name_cargo_skips_other_sections() {
         let tmp = Scratch::new("cargo_other");
-        tmp.write("Cargo.toml", "[workspace]\nname = \"wrong\"\n[package]\nname = \"right\"\n");
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nname = \"wrong\"\n[package]\nname = \"right\"\n",
+        );
         assert_eq!(project_name(&tmp.0), Some("right".to_string()));
     }
 
     #[test]
     fn project_name_package_json() {
         let tmp = Scratch::new("pkg");
-        tmp.write("package.json", r#"{ "version": "1.0", "name": "my-app", "deps": {} }"#);
+        tmp.write(
+            "package.json",
+            r#"{ "version": "1.0", "name": "my-app", "deps": {} }"#,
+        );
         assert_eq!(project_name(&tmp.0), Some("my-app".to_string()));
     }
 
@@ -1361,7 +1411,9 @@ mod tests {
     }
 
     fn pairs(ps: &[(&str, &str)]) -> Vec<(String, String)> {
-        ps.iter().map(|(d, i)| (d.to_string(), i.to_string())).collect()
+        ps.iter()
+            .map(|(d, i)| (d.to_string(), i.to_string()))
+            .collect()
     }
 
     /// DG.12: every declaration form sbt documents, comments and strings read
@@ -1418,7 +1470,12 @@ lazy val late = project
                 "lazy val c = Project(base = file(\"c-dir\"), id = \"cee\")\n",
                 "lazy val d = Project(idOf(\"d\"), file(\"d-dir\"))\n",
             )),
-            pairs(&[("api", "core-api"), ("svc", "svc"), ("c-dir", "cee"), ("d-dir", "d")])
+            pairs(&[
+                ("api", "core-api"),
+                ("svc", "svc"),
+                ("c-dir", "cee"),
+                ("d-dir", "d")
+            ])
         );
         // Comments: line, block, nested block; a `//` inside a string is text.
         assert_eq!(
@@ -1473,7 +1530,10 @@ lazy val late = project
         );
         assert!(sbt("").is_empty());
         assert!(sbt("name := \"single\"\nscalaVersion := \"3.3.1\"\n").is_empty());
-        assert!(sbt("lazy val broken = project.in(file(\"x\"").is_empty(), "an unclosed group");
+        assert!(
+            sbt("lazy val broken = project.in(file(\"x\"").is_empty(),
+            "an unclosed group"
+        );
     }
 
     /// DG.12: a member is an sbt root labelled by its project id (a manifest
@@ -1482,10 +1542,20 @@ lazy val late = project
     fn sbt_member_label_and_manifest() {
         let r = ProjectRoot::sbt_member("api".into(), "api", "build.sbt".into());
         assert_eq!(
-            (r.rel_path.as_str(), r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()),
+            (
+                r.rel_path.as_str(),
+                r.label.as_str(),
+                r.label_source,
+                r.ecosystem,
+                r.manifest.as_str()
+            ),
             ("api", "api", LABEL_MANIFEST, "sbt", "build.sbt")
         );
-        let r = ProjectRoot::sbt_member("scala/svc/core".into(), "core-api", "scala/build.sbt".into());
+        let r = ProjectRoot::sbt_member(
+            "scala/svc/core".into(),
+            "core-api",
+            "scala/build.sbt".into(),
+        );
         assert_eq!(
             (r.label.as_str(), r.label_source, r.manifest.as_str()),
             ("core-api", LABEL_MANIFEST, "scala/build.sbt")
@@ -1494,9 +1564,14 @@ lazy val late = project
         let r = ProjectRoot::sbt_member("svc/core".into(), "a::b", "build.sbt".into());
         assert_eq!((r.label.as_str(), r.label_source), ("core", LABEL_DIR));
         // The ecosystem is the one a build.sbt roots.
-        let (eco, base, label) =
-            detect_root(&names(&["build.sbt"]), |_| "lazy val api = project\n".into()).unwrap();
-        assert_eq!((eco, base.as_str(), label), (SBT_ECOSYSTEM, "build.sbt", None));
+        let (eco, base, label) = detect_root(&names(&["build.sbt"]), |_| {
+            "lazy val api = project\n".into()
+        })
+        .unwrap();
+        assert_eq!(
+            (eco, base.as_str(), label),
+            (SBT_ECOSYSTEM, "build.sbt", None)
+        );
         assert_eq!(marker(&[r]), "1 project roots (sbt=1)");
     }
 
@@ -1506,12 +1581,31 @@ lazy val late = project
     fn declared_roots_carry_the_overlay_as_manifest() {
         let r = ProjectRoot::declared("tools/migrator".into(), Some("migrator"));
         assert_eq!(
-            (r.rel_path.as_str(), r.label.as_str(), r.ecosystem, r.manifest.as_str()),
-            ("tools/migrator", "migrator", "declared", ".glia/overlay.toml")
+            (
+                r.rel_path.as_str(),
+                r.label.as_str(),
+                r.ecosystem,
+                r.manifest.as_str()
+            ),
+            (
+                "tools/migrator",
+                "migrator",
+                "declared",
+                ".glia/overlay.toml"
+            )
         );
-        assert_eq!(ProjectRoot::declared("tools/migrator".into(), None).label, "migrator");
-        assert_eq!(ProjectRoot::declared("svc/api".into(), Some("a::b")).label, "api");
-        assert_eq!(ProjectRoot::declared("svc/api".into(), Some("  Billing  ")).label, "Billing");
+        assert_eq!(
+            ProjectRoot::declared("tools/migrator".into(), None).label,
+            "migrator"
+        );
+        assert_eq!(
+            ProjectRoot::declared("svc/api".into(), Some("a::b")).label,
+            "api"
+        );
+        assert_eq!(
+            ProjectRoot::declared("svc/api".into(), Some("  Billing  ")).label,
+            "Billing"
+        );
         assert_eq!(marker(&[r]), "1 project roots (declared=1)");
     }
 }

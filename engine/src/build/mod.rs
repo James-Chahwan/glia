@@ -61,8 +61,8 @@ use glia_graph::{MergedGraph, RepoGraph};
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
-use crate::extract::GoModules;
 use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
+use crate::extract::GoModules;
 use crate::passes::GroupFill;
 use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{
@@ -149,7 +149,10 @@ pub struct BuildOptions {
 
 impl Default for BuildOptions {
     fn default() -> Self {
-        Self { overlay: true, overlay_text: None }
+        Self {
+            overlay: true,
+            overlay_text: None,
+        }
     }
 }
 
@@ -270,7 +273,12 @@ fn generate_one_inner(
     // External inputs (LF.1a): `.glia/overlay.toml` (or the given overlay
     // text, CE.3b) loaded once, before any graph is built.
     let overlay_text = opts.overlay_text.as_deref();
-    let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string(), overlay_text)];
+    let inputs = vec![repo_inputs(
+        repo,
+        root.clone(),
+        repo_path.to_string(),
+        overlay_text,
+    )];
     let go = go_modules_for(&root, &roots, repo_path);
     // Cached parses are only valid under the exact repo identity + go.mod
     // set they were built with — neither is visible to per-file hashes.
@@ -303,8 +311,12 @@ fn generate_one_inner(
     graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
     fills.resize_with(graphs.len(), || None);
     eprintln!("{}", times.repo_marker(repo_path));
-    let Finished { merged, total_nodes, total_edges, times } =
-        finish_build(graphs, fills, inputs, opts, 1, started);
+    let Finished {
+        merged,
+        total_nodes,
+        total_edges,
+        times,
+    } = finish_build(graphs, fills, inputs, opts, 1, started);
     parse_errors.shrink_to_fit();
     eprintln!("{}", times.marker());
     Ok(GenerateResult {
@@ -372,7 +384,13 @@ fn self_pairs(repo_paths: &[String]) -> Vec<(String, String)> {
 /// as given, its root, its walk, its identity (the identity root's,
 /// disambiguated before phase 2 mints any RepoId) and what the walk took
 /// (CA.9's `walk=`).
-type Walked<'a> = (&'a (String, String), PathBuf, WalkResult, RepoIdentity, Duration);
+type Walked<'a> = (
+    &'a (String, String),
+    PathBuf,
+    WalkResult,
+    RepoIdentity,
+    Duration,
+);
 
 fn generate_many_inner(
     pairs: &[(String, String)],
@@ -380,12 +398,29 @@ fn generate_many_inner(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let started = Instant::now();
-    let Assembled { merged, fills, parse_errors, label_inputs, repo_roots, inputs } =
-        assemble_many_with(pairs, incremental, opts)?;
+    let Assembled {
+        merged,
+        fills,
+        parse_errors,
+        label_inputs,
+        repo_roots,
+        inputs,
+    } = assemble_many_with(pairs, incremental, opts)?;
     // `merged` is the assembly's fresh merge (no cross edge, no pass undo
     // record), so the tail re-merges its graphs unchanged.
-    let Finished { merged, total_nodes, total_edges, times } =
-        finish_build(merged.graphs, fills, inputs, opts, label_inputs.len(), started);
+    let Finished {
+        merged,
+        total_nodes,
+        total_edges,
+        times,
+    } = finish_build(
+        merged.graphs,
+        fills,
+        inputs,
+        opts,
+        label_inputs.len(),
+        started,
+    );
     eprintln!("{}", times.marker());
     Ok(GenerateResult {
         merged,
@@ -422,7 +457,11 @@ pub(crate) struct Assembled {
 /// a time. Errs when no path produced a graph.
 #[cfg(test)]
 pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<Assembled, String> {
-    assemble_many_with(&self_pairs(repo_paths), incremental, &BuildOptions::default())
+    assemble_many_with(
+        &self_pairs(repo_paths),
+        incremental,
+        &BuildOptions::default(),
+    )
 }
 
 /// `assemble_many` over `(root, identity root)` pairs, built with `opts`: the
@@ -482,8 +521,11 @@ pub(crate) fn assemble_many_with(
     let mut idents: Vec<RepoIdentity> = walked.iter().flatten().map(|w| w.3.clone()).collect();
     // A shared key is disambiguated by the IDENTITY root's path, so a rev
     // built in a temp dir keeps its working tree's disambiguated key.
-    let abs_paths: Vec<String> =
-        walked.iter().flatten().map(|w| canonical_display(Path::new(&w.0.1))).collect();
+    let abs_paths: Vec<String> = walked
+        .iter()
+        .flatten()
+        .map(|w| canonical_display(Path::new(&w.0.1)))
+        .collect();
     for line in disambiguate(&mut idents, &abs_paths) {
         eprintln!("{line}");
     }
@@ -507,12 +549,18 @@ pub(crate) fn assemble_many_with(
         // or moved path keeps the key, so its sidecar is reused.
         let repo = RepoId::from_canonical(&ident.key);
         repo_id_marker(&ident, identity_root);
-        let overlay_text = if slot == 0 { opts.overlay_text.as_deref() } else { None };
+        let overlay_text = if slot == 0 {
+            opts.overlay_text.as_deref()
+        } else {
+            None
+        };
         let input = repo_inputs(repo, root.clone(), path.clone(), overlay_text);
         label_inputs.push((repo.0, identity_root.clone()));
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
-        repo_roots.entry(repo.0).or_insert_with(|| identity_root.clone());
+        repo_roots
+            .entry(repo.0)
+            .or_insert_with(|| identity_root.clone());
         let go = go_modules_for(&root, &roots, path);
         let mut cache = incremental.then(|| ParseCache::load(identity_root));
         if let Some(c) = cache.as_mut() {
@@ -639,10 +687,15 @@ pub(crate) fn finish_build(
     let report = run_code_passes_with(&mut merged, &ctx);
     let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
+    let total_edges: usize =
+        merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>() + merged.cross_edges.len();
     let times = BuildTimes::new(repos, &report, Some(external), started.elapsed());
-    Finished { merged, total_nodes, total_edges, times }
+    Finished {
+        merged,
+        total_nodes,
+        total_edges,
+        times,
+    }
 }
 
 /// Run `f` and return what it took (CA.9).
@@ -656,7 +709,11 @@ fn timed(f: impl FnOnce()) -> Duration {
 ///   `[repo-id] source=<git-remote|git-local|dir> key=<identity key> repo=<path as given>`
 /// The key never carries remote-URL userinfo (`normalise_remote_url` drops it).
 fn repo_id_marker(ident: &RepoIdentity, repo_path: &str) {
-    eprintln!("[repo-id] source={} key={} repo={repo_path}", ident.source.as_str(), ident.key);
+    eprintln!(
+        "[repo-id] source={} key={} repo={repo_path}",
+        ident.source.as_str(),
+        ident.key
+    );
 }
 
 /// The canonical absolute spelling of `root`, or `root` as given when it
@@ -683,8 +740,9 @@ fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String
         if grouped[i] {
             continue;
         }
-        let members: Vec<usize> =
-            (i..original.len()).filter(|&j| original[j] == original[i]).collect();
+        let members: Vec<usize> = (i..original.len())
+            .filter(|&j| original[j] == original[i])
+            .collect();
         for &j in &members {
             grouped[j] = true;
         }
@@ -723,11 +781,7 @@ fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String
 ///
 /// `pub(crate)` for the shared cache (CE.2a), whose keys hash this module set
 /// for a Go file exactly as the build's parse cache checks it.
-pub(crate) fn go_modules_for(
-    root: &Path,
-    roots: &[ProjectRoot],
-    repo_label: &str,
-) -> GoModules {
+pub(crate) fn go_modules_for(root: &Path, roots: &[ProjectRoot], repo_label: &str) -> GoModules {
     let entries: Vec<(String, String)> = roots
         .iter()
         .filter_map(|r| {
@@ -740,12 +794,14 @@ pub(crate) fn go_modules_for(
         let shown: Vec<String> = go
             .iter()
             .take(4)
-            .map(|(dir, module)| {
-                format!("{}={module}", if dir.is_empty() { "." } else { dir })
-            })
+            .map(|(dir, module)| format!("{}={module}", if dir.is_empty() { "." } else { dir }))
             .collect();
         let more = go.len().saturating_sub(4);
-        let more = if more > 0 { format!(" +{more} more") } else { String::new() };
+        let more = if more > 0 {
+            format!(" +{more} more")
+        } else {
+            String::new()
+        };
         eprintln!(
             "[go-modules] {} module root{} ({}{more}) repo={repo_label}",
             go.len(),
@@ -786,11 +842,16 @@ mod cache_tests {
     /// Sorted (node-ids, edges) — a deterministic fingerprint of a graph's
     /// content, independent of build order.
     fn fingerprint(g: &MergedGraph) -> (Vec<u64>, Vec<(u64, u64, u32)>) {
-        let mut nodes: Vec<u64> =
-            g.graphs.iter().flat_map(|r| r.nodes.iter().map(|n| n.id.0)).collect();
+        let mut nodes: Vec<u64> = g
+            .graphs
+            .iter()
+            .flat_map(|r| r.nodes.iter().map(|n| n.id.0))
+            .collect();
         nodes.sort_unstable();
-        let mut edges: Vec<(u64, u64, u32)> =
-            g.all_edges().map(|e| (e.from.0, e.to.0, e.category.0)).collect();
+        let mut edges: Vec<(u64, u64, u32)> = g
+            .all_edges()
+            .map(|e| (e.from.0, e.to.0, e.category.0))
+            .collect();
         edges.sort_unstable();
         (nodes, edges)
     }
@@ -872,7 +933,10 @@ mod cache_tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("a.py"), "def foo():\n    return 1\n").unwrap();
         generate_one_with_cache(other.to_str().unwrap(), &mut cache).unwrap();
-        assert_eq!(cache.stats.reused, 0, "another repo identity must not reuse");
+        assert_eq!(
+            cache.stats.reused, 0,
+            "another repo identity must not reuse"
+        );
         assert_eq!(cache.stats.reparsed, 1);
         std::fs::remove_dir_all(&other).ok();
 
@@ -904,15 +968,31 @@ mod cache_tests {
     /// unique key is left alone, and one collision line is emitted per group.
     #[test]
     fn disambiguate_suffixes_every_member_of_a_shared_key() {
-        let mut ids = vec![ident("dir:app"), ident("dir:lib"), ident("dir:app"), ident("dir:app")];
+        let mut ids = vec![
+            ident("dir:app"),
+            ident("dir:lib"),
+            ident("dir:app"),
+            ident("dir:app"),
+        ];
         let abs: Vec<String> = ["/t/a/app", "/t/lib", "/t/b/app", "/t/c/app"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let lines = disambiguate(&mut ids, &abs);
         let keys: Vec<&str> = ids.iter().map(|i| i.key.as_str()).collect();
-        assert_eq!(keys, ["dir:app@/t/a/app", "dir:lib", "dir:app@/t/b/app", "dir:app@/t/c/app"]);
-        assert_eq!(lines, ["[repo-id] 3 inputs share key dir:app; disambiguated by path"]);
+        assert_eq!(
+            keys,
+            [
+                "dir:app@/t/a/app",
+                "dir:lib",
+                "dir:app@/t/b/app",
+                "dir:app@/t/c/app"
+            ]
+        );
+        assert_eq!(
+            lines,
+            ["[repo-id] 3 inputs share key dir:app; disambiguated by path"]
+        );
 
         // Argument order changes the order of the inputs, never their keys.
         let mut rev = vec![ident("dir:app"), ident("dir:app")];
@@ -972,7 +1052,10 @@ mod cache_tests {
         write("go.mod", "module example.com/shop\n\ngo 1.22\n");
         write("api/greeter.proto", MEMO_PROTO);
         write("cmd/main.go", MEMO_GO_CLIENT);
-        write("app.py", "import os\n\nPORT = \"8080\"\n\n\ndef handler():\n    return os.getenv(\"PORT\")\n");
+        write(
+            "app.py",
+            "import os\n\nPORT = \"8080\"\n\n\ndef handler():\n    return os.getenv(\"PORT\")\n",
+        );
         write(
             "deploy/web.yaml",
             "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      containers:\n        - name: web\n          image: web:1\n          env:\n            - name: PORT\n              value: \"8080\"\n",
@@ -981,7 +1064,10 @@ mod cache_tests {
             "openapi.json",
             "{\"openapi\": \"3.0.0\", \"info\": {\"title\": \"t\", \"version\": \"1\"}, \"paths\": {\"/users\": {\"get\": {\"responses\": {\"200\": {\"description\": \"ok\"}}}}}}\n",
         );
-        write("Dockerfile", "FROM python:3.12\nENV PORT=8080\nCMD [\"python\", \"app.py\"]\n");
+        write(
+            "Dockerfile",
+            "FROM python:3.12\nENV PORT=8080\nCMD [\"python\", \"app.py\"]\n",
+        );
         dir
     }
 
@@ -991,7 +1077,12 @@ mod cache_tests {
         let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect();
         out.sort();
         out
@@ -1002,7 +1093,8 @@ mod cache_tests {
         let clean = generate_one(repo).unwrap();
         assert_eq!(r.parse_errors, clean.parse_errors, "{what}: parse errors");
         assert!(
-            store_bytes(&r.merged, &scratch.join("warm")) == store_bytes(&clean.merged, &scratch.join("clean")),
+            store_bytes(&r.merged, &scratch.join("warm"))
+                == store_bytes(&clean.merged, &scratch.join("clean")),
             "{what}: a memo-served build differs from a clean one"
         );
         std::fs::remove_dir_all(scratch).ok();
@@ -1061,10 +1153,21 @@ mod cache_tests {
                 noncode_miss: 1,
             }
         );
-        assert_bytes_clean(&warm, repo, &unique_tmp("memo_svc_out"), "service set changed");
+        assert_bytes_clean(
+            &warm,
+            repo,
+            &unique_tmp("memo_svc_out"),
+            "service set changed",
+        );
         // And back on the new set: all hits again.
         generate_one_with_cache(repo, &mut cache).unwrap();
-        assert_eq!((cache.memo().stats.needle_hit, cache.memo().stats.needle_miss), (1, 0));
+        assert_eq!(
+            (
+                cache.memo().stats.needle_hit,
+                cache.memo().stats.needle_miss
+            ),
+            (1, 0)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1078,22 +1181,42 @@ mod cache_tests {
         assert!(held > 0, "a build fills the memo");
         let context = |root: &Path| {
             let (_, _, _, roots) = walk_source_files(root);
-            (repo_identity(root).key, go_modules_for(root, &roots, repo).context_key())
+            (
+                repo_identity(root).key,
+                go_modules_for(root, &roots, repo).context_key(),
+            )
         };
         // The same context keeps it ...
         let (key, go) = context(&dir);
         cache.validate_context(&key, &go);
-        assert_eq!(cache.memo().len(), held, "an unchanged context keeps the memo");
+        assert_eq!(
+            cache.memo().len(),
+            held,
+            "an unchanged context keeps the memo"
+        );
         // ... a go.mod module edit discards it with the parses.
         std::fs::write(dir.join("go.mod"), "module example.com/store\n\ngo 1.22\n").unwrap();
         let (key, go) = context(&dir);
         cache.validate_context(&key, &go);
-        assert_eq!(cache.memo().len(), 0, "the memo is discarded with the context");
+        assert_eq!(
+            cache.memo().len(),
+            0,
+            "the memo is discarded with the context"
+        );
         assert!(cache.is_empty());
         let warm = generate_one_with_cache(repo, &mut cache).unwrap();
         let s = cache.memo().stats;
-        assert_eq!((s.const_hit, s.needle_hit, s.noncode_hit), (0, 0, 0), "{s:?}");
-        assert_bytes_clean(&warm, repo, &unique_tmp("memo_ctx_out"), "after a context change");
+        assert_eq!(
+            (s.const_hit, s.needle_hit, s.noncode_hit),
+            (0, 0, 0),
+            "{s:?}"
+        );
+        assert_bytes_clean(
+            &warm,
+            repo,
+            &unique_tmp("memo_ctx_out"),
+            "after a context change",
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1110,7 +1233,9 @@ mod cache_tests {
         let empty = ParseCache::load(a.to_str().unwrap());
         assert_eq!((empty.len(), empty.memo().len()), (filled.len(), 0));
         empty.save(b.to_str().unwrap()).unwrap();
-        let read = |d: &Path| std::fs::read(glia_store::default_gmap_dir(d).join("parse_cache.bin")).unwrap();
+        let read = |d: &Path| {
+            std::fs::read(glia_store::default_gmap_dir(d).join("parse_cache.bin")).unwrap()
+        };
         assert!(read(&a) == read(&b), "the memo reached parse_cache.bin");
         for d in [&dir, &a, &b] {
             std::fs::remove_dir_all(d).ok();
@@ -1125,25 +1250,51 @@ mod cache_tests {
         generate_one_with_cache(repo, &mut cache).unwrap();
         // A Go file that sorts before cmd/main.go: the client file's parse
         // moves one slot along in the go parses.
-        std::fs::write(dir.join("cmd/aaa.go"), "package main\n\nfunc helper() int {\n\treturn 1\n}\n").unwrap();
+        std::fs::write(
+            dir.join("cmd/aaa.go"),
+            "package main\n\nfunc helper() int {\n\treturn 1\n}\n",
+        )
+        .unwrap();
         let warm = generate_one_with_cache(repo, &mut cache).unwrap();
         let s = cache.memo().stats;
-        assert_eq!((s.needle_hit, s.needle_miss), (1, 0), "the client file's halves are replayed: {s:?}");
+        assert_eq!(
+            (s.needle_hit, s.needle_miss),
+            (1, 0),
+            "the client file's halves are replayed: {s:?}"
+        );
         // The replayed marker is grafted onto main.go's own parse: its MODULE
         // parents it and its `main` function USES it (A5.8), as clean.
         let rid = glia_core::RepoId::from_canonical(&repo_identity(&dir).key);
         let module = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::MODULE, "cmd::main");
         let main_fn = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::FUNCTION, "cmd::main::main");
-        let client = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::GRPC_CLIENT, "grpc_client:Greeter");
-        let parent = warm.merged.graphs.iter().find_map(|g| g.nav.parent_of.get(&client).copied());
-        assert_eq!(parent, Some(module), "the client hangs off cmd/main.go's MODULE");
+        let client = NodeId::from_parts(
+            GRAPH_TYPE,
+            rid,
+            node_kind::GRPC_CLIENT,
+            "grpc_client:Greeter",
+        );
+        let parent = warm
+            .merged
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.parent_of.get(&client).copied());
+        assert_eq!(
+            parent,
+            Some(module),
+            "the client hangs off cmd/main.go's MODULE"
+        );
         assert!(
             warm.merged
                 .all_edges()
                 .any(|e| e.from == main_fn && e.to == client && e.category == edge_category::USES),
             "the client's owner is main.go's `main`"
         );
-        assert_bytes_clean(&warm, repo, &unique_tmp("memo_slot_out"), "after a slot shift");
+        assert_bytes_clean(
+            &warm,
+            repo,
+            &unique_tmp("memo_slot_out"),
+            "after a slot shift",
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
@@ -1210,12 +1361,25 @@ mod stage_tests {
         };
         let builds = build_groups(plan.groups, slots, &group_ctx);
         let kept = builds.clone();
-        let LanguageGraphs { mut graphs, keys, fills, pooled } =
-            fold_groups(builds, &plan.recv_fields, &mut grafted.parse_errors, repo_path);
+        let LanguageGraphs {
+            mut graphs,
+            keys,
+            fills,
+            pooled,
+        } = fold_groups(
+            builds,
+            &plan.recv_fields,
+            &mut grafted.parse_errors,
+            repo_path,
+        );
         repo_markers(&graphs, &plan.di_refs, &grafted, pooled, repo_path);
         graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
-        let Finished { merged, total_nodes, total_edges, .. } =
-            finish_build(graphs, group_fills(fills), inputs, &opts, 1, started);
+        let Finished {
+            merged,
+            total_nodes,
+            total_edges,
+            ..
+        } = finish_build(graphs, group_fills(fills), inputs, &opts, 1, started);
         let result = GenerateResult {
             merged,
             total_nodes,
@@ -1224,7 +1388,12 @@ mod stage_tests {
             repo_labels: crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]),
             repo_roots: std::collections::BTreeMap::from([(repo.0, repo_path.to_string())]),
         };
-        Staged { result, builds: kept, plan_keys, graph_keys: keys }
+        Staged {
+            result,
+            builds: kept,
+            plan_keys,
+            graph_keys: keys,
+        }
     }
 
     /// A repo of every group shape the plan orders: python, go (with a
@@ -1236,12 +1405,27 @@ mod stage_tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        write("a.py", "def foo():\n    return bar()\n\ndef bar():\n    return 1\n");
+        write(
+            "a.py",
+            "def foo():\n    return bar()\n\ndef bar():\n    return 1\n",
+        );
         write("go.mod", "module example.com/fx\n");
-        write("m.go", "package m\n\nfunc F() int { return G() }\n\nfunc G() int { return 1 }\n");
-        write("c.ts", "export function tsEntry(): number {\n  return helper();\n}\nfunction helper(): number { return 3; }\n");
-        write("Cargo.toml", "[package]\nname = \"fx-crate\"\nversion = \"0.1.0\"\n");
-        write("src/lib.rs", "pub fn run() -> u32 { step() }\nfn step() -> u32 { 1 }\n");
+        write(
+            "m.go",
+            "package m\n\nfunc F() int { return G() }\n\nfunc G() int { return 1 }\n",
+        );
+        write(
+            "c.ts",
+            "export function tsEntry(): number {\n  return helper();\n}\nfunction helper(): number { return 3; }\n",
+        );
+        write(
+            "Cargo.toml",
+            "[package]\nname = \"fx-crate\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            "src/lib.rs",
+            "pub fn run() -> u32 { step() }\nfn step() -> u32 { 1 }\n",
+        );
         write("README.md", "# Fixture\n\nCall `foo` and `run`.\n");
     }
 
@@ -1251,7 +1435,12 @@ mod stage_tests {
         let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect();
         out.sort();
         out
@@ -1266,9 +1455,19 @@ mod stage_tests {
 
         let clean = generate_one(repo_s).unwrap();
         let stages = staged(repo_s, |_| None);
-        assert_eq!(stages.plan_keys, ["go", "python", "rust", "typescript"], "TS family last");
-        assert_eq!(stages.graph_keys, stages.plan_keys, "one graph per group, no failure");
-        assert_eq!(stages.builds.iter().map(LangBuild::key).collect::<Vec<_>>(), stages.plan_keys);
+        assert_eq!(
+            stages.plan_keys,
+            ["go", "python", "rust", "typescript"],
+            "TS family last"
+        );
+        assert_eq!(
+            stages.graph_keys, stages.plan_keys,
+            "one graph per group, no failure"
+        );
+        assert_eq!(
+            stages.builds.iter().map(LangBuild::key).collect::<Vec<_>>(),
+            stages.plan_keys
+        );
         assert_eq!(stages.result.parse_errors, clean.parse_errors);
         assert_eq!(
             (stages.result.total_nodes, stages.result.total_edges),
@@ -1292,11 +1491,18 @@ mod stage_tests {
         let a_bytes = shard_bytes(&a.result.merged, &tmp.path().join("a"));
         // A body edit of the python file only: every other group's inputs
         // are unchanged, so its build from A is the build B would make.
-        std::fs::write(repo.join("a.py"), "def foo():\n    return bar() + 1\n\ndef bar():\n    return 2\n")
-            .unwrap();
+        std::fs::write(
+            repo.join("a.py"),
+            "def foo():\n    return bar() + 1\n\ndef bar():\n    return 2\n",
+        )
+        .unwrap();
         let offered: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
         let b = staged(repo_s, |key| {
-            let build = a.builds.iter().find(|b| b.key() == key && key != "python").cloned();
+            let build = a
+                .builds
+                .iter()
+                .find(|b| b.key() == key && key != "python")
+                .cloned();
             if build.is_some() {
                 offered.borrow_mut().push(key);
             }
@@ -1305,8 +1511,12 @@ mod stage_tests {
         let clean = generate_one(repo_s).unwrap();
 
         let reused = offered.into_inner();
-        let expected: Vec<&'static str> =
-            b.plan_keys.iter().copied().filter(|k| *k != "python").collect();
+        let expected: Vec<&'static str> = b
+            .plan_keys
+            .iter()
+            .copied()
+            .filter(|k| *k != "python")
+            .collect();
         assert_eq!(reused, expected, "every group but python reused");
         assert_eq!(b.graph_keys, b.plan_keys);
         assert_eq!(b.result.parse_errors, clean.parse_errors);
@@ -1331,10 +1541,16 @@ mod stage_tests {
         let a = staged(repo_s, |_| None);
         let go = a.builds.iter().find(|b| b.key() == "go").cloned().unwrap();
         let b = staged(repo_s, |key| (key == "python").then(|| go.clone()));
-        assert_eq!(b.builds.iter().map(LangBuild::key).collect::<Vec<_>>(), b.plan_keys);
+        assert_eq!(
+            b.builds.iter().map(LangBuild::key).collect::<Vec<_>>(),
+            b.plan_keys
+        );
         assert_eq!(
             shard_bytes(&b.result.merged, &tmp.path().join("b")),
-            shard_bytes(&generate_one(repo_s).unwrap().merged, &tmp.path().join("clean")),
+            shard_bytes(
+                &generate_one(repo_s).unwrap().merged,
+                &tmp.path().join("clean")
+            ),
         );
     }
 
@@ -1372,8 +1588,15 @@ mod stage_tests {
         let (split_m, split) = run(&CodeBuildCtx::empty().with_group_fills(fills));
         let (global_m, global) = run(&CodeBuildCtx::empty());
 
-        assert_eq!(split.stats, global.stats, "the `[evidence]` line is unchanged");
-        assert!(split.stats.edges > 0 && split.stats.missing == 0, "{:?}", split.stats);
+        assert_eq!(
+            split.stats, global.stats,
+            "the `[evidence]` line is unchanged"
+        );
+        assert!(
+            split.stats.edges > 0 && split.stats.missing == 0,
+            "{:?}",
+            split.stats
+        );
         assert_eq!(split_m.graphs.len(), global_m.graphs.len());
         for (a, b) in split_m.graphs.iter().zip(&global_m.graphs) {
             assert_eq!(a.nodes, b.nodes);
@@ -1392,13 +1615,27 @@ mod stage_tests {
             (s.graphs, s.fallback_graphs, s.cross),
             (global_m.graphs.len(), aux, global_m.cross_edges.len())
         );
-        assert!(s.group_filled > 0, "the cached group results were applied: {s:?}");
+        assert!(
+            s.group_filled > 0,
+            "the cached group results were applied: {s:?}"
+        );
         // A single-repo build appends its region / project / docs graphs
         // after its language graphs.
-        let aux_edges: usize = global_m.graphs[languages..].iter().map(|g| g.edges.len()).sum();
-        assert_eq!(s.group_filled + s.refilled + aux_edges, intra, "every intra edge is counted once: {s:?}");
+        let aux_edges: usize = global_m.graphs[languages..]
+            .iter()
+            .map(|g| g.edges.len())
+            .sum();
         assert_eq!(
-            (global.split.group_filled, global.split.refilled, global.split.fallback_graphs),
+            s.group_filled + s.refilled + aux_edges,
+            intra,
+            "every intra edge is counted once: {s:?}"
+        );
+        assert_eq!(
+            (
+                global.split.group_filled,
+                global.split.refilled,
+                global.split.fallback_graphs
+            ),
             (0, 0, global_m.graphs.len()),
             "no fills: every graph is filled at Finalize"
         );

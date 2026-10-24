@@ -53,10 +53,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -146,8 +159,13 @@ fn visit_block(
                 confidence: Confidence::Strong,
                 cells: Vec::new(),
             });
-            acc.nav
-                .record(id, &name, &qname, node_kind::INFRA_RESOURCE, Some(parent_id));
+            acc.nav.record(
+                id,
+                &name,
+                &qname,
+                node_kind::INFRA_RESOURCE,
+                Some(parent_id),
+            );
             emit_resource_edges(node, src, id, &name, acc);
         }
         "module" if labels.len() >= 2 => {
@@ -288,7 +306,9 @@ fn find_attribute(node: TsNode, src: &[u8], attr_name: &str) -> Option<String> {
 /// The value expression of the block's top-level attribute `attr_name`.
 fn attribute_value<'t>(node: TsNode<'t>, src: &[u8], attr_name: &str) -> Option<TsNode<'t>> {
     let mut cursor = node.walk();
-    let body = node.named_children(&mut cursor).find(|c| c.kind() == "body")?;
+    let body = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "body")?;
     let mut c2 = body.walk();
     let attr = body.named_children(&mut c2).find(|a| {
         a.kind() == "attribute" && a.named_child(0).map(|k| text_of(k, src)) == Some(attr_name)
@@ -352,7 +372,8 @@ fn pubsub_cell(node: TsNode, src: &[u8], ty: &str) -> Option<Cell> {
 /// never need escaping (the graph crate reads them with a tight scan).
 fn is_pubsub_id(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~+%".contains(&b))
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.~+%".contains(&b))
 }
 
 /// `expr` as a plain string literal holding a Pub/Sub id; `None` for an
@@ -365,7 +386,9 @@ fn string_literal(expr: TsNode, src: &[u8]) -> Option<String> {
         .named_children(&mut cursor)
         .filter(|c| !matches!(c.kind(), "quoted_template_start" | "quoted_template_end"))
         .collect();
-    let [part] = parts.as_slice() else { return None };
+    let [part] = parts.as_slice() else {
+        return None;
+    };
     let text = text_of(*part, src);
     (part.kind() == "template_literal" && is_pubsub_id(text)).then(|| text.to_string())
 }
@@ -384,13 +407,18 @@ fn literal_topic(expr: TsNode, src: &[u8]) -> Option<String> {
     };
     // Only a full topic path names a topic: `"${local.prefix}/topics/x"` or
     // `"a/topics/b"` is some other string.
-    if !text_of(string, src).trim_start_matches('"').starts_with("projects/") {
+    if !text_of(string, src)
+        .trim_start_matches('"')
+        .starts_with("projects/")
+    {
         return None;
     }
     let mut cursor = string.walk();
     let parts: Vec<TsNode> = string.named_children(&mut cursor).collect();
     // The last content part, right before the closing quote, must be literal.
-    let [.., last, end] = parts.as_slice() else { return None };
+    let [.., last, end] = parts.as_slice() else {
+        return None;
+    };
     if end.kind() != "quoted_template_end" || last.kind() != "template_literal" {
         return None;
     }
@@ -436,7 +464,8 @@ fn collect_resource_addresses(
                 if labels.len() >= 3 && labels[0] == "resource" {
                     let address = format!("{}.{}", labels[1], labels[2]);
                     let qname = resource_qname(&labels[1], &labels[2]);
-                    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
+                    let id =
+                        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
                     out.insert(address, id);
                 }
             }
@@ -600,9 +629,30 @@ output "instance_id" {
 }
 "#;
         let fp = parse_file(source, "main.tf", "main", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INFRA_RESOURCE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 0);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INFRA_RESOURCE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            0
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            2
+        );
     }
 
     /// `address` is the Terraform address, e.g. "aws_vpc.main".
@@ -633,7 +683,11 @@ resource "aws_instance" "app" {
 
         // All three resources are INFRA_RESOURCE nodes.
         assert_eq!(
-            fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INFRA_RESOURCE).count(),
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INFRA_RESOURCE)
+                .count(),
             3
         );
 
@@ -647,11 +701,17 @@ resource "aws_instance" "app" {
             })
         };
         assert!(has_ref(subnet, vpc), "aws_subnet -> aws_vpc via vpc_id");
-        assert!(has_ref(instance, subnet), "aws_instance -> aws_subnet via subnet_id");
+        assert!(
+            has_ref(instance, subnet),
+            "aws_instance -> aws_subnet via subnet_id"
+        );
 
         // No spurious references (e.g. from string literals or self).
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::INFRA_REFERENCES).count(),
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::INFRA_REFERENCES)
+                .count(),
             2
         );
     }
@@ -690,7 +750,10 @@ resource "aws_instance" "worker" {
         assert!(has_dep(role), "worker depends_on aws_iam_role.app");
         assert!(has_dep(bucket), "worker depends_on aws_s3_bucket.data");
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::DEPENDS_ON).count(),
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::DEPENDS_ON)
+                .count(),
             2
         );
     }
@@ -726,7 +789,10 @@ resource "aws_s3_bucket" "data" {
         );
         // NAME is unchanged: the Terraform address a reader recognises.
         let names: Vec<&String> = fp.nav.name_by_id.values().collect();
-        assert!(names.iter().any(|n| *n == "aws_ecs_service.api"), "{names:?}");
+        assert!(
+            names.iter().any(|n| *n == "aws_ecs_service.api"),
+            "{names:?}"
+        );
     }
 
     #[test]
@@ -737,7 +803,14 @@ module "vpc" {
 }
 "#;
         let fp = parse_file(source, "main.tf", "main", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::PACKAGE)
+                .count(),
+            1
+        );
         assert_eq!(fp.imports.len(), 1);
     }
 
@@ -746,7 +819,9 @@ module "vpc" {
     fn pubsub_cells(fp: &FileParse) -> Vec<(String, Option<String>)> {
         let mut out = Vec::new();
         for n in &fp.nodes {
-            let Some(name) = fp.nav.name_by_id.get(&n.id) else { continue };
+            let Some(name) = fp.nav.name_by_id.get(&n.id) else {
+                continue;
+            };
             if !name.starts_with("google_pubsub_") {
                 continue;
             }
@@ -817,17 +892,37 @@ resource "google_pubsub_subscription" "other_attr" {
 "#;
         let fp = parse_file(source, "infra/pubsub.tf", "infra::pubsub", repo()).unwrap();
         let sub = |name: &str, field: &str, value: &str| {
-            Some(format!(r#"{{"pubsub":"subscription","name":"{name}","{field}":"{value}"}}"#))
+            Some(format!(
+                r#"{{"pubsub":"subscription","name":"{name}","{field}":"{value}"}}"#
+            ))
         };
         let got = pubsub_cells(&fp);
         let want: Vec<(String, Option<String>)> = vec![
-            ("google_pubsub_topic.orders".into(), Some(r#"{"pubsub":"topic","name":"orders"}"#.into())),
+            (
+                "google_pubsub_topic.orders".into(),
+                Some(r#"{"pubsub":"topic","name":"orders"}"#.into()),
+            ),
             ("google_pubsub_topic.dynamic".into(), None),
-            ("google_pubsub_subscription.by_name".into(), sub("orders-worker", "topic_ref", "google_pubsub_topic.orders")),
-            ("google_pubsub_subscription.by_id".into(), sub("orders-audit", "topic_ref", "google_pubsub_topic.orders")),
-            ("google_pubsub_subscription.literal".into(), sub("orders-mail", "topic", "orders")),
-            ("google_pubsub_subscription.full_path".into(), sub("orders-bi", "topic", "orders")),
-            ("google_pubsub_subscription.templated_project".into(), sub("orders-ops", "topic", "orders")),
+            (
+                "google_pubsub_subscription.by_name".into(),
+                sub("orders-worker", "topic_ref", "google_pubsub_topic.orders"),
+            ),
+            (
+                "google_pubsub_subscription.by_id".into(),
+                sub("orders-audit", "topic_ref", "google_pubsub_topic.orders"),
+            ),
+            (
+                "google_pubsub_subscription.literal".into(),
+                sub("orders-mail", "topic", "orders"),
+            ),
+            (
+                "google_pubsub_subscription.full_path".into(),
+                sub("orders-bi", "topic", "orders"),
+            ),
+            (
+                "google_pubsub_subscription.templated_project".into(),
+                sub("orders-ops", "topic", "orders"),
+            ),
             ("google_pubsub_subscription.interpolated_name".into(), None),
             ("google_pubsub_subscription.var_topic".into(), None),
             ("google_pubsub_subscription.templated_topic".into(), None),
@@ -840,15 +935,33 @@ resource "google_pubsub_subscription" "other_attr" {
         let topic = fp
             .nodes
             .iter()
-            .find(|n| fp.nav.name_by_id.get(&n.id).map(String::as_str) == Some("google_pubsub_topic.orders"))
+            .find(|n| {
+                fp.nav.name_by_id.get(&n.id).map(String::as_str)
+                    == Some("google_pubsub_topic.orders")
+            })
             .unwrap();
         let kinds: Vec<_> = topic.cells.iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, [cell_type::CODE, cell_type::POSITION, cell_type::CODE]);
-        assert!(matches!(&topic.cells[0].payload, CellPayload::Text(t) if t.starts_with("resource \"google_pubsub_topic\"")));
+        assert_eq!(
+            kinds,
+            [cell_type::CODE, cell_type::POSITION, cell_type::CODE]
+        );
+        assert!(
+            matches!(&topic.cells[0].payload, CellPayload::Text(t) if t.starts_with("resource \"google_pubsub_topic\""))
+        );
 
         // A non-Pub/Sub resource gains nothing.
-        let other = parse_file("resource \"aws_sqs_queue\" \"q\" {\n  name = \"orders\"\n}\n", "q.tf", "q", repo()).unwrap();
-        assert!(other.nodes.iter().all(|n| n.cells.iter().all(|c| !matches!(c.payload, CellPayload::Json(_)))));
+        let other = parse_file(
+            "resource \"aws_sqs_queue\" \"q\" {\n  name = \"orders\"\n}\n",
+            "q.tf",
+            "q",
+            repo(),
+        )
+        .unwrap();
+        assert!(other.nodes.iter().all(|n| {
+            n.cells
+                .iter()
+                .all(|c| !matches!(c.payload, CellPayload::Json(_)))
+        }));
     }
 
     #[test]
@@ -859,6 +972,13 @@ data "aws_ami" "ubuntu" {
 }
 "#;
         let fp = parse_file(source, "data.tf", "data", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            1
+        );
     }
 }

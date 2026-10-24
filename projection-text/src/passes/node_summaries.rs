@@ -196,8 +196,11 @@ mod tests {
         let src = format!("def big():\n{body}");
         let g = graph_for(&src);
         let mut ctx = PassContext::new(g, "issue".into());
-        ctx.put("seeds", &serde_json::json!({"activated": [["m::big", 0.9_f64]]}))
-            .unwrap();
+        ctx.put(
+            "seeds",
+            &serde_json::json!({"activated": [["m::big", 0.9_f64]]}),
+        )
+        .unwrap();
 
         NodeSummariesPass::new(200).run(&mut ctx).unwrap();
         let entries: Vec<SummaryEntry> = ctx.get("summaries").unwrap();
@@ -235,8 +238,11 @@ mod tests {
     fn pipeline_runs_node_summaries_against_pre_staged_seeds() {
         let g = graph_for("def f(): pass\n");
         let mut ctx = PassContext::new(g, "issue".into());
-        ctx.put("seeds", &serde_json::json!({"activated": [["m::f", 1.0_f64]]}))
-            .unwrap();
+        ctx.put(
+            "seeds",
+            &serde_json::json!({"activated": [["m::f", 1.0_f64]]}),
+        )
+        .unwrap();
 
         let pipeline = Pipeline::new().add(NodeSummariesPass::default());
         pipeline.run_only(&mut ctx, &["node_summaries"]).unwrap();

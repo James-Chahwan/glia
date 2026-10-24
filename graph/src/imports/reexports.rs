@@ -233,18 +233,27 @@ impl Barrels {
         // The importer qnames whose imports a from-less export may name.
         let wants_imports: HashSet<String> = with_facts
             .iter()
-            .filter(|(_, facts)| facts.iter().any(|f| matches!(f, NavFact::ExportLocal { .. })))
+            .filter(|(_, facts)| {
+                facts
+                    .iter()
+                    .any(|f| matches!(f, NavFact::ExportLocal { .. }))
+            })
             .filter_map(|(m, _)| g.nav.qname_by_id.get(m).cloned())
             .collect();
         let mut imports_of: HashMap<&str, Vec<&ImportStmt>> = HashMap::new();
         for stmt in imports {
             if wants_imports.contains(&stmt.from_module) {
-                imports_of.entry(stmt.from_module.as_str()).or_default().push(stmt);
+                imports_of
+                    .entry(stmt.from_module.as_str())
+                    .or_default()
+                    .push(stmt);
             }
         }
         let mut edges: Vec<(NodeId, NodeId, u32)> = Vec::new();
         for (m, facts) in with_facts {
-            let Some(m_q) = g.nav.qname_by_id.get(&m).cloned() else { continue };
+            let Some(m_q) = g.nav.qname_by_id.get(&m).cloned() else {
+                continue;
+            };
             let mut e = ModuleExports::default();
             let mut statement_edges: BTreeSet<(u32, u64)> = BTreeSet::new();
             let mut external: BTreeSet<u32> = BTreeSet::new();
@@ -254,10 +263,14 @@ impl Barrels {
                         e.own.extend(names.iter().cloned());
                         continue;
                     }
-                    NavFact::ExportLocal { local, exported, .. } => {
+                    NavFact::ExportLocal {
+                        local, exported, ..
+                    } => {
                         e.barrel = true;
                         b.stats.local += 1;
-                        e.local.entry(exported.clone()).or_insert_with(|| local.clone());
+                        e.local
+                            .entry(exported.clone())
+                            .or_insert_with(|| local.clone());
                         continue;
                     }
                     NavFact::ReExportStar { source, line }
@@ -288,25 +301,43 @@ impl Barrels {
                 match fact {
                     NavFact::ReExportStar { .. } => e.stars.push(src),
                     NavFact::ReExportNamespace { exported, .. } => {
-                        e.indirect.entry(exported).or_insert(Indirect::Namespace(src));
+                        e.indirect
+                            .entry(exported)
+                            .or_insert(Indirect::Namespace(src));
                     }
                     NavFact::ReExportName { name, exported, .. } => {
-                        e.indirect.entry(exported).or_insert(Indirect::Name(src, name));
+                        e.indirect
+                            .entry(exported)
+                            .or_insert(Indirect::Name(src, name));
                     }
                     _ => {}
                 }
             }
             b.stats.external += external.len();
-            edges.extend(statement_edges.into_iter().map(|(line, s)| (m, NodeId(s), line)));
+            edges.extend(
+                statement_edges
+                    .into_iter()
+                    .map(|(line, s)| (m, NodeId(s), line)),
+            );
             if !e.local.is_empty() {
                 let wanted: BTreeSet<&String> = e.local.values().collect();
                 let mut bound: BTreeMap<String, Imported> = BTreeMap::new();
                 for stmt in imports_of.get(m_q.as_str()).into_iter().flatten() {
                     let (local, spec, name) = match &stmt.target {
-                        ImportTarget::Symbol { module, name, alias, .. } => {
-                            (alias.clone().unwrap_or_else(|| name.clone()), module, Some(name))
-                        }
-                        ImportTarget::Module { path, alias: Some(a) } => (a.clone(), path, None),
+                        ImportTarget::Symbol {
+                            module,
+                            name,
+                            alias,
+                            ..
+                        } => (
+                            alias.clone().unwrap_or_else(|| name.clone()),
+                            module,
+                            Some(name),
+                        ),
+                        ImportTarget::Module {
+                            path,
+                            alias: Some(a),
+                        } => (a.clone(), path, None),
                         ImportTarget::Module { alias: None, .. } => continue,
                     };
                     if !wanted.contains(&local) || bound.contains_key(&local) {
@@ -379,9 +410,10 @@ impl Barrels {
                     Res::Opaque(..) | Res::Null => {}
                 }
             }
-            let has_default = self.modules.get(&m).is_some_and(|e| {
-                e.local.contains_key(DEFAULT) || e.indirect.contains_key(DEFAULT)
-            });
+            let has_default = self
+                .modules
+                .get(&m)
+                .is_some_and(|e| e.local.contains_key(DEFAULT) || e.indirect.contains_key(DEFAULT));
             if has_default && let Res::Found(id) = r.resolve_from(m, DEFAULT) {
                 defaults.push((m, id));
             }
@@ -390,7 +422,12 @@ impl Barrels {
         self.stats.capped += r.capped;
         self.stats.entries = added.len() + side.len() + defaults.len();
         for (m, n, id) in added {
-            g.symbols.module_symbols.entry(m).or_default().entry(n.clone()).or_insert(id);
+            g.symbols
+                .module_symbols
+                .entry(m)
+                .or_default()
+                .entry(n.clone())
+                .or_insert(id);
             self.added.entry(m).or_default().insert(n, id);
         }
         for (m, n, id) in side {
@@ -427,7 +464,9 @@ impl Barrels {
         let entry = if name == DEFAULT {
             self.default_entry.contains_key(&target)
         } else {
-            self.added.get(&target).is_some_and(|t| t.contains_key(name))
+            self.added
+                .get(&target)
+                .is_some_and(|t| t.contains_key(name))
                 || self.side.get(&target).is_some_and(|t| t.contains_key(name))
         };
         self.stats.bound += usize::from(entry);
@@ -502,7 +541,10 @@ fn source_module<R: Fn(&str, &str) -> Option<String>>(
 ) -> Src {
     resolve_source(m_q, spec)
         .and_then(|q| ts_target(g, same, &q, spec_ext(spec), m, "module"))
-        .map_or_else(|| Src::External(spec.to_string()), |(id, _)| Src::Module(id))
+        .map_or_else(
+            || Src::External(spec.to_string()),
+            |(id, _)| Src::Module(id),
+        )
 }
 
 /// Every name barrel `m` may export besides its own declarations: its entry
@@ -597,8 +639,13 @@ impl Resolver<'_> {
             // A module with no export fact exports nothing.
             return (Res::Null, Some(0));
         };
-        let symbol =
-            |name: &str| g.symbols.module_symbols.get(&m).and_then(|s| s.get(name)).copied();
+        let symbol = |name: &str| {
+            g.symbols
+                .module_symbols
+                .get(&m)
+                .and_then(|s| s.get(name))
+                .copied()
+        };
         // Local exports: the module's own `export` declarations.
         if e.own.contains(n) {
             let res = if n == DEFAULT {
@@ -619,13 +666,15 @@ impl Resolver<'_> {
                     let (res, clean) = self.resolve(*s, name, path, depth + 1);
                     (default_fallback(res, name, *s), clean.map(|h| h + 1))
                 }
-                Some(Imported::Name(Src::External(spec), name)) => {
-                    (Res::Opaque(Origin::External(spec.clone()), name.clone()), Some(0))
-                }
+                Some(Imported::Name(Src::External(spec), name)) => (
+                    Res::Opaque(Origin::External(spec.clone()), name.clone()),
+                    Some(0),
+                ),
                 Some(Imported::Namespace(Src::Module(s))) => (Res::Found(*s), Some(0)),
-                Some(Imported::Namespace(Src::External(spec))) => {
-                    (Res::Opaque(Origin::External(spec.clone()), "*".to_string()), Some(0))
-                }
+                Some(Imported::Namespace(Src::External(spec))) => (
+                    Res::Opaque(Origin::External(spec.clone()), "*".to_string()),
+                    Some(0),
+                ),
                 None => (Res::Opaque(Origin::Module(m), n.to_string()), Some(0)),
             };
         }
@@ -636,11 +685,17 @@ impl Resolver<'_> {
                 return (default_fallback(res, name, *s), clean.map(|h| h + 1));
             }
             Some(Indirect::Name(Src::External(spec), name)) => {
-                return (Res::Opaque(Origin::External(spec.clone()), name.clone()), Some(0));
+                return (
+                    Res::Opaque(Origin::External(spec.clone()), name.clone()),
+                    Some(0),
+                );
             }
             Some(Indirect::Namespace(Src::Module(s))) => return (Res::Found(*s), Some(0)),
             Some(Indirect::Namespace(Src::External(spec))) => {
-                return (Res::Opaque(Origin::External(spec.clone()), "*".to_string()), Some(0));
+                return (
+                    Res::Opaque(Origin::External(spec.clone()), "*".to_string()),
+                    Some(0),
+                );
             }
             None => {}
         }

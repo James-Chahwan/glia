@@ -177,7 +177,10 @@ fn read_prior(since: &Path) -> Result<Prior, i32> {
     let (prior, digest) = match read_gmap(since) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[engram-export] v6 since: refused - {}: {e}", since.display());
+            eprintln!(
+                "[engram-export] v6 since: refused - {}: {e}",
+                since.display()
+            );
             return Err(6);
         }
     };
@@ -196,7 +199,12 @@ fn read_prior(since: &Path) -> Result<Prior, i32> {
             None
         }
     };
-    Ok(Prior { tokens: prior_tokens(&prior), gmap: prior, digest, graph })
+    Ok(Prior {
+        tokens: prior_tokens(&prior),
+        gmap: prior,
+        digest,
+        graph,
+    })
 }
 
 /// The parse cache's file counts for one build (LA.12 `ParseCache::last_diff`).
@@ -273,8 +281,10 @@ fn run(args: &Args) -> i32 {
             // Under a prior identity: a token that is not the path and came
             // from the prior (a fresh `<path>#N` never did).
             let from_prior: BTreeSet<&String> = p.tokens.values().collect();
-            let carried =
-                tokens.iter().filter(|(path, t)| path != t && from_prior.contains(t)).count();
+            let carried = tokens
+                .iter()
+                .filter(|(path, t)| path != t && from_prior.contains(t))
+                .count();
             (tokens, moves.files.len(), carried)
         }
         None => Default::default(),
@@ -303,7 +313,10 @@ fn run(args: &Args) -> i32 {
     if let Err(e) = std::fs::remove_file(&stale_ppr)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!("error removing the stale PPR side file {}: {e}", stale_ppr.display());
+        eprintln!(
+            "error removing the stale PPR side file {}: {e}",
+            stale_ppr.display()
+        );
         return 5;
     }
     // The hints side file names the gmap its rows describe: the same rule, so
@@ -312,7 +325,10 @@ fn run(args: &Args) -> i32 {
     if let Err(e) = std::fs::remove_file(&hints_out)
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!("error removing the stale hints side file {}: {e}", hints_out.display());
+        eprintln!(
+            "error removing the stale hints side file {}: {e}",
+            hints_out.display()
+        );
         return 5;
     }
     // Build and write the gmap. The hints side file's identities (T12: one
@@ -324,10 +340,15 @@ fn run(args: &Args) -> i32 {
             let started = Instant::now();
             (identities(&result.merged), started.elapsed().as_millis())
         };
-        let thread = std::thread::Builder::new().name("glia-export-hints".into()).spawn_scoped(scope, derive);
+        let thread = std::thread::Builder::new()
+            .name("glia-export-hints".into())
+            .spawn_scoped(scope, derive);
         let (gmap, _, stats, fact_nodes) = build_gmap_with_nodes(&result.merged, repo_root, &opts);
         let written = write_engram_gmap(&gmap, &out_path);
-        let ids = thread.ok().and_then(|t| t.join().ok()).unwrap_or_else(derive);
+        let ids = thread
+            .ok()
+            .and_then(|t| t.join().ok())
+            .unwrap_or_else(derive);
         (gmap, stats, fact_nodes, written, ids)
     });
     stats.digest = match written {
@@ -361,7 +382,10 @@ fn run(args: &Args) -> i32 {
         match write_hints_side_with(&ids, &gmap, &fact_nodes, stats.digest, &hints_out) {
             Ok(s) => Some((s, ids_ms + started.elapsed().as_millis())),
             Err(e) => {
-                eprintln!("error writing the hints side file {}: {e}", hints_out.display());
+                eprintln!(
+                    "error writing the hints side file {}: {e}",
+                    hints_out.display()
+                );
                 if code == 0 {
                     code = 9;
                 }
@@ -431,7 +455,10 @@ fn run(args: &Args) -> i32 {
     if let Some((base, ds)) = since {
         let cache = match (&cache, persist) {
             (Some(c), _) => {
-                format!("reused={} reparsed={} evicted={}", c.reused, c.reparsed, c.evicted)
+                format!(
+                    "reused={} reparsed={} evicted={}",
+                    c.reused, c.reparsed, c.evicted
+                )
             }
             (None, true) => "unrecorded".to_string(),
             (None, false) => "off".to_string(),
@@ -439,7 +466,11 @@ fn run(args: &Args) -> i32 {
         eprintln!(
             "[engram-export] v6 since: base={base:016x} target={:016x}{} added={} removed={} modified={} (moved={} location_only={}) edges +{}/-{}; parse cache {cache}\n  diff: {}",
             stats.digest,
-            if base == stats.digest { " unchanged" } else { "" },
+            if base == stats.digest {
+                " unchanged"
+            } else {
+                ""
+            },
             ds.added,
             ds.removed,
             ds.modified,
@@ -521,7 +552,11 @@ fn run(args: &Args) -> i32 {
         eprintln!(
             "  filtered: {} synthetic noise node(s){}, {} by --exclude",
             stats.dropped_noise,
-            if args.include_noise { " (kept: --include-noise)" } else { "" },
+            if args.include_noise {
+                " (kept: --include-noise)"
+            } else {
+                ""
+            },
             stats.dropped_excluded,
         );
     }

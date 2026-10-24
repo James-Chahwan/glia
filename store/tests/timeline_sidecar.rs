@@ -17,7 +17,11 @@ const SHA_1: &str = "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1";
 const SHA_2: &str = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2";
 
 fn rev(sha: &str, time: i64, subject: &str) -> TimelineRev {
-    TimelineRev { sha: sha.to_string(), time, subject: timeline_subject(subject) }
+    TimelineRev {
+        sha: sha.to_string(),
+        time,
+        subject: timeline_subject(subject),
+    }
 }
 
 /// Three revs: `f` calls `g` from rev 0 until rev 2, `f` calls `h` from rev 1
@@ -28,9 +32,18 @@ fn sample() -> TimelineStore {
         revs: vec![
             rev(SHA_0, 1_760_000_000, "first: f calls g"),
             rev(SHA_1, 1_760_000_100, "add h"),
-            rev(SHA_2, 1_760_000_200, "move a.py to b.py\n\nbody text is not stored"),
+            rev(
+                SHA_2,
+                1_760_000_200,
+                "move a.py to b.py\n\nbody text is not stored",
+            ),
         ],
-        strings: vec!["app::b::f".into(), "app/b.py".into(), "app::a::g".into(), "app::a::h".into()],
+        strings: vec![
+            "app::b::f".into(),
+            "app/b.py".into(),
+            "app::a::g".into(),
+            "app::a::h".into(),
+        ],
         nodes: vec![
             TimelineNode {
                 id: 11,
@@ -42,12 +55,42 @@ fn sample() -> TimelineStore {
                 until_rev: TIMELINE_OPEN,
                 prior: vec![(2, 10)],
             },
-            TimelineNode { id: 20, kind: 3, qname: 2, file: 0, line: 0, from_rev: 0, until_rev: 2, prior: vec![] },
-            TimelineNode { id: 30, kind: 3, qname: 3, file: 0, line: 0, from_rev: 1, until_rev: TIMELINE_OPEN, prior: vec![] },
+            TimelineNode {
+                id: 20,
+                kind: 3,
+                qname: 2,
+                file: 0,
+                line: 0,
+                from_rev: 0,
+                until_rev: 2,
+                prior: vec![],
+            },
+            TimelineNode {
+                id: 30,
+                kind: 3,
+                qname: 3,
+                file: 0,
+                line: 0,
+                from_rev: 1,
+                until_rev: TIMELINE_OPEN,
+                prior: vec![],
+            },
         ],
         edges: vec![
-            TimelineEdge { from: 11, to: 20, category: 7, from_rev: 0, until_rev: 2 },
-            TimelineEdge { from: 11, to: 30, category: 7, from_rev: 1, until_rev: TIMELINE_OPEN },
+            TimelineEdge {
+                from: 11,
+                to: 20,
+                category: 7,
+                from_rev: 0,
+                until_rev: 2,
+            },
+            TimelineEdge {
+                from: 11,
+                to: 30,
+                category: 7,
+                from_rev: 1,
+                until_rev: TIMELINE_OPEN,
+            },
         ],
     }
 }
@@ -77,7 +120,12 @@ fn round_trip() {
     assert_eq!(decode_timeline(&shifted[1..]).unwrap(), t);
 
     let m = MmapContainer::open(&path).unwrap();
-    let names: Vec<String> = m.section_names().unwrap().into_iter().map(|(n, _)| n).collect();
+    let names: Vec<String> = m
+        .section_names()
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
     assert_eq!(names, vec![TIMELINE_SECTION.to_string()]);
     let core = m.archived().unwrap();
     assert_eq!(core.header.graph_type.as_str(), "code");
@@ -86,7 +134,11 @@ fn round_trip() {
 
     let i = inspect_path(&path).unwrap();
     assert_eq!(i.shards.len(), 1);
-    let sections: Vec<&str> = i.shards[0].sections.iter().map(|(n, _)| n.as_str()).collect();
+    let sections: Vec<&str> = i.shards[0]
+        .sections
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
     assert_eq!(sections, vec!["timeline"]);
     assert_eq!(i.shards[0].graph_type, "code");
     assert_eq!(i.shards[0].format, FORMAT_VERSION);
@@ -106,7 +158,10 @@ fn accessors_decode_the_store_encodings() {
     assert_eq!(f.line(), Some(1), "line is the 0-based row + 1");
     assert_eq!((t.node_file(h), h.line()), (None, None), "0 = none");
     assert_eq!((f.until(), g.until()), (None, Some(2)));
-    assert!(g.covers(0) && g.covers(1) && !g.covers(2), "[from_rev, until_rev)");
+    assert!(
+        g.covers(0) && g.covers(1) && !g.covers(2),
+        "[from_rev, until_rev)"
+    );
     assert!(!h.covers(0) && h.covers(1) && h.covers(2) && h.covers(u32::MAX - 1));
     let (fg, fh) = (&t.edges[0], &t.edges[1]);
     assert!(fg.covers(1) && !fg.covers(2) && fg.until() == Some(2));
@@ -122,11 +177,18 @@ fn unchanged_not_rewritten() {
     let path = dir.join(TIMELINE_FILE);
     let t = sample();
     write_timeline(&dir, &t).unwrap();
-    let (ino, mtime) = (inode(&path), std::fs::metadata(&path).unwrap().modified().unwrap());
+    let (ino, mtime) = (
+        inode(&path),
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+    );
     std::thread::sleep(std::time::Duration::from_millis(20));
     write_timeline(&dir, &t).unwrap();
     assert_eq!(inode(&path), ino, "an identical write keeps the inode");
-    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime, "and the mtime");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        mtime,
+        "and the mtime"
+    );
 
     // A changed timeline is rewritten (tmp + rename: a new inode).
     let mut changed = t.clone();
@@ -149,7 +211,10 @@ fn unchanged_not_rewritten() {
 fn missing_is_none() {
     let tmp = tempfile::tempdir().unwrap();
     assert_eq!(read_timeline(tmp.path()).unwrap(), None);
-    assert_eq!(read_timeline(&tmp.path().join("no/such/layout")).unwrap(), None);
+    assert_eq!(
+        read_timeline(&tmp.path().join("no/such/layout")).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -168,18 +233,30 @@ fn old_future_and_damaged_files_need_a_rebuild() {
     };
 
     let old = with(&|b| b[8..12].copy_from_slice(&2u32.to_le_bytes()));
-    assert!(matches!(old, StoreError::OldFormat { found: Some(2) }), "{old:?}");
+    assert!(
+        matches!(old, StoreError::OldFormat { found: Some(2) }),
+        "{old:?}"
+    );
     assert!(old.needs_rebuild());
 
     let future = with(&|b| b[8..12].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes()));
-    assert!(matches!(future, StoreError::FutureFormat { .. }), "{future:?}");
+    assert!(
+        matches!(future, StoreError::FutureFormat { .. }),
+        "{future:?}"
+    );
     assert!(future.needs_rebuild());
 
     let pre_050 = with(&|b| b[..8].copy_from_slice(b"notgmap!"));
-    assert!(matches!(pre_050, StoreError::OldFormat { found: None }), "{pre_050:?}");
+    assert!(
+        matches!(pre_050, StoreError::OldFormat { found: None }),
+        "{pre_050:?}"
+    );
 
     let truncated = with(&|b| b.truncate(b.len() - 9));
-    assert!(matches!(truncated, StoreError::Corrupt { .. }), "{truncated:?}");
+    assert!(
+        matches!(truncated, StoreError::Corrupt { .. }),
+        "{truncated:?}"
+    );
     assert!(truncated.needs_rebuild());
 
     // Every byte of the section (preamble end .. core_offset) flipped: the
@@ -211,7 +288,9 @@ fn a_container_without_the_timeline_section_is_corrupt() {
     let path = tmp.path().join(TIMELINE_FILE);
     glia_store::write_container(&path, &mut core, &[]).unwrap();
     match read_timeline(tmp.path()) {
-        Err(StoreError::Corrupt { detail }) => assert!(detail.contains("no 'timeline' section"), "{detail}"),
+        Err(StoreError::Corrupt { detail }) => {
+            assert!(detail.contains("no 'timeline' section"), "{detail}")
+        }
         other => panic!("expected Corrupt, got {other:?}"),
     }
 }
@@ -227,44 +306,77 @@ fn an_invalid_store_is_refused_and_nothing_is_written() {
         ("file index", Box::new(|t| t.nodes[0].file = 5)),
         ("from_rev", Box::new(|t| t.edges[0].from_rev = 3)),
         ("until_rev", Box::new(|t| t.edges[0].until_rev = 0)),
-        ("until past the window", Box::new(|t| t.nodes[1].until_rev = 3)),
+        (
+            "until past the window",
+            Box::new(|t| t.nodes[1].until_rev = 3),
+        ),
         ("prior rev", Box::new(|t| t.nodes[0].prior = vec![(3, 1)])),
         ("sha", Box::new(|t| t.revs[0].sha = "abc123".into())),
-        ("upper-case sha", Box::new(|t| t.revs[0].sha = SHA_0.to_ascii_uppercase())),
-        ("two-line subject", Box::new(|t| t.revs[0].subject = "a\nb".into())),
-        ("long subject", Box::new(|t| t.revs[0].subject = "x".repeat(TIMELINE_SUBJECT_CAP + 1))),
-        ("secret in subject", Box::new(|t| t.revs[0].subject = "rotate api_key=abcdef123456".into())),
+        (
+            "upper-case sha",
+            Box::new(|t| t.revs[0].sha = SHA_0.to_ascii_uppercase()),
+        ),
+        (
+            "two-line subject",
+            Box::new(|t| t.revs[0].subject = "a\nb".into()),
+        ),
+        (
+            "long subject",
+            Box::new(|t| t.revs[0].subject = "x".repeat(TIMELINE_SUBJECT_CAP + 1)),
+        ),
+        (
+            "secret in subject",
+            Box::new(|t| t.revs[0].subject = "rotate api_key=abcdef123456".into()),
+        ),
     ];
     for (what, edit) in cases {
         let mut t = sample();
         edit(&mut t);
         assert!(t.check().is_err(), "{what}");
         match write_timeline(&dir, &t) {
-            Err(StoreError::Invalid(why)) => assert!(why.starts_with("timeline: "), "{what}: {why}"),
+            Err(StoreError::Invalid(why)) => {
+                assert!(why.starts_with("timeline: "), "{what}: {why}")
+            }
             other => panic!("{what}: expected Invalid, got {other:?}"),
         }
         assert!(!dir.join(TIMELINE_FILE).exists(), "{what}: nothing written");
     }
     assert_eq!(sample().check(), Ok(()));
-    assert_eq!(TimelineStore::default().check(), Ok(()), "an empty timeline is valid");
+    assert_eq!(
+        TimelineStore::default().check(),
+        Ok(()),
+        "an empty timeline is valid"
+    );
 }
 
 #[test]
 fn subjects_are_one_redacted_capped_line() {
-    assert_eq!(timeline_subject("fix: the thing\n\nlong body\nSigned-off-by: someone"), "fix: the thing");
+    assert_eq!(
+        timeline_subject("fix: the thing\n\nlong body\nSigned-off-by: someone"),
+        "fix: the thing"
+    );
     assert_eq!(timeline_subject("carriage\rreturn"), "carriage");
     assert_eq!(timeline_subject(""), "");
-    let secret = timeline_subject("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    let secret =
+        timeline_subject("deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789");
     assert!(!secret.contains("ghp_abcdefghij"), "{secret}");
     assert!(secret.starts_with("deploy with GITHUB_TOKEN="), "{secret}");
     let long = "é".repeat(TIMELINE_SUBJECT_CAP * 2);
-    assert_eq!(timeline_subject(&long).chars().count(), TIMELINE_SUBJECT_CAP, "chars, not bytes");
+    assert_eq!(
+        timeline_subject(&long).chars().count(),
+        TIMELINE_SUBJECT_CAP,
+        "chars, not bytes"
+    );
     // A cut through a redaction marker is trimmed back, never re-redacted:
     // the redacted line is `<pad> password=***`, the cap lands after its first
     // `*`, and `password=*` would be redacted again, so the `*` goes.
     let pad = "p".repeat(TIMELINE_SUBJECT_CAP - "password=".len() - 2);
     let cut = timeline_subject(&format!("{pad} password=hunter2hunter2"));
-    assert_eq!(cut, format!("{pad} password="), "trimmed back to a clean prefix");
+    assert_eq!(
+        cut,
+        format!("{pad} password="),
+        "trimmed back to a clean prefix"
+    );
     for s in [
         "fix: the thing",
         "deploy with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -275,6 +387,10 @@ fn subjects_are_one_redacted_capped_line() {
         assert_eq!(timeline_subject(&once), once, "idempotent: {s:?}");
         let mut t = sample();
         t.revs[0].subject = once;
-        assert_eq!(t.check(), Ok(()), "what timeline_subject returns is storable: {s:?}");
+        assert_eq!(
+            t.check(),
+            Ok(()),
+            "what timeline_subject returns is storable: {s:?}"
+        );
     }
 }

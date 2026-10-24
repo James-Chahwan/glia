@@ -32,9 +32,7 @@ use anyhow::Result;
 use clap::Parser;
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
-use glia_projection_text::driver_utils::{
-    build_repo_graph, extract_position_cell, read_json,
-};
+use glia_projection_text::driver_utils::{build_repo_graph, extract_position_cell, read_json};
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -229,8 +227,11 @@ fn main() -> Result<()> {
 
     let activated_set: std::collections::HashSet<&str> =
         seeds.activated.iter().map(|(q, _)| q.as_str()).collect();
-    let activated_score: HashMap<&str, f64> =
-        seeds.activated.iter().map(|(q, s)| (q.as_str(), *s)).collect();
+    let activated_score: HashMap<&str, f64> = seeds
+        .activated
+        .iter()
+        .map(|(q, s)| (q.as_str(), *s))
+        .collect();
 
     // Walk every node in the graph; if it has a POSITION cell + a kind we map,
     // bucket by file. We DON'T limit to activated only — class/method labels
@@ -260,15 +261,12 @@ fn main() -> Result<()> {
         };
         let activated = activated_set.contains(qname);
         let label = short_label(qname, klabel);
-        by_file
-            .entry(pos.file.clone())
-            .or_default()
-            .push(SymRow {
-                line: pos.start_line,
-                kind_label: klabel,
-                label: label.clone(),
-                activated,
-            });
+        by_file.entry(pos.file.clone()).or_default().push(SymRow {
+            line: pos.start_line,
+            kind_label: klabel,
+            label: label.clone(),
+            activated,
+        });
         qname_by_row.insert((pos.file.clone(), pos.start_line, label), qname.to_string());
         if let Some(score) = activated_score.get(qname) {
             *file_score.entry(pos.file.clone()).or_insert(0.0) += *score;
@@ -308,14 +306,14 @@ fn main() -> Result<()> {
     );
 
     let mut block = String::new();
-    block.push_str(
-        "## Source map (real line numbers — use these in `@@ -N,M @@` headers):\n\n",
-    );
+    block.push_str("## Source map (real line numbers — use these in `@@ -N,M @@` headers):\n\n");
 
     let v3_mode = !source_cell_qnames.is_empty();
     let mut file_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
     for (file, _score) in &files {
-        let Some(rows) = by_file.get(file) else { continue };
+        let Some(rows) = by_file.get(file) else {
+            continue;
+        };
         let methods: Vec<&SymRow> = if v3_mode {
             // V3: only methods/functions that are in source_cells (Key symbols'
             // top-5). Pure line-number annotation — no new method names beyond
@@ -354,7 +352,10 @@ fn main() -> Result<()> {
         };
         let mut chosen: Vec<&SymRow> = parent_classes;
         for r in &methods {
-            if !chosen.iter().any(|c| c.line == r.line && c.label == r.label) {
+            if !chosen
+                .iter()
+                .any(|c| c.line == r.line && c.label == r.label)
+            {
                 chosen.push(*r);
             }
         }
@@ -384,7 +385,10 @@ fn main() -> Result<()> {
                 Some((refined, _)) => refined,
                 None => r.line,
             };
-            block.push_str(&format!("- L{:<5} {} {}\n", display_line, r.kind_label, r.label));
+            block.push_str(&format!(
+                "- L{:<5} {} {}\n",
+                display_line, r.kind_label, r.label
+            ));
             if ctx == 0 || excerpt_used >= args.per_file_excerpt_bytes {
                 continue;
             }

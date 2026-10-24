@@ -137,7 +137,10 @@ fn traversal_primitives_work() {
     let reachable = g.bfs(do_login, &[edge_category::CALLS], 10);
     let inner = func_id("myapp::helpers::_inner");
     assert!(reachable.contains(&hash), "do_login reaches hash_password");
-    assert!(reachable.contains(&inner), "do_login reaches _inner via hash");
+    assert!(
+        reachable.contains(&inner),
+        "do_login reaches _inner via hash"
+    );
 
     // Parent chain on User.login climbs method → class → module.
     let login = method_id("myapp::users::User::login");

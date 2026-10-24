@@ -205,9 +205,7 @@ where
     }
     let module = enclosing_home_module(g, from);
     let plain = !receiver.contains('.');
-    if plain
-        && let Some(ty) = module.and_then(|m| scope_type(g, m, receiver))
-    {
+    if plain && let Some(ty) = module.and_then(|m| scope_type(g, m, receiver)) {
         if let Some(m) = type_method(g, ty, name) {
             return read_of(g, m);
         }
@@ -319,7 +317,9 @@ fn is_ident_char(c: char) -> bool {
 
 /// A Dart identifier: `[A-Za-z_$][A-Za-z0-9_$]*`.
 fn is_ident(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+    s.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && s.chars().all(is_ident_char)
 }
 
@@ -393,10 +393,15 @@ pub(crate) fn provider_type(g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
     if g.nav.kind_by_id.get(&provider) != Some(&node_kind::STATE_VAR) {
         return None;
     }
-    let (value, notifier) = g.nav.nav_facts.get(&provider)?.iter().find_map(|f| match f {
-        NavFact::RiverpodProvider { read, notifier } => Some((read, notifier)),
-        _ => None,
-    })?;
+    let (value, notifier) = g
+        .nav
+        .nav_facts
+        .get(&provider)?
+        .iter()
+        .find_map(|f| match f {
+            NavFact::RiverpodProvider { read, notifier } => Some((read, notifier)),
+            _ => None,
+        })?;
     let name = if read.notifier { notifier } else { value };
     if name.is_empty() {
         return None;
@@ -447,7 +452,12 @@ mod tests {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
-    fn node(fp: &mut FileParse, kind: glia_core::NodeKindId, qname: &str, parent: Option<NodeId>) -> NodeId {
+    fn node(
+        fp: &mut FileParse,
+        kind: glia_core::NodeKindId,
+        qname: &str,
+        parent: Option<NodeId>,
+    ) -> NodeId {
         let nid = id(kind, qname);
         fp.nodes.push(Node {
             id: nid,
@@ -456,7 +466,12 @@ mod tests {
             cells: Vec::new(),
         });
         if let Some(p) = parent {
-            fp.edges.push(Edge::new(p, nid, edge_category::DEFINES, Confidence::Strong));
+            fp.edges.push(Edge::new(
+                p,
+                nid,
+                edge_category::DEFINES,
+                Confidence::Strong,
+            ));
         }
         let simple = qname.rsplit("::").next().unwrap_or(qname);
         fp.nav.record(nid, simple, qname, kind, parent);
@@ -477,11 +492,31 @@ mod tests {
         let mut env = FileParse::default();
         let env_mod = node(&mut env, node_kind::MODULE, "lib::env", None);
         let env_cls = node(&mut env, node_kind::CLASS, "lib::env::Env", Some(env_mod));
-        let base_url = node(&mut env, node_kind::METHOD, "lib::env::Env::baseUrl", Some(env_cls));
-        node(&mut env, node_kind::METHOD, "lib::env::Env::fromJson", Some(env_cls));
+        let base_url = node(
+            &mut env,
+            node_kind::METHOD,
+            "lib::env::Env::baseUrl",
+            Some(env_cls),
+        );
+        node(
+            &mut env,
+            node_kind::METHOD,
+            "lib::env::Env::fromJson",
+            Some(env_cls),
+        );
         let mode = node(&mut env, node_kind::ENUM, "lib::env::Mode", Some(env_mod));
-        node(&mut env, node_kind::ATTRIBUTE, "lib::env::Mode::dark", Some(mode));
-        node(&mut env, node_kind::STATE_VAR, "lib::env::config", Some(env_mod));
+        node(
+            &mut env,
+            node_kind::ATTRIBUTE,
+            "lib::env::Mode::dark",
+            Some(mode),
+        );
+        node(
+            &mut env,
+            node_kind::STATE_VAR,
+            "lib::env::config",
+            Some(env_mod),
+        );
         env.properties.insert(base_url);
         env
     }
@@ -491,9 +526,24 @@ mod tests {
     fn page_parse() -> FileParse {
         let mut page = FileParse::default();
         let page_mod = node(&mut page, node_kind::MODULE, "lib::page", None);
-        let page_cls = node(&mut page, node_kind::CLASS, "lib::page::Page", Some(page_mod));
-        node(&mut page, node_kind::METHOD, "lib::page::Page::build", Some(page_cls));
-        node(&mut page, node_kind::METHOD, "lib::page::Page::show", Some(page_cls));
+        let page_cls = node(
+            &mut page,
+            node_kind::CLASS,
+            "lib::page::Page",
+            Some(page_mod),
+        );
+        node(
+            &mut page,
+            node_kind::METHOD,
+            "lib::page::Page::build",
+            Some(page_cls),
+        );
+        node(
+            &mut page,
+            node_kind::METHOD,
+            "lib::page::Page::show",
+            Some(page_cls),
+        );
         page.nav.record_field_type(page_cls, "env", "Env");
         for name in ["Env", "Mode", "config"] {
             page.imports.push(ImportStmt {
@@ -518,8 +568,15 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 let ev = Evidence::of(e)?;
-                (ev.emitter == EMITTER)
-                    .then(|| (e.from, e.to, e.category, ev.rule.unwrap_or_default(), ev.line))
+                (ev.emitter == EMITTER).then(|| {
+                    (
+                        e.from,
+                        e.to,
+                        e.category,
+                        ev.rule.unwrap_or_default(),
+                        ev.line,
+                    )
+                })
             })
             .collect();
         out.sort_by_key(|r| format!("{r:?}"));
@@ -555,7 +612,13 @@ mod tests {
         let (g, stats) = passes(vec![env_parse(), page]);
         let base_url = id(node_kind::METHOD, "lib::env::Env::baseUrl");
         let mut want = vec![
-            (build, base_url, edge_category::CALLS, "accessor_read".to_string(), Some(4)),
+            (
+                build,
+                base_url,
+                edge_category::CALLS,
+                "accessor_read".to_string(),
+                Some(4),
+            ),
             (
                 build,
                 id(node_kind::METHOD, "lib::env::Env::fromJson"),
@@ -570,7 +633,13 @@ mod tests {
                 "static_member".to_string(),
                 Some(6),
             ),
-            (show, base_url, edge_category::CALLS, "accessor_read".to_string(), Some(12)),
+            (
+                show,
+                base_url,
+                edge_category::CALLS,
+                "accessor_read".to_string(),
+                Some(12),
+            ),
         ];
         want.sort_by_key(|r| format!("{r:?}"));
         assert_eq!(read_edges(&g), want);
@@ -618,13 +687,31 @@ mod tests {
                 notifier,
             })
         };
-        assert_eq!(provider_read("ref.read(friendServiceProvider)"), pr(None, "friendServiceProvider", false));
-        assert_eq!(provider_read("_ref.watch(authProvider.notifier)"), pr(None, "authProvider", true));
+        assert_eq!(
+            provider_read("ref.read(friendServiceProvider)"),
+            pr(None, "friendServiceProvider", false)
+        );
+        assert_eq!(
+            provider_read("_ref.watch(authProvider.notifier)"),
+            pr(None, "authProvider", true)
+        );
         assert_eq!(provider_read("this.ref.read(p)"), pr(None, "p", false));
-        assert_eq!(provider_read("ref.read(fs.friendServiceProvider)"), pr(Some("fs"), "friendServiceProvider", false));
-        assert_eq!(provider_read("ref.watch(fam(widget.id))"), pr(None, "fam", false));
-        assert_eq!(provider_read("ref.watch(fam(a, 'x)'))"), pr(None, "fam", false));
-        assert_eq!(provider_read("ref.read(fam(id).notifier)"), pr(None, "fam", true));
+        assert_eq!(
+            provider_read("ref.read(fs.friendServiceProvider)"),
+            pr(Some("fs"), "friendServiceProvider", false)
+        );
+        assert_eq!(
+            provider_read("ref.watch(fam(widget.id))"),
+            pr(None, "fam", false)
+        );
+        assert_eq!(
+            provider_read("ref.watch(fam(a, 'x)'))"),
+            pr(None, "fam", false)
+        );
+        assert_eq!(
+            provider_read("ref.read(fam(id).notifier)"),
+            pr(None, "fam", true)
+        );
         assert_eq!(
             provider_read("ref.read(\n      authProvider.notifier,\n    )"),
             pr(None, "authProvider", true)
@@ -651,13 +738,43 @@ mod tests {
     fn services_parse() -> FileParse {
         let mut fp = FileParse::default();
         let module = node(&mut fp, node_kind::MODULE, "lib::core::services", None);
-        let friend = node(&mut fp, node_kind::CLASS, "lib::core::services::FriendService", Some(module));
-        node(&mut fp, node_kind::METHOD, "lib::core::services::FriendService::listAll", Some(friend));
-        let ready = node(&mut fp, node_kind::METHOD, "lib::core::services::FriendService::isReady", Some(friend));
+        let friend = node(
+            &mut fp,
+            node_kind::CLASS,
+            "lib::core::services::FriendService",
+            Some(module),
+        );
+        node(
+            &mut fp,
+            node_kind::METHOD,
+            "lib::core::services::FriendService::listAll",
+            Some(friend),
+        );
+        let ready = node(
+            &mut fp,
+            node_kind::METHOD,
+            "lib::core::services::FriendService::isReady",
+            Some(friend),
+        );
         fp.properties.insert(ready);
-        let group = node(&mut fp, node_kind::CLASS, "lib::core::services::GroupService", Some(module));
-        node(&mut fp, node_kind::METHOD, "lib::core::services::GroupService::listAll", Some(group));
-        let provider = node(&mut fp, node_kind::STATE_VAR, "lib::core::services::friendServiceProvider", Some(module));
+        let group = node(
+            &mut fp,
+            node_kind::CLASS,
+            "lib::core::services::GroupService",
+            Some(module),
+        );
+        node(
+            &mut fp,
+            node_kind::METHOD,
+            "lib::core::services::GroupService::listAll",
+            Some(group),
+        );
+        let provider = node(
+            &mut fp,
+            node_kind::STATE_VAR,
+            "lib::core::services::friendServiceProvider",
+            Some(module),
+        );
         fp.nav.record_fact(
             provider,
             NavFact::RiverpodProvider {
@@ -665,7 +782,12 @@ mod tests {
                 notifier: String::new(),
             },
         );
-        node(&mut fp, node_kind::STATE_VAR, "lib::core::services::plainVar", Some(module));
+        node(
+            &mut fp,
+            node_kind::STATE_VAR,
+            "lib::core::services::plainVar",
+            Some(module),
+        );
         fp
     }
 
@@ -678,9 +800,24 @@ mod tests {
     fn provider_receivers_bind_strictly() {
         let mut page = FileParse::default();
         let page_mod = node(&mut page, node_kind::MODULE, "lib::page", None);
-        let cls = node(&mut page, node_kind::CLASS, "lib::page::Page", Some(page_mod));
-        let build = node(&mut page, node_kind::METHOD, "lib::page::Page::build", Some(cls));
-        let show = node(&mut page, node_kind::METHOD, "lib::page::Page::show", Some(cls));
+        let cls = node(
+            &mut page,
+            node_kind::CLASS,
+            "lib::page::Page",
+            Some(page_mod),
+        );
+        let build = node(
+            &mut page,
+            node_kind::METHOD,
+            "lib::page::Page::build",
+            Some(cls),
+        );
+        let show = node(
+            &mut page,
+            node_kind::METHOD,
+            "lib::page::Page::show",
+            Some(cls),
+        );
         for name in ["friendServiceProvider", "plainVar"] {
             page.imports.push(ImportStmt {
                 from_module: "lib::page".into(),
@@ -709,23 +846,36 @@ mod tests {
             },
             line,
         };
-        page.calls.push(complex(build, "ref.read(friendServiceProvider)", 5));
+        page.calls
+            .push(complex(build, "ref.read(friendServiceProvider)", 5));
         page.calls.push(complex(build, "ref.read(plainVar)", 6));
-        page.calls.push(complex(build, "ref.read(friendServiceProvider.notifier)", 7));
-        page.calls.push(complex(show, "ref.read(fs.friendServiceProvider)", 9));
-        page.nav.record_local_type(build, "svc", "ref.watch(friendServiceProvider)");
+        page.calls.push(complex(
+            build,
+            "ref.read(friendServiceProvider.notifier)",
+            7,
+        ));
+        page.calls
+            .push(complex(show, "ref.read(fs.friendServiceProvider)", 9));
+        page.nav
+            .record_local_type(build, "svc", "ref.watch(friendServiceProvider)");
         page.nav.record_fact(build, read("svc", "isReady", 8));
 
         let (g, reads, _, bound) =
-            super::super::dart_passes(repo(), vec![services_parse(), page], |_, spec| Some(spec.to_string()));
-        let list_all = id(node_kind::METHOD, "lib::core::services::FriendService::listAll");
+            super::super::dart_passes(repo(), vec![services_parse(), page], |_, spec| {
+                Some(spec.to_string())
+            });
+        let list_all = id(
+            node_kind::METHOD,
+            "lib::core::services::FriendService::listAll",
+        );
         let mut provider_edges: Vec<(NodeId, NodeId, Option<u32>)> = g
             .edges
             .iter()
             .filter(|e| {
                 e.category == edge_category::CALLS
                     && Evidence::of(e).is_some_and(|ev| {
-                        ev.emitter == "graph:dart" && ev.rule.as_deref() == Some("provider_receiver")
+                        ev.emitter == "graph:dart"
+                            && ev.rule.as_deref() == Some("provider_receiver")
                     })
             })
             .map(|e| (e.from, e.to, Evidence::of(e).and_then(|ev| ev.line)))
@@ -734,24 +884,38 @@ mod tests {
         let mut want = vec![(build, list_all, Some(5)), (show, list_all, Some(9))];
         want.sort_by_key(|r| format!("{r:?}"));
         assert_eq!(provider_edges, want);
-        let group_list = id(node_kind::METHOD, "lib::core::services::GroupService::listAll");
+        let group_list = id(
+            node_kind::METHOD,
+            "lib::core::services::GroupService::listAll",
+        );
         assert!(
-            !g.edges.iter().any(|e| e.to == group_list && e.category == edge_category::CALLS),
+            !g.edges
+                .iter()
+                .any(|e| e.to == group_list && e.category == edge_category::CALLS),
             "GroupService::listAll stays unbound"
         );
         assert_eq!(
-            g.unresolved_calls.iter().filter(|c| c.from == build).count(),
+            g.unresolved_calls
+                .iter()
+                .filter(|c| c.from == build)
+                .count(),
             2,
             "the plain STATE_VAR and the empty notifier"
         );
         assert_eq!(bound, 2);
-        assert_eq!(provider_marker(bound).as_deref(), Some("[dart-scope] provider receivers bound=2"));
+        assert_eq!(
+            provider_marker(bound).as_deref(),
+            Some("[dart-scope] provider receivers bound=2")
+        );
         assert_eq!(provider_marker(0), None);
         assert_eq!(
             read_edges(&g),
             vec![(
                 build,
-                id(node_kind::METHOD, "lib::core::services::FriendService::isReady"),
+                id(
+                    node_kind::METHOD,
+                    "lib::core::services::FriendService::isReady"
+                ),
                 edge_category::CALLS,
                 "accessor_read".to_string(),
                 Some(8),

@@ -186,7 +186,9 @@ fn nap(total: Duration) -> Option<&'static str> {
 type Stat = Option<(u64, Option<SystemTime>)>;
 
 fn stat(p: &Path) -> Stat {
-    std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
+    std::fs::metadata(p)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
 }
 
 /// The process's resident set in MB (`VmRSS` of `/proc/self/status`), `?`
@@ -264,7 +266,10 @@ impl Loop {
             .map_err(|e| Fail(5, format!("watch: save the parse cache: {e}")))?;
         self.dirty = false;
         self.last_persist = Instant::now();
-        eprintln!("[watch] persisted seq={} reason={reason}", self.session.seq());
+        eprintln!(
+            "[watch] persisted seq={} reason={reason}",
+            self.session.seq()
+        );
         Ok(())
     }
 }

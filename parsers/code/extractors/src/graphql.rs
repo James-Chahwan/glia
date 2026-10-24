@@ -1,6 +1,8 @@
 use std::sync::OnceLock;
 
-use glia_code_domain::wire::{ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat};
+use glia_code_domain::wire::{
+    ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat,
+};
 use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -247,8 +249,7 @@ fn gql_context(source: &str) -> GqlContext {
             || GRAPHQL_CLIENT_MODULES
                 .iter()
                 .any(|m| quoted_module_at(b, start, m));
-        ctx.graphql_request =
-            ctx.graphql_request || quoted_module_at(b, start, "graphql-request");
+        ctx.graphql_request = ctx.graphql_request || quoted_module_at(b, start, "graphql-request");
         ctx.tanstack = ctx.tanstack
             || TANSTACK_MODULES
                 .iter()
@@ -335,7 +336,10 @@ type NeedleHit<'s> = (String, u32, Option<&'s str>);
 /// graphql_flutter) the kept call's own `gql(..)` document names it first
 /// ([`dart_document_name`]): `client.query(QueryOptions(document:
 /// gql(listOrders)))` is the operation its `listOrders` constant declares.
-fn scan_operation_needles<'s>(source: &'s str, guard: &mut LazyGuard<'_>) -> (Vec<NeedleHit<'s>>, NeedleTally) {
+fn scan_operation_needles<'s>(
+    source: &'s str,
+    guard: &mut LazyGuard<'_>,
+) -> (Vec<NeedleHit<'s>>, NeedleTally) {
     let mut hits = Vec::new();
     let mut tally = NeedleTally::default();
     let b = source.as_bytes();
@@ -366,13 +370,16 @@ fn scan_operation_needles<'s>(source: &'s str, guard: &mut LazyGuard<'_>) -> (Ve
             if !trimmed.contains(pattern) {
                 continue;
             }
-            let kept = line.match_indices(pattern).map(|(at, _)| line_start + at).find(|&hit| {
-                if !guard.admits(hit) {
-                    return false;
-                }
-                let arg = first_arg_shape(source, hit + pattern.len());
-                accept(family, arg, ctx, ident_byte_before(b, hit))
-            });
+            let kept = line
+                .match_indices(pattern)
+                .map(|(at, _)| line_start + at)
+                .find(|&hit| {
+                    if !guard.admits(hit) {
+                        return false;
+                    }
+                    let arg = first_arg_shape(source, hit + pattern.len());
+                    accept(family, arg, ctx, ident_byte_before(b, hit))
+                });
             tally.record(family, kept.is_some());
             if let Some(hit) = kept {
                 if !dart_checked {
@@ -663,7 +670,13 @@ pub fn extract_graphql_operation_nodes(
                 confidence: Confidence::Medium,
                 cells: document_cells(doc, line),
             });
-            nav.record(id, &op_name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
+            nav.record(
+                id,
+                &op_name,
+                &qname,
+                node_kind::GRAPHQL_OPERATION,
+                Some(module_id),
+            );
             anchors.push(Anchor { node: id, line });
         }
     }
@@ -676,8 +689,12 @@ pub fn extract_graphql_operation_nodes(
     {
         eprintln!("{marker}");
     }
-    let templates = templates.into_iter().map(|(name, at, doc)| (name, at, doc, Confidence::Strong));
-    let requests = requests.iter().map(|(name, at, doc)| (name.clone(), *at, Some(doc.as_str()), Confidence::Medium));
+    let templates = templates
+        .into_iter()
+        .map(|(name, at, doc)| (name, at, doc, Confidence::Strong));
+    let requests = requests
+        .iter()
+        .map(|(name, at, doc)| (name.clone(), *at, Some(doc.as_str()), Confidence::Medium));
     for (name, at, doc, confidence) in templates.chain(requests) {
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
@@ -689,12 +706,22 @@ pub fn extract_graphql_operation_nodes(
                 confidence,
                 cells: document_cells(doc, line),
             });
-            nav.record(id, &name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
+            nav.record(
+                id,
+                &name,
+                &qname,
+                node_kind::GRAPHQL_OPERATION,
+                Some(module_id),
+            );
             anchors.push(Anchor { node: id, line });
         }
     }
 
-    GraphqlNodes { nodes, nav, anchors }
+    GraphqlNodes {
+        nodes,
+        nav,
+        anchors,
+    }
 }
 
 /// DT.11a: an operation's cells: its document as one CODE text cell, or none
@@ -706,7 +733,10 @@ fn document_cells(doc: Option<&str>, line: u32) -> Vec<Cell> {
     let Some(d) = doc else {
         return Vec::new();
     };
-    let mut cells = vec![Cell { kind: cell_type::CODE, payload: CellPayload::Text(d.to_string()) }];
+    let mut cells = vec![Cell {
+        kind: cell_type::CODE,
+        payload: CellPayload::Text(d.to_string()),
+    }];
     cells.extend(selection_cell(d, line.saturating_add(1)));
     cells
 }
@@ -732,7 +762,10 @@ pub fn extract_graphql_resolver_nodes(
     let (mut names, census) = decorator_scan(source, lang);
     let embedded = embedded_sdl(source);
     if graphql_debug() {
-        for marker in [census.marker(lang), embedded.marker()].into_iter().flatten() {
+        for marker in [census.marker(lang), embedded.marker()]
+            .into_iter()
+            .flatten()
+        {
             eprintln!("{marker}");
         }
     }
@@ -796,7 +829,10 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
                 | DecoratorFamily::Ruby
                 | DecoratorFamily::Elixir,
             ) => root_sites.len(),
-            _ => DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
+            _ => DECORATOR_NEEDLES
+                .iter()
+                .map(|n| source.matches(n).count())
+                .sum(),
         },
         ..DecoratorCensus::default()
     };
@@ -817,33 +853,51 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
         }
         DecoratorFamily::Py => {
             census.rej_position = misplaced_needles(&lines);
-            (py_root_classes(&lines, lib), py_field_resolvers(&lines, lib))
+            (
+                py_root_classes(&lines, lib),
+                py_field_resolvers(&lines, lib),
+            )
         }
         DecoratorFamily::CSharp => {
             let mask = cs_code_mask(source);
-            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites
+                .iter()
+                .filter(|&&at| mask.get(at) == Some(&b' '))
+                .count();
             hc_roots_and_fields(source, &mask)
         }
         DecoratorFamily::Rust => {
             let mut guard = LazyGuard::new(RS_GUARD_PATH, source);
             let mask = code_mask(source, |at| guard.admits(at));
-            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites
+                .iter()
+                .filter(|&&at| mask.get(at) == Some(&b' '))
+                .count();
             async_graphql_roots_and_fields(source, &mask)
         }
         DecoratorFamily::Scala => {
             let map = CodeMap::new(source);
             let mask = code_mask(source, |at| map.is_code(at));
-            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites
+                .iter()
+                .filter(|&&at| mask.get(at) == Some(&b' '))
+                .count();
             caliban_roots_and_fields(source, &mask, &root_sites)
         }
         DecoratorFamily::Ruby => {
             let mask = ruby_mask(source);
-            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites
+                .iter()
+                .filter(|&&at| mask.get(at) == Some(&b' '))
+                .count();
             graphql_ruby_roots_and_fields(source, &mask)
         }
         DecoratorFamily::Elixir => {
             let mask = elixir_code_mask(source);
-            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites
+                .iter()
+                .filter(|&&at| mask.get(at) == Some(&b' '))
+                .count();
             absinthe_roots_and_fields(source, &mask, &root_sites)
         }
     };
@@ -916,11 +970,13 @@ fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
         DecoratorFamily::Rust => rs_imports_async_graphql(source).then_some(GqlLib::AsyncGraphql),
         DecoratorFamily::Scala => scala_imports_caliban(source).then_some(GqlLib::Caliban),
         // A file that never spells the markers is never lexed.
-        DecoratorFamily::Ruby => ((source.contains("GraphQL::Schema") || source.contains("BaseObject"))
+        DecoratorFamily::Ruby => ((source.contains("GraphQL::Schema")
+            || source.contains("BaseObject"))
             && ruby_imports_graphql(source, &ruby_mask(source)))
         .then_some(GqlLib::GraphqlRuby),
-        DecoratorFamily::Elixir => (source.contains("Absinthe.Schema") && absinthe_schema(&elixir_code_mask(source)))
-            .then_some(GqlLib::Absinthe),
+        DecoratorFamily::Elixir => (source.contains("Absinthe.Schema")
+            && absinthe_schema(&elixir_code_mask(source)))
+        .then_some(GqlLib::Absinthe),
     }
 }
 
@@ -1026,15 +1082,10 @@ fn py_root_class_sites(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, usize)
                 if !(after.is_empty() || after.starts_with(['(', ' ', '\t', '#'])) {
                     continue;
                 }
-                let class_line = lines
-                    .iter()
-                    .enumerate()
-                    .skip(i + 1)
-                    .take(4)
-                    .find(|(_, l)| {
-                        let t = l.trim();
-                        !t.is_empty() && !t.starts_with('@')
-                    });
+                let class_line = lines.iter().enumerate().skip(i + 1).take(4).find(|(_, l)| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with('@')
+                });
                 if let Some((j, l)) = class_line
                     && let Some((root, _)) = class_root(l.trim())
                 {
@@ -1180,12 +1231,7 @@ fn py_field_resolvers(lines: &[&str], lib: GqlLib) -> Vec<(String, u32)> {
 
 /// CB.14: strawberry field methods and attributes among a root class's
 /// first-level `members`.
-fn strawberry_fields(
-    lines: &[&str],
-    members: &[usize],
-    camel: bool,
-    out: &mut Vec<(String, u32)>,
-) {
+fn strawberry_fields(lines: &[&str], members: &[usize], camel: bool, out: &mut Vec<(String, u32)>) {
     for (m, &i) in members.iter().enumerate() {
         let Some(t) = lines.get(i).map(|l| l.trim()) else {
             continue;
@@ -1223,8 +1269,12 @@ fn strawberry_fields(
 /// one as a whole dotted name (`strawberry.field_x` is not one).
 fn strawberry_call(s: &str) -> Option<&str> {
     STRAWBERRY_FIELD_CALLS.iter().find_map(|call| {
-        s.strip_prefix(call)
-            .filter(|rest| !rest.bytes().next().is_some_and(|c| is_ident_byte(c) || c == b'.'))
+        s.strip_prefix(call).filter(|rest| {
+            !rest
+                .bytes()
+                .next()
+                .is_some_and(|c| is_ident_byte(c) || c == b'.')
+        })
     })
 }
 
@@ -1322,7 +1372,8 @@ fn py_class_members(lines: &[&str], class_line: usize) -> Vec<usize> {
         if let Some(quote) = in_triple {
             if let Some(at) = l.find(quote) {
                 in_triple = None;
-                depth = (depth + py_bracket_delta(l.get(at + quote.len()..).unwrap_or_default())).max(0);
+                depth = (depth + py_bracket_delta(l.get(at + quote.len()..).unwrap_or_default()))
+                    .max(0);
             }
             continue;
         }
@@ -1406,7 +1457,10 @@ fn py_def_name(t: &str) -> Option<String> {
         return None;
     }
     let (name, after) = py_ident(rest.trim_start())?;
-    after.trim_start().starts_with('(').then(|| name.to_string())
+    after
+        .trim_start()
+        .starts_with('(')
+        .then(|| name.to_string())
 }
 
 /// The Python identifier `s` starts with, and the text after it.
@@ -1501,7 +1555,11 @@ fn py_name_kwarg(call: &str) -> Option<String> {
     while let Some(&c) = b.get(i) {
         match c {
             b'#' => {
-                i = b.iter().skip(i).position(|&x| x == b'\n').map_or(b.len(), |p| i + p);
+                i = b
+                    .iter()
+                    .skip(i)
+                    .position(|&x| x == b'\n')
+                    .map_or(b.len(), |p| i + p);
                 continue;
             }
             b'\'' | b'"' => i = skip_py_string(b, i),
@@ -1568,14 +1626,32 @@ const CS_ROOT_NEEDLES: &[&str] = &[
 
 /// CL.6b: the modifiers a C# class declaration may open with.
 const CS_CLASS_MODIFIERS: &[&str] = &[
-    "public", "internal", "private", "protected", "static", "partial", "sealed", "abstract", "file", "new",
+    "public",
+    "internal",
+    "private",
+    "protected",
+    "static",
+    "partial",
+    "sealed",
+    "abstract",
+    "file",
+    "new",
     "unsafe",
 ];
 
 /// CL.6b: words before a member's name that make it no GraphQL field: a
 /// nested type, an event, an operator, a constant.
 const CS_NOT_A_FIELD: &[&str] = &[
-    "class", "struct", "interface", "enum", "record", "delegate", "event", "operator", "implicit", "explicit",
+    "class",
+    "struct",
+    "interface",
+    "enum",
+    "record",
+    "delegate",
+    "event",
+    "operator",
+    "implicit",
+    "explicit",
     "const",
 ];
 
@@ -1583,9 +1659,32 @@ const CS_NOT_A_FIELD: &[&str] = &[
 /// method (a tuple return type follows a modifier; `this(` / `base(` chain a
 /// constructor).
 const CS_KEYWORDS: &[&str] = &[
-    "public", "internal", "private", "protected", "static", "async", "override", "virtual", "sealed", "abstract",
-    "new", "extern", "unsafe", "readonly", "partial", "required", "this", "base", "typeof", "nameof", "default",
-    "where", "ref", "out", "in", "params",
+    "public",
+    "internal",
+    "private",
+    "protected",
+    "static",
+    "async",
+    "override",
+    "virtual",
+    "sealed",
+    "abstract",
+    "new",
+    "extern",
+    "unsafe",
+    "readonly",
+    "partial",
+    "required",
+    "this",
+    "base",
+    "typeof",
+    "nameof",
+    "default",
+    "where",
+    "ref",
+    "out",
+    "in",
+    "params",
 ];
 
 /// CL.6b: `System.Object` methods, which HotChocolate never exposes.
@@ -1630,7 +1729,9 @@ fn cs_root_needle_sites(source: &str) -> Vec<usize> {
                 .map(|(at, n)| (at, at + n.len()))
                 .collect::<Vec<_>>()
         })
-        .filter(|&(at, end)| !ident_byte_before(b, at) && !b.get(end).is_some_and(|&c| is_ident_byte(c)))
+        .filter(|&(at, end)| {
+            !ident_byte_before(b, at) && !b.get(end).is_some_and(|&c| is_ident_byte(c))
+        })
         .map(|(at, _)| at)
         .collect();
     sites.sort_unstable();
@@ -1648,7 +1749,11 @@ fn cs_code_mask(source: &str) -> Vec<u8> {
     let mut i = 0;
     while let Some(&c) = b.get(i) {
         let opaque = if line_start && c == b'#' {
-            Some(b.get(i..).and_then(|r| r.iter().position(|&x| x == b'\n')).map_or(b.len(), |p| i + p))
+            Some(
+                b.get(i..)
+                    .and_then(|r| r.iter().position(|&x| x == b'\n'))
+                    .map_or(b.len(), |p| i + p),
+            )
         } else {
             cs_skip_opaque(b, i)
         };
@@ -1703,18 +1808,27 @@ fn cs_decls(m: &[u8], from: usize, to: usize) -> Vec<CsDecl> {
             b')' | b']' => depth = depth.saturating_sub(1),
             b'{' if depth == 0 => {
                 let close = cs_matching_close(m, i).map_or(to, |c| c.min(to));
-                decls.push(CsDecl { head: (start, i), end: CsEnd::Body(i, close) });
+                decls.push(CsDecl {
+                    head: (start, i),
+                    end: CsEnd::Body(i, close),
+                });
                 i = close + 1;
                 start = i;
                 continue;
             }
             b'}' if depth == 0 => start = i + 1,
             b';' if depth == 0 => {
-                decls.push(CsDecl { head: (start, i), end: CsEnd::Semi });
+                decls.push(CsDecl {
+                    head: (start, i),
+                    end: CsEnd::Semi,
+                });
                 start = i + 1;
             }
             b'=' if depth == 0 && m.get(i + 1) == Some(&b'>') => {
-                decls.push(CsDecl { head: (start, i), end: CsEnd::Arrow });
+                decls.push(CsDecl {
+                    head: (start, i),
+                    end: CsEnd::Arrow,
+                });
                 i = cs_statement_end(m, i + 2, to) + 1;
                 start = i;
                 continue;
@@ -1794,14 +1908,19 @@ fn cs_attr<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<CsAttr<
         .take_while(|&&c| is_ident_byte(c) || c == b'.' || c == b':')
         .count();
     let last = src.get(i..dotted)?.rsplit(['.', ':']).next()?;
-    let name = last.strip_suffix("Attribute").filter(|n| !n.is_empty()).unwrap_or(last);
+    let name = last
+        .strip_suffix("Attribute")
+        .filter(|n| !n.is_empty())
+        .unwrap_or(last);
     let args = src.get(dotted..to)?.trim();
     (!name.is_empty()).then_some(CsAttr { name, args })
 }
 
 /// CL.6b: the end of the identifier starting at `at`, no further than `to`.
 fn cs_ident_end(m: &[u8], at: usize, to: usize) -> usize {
-    at + m.get(at..to).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c)).count())
+    at + m
+        .get(at..to)
+        .map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c)).count())
 }
 
 /// CL.6b: the arguments of `inner` (an argument list without its brackets)
@@ -1851,7 +1970,8 @@ fn hc_attr_root(attrs: &[CsAttr<'_>]) -> Option<&'static str> {
             .iter()
             .find_map(|call| value.strip_prefix(call)?.strip_suffix(')'))
             .map_or(value, str::trim);
-        let name = quoted_literal(value).unwrap_or_else(|| value.rsplit(['.', ':']).next().unwrap_or(value));
+        let name = quoted_literal(value)
+            .unwrap_or_else(|| value.rsplit(['.', ':']).next().unwrap_or(value));
         ROOT_TYPES.iter().copied().find(|root| *root == name)
     })
 }
@@ -1859,18 +1979,26 @@ fn hc_attr_root(attrs: &[CsAttr<'_>]) -> Option<&'static str> {
 /// CL.6b: a `[GraphQLName("..")]` among `attrs`, when its value is a
 /// GraphQL name.
 fn hc_graphql_name(attrs: &[CsAttr<'_>]) -> Option<String> {
-    attrs.iter().filter(|a| a.name == "GraphQLName").find_map(|a| {
-        let value = quoted_literal(a.args.strip_prefix('(')?.strip_suffix(')')?.trim())?;
-        py_ident(value)
-            .is_some_and(|(_, rest)| rest.is_empty())
-            .then(|| value.to_string())
-    })
+    attrs
+        .iter()
+        .filter(|a| a.name == "GraphQLName")
+        .find_map(|a| {
+            let value = quoted_literal(a.args.strip_prefix('(')?.strip_suffix(')')?.trim())?;
+            py_ident(value)
+                .is_some_and(|(_, rest)| rest.is_empty())
+                .then(|| value.to_string())
+        })
 }
 
 /// CL.6b: a class declaration header from `from` (past its attributes):
 /// modifiers ([`CS_CLASS_MODIFIERS`]), then `class <Name>`. The name, the
 /// offset of the `class` keyword, and whether the class is `static`.
-fn cs_class_head<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<(&'a str, usize, bool)> {
+fn cs_class_head<'a>(
+    src: &'a str,
+    m: &[u8],
+    from: usize,
+    to: usize,
+) -> Option<(&'a str, usize, bool)> {
     let ident_end = |at: usize| cs_ident_end(m, at, to);
     let mut i = skip_ascii_ws(m, from);
     let mut is_static = false;
@@ -1907,7 +2035,13 @@ struct CsRoot<'a> {
 /// `Subscription`. A per-file scan: `AddQueryType<RootQuery>()` in another
 /// file does not make `RootQuery` a root.
 fn cs_root_classes<'a>(src: &'a str, m: &[u8]) -> Vec<CsRoot<'a>> {
-    fn walk<'a>(src: &'a str, m: &[u8], span: (usize, usize), nesting: usize, out: &mut Vec<CsRoot<'a>>) {
+    fn walk<'a>(
+        src: &'a str,
+        m: &[u8],
+        span: (usize, usize),
+        nesting: usize,
+        out: &mut Vec<CsRoot<'a>>,
+    ) {
         if nesting > 64 {
             return;
         }
@@ -1917,12 +2051,20 @@ fn cs_root_classes<'a>(src: &'a str, m: &[u8]) -> Vec<CsRoot<'a>> {
             };
             let (attrs, at) = cs_head_attrs(src, m, decl.head.0, decl.head.1);
             if let Some((name, class_at, is_static)) = cs_class_head(src, m, at, decl.head.1) {
-                let root = hc_attr_root(&attrs).or_else(|| ROOT_TYPES.iter().copied().find(|r| *r == name));
+                let root = hc_attr_root(&attrs)
+                    .or_else(|| ROOT_TYPES.iter().copied().find(|r| *r == name));
                 if let Some(root) = root {
-                    out.push(CsRoot { root, name, class_at, is_static, body: (open, close) });
+                    out.push(CsRoot {
+                        root,
+                        name,
+                        class_at,
+                        is_static,
+                        body: (open, close),
+                    });
                 }
             } else if !src.get(at..decl.head.1).is_some_and(|h| {
-                h.strip_prefix("namespace").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+                h.strip_prefix("namespace")
+                    .is_some_and(|rest| rest.starts_with(char::is_whitespace))
             }) {
                 continue;
             }
@@ -2014,7 +2156,9 @@ fn cs_member<'a>(
             CsTok::Group(b'<') => k.checked_sub(2)?,
             _ => k - 1,
         };
-        word(toks.get(at)?).filter(|w| !CS_KEYWORDS.contains(w)).map(|_| at)
+        word(toks.get(at)?)
+            .filter(|w| !CS_KEYWORDS.contains(w))
+            .map(|_| at)
     });
     let (at, is_method) = match method {
         Some(at) => (at, true),
@@ -2024,7 +2168,9 @@ fn cs_member<'a>(
     let CsTok::Word(name_start, name_end) = *toks.get(at)? else {
         return None;
     };
-    let name = src.get(name_start..name_end).filter(|n| is_ident(n) && !CS_KEYWORDS.contains(n))?;
+    let name = src
+        .get(name_start..name_end)
+        .filter(|n| is_ident(n) && !CS_KEYWORDS.contains(n))?;
     let prefix: Vec<&str> = toks.get(..at)?.iter().filter_map(word).collect();
     let return_type = toks.get(..at)?.last().and_then(word);
     let field = prefix.contains(&"public")
@@ -2032,7 +2178,8 @@ fn cs_member<'a>(
         && (class.is_static || !prefix.contains(&"static"))
         && name != class.name
         && !(is_method
-            && (CS_OBJECT_METHODS.contains(&name) || return_type.is_some_and(|t| CS_NO_VALUE_TYPES.contains(&t))));
+            && (CS_OBJECT_METHODS.contains(&name)
+                || return_type.is_some_and(|t| CS_NO_VALUE_TYPES.contains(&t))));
     field.then_some((name, name_start, is_method))
 }
 
@@ -2044,7 +2191,10 @@ fn cs_member<'a>(
 fn hc_field_name(member: &str, method: bool) -> Option<String> {
     let mut name = member;
     if method {
-        if let Some(rest) = name.strip_prefix("Get").filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase())) {
+        if let Some(rest) = name
+            .strip_prefix("Get")
+            .filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
+        {
             name = rest;
         }
         if let Some(rest) = name.strip_suffix("Async").filter(|r| !r.is_empty()) {
@@ -2082,7 +2232,8 @@ fn cs_root_fields(src: &str, m: &[u8], class: &CsRoot<'_>) -> Vec<(String, u32)>
         if attrs.iter().any(|a| a.name == "GraphQLIgnore") {
             continue;
         }
-        let Some((member, name_at, method)) = cs_member(src, m, (at, decl.head.1), decl.end, class) else {
+        let Some((member, name_at, method)) = cs_member(src, m, (at, decl.head.1), decl.end, class)
+        else {
             continue;
         };
         if let Some(name) = hc_graphql_name(&attrs).or_else(|| hc_field_name(member, method)) {
@@ -2147,11 +2298,21 @@ const RS_FN_MODIFIERS: &[&str] = &["pub", "async", "const", "unsafe", "extern", 
 
 /// DG.4: Caliban's `RootResolver(queryResolver, mutationResolver,
 /// subscriptionResolver)` parameter names, in root order.
-const CALIBAN_RESOLVER_PARAMS: &[&str] = &["queryResolver", "mutationResolver", "subscriptionResolver"];
+const CALIBAN_RESOLVER_PARAMS: &[&str] =
+    &["queryResolver", "mutationResolver", "subscriptionResolver"];
 
 /// DG.4: Scala parameter modifiers a case-class field may carry before its
 /// name.
-const SCALA_PARAM_MODIFIERS: &[&str] = &["val", "var", "override", "private", "protected", "final", "implicit", "using"];
+const SCALA_PARAM_MODIFIERS: &[&str] = &[
+    "val",
+    "var",
+    "override",
+    "private",
+    "protected",
+    "final",
+    "implicit",
+    "using",
+];
 
 /// DG.4: `source` with every byte `is_code` refuses (its literals and
 /// comments) and every `'` it admits (a Rust lifetime or loop label, a Scala
@@ -2182,7 +2343,9 @@ fn word_sites(b: &[u8], word: &[u8]) -> Vec<usize> {
     b.windows(word.len())
         .enumerate()
         .filter(|&(at, w)| {
-            w == word && !ident_byte_before(b, at) && !b.get(at + word.len()).is_some_and(|&c| is_ident_byte(c))
+            w == word
+                && !ident_byte_before(b, at)
+                && !b.get(at + word.len()).is_some_and(|&c| is_ident_byte(c))
         })
         .map(|(at, _)| at)
         .collect()
@@ -2196,7 +2359,12 @@ fn mask_items(m: &[u8], open: usize, close: usize, angle: bool) -> Vec<(usize, u
     let mut items = Vec::new();
     let mut push = |from: usize, to: usize| {
         let start = skip_ascii_ws(m, from).min(to);
-        let end = start + m.get(start..to).map_or(0, |r| r.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(0, |p| p + 1));
+        let end = start
+            + m.get(start..to).map_or(0, |r| {
+                r.iter()
+                    .rposition(|c| !c.is_ascii_whitespace())
+                    .map_or(0, |p| p + 1)
+            });
         if end > start {
             items.push((start, end));
         }
@@ -2207,7 +2375,12 @@ fn mask_items(m: &[u8], open: usize, close: usize, angle: bool) -> Vec<(usize, u
             Some(b'(' | b'[' | b'{') => depth += 1,
             Some(b')' | b']' | b'}') => depth -= 1,
             Some(b'<') if angle => depth += 1,
-            Some(b'>') if angle && !matches!(at.checked_sub(1).and_then(|p| m.get(p)), Some(b'-' | b'=')) => depth -= 1,
+            Some(b'>')
+                if angle
+                    && !matches!(at.checked_sub(1).and_then(|p| m.get(p)), Some(b'-' | b'=')) =>
+            {
+                depth -= 1
+            }
             Some(b',') if depth == 0 => {
                 push(start, at);
                 start = at + 1;
@@ -2267,7 +2440,10 @@ fn path_segments<'a>(src: &'a str, m: &[u8], from: usize, to: usize, sep: &[u8])
 /// DG.4: the type a path names: its last segment that starts upper-case
 /// (`QueryRoot` in `QueryRoot::default`, `Queries` in `api.Queries`).
 fn type_segment<'a>(segs: &[&'a str]) -> Option<&'a str> {
-    segs.iter().rev().copied().find(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))
+    segs.iter()
+        .rev()
+        .copied()
+        .find(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))
 }
 
 /// DG.4: the byte offsets of every async-graphql root attribute opener
@@ -2282,7 +2458,10 @@ fn rs_root_attr_sites(source: &str) -> Vec<usize> {
                 .map(|(at, n)| (at, at + n.len()))
                 .collect::<Vec<_>>()
         })
-        .filter(|&(_, end)| b.get(end).is_some_and(|&c| c == b']' || c == b'(' || c.is_ascii_whitespace()))
+        .filter(|&(_, end)| {
+            b.get(end)
+                .is_some_and(|&c| c == b']' || c == b'(' || c.is_ascii_whitespace())
+        })
         .map(|(at, _)| at)
         .collect();
     sites.sort_unstable();
@@ -2304,10 +2483,20 @@ fn rs_imports_async_graphql(source: &str) -> bool {
         if ident_byte_before(b, at) || b.get(at + name.len()).is_some_and(|&c| is_ident_byte(c)) {
             return false;
         }
-        let path = b.get(skip_ascii_ws(b, at + name.len())..).is_some_and(|r| r.starts_with(b"::"));
-        let line_start = source.get(..at).and_then(|s| s.rfind('\n')).map_or(0, |p| p + 1);
-        let words: Vec<&str> = source.get(line_start..at).unwrap_or_default().split_whitespace().collect();
-        let used = (words.last() == Some(&"use") && words.iter().all(|w| *w == "use" || w.starts_with("pub")))
+        let path = b
+            .get(skip_ascii_ws(b, at + name.len())..)
+            .is_some_and(|r| r.starts_with(b"::"));
+        let line_start = source
+            .get(..at)
+            .and_then(|s| s.rfind('\n'))
+            .map_or(0, |p| p + 1);
+        let words: Vec<&str> = source
+            .get(line_start..at)
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
+        let used = (words.last() == Some(&"use")
+            && words.iter().all(|w| *w == "use" || w.starts_with("pub")))
             || words == ["extern", "crate"];
         (path || used) && guard.admits(at)
     })
@@ -2360,7 +2549,9 @@ impl RenameRule {
     /// (`_internal` -> `internal`).
     fn apply(self, name: &str) -> String {
         let words = heck_words(name);
-        let joined = |sep: &str, word: fn(&str) -> String| words.iter().map(|w| word(w)).collect::<Vec<_>>().join(sep);
+        let joined = |sep: &str, word: fn(&str) -> String| {
+            words.iter().map(|w| word(w)).collect::<Vec<_>>().join(sep)
+        };
         match self {
             RenameRule::Lower => name.to_lowercase(),
             RenameRule::Upper => name.to_uppercase(),
@@ -2368,7 +2559,13 @@ impl RenameRule {
             RenameRule::Camel => words
                 .iter()
                 .enumerate()
-                .map(|(i, w)| if i == 0 { w.to_lowercase() } else { capitalize(w) })
+                .map(|(i, w)| {
+                    if i == 0 {
+                        w.to_lowercase()
+                    } else {
+                        capitalize(w)
+                    }
+                })
                 .collect(),
             RenameRule::Snake => joined("_", str::to_lowercase),
             RenameRule::ScreamingSnake => joined("_", str::to_uppercase),
@@ -2423,7 +2620,10 @@ fn heck_words(s: &str) -> Vec<&str> {
 fn capitalize(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect(),
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
         None => String::new(),
     }
 }
@@ -2443,7 +2643,12 @@ impl<'a> RsAttr<'a> {
         let args: &'a str = self.args;
         args.strip_prefix('(')
             .and_then(|a| a.strip_suffix(')'))
-            .map(|inner| cs_args(inner).into_iter().filter(|item| !item.is_empty()).collect())
+            .map(|inner| {
+                cs_args(inner)
+                    .into_iter()
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2486,10 +2691,18 @@ fn rs_head_attrs<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> (Vec<RsA
         };
         if !inner {
             let start = skip_ascii_ws(m, open + 1);
-            let path_end = start + m.get(start..close).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c) || c == b':').count());
+            let path_end = start
+                + m.get(start..close).map_or(0, |r| {
+                    r.iter()
+                        .take_while(|&&c| is_ident_byte(c) || c == b':')
+                        .count()
+                });
             if let (Some(path), Some(args)) = (src.get(start..path_end), src.get(path_end..close)) {
                 let path = path.strip_prefix("::").unwrap_or(path);
-                attrs.push(RsAttr { path, args: args.trim() });
+                attrs.push(RsAttr {
+                    path,
+                    args: args.trim(),
+                });
             }
         }
         at = skip_ascii_ws(m, close + 1);
@@ -2518,7 +2731,10 @@ fn rs_root_attr(attrs: &[RsAttr<'_>]) -> Option<(bool, RenameRule)> {
             "Subscription" | "async_graphql::Subscription" => true,
             _ => return None,
         };
-        let rule = a.value("rename_fields").and_then(RenameRule::parse).unwrap_or(RenameRule::Camel);
+        let rule = a
+            .value("rename_fields")
+            .and_then(RenameRule::parse)
+            .unwrap_or(RenameRule::Camel);
         Some((subscription, rule))
     })
 }
@@ -2527,14 +2743,22 @@ fn rs_root_attr(attrs: &[RsAttr<'_>]) -> Option<(bool, RenameRule)> {
 /// attributes): `impl QueryRoot`, `impl<'a> QueryRoot<'a>`,
 /// `impl crate::api::QueryRoot`, with the offset of its `impl` keyword. A
 /// trait impl (`impl X for Y`) is none.
-fn rs_impl_self_type<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<(&'a str, usize)> {
+fn rs_impl_self_type<'a>(
+    src: &'a str,
+    m: &[u8],
+    from: usize,
+    to: usize,
+) -> Option<(&'a str, usize)> {
     let toks = cs_head_tokens(m, from, to);
     let word = |t: Option<&CsTok>| match t {
         Some(&CsTok::Word(s, e)) => src.get(s..e),
         _ => None,
     };
     let k = toks.iter().position(|t| word(Some(t)) == Some("impl"))?;
-    if toks.iter().take(k).any(|t| !matches!(word(Some(t)), Some("unsafe" | "default")))
+    if toks
+        .iter()
+        .take(k)
+        .any(|t| !matches!(word(Some(t)), Some("unsafe" | "default")))
         || toks.iter().any(|t| word(Some(t)) == Some("for"))
     {
         return None;
@@ -2547,7 +2771,9 @@ fn rs_impl_self_type<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Opti
         i += 1;
     }
     let mut ty = word(toks.get(i))?;
-    while toks.get(i + 1) == Some(&CsTok::Punct(b':')) && toks.get(i + 2) == Some(&CsTok::Punct(b':')) {
+    while toks.get(i + 1) == Some(&CsTok::Punct(b':'))
+        && toks.get(i + 2) == Some(&CsTok::Punct(b':'))
+    {
         let Some(next) = word(toks.get(i + 3)) else {
             break;
         };
@@ -2570,13 +2796,19 @@ fn rs_merged_struct<'a>(
 ) -> Option<(&'a str, Vec<&'a str>)> {
     let merged = attrs.iter().any(|a| {
         a.path == "derive"
-            && a.items().iter().any(|item| item.rsplit("::").next().is_some_and(|d| RS_MERGED_DERIVES.contains(&d.trim())))
+            && a.items().iter().any(|item| {
+                item.rsplit("::")
+                    .next()
+                    .is_some_and(|d| RS_MERGED_DERIVES.contains(&d.trim()))
+            })
     });
     if !merged {
         return None;
     }
     let toks = cs_head_tokens(m, from, to);
-    let k = toks.iter().position(|t| matches!(*t, CsTok::Word(s, e) if src.get(s..e) == Some("struct")))?;
+    let k = toks
+        .iter()
+        .position(|t| matches!(*t, CsTok::Word(s, e) if src.get(s..e) == Some("struct")))?;
     let CsTok::Word(name_start, name_end) = *toks.get(k + 1)? else {
         return None;
     };
@@ -2616,7 +2848,13 @@ fn rs_items<'a>(src: &'a str, m: &[u8]) -> (Vec<RsObjectImpl<'a>>, MergedRoots<'
         impls: Vec<RsObjectImpl<'a>>,
         merged: MergedRoots<'a>,
     }
-    fn walk<'a>(src: &'a str, m: &[u8], span: (usize, usize), nesting: usize, found: &mut Found<'a>) {
+    fn walk<'a>(
+        src: &'a str,
+        m: &[u8],
+        span: (usize, usize),
+        nesting: usize,
+        found: &mut Found<'a>,
+    ) {
         if nesting > 64 {
             return;
         }
@@ -2631,12 +2869,21 @@ fn rs_items<'a>(src: &'a str, m: &[u8]) -> (Vec<RsObjectImpl<'a>>, MergedRoots<'
             if let Some((subscription, rule)) = rs_root_attr(&attrs)
                 && let Some((ty, impl_at)) = rs_impl_self_type(src, m, at, decl.head.1)
             {
-                found.impls.push(RsObjectImpl { ty, subscription, rule, impl_at, body: (open, close) });
+                found.impls.push(RsObjectImpl {
+                    ty,
+                    subscription,
+                    rule,
+                    impl_at,
+                    body: (open, close),
+                });
             }
             walk(src, m, (open + 1, close), nesting + 1, found);
         }
     }
-    let mut found = Found { impls: Vec::new(), merged: Vec::new() };
+    let mut found = Found {
+        impls: Vec::new(),
+        merged: Vec::new(),
+    };
     walk(src, m, (0, m.len()), 0, &mut found);
     (found.impls, found.merged)
 }
@@ -2657,7 +2904,9 @@ fn rs_schema_roots<'a>(src: &'a str, m: &[u8]) -> Option<Vec<(&'a str, &'static 
             let ctor = skip_ascii_ws(m, after + 2);
             let ctor_end = cs_ident_end(m, ctor, m.len());
             let open = skip_ascii_ws(m, ctor_end);
-            if !matches!(m.get(ctor..ctor_end), Some(b"new" | b"build")) || m.get(open) != Some(&b'(') {
+            if !matches!(m.get(ctor..ctor_end), Some(b"new" | b"build"))
+                || m.get(open) != Some(&b'(')
+            {
                 continue;
             }
             let Some(close) = cs_matching_close(m, open) else {
@@ -2732,7 +2981,10 @@ fn rs_object_fields(src: &str, m: &[u8], imp: &RsObjectImpl<'_>) -> Vec<(String,
     for decl in cs_decls(m, open + 1, close) {
         let (attrs, at) = rs_head_attrs(src, m, decl.head.0, decl.head.1);
         let graphql: Vec<&RsAttr<'_>> = attrs.iter().filter(|a| a.path == "graphql").collect();
-        if graphql.iter().any(|a| RS_NOT_A_FIELD.iter().any(|flag| a.flag(flag))) {
+        if graphql
+            .iter()
+            .any(|a| RS_NOT_A_FIELD.iter().any(|flag| a.flag(flag)))
+        {
             continue;
         }
         let Some((name, fn_at)) = rs_fn_name(src, m, at, decl.head.1) else {
@@ -2815,7 +3067,8 @@ fn scala_root_resolver_sites(source: &str) -> Vec<usize> {
         .match_indices(name)
         .map(|(at, _)| at)
         .filter(|&at| {
-            !ident_byte_before(b, at) && matches!(b.get(skip_ascii_ws(b, at + name.len())), Some(b'(' | b'['))
+            !ident_byte_before(b, at)
+                && matches!(b.get(skip_ascii_ws(b, at + name.len())), Some(b'(' | b'['))
         })
         .collect()
 }
@@ -2848,7 +3101,11 @@ fn scala_case_classes<'a>(src: &'a str, m: &[u8]) -> Vec<ScalaCaseClass<'a>> {
             let params = (m.get(open) == Some(&b'('))
                 .then(|| cs_matching_close(m, open).map(|close| (open, close)))
                 .flatten();
-            Some(ScalaCaseClass { name, case_at, params })
+            Some(ScalaCaseClass {
+                name,
+                case_at,
+                params,
+            })
         })
         .collect()
 }
@@ -2857,7 +3114,9 @@ fn scala_case_classes<'a>(src: &'a str, m: &[u8]) -> Vec<ScalaCaseClass<'a>> {
 /// (`val q: Queries`) or its initialiser's constructor (`val q = Queries(..)`,
 /// `val q = new Queries(..)`), each the path's [`type_segment`].
 fn scala_val_type<'a>(src: &'a str, m: &[u8], v: &str) -> Option<&'a str> {
-    let sites = word_sites(m, b"val").into_iter().chain(word_sites(m, b"var"));
+    let sites = word_sites(m, b"val")
+        .into_iter()
+        .chain(word_sites(m, b"var"));
     sites.into_iter().find_map(|at| {
         let name = skip_ascii_ws(m, at + 3);
         let name_end = cs_ident_end(m, name, m.len());
@@ -2881,12 +3140,24 @@ fn scala_val_type<'a>(src: &'a str, m: &[u8], v: &str) -> Option<&'a str> {
 /// fills (its position, or the `queryResolver = ..` parameter it names) and
 /// its value span, past `Some(..)` / `Option(..)`; `None` for an absent
 /// root (`None`, `Unit`, `()`, `Option.empty[..]`).
-fn caliban_arg(src: &str, m: &[u8], k: usize, s: usize, e: usize) -> Option<(usize, (usize, usize))> {
+fn caliban_arg(
+    src: &str,
+    m: &[u8],
+    k: usize,
+    s: usize,
+    e: usize,
+) -> Option<(usize, (usize, usize))> {
     let name_end = cs_ident_end(m, s, e);
     let eq = skip_ascii_ws(m, name_end);
-    let (slot, mut start) = if name_end > s && m.get(eq) == Some(&b'=') && !matches!(m.get(eq + 1), Some(b'=' | b'>')) {
+    let (slot, mut start) = if name_end > s
+        && m.get(eq) == Some(&b'=')
+        && !matches!(m.get(eq + 1), Some(b'=' | b'>'))
+    {
         let param = src.get(s..name_end)?;
-        (CALIBAN_RESOLVER_PARAMS.iter().position(|p| *p == param)?, skip_ascii_ws(m, eq + 1))
+        (
+            CALIBAN_RESOLVER_PARAMS.iter().position(|p| *p == param)?,
+            skip_ascii_ws(m, eq + 1),
+        )
     } else {
         (k, s)
     };
@@ -2902,7 +3173,11 @@ fn caliban_arg(src: &str, m: &[u8], k: usize, s: usize, e: usize) -> Option<(usi
             }
             "Option" if m.get(next) == Some(&b'.') => return None,
             "None" | "Unit" => return None,
-            "" if m.get(start) == Some(&b'(') && m.get(skip_ascii_ws(m, start + 1)) == Some(&b')') => return None,
+            "" if m.get(start) == Some(&b'(')
+                && m.get(skip_ascii_ws(m, start + 1)) == Some(&b')') =>
+            {
+                return None;
+            }
             _ => break,
         }
     }
@@ -2936,7 +3211,13 @@ fn caliban_param(src: &str, m: &[u8], s: usize, e: usize) -> Option<(String, u32
     let mut at = skip_ascii_ws(m, s);
     let mut renamed = None;
     while at < e && m.get(at) == Some(&b'@') {
-        let name_end = at + 1 + m.get(at + 1..e).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c) || c == b'.').count());
+        let name_end = at
+            + 1
+            + m.get(at + 1..e).map_or(0, |r| {
+                r.iter()
+                    .take_while(|&&c| is_ident_byte(c) || c == b'.')
+                    .count()
+            });
         let annotation = src.get(at + 1..name_end)?.rsplit('.').next()?;
         let mut next = skip_ascii_ws(m, name_end);
         let mut args = None;
@@ -2947,7 +3228,11 @@ fn caliban_param(src: &str, m: &[u8], s: usize, e: usize) -> Option<(String, u32
         }
         match annotation {
             "GQLExcluded" => return None,
-            "GQLName" => renamed = args.and_then(|a| quoted_literal(a.trim())).map(str::to_string),
+            "GQLName" => {
+                renamed = args
+                    .and_then(|a| quoted_literal(a.trim()))
+                    .map(str::to_string)
+            }
             _ => {}
         }
         at = skip_ascii_ws(m, next);
@@ -2967,13 +3252,21 @@ fn caliban_param(src: &str, m: &[u8], s: usize, e: usize) -> Option<(String, u32
         (src.get(at..end).filter(|n| is_ident(n))?, end)
     };
     let colon = skip_ascii_ws(m, name_end);
-    (m.get(colon) == Some(&b':') && !name.is_empty())
-        .then(|| (renamed.unwrap_or_else(|| name.to_string()), line_of(src, at)))
+    (m.get(colon) == Some(&b':') && !name.is_empty()).then(|| {
+        (
+            renamed.unwrap_or_else(|| name.to_string()),
+            line_of(src, at),
+        )
+    })
 }
 
 /// DG.4: the fields of one root case class, in parameter order
 /// ([`caliban_param`]).
-fn caliban_case_class_fields(src: &str, m: &[u8], class: &ScalaCaseClass<'_>) -> Vec<(String, u32)> {
+fn caliban_case_class_fields(
+    src: &str,
+    m: &[u8],
+    class: &ScalaCaseClass<'_>,
+) -> Vec<(String, u32)> {
     let Some((open, close)) = class.params else {
         return Vec::new();
     };
@@ -2992,7 +3285,11 @@ fn caliban_case_class_fields(src: &str, m: &[u8], class: &ScalaCaseClass<'_>) ->
 /// parameters are the root's fields, under their Scala names. A root whose
 /// type is declared in another file names its root only: the noun anchors at
 /// the case class line when the class is in the file, else at the argument.
-fn caliban_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns, Vec<(String, u32)>) {
+fn caliban_roots_and_fields(
+    src: &str,
+    m: &[u8],
+    sites: &[usize],
+) -> (RootNouns, Vec<(String, u32)>) {
     let classes = scala_case_classes(src, m);
     let mut roots = RootNouns::new();
     let mut fields = Vec::new();
@@ -3018,7 +3315,8 @@ fn caliban_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns,
             let Some(&root) = ROOT_TYPES.get(slot) else {
                 continue;
             };
-            let class = caliban_arg_type(src, m, value).and_then(|ty| classes.iter().find(|c| c.name == ty));
+            let class = caliban_arg_type(src, m, value)
+                .and_then(|ty| classes.iter().find(|c| c.name == ty));
             if !roots.iter().any(|&(r, _)| r == root) {
                 let anchor = class.map_or(value.0, |c| c.case_at);
                 roots.push((root, line_of(src, anchor)));
@@ -3064,7 +3362,10 @@ fn line_spans(b: &[u8]) -> Vec<(usize, usize)> {
 /// DH.8: the offset of the first byte of `start..end` that is no blank or
 /// tab (`end` when there is none).
 fn first_non_blank(b: &[u8], start: usize, end: usize) -> usize {
-    start + b.get(start..end).map_or(0, |r| r.iter().take_while(|&&c| c == b' ' || c == b'\t').count())
+    start
+        + b.get(start..end).map_or(0, |r| {
+            r.iter().take_while(|&&c| c == b' ' || c == b'\t').count()
+        })
 }
 
 /// DH.8: the `::`-separated constant path starting at `from` of a Ruby mask
@@ -3097,7 +3398,10 @@ fn ruby_path<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> (Vec<&'a str
 /// `Types::QueryType`).
 fn ruby_root(name: &str) -> Option<&'static str> {
     ROOT_TYPES.iter().copied().find(|&root| {
-        name == root || name.strip_suffix("Type").is_some_and(|stem| stem.ends_with(root))
+        name == root
+            || name
+                .strip_suffix("Type")
+                .is_some_and(|stem| stem.ends_with(root))
     })
 }
 
@@ -3105,7 +3409,8 @@ fn ruby_root(name: &str) -> Option<&'static str> {
 /// `BaseObject` (`Types::BaseObject`, the generator's base class) or
 /// `GraphQL::Schema::Object` itself.
 fn ruby_object_superclass(segs: &[&str]) -> bool {
-    segs.last().is_some_and(|s| s.ends_with("BaseObject")) || segs == ["GraphQL", "Schema", "Object"]
+    segs.last().is_some_and(|s| s.ends_with("BaseObject"))
+        || segs == ["GraphQL", "Schema", "Object"]
 }
 
 /// DH.8: one Ruby `class` declaration: the path it names, its superclass
@@ -3140,7 +3445,12 @@ fn ruby_classes<'a>(src: &'a str, m: &[u8]) -> Vec<RubyClass<'a>> {
         } else {
             Vec::new()
         };
-        classes.push(RubyClass { name, superclass, class_at: at, line });
+        classes.push(RubyClass {
+            name,
+            superclass,
+            class_at: at,
+            line,
+        });
     }
     classes
 }
@@ -3153,8 +3463,14 @@ fn ruby_root_class_sites(source: &str) -> Vec<usize> {
     word_sites(b, b"class")
         .into_iter()
         .filter(|&at| {
-            let end = b.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| at + p);
-            ruby_path(source, b, at + 5, end).0.last().is_some_and(|name| ruby_root(name).is_some())
+            let end = b
+                .get(at..)
+                .and_then(|r| r.iter().position(|&c| c == b'\n'))
+                .map_or(b.len(), |p| at + p);
+            ruby_path(source, b, at + 5, end)
+                .0
+                .last()
+                .is_some_and(|name| ruby_root(name).is_some())
         })
         .collect()
 }
@@ -3165,9 +3481,16 @@ fn ruby_root_class_sites(source: &str) -> Vec<usize> {
 fn ruby_imports_graphql(src: &str, m: &[u8]) -> bool {
     let needle = b"GraphQL::Schema";
     let schema = m.windows(needle.len()).enumerate().any(|(at, w)| {
-        w == needle && !ident_byte_before(m, at) && !m.get(at + needle.len()).is_some_and(|&c| is_ident_byte(c))
+        w == needle
+            && !ident_byte_before(m, at)
+            && !m.get(at + needle.len()).is_some_and(|&c| is_ident_byte(c))
     });
-    schema || ruby_classes(src, m).iter().any(|c| c.superclass.last().is_some_and(|s| s.ends_with("BaseObject")))
+    schema
+        || ruby_classes(src, m).iter().any(|c| {
+            c.superclass
+                .last()
+                .is_some_and(|s| s.ends_with("BaseObject"))
+        })
 }
 
 /// DH.8: graphql-ruby's `Schema::Member::BuildType.camelize`, the default
@@ -3235,7 +3558,9 @@ fn ruby_option(m: &[u8], from: usize, to: usize, key: &[u8]) -> Option<usize> {
             (Some(b':'), next) if next != Some(&b':') => after + 1,
             _ => {
                 let arrow = first_non_blank(stmt, after, stmt.len());
-                stmt.get(arrow..arrow + 2).filter(|r| *r == b"=>").map(|_| arrow + 2)?
+                stmt.get(arrow..arrow + 2)
+                    .filter(|r| *r == b"=>")
+                    .map(|_| arrow + 2)?
             }
         };
         Some(from + first_non_blank(stmt, value, stmt.len()))
@@ -3247,7 +3572,13 @@ fn ruby_option(m: &[u8], from: usize, to: usize, key: &[u8]) -> Option<usize> {
 /// its schema name ([`ruby_camelize`]d unless the call holds `camelize:
 /// false`) and the type method that resolves it (a `resolver_method:
 /// :name` option, else the Ruby name), for the anchor.
-fn ruby_field(src: &str, m: &[u8], lines: &[(usize, usize)], j: usize, at: usize) -> Option<(String, String)> {
+fn ruby_field(
+    src: &str,
+    m: &[u8],
+    lines: &[(usize, usize)],
+    j: usize,
+    at: usize,
+) -> Option<(String, String)> {
     let line_end = lines.get(j)?.1;
     // Blanks are skipped in the source: the mask blanks a quoted name too.
     let sb = src.as_bytes();
@@ -3270,14 +3601,19 @@ fn ruby_field(src: &str, m: &[u8], lines: &[(usize, usize)], j: usize, at: usize
         return None;
     }
     let end = ruby_statement_end(m, lines, j, at);
-    let camel = !ruby_option(m, at, end, b"camelize")
-        .is_some_and(|v| m.get(v..v + 5) == Some(b"false") && !m.get(v + 5).is_some_and(|&c| is_ident_byte(c)));
+    let camel = !ruby_option(m, at, end, b"camelize").is_some_and(|v| {
+        m.get(v..v + 5) == Some(b"false") && !m.get(v + 5).is_some_and(|&c| is_ident_byte(c))
+    });
     let method = ruby_option(m, at, end, b"resolver_method")
         .filter(|&v| m.get(v) == Some(&b':'))
         .and_then(|v| src.get(v + 1..cs_ident_end(m, v + 1, end)))
         .filter(|s| !s.is_empty())
         .unwrap_or(name);
-    let schema = if camel { ruby_camelize(name) } else { name.to_string() };
+    let schema = if camel {
+        ruby_camelize(name)
+    } else {
+        name.to_string()
+    };
     Some((schema, method.to_string()))
 }
 
@@ -3301,7 +3637,12 @@ fn ruby_def_name<'a>(src: &'a str, m: &[u8], at: usize, line_end: usize) -> Opti
 /// none. Each `field` line left is a field ([`ruby_field`]); it anchors at
 /// the class's `def` of its resolving method when the class has one (so
 /// HANDLED_BY lands on that method), else at the `field` line.
-fn ruby_class_fields(src: &str, m: &[u8], lines: &[(usize, usize)], class_line: usize) -> Vec<(String, u32)> {
+fn ruby_class_fields(
+    src: &str,
+    m: &[u8],
+    lines: &[(usize, usize)],
+    class_line: usize,
+) -> Vec<(String, u32)> {
     let sb = src.as_bytes();
     let indent = |(start, end): (usize, usize)| first_non_blank(sb, start, end) - start;
     let Some(&class_span) = lines.get(class_line) else {
@@ -3317,7 +3658,10 @@ fn ruby_class_fields(src: &str, m: &[u8], lines: &[(usize, usize)], class_line: 
             continue;
         }
         let ind = indent((start, end));
-        let word = |w: &[u8]| m.get(at..at + w.len()) == Some(w) && !m.get(at + w.len()).is_some_and(|&c| is_ident_byte(c));
+        let word = |w: &[u8]| {
+            m.get(at..at + w.len()) == Some(w)
+                && !m.get(at + w.len()).is_some_and(|&c| is_ident_byte(c))
+        };
         if let Some(k) = hidden {
             if ind > k {
                 continue;
@@ -3346,7 +3690,10 @@ fn ruby_class_fields(src: &str, m: &[u8], lines: &[(usize, usize)], class_line: 
     found
         .into_iter()
         .map(|(schema, method, j)| {
-            let anchor = defs.iter().find(|&&(d, _)| d == method).map_or(j, |&(_, line)| line);
+            let anchor = defs
+                .iter()
+                .find(|&&(d, _)| d == method)
+                .map_or(j, |&(_, line)| line);
             (schema, line_u32(anchor))
         })
         .collect()
@@ -3397,7 +3744,11 @@ fn elixir_string_end(b: &[u8], at: usize) -> usize {
 /// pair, any other with itself), the body and the modifier letters after
 /// it. `None` when no sigil opens there.
 fn elixir_sigil_end(b: &[u8], at: usize) -> Option<usize> {
-    let letters = b.get(at + 1..)?.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+    let letters = b
+        .get(at + 1..)?
+        .iter()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .count();
     if letters == 0 {
         return None;
     }
@@ -3417,7 +3768,12 @@ fn elixir_sigil_end(b: &[u8], at: usize) -> Option<usize> {
         }
         _ => return None,
     };
-    Some(body_end + b.get(body_end..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_alphabetic()).count()))
+    Some(
+        body_end
+            + b.get(body_end..).map_or(0, |r| {
+                r.iter().take_while(|c| c.is_ascii_alphabetic()).count()
+            }),
+    )
 }
 
 /// DH.8: [`code_mask`] of an Elixir file. One lexing pass blanks `#`
@@ -3431,12 +3787,19 @@ fn elixir_code_mask(source: &str) -> Vec<u8> {
     let mut i = 0;
     while i < b.len() {
         let end = match b[i] {
-            b'#' => Some(b.get(i..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| i + p)),
+            b'#' => Some(
+                b.get(i..)
+                    .and_then(|r| r.iter().position(|&c| c == b'\n'))
+                    .map_or(b.len(), |p| i + p),
+            ),
             b'"' | b'\'' => Some(elixir_string_end(b, i)),
             b'~' => elixir_sigil_end(b, i),
             b'?' if !ident_byte_before(b, i) => match b.get(i + 1) {
                 Some(b'\\') => Some(i + 3),
-                Some(_) => source.get(i + 1..).and_then(|r| r.chars().next()).map(|c| i + 1 + c.len_utf8()),
+                Some(_) => source
+                    .get(i + 1..)
+                    .and_then(|r| r.chars().next())
+                    .map(|c| i + 1 + c.len_utf8()),
                 None => None,
             },
             _ => None,
@@ -3460,7 +3823,9 @@ fn absinthe_schema(m: &[u8]) -> bool {
     word_sites(m, b"use").into_iter().any(|at| {
         let p = skip_ascii_ws(m, at + 3);
         m.get(p..p + module.len()) == Some(&module[..])
-            && !m.get(p + module.len()).is_some_and(|&c| is_ident_byte(c) || c == b'.')
+            && !m
+                .get(p + module.len())
+                .is_some_and(|&c| is_ident_byte(c) || c == b'.')
     })
 }
 
@@ -3474,7 +3839,9 @@ fn absinthe_block_do(b: &[u8], after: usize, line_end: usize) -> Option<usize> {
     let opener = |at: usize| {
         b.get(at..at + 2) == Some(b"do")
             && !ident_byte_before(b, at)
-            && !b.get(at + 2).is_some_and(|&c| is_ident_byte(c) || c == b':')
+            && !b
+                .get(at + 2)
+                .is_some_and(|&c| is_ident_byte(c) || c == b':')
     };
     if opener(p) {
         return Some(p + 2);
@@ -3501,9 +3868,17 @@ fn absinthe_root_sites(source: &str) -> Vec<usize> {
             let word = root.to_ascii_lowercase();
             word_sites(b, word.as_bytes())
                 .into_iter()
-                .filter(|&at| !matches!(at.checked_sub(1).and_then(|p| b.get(p)), Some(b':' | b'.' | b'@')))
                 .filter(|&at| {
-                    let line_end = b.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| at + p);
+                    !matches!(
+                        at.checked_sub(1).and_then(|p| b.get(p)),
+                        Some(b':' | b'.' | b'@')
+                    )
+                })
+                .filter(|&at| {
+                    let line_end = b
+                        .get(at..)
+                        .and_then(|r| r.iter().position(|&c| c == b'\n'))
+                        .map_or(b.len(), |p| at + p);
                     absinthe_block_do(b, at + word.len(), line_end).is_some()
                 })
                 .collect::<Vec<_>>()
@@ -3546,8 +3921,15 @@ fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> Vec<(String, u32)>
                 }
             }
             b"field" if plain && depth == 1 => {
-                let line_start = m.get(..i).and_then(|r| r.iter().rposition(|&c| c == b'\n')).map_or(0, |p| p + 1);
-                let lead = m.get(line_start..i).unwrap_or_default().iter().rposition(|c| !c.is_ascii_whitespace());
+                let line_start = m
+                    .get(..i)
+                    .and_then(|r| r.iter().rposition(|&c| c == b'\n'))
+                    .map_or(0, |p| p + 1);
+                let lead = m
+                    .get(line_start..i)
+                    .unwrap_or_default()
+                    .iter()
+                    .rposition(|c| !c.is_ascii_whitespace());
                 let statement = lead.is_none_or(|p| m.get(line_start + p) == Some(&b';'));
                 let mut p = first_non_blank(m, end, m.len());
                 if m.get(p) == Some(&b'(') {
@@ -3572,17 +3954,32 @@ fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> Vec<(String, u32)>
 /// position that opens its line's statement names its root, anchored at its
 /// line, and the `field`s at its block's first level are the root's fields
 /// ([`absinthe_block_fields`]). An `object :order do` block names nothing.
-fn absinthe_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns, Vec<(String, u32)>) {
+fn absinthe_roots_and_fields(
+    src: &str,
+    m: &[u8],
+    sites: &[usize],
+) -> (RootNouns, Vec<(String, u32)>) {
     let mut roots = RootNouns::new();
     let mut fields = Vec::new();
     for &at in sites.iter().filter(|&&at| m.get(at) != Some(&b' ')) {
-        let line_start = m.get(..at).and_then(|r| r.iter().rposition(|&c| c == b'\n')).map_or(0, |p| p + 1);
+        let line_start = m
+            .get(..at)
+            .and_then(|r| r.iter().rposition(|&c| c == b'\n'))
+            .map_or(0, |p| p + 1);
         if first_non_blank(m, line_start, at) != at {
             continue;
         }
-        let line_end = m.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(m.len(), |p| at + p);
+        let line_end = m
+            .get(at..)
+            .and_then(|r| r.iter().position(|&c| c == b'\n'))
+            .map_or(m.len(), |p| at + p);
         let word = cs_ident_end(m, at, line_end);
-        let Some(root) = src.get(at..word).and_then(|w| ROOT_TYPES.iter().copied().find(|r| r.eq_ignore_ascii_case(w))) else {
+        let Some(root) = src.get(at..word).and_then(|w| {
+            ROOT_TYPES
+                .iter()
+                .copied()
+                .find(|r| r.eq_ignore_ascii_case(w))
+        }) else {
             continue;
         };
         let Some(open) = absinthe_block_do(m, word, line_end) else {
@@ -3666,7 +4063,11 @@ pub fn extract_graphql_sdl_file_nodes(
     repo: RepoId,
 ) -> GraphqlNodes {
     let defs = sdl_defs(source, 0);
-    let names = defs.resolvers.into_iter().map(|h| (h.name, h.line)).collect();
+    let names = defs
+        .resolvers
+        .into_iter()
+        .map(|h| (h.name, h.line))
+        .collect();
     resolver_nodes(names, &defs.root_fields, module_id, repo)
 }
 
@@ -3702,11 +4103,21 @@ fn resolver_nodes(
                 confidence: Confidence::Medium,
                 cells,
             });
-            nav.record(id, &resolver_name, &qname, node_kind::GRAPHQL_RESOLVER, Some(module_id));
+            nav.record(
+                id,
+                &resolver_name,
+                &qname,
+                node_kind::GRAPHQL_RESOLVER,
+                Some(module_id),
+            );
             anchors.push(Anchor { node: id, line });
         }
     }
-    GraphqlNodes { nodes, nav, anchors }
+    GraphqlNodes {
+        nodes,
+        nav,
+        anchors,
+    }
 }
 
 /// The method following a `@Query()` / `@Mutation()` / `@Subscription()` /
@@ -4030,7 +4441,8 @@ fn extract_gql_operation_name(source: &str) -> Option<(String, Option<&str>)> {
             let start = idx + tag.len();
             let after = &source[start..];
             let quote = tag.as_bytes()[tag.len() - 1];
-            return extract_operation_from_body(after).map(|name| (name, quoted_body(source, start, quote)));
+            return extract_operation_from_body(after)
+                .map(|name| (name, quoted_body(source, start, quote)));
         }
     }
     None
@@ -4078,8 +4490,10 @@ fn extract_gql_template_operations<'s>(
             continue;
         }
         let doc = quoted_body(source, abs, b'`');
-        let name = extract_operation_from_body(doc.unwrap_or(&source[abs..]))
-            .or_else(|| doc.filter(|d| is_anonymous_operation(d)).and_then(first_root_field));
+        let name = extract_operation_from_body(doc.unwrap_or(&source[abs..])).or_else(|| {
+            doc.filter(|d| is_anonymous_operation(d))
+                .and_then(first_root_field)
+        });
         if let Some(name) = name {
             ops.push((name, tag, doc));
         }
@@ -4119,8 +4533,17 @@ const SDL_DEFAULT_ROOTS: &[&str] = &["Query", "Mutation", "Subscription"];
 
 /// DT.1j: the words that open a type-system definition, where a type header's
 /// `implements` name list stops (the legacy blank-separated form has no `&`).
-const SDL_DEFINITION_WORDS: &[&str] =
-    &["type", "input", "interface", "enum", "union", "scalar", "schema", "directive", "extend"];
+const SDL_DEFINITION_WORDS: &[&str] = &[
+    "type",
+    "input",
+    "interface",
+    "enum",
+    "union",
+    "scalar",
+    "schema",
+    "directive",
+    "extend",
+];
 
 /// DT.1j: the deepest selection-set nesting [`selection_shape`] reads; a set
 /// below it is skipped and its object marked open.
@@ -4182,19 +4605,29 @@ struct LineIndex {
 impl LineIndex {
     fn new(text: &str, base: u32) -> LineIndex {
         let mut starts = vec![0];
-        starts.extend(text.bytes().enumerate().filter(|&(_, c)| c == b'\n').map(|(i, _)| i + 1));
+        starts.extend(
+            text.bytes()
+                .enumerate()
+                .filter(|&(_, c)| c == b'\n')
+                .map(|(i, _)| i + 1),
+        );
         LineIndex { starts, base }
     }
 
     fn line(&self, at: usize) -> u32 {
         let row = self.starts.partition_point(|&s| s <= at).saturating_sub(1);
-        self.base.saturating_add(u32::try_from(row).unwrap_or(u32::MAX))
+        self.base
+            .saturating_add(u32::try_from(row).unwrap_or(u32::MAX))
     }
 }
 
 /// Nothing but blanks between the start of `at`'s line (or of `b`) and `at`.
 fn starts_line(b: &[u8], at: usize) -> bool {
-    b[..at.min(b.len())].iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t' || c == b'\r')
+    b[..at.min(b.len())]
+        .iter()
+        .rev()
+        .take_while(|&&c| c != b'\n')
+        .all(|&c| c == b' ' || c == b'\t' || c == b'\r')
 }
 
 /// The index past the GraphQL string opening at `i` (a `"` / `"""` block
@@ -4283,7 +4716,10 @@ fn sdl_value_end(b: &[u8], i: usize) -> usize {
         Some(b'[' | b'{') => sdl_close(b, i).map_or(b.len(), |c| c + 1),
         _ => {
             let mut k = i;
-            while b.get(k).is_some_and(|c| c.is_ascii_alphanumeric() || b"-+._".contains(c)) {
+            while b
+                .get(k)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || b"-+._".contains(c))
+            {
                 k += 1;
             }
             k
@@ -4326,14 +4762,21 @@ fn sdl_fields(s: &str, lines: &LineIndex, open: usize, close: usize) -> Vec<SdlF
             p = ty_start.max(q + 1);
             continue;
         };
-        let ty: String = s[ty_start..ty_end].chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+        let ty: String = s[ty_start..ty_end]
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != ',')
+            .collect();
         q = gql_skip(b, ty_end);
         if b.get(q) == Some(&b'=') {
             q = gql_skip(b, sdl_value_end(b, gql_skip(b, q + 1)));
         }
         q = sdl_skip_directives(s, q).unwrap_or(close);
         if !out.iter().any(|f| f.name == name) {
-            out.push(SdlField { name: name.to_string(), ty, line });
+            out.push(SdlField {
+                name: name.to_string(),
+                ty,
+                line,
+            });
         }
         p = q;
     }
@@ -4461,7 +4904,9 @@ fn sdl_defs(text: &str, base_line: u32) -> SdlDefs {
                 }
                 let (extend, kw, kw_end) = match word {
                     "extend" => match gql_name(text, gql_skip(b, end)) {
-                        Some((w, e)) if w == "schema" || SDL_FIELD_TYPES.contains(&w) => (true, w, e),
+                        Some((w, e)) if w == "schema" || SDL_FIELD_TYPES.contains(&w) => {
+                            (true, w, e)
+                        }
                         _ => {
                             i = end;
                             continue;
@@ -4472,10 +4917,12 @@ fn sdl_defs(text: &str, base_line: u32) -> SdlDefs {
                 if kw == "schema" {
                     let open = sdl_skip_directives(text, gql_skip(b, kw_end));
                     i = match open {
-                        Some(o) if b.get(o) == Some(&b'{') => match sdl_schema_roots(text, o, &mut roots) {
-                            Some(next) => next,
-                            None => break,
-                        },
+                        Some(o) if b.get(o) == Some(&b'{') => {
+                            match sdl_schema_roots(text, o, &mut roots) {
+                                Some(next) => next,
+                                None => break,
+                            }
+                        }
                         Some(o) => o,
                         None => break,
                     };
@@ -4544,7 +4991,13 @@ fn merge_type(types: &mut Vec<SdlTypeDef>, block: SdlTypeDef) {
 /// type with one array layer peeled (`[Item!]!` -> `Item`, array), at the
 /// field's 1-based line.
 fn returns_cell(f: &SdlField) -> Cell {
-    ServerWire::new(WireForm::GraphqlReturns, &f.ty, f.line.saturating_add(1), Shape::named(&f.ty)).cell()
+    ServerWire::new(
+        WireForm::GraphqlReturns,
+        &f.ty,
+        f.line.saturating_add(1),
+        Shape::named(&f.ty),
+    )
+    .cell()
 }
 
 /// DT.1j: the MESSAGE_TYPE nodes of SDL object / input / interface types.
@@ -4580,7 +5033,9 @@ pub fn extract_graphql_embedded_types(
 ) -> GraphqlTypes {
     let mut types: Vec<SdlTypeDef> = Vec::new();
     for (start, end) in gql_literal_regions(source) {
-        let Some(body) = source.get(start..end) else { continue };
+        let Some(body) = source.get(start..end) else {
+            continue;
+        };
         for t in sdl_defs(body, line_of(source, start)).types {
             merge_type(&mut types, t);
         }
@@ -4598,13 +5053,21 @@ pub fn extract_graphql_embedded_types(
 /// No `extends`: an object type redeclares every interface field it
 /// implements, so its list is complete.
 fn type_nodes(types: Vec<SdlTypeDef>, path: &str, module_id: NodeId, repo: RepoId) -> GraphqlTypes {
-    let mut out = GraphqlTypes { nodes: Vec::new(), edges: Vec::new(), nav: CodeNav::default() };
+    let mut out = GraphqlTypes {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        nav: CodeNav::default(),
+    };
     let file = serde_json::to_string(path).unwrap_or_else(|_| String::from("\"\""));
     for t in types {
         let qname = format!("message:graphql:{}", t.name);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, &qname);
         let schema = ModelSchema {
-            fields: t.fields.iter().map(|f| ModelField::new(&f.name, &f.ty, f.ty.ends_with('!'))).collect(),
+            fields: t
+                .fields
+                .iter()
+                .map(|f| ModelField::new(&f.name, &f.ty, f.ty.ends_with('!')))
+                .collect(),
             open: t.extend_only || t.holes,
             ..ModelSchema::new(WireFormat::Graphql)
         };
@@ -4625,7 +5088,12 @@ fn type_nodes(types: Vec<SdlTypeDef>, path: &str, module_id: NodeId, repo: RepoI
             },
             schema.cell(),
         ];
-        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+        out.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
         out.edges.push(Edge {
             from: module_id,
             to: id,
@@ -4633,7 +5101,13 @@ fn type_nodes(types: Vec<SdlTypeDef>, path: &str, module_id: NodeId, repo: RepoI
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        out.nav.record(id, &t.name, &qname, node_kind::MESSAGE_TYPE, Some(module_id));
+        out.nav.record(
+            id,
+            &t.name,
+            &qname,
+            node_kind::MESSAGE_TYPE,
+            Some(module_id),
+        );
     }
     out
 }
@@ -4713,7 +5187,9 @@ fn operation_selection(doc: &str) -> Option<(&str, Option<&str>, Shape)> {
                         j = gql_skip(b, e);
                     }
                 }
-                let Some(j) = gql_skip_args_and_directives(doc, j) else { break };
+                let Some(j) = gql_skip_args_and_directives(doc, j) else {
+                    break;
+                };
                 if b.get(j) == Some(&b'{') {
                     fragments.push((name, j));
                 }
@@ -4726,7 +5202,9 @@ fn operation_selection(doc: &str) -> Option<(&str, Option<&str>, Shape)> {
                     name = Some(n);
                     j = gql_skip(b, e);
                 }
-                let Some(j) = gql_skip_args_and_directives(doc, j) else { break };
+                let Some(j) = gql_skip_args_and_directives(doc, j) else {
+                    break;
+                };
                 if b.get(j) == Some(&b'{') {
                     operation.get_or_insert((word, name, j));
                 }
@@ -4748,13 +5226,27 @@ fn operation_selection(doc: &str) -> Option<(&str, Option<&str>, Shape)> {
         }
     }
     let (kind, name, open) = operation?;
-    let reader = SelectionReader { s: doc, b, fragments };
+    let reader = SelectionReader {
+        s: doc,
+        b,
+        fragments,
+    };
     let mut fields = Vec::new();
     let mut is_open = false;
-    if reader.set(open, 0, &mut Vec::new(), &mut fields, &mut is_open).is_none() {
+    if reader
+        .set(open, 0, &mut Vec::new(), &mut fields, &mut is_open)
+        .is_none()
+    {
         is_open = true;
     }
-    Some((kind, name, Shape::Object { fields, open: is_open }))
+    Some((
+        kind,
+        name,
+        Shape::Object {
+            fields,
+            open: is_open,
+        },
+    ))
 }
 
 /// One document's selection sets, read with its fragment definitions at
@@ -4812,12 +5304,19 @@ impl<'a> SelectionReader<'a> {
                     match gql_name(s, j) {
                         Some((name, end)) if name != "on" => {
                             let (next, conditional) = self.directives(gql_skip(b, end))?;
-                            let known = self.fragments.iter().find(|(f, _)| *f == name).map(|&(_, at)| at);
+                            let known = self
+                                .fragments
+                                .iter()
+                                .find(|(f, _)| *f == name)
+                                .map(|&(_, at)| at);
                             match known {
                                 Some(at) if !stack.contains(&name) => {
                                     stack.push(name);
                                     let mut spread = Vec::new();
-                                    if self.set(at, depth + 1, stack, &mut spread, open_set).is_none() {
+                                    if self
+                                        .set(at, depth + 1, stack, &mut spread, open_set)
+                                        .is_none()
+                                    {
                                         *open_set = true;
                                     }
                                     stack.pop();
@@ -4870,7 +5369,10 @@ impl<'a> SelectionReader<'a> {
                                 stopped = true;
                             }
                         }
-                        Shape::Object { fields, open: open_sub }
+                        Shape::Object {
+                            fields,
+                            open: open_sub,
+                        }
                     } else {
                         Shape::open("")
                     };
@@ -4900,8 +5402,13 @@ fn merge_selection(out: &mut Vec<ShapeField>, f: ShapeField) {
         return;
     };
     have.required |= f.required;
-    if let (Shape::Object { fields, open }, Shape::Object { fields: more, open: more_open }) =
-        (&mut have.shape, f.shape)
+    if let (
+        Shape::Object { fields, open },
+        Shape::Object {
+            fields: more,
+            open: more_open,
+        },
+    ) = (&mut have.shape, f.shape)
     {
         *open |= more_open;
         for m in more {
@@ -4948,7 +5455,11 @@ fn dart_imports_graphql(source: &str) -> bool {
     b.iter()
         .enumerate()
         .filter(|&(_, &c)| c == b'\'' || c == b'"')
-        .any(|(i, _)| DART_GRAPHQL_PACKAGES.iter().any(|p| quoted_module_at(b, i + 1, p)))
+        .any(|(i, _)| {
+            DART_GRAPHQL_PACKAGES
+                .iter()
+                .any(|p| quoted_module_at(b, i + 1, p))
+        })
 }
 
 /// DH.8: the Dart string literal opening at `at` (an `r` raw prefix, then
@@ -4972,7 +5483,12 @@ fn dart_literal(b: &[u8], at: usize) -> Option<(usize, usize, usize)> {
 /// `None` when neither does.
 fn dart_skip(b: &[u8], i: usize) -> Option<usize> {
     match (b.get(i)?, b.get(i + 1)) {
-        (b'/', Some(b'/')) => Some(b.get(i..)?.iter().position(|&c| c == b'\n').map_or(b.len(), |p| i + p)),
+        (b'/', Some(b'/')) => Some(
+            b.get(i..)?
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |p| i + p),
+        ),
         (b'/', Some(b'*')) => Some(find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2)),
         (b'\'' | b'"', _) | (b'r', Some(b'\'' | b'"')) => dart_literal(b, i).map(|(_, _, end)| end),
         _ => None,
@@ -5066,7 +5582,9 @@ fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s 
         let words: Vec<&str> = source.get(line_start..at)?.split_whitespace().collect();
         let declared = !words.is_empty()
             && words.iter().all(|w| DART_DECL_WORDS.contains(w))
-            && words.iter().any(|w| matches!(*w, "const" | "final" | "var"));
+            && words
+                .iter()
+                .any(|w| matches!(*w, "const" | "final" | "var"));
         let eq = skip_ascii_ws(b, end);
         if !declared || b.get(eq) != Some(&b'=') || matches!(b.get(eq + 1), Some(b'=' | b'>')) {
             return None;
@@ -5160,12 +5678,17 @@ fn client_request_operations(
             }
             tally.machinebox += 1;
             let arg = skip_ascii_ws(b, at + needle.len());
-            sites.push((at, go_literal(b, arg).and_then(|(doc, end)| ends_arg(b, end, b")").then_some(doc))));
+            sites.push((
+                at,
+                go_literal(b, arg).and_then(|(doc, end)| ends_arg(b, end, b")").then_some(doc)),
+            ));
         }
     }
-    let names_client = source.match_indices(GRAPHQL_CLIENT_NAMESPACE).any(|(at, ns)| {
-        !ident_byte_before(b, at) && !b.get(at + ns.len()).is_some_and(|&c| is_ident_byte(c))
-    });
+    let names_client = source
+        .match_indices(GRAPHQL_CLIENT_NAMESPACE)
+        .any(|(at, ns)| {
+            !ident_byte_before(b, at) && !b.get(at + ns.len()).is_some_and(|&c| is_ident_byte(c))
+        });
     if names_client {
         for &ty in GRAPHQL_CLIENT_REQUESTS {
             for (at, _) in source.match_indices(ty) {
@@ -5210,7 +5733,10 @@ fn machinebox_receivers(source: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (at, _) in source.match_indices(MACHINEBOX_IMPORT) {
         let head = source.get(..at).unwrap_or_default();
-        let head = head.get(head.rfind('\n').map_or(0, |p| p + 1)..).unwrap_or_default().trim();
+        let head = head
+            .get(head.rfind('\n').map_or(0, |p| p + 1)..)
+            .unwrap_or_default()
+            .trim();
         let head = head
             .strip_prefix("import")
             .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
@@ -5231,7 +5757,10 @@ fn machinebox_receivers(source: &str) -> Vec<String> {
 /// Where the (possibly `GraphQL.`-qualified) type name at `at` starts.
 fn qualifier_start(b: &[u8], at: usize) -> usize {
     let mut start = at;
-    while start >= 2 && b.get(start - 1) == Some(&b'.') && b.get(start - 2).is_some_and(|&c| is_ident_byte(c)) {
+    while start >= 2
+        && b.get(start - 1) == Some(&b'.')
+        && b.get(start - 2).is_some_and(|&c| is_ident_byte(c))
+    {
         start -= 1;
         while start >= 1 && b.get(start - 1).is_some_and(|&c| is_ident_byte(c)) {
             start -= 1;
@@ -5244,7 +5773,8 @@ fn qualifier_start(b: &[u8], at: usize) -> usize {
 /// or member: `,` or one of `closers`. Anything else (`+`, a call) makes the
 /// value a non-literal expression.
 fn ends_arg(b: &[u8], end: usize, closers: &[u8]) -> bool {
-    b.get(skip_ascii_ws(b, end)).is_some_and(|c| *c == b',' || closers.contains(c))
+    b.get(skip_ascii_ws(b, end))
+        .is_some_and(|c| *c == b',' || closers.contains(c))
 }
 
 /// The text of a one-line backslash-escaped string whose body starts at
@@ -5313,8 +5843,14 @@ fn cs_literal(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
     let (text, end) = if quotes >= 3 && !verbatim {
         let delim = vec![b'"'; quotes];
         let open = i + quotes;
-        let close = open + b.get(open..)?.windows(quotes).position(|w| w == delim.as_slice())?;
-        (String::from_utf8(b.get(open..close)?.to_vec()).ok()?, close + quotes)
+        let close = open
+            + b.get(open..)?
+                .windows(quotes)
+                .position(|w| w == delim.as_slice())?;
+        (
+            String::from_utf8(b.get(open..close)?.to_vec()).ok()?,
+            close + quotes,
+        )
     } else if verbatim {
         let mut text = Vec::new();
         let mut j = i + 1;
@@ -5343,7 +5879,12 @@ fn cs_literal(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
 /// end of the source.
 fn cs_skip_opaque(b: &[u8], i: usize) -> Option<usize> {
     match (*b.get(i)?, b.get(i + 1)) {
-        (b'/', Some(b'/')) => Some(b.get(i..)?.iter().position(|&x| x == b'\n').map_or(b.len(), |p| i + p)),
+        (b'/', Some(b'/')) => Some(
+            b.get(i..)?
+                .iter()
+                .position(|&x| x == b'\n')
+                .map_or(b.len(), |p| i + p),
+        ),
         (b'/', Some(b'*')) => Some(find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2)),
         (b'\'', _) => Some(find_close(b, i + 1, b"'", true).map_or(b.len(), |p| p + 1)),
         (c @ (b'"' | b'@' | b'$'), _) => match cs_literal(b, i) {
@@ -5429,12 +5970,20 @@ fn cs_initializer_query(b: &[u8], open: usize) -> Option<Option<String>> {
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => expect_member = true,
             _ if is_ident_byte(c) && depth == 0 && expect_member => {
-                let end = i + b.get(i..close)?.iter().take_while(|&&x| is_ident_byte(x)).count();
+                let end = i + b
+                    .get(i..close)?
+                    .iter()
+                    .take_while(|&&x| is_ident_byte(x))
+                    .count();
                 let eq = skip_ascii_ws(b, end);
-                if b.get(i..end) == Some(b"Query") && b.get(eq) == Some(&b'=') && b.get(eq + 1) != Some(&b'=') {
+                if b.get(i..end) == Some(b"Query")
+                    && b.get(eq) == Some(&b'=')
+                    && b.get(eq + 1) != Some(&b'=')
+                {
                     let value = skip_ascii_ws(b, eq + 1);
                     return Some(
-                        cs_literal(b, value).and_then(|(doc, end)| doc.filter(|_| ends_arg(b, end, b"}"))),
+                        cs_literal(b, value)
+                            .and_then(|(doc, end)| doc.filter(|_| ends_arg(b, end, b"}"))),
                     );
                 }
                 i = end;
@@ -5452,7 +6001,10 @@ fn cs_initializer_query(b: &[u8], open: usize) -> Option<Option<String>> {
 fn gql_skip(b: &[u8], mut i: usize) -> usize {
     while let Some(&c) = b.get(i) {
         if c == b'#' {
-            i += b.get(i..).and_then(|r| r.iter().position(|&x| x == b'\n')).unwrap_or(b.len() - i);
+            i += b
+                .get(i..)
+                .and_then(|r| r.iter().position(|&x| x == b'\n'))
+                .unwrap_or(b.len() - i);
         } else if c.is_ascii_whitespace() || c == b',' {
             i += 1;
         } else {
@@ -5494,10 +6046,17 @@ fn gql_close(b: &[u8], open: usize) -> Option<usize> {
 /// The GraphQL name (`[_A-Za-z][_0-9A-Za-z]*`) at `i`, and its end.
 fn gql_name(s: &str, i: usize) -> Option<(&str, usize)> {
     let b = s.as_bytes();
-    if !b.get(i).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_') {
+    if !b
+        .get(i)
+        .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_')
+    {
         return None;
     }
-    let end = i + b.get(i..)?.iter().take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_').count();
+    let end = i + b
+        .get(i..)?
+        .iter()
+        .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_')
+        .count();
     Some((s.get(i..end)?, end))
 }
 
@@ -5526,7 +6085,9 @@ fn gql_skip_args_and_directives(s: &str, i: usize) -> Option<usize> {
 fn is_anonymous_operation(doc: &str) -> bool {
     let b = doc.as_bytes();
     match gql_name(doc, gql_skip(b, 0)) {
-        Some(("query" | "mutation" | "subscription", end)) => gql_name(doc, gql_skip(b, end)).is_none(),
+        Some(("query" | "mutation" | "subscription", end)) => {
+            gql_name(doc, gql_skip(b, end)).is_none()
+        }
         Some(_) => false,
         None => true,
     }
@@ -5736,7 +6297,9 @@ fn client_positional_urls(source: &str, callee: &str) -> Vec<(usize, String)> {
     let b = source.as_bytes();
     source
         .match_indices(callee)
-        .filter(|&(at, _)| !ident_byte_before(b, at) && !in_line_comment(b, at) && preceded_by_new(b, at))
+        .filter(|&(at, _)| {
+            !ident_byte_before(b, at) && !in_line_comment(b, at) && preceded_by_new(b, at)
+        })
         .filter_map(|(at, _)| {
             let open = call_open(b, at + callee.len())?;
             single_url_literal(source, skip_ascii_ws(b, open + 1))
@@ -5745,7 +6308,10 @@ fn client_positional_urls(source: &str, callee: &str) -> Vec<(usize, String)> {
 }
 
 /// CB.24: sites in source order, one per literal, as `(authority, 0-based row)`.
-pub(crate) fn client_sites_in_order(source: &str, mut sites: Vec<(usize, String)>) -> Vec<(String, u32)> {
+pub(crate) fn client_sites_in_order(
+    source: &str,
+    mut sites: Vec<(usize, String)>,
+) -> Vec<(String, u32)> {
     sites.sort_by_key(|&(at, _)| at);
     sites.dedup_by_key(|&mut (at, _)| at);
     sites
@@ -5772,10 +6338,7 @@ fn preceded_by_new(b: &[u8], at: usize) -> bool {
         .iter()
         .rposition(|c| !c.is_ascii_whitespace())
         .map_or(0, |i| i + 1);
-    end < at
-        && end >= 3
-        && b.get(end - 3..end) == Some(b"new")
-        && !ident_byte_before(b, end - 3)
+    end < at && end >= 3 && b.get(end - 3..end) == Some(b"new") && !ident_byte_before(b, end - 3)
 }
 
 /// The `(` of a call whose callee ends at `from`: whitespace and one TS type
@@ -5832,7 +6395,10 @@ fn matching_close(b: &[u8], open: usize) -> Option<usize> {
                 continue;
             }
             b'/' if b.get(i + 1) == Some(&b'/') => {
-                i = b[i..].iter().position(|&x| x == b'\n').map_or(b.len(), |p| i + p);
+                i = b[i..]
+                    .iter()
+                    .position(|&x| x == b'\n')
+                    .map_or(b.len(), |p| i + p);
                 continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
@@ -5857,7 +6423,12 @@ fn matching_close(b: &[u8], open: usize) -> Option<usize> {
 /// `open..=close` whose key is one of `keys`: `(literal offset, authority)`.
 /// A key is an identifier right after the `{` or a `,`; a matching key bound
 /// to anything but one absolute-URL literal ends the search with `None`.
-fn top_level_url(source: &str, open: usize, close: usize, keys: &[&str]) -> Option<(usize, String)> {
+fn top_level_url(
+    source: &str,
+    open: usize,
+    close: usize,
+    keys: &[&str],
+) -> Option<(usize, String)> {
     top_level_value(source, open, close, keys).and_then(|at| single_url_literal(source, at))
 }
 
@@ -5880,7 +6451,10 @@ fn top_level_value(source: &str, open: usize, close: usize, keys: &[&str]) -> Op
             }
             b'/' if matches!(b.get(i + 1), Some(b'/' | b'*')) => {
                 i = if b[i + 1] == b'/' {
-                    b[i..].iter().position(|&x| x == b'\n').map_or(close, |p| i + p)
+                    b[i..]
+                        .iter()
+                        .position(|&x| x == b'\n')
+                        .map_or(close, |p| i + p)
                 } else {
                     find_close(b, i + 2, b"*/", false).map_or(close, |p| p + 2)
                 };
@@ -5898,7 +6472,10 @@ fn top_level_value(source: &str, open: usize, close: usize, keys: &[&str]) -> Op
                 continue;
             }
             _ if depth == 0 && expect_key && is_ident_byte(c) => {
-                let end = i + b[i..close].iter().take_while(|&&x| is_ident_byte(x)).count();
+                let end = i + b[i..close]
+                    .iter()
+                    .take_while(|&&x| is_ident_byte(x))
+                    .count();
                 let colon = skip_ascii_ws(b, end);
                 if keys.contains(&&source[i..end]) && b.get(colon) == Some(&b':') {
                     return Some(skip_ascii_ws(b, colon + 1));
@@ -6219,7 +6796,8 @@ fn placeholder_text(body: &str) -> String {
 
 /// True when `url` starts with `scheme` (`ws://`), ASCII case-insensitive.
 fn has_scheme(url: &str, scheme: &str) -> bool {
-    url.get(..scheme.len()).is_some_and(|h| h.eq_ignore_ascii_case(scheme))
+    url.get(..scheme.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(scheme))
 }
 
 fn is_ws_url(url: &str) -> bool {
@@ -6258,7 +6836,11 @@ fn transport_target(value: &UrlValue<'_>) -> Option<Dial> {
             return None;
         }
         let (path, changed) = normalise_client_path(url);
-        let host = if absolute { client_url_split(url).0 } else { None };
+        let host = if absolute {
+            client_url_split(url).0
+        } else {
+            None
+        };
         Some(Dial::Http(TransportTarget {
             path,
             raw: changed.then(|| url.to_string()),
@@ -6330,10 +6912,15 @@ fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
         // The clause runs to the `from` keyword (a whole word: never the
         // head of `fromEvent`); a quote or `;` first is a side-effect import
         // (`import 'x'`) or no import statement at all.
-        let Some(from_rel) = source[end..].match_indices("from").map(|(i, _)| i).find(|&i| {
-            let at = end + i;
-            !ident_byte_before(b, at) && !b.get(at + "from".len()).is_some_and(|&c| is_ident_byte(c))
-        }) else {
+        let Some(from_rel) = source[end..]
+            .match_indices("from")
+            .map(|(i, _)| i)
+            .find(|&i| {
+                let at = end + i;
+                !ident_byte_before(b, at)
+                    && !b.get(at + "from".len()).is_some_and(|&c| is_ident_byte(c))
+            })
+        else {
             continue;
         };
         let clause = &source[end..end + from_rel];
@@ -6344,7 +6931,8 @@ fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
         let Some(&q) = b.get(module_at).filter(|&&q| q == b'\'' || q == b'"') else {
             continue;
         };
-        let Some(module) = find_close(b, module_at + 1, &[q], true).and_then(|e| source.get(module_at + 1..e))
+        let Some(module) =
+            find_close(b, module_at + 1, &[q], true).and_then(|e| source.get(module_at + 1..e))
         else {
             continue;
         };
@@ -6354,7 +6942,10 @@ fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
             .filter(|item| !item.is_empty() && !item.starts_with('*'))
             .any(|item| {
                 let item = item.strip_prefix("type ").map_or(item, str::trim_start);
-                let name = item.rsplit_once(" as ").map_or(item, |(_, alias)| alias).trim();
+                let name = item
+                    .rsplit_once(" as ")
+                    .map_or(item, |(_, alias)| alias)
+                    .trim();
                 name == local
             });
         if binds {
@@ -6390,13 +6981,19 @@ fn sends_get(source: &str, open: usize, close: usize, get: GetOptIn) -> bool {
         return false;
     };
     let word = || {
-        let end = at + b[at..close].iter().take_while(|&&c| is_ident_byte(c)).count();
+        let end = at
+            + b[at..close]
+                .iter()
+                .take_while(|&&c| is_ident_byte(c))
+                .count();
         &source[at..end]
     };
     match get {
         GetOptIn::Apollo => word() == "true",
         // A string (`'within-url-limit'`, `'force'`) or any word but `false`.
-        GetOptIn::Urql => matches!(b.get(at), Some(b'\'' | b'"')) || !matches!(word(), "" | "false"),
+        GetOptIn::Urql => {
+            matches!(b.get(at), Some(b'\'' | b'"')) || !matches!(word(), "" | "false")
+        }
         GetOptIn::Request => match url_value(source, at) {
             Some((UrlValue::Literal(m), _)) => m.trim().eq_ignore_ascii_case("GET"),
             _ => false,
@@ -6421,7 +7018,10 @@ fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportS
     let b = source.as_bytes();
     let mut out = Vec::new();
     for (at, _) in source.match_indices(ctor.callee) {
-        if ident_byte_before(b, at) || in_line_comment(b, at) || (ctor.new && !preceded_by_new(b, at)) {
+        if ident_byte_before(b, at)
+            || in_line_comment(b, at)
+            || (ctor.new && !preceded_by_new(b, at))
+        {
             continue;
         }
         let Some(open) = call_open(b, at + ctor.callee.len()) else {
@@ -6437,7 +7037,11 @@ fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportS
                     continue;
                 };
                 if let Some(at) = top_level_value(source, arg, close, GQL_URL_KEYS) {
-                    out.push(TransportSite { at, options: Some((arg, close)), ctor });
+                    out.push(TransportSite {
+                        at,
+                        options: Some((arg, close)),
+                        ctor,
+                    });
                 }
             }
             UrlArg::Positional => {
@@ -6449,7 +7053,11 @@ fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportS
                     .then(|| skip_ascii_ws(b, next + 1))
                     .filter(|&o| b.get(o) == Some(&b'{'))
                     .and_then(|o| matching_close(b, o).map(|c| (o, c)));
-                out.push(TransportSite { at: arg, options, ctor });
+                out.push(TransportSite {
+                    at: arg,
+                    options,
+                    ctor,
+                });
             }
         }
     }
@@ -6469,7 +7077,11 @@ fn column_of(b: &[u8], at: usize) -> usize {
 /// ENDPOINT_HIT payload `push_client_endpoint_with` wrote, after its
 /// `raw` / `host`.
 fn append_transport_fields(node: &mut Node, template: Option<&str>) {
-    for cell in node.cells.iter_mut().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
+    for cell in node
+        .cells
+        .iter_mut()
+        .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+    {
         let CellPayload::Json(json) = &mut cell.payload else {
             continue;
         };
@@ -6591,7 +7203,12 @@ pub fn graphql_transport_endpoints(
                 append_transport_fields(node, target.template.as_deref());
             }
             if let Some(e) = out.edges.last_mut() {
-                evidence::attach(e, Evidence::emitter(TRANSPORT_EMITTER).rule(TRANSPORT_RULE).at(path, line0));
+                evidence::attach(
+                    e,
+                    Evidence::emitter(TRANSPORT_EMITTER)
+                        .rule(TRANSPORT_RULE)
+                        .at(path, line0),
+                );
             }
             match target.form {
                 UrlForm::Absolute => out.counts.absolute += 1,
@@ -6621,7 +7238,12 @@ mod tests {
     // DT.11b: a GraphQL client's transport ENDPOINT.
 
     fn transport_owner() -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::client::client")
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "src::client::client",
+        )
     }
 
     fn transport(src: &str) -> TransportNodes {
@@ -6648,7 +7270,10 @@ mod tests {
     }
 
     fn transport_qnames(src: &str) -> Vec<String> {
-        transport_hits(&transport(src)).into_iter().map(|(q, _)| q).collect()
+        transport_hits(&transport(src))
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect()
     }
 
     #[test]
@@ -6659,7 +7284,11 @@ mod tests {
             lines.borrow_mut().push(line);
             transport_owner()
         });
-        assert_eq!(*lines.borrow(), [3], "the owner is asked for the URL's 0-based row");
+        assert_eq!(
+            *lines.borrow(),
+            [3],
+            "the owner is asked for the URL's 0-based row"
+        );
         assert_eq!(
             transport_hits(&out),
             [(
@@ -6669,18 +7298,31 @@ mod tests {
         );
         assert_eq!(out.edges.len(), 1);
         let e = &out.edges[0];
-        assert_eq!((e.from, e.to, e.category), (transport_owner(), out.nodes[0].id, edge_category::CALLS));
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (transport_owner(), out.nodes[0].id, edge_category::CALLS)
+        );
         let ev = glia_code_domain::evidence::Evidence::of(e).expect("evidence");
         assert_eq!(ev.emitter, "extractor:graphql");
         assert_eq!(ev.rule.as_deref(), Some("graphql_transport"));
-        assert_eq!((ev.file.as_deref(), ev.line), (Some("src/client.ts"), Some(3)));
+        assert_eq!(
+            (ev.file.as_deref(), ev.line),
+            (Some("src/client.ts"), Some(3))
+        );
         assert_eq!(
             out.counts,
-            TransportCounts { absolute: 1, relative: 0, template: 0, skipped_ws: 0 }
+            TransportCounts {
+                absolute: 1,
+                relative: 0,
+                template: 0,
+                skipped_ws: 0
+            }
         );
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
-            Some("[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=0 path=src/client.ts")
+            Some(
+                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=0 path=src/client.ts"
+            )
         );
     }
 
@@ -6699,7 +7341,10 @@ mod tests {
         // `createHttpLink` and urql `new Client` read the same way; a bare
         // word and a protocol-relative URL name no endpoint.
         let more = "import { createHttpLink } from '@apollo/client';\nimport { Client } from '@urql/core';\nconst a = createHttpLink({ uri: '/api/graphql' });\nconst b = new Client({ url: '/gql', exchanges: [] });\nconst c = createHttpLink({ uri: 'graphql' });\nconst d = createHttpLink({ uri: '//cdn.example.com/graphql' });\n";
-        assert_eq!(transport_qnames(more), ["endpoint:POST:/api/graphql", "endpoint:POST:/gql"]);
+        assert_eq!(
+            transport_qnames(more),
+            ["endpoint:POST:/api/graphql", "endpoint:POST:/gql"]
+        );
     }
 
     #[test]
@@ -6709,9 +7354,19 @@ mod tests {
         let hits = transport_hits(&out);
         assert_eq!(
             hits.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>(),
-            ["endpoint:POST:${…}", "endpoint:POST:${…}/graphql", "endpoint:POST:/graphql"]
+            [
+                "endpoint:POST:${…}",
+                "endpoint:POST:${…}/graphql",
+                "endpoint:POST:/graphql"
+            ]
         );
-        assert!(hits[0].1.ends_with(r#""confidence":"medium","template":"${environment.graphqlUrl}","via":"graphql"}"#), "{}", hits[0].1);
+        assert!(
+            hits[0].1.ends_with(
+                r#""confidence":"medium","template":"${environment.graphqlUrl}","via":"graphql"}"#
+            ),
+            "{}",
+            hits[0].1
+        );
         assert!(hits[1].1.ends_with(r#""confidence":"medium","template":"${environment.apiUrl}/graphql","via":"graphql"}"#), "{}", hits[1].1);
         // An interpolated authority is no host; the path is read through it.
         assert!(hits[2].1.ends_with(r#""raw":"http://localhost:${…}/graphql","template":"http://localhost:${port}/graphql","via":"graphql"}"#), "{}", hits[2].1);
@@ -6726,7 +7381,8 @@ mod tests {
             "new ApolloClient({ uri })",
             "new ApolloClient({ uri: undefined })",
         ] {
-            let src = format!("import {{ ApolloClient }} from '@apollo/client';\nconst c = {body};\n");
+            let src =
+                format!("import {{ ApolloClient }} from '@apollo/client';\nconst c = {body};\n");
             assert!(transport(&src).nodes.is_empty(), "{body}");
         }
     }
@@ -6734,14 +7390,23 @@ mod tests {
     #[test]
     fn transport_get_for_queries_adds_get() {
         let apollo = "import { ApolloClient } from '@apollo/client';\nconst c = new ApolloClient({ uri: '/graphql', useGETForQueries: true, cache });\n";
-        assert_eq!(transport_qnames(apollo), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        assert_eq!(
+            transport_qnames(apollo),
+            ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]
+        );
         let out = transport(apollo);
         assert_eq!(out.edges.len(), 2);
         assert_eq!(out.counts.relative, 2);
         let urql = "import { createClient } from 'urql';\nconst c = createClient({ url: '/graphql', preferGetMethod: 'within-url-limit', exchanges });\n";
-        assert_eq!(transport_qnames(urql), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        assert_eq!(
+            transport_qnames(urql),
+            ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]
+        );
         let request = "import { GraphQLClient } from 'graphql-request';\nconst c = new GraphQLClient('/graphql', { method: 'GET' });\n";
-        assert_eq!(transport_qnames(request), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        assert_eq!(
+            transport_qnames(request),
+            ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]
+        );
         for body in [
             "import { ApolloClient } from '@apollo/client';\nconst c = new ApolloClient({ uri: '/graphql', useGETForQueries: false });\n",
             "import { createClient } from 'urql';\nconst c = createClient({ url: '/graphql', preferGetMethod: false });\n",
@@ -6758,11 +7423,27 @@ mod tests {
         // beside the HTTP client (the fixture's shape).
         let src = "import { ApolloClient, InMemoryCache, gql } from '@apollo/client/core';\nimport { createClient } from 'graphql-ws';\n\nexport const client = new ApolloClient({\n  uri: 'http://localhost:8080/graphql',\n  cache: new InMemoryCache(),\n});\n\nexport const wsClient = createClient({ url: 'ws://localhost:8080/subscriptions' });\n";
         let out = transport(src);
-        assert_eq!(transport_hits(&out).into_iter().map(|(q, _)| q).collect::<Vec<_>>(), ["endpoint:POST:/graphql"]);
-        assert_eq!(out.counts, TransportCounts { absolute: 1, relative: 0, template: 0, skipped_ws: 1 });
+        assert_eq!(
+            transport_hits(&out)
+                .into_iter()
+                .map(|(q, _)| q)
+                .collect::<Vec<_>>(),
+            ["endpoint:POST:/graphql"]
+        );
+        assert_eq!(
+            out.counts,
+            TransportCounts {
+                absolute: 1,
+                relative: 0,
+                template: 0,
+                skipped_ws: 1
+            }
+        );
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
-            Some("[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=1 path=src/client.ts")
+            Some(
+                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=1 path=src/client.ts"
+            )
         );
         // A graphql-ws client on a non-literal URL is a WebSocket too, and
         // an HTTP constructor handed a ws:// / wss:// URL dials no HTTP.
@@ -6772,7 +7453,9 @@ mod tests {
         assert_eq!(out.counts.skipped_ws, 3);
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
-            Some("[graphql-transport] endpoints=0 (absolute=0 relative=0 template=0) skipped_ws=3 path=src/client.ts")
+            Some(
+                "[graphql-transport] endpoints=0 (absolute=0 relative=0 template=0) skipped_ws=3 path=src/client.ts"
+            )
         );
     }
 
@@ -6787,7 +7470,11 @@ mod tests {
         let required = "import { ApolloClient } from '@apollo/client';\nconst { createClient } = require('redis');\nconst r = createClient({ url: 'http://cache:6379/' });\n";
         assert!(transport(required).nodes.is_empty());
         // No GraphQL client package at all.
-        assert!(transport("const c = new ApolloClient({ uri: '/graphql' });\n").nodes.is_empty());
+        assert!(
+            transport("const c = new ApolloClient({ uri: '/graphql' });\n")
+                .nodes
+                .is_empty()
+        );
         // urql's createClient, aliased graphql-ws beside it.
         let urql = "import { createClient } from 'urql';\nimport { createClient as createWsClient } from 'graphql-ws';\nconst ws = createWsClient({ url: 'ws://x/graphql' });\nconst c = createClient({ url: 'http://catalog-svc/graphql', exchanges });\n";
         assert_eq!(transport_qnames(urql), ["endpoint:POST:/graphql"]);
@@ -6842,7 +7529,10 @@ mod tests {
         let src = "import { ApolloClient, InMemoryCache } from \"@apollo/client\";\n\nexport const client = new ApolloClient({ uri: \"http://users-svc/graphql\", cache: new InMemoryCache() });\n";
         assert_eq!(graphql_client_hosts(src), hosts(&[("users-svc", 2)]));
         let generic = "import { ApolloClient } from '@apollo/client/core';\nconst c = new ApolloClient<NormalizedCacheObject>({\n  cache,\n  uri: 'https://users.internal:4000/graphql',\n});\n";
-        assert_eq!(graphql_client_hosts(generic), hosts(&[("users.internal:4000", 3)]));
+        assert_eq!(
+            graphql_client_hosts(generic),
+            hosts(&[("users.internal:4000", 3)])
+        );
     }
 
     /// CB.24: `new HttpLink({ uri })` and `createHttpLink({ uri })`; a link
@@ -6920,10 +7610,22 @@ mod tests {
         // The Apollo shapes beside them still count.
         let mixed = "const a = trpc.user.list.useQuery();\nconst { data } = useQuery(GET_USERS);";
         let result = extract_graphql_operation_nodes(mixed, "", module_id(), repo());
-        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:useQuery"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "graphql_op:useQuery")
+        );
         let apollo = "const res = await client.query({ query: GET_USERS });";
         let result = extract_graphql_operation_nodes(apollo, "", module_id(), repo());
-        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:client.query"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "graphql_op:client.query")
+        );
     }
 
     /// CJ.1b: in a `.rs` / `.py` file an operation needle or `` gql` `` tag
@@ -6947,8 +7649,13 @@ mod tests {
             q.sort();
             q
         };
-        let rs = extract_graphql_operation_nodes(&rust, "scanner/src/channels.rs", module_id(), repo());
-        assert!(rs.nodes.is_empty() && rs.anchors.is_empty(), "{:?}", qnames(&rs));
+        let rs =
+            extract_graphql_operation_nodes(&rust, "scanner/src/channels.rs", module_id(), repo());
+        assert!(
+            rs.nodes.is_empty() && rs.anchors.is_empty(),
+            "{:?}",
+            qnames(&rs)
+        );
 
         // Unguarded (TypeScript): each shape mints as it did before CJ.1b.
         let ts_hook = extract_graphql_operation_nodes(hook, "x.ts", module_id(), repo());
@@ -6956,7 +7663,11 @@ mod tests {
         let ts_doc = extract_graphql_operation_nodes(template, "x.ts", module_id(), repo());
         assert_eq!(qnames(&ts_doc), vec!["graphql_op:GetUsers"]);
         // The Rust file's text read as TypeScript still mints from its literals.
-        assert!(!extract_graphql_operation_nodes(&rust, "x.ts", module_id(), repo()).nodes.is_empty());
+        assert!(
+            !extract_graphql_operation_nodes(&rust, "x.ts", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
 
         let py = "from gql import gql\n\
                   QUERY = gql(\"query GetUsers { u }\")\n\
@@ -6966,24 +7677,43 @@ mod tests {
                   \x20   return client.query(QUERY)\n";
         let out = extract_graphql_operation_nodes(py, "client/ops.py", module_id(), repo());
         assert_eq!(qnames(&out), vec!["graphql_op:GetUsers"]);
-        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(
+            out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![5]
+        );
         let unguarded = extract_graphql_operation_nodes(py, "client/ops.ts", module_id(), repo());
-        assert_eq!(unguarded.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            unguarded.anchors.iter().map(|a| a.line).collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
     fn extracts_gql_template_name() {
         let source = r#"const GET_USERS = gql`query GetUsers { users { id name } }`;"#;
         let result = extract_graphql_operation_nodes(source, "", module_id(), repo());
-        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:GetUsers"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "graphql_op:GetUsers")
+        );
     }
 
     #[test]
     fn detects_resolver_decorator() {
-        let source = "import { Query } from '@nestjs/graphql';\n@Query()\nasync users() { return []; }";
+        let source =
+            "import { Query } from '@nestjs/graphql';\n@Query()\nasync users() { return []; }";
         let result = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         assert!(!result.nodes.is_empty());
-        assert!(result.nav.qname_by_id.values().any(|q| q.starts_with("graphql_resolver:")));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q.starts_with("graphql_resolver:"))
+        );
     }
 
     #[test]
@@ -6991,7 +7721,13 @@ mod tests {
         // LA.27: a bare SDL document is a `.graphql` body, read whole.
         let source = "type Query {\n  users: [User]\n}";
         let result = extract_graphql_sdl_file_nodes(source, module_id(), repo());
-        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_resolver:Query"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "graphql_resolver:Query")
+        );
     }
 
     #[test]
@@ -7010,11 +7746,13 @@ mod tests {
             result.nav.qname_by_id.values().collect::<Vec<_>>()
         );
         // The root noun the decorator sits on is retained.
-        assert!(result
-            .nav
-            .qname_by_id
-            .values()
-            .any(|q| q == "graphql_resolver:Query"));
+        assert!(
+            result
+                .nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "graphql_resolver:Query")
+        );
     }
 
     #[test]
@@ -7124,13 +7862,20 @@ mod tests {
 
     fn assert_no_ops(sources: &[&str]) {
         for source in sources {
-            assert!(op_qnames(source).is_empty(), "{source} -> {:?}", op_qnames(source));
+            assert!(
+                op_qnames(source).is_empty(),
+                "{source} -> {:?}",
+                op_qnames(source)
+            );
         }
     }
 
     fn assert_op(source: &str, qname: &str) {
         let qnames = op_qnames(source);
-        assert!(qnames.iter().any(|q| q == qname), "{source} -> {qnames:?}, want {qname}");
+        assert!(
+            qnames.iter().any(|q| q == qname),
+            "{source} -> {qnames:?}, want {qname}"
+        );
     }
 
     #[test]
@@ -7149,7 +7894,10 @@ mod tests {
             "graphql_op:request",
         );
         // The constructor alone is graphql-request context.
-        assert_op("const c = new GraphQLClient(url);\nawait c.request(DOC);", "graphql_op:request");
+        assert_op(
+            "const c = new GraphQLClient(url);\nawait c.request(DOC);",
+            "graphql_op:request",
+        );
         // A longer name ending in `request` is not graphql-request's call.
         assert_no_ops(&["import { request } from 'graphql-request';\nhandle_request(x);"]);
         // TanStack's hook is rejected, but graphql-request's call inside it
@@ -7177,7 +7925,10 @@ mod tests {
             "client.query(sql, params)",
             "client.query({ text: q, values })",
         ]);
-        assert_op("client.mutate({\n  mutation: ADD_USER,\n})", "graphql_op:client.mutate");
+        assert_op(
+            "client.mutate({\n  mutation: ADD_USER,\n})",
+            "graphql_op:client.mutate",
+        );
         assert_op(
             "import { createClient } from 'urql';\nclient.query(USERS, {}).toPromise();",
             "graphql_op:client.query",
@@ -7230,11 +7981,18 @@ mod tests {
         assert_eq!(hits, vec![("request".to_string(), 2, None)]);
         assert_eq!(
             tally.marker().as_deref(),
-            Some("[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=client+graphql-request+gql-tag")
+            Some(
+                "[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=client+graphql-request+gql-tag"
+            )
         );
 
         // No needle hit, no marker line.
-        assert_eq!(scan_operation_needles("const x = 1;", &mut LazyGuard::new("", "const x = 1;")).1.marker(), None);
+        assert_eq!(
+            scan_operation_needles("const x = 1;", &mut LazyGuard::new("", "const x = 1;"))
+                .1
+                .marker(),
+            None
+        );
     }
 
     // LA.27. Every source below is a one-line Rust string (`\n` escapes), so
@@ -7250,7 +8008,10 @@ mod tests {
 
     fn assert_resolvers(source: &str, lang: &str, want: &[&str]) {
         let got = resolver_qnames(source, lang);
-        let want: Vec<String> = want.iter().map(|n| format!("graphql_resolver:{n}")).collect();
+        let want: Vec<String> = want
+            .iter()
+            .map(|n| format!("graphql_resolver:{n}"))
+            .collect();
         assert_eq!(got, want, "{source}");
     }
 
@@ -7268,7 +8029,11 @@ mod tests {
 
     #[test]
     fn sdl_in_an_unmarked_string_mints_nothing() {
-        assert_resolvers(r#"let sdl = "type Query {\n  getUser(id: ID!): User\n}\n";"#, "rust", &[]);
+        assert_resolvers(
+            r#"let sdl = "type Query {\n  getUser(id: ID!): User\n}\n";"#,
+            "rust",
+            &[],
+        );
         // A multi-line raw string: the block scan read it line by line.
         let raw = "#[test]\nfn schema_routes() {\n    let sdl = r#\"\ntype Subscription {\n  orderShipped: Order\n}\n\"#;\n    assert!(!sdl.is_empty());\n}\n";
         assert_resolvers(raw, "rust", &[]);
@@ -7291,7 +8056,11 @@ mod tests {
         let out = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
         assert_eq!(anchor_line(&out, "graphql_resolver:listOrders"), Some(4));
-        assert_eq!(out.nodes.len(), 2, "`type Order {{` is an object type, never a resolver");
+        assert_eq!(
+            out.nodes.len(),
+            2,
+            "`type Order {{` is an object type, never a resolver"
+        );
         assert_eq!(
             embedded_sdl(source).marker().as_deref(),
             Some("[graphql-sdl-code] literals=1 roots=Query fields=1 unmarked_roots=0")
@@ -7311,20 +8080,36 @@ mod tests {
         let source = "func Schema() *graphql.Schema {\n\treturn graphql.MustParseSchema(`\n\ttype Query {\n\t\tuser(id: ID!): User\n\t}\n`, &resolver{})\n}\n";
         assert_resolvers(source, "go", &["Query", "user"]);
         // A schema string passed by name is not a marked literal.
-        assert_resolvers("var s = `\ntype Query {\n  user: User\n}\n`\nvar _ = graphql.MustParseSchema(s, &r{})\n", "go", &[]);
+        assert_resolvers(
+            "var s = `\ntype Query {\n  user: User\n}\n`\nvar _ = graphql.MustParseSchema(s, &r{})\n",
+            "go",
+            &[],
+        );
         // `rebuildSchema(` is not `buildSchema(`.
-        assert_resolvers("rebuildSchema(`\ntype Query {\n  user: User\n}\n`)\n", "go", &[]);
+        assert_resolvers(
+            "rebuildSchema(`\ntype Query {\n  user: User\n}\n`)\n",
+            "go",
+            &[],
+        );
     }
 
     #[test]
     fn ruby_graphql_heredoc_mints_fields() {
         let source = "class Schema\n  DEFINITION = <<~GRAPHQL\n    type Query {\n      posts: [Post]\n    }\n  GRAPHQL\nend\nSchema2 = GraphQL::Schema.from_definition(<<-GQL)\n  extend type Mutation {\n    deletePost(id: ID!): Boolean\n  }\nGQL\n";
-        assert_resolvers(source, "ruby", &["Mutation", "Query", "deletePost", "posts"]);
+        assert_resolvers(
+            source,
+            "ruby",
+            &["Mutation", "Query", "deletePost", "posts"],
+        );
         let out = extract_graphql_resolver_nodes(source, "ruby", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:posts"), Some(3));
         assert_eq!(anchor_line(&out, "graphql_resolver:deletePost"), Some(9));
         // No terminator line: no region, and no panic.
-        assert_resolvers("q = <<~GRAPHQL\n  type Query {\n    posts: [Post]\n  }\n", "ruby", &[]);
+        assert_resolvers(
+            "q = <<~GRAPHQL\n  type Query {\n    posts: [Post]\n  }\n",
+            "ruby",
+            &[],
+        );
     }
 
     #[test]
@@ -7345,10 +8130,22 @@ mod tests {
     #[test]
     fn typedefs_bindings_mint_fields() {
         for (source, lang) in [
-            ("export const typeDefs: string = `\ntype Query {\n  me: User\n}\n`;\n", "typescript"),
-            ("type_defs = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n", "python"),
-            ("type_defs: str = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n", "python"),
-            ("new ApolloServer({\n  typeDefs: `\n    type Query {\n      me: User\n    }\n  `,\n  resolvers,\n});\n", "typescript"),
+            (
+                "export const typeDefs: string = `\ntype Query {\n  me: User\n}\n`;\n",
+                "typescript",
+            ),
+            (
+                "type_defs = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
+                "python",
+            ),
+            (
+                "type_defs: str = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
+                "python",
+            ),
+            (
+                "new ApolloServer({\n  typeDefs: `\n    type Query {\n      me: User\n    }\n  `,\n  resolvers,\n});\n",
+                "typescript",
+            ),
         ] {
             assert_resolvers(source, lang, &["Query", "me"]);
         }
@@ -7374,7 +8171,14 @@ mod tests {
         // A root opener mid-line is not a line start, and `b` is unread.
         assert_resolvers(source, "typescript", &[]);
         // Unterminated openers of every shape end the scan cleanly.
-        for tail in ["gql`", "gql(\"", "gql(\"\"\"", "typeDefs = '", "/* GraphQL */", "<<~GRAPHQL"] {
+        for tail in [
+            "gql`",
+            "gql(\"",
+            "gql(\"\"\"",
+            "typeDefs = '",
+            "/* GraphQL */",
+            "<<~GRAPHQL",
+        ] {
             assert!(gql_literal_regions(tail).is_empty(), "{tail}");
         }
     }
@@ -7422,7 +8226,8 @@ mod tests {
         // HEAD: Query.
         assert_resolvers("// @Query(() => X)\nfunc f() {}", "go", &[]);
         // The same decorator in a GraphQL server file of the TypeScript family.
-        let nest = "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
+        let nest =
+            "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
         for lang in ["typescript", "angular", "vue", "react"] {
             assert_resolvers(nest, lang, &["Query", "users"]);
         }
@@ -7433,7 +8238,8 @@ mod tests {
     fn decorator_family_needs_a_graphql_import() {
         // @nestjs/common's query-string parameter decorator (HEAD: Query).
         assert_resolvers(REST_CONTROLLER, "typescript", &[]);
-        let graphql = "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
+        let graphql =
+            "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
         assert_resolvers(graphql, "typescript", &["Query", "users"]);
         // A multi-line import, and TypeGraphQL.
         let multi_line = "import {\n  Args,\n  Query,\n} from \"@nestjs/graphql\";\n@Query(() => [User])\nasync users() {}";
@@ -7441,7 +8247,8 @@ mod tests {
         let type_graphql = "import { Query, Resolver } from 'type-graphql';\n@Query(() => [User])\nasync users() {}";
         assert_resolvers(type_graphql, "typescript", &["Query", "users"]);
         // A package that only starts with the name is not it.
-        let lookalike = "import { Query } from '@nestjs/graphql-x';\n@Query(() => [User])\nasync users() {}";
+        let lookalike =
+            "import { Query } from '@nestjs/graphql-x';\n@Query(() => [User])\nasync users() {}";
         assert_resolvers(lookalike, "typescript", &[]);
         // Python: strawberry-like package names are not strawberry.
         let fields = "from strawberryfields import ops\n@strawberry.type\nclass Query:\n    x: int";
@@ -7461,7 +8268,11 @@ mod tests {
     fn only_root_types_are_nouns() {
         // HEAD adds Resolver and ResolveField.
         let source = "import { Resolver, ResolveField, Query, Subscription } from '@nestjs/graphql';\n@Resolver(() => Recipe)\nexport class R {\n  @Query(() => [Recipe])\n  recipes() {}\n  @Subscription(() => Recipe)\n  added() {}\n  @ResolveField()\n  author() {}\n}";
-        assert_resolvers(source, "typescript", &["Query", "Subscription", "added", "author", "recipes"]);
+        assert_resolvers(
+            source,
+            "typescript",
+            &["Query", "Subscription", "added", "author", "recipes"],
+        );
         let out = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         // CB.4: both root nouns anchor at `export class R {`; fields keep
         // their method lines.
@@ -7475,7 +8286,11 @@ mod tests {
         let strawberry = "import strawberry\n\n@strawberry.type\nclass Recipe:\n    title: str\n\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def recipe(self) -> Recipe: ...\n\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation\n    def add(self) -> Recipe: ...";
         // HEAD: strawberry.type + strawberry.mutation. CB.14: the root
         // classes' fields too.
-        assert_resolvers(strawberry, "python", &["Mutation", "Query", "add", "recipe"]);
+        assert_resolvers(
+            strawberry,
+            "python",
+            &["Mutation", "Query", "add", "recipe"],
+        );
         let out = extract_graphql_resolver_nodes(strawberry, "python", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(7));
         assert_eq!(anchor_line(&out, "graphql_resolver:Mutation"), Some(12));
@@ -7499,33 +8314,60 @@ mod tests {
     fn census_counts_every_rejection() {
         let census = |source: &str, lang: &str| decorator_scan(source, lang).1;
         let java = census(JPA_REPOSITORY, "java");
-        assert_eq!((java.hits, java.rej_lang, java.rej_import, java.rej_position), (1, 1, 0, 0));
+        assert_eq!(
+            (java.hits, java.rej_lang, java.rej_import, java.rej_position),
+            (1, 1, 0, 0)
+        );
         let rest = census(REST_CONTROLLER, "typescript");
-        assert_eq!((rest.hits, rest.rej_lang, rest.rej_import, rest.rej_position), (1, 0, 1, 0));
+        assert_eq!(
+            (rest.hits, rest.rej_lang, rest.rej_import, rest.rej_position),
+            (1, 0, 1, 0)
+        );
         let mixed = census(COMMENT_AND_STRING, "typescript");
-        assert_eq!((mixed.hits, mixed.rej_lang, mixed.rej_import, mixed.rej_position), (3, 0, 0, 2));
+        assert_eq!(
+            (
+                mixed.hits,
+                mixed.rej_lang,
+                mixed.rej_import,
+                mixed.rej_position
+            ),
+            (3, 0, 0, 2)
+        );
         assert_eq!((mixed.roots.as_slice(), mixed.fields), (&["Query"][..], 1));
 
         assert_eq!(
             java.marker("java").as_deref(),
-            Some("[graphql-decorators] lang=java import=none roots= fields=0 rejected lang=1 import=0 position=0")
+            Some(
+                "[graphql-decorators] lang=java import=none roots= fields=0 rejected lang=1 import=0 position=0"
+            )
         );
         assert_eq!(
             rest.marker("typescript").as_deref(),
-            Some("[graphql-decorators] lang=typescript import=none roots= fields=0 rejected lang=0 import=1 position=0")
+            Some(
+                "[graphql-decorators] lang=typescript import=none roots= fields=0 rejected lang=0 import=1 position=0"
+            )
         );
         let resolver = "import { Args, Mutation, Query, Resolver } from \"@nestjs/graphql\";\n\n@Resolver(() => Recipe)\nexport class RecipesResolver {\n  @Query(() => [Recipe])\n  async recipes() {\n    return [];\n  }\n\n  @Mutation(() => Recipe)\n  async addRecipe(@Args(\"title\") title: string) {\n    return { title };\n  }\n}";
         assert_eq!(
-            census(resolver, "typescript").marker("typescript").as_deref(),
-            Some("[graphql-decorators] lang=typescript import=@nestjs/graphql roots=Query,Mutation fields=2 rejected lang=0 import=0 position=0")
+            census(resolver, "typescript")
+                .marker("typescript")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=typescript import=@nestjs/graphql roots=Query,Mutation fields=2 rejected lang=0 import=0 position=0"
+            )
         );
         let py = "import strawberry\n@strawberry.type\nclass Query:\n    x: int";
         assert_eq!(
             census(py, "python").marker("python").as_deref(),
-            Some("[graphql-decorators] lang=python import=strawberry roots=Query fields=0 rejected lang=0 import=0 position=0")
+            Some(
+                "[graphql-decorators] lang=python import=strawberry roots=Query fields=0 rejected lang=0 import=0 position=0"
+            )
         );
         // No needle, no marker line.
-        assert_eq!(census("const x = 1;", "typescript").marker("typescript"), None);
+        assert_eq!(
+            census("const x = 1;", "typescript").marker("typescript"),
+            None
+        );
     }
 
     // CB.14. Python root-class field resolvers, named by their schema field.
@@ -7537,12 +8379,24 @@ mod tests {
         let source = "import strawberry\n\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def user(self, id: strawberry.ID) -> User:\n        @strawberry.field\n        def inner(self) -> int:\n            return 1\n        return User()\n\n    @strawberry.field\n    @cached\n    async def current_user(self) -> User:\n        return User()\n\n    # a comment at the member indent\n    def helper(self) -> None: ...\n";
         assert_resolvers(source, "python", &["Query", "currentUser", "user"]);
         let out = extract_graphql_resolver_nodes(source, "python", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:user"), Some(5), "the `def` line");
-        assert_eq!(anchor_line(&out, "graphql_resolver:currentUser"), Some(13), "past `@cached`");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:user"),
+            Some(5),
+            "the `def` line"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:currentUser"),
+            Some(13),
+            "past `@cached`"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
         // Mutation and Subscription roots read the same way.
         let roots = "import strawberry\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation\n    def add_book(self, title: str) -> Book: ...\n@strawberry.type\nclass Subscription:\n    @strawberry.subscription\n    async def book_added(self) -> AsyncGenerator[Book, None]: ...\n";
-        assert_resolvers(roots, "python", &["Mutation", "Subscription", "addBook", "bookAdded"]);
+        assert_resolvers(
+            roots,
+            "python",
+            &["Mutation", "Subscription", "addBook", "bookAdded"],
+        );
         // A decorator whose next member is no method names nothing.
         let dangling = "import strawberry\n@strawberry.type\nclass Query:\n    @strawberry.field\n    x: int\n";
         assert_resolvers(dangling, "python", &["Query"]);
@@ -7560,9 +8414,16 @@ mod tests {
         // A `name=` of a nested call, in a string or a comment, a longer
         // keyword and a non-literal value are not the field's name.
         let decoys = "import strawberry\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation(permission_classes=[P(name=\"x\")], description=\"name='y'\")\n    def add_book(self) -> Book: ...\n    @strawberry.mutation(graphql_name=\"z\")  # name=\"w\"\n    def drop_book(self) -> Book: ...\n    @strawberry.mutation(name=NAME)\n    def lend_book(self) -> Book: ...\n";
-        assert_resolvers(decoys, "python", &["Mutation", "addBook", "dropBook", "lendBook"]);
+        assert_resolvers(
+            decoys,
+            "python",
+            &["Mutation", "addBook", "dropBook", "lendBook"],
+        );
         assert_eq!(py_name_kwarg("(User, name=\"me\")").as_deref(), Some("me"));
-        assert_eq!(py_name_kwarg("(name == \"x\", name=\"y\")").as_deref(), Some("y"));
+        assert_eq!(
+            py_name_kwarg("(name == \"x\", name=\"y\")").as_deref(),
+            Some("y")
+        );
         assert_eq!(py_name_kwarg("(name=\"not-a-name\")"), None);
         assert_eq!(py_name_kwarg("(name=\"unterminated"), None);
     }
@@ -7581,21 +8442,46 @@ mod tests {
     #[test]
     fn graphene_fields_anchor_at_resolve() {
         // bench/substrate-gap/fixtures/py-graphene-fields/server/schema.py.
-        assert_resolvers(GRAPHENE_SCHEMA, "python", &["Query", "allUsers", "userById"]);
+        assert_resolvers(
+            GRAPHENE_SCHEMA,
+            "python",
+            &["Query", "allUsers", "userById"],
+        );
         let out = extract_graphql_resolver_nodes(GRAPHENE_SCHEMA, "python", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:allUsers"), Some(12), "resolve_all_users");
-        assert_eq!(anchor_line(&out, "graphql_resolver:userById"), Some(15), "resolve_user_by_id");
         assert_eq!(
-            decorator_scan(GRAPHENE_SCHEMA, "python").1.marker("python").as_deref(),
-            Some("[graphql-decorators] lang=python import=graphene roots=Query fields=2 rejected lang=0 import=0 position=0")
+            anchor_line(&out, "graphql_resolver:allUsers"),
+            Some(12),
+            "resolve_all_users"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:userById"),
+            Some(15),
+            "resolve_user_by_id"
+        );
+        assert_eq!(
+            decorator_scan(GRAPHENE_SCHEMA, "python")
+                .1
+                .marker("python")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=python import=graphene roots=Query fields=2 rejected lang=0 import=0 position=0"
+            )
         );
         // No resolve_ method: the attribute line. Bare types, relay fields,
         // a multi-line call with an explicit name, and a non-field call.
         let shapes = "from graphene import ObjectType, String, List, relay\nclass Query(ObjectType):\n    node = relay.Node.Field()\n    version = String()\n    all_posts = relay.ConnectionField(PostConnection)\n    viewer = graphene.Field(\n        User,\n        name=\"me\",\n    )\n    cache = make_cache()\n    enum = graphene.Enum('E', [])\n\n    @staticmethod\n    async def resolve_version(root, info):\n        return \"1\"\n";
-        assert_resolvers(shapes, "python", &["Query", "allPosts", "me", "node", "version"]);
+        assert_resolvers(
+            shapes,
+            "python",
+            &["Query", "allPosts", "me", "node", "version"],
+        );
         let out = extract_graphql_resolver_nodes(shapes, "python", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:node"), Some(2));
-        assert_eq!(anchor_line(&out, "graphql_resolver:version"), Some(13), "async resolve_version");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:version"),
+            Some(13),
+            "async resolve_version"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:me"), Some(5));
     }
 
@@ -7676,11 +8562,16 @@ mod tests {
         let out = extract_graphql_operation_nodes(src, "client/client.go", module_id(), repo());
         let qnames: Vec<&String> = out.nav.qname_by_id.values().collect();
         assert_eq!(qnames, vec!["graphql_op:orders"]);
-        assert_eq!(out.nodes.first().map(|n| n.confidence), Some(Confidence::Medium));
+        assert_eq!(
+            out.nodes.first().map(|n| n.confidence),
+            Some(Confidence::Medium)
+        );
         assert_eq!(anchor_line(&out, "graphql_op:orders"), Some(10));
         assert_eq!(
             request_tally(src, "client/client.go").marker().as_deref(),
-            Some("[graphql-ops] client-request machinebox=1 graphql-client=0 named=0 root_field=1 unread=0")
+            Some(
+                "[graphql-ops] client-request machinebox=1 graphql-client=0 named=0 root_field=1 unread=0"
+            )
         );
     }
 
@@ -7696,7 +8587,15 @@ mod tests {
             vec!["graphql_op:ListOrders", "graphql_op:cancelOrder"]
         );
         let tally = request_tally(alias, "c.go");
-        assert_eq!((tally.machinebox, tally.named, tally.root_field, tally.unread), (2, 1, 1, 0));
+        assert_eq!(
+            (
+                tally.machinebox,
+                tally.named,
+                tally.root_field,
+                tally.unread
+            ),
+            (2, 1, 1, 0)
+        );
         // A dot import has no receiver.
         let dot = "import . \"github.com/machinebox/graphql\"\nvar r = NewRequest(`{ shipments { id } }`)\nvar h, _ = http.NewRequest(\"GET\", u, nil)\n";
         assert_eq!(op_qnames_at(dot, "c.go"), vec!["graphql_op:shipments"]);
@@ -7707,13 +8606,18 @@ mod tests {
     #[test]
     fn graphql_client_request_initializer_and_ctor() {
         let fixture = "using GraphQL;\nusing GraphQL.Client.Http;\n\npublic class BookClient\n{\n    public async Task Load(GraphQLHttpClient client)\n    {\n        var request = new GraphQLRequest { Query = \"query { books { title } }\" };\n        await client.SendQueryAsync<object>(request);\n    }\n}\n";
-        let out = extract_graphql_operation_nodes(fixture, "client/BookClient.cs", module_id(), repo());
+        let out =
+            extract_graphql_operation_nodes(fixture, "client/BookClient.cs", module_id(), repo());
         let qnames: Vec<&String> = out.nav.qname_by_id.values().collect();
         assert_eq!(qnames, vec!["graphql_op:books"]);
         assert_eq!(anchor_line(&out, "graphql_op:books"), Some(7));
         assert_eq!(
-            request_tally(fixture, "client/BookClient.cs").marker().as_deref(),
-            Some("[graphql-ops] client-request machinebox=0 graphql-client=1 named=0 root_field=1 unread=0")
+            request_tally(fixture, "client/BookClient.cs")
+                .marker()
+                .as_deref(),
+            Some(
+                "[graphql-ops] client-request machinebox=0 graphql-client=1 named=0 root_field=1 unread=0"
+            )
         );
 
         let forms = [
@@ -7730,7 +8634,11 @@ mod tests {
         ];
         for form in forms {
             let src = format!("using GraphQL.Client.Abstractions;\n{form}");
-            assert_eq!(op_qnames_at(&src, "x.cs"), vec!["graphql_op:books"], "{form}");
+            assert_eq!(
+                op_qnames_at(&src, "x.cs"),
+                vec!["graphql_op:books"],
+                "{form}"
+            );
         }
         let named = "using GraphQL.Client.Http;\nvar r = new GraphQLRequest { Query = @\"query BookShelf { books { title } }\" };\n";
         assert_eq!(op_qnames_at(named, "x.cs"), vec!["graphql_op:BookShelf"]);
@@ -7746,9 +8654,18 @@ mod tests {
                 "query Recent($n: [Int!] = [1, 2], $s: String = \"a)b\") @live @cached(ttl: 60) {\n  recent: orders(first: $n) { id }\n}",
                 Some("orders"),
             ),
-            ("# a comment\n\n  mutation { createOrder(input: {sku: \"x\"}) { id } }", Some("createOrder")),
-            ("subscription @auth(role: \"x\") { orderShipped { id } }", Some("orderShipped")),
-            ("{ __typename __schema { types { name } } shipments { id } }", Some("shipments")),
+            (
+                "# a comment\n\n  mutation { createOrder(input: {sku: \"x\"}) { id } }",
+                Some("createOrder"),
+            ),
+            (
+                "subscription @auth(role: \"x\") { orderShipped { id } }",
+                Some("orderShipped"),
+            ),
+            (
+                "{ __typename __schema { types { name } } shipments { id } }",
+                Some("shipments"),
+            ),
             ("{ __typename }", None),
             ("fragment F on Order { id }", None),
             ("{ ...F }", None),
@@ -7790,7 +8707,10 @@ mod tests {
             go_doc.trim()
         );
         assert!(op_qnames_at(&rust, "scanner/src/samples.rs").is_empty());
-        assert_eq!(op_qnames_at(&rust, "x.go"), vec!["graphql_op:books", "graphql_op:orders"]);
+        assert_eq!(
+            op_qnames_at(&rust, "x.go"),
+            vec!["graphql_op:books", "graphql_op:orders"]
+        );
     }
 
     #[test]
@@ -7805,7 +8725,9 @@ mod tests {
         let tally = request_tally(cs, "x.cs");
         assert_eq!(
             tally.marker().as_deref(),
-            Some("[graphql-ops] client-request machinebox=0 graphql-client=6 named=0 root_field=0 unread=6")
+            Some(
+                "[graphql-ops] client-request machinebox=0 graphql-client=6 named=0 root_field=0 unread=6"
+            )
         );
     }
 
@@ -7818,17 +8740,34 @@ mod tests {
     fn hotchocolate_query_class_fields() {
         assert_resolvers(HC_QUERY, "csharp", &["Query", "books"]);
         let out = extract_graphql_resolver_nodes(HC_QUERY, "csharp", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2), "the class line");
-        assert_eq!(anchor_line(&out, "graphql_resolver:books"), Some(4), "the method line");
         assert_eq!(
-            decorator_scan(HC_QUERY, "csharp").1.marker("csharp").as_deref(),
-            Some("[graphql-decorators] lang=csharp import=hotchocolate roots=Query fields=1 rejected lang=0 import=0 position=0")
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(2),
+            "the class line"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:books"),
+            Some(4),
+            "the method line"
+        );
+        assert_eq!(
+            decorator_scan(HC_QUERY, "csharp")
+                .1
+                .marker("csharp")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=csharp import=hotchocolate roots=Query fields=1 rejected lang=0 import=0 position=0"
+            )
         );
         // The source-generator shape: a `[QueryType]` static class whose
         // static methods and properties are the fields, a namespace block,
         // a multi-line signature, a block body holding braces in strings.
         let generated = "using HotChocolate.Types;\n\nnamespace Shop\n{\n    [QueryType]\n    public static partial class BookQueries\n    {\n        public static Book GetBookById(\n            int id,\n            [Service] IRepo repo) => repo.Find(id);\n\n        public static async Task<Author> GetAuthorAsync(int id)\n        {\n            var s = \"}\";\n            return new Author { Name = $\"{s}\" };\n        }\n\n        public static string Version { get; } = \"1\";\n\n        public static string Hello => \"world\";\n    }\n}\n";
-        assert_resolvers(generated, "csharp", &["Query", "author", "bookById", "hello", "version"]);
+        assert_resolvers(
+            generated,
+            "csharp",
+            &["Query", "author", "bookById", "hello", "version"],
+        );
         let out = extract_graphql_resolver_nodes(generated, "csharp", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(5));
         assert_eq!(anchor_line(&out, "graphql_resolver:bookById"), Some(7));
@@ -7836,7 +8775,11 @@ mod tests {
         // Mutation / Subscription by name, an attribute on the class line, a
         // file-scoped namespace and `global using`.
         let roots = "global using HotChocolate;\nnamespace Shop;\npublic sealed class Mutation\n{\n    public Book AddBook(string title) => new(title);\n}\n[SubscriptionType] public class Events\n{\n    public Book OnBookAdded([EventMessage] Book book) => book;\n}\n";
-        assert_resolvers(roots, "csharp", &["Mutation", "Subscription", "addBook", "onBookAdded"]);
+        assert_resolvers(
+            roots,
+            "csharp",
+            &["Mutation", "Subscription", "addBook", "onBookAdded"],
+        );
     }
 
     #[test]
@@ -7844,11 +8787,19 @@ mod tests {
         let source = "using HotChocolate;\nusing HotChocolate.Types;\n\n[ExtendObjectType(OperationTypeNames.Mutation)]\npublic class OrderMutations\n{\n    public Task<Order> CreateOrderAsync(OrderInput input) => _svc.Create(input);\n}\n";
         assert_resolvers(source, "csharp", &["Mutation", "createOrder"]);
         let out = extract_graphql_resolver_nodes(source, "csharp", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Mutation"), Some(4), "the class line, past the attribute");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Mutation"),
+            Some(4),
+            "the class line, past the attribute"
+        );
         // Every spelling of the extended root, stacked attributes, and two
         // classes extending one root in a file: one noun, both fields.
         let spellings = "using HotChocolate.Types;\n[ExtendObjectType(\"Query\")]\npublic class A { public int GetA() => 1; }\n[Authorize]\n[ExtendObjectType(typeof(Query))]\npublic class B { public int GetB() => 2; }\n[ExtendObjectType<Subscription>]\npublic class C { public int GetC() => 3; }\n[ExtendObjectType(Name = \"Query\")]\npublic class D { public int GetD() => 4; }\n[HotChocolate.Types.ExtendObjectTypeAttribute(OperationTypeNames.Query)]\npublic class E { public int GetE() => 5; }\n";
-        assert_resolvers(spellings, "csharp", &["Query", "Subscription", "a", "b", "c", "d", "e"]);
+        assert_resolvers(
+            spellings,
+            "csharp",
+            &["Query", "Subscription", "a", "b", "c", "d", "e"],
+        );
         // An object-type extension is no root, and neither is a class an
         // attribute block three lines up no longer reaches.
         let object_ext = "using HotChocolate.Types;\n[ExtendObjectType(typeof(Book))]\npublic class BookExtensions\n{\n    public Author GetAuthor([Parent] Book book) => null;\n}\n[QueryType]\npublic class Real { }\npublic class Next { public int GetNext() => 1; }\n";
@@ -7860,7 +8811,11 @@ mod tests {
         let source = "using HotChocolate;\npublic class Query\n{\n    [GraphQLName(\"me\")]\n    public User GetCurrentUser() => null;\n    [Authorize]\n    [GraphQLNameAttribute(\"viewer\")]\n    [UsePaging]\n    public User GetWhoAmI() => null;\n    [GraphQLIgnore]\n    public string GetSecret() => \"\";\n    [GraphQLDescription(\"the [catalog]\")] public IQueryable<Book> GetBooks() => null;\n    [HotChocolate.GraphQLIgnore] public string Hidden { get; set; }\n}\n";
         assert_resolvers(source, "csharp", &["Query", "books", "me", "viewer"]);
         let out = extract_graphql_resolver_nodes(source, "csharp", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:me"), Some(4), "the member line, not the attribute's");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:me"),
+            Some(4),
+            "the member line, not the attribute's"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:viewer"), Some(8));
     }
 
@@ -7869,16 +8824,32 @@ mod tests {
         let unimported = HC_QUERY.trim_start_matches("using HotChocolate;\n");
         assert_resolvers(unimported, "csharp", &[]);
         assert_eq!(
-            decorator_scan(unimported, "csharp").1.marker("csharp").as_deref(),
-            Some("[graphql-decorators] lang=csharp import=none roots= fields=0 rejected lang=0 import=1 position=0")
+            decorator_scan(unimported, "csharp")
+                .1
+                .marker("csharp")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=csharp import=none roots= fields=0 rejected lang=0 import=1 position=0"
+            )
         );
         // A package that only starts with the name, an import in a comment.
-        for using in ["using HotChocolateX;\n", "// using HotChocolate;\n", "using static Other.HotChocolate;\n"] {
+        for using in [
+            "using HotChocolateX;\n",
+            "// using HotChocolate;\n",
+            "using static Other.HotChocolate;\n",
+        ] {
             assert_resolvers(&format!("{using}{unimported}"), "csharp", &[]);
         }
         // A static import and an alias of the namespace are imports.
-        for using in ["using static HotChocolate.Types.OperationTypeNames;\n", "using HC = HotChocolate.Types;\n"] {
-            assert_resolvers(&format!("{using}{unimported}"), "csharp", &["Query", "books"]);
+        for using in [
+            "using static HotChocolate.Types.OperationTypeNames;\n",
+            "using HC = HotChocolate.Types;\n",
+        ] {
+            assert_resolvers(
+                &format!("{using}{unimported}"),
+                "csharp",
+                &["Query", "books"],
+            );
         }
         // The same C# held by a file of another language.
         assert_resolvers(HC_QUERY, "java", &[]);
@@ -7887,8 +8858,13 @@ mod tests {
         let decoys = "using HotChocolate;\n// public class Query { public int GetX() => 1; }\n/* [QueryType]\npublic class Mutation { public int GetY() => 1; } */\nvar s = @\"\npublic class Subscription { public int GetZ() => 1; }\";\npublic class QueryBuilder { public int GetW() => 1; }\n";
         assert_resolvers(decoys, "csharp", &[]);
         assert_eq!(
-            decorator_scan(decoys, "csharp").1.marker("csharp").as_deref(),
-            Some("[graphql-decorators] lang=csharp import=hotchocolate roots= fields=0 rejected lang=0 import=0 position=4")
+            decorator_scan(decoys, "csharp")
+                .1
+                .marker("csharp")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=csharp import=hotchocolate roots= fields=0 rejected lang=0 import=0 position=4"
+            )
         );
     }
 
@@ -7916,7 +8892,11 @@ mod tests {
             ("GetCount", false, "getCount"),
             ("LoadAsync", false, "loadAsync"),
         ] {
-            assert_eq!(hc_field_name(member, method).as_deref(), Some(field), "{member}");
+            assert_eq!(
+                hc_field_name(member, method).as_deref(),
+                Some(field),
+                "{member}"
+            );
         }
         assert_eq!(hc_field_name("", true), None);
     }
@@ -7939,16 +8919,37 @@ mod tests {
     fn async_graphql_query_root_fields() {
         assert_resolvers(AG_QUERY, "rust", &["Query", "orders"]);
         let out = extract_graphql_resolver_nodes(AG_QUERY, "rust", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(10), "the impl line");
-        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(11), "the fn line");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(10),
+            "the impl line"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:orders"),
+            Some(11),
+            "the fn line"
+        );
         assert_eq!(
             decorator_scan(AG_QUERY, "rust").1.marker("rust").as_deref(),
-            Some("[graphql-decorators] lang=rust import=async-graphql roots=Query fields=1 rejected lang=0 import=0 position=0")
+            Some(
+                "[graphql-decorators] lang=rust import=async-graphql roots=Query fields=1 rejected lang=0 import=0 position=0"
+            )
         );
         // Mutation / Subscription by name, a crate-qualified attribute, a
         // `use async_graphql;` import and generic impls.
         let roots = "use async_graphql;\n\n#[async_graphql::Object]\nimpl<'a> MutationRoot<'a> {\n    async fn add_order(&self, ctx: &async_graphql::Context<'_>) -> i32 { 1 }\n}\n#[Object(name = \"Q\")]\nimpl RootQuery {\n    pub async fn me(&self) -> i32 { 1 }\n}\n#[Object]\nimpl SubscriptionRoot {\n    async fn ticks(&self) -> i32 { 1 }\n}\n";
-        assert_resolvers(roots, "rust", &["Mutation", "Query", "Subscription", "addOrder", "me", "ticks"]);
+        assert_resolvers(
+            roots,
+            "rust",
+            &[
+                "Mutation",
+                "Query",
+                "Subscription",
+                "addOrder",
+                "me",
+                "ticks",
+            ],
+        );
     }
 
     #[test]
@@ -7956,7 +8957,11 @@ mod tests {
         // A schema in the file names the roots: `Q` and `M` take theirs by
         // position, and `LegacyQuery`, named by no schema, is no root.
         let named = "use async_graphql::{EmptySubscription, Object, Schema};\n\npub struct Q;\npub struct M;\n\n#[Object]\nimpl Q {\n    async fn orders(&self) -> i32 { 1 }\n}\n\n#[Object]\nimpl M {\n    async fn place_order(&self, id: i32) -> i32 { id }\n}\n\n#[Object]\nimpl LegacyQuery {\n    async fn legacy(&self) -> i32 { 0 }\n}\n\npub fn schema() -> Schema<Q, M, EmptySubscription> {\n    Schema::new(Q, M, EmptySubscription)\n}\n";
-        assert_resolvers(named, "rust", &["Mutation", "Query", "orders", "placeOrder"]);
+        assert_resolvers(
+            named,
+            "rust",
+            &["Mutation", "Query", "orders", "placeOrder"],
+        );
         // `Schema::build` with a struct-literal value and a qualified path.
         let built = "use async_graphql::{EmptyMutation, EmptySubscription, Object};\npub struct Root { db: Db }\n#[Object]\nimpl Root { async fn version(&self) -> &str { \"1\" } }\nfn main() {\n    let a = async_graphql::Schema::build(Root { db: Db::new() }, EmptyMutation, EmptySubscription).finish();\n    let b = Schema::build(crate::api::Root::default(), EmptyMutation, EmptySubscription);\n}\n";
         assert_resolvers(built, "rust", &["Query", "version"]);
@@ -7964,7 +8969,11 @@ mod tests {
         let merged = "use async_graphql::*;\n#[derive(MergedObject, Default)]\npub struct Query(Users, shop::Orders);\n#[derive(Default)] pub struct Users;\n#[Object] impl Users { async fn users(&self) -> i32 { 1 } }\n#[Object] impl Orders { async fn orders(&self) -> i32 { 2 } }\n#[Object] impl Stray { async fn stray(&self) -> i32 { 3 } }\npub type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;\n";
         assert_resolvers(merged, "rust", &["Query", "orders", "users"]);
         let out = extract_graphql_resolver_nodes(merged, "rust", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(4), "the first root impl");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(4),
+            "the first root impl"
+        );
         // A call that is no async-graphql schema (another crate's
         // one-argument `Schema::new`) leaves the roots to their names.
         let arrow = "use async_graphql::Object;\nfn s() { let x = arrow::Schema::new(vec![]); }\n#[Object]\nimpl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n";
@@ -7977,11 +8986,30 @@ mod tests {
         assert_resolvers(
             source,
             "rust",
-            &["Mutation", "Query", "Subscription", "allOrders", "internal", "orderCount", "orderCreated", "place_order", "type", "userId"],
+            &[
+                "Mutation",
+                "Query",
+                "Subscription",
+                "allOrders",
+                "internal",
+                "orderCount",
+                "orderCreated",
+                "place_order",
+                "type",
+                "userId",
+            ],
         );
         let out = extract_graphql_resolver_nodes(source, "rust", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:orderCount"), Some(8), "the fn line, past its doc comment");
-        assert_eq!(anchor_line(&out, "graphql_resolver:allOrders"), Some(14), "the fn line, past its attribute");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:orderCount"),
+            Some(8),
+            "the fn line, past its doc comment"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:allOrders"),
+            Some(14),
+            "the fn line, past its attribute"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:Subscription"), Some(36));
     }
 
@@ -8001,10 +9029,16 @@ mod tests {
         }
         assert_eq!(RenameRule::Pascal.apply("order_count"), "OrderCount");
         assert_eq!(RenameRule::Snake.apply("placeOrder"), "place_order");
-        assert_eq!(RenameRule::ScreamingSnake.apply("placeOrder"), "PLACE_ORDER");
+        assert_eq!(
+            RenameRule::ScreamingSnake.apply("placeOrder"),
+            "PLACE_ORDER"
+        );
         assert_eq!(RenameRule::Lower.apply("placeOrder"), "placeorder");
         assert_eq!(RenameRule::Upper.apply("place_order"), "PLACE_ORDER");
-        assert_eq!(RenameRule::parse("SCREAMING_SNAKE_CASE"), Some(RenameRule::ScreamingSnake));
+        assert_eq!(
+            RenameRule::parse("SCREAMING_SNAKE_CASE"),
+            Some(RenameRule::ScreamingSnake)
+        );
         assert_eq!(RenameRule::parse("kebab-case"), None);
     }
 
@@ -8014,7 +9048,9 @@ mod tests {
         assert_resolvers(source, "rust", &[]);
         assert_eq!(
             decorator_scan(source, "rust").1.marker("rust").as_deref(),
-            Some("[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=0")
+            Some(
+                "[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=0"
+            )
         );
         // The same file of another language, and juniper's attribute.
         assert_resolvers(AG_QUERY, "go", &[]);
@@ -8034,7 +9070,9 @@ mod tests {
             assert_resolvers(sample, "rust", &[]);
             assert_eq!(
                 decorator_scan(sample, "rust").1.marker("rust").as_deref(),
-                Some("[graphql-decorators] lang=rust import=none roots= fields=0 rejected lang=0 import=1 position=0"),
+                Some(
+                    "[graphql-decorators] lang=rust import=none roots= fields=0 rejected lang=0 import=1 position=0"
+                ),
                 "{sample}"
             );
         }
@@ -8043,7 +9081,9 @@ mod tests {
         assert_resolvers(decoys, "rust", &[]);
         assert_eq!(
             decorator_scan(decoys, "rust").1.marker("rust").as_deref(),
-            Some("[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=3")
+            Some(
+                "[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=3"
+            )
         );
         // Another crate that only starts with the name; `extern crate` names it.
         let axum = "use async_graphql_axum::GraphQL;\n#[Object]\nimpl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n";
@@ -8056,16 +9096,36 @@ mod tests {
     fn caliban_root_resolver_case_class() {
         assert_resolvers(CALIBAN_API, "scala", &["Query", "orders"]);
         let out = extract_graphql_resolver_nodes(CALIBAN_API, "scala", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(6), "the case class line");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(6),
+            "the case class line"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(6));
         assert_eq!(
-            decorator_scan(CALIBAN_API, "scala").1.marker("scala").as_deref(),
-            Some("[graphql-decorators] lang=scala import=caliban roots=Query fields=1 rejected lang=0 import=0 position=0")
+            decorator_scan(CALIBAN_API, "scala")
+                .1
+                .marker("scala")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=scala import=caliban roots=Query fields=1 rejected lang=0 import=0 position=0"
+            )
         );
         // Queries and Mutations case classes through `val`s, a multi-line
         // parameter list, `@GQLName` / `@GQLExcluded`, a back-quoted name.
         let both = "import caliban._\nimport caliban.schema.Annotations.{GQLExcluded, GQLName}\n\ncase class Queries(\n  orders: List[Order],\n  @GQLName(\"customer\") user: Long => Option[User],\n  @GQLExcluded secret: String\n)\ncase class Mutations(placeOrder: OrderInput => Order, `cancel`: Long => Boolean)\n\nobject Api {\n  val queries = Queries(Nil, _ => None, \"\")\n  val mutations: Mutations = Mutations(_ => ???, _ => true)\n  val api = graphQL(RootResolver(queries, mutations))\n}\n";
-        assert_resolvers(both, "scala", &["Mutation", "Query", "cancel", "customer", "orders", "placeOrder"]);
+        assert_resolvers(
+            both,
+            "scala",
+            &[
+                "Mutation",
+                "Query",
+                "cancel",
+                "customer",
+                "orders",
+                "placeOrder",
+            ],
+        );
         let out = extract_graphql_resolver_nodes(both, "scala", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:customer"), Some(5));
         // Types declared in another file name their roots only; `None`
@@ -8073,7 +9133,11 @@ mod tests {
         let elsewhere = "import caliban.{graphQL, RootResolver}\nobject Api {\n  val api = graphQL(\n    RootResolver(Some(Queries(Nil)), None, Option(Subscriptions(stream)))\n  )\n}\n";
         assert_resolvers(elsewhere, "scala", &["Query", "Subscription"]);
         let out = extract_graphql_resolver_nodes(elsewhere, "scala", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3), "the argument line");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(3),
+            "the argument line"
+        );
         // Named arguments pick their root.
         let named = "import caliban.RootResolver\ncase class M(add: Int => Int)\nval api = graphQL(RootResolver(mutationResolver = M(identity), queryResolver = Q()))\n";
         assert_resolvers(named, "scala", &["Mutation", "Query", "add"]);
@@ -8081,14 +9145,28 @@ mod tests {
 
     #[test]
     fn caliban_needs_the_import() {
-        let unimported = CALIBAN_API.replace("import caliban.graphQL\nimport caliban.RootResolver\n", "");
+        let unimported =
+            CALIBAN_API.replace("import caliban.graphQL\nimport caliban.RootResolver\n", "");
         assert_resolvers(&unimported, "scala", &[]);
         assert_eq!(
-            decorator_scan(&unimported, "scala").1.marker("scala").as_deref(),
-            Some("[graphql-decorators] lang=scala import=none roots= fields=0 rejected lang=0 import=1 position=0")
+            decorator_scan(&unimported, "scala")
+                .1
+                .marker("scala")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=scala import=none roots= fields=0 rejected lang=0 import=1 position=0"
+            )
         );
-        assert_resolvers(&format!("import calibanx.RootResolver\n{unimported}"), "scala", &[]);
-        assert_resolvers(&format!("// import caliban.RootResolver\n{unimported}"), "scala", &[]);
+        assert_resolvers(
+            &format!("import calibanx.RootResolver\n{unimported}"),
+            "scala",
+            &[],
+        );
+        assert_resolvers(
+            &format!("// import caliban.RootResolver\n{unimported}"),
+            "scala",
+            &[],
+        );
         // The same file of another language.
         assert_resolvers(CALIBAN_API, "java", &[]);
         assert_resolvers(CALIBAN_API, "kotlin", &[]);
@@ -8097,7 +9175,9 @@ mod tests {
         assert_resolvers(decoys, "scala", &[]);
         assert_eq!(
             decorator_scan(decoys, "scala").1.marker("scala").as_deref(),
-            Some("[graphql-decorators] lang=scala import=caliban roots= fields=0 rejected lang=0 import=0 position=3")
+            Some(
+                "[graphql-decorators] lang=scala import=caliban roots= fields=0 rejected lang=0 import=0 position=3"
+            )
         );
     }
 
@@ -8115,17 +9195,35 @@ mod tests {
     #[test]
     fn graphql_ruby_query_type_fields() {
         assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "ruby", &["Query", "orders"]);
-        let out = extract_graphql_resolver_nodes(GRAPHQL_RUBY_QUERY_TYPE, "ruby", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1), "the class line");
-        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(4), "the type's `def orders`");
+        let out =
+            extract_graphql_resolver_nodes(GRAPHQL_RUBY_QUERY_TYPE, "ruby", module_id(), repo());
         assert_eq!(
-            decorator_scan(GRAPHQL_RUBY_QUERY_TYPE, "ruby").1.marker("ruby").as_deref(),
-            Some("[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=0")
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(1),
+            "the class line"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:orders"),
+            Some(4),
+            "the type's `def orders`"
+        );
+        assert_eq!(
+            decorator_scan(GRAPHQL_RUBY_QUERY_TYPE, "ruby")
+                .1
+                .marker("ruby")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=0"
+            )
         );
         // The compact class path, an unqualified base class, the root class
         // named exactly `Subscription`, and `GraphQL::Schema::Object` itself.
         let compact = "class Types::MutationType < BaseObject\n  field :create_order, mutation: Mutations::CreateOrder\nend\nclass Subscription < GraphQL::Schema::Object\n  field(:order_placed, Types::OrderType)\nend\n";
-        assert_resolvers(compact, "ruby", &["Mutation", "Subscription", "createOrder", "orderPlaced"]);
+        assert_resolvers(
+            compact,
+            "ruby",
+            &["Mutation", "Subscription", "createOrder", "orderPlaced"],
+        );
         // The same file of another language.
         assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "python", &[]);
         assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "elixir", &[]);
@@ -8134,10 +9232,30 @@ mod tests {
     #[test]
     fn graphql_ruby_camelizes_and_honours_camelize_false() {
         let src = "class Types::QueryType < GraphQL::Schema::Object\n  field :user_orders, [Types::OrderType], null: false\n  field :raw_id, ID, null: false, camelize: false\n  field \"named_by_string\", String\n  field :order, Types::OrderType, null: true do\n    argument :order_id, ID, required: true\n  end\n  field :legacy, String,\n    camelize: false\n  field :by_method, String, resolver_method: :resolve_by_method\n\n  def resolve_by_method\n    field :not_a_field, String\n  end\n\n  def self.helper\n    field :nor_this, String\n  end\nend\n";
-        assert_resolvers(src, "ruby", &["Query", "byMethod", "legacy", "namedByString", "order", "raw_id", "userOrders"]);
+        assert_resolvers(
+            src,
+            "ruby",
+            &[
+                "Query",
+                "byMethod",
+                "legacy",
+                "namedByString",
+                "order",
+                "raw_id",
+                "userOrders",
+            ],
+        );
         let out = extract_graphql_resolver_nodes(src, "ruby", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:byMethod"), Some(11), "its resolver_method's def");
-        assert_eq!(anchor_line(&out, "graphql_resolver:userOrders"), Some(1), "no def: the field line");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:byMethod"),
+            Some(11),
+            "its resolver_method's def"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:userOrders"),
+            Some(1),
+            "no def: the field line"
+        );
         for (ruby, schema) in [
             ("orders", "orders"),
             ("user_orders", "userOrders"),
@@ -8156,14 +9274,20 @@ mod tests {
     fn graphql_ruby_non_root_object_type_is_no_resolver() {
         let object = "module Types\n  class OrderType < Types::BaseObject\n    field :id, ID, null: false\n  end\nend\n";
         assert_resolvers(object, "ruby", &[]);
-        assert_eq!(decorator_scan(object, "ruby").1.marker("ruby"), None, "no root-named class, no census line");
+        assert_eq!(
+            decorator_scan(object, "ruby").1.marker("ruby"),
+            None,
+            "no root-named class, no census line"
+        );
         // A root-named class that is no GraphQL object, in a file with no
         // graphql-ruby marker.
         let model = "class QueryType < ApplicationRecord\n  field :orders\nend\n";
         assert_resolvers(model, "ruby", &[]);
         assert_eq!(
             decorator_scan(model, "ruby").1.marker("ruby").as_deref(),
-            Some("[graphql-decorators] lang=ruby import=none roots= fields=0 rejected lang=0 import=1 position=0")
+            Some(
+                "[graphql-decorators] lang=ruby import=none roots= fields=0 rejected lang=0 import=1 position=0"
+            )
         );
         // Declarations in a comment, a heredoc and a `=begin` block are no
         // roots; a nested class's body is hidden, and the fields after it
@@ -8172,7 +9296,9 @@ mod tests {
         assert_resolvers(decoys, "ruby", &["Query", "afterInner"]);
         assert_eq!(
             decorator_scan(decoys, "ruby").1.marker("ruby").as_deref(),
-            Some("[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=3")
+            Some(
+                "[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=3"
+            )
         );
     }
 
@@ -8180,11 +9306,20 @@ mod tests {
     fn absinthe_query_block_fields() {
         assert_resolvers(ABSINTHE_SCHEMA, "elixir", &["Query", "orders"]);
         let out = extract_graphql_resolver_nodes(ABSINTHE_SCHEMA, "elixir", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(7), "the `query do` line");
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(7),
+            "the `query do` line"
+        );
         assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(8));
         assert_eq!(
-            decorator_scan(ABSINTHE_SCHEMA, "elixir").1.marker("elixir").as_deref(),
-            Some("[graphql-decorators] lang=elixir import=absinthe roots=Query fields=1 rejected lang=0 import=0 position=0")
+            decorator_scan(ABSINTHE_SCHEMA, "elixir")
+                .1
+                .marker("elixir")
+                .as_deref(),
+            Some(
+                "[graphql-decorators] lang=elixir import=absinthe roots=Query fields=1 rejected lang=0 import=0 position=0"
+            )
         );
         // A type module (`use Absinthe.Schema.Notation`) is no schema, and
         // its `object` blocks are no roots.
@@ -8199,14 +9334,26 @@ mod tests {
         assert_resolvers(
             src,
             "elixir",
-            &["Mutation", "Query", "Subscription", "field2", "orderPlaced", "ping", "placeOrder", "userOrders"],
+            &[
+                "Mutation",
+                "Query",
+                "Subscription",
+                "field2",
+                "orderPlaced",
+                "ping",
+                "placeOrder",
+                "userOrders",
+            ],
         );
         assert_eq!(
             decorator_scan(src, "elixir").1.marker("elixir").as_deref(),
-            Some("[graphql-decorators] lang=elixir import=absinthe roots=Query,Mutation,Subscription fields=5 rejected lang=0 import=0 position=2")
+            Some(
+                "[graphql-decorators] lang=elixir import=absinthe roots=Query,Mutation,Subscription fields=5 rejected lang=0 import=0 position=2"
+            )
         );
         // An Elixir module that is no Absinthe schema.
-        let plain = "defmodule Report do\n  def run(query) do\n    query |> Repo.all()\n  end\nend\n";
+        let plain =
+            "defmodule Report do\n  def run(query) do\n    query |> Repo.all()\n  end\nend\n";
         assert_resolvers(plain, "elixir", &[]);
         assert_eq!(decorator_scan(plain, "elixir").1.marker("elixir"), None);
         for (elixir, schema) in [
@@ -8228,21 +9375,28 @@ mod tests {
         let src = "a = \"query do\" # end\nb = ~s(end) <> ~S\"\"\"\nend\n\"\"\" <> 'do'\nc = ?# <> ?\" <> valid?(x)\n";
         let m = elixir_code_mask(src);
         assert_eq!(m.len(), src.len());
-        let code = String::from_utf8_lossy(&m).split_whitespace().collect::<Vec<_>>().join(" ");
+        let code = String::from_utf8_lossy(&m)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(code, "a = b = <> <> c = <> <> valid?(x)");
     }
 
     #[test]
     fn dart_gql_const_document_names_the_op() {
         assert_eq!(op_qnames(DART_ORDERS), ["graphql_op:Orders"]);
-        let (hits, tally) = scan_operation_needles(DART_ORDERS, &mut LazyGuard::new("", DART_ORDERS));
+        let (hits, tally) =
+            scan_operation_needles(DART_ORDERS, &mut LazyGuard::new("", DART_ORDERS));
         let named: Vec<(&str, u32)> = hits.iter().map(|(n, l, _)| (n.as_str(), *l)).collect();
         assert_eq!(named, [("Orders", 11)], "minted at the needle line");
         assert_eq!(
             tally.marker().as_deref(),
             Some("[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=gql-tag")
         );
-        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=1 inline=0 unread=0"));
+        assert_eq!(
+            tally.dart_marker().as_deref(),
+            Some("[graphql-ops] dart-document const=1 inline=0 unread=0")
+        );
         // graphql_flutter, a multi-line call, a typed static constant
         // declared after its use.
         let flutter = "import \"package:graphql_flutter/graphql_flutter.dart\";\n\nclass OrdersApi {\n  Future<void> place(GraphQLClient client, String id) async {\n    final result = await client.mutate(\n      MutationOptions(\n        document: gql(placeOrderMutation),\n        variables: {'id': id},\n      ),\n    );\n  }\n\n  static const String placeOrderMutation = '''\n    mutation PlaceOrder($id: ID!) { placeOrder(id: $id) { id } }\n  ''';\n}\n";
@@ -8251,7 +9405,10 @@ mod tests {
         let commented = "import 'package:graphql/client.dart';\n// const listOrders = r'query Orders { orders { id } }';\nFuture<QueryResult> f(GraphQLClient client) => client.query(QueryOptions(document: gql(listOrders)));\n";
         assert_eq!(op_qnames(commented), ["graphql_op:client.query"]);
         let (_, tally) = scan_operation_needles(commented, &mut LazyGuard::new("", commented));
-        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=0 inline=0 unread=1"));
+        assert_eq!(
+            tally.dart_marker().as_deref(),
+            Some("[graphql-ops] dart-document const=0 inline=0 unread=1")
+        );
         // Without the package:graphql import the call keeps its fallback name.
         let unimported = DART_ORDERS.replace("import 'package:graphql/client.dart';\n", "");
         assert_eq!(op_qnames(&unimported), ["graphql_op:client.query"]);
@@ -8264,7 +9421,10 @@ mod tests {
         let inline = "import 'package:graphql/client.dart';\n\nFuture<QueryResult> fetch(GraphQLClient client) {\n  return client.query(QueryOptions(document: gql(r'''\n    query Inline { orders { id } }\n  ''')));\n}\n";
         assert_eq!(op_qnames(inline), ["graphql_op:Inline"]);
         let (_, tally) = scan_operation_needles(inline, &mut LazyGuard::new("", inline));
-        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=0 inline=1 unread=0"));
+        assert_eq!(
+            tally.dart_marker().as_deref(),
+            Some("[graphql-ops] dart-document const=0 inline=1 unread=0")
+        );
         // Two calls, each named by its own document.
         let two = "import 'package:graphql/client.dart';\nconst a = \"query First { a }\";\nfinal f1 = client.query(QueryOptions(document: gql(a)));\nfinal f2 = client.query(QueryOptions(document: gql(\"query Second { b }\")));\n";
         assert_eq!(op_qnames(two), ["graphql_op:First", "graphql_op:Second"]);
@@ -8293,7 +9453,12 @@ mod tests {
             .iter()
             .find(|(_, q)| q.as_str() == qname)
             .map(|(id, _)| *id)
-            .unwrap_or_else(|| panic!("no {qname}: {:?}", out.nav.qname_by_id.values().collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {qname}: {:?}",
+                    out.nav.qname_by_id.values().collect::<Vec<_>>()
+                )
+            });
         out.nodes
             .iter()
             .filter(|n| n.id == id)
@@ -8314,13 +9479,28 @@ mod tests {
     #[test]
     fn operation_root_fields_reads_aliases_inline_fragments_and_skips_typename() {
         for (doc, want) in [
-            ("query Dashboard { me { id } recent: orders(last: 5) { id } }", &["me", "orders"][..]),
-            ("\n  query StockList($first: Int) {\n    products(first: $first) { id name }\n  }\n", &["products"][..]),
+            (
+                "query Dashboard { me { id } recent: orders(last: 5) { id } }",
+                &["me", "orders"][..],
+            ),
+            (
+                "\n  query StockList($first: Int) {\n    products(first: $first) { id name }\n  }\n",
+                &["products"][..],
+            ),
             ("query Products { __typename me { id } }", &["me"][..]),
-            ("{ a: me { id } b: me { name } orders }", &["me", "orders"][..]),
-            ("query Q @live { ... on Query { users { id } } ... @include(if: $x) { stats } ...Rest me }", &["users", "stats", "me"][..]),
+            (
+                "{ a: me { id } b: me { name } orders }",
+                &["me", "orders"][..],
+            ),
+            (
+                "query Q @live { ... on Query { users { id } } ... @include(if: $x) { stats } ...Rest me }",
+                &["users", "stats", "me"][..],
+            ),
             ("query { ...OnlySpreads ...onUser }", &[][..]),
-            ("mutation M($id: ID!) { restock(id: $id, input: {qty: 2, note: \"}\"}) @auth { id } }", &["restock"][..]),
+            (
+                "mutation M($id: ID!) { restock(id: $id, input: {qty: 2, note: \"}\"}) @auth { id } }",
+                &["restock"][..],
+            ),
             ("# c\n{ orders(last: 1) { id } }", &["orders"][..]),
             ("fragment F on Query { users }", &[][..]),
             ("type Query { products: [Product] }", &[][..]),
@@ -8339,14 +9519,37 @@ mod tests {
     #[test]
     fn anonymous_template_is_named_by_first_root_field() {
         let src = "import { gql } from '@apollo/client/core';\nexport const RECENT = gql`\n  {\n    orders(last: 1) { id }\n  }\n`;\nexport const SHIPPED = gql`query ($n: Int) { __typename shipments(first: $n) { id } }`;\nexport const NAMED = gql`query Recent { orders { id } }`;\n";
-        assert_eq!(op_qnames(src), ["graphql_op:Recent", "graphql_op:orders", "graphql_op:shipments"]);
+        assert_eq!(
+            op_qnames(src),
+            [
+                "graphql_op:Recent",
+                "graphql_op:orders",
+                "graphql_op:shipments"
+            ]
+        );
         let open = "const X = gql`\n  { orders { id } }\n";
-        assert!(op_qnames(open).is_empty(), "an unclosed anonymous template is no document");
+        assert!(
+            op_qnames(open).is_empty(),
+            "an unclosed anonymous template is no document"
+        );
         let named = "const X = gql`query\n  Named { orders { id } }`;\n";
-        assert!(op_qnames(named).is_empty(), "a named document is never named by its root field");
+        assert!(
+            op_qnames(named).is_empty(),
+            "a named document is never named by its root field"
+        );
         let open_named = "const X = gql`query Open { orders { id } }\n";
-        assert_eq!(op_qnames(open_named), ["graphql_op:Open"], "HEAD's name rule");
-        assert!(op_code(&extract_graphql_operation_nodes(open_named, "", module_id(), repo()), "graphql_op:Open").is_empty());
+        assert_eq!(
+            op_qnames(open_named),
+            ["graphql_op:Open"],
+            "HEAD's name rule"
+        );
+        assert!(
+            op_code(
+                &extract_graphql_operation_nodes(open_named, "", module_id(), repo()),
+                "graphql_op:Open"
+            )
+            .is_empty()
+        );
     }
 
     /// DT.11a: a template operation carries its document, the untrimmed
@@ -8359,9 +9562,20 @@ mod tests {
             op_code(&out, "graphql_op:StockList"),
             ["\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n"]
         );
-        assert_eq!(op_code(&out, "graphql_op:Restock"), ["mutation Restock { restock { id } }"]);
-        let anonymous = extract_graphql_operation_nodes("const R = gql`{ orders { id } }`;\n", "", module_id(), repo());
-        assert_eq!(op_code(&anonymous, "graphql_op:orders"), ["{ orders { id } }"]);
+        assert_eq!(
+            op_code(&out, "graphql_op:Restock"),
+            ["mutation Restock { restock { id } }"]
+        );
+        let anonymous = extract_graphql_operation_nodes(
+            "const R = gql`{ orders { id } }`;\n",
+            "",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(
+            op_code(&anonymous, "graphql_op:orders"),
+            ["{ orders { id } }"]
+        );
     }
 
     /// DT.11a: a needle named from the file's first document carries that
@@ -8371,19 +9585,40 @@ mod tests {
     fn needle_op_carries_its_document() {
         let tagged = "import { gql } from '@apollo/client';\nclient.query({ query: ORDERS });\nconst ORDERS = gql`query Orders { orders { id } }`;\n";
         let out = extract_graphql_operation_nodes(tagged, "", module_id(), repo());
-        assert_eq!(out.anchors.first().map(|a| a.line), Some(1), "minted at the needle line");
-        assert_eq!(op_code(&out, "graphql_op:Orders"), ["query Orders { orders { id } }"]);
+        assert_eq!(
+            out.anchors.first().map(|a| a.line),
+            Some(1),
+            "minted at the needle line"
+        );
+        assert_eq!(
+            op_code(&out, "graphql_op:Orders"),
+            ["query Orders { orders { id } }"]
+        );
         let call = "import { gql } from '@apollo/client';\nconst ORDERS = gql(\"query Orders { orders { id } }\");\nclient.query({ query: ORDERS });\n";
         let out = extract_graphql_operation_nodes(call, "", module_id(), repo());
-        assert_eq!(op_code(&out, "graphql_op:Orders"), ["query Orders { orders { id } }"]);
-        let bare = extract_graphql_operation_nodes("const { data } = useQuery(GET_USERS);", "", module_id(), repo());
+        assert_eq!(
+            op_code(&out, "graphql_op:Orders"),
+            ["query Orders { orders { id } }"]
+        );
+        let bare = extract_graphql_operation_nodes(
+            "const { data } = useQuery(GET_USERS);",
+            "",
+            module_id(),
+            repo(),
+        );
         assert!(op_code(&bare, "graphql_op:useQuery").is_empty());
 
         let out = extract_graphql_operation_nodes(DART_ORDERS, "", module_id(), repo());
-        assert_eq!(op_code(&out, "graphql_op:Orders"), ["\n  query Orders {\n    orders {\n      id\n    }\n  }\n"]);
+        assert_eq!(
+            op_code(&out, "graphql_op:Orders"),
+            ["\n  query Orders {\n    orders {\n      id\n    }\n  }\n"]
+        );
         let inline = "import 'package:graphql/client.dart';\nfinal f = client.query(QueryOptions(document: gql(r'query Inline { orders { id } }')));\n";
         let out = extract_graphql_operation_nodes(inline, "", module_id(), repo());
-        assert_eq!(op_code(&out, "graphql_op:Inline"), ["query Inline { orders { id } }"]);
+        assert_eq!(
+            op_code(&out, "graphql_op:Inline"),
+            ["query Inline { orders { id } }"]
+        );
     }
 
     /// DT.11a: a Go machinebox / C# GraphQL.Client request carries the
@@ -8392,17 +9627,26 @@ mod tests {
     fn client_request_op_carries_its_document() {
         let go = "package main\n\nimport \"github.com/machinebox/graphql\"\n\nfunc f() {\n\treq := graphql.NewRequest(`query { orders { id } }`)\n\t_ = req\n}\n";
         let out = extract_graphql_operation_nodes(go, "client.go", module_id(), repo());
-        assert_eq!(op_code(&out, "graphql_op:orders"), ["query { orders { id } }"]);
+        assert_eq!(
+            op_code(&out, "graphql_op:orders"),
+            ["query { orders { id } }"]
+        );
         let cs = "using GraphQL.Client.Http;\nvar r = new GraphQLRequest { Query = @\"query BookShelf { books { title } }\" };\n";
         let out = extract_graphql_operation_nodes(cs, "x.cs", module_id(), repo());
-        assert_eq!(op_code(&out, "graphql_op:BookShelf"), ["query BookShelf { books { title } }"]);
+        assert_eq!(
+            op_code(&out, "graphql_op:BookShelf"),
+            ["query BookShelf { books { title } }"]
+        );
     }
 
     /// DT.11a: a fragment definition, in a template or a request, is no
     /// operation and names nothing by a root field.
     #[test]
     fn fragment_definition_mints_nothing() {
-        assert!(op_qnames("export const PARTS = gql`\n  fragment UserParts on User { id name }\n`;\n").is_empty());
+        assert!(
+            op_qnames("export const PARTS = gql`\n  fragment UserParts on User { id name }\n`;\n")
+                .is_empty()
+        );
         assert!(op_qnames("const T = gql`type Query { users: [User] }`;\n").is_empty());
         let go = "package main\n\nimport \"github.com/machinebox/graphql\"\n\nfunc f() {\n\treq := graphql.NewRequest(`fragment F on Order { id }`)\n\t_ = req\n}\n";
         assert!(op_qnames(go).is_empty());
@@ -8413,7 +9657,11 @@ mod tests {
     // build, reading this file as Rust, declares no type from it.
 
     fn type_id(out: &GraphqlTypes, qname: &str) -> Option<NodeId> {
-        out.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == qname).map(|(id, _)| *id)
+        out.nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
     }
 
     fn type_qnames(out: &GraphqlTypes) -> Vec<&str> {
@@ -8424,25 +9672,50 @@ mod tests {
 
     fn type_cell(out: &GraphqlTypes, qname: &str, kind: glia_core::CellTypeId) -> Option<String> {
         let id = type_id(out, qname)?;
-        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find(|c| c.kind == kind).map(|c| match &c.payload {
-            CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
-            CellPayload::Bytes(_) => String::new(),
-        })
+        out.nodes
+            .iter()
+            .find(|n| n.id == id)?
+            .cells
+            .iter()
+            .find(|c| c.kind == kind)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
     }
 
     fn type_schema(out: &GraphqlTypes, qname: &str) -> Option<ModelSchema> {
         let id = type_id(out, qname)?;
-        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find_map(ModelSchema::from_cell)
+        out.nodes
+            .iter()
+            .find(|n| n.id == id)?
+            .cells
+            .iter()
+            .find_map(ModelSchema::from_cell)
     }
 
     /// `(name, type, required, array)` of each field, in order.
     fn fields_of(schema: &ModelSchema) -> Vec<(&str, &str, bool, bool)> {
-        schema.fields.iter().map(|f| (f.name.as_str(), f.ty.as_str(), f.required, f.array)).collect()
+        schema
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.ty.as_str(), f.required, f.array))
+            .collect()
     }
 
     fn wire_of(out: &GraphqlNodes, qname: &str) -> Option<ServerWire> {
-        let id = out.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == qname).map(|(id, _)| *id)?;
-        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find_map(ServerWire::from_cell)
+        let id = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)?;
+        out.nodes
+            .iter()
+            .find(|n| n.id == id)?
+            .cells
+            .iter()
+            .find_map(ServerWire::from_cell)
     }
 
     /// `(name, field, required)` of a selection object's fields, and its
@@ -8452,9 +9725,13 @@ mod tests {
 
     fn keys(shape: &Shape) -> (Vec<Key<'_>>, bool) {
         match shape {
-            Shape::Object { fields, open } => {
-                (fields.iter().map(|f| (f.name.as_str(), f.field.as_deref(), f.required)).collect(), *open)
-            }
+            Shape::Object { fields, open } => (
+                fields
+                    .iter()
+                    .map(|f| (f.name.as_str(), f.field.as_deref(), f.required))
+                    .collect(),
+                *open,
+            ),
             other => panic!("not an object: {other:?}"),
         }
     }
@@ -8462,7 +9739,11 @@ mod tests {
     fn sub<'s>(shape: &'s Shape, key: &str) -> &'s Shape {
         match shape {
             Shape::Object { fields, .. } => {
-                &fields.iter().find(|f| f.name == key).unwrap_or_else(|| panic!("no {key}")).shape
+                &fields
+                    .iter()
+                    .find(|f| f.name == key)
+                    .unwrap_or_else(|| panic!("no {key}"))
+                    .shape
             }
             other => panic!("not an object: {other:?}"),
         }
@@ -8477,10 +9758,15 @@ mod tests {
     /// scalars and unions mint none.
     #[test]
     fn sdl_types_become_message_types() {
-        let out = extract_graphql_sdl_file_types(STOCK_SDL, "api/schema.graphqls", module_id(), repo());
+        let out =
+            extract_graphql_sdl_file_types(STOCK_SDL, "api/schema.graphqls", module_id(), repo());
         assert_eq!(
             type_qnames(&out),
-            ["message:graphql:AdjustInput", "message:graphql:Item", "message:graphql:Node"]
+            [
+                "message:graphql:AdjustInput",
+                "message:graphql:Item",
+                "message:graphql:Node"
+            ]
         );
         let item = type_schema(&out, "message:graphql:Item").expect("Item fields");
         assert_eq!(item.format, WireFormat::Graphql);
@@ -8520,7 +9806,10 @@ mod tests {
             && e.category == edge_category::DEFINES));
         assert_eq!(out.edges.len(), 3, "one DEFINES per type");
         assert_eq!(out.nav.parent_of.get(&item_id), Some(&module_id()));
-        assert_eq!(out.nav.name_by_id.get(&item_id).map(String::as_str), Some("Item"));
+        assert_eq!(
+            out.nav.name_by_id.get(&item_id).map(String::as_str),
+            Some("Item")
+        );
     }
 
     /// DT.1j: a root field's resolver carries its declared return type; the
@@ -8531,11 +9820,24 @@ mod tests {
         let out = extract_graphql_sdl_file_nodes(STOCK_SDL, module_id(), repo());
         let items = wire_of(&out, "graphql_resolver:items").expect("items returns");
         assert_eq!(items.form, WireForm::GraphqlReturns);
-        assert_eq!((items.ty.as_str(), items.raw.as_str(), items.line), ("Item", "[Item!]!", 28));
-        assert_eq!(items.shape, Shape::Named { ty: "Item".into(), array: true, model: None });
+        assert_eq!(
+            (items.ty.as_str(), items.raw.as_str(), items.line),
+            ("Item", "[Item!]!", 28)
+        );
+        assert_eq!(
+            items.shape,
+            Shape::Named {
+                ty: "Item".into(),
+                array: true,
+                model: None
+            }
+        );
         let count = wire_of(&out, "graphql_resolver:count").expect("count returns");
         assert_eq!(count.shape, Shape::named("Int"));
-        assert!(wire_of(&out, "graphql_resolver:Query").is_none(), "a root type returns nothing");
+        assert!(
+            wire_of(&out, "graphql_resolver:Query").is_none(),
+            "a root type returns nothing"
+        );
         assert!(
             items.to_payload().starts_with(r#"{"type":"Item","raw":"[Item!]!","form":"graphql_returns","window":"site","line":28,"#),
             "{}",
@@ -8554,8 +9856,13 @@ mod tests {
         let user = type_schema(&out, "message:graphql:User").expect("User");
         assert!(user.open, "an extend-only type lists part of its fields");
         assert_eq!(fields_of(&user), [("orders", "[Order!]!", true, true)]);
-        let doc = "query getUser($id: ID!) {\n  user(id: $id) { id }\n}\nfragment F on User { id }\n";
-        assert!(extract_graphql_sdl_file_types(doc, "client/getUser.graphql", module_id(), repo()).nodes.is_empty());
+        let doc =
+            "query getUser($id: ID!) {\n  user(id: $id) { id }\n}\nfragment F on User { id }\n";
+        assert!(
+            extract_graphql_sdl_file_types(doc, "client/getUser.graphql", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
     }
 
     /// DT.1j: in a code file, the types of SDL in a GraphQL-marked literal
@@ -8567,21 +9874,41 @@ mod tests {
     fn embedded_sdl_types_and_return_types() {
         let source = "import { gql } from \"graphql-tag\";\n\nexport const typeDefs = gql`\n  type Query {\n    products: [Product!]!\n  }\n  type Product {\n    id: ID!\n    name: String\n  }\n  type Shelf {\n    id: ID!\n    ${extraFields}\n  }\n`;\n";
         let out = extract_graphql_embedded_types(source, "api/schema.ts", module_id(), repo());
-        assert_eq!(type_qnames(&out), ["message:graphql:Product", "message:graphql:Shelf"]);
+        assert_eq!(
+            type_qnames(&out),
+            ["message:graphql:Product", "message:graphql:Shelf"]
+        );
         assert_eq!(
             type_cell(&out, "message:graphql:Product", cell_type::POSITION).as_deref(),
             Some(r#"{"file":"api/schema.ts","start_line":6,"end_line":9}"#)
         );
-        assert!(!type_schema(&out, "message:graphql:Product").expect("Product").open);
-        assert!(type_schema(&out, "message:graphql:Shelf").expect("Shelf").open, "a hole may splice fields in");
+        assert!(
+            !type_schema(&out, "message:graphql:Product")
+                .expect("Product")
+                .open
+        );
+        assert!(
+            type_schema(&out, "message:graphql:Shelf")
+                .expect("Shelf")
+                .open,
+            "a hole may splice fields in"
+        );
         let resolvers = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         let products = wire_of(&resolvers, "graphql_resolver:products").expect("products returns");
         assert_eq!((products.ty.as_str(), products.line), ("Product", 5));
 
         let escaped = "const S = gql`\\n  type Order {\\n    id: ID!\\n  }\\n`;\n";
-        assert!(extract_graphql_embedded_types(escaped, "x.rs", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_graphql_embedded_types(escaped, "x.rs", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
         let unmarked = "const S = `\n  type Order {\n    id: ID!\n  }\n`;\n";
-        assert!(extract_graphql_embedded_types(unmarked, "x.ts", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_graphql_embedded_types(unmarked, "x.ts", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
     }
 
     /// DT.1j: the selection set as nested objects: a response key with its
@@ -8608,20 +9935,31 @@ mod tests {
                 true
             )
         );
-        assert_eq!(keys(sub(items, "owner")), (vec![("name", None, true), ("id", None, true)], false));
-        assert_eq!(*sub(items, "id"), Shape::open(""), "a leaf's type is the schema's");
+        assert_eq!(
+            keys(sub(items, "owner")),
+            (vec![("name", None, true), ("id", None, true)], false)
+        );
+        assert_eq!(
+            *sub(items, "id"),
+            Shape::open(""),
+            "a leaf's type is the schema's"
+        );
 
         // A root alias, a shorthand document, an unknown or cyclic spread.
-        let aliased = selection_shape("mutation { moved: adjustStock(id: 1, delta: 2) { id } }").expect("op");
+        let aliased =
+            selection_shape("mutation { moved: adjustStock(id: 1, delta: 2) { id } }").expect("op");
         assert_eq!(keys(&aliased).0, [("moved", Some("adjustStock"), true)]);
         let shorthand = operation_selection("{ me { id } }").expect("op");
         assert_eq!((shorthand.0, shorthand.1), ("query", None));
         let spread = selection_shape("query Q { me { ...Elsewhere } }").expect("op");
         assert_eq!(keys(sub(&spread, "me")), (vec![], true));
-        let cyclic = selection_shape("query Q { me { ...A } }\nfragment A on User { id ...A }").expect("op");
+        let cyclic =
+            selection_shape("query Q { me { ...A } }\nfragment A on User { id ...A }").expect("op");
         assert_eq!(keys(sub(&cyclic, "me")), (vec![("id", None, true)], true));
         // A fragment spread under `@skip` makes its fields optional.
-        let skipped = selection_shape("query Q { me { ...A @skip(if: true) } } fragment A on User { id }").expect("op");
+        let skipped =
+            selection_shape("query Q { me { ...A @skip(if: true) } } fragment A on User { id }")
+                .expect("op");
         assert_eq!(keys(sub(&skipped, "me")).0, [("id", None, false)]);
     }
 
@@ -8636,7 +9974,8 @@ mod tests {
         assert!(selection_shape("fragment F on User { id }").is_none());
         assert!(selection_shape("type Query { users: [User] }").is_none());
         // A trailing fragment hole is no operation and closes nothing.
-        let held = selection_shape("query Q { items { ...ItemFields } }\n${ITEM_FIELDS}").expect("op");
+        let held =
+            selection_shape("query Q { items { ...ItemFields } }\n${ITEM_FIELDS}").expect("op");
         assert_eq!(keys(sub(&held, "items")), (vec![], true));
     }
 
@@ -8649,12 +9988,24 @@ mod tests {
         let out = extract_graphql_operation_nodes(source, "", module_id(), repo());
         let list = wire_of(&out, "graphql_op:ListItems").expect("ListItems selection");
         assert_eq!(list.form, WireForm::GraphqlSelection);
-        assert_eq!((list.ty.as_str(), list.raw.as_str(), list.line), ("", "query ListItems", 3));
-        assert!(list.to_payload().contains(r#""name":"barcode""#), "{}", list.to_payload());
+        assert_eq!(
+            (list.ty.as_str(), list.raw.as_str(), list.line),
+            ("", "query ListItems", 3)
+        );
+        assert!(
+            list.to_payload().contains(r#""name":"barcode""#),
+            "{}",
+            list.to_payload()
+        );
         let orders = wire_of(&out, "graphql_op:orders").expect("anonymous selection");
         assert_eq!((orders.raw.as_str(), orders.line), ("query", 12));
         // A needle named by its needle text read no document and carries none.
-        let bare = extract_graphql_operation_nodes("const { data } = useQuery(GET_USERS);", "", module_id(), repo());
+        let bare = extract_graphql_operation_nodes(
+            "const { data } = useQuery(GET_USERS);",
+            "",
+            module_id(),
+            repo(),
+        );
         assert!(bare.nodes.iter().all(|n| n.cells.is_empty()));
     }
 }

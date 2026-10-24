@@ -155,11 +155,15 @@ pub fn synth_paths(
             classes_in_scope.insert(id);
             let s = score_by_id.get(&id).copied().unwrap_or(0.5);
             let e = class_eff.entry(id).or_insert(s);
-            if s > *e { *e = s; }
+            if s > *e {
+                *e = s;
+            }
             for a in ancestors_of(id, &idx) {
                 classes_in_scope.insert(a);
                 let e = class_eff.entry(a).or_insert(s);
-                if s > *e { *e = s; }
+                if s > *e {
+                    *e = s;
+                }
             }
         }
     }
@@ -171,7 +175,9 @@ pub fn synth_paths(
         if graph.nav.kind_by_id.get(&id).copied() != Some(node_kind::METHOD) {
             continue;
         }
-        let Some(&parent) = graph.nav.parent_of.get(&id) else { continue };
+        let Some(&parent) = graph.nav.parent_of.get(&id) else {
+            continue;
+        };
         if graph.nav.kind_by_id.get(&parent).copied() == Some(node_kind::CLASS) {
             sources.push((id, parent));
         }
@@ -188,14 +194,18 @@ pub fn synth_paths(
         if kind != node_kind::ATTRIBUTE {
             continue;
         }
-        let Some(&parent) = graph.nav.parent_of.get(&id) else { continue };
+        let Some(&parent) = graph.nav.parent_of.get(&id) else {
+            continue;
+        };
         if graph.nav.kind_by_id.get(&parent).copied() != Some(node_kind::CLASS) {
             continue;
         }
         if !activated_set.contains(&id) && !classes_in_scope.contains(&parent) {
             continue;
         }
-        let Some(name) = graph.nav.name_by_id.get(&id).cloned() else { continue };
+        let Some(name) = graph.nav.name_by_id.get(&id).cloned() else {
+            continue;
+        };
         if seen_attrs.insert(id) {
             targets.push((id, parent, name));
         }
@@ -206,8 +216,18 @@ pub fn synth_paths(
     // by attribute qname (with NodeId tiebreak) so the synthesized cells land
     // in stable order across runs.
     targets.sort_by(|a, b| {
-        let qa = graph.nav.qname_by_id.get(&a.0).map(String::as_str).unwrap_or("");
-        let qb = graph.nav.qname_by_id.get(&b.0).map(String::as_str).unwrap_or("");
+        let qa = graph
+            .nav
+            .qname_by_id
+            .get(&a.0)
+            .map(String::as_str)
+            .unwrap_or("");
+        let qb = graph
+            .nav
+            .qname_by_id
+            .get(&b.0)
+            .map(String::as_str)
+            .unwrap_or("");
         qa.cmp(qb).then_with(|| a.0.0.cmp(&b.0.0))
     });
 
@@ -268,13 +288,15 @@ pub fn render_cells(paths: &[AccessPath]) -> Vec<CompositionCell> {
     paths
         .iter()
         .map(|p| {
-            let summary = format!(
-                "AccessPath `{}` — {}",
-                p.expression, p.derivation,
-            );
+            let summary = format!("AccessPath `{}` — {}", p.expression, p.derivation,);
             let qname = format!("synth::AccessPath::{}", p.expression);
             let id = synth_id(&qname);
-            CompositionCell { qname, summary, score: p.score, id }
+            CompositionCell {
+                qname,
+                summary,
+                score: p.score,
+                id,
+            }
         })
         .collect()
 }
@@ -307,7 +329,10 @@ impl EdgeIndex {
         for e in &graph.edges {
             match e.category {
                 c if c == edge_category::RETURNS_TYPE => {
-                    returns.entry(e.from).or_default().push((e.to, HopKind::TypedReturn));
+                    returns
+                        .entry(e.from)
+                        .or_default()
+                        .push((e.to, HopKind::TypedReturn));
                     has_explicit_return.insert(e.from);
                 }
                 c if c == edge_category::INHERITS_FROM => {
@@ -358,7 +383,11 @@ impl EdgeIndex {
             v.sort_by_key(|id| id.0);
         }
 
-        Self { returns, methods_of, parents_of }
+        Self {
+            returns,
+            methods_of,
+            parents_of,
+        }
     }
 }
 
@@ -388,11 +417,15 @@ fn build_class_name_index(graph: &RepoGraph) -> HashMap<String, Vec<NodeId>> {
 /// contain backtick-quoted type names. Extract them.
 /// "Reference to the `Foo` that this bar belongs to" → ["Foo"].
 fn extract_docstring_class_hints(method_id: NodeId, graph: &RepoGraph) -> Vec<String> {
-    let Some(node) = graph.nodes.iter().find(|n| n.id == method_id) else { return Vec::new() };
+    let Some(node) = graph.nodes.iter().find(|n| n.id == method_id) else {
+        return Vec::new();
+    };
     let Some(doc_cell) = node.cells.iter().find(|c| c.kind == cell_type::DOC) else {
         return Vec::new();
     };
-    let CellPayload::Text(ref doc) = doc_cell.payload else { return Vec::new() };
+    let CellPayload::Text(ref doc) = doc_cell.payload else {
+        return Vec::new();
+    };
     // First sentence — stop at `.`, `\n\n`, or exhaust the string.
     let end = doc
         .find("\n\n")
@@ -409,17 +442,28 @@ fn parse_backtick_identifiers(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c != '`' { continue; }
+        if c != '`' {
+            continue;
+        }
         let mut buf = String::new();
         while let Some(&nc) = chars.peek() {
-            if nc == '`' { chars.next(); break; }
+            if nc == '`' {
+                chars.next();
+                break;
+            }
             buf.push(nc);
             chars.next();
         }
         let trimmed = buf.rsplit('.').next().unwrap_or(&buf).trim();
         if !trimmed.is_empty()
-            && trimmed.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
-            && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false)
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             out.push(trimmed.to_string());
         }
@@ -479,12 +523,16 @@ fn bfs_class_paths(
         // `self.method_name` chain reads the callable, not its return value —
         // so non-property methods can't legitimately extend an access path.
         for cls in std::iter::once(current_class).chain(ancestors_of(current_class, idx)) {
-            let Some(methods) = idx.methods_of.get(&cls) else { continue };
+            let Some(methods) = idx.methods_of.get(&cls) else {
+                continue;
+            };
             for &method_id in methods {
                 if !graph.properties.contains(&method_id) {
                     continue;
                 }
-                let Some(returns_list) = idx.returns.get(&method_id) else { continue };
+                let Some(returns_list) = idx.returns.get(&method_id) else {
+                    continue;
+                };
                 for &(return_class, kind) in returns_list {
                     if visited.contains(&return_class) {
                         continue; // avoid cycles
@@ -493,7 +541,9 @@ fn bfs_class_paths(
                     // keeps the path "grounded" in the PPR result. But don't
                     // *require* it (removes fallback coverage otherwise).
                     let _ = activated.contains(&method_id);
-                    let Some(name) = graph.nav.name_by_id.get(&method_id).cloned() else { continue };
+                    let Some(name) = graph.nav.name_by_id.get(&method_id).cloned() else {
+                        continue;
+                    };
                     let mut new_hops = hops.clone();
                     new_hops.push(Hop {
                         owning_class: cls,
@@ -526,7 +576,9 @@ fn ancestors_of(class_id: NodeId, idx: &EdgeIndex) -> Vec<NodeId> {
     let mut stack = vec![class_id];
     let mut seen: HashSet<NodeId> = HashSet::new();
     while let Some(c) = stack.pop() {
-        let Some(parents) = idx.parents_of.get(&c) else { continue };
+        let Some(parents) = idx.parents_of.get(&c) else {
+            continue;
+        };
         for &p in parents {
             if seen.insert(p) {
                 out.push(p);
@@ -569,7 +621,11 @@ fn render_derivation(hops: &[Hop], graph: &RepoGraph) -> String {
             .get(&h.owning_class)
             .cloned()
             .unwrap_or_default();
-        let short_owner = owner_qname.rsplit("::").next().unwrap_or(&owner_qname).to_string();
+        let short_owner = owner_qname
+            .rsplit("::")
+            .next()
+            .unwrap_or(&owner_qname)
+            .to_string();
         let frag = match h.kind {
             HopKind::TypedReturn => {
                 let ret = h
@@ -605,8 +661,13 @@ fn dedupe_paths(paths: &mut Vec<AccessPath>) {
     // first so retain keeps a stable representative regardless of upstream
     // order: highest-score-wins (strongest PPR evidence), tiebreak by NodeId.
     paths.sort_by(|a, b| {
-        a.expression.cmp(&b.expression)
-            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        a.expression
+            .cmp(&b.expression)
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.start_class.0.cmp(&b.start_class.0))
             .then_with(|| a.target_attr.0.cmp(&b.target_attr.0))
     });
@@ -616,8 +677,8 @@ fn dedupe_paths(paths: &mut Vec<AccessPath>) {
 
 fn synth_id(qname: &str) -> u64 {
     // Cheap deterministic hash — same FxHash-ish approach used for NodeId.
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     qname.hash(&mut h);
     h.finish()
@@ -631,8 +692,8 @@ fn synth_id(qname: &str) -> u64 {
 mod tests {
     use super::*;
     use glia_core::RepoId;
-    use glia_parser_python::parse_file;
     use glia_graph::build_python;
+    use glia_parser_python::parse_file;
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://composition")
@@ -741,7 +802,8 @@ class Source:
 
     #[test]
     fn backtick_identifier_parser() {
-        let got = parse_backtick_identifiers("Reference to the `Schema` that belongs to `pkg.Klass`.");
+        let got =
+            parse_backtick_identifiers("Reference to the `Schema` that belongs to `pkg.Klass`.");
         assert_eq!(got, vec!["Schema", "Klass"]);
         // Skips lowercase (not a class convention).
         let got = parse_backtick_identifiers("uses `foo` and `bar`.");

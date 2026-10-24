@@ -173,7 +173,14 @@ impl<'a> LevelWalk<'a> {
     /// `levels` passes along `walk`: unbounded depth, no mask, no rank, seeds
     /// start visited.
     pub fn new(walk: Walk, levels: u8) -> Self {
-        Self { walk, levels, max_depth: usize::MAX, within: None, parent_rank: None, plus: false }
+        Self {
+            walk,
+            levels,
+            max_depth: usize::MAX,
+            within: None,
+            parent_rank: None,
+            plus: false,
+        }
     }
 }
 
@@ -197,10 +204,20 @@ impl<'a> LevelWalk<'a> {
 ///
 /// An `edge_level`, mask or rank of the wrong length returns an empty result
 /// and prints `[algo] bfs_levels: <what> has <n> entries for <m>`.
-pub fn bfs_levels(adj: &Adjacency, seeds: &[(NodeId, u8)], edge_level: &[u8], how: &LevelWalk<'_>) -> LevelBfs {
+pub fn bfs_levels(
+    adj: &Adjacency,
+    seeds: &[(NodeId, u8)],
+    edge_level: &[u8],
+    how: &LevelWalk<'_>,
+) -> LevelBfs {
     let n = adj.len();
     if edge_level.len() != adj.kept_edges() {
-        return length_guard("edge_level", edge_level.len(), adj.kept_edges(), "kept edges");
+        return length_guard(
+            "edge_level",
+            edge_level.len(),
+            adj.kept_edges(),
+            "kept edges",
+        );
     }
     if let Some(mask) = how.within
         && mask.len() != n
@@ -232,7 +249,13 @@ pub fn bfs_levels(adj: &Adjacency, seeds: &[(NodeId, u8)], edge_level: &[u8], ho
     }
     start.retain(|&(_, level)| level < how.levels);
 
-    let mut out = LevelBfs { seeds: start.iter().map(|&(ix, level)| (adj.id(ix), level)).collect(), ..LevelBfs::default() };
+    let mut out = LevelBfs {
+        seeds: start
+            .iter()
+            .map(|&(ix, level)| (adj.id(ix), level))
+            .collect(),
+        ..LevelBfs::default()
+    };
     let mut reported = vec![false; n];
     let mut visited = vec![false; n];
     let mut frontier: Vec<u32> = Vec::new();
@@ -284,14 +307,21 @@ pub fn bfs_levels(adj: &Adjacency, seeds: &[(NodeId, u8)], edge_level: &[u8], ho
 
 /// The wrong-length guard: report and return an empty walk.
 fn length_guard(what: &str, got: usize, want: usize, unit: &str) -> LevelBfs {
-    eprintln!("[algo] bfs_levels: {what} has {got} entries for {want} {unit}, returning an empty walk");
+    eprintln!(
+        "[algo] bfs_levels: {what} has {got} entries for {want} {unit}, returning an empty walk"
+    );
     LevelBfs::default()
 }
 
 /// The seeds plus everything `walk` reaches from them, at any depth.
 pub fn reachable(adj: &Adjacency, seeds: &[NodeId], walk: Walk) -> HashSet<NodeId> {
     let mut set: HashSet<NodeId> = seeds.iter().copied().collect();
-    set.extend(bfs(adj, seeds, walk, usize::MAX).reached.iter().map(|r| r.id));
+    set.extend(
+        bfs(adj, seeds, walk, usize::MAX)
+            .reached
+            .iter()
+            .map(|r| r.id),
+    );
     set
 }
 
@@ -299,7 +329,12 @@ pub fn reachable(adj: &Adjacency, seeds: &[NodeId], walk: Walk) -> HashSet<NodeI
 /// order: a backward walk from `sink` that stops once every distinct source
 /// is hit. The sink itself is never a hit, and a source the index does not
 /// hold is never hit (so it also keeps the walk from stopping early).
-pub fn reachable_by(adj: &Adjacency, sink: NodeId, sources: &[NodeId], max_depth: usize) -> Vec<NodeId> {
+pub fn reachable_by(
+    adj: &Adjacency,
+    sink: NodeId,
+    sources: &[NodeId],
+    max_depth: usize,
+) -> Vec<NodeId> {
     if sources.is_empty() {
         return Vec::new();
     }
@@ -398,7 +433,12 @@ mod tests {
         }
 
         /// graph/src/traversal.rs `RepoGraph::bfs`.
-        pub fn bfs(edges: &[Edge], start: NodeId, follow: &[EdgeCategoryId], max_depth: usize) -> Vec<NodeId> {
+        pub fn bfs(
+            edges: &[Edge],
+            start: NodeId,
+            follow: &[EdgeCategoryId],
+            max_depth: usize,
+        ) -> Vec<NodeId> {
             let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
             let mut visited: HashSet<NodeId> = HashSet::from([start]);
             let mut out = Vec::new();
@@ -421,7 +461,12 @@ mod tests {
         }
 
         /// graph/src/traversal.rs `RepoGraph::predecessors`.
-        pub fn predecessors(edges: &[Edge], sink: NodeId, follow: &[EdgeCategoryId], max_depth: usize) -> Vec<NodeId> {
+        pub fn predecessors(
+            edges: &[Edge],
+            sink: NodeId,
+            follow: &[EdgeCategoryId],
+            max_depth: usize,
+        ) -> Vec<NodeId> {
             let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
             let mut visited: HashSet<NodeId> = HashSet::from([sink]);
             let mut out = Vec::new();
@@ -478,7 +523,11 @@ mod tests {
                     }
                 }
             }
-            sources.iter().copied().filter(|s| hit.contains(s)).collect()
+            sources
+                .iter()
+                .copied()
+                .filter(|s| hit.contains(s))
+                .collect()
         }
     }
 
@@ -487,7 +536,10 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0 >> 33
         }
 
@@ -547,7 +599,11 @@ mod tests {
             }
             edges.push(e);
         }
-        Case { graph: ToyGraph { nodes, edges }, dangling, absent: scatter(salt, 5_000) }
+        Case {
+            graph: ToyGraph { nodes, edges },
+            dangling,
+            absent: scatter(salt, 5_000),
+        }
     }
 
     /// 1..=3 seeds: nodes, sometimes a dangling id, sometimes an id absent
@@ -571,7 +627,10 @@ mod tests {
     }
 
     fn as_rows(b: &Bfs) -> Vec<(NodeId, usize, EdgeCategoryId, NodeId)> {
-        b.reached.iter().map(|r| (r.id, r.depth, r.via, r.parent)).collect()
+        b.reached
+            .iter()
+            .map(|r| (r.id, r.depth, r.via, r.parent))
+            .collect()
     }
 
     #[test]
@@ -582,17 +641,28 @@ mod tests {
             let c = case(&mut rng);
             for cats in category_sets(&mut rng) {
                 let allow: HashSet<EdgeCategoryId> = cats.iter().copied().collect();
-                let keep = if cats.len() == CATEGORIES as usize { CategorySet::all() } else { CategorySet::of(&cats) };
+                let keep = if cats.len() == CATEGORIES as usize {
+                    CategorySet::all()
+                } else {
+                    CategorySet::of(&cats)
+                };
                 let adj = Adjacency::build(&c.graph, &keep);
                 for _ in 0..2 {
                     let s = seeds(&mut rng, &c);
                     for &max_depth in &DEPTHS {
-                        for (walk, fwd, bwd) in
-                            [(Walk::Forward, true, false), (Walk::Backward, false, true), (Walk::Both, true, true)]
-                        {
+                        for (walk, fwd, bwd) in [
+                            (Walk::Forward, true, false),
+                            (Walk::Backward, false, true),
+                            (Walk::Both, true, true),
+                        ] {
                             let got = bfs(&adj, &s, walk, max_depth);
-                            let want = oracle::blast(&c.graph.edges, &allow, &s, fwd, bwd, max_depth);
-                            assert_eq!(as_rows(&got), want, "walk {walk:?} depth {max_depth} seeds {s:?}");
+                            let want =
+                                oracle::blast(&c.graph.edges, &allow, &s, fwd, bwd, max_depth);
+                            assert_eq!(
+                                as_rows(&got),
+                                want,
+                                "walk {walk:?} depth {max_depth} seeds {s:?}"
+                            );
                             assert!(got.scanned <= 2 * adj.kept_edges());
                             compared += 1;
                         }
@@ -628,32 +698,54 @@ mod tests {
                     // sometimes the sink itself.
                     let mut sources: Vec<NodeId> = Vec::new();
                     for _ in 0..rng.below(6) {
-                        let s = if rng.chance(10) { sink } else { seeds(&mut rng, &c)[0] };
+                        let s = if rng.chance(10) {
+                            sink
+                        } else {
+                            seeds(&mut rng, &c)[0]
+                        };
                         sources.push(s);
                     }
                     for &max_depth in &DEPTHS {
                         let got = reachable_by(&adj, sink, &sources, max_depth);
-                        let want = oracle::reachable_by(&c.graph.edges, sink, &sources, &cats, max_depth);
-                        assert_eq!(got, want, "sink {sink:?} sources {sources:?} depth {max_depth}");
+                        let want =
+                            oracle::reachable_by(&c.graph.edges, sink, &sources, &cats, max_depth);
+                        assert_eq!(
+                            got, want,
+                            "sink {sink:?} sources {sources:?} depth {max_depth}"
+                        );
                         nonempty += usize::from(!got.is_empty());
                     }
                 }
             }
         }
-        assert!(nonempty > 100, "the corpus must exercise hits, got {nonempty}");
+        assert!(
+            nonempty > 100,
+            "the corpus must exercise hits, got {nonempty}"
+        );
     }
 
     #[test]
     fn reachable_is_seeds_plus_the_unbounded_closure() {
         let g = ToyGraph {
             nodes: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
-            edges: vec![toy_edge(1, 2, 1), toy_edge(2, 3, 1), toy_edge(4, 3, 1), toy_edge(3, 9, 1)],
+            edges: vec![
+                toy_edge(1, 2, 1),
+                toy_edge(2, 3, 1),
+                toy_edge(4, 3, 1),
+                toy_edge(3, 9, 1),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let fwd = reachable(&adj, &[NodeId(1), NodeId(77)], Walk::Forward);
-        assert_eq!(fwd, HashSet::from([NodeId(1), NodeId(77), NodeId(2), NodeId(3), NodeId(9)]));
+        assert_eq!(
+            fwd,
+            HashSet::from([NodeId(1), NodeId(77), NodeId(2), NodeId(3), NodeId(9)])
+        );
         let back = reachable(&adj, &[NodeId(3)], Walk::Backward);
-        assert_eq!(back, HashSet::from([NodeId(3), NodeId(2), NodeId(1), NodeId(4)]));
+        assert_eq!(
+            back,
+            HashSet::from([NodeId(3), NodeId(2), NodeId(1), NodeId(4)])
+        );
     }
 
     #[test]
@@ -665,10 +757,18 @@ mod tests {
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         assert_eq!(adj.kept_edges(), (N - 1) as usize);
-        for (seed, walk) in [(0, Walk::Forward), (N - 1, Walk::Backward), (N / 2, Walk::Both)] {
+        for (seed, walk) in [
+            (0, Walk::Forward),
+            (N - 1, Walk::Backward),
+            (N / 2, Walk::Both),
+        ] {
             let b = bfs(&adj, &[NodeId(seed)], walk, usize::MAX);
             assert_eq!(b.reached.len(), (N - 1) as usize, "{walk:?}");
-            assert!(b.scanned <= 2 * adj.kept_edges(), "{walk:?} scanned {}", b.scanned);
+            assert!(
+                b.scanned <= 2 * adj.kept_edges(),
+                "{walk:?} scanned {}",
+                b.scanned
+            );
         }
     }
 
@@ -682,13 +782,22 @@ mod tests {
         ToyGraph {
             nodes: (0..n).map(NodeId).collect(),
             edges: (0..m)
-                .map(|_| toy_edge(rng.below(n), rng.below(n), 1 + rng.below(cats as u64) as u32))
+                .map(|_| {
+                    toy_edge(
+                        rng.below(n),
+                        rng.below(n),
+                        1 + rng.below(cats as u64) as u32,
+                    )
+                })
                 .collect(),
         }
     }
 
     fn level_rows(b: &LevelBfs) -> Vec<(NodeId, usize, EdgeCategoryId, NodeId)> {
-        b.reached.iter().map(|r| (r.id, r.depth, r.via, r.parent)).collect()
+        b.reached
+            .iter()
+            .map(|r| (r.id, r.depth, r.via, r.parent))
+            .collect()
     }
 
     fn at(level: u8, ids: &[NodeId]) -> Vec<(NodeId, u8)> {
@@ -709,7 +818,10 @@ mod tests {
         for walk in WALKS {
             let want = bfs(&adj, &s, walk, usize::MAX);
             let got = bfs_levels(&adj, &at(0, &s), &zero, &LevelWalk::new(walk, 1));
-            assert!(want.reached.len() > 100, "{walk:?}: the graph must reach widely");
+            assert!(
+                want.reached.len() > 100,
+                "{walk:?}: the graph must reach widely"
+            );
             assert_eq!(level_rows(&got), as_rows(&want), "{walk:?}");
             assert!(got.reached.iter().all(|r| r.level == 0));
             assert_eq!(got.seeds, at(0, &s));
@@ -732,7 +844,11 @@ mod tests {
                         let mut how = LevelWalk::new(walk, 1);
                         how.max_depth = max_depth;
                         let got = bfs_levels(&adj, &at(0, &s), &zero, &how);
-                        assert_eq!(level_rows(&got), as_rows(&want), "{walk:?} depth {max_depth} seeds {s:?}");
+                        assert_eq!(
+                            level_rows(&got),
+                            as_rows(&want),
+                            "{walk:?} depth {max_depth} seeds {s:?}"
+                        );
                         assert_eq!(got.scanned, want.scanned);
                         compared += 1;
                     }
@@ -750,25 +866,45 @@ mod tests {
         // edge position.
         let keep = [EdgeCategoryId(1), EdgeCategoryId(2)];
         let adj = Adjacency::build(&g, &CategorySet::of(&keep));
-        let kept: Vec<&Edge> = g.edges.iter().filter(|e| keep.contains(&e.category)).collect();
+        let kept: Vec<&Edge> = g
+            .edges
+            .iter()
+            .filter(|e| keep.contains(&e.category))
+            .collect();
         assert_eq!(kept.len(), adj.kept_edges());
         assert!(kept.len() < g.edges.len());
         let edge_level: Vec<u8> = kept.iter().map(|_| rng.below(3) as u8).collect();
         // The level-0 seed has a level-0 edge each way, so pass 0 reaches
         // something whichever way it walks.
-        let lvl0: Vec<&Edge> =
-            kept.iter().zip(&edge_level).filter(|&(e, &l)| l == 0 && e.from != e.to).map(|(e, _)| *e).collect();
+        let lvl0: Vec<&Edge> = kept
+            .iter()
+            .zip(&edge_level)
+            .filter(|&(e, &l)| l == 0 && e.from != e.to)
+            .map(|(e, _)| *e)
+            .collect();
         let x = lvl0
             .iter()
             .map(|e| e.from)
             .find(|&f| ![7, 42, 150].contains(&f.0) && lvl0.iter().any(|e| e.to == f))
             .expect("a node with a level-0 edge each way");
         // 7 is given twice; its lowest level (1) counts.
-        let seeds = [(x, 0), (NodeId(7), 2), (NodeId(42), 1), (NodeId(7), 1), (NodeId(150), 2)];
+        let seeds = [
+            (x, 0),
+            (NodeId(7), 2),
+            (NodeId(42), 1),
+            (NodeId(7), 1),
+            (NodeId(150), 2),
+        ];
         for walk in WALKS {
             let got = bfs_levels(&adj, &seeds, &edge_level, &LevelWalk::new(walk, 3));
-            assert_eq!(got.seeds, vec![(x, 0), (NodeId(7), 1), (NodeId(42), 1), (NodeId(150), 2)]);
-            assert!(got.reached.windows(2).all(|w| w[0].level <= w[1].level), "{walk:?}: level ascending");
+            assert_eq!(
+                got.seeds,
+                vec![(x, 0), (NodeId(7), 1), (NodeId(42), 1), (NodeId(150), 2)]
+            );
+            assert!(
+                got.reached.windows(2).all(|w| w[0].level <= w[1].level),
+                "{walk:?}: level ascending"
+            );
             let once: HashSet<NodeId> = got.reached.iter().map(|r| r.id).collect();
             assert_eq!(once.len(), got.reached.len(), "{walk:?}: each node once");
             for r in &got.reached {
@@ -778,7 +914,9 @@ mod tests {
                 let joined = match walk {
                     Walk::Forward => (tail, head) == (r.parent, r.id),
                     Walk::Backward => (head, tail) == (r.parent, r.id),
-                    Walk::Both => (tail, head) == (r.parent, r.id) || (head, tail) == (r.parent, r.id),
+                    Walk::Both => {
+                        (tail, head) == (r.parent, r.id) || (head, tail) == (r.parent, r.id)
+                    }
                 };
                 assert!(joined && e.category == r.via, "{walk:?}: {r:?} via {e:?}");
                 assert!(edge_level[r.kept_edge as usize] <= r.level);
@@ -786,17 +924,40 @@ mod tests {
             for l in 0..3u8 {
                 let sub = ToyGraph {
                     nodes: g.nodes.clone(),
-                    edges: kept.iter().zip(&edge_level).filter(|&(_, &x)| x <= l).map(|(e, _)| (*e).clone()).collect(),
+                    edges: kept
+                        .iter()
+                        .zip(&edge_level)
+                        .filter(|&(_, &x)| x <= l)
+                        .map(|(e, _)| (*e).clone())
+                        .collect(),
                 };
                 let sub_adj = Adjacency::build(&sub, &CategorySet::all());
-                let s_l: Vec<NodeId> = seeds.iter().filter(|&&(_, x)| x <= l).map(|&(s, _)| s).collect();
+                let s_l: Vec<NodeId> = seeds
+                    .iter()
+                    .filter(|&&(_, x)| x <= l)
+                    .map(|&(s, _)| s)
+                    .collect();
                 // The closure at level l: seeds of level <= l plus what edges of level <= l reach.
-                let got_set: HashSet<NodeId> =
-                    got.reached.iter().filter(|r| r.level <= l).map(|r| r.id).chain(s_l.iter().copied()).collect();
-                assert_eq!(got_set, reachable(&sub_adj, &s_l, walk), "{walk:?} level {l}");
+                let got_set: HashSet<NodeId> = got
+                    .reached
+                    .iter()
+                    .filter(|r| r.level <= l)
+                    .map(|r| r.id)
+                    .chain(s_l.iter().copied())
+                    .collect();
+                assert_eq!(
+                    got_set,
+                    reachable(&sub_adj, &s_l, walk),
+                    "{walk:?} level {l}"
+                );
                 // The rows new at l are the filtered graph's BFS minus what an
                 // earlier level reported: same order, depth, via and parent.
-                let earlier: HashSet<NodeId> = got.reached.iter().filter(|r| r.level < l).map(|r| r.id).collect();
+                let earlier: HashSet<NodeId> = got
+                    .reached
+                    .iter()
+                    .filter(|r| r.level < l)
+                    .map(|r| r.id)
+                    .collect();
                 let want: Vec<_> = as_rows(&bfs(&sub_adj, &s_l, walk, usize::MAX))
                     .into_iter()
                     .filter(|row| !earlier.contains(&row.0))
@@ -818,16 +979,35 @@ mod tests {
         // 1 -> 2, 3 -> 4, 5 -> 6, 2 -> 8; every edge at level 0.
         let g = ToyGraph {
             nodes: (1..=8).map(NodeId).collect(),
-            edges: vec![toy_edge(1, 2, 1), toy_edge(3, 4, 1), toy_edge(5, 6, 1), toy_edge(2, 8, 1)],
+            edges: vec![
+                toy_edge(1, 2, 1),
+                toy_edge(3, 4, 1),
+                toy_edge(5, 6, 1),
+                toy_edge(2, 8, 1),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let zero = vec![0u8; adj.kept_edges()];
         // 3 is given at 2 (and its repeat at 2 changes nothing), 5 at 3 (never
         // starts in 3 passes), 99 is absent, 2 is a seed at 2 that pass 0 reaches.
-        let seeds = [(NodeId(1), 0), (NodeId(3), 2), (NodeId(5), 3), (NodeId(99), 0), (NodeId(2), 2), (NodeId(3), 2)];
+        let seeds = [
+            (NodeId(1), 0),
+            (NodeId(3), 2),
+            (NodeId(5), 3),
+            (NodeId(99), 0),
+            (NodeId(2), 2),
+            (NodeId(3), 2),
+        ];
         let got = bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 3));
-        assert_eq!(got.seeds, vec![(NodeId(1), 0), (NodeId(3), 2), (NodeId(2), 2)]);
-        let rows: Vec<(u64, u8, usize, u64)> = got.reached.iter().map(|r| (r.id.0, r.level, r.depth, r.parent.0)).collect();
+        assert_eq!(
+            got.seeds,
+            vec![(NodeId(1), 0), (NodeId(3), 2), (NodeId(2), 2)]
+        );
+        let rows: Vec<(u64, u8, usize, u64)> = got
+            .reached
+            .iter()
+            .map(|r| (r.id.0, r.level, r.depth, r.parent.0))
+            .collect();
         assert_eq!(rows, vec![(2, 0, 1, 1), (8, 0, 2, 2), (4, 2, 1, 3)]);
         // Two passes never start 3: 4 is never reached.
         let two = bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 2));
@@ -843,20 +1023,32 @@ mod tests {
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let zero = vec![0u8; adj.kept_edges()];
-        let mask: Vec<bool> = (0..adj.len() as u32).map(|ix| adj.id(ix) != NodeId(2)).collect();
+        let mask: Vec<bool> = (0..adj.len() as u32)
+            .map(|ix| adj.id(ix) != NodeId(2))
+            .collect();
         let mut how = LevelWalk::new(Walk::Forward, 1);
         how.within = Some(&mask);
-        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)), vec![1]);
+        assert_eq!(
+            ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)),
+            vec![1]
+        );
         // From 3 both ways the walk cannot step onto 2.
         how.walk = Walk::Both;
-        assert!(bfs_levels(&adj, &at(0, &[NodeId(3)]), &zero, &how).reached.is_empty());
+        assert!(
+            bfs_levels(&adj, &at(0, &[NodeId(3)]), &zero, &how)
+                .reached
+                .is_empty()
+        );
         // A seed outside the mask never starts.
         let outside = bfs_levels(&adj, &at(0, &[NodeId(2)]), &zero, &how);
         assert_eq!(outside, LevelBfs::default());
         // Without the mask the chain is walked whole.
         how.within = None;
         how.walk = Walk::Forward;
-        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)), vec![1, 2, 3]);
+        assert_eq!(
+            ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
@@ -864,7 +1056,12 @@ mod tests {
         // s=1 -> a=2, s -> b=3, a -> t=4, b -> t; a's edge to t first.
         let g = ToyGraph {
             nodes: (1..=4).map(NodeId).collect(),
-            edges: vec![toy_edge(1, 2, 1), toy_edge(1, 3, 2), toy_edge(2, 4, 3), toy_edge(3, 4, 4)],
+            edges: vec![
+                toy_edge(1, 2, 1),
+                toy_edge(1, 3, 2),
+                toy_edge(2, 4, 3),
+                toy_edge(3, 4, 4),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let zero = vec![0u8; adj.kept_edges()];
@@ -878,14 +1075,26 @@ mod tests {
             let mut how = LevelWalk::new(Walk::Forward, 1);
             how.parent_rank = rank;
             let got = bfs_levels(&adj, &at(0, &[NodeId(1)]), &zero, &how);
-            assert_eq!(ids_of(&got), vec![2, 3, 4], "depth-1 discovery stays in s's edge order");
+            assert_eq!(
+                ids_of(&got),
+                vec![2, 3, 4],
+                "depth-1 discovery stays in s's edge order"
+            );
             let t = got.reached[2];
             (t.parent.0, t.via.0, t.kept_edge)
         };
-        assert_eq!(t_of(None), (2, 3, 2), "unranked: the first discovered parent");
+        assert_eq!(
+            t_of(None),
+            (2, 3, 2),
+            "unranked: the first discovered parent"
+        );
         assert_eq!(t_of(Some(&ranked(5, 1))), (3, 4, 3), "rank(b) < rank(a)");
         assert_eq!(t_of(Some(&ranked(1, 5))), (2, 3, 2), "rank(a) < rank(b)");
-        assert_eq!(t_of(Some(&ranked(7, 7))), (2, 3, 2), "a rank tie falls to the dense index");
+        assert_eq!(
+            t_of(Some(&ranked(7, 7))),
+            (2, 3, 2),
+            "a rank tie falls to the dense index"
+        );
     }
 
     #[test]
@@ -898,15 +1107,33 @@ mod tests {
         let levels = [0, u8::MAX];
         for passes in [1, 3, u8::MAX] {
             for walk in WALKS {
-                let got = bfs_levels(&adj, &at(0, &[NodeId(1)]), &levels, &LevelWalk::new(walk, passes));
-                let want: Vec<u64> = if walk == Walk::Backward { vec![] } else { vec![2] };
+                let got = bfs_levels(
+                    &adj,
+                    &at(0, &[NodeId(1)]),
+                    &levels,
+                    &LevelWalk::new(walk, passes),
+                );
+                let want: Vec<u64> = if walk == Walk::Backward {
+                    vec![]
+                } else {
+                    vec![2]
+                };
                 assert_eq!(ids_of(&got), want, "{walk:?} over {passes} passes");
             }
         }
         // u8::MAX passes run passes 0..=254; the last still skips a u8::MAX edge.
-        let got = bfs_levels(&adj, &at(0, &[NodeId(2)]), &levels, &LevelWalk::new(Walk::Forward, u8::MAX));
+        let got = bfs_levels(
+            &adj,
+            &at(0, &[NodeId(2)]),
+            &levels,
+            &LevelWalk::new(Walk::Forward, u8::MAX),
+        );
         assert!(got.reached.is_empty());
-        assert_eq!(got.scanned, u8::MAX as usize, "2's one out-edge examined once per pass");
+        assert_eq!(
+            got.scanned,
+            u8::MAX as usize,
+            "2's one out-edge examined once per pass"
+        );
     }
 
     #[test]
@@ -918,10 +1145,16 @@ mod tests {
         let adj = Adjacency::build(&g, &CategorySet::all());
         let seeds = at(0, &[NodeId(1)]);
         let short = vec![0u8; adj.kept_edges() - 1];
-        assert_eq!(bfs_levels(&adj, &seeds, &short, &LevelWalk::new(Walk::Forward, 3)), LevelBfs::default());
+        assert_eq!(
+            bfs_levels(&adj, &seeds, &short, &LevelWalk::new(Walk::Forward, 3)),
+            LevelBfs::default()
+        );
         let zero = vec![0u8; adj.kept_edges()];
         let long = vec![0u8; adj.kept_edges() + 1];
-        assert_eq!(bfs_levels(&adj, &seeds, &long, &LevelWalk::new(Walk::Forward, 3)), LevelBfs::default());
+        assert_eq!(
+            bfs_levels(&adj, &seeds, &long, &LevelWalk::new(Walk::Forward, 3)),
+            LevelBfs::default()
+        );
         let mask = vec![true; adj.len() - 1];
         let mut how = LevelWalk::new(Walk::Forward, 3);
         how.within = Some(&mask);
@@ -931,9 +1164,20 @@ mod tests {
         how.parent_rank = Some(&rank);
         assert_eq!(bfs_levels(&adj, &seeds, &zero, &how), LevelBfs::default());
         // Zero passes start nothing.
-        assert_eq!(bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 0)), LevelBfs::default());
+        assert_eq!(
+            bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 0)),
+            LevelBfs::default()
+        );
         // The right lengths walk.
-        assert_eq!(ids_of(&bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 3))), vec![2, 3]);
+        assert_eq!(
+            ids_of(&bfs_levels(
+                &adj,
+                &seeds,
+                &zero,
+                &LevelWalk::new(Walk::Forward, 3)
+            )),
+            vec![2, 3]
+        );
     }
 
     #[test]
@@ -953,7 +1197,11 @@ mod tests {
                         how.parent_rank = ranked.then_some(rank.as_slice());
                         let got = bfs_levels(&adj, &seeds, &edge_level, &how);
                         let bound = 4 * adj.kept_edges() * levels as usize;
-                        assert!(got.scanned <= bound, "{walk:?} plus {plus} levels {levels}: {} > {bound}", got.scanned);
+                        assert!(
+                            got.scanned <= bound,
+                            "{walk:?} plus {plus} levels {levels}: {} > {bound}",
+                            got.scanned
+                        );
                         assert!(!got.reached.is_empty());
                     }
                 }
@@ -966,29 +1214,65 @@ mod tests {
         // 0 -> 1 -> 2 -> 0, 2 -> 3.
         let g = ToyGraph {
             nodes: (0..4).map(NodeId).collect(),
-            edges: vec![toy_edge(0, 1, 1), toy_edge(1, 2, 1), toy_edge(2, 0, 1), toy_edge(2, 3, 1)],
+            edges: vec![
+                toy_edge(0, 1, 1),
+                toy_edge(1, 2, 1),
+                toy_edge(2, 0, 1),
+                toy_edge(2, 3, 1),
+            ],
         };
         let adj = Adjacency::build(&g, &CategorySet::all());
         let zero = vec![0u8; adj.kept_edges()];
         let mut how = LevelWalk::new(Walk::Forward, 1);
         how.plus = true;
         let got = bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how);
-        let rows: Vec<(u64, usize, u64)> = got.reached.iter().map(|r| (r.id.0, r.depth, r.parent.0)).collect();
+        let rows: Vec<(u64, usize, u64)> = got
+            .reached
+            .iter()
+            .map(|r| (r.id.0, r.depth, r.parent.0))
+            .collect();
         assert_eq!(rows, vec![(1, 1, 0), (2, 2, 1), (0, 3, 2), (3, 3, 2)]);
         // Without plus the seed is never reported.
-        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &LevelWalk::new(Walk::Forward, 1))), vec![1, 2, 3]);
+        assert_eq!(
+            ids_of(&bfs_levels(
+                &adj,
+                &at(0, &[NodeId(0)]),
+                &zero,
+                &LevelWalk::new(Walk::Forward, 1)
+            )),
+            vec![1, 2, 3]
+        );
 
         // Chain 0 -> 1, seeds [0, 1]: plus reports 1 (reached from 0), never 0.
-        let chain = ToyGraph { nodes: (0..2).map(NodeId).collect(), edges: vec![toy_edge(0, 1, 1)] };
+        let chain = ToyGraph {
+            nodes: (0..2).map(NodeId).collect(),
+            edges: vec![toy_edge(0, 1, 1)],
+        };
         let cadj = Adjacency::build(&chain, &CategorySet::all());
         let both = at(0, &[NodeId(0), NodeId(1)]);
         let plus = bfs_levels(&cadj, &both, &[0], &how);
-        assert_eq!(plus.reached.iter().map(|r| (r.id.0, r.depth, r.parent.0)).collect::<Vec<_>>(), vec![(1, 1, 0)]);
-        assert!(bfs_levels(&cadj, &both, &[0], &LevelWalk::new(Walk::Forward, 1)).reached.is_empty());
+        assert_eq!(
+            plus.reached
+                .iter()
+                .map(|r| (r.id.0, r.depth, r.parent.0))
+                .collect::<Vec<_>>(),
+            vec![(1, 1, 0)]
+        );
+        assert!(
+            bfs_levels(&cadj, &both, &[0], &LevelWalk::new(Walk::Forward, 1))
+                .reached
+                .is_empty()
+        );
         // A self-loop puts its node on a cycle of one hop.
-        let self_loop = ToyGraph { nodes: vec![NodeId(5)], edges: vec![toy_edge(5, 5, 1)] };
+        let self_loop = ToyGraph {
+            nodes: vec![NodeId(5)],
+            edges: vec![toy_edge(5, 5, 1)],
+        };
         let sadj = Adjacency::build(&self_loop, &CategorySet::all());
-        assert_eq!(ids_of(&bfs_levels(&sadj, &at(0, &[NodeId(5)]), &[0], &how)), vec![5]);
+        assert_eq!(
+            ids_of(&bfs_levels(&sadj, &at(0, &[NodeId(5)]), &[0], &how)),
+            vec![5]
+        );
     }
 
     /// Plus mode is the one-or-more-hop closure (the closure of the seeds'
@@ -1004,7 +1288,11 @@ mod tests {
                 let adj = Adjacency::build(&c.graph, &CategorySet::of(&cats));
                 let zero = vec![0u8; adj.kept_edges()];
                 let s = seeds(&mut rng, &c);
-                let indexed: Vec<NodeId> = s.iter().copied().filter(|&x| adj.index_of(x).is_some()).collect();
+                let indexed: Vec<NodeId> = s
+                    .iter()
+                    .copied()
+                    .filter(|&x| adj.index_of(x).is_some())
+                    .collect();
                 for walk in WALKS {
                     let mut how = LevelWalk::new(walk, 1);
                     how.plus = true;
@@ -1023,14 +1311,24 @@ mod tests {
                         .collect();
                     let got_set: HashSet<NodeId> = got.reached.iter().map(|r| r.id).collect();
                     assert_eq!(got_set.len(), got.reached.len());
-                    assert_eq!(got_set, reachable(&adj, &one_hop, walk), "{walk:?} seeds {s:?}");
+                    assert_eq!(
+                        got_set,
+                        reachable(&adj, &one_hop, walk),
+                        "{walk:?} seeds {s:?}"
+                    );
                     let plain = bfs_levels(&adj, &at(0, &s), &zero, &LevelWalk::new(walk, 1));
-                    let non_seed: Vec<_> = level_rows(&got).into_iter().filter(|row| !s.contains(&row.0)).collect();
+                    let non_seed: Vec<_> = level_rows(&got)
+                        .into_iter()
+                        .filter(|row| !s.contains(&row.0))
+                        .collect();
                     assert_eq!(non_seed, level_rows(&plain), "{walk:?} seeds {s:?}");
                     seeds_reported += got.reached.iter().filter(|r| s.contains(&r.id)).count();
                 }
             }
         }
-        assert!(seeds_reported > 100, "the corpus must reach seeds, got {seeds_reported}");
+        assert!(
+            seeds_reported > 100,
+            "the corpus must reach seeds, got {seeds_reported}"
+        );
     }
 }

@@ -49,7 +49,9 @@ use glia_projection_text::research::key_symbols::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
-#[command(about = "Run the access-path, call-site, key-symbols and derived-notes synth hooks in one plan")]
+#[command(
+    about = "Run the access-path, call-site, key-symbols and derived-notes synth hooks in one plan"
+)]
 struct Args {
     /// Repo root to walk for `*.py` files, parsed once.
     #[arg(long)]
@@ -172,10 +174,18 @@ fn main() -> Result<()> {
         .iter()
         .filter_map(|(qname, score)| qname_to_id.get(qname.as_str()).map(|&id| (id, *score)))
         .collect();
-    eprintln!("[resolve] {}/{} qnames matched", ranked.len(), seeds.activated.len());
+    eprintln!(
+        "[resolve] {}/{} qnames matched",
+        ranked.len(),
+        seeds.activated.len()
+    );
 
-    let access = AccessPathSynth { max_hops: args.max_hops };
-    let callsite = CallsiteArgflowSynth { id_start: args.id_start };
+    let access = AccessPathSynth {
+        max_hops: args.max_hops,
+    };
+    let callsite = CallsiteArgflowSynth {
+        id_start: args.id_start,
+    };
     let key_symbols = KeySymbolsSynth {
         activated: seeds.activated,
         class_seeds: seeds.class_seeds,
@@ -230,11 +240,16 @@ fn main() -> Result<()> {
         .collect();
     write_out_json(&args.out_dir.join("summaries-aplus.json"), &aplus)?;
 
-    let source_cells: Vec<SourceCell> =
-        view.cells_of(KEY_SYMBOLS).map(source_cell).collect::<Result<_>>()?;
+    let source_cells: Vec<SourceCell> = view
+        .cells_of(KEY_SYMBOLS)
+        .map(source_cell)
+        .collect::<Result<_>>()?;
     write_out_json(&args.out_dir.join("source_cells.json"), &source_cells)?;
 
-    let block = view.cells_of(DERIVED_NOTES).next().map_or("", |c| c.text.as_str());
+    let block = view
+        .cells_of(DERIVED_NOTES)
+        .next()
+        .map_or("", |c| c.text.as_str());
     let notes_path = args.out_dir.join("derived_notes.md");
     fs::write(&notes_path, block).with_context(|| format!("write {}", notes_path.display()))?;
     eprintln!("[write] {}", notes_path.display());

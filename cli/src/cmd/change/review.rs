@@ -144,7 +144,11 @@ fn engine_args(
     select: bool,
     title: Option<String>,
 ) -> Result<ReviewArgs, String> {
-    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+    let Some(tier) = MODEL_MIN_TIERS
+        .iter()
+        .copied()
+        .find(|t| *t == models_min_tier)
+    else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
             MODEL_MIN_TIERS.join(", ")
@@ -225,21 +229,65 @@ mod tests {
     #[test]
     fn engine_args_carry_the_flags() {
         let bfs = Ranking::new(glia_engine::rank::RankBase::Bfs, false);
-        let a = engine_args(2, 7, 9, "derived", bfs, false, Some("T012 export".to_string())).expect("a tier");
+        let a = engine_args(
+            2,
+            7,
+            9,
+            "derived",
+            bfs,
+            false,
+            Some("T012 export".to_string()),
+        )
+        .expect("a tier");
         assert_eq!(
-            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier, a.blast.ranking, a.blast.select),
+            (
+                a.blast.depth,
+                a.max_tests,
+                a.max_impact,
+                a.models_min_tier,
+                a.blast.ranking,
+                a.blast.select
+            ),
             (2, 7, 9, "derived", bfs, false)
         );
         assert_eq!(a.title.as_deref(), Some("T012 export"));
         let e = ReviewArgs::default();
-        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact", Ranking::default(), true, None)
-            .expect("the default tier");
+        let d = engine_args(
+            e.blast.depth,
+            DEFAULT_MAX_TESTS,
+            DEFAULT_MAX_IMPACT,
+            "fact",
+            Ranking::default(),
+            true,
+            None,
+        )
+        .expect("the default tier");
         assert_eq!(
-            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier, d.blast.ranking, d.blast.select, d.title),
-            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier, e.blast.ranking, e.blast.select, e.title)
+            (
+                d.blast.depth,
+                d.max_tests,
+                d.max_impact,
+                d.models_min_tier,
+                d.blast.ranking,
+                d.blast.select,
+                d.title
+            ),
+            (
+                e.blast.depth,
+                e.max_tests,
+                e.max_impact,
+                e.models_min_tier,
+                e.blast.ranking,
+                e.blast.select,
+                e.title
+            )
         );
         assert_eq!(e.models_min_tier, "fact", "the ruling's default");
-        let err = engine_args(4, 50, 50, "heuristic", Ranking::default(), true, None).expect_err("no such gate");
-        assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
+        let err = engine_args(4, 50, 50, "heuristic", Ranking::default(), true, None)
+            .expect_err("no such gate");
+        assert_eq!(
+            err,
+            "unknown models min tier `heuristic`: expected one of fact, derived"
+        );
     }
 }

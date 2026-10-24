@@ -207,11 +207,14 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 ("--database", database.is_some(), &[Notion]),
                 ("--page", page.is_some(), &[Notion]),
             ];
-            if let Some((flag, _, takes)) =
-                given.iter().find(|(_, set, takes)| *set && !takes.contains(&source))
+            if let Some((flag, _, takes)) = given
+                .iter()
+                .find(|(_, set, takes)| *set && !takes.contains(&source))
             {
-                let takes: Vec<String> =
-                    takes.iter().map(|s| format!("--source {}", s.name())).collect();
+                let takes: Vec<String> = takes
+                    .iter()
+                    .map(|s| format!("--source {}", s.name()))
+                    .collect();
                 eprintln!("error: {flag} applies only to {}", takes.join(" or "));
                 return 2;
             }
@@ -308,7 +311,16 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 }
             }
         }
-        DocsCmd::Push { space, title, file, markdown, page_id, site, email, token } => {
+        DocsCmd::Push {
+            space,
+            title,
+            file,
+            markdown,
+            page_id,
+            site,
+            email,
+            token,
+        } => {
             let cfg = match Config::resolve(site, email, token) {
                 Ok(c) => c,
                 Err(e) => {
@@ -326,8 +338,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             // Converted before any network call, so the marker below proves the
             // conversion ran even when the push itself fails on credentials.
             let storage = if markdown {
-                let (s, st) =
-                    glia_doc_sources::markdown::markdown_to_storage_with_stats(&body);
+                let (s, st) = glia_doc_sources::markdown::markdown_to_storage_with_stats(&body);
                 eprintln!(
                     "[docs] push markdown→storage: {} md bytes → {} storage bytes (h={} code={} link={} inline={})",
                     body.len(),
@@ -347,7 +358,11 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             };
             match result {
                 Ok(p) => {
-                    let verb = if page_id.is_some() { "updated" } else { "created" };
+                    let verb = if page_id.is_some() {
+                        "updated"
+                    } else {
+                        "created"
+                    };
                     println!("{verb} page {} (v{}) — {}", p.id, p.version, p.url);
                     0
                 }
@@ -377,7 +392,10 @@ fn sync_confluence(
         }
     };
     let fetched = pages.len();
-    let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+    let pages: Vec<_> = pages
+        .into_iter()
+        .filter(|p| filter.keep(&p.title))
+        .collect();
     eprintln!(
         "[docs] sync space={space} fetched={fetched} kept={} include={include} exclude={exclude}",
         pages.len()
@@ -398,7 +416,11 @@ fn sync_confluence(
     };
     match write_pages(repo, &source, &pages) {
         Ok(w) => {
-            println!("synced {} page(s) from space {space} → {}", w.written, w.path.display());
+            println!(
+                "synced {} page(s) from space {space} → {}",
+                w.written,
+                w.path.display()
+            );
             println!("run `glia build {repo}` to ingest.");
             0
         }
@@ -443,7 +465,10 @@ fn sync_dir(
             return 1;
         }
     };
-    let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+    let pages: Vec<_> = pages
+        .into_iter()
+        .filter(|p| filter.keep(&p.title))
+        .collect();
     eprintln!(
         "[docs] sync source=dir path={path} container={container} files={} pages={} kept={} skipped={}",
         stats.files,
@@ -515,7 +540,10 @@ fn sync_mediawiki(
             return 1;
         }
     };
-    let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+    let pages: Vec<_> = pages
+        .into_iter()
+        .filter(|p| filter.keep(&p.title))
+        .collect();
     eprintln!(
         "[docs] sync source=mediawiki api={origin} selection={label} fetched={} kept={} skipped={} requests={} retries={}",
         stats.fetched,
@@ -604,7 +632,10 @@ fn sync_notion(
             return 1;
         }
     };
-    let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+    let pages: Vec<_> = pages
+        .into_iter()
+        .filter(|p| filter.keep(&p.title))
+        .collect();
     let marker = match target {
         NotionTarget::Database(_) => stats.sync_marker(container, pages.len()),
         NotionTarget::Page(_) => stats.tree_marker(container, pages.len()),

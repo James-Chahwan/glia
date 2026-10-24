@@ -145,7 +145,11 @@ fn merge(args: &[&str]) -> Output {
 
 fn ok(out: &Output) -> (String, String) {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "glia merge exited {:?}\nstderr:\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "glia merge exited {:?}\nstderr:\n{stderr}",
+        out.status
+    );
     (String::from_utf8_lossy(&out.stdout).into_owned(), stderr)
 }
 
@@ -185,16 +189,32 @@ fn merge_accepts_gmap_dirs() {
     build_layout(&web, &b);
     let m = sc.0.join("merged");
 
-    let (stdout, stderr) = ok(&merge(&["--gmap", s(&a), "--gmap", s(&b), "--layout", s(&m)]));
+    let (stdout, stderr) = ok(&merge(&[
+        "--gmap",
+        s(&a),
+        "--gmap",
+        s(&b),
+        "--layout",
+        s(&m),
+    ]));
     assert!(
         stderr.contains("[merge] members=2 (gmap=2 repo=0) repos=2 "),
         "no merge marker:\n{stderr}"
     );
-    assert!(stderr.contains("[merge] wrote "), "no layout write:\n{stderr}");
-    assert_eq!(stdout, JOINT_SUMMARY, "the layout merge reproduces the joint build's summary");
+    assert!(
+        stderr.contains("[merge] wrote "),
+        "no layout write:\n{stderr}"
+    );
+    assert_eq!(
+        stdout, JOINT_SUMMARY,
+        "the layout merge reproduces the joint build's summary"
+    );
 
     let man = manifest(&m);
-    assert_eq!(man["schema_version"].as_u64(), Some(u64::from(MANIFEST_VERSION)));
+    assert_eq!(
+        man["schema_version"].as_u64(),
+        Some(u64::from(MANIFEST_VERSION))
+    );
     assert_eq!(man["schema_version"].as_u64(), Some(2));
     assert_eq!(man["repos"].as_array().map(Vec::len), Some(2), "{man}");
     let gmap = |n: &str| (n.to_string(), "gmap".to_string());
@@ -228,8 +248,14 @@ fn workspace_and_repo_members_merge() {
     );
     assert_eq!(stdout, JOINT_SUMMARY);
     let member = |n: &str, src: &str| (n.to_string(), src.to_string());
-    assert_eq!(members(&m), [member("backend", "gmap"), member("web", "repo")]);
-    assert!(default_layout_dir(&web).join(MANIFEST_NAME).is_file(), "the repo member's layout");
+    assert_eq!(
+        members(&m),
+        [member("backend", "gmap"), member("web", "repo")]
+    );
+    assert!(
+        default_layout_dir(&web).join(MANIFEST_NAME).is_file(),
+        "the repo member's layout"
+    );
 }
 
 #[test]
@@ -238,7 +264,11 @@ fn positional_merge_is_unchanged() {
     let before = (tree(&backend), tree(&frontend));
     let (stdout, _) = ok(&merge(&[s(&backend), s(&frontend)]));
     assert_eq!(stdout, JOINT_SUMMARY);
-    assert_eq!((tree(&backend), tree(&frontend)), before, "a source merge writes nothing");
+    assert_eq!(
+        (tree(&backend), tree(&frontend)),
+        before,
+        "a source merge writes nothing"
+    );
 }
 
 #[test]
@@ -249,9 +279,16 @@ fn positional_merge_with_layout_writes_the_joint_build() {
     let m = sc.0.join("merged");
     let (stdout, _) = ok(&merge(&[s(&api), s(&web), "--layout", s(&m)]));
     assert_eq!(stdout, JOINT_SUMMARY);
-    assert_eq!((tree(&api), tree(&web)), before, "a source merge writes nothing into its repos");
+    assert_eq!(
+        (tree(&api), tree(&web)),
+        before,
+        "a source merge writes nothing into its repos"
+    );
     assert_eq!(manifest(&m)["repos"].as_array().map(Vec::len), Some(2));
-    assert!(members(&m).is_empty(), "a source merge's layout is the joint build's, no members");
+    assert!(
+        members(&m).is_empty(),
+        "a source merge's layout is the joint build's, no members"
+    );
 }
 
 #[test]
@@ -283,15 +320,24 @@ fn merge_errors_exit_2() {
     let gone = sc.0.join("gone");
     for (args, needle) in [
         (vec!["--gmap", s(&gone)], "member 'gone'"),
-        (vec!["--gmap", s(&a), "--gmap", s(&a)], "two members are named 'api'"),
-        (vec!["--workspace", s(&sc.0.join("missing.json"))], "workspace "),
+        (
+            vec!["--gmap", s(&a), "--gmap", s(&a)],
+            "two members are named 'api'",
+        ),
+        (
+            vec!["--workspace", s(&sc.0.join("missing.json"))],
+            "workspace ",
+        ),
     ] {
         let mut argv = args.clone();
         argv.extend(["--layout", s(&m)]);
         let out = merge(&argv);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
-        assert!(stderr.contains(needle), "{args:?}: {needle:?} missing from:\n{stderr}");
+        assert!(
+            stderr.contains(needle),
+            "{args:?}: {needle:?} missing from:\n{stderr}"
+        );
         assert!(!m.exists(), "{args:?}: nothing written");
     }
 }

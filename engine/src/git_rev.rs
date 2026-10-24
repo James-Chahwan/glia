@@ -71,10 +71,18 @@ impl TempDir {
             match create_private_dir(&path) {
                 Ok(()) => return Ok(TempDir { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e.to_string(),
-                Err(e) => return Err(format!("cannot create a temp dir under {}: {e}", base.display())),
+                Err(e) => {
+                    return Err(format!(
+                        "cannot create a temp dir under {}: {e}",
+                        base.display()
+                    ));
+                }
             }
         }
-        Err(format!("cannot create a temp dir under {}: {last}", base.display()))
+        Err(format!(
+            "cannot create a temp dir under {}: {last}",
+            base.display()
+        ))
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -119,7 +127,10 @@ pub(crate) struct Materialized {
 /// A `git -C <repo>` command that takes no lock and reads no stdin.
 fn git(repo: &Path) -> Command {
     let mut c = Command::new("git");
-    c.arg("-C").arg(repo).env("GIT_OPTIONAL_LOCKS", "0").stdin(Stdio::null());
+    c.arg("-C")
+        .arg(repo)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null());
     c
 }
 
@@ -135,7 +146,12 @@ fn git_output(repo: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, String> {
 
 /// Resolve `rev` to a commit in the repository `repo` sits in.
 pub(crate) fn resolve_rev(repo: &Path, rev: &str) -> Result<Rev, String> {
-    let fail = || format!("not a git work tree or unknown rev {rev}: {}", repo.display());
+    let fail = || {
+        format!(
+            "not a git work tree or unknown rev {rev}: {}",
+            repo.display()
+        )
+    };
     // A leading '-' would be read as an option, never as a rev.
     if rev.is_empty() || rev.starts_with('-') {
         return Err(fail());
@@ -146,7 +162,10 @@ pub(crate) fn resolve_rev(repo: &Path, rev: &str) -> Result<Rev, String> {
     if sha.is_empty() {
         return Err(fail());
     }
-    Ok(Rev { given: rev.to_string(), sha })
+    Ok(Rev {
+        given: rev.to_string(),
+        sha,
+    })
 }
 
 /// What an `ls-tree` entry is.
@@ -168,12 +187,18 @@ struct Entry {
 fn parse_ls_tree(out: &[u8]) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        let bad = || format!("unexpected ls-tree record: {}", String::from_utf8_lossy(rec));
+        let bad = || {
+            format!(
+                "unexpected ls-tree record: {}",
+                String::from_utf8_lossy(rec)
+            )
+        };
         let tab = rec.iter().position(|b| *b == b'\t').ok_or_else(bad)?;
         let head = std::str::from_utf8(&rec[..tab]).map_err(|_| bad())?;
         let path = rec[tab + 1..].to_vec();
         let mut parts = head.split(' ');
-        let (Some(mode), Some(kind), Some(oid), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+        let (Some(mode), Some(kind), Some(oid), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
         else {
             return Err(bad());
         };
@@ -185,9 +210,16 @@ fn parse_ls_tree(out: &[u8]) -> Result<Vec<Entry>, String> {
             _ => continue,
         };
         if !is_safe_rel(&path) {
-            return Err(format!("refusing unsafe path in the rev tree: {}", String::from_utf8_lossy(&path)));
+            return Err(format!(
+                "refusing unsafe path in the rev tree: {}",
+                String::from_utf8_lossy(&path)
+            ));
         }
-        entries.push(Entry { kind, oid: oid.to_string(), path });
+        entries.push(Entry {
+            kind,
+            oid: oid.to_string(),
+            path,
+        });
     }
     Ok(entries)
 }
@@ -197,7 +229,9 @@ fn parse_ls_tree(out: &[u8]) -> Result<Vec<Entry>, String> {
 fn is_safe_rel(path: &[u8]) -> bool {
     !path.is_empty()
         && path[0] != b'/'
-        && path.split(|b| *b == b'/').all(|c| !matches!(c, b"" | b"." | b".." | b".git"))
+        && path
+            .split(|b| *b == b'/')
+            .all(|c| !matches!(c, b"" | b"." | b".." | b".git"))
 }
 
 /// Whether a symlink at `link` (a safe repo-relative path) pointing at
@@ -248,7 +282,8 @@ fn make_symlink(_target: &[u8], _at: &Path) -> std::io::Result<bool> {
 fn write_at(root: &Path, rel: &[u8], bytes: &[u8]) -> Result<PathBuf, String> {
     let dest = root.join(bytes_path(rel));
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("materialise {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("materialise {}: {e}", parent.display()))?;
     }
     std::fs::write(&dest, bytes).map_err(|e| format!("materialise {}: {e}", dest.display()))?;
     Ok(dest)
@@ -270,7 +305,10 @@ pub(crate) fn materialize_rev(repo: &Path, rev: &Rev) -> Result<Materialized, St
         skipped_symlinks: 0,
         snapshots: 0,
     };
-    let wanted: Vec<&Entry> = entries.iter().filter(|e| e.kind != EntryKind::Gitlink).collect();
+    let wanted: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| e.kind != EntryKind::Gitlink)
+        .collect();
     m.gitlinks_skipped = entries.len() - wanted.len();
     let root = m.dir.path().to_path_buf();
     stream_blobs(repo, &wanted, |entry, bytes| {
@@ -282,8 +320,11 @@ pub(crate) fn materialize_rev(repo: &Path, rev: &Rev) -> Result<Materialized, St
             EntryKind::Symlink => {
                 let at = root.join(bytes_path(&entry.path));
                 let made = symlink_stays_inside(&entry.path, bytes)
-                    && at.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok())
-                    && make_symlink(bytes, &at).map_err(|e| format!("materialise {}: {e}", at.display()))?;
+                    && at
+                        .parent()
+                        .is_none_or(|p| std::fs::create_dir_all(p).is_ok())
+                    && make_symlink(bytes, &at)
+                        .map_err(|e| format!("materialise {}: {e}", at.display()))?;
                 if made {
                     m.symlinks += 1;
                 } else {
@@ -294,8 +335,10 @@ pub(crate) fn materialize_rev(repo: &Path, rev: &Rev) -> Result<Materialized, St
         }
         Ok(())
     })?;
-    let tracked: BTreeSet<String> =
-        entries.iter().map(|e| String::from_utf8_lossy(&e.path).into_owned()).collect();
+    let tracked: BTreeSet<String> = entries
+        .iter()
+        .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+        .collect();
     m.snapshots = copy_untracked_inputs(repo, &root, &tracked)?;
     eprintln!(
         "[delta] materialized {} files from {} (gitlinks_skipped={} symlinks={} skipped_symlinks={} snapshots={})",
@@ -372,7 +415,12 @@ fn read_frame(reader: &mut impl BufRead, oid: &str) -> Result<Vec<u8>, String> {
         [got, "blob", size] if *got == oid => size
             .parse()
             .map_err(|_| format!("git cat-file: bad frame header {text:?}"))?,
-        _ => return Err(format!("git cat-file: expected blob {oid}, got {:?}", text.trim_end())),
+        _ => {
+            return Err(format!(
+                "git cat-file: expected blob {oid}, got {:?}",
+                text.trim_end()
+            ));
+        }
     };
     let mut bytes = vec![0u8; size];
     reader
@@ -387,7 +435,11 @@ fn read_frame(reader: &mut impl BufRead, oid: &str) -> Result<Vec<u8>, String> {
 
 /// Copy every `.glia` input of the working tree that neither the rev
 /// (`tracked`) nor the index tracks into `root`; returns how many.
-fn copy_untracked_inputs(repo: &Path, root: &Path, tracked: &BTreeSet<String>) -> Result<usize, String> {
+fn copy_untracked_inputs(
+    repo: &Path,
+    root: &Path,
+    tracked: &BTreeSet<String>,
+) -> Result<usize, String> {
     let inputs = glia_store::external_inputs_fingerprint(repo);
     if inputs.is_empty() {
         return Ok(0);
@@ -407,7 +459,8 @@ fn copy_untracked_inputs(repo: &Path, root: &Path, tracked: &BTreeSet<String>) -
         }
         let dest = root.join(rel);
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("materialise {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("materialise {}: {e}", parent.display()))?;
         }
         std::fs::copy(repo.join(rel), &dest).map_err(|e| format!("copy {rel}: {e}"))?;
         copied += 1;
@@ -421,7 +474,16 @@ fn copy_untracked_inputs(repo: &Path, root: &Path, tracked: &BTreeSet<String>) -
 /// moved without `git mv` is untracked at its new path and is not listed;
 /// move detection still pairs it by body or name. Empty when the diff fails.
 pub(crate) fn declared_renames(repo: &Path, rev: &Rev) -> Vec<(String, String)> {
-    let args = ["diff", "--relative", "-M", "--name-status", "-z", "--no-color", &rev.sha, "--"];
+    let args = [
+        "diff",
+        "--relative",
+        "-M",
+        "--name-status",
+        "-z",
+        "--no-color",
+        &rev.sha,
+        "--",
+    ];
     match git_output(repo, &args) {
         Ok(Some(out)) => parse_name_status(&out),
         _ => Vec::new(),
@@ -438,7 +500,16 @@ pub(crate) fn declared_renames(repo: &Path, rev: &Rev) -> Vec<(String, String)> 
 /// (LF.1d) and a snapshot is an input, not a change. `Err` when either git
 /// command fails.
 pub(crate) fn changed_files(repo: &Path, rev: &Rev) -> Result<Vec<String>, String> {
-    let diff = ["diff", "--relative", "--no-renames", "--name-only", "-z", "--no-color", &rev.sha, "--"];
+    let diff = [
+        "diff",
+        "--relative",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        "--no-color",
+        &rev.sha,
+        "--",
+    ];
     let tracked = git_output(repo, &diff)?
         .ok_or_else(|| format!("git diff {} failed in {}", rev.given, repo.display()))?;
     let others = ["ls-files", "--others", "--exclude-standard", "-z"];
@@ -522,7 +593,11 @@ fn first_line(path: &Path) -> Option<String> {
         return None;
     }
     let mut text = String::new();
-    std::fs::File::open(path).ok()?.take(SMALL_FILE_CAP).read_to_string(&mut text).ok()?;
+    std::fs::File::open(path)
+        .ok()?
+        .take(SMALL_FILE_CAP)
+        .read_to_string(&mut text)
+        .ok()?;
     Some(text.lines().next().unwrap_or("").trim().to_string())
 }
 
@@ -569,7 +644,8 @@ fn is_ref_name(name: &str) -> bool {
 
 /// A full object id (40 hex, sha-1; 64 hex, sha-256), lowercased.
 fn object_id(s: &str) -> Option<String> {
-    (matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
+    (matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| s.to_ascii_lowercase())
 }
 
 /// The id `<common>/packed-refs` records for `name`.
@@ -616,10 +692,18 @@ pub(crate) fn first_parent_log(repo: &Path, head: &Rev, n: usize) -> Result<Vec<
     if shas.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args = vec!["log", "--no-walk=unsorted", "--no-show-signature", "--no-color", "--format=%H%x00%ct%x00%s", "-z"];
+    let mut args = vec![
+        "log",
+        "--no-walk=unsorted",
+        "--no-show-signature",
+        "--no-color",
+        "--format=%H%x00%ct%x00%s",
+        "-z",
+    ];
     args.extend(shas.iter().map(String::as_str));
     args.push("--");
-    let out = git_output(repo, &args)?.ok_or_else(|| format!("git log failed in {}", repo.display()))?;
+    let out =
+        git_output(repo, &args)?.ok_or_else(|| format!("git log failed in {}", repo.display()))?;
     let records = parse_log_records(&out);
     let mut revs = Vec::with_capacity(shas.len());
     for sha in shas.iter().rev() {
@@ -641,9 +725,18 @@ pub(crate) fn rev_list(repo: &Path, base: &str, head: &str) -> Result<BTreeSet<S
     let base = resolve_rev(repo, base)?;
     let head = resolve_rev(repo, head)?;
     let range = format!("{}..{}", base.sha, head.sha);
-    let out = git_output(repo, &["rev-list", "--no-merges", &range, "--"])?
-        .ok_or_else(|| format!("git rev-list {}..{} failed in {}", base.given, head.given, repo.display()))?;
-    Ok(String::from_utf8_lossy(&out).lines().filter_map(|l| object_id(l.trim())).collect())
+    let out = git_output(repo, &["rev-list", "--no-merges", &range, "--"])?.ok_or_else(|| {
+        format!(
+            "git rev-list {}..{} failed in {}",
+            base.given,
+            head.given,
+            repo.display()
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|l| object_id(l.trim()))
+        .collect())
 }
 
 /// The `%H NUL %ct NUL %s` records of a `log -z` listing (records NUL
@@ -662,7 +755,11 @@ fn parse_log_records(out: &[u8]) -> Vec<RevInfo> {
             let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
             let sha = object_id(text(r[0]).trim())?;
             let time = text(r[1]).trim().parse::<i64>().ok()?;
-            Some(RevInfo { sha, time, subject: text(r[2]) })
+            Some(RevInfo {
+                sha,
+                time,
+                subject: text(r[2]),
+            })
         })
         .collect()
 }
@@ -676,7 +773,17 @@ pub(crate) fn renames_between(repo: &Path, a: &str, b: &str) -> Vec<(String, Str
     if a.starts_with('-') || b.starts_with('-') {
         return Vec::new();
     }
-    let args = ["diff", "--relative", "-M", "--name-status", "-z", "--no-color", a, b, "--"];
+    let args = [
+        "diff",
+        "--relative",
+        "-M",
+        "--name-status",
+        "-z",
+        "--no-color",
+        a,
+        b,
+        "--",
+    ];
     match git_output(repo, &args) {
         Ok(Some(out)) => parse_name_status(&out),
         _ => Vec::new(),
@@ -696,11 +803,20 @@ pub(crate) fn renames_between(repo: &Path, a: &str, b: &str) -> Vec<(String, Str
 /// of it (the status is scoped to `repo`). `Err` when git is missing, `repo`
 /// is not in a git work tree or `HEAD` has no commit yet.
 pub(crate) fn clean_head_tree(repo: &Path) -> Result<Option<String>, String> {
-    let out = git_output(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])?
-        .ok_or_else(|| format!("no commit to key by: {} is not a git work tree with a HEAD", repo.display()))?;
+    let out = git_output(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])?.ok_or_else(
+        || {
+            format!(
+                "no commit to key by: {} is not a git work tree with a HEAD",
+                repo.display()
+            )
+        },
+    )?;
     let tree = String::from_utf8_lossy(&out).trim().to_string();
     if object_id(&tree).is_none() {
-        return Err(format!("git rev-parse HEAD^{{tree}} printed no tree id in {}", repo.display()));
+        return Err(format!(
+            "git rev-parse HEAD^{{tree}} printed no tree id in {}",
+            repo.display()
+        ));
     }
     let status = [
         "status",
@@ -712,7 +828,8 @@ pub(crate) fn clean_head_tree(repo: &Path) -> Result<Option<String>, String> {
         ".",
         ":(exclude).glia",
     ];
-    let listed = git_output(repo, &status)?.ok_or_else(|| format!("git status failed in {}", repo.display()))?;
+    let listed = git_output(repo, &status)?
+        .ok_or_else(|| format!("git status failed in {}", repo.display()))?;
     Ok(listed.is_empty().then_some(tree))
 }
 
@@ -775,8 +892,17 @@ pub(crate) fn read_paths_at(tree: &Tree, keep: &dyn Fn(&str) -> bool) -> Result<
     let mut out = TreeFiles::default();
     match tree {
         Tree::Work(root) => {
-            let listed = git_output(root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?
-                .ok_or_else(|| format!("git ls-files failed in {}", root.display()))?;
+            let listed = git_output(
+                root,
+                &[
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+            )?
+            .ok_or_else(|| format!("git ls-files failed in {}", root.display()))?;
             let paths: BTreeSet<String> = listed
                 .split(|b| *b == 0)
                 .filter(|p| !p.is_empty() && is_safe_rel(p))
@@ -784,7 +910,9 @@ pub(crate) fn read_paths_at(tree: &Tree, keep: &dyn Fn(&str) -> bool) -> Result<
                 .collect();
             for rel in paths.into_iter().filter(|p| wanted(p)) {
                 let abs = root.join(&rel);
-                let Ok(meta) = std::fs::symlink_metadata(&abs) else { continue };
+                let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+                    continue;
+                };
                 if !meta.is_file() {
                     continue;
                 }
@@ -806,13 +934,18 @@ pub(crate) fn read_paths_at(tree: &Tree, keep: &dyn Fn(&str) -> bool) -> Result<
             let entries = parse_ls_tree(&listing)?;
             let kept: Vec<&Entry> = entries
                 .iter()
-                .filter(|e| e.kind == EntryKind::File && std::str::from_utf8(&e.path).is_ok_and(&wanted))
+                .filter(|e| {
+                    e.kind == EntryKind::File && std::str::from_utf8(&e.path).is_ok_and(&wanted)
+                })
                 .collect();
             stream_blobs(repo, &kept, |entry, bytes| {
                 if bytes.len() > TREE_FILE_CAP {
                     out.too_large += 1;
                 } else {
-                    out.files.push((String::from_utf8_lossy(&entry.path).into_owned(), bytes.to_vec()));
+                    out.files.push((
+                        String::from_utf8_lossy(&entry.path).into_owned(),
+                        bytes.to_vec(),
+                    ));
                 }
                 Ok(())
             })?;
@@ -840,7 +973,11 @@ pub(crate) fn has_id_word(line: &str, word: &str) -> bool {
     }
     let b = line.as_bytes();
     let mut from = 0;
-    while let Some(i) = line.get(from..).and_then(|rest| rest.find(word)).map(|i| from + i) {
+    while let Some(i) = line
+        .get(from..)
+        .and_then(|rest| rest.find(word))
+        .map(|i| from + i)
+    {
         let e = i + word.len();
         let before = i == 0 || !grep_word_byte(b[i - 1]);
         let after = match b.get(e) {
@@ -868,7 +1005,11 @@ pub(crate) fn has_id_word(line: &str, word: &str) -> bool {
 /// NUL in its first 8000 bytes, as `-I`), lossily as UTF-8. Every hit is
 /// re-checked with the id boundary rule, since `git grep -w` treats `.` / `-`
 /// as non-word bytes (`DT.5` would hit `DT.5h`). EB.6.
-pub(crate) fn grep_words_at(tree: &Tree, words: &[String], paths: &[String]) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn grep_words_at(
+    tree: &Tree,
+    words: &[String],
+    paths: &[String],
+) -> Result<Vec<(String, String)>, String> {
     let words: Vec<&String> = words.iter().filter(|w| !w.is_empty()).collect();
     if words.is_empty() {
         return Ok(Vec::new());
@@ -902,7 +1043,10 @@ pub(crate) fn grep_words_at(tree: &Tree, words: &[String], paths: &[String]) -> 
                 c.arg("-e").arg(w.as_str());
             }
             c.arg(sha.as_str());
-            let res = c.stderr(Stdio::null()).output().map_err(|e| format!("git not found on PATH: {e}"))?;
+            let res = c
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|e| format!("git not found on PATH: {e}"))?;
             match res.status.code() {
                 Some(0) => {}
                 // 1: no line matched
@@ -912,9 +1056,14 @@ pub(crate) fn grep_words_at(tree: &Tree, words: &[String], paths: &[String]) -> 
             let prefix = format!("{sha}:");
             for rec in res.stdout.split(|b| *b == b'\n') {
                 let mut parts = rec.splitn(3, |b| *b == 0);
-                let (Some(head), Some(_n), Some(line)) = (parts.next(), parts.next(), parts.next()) else { continue };
+                let (Some(head), Some(_n), Some(line)) = (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
                 let head = String::from_utf8_lossy(head);
-                let Some(path) = head.strip_prefix(prefix.as_str()) else { continue };
+                let Some(path) = head.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
                 if !listed(path) || path.starts_with(&format!("{CONTROL_DIR}/")) {
                     continue;
                 }
@@ -931,7 +1080,9 @@ pub(crate) fn grep_words_at(tree: &Tree, words: &[String], paths: &[String]) -> 
 
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
-    let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
+    let mut fields = out
+        .split(|b| *b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned());
     let mut pairs = Vec::new();
     while let Some(status) = fields.next() {
         if status.is_empty() {
@@ -957,17 +1108,34 @@ mod tests {
         let out = b"100644 blob aaaa\tsrc/a.py\x00100755 blob bbbb\tbin/run\x00120000 blob cccc\tlink\x00160000 commit dddd\tvendor/sub\x00";
         let e = parse_ls_tree(out).expect("parses");
         let kinds: Vec<EntryKind> = e.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, [EntryKind::File, EntryKind::File, EntryKind::Symlink, EntryKind::Gitlink]);
+        assert_eq!(
+            kinds,
+            [
+                EntryKind::File,
+                EntryKind::File,
+                EntryKind::Symlink,
+                EntryKind::Gitlink
+            ]
+        );
         assert_eq!(e[0].path, b"src/a.py");
         assert_eq!(e[3].oid, "dddd");
         // A path with a tab or space after the first tab is kept whole.
-        let odd = parse_ls_tree(b"100644 blob eeee\tdir/with space\tand tab.py\x00").expect("parses");
+        let odd =
+            parse_ls_tree(b"100644 blob eeee\tdir/with space\tand tab.py\x00").expect("parses");
         assert_eq!(odd[0].path, b"dir/with space\tand tab.py");
     }
 
     #[test]
     fn unsafe_tree_paths_are_refused() {
-        for bad in ["../x", "a/../../x", "/etc/passwd", "a//b", "./a", ".git/config", "a/.git/hooks/x"] {
+        for bad in [
+            "../x",
+            "a/../../x",
+            "/etc/passwd",
+            "a//b",
+            "./a",
+            ".git/config",
+            "a/.git/hooks/x",
+        ] {
             let rec = format!("100644 blob ffff\t{bad}\x00");
             assert!(parse_ls_tree(rec.as_bytes()).is_err(), "{bad}");
         }
@@ -1007,8 +1175,12 @@ mod tests {
     #[test]
     fn changed_paths_merge_sort_and_skip_the_control_dir() {
         let tracked = b"src/b.py\x00.glia/overlay.toml\x00a.py\x00";
-        let untracked = b"a.py\x00.glia/history-snapshot/commits.jsonl\x00new.py\x00.gliax/keep.txt\x00";
-        assert_eq!(changed_paths(&[tracked, untracked]), [".gliax/keep.txt", "a.py", "new.py", "src/b.py"]);
+        let untracked =
+            b"a.py\x00.glia/history-snapshot/commits.jsonl\x00new.py\x00.gliax/keep.txt\x00";
+        assert_eq!(
+            changed_paths(&[tracked, untracked]),
+            [".gliax/keep.txt", "a.py", "new.py", "src/b.py"]
+        );
         assert!(changed_paths(&[b"", b""]).is_empty());
     }
 
@@ -1017,7 +1189,10 @@ mod tests {
         // A blob holding a newline and a fake header must not split the stream.
         let stream = b"aaaa blob 13\nx\nbbbb blob 1\nbbbb blob 0\n\n";
         let mut r = BufReader::new(&stream[..]);
-        assert_eq!(read_frame(&mut r, "aaaa").expect("first"), b"x\nbbbb blob 1");
+        assert_eq!(
+            read_frame(&mut r, "aaaa").expect("first"),
+            b"x\nbbbb blob 1"
+        );
         assert_eq!(read_frame(&mut r, "bbbb").expect("second"), b"");
         assert!(read_frame(&mut BufReader::new(&b"cccc missing\n"[..]), "cccc").is_err());
     }
@@ -1090,7 +1265,12 @@ mod tests {
         let sha256 = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         put(&root, ".git/HEAD", &format!("{sha256}\n"));
         assert_eq!(head_commit(&root), Some(sha256.to_ascii_lowercase()));
-        for bad in ["", "1111", "not a commit id at all, forty chars long.", "ref: HEAD"] {
+        for bad in [
+            "",
+            "1111",
+            "not a commit id at all, forty chars long.",
+            "ref: HEAD",
+        ] {
             put(&root, ".git/HEAD", bad);
             assert_eq!(head_commit(&root), None, "{bad:?}");
         }
@@ -1101,7 +1281,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let main = repo_with_head(tmp.path(), "main", "ref: refs/heads/main\n");
         put(&main, ".git/refs/heads/main", &format!("{SHA_A}\n"));
-        put(&main, ".git/packed-refs", &format!("{SHA_B} refs/heads/feature\n"));
+        put(
+            &main,
+            ".git/packed-refs",
+            &format!("{SHA_B} refs/heads/feature\n"),
+        );
         // `git worktree add ../wt feature`: a gitfile to a per-worktree gitdir
         // whose `commondir` leads back to the main `.git`.
         let wt = tmp.path().join("wt");
@@ -1109,8 +1293,16 @@ mod tests {
         put(&wt, ".git", &format!("gitdir: {}\n", wt_gitdir.display()));
         put(&wt_gitdir, "HEAD", "ref: refs/heads/feature\n");
         put(&wt_gitdir, "commondir", "../..\n");
-        assert_eq!(head_commit(&wt).as_deref(), Some(SHA_B), "the branch, packed in the common dir");
-        assert_eq!(head_commit(&main).as_deref(), Some(SHA_A), "the main tree keeps its own HEAD");
+        assert_eq!(
+            head_commit(&wt).as_deref(),
+            Some(SHA_B),
+            "the branch, packed in the common dir"
+        );
+        assert_eq!(
+            head_commit(&main).as_deref(),
+            Some(SHA_A),
+            "the main tree keeps its own HEAD"
+        );
         // A submodule: a relative gitfile into the superproject's modules dir.
         let sub = main.join("vendor/sub");
         put(&sub, ".git", "gitdir: ../../.git/modules/vendor/sub\n");
@@ -1151,7 +1343,12 @@ mod tests {
         put(tmp.path(), "outside", &format!("{SHA_A}\n"));
         let root = repo_with_head(tmp.path(), "r", "ref: refs/../../../outside\n");
         assert_eq!(head_commit(&root), None);
-        for bad in ["ref: refs//heads/x", "ref: refs/./heads", "ref: heads/main", "ref: /etc/passwd"] {
+        for bad in [
+            "ref: refs//heads/x",
+            "ref: refs/./heads",
+            "ref: heads/main",
+            "ref: /etc/passwd",
+        ] {
             put(&root, ".git/HEAD", bad);
             assert_eq!(head_commit(&root), None, "{bad:?}");
         }
@@ -1159,12 +1356,16 @@ mod tests {
         #[cfg(unix)]
         {
             put(&root, ".git/HEAD", "ref: refs/heads/main\n");
-            std::os::unix::fs::symlink(tmp.path().join("outside"), root.join(".git/refs/heads/main"))
-                .expect("symlink");
+            std::os::unix::fs::symlink(
+                tmp.path().join("outside"),
+                root.join(".git/refs/heads/main"),
+            )
+            .expect("symlink");
             assert_eq!(head_commit(&root), None, "a symlinked loose ref");
             let other = repo_with_head(tmp.path(), "o", "");
             std::fs::remove_file(other.join(".git/HEAD")).expect("rm");
-            std::os::unix::fs::symlink(tmp.path().join("outside"), other.join(".git/HEAD")).expect("symlink");
+            std::os::unix::fs::symlink(tmp.path().join("outside"), other.join(".git/HEAD"))
+                .expect("symlink");
             assert_eq!(head_commit(&other), None, "a symlinked HEAD");
         }
     }
@@ -1175,14 +1376,23 @@ mod tests {
         let out = format!("{SHA_A}\x001700000000\x00first line\x00{sha_b}\x001700000100\x00\x00");
         let r = parse_log_records(out.as_bytes());
         assert_eq!(r.len(), 2, "{r:?}");
-        assert_eq!((r[0].sha.as_str(), r[0].time, r[0].subject.as_str()), (SHA_A, 1_700_000_000, "first line"));
-        assert_eq!((r[1].sha.as_str(), r[1].time, r[1].subject.as_str()), (sha_b.as_str(), 1_700_000_100, ""));
+        assert_eq!(
+            (r[0].sha.as_str(), r[0].time, r[0].subject.as_str()),
+            (SHA_A, 1_700_000_000, "first line")
+        );
+        assert_eq!(
+            (r[1].sha.as_str(), r[1].time, r[1].subject.as_str()),
+            (sha_b.as_str(), 1_700_000_100, "")
+        );
         // No trailing terminator parses the same.
         let bare = &out[..out.len() - 1];
         assert_eq!(parse_log_records(bare.as_bytes()), r);
         // A subject holding tabs and a would-be separator stays one field.
         let odd = format!("{SHA_A}\x001\x00fix: a\tb \x1e c\x00");
-        assert_eq!(parse_log_records(odd.as_bytes())[0].subject, "fix: a\tb \x1e c");
+        assert_eq!(
+            parse_log_records(odd.as_bytes())[0].subject,
+            "fix: a\tb \x1e c"
+        );
         // A malformed record is dropped, never guessed.
         assert!(parse_log_records(b"nothex\x00x\x00s\x00").is_empty());
         assert!(parse_log_records(format!("{SHA_A}\x00soon\x00s\x00").as_bytes()).is_empty());
@@ -1194,13 +1404,24 @@ mod tests {
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .expect("git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -1253,7 +1474,14 @@ mod tests {
         let sha = run_git(d, &["rev-parse", "HEAD"]);
         let md = |p: &str| p.ends_with(".md") || p.ends_with(".toml");
         let work = read_paths_at(&Tree::Work(d), &md).expect("work");
-        let rev = read_paths_at(&Tree::Rev { repo: d, sha: sha.clone() }, &md).expect("rev");
+        let rev = read_paths_at(
+            &Tree::Rev {
+                repo: d,
+                sha: sha.clone(),
+            },
+            &md,
+        )
+        .expect("rev");
         let names: Vec<&str> = work.files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(names, ["README.md", "docs/a.md"]);
         assert_eq!(work.files, rev.files);
@@ -1262,9 +1490,25 @@ mod tests {
         put(d, "docs/new.md", "n\n");
         let work = read_paths_at(&Tree::Work(d), &md).expect("work");
         assert!(work.files.iter().any(|(p, _)| p == "docs/new.md"));
-        assert_eq!(Tree::Rev { repo: d, sha: sha.clone() }.label(), sha[..12]);
+        assert_eq!(
+            Tree::Rev {
+                repo: d,
+                sha: sha.clone()
+            }
+            .label(),
+            sha[..12]
+        );
         assert_eq!(Tree::Work(d).label(), "worktree");
-        assert!(read_paths_at(&Tree::Rev { repo: d, sha: "--all".into() }, &md).is_err());
+        assert!(
+            read_paths_at(
+                &Tree::Rev {
+                    repo: d,
+                    sha: "--all".into()
+                },
+                &md
+            )
+            .is_err()
+        );
     }
 
     /// EB.6: the id boundary rule, and `grep_words_at` reading the working tree
@@ -1289,7 +1533,15 @@ mod tests {
         let sha = run_git(d, &["rev-parse", "HEAD"]);
         put(d, "src/c.rs", "// T012 later\n");
         let words = vec!["T012".to_string(), "DT.5".to_string()];
-        let rev = grep_words_at(&Tree::Rev { repo: d, sha: sha.clone() }, &words, &[]).expect("rev");
+        let rev = grep_words_at(
+            &Tree::Rev {
+                repo: d,
+                sha: sha.clone(),
+            },
+            &words,
+            &[],
+        )
+        .expect("rev");
         let want = vec![
             ("src/a.rs".to_string(), "// T012 here".to_string()),
             ("src/b.rs".to_string(), "// DT.5: yes".to_string()),
@@ -1297,11 +1549,36 @@ mod tests {
         assert_eq!(rev, want);
         let work = grep_words_at(&Tree::Work(d), &words, &[]).expect("work");
         assert_eq!(work.len(), 3);
-        assert_eq!(work[2], ("src/c.rs".to_string(), "// T012 later".to_string()));
-        let only = grep_words_at(&Tree::Rev { repo: d, sha: sha.clone() }, &words, &["src/b.rs".to_string()]).expect("rev");
+        assert_eq!(
+            work[2],
+            ("src/c.rs".to_string(), "// T012 later".to_string())
+        );
+        let only = grep_words_at(
+            &Tree::Rev {
+                repo: d,
+                sha: sha.clone(),
+            },
+            &words,
+            &["src/b.rs".to_string()],
+        )
+        .expect("rev");
         assert_eq!(only, want[1..]);
-        assert!(grep_words_at(&Tree::Rev { repo: d, sha }, &["absent".to_string()], &[]).expect("none").is_empty());
-        assert!(grep_words_at(&Tree::Rev { repo: d, sha: "--all".into() }, &words, &[]).is_err());
+        assert!(
+            grep_words_at(&Tree::Rev { repo: d, sha }, &["absent".to_string()], &[])
+                .expect("none")
+                .is_empty()
+        );
+        assert!(
+            grep_words_at(
+                &Tree::Rev {
+                    repo: d,
+                    sha: "--all".into()
+                },
+                &words,
+                &[]
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -84,9 +84,7 @@ fn with_parent_fallback<T>(
 ) -> Option<T> {
     collect(node, src).or_else(|| {
         let parent = node.parent()?;
-        if parent.start_byte() == node.start_byte()
-            || first_named_child_is(&parent, node)
-        {
+        if parent.start_byte() == node.start_byte() || first_named_child_is(&parent, node) {
             collect(&parent, src)
         } else {
             None
@@ -372,7 +370,10 @@ mod tests {
         let src = "/// Adds two numbers.\n#[inline]\npub fn add() {}";
         let tree = rust_tree(src);
         let f = find(tree.root_node(), "function_item").unwrap();
-        assert_eq!(leading_doc(&f, src.as_bytes()).as_deref(), Some("Adds two numbers."));
+        assert_eq!(
+            leading_doc(&f, src.as_bytes()).as_deref(),
+            Some("Adds two numbers.")
+        );
     }
 
     #[test]
@@ -493,7 +494,10 @@ mod tests {
         let src = "// just a comment\npub fn g() {}";
         let tree = rust_tree(src);
         let g = find(tree.root_node(), "function_item").unwrap();
-        assert_eq!(leading_doc_lines_where(&g, src.as_bytes(), only_triple), None);
+        assert_eq!(
+            leading_doc_lines_where(&g, src.as_bytes(), only_triple),
+            None
+        );
         assert_eq!(
             leading_doc_lines(&g, src.as_bytes()),
             Some(lines(&["just a comment"]))
@@ -529,7 +533,10 @@ mod tests {
         let got = split_doc_tags(&lines(&["Deposits funds.", "@dev Internal."]), "notice");
         assert_eq!(
             got,
-            vec![tag("notice", None, "Deposits funds."), tag("dev", None, "Internal.")]
+            vec![
+                tag("notice", None, "Deposits funds."),
+                tag("dev", None, "Internal.")
+            ]
         );
     }
 

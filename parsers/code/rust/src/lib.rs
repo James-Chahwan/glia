@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use glia_code_domain::endpoint::{
-    ClientEndpoint, push_client_endpoint, route_qname, url_to_path,
-};
+use glia_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, route_qname, url_to_path};
 use glia_code_domain::line_of;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -38,8 +36,13 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
     acc.file_module = Some(module_id);
     acc.di = DiFrameworks::of(source);
 
@@ -459,7 +462,8 @@ fn trait_impl_ref(trait_node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 /// the trait, so it draws no IMPLEMENTS ref.
 fn is_negative_impl(node: TsNode) -> bool {
     let mut cursor = node.walk();
-    node.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "!")
+    node.children(&mut cursor)
+        .any(|c| !c.is_named() && c.kind() == "!")
 }
 
 // ============================================================================
@@ -517,7 +521,9 @@ impl DiFrameworks {
         let (prefix, last) = split_type_path(text_of(ty.child_by_field_name("type")?, src))?;
         let under = |crates: &[&str]| prefix.iter().all(|s| crates.contains(s));
         let extractor = match last {
-            "State" | "Extension" if self.axum && !behind_ref && under(&["axum", "extract"]) => true,
+            "State" | "Extension" if self.axum && !behind_ref && under(&["axum", "extract"]) => {
+                true
+            }
             "Data" if self.actix && !behind_ref && under(&["actix_web", "web"]) => true,
             "State" if self.rocket && under(&["rocket"]) => true,
             _ => false,
@@ -604,8 +610,7 @@ fn type_params<'a>(item: TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
 fn first_type_arg(generic: TsNode) -> Option<TsNode> {
     let args = generic.child_by_field_name("type_arguments")?;
     let mut cursor = args.walk();
-    args
-        .named_children(&mut cursor)
+    args.named_children(&mut cursor)
         .find(|a| !matches!(a.kind(), "lifetime" | "line_comment" | "block_comment"))
 }
 
@@ -880,13 +885,8 @@ fn visit_route_attr(
                 confidence: Confidence::Strong,
                 cells: Vec::new(),
             });
-            acc.nav.record(
-                route_id,
-                &route_name,
-                &route_name,
-                node_kind::ROUTE,
-                None,
-            );
+            acc.nav
+                .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
         }
     }
 }
@@ -933,12 +933,8 @@ fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
                     // via a HANDLED_BY ref (graph's resolve_refs binds Bare by
                     // name, incl. same-module fns).
                     if let Some(handler) = extract_handler_name(args_text, &pat) {
-                        let route_id = NodeId::from_parts(
-                            GRAPH_TYPE,
-                            repo,
-                            node_kind::ROUTE,
-                            &route_name,
-                        );
+                        let route_id =
+                            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
                         acc.refs.push(UnresolvedRef {
                             from: route_id,
                             from_module: module_id,
@@ -1014,7 +1010,10 @@ fn extract_handler_name(hay: &str, pat: &str) -> Option<String> {
                 let token = &hay[arg_start..j];
                 let name = token.rsplit("::").next().unwrap_or("");
                 if !name.is_empty()
-                    && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    && name
+                        .bytes()
+                        .next()
+                        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
                 {
                     return Some(name.to_string());
                 }
@@ -1189,7 +1188,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, from_qname: &str, ac
                     && variant_path(func, src).is_none()
                 {
                     let qualifier = classify_call(func, src);
-                    acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+                    acc.calls.push(CallSite {
+                        from,
+                        qualifier,
+                        line: line_at(n),
+                    });
                 }
             }
             // A macro's arguments are a flat token tree, never a call_expression,
@@ -1303,7 +1306,10 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
 /// (`Repo`) or SCREAMING (`CONFIG`) identifier names a type, a unit value or
 /// a static and stays an `Attribute` base (LA.35a).
 fn is_value_name(ident: &str) -> bool {
-    ident.chars().next().is_some_and(|c| c == '_' || c.is_lowercase())
+    ident
+        .chars()
+        .next()
+        .is_some_and(|c| c == '_' || c.is_lowercase())
 }
 
 // ============================================================================
@@ -1351,9 +1357,10 @@ fn rust_type_name(ty: TsNode, src: &[u8], impl_type: Option<&str>) -> Option<Str
             }
             type_named(base, impl_type)
         }
-        "scoped_type_identifier" => {
-            type_named(text_of(ty.child_by_field_name("name")?, src).to_string(), impl_type)
-        }
+        "scoped_type_identifier" => type_named(
+            text_of(ty.child_by_field_name("name")?, src).to_string(),
+            impl_type,
+        ),
         "type_identifier" => type_named(text_of(ty, src).to_string(), impl_type),
         _ => None,
     }
@@ -1476,13 +1483,7 @@ const NOT_LOCAL_SCOPES: &[&str] = &[
 
 /// `r: &Repo` / `mut r: Repo` -> `r` typed `Repo`; `(a, b): (A, B)` -> `a`
 /// and `b` unknown; `self: Box<Self>` -> nothing.
-fn record_parameter(
-    p: TsNode,
-    src: &[u8],
-    fn_id: NodeId,
-    impl_type: Option<&str>,
-    acc: &mut Acc,
-) {
+fn record_parameter(p: TsNode, src: &[u8], fn_id: NodeId, impl_type: Option<&str>, acc: &mut Acc) {
     let Some(pattern) = p.child_by_field_name("pattern") else {
         return;
     };
@@ -1509,7 +1510,10 @@ fn record_let(n: TsNode, src: &[u8], fn_id: NodeId, impl_type: Option<&str>, acc
         record_unknown_bindings(pattern, src, fn_id, acc);
         return;
     };
-    let ty = match (n.child_by_field_name("type"), n.child_by_field_name("value")) {
+    let ty = match (
+        n.child_by_field_name("type"),
+        n.child_by_field_name("value"),
+    ) {
         (Some(t), _) => rust_type_name(t, src, impl_type).unwrap_or_default(),
         (None, Some(v)) => init_type(v, src, fn_id, impl_type, acc),
         (None, None) => String::new(),
@@ -1548,8 +1552,11 @@ fn record_unknown_bindings(pattern: TsNode, src: &[u8], fn_id: NodeId, acc: &mut
                 }
                 continue;
             }
-            "scoped_identifier" | "scoped_type_identifier" | "range_pattern"
-            | "macro_invocation" | "closure_expression" => continue,
+            "scoped_identifier"
+            | "scoped_type_identifier"
+            | "range_pattern"
+            | "macro_invocation"
+            | "closure_expression" => continue,
             _ => {}
         }
         // Fields that hold no binding: a pattern's type path, a field
@@ -1919,7 +1926,11 @@ fn scan_token_tree(
                     [] => None,
                 };
                 if let Some(qualifier) = qualifier.filter(|_| !defining) {
-                    acc.calls.push(CallSite { from, qualifier, line: line_at(t) });
+                    acc.calls.push(CallSite {
+                        from,
+                        qualifier,
+                        line: line_at(t),
+                    });
                     found += 1;
                 }
                 found += scan_token_tree(args, src, from, false, depth + 1, acc);
@@ -2242,8 +2253,22 @@ pub fn create_user(name: &str) -> User {
         assert!(names.contains(&"models"));
         assert!(names.contains(&"User"));
         assert!(names.contains(&"create_user"));
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::STRUCT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2283,8 +2308,22 @@ pub trait Drawable {
 }
 "#;
         let fp = parse_file(source, "src/lib.rs", "myapp", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
         // LA.3: the three variants are ATTRIBUTE children of the ENUM.
         let color = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "myapp::Color");
         let mut variants: Vec<&str> = fp.nav.children_of[&color]
@@ -2344,12 +2383,7 @@ mod tests {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
-    fn has_edge(
-        fp: &FileParse,
-        from: NodeId,
-        to: NodeId,
-        cat: glia_core::EdgeCategoryId,
-    ) -> bool {
+    fn has_edge(fp: &FileParse, from: NodeId, to: NodeId, cat: glia_core::EdgeCategoryId) -> bool {
         fp.edges
             .iter()
             .any(|e| e.from == from && e.to == to && e.category == cat)
@@ -2604,8 +2638,7 @@ impl Display for Foo {
         assert_eq!(state_vars.len(), 1);
 
         // FEE_BPS carries its doc cell.
-        let fee_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "myapp::FEE_BPS");
+        let fee_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "myapp::FEE_BPS");
         let fee_node = fp.nodes.iter().find(|n| n.id == fee_id).unwrap();
         assert!(fee_node.cells.iter().any(|c| c.kind == cell_type::DOC));
 
@@ -2613,9 +2646,13 @@ impl Display for Foo {
         let foo_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "myapp::Foo");
         let display_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "myapp::Display");
-        assert!(fp.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS
-            && e.from == foo_id
-            && e.to == display_id));
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::IMPLEMENTS
+                    && e.from == foo_id
+                    && e.to == display_id)
+        );
     }
 
     /// DG.13a: a trait the impl's container does not declare is an
@@ -2675,7 +2712,11 @@ impl !Send for SqlRepo {}
             .filter(|e| e.category == edge_category::IMPLEMENTS)
             .map(|e| (e.from, e.to))
             .collect();
-        assert_eq!(direct, vec![(sql, local)], "the in-file trait keeps HEAD's direct edge");
+        assert_eq!(
+            direct,
+            vec![(sql, local)],
+            "the in-file trait keeps HEAD's direct edge"
+        );
     }
 
     /// The INJECTS refs of a parse as `(from qname, qualifier, line)`, each
@@ -2989,11 +3030,14 @@ fn app() -> Router {
         assert!(handlers.contains(&"get_user"), "handlers: {handlers:?}");
 
         // The ROUTE `GET /users` must be the `from` of the list_users ref.
-        let route_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users");
-        assert!(fp.refs.iter().any(|r| r.category == edge_category::HANDLED_BY
-            && r.from == route_id
-            && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "list_users")));
+        let route_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users");
+        assert!(
+            fp.refs
+                .iter()
+                .any(|r| r.category == edge_category::HANDLED_BY
+                    && r.from == route_id
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "list_users"))
+        );
 
         // Path-qualified handlers reduce to the fn's bare name.
         assert_eq!(
@@ -3111,7 +3155,10 @@ fn run(items: &[&str]) {
 "#;
         let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
         let names = route_names(&fp);
-        assert!(names.is_empty(), "non-`/` `.at(...)` args must not emit routes");
+        assert!(
+            names.is_empty(),
+            "non-`/` `.at(...)` args must not emit routes"
+        );
     }
 
     /// LA.25b — the verb window after a Tide / Poem `.at("/p")` or a Salvo
@@ -3224,9 +3271,9 @@ impl ApiClient {
         let caller = id_of(&fp, "create_user");
         let ep = id_of(&fp, "POST /api/users");
         assert!(
-            fp.edges.iter().any(|e| e.from == caller
-                && e.to == ep
-                && e.category == edge_category::CALLS),
+            fp.edges
+                .iter()
+                .any(|e| e.from == caller && e.to == ep && e.category == edge_category::CALLS),
             "no CALLS edge create_user -> POST /api/users"
         );
     }
@@ -3534,8 +3581,10 @@ impl Svc {
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> =
-            list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let mut out: Vec<(String, String)> = list
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         out.sort();
         out
     }
@@ -3561,10 +3610,14 @@ impl Svc {
             ]
         );
         // `self.x()` stays a SelfMethod.
-        let source = "struct S;\nimpl S {\n    fn run(&self) { self.x(); }\n    fn x(&self) {}\n}\n";
+        let source =
+            "struct S;\nimpl S {\n    fn run(&self) { self.x(); }\n    fn x(&self) {}\n}\n";
         let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
         assert_eq!(fp.calls.len(), 1);
-        assert_eq!(fp.calls[0].qualifier, CallQualifier::SelfMethod("x".to_string()));
+        assert_eq!(
+            fp.calls[0].qualifier,
+            CallQualifier::SelfMethod("x".to_string())
+        );
     }
 
     #[test]
@@ -3695,7 +3748,12 @@ impl S {
         let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
         assert_eq!(
             locals(&fp, node_kind::METHOD, "m::S::run"),
-            pairs(&[("a", "self.repo"), ("b", "self.repo"), ("c", "self.repo"), ("d", "")])
+            pairs(&[
+                ("a", "self.repo"),
+                ("b", "self.repo"),
+                ("c", "self.repo"),
+                ("d", "")
+            ])
         );
     }
 
@@ -3719,7 +3777,13 @@ pub fn free() { let s = Self::new(); }
         let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
         assert_eq!(
             locals(&fp, node_kind::METHOD, "m::Repo::fresh"),
-            pairs(&[("other", "Repo"), ("a", "Repo"), ("b", "Repo"), ("c", "Repo"), ("d", "Repo")])
+            pairs(&[
+                ("other", "Repo"),
+                ("a", "Repo"),
+                ("b", "Repo"),
+                ("c", "Repo"),
+                ("d", "Repo")
+            ])
         );
         assert_eq!(
             locals(&fp, node_kind::FUNCTION, "m::Wrapper::get").len(),
@@ -3731,6 +3795,9 @@ pub fn free() { let s = Self::new(); }
             pairs(&[("w", "Wrapper")])
         );
         // No impl: `Self` names nothing.
-        assert_eq!(locals(&fp, node_kind::FUNCTION, "m::free"), pairs(&[("s", "")]));
+        assert_eq!(
+            locals(&fp, node_kind::FUNCTION, "m::free"),
+            pairs(&[("s", "")])
+        );
     }
 }

@@ -79,8 +79,7 @@ struct PerTestFn {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let patch = std::fs::read_to_string(&args.test_patch)
-        .context("reading test_patch")?;
+    let patch = std::fs::read_to_string(&args.test_patch).context("reading test_patch")?;
     let mut per_fn = parse_patch(&patch)?;
 
     if per_fn.is_empty() {
@@ -102,7 +101,11 @@ fn main() -> Result<()> {
     }
     std::fs::write(&args.text_out, directive.as_bytes())?;
     for tf in per_fn.values() {
-        eprintln!("[synth_test_assertion] test {}: {} assertion(s)", tf.name, tf.asserts.len());
+        eprintln!(
+            "[synth_test_assertion] test {}: {} assertion(s)",
+            tf.name,
+            tf.asserts.len()
+        );
     }
     let n_asserts: usize = per_fn.values().map(|tf| tf.asserts.len()).sum();
     eprintln!(
@@ -117,13 +120,19 @@ fn main() -> Result<()> {
 fn parse_patch(patch: &str) -> Result<BTreeMap<String, PerTestFn>> {
     let def_re = Regex::new(r"def\s+(test_[A-Za-z_][A-Za-z0-9_]*)\s*\(")?;
     // assert <lhs> <op> <rhs> ; or assert <expr> (truthy)
-    let assert_eq_re = Regex::new(r"^\s*assert\s+(.+?)\s+(==|!=|is\s+not|is|not\s+in|in)\s+(.+?)\s*(?:#.*)?$")?;
+    let assert_eq_re =
+        Regex::new(r"^\s*assert\s+(.+?)\s+(==|!=|is\s+not|is|not\s+in|in)\s+(.+?)\s*(?:#.*)?$")?;
     let assert_truthy_re = Regex::new(r"^\s*assert\s+(.+?)\s*(?:#.*)?$")?;
-    let raises_re = Regex::new(r"^\s*(?:with\s+)?pytest\.raises\(\s*([A-Za-z_][\w\.]*)\s*(?:,\s*match\s*=\s*([^)]+))?\)\s*:?")?;
-    let assert_equal_re = Regex::new(r"^\s*self\.assertEqual\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*(?:#.*)?$")?;
+    let raises_re = Regex::new(
+        r"^\s*(?:with\s+)?pytest\.raises\(\s*([A-Za-z_][\w\.]*)\s*(?:,\s*match\s*=\s*([^)]+))?\)\s*:?",
+    )?;
+    let assert_equal_re =
+        Regex::new(r"^\s*self\.assertEqual\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*(?:#.*)?$")?;
     let assert_raises_re = Regex::new(r"^\s*self\.assertRaises\s*\(\s*([A-Za-z_][\w\.]*)\s*\)")?;
-    let assert_truefalse_re = Regex::new(r"^\s*self\.(assertTrue|assertFalse)\s*\(\s*(.+?)\s*\)\s*(?:#.*)?$")?;
-    let assert_isinstance_re = Regex::new(r"^\s*self\.assertIsInstance\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)")?;
+    let assert_truefalse_re =
+        Regex::new(r"^\s*self\.(assertTrue|assertFalse)\s*\(\s*(.+?)\s*\)\s*(?:#.*)?$")?;
+    let assert_isinstance_re =
+        Regex::new(r"^\s*self\.assertIsInstance\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)")?;
 
     let mut per_fn: BTreeMap<String, PerTestFn> = BTreeMap::new();
     let mut cur_fn: Option<String> = None;
@@ -287,31 +296,38 @@ fn render_directive(per_fn: &BTreeMap<String, PerTestFn>) -> String {
         for a in &tf.asserts {
             match a.kind.as_str() {
                 "assert_eq" => s.push_str(&format!(
-                    "- Expression `{}` must equal `{}`.\n", a.expr,
+                    "- Expression `{}` must equal `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assert_ne" => s.push_str(&format!(
-                    "- Expression `{}` must NOT equal `{}`.\n", a.expr,
+                    "- Expression `{}` must NOT equal `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assert_is" => s.push_str(&format!(
-                    "- `{}` must be (identity) `{}`.\n", a.expr,
+                    "- `{}` must be (identity) `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assert_is_not" => s.push_str(&format!(
-                    "- `{}` must NOT be (identity) `{}`.\n", a.expr,
+                    "- `{}` must NOT be (identity) `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assert_in" => s.push_str(&format!(
-                    "- `{}` must appear in `{}`.\n", a.expr,
+                    "- `{}` must appear in `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assert_not_in" => s.push_str(&format!(
-                    "- `{}` must NOT appear in `{}`.\n", a.expr,
+                    "- `{}` must NOT appear in `{}`.\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "assertEqual" => s.push_str(&format!(
-                    "- `{}` must equal `{}` (self.assertEqual).\n", a.expr,
+                    "- `{}` must equal `{}` (self.assertEqual).\n",
+                    a.expr,
                     a.expected.as_deref().unwrap_or("?"),
                 )),
                 "raises" | "assertRaises" => {
@@ -321,27 +337,18 @@ fn render_directive(per_fn: &BTreeMap<String, PerTestFn>) -> String {
                             "- Code under test must raise `{exc}` (message matching `{m}`).\n"
                         ));
                     } else {
-                        s.push_str(&format!(
-                            "- Code under test must raise `{exc}`.\n"
-                        ));
+                        s.push_str(&format!("- Code under test must raise `{exc}`.\n"));
                     }
                 }
-                "assertTrue" => s.push_str(&format!(
-                    "- `{}` must evaluate truthy.\n", a.expr,
-                )),
-                "assertFalse" => s.push_str(&format!(
-                    "- `{}` must evaluate falsy.\n", a.expr,
-                )),
+                "assertTrue" => s.push_str(&format!("- `{}` must evaluate truthy.\n", a.expr,)),
+                "assertFalse" => s.push_str(&format!("- `{}` must evaluate falsy.\n", a.expr,)),
                 "assertIsInstance" => s.push_str(&format!(
                     "- `{}` must be an instance of `{}`.\n",
-                    a.expr, a.expected.as_deref().unwrap_or("?"),
+                    a.expr,
+                    a.expected.as_deref().unwrap_or("?"),
                 )),
-                "truthy" => s.push_str(&format!(
-                    "- `{}` must evaluate truthy.\n", a.expr,
-                )),
-                other => s.push_str(&format!(
-                    "- ({other}) {}\n", a.raw,
-                )),
+                "truthy" => s.push_str(&format!("- `{}` must evaluate truthy.\n", a.expr,)),
+                other => s.push_str(&format!("- ({other}) {}\n", a.raw,)),
             }
         }
         s.push('\n');

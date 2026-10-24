@@ -112,13 +112,27 @@ fn method_bearing_forms_emit_routes_with_methods_and_handlers() {
     // kept verbatim (the shapes such a misread mints through HandleFunc /
     // Handle's ANY arm, in either qname generation), and the PATCH handler
     // stays on its own path.
-    for q in ["ANY /PATCH", "ANY /GET /items/{id}", "route:/PATCH", "route:/GET /items/{id}"] {
+    for q in [
+        "ANY /PATCH",
+        "ANY /GET /items/{id}",
+        "route:/PATCH",
+        "route:/GET /items/{id}",
+    ] {
         assert!(m.node_id_by_qname(q).is_none(), "{q} exists");
     }
     // GET and POST of /users are two nodes, each HANDLED_BY its own handler.
-    assert_eq!(handlers(&m, route(&m, "GET /users")), vec!["listUsers".to_string()]);
-    assert_eq!(handlers(&m, route(&m, "POST /users")), vec!["createUser".to_string()]);
-    assert!(m.node_id_by_qname("route:/users").is_none(), "path-only node is gone");
+    assert_eq!(
+        handlers(&m, route(&m, "GET /users")),
+        vec!["listUsers".to_string()]
+    );
+    assert_eq!(
+        handlers(&m, route(&m, "POST /users")),
+        vec!["createUser".to_string()]
+    );
+    assert!(
+        m.node_id_by_qname("route:/users").is_none(),
+        "path-only node is gone"
+    );
 }
 
 #[test]
@@ -142,12 +156,19 @@ fn every_go_route_is_positioned_at_its_registration() {
     // Go 1.22 pattern: `mux.HandleFunc("GET /items/{id}", ..)` on row 23.
     let item = route(&m, "GET /items/{id}");
     assert_eq!(
-        cells_of(&m, item, cell_type::POSITION).first().map(String::as_str),
+        cells_of(&m, item, cell_type::POSITION)
+            .first()
+            .map(String::as_str),
         Some(r#"{"file":"main.go","start_line":23,"end_line":23}"#),
     );
 
     // Every ROUTE in the graph carries at least one POSITION.
-    for q in ["PATCH /users/:id", "ANY /ping", "GET /orders", "POST /orders"] {
+    for q in [
+        "PATCH /users/:id",
+        "ANY /ping",
+        "GET /orders",
+        "POST /orders",
+    ] {
         let id = route(&m, q);
         assert!(
             !cells_of(&m, id, cell_type::POSITION).is_empty(),
@@ -237,16 +258,29 @@ fn const_prefixes_end_to_end() {
         ("GET /shared/ping", "ping"),
         ("GET /m/api/v1/deep", "deep"),
     ] {
-        assert_eq!(handlers(&m, route(&m, route_q)), vec![handler.to_string()], "{route_q}");
+        assert_eq!(
+            handlers(&m, route(&m, route_q)),
+            vec![handler.to_string()],
+            "{route_q}"
+        );
     }
-    for q in ["GET /items", "GET /thing", "GET /ping", "GET /stats", "GET /deep"] {
+    for q in [
+        "GET /items",
+        "GET /thing",
+        "GET /ping",
+        "GET /stats",
+        "GET /deep",
+    ] {
         assert!(m.node_id_by_qname(q).is_none(), "{q} exists");
     }
     // Each final ROUTE keeps the POSITION of its registration.
     for q in ["GET /other/thing", "GET /shared/ping", "GET /m/api/v1/deep"] {
         let cells = cells_of(&m, route(&m, q), cell_type::POSITION);
         assert_eq!(cells.len(), 1, "{q}: {cells:?}");
-        assert!(cells[0].contains(r#""file":"api/routes.go""#), "{q}: {cells:?}");
+        assert!(
+            cells[0].contains(r#""file":"api/routes.go""#),
+            "{q}: {cells:?}"
+        );
     }
 }
 
@@ -292,7 +326,11 @@ fn handler_qnames(m: &MergedGraph, id: NodeId) -> Vec<String> {
         .flat_map(|g| g.edges.iter())
         .chain(m.cross_edges.iter())
         .filter(|e| e.from == id && e.category == edge_category::HANDLED_BY)
-        .filter_map(|e| m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&e.to).cloned()))
+        .filter_map(|e| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&e.to).cloned())
+        })
         .collect();
     out.sort();
     out
@@ -313,7 +351,11 @@ fn local_method_handlers_bind() {
         ("GET /tokens/:id", "api::handlers::TokensHandler::Show"),
         ("DELETE /tokens/:id", "api::handlers::TokensHandler::Del"),
     ] {
-        assert_eq!(handler_qnames(&m, route(&m, q)), vec![handler.to_string()], "{q}");
+        assert_eq!(
+            handler_qnames(&m, route(&m, q)),
+            vec![handler.to_string()],
+            "{q}"
+        );
     }
     let into_users = m
         .graphs

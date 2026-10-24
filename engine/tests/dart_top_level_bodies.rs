@@ -17,7 +17,10 @@ use glia_engine::generate_one;
 const FIXTURE: &str = "fixtures/dart-top-level-bodies";
 
 fn bench(rel: &str) -> String {
-    format!("{}/../bench/substrate-gap/{rel}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/{rel}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 #[test]

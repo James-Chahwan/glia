@@ -110,7 +110,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
-use glia_code_domain::evm::{self, AbiEntry, ClientFacts, ClientSide, EntryKind, ProcedureFacts, Scope};
+use glia_code_domain::evm::{
+    self, AbiEntry, ClientFacts, ClientSide, EntryKind, ProcedureFacts, Scope,
+};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 
@@ -215,9 +217,7 @@ fn facts_for(cells: &[Cell], file: Option<&str>) -> Option<ProcedureFacts> {
         for c in cells {
             if c.kind == cell_type::POSITION {
                 here = cell_file(c) == Some(file);
-            } else if here
-                && let Some(facts) = evm::read_procedure_cell(std::slice::from_ref(c))
-            {
+            } else if here && let Some(facts) = evm::read_procedure_cell(std::slice::from_ref(c)) {
                 return Some(facts);
             }
         }
@@ -239,11 +239,16 @@ fn proc_owners(
     };
     let mut out: Vec<(NodeId, Option<String>)> = Vec::new();
     for h in handlers.get(&proc.0).into_iter().flatten() {
-        let Some(&decl) = g.nav.parent_of.get(h) else { continue };
+        let Some(&decl) = g.nav.parent_of.get(h) else {
+            continue;
+        };
         if !named(decl) || out.iter().any(|(d, _)| *d == decl) {
             continue;
         }
-        let file = at.get(&h.0).and_then(|&i| node_file(&g.nodes[i])).map(str::to_string);
+        let file = at
+            .get(&h.0)
+            .and_then(|&i| node_file(&g.nodes[i]))
+            .map(str::to_string);
         out.push((decl, file));
     }
     if out.is_empty()
@@ -302,15 +307,28 @@ fn contract_index(graphs: &[RepoGraph]) -> Contracts {
             }
         }
         for n in &g.nodes {
-            let Some(&kind) = g.nav.kind_by_id.get(&n.id) else { continue };
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(&kind) = g.nav.kind_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
             if kind == node_kind::RPC_PROCEDURE {
-                let Some((contract, member)) = evm::split_procedure(qname) else { continue };
+                let Some((contract, member)) = evm::split_procedure(qname) else {
+                    continue;
+                };
                 procedures.insert(n.id.0);
-                let target = Target { id: n.id, confidence: n.confidence };
+                let target = Target {
+                    id: n.id,
+                    confidence: n.confidence,
+                };
                 for (decl, file) in proc_owners(g, n.id, contract, &handlers, &at) {
-                    let Some(facts) = facts_for(&n.cells, file.as_deref()) else { continue };
-                    let Some(p) = decl_parts(&mut parts, decl, gi) else { continue };
+                    let Some(facts) = facts_for(&n.cells, file.as_deref()) else {
+                        continue;
+                    };
+                    let Some(p) = decl_parts(&mut parts, decl, gi) else {
+                        continue;
+                    };
                     p.functions.entry(member.to_string()).or_insert(Function {
                         arities: facts.arities,
                         abstract_: facts.abstract_,
@@ -318,15 +336,22 @@ fn contract_index(graphs: &[RepoGraph]) -> Contracts {
                     });
                 }
             } else if kind == node_kind::EVENT_EMITTER && is_solidity_event(qname, n) {
-                let Some(&decl) = g.nav.parent_of.get(&n.id) else { continue };
-                let Some(name) = g.nav.name_by_id.get(&n.id) else { continue };
+                let Some(&decl) = g.nav.parent_of.get(&n.id) else {
+                    continue;
+                };
+                let Some(name) = g.nav.name_by_id.get(&n.id) else {
+                    continue;
+                };
                 if !is_decl_kind(g, decl) {
                     continue;
                 }
-                let Some(p) = decl_parts(&mut parts, decl, gi) else { continue };
-                p.events
-                    .entry(name.clone())
-                    .or_insert(Target { id: n.id, confidence: n.confidence });
+                let Some(p) = decl_parts(&mut parts, decl, gi) else {
+                    continue;
+                };
+                p.events.entry(name.clone()).or_insert(Target {
+                    id: n.id,
+                    confidence: n.confidence,
+                });
             }
         }
     }
@@ -340,7 +365,8 @@ fn contract_index(graphs: &[RepoGraph]) -> Contracts {
         let adjacency = heritage.entry(gi).or_insert_with(|| {
             let mut adj: HashMap<u64, Vec<NodeId>> = HashMap::new();
             for e in &g.edges {
-                if (e.category == edge_category::INHERITS_FROM || e.category == edge_category::IMPLEMENTS)
+                if (e.category == edge_category::INHERITS_FROM
+                    || e.category == edge_category::IMPLEMENTS)
                     && is_decl_kind(g, e.from)
                     && is_decl_kind(g, e.to)
                 {
@@ -374,8 +400,15 @@ fn contract_index(graphs: &[RepoGraph]) -> Contracts {
     }
 
     let by_id = decls.iter().enumerate().map(|(i, d)| (d.id.0, i)).collect();
-    let mut contracts = Contracts { decls, by_id, concrete: Vec::new(), procedures: procedures.len() };
-    contracts.concrete = (0..contracts.decls.len()).map(|d| contracts.is_concrete(d)).collect();
+    let mut contracts = Contracts {
+        decls,
+        by_id,
+        concrete: Vec::new(),
+        procedures: procedures.len(),
+    };
+    contracts.concrete = (0..contracts.decls.len())
+        .map(|d| contracts.is_concrete(d))
+        .collect();
     contracts
 }
 
@@ -394,13 +427,19 @@ fn decl_parts(parts: &mut HashMap<u64, Parts>, decl: NodeId, gi: usize) -> Optio
 impl Contracts {
     /// The indexed decls among `d`'s bases, in base order.
     fn base_decls(&self, d: usize) -> impl Iterator<Item = &Decl> {
-        self.decls[d].bases.iter().filter_map(|b| self.by_id.get(&b.0).map(|&i| &self.decls[i]))
+        self.decls[d]
+            .bases
+            .iter()
+            .filter_map(|b| self.by_id.get(&b.0).map(|&i| &self.decls[i]))
     }
 
     /// `d`'s visible definitions of function `name`, ranked (module doc).
     fn definitions(&self, d: usize, name: &str) -> Vec<&Function> {
         let mut out: Vec<&Function> = self.decls[d].functions.get(name).into_iter().collect();
-        let inherited: Vec<&Function> = self.base_decls(d).filter_map(|b| b.functions.get(name)).collect();
+        let inherited: Vec<&Function> = self
+            .base_decls(d)
+            .filter_map(|b| b.functions.get(name))
+            .collect();
         out.extend(inherited.iter().copied().filter(|f| !f.abstract_));
         out.extend(inherited.iter().copied().filter(|f| f.abstract_));
         out
@@ -474,8 +513,12 @@ fn clients(graphs: &[RepoGraph]) -> Vec<Client> {
                 Some(&k) if k == node_kind::EVENT_HANDLER => ClientSide::Event,
                 _ => continue,
             };
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some((side, scope, member)) = evm::split_client(split_owner(qname).0) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some((side, scope, member)) = evm::split_client(split_owner(qname).0) else {
+                continue;
+            };
             if side != want {
                 continue;
             }
@@ -520,7 +563,9 @@ impl Variant {
 
     /// The entries of `kind` named `name`.
     fn listed<'a>(&'a self, kind: EntryKind, name: &'a str) -> impl Iterator<Item = &'a AbiEntry> {
-        self.entries().iter().filter(move |e| e.kind == kind && e.name == name)
+        self.entries()
+            .iter()
+            .filter(move |e| e.kind == kind && e.name == name)
     }
 
     /// The ABI lists entries and none of them is `kind` `name`.
@@ -530,7 +575,10 @@ impl Variant {
 
     /// Does definition `f` of `member` fit this variant (module doc)?
     fn fits(&self, member: &str, f: &Function) -> bool {
-        let known: Vec<u32> = self.listed(EntryKind::Fn, member).filter_map(|e| e.arity).collect();
+        let known: Vec<u32> = self
+            .listed(EntryKind::Fn, member)
+            .filter_map(|e| e.arity)
+            .collect();
         if !known.is_empty() {
             return known.iter().any(|a| f.arities.contains(a));
         }
@@ -553,7 +601,10 @@ fn variants(facts: &[ClientFacts]) -> Vec<Variant> {
             abi.dedup();
             abi
         });
-        by_abi.entry(key).or_default().push((f.lib.clone(), f.args.clone()));
+        by_abi
+            .entry(key)
+            .or_default()
+            .push((f.lib.clone(), f.args.clone()));
     }
     if by_abi.is_empty() {
         by_abi.insert(None, Vec::new());
@@ -572,7 +623,10 @@ fn variants(facts: &[ClientFacts]) -> Vec<Variant> {
 /// What one variant identified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Identified {
-    Decls { decls: Vec<usize>, rule: &'static str },
+    Decls {
+        decls: Vec<usize>,
+        rule: &'static str,
+    },
     Unmatched,
     Ambiguous,
 }
@@ -592,11 +646,16 @@ fn identify(scope: &Scope, variant: &Variant, c: &Contracts) -> Identified {
             if decls.is_empty() {
                 Identified::Unmatched
             } else {
-                Identified::Decls { decls, rule: "contract" }
+                Identified::Decls {
+                    decls,
+                    rule: "contract",
+                }
             }
         }
         Scope::Abi(name) if entries.len() >= 2 => {
-            let covering: Vec<usize> = all.filter(|&d| entries.iter().all(|e| c.holds(d, e))).collect();
+            let covering: Vec<usize> = all
+                .filter(|&d| entries.iter().all(|e| c.holds(d, e)))
+                .collect();
             let covering = c.prefer_concrete(covering);
             if covering.len() < 2 {
                 return one(covering, "abi");
@@ -605,10 +664,15 @@ fn identify(scope: &Scope, variant: &Variant, c: &Contracts) -> Identified {
             if key.len() < NAME_MIN {
                 return Identified::Ambiguous;
             }
-            let named: Vec<usize> =
-                covering.into_iter().filter(|&d| evm::name_key(&c.decls[d].name) == key).collect();
+            let named: Vec<usize> = covering
+                .into_iter()
+                .filter(|&d| evm::name_key(&c.decls[d].name) == key)
+                .collect();
             if named.len() == 1 {
-                Identified::Decls { decls: named, rule: "abi_hint" }
+                Identified::Decls {
+                    decls: named,
+                    rule: "abi_hint",
+                }
             } else {
                 Identified::Ambiguous
             }
@@ -630,7 +694,10 @@ fn identify(scope: &Scope, variant: &Variant, c: &Contracts) -> Identified {
 /// A client's joint identification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Agreed {
-    Pair { decls: Vec<usize>, rule: &'static str },
+    Pair {
+        decls: Vec<usize>,
+        rule: &'static str,
+    },
     Unmatched,
     Ambiguous,
     Conflict,
@@ -661,10 +728,16 @@ fn agree(results: &[(bool, Identified)]) -> Agreed {
             Agreed::Unmatched
         };
     };
-    if results.iter().any(|(abi, r)| *abi && !matches!(r, Identified::Decls { .. })) {
+    if results
+        .iter()
+        .any(|(abi, r)| *abi && !matches!(r, Identified::Decls { .. }))
+    {
         return Agreed::Conflict;
     }
-    Agreed::Pair { decls: decls.clone(), rule }
+    Agreed::Pair {
+        decls: decls.clone(),
+        rule,
+    }
 }
 
 /// Why an identified decl gave a client no edge.
@@ -774,7 +847,12 @@ fn link(graphs: &[RepoGraph]) -> Linked {
         let variants = variants(&client.facts);
         let results: Vec<(bool, Identified)> = variants
             .iter()
-            .map(|v| (v.entries().len() >= 2, identify(&client.scope, v, &contracts)))
+            .map(|v| {
+                (
+                    v.entries().len() >= 2,
+                    identify(&client.scope, v, &contracts),
+                )
+            })
             .collect();
         let (decls, rule) = match agree(&results) {
             Agreed::Pair { decls, rule } => (decls, rule),
@@ -824,12 +902,20 @@ fn link(graphs: &[RepoGraph]) -> Linked {
         tally.not_in_abi += usize::from(misses[Miss::NotInAbi as usize]);
     }
     tally.edges = edges.len();
-    Linked { edges, tally, rules }
+    Linked {
+        edges,
+        tally,
+        rules,
+    }
 }
 
 impl CrossGraphResolver for EvmContractResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let Linked { edges, tally, rules } = link(&merged.graphs);
+        let Linked {
+            edges,
+            tally,
+            rules,
+        } = link(&merged.graphs);
         rules.report();
         if let Some(line) = tally.line() {
             eprintln!("{line}");
@@ -852,7 +938,9 @@ mod tests {
     fn position(file: &str) -> Cell {
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":1}}"#
+            )),
         }
     }
 
@@ -872,7 +960,12 @@ mod tests {
         g.nav.record(id, name, qname, kind, parent);
         match g.nodes.iter_mut().find(|n| n.id == id) {
             Some(n) => n.cells.extend(cells),
-            None => g.nodes.push(Node { id, repo: g.repo, confidence, cells }),
+            None => g.nodes.push(Node {
+                id,
+                repo: g.repo,
+                confidence,
+                cells,
+            }),
         }
         id
     }
@@ -885,7 +978,9 @@ mod tests {
 
     impl Sol {
         fn new(tag: &str) -> Self {
-            Sol { g: channel_graph(tag, &[]) }
+            Sol {
+                g: channel_graph(tag, &[]),
+            }
         }
 
         /// `contract <name>` (CLASS) or `interface <name>` (INTERFACE) in
@@ -894,9 +989,25 @@ mod tests {
             let module = file.trim_end_matches(".sol").replace('/', "::");
             let mid = NodeId::from_parts(GRAPH_TYPE, self.g.repo, node_kind::MODULE, &module);
             if !self.g.nav.qname_by_id.contains_key(&mid) {
-                add(&mut self.g, node_kind::MODULE, &module, &module, None, Strong, vec![position(file)]);
+                add(
+                    &mut self.g,
+                    node_kind::MODULE,
+                    &module,
+                    &module,
+                    None,
+                    Strong,
+                    vec![position(file)],
+                );
             }
-            add(&mut self.g, kind, &format!("{module}::{name}"), name, Some(mid), Strong, vec![position(file)])
+            add(
+                &mut self.g,
+                kind,
+                &format!("{module}::{name}"),
+                name,
+                Some(mid),
+                Strong,
+                vec![position(file)],
+            )
         }
 
         fn contract(&mut self, file: &str, name: &str) -> NodeId {
@@ -917,10 +1028,24 @@ mod tests {
 
         /// A callable member of `decl` declared in `file`: its METHOD, and the
         /// procedure `evm:<C>.<member>` HANDLED_BY it.
-        fn function(&mut self, file: &str, decl: NodeId, member: &str, arities: &[u32], abstract_: bool) -> NodeId {
+        fn function(
+            &mut self,
+            file: &str,
+            decl: NodeId,
+            member: &str,
+            arities: &[u32],
+            abstract_: bool,
+        ) -> NodeId {
             let (contract, dq) = (self.name(decl), self.qname(decl));
-            let method =
-                add(&mut self.g, node_kind::METHOD, &format!("{dq}::{member}"), member, Some(decl), Strong, vec![position(file)]);
+            let method = add(
+                &mut self.g,
+                node_kind::METHOD,
+                &format!("{dq}::{member}"),
+                member,
+                Some(decl),
+                Strong,
+                vec![position(file)],
+            );
             let facts = ProcedureFacts {
                 arities: arities.to_vec(),
                 mutability: evm::NONPAYABLE.into(),
@@ -936,7 +1061,9 @@ mod tests {
                 Strong,
                 vec![position(file), evm::procedure_cell(&facts)],
             );
-            self.g.edges.push(Edge::new(proc, method, edge_category::HANDLED_BY, Strong));
+            self.g
+                .edges
+                .push(Edge::new(proc, method, edge_category::HANDLED_BY, Strong));
             proc
         }
 
@@ -965,7 +1092,15 @@ mod tests {
         /// `event <name>` of `decl`: an EVENT_EMITTER with a code qname.
         fn event(&mut self, decl: NodeId, name: &str) -> NodeId {
             let (file, dq) = (self.file_of(decl), self.qname(decl));
-            add(&mut self.g, node_kind::EVENT_EMITTER, &format!("{dq}::{name}"), name, Some(decl), Strong, vec![position(&file)])
+            add(
+                &mut self.g,
+                node_kind::EVENT_EMITTER,
+                &format!("{dq}::{name}"),
+                name,
+                Some(decl),
+                Strong,
+                vec![position(&file)],
+            )
         }
 
         /// `from is to`.
@@ -991,14 +1126,30 @@ mod tests {
     fn call(g: &mut RepoGraph, scope: &Scope, member: &str, sites: &[Site<'_>]) -> NodeId {
         let qname = evm::call_qname(scope, member);
         let name = format!("{}.{member}", scope.name());
-        add(g, node_kind::RPC_CALL, &qname, &name, None, Medium, sites.iter().map(cell).collect())
+        add(
+            g,
+            node_kind::RPC_CALL,
+            &qname,
+            &name,
+            None,
+            Medium,
+            sites.iter().map(cell).collect(),
+        )
     }
 
     /// An event subscription `evm_event:<scope>.<event>` in `g`, Medium.
     fn subscribe(g: &mut RepoGraph, scope: &Scope, event: &str, sites: &[Site<'_>]) -> NodeId {
         let qname = evm::event_qname(scope, event);
         let name = format!("{}.{event}", scope.name());
-        add(g, node_kind::EVENT_HANDLER, &qname, &name, None, Medium, sites.iter().map(cell).collect())
+        add(
+            g,
+            node_kind::EVENT_HANDLER,
+            &qname,
+            &name,
+            None,
+            Medium,
+            sites.iter().map(cell).collect(),
+        )
     }
 
     fn abi(n: &str) -> Scope {
@@ -1020,14 +1171,25 @@ mod tests {
     /// Link `graphs`; the rows and the tally.
     fn run(graphs: &[RepoGraph]) -> (Vec<Row>, Tally) {
         let linked = link(graphs);
-        let q = |id: NodeId| graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default();
+        let q = |id: NodeId| {
+            graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
+        };
         let mut rows: Vec<Row> = linked
             .edges
             .iter()
             .map(|e| {
                 let ev = Evidence::read(&e.cells).expect("every evm edge carries EVIDENCE");
                 assert_eq!(ev.emitter, "resolver:evm");
-                (q(e.from), q(e.to), edge_category::name(e.category), ev.rule.unwrap_or_default(), e.confidence)
+                (
+                    q(e.from),
+                    q(e.to),
+                    edge_category::name(e.category),
+                    ev.rule.unwrap_or_default(),
+                    e.confidence,
+                )
             })
             .collect();
         rows.sort_by(|a, b| (&a.0, &a.1, a.2).cmp(&(&b.0, &b.1, b.2)));
@@ -1057,14 +1219,36 @@ mod tests {
     fn abi_set_picks_the_one_covering_contract() {
         let s = escrow_and_vault();
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &abi("ESCROW_ABI"), "deposit", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, tally) = run(&[s.g, web]);
         assert_eq!(
             rows,
             [
-                row("evm_call:abi:ESCROW_ABI.deposit", "evm:Escrow.deposit", "RPC_CALLS", "abi", Medium),
-                row("evm_call:abi:ESCROW_ABI.release", "evm:Escrow.release", "RPC_CALLS", "abi", Medium),
+                row(
+                    "evm_call:abi:ESCROW_ABI.deposit",
+                    "evm:Escrow.deposit",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
+                row(
+                    "evm_call:abi:ESCROW_ABI.release",
+                    "evm:Escrow.release",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
             ],
             "Vault also declares release, but only Escrow covers the ABI"
         );
@@ -1082,14 +1266,30 @@ mod tests {
     fn one_entry_abi_is_never_derived() {
         let s = escrow_and_vault();
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(&["f:release/1"]))]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(&["f:release/1"]))],
+        );
         // Vault and Escrow both hold `release`: a name alone identifies
         // nothing, and TOKEN_ABI names no contract.
-        call(&mut web, &abi("TOKEN_ABI"), "release", &[("ethers", &[1], Some(&["f:release/1"]))]);
+        call(
+            &mut web,
+            &abi("TOKEN_ABI"),
+            "release",
+            &[("ethers", &[1], Some(&["f:release/1"]))],
+        );
         let (rows, tally) = run(&[s.g, web]);
         assert_eq!(
             rows,
-            [row("evm_call:abi:ESCROW_ABI.release", "evm:Escrow.release", "RPC_CALLS", "name_hint", Weak)]
+            [row(
+                "evm_call:abi:ESCROW_ABI.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "name_hint",
+                Weak
+            )]
         );
         assert_eq!((tally.unmatched, tally.by_rule), (1, [0, 0, 0, 1]));
     }
@@ -1105,9 +1305,24 @@ mod tests {
         s.f(mock, "mint", &[2]);
         let mut web = channel_graph("evm-web", &[]);
         let erc20: &[&str] = &["f:balanceOf/1", "f:decimals/0"];
-        call(&mut web, &abi("ERC20_ABI"), "balanceOf", &[("ethers", &[1], Some(erc20))]);
-        call(&mut web, &abi("ERC20_ABI"), "decimals", &[("ethers", &[0], Some(erc20))]);
-        call(&mut web, &abi("MOCK_TOKEN_ABI"), "decimals", &[("ethers", &[0], Some(erc20))]);
+        call(
+            &mut web,
+            &abi("ERC20_ABI"),
+            "balanceOf",
+            &[("ethers", &[1], Some(erc20))],
+        );
+        call(
+            &mut web,
+            &abi("ERC20_ABI"),
+            "decimals",
+            &[("ethers", &[0], Some(erc20))],
+        );
+        call(
+            &mut web,
+            &abi("MOCK_TOKEN_ABI"),
+            "decimals",
+            &[("ethers", &[0], Some(erc20))],
+        );
         let (rows, tally) = run(&[s.g, web]);
         assert_eq!(rows, []);
         assert_eq!((tally.calls, tally.unmatched, tally.paired), (3, 3, 0));
@@ -1125,12 +1340,35 @@ mod tests {
         s.f(escrow, "release", &[1]);
         s.base(escrow, iface, edge_category::IMPLEMENTS);
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("SHOP_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("SHOP_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, _) = run(&[s.g, web.clone()]);
-        assert_eq!(rows, [row("evm_call:abi:SHOP_ABI.release", "evm:Escrow.release", "RPC_CALLS", "abi", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:SHOP_ABI.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "abi",
+                Medium
+            )]
+        );
         // With no implementation in the build the interface is what there is.
         let (rows, _) = run(&[only_iface, web]);
-        assert_eq!(rows, [row("evm_call:abi:SHOP_ABI.release", "evm:IEscrow.release", "RPC_CALLS", "abi", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:SHOP_ABI.release",
+                "evm:IEscrow.release",
+                "RPC_CALLS",
+                "abi",
+                Medium
+            )]
+        );
     }
 
     /// An abstract base covers the ABI as well as its concrete child; the
@@ -1145,14 +1383,36 @@ mod tests {
         s.f(v2, "release", &[1]);
         s.base(v2, base, edge_category::INHERITS_FROM);
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &abi("ESCROW_ABI"), "deposit", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, _) = run(&[s.g, web]);
         assert_eq!(
             rows,
             [
-                row("evm_call:abi:ESCROW_ABI.deposit", "evm:Escrow.deposit", "RPC_CALLS", "abi", Medium),
-                row("evm_call:abi:ESCROW_ABI.release", "evm:EscrowV2.release", "RPC_CALLS", "abi", Medium),
+                row(
+                    "evm_call:abi:ESCROW_ABI.deposit",
+                    "evm:Escrow.deposit",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
+                row(
+                    "evm_call:abi:ESCROW_ABI.release",
+                    "evm:EscrowV2.release",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
             ],
             "the name key `escrow` would have picked the abstract Escrow"
         );
@@ -1167,14 +1427,36 @@ mod tests {
         s.f(escrow, "deposit", &[1]);
         s.base(escrow, base, edge_category::INHERITS_FROM);
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &abi("ESCROW_ABI"), "deposit", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, _) = run(&[s.g, web]);
         assert_eq!(
             rows,
             [
-                row("evm_call:abi:ESCROW_ABI.deposit", "evm:Escrow.deposit", "RPC_CALLS", "abi", Medium),
-                row("evm_call:abi:ESCROW_ABI.release", "evm:Base.release", "RPC_CALLS", "abi", Medium),
+                row(
+                    "evm_call:abi:ESCROW_ABI.deposit",
+                    "evm:Escrow.deposit",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
+                row(
+                    "evm_call:abi:ESCROW_ABI.release",
+                    "evm:Base.release",
+                    "RPC_CALLS",
+                    "abi",
+                    Medium
+                ),
             ]
         );
     }
@@ -1194,7 +1476,16 @@ mod tests {
         let mut web = channel_graph("evm-web", &[]);
         call(&mut web, &named("C"), "ping", &[("hardhat", &[0], None)]);
         let (rows, tally) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:C.ping", "evm:A.ping", "RPC_CALLS", "contract", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:C.ping",
+                "evm:A.ping",
+                "RPC_CALLS",
+                "contract",
+                Medium
+            )]
+        );
         assert_eq!(tally.contracts, 2, "A and C; B has no procedure");
     }
 
@@ -1210,26 +1501,60 @@ mod tests {
         let b = s.contract("legacy/Escrow.sol", "Escrow");
         s.f(b, "release", &[2]);
         s.f(b, "refund", &[1]);
-        let release = NodeId::from_parts(GRAPH_TYPE, s.g.repo, node_kind::RPC_PROCEDURE, "evm:Escrow.release");
-        assert_eq!(s.g.nav.parent_of.get(&release), Some(&b), "the shared node's parent is overwritten");
+        let release = NodeId::from_parts(
+            GRAPH_TYPE,
+            s.g.repo,
+            node_kind::RPC_PROCEDURE,
+            "evm:Escrow.release",
+        );
+        assert_eq!(
+            s.g.nav.parent_of.get(&release),
+            Some(&b),
+            "the shared node's parent is overwritten"
+        );
 
         let contracts = contract_index(std::slice::from_ref(&s.g));
         type Members<'a> = Vec<(&'a str, &'a [u32])>;
         let members: Vec<(NodeId, Members<'_>)> = contracts
             .decls
             .iter()
-            .map(|d| (d.id, d.functions.iter().map(|(m, f)| (m.as_str(), f.arities.as_slice())).collect()))
+            .map(|d| {
+                (
+                    d.id,
+                    d.functions
+                        .iter()
+                        .map(|(m, f)| (m.as_str(), f.arities.as_slice()))
+                        .collect(),
+                )
+            })
             .collect();
         assert_eq!(
             members,
-            [(a, vec![("deposit", &[1][..]), ("release", &[1][..])]), (b, vec![("refund", &[1][..]), ("release", &[2][..])])]
+            [
+                (a, vec![("deposit", &[1][..]), ("release", &[1][..])]),
+                (b, vec![("refund", &[1][..]), ("release", &[2][..])])
+            ]
         );
         assert_eq!(contracts.procedures, 3);
 
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("SHOP_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("SHOP_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, _) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:abi:SHOP_ABI.release", "evm:Escrow.release", "RPC_CALLS", "abi", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:SHOP_ABI.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "abi",
+                Medium
+            )]
+        );
     }
 
     /// Only a `.sol` code-qname event is indexed: a TypeScript class's
@@ -1241,15 +1566,42 @@ mod tests {
         let auction = s.contract("contracts/Auction.sol", "Auction");
         let bid = s.event(auction, "BidPlaced");
         let mut ts = channel_graph("evm-ts", &[]);
-        let shop = add(&mut ts, node_kind::CLASS, "src::shop::Shop", "Shop", None, Strong, vec![position("src/shop.ts")]);
-        add(&mut ts, node_kind::EVENT_EMITTER, "src::shop::Shop::Placed", "Placed", Some(shop), Strong, vec![position("src/shop.ts")]);
+        let shop = add(
+            &mut ts,
+            node_kind::CLASS,
+            "src::shop::Shop",
+            "Shop",
+            None,
+            Strong,
+            vec![position("src/shop.ts")],
+        );
+        add(
+            &mut ts,
+            node_kind::EVENT_EMITTER,
+            "src::shop::Shop::Placed",
+            "Placed",
+            Some(shop),
+            Strong,
+            vec![position("src/shop.ts")],
+        );
         let mut web = channel_graph("evm-web", &[]);
-        subscribe(&mut web, &named("Auction"), "BidPlaced", &[("ethers", &[], None)]);
+        subscribe(
+            &mut web,
+            &named("Auction"),
+            "BidPlaced",
+            &[("ethers", &[], None)],
+        );
         subscribe(&mut web, &named("Shop"), "Placed", &[("ethers", &[], None)]);
         let graphs = [s.g, ts, web];
         let contracts = contract_index(&graphs);
-        assert_eq!(contracts.decls.iter().map(|d| d.id).collect::<Vec<_>>(), [auction]);
-        assert_eq!(contracts.decls[0].events.get("BidPlaced").map(|t| t.id), Some(bid));
+        assert_eq!(
+            contracts.decls.iter().map(|d| d.id).collect::<Vec<_>>(),
+            [auction]
+        );
+        assert_eq!(
+            contracts.decls[0].events.get("BidPlaced").map(|t| t.id),
+            Some(bid)
+        );
         let (rows, tally) = run(&graphs);
         assert_eq!(
             rows,
@@ -1261,7 +1613,10 @@ mod tests {
                 Medium
             )]
         );
-        assert_eq!((tally.events, tally.paired, tally.unmatched, tally.contracts), (2, 1, 1, 1));
+        assert_eq!(
+            (tally.events, tally.paired, tally.unmatched, tally.contracts),
+            (2, 1, 1, 1)
+        );
     }
 
     /// Kina's hardhat `token.approve` on MockERC20: approve comes from
@@ -1272,12 +1627,39 @@ mod tests {
         let mock = s.contract("contracts/MockERC20.sol", "MockERC20");
         s.f(mock, "mint", &[2]);
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &named("MockERC20"), "approve", &[("hardhat", &[2], None)]);
-        call(&mut web, &named("MockERC20"), "mint", &[("hardhat", &[2], None)]);
-        call(&mut web, &named("Missing"), "mint", &[("hardhat", &[2], None)]);
+        call(
+            &mut web,
+            &named("MockERC20"),
+            "approve",
+            &[("hardhat", &[2], None)],
+        );
+        call(
+            &mut web,
+            &named("MockERC20"),
+            "mint",
+            &[("hardhat", &[2], None)],
+        );
+        call(
+            &mut web,
+            &named("Missing"),
+            "mint",
+            &[("hardhat", &[2], None)],
+        );
         let (rows, tally) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:MockERC20.mint", "evm:MockERC20.mint", "RPC_CALLS", "contract", Medium)]);
-        assert_eq!((tally.paired, tally.not_declared, tally.unmatched), (1, 1, 1));
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:MockERC20.mint",
+                "evm:MockERC20.mint",
+                "RPC_CALLS",
+                "contract",
+                Medium
+            )]
+        );
+        assert_eq!(
+            (tally.paired, tally.not_declared, tally.unmatched),
+            (1, 1, 1)
+        );
     }
 
     #[test]
@@ -1294,7 +1676,16 @@ mod tests {
             web
         };
         let (rows, _) = run(&[escrow().g, client(&recv("escrow"), &[1])]);
-        assert_eq!(rows, [row("evm_call:recv:escrow.release", "evm:Escrow.release", "RPC_CALLS", "name_hint", Weak)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:recv:escrow.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "name_hint",
+                Weak
+            )]
+        );
 
         let (rows, tally) = run(&[escrow().g, client(&recv("escrow"), &[3])]);
         assert_eq!((rows.len(), tally.arity_mismatch), (0, 1));
@@ -1303,10 +1694,18 @@ mod tests {
         let other = two.contract("contracts/EscrowContract.sol", "EscrowContract");
         two.f(other, "release", &[1]);
         let (rows, tally) = run(&[two.g, client(&recv("escrow"), &[1])]);
-        assert_eq!((rows.len(), tally.ambiguous), (0, 1), "escrow and escrowcontract share a name key");
+        assert_eq!(
+            (rows.len(), tally.ambiguous),
+            (0, 1),
+            "escrow and escrowcontract share a name key"
+        );
 
         let (rows, tally) = run(&[escrow().g, client(&recv("c"), &[1])]);
-        assert_eq!((rows.len(), tally.unmatched), (0, 1), "a name key under three characters");
+        assert_eq!(
+            (rows.len(), tally.unmatched),
+            (0, 1),
+            "a name key under three characters"
+        );
     }
 
     #[test]
@@ -1318,10 +1717,29 @@ mod tests {
             s.f(d, "release", &[1]);
         }
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &abi("SHOP_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &abi("SHOP_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, tally) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:abi:ESCROW_ABI.release", "evm:Escrow.release", "RPC_CALLS", "abi_hint", Weak)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:ESCROW_ABI.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "abi_hint",
+                Weak
+            )]
+        );
         assert_eq!(tally.ambiguous, 1, "SHOP_ABI names neither");
     }
 
@@ -1332,7 +1750,12 @@ mod tests {
             let e = s.contract("contracts/Escrow.sol", "Escrow");
             s.f(e, "deposit", &[1]);
             let mut web = channel_graph("evm-web", &[]);
-            call(&mut web, &named("Escrow"), "deposit", &[(lib, &[1, 2], None)]);
+            call(
+                &mut web,
+                &named("Escrow"),
+                "deposit",
+                &[(lib, &[1, 2], None)],
+            );
             run(&[s.g, web])
         };
         for lib in ["ethers", "hardhat", "typechain"] {
@@ -1349,30 +1772,82 @@ mod tests {
         s.f(e, "deposit", &[1]);
         s.f(e, "release", &[1]);
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &named("Escrow"), "deposit", &[("geth", &[4], Some(&["f:deposit/1", "f:release/1"]))]);
-        call(&mut web, &named("Escrow"), "release", &[("geth", &[1], Some(&["f:deposit/1", "f:release/2"]))]);
+        call(
+            &mut web,
+            &named("Escrow"),
+            "deposit",
+            &[("geth", &[4], Some(&["f:deposit/1", "f:release/1"]))],
+        );
+        call(
+            &mut web,
+            &named("Escrow"),
+            "release",
+            &[("geth", &[1], Some(&["f:deposit/1", "f:release/2"]))],
+        );
         let (rows, tally) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:Escrow.deposit", "evm:Escrow.deposit", "RPC_CALLS", "contract", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:Escrow.deposit",
+                "evm:Escrow.deposit",
+                "RPC_CALLS",
+                "contract",
+                Medium
+            )]
+        );
         assert_eq!(tally.arity_mismatch, 1);
     }
 
     #[test]
     fn events_flow_from_the_identified_contract_only() {
         let mut s = escrow_and_vault();
-        let escrow = s.g.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow").map(|(k, _)| *k).unwrap();
-        let vault = s.g.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == "contracts::Vault::Vault").map(|(k, _)| *k).unwrap();
+        let escrow =
+            s.g.nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow")
+                .map(|(k, _)| *k)
+                .unwrap();
+        let vault =
+            s.g.nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == "contracts::Vault::Vault")
+                .map(|(k, _)| *k)
+                .unwrap();
         s.event(escrow, "Released");
         s.event(escrow, "Deposited");
         s.event(vault, "Released");
         let mut web = channel_graph("evm-web", &[]);
         let ab: &[&str] = &["e:Released/2", "f:deposit/1"];
-        subscribe(&mut web, &abi("ESCROW_ABI"), "Released", &[("ethers", &[], Some(ab))]);
-        subscribe(&mut web, &abi("ESCROW_ABI"), "Deposited", &[("ethers", &[], Some(ab))]);
-        subscribe(&mut web, &abi("ESCROW_ABI"), "Frozen", &[("ethers", &[], Some(&["e:Frozen/1", "f:deposit/1"]))]);
+        subscribe(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "Released",
+            &[("ethers", &[], Some(ab))],
+        );
+        subscribe(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "Deposited",
+            &[("ethers", &[], Some(ab))],
+        );
+        subscribe(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "Frozen",
+            &[("ethers", &[], Some(&["e:Frozen/1", "f:deposit/1"]))],
+        );
         let (rows, tally) = run(&[s.g, web]);
         assert_eq!(
             rows,
-            [row("contracts::Escrow::Escrow::Released", "evm_event:abi:ESCROW_ABI.Released", "EVENT_FLOWS", "abi", Medium)],
+            [row(
+                "contracts::Escrow::Escrow::Released",
+                "evm_event:abi:ESCROW_ABI.Released",
+                "EVENT_FLOWS",
+                "abi",
+                Medium
+            )],
             "Vault's Released never flows: Vault does not cover the ABI"
         );
         assert_eq!((tally.events, tally.not_in_abi, tally.unmatched), (3, 1, 1));
@@ -1418,7 +1893,13 @@ mod tests {
     #[test]
     fn agreeing_variants_pair_once() {
         let mut s = escrow_and_vault();
-        let escrow = s.g.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow").map(|(k, _)| *k).unwrap();
+        let escrow =
+            s.g.nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow")
+                .map(|(k, _)| *k)
+                .unwrap();
         s.f(escrow, "refund", &[0]);
         let mut web = channel_graph("evm-web", &[]);
         call(
@@ -1427,14 +1908,32 @@ mod tests {
             "release",
             &[
                 ("ethers", &[1], Some(ESCROW_ABI)),
-                ("ethers", &[2], Some(&["f:deposit/1", "f:refund/0", "f:release/1"])),
+                (
+                    "ethers",
+                    &[2],
+                    Some(&["f:deposit/1", "f:refund/0", "f:release/1"]),
+                ),
                 ("geth", &[1], None),
             ],
         );
         let mut copy = channel_graph("evm-web", &[]);
-        call(&mut copy, &abi("ESCROW_ABI"), "release", &[("viem", &[1], Some(ESCROW_ABI))]);
+        call(
+            &mut copy,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("viem", &[1], Some(ESCROW_ABI))],
+        );
         let (rows, tally) = run(&[s.g, web, copy]);
-        assert_eq!(rows, [row("evm_call:abi:ESCROW_ABI.release", "evm:Escrow.release", "RPC_CALLS", "abi", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:ESCROW_ABI.release",
+                "evm:Escrow.release",
+                "RPC_CALLS",
+                "abi",
+                Medium
+            )]
+        );
         assert_eq!((tally.calls, tally.paired, tally.edges), (1, 1, 1));
     }
 
@@ -1452,7 +1951,12 @@ mod tests {
             "evm-web",
             &[(node_kind::EVENT_HANDLER, "event_handle:Released")],
         );
-        let sub = subscribe(&mut web, &named("Escrow"), "Released", &[("ethers", &[], None)]);
+        let sub = subscribe(
+            &mut web,
+            &named("Escrow"),
+            "Released",
+            &[("ethers", &[], None)],
+        );
         let mut merged = MergedGraph::new(vec![s.g, web]);
         merged.run(&EventBusResolver);
         merged.run(&EvmContractResolver);
@@ -1460,7 +1964,15 @@ mod tests {
             .cross_edges
             .iter()
             .filter(|e| e.category == edge_category::EVENT_FLOWS)
-            .map(|e| (e.from, e.to, Evidence::read(&e.cells).map(|ev| ev.emitter).unwrap_or_default()))
+            .map(|e| {
+                (
+                    e.from,
+                    e.to,
+                    Evidence::read(&e.cells)
+                        .map(|ev| ev.emitter)
+                        .unwrap_or_default(),
+                )
+            })
             .collect();
         assert_eq!(flows, [(released, sub, "resolver:evm".to_string())]);
     }
@@ -1468,14 +1980,45 @@ mod tests {
     #[test]
     fn edges_are_identical_across_two_runs() {
         let mut s = escrow_and_vault();
-        let escrow = s.g.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow").map(|(k, _)| *k).unwrap();
+        let escrow =
+            s.g.nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow")
+                .map(|(k, _)| *k)
+                .unwrap();
         s.event(escrow, "Released");
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &abi("ESCROW_ABI"), "release", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &abi("ESCROW_ABI"), "deposit", &[("ethers", &[1], Some(ESCROW_ABI))]);
-        call(&mut web, &recv("vault"), "withdraw", &[("geth", &[1], None)]);
-        call(&mut web, &named("Vault"), "release", &[("hardhat", &[1, 2], None)]);
-        subscribe(&mut web, &named("Escrow"), "Released", &[("ethers", &[], None)]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "release",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(ESCROW_ABI))],
+        );
+        call(
+            &mut web,
+            &recv("vault"),
+            "withdraw",
+            &[("geth", &[1], None)],
+        );
+        call(
+            &mut web,
+            &named("Vault"),
+            "release",
+            &[("hardhat", &[1, 2], None)],
+        );
+        subscribe(
+            &mut web,
+            &named("Escrow"),
+            "Released",
+            &[("ethers", &[], None)],
+        );
         let graphs = [s.g, web];
         let first = link(&graphs);
         assert_eq!(first.edges.len(), 5);
@@ -1489,8 +2032,15 @@ mod tests {
     #[test]
     fn marker_is_silent_without_procedures_or_clients() {
         assert_eq!(Tally::default().line(), None);
-        let (rows, tally) = run(&[channel_graph("evm-empty", &[(node_kind::RPC_CALL, "rpc_call:user.list")])]);
-        assert_eq!((rows.len(), tally.line()), (0, None), "a tRPC call is no evm client");
+        let (rows, tally) = run(&[channel_graph(
+            "evm-empty",
+            &[(node_kind::RPC_CALL, "rpc_call:user.list")],
+        )]);
+        assert_eq!(
+            (rows.len(), tally.line()),
+            (0, None),
+            "a tRPC call is no evm client"
+        );
         let s = escrow_and_vault();
         let (_, tally) = run(&[s.g]);
         assert_eq!(
@@ -1509,7 +2059,12 @@ mod tests {
     fn contained_getter_falls_back_to_its_nav_parent() {
         let mut s = Sol::new("evm-sol");
         let e = s.contract("contracts/Escrow.sol", "Escrow");
-        let facts = ProcedureFacts { arities: vec![0], mutability: "view".into(), getter: true, abstract_: false };
+        let facts = ProcedureFacts {
+            arities: vec![0],
+            mutability: "view".into(),
+            getter: true,
+            abstract_: false,
+        };
         add(
             &mut s.g,
             node_kind::RPC_PROCEDURE,
@@ -1517,11 +2072,28 @@ mod tests {
             "Escrow.VERSION",
             Some(e),
             Strong,
-            vec![position("contracts/Escrow.sol"), evm::procedure_cell(&facts)],
+            vec![
+                position("contracts/Escrow.sol"),
+                evm::procedure_cell(&facts),
+            ],
         );
         let mut web = channel_graph("evm-web", &[]);
-        call(&mut web, &named("Escrow"), "VERSION", &[("ethers", &[0], None)]);
+        call(
+            &mut web,
+            &named("Escrow"),
+            "VERSION",
+            &[("ethers", &[0], None)],
+        );
         let (rows, _) = run(&[s.g, web]);
-        assert_eq!(rows, [row("evm_call:Escrow.VERSION", "evm:Escrow.VERSION", "RPC_CALLS", "contract", Medium)]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:Escrow.VERSION",
+                "evm:Escrow.VERSION",
+                "RPC_CALLS",
+                "contract",
+                Medium
+            )]
+        );
     }
 }

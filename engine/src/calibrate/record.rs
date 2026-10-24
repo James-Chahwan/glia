@@ -562,7 +562,10 @@ mod tests {
     }
 
     fn sel(r: CalibratedSet) -> (String, &'static str, Option<&'static str>) {
-        let read = CalibrationRead::Loaded(Box::new(Calibration { sets: vec![r], ..Calibration::default() }));
+        let read = CalibrationRead::Loaded(Box::new(Calibration {
+            sets: vec![r],
+            ..Calibration::default()
+        }));
         let s = select(&read, "S", Shape::K1, &["A", "B"], "F");
         (s.pick, s.source, s.reason)
     }
@@ -572,10 +575,16 @@ mod tests {
     /// answers the fallback with reason `refused`, not `candidate_set`.
     #[test]
     fn a_refused_row_answers_refused() {
-        assert_eq!(sel(row("F", 0.25, 0.5)), ("F".into(), "fallback", Some("refused")));
+        assert_eq!(
+            sel(row("F", 0.25, 0.5)),
+            ("F".into(), "fallback", Some("refused"))
+        );
         assert_eq!(sel(row("B", 0.5, 0.25)), ("B".into(), "calibrated", None));
         // a pick that is neither a candidate nor the fallback: another set
-        assert_eq!(sel(row("Z", 0.5, 0.25)), ("F".into(), "fallback", Some("candidate_set")));
+        assert_eq!(
+            sel(row("Z", 0.5, 0.25)),
+            ("F".into(), "fallback", Some("candidate_set"))
+        );
         // another candidate list: candidate_set even when refused
         let mut other = row("F", 0.25, 0.5);
         other.digest = set_digest(&["A"]);

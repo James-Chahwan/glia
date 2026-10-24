@@ -248,8 +248,11 @@ mod tests {
             "class Helper:\n    pass\n\n\ndef helper(x):\n    return x + 1\n\n\ndef main():\n    return helper(2)\n",
         )
         .expect("write fixture");
-        std::fs::write(root.join("svc/other.py"), "def helper_two():\n    return 2\n")
-            .expect("write fixture");
+        std::fs::write(
+            root.join("svc/other.py"),
+            "def helper_two():\n    return 2\n",
+        )
+        .expect("write fixture");
         let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         built.expect("build").merged
@@ -262,30 +265,96 @@ mod tests {
     fn find_is_the_engine_find_with_kind_names() {
         let merged = built("kinds");
         let live = glia_engine::entrypoint_reachable(&merged);
-        let all = find_answer(&merged, &live, "helper", 20, &[], None, Collapse::default(), 0).expect("answer");
+        let all = find_answer(
+            &merged,
+            &live,
+            "helper",
+            20,
+            &[],
+            None,
+            Collapse::default(),
+            0,
+        )
+        .expect("answer");
         let engine = find_nodes(&merged, "helper", &FindOptions::default());
         assert_eq!(all.results, engine.results);
-        assert_eq!(all.results.first().map(|r| r.qname.as_str()), Some("app::helper"));
+        assert_eq!(
+            all.results.first().map(|r| r.qname.as_str()),
+            Some("app::helper")
+        );
         // LD.6: `main` calls `helper`, so both are live; the rows carry it.
-        assert!(all.results.first().is_some_and(|r| r.live), "{:?}", all.results);
+        assert!(
+            all.results.first().is_some_and(|r| r.live),
+            "{:?}",
+            all.results
+        );
 
-        let funcs = find_answer(&merged, &live, "helper", 0, &["function".into()], None, Collapse::default(), 0).expect("answer");
+        let funcs = find_answer(
+            &merged,
+            &live,
+            "helper",
+            0,
+            &["function".into()],
+            None,
+            Collapse::default(),
+            0,
+        )
+        .expect("answer");
         assert!(!funcs.results.is_empty());
-        assert!(funcs.results.iter().all(|r| r.kind == "FUNCTION"), "{:?}", funcs.results);
+        assert!(
+            funcs.results.iter().all(|r| r.kind == "FUNCTION"),
+            "{:?}",
+            funcs.results
+        );
 
-        let bad = find_answer(&merged, &live, "helper", 20, &["FUNCTOIN".into()], None, Collapse::default(), 0);
+        let bad = find_answer(
+            &merged,
+            &live,
+            "helper",
+            20,
+            &["FUNCTOIN".into()],
+            None,
+            Collapse::default(),
+            0,
+        );
         let err = bad.expect_err("an unknown kind name is an error");
-        assert!(err.contains("unknown kind 'FUNCTOIN'") && err.contains("FUNCTION"), "{err}");
+        assert!(
+            err.contains("unknown kind 'FUNCTOIN'") && err.contains("FUNCTION"),
+            "{err}"
+        );
 
-        let scoped = find_answer(&merged, &live, "helper", 0, &[], Some("svc".into()), Collapse::default(), 0).expect("answer");
+        let scoped = find_answer(
+            &merged,
+            &live,
+            "helper",
+            0,
+            &[],
+            Some("svc".into()),
+            Collapse::default(),
+            0,
+        )
+        .expect("answer");
         assert!(!scoped.results.is_empty());
         assert!(
-            scoped.results.iter().all(|r| r.file.as_deref().is_none_or(|f| f.starts_with("svc/"))),
+            scoped
+                .results
+                .iter()
+                .all(|r| r.file.as_deref().is_none_or(|f| f.starts_with("svc/"))),
             "scope is a filter: {:?}",
             scoped.results
         );
 
-        let none = find_answer(&merged, &live, "zzqqxx", 20, &[], None, Collapse::default(), 7).expect("answer");
+        let none = find_answer(
+            &merged,
+            &live,
+            "zzqqxx",
+            20,
+            &[],
+            None,
+            Collapse::default(),
+            7,
+        )
+        .expect("answer");
         assert!(none.results.is_empty());
         let absence = none.absence.expect("an empty answer carries its absence");
         assert_eq!((absence.reason, absence.unparsed_files), ("no_match", 7));
@@ -307,9 +376,11 @@ mod tests {
                 ),
             )
             .expect("write manifest");
-            std::fs::write(root.join(repo).join("index.js"), "export const x = 1;\n").expect("write source");
+            std::fs::write(root.join(repo).join("index.js"), "export const x = 1;\n")
+                .expect("write source");
         }
-        let paths = [root.join("web"), root.join("admin")].map(|p| p.to_string_lossy().into_owned());
+        let paths =
+            [root.join("web"), root.join("admin")].map(|p| p.to_string_lossy().into_owned());
         let built = glia_engine::generate_many(&paths);
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
@@ -320,19 +391,35 @@ mod tests {
         let one = find_answer(&built.merged, &live, q, 20, &[], None, on, 0).expect("answer");
         assert_eq!(one.results.len(), 1, "{:?}", one.results);
         let id = one.results[0].identity.as_ref().expect("identity");
-        assert_eq!((id.tier, id.rules.as_slice()), ("fact", ["package_name"].as_slice()));
+        assert_eq!(
+            (id.tier, id.rules.as_slice()),
+            ("fact", ["package_name"].as_slice())
+        );
         assert_eq!(id.also_in.len(), 1, "{:?}", id.also_in);
         let labels: Vec<&str> = built.repo_labels.values().map(String::as_str).collect();
-        assert!(labels.contains(&id.also_in[0].repo.as_str()), "{:?} vs {labels:?}", id.also_in);
+        assert!(
+            labels.contains(&id.also_in[0].repo.as_str()),
+            "{:?} vs {labels:?}",
+            id.also_in
+        );
         let text = serde_json::to_string(&one).expect("json");
         assert!(text.contains("\"identity\":{\"tier\":\"fact\""), "{text}");
 
-        let two = find_answer(&built.merged, &live, q, 20, &[], None, Collapse::off(), 0).expect("answer");
+        let two = find_answer(&built.merged, &live, q, 20, &[], None, Collapse::off(), 0)
+            .expect("answer");
         assert_eq!(two.results.len(), 2, "{:?}", two.results);
-        assert!(!serde_json::to_string(&two).expect("json").contains("\"identity\""));
+        assert!(
+            !serde_json::to_string(&two)
+                .expect("json")
+                .contains("\"identity\"")
+        );
 
         // EB.8: find_files ranks one repo's files; two repos are refused.
-        let cache = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
+        let cache = Arc::new(RankCache::new(
+            "pygraph",
+            &built.repo_roots,
+            &built.repo_labels,
+        ));
         let err = find_files_answer(&built.merged, &built.repo_roots, cache, "T012", 20, 0)
             .expect_err("two repos");
         assert_eq!(err, "find --files ranks one repo's files; got 2 repos");
@@ -340,7 +427,8 @@ mod tests {
 
     fn engine_with_errors(built: &glia_engine::GenerateResult, n: usize) -> Answer<FoundFile> {
         let opts = FindFilesOptions::default();
-        let mut x = find_files(&built.merged, &built.repo_roots, "export the ledger", &opts).expect("answer");
+        let mut x = find_files(&built.merged, &built.repo_roots, "export the ledger", &opts)
+            .expect("answer");
         if let Some(a) = x.absence.as_mut() {
             a.unparsed_files = n;
         }
@@ -355,20 +443,49 @@ mod tests {
         let root = std::env::temp_dir().join(format!("glia-eb8-find-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp dir");
-        std::fs::write(root.join("app.py"), "def helper(x):\n    return x\n").expect("write fixture");
+        std::fs::write(root.join("app.py"), "def helper(x):\n    return x\n")
+            .expect("write fixture");
         let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
-        let held = Arc::new(RankCache::new("pygraph", &built.repo_roots, &built.repo_labels));
-        let a = find_files_answer(&built.merged, &built.repo_roots, held.clone(), "export the ledger", 20, 3)
-            .expect("answer");
+        let held = Arc::new(RankCache::new(
+            "pygraph",
+            &built.repo_roots,
+            &built.repo_labels,
+        ));
+        let a = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            held.clone(),
+            "export the ledger",
+            20,
+            3,
+        )
+        .expect("answer");
         assert!(a.results.is_empty());
         let ab = a.absence.expect("absence");
         assert_eq!((ab.reason, ab.unparsed_files), ("no_match", 3));
-        assert!(ab.note.contains("no id in the query resolved to a defining row"), "{}", ab.note);
-        assert!(ab.note.contains("no history messages (run glia history sync)"), "{}", ab.note);
-        let again = find_files_answer(&built.merged, &built.repo_roots, held, "export the ledger", 20, 3)
-            .expect("answer");
+        assert!(
+            ab.note
+                .contains("no id in the query resolved to a defining row"),
+            "{}",
+            ab.note
+        );
+        assert!(
+            ab.note
+                .contains("no history messages (run glia history sync)"),
+            "{}",
+            ab.note
+        );
+        let again = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            held,
+            "export the ledger",
+            20,
+            3,
+        )
+        .expect("answer");
         assert_eq!(
             serde_json::to_string(&again).expect("json"),
             serde_json::to_string(&engine_with_errors(&built, 3)).expect("json")

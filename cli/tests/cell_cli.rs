@@ -12,7 +12,8 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const CHARGE: &str = "def charge(order_id):\n    total = order_id * 2\n    return total + len(str(order_id))\n";
+const CHARGE: &str =
+    "def charge(order_id):\n    total = order_id * 2\n    return total + len(str(order_id))\n";
 
 /// A scratch repo, created fresh and removed on drop (`cli` has no
 /// dev-dependencies, so no `tempfile`).
@@ -62,7 +63,8 @@ struct Run {
 
 impl Run {
     fn json(&self) -> Value {
-        serde_json::from_str(&self.stdout).unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", self.stdout))
+        serde_json::from_str(&self.stdout)
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", self.stdout))
     }
 }
 
@@ -73,15 +75,26 @@ fn glia(args: &[&str]) -> Run {
         .expect("glia runs");
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     // Relay the markers so `-- --nocapture | grep '\[cells\]'` sees them.
-    for line in stderr.lines().filter(|l| l.starts_with("[cells] ") && l.contains("surface=cli")) {
+    for line in stderr
+        .lines()
+        .filter(|l| l.starts_with("[cells] ") && l.contains("surface=cli"))
+    {
         eprintln!("{line}");
     }
-    Run { code: out.status.code().unwrap_or(-1), stdout: String::from_utf8_lossy(&out.stdout).into_owned(), stderr }
+    Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr,
+    }
 }
 
 fn ok(args: &[&str]) -> Run {
     let r = glia(args);
-    assert_eq!(r.code, 0, "glia {args:?} exited {}\nstdout:\n{}\nstderr:\n{}", r.code, r.stdout, r.stderr);
+    assert_eq!(
+        r.code, 0,
+        "glia {args:?} exited {}\nstdout:\n{}\nstderr:\n{}",
+        r.code, r.stdout, r.stderr
+    );
     r
 }
 
@@ -102,8 +115,19 @@ fn set_ls_rm_then_a_rename_orphans_the_row() {
     repo.write("a.py", CHARGE);
     let root = repo.path();
 
-    let first = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "retries are safe"]);
-    assert_eq!(first.stdout.trim(), "wrote CONV 000001 for a::charge (write-through: no gmap)");
+    let first = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "retries are safe",
+    ]);
+    assert_eq!(
+        first.stdout.trim(),
+        "wrote CONV 000001 for a::charge (write-through: no gmap)"
+    );
     assert!(
         first.stderr.contains(
             "[cells] write qname=a::charge cell=CONV id=000001 rows=1 target=pending write_through=no_gmap surface=cli"
@@ -113,42 +137,91 @@ fn set_ls_rm_then_a_rename_orphans_the_row() {
     );
     assert_eq!(
         texts(&repo.cell_rows()),
-        vec![("a::charge".into(), "000001".into(), "retries are safe".into())]
+        vec![(
+            "a::charge".into(),
+            "000001".into(),
+            "retries are safe".into()
+        )]
     );
 
     let listed = ok(&["cell", "ls", root, "--json"]).json();
     let rows = listed["rows"].as_array().expect("rows");
     assert_eq!(rows.len(), 1, "{listed}");
-    assert_eq!((rows[0]["qname"].as_str(), rows[0]["cell"].as_str()), (Some("a::charge"), Some("CONV")));
+    assert_eq!(
+        (rows[0]["qname"].as_str(), rows[0]["cell"].as_str()),
+        (Some("a::charge"), Some("CONV"))
+    );
     assert_eq!(rows[0]["entry"]["text"], "retries are safe");
-    assert!(rows[0].get("status").is_none(), "plain ls classifies nothing: {listed}");
+    assert!(
+        rows[0].get("status").is_none(),
+        "plain ls classifies nothing: {listed}"
+    );
 
-    let second = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "idempotent by order id"]);
-    assert!(second.stdout.starts_with("wrote CONV 000002 for a::charge"), "{}", second.stdout);
+    let second = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "idempotent by order id",
+    ]);
+    assert!(
+        second.stdout.starts_with("wrote CONV 000002 for a::charge"),
+        "{}",
+        second.stdout
+    );
     assert_eq!(repo.cell_rows().len(), 2);
 
     let rm = ok(&["cell", "rm", root, "a::charge", "CONV", "--id", "000001"]);
-    assert!(rm.stdout.starts_with("removed CONV 000001 from a::charge"), "{}", rm.stdout);
-    assert!(rm.stderr.contains("[cells] remove qname=a::charge cell=CONV id=000001 rows=1 "), "{}", rm.stderr);
+    assert!(
+        rm.stdout.starts_with("removed CONV 000001 from a::charge"),
+        "{}",
+        rm.stdout
+    );
+    assert!(
+        rm.stderr
+            .contains("[cells] remove qname=a::charge cell=CONV id=000001 rows=1 "),
+        "{}",
+        rm.stderr
+    );
     assert_eq!(
         texts(&repo.cell_rows()),
-        vec![("a::charge".into(), "000002".into(), "idempotent by order id".into())]
+        vec![(
+            "a::charge".into(),
+            "000002".into(),
+            "idempotent by order id".into()
+        )]
     );
 
     // Before the rename the row binds and the check passes.
     let bound = ok(&["cell", "ls", root, "--check"]);
     assert!(
-        bound.stderr.contains("[cells] ls rows=1 bound=1 rekeyed=0 ambiguous=0 orphaned=0 rejected=0 surface=cli"),
+        bound.stderr.contains(
+            "[cells] ls rows=1 bound=1 rekeyed=0 ambiguous=0 orphaned=0 rejected=0 surface=cli"
+        ),
         "{}",
         bound.stderr
     );
 
     repo.write("a.py", &CHARGE.replace("def charge(", "def charge2("));
     let orphaned = glia(&["cell", "ls", root, "--check"]);
-    assert_eq!(orphaned.code, 1, "an orphaned row fails the check:\n{}\n{}", orphaned.stdout, orphaned.stderr);
-    assert!(orphaned.stdout.contains("orphaned a::charge CONV api/000002"), "{}", orphaned.stdout);
+    assert_eq!(
+        orphaned.code, 1,
+        "an orphaned row fails the check:\n{}\n{}",
+        orphaned.stdout, orphaned.stderr
+    );
     assert!(
-        orphaned.stderr.contains("[cells] ls rows=1 bound=0 rekeyed=0 ambiguous=0 orphaned=1 rejected=0 surface=cli"),
+        orphaned
+            .stdout
+            .contains("orphaned a::charge CONV api/000002"),
+        "{}",
+        orphaned.stdout
+    );
+    assert!(
+        orphaned.stderr.contains(
+            "[cells] ls rows=1 bound=0 rekeyed=0 ambiguous=0 orphaned=1 rejected=0 surface=cli"
+        ),
         "{}",
         orphaned.stderr
     );
@@ -169,26 +242,53 @@ fn check_reports_a_moved_node_rekeyed_and_rekey_rewrites_it() {
     repo.write("a.py", CHARGE);
     let root = repo.path();
     ok(&["build", root]);
-    let set = ok(&["cell", "set", root, "a::charge", "DECISION", "--json", r#"{"id":"d1","title":"charge is idempotent"}"#]);
+    let set = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "DECISION",
+        "--json",
+        r#"{"id":"d1","title":"charge is idempotent"}"#,
+    ]);
     assert!(
         set.stderr.contains("[cells] write qname=a::charge cell=DECISION id=d1 rows=1 target=bound write_through=applied surface=cli"),
         "{}",
         set.stderr
     );
-    let hint = repo.cell_rows()[0]["hint"].as_str().unwrap_or_default().to_string();
-    assert!(hint.starts_with("v1|"), "the row carries the node's hint: {:?}", repo.cell_rows());
+    let hint = repo.cell_rows()[0]["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        hint.starts_with("v1|"),
+        "the row carries the node's hint: {:?}",
+        repo.cell_rows()
+    );
 
     std::fs::create_dir_all(repo.0.join("pkg")).expect("mkdir pkg");
     std::fs::rename(repo.0.join("a.py"), repo.0.join("pkg/a.py")).expect("move a.py");
 
     let check = ok(&["cell", "ls", root, "--check"]);
     assert!(
-        check.stdout.contains("rekeyed a::charge DECISION api/d1 -> pkg::a::charge tier=same-name"),
+        check
+            .stdout
+            .contains("rekeyed a::charge DECISION api/d1 -> pkg::a::charge tier=same-name"),
         "{}",
         check.stdout
     );
-    assert!(check.stderr.contains("[cells] ls rows=1 bound=0 rekeyed=1 "), "{}", check.stderr);
-    assert_eq!(repo.cell_rows()[0]["qname"], "a::charge", "--check alone never rewrites");
+    assert!(
+        check
+            .stderr
+            .contains("[cells] ls rows=1 bound=0 rekeyed=1 "),
+        "{}",
+        check.stderr
+    );
+    assert_eq!(
+        repo.cell_rows()[0]["qname"],
+        "a::charge",
+        "--check alone never rewrites"
+    );
 
     let rekey = ok(&["cell", "ls", root, "--check", "--rekey"]);
     assert!(
@@ -218,10 +318,42 @@ fn rekey_never_overwrites_an_entry_at_the_target() {
     repo.write("a.py", CHARGE);
     let root = repo.path();
     ok(&["build", root]);
-    ok(&["cell", "set", root, "a::charge", "CONV", "--text", "old note"]);
-    ok(&["cell", "set", root, "a::charge", "DECISION", "--json", r#"{"id":"d1","title":"old"}"#]);
-    ok(&["cell", "set", root, "pkg::a::charge", "CONV", "--text", "new note"]);
-    ok(&["cell", "set", root, "pkg::a::charge", "DECISION", "--json", r#"{"id":"d1","title":"new"}"#]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "old note",
+    ]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "DECISION",
+        "--json",
+        r#"{"id":"d1","title":"old"}"#,
+    ]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "pkg::a::charge",
+        "CONV",
+        "--text",
+        "new note",
+    ]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "pkg::a::charge",
+        "DECISION",
+        "--json",
+        r#"{"id":"d1","title":"new"}"#,
+    ]);
     std::fs::create_dir_all(repo.0.join("pkg")).expect("mkdir pkg");
     std::fs::rename(repo.0.join("a.py"), repo.0.join("pkg/a.py")).expect("move a.py");
 
@@ -231,15 +363,28 @@ fn rekey_never_overwrites_an_entry_at_the_target() {
         "{}",
         r.stderr
     );
-    assert!(r.stderr.contains("[cells] rekey conflict qname=a::charge -> pkg::a::charge cell=DECISION id=d1"), "{}", r.stderr);
-    assert_eq!(r.json()["rekey"], serde_json::json!({"rewritten": 1, "conflicts": 1}));
+    assert!(
+        r.stderr.contains(
+            "[cells] rekey conflict qname=a::charge -> pkg::a::charge cell=DECISION id=d1"
+        ),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(
+        r.json()["rekey"],
+        serde_json::json!({"rewritten": 1, "conflicts": 1})
+    );
 
     let rows: Vec<(String, String, String)> = repo
         .cell_rows()
         .iter()
         .map(|r| {
             let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
-            (s(&r["qname"]), s(&r["entry"]["id"]), format!("{}{}", s(&r["entry"]["text"]), s(&r["entry"]["title"])))
+            (
+                s(&r["qname"]),
+                s(&r["entry"]["id"]),
+                format!("{}{}", s(&r["entry"]["text"]), s(&r["entry"]["title"])),
+            )
         })
         .collect();
     let want = [
@@ -248,7 +393,10 @@ fn rekey_never_overwrites_an_entry_at_the_target() {
         ("pkg::a::charge", "000002", "old note"),
         ("pkg::a::charge", "d1", "new"),
     ];
-    assert_eq!(rows, want.map(|(q, i, t)| (q.to_string(), i.to_string(), t.to_string())));
+    assert_eq!(
+        rows,
+        want.map(|(q, i, t)| (q.to_string(), i.to_string(), t.to_string()))
+    );
 }
 
 /// A qname two nodes share (a CLASS and a FUNCTION) is ambiguous: `--check`
@@ -256,22 +404,57 @@ fn rekey_never_overwrites_an_entry_at_the_target() {
 #[test]
 fn check_lists_ambiguous_candidates() {
     let repo = Scratch::new("ambiguous");
-    repo.write("a.py", "class Foo:\n    pass\n\n\ndef Foo():\n    return 1\n");
+    repo.write(
+        "a.py",
+        "class Foo:\n    pass\n\n\ndef Foo():\n    return 1\n",
+    );
     let root = repo.path();
-    ok(&["cell", "set", root, "a::Foo", "CONV", "--text", "which one?"]);
-    ok(&["cell", "set", root, "a::Foo", "CONV", "--text", "the function", "--kind", "FUNCTION"]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "a::Foo",
+        "CONV",
+        "--text",
+        "which one?",
+    ]);
+    ok(&[
+        "cell",
+        "set",
+        root,
+        "a::Foo",
+        "CONV",
+        "--text",
+        "the function",
+        "--kind",
+        "FUNCTION",
+    ]);
     let r = glia(&["cell", "ls", root, "--check", "--json"]);
     assert_eq!(r.code, 1, "an ambiguous row is not applied:\n{}", r.stderr);
     let v = r.json();
     let rows = v["rows"].as_array().expect("rows");
     let ambiguous: Vec<&Value> = rows.iter().filter(|r| r["status"] == "ambiguous").collect();
     assert_eq!(ambiguous.len(), 1, "{v}");
-    let mut kinds: Vec<&str> =
-        ambiguous[0]["candidates"].as_array().expect("candidates").iter().filter_map(|c| c["kind"].as_str()).collect();
+    let mut kinds: Vec<&str> = ambiguous[0]["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|c| c["kind"].as_str())
+        .collect();
     kinds.sort_unstable();
     assert_eq!(kinds, ["CLASS", "FUNCTION"], "{v}");
-    assert!(rows.iter().any(|r| r["status"] == "bound" && r["kind"] == "FUNCTION"), "{v}");
-    assert!(r.stderr.contains("[cells] ls rows=2 bound=1 rekeyed=0 ambiguous=1 orphaned=0 rejected=0 surface=cli"), "{}", r.stderr);
+    assert!(
+        rows.iter()
+            .any(|r| r["status"] == "bound" && r["kind"] == "FUNCTION"),
+        "{v}"
+    );
+    assert!(
+        r.stderr.contains(
+            "[cells] ls rows=2 bound=1 rekeyed=0 ambiguous=1 orphaned=0 rejected=0 surface=cli"
+        ),
+        "{}",
+        r.stderr
+    );
 }
 
 /// A VECTOR goes through `--file` (raw bytes), lists as `<n> bytes`, and is
@@ -286,16 +469,44 @@ fn vector_set_ls_rm() {
     let root = repo.path();
     let file = vec_path.to_str().expect("utf-8");
 
-    let set = ok(&["cell", "set", root, "a::charge", "VECTOR", "--file", file, "--model", "m1", "--dims", "2"]);
-    assert_eq!(set.stdout.trim(), "wrote VECTOR - for a::charge (write-through: no gmap)");
+    let set = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "VECTOR",
+        "--file",
+        file,
+        "--model",
+        "m1",
+        "--dims",
+        "2",
+    ]);
+    assert_eq!(
+        set.stdout.trim(),
+        "wrote VECTOR - for a::charge (write-through: no gmap)"
+    );
     let ls = ok(&["cell", "ls", root]);
-    assert!(ls.stdout.contains("a::charge VECTOR 8 bytes model=m1 dims=2"), "{}", ls.stdout);
+    assert!(
+        ls.stdout
+            .contains("a::charge VECTOR 8 bytes model=m1 dims=2"),
+        "{}",
+        ls.stdout
+    );
     let json = ok(&["cell", "ls", root, "--json", "--qname", "a::charge"]).json();
     assert_eq!(json["rows"][0]["bytes"], 8, "{json}");
-    assert!(ok(&["cell", "ls", root, "--json", "--qname", "nope"]).json()["rows"].as_array().is_some_and(Vec::is_empty));
+    assert!(
+        ok(&["cell", "ls", root, "--json", "--qname", "nope"]).json()["rows"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
 
     ok(&["cell", "rm", root, "a::charge", "VECTOR"]);
-    assert!(ok(&["cell", "ls", root, "--json"]).json()["rows"].as_array().is_some_and(Vec::is_empty));
+    assert!(
+        ok(&["cell", "ls", root, "--json"]).json()["rows"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
 }
 
 /// Usage errors exit 2 and write nothing; removing a row that is not there
@@ -311,12 +522,56 @@ fn usage_errors_exit_2_and_a_missing_row_exits_1() {
         r
     };
     two(&["cell", "set", root, "a::charge", "CONV"]);
-    two(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--json", "{}"]);
+    two(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "x",
+        "--json",
+        "{}",
+    ]);
     two(&["cell", "ls", root, "--rekey"]);
-    assert!(two(&["cell", "set", root, "a::charge", "CODE", "--text", "x"]).stderr.contains("not writable"));
-    assert!(two(&["cell", "set", root, "a::charge", "CONV", "--json", "not json"]).stderr.contains("not JSON"));
-    assert!(two(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--dims", "2"]).stderr.contains("VECTOR"));
-    assert!(two(&["cell", "rm", root, "a::charge", "CONV"]).stderr.contains("--id"));
+    assert!(
+        two(&["cell", "set", root, "a::charge", "CODE", "--text", "x"])
+            .stderr
+            .contains("not writable")
+    );
+    assert!(
+        two(&[
+            "cell",
+            "set",
+            root,
+            "a::charge",
+            "CONV",
+            "--json",
+            "not json"
+        ])
+        .stderr
+        .contains("not JSON")
+    );
+    assert!(
+        two(&[
+            "cell",
+            "set",
+            root,
+            "a::charge",
+            "CONV",
+            "--text",
+            "x",
+            "--dims",
+            "2"
+        ])
+        .stderr
+        .contains("VECTOR")
+    );
+    assert!(
+        two(&["cell", "rm", root, "a::charge", "CONV"])
+            .stderr
+            .contains("--id")
+    );
     let missing = repo.0.join("no-such-dir");
     two(&["cell", "ls", missing.to_str().expect("utf-8")]);
     assert!(!missing.exists(), "a missing repo is never created");
@@ -324,7 +579,11 @@ fn usage_errors_exit_2_and_a_missing_row_exits_1() {
 
     let gone = glia(&["cell", "rm", root, "a::charge", "CONV", "--id", "000009"]);
     assert_eq!(gone.code, 1, "{}", gone.stderr);
-    assert!(gone.stdout.contains("no CONV api/000009 on a::charge"), "{}", gone.stdout);
+    assert!(
+        gone.stdout.contains("no CONV api/000009 on a::charge"),
+        "{}",
+        gone.stdout
+    );
     assert!(!Path::new(root).join(".glia/cells.jsonl").exists());
 }
 
@@ -348,10 +607,26 @@ fn set_hint_binds_reports_and_refuses() {
     ok(&["build", root]);
     ok(&["cell", "set", root, "a::charge", "CONV", "--text", "one"]);
     let listed = ok(&["cell", "ls", root, "--json"]).json();
-    let hint = listed["rows"][0]["hint"].as_str().unwrap_or_default().to_string();
-    assert!(hint.starts_with("v1|3|a.py|"), "the row carries the node's hint: {listed}");
+    let hint = listed["rows"][0]["hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        hint.starts_with("v1|3|a.py|"),
+        "the row carries the node's hint: {listed}"
+    );
 
-    let bound = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "two", "--hint", &hint]);
+    let bound = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "two",
+        "--hint",
+        &hint,
+    ]);
     assert!(
         bound.stderr.contains("[cells] write qname=a::charge cell=CONV id=000002 rows=2 target=bound write_through=applied surface=cli\n"),
         "{}",
@@ -359,8 +634,26 @@ fn set_hint_binds_reports_and_refuses() {
     );
     assert!(!bound.stdout.contains("note:"), "{}", bound.stdout);
 
-    let flipped = with_field(&hint, 3, if hint.split('|').nth(3) == Some("0123456789abcdef") { "fedcba9876543210" } else { "0123456789abcdef" });
-    let differs = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "three", "--hint", &flipped]);
+    let flipped = with_field(
+        &hint,
+        3,
+        if hint.split('|').nth(3) == Some("0123456789abcdef") {
+            "fedcba9876543210"
+        } else {
+            "0123456789abcdef"
+        },
+    );
+    let differs = ok(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "three",
+        "--hint",
+        &flipped,
+    ]);
     assert!(
         differs.stderr.contains(
             "[cells] write qname=a::charge cell=CONV id=000003 rows=3 target=hint_differs write_through=applied surface=cli differs=body"
@@ -369,29 +662,91 @@ fn set_hint_binds_reports_and_refuses() {
         differs.stderr
     );
     assert!(
-        differs.stdout.contains(&format!("note: a::charge's own hint is {hint}; --hint differs in body")),
+        differs.stdout.contains(&format!(
+            "note: a::charge's own hint is {hint}; --hint differs in body"
+        )),
         "{}",
         differs.stdout
     );
     let rows = repo.cell_rows();
-    assert_eq!(rows[2]["hint"].as_str(), Some(flipped.as_str()), "the row stores the caller's hint: {rows:?}");
+    assert_eq!(
+        rows[2]["hint"].as_str(),
+        Some(flipped.as_str()),
+        "the row stores the caller's hint: {rows:?}"
+    );
 
     let sidecar = std::fs::read(repo.0.join(".glia/cells.jsonl")).expect("cells.jsonl");
-    let gmap = glia(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--hint", "a.py:1:0"]);
+    let gmap = glia(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "x",
+        "--hint",
+        "a.py:1:0",
+    ]);
     assert_eq!(gmap.code, 2, "{}\n{}", gmap.stdout, gmap.stderr);
-    assert!(gmap.stderr.contains(r#"error: invalid cell write: hint "a.py:1:0" is not a v1 identity hint"#), "{}", gmap.stderr);
-    let kind = glia(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--hint", &hint, "--kind", "CLASS"]);
+    assert!(
+        gmap.stderr
+            .contains(r#"error: invalid cell write: hint "a.py:1:0" is not a v1 identity hint"#),
+        "{}",
+        gmap.stderr
+    );
+    let kind = glia(&[
+        "cell",
+        "set",
+        root,
+        "a::charge",
+        "CONV",
+        "--text",
+        "x",
+        "--hint",
+        &hint,
+        "--kind",
+        "CLASS",
+    ]);
     assert_eq!(kind.code, 2, "{}\n{}", kind.stdout, kind.stderr);
-    assert!(kind.stderr.contains("names a FUNCTION but kind is CLASS"), "{}", kind.stderr);
-    assert_eq!(std::fs::read(repo.0.join(".glia/cells.jsonl")).expect("cells.jsonl"), sidecar, "a refused hint writes nothing");
+    assert!(
+        kind.stderr.contains("names a FUNCTION but kind is CLASS"),
+        "{}",
+        kind.stderr
+    );
+    assert_eq!(
+        std::fs::read(repo.0.join(".glia/cells.jsonl")).expect("cells.jsonl"),
+        sidecar,
+        "a refused hint writes nothing"
+    );
 
     let twin = Scratch::new("hint-twin");
-    twin.write("a.py", "class Foo:\n    pass\n\n\ndef Foo():\n    return 1\n");
+    twin.write(
+        "a.py",
+        "class Foo:\n    pass\n\n\ndef Foo():\n    return 1\n",
+    );
     let troot = twin.path();
     ok(&["build", troot]);
-    let amb = ok(&["cell", "set", troot, "a::Foo", "CONV", "--text", "which one?"]);
+    let amb = ok(&[
+        "cell",
+        "set",
+        troot,
+        "a::Foo",
+        "CONV",
+        "--text",
+        "which one?",
+    ]);
     assert!(amb.stderr.contains("target=ambiguous"), "{}", amb.stderr);
-    ok(&["cell", "set", troot, "a::Foo", "CONV", "--text", "the function", "--kind", "FUNCTION"]);
+    ok(&[
+        "cell",
+        "set",
+        troot,
+        "a::Foo",
+        "CONV",
+        "--text",
+        "the function",
+        "--kind",
+        "FUNCTION",
+    ]);
     let rows = twin.cell_rows();
     let function = rows
         .iter()
@@ -400,11 +755,39 @@ fn set_hint_binds_reports_and_refuses() {
         .unwrap_or_default()
         .to_string();
     assert!(function.starts_with("v1|3|a.py|"), "{rows:?}");
-    let by_hint = ok(&["cell", "set", troot, "a::Foo", "DECISION", "--json", r#"{"id":"d1","title":"t"}"#, "--hint", &function]);
-    assert!(by_hint.stderr.contains("target=bound write_through=applied surface=cli"), "{}", by_hint.stderr);
+    let by_hint = ok(&[
+        "cell",
+        "set",
+        troot,
+        "a::Foo",
+        "DECISION",
+        "--json",
+        r#"{"id":"d1","title":"t"}"#,
+        "--hint",
+        &function,
+    ]);
+    assert!(
+        by_hint
+            .stderr
+            .contains("target=bound write_through=applied surface=cli"),
+        "{}",
+        by_hint.stderr
+    );
     let check = glia(&["cell", "ls", troot, "--check", "--json"]).json();
-    let decision = check["rows"].as_array().and_then(|r| r.iter().find(|r| r["cell"] == "DECISION")).cloned().unwrap_or_default();
-    assert_eq!((decision["status"].as_str(), decision["kind"].is_null()), (Some("bound"), true), "{check}");
+    let decision = check["rows"]
+        .as_array()
+        .and_then(|r| r.iter().find(|r| r["cell"] == "DECISION"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        (decision["status"].as_str(), decision["kind"].is_null()),
+        (Some("bound"), true),
+        "{check}"
+    );
     assert_eq!(decision["node"]["kind"], "FUNCTION", "{check}");
-    assert_eq!(decision["hint"].as_str(), Some(function.as_str()), "{check}");
+    assert_eq!(
+        decision["hint"].as_str(),
+        Some(function.as_str()),
+        "{check}"
+    );
 }

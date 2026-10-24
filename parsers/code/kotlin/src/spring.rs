@@ -189,7 +189,13 @@ pub(crate) struct TypeSpring {
 /// Everything a type declaration's own annotations and supertypes emit: its
 /// class-level routes, its DATA_ENTITY, its repository ACCESSES_DATA and its
 /// primary-constructor INJECTS. Returns what its members need.
-pub(crate) fn on_type(node: TsNode, name: &str, id: NodeId, file: &File, acc: &mut Acc) -> TypeSpring {
+pub(crate) fn on_type(
+    node: TsNode,
+    name: &str,
+    id: NodeId,
+    file: &File,
+    acc: &mut Acc,
+) -> TypeSpring {
     let anns = own_annotations(node, file.src);
     let is_bean = anns
         .iter()
@@ -361,7 +367,12 @@ fn simple_type_name(user_type: TsNode, src: &[u8]) -> String {
 pub(crate) fn own_annotations(node: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
     own_annotation_parts(node, src)
         .into_iter()
-        .map(|p| (p.name, p.args.and_then(|args| annotation_path_arg(args, src))))
+        .map(|p| {
+            (
+                p.name,
+                p.args.and_then(|args| annotation_path_arg(args, src)),
+            )
+        })
         .collect()
 }
 
@@ -428,7 +439,8 @@ pub(crate) fn named_string_arg(args: TsNode, key: &str, src: &[u8]) -> Option<St
         let named: Vec<TsNode> = arg.named_children(&mut ac).collect();
         let has_key = {
             let mut kc = arg.walk();
-            arg.children(&mut kc).any(|c| !c.is_named() && c.kind() == "=")
+            arg.children(&mut kc)
+                .any(|c| !c.is_named() && c.kind() == "=")
         };
         if has_key
             && named.len() >= 2
@@ -456,7 +468,8 @@ pub(crate) fn annotation_path_arg(args: TsNode, src: &[u8]) -> Option<String> {
         let named: Vec<TsNode> = arg.named_children(&mut ac).collect();
         let has_key = {
             let mut kc = arg.walk();
-            arg.children(&mut kc).any(|c| !c.is_named() && c.kind() == "=")
+            arg.children(&mut kc)
+                .any(|c| !c.is_named() && c.kind() == "=")
         };
         let Some(value) = named.last().copied() else {
             continue;
@@ -564,8 +577,13 @@ fn emit_data_entity(flavor: &str, name: &str, class_id: NodeId, file: &File, acc
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav
-        .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.nav.record(
+        entity_id,
+        name,
+        &qname,
+        node_kind::DATA_ENTITY,
+        Some(class_id),
+    );
     acc.spring.entities += 1;
 }
 
@@ -688,7 +706,9 @@ mod tests {
     }
 
     fn counts(source: &str) -> SpringCounts {
-        crate::parse_counting(source, "x.kt", "x", repo()).unwrap().1
+        crate::parse_counting(source, "x.kt", "x", repo())
+            .unwrap()
+            .1
     }
 
     #[test]
@@ -712,18 +732,28 @@ class UserController(private val userService: UserService) {
             handled_by(&fp),
             vec![
                 ("GET /users".to_string(), "UserController::list".to_string()),
-                ("POST /users".to_string(), "UserController::create".to_string()),
+                (
+                    "POST /users".to_string(),
+                    "UserController::create".to_string()
+                ),
             ]
         );
         // The Java parser's ROUTE: same id, Strong, one ROUTE_METHOD cell.
-        let node = fp.nodes.iter().find(|n| n.id == route_id("GET /users")).unwrap();
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == route_id("GET /users"))
+            .unwrap();
         assert_eq!(node.confidence, Confidence::Strong);
         assert!(matches!(
             node.cells.as_slice(),
             [Cell { kind, payload: CellPayload::Text(m) }] if *kind == cell_type::ROUTE_METHOD && m == "GET"
         ));
         let c = counts(source);
-        assert_eq!((c.stereotypes, c.routes, c.composed, c.injects), (1, 2, 0, 1));
+        assert_eq!(
+            (c.stereotypes, c.routes, c.composed, c.injects),
+            (1, 2, 0, 1)
+        );
     }
 
     #[test]
@@ -747,9 +777,18 @@ class UserController {
         assert_eq!(
             handled_by(&fp),
             vec![
-                ("ANY /api".to_string(), "com::acme::web::UserController".to_string()),
-                ("DELETE /api".to_string(), "com::acme::web::UserController::purge".to_string()),
-                ("GET /api/users".to_string(), "com::acme::web::UserController::list".to_string()),
+                (
+                    "ANY /api".to_string(),
+                    "com::acme::web::UserController".to_string()
+                ),
+                (
+                    "DELETE /api".to_string(),
+                    "com::acme::web::UserController::purge".to_string()
+                ),
+                (
+                    "GET /api/users".to_string(),
+                    "com::acme::web::UserController::list".to_string()
+                ),
             ]
         );
         let c = counts(source);
@@ -783,9 +822,18 @@ class ItemResource {
             vec![
                 ("ANY /hello".to_string(), "app::HelloController".to_string()),
                 ("ANY /items".to_string(), "app::ItemResource".to_string()),
-                ("GET /hello/{name}".to_string(), "app::HelloController::greet".to_string()),
-                ("GET /items/{id}".to_string(), "app::ItemResource::one".to_string()),
-                ("POST /items".to_string(), "app::ItemResource::add".to_string()),
+                (
+                    "GET /hello/{name}".to_string(),
+                    "app::HelloController::greet".to_string()
+                ),
+                (
+                    "GET /items/{id}".to_string(),
+                    "app::ItemResource::one".to_string()
+                ),
+                (
+                    "POST /items".to_string(),
+                    "app::ItemResource::add".to_string()
+                ),
             ]
         );
     }
@@ -946,16 +994,26 @@ interface NotARepo : Comparable<User>
         // model-keyed one, the same string the Java parser mints.
         let user = id_of(&m, node_kind::DATA_ENTITY, "data_entity:sql:User");
         let event = id_of(&m, node_kind::DATA_ENTITY, "data_entity:nosql:Event");
-        assert_eq!(m.nav.name_by_id.get(&user).map(String::as_str), Some("User"));
+        assert_eq!(
+            m.nav.name_by_id.get(&user).map(String::as_str),
+            Some("User")
+        );
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "model::User");
-        assert!(m.edges.iter().any(|e| e.from == class
-            && e.to == user
-            && e.category == edge_category::DEFINES));
+        assert!(
+            m.edges
+                .iter()
+                .any(|e| e.from == class && e.to == user && e.category == edge_category::DEFINES)
+        );
         let mut access: Vec<(String, NodeId)> = r
             .edges
             .iter()
             .filter(|e| e.category == edge_category::ACCESSES_DATA)
-            .map(|e| (r.nav.qname_by_id.get(&e.from).cloned().unwrap_or_default(), e.to))
+            .map(|e| {
+                (
+                    r.nav.qname_by_id.get(&e.from).cloned().unwrap_or_default(),
+                    e.to,
+                )
+            })
             .collect();
         access.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(

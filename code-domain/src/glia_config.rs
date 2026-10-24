@@ -77,8 +77,19 @@ pub const MAX_ID_CHARS: usize = 128;
 pub const MAX_NOTE_CHARS: usize = 4096;
 /// Section names in `section_counts` / marker order.
 pub const SECTIONS: [&str; 13] = [
-    "walk", "project", "entrypoints", "constants", "route_prefix", "wrapper", "edge", "constraint",
-    "decision", "note", "component", "layer", "ids",
+    "walk",
+    "project",
+    "entrypoints",
+    "constants",
+    "route_prefix",
+    "wrapper",
+    "edge",
+    "constraint",
+    "decision",
+    "note",
+    "component",
+    "layer",
+    "ids",
 ];
 /// `[ids] patterns`: at most this many shapes (EB.4).
 pub const MAX_ID_PATTERNS: usize = 16;
@@ -88,8 +99,11 @@ pub const MAX_ID_PATTERN_CHARS: usize = 64;
 pub const MAX_SHORTHAND_LETTERS: u8 = 20;
 /// Edge categories an `[[edge]]` may never declare: structural (DEFINES /
 /// CONTAINS) or owned by the git-history snapshot (CO_CHANGES).
-pub const REJECTED_EDGE_CATEGORIES: &[EdgeCategoryId] =
-    &[edge_category::DEFINES, edge_category::CONTAINS, edge_category::CO_CHANGES];
+pub const REJECTED_EDGE_CATEGORIES: &[EdgeCategoryId] = &[
+    edge_category::DEFINES,
+    edge_category::CONTAINS,
+    edge_category::CO_CHANGES,
+];
 /// `[[wrapper]] kind` values.
 pub const WRAPPER_KINDS: &[&str] = &["http", "queue_producer", "queue_consumer", "data_entity"];
 /// `[[wrapper]] flavor` values for `kind = "data_entity"`: the middle segment
@@ -230,7 +244,9 @@ impl PathGlobs {
         if rel.is_empty() {
             return false;
         }
-        self.matcher.matched_path_or_any_parents(Path::new(rel), false).is_ignore()
+        self.matcher
+            .matched_path_or_any_parents(Path::new(rel), false)
+            .is_ignore()
     }
 
     /// How many patterns the matcher holds (ignores plus `!` whitelists).
@@ -367,7 +383,11 @@ impl WrapperDecl {
 
     /// The path argument index: a receiver form defaults it to 0.
     pub fn path_arg_index(&self) -> Option<usize> {
-        if self.receiver { Some(self.path_arg.unwrap_or(0)) } else { self.path_arg }
+        if self.receiver {
+            Some(self.path_arg.unwrap_or(0))
+        } else {
+            self.path_arg
+        }
     }
 
     /// The `data_entity` flavor as its [`DATA_ENTITY_FLAVORS`] spelling:
@@ -669,7 +689,9 @@ impl IdPattern {
     pub fn parse(text: &str) -> Result<IdPattern, String> {
         let chars = text.chars().count();
         if chars == 0 || chars > MAX_ID_PATTERN_CHARS {
-            return Err(format!("a pattern is 1..={MAX_ID_PATTERN_CHARS} chars (got {chars})"));
+            return Err(format!(
+                "a pattern is 1..={MAX_ID_PATTERN_CHARS} chars (got {chars})"
+            ));
         }
         let mut toks = Vec::new();
         let mut rest = text;
@@ -684,7 +706,9 @@ impl IdPattern {
                     "N" => IdTok::Digits(None),
                     "l?" => IdTok::Letter,
                     _ => match name.strip_prefix('N').and_then(|k| k.parse::<usize>().ok()) {
-                        Some(k) if (1..=9).contains(&k) && name.len() == 2 => IdTok::Digits(Some(k)),
+                        Some(k) if (1..=9).contains(&k) && name.len() == 2 => {
+                            IdTok::Digits(Some(k))
+                        }
                         _ => {
                             return Err(format!(
                                 "unknown token `{{{name}}}` (the grammar is {{U}}, {{N}}, {{N1}}..{{N9}}, {{l?}})"
@@ -702,9 +726,14 @@ impl IdPattern {
             }
         }
         if !toks.iter().any(|t| matches!(t, IdTok::Digits(_))) {
-            return Err(format!("{text:?} holds no {{N}} / {{N<k>}}: an id needs a number"));
+            return Err(format!(
+                "{text:?} holds no {{N}} / {{N<k>}}: an id needs a number"
+            ));
         }
-        Ok(IdPattern { text: text.to_string(), toks })
+        Ok(IdPattern {
+            text: text.to_string(),
+            toks,
+        })
     }
 
     /// The shape string as written.
@@ -742,7 +771,13 @@ impl IdPattern {
         let end = st.end;
         let family_end = st.first_n?;
         text.get(start..end)?;
-        let mut m = IdMatch { start, end, family_end, claim_end: end, extra: Vec::new() };
+        let mut m = IdMatch {
+            start,
+            end,
+            family_end,
+            claim_end: end,
+            extra: Vec::new(),
+        };
         if let Some(letter_at) = st.letter
             && letter_at + 1 == end
             && self.has_letter_suffix()
@@ -752,7 +787,14 @@ impl IdPattern {
         Some(m)
     }
 
-    fn step(&self, b: &[u8], ti: usize, pos: usize, st: MatchState, steps: &mut usize) -> Option<MatchState> {
+    fn step(
+        &self,
+        b: &[u8],
+        ti: usize,
+        pos: usize,
+        st: MatchState,
+        steps: &mut usize,
+    ) -> Option<MatchState> {
         *steps += 1;
         if *steps > ID_MATCH_STEPS {
             return None;
@@ -761,28 +803,47 @@ impl IdPattern {
             return id_boundary_after(b, pos).then_some(MatchState { end: pos, ..st });
         };
         let run = |ok: fn(&u8) -> bool, from: usize| {
-            b.get(from..).map_or(0, |r| r.iter().take(ID_RUN_CAP).take_while(|c| ok(c)).count())
+            b.get(from..).map_or(0, |r| {
+                r.iter().take(ID_RUN_CAP).take_while(|c| ok(c)).count()
+            })
         };
         match *tok {
             IdTok::Upper => {
                 if !b.get(pos).is_some_and(u8::is_ascii_uppercase) {
                     return None;
                 }
-                let tail = run(|c| c.is_ascii_uppercase() || c.is_ascii_digit(), pos + 1).min(ID_RUN_CAP - 1);
-                (1..=1 + tail).rev().find_map(|len| self.step(b, ti + 1, pos + len, st, steps))
+                let tail = run(|c| c.is_ascii_uppercase() || c.is_ascii_digit(), pos + 1)
+                    .min(ID_RUN_CAP - 1);
+                (1..=1 + tail)
+                    .rev()
+                    .find_map(|len| self.step(b, ti + 1, pos + len, st, steps))
             }
             IdTok::Digits(k) => {
-                let st = MatchState { first_n: st.first_n.or(Some(pos)), ..st };
+                let st = MatchState {
+                    first_n: st.first_n.or(Some(pos)),
+                    ..st
+                };
                 let d = run(u8::is_ascii_digit, pos);
                 match k {
                     Some(k) if d >= k => self.step(b, ti + 1, pos + k, st, steps),
                     Some(_) => None,
-                    None => (1..=d).rev().find_map(|len| self.step(b, ti + 1, pos + len, st, steps)),
+                    None => (1..=d)
+                        .rev()
+                        .find_map(|len| self.step(b, ti + 1, pos + len, st, steps)),
                 }
             }
             IdTok::Letter => {
                 if b.get(pos).is_some_and(u8::is_ascii_lowercase)
-                    && let Some(s) = self.step(b, ti + 1, pos + 1, MatchState { letter: Some(pos), ..st }, steps)
+                    && let Some(s) = self.step(
+                        b,
+                        ti + 1,
+                        pos + 1,
+                        MatchState {
+                            letter: Some(pos),
+                            ..st
+                        },
+                        steps,
+                    )
                 {
                     return Some(s);
                 }
@@ -846,7 +907,8 @@ fn shorthand(text: &str, start: usize, m: &mut IdMatch) {
         Some((b[r], r + 1))
     } else if text.get(r..).is_some_and(|t| t.starts_with(base)) {
         let q = r + base.len();
-        (b.get(q).is_some_and(u8::is_ascii_lowercase) && id_word_end(b, q + 1)).then(|| (b[q], q + 1))
+        (b.get(q).is_some_and(u8::is_ascii_lowercase) && id_word_end(b, q + 1))
+            .then(|| (b[q], q + 1))
     } else {
         None
     };
@@ -951,9 +1013,13 @@ impl Rejection {
         } else if m.contains("is not a declared [[component]]") {
             "declare that [[component]] or correct the name (a [[component]] the loader dropped is listed here too: fix it first)".to_string()
         } else if m.starts_with("duplicate id") {
-            format!("give each [[{section}]] its own id: the first stanza with it is kept, this one is not")
+            format!(
+                "give each [[{section}]] its own id: the first stanza with it is kept, this one is not"
+            )
         } else if m.starts_with("duplicate name") {
-            format!("give each [[{section}]] its own name: the first stanza with it is kept, this one is not")
+            format!(
+                "give each [[{section}]] its own name: the first stanza with it is kept, this one is not"
+            )
         } else if m.contains("is listed twice") {
             "list it once".to_string()
         } else if m.contains("is already in layer") {
@@ -1033,7 +1099,10 @@ impl LoadedConfig {
     /// has nothing to switch off.
     pub fn is_overlay_empty(&self) -> bool {
         let c = &self.config;
-        c.constants.is_empty() && c.route_prefix.is_empty() && c.wrapper.is_empty() && c.edge.is_empty()
+        c.constants.is_empty()
+            && c.route_prefix.is_empty()
+            && c.wrapper.is_empty()
+            && c.edge.is_empty()
     }
 
     fn at(&self, line: Option<u32>, msg: &str) -> String {
@@ -1045,7 +1114,12 @@ impl LoadedConfig {
 
     /// `[ids]` (EB.4): each bad pattern, local word, markdown glob or tracker
     /// is dropped on its own with an errors line naming its line.
-    fn validate_ids(&self, mut ids: IdsConfig, errors: &mut Vec<String>, rejections: &mut Vec<Rejection>) -> IdsConfig {
+    fn validate_ids(
+        &self,
+        mut ids: IdsConfig,
+        errors: &mut Vec<String>,
+        rejections: &mut Vec<Rejection>,
+    ) -> IdsConfig {
         if let Some(patterns) = ids.patterns.take() {
             let mut kept = Vec::with_capacity(patterns.len().min(MAX_ID_PATTERNS));
             for p in patterns {
@@ -1057,9 +1131,10 @@ impl LoadedConfig {
                 };
                 match verdict {
                     Ok(()) => kept.push(p),
-                    Err(e) => errors.push(
-                        self.at(Some(line), &format!("[ids] patterns {:?}: {e} (pattern dropped)", p.get_ref())),
-                    ),
+                    Err(e) => errors.push(self.at(
+                        Some(line),
+                        &format!("[ids] patterns {:?}: {e} (pattern dropped)", p.get_ref()),
+                    )),
                 }
             }
             ids.patterns = Some(kept);
@@ -1086,32 +1161,40 @@ impl LoadedConfig {
                 Ok(()) => kept.push(g),
                 Err(e) => {
                     let line = self.line_of(g.span());
-                    errors.push(
-                        self.at(Some(line), &format!("[ids] markdown {:?}: {e} (pattern dropped)", g.get_ref())),
-                    );
+                    errors.push(self.at(
+                        Some(line),
+                        &format!("[ids] markdown {:?}: {e} (pattern dropped)", g.get_ref()),
+                    ));
                 }
             }
         }
         ids.markdown = kept;
-        ids.tracker = self.keep("ids.tracker", std::mem::take(&mut ids.tracker), errors, rejections, |_| None, |t| {
-            if t.path.trim().is_empty() {
-                return Err("path must name a JSON file glob".into());
-            }
-            check_skip_pattern(&t.path).map_err(|e| format!("path {:?}: {e}", t.path))?;
-            if t.files.trim().is_empty() {
-                return Err("files must name the field listing a task's files".into());
-            }
-            if t.id.trim().is_empty() {
-                return Err("id must name the field holding a task's id".into());
-            }
-            if t.list.as_deref().is_some_and(|l| l.trim().is_empty()) {
-                return Err("list is empty (omit it for a top-level array)".into());
-            }
-            if t.state.as_deref().is_some_and(|l| l.trim().is_empty()) {
-                return Err("state is empty (omit it when tasks carry no state)".into());
-            }
-            Ok(())
-        });
+        ids.tracker = self.keep(
+            "ids.tracker",
+            std::mem::take(&mut ids.tracker),
+            errors,
+            rejections,
+            |_| None,
+            |t| {
+                if t.path.trim().is_empty() {
+                    return Err("path must name a JSON file glob".into());
+                }
+                check_skip_pattern(&t.path).map_err(|e| format!("path {:?}: {e}", t.path))?;
+                if t.files.trim().is_empty() {
+                    return Err("files must name the field listing a task's files".into());
+                }
+                if t.id.trim().is_empty() {
+                    return Err("id must name the field holding a task's id".into());
+                }
+                if t.list.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                    return Err("list is empty (omit it for a top-level array)".into());
+                }
+                if t.state.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                    return Err("state is empty (omit it when tasks carry no state)".into());
+                }
+                Ok(())
+            },
+        );
         ids
     }
 
@@ -1149,7 +1232,12 @@ impl LoadedConfig {
     /// The whole file is ignored: one errors line and one [`Rejection`].
     fn reject_file(&mut self, line: Option<u32>, message: String) {
         self.errors.push(self.at(line, &message));
-        self.rejections.push(Rejection { section: None, line, id: None, message });
+        self.rejections.push(Rejection {
+            section: None,
+            line,
+            id: None,
+            message,
+        });
     }
 
     fn validate(&mut self, text: &str) {
@@ -1195,22 +1283,29 @@ impl LoadedConfig {
         self.ids_rejected = errors.len() - ids_errors;
 
         let mut paths = BTreeSet::new();
-        cfg.project = self.keep("project", cfg.project, &mut errors, &mut rejections, |_| None, |p| {
-            let rel = p.rel_path();
-            if rel.is_empty() || rel == "." {
-                return Err(format!("path {:?} names the repo root", p.path));
-            }
-            if rel.split('/').any(|c| c == "..") {
-                return Err(format!("path {:?} leaves the repo", p.path));
-            }
-            if p.label.as_deref().is_some_and(|l| l.trim().is_empty()) {
-                return Err("label is empty".into());
-            }
-            if !paths.insert(rel.to_string()) {
-                return Err(format!("duplicate path {rel:?}"));
-            }
-            Ok(())
-        });
+        cfg.project = self.keep(
+            "project",
+            cfg.project,
+            &mut errors,
+            &mut rejections,
+            |_| None,
+            |p| {
+                let rel = p.rel_path();
+                if rel.is_empty() || rel == "." {
+                    return Err(format!("path {:?} names the repo root", p.path));
+                }
+                if rel.split('/').any(|c| c == "..") {
+                    return Err(format!("path {:?} leaves the repo", p.path));
+                }
+                if p.label.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                    return Err("label is empty".into());
+                }
+                if !paths.insert(rel.to_string()) {
+                    return Err(format!("duplicate path {rel:?}"));
+                }
+                Ok(())
+            },
+        );
 
         let mut qnames = Vec::with_capacity(cfg.entrypoints.qnames.len());
         for q in std::mem::take(&mut cfg.entrypoints.qnames) {
@@ -1218,7 +1313,8 @@ impl LoadedConfig {
                 Ok(()) => qnames.push(q),
                 Err(e) => {
                     let line = self.line_of(q.span());
-                    errors.push(self.at(Some(line), &format!("[entrypoints] {e} (pattern dropped)")));
+                    errors
+                        .push(self.at(Some(line), &format!("[entrypoints] {e} (pattern dropped)")));
                 }
             }
         }
@@ -1236,14 +1332,31 @@ impl LoadedConfig {
             false
         });
 
-        cfg.route_prefix = self.keep("route_prefix", cfg.route_prefix, &mut errors, &mut rejections, |_| None, |r| {
-            if !r.prefix.starts_with('/') || r.prefix.chars().any(char::is_whitespace) {
-                return Err(format!("prefix {:?} must start with '/' and contain no whitespace", r.prefix));
-            }
-            Ok(())
-        });
+        cfg.route_prefix = self.keep(
+            "route_prefix",
+            cfg.route_prefix,
+            &mut errors,
+            &mut rejections,
+            |_| None,
+            |r| {
+                if !r.prefix.starts_with('/') || r.prefix.chars().any(char::is_whitespace) {
+                    return Err(format!(
+                        "prefix {:?} must start with '/' and contain no whitespace",
+                        r.prefix
+                    ));
+                }
+                Ok(())
+            },
+        );
 
-        cfg.wrapper = self.keep("wrapper", cfg.wrapper, &mut errors, &mut rejections, |_| None, check_wrapper);
+        cfg.wrapper = self.keep(
+            "wrapper",
+            cfg.wrapper,
+            &mut errors,
+            &mut rejections,
+            |_| None,
+            check_wrapper,
+        );
 
         cfg.edge = self.keep("edge", cfg.edge, &mut errors, &mut rejections, |_| None, |e| {
             if e.from.trim().is_empty() || e.to.trim().is_empty() {
@@ -1264,126 +1377,182 @@ impl LoadedConfig {
         // the components that were KEPT.
         let mut names = BTreeSet::new();
         let mut claimed: BTreeMap<String, String> = BTreeMap::new();
-        let component_id = |c: &ComponentDecl| nonblank(&c.name).map(|n| format!("{COMPONENT_ID_PREFIX}{n}"));
-        cfg.component = self.keep("component", cfg.component, &mut errors, &mut rejections, component_id, |c| {
-            check_model_name(&c.name)?;
-            if names.contains(&c.name) {
-                return Err(format!("duplicate name {:?}", c.name));
-            }
-            if c.paths.is_empty() {
-                return Err("paths must name at least one path or project label".into());
-            }
-            let mut mine = BTreeSet::new();
-            for (raw, rel) in c.paths.iter().zip(c.rel_paths()) {
-                if raw.trim().is_empty() {
-                    return Err("a path is empty (use \".\" for the repo root)".into());
+        let component_id =
+            |c: &ComponentDecl| nonblank(&c.name).map(|n| format!("{COMPONENT_ID_PREFIX}{n}"));
+        cfg.component = self.keep(
+            "component",
+            cfg.component,
+            &mut errors,
+            &mut rejections,
+            component_id,
+            |c| {
+                check_model_name(&c.name)?;
+                if names.contains(&c.name) {
+                    return Err(format!("duplicate name {:?}", c.name));
                 }
-                if rel.split('/').any(|seg| seg == "..") {
-                    return Err(format!("path {raw:?} leaves the repo"));
+                if c.paths.is_empty() {
+                    return Err("paths must name at least one path or project label".into());
                 }
-                if let Some(owner) = claimed.get(&rel) {
-                    return Err(format!("path {rel:?} is already claimed by component {owner:?}"));
+                let mut mine = BTreeSet::new();
+                for (raw, rel) in c.paths.iter().zip(c.rel_paths()) {
+                    if raw.trim().is_empty() {
+                        return Err("a path is empty (use \".\" for the repo root)".into());
+                    }
+                    if rel.split('/').any(|seg| seg == "..") {
+                        return Err(format!("path {raw:?} leaves the repo"));
+                    }
+                    if let Some(owner) = claimed.get(&rel) {
+                        return Err(format!(
+                            "path {rel:?} is already claimed by component {owner:?}"
+                        ));
+                    }
+                    if !mine.insert(rel.clone()) {
+                        return Err(format!("path {rel:?} is listed twice"));
+                    }
                 }
-                if !mine.insert(rel.clone()) {
-                    return Err(format!("path {rel:?} is listed twice"));
+                names.insert(c.name.clone());
+                for rel in mine {
+                    claimed.insert(rel, c.name.clone());
                 }
-            }
-            names.insert(c.name.clone());
-            for rel in mine {
-                claimed.insert(rel, c.name.clone());
-            }
-            Ok(())
-        });
-        let components: BTreeSet<String> = cfg.component.iter().map(|c| c.get_ref().name.clone()).collect();
+                Ok(())
+            },
+        );
+        let components: BTreeSet<String> = cfg
+            .component
+            .iter()
+            .map(|c| c.get_ref().name.clone())
+            .collect();
 
         let mut layers = BTreeSet::new();
         let mut layer_of: BTreeMap<String, String> = BTreeMap::new();
         let layer_id = |l: &LayerDecl| nonblank(&l.name).map(|n| format!("{LAYER_ID_PREFIX}{n}"));
-        cfg.layer = self.keep("layer", cfg.layer, &mut errors, &mut rejections, layer_id, |l| {
-            check_model_name(&l.name)?;
-            if layers.contains(&l.name) {
-                return Err(format!("duplicate name {:?}", l.name));
-            }
-            if l.components.is_empty() {
-                return Err("components must name at least one [[component]]".into());
-            }
-            let mut mine = BTreeSet::new();
-            for c in &l.components {
-                if !components.contains(c) {
-                    return Err(format!("component {c:?} is not a declared [[component]]"));
+        cfg.layer = self.keep(
+            "layer",
+            cfg.layer,
+            &mut errors,
+            &mut rejections,
+            layer_id,
+            |l| {
+                check_model_name(&l.name)?;
+                if layers.contains(&l.name) {
+                    return Err(format!("duplicate name {:?}", l.name));
                 }
-                if let Some(other) = layer_of.get(c) {
-                    return Err(format!("component {c:?} is already in layer {other:?}"));
+                if l.components.is_empty() {
+                    return Err("components must name at least one [[component]]".into());
                 }
-                if !mine.insert(c.clone()) {
-                    return Err(format!("component {c:?} is listed twice"));
+                let mut mine = BTreeSet::new();
+                for c in &l.components {
+                    if !components.contains(c) {
+                        return Err(format!("component {c:?} is not a declared [[component]]"));
+                    }
+                    if let Some(other) = layer_of.get(c) {
+                        return Err(format!("component {c:?} is already in layer {other:?}"));
+                    }
+                    if !mine.insert(c.clone()) {
+                        return Err(format!("component {c:?} is listed twice"));
+                    }
                 }
-            }
-            layers.insert(l.name.clone());
-            for c in mine {
-                layer_of.insert(c, l.name.clone());
-            }
-            Ok(())
-        });
+                layers.insert(l.name.clone());
+                for c in mine {
+                    layer_of.insert(c, l.name.clone());
+                }
+                Ok(())
+            },
+        );
 
         let mut ids = BTreeSet::new();
-        cfg.constraint = self.keep("constraint", cfg.constraint, &mut errors, &mut rejections, |c| nonblank(&c.id), |c| {
-            check_id(&c.id)?;
-            if let Some(p) = [COMPONENT_ID_PREFIX, LAYER_ID_PREFIX].iter().find(|p| c.id.starts_with(**p)) {
-                return Err(format!("id {:?} uses the reserved {p:?} prefix", c.id));
-            }
-            let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
-            match c.kind.as_str() {
-                "forbid_edge" if !(present(&c.from) && present(&c.to)) => {
-                    return Err("kind forbid_edge needs `from` and `to`".into());
+        cfg.constraint = self.keep(
+            "constraint",
+            cfg.constraint,
+            &mut errors,
+            &mut rejections,
+            |c| nonblank(&c.id),
+            |c| {
+                check_id(&c.id)?;
+                if let Some(p) = [COMPONENT_ID_PREFIX, LAYER_ID_PREFIX]
+                    .iter()
+                    .find(|p| c.id.starts_with(**p))
+                {
+                    return Err(format!("id {:?} uses the reserved {p:?} prefix", c.id));
                 }
-                "invariant" if !present(&c.text) => return Err("kind invariant needs `text`".into()),
-                "allow" => check_allow(c, &components)?,
-                k if MODEL_KINDS.contains(&k) => {
-                    return Err(format!("kind {k:?} is declared through [[{k}]], not [[constraint]]"));
+                let present =
+                    |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+                match c.kind.as_str() {
+                    "forbid_edge" if !(present(&c.from) && present(&c.to)) => {
+                        return Err("kind forbid_edge needs `from` and `to`".into());
+                    }
+                    "invariant" if !present(&c.text) => {
+                        return Err("kind invariant needs `text`".into());
+                    }
+                    "allow" => check_allow(c, &components)?,
+                    k if MODEL_KINDS.contains(&k) => {
+                        return Err(format!(
+                            "kind {k:?} is declared through [[{k}]], not [[constraint]]"
+                        ));
+                    }
+                    k if !CONSTRAINT_KINDS.contains(&k) => {
+                        return Err(format!(
+                            "kind {k:?} is not one of {}",
+                            CONSTRAINT_KINDS.join(" | ")
+                        ));
+                    }
+                    _ => {}
                 }
-                k if !CONSTRAINT_KINDS.contains(&k) => {
-                    return Err(format!("kind {k:?} is not one of {}", CONSTRAINT_KINDS.join(" | ")));
+                check_v2_fields(c, version)?;
+                if let Some(bad) = c.categories.iter().find(|n| category_id(n).is_none()) {
+                    return Err(format!("category {bad:?} is not an edge category name"));
                 }
-                _ => {}
-            }
-            check_v2_fields(c, version)?;
-            if let Some(bad) = c.categories.iter().find(|n| category_id(n).is_none()) {
-                return Err(format!("category {bad:?} is not an edge category name"));
-            }
-            unique(&mut ids, &c.id)
-        });
+                unique(&mut ids, &c.id)
+            },
+        );
 
         let mut ids = BTreeSet::new();
-        cfg.decision = self.keep("decision", cfg.decision, &mut errors, &mut rejections, |d| nonblank(&d.id), |d| {
-            check_id(&d.id)?;
-            let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
-            if !present(&d.title) && !present(&d.text) {
-                return Err("needs `title` or `text`".into());
-            }
-            unique(&mut ids, &d.id)
-        });
+        cfg.decision = self.keep(
+            "decision",
+            cfg.decision,
+            &mut errors,
+            &mut rejections,
+            |d| nonblank(&d.id),
+            |d| {
+                check_id(&d.id)?;
+                let present =
+                    |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+                if !present(&d.title) && !present(&d.text) {
+                    return Err("needs `title` or `text`".into());
+                }
+                unique(&mut ids, &d.id)
+            },
+        );
 
         let mut ids = BTreeSet::new();
-        cfg.note = self.keep("note", cfg.note, &mut errors, &mut rejections, |n| n.id.as_deref().and_then(nonblank), |n| {
-            if n.anchor.trim().is_empty() {
-                return Err("anchor must be a non-empty qname".into());
-            }
-            let chars = n.text.chars().count();
-            if n.text.trim().is_empty() || chars > MAX_NOTE_CHARS {
-                return Err(format!("text must be 1..={MAX_NOTE_CHARS} chars (got {chars})"));
-            }
-            match &n.id {
-                Some(id) if id.starts_with(NOTE_ID_PREFIX) => {
-                    Err(format!("id {id:?} uses the reserved {NOTE_ID_PREFIX:?} prefix"))
+        cfg.note = self.keep(
+            "note",
+            cfg.note,
+            &mut errors,
+            &mut rejections,
+            |n| n.id.as_deref().and_then(nonblank),
+            |n| {
+                if n.anchor.trim().is_empty() {
+                    return Err("anchor must be a non-empty qname".into());
                 }
-                Some(id) => {
-                    check_id(id)?;
-                    unique(&mut ids, id)
+                let chars = n.text.chars().count();
+                if n.text.trim().is_empty() || chars > MAX_NOTE_CHARS {
+                    return Err(format!(
+                        "text must be 1..={MAX_NOTE_CHARS} chars (got {chars})"
+                    ));
                 }
-                None => Ok(()),
-            }
-        });
+                match &n.id {
+                    Some(id) if id.starts_with(NOTE_ID_PREFIX) => Err(format!(
+                        "id {id:?} uses the reserved {NOTE_ID_PREFIX:?} prefix"
+                    )),
+                    Some(id) => {
+                        check_id(id)?;
+                        unique(&mut ids, id)
+                    }
+                    None => Ok(()),
+                }
+            },
+        );
 
         self.config = cfg;
         self.errors.extend(errors);
@@ -1402,7 +1571,9 @@ pub fn load(repo_root: &Path) -> Option<LoadedConfig> {
     };
     match String::from_utf8(bytes) {
         Ok(text) => Some(parse_str(&text)),
-        Err(_) => Some(failed("not valid UTF-8; the whole file is ignored".to_string())),
+        Err(_) => Some(failed(
+            "not valid UTF-8; the whole file is ignored".to_string(),
+        )),
     }
 }
 
@@ -1411,8 +1582,7 @@ pub fn parse_str(text: &str) -> LoadedConfig {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut line_starts = vec![0];
     line_starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
-    let mut loaded =
-        LoadedConfig {
+    let mut loaded = LoadedConfig {
         config: GliaConfig::default(),
         errors: Vec::new(),
         rejections: Vec::new(),
@@ -1436,8 +1606,7 @@ pub fn parse_str(text: &str) -> LoadedConfig {
 /// A file that could not be read as text: `message` is the errors line
 /// after its `.glia/overlay.toml: ` prefix.
 fn failed(message: String) -> LoadedConfig {
-    let mut loaded =
-        LoadedConfig {
+    let mut loaded = LoadedConfig {
         config: GliaConfig::default(),
         errors: Vec::new(),
         rejections: Vec::new(),
@@ -1454,7 +1623,10 @@ fn nonblank(s: &str) -> Option<String> {
 }
 
 fn category_id(name: &str) -> Option<EdgeCategoryId> {
-    edge_category::ALL.iter().find(|(_, n)| *n == name).map(|(id, _)| *id)
+    edge_category::ALL
+        .iter()
+        .find(|(_, n)| *n == name)
+        .map(|(id, _)| *id)
 }
 
 /// [`SUPPORTED_VERSIONS`] as prose: `1 and 2`.
@@ -1481,7 +1653,9 @@ pub(crate) const RULE_ONLY_INVARIANT: &str = "`rule` is an invariant field";
 pub(crate) fn check_rule_text(rule: &str) -> Result<(), String> {
     let n = rule.chars().count();
     if rule.trim().is_empty() || n > MAX_RULE_CHARS {
-        return Err(format!("`rule` must be 1..={MAX_RULE_CHARS} chars of Datalog text, not blank (got {n})"));
+        return Err(format!(
+            "`rule` must be 1..={MAX_RULE_CHARS} chars of Datalog text, not blank (got {n})"
+        ));
     }
     Ok(())
 }
@@ -1503,9 +1677,16 @@ pub(crate) fn check_min_tier_on(kind: &str, has_rule: bool) -> Result<(), String
     match kind {
         "forbid_edge" | "no_cycle" => Ok(()),
         "invariant" if has_rule => Ok(()),
-        "invariant" => Err("`min_tier` on an invariant needs `rule` (an unchecked statement has no violations)".into()),
-        "allow" => Err("`min_tier` is not taken by kind allow (a divergence's gate is the default)".into()),
-        k => Err(format!("`min_tier` is not taken by kind {k} (a model declaration has no violations of its own)")),
+        "invariant" => Err(
+            "`min_tier` on an invariant needs `rule` (an unchecked statement has no violations)"
+                .into(),
+        ),
+        "allow" => {
+            Err("`min_tier` is not taken by kind allow (a divergence's gate is the default)".into())
+        }
+        k => Err(format!(
+            "`min_tier` is not taken by kind {k} (a model declaration has no violations of its own)"
+        )),
     }
 }
 
@@ -1577,7 +1758,9 @@ fn version_line(text: &str) -> Option<u32> {
         if t.starts_with('[') {
             return None;
         }
-        if t.strip_prefix("version").is_some_and(|r| r.trim_start().starts_with('=')) {
+        if t.strip_prefix("version")
+            .is_some_and(|r| r.trim_start().starts_with('='))
+        {
             return u32::try_from(i + 1).ok();
         }
     }
@@ -1607,14 +1790,18 @@ fn check_entrypoint(q: &str) -> Result<(), String> {
 
 fn is_constant_key(k: &str) -> bool {
     let mut chars = k.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 fn check_id(id: &str) -> Result<(), String> {
     let n = id.chars().count();
     if n == 0 || n > MAX_ID_CHARS || id.chars().any(char::is_control) {
-        return Err(format!("id {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"));
+        return Err(format!(
+            "id {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"
+        ));
     }
     Ok(())
 }
@@ -1624,7 +1811,9 @@ fn check_id(id: &str) -> Result<(), String> {
 fn check_model_name(name: &str) -> Result<(), String> {
     let n = name.chars().count();
     if name.trim().is_empty() || n > MAX_MODEL_NAME_CHARS || name.chars().any(char::is_control) {
-        return Err(format!("name {name:?} must be 1..={MAX_MODEL_NAME_CHARS} chars with no control chars"));
+        return Err(format!(
+            "name {name:?} must be 1..={MAX_MODEL_NAME_CHARS} chars with no control chars"
+        ));
     }
     Ok(())
 }
@@ -1637,11 +1826,15 @@ fn check_allow(c: &ConstraintDecl, components: &BTreeSet<String>) -> Result<(), 
     };
     for end in [from, to] {
         if !components.contains(end) {
-            return Err(format!("kind allow names {end:?}, which is not a declared [[component]]"));
+            return Err(format!(
+                "kind allow names {end:?}, which is not a declared [[component]]"
+            ));
         }
     }
     if from == to {
-        return Err(format!("kind allow from {from:?} to itself: a component always uses itself"));
+        return Err(format!(
+            "kind allow from {from:?} to itself: a component always uses itself"
+        ));
     }
     if c.scope.is_some() {
         return Err("kind allow takes no `scope` (from / to are component names)".into());
@@ -1650,15 +1843,30 @@ fn check_allow(c: &ConstraintDecl, components: &BTreeSet<String>) -> Result<(), 
 }
 
 fn unique(seen: &mut BTreeSet<String>, id: &str) -> Result<(), String> {
-    if seen.insert(id.to_string()) { Ok(()) } else { Err(format!("duplicate id {id:?}")) }
+    if seen.insert(id.to_string()) {
+        Ok(())
+    } else {
+        Err(format!("duplicate id {id:?}"))
+    }
 }
 
 fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
-    if w.call.is_empty() || w.call.chars().any(|c| c.is_whitespace() || c == '(' || c == ')') {
-        return Err(format!("call {:?} must be a bare callee name (no whitespace or parens)", w.call));
+    if w.call.is_empty()
+        || w.call
+            .chars()
+            .any(|c| c.is_whitespace() || c == '(' || c == ')')
+    {
+        return Err(format!(
+            "call {:?} must be a bare callee name (no whitespace or parens)",
+            w.call
+        ));
     }
     let Some(kind) = w.wrapper_kind() else {
-        return Err(format!("kind {:?} is not one of {}", w.kind, WRAPPER_KINDS.join(" | ")));
+        return Err(format!(
+            "kind {:?} is not one of {}",
+            w.kind,
+            WRAPPER_KINDS.join(" | ")
+        ));
     };
     for (name, arg) in [
         ("method_arg", w.method_arg),
@@ -1680,10 +1888,16 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
     if let Some(m) = &w.method
         && !HTTP_METHODS.contains(&m.to_ascii_uppercase().as_str())
     {
-        return Err(format!("method {m:?} is not one of {}", HTTP_METHODS.join(" | ")));
+        return Err(format!(
+            "method {m:?} is not one of {}",
+            HTTP_METHODS.join(" | ")
+        ));
     }
     if kind != WrapperKind::DataEntity && (w.flavor.is_some() || w.name_arg.is_some()) {
-        return Err(format!("kind {} takes no flavor / name_arg (those are kind data_entity's)", w.kind));
+        return Err(format!(
+            "kind {} takes no flavor / name_arg (those are kind data_entity's)",
+            w.kind
+        ));
     }
     match kind {
         WrapperKind::Http => {
@@ -1708,7 +1922,10 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
                 return Err("receiver = true requires kind http".into());
             }
             if w.method.is_some() || w.method_arg.is_some() || w.path_arg.is_some() {
-                return Err(format!("kind {} takes no method / method_arg / path_arg", w.kind));
+                return Err(format!(
+                    "kind {} takes no method / method_arg / path_arg",
+                    w.kind
+                ));
             }
             if w.topic_arg.is_none() {
                 return Err(format!("kind {} needs topic_arg", w.kind));
@@ -1724,7 +1941,10 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
                 || w.topic_arg.is_some()
                 || w.broker.is_some()
             {
-                return Err("kind data_entity takes no method / method_arg / path_arg / topic_arg / broker".into());
+                return Err(
+                    "kind data_entity takes no method / method_arg / path_arg / topic_arg / broker"
+                        .into(),
+                );
             }
             if w.name_arg.is_none() {
                 return Err("kind data_entity needs name_arg".into());
@@ -1812,7 +2032,9 @@ patterns = ["{U}.{N}{l?}"]
         for _ in 2..line {
             s.push_str("# pad\n");
         }
-        s.push_str(&format!("[[edge]]\nfrom = \"a::f\"\nto = \"b::g\"\ncategory = \"{category}\"\n"));
+        s.push_str(&format!(
+            "[[edge]]\nfrom = \"a::f\"\nto = \"b::g\"\ncategory = \"{category}\"\n"
+        ));
         s
     }
 
@@ -1824,7 +2046,10 @@ patterns = ["{U}.{N}{l?}"]
             assert_eq!(n, 1, "section {name}");
         }
         assert_eq!(l.config.edge[0].get_ref().origin, Origin::Human);
-        assert_eq!(l.config.edge[0].get_ref().category_id(), Some(edge_category::CALLS));
+        assert_eq!(
+            l.config.edge[0].get_ref().category_id(),
+            Some(edge_category::CALLS)
+        );
         assert_eq!(l.config.wrapper[0].get_ref().origin, Origin::Llm);
         assert!(!l.is_overlay_empty());
     }
@@ -1833,12 +2058,20 @@ patterns = ["{U}.{N}{l?}"]
     #[test]
     fn docs_example_parses_cleanly() {
         let doc = include_str!("../../docs/overlay.md");
-        let body = doc.split("```toml\n").nth(1).and_then(|s| s.split("```").next()).expect("toml block");
+        let body = doc
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .expect("toml block");
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
         assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1, 0]);
-        assert_eq!(l.config.walk.tests, ["playwright/", "qa/**/*.py"], "CJ.4: the example declares tests");
+        assert_eq!(
+            l.config.walk.tests,
+            ["playwright/", "qa/**/*.py"],
+            "CJ.4: the example declares tests"
+        );
     }
 
     /// EB.4: SECTIONS names 13 sections, `ids` last.
@@ -1865,7 +2098,10 @@ patterns = ["{U}.{N}{l?}"]
             assert_eq!(ids.patterns.as_ref().map(Vec::len), Some(2));
             assert_eq!(ids.markdown_patterns(), ["TODO.md"]);
             let t = ids.tracker[0].get_ref();
-            assert_eq!((t.id.as_str(), t.files.as_str(), t.list.as_deref()), ("id", "files_touched", Some("packets")));
+            assert_eq!(
+                (t.id.as_str(), t.files.as_str(), t.list.as_deref()),
+                ("id", "files_touched", Some("packets"))
+            );
             assert_eq!(l.section_counts()[12], ("ids", 5));
         }
         // No [ids]: patterns unset (the engine's defaults), nothing counted.
@@ -1892,15 +2128,45 @@ patterns = ["{U}.{N}{l?}"]
         // patterns: `{Q}` (line 4) and the 17th valid one (line 21); words: 2; markdown: 1; trackers: 2.
         assert_eq!(l.errors.len(), 7, "{:?}", l.errors);
         assert_eq!(l.ids_rejected(), 7);
-        assert!(l.errors[0].starts_with(".glia/overlay.toml:4: [ids] patterns \"{Q}\": unknown token"), "{}", l.errors[0]);
-        assert!(l.errors[1].starts_with(".glia/overlay.toml:21: [ids] patterns \"P16-{N}\": more than 16"), "{}", l.errors[1]);
-        assert!(l.errors[2].starts_with(".glia/overlay.toml:23: [ids] local_words \"Bad\""), "{}", l.errors[2]);
-        assert!(l.errors[4].starts_with(".glia/overlay.toml:24: [ids] markdown"), "{}", l.errors[4]);
-        assert!(l.errors[5].starts_with(".glia/overlay.toml:25: [[ids.tracker]] path"), "{}", l.errors[5]);
-        assert!(l.errors[6].starts_with(".glia/overlay.toml:28: [[ids.tracker]] files"), "{}", l.errors[6]);
+        assert!(
+            l.errors[0].starts_with(".glia/overlay.toml:4: [ids] patterns \"{Q}\": unknown token"),
+            "{}",
+            l.errors[0]
+        );
+        assert!(
+            l.errors[1]
+                .starts_with(".glia/overlay.toml:21: [ids] patterns \"P16-{N}\": more than 16"),
+            "{}",
+            l.errors[1]
+        );
+        assert!(
+            l.errors[2].starts_with(".glia/overlay.toml:23: [ids] local_words \"Bad\""),
+            "{}",
+            l.errors[2]
+        );
+        assert!(
+            l.errors[4].starts_with(".glia/overlay.toml:24: [ids] markdown"),
+            "{}",
+            l.errors[4]
+        );
+        assert!(
+            l.errors[5].starts_with(".glia/overlay.toml:25: [[ids.tracker]] path"),
+            "{}",
+            l.errors[5]
+        );
+        assert!(
+            l.errors[6].starts_with(".glia/overlay.toml:28: [[ids.tracker]] files"),
+            "{}",
+            l.errors[6]
+        );
         let ids = &l.config.ids;
         assert_eq!(ids.patterns.as_ref().map(Vec::len), Some(16));
-        assert_eq!(ids.local_words.as_ref().map(|w| w.iter().map(|x| x.get_ref().clone()).collect::<Vec<_>>()), Some(vec!["ok".to_string()]));
+        assert_eq!(
+            ids.local_words
+                .as_ref()
+                .map(|w| w.iter().map(|x| x.get_ref().clone()).collect::<Vec<_>>()),
+            Some(vec!["ok".to_string()])
+        );
         assert!(ids.markdown.is_empty());
         assert_eq!(ids.tracker.len(), 1);
         // The rest of the file still applies.
@@ -1911,8 +2177,16 @@ patterns = ["{U}.{N}{l?}"]
     #[test]
     fn docs_ids_examples_parse_cleanly() {
         let doc = include_str!("../../docs/overlay.md");
-        let section = doc.split("\n## `[ids]`").nth(1).and_then(|s| s.split("\n## ").next()).expect("an [ids] section");
-        let blocks: Vec<&str> = section.split("```toml\n").skip(1).filter_map(|b| b.split("```").next()).collect();
+        let section = doc
+            .split("\n## `[ids]`")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .expect("an [ids] section");
+        let blocks: Vec<&str> = section
+            .split("```toml\n")
+            .skip(1)
+            .filter_map(|b| b.split("```").next())
+            .collect();
         assert_eq!(blocks.len(), 3, "a ticket repo, spec-kit, a JSON tracker");
         for b in blocks {
             let l = parse_str(b);
@@ -1934,15 +2208,25 @@ patterns = ["{U}.{N}{l?}"]
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         assert_eq!(l.config.constraint.len(), 2);
         let f = l.config.constraint[0].get_ref();
-        assert!(f.transitive && f.via == ["services/api/public"] && f.min_tier.as_deref() == Some("fact"));
+        assert!(
+            f.transitive
+                && f.via == ["services/api/public"]
+                && f.min_tier.as_deref() == Some("fact")
+        );
         assert!(l.config.constraint[1].get_ref().rule.is_some());
     }
 
     #[test]
     fn typo_in_stanza_is_an_error_not_silence() {
-        let l = parse_str("version = 1\n[[edge]]\nform = \"a::f\"\nto = \"b::g\"\ncategory = \"CALLS\"\n");
+        let l = parse_str(
+            "version = 1\n[[edge]]\nform = \"a::f\"\nto = \"b::g\"\ncategory = \"CALLS\"\n",
+        );
         assert_eq!(l.errors.len(), 1, "{:?}", l.errors);
-        assert!(l.errors[0].contains(":3:") && l.errors[0].contains("form"), "{}", l.errors[0]);
+        assert!(
+            l.errors[0].contains(":3:") && l.errors[0].contains("form"),
+            "{}",
+            l.errors[0]
+        );
         assert!(l.config.edge.is_empty());
     }
 
@@ -1953,8 +2237,16 @@ patterns = ["{U}.{N}{l?}"]
             text.push_str("[[edge]]\nfrom = \"a::f\"\nto = \"b::g\"\ncategory = \"HTTP_CALLS\"\n");
             let l = parse_str(&text);
             assert_eq!(l.errors.len(), 1, "{cat}: {:?}", l.errors);
-            assert!(l.errors[0].starts_with(".glia/overlay.toml:4: ") && l.errors[0].contains(cat), "{}", l.errors[0]);
-            assert_eq!(l.config.edge.len(), 1, "{cat}: only the valid stanza survives");
+            assert!(
+                l.errors[0].starts_with(".glia/overlay.toml:4: ") && l.errors[0].contains(cat),
+                "{}",
+                l.errors[0]
+            );
+            assert_eq!(
+                l.config.edge.len(),
+                1,
+                "{cat}: only the valid stanza survives"
+            );
             assert_eq!(l.config.edge[0].get_ref().category, "HTTP_CALLS");
         }
     }
@@ -1962,12 +2254,24 @@ patterns = ["{U}.{N}{l?}"]
     #[test]
     fn wrong_version_defaults_everything() {
         for (text, line, needle) in [
-            (FULL.replacen("version = 1", "version = 3", 1), ":1: ", "this glia reads versions 1 and 2"),
-            (FULL.replacen("version = 1", "", 1), "toml: ", "`version` is missing (1, or 2 to use rule / transitive / via / min_tier)"),
+            (
+                FULL.replacen("version = 1", "version = 3", 1),
+                ":1: ",
+                "this glia reads versions 1 and 2",
+            ),
+            (
+                FULL.replacen("version = 1", "", 1),
+                "toml: ",
+                "`version` is missing (1, or 2 to use rule / transitive / via / min_tier)",
+            ),
         ] {
             let l = parse_str(&text);
             assert_eq!(l.errors.len(), 1, "{:?}", l.errors);
-            assert!(l.errors[0].contains(line) && l.errors[0].contains(needle), "{}", l.errors[0]);
+            assert!(
+                l.errors[0].contains(line) && l.errors[0].contains(needle),
+                "{}",
+                l.errors[0]
+            );
             assert!(l.section_counts().iter().all(|(_, n)| *n == 0));
         }
         // FULL (a version-1 file) also loads as version 2: version 2 only adds fields.
@@ -2007,19 +2311,30 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
         assert_eq!(f.rule, None);
         let i = l.config.constraint[1].get_ref();
         assert_eq!(i.kind, "invariant");
-        assert_eq!(i.rule.as_deref(), Some("violation(x) :- node(x, \"ROUTE\")."));
+        assert_eq!(
+            i.rule.as_deref(),
+            Some("violation(x) :- node(x, \"ROUTE\").")
+        );
         assert!(!i.transitive && i.via.is_empty() && i.min_tier.is_none());
         // A version-1 stanza reads with every v2 field unset.
         let l = parse_str("version = 1\n[[constraint]]\nid = \"c\"\nkind = \"no_cycle\"\n");
         let c = l.config.constraint[0].get_ref();
-        assert!(l.errors.is_empty() && c.rule.is_none() && !c.transitive && c.via.is_empty() && c.min_tier.is_none());
+        assert!(
+            l.errors.is_empty()
+                && c.rule.is_none()
+                && !c.transitive
+                && c.via.is_empty()
+                && c.min_tier.is_none()
+        );
     }
 
     /// Q7: a version-1 file that sets a version-2 field loses that stanza and
     /// nothing else - the config is NOT defaulted.
     #[test]
     fn version_one_drops_only_the_rule_stanzas() {
-        let text = format!("version = 1\n[walk]\nskip = [\"gen/\"]\n\n{V2_RULES}\n[[constraint]]\nid = \"kept\"\nkind = \"no_cycle\"\n");
+        let text = format!(
+            "version = 1\n[walk]\nskip = [\"gen/\"]\n\n{V2_RULES}\n[[constraint]]\nid = \"kept\"\nkind = \"no_cycle\"\n"
+        );
         let l = parse_str(&text);
         assert_eq!(l.errors.len(), 2, "{:#?}", l.errors);
         assert_eq!(
@@ -2031,11 +2346,22 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
             ".glia/overlay.toml:14: [[constraint]] `rule` need `version = 2` (this file says version = 1) (stanza dropped)"
         );
         assert_eq!(l.config.walk.skip, ["gen/"]);
-        let ids: Vec<&str> = l.config.constraint.iter().map(|c| c.get_ref().id.as_str()).collect();
+        let ids: Vec<&str> = l
+            .config
+            .constraint
+            .iter()
+            .map(|c| c.get_ref().id.as_str())
+            .collect();
         assert_eq!(ids, ["kept"]);
         // `transitive = false` and `via = []` set nothing: a version-1 file keeps them.
-        let l = parse_str("version = 1\n[[constraint]]\nid = \"c\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = false\nvia = []\n");
-        assert!(l.errors.is_empty() && l.config.constraint.len() == 1, "{:?}", l.errors);
+        let l = parse_str(
+            "version = 1\n[[constraint]]\nid = \"c\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = false\nvia = []\n",
+        );
+        assert!(
+            l.errors.is_empty() && l.config.constraint.len() == 1,
+            "{:?}",
+            l.errors
+        );
     }
 
     /// DB.1: each version-2 shape rule drops its stanza with its exact message.
@@ -2087,30 +2413,67 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
         ];
         let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\"api\"]\n";
         for (body, msg) in &bad {
-            let l = parse_str(&format!("version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"));
-            assert_eq!(l.errors, [format!(".glia/overlay.toml:8: [[constraint]] {msg} (stanza dropped)")], "{body}");
+            let l = parse_str(&format!(
+                "version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"
+            ));
+            assert_eq!(
+                l.errors,
+                [format!(
+                    ".glia/overlay.toml:8: [[constraint]] {msg} (stanza dropped)"
+                )],
+                "{body}"
+            );
             assert!(l.config.constraint.is_empty(), "{body}");
-            assert_eq!(l.config.component.len(), 2, "{body}: only the stanza is dropped");
+            assert_eq!(
+                l.config.component.len(),
+                2,
+                "{body}: only the stanza is dropped"
+            );
         }
         // Each field where it belongs loads clean.
         let ok = [
             format!("{forbid}\ntransitive = true"),
-            format!("{forbid}\ntransitive = true\nvia = [\"api/public\", \"api\"]\nmin_tier = \"derived\""),
+            format!(
+                "{forbid}\ntransitive = true\nvia = [\"api/public\", \"api\"]\nmin_tier = \"derived\""
+            ),
             "kind = \"no_cycle\"\nmin_tier = \"fact\"".to_string(),
-            format!("kind = \"invariant\"\ntext = \"t\"\nrule = \"{}\"\nmin_tier = \"fact\"", "x".repeat(MAX_RULE_CHARS)),
+            format!(
+                "kind = \"invariant\"\ntext = \"t\"\nrule = \"{}\"\nmin_tier = \"fact\"",
+                "x".repeat(MAX_RULE_CHARS)
+            ),
         ];
         for body in &ok {
-            let l = parse_str(&format!("version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"));
-            assert!(l.errors.is_empty() && l.config.constraint.len() == 1, "{body}: {:?}", l.errors);
+            let l = parse_str(&format!(
+                "version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"
+            ));
+            assert!(
+                l.errors.is_empty() && l.config.constraint.len() == 1,
+                "{body}: {:?}",
+                l.errors
+            );
         }
         // An unknown key still fails the whole file: deny_unknown_fields stays.
-        let l = parse_str("version = 2\n[[constraint]]\nid = \"c\"\nkind = \"no_cycle\"\nmin_teir = \"fact\"\n");
-        assert!(l.errors.len() == 1 && l.errors[0].contains("min_teir") && l.config.constraint.is_empty(), "{:?}", l.errors);
+        let l = parse_str(
+            "version = 2\n[[constraint]]\nid = \"c\"\nkind = \"no_cycle\"\nmin_teir = \"fact\"\n",
+        );
+        assert!(
+            l.errors.len() == 1
+                && l.errors[0].contains("min_teir")
+                && l.config.constraint.is_empty(),
+            "{:?}",
+            l.errors
+        );
     }
 
     #[test]
     fn malformed_toml_never_panics() {
-        for text in ["version = 1\n[[edge]\n", "[[edge]]\nfrom = 3\n", "\u{feff}version = \"1\"", "", "\n\n"] {
+        for text in [
+            "version = 1\n[[edge]\n",
+            "[[edge]]\nfrom = 3\n",
+            "\u{feff}version = \"1\"",
+            "",
+            "\n\n",
+        ] {
             let l = parse_str(text);
             assert_eq!(l.errors.len(), 1, "{text:?}: {:?}", l.errors);
             assert!(l.section_counts().iter().all(|(_, n)| *n == 0));
@@ -2125,7 +2488,13 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
         assert_eq!(l.line_of(span.clone()), 7);
         assert_eq!(l.decl_of(span), ".glia/overlay.toml:7");
         let q = parse_str("version = 1\n[entrypoints]\nqnames = [\n  \"a::b\",\n  \"c::*\",\n]\n");
-        let lines: Vec<u32> = q.config.entrypoints.qnames.iter().map(|s| q.line_of(s.span())).collect();
+        let lines: Vec<u32> = q
+            .config
+            .entrypoints
+            .qnames
+            .iter()
+            .map(|s| q.line_of(s.span()))
+            .collect();
         assert_eq!(lines, [4, 5]);
     }
 
@@ -2148,7 +2517,11 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
         let d = scratch_repo("present");
         std::fs::write(d.join(OVERLAY_FILE), FULL).expect("write");
         let l = load(&d).expect("present");
-        assert!(l.errors.is_empty() && l.config.edge.len() == 1, "{:?}", l.errors);
+        assert!(
+            l.errors.is_empty() && l.config.edge.len() == 1,
+            "{:?}",
+            l.errors
+        );
         std::fs::write(d.join(OVERLAY_FILE), [0xff_u8, 0xfe, 0x00]).expect("write");
         assert_eq!(load(&d).expect("present").errors.len(), 1);
         let _ = std::fs::remove_dir_all(&d);
@@ -2164,23 +2537,68 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
             "call = \"Table\"\nkind = \"data_entity\"\nflavor = \"sql\"\nname_arg = 0\norigin = \"human\"",
         ];
         let bad = [
-            ("call = \"api\"\nkind = \"http\"\nreceiver = true\nmethod = \"GET\"", "receiver"),
-            ("call = \"request\"\nkind = \"http\"\nmethod_arg = 0", "path_arg"),
-            ("call = \"request\"\nkind = \"http\"\nmethod = \"GET\"\nmethod_arg = 0\npath_arg = 1", "exactly one"),
-            ("call = \"request\"\nkind = \"http\"\nmethod = \"FETCH\"\npath_arg = 1", "FETCH"),
+            (
+                "call = \"api\"\nkind = \"http\"\nreceiver = true\nmethod = \"GET\"",
+                "receiver",
+            ),
+            (
+                "call = \"request\"\nkind = \"http\"\nmethod_arg = 0",
+                "path_arg",
+            ),
+            (
+                "call = \"request\"\nkind = \"http\"\nmethod = \"GET\"\nmethod_arg = 0\npath_arg = 1",
+                "exactly one",
+            ),
+            (
+                "call = \"request\"\nkind = \"http\"\nmethod = \"FETCH\"\npath_arg = 1",
+                "FETCH",
+            ),
             ("call = \"publish\"\nkind = \"queue_consumer\"", "topic_arg"),
-            ("call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 9", "<= 8"),
+            (
+                "call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 9",
+                "<= 8",
+            ),
             ("call = \"publish\"\nkind = \"grpc\"\ntopic_arg = 0", "grpc"),
-            ("call = \"publish\"\nkind = \"queue_producer\"\nreceiver = true\ntopic_arg = 0", "receiver"),
-            ("call = \"req uest\"\nkind = \"http\"\nreceiver = true", "bare callee"),
-            ("call = \"api\"\nkind = \"http\"\nreceiver = true\nlanguages = [\"TypeScript\"]", "language"),
-            ("call = \"NewCollection\"\nkind = \"data_entity\"", "needs name_arg"),
-            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 9", "<= 8"),
-            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nflavor = \"kv\"", "kv"),
-            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\ntopic_arg = 0", "data_entity takes no"),
-            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nreceiver = true", "receiver"),
-            ("call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 0\nname_arg = 1", "flavor / name_arg"),
-            ("call = \"request\"\nkind = \"http\"\nmethod = \"GET\"\npath_arg = 0\nflavor = \"sql\"", "flavor / name_arg"),
+            (
+                "call = \"publish\"\nkind = \"queue_producer\"\nreceiver = true\ntopic_arg = 0",
+                "receiver",
+            ),
+            (
+                "call = \"req uest\"\nkind = \"http\"\nreceiver = true",
+                "bare callee",
+            ),
+            (
+                "call = \"api\"\nkind = \"http\"\nreceiver = true\nlanguages = [\"TypeScript\"]",
+                "language",
+            ),
+            (
+                "call = \"NewCollection\"\nkind = \"data_entity\"",
+                "needs name_arg",
+            ),
+            (
+                "call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 9",
+                "<= 8",
+            ),
+            (
+                "call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nflavor = \"kv\"",
+                "kv",
+            ),
+            (
+                "call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\ntopic_arg = 0",
+                "data_entity takes no",
+            ),
+            (
+                "call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nreceiver = true",
+                "receiver",
+            ),
+            (
+                "call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 0\nname_arg = 1",
+                "flavor / name_arg",
+            ),
+            (
+                "call = \"request\"\nkind = \"http\"\nmethod = \"GET\"\npath_arg = 0\nflavor = \"sql\"",
+                "flavor / name_arg",
+            ),
         ];
         for body in ok {
             let l = parse_str(&format!("version = 1\n[[wrapper]]\n{body}\n"));
@@ -2190,13 +2608,21 @@ rule = "violation(x) :- node(x, \"ROUTE\")."
             let l = parse_str(&format!("version = 1\n[[wrapper]]\n{body}\n"));
             assert!(l.config.wrapper.is_empty(), "{body}");
             assert_eq!(l.errors.len(), 1, "{body}: {:?}", l.errors);
-            assert!(l.errors[0].contains(":2: [[wrapper]]") && l.errors[0].contains(needle), "{}", l.errors[0]);
+            assert!(
+                l.errors[0].contains(":2: [[wrapper]]") && l.errors[0].contains(needle),
+                "{}",
+                l.errors[0]
+            );
         }
         let r = parse_str(&format!("version = 1\n[[wrapper]]\n{}\n", ok[0]));
         let w = r.config.wrapper[0].get_ref();
-        assert_eq!((w.wrapper_kind(), w.path_arg_index()), (Some(WrapperKind::Http), Some(0)));
+        assert_eq!(
+            (w.wrapper_kind(), w.path_arg_index()),
+            (Some(WrapperKind::Http), Some(0))
+        );
         // data_entity: the flavor defaults to nosql; a declared one is kept.
-        for (body, flavor, origin) in [(ok[3], "nosql", Origin::Llm), (ok[4], "sql", Origin::Human)] {
+        for (body, flavor, origin) in [(ok[3], "nosql", Origin::Llm), (ok[4], "sql", Origin::Human)]
+        {
             let r = parse_str(&format!("version = 1\n[[wrapper]]\n{body}\n"));
             let w = r.config.wrapper[0].get_ref();
             assert_eq!(
@@ -2243,7 +2669,11 @@ anchor = "a::b"
 text = "kept"
 "#;
         let l = parse_str(text);
-        let lines: Vec<&str> = l.errors.iter().map(|e| e.split(": ").next().unwrap_or("")).collect();
+        let lines: Vec<&str> = l
+            .errors
+            .iter()
+            .map(|e| e.split(": ").next().unwrap_or(""))
+            .collect();
         assert_eq!(
             lines,
             [
@@ -2336,13 +2766,34 @@ to = "ghost"
         ]) {
             assert!(e.contains(needle) && e.ends_with("(stanza dropped)"), "{e}");
         }
-        let names: Vec<&str> = l.config.component.iter().map(|c| c.get_ref().name.as_str()).collect();
+        let names: Vec<&str> = l
+            .config
+            .component
+            .iter()
+            .map(|c| c.get_ref().name.as_str())
+            .collect();
         assert_eq!(names, ["web", "api"]);
-        assert_eq!(l.config.component[1].get_ref().rel_paths(), ["services/api"]);
-        let layers: Vec<&str> = l.config.layer.iter().map(|x| x.get_ref().name.as_str()).collect();
+        assert_eq!(
+            l.config.component[1].get_ref().rel_paths(),
+            ["services/api"]
+        );
+        let layers: Vec<&str> = l
+            .config
+            .layer
+            .iter()
+            .map(|x| x.get_ref().name.as_str())
+            .collect();
         assert_eq!(layers, ["ui"]);
-        assert!(!l.config.layer[0].get_ref().strict, "strict defaults to false");
-        let ids: Vec<&str> = l.config.constraint.iter().map(|c| c.get_ref().id.as_str()).collect();
+        assert!(
+            !l.config.layer[0].get_ref().strict,
+            "strict defaults to false"
+        );
+        let ids: Vec<&str> = l
+            .config
+            .constraint
+            .iter()
+            .map(|c| c.get_ref().id.as_str())
+            .collect();
         assert_eq!(ids, ["web-uses-api"]);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
         assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1, 0]);
@@ -2350,34 +2801,78 @@ to = "ghost"
         // One stanza at a time: each is dropped with one line at its header.
         let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\".\"]\n";
         let bad = [
-            ("[[constraint]]\nid = \"c\"\nkind = \"component\"", "declared through [[component]]"),
-            ("[[constraint]]\nid = \"c\"\nkind = \"layer\"", "declared through [[layer]]"),
-            ("[[constraint]]\nid = \"component:web\"\nkind = \"no_cycle\"", "reserved"),
-            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"", "needs `from` and `to`"),
-            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"web\"", "to itself"),
-            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\nscope = \"web\"", "no `scope`"),
-            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\ncategories = [\"calls\"]", "calls"),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"component\"",
+                "declared through [[component]]",
+            ),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"layer\"",
+                "declared through [[layer]]",
+            ),
+            (
+                "[[constraint]]\nid = \"component:web\"\nkind = \"no_cycle\"",
+                "reserved",
+            ),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"",
+                "needs `from` and `to`",
+            ),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"web\"",
+                "to itself",
+            ),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\nscope = \"web\"",
+                "no `scope`",
+            ),
+            (
+                "[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\ncategories = [\"calls\"]",
+                "calls",
+            ),
             ("[[component]]\nname = \"x\"\npaths = []", "at least one"),
             ("[[component]]\nname = \"x\"\npaths = [\" \"]", "empty"),
-            ("[[component]]\nname = \"x\"\npaths = [\"a\", \"./a/\"]", "listed twice"),
-            ("[[component]]\nname = \"x\"\npaths = [\"./\"]", "already claimed by component \"api\""),
+            (
+                "[[component]]\nname = \"x\"\npaths = [\"a\", \"./a/\"]",
+                "listed twice",
+            ),
+            (
+                "[[component]]\nname = \"x\"\npaths = [\"./\"]",
+                "already claimed by component \"api\"",
+            ),
             ("[[component]]\nname = \"\"\npaths = [\"x\"]", "name"),
             ("[[layer]]\nname = \"l\"\ncomponents = []", "at least one"),
-            ("[[layer]]\nname = \"l\"\ncomponents = [\"web\", \"web\"]", "listed twice"),
+            (
+                "[[layer]]\nname = \"l\"\ncomponents = [\"web\", \"web\"]",
+                "listed twice",
+            ),
         ];
         for (body, needle) in bad {
             let l = parse_str(&format!("version = 1\n{model}{body}\n"));
             assert_eq!(l.errors.len(), 1, "{body}: {:?}", l.errors);
-            assert!(l.errors[0].contains(":8: [[") && l.errors[0].contains(needle), "{body}: {}", l.errors[0]);
+            assert!(
+                l.errors[0].contains(":8: [[") && l.errors[0].contains(needle),
+                "{body}: {}",
+                l.errors[0]
+            );
             let n = l.config.constraint.len() + l.config.layer.len() + l.config.component.len();
             assert_eq!(n, 2, "{body}: only the two model components survive");
         }
         let long = "x".repeat(MAX_MODEL_NAME_CHARS + 1);
-        let l = parse_str(&format!("version = 1\n[[component]]\nname = \"{long}\"\npaths = [\"x\"]\n"));
-        assert!(l.errors.len() == 1 && l.config.component.is_empty(), "{:?}", l.errors);
+        let l = parse_str(&format!(
+            "version = 1\n[[component]]\nname = \"{long}\"\npaths = [\"x\"]\n"
+        ));
+        assert!(
+            l.errors.len() == 1 && l.config.component.is_empty(),
+            "{:?}",
+            l.errors
+        );
         // A missing `paths` is a schema error: the whole file is ignored.
         let l = parse_str("version = 1\n[[component]]\nname = \"x\"\n");
-        assert!(l.errors.len() == 1 && l.errors[0].contains("paths"), "{:?}", l.errors);
+        assert!(
+            l.errors.len() == 1 && l.errors[0].contains("paths"),
+            "{:?}",
+            l.errors
+        );
     }
 
     #[test]
@@ -2406,18 +2901,38 @@ prefix = "orders"
         assert_eq!(l.config.project.len(), 1);
         assert_eq!(l.config.project[0].get_ref().rel_path(), "tools/migrator");
         assert_eq!(l.config.entrypoints.qnames.len(), 1);
-        assert_eq!(l.config.constants.keys().collect::<Vec<_>>(), ["api.base_URL"]);
+        assert_eq!(
+            l.config.constants.keys().collect::<Vec<_>>(),
+            ["api.base_URL"]
+        );
         assert!(l.config.route_prefix.is_empty());
-        assert!(!l.is_overlay_empty(), "the surviving constant is overlay content");
+        assert!(
+            !l.is_overlay_empty(),
+            "the surviving constant is overlay content"
+        );
     }
 
     #[test]
     fn overlay_emptiness_and_origin() {
-        let l = parse_str("version = 1\n[walk]\nskip = [\"x\"]\n[[decision]]\nid = \"d\"\ntext = \"t\"\n");
-        assert!(l.errors.is_empty() && l.is_overlay_empty(), "{:?}", l.errors);
-        assert_eq!((Origin::Llm.provenance(), Origin::Llm.confidence()), ("overlay:llm", Confidence::Weak));
-        assert_eq!((Origin::Human.provenance(), Origin::Human.confidence()), ("overlay:human", Confidence::Medium));
-        let bad = parse_str("version = 1\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"CALLS\"\norigin = \"robot\"\n");
+        let l = parse_str(
+            "version = 1\n[walk]\nskip = [\"x\"]\n[[decision]]\nid = \"d\"\ntext = \"t\"\n",
+        );
+        assert!(
+            l.errors.is_empty() && l.is_overlay_empty(),
+            "{:?}",
+            l.errors
+        );
+        assert_eq!(
+            (Origin::Llm.provenance(), Origin::Llm.confidence()),
+            ("overlay:llm", Confidence::Weak)
+        );
+        assert_eq!(
+            (Origin::Human.provenance(), Origin::Human.confidence()),
+            ("overlay:human", Confidence::Medium)
+        );
+        let bad = parse_str(
+            "version = 1\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"CALLS\"\norigin = \"robot\"\n",
+        );
         assert_eq!(bad.errors.len(), 1);
         assert!(bad.config.edge.is_empty());
     }
@@ -2433,32 +2948,61 @@ prefix = "orders"
         assert!(l.errors[0].contains("[walk] tests \"\""), "{:?}", l.errors);
         assert!(l.config.walk.skip.is_empty());
         assert!(l.is_overlay_empty(), "user config, not overlay content");
-        let walk = l.section_counts().iter().find(|(s, _)| *s == "walk").map(|(_, n)| *n);
+        let walk = l
+            .section_counts()
+            .iter()
+            .find(|(s, _)| *s == "walk")
+            .map(|(_, n)| *n);
         assert_eq!(walk, Some(2));
 
         let m = l.config.walk.tests_matcher().expect("two patterns compile");
         assert_eq!(m.patterns(), 2);
-        for hit in ["playwright/checkout.ts", "e2e/playwright/a.ts", "qa/smoke/seed.py", "./playwright/x.ts", "playwright\\win.ts"] {
+        for hit in [
+            "playwright/checkout.ts",
+            "e2e/playwright/a.ts",
+            "qa/smoke/seed.py",
+            "./playwright/x.ts",
+            "playwright\\win.ts",
+        ] {
             assert!(m.matches(hit), "{hit} is declared test code");
         }
-        for miss in ["qa/smoke/seed.ts", "src/cart.ts", "playwright.config.ts", "src/qa/seed.py", ""] {
+        for miss in [
+            "qa/smoke/seed.ts",
+            "src/cart.ts",
+            "playwright.config.ts",
+            "src/qa/seed.py",
+            "",
+        ] {
             assert!(!m.matches(miss), "{miss:?} is not declared test code");
         }
 
         // Root anchoring and a re-include against the earlier tests patterns.
-        let l = parse_str("version = 1\n[walk]\nskip = [\"gen/\"]\ntests = [\"/acceptance/\", \"!/acceptance/support/\"]\n");
+        let l = parse_str(
+            "version = 1\n[walk]\nskip = [\"gen/\"]\ntests = [\"/acceptance/\", \"!/acceptance/support/\"]\n",
+        );
         assert!(l.errors.is_empty(), "{:?}", l.errors);
-        let walk = l.section_counts().iter().find(|(s, _)| *s == "walk").map(|(_, n)| *n);
+        let walk = l
+            .section_counts()
+            .iter()
+            .find(|(s, _)| *s == "walk")
+            .map(|(_, n)| *n);
         assert_eq!(walk, Some(3), "skip plus tests");
         let m = l.config.walk.tests_matcher().expect("compiles");
         assert_eq!(m.patterns(), 2, "one ignore, one whitelist");
         assert!(m.matches("acceptance/cart.feature.ts"));
-        assert!(!m.matches("web/acceptance/cart.ts"), "a leading / anchors at the root");
+        assert!(
+            !m.matches("web/acceptance/cart.ts"),
+            "a leading / anchors at the root"
+        );
         assert!(!m.matches("acceptance/support/world.ts"), "re-included");
 
         // A config with only skip has no tests matcher.
         let l = parse_str("version = 1\n[walk]\nskip = [\"legacy\"]\n");
-        assert!(l.errors.is_empty() && l.config.walk.tests.is_empty(), "{:?}", l.errors);
+        assert!(
+            l.errors.is_empty() && l.config.walk.tests.is_empty(),
+            "{:?}",
+            l.errors
+        );
         assert!(l.config.walk.tests_matcher().is_none());
     }
 
@@ -2562,7 +3106,10 @@ transitive = true
         for (e, r) in l.errors.iter().zip(&l.rejections) {
             let section = r.section.unwrap_or_default();
             let line = r.line.unwrap_or_default();
-            assert_eq!(e, &format!("{OVERLAY_FILE}:{line}: [[{section}]] {}", r.message));
+            assert_eq!(
+                e,
+                &format!("{OVERLAY_FILE}:{line}: [[{section}]] {}", r.message)
+            );
         }
         // A clean file has none; an entry drop (not a stanza) has none.
         assert!(parse_str(FULL).rejections.is_empty());
@@ -2570,16 +3117,31 @@ transitive = true
         assert_eq!(walk.errors.len(), 2, "{:?}", walk.errors);
         assert!(walk.rejections.is_empty(), "{:?}", walk.rejections);
         // A blank id or name, and a section with no id, give no id.
-        let blank = parse_str("version = 1\n[[component]]\nname = \" \"\npaths = [\"a\"]\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"DEFINES\"\n[[note]]\nanchor = \"a\"\ntext = \"\"\n");
-        let ids: Vec<(Option<&str>, Option<&str>)> =
-            blank.rejections.iter().map(|r| (r.section, r.id.as_deref())).collect();
-        assert_eq!(ids, [(Some("edge"), None), (Some("component"), None), (Some("note"), None)]);
+        let blank = parse_str(
+            "version = 1\n[[component]]\nname = \" \"\npaths = [\"a\"]\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"DEFINES\"\n[[note]]\nanchor = \"a\"\ntext = \"\"\n",
+        );
+        let ids: Vec<(Option<&str>, Option<&str>)> = blank
+            .rejections
+            .iter()
+            .map(|r| (r.section, r.id.as_deref()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (Some("edge"), None),
+                (Some("component"), None),
+                (Some("note"), None)
+            ]
+        );
     }
 
     #[test]
     fn whole_file_rejections() {
         let unknown = parse_str(&handlers_stanza("version = 2\n", "categorys = [\"CALLS\"]"));
-        let version3 = parse_str(&handlers_stanza("version = 3\n", "categories = [\"CALLS\"]"));
+        let version3 = parse_str(&handlers_stanza(
+            "version = 3\n",
+            "categories = [\"CALLS\"]",
+        ));
         let missing = parse_str(&handlers_stanza("", "categories = [\"CALLS\"]"));
         let syntax = parse_str(
             "version = 1\n\n[[constraint]]\nid = \"handlers-no-repository\"\nkind = \"forbid_edge\"\nfrom = \"backend/internal/handlers\nto = \"backend/internal/repository\"\n",
@@ -2600,28 +3162,51 @@ transitive = true
                 None,
                 "`version` is missing (1, or 2 to use rule / transitive / via / min_tier); the whole file is ignored",
             ),
-            (&syntax, Some(6), "invalid basic string; the whole file is ignored"),
+            (
+                &syntax,
+                Some(6),
+                "invalid basic string; the whole file is ignored",
+            ),
         ] {
             assert_eq!(l.rejections.len(), 1, "{:?}", l.rejections);
             let r = &l.rejections[0];
             assert_eq!(row(r), (None, line, None, message));
             assert!(r.whole_file());
             assert_eq!(l.errors, [l.at(line, message)]);
-            assert!(l.config.constraint.is_empty(), "the whole file is defaulted");
+            assert!(
+                l.config.constraint.is_empty(),
+                "the whole file is defaulted"
+            );
         }
 
         // Unreadable bytes and an unreadable file (a directory in its place).
         let d = scratch_repo("rejected_bytes");
         std::fs::write(d.join(OVERLAY_FILE), [0xff_u8, 0xfe, 0x00]).expect("write");
         let l = load(&d).expect("present");
-        assert_eq!(row(&l.rejections[0]), (None, None, None, "not valid UTF-8; the whole file is ignored"));
-        assert_eq!(l.errors, [".glia/overlay.toml: not valid UTF-8; the whole file is ignored"]);
+        assert_eq!(
+            row(&l.rejections[0]),
+            (
+                None,
+                None,
+                None,
+                "not valid UTF-8; the whole file is ignored"
+            )
+        );
+        assert_eq!(
+            l.errors,
+            [".glia/overlay.toml: not valid UTF-8; the whole file is ignored"]
+        );
         std::fs::remove_file(d.join(OVERLAY_FILE)).expect("rm");
         std::fs::create_dir_all(d.join(OVERLAY_FILE)).expect("mkdir");
         let l = load(&d).expect("present");
         assert_eq!(l.rejections.len(), 1, "{:?}", l.rejections);
-        assert!(l.rejections[0].whole_file() && l.rejections[0].message.starts_with("cannot read: "));
-        assert_eq!(l.errors, [format!("{OVERLAY_FILE}: {}", l.rejections[0].message)]);
+        assert!(
+            l.rejections[0].whole_file() && l.rejections[0].message.starts_with("cannot read: ")
+        );
+        assert_eq!(
+            l.errors,
+            [format!("{OVERLAY_FILE}: {}", l.rejections[0].message)]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2630,16 +3215,24 @@ transitive = true
         let fix_of = |text: &str, section: &str| -> String {
             let l = parse_str(text);
             let r = l.rejections.iter().find(|r| r.section == Some(section));
-            r.unwrap_or_else(|| panic!("no {section} rejection in {:?}", l.rejections)).fix()
+            r.unwrap_or_else(|| panic!("no {section} rejection in {:?}", l.rejections))
+                .fix()
         };
         let v1 = "version = 1\n";
         // (a) a version-2 key in a version-1 file.
         assert_eq!(
-            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = true\n"), "constraint"),
+            fix_of(
+                &format!(
+                    "{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = true\n"
+                ),
+                "constraint"
+            ),
             "set `version = 2` at the top of .glia/overlay.toml (version 2 loads every version-1 stanza as before), or remove the version-2 keys from this stanza"
         );
         // (b) an exact path two components claim.
-        let claim = format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"b\"\npaths = [\"x\"]\n");
+        let claim = format!(
+            "{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"b\"\npaths = [\"x\"]\n"
+        );
         assert_eq!(
             fix_of(&claim, "component"),
             "give the path to one component: remove it from this stanza or from the component that claims it first (an exact-equal path is claimed once; nested paths are legal)"
@@ -2652,30 +3245,58 @@ transitive = true
         assert_eq!(allow.rejections[2].fix(), undeclared);
         // (d) a duplicate id, and a duplicate name.
         assert_eq!(
-            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n"), "constraint"),
+            fix_of(
+                &format!(
+                    "{v1}[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n"
+                ),
+                "constraint"
+            ),
             "give each [[constraint]] its own id: the first stanza with it is kept, this one is not"
         );
         assert_eq!(
-            fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"a\"\npaths = [\"y\"]\n"), "component"),
+            fix_of(
+                &format!(
+                    "{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"a\"\npaths = [\"y\"]\n"
+                ),
+                "component"
+            ),
             "give each [[component]] its own name: the first stanza with it is kept, this one is not"
         );
         // (e) one entry listed twice.
-        assert_eq!(fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\", \"x\"]\n"), "component"), "list it once");
+        assert_eq!(
+            fix_of(
+                &format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\", \"x\"]\n"),
+                "component"
+            ),
+            "list it once"
+        );
         // (f) a component in two layers.
         assert_eq!(
-            fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[layer]]\nname = \"l1\"\ncomponents = [\"a\"]\n[[layer]]\nname = \"l2\"\ncomponents = [\"a\"]\n"), "layer"),
+            fix_of(
+                &format!(
+                    "{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[layer]]\nname = \"l1\"\ncomponents = [\"a\"]\n[[layer]]\nname = \"l2\"\ncomponents = [\"a\"]\n"
+                ),
+                "layer"
+            ),
             "put each component in one [[layer]]"
         );
         // Any other stanza drop.
         assert_eq!(
-            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\n"), "constraint"),
+            fix_of(
+                &format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\n"),
+                "constraint"
+            ),
             "correct the stanza as the message says (docs/overlay.md \"Validation\" lists what the loader drops)"
         );
 
         // The whole file.
         let whole = |text: &str| -> String {
             let l = parse_str(text);
-            assert!(l.rejections.len() == 1 && l.rejections[0].whole_file(), "{:?}", l.rejections);
+            assert!(
+                l.rejections.len() == 1 && l.rejections[0].whole_file(),
+                "{:?}",
+                l.rejections
+            );
             l.rejections[0].fix()
         };
         assert_eq!(
@@ -2687,15 +3308,29 @@ transitive = true
             "add `version = 1` as the first line (`version = 2` to use rule / transitive / via / min_tier)"
         );
         assert_eq!(
-            whole(&handlers_stanza("version = 3\n", "categories = [\"CALLS\"]")),
+            whole(&handlers_stanza(
+                "version = 3\n",
+                "categories = [\"CALLS\"]"
+            )),
             "set `version = 2` (this glia reads versions 1 and 2)"
         );
         assert_eq!(
             whole("version = 1\n[[constraint]]\nid = \"t\nkind = \"no_cycle\"\n"),
             "correct the TOML at that line: a syntax error, a wrong type or a missing required field ignores the whole file (docs/overlay.md \"Validation\")"
         );
-        let file = |message: &str| Rejection { section: None, line: None, id: None, message: message.to_string() };
-        assert_eq!(file("not valid UTF-8; the whole file is ignored").fix(), "save .glia/overlay.toml as UTF-8");
-        assert_eq!(file("cannot read: Is a directory (os error 21)").fix(), "make .glia/overlay.toml readable");
+        let file = |message: &str| Rejection {
+            section: None,
+            line: None,
+            id: None,
+            message: message.to_string(),
+        };
+        assert_eq!(
+            file("not valid UTF-8; the whole file is ignored").fix(),
+            "save .glia/overlay.toml as UTF-8"
+        );
+        assert_eq!(
+            file("cannot read: Is a directory (os error 21)").fix(),
+            "make .glia/overlay.toml readable"
+        );
     }
 }

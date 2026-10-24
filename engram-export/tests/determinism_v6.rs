@@ -105,7 +105,10 @@ impl Scratch {
             s.write(copy, "util.go", UTIL_GO);
         }
         s.write("fx-gamma", ".git/config", GIT_CONFIG);
-        let keys: Vec<String> = COPIES.iter().map(|c| repo_identity(&s.repo(c)).key).collect();
+        let keys: Vec<String> = COPIES
+            .iter()
+            .map(|c| repo_identity(&s.repo(c)).key)
+            .collect();
         assert_eq!(
             keys,
             ["dir:fx-alpha", "dir:fx-beta", "git:elsewhere/fx-alpha"],
@@ -119,7 +122,9 @@ impl Scratch {
     }
 
     fn out(&self, copy: &str, name: &str) -> PathBuf {
-        self.0.join("out").join(format!("{copy}-{name}.engram-gmap"))
+        self.0
+            .join("out")
+            .join(format!("{copy}-{name}.engram-gmap"))
     }
 
     fn write(&self, copy: &str, rel: &str, body: &str) {
@@ -139,7 +144,12 @@ impl Scratch {
     /// `helper` renamed to `double` with its caller.
     fn edit_all(&self) {
         for copy in COPIES {
-            self.edit(copy, "billing/wallet.py", "        return 1\n", "        return 1\n\n    def settle(self):\n        return 0\n");
+            self.edit(
+                copy,
+                "billing/wallet.py",
+                "        return 1\n",
+                "        return 1\n\n    def settle(self):\n        return 0\n",
+            );
             self.edit(copy, "util.go", "func helper(", "func double(");
             self.edit(copy, "calc.go", "helper(hi)", "double(hi)");
         }
@@ -150,14 +160,24 @@ impl Scratch {
     /// Asserts exit 0 and returns stderr.
     fn export(&self, copy: &str, name: &str, since: Option<&str>) -> String {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia-export-engram"));
-        cmd.arg(self.repo(copy)).arg("--out").arg(self.out(copy, name)).arg("--no-persist");
+        cmd.arg(self.repo(copy))
+            .arg("--out")
+            .arg(self.out(copy, name))
+            .arg("--no-persist");
         if let Some(prior) = since {
             cmd.arg("--since").arg(self.out(copy, prior));
         }
         let out = cmd.env_remove("GLIA_NO_PERSIST").output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "export {copy}-{name} failed:\n{stderr}");
-        assert!(!self.repo(copy).join(".glia").exists(), "--no-persist wrote into {copy}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "export {copy}-{name} failed:\n{stderr}"
+        );
+        assert!(
+            !self.repo(copy).join(".glia").exists(),
+            "--no-persist wrote into {copy}"
+        );
         stderr
     }
 }
@@ -174,7 +194,10 @@ fn read(path: &Path) -> Vec<u8> {
 
 /// The one `[engram-export] v6 order:` line.
 fn order_line(stderr: &str) -> String {
-    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[engram-export] v6 order:")).collect();
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[engram-export] v6 order:"))
+        .collect();
     assert_eq!(lines.len(), 1, "want one v6 order line in:\n{stderr}");
     lines[0].to_string()
 }
@@ -183,14 +206,22 @@ fn order_line(stderr: &str) -> String {
 fn assert_all_equal(what: &str, per_copy: Vec<(&str, Vec<u8>)>) {
     let (first, want) = &per_copy[0];
     for (copy, got) in &per_copy[1..] {
-        assert!(got == want, "{what}: {copy} differs from {first} ({} vs {} bytes)", got.len(), want.len());
+        assert!(
+            got == want,
+            "{what}: {copy} differs from {first} ({} vs {} bytes)",
+            got.len(),
+            want.len()
+        );
     }
 }
 
 #[test]
 fn two_clones_export_identical_bytes() {
     let s = Scratch::new("bytes");
-    let errs: Vec<(&str, String)> = COPIES.iter().map(|c| (*c, s.export(c, "a", None))).collect();
+    let errs: Vec<(&str, String)> = COPIES
+        .iter()
+        .map(|c| (*c, s.export(c, "a", None)))
+        .collect();
     // (label, the artefact's path for an export at a path).
     type Artefact = (&'static str, fn(&Path) -> PathBuf);
     let artefacts: [Artefact; 4] = [
@@ -200,9 +231,18 @@ fn two_clones_export_identical_bytes() {
         ("hints.jsonl", hints_side_path),
     ];
     for (label, path_of) in artefacts {
-        assert_all_equal(label, COPIES.iter().map(|c| (*c, read(&path_of(&s.out(c, "a"))))).collect());
+        assert_all_equal(
+            label,
+            COPIES
+                .iter()
+                .map(|c| (*c, read(&path_of(&s.out(c, "a")))))
+                .collect(),
+        );
     }
-    let lines: Vec<(&str, Vec<u8>)> = errs.iter().map(|(c, e)| (*c, order_line(e).into_bytes())).collect();
+    let lines: Vec<(&str, Vec<u8>)> = errs
+        .iter()
+        .map(|(c, e)| (*c, order_line(e).into_bytes()))
+        .collect();
     assert_all_equal("v6 order line", lines);
     // The fixture exercises the tie it guards: `lo` and `hi` share a row.
     let line = order_line(&errs[0].1);
@@ -229,11 +269,29 @@ fn two_clones_write_identical_diffs() {
     }
     // The edit is a real change: one method added, one function renamed.
     assert!(!since[0].1.contains(" unchanged "), "{}", since[0].1);
-    assert_all_equal("v6 since line", since.iter().map(|(c, l)| (*c, l.clone().into_bytes())).collect());
-    assert_all_equal("gmap after the edit", COPIES.iter().map(|c| (*c, read(&s.out(c, "b")))).collect());
-    assert_all_equal("diff", COPIES.iter().map(|c| (*c, read(&diff_path(&s.out(c, "b"))))).collect());
+    assert_all_equal(
+        "v6 since line",
+        since
+            .iter()
+            .map(|(c, l)| (*c, l.clone().into_bytes()))
+            .collect(),
+    );
+    assert_all_equal(
+        "gmap after the edit",
+        COPIES.iter().map(|c| (*c, read(&s.out(c, "b")))).collect(),
+    );
+    assert_all_equal(
+        "diff",
+        COPIES
+            .iter()
+            .map(|c| (*c, read(&diff_path(&s.out(c, "b")))))
+            .collect(),
+    );
     assert_all_equal(
         "hints after the edit",
-        COPIES.iter().map(|c| (*c, read(&hints_side_path(&s.out(c, "b"))))).collect(),
+        COPIES
+            .iter()
+            .map(|c| (*c, read(&hints_side_path(&s.out(c, "b")))))
+            .collect(),
     );
 }

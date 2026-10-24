@@ -47,7 +47,10 @@ fn merge_gmaps(dirs: Vec<String>, out: Option<String>) -> PyResult<PyGraph> {
 fn merge_gmap_dirs(dirs: &[String], out: Option<&str>) -> Result<GenerateResult, String> {
     let members: Vec<MergeMember> = dirs
         .iter()
-        .map(|dir| MergeMember::Gmap { name: member_name(Path::new(dir)), dir: PathBuf::from(dir) })
+        .map(|dir| MergeMember::Gmap {
+            name: member_name(Path::new(dir)),
+            dir: PathBuf::from(dir),
+        })
         .collect();
     let merged = merge_layouts(&members)?;
     if let Some(dir) = out {
@@ -76,7 +79,13 @@ fn member_name(path: &Path) -> String {
         .unwrap_or_default();
     let plain: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     plain.trim_start_matches('.').to_string()
 }
@@ -93,9 +102,7 @@ mod tests {
     use super::*;
 
     use glia_engine::generate_many;
-    use glia_engine::persist::{
-        LoadOutcome, default_layout_dir, load_or_rebuild, persist_result,
-    };
+    use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild, persist_result};
 
     /// A scratch dir removed on drop.
     struct Scratch(PathBuf);
@@ -172,7 +179,10 @@ mod tests {
         let mut labels: Vec<&str> = r.repo_labels.values().map(String::as_str).collect();
         labels.sort_unstable();
         assert_eq!(labels, ["api", "web"]);
-        assert!(!r.merged.cross_edges.is_empty(), "the union resolves the HTTP link");
+        assert!(
+            !r.merged.cross_edges.is_empty(),
+            "the union resolves the HTTP link"
+        );
 
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(out.join(glia_store::MANIFEST_NAME)).expect("manifest written"),
@@ -182,7 +192,12 @@ mod tests {
             .as_array()
             .expect("members recorded")
             .iter()
-            .map(|m| (m["name"].as_str().unwrap_or(""), m["source"].as_str().unwrap_or("")))
+            .map(|m| {
+                (
+                    m["name"].as_str().unwrap_or(""),
+                    m["source"].as_str().unwrap_or(""),
+                )
+            })
             .collect();
         assert_eq!(names, [("api", "gmap"), ("web", "gmap")]);
         assert_eq!(manifest["repos"].as_array().map(Vec::len), Some(2));

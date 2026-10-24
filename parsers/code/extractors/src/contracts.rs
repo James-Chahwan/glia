@@ -972,7 +972,9 @@ fn scan_asyncapi_v3(lines: &[&str]) -> Vec<ChannelOp> {
             continue;
         }
         let Some(p) = cur.as_mut() else { continue };
-        let Some((key, raw)) = split_key(line) else { continue };
+        let Some((key, raw)) = split_key(line) else {
+            continue;
+        };
 
         if let Some(c) = channel_block {
             // Only the `$ref` that is a direct child of `channel:`.
@@ -1033,9 +1035,18 @@ pub(crate) fn push_op(
         repo,
         confidence: Confidence::Strong,
         cells: vec![
-            Cell { kind: cell_type::CODE, payload: CellPayload::Text(code) },
-            Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
-            Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) },
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text(code),
+            },
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(pos),
+            },
+            Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(origin),
+            },
         ],
     });
     out.nav
@@ -1205,7 +1216,8 @@ fn route_item(raw: &str) -> Option<(String, String)> {
         return None;
     }
     let path = path.split('?').next().unwrap_or(path);
-    path.starts_with('/').then(|| (method.to_ascii_uppercase(), path.to_string()))
+    path.starts_with('/')
+        .then(|| (method.to_ascii_uppercase(), path.to_string()))
 }
 
 /// Line scan of a feature list's top-level `backend_routes:` block. `None`
@@ -1231,12 +1243,22 @@ fn scan_feature_yaml(source: &str) -> Option<Vec<RouteDecl>> {
         if decls.len() >= MAX_OPS || decls.iter().any(|d| d.method == method && d.path == path) {
             return;
         }
-        decls.push(RouteDecl { method, path, group: group.map(str::to_string), line: line as u32 });
+        decls.push(RouteDecl {
+            method,
+            path,
+            group: group.map(str::to_string),
+            line: line as u32,
+        });
     };
     let flow = |v: &str| -> Vec<String> {
         v.strip_prefix('[')
             .and_then(|v| v.strip_suffix(']'))
-            .map(|inner| inner.split(',').map(|i| unquote(i.trim()).to_string()).collect())
+            .map(|inner| {
+                inner
+                    .split(',')
+                    .map(|i| unquote(i.trim()).to_string())
+                    .collect()
+            })
             .unwrap_or_default()
     };
     for item in flow(value_of(lines[start])) {
@@ -1309,7 +1331,9 @@ fn emit_feature_yaml(
             json_str(&d.path),
             json_str(&d.path),
         );
-        push_op(out, &qname, &name, None, path, d.line, origin, module_id, repo);
+        push_op(
+            out, &qname, &name, None, path, d.line, origin, module_id, repo,
+        );
     }
 }
 
@@ -1346,7 +1370,9 @@ fn emit_openapi(
             operation_id_field(op.operation_id.as_deref())
         );
         let oid = op.operation_id.as_deref();
-        push_op(out, &qname, &name, oid, path, op.line, origin, module_id, repo);
+        push_op(
+            out, &qname, &name, oid, path, op.line, origin, module_id, repo,
+        );
         if let Some(cx) = cx.as_mut() {
             cx.begin_op();
             let secs = openapi_sections(cx, &op);
@@ -1381,7 +1407,9 @@ fn emit_asyncapi(
             operation_id_field(op.operation_id.as_deref())
         );
         let oid = op.operation_id.as_deref();
-        push_op(out, &qname, &name, oid, path, op.line, origin, module_id, repo);
+        push_op(
+            out, &qname, &name, oid, path, op.line, origin, module_id, repo,
+        );
         if let Some(cx) = cx.as_mut() {
             cx.begin_op();
             let secs = asyncapi_sections(cx, &op);
@@ -1499,9 +1527,7 @@ fn located<'a, T>(
             Some((json_key_at(source, from, source.len(), k), 0, k.as_str(), t))
         })
         .collect();
-    v.sort_by(|a, b| {
-        (a.0.unwrap_or(usize::MAX), a.2).cmp(&(b.0.unwrap_or(usize::MAX), b.2))
-    });
+    v.sort_by(|a, b| (a.0.unwrap_or(usize::MAX), a.2).cmp(&(b.0.unwrap_or(usize::MAX), b.2)));
     for i in 0..v.len() {
         v[i].1 = v.get(i + 1).and_then(|n| n.0).unwrap_or(source.len());
     }
@@ -1620,7 +1646,10 @@ fn json_asyncapi_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<Chan
             else {
                 continue;
             };
-            let channel = match channels.and_then(|c| c.get(&chan_id)).and_then(|c| c.get("address")) {
+            let channel = match channels
+                .and_then(|c| c.get(&chan_id))
+                .and_then(|c| c.get("address"))
+            {
                 Some(Value::String(a)) if !a.is_empty() => a.clone(),
                 Some(Value::String(_) | Value::Null) => continue, // dynamic channel
                 _ => chan_id,
@@ -1704,9 +1733,12 @@ fn json_pact_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<PactOp> 
         if !path.starts_with('/') || !METHODS.iter().any(|m| m.eq_ignore_ascii_case(&method)) {
             continue;
         }
-        let at = serde_json::to_string(raw)
-            .ok()
-            .and_then(|lit| source.get(cursor..)?.find(&lit).map(|i| (cursor + i, lit.len())));
+        let at = serde_json::to_string(raw).ok().and_then(|lit| {
+            source
+                .get(cursor..)?
+                .find(&lit)
+                .map(|i| (cursor + i, lit.len()))
+        });
         if let Some((i, len)) = at {
             cursor = i + len;
         }
@@ -1720,7 +1752,10 @@ fn json_pact_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<PactOp> 
             method,
             path: path.to_string(),
             raw_path: raw.to_string(),
-            description: it.get("description").and_then(Value::as_str).map(str::to_string),
+            description: it
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             line: lines.line(at.map(|(i, _)| i)),
             index,
         });
@@ -1751,7 +1786,8 @@ pub fn extract_json_contract(
     let Some(kind) = sniff_json_contract(source) else {
         return out;
     };
-    let Ok(Value::Object(doc)) = serde_json::from_str::<Value>(source.trim_start_matches('\u{feff}'))
+    let Ok(Value::Object(doc)) =
+        serde_json::from_str::<Value>(source.trim_start_matches('\u{feff}'))
     else {
         return out;
     };
@@ -1809,11 +1845,16 @@ pub fn extract_json_contract(
                     json_str(&op.raw_path),
                 );
                 let desc = op.description.as_deref();
-                push_op(&mut out, &qname, &name, desc, path, op.line, origin, module_id, repo);
+                push_op(
+                    &mut out, &qname, &name, desc, path, op.line, origin, module_id, repo,
+                );
                 if let Some(cx) = cx.as_mut() {
                     cx.begin_op();
                     let root = cx.root;
-                    let it = root.get("interactions").map_or(&[][..], YNode::items).get(op.index);
+                    let it = root
+                        .get("interactions")
+                        .map_or(&[][..], YNode::items)
+                        .get(op.index);
                     let secs = it.map(|it| pact_sections(cx, it)).unwrap_or_default();
                     attach_fields(&mut out, "pact", &secs, cx.truncated);
                 }
@@ -1854,7 +1895,10 @@ impl YNode {
     }
 
     fn get(&self, key: &str) -> Option<&YNode> {
-        self.entries().iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.entries()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
     }
 
     fn entries(&self) -> &[(String, YNode)] {
@@ -1986,7 +2030,10 @@ fn yaml_document(source: &str) -> YNode {
     let lines = source
         .lines()
         .filter(|l| !is_skippable(l))
-        .map(|l| YLine { ind: indent_of(l), text: l.trim() })
+        .map(|l| YLine {
+            ind: indent_of(l),
+            text: l.trim(),
+        })
         .filter(|l| {
             // Document markers and directives carry no structure.
             !(l.ind == 0
@@ -2088,7 +2135,10 @@ impl<'a> YamlScan<'a> {
                 // the line, so the column is exact.
                 let col = ind + (l.text.len() - rest.len());
                 if let Some(slot) = self.lines.get_mut(self.pos) {
-                    *slot = YLine { ind: col, text: rest };
+                    *slot = YLine {
+                        ind: col,
+                        text: rest,
+                    };
                 }
                 items.push(self.block(ind as isize, nest + 1));
             } else {
@@ -2118,9 +2168,9 @@ impl<'a> YamlScan<'a> {
             let mut text = raw.to_string();
             let mut joined = 0;
             while flow_depth(&text) > 0 && joined < YAML_MAX_FLOW_LINES {
-                let next = self.peek().filter(|n| {
-                    n.ind > ind || (n.ind == ind && n.text.starts_with([']', '}']))
-                });
+                let next = self
+                    .peek()
+                    .filter(|n| n.ind > ind || (n.ind == ind && n.text.starts_with([']', '}'])));
                 let Some(n) = next else { break };
                 text.push(' ');
                 text.push_str(n.text);
@@ -2198,7 +2248,8 @@ fn plain_scalar(t: &str) -> YNode {
         ".inf" | "-.inf" | "+.inf" | ".nan" | ".NaN" => "number",
         _ if is_yaml_int(t) => "integer",
         _ if t.bytes().any(|c| c.is_ascii_digit())
-            && t.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
+            && t.bytes()
+                .all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
             && t.parse::<f64>().is_ok() =>
         {
             "number"
@@ -2292,7 +2343,11 @@ fn flow_value(s: &str, i: &mut usize, nest: usize) -> Option<YNode> {
             return None; // no progress: a stray closer of the other kind
         }
     }
-    Some(if open == b'[' { YNode::List(list) } else { YNode::Map(map) })
+    Some(if open == b'[' {
+        YNode::List(list)
+    } else {
+        YNode::Map(map)
+    })
 }
 
 /// A flow scalar at `*i`, quoted or plain. A plain one ends at `,` `]` `}`,
@@ -2309,7 +2364,8 @@ fn flow_scalar(s: &str, i: &mut usize, key: bool) -> Option<YNode> {
         }
         if key
             && c == b':'
-            && b.get(*i + 1).is_none_or(|n| n.is_ascii_whitespace() || matches!(n, b',' | b']' | b'}'))
+            && b.get(*i + 1)
+                .is_none_or(|n| n.is_ascii_whitespace() || matches!(n, b',' | b']' | b'}'))
         {
             break;
         }
@@ -2510,7 +2566,14 @@ impl<'a> FieldCx<'a> {
 
     /// One named schema (a property, an array's items, or the body root when
     /// `name` is empty) and, when it is an object, its properties beneath it.
-    fn member(&mut self, schema: &'a YNode, mut name: String, required: bool, depth: usize, out: &mut Vec<Field>) {
+    fn member(
+        &mut self,
+        schema: &'a YNode,
+        mut name: String,
+        required: bool,
+        depth: usize,
+        out: &mut Vec<Field>,
+    ) {
         if !self.spend() {
             return;
         }
@@ -2518,7 +2581,11 @@ impl<'a> FieldCx<'a> {
         let mut s = match self.deref(schema, &mut via) {
             Ok(s) => s,
             Err(r) => {
-                let label = if name.is_empty() { "$ref".to_string() } else { name };
+                let label = if name.is_empty() {
+                    "$ref".to_string()
+                } else {
+                    name
+                };
                 self.push(out, label, r.to_string(), required);
                 return;
             }
@@ -2541,7 +2608,11 @@ impl<'a> FieldCx<'a> {
         }
         let object = is_object(s);
         if !(name.is_empty() && object) {
-            let label = if name.is_empty() { "$".to_string() } else { name.clone() };
+            let label = if name.is_empty() {
+                "$".to_string()
+            } else {
+                name.clone()
+            };
             self.push(out, label, type_name(s, 0), required);
         }
         if !object || depth >= FIELD_MAX_DEPTH || via.iter().any(|r| self.stack.contains(r)) {
@@ -2622,7 +2693,13 @@ impl<'a> FieldCx<'a> {
     /// `values` are the examples seen for one name (several when it sits in an
     /// array of objects): the first decides the type, and objects contribute
     /// the union of their keys in first-seen order.
-    fn example_member(&mut self, mut values: Vec<&'a YNode>, mut name: String, depth: usize, out: &mut Vec<Field>) {
+    fn example_member(
+        &mut self,
+        mut values: Vec<&'a YNode>,
+        mut name: String,
+        depth: usize,
+        out: &mut Vec<Field>,
+    ) {
         if !self.spend() {
             return;
         }
@@ -2642,13 +2719,20 @@ impl<'a> FieldCx<'a> {
             YNode::Scalar(_, t) => (*t, false),
         };
         if !(name.is_empty() && object) {
-            let label = if name.is_empty() { "$".to_string() } else { name.clone() };
+            let label = if name.is_empty() {
+                "$".to_string()
+            } else {
+                name.clone()
+            };
             self.push(out, label, ty.to_string(), false);
         }
         if !object || depth >= FIELD_MAX_DEPTH {
             return;
         }
-        let maps: Vec<&'a YNode> = values.into_iter().filter(|v| matches!(v, YNode::Map(_))).collect();
+        let maps: Vec<&'a YNode> = values
+            .into_iter()
+            .filter(|v| matches!(v, YNode::Map(_)))
+            .collect();
         let mut keys: Vec<&'a str> = Vec::new();
         let mut seen: std::collections::HashSet<&'a str> = std::collections::HashSet::new();
         for m in &maps {
@@ -2673,7 +2757,11 @@ impl<'a> FieldCx<'a> {
         let fields = match body {
             None => return,
             Some(Body::External(r)) => {
-                vec![Field { name: "$ref".to_string(), ty: r.to_string(), required: false }]
+                vec![Field {
+                    name: "$ref".to_string(),
+                    ty: r.to_string(),
+                    required: false,
+                }]
             }
             Some(Body::Schema(s)) => self.body(s),
         };
@@ -2708,7 +2796,11 @@ impl<'a> FieldCx<'a> {
 
 /// `prefix.name`, or `name` at the body root.
 fn join_field(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") }
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
 }
 
 fn is_array(s: &YNode) -> bool {
@@ -2753,7 +2845,11 @@ fn type_name(s: &YNode, hops: usize) -> String {
     }
     let mut t = match s.get("type") {
         Some(YNode::Scalar(t, _)) if !t.is_empty() => t.clone(),
-        Some(YNode::List(ts)) => ts.iter().filter_map(YNode::as_str).collect::<Vec<_>>().join("|"),
+        Some(YNode::List(ts)) => ts
+            .iter()
+            .filter_map(YNode::as_str)
+            .collect::<Vec<_>>()
+            .join("|"),
         _ if is_object(s) => "object".to_string(),
         _ if s.get("items").is_some() => "array".to_string(),
         _ => "any".to_string(),
@@ -2870,7 +2966,9 @@ fn openapi_sections<'a>(cx: &mut FieldCx<'a>, op: &Op) -> Sections {
 fn asyncapi_sections<'a>(cx: &mut FieldCx<'a>, op: &ChannelOp) -> Sections {
     let mut secs = Sections::new();
     let root = cx.root;
-    let v3 = root.str_at("asyncapi").is_some_and(|v| v.split('.').next() == Some("3"));
+    let v3 = root
+        .str_at("asyncapi")
+        .is_some_and(|v| v.split('.').next() == Some("3"));
     let mut messages: Vec<(String, Result<&'a YNode, &'a str>)> = Vec::new();
     if v3 {
         let found = op
@@ -2905,7 +3003,12 @@ fn asyncapi_sections<'a>(cx: &mut FieldCx<'a>, op: &ChannelOp) -> Sections {
         };
         match cx.deref(message, &mut Vec::new()) {
             Ok(m) if matches!(m.get("oneOf"), Some(YNode::List(_))) => {
-                for (i, x) in m.get("oneOf").map_or(&[][..], YNode::items).iter().enumerate() {
+                for (i, x) in m
+                    .get("oneOf")
+                    .map_or(&[][..], YNode::items)
+                    .iter()
+                    .enumerate()
+                {
                     let resolved = cx.deref(x, &mut Vec::new());
                     let name = x
                         .str_at("$ref")
@@ -2920,7 +3023,11 @@ fn asyncapi_sections<'a>(cx: &mut FieldCx<'a>, op: &ChannelOp) -> Sections {
     }
     let single = messages.len() == 1;
     for (name, m) in messages {
-        let section = if single { "payload".to_string() } else { format!("payload:{name}") };
+        let section = if single {
+            "payload".to_string()
+        } else {
+            format!("payload:{name}")
+        };
         let body = match m {
             Ok(m) => m.get("payload").map(Body::Schema),
             Err(r) => Some(Body::External(r)),
@@ -2936,7 +3043,10 @@ fn asyncapi_sections<'a>(cx: &mut FieldCx<'a>, op: &ChannelOp) -> Sections {
 fn pact_body(v: &YNode) -> Option<&YNode> {
     let wrapper = v.get("content").is_some()
         && v.entries().iter().all(|(k, _)| {
-            matches!(k.as_str(), "content" | "contentType" | "contentTypeHint" | "encoded")
+            matches!(
+                k.as_str(),
+                "content" | "contentType" | "contentTypeHint" | "encoded"
+            )
         });
     if !wrapper {
         return Some(v);
@@ -2952,7 +3062,11 @@ fn pact_body(v: &YNode) -> Option<&YNode> {
 /// is written).
 fn pact_sections<'a>(cx: &mut FieldCx<'a>, it: &'a YNode) -> Sections {
     let mut secs = Sections::new();
-    if let Some(b) = it.get("request").and_then(|r| r.get("body")).and_then(pact_body) {
+    if let Some(b) = it
+        .get("request")
+        .and_then(|r| r.get("body"))
+        .and_then(pact_body)
+    {
         let fields = cx.example(b);
         if !fields.is_empty() {
             secs.push(("request".to_string(), fields));
@@ -2989,7 +3103,11 @@ fn fields_cell(format: &str, secs: &Sections, truncated: bool) -> Cell {
             if i > 0 {
                 j.push(',');
             }
-            j.push_str(&format!(r#"{{"name":{},"type":{}"#, json_str(&f.name), json_str(&f.ty)));
+            j.push_str(&format!(
+                r#"{{"name":{},"type":{}"#,
+                json_str(&f.name),
+                json_str(&f.ty)
+            ));
             if f.required {
                 j.push_str(r#","required":true"#);
             }
@@ -3001,7 +3119,10 @@ fn fields_cell(format: &str, secs: &Sections, truncated: bool) -> Cell {
         j.push_str(r#","truncated":true"#);
     }
     j.push('}');
-    Cell { kind: cell_type::SCHEMA_FIELDS, payload: CellPayload::Json(j) }
+    Cell {
+        kind: cell_type::SCHEMA_FIELDS,
+        payload: CellPayload::Json(j),
+    }
 }
 
 /// Add the op's SCHEMA_FIELDS cell to the node [`push_op`] just pushed, when
@@ -3067,7 +3188,10 @@ paths:
         let out = extract_yaml_contracts(source, "spec.yaml", module_id(), repo());
         assert_eq!(out.nodes.len(), 1);
         let id = out.nodes[0].id;
-        assert_eq!(out.nav.qname_by_id[&id], "contract::spec::GET:/api/v1/users");
+        assert_eq!(
+            out.nav.qname_by_id[&id],
+            "contract::spec::GET:/api/v1/users"
+        );
         assert_eq!(out.nav.name_by_id[&id], "GET /api/v1/users");
         assert_eq!(out.nav.kind_by_id[&id], node_kind::DOC_SECTION);
         assert_eq!(out.nav.parent_of[&id], module_id());
@@ -3081,7 +3205,10 @@ paths:
             CellPayload::Json(j) => {
                 assert!(j.contains(r#""provenance":"contract""#), "got {j}");
                 assert!(j.contains(r#""source":"openapi""#), "got {j}");
-                assert!(j.contains(r#""raw_path":"/users""#), "un-prefixed form kept: {j}");
+                assert!(
+                    j.contains(r#""raw_path":"/users""#),
+                    "un-prefixed form kept: {j}"
+                );
                 assert!(j.contains(r#""path":"/api/v1/users""#), "got {j}");
                 assert!(j.contains(r#""operation_id":"listUsers""#), "got {j}");
             }
@@ -3517,7 +3644,10 @@ components:
             r#"{"provenance":"contract","source":"asyncapi","action":"publish","channel":"orders","operation_id":"publishOrder"}"#
         );
         // No HTTP keys: that absence is the pairing pass's discriminator.
-        assert!(!j.contains("\"method\"") && !j.contains("\"path\""), "got {j}");
+        assert!(
+            !j.contains("\"method\"") && !j.contains("\"path\""),
+            "got {j}"
+        );
         // No operationId declared → the field is omitted, not null.
         assert!(!origin_json(&out.nodes[2]).contains("operation_id"));
 
@@ -3545,7 +3675,10 @@ paths:
         assert_eq!(out.nodes.len(), 1);
         let j = origin_json(&out.nodes[0]);
         assert!(j.contains(r#""source":"openapi""#), "got {j}");
-        assert!(!j.contains("\"action\"") && !j.contains("\"channel\""), "got {j}");
+        assert!(
+            !j.contains("\"action\"") && !j.contains("\"channel\""),
+            "got {j}"
+        );
         assert!(scan_asyncapi(source).is_empty());
 
         // And an AsyncAPI doc yields no HTTP ops.
@@ -3553,7 +3686,10 @@ paths:
         assert!(scan_openapi(async_src).is_empty());
         let out = extract_yaml_contracts(async_src, "events.yml", module_id(), repo());
         assert_eq!(out.source, Some(ContractSource::AsyncApi));
-        assert_eq!(out.nav.qname_by_id[&out.nodes[0].id], "contract::events::publish:orders");
+        assert_eq!(
+            out.nav.qname_by_id[&out.nodes[0].id],
+            "contract::events::publish:orders"
+        );
     }
 
     #[test]
@@ -3622,7 +3758,10 @@ operations:
             out.nav.qname_by_id[&out.nodes[0].id],
             "contract::asyncapi::publish:user/signedup"
         );
-        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "publish user/signedup");
+        assert_eq!(
+            out.nav.name_by_id[&out.nodes[0].id],
+            "publish user/signedup"
+        );
     }
 
     #[test]
@@ -3650,18 +3789,26 @@ operations:
             c.record(&extract_yaml_contracts(src, "x.yaml", module_id(), repo()));
         }
         assert_eq!((c.files, c.openapi, c.asyncapi, c.pact), (2, 2, 1, 0));
-        assert_eq!(extract_yaml_contracts(k8s, "x.yaml", module_id(), repo()).source, None);
+        assert_eq!(
+            extract_yaml_contracts(k8s, "x.yaml", module_id(), repo()).source,
+            None
+        );
     }
 
     // ------------------------------------------------------------------
     // LB.12 — an op is scoped by its file's directory + stem
     // ------------------------------------------------------------------
 
-    const ORDERS_OP: &str = "openapi: 3.0.0\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
-    const ORDERS_OP_JSON: &str = r#"{"openapi":"3.0.0","paths":{"/orders":{"get":{"operationId":"listOrders"}}}}"#;
+    const ORDERS_OP: &str =
+        "openapi: 3.0.0\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+    const ORDERS_OP_JSON: &str =
+        r#"{"openapi":"3.0.0","paths":{"/orders":{"get":{"operationId":"listOrders"}}}}"#;
 
     fn op_ids(out: &ContractNodes) -> Vec<(String, NodeId)> {
-        out.nodes.iter().map(|n| (out.nav.qname_by_id[&n.id].clone(), n.id)).collect()
+        out.nodes
+            .iter()
+            .map(|n| (out.nav.qname_by_id[&n.id].clone(), n.id))
+            .collect()
     }
 
     #[test]
@@ -3670,7 +3817,10 @@ operations:
             contract_op_qname("services/orders/openapi.yaml", "GET:/orders"),
             "contract::services::orders::openapi::GET:/orders"
         );
-        assert_eq!(contract_op_qname("openapi.json", "GET:/users"), "contract::openapi::GET:/users");
+        assert_eq!(
+            contract_op_qname("openapi.json", "GET:/users"),
+            "contract::openapi::GET:/users"
+        );
         assert_eq!(
             contract_op_qname("turps/docs/swagger.json", "POST:/auth/login"),
             "contract::turps::docs::swagger::POST:/auth/login"
@@ -3686,8 +3836,14 @@ operations:
     fn two_services_one_op_are_two_nodes() {
         let orders = op_ids(&yaml(ORDERS_OP, "services/orders/openapi.yaml"));
         let billing = op_ids(&yaml(ORDERS_OP, "services/billing/openapi.yaml"));
-        assert_eq!(orders[0].0, "contract::services::orders::openapi::GET:/orders");
-        assert_eq!(billing[0].0, "contract::services::billing::openapi::GET:/orders");
+        assert_eq!(
+            orders[0].0,
+            "contract::services::orders::openapi::GET:/orders"
+        );
+        assert_eq!(
+            billing[0].0,
+            "contract::services::billing::openapi::GET:/orders"
+        );
         assert_ne!(orders[0].1, billing[0].1);
     }
 
@@ -3704,10 +3860,16 @@ operations:
     #[test]
     fn root_file_scope_is_its_stem() {
         let y = op_ids(&yaml(ORDERS_OP, "openapi.yaml"));
-        assert_eq!(y[0].0, "contract::openapi::GET:/orders", "a root-level op keeps its pre-LB.12 qname");
+        assert_eq!(
+            y[0].0, "contract::openapi::GET:/orders",
+            "a root-level op keeps its pre-LB.12 qname"
+        );
         let p = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[
             {"request":{"method":"GET","path":"/orders"}}]}"#;
-        assert_eq!(op_ids(&json(p, "pact.json"))[0].0, "contract::pact::GET:/orders");
+        assert_eq!(
+            op_ids(&json(p, "pact.json"))[0].0,
+            "contract::pact::GET:/orders"
+        );
     }
 
     #[test]
@@ -3720,11 +3882,24 @@ operations:
         c.record(&json(ORDERS_OP_JSON, "services/billing/openapi.json"));
         assert_eq!((c.files, c.openapi, c.collided()), (3, 3, 1));
         // The same root file in another repo is another NodeId, not a collision.
-        c.record(&extract_yaml_contracts(ORDERS_OP, "openapi.yaml", module_id(), RepoId(2)));
-        c.record(&extract_yaml_contracts(ORDERS_OP, "openapi.yaml", module_id(), RepoId(3)));
+        c.record(&extract_yaml_contracts(
+            ORDERS_OP,
+            "openapi.yaml",
+            module_id(),
+            RepoId(2),
+        ));
+        c.record(&extract_yaml_contracts(
+            ORDERS_OP,
+            "openapi.yaml",
+            module_id(),
+            RepoId(3),
+        ));
         assert_eq!((c.openapi, c.collided()), (5, 1));
         // A sniffed file that declares nothing counts nowhere.
-        c.record(&yaml("openapi: 3.0.0\ninfo:\n  title: x\n", "empty/openapi.yaml"));
+        c.record(&yaml(
+            "openapi: 3.0.0\ninfo:\n  title: x\n",
+            "empty/openapi.yaml",
+        ));
         assert_eq!((c.files, c.collided()), (5, 1));
     }
 
@@ -3733,7 +3908,13 @@ operations:
     // ------------------------------------------------------------------
 
     fn cell_text(node: &Node, kind: glia_core::CellTypeId) -> &str {
-        match &node.cells.iter().find(|c| c.kind == kind).expect("cell present").payload {
+        match &node
+            .cells
+            .iter()
+            .find(|c| c.kind == kind)
+            .expect("cell present")
+            .payload
+        {
             CellPayload::Json(s) | CellPayload::Text(s) => s.as_str(),
             other => panic!("unexpected payload {other:?}"),
         }
@@ -3788,7 +3969,10 @@ operations:
         let pact = r#"{"consumer":{"name":"web"},"provider":{"name":"api"},"interactions":[]}"#;
         assert_eq!(sniff_json_contract(openapi), Some(ContractSource::OpenApi));
         assert_eq!(sniff_json_contract(swagger), Some(ContractSource::OpenApi));
-        assert_eq!(sniff_json_contract(asyncapi), Some(ContractSource::AsyncApi));
+        assert_eq!(
+            sniff_json_contract(asyncapi),
+            Some(ContractSource::AsyncApi)
+        );
         assert_eq!(sniff_json_contract(pact), Some(ContractSource::Pact));
 
         // A pact_ffi pact is key-sorted, so `"provider"` comes after every
@@ -3799,12 +3983,23 @@ operations:
             r#"{{"consumer":{{"name":"web"}},"interactions":[{many}],"metadata":{{"pactSpecification":{{"version":"3.0.0"}}}},"provider":{{"name":"api"}}}}"#
         );
         assert!(sorted_pact.find("\"provider\"").unwrap() > JSON_SNIFF_BYTES);
-        assert_eq!(sniff_json_contract(&sorted_pact), Some(ContractSource::Pact));
+        assert_eq!(
+            sniff_json_contract(&sorted_pact),
+            Some(ContractSource::Pact)
+        );
         let out = extract_json_contract(&sorted_pact, "pacts/web-api.json", module_id(), repo());
-        assert_eq!(out.nodes.len(), 1, "200 interactions on one request are one op");
+        assert_eq!(
+            out.nodes.len(),
+            1,
+            "200 interactions on one request are one op"
+        );
 
         // The same text, but the marker sits in neither window: not sniffed.
-        let buried = format!(r#"{{"a":"{}","openapi":"3.0.0","b":"{}","paths":{{}}}}"#, "x".repeat(9000), "y".repeat(9000));
+        let buried = format!(
+            r#"{{"a":"{}","openapi":"3.0.0","b":"{}","paths":{{}}}}"#,
+            "x".repeat(9000),
+            "y".repeat(9000)
+        );
         assert_eq!(sniff_json_contract(&buried), None);
         // A long `info.description` pushes `"paths"` out of the head; the
         // marker is in the head, so the companion key is searched in full.
@@ -3813,7 +4008,10 @@ operations:
             "d".repeat(9000),
             "c".repeat(9000)
         );
-        assert_eq!(sniff_json_contract(&long_info), Some(ContractSource::OpenApi));
+        assert_eq!(
+            sniff_json_contract(&long_info),
+            Some(ContractSource::OpenApi)
+        );
     }
 
     #[test]
@@ -3867,7 +4065,11 @@ paths:
                 })
                 .collect()
         };
-        assert_eq!(shape(&j), shape(&y), "the JSON path emits the yaml path's nodes");
+        assert_eq!(
+            shape(&j),
+            shape(&y),
+            "the JSON path emits the yaml path's nodes"
+        );
         let qnames: Vec<String> = shape(&j).into_iter().map(|t| t.0).collect();
         assert_eq!(
             qnames,
@@ -3877,10 +4079,16 @@ paths:
                 "contract::api::openapi::GET:/v1/a",
             ]
         );
-        assert_eq!(j.nodes[0].id, y.nodes[0].id, "a twin in one directory: same directory + stem, same qname, same id");
+        assert_eq!(
+            j.nodes[0].id, y.nodes[0].id,
+            "a twin in one directory: same directory + stem, same qname, same id"
+        );
         assert_eq!(j.nav.parent_of[&j.nodes[0].id], module_id());
         // POSITION is the method key's line (`"post"` is the 7th line).
-        assert!(cell_text(&j.nodes[0], cell_type::POSITION).contains(r#""file":"api/openapi.json","start_line":6"#));
+        assert!(
+            cell_text(&j.nodes[0], cell_type::POSITION)
+                .contains(r#""file":"api/openapi.json","start_line":6"#)
+        );
         assert!(cell_text(&j.nodes[2], cell_type::POSITION).contains(r#""start_line":10"#));
     }
 
@@ -3889,7 +4097,10 @@ paths:
         let json = r#"{"swagger":"2.0","basePath":"/v2","paths":{"/pets/{id}":{"get":{"operationId":"getPet"}}}}"#;
         let out = extract_json_contract(json, "swagger.json", module_id(), repo());
         assert_eq!(out.nodes.len(), 1);
-        assert_eq!(out.nav.qname_by_id[&out.nodes[0].id], "contract::swagger::GET:/v2/pets/{id}");
+        assert_eq!(
+            out.nav.qname_by_id[&out.nodes[0].id],
+            "contract::swagger::GET:/v2/pets/{id}"
+        );
         assert_eq!(
             origin_json(&out.nodes[0]),
             r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/v2/pets/{id}","raw_path":"/pets/{id}","operation_id":"getPet"}"#
@@ -3913,7 +4124,11 @@ paths:
 }"#;
         let out = extract_json_contract(v2, "asyncapi.json", module_id(), repo());
         assert_eq!(out.source, Some(ContractSource::AsyncApi));
-        let qnames: Vec<&str> = out.nodes.iter().map(|n| out.nav.qname_by_id[&n.id].as_str()).collect();
+        let qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.qname_by_id[&n.id].as_str())
+            .collect();
         assert_eq!(
             qnames,
             [
@@ -3949,12 +4164,20 @@ paths:
         let got: Vec<(&str, &str)> = out
             .nodes
             .iter()
-            .map(|n| (out.nav.qname_by_id[&n.id].as_str(), out.nav.name_by_id[&n.id].as_str()))
+            .map(|n| {
+                (
+                    out.nav.qname_by_id[&n.id].as_str(),
+                    out.nav.name_by_id[&n.id].as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
             [
-                ("contract::events::publish:user/signedup", "publish user/signedup"),
+                (
+                    "contract::events::publish:user/signedup",
+                    "publish user/signedup"
+                ),
                 ("contract::events::subscribe:orders", "subscribe orders"),
             ]
         );
@@ -3994,7 +4217,12 @@ paths:
         let got: Vec<(&str, &str)> = out
             .nodes
             .iter()
-            .map(|n| (out.nav.qname_by_id[&n.id].as_str(), out.nav.name_by_id[&n.id].as_str()))
+            .map(|n| {
+                (
+                    out.nav.qname_by_id[&n.id].as_str(),
+                    out.nav.name_by_id[&n.id].as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
@@ -4012,7 +4240,10 @@ paths:
             r#"{"provenance":"contract","source":"pact","method":"GET","path":"/users","raw_path":"/users","description":"a request for users","consumer":"web","provider":"api"}"#
         );
         // The description goes in the CODE cell, first interaction wins.
-        assert_eq!(cell_text(first, cell_type::CODE), "GET /users — a request for users");
+        assert_eq!(
+            cell_text(first, cell_type::CODE),
+            "GET /users — a request for users"
+        );
         // `"path": "/users"` is the 8th line => 0-indexed 7.
         assert!(cell_text(first, cell_type::POSITION).contains(r#""start_line":7"#));
 
@@ -4030,10 +4261,18 @@ paths:
         // Sniffs as OpenAPI, but does not parse: empty, never a panic.
         let broken = r#"{"openapi": "3.0.0", "paths": {"/a": {"get": "#;
         assert_eq!(sniff_json_contract(broken), Some(ContractSource::OpenApi));
-        assert!(extract_json_contract(broken, "openapi.json", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_json_contract(broken, "openapi.json", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
         // Parses, but the marker is nested rather than top-level.
         let nested = r#"{"docs": {"openapi": "3.0.0"}, "paths": {"/a": {"get": {}}}}"#;
-        assert!(extract_json_contract(nested, "x.json", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_json_contract(nested, "x.json", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4043,7 +4282,11 @@ paths:
             {"request":{"method":"GET","path":"/a"}},{"request":{"method":"POST","path":"/a"}}]}"#;
         let openapi = r#"{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}"#;
         let empty_pact = r#"{"consumer":{},"provider":{},"interactions":[]}"#;
-        for (src, p) in [(pact, "p.json"), (openapi, "o.json"), (empty_pact, "e.json")] {
+        for (src, p) in [
+            (pact, "p.json"),
+            (openapi, "o.json"),
+            (empty_pact, "e.json"),
+        ] {
             c.record(&extract_json_contract(src, p, module_id(), repo()));
         }
         assert_eq!((c.files, c.openapi, c.asyncapi, c.pact), (2, 1, 0, 2));
@@ -4055,11 +4298,17 @@ paths:
 
     /// The SCHEMA_FIELDS payload of the op named `qname`, if it has one.
     fn fields_of<'a>(out: &'a ContractNodes, qname: &str) -> Option<&'a str> {
-        let node = out.nodes.iter().find(|n| out.nav.qname_by_id[&n.id] == qname)?;
-        node.cells.iter().find(|c| c.kind == cell_type::SCHEMA_FIELDS).map(|c| match &c.payload {
-            CellPayload::Json(j) => j.as_str(),
-            other => panic!("SCHEMA_FIELDS must be Json, got {other:?}"),
-        })
+        let node = out
+            .nodes
+            .iter()
+            .find(|n| out.nav.qname_by_id[&n.id] == qname)?;
+        node.cells
+            .iter()
+            .find(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.as_str(),
+                other => panic!("SCHEMA_FIELDS must be Json, got {other:?}"),
+            })
     }
 
     fn yaml(src: &str, path: &str) -> ContractNodes {
@@ -4135,16 +4384,29 @@ components:
         // flattened as `parent.child`; an array of objects as `name[]`. The
         // 201 response declares no schema, so it is no section.
         let out = yaml(ORDERS_YAML, "openapi.yaml");
-        assert_eq!(fields_of(&out, "contract::openapi::POST:/orders"), Some(ORDERS_CELL));
+        assert_eq!(
+            fields_of(&out, "contract::openapi::POST:/orders"),
+            Some(ORDERS_CELL)
+        );
         // The cell comes after the existing three, which are unchanged.
         let kinds: Vec<_> = out.nodes[0].cells.iter().map(|c| c.kind).collect();
         assert_eq!(
             kinds,
-            vec![cell_type::CODE, cell_type::POSITION, cell_type::ORIGIN, cell_type::SCHEMA_FIELDS]
+            vec![
+                cell_type::CODE,
+                cell_type::POSITION,
+                cell_type::ORIGIN,
+                cell_type::SCHEMA_FIELDS
+            ]
         );
         assert_eq!(
             out.field_stats,
-            FieldStats { ops_with_fields: 1, fields: 7, refs_resolved: 2, refs_external: 0 }
+            FieldStats {
+                ops_with_fields: 1,
+                fields: 7,
+                refs_resolved: 2,
+                refs_external: 0
+            }
         );
     }
 
@@ -4348,7 +4610,9 @@ components:
         let out = yaml(ASYNC_V2, "asyncapi.yaml");
         assert_eq!(
             fields_of(&out, "contract::asyncapi::publish:orders.placed"),
-            Some(r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string","required":true},{"name":"totalCents","type":"integer"}]}"#)
+            Some(
+                r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string","required":true},{"name":"totalCents","type":"integer"}]}"#
+            )
         );
         // message → components/messages → its payload → components/schemas.
         let placed = r#"[{"name":"orderId","type":"string"},{"name":"currency","type":"string"}]"#;
@@ -4402,8 +4666,14 @@ components:
 "#;
         let cell = r#"{"format":"asyncapi","payload":[{"name":"userId","type":"string"},{"name":"signedUpAt","type":"string(date-time)"}]}"#;
         let out = yaml(src, "asyncapi.yaml");
-        assert_eq!(fields_of(&out, "contract::asyncapi::publish:user/signedup"), Some(cell));
-        assert_eq!(fields_of(&out, "contract::asyncapi::subscribe:user/signedup"), Some(cell));
+        assert_eq!(
+            fields_of(&out, "contract::asyncapi::publish:user/signedup"),
+            Some(cell)
+        );
+        assert_eq!(
+            fields_of(&out, "contract::asyncapi::subscribe:user/signedup"),
+            Some(cell)
+        );
 
         let v3_json = r##"{"asyncapi": "3.0.0",
  "channels": {"userSignedup": {"address": "user/signedup", "messages": {"UserSignedUp": {"$ref": "#/components/messages/UserSignedUp"}}}},
@@ -4411,7 +4681,10 @@ components:
  "components": {"messages": {"UserSignedUp": {"payload": {"type": "object", "properties": {
    "userId": {"type": "string"}, "signedUpAt": {"type": "string", "format": "date-time"}}}}}}}"##;
         let j = json(v3_json, "asyncapi.json");
-        assert_eq!(fields_of(&j, "contract::asyncapi::subscribe:user/signedup"), Some(cell));
+        assert_eq!(
+            fields_of(&j, "contract::asyncapi::subscribe:user/signedup"),
+            Some(cell)
+        );
     }
 
     #[test]
@@ -4454,14 +4727,19 @@ components:
         );
         assert_eq!(
             fields_of(&out, "contract::pacts::web-orders::GET:/orders"),
-            Some(r#"{"format":"pact","response:200":[{"name":"[]","type":"object"},{"name":"[].id","type":"string"}]}"#)
+            Some(
+                r#"{"format":"pact","response:200":[{"name":"[]","type":"object"},{"name":"[].id","type":"string"}]}"#
+            )
         );
         // A v4 body wrapper is unwrapped; an encoded one lists nothing.
         assert_eq!(
             fields_of(&out, "contract::pacts::web-orders::PUT:/orders/1"),
             Some(r#"{"format":"pact","request":[{"name":"sku","type":"string"}]}"#)
         );
-        assert_eq!(fields_of(&out, "contract::pacts::web-orders::PATCH:/orders/1"), None);
+        assert_eq!(
+            fields_of(&out, "contract::pacts::web-orders::PATCH:/orders/1"),
+            None
+        );
         assert_eq!(out.field_stats.ops_with_fields, 3);
         assert_eq!(out.field_stats.fields, 16);
     }
@@ -4599,7 +4877,9 @@ paths:
         assert_eq!(out.nodes.len(), 1, "the op itself is unaffected");
         assert_eq!(
             fields_of(&out, "contract::openapi::POST:/a"),
-            Some(r#"{"format":"openapi","response:200":[{"name":"kept","type":"string"},{"name":"also","type":"integer"}]}"#)
+            Some(
+                r#"{"format":"openapi","response:200":[{"name":"kept","type":"string"},{"name":"also","type":"integer"}]}"#
+            )
         );
         // Only unsupported constructs: the op gets no cell at all.
         let only = "openapi: 3.0.0\npaths:\n  /b:\n    get:\n      responses:\n        '200':\n          content:\n            application/json:\n              schema: *shared\n";
@@ -4614,9 +4894,18 @@ paths:
         let openapi = "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      responses:\n        '200':\n          description: ok\n";
         let asyncapi = "asyncapi: 2.6.0\nchannels:\n  orders:\n    publish:\n      message:\n        name: Order\n";
         let pact = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[{"request":{"method":"GET","path":"/a"},"response":{"status":200}}]}"#;
-        for out in [yaml(openapi, "o.yaml"), yaml(asyncapi, "e.yaml"), json(pact, "p.json")] {
+        for out in [
+            yaml(openapi, "o.yaml"),
+            yaml(asyncapi, "e.yaml"),
+            json(pact, "p.json"),
+        ] {
             assert_eq!(out.nodes.len(), 1);
-            assert!(out.nodes[0].cells.iter().all(|c| c.kind != cell_type::SCHEMA_FIELDS));
+            assert!(
+                out.nodes[0]
+                    .cells
+                    .iter()
+                    .all(|c| c.kind != cell_type::SCHEMA_FIELDS)
+            );
             assert_eq!(out.field_stats, FieldStats::default());
         }
     }
@@ -4639,14 +4928,25 @@ paths:
             .collect();
         assert_eq!(
             c,
-            [("1", "integer"), ("2.5", "number"), ("true", "boolean"), ("~", "null"), ("x, y", "string")]
+            [
+                ("1", "integer"),
+                ("2.5", "number"),
+                ("true", "boolean"),
+                ("~", "null"),
+                ("x, y", "string")
+            ]
         );
         assert_eq!(doc.get("c").map(|v| v.items().len()), Some(6));
         assert_eq!(doc.str_at("d"), Some("plain"));
         let e = doc.get("e").expect("flow map");
         assert_eq!(e.get("f").map(|f| f.items().len()), Some(2));
         assert_eq!(e.str_at("i j"), Some("k"));
-        let l: Vec<&str> = doc.get("l").map_or(&[][..], YNode::items).iter().filter_map(YNode::as_str).collect();
+        let l: Vec<&str> = doc
+            .get("l")
+            .map_or(&[][..], YNode::items)
+            .iter()
+            .filter_map(YNode::as_str)
+            .collect();
         assert_eq!(l, ["m", "n"], "a flow list spanning lines is joined");
     }
 
@@ -4655,8 +4955,12 @@ paths:
         // Every char-prefix of real specs (so every construct is cut mid-way),
         // multibyte text in keys / values / quotes / escapes, unbalanced
         // brackets and deep nesting: never a panic, never a stack overflow.
-        let deep_block: String = (0..3000).map(|i| format!("{}k{i}:\n", " ".repeat(i))).collect();
-        let deep_list: String = (0..3000).map(|i| format!("{}- \n", " ".repeat(i))).collect();
+        let deep_block: String = (0..3000)
+            .map(|i| format!("{}k{i}:\n", " ".repeat(i)))
+            .collect();
+        let deep_list: String = (0..3000)
+            .map(|i| format!("{}- \n", " ".repeat(i)))
+            .collect();
         let deep_flow = format!("openapi: 3.0.0\nx: {}\n", "[".repeat(5000));
         let nasty = [
             "openapi: 3.0.0\npaths:\n  /é:\n    get:\n      responses:\n        'ü':\n          content:\n            application/json:\n              schema: {type: \"ß\\é\", properties: {ñ: {type: string}}}\n",
@@ -4664,12 +4968,24 @@ paths:
             "openapi: 3.0.0\n- - - -\n  : :\n? ?\n\t\tx: \"\n'\n[{]}\n- 'é\n  \"é\\",
             "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      responses:\n        200:\n          content:\n            a/json:\n              schema:\n                properties:\n                  x:\n                    $ref: '#/paths/~1a/get/responses/200/content/a~1json/schema'\n",
         ];
-        let mut docs: Vec<String> = vec![ORDERS_YAML.to_string(), ASYNC_V2.to_string(), deep_block, deep_list, deep_flow];
+        let mut docs: Vec<String> = vec![
+            ORDERS_YAML.to_string(),
+            ASYNC_V2.to_string(),
+            deep_block,
+            deep_list,
+            deep_flow,
+        ];
         docs.extend(nasty.iter().map(|s| s.to_string()));
         for doc in &docs {
             let _ = yaml_document(doc);
             let _ = yaml(doc, "x.yaml");
-            let _ = yaml(&format!("openapi: 3.0.0\npaths:\n  /a:\n    get:\n      responses:\n        '200':\n          content:\n            application/json:\n              schema:\n{}", doc), "y.yaml");
+            let _ = yaml(
+                &format!(
+                    "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      responses:\n        '200':\n          content:\n            application/json:\n              schema:\n{}",
+                    doc
+                ),
+                "y.yaml",
+            );
         }
         for doc in [ORDERS_YAML, ASYNC_V2, nasty[0], nasty[2]] {
             for (i, _) in doc.char_indices() {
@@ -4687,13 +5003,21 @@ paths:
         let mut c = ContractCounts::default();
         c.record(&yaml(ORDERS_YAML, "openapi.yaml"));
         c.record(&yaml(ASYNC_V2, "asyncapi.yaml"));
-        c.record(&yaml("openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n", "o.yaml"));
+        c.record(&yaml(
+            "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n",
+            "o.yaml",
+        ));
         assert_eq!((c.files, c.openapi, c.asyncapi, c.pact), (3, 2, 3, 0));
         // 7 request fields + 2 + 2 + (2 + 1) payload fields; refs: the
         // openapi's 2, then message + payload for each of the two ops that
         // name OrderPlaced.
         assert_eq!(
-            (c.ops_with_fields, c.fields, c.refs_resolved, c.refs_external),
+            (
+                c.ops_with_fields,
+                c.fields,
+                c.refs_resolved,
+                c.refs_external
+            ),
             (4, 14, 6, 0)
         );
     }
@@ -4738,12 +5062,22 @@ paths:
             "../../../../bench/substrate-gap/fixtures/asyncapi-payload-fields/billing/asyncapi.yaml"
         );
         assert_eq!(
-            fields_of(&yaml(orders, "asyncapi.yaml"), "contract::asyncapi::publish:orders.placed"),
-            Some(r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string","required":true},{"name":"totalCents","type":"integer"}]}"#)
+            fields_of(
+                &yaml(orders, "asyncapi.yaml"),
+                "contract::asyncapi::publish:orders.placed"
+            ),
+            Some(
+                r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string","required":true},{"name":"totalCents","type":"integer"}]}"#
+            )
         );
         assert_eq!(
-            fields_of(&yaml(billing, "asyncapi.yaml"), "contract::asyncapi::subscribe:orders.placed"),
-            Some(r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string"},{"name":"currency","type":"string"}]}"#)
+            fields_of(
+                &yaml(billing, "asyncapi.yaml"),
+                "contract::asyncapi::subscribe:orders.placed"
+            ),
+            Some(
+                r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string"},{"name":"currency","type":"string"}]}"#
+            )
         );
     }
 
@@ -4801,11 +5135,14 @@ data_model:
         );
         assert!(ops[2].1.contains(r#""group":"public""#), "{}", ops[2].1);
         assert_eq!(
-            ops[1].2,
-            r#"{"file":"features/activities/feature.yaml","start_line":5,"end_line":5}"#,
+            ops[1].2, r#"{"file":"features/activities/feature.yaml","start_line":5,"end_line":5}"#,
             "POSITION is the item's 0-indexed line"
         );
-        let names: Vec<&str> = out.nodes.iter().map(|n| out.nav.name_by_id[&n.id].as_str()).collect();
+        let names: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.name_by_id[&n.id].as_str())
+            .collect();
         assert_eq!(names[1], "GET /api/protected/activity/:id");
         for n in &out.nodes {
             assert_eq!(out.nav.kind_by_id[&n.id], node_kind::DOC_SECTION);
@@ -4820,7 +5157,11 @@ data_model:
         let out = yaml(src, "features/a/feature.yml");
         let ops = ops_of(&out);
         assert_eq!(ops.len(), 2);
-        assert!(!ops[0].1.contains("\"group\""), "no group key: {}", ops[0].1);
+        assert!(
+            !ops[0].1.contains("\"group\""),
+            "no group key: {}",
+            ops[0].1
+        );
         let src = "backend_routes:\n  protected:\n  - PUT /c\n  public: [GET /d, \"POST /e\"]\n";
         let ops = ops_of(&yaml(src, "features/b/feature.yaml"));
         let got: Vec<(&str, bool)> = ops
@@ -4845,7 +5186,10 @@ data_model:
         assert_eq!(out.source, Some(ContractSource::FeatureYaml));
         let mut c = ContractCounts::default();
         c.record(&out);
-        assert_eq!((c.files, c.feature_yaml, c.feature_yaml_features.len()), (0, 0, 0));
+        assert_eq!(
+            (c.files, c.feature_yaml, c.feature_yaml_features.len()),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -4868,13 +5212,20 @@ data_model:
                 "contract::features::activities::feature::GET:/api/quoted",
             ]
         );
-        assert!(ops[0].1.contains(r#""path":"/api/protected/activities/city","raw_path":"/api/protected/activities/city""#));
+        assert!(ops[0].1.contains(
+            r#""path":"/api/protected/activities/city","raw_path":"/api/protected/activities/city""#
+        ));
     }
 
     #[test]
     fn non_features_dir_feature_yaml_ignored() {
         // The gate needs BOTH the `features/<f>/` path and the key.
-        for path in ["feature.yaml", "config/activities/feature.yaml", "features/feature.yaml", "features/a/other.yaml"] {
+        for path in [
+            "feature.yaml",
+            "config/activities/feature.yaml",
+            "features/feature.yaml",
+            "features/a/other.yaml",
+        ] {
             let out = yaml(QUOKKA_FEATURE, path);
             assert!(out.nodes.is_empty(), "{path}");
             assert_eq!(out.source, None, "{path}");
@@ -4895,38 +5246,77 @@ data_model:
         let src = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
         let a = yaml(src, "specs/001-orders/contracts/openapi.yaml");
         let b = yaml(src, "specs/002-admin/contracts/openapi.yaml");
-        assert_eq!(ops_of(&a)[0].0, "contract::specs::001-orders::contracts::openapi::GET:/orders");
-        assert_eq!(ops_of(&b)[0].0, "contract::specs::002-admin::contracts::openapi::GET:/orders");
-        assert_ne!(a.nodes[0].id, b.nodes[0].id, "two features' ops never share a NodeId");
+        assert_eq!(
+            ops_of(&a)[0].0,
+            "contract::specs::001-orders::contracts::openapi::GET:/orders"
+        );
+        assert_eq!(
+            ops_of(&b)[0].0,
+            "contract::specs::002-admin::contracts::openapi::GET:/orders"
+        );
+        assert_ne!(
+            a.nodes[0].id, b.nodes[0].id,
+            "two features' ops never share a NodeId"
+        );
         assert_eq!(
             ops_of(&b)[0].1,
             r#"{"provenance":"contract","source":"openapi","feature":"002-admin","method":"GET","path":"/orders","raw_path":"/orders","operation_id":"listOrders"}"#
         );
         // AsyncAPI and the JSON formats take the same scope.
         let async_src = "asyncapi: 2.6.0\nchannels:\n  orders:\n    subscribe:\n      summary: x\n";
-        let c = yaml(async_src, "docs/specs/0042-events/contracts/v1/asyncapi.yaml");
+        let c = yaml(
+            async_src,
+            "docs/specs/0042-events/contracts/v1/asyncapi.yaml",
+        );
         assert_eq!(
             ops_of(&c)[0].0,
             "contract::docs::specs::0042-events::contracts::v1::asyncapi::subscribe:orders"
         );
-        assert!(ops_of(&c)[0].1.contains(r#""source":"asyncapi","feature":"0042-events","#));
+        assert!(
+            ops_of(&c)[0]
+                .1
+                .contains(r#""source":"asyncapi","feature":"0042-events","#)
+        );
         let pact = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[
             {"request":{"method":"GET","path":"/orders"}}]}"#;
         let p = json(pact, "specs/003-web/contracts/web-api.json");
-        assert_eq!(ops_of(&p)[0].0, "contract::specs::003-web::contracts::web-api::GET:/orders");
-        assert!(ops_of(&p)[0].1.contains(r#""source":"pact","feature":"003-web","#));
-        let oj = json(r#"{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}"#, "specs/004-x/contracts/openapi.json");
-        assert_eq!(ops_of(&oj)[0].0, "contract::specs::004-x::contracts::openapi::GET:/a");
-        assert_eq!(speckit_feature(r"specs\004-x\contracts\openapi.json"), Some("004-x"));
+        assert_eq!(
+            ops_of(&p)[0].0,
+            "contract::specs::003-web::contracts::web-api::GET:/orders"
+        );
+        assert!(
+            ops_of(&p)[0]
+                .1
+                .contains(r#""source":"pact","feature":"003-web","#)
+        );
+        let oj = json(
+            r#"{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}"#,
+            "specs/004-x/contracts/openapi.json",
+        );
+        assert_eq!(
+            ops_of(&oj)[0].0,
+            "contract::specs::004-x::contracts::openapi::GET:/a"
+        );
+        assert_eq!(
+            speckit_feature(r"specs\004-x\contracts\openapi.json"),
+            Some("004-x")
+        );
 
         let mut counts = ContractCounts::default();
         for out in [&a, &b, &c, &p] {
             counts.record(out);
         }
-        assert_eq!((counts.files, counts.openapi, counts.asyncapi, counts.pact), (4, 2, 1, 1));
+        assert_eq!(
+            (counts.files, counts.openapi, counts.asyncapi, counts.pact),
+            (4, 2, 1, 1)
+        );
         assert_eq!(counts.speckit, 4);
         assert_eq!(
-            counts.speckit_features.iter().map(String::as_str).collect::<Vec<_>>(),
+            counts
+                .speckit_features
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             ["001-orders", "002-admin", "003-web", "0042-events"]
         );
     }
@@ -4964,12 +5354,27 @@ data_model:
     fn feature_yaml_counts() {
         let mut c = ContractCounts::default();
         c.record(&yaml(QUOKKA_FEATURE, "features/activities/feature.yaml"));
-        c.record(&yaml("backend_routes:\n  protected:\n    - POST /api/protected/swipe\n", "features/discover/feature.yaml"));
-        c.record(&yaml("backend_routes: []\n", "features/marketing/feature.yaml"));
-        c.record(&yaml("openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n", "openapi.yaml"));
-        assert_eq!((c.files, c.openapi, c.feature_yaml, c.speckit), (3, 1, 4, 0));
+        c.record(&yaml(
+            "backend_routes:\n  protected:\n    - POST /api/protected/swipe\n",
+            "features/discover/feature.yaml",
+        ));
+        c.record(&yaml(
+            "backend_routes: []\n",
+            "features/marketing/feature.yaml",
+        ));
+        c.record(&yaml(
+            "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n",
+            "openapi.yaml",
+        ));
         assert_eq!(
-            c.feature_yaml_features.iter().map(String::as_str).collect::<Vec<_>>(),
+            (c.files, c.openapi, c.feature_yaml, c.speckit),
+            (3, 1, 4, 0)
+        );
+        assert_eq!(
+            c.feature_yaml_features
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             ["activities", "discover"]
         );
     }

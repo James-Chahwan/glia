@@ -64,7 +64,10 @@ fn build_result(
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
-    eprintln!("[build] surface=pyo3 repos={} incremental={incremental}", inputs.repos());
+    eprintln!(
+        "[build] surface=pyo3 repos={} incremental={incremental}",
+        inputs.repos()
+    );
     if !opts.overlay {
         eprintln!("[overlay] disabled (overlay=False): not persisting to the default gmap dir");
     }
@@ -84,7 +87,11 @@ fn checked(result: GenerateResult) -> Result<GenerateResult, String> {
             return Err(format!(
                 "no nodes produced; {} parse errors: {}",
                 result.parse_errors.len(),
-                result.parse_errors.first().map(String::as_str).unwrap_or_default()
+                result
+                    .parse_errors
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default()
             ));
         }
         eprintln!(
@@ -167,8 +174,18 @@ fn parse_file_to_json(source: &str, path: &str, lang: &str) -> PyResult<String> 
     let mut first = true;
     for n in &fp.nodes {
         let kind = fp.nav.kind_by_id.get(&n.id).map(|k| k.0).unwrap_or(0);
-        let name = fp.nav.name_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
-        let qname = fp.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+        let name = fp
+            .nav
+            .name_by_id
+            .get(&n.id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let qname = fp
+            .nav
+            .qname_by_id
+            .get(&n.id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let conf = match n.confidence {
             Confidence::Strong => "strong",
             Confidence::Medium => "medium",
@@ -248,8 +265,14 @@ mod tests {
         let before = tree(&root);
 
         let one = build_result(Inputs::One(&path), false, &BuildOptions::default()).expect("build");
-        let again = build_result(Inputs::One(&path), false, &BuildOptions::default()).expect("build");
-        let many = build_result(Inputs::Many(std::slice::from_ref(&path)), false, &BuildOptions::default()).expect("build");
+        let again =
+            build_result(Inputs::One(&path), false, &BuildOptions::default()).expect("build");
+        let many = build_result(
+            Inputs::Many(std::slice::from_ref(&path)),
+            false,
+            &BuildOptions::default(),
+        )
+        .expect("build");
         assert_eq!(tree(&root), before, "a pure build wrote into the repo");
         assert!(one.total_nodes > 0 && one.total_nodes == again.total_nodes);
         assert_eq!(one.total_nodes, many.total_nodes);
@@ -295,11 +318,21 @@ mod tests {
         let mut some = glia_engine::generate_one(&path).expect("build");
         let _ = std::fs::remove_dir_all(&root);
         some.parse_errors.push("other.py: boom".into());
-        assert!(checked(some).is_ok(), "a graph with nodes passes its parse errors through");
+        assert!(
+            checked(some).is_ok(),
+            "a graph with nodes passes its parse errors through"
+        );
 
         let missing = std::env::temp_dir().join(format!("glia-ld2-missing-{}", std::process::id()));
         let missing = missing.to_str().expect("utf-8 temp path").to_string();
         assert!(build_result(Inputs::One(&missing), false, &BuildOptions::default()).is_err());
-        assert!(build_result(Inputs::Many(std::slice::from_ref(&missing)), false, &BuildOptions::default()).is_err());
+        assert!(
+            build_result(
+                Inputs::Many(std::slice::from_ref(&missing)),
+                false,
+                &BuildOptions::default()
+            )
+            .is_err()
+        );
     }
 }

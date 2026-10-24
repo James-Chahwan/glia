@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use glia_core::RepoId;
-use glia_graph::{build_go, build_typescript, HttpStackResolver, MergedGraph, RepoGraph};
+use glia_graph::{HttpStackResolver, MergedGraph, RepoGraph, build_go, build_typescript};
 use glia_parser_go as go;
 use glia_parser_typescript as ts;
 use glia_projection_text::{render_merged, render_repo_graph};
@@ -123,10 +123,8 @@ fn build_ts_graph() -> RepoGraph {
     }
 
     // Build a set of known qnames for the resolver.
-    let known_qnames: HashMap<String, bool> = qname_of_file
-        .values()
-        .map(|q| (q.clone(), true))
-        .collect();
+    let known_qnames: HashMap<String, bool> =
+        qname_of_file.values().map(|q| (q.clone(), true)).collect();
 
     // Parse all files.
     for (path, qname) in &qname_of_file {
@@ -210,7 +208,11 @@ fn dump_quokka_gmap() {
     let text_path = PathBuf::from(OUTPUT_DIR).join("gmap-text.txt");
     std::fs::create_dir_all(OUTPUT_DIR).unwrap();
     std::fs::write(&text_path, &text).unwrap();
-    eprintln!("Text projection: {} bytes → {}", text.len(), text_path.display());
+    eprintln!(
+        "Text projection: {} bytes → {}",
+        text.len(),
+        text_path.display()
+    );
 
     // --- Per-repo text for reference.
     for (i, g) in merged.graphs.iter().enumerate() {
@@ -293,7 +295,13 @@ fn dump_quokka_gmap() {
                 .unwrap_or("?");
             eprintln!("  {score:.6}  {name}  ({qname})");
         }
-        assert!(!result.scores.is_empty(), "activation should find reachable nodes");
-        assert!(result.iterations < 100, "should converge before max_iterations");
+        assert!(
+            !result.scores.is_empty(),
+            "activation should find reachable nodes"
+        );
+        assert!(
+            result.iterations < 100,
+            "should converge before max_iterations"
+        );
     }
 }

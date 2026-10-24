@@ -8,20 +8,31 @@ use std::process::Command;
 use glia_code_domain::glia_config::parse_str;
 use glia_code_domain::{DocProvenance, DocRecord, DocSourceKind};
 use glia_core::RepoId;
-use glia_engine::intent::defs::{read_defs, DefRow, IdDefs, RowState, Tree};
+use glia_engine::intent::defs::{DefRow, IdDefs, RowState, Tree, read_defs};
 use glia_engine::intent::ids::IdVocab;
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("git");
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -67,9 +78,17 @@ fn fixture(d: &Path) -> String {
     git(d, &["init", "-q", "-b", "main"]);
     put(d, "specs/003-billing/tasks.md", TASKS);
     put(d, "docs/requirements.md", REQS);
-    put(d, "README.md", "# Shop\n\n- [ ] OPS-1: readme task in `src/shop.rs`\n");
+    put(
+        d,
+        "README.md",
+        "# Shop\n\n- [ ] OPS-1: readme task in `src/shop.rs`\n",
+    );
     put(d, "src/notes.md", "- [ ] T050 outside the doc rules\n");
-    put(d, "dev-notes/plan.md", "- [ ] T060 a planned task in src/plan.rs\n");
+    put(
+        d,
+        "dev-notes/plan.md",
+        "- [ ] T060 a planned task in src/plan.rs\n",
+    );
     put(d, "ops/tasks.json", TRACKER);
     put(d, "ops/broken.json", "{not json");
     put(d, "src/billing/export.rs", "pub fn export() {}\n");
@@ -79,7 +98,11 @@ fn fixture(d: &Path) -> String {
 }
 
 fn vocab(markdown: bool) -> IdVocab {
-    let md = if markdown { "markdown = [\"dev-notes/plan.md\"]\n" } else { "" };
+    let md = if markdown {
+        "markdown = [\"dev-notes/plan.md\"]\n"
+    } else {
+        ""
+    };
     let text = format!(
         "version = 1\n[ids]\n{md}[[ids.tracker]]\npath = \"ops/*.json\"\nlist = \"items\"\nfiles = \"files\"\nstate = \"status\"\ndone = [\"done\"]\n"
     );
@@ -89,7 +112,10 @@ fn vocab(markdown: bool) -> IdVocab {
 }
 
 fn row<'a>(defs: &'a IdDefs, id: &str) -> &'a DefRow {
-    defs.rows.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("no row for {id}: {:#?}", defs.rows))
+    defs.rows
+        .iter()
+        .find(|r| r.id == id)
+        .unwrap_or_else(|| panic!("no row for {id}: {:#?}", defs.rows))
 }
 
 #[test]
@@ -101,7 +127,11 @@ fn reads_task_rows_tables_headings_and_trackers() {
     defs.report("fixture");
     assert_eq!(defs.tree_error, None);
 
-    let ids: Vec<(&str, &str, i64)> = defs.rows.iter().map(|r| (r.page.as_str(), r.id.as_str(), r.line)).collect();
+    let ids: Vec<(&str, &str, i64)> = defs
+        .rows
+        .iter()
+        .map(|r| (r.page.as_str(), r.id.as_str(), r.line))
+        .collect();
     assert_eq!(
         ids,
         [
@@ -121,27 +151,53 @@ fn reads_task_rows_tables_headings_and_trackers() {
     assert_eq!(t12.state, RowState::Pending);
     assert_eq!(t12.family, "T");
     assert_eq!(t12.scope.as_deref(), Some("specs/003-billing"));
-    assert!(t12.names.iter().any(|n| n == "src/billing/export.rs"), "{:?}", t12.names);
-    assert!(t12.names.iter().any(|n| n == "src/billing/{model,view}.rs"), "the block's indented line: {:?}", t12.names);
-    assert_eq!(t12.head, "- [ ]   Add invoice export in src/billing/export.rs");
+    assert!(
+        t12.names.iter().any(|n| n == "src/billing/export.rs"),
+        "{:?}",
+        t12.names
+    );
+    assert!(
+        t12.names.iter().any(|n| n == "src/billing/{model,view}.rs"),
+        "the block's indented line: {:?}",
+        t12.names
+    );
+    assert_eq!(
+        t12.head,
+        "- [ ]   Add invoice export in src/billing/export.rs"
+    );
     assert_eq!(t12.heading_words, "tasks.md phase 1 tasks: billing (top) ");
     assert_eq!(t12.nearest_heading, "phase 1");
     assert_eq!(row(&defs, "T013").state, RowState::Done);
     // rank_eval's subject rule: `split from` takes the id just before it.
     assert_eq!(
         row(&defs, "T015").lineage,
-        [("T015".to_string(), "T009".to_string(), "was"), ("T009".to_string(), "T010".to_string(), "split-from")]
+        [
+            ("T015".to_string(), "T009".to_string(), "was"),
+            ("T009".to_string(), "T010".to_string(), "split-from")
+        ]
     );
     assert_eq!(row(&defs, "T014").state, RowState::None);
     assert_eq!(row(&defs, "T014").nearest_heading, "t014: retry");
-    assert!(defs.rows.iter().all(|r| r.id != "T099"), "a fenced task defines nothing");
-    assert!(defs.rows.iter().all(|r| r.id != "T050"), "src/notes.md is outside the doc rules");
-    assert!(defs.rows.iter().all(|r| r.id != "T060"), "dev-notes/ is read only through [ids] markdown");
+    assert!(
+        defs.rows.iter().all(|r| r.id != "T099"),
+        "a fenced task defines nothing"
+    );
+    assert!(
+        defs.rows.iter().all(|r| r.id != "T050"),
+        "src/notes.md is outside the doc rules"
+    );
+    assert!(
+        defs.rows.iter().all(|r| r.id != "T060"),
+        "dev-notes/ is read only through [ids] markdown"
+    );
     assert_eq!(defs.label_rows, 1, "`| FR-001 rollout |` is a label row");
     assert_eq!(row(&defs, "FR-001").scope, None);
 
     let ops7 = row(&defs, "OPS-7");
-    assert_eq!((ops7.state, ops7.head.as_str()), (RowState::Done, "rotate keys"));
+    assert_eq!(
+        (ops7.state, ops7.head.as_str()),
+        (RowState::Done, "rotate keys")
+    );
     assert_eq!(ops7.names, ["src/a.rs (new)"]);
     assert_eq!(row(&defs, "OPS-8").state, RowState::Pending);
     assert_eq!(row(&defs, "OPS-8").names, ["src/b.rs"]);
@@ -158,21 +214,46 @@ fn rev_and_work_trees_read_the_same_definitions() {
     let sha = fixture(d);
     let v = vocab(true);
     let work = read_defs(&Tree::Work(d), &[], &v, None);
-    let rev = read_defs(&Tree::Rev { repo: d, sha: sha.clone() }, &[], &v, None);
+    let rev = read_defs(
+        &Tree::Rev {
+            repo: d,
+            sha: sha.clone(),
+        },
+        &[],
+        &v,
+        None,
+    );
     rev.report("fixture");
     assert_eq!(work.rows, rev.rows);
     assert_eq!(
-        (work.label_rows, work.tracker_rows, work.trackers_unreadable, work.pages),
-        (rev.label_rows, rev.tracker_rows, rev.trackers_unreadable, rev.pages)
+        (
+            work.label_rows,
+            work.tracker_rows,
+            work.trackers_unreadable,
+            work.pages
+        ),
+        (
+            rev.label_rows,
+            rev.tracker_rows,
+            rev.trackers_unreadable,
+            rev.pages
+        )
     );
     assert_eq!(rev.rev, sha[..12]);
     // The [ids] markdown glob admits a file the doc include rule does not.
     let t60 = row(&rev, "T060");
-    assert_eq!((t60.page.as_str(), t60.state), ("dev-notes/plan.md", RowState::Pending));
+    assert_eq!(
+        (t60.page.as_str(), t60.state),
+        ("dev-notes/plan.md", RowState::Pending)
+    );
     assert!(rev.rows.iter().all(|r| r.id != "T050"));
 
     // A later working-tree edit is not in the rev's tree.
-    put(d, "docs/requirements.md", &format!("{REQS}| FR-003 | new | src/x |\n"));
+    put(
+        d,
+        "docs/requirements.md",
+        &format!("{REQS}| FR-003 | new | src/x |\n"),
+    );
     let work = read_defs(&Tree::Work(d), &[], &v, None);
     let rev = read_defs(&Tree::Rev { repo: d, sha }, &[], &v, None);
     assert!(work.rows.iter().any(|r| r.id == "FR-003"));
@@ -184,7 +265,15 @@ fn an_unknown_rev_is_a_tree_error_not_a_panic() {
     let tmp = tempfile::tempdir().expect("tmp");
     let d = tmp.path();
     fixture(d);
-    let defs = read_defs(&Tree::Rev { repo: d, sha: "0".repeat(40) }, &[], &vocab(false), None);
+    let defs = read_defs(
+        &Tree::Rev {
+            repo: d,
+            sha: "0".repeat(40),
+        },
+        &[],
+        &vocab(false),
+        None,
+    );
     assert!(defs.tree_error.is_some());
     assert!(defs.rows.is_empty());
 }
@@ -194,12 +283,22 @@ fn project_root_specs_are_scoped_under_their_root() {
     let tmp = tempfile::tempdir().expect("tmp");
     let d = tmp.path();
     git(d, &["init", "-q", "-b", "main"]);
-    put(d, "web/specs/004-cart/tasks.md", "- [ ] T001 cart in web/src/cart.ts\n");
+    put(
+        d,
+        "web/specs/004-cart/tasks.md",
+        "- [ ] T001 cart in web/src/cart.ts\n",
+    );
     put(d, "web/package.json", "{\"name\":\"web\"}\n");
     let defs = read_defs(&Tree::Work(d), &["web"], &IdVocab::default(), None);
-    assert_eq!(row(&defs, "T001").scope.as_deref(), Some("web/specs/004-cart"));
+    assert_eq!(
+        row(&defs, "T001").scope.as_deref(),
+        Some("web/specs/004-cart")
+    );
     let none = read_defs(&Tree::Work(d), &[], &IdVocab::default(), None);
-    assert!(none.rows.is_empty(), "without the PROJECT root the doc is not ingested");
+    assert!(
+        none.rows.is_empty(),
+        "without the PROJECT root the doc is not ingested"
+    );
 }
 
 #[test]
@@ -219,10 +318,19 @@ fn snapshot_sections_define_ids() {
         },
     };
     let line = serde_json::to_string(&record).expect("serialise");
-    put(d, ".glia/docs-snapshot/manifest.jsonl", &format!("{line}\n"));
+    put(
+        d,
+        ".glia/docs-snapshot/manifest.jsonl",
+        &format!("{line}\n"),
+    );
     let built = glia_engine::generate_one(d.to_str().expect("utf-8")).expect("build");
     let repo = RepoId(*built.repo_labels.keys().next().expect("one repo"));
-    let defs = read_defs(&Tree::Work(d), &[], &IdVocab::default(), Some((&built.merged, repo)));
+    let defs = read_defs(
+        &Tree::Work(d),
+        &[],
+        &IdVocab::default(),
+        Some((&built.merged, repo)),
+    );
     defs.report("snapshot");
     assert_eq!(defs.snapshot_sections, 2);
     let r = row(&defs, "PAY-12");

@@ -10,11 +10,11 @@
 
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::trace::{TraceOptions, cross_stack_trace};
 use glia_engine::{
     BlastOptions, ParseCache, blast_radius, generate_many, generate_one, generate_one_with_cache,
     locate_node, node_file, service_map,
 };
-use glia_engine::trace::{TraceOptions, cross_stack_trace};
 use glia_graph::MergedGraph;
 use std::path::Path;
 

@@ -112,7 +112,10 @@ pub struct ExplainLimits {
 
 impl Default for ExplainLimits {
     fn default() -> Self {
-        ExplainLimits { max_leaves: MAX_LEAVES, max_candidates: DEFAULT_MAX_ROWS }
+        ExplainLimits {
+            max_leaves: MAX_LEAVES,
+            max_candidates: DEFAULT_MAX_ROWS,
+        }
     }
 }
 
@@ -170,7 +173,11 @@ pub enum Leaf {
     /// A `node(id, kind)` row.
     Node { id: NodeId, kind: String },
     /// A domain attribute row.
-    Attr { id: NodeId, name: String, value: Value },
+    Attr {
+        id: NodeId,
+        name: String,
+        value: Value,
+    },
     /// A `cell(id, cell_type, text)` row.
     Cell { id: NodeId, cell_type: String },
     /// A domain or string builtin call and its row.
@@ -263,7 +270,9 @@ impl Clone for Witness {
         for i in (0..nodes.len()).rev() {
             let (w, first, len) = nodes[i];
             let mut copy = w.shallow();
-            copy.support = (first..first + len).filter_map(|c| done[c].take()).collect();
+            copy.support = (first..first + len)
+                .filter_map(|c| done[c].take())
+                .collect();
             done[i] = Some(copy);
         }
         match done.into_iter().next() {
@@ -341,7 +350,10 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
     /// [`ExplainLimits::default`] with the evaluation's own row budget as the
     /// candidate cap.
     pub fn explain_limits(&self) -> ExplainLimits {
-        ExplainLimits { max_leaves: MAX_LEAVES, max_candidates: self.max_rows }
+        ExplainLimits {
+            max_leaves: MAX_LEAVES,
+            max_candidates: self.max_rows,
+        }
     }
 
     /// The minimal-height derivation of `row` at its tier (module doc). `row` comes
@@ -448,7 +460,13 @@ struct Cand {
 enum Child {
     /// An IDB tuple, expanded when placed; `splice`: an adorned copy, whose support
     /// takes its place.
-    Tuple { pred: PredId, row: Vec<Handle>, tier: Tier, meta: RowMeta, splice: bool },
+    Tuple {
+        pred: PredId,
+        row: Vec<Handle>,
+        tier: Tier,
+        meta: RowMeta,
+        splice: bool,
+    },
     /// A finished leaf or negation.
     Done(Witness),
     /// An aggregate binding and its body.
@@ -496,7 +514,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         let root = self.tuple_witness(at.pred, &at.row, at.level, at.meta)?;
         let first = self.expand(at.pred, &at.row, at.level, at.meta)?;
         let mut arena: Vec<(Witness, Vec<usize>)> = vec![(root, Vec::new())];
-        let mut frames = vec![Frame { attach: 0, pending: reversed(first) }];
+        let mut frames = vec![Frame {
+            attach: 0,
+            pending: reversed(first),
+        }];
         let (mut leaves, mut truncated) = (0usize, false);
         while let Some(f) = frames.last_mut() {
             let attach = f.attach;
@@ -511,7 +532,13 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 continue;
             };
             match child {
-                Child::Tuple { pred, row, tier, meta, splice } => {
+                Child::Tuple {
+                    pred,
+                    row,
+                    tier,
+                    meta,
+                    splice,
+                } => {
                     let kids = self.expand(pred, &row, tier, meta)?;
                     let to = if splice {
                         attach
@@ -519,7 +546,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                         let w = self.tuple_witness(pred, &row, tier, meta)?;
                         place(&mut arena, attach, w)
                     };
-                    frames.push(Frame { attach: to, pending: reversed(kids) });
+                    frames.push(Frame {
+                        attach: to,
+                        pending: reversed(kids),
+                    });
                 }
                 Child::Done(w) => {
                     leaves += usize::from(w.leaf.is_some());
@@ -527,7 +557,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 }
                 Child::Binding(w, kids) => {
                     let to = place(&mut arena, attach, w);
-                    frames.push(Frame { attach: to, pending: reversed(kids) });
+                    frames.push(Frame {
+                        attach: to,
+                        pending: reversed(kids),
+                    });
                 }
             }
         }
@@ -542,7 +575,14 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             return Err(self.internal(at.pred, "the witness tree lost its root".into()));
         };
         let sig = self.signature(at.pred);
-        let line = explain_line(&sig, at.level, at.meta.height, leaves, self.candidates, truncated);
+        let line = explain_line(
+            &sig,
+            at.level,
+            at.meta.height,
+            leaves,
+            self.candidates,
+            truncated,
+        );
         eprintln!("{line}");
         Ok(root)
     }
@@ -553,7 +593,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         let at = &row.at;
         let info = self.an.preds.get(at.pred as usize);
         let user = info.is_some_and(|i| i.kind == PredKind::Idb && !i.synthetic);
-        let held = self.relations.get(at.pred as usize).and_then(|r| r.contains(&at.row));
+        let held = self
+            .relations
+            .get(at.pred as usize)
+            .and_then(|r| r.contains(&at.row));
         let same = user
             && held.is_some_and(|(t, m, _)| t == at.level && m == at.meta)
             && at.row.len() == row.values.len()
@@ -569,7 +612,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             Some(i) => i.signature(),
             None => format!("#{}/{}", at.pred, row.values.len()),
         };
-        Err(RulesError::Unknown { predicate, known: self.outputs.clone() })
+        Err(RulesError::Unknown {
+            predicate,
+            known: self.outputs.clone(),
+        })
     }
 
     /// `p` as `name/arity`, a synthetic copy by its user predicate.
@@ -578,7 +624,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
     }
 
     fn internal(&self, p: PredId, message: String) -> RulesError {
-        RulesError::Type { predicate: self.signature(p), message: format!("explain: {message}") }
+        RulesError::Type {
+            predicate: self.signature(p),
+            message: format!("explain: {message}"),
+        }
     }
 
     fn owned(&self, row: &[Handle]) -> Vec<Value> {
@@ -685,15 +734,31 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             })
             .collect();
         let accept = |b: &Binding<'_>| -> Option<Vec<Handle>> {
-            let fits = head.iter().zip(&consts).zip(row).all(|((p, c), want)| match p {
-                KeyPart::Var(v) => b.vars.get(usize::from(*v)) == Some(want),
-                KeyPart::Const(_) => *c == Some(*want),
-            });
+            let fits = head
+                .iter()
+                .zip(&consts)
+                .zip(row)
+                .all(|((p, c), want)| match p {
+                    KeyPart::Var(v) => b.vars.get(usize::from(*v)) == Some(want),
+                    KeyPart::Const(_) => *c == Some(*want),
+                });
             fits.then(Vec::new)
         };
-        let mode = Mode::Explain { level, max_height: meta.height, bound: &pairs };
+        let mode = Mode::Explain {
+            level,
+            max_height: meta.height,
+            bound: &pairs,
+        };
         let mut fresh = Vec::new();
-        let cands = self.collect(&body.steps, body.kept, &mut fresh, mode, rule, &accept, true)?;
+        let cands = self.collect(
+            &body.steps,
+            body.kept,
+            &mut fresh,
+            mode,
+            rule,
+            &accept,
+            true,
+        )?;
         let best = self.pick(&cands, &body.lit_of, rule, level, meta.height)?;
         let kids = self.children(
             rule,
@@ -739,7 +804,12 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 let (mut steps, indexes) = plan_bound(an, catalog, rule.index, &mask);
                 let map = self.ensure(&indexes)?;
                 resolve_indexes(&mut steps, &map);
-                Body { lit_of: map_steps(rule, &steps, an, catalog), steps, kept: None, head: None }
+                Body {
+                    lit_of: map_steps(rule, &steps, an, catalog),
+                    steps,
+                    kept: None,
+                    head: None,
+                }
             }
         };
         let body = Rc::new(body);
@@ -751,14 +821,21 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
     fn ensure(&mut self, indexes: &[(PredId, Vec<u8>)]) -> Result<Vec<usize>, RulesError> {
         let mut map = Vec::with_capacity(indexes.len());
         for (p, perm) in indexes {
-            match self.relations.get_mut(*p as usize).and_then(|r| r.ensure_index(perm)) {
+            match self
+                .relations
+                .get_mut(*p as usize)
+                .and_then(|r| r.ensure_index(perm))
+            {
                 Some(i) => map.push(i),
                 None => {
                     let sig = self.signature(*p);
                     let message = format!(
                         "`{sig}` is too wide to index: a relation key holds at most 256 columns"
                     );
-                    return Err(RulesError::Type { predicate: sig, message });
+                    return Err(RulesError::Type {
+                        predicate: sig,
+                        message,
+                    });
                 }
             }
         }
@@ -770,9 +847,9 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         match c {
             ConstVal::Str(s) => self.values.find(ValueRef::Str(s)),
             ConstVal::Int(i) => self.values.find(ValueRef::Int(*i)),
-            ConstVal::CatSet(set) => {
-                self.values.find(ValueRef::Str(&set_text(set, self.src.tables())))
-            }
+            ConstVal::CatSet(set) => self
+                .values
+                .find(ValueRef::Str(&set_text(set, self.src.tables()))),
         }
     }
 
@@ -833,7 +910,13 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             if count > cap {
                 over = true;
                 let (predicate, source) = (predicate.clone(), source.clone());
-                return Err(RulesError::Budget { predicate, source, line, rows: count, cap });
+                return Err(RulesError::Budget {
+                    predicate,
+                    source,
+                    line,
+                    rows: count,
+                    cap,
+                });
             }
             let key = (b.level, b.height);
             if prune {
@@ -884,7 +967,11 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         };
         for c in &cands[1..] {
             let o = c.level.cmp(&best.level).then(c.height.cmp(&best.height));
-            let o = if o.is_eq() { self.cmp_body(&c.lits, &best.lits, lit_of) } else { o };
+            let o = if o.is_eq() {
+                self.cmp_body(&c.lits, &best.lits, lit_of)
+            } else {
+                o
+            };
             if o.is_lt() {
                 best = c;
             }
@@ -957,7 +1044,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                     let Some(CLit::Neg(p, terms, _)) = lit else {
                         return Err(self.internal(rule.head, unmatched()));
                     };
-                    let values = terms.iter().map(|t| self.term_value(t, &cand.vars)).collect();
+                    let values = terms
+                        .iter()
+                        .map(|t| self.term_value(t, &cand.vars))
+                        .collect();
                     let w = Witness {
                         predicate: self.signature(*p),
                         values,
@@ -1012,12 +1102,18 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                     return Ok(None);
                 }
                 let (row, tier, meta) = (lit.row.clone(), lit.tier, lit.meta);
-                Ok(Some(Child::Tuple { pred: p, row, tier, meta, splice: info.synthetic }))
+                Ok(Some(Child::Tuple {
+                    pred: p,
+                    row,
+                    tier,
+                    meta,
+                    splice: info.synthetic,
+                }))
             }
             PredKind::Edb(e) => Ok(Some(Child::Done(self.edb_leaf(p, e, lit)?))),
-            PredKind::Builtin(b) => {
-                Ok(Some(Child::Done(self.builtin_leaf(p, b, terms, step, lit, vars)?)))
-            }
+            PredKind::Builtin(b) => Ok(Some(Child::Done(
+                self.builtin_leaf(p, b, terms, step, lit, vars)?,
+            ))),
         }
     }
 
@@ -1046,15 +1142,34 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 let Some(ordinal) = ordinal else {
                     return Err(self.internal(p, "an edge row with no edge behind it".into()));
                 };
-                Leaf::Edge(EdgeHop { from, to, category, ordinal, tier: lit.tier })
+                Leaf::Edge(EdgeHop {
+                    from,
+                    to,
+                    category,
+                    ordinal,
+                    tier: lit.tier,
+                })
             }
-            EdbPred::Node => Leaf::Node { id: node(0)?, kind: text(1) },
-            EdbPred::Cell => Leaf::Cell { id: node(0)?, cell_type: text(1) },
+            EdbPred::Node => Leaf::Node {
+                id: node(0)?,
+                kind: text(1),
+            },
+            EdbPred::Cell => Leaf::Cell {
+                id: node(0)?,
+                cell_type: text(1),
+            },
             EdbPred::Attr(_) => {
-                let name =
-                    self.an.preds.get(p as usize).map_or_else(String::new, |i| i.name.clone());
+                let name = self
+                    .an
+                    .preds
+                    .get(p as usize)
+                    .map_or_else(String::new, |i| i.name.clone());
                 let value = vals.get(1).cloned().unwrap_or(Value::Str(String::new()));
-                Leaf::Attr { id: node(0)?, name, value }
+                Leaf::Attr {
+                    id: node(0)?,
+                    name,
+                    value,
+                }
             }
             EdbPred::Kind | EdbPred::Category | EdbPred::CarryCategory => Leaf::Registry,
         };
@@ -1071,7 +1186,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         if let Some(id) = name.strip_prefix('#').and_then(|n| n.parse::<u32>().ok()) {
             return EdgeCategoryId(id);
         }
-        self.src.edges().nth(ordinal as usize).map_or(EdgeCategoryId(u32::MAX), |e| e.category)
+        self.src
+            .edges()
+            .nth(ordinal as usize)
+            .map_or(EdgeCategoryId(u32::MAX), |e| e.category)
     }
 
     /// The first edge with this key at `tier`, in global order.
@@ -1098,7 +1216,12 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         vars: &[Handle],
     ) -> Result<Witness, RulesError> {
         let mut values = self.owned(&lit.row);
-        values.extend(terms.iter().skip(lit.row.len()).map(|t| self.term_value(t, vars)));
+        values.extend(
+            terms
+                .iter()
+                .skip(lit.row.len())
+                .map(|t| self.term_value(t, vars)),
+        );
         let ends = match (values.first(), values.get(1)) {
             (Some(Value::Node(x)), Some(Value::Node(y))) => Some((*x, *y)),
             _ => None,
@@ -1112,7 +1235,12 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 };
                 Leaf::Path(hops.iter().map(edge_hop).collect())
             }
-            (Step::Call { cats: Some(cats), .. }, Some((x, rep))) if scc => {
+            (
+                Step::Call {
+                    cats: Some(cats), ..
+                },
+                Some((x, rep)),
+            ) if scc => {
                 let hops = self.closure.cycle(cats, x, rep, lit.tier);
                 if hops.is_empty() {
                     return Err(self.internal(p, "an scc row with no cycle behind it".into()));
@@ -1121,7 +1249,10 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             }
             _ => {
                 let name = decls.get(b).map_or_else(String::new, |d| d.name.clone());
-                Leaf::Builtin { name, args: self.owned(&lit.row) }
+                Leaf::Builtin {
+                    name,
+                    args: self.owned(&lit.row),
+                }
             }
         };
         Ok(Witness::leaf(self.signature(p), values, lit.tier, leaf))
@@ -1141,7 +1272,16 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         fresh: &mut Vec<MultiState>,
         max_height: u32,
     ) -> Result<Vec<(usize, Child)>, RulesError> {
-        let Step::ReachMulti { slot, cats, seed, seed_var, backward, bind, .. } = step else {
+        let Step::ReachMulti {
+            slot,
+            cats,
+            seed,
+            seed_var,
+            backward,
+            bind,
+            ..
+        } = step
+        else {
             return Ok(Vec::new());
         };
         let head = rule.head;
@@ -1160,11 +1300,23 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         };
         let seeds: Vec<NodeId> = states
             .get(*slot)
-            .map(|m| m.seeds.iter().filter(|(_, l)| *l <= t).map(|(id, _)| *id).collect())
+            .map(|m| {
+                m.seeds
+                    .iter()
+                    .filter(|(_, l)| *l <= t)
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
             .unwrap_or_default();
-        let hops = self.closure.path(cats, &seeds, reached, t, *backward).unwrap_or_default();
-        let nearest =
-            if *backward { hops.last().map(|h| h.to) } else { hops.first().map(|h| h.from) };
+        let hops = self
+            .closure
+            .path(cats, &seeds, reached, t, *backward)
+            .unwrap_or_default();
+        let nearest = if *backward {
+            hops.last().map(|h| h.to)
+        } else {
+            hops.first().map(|h| h.from)
+        };
         let Some(s) = nearest.and_then(|n| self.values.find(ValueRef::Node(n))) else {
             return Err(self.internal(head, "a hoisted reach with no path from a seed".into()));
         };
@@ -1179,11 +1331,18 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         }
         let values = terms.iter().map(|t| self.term_value(t, &vars)).collect();
         let path = Leaf::Path(hops.iter().map(edge_hop).collect());
-        let mut out = vec![(li, Child::Done(Witness::leaf(self.signature(*p), values, t, path)))];
+        let mut out = vec![(
+            li,
+            Child::Done(Witness::leaf(self.signature(*p), values, t, path)),
+        )];
         let seed_lit_of = map_steps(rule, seed, self.an, &self.declared.catalog);
         let sv = usize::from(*seed_var);
         let accept = |b: &Binding<'_>| (b.vars.get(sv) == Some(&s)).then(Vec::new);
-        let mode = Mode::Explain { level: t, max_height, bound: &[] };
+        let mode = Mode::Explain {
+            level: t,
+            max_height,
+            bound: &[],
+        };
         let cands = self.collect(seed, kept, fresh, mode, rule, &accept, true)?;
         let best = self.pick(&cands, &seed_lit_of, rule, t, max_height)?;
         out.extend(self.children_at(rule, seed, &seed_lit_of, best, kept, fresh, max_height)?);
@@ -1216,13 +1375,17 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             plan_aggregate(an, &declared.catalog, rule.index, &size)
         };
         let Some(mut plan) = planned else {
-            return Err(
-                self.internal(rule.head, "an aggregate row of a rule with no aggregate".into())
-            );
+            return Err(self.internal(
+                rule.head,
+                "an aggregate row of a rule with no aggregate".into(),
+            ));
         };
         let map = self.ensure(&plan.indexes)?;
         resolve_indexes(&mut plan.steps, &map);
-        let ran = plans.get(k).and_then(|p| p.rules.first()).and_then(|r| r.variants.first());
+        let ran = plans
+            .get(k)
+            .and_then(|p| p.rules.first())
+            .and_then(|r| r.variants.first());
         let kept = ran.is_some_and(|v| v.steps == plan.steps).then_some(k);
         let mut fresh = vec![MultiState::default(); plan.multi_slots];
         let group = plan.spec.group;
@@ -1255,7 +1418,11 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
             (proj.get(..group) == Some(&key[..])).then_some(proj)
         };
         let lit_of = map_steps(rule, &plan.steps, an, &declared.catalog);
-        let mode = Mode::Explain { level, max_height: meta.height, bound: &[] };
+        let mode = Mode::Explain {
+            level,
+            max_height: meta.height,
+            bound: &[],
+        };
         let mut cands = self.collect(&plan.steps, kept, &mut fresh, mode, rule, &accept, false)?;
         // Group by projection (handle order only gathers a group), then each group's
         // best binding, then the groups by rendered projection.
@@ -1274,8 +1441,15 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         let (sig, rr) = (self.signature(rule.head), self.rule_ref(rule));
         let mut out = Vec::with_capacity(chosen.len());
         for cand in chosen {
-            let kids =
-                self.children(rule, &plan.steps, &lit_of, cand, kept, &mut fresh, meta.height)?;
+            let kids = self.children(
+                rule,
+                &plan.steps,
+                &lit_of,
+                cand,
+                kept,
+                &mut fresh,
+                meta.height,
+            )?;
             let w = Witness {
                 predicate: sig.clone(),
                 values: self.owned(&cand.proj),
@@ -1344,7 +1518,10 @@ fn set_text(set: &CatSet, tables: &DomainTables) -> String {
     let reg = &tables.registries;
     let mut names: Vec<String> = ids
         .iter()
-        .map(|c| reg.category_name(*c).map_or_else(|| format!("#{}", c.0), str::to_string))
+        .map(|c| {
+            reg.category_name(*c)
+                .map_or_else(|| format!("#{}", c.0), str::to_string)
+        })
         .collect();
     names.sort();
     names.join("|")
@@ -1377,36 +1554,90 @@ fn step_is(step: &Step, lit: &CLit, an: &Analysis, catalog: &Catalog) -> bool {
     };
     let walks = |p: &PredId, terms: &[CTerm], cats: &CatSet, depth: &Option<u32>| {
         let Some(b) = builtin(p) else { return false };
-        let reaches = catalog.builtins.get(b).is_some_and(|d| d.kind == BuiltinKind::Reaches);
+        let reaches = catalog
+            .builtins
+            .get(b)
+            .is_some_and(|d| d.kind == BuiltinKind::Reaches);
         reaches
             && closure_set(catalog, b, terms).as_ref() == Some(cats)
             && depth_of(terms) == *depth
     };
     match (step, lit) {
-        (Step::Scan { pred, binds, checks, .. }, CLit::Pos(p, terms, _)) => {
-            p == pred && columns_are(terms, &columns(terms.len(), &[], &[], binds, checks))
-        }
-        (Step::Lookup { pred, perm, key, binds, checks, .. }, CLit::Pos(p, terms, _)) => {
-            p == pred && columns_are(terms, &columns(terms.len(), perm, key, binds, checks))
-        }
-        (Step::Neg { pred, perm, key, .. }, CLit::Neg(p, terms, _)) => {
-            p == pred && columns_are(terms, &columns(terms.len(), perm, key, &[], &[]))
-        }
-        (Step::Call { builtin: b, args, binds, checks, .. }, CLit::Pos(p, terms, _)) => {
-            builtin(p) == Some(*b) && columns_are(terms, &with_free(args.clone(), binds, checks))
-        }
-        (Step::NegCall { builtin: b, args, .. }, CLit::Neg(p, terms, _)) => {
-            builtin(p) == Some(*b) && columns_are(terms, args)
-        }
-        (Step::Reach { cats, depth, from, to, binds, checks, .. }, CLit::Pos(p, terms, _)) => {
+        (
+            Step::Scan {
+                pred,
+                binds,
+                checks,
+                ..
+            },
+            CLit::Pos(p, terms, _),
+        ) => p == pred && columns_are(terms, &columns(terms.len(), &[], &[], binds, checks)),
+        (
+            Step::Lookup {
+                pred,
+                perm,
+                key,
+                binds,
+                checks,
+                ..
+            },
+            CLit::Pos(p, terms, _),
+        ) => p == pred && columns_are(terms, &columns(terms.len(), perm, key, binds, checks)),
+        (
+            Step::Neg {
+                pred, perm, key, ..
+            },
+            CLit::Neg(p, terms, _),
+        ) => p == pred && columns_are(terms, &columns(terms.len(), perm, key, &[], &[])),
+        (
+            Step::Call {
+                builtin: b,
+                args,
+                binds,
+                checks,
+                ..
+            },
+            CLit::Pos(p, terms, _),
+        ) => builtin(p) == Some(*b) && columns_are(terms, &with_free(args.clone(), binds, checks)),
+        (
+            Step::NegCall {
+                builtin: b, args, ..
+            },
+            CLit::Neg(p, terms, _),
+        ) => builtin(p) == Some(*b) && columns_are(terms, args),
+        (
+            Step::Reach {
+                cats,
+                depth,
+                from,
+                to,
+                binds,
+                checks,
+                ..
+            },
+            CLit::Pos(p, terms, _),
+        ) => {
             let ends = with_free(vec![from.clone(), to.clone()], binds, checks);
             walks(p, terms, cats, depth) && ends_are(terms, &ends)
         }
-        (Step::NegReach { cats, depth, from, to }, CLit::Neg(p, terms, _)) => {
-            walks(p, terms, cats, depth) && ends_are(terms, &[from.clone(), to.clone()])
-        }
         (
-            Step::ReachMulti { cats, depth, seed_var, bind, backward, .. },
+            Step::NegReach {
+                cats,
+                depth,
+                from,
+                to,
+            },
+            CLit::Neg(p, terms, _),
+        ) => walks(p, terms, cats, depth) && ends_are(terms, &[from.clone(), to.clone()]),
+        (
+            Step::ReachMulti {
+                cats,
+                depth,
+                seed_var,
+                bind,
+                backward,
+                ..
+            },
             CLit::Pos(p, terms, _),
         ) => {
             let (s, b) = (Some(KeyPart::Var(*seed_var)), Some(KeyPart::Var(*bind)));
@@ -1510,8 +1741,16 @@ r(z) :- r(y), edge(y, z, "CALLS").
 
     /// The row of `pred` whose rendered values, space-joined, are `want`.
     fn row_of(ev: &Evaluation<'_, MemSource>, pred: &str, want: &str) -> Row {
-        let rows = ev.rows(pred).unwrap_or_else(|e| panic!("rows({pred}): {e}"));
-        let text = |r: &Row| r.values.iter().map(|v| ev.render(v)).collect::<Vec<_>>().join(" ");
+        let rows = ev
+            .rows(pred)
+            .unwrap_or_else(|e| panic!("rows({pred}): {e}"));
+        let text = |r: &Row| {
+            r.values
+                .iter()
+                .map(|v| ev.render(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         rows.iter()
             .find(|r| text(r) == want)
             .cloned()
@@ -1519,7 +1758,8 @@ r(z) :- r(y), edge(y, z, "CALLS").
     }
 
     fn explain(ev: &mut Evaluation<'_, MemSource>, row: &Row, limits: &ExplainLimits) -> Witness {
-        ev.explain(row, limits).unwrap_or_else(|e| panic!("explain failed: {e}"))
+        ev.explain(row, limits)
+            .unwrap_or_else(|e| panic!("explain failed: {e}"))
     }
 
     /// `n` numbered testkit nodes (`n<i:05>`, `index` = i, salt 0) and no edges.
@@ -1536,7 +1776,13 @@ r(z) :- r(y), edge(y, z, "CALLS").
     }
 
     fn edge(g: &mut MemSource, from: u32, to: u32, cat: &str, tier: Tier) {
-        g.edge(node_id(0, from), node_id(0, to), category_id(cat), Confidence::Strong, tier);
+        g.edge(
+            node_id(0, from),
+            node_id(0, to),
+            category_id(cat),
+            Confidence::Strong,
+            tier,
+        );
     }
 
     /// A source of named nodes (`id(i)` is `node_id(0, i)`) and CALLS edges by name.
@@ -1547,7 +1793,13 @@ r(z) :- r(y), edge(y, z, "CALLS").
         }
         let at = |n: &str| node_id(0, names.iter().position(|x| x.0 == n).unwrap_or(0) as u32);
         for (from, to, tier) in edges {
-            g.edge(at(from), at(to), category_id("CALLS"), Confidence::Strong, *tier);
+            g.edge(
+                at(from),
+                at(to),
+                category_id("CALLS"),
+                Confidence::Strong,
+                *tier,
+            );
         }
         g
     }
@@ -1641,11 +1893,24 @@ r(z) :- r(y), edge(y, z, "CALLS").
         let mut ev = eval(TC, &g, &Options::default());
         let row = row_of(&ev, "tc", "n00000 n00003");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
-        let want =
-            vec![hop(0, 1, 0, Tier::Fact), hop(1, 2, 1, Tier::Fact), hop(2, 3, 2, Tier::Fact)];
+        let want = vec![
+            hop(0, 1, 0, Tier::Fact),
+            hop(1, 2, 1, Tier::Fact),
+            hop(2, 3, 2, Tier::Fact),
+        ];
         assert_eq!(w.leaf_edges(), want);
-        assert_eq!((w.predicate.as_str(), w.height, w.tier), ("tc/2", 3, Tier::Fact));
-        assert_eq!(w.rule, Some(RuleRef { index: 1, source: "rules".into(), line: 2 }));
+        assert_eq!(
+            (w.predicate.as_str(), w.height, w.tier),
+            ("tc/2", 3, Tier::Fact)
+        );
+        assert_eq!(
+            w.rule,
+            Some(RuleRef {
+                index: 1,
+                source: "rules".into(),
+                line: 2
+            })
+        );
         assert_eq!(
             outline(&ev, &w),
             [
@@ -1674,7 +1939,11 @@ r(z) :- r(y), edge(y, z, "CALLS").
         let w = explain(&mut ev, &row, &ExplainLimits::default());
         assert_eq!(
             w.leaf_edges(),
-            [hop(0, 1, 1, Tier::Fact), hop(1, 2, 2, Tier::Fact), hop(2, 3, 3, Tier::Fact)]
+            [
+                hop(0, 1, 1, Tier::Fact),
+                hop(1, 2, 2, Tier::Fact),
+                hop(2, 3, 3, Tier::Fact)
+            ]
         );
         assert_eq!(w.tier, Tier::Fact);
     }
@@ -1683,7 +1952,12 @@ r(z) :- r(y), edge(y, z, "CALLS").
     fn checkout_stable_choice() {
         // Two FACT derivations of tc(a, d) at height 2, through b and through c; c
         // renders first, b comes first in edge and handle order.
-        let names = [("a", FUNCTION), ("x1", FUNCTION), ("x0", FUNCTION), ("d", FUNCTION)];
+        let names = [
+            ("a", FUNCTION),
+            ("x1", FUNCTION),
+            ("x0", FUNCTION),
+            ("d", FUNCTION),
+        ];
         let edges = [
             ("a", "x1", Tier::Fact),
             ("x1", "d", Tier::Fact),
@@ -1695,7 +1969,10 @@ r(z) :- r(y), edge(y, z, "CALLS").
         let mut ev = eval(TC, &g, &Options::default());
         let row = row_of(&ev, "tc", "a d");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
-        assert_eq!(rendered_hops(&g, &w), ["a->x0 CALLS fact", "x0->d CALLS fact"]);
+        assert_eq!(
+            rendered_hops(&g, &w),
+            ["a->x0 CALLS fact", "x0->d CALLS fact"]
+        );
         let mut ev2 = eval(TC, &g2, &Options::default());
         let row2 = row_of(&ev2, "tc", "a d");
         let w2 = explain(&mut ev2, &row2, &ExplainLimits::default());
@@ -1724,7 +2001,13 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
         let w = explain(&mut ev, &row, &ExplainLimits::default());
         assert_eq!(w.support.len(), 2, "{w:?}");
         let node = &w.support[0];
-        assert_eq!(node.leaf, Some(Leaf::Node { id: node_id(0, 1), kind: "ROUTE".into() }));
+        assert_eq!(
+            node.leaf,
+            Some(Leaf::Node {
+                id: node_id(0, 1),
+                kind: "ROUTE".into()
+            })
+        );
         let neg = &w.support[1];
         assert_eq!(
             (
@@ -1747,10 +2030,21 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
         for (f, t) in [(4, 3), (0, 3), (1, 3), (2, 4)] {
             edge(&mut g, f, t, "CALLS", Tier::Fact);
         }
-        let mut ev = eval(r#"fan(y, count(x)) :- edge(x, y, "CALLS")."#, &g, &Options::default());
+        let mut ev = eval(
+            r#"fan(y, count(x)) :- edge(x, y, "CALLS")."#,
+            &g,
+            &Options::default(),
+        );
         let row = row_of(&ev, "fan", "n00003 3");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
-        assert_eq!(w.rule, Some(RuleRef { index: 0, source: "rules".into(), line: 1 }));
+        assert_eq!(
+            w.rule,
+            Some(RuleRef {
+                index: 0,
+                source: "rules".into(),
+                line: 1
+            })
+        );
         assert_eq!(
             outline(&ev, &w),
             [
@@ -1768,8 +2062,13 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
     #[test]
     fn reaches_path_leaf() {
         // Two ROUTE seeds: a1 (renders first) reaches t in 3 hops, a2 in 1.
-        let names =
-            [("a1", ROUTE), ("a2", ROUTE), ("x", FUNCTION), ("y", FUNCTION), ("t", FUNCTION)];
+        let names = [
+            ("a1", ROUTE),
+            ("a2", ROUTE),
+            ("x", FUNCTION),
+            ("y", FUNCTION),
+            ("t", FUNCTION),
+        ];
         let edges = [
             ("a1", "x", Tier::Fact),
             ("x", "y", Tier::Fact),
@@ -1779,9 +2078,15 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
         let g = named(&names, &edges);
         let text = r#"far(b) :- node(a, "ROUTE"), reaches(a, b, "CALLS")."#;
         let mut ev = eval(text, &g, &Options::default());
-        let hoisted = ev.plans.iter().flat_map(|p| &p.rules).flat_map(|r| &r.variants);
+        let hoisted = ev
+            .plans
+            .iter()
+            .flat_map(|p| &p.rules)
+            .flat_map(|r| &r.variants);
         assert!(
-            hoisted.into_iter().any(|v| matches!(v.steps.first(), Some(Step::ReachMulti { .. }))),
+            hoisted
+                .into_iter()
+                .any(|v| matches!(v.steps.first(), Some(Step::ReachMulti { .. }))),
             "far's evaluation plan hoists the reach"
         );
         let row = row_of(&ev, "far", "t");
@@ -1798,7 +2103,10 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
         // A node only a1 reaches is explained from a1.
         let row = row_of(&ev, "far", "y");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
-        assert_eq!(rendered_hops(&g, &w), ["a1->x CALLS fact", "x->y CALLS fact"]);
+        assert_eq!(
+            rendered_hops(&g, &w),
+            ["a1->x CALLS fact", "x->y CALLS fact"]
+        );
     }
 
     #[test]
@@ -1815,7 +2123,11 @@ unhandled(r) :- node(r, "ROUTE"), !handled(r).
         ];
         let mut g = named(
             &names,
-            &[("a1", "m1", Tier::Fact), ("m1", "m2", Tier::Fact), ("a2", "m2", Tier::Fact)],
+            &[
+                ("a1", "m1", Tier::Fact),
+                ("m1", "m2", Tier::Fact),
+                ("a2", "m2", Tier::Fact),
+            ],
         );
         for (f, t) in [(3, 4), (4, 5)] {
             g.edge(
@@ -1837,14 +2149,28 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
 "#;
         let mut ev = eval(text, &g, &Options::default());
         let base = |ev: &Evaluation<'_, MemSource>, rule: usize| {
-            let r = ev.plans.iter().flat_map(|p| &p.rules).find(|r| r.rule == rule);
-            r.and_then(|r| r.variants.first()).and_then(|v| v.steps.first()).cloned()
+            let r = ev
+                .plans
+                .iter()
+                .flat_map(|p| &p.rules)
+                .find(|r| r.rule == rule);
+            r.and_then(|r| r.variants.first())
+                .and_then(|v| v.steps.first())
+                .cloned()
         };
         let nested = matches!(base(&ev, 0), Some(Step::ReachMulti { seed, .. })
             if matches!(seed.first(), Some(Step::ReachMulti { .. })));
-        assert!(nested, "deep's plan nests one hoist in another: {:?}", base(&ev, 0));
+        assert!(
+            nested,
+            "deep's plan nests one hoist in another: {:?}",
+            base(&ev, 0)
+        );
         let hoisted = matches!(base(&ev, 1), Some(Step::ReachMulti { bind: 2, .. }));
-        assert!(hoisted, "step's reach hoists, binding b: {:?}", base(&ev, 1));
+        assert!(
+            hoisted,
+            "step's reach hoists, binding b: {:?}",
+            base(&ev, 1)
+        );
         let row = row_of(&ev, "deep", "c");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
         assert_eq!(
@@ -1878,17 +2204,30 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let mut ev = eval(text, &g, &Options::default());
         let row = row_of(&ev, "p", "n00000 FUNCTION");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
-        let leaves: Vec<(&str, Option<&Leaf>)> =
-            w.support.iter().map(|c| (c.predicate.as_str(), c.leaf.as_ref())).collect();
+        let leaves: Vec<(&str, Option<&Leaf>)> = w
+            .support
+            .iter()
+            .map(|c| (c.predicate.as_str(), c.leaf.as_ref()))
+            .collect();
         let n0 = node_id(0, 0);
         assert_eq!(
             leaves,
             [
-                ("node/2", Some(&Leaf::Node { id: n0, kind: "FUNCTION".into() })),
+                (
+                    "node/2",
+                    Some(&Leaf::Node {
+                        id: n0,
+                        kind: "FUNCTION".into()
+                    })
+                ),
                 ("kind/1", Some(&Leaf::Registry)),
                 (
                     "index/2",
-                    Some(&Leaf::Attr { id: n0, name: "index".into(), value: Value::Int(0) })
+                    Some(&Leaf::Attr {
+                        id: n0,
+                        name: "index".into(),
+                        value: Value::Int(0)
+                    })
                 ),
                 (
                     "starts_with/2",
@@ -1898,7 +2237,10 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
                     })
                 ),
                 ("category/1", Some(&Leaf::Registry)),
-                ("edge_conf/4", Some(&Leaf::Edge(hop(0, 1, 0, Tier::Derived)))),
+                (
+                    "edge_conf/4",
+                    Some(&Leaf::Edge(hop(0, 1, 0, Tier::Derived)))
+                ),
             ]
         );
         assert_eq!(w.tier, Tier::Derived);
@@ -1912,18 +2254,32 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         for (f, t) in [(0, 1), (1, 2), (2, 0), (2, 3)] {
             edge(&mut g, f, t, "CALLS", Tier::Fact);
         }
-        let mut ev = eval(r#"cyc(x, r) :- scc(x, r, "CALLS")."#, &g, &Options::default());
+        let mut ev = eval(
+            r#"cyc(x, r) :- scc(x, r, "CALLS")."#,
+            &g,
+            &Options::default(),
+        );
         let row = row_of(&ev, "cyc", "n00001 n00000");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
         let leaf = &w.support[0];
         assert_eq!(
             leaf.values,
-            [Value::Node(node_id(0, 1)), Value::Node(node_id(0, 0)), Value::Str("CALLS".into())]
+            [
+                Value::Node(node_id(0, 1)),
+                Value::Node(node_id(0, 0)),
+                Value::Str("CALLS".into())
+            ]
         );
-        let Some(Leaf::Path(hops)) = &leaf.leaf else { panic!("no path leaf: {leaf:?}") };
+        let Some(Leaf::Path(hops)) = &leaf.leaf else {
+            panic!("no path leaf: {leaf:?}")
+        };
         assert_eq!(
             hops,
-            &[hop(0, 1, 0, Tier::Fact), hop(1, 2, 1, Tier::Fact), hop(2, 0, 2, Tier::Fact)]
+            &[
+                hop(0, 1, 0, Tier::Fact),
+                hop(1, 2, 1, Tier::Fact),
+                hop(2, 0, 2, Tier::Fact)
+            ]
         );
         assert_eq!(
             (hops[0].from, hops[2].to),
@@ -1937,18 +2293,30 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let g = chain(151, "CALLS", &[Tier::Fact]);
         let mut ev = eval(TC, &g, &Options::default());
         let row = row_of(&ev, "tc", "n00000 n00150");
-        let limits = ExplainLimits { max_leaves: 100, ..ExplainLimits::default() };
+        let limits = ExplainLimits {
+            max_leaves: 100,
+            ..ExplainLimits::default()
+        };
         let w = explain(&mut ev, &row, &limits);
         let hops = w.leaf_edges();
         assert_eq!(hops.len(), 100);
         assert_eq!(
             hops,
-            (0..100).map(|i| hop(i, i + 1, i as usize, Tier::Fact)).collect::<Vec<_>>()
+            (0..100)
+                .map(|i| hop(i, i + 1, i as usize, Tier::Fact))
+                .collect::<Vec<_>>()
         );
         assert!(w.truncated, "the root's last edge was dropped");
         // Under the default cap of 100 the 150 hops are cut the same way; with room
         // for all of them nothing is.
-        let all = explain(&mut ev, &row, &ExplainLimits { max_leaves: 150, ..limits });
+        let all = explain(
+            &mut ev,
+            &row,
+            &ExplainLimits {
+                max_leaves: 150,
+                ..limits
+            },
+        );
         assert_eq!(all.leaf_edges().len(), 150);
         assert!(!all.truncated);
     }
@@ -1958,7 +2326,14 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let g = chain(6, "CALLS", &[Tier::Fact]);
         let text = format!("seed(x) :- index(x, 0).\n{TC}out(b) :- seed(a), tc(a, b).\n");
         let mut on = eval(&text, &g, &Options::default());
-        let mut off = eval(&text, &g, &Options { magic: false, ..Options::default() });
+        let mut off = eval(
+            &text,
+            &g,
+            &Options {
+                magic: false,
+                ..Options::default()
+            },
+        );
         assert_eq!(on.stats().magic_rewrites, 1);
         let (r_on, r_off) = (row_of(&on, "out", "n00005"), row_of(&off, "out", "n00005"));
         let w_on = explain(&mut on, &r_on, &ExplainLimits::default());
@@ -1978,7 +2353,10 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let rows = ev.rows("r").unwrap_or_default();
         assert_eq!(rows.len(), 20_001);
         let row = row_of(&ev, "r", "n20000");
-        let limits = ExplainLimits { max_leaves: 30_000, ..ExplainLimits::default() };
+        let limits = ExplainLimits {
+            max_leaves: 30_000,
+            ..ExplainLimits::default()
+        };
         let w = explain(&mut ev, &row, &limits);
         assert_eq!(w.leaf_edges().len(), 20_000);
         assert!(!w.truncated);
@@ -1990,26 +2368,49 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
 
     /// The permutations of a 3-column relation that have an index.
     fn indexed(rel: &Relation) -> Vec<Vec<u8>> {
-        let perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-        perms.iter().filter(|p| rel.index_of(&p[..]).is_some()).map(|p| p.to_vec()).collect()
+        let perms = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        perms
+            .iter()
+            .filter(|p| rel.index_of(&p[..]).is_some())
+            .map(|p| p.to_vec())
+            .collect()
     }
 
     #[test]
     fn explain_builds_missing_index() {
         let g = chain(201, "CALLS", &[Tier::Fact]);
         let mut ev = eval(WALK, &g, &Options::default());
-        let edge = ev.analysis.preds.iter().position(|p| p.name == "edge").unwrap_or(usize::MAX);
+        let edge = ev
+            .analysis
+            .preds
+            .iter()
+            .position(|p| p.name == "edge")
+            .unwrap_or(usize::MAX);
         let before = indexed(&ev.relations[edge]);
         assert!(!before.contains(&vec![1, 2, 0]), "{before:?}");
         let row = row_of(&ev, "r", "n00200");
-        let limits = ExplainLimits { max_leaves: 1_000, ..ExplainLimits::default() };
+        let limits = ExplainLimits {
+            max_leaves: 1_000,
+            ..ExplainLimits::default()
+        };
         let first = explain(&mut ev, &row, &limits);
         let after = indexed(&ev.relations[edge]);
         assert_eq!(after.len(), before.len() + 1);
         assert!(after.contains(&vec![1, 2, 0]));
         let at = ev.relations[edge].index_of(&[1, 2, 0]);
         let second = explain(&mut ev, &row, &limits);
-        assert_eq!(indexed(&ev.relations[edge]), after, "the second explain builds nothing");
+        assert_eq!(
+            indexed(&ev.relations[edge]),
+            after,
+            "the second explain builds nothing"
+        );
         assert_eq!(ev.relations[edge].index_of(&[1, 2, 0]), at);
         assert!(first == second);
         assert_eq!(first.leaf_edges().len(), 200);
@@ -2024,7 +2425,10 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         }
         let mut ev = eval(r#"p(x) :- edge(x, y, "CALLS")."#, &g, &Options::default());
         let row = row_of(&ev, "p", "n00000");
-        let limits = ExplainLimits { max_candidates: 10, ..ExplainLimits::default() };
+        let limits = ExplainLimits {
+            max_candidates: 10,
+            ..ExplainLimits::default()
+        };
         let err = ev.explain(&row, &limits).map(|w| w.height);
         assert_eq!(
             err,
@@ -2046,14 +2450,22 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
 
     #[test]
     fn foreign_row_is_unknown() {
-        let (g1, g2) = (chain(3, "CALLS", &[Tier::Fact]), chain(5, "CALLS", &[Tier::Derived]));
+        let (g1, g2) = (
+            chain(3, "CALLS", &[Tier::Fact]),
+            chain(5, "CALLS", &[Tier::Derived]),
+        );
         let ev1 = eval(TC, &g1, &Options::default());
         let mut ev2 = eval(TC, &g2, &Options::default());
         let row = row_of(&ev1, "tc", "n00000 n00002");
-        let err = ev2.explain(&row, &ExplainLimits::default()).map(|w| w.height);
+        let err = ev2
+            .explain(&row, &ExplainLimits::default())
+            .map(|w| w.height);
         assert_eq!(
             err,
-            Err(RulesError::Unknown { predicate: "tc/2".into(), known: vec!["tc/2".into()] })
+            Err(RulesError::Unknown {
+                predicate: "tc/2".into(),
+                known: vec!["tc/2".into()]
+            })
         );
     }
 
@@ -2062,7 +2474,9 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let g = chain(4, "CALLS", &[Tier::Fact, Tier::Derived]);
         let mut ev = eval(TC, &g, &Options::default());
         let rows = ev.rows("tc").unwrap_or_default();
-        let all = ev.explain_all(&rows, &ExplainLimits::default()).unwrap_or_default();
+        let all = ev
+            .explain_all(&rows, &ExplainLimits::default())
+            .unwrap_or_default();
         assert_eq!(all.len(), rows.len());
         for (r, w) in rows.iter().zip(&all) {
             assert_eq!((w.tier, w.height), (r.tier, r.at.meta.height));
@@ -2082,8 +2496,14 @@ step(i) :- node(a, "ROUTE"), reaches(a, b, "CALLS"), index(b, i).
         let row = row_of(&ev, "tc", "n00000 n00001");
         let w = explain(&mut ev, &row, &ExplainLimits::default());
         let text = format!("{w:?}");
-        assert!(text.starts_with("Witness { predicate: \"tc/2\", "), "{text}");
-        assert!(text.contains("support: [Witness { predicate: \"edge/3\""), "{text}");
+        assert!(
+            text.starts_with("Witness { predicate: \"tc/2\", "),
+            "{text}"
+        );
+        assert!(
+            text.contains("support: [Witness { predicate: \"edge/3\""),
+            "{text}"
+        );
         assert!(text.ends_with("support: [] }] }"), "{text}");
         assert_eq!(g.edges().count(), 2);
     }

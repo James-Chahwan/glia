@@ -83,7 +83,9 @@ impl Drop for Scratch {
 fn content<'g>(gmap: &'g Gmap, key: &str) -> &'g Content {
     let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
     let node = gmap.nodes.iter().find(|n| n.key == key);
-    &node.unwrap_or_else(|| panic!("no node {key}; keys: {keys:?}")).content
+    &node
+        .unwrap_or_else(|| panic!("no node {key}; keys: {keys:?}"))
+        .content
 }
 
 fn symbol_span(gmap: &Gmap, key: &str) -> SpanRef {
@@ -102,7 +104,8 @@ fn anchor(gmap: &Gmap, key: &str) -> Option<SpanRef> {
 
 fn file_id(gmap: &Gmap, path: &str) -> u32 {
     let hit = gmap.files.iter().find(|(_, p)| p.as_str() == path);
-    *hit.unwrap_or_else(|| panic!("{path} not interned: {:?}", gmap.files)).0
+    *hit.unwrap_or_else(|| panic!("{path} not interned: {:?}", gmap.files))
+        .0
 }
 
 #[test]
@@ -122,22 +125,61 @@ fn fixture_spans_carry_one_based_inclusive_lines() {
 
     // place: rows 6..=8 -> lines 7..=9; bytes cover those whole lines.
     let place = symbol_span(&gmap, "svc::orders::OrderService::place");
-    assert_eq!(place, SpanRef { file: py, start: 76, end: 167, start_line: 7, end_line: 9 });
+    assert_eq!(
+        place,
+        SpanRef {
+            file: py,
+            start: 76,
+            end: 167,
+            start_line: 7,
+            end_line: 9
+        }
+    );
     // deposit: rows 13..=16 -> lines 14..=17.
     let deposit = symbol_span(&gmap, "contracts::Vault::Vault::deposit");
-    assert_eq!((deposit.file, deposit.start_line, deposit.end_line), (sol, 14, 17));
+    assert_eq!(
+        (deposit.file, deposit.start_line, deposit.end_line),
+        (sol, 14, 17)
+    );
     // The module's end row is tree-sitter's point after the trailing newline
     // (row 12 of a 12-line file): the clamp keeps it on the last real line.
     let module = symbol_span(&gmap, "svc::orders");
-    assert_eq!(module, SpanRef { file: py, start: 0, end: 234, start_line: 1, end_line: 12 });
+    assert_eq!(
+        module,
+        SpanRef {
+            file: py,
+            start: 0,
+            end: 234,
+            start_line: 1,
+            end_line: 12
+        }
+    );
 
     // Doc sections are Propositions anchored the same way (rows end-inclusive
     // since LG.10a): `# Orders` rows 0..=2, `## Placing orders` rows 4..=6.
     // Section keys are `docs::<dir-scoped doc path>::<slug>`.
     let orders = anchor(&gmap, "docs::docs::README::orders");
-    assert_eq!(orders, Some(SpanRef { file: md, start: 0, end: 55, start_line: 1, end_line: 3 }));
+    assert_eq!(
+        orders,
+        Some(SpanRef {
+            file: md,
+            start: 0,
+            end: 55,
+            start_line: 1,
+            end_line: 3
+        })
+    );
     let placing = anchor(&gmap, "docs::docs::README::placing-orders");
-    assert_eq!(placing, Some(SpanRef { file: md, start: 56, end: 150, start_line: 5, end_line: 7 }));
+    assert_eq!(
+        placing,
+        Some(SpanRef {
+            file: md,
+            start: 56,
+            end: 150,
+            start_line: 5,
+            end_line: 7
+        })
+    );
 
     // Every positioned node carries lines; both doc sections are anchored.
     assert!(stats.positioned > 0);
@@ -156,7 +198,10 @@ fn pos(file: &str, start: u32, end: u32) -> Cell {
 }
 
 fn text(t: &str) -> Cell {
-    Cell { kind: cell_type::CODE, payload: CellPayload::Text(t.to_string()) }
+    Cell {
+        kind: cell_type::CODE,
+        payload: CellPayload::Text(t.to_string()),
+    }
 }
 
 #[test]
@@ -168,7 +213,13 @@ fn unreadable_file_keeps_lines_and_no_position_is_none() {
     let mut nav = CodeNav::default();
     let mut nodes = Vec::new();
     let rows: [(u64, &str, &str, _, Vec<Cell>); 4] = [
-        (1, "f", "app::gone::f", node_kind::FUNCTION, vec![pos("src/gone.py", 2, 3)]),
+        (
+            1,
+            "f",
+            "app::gone::f",
+            node_kind::FUNCTION,
+            vec![pos("src/gone.py", 2, 3)],
+        ),
         (2, "g", "app::nowhere::g", node_kind::FUNCTION, vec![]),
         (
             3,
@@ -177,11 +228,22 @@ fn unreadable_file_keeps_lines_and_no_position_is_none() {
             node_kind::DOC_SECTION,
             vec![pos("docs/GONE.md", 0, 0), text("Intro prose.")],
         ),
-        (4, "bare", "docs::GONE::bare", node_kind::DOC_SECTION, vec![text("Unplaced prose.")]),
+        (
+            4,
+            "bare",
+            "docs::GONE::bare",
+            node_kind::DOC_SECTION,
+            vec![text("Unplaced prose.")],
+        ),
     ];
     for (id, name, qname, kind, cells) in rows {
         nav.record(NodeId(id), name, qname, kind, None);
-        nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
+        nodes.push(Node {
+            id: NodeId(id),
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
     }
     let g = RepoGraph {
         repo,
@@ -198,10 +260,28 @@ fn unreadable_file_keeps_lines_and_no_position_is_none() {
 
     // Interned in sorted-path order: docs/GONE.md = 1, src/gone.py = 2.
     let f = symbol_span(&gmap, "app::gone::f");
-    assert_eq!(f, SpanRef { file: 2, start: 0, end: 0, start_line: 3, end_line: 4 });
+    assert_eq!(
+        f,
+        SpanRef {
+            file: 2,
+            start: 0,
+            end: 0,
+            start_line: 3,
+            end_line: 4
+        }
+    );
     assert_eq!(symbol_span(&gmap, "app::nowhere::g"), SpanRef::NONE);
     let intro = anchor(&gmap, "docs::GONE::intro");
-    assert_eq!(intro, Some(SpanRef { file: 1, start: 0, end: 0, start_line: 1, end_line: 1 }));
+    assert_eq!(
+        intro,
+        Some(SpanRef {
+            file: 1,
+            start: 0,
+            end: 0,
+            start_line: 1,
+            end_line: 1
+        })
+    );
     assert_eq!(anchor(&gmap, "docs::GONE::bare"), None);
 
     assert_eq!((stats.positioned, stats.spans_with_lines), (2, 2));

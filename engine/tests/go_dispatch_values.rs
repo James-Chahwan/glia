@@ -36,7 +36,9 @@ use glia_graph::MergedGraph;
 const FIXTURE: &str = "go-dispatch-values";
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures").join(FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(FIXTURE)
 }
 
 /// Copy a fixture's sources (never its key.json or a stray `.ai/` / `.glia/`).
@@ -58,7 +60,9 @@ fn copy_tree(from: &Path, to: &Path) {
 fn build(tmp: &Path) -> MergedGraph {
     copy_tree(&fixture_dir(), tmp);
     let root = tmp.display().to_string();
-    generate_one(&root).unwrap_or_else(|e| panic!("generate_one: {e}")).merged
+    generate_one(&root)
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged
 }
 
 /// The one node whose qname is exactly `qname`.
@@ -87,7 +91,10 @@ fn site_text(root: &Path, ev: &Evidence) -> String {
         panic!("site evidence without a file and line: {ev:?}");
     };
     let text = std::fs::read_to_string(root.join(file)).expect("read site file");
-    text.lines().nth(line as usize).unwrap_or_default().to_string()
+    text.lines()
+        .nth(line as usize)
+        .unwrap_or_default()
+        .to_string()
 }
 
 const HOOK: &str = "graph:go_packages";
@@ -99,39 +106,190 @@ fn dispatch_and_value_edges_bind() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let m = build(tmp.path());
     let n = |q: &str| node(&m, q);
-    let (calls, uses, handled) =
-        (edge_category::CALLS, edge_category::USES, edge_category::HANDLED_BY);
+    let (calls, uses, handled) = (
+        edge_category::CALLS,
+        edge_category::USES,
+        edge_category::HANDLED_BY,
+    );
     let main = "cmd::server::main::main";
     let refusal_test = "apperr::apperr_test::TestRefusalText";
     let rows = [
-        ("services::service::Service::Upload", "docstore::docstore::Store::Put", calls, HOOK, "receiver_field_chain", "s.store.Put(key)"),
-        ("services::service::Service::Create", "tokens::registry::Registry::ActivePair", calls, HOOK, "receiver_field_chain", "s.tokens.ActivePair(pair)"),
-        ("services::service::Service::Create", "screening::registry::Registry::Get", calls, HOOK, "receiver_field_chain", "s.lists.Get(pair)"),
-        ("services::ledger_ops::Ledger::Pairs", "tokens::registry::Registry::ActivePair", calls, HOOK, "receiver_field_chain", "l.pairs.ActivePair(p)"),
-        ("services::service::Service::Reasons", "services::service::SelfCheck::Check", calls, HOOK, "receiver_local", "c.Check(id)"),
-        ("services::service::Service::Reasons", "services::service::SelfCheck::Name", calls, HOOK, "receiver_local", "c.Name()"),
-        ("services::service::Service::Lookup", "services::service::SelfCheck::Name", calls, HOOK, "receiver_local", "return c.Name()"),
-        ("fx::oxr_test::TestOXR", "fx::oxr::OXR::Provider", calls, HOOK, "receiver_local", "o.Provider()"),
-        (refusal_test, "services::refusal::Refusal::Error", calls, HOOK, "receiver_return", "(&services.Refusal{"),
-        (refusal_test, "services::refusal::Refusal::Text", calls, HOOK, "receiver_return", "(&services.Refusal{"),
-        (main, "services::values::Topic::Describe", calls, HOOK, "receiver_return", "services.Topic{}.Describe()"),
-        (main, "services::service::Service::Upload", calls, HOOK, "receiver_local", "svc.Upload("),
-        (main, "services::service::Service::OnDone", uses, HOOK, "method_value", "idx.SetOnCompleted(svc.OnDone)"),
-        ("indexer::indexer::defaultDone", "indexer::indexer::logDone", uses, HOOK, "func_value", "var defaultDone = logDone"),
-        ("GET /metrics", "controllers::metrics::MetricsHandler", handled, HOOK, "package_function", "controllers.MetricsHandler"),
-        ("GET /healthz", "controllers::health::HealthHandler", handled, HOOK, "package_function", "controllers.HealthHandler"),
-        ("GET /ping", "controllers::activity::Ping", handled, "graph:refs", "attribute", "controllers.Ping"),
+        (
+            "services::service::Service::Upload",
+            "docstore::docstore::Store::Put",
+            calls,
+            HOOK,
+            "receiver_field_chain",
+            "s.store.Put(key)",
+        ),
+        (
+            "services::service::Service::Create",
+            "tokens::registry::Registry::ActivePair",
+            calls,
+            HOOK,
+            "receiver_field_chain",
+            "s.tokens.ActivePair(pair)",
+        ),
+        (
+            "services::service::Service::Create",
+            "screening::registry::Registry::Get",
+            calls,
+            HOOK,
+            "receiver_field_chain",
+            "s.lists.Get(pair)",
+        ),
+        (
+            "services::ledger_ops::Ledger::Pairs",
+            "tokens::registry::Registry::ActivePair",
+            calls,
+            HOOK,
+            "receiver_field_chain",
+            "l.pairs.ActivePair(p)",
+        ),
+        (
+            "services::service::Service::Reasons",
+            "services::service::SelfCheck::Check",
+            calls,
+            HOOK,
+            "receiver_local",
+            "c.Check(id)",
+        ),
+        (
+            "services::service::Service::Reasons",
+            "services::service::SelfCheck::Name",
+            calls,
+            HOOK,
+            "receiver_local",
+            "c.Name()",
+        ),
+        (
+            "services::service::Service::Lookup",
+            "services::service::SelfCheck::Name",
+            calls,
+            HOOK,
+            "receiver_local",
+            "return c.Name()",
+        ),
+        (
+            "fx::oxr_test::TestOXR",
+            "fx::oxr::OXR::Provider",
+            calls,
+            HOOK,
+            "receiver_local",
+            "o.Provider()",
+        ),
+        (
+            refusal_test,
+            "services::refusal::Refusal::Error",
+            calls,
+            HOOK,
+            "receiver_return",
+            "(&services.Refusal{",
+        ),
+        (
+            refusal_test,
+            "services::refusal::Refusal::Text",
+            calls,
+            HOOK,
+            "receiver_return",
+            "(&services.Refusal{",
+        ),
+        (
+            main,
+            "services::values::Topic::Describe",
+            calls,
+            HOOK,
+            "receiver_return",
+            "services.Topic{}.Describe()",
+        ),
+        (
+            main,
+            "services::service::Service::Upload",
+            calls,
+            HOOK,
+            "receiver_local",
+            "svc.Upload(",
+        ),
+        (
+            main,
+            "services::service::Service::OnDone",
+            uses,
+            HOOK,
+            "method_value",
+            "idx.SetOnCompleted(svc.OnDone)",
+        ),
+        (
+            "indexer::indexer::defaultDone",
+            "indexer::indexer::logDone",
+            uses,
+            HOOK,
+            "func_value",
+            "var defaultDone = logDone",
+        ),
+        (
+            "GET /metrics",
+            "controllers::metrics::MetricsHandler",
+            handled,
+            HOOK,
+            "package_function",
+            "controllers.MetricsHandler",
+        ),
+        (
+            "GET /healthz",
+            "controllers::health::HealthHandler",
+            handled,
+            HOOK,
+            "package_function",
+            "controllers.HealthHandler",
+        ),
+        (
+            "GET /ping",
+            "controllers::activity::Ping",
+            handled,
+            "graph:refs",
+            "attribute",
+            "controllers.Ping",
+        ),
         // The 2026-10-17 correction: a composite literal USES its STRUCT.
-        ("apperr::apperr::notAvailable", "apperr::apperr::Error", uses, HOOK, "composite_literal", "var notAvailable = &Error{"),
-        ("indexer::indexer::New", "indexer::indexer::Indexer", uses, HOOK, "composite_literal", "return &Indexer{done: defaultDone}"),
-        (main, "services::ledger::Ledger", uses, HOOK, "composite_literal", "(&services.Ledger{}).Pairs"),
+        (
+            "apperr::apperr::notAvailable",
+            "apperr::apperr::Error",
+            uses,
+            HOOK,
+            "composite_literal",
+            "var notAvailable = &Error{",
+        ),
+        (
+            "indexer::indexer::New",
+            "indexer::indexer::Indexer",
+            uses,
+            HOOK,
+            "composite_literal",
+            "return &Indexer{done: defaultDone}",
+        ),
+        (
+            main,
+            "services::ledger::Ledger",
+            uses,
+            HOOK,
+            "composite_literal",
+            "(&services.Ledger{}).Pairs",
+        ),
     ];
     for (from, to, category, emitter, rule, site) in rows {
         let ev = edge_evidence(&m, n(from), n(to), category)
             .unwrap_or_else(|| panic!("{site}: no edge {from} -> {to}"));
-        assert_eq!((ev.emitter.as_str(), ev.rule.as_deref()), (emitter, Some(rule)), "{site}: {ev:?}");
+        assert_eq!(
+            (ev.emitter.as_str(), ev.rule.as_deref()),
+            (emitter, Some(rule)),
+            "{site}: {ev:?}"
+        );
         let text = site_text(tmp.path(), &ev);
-        assert!(text.contains(site), "{site}: the site line is `{}`", text.trim());
+        assert!(
+            text.contains(site),
+            "{site}: the site line is `{}`",
+            text.trim()
+        );
     }
 }
 
@@ -146,15 +304,34 @@ fn look_alikes_bind_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let m = build(tmp.path());
     let n = |q: &str| node(&m, q);
-    let (calls, uses, handled) =
-        (edge_category::CALLS, edge_category::USES, edge_category::HANDLED_BY);
+    let (calls, uses, handled) = (
+        edge_category::CALLS,
+        edge_category::USES,
+        edge_category::HANDLED_BY,
+    );
     let main = "cmd::server::main::main";
     let refusal_test = "apperr::apperr_test::TestRefusalText";
     let forbid = [
-        ("services::service::Service::Upload", "fx::store::Store::Put", calls),
-        ("services::service::Service::Create", "screening::registry::Registry::ActivePair", calls),
-        ("services::ledger_ops::Ledger::Pairs", "screening::registry::Registry::ActivePair", calls),
-        ("services::values::Rules::Topics", "services::values::Rule::Describe", calls),
+        (
+            "services::service::Service::Upload",
+            "fx::store::Store::Put",
+            calls,
+        ),
+        (
+            "services::service::Service::Create",
+            "screening::registry::Registry::ActivePair",
+            calls,
+        ),
+        (
+            "services::ledger_ops::Ledger::Pairs",
+            "screening::registry::Registry::ActivePair",
+            calls,
+        ),
+        (
+            "services::values::Rules::Topics",
+            "services::values::Rule::Describe",
+            calls,
+        ),
         ("fx::oxr_test::TestMixed", "fx::oxr::Other::Provider", calls),
         (refusal_test, "services::refusal::Refusal::Detail", calls),
         (refusal_test, "apperr::apperr::Refusal::Text", calls),
@@ -163,11 +340,18 @@ fn look_alikes_bind_nothing() {
         (main, "cmd::server::main::notify", uses),
         ("services::values::Wrap", "services::values::handle", uses),
         ("services::values::Pick", "services::values::handle", uses),
-        ("GET /metrics", "controllers::metrics::MetricsDebug", handled),
+        (
+            "GET /metrics",
+            "controllers::metrics::MetricsDebug",
+            handled,
+        ),
         (refusal_test, "apperr::apperr::Refusal", uses),
     ];
     for (from, to, category) in forbid {
-        assert!(edge_evidence(&m, n(from), n(to), category).is_none(), "{from} -> {to}");
+        assert!(
+            edge_evidence(&m, n(from), n(to), category).is_none(),
+            "{from} -> {to}"
+        );
     }
     // `handle` is referenced only through shadowing names: nothing but its
     // MODULE's DEFINES reaches it.
@@ -187,8 +371,12 @@ fn fixed_rows_leave_dead_symbol() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let m = build(tmp.path());
     let rep = gaps_report(&m, &[], &GapsOptions::default()).expect("known categories");
-    let rows: BTreeSet<String> =
-        rep.rows.iter().filter(|r| r.category == DEAD_SYMBOL).map(|r| r.qname.clone()).collect();
+    let rows: BTreeSet<String> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.clone())
+        .collect();
     for gone in [
         "apperr::apperr::Error::Error",
         "controllers::health::HealthHandler",

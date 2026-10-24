@@ -19,8 +19,8 @@
 use std::path::Path;
 
 use glia_engine::{
-    BlastAnswer, BlastOptions, GenerateResult, blast_radius, generate_one, governing_docs, locate_node,
-    node_in_scope, project_roots, resolve_scope, resolve_seed, resolve_signal_located,
+    BlastAnswer, BlastOptions, GenerateResult, blast_radius, generate_one, governing_docs,
+    locate_node, node_in_scope, project_roots, resolve_scope, resolve_seed, resolve_signal_located,
 };
 use glia_graph::{MergedGraph, Reach};
 
@@ -42,7 +42,11 @@ fn write_fixture(dir: &Path) {
          def handle():\n    return call_shared() + local_dep()\n",
     )
     .unwrap();
-    std::fs::write(dir.join("services/api/deps.py"), "def local_dep():\n    return 3\n").unwrap();
+    std::fs::write(
+        dir.join("services/api/deps.py"),
+        "def local_dep():\n    return 3\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("services/api/app.py"),
         "from flask import Flask\n\napp = Flask(__name__)\n\n\n\
@@ -54,7 +58,11 @@ fn write_fixture(dir: &Path) {
         "from django.urls import path\n\nurlpatterns = [path(\"/v1/legacy\", legacy_view)]\n",
     )
     .unwrap();
-    std::fs::write(dir.join("shared/util.py"), "def call_shared():\n    return 1\n").unwrap();
+    std::fs::write(
+        dir.join("shared/util.py"),
+        "def call_shared():\n    return 1\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("shared/more.py"),
         "from shared.util import call_shared\n\n\ndef more():\n    return call_shared()\n",
@@ -99,7 +107,8 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
     // (a) unscoped reaches across into shared/; scoped to services/api it does not.
     let all = blast(m, "handle", Reach::Both, None, None);
     assert!(
-        all.iter().any(|a| a.file.as_deref() == Some("shared/util.py")),
+        all.iter()
+            .any(|a| a.file.as_deref() == Some("shared/util.py")),
         "unscoped radius should reach shared/util.py; got {:?}",
         all.iter().map(|a| (&a.qname, &a.file)).collect::<Vec<_>>()
     );
@@ -109,18 +118,25 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
         "scoped radius should keep the in-scope nodes"
     );
     assert!(
+        scoped.iter().all(|a| a
+            .file
+            .as_deref()
+            .is_some_and(|f| f.starts_with("services/api/"))),
+        "scoped radius must contain only services/api nodes; got {:?}",
         scoped
             .iter()
-            .all(|a| a.file.as_deref().is_some_and(|f| f.starts_with("services/api/"))),
-        "scoped radius must contain only services/api nodes; got {:?}",
-        scoped.iter().map(|a| (&a.qname, &a.file)).collect::<Vec<_>>()
+            .map(|a| (&a.qname, &a.file))
+            .collect::<Vec<_>>()
     );
 
     // (b) ORDER: scope must run BEFORE truncate(top_k). Precondition — the
     // globally top-ranked node is OUT of scope (call_shared has three callers,
     // local_dep one), so truncate-then-filter would return an EMPTY answer.
     assert!(
-        !all[0].file.as_deref().is_some_and(|f| f.starts_with("services/api/")),
+        !all[0]
+            .file
+            .as_deref()
+            .is_some_and(|f| f.starts_with("services/api/")),
         "precondition: the globally top-ranked node should be out of scope; got {:?}",
         all[0].file
     );
@@ -134,12 +150,12 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
     assert_eq!(one[0].file.as_deref(), Some("services/api/deps.py"));
 
     // (c) BOUNDARY: a prefix that stops mid-segment must not match.
-    let boundary =
-        blast(m, "handle", Reach::Both, None, Some("services/ap"));
+    let boundary = blast(m, "handle", Reach::Both, None, Some("services/ap"));
     assert!(
-        boundary
-            .iter()
-            .all(|a| !a.file.as_deref().is_some_and(|f| f.starts_with("services/api/"))),
+        boundary.iter().all(|a| !a
+            .file
+            .as_deref()
+            .is_some_and(|f| f.starts_with("services/api/"))),
         "`services/ap` must not prefix-match `services/api/...`; got {:?}",
         boundary.iter().map(|a| &a.file).collect::<Vec<_>>()
     );
@@ -160,7 +176,10 @@ fn resolve_scope_filters_seeds_before_ppr() {
         unscoped.len(),
         2,
         "both frames should resolve unscoped; got {:?}",
-        unscoped.iter().map(|n| (&n.qname, &n.file)).collect::<Vec<_>>()
+        unscoped
+            .iter()
+            .map(|n| (&n.qname, &n.file))
+            .collect::<Vec<_>>()
     );
 
     // (d) scoped: only the handler frame survives, AND its PPR score changes,
@@ -196,12 +215,16 @@ fn governing_docs_scope_drops_out_of_tree_sections() {
     // (e) scoped to docs/ drops the README-derived DOC_SECTION.
     let scoped = governing_docs(m, "handle", Some("docs")).results;
     assert!(
-        scoped.iter().all(|d| d.file.as_deref() != Some("README.md")),
+        scoped
+            .iter()
+            .all(|d| d.file.as_deref() != Some("README.md")),
         "scope=docs must drop the README section; got {:?}",
         scoped.iter().map(|d| &d.file).collect::<Vec<_>>()
     );
     assert!(
-        scoped.iter().any(|d| d.file.as_deref() == Some("docs/rules.md")),
+        scoped
+            .iter()
+            .any(|d| d.file.as_deref() == Some("docs/rules.md")),
         "scope=docs must keep docs/rules.md"
     );
 }
@@ -220,7 +243,11 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
     // KEPT under any scope. Dropping unlocatables would silently delete them
     // from a scoped answer, which is the cross-service half of the result.
     let orphan = by_qname("ANY /v1/legacy");
-    assert_eq!(locate_node(m, orphan).file, None, "a handler-less route has no span");
+    assert_eq!(
+        locate_node(m, orphan).file,
+        None,
+        "a handler-less route has no span"
+    );
     assert!(
         node_in_scope(m, orphan, Some("no/such/dir")),
         "unlocatable nodes must be kept under any scope"
@@ -250,7 +277,10 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
         .map(|n| n.id)
         .filter(|id| locate_node(m, *id).kind == "ENDPOINT")
         .collect();
-    assert!(!endpoints.is_empty(), "fixture should emit an ENDPOINT node");
+    assert!(
+        !endpoints.is_empty(),
+        "fixture should emit an ENDPOINT node"
+    );
     for e in &endpoints {
         assert_eq!(
             locate_node(m, *e).file.as_deref(),
@@ -369,8 +399,20 @@ fn project_roots_decodes_every_anchor_sorted_by_path() {
         got,
         [
             (".", "shop-monorepo", "npm", "package.json", "project:."),
-            ("apps/web", "@shop/web", "npm", "apps/web/package.json", "project:apps/web"),
-            ("libs/core", "shop-core", "cargo", "libs/core/Cargo.toml", "project:libs/core"),
+            (
+                "apps/web",
+                "@shop/web",
+                "npm",
+                "apps/web/package.json",
+                "project:apps/web"
+            ),
+            (
+                "libs/core",
+                "shop-core",
+                "cargo",
+                "libs/core/Cargo.toml",
+                "project:libs/core"
+            ),
             (
                 "services/api",
                 "github.com/shop/api",
@@ -429,26 +471,34 @@ fn a_label_scope_equals_its_path_scope() {
         "precondition: unscoped radius reaches both tools/ and apps/web; got {all_q:?}"
     );
 
-    let by_path =
-        blast(m, "webEntry", Reach::Both, None, Some("apps/web"));
-    let by_label =
-        blast(m, "webEntry", Reach::Both, None, Some("@shop/web"));
+    let by_path = blast(m, "webEntry", Reach::Both, None, Some("apps/web"));
+    let by_label = blast(m, "webEntry", Reach::Both, None, Some("@shop/web"));
     let path_q = qnames(&by_path, |a| &a.qname);
     assert!(!path_q.is_empty(), "the in-scope helper must survive");
     assert!(
         !path_q.iter().any(|q| q.contains("runAll")),
         "tools/run.ts is outside apps/web; got {path_q:?}"
     );
-    assert_eq!(qnames(&by_label, |a| &a.qname), path_q, "label scope == path scope");
+    assert_eq!(
+        qnames(&by_label, |a| &a.qname),
+        path_q,
+        "label scope == path scope"
+    );
     // Same set AND same ranking — label resolution runs before the filter.
     let scores = |v: &[glia_engine::BlastAnswer]| {
-        v.iter().map(|a| (a.qname.clone(), a.score.to_bits())).collect::<Vec<_>>()
+        v.iter()
+            .map(|a| (a.qname.clone(), a.score.to_bits()))
+            .collect::<Vec<_>>()
     };
     assert_eq!(scores(&by_label), scores(&by_path));
 
     // The ROOT project's label resolves to `.`, i.e. the whole repo.
     let root = blast(m, "webEntry", Reach::Both, None, Some("shop-monorepo"));
-    assert_eq!(qnames(&root, |a| &a.qname), all_q, "`.` scopes to everything");
+    assert_eq!(
+        qnames(&root, |a| &a.qname),
+        all_q,
+        "`.` scopes to everything"
+    );
 
     // A second primitive, through the same applier: `resolve` filters its
     // SEEDS, so equal seeds must give equal PPR scores too.
@@ -465,7 +515,10 @@ fn a_label_scope_equals_its_path_scope() {
         !res_path.is_empty() && res_path.iter().all(|(q, _)| q.starts_with("apps::web::")),
         "only apps/web seeds survive; got {res_path:?}"
     );
-    assert_eq!(res_label, res_path, "label scope == path scope, scores included");
+    assert_eq!(
+        res_label, res_path,
+        "label scope == path scope, scores included"
+    );
 }
 
 // ============================================================================
@@ -519,12 +572,26 @@ fn ambiguous_seed_prefers_the_in_scope_candidate() {
          whose whole radius the scope then filters away"
     );
     // A label-free path scope and the qname seed agree.
-    let by_qname = blast(m, "services::api::handler::handle", Reach::Both, None, Some(SCOPE));
-    assert_eq!(qnames(&by_qname, |a| &a.qname), qnames(&scoped, |a| &a.qname));
+    let by_qname = blast(
+        m,
+        "services::api::handler::handle",
+        Reach::Both,
+        None,
+        Some(SCOPE),
+    );
+    assert_eq!(
+        qnames(&by_qname, |a| &a.qname),
+        qnames(&scoped, |a| &a.qname)
+    );
     // Scope never overrides an explicit qname: the web `handle` stays the seed
     // and its (web-only) radius is filtered to nothing.
-    let pinned =
-        blast(m, "services::web::views::handle", Reach::Both, None, Some(SCOPE));
+    let pinned = blast(
+        m,
+        "services::web::views::handle",
+        Reach::Both,
+        None,
+        Some(SCOPE),
+    );
     assert!(
         pinned.is_empty(),
         "an explicit qname is never re-seeded; got {:?}",
@@ -546,9 +613,11 @@ fn out_of_scope_seed_still_answers() {
     let seed = resolve_seed(m, "shared_fn", Some(SCOPE)).expect("out-of-scope seed kept");
     assert_eq!(resolve_seed(m, "shared_fn", None), Some(seed));
     assert_eq!(locate_node(m, seed).qname, "shared::util::shared_fn");
-    let scoped =
-        blast(m, "shared_fn", Reach::Backward, None, Some(SCOPE));
-    assert_eq!(qnames(&scoped, |a| &a.qname), ["services::api::handler::api_user"]);
+    let scoped = blast(m, "shared_fn", Reach::Backward, None, Some(SCOPE));
+    assert_eq!(
+        qnames(&scoped, |a| &a.qname),
+        ["services::api::handler::api_user"]
+    );
     let all = blast(m, "shared_fn", Reach::Backward, None, None);
     let all_q = qnames(&all, |a| &a.qname);
     assert!(
@@ -573,7 +642,13 @@ fn unscoped_seed_is_unchanged() {
         "scope None keeps the degree pick: the web `handle`"
     );
     // `scope = None` is exactly HEAD's rule: qname first, then the bare name.
-    for q in ["handle", "shared_fn", "services::api::handler::handle", "w1", "nope"] {
+    for q in [
+        "handle",
+        "shared_fn",
+        "services::api::handler::handle",
+        "w1",
+        "nope",
+    ] {
         assert_eq!(
             resolve_seed(m, q, None),
             m.node_id_by_qname(q).or_else(|| m.resolve_name(q)),

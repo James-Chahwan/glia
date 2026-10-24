@@ -953,7 +953,9 @@ fn is_channel_class(name: &str) -> bool {
     name.len() > "Channel".len()
         && name.ends_with("Channel")
         && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
 }
 
 /// Non-empty, bounded, and a single token: no whitespace, no control chars.
@@ -3068,7 +3070,8 @@ mod tests {
     #[test]
     fn application_cable_base_is_not_a_channel() {
         // Rails' generated app/channels/application_cable/channel.rb.
-        let src = "module ApplicationCable\n  class Channel < ActionCable::Channel::Base\n  end\nend\n";
+        let src =
+            "module ApplicationCable\n  class Channel < ActionCable::Channel::Base\n  end\nend\n";
         let out = handlers(src);
         assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
         let src = "class ApplicationCable::Channel < ActionCable::Channel::Base\nend\n";
@@ -3088,7 +3091,10 @@ mod tests {
                    \x20 })\n\
                    }\n";
         let out = clients(src);
-        assert_eq!(anchored(&out), vec![("ws_client:ChatChannel".to_string(), 3)]);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws_client:ChatChannel".to_string(), 3)]
+        );
         // The positional string form.
         let src = "consumer.subscriptions.create(\"NotificationsChannel\", { received() {} })\n";
         assert_eq!(
@@ -3293,7 +3299,10 @@ mod tests {
                   c, _, _ := websocket.DefaultDialer.DialContext(ctx, \"ws://chat-svc/ws\", nil)\n";
         assert_eq!(
             hits(&clients(go)),
-            vec![("ws_client:/ws".to_string(), vec![r#"{"via":"ws","host":"chat-svc"}"#.to_string()])]
+            vec![(
+                "ws_client:/ws".to_string(),
+                vec![r#"{"via":"ws","host":"chat-svc"}"#.to_string()]
+            )]
         );
     }
 
@@ -3320,9 +3329,18 @@ mod tests {
         assert_eq!(
             hits(&clients(src)),
             vec![
-                ("ws_client:/ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
-                ("ws_client:ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
-                ("ws_client:ChatChannel".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+                (
+                    "ws_client:/ws".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
+                (
+                    "ws_client:ws".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
+                (
+                    "ws_client:ChatChannel".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
             ]
         );
         // A handler never carries one.
@@ -3341,7 +3359,11 @@ mod tests {
                     }\n";
         let rs_handlers = extract_ws_handler_nodes(rust, "src/x.rs", module_id(), repo());
         let rs_clients = extract_ws_client_nodes(rust, "src/x.rs", module_id(), repo());
-        assert!(qnames(&rs_handlers).is_empty(), "{:?}", qnames(&rs_handlers));
+        assert!(
+            qnames(&rs_handlers).is_empty(),
+            "{:?}",
+            qnames(&rs_handlers)
+        );
         assert!(qnames(&rs_clients).is_empty(), "{:?}", qnames(&rs_clients));
         assert!(rs_clients.anchors.is_empty() && rs_handlers.anchors.is_empty());
 
@@ -3366,8 +3388,8 @@ mod tests {
     /// cap, so a file whose literals repeat a needle keeps its real site.
     #[test]
     fn literal_sites_do_not_fill_the_cap() {
-        let mut src = "const SAMPLE: &str = \"new WebSocket('/fake')\";\n"
-            .repeat(MAX_HITS_PER_NEEDLE + 5);
+        let mut src =
+            "const SAMPLE: &str = \"new WebSocket('/fake')\";\n".repeat(MAX_HITS_PER_NEEDLE + 5);
         src.push_str("fn connect(url: &str) { let _ = new WebSocket(url); }\n");
         let out = extract_ws_client_nodes(&src, "src/table.rs", module_id(), repo());
         assert_eq!(qnames(&out), vec!["ws_client:ws"]);
@@ -4308,7 +4330,13 @@ mod tests {
         assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
         let fold = folded(src);
         assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/feed"]);
-        assert_eq!(fold.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            fold.counts,
+            WsFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             hits(&fold.nodes)[0].1,
             vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]
@@ -4317,7 +4345,13 @@ mod tests {
         // A base with no path names no path either way, but records its host.
         let bare = folded("const ws = new WebSocket(environment.liveUrl);\n");
         assert_eq!(fold_qnames(&bare), vec!["ws_client:ws"]);
-        assert_eq!(bare.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            bare.counts,
+            WsFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             hits(&bare.nodes)[0].1,
             vec![r#"{"via":"ws","host":"localhost:8080"}"#.to_string()]
@@ -4343,9 +4377,18 @@ mod tests {
         let plain = clients(LIVE);
         assert_eq!(qnames(&plain), vec!["ws_client:ws", "ws_client:/prices"]);
         let fold = folded(LIVE);
-        assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/feed", "ws_client:/rt/prices"]);
+        assert_eq!(
+            fold_qnames(&fold),
+            vec!["ws_client:/rt/feed", "ws_client:/rt/prices"]
+        );
         assert!(!fold_qnames(&fold).contains(&"ws_client:/prices".to_string()));
-        assert_eq!(fold.counts, WsFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            fold.counts,
+            WsFoldCounts {
+                folded: 2,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             anchored(&fold.nodes),
             vec![
@@ -4354,7 +4397,10 @@ mod tests {
             ]
         );
         for (_, payloads) in hits(&fold.nodes) {
-            assert_eq!(payloads, vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]);
+            assert_eq!(
+                payloads,
+                vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]
+            );
         }
         let concat = folded("new WebSocket(environment.wsBase + '/prices');\n");
         assert_eq!(fold_qnames(&concat), vec!["ws_client:/rt/prices"]);
@@ -4362,7 +4408,13 @@ mod tests {
         // the configured host.
         let feed = folded(ORDER_FEED);
         assert_eq!(fold_qnames(&feed), vec!["ws_client:/live/orders"]);
-        assert_eq!(feed.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            feed.counts,
+            WsFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             hits(&feed.nodes)[0].1,
             vec![r#"{"via":"ws","host":"localhost:8080"}"#.to_string()]
@@ -4380,12 +4432,24 @@ mod tests {
         let src = "new WebSocket(`${environment.missing}/prices`);\n";
         let fold = folded(src);
         assert_eq!(fold_qnames(&fold), vec!["ws_client:/prices"]);
-        assert_eq!(fold.counts, WsFoldCounts { folded: 0, unresolved: 1 });
+        assert_eq!(
+            fold.counts,
+            WsFoldCounts {
+                folded: 0,
+                unresolved: 1
+            }
+        );
         assert_eq!(hits(&fold.nodes)[0].1, vec![r#"{"via":"ws"}"#.to_string()]);
         // `true/prices` reads no path where `/prices` did: refused.
         let flag = folded("new WebSocket(`${environment.flag}/prices`);\n");
         assert_eq!(fold_qnames(&flag), vec!["ws_client:/prices"]);
-        assert_eq!(flag.counts, WsFoldCounts { folded: 0, unresolved: 1 });
+        assert_eq!(
+            flag.counts,
+            WsFoldCounts {
+                folded: 0,
+                unresolved: 1
+            }
+        );
         // A call, an env read and a literal offer the resolver nothing.
         let none = folded(
             "new WebSocket(`${cfg()}/a`);\n\
@@ -4409,7 +4473,13 @@ mod tests {
         // parameter left dynamic.
         let param = folded("new WebSocket(`${environment.wsBase}/rooms/${roomId}`);\n");
         assert_eq!(fold_qnames(&param), vec!["ws_client:/rt/rooms/"]);
-        assert_eq!(param.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            param.counts,
+            WsFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             hits(&param.nodes)[0].1,
             vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]
@@ -4422,7 +4492,10 @@ mod tests {
         let src = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
                    final a = WebSocketChannel.connect(Uri.parse('${Env.wsBase}/prices'));\n\
                    final b = WebSocketChannel.connect(Uri.parse('$base/feed'));\n";
-        assert_eq!(qnames(&clients(src)), vec!["ws_client:/prices", "ws_client:/feed"]);
+        assert_eq!(
+            qnames(&clients(src)),
+            vec!["ws_client:/prices", "ws_client:/feed"]
+        );
         let fold = extract_ws_client_nodes_with_consts(
             src,
             "lib/live.dart",
@@ -4430,8 +4503,17 @@ mod tests {
             repo(),
             &table(ENV),
         );
-        assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/prices", "ws_client:/rt/feed"]);
-        assert_eq!(fold.counts, WsFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            fold_qnames(&fold),
+            vec!["ws_client:/rt/prices", "ws_client:/rt/feed"]
+        );
+        assert_eq!(
+            fold.counts,
+            WsFoldCounts {
+                folded: 2,
+                unresolved: 0
+            }
+        );
         assert_eq!(
             hits(&fold.nodes),
             vec![
@@ -4461,7 +4543,12 @@ mod tests {
     /// The function span the swap test's parse holds: lines 2..=4 and 6..=8
     /// (0-indexed) of [`LIVE`].
     fn live_fn(name: &str) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, &format!("live::{name}"))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            &format!("live::{name}"),
+        )
     }
 
     /// The engine's `merge_nav`, for the hand-assembled parse.
@@ -4501,10 +4588,16 @@ mod tests {
             ],
             ..Default::default()
         };
-        fp.nav.record(module, "live", "live", node_kind::MODULE, None);
+        fp.nav
+            .record(module, "live", "live", node_kind::MODULE, None);
         for f in ["openFeed", "openPrices"] {
-            fp.nav
-                .record(live_fn(f), f, &format!("live::{f}"), node_kind::FUNCTION, Some(module));
+            fp.nav.record(
+                live_fn(f),
+                f,
+                &format!("live::{f}"),
+                node_kind::FUNCTION,
+                Some(module),
+            );
         }
         let mut anchors = Vec::new();
         for out in [
@@ -4546,7 +4639,11 @@ mod tests {
         let mut fp = live_parse(LIVE);
         let (generic, tail) = (client("ws_client:ws"), client("ws_client:/prices"));
         assert!(fp.nav.kind_by_id.contains_key(&generic));
-        assert!(fp.edges.iter().any(|e| e.to == tail && e.category == edge_category::USES));
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == tail && e.category == edge_category::USES)
+        );
 
         let fold = folded(LIVE);
         assert_eq!(fold.counts.folded, 2);
@@ -4568,7 +4665,10 @@ mod tests {
             .filter(|e| e.category == edge_category::USES)
             .map(|e| (e.from, e.to))
             .collect();
-        assert_eq!(uses, vec![(live_fn("openFeed"), feed), (live_fn("openPrices"), prices)]);
+        assert_eq!(
+            uses,
+            vec![(live_fn("openFeed"), feed), (live_fn("openPrices"), prices)]
+        );
         assert!(
             !fp.edges
                 .iter()
@@ -4576,12 +4676,20 @@ mod tests {
         );
         assert!(!fp.nav.qname_by_id.contains_key(&generic));
         // Re-anchored post-cache: `extractor:anchor` rule `const_fold`.
-        assert!(fp.edges.iter().all(|e| evidence::Evidence::of(e).is_some_and(
-            |ev| ev.emitter == "extractor:anchor" && ev.rule.as_deref() == Some("const_fold")
-        )));
+        assert!(
+            fp.edges.iter().all(|e| evidence::Evidence::of(e)
+                .is_some_and(|ev| ev.emitter == "extractor:anchor"
+                    && ev.rule.as_deref() == Some("const_fold")))
+        );
         assert_eq!(crate::anchor::census(&fp), crate::anchor::census(&literal));
         for n in fp.nodes.iter().filter(|n| n.id == feed || n.id == prices) {
-            assert_eq!(n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS).count(), 1);
+            assert_eq!(
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::IMPORTS)
+                    .count(),
+                1
+            );
             assert_eq!(n.cells.last().map(|c| c.kind), Some(cell_type::IMPORTS));
         }
     }
@@ -4604,7 +4712,8 @@ mod tests {
         let nothing = |_: &str| -> Option<String> { None };
         for src in srcs {
             let plain = clients(src);
-            let fold = extract_ws_client_nodes_with_consts(src, "t.src", module_id(), repo(), &nothing);
+            let fold =
+                extract_ws_client_nodes_with_consts(src, "t.src", module_id(), repo(), &nothing);
             assert_eq!(plain.nodes, fold.nodes.nodes, "{src}");
             assert_eq!(plain.nav.qname_by_id, fold.nodes.nav.qname_by_id, "{src}");
             assert_eq!(plain.nav.children_of, fold.nodes.nav.children_of, "{src}");
@@ -4612,12 +4721,21 @@ mod tests {
             assert_eq!(fold.counts.folded, 0, "{src}");
         }
         // The per-file pass over the fixture is still HEAD's reading.
-        assert_eq!(qnames(&clients(LIVE)), vec!["ws_client:ws", "ws_client:/prices"]);
+        assert_eq!(
+            qnames(&clients(LIVE)),
+            vec!["ws_client:ws", "ws_client:/prices"]
+        );
         assert_eq!(
             hits(&clients(LIVE)),
             vec![
-                ("ws_client:ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
-                ("ws_client:/prices".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+                (
+                    "ws_client:ws".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/prices".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
             ]
         );
     }

@@ -17,9 +17,7 @@ use glia_core::{
     Cell, CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
     RepoId,
 };
-use glia_store::{
-    Container, EncodedSection, Header, StoreError, read_to_owned, write_container,
-};
+use glia_store::{Container, EncodedSection, Header, StoreError, read_to_owned, write_container};
 
 use crate::profile::TOY_TABLES;
 use crate::registry::cell_type::{LABEL, SCREEN_TIME, TIMECODE};

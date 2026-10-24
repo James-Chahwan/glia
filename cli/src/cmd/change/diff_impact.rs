@@ -56,8 +56,8 @@ use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{
-    CalibratedRankingArgs, ImpactDirection, applied_ranking, build_options, generate_for, rank_cache, render_files,
-    render_selection,
+    CalibratedRankingArgs, ImpactDirection, applied_ranking, build_options, generate_for,
+    rank_cache, render_files, render_selection,
 };
 
 #[derive(clap::Args, Debug)]
@@ -120,7 +120,9 @@ fn read_diff(src: &str) -> Result<String, String> {
 fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), String> {
     if let Some(src) = &args.diff {
         if args.base.is_some() {
-            return Err("give one change source: --base <rev> or --diff <file|->, not both".to_string());
+            return Err(
+                "give one change source: --base <rev> or --diff <file|->, not both".to_string(),
+            );
         }
         let text = read_diff(src)?;
         let built = generate_for(&args.repo, &args.with)?;
@@ -133,11 +135,14 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), Strin
         return Ok((a, built.repo_labels.len()));
     }
     if !args.with.is_empty() {
-        return Err("--base builds the one repo against its git rev; --with needs --diff".to_string());
+        return Err(
+            "--base builds the one repo against its git rev; --with needs --diff".to_string(),
+        );
     }
     if !build_options().overlay {
         return Err(
-            "--no-overlay does not apply to --base: both sides are built with the repo's overlay".to_string(),
+            "--no-overlay does not apply to --base: both sides are built with the repo's overlay"
+                .to_string(),
         );
     }
     // `diff_impact_vs_rev`'s two steps, so the radius gets the working
@@ -145,7 +150,10 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), Strin
     let rev = graph_delta_vs_rev(&args.repo, args.base.as_deref().unwrap_or("HEAD"))?;
     let mut opts = labelled(opts, &rev.after.repo_labels);
     opts.rank_cache = Some(rank_cache(&rev.after));
-    Ok((diff_impact_from_delta(&rev, &opts), rev.after.repo_labels.len()))
+    Ok((
+        diff_impact_from_delta(&rev, &opts),
+        rev.after.repo_labels.len(),
+    ))
 }
 
 /// `opts` with the build's repo labels when its collapse is on and has none
@@ -239,7 +247,10 @@ fn render(repo: &str, source: &str, a: &DiffImpact, dir: &str, depth: usize) {
         a.impact.results.len()
     );
     if !a.unresolved_diff_files.is_empty() {
-        println!("- diff files no node placed: {}", a.unresolved_diff_files.join(", "));
+        println!(
+            "- diff files no node placed: {}",
+            a.unresolved_diff_files.join(", ")
+        );
     }
     println!();
     if !a.changed.is_empty() {
@@ -264,7 +275,11 @@ fn render(repo: &str, source: &str, a: &DiffImpact, dir: &str, depth: usize) {
     println!("## Impact");
     println!();
     for s in a.impact.seeds.iter().filter(|s| !s.linked_seeds.is_empty()) {
-        println!("> seed `{}` is one carry edge from: {}", s.qname, s.linked_seeds.join(", "));
+        println!(
+            "> seed `{}` is one carry edge from: {}",
+            s.qname,
+            s.linked_seeds.join(", ")
+        );
     }
     if a.impact.seeds.iter().any(|s| !s.linked_seeds.is_empty()) {
         println!();

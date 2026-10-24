@@ -84,7 +84,10 @@ fn a_known_symbol_with_no_doc_edge_is_no_edges_with_its_caveat() {
         a.caveats
     );
     assert_eq!(
-        a.caveats.iter().filter(|c| c.edge_category == "DOCUMENTS").count(),
+        a.caveats
+            .iter()
+            .filter(|c| c.edge_category == "DOCUMENTS")
+            .count(),
         2,
         "{:?}",
         a.caveats

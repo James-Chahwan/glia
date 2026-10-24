@@ -64,7 +64,13 @@ fn projects_json_lists_the_four_roots_sorted_by_path() {
 
 #[test]
 fn scope_accepts_a_project_label() {
-    let out = glia(&["blast-radius", &fixture(), "webEntry", "--scope", "@shop/web"]);
+    let out = glia(&[
+        "blast-radius",
+        &fixture(),
+        "webEntry",
+        "--scope",
+        "@shop/web",
+    ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("[scope] resolved label '@shop/web' -> apps/web"),
@@ -76,7 +82,13 @@ fn scope_accepts_a_project_label() {
     );
 
     // A literal path never prints the label marker.
-    let out = glia(&["blast-radius", &fixture(), "webEntry", "--scope", "apps/web"]);
+    let out = glia(&[
+        "blast-radius",
+        &fixture(),
+        "webEntry",
+        "--scope",
+        "apps/web",
+    ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("resolved label"), "{stderr}");
 }

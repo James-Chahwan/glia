@@ -831,19 +831,31 @@ mod tests {
             repo: glia_core::RepoId(1),
             confidence: glia_core::Confidence::Strong,
             cells: vec![
-                Cell { kind: POSITION, payload: CellPayload::Json(r#"{"file":"a.rs","start_line":0}"#.into()) },
-                Cell { kind: CODE, payload },
+                Cell {
+                    kind: POSITION,
+                    payload: CellPayload::Json(r#"{"file":"a.rs","start_line":0}"#.into()),
+                },
+                Cell {
+                    kind: CODE,
+                    payload,
+                },
             ],
         };
         let text = node(CellPayload::Text(body.into()));
         assert_eq!(code_text(&text), Some(body));
-        assert_ne!(code_text(&text).map_or(0, body_hash), 0, "the text has a body hash");
+        assert_ne!(
+            code_text(&text).map_or(0, body_hash),
+            0,
+            "the text has a body hash"
+        );
         let span = CodeSpan::of("a.rs", 0, body.as_bytes());
         let spanned = node(span.to_payload());
         assert_eq!(code_text(&spanned), None, "a span is a reference, not code");
         assert_eq!(code_text(&spanned).map_or(0, body_hash), 0, "no body hash");
         // Other CODE JSON (queue / cron `sites`) is still read as before.
-        let sites = node(CellPayload::Json(r#"{"sites":[{"file":"a.rs","line":3}]}"#.into()));
+        let sites = node(CellPayload::Json(
+            r#"{"sites":[{"file":"a.rs","line":3}]}"#.into(),
+        ));
         assert!(code_text(&sites).is_some());
     }
 

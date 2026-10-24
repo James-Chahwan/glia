@@ -52,10 +52,15 @@ impl UnionFind {
     /// panic.
     pub fn new(n: usize) -> Self {
         if n > u32::MAX as usize {
-            eprintln!("[algo] union-find: more than {} indices - u32 index limit, returning an empty set", u32::MAX);
+            eprintln!(
+                "[algo] union-find: more than {} indices - u32 index limit, returning an empty set",
+                u32::MAX
+            );
             return Self::default();
         }
-        Self { parent: (0..n as u32).collect() }
+        Self {
+            parent: (0..n as u32).collect(),
+        }
     }
 
     /// The root (smallest index) of `i`'s set, with full path compression:
@@ -131,8 +136,16 @@ impl Classes {
     /// The classes `g`'s edges join: every edge whose category `keep`
     /// contains and that `filter` accepts is one pair, in one pass over
     /// `g.edges()`. Its direction does not matter.
-    pub fn from_source<G: GraphSource + ?Sized>(g: &G, keep: &CategorySet, filter: impl Fn(&Edge) -> bool) -> Self {
-        Self::from_pairs(g.edges().filter(|e| keep.contains(e.category) && filter(e)).map(|e| (e.from, e.to)))
+    pub fn from_source<G: GraphSource + ?Sized>(
+        g: &G,
+        keep: &CategorySet,
+        filter: impl Fn(&Edge) -> bool,
+    ) -> Self {
+        Self::from_pairs(
+            g.edges()
+                .filter(|e| keep.contains(e.category) && filter(e))
+                .map(|e| (e.from, e.to)),
+        )
     }
 
     /// [`Self::from_pairs`] with the dense-index limit as a parameter, so the
@@ -147,7 +160,9 @@ impl Classes {
         ids.sort_unstable_by_key(|id| id.0);
         ids.dedup();
         if ids.len() > cap {
-            eprintln!("[algo] classes: more than {cap} ids - u32 index limit, returning no classes");
+            eprintln!(
+                "[algo] classes: more than {cap} ids - u32 index limit, returning no classes"
+            );
             return Self::default();
         }
         let n = ids.len();
@@ -174,7 +189,11 @@ impl Classes {
             classes[c as usize].1.push(id);
             class.push(c);
         }
-        Self { ids, class, classes }
+        Self {
+            ids,
+            class,
+            classes,
+        }
     }
 
     /// The representative of `id`'s class: the class's minimum id, or `id`
@@ -188,7 +207,9 @@ impl Classes {
 
     /// The members of `id`'s class, ascending, when it is in one.
     pub fn class_of(&self, id: NodeId) -> Option<&[NodeId]> {
-        dense(&self.ids, id).ok().map(|i| self.classes[self.class[i] as usize].1.as_slice())
+        dense(&self.ids, id)
+            .ok()
+            .map(|i| self.classes[self.class[i] as usize].1.as_slice())
     }
 
     /// Whether `a` and `b` are one node: equal, or members of one class.
@@ -199,7 +220,9 @@ impl Classes {
     /// Every class as `(representative, members ascending)`, by
     /// representative ascending.
     pub fn classes(&self) -> impl Iterator<Item = (NodeId, &[NodeId])> + '_ {
-        self.classes.iter().map(|(rep, members)| (*rep, members.as_slice()))
+        self.classes
+            .iter()
+            .map(|(rep, members)| (*rep, members.as_slice()))
     }
 
     /// Classes (each of two or more members).
@@ -252,7 +275,13 @@ impl<'g, G: GraphSource + ?Sized> Quotient<'g, G> {
     /// The quotient of `inner` by `classes`, in one pass over its nodes and
     /// one over its edges.
     pub fn new(inner: &'g G, classes: &'g Classes) -> Self {
-        let nodes = first_occurrences(inner.node_ids().into_iter().map(|id| classes.rep(id)).collect());
+        let nodes = first_occurrences(
+            inner
+                .node_ids()
+                .into_iter()
+                .map(|id| classes.rep(id))
+                .collect(),
+        );
         let mut edges = Vec::new();
         let mut collapsed = 0usize;
         for e in inner.edges() {
@@ -263,7 +292,13 @@ impl<'g, G: GraphSource + ?Sized> Quotient<'g, G> {
             }
             edges.push(Edge::new(from, to, e.category, e.confidence));
         }
-        Self { inner, classes, nodes, edges, collapsed }
+        Self {
+            inner,
+            classes,
+            nodes,
+            edges,
+            collapsed,
+        }
     }
 
     /// The node `id` is in the quotient: its class representative, or `id`.
@@ -305,7 +340,10 @@ fn first_occurrences(ids: Vec<NodeId>) -> Vec<NodeId> {
             prev = Some(ids[i].0);
         }
     }
-    ids.into_iter().zip(keep).filter_map(|(id, k)| k.then_some(id)).collect()
+    ids.into_iter()
+        .zip(keep)
+        .filter_map(|(id, k)| k.then_some(id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -329,13 +367,18 @@ mod tests {
 
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             self.0 >> 33
         }
     }
 
     fn signature(g: &dyn GraphSource) -> Vec<(u64, u64, u32, Confidence)> {
-        g.edges().map(|e| (e.from.0, e.to.0, e.category.0, e.confidence)).collect()
+        g.edges()
+            .map(|e| (e.from.0, e.to.0, e.category.0, e.confidence))
+            .collect()
     }
 
     #[test]
@@ -344,7 +387,10 @@ mod tests {
         assert_eq!(uf.union(5, 2), 2);
         assert_eq!(uf.union(2, 9), 2);
         assert_eq!(uf.union(7, 9), 2);
-        assert_eq!((uf.find(9), uf.find(7), uf.find(5), uf.find(2)), (2, 2, 2, 2));
+        assert_eq!(
+            (uf.find(9), uf.find(7), uf.find(5), uf.find(2)),
+            (2, 2, 2, 2)
+        );
         // Untouched indices stay singletons; a repeated union changes nothing.
         assert_eq!((uf.find(0), uf.find(8)), (0, 8));
         assert_eq!(uf.union(9, 5), 2);
@@ -363,8 +409,14 @@ mod tests {
         }
         assert_eq!(uf.parent[9_999], 9_998, "the walk under test is a chain");
         assert_eq!(uf.find(9_999), 0);
-        assert_eq!(uf.parent[9_999], 0, "one find points the far end at the root");
-        assert!(uf.parent.iter().all(|&p| p == 0), "and every index on the path");
+        assert_eq!(
+            uf.parent[9_999], 0,
+            "one find points the far end at the root"
+        );
+        assert!(
+            uf.parent.iter().all(|&p| p == 0),
+            "and every index on the path"
+        );
         // Ascending unions (the other order) give the same root everywhere.
         let mut up = UnionFind::new(len as usize);
         for i in 0..len - 1 {
@@ -420,7 +472,8 @@ mod tests {
                 break;
             }
         }
-        let mut groups: std::collections::BTreeMap<u64, Vec<u64>> = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<u64, Vec<u64>> =
+            std::collections::BTreeMap::new();
         for (id, l) in label {
             groups.entry(l).or_default().push(id);
         }
@@ -431,21 +484,32 @@ mod tests {
     fn classes_order_invariant() {
         for seed in 0..20u64 {
             let mut r = Lcg(seed ^ 0xC1A55);
-            let pairs: Vec<(NodeId, NodeId)> = (0..200).map(|_| (n(r.next() % 60), n(r.next() % 60))).collect();
+            let pairs: Vec<(NodeId, NodeId)> = (0..200)
+                .map(|_| (n(r.next() % 60), n(r.next() % 60)))
+                .collect();
             let forward = Classes::from_pairs(pairs.iter().copied());
             let reversed = Classes::from_pairs(pairs.iter().rev().copied());
             let swapped = Classes::from_pairs(pairs.iter().map(|&(a, b)| (b, a)));
             assert_eq!(forward, reversed, "seed {seed}");
             assert_eq!(forward, swapped, "seed {seed}");
 
-            let got: Vec<Vec<u64>> = forward.classes().map(|(_, m)| m.iter().map(|x| x.0).collect()).collect();
+            let got: Vec<Vec<u64>> = forward
+                .classes()
+                .map(|(_, m)| m.iter().map(|x| x.0).collect())
+                .collect();
             assert_eq!(got, oracle(&pairs), "seed {seed}");
             let reps: Vec<u64> = forward.classes().map(|(rep, _)| rep.0).collect();
-            assert!(reps.windows(2).all(|w| w[0] < w[1]), "classes ascending by rep");
+            assert!(
+                reps.windows(2).all(|w| w[0] < w[1]),
+                "classes ascending by rep"
+            );
             let mut total = 0;
             for (rep, members) in forward.classes() {
                 assert!(members.len() >= 2);
-                assert!(members.windows(2).all(|w| w[0].0 < w[1].0), "members ascending");
+                assert!(
+                    members.windows(2).all(|w| w[0].0 < w[1].0),
+                    "members ascending"
+                );
                 assert_eq!(rep, members[0], "rep is the class minimum");
                 for &m in members {
                     assert_eq!(forward.rep(m), rep);
@@ -470,7 +534,10 @@ mod tests {
         assert_eq!(classes.len(), 1);
         assert_eq!(classes.members(), 2);
         assert!(!classes.is_empty());
-        assert_eq!(classes.classes().collect::<Vec<_>>(), vec![(b, &[b, a][..])]);
+        assert_eq!(
+            classes.classes().collect::<Vec<_>>(),
+            vec![(b, &[b, a][..])]
+        );
         assert_eq!(classes.rep(a), b);
         assert_eq!(classes.rep(c), c);
         assert_eq!(classes.class_of(c), None);
@@ -492,10 +559,17 @@ mod tests {
     fn from_source_filters() {
         let g = ToyGraph {
             nodes: (1..=6).map(n).collect(),
-            edges: vec![toy_edge(1, 2, X.0), toy_edge(3, 4, Y.0), toy_edge(5, 6, X.0)],
+            edges: vec![
+                toy_edge(1, 2, X.0),
+                toy_edge(3, 4, Y.0),
+                toy_edge(5, 6, X.0),
+            ],
         };
         let classes = Classes::from_source(&g, &CategorySet::of(&[X]), |e| e.from != n(5));
-        assert_eq!(classes.classes().collect::<Vec<_>>(), vec![(n(1), &[n(1), n(2)][..])]);
+        assert_eq!(
+            classes.classes().collect::<Vec<_>>(),
+            vec![(n(1), &[n(1), n(2)][..])]
+        );
         let both = Classes::from_source(&g, &CategorySet::all(), |_| true);
         assert_eq!(both.len(), 3);
     }
@@ -519,7 +593,11 @@ mod tests {
         let strong = Confidence::Strong;
         assert_eq!(
             signature(&q),
-            vec![(a, m, CALLS.0, strong), (m, d, CALLS.0, strong), (e, e, CALLS.0, strong)]
+            vec![
+                (a, m, CALLS.0, strong),
+                (m, d, CALLS.0, strong),
+                (e, e, CALLS.0, strong)
+            ]
         );
         assert_eq!(q.collapsed_edges(), 2, "b->c CALLS and b->c SAME");
         assert_eq!(q.node_ids(), vec![n(a), n(m), n(d), n(e)]);
@@ -535,11 +613,20 @@ mod tests {
         let (a, b, c, d) = (1, 7, 4, 9);
         let g = ToyGraph {
             nodes: [a, b, c, d].into_iter().map(n).collect(),
-            edges: vec![toy_edge(a, b, CALLS.0), toy_edge(b, c, CALLS.0), toy_edge(c, d, CALLS.0), toy_edge(b, c, SAME.0)],
+            edges: vec![
+                toy_edge(a, b, CALLS.0),
+                toy_edge(b, c, CALLS.0),
+                toy_edge(c, d, CALLS.0),
+                toy_edge(b, c, SAME.0),
+            ],
         };
         let depths = |src: &dyn GraphSource| -> Vec<(u64, usize)> {
             let adj = Adjacency::build(src, &CategorySet::of(&[CALLS]));
-            bfs(&adj, &[n(a)], Walk::Forward, usize::MAX).reached.iter().map(|r| (r.id.0, r.depth)).collect()
+            bfs(&adj, &[n(a)], Walk::Forward, usize::MAX)
+                .reached
+                .iter()
+                .map(|r| (r.id.0, r.depth))
+                .collect()
         };
         assert_eq!(depths(&g), vec![(b, 1), (c, 2), (d, 3)]);
         let classes = Classes::from_pairs([(n(b), n(c))]);
@@ -556,7 +643,11 @@ mod tests {
             .map(|_| {
                 let from = nodes[(r.next() % 40) as usize];
                 // Now and then an endpoint that is no node (dangling).
-                let to = if r.next().is_multiple_of(13) { n(5) } else { nodes[(r.next() % 40) as usize] };
+                let to = if r.next().is_multiple_of(13) {
+                    n(5)
+                } else {
+                    nodes[(r.next() % 40) as usize]
+                };
                 let conf = confidences[(r.next() % 3) as usize];
                 Edge::new(from, to, EdgeCategoryId(1 + (r.next() % 4) as u32), conf)
             })
@@ -573,7 +664,10 @@ mod tests {
     fn quotient_nodes_keep_first_occurrence() {
         // A repeated inner id and two members of one class: each kept once,
         // at its first position.
-        let g = ToyGraph { nodes: vec![n(8), n(3), n(8), n(6), n(2)], edges: Vec::new() };
+        let g = ToyGraph {
+            nodes: vec![n(8), n(3), n(8), n(6), n(2)],
+            edges: Vec::new(),
+        };
         let classes = Classes::from_pairs([(n(6), n(3))]);
         let q = Quotient::new(&g, &classes);
         assert_eq!(q.node_ids(), vec![n(8), n(3), n(2)]);

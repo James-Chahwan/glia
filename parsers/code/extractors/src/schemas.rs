@@ -146,7 +146,10 @@ fn tokenize(source: &str) -> Vec<(Tok, u32)> {
                 while i < b.len() && b[i].is_ascii_alphanumeric() {
                     i += 1;
                 }
-                out.push((Tok::Num(source.get(start..i).unwrap_or_default().to_string()), line));
+                out.push((
+                    Tok::Num(source.get(start..i).unwrap_or_default().to_string()),
+                    line,
+                ));
             }
             _ => {
                 out.push((Tok::Sym(c), line));
@@ -216,8 +219,16 @@ enum Frame {
 
 /// Statement keywords that can never open a field, even where the rest of
 /// the statement reads like one (`option foo = 1;`).
-const PROTO_NON_FIELD_KEYWORDS: [&str; 8] =
-    ["option", "extensions", "extend", "reserved", "oneof", "message", "enum", "group"];
+const PROTO_NON_FIELD_KEYWORDS: [&str; 8] = [
+    "option",
+    "extensions",
+    "extend",
+    "reserved",
+    "oneof",
+    "message",
+    "enum",
+    "group",
+];
 
 /// A proto integer literal: decimal, `0x` hex or leading-`0` octal.
 fn parse_proto_int(s: &str) -> Option<u64> {
@@ -238,7 +249,11 @@ fn proto_num_text(s: &str) -> String {
 /// One named type at `toks[i]`: `Name` or `.pkg.Name` (dot dropped).
 /// Returns it and the index after it.
 fn proto_named_type(toks: &[Tok], i: usize) -> Option<(String, usize)> {
-    let i = if toks.get(i) == Some(&Tok::Sym(b'.')) { i + 1 } else { i };
+    let i = if toks.get(i) == Some(&Tok::Sym(b'.')) {
+        i + 1
+    } else {
+        i
+    };
     let Tok::Ident(t) = toks.get(i)? else {
         return None;
     };
@@ -264,7 +279,9 @@ fn proto_type(toks: &[Tok], i: usize) -> Option<(String, usize)> {
 /// number are ignored), else `None`.
 fn proto_field(stmt: &[Tok], oneof: Option<&str>) -> Option<ProtoField> {
     let label = match stmt.first()? {
-        Tok::Ident(l) if matches!(l.as_str(), "repeated" | "optional" | "required") => Some(l.clone()),
+        Tok::Ident(l) if matches!(l.as_str(), "repeated" | "optional" | "required") => {
+            Some(l.clone())
+        }
         _ => None,
     };
     let at = usize::from(label.is_some());
@@ -356,7 +373,8 @@ pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
         last_line = *line;
         match tok {
             Tok::Ident(kw) if kw == "package" && frames.is_empty() => {
-                if let (Some((Tok::Ident(p), _)), Some((Tok::Semi, _))) = (toks.get(i + 1), toks.get(i + 2))
+                if let (Some((Tok::Ident(p), _)), Some((Tok::Semi, _))) =
+                    (toks.get(i + 1), toks.get(i + 2))
                     && package.is_none()
                 {
                     package = Some(p.clone());
@@ -365,7 +383,8 @@ pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
                 }
             }
             Tok::Ident(kw) if kw == "message" || kw == "enum" => {
-                if let (Some((Tok::Ident(name), _)), Some((Tok::Open, _))) = (toks.get(i + 1), toks.get(i + 2))
+                if let (Some((Tok::Ident(name), _)), Some((Tok::Open, _))) =
+                    (toks.get(i + 1), toks.get(i + 2))
                     && !name.contains('.')
                 {
                     // The innermost enclosing message / enum body, if the
@@ -410,13 +429,18 @@ pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
                     (Some(Frame::Decl(msg)), [Tok::Ident(kw), Tok::Ident(name)])
                         if target.is_some() && kw == "oneof" && !name.contains('.') =>
                     {
-                        Frame::Oneof { msg: *msg, name: name.clone() }
+                        Frame::Oneof {
+                            msg: *msg,
+                            name: name.clone(),
+                        }
                     }
                     _ => Frame::Other,
                 };
                 // An option's aggregate value (`= {`) is part of its statement;
                 // any other brace in a message body opens a block that ends it.
-                if target.is_some() && !matches!(stmt.last(), Some(Tok::Sym(b'=' | b':' | b',' | b'['))) {
+                if target.is_some()
+                    && !matches!(stmt.last(), Some(Tok::Sym(b'=' | b':' | b',' | b'[')))
+                {
                     stmt.clear();
                 }
                 frames.push(frame);
@@ -467,7 +491,12 @@ fn json_string(s: &str) -> String {
 /// `"reserved":[...]` when there are any, then `"truncated":true` when a cap
 /// cut a list short. LE.10b writes the same shape for contract ops, so LE.10c
 /// compares one shape.
-fn schema_fields_cell(format: &str, fields: &[String], reserved: &[String], truncated: bool) -> Cell {
+fn schema_fields_cell(
+    format: &str,
+    fields: &[String],
+    reserved: &[String],
+    truncated: bool,
+) -> Cell {
     let mut j = format!(r#"{{"format":"{format}","fields":[{}]"#, fields.join(","));
     if !reserved.is_empty() {
         let reserved: Vec<String> = reserved.iter().map(|r| json_string(r)).collect();
@@ -477,13 +506,20 @@ fn schema_fields_cell(format: &str, fields: &[String], reserved: &[String], trun
         j.push_str(r#","truncated":true"#);
     }
     j.push('}');
-    Cell { kind: cell_type::SCHEMA_FIELDS, payload: CellPayload::Json(j) }
+    Cell {
+        kind: cell_type::SCHEMA_FIELDS,
+        payload: CellPayload::Json(j),
+    }
 }
 
 /// `{"name":..,"type":..,"number":N,"label":..,"oneof":..}`, each optional
 /// key only when present.
 fn proto_field_json(f: &ProtoField) -> String {
-    let mut j = format!(r#"{{"name":{},"type":{}"#, json_string(&f.name), json_string(&f.type_name));
+    let mut j = format!(
+        r#"{{"name":{},"type":{}"#,
+        json_string(&f.name),
+        json_string(&f.type_name)
+    );
     if let Some(n) = f.number {
         j.push_str(&format!(r#","number":{n}"#));
     }
@@ -554,11 +590,21 @@ pub fn extract_proto_messages(
         ];
         if !d.is_enum {
             let fields: Vec<String> = d.fields.iter().map(proto_field_json).collect();
-            cells.push(schema_fields_cell("proto", &fields, &d.reserved, d.truncated));
+            cells.push(schema_fields_cell(
+                "proto",
+                &fields,
+                &d.reserved,
+                d.truncated,
+            ));
             out.schema_field_cells += 1;
             out.schema_fields += fields.len();
         }
-        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+        out.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
         let parent = d.parent.as_ref().and_then(|p| ids.get(p).copied());
         if let Some(p) = parent {
             out.edges.push(Edge {
@@ -597,7 +643,11 @@ const AVRO_MAX_TYPES: usize = 500;
 /// A JSON value that keeps each object's 0-indexed line span. serde_json's
 /// `Value` drops positions, and a POSITION cell needs the declaration's braces.
 enum Json {
-    Obj { members: Vec<(String, Json)>, start_line: u32, end_line: u32 },
+    Obj {
+        members: Vec<(String, Json)>,
+        start_line: u32,
+        end_line: u32,
+    },
     Arr(Vec<Json>),
     Str(String),
     Other,
@@ -686,7 +736,11 @@ impl JsonReader<'_> {
                     }
                 }
                 self.i += 1;
-                Some(Json::Obj { members, start_line, end_line: self.line })
+                Some(Json::Obj {
+                    members,
+                    start_line,
+                    end_line: self.line,
+                })
             }
             b'[' => {
                 self.i += 1;
@@ -742,7 +796,9 @@ struct AvroDecl {
 }
 
 /// Avro's primitive type names; any other bare type string names a type.
-const AVRO_PRIMITIVES: [&str; 8] = ["null", "boolean", "int", "long", "float", "double", "bytes", "string"];
+const AVRO_PRIMITIVES: [&str; 8] = [
+    "null", "boolean", "int", "long", "float", "double", "bytes", "string",
+];
 
 /// A named type's `(namespace, bare name)`. A dotted `name` is already a
 /// fullname, and its namespace overrides both the `namespace` attribute and
@@ -787,7 +843,10 @@ fn avro_type(v: &Json, ns: &str, depth: usize) -> Option<String> {
     match v {
         Json::Str(s) => Some(avro_type_ref(s, ns)),
         Json::Arr(members) => {
-            let members: Option<Vec<String>> = members.iter().map(|m| avro_type(m, ns, depth + 1)).collect();
+            let members: Option<Vec<String>> = members
+                .iter()
+                .map(|m| avro_type(m, ns, depth + 1))
+                .collect();
             Some(members?.join("|"))
         }
         Json::Obj { .. } => {
@@ -865,7 +924,11 @@ fn walk_avro(v: &Json, ns: &str, parent: Option<usize>, depth: usize, out: &mut 
             }
             return;
         }
-        Json::Obj { start_line, end_line, .. } => (*start_line, *end_line),
+        Json::Obj {
+            start_line,
+            end_line,
+            ..
+        } => (*start_line, *end_line),
         Json::Str(_) | Json::Other => return,
     };
     let ty = v.get("type");
@@ -926,7 +989,11 @@ pub fn extract_avro_records(
     if serde_json::from_str::<serde::de::IgnoredAny>(source).is_err() {
         return out;
     }
-    let mut reader = JsonReader { src: source, i: 0, line: 0 };
+    let mut reader = JsonReader {
+        src: source,
+        i: 0,
+        line: 0,
+    };
     let Some(root) = reader.value(0) else {
         return out;
     };
@@ -966,7 +1033,12 @@ pub fn extract_avro_records(
             out.schema_field_cells += 1;
             out.schema_fields += fields.len();
         }
-        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+        out.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
         let parent = d.parent.and_then(|p| id_of.get(p).copied());
         if let Some(p) = parent {
             out.edges.push(Edge {
@@ -1060,7 +1132,9 @@ pub fn sniff_json_schema(text: &str) -> bool {
 /// than minting a qname with a space in it.
 fn is_type_name(s: &str) -> bool {
     let mut bytes = s.bytes();
-    bytes.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+    bytes
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
         && s.len() <= 128
         && bytes.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
 }
@@ -1089,7 +1163,11 @@ fn json_schema_root_name(root: &Json, path: &str) -> Option<String> {
         return Some(title.to_string());
     }
     if let Some(id) = root.get("$id").and_then(Json::as_str) {
-        let id = id.split(['#', '?']).next().unwrap_or(id).trim_end_matches('/');
+        let id = id
+            .split(['#', '?'])
+            .next()
+            .unwrap_or(id)
+            .trim_end_matches('/');
         let seg = schema_stem(id.rsplit('/').next().unwrap_or(id));
         if is_type_name(seg) {
             return Some(seg.to_string());
@@ -1110,7 +1188,11 @@ fn is_object_type(v: &Json) -> bool {
 /// POSITION (the object's own braces) + ORIGIN for one JSON Schema type.
 fn json_schema_node(v: &Json, id: NodeId, repo: RepoId, path: &str, decl: &str) -> Node {
     let (start_line, end_line) = match v {
-        Json::Obj { start_line, end_line, .. } => (*start_line, *end_line),
+        Json::Obj {
+            start_line,
+            end_line,
+            ..
+        } => (*start_line, *end_line),
         _ => (0, 0),
     };
     // serde_json escapes control characters too, which `json_str` does not.
@@ -1159,7 +1241,11 @@ pub fn extract_json_schema_types(
     if serde_json::from_str::<serde::de::IgnoredAny>(body).is_err() {
         return out;
     }
-    let mut reader = JsonReader { src: body, i: 0, line: 0 };
+    let mut reader = JsonReader {
+        src: body,
+        i: 0,
+        line: 0,
+    };
     let Some(root @ Json::Obj { .. }) = reader.value(0) else {
         return out;
     };
@@ -1174,8 +1260,15 @@ pub fn extract_json_schema_types(
     let root_id = if is_object_type(&root) {
         let qname = format!("message:jsonschema:{root_name}");
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, &qname);
-        out.nodes.push(json_schema_node(&root, id, repo, path, "object"));
-        out.nav.record(id, &root_name, &qname, node_kind::MESSAGE_TYPE, Some(module_id));
+        out.nodes
+            .push(json_schema_node(&root, id, repo, path, "object"));
+        out.nav.record(
+            id,
+            &root_name,
+            &qname,
+            node_kind::MESSAGE_TYPE,
+            Some(module_id),
+        );
         out.message_count += 1;
         seen.insert(qname);
         Some(id)
@@ -1215,7 +1308,13 @@ pub fn extract_json_schema_types(
                 cells: Vec::new(),
             });
         }
-        out.nav.record(id, name, &qname, node_kind::MESSAGE_TYPE, Some(root_id.unwrap_or(module_id)));
+        out.nav.record(
+            id,
+            name,
+            &qname,
+            node_kind::MESSAGE_TYPE,
+            Some(root_id.unwrap_or(module_id)),
+        );
         out.def_count += 1;
     }
     if !out.nodes.is_empty() {
@@ -1238,7 +1337,10 @@ mod tests {
     }
 
     fn qnames(out: &SchemaNodes) -> Vec<String> {
-        out.nodes.iter().map(|n| out.nav.qname_by_id[&n.id].clone()).collect()
+        out.nodes
+            .iter()
+            .map(|n| out.nav.qname_by_id[&n.id].clone())
+            .collect()
     }
 
     fn cell(n: &Node, kind: glia_core::CellTypeId) -> &str {
@@ -1258,7 +1360,10 @@ mod tests {
         let out = extract_proto_messages(USER_PROTO, "user.proto", module_id(), repo());
         assert_eq!(
             qnames(&out),
-            vec!["message:proto:user.GetUserRequest", "message:proto:user.User"],
+            vec![
+                "message:proto:user.GetUserRequest",
+                "message:proto:user.User"
+            ],
             "ListUsersRequest / ListUsersResponse are referenced by an rpc, never declared"
         );
         assert_eq!(out.message_count, 2);
@@ -1266,7 +1371,10 @@ mod tests {
         assert!(out.edges.is_empty(), "no nesting, no DEFINES");
 
         let user = &out.nodes[1];
-        assert_eq!(out.nav.name_by_id[&user.id], "User", "nav name is the bare name");
+        assert_eq!(
+            out.nav.name_by_id[&user.id], "User",
+            "nav name is the bare name"
+        );
         assert_eq!(out.nav.kind_by_id[&user.id], node_kind::MESSAGE_TYPE);
         assert_eq!(out.nav.parent_of[&user.id], module_id());
         assert_eq!(
@@ -1283,7 +1391,10 @@ mod tests {
     fn nested_message_is_dot_qualified_and_parented_to_its_outer_message() {
         let src = "message Outer {\n  message Inner {}\n  Inner inner = 1;\n}\n";
         let out = extract_proto_messages(src, "o.proto", module_id(), repo());
-        assert_eq!(qnames(&out), vec!["message:proto:Outer", "message:proto:Outer.Inner"]);
+        assert_eq!(
+            qnames(&out),
+            vec!["message:proto:Outer", "message:proto:Outer.Inner"]
+        );
         let (outer, inner) = (out.nodes[0].id, out.nodes[1].id);
         assert_eq!(out.nav.name_by_id[&inner], "Inner");
         assert_eq!(out.nav.parent_of[&inner], outer);
@@ -1344,11 +1455,17 @@ mod tests {
     // ---- SCHEMA_FIELDS on proto messages (LE.10a) ----
 
     fn fields_of<'a>(out: &'a SchemaNodes, qname: &str) -> Option<&'a str> {
-        let n = out.nodes.iter().find(|n| out.nav.qname_by_id[&n.id] == qname)?;
-        n.cells.iter().find(|c| c.kind == cell_type::SCHEMA_FIELDS).map(|c| match &c.payload {
-            CellPayload::Json(j) => j.as_str(),
-            other => panic!("expected a Json cell, got {other:?}"),
-        })
+        let n = out
+            .nodes
+            .iter()
+            .find(|n| out.nav.qname_by_id[&n.id] == qname)?;
+        n.cells
+            .iter()
+            .find(|c| c.kind == cell_type::SCHEMA_FIELDS)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.as_str(),
+                other => panic!("expected a Json cell, got {other:?}"),
+            })
     }
 
     #[test]
@@ -1375,7 +1492,14 @@ mod tests {
         assert_eq!((out.schema_field_cells, out.schema_fields), (1, 8));
         // The POSITION / ORIGIN cells are unchanged, SCHEMA_FIELDS comes last.
         let kinds: Vec<_> = out.nodes[0].cells.iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, vec![cell_type::POSITION, cell_type::ORIGIN, cell_type::SCHEMA_FIELDS]);
+        assert_eq!(
+            kinds,
+            vec![
+                cell_type::POSITION,
+                cell_type::ORIGIN,
+                cell_type::SCHEMA_FIELDS
+            ]
+        );
     }
 
     #[test]
@@ -1395,7 +1519,11 @@ mod tests {
             Some(r#"{"format":"proto","fields":[]}"#),
             "a message with no fields says so; no reserved key when there is none"
         );
-        assert_eq!(fields_of(&out, "message:proto:E"), None, "an enum declares values, not fields");
+        assert_eq!(
+            fields_of(&out, "message:proto:E"),
+            None,
+            "an enum declares values, not fields"
+        );
         assert_eq!((out.schema_field_cells, out.schema_fields), (2, 1));
     }
 
@@ -1405,7 +1533,11 @@ mod tests {
         let out = extract_proto_messages(src, "n.proto", module_id(), repo());
         assert_eq!(
             qnames(&out),
-            vec!["message:proto:Outer", "message:proto:Outer.Inner", "message:proto:Outer.Inner.Kind"]
+            vec![
+                "message:proto:Outer",
+                "message:proto:Outer.Inner",
+                "message:proto:Outer.Inner.Kind"
+            ]
         );
         assert_eq!(
             fields_of(&out, "message:proto:Outer"),
@@ -1492,34 +1624,74 @@ mod tests {
                 r#"{"name":"sku","type":"string","number":3,"label":"repeated"}]}"#
             ))
         );
-        assert_eq!((p.schema_fields + c.schema_fields, p.schema_field_cells + c.schema_field_cells), (9, 2));
+        assert_eq!(
+            (
+                p.schema_fields + c.schema_fields,
+                p.schema_field_cells + c.schema_field_cells
+            ),
+            (9, 2)
+        );
     }
 
     #[test]
     fn field_cap_500() {
-        let body: String = (1..=600).map(|i| format!("  string f{i} = {i};\n")).collect();
+        let body: String = (1..=600)
+            .map(|i| format!("  string f{i} = {i};\n"))
+            .collect();
         let reserved: Vec<String> = (1000..1600).map(|i| i.to_string()).collect();
-        let src = format!("message Big {{\n{body}  reserved {};\n}}\n", reserved.join(", "));
+        let src = format!(
+            "message Big {{\n{body}  reserved {};\n}}\n",
+            reserved.join(", ")
+        );
         let out = extract_proto_messages(&src, "b.proto", module_id(), repo());
         let j = fields_of(&out, "message:proto:Big").unwrap_or_default();
         assert_eq!(j.matches(r#""name":"#).count(), SCHEMA_MAX_FIELDS);
-        assert!(j.contains(r#""name":"f500""#) && !j.contains(r#""name":"f501""#), "the first 500 kept");
-        assert!(j.contains(r#""1499""#) && !j.contains(r#""1500""#), "reserved capped the same way");
-        assert!(j.ends_with(r#","truncated":true}"#), "{}", &j[j.len() - 40..]);
+        assert!(
+            j.contains(r#""name":"f500""#) && !j.contains(r#""name":"f501""#),
+            "the first 500 kept"
+        );
+        assert!(
+            j.contains(r#""1499""#) && !j.contains(r#""1500""#),
+            "reserved capped the same way"
+        );
+        assert!(
+            j.ends_with(r#","truncated":true}"#),
+            "{}",
+            &j[j.len() - 40..]
+        );
         assert_eq!(out.schema_fields, SCHEMA_MAX_FIELDS);
 
         // A pathological `map<map<map<...` statement is not a field, and the
         // type scan never recurses into it.
         let deep = format!("message D {{ {} string> x = 1; }}", "map<".repeat(100_000));
         let out = extract_proto_messages(&deep, "d.proto", module_id(), repo());
-        assert_eq!(fields_of(&out, "message:proto:D"), Some(r#"{"format":"proto","fields":[]}"#));
+        assert_eq!(
+            fields_of(&out, "message:proto:D"),
+            Some(r#"{"format":"proto","fields":[]}"#)
+        );
 
-        let exact: String = (1..=500).map(|i| format!("  string f{i} = {i};\n")).collect();
-        let out = extract_proto_messages(&format!("message Full {{\n{exact}}}\n"), "f.proto", module_id(), repo());
-        assert!(!fields_of(&out, "message:proto:Full").unwrap_or_default().contains("truncated"));
+        let exact: String = (1..=500)
+            .map(|i| format!("  string f{i} = {i};\n"))
+            .collect();
+        let out = extract_proto_messages(
+            &format!("message Full {{\n{exact}}}\n"),
+            "f.proto",
+            module_id(),
+            repo(),
+        );
+        assert!(
+            !fields_of(&out, "message:proto:Full")
+                .unwrap_or_default()
+                .contains("truncated")
+        );
 
-        let fields: Vec<String> = (1..=600).map(|i| format!(r#"{{"name":"f{i}","type":"int"}}"#)).collect();
-        let big = format!(r#"{{"type":"record","name":"Big","fields":[{}]}}"#, fields.join(","));
+        let fields: Vec<String> = (1..=600)
+            .map(|i| format!(r#"{{"name":"f{i}","type":"int"}}"#))
+            .collect();
+        let big = format!(
+            r#"{{"type":"record","name":"Big","fields":[{}]}}"#,
+            fields.join(",")
+        );
         let out = avro(&big);
         let j = fields_of(&out, "message:avro:Big").unwrap_or_default();
         assert_eq!(j.matches(r#""name":"#).count(), SCHEMA_MAX_FIELDS);
@@ -1538,7 +1710,10 @@ mod tests {
         let out = avro(src);
         assert_eq!(qnames(&out), vec!["message:avro:com.shop.OrderPlaced"]);
         let n = &out.nodes[0];
-        assert_eq!(out.nav.name_by_id[&n.id], "OrderPlaced", "nav name is the bare name");
+        assert_eq!(
+            out.nav.name_by_id[&n.id], "OrderPlaced",
+            "nav name is the bare name"
+        );
         assert_eq!(out.nav.kind_by_id[&n.id], node_kind::MESSAGE_TYPE);
         assert_eq!(out.nav.parent_of[&n.id], module_id());
         assert_eq!(
@@ -1550,9 +1725,16 @@ mod tests {
             cell(n, cell_type::ORIGIN),
             r#"{"provenance":"contract","source":"avro","decl":"record","namespace":"com.shop"}"#
         );
-        assert_eq!((out.message_count, out.enum_count, out.fixed_count), (1, 0, 0));
+        assert_eq!(
+            (out.message_count, out.enum_count, out.fixed_count),
+            (1, 0, 0)
+        );
         assert!(out.edges.is_empty());
-        assert_eq!(out.module_cells.len(), 1, "the .avsc MODULE gets a whole-file POSITION");
+        assert_eq!(
+            out.module_cells.len(),
+            1,
+            "the .avsc MODULE gets a whole-file POSITION"
+        );
     }
 
     #[test]
@@ -1580,19 +1762,33 @@ mod tests {
         let ids: Vec<NodeId> = out.nodes.iter().map(|n| n.id).collect();
         let (user, address, geo) = (ids[0], ids[1], ids[2]);
         assert_eq!(out.nav.parent_of[&address], user);
-        assert_eq!(out.nav.parent_of[&geo], address, "parent is the innermost enclosing record");
+        assert_eq!(
+            out.nav.parent_of[&geo], address,
+            "parent is the innermost enclosing record"
+        );
         let defines: Vec<(NodeId, NodeId)> = out
             .edges
             .iter()
             .filter(|e| e.category == edge_category::DEFINES)
             .map(|e| (e.from, e.to))
             .collect();
-        assert_eq!(defines, vec![(user, address), (address, geo), (user, ids[3]), (user, ids[4])]);
+        assert_eq!(
+            defines,
+            vec![
+                (user, address),
+                (address, geo),
+                (user, ids[3]),
+                (user, ids[4])
+            ]
+        );
         assert_eq!(
             cell(&out.nodes[1], cell_type::POSITION),
             r#"{"file":"o.avsc","start_line":2,"end_line":3}"#
         );
-        assert_eq!((out.message_count, out.enum_count, out.fixed_count), (3, 1, 1));
+        assert_eq!(
+            (out.message_count, out.enum_count, out.fixed_count),
+            (3, 1, 1)
+        );
         assert!(cell(&out.nodes[2], cell_type::ORIGIN).contains(r#""decl":"fixed""#));
     }
 
@@ -1614,7 +1810,10 @@ mod tests {
     #[test]
     fn a_bare_type_string_schema_yields_nothing_and_a_dotted_name_is_a_fullname() {
         assert!(avro("\"string\"").nodes.is_empty());
-        assert!(avro("[\"null\", \"com.shop.User\"]").nodes.is_empty(), "references declare nothing");
+        assert!(
+            avro("[\"null\", \"com.shop.User\"]").nodes.is_empty(),
+            "references declare nothing"
+        );
         let out = avro(
             r#"[{"type":"record","name":"a.b.Rec","namespace":"ignored","fields":[
                 {"name":"x","type":{"type":"enum","name":"Kind","symbols":["K"]}}]},
@@ -1622,7 +1821,11 @@ mod tests {
         );
         assert_eq!(
             qnames(&out),
-            vec!["message:avro:a.b.Rec", "message:avro:a.b.Kind", "message:avro:Plain"],
+            vec![
+                "message:avro:a.b.Rec",
+                "message:avro:a.b.Kind",
+                "message:avro:Plain"
+            ],
             "a dotted name overrides `namespace`; the null namespace has no prefix"
         );
         assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "Rec");
@@ -1643,10 +1846,16 @@ mod tests {
         // 40 nested records: the walk stops at AVRO_MAX_DEPTH, never overflows.
         let mut deep = String::from("\"int\"");
         for i in 0..40 {
-            deep = format!(r#"{{"type":"record","name":"N{i}","fields":[{{"name":"f","type":{deep}}}]}}"#);
+            deep = format!(
+                r#"{{"type":"record","name":"N{i}","fields":[{{"name":"f","type":{deep}}}]}}"#
+            );
         }
         let n = avro(&deep).nodes.len();
-        assert_eq!(n, AVRO_MAX_DEPTH + 1, "records at walk depth 0..=AVRO_MAX_DEPTH");
+        assert_eq!(
+            n,
+            AVRO_MAX_DEPTH + 1,
+            "records at walk depth 0..=AVRO_MAX_DEPTH"
+        );
     }
 
     #[test]
@@ -1707,9 +1916,20 @@ mod tests {
             Some(r#"{"format":"avro","fields":[{"name":"city","type":"string"}]}"#),
             "the nested record's fields are its own cell"
         );
-        assert_eq!(fields_of(&out, "message:avro:com.meta.Tag"), Some(r#"{"format":"avro","fields":[]}"#));
-        assert_eq!(fields_of(&out, "message:avro:com.shop.Status"), None, "an enum has no fields");
-        assert_eq!(fields_of(&out, "message:avro:com.geo.Hash"), None, "a fixed has no fields");
+        assert_eq!(
+            fields_of(&out, "message:avro:com.meta.Tag"),
+            Some(r#"{"format":"avro","fields":[]}"#)
+        );
+        assert_eq!(
+            fields_of(&out, "message:avro:com.shop.Status"),
+            None,
+            "an enum has no fields"
+        );
+        assert_eq!(
+            fields_of(&out, "message:avro:com.geo.Hash"),
+            None,
+            "a fixed has no fields"
+        );
         assert_eq!((out.schema_field_cells, out.schema_fields), (3, 5));
     }
 
@@ -1795,26 +2015,50 @@ mod tests {
             ),
             ("2020-12 $schema", ORDER_CREATED),
             ("type object + properties, no $schema", REFUND),
-            ("BOM and leading whitespace", "\u{feff}\n  {\"type\" : \"object\", \"properties\" : {}}"),
-            ("escaped slashes in the meta-schema URL", r#"{"$schema":"https:\/\/json-schema.org\/draft\/2019-09\/schema"}"#),
+            (
+                "BOM and leading whitespace",
+                "\u{feff}\n  {\"type\" : \"object\", \"properties\" : {}}",
+            ),
+            (
+                "escaped slashes in the meta-schema URL",
+                r#"{"$schema":"https:\/\/json-schema.org\/draft\/2019-09\/schema"}"#,
+            ),
         ] {
             assert!(sniff_json_schema(src), "{what}: {src:?}");
         }
         // The walk test's rejected candidates, the fixture's own key.json and
         // the near misses.
         for (what, src) in [
-            ("openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
-            ("tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#),
+            (
+                "openapi.json",
+                r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#,
+            ),
             (
                 "package-lock.json",
                 r#"{"name":"shop","lockfileVersion":3,"packages":{"":{"dependencies":{"swagger-ui":"5"}}}}"#,
             ),
             ("a JSON array", r#"[{"type":"object","properties":{}}]"#),
             ("the substrate key.json", FIXTURE_KEY),
-            ("schemastore $schema", r#"{"$schema":"https://json.schemastore.org/tsconfig","compilerOptions":{}}"#),
-            ("type object without properties", r#"{"type":"object","required":[]}"#),
-            ("the keys only as values", r#"{"kind":"type","note":"properties","t":"object"}"#),
-            ("type not object", r#"{"type":"module","properties":{"a":1}}"#),
+            (
+                "schemastore $schema",
+                r#"{"$schema":"https://json.schemastore.org/tsconfig","compilerOptions":{}}"#,
+            ),
+            (
+                "type object without properties",
+                r#"{"type":"object","required":[]}"#,
+            ),
+            (
+                "the keys only as values",
+                r#"{"kind":"type","note":"properties","t":"object"}"#,
+            ),
+            (
+                "type not object",
+                r#"{"type":"module","properties":{"a":1}}"#,
+            ),
             ("empty", ""),
         ] {
             assert!(!sniff_json_schema(src), "{what}: {src:?}");
@@ -1833,12 +2077,18 @@ mod tests {
         let out = jsonschema(ORDER_CREATED, path);
         assert_eq!(
             qnames(&out),
-            vec!["message:jsonschema:OrderCreated", "message:jsonschema:OrderCreated.Address"],
+            vec![
+                "message:jsonschema:OrderCreated",
+                "message:jsonschema:OrderCreated.Address"
+            ],
             "the root and its one $defs entry; properties are not declared types"
         );
         let (root, address) = (&out.nodes[0], &out.nodes[1]);
         assert_eq!(out.nav.name_by_id[&root.id], "OrderCreated");
-        assert_eq!(out.nav.name_by_id[&address.id], "Address", "nav name is the bare def name");
+        assert_eq!(
+            out.nav.name_by_id[&address.id], "Address",
+            "nav name is the bare def name"
+        );
         assert_eq!(out.nav.kind_by_id[&address.id], node_kind::MESSAGE_TYPE);
         assert_eq!(out.nav.parent_of[&root.id], module_id());
         assert_eq!(out.nav.parent_of[&address.id], root.id);
@@ -1864,7 +2114,11 @@ mod tests {
         );
         assert_eq!((out.message_count, out.def_count), (1, 1));
         assert_eq!((out.enum_count, out.fixed_count), (0, 0));
-        assert_eq!(out.module_cells.len(), 1, "the schema file's MODULE gets a whole-file POSITION");
+        assert_eq!(
+            out.module_cells.len(),
+            1,
+            "the schema file's MODULE gets a whole-file POSITION"
+        );
         assert!(matches!(&out.module_cells[0].payload,
             CellPayload::Json(j) if j == r#"{"file":"schemas/order-created.schema.json","start_line":0,"end_line":17}"#));
 
@@ -1877,17 +2131,26 @@ mod tests {
     fn title_id_stem_naming_precedence() {
         let name = |src: &str, path: &str| qnames(&jsonschema(src, path));
         assert_eq!(
-            name(r#"{"title":"Order","$id":"https://x/y/other.json","type":"object"}"#, "a/b.json"),
+            name(
+                r#"{"title":"Order","$id":"https://x/y/other.json","type":"object"}"#,
+                "a/b.json"
+            ),
             ["message:jsonschema:Order"],
             "a valid title wins"
         );
         assert_eq!(
-            name(r##"{"title":"Order placed","$id":"https://x/y/order-placed.schema.json#","type":"object"}"##, "a/b.json"),
+            name(
+                r##"{"title":"Order placed","$id":"https://x/y/order-placed.schema.json#","type":"object"}"##,
+                "a/b.json"
+            ),
             ["message:jsonschema:order-placed"],
             "a spaced title falls to the $id's last segment, suffix and fragment dropped"
         );
         assert_eq!(
-            name(r#"{"$id":"urn:example:order","properties":{"a":{}}}"#, "schemas/Refund.Schema.JSON"),
+            name(
+                r#"{"$id":"urn:example:order","properties":{"a":{}}}"#,
+                "schemas/Refund.Schema.JSON"
+            ),
             ["message:jsonschema:Refund"],
             "an $id with no valid segment falls to the file stem, suffixes case-insensitive"
         );
@@ -1907,7 +2170,10 @@ mod tests {
     fn nested_lookalike_yields_nothing() {
         for (what, src) in [
             ("the fixture's settings.json", SETTINGS),
-            ("an array of schemas", r#"[{"type":"object","properties":{}}]"#),
+            (
+                "an array of schemas",
+                r#"[{"type":"object","properties":{}}]"#,
+            ),
             (
                 "a Swagger document's definitions are the contract route's",
                 r#"{"swagger":"2.0","definitions":{"User":{"type":"object","properties":{}}}}"#,
@@ -1916,7 +2182,10 @@ mod tests {
                 "an OpenAPI document's component schemas",
                 r#"{"openapi":"3.1.0","type":"object","properties":{},"components":{"schemas":{}}}"#,
             ),
-            ("a root that is not an object type", r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"}"#),
+            (
+                "a root that is not an object type",
+                r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"}"#,
+            ),
             (
                 "a def that is not an object schema, or not a name",
                 r##"{"$defs":{"Id":{"type":"string"},"bad name":{"type":"object"},"Ref":{"$ref":"#/x"}}}"##,
@@ -1935,7 +2204,13 @@ mod tests {
         // DEFINES, and a name repeated across the two blocks keeps the first.
         let src = "{\n  \"definitions\": {\n    \"Money\": {\"type\": \"object\"}\n  },\n  \"$defs\": {\n    \"Money\": {\"properties\": {}},\n    \"Sku\": {\"properties\": {}}\n  }\n}\n";
         let out = jsonschema(src, "schemas/common.schema.json");
-        assert_eq!(qnames(&out), vec!["message:jsonschema:common.Money", "message:jsonschema:common.Sku"]);
+        assert_eq!(
+            qnames(&out),
+            vec![
+                "message:jsonschema:common.Money",
+                "message:jsonschema:common.Sku"
+            ]
+        );
         assert!(out.edges.is_empty(), "no root type, no DEFINES");
         for n in &out.nodes {
             assert_eq!(out.nav.parent_of[&n.id], module_id());
@@ -1947,11 +2222,20 @@ mod tests {
         );
         assert_eq!((out.message_count, out.def_count), (0, 2));
 
-        let defs: Vec<String> = (0..300).map(|i| format!(r#""T{i}":{{"type":"object"}}"#)).collect();
+        let defs: Vec<String> = (0..300)
+            .map(|i| format!(r#""T{i}":{{"type":"object"}}"#))
+            .collect();
         let big = format!(r#"{{"type":"object","$defs":{{{}}}}}"#, defs.join(","));
         let out = jsonschema(&big, "big.json");
-        assert_eq!(out.nodes.len(), JSON_SCHEMA_MAX_TYPES, "the root plus 255 defs");
-        assert_eq!((out.message_count, out.def_count), (1, JSON_SCHEMA_MAX_TYPES - 1));
+        assert_eq!(
+            out.nodes.len(),
+            JSON_SCHEMA_MAX_TYPES,
+            "the root plus 255 defs"
+        );
+        assert_eq!(
+            (out.message_count, out.def_count),
+            (1, JSON_SCHEMA_MAX_TYPES - 1)
+        );
     }
 
     #[test]
@@ -1972,7 +2256,10 @@ mod tests {
         // Control characters in a decoded $id stay valid JSON in the ORIGIN.
         let out = jsonschema(r#"{"$id":"a\nb\"c","title":"T","type":"object"}"#, "t.json");
         let origin = cell(&out.nodes[0], cell_type::ORIGIN);
-        assert!(serde_json::from_str::<serde::de::IgnoredAny>(origin).is_ok(), "{origin}");
+        assert!(
+            serde_json::from_str::<serde::de::IgnoredAny>(origin).is_ok(),
+            "{origin}"
+        );
         assert!(origin.ends_with(r#","id":"a\nb\"c"}"#), "{origin}");
     }
 }

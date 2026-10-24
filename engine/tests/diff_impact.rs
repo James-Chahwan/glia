@@ -89,17 +89,34 @@ fn modified_leaf_impacts_callers() {
     assert_eq!(price.file.as_deref(), Some("shop/a.py"));
     assert_eq!(price.line, Some(1), "1-based: {price:#?}");
     for c in d.changed.iter().filter(|c| c.kind == "MODULE") {
-        assert!(!c.seed, "a module is never a seed beside a finer one: {c:#?}");
+        assert!(
+            !c.seed,
+            "a module is never a seed beside a finer one: {c:#?}"
+        );
     }
     assert_eq!(seed_qnames(&d), [PRICE]);
     // Sorted by qname: `shop::a::place` before `shop::b::checkout`.
     assert_eq!(
         rows(&d),
-        [(PLACE.to_string(), 1, PRICE.to_string()), (CHECKOUT.to_string(), 2, PRICE.to_string())]
+        [
+            (PLACE.to_string(), 1, PRICE.to_string()),
+            (CHECKOUT.to_string(), 2, PRICE.to_string())
+        ]
     );
-    let place = d.impact.results.iter().find(|r| r.qname == PLACE).expect("place row");
-    assert_eq!((place.file.as_deref(), place.line), (Some("shop/a.py"), Some(8)));
-    assert!(d.edges_added.is_empty() && d.edges_removed.is_empty(), "{d:#?}");
+    let place = d
+        .impact
+        .results
+        .iter()
+        .find(|r| r.qname == PLACE)
+        .expect("place row");
+    assert_eq!(
+        (place.file.as_deref(), place.line),
+        (Some("shop/a.py"), Some(8))
+    );
+    assert!(
+        d.edges_added.is_empty() && d.edges_removed.is_empty(),
+        "{d:#?}"
+    );
     assert!(d.unresolved_diff_files.is_empty());
     assert!(d.impact.absence.is_none());
 }
@@ -121,11 +138,23 @@ fn removed_call_seeds_the_caller() {
     let place = changed(&d, PLACE);
     assert!(place.seed, "{place:#?}");
     let price = changed(&d, PRICE);
-    assert_eq!((price.change, price.seed), ("edge_endpoint", true), "{price:#?}");
+    assert_eq!(
+        (price.change, price.seed),
+        ("edge_endpoint", true),
+        "{price:#?}"
+    );
     let seeds = seed_qnames(&d);
-    assert!(seeds.contains(&PLACE.to_string()) && seeds.contains(&PRICE.to_string()), "{seeds:?}");
+    assert!(
+        seeds.contains(&PLACE.to_string()) && seeds.contains(&PRICE.to_string()),
+        "{seeds:?}"
+    );
     // `checkout` still calls `place`: in radius, attributed to `place`.
-    let checkout = d.impact.results.iter().find(|r| r.qname == CHECKOUT).expect("checkout row");
+    let checkout = d
+        .impact
+        .results
+        .iter()
+        .find(|r| r.qname == CHECKOUT)
+        .expect("checkout row");
     assert_eq!((checkout.depth, checkout.seed.as_str()), (1, PLACE));
 }
 
@@ -145,7 +174,11 @@ fn pasted_diff_matches_rev_mode() {
     assert_eq!(seed_qnames(&pasted), [PRICE]);
     let hit = changed(&pasted, PRICE);
     assert_eq!((hit.change, hit.seed), ("diff_hit", true), "{hit:#?}");
-    assert!(pasted.unresolved_diff_files.is_empty(), "{:?}", pasted.unresolved_diff_files);
+    assert!(
+        pasted.unresolved_diff_files.is_empty(),
+        "{:?}",
+        pasted.unresolved_diff_files
+    );
 }
 
 /// (4) A hunk that only deletes lines: the rev mode still seeds `price` (its
@@ -161,7 +194,12 @@ fn deletion_only_hunk_still_seeds_in_rev_mode() {
     assert!(!rev.impact.results.is_empty());
 
     let text = String::from_utf8_lossy(&repo.git(&["diff"]).stdout).into_owned();
-    assert!(!text.lines().any(|l| l.starts_with('+') && !l.starts_with("+++")), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with('+') && !l.starts_with("+++")),
+        "{text}"
+    );
     let after = generate_one(repo.path()).expect("build the working tree");
     let pasted = diff_impact_from_diff(&after.merged, &text, &opts(Reach::Backward));
     assert_eq!(pasted.unresolved_diff_files, ["shop/a.py"]);
@@ -169,7 +207,11 @@ fn deletion_only_hunk_still_seeds_in_rev_mode() {
     assert!(pasted.impact.results.is_empty() && pasted.impact.seeds.is_empty());
     let absence = pasted.impact.absence.as_ref().expect("absence");
     assert_eq!(absence.reason, "no_match");
-    assert!(absence.note.contains("the diff resolved to no node"), "{}", absence.note);
+    assert!(
+        absence.note.contains("the diff resolved to no node"),
+        "{}",
+        absence.note
+    );
     assert!(absence.note.contains("shop/a.py"), "{}", absence.note);
 }
 
@@ -194,14 +236,22 @@ fn module_seed_dropped_beside_a_finer_seed() {
     repo.write("shop/a.py", A_PY_EDITED_IMPORT);
     let d = diff_impact_vs_rev(repo.path(), "HEAD", &opts(Reach::Backward)).expect("rev mode");
     let module = changed(&d, MODULE_A);
-    assert_eq!((module.change, module.seed), ("modified", false), "{module:#?}");
+    assert_eq!(
+        (module.change, module.seed),
+        ("modified", false),
+        "{module:#?}"
+    );
     assert_eq!(seed_qnames(&d), [PRICE]);
 
     let text = String::from_utf8_lossy(&repo.git(&["diff"]).stdout).into_owned();
     let after = generate_one(repo.path()).expect("build the working tree");
     let pasted = diff_impact_from_diff(&after.merged, &text, &opts(Reach::Backward));
     let module = changed(&pasted, MODULE_A);
-    assert_eq!((module.change, module.seed), ("diff_hit", false), "{module:#?}");
+    assert_eq!(
+        (module.change, module.seed),
+        ("diff_hit", false),
+        "{module:#?}"
+    );
     assert_eq!(seed_qnames(&pasted), [PRICE]);
     assert_eq!(rows(&pasted), rows(&d));
 }
@@ -214,9 +264,20 @@ fn removed_nodes_are_reported_not_seeded() {
     repo.remove("shop/b.py");
     let d = diff_impact_vs_rev(repo.path(), "HEAD", &opts(Reach::Forward)).expect("diff impact");
     let checkout = changed(&d, CHECKOUT);
-    assert_eq!((checkout.change, checkout.seed), ("removed", false), "{checkout:#?}");
-    assert_eq!((checkout.file.as_deref(), checkout.line), (Some("shop/b.py"), Some(4)));
-    assert!(d.edges_removed.iter().any(|e| e.category == "CALLS" && e.from_qname == CHECKOUT && e.to_qname == PLACE));
+    assert_eq!(
+        (checkout.change, checkout.seed),
+        ("removed", false),
+        "{checkout:#?}"
+    );
+    assert_eq!(
+        (checkout.file.as_deref(), checkout.line),
+        (Some("shop/b.py"), Some(4))
+    );
+    assert!(
+        d.edges_removed
+            .iter()
+            .any(|e| e.category == "CALLS" && e.from_qname == CHECKOUT && e.to_qname == PLACE)
+    );
     assert_eq!(seed_qnames(&d), [PLACE]);
     assert_eq!(changed(&d, PLACE).change, "edge_endpoint");
     assert_eq!(rows(&d), [(PRICE.to_string(), 1, PLACE.to_string())]);
@@ -231,8 +292,17 @@ fn moved_nodes_seed_under_their_new_identity() {
     let moved = changed(&d, "shop::c::checkout");
     assert_eq!((moved.change, moved.seed), ("moved", true), "{moved:#?}");
     assert_eq!(moved.file.as_deref(), Some("shop/c.py"));
-    assert!(seed_qnames(&d).contains(&"shop::c::checkout".to_string()), "{:?}", seed_qnames(&d));
-    let place = d.impact.results.iter().find(|r| r.qname == PLACE).expect("place row");
+    assert!(
+        seed_qnames(&d).contains(&"shop::c::checkout".to_string()),
+        "{:?}",
+        seed_qnames(&d)
+    );
+    let place = d
+        .impact
+        .results
+        .iter()
+        .find(|r| r.qname == PLACE)
+        .expect("place row");
     assert_eq!((place.depth, place.seed.as_str()), (1, "shop::c::checkout"));
     assert!(repo.root().join("shop/c.py").is_file());
 }
@@ -264,10 +334,22 @@ fn options_reach_the_radius_and_bad_rev_is_an_error() {
 fn changed_file_list_seeds_files_and_lists_unplaced_ones() {
     let repo = committed_shop();
     let g = generate_one(repo.path()).expect("build");
-    let d = diff_impact_from_diff(&g.merged, "shop/b.py\ndocs/notes.md\n", &opts(Reach::Forward));
+    let d = diff_impact_from_diff(
+        &g.merged,
+        "shop/b.py\ndocs/notes.md\n",
+        &opts(Reach::Forward),
+    );
     assert_eq!(d.unresolved_diff_files, ["docs/notes.md"]);
-    assert!(d.changed.iter().any(|c| c.qname == CHECKOUT && c.seed), "{:#?}", d.changed);
-    assert!(rows(&d).iter().any(|(q, _, s)| q == PLACE && s == CHECKOUT), "{:?}", rows(&d));
+    assert!(
+        d.changed.iter().any(|c| c.qname == CHECKOUT && c.seed),
+        "{:#?}",
+        d.changed
+    );
+    assert!(
+        rows(&d).iter().any(|(q, _, s)| q == PLACE && s == CHECKOUT),
+        "{:?}",
+        rows(&d)
+    );
 }
 
 /// CC.1: one precomputed rev delta answers exactly what `diff_impact_vs_rev`
@@ -280,11 +362,17 @@ fn from_delta_matches_vs_rev() {
     let rev = glia_engine::delta::graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
     let a = diff_impact_from_delta(&rev, &opts(Reach::Backward));
     let b = diff_impact_vs_rev(repo.path(), "HEAD", &opts(Reach::Backward)).expect("diff impact");
-    assert_eq!(serde_json::to_string(&a).expect("json"), serde_json::to_string(&b).expect("json"));
+    assert_eq!(
+        serde_json::to_string(&a).expect("json"),
+        serde_json::to_string(&b).expect("json")
+    );
     assert_eq!(a.base.as_deref(), Some("HEAD"));
     assert_eq!(seed_qnames(&a), [PRICE]);
     assert_eq!(
         rows(&a),
-        [(PLACE.to_string(), 1, PRICE.to_string()), (CHECKOUT.to_string(), 2, PRICE.to_string())]
+        [
+            (PLACE.to_string(), 1, PRICE.to_string()),
+            (CHECKOUT.to_string(), 2, PRICE.to_string())
+        ]
     );
 }

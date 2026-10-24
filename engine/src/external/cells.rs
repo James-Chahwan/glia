@@ -49,7 +49,13 @@ impl Tally {
     }
 
     /// Count one write's outcome; `what` names the row in a detail line.
-    fn count(&mut self, merged: &MergedGraph, cell: CellTypeId, what: &str, target: Result<CellTarget, String>) {
+    fn count(
+        &mut self,
+        merged: &MergedGraph,
+        cell: CellTypeId,
+        what: &str,
+        target: Result<CellTarget, String>,
+    ) {
         match target {
             Ok(CellTarget::Bound(_)) => {
                 self.bound += 1;
@@ -58,11 +64,18 @@ impl Tally {
             Ok(CellTarget::Rekeyed { id, tier }) => {
                 self.rekeyed += 1;
                 self.applied_one(cell);
-                self.detail(format!("rekeyed {what} -> {} tier={}", qname_of(merged, id), tier.as_str()));
+                self.detail(format!(
+                    "rekeyed {what} -> {} tier={}",
+                    qname_of(merged, id),
+                    tier.as_str()
+                ));
             }
             Ok(CellTarget::Ambiguous(id)) => {
                 self.ambiguous += 1;
-                self.detail(format!("ambiguous {what} (not applied; smallest candidate {})", qname_of(merged, id)));
+                self.detail(format!(
+                    "ambiguous {what} (not applied; smallest candidate {})",
+                    qname_of(merged, id)
+                ));
             }
             Ok(CellTarget::Orphaned) => {
                 self.orphaned += 1;
@@ -79,7 +92,11 @@ impl Tally {
     }
 
     fn applied_one(&mut self, cell: CellTypeId) {
-        if let Some(slot) = WRITABLE.iter().position(|c| *c == cell).and_then(|i| self.applied.get_mut(i)) {
+        if let Some(slot) = WRITABLE
+            .iter()
+            .position(|c| *c == cell)
+            .and_then(|i| self.applied.get_mut(i))
+        {
             *slot += 1;
         }
     }
@@ -143,12 +160,18 @@ fn report(label: &str, t: &Tally) {
         eprintln!("[cells] {line}");
     }
     if t.details.len() > MAX_DETAIL_LINES {
-        eprintln!("[cells] ... {} more detail lines", t.details.len() - MAX_DETAIL_LINES);
+        eprintln!(
+            "[cells] ... {} more detail lines",
+            t.details.len() - MAX_DETAIL_LINES
+        );
     }
 }
 
 fn cell_name(c: CellTypeId) -> &'static str {
-    cell_type::ALL.iter().find(|(id, _)| *id == c).map_or("?", |(_, n)| n)
+    cell_type::ALL
+        .iter()
+        .find(|(id, _)| *id == c)
+        .map_or("?", |(_, n)| n)
 }
 
 /// The qname of `id`, for a detail line; its numeric id when no nav names it.

@@ -75,7 +75,13 @@ impl PyGraph {
     /// build label). Rows without them have no `identity` /
     /// `handler_identity` key. `collapse=False` is the raw rows.
     #[pyo3(signature = (channel, mechanism="auto", collapse=true))]
-    fn serves(&self, py: Python<'_>, channel: &str, mechanism: &str, collapse: bool) -> PyResult<Py<PyAny>> {
+    fn serves(
+        &self,
+        py: Python<'_>,
+        channel: &str,
+        mechanism: &str,
+        collapse: bool,
+    ) -> PyResult<Py<PyAny>> {
         let collapse = if collapse {
             Collapse::with_labels(&self.repo_labels)
         } else {
@@ -117,7 +123,15 @@ mod tests {
         let merged = built.expect("build").merged;
         let live = glia_engine::entrypoint_reachable(&merged);
 
-        let hit = serves_answer(&merged, &live, "POST /orders", "auto", &Collapse::default(), 3).expect("answer");
+        let hit = serves_answer(
+            &merged,
+            &live,
+            "POST /orders",
+            "auto",
+            &Collapse::default(),
+            3,
+        )
+        .expect("answer");
         assert!(hit.absence.is_none());
         let json = serde_json::to_string(&hit).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
@@ -126,15 +140,23 @@ mod tests {
         assert_eq!(row["handlers"][0]["qname"], "app::create_order", "{json}");
         assert_eq!(row["live"], true, "{json}");
 
-        let none = serves_answer(&merged, &live, "DELETE /orders", "http", &Collapse::default(), 3).expect("answer");
+        let none = serves_answer(
+            &merged,
+            &live,
+            "DELETE /orders",
+            "http",
+            &Collapse::default(),
+            3,
+        )
+        .expect("answer");
         let absence = none.absence.expect("nothing takes DELETE");
         assert_eq!(
             (absence.reason, absence.unparsed_files),
             ("unserved_channel", 3)
         );
 
-        let err =
-            serves_answer(&merged, &live, "orders", "smtp", &Collapse::default(), 0).expect_err("unknown mechanism");
+        let err = serves_answer(&merged, &live, "orders", "smtp", &Collapse::default(), 0)
+            .expect_err("unknown mechanism");
         assert!(err.contains("smtp"), "{err}");
     }
 
@@ -158,7 +180,11 @@ mod tests {
                 path: "app.py".to_string(),
                 language: "python".to_string(),
                 source_hash: source_hash(APP.as_bytes()),
-                defs: vec![ScipDefRow { s: 0, line: 6, name: "create_order".to_string() }],
+                defs: vec![ScipDefRow {
+                    s: 0,
+                    line: 6,
+                    name: "create_order".to_string(),
+                }],
                 refs: Vec::new(),
             }];
             let symbols = vec![ScipSymbolRecord {
@@ -166,34 +192,59 @@ mod tests {
                 symbol: "scip-python python shop-svc 1.0 `app`/create_order().".to_string(),
                 implements: Vec::new(),
             }];
-            let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+            let meta = ScipMeta::new(
+                "scip-python".to_string(),
+                "0.6.0".to_string(),
+                String::new(),
+                0,
+            );
             write_scip(&dir, meta, &documents, &symbols).expect("write snapshot");
         }
-        let paths = [root.join("billing"), root.join("shop")].map(|p| p.to_string_lossy().into_owned());
+        let paths =
+            [root.join("billing"), root.join("shop")].map(|p| p.to_string_lossy().into_owned());
         let built = glia_engine::generate_many(&paths);
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
         let live = glia_engine::entrypoint_reachable(&built.merged);
 
         let on = Collapse::with_labels(&built.repo_labels);
-        let a = serves_answer(&built.merged, &live, "POST /orders", "auto", &on, 0).expect("answer");
+        let a =
+            serves_answer(&built.merged, &live, "POST /orders", "auto", &on, 0).expect("answer");
         assert_eq!(a.results.len(), 2, "{:?}", a.results);
         let mut also: Vec<&str> = Vec::new();
         for s in &a.results {
             assert!(s.identity.is_none(), "{s:?}");
             assert_eq!(s.handler_identity.len(), 1, "{s:?}");
             let hi = &s.handler_identity[0];
-            assert_eq!((hi.qname.as_str(), hi.identity.tier), ("app::create_order", "fact"));
+            assert_eq!(
+                (hi.qname.as_str(), hi.identity.tier),
+                ("app::create_order", "fact")
+            );
             assert_eq!(hi.identity.also_in.len(), 1, "{:?}", hi.identity.also_in);
             also.push(hi.identity.also_in[0].repo.as_str());
         }
         also.sort_unstable();
         assert_eq!(also, ["billing", "shop"]);
         let text = serde_json::to_string(&a).expect("json");
-        assert!(text.contains("\"handler_identity\":[{\"qname\":\"app::create_order\""), "{text}");
+        assert!(
+            text.contains("\"handler_identity\":[{\"qname\":\"app::create_order\""),
+            "{text}"
+        );
 
-        let raw = serves_answer(&built.merged, &live, "POST /orders", "auto", &Collapse::off(), 0).expect("answer");
+        let raw = serves_answer(
+            &built.merged,
+            &live,
+            "POST /orders",
+            "auto",
+            &Collapse::off(),
+            0,
+        )
+        .expect("answer");
         assert_eq!(raw.results.len(), 2);
-        assert!(!serde_json::to_string(&raw).expect("json").contains("identity"));
+        assert!(
+            !serde_json::to_string(&raw)
+                .expect("json")
+                .contains("identity")
+        );
     }
 }

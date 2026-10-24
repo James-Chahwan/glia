@@ -93,12 +93,18 @@ fn shape(m: &MergedGraph) -> Shape {
         .graphs
         .iter()
         .flat_map(|g| {
-            g.nodes
-                .iter()
-                .map(move |n| (n.id.0, g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default()))
+            g.nodes.iter().map(move |n| {
+                (
+                    n.id.0,
+                    g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default(),
+                )
+            })
         })
         .collect();
-    let edges = m.all_edges().map(|e| (e.from.0, e.to.0, e.category.0)).collect();
+    let edges = m
+        .all_edges()
+        .map(|e| (e.from.0, e.to.0, e.category.0))
+        .collect();
     (nodes, edges)
 }
 
@@ -108,7 +114,12 @@ fn gmap_bytes(r: &GenerateResult, out: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(out)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     files.sort();
     files
@@ -137,11 +148,20 @@ fn child_build_for_stderr() {
 fn markers(dir: &Path) -> Vec<String> {
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, dir)
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stderr)
         .lines()
         .filter(|l| l.starts_with("[cron] akka-quartz") || l.starts_with("[cron] code"))
@@ -163,7 +183,9 @@ fn conf_schedule_names_the_code_started_job() {
     assert_eq!(
         markers(td.path()),
         [
-            s("[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 akka_quartz=1 handler_refs=0 path=Jobs.scala"),
+            s(
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 akka_quartz=1 handler_refs=0 path=Jobs.scala"
+            ),
             s("[cron] akka-quartz confs=1 schedules=1 rekeyed=1 unresolved=0 conflicts=0"),
         ]
     );
@@ -175,7 +197,11 @@ fn no_conf_no_job() {
     let td = tempfile::tempdir().unwrap();
     write(td.path(), "Jobs.scala", JOBS);
     let r = build(td.path());
-    assert!(cron_jobs(&r.merged).is_empty(), "{:?}", cron_jobs(&r.merged));
+    assert!(
+        cron_jobs(&r.merged).is_empty(),
+        "{:?}",
+        cron_jobs(&r.merged)
+    );
     assert!(edges(&r.merged, edge_category::SCHEDULES).is_empty());
     assert_eq!(
         markers(td.path()).last().map(String::as_str),
@@ -203,7 +229,13 @@ fn incremental_equals_clean_and_a_conf_edit_rekeys() {
         );
         assert_eq!(shape(&r.merged), shape(&clean.merged));
     }
-    assert!(cache.last_diff().expect("a diff").reused.contains(&s("Jobs.scala")));
+    assert!(
+        cache
+            .last_diff()
+            .expect("a diff")
+            .reused
+            .contains(&s("Jobs.scala"))
+    );
 
     // Edit ONLY the conf: the cache serves Jobs.scala, which still holds the
     // REF, and the graft re-keys it to the new expression.
@@ -212,9 +244,17 @@ fn incremental_equals_clean_and_a_conf_edit_rekeys() {
     let diff = cache.last_diff().expect("a diff").clone();
     assert!(diff.reused.contains(&s("Jobs.scala")), "{diff:?}");
     assert!(!diff.reparsed.contains(&s("Jobs.scala")), "{diff:?}");
-    let cached = cache.iter().find(|c| c.path == "Jobs.scala").expect("cached parse");
+    let cached = cache
+        .iter()
+        .find(|c| c.path == "Jobs.scala")
+        .expect("cached parse");
     assert!(
-        cached.parse.nav.qname_by_id.values().any(|q| q == "cron:@quartz-conf:Nightly:Nightly"),
+        cached
+            .parse
+            .nav
+            .qname_by_id
+            .values()
+            .any(|q| q == "cron:@quartz-conf:Nightly:Nightly"),
         "the parse cache keeps the per-file REF"
     );
     assert_eq!(cron_jobs(&edited.merged), [s("cron:0 30 4 * * ?:Nightly")]);
@@ -232,5 +272,9 @@ fn incremental_equals_clean_and_a_conf_edit_rekeys() {
     // Dropping the conf drops the job on the next warm build.
     std::fs::remove_file(root.join(CONF_PATH)).unwrap();
     let gone = generate_one_with_cache(path, &mut cache).expect("no conf");
-    assert!(cron_jobs(&gone.merged).is_empty(), "{:?}", cron_jobs(&gone.merged));
+    assert!(
+        cron_jobs(&gone.merged).is_empty(),
+        "{:?}",
+        cron_jobs(&gone.merged)
+    );
 }

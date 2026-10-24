@@ -1,14 +1,14 @@
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
-    UnresolvedRef, cell_type, edge_category, node_kind,
-};
 use glia_code_domain::data_entity;
 use glia_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::line_of;
+pub use glia_code_domain::{
+    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
+    UnresolvedRef, cell_type, edge_category, node_kind,
+};
 
 pub fn parse_file(
     source: &str,
@@ -44,10 +44,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
 
     scan_phoenix_routes(source, repo, module_id, &mut acc);
     if acc.doc_attached + acc.doc_moduledoc + acc.doc_hidden > 0 {
@@ -171,7 +184,8 @@ fn visit_node(
 
 fn find_args(node: TsNode) -> Option<TsNode> {
     let mut c = node.walk();
-    node.named_children(&mut c).find(|ch| ch.kind() == "arguments")
+    node.named_children(&mut c)
+        .find(|ch| ch.kind() == "arguments")
 }
 
 fn visit_defmodule(
@@ -319,7 +333,10 @@ fn body_shape(body: TsNode, src: &[u8]) -> BodyShape {
         }
     }
     let tests = |c: &TsNode| {
-        matches!(exunit_block(*c, src), Some(ExUnitBlock::Test | ExUnitBlock::Describe))
+        matches!(
+            exunit_block(*c, src),
+            Some(ExUnitBlock::Test | ExUnitBlock::Describe)
+        )
     };
     if shape.exunit && children.iter().any(tests) {
         shape.children = true;
@@ -395,7 +412,13 @@ fn block_name(node: TsNode, src: &[u8]) -> Option<String> {
     (first.kind() == "string").then(|| {
         quoted_text(first, src)
             .chars()
-            .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
+            .map(|c| {
+                if matches!(c, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    c
+                }
+            })
             .collect()
     })
 }
@@ -578,7 +601,16 @@ fn visit_module_body(
                     }
                 }
             };
-            visit_def(child, src, file_rel, parent_qname, parent_id, repo, doc, acc);
+            visit_def(
+                child,
+                src,
+                file_rel,
+                parent_qname,
+                parent_id,
+                repo,
+                doc,
+                acc,
+            );
             continue;
         }
         pending = None;
@@ -687,7 +719,8 @@ fn visit_exunit_test(
         confidence: Confidence::Strong,
         cells: Vec::new(),
     });
-    acc.nav.record(id, &name, &qname, node_kind::FUNCTION, Some(module.id));
+    acc.nav
+        .record(id, &name, &qname, node_kind::FUNCTION, Some(module.id));
     if let Some(body) = do_block_of(node) {
         collect_calls_in(body, src, id, acc);
     }
@@ -920,7 +953,22 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             match target.kind() {
                 "identifier" => {
                     let name = text_of(target, src);
-                    if !matches!(name, "def" | "defp" | "defmodule" | "defprotocol" | "defstruct" | "import" | "alias" | "use" | "if" | "case" | "cond" | "do" | "end") {
+                    if !matches!(
+                        name,
+                        "def"
+                            | "defp"
+                            | "defmodule"
+                            | "defprotocol"
+                            | "defstruct"
+                            | "import"
+                            | "alias"
+                            | "use"
+                            | "if"
+                            | "case"
+                            | "cond"
+                            | "do"
+                            | "end"
+                    ) {
                         acc.calls.push(CallSite {
                             from,
                             qualifier: CallQualifier::Bare(name.to_string()),
@@ -1233,7 +1281,9 @@ fn ecto_schema_decl(node: TsNode, src: &[u8]) -> Option<SchemaDecl> {
     if first.kind() == "keywords" {
         return None;
     }
-    Some(SchemaDecl { table: literal_source(first, src) })
+    Some(SchemaDecl {
+        table: literal_source(first, src),
+    })
 }
 
 /// A string literal naming a table (`"users"`, `"public.users"`): no
@@ -1246,7 +1296,9 @@ fn literal_source(node: TsNode, src: &[u8]) -> Option<String> {
     let (text, interpolated) = string_text(node, src);
     let ok = !interpolated
         && !text.is_empty()
-        && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
     ok.then_some(text)
 }
 
@@ -1283,7 +1335,9 @@ fn queryable_entity(expr: TsNode, src: &[u8], module: Option<&str>) -> Option<St
         "identifier" if text_of(expr, src) == "__MODULE__" => module.map(str::to_string),
         "map" => {
             let mut cursor = expr.walk();
-            let st = expr.named_children(&mut cursor).find(|c| c.kind() == "struct")?;
+            let st = expr
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "struct")?;
             let mut inner = st.walk();
             let name = st.named_children(&mut inner).next()?;
             matches!(name.kind(), "alias" | "identifier")
@@ -1372,8 +1426,12 @@ fn from_sources<'a>(call: TsNode<'a>, src: &[u8]) -> Vec<TsNode<'a>> {
     let is_from = match target.kind() {
         "identifier" => text_of(target, src) == "from",
         "dot" => {
-            target.child_by_field_name("left").is_some_and(|l| text_of(l, src) == "Ecto.Query")
-                && target.child_by_field_name("right").is_some_and(|r| text_of(r, src) == "from")
+            target
+                .child_by_field_name("left")
+                .is_some_and(|l| text_of(l, src) == "Ecto.Query")
+                && target
+                    .child_by_field_name("right")
+                    .is_some_and(|r| text_of(r, src) == "from")
         }
         _ => false,
     };
@@ -1389,9 +1447,12 @@ fn from_sources<'a>(call: TsNode<'a>, src: &[u8]) -> Vec<TsNode<'a>> {
     for kw in parts.iter().filter(|p| p.kind() == "keywords") {
         let mut pairs = kw.walk();
         for pair in kw.named_children(&mut pairs) {
-            let is_join = pair
-                .child_by_field_name("key")
-                .is_some_and(|k| text_of(k, src).trim().trim_end_matches(':').ends_with("join"));
+            let is_join = pair.child_by_field_name("key").is_some_and(|k| {
+                text_of(k, src)
+                    .trim()
+                    .trim_end_matches(':')
+                    .ends_with("join")
+            });
             if let Some(source) = pair
                 .child_by_field_name("value")
                 .filter(|_| is_join)
@@ -1476,7 +1537,8 @@ impl Acc {
                 confidence: Confidence::Strong,
                 cells: cell.into_iter().collect(),
             });
-            self.nav.record(id, model, &qname, node_kind::DATA_ENTITY, None);
+            self.nav
+                .record(id, model, &qname, node_kind::DATA_ENTITY, None);
         } else if let Some(existing) = self.nodes.iter_mut().find(|n| n.id == id) {
             existing.confidence = Confidence::Strong;
             existing.cells.extend(cell);
@@ -1505,7 +1567,8 @@ impl Acc {
                 confidence: Confidence::Medium,
                 cells: Vec::new(),
             });
-            self.nav.record(id, name, &qname, node_kind::DATA_ENTITY, None);
+            self.nav
+                .record(id, name, &qname, node_kind::DATA_ENTITY, None);
         }
         if self.access_edges.insert((from, id)) {
             let mut edge = Edge {
@@ -1515,7 +1578,10 @@ impl Acc {
                 confidence: Confidence::Medium,
                 cells: Vec::new(),
             };
-            evidence::attach(&mut edge, Evidence::emitter("parser:elixir").rule(rule).line(line));
+            evidence::attach(
+                &mut edge,
+                Evidence::emitter("parser:elixir").rule(rule).line(line),
+            );
             self.edges.push(edge);
         }
     }
@@ -1586,7 +1652,15 @@ fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut 
                         if seen.insert(route_name.clone()) {
                             // `resources` derives standard RESTful actions from the
                             // controller implicitly; no explicit action to link.
-                            emit_phoenix_route(m, &full, None, repo, module_id, line_of(source, i), acc);
+                            emit_phoenix_route(
+                                m,
+                                &full,
+                                None,
+                                repo,
+                                module_id,
+                                line_of(source, i),
+                                acc,
+                            );
                         }
                     }
                 }
@@ -2012,13 +2086,19 @@ end
     #[test]
     fn doc_heredoc_attaches_through_spec() {
         let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "get_user"), vec!["Fetches a user by id."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "get_user"),
+            vec!["Fetches a user by id."]
+        );
     }
 
     #[test]
     fn doc_single_line_string() {
         let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "create_user"), vec!["Creates a user."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "create_user"),
+            vec!["Creates a user."]
+        );
     }
 
     #[test]
@@ -2035,7 +2115,10 @@ end
         let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
         assert!(docs_of(&fp, node_kind::FUNCTION, "internal").is_empty());
         // Control: the leading-comment path still documents a comment-only def.
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "comment_only"), vec!["Plain comment above."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "comment_only"),
+            vec!["Plain comment above."]
+        );
 
         // A comment BETWEEN `@doc false` and the def is directly above the def,
         // so `leading_doc` would pick it up; `@doc false` must still win.
@@ -2075,7 +2158,10 @@ defmodule M do
 end
 "#;
         let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "handle"), vec!["Handles a call."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "handle"),
+            vec!["Handles a call."]
+        );
     }
 
     #[test]
@@ -2112,7 +2198,10 @@ defmodule M do
 end
 "#;
         let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "get"), vec!["Gets a thing."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "get"),
+            vec!["Gets a thing."]
+        );
     }
 
     #[test]
@@ -2126,7 +2215,10 @@ end
 "#;
         let fp = parse_file(source, "lib/o.ex", "lib::o", repo()).unwrap();
         assert!(docs_of(&fp, node_kind::PACKAGE, "Outer").is_empty());
-        assert_eq!(docs_of(&fp, node_kind::PACKAGE, "Inner"), vec!["Inner docs."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::PACKAGE, "Inner"),
+            vec!["Inner docs."]
+        );
     }
 
     #[test]
@@ -2165,7 +2257,10 @@ end
             docs_of(&fp, node_kind::FUNCTION, "a"),
             vec!["Indented first line. Deeper second line, café."]
         );
-        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "b"), vec!["Say \"hi\" to #{name}."]);
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "b"),
+            vec!["Say \"hi\" to #{name}."]
+        );
     }
 
     #[test]
@@ -2233,8 +2328,22 @@ defmodule MyApp.Users do
 end
 "#;
         let fp = parse_file(source, "lib/users.ex", "lib::users", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 2);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::PACKAGE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -2257,7 +2366,10 @@ end
         assert!(
             fp.imports.iter().all(|i| i.from_module == "lib::web"),
             "from_module must be the file MODULE qname, got: {:?}",
-            fp.imports.iter().map(|i| &i.from_module).collect::<Vec<_>>()
+            fp.imports
+                .iter()
+                .map(|i| &i.from_module)
+                .collect::<Vec<_>>()
         );
 
         // The dotted alias path is preserved so the graph's tail fallback can split
@@ -2292,7 +2404,10 @@ end
             .iter()
             .find(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::PACKAGE))
             .expect("defmodule package node");
-        assert_eq!(pkg.1, "Repo", "short name should be the last dotted segment");
+        assert_eq!(
+            pkg.1, "Repo",
+            "short name should be the last dotted segment"
+        );
         assert_eq!(
             fp.nav.qname_by_id.get(pkg.0).map(String::as_str),
             Some("lib::repo::MyApp.Repo"),
@@ -2342,7 +2457,11 @@ defmodule MyApp.Service do
 end
 "#;
         let fp = parse_file(source, "lib/service.ex", "lib::service", repo()).unwrap();
-        assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate")));
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate"))
+        );
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Attribute { base, name } if base == "Repo" && name == "insert")));
     }
 
@@ -2580,7 +2699,8 @@ end
     // --- DH.17b: behaviours, @behaviour, compile_env DI, ExUnit tests -------
 
     /// The matrix/elixir/impl probe's two files.
-    const NOTIFIER: &str = "defmodule Shop.Notifier do\n  @callback notify(String.t()) :: :ok\nend\n";
+    const NOTIFIER: &str =
+        "defmodule Shop.Notifier do\n  @callback notify(String.t()) :: :ok\nend\n";
     const EMAIL_NOTIFIER: &str = "defmodule Shop.EmailNotifier do\n  @behaviour Shop.Notifier\n\n  @impl true\n  def notify(_msg), do: :ok\nend\n";
     /// The matrix/elixir/injects probe's two files.
     const ACCOUNTS_DI: &str = "defmodule Shop.Accounts do\n  @repo Application.compile_env(:shop, :user_repo, Shop.PgUserRepo)\n\n  def list_users, do: @repo.all()\nend\n";
@@ -2600,7 +2720,15 @@ end
             module_id: Some(module_id),
             ..Acc::default()
         };
-        visit_top(tree.root_node(), source.as_bytes(), file, module_qname, module_id, repo(), &mut acc);
+        visit_top(
+            tree.root_node(),
+            source.as_bytes(),
+            file,
+            module_qname,
+            module_id,
+            repo(),
+            &mut acc,
+        );
         acc.types
     }
 
@@ -2648,45 +2776,83 @@ end
     /// The CallSites whose `from` is the FUNCTION `qname`.
     fn calls_from(fp: &FileParse, qname: &str) -> Vec<CallQualifier> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname);
-        fp.calls.iter().filter(|c| c.from == id).map(|c| c.qualifier.clone()).collect()
+        fp.calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect()
     }
 
     fn attr(base: &str, name: &str) -> CallQualifier {
-        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
     }
 
     #[test]
     fn behaviour_module_is_interface() {
         let fp = parse_file(NOTIFIER, "lib/notifier.ex", "lib::notifier", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::notifier::Shop.Notifier"), Some(node_kind::INTERFACE));
+        assert_eq!(
+            kind_of(&fp, "lib::notifier::Shop.Notifier"),
+            Some(node_kind::INTERFACE)
+        );
         // Same qname, same short name: only the kind (and so the NodeId) moved.
-        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "lib::notifier::Shop.Notifier");
-        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("Notifier"));
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::INTERFACE,
+            "lib::notifier::Shop.Notifier",
+        );
+        assert_eq!(
+            fp.nav.name_by_id.get(&id).map(String::as_str),
+            Some("Notifier")
+        );
         assert!(fp.nodes.iter().any(|n| n.id == id));
         assert!(
-            fp.edges.iter().any(|e| e.to == id && e.category == edge_category::CONTAINS),
+            fp.edges
+                .iter()
+                .any(|e| e.to == id && e.category == edge_category::CONTAINS),
             "the file MODULE still CONTAINS the behaviour"
         );
         // `@macrocallback` declares a contract too.
         let src = "defmodule Shop.Dsl do\n  @macrocallback build(term) :: Macro.t()\nend\n";
         let fp = parse_file(src, "lib/dsl.ex", "lib::dsl", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::dsl::Shop.Dsl"), Some(node_kind::INTERFACE));
+        assert_eq!(
+            kind_of(&fp, "lib::dsl::Shop.Dsl"),
+            Some(node_kind::INTERFACE)
+        );
     }
 
     #[test]
     fn plain_module_stays_package() {
         // Every module of the existing docs tests (no `@callback`) is a PACKAGE.
         let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::accounts::MyApp.Accounts"), Some(node_kind::PACKAGE));
+        assert_eq!(
+            kind_of(&fp, "lib::accounts::MyApp.Accounts"),
+            Some(node_kind::PACKAGE)
+        );
         // A module that only implements a behaviour stays a PACKAGE.
-        let fp = parse_file(EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::email_notifier::Shop.EmailNotifier"), Some(node_kind::PACKAGE));
+        let fp = parse_file(
+            EMAIL_NOTIFIER,
+            "lib/email_notifier.ex",
+            "lib::email_notifier",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            kind_of(&fp, "lib::email_notifier::Shop.EmailNotifier"),
+            Some(node_kind::PACKAGE)
+        );
         // A nested module's `@callback` makes the NESTED module the contract,
         // never its parent (`body_shape` reads direct children only).
         let src = "defmodule Outer do\n  defmodule Port do\n    @callback x() :: :ok\n  end\nend\n";
         let fp = parse_file(src, "lib/outer.ex", "lib::outer", repo()).unwrap();
         assert_eq!(kind_of(&fp, "lib::outer::Outer"), Some(node_kind::PACKAGE));
-        assert_eq!(kind_of(&fp, "lib::outer::Outer::Port"), Some(node_kind::INTERFACE));
+        assert_eq!(
+            kind_of(&fp, "lib::outer::Outer::Port"),
+            Some(node_kind::INTERFACE)
+        );
     }
 
     #[test]
@@ -2702,7 +2868,10 @@ defmodule Shop.Worker do
 end
 "#;
         let fp = parse_file(src, "lib/worker.ex", "lib::worker", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::worker::Shop.Worker"), Some(node_kind::PACKAGE));
+        assert_eq!(
+            kind_of(&fp, "lib::worker::Shop.Worker"),
+            Some(node_kind::PACKAGE)
+        );
         assert_eq!(counts_of(src, "lib/worker.ex", "lib::worker").behaviours, 0);
         // A `defmacro __using__` that injects `@behaviour` + default defs is
         // still a pure contract: the `quote` body is not the module's.
@@ -2719,29 +2888,49 @@ defmodule Shop.Handler do
 end
 "#;
         let fp = parse_file(src, "lib/handler.ex", "lib::handler", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::handler::Shop.Handler"), Some(node_kind::INTERFACE));
-        assert!(fp.refs.is_empty(), "a quoted @behaviour is the user's, not this module's");
+        assert_eq!(
+            kind_of(&fp, "lib::handler::Shop.Handler"),
+            Some(node_kind::INTERFACE)
+        );
+        assert!(
+            fp.refs.is_empty(),
+            "a quoted @behaviour is the user's, not this module's"
+        );
     }
 
     #[test]
     fn behaviour_attribute_emits_implements_ref() {
-        let fp = parse_file(EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", repo()).unwrap();
+        let fp = parse_file(
+            EMAIL_NOTIFIER,
+            "lib/email_notifier.ex",
+            "lib::email_notifier",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(
             refs_from(&fp, "lib::email_notifier::Shop.EmailNotifier"),
             vec![(edge_category::IMPLEMENTS, "Notifier".to_string())]
         );
         let r = &fp.refs[0];
-        assert_eq!(r.from_module, NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::email_notifier"));
+        assert_eq!(
+            r.from_module,
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::email_notifier")
+        );
         assert_eq!(r.line, 1, "the @behaviour line, 0-based");
         // An Erlang behaviour (`:gen_server`) names no in-repo module.
-        let src = "defmodule Shop.Srv do\n  @behaviour :gen_server\n  def init(s), do: {:ok, s}\nend\n";
+        let src =
+            "defmodule Shop.Srv do\n  @behaviour :gen_server\n  def init(s), do: {:ok, s}\nend\n";
         let fp = parse_file(src, "lib/srv.ex", "lib::srv", repo()).unwrap();
         assert!(fp.refs.is_empty(), "{:?}", fp.refs);
         // `@behaviour` keeps a pending `@doc`, like any module attribute.
-        let src = "defmodule M do\n  @doc \"Runs.\"\n  @behaviour Shop.Job\n  def run, do: :ok\nend\n";
+        let src =
+            "defmodule M do\n  @doc \"Runs.\"\n  @behaviour Shop.Job\n  def run, do: :ok\nend\n";
         let fp = parse_file(src, "lib/m.ex", "lib::m", repo()).unwrap();
         assert_eq!(docs_of(&fp, node_kind::FUNCTION, "run"), vec!["Runs."]);
-        assert_eq!(refs_from(&fp, "lib::m::M"), vec![(edge_category::IMPLEMENTS, "Job".to_string())]);
+        assert_eq!(
+            refs_from(&fp, "lib::m::M"),
+            vec![(edge_category::IMPLEMENTS, "Job".to_string())]
+        );
     }
 
     #[test]
@@ -2775,7 +2964,10 @@ end
 "#;
         let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
         assert!(fp.refs.is_empty(), "{:?}", fp.refs);
-        assert_eq!(counts_of(src, "lib/accounts.ex", "lib::accounts"), TypeCounts::default());
+        assert_eq!(
+            counts_of(src, "lib/accounts.ex", "lib::accounts"),
+            TypeCounts::default()
+        );
     }
 
     #[test]
@@ -2784,19 +2976,46 @@ end
         let qname = "test::cart_test::CartTest::test sums";
         assert_eq!(functions(&fp), vec![qname.to_string()]);
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname);
-        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("test sums"));
-        let pkg = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "test::cart_test::CartTest");
+        assert_eq!(
+            fp.nav.name_by_id.get(&id).map(String::as_str),
+            Some("test sums")
+        );
+        let pkg = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::PACKAGE,
+            "test::cart_test::CartTest",
+        );
         assert_eq!(fp.nav.parent_of.get(&id), Some(&pkg));
-        assert!(fp.edges.iter().any(|e| e.from == pkg && e.to == id && e.category == edge_category::DEFINES));
-        let node = fp.nodes.iter().find(|n| n.id == id).expect("test FUNCTION node");
-        let pos = node.cells.iter().find(|c| c.kind == cell_type::POSITION).expect("POSITION");
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == pkg && e.to == id && e.category == edge_category::DEFINES)
+        );
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("test FUNCTION node");
+        let pos = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::POSITION)
+            .expect("POSITION");
         assert!(matches!(&pos.payload, CellPayload::Json(j) if j.contains("test/cart_test.exs")));
         let calls = calls_from(&fp, qname);
         assert!(calls.contains(&attr("Cart", "total")), "{calls:?}");
-        let site = fp.calls.iter().find(|c| c.qualifier == attr("Cart", "total")).unwrap();
+        let site = fp
+            .calls
+            .iter()
+            .find(|c| c.qualifier == attr("Cart", "total"))
+            .unwrap();
         assert_eq!(site.line, 4, "the call's own row");
         // The test module itself is no contract.
-        assert_eq!(kind_of(&fp, "test::cart_test::CartTest"), Some(node_kind::PACKAGE));
+        assert_eq!(
+            kind_of(&fp, "test::cart_test::CartTest"),
+            Some(node_kind::PACKAGE)
+        );
     }
 
     #[test]
@@ -2825,7 +3044,13 @@ defmodule MyAppWeb.CartControllerTest do
   test "pending"
 end
 "#;
-        let fp = parse_file(src, "test/cart_controller_test.exs", "test::cart_controller_test", repo()).unwrap();
+        let fp = parse_file(
+            src,
+            "test/cart_controller_test.exs",
+            "test::cart_controller_test",
+            repo(),
+        )
+        .unwrap();
         let m = "test::cart_controller_test::MyAppWeb.CartControllerTest";
         assert_eq!(
             functions(&fp),
@@ -2835,16 +3060,40 @@ end
                 format!("{m}::test total sums"),
             ]
         );
-        assert_eq!(calls_from(&fp, &format!("{m}::test total sums")), vec![attr("Cart", "total")]);
+        assert_eq!(
+            calls_from(&fp, &format!("{m}::test total sums")),
+            vec![attr("Cart", "total")]
+        );
         // A one-liner `test .., do: ..` carries its body in the `do:` keyword.
-        assert_eq!(calls_from(&fp, &format!("{m}::test total empty is zero")), vec![attr("Cart", "total")]);
+        assert_eq!(
+            calls_from(&fp, &format!("{m}::test total empty is zero")),
+            vec![attr("Cart", "total")]
+        );
         // `setup` blocks are no tests: `Cart.reset()` belongs to no function.
-        assert!(fp.calls.iter().all(|c| c.qualifier != attr("Cart", "reset")), "{:?}", fp.calls);
-        assert_eq!(counts_of(src, "test/cart_controller_test.exs", "test::cart_controller_test").exunit_tests, 3);
+        assert!(
+            fp.calls
+                .iter()
+                .all(|c| c.qualifier != attr("Cart", "reset")),
+            "{:?}",
+            fp.calls
+        );
+        assert_eq!(
+            counts_of(
+                src,
+                "test/cart_controller_test.exs",
+                "test::cart_controller_test"
+            )
+            .exunit_tests,
+            3
+        );
         // A line break inside the literal is a space in the qname.
-        let src = "defmodule T do\n  use ExUnit.Case\n  test \"two\n  lines\" do\n    :ok\n  end\nend\n";
+        let src =
+            "defmodule T do\n  use ExUnit.Case\n  test \"two\n  lines\" do\n    :ok\n  end\nend\n";
         let fp = parse_file(src, "test/t_test.exs", "test::t_test", repo()).unwrap();
-        assert_eq!(functions(&fp), vec!["test::t_test::T::test two   lines".to_string()]);
+        assert_eq!(
+            functions(&fp),
+            vec!["test::t_test::T::test two   lines".to_string()]
+        );
     }
 
     #[test]
@@ -2863,7 +3112,13 @@ end
         assert!(fp.calls.is_empty(), "{:?}", fp.calls);
         // `ExUnit.CaseTemplate` builds a template; it is not a case module.
         let src = "defmodule MyApp.DataCase do\n  use ExUnit.CaseTemplate\n  test \"x\" do\n    :ok\n  end\nend\n";
-        let fp = parse_file(src, "test/support/data_case.ex", "test::support::data_case", repo()).unwrap();
+        let fp = parse_file(
+            src,
+            "test/support/data_case.ex",
+            "test::support::data_case",
+            repo(),
+        )
+        .unwrap();
         assert!(functions(&fp).is_empty(), "{:?}", functions(&fp));
         // Inside a case module, a `test` call whose first argument is no
         // string literal is not ExUnit's macro.
@@ -2876,7 +3131,10 @@ end
     fn one_liner_def_body_calls_are_collected() {
         let src = "defmodule Shop.Api do\n  def total(xs), do: Shop.Cart.total(xs)\n  defp helper(x), do: normalise(x)\nend\n";
         let fp = parse_file(src, "lib/api.ex", "lib::api", repo()).unwrap();
-        assert_eq!(calls_from(&fp, "lib::api::Shop.Api::total"), vec![attr("Shop.Cart", "total")]);
+        assert_eq!(
+            calls_from(&fp, "lib::api::Shop.Api::total"),
+            vec![attr("Shop.Cart", "total")]
+        );
         assert_eq!(
             calls_from(&fp, "lib::api::Shop.Api::helper"),
             vec![CallQualifier::Bare("normalise".to_string())]
@@ -2884,7 +3142,10 @@ end
         // A `do_block` body is read once, as before.
         let src = "defmodule M do\n  def f(x) do\n    g(x)\n  end\nend\n";
         let fp = parse_file(src, "lib/m.ex", "lib::m", repo()).unwrap();
-        assert_eq!(calls_from(&fp, "lib::m::M::f"), vec![CallQualifier::Bare("g".to_string())]);
+        assert_eq!(
+            calls_from(&fp, "lib::m::M::f"),
+            vec![CallQualifier::Bare("g".to_string())]
+        );
     }
 
     #[test]
@@ -2922,10 +3183,30 @@ end
     fn type_counters_match_the_fixture_markers() {
         let cases = [
             (NOTIFIER, "lib/notifier.ex", "lib::notifier", (1, 0, 0, 0)),
-            (EMAIL_NOTIFIER, "lib/email_notifier.ex", "lib::email_notifier", (0, 1, 0, 0)),
-            (USER_REPO, "lib/user_repo.ex", "lib::user_repo", (1, 1, 0, 0)),
-            (ACCOUNTS_DI, "lib/accounts.ex", "lib::accounts", (0, 0, 1, 0)),
-            (CART_TEST, "test/cart_test.exs", "test::cart_test", (0, 0, 0, 1)),
+            (
+                EMAIL_NOTIFIER,
+                "lib/email_notifier.ex",
+                "lib::email_notifier",
+                (0, 1, 0, 0),
+            ),
+            (
+                USER_REPO,
+                "lib/user_repo.ex",
+                "lib::user_repo",
+                (1, 1, 0, 0),
+            ),
+            (
+                ACCOUNTS_DI,
+                "lib/accounts.ex",
+                "lib::accounts",
+                (0, 0, 1, 0),
+            ),
+            (
+                CART_TEST,
+                "test/cart_test.exs",
+                "test::cart_test",
+                (0, 0, 0, 1),
+            ),
         ];
         for (src, file, module, (b, i, j, t)) in cases {
             let c = counts_of(src, file, module);
@@ -2936,22 +3217,39 @@ end
             );
         }
         assert_eq!(
-            counts_of(NOTIFIER, "lib/notifier.ex", "lib::notifier").marker("lib/notifier.ex").as_deref(),
-            Some("[elixir-types] behaviours=1 implements=0 injects=0 exunit_tests=0 path=lib/notifier.ex")
+            counts_of(NOTIFIER, "lib/notifier.ex", "lib::notifier")
+                .marker("lib/notifier.ex")
+                .as_deref(),
+            Some(
+                "[elixir-types] behaviours=1 implements=0 injects=0 exunit_tests=0 path=lib/notifier.ex"
+            )
         );
         assert_eq!(
-            counts_of(USER_REPO, "lib/user_repo.ex", "lib::user_repo").marker("lib/user_repo.ex").as_deref(),
-            Some("[elixir-types] behaviours=1 implements=1 injects=0 exunit_tests=0 path=lib/user_repo.ex")
+            counts_of(USER_REPO, "lib/user_repo.ex", "lib::user_repo")
+                .marker("lib/user_repo.ex")
+                .as_deref(),
+            Some(
+                "[elixir-types] behaviours=1 implements=1 injects=0 exunit_tests=0 path=lib/user_repo.ex"
+            )
         );
         // A file with none of the four prints nothing.
-        assert_eq!(counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"), None);
+        assert_eq!(
+            counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"),
+            None
+        );
     }
 
     #[test]
     fn user_repo_probe_contract_and_implementation() {
         let fp = parse_file(USER_REPO, "lib/user_repo.ex", "lib::user_repo", repo()).unwrap();
-        assert_eq!(kind_of(&fp, "lib::user_repo::Shop.UserRepo"), Some(node_kind::INTERFACE));
-        assert_eq!(kind_of(&fp, "lib::user_repo::Shop.PgUserRepo"), Some(node_kind::PACKAGE));
+        assert_eq!(
+            kind_of(&fp, "lib::user_repo::Shop.UserRepo"),
+            Some(node_kind::INTERFACE)
+        );
+        assert_eq!(
+            kind_of(&fp, "lib::user_repo::Shop.PgUserRepo"),
+            Some(node_kind::PACKAGE)
+        );
         assert_eq!(
             refs_from(&fp, "lib::user_repo::Shop.PgUserRepo"),
             vec![(edge_category::IMPLEMENTS, "UserRepo".to_string())]
@@ -2968,7 +3266,12 @@ end
     const ECTO_ACCOUNTS: &str = "defmodule Shop.Accounts do\n  import Ecto.Query\n\n  def list_users, do: Shop.Repo.all(Shop.User)\nend\n";
 
     fn entity_id(name: &str) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, &format!("data_entity:sql:{name}"))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            &format!("data_entity:sql:{name}"),
+        )
     }
 
     fn fn_id(qname: &str) -> NodeId {
@@ -3013,7 +3316,15 @@ end
             module_id: Some(module_id),
             ..Acc::default()
         };
-        visit_top(tree.root_node(), source.as_bytes(), file, module_qname, module_id, repo(), &mut acc);
+        visit_top(
+            tree.root_node(),
+            source.as_bytes(),
+            file,
+            module_qname,
+            module_id,
+            repo(),
+            &mut acc,
+        );
         acc.ecto
     }
 
@@ -3034,8 +3345,16 @@ end
             })
             .collect();
         assert_eq!(payloads, vec![r#"{"orm":"ecto","table":"users"}"#]);
-        assert_eq!(data_entity::table_of(&node.cells), Some("users".to_string()));
-        let package = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "lib::user::Shop.User");
+        assert_eq!(
+            data_entity::table_of(&node.cells),
+            Some("users".to_string())
+        );
+        let package = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::PACKAGE,
+            "lib::user::Shop.User",
+        );
         assert!(
             fp.edges
                 .iter()
@@ -3050,7 +3369,10 @@ end
         let src = "defmodule Shop.Address do\n  use Ecto.Schema\n\n  embedded_schema do\n    field :street, :string\n  end\nend\n";
         let fp = parse_file(src, "lib/address.ex", "lib::address", repo()).unwrap();
         assert!(entities(&fp).is_empty());
-        assert_eq!(ecto_counts_of(src, "lib/address.ex", "lib::address").marker("lib/address.ex"), None);
+        assert_eq!(
+            ecto_counts_of(src, "lib/address.ex", "lib::address").marker("lib/address.ex"),
+            None
+        );
     }
 
     #[test]
@@ -3066,10 +3388,20 @@ end
         let src = "defmodule Shop.Order do\n  use Shop.Schema\n\n  schema \"orders\" do\n    field :total, :integer\n  end\nend\n";
         let fp = parse_file(src, "lib/order.ex", "lib::order", repo()).unwrap();
         assert_eq!(entities(&fp), vec!["data_entity:sql:Order"]);
-        let node = fp.nodes.iter().find(|n| n.id == entity_id("Order")).unwrap();
-        assert_eq!(data_entity::table_of(&node.cells), Some("orders".to_string()));
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == entity_id("Order"))
+            .unwrap();
+        assert_eq!(
+            data_entity::table_of(&node.cells),
+            Some("orders".to_string())
+        );
         assert!(is_ecto_schema_use("Ecto.Schema"));
-        assert!(!is_ecto_schema_use("Schema"), "a bare `Schema` names no app wrapper");
+        assert!(
+            !is_ecto_schema_use("Schema"),
+            "a bare `Schema` names no app wrapper"
+        );
         assert!(!is_ecto_schema_use("Ecto.Migration"));
     }
 
@@ -3077,19 +3409,35 @@ end
     fn repo_all_alias_is_an_access() {
         let src = "defmodule Shop.Accounts do\n  alias Shop.Repo\n  alias Shop.User\n\n  def list_users do\n    Repo.all(User)\n  end\n\n  def get_user!(id), do: Repo.get!(User, id)\nend\n";
         let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"), vec!["data_entity:sql:User"]);
-        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::get_user!"), vec!["data_entity:sql:User"]);
+        assert_eq!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"),
+            vec!["data_entity:sql:User"]
+        );
+        assert_eq!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::get_user!"),
+            vec!["data_entity:sql:User"]
+        );
         // One node per entity per file; not declared here, so Medium.
-        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("User")).collect();
+        let nodes: Vec<&Node> = fp
+            .nodes
+            .iter()
+            .filter(|n| n.id == entity_id("User"))
+            .collect();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].confidence, Confidence::Medium);
-        assert!(nodes[0].cells.is_empty(), "the table rides the declaration only");
+        assert!(
+            nodes[0].cells.is_empty(),
+            "the table rides the declaration only"
+        );
     }
 
     #[test]
     fn repo_site_in_keyword_do_body() {
         let fp = parse_file(ECTO_ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"), vec!["data_entity:sql:User"]);
+        assert_eq!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::list_users"),
+            vec!["data_entity:sql:User"]
+        );
         let edge = fp
             .edges
             .iter()
@@ -3120,7 +3468,10 @@ end
 end
 "#;
         let fp = parse_file(src, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
-        assert_eq!(accesses_from(&fp, "lib::accounts::Shop.Accounts::create"), vec!["data_entity:sql:User"]);
+        assert_eq!(
+            accesses_from(&fp, "lib::accounts::Shop.Accounts::create"),
+            vec!["data_entity:sql:User"]
+        );
         assert_eq!(
             accesses_from(&fp, "lib::accounts::Shop.Accounts::register"),
             vec!["data_entity:sql:User"],
@@ -3131,7 +3482,10 @@ end
             "a variable head names nothing"
         );
         // The pipeline stage `User.changeset(attrs)` is still a CALLS site.
-        assert!(calls_from(&fp, "lib::accounts::Shop.Accounts::register").contains(&attr("User", "changeset")));
+        assert!(
+            calls_from(&fp, "lib::accounts::Shop.Accounts::register")
+                .contains(&attr("User", "changeset"))
+        );
     }
 
     #[test]
@@ -3153,7 +3507,10 @@ end
             accesses_from(&fp, "lib::reports::Shop.Reports::active"),
             vec!["data_entity:sql:Post", "data_entity:sql:User"]
         );
-        assert_eq!(accesses_from(&fp, "lib::reports::Shop.Reports::orders"), vec!["data_entity:sql:Order"]);
+        assert_eq!(
+            accesses_from(&fp, "lib::reports::Shop.Reports::orders"),
+            vec!["data_entity:sql:Order"]
+        );
         let ev = fp
             .edges
             .iter()
@@ -3167,9 +3524,18 @@ end
     fn schemaless_from_string_names_the_table() {
         let src = "defmodule Shop.Stats do\n  import Ecto.Query\n\n  def emails, do: Shop.Repo.all(from u in \"users\", select: u.email)\n  def purge, do: Repo.delete_all(\"sessions\")\n  def dynamic(t), do: Repo.all(from u in \"#{t}_users\")\nend\n";
         let fp = parse_file(src, "lib/stats.ex", "lib::stats", repo()).unwrap();
-        assert_eq!(accesses_from(&fp, "lib::stats::Shop.Stats::emails"), vec!["data_entity:sql:users"]);
-        assert_eq!(accesses_from(&fp, "lib::stats::Shop.Stats::purge"), vec!["data_entity:sql:sessions"]);
-        assert!(accesses_from(&fp, "lib::stats::Shop.Stats::dynamic").is_empty(), "an interpolated source names no table");
+        assert_eq!(
+            accesses_from(&fp, "lib::stats::Shop.Stats::emails"),
+            vec!["data_entity:sql:users"]
+        );
+        assert_eq!(
+            accesses_from(&fp, "lib::stats::Shop.Stats::purge"),
+            vec!["data_entity:sql:sessions"]
+        );
+        assert!(
+            accesses_from(&fp, "lib::stats::Shop.Stats::dynamic").is_empty(),
+            "an interpolated source names no table"
+        );
     }
 
     #[test]
@@ -3177,8 +3543,15 @@ end
         let src = "defmodule Shop.Web do\n  def a, do: Cache.all(User)\n  def b(repo), do: repo.all(User)\n  def c(q), do: Repo.all(q)\n  def d, do: Repo.transaction(User)\n  def e, do: Shop.UserRepo.all(User)\nend\n";
         let fp = parse_file(src, "lib/web.ex", "lib::web", repo()).unwrap();
         assert!(entities(&fp).is_empty(), "{:?}", entities(&fp));
-        assert!(!fp.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
-        assert_eq!(ecto_counts_of(src, "lib/web.ex", "lib::web").marker("lib/web.ex"), None);
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA)
+        );
+        assert_eq!(
+            ecto_counts_of(src, "lib/web.ex", "lib::web").marker("lib/web.ex"),
+            None
+        );
     }
 
     #[test]
@@ -3186,18 +3559,41 @@ end
         let src = "defmodule Shop.User do\n  use Ecto.Schema\n\n  def by_email(e), do: Shop.Repo.get_by(__MODULE__, email: e)\n\n  schema \"users\" do\n    field :email, :string\n  end\n\n  def blank, do: Shop.Repo.insert(%__MODULE__{})\nend\n";
         let fp = parse_file(src, "lib/user.ex", "lib::user", repo()).unwrap();
         assert_eq!(entities(&fp), vec!["data_entity:sql:User"]);
-        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("User")).collect();
-        assert_eq!(nodes.len(), 1, "the site before the declaration and the declaration share one node");
-        assert_eq!(nodes[0].confidence, Confidence::Strong, "the declaration lifts the site's node");
-        assert_eq!(data_entity::table_of(&nodes[0].cells), Some("users".to_string()));
-        assert_eq!(accesses_from(&fp, "lib::user::Shop.User::by_email"), vec!["data_entity:sql:User"]);
-        assert_eq!(accesses_from(&fp, "lib::user::Shop.User::blank"), vec!["data_entity:sql:User"]);
+        let nodes: Vec<&Node> = fp
+            .nodes
+            .iter()
+            .filter(|n| n.id == entity_id("User"))
+            .collect();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "the site before the declaration and the declaration share one node"
+        );
+        assert_eq!(
+            nodes[0].confidence,
+            Confidence::Strong,
+            "the declaration lifts the site's node"
+        );
+        assert_eq!(
+            data_entity::table_of(&nodes[0].cells),
+            Some("users".to_string())
+        );
+        assert_eq!(
+            accesses_from(&fp, "lib::user::Shop.User::by_email"),
+            vec!["data_entity:sql:User"]
+        );
+        assert_eq!(
+            accesses_from(&fp, "lib::user::Shop.User::blank"),
+            vec!["data_entity:sql:User"]
+        );
     }
 
     #[test]
     fn ecto_counters_match_the_fixture_markers() {
         assert_eq!(
-            ecto_counts_of(ECTO_USER, "lib/user.ex", "lib::user").marker("lib/user.ex").as_deref(),
+            ecto_counts_of(ECTO_USER, "lib/user.ex", "lib::user")
+                .marker("lib/user.ex")
+                .as_deref(),
             Some("[orm-ecto] schemas=1 table_cells=1 repo_sites=0 path=lib/user.ex")
         );
         assert_eq!(
@@ -3210,9 +3606,16 @@ end
         let src = "defmodule Shop.Tag do\n  use Ecto.Schema\n  schema @source do\n    field :name\n  end\nend\n";
         assert_eq!(
             ecto_counts_of(src, "lib/tag.ex", "lib::tag"),
-            EctoCounts { schemas: 1, table_cells: 0, repo_sites: 0 }
+            EctoCounts {
+                schemas: 1,
+                table_cells: 0,
+                repo_sites: 0
+            }
         );
         // A file with neither prints nothing.
-        assert_eq!(ecto_counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"), None);
+        assert_eq!(
+            ecto_counts_of(ACCOUNTS, "lib/accounts.ex", "lib::accounts").marker("lib/accounts.ex"),
+            None
+        );
     }
 }

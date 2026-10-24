@@ -32,9 +32,11 @@ fn is_terraform_resource(n: &Node) -> bool {
         c.kind == cell_type::POSITION
             && match &c.payload {
                 // `<file>:<start>-<end>` — strip the line range back off.
-                CellPayload::Text(t) => {
-                    t.rsplit_once(':').map(|(path, _)| path).unwrap_or(t).ends_with(".tf")
-                }
+                CellPayload::Text(t) => t
+                    .rsplit_once(':')
+                    .map(|(path, _)| path)
+                    .unwrap_or(t)
+                    .ends_with(".tf"),
                 _ => false,
             }
     })
@@ -105,9 +107,9 @@ impl CrossGraphResolver for IacResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{RepoGraph, SymbolTable};
     use glia_code_domain::{CodeNav, GRAPH_TYPE};
     use glia_core::{Cell, Node};
-    use crate::types::{RepoGraph, SymbolTable};
 
     fn graph_with_infra(repo_id: RepoId, qname: &str) -> RepoGraph {
         let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::INFRA_RESOURCE, qname);

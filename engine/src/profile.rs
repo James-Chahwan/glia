@@ -50,10 +50,9 @@ use glia_code_domain::{cell_type, evidence, node_kind};
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
-    EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver,
-    GrpcStackResolver, HttpStackResolver, IacResolver, IdentityResolver, MergedGraph,
-    ModelResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
-    WebSocketStackResolver,
+    EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver, GrpcStackResolver,
+    HttpStackResolver, IacResolver, IdentityResolver, MergedGraph, ModelResolver,
+    QueueStackResolver, RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -90,26 +89,45 @@ impl CodeBuildCtx {
     /// A build's context: its repos' inputs and options. Every repo is a SCIP
     /// root, labelled with its path as given (its markers' `repo=`).
     pub(crate) fn new(inputs: Vec<RepoInputs>, opts: &BuildOptions) -> Self {
-        let scip_roots = inputs.iter().map(|i| (i.repo, i.root.clone(), i.label.clone())).collect();
-        Self { inputs, overlay: opts.overlay, group_fills: Vec::new(), scip_roots }
+        let scip_roots = inputs
+            .iter()
+            .map(|i| (i.repo, i.root.clone(), i.label.clone()))
+            .collect();
+        Self {
+            inputs,
+            overlay: opts.overlay,
+            group_fills: Vec::new(),
+            scip_roots,
+        }
     }
 
     /// No external inputs: every external stage is a no-op.
     pub(crate) fn empty() -> Self {
-        Self { inputs: Vec::new(), overlay: true, group_fills: Vec::new(), scip_roots: Vec::new() }
+        Self {
+            inputs: Vec::new(),
+            overlay: true,
+            group_fills: Vec::new(),
+            scip_roots: Vec::new(),
+        }
     }
 
     /// A layout merge's context (DD.7): no external inputs, and `roots` - each
     /// member repo whose recorded root is a directory, with its label - as the
     /// SCIP roots. No group fills: a merge fills every edge at Finalize.
     pub(crate) fn for_merge(roots: Vec<(RepoId, PathBuf, String)>) -> Self {
-        Self { scip_roots: roots, ..Self::empty() }
+        Self {
+            scip_roots: roots,
+            ..Self::empty()
+        }
     }
 
     /// This context with the build's group evidence fills (DC.5), aligned
     /// with the graphs the passes run over.
     pub(crate) fn with_group_fills(self, group_fills: Vec<Option<GroupFill>>) -> Self {
-        Self { group_fills, ..self }
+        Self {
+            group_fills,
+            ..self
+        }
     }
 }
 
@@ -424,7 +442,11 @@ mod tests {
         let stages: Vec<Stage> = CODE_PASSES.order().iter().map(|s| s.stage).collect();
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
-            (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
+            (
+                count(Stage::Resolve),
+                count(Stage::Post),
+                count(Stage::Finalize)
+            ),
             (17, 9, 2)
         );
     }
@@ -557,20 +579,45 @@ mod tests {
                 epsilon: 1e-6,
             };
             let got = t.activation_config(p);
-            assert_eq!(got.edge_weights, head.edge_weights, "edge_weights, preset {p:?}");
+            assert_eq!(
+                got.edge_weights, head.edge_weights,
+                "edge_weights, preset {p:?}"
+            );
             assert_eq!(got.damping, head.damping, "damping, preset {p:?}");
             assert_eq!(got.direction, head.direction, "direction, preset {p:?}");
-            assert_eq!(got.node_specificity, head.node_specificity, "specificity, preset {p:?}");
+            assert_eq!(
+                got.node_specificity, head.node_specificity,
+                "specificity, preset {p:?}"
+            );
             assert_eq!(got.top_k, head.top_k, "top_k, preset {p:?}");
-            assert_eq!(got.max_iterations, head.max_iterations, "max_iterations, preset {p:?}");
+            assert_eq!(
+                got.max_iterations, head.max_iterations,
+                "max_iterations, preset {p:?}"
+            );
             assert_eq!(got.epsilon, head.epsilon, "epsilon, preset {p:?}");
         }
         assert_eq!(t.activation_weights, HEAD_WEIGHTS);
-        let presets: Vec<(&str, usize)> =
-            t.activation_presets.iter().map(|p| (p.name, p.overrides.len())).collect();
-        assert_eq!(presets, [("repair", 6), ("review", 5), ("onboard", 5), ("centrality", 4)]);
+        let presets: Vec<(&str, usize)> = t
+            .activation_presets
+            .iter()
+            .map(|p| (p.name, p.overrides.len()))
+            .collect();
+        assert_eq!(
+            presets,
+            [
+                ("repair", 6),
+                ("review", 5),
+                ("onboard", 5),
+                ("centrality", 4)
+            ]
+        );
         for p in t.activation_presets {
-            assert_eq!(p.overrides, head_overrides(Some(p.name)), "preset {}", p.name);
+            assert_eq!(
+                p.overrides,
+                head_overrides(Some(p.name)),
+                "preset {}",
+                p.name
+            );
         }
 
         // The entrypoint predicate `engine::answers` hardcoded before LD.14b,
@@ -603,17 +650,30 @@ mod tests {
                 _ => false,
             }
         };
-        const NAMES: [&str; 8] = ["main", "Main", "test_x", "testFoo", "TestFoo", "tester", "handler", ""];
-        let role_sets: [&[NodeKindId]; 4] =
-            [&[], &[nk::COMPONENT], &[nk::SERVICE, nk::HOOK], &[nk::HOOK, nk::COMPONENT]];
-        let kinds: Vec<Option<NodeKindId>> =
-            nk::ALL.iter().map(|(k, _)| Some(*k)).chain([None]).collect();
+        const NAMES: [&str; 8] = [
+            "main", "Main", "test_x", "testFoo", "TestFoo", "tester", "handler", "",
+        ];
+        let role_sets: [&[NodeKindId]; 4] = [
+            &[],
+            &[nk::COMPONENT],
+            &[nk::SERVICE, nk::HOOK],
+            &[nk::HOOK, nk::COMPONENT],
+        ];
+        let kinds: Vec<Option<NodeKindId>> = nk::ALL
+            .iter()
+            .map(|(k, _)| Some(*k))
+            .chain([None])
+            .collect();
         let mut entries_without_roles = 0;
         for &kind in &kinds {
             for name in NAMES {
                 for roles in role_sets {
                     let head = head_entry(kind, name, roles);
-                    assert_eq!(t.entry.is_entry(kind, name, roles), head, "{kind:?} {name:?} {roles:?}");
+                    assert_eq!(
+                        t.entry.is_entry(kind, name, roles),
+                        head,
+                        "{kind:?} {name:?} {roles:?}"
+                    );
                     entries_without_roles += usize::from(head && roles.is_empty());
                 }
             }
@@ -631,7 +691,10 @@ mod tests {
         assert!(init(nk::FUNCTION, "go"));
         assert!(!init(nk::FUNCTION, "ts") && !init(nk::FUNCTION, "py"));
         assert!(!init(nk::METHOD, "go"));
-        assert!(!t.entry.is_entry_at(Some(nk::FUNCTION), "init", &[], || None));
+        assert!(
+            !t.entry
+                .is_entry_at(Some(nk::FUNCTION), "init", &[], || None)
+        );
 
         assert_eq!(CODE_PROFILE.validate(), Ok(()));
         assert_eq!(
@@ -643,19 +706,32 @@ mod tests {
             ]
         );
         // LE.4d's sink table: (class, target kinds, reaching categories).
-        let sinks: Vec<(&str, &[NodeKindId], &[EdgeCategoryId])> =
-            t.effect_sinks.iter().map(|s| (s.class, s.kinds, s.via)).collect();
+        let sinks: Vec<(&str, &[NodeKindId], &[EdgeCategoryId])> = t
+            .effect_sinks
+            .iter()
+            .map(|s| (s.class, s.kinds, s.via))
+            .collect();
         let expect: [(&str, &[NodeKindId], &[EdgeCategoryId]); 8] = [
             (
                 "db",
-                &[nk::DATA_ENTITY, nk::DATABASE, nk::CACHE, nk::BLOB_STORE, nk::SEARCH_INDEX],
+                &[
+                    nk::DATA_ENTITY,
+                    nk::DATABASE,
+                    nk::CACHE,
+                    nk::BLOB_STORE,
+                    nk::SEARCH_INDEX,
+                ],
                 &[ec::ACCESSES_DATA],
             ),
             ("email", &[nk::EMAIL_SERVICE], &[ec::ACCESSES_DATA]),
             ("queue_produce", &[nk::QUEUE_PRODUCER], &[ec::USES]),
             ("http_call", &[nk::ENDPOINT], &[ec::CALLS, ec::USES]),
             ("event_emit", &[nk::EVENT_EMITTER], &[ec::USES]),
-            ("rpc_call", &[nk::GRPC_CLIENT, nk::RPC_CALL], &[ec::USES, ec::CALLS]),
+            (
+                "rpc_call",
+                &[nk::GRPC_CLIENT, nk::RPC_CALL],
+                &[ec::USES, ec::CALLS],
+            ),
             ("ws_send", &[nk::WS_CLIENT], &[ec::USES]),
             ("graphql_op", &[nk::GRAPHQL_OPERATION], &[ec::USES]),
         ];
@@ -680,13 +756,20 @@ mod tests {
             .as_array()
             .unwrap_or_else(|| panic!("{name}/key.json has no dirs"))
             .iter()
-            .map(|d| root.join(d.as_str().expect("dir is a string")).to_string_lossy().into_owned())
+            .map(|d| {
+                root.join(d.as_str().expect("dir is a string"))
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect()
     }
 
     /// Every node's cells, per graph, in node order.
     fn node_cells(m: &MergedGraph) -> Vec<Vec<Vec<Cell>>> {
-        m.graphs.iter().map(|g| g.nodes.iter().map(|n| n.cells.clone()).collect()).collect()
+        m.graphs
+            .iter()
+            .map(|g| g.nodes.iter().map(|n| n.cells.clone()).collect())
+            .collect()
     }
 
     /// The types of the cells in `after` that `before` does not hold (a

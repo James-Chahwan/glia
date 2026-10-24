@@ -20,8 +20,8 @@
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
-use glia_snapshots::{TestsIngestOptions, TestsSummary, tests_ingest};
 use glia_code_domain::snapshots::{TESTS_DEFAULT_WINDOW, tests_dir};
+use glia_snapshots::{TestsIngestOptions, TestsSummary, tests_ingest};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -135,7 +135,10 @@ fn report_lines(s: &TestsSummary, root: &Path, repo: &str, window: usize) -> Vec
         s.lcov_files,
         tests_dir(root).display()
     ));
-    lines.push(format!("this run is seq {}; the snapshot holds {} run(s) (window {window})", s.seq, s.runs));
+    lines.push(format!(
+        "this run is seq {}; the snapshot holds {} run(s) (window {window})",
+        s.seq, s.runs
+    ));
     lines.push(format!("run `glia build {repo}` to ingest."));
     lines
 }
@@ -148,7 +151,8 @@ mod unit {
     use super::*;
 
     fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
-        let cmd = <Args as clap::Args>::augment_args(clap::Command::new("tests").no_binary_name(true));
+        let cmd =
+            <Args as clap::Args>::augment_args(clap::Command::new("tests").no_binary_name(true));
         let matches = cmd.try_get_matches_from(argv)?;
         Args::from_arg_matches(&matches)
     }
@@ -157,31 +161,65 @@ mod unit {
     fn a_report_flag_is_required_and_each_takes_several_paths() {
         let err = parse(&["ingest", "."]).expect_err("no report flag");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-        assert!(parse(&["ingest", ".", "--run", "ci-1"]).is_err(), "--run alone is not a report");
+        assert!(
+            parse(&["ingest", ".", "--run", "ci-1"]).is_err(),
+            "--run alone is not a report"
+        );
 
-        let args = parse(&["ingest", "repo", "--junit", "a.xml", "b.xml", "--lcov", "c.lcov", "--junit", "d.xml"])
-            .expect("parses");
-        let TestsCmd::Ingest { repo, junit, log, lcov, run, window, reset } = args.action;
+        let args = parse(&[
+            "ingest", "repo", "--junit", "a.xml", "b.xml", "--lcov", "c.lcov", "--junit", "d.xml",
+        ])
+        .expect("parses");
+        let TestsCmd::Ingest {
+            repo,
+            junit,
+            log,
+            lcov,
+            run,
+            window,
+            reset,
+        } = args.action;
         assert_eq!(repo, "repo");
-        assert_eq!(junit, [PathBuf::from("a.xml"), PathBuf::from("b.xml"), PathBuf::from("d.xml")]);
+        assert_eq!(
+            junit,
+            [
+                PathBuf::from("a.xml"),
+                PathBuf::from("b.xml"),
+                PathBuf::from("d.xml")
+            ]
+        );
         assert!(log.is_empty());
         assert_eq!(lcov, [PathBuf::from("c.lcov")]);
         assert_eq!(run, None);
-        assert_eq!((window, reset), (TESTS_DEFAULT_WINDOW, false), "the library's defaults");
+        assert_eq!(
+            (window, reset),
+            (TESTS_DEFAULT_WINDOW, false),
+            "the library's defaults"
+        );
 
         let args = parse(&["ingest", "repo", "--log", "ci.log", "--run", "ci-42"]).expect("parses");
         let TestsCmd::Ingest { log, run, .. } = args.action;
-        assert_eq!((log, run.as_deref()), (vec![PathBuf::from("ci.log")], Some("ci-42")));
+        assert_eq!(
+            (log, run.as_deref()),
+            (vec![PathBuf::from("ci.log")], Some("ci-42"))
+        );
     }
 
     #[test]
     fn window_and_reset_parse_and_zero_is_a_usage_error() {
-        let args = parse(&["ingest", "repo", "--junit", "a.xml", "--window", "3", "--reset"]).expect("parses");
+        let args = parse(&[
+            "ingest", "repo", "--junit", "a.xml", "--window", "3", "--reset",
+        ])
+        .expect("parses");
         let TestsCmd::Ingest { window, reset, .. } = args.action;
         assert_eq!((window, reset), (3, true));
-        let err = parse(&["ingest", "repo", "--junit", "a.xml", "--window", "0"]).expect_err("0 keeps no run");
+        let err = parse(&["ingest", "repo", "--junit", "a.xml", "--window", "0"])
+            .expect_err("0 keeps no run");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-        assert!(parse(&["ingest", "repo", "--reset"]).is_err(), "--reset alone is not a report");
+        assert!(
+            parse(&["ingest", "repo", "--reset"]).is_err(),
+            "--reset alone is not a report"
+        );
     }
 
     #[test]
@@ -193,17 +231,26 @@ mod unit {
             stored: 2,
             runs: 3,
             seq: 2,
-            report_errors: vec![ReportError { report: "bad.xml".into(), reason: "malformed XML".into() }],
+            report_errors: vec![ReportError {
+                report: "bad.xml".into(),
+                reason: "malformed XML".into(),
+            }],
             ..TestsSummary::default()
         };
-        assert_eq!(warning_lines(&summary), ["warning: skipped bad.xml: malformed XML"]);
+        assert_eq!(
+            warning_lines(&summary),
+            ["warning: skipped bad.xml: malformed XML"]
+        );
         let root = Path::new("/r");
         assert_eq!(
             report_lines(&summary, root, "/r", 10),
             [
                 "read a.xml".to_string(),
                 "read cov.lcov".to_string(),
-                format!("ingested 2 failing case(s) and 1 lcov file(s) -> {}", tests_dir(root).display()),
+                format!(
+                    "ingested 2 failing case(s) and 1 lcov file(s) -> {}",
+                    tests_dir(root).display()
+                ),
                 "this run is seq 2; the snapshot holds 3 run(s) (window 10)".to_string(),
                 "run `glia build /r` to ingest.".to_string(),
             ]

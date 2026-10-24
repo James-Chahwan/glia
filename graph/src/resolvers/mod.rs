@@ -12,23 +12,23 @@ use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, Repo
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
-mod http;
 mod grpc;
+mod http;
 mod rpc;
 // DT.10b: EVM contract calls / event subscriptions -> Solidity procedures / events.
 mod evm;
-mod queue;
 mod graphql;
+mod queue;
 // DT.5f: gqlgen's schema-first resolver sets (SDL field -> Go method).
-mod gqlgen;
-mod websocket;
-mod eventbus;
-mod shared_schema;
-mod db;
-mod cron;
-mod config;
-mod iac;
 mod cli;
+mod config;
+mod cron;
+mod db;
+mod eventbus;
+mod gqlgen;
+mod iac;
+mod shared_schema;
+mod websocket;
 // 0.5.2 (D0.5): SAME_AS identity stars (DD.5-DD.7).
 mod identity;
 // DT.1g: the models pass's inputs (client wires: both sides of every paired
@@ -38,28 +38,30 @@ mod models;
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;
 
-pub use http::HttpStackResolver;
-pub use grpc::GrpcStackResolver;
-pub use rpc::RpcStackResolver;
-pub use evm::EvmContractResolver;
-pub use queue::QueueStackResolver;
-pub use graphql::GraphQLStackResolver;
-pub use gqlgen::GqlgenResolver;
-pub use websocket::WebSocketStackResolver;
-pub use eventbus::EventBusResolver;
-pub use shared_schema::SharedSchemaResolver;
-pub use db::DbResolver;
-pub use cron::CronResolver;
-pub use config::ConfigResolver;
-pub use iac::IacResolver;
 pub use cli::CliInvocationResolver;
+pub use config::ConfigResolver;
+pub use cron::CronResolver;
+pub use db::DbResolver;
+pub use eventbus::EventBusResolver;
+pub use evm::EvmContractResolver;
+pub use gqlgen::GqlgenResolver;
+pub use graphql::GraphQLStackResolver;
+pub use grpc::GrpcStackResolver;
+pub use http::HttpStackResolver;
+pub use iac::IacResolver;
 pub use identity::IdentityResolver;
 pub use models::{
-    ClientWire, ClientWireStats, ClientWires, ResolvedField, ResolvedShape, RouteHandler, RouteSide,
-    ServerSite, WireDirection, client_wires,
+    ClientWire, ClientWireStats, ClientWires, ResolvedField, ResolvedShape, RouteHandler,
+    RouteSide, ServerSite, WireDirection, client_wires,
 };
+pub use queue::QueueStackResolver;
+pub use rpc::RpcStackResolver;
+pub use shared_schema::SharedSchemaResolver;
+pub use websocket::WebSocketStackResolver;
 // DT.1m: the models pass's compare (each client side against its server side).
-pub use models::{ModelJoin, ModelPair, WireChange, WirePair, WirePairStats, WirePairs, wire_pairs};
+pub use models::{
+    ModelJoin, ModelPair, WireChange, WirePair, WirePairStats, WirePairs, wire_pairs,
+};
 // DT.1h: the `models` Resolve pass (http_model SAME_AS stars).
 pub use models::ModelResolver;
 // DT.1n: GraphQL selection drift (each GRAPHQL_CALLS op's selection against
@@ -67,8 +69,8 @@ pub use models::ModelResolver;
 pub use models::{GraphqlChange, GraphqlPair, GraphqlPairStats, GraphqlPairs, graphql_pairs};
 // DT.1o: one side of an exchange flattened to JSON / schema-field paths, read
 // by the engine's model_breaks to judge a side across a git rev.
-pub use models::{WireField, WireFields, graphql_fields, graphql_fields_all, wire_fields};
 pub use http::normalise_http_path;
+pub use models::{WireField, WireFields, graphql_fields, graphql_fields_all, wire_fields};
 // A10.2 — the route index + tiers 1-4 for passes that pair a DECLARED path
 // (a contract operation) with the ROUTE serving it.
 pub use http::{HttpRouteMatcher, RouteMatch};
@@ -114,8 +116,12 @@ fn build_kind_index(
             if g.nav.kind_by_id.get(&n.id) != Some(&kind) {
                 continue;
             }
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(stripped) = qname.strip_prefix(prefix) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some(stripped) = qname.strip_prefix(prefix) else {
+                continue;
+            };
             let key = split_owner(stripped).0;
             index
                 .entry(key.to_string())
@@ -305,7 +311,12 @@ mod tests {
         for (kind, q) in nodes {
             let id = NodeId::from_parts(GRAPH_TYPE, repo, *kind, q);
             nav.record(id, q, q, *kind, None);
-            out.push(Node { id, repo, confidence: Confidence::Strong, cells: vec![] });
+            out.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
         }
         RepoGraph {
             repo,
@@ -322,7 +333,10 @@ mod tests {
     /// `(from qname, to qname)` of every `category` cross edge, sorted.
     pub(super) fn cross_pairs(m: &MergedGraph, category: EdgeCategoryId) -> Vec<(String, String)> {
         let q = |id: NodeId| {
-            m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
         };
         let mut out: Vec<(String, String)> = m
             .cross_edges
@@ -342,13 +356,20 @@ mod tests {
         let g = channel_graph(
             "kind-index",
             &[
-                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/users"),
-                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/catalog"),
+                (
+                    node_kind::GRAPHQL_RESOLVER,
+                    "graphql_resolver:getUser @services/users",
+                ),
+                (
+                    node_kind::GRAPHQL_RESOLVER,
+                    "graphql_resolver:getUser @services/catalog",
+                ),
                 (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:listUsers"),
             ],
         );
         let index = build_kind_index(&[g], node_kind::GRAPHQL_RESOLVER, "graphql_resolver:");
-        let mut keys: Vec<(&str, usize)> = index.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
+        let mut keys: Vec<(&str, usize)> =
+            index.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
         keys.sort();
         assert_eq!(keys, [("getUser", 2), ("listUsers", 1)]);
     }
@@ -389,9 +410,21 @@ mod tests {
 
     #[test]
     fn weakest_confidence_is_min_rank() {
-        assert_eq!(weakest(Confidence::Strong, Confidence::Strong), Confidence::Strong);
-        assert_eq!(weakest(Confidence::Strong, Confidence::Medium), Confidence::Medium);
-        assert_eq!(weakest(Confidence::Medium, Confidence::Weak), Confidence::Weak);
-        assert_eq!(weakest(Confidence::Weak, Confidence::Strong), Confidence::Weak);
+        assert_eq!(
+            weakest(Confidence::Strong, Confidence::Strong),
+            Confidence::Strong
+        );
+        assert_eq!(
+            weakest(Confidence::Strong, Confidence::Medium),
+            Confidence::Medium
+        );
+        assert_eq!(
+            weakest(Confidence::Medium, Confidence::Weak),
+            Confidence::Weak
+        );
+        assert_eq!(
+            weakest(Confidence::Weak, Confidence::Strong),
+            Confidence::Weak
+        );
     }
 }

@@ -77,7 +77,11 @@ pub(crate) fn run(args: Args) -> i32 {
 /// in discovery order.
 fn walk_and_print(merged: &MergedGraph, start: NodeId, max_depth: usize, forward: bool) {
     let adj = Adjacency::build(merged, &CategorySet::all());
-    let walk = if forward { Walk::Forward } else { Walk::Backward };
+    let walk = if forward {
+        Walk::Forward
+    } else {
+        Walk::Backward
+    };
     let hits: Vec<(NodeId, usize, &'static str)> = reach::bfs(&adj, &[start], walk, max_depth)
         .reached
         .iter()

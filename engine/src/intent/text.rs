@@ -30,7 +30,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot, read_history, read_history_messages};
+use glia_code_domain::snapshots::{
+    HistoryMessage, HistorySnapshot, read_history, read_history_messages,
+};
 
 use crate::rank::FileIndex;
 
@@ -45,16 +47,17 @@ const BM25_B: f64 = 0.75;
 
 /// rank_eval.rs `STOP`, verbatim and in its order.
 const STOP: &[&str] = &[
-    "about", "above", "after", "again", "against", "all", "also", "and", "any", "are", "because", "been",
-    "before", "being", "below", "between", "both", "but", "can", "could", "did", "does", "doing", "down",
-    "during", "each", "few", "for", "from", "further", "had", "has", "have", "having", "her", "here", "hers",
-    "him", "his", "how", "into", "its", "itself", "just", "more", "most", "not", "now", "off", "once", "only",
-    "other", "our", "ours", "out", "over", "own", "same", "she", "should", "some", "such", "than", "that",
-    "the", "their", "them", "then", "there", "these", "they", "this", "those", "through", "too", "under",
-    "until", "very", "was", "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will",
-    "with", "would", "you", "your", "yours", "yet", "via", "per", "one", "two", "new", "use", "used",
-    "uses", "using", "get", "got", "let", "may", "might", "must", "shall", "upon", "within", "without",
-    "onto", "etc",
+    "about", "above", "after", "again", "against", "all", "also", "and", "any", "are", "because",
+    "been", "before", "being", "below", "between", "both", "but", "can", "could", "did", "does",
+    "doing", "down", "during", "each", "few", "for", "from", "further", "had", "has", "have",
+    "having", "her", "here", "hers", "him", "his", "how", "into", "its", "itself", "just", "more",
+    "most", "not", "now", "off", "once", "only", "other", "our", "ours", "out", "over", "own",
+    "same", "she", "should", "some", "such", "than", "that", "the", "their", "them", "then",
+    "there", "these", "they", "this", "those", "through", "too", "under", "until", "very", "was",
+    "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with",
+    "would", "you", "your", "yours", "yet", "via", "per", "one", "two", "new", "use", "used",
+    "uses", "using", "get", "got", "let", "may", "might", "must", "shall", "upon", "within",
+    "without", "onto", "etc",
 ];
 
 /// rank_eval's `tokens`: per line, `trim_start` then ASCII-lowercase (a
@@ -66,7 +69,10 @@ pub fn tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
         let l = line.trim_start().to_ascii_lowercase();
-        if l.starts_with("co-authored-by:") || l.starts_with("claude-session:") || l.starts_with("signed-off-by:") {
+        if l.starts_with("co-authored-by:")
+            || l.starts_with("claude-session:")
+            || l.starts_with("signed-off-by:")
+        {
             continue;
         }
         for t in l.split(|c: char| !c.is_alphanumeric()) {
@@ -80,7 +86,10 @@ pub fn tokens(text: &str) -> Vec<String> {
 
 /// rank_eval's `subject`: the first non-empty trimmed line, else `""`.
 pub fn subject(text: &str) -> &str {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
 }
 
 /// The candidate files of one repo: its slice of a [`FileIndex`], in index
@@ -159,7 +168,10 @@ impl TextAbsent {
 
     /// Print `[intent] text repo=<label> surface=<s> <history|messages>=absent`.
     pub fn report(self, label: &str, surface: &str) {
-        eprintln!("[intent] text repo={label} surface={surface} {}", self.as_str());
+        eprintln!(
+            "[intent] text repo={label} surface={surface} {}",
+            self.as_str()
+        );
     }
 }
 
@@ -182,8 +194,14 @@ impl TextIndex {
     /// indices)`. A document of 0 or more than 30 distinct candidates is
     /// skipped and counted. `n_files` is the candidate count the scores
     /// cover (`Candidates::len`).
-    pub fn from_docs<'a>(n_files: usize, docs: impl Iterator<Item = (&'a str, &'a str, Vec<u32>)>) -> TextIndex {
-        let mut idx = TextIndex { n_files, ..TextIndex::default() };
+    pub fn from_docs<'a>(
+        n_files: usize,
+        docs: impl Iterator<Item = (&'a str, &'a str, Vec<u32>)>,
+    ) -> TextIndex {
+        let mut idx = TextIndex {
+            n_files,
+            ..TextIndex::default()
+        };
         for (sha, text, mut files) in docs {
             files.sort_unstable();
             files.dedup();
@@ -235,17 +253,29 @@ impl TextIndex {
                 excluded += 1;
                 continue;
             }
-            let files: Vec<u32> = c.files.iter().filter_map(|f| cands.position(&f.p)).map(|i| i as u32).collect();
+            let files: Vec<u32> = c
+                .files
+                .iter()
+                .filter_map(|f| cands.position(&f.p))
+                .map(|i| i as u32)
+                .collect();
             docs.push((c.c.as_str(), format!("{}\n{}", m.s, m.b), files));
         }
-        let mut idx = TextIndex::from_docs(cands.len(), docs.iter().map(|(s, t, f)| (*s, t.as_str(), f.clone())));
+        let mut idx = TextIndex::from_docs(
+            cands.len(),
+            docs.iter().map(|(s, t, f)| (*s, t.as_str(), f.clone())),
+        );
         idx.stats.excluded = excluded;
         idx
     }
 
     /// The index under `<root>/.glia/history-snapshot/` over `cands`, or why
     /// there is none.
-    pub fn load(root: &Path, cands: &Candidates, exclude: &BTreeSet<String>) -> Result<TextIndex, TextAbsent> {
+    pub fn load(
+        root: &Path,
+        cands: &Candidates,
+        exclude: &BTreeSet<String>,
+    ) -> Result<TextIndex, TextAbsent> {
         let snap = read_history(root).ok_or(TextAbsent::History)?;
         let messages = read_history_messages(root, &snap).ok_or(TextAbsent::Messages)?;
         Ok(TextIndex::build(&snap, &messages, cands, exclude))
@@ -268,7 +298,8 @@ impl TextIndex {
             for &(d, tf) in pl {
                 let tf = f64::from(tf);
                 let dl = f64::from(self.dl[d as usize]);
-                s[d as usize] += idf * tf * (BM25_K1 + 1.0) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / avg));
+                s[d as usize] += idf * tf * (BM25_K1 + 1.0)
+                    / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / avg));
             }
         }
         s
@@ -277,7 +308,12 @@ impl TextIndex {
     /// The top documents of `s`: score > 0, by score descending, then the
     /// newer (later) document first, at most 20.
     fn top(s: &[f64]) -> Vec<(usize, f64)> {
-        let mut top: Vec<(usize, f64)> = s.iter().copied().enumerate().filter(|&(_, v)| v > 0.0).collect();
+        let mut top: Vec<(usize, f64)> = s
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, v)| v > 0.0)
+            .collect();
         top.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
         top.truncate(TOP_DOCS);
         top
@@ -306,7 +342,10 @@ impl TextIndex {
     /// `query`'s top documents as (commit sha, score), best first: the
     /// commits [`TextIndex::scores`] read.
     pub fn top_commits(&self, query: &str) -> Vec<(&str, f64)> {
-        TextIndex::top(&self.doc_scores(query)).into_iter().map(|(d, v)| (self.doc_sha[d].as_str(), v)).collect()
+        TextIndex::top(&self.doc_scores(query))
+            .into_iter()
+            .map(|(d, v)| (self.doc_sha[d].as_str(), v))
+            .collect()
     }
 
     pub fn stats(&self) -> TextStats {
@@ -318,7 +357,10 @@ impl TextIndex {
     /// matched_docs=<m> files=<f>`, `q` the query's distinct tokens, `f` the
     /// candidates it scores above 0.
     pub fn report(&self, label: &str, surface: &str, query: &str) {
-        let q = tokens(query).into_iter().collect::<BTreeSet<String>>().len();
+        let q = tokens(query)
+            .into_iter()
+            .collect::<BTreeSet<String>>()
+            .len();
         let files = self.scores(query).iter().filter(|&&v| v > 0.0).count();
         eprintln!(
             "[intent] text repo={label} surface={surface} docs={} skipped_wide={} excluded={} tokens={q} matched_docs={} files={files}",
@@ -343,7 +385,9 @@ mod tests {
 
     #[test]
     fn tokens_are_the_harness_rule() {
-        let t = tokens("Fix CODEC-42 in the Über parser\nCo-Authored-By: x <y>\n  Signed-off-by: z\nab cd_ef");
+        let t = tokens(
+            "Fix CODEC-42 in the Über parser\nCo-Authored-By: x <y>\n  Signed-off-by: z\nab cd_ef",
+        );
         assert_eq!(t, ["fix", "codec", "Über", "parser"]);
         assert_eq!(subject("\n  \n  Hello world \nbody"), "Hello world");
         assert_eq!(subject(""), "");
@@ -353,11 +397,19 @@ mod tests {
     fn top_docs_tie_to_the_newer() {
         let idx = TextIndex::from_docs(
             3,
-            [("a", "codec alpha", vec![0]), ("b", "codec alpha", vec![1]), ("c", "nothing", vec![2])].into_iter(),
+            [
+                ("a", "codec alpha", vec![0]),
+                ("b", "codec alpha", vec![1]),
+                ("c", "nothing", vec![2]),
+            ]
+            .into_iter(),
         );
         let top = idx.top_commits("codec");
         assert_eq!(top.iter().map(|x| x.0).collect::<Vec<_>>(), ["b", "a"]);
         assert_eq!(top[0].1.to_bits(), top[1].1.to_bits());
-        assert_eq!(TextIndex::from_docs(2, std::iter::empty()).scores("codec"), [0.0, 0.0]);
+        assert_eq!(
+            TextIndex::from_docs(2, std::iter::empty()).scores("codec"),
+            [0.0, 0.0]
+        );
     }
 }

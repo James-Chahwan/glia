@@ -26,7 +26,9 @@ pub use passes::{PassRegistry, PassReport, PassSpec, Stage};
 /// activation weights + presets) and [`DomainProfile`] (tables + passes).
 pub mod profile;
 
-pub use profile::{ActivationPreset, DomainProfile, DomainTables, EntryRule, NamedEntry, Registries};
+pub use profile::{
+    ActivationPreset, DomainProfile, DomainTables, EntryRule, NamedEntry, Registries,
+};
 
 /// Domain-agnostic graph algorithms (LD.15a), reached by module path
 /// (`glia_activation::algo::reach::bfs`): [`algo::GraphSource`], the
@@ -45,8 +47,8 @@ pub mod ppr_index;
 pub use ppr_index::PprIndex;
 
 pub use plan::{
-    ActivatedView, ActivationPlan, DegreeSpecificity, FilterPredicate, RankingSignal, SliceGraph, SynthCell,
-    SynthHook,
+    ActivatedView, ActivationPlan, DegreeSpecificity, FilterPredicate, RankingSignal, SliceGraph,
+    SynthCell, SynthHook,
 };
 
 // ============================================================================
@@ -154,7 +156,14 @@ pub fn activate(
     seeds: &[NodeId],
     config: &ActivationConfig,
 ) -> ActivationResult {
-    let view = plan::activate_view(&SliceGraph { nodes: node_ids, edges }, seeds, config);
+    let view = plan::activate_view(
+        &SliceGraph {
+            nodes: node_ids,
+            edges,
+        },
+        seeds,
+        config,
+    );
     ActivationResult {
         scores: view.scores,
         iterations: view.iterations,
@@ -196,7 +205,10 @@ pub fn activate_indexed(
     config: &ActivationConfig,
 ) -> ActivationResult {
     let view = plan::activate_view_indexed(
-        &SliceGraph { nodes: index.node_ids(), edges },
+        &SliceGraph {
+            nodes: index.node_ids(),
+            edges,
+        },
         index,
         seeds,
         config,
@@ -354,7 +366,11 @@ mod tests {
         };
         let r = activate(&nodes, &edges, &[NodeId(1)], &config);
 
-        assert_eq!(r.score_of(NodeId(2)), 0.0, "B should get zero — edge blocked");
+        assert_eq!(
+            r.score_of(NodeId(2)),
+            0.0,
+            "B should get zero — edge blocked"
+        );
         assert!(r.score_of(NodeId(3)) > 0.0, "C should get activation");
     }
 
@@ -394,7 +410,10 @@ mod tests {
 
         let sc = r.score_of(NodeId(3));
         let sd = r.score_of(NodeId(4));
-        assert!(sc > sd, "C ({sc}) should beat D ({sd}) — C fed by both seeds");
+        assert!(
+            sc > sd,
+            "C ({sc}) should beat D ({sd}) — C fed by both seeds"
+        );
     }
 
     #[test]
@@ -425,7 +444,11 @@ mod tests {
             ..Default::default()
         };
         let r = activate(&nodes, &edges, &[NodeId(1)], &config);
-        assert!(r.iterations < 50, "should converge in <50 iters, got {}", r.iterations);
+        assert!(
+            r.iterations < 50,
+            "should converge in <50 iters, got {}",
+            r.iterations
+        );
     }
 
     #[test]

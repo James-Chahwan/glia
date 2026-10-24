@@ -32,7 +32,11 @@ fn cells_of(r: &GenerateResult, qname: &str) -> Vec<Cell> {
         .merged
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname)))
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname))
+        })
         .map(|n| &n.cells)
         .collect();
     assert_eq!(hits.len(), 1, "exactly one node is {qname}");
@@ -40,7 +44,11 @@ fn cells_of(r: &GenerateResult, qname: &str) -> Vec<Cell> {
 }
 
 fn of_type(cells: &[Cell], t: CellTypeId) -> Vec<&CellPayload> {
-    cells.iter().filter(|c| c.kind == t).map(|c| &c.payload).collect()
+    cells
+        .iter()
+        .filter(|c| c.kind == t)
+        .map(|c| &c.payload)
+        .collect()
 }
 
 #[test]
@@ -50,7 +58,9 @@ fn sidecar_conv_row_lands_on_its_node() {
     let cells = cells_of(&r, "a::charge");
     assert_eq!(
         of_type(&cells, cell_type::CONV),
-        [&CellPayload::Json(r#"[{"id":"000001","source":"api","text":"retries are safe"}]"#.into())]
+        [&CellPayload::Json(
+            r#"[{"id":"000001","source":"api","text":"retries are safe"}]"#.into()
+        )]
     );
 }
 
@@ -68,12 +78,24 @@ fn orphaned_and_rejected_rows_change_nothing() {
     ];
     let r = generate_one(&repo(tmp.path(), Some(&rows.join("\n")), None)).unwrap();
     let node_cells = |g: &GenerateResult| -> Vec<Vec<Cell>> {
-        g.merged.graphs.iter().flat_map(|x| x.nodes.iter().map(|n| n.cells.clone())).collect()
+        g.merged
+            .graphs
+            .iter()
+            .flat_map(|x| x.nodes.iter().map(|n| n.cells.clone()))
+            .collect()
     };
-    assert_eq!(node_cells(&r), node_cells(&bare), "no node gains or loses a cell");
+    assert_eq!(
+        node_cells(&r),
+        node_cells(&bare),
+        "no node gains or loses a cell"
+    );
     let (after, before) = (cells_of(&r, "a::charge"), cells_of(&bare, "a::charge"));
     let code = of_type(&after, cell_type::CODE);
-    assert_eq!(code, of_type(&before, cell_type::CODE), "a::charge's CODE bytes are unchanged");
+    assert_eq!(
+        code,
+        of_type(&before, cell_type::CODE),
+        "a::charge's CODE bytes are unchanged"
+    );
     assert_eq!(code.len(), 1);
 }
 
@@ -90,7 +112,10 @@ fn vector_row_decodes_to_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let bad = r#"{"qname":"a::charge","dims":3,"b64":"AACAPwAAAEA="}"#;
     let r = generate_one(&repo(tmp.path(), None, Some(bad))).unwrap();
-    assert!(of_type(&cells_of(&r, "a::charge"), cell_type::VECTOR).is_empty(), "dims=3 needs 12 bytes");
+    assert!(
+        of_type(&cells_of(&r, "a::charge"), cell_type::VECTOR).is_empty(),
+        "dims=3 needs 12 bytes"
+    );
 }
 
 /// A sidecar writes node cells and nothing else: the edges and every other
@@ -106,7 +131,11 @@ fn sidecar_changes_only_its_node_cells() {
         assert_eq!(a.edges, b.edges);
         for (na, nb) in a.nodes.iter().zip(&b.nodes) {
             assert_eq!(na.id, nb.id);
-            if a.nav.qname_by_id.get(&na.id).is_some_and(|q| q == "a::charge") {
+            if a.nav
+                .qname_by_id
+                .get(&na.id)
+                .is_some_and(|q| q == "a::charge")
+            {
                 assert_eq!(na.cells.len(), nb.cells.len() + 2, "CONV + VECTOR appended");
                 assert_eq!(na.cells[..nb.cells.len()], nb.cells[..]);
             } else {
@@ -122,7 +151,12 @@ fn dir_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -144,7 +178,10 @@ fn sidecar_builds_are_byte_identical() {
     let mut cache = ParseCache::new();
     generate_one_with_cache(&repo_s, &mut cache).unwrap();
     let warm = generate_one_with_cache(&repo_s, &mut cache).unwrap();
-    assert!(cache.stats.reused > 0, "the cached build must reuse its parse");
+    assert!(
+        cache.stats.reused > 0,
+        "the cached build must reuse its parse"
+    );
     write_merged_sharded(&warm.merged, &out("cached")).unwrap();
 
     let clean1 = dir_bytes(&out("clean1"));
@@ -157,7 +194,10 @@ fn sidecar_builds_are_byte_identical() {
         .collect::<Vec<_>>();
     assert_eq!(
         decision,
-        [CellPayload::Json(r#"[{"id":"d1","source":"api","status":"accepted","title":"charge is idempotent"}]"#.into())]
+        [CellPayload::Json(
+            r#"[{"id":"d1","source":"api","status":"accepted","title":"charge is idempotent"}]"#
+                .into()
+        )]
     );
 }
 
@@ -179,11 +219,20 @@ fn moved_node_rebinds_through_its_hint() {
         .merged
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == "a::charge")))
+        .flat_map(|g| {
+            g.nodes.iter().filter(|n| {
+                g.nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .is_some_and(|q| q == "a::charge")
+            })
+        })
         .map(|n| n.id)
         .next()
         .expect("a::charge");
-    let hint = identity_of(&before.merged, id).expect("a::charge has an identity").hint();
+    let hint = identity_of(&before.merged, id)
+        .expect("a::charge has an identity")
+        .hint();
 
     // Move a.py under billing/: the qname becomes billing::a::charge.
     std::fs::rename(dir.join("a.py"), dir.join("billing/a.py")).unwrap();
@@ -198,13 +247,24 @@ fn moved_node_rebinds_through_its_hint() {
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(conv, [CellPayload::Json(r#"[{"id":"1","source":"api","text":"moved"}]"#.into())]);
+    assert_eq!(
+        conv,
+        [CellPayload::Json(
+            r#"[{"id":"1","source":"api","text":"moved"}]"#.into()
+        )]
+    );
 
     // Without the hint the same row is an orphan.
     let idx = QnameIndex::build(&after.merged, None);
-    assert_eq!(idx.resolve("a::charge", Some("FUNCTION"), None), CellTarget::Orphaned);
+    assert_eq!(
+        idx.resolve("a::charge", Some("FUNCTION"), None),
+        CellTarget::Orphaned
+    );
     assert!(matches!(
         idx.resolve("a::charge", Some("FUNCTION"), Some(&hint)),
-        CellTarget::Rekeyed { tier: MoveTier::SameName, .. }
+        CellTarget::Rekeyed {
+            tier: MoveTier::SameName,
+            ..
+        }
     ));
 }

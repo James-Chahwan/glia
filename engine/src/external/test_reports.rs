@@ -120,14 +120,19 @@ const TEST_KINDS: [NodeKindId; 2] = [node_kind::FUNCTION, node_kind::METHOD];
 
 /// The kinds that take a COVERAGE cell: a MODULE its whole file, the others
 /// their POSITION span.
-const COVERAGE_KINDS: [NodeKindId; 4] = [node_kind::MODULE, node_kind::CLASS, node_kind::FUNCTION, node_kind::METHOD];
+const COVERAGE_KINDS: [NodeKindId; 4] = [
+    node_kind::MODULE,
+    node_kind::CLASS,
+    node_kind::FUNCTION,
+    node_kind::METHOD,
+];
 
 /// A classname's trailing segment that names a source file's extension
 /// (`tests/test_app.py` -> `tests`, `test_app`).
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "py", "go", "rs", "java", "kt", "kts", "scala", "groovy", "ts", "tsx", "js", "jsx", "mjs", "cjs", "rb",
-    "php", "cs", "swift", "dart", "ex", "exs", "sol", "c", "cc", "cpp", "cxx", "h", "hpp", "clj", "cljs",
-    "vue",
+    "py", "go", "rs", "java", "kt", "kts", "scala", "groovy", "ts", "tsx", "js", "jsx", "mjs",
+    "cjs", "rb", "php", "cs", "swift", "dart", "ex", "exs", "sol", "c", "cc", "cpp", "cxx", "h",
+    "hpp", "clj", "cljs", "vue",
 ];
 
 /// How a failing test was mapped to its node.
@@ -183,7 +188,10 @@ impl<'a> RepoIndex<'a> {
                 let kind = g.nav.kind_by_id.get(&n.id).copied();
                 let qname = g.nav.qname_by_id.get(&n.id).map_or("", String::as_str);
                 if !qname.is_empty() {
-                    by_tail.entry(qname.rsplit("::").next().unwrap_or(qname)).or_default().push(n.id);
+                    by_tail
+                        .entry(qname.rsplit("::").next().unwrap_or(qname))
+                        .or_default()
+                        .push(n.id);
                 }
                 if kind.is_some_and(|k| TEST_KINDS.contains(&k))
                     && let Some(name) = g.nav.name_by_id.get(&n.id)
@@ -192,17 +200,33 @@ impl<'a> RepoIndex<'a> {
                 }
                 let covers = kind.is_some_and(|k| COVERAGE_KINDS.contains(&k));
                 let positions = if covers { positions(n) } else { Vec::new() };
-                facts.insert(n.id, Facts { kind, qname, file: position_file(n), fixture: is_fixture(n), positions });
+                facts.insert(
+                    n.id,
+                    Facts {
+                        kind,
+                        qname,
+                        file: position_file(n),
+                        fixture: is_fixture(n),
+                        positions,
+                    },
+                );
             }
         }
         for ids in by_tail.values_mut().chain(tests_by_name.values_mut()) {
             ids.sort_by_key(|id| id.0);
         }
-        RepoIndex { facts, by_tail, tests_by_name }
+        RepoIndex {
+            facts,
+            by_tail,
+            tests_by_name,
+        }
     }
 
     fn file_is(&self, id: NodeId, file: &str) -> bool {
-        self.facts.get(&id).and_then(|f| f.file.as_deref()).is_some_and(|f| same_file(f, file))
+        self.facts
+            .get(&id)
+            .and_then(|f| f.file.as_deref())
+            .is_some_and(|f| same_file(f, file))
     }
 }
 
@@ -250,14 +274,24 @@ impl RunWindow {
         let labels = meta
             .runs
             .iter()
-            .filter_map(|r| r.run.as_deref().map(|label| (r.seq, redact_untrusted(label))))
+            .filter_map(|r| {
+                r.run
+                    .as_deref()
+                    .map(|label| (r.seq, redact_untrusted(label)))
+            })
             .collect();
-        RunWindow { labels, latest: meta.latest_seq().unwrap_or(0), runs: meta.runs.len() }
+        RunWindow {
+            labels,
+            latest: meta.latest_seq().unwrap_or(0),
+            runs: meta.runs.len(),
+        }
     }
 
     /// Run `seq`'s redacted label and its redacted-span count.
     fn label(&self, seq: u32) -> Option<(&str, usize)> {
-        self.labels.get(&seq).map(|(label, spans)| (label.as_str(), *spans))
+        self.labels
+            .get(&seq)
+            .map(|(label, spans)| (label.as_str(), *spans))
     }
 }
 
@@ -323,7 +357,11 @@ impl Batch {
     /// Every item resolved, in index order: one `resolve_signals` call.
     fn resolve(&self, merged: &MergedGraph) -> Vec<Vec<NodeId>> {
         let batch: Vec<(&str, &str)> = self.items.iter().map(|(t, k)| (t.as_str(), *k)).collect();
-        if batch.is_empty() { Vec::new() } else { merged.resolve_signals(&batch) }
+        if batch.is_empty() {
+            Vec::new()
+        } else {
+            merged.resolve_signals(&batch)
+        }
     }
 }
 
@@ -338,10 +376,19 @@ struct Agg<'c> {
 }
 
 /// Count `case` (one run's failure) into the entry `key` of `map`.
-fn note<'c, K: Ord>(map: &mut BTreeMap<K, Agg<'c>>, key: K, case: &'c TestCaseRecord, via: Option<Via>) {
+fn note<'c, K: Ord>(
+    map: &mut BTreeMap<K, Agg<'c>>,
+    key: K,
+    case: &'c TestCaseRecord,
+    via: Option<Via>,
+) {
     match map.entry(key) {
         std::collections::btree_map::Entry::Vacant(slot) => {
-            slot.insert(Agg { seqs: BTreeSet::from([case.seq]), newest: case, via });
+            slot.insert(Agg {
+                seqs: BTreeSet::from([case.seq]),
+                newest: case,
+                via,
+            });
         }
         std::collections::btree_map::Entry::Occupied(slot) => {
             let agg = slot.into_mut();
@@ -375,8 +422,10 @@ fn plan_fail_cells(
     for case in cases {
         by_run.entry(case.seq).or_default().push(case);
     }
-    let cases: Vec<&TestCaseRecord> =
-        by_run.values().flat_map(|run| dedup_by_classname(run, &mut tally)).collect();
+    let cases: Vec<&TestCaseRecord> = by_run
+        .values()
+        .flat_map(|run| dedup_by_classname(run, &mut tally))
+        .collect();
 
     // One batch for every case's items.
     let mut batch = Batch::default();
@@ -431,15 +480,24 @@ fn plan_fail_cells(
             }
         };
 
-        let Some(frames) = ci.trace.and_then(|i| resolved.get(i)) else { continue };
-        let test_file = test_node.and_then(|t| index.facts.get(&t)).and_then(|f| f.file.as_deref());
+        let Some(frames) = ci.trace.and_then(|i| resolved.get(i)) else {
+            continue;
+        };
+        let test_file = test_node
+            .and_then(|t| index.facts.get(&t))
+            .and_then(|f| f.file.as_deref());
         let mut kept = 0usize;
         for (frame, &node) in frames.iter().enumerate() {
             if kept == MAX_IMPLICATED {
                 break;
             }
-            let Some(f) = index.facts.get(&node) else { continue };
-            if Some(node) == test_node || f.fixture || (test_file.is_some() && f.file.as_deref() == test_file) {
+            let Some(f) = index.facts.get(&node) else {
+                continue;
+            };
+            if Some(node) == test_node
+                || f.fixture
+                || (test_file.is_some() && f.file.as_deref() == test_file)
+            {
                 continue;
             }
             note(&mut frames_of, (node.0, test.clone(), frame), case, None);
@@ -449,7 +507,10 @@ fn plan_fail_cells(
 
     // A test that mapped in some run is not unmapped for missing in another.
     let mapped_tests: BTreeSet<&str> = tests.keys().map(|(_, t)| t.as_str()).collect();
-    tally.unmapped = unmapped.iter().filter(|t| !mapped_tests.contains(t.as_str())).count();
+    tally.unmapped = unmapped
+        .iter()
+        .filter(|t| !mapped_tests.contains(t.as_str()))
+        .count();
     for agg in tests.values() {
         match agg.via {
             Some(Via::FileLine) => tally.file_line += 1,
@@ -486,7 +547,8 @@ fn fail_entry(test: &str, id: String, agg: &Agg<'_>, window: &RunWindow) -> Map<
     let (source, source_redacted) = redact_untrusted(&case.source);
     let (report, report_redacted) = redact_untrusted(&case.report);
     let label = window.label(case.seq);
-    let redacted = case.redacted || source_redacted + report_redacted + label.map_or(0, |(_, n)| n) > 0;
+    let redacted =
+        case.redacted || source_redacted + report_redacted + label.map_or(0, |(_, n)| n) > 0;
     let mut m = Map::new();
     m.insert("source".into(), Value::from(source));
     m.insert("id".into(), Value::from(id));
@@ -520,7 +582,10 @@ fn map_test(
     // 1. file_line.
     if let (Some(item), Some(file)) = (ci.file_line, case.file.as_deref())
         && let Some(hit) = first_hit(item)
-        && index.facts.get(&hit).is_some_and(|f| f.kind.is_some_and(|k| TEST_KINDS.contains(&k)))
+        && index
+            .facts
+            .get(&hit)
+            .is_some_and(|f| f.kind.is_some_and(|k| TEST_KINDS.contains(&k)))
         && index.file_is(hit, file)
     {
         return Some((hit, Via::FileLine));
@@ -529,7 +594,9 @@ fn map_test(
     // falls back to the bare name, which is no qname match). The hit may be
     // another repo's node in a merged build: the candidates are this repo's.
     for (token, item) in &ci.tokens {
-        let Some(hit) = first_hit(*item) else { continue };
+        let Some(hit) = first_hit(*item) else {
+            continue;
+        };
         let suffix = format!("::{token}");
         let names_token = merged
             .graphs
@@ -542,9 +609,16 @@ fn map_test(
         let tail = token.rsplit("::").next().unwrap_or(token);
         let pool = index.by_tail.get(tail).map_or(&[][..], Vec::as_slice);
         let qname_of = |id: &NodeId| index.facts.get(id).map_or("", |f| f.qname);
-        let exact: Vec<NodeId> = pool.iter().copied().filter(|id| qname_of(id) == token).collect();
+        let exact: Vec<NodeId> = pool
+            .iter()
+            .copied()
+            .filter(|id| qname_of(id) == token)
+            .collect();
         let mut candidates: Vec<NodeId> = if exact.is_empty() {
-            pool.iter().copied().filter(|id| qname_of(id).ends_with(&suffix)).collect()
+            pool.iter()
+                .copied()
+                .filter(|id| qname_of(id).ends_with(&suffix))
+                .collect()
         } else {
             exact
         };
@@ -554,7 +628,11 @@ fn map_test(
         if candidates.len() > 1
             && let Some(file) = case.file.as_deref()
         {
-            let in_file: Vec<NodeId> = candidates.iter().copied().filter(|&id| index.file_is(id, file)).collect();
+            let in_file: Vec<NodeId> = candidates
+                .iter()
+                .copied()
+                .filter(|&id| index.file_is(id, file))
+                .collect();
             if !in_file.is_empty() {
                 candidates = in_file;
             }
@@ -589,10 +667,15 @@ fn qname_tokens(case: &TestCaseRecord) -> Vec<String> {
     };
     segs.extend(head);
     segs.push(base_name(last));
-    if segs.iter().any(|s| s.is_empty() || s.chars().any(char::is_whitespace)) {
+    if segs
+        .iter()
+        .any(|s| s.is_empty() || s.chars().any(char::is_whitespace))
+    {
         return Vec::new();
     }
-    (0..segs.len().saturating_sub(1)).map(|k| segs[k..].join("::")).collect()
+    (0..segs.len().saturating_sub(1))
+        .map(|k| segs[k..].join("::"))
+        .collect()
 }
 
 /// A test name without its parameter suffix (`test_x[a-1]`, `testGet(String)`)
@@ -607,7 +690,10 @@ fn base_name(name: &str) -> &str {
 
 /// One run's `cases` with one copy per `(classname, name)`, the JUnit copy
 /// first, then JUnit cases before log cases, each in snapshot order.
-fn dedup_by_classname<'c>(cases: &[&'c TestCaseRecord], tally: &mut Tally) -> Vec<&'c TestCaseRecord> {
+fn dedup_by_classname<'c>(
+    cases: &[&'c TestCaseRecord],
+    tally: &mut Tally,
+) -> Vec<&'c TestCaseRecord> {
     let mut kept: Vec<&TestCaseRecord> = Vec::new();
     let mut at: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for &case in cases {
@@ -632,14 +718,21 @@ fn dedup_by_classname<'c>(cases: &[&'c TestCaseRecord], tally: &mut Tally) -> Ve
 
 /// Merge each node's planned entries into its FAIL cell (first copy of the
 /// node in graph order), capped at [`MAX_ENTRIES_PER_NODE`].
-fn write_fail_cells(merged: &mut MergedGraph, input: &RepoInputs, plan: BTreeMap<u64, Vec<Value>>, tally: &mut Tally) {
+fn write_fail_cells(
+    merged: &mut MergedGraph,
+    input: &RepoInputs,
+    plan: BTreeMap<u64, Vec<Value>>,
+    tally: &mut Tally,
+) {
     if plan.is_empty() {
         return;
     }
     let mut done: BTreeSet<u64> = BTreeSet::new();
     for g in merged.graphs.iter_mut().filter(|g| g.repo == input.repo) {
         for n in g.nodes.iter_mut() {
-            let Some(entries) = plan.get(&n.id.0) else { continue };
+            let Some(entries) = plan.get(&n.id.0) else {
+                continue;
+            };
             if !done.insert(n.id.0) {
                 continue;
             }
@@ -663,7 +756,10 @@ fn write_fail_cells(merged: &mut MergedGraph, input: &RepoInputs, plan: BTreeMap
             };
             let (payload, dropped) = cap_entries(payload);
             tally.dropped += dropped;
-            let cell = Cell { kind: cell_type::FAIL, payload };
+            let cell = Cell {
+                kind: cell_type::FAIL,
+                payload,
+            };
             match slot {
                 Some(i) => n.cells[i] = cell,
                 None => n.cells.push(cell),
@@ -710,17 +806,30 @@ struct CoveragePlan {
 /// Map every lcov row onto one repo file, then every [`COVERAGE_KINDS`] node
 /// with a POSITION in a covered file onto its `(lines, hit)` counts (see the
 /// module doc).
-fn plan_coverage(index: &RepoIndex<'_>, lcov: &[LcovFileRecord], run: Option<(&str, usize)>) -> CoveragePlan {
-    let mut plan = CoveragePlan { files: lcov.len(), ..CoveragePlan::default() };
+fn plan_coverage(
+    index: &RepoIndex<'_>,
+    lcov: &[LcovFileRecord],
+    run: Option<(&str, usize)>,
+) -> CoveragePlan {
+    let mut plan = CoveragePlan {
+        files: lcov.len(),
+        ..CoveragePlan::default()
+    };
     if lcov.is_empty() {
         return plan;
     }
     // Node ids in id order, so the plan is built one way on every run.
-    let mut nodes: Vec<(NodeId, &Facts<'_>)> =
-        index.facts.iter().filter(|(_, f)| !f.positions.is_empty()).map(|(id, f)| (*id, f)).collect();
+    let mut nodes: Vec<(NodeId, &Facts<'_>)> = index
+        .facts
+        .iter()
+        .filter(|(_, f)| !f.positions.is_empty())
+        .map(|(id, f)| (*id, f))
+        .collect();
     nodes.sort_by_key(|(id, _)| id.0);
-    let files: BTreeSet<&str> =
-        nodes.iter().flat_map(|(_, f)| f.positions.iter().map(|(file, _)| file.as_str())).collect();
+    let files: BTreeSet<&str> = nodes
+        .iter()
+        .flat_map(|(_, f)| f.positions.iter().map(|(file, _)| file.as_str()))
+        .collect();
 
     // Repo file -> 1-based line -> hits, summed over the rows that map to it.
     let mut da: BTreeMap<&str, BTreeMap<u32, u32>> = BTreeMap::new();
@@ -742,7 +851,9 @@ fn plan_coverage(index: &RepoIndex<'_>, lcov: &[LcovFileRecord], run: Option<(&s
         // (file, line) -> hits: a record two POSITION cells share counts once.
         let mut taken: BTreeMap<(&str, u32), u32> = BTreeMap::new();
         for (file, span) in &facts.positions {
-            let Some(lines) = da.get(file.as_str()) else { continue };
+            let Some(lines) = da.get(file.as_str()) else {
+                continue;
+            };
             let range = match (module, span) {
                 (true, _) => 0..=u32::MAX,
                 (false, Some((s0, e0))) if s0 <= e0 => s0.saturating_add(1)..=e0.saturating_add(1),
@@ -766,7 +877,9 @@ fn plan_coverage(index: &RepoIndex<'_>, lcov: &[LcovFileRecord], run: Option<(&s
                 payload.insert("redacted", Value::Bool(true));
             }
         }
-        let Ok(text) = serde_json::to_string(&payload) else { continue };
+        let Ok(text) = serde_json::to_string(&payload) else {
+            continue;
+        };
         plan.cells.insert(id.0, CellPayload::Json(text));
     }
     plan
@@ -827,11 +940,16 @@ fn ingest_lcov(merged: &mut MergedGraph, input: &RepoInputs, plan: CoveragePlan)
     if !plan.cells.is_empty() {
         for g in merged.graphs.iter_mut().filter(|g| g.repo == input.repo) {
             for n in g.nodes.iter_mut() {
-                let Some(payload) = plan.cells.get(&n.id.0) else { continue };
+                let Some(payload) = plan.cells.get(&n.id.0) else {
+                    continue;
+                };
                 if !done.insert(n.id.0) {
                     continue;
                 }
-                let cell = Cell { kind: cell_type::COVERAGE, payload: payload.clone() };
+                let cell = Cell {
+                    kind: cell_type::COVERAGE,
+                    payload: payload.clone(),
+                };
                 match n.cells.iter().position(|c| c.kind == cell_type::COVERAGE) {
                     Some(i) => n.cells[i] = cell,
                     None => n.cells.push(cell),
@@ -853,7 +971,11 @@ fn ingest_lcov(merged: &mut MergedGraph, input: &RepoInputs, plan: CoveragePlan)
 /// Every POSITION cell of a node as `(file, 0-based [start_line, end_line])`;
 /// the span is `None` when either bound is missing.
 fn positions(n: &Node) -> Vec<(String, Option<(u32, u32)>)> {
-    let row = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).map(|r| u32::try_from(r).unwrap_or(u32::MAX));
+    let row = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_u64)
+            .map(|r| u32::try_from(r).unwrap_or(u32::MAX))
+    };
     n.cells
         .iter()
         .filter(|c| c.kind == cell_type::POSITION)
@@ -862,7 +984,11 @@ fn positions(n: &Node) -> Vec<(String, Option<(u32, u32)>)> {
                 return None;
             };
             let v: Value = serde_json::from_str(s).ok()?;
-            let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?.to_string();
+            let file = v
+                .get("file")?
+                .as_str()
+                .filter(|f| !f.is_empty())?
+                .to_string();
             let span = row(&v, "start_line").zip(row(&v, "end_line"));
             Some((file, span))
         })
@@ -876,17 +1002,23 @@ fn position_file(n: &Node) -> Option<String> {
         return None;
     };
     let v: Value = serde_json::from_str(s).ok()?;
-    v.get("file")?.as_str().filter(|f| !f.is_empty()).map(str::to_string)
+    v.get("file")?
+        .as_str()
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
 }
 
 /// ORIGIN provenance `test_fixture` (`passes::tag_synthetic_provenance`).
 fn is_fixture(n: &Node) -> bool {
-    n.cells.iter().filter(|c| c.kind == cell_type::ORIGIN).any(|c| match &c.payload {
-        CellPayload::Json(s) => serde_json::from_str::<Value>(s)
-            .ok()
-            .is_some_and(|v| v.get("provenance").and_then(Value::as_str) == Some("test_fixture")),
-        _ => false,
-    })
+    n.cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ORIGIN)
+        .any(|c| match &c.payload {
+            CellPayload::Json(s) => serde_json::from_str::<Value>(s).ok().is_some_and(|v| {
+                v.get("provenance").and_then(Value::as_str) == Some("test_fixture")
+            }),
+            _ => false,
+        })
 }
 
 /// True when a POSITION file and a report's file name the same file: one is a
@@ -929,13 +1061,28 @@ mod tests {
     fn tokens_are_the_suffixes_longest_first() {
         assert_eq!(
             qname_tokens(&case(Some("com.example.UserServiceTest"), "testGetUser")),
-            ["com::example::UserServiceTest::testGetUser", "example::UserServiceTest::testGetUser", "UserServiceTest::testGetUser"]
+            [
+                "com::example::UserServiceTest::testGetUser",
+                "example::UserServiceTest::testGetUser",
+                "UserServiceTest::testGetUser"
+            ]
         );
         // A trailing source extension is a file name, not a segment.
-        assert_eq!(qname_tokens(&case(Some("tests/test_app.py"), "test_x[a-1]")), ["tests::test_app::test_x", "test_app::test_x"]);
+        assert_eq!(
+            qname_tokens(&case(Some("tests/test_app.py"), "test_x[a-1]")),
+            ["tests::test_app::test_x", "test_app::test_x"]
+        );
         // A Rust module path in the name; a Go subtest suffix.
-        assert_eq!(qname_tokens(&case(Some("mycrate"), "tests::it_works")), ["mycrate::tests::it_works", "tests::it_works"]);
-        assert_eq!(qname_tokens(&case(Some("github.com/acme/pay"), "TestPay/refund")).last().map(String::as_str), Some("pay::TestPay"));
+        assert_eq!(
+            qname_tokens(&case(Some("mycrate"), "tests::it_works")),
+            ["mycrate::tests::it_works", "tests::it_works"]
+        );
+        assert_eq!(
+            qname_tokens(&case(Some("github.com/acme/pay"), "TestPay/refund"))
+                .last()
+                .map(String::as_str),
+            Some("pay::TestPay")
+        );
         // One segment is no qname; a description is no qname.
         assert!(qname_tokens(&case(None, "test_x")).is_empty());
         assert!(qname_tokens(&case(Some("Cart"), "adds an item")).is_empty());
@@ -966,8 +1113,14 @@ mod tests {
     #[test]
     fn same_file_is_a_boundary_suffix() {
         assert!(same_file("tests/test_app.py", "tests/test_app.py"));
-        assert!(same_file("tests/test_app.py", "/ci/work/repo/tests/test_app.py"));
-        assert!(same_file("src/test/java/UserServiceTest.java", "UserServiceTest.java"));
+        assert!(same_file(
+            "tests/test_app.py",
+            "/ci/work/repo/tests/test_app.py"
+        ));
+        assert!(same_file(
+            "src/test/java/UserServiceTest.java",
+            "UserServiceTest.java"
+        ));
         assert!(same_file("tests/test_app.py", ".\\tests\\test_app.py"));
         assert!(!same_file("other/test_app.py", "tests/test_app.py"));
         assert!(!same_file("tests/my_test_app.py", "test_app.py"));
@@ -982,7 +1135,9 @@ mod tests {
         }
         let (capped, dropped) = cap_entries(payload.unwrap());
         assert_eq!(dropped, 5);
-        let CellPayload::Json(s) = capped else { panic!("json") };
+        let CellPayload::Json(s) = capped else {
+            panic!("json")
+        };
         let v: Vec<Value> = serde_json::from_str(&s).unwrap();
         assert_eq!(v.len(), MAX_ENTRIES_PER_NODE);
         assert_eq!(v[0]["id"], "t00");

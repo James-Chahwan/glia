@@ -77,23 +77,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
-use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot, read_history, read_history_messages};
+use glia_code_domain::snapshots::{
+    HistoryMessage, HistorySnapshot, read_history, read_history_messages,
+};
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
-use crate::calibrate::fusions::{FindHead, find_keys, find_order, find_signals_at_head};
-use crate::calibrate::record::{Shape, explicit, log_selection, select};
-use crate::calibrate::sets::{FIND_CANDIDATES, FIND_FALLBACK, FIND_SET};
 use crate::answers::{
     Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
 };
 use crate::arch::{repo_label_for, repo_label_map};
+use crate::calibrate::fusions::{FindHead, find_keys, find_order, find_signals_at_head};
+use crate::calibrate::record::{Shape, explicit, log_selection, select};
+use crate::calibrate::sets::{FIND_CANDIDATES, FIND_FALLBACK, FIND_SET};
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::intent::defs::{Tree, read_defs};
-use crate::intent::idr::{
-    IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route,
-};
+use crate::intent::idr::{IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route};
 use crate::intent::paths::{PathResolver, rename_pairs};
 use crate::intent::text::{Candidates, TextAbsent, TextIndex, subject};
 use crate::rank::RankCache;
@@ -196,7 +196,11 @@ pub fn find_nodes_with_live(
     for r in &mut found.rows {
         r.live = live.contains(&NodeId(r.id));
     }
-    live_marker("find", found.rows.len(), found.rows.iter().filter(|r| r.live).count());
+    live_marker(
+        "find",
+        found.rows.len(),
+        found.rows.iter().filter(|r| r.live).count(),
+    );
     Answer::from_results(found.rows, || {
         if found.out_of_scope > 0
             && let Some(scope) = opts.scope.as_deref()
@@ -275,8 +279,18 @@ pub(crate) fn search_with(
             {
                 continue;
             }
-            let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-            let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+            let name = g
+                .nav
+                .name_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
+            let qname = g
+                .nav
+                .qname_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
             let Some(tier) = q.tier_of(name, qname) else {
                 continue;
             };
@@ -344,7 +358,11 @@ pub(crate) fn search_with(
     };
     let folded = ranked - cands.len();
 
-    let keep = if opts.top_k == 0 { cands.len() } else { opts.top_k };
+    let keep = if opts.top_k == 0 {
+        cands.len()
+    } else {
+        opts.top_k
+    };
     let rows = cands
         .into_iter()
         .take(keep)
@@ -463,7 +481,10 @@ impl Query {
             qname_forms.push(pathlike);
         }
         let folded_qname_forms: Vec<String> = qname_forms.iter().map(|f| fold(f)).collect();
-        let qname_suffixes = folded_qname_forms.iter().map(|f| format!("::{f}")).collect();
+        let qname_suffixes = folded_qname_forms
+            .iter()
+            .map(|f| format!("::{f}"))
+            .collect();
         let folded_str = fold(&raw);
         Query {
             folded: folded_str.chars().collect(),
@@ -488,7 +509,11 @@ impl Query {
         if fname == self.folded_str || self.folded_qname_forms.contains(&fqname) {
             return Some(Tier::ExactCi);
         }
-        if self.qname_suffixes.iter().any(|s| fqname.ends_with(s.as_str())) {
+        if self
+            .qname_suffixes
+            .iter()
+            .any(|s| fqname.ends_with(s.as_str()))
+        {
             return Some(Tier::QnameSuffix);
         }
         if fname.starts_with(&self.folded_str) {
@@ -500,7 +525,11 @@ impl Query {
         if fname.contains(&self.folded_str) {
             return Some(Tier::NameSubstring);
         }
-        if self.folded_qname_forms.iter().any(|f| fqname.contains(f.as_str())) {
+        if self
+            .folded_qname_forms
+            .iter()
+            .any(|f| fqname.contains(f.as_str()))
+        {
             return Some(Tier::QnameSubstring);
         }
         if self.folded.len() >= 3 && is_subsequence(&self.folded, &fname) {
@@ -595,7 +624,11 @@ fn log_marker(query: &str, cands: &[Candidate], top_k: usize) {
             (n > 0).then(|| format!("{}:{n}", t.label()))
         })
         .collect();
-    let tiers = if tiers.is_empty() { "-".to_string() } else { tiers.join(",") };
+    let tiers = if tiers.is_empty() {
+        "-".to_string()
+    } else {
+        tiers.join(",")
+    };
     eprintln!(
         "[find] query='{query}' matched={} tiers={tiers} top_k={top_k}",
         cands.len()
@@ -734,7 +767,10 @@ pub fn find_files_with_ids(
 /// The history a [`find_files_with`] call reads: `history`'s snapshot with
 /// its `exclude`d commits dropped (messages kept row-aligned), else the
 /// root's on disk.
-fn find_history(root: &Path, history: Option<&IntentHistory>) -> Option<(HistorySnapshot, Option<Vec<HistoryMessage>>)> {
+fn find_history(
+    root: &Path,
+    history: Option<&IntentHistory>,
+) -> Option<(HistorySnapshot, Option<Vec<HistoryMessage>>)> {
     let Some(h) = history else {
         let snap = read_history(root)?;
         let msgs = read_history_messages(root, &snap);
@@ -743,7 +779,12 @@ fn find_history(root: &Path, history: Option<&IntentHistory>) -> Option<(History
     if h.exclude.is_empty() {
         return Some((h.snapshot.clone(), h.messages.clone()));
     }
-    let keep: Vec<bool> = h.snapshot.commits.iter().map(|c| !h.exclude.contains(&c.c)).collect();
+    let keep: Vec<bool> = h
+        .snapshot
+        .commits
+        .iter()
+        .map(|c| !h.exclude.contains(&c.c))
+        .collect();
     let commits = h
         .snapshot
         .commits
@@ -776,7 +817,11 @@ fn find_files_core(
 ) -> Result<(Answer<FoundFile>, Vec<RoutedId>), String> {
     let (repo, root) = match (repo_roots.len(), repo_roots.iter().next()) {
         (1, Some((r, p))) => (*r, p.clone()),
-        (n, _) => return Err(format!("find --files ranks one repo's files; got {n} repos")),
+        (n, _) => {
+            return Err(format!(
+                "find --files ranks one repo's files; got {n} repos"
+            ));
+        }
     };
     let surface = opts.surface;
     let cache = opts.rank_cache.clone().unwrap_or_else(|| {
@@ -808,7 +853,11 @@ fn find_files_core(
             (idx.scores(&subj), "present")
         }
         (s, _) => {
-            let why = if s.is_none() { TextAbsent::History } else { TextAbsent::Messages };
+            let why = if s.is_none() {
+                TextAbsent::History
+            } else {
+                TextAbsent::Messages
+            };
             why.report(&label, surface);
             (vec![0.0; n], "absent")
         }
@@ -857,7 +906,9 @@ fn find_files_core(
         (routed, ids_of)
     });
     let (routed, ids_of) = (&routed.0, &routed.1);
-    let idr: Vec<f64> = (0..n).map(|i| routed.idr.get(i).copied().unwrap_or(0.0)).collect();
+    let idr: Vec<f64> = (0..n)
+        .map(|i| routed.idr.get(i).copied().unwrap_or(0.0))
+        .collect();
 
     // EC.13: SELf2t's calibrated pick, else LX[IDR,T1s]; the find shape's
     // tie rule (the degree in an unused third key), then path.
@@ -875,7 +926,12 @@ fn find_files_core(
         explicit(FIND_SET, Shape::Find, FIND_FILES_FUSION)
     };
     log_selection("find_files", &selection);
-    let head = FindHead::new(merged, &cache, &cands, snap.map(|s| (s, msgs.unwrap_or(&[]))));
+    let head = FindHead::new(
+        merged,
+        &cache,
+        &cands,
+        snap.map(|s| (s, msgs.unwrap_or(&[]))),
+    );
     let keyed = |name: &str| {
         let sig = find_signals_at_head(&head, name, text.clone(), idr.clone());
         find_keys(name, &sig)
@@ -924,7 +980,11 @@ fn find_files_core(
                 "no past commit message matches the query"
             });
         }
-        let note = format!("no file of `{label}` ranks for `{}`: {}", query.trim(), why.join("; "));
+        let note = format!(
+            "no file of `{label}` ranks for `{}`: {}",
+            query.trim(),
+            why.join("; ")
+        );
         absence::empty(merged, "find_files", query, "no_match", note, &[], None)
     });
     answer.selection = Some(selection);
@@ -944,13 +1004,19 @@ mod tests {
         assert_eq!(tier("m::f", "f", "m::f"), Some("exact_qname"));
         assert_eq!(tier("f", "f", "m::f"), Some("exact_name"));
         assert_eq!(tier("GETUSER", "getUser", "m::getUser"), Some("exact_ci"));
-        assert_eq!(tier("M::GETUSER", "getUser", "m::getUser"), Some("exact_ci"));
+        assert_eq!(
+            tier("M::GETUSER", "getUser", "m::getUser"),
+            Some("exact_ci")
+        );
         assert_eq!(tier("Svc::run", "run", "m::Svc::run"), Some("qname_suffix"));
         assert_eq!(tier("svc", "Service", "m::Service"), Some("subsequence"));
         assert_eq!(tier("serv", "Service", "m::Service"), Some("name_prefix"));
         assert_eq!(tier("user", "get_user", "m::get_user"), Some("name_word"));
         assert_eq!(tier("user", "getUser", "m::getUser"), Some("name_word"));
-        assert_eq!(tier("users", "GET /users", "endpoint:GET:/users"), Some("name_word"));
+        assert_eq!(
+            tier("users", "GET /users", "endpoint:GET:/users"),
+            Some("name_word")
+        );
         assert_eq!(tier("ser", "user", "m::user"), Some("name_substring"));
         assert_eq!(tier("mod", "load", "mod::load"), Some("qname_substring"));
         assert_eq!(tier("usr", "users", "users"), Some("subsequence"));
@@ -964,14 +1030,20 @@ mod tests {
         assert_eq!(tier("m.Svc.run", "run", "m::Svc::run"), Some("exact_qname"));
         assert_eq!(tier("Svc/run", "run", "m::Svc::run"), Some("qname_suffix"));
         // The raw form still matches a qname that really has a `/`.
-        assert_eq!(tier("/users", "GET /users", "endpoint:GET:/users"), Some("name_word"));
+        assert_eq!(
+            tier("/users", "GET /users", "endpoint:GET:/users"),
+            Some("name_word")
+        );
     }
 
     #[test]
     fn camel_steps_are_word_starts_but_acronym_runs_are_not() {
         assert!(starts_a_word("getUserById", &['b', 'y']));
         assert!(!starts_a_word("HTTPServer", &['s', 'e', 'r']));
-        assert!(!starts_a_word("user", &['u', 's', 'e', 'r']), "position 0 is name_prefix");
+        assert!(
+            !starts_a_word("user", &['u', 's', 'e', 'r']),
+            "position 0 is name_prefix"
+        );
     }
 
     #[test]

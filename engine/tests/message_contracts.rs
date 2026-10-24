@@ -79,11 +79,23 @@ fn rows_one(root: &Path) -> Vec<MessageContractRow> {
 fn go_nats_same_type_is_one_match_row() {
     let tmp = tempfile::tempdir().unwrap();
     let root = repo_dir(&tmp, "shop");
-    write(&root, "server/publisher.go", &go_publisher("orders", "OrderCreated"));
-    write(&root, "client/consumer.go", &go_subscriber("orders", "OrderCreated"));
+    write(
+        &root,
+        "server/publisher.go",
+        &go_publisher("orders", "OrderCreated"),
+    );
+    write(
+        &root,
+        "client/consumer.go",
+        &go_subscriber("orders", "OrderCreated"),
+    );
 
     let rows = rows_one(&root);
-    assert_eq!(rows.len(), 1, "one producer + one consumer = one row: {rows:#?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one producer + one consumer = one row: {rows:#?}"
+    );
     let r = &rows[0];
     assert_eq!(r.topic, "orders");
     assert!(!r.topic_is_tag);
@@ -111,10 +123,21 @@ fn go_nats_differing_types_across_repos_is_mismatch() {
     let tmp = tempfile::tempdir().unwrap();
     let svc = repo_dir(&tmp, "svc");
     let worker = repo_dir(&tmp, "worker");
-    write(&svc, "publisher.go", &go_publisher("shipments", "ShipmentCreated"));
-    write(&worker, "consumer.go", &go_subscriber("shipments", "ShipmentDispatched"));
+    write(
+        &svc,
+        "publisher.go",
+        &go_publisher("shipments", "ShipmentCreated"),
+    );
+    write(
+        &worker,
+        "consumer.go",
+        &go_subscriber("shipments", "ShipmentDispatched"),
+    );
 
-    let paths = vec![svc.to_str().unwrap().to_string(), worker.to_str().unwrap().to_string()];
+    let paths = vec![
+        svc.to_str().unwrap().to_string(),
+        worker.to_str().unwrap().to_string(),
+    ];
     let rows = message_contracts(&generate_many(&paths).unwrap().merged);
     assert_eq!(rows.len(), 1, "{rows:#?}");
     let r = &rows[0];
@@ -141,7 +164,11 @@ fn csharp_framework_tag_is_one_unpaired_unknown_row() {
     assert_eq!(r.status, "unknown");
     assert_eq!(r.confidence, "none");
     assert!(r.consumer.is_none());
-    assert!(r.note.is_some_and(|n| n.contains("framework tag")), "{:?}", r.note);
+    assert!(
+        r.note.is_some_and(|n| n.contains("framework tag")),
+        "{:?}",
+        r.note
+    );
     // The type is still reported — only the PAIRING is withheld.
     let p = r.producer.as_ref().unwrap();
     assert_eq!(p.message_type.as_deref(), Some("OrderCreated"));
@@ -166,7 +193,10 @@ fn tag_topics_never_cross_product() {
     let rows = message_contracts(&generate_many(&paths).unwrap().merged);
     assert_eq!(rows.len(), 7, "3 + 4 one-sided rows, not 3 x 4: {rows:#?}");
     assert!(rows.iter().all(|r| r.topic_is_tag && r.status == "unknown"));
-    assert!(rows.iter().all(|r| r.producer.is_none() != r.consumer.is_none()));
+    assert!(
+        rows.iter()
+            .all(|r| r.producer.is_none() != r.consumer.is_none())
+    );
     assert_eq!(rows.iter().filter(|r| r.producer.is_some()).count(), 3);
     assert_eq!(rows.iter().filter(|r| r.consumer.is_some()).count(), 4);
 }
@@ -219,19 +249,41 @@ fn primitive_payload_is_unknown_not_mismatch() {
     assert_eq!(rows.len(), 1, "{rows:#?}");
     let r = &rows[0];
     assert_eq!(r.topic, "orders");
-    assert_eq!(r.producer.as_ref().unwrap().message_type.as_deref(), Some("string"));
-    assert_eq!(r.consumer.as_ref().unwrap().message_type.as_deref(), Some("OrderCreated"));
+    assert_eq!(
+        r.producer.as_ref().unwrap().message_type.as_deref(),
+        Some("string")
+    );
+    assert_eq!(
+        r.consumer.as_ref().unwrap().message_type.as_deref(),
+        Some("OrderCreated")
+    );
     assert_eq!(r.status, "unknown", "a primitive side is not comparable");
-    assert!(r.note.is_some_and(|n| n.contains("primitive")), "{:?}", r.note);
+    assert!(
+        r.note.is_some_and(|n| n.contains("primitive")),
+        "{:?}",
+        r.note
+    );
 }
 
 #[test]
 fn report_is_deterministic() {
     let tmp = tempfile::tempdir().unwrap();
     let root = repo_dir(&tmp, "mixed");
-    write(&root, "server/publisher.go", &go_publisher("orders", "OrderCreated"));
-    write(&root, "client/consumer.go", &go_subscriber("orders", "OrderCreated"));
-    write(&root, "server/audit.go", &go_publisher("audit", "AuditEntry"));
+    write(
+        &root,
+        "server/publisher.go",
+        &go_publisher("orders", "OrderCreated"),
+    );
+    write(
+        &root,
+        "client/consumer.go",
+        &go_subscriber("orders", "OrderCreated"),
+    );
+    write(
+        &root,
+        "server/audit.go",
+        &go_publisher("audit", "AuditEntry"),
+    );
     write(&root, "billing/Publisher.cs", CS_TAG_PRODUCER);
 
     let merged = generate_one(root.to_str().unwrap()).unwrap().merged;
@@ -246,5 +298,9 @@ fn report_is_deterministic() {
 
     let rows = message_contracts(&merged);
     let topics: Vec<&str> = rows.iter().map(|r| r.topic.as_str()).collect();
-    assert_eq!(topics, vec!["audit", "orders", "unresolved:kafka"], "topic-sorted");
+    assert_eq!(
+        topics,
+        vec!["audit", "orders", "unresolved:kafka"],
+        "topic-sorted"
+    );
 }

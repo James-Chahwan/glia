@@ -59,7 +59,11 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> i32 {
     let Some(level) = parse_level(&args.level) else {
-        eprintln!("error: unknown --level '{}'; valid: {}", args.level, LEVELS.join(", "));
+        eprintln!(
+            "error: unknown --level '{}'; valid: {}",
+            args.level,
+            LEVELS.join(", ")
+        );
         return 2;
     };
     let result = match generate_for(&args.repo, &args.with) {
@@ -91,7 +95,11 @@ pub(crate) fn run(args: Args) -> i32 {
     let symbols = (level != LEVEL_MODULE).then(|| ranked_line(&answer.symbols, "symbols"));
     let counts: Vec<String> = [modules, symbols].into_iter().flatten().collect();
     match answer.history_head {
-        Some(t) => println!("- history to {} ({} ranked)", utc_date(t), counts.join(", ")),
+        Some(t) => println!(
+            "- history to {} ({} ranked)",
+            utc_date(t),
+            counts.join(", ")
+        ),
         None => println!("- no history"),
     }
     println!();

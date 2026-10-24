@@ -72,7 +72,12 @@ fn main() -> Result<()> {
         // No file headers → diff probably malformed. Not STATIC-FAIL
         // per se (apply_and_test will catch it as APPLY-FAIL), just
         // pass through with a note.
-        return write_result(&args.check_out, "STATIC-OK", &["no file headers parsed (diff may be malformed but that's apply's job)".to_string()], &files_touched);
+        return write_result(
+            &args.check_out,
+            "STATIC-OK",
+            &["no file headers parsed (diff may be malformed but that's apply's job)".to_string()],
+            &files_touched,
+        );
     }
 
     // 2. Lightweight check: each added import line MUST have at least one
@@ -122,8 +127,9 @@ fn main() -> Result<()> {
             // the name is also a prefix of something else.
             let used_outside_import = added_body
                 .lines()
-                .filter(|l| !l.trim_start().starts_with("import ")
-                          && !l.trim_start().starts_with("from "))
+                .filter(|l| {
+                    !l.trim_start().starts_with("import ") && !l.trim_start().starts_with("from ")
+                })
                 .any(|l| l.contains(look_name));
             if !used_outside_import {
                 reasons.push(format!(
@@ -146,7 +152,11 @@ fn main() -> Result<()> {
         reasons.push("diff adds zero non-import lines".to_string());
     }
 
-    let status = if reasons.is_empty() { "STATIC-OK" } else { "STATIC-FAIL" };
+    let status = if reasons.is_empty() {
+        "STATIC-OK"
+    } else {
+        "STATIC-FAIL"
+    };
     write_result(&args.check_out, status, &reasons, &files_touched)
 }
 
@@ -160,7 +170,11 @@ fn write_result(out: &PathBuf, status: &str, reasons: &[String], files: &[String
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(out, serde_json::to_string_pretty(&result)?)?;
-    eprintln!("[synth_check] {status} ({} reasons, {} files): {}",
-              reasons.len(), files.len(), out.display());
+    eprintln!(
+        "[synth_check] {status} ({} reasons, {} files): {}",
+        reasons.len(),
+        files.len(),
+        out.display()
+    );
     Ok(())
 }

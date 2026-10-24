@@ -173,7 +173,11 @@ fn decide(e: &Edge, from: Option<&At>, to: Option<&At>) -> Option<Decided> {
         }
         changed = ev != before;
     }
-    Some(Decided { ev, changed, module_file })
+    Some(Decided {
+        ev,
+        changed,
+        module_file,
+    })
 }
 
 impl FillStats {
@@ -255,7 +259,11 @@ enum Contrib {
     Missing,
     /// The basis after the local fill, whether it was placed at a non-code
     /// MODULE's file, and its emitter ([`GroupFill::emitters`] index).
-    Filled { basis: Basis, module_file: bool, emitter: usize },
+    Filled {
+        basis: Basis,
+        module_file: bool,
+        emitter: usize,
+    },
     /// An endpoint is not a node of this graph: the local fill cannot know
     /// its location, so Finalize fills the edge against the whole build.
     Absent,
@@ -355,14 +363,27 @@ pub(crate) fn fill_group_evidence(g: &RepoGraph) -> GroupFill {
                             emitters.len() - 1
                         }
                     };
-                    Contrib::Filled { basis: d.ev.basis, module_file: d.module_file, emitter }
+                    Contrib::Filled {
+                        basis: d.ev.basis,
+                        module_file: d.module_file,
+                        emitter,
+                    }
                 }
             },
             _ => Contrib::Absent,
         };
-        edges.push(EdgeFill { hash: edge_fill_hash(e), contrib });
+        edges.push(EdgeFill {
+            hash: edge_fill_hash(e),
+            contrib,
+        });
     }
-    GroupFill { at, nodes: node_ids_hash(g), edges, filled, emitters }
+    GroupFill {
+        at,
+        nodes: node_ids_hash(g),
+        edges,
+        filled,
+        emitters,
+    }
 }
 
 /// The whole build's [`At`] map: each id's first instance in graph order,
@@ -461,7 +482,12 @@ pub(crate) fn fill_evidence_sites_split(
         .graphs
         .iter()
         .enumerate()
-        .map(|(i, g)| fills.get(i).and_then(Option::as_ref).filter(|f| f.describes(g)))
+        .map(|(i, g)| {
+            fills
+                .get(i)
+                .and_then(Option::as_ref)
+                .filter(|f| f.describes(g))
+        })
         .collect();
     let mut at: AtMap<'_> = HashMap::new();
     // Per graph: its ids whose first instance in the build sits in an earlier
@@ -487,7 +513,8 @@ pub(crate) fn fill_evidence_sites_split(
             }
             None => {
                 for n in &g.nodes {
-                    at.entry(n.id).or_insert_with(|| (i, Cow::Owned(at_of(g, n))));
+                    at.entry(n.id)
+                        .or_insert_with(|| (i, Cow::Owned(at_of(g, n))));
                 }
             }
         }
@@ -531,7 +558,11 @@ pub(crate) fn fill_evidence_sites_split(
                 attach_cell(e, cell.clone());
             }
             match rec.contrib {
-                Contrib::Filled { basis, module_file, emitter } => {
+                Contrib::Filled {
+                    basis,
+                    module_file,
+                    emitter,
+                } => {
                     stats.tally(basis, module_file);
                     if let Some(n) = per_emitter.get_mut(emitter) {
                         *n += 1;
@@ -586,7 +617,15 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                 continue;
             };
             let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
-            idx.add(name, DocCand { id: n.id, qname, kind: kind.0, graph });
+            idx.add(
+                name,
+                DocCand {
+                    id: n.id,
+                    qname,
+                    kind: kind.0,
+                    graph,
+                },
+            );
         }
     }
     if idx.by_name.is_empty() {
@@ -1038,8 +1077,7 @@ fn channel_edges(
         for &(to, node_conf) in hits {
             let confidence = weaker(tier, node_conf);
             edges.push(
-                Edge::new(*op_id, to, edge_category::DOCUMENTS, confidence)
-                    .with_cell(cell.clone()),
+                Edge::new(*op_id, to, edge_category::DOCUMENTS, confidence).with_cell(cell.clone()),
             );
             stats.channel_edges += 1;
         }
@@ -1082,7 +1120,10 @@ fn http_op(v: &serde_json::Value) -> Option<ContractOp> {
         return None;
     }
     let path = v.get("path")?.as_str()?.to_string();
-    let raw_path = v.get("raw_path").and_then(|p| p.as_str()).map(str::to_string);
+    let raw_path = v
+        .get("raw_path")
+        .and_then(|p| p.as_str())
+        .map(str::to_string);
     let bases = v
         .get("bases")
         .and_then(|b| b.as_array())
@@ -1122,7 +1163,10 @@ fn channel_op(v: &serde_json::Value) -> Option<ChannelOp> {
     if norm_channel(channel).is_empty() {
         return None;
     }
-    Some(ChannelOp { publish, channel: channel.to_string() })
+    Some(ChannelOp {
+        publish,
+        channel: channel.to_string(),
+    })
 }
 
 /// The HTTP contract operation a DOC_SECTION's cells declare (test seam for
@@ -1171,7 +1215,12 @@ impl<'a> DocCand<'a> {
     /// qname), then the graph index (one qname in two repos of a multi-repo
     /// build). Content only: the NodeId hashes the RepoId and never decides.
     fn key(&self) -> (bool, &'a str, u32, usize) {
-        (self.qname.is_none(), self.qname.unwrap_or(""), self.kind, self.graph)
+        (
+            self.qname.is_none(),
+            self.qname.unwrap_or(""),
+            self.kind,
+            self.graph,
+        )
     }
 }
 
@@ -1188,11 +1237,22 @@ struct DocPick {
 
 impl DocPick {
     fn new(c: DocCand<'_>, count: usize) -> Self {
-        DocPick { id: c.id, qname: c.qname.map(str::to_string), kind: c.kind, graph: c.graph, count }
+        DocPick {
+            id: c.id,
+            qname: c.qname.map(str::to_string),
+            kind: c.kind,
+            graph: c.graph,
+            count,
+        }
     }
 
     fn cand(&self) -> DocCand<'_> {
-        DocCand { id: self.id, qname: self.qname.as_deref(), kind: self.kind, graph: self.graph }
+        DocCand {
+            id: self.id,
+            qname: self.qname.as_deref(),
+            kind: self.kind,
+            graph: self.graph,
+        }
     }
 }
 
@@ -1246,7 +1306,8 @@ fn resolve_doc_mention(
         if let (Some(last), Some(prev)) = (segs.next(), segs.next())
             && is_identifier(prev)
             && is_identifier(last)
-            && let Some(&DocPick { id, count: n, .. }) = idx.by_tail2.get(&format!("{prev}::{last}"))
+            && let Some(&DocPick { id, count: n, .. }) =
+                idx.by_tail2.get(&format!("{prev}::{last}"))
         {
             let confidence = if n == 1 {
                 Confidence::Strong
@@ -1385,20 +1446,29 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
 
     // (repo, label, matcher, tagged): in `ctx.inputs` order, so the marker
     // lines are too.
-    let mut declared: Vec<(RepoId, &str, TestPaths, usize)> =
-        declared_tests(ctx).map(|(repo, label, matcher)| (repo, label, matcher, 0)).collect();
+    let mut declared: Vec<(RepoId, &str, TestPaths, usize)> = declared_tests(ctx)
+        .map(|(repo, label, matcher)| (repo, label, matcher, 0))
+        .collect();
     // DT.6a: the test-only ROUTEs, by the matchers just built. Only probed.
     let test_routes = {
-        let matchers: Vec<(RepoId, &TestPaths)> =
-            declared.iter().map(|(repo, _, matcher, _)| (*repo, matcher)).collect();
+        let matchers: Vec<(RepoId, &TestPaths)> = declared
+            .iter()
+            .map(|(repo, _, matcher, _)| (*repo, matcher))
+            .collect();
         test_routes_with(merged, &matchers)
     };
 
     // CG.4b's endpoints and DF.10's channel clients: one set, only probed.
     let mut third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
-    third_party.extend(glia_graph::WebSocketStackResolver::third_party_clients(&merged.graphs));
-    third_party.extend(glia_graph::GrpcStackResolver::third_party_clients(&merged.graphs));
-    third_party.extend(glia_graph::GraphQLStackResolver::third_party_clients(&merged.graphs));
+    third_party.extend(glia_graph::WebSocketStackResolver::third_party_clients(
+        &merged.graphs,
+    ));
+    third_party.extend(glia_graph::GrpcStackResolver::third_party_clients(
+        &merged.graphs,
+    ));
+    third_party.extend(glia_graph::GraphQLStackResolver::third_party_clients(
+        &merged.graphs,
+    ));
     // Only probed; not built at all when no side is third-party.
     let paired: HashSet<NodeId> = if third_party.is_empty() {
         HashSet::new()
@@ -1451,7 +1521,9 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
                 "generated_proto"
             } else if let Some(rule) = if kind == Some(node_kind::ROUTE) {
                 // DT.6a: a ROUTE by every registration site, see the doc.
-                test_routes.contains(&n.id).then(|| route_test_rule(&n.cells))
+                test_routes
+                    .contains(&n.id)
+                    .then(|| route_test_rule(&n.cells))
             } else {
                 node_test_rule(&declared, n.repo, &file, qname)
             } {
@@ -1463,7 +1535,8 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
                     TestRule::Path => stats.test_fixture_path += 1,
                     TestRule::Qname => stats.test_fixture_qname += 1,
                     TestRule::Declared => {
-                        if let Some((.., tagged)) = declared.iter_mut().find(|(r, ..)| *r == n.repo) {
+                        if let Some((.., tagged)) = declared.iter_mut().find(|(r, ..)| *r == n.repo)
+                        {
                             *tagged += 1;
                         }
                         stats.test_fixture_declared += 1;
@@ -1535,10 +1608,16 @@ fn node_test_rule(
     qname: &str,
 ) -> Option<TestRule> {
     if is_test_fixture(file, qname) {
-        return Some(if is_test_path(file).is_some() { TestRule::Path } else { TestRule::Qname });
+        return Some(if is_test_path(file).is_some() {
+            TestRule::Path
+        } else {
+            TestRule::Qname
+        });
     }
     let hit = !file.is_empty()
-        && declared.iter().any(|(r, _, matcher, _)| *r == repo && matcher.matches(file));
+        && declared
+            .iter()
+            .any(|(r, _, matcher, _)| *r == repo && matcher.matches(file));
     hit.then_some(TestRule::Declared)
 }
 
@@ -1575,10 +1654,13 @@ fn route_test_rule(cells: &[Cell]) -> TestRule {
 /// is a test route iff every entry is. Only probed, never iterated into an
 /// output.
 pub(crate) fn test_route_ids(merged: &MergedGraph, ctx: &CodeBuildCtx) -> HashSet<NodeId> {
-    let declared: Vec<(RepoId, TestPaths)> =
-        declared_tests(ctx).map(|(repo, _, matcher)| (repo, matcher)).collect();
-    let matchers: Vec<(RepoId, &TestPaths)> =
-        declared.iter().map(|(repo, matcher)| (*repo, matcher)).collect();
+    let declared: Vec<(RepoId, TestPaths)> = declared_tests(ctx)
+        .map(|(repo, _, matcher)| (repo, matcher))
+        .collect();
+    let matchers: Vec<(RepoId, &TestPaths)> = declared
+        .iter()
+        .map(|(repo, matcher)| (*repo, matcher))
+        .collect();
     test_routes_with(merged, &matchers)
 }
 
@@ -1592,17 +1674,28 @@ fn test_routes_with(merged: &MergedGraph, declared: &[(RepoId, &TestPaths)]) -> 
             }
             let matcher = declared.iter().find(|(r, _)| *r == n.repo).map(|(_, m)| *m);
             let test = route_entry_is_test(&n.cells, matcher);
-            verdict.entry(n.id).and_modify(|v| *v &= test).or_insert(test);
+            verdict
+                .entry(n.id)
+                .and_modify(|v| *v &= test)
+                .or_insert(test);
         }
     }
-    verdict.into_iter().filter_map(|(id, test)| test.then_some(id)).collect()
+    verdict
+        .into_iter()
+        .filter_map(|(id, test)| test.then_some(id))
+        .collect()
 }
 
 /// One ROUTE entry's verdict for [`test_route_ids`].
 fn route_entry_is_test(cells: &[Cell], declared: Option<&TestPaths>) -> bool {
-    let origins: Vec<&Cell> = cells.iter().filter(|c| c.kind == cell_type::ORIGIN).collect();
+    let origins: Vec<&Cell> = cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ORIGIN)
+        .collect();
     if !origins.is_empty() {
-        return origins.iter().any(|c| cell_json_str(c, "provenance").as_deref() == Some("test_fixture"));
+        return origins
+            .iter()
+            .any(|c| cell_json_str(c, "provenance").as_deref() == Some("test_fixture"));
     }
     let sites = route_site_files(cells);
     !sites.is_empty()
@@ -1787,7 +1880,11 @@ pub(crate) struct GeneratedFiles<'c> {
 /// The empty generated set of a build: its repos' roots, nothing read yet.
 pub(crate) fn generated_files(ctx: &CodeBuildCtx) -> GeneratedFiles<'_> {
     GeneratedFiles {
-        roots: ctx.inputs.iter().map(|i| (i.repo, i.root.as_path())).collect(),
+        roots: ctx
+            .inputs
+            .iter()
+            .map(|i| (i.repo, i.root.as_path()))
+            .collect(),
         classed: BTreeMap::new(),
     }
 }
@@ -1807,7 +1904,8 @@ impl GeneratedFiles<'_> {
             Some(GeneratedBy::Name)
         } else {
             let root = self.roots.get(&repo);
-            root.is_some_and(|root| head_is_generated(root, file)).then_some(GeneratedBy::Banner)
+            root.is_some_and(|root| head_is_generated(root, file))
+                .then_some(GeneratedBy::Banner)
         };
         classed.insert(file.to_string(), by);
         by
@@ -1823,7 +1921,10 @@ fn head_is_generated(root: &Path, file: &str) -> bool {
     use std::path::Component;
 
     let rel = Path::new(file);
-    if !rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+    if !rel
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
         return false;
     }
     let Ok(f) = std::fs::File::open(root.join(rel)) else {
@@ -1911,7 +2012,11 @@ fn is_test_path(file: &str) -> Option<TestPathRule> {
         return Some(TestPathRule::Prefix);
     }
     parts
-        .any(|seg| TEST_DIR_SEGMENTS.iter().any(|d| seg.eq_ignore_ascii_case(d)))
+        .any(|seg| {
+            TEST_DIR_SEGMENTS
+                .iter()
+                .any(|d| seg.eq_ignore_ascii_case(d))
+        })
         .then_some(TestPathRule::Dir)
 }
 
@@ -1964,7 +2069,12 @@ pub(crate) fn emit_tests_edges(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
     let declared: Vec<(RepoId, TestPaths)> = ctx
         .inputs
         .iter()
-        .filter_map(|input| Some((input.repo, input.config.as_ref()?.config.walk.tests_matcher()?)))
+        .filter_map(|input| {
+            Some((
+                input.repo,
+                input.config.as_ref()?.config.walk.tests_matcher()?,
+            ))
+        })
         .collect();
     let (edges, stats) = tests_module_edges(merged, &declared);
     // A6.7 fired_on marker: `... 2>&1 | grep '^\[tests\] module TESTS edges:'`
@@ -2261,7 +2371,9 @@ fn tests_module_edges(
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::MODULE) {
                 continue;
             }
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
             let bare = g
                 .nav
                 .name_by_id
@@ -2286,7 +2398,14 @@ fn tests_module_edges(
                     .find(|(repo, _)| *repo == n.repo)
                     .is_some_and(|(_, matcher)| matcher.matches(f))
             });
-            module_info.push(TestsModule { id: n.id, key, qualified, graph, ext, declared });
+            module_info.push(TestsModule {
+                id: n.id,
+                key,
+                qualified,
+                graph,
+                ext,
+                declared,
+            });
         }
     }
     for test in &module_info {
@@ -2294,12 +2413,16 @@ fn tests_module_edges(
         if !test.declared && !is_test_module_qname(qname) {
             continue;
         }
-        let Some(tail) = qname.rsplit("::").next() else { continue };
+        let Some(tail) = qname.rsplit("::").next() else {
+            continue;
+        };
         let stripped = strip_test_affixes(tail);
         if stripped.is_empty() || (stripped == tail && !test.declared) {
             continue;
         }
-        let Some(candidates) = modules_by_tail.get(stripped) else { continue };
+        let Some(candidates) = modules_by_tail.get(stripped) else {
+            continue;
+        };
         let snake = strip_snake_test_affixes(tail) != tail;
         let candidates: Vec<&TestsModule> = candidates
             .iter()
@@ -2307,7 +2430,11 @@ fn tests_module_edges(
             .filter(|c| !c.declared)
             .filter(|c| !test.declared || !is_test_module_qname(&c.key))
             .collect();
-        let rule = if test.declared { DECLARED_TESTS_RULE } else { "name_match" };
+        let rule = if test.declared {
+            DECLARED_TESTS_RULE
+        } else {
+            "name_match"
+        };
         for to_id in select_test_targets(test, &candidates) {
             if test.declared {
                 stats.declared += 1;
@@ -2376,7 +2503,10 @@ fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<N
             // An empty order (or no sibling in it) keeps the whole group;
             // otherwise only the first best-ranked sibling stays.
             if best != usize::MAX
-                && scored.iter().position(|(_, o)| sibling(o) && rank(o) == best) != Some(i)
+                && scored
+                    .iter()
+                    .position(|(_, o)| sibling(o) && rank(o) == best)
+                    != Some(i)
             {
                 continue;
             }
@@ -2527,7 +2657,9 @@ pub(crate) fn fill_test_cells(merged: &mut MergedGraph) -> TestCellStats {
     let mut named: BTreeSet<u64> = BTreeSet::new();
     let mut payloads: BTreeMap<(usize, usize), String> = BTreeMap::new();
     for (target, set) in &targets {
-        let Some(&place) = first.get(target) else { continue };
+        let Some(&place) = first.get(target) else {
+            continue;
+        };
         let mut entries: Vec<(&str, &'static str, u64)> = set
             .iter()
             .filter_map(|t| test_info.get(t).map(|(q, k)| (*q, node_kind::name(*k), *t)))
@@ -2574,7 +2706,10 @@ pub(crate) fn fill_test_cells(merged: &mut MergedGraph) -> TestCellStats {
                         }
                     });
                     if let Some(j) = json {
-                        n.cells.push(Cell { kind: cell_type::TEST, payload: CellPayload::Json(j) });
+                        n.cells.push(Cell {
+                            kind: cell_type::TEST,
+                            payload: CellPayload::Json(j),
+                        });
                     }
                 }
                 None => n.cells.retain(|c| c.kind != cell_type::TEST),
@@ -2588,7 +2723,9 @@ pub(crate) fn fill_test_cells(merged: &mut MergedGraph) -> TestCellStats {
 pub(crate) fn downgrade_test_paths(merged: &mut MergedGraph) {
     for g in &mut merged.graphs {
         for n in &mut g.nodes {
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
             // Legacy tolerance: LB.11b found no emitter minting a `route:`
             // qname any more; kept so an old-shape qname is never downgraded.
             if qname.starts_with("route:") {
@@ -2634,7 +2771,8 @@ pub(crate) fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
     for g in &mut merged.graphs {
         for n in &mut g.nodes {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
-            let is_http_node = matches!(kind, Some(k) if k == node_kind::ROUTE || k == node_kind::ENDPOINT);
+            let is_http_node =
+                matches!(kind, Some(k) if k == node_kind::ROUTE || k == node_kind::ENDPOINT);
             if !is_http_node || matched.contains(&n.id) {
                 continue;
             }
@@ -2658,7 +2796,10 @@ pub(crate) fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
         }
     }
     if !recorded.is_empty() {
-        eprintln!("[passes] http demotions: {} (undo recorded)", recorded.len());
+        eprintln!(
+            "[passes] http demotions: {} (undo recorded)",
+            recorded.len()
+        );
     }
     if mixed > 0 {
         eprintln!("[passes] http demotions: {mixed} not undoable (instances disagree)");
@@ -2672,9 +2813,19 @@ pub(crate) fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
 
 fn qname_is_noncritical_path(qname: &str) -> bool {
     const NONCRITICAL: &[&str] = &[
-        "tests", "test", "__tests__", "spec", "specs",
-        "fixtures", "fixture", "examples", "example",
-        "e2e", "__mocks__", "mocks", "testdata",
+        "tests",
+        "test",
+        "__tests__",
+        "spec",
+        "specs",
+        "fixtures",
+        "fixture",
+        "examples",
+        "example",
+        "e2e",
+        "__mocks__",
+        "mocks",
+        "testdata",
     ];
     qname.split("::").any(|seg| {
         let lowered = seg.to_ascii_lowercase();
@@ -2715,7 +2866,9 @@ fn is_test_module_qname(qname: &str) -> bool {
     if is_test_qname(qname) {
         return true;
     }
-    let Some(tail) = qname.rsplit("::").next() else { return false };
+    let Some(tail) = qname.rsplit("::").next() else {
+        return false;
+    };
     strip_test_affixes(tail) != tail
 }
 
@@ -2773,7 +2926,12 @@ mod passes_tests {
 
     /// A METHOD candidate in graph 0.
     fn method(id: u64, qname: &str) -> DocCand<'_> {
-        DocCand { id: NodeId(id), qname: Some(qname), kind: node_kind::METHOD.0, graph: 0 }
+        DocCand {
+            id: NodeId(id),
+            qname: Some(qname),
+            kind: node_kind::METHOD.0,
+            graph: 0,
+        }
     }
 
     /// `(kept id, count)` of one index entry.
@@ -2797,7 +2955,10 @@ mod passes_tests {
     #[test]
     fn doc_mention_qualified_is_strong() {
         let idx = fixture_index();
-        assert_eq!(pick(&idx.by_tail2, "PaymentGateway::charge"), (NodeId(7), 1));
+        assert_eq!(
+            pick(&idx.by_tail2, "PaymentGateway::charge"),
+            (NodeId(7), 1)
+        );
         assert_eq!(
             resolve_doc_mention("PaymentGateway.charge", &idx),
             Some((NodeId(7), Confidence::Strong, "qualified"))
@@ -2854,12 +3015,38 @@ mod passes_tests {
     /// candidate with no qname sorts after every one with a qname.
     #[test]
     fn doclink_pick_breaks_qname_ties_by_kind_then_graph() {
-        let class = DocCand { id: NodeId(9), qname: Some("ui::Card"), kind: node_kind::CLASS.0, graph: 1 };
-        let component = DocCand { kind: node_kind::COMPONENT.0, id: NodeId(1), ..class };
-        let (lo, hi) = if class.kind < component.kind { (class, component) } else { (component, class) };
-        let other_repo = DocCand { id: NodeId(2), graph: 0, ..hi };
-        let unnamed = DocCand { id: NodeId(0), qname: None, kind: 0, graph: 0 };
-        for order in [[unnamed, hi, lo, other_repo], [other_repo, lo, unnamed, hi], [lo, other_repo, hi, unnamed]] {
+        let class = DocCand {
+            id: NodeId(9),
+            qname: Some("ui::Card"),
+            kind: node_kind::CLASS.0,
+            graph: 1,
+        };
+        let component = DocCand {
+            kind: node_kind::COMPONENT.0,
+            id: NodeId(1),
+            ..class
+        };
+        let (lo, hi) = if class.kind < component.kind {
+            (class, component)
+        } else {
+            (component, class)
+        };
+        let other_repo = DocCand {
+            id: NodeId(2),
+            graph: 0,
+            ..hi
+        };
+        let unnamed = DocCand {
+            id: NodeId(0),
+            qname: None,
+            kind: 0,
+            graph: 0,
+        };
+        for order in [
+            [unnamed, hi, lo, other_repo],
+            [other_repo, lo, unnamed, hi],
+            [lo, other_repo, hi, unnamed],
+        ] {
             let mut idx = DocSymbolIndex::default();
             for c in order {
                 idx.add("Card", c);
@@ -2869,7 +3056,11 @@ mod passes_tests {
         let mut idx = DocSymbolIndex::default();
         idx.add("Card", hi);
         idx.add("Card", other_repo);
-        assert_eq!(pick(&idx.by_name, "Card"), (other_repo.id, 2), "same qname and kind: graph 0 wins");
+        assert_eq!(
+            pick(&idx.by_name, "Card"),
+            (other_repo.id, 2),
+            "same qname and kind: graph 0 wins"
+        );
     }
 
     #[test]
@@ -2897,7 +3088,11 @@ mod passes_tests {
 
     impl Hand {
         fn new(canonical: &str) -> Self {
-            Hand { repo: RepoId::from_canonical(canonical), nodes: vec![], nav: CodeNav::default() }
+            Hand {
+                repo: RepoId::from_canonical(canonical),
+                nodes: vec![],
+                nav: CodeNav::default(),
+            }
         }
 
         fn add(&mut self, kind: NodeKindId, name: &str, qname: &str, cells: Vec<Cell>) -> NodeId {
@@ -2907,22 +3102,40 @@ mod passes_tests {
 
         /// [`Self::add`] with a chosen `id` (DE.1: a test can make the lowest
         /// NodeId the larger qname, as a different RepoId may).
-        fn add_at(&mut self, id: NodeId, kind: NodeKindId, name: &str, qname: &str, cells: Vec<Cell>) -> NodeId {
+        fn add_at(
+            &mut self,
+            id: NodeId,
+            kind: NodeKindId,
+            name: &str,
+            qname: &str,
+            cells: Vec<Cell>,
+        ) -> NodeId {
             self.nav.record(id, name, qname, kind, None);
-            self.nodes.push(Node { id, repo: self.repo, confidence: Confidence::Strong, cells });
+            self.nodes.push(Node {
+                id,
+                repo: self.repo,
+                confidence: Confidence::Strong,
+                cells,
+            });
             id
         }
 
         /// A ROUTE in the legacy `<METHOD> <path>` shape (flask, spring, ...).
         fn route(&mut self, method: &str, path: &str) -> NodeId {
             let qname = format!("{method} {path}");
-            let cell = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(method.into()) };
+            let cell = Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Text(method.into()),
+            };
             self.add(node_kind::ROUTE, &qname, &qname, vec![cell])
         }
 
         /// A DOC_SECTION carrying `origin` as its ORIGIN payload.
         fn doc(&mut self, qname: &str, origin: &str) -> NodeId {
-            let cell = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin.into()) };
+            let cell = Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(origin.into()),
+            };
             self.add(node_kind::DOC_SECTION, qname, qname, vec![cell])
         }
 
@@ -2964,26 +3177,60 @@ mod passes_tests {
     #[test]
     fn doc_mention_skips_fenced_blocks() {
         let mut h = Hand::new("test://doclink/fence");
-        let refund = h.add(node_kind::METHOD, "refund", "app::orders::OrderService::refund", vec![]);
-        let cancel = h.add(node_kind::METHOD, "cancel", "app::orders::OrderService::cancel", vec![]);
-        let shipment = h.add(node_kind::CLASS, "Shipment", "app::orders::Shipment", vec![]);
+        let refund = h.add(
+            node_kind::METHOD,
+            "refund",
+            "app::orders::OrderService::refund",
+            vec![],
+        );
+        let cancel = h.add(
+            node_kind::METHOD,
+            "cancel",
+            "app::orders::OrderService::cancel",
+            vec![],
+        );
+        let shipment = h.add(
+            node_kind::CLASS,
+            "Shipment",
+            "app::orders::Shipment",
+            vec![],
+        );
         let mut text = String::from("## Refunds\n\n");
         while text.len() < 620 {
             text.push_str("Refunds are slow, and the finance team approves the large ones. ");
         }
         text.push_str("\n\nEvery refund goes through `OrderService.refund`.\n\n");
         let at = text.find("`OrderService.refund`").unwrap_or(0);
-        assert!(at > 600, "the inline mention sits past the old 500-byte cap: {at}");
-        text.push_str("```python\nOrderService.cancel\n```\n\nA refunded order keeps its Shipment record.");
+        assert!(
+            at > 600,
+            "the inline mention sits past the old 500-byte cap: {at}"
+        );
+        text.push_str(
+            "```python\nOrderService.cancel\n```\n\nA refunded order keeps its Shipment record.",
+        );
         assert!((650..800).contains(&text.len()), "{}", text.len());
-        let code = Cell { kind: cell_type::CODE, payload: CellPayload::Text(text) };
-        let doc = h.add(node_kind::DOC_SECTION, "refunds", "docs::docs::orders::refunds", vec![code]);
+        let code = Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Text(text),
+        };
+        let doc = h.add(
+            node_kind::DOC_SECTION,
+            "refunds",
+            "docs::docs::orders::refunds",
+            vec![code],
+        );
         let mut merged = MergedGraph::new(vec![h.graph()]);
 
         link_doc_sections(&mut merged);
-        assert_eq!(documents(&merged.cross_edges, doc), vec![(refund, Confidence::Strong)]);
+        assert_eq!(
+            documents(&merged.cross_edges, doc),
+            vec![(refund, Confidence::Strong)]
+        );
         let targets: Vec<NodeId> = merged.cross_edges.iter().map(|e| e.to).collect();
-        assert!(!targets.contains(&cancel), "a fenced block's body is no mention");
+        assert!(
+            !targets.contains(&cancel),
+            "a fenced block's body is no mention"
+        );
         assert!(!targets.contains(&shipment), "a prose word is no mention");
         let rule = merged
             .cross_edges
@@ -3006,8 +3253,17 @@ mod passes_tests {
 
     /// One DOC_SECTION whose CODE is `text`, at a chosen id.
     fn doc_at(h: &mut Hand, id: u64, text: &str) -> NodeId {
-        let code = Cell { kind: cell_type::CODE, payload: CellPayload::Text(text.into()) };
-        h.add_at(NodeId(id), node_kind::DOC_SECTION, "caching", "docs::README::caching", vec![code])
+        let code = Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Text(text.into()),
+        };
+        h.add_at(
+            NodeId(id),
+            node_kind::DOC_SECTION,
+            "caching",
+            "docs::README::caching",
+            vec![code],
+        )
     }
 
     /// DE.1: an ambiguous bare mention binds the least (qname, kind)
@@ -3016,8 +3272,20 @@ mod passes_tests {
     #[test]
     fn doclink_ambiguous_pick_is_least_qname() {
         let mut h = Hand::new("test://doclink/least-qname");
-        let feed = h.add_at(NodeId(20), node_kind::METHOD, "refresh", "a::feed::Feed::refresh", vec![]);
-        let wallet = h.add_at(NodeId(10), node_kind::METHOD, "refresh", "b::wallet::Wallet::refresh", vec![]);
+        let feed = h.add_at(
+            NodeId(20),
+            node_kind::METHOD,
+            "refresh",
+            "a::feed::Feed::refresh",
+            vec![],
+        );
+        let wallet = h.add_at(
+            NodeId(10),
+            node_kind::METHOD,
+            "refresh",
+            "b::wallet::Wallet::refresh",
+            vec![],
+        );
         let doc = doc_at(&mut h, 30, "Call `refresh` after a write.");
         let mut merged = MergedGraph::new(vec![h.graph()]);
 
@@ -3034,8 +3302,20 @@ mod passes_tests {
     #[test]
     fn doclink_qualified_pick_is_least_qname() {
         let mut h = Hand::new("test://doclink/least-qname-qualified");
-        let a = h.add_at(NodeId(20), node_kind::METHOD, "refresh", "a::feed::Feed::refresh", vec![]);
-        let b = h.add_at(NodeId(10), node_kind::METHOD, "refresh", "b::feed::Feed::refresh", vec![]);
+        let a = h.add_at(
+            NodeId(20),
+            node_kind::METHOD,
+            "refresh",
+            "a::feed::Feed::refresh",
+            vec![],
+        );
+        let b = h.add_at(
+            NodeId(10),
+            node_kind::METHOD,
+            "refresh",
+            "b::feed::Feed::refresh",
+            vec![],
+        );
         let doc = doc_at(&mut h, 30, "`Feed.refresh` reloads the feed.");
         let mut merged = MergedGraph::new(vec![h.graph()]);
 
@@ -3051,7 +3331,10 @@ mod passes_tests {
     fn contract_link_strong_on_exact_medium_on_prefix_none_on_docs() {
         let mut h = Hand::new("test://contract-link/one");
         let get_users = h.route("GET", "/users");
-        let exact = h.doc("contract::openapi::GET:/users", &op_origin("GET", "/users", "/users"));
+        let exact = h.doc(
+            "contract::openapi::GET:/users",
+            &op_origin("GET", "/users", "/users"),
+        );
         let prefixed = h.doc(
             "contract::openapi::GET:/api/v1/users",
             &op_origin("GET", "/api/v1/users", "/users"),
@@ -3064,11 +3347,26 @@ mod passes_tests {
         let merged = MergedGraph::new(vec![h.graph()]);
 
         let (edges, stats) = contract_route_edges(&merged);
-        assert_eq!(documents(&edges, exact), vec![(get_users, Confidence::Strong)]);
-        assert_eq!(documents(&edges, prefixed), vec![(get_users, Confidence::Medium)]);
+        assert_eq!(
+            documents(&edges, exact),
+            vec![(get_users, Confidence::Strong)]
+        );
+        assert_eq!(
+            documents(&edges, prefixed),
+            vec![(get_users, Confidence::Medium)]
+        );
         assert!(documents(&edges, prose).is_empty());
         assert_eq!(edges.len(), 2);
-        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 1, prefix: 1, unmatched: 0, ..Default::default() });
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                ops: 2,
+                exact: 1,
+                prefix: 1,
+                unmatched: 0,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -3090,10 +3388,22 @@ mod passes_tests {
         let merged = MergedGraph::new(vec![h.graph()]);
 
         let (edges, stats) = contract_route_edges(&merged);
-        assert_eq!(documents(&edges, op), vec![(get_orders, Confidence::Medium)]);
+        assert_eq!(
+            documents(&edges, op),
+            vec![(get_orders, Confidence::Medium)]
+        );
         assert!(documents(&edges, miss).is_empty());
         assert_eq!(edges.len(), 1);
-        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 0, prefix: 1, unmatched: 1, ..Default::default() });
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                ops: 2,
+                exact: 0,
+                prefix: 1,
+                unmatched: 1,
+                ..Default::default()
+            }
+        );
     }
 
     /// DF.19: the lookup order. The declared path wins outright (`exact`,
@@ -3116,7 +3426,10 @@ mod passes_tests {
         };
         let stats_op = h.doc(
             "contract::admin::GET:/stats",
-            &with(op_origin("GET", "/stats", "/stats"), r#","bases":["","/admin"]"#),
+            &with(
+                op_origin("GET", "/stats", "/stats"),
+                r#","bases":["","/admin"]"#,
+            ),
         );
         let annotated = r#","annotated_base":"/api","annotated_at":"main.go:7""#;
         let login_op = h.doc(
@@ -3129,7 +3442,10 @@ mod passes_tests {
         );
         let orders_op = h.doc(
             "contract::orders::GET:/orders",
-            &with(op_origin("GET", "/orders", "/orders"), r#","bases":["","/v2"]"#),
+            &with(
+                op_origin("GET", "/orders", "/orders"),
+                r#","bases":["","/v2"]"#,
+            ),
         );
         let merged = MergedGraph::new(vec![h.graph()]);
 
@@ -3142,13 +3458,19 @@ mod passes_tests {
                 .collect()
         };
         let rule = |r: &str| Some(r.to_string());
-        assert_eq!(rules(stats_op), vec![(admin_stats, Confidence::Strong, rule("server_base"))]);
+        assert_eq!(
+            rules(stats_op),
+            vec![(admin_stats, Confidence::Strong, rule("server_base"))]
+        );
         assert_eq!(
             rules(login_op),
             vec![(api_login, Confidence::Medium, rule("annotated_base"))],
             "the annotated base pairs one mount, not the guess's two ({v1_login:?})"
         );
-        assert_eq!(rules(health_op), vec![(healthz, Confidence::Strong, rule("exact"))]);
+        assert_eq!(
+            rules(health_op),
+            vec![(healthz, Confidence::Strong, rule("exact"))]
+        );
         assert_eq!(
             rules(orders_op),
             vec![(api_orders, Confidence::Medium, rule("prefix"))],
@@ -3156,7 +3478,14 @@ mod passes_tests {
         );
         assert_eq!(
             stats,
-            ContractLinkStats { ops: 4, exact: 1, based: 2, prefix: 1, unmatched: 0, ..Default::default() }
+            ContractLinkStats {
+                ops: 4,
+                exact: 1,
+                based: 2,
+                prefix: 1,
+                unmatched: 0,
+                ..Default::default()
+            }
         );
 
         // Control: the same login op without its annotated base is HEAD's
@@ -3171,23 +3500,39 @@ mod passes_tests {
         let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
         let mut got = documents(&edges, op);
         got.sort_by_key(|(id, _)| id.0);
-        let mut want = vec![(api_login, Confidence::Medium), (v1_login, Confidence::Medium)];
+        let mut want = vec![
+            (api_login, Confidence::Medium),
+            (v1_login, Confidence::Medium),
+        ];
         want.sort_by_key(|(id, _)| id.0);
         assert_eq!(got, want);
-        assert_eq!(stats, ContractLinkStats { ops: 1, prefix: 1, ..Default::default() });
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                ops: 1,
+                prefix: 1,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
     fn contract_link_pairs_across_repos_and_lands_in_cross_edges() {
         let mut spec = Hand::new("test://contract-link/spec");
-        let op = spec.doc("contract::api::DELETE:/users/{id}", &op_origin("delete", "/users/{id}", "/users/{id}"));
+        let op = spec.doc(
+            "contract::api::DELETE:/users/{id}",
+            &op_origin("delete", "/users/{id}", "/users/{id}"),
+        );
         let mut svc = Hand::new("test://contract-link/svc");
         let del = svc.route("DELETE", "/users/:id");
         let mut merged = MergedGraph::new(vec![spec.graph(), svc.graph()]);
 
         link_contract_routes(&mut merged);
         // Method is case-folded; `{id}` and `:id` normalise to one key.
-        assert_eq!(documents(&merged.cross_edges, op), vec![(del, Confidence::Strong)]);
+        assert_eq!(
+            documents(&merged.cross_edges, op),
+            vec![(del, Confidence::Strong)]
+        );
     }
 
     #[test]
@@ -3202,21 +3547,41 @@ mod passes_tests {
 
         // Ops but no routes: every op is unmatched.
         let mut h = Hand::new("test://contract-link/no-routes");
-        h.doc("contract::api::GET:/users", &op_origin("GET", "/users", "/users"));
+        h.doc(
+            "contract::api::GET:/users",
+            &op_origin("GET", "/users", "/users"),
+        );
         let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
         assert!(edges.is_empty());
-        assert_eq!(stats, ContractLinkStats { ops: 1, exact: 0, prefix: 0, unmatched: 1, ..Default::default() });
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                ops: 1,
+                exact: 0,
+                prefix: 0,
+                unmatched: 1,
+                ..Default::default()
+            }
+        );
     }
 
     /// DF.18 / DF.19: `bases` is read as a string array and `annotated_base`
     /// as a non-empty string; neither is required.
     #[test]
     fn contract_op_reads_bases_and_annotated_base() {
-        let origin = |j: &str| vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+        let origin = |j: &str| {
+            vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(j.into()),
+            }]
+        };
         let op = contract_op(&origin(
             r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/stats","raw_path":"/stats","bases":["","/admin"],"operation_id":"stats"}"#,
         ));
-        assert_eq!(op.map(|o| o.bases), Some(vec![String::new(), "/admin".to_string()]));
+        assert_eq!(
+            op.map(|o| o.bases),
+            Some(vec![String::new(), "/admin".to_string()])
+        );
         let op = contract_op(&origin(
             r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","annotated_base":"/api","annotated_at":"turps/Server/server.go:29"}"#,
         ));
@@ -3224,12 +3589,20 @@ mod passes_tests {
         let op = contract_op(&origin(
             r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/x","raw_path":"/x","annotated_base":""}"#,
         ));
-        assert_eq!(op.map(|o| (o.bases, o.annotated_base)), Some((vec![], None)));
+        assert_eq!(
+            op.map(|o| (o.bases, o.annotated_base)),
+            Some((vec![], None))
+        );
     }
 
     #[test]
     fn contract_op_reads_only_http_contract_origins() {
-        let origin = |j: &str| vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+        let origin = |j: &str| {
+            vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(j.into()),
+            }]
+        };
         // operation_id is OMITTED, not null, when the spec has none.
         assert_eq!(
             contract_op(&origin(
@@ -3245,7 +3618,9 @@ mod passes_tests {
         );
         // An AsyncAPI channel op is not an HTTP op.
         assert_eq!(
-            contract_op(&origin(r#"{"provenance":"contract","source":"asyncapi","method":"publish","path":"orders"}"#)),
+            contract_op(&origin(
+                r#"{"provenance":"contract","source":"asyncapi","method":"publish","path":"orders"}"#
+            )),
             None
         );
         // "contract" as some OTHER field's value passes the cheap substring
@@ -3295,20 +3670,44 @@ mod passes_tests {
         let cons_orders = h.consumer("orders");
         let cons_audit = h.consumer("audit/events");
         // Same side exists: Strong to it, and NOT to the other side.
-        let pub_orders = h.doc("contract::asyncapi::publish:orders", &chan_origin("publish", "orders"));
-        let sub_orders = h.doc("contract::asyncapi::subscribe:orders", &chan_origin("subscribe", "orders"));
+        let pub_orders = h.doc(
+            "contract::asyncapi::publish:orders",
+            &chan_origin("publish", "orders"),
+        );
+        let sub_orders = h.doc(
+            "contract::asyncapi::subscribe:orders",
+            &chan_origin("subscribe", "orders"),
+        );
         // Only the other side exists: Medium; `/`-trimmed on both sides.
-        let pub_audit = h.doc("contract::asyncapi::publish:/audit/events/", &chan_origin("publish", "/audit/events/"));
+        let pub_audit = h.doc(
+            "contract::asyncapi::publish:/audit/events/",
+            &chan_origin("publish", "/audit/events/"),
+        );
         // Neither side: no edge, never a fan-out.
-        let miss = h.doc("contract::asyncapi::publish:payments", &chan_origin("publish", "payments"));
+        let miss = h.doc(
+            "contract::asyncapi::publish:payments",
+            &chan_origin("publish", "payments"),
+        );
         // Case-sensitive: `Orders` is not `orders`.
-        let cased = h.doc("contract::asyncapi::subscribe:Orders", &chan_origin("subscribe", "Orders"));
+        let cased = h.doc(
+            "contract::asyncapi::subscribe:Orders",
+            &chan_origin("subscribe", "Orders"),
+        );
         let merged = MergedGraph::new(vec![h.graph()]);
 
         let (edges, stats) = contract_route_edges(&merged);
-        assert_eq!(documents(&edges, pub_orders), vec![(prod_orders, Confidence::Strong)]);
-        assert_eq!(documents(&edges, sub_orders), vec![(cons_orders, Confidence::Strong)]);
-        assert_eq!(documents(&edges, pub_audit), vec![(cons_audit, Confidence::Medium)]);
+        assert_eq!(
+            documents(&edges, pub_orders),
+            vec![(prod_orders, Confidence::Strong)]
+        );
+        assert_eq!(
+            documents(&edges, sub_orders),
+            vec![(cons_orders, Confidence::Strong)]
+        );
+        assert_eq!(
+            documents(&edges, pub_audit),
+            vec![(cons_audit, Confidence::Medium)]
+        );
         assert!(documents(&edges, miss).is_empty());
         assert!(documents(&edges, cased).is_empty());
         assert_eq!(edges.len(), 3);
@@ -3330,7 +3729,12 @@ mod passes_tests {
         // A tag-fallback node names no topic: a channel literally called
         // `unresolved:kafka` (or `kafka`) must not pair with it.
         let mut svc = Hand::new("test://contract-link/chan-svc");
-        svc.add(node_kind::QUEUE_PRODUCER, "kafka", "queue_producer:unresolved:kafka", vec![]);
+        svc.add(
+            node_kind::QUEUE_PRODUCER,
+            "kafka",
+            "queue_producer:unresolved:kafka",
+            vec![],
+        );
         let weak_cons = {
             let id = svc.consumer("orders");
             if let Some(n) = svc.nodes.iter_mut().find(|n| n.id == id) {
@@ -3339,16 +3743,28 @@ mod passes_tests {
             id
         };
         let mut spec = Hand::new("test://contract-link/chan-spec");
-        let tag = spec.doc("contract::api::publish:unresolved:kafka", &chan_origin("publish", "unresolved:kafka"));
-        let bare = spec.doc("contract::api::publish:kafka", &chan_origin("publish", "kafka"));
-        let sub = spec.doc("contract::api::subscribe:orders", &chan_origin("subscribe", "orders"));
+        let tag = spec.doc(
+            "contract::api::publish:unresolved:kafka",
+            &chan_origin("publish", "unresolved:kafka"),
+        );
+        let bare = spec.doc(
+            "contract::api::publish:kafka",
+            &chan_origin("publish", "kafka"),
+        );
+        let sub = spec.doc(
+            "contract::api::subscribe:orders",
+            &chan_origin("subscribe", "orders"),
+        );
         let mut merged = MergedGraph::new(vec![spec.graph(), svc.graph()]);
 
         link_contract_routes(&mut merged);
         assert!(documents(&merged.cross_edges, tag).is_empty());
         assert!(documents(&merged.cross_edges, bare).is_empty());
         // Cross-repo, and never above the queue node's own confidence.
-        assert_eq!(documents(&merged.cross_edges, sub), vec![(weak_cons, Confidence::Weak)]);
+        assert_eq!(
+            documents(&merged.cross_edges, sub),
+            vec![(weak_cons, Confidence::Weak)]
+        );
     }
 
     #[test]
@@ -3356,8 +3772,14 @@ mod passes_tests {
         let mut h = Hand::new("test://contract-link/both");
         let get_users = h.route("GET", "/users");
         let prod = h.producer("orders");
-        let http = h.doc("contract::openapi::GET:/users", &op_origin("GET", "/users", "/users"));
-        let chan = h.doc("contract::asyncapi::publish:orders", &chan_origin("publish", "orders"));
+        let http = h.doc(
+            "contract::openapi::GET:/users",
+            &op_origin("GET", "/users", "/users"),
+        );
+        let chan = h.doc(
+            "contract::asyncapi::publish:orders",
+            &chan_origin("publish", "orders"),
+        );
         // An ORIGIN carrying BOTH an HTTP method and a channel is an HTTP op
         // (or malformed) — never read as a channel.
         let hybrid = h.doc(
@@ -3367,7 +3789,10 @@ mod passes_tests {
         let merged = MergedGraph::new(vec![h.graph()]);
 
         let (edges, stats) = contract_route_edges(&merged);
-        assert_eq!(documents(&edges, http), vec![(get_users, Confidence::Strong)]);
+        assert_eq!(
+            documents(&edges, http),
+            vec![(get_users, Confidence::Strong)]
+        );
         assert_eq!(documents(&edges, chan), vec![(prod, Confidence::Strong)]);
         assert!(documents(&edges, hybrid).is_empty());
         assert_eq!(
@@ -3388,24 +3813,37 @@ mod passes_tests {
         // Channel ops with no queue nodes and no HTTP ops: all unmatched, and
         // the HTTP half stays silent (ops == 0).
         let mut h = Hand::new("test://contract-link/no-queues");
-        h.doc("contract::asyncapi::subscribe:orders", &chan_origin("subscribe", "orders"));
+        h.doc(
+            "contract::asyncapi::subscribe:orders",
+            &chan_origin("subscribe", "orders"),
+        );
         let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
         assert!(edges.is_empty());
         assert_eq!(
             stats,
-            ContractLinkStats { channels: 1, channel_unmatched: 1, ..Default::default() }
+            ContractLinkStats {
+                channels: 1,
+                channel_unmatched: 1,
+                ..Default::default()
+            }
         );
     }
 
     #[test]
     fn channel_op_reads_only_asyncapi_shaped_origins() {
         let parse = |j: &str| {
-            let cells = vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+            let cells = vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(j.into()),
+            }];
             contract_origin(&cells).and_then(|v| channel_op(&v))
         };
         assert_eq!(
             parse(&chan_origin("subscribe", "user/signedup")),
-            Some(ChannelOp { publish: false, channel: "user/signedup".into() })
+            Some(ChannelOp {
+                publish: false,
+                channel: "user/signedup".into()
+            })
         );
         // v3 verbs are mapped by the extractor; raw ones are not accepted here.
         assert_eq!(parse(&chan_origin("send", "orders")), None);
@@ -3413,7 +3851,9 @@ mod passes_tests {
         assert_eq!(parse(&chan_origin("publish", "/")), None);
         // Not a contract provenance.
         assert_eq!(
-            parse(r#"{"provenance":"documentation","source":"contract","action":"publish","channel":"orders"}"#),
+            parse(
+                r#"{"provenance":"documentation","source":"contract","action":"publish","channel":"orders"}"#
+            ),
             None
         );
         // An OpenAPI op is not a channel op.
@@ -3421,7 +3861,7 @@ mod passes_tests {
     }
 
     #[test]
-    fn backtick_identifiers_extract_inline_code(){
+    fn backtick_identifiers_extract_inline_code() {
         let md = "Use `parse_config` and `WidgetFactory.build()`.\n\
                   Run `npm install` (ignored). `x` too short.\n\
                   ```\nfenced `not_this`\n```";
@@ -3436,7 +3876,10 @@ mod passes_tests {
 
     #[test]
     fn identifier_from_span_normalises() {
-        assert_eq!(identifier_from_span("parse_config()"), Some("parse_config".into()));
+        assert_eq!(
+            identifier_from_span("parse_config()"),
+            Some("parse_config".into())
+        );
         assert_eq!(identifier_from_span("mod::Thing"), Some("Thing".into()));
         assert_eq!(identifier_from_span("a.b.method"), Some("method".into()));
         assert_eq!(identifier_from_span("--flag"), None);
@@ -3461,7 +3904,10 @@ mod passes_tests {
         assert!(is_test_fixture("services/auth_test.go", "turps::auth"));
         assert!(is_test_fixture("app/login.spec.ts", "quokka_web::login"));
         assert!(is_test_fixture("pkg/foo.go", "pkg::tests::seed_users"));
-        assert!(!is_test_fixture("services/auth.go", "turps::auth::HashPassword"));
+        assert!(!is_test_fixture(
+            "services/auth.go",
+            "turps::auth::HashPassword"
+        ));
     }
 
     #[test]
@@ -3470,7 +3916,10 @@ mod passes_tests {
         // included, any case) or a test-file suffix / prefix tags the node,
         // whatever its qname says.
         for (file, qname) in [
-            ("frontend/e2e/push-prompt.js", "frontend::e2e::push-prompt::writePrefs"),
+            (
+                "frontend/e2e/push-prompt.js",
+                "frontend::e2e::push-prompt::writePrefs",
+            ),
             (
                 "bench/substrate-gap/fixtures/csharp-aspnet-composed/server/OrdersController.cs",
                 "Shop::Controllers::OrdersController::GetOrder",
@@ -3487,32 +3936,47 @@ mod passes_tests {
             ("integration_test/app_test.dart", "app::main"),
             ("web\\__fixtures__\\user.json.ts", "web::user"),
         ] {
-            assert!(is_test_fixture(file, qname), "{file} / {qname} must be test_fixture");
+            assert!(
+                is_test_fixture(file, qname),
+                "{file} / {qname} must be test_fixture"
+            );
         }
         // App code: a test word only as a substring of a segment, the
         // deliberately absent segments (specs, examples, bench, mocks), and a
         // plain source file.
         for (file, qname) in [
             ("src/cart.ts", "src::cart::addItem"),
-            ("src/app/features/home/home.component.ts", "src::app::features::home::HomeComponent"),
+            (
+                "src/app/features/home/home.component.ts",
+                "src::app::features::home::HomeComponent",
+            ),
             ("specs/001-orders/plan.ts", "specs::001-orders::plan::x"),
             ("examples/hello/main.go", "examples::hello::main"),
             ("src/latest/x.ts", "src::latest::x::run"),
             ("src/contest/x.go", "src::contest::x::Run"),
             ("src/attestation.ts", "src::attestation::verify"),
             ("bench/lens/src/main.rs", "bench::lens::main"),
-            ("src/fixtures-view/list.ts", "src::fixtures-view::list::render"),
+            (
+                "src/fixtures-view/list.ts",
+                "src::fixtures-view::list::render",
+            ),
             ("src/mocks/handlers.ts", "src::mocks::handlers::handlers"),
             ("src/testing.py", "src::testing::helper"),
         ] {
-            assert!(!is_test_fixture(file, qname), "{file} / {qname} must stay app code");
+            assert!(
+                !is_test_fixture(file, qname),
+                "{file} / {qname} must stay app code"
+            );
         }
         // The rule that fired: suffix before prefix before directory.
         assert_eq!(is_test_path("frontend/e2e/a.js"), Some(TestPathRule::Dir));
         assert_eq!(is_test_path("src/a.test.tsx"), Some(TestPathRule::Suffix));
         assert_eq!(is_test_path("app/test_x.py"), Some(TestPathRule::Prefix));
         assert_eq!(is_test_path("tests/test_x.py"), Some(TestPathRule::Prefix));
-        assert_eq!(is_test_path("e2e/app.E2E-SPEC.TS"), Some(TestPathRule::Suffix));
+        assert_eq!(
+            is_test_path("e2e/app.E2E-SPEC.TS"),
+            Some(TestPathRule::Suffix)
+        );
         assert_eq!(is_test_path("TEST/app.go"), Some(TestPathRule::Dir));
         // A base name is never a directory segment; nothing is not a path.
         assert_eq!(is_test_path("e2e"), None);
@@ -3533,7 +3997,14 @@ mod passes_tests {
             ..Default::default()
         };
         // `test_fixture` and `generated` are counted at their stamp sites.
-        for p in ["generated_proto", "generated", "dependency", "synthetic", "test_fixture", "external"] {
+        for p in [
+            "generated_proto",
+            "generated",
+            "dependency",
+            "synthetic",
+            "test_fixture",
+            "external",
+        ] {
             s.count(p);
         }
         assert_eq!(
@@ -3543,10 +4014,24 @@ mod passes_tests {
                  (name=1 banner=3 qname=2) dependency=1 synthetic=1 external=1"
             )
         );
-        let only_banner = ProvenanceStats { generated_banner: 3, ..Default::default() };
-        assert!(only_banner.marker().is_some_and(|m| m.contains(" generated=3 (name=0 banner=3 qname=0) ")));
-        let only_external = ProvenanceStats { external: 2, ..Default::default() };
-        assert!(only_external.marker().is_some_and(|m| m.ends_with(" external=2")));
+        let only_banner = ProvenanceStats {
+            generated_banner: 3,
+            ..Default::default()
+        };
+        assert!(
+            only_banner
+                .marker()
+                .is_some_and(|m| m.contains(" generated=3 (name=0 banner=3 qname=0) "))
+        );
+        let only_external = ProvenanceStats {
+            external: 2,
+            ..Default::default()
+        };
+        assert!(
+            only_external
+                .marker()
+                .is_some_and(|m| m.ends_with(" external=2"))
+        );
     }
 
     /// DT.6a: a ROUTE is test-only iff EVERY registration site of every
@@ -3562,7 +4047,9 @@ mod passes_tests {
 
         let pos = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":11,"end_line":11}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":11,"end_line":11}}"#
+            )),
         };
         let site = |file: &str| Cell {
             kind: cell_type::ROUTE_METHOD,
@@ -3577,28 +4064,62 @@ mod passes_tests {
         let rt = node_kind::ROUTE;
         let build = || {
             let mut h = Hand::new("test://dt6a");
-            let mixed = h.add(rt, "GET /api/orders", "GET /api/orders", vec![
-                pos("api_test.go"),
-                pos("main.go"),
-                site("main.go"),
-                site("api_test.go"),
-            ]);
-            let boom = h.add(rt, "GET /boom", "GET /boom", vec![pos("api_test.go"), site("api_test.go")]);
-            let dir = h.add(rt, "GET /health-test", "GET /health-test", vec![
-                pos("test/router.go"),
-                site("test/router.go"),
-            ]);
-            let ab = h.add(rt, "GET /api/ab_test", "GET /api/ab_test", vec![pos("main.go"), site("main.go")]);
-            let qa = h.add(rt, "GET /qa-only", "GET /qa-only", vec![pos("qa/routes.go"), site("qa/routes.go")]);
+            let mixed = h.add(
+                rt,
+                "GET /api/orders",
+                "GET /api/orders",
+                vec![
+                    pos("api_test.go"),
+                    pos("main.go"),
+                    site("main.go"),
+                    site("api_test.go"),
+                ],
+            );
+            let boom = h.add(
+                rt,
+                "GET /boom",
+                "GET /boom",
+                vec![pos("api_test.go"), site("api_test.go")],
+            );
+            let dir = h.add(
+                rt,
+                "GET /health-test",
+                "GET /health-test",
+                vec![pos("test/router.go"), site("test/router.go")],
+            );
+            let ab = h.add(
+                rt,
+                "GET /api/ab_test",
+                "GET /api/ab_test",
+                vec![pos("main.go"), site("main.go")],
+            );
+            let qa = h.add(
+                rt,
+                "GET /qa-only",
+                "GET /qa-only",
+                vec![pos("qa/routes.go"), site("qa/routes.go")],
+            );
             // A member layout's stamp, with a product site: the stamp decides.
-            let member =
-                h.add(rt, "GET /legacy", "GET /legacy", vec![pos("main.go"), stamp("test_fixture")]);
-            let generated =
-                h.add(rt, "GET /gen", "GET /gen", vec![pos("api_test.go"), stamp("generated")]);
+            let member = h.add(
+                rt,
+                "GET /legacy",
+                "GET /legacy",
+                vec![pos("main.go"), stamp("test_fixture")],
+            );
+            let generated = h.add(
+                rt,
+                "GET /gen",
+                "GET /gen",
+                vec![pos("api_test.go"), stamp("generated")],
+            );
             // No site file at all (a bare-verb ROUTE_METHOD names none).
             let bare = h.route("GET", "/bare");
-            let proto =
-                h.add(rt, "GET /pb", "GET /pb", vec![pos("test/api.pb.go"), site("test/api.pb.go")]);
+            let proto = h.add(
+                rt,
+                "GET /pb",
+                "GET /pb",
+                vec![pos("test/api.pb.go"), site("test/api.pb.go")],
+            );
             // One id in two graphs of the repo: the second entry's product
             // site makes it product, and an all-test twin keeps it test.
             let split = h.add(rt, "GET /split", "GET /split", vec![pos("x_test.go")]);
@@ -3606,7 +4127,9 @@ mod passes_tests {
             let mut twin = Hand::new("test://dt6a");
             twin.add(rt, "GET /split", "GET /split", vec![pos("split.go")]);
             twin.add(rt, "GET /twins", "GET /twins", vec![site("y_test.go")]);
-            let ids = [mixed, boom, dir, ab, qa, member, generated, bare, proto, split, twins];
+            let ids = [
+                mixed, boom, dir, ab, qa, member, generated, bare, proto, split, twins,
+            ];
             (MergedGraph::new(vec![h.graph(), twin.graph()]), ids)
         };
         let ctx = |declared: bool| CodeBuildCtx {
@@ -3614,24 +4137,52 @@ mod passes_tests {
                 repo: RepoId::from_canonical("test://dt6a"),
                 root: PathBuf::from("dt6a"),
                 label: "dt6a".into(),
-                config: declared.then(|| glia_config::parse_str("version = 1\n[walk]\ntests = [\"qa/\"]\n")),
+                config: declared
+                    .then(|| glia_config::parse_str("version = 1\n[walk]\ntests = [\"qa/\"]\n")),
             }],
             overlay: true,
             group_fills: Vec::new(),
             scip_roots: Vec::new(),
         };
 
-        let (m, [mixed, boom, dir, ab, qa, member, generated, bare, proto, split, twins]) = build();
+        let (
+            m,
+            [
+                mixed,
+                boom,
+                dir,
+                ab,
+                qa,
+                member,
+                generated,
+                bare,
+                proto,
+                split,
+                twins,
+            ],
+        ) = build();
         let tests = test_route_ids(&m, &ctx(true));
-        assert!(!tests.contains(&mixed), "main.go + api_test.go is a product route");
+        assert!(
+            !tests.contains(&mixed),
+            "main.go + api_test.go is a product route"
+        );
         assert!(tests.contains(&boom), "every site a _test.go file");
         assert!(tests.contains(&dir), "a test/ directory");
-        assert!(!tests.contains(&ab), "the qname rule never reads a ROUTE URL");
+        assert!(
+            !tests.contains(&ab),
+            "the qname rule never reads a ROUTE URL"
+        );
         assert!(tests.contains(&qa), "a declared [walk] tests match");
         assert!(tests.contains(&member), "an entry stamped test_fixture");
-        assert!(!tests.contains(&generated), "another provenance is not test");
+        assert!(
+            !tests.contains(&generated),
+            "another provenance is not test"
+        );
         assert!(!tests.contains(&bare), "no site file, no test route");
-        assert!(!tests.contains(&proto), "protobuf output is never a test site");
+        assert!(
+            !tests.contains(&proto),
+            "protobuf output is never a test site"
+        );
         assert!(!tests.contains(&split), "every entry must be test");
         assert!(tests.contains(&twins), "every entry is test");
         assert_eq!(tests.len(), 5);
@@ -3648,17 +4199,25 @@ mod passes_tests {
         tag_synthetic_provenance(&mut m, &ctx(true));
         let fixture = vec![r#"{"provenance":"test_fixture"}"#.to_string()];
         for id in [boom, dir, qa, twins] {
-            assert!(origins(&m, id).iter().all(|o| *o == fixture[0]) && !origins(&m, id).is_empty());
+            assert!(
+                origins(&m, id).iter().all(|o| *o == fixture[0]) && !origins(&m, id).is_empty()
+            );
         }
         for id in [mixed, ab, bare, split] {
             assert!(origins(&m, id).is_empty(), "{id:?} stays unstamped");
         }
         assert_eq!(origins(&m, member), fixture, "a member's stamp is kept");
-        assert_eq!(origins(&m, proto), vec![r#"{"provenance":"generated_proto"}"#.to_string()]);
+        assert_eq!(
+            origins(&m, proto),
+            vec![r#"{"provenance":"generated_proto"}"#.to_string()]
+        );
         assert_eq!(ids.len(), 11);
         // route_test_rule: a declared-only site counts under declared.
         assert_eq!(route_test_rule(&[pos("qa/routes.go")]), TestRule::Declared);
-        assert_eq!(route_test_rule(&[pos("qa/x_test.go"), pos("qa/routes.go")]), TestRule::Path);
+        assert_eq!(
+            route_test_rule(&[pos("qa/x_test.go"), pos("qa/routes.go")]),
+            TestRule::Path
+        );
     }
 
     /// The ORIGIN payloads of every entry of `id`.
@@ -3685,47 +4244,113 @@ mod passes_tests {
     fn external_endpoint_origin_needs_every_site_and_no_pair() {
         const EXT: &str = r#"{"method":"GET","path":"/search","file":"src/geo.ts","line":4,"col":10,"confidence":"strong","raw":"https://nominatim.openstreetmap.org/search?q=${…}&format=json","host":"nominatim.openstreetmap.org","external":true}"#;
         const PLAIN: &str = r#"{"method":"GET","path":"/geo","file":"src/geo.ts","line":9,"col":10,"confidence":"strong","raw":"https://nominatim.openstreetmap.org/geo","host":"nominatim.openstreetmap.org"}"#;
-        let hit = |j: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(j.into()) };
+        let hit = |j: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(j.into()),
+        };
         let stamped = || Cell {
             kind: cell_type::ORIGIN,
             payload: CellPayload::Json(r#"{"provenance":"external"}"#.into()),
         };
         let spec_file = Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(r#"{"file":"src/geo.spec.ts","start_line":3,"end_line":3}"#.into()),
+            payload: CellPayload::Json(
+                r#"{"file":"src/geo.spec.ts","start_line":3,"end_line":3}"#.into(),
+            ),
         };
         let ep = node_kind::ENDPOINT;
 
         let mut web = Hand::new("test://cg4b-web");
-        let all = web.add(ep, "endpoint:GET:/search", "endpoint:GET:/search", vec![hit(EXT), hit(EXT)]);
+        let all = web.add(
+            ep,
+            "endpoint:GET:/search",
+            "endpoint:GET:/search",
+            vec![hit(EXT), hit(EXT)],
+        );
         let mixed = web.add(ep, "endpoint:GET:/geo", "endpoint:GET:/geo", vec![hit(EXT)]);
-        let wired = web.add(ep, "endpoint:GET:/lookup", "endpoint:GET:/lookup", vec![hit(EXT)]);
-        let in_test = web.add(ep, "endpoint:GET:/reverse", "endpoint:GET:/reverse", vec![hit(EXT), spec_file]);
-        let merged_in =
-            web.add(ep, "endpoint:GET:/status", "endpoint:GET:/status", vec![hit(EXT), stamped()]);
-        let kept = web.add(ep, "endpoint:GET:/place", "endpoint:GET:/place", vec![hit(EXT), stamped()]);
+        let wired = web.add(
+            ep,
+            "endpoint:GET:/lookup",
+            "endpoint:GET:/lookup",
+            vec![hit(EXT)],
+        );
+        let in_test = web.add(
+            ep,
+            "endpoint:GET:/reverse",
+            "endpoint:GET:/reverse",
+            vec![hit(EXT), spec_file],
+        );
+        let merged_in = web.add(
+            ep,
+            "endpoint:GET:/status",
+            "endpoint:GET:/status",
+            vec![hit(EXT), stamped()],
+        );
+        let kept = web.add(
+            ep,
+            "endpoint:GET:/place",
+            "endpoint:GET:/place",
+            vec![hit(EXT), stamped()],
+        );
         let web = web.graph();
         // A second graph of the same repo holds /geo's unmarked site alone,
         // and a second entry of the stale /status stamp.
         let mut twin = Hand::new("test://cg4b-web");
-        twin.add(ep, "endpoint:GET:/search", "endpoint:GET:/search", vec![hit(EXT)]);
-        twin.add(ep, "endpoint:GET:/geo", "endpoint:GET:/geo", vec![hit(PLAIN)]);
-        twin.add(ep, "endpoint:GET:/status", "endpoint:GET:/status", vec![hit(EXT), stamped()]);
+        twin.add(
+            ep,
+            "endpoint:GET:/search",
+            "endpoint:GET:/search",
+            vec![hit(EXT)],
+        );
+        twin.add(
+            ep,
+            "endpoint:GET:/geo",
+            "endpoint:GET:/geo",
+            vec![hit(PLAIN)],
+        );
+        twin.add(
+            ep,
+            "endpoint:GET:/status",
+            "endpoint:GET:/status",
+            vec![hit(EXT), stamped()],
+        );
         let mut server = Hand::new("test://cg4b-server");
         let route = server.route("GET", "/lookup");
         let mut m = MergedGraph::new(vec![web, twin.graph(), server.graph()]);
         for from in [wired, merged_in] {
-            m.cross_edges.push(Edge::new(from, route, edge_category::HTTP_CALLS, Confidence::Weak));
+            m.cross_edges.push(Edge::new(
+                from,
+                route,
+                edge_category::HTTP_CALLS,
+                Confidence::Weak,
+            ));
         }
 
         tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
         let external = vec![r#"{"provenance":"external"}"#.to_string()];
-        assert_eq!(origins(&m, all), [external.clone(), external.clone()].concat(), "both entries");
-        assert!(origins(&m, mixed).is_empty(), "one unmarked site, on the other entry");
+        assert_eq!(
+            origins(&m, all),
+            [external.clone(), external.clone()].concat(),
+            "both entries"
+        );
+        assert!(
+            origins(&m, mixed).is_empty(),
+            "one unmarked site, on the other entry"
+        );
         assert!(origins(&m, wired).is_empty(), "an HTTP_CALLS edge pairs it");
-        assert_eq!(origins(&m, in_test), vec![r#"{"provenance":"test_fixture"}"#.to_string()]);
-        assert!(origins(&m, merged_in).is_empty(), "the stale stamp is taken back on both entries");
-        assert_eq!(origins(&m, kept), external, "a stamp that holds is kept, never doubled");
+        assert_eq!(
+            origins(&m, in_test),
+            vec![r#"{"provenance":"test_fixture"}"#.to_string()]
+        );
+        assert!(
+            origins(&m, merged_in).is_empty(),
+            "the stale stamp is taken back on both entries"
+        );
+        assert_eq!(
+            origins(&m, kept),
+            external,
+            "a stamp that holds is kept, never doubled"
+        );
 
         // A re-run changes nothing.
         let before: Vec<Vec<String>> = [all, mixed, wired, in_test, merged_in, kept]
@@ -3751,14 +4376,19 @@ mod passes_tests {
         const GRPC: &str = r#"{"via":"grpc","host":"geocoder.googleapis.com:443","external":true}"#;
         const GQL: &str = r#"{"via":"graphql","hosts":["api.github.com"],"external":true}"#;
         const LOCAL: &str = r#"{"via":"ws","host":"localhost:8080"}"#;
-        let hit = |j: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(j.into()) };
+        let hit = |j: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(j.into()),
+        };
         let stamped = || Cell {
             kind: cell_type::ORIGIN,
             payload: CellPayload::Json(r#"{"provenance":"external"}"#.into()),
         };
         let spec_file = Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(r#"{"file":"src/ticker.spec.ts","start_line":3,"end_line":3}"#.into()),
+            payload: CellPayload::Json(
+                r#"{"file":"src/ticker.spec.ts","start_line":3,"end_line":3}"#.into(),
+            ),
         };
         let ws = node_kind::WS_CLIENT;
 
@@ -3769,9 +4399,24 @@ mod passes_tests {
                 web.add(ws, "/live", "ws_client:/live", vec![hit(WS)]),
                 web.add(ws, "/feed", "ws_client:/feed", vec![hit(LOCAL)]),
                 web.add(ws, "/stale", "ws_client:/stale", vec![hit(WS), stamped()]),
-                web.add(ws, "/spec", "ws_client:/spec", vec![hit(WS), spec_file.clone()]),
-                web.add(node_kind::GRPC_CLIENT, "Geocoder", "grpc_client:Geocoder", vec![hit(GRPC)]),
-                web.add(node_kind::GRAPHQL_OPERATION, "GetUser", "graphql_op:GetUser", vec![hit(GQL)]),
+                web.add(
+                    ws,
+                    "/spec",
+                    "ws_client:/spec",
+                    vec![hit(WS), spec_file.clone()],
+                ),
+                web.add(
+                    node_kind::GRPC_CLIENT,
+                    "Geocoder",
+                    "grpc_client:Geocoder",
+                    vec![hit(GRPC)],
+                ),
+                web.add(
+                    node_kind::GRAPHQL_OPERATION,
+                    "GetUser",
+                    "graphql_op:GetUser",
+                    vec![hit(GQL)],
+                ),
             ];
             let mut server = Hand::new("test://df10-server");
             let handler = server.add(node_kind::WS_HANDLER, "/ws", "ws:/ws", vec![]);
@@ -3783,7 +4428,12 @@ mod passes_tests {
                 paired.push(ws_ext);
             }
             for from in paired {
-                m.cross_edges.push(Edge::new(from, handler, edge_category::WS_CONNECTS, Confidence::Weak));
+                m.cross_edges.push(Edge::new(
+                    from,
+                    handler,
+                    edge_category::WS_CONNECTS,
+                    Confidence::Weak,
+                ));
             }
             (m, ids)
         };
@@ -3791,17 +4441,38 @@ mod passes_tests {
 
         let (mut m, [ws_ext, live, feed, stale, spec, grpc, gql]) = build(false);
         tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
-        assert_eq!(origins(&m, ws_ext), external, "unpaired third-party ws client");
-        assert_eq!(origins(&m, grpc), external, "unpaired third-party grpc stub");
-        assert_eq!(origins(&m, gql), external, "unpaired third-party graphql op");
+        assert_eq!(
+            origins(&m, ws_ext),
+            external,
+            "unpaired third-party ws client"
+        );
+        assert_eq!(
+            origins(&m, grpc),
+            external,
+            "unpaired third-party grpc stub"
+        );
+        assert_eq!(
+            origins(&m, gql),
+            external,
+            "unpaired third-party graphql op"
+        );
         assert!(origins(&m, live).is_empty(), "a WS_CONNECTS edge pairs it");
         assert!(origins(&m, feed).is_empty(), "a local host is in-build");
-        assert!(origins(&m, stale).is_empty(), "the stale stamp is taken back");
-        assert_eq!(origins(&m, spec), vec![r#"{"provenance":"test_fixture"}"#.to_string()]);
+        assert!(
+            origins(&m, stale).is_empty(),
+            "the stale stamp is taken back"
+        );
+        assert_eq!(
+            origins(&m, spec),
+            vec![r#"{"provenance":"test_fixture"}"#.to_string()]
+        );
 
         let (mut m, [ws_ext, ..]) = build(true);
         tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
-        assert!(origins(&m, ws_ext).is_empty(), "the same client with a WS_CONNECTS edge");
+        assert!(
+            origins(&m, ws_ext).is_empty(),
+            "the same client with a WS_CONNECTS edge"
+        );
     }
 
     /// CJ.4: repo A's `[walk] tests = ["playwright/"]` stamps `test_fixture`
@@ -3821,25 +4492,55 @@ mod passes_tests {
         const OWN: &str = r#"{"provenance":"contract","source":"openapi"}"#;
         let at = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":2}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":2}}"#
+            )),
         };
         let fx = node_kind::FUNCTION;
         let build = || {
             let mut a = Hand::new("test://cj4-a");
             let ids = [
-                a.add(fx, "buyFlow", "playwright::checkout::buyFlow", vec![at("playwright/checkout.ts")]),
-                a.add(fx, "login", "web::playwright::login::login", vec![at("web/playwright/login.ts")]),
+                a.add(
+                    fx,
+                    "buyFlow",
+                    "playwright::checkout::buyFlow",
+                    vec![at("playwright/checkout.ts")],
+                ),
+                a.add(
+                    fx,
+                    "login",
+                    "web::playwright::login::login",
+                    vec![at("web/playwright/login.ts")],
+                ),
                 a.add(fx, "addItem", "src::cart::addItem", vec![at("src/cart.ts")]),
-                a.add(fx, "config", "playwright.config::config", vec![at("playwright.config.ts")]),
+                a.add(
+                    fx,
+                    "config",
+                    "playwright.config::config",
+                    vec![at("playwright.config.ts")],
+                ),
                 a.add(fx, "seed", "playwright::seed", vec![]),
-                a.add(fx, "x", "playwright::x::x", vec![
-                    at("playwright/x.ts"),
-                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(OWN.into()) },
-                ]),
+                a.add(
+                    fx,
+                    "x",
+                    "playwright::x::x",
+                    vec![
+                        at("playwright/x.ts"),
+                        Cell {
+                            kind: cell_type::ORIGIN,
+                            payload: CellPayload::Json(OWN.into()),
+                        },
+                    ],
+                ),
                 a.add(fx, "spec", "src::cart::spec", vec![at("src/cart.test.ts")]),
             ];
             let mut b = Hand::new("test://cj4-b");
-            let other = b.add(fx, "buyFlow", "playwright::checkout::buyFlow", vec![at("playwright/checkout.ts")]);
+            let other = b.add(
+                fx,
+                "buyFlow",
+                "playwright::checkout::buyFlow",
+                vec![at("playwright/checkout.ts")],
+            );
             (MergedGraph::new(vec![a.graph(), b.graph()]), ids, other)
         };
         let ctx = |overlay: bool| CodeBuildCtx {
@@ -3848,7 +4549,9 @@ mod passes_tests {
                     repo: RepoId::from_canonical("test://cj4-a"),
                     root: PathBuf::from("cj4-a"),
                     label: "a".into(),
-                    config: Some(glia_config::parse_str("version = 1\n[walk]\ntests = [\"playwright/\"]\n")),
+                    config: Some(glia_config::parse_str(
+                        "version = 1\n[walk]\ntests = [\"playwright/\"]\n",
+                    )),
                 },
                 RepoInputs {
                     repo: RepoId::from_canonical("test://cj4-b"),
@@ -3867,13 +4570,35 @@ mod passes_tests {
         for overlay in [true, false] {
             let (mut m, [flow, nested, app, config, no_pos, own, builtin], other) = build();
             tag_synthetic_provenance(&mut m, &ctx(overlay));
-            assert_eq!(origins(&m, flow), fixture, "declared playwright/ at the root");
-            assert_eq!(origins(&m, nested), fixture, "declared playwright/ at any depth");
+            assert_eq!(
+                origins(&m, flow),
+                fixture,
+                "declared playwright/ at the root"
+            );
+            assert_eq!(
+                origins(&m, nested),
+                fixture,
+                "declared playwright/ at any depth"
+            );
             assert!(origins(&m, app).is_empty(), "app code stays untagged");
-            assert!(origins(&m, config).is_empty(), "a playwright.config.ts file is not the directory");
-            assert!(origins(&m, no_pos).is_empty(), "no POSITION, no declared tag");
-            assert_eq!(origins(&m, own), vec![OWN.to_string()], "an ORIGIN of its own is kept");
-            assert_eq!(origins(&m, builtin), fixture, "the built-in path rule still fires");
+            assert!(
+                origins(&m, config).is_empty(),
+                "a playwright.config.ts file is not the directory"
+            );
+            assert!(
+                origins(&m, no_pos).is_empty(),
+                "no POSITION, no declared tag"
+            );
+            assert_eq!(
+                origins(&m, own),
+                vec![OWN.to_string()],
+                "an ORIGIN of its own is kept"
+            );
+            assert_eq!(
+                origins(&m, builtin),
+                fixture,
+                "the built-in path rule still fires"
+            );
             assert!(origins(&m, other).is_empty(), "repo B declares nothing");
             runs.push(
                 [flow, nested, app, config, no_pos, own, builtin, other]
@@ -3890,8 +4615,15 @@ mod passes_tests {
         assert!(origins(&m, flow).is_empty());
 
         // The marker's total counts the declared stamps too.
-        let s = ProvenanceStats { test_fixture_path: 1, test_fixture_declared: 2, ..Default::default() };
-        assert!(s.marker().is_some_and(|m| m.starts_with("[provenance] test_fixture=3 (path=1 qname=0)")));
+        let s = ProvenanceStats {
+            test_fixture_path: 1,
+            test_fixture_declared: 2,
+            ..Default::default()
+        };
+        assert!(
+            s.marker()
+                .is_some_and(|m| m.starts_with("[provenance] test_fixture=3 (path=1 qname=0)"))
+        );
     }
 
     /// DE.7: the generator heads the provenance pass reads, and the
@@ -3899,11 +4631,26 @@ mod passes_tests {
     #[test]
     fn generated_banner_heads_and_the_hand_written_warning() {
         for (what, head) in [
-            ("sqlc", "// Code generated by sqlc. DO NOT EDIT.\n// versions:\n//   sqlc v1.25.0\n\npackage db\n"),
-            ("protoc-py", "# -*- coding: utf-8 -*-\n# Generated by the protocol buffer compiler.  DO NOT EDIT!\n# source: chat.proto\n"),
-            ("dart", "//\n//  Generated code. Do not modify.\n//  source: quokka_chat.proto\n//\n"),
-            ("swaggo", "// Package docs Code generated by swaggo/swag. DO NOT EDIT\npackage docs\n"),
-            ("openapi", "/**\n * NOTE: This class is auto generated by OpenAPI Generator (https://openapi-generator.tech).\n * https://openapi-generator.tech\n * Do not edit the class manually.\n */\n"),
+            (
+                "sqlc",
+                "// Code generated by sqlc. DO NOT EDIT.\n// versions:\n//   sqlc v1.25.0\n\npackage db\n",
+            ),
+            (
+                "protoc-py",
+                "# -*- coding: utf-8 -*-\n# Generated by the protocol buffer compiler.  DO NOT EDIT!\n# source: chat.proto\n",
+            ),
+            (
+                "dart",
+                "//\n//  Generated code. Do not modify.\n//  source: quokka_chat.proto\n//\n",
+            ),
+            (
+                "swaggo",
+                "// Package docs Code generated by swaggo/swag. DO NOT EDIT\npackage docs\n",
+            ),
+            (
+                "openapi",
+                "/**\n * NOTE: This class is auto generated by OpenAPI Generator (https://openapi-generator.tech).\n * https://openapi-generator.tech\n * Do not edit the class manually.\n */\n",
+            ),
         ] {
             assert!(generated_by_banner(head), "{what}");
         }
@@ -3933,40 +4680,96 @@ mod passes_tests {
             std::fs::write(path, body).expect("write");
         };
         write("db/queries_gen.go", SQLC);
-        write("db/store.go", "package db\n\nfunc NewStore() string { return GetUser(1) }\n");
-        write("db/limits.go", "// Limits. Do not edit without updating the migration.\npackage db\n\nfunc Limit() int { return 10 }\n");
+        write(
+            "db/store.go",
+            "package db\n\nfunc NewStore() string { return GetUser(1) }\n",
+        );
+        write(
+            "db/limits.go",
+            "// Limits. Do not edit without updating the migration.\npackage db\n\nfunc Limit() int { return 10 }\n",
+        );
         write("db/queries_gen_test.go", SQLC);
         std::fs::write(tmp.path().join("outside.go"), SQLC).expect("write");
 
         let at = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":3,"end_line":3}}"#
+            )),
         };
         const OWN: &str = r#"{"provenance":"contract","source":"openapi"}"#;
         let fx = node_kind::FUNCTION;
         let build = || {
             let mut a = Hand::new("test://de7-a");
             let ids = [
-                a.add(fx, "GetUser", "db::queries_gen::GetUser", vec![at("db/queries_gen.go")]),
-                a.add(fx, "ListUsers", "db::queries_gen::ListUsers", vec![at("db/queries_gen.go")]),
-                a.add(fx, "NewStore", "db::store::NewStore", vec![at("db/store.go")]),
+                a.add(
+                    fx,
+                    "GetUser",
+                    "db::queries_gen::GetUser",
+                    vec![at("db/queries_gen.go")],
+                ),
+                a.add(
+                    fx,
+                    "ListUsers",
+                    "db::queries_gen::ListUsers",
+                    vec![at("db/queries_gen.go")],
+                ),
+                a.add(
+                    fx,
+                    "NewStore",
+                    "db::store::NewStore",
+                    vec![at("db/store.go")],
+                ),
                 a.add(fx, "Limit", "db::limits::Limit", vec![at("db/limits.go")]),
-                a.add(fx, "userToJson", "lib::user.g::userToJson", vec![at("lib/user.g.dart")]),
-                a.add(fx, "TestGetUser", "db::queries_gen_test::TestGetUser", vec![at("db/queries_gen_test.go")]),
-                a.add(fx, "chat", "lib::chat.pbgrpc::chat", vec![at("lib/chat.pbgrpc.dart")]),
+                a.add(
+                    fx,
+                    "userToJson",
+                    "lib::user.g::userToJson",
+                    vec![at("lib/user.g.dart")],
+                ),
+                a.add(
+                    fx,
+                    "TestGetUser",
+                    "db::queries_gen_test::TestGetUser",
+                    vec![at("db/queries_gen_test.go")],
+                ),
+                a.add(
+                    fx,
+                    "chat",
+                    "lib::chat.pbgrpc::chat",
+                    vec![at("lib/chat.pbgrpc.dart")],
+                ),
                 a.add(fx, "Gone", "db::gone::Gone", vec![at("db/gone.go")]),
                 a.add(fx, "Out", "out::Out", vec![at("../outside.go")]),
-                a.add(fx, "Own", "db::queries_gen::Own", vec![
-                    at("db/queries_gen.go"),
-                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(OWN.into()) },
-                ]),
+                a.add(
+                    fx,
+                    "Own",
+                    "db::queries_gen::Own",
+                    vec![
+                        at("db/queries_gen.go"),
+                        Cell {
+                            kind: cell_type::ORIGIN,
+                            payload: CellPayload::Json(OWN.into()),
+                        },
+                    ],
+                ),
                 a.add(fx, "seed", "db::queries_gen::seed", vec![]),
             ];
             // Repo B shares the paths but has no root in the context.
             let mut b = Hand::new("test://de7-b");
             let other = [
-                b.add(fx, "GetUser", "db::queries_gen::GetUser", vec![at("db/queries_gen.go")]),
-                b.add(fx, "userToJson", "lib::user.g::userToJson", vec![at("lib/user.g.dart")]),
+                b.add(
+                    fx,
+                    "GetUser",
+                    "db::queries_gen::GetUser",
+                    vec![at("db/queries_gen.go")],
+                ),
+                b.add(
+                    fx,
+                    "userToJson",
+                    "lib::user.g::userToJson",
+                    vec![at("lib/user.g.dart")],
+                ),
             ];
             (MergedGraph::new(vec![a.graph(), b.graph()]), ids, other)
         };
@@ -3986,31 +4789,81 @@ mod passes_tests {
 
         let (mut m, ids, other) = build();
         tag_synthetic_provenance(&mut m, &ctx);
-        let [get, list, store, limit, to_json, test, chat, gone, out, own, seed] = ids;
+        let [
+            get,
+            list,
+            store,
+            limit,
+            to_json,
+            test,
+            chat,
+            gone,
+            out,
+            own,
+            seed,
+        ] = ids;
         assert_eq!(origins(&m, get), origin("generated"), "a generator header");
-        assert_eq!(origins(&m, list), origin("generated"), "every node of the file");
+        assert_eq!(
+            origins(&m, list),
+            origin("generated"),
+            "every node of the file"
+        );
         assert_eq!(origins(&m, store), none, "hand-written");
-        assert_eq!(origins(&m, limit), none, "an edit warning without `generated`");
-        assert_eq!(origins(&m, to_json), origin("generated"), "a codegen name, never read");
-        assert_eq!(origins(&m, test), origin("test_fixture"), "a test path wins over a header");
-        assert_eq!(origins(&m, chat), origin("generated_proto"), "`.pbgrpc.dart` is protobuf output");
+        assert_eq!(
+            origins(&m, limit),
+            none,
+            "an edit warning without `generated`"
+        );
+        assert_eq!(
+            origins(&m, to_json),
+            origin("generated"),
+            "a codegen name, never read"
+        );
+        assert_eq!(
+            origins(&m, test),
+            origin("test_fixture"),
+            "a test path wins over a header"
+        );
+        assert_eq!(
+            origins(&m, chat),
+            origin("generated_proto"),
+            "`.pbgrpc.dart` is protobuf output"
+        );
         assert_eq!(origins(&m, gone), none, "a missing file is not generated");
         assert_eq!(origins(&m, out), none, "never read outside the root");
-        assert_eq!(origins(&m, own), vec![OWN.to_string()], "an ORIGIN of its own is kept");
+        assert_eq!(
+            origins(&m, own),
+            vec![OWN.to_string()],
+            "an ORIGIN of its own is kept"
+        );
         assert_eq!(origins(&m, seed), none, "no POSITION, nothing to read");
         assert_eq!(origins(&m, other[0]), none, "no root: no header read");
-        assert_eq!(origins(&m, other[1]), origin("generated"), "no root: names still classify");
+        assert_eq!(
+            origins(&m, other[1]),
+            origin("generated"),
+            "no root: names still classify"
+        );
 
         // Each file is classed once, whatever number of nodes it holds; a
         // codegen name needs no file on disk.
         let mut set = generated_files(&ctx);
         let a = RepoId::from_canonical("test://de7-a");
-        assert_eq!(set.classify(a, "db/queries_gen.go"), Some(GeneratedBy::Banner));
-        assert_eq!(set.classify(a, "db/queries_gen.go"), Some(GeneratedBy::Banner));
+        assert_eq!(
+            set.classify(a, "db/queries_gen.go"),
+            Some(GeneratedBy::Banner)
+        );
+        assert_eq!(
+            set.classify(a, "db/queries_gen.go"),
+            Some(GeneratedBy::Banner)
+        );
         assert_eq!(set.classify(a, "lib/user.g.dart"), Some(GeneratedBy::Name));
         assert_eq!(set.classify(a, "db/store.go"), None);
         assert_eq!(set.classify(a, ""), None);
-        assert_eq!(set.classed.values().map(BTreeMap::len).sum::<usize>(), 3, "one entry per file");
+        assert_eq!(
+            set.classed.values().map(BTreeMap::len).sum::<usize>(),
+            3,
+            "one entry per file"
+        );
 
         // A layout merge (no inputs) reads nothing: names only.
         let (mut m, ids, _) = build();
@@ -4108,7 +4961,14 @@ mod passes_tests {
         ];
         want.sort_by_key(|(f, t)| (f.0, t.0));
         assert_eq!(got, want);
-        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 3, declared: 0 });
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 2,
+                camel: 3,
+                declared: 0
+            }
+        );
     }
 
     /// DF.11: a module under its repo's declared `[walk] tests` path is a
@@ -4129,7 +4989,9 @@ mod passes_tests {
         const OVERLAY: &str = "version = 1\n[walk]\ntests = [\"qa/\"]\n";
         let at = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":4}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":4}}"#
+            )),
         };
         let mut h = Hand::new("test://df11");
         let mut module = |q: &str, file: &str| {
@@ -4147,7 +5009,11 @@ mod passes_tests {
         let merged = MergedGraph::new(vec![h.graph()]);
         let repo = RepoId::from_canonical("test://df11");
         let matcher = || {
-            glia_config::parse_str(OVERLAY).config.walk.tests_matcher().expect("a tests matcher")
+            glia_config::parse_str(OVERLAY)
+                .config
+                .walk
+                .tests_matcher()
+                .expect("a tests matcher")
         };
         let rules = |edges: &[Edge]| {
             let mut got: Vec<(NodeId, NodeId, String)> = edges
@@ -4164,7 +5030,9 @@ mod passes_tests {
         };
         let sorted = |mut v: Vec<(NodeId, NodeId, &str)>| {
             v.sort_by_key(|(f, t, _)| (f.0, t.0));
-            v.into_iter().map(|(f, t, r)| (f, t, r.to_string())).collect::<Vec<_>>()
+            v.into_iter()
+                .map(|(f, t, r)| (f, t, r.to_string()))
+                .collect::<Vec<_>>()
         };
 
         let (edges, stats) = tests_module_edges(&merged, &[(repo, matcher())]);
@@ -4178,7 +5046,14 @@ mod passes_tests {
                 (web, fixture, "name_match"),
             ])
         );
-        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 0, declared: 3 });
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 2,
+                camel: 0,
+                declared: 3
+            }
+        );
         assert_eq!(
             stats.marker().as_deref(),
             Some("[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3)")
@@ -4197,7 +5072,14 @@ mod passes_tests {
                     (web, smoke, "name_match"),
                 ])
             );
-            assert_eq!(stats, TestsEdgeStats { snake: 4, camel: 0, declared: 0 });
+            assert_eq!(
+                stats,
+                TestsEdgeStats {
+                    snake: 4,
+                    camel: 0,
+                    declared: 0
+                }
+            );
         }
 
         // The pass reads the matcher from the context's inputs.
@@ -4214,10 +5096,16 @@ mod passes_tests {
         };
         let mut built = merged.clone();
         emit_tests_edges(&mut built, &ctx);
-        assert_eq!(rules(&built.cross_edges), rules(&tests_module_edges(&merged, &[(repo, matcher())]).0));
+        assert_eq!(
+            rules(&built.cross_edges),
+            rules(&tests_module_edges(&merged, &[(repo, matcher())]).0)
+        );
         let mut unbuilt = merged.clone();
         emit_tests_edges(&mut unbuilt, &CodeBuildCtx::empty());
-        assert_eq!(rules(&unbuilt.cross_edges), rules(&tests_module_edges(&merged, &[]).0));
+        assert_eq!(
+            rules(&unbuilt.cross_edges),
+            rules(&tests_module_edges(&merged, &[]).0)
+        );
     }
 
     /// LB.13: a test pairs the one same-stem sibling its language loads; a
@@ -4240,19 +5128,30 @@ mod passes_tests {
         let other = module("lib::util", "lib::util", false, "ts");
         let candidates = [&js, &ts, &other];
         let pick = |test: &TestsModule| select_test_targets(test, &candidates);
-        assert_eq!(pick(&module("src::util.test", "src::util.test", false, "ts")), [ts.id]);
-        assert_eq!(pick(&module("src::util.test", "src::util.test", false, "js")), [js.id]);
+        assert_eq!(
+            pick(&module("src::util.test", "src::util.test", false, "ts")),
+            [ts.id]
+        );
+        assert_eq!(
+            pick(&module("src::util.test", "src::util.test", false, "js")),
+            [js.id]
+        );
         // FooTest.java beside Foo.java + Foo.kt keeps both: no file order.
         assert_eq!(
             pick(&module("src::util_test", "src::util_test", false, "java")),
             [js.id, ts.id]
         );
         // A test with no located file keeps both too.
-        let unlocated = TestsModule { ext: None, ..module("src::util.test", "src::util.test", false, "") };
+        let unlocated = TestsModule {
+            ext: None,
+            ..module("src::util.test", "src::util.test", false, "")
+        };
         assert_eq!(pick(&unlocated), [js.id, ts.id]);
         // Only the best-scored survive to the sibling pick: `lib::util` shares
         // no directory with `src::util.test`, so it was never a candidate.
-        assert!(!pick(&module("src::util.test", "src::util.test", false, "ts")).contains(&other.id));
+        assert!(
+            !pick(&module("src::util.test", "src::util.test", false, "ts")).contains(&other.id)
+        );
     }
 
     #[test]
@@ -4277,10 +5176,10 @@ mod passes_tests {
     /// original record.
     #[test]
     fn http_demotion_records_only_its_own_changes() {
+        use Confidence::{Medium, Strong, Weak};
         use glia_code_domain::{CodeNav, GRAPH_TYPE};
         use glia_core::{Node, NodeKindId, RepoId};
         use glia_graph::{RepoGraph, SymbolTable};
-        use Confidence::{Medium, Strong, Weak};
 
         let repo = RepoId::from_canonical("test://lc10a");
         let id = |kind: NodeKindId, q: &str| NodeId::from_parts(GRAPH_TYPE, repo, kind, q);
@@ -4300,7 +5199,12 @@ mod passes_tests {
                 repo,
                 nodes: nodes
                     .iter()
-                    .map(|(n, _, _, c)| Node { id: *n, repo, confidence: *c, cells: vec![] })
+                    .map(|(n, _, _, c)| Node {
+                        id: *n,
+                        repo,
+                        confidence: *c,
+                        cells: vec![],
+                    })
                     .collect(),
                 edges: vec![],
                 nav,
@@ -4347,11 +5251,19 @@ mod passes_tests {
         assert_eq!(conf(&m, r_weak), vec![Weak]);
         assert_eq!(conf(&m, r_matched), vec![Strong]);
         assert_eq!(conf(&m, e_matched), vec![Strong]);
-        assert_eq!(conf(&m, e_mixed), vec![Medium, Weak], "demoted, but not undoable");
+        assert_eq!(
+            conf(&m, e_mixed),
+            vec![Medium, Weak],
+            "demoted, but not undoable"
+        );
         assert_eq!(conf(&m, f), vec![Strong]);
 
         demote_unmatched_http_nodes(&mut m);
-        assert_eq!(m.pass_undo, vec![(e_strong, Strong)], "a re-run keeps the original");
+        assert_eq!(
+            m.pass_undo,
+            vec![(e_strong, Strong)],
+            "a re-run keeps the original"
+        );
 
         m.undo_pass_mutations();
         assert!(m.pass_undo.is_empty());
@@ -4385,9 +5297,19 @@ mod passes_tests {
 
     #[test]
     fn test_cell_marker_needs_a_tests_edge() {
-        assert_eq!(TestCellStats::default().marker(), None, "no TESTS edge, no marker");
-        let stats =
-            TestCellStats { nodes: 3, tests: 3, edges: 4, fn_level: 2, module: 2, dangling: 0 };
+        assert_eq!(
+            TestCellStats::default().marker(),
+            None,
+            "no TESTS edge, no marker"
+        );
+        let stats = TestCellStats {
+            nodes: 3,
+            tests: 3,
+            edges: 4,
+            fn_level: 2,
+            module: 2,
+            dangling: 0,
+        };
         assert_eq!(
             stats.marker().as_deref(),
             Some("[test-cells] nodes=3 tests=3 edges=4 (fn=2 module=2) dangling=0")
@@ -4400,9 +5322,18 @@ mod passes_tests {
     /// dropped; a second run changes nothing.
     #[test]
     fn test_cells_rewrite_in_place_and_drop_stale() {
-        let stale = || Cell { kind: cell_type::TEST, payload: CellPayload::Json("{}".into()) };
-        let position = Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{}".into()) };
-        let origin = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) };
+        let stale = || Cell {
+            kind: cell_type::TEST,
+            payload: CellPayload::Json("{}".into()),
+        };
+        let position = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json("{}".into()),
+        };
+        let origin = Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json("{}".into()),
+        };
 
         let mut h = Hand::new("test://le3a");
         let target = h.add(
@@ -4412,8 +5343,18 @@ mod passes_tests {
             vec![position.clone(), stale(), origin.clone()],
         );
         let untested = h.add(node_kind::FUNCTION, "place", "shop::place", vec![stale()]);
-        let t_b = h.add(node_kind::FUNCTION, "test_b", "tests::test_shop::test_b", vec![]);
-        let t_a = h.add(node_kind::FUNCTION, "test_a", "tests::test_shop::test_a", vec![]);
+        let t_b = h.add(
+            node_kind::FUNCTION,
+            "test_b",
+            "tests::test_shop::test_b",
+            vec![],
+        );
+        let t_a = h.add(
+            node_kind::FUNCTION,
+            "test_a",
+            "tests::test_shop::test_a",
+            vec![],
+        );
         let t_mod = h.add(node_kind::MODULE, "test_shop", "tests::test_shop", vec![]);
         let ghost = NodeId(42);
         let mut g = h.graph();
@@ -4425,14 +5366,28 @@ mod passes_tests {
         let stats = fill_test_cells(&mut m);
         assert_eq!(
             stats,
-            TestCellStats { nodes: 1, tests: 3, edges: 4, fn_level: 2, module: 1, dangling: 1 }
+            TestCellStats {
+                nodes: 1,
+                tests: 3,
+                edges: 4,
+                fn_level: 2,
+                module: 1,
+                dangling: 1
+            }
         );
         let want = r#"{"tests":[{"test":"tests::test_shop","kind":"MODULE"},{"test":"tests::test_shop::test_a","kind":"FUNCTION"},{"test":"tests::test_shop::test_b","kind":"FUNCTION"}],"total":3}"#;
         assert_eq!(test_payloads(&m, target), vec![vec![want.to_string()]]);
-        let kinds: Vec<_> =
-            m.graphs[0].nodes[0].cells.iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, [cell_type::POSITION, cell_type::TEST, cell_type::ORIGIN], "rewritten in place");
-        assert_eq!(test_payloads(&m, untested), vec![Vec::<String>::new()], "stale cell dropped");
+        let kinds: Vec<_> = m.graphs[0].nodes[0].cells.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [cell_type::POSITION, cell_type::TEST, cell_type::ORIGIN],
+            "rewritten in place"
+        );
+        assert_eq!(
+            test_payloads(&m, untested),
+            vec![Vec::<String>::new()],
+            "stale cell dropped"
+        );
 
         let before = m.graphs[0].nodes.clone();
         assert_eq!(fill_test_cells(&mut m), stats);
@@ -4936,7 +5891,12 @@ mod passes_tests {
     }
 
     /// An edge whose only cell is `ev`'s EVIDENCE.
-    fn ev_edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId, ev: Evidence) -> Edge {
+    fn ev_edge(
+        from: NodeId,
+        to: NodeId,
+        category: glia_core::EdgeCategoryId,
+        ev: Evidence,
+    ) -> Edge {
         Edge::new(from, to, category, Confidence::Strong).with_cell(ev.to_cell())
     }
 
@@ -4950,57 +5910,135 @@ mod passes_tests {
         let h0 = g0.add(node_kind::FUNCTION, "h0", "a::h0", vec![pos("a.py", 10)]);
         // One ENDPOINT id in graphs 0 and 1, at different places: the
         // build locates it at graph 0's (its first instance).
-        let ep = g0.add(node_kind::ENDPOINT, "GET /x", "endpoint:GET:/x", vec![pos("web/a.ts", 5)]);
-        let only0 = g0.add(node_kind::FUNCTION, "only0", "a::only0", vec![pos("a.py", 20)]);
+        let ep = g0.add(
+            node_kind::ENDPOINT,
+            "GET /x",
+            "endpoint:GET:/x",
+            vec![pos("web/a.ts", 5)],
+        );
+        let only0 = g0.add(
+            node_kind::FUNCTION,
+            "only0",
+            "a::only0",
+            vec![pos("a.py", 20)],
+        );
         // LB.9b: a non-code MODULE (no POSITION, no IMPORTS) and an
         // unlocated package it depends on.
-        let manifest = g0.add(node_kind::MODULE, "package.json", "web::package.json", vec![]);
+        let manifest = g0.add(
+            node_kind::MODULE,
+            "package.json",
+            "web::package.json",
+            vec![],
+        );
         let pkg = g0.add(node_kind::PACKAGE, "left-pad", "npm::left-pad", vec![]);
         let mut graph0 = g0.graph();
         let two_ev = Edge::new(f0, only0, edge_category::CALLS, Confidence::Strong)
             .with_cell(Evidence::emitter("graph:build").to_cell())
-            .with_cell(Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) })
+            .with_cell(Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json("{}".into()),
+            })
             .with_cell(Evidence::emitter("graph:other").to_cell());
         graph0.edges = vec![
-            ev_edge(f0, h0, edge_category::CALLS, Evidence::emitter("graph:calls").rule("bare").line(4)),
+            ev_edge(
+                f0,
+                h0,
+                edge_category::CALLS,
+                Evidence::emitter("graph:calls").rule("bare").line(4),
+            ),
             // (3) a "pass" replaces this one's evidence before Finalize.
-            ev_edge(h0, f0, edge_category::CALLS, Evidence::emitter("graph:build")),
-            ev_edge(manifest, pkg, edge_category::DEPENDS_ON, Evidence::emitter("extractor:manifest")),
+            ev_edge(
+                h0,
+                f0,
+                edge_category::CALLS,
+                Evidence::emitter("graph:build"),
+            ),
+            ev_edge(
+                manifest,
+                pkg,
+                edge_category::DEPENDS_ON,
+                Evidence::emitter("extractor:manifest"),
+            ),
             Edge::new(f0, ep, edge_category::USES, Confidence::Strong),
             two_ev,
-            ev_edge(f0, ep, edge_category::DEFINES, Evidence::emitter("graph:build")),
+            ev_edge(
+                f0,
+                ep,
+                edge_category::DEFINES,
+                Evidence::emitter("graph:build"),
+            ),
         ];
 
         let mut g1 = Hand::new(repo);
         let h1 = g1.add(node_kind::FUNCTION, "h1", "b::h1", vec![pos("b.ts", 2)]);
         let k1 = g1.add(node_kind::FUNCTION, "k1", "b::k1", vec![pos("b.ts", 8)]);
-        let ep1 = g1.add(node_kind::ENDPOINT, "GET /x", "endpoint:GET:/x", vec![pos("web/b.ts", 7)]);
+        let ep1 = g1.add(
+            node_kind::ENDPOINT,
+            "GET /x",
+            "endpoint:GET:/x",
+            vec![pos("web/b.ts", 7)],
+        );
         assert_eq!(ep1, ep, "one id in two graphs");
         let mut graph1 = g1.graph();
         graph1.edges = vec![
             // (1) unfilled, into the shared ENDPOINT: located at graph 0's.
-            ev_edge(h1, ep, edge_category::CALLS, Evidence::emitter("graph:build")),
+            ev_edge(
+                h1,
+                ep,
+                edge_category::CALLS,
+                Evidence::emitter("graph:build"),
+            ),
             // (2) to an id only graph 0 holds, located at that end (the
             // child of a structural edge).
-            ev_edge(h1, only0, edge_category::CONTAINS, Evidence::emitter("graph:refs")),
-            ev_edge(h1, k1, edge_category::CALLS, Evidence::emitter("graph:calls").line(3)),
+            ev_edge(
+                h1,
+                only0,
+                edge_category::CONTAINS,
+                Evidence::emitter("graph:refs"),
+            ),
+            ev_edge(
+                h1,
+                k1,
+                edge_category::CALLS,
+                Evidence::emitter("graph:calls").line(3),
+            ),
         ];
 
         let mut g2 = Hand::new(repo);
         let m2 = g2.add(node_kind::FUNCTION, "m2", "c::m2", vec![pos("c.go", 1)]);
         let n2 = g2.add(node_kind::FUNCTION, "n2", "c::n2", vec![pos("c.go", 9)]);
         let mut graph2 = g2.graph();
-        let removed = ev_edge(n2, m2, edge_category::CALLS, Evidence::emitter("graph:build"));
+        let removed = ev_edge(
+            n2,
+            m2,
+            edge_category::CALLS,
+            Evidence::emitter("graph:build"),
+        );
         graph2.edges = vec![
-            ev_edge(m2, n2, edge_category::CALLS, Evidence::emitter("graph:build")),
+            ev_edge(
+                m2,
+                n2,
+                edge_category::CALLS,
+                Evidence::emitter("graph:build"),
+            ),
             removed.clone(),
         ];
 
         // A docs-like graph: no group fill.
         let mut g3 = Hand::new(repo);
-        let doc = g3.add(node_kind::DOC_SECTION, "Intro", "README::Intro", vec![pos("README.md", 0)]);
+        let doc = g3.add(
+            node_kind::DOC_SECTION,
+            "Intro",
+            "README::Intro",
+            vec![pos("README.md", 0)],
+        );
         let mut graph3 = g3.graph();
-        graph3.edges = vec![ev_edge(doc, h1, edge_category::DOCUMENTS, Evidence::emitter("pass:doclink"))];
+        graph3.edges = vec![ev_edge(
+            doc,
+            h1,
+            edge_category::DOCUMENTS,
+            Evidence::emitter("pass:doclink"),
+        )];
 
         // f0 again, with graph 0's very cells: same `At`, so its edge keeps
         // the cached result.
@@ -5008,7 +6046,12 @@ mod passes_tests {
         g4.add(node_kind::FUNCTION, "f0", "a::f0", vec![pos("a.py", 3)]);
         let q4 = g4.add(node_kind::CLASS, "Q", "a::Q", vec![pos("a.py", 30)]);
         let mut graph4 = g4.graph();
-        graph4.edges = vec![ev_edge(q4, f0, edge_category::CONTAINS, Evidence::emitter("graph:build"))];
+        graph4.edges = vec![ev_edge(
+            q4,
+            f0,
+            edge_category::CONTAINS,
+            Evidence::emitter("graph:build"),
+        )];
 
         (vec![graph0, graph1, graph2, graph3, graph4], removed)
     }
@@ -5018,14 +6061,27 @@ mod passes_tests {
     /// two resolver cross edges.
     fn split_passes(m: &mut MergedGraph, removed: &Edge) {
         let restamped = m.graphs[0].edges.get_mut(1).expect("graph 0's second edge");
-        evidence::attach(restamped, Evidence::emitter("scip").rule("occurrence").at("a.py", 11));
+        evidence::attach(
+            restamped,
+            Evidence::emitter("scip").rule("occurrence").at("a.py", 11),
+        );
         restamped.confidence = Confidence::Strong;
         m.graphs[2].edges.retain(|e| e != removed);
         let (doc, ep) = (m.graphs[3].nodes[0].id, m.graphs[0].nodes[2].id);
         let h1 = m.graphs[1].nodes[0].id;
         m.cross_edges = vec![
-            ev_edge(doc, ep, edge_category::DOCUMENTS, Evidence::emitter("pass:doclink")),
-            ev_edge(h1, ep, edge_category::HTTP_CALLS, Evidence::emitter("resolver:http")),
+            ev_edge(
+                doc,
+                ep,
+                edge_category::DOCUMENTS,
+                Evidence::emitter("pass:doclink"),
+            ),
+            ev_edge(
+                h1,
+                ep,
+                edge_category::HTTP_CALLS,
+                Evidence::emitter("resolver:http"),
+            ),
         ];
     }
 
@@ -5039,8 +6095,11 @@ mod passes_tests {
     #[test]
     fn split_fill_equals_global_fill() {
         let (graphs, removed) = split_fixture();
-        let fills: Vec<Option<GroupFill>> =
-            graphs.iter().enumerate().map(|(i, g)| (i != 3).then(|| fill_group_evidence(g))).collect();
+        let fills: Vec<Option<GroupFill>> = graphs
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (i != 3).then(|| fill_group_evidence(g)))
+            .collect();
         // The group fill decides without touching its graph.
         let (pristine, _) = split_fixture();
         for (g, p) in graphs.iter().zip(&pristine) {
@@ -5068,24 +6127,51 @@ mod passes_tests {
         assert_eq!(split_m.cross_edges, head_m.cross_edges);
         assert_eq!(
             split.split,
-            SplitStats { graphs: 5, group_filled: 7, refilled: 3, fallback_graphs: 2, cross: 2 }
+            SplitStats {
+                graphs: 5,
+                group_filled: 7,
+                refilled: 3,
+                fallback_graphs: 2,
+                cross: 2
+            }
         );
 
         // The cases bite: a graph-local result would have differed.
         let file = |e: &Edge| Evidence::of(e).and_then(|ev| ev.file);
         let (g0, g1) = (&split_m.graphs[0], &split_m.graphs[1]);
-        assert_eq!(file(&g1.edges[0]).as_deref(), Some("web/a.ts"), "(1) graph 0's ENDPOINT");
-        assert_eq!(file(&g1.edges[1]).as_deref(), Some("a.py"), "(2) graph 0's node");
+        assert_eq!(
+            file(&g1.edges[0]).as_deref(),
+            Some("web/a.ts"),
+            "(1) graph 0's ENDPOINT"
+        );
+        assert_eq!(
+            file(&g1.edges[1]).as_deref(),
+            Some("a.py"),
+            "(2) graph 0's node"
+        );
         assert_eq!(
             Evidence::of(&g0.edges[1]).and_then(|ev| ev.rule).as_deref(),
             Some("occurrence"),
             "(3) the replaced evidence is kept"
         );
         assert_eq!(split_m.graphs[2].edges.len(), 1, "(4)");
-        assert_eq!(file(&g0.edges[2]).as_deref(), Some("web/package.json"), "LB.9b");
+        assert_eq!(
+            file(&g0.edges[2]).as_deref(),
+            Some("web/package.json"),
+            "LB.9b"
+        );
         assert_eq!((head.missing, head.module_file), (1, 1));
-        let evidence_cells = |e: &Edge| e.cells.iter().filter(|c| c.kind == cell_type::EVIDENCE).count();
-        assert_eq!(evidence_cells(&g0.edges[4]), 1, "a filled edge keeps one EVIDENCE cell");
+        let evidence_cells = |e: &Edge| {
+            e.cells
+                .iter()
+                .filter(|c| c.kind == cell_type::EVIDENCE)
+                .count()
+        };
+        assert_eq!(
+            evidence_cells(&g0.edges[4]),
+            1,
+            "a filled edge keeps one EVIDENCE cell"
+        );
         assert_eq!(g0.edges[4].cells.len(), 2, "and its ORIGIN cell");
 
         // A fill that no longer describes its graph (another graph's, here)
@@ -5110,7 +6196,10 @@ mod passes_tests {
             vec![],
             vec![Evidence::emitter("old").to_cell()],
             vec![
-                Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) },
+                Cell {
+                    kind: cell_type::ORIGIN,
+                    payload: CellPayload::Json("{}".into()),
+                },
                 Evidence::emitter("old").to_cell(),
                 Evidence::emitter("older").to_cell(),
             ],

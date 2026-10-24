@@ -132,7 +132,10 @@ impl<'a> MountedHttpResolver<'a> {
     /// per id on `[http] test routes excluded from route index: <n>`. The set
     /// is only probed, so its order never reaches an output.
     pub fn without_routes(self, routes: &'a HashSet<NodeId>) -> Self {
-        Self { without: Some(routes), ..self }
+        Self {
+            without: Some(routes),
+            ..self
+        }
     }
 }
 
@@ -165,7 +168,10 @@ impl HttpStackResolver {
 
     /// This resolver with `mounts` applied, as a [`CrossGraphResolver`].
     pub fn with_mounts(mounts: &RouteMounts) -> MountedHttpResolver<'_> {
-        MountedHttpResolver { mounts, without: None }
+        MountedHttpResolver {
+            mounts,
+            without: None,
+        }
     }
 
     /// Pair every ENDPOINT with the ROUTEs serving it, every mounted ROUTE
@@ -253,11 +259,15 @@ impl HttpStackResolver {
                 // (`weakest(_, Strong)` is the identity); the fuzzy tiers
                 // floor it so a consumer can tell a principled pairing from a
                 // guessed one. LC.3c: the edge's evidence names the tier.
-                let confidence =
-                    weakest(weakest(ep.confidence, target.confidence), tier.ceiling());
+                let confidence = weakest(weakest(ep.confidence, target.confidence), tier.ceiling());
                 edges.push(
-                    Edge::new(ep.id, target.route_id, edge_category::HTTP_CALLS, confidence)
-                        .with_cell(rules.cell(tier.rule())),
+                    Edge::new(
+                        ep.id,
+                        target.route_id,
+                        edge_category::HTTP_CALLS,
+                        confidence,
+                    )
+                    .with_cell(rules.cell(tier.rule())),
                 );
             }
         }
@@ -591,7 +601,10 @@ impl HttpMatchStats {
     /// build (`HttpRouteMatcher`, A10.2) cannot print the line twice.
     fn report_nav_excluded(&self) {
         if self.nav_excluded > 0 {
-            eprintln!("[http] nav-routes excluded from route index: {}", self.nav_excluded);
+            eprintln!(
+                "[http] nav-routes excluded from route index: {}",
+                self.nav_excluded
+            );
         }
     }
 
@@ -601,7 +614,10 @@ impl HttpMatchStats {
     /// [`HttpRouteMatcher`] excludes nothing).
     fn report_test_excluded(&self) {
         if self.test_excluded > 0 {
-            eprintln!("[http] test routes excluded from route index: {}", self.test_excluded);
+            eprintln!(
+                "[http] test routes excluded from route index: {}",
+                self.test_excluded
+            );
         }
     }
 
@@ -839,7 +855,8 @@ fn build_route_index(
             };
             // Every entry is indexed (another graph's entry can stack a verb
             // the first did not), but counted once.
-            let path = index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes);
+            let path =
+                index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes);
             if first {
                 stats.owned_routes += usize::from(target.owner.is_some());
                 if let Some(path) = path {
@@ -942,9 +959,18 @@ impl HttpRouteMatcher {
         let mut scratch = HttpMatchStats::default();
         // A contract pairs DECLARED paths: a gateway mount is not part of an
         // OpenAPI path, so the matcher never sees one (LF.2d).
-        let (index, stripped, _owners) =
-            build_route_index(graphs, &prefixes, &RouteMounts::default(), None, &mut scratch);
-        Self { index, stripped, prefixes }
+        let (index, stripped, _owners) = build_route_index(
+            graphs,
+            &prefixes,
+            &RouteMounts::default(),
+            None,
+            &mut scratch,
+        );
+        Self {
+            index,
+            stripped,
+            prefixes,
+        }
     }
 
     /// No server route anywhere in the build. (`stripped` is only ever filled
@@ -1052,7 +1078,10 @@ fn push_route(
     prefixes: &[String],
 ) {
     let method = method.to_ascii_uppercase();
-    push_target(index.entry((method.clone(), norm.to_string())).or_default(), target);
+    push_target(
+        index.entry((method.clone(), norm.to_string())).or_default(),
+        target,
+    );
     // Every depth, not just the deepest: a route at `/api/v1/orders` must be
     // reachable from a client that says `/v1/orders` as well as one that says
     // `/orders`. Bounded at 2 segments, so this adds at most two entries.
@@ -1191,7 +1220,9 @@ fn fold_kind(seg: &str) -> Option<PlaceholderFold> {
     }
     let name = seg.strip_prefix('*')?;
     let mut chars = name.chars();
-    let starts_ident = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let starts_ident = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
     if starts_ident && chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Some(PlaceholderFold::Splat);
     }
@@ -1307,7 +1338,10 @@ fn lookup_route(
     // as a miss does, so tier 6 sees every endpoint it saw before.
     let fold = match lookup_mount_tail(index, tails, method, folded) {
         MountTail::Unique(targets) => {
-            let hit = targets.into_iter().map(|t| (t, MatchTier::BaseFold)).collect();
+            let hit = targets
+                .into_iter()
+                .map(|t| (t, MatchTier::BaseFold))
+                .collect();
             return (hit, MountFold::Paired);
         }
         MountTail::Ambiguous => MountFold::Ambiguous,
@@ -1372,7 +1406,9 @@ fn build_mount_tails(index: &RouteIndex) -> MountTailIndex {
     let mut out: MountTailIndex = HashMap::new();
     for (method, path) in index.keys() {
         for tail in mount_tails(path) {
-            out.entry((method.clone(), tail)).or_default().insert(path.clone());
+            out.entry((method.clone(), tail))
+                .or_default()
+                .insert(path.clone());
         }
     }
     out
@@ -1422,7 +1458,11 @@ fn lookup_mount_tail(
         };
         let mut targets: Vec<RouteTarget> = Vec::new();
         for path in paths {
-            for t in index.get(&(m.to_string(), path.clone())).into_iter().flatten() {
+            for t in index
+                .get(&(m.to_string(), path.clone()))
+                .into_iter()
+                .flatten()
+            {
                 push_target(&mut targets, *t);
             }
         }
@@ -1496,10 +1536,7 @@ fn literal_suffixes(path: &str) -> Vec<String> {
 }
 
 /// Relabel an inner tier-1..4 hit with the outer tier that reached it.
-fn retier(
-    hit: Vec<(RouteTarget, MatchTier)>,
-    tier: MatchTier,
-) -> Vec<(RouteTarget, MatchTier)> {
+fn retier(hit: Vec<(RouteTarget, MatchTier)>, tier: MatchTier) -> Vec<(RouteTarget, MatchTier)> {
     hit.into_iter().map(|(t, _)| (t, tier)).collect()
 }
 
@@ -1533,7 +1570,10 @@ mod tests {
         assert_eq!(normalise_http_path("/users/:id"), "/users/{}");
         assert_eq!(normalise_http_path("/users/{id}"), "/users/{}");
         assert_eq!(normalise_http_path("/users/${…}"), "/users/{}");
-        assert_eq!(normalise_http_path("/api/users/:id/posts/:pid"), "/api/users/{}/posts/{}");
+        assert_eq!(
+            normalise_http_path("/api/users/:id/posts/:pid"),
+            "/api/users/{}/posts/{}"
+        );
         assert_eq!(normalise_http_path("users/list"), "/users/list");
         assert_eq!(normalise_http_path("/users/list/"), "/users/list");
         assert_eq!(normalise_http_path("//double//slash"), "/double/slash");
@@ -1546,13 +1586,23 @@ mod tests {
         assert_eq!(normalise_http_path("/users/<uid>/posts"), "/users/{}/posts");
         // A3.2 — Rails / Express 5 named splat.
         assert_eq!(normalise_http_path("/files/*path"), "/files/{}");
-        assert_eq!(normalise_http_path("/files/*rest_of/edit"), "/files/{}/edit");
+        assert_eq!(
+            normalise_http_path("/files/*rest_of/edit"),
+            "/files/{}/edit"
+        );
         // A3.2 — Next.js / SvelteKit dynamic segments.
         assert_eq!(normalise_http_path("/blog/[slug]"), "/blog/{}");
         assert_eq!(normalise_http_path("/blog/[...slug]"), "/blog/{}");
         assert_eq!(normalise_http_path("/docs/[[...slug]]"), "/docs/{}");
         // Every spelling of one parameter lands on the same key.
-        for p in ["/u/:id", "/u/{id}", "/u/${…}", "/u/<int:id>", "/u/*id", "/u/[id]"] {
+        for p in [
+            "/u/:id",
+            "/u/{id}",
+            "/u/${…}",
+            "/u/<int:id>",
+            "/u/*id",
+            "/u/[id]",
+        ] {
             assert_eq!(normalise_http_path(p), "/u/{}", "{p}");
         }
     }
@@ -1604,10 +1654,20 @@ mod tests {
         let mut add = |kind, qname: &str, cells: Vec<Cell>| {
             let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
             nav.record(id, qname, qname, kind, None);
-            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells });
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells,
+            });
             id
         };
-        let get = || vec![Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) }];
+        let get = || {
+            vec![Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Text("GET".into()),
+            }]
+        };
         let flask = add(node_kind::ROUTE, "GET /users/<int:uid>", get());
         let rails = add(node_kind::ROUTE, "GET /files/*path", get());
         let next = add(node_kind::ROUTE, "GET /blog/[slug]", get());
@@ -1637,12 +1697,18 @@ mod tests {
             .collect();
         let got: std::collections::HashSet<_> = pairs.iter().copied().collect();
         let want: std::collections::HashSet<_> =
-            [(user_call, flask), (file_call, rails), (blog_call, next)].into_iter().collect();
+            [(user_call, flask), (file_call, rails), (blog_call, next)]
+                .into_iter()
+                .collect();
         // Exactly these three, once each: no cross-pairing between the folded
         // keys, and nothing reaches the bare `*` catch-all.
         assert_eq!(pairs.len(), 3);
         assert_eq!(got, want);
-        assert!(!pairs.iter().any(|(from, to)| *from == static_call || *to == catch_all));
+        assert!(
+            !pairs
+                .iter()
+                .any(|(from, to)| *from == static_call || *to == catch_all)
+        );
     }
 
     #[test]
@@ -1679,14 +1745,31 @@ mod tests {
         let (g, ids) = repo_graph(
             repo,
             vec![
-                (node_kind::ENDPOINT, "endpoint:GET:/health @web", vec![hit(r#"{"method":"GET"}"#)]),
-                (node_kind::ROUTE, "GET /health @services/admin", vec![text_get()]),
-                (node_kind::ROUTE, "route:/health @services/users", get_route()),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @web",
+                    vec![hit(r#"{"method":"GET"}"#)],
+                ),
+                (
+                    node_kind::ROUTE,
+                    "GET /health @services/admin",
+                    vec![text_get()],
+                ),
+                (
+                    node_kind::ROUTE,
+                    "route:/health @services/users",
+                    get_route(),
+                ),
             ],
         );
         let mut stats = HttpMatchStats::default();
-        let (index, _, owners) =
-            build_route_index(std::slice::from_ref(&g), &[], &RouteMounts::default(), None, &mut stats);
+        let (index, _, owners) = build_route_index(
+            std::slice::from_ref(&g),
+            &[],
+            &RouteMounts::default(),
+            None,
+            &mut stats,
+        );
         let targets = index
             .get(&("GET".to_string(), "/health".to_string()))
             .map(Vec::as_slice)
@@ -1696,11 +1779,17 @@ mod tests {
             .map(|t| (t.route_id.0, t.owner.and_then(|i| owners.name(i))))
             .collect();
         got.sort();
-        let mut want = vec![(ids[1].0, Some("services/admin")), (ids[2].0, Some("services/users"))];
+        let mut want = vec![
+            (ids[1].0, Some("services/admin")),
+            (ids[2].0, Some("services/users")),
+        ];
         want.sort();
         assert_eq!(got, want);
         assert_eq!((stats.owned_routes, owners.len()), (2, 2));
-        assert!(stats.qnames.offenders.is_empty(), "the owner is not judged as path");
+        assert!(
+            stats.qnames.offenders.is_empty(),
+            "the owner is not judged as path"
+        );
 
         let mut merged = MergedGraph::new(vec![g]);
         HttpStackResolver.resolve(&mut merged);
@@ -1717,7 +1806,10 @@ mod tests {
     }
 
     fn text_get() -> Cell {
-        Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) }
+        Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Text("GET".into()),
+        }
     }
 
     #[test]
@@ -1729,7 +1821,10 @@ mod tests {
             vec!["/v1/orders".to_string(), "/orders".to_string()]
         );
         // Stops at the first non-prefix segment.
-        assert_eq!(strip_api_prefixes("/users/api", &default), Vec::<String>::new());
+        assert_eq!(
+            strip_api_prefixes("/users/api", &default),
+            Vec::<String>::new()
+        );
         // Never strips the last segment — `/api` stays `/api`.
         assert_eq!(strip_api_prefixes("/api", &default), Vec::<String>::new());
         // Bounded at two segments, exactly as the pre-A3.1 loop was.
@@ -1744,7 +1839,10 @@ mod tests {
             strip_api_prefixes("/gateway/orders", &custom),
             vec!["/orders".to_string()]
         );
-        assert_eq!(strip_api_prefixes("/api/orders", &custom), Vec::<String>::new());
+        assert_eq!(
+            strip_api_prefixes("/api/orders", &custom),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -1764,7 +1862,10 @@ mod tests {
         );
         // A tail of nothing but `{}` would match essentially any route.
         assert_eq!(literal_suffixes("/users/{}"), Vec::<String>::new());
-        assert_eq!(literal_suffixes("/a/{}/users"), vec!["/{}/users".to_string(), "/users".to_string()]);
+        assert_eq!(
+            literal_suffixes("/a/{}/users"),
+            vec!["/{}/users".to_string(), "/users".to_string()]
+        );
         // Single segment: no proper suffix at all.
         assert_eq!(literal_suffixes("/users"), Vec::<String>::new());
     }
@@ -1808,16 +1909,28 @@ mod tests {
         let mut add = |qname: &str, confidence: Confidence, cells: Vec<Cell>| {
             let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, qname);
             nav.record(id, qname, qname, node_kind::ROUTE, None);
-            nodes.push(Node { id, repo: r, confidence, cells });
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence,
+                cells,
+            });
             id
         };
-        let text = |m: &str| Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(m.into()) };
+        let text = |m: &str| Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Text(m.into()),
+        };
         let json = |m: &str| Cell {
             kind: cell_type::ROUTE_METHOD,
             payload: CellPayload::Json(format!(r#"{{"method":"{m}"}}"#)),
         };
         let users = add("GET /users", Confidence::Strong, vec![text("GET")]);
-        let orders = add("route:/api/orders/:id", Confidence::Strong, vec![json("POST")]);
+        let orders = add(
+            "route:/api/orders/:id",
+            Confidence::Strong,
+            vec![json("POST")],
+        );
         let health = add("ANY /health", Confidence::Medium, vec![text("ANY")]);
         let nav_route = add(
             "route:/dashboard",
@@ -1849,11 +1962,19 @@ mod tests {
         let m = HttpRouteMatcher::new(std::slice::from_ref(&g));
         assert!(!m.is_empty());
         let hit = |route, confidence, exact, tier| {
-            vec![RouteMatch { route, confidence, exact, tier }]
+            vec![RouteMatch {
+                route,
+                confidence,
+                exact,
+                tier,
+            }]
         };
 
         // Tier 1, legacy `<METHOD> <path>` shape. Method is case-folded.
-        assert_eq!(m.lookup("get", "/users"), hit(users, Confidence::Strong, true, "exact"));
+        assert_eq!(
+            m.lookup("get", "/users"),
+            hit(users, Confidence::Strong, true, "exact")
+        );
         // Tier 1, `route:` shape; any param spelling normalises the same way.
         assert_eq!(
             m.lookup("POST", "/api/orders/{id}"),
@@ -1871,7 +1992,10 @@ mod tests {
         );
         // Tier 3: an ANY route serves every verb, but is not an exact hit, and
         // the route's own Medium confidence is kept.
-        assert_eq!(m.lookup("DELETE", "/health"), hit(health, Confidence::Medium, false, "any"));
+        assert_eq!(
+            m.lookup("DELETE", "/health"),
+            hit(health, Confidence::Medium, false, "any")
+        );
     }
 
     /// LD.8b — `RouteMatch::tier` names the tier, so `serves` can say a route
@@ -1888,8 +2012,16 @@ mod tests {
         for (qname, verb) in [("GET /users", "GET"), ("ANY /posts", "ANY")] {
             let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, qname);
             nav.record(id, qname, qname, node_kind::ROUTE, None);
-            let cell = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(verb.into()) };
-            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![cell] });
+            let cell = Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Text(verb.into()),
+            };
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![cell],
+            });
         }
         let g = RepoGraph {
             repo: r,
@@ -1946,7 +2078,12 @@ mod tests {
         for (kind, qname, cells) in specs {
             let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
             nav.record(id, qname, qname, kind, None);
-            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells,
+            });
             ids.push(id);
         }
         let g = RepoGraph {
@@ -1970,13 +2107,19 @@ mod tests {
     }
 
     fn hit(json: &str) -> Cell {
-        Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.into()) }
+        Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.into()),
+        }
     }
 
     /// web (one ENDPOINT carrying `hits`), users (`route:/users` + the
     /// `infra:service:users-service` alias) and orders (`route:/users`, no
     /// alias). Returns the HTTP_CALLS targets and the two route ids.
-    fn pair_web_users_orders(hits: Vec<Cell>, orders_infra: &[&str]) -> (Vec<NodeId>, NodeId, NodeId) {
+    fn pair_web_users_orders(
+        hits: Vec<Cell>,
+        orders_infra: &[&str],
+    ) -> (Vec<NodeId>, NodeId, NodeId) {
         let (web, _) = repo_graph(
             RepoId(401),
             vec![(node_kind::ENDPOINT, "endpoint:GET:/users", hits)],
@@ -1985,11 +2128,19 @@ mod tests {
             RepoId(402),
             vec![
                 (node_kind::ROUTE, "route:/users", get_route()),
-                (node_kind::INFRA_RESOURCE, "infra:service:users-service", vec![]),
+                (
+                    node_kind::INFRA_RESOURCE,
+                    "infra:service:users-service",
+                    vec![],
+                ),
             ],
         );
         let mut orders_specs = vec![(node_kind::ROUTE, "route:/users", get_route())];
-        orders_specs.extend(orders_infra.iter().map(|q| (node_kind::INFRA_RESOURCE, *q, vec![])));
+        orders_specs.extend(
+            orders_infra
+                .iter()
+                .map(|q| (node_kind::INFRA_RESOURCE, *q, vec![])),
+        );
         let (orders, o) = repo_graph(RepoId(403), orders_specs);
         let mut merged = MergedGraph::new(vec![web, users, orders]);
         HttpStackResolver.resolve(&mut merged);
@@ -2028,8 +2179,10 @@ mod tests {
                 (node_kind::ROUTE, "GET /boom", vec![text_get()]),
             ],
         );
-        let (other, users2) =
-            repo_graph(RepoId(613), vec![(node_kind::ROUTE, "GET /users", vec![text_get()])]);
+        let (other, users2) = repo_graph(
+            RepoId(613),
+            vec![(node_kind::ROUTE, "GET /users", vec![text_get()])],
+        );
         routes.extend(users2);
         let mut merged = MergedGraph::new(vec![web, server, other]);
         let mounts = RouteMounts::default();
@@ -2066,7 +2219,10 @@ mod tests {
         assert_eq!(kept, vec![(users, r[3])]);
 
         // Counted once per id, however many entries carry it.
-        let (mut g, ids) = repo_graph(RepoId(614), vec![(node_kind::ROUTE, "GET /x", vec![text_get()])]);
+        let (mut g, ids) = repo_graph(
+            RepoId(614),
+            vec![(node_kind::ROUTE, "GET /x", vec![text_get()])],
+        );
         let dup = g.nodes[0].clone();
         g.nodes.push(dup);
         let one: HashSet<NodeId> = ids.iter().copied().collect();
@@ -2109,7 +2265,9 @@ mod tests {
                 0 => HttpStackResolver.resolve(&mut merged),
                 1 => HttpStackResolver.resolve_with_mounts(&mut merged, &mounts),
                 2 => HttpStackResolver::with_mounts(&mounts).resolve(&mut merged),
-                _ => HttpStackResolver::with_mounts(&mounts).without_routes(&none).resolve(&mut merged),
+                _ => HttpStackResolver::with_mounts(&mounts)
+                    .without_routes(&none)
+                    .resolve(&mut merged),
             }
             merged.cross_edges
         };
@@ -2123,7 +2281,9 @@ mod tests {
     #[test]
     fn host_naming_a_service_keeps_only_that_services_route() {
         let (to, users, orders) = pair_web_users_orders(
-            vec![hit(r#"{"method":"GET","path":"/users","host":"users-service:8080"}"#)],
+            vec![hit(
+                r#"{"method":"GET","path":"/users","host":"users-service:8080"}"#,
+            )],
             &[],
         );
         assert_ne!(users, orders, "RepoId is part of the route id");
@@ -2151,18 +2311,41 @@ mod tests {
         // A public dotted host is never cut down to its first label.
         assert_eq!(both(vec![hit(r#"{"host":"users.example.com"}"#)], &[]), 2);
         // The alias is declared by both repos: a genuine ambiguity.
-        assert_eq!(both(vec![hit(r#"{"host":"users-service"}"#)], &["infra:image:users"]), 2);
+        assert_eq!(
+            both(
+                vec![hit(r#"{"host":"users-service"}"#)],
+                &["infra:image:users"]
+            ),
+            2
+        );
         // One call site names users, a second names nothing.
         assert_eq!(
-            both(vec![hit(r#"{"host":"users-service"}"#), hit(r#"{"path":"/users"}"#)], &[]),
+            both(
+                vec![
+                    hit(r#"{"host":"users-service"}"#),
+                    hit(r#"{"path":"/users"}"#)
+                ],
+                &[]
+            ),
             2
         );
         // One deployment names users, another has a relative base.
-        assert_eq!(both(vec![hit(r#"{"host":"users-service","hosts":["users-service",""]}"#)], &[]), 2);
+        assert_eq!(
+            both(
+                vec![hit(
+                    r#"{"host":"users-service","hosts":["users-service",""]}"#
+                )],
+                &[]
+            ),
+            2
+        );
         // A non-JSON hit is no evidence.
         assert_eq!(
             both(
-                vec![Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("users-service".into()) }],
+                vec![Cell {
+                    kind: cell_type::ENDPOINT_HIT,
+                    payload: CellPayload::Text("users-service".into())
+                }],
                 &[]
             ),
             2
@@ -2174,12 +2357,17 @@ mod tests {
     #[test]
     fn several_hosts_narrow_to_the_union_of_their_owners() {
         let (to, _, _) = pair_web_users_orders(
-            vec![hit(r#"{"host":"users-service"}"#), hit(r#"{"host":"orders"}"#)],
+            vec![
+                hit(r#"{"host":"users-service"}"#),
+                hit(r#"{"host":"orders"}"#),
+            ],
             &["infra:deployment:orders-svc"],
         );
         assert_eq!(to.len(), 2);
         let (to, _, _) = pair_web_users_orders(
-            vec![hit(r#"{"host":"users-svc","hosts":["users-svc","users.default.svc.cluster.local:80"]}"#)],
+            vec![hit(
+                r#"{"host":"users-svc","hosts":["users-svc","users.default.svc.cluster.local:80"]}"#,
+            )],
             &["infra:deployment:orders-svc"],
         );
         assert_eq!(to.len(), 1);
@@ -2224,15 +2412,24 @@ mod tests {
         ]);
 
         let mut hits = vec![t(1, 1), t(2, 2)];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("payments:80")), &mut hits), Narrowed::No);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("payments:80")), &mut hits),
+            Narrowed::No
+        );
         assert_eq!(hits.len(), 2);
 
         let mut hits = vec![t(2, 2)];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::No);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users")), &mut hits),
+            Narrowed::No
+        );
         assert_eq!(hits.len(), 1, "a lone hit in another repo is kept");
 
         let mut hits = vec![t(1, 1), t(2, 2), t(3, 1)];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users-svc:80")), &mut hits), Narrowed::Repo);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users-svc:80")), &mut hits),
+            Narrowed::Repo
+        );
         assert_eq!(kept(&hits), vec![1, 3], "order is kept");
         assert!(hits.iter().all(|(_, tier)| *tier == MatchTier::Exact));
     }
@@ -2247,24 +2444,40 @@ mod tests {
             ("users", &[(RepoId(7), Some(users))]),
         ]);
         let mut hits = vec![target(1, 7, Some(admin)), target(2, 7, Some(users))];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users-svc:8080")), &mut hits), Narrowed::Owner);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users-svc:8080")), &mut hits),
+            Narrowed::Owner
+        );
         assert_eq!(kept(&hits), vec![2]);
 
         // A root-level route of the same repo (no owner) is not in the users
         // project either.
-        let mut hits = vec![target(1, 7, None), target(2, 7, Some(users)), target(3, 7, Some(admin))];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::Owner);
+        let mut hits = vec![
+            target(1, 7, None),
+            target(2, 7, Some(users)),
+            target(3, 7, Some(admin)),
+        ];
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users")), &mut hits),
+            Narrowed::Owner
+        );
         assert_eq!(kept(&hits), vec![2]);
 
         // Hosts naming both projects keep both: nothing is cut.
         let mut hits = vec![target(1, 7, Some(admin)), target(2, 7, Some(users))];
         let both = vec!["users".to_string(), "admin-api".to_string()];
-        assert_eq!(narrow_by_host(&aliases, Some(&both), &mut hits), Narrowed::No);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&both), &mut hits),
+            Narrowed::No
+        );
         assert_eq!(hits.len(), 2);
 
         // The same project index in ANOTHER repo is a different project.
         let mut hits = vec![target(1, 8, Some(users)), target(2, 8, Some(admin))];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::No);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users")), &mut hits),
+            Narrowed::No
+        );
         assert_eq!(hits.len(), 2);
     }
 
@@ -2274,15 +2487,29 @@ mod tests {
     #[test]
     fn repo_level_alias_keeps_every_owner() {
         let aliases = alias_index(&[("users", &[(RepoId(7), None)])]);
-        let mut hits =
-            vec![target(1, 7, Some(0)), target(2, 8, None), target(3, 7, Some(1)), target(4, 7, None)];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users-service")), &mut hits), Narrowed::Repo);
+        let mut hits = vec![
+            target(1, 7, Some(0)),
+            target(2, 8, None),
+            target(3, 7, Some(1)),
+            target(4, 7, None),
+        ];
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users-service")), &mut hits),
+            Narrowed::Repo
+        );
         assert_eq!(kept(&hits), vec![1, 3, 4]);
 
         // A repo-level scope and a project scope of another repo: the union.
         let aliases = alias_index(&[("users", &[(RepoId(7), None), (RepoId(8), Some(2))])]);
-        let mut hits = vec![target(1, 7, Some(0)), target(2, 8, Some(2)), target(3, 8, Some(3))];
-        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::Owner);
+        let mut hits = vec![
+            target(1, 7, Some(0)),
+            target(2, 8, Some(2)),
+            target(3, 8, Some(3)),
+        ];
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&host("users")), &mut hits),
+            Narrowed::Owner
+        );
         assert_eq!(kept(&hits), vec![1, 2]);
     }
 
@@ -2295,7 +2522,13 @@ mod tests {
             // A project that serves no route: known, scoped to nothing.
             ("web", &[]),
         ]);
-        let three = || vec![target(1, 7, Some(0)), target(2, 7, Some(1)), target(3, 8, None)];
+        let three = || {
+            vec![
+                target(1, 7, Some(0)),
+                target(2, 7, Some(1)),
+                target(3, 8, None),
+            ]
+        };
         for hosts in [
             vec!["billing:9000".to_string()],
             vec!["users".to_string(), "billing".to_string()],
@@ -2303,7 +2536,11 @@ mod tests {
             vec!["web".to_string()],
         ] {
             let mut hits = three();
-            assert_eq!(narrow_by_host(&aliases, Some(&hosts), &mut hits), Narrowed::No, "{hosts:?}");
+            assert_eq!(
+                narrow_by_host(&aliases, Some(&hosts), &mut hits),
+                Narrowed::No,
+                "{hosts:?}"
+            );
             assert_eq!(hits.len(), 3, "{hosts:?}");
         }
         let mut hits = three();
@@ -2312,7 +2549,10 @@ mod tests {
         // A known-but-empty name does not block the other host's evidence.
         let mut hits = three();
         let web_or_users = vec!["web".to_string(), "users".to_string()];
-        assert_eq!(narrow_by_host(&aliases, Some(&web_or_users), &mut hits), Narrowed::Owner);
+        assert_eq!(
+            narrow_by_host(&aliases, Some(&web_or_users), &mut hits),
+            Narrowed::Owner
+        );
         assert_eq!(kept(&hits), vec![2]);
     }
 
@@ -2326,9 +2566,21 @@ mod tests {
         let (code, ids) = repo_graph(
             r,
             vec![
-                (node_kind::ENDPOINT, "endpoint:GET:/health @web", vec![hit_users]),
-                (node_kind::ROUTE, "GET /health @services/admin", vec![text_get()]),
-                (node_kind::ROUTE, "GET /health @services/users", vec![text_get()]),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @web",
+                    vec![hit_users],
+                ),
+                (
+                    node_kind::ROUTE,
+                    "GET /health @services/admin",
+                    vec![text_get()],
+                ),
+                (
+                    node_kind::ROUTE,
+                    "GET /health @services/users",
+                    vec![text_get()],
+                ),
             ],
         );
         let (mut projects, pids) = repo_graph(
@@ -2364,14 +2616,22 @@ mod tests {
         let (mut ts, ids) = repo_graph(
             r,
             vec![
-                (node_kind::ENDPOINT, "endpoint:GET:/user/2fa", vec![hit(r#"{"host":"users"}"#)]),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/user/2fa",
+                    vec![hit(r#"{"host":"users"}"#)],
+                ),
                 (node_kind::ROUTE, "route:/user/2fa", twice),
             ],
         );
         let (mut dart, _) = repo_graph(
             r,
             vec![
-                (node_kind::ENDPOINT, "endpoint:GET:/user/2fa", vec![hit(r#"{"path":"/user/2fa"}"#)]),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/user/2fa",
+                    vec![hit(r#"{"path":"/user/2fa"}"#)],
+                ),
                 (node_kind::ROUTE, "route:/user/2fa", get_route()),
             ],
         );
@@ -2386,7 +2646,11 @@ mod tests {
             .collect();
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!((calls[0].from, calls[0].to), (ids[0], ids[1]));
-        assert_eq!(calls[0].confidence, Confidence::Medium, "the strongest entry wins");
+        assert_eq!(
+            calls[0].confidence,
+            Confidence::Medium,
+            "the strongest entry wins"
+        );
 
         let endpoints = collect_endpoints(&merged.graphs);
         assert_eq!(endpoints.len(), 1);
@@ -2397,9 +2661,20 @@ mod tests {
         assert_eq!(hit_hosts(endpoints[0].cells.iter().copied()), None);
         // The route is counted, and indexed, once.
         let mut stats = HttpMatchStats::default();
-        let (index, _, _) = build_route_index(&merged.graphs, &[], &RouteMounts::default(), None, &mut stats);
+        let (index, _, _) = build_route_index(
+            &merged.graphs,
+            &[],
+            &RouteMounts::default(),
+            None,
+            &mut stats,
+        );
         assert_eq!(stats.routes, 1);
-        assert_eq!(index.get(&("GET".to_string(), "/user/2fa".to_string())).map(Vec::len), Some(1));
+        assert_eq!(
+            index
+                .get(&("GET".to_string(), "/user/2fa".to_string()))
+                .map(Vec::len),
+            Some(1)
+        );
     }
 
     /// CG.4b (CA-13): a web repo whose ENDPOINT `endpoint:GET:/search` carries
@@ -2407,7 +2682,10 @@ mod tests {
     /// PROJECT labelled `project`. Returns the HTTP_CALLS count and what
     /// [`third_party_hosts`] said of the endpoint over the same alias index.
     fn pair_search(hits: Vec<Cell>, project: &str) -> (usize, Option<Vec<String>>) {
-        let (web, _) = repo_graph(RepoId(501), vec![(node_kind::ENDPOINT, "endpoint:GET:/search", hits)]);
+        let (web, _) = repo_graph(
+            RepoId(501),
+            vec![(node_kind::ENDPOINT, "endpoint:GET:/search", hits)],
+        );
         let (mut server, ids) = repo_graph(
             RepoId(502),
             vec![
@@ -2442,15 +2720,25 @@ mod tests {
     fn external_endpoint_is_left_unpaired() {
         let nominatim = r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org","external":true}"#;
         let (calls, hosts) = pair_search(vec![hit(nominatim), hit(nominatim)], "backend");
-        assert_eq!(calls, 0, "a third-party /search is not the app's GET /search");
-        assert_eq!(hosts, Some(vec!["nominatim.openstreetmap.org".to_string()]), "hosts once");
+        assert_eq!(
+            calls, 0,
+            "a third-party /search is not the app's GET /search"
+        );
+        assert_eq!(
+            hosts,
+            Some(vec!["nominatim.openstreetmap.org".to_string()]),
+            "hosts once"
+        );
 
         // The same site without the mark pairs.
         let plain = r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org"}"#;
         assert_eq!(pair_search(vec![hit(plain)], "backend"), (1, None));
 
         // One marked site and one unmarked: not every site is external.
-        assert_eq!(pair_search(vec![hit(nominatim), hit(plain)], "backend"), (1, None));
+        assert_eq!(
+            pair_search(vec![hit(nominatim), hit(plain)], "backend"),
+            (1, None)
+        );
 
         // A marked host whose non-generic label names a project of the build
         // (`api.shop.io` -> `shop`) is the build's own backend.
@@ -2462,12 +2750,19 @@ mod tests {
         // `<unresolved>` is skipped before the mark is read, as it always was.
         let (g, _) = repo_graph(
             RepoId(503),
-            vec![(node_kind::ENDPOINT, "endpoint:GET:<unresolved>", vec![hit(nominatim)])],
+            vec![(
+                node_kind::ENDPOINT,
+                "endpoint:GET:<unresolved>",
+                vec![hit(nominatim)],
+            )],
         );
         assert!(HttpStackResolver::third_party_endpoints(&[g]).is_empty());
 
         // A non-JSON hit is never a marked site.
-        let text = Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("external".into()) };
+        let text = Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Text("external".into()),
+        };
         assert!(!all_sites_external(&[text]));
         assert!(!all_sites_external(&[]), "no hit, no mark");
     }
@@ -2477,10 +2772,22 @@ mod tests {
         let aliases = alias_index(&[("shop", &[]), ("users", &[(RepoId(1), None)])]);
         assert!(host_names_an_alias(&aliases, "api.shop.io"));
         assert!(host_names_an_alias(&aliases, "www.SHOP.com:443"));
-        assert!(host_names_an_alias(&aliases, "users-api.example.io"), "normalised: users-api -> users");
-        assert!(host_names_an_alias(&aliases, "users"), "the whole host, as narrowing reads it");
-        assert!(!host_names_an_alias(&aliases, "nominatim.openstreetmap.org"));
-        assert!(!host_names_an_alias(&aliases, "api.example.shop"), "the TLD is never a name");
+        assert!(
+            host_names_an_alias(&aliases, "users-api.example.io"),
+            "normalised: users-api -> users"
+        );
+        assert!(
+            host_names_an_alias(&aliases, "users"),
+            "the whole host, as narrowing reads it"
+        );
+        assert!(!host_names_an_alias(
+            &aliases,
+            "nominatim.openstreetmap.org"
+        ));
+        assert!(
+            !host_names_an_alias(&aliases, "api.example.shop"),
+            "the TLD is never a name"
+        );
         let generic = alias_index(&[("app", &[]), ("api", &[])]);
         assert!(!host_names_an_alias(&generic, "app.acme.io"));
         assert!(!host_names_an_alias(&generic, "api.acme.io"));
@@ -2505,7 +2812,10 @@ mod tests {
         // No raw, a non-JSON cell, and a raw on the wrong cell kind: ignored.
         stats.count_client_normalised(&[
             hit(r#"{"path":"/users"}"#),
-            Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("raw".into()) },
+            Cell {
+                kind: cell_type::ENDPOINT_HIT,
+                payload: CellPayload::Text("raw".into()),
+            },
             Cell {
                 kind: cell_type::ROUTE_METHOD,
                 payload: CellPayload::Json(r#"{"raw":"https://x/y?z"}"#.into()),
@@ -2576,8 +2886,16 @@ mod tests {
             let (web, _) = repo_graph(
                 RepoId(501),
                 vec![
-                    (node_kind::ENDPOINT, "endpoint:GET:/orders-svc/users", vec![hit("{}")]),
-                    (node_kind::ENDPOINT, "endpoint:GET:/orders-svc/orders", vec![hit("{}")]),
+                    (
+                        node_kind::ENDPOINT,
+                        "endpoint:GET:/orders-svc/users",
+                        vec![hit("{}")],
+                    ),
+                    (
+                        node_kind::ENDPOINT,
+                        "endpoint:GET:/orders-svc/orders",
+                        vec![hit("{}")],
+                    ),
                     (node_kind::ENDPOINT, "endpoint:GET:/users", vec![hit("{}")]),
                 ],
             );
@@ -2589,7 +2907,8 @@ mod tests {
                     (node_kind::ROUTE, "route:/orders", get_route()),
                 ],
             );
-            let (billing, b) = repo_graph(RepoId(503), vec![(node_kind::ROUTE, "GET /users", vec![])]);
+            let (billing, b) =
+                repo_graph(RepoId(503), vec![(node_kind::ROUTE, "GET /users", vec![])]);
             (MergedGraph::new(vec![web, orders, billing]), o, b[0])
         };
         let pairs = |m: &MergedGraph| -> Vec<(String, NodeId, Confidence, Option<String>)> {
@@ -2598,7 +2917,12 @@ mod tests {
                 .iter()
                 .filter(|e| e.category == edge_category::HTTP_CALLS)
                 .map(|e| {
-                    let from = m.graphs[0].nav.qname_by_id.get(&e.from).cloned().unwrap_or_default();
+                    let from = m.graphs[0]
+                        .nav
+                        .qname_by_id
+                        .get(&e.from)
+                        .cloned()
+                        .unwrap_or_default();
                     let rule = glia_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule);
                     (from, e.to, e.confidence, rule)
                 })
@@ -2620,7 +2944,10 @@ mod tests {
         mounts.add(o[1], "/orders-svc/", Confidence::Weak);
         mounts.add(o[1], "/orders-svc/", Confidence::Medium);
         assert_eq!(mounts.routes(), 2);
-        assert_eq!(mounts.of(o[1]), [("/orders-svc/".to_string(), Confidence::Medium)]);
+        assert_eq!(
+            mounts.of(o[1]),
+            [("/orders-svc/".to_string(), Confidence::Medium)]
+        );
         assert!(mounts.of(billing).is_empty());
 
         let (mut mounted, _, _) = build();
@@ -2630,10 +2957,30 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("endpoint:GET:/orders-svc/orders".to_string(), o[1], Confidence::Medium, exact.clone()),
-                ("endpoint:GET:/orders-svc/users".to_string(), o[0], Confidence::Weak, exact.clone()),
-                ("endpoint:GET:/users".to_string(), o[0], Confidence::Strong, exact.clone()),
-                ("endpoint:GET:/users".to_string(), billing, Confidence::Strong, exact),
+                (
+                    "endpoint:GET:/orders-svc/orders".to_string(),
+                    o[1],
+                    Confidence::Medium,
+                    exact.clone()
+                ),
+                (
+                    "endpoint:GET:/orders-svc/users".to_string(),
+                    o[0],
+                    Confidence::Weak,
+                    exact.clone()
+                ),
+                (
+                    "endpoint:GET:/users".to_string(),
+                    o[0],
+                    Confidence::Strong,
+                    exact.clone()
+                ),
+                (
+                    "endpoint:GET:/users".to_string(),
+                    billing,
+                    Confidence::Strong,
+                    exact
+                ),
             ],
             "the mounted keys pair the orders routes only, at the mount's confidence; \
              the routes' own keys are untouched"
@@ -2641,17 +2988,31 @@ mod tests {
 
         // The mounted index: keys land in the strong index only, counted.
         let mut stats = HttpMatchStats::default();
-        let (index, stripped, _) = build_route_index(&mounted.graphs, &["api".to_string()], &mounts, None, &mut stats);
+        let (index, stripped, _) = build_route_index(
+            &mounted.graphs,
+            &["api".to_string()],
+            &mounts,
+            None,
+            &mut stats,
+        );
         assert_eq!((stats.mount_routes, stats.mount_keys), (2, 2));
         let key = ("GET".to_string(), "/orders-svc/users".to_string());
         let hit = index.get(&key).expect("mounted key");
         assert_eq!(hit.len(), 1);
         assert!(hit[0].mounted && hit[0].route_id == o[0] && hit[0].confidence == Confidence::Weak);
         assert!(!stripped.contains_key(&key));
-        assert!(index.get(&("GET".to_string(), "/users".to_string())).is_some_and(|t| t.iter().all(|t| !t.mounted)));
+        assert!(
+            index
+                .get(&("GET".to_string(), "/users".to_string()))
+                .is_some_and(|t| t.iter().all(|t| !t.mounted))
+        );
 
         // The contract matcher pairs declared paths only.
-        assert!(HttpRouteMatcher::new(&mounted.graphs).lookup("GET", "/orders-svc/users").is_empty());
+        assert!(
+            HttpRouteMatcher::new(&mounted.graphs)
+                .lookup("GET", "/orders-svc/users")
+                .is_empty()
+        );
     }
 
     // ---- CB.23 mount-segment fold ----------------------------------------
@@ -2659,7 +3020,10 @@ mod tests {
     #[test]
     fn mount_tails_stop_at_placeholder_mounts_and_wildcard_tails() {
         let tails = |p: &str| mount_tails(p);
-        assert_eq!(tails("/admin/users/{}/status"), ["/users/{}/status", "/{}/status"]);
+        assert_eq!(
+            tails("/admin/users/{}/status"),
+            ["/users/{}/status", "/{}/status"]
+        );
         assert_eq!(
             tails("/back/office/audit/log"),
             ["/office/audit/log", "/audit/log", "/log"]
@@ -2681,7 +3045,10 @@ mod tests {
         routes: &[&str],
         mounts: &[(usize, &str)],
     ) -> impl Fn(&str, &str) -> (Vec<(String, &'static str)>, MountFold) {
-        let specs = routes.iter().map(|q| (node_kind::ROUTE, *q, vec![])).collect();
+        let specs = routes
+            .iter()
+            .map(|q| (node_kind::ROUTE, *q, vec![]))
+            .collect();
         let (g, ids) = repo_graph(RepoId(610), specs);
         let mut gateway = RouteMounts::default();
         for (i, prefix) in mounts {
@@ -2689,8 +3056,13 @@ mod tests {
         }
         let prefixes = vec!["api".to_string()];
         let mut stats = HttpMatchStats::default();
-        let (index, stripped, _) =
-            build_route_index(std::slice::from_ref(&g), &prefixes, &gateway, None, &mut stats);
+        let (index, stripped, _) = build_route_index(
+            std::slice::from_ref(&g),
+            &prefixes,
+            &gateway,
+            None,
+            &mut stats,
+        );
         let tails = build_mount_tails(&index);
         let qnames = g.nav.qname_by_id.clone();
         move |method, path| {
@@ -2698,7 +3070,12 @@ mod tests {
             let (hits, fold) = lookup_route(&index, &stripped, &tails, method, &norm, &prefixes);
             let hits = hits
                 .into_iter()
-                .map(|(t, tier)| (qnames.get(&t.route_id).cloned().unwrap_or_default(), tier.rule()))
+                .map(|(t, tier)| {
+                    (
+                        qnames.get(&t.route_id).cloned().unwrap_or_default(),
+                        tier.rule(),
+                    )
+                })
                 .collect();
             (hits, fold)
         }
@@ -2731,17 +3108,29 @@ mod tests {
             (one("GET /back/office/audit/log"), MountFold::Paired)
         );
         // The method is part of the key; ANY is reached after it.
-        assert_eq!(ladder("DELETE", "${…}/users/${…}/status"), (vec![], MountFold::Unused));
+        assert_eq!(
+            ladder("DELETE", "${…}/users/${…}/status"),
+            (vec![], MountFold::Unused)
+        );
         assert_eq!(
             ladder("DELETE", "${…}/sessions"),
             (one("ANY /auth/sessions"), MountFold::Paired)
         );
         // Ambiguous: `/reports` is served behind two mounts, so neither.
-        assert_eq!(ladder("GET", "${…}/reports"), (vec![], MountFold::Ambiguous));
+        assert_eq!(
+            ladder("GET", "${…}/reports"),
+            (vec![], MountFold::Ambiguous)
+        );
         // The folded path is itself a route: tier 5's own lookup wins.
-        assert_eq!(ladder("GET", "${…}/health"), (one("GET /health"), MountFold::Unused));
+        assert_eq!(
+            ladder("GET", "${…}/health"),
+            (one("GET /health"), MountFold::Unused)
+        );
         // No leading interpolation: never folded, however the tail reads.
-        assert_eq!(ladder("POST", "/users/${…}/status"), (vec![], MountFold::Unused));
+        assert_eq!(
+            ladder("POST", "/users/${…}/status"),
+            (vec![], MountFold::Unused)
+        );
         // A placeholder segment is never a mount, and a wildcard-only folded
         // path is never a tail.
         assert_eq!(ladder("GET", "${…}/users"), (vec![], MountFold::Unused));
@@ -2751,10 +3140,16 @@ mod tests {
     #[test]
     fn mount_segment_fold_leaves_tier_six_and_counts_one_route_once() {
         // Ambiguity falls through to tier 6 exactly as a miss does.
-        let ladder = fold_ladder(&["GET /admin/a/reports", "GET /ops/a/reports", "GET /reports"], &[]);
+        let ladder = fold_ladder(
+            &["GET /admin/a/reports", "GET /ops/a/reports", "GET /reports"],
+            &[],
+        );
         assert_eq!(
             ladder("GET", "${…}/a/reports"),
-            (vec![("GET /reports".to_string(), "suffix")], MountFold::Ambiguous)
+            (
+                vec![("GET /reports".to_string(), "suffix")],
+                MountFold::Ambiguous
+            )
         );
         // A route reached through its own path and an LF.2d gateway path is
         // one route: still unique.
@@ -2775,7 +3170,11 @@ mod tests {
         let (web, e) = repo_graph(
             RepoId(620),
             vec![
-                (node_kind::ENDPOINT, "endpoint:POST:${…}/users/${…}/status", vec![]),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:POST:${…}/users/${…}/status",
+                    vec![],
+                ),
                 (node_kind::ENDPOINT, "endpoint:GET:${…}/reports", vec![]),
             ],
         );
@@ -2800,7 +3199,12 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            vec![(e[0], r[0], Confidence::Medium, Some("base_fold".to_string()))]
+            vec![(
+                e[0],
+                r[0],
+                Confidence::Medium,
+                Some("base_fold".to_string())
+            )]
         );
     }
 }

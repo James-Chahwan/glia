@@ -10,12 +10,12 @@ use std::process::Command;
 
 use glia_code_domain::glia_config::parse_str;
 use glia_code_domain::snapshots::{
-    read_history, read_history_messages, write_history_with_messages, HistoryCommit, HistoryFile, HistoryMessage,
-    HistoryMeta,
+    HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, read_history, read_history_messages,
+    write_history_with_messages,
 };
 use glia_engine::intent::defs::Tree;
 use glia_engine::intent::idr::{
-    comment_part, conventional_scopes, recent_scopes, recent_subjects, route, Idr, IdrInputs,
+    Idr, IdrInputs, comment_part, conventional_scopes, recent_scopes, recent_subjects, route,
 };
 use glia_engine::intent::ids::IdVocab;
 use glia_engine::intent::paths::rename_pairs;
@@ -25,13 +25,24 @@ fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("git");
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -42,7 +53,8 @@ fn put(root: &Path, rel: &str, text: &str) {
 }
 
 fn vocab() -> IdVocab {
-    let loaded = parse_str("version = 1\n[ids]\npatterns = [\"T{N}\", \"{U}-{N}\", \"{U}.{N}{l?}\"]\n");
+    let loaded =
+        parse_str("version = 1\n[ids]\npatterns = [\"T{N}\", \"{U}-{N}\", \"{U}.{N}{l?}\"]\n");
     assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
     IdVocab::from_config(Some(&loaded))
 }
@@ -70,7 +82,8 @@ const BILLING_TASKS: &str = "# Tasks\n\n\
 
 const SEARCH_TASKS: &str = "# Tasks\n\n- [ ] T030 search tweak in src/search/tweak.rs\n";
 
-const PK_PLAN: &str = "# Packets\n\n- [ ] PK.3a first half in src/pk/a.rs\n- [ ] PK.3b second half in src/pk/b.rs\n";
+const PK_PLAN: &str =
+    "# Packets\n\n- [ ] PK.3a first half in src/pk/a.rs\n- [ ] PK.3b second half in src/pk/b.rs\n";
 
 /// The spec-kit fixture, committed; returns the commit sha.
 fn fixture(d: &Path) -> String {
@@ -78,10 +91,18 @@ fn fixture(d: &Path) -> String {
     put(d, "specs/001-billing/tasks.md", BILLING_TASKS);
     put(d, "specs/002-search/tasks.md", SEARCH_TASKS);
     put(d, "docs/packets.md", PK_PLAN);
-    put(d, "src/billing/export.rs", "// implements T012\npub fn export() {}\n");
+    put(
+        d,
+        "src/billing/export.rs",
+        "// implements T012\npub fn export() {}\n",
+    );
     put(d, "src/billing/model.rs", "pub struct Model;\n");
     put(d, "src/billing/api.rs", "/* see T012 */\npub fn api() {}\n");
-    put(d, "src/billing/route.rs", "pub fn route() { let s = \"T012\"; let t012 = 1; }\n");
+    put(
+        d,
+        "src/billing/route.rs",
+        "pub fn route() { let s = \"T012\"; let t012 = 1; }\n",
+    );
     put(d, "src/billing/legacy.rs", "pub fn legacy() {}\n");
     put(d, "src/billing/plan_impl.rs", "pub fn plan() {}\n");
     put(d, "src/billing/tweak.rs", "// T030 billing side\n");
@@ -113,7 +134,12 @@ fn run(tree: &Tree, c: &Candidates, text: &str, recent: &[String]) -> Idr {
 
 /// (path, idr) of every file with a score, path order.
 fn scored(c: &Candidates, x: &Idr) -> Vec<(String, f64)> {
-    c.paths.iter().zip(&x.idr).filter(|(_, w)| **w > 0.0).map(|(p, w)| (p.clone(), *w)).collect()
+    c.paths
+        .iter()
+        .zip(&x.idr)
+        .filter(|(_, w)| **w > 0.0)
+        .map(|(p, w)| (p.clone(), *w))
+        .collect()
 }
 
 fn s(p: &str, w: f64) -> (String, f64) {
@@ -130,13 +156,26 @@ fn a_title_id_reaches_named_and_citing_files() {
     assert!(x.has_id);
     // export.rs is named (1.0) and cites T012 in a comment (0.5); model.rs is
     // named; api.rs cites it; route.rs only holds it in a string literal
-    assert_eq!(scored(&c, &x), [s("src/billing/api.rs", 0.5), s("src/billing/export.rs", 1.5), s("src/billing/model.rs", 1.0)]);
+    assert_eq!(
+        scored(&c, &x),
+        [
+            s("src/billing/api.rs", 0.5),
+            s("src/billing/export.rs", 1.5),
+            s("src/billing/model.rs", 1.0)
+        ]
+    );
     let i = c.position("src/billing/export.rs").expect("export");
     assert_eq!((x.named[i], x.cited[i]), (1.0, 0.5));
     assert_eq!(x.ids.len(), 1);
     let r = &x.ids[0];
-    assert_eq!((r.id.as_str(), r.route, r.tier, r.state), ("T012", "unique", Some("derived"), Some("pending")));
-    assert_eq!(r.defined_at, Some(("specs/001-billing/tasks.md".to_string(), 3)));
+    assert_eq!(
+        (r.id.as_str(), r.route, r.tier, r.state),
+        ("T012", "unique", Some("derived"), Some("pending"))
+    );
+    assert_eq!(
+        r.defined_at,
+        Some(("specs/001-billing/tasks.md".to_string(), 3))
+    );
     assert_eq!((r.named_files, r.cited_files), (2, 2));
 }
 
@@ -175,7 +214,10 @@ fn an_undefined_id_is_listed_and_reaches_nothing() {
     assert!(!x.has_id);
     assert!(x.idr.iter().all(|w| *w == 0.0));
     assert_eq!(x.ids.len(), 1);
-    assert_eq!((x.ids[0].id.as_str(), x.ids[0].route, x.ids[0].ns.as_deref()), ("UTF-8", "undefined", None));
+    assert_eq!(
+        (x.ids[0].id.as_str(), x.ids[0].route, x.ids[0].ns.as_deref()),
+        ("UTF-8", "undefined", None)
+    );
 }
 
 #[test]
@@ -183,7 +225,11 @@ fn reading_at_the_commit_ignores_a_row_the_working_tree_added() {
     let tmp = tempfile::tempdir().expect("tmp");
     let d = tmp.path();
     let sha = fixture(d);
-    put(d, "specs/001-billing/tasks.md", &format!("{BILLING_TASKS}- [ ] T040 new thing in src/billing/new.rs\n"));
+    put(
+        d,
+        "specs/001-billing/tasks.md",
+        &format!("{BILLING_TASKS}- [ ] T040 new thing in src/billing/new.rs\n"),
+    );
     let c = cands(SRC);
     let work = run(&Tree::Work(d), &c, "T040 start", &[]);
     assert_eq!(scored(&c, &work), [s("src/billing/new.rs", 1.0)]);
@@ -193,8 +239,20 @@ fn reading_at_the_commit_ignores_a_row_the_working_tree_added() {
     assert!(rev.idr.iter().all(|w| *w == 0.0));
     // the commit's own rows and comments read the same at the commit
     let sha2 = git(d, &["rev-parse", "HEAD"]);
-    let x = run(&Tree::Rev { repo: d, sha: sha2 }, &c, "fix: finish T012 export", &[]);
-    assert_eq!(scored(&c, &x), [s("src/billing/api.rs", 0.5), s("src/billing/export.rs", 1.5), s("src/billing/model.rs", 1.0)]);
+    let x = run(
+        &Tree::Rev { repo: d, sha: sha2 },
+        &c,
+        "fix: finish T012 export",
+        &[],
+    );
+    assert_eq!(
+        scored(&c, &x),
+        [
+            s("src/billing/api.rs", 0.5),
+            s("src/billing/export.rs", 1.5),
+            s("src/billing/model.rs", 1.0)
+        ]
+    );
 }
 
 #[test]
@@ -204,9 +262,19 @@ fn a_family_reaches_its_members_and_a_bare_prefix_nothing() {
     fixture(d);
     let c = cands(SRC);
     let x = run(&Tree::Work(d), &c, "PK.3 and T01", &[]);
-    assert_eq!(scored(&c, &x), [s("src/pk/a.rs", 1.0), s("src/pk/b.rs", 1.0)]);
+    assert_eq!(
+        scored(&c, &x),
+        [s("src/pk/a.rs", 1.0), s("src/pk/b.rs", 1.0)]
+    );
     let routes: Vec<(&str, &str)> = x.ids.iter().map(|r| (r.id.as_str(), r.route)).collect();
-    assert_eq!(routes, [("PK.3a", "family"), ("PK.3b", "family"), ("T01", "undefined")]);
+    assert_eq!(
+        routes,
+        [
+            ("PK.3a", "family"),
+            ("PK.3b", "family"),
+            ("T01", "undefined")
+        ]
+    );
 }
 
 #[test]
@@ -217,7 +285,13 @@ fn lineage_routes_an_old_id_to_its_successor() {
     let c = cands(SRC);
     // T009 (done) and T015 (was T009) are one lineage class
     let x = run(&Tree::Work(d), &c, "revisit T009", &[]);
-    assert_eq!(scored(&c, &x), [s("src/billing/legacy.rs", 0.5), s("src/billing/plan_impl.rs", 1.0)]);
+    assert_eq!(
+        scored(&c, &x),
+        [
+            s("src/billing/legacy.rs", 0.5),
+            s("src/billing/plan_impl.rs", 1.0)
+        ]
+    );
 }
 
 #[test]
@@ -231,16 +305,38 @@ fn recent_scopes_pick_the_scope_the_last_subjects_named() {
         let hc = HistoryCommit {
             c: sha(n),
             t: 1_767_225_600 + n as i64,
-            files: files.iter().map(|p| HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None }).collect(),
+            files: files
+                .iter()
+                .map(|p| HistoryFile {
+                    p: p.to_string(),
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
+                .collect(),
         };
-        let m = HistoryMessage { c: sha(n), at: hc.t, s: subj.to_string(), b: String::new(), br: None };
+        let m = HistoryMessage {
+            c: sha(n),
+            at: hc.t,
+            s: subj.to_string(),
+            b: String::new(),
+            br: None,
+        };
         (hc, m)
     };
     // newest first; commit 3 touches one candidate file (no test commit)
     let rows = vec![
         commit(3, &["src/billing/tweak.rs"], "T013 tiny"),
-        commit(2, &["src/search/tweak.rs", "src/billing/tweak.rs"], "T030 per 002-search"),
-        commit(1, &["src/billing/export.rs", "src/billing/model.rs"], "T012 export"),
+        commit(
+            2,
+            &["src/search/tweak.rs", "src/billing/tweak.rs"],
+            "T030 per 002-search",
+        ),
+        commit(
+            1,
+            &["src/billing/export.rs", "src/billing/model.rs"],
+            "T012 export",
+        ),
     ];
     let (commits, messages): (Vec<HistoryCommit>, Vec<HistoryMessage>) = rows.into_iter().unzip();
     let meta = HistoryMeta::new(commits[0].c.clone(), 2000, None, String::new());
@@ -263,13 +359,25 @@ fn recent_scopes_pick_the_scope_the_last_subjects_named() {
     assert_eq!(recent_subjects(&snap, &msgs, &c, &ex), ["T012 export"]);
 }
 
-const SCOPE_SRC: &[&str] = &["src/billing/export.rs", "src/billing/old.rs", "src/other.rs"];
+const SCOPE_SRC: &[&str] = &[
+    "src/billing/export.rs",
+    "src/billing/old.rs",
+    "src/other.rs",
+];
 
 fn scope_fixture(d: &Path) {
     git(d, &["init", "-q", "-b", "main"]);
-    put(d, "features/billing/plan.md", "# Plan\n\n- [ ] write src/billing/export.rs\n- [x] done in src/billing/old.rs\n");
+    put(
+        d,
+        "features/billing/plan.md",
+        "# Plan\n\n- [ ] write src/billing/export.rs\n- [x] done in src/billing/old.rs\n",
+    );
     put(d, "node_modules/billing/x.md", "- [ ] src/other.rs\n");
-    put(d, "docs/tasks.md", "# Tasks\n\n- [ ] T101 other work in src/other.rs\n");
+    put(
+        d,
+        "docs/tasks.md",
+        "# Tasks\n\n- [ ] T101 other work in src/other.rs\n",
+    );
     for p in SCOPE_SRC {
         put(d, p, "fn x() {}\n");
     }
@@ -283,9 +391,23 @@ fn the_scope_route_runs_only_when_no_id_resolves() {
     let c = cands(SCOPE_SRC);
     let x = run(&Tree::Work(d), &c, "feat(billing): add export", &[]);
     assert!(x.has_id);
-    assert_eq!(scored(&c, &x), [s("src/billing/export.rs", 1.0), s("src/billing/old.rs", 0.5)]);
-    assert_eq!((x.ids[0].id.as_str(), x.ids[0].route), ("scope:billing", "scope-dir"));
-    let y = run(&Tree::Work(d), &c, "feat(billing): add export for T101", &[]);
+    assert_eq!(
+        scored(&c, &x),
+        [
+            s("src/billing/export.rs", 1.0),
+            s("src/billing/old.rs", 0.5)
+        ]
+    );
+    assert_eq!(
+        (x.ids[0].id.as_str(), x.ids[0].route),
+        ("scope:billing", "scope-dir")
+    );
+    let y = run(
+        &Tree::Work(d),
+        &c,
+        "feat(billing): add export for T101",
+        &[],
+    );
     assert_eq!(scored(&c, &y), [s("src/other.rs", 1.0)]);
     // a scope with no docs is no id
     let z = run(&Tree::Work(d), &c, "feat(search): nothing", &[]);
@@ -305,7 +427,10 @@ fn a_text_without_ids_or_scopes_routes_nothing() {
 
 #[test]
 fn the_harness_helpers() {
-    assert_eq!(conventional_scopes("feat(billing, Search-2)!: x"), ["billing", "search-2"]);
+    assert_eq!(
+        conventional_scopes("feat(billing, Search-2)!: x"),
+        ["billing", "search-2"]
+    );
     assert!(conventional_scopes("feat(ab): x").is_empty());
     assert!(conventional_scopes("fix billing(x): y").is_empty());
     assert!(conventional_scopes("feat(billing) x").is_empty());

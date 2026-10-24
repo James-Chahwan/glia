@@ -19,8 +19,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use glia_core::{
+    Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
+};
 use memmap2::{Mmap, MmapOptions};
-use glia_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
 use rkyv::util::AlignedVec;
 
 use crate::error::StoreError;
@@ -77,8 +79,7 @@ layout: a dev build from another commit, or a damaged file)";
 
 /// Top-level on-disk shape: the domain-free core. Owned form = what the writer
 /// builds; Archived form = `&ArchivedContainer`, what mmap returns.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct Container {
     pub header: Header,
@@ -97,8 +98,7 @@ pub struct Container {
 
 /// One named section: an rkyv archive at an absolute, 16-aligned file offset
 /// between the preamble and the core.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct SectionEntry {
     pub name: String,
@@ -136,8 +136,7 @@ pub struct OwnedFile {
 /// with no domain crate linked, and a file written by a newer build names the
 /// ids an older reader has never heard of. Not load-bearing for decoding:
 /// `Header::new` writes them empty, `Header::for_domain` fills them.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct Header {
     pub magic: [u8; 4],
@@ -190,7 +189,10 @@ impl Header {
 fn registry(table: &str, pairs: &[(u32, &str)]) -> Result<Vec<RegistryEntry>, StoreError> {
     let mut out: Vec<RegistryEntry> = pairs
         .iter()
-        .map(|(id, name)| RegistryEntry { id: *id, name: (*name).to_string() })
+        .map(|(id, name)| RegistryEntry {
+            id: *id,
+            name: (*name).to_string(),
+        })
         .collect();
     out.sort_by_key(|e| e.id);
     if let Some(w) = out.windows(2).find(|w| w[0].id == w[1].id) {
@@ -204,8 +206,7 @@ fn registry(table: &str, pairs: &[(u32, &str)]) -> Result<Vec<RegistryEntry>, St
     Ok(out)
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct RegistryEntry {
     pub id: u32,
@@ -258,22 +259,26 @@ pub(crate) fn hex_xxhash64(bytes: &[u8]) -> String {
 pub fn encode_section<T>(name: &str, value: &T) -> Result<EncodedSection, StoreError>
 where
     T: for<'a> rkyv::Serialize<
-        rkyv::api::high::HighSerializer<
-            AlignedVec,
-            rkyv::ser::allocator::ArenaHandle<'a>,
-            rkyv::rancor::Error,
+            rkyv::api::high::HighSerializer<
+                AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
         >,
-    >,
 {
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)?;
-    Ok(EncodedSection { name: name.to_string(), bytes })
+    Ok(EncodedSection {
+        name: name.to_string(),
+        bytes,
+    })
 }
 
 /// Round `at` up to the next multiple of `CORE_ALIGN`.
 fn align_up(at: usize) -> Result<usize, StoreError> {
-    at.checked_next_multiple_of(CORE_ALIGN).ok_or_else(|| StoreError::Corrupt {
-        detail: format!("file layout overflows at offset {at}"),
-    })
+    at.checked_next_multiple_of(CORE_ALIGN)
+        .ok_or_else(|| StoreError::Corrupt {
+            detail: format!("file layout overflows at offset {at}"),
+        })
 }
 
 /// Lay `sections` out after the preamble, in slice order, each at a 16-aligned
@@ -294,9 +299,11 @@ fn layout_sections(sections: &[EncodedSection]) -> Result<(Vec<SectionEntry>, us
             offset: at as u64,
             len: s.bytes.len() as u64,
         });
-        at = at.checked_add(s.bytes.len()).ok_or_else(|| StoreError::Corrupt {
-            detail: format!("section '{}' overflows the file layout", s.name),
-        })?;
+        at = at
+            .checked_add(s.bytes.len())
+            .ok_or_else(|| StoreError::Corrupt {
+                detail: format!("section '{}' overflows the file layout", s.name),
+            })?;
     }
     Ok((table, align_up(at)?))
 }
@@ -369,12 +376,17 @@ pub(crate) fn split_file(bytes: &[u8]) -> Result<Range<usize>, StoreError> {
     }
     if bytes.len() < PREAMBLE_LEN {
         return Err(StoreError::Corrupt {
-            detail: format!("truncated preamble ({} of {PREAMBLE_LEN} bytes)", bytes.len()),
+            detail: format!(
+                "truncated preamble ({} of {PREAMBLE_LEN} bytes)",
+                bytes.len()
+            ),
         });
     }
     let version = le_u32(bytes, 8);
     if version < FORMAT_VERSION {
-        return Err(StoreError::OldFormat { found: Some(version) });
+        return Err(StoreError::OldFormat {
+            found: Some(version),
+        });
     }
     if version > FORMAT_VERSION {
         return Err(StoreError::FutureFormat { found: version });
@@ -449,7 +461,11 @@ impl MmapContainer {
         // mmap stays pinned to the old inode until we drop.
         let bytes = unsafe { MmapOptions::new().map(&f)? };
         let core = split_file(&bytes)?;
-        let mut s = Self { bytes, core, sections: Vec::new() };
+        let mut s = Self {
+            bytes,
+            core,
+            sections: Vec::new(),
+        };
         s.validate_header()?;
         s.sections = s.resolve_sections()?;
         Ok(s)
@@ -493,7 +509,9 @@ impl MmapContainer {
             };
             let start = usize::try_from(offset).map_err(|_| bad("lies outside the file"))?;
             let len = usize::try_from(len).map_err(|_| bad("lies outside the file"))?;
-            let end = start.checked_add(len).ok_or_else(|| bad("lies outside the file"))?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| bad("lies outside the file"))?;
             if start < prev_end || end > self.core.start {
                 return Err(bad(&format!(
                     "is not between the previous section (ending {prev_end}) and the core \
@@ -519,9 +537,12 @@ impl MmapContainer {
     /// preamble already matched this build's version, so the only causes left
     /// are a same-number dev build with another layout or a damaged file.
     pub fn archived(&self) -> Result<&ArchivedContainer, StoreError> {
-        let core = self.bytes.get(self.core.clone()).ok_or_else(|| StoreError::Corrupt {
-            detail: format!("core range {:?} outside the mapped file", self.core),
-        })?;
+        let core = self
+            .bytes
+            .get(self.core.clone())
+            .ok_or_else(|| StoreError::Corrupt {
+                detail: format!("core range {:?} outside the mapped file", self.core),
+            })?;
         rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(core).map_err(|_| {
             StoreError::Corrupt {
                 detail: ARCHIVE_INVALID.to_string(),
@@ -546,9 +567,12 @@ impl MmapContainer {
         let Some((_, range)) = self.sections.iter().find(|(n, _)| n == name) else {
             return Ok(None);
         };
-        self.bytes.get(range.clone()).map(Some).ok_or_else(|| StoreError::Corrupt {
-            detail: format!("section '{name}' range {range:?} outside the mapped file"),
-        })
+        self.bytes
+            .get(range.clone())
+            .map(Some)
+            .ok_or_else(|| StoreError::Corrupt {
+                detail: format!("section '{name}' range {range:?} outside the mapped file"),
+            })
     }
 
     /// Section `name` validated and borrowed as the archived type `A` the
@@ -565,11 +589,11 @@ impl MmapContainer {
         let Some(bytes) = self.section_bytes(name)? else {
             return Ok(None);
         };
-        rkyv::access::<A, rkyv::rancor::Error>(bytes).map(Some).map_err(|_| {
-            StoreError::Corrupt {
+        rkyv::access::<A, rkyv::rancor::Error>(bytes)
+            .map(Some)
+            .map_err(|_| StoreError::Corrupt {
                 detail: format!("section '{name}': {ARCHIVE_INVALID}"),
-            }
-        })
+            })
     }
 
     /// Raw mmap byte length (preamble included) — useful for diagnostics and
@@ -612,7 +636,10 @@ pub(crate) fn owned_file(mmap: &MmapContainer) -> Result<OwnedFile, StoreError> 
         if let Some(raw) = mmap.section_bytes(name)? {
             bytes.extend_from_slice(raw);
         }
-        sections.push(EncodedSection { name: name.clone(), bytes });
+        sections.push(EncodedSection {
+            name: name.clone(),
+            bytes,
+        });
     }
     Ok(OwnedFile { core, sections })
 }
@@ -747,19 +774,21 @@ mod tests {
     #[test]
     fn header_round_trips_via_rkyv() {
         let core = encoded_core(&empty_container());
-        let archived =
-            rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
+        let archived = rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
         assert_eq!(archived.header.magic, MAGIC);
         assert_eq!(archived.header.version.to_native(), FORMAT_VERSION);
         assert_eq!(archived.header.graph_type.as_str(), "code");
-        assert_eq!(archived.header.node_kind_registry.len(), 0, "Header::new names nothing");
+        assert_eq!(
+            archived.header.node_kind_registry.len(),
+            0,
+            "Header::new names nothing"
+        );
 
         // LC.4: a for_domain header's registries survive the archive, sorted.
         let mut c = empty_container();
         c.header = Header::for_domain("toy", &[(2, "B"), (1, "A")], &[(1, "E")], &[]).unwrap();
         let core = encoded_core(&c);
-        let archived =
-            rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
+        let archived = rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
         let kinds: Vec<(u32, &str)> = archived
             .header
             .node_kind_registry
@@ -791,8 +820,7 @@ mod tests {
     #[test]
     fn empty_container_round_trips() {
         let core = encoded_core(&empty_container());
-        let archived =
-            rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
+        let archived = rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
         assert_eq!(archived.nodes.len(), 0);
         assert_eq!(archived.edges.len(), 0);
     }
@@ -814,21 +842,36 @@ mod tests {
     #[test]
     fn split_file_classifies_what_it_cannot_read() {
         let file = encode_file(&mut empty_container(), &[]).unwrap();
-        assert!(matches!(split_file(b""), Err(StoreError::OldFormat { found: None })));
+        assert!(matches!(
+            split_file(b""),
+            Err(StoreError::OldFormat { found: None })
+        ));
         assert!(matches!(
             split_file(b"def f():\n    return 1\n pre-0.5.0 out-of-line bytes"),
             Err(StoreError::OldFormat { found: None })
         ));
-        assert!(matches!(split_file(&file[..20]), Err(StoreError::Corrupt { .. })));
+        assert!(matches!(
+            split_file(&file[..20]),
+            Err(StoreError::Corrupt { .. })
+        ));
         let mut v1 = file.clone();
         v1[8..12].copy_from_slice(&1u32.to_le_bytes());
-        assert!(matches!(split_file(&v1), Err(StoreError::OldFormat { found: Some(1) })));
+        assert!(matches!(
+            split_file(&v1),
+            Err(StoreError::OldFormat { found: Some(1) })
+        ));
         let mut v9 = file.clone();
         v9[8..12].copy_from_slice(&9u32.to_le_bytes());
-        assert!(matches!(split_file(&v9), Err(StoreError::FutureFormat { found: 9 })));
+        assert!(matches!(
+            split_file(&v9),
+            Err(StoreError::FutureFormat { found: 9 })
+        ));
         let mut overlap = file.clone();
         overlap[16..24].copy_from_slice(&16u64.to_le_bytes());
-        assert!(matches!(split_file(&overlap), Err(StoreError::Corrupt { .. })));
+        assert!(matches!(
+            split_file(&overlap),
+            Err(StoreError::Corrupt { .. })
+        ));
         let mut huge = file;
         huge[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(split_file(&huge), Err(StoreError::Corrupt { .. })));
@@ -860,30 +903,61 @@ mod tests {
     }
 
     fn entry(name: &str, offset: u64, len: u64) -> SectionEntry {
-        SectionEntry { name: name.into(), offset, len }
+        SectionEntry {
+            name: name.into(),
+            offset,
+            len,
+        }
     }
 
     #[test]
     fn a_damaged_section_table_is_corrupt() {
         // Control: a well-formed hand-built table opens and reads back.
-        let ok = open_bytes(&file_with_table(64, vec![entry("a", 32, 8), entry("b", 48, 16)]))
-            .expect("valid table");
+        let ok = open_bytes(&file_with_table(
+            64,
+            vec![entry("a", 32, 8), entry("b", 48, 16)],
+        ))
+        .expect("valid table");
         assert_eq!(ok.section_bytes("b").unwrap().map(<[u8]>::len), Some(16));
-        assert_eq!(ok.section_names().unwrap(), vec![("a".into(), 8), ("b".into(), 16)]);
+        assert_eq!(
+            ok.section_names().unwrap(),
+            vec![("a".into(), 8), ("b".into(), 16)]
+        );
 
         let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("runs into the core", file_with_table(48, vec![entry("a", 32, 17)])),
-            ("inside the preamble", file_with_table(48, vec![entry("a", 16, 8)])),
+            (
+                "runs into the core",
+                file_with_table(48, vec![entry("a", 32, 17)]),
+            ),
+            (
+                "inside the preamble",
+                file_with_table(48, vec![entry("a", 16, 8)]),
+            ),
             ("misaligned", file_with_table(64, vec![entry("a", 40, 8)])),
-            ("overlapping", file_with_table(96, vec![entry("a", 32, 32), entry("b", 48, 8)])),
-            ("duplicate name", file_with_table(64, vec![entry("a", 32, 8), entry("a", 48, 8)])),
-            ("offset overflow", file_with_table(48, vec![entry("a", u64::MAX, 2)])),
-            ("past the file", file_with_table(48, vec![entry("a", 1 << 40, 8)])),
+            (
+                "overlapping",
+                file_with_table(96, vec![entry("a", 32, 32), entry("b", 48, 8)]),
+            ),
+            (
+                "duplicate name",
+                file_with_table(64, vec![entry("a", 32, 8), entry("a", 48, 8)]),
+            ),
+            (
+                "offset overflow",
+                file_with_table(48, vec![entry("a", u64::MAX, 2)]),
+            ),
+            (
+                "past the file",
+                file_with_table(48, vec![entry("a", 1 << 40, 8)]),
+            ),
         ];
         for (what, bytes) in cases {
             match open_bytes(&bytes) {
                 Err(StoreError::Corrupt { detail }) => {
-                    assert!(detail.contains("section 'a'") || detail.contains("section 'b'"), "{what}: {detail}")
+                    assert!(
+                        detail.contains("section 'a'") || detail.contains("section 'b'"),
+                        "{what}: {detail}"
+                    )
                 }
                 other => panic!("{what}: expected Corrupt, got {:?}", other.err()),
             }
@@ -899,7 +973,9 @@ mod tests {
         assert_eq!(*m.section::<rkyv::Archived<u32>>("s").unwrap().unwrap(), 7);
         assert!(m.section::<rkyv::Archived<u32>>("none").unwrap().is_none());
         match m.section::<rkyv::Archived<String>>("s") {
-            Err(StoreError::Corrupt { detail }) => assert!(detail.contains("section 's'"), "{detail}"),
+            Err(StoreError::Corrupt { detail }) => {
+                assert!(detail.contains("section 's'"), "{detail}")
+            }
             other => panic!("expected Corrupt, got {:?}", other.map(|o| o.is_some())),
         }
     }

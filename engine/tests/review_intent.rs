@@ -398,11 +398,12 @@ fn clusters(repo: &GitRepo) {
         );
         repo.write(
             &cluster_path("zeta", i),
-            &format!("from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"),
+            &format!(
+                "from hub import h, g{i:02}\n\ndef zeta{i:02}_f():\n    h()\n    return g{i:02}()\n"
+            ),
         );
     }
 }
-
 
 /// The clusters fixture's history with messages: even commits touch alpha
 /// modules, odd ones zeta modules, each subject naming its cluster.
@@ -419,10 +420,21 @@ fn text_history(root: &std::path::Path) {
             c: sha.clone(),
             t,
             files: (0..size)
-                .map(|j| HistoryFile { p: cluster_path(c, (start + j) % N), a: Some(1), d: Some(0), from: None })
+                .map(|j| HistoryFile {
+                    p: cluster_path(c, (start + j) % N),
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
                 .collect(),
         });
-        messages.push(HistoryMessage { c: sha, at: t, s: format!("{c} cluster work {i}"), b: String::new(), br: None });
+        messages.push(HistoryMessage {
+            c: sha,
+            at: t,
+            s: format!("{c} cluster work {i}"),
+            b: String::new(),
+            br: None,
+        });
     }
     commits.reverse();
     messages.reverse();
@@ -437,7 +449,10 @@ fn review_intent_follows_the_selt_pick() {
     g.commit("clean");
     text_history(g.root());
     let built = glia_engine::generate_one(g.path()).expect("build");
-    g.write("alpha/alpha03.py", "import hub\n\ndef alpha03_f():\n    return 33\n");
+    g.write(
+        "alpha/alpha03.py",
+        "import hub\n\ndef alpha03_f():\n    return 33\n",
+    );
     let mut args = ReviewArgs::default();
     args.title = Some("alpha cluster work".into());
 
@@ -445,13 +460,24 @@ fn review_intent_follows_the_selt_pick() {
     let u = review_vs_rev(g.path(), "HEAD", &args).expect("review");
     let sel = u.selection_intent.as_ref().expect("selection_intent");
     assert_eq!(
-        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        (
+            sel.set.as_str(),
+            sel.shape.as_str(),
+            sel.pick.as_str(),
+            sel.source,
+            sel.reason
+        ),
         ("SELt2", "k1", "LX[IDR,P1]", "fallback", Some("absent"))
     );
     let ui = u.intent.as_ref().expect("intent");
     assert_eq!(ui.fusion, "LX[IDR,P1]");
     let md = render_markdown(&u, &MarkdownOptions::default());
-    assert!(md.contains("_title (arg): alpha cluster work_\n\n_ranked by LX[IDR,P1] (uncalibrated: absent)_"), "{md}");
+    assert!(
+        md.contains(
+            "_title (arg): alpha cluster work_\n\n_ranked by LX[IDR,P1] (uncalibrated: absent)_"
+        ),
+        "{md}"
+    );
 
     // Calibrated: the record's SELt2 k1 pick orders the intent files.
     let mut opts = CalibrateOptions::default();
@@ -460,25 +486,42 @@ fn review_intent_follows_the_selt_pick() {
     let CalibrationRead::Loaded(cal) = read_calibration(g.root()) else {
         panic!("record not loaded");
     };
-    let want = cal.sets.iter().find(|s| s.set == "SELt2" && s.shape == "k1").map(|s| s.pick.clone()).expect("SELt2 k1");
+    let want = cal
+        .sets
+        .iter()
+        .find(|s| s.set == "SELt2" && s.shape == "k1")
+        .map(|s| s.pick.clone())
+        .expect("SELt2 k1");
     let c = review_vs_rev(g.path(), "HEAD", &args).expect("review");
     let sel = c.selection_intent.as_ref().expect("selection_intent");
     assert_eq!(
-        (sel.set.as_str(), sel.shape.as_str(), sel.pick.as_str(), sel.source, sel.reason),
+        (
+            sel.set.as_str(),
+            sel.shape.as_str(),
+            sel.pick.as_str(),
+            sel.source,
+            sel.reason
+        ),
         ("SELt2", "k1", want.as_str(), "calibrated", None)
     );
     assert_eq!(sel.test_commits, COMMITS);
     let ci = c.intent.as_ref().expect("intent");
     assert_eq!(ci.fusion, want);
     assert!(!ci.files.is_empty());
-    assert!(ci.files.iter().all(|f| f.file != "alpha/alpha03.py"), "the changed file is no candidate");
+    assert!(
+        ci.files.iter().all(|f| f.file != "alpha/alpha03.py"),
+        "the changed file is no candidate"
+    );
     // the title's cluster leads the calibrated list
     assert!(ci.files[0].file.starts_with("alpha/"), "{:?}", ci.files);
     let v = serde_json::to_value(&c).expect("json");
     assert_eq!(v["selection_intent"]["source"], "calibrated", "{v}");
     assert_eq!(v["intent"]["fusion"], want.as_str());
     let md = render_markdown(&c, &MarkdownOptions::default());
-    let line = format!("_ranked by {} (calibrated on {COMMITS} commits, shape k1)_", want.replace('*', "\\*"));
+    let line = format!(
+        "_ranked by {} (calibrated on {COMMITS} commits, shape k1)_",
+        want.replace('*', "\\*")
+    );
     assert!(md.contains(&line), "{line}\n{md}");
     // The impact rows: EB.7's re-sort (IDR only), unchanged by the pick.
     assert_eq!(
@@ -497,17 +540,35 @@ fn history_of(repo: &GitRepo) -> IntentHistory {
 
 /// The seam over the working tree's graph, changed file `src/a.rs`, as file
 /// paths.
-fn seam_files(repo: &GitRepo, title: &str, history: &IntentHistory, pick: Option<&str>) -> Vec<String> {
+fn seam_files(
+    repo: &GitRepo,
+    title: &str,
+    history: &IntentHistory,
+    pick: Option<&str>,
+) -> Vec<String> {
     let rev = graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
     let base = String::from_utf8(repo.git(&["rev-parse", "HEAD"]).stdout).expect("utf-8");
     let merged = &rev.after.merged;
-    let cache = Arc::new(RankCache::new("answer", &rev.after.repo_roots, &rev.after.repo_labels));
+    let cache = Arc::new(RankCache::new(
+        "answer",
+        &rev.after.repo_roots,
+        &rev.after.repo_labels,
+    ));
     let files = cache.files(merged);
     let a = files.index_of(files.repo(0), "src/a.rs").expect("src/a.rs");
-    intent_files_with(merged, repo.root(), base.trim(), title, &[a], &cache, history, pick)
-        .into_iter()
-        .map(|f| files.path(f).to_string())
-        .collect()
+    intent_files_with(
+        merged,
+        repo.root(),
+        base.trim(),
+        title,
+        &[a],
+        &cache,
+        history,
+        pick,
+    )
+    .into_iter()
+    .map(|f| files.path(f).to_string())
+    .collect()
 }
 
 /// (7) EG.7: `intent_files_with` with the root's own snapshot lists the
@@ -541,10 +602,18 @@ fn the_seams_excluded_commit_reads_as_absent() {
     let mut excl = history_of(&repo);
     excl.exclude.insert(sha(2));
     let mut cut = history_of(&repo);
-    let i = cut.snapshot.commits.iter().position(|c| c.c == sha(2)).expect("sha 2");
+    let i = cut
+        .snapshot
+        .commits
+        .iter()
+        .position(|c| c.c == sha(2))
+        .expect("sha 2");
     cut.snapshot.commits.remove(i);
     if let Some(m) = cut.messages.as_mut() {
         m.remove(i);
     }
-    assert_eq!(seam_files(&repo, title, &excl, None), seam_files(&repo, title, &cut, None));
+    assert_eq!(
+        seam_files(&repo, title, &excl, None),
+        seam_files(&repo, title, &cut, None)
+    );
 }

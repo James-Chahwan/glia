@@ -26,10 +26,22 @@ const MAIN_GO: &str = "package main\n\nimport (\n\t\"github.com/google/uuid\"\n\
 fn write_fixture(dir: &Path) {
     write(dir, "svc/go.mod", "module example.com/svc\n\ngo 1.22\n");
     write(dir, "svc/cmd/main.go", MAIN_GO);
-    write(dir, "svc/internal/store/store.go", "package store\n\nfunc Save() string { return \"svc\" }\n");
+    write(
+        dir,
+        "svc/internal/store/store.go",
+        "package store\n\nfunc Save() string { return \"svc\" }\n",
+    );
     write(dir, "svc-b/go.mod", "module example.com/svc-b\n\ngo 1.22\n");
-    write(dir, "svc-b/client/client.go", "package client\n\nfunc Get() string { return \"b\" }\n");
-    write(dir, "svc-b/internal/store/store.go", "package store\n\nfunc Save() string { return \"svc-b\" }\n");
+    write(
+        dir,
+        "svc-b/client/client.go",
+        "package client\n\nfunc Get() string { return \"b\" }\n",
+    );
+    write(
+        dir,
+        "svc-b/internal/store/store.go",
+        "package store\n\nfunc Save() string { return \"svc-b\" }\n",
+    );
 }
 
 fn id_of(r: &GenerateResult, qname: &str) -> NodeId {
@@ -41,13 +53,19 @@ fn id_of(r: &GenerateResult, qname: &str) -> NodeId {
         .filter(|(_, q)| q.as_str() == qname)
         .map(|(id, _)| *id)
         .collect();
-    assert_eq!(hits.len(), 1, "expected exactly one node {qname}, got {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one node {qname}, got {hits:?}"
+    );
     hits[0]
 }
 
 fn has_edge(r: &GenerateResult, from: &str, to: &str, cat: EdgeCategoryId) -> bool {
     let (f, t) = (id_of(r, from), id_of(r, to));
-    r.merged.all_edges().any(|e| e.from == f && e.to == t && e.category == cat)
+    r.merged
+        .all_edges()
+        .any(|e| e.from == f && e.to == t && e.category == cat)
 }
 
 /// The IMPORTS payload of the node `qname` (exactly one cell).
@@ -66,7 +84,11 @@ fn imports_cell(r: &GenerateResult, qname: &str) -> String {
             CellPayload::Bytes(_) => String::from("<bytes>"),
         })
         .collect();
-    assert_eq!(cells.len(), 1, "{qname} must carry exactly one IMPORTS cell, got {cells:?}");
+    assert_eq!(
+        cells.len(),
+        1,
+        "{qname} must carry exactly one IMPORTS cell, got {cells:?}"
+    );
     cells.into_iter().next().unwrap()
 }
 
@@ -77,19 +99,39 @@ fn nested_go_mods_map_internal_imports() {
     let r = generate_one(tmp.path().to_str().unwrap()).unwrap();
 
     assert!(
-        has_edge(&r, "svc::cmd::main", "svc::internal::store::store", edge_category::IMPORTS),
+        has_edge(
+            &r,
+            "svc::cmd::main",
+            "svc::internal::store::store",
+            edge_category::IMPORTS
+        ),
         "own-module import must bind svc's store package"
     );
     assert!(
-        has_edge(&r, "svc::cmd::main", "svc-b::client::client", edge_category::IMPORTS),
+        has_edge(
+            &r,
+            "svc::cmd::main",
+            "svc-b::client::client",
+            edge_category::IMPORTS
+        ),
         "sibling-module import must bind svc-b's client package"
     );
     assert!(
-        has_edge(&r, "svc::cmd::main::main", "svc::internal::store::store::Save", edge_category::CALLS),
+        has_edge(
+            &r,
+            "svc::cmd::main::main",
+            "svc::internal::store::store::Save",
+            edge_category::CALLS
+        ),
         "store.Save() must call svc's Save"
     );
     assert!(
-        has_edge(&r, "svc::cmd::main::main", "svc-b::client::client::Get", edge_category::CALLS),
+        has_edge(
+            &r,
+            "svc::cmd::main::main",
+            "svc-b::client::client::Get",
+            edge_category::CALLS
+        ),
         "client.Get() must call svc-b's Get"
     );
     // Precision: example.com/svc/internal/store is never svc-b's same-named package.
@@ -114,8 +156,14 @@ fn imports_cell_lists_only_third_party() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture(tmp.path());
     let r = generate_one(tmp.path().to_str().unwrap()).unwrap();
-    assert_eq!(imports_cell(&r, "svc::cmd::main"), r#"["github.com/google/uuid"]"#);
-    assert_eq!(imports_cell(&r, "svc::cmd::main::main"), r#"["github.com/google/uuid"]"#);
+    assert_eq!(
+        imports_cell(&r, "svc::cmd::main"),
+        r#"["github.com/google/uuid"]"#
+    );
+    assert_eq!(
+        imports_cell(&r, "svc::cmd::main::main"),
+        r#"["github.com/google/uuid"]"#
+    );
 }
 
 /// Module `example.com/svc` holds `example.com/svc/...` only at a `/`
@@ -128,13 +176,21 @@ fn prefix_boundary() {
     for root in ["", "svc/"] {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
-        write(d, &format!("{root}go.mod"), "module example.com/svc\n\ngo 1.22\n");
+        write(
+            d,
+            &format!("{root}go.mod"),
+            "module example.com/svc\n\ngo 1.22\n",
+        );
         write(
             d,
             &format!("{root}cmd/main.go"),
             "package main\n\nimport (\n\t\"example.com/svc/util\"\n\t\"example.com/svc-b/client\"\n)\n\nfunc main() {\n\tutil.Do()\n\tclient.Get()\n}\n",
         );
-        write(d, &format!("{root}util/util.go"), "package util\n\nfunc Do() {}\n");
+        write(
+            d,
+            &format!("{root}util/util.go"),
+            "package util\n\nfunc Do() {}\n",
+        );
         let r = generate_one(d.to_str().unwrap()).unwrap();
         let main = format!("{}cmd::main", root.replace('/', "::"));
         let util = format!("{}util::util", root.replace('/', "::"));
@@ -175,7 +231,11 @@ fn editing_a_nested_go_mod_discards_the_cache() {
     // Control: an unchanged rebuild reuses every parse.
     generate_one_with_cache(path, &mut cache).unwrap();
     let warm = cache.last_diff().expect("diff").clone();
-    assert!(warm.reparsed.is_empty(), "unchanged rebuild reparsed {:?}", warm.reparsed);
+    assert!(
+        warm.reparsed.is_empty(),
+        "unchanged rebuild reparsed {:?}",
+        warm.reparsed
+    );
     assert!(warm.reused.iter().any(|p| p == "svc/cmd/extra.go"));
 
     write(d, "svc-b/go.mod", "module example.com/bee\n\ngo 1.22\n");
@@ -185,7 +245,12 @@ fn editing_a_nested_go_mod_discards_the_cache() {
         "[]",
         "example.com/bee is svc-b's module now: the stale raw import must not survive"
     );
-    assert!(has_edge(&second, "svc::cmd::extra", "svc-b::client::client", edge_category::IMPORTS));
+    assert!(has_edge(
+        &second,
+        "svc::cmd::extra",
+        "svc-b::client::client",
+        edge_category::IMPORTS
+    ));
     let diff = cache.last_diff().expect("diff");
     assert!(
         diff.reused.is_empty(),

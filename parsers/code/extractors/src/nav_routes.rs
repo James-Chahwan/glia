@@ -45,8 +45,7 @@
 use std::collections::HashSet;
 
 use glia_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
-    node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, RepoId};
 
@@ -1563,6 +1562,9 @@ const saved: Array<Route> = [];
         assert_eq!(out.catchalls, 1);
         assert_eq!(out.bound, 1);
         assert_eq!(out.refs[0].from, route_id("/docs/:slug*"));
-        assert_eq!(out.refs[0].line, 7, "the record's row is the ref's site line");
+        assert_eq!(
+            out.refs[0].line, 7,
+            "the record's row is the ref's site line"
+        );
     }
 }

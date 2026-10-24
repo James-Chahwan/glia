@@ -85,12 +85,7 @@ pub(crate) fn build_group(lang: &'static str) -> &'static str {
 /// Parse a single file with the appropriate language parser. Public so the
 /// pyo3 wrapper's `parse_file_to_json` can call directly without going
 /// through the full repo-walk pipeline.
-pub fn parse_one(
-    source: &str,
-    path: &str,
-    lang: &str,
-    repo: RepoId,
-) -> Result<FileParse, String> {
+pub fn parse_one(source: &str, path: &str, lang: &str, repo: RepoId) -> Result<FileParse, String> {
     parse_one_with(source, path, lang, repo, "")
 }
 
@@ -106,7 +101,13 @@ pub fn parse_one_with(
     repo: RepoId,
     go_module_prefix: &str,
 ) -> Result<FileParse, String> {
-    parse_one_with_go_modules(source, path, lang, repo, &GoModules::root_only(go_module_prefix))
+    parse_one_with_go_modules(
+        source,
+        path,
+        lang,
+        repo,
+        &GoModules::root_only(go_module_prefix),
+    )
 }
 
 /// Like [`parse_one_with`] under every `go.mod` of the repo (LA.13): a Go
@@ -149,8 +150,10 @@ pub(crate) fn parse_one_as(
             .map_err(|e| e.to_string()),
         "go" => glia_parser_go::parse_file_with_modules(source, path, &module_qname, go, repo)
             .map_err(|e| e.to_string()),
-        "typescript" | "js" => glia_parser_typescript::parse_file(source, path, &module_qname, repo)
-            .map_err(|e| e.to_string()),
+        "typescript" | "js" => {
+            glia_parser_typescript::parse_file(source, path, &module_qname, repo)
+                .map_err(|e| e.to_string())
+        }
         "rust" => glia_parser_rust::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "java" => glia_parser_java::parse_file(source, path, &module_qname, repo)
@@ -329,11 +332,21 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(websocket::extract_ws_client_nodes(
         source, path, module_id, repo
     ));
-    run_marked!(eventbus::extract_event_emitter_nodes(source, path, module_id, repo));
-    run_marked!(eventbus::extract_event_handler_nodes(source, path, module_id, repo));
-    run_marked!(graphql::extract_graphql_operation_nodes(source, path, module_id, repo));
-    run_marked!(graphql::extract_graphql_resolver_nodes(source, lang, module_id, repo));
-    run_marked!(grpc::extract_grpc_client_nodes(source, path, module_id, repo));
+    run_marked!(eventbus::extract_event_emitter_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(eventbus::extract_event_handler_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(graphql::extract_graphql_operation_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(graphql::extract_graphql_resolver_nodes(
+        source, lang, module_id, repo
+    ));
+    run_marked!(grpc::extract_grpc_client_nodes(
+        source, path, module_id, repo
+    ));
     // DT.10c: EVM contract clients (ethers `new Contract(addr, ABI, runner)`
     // calls and `.on` / `.once` subscriptions) as RPC_CALL `evm_call:..` /
     // EVENT_HANDLER `evm_event:..` markers, anchored by the A5.8 pass below
@@ -349,11 +362,14 @@ pub(crate) fn apply_cross_cutting_extractors(
     // extractor's own facts, the CB.24 note below); cached with the parse, and
     // the post-cache join (build/evm_abi.rs) fills the cells that import them.
     for (name, entries) in std::mem::take(&mut evm.abi_decls) {
-        let mut entries: Vec<String> =
-            entries.iter().map(glia_code_domain::evm::AbiEntry::to_key).collect();
+        let mut entries: Vec<String> = entries
+            .iter()
+            .map(glia_code_domain::evm::AbiEntry::to_key)
+            .collect();
         entries.sort();
         entries.dedup();
-        fp.nav.record_fact(module_id, NavFact::EvmAbi { name, entries });
+        fp.nav
+            .record_fact(module_id, NavFact::EvmAbi { name, entries });
     }
     run_marked!(evm);
     run_with_edges!(
@@ -470,7 +486,14 @@ pub(crate) fn apply_cross_cutting_extractors(
             ("rpc", trpc::trpc_client_hosts(source)),
         ] {
             for (host, line) in hosts {
-                fp.nav.record_fact(module_id, NavFact::ClientHost { via: via.into(), host, line });
+                fp.nav.record_fact(
+                    module_id,
+                    NavFact::ClientHost {
+                        via: via.into(),
+                        host,
+                        line,
+                    },
+                );
             }
         }
         // DT.11b: a GraphQL client's transport is an HTTP call, so each
@@ -532,7 +555,10 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(react::extract_react_nodes(
-            source, &module_qname, module_id, repo
+            source,
+            &module_qname,
+            module_id,
+            repo
         ));
     }
     if matches!(lang, "angular" | "typescript") {
@@ -543,7 +569,10 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(angular::extract_angular_nodes(
-            source, &module_qname, module_id, repo
+            source,
+            &module_qname,
+            module_id,
+            repo
         ));
         // DT.5a: an inline `template:` / `host:` binding that calls or reads
         // a METHOD of its own component is a CALLS / USES from the CLASS, at
@@ -554,14 +583,8 @@ pub(crate) fn apply_cross_cutting_extractors(
         // a member (`theme.toggle()`) is a receiver CallSite from the CLASS,
         // bound by the graph through the member's declared type, and a
         // decorator-bound member (`@HostListener`, `@Input() set ..`) a USES.
-        let mut out = angular_template::bind_inline(
-            source,
-            path,
-            &fp.nodes,
-            &fp.nav,
-            &module_qname,
-            repo,
-        );
+        let mut out =
+            angular_template::bind_inline(source, path, &fp.nodes, &fp.nav, &module_qname, repo);
         evidence::stamp_missing(&mut out.edges, angular_template::EMITTER);
         fp.edges.extend(out.edges);
         fp.calls.extend(out.call_sites);
@@ -574,7 +597,11 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(vue::extract_vue_nodes(
-            source, path, &module_qname, module_id, repo
+            source,
+            path,
+            &module_qname,
+            module_id,
+            repo
         ));
     }
 

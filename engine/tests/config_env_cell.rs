@@ -84,7 +84,11 @@ fn env_values_survive_build_and_store_round_trip() {
             "{label}: {}",
             api[0]
         );
-        assert!(api[0].contains(r#""source":"dotenv""#), "{label}: {}", api[0]);
+        assert!(
+            api[0].contains(r#""source":"dotenv""#),
+            "{label}: {}",
+            api[0]
+        );
 
         // Userinfo masked, HOST kept — A11 pairs on the host.
         let db = env_payloads(merged, "config:env:DATABASE_URL");
@@ -98,7 +102,11 @@ fn env_values_survive_build_and_store_round_trip() {
         // Second pair of a multi-pair Dockerfile ENV.
         let log = env_payloads(merged, "config:env:LOG_LEVEL");
         assert_eq!(log.len(), 1, "{label}: LOG_LEVEL env cells: {log:?}");
-        assert!(log[0].contains(r#""source":"dockerfile""#), "{label}: {}", log[0]);
+        assert!(
+            log[0].contains(r#""source":"dockerfile""#),
+            "{label}: {}",
+            log[0]
+        );
 
         // Secret-named key: the cell says a value exists and nothing else.
         let secret = env_payloads(merged, "config:env:STRIPE_SECRET_KEY");
@@ -119,7 +127,13 @@ fn env_values_survive_build_and_store_round_trip() {
                 CellPayload::Bytes(_) => None,
             })
             .collect();
-        assert!(!all.contains("sk_live_"), "{label}: secret leaked into a cell");
-        assert!(!all.contains("s3cr3t"), "{label}: db password leaked into a cell");
+        assert!(
+            !all.contains("sk_live_"),
+            "{label}: secret leaked into a cell"
+        );
+        assert!(
+            !all.contains("s3cr3t"),
+            "{label}: db password leaked into a cell"
+        );
     }
 }

@@ -135,10 +135,17 @@ pub(crate) struct Declared<'s> {
 /// The owner of `name` in `cat`, for a conflict message.
 fn owner_of(cat: &Catalog, n_core: usize, name: &str) -> Option<String> {
     if let Some(i) = cat.edb.iter().position(|p| p.name == name) {
-        let what = if i < n_core { "the core predicate" } else { "the attribute" };
+        let what = if i < n_core {
+            "the core predicate"
+        } else {
+            "the attribute"
+        };
         return Some(format!("{what} `{}`", cat.edb[i].signature()));
     }
-    cat.builtins.iter().find(|b| b.name == name).map(|b| format!("the builtin `{}`", b.signature()))
+    cat.builtins
+        .iter()
+        .find(|b| b.name == name)
+        .map(|b| format!("the builtin `{}`", b.signature()))
 }
 
 /// [`catalog_of`], with the builtin implementations and the left-out declarations.
@@ -158,8 +165,11 @@ pub(crate) fn declare<'s, S: FactSource + ?Sized>(src: &'s S) -> Declared<'s> {
         }
         cat = cat.with_attrs(std::slice::from_ref(a));
     }
-    let mut impls: Vec<Option<&'s dyn Builtin>> =
-        cat.builtins.iter().map(|d| string_builtin(d.kind)).collect();
+    let mut impls: Vec<Option<&'s dyn Builtin>> = cat
+        .builtins
+        .iter()
+        .map(|d| string_builtin(d.kind))
+        .collect();
     for b in src.builtins() {
         let mut d = b.decl();
         d.kind = BuiltinKind::Domain;
@@ -175,7 +185,11 @@ pub(crate) fn declare<'s, S: FactSource + ?Sized>(src: &'s S) -> Declared<'s> {
         }
         let before = cat.builtins.len();
         let owner = match cat.edb(&d.name) {
-            Some(p) => Some(format!("`{}` is already the predicate `{}`", d.name, p.signature())),
+            Some(p) => Some(format!(
+                "`{}` is already the predicate `{}`",
+                d.name,
+                p.signature()
+            )),
             None => cat.builtin(&d.name, d.cols.len()).map(|e| match e.kind {
                 BuiltinKind::Domain => format!("`{sig}` is already a domain builtin"),
                 _ => format!("`{sig}` is already a core builtin"),
@@ -188,7 +202,11 @@ pub(crate) fn declare<'s, S: FactSource + ?Sized>(src: &'s S) -> Declared<'s> {
             conflicts.push(format!("domain builtin `{sig}` is ignored: {o}"));
         }
     }
-    Declared { catalog: cat, impls, conflicts }
+    Declared {
+        catalog: cat,
+        impls,
+        conflicts,
+    }
 }
 
 // ============================================================================
@@ -231,12 +249,17 @@ impl Restrict {
 
 /// Every edge's tier, by ordinal: one pass over `edges()`.
 pub(crate) fn edge_tiers<S: FactSource + ?Sized>(src: &S) -> Vec<Tier> {
-    src.edges().enumerate().map(|(i, e)| src.edge_tier(i, e)).collect()
+    src.edges()
+        .enumerate()
+        .map(|(i, e)| src.edge_tier(i, e))
+        .collect()
 }
 
 /// An ordinal as a row column; an edge list past `u32::MAX - 1` edges saturates.
 fn ordinal(i: usize) -> u32 {
-    u32::try_from(i).unwrap_or(NO_ORDINAL - 1).min(NO_ORDINAL - 1)
+    u32::try_from(i)
+        .unwrap_or(NO_ORDINAL - 1)
+        .min(NO_ORDINAL - 1)
 }
 
 /// Rows under construction, deduplicated by [`Rows::finish`].
@@ -249,7 +272,12 @@ struct Rows {
 
 impl Rows {
     fn new(arity: usize) -> Self {
-        Rows { arity, rows: Vec::new(), levels: Vec::new(), ordinals: Vec::new() }
+        Rows {
+            arity,
+            rows: Vec::new(),
+            levels: Vec::new(),
+            ordinals: Vec::new(),
+        }
     }
 
     /// `row` holds `arity` handles (every caller passes a literal of that length).
@@ -262,13 +290,24 @@ impl Rows {
     /// Sort by (row handles, level, ordinal) and keep each row's first: its best
     /// level and, at that level, its first ordinal.
     fn finish(self) -> EdbRows {
-        let Rows { arity, rows, levels, ordinals } = self;
+        let Rows {
+            arity,
+            rows,
+            levels,
+            ordinals,
+        } = self;
         let row = |i: usize| &rows[i * arity..(i + 1) * arity];
         let mut order: Vec<usize> = (0..levels.len()).collect();
         order.sort_unstable_by(|&a, &b| {
-            row(a).cmp(row(b)).then(levels[a].cmp(&levels[b])).then(ordinals[a].cmp(&ordinals[b]))
+            row(a)
+                .cmp(row(b))
+                .then(levels[a].cmp(&levels[b]))
+                .then(ordinals[a].cmp(&ordinals[b]))
         });
-        let mut out = EdbRows { arity, ..EdbRows::default() };
+        let mut out = EdbRows {
+            arity,
+            ..EdbRows::default()
+        };
         let mut last: Option<usize> = None;
         for i in order {
             if last.is_some_and(|l| row(l) == row(i)) {
@@ -294,7 +333,12 @@ struct Names<'r> {
 
 impl<'r> Names<'r> {
     fn new(reg: &'r Registries) -> Self {
-        Names { reg, kinds: Lookup::new(), categories: Lookup::new(), cell_types: Lookup::new() }
+        Names {
+            reg,
+            kinds: Lookup::new(),
+            categories: Lookup::new(),
+            cell_types: Lookup::new(),
+        }
     }
 
     fn intern(
@@ -677,7 +721,10 @@ impl fmt::Debug for MemSource {
             .field("graph_type", &self.tables.graph_type)
             .field("nodes", &self.ids.len())
             .field("edges", &self.edges.len())
-            .field("attributes", &self.attrs.iter().map(|a| a.name).collect::<Vec<_>>())
+            .field(
+                "attributes",
+                &self.attrs.iter().map(|a| a.name).collect::<Vec<_>>(),
+            )
             .field("builtins", &self.builtins.len())
             .finish()
     }
@@ -759,7 +806,11 @@ mod tests {
             edge_categories: &[(CALLS, "CALLS"), (IMPORTS, "IMPORTS"), (USES, "USES")],
             cell_types: &[(CODE, "CODE"), (POSITION, "POSITION"), (EMBED, "EMBED")],
         },
-        entry: EntryRule { kinds: &[], roles: &[], named: &[] },
+        entry: EntryRule {
+            kinds: &[],
+            roles: &[],
+            named: &[],
+        },
         // A repeat and an unregistered category: carry_category dedups and renders `#77`.
         carry_edges: &[USES, CALLS, USES, EdgeCategoryId(77)],
         effect_sinks: &[],
@@ -775,7 +826,9 @@ mod tests {
 
     fn src() -> MemSource {
         let mut g = MemSource::new(TABLES);
-        g.node(A, FUNCTION, "a").node(B, FUNCTION, "b").node(C, MODULE, "c");
+        g.node(A, FUNCTION, "a")
+            .node(B, FUNCTION, "b")
+            .node(C, MODULE, "c");
         g
     }
 
@@ -817,7 +870,10 @@ mod tests {
     }
 
     fn text(t: CellTypeId, s: &str) -> Cell {
-        Cell { kind: t, payload: CellPayload::Text(s.into()) }
+        Cell {
+            kind: t,
+            payload: CellPayload::Text(s.into()),
+        }
     }
 
     /// `near(A, B)`: true for two equal ints; a test domain builtin.
@@ -867,20 +923,30 @@ mod tests {
     #[test]
     fn catalog_of_lists_attrs_and_builtins() {
         let mut g = src();
-        g.attr(AttrDecl { name: "index", ty: ColType::Int }).builtin(Box::new(Near));
+        g.attr(AttrDecl {
+            name: "index",
+            ty: ColType::Int,
+        })
+        .builtin(Box::new(Near));
         let core = Catalog::core(TABLES.registries, TABLES.carry_edges);
         let c = catalog_of(&g);
         let edb: Vec<String> = c.edb.iter().map(|p| p.signature()).collect();
         let core_edb: Vec<String> = core.edb.iter().map(|p| p.signature()).collect();
         assert_eq!(edb[..core_edb.len()], core_edb[..]);
         assert_eq!(edb[core_edb.len()..], ["index/2"]);
-        assert_eq!(c.edb("index").map(|p| p.cols.clone()), Some(vec![ColType::Node, ColType::Int]));
+        assert_eq!(
+            c.edb("index").map(|p| p.cols.clone()),
+            Some(vec![ColType::Node, ColType::Int])
+        );
         let builtins: Vec<String> = c.builtins.iter().map(|b| b.signature()).collect();
         let core_builtins: Vec<String> = core.builtins.iter().map(|b| b.signature()).collect();
         assert_eq!(builtins[..core_builtins.len()], core_builtins[..]);
         assert_eq!(builtins[core_builtins.len()..], ["near/2"]);
         // A domain builtin is a Domain builtin whatever its declaration said.
-        assert_eq!(c.builtin("near", 2).map(|b| b.kind), Some(BuiltinKind::Domain));
+        assert_eq!(
+            c.builtin("near", 2).map(|b| b.kind),
+            Some(BuiltinKind::Domain)
+        );
         assert_eq!(c.registries, TABLES.registries);
         assert_eq!(c.carry, TABLES.carry_edges);
         assert!(catalog_conflicts(&g).is_empty());
@@ -895,7 +961,11 @@ mod tests {
             }
         }
         // The string builtins declare exactly what the core catalog does.
-        for k in [BuiltinKind::StartsWith, BuiltinKind::EndsWith, BuiltinKind::Contains] {
+        for k in [
+            BuiltinKind::StartsWith,
+            BuiltinKind::EndsWith,
+            BuiltinKind::Contains,
+        ] {
             let b = string_builtin(k).expect("a string builtin");
             assert_eq!(core.builtin(&b.decl().name, 2), Some(&b.decl()));
         }
@@ -904,16 +974,28 @@ mod tests {
     #[test]
     fn catalog_conflicts_name_the_owner() {
         let mut g = src();
-        g.attr(AttrDecl { name: "edge", ty: ColType::Int })
-            .attr(AttrDecl { name: "index", ty: ColType::Int })
-            .attr(AttrDecl { name: "scc", ty: ColType::Str })
-            .attr(AttrDecl { name: "index", ty: ColType::Str })
-            .builtin(Box::new(Named("in_scope", 2, 2)))
-            .builtin(Box::new(Named("reaches", 2, 2)))
-            .builtin(Box::new(Named("index", 1, 1)))
-            .builtin(Box::new(Named("in_scope", 2, 2)))
-            .builtin(Box::new(Named("odd", 2, 1)))
-            .builtin(Box::new(Named("in_scope", 3, 3)));
+        g.attr(AttrDecl {
+            name: "edge",
+            ty: ColType::Int,
+        })
+        .attr(AttrDecl {
+            name: "index",
+            ty: ColType::Int,
+        })
+        .attr(AttrDecl {
+            name: "scc",
+            ty: ColType::Str,
+        })
+        .attr(AttrDecl {
+            name: "index",
+            ty: ColType::Str,
+        })
+        .builtin(Box::new(Named("in_scope", 2, 2)))
+        .builtin(Box::new(Named("reaches", 2, 2)))
+        .builtin(Box::new(Named("index", 1, 1)))
+        .builtin(Box::new(Named("in_scope", 2, 2)))
+        .builtin(Box::new(Named("odd", 2, 1)))
+        .builtin(Box::new(Named("in_scope", 3, 3)));
         assert_eq!(
             catalog_conflicts(&g),
             [
@@ -934,8 +1016,10 @@ mod tests {
         let builtins: Vec<String> = d.catalog.builtins.iter().map(|b| b.signature()).collect();
         assert_eq!(builtins[8..], ["in_scope/2", "in_scope/3"]);
         // The kept implementations are the first in_scope/2 and the in_scope/3.
-        let kept: Vec<usize> =
-            d.impls[8..].iter().filter_map(|b| b.map(|b| b.decl().cols.len())).collect();
+        let kept: Vec<usize> = d.impls[8..]
+            .iter()
+            .filter_map(|b| b.map(|b| b.decl().cols.len()))
+            .collect();
         assert_eq!(kept, [2, 3]);
         assert_eq!(d.impls.len(), builtins.len());
     }
@@ -948,7 +1032,10 @@ mod tests {
             .edge(A, B, CALLS, Confidence::Strong, Tier::Fact);
         assert_eq!(edge_tiers(&g), [Tier::Heuristic, Tier::Fact, Tier::Fact]);
         let all = Restrict::default();
-        assert_eq!(load(&g, EdbPred::Edge, &all), [row(&["a", "b", "CALLS"], Tier::Fact, 1)]);
+        assert_eq!(
+            load(&g, EdbPred::Edge, &all),
+            [row(&["a", "b", "CALLS"], Tier::Fact, 1)]
+        );
         assert_eq!(
             load(&g, EdbPred::EdgeConf, &all),
             [row(&["a", "b", "CALLS", "strong"], Tier::Fact, 1)]
@@ -960,7 +1047,10 @@ mod tests {
         h.edge(A, B, CALLS, Confidence::Weak, Tier::Derived)
             .edge(A, B, CALLS, Confidence::Strong, Tier::Heuristic)
             .edge(A, B, CALLS, Confidence::Weak, Tier::Derived);
-        assert_eq!(load(&h, EdbPred::Edge, &all), [row(&["a", "b", "CALLS"], Tier::Derived, 0)]);
+        assert_eq!(
+            load(&h, EdbPred::Edge, &all),
+            [row(&["a", "b", "CALLS"], Tier::Derived, 0)]
+        );
         assert_eq!(
             load(&h, EdbPred::EdgeConf, &all),
             [
@@ -971,7 +1061,10 @@ mod tests {
         // Without tiers (a non-edge caller's `&[]`) the source is asked directly.
         let mut values = ValueTable::new();
         let rows = load_edb(&h, EdbPred::Edge, &all, &[], &mut values);
-        assert_eq!(rendered(&h, &rows, &values), [row(&["a", "b", "CALLS"], Tier::Derived, 0)]);
+        assert_eq!(
+            rendered(&h, &rows, &values),
+            [row(&["a", "b", "CALLS"], Tier::Derived, 0)]
+        );
     }
 
     #[test]
@@ -981,9 +1074,14 @@ mod tests {
             .edge(A, C, IMPORTS, Confidence::Strong, Tier::Fact)
             .edge(B, C, CALLS, Confidence::Medium, Tier::Derived)
             .edge(B, A, USES, Confidence::Strong, Tier::Fact);
-        let calls = Restrict { categories: Some(vec![CALLS]), cell_types: None };
-        let want =
-            [row(&["a", "b", "CALLS"], Tier::Fact, 0), row(&["b", "c", "CALLS"], Tier::Derived, 2)];
+        let calls = Restrict {
+            categories: Some(vec![CALLS]),
+            cell_types: None,
+        };
+        let want = [
+            row(&["a", "b", "CALLS"], Tier::Fact, 0),
+            row(&["b", "c", "CALLS"], Tier::Derived, 2),
+        ];
         assert_eq!(load(&g, EdbPred::Edge, &calls), want);
         assert_eq!(
             load(&g, EdbPred::EdgeConf, &calls),
@@ -993,7 +1091,10 @@ mod tests {
             ]
         );
         assert_eq!(load(&g, EdbPred::Edge, &Restrict::default()).len(), 4);
-        let none = Restrict { categories: Some(Vec::new()), cell_types: None };
+        let none = Restrict {
+            categories: Some(Vec::new()),
+            cell_types: None,
+        };
         assert!(load(&g, EdbPred::Edge, &none).is_empty());
     }
 
@@ -1001,8 +1102,20 @@ mod tests {
     fn cells_text_and_json_only() {
         let mut g = src();
         g.cell(A, text(CODE, "def a(): pass"))
-            .cell(A, Cell { kind: POSITION, payload: CellPayload::Json("{\"line\":0}".into()) })
-            .cell(A, Cell { kind: EMBED, payload: CellPayload::Bytes(vec![1, 2, 3]) })
+            .cell(
+                A,
+                Cell {
+                    kind: POSITION,
+                    payload: CellPayload::Json("{\"line\":0}".into()),
+                },
+            )
+            .cell(
+                A,
+                Cell {
+                    kind: EMBED,
+                    payload: CellPayload::Bytes(vec![1, 2, 3]),
+                },
+            )
             .cell(NodeId(0xdead), text(CODE, "ignored: no such node"));
         let all = Restrict::default();
         assert_eq!(
@@ -1012,7 +1125,10 @@ mod tests {
                 row(&["a", "POSITION", "{\"line\":0}"], Tier::Fact, NO_ORDINAL),
             ]
         );
-        let code = Restrict { categories: None, cell_types: Some(vec![CODE]) };
+        let code = Restrict {
+            categories: None,
+            cell_types: Some(vec![CODE]),
+        };
         assert_eq!(
             load(&g, EdbPred::Cell, &code),
             [row(&["a", "CODE", "def a(): pass"], Tier::Fact, NO_ORDINAL)]
@@ -1023,8 +1139,14 @@ mod tests {
         h.push_edge(
             Edge::new(A, B, CALLS, Confidence::Strong)
                 .with_cell(text(CODE, "a()"))
-                .with_cell(Cell { kind: EMBED, payload: CellPayload::Bytes(vec![0]) })
-                .with_cell(Cell { kind: POSITION, payload: CellPayload::Json("{}".into()) }),
+                .with_cell(Cell {
+                    kind: EMBED,
+                    payload: CellPayload::Bytes(vec![0]),
+                })
+                .with_cell(Cell {
+                    kind: POSITION,
+                    payload: CellPayload::Json("{}".into()),
+                }),
             Tier::Derived,
         )
         .push_edge(
@@ -1039,7 +1161,10 @@ mod tests {
                 row(&["a", "c", "IMPORTS", "CODE", "import c"], Tier::Fact, 1),
             ]
         );
-        let both = Restrict { categories: Some(vec![CALLS]), cell_types: Some(vec![CODE]) };
+        let both = Restrict {
+            categories: Some(vec![CALLS]),
+            cell_types: Some(vec![CODE]),
+        };
         assert_eq!(
             load(&h, EdbPred::EdgeCell, &both),
             [row(&["a", "b", "CALLS", "CODE", "a()"], Tier::Derived, 0)]
@@ -1093,10 +1218,15 @@ mod tests {
         assert_eq!(carry.arity, 1);
         assert_eq!(
             load(&g, EdbPred::Kind, &all),
-            [row(&["FUNCTION"], Tier::Fact, NO_ORDINAL), row(&["MODULE"], Tier::Fact, NO_ORDINAL)]
+            [
+                row(&["FUNCTION"], Tier::Fact, NO_ORDINAL),
+                row(&["MODULE"], Tier::Fact, NO_ORDINAL)
+            ]
         );
-        let cats: Vec<Vec<String>> =
-            load(&g, EdbPred::Category, &all).into_iter().map(|r| r.0).collect();
+        let cats: Vec<Vec<String>> = load(&g, EdbPred::Category, &all)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
         assert_eq!(cats, [["CALLS"], ["IMPORTS"], ["USES"]]);
         // Names are interned once: the same name is the same handle across loads.
         let cats = load_edb(&g, EdbPred::Category, &all, &[], &mut values);
@@ -1149,9 +1279,18 @@ mod tests {
         // `edge` collides with the core predicate and is dropped, so the catalog's
         // index/2 is EDB 8 and file/2 EDB 9 while their columns are 1 and 2.
         inner
-            .attr(AttrDecl { name: "edge", ty: ColType::Int })
-            .attr(AttrDecl { name: "index", ty: ColType::Int })
-            .attr(AttrDecl { name: "file", ty: ColType::Str })
+            .attr(AttrDecl {
+                name: "edge",
+                ty: ColType::Int,
+            })
+            .attr(AttrDecl {
+                name: "index",
+                ty: ColType::Int,
+            })
+            .attr(AttrDecl {
+                name: "file",
+                ty: ColType::Str,
+            })
             .set_attr(A, 1, Value::Int(0))
             .set_attr(C, 1, Value::Int(2))
             .set_attr(B, 2, Value::Str("b.py".into()))
@@ -1160,14 +1299,22 @@ mod tests {
             .set_attr(A, 7, Value::Int(9))
             .cell(A, text(CODE, "x"))
             .edge(A, B, CALLS, Confidence::Strong, Tier::Fact);
-        let g =
-            Counting { inner, cell_walks: Counter::new(0), attr_reads: RefCell::new(Vec::new()) };
+        let g = Counting {
+            inner,
+            cell_walks: Counter::new(0),
+            attr_reads: RefCell::new(Vec::new()),
+        };
         let cat = catalog_of(&g);
         assert_eq!(cat.edb[8].name, "index");
         assert_eq!(cat.edb[9].name, "file");
         let all = Restrict::default();
 
-        for pred in [EdbPred::Node, EdbPred::Edge, EdbPred::EdgeConf, EdbPred::Kind] {
+        for pred in [
+            EdbPred::Node,
+            EdbPred::Edge,
+            EdbPred::EdgeConf,
+            EdbPred::Kind,
+        ] {
             load(&g, pred, &all);
         }
         assert!(g.attr_reads.borrow().clone().is_empty());
@@ -1175,10 +1322,16 @@ mod tests {
 
         assert_eq!(
             load(&g, EdbPred::Attr(8), &all),
-            [row(&["a", "0i"], Tier::Fact, NO_ORDINAL), row(&["c", "5i"], Tier::Fact, NO_ORDINAL)]
+            [
+                row(&["a", "0i"], Tier::Fact, NO_ORDINAL),
+                row(&["c", "5i"], Tier::Fact, NO_ORDINAL)
+            ]
         );
         assert_eq!(g.attr_reads.borrow().clone(), [1]);
-        assert_eq!(load(&g, EdbPred::Attr(9), &all), [row(&["b", "b.py"], Tier::Fact, NO_ORDINAL)]);
+        assert_eq!(
+            load(&g, EdbPred::Attr(9), &all),
+            [row(&["b", "b.py"], Tier::Fact, NO_ORDINAL)]
+        );
         assert_eq!(g.attr_reads.borrow().clone(), [1, 2]);
         // A core index or one past the attributes reads no column.
         assert!(load(&g, EdbPred::Attr(1), &all).is_empty());
@@ -1242,30 +1395,57 @@ mod tests {
             call(&StartsWith, &[s("engine::check"), s("engine")]),
             Ok(yes("engine::check", "engine"))
         );
-        assert_eq!(call(&StartsWith, &[s("engine::check"), s("check")]), Ok(vec![]));
+        assert_eq!(
+            call(&StartsWith, &[s("engine::check"), s("check")]),
+            Ok(vec![])
+        );
         assert_eq!(
             call(&EndsWith, &[s("engine::check"), s("check")]),
             Ok(yes("engine::check", "check"))
         );
-        assert_eq!(call(&EndsWith, &[s("engine::check"), s("engine")]), Ok(vec![]));
+        assert_eq!(
+            call(&EndsWith, &[s("engine::check"), s("engine")]),
+            Ok(vec![])
+        );
         assert_eq!(
             call(&Contains, &[s("engine::check"), s("e::c")]),
             Ok(yes("engine::check", "e::c"))
         );
-        assert_eq!(call(&Contains, &[s("engine::check"), s("graph")]), Ok(vec![]));
+        assert_eq!(
+            call(&Contains, &[s("engine::check"), s("graph")]),
+            Ok(vec![])
+        );
         assert_eq!(call(&Contains, &[s("x"), s("")]), Ok(yes("x", "")));
         // A node or int is no match; an unbound argument or a wrong arity is an error.
-        assert_eq!(call(&StartsWith, &[Some(ValueRef::Node(A)), s("a")]), Ok(vec![]));
-        assert_eq!(call(&Contains, &[s("10"), Some(ValueRef::Int(1))]), Ok(vec![]));
-        assert_eq!(call(&EndsWith, &[s("x"), None]), Err("argument 2 is unbound".to_string()));
-        assert_eq!(call(&EndsWith, &[None, s("x")]), Err("argument 1 is unbound".to_string()));
-        assert_eq!(call(&Contains, &[s("x")]), Err("takes 2 arguments, got 1".to_string()));
+        assert_eq!(
+            call(&StartsWith, &[Some(ValueRef::Node(A)), s("a")]),
+            Ok(vec![])
+        );
+        assert_eq!(
+            call(&Contains, &[s("10"), Some(ValueRef::Int(1))]),
+            Ok(vec![])
+        );
+        assert_eq!(
+            call(&EndsWith, &[s("x"), None]),
+            Err("argument 2 is unbound".to_string())
+        );
+        assert_eq!(
+            call(&EndsWith, &[None, s("x")]),
+            Err("argument 1 is unbound".to_string())
+        );
+        assert_eq!(
+            call(&Contains, &[s("x")]),
+            Err("takes 2 arguments, got 1".to_string())
+        );
         for (k, name) in [
             (BuiltinKind::StartsWith, "starts_with"),
             (BuiltinKind::EndsWith, "ends_with"),
             (BuiltinKind::Contains, "contains"),
         ] {
-            assert_eq!(string_builtin(k).map(|b| b.decl().name), Some(name.to_string()));
+            assert_eq!(
+                string_builtin(k).map(|b| b.decl().name),
+                Some(name.to_string())
+            );
         }
         for k in [BuiltinKind::Reaches, BuiltinKind::Scc, BuiltinKind::Domain] {
             assert!(string_builtin(k).is_none());
@@ -1275,14 +1455,26 @@ mod tests {
     #[test]
     fn mem_source_reads_back_what_it_was_given() {
         let mut g = src();
-        g.attr(AttrDecl { name: "index", ty: ColType::Int })
-            .set_attr(B, 0, Value::Int(1))
-            .edge(A, B, CALLS, Confidence::Strong, Tier::Heuristic)
-            .edge(B, C, USES, Confidence::Weak, Tier::Fact)
-            .builtin(Box::new(Near));
+        g.attr(AttrDecl {
+            name: "index",
+            ty: ColType::Int,
+        })
+        .set_attr(B, 0, Value::Int(1))
+        .edge(A, B, CALLS, Confidence::Strong, Tier::Heuristic)
+        .edge(B, C, USES, Confidence::Weak, Tier::Fact)
+        .builtin(Box::new(Near));
         assert_eq!(g.node_ids(), [A, B, C]);
-        let keys: Vec<_> = g.edges().map(|e| (e.from, e.to, e.category, e.confidence)).collect();
-        assert_eq!(keys, [(A, B, CALLS, Confidence::Strong), (B, C, USES, Confidence::Weak)]);
+        let keys: Vec<_> = g
+            .edges()
+            .map(|e| (e.from, e.to, e.category, e.confidence))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (A, B, CALLS, Confidence::Strong),
+                (B, C, USES, Confidence::Weak)
+            ]
+        );
         let e0 = g.edges().next().cloned().expect("an edge");
         assert_eq!(g.edge_tier(0, &e0), Tier::Heuristic);
         assert_eq!(g.edge_tier(1, &e0), Tier::Fact);

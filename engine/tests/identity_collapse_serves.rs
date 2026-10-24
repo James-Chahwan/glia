@@ -56,11 +56,24 @@ fn snapshot(repo: &Path) {
         path: "app.py".to_string(),
         language: "python".to_string(),
         source_hash: source_hash(&bytes),
-        defs: vec![ScipDefRow { s: 0, line: DEF_ROW, name: "create_order".to_string() }],
+        defs: vec![ScipDefRow {
+            s: 0,
+            line: DEF_ROW,
+            name: "create_order".to_string(),
+        }],
         refs: Vec::new(),
     }];
-    let symbols = vec![ScipSymbolRecord { id: 0, symbol: SYMBOL.to_string(), implements: Vec::new() }];
-    let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+    let symbols = vec![ScipSymbolRecord {
+        id: 0,
+        symbol: SYMBOL.to_string(),
+        implements: Vec::new(),
+    }];
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
     write_scip(repo, meta, &documents, &symbols).expect("write snapshot");
 }
 
@@ -86,7 +99,11 @@ fn build(td: &tempfile::TempDir, repos: &[&str]) -> GenerateResult {
 }
 
 fn same_as_edges(r: &GenerateResult) -> usize {
-    r.merged.cross_edges.iter().filter(|e| e.category == edge_category::SAME_AS).count()
+    r.merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count()
 }
 
 fn on(r: &GenerateResult) -> Collapse {
@@ -112,7 +129,10 @@ fn repo_of(r: &GenerateResult, id: u64) -> String {
         .iter()
         .find(|g| g.nav.qname_by_id.contains_key(&NodeId(id)))
         .expect("a node of the build");
-    r.repo_labels.get(&g.repo.0).cloned().expect("a labelled repo")
+    r.repo_labels
+        .get(&g.repo.0)
+        .cloned()
+        .expect("a labelled repo")
 }
 
 /// The handler node of `server` (its only HANDLED_BY target).
@@ -122,7 +142,13 @@ fn handler_of(s: &Server) -> u64 {
 }
 
 /// A test-only cross edge carrying its EVIDENCE cell.
-fn cross(r: &mut GenerateResult, from: u64, to: u64, category: glia_core::EdgeCategoryId, ev: Evidence) {
+fn cross(
+    r: &mut GenerateResult,
+    from: u64,
+    to: u64,
+    category: glia_core::EdgeCategoryId,
+    ev: Evidence,
+) {
     let mut e = Edge::new(NodeId(from), NodeId(to), category, Confidence::Strong);
     evidence::attach(&mut e, ev);
     r.merged.cross_edges.push(e);
@@ -138,7 +164,10 @@ fn cross(r: &mut GenerateResult, from: u64, to: u64, category: glia_core::EdgeCa
 fn scip_identical_handlers() {
     let td = repos(true);
     let r = build(&td, &["billing", "shop"]);
-    assert!(same_as_edges(&r) > 0, "control: the create_order copies are one SCIP class");
+    assert!(
+        same_as_edges(&r) > 0,
+        "control: the create_order copies are one SCIP class"
+    );
 
     let rows = answer(&r, &on(&r));
     assert_eq!(rows.len(), 2, "two ROUTEs, kept: {rows:#?}");
@@ -147,7 +176,11 @@ fn scip_identical_handlers() {
         assert_eq!((s.kind, s.r#match), ("ROUTE", "exact"), "{s:#?}");
         assert!(s.identity.is_none(), "no rule pairs routes: {s:#?}");
         let own = repo_of(&r, handler_of(s));
-        assert_eq!(own, repo_of(&r, s.id), "a server's handler is its own repo's");
+        assert_eq!(
+            own,
+            repo_of(&r, s.id),
+            "a server's handler is its own repo's"
+        );
         assert_eq!(s.handlers[0].qname, HANDLER);
         assert_eq!(s.handler_identity.len(), 1, "{s:#?}");
         let hi = &s.handler_identity[0];
@@ -173,16 +206,25 @@ fn scip_identical_handlers() {
     assert_eq!(repos_seen, ["billing", "shop"]);
     let text = json(&rows);
     assert!(
-        text.contains("\"handler_identity\":[{\"qname\":\"app::create_order\",\"identity\":{\"tier\":\"fact\""),
+        text.contains(
+            "\"handler_identity\":[{\"qname\":\"app::create_order\",\"identity\":{\"tier\":\"fact\""
+        ),
         "{text}"
     );
-    assert!(!text.contains("\"identity\":null"), "an unset identity is no key: {text}");
+    assert!(
+        !text.contains("\"identity\":null"),
+        "an unset identity is no key: {text}"
+    );
 
     // Off: the same servers and handlers, no identity keys.
     let off = answer(&r, &Collapse::off());
     let off_text = json(&off);
     assert!(!off_text.contains("identity"), "{off_text}");
-    let ids = |rows: &[Server]| rows.iter().map(|s| (s.id, handler_of(s))).collect::<Vec<_>>();
+    let ids = |rows: &[Server]| {
+        rows.iter()
+            .map(|s| (s.id, handler_of(s)))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(ids(&off), ids(&rows));
 
     // serves / serves_with_live delegate with Collapse::default(): on, no
@@ -191,12 +233,16 @@ fn scip_identical_handlers() {
     let plain = serves(&r.merged, CHANNEL, "auto").expect("an answer");
     let live = entrypoint_reachable(&r.merged);
     let cached = serves_with_live(&r.merged, &live, CHANNEL, "auto").expect("an answer");
-    let dflt = serves_with(&r.merged, &live, CHANNEL, "auto", &Collapse::default()).expect("an answer");
+    let dflt =
+        serves_with(&r.merged, &live, CHANNEL, "auto", &Collapse::default()).expect("an answer");
     assert_eq!(json(&plain), json(&dflt));
     assert_eq!(json(&cached), json(&dflt));
     for s in &dflt.results {
         let also = &s.handler_identity[0].identity.also_in;
-        assert!(also.len() == 1 && also[0].repo.starts_with("repo#"), "{also:?}");
+        assert!(
+            also.len() == 1 && also[0].repo.starts_with("repo#"),
+            "{also:?}"
+        );
     }
 
     // Unknown mechanism is still an error.
@@ -232,12 +278,26 @@ fn a_server_class_folds_to_one_row() {
     let s = &rows[0];
     assert_eq!(s.id, a, "the first row in answer order is kept");
     assert_eq!(handler_of(s), handler_of(&raw[0]), "with its own handlers");
-    assert!(s.handler_identity.is_empty(), "the handler is in no class: {s:#?}");
+    assert!(
+        s.handler_identity.is_empty(),
+        "the handler is in no class: {s:#?}"
+    );
     let id = s.identity.as_ref().expect("the kept row carries its class");
-    assert_eq!((id.tier, id.rules.as_slice()), ("derived", [same_as::RULE_CONTRACT_ROUTE].as_slice()));
-    let also: Vec<(String, &str)> = id.also_in.iter().map(|m| (m.repo.clone(), m.qname.as_str())).collect();
+    assert_eq!(
+        (id.tier, id.rules.as_slice()),
+        ("derived", [same_as::RULE_CONTRACT_ROUTE].as_slice())
+    );
+    let also: Vec<(String, &str)> = id
+        .also_in
+        .iter()
+        .map(|m| (m.repo.clone(), m.qname.as_str()))
+        .collect();
     assert_eq!(also, [(repo_of(&r, b), raw[1].qname.as_str())]);
-    assert!(json(&rows).contains("\"identity\":{\"tier\":\"derived\""), "{}", json(&rows));
+    assert!(
+        json(&rows).contains("\"identity\":{\"tier\":\"derived\""),
+        "{}",
+        json(&rows)
+    );
 
     let off = answer(&r, &Collapse::off());
     assert_eq!(json(&off), json(&raw), "off is the raw rows");
@@ -251,8 +311,14 @@ fn one_servers_handlers_of_one_class_fold() {
     let td = repos(true);
     let mut r = build(&td, &["billing", "shop"]);
     let raw = answer(&r, &Collapse::off());
-    let billing = raw.iter().find(|s| repo_of(&r, s.id) == "billing").expect("billing's route");
-    let shop = raw.iter().find(|s| repo_of(&r, s.id) == "shop").expect("shop's route");
+    let billing = raw
+        .iter()
+        .find(|s| repo_of(&r, s.id) == "billing")
+        .expect("billing's route");
+    let shop = raw
+        .iter()
+        .find(|s| repo_of(&r, s.id) == "shop")
+        .expect("shop's route");
     let (route, own, copy) = (billing.id, handler_of(billing), handler_of(shop));
     cross(
         &mut r,
@@ -268,11 +334,19 @@ fn one_servers_handlers_of_one_class_fold() {
     assert_eq!(hs, [own, copy], "off: both handlers, in edge order");
 
     let rows = answer(&r, &on(&r));
-    let s = rows.iter().find(|s| s.id == route).expect("billing's route");
+    let s = rows
+        .iter()
+        .find(|s| s.id == route)
+        .expect("billing's route");
     let hs: Vec<u64> = s.handlers.iter().map(|h| h.id).collect();
     assert_eq!(hs, [own], "the class's first handler kept: {s:#?}");
     assert_eq!(s.handler_identity.len(), 1, "{s:#?}");
-    let also: Vec<&str> = s.handler_identity[0].identity.also_in.iter().map(|m| m.repo.as_str()).collect();
+    let also: Vec<&str> = s.handler_identity[0]
+        .identity
+        .also_in
+        .iter()
+        .map(|m| m.repo.as_str())
+        .collect();
     assert_eq!(also, ["shop"]);
     assert_eq!(rows.len(), 2, "the servers themselves stay two");
 }
@@ -289,13 +363,20 @@ fn class_free_identical() {
     let one = build(&td, &["billing"]);
     assert_eq!(same_as_edges(&one), 0, "control: one repo, no SAME_AS");
     let two = build(&td, &["billing", "shop"]);
-    assert!(same_as_edges(&two) > 0, "control: the unindexed copies are heuristic candidates");
-    assert!(IdentityView::new(&two.merged, &on(&two)).is_empty(), "control: no collapse class");
+    assert!(
+        same_as_edges(&two) > 0,
+        "control: the unindexed copies are heuristic candidates"
+    );
+    assert!(
+        IdentityView::new(&two.merged, &on(&two)).is_empty(),
+        "control: no collapse class"
+    );
     for r in [&one, &two] {
         let live: HashSet<NodeId> = entrypoint_reachable(&r.merged);
         for channel in [CHANNEL, "/orders", "DELETE /orders", "orders.created"] {
             let a = serves_with(&r.merged, &live, channel, "auto", &on(r)).expect("an answer");
-            let b = serves_with(&r.merged, &live, channel, "auto", &Collapse::off()).expect("an answer");
+            let b = serves_with(&r.merged, &live, channel, "auto", &Collapse::off())
+                .expect("an answer");
             assert_eq!(json(&a), json(&b), "{channel}");
             assert!(!json(&a).contains("identity"), "{}", json(&a));
         }

@@ -155,5 +155,8 @@ fn a_kotlin_only_repo_builds_its_own_graph() {
 fn a_java_only_repo_keeps_one_graph() {
     let (_tmp, merged) = build(&[(JAVA_PATH, JAVA_SERVICE)]);
     assert_eq!(merged.graphs.len(), 1, "no empty Kotlin graph beside Java");
-    assert_eq!(graph_with(&merged, node_kind::CLASS, "InvoiceService").len(), 1);
+    assert_eq!(
+        graph_with(&merged, node_kind::CLASS, "InvoiceService").len(),
+        1
+    );
 }

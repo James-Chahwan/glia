@@ -1014,10 +1014,15 @@ mod tests {
         );
         let position = |file: &str| Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":3,"end_line":3}}"#
+            )),
         };
         for (q, file) in [
-            ("contracts::Escrow::Escrow::Released", "contracts/Escrow.sol"),
+            (
+                "contracts::Escrow::Escrow::Released",
+                "contracts/Escrow.sol",
+            ),
             ("src::orders::Orders::Shipped", "src/orders.ts"),
         ] {
             let id = NodeId::from_parts(GRAPH_TYPE, g.repo, node_kind::EVENT_EMITTER, q);

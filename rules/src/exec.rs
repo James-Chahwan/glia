@@ -56,7 +56,10 @@ use crate::value::{Handle, Lookup, Tier, ValueRef, ValueTable};
 const FREE: Handle = Handle::MAX;
 
 /// The provenance of a row no rule derived: builtin, `reaches` and filter rows.
-const LOADED: RowMeta = RowMeta { height: 0, rule: EDB_RULE };
+const LOADED: RowMeta = RowMeta {
+    height: 0,
+    rule: EDB_RULE,
+};
 
 /// An scc relation's columns in identity order, and swapped (`rep` first).
 const ID2: [u8; 2] = [0, 1];
@@ -97,7 +100,11 @@ pub(crate) struct Budget {
 
 impl Budget {
     pub(crate) fn new(cap: usize) -> Self {
-        Budget { cap, used: 0, tripped: None }
+        Budget {
+            cap,
+            used: 0,
+            tripped: None,
+        }
     }
 
     /// Count `n` more rows; true once the count has passed the cap.
@@ -120,8 +127,15 @@ impl Budget {
 /// set before the body (the head's, for a row).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Mode<'m> {
-    Eval { level: Tier, first_round: bool },
-    Explain { level: Tier, max_height: u32, bound: &'m [(u16, Handle)] },
+    Eval {
+        level: Tier,
+        first_round: bool,
+    },
+    Explain {
+        level: Tier,
+        max_height: u32,
+        bound: &'m [(u16, Handle)],
+    },
 }
 
 /// One complete binding.
@@ -173,10 +187,20 @@ pub(crate) fn run_body<S: FactSource + ?Sized>(
 ) -> Result<(), RulesError> {
     let (level, first, max_height, bound) = match mode {
         Mode::Eval { level, first_round } => (level, first_round, None, &[][..]),
-        Mode::Explain { level, max_height, bound } => (level, false, Some(max_height), bound),
+        Mode::Explain {
+            level,
+            max_height,
+            bound,
+        } => (level, false, Some(max_height), bound),
     };
     let explain = max_height.is_some();
-    let vis = Vis { level: level.level(), first, max_height, explain, count: !explain };
+    let vis = Vis {
+        level: level.level(),
+        first,
+        max_height,
+        explain,
+        count: !explain,
+    };
     walk(ctx, steps, vis, bound, emit)
 }
 
@@ -202,16 +226,22 @@ impl Vis {
             (Src::All, _) => (upto, Which::Both),
             (Src::Delta, true) => (l..=l, Which::Both),
             (Src::Delta, false) => (l..=l, Which::Recent),
-            (Src::Old, true) => {
-                (l.checked_sub(1).map_or(RangeInclusive::new(1, 0), |b| 0..=b), Which::Both)
-            }
+            (Src::Old, true) => (
+                l.checked_sub(1)
+                    .map_or(RangeInclusive::new(1, 0), |b| 0..=b),
+                Which::Both,
+            ),
             (Src::Old, false) => (upto, Which::Stable),
         }
     }
 
     fn view(self, src: Src) -> View {
         let (levels, which) = self.span(src);
-        View { levels, which, max_height: self.max_height }
+        View {
+            levels,
+            which,
+            max_height: self.max_height,
+        }
     }
 
     /// A complete-input row (builtin, reaches, hoisted) at `tier` is visible.
@@ -223,7 +253,13 @@ impl Vis {
     /// Every level, no height bound: what a negation and a hoisted seed read.
     fn complete(count: bool) -> Vis {
         let level = Tier::Heuristic.level();
-        Vis { level, first: false, max_height: None, explain: false, count }
+        Vis {
+            level,
+            first: false,
+            max_height: None,
+            explain: false,
+            count,
+        }
     }
 }
 
@@ -317,7 +353,13 @@ impl Alts {
             }
             _ => ordinal,
         };
-        self.alts.push(Alt { at, len: self.vals.len() - at, tier, meta, ordinal });
+        self.alts.push(Alt {
+            at,
+            len: self.vals.len() - at,
+            tier,
+            meta,
+            ordinal,
+        });
     }
 }
 
@@ -356,7 +398,11 @@ fn walk<'e, S: FactSource + ?Sized>(
     if vis.count && ctx.budget.tripped.is_some() {
         return Ok(());
     }
-    let mut span = bound.iter().map(|(v, _)| usize::from(*v) + 1).max().unwrap_or(0);
+    let mut span = bound
+        .iter()
+        .map(|(v, _)| usize::from(*v) + 1)
+        .max()
+        .unwrap_or(0);
     for s in steps {
         each_bind(s, |_, v| span = span.max(usize::from(v) + 1));
     }
@@ -369,8 +415,11 @@ fn walk<'e, S: FactSource + ?Sized>(
         cursors: steps.iter().map(|_| None).collect(),
         all: steps.iter().map(|_| None).collect(),
     };
-    let (mut out, mut frames, mut lits) =
-        (Alts::default(), Vec::<Frame>::with_capacity(steps.len()), Vec::new());
+    let (mut out, mut frames, mut lits) = (
+        Alts::default(),
+        Vec::<Frame>::with_capacity(steps.len()),
+        Vec::new(),
+    );
     let (mut level, mut height) = (Tier::Fact, 0u32);
     loop {
         let k = frames.len();
@@ -394,11 +443,18 @@ fn walk<'e, S: FactSource + ?Sized>(
                 if vis.count && ctx.budget.charge(1) {
                     return Ok(());
                 }
-                emit(&Binding { vars: &vars, level, height, lits: &lits })?;
+                emit(&Binding {
+                    vars: &vars,
+                    level,
+                    height,
+                    lits: &lits,
+                })?;
             }
         }
         loop {
-            let Some(k) = frames.len().checked_sub(1) else { return Ok(()) };
+            let Some(k) = frames.len().checked_sub(1) else {
+                return Ok(());
+            };
             let f = &mut frames[k];
             if f.next < f.end {
                 let a = out.alts[f.next];
@@ -406,7 +462,9 @@ fn walk<'e, S: FactSource + ?Sized>(
                 level = f.level.weakest(a.tier);
                 height = f.height.max(a.meta.height);
                 let row = &out.vals[a.at..a.at + a.len];
-                each_bind(&steps[k], |c, v| set(&mut vars, v, row.get(c).copied().unwrap_or(FREE)));
+                each_bind(&steps[k], |c, v| {
+                    set(&mut vars, v, row.get(c).copied().unwrap_or(FREE))
+                });
                 if vis.explain {
                     lits.truncate(f.lits);
                     lits.extend(lit_row(k, &steps[k], row, &a));
@@ -471,7 +529,14 @@ fn expand<'e, S: FactSource + ?Sized>(
 ) -> Result<bool, RulesError> {
     let (vis, rels): (Vis, &'e [Relation]) = (run.vis, ctx.rels);
     match step {
-        Step::Scan { pred, index, perm, binds, checks, src } => {
+        Step::Scan {
+            pred,
+            index,
+            perm,
+            binds,
+            checks,
+            src,
+        } => {
             let (Some(rel), Some(wants)) =
                 (rels.get(*pred as usize), wants(ctx, checks, binds, vars))
             else {
@@ -482,20 +547,41 @@ fn expand<'e, S: FactSource + ?Sized>(
                 out.relation_row(r, perm, &wants, (t, m, o), ex)
             });
         }
-        Step::Lookup { pred, index, perm, key, binds, checks, src } => {
-            let (Some(rel), Some(key), Some(wants)) =
-                (rels.get(*pred as usize), parts(ctx, key, vars), wants(ctx, checks, binds, vars))
-            else {
+        Step::Lookup {
+            pred,
+            index,
+            perm,
+            key,
+            binds,
+            checks,
+            src,
+        } => {
+            let (Some(rel), Some(key), Some(wants)) = (
+                rels.get(*pred as usize),
+                parts(ctx, key, vars),
+                wants(ctx, checks, binds, vars),
+            ) else {
                 return Ok(true);
             };
             let ex = vis.explain.then_some(rel);
-            let Some(slot) = run.cursors.get_mut(k) else { return Ok(true) };
+            let Some(slot) = run.cursors.get_mut(k) else {
+                return Ok(true);
+            };
             let cursor = slot.get_or_insert_with(|| rel.cursor(*index, vis.view(*src)));
-            cursor.seek(&key, &mut |r, t, m, o| out.relation_row(r, perm, &wants, (t, m, o), ex));
+            cursor.seek(&key, &mut |r, t, m, o| {
+                out.relation_row(r, perm, &wants, (t, m, o), ex)
+            });
         }
-        Step::Neg { pred, index, key, .. } => {
-            let Some(key) = parts(ctx, key, vars) else { return Ok(true) };
-            if !rels.get(*pred as usize).is_some_and(|r| r.exists_prefix(*index, &key)) {
+        Step::Neg {
+            pred, index, key, ..
+        } => {
+            let Some(key) = parts(ctx, key, vars) else {
+                return Ok(true);
+            };
+            if !rels
+                .get(*pred as usize)
+                .is_some_and(|r| r.exists_prefix(*index, &key))
+            {
                 out.unit();
             }
         }
@@ -512,21 +598,56 @@ fn expand<'e, S: FactSource + ?Sized>(
                 out.push(&[h], &[], Tier::Fact, LOADED);
             }
         }
-        Step::Call { builtin, cats, args, binds, checks, src } => {
-            let Some(wants) = wants(ctx, checks, binds, vars) else { return Ok(true) };
-            return call(ctx, (*builtin, cats.as_ref(), args), wants, (vis, *src), vars, out);
+        Step::Call {
+            builtin,
+            cats,
+            args,
+            binds,
+            checks,
+            src,
+        } => {
+            let Some(wants) = wants(ctx, checks, binds, vars) else {
+                return Ok(true);
+            };
+            return call(
+                ctx,
+                (*builtin, cats.as_ref(), args),
+                wants,
+                (vis, *src),
+                vars,
+                out,
+            );
         }
-        Step::NegCall { builtin, cats, args } => {
+        Step::NegCall {
+            builtin,
+            cats,
+            args,
+        } => {
             let mut probe = Alts::default();
             let read = (Vis::complete(vis.count), Src::All);
-            if !call(ctx, (*builtin, cats.as_ref(), args), Vec::new(), read, vars, &mut probe)? {
+            if !call(
+                ctx,
+                (*builtin, cats.as_ref(), args),
+                Vec::new(),
+                read,
+                vars,
+                &mut probe,
+            )? {
                 return Ok(false);
             }
             if probe.alts.is_empty() {
                 out.unit();
             }
         }
-        Step::Reach { cats, depth, from, to, binds, checks, src } => {
+        Step::Reach {
+            cats,
+            depth,
+            from,
+            to,
+            binds,
+            checks,
+            src,
+        } => {
             let (Some(wants), Some(from), Some(to)) = (
                 wants(ctx, checks, binds, vars),
                 opt(ctx, from.as_ref(), vars),
@@ -544,7 +665,12 @@ fn expand<'e, S: FactSource + ?Sized>(
                 out,
             );
         }
-        Step::NegReach { cats, depth, from, to } => {
+        Step::NegReach {
+            cats,
+            depth,
+            from,
+            to,
+        } => {
             let (Some(from), Some(to)) =
                 (opt(ctx, from.as_ref(), vars), opt(ctx, to.as_ref(), vars))
             else {
@@ -552,22 +678,52 @@ fn expand<'e, S: FactSource + ?Sized>(
             };
             let mut probe = Alts::default();
             let read = (Vis::complete(vis.count), Src::All);
-            if !reach(ctx, run.all.get_mut(k), (cats, *depth), (from, to), &[], read, &mut probe)? {
+            if !reach(
+                ctx,
+                run.all.get_mut(k),
+                (cats, *depth),
+                (from, to),
+                &[],
+                read,
+                &mut probe,
+            )? {
                 return Ok(false);
             }
             if probe.alts.is_empty() {
                 out.unit();
             }
         }
-        Step::ReachMulti { slot, cats, depth, seed, seed_var, backward, src, .. } => {
+        Step::ReachMulti {
+            slot,
+            cats,
+            depth,
+            seed,
+            seed_var,
+            backward,
+            src,
+            ..
+        } => {
             let done = ctx.multi.get(*slot).is_some_and(|m| m.done);
             if !done
-                && !fill_multi(ctx, *slot, (cats, *depth), seed, *seed_var, *backward, vis.count)?
+                && !fill_multi(
+                    ctx,
+                    *slot,
+                    (cats, *depth),
+                    seed,
+                    *seed_var,
+                    *backward,
+                    vis.count,
+                )?
             {
                 return Ok(false);
             }
-            let Some(m) = ctx.multi.get(*slot) else { return Ok(true) };
-            let meta = RowMeta { height: m.height, rule: EDB_RULE };
+            let Some(m) = ctx.multi.get(*slot) else {
+                return Ok(true);
+            };
+            let meta = RowMeta {
+                height: m.height,
+                rule: EDB_RULE,
+            };
             for (tier, ids) in Tier::ALL.iter().zip(&m.rows) {
                 if vis.admits(*src, *tier) {
                     for &id in ids {
@@ -595,7 +751,9 @@ fn resolve<S: FactSource + ?Sized>(
     Some(match c {
         ConstVal::Str(s) => ctx.values.intern(ValueRef::Str(s)),
         ConstVal::Int(i) => ctx.values.intern(ValueRef::Int(*i)),
-        ConstVal::CatSet(set) => ctx.values.intern(ValueRef::Str(&set_text(set, ctx.src.tables()))),
+        ConstVal::CatSet(set) => ctx
+            .values
+            .intern(ValueRef::Str(&set_text(set, ctx.src.tables()))),
     })
 }
 
@@ -608,7 +766,10 @@ fn set_text(set: &CatSet, tables: &DomainTables) -> String {
     let reg = &tables.registries;
     let mut names: Vec<String> = ids
         .iter()
-        .map(|c| reg.category_name(*c).map_or_else(|| format!("#{}", c.0), str::to_string))
+        .map(|c| {
+            reg.category_name(*c)
+                .map_or_else(|| format!("#{}", c.0), str::to_string)
+        })
         .collect();
     names.sort();
     names.join("|")
@@ -647,9 +808,10 @@ fn wants<S: FactSource + ?Sized>(
         .iter()
         .map(|(c, part)| {
             let own = match part {
-                KeyPart::Var(v) => {
-                    binds.iter().find(|(_, b)| b == v).map(|(bc, _)| Want::Col(usize::from(*bc)))
-                }
+                KeyPart::Var(v) => binds
+                    .iter()
+                    .find(|(_, b)| b == v)
+                    .map(|(bc, _)| Want::Col(usize::from(*bc))),
                 KeyPart::Const(_) => None,
             };
             let w = match own {
@@ -712,17 +874,25 @@ fn call<S: FactSource + ?Sized>(
 ) -> Result<bool, RulesError> {
     let imp = ctx.builtins.get(b).copied().flatten();
     // An scc call's third column is its category set, carried by `cats`.
-    let n = if imp.is_some() { args.len() } else { args.len().min(2) };
+    let n = if imp.is_some() {
+        args.len()
+    } else {
+        args.len().min(2)
+    };
     let mut key = Vec::with_capacity(n);
     for (c, a) in args[..n].iter().enumerate() {
-        let Some(h) = opt(ctx, a.as_ref(), vars) else { return Ok(true) };
+        let Some(h) = opt(ctx, a.as_ref(), vars) else {
+            return Ok(true);
+        };
         key.push(h.unwrap_or(FREE));
         if let Some(h) = h {
             wants.push((c, Want::Val(h)));
         }
     }
     let Some(imp) = imp else {
-        let rel = cats.and_then(|c| ctx.scc.iter().find(|(s, _)| s == c)).map(|(_, r)| r);
+        let rel = cats
+            .and_then(|c| ctx.scc.iter().find(|(s, _)| s == c))
+            .map(|(_, r)| r);
         if let (Some(rel), [x, rep]) = (rel, key.as_slice()) {
             scc(rel, *x, *rep, &wants, vis.view(src), out);
         }
@@ -751,8 +921,11 @@ fn fill_memo<S: FactSource + ?Sized>(
     let mut found = Vec::new();
     let called = {
         let values = &*ctx.values;
-        let args: Vec<Option<ValueRef<'_>>> =
-            key.1.iter().map(|&h| (h != FREE).then(|| values.get(h))).collect();
+        let args: Vec<Option<ValueRef<'_>>> = key
+            .1
+            .iter()
+            .map(|&h| (h != FREE).then(|| values.get(h)))
+            .collect();
         imp.call(&args, &mut found)
     };
     let decl = ctx.decls.get(key.0);
@@ -765,7 +938,11 @@ fn fill_memo<S: FactSource + ?Sized>(
         .iter()
         .filter(|r| r.values.len() == key.1.len())
         .map(|r| {
-            let row = r.values.iter().map(|v| ctx.values.intern(v.as_ref())).collect();
+            let row = r
+                .values
+                .iter()
+                .map(|v| ctx.values.intern(v.as_ref()))
+                .collect();
             (row, if tiered { r.tier } else { Tier::Fact })
         })
         .collect();
@@ -831,14 +1008,23 @@ fn reach<S: FactSource + ?Sized>(
         (None, Some((th, tid))) => {
             for &(x, t) in ctx.closure.reach(cats, tid, true, depth) {
                 if vis.admits(src, t) {
-                    out.push(&[ctx.values.intern(ValueRef::Node(x)), th], wants, t, LOADED);
+                    out.push(
+                        &[ctx.values.intern(ValueRef::Node(x)), th],
+                        wants,
+                        t,
+                        LOADED,
+                    );
                 }
             }
         }
         (None, None) => {
             let Some(cache) = cache else { return Ok(true) };
             if cache.is_none() {
-                let limit = if vis.count { ctx.budget.remaining() } else { usize::MAX };
+                let limit = if vis.count {
+                    ctx.budget.remaining()
+                } else {
+                    usize::MAX
+                };
                 let Some(rows) = ctx.closure.reach_all(cats, depth, limit) else {
                     // Only a budgeted run passes a limit the rows can exceed.
                     if vis.count {
@@ -879,12 +1065,20 @@ fn fill_multi<S: FactSource + ?Sized>(
     backward: bool,
     count: bool,
 ) -> Result<bool, RulesError> {
-    debug_assert!(seed.iter().all(|s| complete_input(s, ctx.rels)), "a seed reads complete input");
+    debug_assert!(
+        seed.iter().all(|s| complete_input(s, ctx.rels)),
+        "a seed reads complete input"
+    );
     let vis = Vis::complete(count);
     let mut raw: Vec<(Handle, Tier, u32)> = Vec::new();
     let take = usize::from(seed_var);
     walk(ctx, seed, vis, &[], &mut |b| {
-        raw.extend(b.vars.get(take).filter(|h| **h != FREE).map(|h| (*h, b.level, b.height)));
+        raw.extend(
+            b.vars
+                .get(take)
+                .filter(|h| **h != FREE)
+                .map(|h| (*h, b.level, b.height)),
+        );
         Ok(())
     })?;
     if count && ctx.budget.tripped.is_some() {
@@ -893,7 +1087,9 @@ fn fill_multi<S: FactSource + ?Sized>(
     let mut at: Lookup<Handle, usize> = Lookup::new();
     let mut seeds: Vec<(NodeId, Tier, u32)> = Vec::new();
     for (h, t, height) in raw {
-        let Some(id) = node_of(ctx.values, h) else { continue };
+        let Some(id) = node_of(ctx.values, h) else {
+            continue;
+        };
         match at.get(&h) {
             Some(&i) => {
                 let s = &mut seeds[i];
@@ -910,7 +1106,12 @@ fn fill_multi<S: FactSource + ?Sized>(
     let starts: Vec<(NodeId, Tier)> = seeds.iter().map(|s| (s.0, s.1)).collect();
     let reached = ctx.closure.reach_from(cats, &starts, backward, depth);
     let height = seeds.iter().map(|s| s.2).max().unwrap_or(0);
-    let mut state = MultiState { seeds: starts, rows: Default::default(), height, done: true };
+    let mut state = MultiState {
+        seeds: starts,
+        rows: Default::default(),
+        height,
+        done: true,
+    };
     for (id, t) in &reached {
         if let Some(part) = state.rows.get_mut(usize::from(t.level())) {
             part.push(*id);
@@ -988,7 +1189,13 @@ mod tests {
     }
 
     fn edge(g: &mut MemSource, from: u32, to: u32, cat: &str, tier: Tier) {
-        g.edge(node_id(0, from), node_id(0, to), category_id(cat), Confidence::Strong, tier);
+        g.edge(
+            node_id(0, from),
+            node_id(0, to),
+            category_id(cat),
+            Confidence::Strong,
+            tier,
+        );
     }
 
     fn row(vals: &[&str], tier: Tier) -> (Vec<String>, Tier) {
@@ -1028,19 +1235,34 @@ mod tests {
                 .map(|p| {
                     let mut r = Relation::new(p.arity, &[]);
                     if let PredKind::Edb(e) = p.kind {
-                        r.load(load_edb(src, e, &Restrict::default(), tiers, &mut values), None);
+                        r.load(
+                            load_edb(src, e, &Restrict::default(), tiers, &mut values),
+                            None,
+                        );
                     }
                     r
                 })
                 .collect();
             let closure = Closure::new(src, tiers);
             let (memo, multi, budget) = (Memo::new(), Vec::new(), Budget::new(usize::MAX));
-            World { src, an, decl, values, rels, scc: Vec::new(), closure, memo, multi, budget }
+            World {
+                src,
+                an,
+                decl,
+                values,
+                rels,
+                scc: Vec::new(),
+                closure,
+                memo,
+                multi,
+                budget,
+            }
         }
 
         fn pid(&self, name: &str) -> PredId {
             let p = self.an.preds.iter().position(|p| p.name == name);
-            p.map(|p| p as PredId).unwrap_or_else(|| panic!("no predicate {name}"))
+            p.map(|p| p as PredId)
+                .unwrap_or_else(|| panic!("no predicate {name}"))
         }
 
         /// The plan of `head`'s stratum, its indexes built and resolved.
@@ -1117,19 +1339,34 @@ mod tests {
     }
 
     fn eval(level: Tier) -> Mode<'static> {
-        Mode::Eval { level, first_round: true }
+        Mode::Eval {
+            level,
+            first_round: true,
+        }
     }
 
     fn base(plan: &StratumPlan, rule: usize) -> &Variant {
-        let r =
-            plan.rules.iter().find(|r| r.rule == rule).unwrap_or_else(|| panic!("no rule {rule}"));
-        r.variants.iter().find(|v| v.delta.is_none()).unwrap_or_else(|| panic!("no base variant"))
+        let r = plan
+            .rules
+            .iter()
+            .find(|r| r.rule == rule)
+            .unwrap_or_else(|| panic!("no rule {rule}"));
+        r.variants
+            .iter()
+            .find(|v| v.delta.is_none())
+            .unwrap_or_else(|| panic!("no base variant"))
     }
 
     fn delta(plan: &StratumPlan, rule: usize, d: usize) -> &Variant {
-        let r =
-            plan.rules.iter().find(|r| r.rule == rule).unwrap_or_else(|| panic!("no rule {rule}"));
-        r.variants.iter().find(|v| v.delta == Some(d)).unwrap_or_else(|| panic!("no variant {d}"))
+        let r = plan
+            .rules
+            .iter()
+            .find(|r| r.rule == rule)
+            .unwrap_or_else(|| panic!("no rule {rule}"));
+        r.variants
+            .iter()
+            .find(|v| v.delta == Some(d))
+            .unwrap_or_else(|| panic!("no variant {d}"))
     }
 
     #[test]
@@ -1137,7 +1374,13 @@ mod tests {
         let mut g = chain(
             6,
             "CALLS",
-            &[Tier::Fact, Tier::Derived, Tier::Fact, Tier::Heuristic, Tier::Fact],
+            &[
+                Tier::Fact,
+                Tier::Derived,
+                Tier::Fact,
+                Tier::Heuristic,
+                Tier::Fact,
+            ],
         );
         edge(&mut g, 1, 0, "CALLS", Tier::Fact);
         edge(&mut g, 2, 0, "CALLS", Tier::Derived);
@@ -1161,25 +1404,49 @@ mod tests {
             row(&["n00002", "n00000"], Tier::Derived),
             row(&["n00002", "n00003"], Tier::Fact),
         ];
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(), all);
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(), vec![all[2].clone()]);
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(),
+            all
+        );
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(),
+            vec![all[2].clone()]
+        );
         // Level DERIVED's first round: the edge literal's delta is its DERIVED partition.
         let d = delta(&plan, 0, 0);
-        assert_eq!(w.run(&d.steps, &d.head, eval(Tier::Derived)).unwrap(), all[..2].to_vec());
+        assert_eq!(
+            w.run(&d.steps, &d.head, eval(Tier::Derived)).unwrap(),
+            all[..2].to_vec()
+        );
         // A later round's delta is the recent run, which complete input never has.
-        let later = Mode::Eval { level: Tier::Derived, first_round: false };
+        let later = Mode::Eval {
+            level: Tier::Derived,
+            first_round: false,
+        };
         assert_eq!(w.run(&d.steps, &d.head, later).unwrap(), vec![]);
         // Explain with b bound reads edge on its [1, 2, 0] index, whose rows carry no
         // ordinal: the witness comes from the identity index (2 -> 3 is edge 2).
         let (mut steps, indexes) = plan_bound(&w.an, &w.decl.catalog, 0, &[false, true]);
-        assert!(indexes.iter().any(|(_, perm)| perm == &[1, 2, 0]), "{indexes:?}");
+        assert!(
+            indexes.iter().any(|(_, perm)| perm == &[1, 2, 0]),
+            "{indexes:?}"
+        );
         let map = w.ensure(&indexes);
         resolve_indexes(&mut steps, &map);
         let bound = [(1u16, w.handle(3))];
-        let mode = Mode::Explain { level: Tier::Heuristic, max_height: u32::MAX, bound: &bound };
+        let mode = Mode::Explain {
+            level: Tier::Heuristic,
+            max_height: u32::MAX,
+            bound: &bound,
+        };
         let mut lits = Vec::new();
         run_body(&mut w.ctx(), &steps, mode, &mut |b| {
-            lits.push(b.lits.iter().map(|l| (l.pred, l.row.len(), l.ordinal)).collect::<Vec<_>>());
+            lits.push(
+                b.lits
+                    .iter()
+                    .map(|l| (l.pred, l.row.len(), l.ordinal))
+                    .collect::<Vec<_>>(),
+            );
             Ok(())
         })
         .unwrap();
@@ -1203,11 +1470,16 @@ mod tests {
         let mut w = World::new(&g, &tiers, vec![r]);
         let plan = w.plan("v");
         let b = base(&plan, 0);
-        let open =
-            vec![row(&["n00001", "n00002"], Tier::Fact), row(&["n00002", "n00003"], Tier::Fact)];
+        let open = vec![
+            row(&["n00001", "n00002"], Tier::Fact),
+            row(&["n00002", "n00003"], Tier::Fact),
+        ];
         // At FACT the HEURISTIC 1 -> 0 is no positive row, yet it blocks (0, 1).
         assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(), open);
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(), open);
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(),
+            open
+        );
     }
 
     #[test]
@@ -1234,7 +1506,10 @@ mod tests {
             w.run(&b.steps, &b.head, eval(Tier::Derived)).unwrap(),
             vec![row(&["n00000", "n00002"], Tier::Derived), fact.clone()]
         );
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(), vec![fact]);
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(),
+            vec![fact]
+        );
     }
 
     /// `in_scope(Node, Str)`: the nodes of a named scope, counting its calls.
@@ -1285,7 +1560,10 @@ mod tests {
         edge(&mut g, 0, 2, "CALLS", Tier::Fact);
         edge(&mut g, 1, 2, "CALLS", Tier::Fact);
         let calls = Rc::new(Cell::new(0));
-        g.builtin(Box::new(InScope { calls: calls.clone(), cli: vec![node_id(0, 2)] }));
+        g.builtin(Box::new(InScope {
+            calls: calls.clone(),
+            cli: vec![node_id(0, 2)],
+        }));
         let tiers = edge_tiers(&g);
         let ok = rule(
             "v",
@@ -1306,19 +1584,41 @@ mod tests {
         let mut w = World::new(&g, &tiers, vec![ok, bad]);
         let plan = w.plan("v");
         let b = base(&plan, 0);
-        assert!(matches!(b.steps[0], Step::Scan { .. } | Step::Lookup { .. }), "{:?}", b.steps);
-        let want =
-            vec![row(&["n00000", "n00002"], Tier::Fact), row(&["n00001", "n00002"], Tier::Fact)];
+        assert!(
+            matches!(b.steps[0], Step::Scan { .. } | Step::Lookup { .. }),
+            "{:?}",
+            b.steps
+        );
+        let want = vec![
+            row(&["n00000", "n00002"], Tier::Fact),
+            row(&["n00001", "n00002"], Tier::Fact),
+        ];
         assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap(), want);
-        assert_eq!(calls.get(), 1, "two bindings, one call: in_scope(n00002, \"cli\")");
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(), want);
+        assert_eq!(
+            calls.get(),
+            1,
+            "two bindings, one call: in_scope(n00002, \"cli\")"
+        );
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap(),
+            want
+        );
         assert_eq!(calls.get(), 1, "the memo outlives a run");
         let plan = w.plan("w");
         let b = base(&plan, 1);
         let err = w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap_err();
         let message = "scope `nowhere` holds no node".to_string();
-        assert_eq!(err, RulesError::Builtin { name: "in_scope/2".into(), message });
-        assert_eq!(err.to_string(), "builtin `in_scope/2` failed: scope `nowhere` holds no node");
+        assert_eq!(
+            err,
+            RulesError::Builtin {
+                name: "in_scope/2".into(),
+                message
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "builtin `in_scope/2` failed: scope `nowhere` holds no node"
+        );
     }
 
     #[test]
@@ -1358,7 +1658,18 @@ mod tests {
         // Both ends free (no bound column comes first): every pair, once per run.
         let plan = w.plan("pair");
         let b = base(&plan, 0);
-        assert!(matches!(b.steps[0], Step::Reach { from: None, to: None, .. }), "{:?}", b.steps);
+        assert!(
+            matches!(
+                b.steps[0],
+                Step::Reach {
+                    from: None,
+                    to: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            b.steps
+        );
         let got = w.run(&b.steps, &b.head, eval(Tier::Derived)).unwrap();
         assert_eq!(got, expect(&[0, 1]));
         let literal = vec![
@@ -1370,7 +1681,18 @@ mod tests {
         // Per binding: `a` is live in the head, so no hoist.
         let plan = w.plan("per");
         let b = base(&plan, 1);
-        assert!(matches!(b.steps[1], Step::Reach { from: Some(_), to: None, .. }), "{:?}", b.steps);
+        assert!(
+            matches!(
+                b.steps[1],
+                Step::Reach {
+                    from: Some(_),
+                    to: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            b.steps
+        );
         let got = w.run(&b.steps, &b.head, eval(Tier::Derived)).unwrap();
         assert_eq!(got, expect(&[0, 4]));
         let literal = vec![
@@ -1382,7 +1704,11 @@ mod tests {
         // Hoisted: one walk from both seeds, kept across runs and variants.
         let plan = w.plan("hit");
         let b = base(&plan, 2);
-        assert!(matches!(b.steps[0], Step::ReachMulti { slot: 0, .. }), "{:?}", b.steps);
+        assert!(
+            matches!(b.steps[0], Step::ReachMulti { slot: 0, .. }),
+            "{:?}",
+            b.steps
+        );
         let all = w.run(&b.steps, &b.head, eval(Tier::Heuristic)).unwrap();
         let reached = vec![
             row(&["n00001"], Tier::Fact),
@@ -1393,17 +1719,32 @@ mod tests {
         ];
         assert_eq!(all, reached);
         let walks = |w: &World<'_>| {
-            w.closure.stats().sets.iter().map(|s| (s.bfs, s.multi)).collect::<Vec<_>>()
+            w.closure
+                .stats()
+                .sets
+                .iter()
+                .map(|s| (s.bfs, s.multi))
+                .collect::<Vec<_>>()
         };
         let walked = walks(&w);
         // Level DERIVED's first round: the composite's delta is its DERIVED rows.
         let d = delta(&plan, 2, 1);
         let derived = vec![reached[1].clone(), reached[4].clone()];
-        assert_eq!(w.run(&d.steps, &d.head, eval(Tier::Derived)).unwrap(), derived);
-        assert_eq!(walks(&w), walked, "the second run reads the kept rows: no walk");
+        assert_eq!(
+            w.run(&d.steps, &d.head, eval(Tier::Derived)).unwrap(),
+            derived
+        );
+        assert_eq!(
+            walks(&w),
+            walked,
+            "the second run reads the kept rows: no walk"
+        );
         let m = &w.multi[0];
         assert!(m.done);
-        assert_eq!(m.seeds, vec![(node_id(0, 0), Tier::Fact), (node_id(0, 4), Tier::Fact)]);
+        assert_eq!(
+            m.seeds,
+            vec![(node_id(0, 0), Tier::Fact), (node_id(0, 4), Tier::Fact)]
+        );
         assert_eq!(m.rows.iter().map(Vec::len).collect::<Vec<_>>(), [1, 2, 2]);
     }
 
@@ -1414,13 +1755,19 @@ mod tests {
         let r = rule(
             "v",
             vec![v("a"), v("b")],
-            vec![pos("node", vec![v("a"), Term::wild()]), pos("node", vec![v("b"), Term::wild()])],
+            vec![
+                pos("node", vec![v("a"), Term::wild()]),
+                pos("node", vec![v("b"), Term::wild()]),
+            ],
         );
         let mut w = World::new(&g, &tiers, vec![r]);
         w.budget = Budget::new(1000);
         let plan = w.plan("v");
         let b = base(&plan, 0);
-        assert_eq!(w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap().len(), 1000);
+        assert_eq!(
+            w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap().len(),
+            1000
+        );
         assert_eq!(w.budget.tripped, Some(1001));
         assert_eq!(
             w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap().len(),
@@ -1434,13 +1781,20 @@ mod tests {
     fn explain_mode_heights() {
         let g = nodes(8);
         let tiers = edge_tiers(&g);
-        let t = rule("t", vec![v("x")], vec![pos("node", vec![v("x"), s("FUNCTION")])]);
+        let t = rule(
+            "t",
+            vec![v("x")],
+            vec![pos("node", vec![v("x"), s("FUNCTION")])],
+        );
         let u = rule("u", vec![v("x")], vec![pos("t", vec![v("x")])]);
         let mut w = World::new(&g, &tiers, vec![t, u]);
         // t's rows as evaluation would have left them: n0 at height 1, n4 at height 2.
         let (n0, n4) = (w.handle(0), w.handle(4));
         let tp = w.pid("t") as usize;
-        let mut metas = vec![RowMeta { height: 1, rule: 0 }, RowMeta { height: 2, rule: 0 }];
+        let mut metas = vec![
+            RowMeta { height: 1, rule: 0 },
+            RowMeta { height: 2, rule: 0 },
+        ];
         w.rels[tp].insert_round(Tier::Fact, &mut vec![n0, n4], &mut metas);
         let (mut steps, indexes) = plan_bound(&w.an, &w.decl.catalog, 1, &[true]);
         let map = w.ensure(&indexes);
@@ -1448,7 +1802,11 @@ mod tests {
         let explain = |w: &mut World<'_>, x: Handle, max_height: u32| {
             let mut seen = Vec::new();
             let bound = [(0u16, x)];
-            let mode = Mode::Explain { level: Tier::Fact, max_height, bound: &bound };
+            let mode = Mode::Explain {
+                level: Tier::Fact,
+                max_height,
+                bound: &bound,
+            };
             run_body(&mut w.ctx(), &steps, mode, &mut |b| {
                 seen.push((b.height, b.lits.to_vec()));
                 Ok(())
@@ -1465,7 +1823,11 @@ mod tests {
             ordinal: NO_ORDINAL,
         };
         assert_eq!(explain(&mut w, n0, 2), vec![(1, vec![lit(n0, 1)])]);
-        assert_eq!(explain(&mut w, n4, 2), vec![], "a row of height 2 is not below 2");
+        assert_eq!(
+            explain(&mut w, n4, 2),
+            vec![],
+            "a row of height 2 is not below 2"
+        );
         assert_eq!(explain(&mut w, n4, 3), vec![(2, vec![lit(n4, 2)])]);
     }
 
@@ -1476,7 +1838,11 @@ mod tests {
         edge(&mut g, 2, 1, "CALLS", Tier::Fact);
         let tiers = edge_tiers(&g);
         let rules = vec![
-            rule("cyc", vec![v("x"), v("r")], vec![pos("scc", vec![v("x"), v("r"), s("CALLS")])]),
+            rule(
+                "cyc",
+                vec![v("x"), v("r")],
+                vec![pos("scc", vec![v("x"), v("r"), s("CALLS")])],
+            ),
             rule(
                 "onrep",
                 vec![v("x")],
@@ -1512,10 +1878,15 @@ mod tests {
             ),
         ];
         let mut w = World::new(&g, &tiers, rules);
-        let mut rows = EdbRows { arity: 2, ..EdbRows::default() };
+        let mut rows = EdbRows {
+            arity: 2,
+            ..EdbRows::default()
+        };
         for (x, rep, t) in w.closure.scc_rows(&calls()) {
-            rows.rows
-                .extend([w.values.intern(ValueRef::Node(x)), w.values.intern(ValueRef::Node(rep))]);
+            rows.rows.extend([
+                w.values.intern(ValueRef::Node(x)),
+                w.values.intern(ValueRef::Node(rep)),
+            ]);
             rows.levels.push(t);
         }
         let mut rel = Relation::new(2, &[SWAP.to_vec()]);
@@ -1536,7 +1907,12 @@ mod tests {
         assert_eq!(run(&mut w, "noscc", 3), ["n00000", "n00003"]);
         assert_eq!(
             run(&mut w, "twin", 4),
-            ["n00000 n00000", "n00001 n00001", "n00002 n00002", "n00003 n00003"]
+            [
+                "n00000 n00000",
+                "n00001 n00001",
+                "n00002 n00002",
+                "n00003 n00003"
+            ]
         );
     }
 }

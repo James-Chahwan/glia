@@ -86,7 +86,9 @@ impl CrossGraphResolver for QueueStackResolver {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::QUEUE_PRODUCER) {
                     continue;
                 }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
                 // LB.8: the owner segment names the producing project, not the
                 // topic; every owner of a topic pairs every consumer of it.
                 let Some(topic) = split_owner(qname).0.strip_prefix("queue_producer:") else {
@@ -99,7 +101,11 @@ impl CrossGraphResolver for QueueStackResolver {
                 let families = node_families(&n.cells);
                 let placeholder = is_placeholder_topic(topic, &families);
                 placeholders += usize::from(placeholder);
-                let exact = if placeholder { None } else { index.exact.get(topic) };
+                let exact = if placeholder {
+                    None
+                } else {
+                    index.exact.get(topic)
+                };
                 for t in exact.into_iter().flatten() {
                     if !families_compatible(&families, &t.families) {
                         family_mismatch += 1;
@@ -122,8 +128,16 @@ impl CrossGraphResolver for QueueStackResolver {
                 // Rare path: O(producers × wildcard consumers). A consumer whose
                 // pattern string equals the topic was already decided above,
                 // except for a placeholder producer, which the exact pass skips.
-                for w in index.wildcard.iter().filter(|w| placeholder || w.topic != topic) {
-                    let mut hits = w.arms.iter().filter(|(_, p)| p.matches(w.topic, topic)).peekable();
+                for w in index
+                    .wildcard
+                    .iter()
+                    .filter(|w| placeholder || w.topic != topic)
+                {
+                    let mut hits = w
+                        .arms
+                        .iter()
+                        .filter(|(_, p)| p.matches(w.topic, topic))
+                        .peekable();
                     if hits.peek().is_none() {
                         continue;
                     }
@@ -225,7 +239,9 @@ fn build_queue_index<'a>(
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::QUEUE_CONSUMER) {
                 continue;
             }
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
             let Some(topic) = split_owner(qname).0.strip_prefix("queue_consumer:") else {
                 continue;
             };
@@ -245,7 +261,11 @@ fn build_queue_index<'a>(
             }
             ix.skipped_catchall += usize::from(catchall);
             if !arms.is_empty() {
-                ix.wildcard.push(WildcardConsumer { id: n.id, topic, arms });
+                ix.wildcard.push(WildcardConsumer {
+                    id: n.id,
+                    topic,
+                    arms,
+                });
             }
             if let Some(&bound) = bindings.get(topic)
                 && bound != topic
@@ -333,13 +353,18 @@ fn pubsub_bindings(graphs: &[RepoGraph]) -> BTreeMap<&str, &str> {
                 continue;
             }
             for c in &n.cells {
-                let (true, CellPayload::Json(json)) = (c.kind == cell_type::CODE, &c.payload) else {
+                let (true, CellPayload::Json(json)) = (c.kind == cell_type::CODE, &c.payload)
+                else {
                     continue;
                 };
-                let Some(name) = str_field(json, "name") else { continue };
+                let Some(name) = str_field(json, "name") else {
+                    continue;
+                };
                 match str_field(json, "pubsub") {
                     Some("topic") => {
-                        let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+                        let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                            continue;
+                        };
                         match topics.entry((gi, qname.as_str())) {
                             Entry::Vacant(e) => {
                                 e.insert(Some(name));
@@ -383,7 +408,10 @@ fn pubsub_bindings(graphs: &[RepoGraph]) -> BTreeMap<&str, &str> {
             Entry::Occupied(_) => {}
         }
     }
-    bound.into_iter().filter_map(|(sub, topic)| Some((sub, topic?))).collect()
+    bound
+        .into_iter()
+        .filter_map(|(sub, topic)| Some((sub, topic?)))
+        .collect()
 }
 
 /// Pair when either side is unknown or generic, or the sets intersect.
@@ -416,16 +444,29 @@ impl Segmented {
 }
 
 /// NATS, RabbitMQ topic exchanges, JMS (ActiveMQ `>` and Artemis `#`).
-const DOTTED: Segmented = Segmented { sep: '.', one: "*", rest_some: Some(">"), rest_any: "#" };
+const DOTTED: Segmented = Segmented {
+    sep: '.',
+    one: "*",
+    rest_some: Some(">"),
+    rest_any: "#",
+};
 /// MQTT topic filters.
-const SLASHED: Segmented = Segmented { sep: '/', one: "+", rest_some: None, rest_any: "#" };
+const SLASHED: Segmented = Segmented {
+    sep: '/',
+    one: "+",
+    rest_some: None,
+    rest_any: "#",
+};
 
 enum Pattern {
     Segments(Segmented),
     /// Kafka `subscribe(Pattern)`: the regex's literal prefix. `exact` when the
     /// whole regex was literal. No regex dependency — an over-approximation,
     /// which is why every wildcard edge is Weak.
-    Prefix { prefix: String, exact: bool },
+    Prefix {
+        prefix: String,
+        exact: bool,
+    },
 }
 
 enum Compiled {
@@ -440,8 +481,14 @@ impl Pattern {
     fn matches(&self, pattern: &str, topic: &str) -> bool {
         match self {
             Pattern::Segments(syn) => seg_walk(topic.split(syn.sep), pattern.split(syn.sep), *syn),
-            Pattern::Prefix { prefix, exact: true } => topic == prefix,
-            Pattern::Prefix { prefix, exact: false } => topic.starts_with(prefix.as_str()),
+            Pattern::Prefix {
+                prefix,
+                exact: true,
+            } => topic == prefix,
+            Pattern::Prefix {
+                prefix,
+                exact: false,
+            } => topic.starts_with(prefix.as_str()),
         }
     }
 }
@@ -464,9 +511,13 @@ fn compile_pattern(topic: &str, family: &str) -> Compiled {
     }
     let syn = if is(QueueFramework::Mqtt) {
         SLASHED
-    } else if [QueueFramework::Nats, QueueFramework::RabbitMQ, QueueFramework::Jms]
-        .into_iter()
-        .any(is)
+    } else if [
+        QueueFramework::Nats,
+        QueueFramework::RabbitMQ,
+        QueueFramework::Jms,
+    ]
+    .into_iter()
+    .any(is)
     {
         DOTTED
     } else {
@@ -552,22 +603,48 @@ mod tests {
         let g = channel_graph(
             "queue-owner",
             &[
-                (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created @services/orders"),
-                (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created @services/returns"),
-                (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created @services/billing"),
-                (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created @services/audit"),
-                (node_kind::QUEUE_PRODUCER, "queue_producer:unresolved:kafka @services/orders"),
-                (node_kind::QUEUE_CONSUMER, "queue_consumer:unresolved:kafka @services/audit"),
+                (
+                    node_kind::QUEUE_PRODUCER,
+                    "queue_producer:orders.created @services/orders",
+                ),
+                (
+                    node_kind::QUEUE_PRODUCER,
+                    "queue_producer:orders.created @services/returns",
+                ),
+                (
+                    node_kind::QUEUE_CONSUMER,
+                    "queue_consumer:orders.created @services/billing",
+                ),
+                (
+                    node_kind::QUEUE_CONSUMER,
+                    "queue_consumer:orders.created @services/audit",
+                ),
+                (
+                    node_kind::QUEUE_PRODUCER,
+                    "queue_producer:unresolved:kafka @services/orders",
+                ),
+                (
+                    node_kind::QUEUE_CONSUMER,
+                    "queue_consumer:unresolved:kafka @services/audit",
+                ),
             ],
         );
         let mut m = MergedGraph::new(vec![g]);
         QueueStackResolver.resolve(&mut m);
         let p = |a: &str, b: &str| {
-            (format!("queue_producer:orders.created @services/{a}"), format!("queue_consumer:orders.created @services/{b}"))
+            (
+                format!("queue_producer:orders.created @services/{a}"),
+                format!("queue_consumer:orders.created @services/{b}"),
+            )
         };
         assert_eq!(
             cross_pairs(&m, edge_category::QUEUE_FLOWS),
-            [p("orders", "audit"), p("orders", "billing"), p("returns", "audit"), p("returns", "billing")]
+            [
+                p("orders", "audit"),
+                p("orders", "billing"),
+                p("returns", "audit"),
+                p("returns", "billing")
+            ]
         );
     }
 
@@ -589,7 +666,10 @@ mod tests {
     /// `(from, to, confidence, rule)` of every QUEUE_FLOWS cross edge, sorted.
     fn flows(m: &MergedGraph) -> Vec<(String, String, Confidence, Option<String>)> {
         let q = |id: NodeId| {
-            m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
         };
         let mut out: Vec<_> = m
             .cross_edges
@@ -618,7 +698,10 @@ mod tests {
                     (node_kind::QUEUE_PRODUCER, "queue_producer:shop.shipments.*"),
                     (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments.*"),
                     (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.>"),
-                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments.42"),
+                    (
+                        node_kind::QUEUE_CONSUMER,
+                        "queue_consumer:shop.shipments.42",
+                    ),
                     (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.*.42"),
                     (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.orders.*"),
                     (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments"),
@@ -646,7 +729,10 @@ mod tests {
     #[test]
     fn placeholder_needs_nats_family() {
         assert!(is_placeholder_topic("orders.*", &["nats"]));
-        assert!(is_placeholder_topic("audit.*.created", &["rabbitmq", "nats"]));
+        assert!(is_placeholder_topic(
+            "audit.*.created",
+            &["rabbitmq", "nats"]
+        ));
         assert!(!is_placeholder_topic("orders.*", &["kafka"]));
         assert!(!is_placeholder_topic("orders.*", &[]));
         assert!(!is_placeholder_topic("orders.created", &["nats"]));

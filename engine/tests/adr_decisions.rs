@@ -49,7 +49,11 @@ fn cells_of(r: &GenerateResult, qname: &str) -> Vec<Vec<Cell>> {
     r.merged
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname)))
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|q| q == qname))
+        })
         .map(|n| n.cells.clone())
         .collect()
 }
@@ -66,7 +70,10 @@ fn decision(r: &GenerateResult, qname: &str) -> Option<String> {
             other => panic!("DECISION is JSON, got {other:?}"),
         })
         .collect();
-    assert!(decisions.len() <= 1, "one DECISION cell per node: {decisions:?}");
+    assert!(
+        decisions.len() <= 1,
+        "one DECISION cell per node: {decisions:?}"
+    );
     decisions.into_iter().next()
 }
 
@@ -74,7 +81,13 @@ fn decision(r: &GenerateResult, qname: &str) -> Option<String> {
 fn adr_in_doc_adr_is_ingested() {
     let r = build(&fixture());
     let sections = qnames(&r, node_kind::DOC_SECTION);
-    for slug in ["1-use-flask-for-orders", "status", "context", "decision", "consequences"] {
+    for slug in [
+        "1-use-flask-for-orders",
+        "status",
+        "context",
+        "decision",
+        "consequences",
+    ] {
         let q = format!("docs::doc::adr::0001-use-flask-for-orders::{slug}");
         assert!(sections.contains(&q), "{q} in {sections:?}");
     }
@@ -96,10 +109,16 @@ fn non_adr_doc_dir_stays_out() {
     let r = build(&fixture());
     let sections = qnames(&r, node_kind::DOC_SECTION);
     assert!(
-        sections.iter().all(|q| !q.starts_with("docs::doc::notes::")),
+        sections
+            .iter()
+            .all(|q| !q.starts_with("docs::doc::notes::")),
         "doc/notes.md is not an ADR and not ingested: {sections:?}"
     );
-    assert_eq!(sections.len(), 5, "only the ADR's five sections: {sections:?}");
+    assert_eq!(
+        sections.len(),
+        5,
+        "only the ADR's five sections: {sections:?}"
+    );
 }
 
 const APP: &str = "def save_order(order):\n    return order\n\n\ndef load_order(order_id):\n    return order_id\n";
@@ -126,7 +145,11 @@ fn madr_status_line_is_read() {
             r#"[{"adr":"docs/decisions/0002-use-postgres.md","id":"adr:docs/decisions/0002-use-postgres.md","section":"docs::docs::decisions::0002-use-postgres::decision-outcome","source":"adr","status":"proposed","title":"Use Postgres for orders"}]"#
         )
     );
-    assert_eq!(decision(&r, "app::load_order"), None, "an undocumented node gets nothing");
+    assert_eq!(
+        decision(&r, "app::load_order"),
+        None,
+        "an undocumented node gets nothing"
+    );
 }
 
 #[test]
@@ -161,9 +184,18 @@ fn two_sections_one_entry() {
         .collect();
     // Context AND Decision of 0003 mention it: one entry for that ADR, one
     // for 0004, in id order.
-    assert_eq!(ids, ["adr:adr/0003-idempotent-saves.md", "adr:adr/0004-archive.md"]);
+    assert_eq!(
+        ids,
+        [
+            "adr:adr/0003-idempotent-saves.md",
+            "adr:adr/0004-archive.md"
+        ]
+    );
     assert_eq!(entries[1]["status"], "superseded");
-    assert_eq!(entries[0]["section"], "docs::adr::0003-idempotent-saves::decision");
+    assert_eq!(
+        entries[0]["section"],
+        "docs::adr::0003-idempotent-saves::decision"
+    );
 }
 
 #[test]
@@ -190,5 +222,8 @@ fn numbered_doc_needs_the_adr_shape() {
 fn adr_decisions_are_deterministic() {
     let a = build(&fixture());
     let b = build(&fixture());
-    assert_eq!(cells_of(&a, "api::app::list_orders"), cells_of(&b, "api::app::list_orders"));
+    assert_eq!(
+        cells_of(&a, "api::app::list_orders"),
+        cells_of(&b, "api::app::list_orders")
+    );
 }

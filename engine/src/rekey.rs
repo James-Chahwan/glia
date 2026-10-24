@@ -149,12 +149,21 @@ mod tests {
             id,
             repo: REPO,
             confidence: Confidence::Strong,
-            cells: vec![Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(cell.into()) }],
+            cells: vec![Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Text(cell.into()),
+            }],
         }
     }
 
     fn edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
-        Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
+        Edge {
+            from,
+            to,
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        }
     }
 
     /// A module holding a handler, a ROUTE between two siblings, the ROUTE's
@@ -164,7 +173,10 @@ mod tests {
         let module = id(node_kind::MODULE, "svc::app");
         let handler = id(node_kind::FUNCTION, "svc::app::health");
         let route = id(node_kind::ROUTE, "route:/health");
-        let (a, b) = (id(node_kind::FUNCTION, "svc::app::a"), id(node_kind::FUNCTION, "svc::app::b"));
+        let (a, b) = (
+            id(node_kind::FUNCTION, "svc::app::a"),
+            id(node_kind::FUNCTION, "svc::app::b"),
+        );
         let mut fp = FileParse::default();
         for (n, name, q, k) in [
             (module, "app", "svc::app", node_kind::MODULE),
@@ -174,10 +186,12 @@ mod tests {
             (handler, "health", "svc::app::health", node_kind::FUNCTION),
         ] {
             fp.nodes.push(node(n, "GET"));
-            fp.nav.record(n, name, q, k, (n != module).then_some(module));
+            fp.nav
+                .record(n, name, q, k, (n != module).then_some(module));
         }
         fp.edges.push(edge(module, route, edge_category::CONTAINS));
-        fp.edges.push(edge(route, handler, edge_category::HANDLED_BY));
+        fp.edges
+            .push(edge(route, handler, edge_category::HANDLED_BY));
         fp.refs.push(UnresolvedRef {
             from: route,
             from_module: module,
@@ -185,7 +199,11 @@ mod tests {
             category: edge_category::HANDLED_BY,
             line: 0,
         });
-        fp.calls.push(CallSite { from: handler, qualifier: CallQualifier::Bare("a".into()), line: 0 });
+        fp.calls.push(CallSite {
+            from: handler,
+            qualifier: CallQualifier::Bare("a".into()),
+            line: 0,
+        });
         (fp, [module, route, handler, a, b])
     }
 
@@ -196,13 +214,24 @@ mod tests {
         rekey_node(&mut fp, route, new, "route:/health @svc");
 
         let ids: Vec<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
-        assert_eq!(ids, [module, a, new, b, handler], "node order kept, id swapped in place");
+        assert_eq!(
+            ids,
+            [module, a, new, b, handler],
+            "node order kept, id swapped in place"
+        );
         assert_eq!(fp.edges[0], edge(module, new, edge_category::CONTAINS));
         assert_eq!(fp.edges[1], edge(new, handler, edge_category::HANDLED_BY));
         assert_eq!((fp.refs[0].from, fp.refs[0].from_module), (new, module));
         assert_eq!(fp.calls[0].from, handler, "an unrelated call is untouched");
-        assert_eq!(fp.nav.qname_by_id.get(&new).map(String::as_str), Some("route:/health @svc"));
-        assert_eq!(fp.nav.name_by_id.get(&new).map(String::as_str), Some("/health"), "display name kept");
+        assert_eq!(
+            fp.nav.qname_by_id.get(&new).map(String::as_str),
+            Some("route:/health @svc")
+        );
+        assert_eq!(
+            fp.nav.name_by_id.get(&new).map(String::as_str),
+            Some("/health"),
+            "display name kept"
+        );
         assert_eq!(fp.nav.kind_by_id.get(&new), Some(&node_kind::ROUTE));
         assert_eq!(fp.nav.parent_of.get(&new), Some(&module));
         for map_has_old in [
@@ -240,7 +269,13 @@ mod tests {
         let (mut fp, [module, route, handler, a, b]) = file();
         let new = id(node_kind::ROUTE, "route:/health @svc");
         fp.nodes.insert(0, node(new, "POST"));
-        fp.nav.record(new, "/health", "route:/health @svc", node_kind::ROUTE, Some(module));
+        fp.nav.record(
+            new,
+            "/health",
+            "route:/health @svc",
+            node_kind::ROUTE,
+            Some(module),
+        );
         fp.nodes.push(node(route, "PUT"));
         rekey_node(&mut fp, route, new, "route:/health @svc");
 
@@ -256,7 +291,11 @@ mod tests {
             ]
         );
         assert_eq!(fp.edges[1].from, new);
-        assert_eq!(fp.nav.parent_of.get(&new), Some(&module), "`new` keeps its own slot");
+        assert_eq!(
+            fp.nav.parent_of.get(&new),
+            Some(&module),
+            "`new` keeps its own slot"
+        );
         assert_eq!(
             fp.nav.children_of.get(&module).map(Vec::as_slice),
             Some([a, b, handler, new].as_slice()),
@@ -269,8 +308,19 @@ mod tests {
         let (mut fp, [_, route, ..]) = file();
         let before = (fp.nodes.clone(), fp.edges.clone(), fp.refs.clone());
         rekey_node(&mut fp, route, route, "route:/health");
-        rekey_node(&mut fp, id(node_kind::ROUTE, "route:/nope"), route, "route:/health");
-        assert_eq!((fp.nodes.clone(), fp.edges.clone(), fp.refs.clone()), before);
-        assert_eq!(fp.nav.qname_by_id.get(&route).map(String::as_str), Some("route:/health"));
+        rekey_node(
+            &mut fp,
+            id(node_kind::ROUTE, "route:/nope"),
+            route,
+            "route:/health",
+        );
+        assert_eq!(
+            (fp.nodes.clone(), fp.edges.clone(), fp.refs.clone()),
+            before
+        );
+        assert_eq!(
+            fp.nav.qname_by_id.get(&route).map(String::as_str),
+            Some("route:/health")
+        );
     }
 }

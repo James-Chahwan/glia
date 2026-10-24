@@ -180,7 +180,10 @@ fn blast_radius_continues_from_the_consumer_into_its_handler() {
     let blast = blast_radius(&m, &["queue_consumer:payments"], &forward);
     assert!(blast.unresolved.is_empty(), "seed resolves");
     let reached: Vec<&str> = blast.results.iter().map(|b| b.qname.as_str()).collect();
-    assert!(reached.contains(&"svc::worker::handlePayment"), "{reached:?}");
+    assert!(
+        reached.contains(&"svc::worker::handlePayment"),
+        "{reached:?}"
+    );
     assert!(reached.contains(&"svc::worker::settle"), "{reached:?}");
 }
 

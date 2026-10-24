@@ -429,9 +429,10 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     // Step 2a (EC.9, ruling EC-9b): the selection naming the ranking applied.
     let (selection, ranking) = select_for(&loc, &seed_ids, args);
     log_selection("pack", &selection);
-    let cache = args.rank_cache.clone().unwrap_or_else(|| {
-        Arc::new(RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new()))
-    });
+    let cache = args
+        .rank_cache
+        .clone()
+        .unwrap_or_else(|| Arc::new(RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new())));
     cache.guard(merged);
     let mut cfg = CODE_TABLES.activation_config(args.preset.as_deref());
     cfg.direction = Direction::Undirected;
@@ -586,7 +587,11 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
 fn select_for(loc: &Locator<'_>, ids: &[NodeId], args: &PackArgs) -> (Selection, Ranking) {
     let seed_files: BTreeSet<String> = ids.iter().filter_map(|&id| loc.locate(id).file).collect();
     let shape = Shape::from_seed_files(seed_files.len());
-    let set = if args.ranking.cochange_first { COCHANGE_SET } else { STRUCTURE_SET };
+    let set = if args.ranking.cochange_first {
+        COCHANGE_SET
+    } else {
+        STRUCTURE_SET
+    };
     let mut sel = explicit(set, shape, args.ranking.harness_name());
     if args.ranking == Ranking::default() {
         sel.source = "fallback";
@@ -633,7 +638,10 @@ fn rank_rows(
             None => extra.push(id),
         }
     }
-    let row_files: Vec<Option<u32>> = scored.iter().map(|(id, _)| files.file_of_node(*id)).collect();
+    let row_files: Vec<Option<u32>> = scored
+        .iter()
+        .map(|(id, _)| files.file_of_node(*id))
+        .collect();
     if seed_files.is_empty() {
         return RankedRows {
             ranking,
@@ -708,7 +716,9 @@ fn lift_files(
     firsts.sort_unstable();
     let lift: Vec<usize> = firsts.into_iter().map(|(_, i)| i).collect();
     let lifted: BTreeSet<usize> = lift.iter().copied().collect();
-    let rest: Vec<usize> = (0..row_files.len()).filter(|i| !lifted.contains(i)).collect();
+    let rest: Vec<usize> = (0..row_files.len())
+        .filter(|i| !lifted.contains(i))
+        .collect();
     let rest = if matches!(fr.ranking.base, RankBase::Ppr) {
         rest
     } else {

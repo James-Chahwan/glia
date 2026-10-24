@@ -176,8 +176,7 @@ pub fn extract_service_nodes(
             owners_of.insert(name.clone(), candidates.len());
         }
         for (qname, class_id) in candidates {
-            let service_id =
-                NodeId::from_parts(GRAPH_TYPE, repo, node_kind::SERVICE, qname);
+            let service_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::SERVICE, qname);
             if seen.insert(service_id) {
                 out.nodes.push(Node {
                     id: service_id,
@@ -334,8 +333,8 @@ fn detect_go_services(source: &str) -> Vec<String> {
 
     for t in &types {
         let suffix_match = t.ends_with("Service") || t.ends_with("Server");
-        let receiver_match = receiver_counts.get(t).copied().unwrap_or(0) >= 3
-            && has_constructor(t);
+        let receiver_match =
+            receiver_counts.get(t).copied().unwrap_or(0) >= 3 && has_constructor(t);
         if suffix_match || receiver_match {
             out.push(t.clone());
         }
@@ -420,10 +419,7 @@ fn detect_rust_services(source: &str) -> Vec<String> {
     let mut i = 0;
     while i + 5 <= bytes.len() {
         if &bytes[i..i + 5] == b"impl " {
-            let line_start = source[..i]
-                .rfind('\n')
-                .map(|p| p + 1)
-                .unwrap_or(0);
+            let line_start = source[..i].rfind('\n').map(|p| p + 1).unwrap_or(0);
             let prefix = source[line_start..i].trim();
             if !prefix.is_empty() {
                 i += 1;
@@ -457,8 +453,8 @@ fn detect_rust_services(source: &str) -> Vec<String> {
                     k += 1;
                 }
                 let body = &rest[body_start + 1..body_start + k];
-                let pub_fns = body.matches("pub fn ").count()
-                    + body.matches("pub async fn ").count();
+                let pub_fns =
+                    body.matches("pub fn ").count() + body.matches("pub async fn ").count();
                 let async_fns = body.matches("async fn ").count();
                 if pub_fns >= 2 && async_fns >= 1 {
                     out.push(target.to_string());
@@ -845,7 +841,10 @@ fn detect_dart_services(source: &str) -> Vec<RuleHit> {
         }
         let toks = header_tokens(&d.header, true);
         let bases = words_after(&toks, &["extends"]);
-        if bases.iter().any(|p| p == "GetxService" || p == "GetxController") {
+        if bases
+            .iter()
+            .any(|p| p == "GetxService" || p == "GetxController")
+        {
             out.push((d.name.clone(), "getx"));
         }
         if dio && bases.iter().any(|p| DIO_INTERCEPTORS.contains(&p.as_str())) {
@@ -1452,11 +1451,9 @@ mod tests {
 
     fn nav_with_class(qname: &str, methods: &[&str]) -> (CodeNav, NodeId, Vec<NodeId>) {
         let mut nav = CodeNav::default();
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m");
         nav.record(module_id, "m", "m", node_kind::MODULE, None);
-        let class_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname);
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname);
         nav.record(
             class_id,
             qname.rsplit("::").next().unwrap_or(qname),
@@ -1484,14 +1481,15 @@ export class UserService {
 }
 "#;
         let (nav, _class, methods) = nav_with_class("m::UserService", &["login", "logout"]);
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m");
         let out = extract_service_nodes(src, "typescript", &nav, module_id, repo());
         assert_eq!(out.nodes.len(), 1, "got nodes: {:?}", out.nodes);
-        assert_eq!(out.nodes[0].id.0, NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::SERVICE, "m::UserService").0);
+        assert_eq!(
+            out.nodes[0].id.0,
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::SERVICE, "m::UserService").0
+        );
         assert_eq!(out.edges.len(), 2);
-        let to_set: std::collections::HashSet<NodeId> =
-            out.edges.iter().map(|e| e.to).collect();
+        let to_set: std::collections::HashSet<NodeId> = out.edges.iter().map(|e| e.to).collect();
         for m in methods {
             assert!(to_set.contains(&m));
         }
@@ -1628,7 +1626,10 @@ public class UserService {
 public class UserController { }
 "#;
         let names = detect_java_services(src);
-        assert!(names.contains(&"UserController".to_string()), "got: {names:?}");
+        assert!(
+            names.contains(&"UserController".to_string()),
+            "got: {names:?}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2088,9 +2089,16 @@ class Injected extends QueuedInterceptorsWrapper {}
         );
         assert_eq!(
             hit_names(&detect_dart_services(src)),
-            ["AuthInterceptor", "Injected", "LogWrapper", "Prefixed", "RetryInterceptor"]
+            [
+                "AuthInterceptor",
+                "Injected",
+                "LogWrapper",
+                "Prefixed",
+                "RetryInterceptor"
+            ]
         );
-        let no_dio = "import 'package:http/http.dart';\n\nclass AuthInterceptor extends Interceptor {}\n";
+        let no_dio =
+            "import 'package:http/http.dart';\n\nclass AuthInterceptor extends Interceptor {}\n";
         assert_eq!(detect_dart_services(no_dio), Vec::<RuleHit>::new());
     }
 
@@ -2117,9 +2125,15 @@ class Injected extends QueuedInterceptorsWrapper {}
         );
         assert_eq!(out.edges.iter().map(|e| e.to).collect::<Vec<_>>(), kids);
         let hits = detect_dart_services(src);
-        let owners: HashMap<String, usize> = [("AuthInterceptor".to_string(), 1)].into_iter().collect();
+        let owners: HashMap<String, usize> =
+            [("AuthInterceptor".to_string(), 1)].into_iter().collect();
         assert_eq!(
-            services_marker("dart", 1, &rule_tally(&hits, &owners), "lib::core::auth_interceptor"),
+            services_marker(
+                "dart",
+                1,
+                &rule_tally(&hits, &owners),
+                "lib::core::auth_interceptor"
+            ),
             "[services] dart classified=1 rules=dio_interceptor:1 module=lib::core::auth_interceptor"
         );
     }
@@ -2200,13 +2214,20 @@ class Plain {}
     /// ROLE through the SERVICE overlay the fold merges into it.
     #[test]
     fn elixir_behaviour_module_keeps_role() {
-        let src = "defmodule MyApp.Store do\n  use GenServer\n  @callback fetch(term) :: term\nend\n";
-        let (nav, module_id, _, _) = nav_with_owner(node_kind::INTERFACE, "worker::MyApp.Store", &[]);
+        let src =
+            "defmodule MyApp.Store do\n  use GenServer\n  @callback fetch(term) :: term\nend\n";
+        let (nav, module_id, _, _) =
+            nav_with_owner(node_kind::INTERFACE, "worker::MyApp.Store", &[]);
         let out = extract_service_nodes(src, "elixir", &nav, module_id, repo());
         assert_eq!(out.nodes.len(), 1, "got {:?}", out.nodes);
         assert_eq!(
             out.nodes[0].id,
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::SERVICE, "worker::MyApp.Store")
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::SERVICE,
+                "worker::MyApp.Store"
+            )
         );
         assert_eq!(out.nav.parent_of.get(&out.nodes[0].id), Some(&module_id));
         // An INTERFACE is an owner for Elixir only: the Java detector names

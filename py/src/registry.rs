@@ -23,21 +23,30 @@ inventory::collect!(ModuleFns);
 /// kind is added. Returns `[(id, name)]`.
 #[pyfunction]
 fn kind_names() -> Vec<(u32, String)> {
-    node_kind::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+    node_kind::ALL
+        .iter()
+        .map(|(id, n)| (id.0, (*n).to_string()))
+        .collect()
 }
 
 /// Canonical edge-category `id → name` table (WP-I / #3). Pairs with
 /// `edges_json` category ids.
 #[pyfunction]
 fn category_names() -> Vec<(u32, String)> {
-    edge_category::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+    edge_category::ALL
+        .iter()
+        .map(|(id, n)| (id.0, (*n).to_string()))
+        .collect()
 }
 
 /// Canonical cell-type `id → name` table — labels the structured cells exposed
 /// by `node_cells` (WP-J).
 #[pyfunction]
 fn cell_type_names() -> Vec<(u32, String)> {
-    cell_type::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+    cell_type::ALL
+        .iter()
+        .map(|(id, n)| (id.0, (*n).to_string()))
+        .collect()
 }
 
 /// The code domain's entrypoint kinds (LD.6) as `[(id, name)]`, in table
@@ -92,7 +101,10 @@ mod tests {
         let kinds = entry_kinds();
         let ids: Vec<u32> = kinds.iter().map(|(i, _)| *i).collect();
         assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28]);
-        assert!(kinds.contains(&(13, "QUEUE_CONSUMER".to_string())), "{kinds:?}");
+        assert!(
+            kinds.contains(&(13, "QUEUE_CONSUMER".to_string())),
+            "{kinds:?}"
+        );
         for (id, name) in &kinds {
             assert_eq!(node_kind::name(glia_core::NodeKindId(*id)), name);
         }

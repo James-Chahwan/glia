@@ -61,7 +61,11 @@ fn print_tables(ins: &Inspection) {
         let sections = if s.sections.is_empty() {
             "—".to_string()
         } else {
-            s.sections.iter().map(|(n, len)| format!("{n}:{len}B")).collect::<Vec<_>>().join(", ")
+            s.sections
+                .iter()
+                .map(|(n, len)| format!("{n}:{len}B"))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         println!(
             "| {} | {} | {} | {} | {} | {sections} |",
@@ -70,7 +74,12 @@ fn print_tables(ins: &Inspection) {
     }
     let t = &ins.totals;
     println!();
-    println!("{} nodes, {} edges in {} shard(s)", t.nodes, t.edges, ins.shards.len());
+    println!(
+        "{} nodes, {} edges in {} shard(s)",
+        t.nodes,
+        t.edges,
+        ins.shards.len()
+    );
     table("Node kinds", &t.kinds);
     table("Edge categories", &t.categories);
     table("Node cells", &t.node_cells);

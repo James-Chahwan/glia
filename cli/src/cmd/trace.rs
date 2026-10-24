@@ -103,7 +103,9 @@ fn render(args: &Args, answer: &TraceAnswer) {
             p.mechanisms.join(", ")
         );
         if !p.directed {
-            println!("_undirected: no carry path runs this way; the shortest path over any edge, walked either way_");
+            println!(
+                "_undirected: no carry path runs this way; the shortest path over any edge, walked either way_"
+            );
         }
         println!();
         println!("| depth | mechanism | xsvc | from | → to | live | location |");

@@ -568,11 +568,15 @@ fn empty_scope_rule_checks_nothing() {
     assert_eq!(t.rule_id, "webs-no-store-edge");
     assert_eq!(
         t.reason.as_deref(),
-        Some("from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)")
+        Some(
+            "from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)"
+        )
     );
     assert_eq!(
         t.fix.as_deref(),
-        Some("check the spelling of `from`; `glia projects` lists the paths and labels a scope can name")
+        Some(
+            "check the spelling of `from`; `glia projects` lists the paths and labels a scope can name"
+        )
     );
     assert!(t.error.is_none(), "{t:#?}");
     assert_eq!((t.violations, t.blocking), (0, 0));
@@ -585,14 +589,22 @@ fn empty_scope_rule_checks_nothing() {
     assert_eq!(report.verdict, REVIEW);
     let json = serde_json::to_value(s).expect("json");
     assert_eq!(json["rule"]["status"], "checks_nothing", "{json}");
-    assert_eq!(json["rule"]["reason"], t.reason.clone().unwrap_or_default().as_str());
-    assert_eq!(json["rule"]["fix"], t.fix.clone().unwrap_or_default().as_str());
+    assert_eq!(
+        json["rule"]["reason"],
+        t.reason.clone().unwrap_or_default().as_str()
+    );
+    assert_eq!(
+        json["rule"]["fix"],
+        t.fix.clone().unwrap_or_default().as_str()
+    );
     assert!(json["rule"].get("error").is_none(), "{json}");
     // The other statuses carry no reason / fix.
-    let held =
-        try_candidate(std::slice::from_ref(&repo), C1, &TryOptions::default()).expect("try");
+    let held = try_candidate(std::slice::from_ref(&repo), C1, &TryOptions::default()).expect("try");
     let h = serde_json::to_value(&held.stanzas[0]).expect("json");
-    assert!(h["rule"].get("reason").is_none() && h["rule"].get("fix").is_none(), "{h}");
+    assert!(
+        h["rule"].get("reason").is_none() && h["rule"].get("fix").is_none(),
+        "{h}"
+    );
 
     // accept writes it: it parses, accept never builds.
     let mut opts = AcceptOptions::default();

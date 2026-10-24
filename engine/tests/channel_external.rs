@@ -25,7 +25,8 @@ use glia_engine::{GenerateResult, generate_one};
 
 const ROOT_PACKAGE: &str =
     "{ \"name\": \"mono\", \"private\": true, \"workspaces\": [\"apps/*\", \"services/*\"] }\n";
-const WEB_PACKAGE: &str = "{ \"name\": \"web\", \"dependencies\": { \"@apollo/client\": \"^3.0.0\" } }\n";
+const WEB_PACKAGE: &str =
+    "{ \"name\": \"web\", \"dependencies\": { \"@apollo/client\": \"^3.0.0\" } }\n";
 const GITHUB_TS: &str = "import { ApolloClient, InMemoryCache, gql } from \"@apollo/client\";
 
 export const gh = new ApolloClient({ uri: \"https://api.github.com/graphql\", cache: new InMemoryCache() });
@@ -42,8 +43,7 @@ export function feed(): WebSocket {
   return new WebSocket(\"ws://localhost:8080/feed\");
 }
 ";
-const USERS_PACKAGE: &str =
-    "{ \"name\": \"users\", \"dependencies\": { \"@nestjs/graphql\": \"^12.0.0\", \"ws\": \"^8.0.0\" } }\n";
+const USERS_PACKAGE: &str = "{ \"name\": \"users\", \"dependencies\": { \"@nestjs/graphql\": \"^12.0.0\", \"ws\": \"^8.0.0\" } }\n";
 const SOCKET_JS: &str = "const { WebSocketServer } = require(\"ws\");
 const wss = new WebSocketServer({ path: \"/ws\", port: 8080 });
 wss.on(\"connection\", (s) => s.send(\"hi\"));
@@ -116,7 +116,11 @@ fn channels() -> tempfile::TempDir {
     write(root, "apps/web/src/github.ts", GITHUB_TS);
     write(root, "services/users/package.json", USERS_PACKAGE);
     write(root, "services/users/src/socket.js", SOCKET_JS);
-    write(root, "services/users/src/user.resolver.ts", USER_RESOLVER_TS);
+    write(
+        root,
+        "services/users/src/user.resolver.ts",
+        USER_RESOLVER_TS,
+    );
     d
 }
 
@@ -217,16 +221,32 @@ fn ws_and_graphql_clients_are_external_and_unpaired() {
     let r = build(d.path());
 
     let ws = node(&r, node_kind::WS_CLIENT, WS_EXT);
-    assert!(all_marked(&r, ws), "{:?}", payloads(&r, ws, cell_type::ENDPOINT_HIT));
-    assert!(stamped_external(&r, ws), "{:?}", payloads(&r, ws, cell_type::ORIGIN));
+    assert!(
+        all_marked(&r, ws),
+        "{:?}",
+        payloads(&r, ws, cell_type::ENDPOINT_HIT)
+    );
+    assert!(
+        stamped_external(&r, ws),
+        "{:?}",
+        payloads(&r, ws, cell_type::ORIGIN)
+    );
     assert!(
         targets(&r, ws, edge_category::WS_CONNECTS).is_empty(),
         "binance's /ws is not this repo's /ws"
     );
 
     let gql = node(&r, node_kind::GRAPHQL_OPERATION, GQL_EXT);
-    assert!(all_marked(&r, gql), "{:?}", payloads(&r, gql, cell_type::ENDPOINT_HIT));
-    assert!(stamped_external(&r, gql), "{:?}", payloads(&r, gql, cell_type::ORIGIN));
+    assert!(
+        all_marked(&r, gql),
+        "{:?}",
+        payloads(&r, gql, cell_type::ENDPOINT_HIT)
+    );
+    assert!(
+        stamped_external(&r, gql),
+        "{:?}",
+        payloads(&r, gql, cell_type::ORIGIN)
+    );
     assert!(
         targets(&r, gql, edge_category::GRAPHQL_CALLS).is_empty(),
         "GitHub's getUser is not this repo's resolver"
@@ -247,8 +267,16 @@ fn grpc_client_is_external() {
     let r = build(d.path());
 
     let stub = node(&r, node_kind::GRPC_CLIENT, GRPC_EXT);
-    assert!(all_marked(&r, stub), "{:?}", payloads(&r, stub, cell_type::ENDPOINT_HIT));
-    assert!(stamped_external(&r, stub), "{:?}", payloads(&r, stub, cell_type::ORIGIN));
+    assert!(
+        all_marked(&r, stub),
+        "{:?}",
+        payloads(&r, stub, cell_type::ENDPOINT_HIT)
+    );
+    assert!(
+        stamped_external(&r, stub),
+        "{:?}",
+        payloads(&r, stub, cell_type::ORIGIN)
+    );
     assert!(
         targets(&r, stub, edge_category::GRPC_CALLS).is_empty(),
         "a dial at googleapis is not the repo's own Geocoder"
@@ -298,6 +326,9 @@ fn effects_labels_external_channel_sinks() {
     let lookup = effects_of(&r, "client::main::Lookup");
     let row = sink(&lookup, GRPC_EXT);
     assert_eq!(row.class, "rpc_call");
-    assert_eq!(row.external_hosts, vec!["geocoder.googleapis.com:443".to_string()]);
+    assert_eq!(
+        row.external_hosts,
+        vec!["geocoder.googleapis.com:443".to_string()]
+    );
     assert!(row.downstream.is_empty(), "nothing pairs it: {row:#?}");
 }

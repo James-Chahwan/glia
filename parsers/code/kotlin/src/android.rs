@@ -85,9 +85,7 @@ use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
 use glia_core::{Cell, CellPayload, Confidence, NodeId};
 use tree_sitter::Node as TsNode;
 
-use crate::{
-    Acc, File, ImportTarget, cell_type, named_child_of_kind, node_kind, spring, text_of,
-};
+use crate::{Acc, File, ImportTarget, cell_type, named_child_of_kind, node_kind, spring, text_of};
 
 /// Android framework types a component class extends, as simple names. All
 /// are classes the framework instantiates; each counts only in a file that
@@ -112,8 +110,12 @@ const ANDROID_BASES: &[&str] = &[
 /// counts only in a file importing anything under `io.flutter`
 /// ([`imports_flutter`]), so a same-named class imported from elsewhere is
 /// not Flutter's.
-const FLUTTER_ANDROID_BASES: &[&str] =
-    &["FlutterActivity", "FlutterFragmentActivity", "FlutterFragment", "FlutterApplication"];
+const FLUTTER_ANDROID_BASES: &[&str] = &[
+    "FlutterActivity",
+    "FlutterFragmentActivity",
+    "FlutterFragment",
+    "FlutterApplication",
+];
 
 /// Hilt annotations that mark a class as a framework entry point, anywhere.
 const HILT_ENTRY_ANNOTATIONS: &[&str] = &["AndroidEntryPoint", "HiltViewModel", "HiltAndroidApp"];
@@ -139,9 +141,10 @@ static COUNTS: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
 
 /// Add one file's counts to the bank (end of `parse_file`).
 pub(crate) fn publish(c: ClientCounts) {
-    for (slot, n) in COUNTS
-        .iter()
-        .zip([c.endpoints, c.components, c.spring_clients, c.ktor_clients])
+    for (slot, n) in
+        COUNTS
+            .iter()
+            .zip([c.endpoints, c.components, c.spring_clients, c.ktor_clients])
     {
         if n > 0 {
             slot.fetch_add(n, Ordering::Relaxed);
@@ -172,7 +175,10 @@ pub(crate) fn marker(c: ClientCounts, repo_label: &str) -> String {
 /// The `[kotlin-ktor-client]` marker line (CA.6b), printed right after the
 /// `[kotlin/retrofit]` line from the same [`take`].
 pub(crate) fn ktor_marker(c: ClientCounts, repo_label: &str) -> String {
-    format!("[kotlin-ktor-client] endpoints={} repo={repo_label}", c.ktor_clients)
+    format!(
+        "[kotlin-ktor-client] endpoints={} repo={repo_label}",
+        c.ktor_clients
+    )
 }
 
 /// A member function of an INTERFACE: when it is a Retrofit mapping (see the
@@ -194,7 +200,16 @@ pub(crate) fn on_interface_fn(fun: TsNode, from: NodeId, file: &File, acc: &mut 
         } else {
             (None, base_relative_path(&tmpl))
         };
-        emit_client_endpoint(ann, verb, path, host.as_deref(), !templated, from, file, acc);
+        emit_client_endpoint(
+            ann,
+            verb,
+            path,
+            host.as_deref(),
+            !templated,
+            from,
+            file,
+            acc,
+        );
         acc.clients.endpoints += 1;
     }
     true
@@ -541,7 +556,10 @@ mod tests {
         let Some(Cell {
             payload: CellPayload::Json(s),
             ..
-        }) = node.cells.iter().find(|c| c.kind == cell_type::ENDPOINT_HIT)
+        }) = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENDPOINT_HIT)
         else {
             panic!("no ENDPOINT_HIT on {qname}");
         };
@@ -587,9 +605,18 @@ interface UserApi {
         assert_eq!(
             endpoint_calls(&fp),
             vec![
-                ("endpoint:DELETE:/api/users/{id}".to_string(), "UserApi::purge".to_string()),
-                ("endpoint:GET:/api/users".to_string(), "UserApi::listUsers".to_string()),
-                ("endpoint:POST:/api/users".to_string(), "UserApi::createUser".to_string()),
+                (
+                    "endpoint:DELETE:/api/users/{id}".to_string(),
+                    "UserApi::purge".to_string()
+                ),
+                (
+                    "endpoint:GET:/api/users".to_string(),
+                    "UserApi::listUsers".to_string()
+                ),
+                (
+                    "endpoint:POST:/api/users".to_string(),
+                    "UserApi::createUser".to_string()
+                ),
             ]
         );
         assert!(
@@ -602,7 +629,10 @@ interface UserApi {
         assert_eq!(hit["col"], 5);
         assert_eq!(hit["confidence"], "strong");
         assert_eq!(hit["file"], "api.kt");
-        assert!(hit.get("raw").is_none() && hit.get("host").is_none(), "{hit}");
+        assert!(
+            hit.get("raw").is_none() && hit.get("host").is_none(),
+            "{hit}"
+        );
         let clients = crate::parse_all(
             "interface A {\n    @GET(\"/a\")\n    fun a(): String\n}\n",
             "a.kt",
@@ -611,7 +641,13 @@ interface UserApi {
         )
         .unwrap()
         .clients;
-        assert_eq!(clients, ClientCounts { endpoints: 1, ..ClientCounts::default() });
+        assert_eq!(
+            clients,
+            ClientCounts {
+                endpoints: 1,
+                ..ClientCounts::default()
+            }
+        );
     }
 
     #[test]
@@ -636,18 +672,33 @@ interface Api {
         assert_eq!(
             endpoint_calls(&fp),
             vec![
-                ("endpoint:GET:/users/{id}".to_string(), "Api::user".to_string()),
-                ("endpoint:GET:/v2/orders".to_string(), "Api::orders".to_string()),
-                ("endpoint:PUT:${…}/items".to_string(), "Api::put".to_string()),
+                (
+                    "endpoint:GET:/users/{id}".to_string(),
+                    "Api::user".to_string()
+                ),
+                (
+                    "endpoint:GET:/v2/orders".to_string(),
+                    "Api::orders".to_string()
+                ),
+                (
+                    "endpoint:PUT:${…}/items".to_string(),
+                    "Api::put".to_string()
+                ),
             ]
         );
         // Relative: normalised before the ENDPOINT is built, so no `raw`.
         let user = hit_json(&fp, "endpoint:GET:/users/{id}");
         assert!(user.get("raw").is_none(), "{user}");
         // Absolute: the literal authority rides as `host`.
-        assert_eq!(hit_json(&fp, "endpoint:GET:/v2/orders")["host"], "api.example.com");
+        assert_eq!(
+            hit_json(&fp, "endpoint:GET:/v2/orders")["host"],
+            "api.example.com"
+        );
         // A template interpolation is Medium.
-        assert_eq!(hit_json(&fp, "endpoint:PUT:${…}/items")["confidence"], "medium");
+        assert_eq!(
+            hit_json(&fp, "endpoint:PUT:${…}/items")["confidence"],
+            "medium"
+        );
     }
 
     #[test]
@@ -671,7 +722,12 @@ interface ItemResource {
         );
         assert!(endpoint_calls(&fp).is_empty(), "{:?}", endpoint_calls(&fp));
         // The JAX-RS route is still there.
-        let route = NodeId::from_parts(crate::GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /items/{id}");
+        let route = NodeId::from_parts(
+            crate::GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            "GET /items/{id}",
+        );
         assert!(fp.nodes.iter().any(|n| n.id == route));
     }
 
@@ -713,10 +769,18 @@ class Plain : Helper()
 interface Screen : Activity
 "#,
         );
-        assert_eq!(roles_of(&fp, "MainActivity"), vec![r#"{"roles":["COMPONENT"]}"#]);
+        assert_eq!(
+            roles_of(&fp, "MainActivity"),
+            vec![r#"{"roles":["COMPONENT"]}"#]
+        );
         assert!(roles_of(&fp, "Plain").is_empty());
         // No same-qname COMPONENT twin: the CLASS carries the role (LB.3a).
-        assert!(!fp.nav.kind_by_id.values().any(|k| *k == node_kind::COMPONENT));
+        assert!(
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::COMPONENT)
+        );
         // Control: the same base without an Android import is not Android's.
         let backend = parse("class Worker : Service() {\n    fun run() {}\n}\n");
         assert!(roles_of(&backend, "Worker").is_empty());
@@ -738,21 +802,49 @@ interface Screen : Activity
     fn flutter_activity_is_component() {
         let counts = |src: &str| crate::parse_all(src, "m.kt", "m", repo()).unwrap().clients;
         for (import, class, base) in [
-            ("io.flutter.embedding.android.FlutterActivity", "MainActivity", "FlutterActivity"),
-            ("io.flutter.embedding.android.FlutterFragmentActivity", "MainActivity", "FlutterFragmentActivity"),
-            ("io.flutter.app.FlutterApplication", "App", "FlutterApplication"),
-            ("io.flutter.embedding.android.FlutterFragment", "Screen", "FlutterFragment"),
+            (
+                "io.flutter.embedding.android.FlutterActivity",
+                "MainActivity",
+                "FlutterActivity",
+            ),
+            (
+                "io.flutter.embedding.android.FlutterFragmentActivity",
+                "MainActivity",
+                "FlutterFragmentActivity",
+            ),
+            (
+                "io.flutter.app.FlutterApplication",
+                "App",
+                "FlutterApplication",
+            ),
+            (
+                "io.flutter.embedding.android.FlutterFragment",
+                "Screen",
+                "FlutterFragment",
+            ),
         ] {
-            let src = format!("package com.example.app\n\nimport {import}\n\nclass {class} : {base}()\n");
+            let src =
+                format!("package com.example.app\n\nimport {import}\n\nclass {class} : {base}()\n");
             let fp = parse(&src);
-            assert_eq!(roles_of(&fp, class), vec![r#"{"roles":["COMPONENT"]}"#], "{import}");
+            assert_eq!(
+                roles_of(&fp, class),
+                vec![r#"{"roles":["COMPONENT"]}"#],
+                "{import}"
+            );
             assert_eq!(counts(&src).components, 1, "{import}");
         }
         let shadow = "package com.example.app\n\nimport com.example.fake.FlutterActivity\n\nclass Shadow : FlutterActivity()\n";
-        assert!(roles_of(&parse(shadow), "Shadow").is_empty(), "FlutterActivity from elsewhere");
+        assert!(
+            roles_of(&parse(shadow), "Shadow").is_empty(),
+            "FlutterActivity from elsewhere"
+        );
         assert_eq!(counts(shadow).components, 0);
-        let service = "import io.flutter.embedding.android.FlutterActivity\n\nclass W : Service()\n";
-        assert!(roles_of(&parse(service), "W").is_empty(), "the Flutter gate admits Flutter bases only");
+        let service =
+            "import io.flutter.embedding.android.FlutterActivity\n\nclass W : Service()\n";
+        assert!(
+            roles_of(&parse(service), "W").is_empty(),
+            "the Flutter gate admits Flutter bases only"
+        );
     }
 
     #[test]
@@ -771,9 +863,20 @@ class UsersViewModel(private val repo: UserRepository) : ViewModel() {
 class HomeFragment : Fragment()
 "#,
         );
-        assert_eq!(roles_of(&fp, "UsersViewModel"), vec![r#"{"roles":["COMPONENT"]}"#]);
-        assert_eq!(roles_of(&fp, "HomeFragment"), vec![r#"{"roles":["COMPONENT"]}"#]);
-        let vm = NodeId::from_parts(crate::GRAPH_TYPE, repo(), node_kind::CLASS, "UsersViewModel");
+        assert_eq!(
+            roles_of(&fp, "UsersViewModel"),
+            vec![r#"{"roles":["COMPONENT"]}"#]
+        );
+        assert_eq!(
+            roles_of(&fp, "HomeFragment"),
+            vec![r#"{"roles":["COMPONENT"]}"#]
+        );
+        let vm = NodeId::from_parts(
+            crate::GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "UsersViewModel",
+        );
         assert!(fp.refs.iter().any(|r| r.from == vm
             && r.category == edge_category::INJECTS
             && r.qualifier == glia_code_domain::CallQualifier::Bare("UserRepository".into())));
@@ -781,7 +884,10 @@ class HomeFragment : Fragment()
 
     #[test]
     fn client_url_reconstructs_templates_and_concatenation() {
-        assert_eq!(placeholders("/users/$id/x"), ("/users/${…}/x".to_string(), true));
+        assert_eq!(
+            placeholders("/users/$id/x"),
+            ("/users/${…}/x".to_string(), true)
+        );
         assert_eq!(placeholders("/o/${o.id}"), ("/o/${…}".to_string(), true));
         assert_eq!(placeholders("/a/\\$b"), ("/a/$b".to_string(), false));
         assert_eq!(placeholders("/cost/$"), ("/cost/$".to_string(), false));

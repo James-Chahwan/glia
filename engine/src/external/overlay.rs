@@ -176,7 +176,10 @@ pub(super) fn apply_overlay_edges(
     }
 
     let existing = stage.existing.get_or_insert_with(|| {
-        merged.all_edges().map(|e| (e.from.0, e.to.0, e.category.0)).collect()
+        merged
+            .all_edges()
+            .map(|e| (e.from.0, e.to.0, e.category.0))
+            .collect()
     });
     for b in bound {
         let rule = format!("edge#{}", b.ordinal);
@@ -194,18 +197,30 @@ pub(super) fn apply_overlay_edges(
         let note = b.note.as_deref().map(|n| {
             let (clean, spans) = redact_untrusted(n);
             if spans > 0 {
-                t.details.push(format!("redacted {rule} {OVERLAY_FILE}:{} note spans={spans}", b.line));
+                t.details.push(format!(
+                    "redacted {rule} {OVERLAY_FILE}:{} note spans={spans}",
+                    b.line
+                ));
             }
             clean
         });
-        let origin = OriginJson { provenance: b.origin.provenance(), rule: &rule, note: note.as_deref() };
+        let origin = OriginJson {
+            provenance: b.origin.provenance(),
+            rule: &rule,
+            note: note.as_deref(),
+        };
         // Plain strings only: serialising cannot fail; `{}` would read as no
         // provenance rather than lie.
         let origin = serde_json::to_string(&origin).unwrap_or_else(|_| String::from("{}"));
-        let evidence = Evidence::emitter(EMITTER).rule(rule).at(OVERLAY_FILE, b.line.saturating_sub(1));
+        let evidence = Evidence::emitter(EMITTER)
+            .rule(rule)
+            .at(OVERLAY_FILE, b.line.saturating_sub(1));
         merged.cross_edges.push(
             Edge::new(b.from, b.to, b.category, b.origin.confidence())
-                .with_cell(Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) })
+                .with_cell(Cell {
+                    kind: cell_type::ORIGIN,
+                    payload: CellPayload::Json(origin),
+                })
                 .with_cell(evidence.to_cell()),
         );
         t.applied += 1;
@@ -220,13 +235,22 @@ pub(super) fn apply_overlay_edges(
 
 /// Bind `qname`: the stanza's own repo first, then every repo of the build.
 /// Several hits bind the smallest NodeId.
-fn bind(merged: &MergedGraph, own: &QnameIndex, all: &mut Option<QnameIndex>, qname: &str) -> Option<NodeId> {
+fn bind(
+    merged: &MergedGraph,
+    own: &QnameIndex,
+    all: &mut Option<QnameIndex>,
+    qname: &str,
+) -> Option<NodeId> {
     let pick = |t: CellTarget| match t {
         CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some(id),
         _ => None,
     };
-    pick(own.resolve(qname, None, None))
-        .or_else(|| pick(all.get_or_insert_with(|| QnameIndex::build(merged, None)).resolve(qname, None, None)))
+    pick(own.resolve(qname, None, None)).or_else(|| {
+        pick(
+            all.get_or_insert_with(|| QnameIndex::build(merged, None))
+                .resolve(qname, None, None),
+        )
+    })
 }
 
 /// The 1-based lines of the `[[edge]]` stanzas the loader dropped, read from
@@ -237,7 +261,9 @@ fn rejected_edge_lines(cfg: &LoadedConfig) -> Vec<u32> {
         .iter()
         .filter_map(|e| {
             let (line, msg) = e.strip_prefix(prefix.as_str())?.split_once(": ")?;
-            msg.starts_with("[[edge]] ").then(|| line.parse().ok()).flatten()
+            msg.starts_with("[[edge]] ")
+                .then(|| line.parse().ok())
+                .flatten()
         })
         .collect()
 }
@@ -251,7 +277,10 @@ fn report(label: &str, t: &EdgeTally) {
         eprintln!("[overlay] {line}");
     }
     if t.details.len() > MAX_DETAIL_LINES {
-        eprintln!("[overlay] ... {} more detail lines", t.details.len() - MAX_DETAIL_LINES);
+        eprintln!(
+            "[overlay] ... {} more detail lines",
+            t.details.len() - MAX_DETAIL_LINES
+        );
     }
 }
 
@@ -299,9 +328,17 @@ impl RepoInputs {
     /// server routes no tier placed. The resolver's
     /// `[http] overlay mounts: routes=<r> keys=<k> paired=<p>` line reports
     /// what the mounts paired.
-    pub(crate) fn route_mounts(merged: &MergedGraph, inputs: &[RepoInputs], overlay: bool) -> RouteMounts {
+    pub(crate) fn route_mounts(
+        merged: &MergedGraph,
+        inputs: &[RepoInputs],
+        overlay: bool,
+    ) -> RouteMounts {
         let mut mounts = RouteMounts::default();
-        let declared = |i: &RepoInputs| i.config.as_ref().is_some_and(|c| !c.config.route_prefix.is_empty());
+        let declared = |i: &RepoInputs| {
+            i.config
+                .as_ref()
+                .is_some_and(|c| !c.config.route_prefix.is_empty())
+        };
         if !overlay || !inputs.iter().any(declared) {
             return mounts;
         }
@@ -336,7 +373,11 @@ impl RepoInputs {
 
 /// `input`'s server ROUTE nodes (NAV routes excluded), each once, in graph
 /// then node order, with the file the locator places it in.
-fn server_routes(merged: &MergedGraph, loc: &Locator<'_>, input: &RepoInputs) -> Vec<(NodeId, Option<String>)> {
+fn server_routes(
+    merged: &MergedGraph,
+    loc: &Locator<'_>,
+    input: &RepoInputs,
+) -> Vec<(NodeId, Option<String>)> {
     let mut seen: BTreeSet<u64> = BTreeSet::new();
     let mut out = Vec::new();
     for g in merged.graphs.iter().filter(|g| g.repo == input.repo) {
@@ -375,13 +416,17 @@ mod tests {
     const FIXTURE: &str = "bench/substrate-gap/fixtures/xcut-overlay-edges";
 
     fn fixture_dir(sub: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(FIXTURE).join(sub)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(FIXTURE)
+            .join(sub)
     }
 
     /// The fixture's web + api graphs, assembled (no pass run), and the web
     /// repo's inputs as the build loaded them.
     fn assembled() -> (MergedGraph, Vec<RepoInputs>) {
-        let dirs = [fixture_dir("web"), fixture_dir("api")].map(|d| d.to_string_lossy().into_owned());
+        let dirs =
+            [fixture_dir("web"), fixture_dir("api")].map(|d| d.to_string_lossy().into_owned());
         let a = crate::build::assemble_many(&dirs, false).expect("fixture assembles");
         (a.merged, a.inputs)
     }
@@ -398,11 +443,20 @@ mod tests {
 
     fn apply(merged: &mut MergedGraph, input: &RepoInputs) -> EdgeTally {
         let cfg = input.config.as_ref().expect("a config");
-        apply_overlay_edges(merged, input, cfg, &mut EdgeStage::default()).expect("[[edge]] declared")
+        apply_overlay_edges(merged, input, cfg, &mut EdgeStage::default())
+            .expect("[[edge]] declared")
     }
 
     fn counts(t: &EdgeTally) -> [usize; 7] {
-        [t.declared, t.applied, t.redundant, t.orphaned, t.rejected, t.llm, t.human]
+        [
+            t.declared,
+            t.applied,
+            t.redundant,
+            t.orphaned,
+            t.rejected,
+            t.llm,
+            t.human,
+        ]
     }
 
     /// The fixture's own file: one CALLS stanza applies, the DEFINES one was
@@ -461,11 +515,29 @@ category = "USES"
         let e = merged.cross_edges.last().expect("the applied edge");
         assert_eq!(e.confidence, glia_core::Confidence::Medium);
         let ev = Evidence::of(e).expect("evidence");
-        assert_eq!(ev.rule.as_deref(), Some("edge#4"), "the dropped CONTAINS stanza is edge#1");
+        assert_eq!(
+            ev.rule.as_deref(),
+            Some("edge#4"),
+            "the dropped CONTAINS stanza is edge#1"
+        );
         assert_eq!(ev.line, Some(17), "0-based line of the 4th [[edge]] header");
-        assert!(t.details.iter().any(|d| d.starts_with("orphaned edge#2 ") && d.ends_with("(no node: to)")), "{:?}", t.details);
-        assert!(t.details.iter().any(|d| d.starts_with("redundant edge#3 ")), "{:?}", t.details);
-        assert!(t.details.iter().any(|d| d.starts_with("redundant edge#5 ")), "{:?}", t.details);
+        assert!(
+            t.details
+                .iter()
+                .any(|d| d.starts_with("orphaned edge#2 ") && d.ends_with("(no node: to)")),
+            "{:?}",
+            t.details
+        );
+        assert!(
+            t.details.iter().any(|d| d.starts_with("redundant edge#3 ")),
+            "{:?}",
+            t.details
+        );
+        assert!(
+            t.details.iter().any(|d| d.starts_with("redundant edge#5 ")),
+            "{:?}",
+            t.details
+        );
     }
 
     /// Own repo first, then any repo of the build; a file with no `[[edge]]`
@@ -478,23 +550,40 @@ category = "USES"
         let mut all = None;
         let web_mod = bind(&merged, &own, &mut all, "src::report").expect("own repo");
         let api_mod = bind(&merged, &own, &mut all, "report").expect("other repo");
-        let repo_of = |id: NodeId| merged.graphs.iter().find(|g| g.nodes.iter().any(|n| n.id == id)).map(|g| g.repo);
+        let repo_of = |id: NodeId| {
+            merged
+                .graphs
+                .iter()
+                .find(|g| g.nodes.iter().any(|n| n.id == id))
+                .map(|g| g.repo)
+        };
         assert_eq!(repo_of(web_mod), Some(inputs[0].repo));
         assert_eq!(repo_of(api_mod), Some(inputs[1].repo));
         assert!(bind(&merged, &own, &mut all, "nope::nothing").is_none());
 
-        for text in ["version = 1\n[walk]\nskip = [\"gen/\"]\n", "version = 1\n[[edge]\n"] {
+        for text in [
+            "version = 1\n[walk]\nskip = [\"gen/\"]\n",
+            "version = 1\n[[edge]\n",
+        ] {
             let input = with_config(&inputs[0], text);
             let cfg = input.config.as_ref().expect("a config");
-            assert!(apply_overlay_edges(&mut merged, &input, cfg, &mut EdgeStage::default()).is_none(), "{text}");
+            assert!(
+                apply_overlay_edges(&mut merged, &input, cfg, &mut EdgeStage::default()).is_none(),
+                "{text}"
+            );
         }
     }
 
     #[test]
     fn rejected_lines_are_read_from_loader_errors() {
-        let cfg = parse_str("version = 1\n\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"DEFINES\"\n\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"NOPE\"\n");
+        let cfg = parse_str(
+            "version = 1\n\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"DEFINES\"\n\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"NOPE\"\n",
+        );
         assert_eq!(rejected_edge_lines(&cfg), [3, 8], "{:?}", cfg.errors);
-        assert!(rejected_edge_lines(&parse_str("[[edge]]\n")).is_empty(), "a whole-file error is not a stanza");
+        assert!(
+            rejected_edge_lines(&parse_str("[[edge]]\n")).is_empty(),
+            "a whole-file error is not a stanza"
+        );
     }
 
     // ---- LF.2d route mounts ----------------------------------------------
@@ -504,14 +593,18 @@ category = "USES"
     fn mount_fixture() -> (MergedGraph, Vec<RepoInputs>) {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../bench/substrate-gap/fixtures/xcut-overlay-const-mount");
-        let dirs = ["web", "orders", "billing"].map(|d| root.join(d).to_string_lossy().into_owned());
+        let dirs =
+            ["web", "orders", "billing"].map(|d| root.join(d).to_string_lossy().into_owned());
         let a = crate::build::assemble_many(&dirs, false).expect("fixture assembles");
         (a.merged, a.inputs)
     }
 
     /// The server ROUTEs of `input`'s repo, by id.
     fn route_ids(merged: &MergedGraph, input: &RepoInputs) -> Vec<NodeId> {
-        server_routes(merged, &Locator::new(merged), input).into_iter().map(|(id, _)| id).collect()
+        server_routes(merged, &Locator::new(merged), input)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// A stanza mounts every located server route of its OWN repo under its
@@ -530,23 +623,48 @@ category = "USES"
         let mounts = RepoInputs::route_mounts(&merged, &inputs, true);
         assert_eq!(mounts.routes(), 2, "the orders routes only");
         for id in &orders_routes {
-            assert_eq!(mounts.of(*id), [("/orders-svc".to_string(), Confidence::Weak)]);
+            assert_eq!(
+                mounts.of(*id),
+                [("/orders-svc".to_string(), Confidence::Weak)]
+            );
         }
         assert!(mounts.of(billing_routes[0]).is_empty());
-        assert!(RepoInputs::route_mounts(&merged, &inputs, false).is_empty(), "--no-overlay mounts nothing");
+        assert!(
+            RepoInputs::route_mounts(&merged, &inputs, false).is_empty(),
+            "--no-overlay mounts nothing"
+        );
 
         let with = |text: &str| {
-            let mut v: Vec<RepoInputs> = inputs.iter().map(|i| with_config(i, "version = 1\n")).collect();
+            let mut v: Vec<RepoInputs> = inputs
+                .iter()
+                .map(|i| with_config(i, "version = 1\n"))
+                .collect();
             v[1] = with_config(orders, text);
             RepoInputs::route_mounts(&merged, &v, true)
         };
-        let human = with("version = 1\n[[route_prefix]]\nscope = \"\"\nprefix = \"/gw\"\norigin = \"human\"\n");
-        assert_eq!(human.of(orders_routes[0]), [("/gw".to_string(), Confidence::Medium)], "empty scope = whole repo");
-        assert!(with("version = 1\n[[route_prefix]]\nscope = \"services/none\"\nprefix = \"/gw\"\n").is_empty());
-        assert_eq!(with("version = 1\n[[route_prefix]]\nscope = \"./\"\nprefix = \"/gw\"\n").routes(), 2);
+        let human = with(
+            "version = 1\n[[route_prefix]]\nscope = \"\"\nprefix = \"/gw\"\norigin = \"human\"\n",
+        );
+        assert_eq!(
+            human.of(orders_routes[0]),
+            [("/gw".to_string(), Confidence::Medium)],
+            "empty scope = whole repo"
+        );
+        assert!(
+            with("version = 1\n[[route_prefix]]\nscope = \"services/none\"\nprefix = \"/gw\"\n")
+                .is_empty()
+        );
+        assert_eq!(
+            with("version = 1\n[[route_prefix]]\nscope = \"./\"\nprefix = \"/gw\"\n").routes(),
+            2
+        );
         assert!(with("version = 1\n").is_empty(), "no stanza, no mount");
         assert_eq!(mount_scope(&merged, "./"), ".");
-        assert_eq!(mount_scope(&merged, "services/api/"), "services/api/", "a path passes through");
+        assert_eq!(
+            mount_scope(&merged, "services/api/"),
+            "services/api/",
+            "a path passes through"
+        );
     }
 
     /// A route with no POSITION, no located ROUTE_METHOD and no handler is

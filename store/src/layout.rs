@@ -64,7 +64,11 @@ pub fn repo_root_of_gmap_dir(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let root: PathBuf = comps[..split].iter().collect();
-    Some(if root.as_os_str().is_empty() { PathBuf::from(".") } else { root })
+    Some(if root.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        root
+    })
 }
 
 // ============================================================================
@@ -235,7 +239,10 @@ fn confidence_from_name(s: &str) -> Option<Confidence> {
 fn pass_undo_entries(undo: &[(NodeId, Confidence)]) -> Vec<PassUndo> {
     let mut out: Vec<PassUndo> = undo
         .iter()
-        .map(|(id, c)| PassUndo { node: id.0, confidence: confidence_name(*c).to_string() })
+        .map(|(id, c)| PassUndo {
+            node: id.0,
+            confidence: confidence_name(*c).to_string(),
+        })
         .collect();
     out.sort_by_key(|e| e.node);
     out
@@ -248,9 +255,12 @@ fn pass_undo_from_entries(entries: &[PassUndo]) -> Result<Vec<(NodeId, Confidenc
     let mut out = Vec::with_capacity(entries.len());
     for e in entries {
         let Some(c) = confidence_from_name(&e.confidence) else {
-            return Err(StoreError::ManifestJson(<serde_json::Error as serde::de::Error>::custom(
-                format!("pass_undo: node {} has unknown confidence {:?}", e.node, e.confidence),
-            )));
+            return Err(StoreError::ManifestJson(
+                <serde_json::Error as serde::de::Error>::custom(format!(
+                    "pass_undo: node {} has unknown confidence {:?}",
+                    e.node, e.confidence
+                )),
+            ));
         };
         out.push((NodeId(e.node), c));
     }
@@ -305,7 +315,9 @@ pub struct LayoutMeta {
 /// inline, a read hands every span out as JSON.
 fn layout_code_source(repos: &[RepoMeta], dir: &Path) -> Option<FsCodeSource> {
     let source = FsCodeSource::new(
-        repos.iter().filter_map(|r| Some((r.id, dir.join(r.root.as_deref()?)))),
+        repos
+            .iter()
+            .filter_map(|r| Some((r.id, dir.join(r.root.as_deref()?)))),
     );
     (!source.is_empty()).then_some(source)
 }
@@ -370,7 +382,10 @@ pub struct ShardEntry {
     /// which readers hash-check but never decode as code. Read as `"code"`
     /// when absent and omitted when `"code"`, so a code-only manifest keeps
     /// the bytes it had before the field.
-    #[serde(default = "code_graph_type", skip_serializing_if = "is_code_graph_type")]
+    #[serde(
+        default = "code_graph_type",
+        skip_serializing_if = "is_code_graph_type"
+    )]
     pub graph_type: String,
 }
 
@@ -409,7 +424,10 @@ fn check_foreign(f: &ForeignShard, taken: &[&str]) -> Result<(), StoreError> {
     let bad = |why: &str| {
         Err(StoreError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("foreign shard {:?} (graph_type {:?}): {why}", f.name, f.graph_type),
+            format!(
+                "foreign shard {:?} (graph_type {:?}): {why}",
+                f.name, f.graph_type
+            ),
         )))
     };
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
@@ -527,7 +545,9 @@ fn write_sharded_with(
         // shard damaged after its write keeps its name and its manifest entry,
         // and a rebuild must replace it (LC.8), not skip it forever.
         let unchanged = prior_manifest.as_ref().is_some_and(|m| {
-            m.shards.iter().any(|e| e.name == *name && e.content_hash == content_hash)
+            m.shards
+                .iter()
+                .any(|e| e.name == *name && e.content_hash == content_hash)
         }) && on_disk_is(&shard_path, &bytes);
         if !unchanged {
             write_atomic(&shard_path, &bytes)?;
@@ -550,7 +570,9 @@ fn write_sharded_with(
         let shard_path = dir.join(&file_name);
         let content_hash = hex_xxhash64(&f.bytes);
         let unchanged = prior_manifest.as_ref().is_some_and(|m| {
-            m.shards.iter().any(|e| e.name == f.name && e.content_hash == content_hash)
+            m.shards
+                .iter()
+                .any(|e| e.name == f.name && e.content_hash == content_hash)
         }) && on_disk_is(&shard_path, &f.bytes);
         if unchanged {
             shards_skipped += 1;
@@ -648,7 +670,11 @@ fn write_sharded_with(
             "[store] write_sharded: {} shards skipped (unchanged), {} written, manifest {}",
             shards_skipped,
             shards.len() + recorded.foreign.len() + cross_edges.len().min(1) - shards_skipped,
-            if manifest_unchanged { "unchanged" } else { "rewritten" },
+            if manifest_unchanged {
+                "unchanged"
+            } else {
+                "rewritten"
+            },
         );
     }
     Ok(manifest)
@@ -711,10 +737,14 @@ impl ShardedMmap {
     /// Iterate all edges across every shard and the cross-stack shard. Useful
     /// for whole-merged-graph walks without rehydrating owned types.
     pub fn edges_iter(&self) -> impl Iterator<Item = (NodeId, NodeId, EdgeCategoryId)> + '_ {
-        let shard_edges = self.shards.iter().flat_map(|(_, mmap)| match mmap.archived() {
-            Ok(a) => Some(a.edges_iter()),
-            Err(_) => None,
-        }).flatten();
+        let shard_edges = self
+            .shards
+            .iter()
+            .flat_map(|(_, mmap)| match mmap.archived() {
+                Ok(a) => Some(a.edges_iter()),
+                Err(_) => None,
+            })
+            .flatten();
         let cross_edges = self
             .cross
             .as_ref()
@@ -814,7 +844,9 @@ pub fn write_merged_sharded_extras(
         [only] => only.root.as_deref().map(|r| dir.join(r)),
         _ => None,
     });
-    let inputs = root.map(|r| external_inputs_fingerprint(&r)).unwrap_or_default();
+    let inputs = root
+        .map(|r| external_inputs_fingerprint(&r))
+        .unwrap_or_default();
     write_merged_with(
         merged,
         meta,
@@ -858,8 +890,10 @@ pub fn write_merged_sharded_for_repo(
     dir: &Path,
     repo_root: &Path,
 ) -> Result<Manifest, StoreError> {
-    let recorded =
-        Recorded { external_inputs: external_inputs_fingerprint(repo_root), ..Recorded::default() };
+    let recorded = Recorded {
+        external_inputs: external_inputs_fingerprint(repo_root),
+        ..Recorded::default()
+    };
     write_merged_with(merged, meta, dir, recorded)
 }
 
@@ -891,7 +925,10 @@ fn write_merged_with(
         &merged.cross_edges,
         meta,
         dir,
-        Recorded { pass_undo: pass_undo_entries(&merged.pass_undo), ..recorded },
+        Recorded {
+            pass_undo: pass_undo_entries(&merged.pass_undo),
+            ..recorded
+        },
     )
 }
 
@@ -906,9 +943,7 @@ fn write_merged_with(
 /// When the layout cannot be served (`StoreError::needs_rebuild`) it prints one
 /// `[gmap] needs rebuild: <dir>: <reason>` line before returning the error, so
 /// the first 0.5.0 load of a 0.4.x layout says why it is regenerating.
-pub fn read_merged_sharded(
-    dir: &Path,
-) -> Result<glia_graph::MergedGraph, StoreError> {
+pub fn read_merged_sharded(dir: &Path) -> Result<glia_graph::MergedGraph, StoreError> {
     read_merged_sharded_meta(dir).map(|(merged, _meta)| merged)
 }
 
@@ -957,7 +992,10 @@ pub fn read_layout_extras(dir: &Path) -> Result<LayoutExtras, StoreError> {
             bytes: verified_bytes(entry, &dir.join(&entry.path))?,
         });
     }
-    Ok(LayoutExtras { foreign, members: manifest.members })
+    Ok(LayoutExtras {
+        foreign,
+        members: manifest.members,
+    })
 }
 
 fn read_merged_sharded_inner(
@@ -981,12 +1019,14 @@ fn read_merged_sharded_inner(
         );
     }
     for entry in sharded.manifest.shards.iter().filter(|e| !e.is_code()) {
-        eprintln!("[gmap] skipped foreign shard {} graph_type={}", entry.name, entry.graph_type);
+        eprintln!(
+            "[gmap] skipped foreign shard {} graph_type={}",
+            entry.name, entry.graph_type
+        );
     }
     let cross_edges = if let Some(cross_mmap) = &sharded.cross {
         let archived = cross_mmap.archived()?;
-        let mut owned: Container =
-            rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
+        let mut owned: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
         expand_file_evidence(cross_mmap, &mut owned.edges)
             .map_err(|e| in_shard("cross_stack", e))?;
         owned.edges
@@ -1014,9 +1054,9 @@ fn read_merged_sharded_inner(
 /// does not decode): the detail alone names only the edge.
 fn in_shard(name: &str, e: StoreError) -> StoreError {
     match e {
-        StoreError::Corrupt { detail } => {
-            StoreError::Corrupt { detail: format!("shard {name}: {detail}") }
-        }
+        StoreError::Corrupt { detail } => StoreError::Corrupt {
+            detail: format!("shard {name}: {detail}"),
+        },
         other => other,
     }
 }
@@ -1076,9 +1116,7 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     let Ok(m) = serde_json::from_slice::<Manifest>(&manifest_bytes) else {
         return true;
     };
-    if m.engine_version != env!("CARGO_PKG_VERSION")
-        || m.build_stamp != glia_stamp::BUILD_STAMP
-    {
+    if m.engine_version != env!("CARGO_PKG_VERSION") || m.build_stamp != glia_stamp::BUILD_STAMP {
         // Un-gated on purpose (not behind GLIA_STORE_VERBOSE): it fires rarely
         // and it is the only explanation a user gets for an expensive
         // regenerate, matching the `[incremental] build context changed` line.
@@ -1106,7 +1144,11 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
 /// (resolved against `dir`) is `repo_path`, that repo's entry, or an empty map
 /// for a rooted repo that had no inputs; otherwise the one-root
 /// [`Manifest::external_inputs`].
-fn recorded_inputs<'a>(m: &'a Manifest, dir: &Path, repo_path: &Path) -> &'a BTreeMap<String, String> {
+fn recorded_inputs<'a>(
+    m: &'a Manifest,
+    dir: &Path,
+    repo_path: &Path,
+) -> &'a BTreeMap<String, String> {
     static NONE: BTreeMap<String, String> = BTreeMap::new();
     if m.external_inputs_by_repo.is_empty() {
         return &m.external_inputs;
@@ -1118,7 +1160,9 @@ fn recorded_inputs<'a>(m: &'a Manifest, dir: &Path, repo_path: &Path) -> &'a BTr
     };
     let want = resolved(repo_path);
     let repo = m.repos.iter().find(|r| {
-        r.root.as_deref().is_some_and(|root| resolved(&dir.join(root)) == want)
+        r.root
+            .as_deref()
+            .is_some_and(|root| resolved(&dir.join(root)) == want)
     });
     match repo {
         Some(r) => m.external_inputs_by_repo.get(&r.id).unwrap_or(&NONE),
@@ -1154,10 +1198,14 @@ pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String>
     let own_layout = repo_root.join(DEFAULT_GMAP_SUBDIR);
     let mut stack = vec![control];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(ftype) = entry.file_type() else { continue };
+            let Ok(ftype) = entry.file_type() else {
+                continue;
+            };
             if ftype.is_dir() {
                 if path != own_layout {
                     stack.push(path);
@@ -1171,7 +1219,9 @@ pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String>
             if !is_file || is_store_output_name(&entry.file_name().to_string_lossy()) {
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(repo_root) else { continue };
+            let Ok(rel) = path.strip_prefix(repo_root) else {
+                continue;
+            };
             let key = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy())
@@ -1261,7 +1311,11 @@ fn scan_for_newer(
     // relative `repo_path` against an absolute `gmap_dir`.
     let root = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let gmap = std::fs::canonicalize(gmap_dir).unwrap_or_else(|_| gmap_dir.to_path_buf());
-    let own_output = [gmap, root.join(DEFAULT_GMAP_SUBDIR), root.join(LEGACY_GMAP_SUBDIR)];
+    let own_output = [
+        gmap,
+        root.join(DEFAULT_GMAP_SUBDIR),
+        root.join(LEGACY_GMAP_SUBDIR),
+    ];
     let mut gated = 0usize;
     let mut checked = 0usize;
     let mut stale = false;
@@ -1388,7 +1442,6 @@ pub fn upsert_cell_sharded(
 // Tests
 // ============================================================================
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1453,8 +1506,7 @@ mod tests {
         // The upsert round-trips the manifest struct, so the build stamp must
         // survive it — the layout was still produced by THIS build.
         let m: Manifest =
-            serde_json::from_slice(&std::fs::read(shard_dir.join(MANIFEST_NAME)).unwrap())
-                .unwrap();
+            serde_json::from_slice(&std::fs::read(shard_dir.join(MANIFEST_NAME)).unwrap()).unwrap();
         assert_eq!(m.build_stamp, glia_stamp::BUILD_STAMP);
     }
 
@@ -1471,7 +1523,13 @@ mod tests {
         let repo = RepoId::from_canonical("test://lc5b-layout");
         let mut nav = CodeNav::default();
         nav.record(NodeId(100), "m", "pkg::m", node_kind::MODULE, None);
-        nav.record(NodeId(101), "f", "pkg::m::f", node_kind::FUNCTION, Some(NodeId(100)));
+        nav.record(
+            NodeId(101),
+            "f",
+            "pkg::m::f",
+            node_kind::FUNCTION,
+            Some(NodeId(100)),
+        );
         let node = |id: u64| Node {
             id: NodeId(id),
             repo,
@@ -1505,7 +1563,10 @@ mod tests {
             Some("pkg::m::f")
         );
         let cross_file = opened.cross.as_ref().unwrap();
-        assert!(cross_file.section_names().unwrap().is_empty(), "cross_stack has no section");
+        assert!(
+            cross_file.section_names().unwrap().is_empty(),
+            "cross_stack has no section"
+        );
         drop(opened);
 
         let loaded = read_merged_sharded(&dir).unwrap();
@@ -1514,12 +1575,23 @@ mod tests {
         assert_eq!(loaded.graphs[0].nav.parent_of, g.nav.parent_of);
         assert_eq!(loaded.cross_edges, cross);
 
-        upsert_cell_sharded(&dir, NodeId(101), CellTypeId(8), CellPayload::Text("x".into()))
-            .unwrap();
+        upsert_cell_sharded(
+            &dir,
+            NodeId(101),
+            CellTypeId(8),
+            CellPayload::Text("x".into()),
+        )
+        .unwrap();
         let reopened = ShardedMmap::open(&dir).unwrap();
         let shard = &reopened.shards[0].1;
-        assert_eq!(shard.section_bytes(CODE_SECTION).unwrap().unwrap(), code_before.as_slice());
-        assert_eq!(shard.archived().unwrap().kind(NodeId(101)), Some(node_kind::FUNCTION));
+        assert_eq!(
+            shard.section_bytes(CODE_SECTION).unwrap().unwrap(),
+            code_before.as_slice()
+        );
+        assert_eq!(
+            shard.archived().unwrap().kind(NodeId(101)),
+            Some(node_kind::FUNCTION)
+        );
     }
 
     /// LC.7: the layout metadata round-trips through the manifest, repos are
@@ -1529,7 +1601,10 @@ mod tests {
     fn layout_meta_round_trips_through_the_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let g = empty_graph("test://lc7-meta");
-        let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
+        let merged = glia_graph::MergedGraph {
+            graphs: vec![g],
+            ..Default::default()
+        };
         let meta = LayoutMeta {
             repos: vec![
                 RepoMeta {
@@ -1538,30 +1613,56 @@ mod tests {
                     root: Some("../web".into()),
                     rev: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 },
-                RepoMeta { id: 3, label: "api".into(), root: None, rev: None },
+                RepoMeta {
+                    id: 3,
+                    label: "api".into(),
+                    root: None,
+                    rev: None,
+                },
             ],
             parse_errors: vec!["b.py: second".into(), "a.py: first".into()],
             code_spans_unresolved: 0,
         };
         let dir = tmp.path().join("with");
         let written = write_merged_sharded_meta(&merged, &meta, &dir).unwrap();
-        assert_eq!(written.repos.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 9]);
+        assert_eq!(
+            written.repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![3, 9]
+        );
         let (_, back) = read_merged_sharded_meta(&dir).unwrap();
         assert_eq!(back.repos, written.repos);
-        assert_eq!(back.parse_errors, meta.parse_errors, "build order, not sorted");
+        assert_eq!(
+            back.parse_errors, meta.parse_errors,
+            "build order, not sorted"
+        );
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap();
-        assert!(json["repos"][0].get("root").is_none(), "an unknown root is omitted: {json}");
+        assert!(
+            json["repos"][0].get("root").is_none(),
+            "an unknown root is omitted: {json}"
+        );
         // CD.5b: a recorded rev rides the manifest; an unknown one is omitted.
-        assert!(json["repos"][0].get("rev").is_none(), "an unknown rev is omitted: {json}");
-        assert_eq!(json["repos"][1]["rev"], "0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(back.repos[1].rev.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        assert!(
+            json["repos"][0].get("rev").is_none(),
+            "an unknown rev is omitted: {json}"
+        );
+        assert_eq!(
+            json["repos"][1]["rev"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            back.repos[1].rev.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
 
         let bare = tmp.path().join("bare");
         write_merged_sharded(&merged, &bare).unwrap();
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(bare.join(MANIFEST_NAME)).unwrap()).unwrap();
-        assert!(json.get("repos").is_none() && json.get("parse_errors").is_none(), "{json}");
+        assert!(
+            json.get("repos").is_none() && json.get("parse_errors").is_none(),
+            "{json}"
+        );
         let (_, empty) = read_merged_sharded_meta(&bare).unwrap();
         assert_eq!(empty, LayoutMeta::default());
     }
@@ -1571,17 +1672,29 @@ mod tests {
     /// before it reads back with `rev: None`.
     #[test]
     fn repo_meta_rev_is_additive() {
-        let bare = RepoMeta { id: 7, label: "api".into(), root: Some("../..".into()), rev: None };
+        let bare = RepoMeta {
+            id: 7,
+            label: "api".into(),
+            root: Some("../..".into()),
+            rev: None,
+        };
         assert_eq!(
             serde_json::to_string(&bare).unwrap(),
             r#"{"id":7,"label":"api","root":"../.."}"#
         );
-        let old: RepoMeta = serde_json::from_str(r#"{"id":7,"label":"api","root":"../.."}"#).unwrap();
+        let old: RepoMeta =
+            serde_json::from_str(r#"{"id":7,"label":"api","root":"../.."}"#).unwrap();
         assert_eq!(old, bare);
         let sha = "89abcdef0123456789abcdef0123456789abcdef";
-        let with = RepoMeta { rev: Some(sha.into()), ..bare };
+        let with = RepoMeta {
+            rev: Some(sha.into()),
+            ..bare
+        };
         let text = serde_json::to_string(&with).unwrap();
-        assert_eq!(text, format!(r#"{{"id":7,"label":"api","root":"../..","rev":"{sha}"}}"#));
+        assert_eq!(
+            text,
+            format!(r#"{{"id":7,"label":"api","root":"../..","rev":"{sha}"}}"#)
+        );
         assert_eq!(serde_json::from_str::<RepoMeta>(&text).unwrap(), with);
     }
 
@@ -1596,21 +1709,32 @@ mod tests {
             graphs: vec![empty_graph("test://lc10a-undo")],
             ..Default::default()
         };
-        merged.pass_undo =
-            vec![(NodeId(9), Confidence::Strong), (NodeId(2), Confidence::Medium)];
+        merged.pass_undo = vec![
+            (NodeId(9), Confidence::Strong),
+            (NodeId(2), Confidence::Medium),
+        ];
         let dir = tmp.path().join("undo");
         let written = write_merged_sharded(&merged, &dir).unwrap();
         assert_eq!(
             written.pass_undo,
             vec![
-                PassUndo { node: 2, confidence: "medium".into() },
-                PassUndo { node: 9, confidence: "strong".into() },
+                PassUndo {
+                    node: 2,
+                    confidence: "medium".into()
+                },
+                PassUndo {
+                    node: 9,
+                    confidence: "strong".into()
+                },
             ]
         );
         let back = read_merged_sharded(&dir).unwrap();
         assert_eq!(
             back.pass_undo,
-            vec![(NodeId(2), Confidence::Medium), (NodeId(9), Confidence::Strong)]
+            vec![
+                (NodeId(2), Confidence::Medium),
+                (NodeId(9), Confidence::Strong)
+            ]
         );
 
         let bare = tmp.path().join("bare");
@@ -1622,7 +1746,9 @@ mod tests {
         assert!(read_merged_sharded(&bare).unwrap().pass_undo.is_empty());
 
         let path = dir.join(MANIFEST_NAME);
-        let text = std::fs::read_to_string(&path).unwrap().replace("\"strong\"", "\"certain\"");
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"strong\"", "\"certain\"");
         std::fs::write(&path, text).unwrap();
         let err = read_merged_sharded(&dir).unwrap_err();
         assert!(err.needs_rebuild(), "{err}");
@@ -1646,13 +1772,24 @@ mod tests {
         )
         .unwrap();
         let m = read_manifest_lenient(&v1).unwrap();
-        assert_eq!((m.schema_version, m.build_stamp.as_str()), (1, "0.4.18+p3d23e8828e7ba01a"));
+        assert_eq!(
+            (m.schema_version, m.build_stamp.as_str()),
+            (1, "0.4.18+p3d23e8828e7ba01a")
+        );
         assert!(m.repos.is_empty());
 
         let g = empty_graph("test://lc8-lenient");
-        let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
+        let merged = glia_graph::MergedGraph {
+            graphs: vec![g],
+            ..Default::default()
+        };
         let meta = LayoutMeta {
-            repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()), rev: None }],
+            repos: vec![RepoMeta {
+                id: 3,
+                label: "api".into(),
+                root: Some("../api".into()),
+                rev: None,
+            }],
             parse_errors: vec![],
             code_spans_unresolved: 0,
         };
@@ -1718,20 +1855,47 @@ mod tests {
         let shard_a_path = shard_dir.join("a.gmap");
         let shard_b_path = shard_dir.join("b.gmap");
         let manifest_path = shard_dir.join(MANIFEST_NAME);
-        let mtime_a_before = std::fs::metadata(&shard_a_path).unwrap().modified().unwrap();
-        let mtime_b_before = std::fs::metadata(&shard_b_path).unwrap().modified().unwrap();
-        let mtime_m_before = std::fs::metadata(&manifest_path).unwrap().modified().unwrap();
+        let mtime_a_before = std::fs::metadata(&shard_a_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mtime_b_before = std::fs::metadata(&shard_b_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mtime_m_before = std::fs::metadata(&manifest_path)
+            .unwrap()
+            .modified()
+            .unwrap();
         // Sleep a bit so mtime resolution differences are visible if a
         // write_atomic does fire.
         std::thread::sleep(Duration::from_millis(50));
         // Rewrite with identical inputs.
         write_sharded(&[("a", &g_a), ("b", &g_b)], &[], shard_dir).unwrap();
-        let mtime_a_after = std::fs::metadata(&shard_a_path).unwrap().modified().unwrap();
-        let mtime_b_after = std::fs::metadata(&shard_b_path).unwrap().modified().unwrap();
-        let mtime_m_after = std::fs::metadata(&manifest_path).unwrap().modified().unwrap();
-        assert_eq!(mtime_a_before, mtime_a_after, "shard a was rewritten despite unchanged input");
-        assert_eq!(mtime_b_before, mtime_b_after, "shard b was rewritten despite unchanged input");
-        assert_eq!(mtime_m_before, mtime_m_after, "manifest was rewritten despite unchanged input");
+        let mtime_a_after = std::fs::metadata(&shard_a_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mtime_b_after = std::fs::metadata(&shard_b_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let mtime_m_after = std::fs::metadata(&manifest_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            mtime_a_before, mtime_a_after,
+            "shard a was rewritten despite unchanged input"
+        );
+        assert_eq!(
+            mtime_b_before, mtime_b_after,
+            "shard b was rewritten despite unchanged input"
+        );
+        assert_eq!(
+            mtime_m_before, mtime_m_after,
+            "manifest was rewritten despite unchanged input"
+        );
     }
 
     /// LC.8: a shard damaged after its write keeps its manifest entry, so the
@@ -1755,11 +1919,17 @@ mod tests {
         let mut flipped = good_x.clone();
         flipped[0] ^= 0xff;
         std::fs::write(tmp.path().join(CROSS_STACK_NAME), &flipped).unwrap();
-        assert!(read_merged_sharded(tmp.path()).is_err(), "damaged layout must not load");
+        assert!(
+            read_merged_sharded(tmp.path()).is_err(),
+            "damaged layout must not load"
+        );
 
         write_sharded(&[("a", &g)], &cross, tmp.path()).unwrap();
         assert_eq!(std::fs::read(tmp.path().join("a.gmap")).unwrap(), good_a);
-        assert_eq!(std::fs::read(tmp.path().join(CROSS_STACK_NAME)).unwrap(), good_x);
+        assert_eq!(
+            std::fs::read(tmp.path().join(CROSS_STACK_NAME)).unwrap(),
+            good_x
+        );
         read_merged_sharded(tmp.path()).unwrap();
     }
 
@@ -1841,7 +2011,10 @@ mod tests {
         // (3) Same release, different build stamp -> stale. Shard hashes and
         // `engine_version` are untouched, so only the stamp can trigger it.
         v["build_stamp"] = serde_json::json!("0.4.18+p0000000000000000");
-        assert_eq!(v["engine_version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            v["engine_version"].as_str().unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
         std::fs::write(&manifest_path, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(is_gmap_stale(&gmap_dir, &repo_dir));
 
@@ -1888,7 +2061,10 @@ mod tests {
         let repo_dir = dir.path().join("repo");
 
         write_file(&repo_dir.join("src/a.py"), "x = 1\n");
-        write_file(&repo_dir.join(".gitignore"), "# local eval venv\n.venv-eval/\n");
+        write_file(
+            &repo_dir.join(".gitignore"),
+            "# local eval venv\n.venv-eval/\n",
+        );
         std::fs::create_dir_all(repo_dir.join("node_modules/pkg")).unwrap();
         std::fs::create_dir_all(repo_dir.join("dist/assets")).unwrap();
         std::fs::create_dir_all(repo_dir.join(".venv-eval/lib")).unwrap();
@@ -1972,8 +2148,14 @@ mod tests {
     #[test]
     fn stale_scan_ignores_legacy_dir() {
         let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
-        write_file(&repo_dir.join(LEGACY_GMAP_SUBDIR).join("parse_cache.bin"), "old\n");
-        write_file(&repo_dir.join(LEGACY_GMAP_SUBDIR).join("manifest.json"), "{}\n");
+        write_file(
+            &repo_dir.join(LEGACY_GMAP_SUBDIR).join("parse_cache.bin"),
+            "old\n",
+        );
+        write_file(
+            &repo_dir.join(LEGACY_GMAP_SUBDIR).join("manifest.json"),
+            "{}\n",
+        );
         assert!(
             !is_gmap_stale(&gmap_dir, &repo_dir),
             "the legacy layout is engine output, not source"
@@ -1985,7 +2167,10 @@ mod tests {
     #[test]
     fn stale_scan_skips_the_default_layout_for_any_gmap_dir() {
         let (_tmp, gmap_dir, repo_dir) = gated_repo();
-        write_file(&repo_dir.join(DEFAULT_GMAP_SUBDIR).join("manifest.json"), "{}\n");
+        write_file(
+            &repo_dir.join(DEFAULT_GMAP_SUBDIR).join("manifest.json"),
+            "{}\n",
+        );
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
     }
 
@@ -2031,7 +2216,12 @@ mod tests {
         for d in ["dist-x/sub", "pkg/generated/sub", "src/generated/sub"] {
             std::fs::create_dir_all(repo_dir.join(d)).unwrap();
         }
-        write_sharded(&[("a", &empty_graph("test://gi-semantics"))], &[], &gmap_dir).unwrap();
+        write_sharded(
+            &[("a", &empty_graph("test://gi-semantics"))],
+            &[],
+            &gmap_dir,
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         // Glob dir, nested-file dir, and a file-level pattern: none is read by
@@ -2062,7 +2252,10 @@ mod tests {
             let repo_dir = dir.path().join("repo");
             let gmap_dir = default_gmap_dir(&repo_dir);
             write_file(&repo_dir.join("app.py"), "def main():\n    return 1\n");
-            write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 1\n");
+            write_file(
+                &repo_dir.join("legacy/sub/old.py"),
+                "def legacy_thing():\n    return 1\n",
+            );
             write_file(&repo_dir.join("src/api.gen.py"), "x = 1\n");
             if overlay {
                 write_file(
@@ -2076,8 +2269,14 @@ mod tests {
         };
 
         let (_tmp, gmap_dir, repo_dir) = setup(true);
-        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "fresh right after the write");
-        write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 2\n");
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "fresh right after the write"
+        );
+        write_file(
+            &repo_dir.join("legacy/sub/old.py"),
+            "def legacy_thing():\n    return 2\n",
+        );
         write_file(&repo_dir.join("legacy/sub/new.py"), "y = 1\n");
         write_file(&repo_dir.join("src/api.gen.py"), "x = 2\n");
         assert!(
@@ -2085,12 +2284,21 @@ mod tests {
             "churn under a [walk] skip pattern must not mark stale"
         );
         write_file(&repo_dir.join("app.py"), "def main():\n    return 2\n");
-        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "an un-skipped file still marks stale");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "an un-skipped file still marks stale"
+        );
 
         let (_tmp, gmap_dir, repo_dir) = setup(false);
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
-        write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 2\n");
-        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "control: without the config it is source");
+        write_file(
+            &repo_dir.join("legacy/sub/old.py"),
+            "def legacy_thing():\n    return 2\n",
+        );
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "control: without the config it is source"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2098,7 +2306,10 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn one_graph(canonical: &str) -> glia_graph::MergedGraph {
-        glia_graph::MergedGraph { graphs: vec![empty_graph(canonical)], ..Default::default() }
+        glia_graph::MergedGraph {
+            graphs: vec![empty_graph(canonical)],
+            ..Default::default()
+        }
     }
 
     fn manifest_json(dir: &Path) -> serde_json::Value {
@@ -2114,7 +2325,10 @@ mod tests {
         let gmap_dir = default_gmap_dir(&repo_dir);
         write_file(&repo_dir.join("m.py"), "def f():\n    return 1\n");
         write_file(&repo_dir.join(".gitignore"), ".glia/docs-snapshot/\n");
-        write_file(&repo_dir.join(".glia/docs-snapshot/manifest.jsonl"), "{\"v\":1}\n");
+        write_file(
+            &repo_dir.join(".glia/docs-snapshot/manifest.jsonl"),
+            "{\"v\":1}\n",
+        );
         write_merged_sharded(&one_graph("test://docs-snapshot"), &gmap_dir).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         (dir, gmap_dir, repo_dir)
@@ -2130,16 +2344,34 @@ mod tests {
         let snap = repo_dir.join(".glia/docs-snapshot/manifest.jsonl");
         let recorded = manifest_json(&gmap_dir)["external_inputs"].clone();
         assert_eq!(recorded.as_object().map(|o| o.len()), Some(1), "{recorded}");
-        assert!(recorded[".glia/docs-snapshot/manifest.jsonl"].is_string(), "{recorded}");
-        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "fresh right after the persist");
+        assert!(
+            recorded[".glia/docs-snapshot/manifest.jsonl"].is_string(),
+            "{recorded}"
+        );
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "fresh right after the persist"
+        );
 
-        let dir_mtime = || std::fs::metadata(snap.parent().unwrap()).unwrap().modified().unwrap();
+        let dir_mtime = || {
+            std::fs::metadata(snap.parent().unwrap())
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
         let before = dir_mtime();
         // What doc-sources `write_snapshot` does: `std::fs::write` in place,
         // same length, different bytes.
         std::fs::write(&snap, "{\"v\":2}\n").unwrap();
-        assert_eq!(before, dir_mtime(), "an in-place rewrite moves no directory mtime");
-        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "an in-place snapshot rewrite must mark stale");
+        assert_eq!(
+            before,
+            dir_mtime(),
+            "an in-place rewrite moves no directory mtime"
+        );
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "an in-place snapshot rewrite must mark stale"
+        );
     }
 
     #[test]
@@ -2147,20 +2379,32 @@ mod tests {
         let (_tmp, gmap_dir, repo_dir) = docs_snapshot_repo();
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
         std::fs::remove_file(repo_dir.join(".glia/docs-snapshot/manifest.jsonl")).unwrap();
-        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "a deleted .glia input must mark stale");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "a deleted .glia input must mark stale"
+        );
     }
 
     #[test]
     fn adding_a_nested_input_marks_stale_and_a_rewrite_restores_fresh() {
         let (_tmp, gmap_dir, repo_dir) = docs_snapshot_repo();
         write_file(&repo_dir.join(".glia/history/2026/log.jsonl"), "{}\n");
-        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "a new nested .glia input must mark stale");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "a new nested .glia input must mark stale"
+        );
         // Regenerating records it; the same bytes are fresh again.
         write_merged_sharded(&one_graph("test://docs-snapshot"), &gmap_dir).unwrap();
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
         let fp = external_inputs_fingerprint(&repo_dir);
         let keys: Vec<&str> = fp.keys().map(String::as_str).collect();
-        assert_eq!(keys, [".glia/docs-snapshot/manifest.jsonl", ".glia/history/2026/log.jsonl"]);
+        assert_eq!(
+            keys,
+            [
+                ".glia/docs-snapshot/manifest.jsonl",
+                ".glia/history/2026/log.jsonl"
+            ]
+        );
     }
 
     /// The store's own writes under `.glia` never enter the fingerprint, or a
@@ -2179,7 +2423,10 @@ mod tests {
         write_file(&gmap_dir.join("parse_cache.bin"), "cache\n");
         write_file(&gmap_dir.join("parse_cache.bin.123.tmp"), "half\n");
         write_file(&gmap_dir.join(".gitignore"), "*\n");
-        write_file(&gmap_dir.join("notes.txt"), "anything under the layout dir\n");
+        write_file(
+            &gmap_dir.join("notes.txt"),
+            "anything under the layout dir\n",
+        );
         // The flat 0.4.x `glia build` output and a custom layout inside .glia.
         write_file(&repo_dir.join(".glia/repo-1.gmap"), "old\n");
         write_file(&repo_dir.join(".glia/custom/manifest.json"), "{}\n");
@@ -2191,7 +2438,10 @@ mod tests {
         write_merged_sharded(&one_graph("test://own-output"), &gmap_dir).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_file(&gmap_dir.join("parse_cache.bin"), "cache v2\n");
-        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "our own output must never mark stale");
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "our own output must never mark stale"
+        );
     }
 
     #[test]
@@ -2224,15 +2474,25 @@ mod tests {
         assert!(is_gmap_stale(&custom, &repo_dir));
 
         // An explicit root records its fingerprint.
-        write_merged_sharded_for_repo(&one_graph("test://custom"), &LayoutMeta::default(), &custom, &repo_dir)
-            .unwrap();
+        write_merged_sharded_for_repo(
+            &one_graph("test://custom"),
+            &LayoutMeta::default(),
+            &custom,
+            &repo_dir,
+        )
+        .unwrap();
         assert!(manifest_json(&custom)["external_inputs"][".glia/overlay.toml"].is_string());
         assert!(!is_gmap_stale(&custom, &repo_dir));
 
         // So does metadata naming exactly one root (LC.7 records it relative
         // to the layout dir), which is what the engine's writer passes.
         let meta = LayoutMeta {
-            repos: vec![RepoMeta { id: 1, label: "repo".into(), root: Some("../repo".into()), rev: None }],
+            repos: vec![RepoMeta {
+                id: 1,
+                label: "repo".into(),
+                root: Some("../repo".into()),
+                rev: None,
+            }],
             parse_errors: vec![],
             code_spans_unresolved: 0,
         };
@@ -2274,19 +2534,32 @@ mod tests {
         let out = root("out");
         write_merged_sharded_meta(&one_graph("test://multi"), &meta, &out).unwrap();
         let json = manifest_json(&out);
-        assert!(json.get("external_inputs").is_none(), "no single root: {json}");
+        assert!(
+            json.get("external_inputs").is_none(),
+            "no single root: {json}"
+        );
         let by_repo = json["external_inputs_by_repo"].as_object().unwrap();
-        assert_eq!(by_repo.keys().collect::<Vec<_>>(), ["1", "2"], "c has no inputs: {json}");
+        assert_eq!(
+            by_repo.keys().collect::<Vec<_>>(),
+            ["1", "2"],
+            "c has no inputs: {json}"
+        );
         assert!(by_repo["1"][".glia/overlay.toml"].is_string());
         for n in ["a", "b", "c"] {
-            assert!(!is_gmap_stale(&out, &root(n)), "{n}: fresh right after the write");
+            assert!(
+                !is_gmap_stale(&out, &root(n)),
+                "{n}: fresh right after the write"
+            );
         }
         write_file(&root("b").join(".glia/overlay.toml"), "# b v2\n");
         assert!(is_gmap_stale(&out, &root("b")), "b's own input changed");
         assert!(!is_gmap_stale(&out, &root("a")), "a's inputs did not");
         write_file(&root("c").join(".glia/overlay.toml"), "# c\n");
         assert!(is_gmap_stale(&out, &root("c")), "c gained an input");
-        assert!(is_gmap_stale(&out, &root("d")), "d is no root of the layout: nothing recorded");
+        assert!(
+            is_gmap_stale(&out, &root("d")),
+            "d is no root of the layout: nothing recorded"
+        );
     }
 
     /// LC.10b: a foreign-domain shard rides a layout verbatim (never decoded,
@@ -2302,15 +2575,26 @@ mod tests {
             graph_type: "toy".into(),
             bytes: b"not a gmap: never decoded".to_vec(),
         }];
-        let members = vec![MemberMeta { name: "cam".into(), source: "gmap".into(), build_stamp: "s".into() }];
+        let members = vec![MemberMeta {
+            name: "cam".into(),
+            source: "gmap".into(),
+            build_stamp: "s".into(),
+        }];
         let dir = tmp.path().join("layout");
-        let written = write_merged_sharded_extras(&merged, &LayoutMeta::default(), &foreign, &members, &dir)
-            .unwrap();
+        let written =
+            write_merged_sharded_extras(&merged, &LayoutMeta::default(), &foreign, &members, &dir)
+                .unwrap();
         assert_eq!(written.shards.len(), 2);
         assert_eq!(written.shards[1].path, "clip.gmap");
-        assert_eq!(written.shards[1].content_hash, hex_xxhash64(&foreign[0].bytes));
+        assert_eq!(
+            written.shards[1].content_hash,
+            hex_xxhash64(&foreign[0].bytes)
+        );
         let json = manifest_json(&dir);
-        assert!(json["shards"][0].get("graph_type").is_none(), "a code shard keeps its old JSON: {json}");
+        assert!(
+            json["shards"][0].get("graph_type").is_none(),
+            "a code shard keeps its old JSON: {json}"
+        );
         assert_eq!(json["shards"][1]["graph_type"], "toy");
         assert_eq!(json["members"][0]["name"], "cam");
         let old: ShardEntry =
@@ -2318,41 +2602,87 @@ mod tests {
         assert!(old.is_code(), "an entry written before the field is code");
 
         let opened = ShardedMmap::open(&dir).unwrap();
-        assert_eq!((opened.shards.len(), opened.manifest.shards.len()), (1, 2), "opened as code: 1");
+        assert_eq!(
+            (opened.shards.len(), opened.manifest.shards.len()),
+            (1, 2),
+            "opened as code: 1"
+        );
         assert_eq!(read_merged_sharded(&dir).unwrap().graphs.len(), 1);
         let extras = read_layout_extras(&dir).unwrap();
         assert_eq!((extras.foreign, extras.members), (foreign.clone(), members));
         assert!(matches!(
-            upsert_cell_sharded(&dir, NodeId(424242), CellTypeId(1), CellPayload::Text("x".into())),
+            upsert_cell_sharded(
+                &dir,
+                NodeId(424242),
+                CellTypeId(1),
+                CellPayload::Text("x".into())
+            ),
             Err(StoreError::NodeNotFound(_))
         ));
 
         std::fs::write(dir.join("clip.gmap"), b"damaged").unwrap();
         assert!(read_layout_extras(&dir).unwrap_err().needs_rebuild());
-        assert!(ShardedMmap::open(&dir).is_err(), "a damaged foreign shard fails the layout");
+        assert!(
+            ShardedMmap::open(&dir).is_err(),
+            "a damaged foreign shard fails the layout"
+        );
 
         let code_name = written.shards[0].name.clone();
-        for (name, graph_type) in
-            [("../x", "toy"), ("", "toy"), (".hidden", "toy"), ("clip", "code"), ("clip", ""), (code_name.as_str(), "toy")]
-        {
-            let bad = tmp.path().join(format!("bad-{}", graph_type.len() + name.len()));
-            let f = ForeignShard { name: name.into(), graph_type: graph_type.into(), bytes: vec![1] };
+        for (name, graph_type) in [
+            ("../x", "toy"),
+            ("", "toy"),
+            (".hidden", "toy"),
+            ("clip", "code"),
+            ("clip", ""),
+            (code_name.as_str(), "toy"),
+        ] {
+            let bad = tmp
+                .path()
+                .join(format!("bad-{}", graph_type.len() + name.len()));
+            let f = ForeignShard {
+                name: name.into(),
+                graph_type: graph_type.into(),
+                bytes: vec![1],
+            };
             let err = write_merged_sharded_extras(&merged, &LayoutMeta::default(), &[f], &[], &bad)
                 .expect_err(&format!("{name:?} / {graph_type:?} must be refused"));
             assert!(err.to_string().contains("foreign shard"), "{err}");
-            assert!(!bad.join(MANIFEST_NAME).exists(), "{name:?}: nothing written");
+            assert!(
+                !bad.join(MANIFEST_NAME).exists(),
+                "{name:?}: nothing written"
+            );
         }
     }
 
     #[test]
     fn repo_root_of_gmap_dir_inverts_default() {
         for r in ["r", "/abs/repo", "a/b/c", "."] {
-            assert_eq!(repo_root_of_gmap_dir(&default_gmap_dir(Path::new(r))), Some(PathBuf::from(r)), "{r}");
+            assert_eq!(
+                repo_root_of_gmap_dir(&default_gmap_dir(Path::new(r))),
+                Some(PathBuf::from(r)),
+                "{r}"
+            );
         }
-        assert_eq!(repo_root_of_gmap_dir(Path::new("r/.glia/graph/")), Some(PathBuf::from("r")));
-        assert_eq!(repo_root_of_gmap_dir(Path::new(".glia/graph")), Some(PathBuf::from(".")));
-        assert_eq!(repo_root_of_gmap_dir(Path::new("/.glia/graph")), Some(PathBuf::from("/")));
-        for other in ["r/.glia", "r/graph", "r/.glia/graph/..", "r/.glia/graph/x", "r/glia/graph", "out"] {
+        assert_eq!(
+            repo_root_of_gmap_dir(Path::new("r/.glia/graph/")),
+            Some(PathBuf::from("r"))
+        );
+        assert_eq!(
+            repo_root_of_gmap_dir(Path::new(".glia/graph")),
+            Some(PathBuf::from("."))
+        );
+        assert_eq!(
+            repo_root_of_gmap_dir(Path::new("/.glia/graph")),
+            Some(PathBuf::from("/"))
+        );
+        for other in [
+            "r/.glia",
+            "r/graph",
+            "r/.glia/graph/..",
+            "r/.glia/graph/x",
+            "r/glia/graph",
+            "out",
+        ] {
             assert_eq!(repo_root_of_gmap_dir(Path::new(other)), None, "{other}");
         }
     }

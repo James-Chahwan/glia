@@ -69,8 +69,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::walk_gating::CONTROL_DIR;
 
@@ -135,7 +135,12 @@ impl HistoryMeta {
     /// A meta for a history read at `head`. The derived fields (`commits`,
     /// `blame_files`, `data_hash`) are left empty: [`write_history`] fills them
     /// from the rows it writes.
-    pub fn new(head: String, max_commits: usize, since: Option<String>, relative_to: String) -> Self {
+    pub fn new(
+        head: String,
+        max_commits: usize,
+        since: Option<String>,
+        relative_to: String,
+    ) -> Self {
         Self {
             version: HISTORY_VERSION,
             generator: HISTORY_GENERATOR.to_string(),
@@ -233,7 +238,10 @@ pub fn clean_message_counted(raw: &str) -> (String, String, usize, usize) {
     }
     let first = lines.iter().position(|l| !l.trim().is_empty());
     let (subject, body) = match first {
-        Some(i) => (lines[i].trim().to_string(), lines[i + 1..].join("\n").trim().to_string()),
+        Some(i) => (
+            lines[i].trim().to_string(),
+            lines[i + 1..].join("\n").trim().to_string(),
+        ),
         None => (String::new(), String::new()),
     };
     let (mut subject, n1) = redact_untrusted(&subject);
@@ -246,7 +254,9 @@ pub fn clean_message_counted(raw: &str) -> (String, String, usize, usize) {
 /// `<token>: <value>`, token `[A-Za-z][A-Za-z0-9-]*`, value non-empty.
 fn is_trailer_line(line: &str) -> bool {
     let line = line.trim();
-    let Some((token, value)) = line.split_once(": ") else { return false };
+    let Some((token, value)) = line.split_once(": ") else {
+        return false;
+    };
     let mut chars = token.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -399,13 +409,20 @@ pub fn read_history_messages(root: &Path, snap: &HistorySnapshot) -> Option<Vec<
     match load_history_messages(&dir, snap, expected) {
         Ok(rows) => Some(rows),
         Err(reason) => {
-            eprintln!("[history] messages incomplete dir={} reason={reason}", dir.display());
+            eprintln!(
+                "[history] messages incomplete dir={} reason={reason}",
+                dir.display()
+            );
             None
         }
     }
 }
 
-fn load_history_messages(dir: &Path, snap: &HistorySnapshot, expected: usize) -> Result<Vec<HistoryMessage>, String> {
+fn load_history_messages(
+    dir: &Path,
+    snap: &HistorySnapshot,
+    expected: usize,
+) -> Result<Vec<HistoryMessage>, String> {
     let bytes = read_required(&dir.join(HISTORY_MESSAGES_FILE))?;
     let got = data_hash(&[&bytes]);
     if snap.meta.messages_hash.as_deref() != Some(got.as_str()) {
@@ -423,7 +440,12 @@ fn load_history_messages(dir: &Path, snap: &HistorySnapshot, expected: usize) ->
         ));
     }
     if let Some(i) = rows.iter().zip(&snap.commits).position(|(m, c)| m.c != c.c) {
-        return Err(format!("row {} names commit {} not {}", i + 1, rows[i].c, snap.commits[i].c));
+        return Err(format!(
+            "row {} names commit {} not {}",
+            i + 1,
+            rows[i].c,
+            snap.commits[i].c
+        ));
     }
     for row in &mut rows {
         for field in [&mut row.s, &mut row.b].into_iter().chain(row.br.as_mut()) {
@@ -452,7 +474,10 @@ pub fn read_history(root: &Path) -> Option<HistorySnapshot> {
     match load_history(&dir) {
         Ok(snapshot) => Some(snapshot),
         Err(reason) => {
-            eprintln!("[history] snapshot incomplete dir={} reason={reason}", dir.display());
+            eprintln!(
+                "[history] snapshot incomplete dir={} reason={reason}",
+                dir.display()
+            );
             None
         }
     }
@@ -463,7 +488,10 @@ fn load_history(dir: &Path) -> Result<HistorySnapshot, String> {
     let meta: HistoryMeta =
         serde_json::from_slice(&meta_bytes).map_err(|e| format!("{META_FILE}: {e}"))?;
     if !HISTORY_VERSIONS.contains(&meta.version) {
-        return Err(format!("{META_FILE}: version {} (reader wants one of {HISTORY_VERSIONS:?})", meta.version));
+        return Err(format!(
+            "{META_FILE}: version {} (reader wants one of {HISTORY_VERSIONS:?})",
+            meta.version
+        ));
     }
     let commits_bytes = read_required(&dir.join(HISTORY_COMMITS_FILE))?;
     let blame_bytes = match std::fs::read(dir.join(HISTORY_BLAME_FILE)) {
@@ -486,12 +514,19 @@ fn load_history(dir: &Path) -> Result<HistorySnapshot, String> {
             meta.blame_files
         ));
     }
-    Ok(HistorySnapshot { meta, commits, blame })
+    Ok(HistorySnapshot {
+        meta,
+        commits,
+        blame,
+    })
 }
 
 fn read_required(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("{name} absent")
         } else {
@@ -544,7 +579,8 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
 
 /// `meta` as pretty JSON plus a trailing newline.
 fn meta_bytes<T: Serialize>(meta: &T) -> Result<Vec<u8>, String> {
-    let mut bytes = serde_json::to_vec_pretty(meta).map_err(|e| format!("serialize {META_FILE}: {e}"))?;
+    let mut bytes =
+        serde_json::to_vec_pretty(meta).map_err(|e| format!("serialize {META_FILE}: {e}"))?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -744,9 +780,15 @@ impl TestCaseRecord {
             }
         };
         clean(&mut self.name);
-        for field in [&mut self.suite, &mut self.classname, &mut self.file, &mut self.message, &mut self.trace]
-            .into_iter()
-            .flatten()
+        for field in [
+            &mut self.suite,
+            &mut self.classname,
+            &mut self.file,
+            &mut self.message,
+            &mut self.trace,
+        ]
+        .into_iter()
+        .flatten()
         {
             clean(field);
         }
@@ -856,16 +898,23 @@ pub fn append_tests_run(
     let prior = if reset { None } else { read_tests(root) };
     let seq = match prior.as_ref().and_then(|p| p.meta.latest_seq()) {
         None => 0,
-        Some(last) => last
-            .checked_add(1)
-            .ok_or_else(|| format!("the newest run is seq {last}: ingest with a reset to start over at 0"))?,
+        Some(last) => last.checked_add(1).ok_or_else(|| {
+            format!("the newest run is seq {last}: ingest with a reset to start over at 0")
+        })?,
     };
     // `window` counts the new run: the prior runs within `window - 1` of it stay.
     let keep = |s: u32| u64::from(s) + window as u64 > u64::from(seq);
     let (mut runs, mut rows) = match prior {
         Some(p) => (
-            p.meta.runs.into_iter().filter(|r| keep(r.seq)).collect::<Vec<_>>(),
-            p.cases.into_iter().filter(|c| keep(c.seq)).collect::<Vec<_>>(),
+            p.meta
+                .runs
+                .into_iter()
+                .filter(|r| keep(r.seq))
+                .collect::<Vec<_>>(),
+            p.cases
+                .into_iter()
+                .filter(|c| keep(c.seq))
+                .collect::<Vec<_>>(),
         ),
         None => (Vec::new(), Vec::new()),
     };
@@ -926,7 +975,10 @@ pub fn read_tests(root: &Path) -> Option<TestsSnapshot> {
     match load_tests(&dir) {
         Ok(snapshot) => Some(snapshot),
         Err(reason) => {
-            eprintln!("[tests] snapshot incomplete dir={} reason={reason}", dir.display());
+            eprintln!(
+                "[tests] snapshot incomplete dir={} reason={reason}",
+                dir.display()
+            );
             None
         }
     }
@@ -959,7 +1011,11 @@ fn load_tests(dir: &Path) -> Result<TestsSnapshot, String> {
     }
     check_runs(&meta, &cases)?;
     if lcov.len() != meta.lcov_files {
-        return Err(format!("lcov rows {} != meta lcov_files={}", lcov.len(), meta.lcov_files));
+        return Err(format!(
+            "lcov rows {} != meta lcov_files={}",
+            lcov.len(),
+            meta.lcov_files
+        ));
     }
     for case in &mut cases {
         case.sanitize();
@@ -976,18 +1032,28 @@ fn check_runs(meta: &TestsMeta, cases: &[TestCaseRecord]) -> Result<(), String> 
         return Err(format!("{META_FILE}: no run"));
     };
     if meta.runs.len() > meta.window {
-        return Err(format!("{META_FILE}: {} runs exceed the window of {}", meta.runs.len(), meta.window));
+        return Err(format!(
+            "{META_FILE}: {} runs exceed the window of {}",
+            meta.runs.len(),
+            meta.window
+        ));
     }
     if meta.runs.windows(2).any(|w| w[0].seq >= w[1].seq) {
         return Err(format!("{META_FILE}: run seqs are not increasing"));
     }
-    let mut counts: std::collections::BTreeMap<u32, (usize, usize)> = std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<u32, (usize, usize)> =
+        std::collections::BTreeMap::new();
     for case in cases {
         let slot = counts.entry(case.seq).or_default();
         match case.status.as_str() {
             STATUS_FAILED => slot.0 += 1,
             STATUS_ERROR => slot.1 += 1,
-            other => return Err(format!("{TESTS_CASES_FILE}: case {:?} has status {other:?}", case.name)),
+            other => {
+                return Err(format!(
+                    "{TESTS_CASES_FILE}: case {:?} has status {other:?}",
+                    case.name
+                ));
+            }
         }
     }
     for run in &meta.runs {
@@ -1002,10 +1068,15 @@ fn check_runs(meta: &TestsMeta, cases: &[TestCaseRecord]) -> Result<(), String> 
         }
     }
     if let Some(seq) = counts.keys().next() {
-        return Err(format!("{TESTS_CASES_FILE}: rows of run {seq}, which {META_FILE} does not list"));
+        return Err(format!(
+            "{TESTS_CASES_FILE}: rows of run {seq}, which {META_FILE} does not list"
+        ));
     }
     if TestRun::of_meta(newest.seq, meta) != *newest {
-        return Err(format!("{META_FILE}: the top-level fields are not the newest run's (seq {})", newest.seq));
+        return Err(format!(
+            "{META_FILE}: the top-level fields are not the newest run's (seq {})",
+            newest.seq
+        ));
     }
     Ok(())
 }
@@ -1017,7 +1088,12 @@ fn status_counts(cases: &[TestCaseRecord]) -> Result<(usize, usize), String> {
         match case.status.as_str() {
             STATUS_FAILED => failed += 1,
             STATUS_ERROR => errors += 1,
-            other => return Err(format!("{TESTS_CASES_FILE}: case {:?} has status {other:?}", case.name)),
+            other => {
+                return Err(format!(
+                    "{TESTS_CASES_FILE}: case {:?} has status {other:?}",
+                    case.name
+                ));
+            }
         }
     }
     Ok((failed, errors))
@@ -1088,7 +1164,12 @@ impl ScipMeta {
     /// A meta for an index written by `tool` at `tool_version`. The derived
     /// fields (`documents`, `symbols`, `data_hash`) are left empty:
     /// [`write_scip`] fills them from the rows it writes.
-    pub fn new(tool: String, tool_version: String, project_root: String, skipped_documents: usize) -> Self {
+    pub fn new(
+        tool: String,
+        tool_version: String,
+        project_root: String,
+        skipped_documents: usize,
+    ) -> Self {
         Self {
             version: SCIP_VERSION,
             generator: SCIP_GENERATOR.to_string(),
@@ -1229,7 +1310,10 @@ pub fn write_scip(
     symbols: &[ScipSymbolRecord],
 ) -> Result<ScipMeta, String> {
     if meta.version != SCIP_VERSION {
-        return Err(format!("{META_FILE}: version {} (this writer writes {SCIP_VERSION})", meta.version));
+        return Err(format!(
+            "{META_FILE}: version {} (this writer writes {SCIP_VERSION})",
+            meta.version
+        ));
     }
     check_scip(documents, symbols)?;
     let documents_bytes = jsonl(documents.iter())?;
@@ -1267,7 +1351,10 @@ pub fn read_scip(root: &Path) -> Option<ScipSnapshot> {
     match load_scip(&dir) {
         Ok(snapshot) => Some(snapshot),
         Err(reason) => {
-            eprintln!("[scip] snapshot incomplete dir={} reason={reason}", dir.display());
+            eprintln!(
+                "[scip] snapshot incomplete dir={} reason={reason}",
+                dir.display()
+            );
             None
         }
     }
@@ -1277,13 +1364,19 @@ fn load_scip(dir: &Path) -> Result<ScipSnapshot, String> {
     let meta: ScipMeta = serde_json::from_slice(&read_required(&dir.join(META_FILE))?)
         .map_err(|e| format!("{META_FILE}: {e}"))?;
     if meta.version != SCIP_VERSION {
-        return Err(format!("{META_FILE}: version {} (reader wants {SCIP_VERSION})", meta.version));
+        return Err(format!(
+            "{META_FILE}: version {} (reader wants {SCIP_VERSION})",
+            meta.version
+        ));
     }
     let documents_bytes = read_required(&dir.join(SCIP_DOCUMENTS_FILE))?;
     let symbols_bytes = read_required(&dir.join(SCIP_SYMBOLS_FILE))?;
     let got = data_hash(&[&documents_bytes, &symbols_bytes]);
     if got != meta.data_hash {
-        return Err(format!("data_hash mismatch: {got} != meta {}", meta.data_hash));
+        return Err(format!(
+            "data_hash mismatch: {got} != meta {}",
+            meta.data_hash
+        ));
     }
     let documents: Vec<ScipDocumentRecord> = parse_jsonl(&documents_bytes, SCIP_DOCUMENTS_FILE)?;
     let symbols: Vec<ScipSymbolRecord> = parse_jsonl(&symbols_bytes, SCIP_SYMBOLS_FILE)?;
@@ -1297,11 +1390,18 @@ fn load_scip(dir: &Path) -> Result<ScipSnapshot, String> {
         ));
     }
     check_scip(&documents, &symbols)?;
-    Ok(ScipSnapshot { meta, documents, symbols })
+    Ok(ScipSnapshot {
+        meta,
+        documents,
+        symbols,
+    })
 }
 
 /// [`write_scip`]'s order and id rules; the error names the file and 1-based row.
-fn check_scip(documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord]) -> Result<(), String> {
+fn check_scip(
+    documents: &[ScipDocumentRecord],
+    symbols: &[ScipSymbolRecord],
+) -> Result<(), String> {
     let n = symbols.len();
     let dangling = |id: u32| id as usize >= n;
     for (i, sym) in symbols.iter().enumerate() {
@@ -1312,13 +1412,21 @@ fn check_scip(documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord]) ->
         if let Some(prev) = i.checked_sub(1).and_then(|p| symbols.get(p))
             && prev.symbol >= sym.symbol
         {
-            return Err(format!("{at}: symbol {:?} does not sort after {:?}", sym.symbol, prev.symbol));
+            return Err(format!(
+                "{at}: symbol {:?} does not sort after {:?}",
+                sym.symbol, prev.symbol
+            ));
         }
         if let Some(&id) = sym.implements.iter().find(|&&id| dangling(id)) {
-            return Err(format!("{at}: implements id {id} out of range (symbols={n})"));
+            return Err(format!(
+                "{at}: implements id {id} out of range (symbols={n})"
+            ));
         }
         if sym.implements.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(format!("{at}: implements {:?} is not strictly ascending", sym.implements));
+            return Err(format!(
+                "{at}: implements {:?} is not strictly ascending",
+                sym.implements
+            ));
         }
     }
     for (i, doc) in documents.iter().enumerate() {
@@ -1334,19 +1442,40 @@ fn check_scip(documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord]) ->
         if let Some(prev) = i.checked_sub(1).and_then(|k| documents.get(k))
             && prev.path >= doc.path
         {
-            return Err(format!("{at}: path {p:?} does not sort after {:?}", prev.path));
+            return Err(format!(
+                "{at}: path {p:?} does not sort after {:?}",
+                prev.path
+            ));
         }
         if let Some(row) = doc.defs.iter().find(|r| dangling(r.s)) {
-            return Err(format!("{at}: def at line {} names symbol {} out of range (symbols={n})", row.line, row.s));
+            return Err(format!(
+                "{at}: def at line {} names symbol {} out of range (symbols={n})",
+                row.line, row.s
+            ));
         }
         if let Some(row) = doc.refs.iter().find(|r| dangling(r.s)) {
-            return Err(format!("{at}: ref at line {} names symbol {} out of range (symbols={n})", row.line, row.s));
+            return Err(format!(
+                "{at}: ref at line {} names symbol {} out of range (symbols={n})",
+                row.line, row.s
+            ));
         }
-        if doc.defs.windows(2).any(|w| w[0].sort_key() > w[1].sort_key()) {
-            return Err(format!("{at}: defs of {p:?} are not sorted by (line, s, name)"));
+        if doc
+            .defs
+            .windows(2)
+            .any(|w| w[0].sort_key() > w[1].sort_key())
+        {
+            return Err(format!(
+                "{at}: defs of {p:?} are not sorted by (line, s, name)"
+            ));
         }
-        if doc.refs.windows(2).any(|w| w[0].sort_key() > w[1].sort_key()) {
-            return Err(format!("{at}: refs of {p:?} are not sorted by (line, s, call, write, import)"));
+        if doc
+            .refs
+            .windows(2)
+            .any(|w| w[0].sort_key() > w[1].sort_key())
+        {
+            return Err(format!(
+                "{at}: refs of {p:?} are not sorted by (line, s, call, write, import)"
+            ));
         }
     }
     Ok(())
@@ -1371,8 +1500,18 @@ pub const REDACTED: &str = "***";
 /// call [`is_secret_name`] and [`mask_userinfo`] from here, delete their
 /// copies and that drift test; this module is then the one implementation.
 pub const SECRET_NEEDLES: [&str; 12] = [
-    "SECRET", "PASSWORD", "PASSWD", "TOKEN", "APIKEY", "API_KEY", "PRIVATE_KEY",
-    "CREDENTIAL", "ACCESS_KEY", "SESSION_KEY", "SALT", "SIGNING",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "APIKEY",
+    "API_KEY",
+    "PRIVATE_KEY",
+    "CREDENTIAL",
+    "ACCESS_KEY",
+    "SESSION_KEY",
+    "SALT",
+    "SIGNING",
 ];
 
 /// Whether a key's value must never be stored (A13.7).
@@ -1392,18 +1531,40 @@ pub fn mask_userinfo(value: &str) -> Option<String> {
     if !rest.get(..at)?.contains(':') {
         return None;
     }
-    Some(format!("{}{REDACTED}{}", value.get(..scheme_end)?, rest.get(at..)?))
+    Some(format!(
+        "{}{REDACTED}{}",
+        value.get(..scheme_end)?,
+        rest.get(at..)?
+    ))
 }
 
 /// Token prefixes that make a value a credential by construction, each with
 /// the least body length after it (a shorter run is prose, not a key).
 const SECRET_PREFIXES: [(&str, usize); 24] = [
-    ("sk_live_", 8), ("sk_test_", 8), ("rk_live_", 8), ("rk_test_", 8), ("whsec_", 16),
-    ("ghp_", 20), ("gho_", 20), ("ghu_", 20), ("ghs_", 20), ("ghr_", 20), ("github_pat_", 20),
+    ("sk_live_", 8),
+    ("sk_test_", 8),
+    ("rk_live_", 8),
+    ("rk_test_", 8),
+    ("whsec_", 16),
+    ("ghp_", 20),
+    ("gho_", 20),
+    ("ghu_", 20),
+    ("ghs_", 20),
+    ("ghr_", 20),
+    ("github_pat_", 20),
     ("glpat-", 16),
-    ("xoxb-", 10), ("xoxp-", 10), ("xoxa-", 10), ("xoxr-", 10), ("xoxs-", 10), ("xapp-", 10),
-    ("sk-", 20), ("AIza", 30), ("npm_", 30), ("pypi-", 30),
-    ("AKIA", 16), ("ASIA", 16),
+    ("xoxb-", 10),
+    ("xoxp-", 10),
+    ("xoxa-", 10),
+    ("xoxr-", 10),
+    ("xoxs-", 10),
+    ("xapp-", 10),
+    ("sk-", 20),
+    ("AIza", 30),
+    ("npm_", 30),
+    ("pypi-", 30),
+    ("AKIA", 16),
+    ("ASIA", 16),
 ];
 
 /// Redact secrets from untrusted free text (CI output, test failure
@@ -1437,7 +1598,8 @@ fn redact_pem_blocks(text: &str) -> (String, usize) {
     while let Some(at) = rest.find(BEGIN) {
         let label_start = at + BEGIN.len();
         let label_end = rest[label_start..].find("-----").map(|k| label_start + k);
-        let Some(label_end) = label_end.filter(|&e| rest[label_start..e].ends_with("PRIVATE KEY")) else {
+        let Some(label_end) = label_end.filter(|&e| rest[label_start..e].ends_with("PRIVATE KEY"))
+        else {
             out.push_str(&rest[..label_start]);
             rest = &rest[label_start..];
             continue;
@@ -1449,7 +1611,9 @@ fn redact_pem_blocks(text: &str) -> (String, usize) {
         rest = match rest[body..].find(END) {
             Some(k) => {
                 let end_label = body + k + END.len();
-                rest[end_label..].find("-----").map_or("", |k2| &rest[end_label + k2 + 5..])
+                rest[end_label..]
+                    .find("-----")
+                    .map_or("", |k2| &rest[end_label + k2 + 5..])
             }
             None => "",
         };
@@ -1464,13 +1628,17 @@ fn redact_url_userinfo(text: &str) -> (String, usize) {
     while let Some(k) = text[from..].find("://") {
         let at = from + k;
         let mut start = at;
-        while start > copied && (b[start - 1].is_ascii_alphanumeric() || matches!(b[start - 1], b'+' | b'.' | b'-')) {
+        while start > copied
+            && (b[start - 1].is_ascii_alphanumeric() || matches!(b[start - 1], b'+' | b'.' | b'-'))
+        {
             start -= 1;
         }
         while start < at && !b[start].is_ascii_alphabetic() {
             start += 1;
         }
-        let end = run(b, at + 3, |c| !c.is_ascii_whitespace() && !b"\"'<>()[]{}`,".contains(&c));
+        let end = run(b, at + 3, |c| {
+            !c.is_ascii_whitespace() && !b"\"'<>()[]{}`,".contains(&c)
+        });
         if start < at
             && let Some(masked) = mask_userinfo(&text[start..end])
         {
@@ -1541,11 +1709,18 @@ fn secret_token_end(b: &[u8], i: usize) -> Option<usize> {
 fn auth_scheme_value(b: &[u8], i: usize) -> Option<(usize, usize)> {
     for (scheme, base64) in [("bearer", false), ("basic", true)] {
         let word_end = i + scheme.len();
-        if b.len() <= word_end || !b[i..word_end].eq_ignore_ascii_case(scheme.as_bytes()) || b[word_end] != b' ' {
+        if b.len() <= word_end
+            || !b[i..word_end].eq_ignore_ascii_case(scheme.as_bytes())
+            || b[word_end] != b' '
+        {
             continue;
         }
         let start = run(b, word_end, |c| c == b' ');
-        let pred: fn(u8) -> bool = if base64 { is_base64_byte } else { is_credential_byte };
+        let pred: fn(u8) -> bool = if base64 {
+            is_base64_byte
+        } else {
+            is_credential_byte
+        };
         let end = run(b, start, pred);
         let token = &b[start..end];
         // `Basic authentication` is prose: a base64 credential has a capital, digit or symbol.
@@ -1579,8 +1754,15 @@ fn secret_assignment_value(b: &[u8], i: usize) -> Option<(usize, usize)> {
     };
     j = run(b, j, |c| c == b' ' || c == b'\t');
     let (start, end) = match b.get(j) {
-        Some(&quote @ (b'"' | b'\'' | b'`')) => (j + 1, run(b, j + 1, |c| c != quote && c != b'\n')),
-        _ => (j, run(b, j, |c| !c.is_ascii_whitespace() && !b",;&)}]<>\"'`".contains(&c))),
+        Some(&quote @ (b'"' | b'\'' | b'`')) => {
+            (j + 1, run(b, j + 1, |c| c != quote && c != b'\n'))
+        }
+        _ => (
+            j,
+            run(b, j, |c| {
+                !c.is_ascii_whitespace() && !b",;&)}]<>\"'`".contains(&c)
+            }),
+        ),
     };
     let value = &b[start..end];
     (!value.is_empty() && value != REDACTED.as_bytes()).then_some((start, end))
@@ -1643,14 +1825,30 @@ mod tests {
                 c: "ef".repeat(20),
                 t: 100,
                 files: vec![
-                    HistoryFile { p: "svc/a.py".into(), a: Some(1), d: Some(0), from: None },
-                    HistoryFile { p: "img.png".into(), a: None, d: None, from: None },
+                    HistoryFile {
+                        p: "svc/a.py".into(),
+                        a: Some(1),
+                        d: Some(0),
+                        from: None,
+                    },
+                    HistoryFile {
+                        p: "img.png".into(),
+                        a: None,
+                        d: None,
+                        from: None,
+                    },
                 ],
             },
         ];
         let blame = vec![
-            BlameFile { p: "svc/b.py".into(), runs: vec![[1, 2, 100]] },
-            BlameFile { p: "svc/a.py".into(), runs: vec![[1, 1, 100], [2, 3, 200]] },
+            BlameFile {
+                p: "svc/b.py".into(),
+                runs: vec![[1, 2, 100]],
+            },
+            BlameFile {
+                p: "svc/a.py".into(),
+                runs: vec![[1, 1, 100], [2, 3, 200]],
+            },
         ];
         (meta, commits, blame)
     }
@@ -1662,7 +1860,11 @@ mod tests {
         assert_ne!(data_hash(&[b"abc"]), data_hash(&[b"abd"]));
         let empty = data_hash(&[]);
         assert_eq!(empty.len(), 16);
-        assert!(empty.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            empty
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
         // xxhash64 seed 0 of the empty input.
         assert_eq!(empty, "ef46db3751d8e999");
     }
@@ -1682,9 +1884,15 @@ mod tests {
         assert_eq!(paths, ["svc/a.py", "svc/b.py"]);
         // Compact rows: a rename carries `from`, other files omit it; binaries are null.
         let text = std::fs::read_to_string(history_dir(&root).join(HISTORY_COMMITS_FILE)).unwrap();
-        assert!(text.contains(r#"{"p":"svc/c2.py","a":0,"d":0,"from":"svc/c.py"}"#), "{text}");
+        assert!(
+            text.contains(r#"{"p":"svc/c2.py","a":0,"d":0,"from":"svc/c.py"}"#),
+            "{text}"
+        );
         assert!(text.contains(r#"{"p":"svc/a.py","a":1,"d":0}"#), "{text}");
-        assert!(text.contains(r#"{"p":"img.png","a":null,"d":null}"#), "{text}");
+        assert!(
+            text.contains(r#"{"p":"img.png","a":null,"d":null}"#),
+            "{text}"
+        );
         // No temp file is left behind.
         let leftovers: Vec<_> = std::fs::read_dir(history_dir(&root))
             .unwrap()
@@ -1737,7 +1945,10 @@ mod tests {
 
         // Another version.
         let written = write_history(&root, meta.clone(), &commits, &blame).unwrap();
-        let other = HistoryMeta { version: HISTORY_VERSION + 1, ..written };
+        let other = HistoryMeta {
+            version: HISTORY_VERSION + 1,
+            ..written
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&other).unwrap()).unwrap();
         assert_eq!(read_history(&root), None);
 
@@ -1765,7 +1976,11 @@ mod tests {
                 c: c.c.clone(),
                 at: c.t - 5,
                 s: format!("subject {i}"),
-                b: if i == 0 { "body line".into() } else { String::new() },
+                b: if i == 0 {
+                    "body line".into()
+                } else {
+                    String::new()
+                },
                 br: if i == 0 { Some("feat-x".into()) } else { None },
             })
             .collect()
@@ -1780,7 +1995,10 @@ mod tests {
         assert_eq!(written.version, 2);
         assert_eq!(HISTORY_VERSIONS, &[1, 2]);
         for (version, ok) in [(1, true), (2, true), (3, false)] {
-            let other = HistoryMeta { version, ..written.clone() };
+            let other = HistoryMeta {
+                version,
+                ..written.clone()
+            };
             std::fs::write(dir.join(META_FILE), serde_json::to_vec(&other).unwrap()).unwrap();
             assert_eq!(load_history(&dir).is_ok(), ok, "version {version}");
         }
@@ -1791,7 +2009,10 @@ mod tests {
         );
         std::fs::write(dir.join(META_FILE), v1).unwrap();
         let snap = read_history(&root).expect("v1 snapshot reads");
-        assert_eq!((snap.meta.messages, snap.meta.messages_hash.as_deref()), (None, None));
+        assert_eq!(
+            (snap.meta.messages, snap.meta.messages_hash.as_deref()),
+            (None, None)
+        );
         assert_eq!(read_history_messages(&root, &snap), None);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1807,18 +2028,38 @@ mod tests {
         };
         let inputs = read_inputs();
         assert!(!dir.join(HISTORY_MESSAGES_FILE).exists());
-        assert_eq!((plain.messages, plain.messages_hash.as_deref()), (None, None));
+        assert_eq!(
+            (plain.messages, plain.messages_hash.as_deref()),
+            (None, None)
+        );
 
         let msgs = messages_for(&commits);
-        let with = write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs)).unwrap();
-        assert_eq!(read_inputs(), inputs, "the build's inputs are byte-identical");
+        let with = write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs))
+            .unwrap();
+        assert_eq!(
+            read_inputs(),
+            inputs,
+            "the build's inputs are byte-identical"
+        );
         assert_eq!(with.data_hash, plain.data_hash);
         assert_eq!(with.messages, Some(2));
         let bytes = std::fs::read(dir.join(HISTORY_MESSAGES_FILE)).unwrap();
-        assert_eq!(with.messages_hash.as_deref(), Some(data_hash(&[&bytes]).as_str()));
+        assert_eq!(
+            with.messages_hash.as_deref(),
+            Some(data_hash(&[&bytes]).as_str())
+        );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.starts_with(&format!(r#"{{"c":"{}","at":195,"s":"subject 0","b":"body line","br":"feat-x"}}"#, "cd".repeat(20))), "{text}");
-        assert!(text.contains(r#""s":"subject 1"}"#), "empty body and no branch are omitted: {text}");
+        assert!(
+            text.starts_with(&format!(
+                r#"{{"c":"{}","at":195,"s":"subject 0","b":"body line","br":"feat-x"}}"#,
+                "cd".repeat(20)
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""s":"subject 1"}"#),
+            "empty body and no branch are omitted: {text}"
+        );
         let snap = read_history(&root).expect("snapshot");
         assert_eq!(snap.meta, with);
         assert_eq!(read_history_messages(&root, &snap), Some(msgs));
@@ -1836,7 +2077,8 @@ mod tests {
         let dir = history_dir(&root);
         let msgs = messages_for(&commits);
         let rewrite = |rows: &[HistoryMessage]| {
-            write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs)).unwrap();
+            write_history_with_messages(&root, meta.clone(), &commits, &blame, Some(&msgs))
+                .unwrap();
             let bytes = jsonl(rows.iter()).unwrap();
             // Keep the meta's hash in step, so only the alignment check can catch it.
             let mut m: HistoryMeta =
@@ -1874,7 +2116,11 @@ mod tests {
         msgs[1].b = "token=sk-abcdefghijklmnopqrstuv".into();
         // Written as-is (a hand-edited sidecar), with a consistent hash.
         write_history_with_messages(&root, meta, &commits, &blame, Some(&msgs)).unwrap();
-        assert!(std::fs::read_to_string(dir.join(HISTORY_MESSAGES_FILE)).unwrap().contains("sk-abcdef"));
+        assert!(
+            std::fs::read_to_string(dir.join(HISTORY_MESSAGES_FILE))
+                .unwrap()
+                .contains("sk-abcdef")
+        );
         let snap = read_history(&root).expect("snapshot");
         let back = read_history_messages(&root, &snap).expect("aligned");
         assert!(!back[1].b.contains("sk-abcdef"), "{:?}", back[1].b);
@@ -1887,7 +2133,10 @@ mod tests {
         // A git trailer block of three `Token: value` lines goes whole.
         let raw = "fix(x): the thing\n\nWhy it broke.\nMore prose.\n\nFixes: #12\nRefs: abc\nLink: https://e.invalid/1\n";
         let (s, b, t) = clean_message(raw);
-        assert_eq!((s.as_str(), b.as_str()), ("fix(x): the thing", "Why it broke.\nMore prose."));
+        assert_eq!(
+            (s.as_str(), b.as_str()),
+            ("fix(x): the thing", "Why it broke.\nMore prose.")
+        );
         assert_eq!(t, 3);
         // Identity-bearing trailer lines go wherever they sit, any case.
         let raw = "subj\n\nbody\nsigned-off-by: A <a@b.invalid>\n\nCo-Authored-By: C <c@d.invalid>\nClaude-Session: https://x.invalid/s\n";
@@ -1896,7 +2145,10 @@ mod tests {
         // A `Note: see below` paragraph followed by prose is kept.
         let raw = "subj\n\nNote: see below\nthe prose that follows it\n";
         let (_, b, t) = clean_message(raw);
-        assert_eq!((b.as_str(), t), ("Note: see below\nthe prose that follows it", 0));
+        assert_eq!(
+            (b.as_str(), t),
+            ("Note: see below\nthe prose that follows it", 0)
+        );
         // A subject that looks like a trailer is never the trailer block.
         let (s, b, t) = clean_message("feat: add x\n");
         assert_eq!((s.as_str(), b.as_str(), t), ("feat: add x", "", 0));
@@ -1910,7 +2162,11 @@ mod tests {
         let (_, b, _) = clean_message(&raw);
         assert_eq!(b.chars().count(), MESSAGE_BODY_CAP);
         // An emoji straddling the cut does not panic.
-        let raw = format!("{}\n\n{}", "é".repeat(SUBJECT_CAP + 9), "😀".repeat(MESSAGE_BODY_CAP + 3));
+        let raw = format!(
+            "{}\n\n{}",
+            "é".repeat(SUBJECT_CAP + 9),
+            "😀".repeat(MESSAGE_BODY_CAP + 3)
+        );
         let (s, b, _) = clean_message(&raw);
         assert_eq!(s.chars().count(), SUBJECT_CAP);
         assert_eq!(b.chars().count(), MESSAGE_BODY_CAP);
@@ -1918,7 +2174,9 @@ mod tests {
         let (_, b, _) = clean_message(&raw);
         assert!(b.ends_with('😀'), "{}", b.len());
         // A secret in a subject or body is redacted; the count is returned.
-        let (s, b, t, r) = clean_message_counted("deploy token=sk-abcdefghijklmnopqrstuv\n\napi_key: hunter2hunter2\n");
+        let (s, b, t, r) = clean_message_counted(
+            "deploy token=sk-abcdefghijklmnopqrstuv\n\napi_key: hunter2hunter2\n",
+        );
         assert!(!s.contains("sk-abc") && !b.contains("hunter2"), "{s} / {b}");
         assert_eq!((t, r), (0, 2));
     }
@@ -1943,15 +2201,28 @@ mod tests {
     }
 
     fn tests_sample() -> (TestsMeta, Vec<TestCaseRecord>, Vec<LcovFileRecord>) {
-        let meta = TestsMeta::new(Some("ci-42".into()), vec!["b.xml".into(), "a.xml".into(), "a.xml".into()], 1, 5);
+        let meta = TestsMeta::new(
+            Some("ci-42".into()),
+            vec!["b.xml".into(), "a.xml".into(), "a.xml".into()],
+            1,
+            5,
+        );
         let cases = vec![
             case("b.xml", "test_z", STATUS_ERROR),
             case("a.xml", "test_y", STATUS_FAILED),
             case("a.xml", "test_x", STATUS_FAILED),
         ];
         let lcov = vec![
-            LcovFileRecord { sf: "/r/web/x.ts".into(), rel: Some("web/x.ts".into()), lines: vec![[1, 0]] },
-            LcovFileRecord { sf: "/r/api/app.py".into(), rel: Some("api/app.py".into()), lines: vec![[1, 2], [3, 0]] },
+            LcovFileRecord {
+                sf: "/r/web/x.ts".into(),
+                rel: Some("web/x.ts".into()),
+                lines: vec![[1, 0]],
+            },
+            LcovFileRecord {
+                sf: "/r/api/app.py".into(),
+                rel: Some("api/app.py".into()),
+                lines: vec![[1, 2], [3, 0]],
+            },
         ];
         (meta, cases, lcov)
     }
@@ -1961,7 +2232,15 @@ mod tests {
         let root = tmp_root("tests-roundtrip");
         let (meta, cases, lcov) = tests_sample();
         let written = write_tests(&root, meta, &cases, &lcov).unwrap();
-        assert_eq!((written.failed, written.errors, written.skipped, written.passed), (2, 1, 1, 5));
+        assert_eq!(
+            (
+                written.failed,
+                written.errors,
+                written.skipped,
+                written.passed
+            ),
+            (2, 1, 1, 5)
+        );
         assert_eq!(written.cases_total, 9);
         assert_eq!(written.lcov_files, 2);
         assert_eq!(written.reports, ["a.xml", "b.xml"]);
@@ -1972,12 +2251,19 @@ mod tests {
         assert_eq!(snap.meta, written);
         assert!(snap.cases.iter().all(|c| c.seq == 0));
         let names: Vec<&str> = snap.cases.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["test_x", "test_y", "test_z"], "sorted by (report, suite, classname, name)");
+        assert_eq!(
+            names,
+            ["test_x", "test_y", "test_z"],
+            "sorted by (report, suite, classname, name)"
+        );
         let rels: Vec<&str> = snap.lcov.iter().map(LcovFileRecord::key).collect();
         assert_eq!(rels, ["api/app.py", "web/x.ts"]);
         // Compact rows: absent optionals and an unredacted flag are omitted.
         let text = std::fs::read_to_string(tests_dir(&root).join(TESTS_CASES_FILE)).unwrap();
-        assert!(!text.contains("null") && !text.contains("redacted") && !text.contains("trace"), "{text}");
+        assert!(
+            !text.contains("null") && !text.contains("redacted") && !text.contains("trace"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1986,14 +2272,19 @@ mod tests {
         let root = tmp_root("tests-identical");
         let (meta, cases, lcov) = tests_sample();
         let read_all = |root: &Path| {
-            [TESTS_CASES_FILE, TESTS_LCOV_FILE, META_FILE].map(|f| std::fs::read(tests_dir(root).join(f)).unwrap())
+            [TESTS_CASES_FILE, TESTS_LCOV_FILE, META_FILE]
+                .map(|f| std::fs::read(tests_dir(root).join(f)).unwrap())
         };
         write_tests(&root, meta.clone(), &cases, &lcov).unwrap();
         let first = read_all(&root);
         let mut reversed = cases.clone();
         reversed.reverse();
         write_tests(&root, meta.clone(), &reversed, &lcov).unwrap();
-        assert_eq!(first, read_all(&root), "input order never reaches the bytes");
+        assert_eq!(
+            first,
+            read_all(&root),
+            "input order never reaches the bytes"
+        );
         // A re-ingest replaces the snapshot: it describes one run.
         write_tests(&root, meta, &cases[..1], &[]).unwrap();
         let snap = read_tests(&root).unwrap();
@@ -2032,9 +2323,16 @@ mod tests {
         assert_eq!(read_tests(&root), None, "no meta");
 
         let written = write_tests(&root, meta, &cases, &lcov).unwrap();
-        let lying = TestsMeta { passed: written.passed + 1, ..written };
+        let lying = TestsMeta {
+            passed: written.passed + 1,
+            ..written
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
-        assert_eq!(read_tests(&root), None, "cases_total disagrees with the counts");
+        assert_eq!(
+            read_tests(&root),
+            None,
+            "cases_total disagrees with the counts"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2068,13 +2366,22 @@ mod tests {
 
     /// `(seq, name)` of every stored case, in file order.
     fn seq_names(snap: &TestsSnapshot) -> Vec<(u32, &str)> {
-        snap.cases.iter().map(|c| (c.seq, c.name.as_str())).collect()
+        snap.cases
+            .iter()
+            .map(|c| (c.seq, c.name.as_str()))
+            .collect()
     }
 
     #[test]
     fn window_keeps_the_last_n_runs() {
         let root = tmp_root("tests-window");
-        let lcov = |sf: &str| vec![LcovFileRecord { sf: sf.into(), rel: Some(sf.into()), lines: vec![[1, 1]] }];
+        let lcov = |sf: &str| {
+            vec![LcovFileRecord {
+                sf: sf.into(),
+                rel: Some(sf.into()),
+                lines: vec![[1, 1]],
+            }]
+        };
         for (i, name) in ["test_a", "test_b", "test_c"].into_iter().enumerate() {
             let meta = run_meta(&format!("ci-{i}"), i);
             let written = append_tests_run(
@@ -2092,23 +2399,50 @@ mod tests {
         let snap = read_tests(&root).expect("complete snapshot");
         let seqs: Vec<u32> = snap.meta.runs.iter().map(|r| r.seq).collect();
         assert_eq!(seqs, [1, 2], "run 0 aged out of a window of 2");
-        assert_eq!(seq_names(&snap), [(1, "test_b"), (2, "test_c")], "only the kept runs' cases");
+        assert_eq!(
+            seq_names(&snap),
+            [(1, "test_b"), (2, "test_c")],
+            "only the kept runs' cases"
+        );
         let passed: Vec<usize> = snap.meta.runs.iter().map(|r| r.passed).collect();
         assert_eq!(passed, [1, 2], "each run keeps its own counts");
         // The top level is the newest run; coverage is the newest run's only.
-        assert_eq!((snap.meta.run.as_deref(), snap.meta.passed), (Some("ci-2"), 2));
+        assert_eq!(
+            (snap.meta.run.as_deref(), snap.meta.passed),
+            (Some("ci-2"), 2)
+        );
         assert_eq!(snap.meta.reports, ["ci-2.xml"]);
-        assert_eq!(snap.lcov.iter().map(LcovFileRecord::key).collect::<Vec<_>>(), ["f2.py"]);
+        assert_eq!(
+            snap.lcov
+                .iter()
+                .map(LcovFileRecord::key)
+                .collect::<Vec<_>>(),
+            ["f2.py"]
+        );
 
         // A wider window on the next ingest keeps what is still there.
         append_tests_run(&root, run_meta("ci-3", 0), &[], &[], 10, false).unwrap();
         let snap = read_tests(&root).unwrap();
-        assert_eq!(snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(
+            snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
         assert_eq!(snap.meta.window, 10);
         // A window of 1 is a replace, and the seq keeps counting.
-        append_tests_run(&root, run_meta("ci-4", 0), &[case("x.xml", "test_d", STATUS_ERROR)], &[], 1, false).unwrap();
+        append_tests_run(
+            &root,
+            run_meta("ci-4", 0),
+            &[case("x.xml", "test_d", STATUS_ERROR)],
+            &[],
+            1,
+            false,
+        )
+        .unwrap();
         let snap = read_tests(&root).unwrap();
-        assert_eq!(snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [4]);
+        assert_eq!(
+            snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            [4]
+        );
         assert_eq!(seq_names(&snap), [(4, "test_d")]);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2174,21 +2508,39 @@ mod tests {
         assert_eq!(seq_names(&snap), [(0, "test_list_orders")]);
 
         // The next ingest upgrades it: run 0 kept, the new run is seq 1.
-        let written =
-            append_tests_run(&root, run_meta("ci-42", 3), &[case("ci-42.xml", "test_x", STATUS_FAILED)], &[], 10, false)
-                .unwrap();
+        let written = append_tests_run(
+            &root,
+            run_meta("ci-42", 3),
+            &[case("ci-42.xml", "test_x", STATUS_FAILED)],
+            &[],
+            10,
+            false,
+        )
+        .unwrap();
         assert_eq!(written.version, TESTS_VERSION);
         let snap = read_tests(&root).unwrap();
-        let runs: Vec<(u32, Option<&str>)> = snap.meta.runs.iter().map(|r| (r.seq, r.run.as_deref())).collect();
+        let runs: Vec<(u32, Option<&str>)> = snap
+            .meta
+            .runs
+            .iter()
+            .map(|r| (r.seq, r.run.as_deref()))
+            .collect();
         assert_eq!(runs, [(0, Some("ci-41")), (1, Some("ci-42"))]);
         assert_eq!(seq_names(&snap), [(0, "test_list_orders"), (1, "test_x")]);
         let text = std::fs::read_to_string(tests_dir(&root).join(TESTS_CASES_FILE)).unwrap();
-        assert!(text.lines().all(|l| l.starts_with(r#"{"seq":"#)), "every v2 row carries its seq: {text}");
+        assert!(
+            text.lines().all(|l| l.starts_with(r#"{"seq":"#)),
+            "every v2 row carries its seq: {text}"
+        );
 
         // A version this reader does not know is incomplete.
         let dir = tests_dir(&root);
         let meta = std::fs::read_to_string(dir.join(META_FILE)).unwrap();
-        std::fs::write(dir.join(META_FILE), meta.replace("\"version\": 2", "\"version\": 3")).unwrap();
+        std::fs::write(
+            dir.join(META_FILE),
+            meta.replace("\"version\": 2", "\"version\": 3"),
+        )
+        .unwrap();
         assert_eq!(read_tests(&root), None);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2197,18 +2549,35 @@ mod tests {
     fn reset_starts_at_seq_zero() {
         let root = tmp_root("tests-reset");
         for i in 0..3 {
-            append_tests_run(&root, run_meta(&format!("ci-{i}"), 1), &[case("r.xml", "test_a", STATUS_FAILED)], &[], 10, false)
-                .unwrap();
+            append_tests_run(
+                &root,
+                run_meta(&format!("ci-{i}"), 1),
+                &[case("r.xml", "test_a", STATUS_FAILED)],
+                &[],
+                10,
+                false,
+            )
+            .unwrap();
         }
         assert_eq!(read_tests(&root).unwrap().meta.latest_seq(), Some(2));
-        let written =
-            append_tests_run(&root, run_meta("ci-9", 1), &[case("r.xml", "test_b", STATUS_FAILED)], &[], 10, true).unwrap();
+        let written = append_tests_run(
+            &root,
+            run_meta("ci-9", 1),
+            &[case("r.xml", "test_b", STATUS_FAILED)],
+            &[],
+            10,
+            true,
+        )
+        .unwrap();
         assert_eq!(written.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [0]);
         assert_eq!(written.window, 10, "a reset keeps the window it was given");
         assert_eq!(seq_names(&read_tests(&root).unwrap()), [(0, "test_b")]);
         // write_tests is a one-run replace: seq 0, window 1.
         let written = write_tests(&root, run_meta("ci-10", 0), &[], &[]).unwrap();
-        assert_eq!((written.latest_seq(), written.window, written.runs.len()), (Some(0), 1, 1));
+        assert_eq!(
+            (written.latest_seq(), written.window, written.runs.len()),
+            (Some(0), 1, 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2217,9 +2586,24 @@ mod tests {
         let root = tmp_root("tests-tampered");
         let dir = tests_dir(&root);
         let two_runs = |root: &Path| {
-            append_tests_run(root, run_meta("ci-0", 0), &[case("r.xml", "test_a", STATUS_FAILED)], &[], 10, true).unwrap();
-            append_tests_run(root, run_meta("ci-1", 0), &[case("r.xml", "test_b", STATUS_FAILED)], &[], 10, false)
-                .unwrap()
+            append_tests_run(
+                root,
+                run_meta("ci-0", 0),
+                &[case("r.xml", "test_a", STATUS_FAILED)],
+                &[],
+                10,
+                true,
+            )
+            .unwrap();
+            append_tests_run(
+                root,
+                run_meta("ci-1", 0),
+                &[case("r.xml", "test_b", STATUS_FAILED)],
+                &[],
+                10,
+                false,
+            )
+            .unwrap()
         };
         // Rewrite `file` with `edit`, re-hashing the meta so only the counts can catch it.
         let tamper = |file: &str, edit: &dyn Fn(String) -> String| {
@@ -2227,31 +2611,49 @@ mod tests {
             std::fs::write(dir.join(file), &text).unwrap();
             let cases = std::fs::read(dir.join(TESTS_CASES_FILE)).unwrap();
             let lcov = std::fs::read(dir.join(TESTS_LCOV_FILE)).unwrap();
-            let mut meta: TestsMeta = serde_json::from_slice(&std::fs::read(dir.join(META_FILE)).unwrap()).unwrap();
+            let mut meta: TestsMeta =
+                serde_json::from_slice(&std::fs::read(dir.join(META_FILE)).unwrap()).unwrap();
             meta.data_hash = data_hash(&[&cases, &lcov]);
             std::fs::write(dir.join(META_FILE), serde_json::to_vec(&meta).unwrap()).unwrap();
         };
         two_runs(&root);
-        assert!(read_tests(&root).is_some(), "control: the untouched snapshot reads");
+        assert!(
+            read_tests(&root).is_some(),
+            "control: the untouched snapshot reads"
+        );
 
         // test_a moved from run 0 to run 1: both runs' counts are off.
-        tamper(TESTS_CASES_FILE, &|t| t.replacen(r#"{"seq":0,"#, r#"{"seq":1,"#, 1));
-        assert_eq!(read_tests(&root), None, "run 0 lost a row, run 1 gained one");
+        tamper(TESTS_CASES_FILE, &|t| {
+            t.replacen(r#"{"seq":0,"#, r#"{"seq":1,"#, 1)
+        });
+        assert_eq!(
+            read_tests(&root),
+            None,
+            "run 0 lost a row, run 1 gained one"
+        );
 
         // A row of a run the meta does not list.
         two_runs(&root);
-        tamper(TESTS_CASES_FILE, &|t| t.replacen(r#"{"seq":0,"#, r#"{"seq":7,"#, 1));
+        tamper(TESTS_CASES_FILE, &|t| {
+            t.replacen(r#"{"seq":0,"#, r#"{"seq":7,"#, 1)
+        });
         assert_eq!(read_tests(&root), None, "run 7 is not listed");
 
         // A top level that is not the newest run.
         let written = two_runs(&root);
-        let lying = TestsMeta { run: Some("ci-0".into()), ..written };
+        let lying = TestsMeta {
+            run: Some("ci-0".into()),
+            ..written
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
         assert_eq!(read_tests(&root), None, "the top level names run 0");
 
         // More runs than the window.
         let written = two_runs(&root);
-        let lying = TestsMeta { window: 1, ..written };
+        let lying = TestsMeta {
+            window: 1,
+            ..written
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
         assert_eq!(read_tests(&root), None, "two runs in a window of one");
         let _ = std::fs::remove_dir_all(&root);
@@ -2261,10 +2663,23 @@ mod tests {
     fn sanitize_caps_on_char_boundaries_after_redacting() {
         let mut c = case("a.xml", "t", STATUS_FAILED);
         c.message = Some("é".repeat(MESSAGE_CAP + 50));
-        c.trace = Some(format!("{}\nAuthorization: Bearer abcdef0123456789", "漢".repeat(TRACE_CAP)));
-        assert_eq!(c.sanitize(), 1, "the bearer credential past the cap is still one span");
-        assert_eq!(c.message.as_deref().map(|m| m.chars().count()), Some(MESSAGE_CAP));
-        assert_eq!(c.trace.as_deref().map(|t| t.chars().count()), Some(TRACE_CAP));
+        c.trace = Some(format!(
+            "{}\nAuthorization: Bearer abcdef0123456789",
+            "漢".repeat(TRACE_CAP)
+        ));
+        assert_eq!(
+            c.sanitize(),
+            1,
+            "the bearer credential past the cap is still one span"
+        );
+        assert_eq!(
+            c.message.as_deref().map(|m| m.chars().count()),
+            Some(MESSAGE_CAP)
+        );
+        assert_eq!(
+            c.trace.as_deref().map(|t| t.chars().count()),
+            Some(TRACE_CAP)
+        );
         assert!(c.redacted);
         let again = c.clone();
         assert_eq!(c.sanitize(), 0, "idempotent");
@@ -2276,18 +2691,39 @@ mod tests {
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
         // Assembled at run time so no scanner mistakes this source for a leak.
         let github = format!("gh {}_0123456789abcdefghijABCDEFGHIJ", "ghp");
-        let pem = format!("a\n-----BEGIN {0} PRIVATE KEY-----\nMIIE\n-----END {0} PRIVATE KEY-----\nb", "RSA");
+        let pem = format!(
+            "a\n-----BEGIN {0} PRIVATE KEY-----\nMIIE\n-----END {0} PRIVATE KEY-----\nb",
+            "RSA"
+        );
         let bare_jwt = format!("token was {jwt}!");
         let cases = [
-            ("charge failed for sk_live_4eC39HqLyjWDarjtT1zdp7dc", "charge failed for ***"),
+            (
+                "charge failed for sk_live_4eC39HqLyjWDarjtT1zdp7dc",
+                "charge failed for ***",
+            ),
             (&bare_jwt as &str, "token was ***!"),
-            ("Authorization: Bearer 9f8e7d6c5b4a3210", "Authorization: Bearer ***"),
-            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic ***"),
-            ("STRIPE_SECRET_KEY=abc123 next", "STRIPE_SECRET_KEY=*** next"),
-            (r#"{"password": "hunter2", "user": "bob"}"#, r#"{"password": "***", "user": "bob"}"#),
+            (
+                "Authorization: Bearer 9f8e7d6c5b4a3210",
+                "Authorization: Bearer ***",
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNz",
+                "Authorization: Basic ***",
+            ),
+            (
+                "STRIPE_SECRET_KEY=abc123 next",
+                "STRIPE_SECRET_KEY=*** next",
+            ),
+            (
+                r#"{"password": "hunter2", "user": "bob"}"#,
+                r#"{"password": "***", "user": "bob"}"#,
+            ),
             ("x-api-key: k-123, other", "x-api-key: ***, other"),
             ("db_passwd => 'pw'", "db_passwd => '***'"),
-            ("url postgres://app:s3cr3t@db.internal:5432/x ok", "url postgres://***@db.internal:5432/x ok"),
+            (
+                "url postgres://app:s3cr3t@db.internal:5432/x ok",
+                "url postgres://***@db.internal:5432/x ok",
+            ),
             ("key AKIAIOSFODNN7EXAMPLE used", "key *** used"),
             (&github as &str, "gh ***"),
             (&pem as &str, "a\n***\nb"),
@@ -2296,7 +2732,11 @@ mod tests {
             let (got, n) = redact_untrusted(input);
             assert_eq!(got, want, "input {input:?}");
             assert!(n >= 1, "input {input:?}");
-            assert_eq!(redact_untrusted(&got), (got.clone(), 0), "idempotent on {input:?}");
+            assert_eq!(
+                redact_untrusted(&got),
+                (got.clone(), 0),
+                "idempotent on {input:?}"
+            );
         }
     }
 
@@ -2319,7 +2759,13 @@ mod tests {
     // --- SCIP index snapshot (CE.1a) ---
 
     fn ref_row(s: u32, line: u32) -> ScipRefRow {
-        ScipRefRow { s, line, call: false, write: false, import: false }
+        ScipRefRow {
+            s,
+            line,
+            call: false,
+            write: false,
+            import: false,
+        }
     }
 
     fn scip_sample() -> (ScipMeta, Vec<ScipDocumentRecord>, Vec<ScipSymbolRecord>) {
@@ -2329,26 +2775,45 @@ mod tests {
                 path: "a/x.py".into(),
                 language: "python".into(),
                 source_hash: source_hash(b"def run():\n"),
-                defs: vec![ScipDefRow { s: 0, line: 3, name: "run".into() }],
-                refs: vec![ScipRefRow { call: true, ..ref_row(1, 7) }],
+                defs: vec![ScipDefRow {
+                    s: 0,
+                    line: 3,
+                    name: "run".into(),
+                }],
+                refs: vec![ScipRefRow {
+                    call: true,
+                    ..ref_row(1, 7)
+                }],
             },
             ScipDocumentRecord {
                 path: "b/y.py".into(),
                 language: "python".into(),
                 source_hash: source_hash(b"total = 0\n"),
                 defs: vec![],
-                refs: vec![ScipRefRow { write: true, ..ref_row(0, 2) }],
+                refs: vec![ScipRefRow {
+                    write: true,
+                    ..ref_row(0, 2)
+                }],
             },
         ];
         let symbols = vec![
-            ScipSymbolRecord { id: 0, symbol: "scip-python python app 0.1 `a.x`/run().".into(), implements: vec![] },
-            ScipSymbolRecord { id: 1, symbol: "scip-python python app 0.1 `b.y`/Job#run().".into(), implements: vec![0] },
+            ScipSymbolRecord {
+                id: 0,
+                symbol: "scip-python python app 0.1 `a.x`/run().".into(),
+                implements: vec![],
+            },
+            ScipSymbolRecord {
+                id: 1,
+                symbol: "scip-python python app 0.1 `b.y`/Job#run().".into(),
+                implements: vec![0],
+            },
         ];
         (meta, documents, symbols)
     }
 
     fn scip_files(root: &Path) -> [Vec<u8>; 3] {
-        [SCIP_DOCUMENTS_FILE, SCIP_SYMBOLS_FILE, META_FILE].map(|f| std::fs::read(scip_dir(root).join(f)).unwrap())
+        [SCIP_DOCUMENTS_FILE, SCIP_SYMBOLS_FILE, META_FILE]
+            .map(|f| std::fs::read(scip_dir(root).join(f)).unwrap())
     }
 
     #[test]
@@ -2362,13 +2827,30 @@ mod tests {
         let root = tmp_root("scip-roundtrip");
         let (meta, documents, symbols) = scip_sample();
         let written = write_scip(&root, meta, &documents, &symbols).unwrap();
-        assert_eq!((written.documents, written.symbols, written.skipped_documents), (2, 2, 1));
-        assert_eq!((written.version, written.generator.as_str()), (SCIP_VERSION, SCIP_GENERATOR));
+        assert_eq!(
+            (
+                written.documents,
+                written.symbols,
+                written.skipped_documents
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(
+            (written.version, written.generator.as_str()),
+            (SCIP_VERSION, SCIP_GENERATOR)
+        );
         let [docs_bytes, syms_bytes, _] = scip_files(&root);
         assert_eq!(written.data_hash, data_hash(&[&docs_bytes, &syms_bytes]));
 
         let snap = read_scip(&root).expect("complete snapshot");
-        assert_eq!(snap, ScipSnapshot { meta: written, documents: documents.clone(), symbols });
+        assert_eq!(
+            snap,
+            ScipSnapshot {
+                meta: written,
+                documents: documents.clone(),
+                symbols
+            }
+        );
 
         // Compact rows: false flags and an empty `implements` are omitted.
         let docs = String::from_utf8(docs_bytes).unwrap();
@@ -2380,7 +2862,11 @@ mod tests {
                 r#"{{"path":"a/x.py","language":"python","source_hash":"{h}","defs":[{{"s":0,"line":3,"name":"run"}}],"refs":[{{"s":1,"line":7,"call":true}}]}}"#
             )
         );
-        assert!(lines[1].ends_with(r#""defs":[],"refs":[{"s":0,"line":2,"write":true}]}"#), "{}", lines[1]);
+        assert!(
+            lines[1].ends_with(r#""defs":[],"refs":[{"s":0,"line":2,"write":true}]}"#),
+            "{}",
+            lines[1]
+        );
         let syms = String::from_utf8(syms_bytes).unwrap();
         assert_eq!(
             syms.lines().collect::<Vec<_>>(),
@@ -2411,7 +2897,10 @@ mod tests {
 
         // Another version.
         let written = write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
-        let other = ScipMeta { version: 2, ..written.clone() };
+        let other = ScipMeta {
+            version: 2,
+            ..written.clone()
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&other).unwrap()).unwrap();
         assert!(load_scip(&dir).unwrap_err().contains("version 2"));
         assert_eq!(read_scip(&root), None);
@@ -2429,7 +2918,10 @@ mod tests {
 
         // A meta whose counts lie.
         let written = write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
-        let lying = ScipMeta { symbols: 3, ..written };
+        let lying = ScipMeta {
+            symbols: 3,
+            ..written
+        };
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
         assert!(load_scip(&dir).unwrap_err().starts_with("row counts"));
 
@@ -2442,7 +2934,11 @@ mod tests {
         let mut hand = ScipMeta::new("t".into(), "1".into(), String::new(), 0);
         (hand.documents, hand.symbols, hand.data_hash) = (1, 1, data_hash(&[docs, syms]));
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&hand).unwrap()).unwrap();
-        assert!(load_scip(&dir).unwrap_err().contains("names symbol 5 out of range"));
+        assert!(
+            load_scip(&dir)
+                .unwrap_err()
+                .contains("names symbol 5 out of range")
+        );
         assert_eq!(read_scip(&root), None);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2450,11 +2946,17 @@ mod tests {
     #[test]
     fn unsorted_or_dangling_input_is_refused() {
         let (meta, documents, symbols) = scip_sample();
-        let refused = |tag: &str, documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord], want: &str| {
+        let refused = |tag: &str,
+                       documents: &[ScipDocumentRecord],
+                       symbols: &[ScipSymbolRecord],
+                       want: &str| {
             let root = tmp_root(&format!("scip-refused-{tag}"));
             let err = write_scip(&root, meta.clone(), documents, symbols).unwrap_err();
             assert!(err.contains(want), "{tag}: {err}");
-            assert!(!scip_dir(&root).join(META_FILE).exists(), "{tag}: nothing written");
+            assert!(
+                !scip_dir(&root).join(META_FILE).exists(),
+                "{tag}: nothing written"
+            );
             let _ = std::fs::remove_dir_all(&root);
         };
 
@@ -2467,15 +2969,35 @@ mod tests {
 
         let mut dangling = documents.clone();
         dangling[1].refs[0].s = 2;
-        refused("ref-dangling", &dangling, &symbols, "names symbol 2 out of range");
+        refused(
+            "ref-dangling",
+            &dangling,
+            &symbols,
+            "names symbol 2 out of range",
+        );
         let mut dangling = documents.clone();
         dangling[0].defs[0].s = 9;
-        refused("def-dangling", &dangling, &symbols, "names symbol 9 out of range");
+        refused(
+            "def-dangling",
+            &dangling,
+            &symbols,
+            "names symbol 9 out of range",
+        );
         let mut bad_impl = symbols.clone();
         bad_impl[1].implements = vec![2];
-        refused("impl-dangling", &documents, &bad_impl, "implements id 2 out of range");
+        refused(
+            "impl-dangling",
+            &documents,
+            &bad_impl,
+            "implements id 2 out of range",
+        );
         bad_impl[0].implements = vec![1, 1];
-        refused("impl-order", &documents, &bad_impl, "not strictly ascending");
+        refused(
+            "impl-order",
+            &documents,
+            &bad_impl,
+            "not strictly ascending",
+        );
 
         let mut ids = symbols.clone();
         ids[1].id = 5;
@@ -2487,10 +3009,24 @@ mod tests {
 
         let mut rows = documents.clone();
         rows[0].refs = vec![ref_row(1, 9), ref_row(0, 8)];
-        refused("row-order", &rows, &symbols, "refs of \"a/x.py\" are not sorted");
+        refused(
+            "row-order",
+            &rows,
+            &symbols,
+            "refs of \"a/x.py\" are not sorted",
+        );
         rows[0].refs = vec![ref_row(1, 7)];
-        rows[0].defs.push(ScipDefRow { s: 0, line: 3, name: "ran".into() });
-        refused("def-order", &rows, &symbols, "defs of \"a/x.py\" are not sorted");
+        rows[0].defs.push(ScipDefRow {
+            s: 0,
+            line: 3,
+            name: "ran".into(),
+        });
+        refused(
+            "def-order",
+            &rows,
+            &symbols,
+            "defs of \"a/x.py\" are not sorted",
+        );
 
         for bad in ["", "/etc/hosts", "../../etc/passwd", "a/../../b"] {
             let mut outside = documents.clone();
@@ -2499,7 +3035,16 @@ mod tests {
         }
 
         let root = tmp_root("scip-refused-version");
-        let err = write_scip(&root, ScipMeta { version: 2, ..meta.clone() }, &documents, &symbols).unwrap_err();
+        let err = write_scip(
+            &root,
+            ScipMeta {
+                version: 2,
+                ..meta.clone()
+            },
+            &documents,
+            &symbols,
+        )
+        .unwrap_err();
         assert!(err.contains("version 2"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
 

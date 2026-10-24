@@ -41,8 +41,14 @@ pub struct DeltaSide<'a> {
 }
 
 impl<'a> DeltaSide<'a> {
-    pub fn new(nodes: impl IntoIterator<Item = &'a Node>, edges: impl IntoIterator<Item = &'a Edge>) -> Self {
-        Self { nodes: nodes.into_iter().collect(), edges: edges.into_iter().collect() }
+    pub fn new(
+        nodes: impl IntoIterator<Item = &'a Node>,
+        edges: impl IntoIterator<Item = &'a Edge>,
+    ) -> Self {
+        Self {
+            nodes: nodes.into_iter().collect(),
+            edges: edges.into_iter().collect(),
+        }
     }
 }
 
@@ -57,7 +63,11 @@ pub struct EdgeKey {
 
 impl From<&Edge> for EdgeKey {
     fn from(e: &Edge) -> Self {
-        Self { from: e.from, to: e.to, category: e.category }
+        Self {
+            from: e.from,
+            to: e.to,
+            category: e.category,
+        }
     }
 }
 
@@ -120,12 +130,19 @@ type Content<'a> = BTreeMap<u64, Vec<(u32, &'a str)>>;
 type EdgeSet = BTreeMap<EdgeKey, (Confidence, EdgeKey)>;
 
 /// The difference between two graph snapshots (see the module docs).
-pub fn graph_delta(before: &DeltaSide<'_>, after: &DeltaSide<'_>, opts: &DeltaOptions<'_>) -> GraphDelta {
+pub fn graph_delta(
+    before: &DeltaSide<'_>,
+    after: &DeltaSide<'_>,
+    opts: &DeltaOptions<'_>,
+) -> GraphDelta {
     let kinds: BTreeSet<u32> = opts.content_cells.iter().map(|k| k.0).collect();
     let (old, new) = (content(before, &kinds), content(after, &kinds));
     let (moves, ignored_moves) = accept_moves(opts.moves, before, &old, &new);
     let remap = |id: u64| moves.get(&id).copied().unwrap_or(id);
-    let mut d = GraphDelta { ignored_moves, ..GraphDelta::default() };
+    let mut d = GraphDelta {
+        ignored_moves,
+        ..GraphDelta::default()
+    };
 
     // After id -> the before id it was. The remap is injective (accept_moves).
     let mut was: BTreeMap<u64, u64> = BTreeMap::new();
@@ -144,7 +161,10 @@ pub fn graph_delta(before: &DeltaSide<'_>, after: &DeltaSide<'_>, opts: &DeltaOp
             Some(_) => {}
         }
     }
-    d.moved_nodes = moves.iter().map(|(&b, &a)| (NodeId(b), NodeId(a))).collect();
+    d.moved_nodes = moves
+        .iter()
+        .map(|(&b, &a)| (NodeId(b), NodeId(a)))
+        .collect();
 
     let old_edges = fold_edges(&before.edges, remap);
     let new_edges = fold_edges(&after.edges, |id| id);
@@ -157,7 +177,11 @@ pub fn graph_delta(before: &DeltaSide<'_>, after: &DeltaSide<'_>, opts: &DeltaOp
     }
     // Emitted in remapped order; re-sort under the before-side keys they carry.
     d.removed_edges.sort_unstable();
-    d.added_edges = new_edges.keys().filter(|k| !old_edges.contains_key(k)).copied().collect();
+    d.added_edges = new_edges
+        .keys()
+        .filter(|k| !old_edges.contains_key(k))
+        .copied()
+        .collect();
 
     if super::algo_debug() {
         eprintln!(
@@ -198,13 +222,23 @@ fn content<'a>(side: &DeltaSide<'a>, kinds: &BTreeSet<u32>) -> Content<'a> {
 
 /// The move pairs that apply (before id -> after id) and how many do not, by
 /// the rules on [`DeltaOptions::moves`].
-fn accept_moves(pairs: &[(NodeId, NodeId)], before: &DeltaSide<'_>, old: &Content<'_>, new: &Content<'_>) -> (BTreeMap<u64, u64>, usize) {
+fn accept_moves(
+    pairs: &[(NodeId, NodeId)],
+    before: &DeltaSide<'_>,
+    old: &Content<'_>,
+    new: &Content<'_>,
+) -> (BTreeMap<u64, u64>, usize) {
     let mut moves: BTreeMap<u64, u64> = BTreeMap::new();
     let mut targets: BTreeSet<u64> = BTreeSet::new();
     let mut ignored = 0usize;
     for &(b, a) in pairs {
         let (b, a) = (b.0, a.0);
-        if b != a && old.contains_key(&b) && new.contains_key(&a) && !moves.contains_key(&b) && !targets.contains(&a) {
+        if b != a
+            && old.contains_key(&b)
+            && new.contains_key(&a)
+            && !moves.contains_key(&b)
+            && !targets.contains(&a)
+        {
             moves.insert(b, a);
             targets.insert(a);
         } else {
@@ -212,7 +246,11 @@ fn accept_moves(pairs: &[(NodeId, NodeId)], before: &DeltaSide<'_>, old: &Conten
         }
     }
     // Targets the before side also names, as a node or as an edge endpoint.
-    let mut named: BTreeSet<u64> = targets.iter().filter(|a| old.contains_key(a)).copied().collect();
+    let mut named: BTreeSet<u64> = targets
+        .iter()
+        .filter(|a| old.contains_key(a))
+        .copied()
+        .collect();
     for e in &before.edges {
         for id in [e.from.0, e.to.0] {
             if targets.contains(&id) {
@@ -223,8 +261,11 @@ fn accept_moves(pairs: &[(NodeId, NodeId)], before: &DeltaSide<'_>, old: &Conten
     // Such a target must itself move away, or two before ids would fold into
     // one. Dropping a move can strand another one's target, so repeat.
     loop {
-        let clash: Vec<u64> =
-            moves.iter().filter(|&(_, a)| named.contains(a) && !moves.contains_key(a)).map(|(&b, _)| b).collect();
+        let clash: Vec<u64> = moves
+            .iter()
+            .filter(|&(_, a)| named.contains(a) && !moves.contains_key(a))
+            .map(|(&b, _)| b)
+            .collect();
         if clash.is_empty() {
             break;
         }
@@ -241,7 +282,11 @@ fn accept_moves(pairs: &[(NodeId, NodeId)], before: &DeltaSide<'_>, old: &Conten
 fn fold_edges(edges: &[&Edge], remap: impl Fn(u64) -> u64) -> EdgeSet {
     let mut out = EdgeSet::new();
     for &e in edges {
-        let key = EdgeKey { from: NodeId(remap(e.from.0)), to: NodeId(remap(e.to.0)), category: e.category };
+        let key = EdgeKey {
+            from: NodeId(remap(e.from.0)),
+            to: NodeId(remap(e.to.0)),
+            category: e.category,
+        };
         let slot = out.entry(key).or_insert((e.confidence, EdgeKey::from(e)));
         if strength(e.confidence) > strength(slot.0) {
             slot.0 = e.confidence;
@@ -278,7 +323,13 @@ mod tests {
             id: NodeId(id),
             repo: RepoId(1),
             confidence: Confidence::Strong,
-            cells: cells.into_iter().map(|(k, payload)| Cell { kind: CellTypeId(k), payload }).collect(),
+            cells: cells
+                .into_iter()
+                .map(|(k, payload)| Cell {
+                    kind: CellTypeId(k),
+                    payload,
+                })
+                .collect(),
         }
     }
 
@@ -295,16 +346,29 @@ mod tests {
     }
 
     fn key(from: u64, to: u64) -> EdgeKey {
-        EdgeKey { from: NodeId(from), to: NodeId(to), category: CALLS }
+        EdgeKey {
+            from: NodeId(from),
+            to: NodeId(to),
+            category: CALLS,
+        }
     }
 
     fn ids(xs: &[u64]) -> Vec<NodeId> {
         xs.iter().map(|&x| NodeId(x)).collect()
     }
 
-    fn delta(b: (&[Node], &[Edge]), a: (&[Node], &[Edge]), content_cells: &[CellTypeId], moves: &[(u64, u64)]) -> GraphDelta {
-        let moves: Vec<(NodeId, NodeId)> = moves.iter().map(|&(x, y)| (NodeId(x), NodeId(y))).collect();
-        let opts = DeltaOptions { content_cells, moves: &moves };
+    fn delta(
+        b: (&[Node], &[Edge]),
+        a: (&[Node], &[Edge]),
+        content_cells: &[CellTypeId],
+        moves: &[(u64, u64)],
+    ) -> GraphDelta {
+        let moves: Vec<(NodeId, NodeId)> =
+            moves.iter().map(|&(x, y)| (NodeId(x), NodeId(y))).collect();
+        let opts = DeltaOptions {
+            content_cells,
+            moves: &moves,
+        };
         graph_delta(&DeltaSide::new(b.0, b.1), &DeltaSide::new(a.0, a.1), &opts)
     }
 
@@ -329,13 +393,22 @@ mod tests {
 
     #[test]
     fn position_only_change_is_not_modified() {
-        let before = [node(1, vec![(CODE, text("fn a() {}")), (POS, text("a.rs:4"))])];
-        let after = [node(1, vec![(CODE, text("fn a() {}")), (POS, text("a.rs:9"))])];
+        let before = [node(
+            1,
+            vec![(CODE, text("fn a() {}")), (POS, text("a.rs:4"))],
+        )];
+        let after = [node(
+            1,
+            vec![(CODE, text("fn a() {}")), (POS, text("a.rs:9"))],
+        )];
         let d = delta((&before, &[]), (&after, &[]), CONTENT, &[]);
         assert!(d.modified_nodes.is_empty());
         // The same change is a modification when POSITION counts as content.
         let both = [CellTypeId(CODE), CellTypeId(POS)];
-        assert_eq!(delta((&before, &[]), (&after, &[]), &both, &[]).modified_nodes, ids(&[1]));
+        assert_eq!(
+            delta((&before, &[]), (&after, &[]), &both, &[]).modified_nodes,
+            ids(&[1])
+        );
     }
 
     #[test]
@@ -343,22 +416,36 @@ mod tests {
         let json = |s: &str| CellPayload::Json(s.to_string());
         let before = [node(1, vec![(CODE, json(r#"{"sites":[{"line":4}]}"#))])];
         let after = [node(1, vec![(CODE, json(r#"{"sites":[{"line":7}]}"#))])];
-        assert!(delta((&before, &[]), (&after, &[]), CONTENT, &[]).modified_nodes.is_empty());
+        assert!(
+            delta((&before, &[]), (&after, &[]), CONTENT, &[])
+                .modified_nodes
+                .is_empty()
+        );
         let bytes = |b: &[u8]| CellPayload::Bytes(b.to_vec());
         let before = [node(1, vec![(CODE, bytes(&[1]))])];
         let after = [node(1, vec![(CODE, bytes(&[2]))])];
-        assert!(delta((&before, &[]), (&after, &[]), CONTENT, &[]).modified_nodes.is_empty());
+        assert!(
+            delta((&before, &[]), (&after, &[]), CONTENT, &[])
+                .modified_nodes
+                .is_empty()
+        );
     }
 
     #[test]
     fn edge_added_removed_and_reconfidenced() {
         let nodes = [bare(1), bare(2), bare(3)];
         let before = [edge(1, 2, Confidence::Strong), edge(2, 3, Confidence::Weak)];
-        let after = [edge(2, 3, Confidence::Medium), edge(3, 1, Confidence::Strong)];
+        let after = [
+            edge(2, 3, Confidence::Medium),
+            edge(3, 1, Confidence::Strong),
+        ];
         let d = delta((&nodes, &before), (&nodes, &after), CONTENT, &[]);
         assert_eq!(d.added_edges, vec![key(3, 1)]);
         assert_eq!(d.removed_edges, vec![key(1, 2)]);
-        assert_eq!(d.reconfidenced_edges, vec![(key(2, 3), Confidence::Weak, Confidence::Medium)]);
+        assert_eq!(
+            d.reconfidenced_edges,
+            vec![(key(2, 3), Confidence::Weak, Confidence::Medium)]
+        );
         assert!(d.added_nodes.is_empty() && d.removed_nodes.is_empty());
     }
 
@@ -367,29 +454,50 @@ mod tests {
         let nodes = [bare(1), bare(2)];
         let before = [edge(1, 2, Confidence::Weak), edge(1, 2, Confidence::Strong)];
         let after = [edge(1, 2, Confidence::Strong)];
-        assert_eq!(delta((&nodes, &before), (&nodes, &after), CONTENT, &[]), GraphDelta::default());
+        assert_eq!(
+            delta((&nodes, &before), (&nodes, &after), CONTENT, &[]),
+            GraphDelta::default()
+        );
         // Order of the copies does not matter, and the fold keeps the strongest.
-        let after = [edge(1, 2, Confidence::Strong), edge(1, 2, Confidence::Medium), edge(1, 2, Confidence::Weak)];
-        assert_eq!(delta((&nodes, &before), (&nodes, &after), CONTENT, &[]), GraphDelta::default());
+        let after = [
+            edge(1, 2, Confidence::Strong),
+            edge(1, 2, Confidence::Medium),
+            edge(1, 2, Confidence::Weak),
+        ];
+        assert_eq!(
+            delta((&nodes, &before), (&nodes, &after), CONTENT, &[]),
+            GraphDelta::default()
+        );
     }
 
     #[test]
     fn edge_cells_are_not_compared() {
         let nodes = [bare(1), bare(2)];
-        let site = |line: &str| Cell { kind: CellTypeId(9), payload: text(line) };
+        let site = |line: &str| Cell {
+            kind: CellTypeId(9),
+            payload: text(line),
+        };
         let before = [edge(1, 2, Confidence::Strong).with_cell(site("a.rs:3"))];
         let after = [edge(1, 2, Confidence::Strong).with_cell(site("a.rs:8"))];
-        assert_eq!(delta((&nodes, &before), (&nodes, &after), CONTENT, &[]), GraphDelta::default());
+        assert_eq!(
+            delta((&nodes, &before), (&nodes, &after), CONTENT, &[]),
+            GraphDelta::default()
+        );
     }
 
     #[test]
     fn moves_remap_nodes_and_edges() {
         let before = [code(1, "fn a() {}"), bare(2)];
         let after = [code(11, "fn a() {}"), bare(2)];
-        let (eb, ea) = ([edge(1, 2, Confidence::Strong)], [edge(11, 2, Confidence::Strong)]);
+        let (eb, ea) = (
+            [edge(1, 2, Confidence::Strong)],
+            [edge(11, 2, Confidence::Strong)],
+        );
         let d = delta((&before, &eb), (&after, &ea), CONTENT, &[(1, 11)]);
         assert_eq!(d.moved_nodes, vec![(NodeId(1), NodeId(11))]);
-        assert!(d.added_nodes.is_empty() && d.removed_nodes.is_empty() && d.modified_nodes.is_empty());
+        assert!(
+            d.added_nodes.is_empty() && d.removed_nodes.is_empty() && d.modified_nodes.is_empty()
+        );
         assert!(d.added_edges.is_empty() && d.removed_edges.is_empty());
         assert_eq!(d.ignored_moves, 0);
     }
@@ -433,12 +541,20 @@ mod tests {
         // keeps: none of them applies.
         let before = [bare(1), bare(2), bare(3)];
         let after = [bare(2), bare(3), bare(4)];
-        let d = delta((&before, &[]), (&after, &[]), CONTENT, &[(3, 3), (1, 4), (1, 2), (2, 2)]);
+        let d = delta(
+            (&before, &[]),
+            (&after, &[]),
+            CONTENT,
+            &[(3, 3), (1, 4), (1, 2), (2, 2)],
+        );
         assert_eq!(d.moved_nodes, vec![(NodeId(1), NodeId(4))]);
         assert_eq!(d.ignored_moves, 3);
         // A swap applies: each target moves away itself.
         let d = delta((&before, &[]), (&after, &[]), CONTENT, &[(2, 3), (3, 2)]);
-        assert_eq!(d.moved_nodes, vec![(NodeId(2), NodeId(3)), (NodeId(3), NodeId(2))]);
+        assert_eq!(
+            d.moved_nodes,
+            vec![(NodeId(2), NodeId(3)), (NodeId(3), NodeId(2))]
+        );
         assert_eq!(d.ignored_moves, 0);
         // Dropping 2=>3 (3 stays in before) strands 1=>2, whose target 2 then stays too.
         let d = delta((&before, &[]), (&after, &[]), CONTENT, &[(1, 2), (2, 3)]);
@@ -463,21 +579,42 @@ mod tests {
         assert_eq!(d, GraphDelta::default());
         // A real change in one copy still shows.
         let after = [copy_b, node(1, vec![(CODE, text("class A { x }"))])];
-        assert_eq!(delta((&before, &[]), (&after, &[]), &content, &[]).modified_nodes, ids(&[1]));
+        assert_eq!(
+            delta((&before, &[]), (&after, &[]), &content, &[]).modified_nodes,
+            ids(&[1])
+        );
     }
 
     #[test]
     fn output_is_sorted() {
         let before = [code(30, "x"), bare(10), code(20, "y"), bare(7), bare(8)];
-        let after = [bare(40), code(20, "z"), bare(5), code(30, "w"), bare(12), bare(1)];
-        let eb = [edge(30, 20, Confidence::Strong), edge(10, 20, Confidence::Strong), edge(7, 20, Confidence::Strong)];
-        let ea = [edge(40, 5, Confidence::Strong), edge(5, 40, Confidence::Strong), edge(20, 30, Confidence::Strong)];
+        let after = [
+            bare(40),
+            code(20, "z"),
+            bare(5),
+            code(30, "w"),
+            bare(12),
+            bare(1),
+        ];
+        let eb = [
+            edge(30, 20, Confidence::Strong),
+            edge(10, 20, Confidence::Strong),
+            edge(7, 20, Confidence::Strong),
+        ];
+        let ea = [
+            edge(40, 5, Confidence::Strong),
+            edge(5, 40, Confidence::Strong),
+            edge(20, 30, Confidence::Strong),
+        ];
         // 8 => 1 and 7 => 12: before-id order and after-id order disagree.
         let d = delta((&before, &eb), (&after, &ea), CONTENT, &[(8, 1), (7, 12)]);
         assert_eq!(d.added_nodes, ids(&[5, 40]));
         assert_eq!(d.removed_nodes, ids(&[10]));
         assert_eq!(d.modified_nodes, ids(&[20, 30]));
-        assert_eq!(d.moved_nodes, vec![(NodeId(7), NodeId(12)), (NodeId(8), NodeId(1))]);
+        assert_eq!(
+            d.moved_nodes,
+            vec![(NodeId(7), NodeId(12)), (NodeId(8), NodeId(1))]
+        );
         assert_eq!(d.added_edges, vec![key(5, 40), key(20, 30), key(40, 5)]);
         // 7->20 remaps to 12->20, which sorts after 10->20; the output is in
         // before-key order.

@@ -34,7 +34,9 @@ mod tests {
     fn parser_stamp_is_16_lowercase_hex() {
         assert_eq!(PARSER_STAMP.len(), 16, "PARSER_STAMP = {PARSER_STAMP:?}");
         assert!(
-            PARSER_STAMP.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            PARSER_STAMP
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "PARSER_STAMP = {PARSER_STAMP:?} is not lowercase hex"
         );
         assert_ne!(PARSER_STAMP, "0000000000000000", "stamp hashed nothing");

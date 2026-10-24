@@ -60,8 +60,11 @@ impl CrossGraphResolver for RpcStackResolver {
         let mut edges = Vec::new();
         // CB.24: a call's hosts narrow its procedures; the calls narrowed
         // (distinct ids) and the `host` rule's tally.
-        let mut narrowing =
-            SideNarrowing::new(&merged.graphs, node_kind::RPC_CALL, node_kind::RPC_PROCEDURE);
+        let mut narrowing = SideNarrowing::new(
+            &merged.graphs,
+            node_kind::RPC_CALL,
+            node_kind::RPC_PROCEDURE,
+        );
         let mut narrowed: HashSet<NodeId> = HashSet::new();
         let mut rules = RuleTally::new("rpc", &["host"]);
         for g in &merged.graphs {
@@ -69,10 +72,16 @@ impl CrossGraphResolver for RpcStackResolver {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::RPC_CALL) {
                     continue;
                 }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(path) = split_owner(qname).0.strip_prefix("rpc_call:") else { continue };
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                let Some(path) = split_owner(qname).0.strip_prefix("rpc_call:") else {
+                    continue;
+                };
                 calls += 1;
-                let Some(targets) = index.get(path) else { continue };
+                let Some(targets) = index.get(path) else {
+                    continue;
+                };
                 paired += 1;
                 let mut targets = targets.clone();
                 let by_host = narrowing.narrow(n.id, &mut targets, |t| t.id);
@@ -124,7 +133,12 @@ mod tests {
             let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
             let name = qname.split_once(':').map_or(qname, |(_, p)| p);
             nav.record(id, name, qname, kind, None);
-            out.push(Node { id, repo, confidence, cells: vec![] });
+            out.push(Node {
+                id,
+                repo,
+                confidence,
+                cells: vec![],
+            });
         }
         RepoGraph {
             repo,
@@ -157,8 +171,17 @@ mod tests {
 
     #[test]
     fn pairs_a_call_to_its_procedure_across_repos() {
-        let (server, client) = (RepoId::from_canonical("test://srv"), RepoId::from_canonical("test://web"));
-        let g_srv = graph(server, &[(PROC, "rpc:user.list", Strong), (PROC, "rpc:user.byId", Strong)]);
+        let (server, client) = (
+            RepoId::from_canonical("test://srv"),
+            RepoId::from_canonical("test://web"),
+        );
+        let g_srv = graph(
+            server,
+            &[
+                (PROC, "rpc:user.list", Strong),
+                (PROC, "rpc:user.byId", Strong),
+            ],
+        );
         let g_web = graph(client, &[(CALL, "rpc_call:user.list", Medium)]);
         let mut merged = MergedGraph::new(vec![g_srv, g_web]);
         merged.run(&RpcStackResolver);
@@ -175,7 +198,10 @@ mod tests {
 
     #[test]
     fn exact_path_only_no_prefix_suffix_or_substring_fallback() {
-        let (server, client) = (RepoId::from_canonical("test://srv"), RepoId::from_canonical("test://web"));
+        let (server, client) = (
+            RepoId::from_canonical("test://srv"),
+            RepoId::from_canonical("test://web"),
+        );
         let g_srv = graph(server, &[(PROC, "rpc:user.list", Strong)]);
         let g_web = graph(
             client,
@@ -193,7 +219,10 @@ mod tests {
 
     #[test]
     fn blast_radius_crosses_the_rpc_hop() {
-        let (server, client) = (RepoId::from_canonical("test://srv"), RepoId::from_canonical("test://web"));
+        let (server, client) = (
+            RepoId::from_canonical("test://srv"),
+            RepoId::from_canonical("test://web"),
+        );
         let g_srv = graph(server, &[(PROC, "rpc:user.list", Strong)]);
         let g_web = graph(client, &[(CALL, "rpc_call:user.list", Strong)]);
         let mut merged = MergedGraph::new(vec![g_srv, g_web]);
@@ -205,8 +234,15 @@ mod tests {
             &glia_code_domain::profile::CODE_TABLES,
         );
         let proc_id = id(server, PROC, "rpc:user.list");
-        let hit = hits.iter().find(|h| h.id == proc_id).map(|h| (h.depth, h.reason));
-        assert_eq!(hit, Some((1, edge_category::RPC_CALLS)), "RPC_CALLS must carry blast radius");
+        let hit = hits
+            .iter()
+            .find(|h| h.id == proc_id)
+            .map(|h| (h.depth, h.reason));
+        assert_eq!(
+            hit,
+            Some((1, edge_category::RPC_CALLS)),
+            "RPC_CALLS must carry blast radius"
+        );
     }
 
     /// LB.8b: an owned call reaches every owned procedure of its path, and the
@@ -268,7 +304,12 @@ mod tests {
         });
         let mut merged = MergedGraph::new(vec![g]);
         merged.run(&RpcStackResolver);
-        let pair = |from: &str, to: &str| (format!("rpc_call:item.list @{from}"), format!("rpc:item.list @{to}"));
+        let pair = |from: &str, to: &str| {
+            (
+                format!("rpc_call:item.list @{from}"),
+                format!("rpc:item.list @{to}"),
+            )
+        };
         assert_eq!(
             cross_pairs(&merged, edge_category::RPC_CALLS),
             vec![
@@ -282,7 +323,11 @@ mod tests {
             .iter()
             .map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule).as_deref() == Some("host"))
             .collect();
-        assert_eq!(host_rule.iter().filter(|h| **h).count(), 1, "only the narrowed pair: {host_rule:?}");
+        assert_eq!(
+            host_rule.iter().filter(|h| **h).count(),
+            1,
+            "only the narrowed pair: {host_rule:?}"
+        );
     }
 
     #[test]
@@ -290,13 +335,23 @@ mod tests {
         // A T3 app keeps router and page in one repo; the same procedure id
         // appearing in two graphs of that repo must still yield one edge.
         let r = RepoId::from_canonical("test://t3");
-        let g1 = graph(r, &[(PROC, "rpc:post.create", Strong), (CALL, "rpc_call:post.create", Strong)]);
+        let g1 = graph(
+            r,
+            &[
+                (PROC, "rpc:post.create", Strong),
+                (CALL, "rpc_call:post.create", Strong),
+            ],
+        );
         let g2 = graph(r, &[(PROC, "rpc:post.create", Strong)]);
         let mut merged = MergedGraph::new(vec![g1, g2]);
         merged.run(&RpcStackResolver);
         assert_eq!(
             rpc_edges(&merged),
-            vec![(id(r, CALL, "rpc_call:post.create"), id(r, PROC, "rpc:post.create"), Strong)],
+            vec![(
+                id(r, CALL, "rpc_call:post.create"),
+                id(r, PROC, "rpc:post.create"),
+                Strong
+            )],
         );
     }
 }

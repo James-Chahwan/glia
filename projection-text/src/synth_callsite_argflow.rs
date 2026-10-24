@@ -30,11 +30,7 @@ pub struct CallsiteArgflowCell {
 /// NodeId set (typically PPR top-K resolved to method/function nodes),
 /// and emits one `CallsiteArgflowCell` per polymorphic simple-name with
 /// observed call-site polymorphism.
-pub fn run(
-    graph: &RepoGraph,
-    activated: &[NodeId],
-    id_start: u64,
-) -> Vec<CallsiteArgflowCell> {
+pub fn run(graph: &RepoGraph, activated: &[NodeId], id_start: u64) -> Vec<CallsiteArgflowCell> {
     let activated_set: HashSet<NodeId> = activated.iter().copied().collect();
 
     // All METHODs grouped by simple name (whole-graph view — needed to

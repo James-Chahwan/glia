@@ -123,7 +123,11 @@ impl RankCache {
     /// An empty cache. `holder` names the owner in the marker (`cli`,
     /// `pygraph`, `watch`, `answer`); the repo roots and labels are the ones
     /// the answers locate and tie-break rows by.
-    pub fn new(holder: &'static str, repo_roots: &BTreeMap<u64, String>, repo_labels: &BTreeMap<u64, String>) -> Self {
+    pub fn new(
+        holder: &'static str,
+        repo_roots: &BTreeMap<u64, String>,
+        repo_labels: &BTreeMap<u64, String>,
+    ) -> Self {
         RankCache {
             holder,
             roots: repo_roots.clone(),
@@ -140,10 +144,19 @@ impl RankCache {
     /// The PPR index of `g` (the `source` view of this cache's graph) under
     /// `config`: a held one, else built now (outside the lock: two racing
     /// builders build identical indexes and the first insert wins).
-    pub fn ppr_index<G: GraphSource + ?Sized>(&self, g: &G, source: SourceKey, config: &ActivationConfig) -> Arc<PprIndex> {
+    pub fn ppr_index<G: GraphSource + ?Sized>(
+        &self,
+        g: &G,
+        source: SourceKey,
+        config: &ActivationConfig,
+    ) -> Arc<PprIndex> {
         let held = {
             let slots = lock(&self.slots);
-            slots.indexes.iter().find(|(s, ix)| *s == source && ix.matches(config)).map(|(_, ix)| Arc::clone(ix))
+            slots
+                .indexes
+                .iter()
+                .find(|(s, ix)| *s == source && ix.matches(config))
+                .map(|(_, ix)| Arc::clone(ix))
         };
         if let Some(ix) = held {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -155,10 +168,15 @@ impl RankCache {
         let built = Arc::new(PprIndex::build(&g.node_ids(), g.edges(), config));
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.built.fetch_add(1, Ordering::Relaxed);
-        self.build_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.build_us
+            .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         let (ix, entries) = {
             let mut slots = lock(&self.slots);
-            let raced = slots.indexes.iter().find(|(s, ix)| *s == source && ix.matches(config)).map(|(_, ix)| Arc::clone(ix));
+            let raced = slots
+                .indexes
+                .iter()
+                .find(|(s, ix)| *s == source && ix.matches(config))
+                .map(|(_, ix)| Arc::clone(ix));
             let ix = match raced {
                 Some(first) => first,
                 None => {
@@ -175,7 +193,15 @@ impl RankCache {
         ix
     }
 
-    fn mark(&self, source: SourceKey, config: &ActivationConfig, how: &str, ix: &PprIndex, ms: f64, entries: usize) {
+    fn mark(
+        &self,
+        source: SourceKey,
+        config: &ActivationConfig,
+        how: &str,
+        ix: &PprIndex,
+        ms: f64,
+        entries: usize,
+    ) {
         if self.holder == CALIBRATE_HOLDER {
             return;
         }
@@ -259,9 +285,15 @@ impl RankCache {
         if fresh {
             let s = ix.stats();
             if self.roots.is_empty() {
-                eprintln!("[rank-cochange] holder={} none reason=no_roots", self.holder);
+                eprintln!(
+                    "[rank-cochange] holder={} none reason=no_roots",
+                    self.holder
+                );
             } else if s.snapshots == 0 {
-                eprintln!("[rank-cochange] holder={} none reason=no_snapshot", self.holder);
+                eprintln!(
+                    "[rank-cochange] holder={} none reason=no_snapshot",
+                    self.holder
+                );
             } else {
                 self.mark_cochange("snapshot", &ix, ms);
             }
@@ -300,7 +332,8 @@ impl RankCache {
     /// then the held handle. A guard reset drops it.
     pub fn calibration(&self) -> CalibrationHandle {
         let mut held = lock(&self.calibration);
-        held.get_or_insert_with(|| CalibrationHandle::new(load_for_roots(&self.roots))).clone()
+        held.get_or_insert_with(|| CalibrationHandle::new(load_for_roots(&self.roots)))
+            .clone()
     }
 
     /// Record `merged`'s shape on the first call; on a later call with
@@ -357,7 +390,10 @@ impl Drop for RankCache {
         if self.holder != CALIBRATE_HOLDER {
             return;
         }
-        let (hits, built) = (self.hits.load(Ordering::Relaxed), self.built.load(Ordering::Relaxed));
+        let (hits, built) = (
+            self.hits.load(Ordering::Relaxed),
+            self.built.load(Ordering::Relaxed),
+        );
         if hits + built == 0 {
             return;
         }
@@ -410,9 +446,21 @@ mod tests {
         let names = ["m::a", "m::b", "m::c", "m::d"];
         let mut nav = CodeNav::default();
         for q in names {
-            nav.record(id(q), q.trim_start_matches("m::"), q, node_kind::FUNCTION, None);
+            nav.record(
+                id(q),
+                q.trim_start_matches("m::"),
+                q,
+                node_kind::FUNCTION,
+                None,
+            );
         }
-        let e = |f: &str, t: &str, c| Edge { from: id(f), to: id(t), category: c, confidence: Confidence::Strong, cells: Vec::new() };
+        let e = |f: &str, t: &str, c| Edge {
+            from: id(f),
+            to: id(t),
+            category: c,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        };
         let mut edges = vec![
             e("m::a", "m::b", edge_category::CALLS),
             e("m::b", "m::c", edge_category::CALLS),
@@ -422,7 +470,15 @@ mod tests {
         edges.extend((0..extra).map(|_| e("m::c", "m::a", edge_category::CALLS)));
         MergedGraph::new(vec![RepoGraph {
             repo: r,
-            nodes: names.iter().map(|&q| Node { id: id(q), repo: r, confidence: Confidence::Strong, cells: vec![] }).collect(),
+            nodes: names
+                .iter()
+                .map(|&q| Node {
+                    id: id(q),
+                    repo: r,
+                    confidence: Confidence::Strong,
+                    cells: vec![],
+                })
+                .collect(),
             edges,
             symbols: SymbolTable::default(),
             nav,
@@ -476,16 +532,24 @@ mod tests {
     #[test]
     fn a_ninth_config_evicts_the_first_inserted() {
         let (g, c) = (merged(0), cache());
-        let cfgs: Vec<ActivationConfig> = (0..=MAX_INDEXES).map(|i| undirected(0.1 + 0.05 * i as f64)).collect();
+        let cfgs: Vec<ActivationConfig> = (0..=MAX_INDEXES)
+            .map(|i| undirected(0.1 + 0.05 * i as f64))
+            .collect();
         let first = c.ppr_index(&g, SourceKey::Merged, &cfgs[0]);
         let second = c.ppr_index(&g, SourceKey::Merged, &cfgs[1]);
         for cfg in &cfgs[2..] {
             c.ppr_index(&g, SourceKey::Merged, cfg);
         }
         assert_eq!(c.stats().entries, MAX_INDEXES);
-        assert!(Arc::ptr_eq(&second, &c.ppr_index(&g, SourceKey::Merged, &cfgs[1])));
+        assert!(Arc::ptr_eq(
+            &second,
+            &c.ppr_index(&g, SourceKey::Merged, &cfgs[1])
+        ));
         let again = c.ppr_index(&g, SourceKey::Merged, &cfgs[0]);
-        assert!(!Arc::ptr_eq(&first, &again), "the first inserted was evicted and rebuilt");
+        assert!(
+            !Arc::ptr_eq(&first, &again),
+            "the first inserted was evicted and rebuilt"
+        );
         assert_eq!(c.stats().built, MAX_INDEXES + 2);
     }
 
@@ -502,15 +566,25 @@ mod tests {
         let g1 = merged(1);
         c.guard(&g1);
         assert_eq!(c.stats().entries, 0);
-        assert!(!Arc::ptr_eq(&adj0, &c.carry(&g1)), "the adjacency was dropped too");
+        assert!(
+            !Arc::ptr_eq(&adj0, &c.carry(&g1)),
+            "the adjacency was dropped too"
+        );
     }
 
     #[test]
     fn rank_over_the_cached_index_equals_rank_in_f64_bits() {
         let (g, c) = (merged(0), cache());
-        let candidates: Vec<NodeId> = ["m::a", "m::b", "m::c", "m::d"].iter().map(|q| id(q)).collect();
+        let candidates: Vec<NodeId> = ["m::a", "m::b", "m::c", "m::d"]
+            .iter()
+            .map(|q| id(q))
+            .collect();
         for d in [0.5, WIDE_DAMPING] {
-            for dir in [Direction::Forward, Direction::Backward, Direction::Undirected] {
+            for dir in [
+                Direction::Forward,
+                Direction::Backward,
+                Direction::Undirected,
+            ] {
                 let mut cfg = undirected(d);
                 cfg.direction = dir;
                 let plan: ActivationPlan<'_, MergedGraph> = ActivationPlan::new(cfg.clone());

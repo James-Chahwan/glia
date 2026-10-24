@@ -55,8 +55,8 @@
 
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::patterns::{
-    DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, GroupBy, PatternArgs,
-    PatternReport, Population, pattern_conformance, pattern_conformance_delta,
+    DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, GroupBy, PatternArgs, PatternReport,
+    Population, pattern_conformance, pattern_conformance_delta,
 };
 
 use crate::common::{build_options, generate_for};
@@ -107,7 +107,10 @@ pub(crate) struct Args {
 /// The engine's options from the flags, or the usage error.
 fn pattern_args(args: &Args) -> Result<PatternArgs, String> {
     if args.min_share > 100 {
-        return Err(format!("--min-share is a percentage (0-100), got {}", args.min_share));
+        return Err(format!(
+            "--min-share is a percentage (0-100), got {}",
+            args.min_share
+        ));
     }
     let mut p = PatternArgs::default();
     p.min_support = args.min_support;
@@ -124,14 +127,18 @@ fn pattern_args(args: &Args) -> Result<PatternArgs, String> {
 fn answer(args: &Args, p: &PatternArgs) -> Result<(PatternReport, &'static str), String> {
     let Some(base) = args.base.as_deref() else {
         let built = generate_for(&args.repo, &args.with)?;
-        return Ok((pattern_conformance(&built.merged, &built.repo_labels, p), "graph"));
+        return Ok((
+            pattern_conformance(&built.merged, &built.repo_labels, p),
+            "graph",
+        ));
     };
     if !args.with.is_empty() {
         return Err("--base builds the one repo against its git rev; --with needs whole-graph mode (no --base)".to_string());
     }
     if !build_options().overlay {
         return Err(
-            "--no-overlay does not apply to --base: both sides are built with the repo's overlay".to_string(),
+            "--no-overlay does not apply to --base: both sides are built with the repo's overlay"
+                .to_string(),
         );
     }
     let d = graph_delta_vs_rev(&args.repo, base)?;
@@ -185,7 +192,11 @@ fn route(method: Option<&str>, path: Option<&str>) -> String {
 /// `k=v, ...` for a count map, or `none`.
 fn counts<'a>(m: impl IntoIterator<Item = (&'a &'static str, &'a usize)>) -> String {
     let parts: Vec<String> = m.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
-    if parts.is_empty() { "none".to_string() } else { parts.join(", ") }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// The table report (module docs).
@@ -221,7 +232,11 @@ fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) ->
 }
 
 fn population(out: &mut String, pop: &Population, r: &PatternReport, p: &PatternArgs) {
-    let sigs: Vec<String> = pop.signatures.iter().map(|(s, n)| format!("`{s}` ×{n}")).collect();
+    let sigs: Vec<String> = pop
+        .signatures
+        .iter()
+        .map(|(s, n)| format!("`{s}` ×{n}"))
+        .collect();
     let name = match &pop.package {
         Some(pkg) => format!("{} / {pkg}", pop.service),
         None => pop.service.clone(),
@@ -303,7 +318,9 @@ fn blind_rows(out: &mut String, pop: &Population, r: &PatternReport) {
             pop.blind.len()
         ));
     } else {
-        out.push_str(&format!("- blind (the graph follows no chain): {blind}\n\n"));
+        out.push_str(&format!(
+            "- blind (the graph follows no chain): {blind}\n\n"
+        ));
     }
     if pop.blind.is_empty() {
         return;
@@ -311,7 +328,11 @@ fn blind_rows(out: &mut String, pop: &Population, r: &PatternReport) {
     out.push_str("| handler | route | location |\n|---|---|---|\n");
     for b in &pop.blind {
         let route = route(b.route_method.as_deref(), b.route_path.as_deref());
-        out.push_str(&format!("| `{}` | {route} | {} |\n", b.handler, at(b.file.as_deref(), b.line)));
+        out.push_str(&format!(
+            "| `{}` | {route} | {} |\n",
+            b.handler,
+            at(b.file.as_deref(), b.line)
+        ));
     }
     out.push('\n');
 }

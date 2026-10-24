@@ -41,13 +41,22 @@ fn control_dir_repo(root: &Path, gitignore: &str) {
     write(&root.join("m.py"), "def f():\n    return 1\n");
     write(&root.join(".gitignore"), gitignore);
     write(&root.join(".glia/notes.py"), "def g():\n    return 2\n");
-    write(&root.join(".glia/notes.md"), "# Notes\n\nNever a DOC_SECTION.\n");
+    write(
+        &root.join(".glia/notes.md"),
+        "# Notes\n\nNever a DOC_SECTION.\n",
+    );
     write(
         &root.join(".glia/scratch/spec.json"),
         r#"{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/x":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
     );
-    write(&root.join(".glia/docs-snapshot/manifest.jsonl"), SNAPSHOT_LINE);
-    write(&root.join("pkg/.glia/nested.py"), "def h():\n    return 3\n");
+    write(
+        &root.join(".glia/docs-snapshot/manifest.jsonl"),
+        SNAPSHOT_LINE,
+    );
+    write(
+        &root.join("pkg/.glia/nested.py"),
+        "def h():\n    return 3\n",
+    );
 }
 
 /// `(kind, qname)` of every node the build produced, sorted.
@@ -77,18 +86,29 @@ fn assert_no_control_dir_nodes(r: &GenerateResult, context: &str) {
         .iter()
         .filter(|(_, q)| q.starts_with(".glia") || q.contains("::.glia") || q.contains(".glia/"))
         .collect();
-    assert!(leaked.is_empty(), "{context}: nodes from under .glia: {leaked:?}");
-    let regions: Vec<&String> =
-        all.iter().filter(|(k, _)| *k == node_kind::REGION.0).map(|(_, q)| q).collect();
-    assert!(regions.iter().all(|q| !q.contains(".glia")), "{context}: {regions:?}");
+    assert!(
+        leaked.is_empty(),
+        "{context}: nodes from under .glia: {leaked:?}"
+    );
+    let regions: Vec<&String> = all
+        .iter()
+        .filter(|(k, _)| *k == node_kind::REGION.0)
+        .map(|(_, q)| q)
+        .collect();
+    assert!(
+        regions.iter().all(|q| !q.contains(".glia")),
+        "{context}: {regions:?}"
+    );
     assert!(
         // LB.12: the qname a sniffed .glia/scratch/spec.json op would mint.
-        !all.iter().any(|(k, q)| *k == node_kind::DOC_SECTION.0 && q == "contract::.glia::scratch::spec::GET:/x"),
+        !all.iter().any(|(k, q)| *k == node_kind::DOC_SECTION.0
+            && q == "contract::.glia::scratch::spec::GET:/x"),
         "{context}: .glia/scratch/spec.json was contract-sniffed"
     );
     // The control: ordinary source beside `.glia` is still parsed.
     assert!(
-        all.iter().any(|(k, q)| *k == node_kind::FUNCTION.0 && q == "m::f"),
+        all.iter()
+            .any(|(k, q)| *k == node_kind::FUNCTION.0 && q == "m::f"),
         "{context}: m::f missing from {all:?}"
     );
 }
@@ -106,11 +126,13 @@ fn glia_dir_is_never_walked() {
 
     let all = nodes(&r);
     assert!(
-        all.iter().any(|(k, q)| *k == node_kind::DOC_SECTION.0 && q.contains("runbook")),
+        all.iter()
+            .any(|(k, q)| *k == node_kind::DOC_SECTION.0 && q.contains("runbook")),
         "the docs snapshot must still be ingested: {all:?}"
     );
     assert!(
-        !all.iter().any(|(_, q)| q.contains("nested") || q.contains("pkg::.glia")),
+        !all.iter()
+            .any(|(_, q)| q.contains("nested") || q.contains("pkg::.glia")),
         "a nested .glia is the control dir too: {all:?}"
     );
 }
@@ -120,7 +142,12 @@ fn layout_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
-        .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -145,7 +172,9 @@ fn control_dir_builds_are_byte_identical() {
 
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(layout.join(MANIFEST_NAME)).unwrap()).unwrap();
-    let inputs = manifest["external_inputs"].as_object().expect("the writer records the fingerprint");
+    let inputs = manifest["external_inputs"]
+        .as_object()
+        .expect("the writer records the fingerprint");
     let keys: Vec<&str> = inputs.keys().map(String::as_str).collect();
     assert_eq!(
         keys,
@@ -182,10 +211,21 @@ fn in_place_snapshot_rewrite_after_persist_is_stale() {
     let repo = tmp.path().join("repo");
     control_dir_repo(&repo, ".glia/docs-snapshot/\n");
     let layout = default_layout_dir(&repo);
-    persist_result(&generate_one(repo.to_str().unwrap()).unwrap(), &layout, "test").unwrap();
-    assert!(!is_gmap_stale(&layout, &repo), "fresh right after the persist");
+    persist_result(
+        &generate_one(repo.to_str().unwrap()).unwrap(),
+        &layout,
+        "test",
+    )
+    .unwrap();
+    assert!(
+        !is_gmap_stale(&layout, &repo),
+        "fresh right after the persist"
+    );
 
     let snap = repo.join(".glia/docs-snapshot/manifest.jsonl");
     std::fs::write(&snap, SNAPSHOT_LINE.replace("\"3\"", "\"4\"")).unwrap();
-    assert!(is_gmap_stale(&layout, &repo), "an in-place snapshot rewrite must mark stale");
+    assert!(
+        is_gmap_stale(&layout, &repo),
+        "an in-place snapshot rewrite must mark stale"
+    );
 }

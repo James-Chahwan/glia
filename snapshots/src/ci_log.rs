@@ -29,12 +29,21 @@ use glia_code_domain::snapshots::{SOURCE_LOG, STATUS_ERROR, STATUS_FAILED, TestC
 const TRACE_READ_CAP: usize = 64 * 1024;
 
 /// (file, suite, classname, name, status): a case printed twice is one case.
-type CaseKey = (Option<String>, Option<String>, Option<String>, String, String);
+type CaseKey = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
 
 /// Parse the failure lines of one CI log into records (source `log`,
 /// `report` as given).
 pub fn parse_ci_log(text: &str, report: &str) -> Vec<TestCaseRecord> {
-    let mut parser = LogParser { report, ..LogParser::default() };
+    let mut parser = LogParser {
+        report,
+        ..LogParser::default()
+    };
     for raw in text.lines() {
         parser.line(&clean_line(raw));
     }
@@ -46,7 +55,11 @@ enum Capture {
     #[default]
     None,
     /// Lines indented deeper than the header's `indent` (blank lines too, for jest).
-    Indented { rec: usize, indent: usize, keep_blank: bool },
+    Indented {
+        rec: usize,
+        indent: usize,
+        keep_blank: bool,
+    },
     /// A cargo `---- name stdout ----` block, up to the next block or `failures:`.
     Cargo { rec: usize },
 }
@@ -77,7 +90,11 @@ impl LogParser<'_> {
             let name = rest.split(" (").next().unwrap_or(rest).trim();
             let rec = self.push(None, None, name, STATUS_FAILED);
             self.go_pending.push(rec);
-            self.capture = Capture::Indented { rec, indent, keep_blank: false };
+            self.capture = Capture::Indented {
+                rec,
+                indent,
+                keep_blank: false,
+            };
         } else if let Some(rest) = line.strip_prefix("FAIL\t") {
             let pkg = rest.split(['\t', ' ']).next().unwrap_or("").trim();
             for rec in std::mem::take(&mut self.go_pending) {
@@ -87,19 +104,23 @@ impl LogParser<'_> {
             }
         } else if line.starts_with("ok ") && line.contains('\t') {
             self.go_pending.clear();
-        } else if let Some(full) = trimmed.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
-            self.cargo_record(full.trim());
         } else if let Some(full) = trimmed
-            .strip_prefix("---- ")
-            .and_then(|r| r.strip_suffix(" stdout ----").or_else(|| r.strip_suffix(" stderr ----")))
+            .strip_prefix("test ")
+            .and_then(|r| r.strip_suffix(" ... FAILED"))
         {
+            self.cargo_record(full.trim());
+        } else if let Some(full) = trimmed.strip_prefix("---- ").and_then(|r| {
+            r.strip_suffix(" stdout ----")
+                .or_else(|| r.strip_suffix(" stderr ----"))
+        }) {
             let rec = self.cargo_record(full.trim());
             self.capture = Capture::Cargo { rec };
         } else if let Some(title) = trimmed.strip_prefix("● ") {
             self.jest(title.trim(), indent);
         } else if let Some(path) = trimmed.strip_prefix("FAIL ") {
             let path = path.trim();
-            self.jest_file = (!path.is_empty() && !path.contains(char::is_whitespace)).then(|| path.to_string());
+            self.jest_file =
+                (!path.is_empty() && !path.contains(char::is_whitespace)).then(|| path.to_string());
         } else if trimmed.starts_with("PASS ") {
             self.jest_file = None;
         }
@@ -111,12 +132,20 @@ impl LogParser<'_> {
         let t = line.trim();
         let keep = match self.capture {
             Capture::None => return false,
-            Capture::Indented { indent, keep_blank, .. } => {
+            Capture::Indented {
+                indent, keep_blank, ..
+            } => {
                 let header = t.starts_with("--- ") || t.starts_with("=== ") || t.starts_with("● ");
-                if t.is_empty() { keep_blank } else { indent_of(line) > indent && !header }
+                if t.is_empty() {
+                    keep_blank
+                } else {
+                    indent_of(line) > indent && !header
+                }
             }
             Capture::Cargo { .. } => {
-                !(t == "failures:" || t.starts_with("test result:") || (t.starts_with("---- ") && t.ends_with(" ----")))
+                !(t == "failures:"
+                    || t.starts_with("test result:")
+                    || (t.starts_with("---- ") && t.ends_with(" ----")))
             }
         };
         let rec = match self.capture {
@@ -145,10 +174,23 @@ impl LogParser<'_> {
         }
         let (base, param) = id.find('[').map_or((id, ""), |k| (&id[..k], &id[k..]));
         let parts: Vec<&str> = base.split("::").collect();
-        let (Some((last, classes)), Some(path)) = (parts[1..].split_last(), parts.first()) else { return };
-        let module = path.strip_suffix(".py").unwrap_or(path).replace(['/', '\\'], ".");
-        let classname = std::iter::once(module.as_str()).chain(classes.iter().copied()).collect::<Vec<_>>().join(".");
-        let rec = self.push(Some(path.to_string()), Some(classname), &format!("{last}{param}"), status);
+        let (Some((last, classes)), Some(path)) = (parts[1..].split_last(), parts.first()) else {
+            return;
+        };
+        let module = path
+            .strip_suffix(".py")
+            .unwrap_or(path)
+            .replace(['/', '\\'], ".");
+        let classname = std::iter::once(module.as_str())
+            .chain(classes.iter().copied())
+            .collect::<Vec<_>>()
+            .join(".");
+        let rec = self.push(
+            Some(path.to_string()),
+            Some(classname),
+            &format!("{last}{param}"),
+            status,
+        );
         self.records[rec].message = msg.filter(|m| !m.is_empty()).map(str::to_string);
     }
 
@@ -188,13 +230,27 @@ impl LogParser<'_> {
             Some((name, describe)) if !describe.is_empty() => (Some(describe.join(" › ")), *name),
             _ => (None, title),
         };
-        let status = if title == "Test suite failed to run" { STATUS_ERROR } else { STATUS_FAILED };
+        let status = if title == "Test suite failed to run" {
+            STATUS_ERROR
+        } else {
+            STATUS_FAILED
+        };
         let rec = self.push(self.jest_file.clone(), None, name, status);
         self.records[rec].suite = suite;
-        self.capture = Capture::Indented { rec, indent, keep_blank: true };
+        self.capture = Capture::Indented {
+            rec,
+            indent,
+            keep_blank: true,
+        };
     }
 
-    fn push(&mut self, file: Option<String>, classname: Option<String>, name: &str, status: &str) -> usize {
+    fn push(
+        &mut self,
+        file: Option<String>,
+        classname: Option<String>,
+        name: &str,
+        status: &str,
+    ) -> usize {
         self.records.push(TestCaseRecord {
             // `append_tests_run` stamps the run's seq.
             seq: 0,
@@ -259,19 +315,33 @@ impl LogParser<'_> {
 fn trace_message(trace: &str) -> Option<String> {
     let mut lines = trace.lines().map(str::trim).filter(|l| !l.is_empty());
     let first = lines.next()?;
-    let message = if first.contains("panicked at") { lines.next().unwrap_or(first) } else { first };
+    let message = if first.contains("panicked at") {
+        lines.next().unwrap_or(first)
+    } else {
+        first
+    };
     Some(message.to_string())
 }
 
 /// Leading spaces and tabs.
 fn indent_of(line: &str) -> usize {
-    line.bytes().take_while(|b| *b == b' ' || *b == b'\t').count()
+    line.bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count()
 }
 
 /// Join `lines` with their common indentation removed, blank edges trimmed.
 fn dedent(lines: &[String]) -> String {
-    let common = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| indent_of(l)).min().unwrap_or(0);
-    let body: Vec<&str> = lines.iter().map(|l| l.get(common..).unwrap_or(l.trim_start()).trim_end()).collect();
+    let common = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| indent_of(l))
+        .min()
+        .unwrap_or(0);
+    let body: Vec<&str> = lines
+        .iter()
+        .map(|l| l.get(common..).unwrap_or(l.trim_start()).trim_end())
+        .collect();
     body.join("\n").trim_matches('\n').to_string()
 }
 
@@ -316,7 +386,10 @@ fn strip_actions_timestamp(line: &str) -> Option<&str> {
         return None;
     }
     let z = line[..line.len().min(40)].find("Z ")?;
-    line[11..z].bytes().all(|c| c.is_ascii_digit() || c == b':' || c == b'.').then(|| &line[z + 2..])
+    line[11..z]
+        .bytes()
+        .all(|c| c.is_ascii_digit() || c == b':' || c == b'.')
+        .then(|| &line[z + 2..])
 }
 
 #[cfg(test)]
@@ -325,7 +398,8 @@ mod tests {
 
     #[test]
     fn ansi_and_actions_timestamps_are_stripped() {
-        let log = "2026-09-19T06:00:00.1234567Z \x1b[31mFAILED\x1b[0m tests/test_a.py::test_x - boom\n";
+        let log =
+            "2026-09-19T06:00:00.1234567Z \x1b[31mFAILED\x1b[0m tests/test_a.py::test_x - boom\n";
         let rows = parse_ci_log(log, "ci.log");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "test_x");

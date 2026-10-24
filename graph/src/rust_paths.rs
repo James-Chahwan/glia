@@ -138,7 +138,11 @@ pub(crate) const MOD_ITEM: &str = "mod_item";
 /// fn's body is not in scope for its signature (rustc E0412), so a fn-scoped
 /// binding never names a parameter's type.
 pub(crate) const TYPE_REF_CATEGORIES: &[(EdgeCategoryId, &[NodeKindId], &str)] = &[
-    (edge_category::IMPLEMENTS, &[node_kind::INTERFACE], "trait_impl"),
+    (
+        edge_category::IMPLEMENTS,
+        &[node_kind::INTERFACE],
+        "trait_impl",
+    ),
     (
         edge_category::INJECTS,
         &[node_kind::STRUCT, node_kind::ENUM, node_kind::INTERFACE],
@@ -1280,8 +1284,7 @@ impl RustIndex {
         enclosing(&g.nav, scope, false)
             .and_then(|m| g.nav.qname_by_id.get(&m))
             .is_some_and(|q| {
-                self.covering(q).is_some()
-                    && matches!(self.crate_root(g, q), Some(Root::Module(_)))
+                self.covering(q).is_some() && matches!(self.crate_root(g, q), Some(Root::Module(_)))
             })
     }
 
@@ -1806,7 +1809,10 @@ pub(crate) fn resolve_imports_rust(
         }
         let name = if leaf.glob { Some("*") } else { leaf.bound };
         if let Some(name) = name {
-            declared.entry(leaf.scope).or_default().insert(name.to_string());
+            declared
+                .entry(leaf.scope)
+                .or_default()
+                .insert(name.to_string());
         }
     }
 
@@ -1846,7 +1852,13 @@ pub(crate) fn resolve_imports_rust(
             continue;
         };
         if from != *to && drawn.insert((from, *to)) {
-            push_edge(g, from, *to, edge_category::IMPORTS, rust_ev(rule).line(leaf.line));
+            push_edge(
+                g,
+                from,
+                *to,
+                edge_category::IMPORTS,
+                rust_ev(rule).line(leaf.line),
+            );
         }
     }
     stats.imports_edges = drawn.len();

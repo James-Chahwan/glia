@@ -15,14 +15,16 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use glia_graph::{MergedGraph, Reach, RepoGraph};
 
 use crate::absence::{self, Absence, Answer};
+use crate::calibrate::{
+    COCHANGE_CANDIDATES, COCHANGE_SET, STRUCTURE_CANDIDATES, STRUCTURE_SET, Selection, Shape,
+    explicit, log_selection, select as select_ranking,
+};
 use crate::find::{self, FindOptions};
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
-use crate::calibrate::{
-    COCHANGE_CANDIDATES, COCHANGE_SET, STRUCTURE_CANDIDATES, STRUCTURE_SET, Selection, Shape, explicit,
-    log_selection, select as select_ranking,
+use crate::rank::{
+    FileIndex, FileRanking, RankCache, RankedFile, Ranking, SourceKey, order_rows, rank_files,
 };
-use crate::rank::{FileIndex, FileRanking, RankCache, RankedFile, Ranking, SourceKey, order_rows, rank_files};
 
 /// One node in a blast-radius answer: identity, kind, why it is here
 /// (`reason`), PPR `score`, `file`:`line`, `live`, the `seed` whose wave
@@ -174,23 +176,45 @@ pub(crate) fn invoked_members_counted(
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::METHOD) {
                 continue;
             }
-            let Some(&owner) = g.nav.parent_of.get(&n.id) else { continue };
-            let Some(&owner_kind) = g.nav.kind_by_id.get(&owner) else { continue };
+            let Some(&owner) = g.nav.parent_of.get(&n.id) else {
+                continue;
+            };
+            let Some(&owner_kind) = g.nav.kind_by_id.get(&owner) else {
+                continue;
+            };
             if !OWNER_KINDS.contains(&owner_kind) {
                 continue;
             }
-            let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-            let owner_name = g.nav.name_by_id.get(&owner).map(String::as_str).unwrap_or("");
-            if !INVOKED_MEMBERS.iter().any(|r| r.names_member(owner_name, name)) {
+            let name = g
+                .nav
+                .name_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
+            let owner_name = g
+                .nav
+                .name_by_id
+                .get(&owner)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !INVOKED_MEMBERS
+                .iter()
+                .any(|r| r.names_member(owner_name, name))
+            {
                 continue;
             }
-            let Some(ext) = node_ext(&n.cells) else { continue };
+            let Some(ext) = node_ext(&n.cells) else {
+                continue;
+            };
             let cells = cells_of
                 .get_or_insert_with(|| {
                     g.nodes
                         .iter()
                         .filter(|o| {
-                            g.nav.kind_by_id.get(&o.id).is_some_and(|k| OWNER_KINDS.contains(k))
+                            g.nav
+                                .kind_by_id
+                                .get(&o.id)
+                                .is_some_and(|k| OWNER_KINDS.contains(k))
                         })
                         .map(|o| (o.id, o.cells.as_slice()))
                         .collect()
@@ -200,7 +224,13 @@ pub(crate) fn invoked_members_counted(
                 .unwrap_or(&[]);
             let roles = glia_graph::roles::roles_in(Some(owner_kind), cells);
             let is_go = ext.eq_ignore_ascii_case("go");
-            let sig = || if is_go { go_code_signature(&n.cells) } else { None };
+            let sig = || {
+                if is_go {
+                    go_code_signature(&n.cells)
+                } else {
+                    None
+                }
+            };
             let sibling_sig = |sibling: &str| -> Option<String> {
                 if !is_go {
                     return None;
@@ -215,16 +245,29 @@ pub(crate) fn invoked_members_counted(
             };
             let has_base = |b: &ExternalBase| -> bool {
                 let refs = heritage.get_or_init(|| unbound_heritage(g));
-                if !refs.get(&owner).is_some_and(|names| names.contains(&b.name)) {
+                if !refs
+                    .get(&owner)
+                    .is_some_and(|names| names.contains(&b.name))
+                {
                     return false;
                 }
-                if declared.get_or_init(|| declared_type_names(g)).contains(b.name) {
+                if declared
+                    .get_or_init(|| declared_type_names(g))
+                    .contains(b.name)
+                {
                     return false;
                 }
                 imports_library(cells, b.library)
             };
-            match invoked_member_at(&roles, owner_name, name, &ext, &sig, &sibling_sig, &has_base)
-            {
+            match invoked_member_at(
+                &roles,
+                owner_name,
+                name,
+                &ext,
+                &sig,
+                &sibling_sig,
+                &has_base,
+            ) {
                 Some(framework) => {
                     if seen.insert(n.id) {
                         out.push((n.id, owner, framework));
@@ -247,10 +290,13 @@ pub(crate) fn invoked_members_counted(
 /// DT.5l: the CA.3a signature of a Go METHOD's CODE text, or `None` when the
 /// node has no CODE text (a `code_span` JSON payload is none).
 fn go_code_signature(cells: &[Cell]) -> Option<String> {
-    cells.iter().find(|c| c.kind == cell_type::CODE).and_then(|c| match &c.payload {
-        CellPayload::Text(code) => glia_parser_go::method_signature(code),
-        _ => None,
-    })
+    cells
+        .iter()
+        .find(|c| c.kind == cell_type::CODE)
+        .and_then(|c| match &c.payload {
+            CellPayload::Text(code) => glia_parser_go::method_signature(code),
+            _ => None,
+        })
 }
 
 /// DT.5l: per node, the base names of its heritage refs (IMPLEMENTS /
@@ -275,11 +321,20 @@ fn unbound_heritage(g: &RepoGraph) -> HashMap<NodeId, Vec<&str>> {
 /// DT.5l: the names of the CLASS / INTERFACE / STRUCT / ENUM nodes `g`
 /// declares, the in-repo types a library base name must not be.
 fn declared_type_names(g: &RepoGraph) -> HashSet<&str> {
-    const TYPES: [glia_core::NodeKindId; 4] =
-        [node_kind::CLASS, node_kind::INTERFACE, node_kind::STRUCT, node_kind::ENUM];
+    const TYPES: [glia_core::NodeKindId; 4] = [
+        node_kind::CLASS,
+        node_kind::INTERFACE,
+        node_kind::STRUCT,
+        node_kind::ENUM,
+    ];
     g.nodes
         .iter()
-        .filter(|n| g.nav.kind_by_id.get(&n.id).is_some_and(|k| TYPES.contains(k)))
+        .filter(|n| {
+            g.nav
+                .kind_by_id
+                .get(&n.id)
+                .is_some_and(|k| TYPES.contains(k))
+        })
         .filter_map(|n| g.nav.name_by_id.get(&n.id).map(String::as_str))
         .collect()
 }
@@ -287,12 +342,16 @@ fn declared_type_names(g: &RepoGraph) -> HashSet<&str> {
 /// DT.5l: does a node's IMPORTS cell (a JSON array of library names) list
 /// `library` exactly?
 fn imports_library(cells: &[Cell], library: &str) -> bool {
-    cells.iter().filter(|c| c.kind == cell_type::IMPORTS).any(|c| {
-        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
-            return false;
-        };
-        serde_json::from_str::<Vec<String>>(s).is_ok_and(|libs| libs.iter().any(|l| l == library))
-    })
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::IMPORTS)
+        .any(|c| {
+            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                return false;
+            };
+            serde_json::from_str::<Vec<String>>(s)
+                .is_ok_and(|libs| libs.iter().any(|l| l == library))
+        })
 }
 
 /// The entrypoint-reachable ("live") node set: every entrypoint plus everything
@@ -394,8 +453,16 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
 /// included.
 fn invoked_marker(w: &LiveWalk) -> String {
     let total: usize = w.invoked_rows.iter().map(|(_, n)| n).sum();
-    let tags: Vec<String> = w.invoked_rows.iter().map(|(t, n)| format!("{t}={n}")).collect();
-    format!("[invoked] rows={total} {} sig_rejected={}", tags.join(" "), w.sig_rejected)
+    let tags: Vec<String> = w
+        .invoked_rows
+        .iter()
+        .map(|(t, n)| format!("{t}={n}"))
+        .collect();
+    format!(
+        "[invoked] rows={total} {} sig_rejected={}",
+        tags.join(" "),
+        w.sig_rejected
+    )
 }
 
 /// Did the user declare this node an entrypoint (LF.3b)? True when it
@@ -432,16 +499,24 @@ impl GraphSource for LiveSource<'_> {
 
     fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
         Box::new(
-            self.hops
-                .iter()
-                .chain(self.merged.all_edges().filter(|e| self.carry.contains(e.category))),
+            self.hops.iter().chain(
+                self.merged
+                    .all_edges()
+                    .filter(|e| self.carry.contains(e.category)),
+            ),
         )
     }
 }
 
 /// A walk-local hop of [`LiveSource`].
 fn live_hop(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
-    Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
+    Edge {
+        from,
+        to,
+        category,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    }
 }
 
 /// The walk behind [`entrypoint_reachable`]: one `algo::reach::bfs` from the
@@ -486,12 +561,20 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
             if kind == Some(node_kind::METHOD)
                 && let Some(&p) = g.nav.parent_of.get(&n.id)
-                && g.nav.kind_by_id.get(&p).is_some_and(|k| OWNER_KINDS.contains(k))
+                && g.nav
+                    .kind_by_id
+                    .get(&p)
+                    .is_some_and(|k| OWNER_KINDS.contains(k))
                 && owner_of.insert(n.id, p).is_none()
             {
                 owned.push(n.id);
             }
-            let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+            let name = g
+                .nav
+                .name_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
             let ext = || glia_code_domain::profile::node_ext(&n.cells);
             let seeded = if t.entry.is_entry_at(kind, name, &[], ext) {
                 &mut w.by_kind
@@ -516,7 +599,11 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
 
     let mut hops: Vec<Edge> = owned
         .iter()
-        .filter_map(|m| owner_of.get(m).map(|&p| live_hop(*m, p, edge_category::DEFINES)))
+        .filter_map(|m| {
+            owner_of
+                .get(m)
+                .map(|&p| live_hop(*m, p, edge_category::DEFINES))
+        })
         .collect();
     // Reverse IMPLEMENTS: interface (or interface method) -> its implementers.
     let mut implementer_hops: HashSet<(NodeId, NodeId)> = HashSet::new();
@@ -538,7 +625,11 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             hops.push(live_hop(owner, member, edge_category::DEFINES));
         }
     }
-    let src = LiveSource { merged, hops, carry: CategorySet::of(t.carry_edges) };
+    let src = LiveSource {
+        merged,
+        hops,
+        carry: CategorySet::of(t.carry_edges),
+    };
     let adj = Adjacency::build(&src, &CategorySet::all());
     for r in reach::bfs(&adj, &seeds, Walk::Forward, usize::MAX).reached {
         w.live.insert(r.id);
@@ -571,9 +662,15 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
 /// `node_id_by_qname(q).or_else(|| resolve_name(q))`.
 pub fn resolve_seed(merged: &MergedGraph, q: &str, scope: Option<&str>) -> Option<NodeId> {
     let by_qname = merged.qnames_exact(q);
-    let candidates = if by_qname.is_empty() { merged.names_exact(q) } else { by_qname };
+    let candidates = if by_qname.is_empty() {
+        merged.names_exact(q)
+    } else {
+        by_qname
+    };
     let primary = merged.pick_primary(&candidates);
-    let Some(raw) = scope.filter(|_| candidates.len() > 1) else { return primary };
+    let Some(raw) = scope.filter(|_| candidates.len() > 1) else {
+        return primary;
+    };
     let path = resolve_scope(merged, raw);
     let loc = Locator::new(merged);
     let inside: Vec<NodeId> = candidates
@@ -909,7 +1006,11 @@ fn radius(
             Some(q) => cache.ppr_index(q, SourceKey::Quotient, &closure_cfg),
             None => cache.ppr_index(merged, SourceKey::Merged, &closure_cfg),
         };
-        let closure_how = if cache.stats().built > built_before { "built" } else { "hit" };
+        let closure_how = if cache.stats().built > built_before {
+            "built"
+        } else {
+            "hit"
+        };
         // The measured file ranking from the DISPLAY seeds' files, in seed
         // order (the harness's order, so C0 sums as it does); a seed whose
         // node maps to no candidate file seeds the ranking by its node.
@@ -960,8 +1061,10 @@ fn radius(
             });
         }
         for (i, links) in linked.iter().enumerate() {
-            blast_seeds[i].linked_seeds =
-                links.iter().map(|&j| blast_seeds[j].qname.clone()).collect();
+            blast_seeds[i].linked_seeds = links
+                .iter()
+                .map(|&j| blast_seeds[j].qname.clone())
+                .collect();
         }
         // A hit's `seed` is a walk node: the seed itself, or its class's
         // representative.
@@ -977,7 +1080,11 @@ fn radius(
                 // A walk class is one node whose id is its representative,
                 // an internal handle: the row shows the class's display
                 // member. Any other hit is the node the walk reached.
-                let shown = if class_reps.contains(&h.id) { view.display(h.id) } else { h.id };
+                let shown = if class_reps.contains(&h.id) {
+                    view.display(h.id)
+                } else {
+                    h.id
+                };
                 let at = loc.locate(shown);
                 BlastAnswer {
                     id: shown.0,
@@ -990,7 +1097,10 @@ fn radius(
                     live: walk_live.contains(&h.id),
                     file: at.file,
                     line: at.line,
-                    seed: seed_qname.get(&h.seed).map(|q| q.to_string()).unwrap_or_default(),
+                    seed: seed_qname
+                        .get(&h.seed)
+                        .map(|q| q.to_string())
+                        .unwrap_or_default(),
                     identity: view.row_identity(h.id, shown),
                 }
             })
@@ -1000,22 +1110,41 @@ fn radius(
         // under Ranking::head() and with no co-change).
         let mut lifted = 0usize;
         if let Some(fr) = &fr {
-            let row_files: Vec<Option<u32>> =
-                out.iter().map(|a| files.file_of_node(NodeId(a.id))).collect();
+            let row_files: Vec<Option<u32>> = out
+                .iter()
+                .map(|a| files.file_of_node(NodeId(a.id)))
+                .collect();
             if let Some(perm) = order_rows(&row_files, &seed_files, fr) {
-                lifted = perm.iter().enumerate().filter(|&(to, &from)| to < from).count();
+                lifted = perm
+                    .iter()
+                    .enumerate()
+                    .filter(|&(to, &from)| to < from)
+                    .count();
                 let mut slots: Vec<Option<BlastAnswer>> = out.into_iter().map(Some).collect();
-                out = perm.iter().filter_map(|&i| slots.get_mut(i).and_then(Option::take)).collect();
+                out = perm
+                    .iter()
+                    .filter_map(|&i| slots.get_mut(i).and_then(Option::take))
+                    .collect();
             }
         }
         // Fold BEFORE scope and the cut: a class never spends two slots.
         let ranked = out.len();
-        out = view.fold(out, |a| NodeId(a.id), |a, identity| a.identity = Some(identity));
+        out = view.fold(
+            out,
+            |a| NodeId(a.id),
+            |a, identity| a.identity = Some(identity),
+        );
         folded = ranked - out.len();
         // Scope BEFORE the cut: filtering after `truncate` would spend the
         // budget on out-of-scope nodes and return fewer (or zero) in-scope
         // answers.
-        out = apply_scope(&loc, out, opts.scope.as_deref(), |a| NodeId(a.id), "blast_radius");
+        out = apply_scope(
+            &loc,
+            out,
+            opts.scope.as_deref(),
+            |a| NodeId(a.id),
+            "blast_radius",
+        );
         kept_in_scope = out.len();
         if let Some(k) = opts.top_k {
             out.truncate(k);
@@ -1061,7 +1190,15 @@ fn radius(
     view.collapse_marker("blast_radius", out.len() + folded, out.len());
 
     let absence = out.is_empty().then(|| {
-        blast_absence(merged, &blast_seeds, &unresolved, opts, reached, dead, kept_in_scope)
+        blast_absence(
+            merged,
+            &blast_seeds,
+            &unresolved,
+            opts,
+            reached,
+            dead,
+            kept_in_scope,
+        )
     });
     BlastRadius {
         seeds: blast_seeds,
@@ -1096,7 +1233,11 @@ fn select_for(loc: &Locator<'_>, ids: &[NodeId], opts: &BlastOptions) -> (Select
     };
     // Every candidate and fallback name is one of the six harness names.
     let picked = Ranking::from_harness_name(&sel.pick);
-    debug_assert!(picked.is_some(), "selection picked `{}`, no ranking", sel.pick);
+    debug_assert!(
+        picked.is_some(),
+        "selection picked `{}`, no ranking",
+        sel.pick
+    );
     (sel, picked.unwrap_or(opts.ranking))
 }
 
@@ -1137,7 +1278,11 @@ fn blast_walk<G: GraphSource + ?Sized>(
     live: &LiveFilter<'_>,
     index: &glia_activation::PprIndex,
 ) -> Vec<glia_graph::BlastHit> {
-    let filters: Vec<&dyn FilterPredicate<G>> = if opts.live_only { vec![live] } else { Vec::new() };
+    let filters: Vec<&dyn FilterPredicate<G>> = if opts.live_only {
+        vec![live]
+    } else {
+        Vec::new()
+    };
     glia_graph::blast_radius_over_with(
         g,
         seeds,
@@ -1191,9 +1336,21 @@ fn blast_absence(
         let near = find::search(merged, first, &near_opts).rows;
         return absence::unknown_symbol(merged, P, first, &[], &near);
     }
-    let query = seeds.iter().map(|s| s.query.as_str()).collect::<Vec<_>>().join(", ");
-    let named = seeds.iter().map(|s| format!("`{}`", s.qname)).collect::<Vec<_>>().join(", ");
-    let named = if seeds.len() == 1 { named } else { format!("any of {named}") };
+    let query = seeds
+        .iter()
+        .map(|s| s.query.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = seeds
+        .iter()
+        .map(|s| format!("`{}`", s.qname))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = if seeds.len() == 1 {
+        named
+    } else {
+        format!("any of {named}")
+    };
     if opts.depth == 0 {
         let note = format!("depth 0 follows no edge, so nothing is in radius of {named}");
         return absence::empty(merged, P, &query, "no_match", note, &[], None);
@@ -1233,7 +1390,11 @@ fn blast_absence(
             ));
         }
         let files: BTreeSet<&str> = seeds.iter().filter_map(|s| s.file.as_deref()).collect();
-        let seed_file = if files.len() == 1 { files.first().copied() } else { None };
+        let seed_file = if files.len() == 1 {
+            files.first().copied()
+        } else {
+            None
+        };
         return absence::empty(merged, P, &query, "no_edges", note, &mechanisms, seed_file);
     }
     if dead == reached {
@@ -1300,7 +1461,10 @@ struct LiveFilter<'a> {
 
 impl<'a> LiveFilter<'a> {
     fn new(live: &'a HashSet<NodeId>) -> Self {
-        LiveFilter { live, dropped: std::cell::Cell::new(0) }
+        LiveFilter {
+            live,
+            dropped: std::cell::Cell::new(0),
+        }
     }
 }
 
@@ -1381,7 +1545,14 @@ pub fn resolve_signal_located(
     top_k: Option<usize>,
     scope: Option<&str>,
 ) -> Answer<LocatedNode> {
-    resolve_signal_located_with_live(merged, &entrypoint_reachable(merged), text, kind, top_k, scope)
+    resolve_signal_located_with_live(
+        merged,
+        &entrypoint_reachable(merged),
+        text,
+        kind,
+        top_k,
+        scope,
+    )
 }
 
 /// [`resolve_signal_located`] over a live set the caller already holds
@@ -1621,10 +1792,7 @@ pub fn governing_docs_with_live(
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for e in merged.all_edges() {
-        if e.to == target
-            && e.category == edge_category::DOCUMENTS
-            && seen.insert(e.from)
-        {
+        if e.to == target && e.category == edge_category::DOCUMENTS && seen.insert(e.from) {
             let at = loc.locate(e.from);
             out.push(LocatedNode {
                 id: e.from.0,
@@ -1734,7 +1902,11 @@ impl<'a> Locator<'a> {
                 merged.graphs.len()
             );
         });
-        Locator { merged, first_graph, node_at }
+        Locator {
+            merged,
+            first_graph,
+            node_at,
+        }
     }
 
     /// Identity + 1-based location of `id`. An id no graph names comes back as
@@ -2019,16 +2191,24 @@ pub fn project_roots(merged: &MergedGraph) -> Vec<ProjectInfo> {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PROJECT) {
                 continue;
             }
-            let origin = n.cells.iter().filter(|c| c.kind == cell_type::ORIGIN).find_map(|c| {
-                match &c.payload {
+            let origin = n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::ORIGIN)
+                .find_map(|c| match &c.payload {
                     CellPayload::Json(s) | CellPayload::Text(s) => {
                         serde_json::from_str::<serde_json::Value>(s).ok()
                     }
                     CellPayload::Bytes(_) => None,
-                }
-            });
-            let Some(v) = origin.filter(serde_json::Value::is_object) else { continue };
-            let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(String::from);
+                });
+            let Some(v) = origin.filter(serde_json::Value::is_object) else {
+                continue;
+            };
+            let field = |k: &str| {
+                v.get(k)
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from)
+            };
             let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
             // The walker records the root as `""`; `.` is what the qname says
             // and what a human types.
@@ -2239,7 +2419,11 @@ fn parse_message_type(c: &Cell) -> Option<ParsedType> {
         return None;
     };
     let v = serde_json::from_str::<serde_json::Value>(s).ok()?;
-    let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(String::from);
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+    };
     Some(ParsedType {
         ty: field("type").filter(|t| !t.is_empty())?,
         raw: field("raw"),
@@ -2257,8 +2441,12 @@ fn collect_queue_nodes(merged: &MergedGraph) -> BTreeMap<u64, QueueNodeAcc<'_>> 
                 Some(k) if *k == node_kind::QUEUE_CONSUMER => (false, CONSUMER_PREFIX),
                 _ => continue,
             };
-            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(topic) = endpoint::split_owner(qname).0.strip_prefix(prefix) else { continue };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some(topic) = endpoint::split_owner(qname).0.strip_prefix(prefix) else {
+                continue;
+            };
             let acc = out.entry(n.id.0).or_insert_with(|| QueueNodeAcc {
                 producer,
                 repo: n.repo.0,
@@ -2278,7 +2466,11 @@ fn collect_queue_nodes(merged: &MergedGraph) -> BTreeMap<u64, QueueNodeAcc<'_>> 
 }
 
 fn contract_side(loc: &Locator<'_>, id: u64, acc: &QueueNodeAcc<'_>) -> MessageContractSide {
-    let parsed: Vec<ParsedType> = acc.types.iter().filter_map(|c| parse_message_type(c)).collect();
+    let parsed: Vec<ParsedType> = acc
+        .types
+        .iter()
+        .filter_map(|c| parse_message_type(c))
+        .collect();
     // `min_by_key` keeps the FIRST of equal keys, so first-seen breaks ties.
     let best = parsed
         .iter()
@@ -2306,11 +2498,12 @@ fn contract_side(loc: &Locator<'_>, id: u64, acc: &QueueNodeAcc<'_>) -> MessageC
         at = loc.locate(p);
     }
     let (file, line) = (at.file, at.line);
-    let module = acc
-        .parent
-        .and_then(|p| {
-            loc.merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&p).cloned())
-        });
+    let module = acc.parent.and_then(|p| {
+        loc.merged
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.qname_by_id.get(&p).cloned())
+    });
 
     MessageContractSide {
         node_id: id,
@@ -2352,7 +2545,11 @@ fn contract_verdict(
         } else {
             whole_file.then_some(NOTE_FILE_WINDOW)
         };
-        return ("match", if note.is_some() { "weak" } else { "strong" }, note);
+        return (
+            "match",
+            if note.is_some() { "weak" } else { "strong" },
+            note,
+        );
     }
     if primitive {
         return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_PRIMITIVE));
@@ -2394,7 +2591,9 @@ pub fn message_contracts(merged: &MergedGraph) -> Vec<MessageContractRow> {
     let mut rows: Vec<MessageContractRow> = Vec::new();
     let mut paired: BTreeSet<u64> = BTreeSet::new();
     for (p, c) in &pairs {
-        let (Some(ps), Some(cs)) = (sides.get(p), sides.get(c)) else { continue };
+        let (Some(ps), Some(cs)) = (sides.get(p), sides.get(c)) else {
+            continue;
+        };
         paired.insert(*p);
         paired.insert(*c);
         let (status, confidence, note) = contract_verdict(ps, cs);
@@ -2458,17 +2657,24 @@ pub fn message_contracts(merged: &MergedGraph) -> Vec<MessageContractRow> {
         s.as_ref().map(|s| (s.file.as_deref(), s.node_id))
     }
     rows.sort_by(|a, b| {
-        (a.topic.as_str(), side_key(&a.producer), side_key(&a.consumer)).cmp(&(
-            b.topic.as_str(),
-            side_key(&b.producer),
-            side_key(&b.consumer),
-        ))
+        (
+            a.topic.as_str(),
+            side_key(&a.producer),
+            side_key(&a.consumer),
+        )
+            .cmp(&(
+                b.topic.as_str(),
+                side_key(&b.producer),
+                side_key(&b.consumer),
+            ))
     });
 
     if !rows.is_empty() {
         let count = |s: &str| rows.iter().filter(|r| r.status == s).count();
-        let topics: BTreeSet<(&str, bool)> =
-            rows.iter().map(|r| (r.topic.as_str(), r.topic_is_tag)).collect();
+        let topics: BTreeSet<(&str, bool)> = rows
+            .iter()
+            .map(|r| (r.topic.as_str(), r.topic_is_tag))
+            .collect();
         let tag_topics = topics.iter().filter(|(_, tag)| *tag).count();
         eprintln!(
             "[contracts] topics={} match={} mismatch={} unknown={} literal={} tag={} rows={}",
@@ -2578,7 +2784,12 @@ mod locate_tests {
         let bare = id(node_kind::FUNCTION, "app::no_span");
         let handler = id(node_kind::FUNCTION, "app::list_users");
         let func_with_hit = id(node_kind::FUNCTION, "app::odd");
-        let node = |id, cells| Node { id, repo, confidence: Confidence::Strong, cells };
+        let node = |id, cells| Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        };
         let mut nav = CodeNav::default();
         for (nid, q, k) in [
             (route, "GET /users", node_kind::ROUTE),
@@ -2643,7 +2854,11 @@ mod locate_tests {
         let graph = |nodes: Vec<Node>, named: &[NodeId]| {
             let mut nav = CodeNav::default();
             for nid in named {
-                let q = if *nid == shared { "m::shared" } else { "m::nav_only" };
+                let q = if *nid == shared {
+                    "m::shared"
+                } else {
+                    "m::nav_only"
+                };
                 nav.record(*nid, q, q, node_kind::FUNCTION, None);
             }
             RepoGraph {
@@ -2657,26 +2872,53 @@ mod locate_tests {
                 properties: Default::default(),
             }
         };
-        let node = |nid, cells| Node { id: nid, repo, confidence: Confidence::Strong, cells };
+        let node = |nid, cells| Node {
+            id: nid,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        };
         let m = MergedGraph::new(vec![
-            graph(vec![node(shared, vec![pos("a.py", 2)])], &[shared, nav_only]),
             graph(
-                vec![node(shared, vec![pos("b.py", 9)]), node(nav_only, vec![pos("c.py", 5)])],
+                vec![node(shared, vec![pos("a.py", 2)])],
+                &[shared, nav_only],
+            ),
+            graph(
+                vec![
+                    node(shared, vec![pos("b.py", 9)]),
+                    node(nav_only, vec![pos("c.py", 5)]),
+                ],
                 &[shared, nav_only],
             ),
         ]);
         let loc = Locator::new(&m);
         let at = loc.locate(shared);
-        assert_eq!((at.file.as_deref(), at.line), (Some("a.py"), Some(3)), "first graph wins");
+        assert_eq!(
+            (at.file.as_deref(), at.line),
+            (Some("a.py"), Some(3)),
+            "first graph wins"
+        );
         let at = loc.locate(nav_only);
         assert_eq!(at.qname, "m::nav_only");
-        assert_eq!((at.file, at.line), (None, None), "nav-only in the owning graph: unlocated");
+        assert_eq!(
+            (at.file, at.line),
+            (None, None),
+            "nav-only in the owning graph: unlocated"
+        );
         let ghost = id("m::ghost");
         let at = loc.locate(ghost);
         assert_eq!(at.qname, format!("(unknown:{})", ghost.0));
         assert_eq!((at.kind, at.name.as_str(), at.line), ("UNKNOWN", "", None));
-        assert_eq!(loc.file_of(shared).as_deref(), Some("a.py"), "file_of agrees with locate");
-        assert_eq!(locate_node(&m, shared), loc.locate(shared), "the one-off wrapper agrees");
+        assert_eq!(
+            loc.file_of(shared).as_deref(),
+            Some("a.py"),
+            "file_of agrees with locate"
+        );
+        assert_eq!(
+            locate_node(&m, shared),
+            loc.locate(shared),
+            "the one-off wrapper agrees"
+        );
     }
 }
 
@@ -2739,17 +2981,22 @@ mod project_scope_tests {
         let broken = m.graphs[0]
             .nodes
             .iter_mut()
-            .find(|n| {
-                matches!(&n.cells[0].payload, CellPayload::Json(s) if s.contains("apps/web"))
-            })
+            .find(|n| matches!(&n.cells[0].payload, CellPayload::Json(s) if s.contains("apps/web")))
             .expect("apps/web anchor");
         broken.cells[0].payload = CellPayload::Json("{not json".into());
         let roots = project_roots(&m);
         assert_eq!(roots.len(), 1, "the broken anchor is skipped");
-        assert_eq!((roots[0].path.as_str(), roots[0].label.as_str()), (".", "mono"));
+        assert_eq!(
+            (roots[0].path.as_str(), roots[0].label.as_str()),
+            (".", "mono")
+        );
         assert_eq!(roots[0].qname, "project:.");
         assert_eq!(resolve_scope(&m, "mono"), ".");
-        assert_eq!(resolve_scope(&m, "web"), "web", "a skipped label passes through");
+        assert_eq!(
+            resolve_scope(&m, "web"),
+            "web",
+            "a skipped label passes through"
+        );
     }
 }
 
@@ -2771,7 +3018,10 @@ mod contracts_tests {
 
     /// One queue node per `(kind, topic, cells)`, all in one repo, plus the
     /// given producer→consumer QUEUE_FLOWS cross edges (by index).
-    fn graph(nodes: Vec<(bool, &str, Vec<Cell>)>, flows: &[(usize, usize)]) -> (MergedGraph, Vec<NodeId>) {
+    fn graph(
+        nodes: Vec<(bool, &str, Vec<Cell>)>,
+        flows: &[(usize, usize)],
+    ) -> (MergedGraph, Vec<NodeId>) {
         let repo = RepoId::from_canonical("test://contracts");
         let mut nav = CodeNav::default();
         let mut out = Vec::new();
@@ -2785,7 +3035,12 @@ mod contracts_tests {
             let qname = format!("{prefix}{topic}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
             nav.record(id, topic, &qname, kind, None);
-            out.push(Node { id, repo, confidence: Confidence::Medium, cells });
+            out.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells,
+            });
             ids.push(id);
         }
         let g = RepoGraph {
@@ -2837,7 +3092,11 @@ mod contracts_tests {
             vec![(
                 true,
                 "orders",
-                vec![msg("string", "near"), msg("Legacy", "file"), msg("OrderCreated", "near")],
+                vec![
+                    msg("string", "near"),
+                    msg("Legacy", "file"),
+                    msg("OrderCreated", "near"),
+                ],
             )],
             &[],
         );
@@ -2853,7 +3112,11 @@ mod contracts_tests {
     fn two_near_schema_types_are_a_conflict_not_a_verdict() {
         let (m, _) = graph(
             vec![
-                (true, "orders", vec![msg("OrderCreated", "near"), msg("OrderPlaced", "near")]),
+                (
+                    true,
+                    "orders",
+                    vec![msg("OrderCreated", "near"), msg("OrderPlaced", "near")],
+                ),
                 (false, "orders", vec![msg("OrderCreated", "near")]),
             ],
             &[(0, 1)],
@@ -2876,7 +3139,10 @@ mod contracts_tests {
             payload: CellPayload::Json(r#"{"raw":"x"}"#.into()),
         };
         let (m, ids) = graph(
-            vec![(true, "orders", vec![bad, untyped]), (false, "orders", vec![])],
+            vec![
+                (true, "orders", vec![bad, untyped]),
+                (false, "orders", vec![]),
+            ],
             &[(0, 1)],
         );
         let rows = message_contracts(&m);
@@ -2900,9 +3166,16 @@ mod contracts_tests {
             &[],
         );
         let rows = message_contracts(&m);
-        assert_eq!(rows.len(), 2, "two one-sided rows, never a pair the resolver refused");
+        assert_eq!(
+            rows.len(),
+            2,
+            "two one-sided rows, never a pair the resolver refused"
+        );
         assert!(rows.iter().all(|r| r.status == "unknown"));
-        assert!(rows.iter().all(|r| r.note == Some(super::NOTE_FAMILY_SPLIT)));
+        assert!(
+            rows.iter()
+                .all(|r| r.note == Some(super::NOTE_FAMILY_SPLIT))
+        );
     }
 
     /// A wildcard subscriber the resolver matched keeps its own pattern topic;
@@ -2937,7 +3210,10 @@ mod contracts_tests {
         );
         let rows = message_contracts(&m);
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.topic_is_tag && r.note == Some(super::NOTE_TAG)));
+        assert!(
+            rows.iter()
+                .all(|r| r.topic_is_tag && r.note == Some(super::NOTE_TAG))
+        );
     }
 }
 
@@ -2965,7 +3241,12 @@ mod role_live_tests {
             })
             .into_iter()
             .collect();
-        let node = |nid, cells| Node { id: nid, repo, confidence: Confidence::Strong, cells };
+        let node = |nid, cells| Node {
+            id: nid,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        };
         let g = RepoGraph {
             repo,
             nodes: vec![node(page, cells), node(api, vec![])],
@@ -2996,10 +3277,16 @@ mod role_live_tests {
 
         let (m, page, api) = page_injects_api(None);
         let live = entrypoint_reachable(&m);
-        assert!(!live.contains(&page) && !live.contains(&api), "no role, no entry");
+        assert!(
+            !live.contains(&page) && !live.contains(&api),
+            "no role, no entry"
+        );
 
         let (m, _, api) = page_injects_api(Some(r#""SERVICE""#));
-        assert!(!entrypoint_reachable(&m).contains(&api), "SERVICE is not an entry role");
+        assert!(
+            !entrypoint_reachable(&m).contains(&api),
+            "SERVICE is not an entry role"
+        );
 
         // The kind / name arms are unchanged and need no roles.
         let entry = &CODE_PROFILE.tables.entry;
@@ -3414,9 +3701,16 @@ mod live_tests {
         }
         // Invoked: Page::ngOnInit, Page::constructor, Svc::constructor;
         // Svc::ngOnDestroy was reached over ngOnInit's CALLS first.
-        assert_eq!((w.by_role, w.owners, w.implementers, w.invoked), (1, 0, 0, 3));
+        assert_eq!(
+            (w.by_role, w.owners, w.implementers, w.invoked),
+            (1, 0, 0, 3)
+        );
         assert_eq!(entrypoint_reachable(&merged), w.live);
-        assert_eq!(merged.all_edges().count(), edges_before, "the hop is never stored");
+        assert_eq!(
+            merged.all_edges().count(),
+            edges_before,
+            "the hop is never stored"
+        );
     }
 
     /// LF.3b: a FUNCTION nothing calls is an entry once it carries an
@@ -3442,7 +3736,10 @@ mod live_tests {
         let w = live_walk(&g.merged());
         assert!(w.live.contains(&job), "the declared job is an entry");
         assert!(w.live.contains(&helper), "what it calls is live");
-        assert!(!w.live.contains(&undeclared), "an undeclared job stays dead");
+        assert!(
+            !w.live.contains(&undeclared),
+            "an undeclared job stays dead"
+        );
         assert!(w.live.contains(&main));
         assert_eq!((w.by_kind, w.by_role, w.by_decl), (1, 0, 1));
     }
@@ -3464,7 +3761,9 @@ mod blast_seeded_tests {
         let api = dir.path().join("api");
         std::fs::create_dir_all(&api).expect("api dir");
         std::fs::write(api.join("app.py"), APP_PY).expect("write app.py");
-        let m = generate_many(&[api.display().to_string()]).expect("builds").merged;
+        let m = generate_many(&[api.display().to_string()])
+            .expect("builds")
+            .merged;
         let save = m.node_id_by_qname("app::save").expect("app::save");
         let opts = BlastOptions::default();
 
@@ -3472,10 +3771,17 @@ mod blast_seeded_tests {
         let by_id = blast_radius_seeded(&m, &[("x".to_string(), save)], &opts);
         assert!(!by_id.results.is_empty());
         let json = |r: &super::BlastRadius| serde_json::to_value(&r.results).expect("rows");
-        assert_eq!(json(&by_id), json(&by_query), "same rows, order, scores and seed");
+        assert_eq!(
+            json(&by_id),
+            json(&by_query),
+            "same rows, order, scores and seed"
+        );
         assert_eq!(by_id.seeds[0].query, "x", "the display string is kept");
         assert_eq!(by_id.seeds[0].qname, "app::save");
-        assert!(by_id.results.iter().all(|r| r.seed == "app::save"), "rows name the qname, not the display");
+        assert!(
+            by_id.results.iter().all(|r| r.seed == "app::save"),
+            "rows name the qname, not the display"
+        );
         assert!(by_id.unresolved.is_empty() && by_id.absence.is_none());
 
         // One id twice is one seed, the first display kept; no seeds is an

@@ -45,7 +45,11 @@ fn origins(r: &GenerateResult, kind: NodeKindId, qname: &str) -> Vec<String> {
         .merged
         .graphs
         .iter()
-        .flat_map(|g| g.nodes.iter().filter_map(move |n| g.nav.qname_by_id.get(&n.id)))
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter_map(move |n| g.nav.qname_by_id.get(&n.id))
+        })
         .collect();
     assert_eq!(ids.len(), 1, "one {qname}; the build holds {qnames:?}");
     r.merged
@@ -66,9 +70,21 @@ fn origins(r: &GenerateResult, kind: NodeKindId, qname: &str) -> Vec<String> {
 fn generated_files_carry_origin_generated_and_hand_written_ones_none() {
     let r = generate_one(&fixture()).expect("fixture builds");
     for (kind, qname, why) in [
-        (node_kind::FUNCTION, "db::queries_gen::GetUser", "an sqlc header"),
-        (node_kind::FUNCTION, "lib::user.g::userToJson", "a `.g.dart` name"),
-        (node_kind::METHOD, "Gen::Data::Settings::Get", "a `.Designer.cs` name"),
+        (
+            node_kind::FUNCTION,
+            "db::queries_gen::GetUser",
+            "an sqlc header",
+        ),
+        (
+            node_kind::FUNCTION,
+            "lib::user.g::userToJson",
+            "a `.g.dart` name",
+        ),
+        (
+            node_kind::METHOD,
+            "Gen::Data::Settings::Get",
+            "a `.Designer.cs` name",
+        ),
     ] {
         let o = origins(&r, kind, qname);
         assert!(!o.is_empty(), "{qname} ({why}) carries an ORIGIN");
@@ -76,8 +92,16 @@ fn generated_files_carry_origin_generated_and_hand_written_ones_none() {
     }
     for (kind, qname, why) in [
         (node_kind::FUNCTION, "db::store::NewStore", "hand-written"),
-        (node_kind::FUNCTION, "db::limits::Limit", "an edit warning that names no generator"),
-        (node_kind::METHOD, "lib::user::User::toJson", "the hand-written half of the part"),
+        (
+            node_kind::FUNCTION,
+            "db::limits::Limit",
+            "an edit warning that names no generator",
+        ),
+        (
+            node_kind::METHOD,
+            "lib::user::User::toJson",
+            "the hand-written half of the part",
+        ),
     ] {
         let o = origins(&r, kind, qname);
         assert!(o.is_empty(), "{qname} ({why}) carries no ORIGIN, got {o:?}");

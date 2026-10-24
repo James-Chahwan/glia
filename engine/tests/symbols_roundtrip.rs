@@ -39,7 +39,9 @@ fn fixture_copy(tmp: &Path) -> PathBuf {
 }
 
 /// A method table in a stable order: `HashMap` iterates randomly per process.
-fn sorted(m: &std::collections::HashMap<NodeId, std::collections::HashMap<String, NodeId>>) -> Table {
+fn sorted(
+    m: &std::collections::HashMap<NodeId, std::collections::HashMap<String, NodeId>>,
+) -> Table {
     m.iter()
         .map(|(k, inner)| (k.0, inner.iter().map(|(s, n)| (s.clone(), n.0)).collect()))
         .collect()
@@ -53,7 +55,11 @@ fn fresh_and_loaded() -> (MergedGraph, MergedGraph) {
     let dir = tmp.path().join("layout");
     write_merged_sharded(&fresh, &dir).unwrap();
     let loaded = read_merged_sharded(&dir).unwrap();
-    assert_eq!(loaded.graphs.len(), fresh.graphs.len(), "one loaded graph per shard");
+    assert_eq!(
+        loaded.graphs.len(),
+        fresh.graphs.len(),
+        "one loaded graph per shard"
+    );
     (fresh, loaded)
 }
 
@@ -73,9 +79,15 @@ fn interface_ids(g: &RepoGraph) -> Vec<NodeId> {
 fn interface_methods_survive_the_gmap() {
     let (fresh, loaded) = fresh_and_loaded();
     let names_get_by_id = fresh.graphs.iter().any(|g| {
-        g.symbols.interface_methods.values().any(|m| m.contains_key("GetById"))
+        g.symbols
+            .interface_methods
+            .values()
+            .any(|m| m.contains_key("GetById"))
     });
-    assert!(names_get_by_id, "fresh build must index IUserService.GetById in interface_methods");
+    assert!(
+        names_get_by_id,
+        "fresh build must index IUserService.GetById in interface_methods"
+    );
     for (i, (f, l)) in fresh.graphs.iter().zip(&loaded.graphs).enumerate() {
         assert_eq!(
             sorted(&l.symbols.interface_methods),
@@ -107,19 +119,37 @@ fn interface_table_bytes_are_reproducible() {
     let owners_with_several: usize = first
         .graphs
         .iter()
-        .map(|g| g.symbols.interface_methods.values().filter(|m| m.len() > 1).count())
+        .map(|g| {
+            g.symbols
+                .interface_methods
+                .values()
+                .filter(|m| m.len() > 1)
+                .count()
+        })
         .sum();
-    assert!(owners_with_several >= 2, "the fixture must give several interfaces several methods");
+    assert!(
+        owners_with_several >= 2,
+        "the fixture must give several interfaces several methods"
+    );
     write_merged_sharded(&first, &out1).unwrap();
     write_merged_sharded(&generate_one(&repo_s).unwrap().merged, &out2).unwrap();
     let files = |d: &Path| -> BTreeMap<String, Vec<u8>> {
         std::fs::read_dir(d)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect()
     };
-    assert_eq!(files(&out1), files(&out2), "two clean builds must write identical layouts");
+    assert_eq!(
+        files(&out1),
+        files(&out2),
+        "two clean builds must write identical layouts"
+    );
 }
 
 #[test]
@@ -146,5 +176,8 @@ fn class_methods_still_exclude_interfaces() {
             );
         }
     }
-    assert!(interfaces_seen > 0, "the fixture declares IUserService: an INTERFACE node must load");
+    assert!(
+        interfaces_seen > 0,
+        "the fixture declares IUserService: an INTERFACE node must load"
+    );
 }

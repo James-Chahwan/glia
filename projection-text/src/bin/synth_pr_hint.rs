@@ -53,9 +53,14 @@ fn main() -> Result<()> {
         write_empty(&args.text_out, "no hints_text supplied")?;
         return Ok(());
     } else if trimmed.len() < args.min_chars {
-        write_empty(&args.text_out, &format!(
-            "hints_text below min_chars threshold ({}/{})", trimmed.len(), args.min_chars,
-        ))?;
+        write_empty(
+            &args.text_out,
+            &format!(
+                "hints_text below min_chars threshold ({}/{})",
+                trimmed.len(),
+                args.min_chars,
+            ),
+        )?;
         return Ok(());
     } else {
         trimmed
@@ -65,10 +70,17 @@ fn main() -> Result<()> {
     // contains ONLY words like {closing, close, thanks, duplicate, see,
     // works for me, won't fix} is signal-poor.
     let lower = body.to_lowercase();
-    let dismissive_keywords = ["closing", "won't fix", "wontfix", "duplicate", "thanks", "ok thanks"];
+    let dismissive_keywords = [
+        "closing",
+        "won't fix",
+        "wontfix",
+        "duplicate",
+        "thanks",
+        "ok thanks",
+    ];
     let body_word_count = body.split_whitespace().count();
-    let only_dismissive = body_word_count <= 10 &&
-        dismissive_keywords.iter().any(|k| lower.contains(k));
+    let only_dismissive =
+        body_word_count <= 10 && dismissive_keywords.iter().any(|k| lower.contains(k));
     if only_dismissive {
         write_empty(&args.text_out, "hints_text is short + dismissive")?;
         return Ok(());
@@ -83,7 +95,11 @@ fn main() -> Result<()> {
          conversation.\n\n",
     );
     // Cap to ~2000 chars to keep prefix bounded.
-    let body_capped = if body.len() > 2000 { &body[..2000] } else { body };
+    let body_capped = if body.len() > 2000 {
+        &body[..2000]
+    } else {
+        body
+    };
     s.push_str("```\n");
     s.push_str(body_capped);
     s.push_str("\n```\n");
@@ -110,6 +126,9 @@ fn write_empty(path: &PathBuf, reason: &str) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, s.as_bytes())?;
-    eprintln!("[synth_pr_hint] wrote empty directive: {} ({reason})", path.display());
+    eprintln!(
+        "[synth_pr_hint] wrote empty directive: {} ({reason})",
+        path.display()
+    );
     Ok(())
 }

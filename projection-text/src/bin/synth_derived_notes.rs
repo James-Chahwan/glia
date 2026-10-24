@@ -69,7 +69,10 @@ fn load_rows(path: &PathBuf, what: &str) -> Result<Vec<Value>> {
 
 /// `row[field]` as a string; `""` when it is missing or not a string.
 fn str_field(row: &Value, field: &str) -> String {
-    row.get(field).and_then(|s| s.as_str()).unwrap_or("").to_string()
+    row.get(field)
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// The source_cells.json rows as `key_symbols` cells, in file order: `key`
@@ -115,8 +118,8 @@ fn main() -> Result<()> {
 
     let cells = load_source_cells(&args.source_cells)?;
     let summaries = load_summaries(&args.summaries)?;
-    let issue =
-        fs::read_to_string(&args.issue).with_context(|| format!("read {}", args.issue.display()))?;
+    let issue = fs::read_to_string(&args.issue)
+        .with_context(|| format!("read {}", args.issue.display()))?;
 
     let graph = build_python(RepoId::from_canonical("synth-derived-notes"), Vec::new())
         .map_err(|e| anyhow!("build_python: {e:?}"))?;
@@ -128,12 +131,17 @@ fn main() -> Result<()> {
     plan.synthesize(&graph, &mut view);
 
     let notes: Vec<&SynthCell> = view.cells_of(DERIVED_NOTES).collect();
-    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), notes.len());
+    eprintln!(
+        "[synth] plan hooks=[{}] cells={}",
+        view.applied.join(","),
+        notes.len()
+    );
     let block = notes.first().map_or("", |c| c.text.as_str());
 
     match args.out {
-        Some(path) => fs::write(&path, block)
-            .with_context(|| format!("write {}", path.display()))?,
+        Some(path) => {
+            fs::write(&path, block).with_context(|| format!("write {}", path.display()))?
+        }
         None => print!("{}", block),
     }
     Ok(())

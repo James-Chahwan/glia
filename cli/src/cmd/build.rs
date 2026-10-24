@@ -33,7 +33,9 @@ pub(crate) fn run(args: Args) -> i32 {
     let repo = args.repo.as_str();
     let opts = build_options();
     if !opts.overlay && args.out.is_none() {
-        eprintln!("error: --no-overlay needs --out; the default gmap dir holds the overlay-applied graph");
+        eprintln!(
+            "error: --no-overlay needs --out; the default gmap dir holds the overlay-applied graph"
+        );
         return 2;
     }
     if args.no_incremental {

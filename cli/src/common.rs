@@ -62,7 +62,11 @@ impl CalibratedRankingArgs {
     /// co-change first unless `--no-cochange`. clap has already refused any
     /// other name; one that slipped through is the default base.
     pub(crate) fn ranking(&self) -> Ranking {
-        let base = self.ranking.as_deref().map_or(Ok(RankBase::Ppr), RankBase::parse).unwrap_or(RankBase::Ppr);
+        let base = self
+            .ranking
+            .as_deref()
+            .map_or(Ok(RankBase::Ppr), RankBase::parse)
+            .unwrap_or(RankBase::Ppr);
         Ranking::new(base, !self.no_cochange)
     }
 
@@ -80,7 +84,9 @@ impl CalibratedRankingArgs {
 
 /// The ranking an answer applied: its selection's pick, else `asked`.
 pub(crate) fn applied_ranking(selection: Option<&Selection>, asked: Ranking) -> Ranking {
-    selection.and_then(|s| Ranking::from_harness_name(&s.pick)).unwrap_or(asked)
+    selection
+        .and_then(|s| Ranking::from_harness_name(&s.pick))
+        .unwrap_or(asked)
 }
 
 /// EC.8: the line under an impact table naming the ranking that ordered it:
@@ -107,7 +113,11 @@ fn selection_line(s: &Selection) -> String {
 /// snapshots co-change reads, its labels the `files` rows' repos. One per
 /// command run (`[rank-cache] holder=cli`).
 pub(crate) fn rank_cache(result: &GenerateResult) -> Arc<RankCache> {
-    Arc::new(RankCache::new("cli", &result.repo_roots, &result.repo_labels))
+    Arc::new(RankCache::new(
+        "cli",
+        &result.repo_roots,
+        &result.repo_labels,
+    ))
 }
 
 /// The `## files` markdown table under a ranked answer: rank, file, the repo
@@ -136,8 +146,15 @@ pub(crate) fn render_files(files: &[RankedFile], ranking: Ranking, many_repos: b
         } else {
             f.ppr.map_or_else(|| "—".to_string(), |p| format!("{p:.3}"))
         };
-        let repo = if many_repos { format!(" {} |", f.repo) } else { String::new() };
-        println!("| {} | {} |{repo} {} | {:.3} | {score} |", f.rank, f.file, f.rows, f.cochange);
+        let repo = if many_repos {
+            format!(" {} |", f.repo)
+        } else {
+            String::new()
+        };
+        println!(
+            "| {} | {} |{repo} {} | {:.3} | {score} |",
+            f.rank, f.file, f.rows, f.cochange
+        );
     }
 }
 
@@ -209,11 +226,15 @@ pub(crate) fn print_summary_table(r: &GenerateResult) {
     let mut cat_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     for g in &merged.graphs {
         for e in &g.edges {
-            *cat_counts.entry(edge_category_name(e.category)).or_insert(0) += 1;
+            *cat_counts
+                .entry(edge_category_name(e.category))
+                .or_insert(0) += 1;
         }
     }
     for e in &merged.cross_edges {
-        *cat_counts.entry(edge_category_name(e.category)).or_insert(0) += 1;
+        *cat_counts
+            .entry(edge_category_name(e.category))
+            .or_insert(0) += 1;
     }
     println!("## Edge categories");
     println!();
@@ -238,8 +259,10 @@ fn graph_json(merged: &MergedGraph) -> serde_json::Value {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
             let name = g.nav.name_by_id.get(&n.id).cloned().unwrap_or_default();
             let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
-            let roles: Vec<&'static str> =
-                roles_in(kind, &n.cells).into_iter().map(node_kind_name).collect();
+            let roles: Vec<&'static str> = roles_in(kind, &n.cells)
+                .into_iter()
+                .map(node_kind_name)
+                .collect();
             let kind = kind.map(|k| k.0).unwrap_or(0);
             nodes.push(serde_json::json!({
                 "id": n.id.0,
@@ -275,7 +298,10 @@ fn graph_json(merged: &MergedGraph) -> serde_json::Value {
 }
 
 pub(crate) fn print_json(merged: &MergedGraph) {
-    println!("{}", serde_json::to_string(&graph_json(merged)).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string(&graph_json(merged)).unwrap_or_default()
+    );
 }
 
 pub(crate) fn write_json_to(merged: &MergedGraph, out: &mut Vec<u8>) {

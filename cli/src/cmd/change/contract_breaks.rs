@@ -134,7 +134,11 @@ fn engine_args(
             AVRO_MODES.join(", ")
         ));
     };
-    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+    let Some(tier) = MODEL_MIN_TIERS
+        .iter()
+        .copied()
+        .find(|t| *t == models_min_tier)
+    else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
             MODEL_MIN_TIERS.join(", ")
@@ -302,7 +306,9 @@ fn print_models(models: &[ModelBreak], base: &str, min_tier: &str) {
         "_Inferred client <-> server models, judged against what the client reads or sends; a breaking row fails the gate only at or above `--models-min-tier` ({min_tier})._"
     );
     println!();
-    println!("| pairing | via | status | gate | tier | changed | rule | field | before | after | client | server |");
+    println!(
+        "| pairing | via | status | gate | tier | changed | rule | field | before | after | client | server |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
     for m in models {
         for line in model_rows(m, base) {
@@ -341,7 +347,11 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
     let rest = if breaking_only {
         "unknown / compatible: left out (--breaking-only)".to_string()
     } else {
-        format!("unknown: {} | compatible: {}", unknown.len(), compatible.len())
+        format!(
+            "unknown: {} | compatible: {}",
+            unknown.len(),
+            compatible.len()
+        )
     };
     let model_blocking = b.models.iter().filter(|m| m.blocking).count();
     let blocking_models = match model_blocking {
@@ -353,9 +363,17 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
         "- breaking: {} ({} contract {}, {} orphaned {}{blocking_models}) | {rest}",
         b.breaking,
         breaking.len(),
-        if breaking.len() == 1 { "change" } else { "changes" },
+        if breaking.len() == 1 {
+            "change"
+        } else {
+            "changes"
+        },
         b.orphaned_clients.len(),
-        if b.orphaned_clients.len() == 1 { "client" } else { "clients" },
+        if b.orphaned_clients.len() == 1 {
+            "client"
+        } else {
+            "clients"
+        },
     );
     if !b.models.is_empty() {
         let model_breaking = b.models.iter().filter(|m| m.status == "breaking").count();
@@ -371,7 +389,11 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
     }
     println!();
     if b.schemas.is_empty() && b.models.is_empty() && b.orphaned_clients.is_empty() {
-        let what = if breaking_only { "breaking contract change" } else { "contract change" };
+        let what = if breaking_only {
+            "breaking contract change"
+        } else {
+            "contract change"
+        };
         println!("_(no {what} vs {})_", b.base);
         if let Some(a) = &b.absence {
             println!();
@@ -419,7 +441,12 @@ pub(crate) fn run(args: Args) -> i32 {
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
     } else {
-        print_table(&args.repo, &answer, args.breaking_only, engine.models_min_tier);
+        print_table(
+            &args.repo,
+            &answer,
+            args.breaking_only,
+            engine.models_min_tier,
+        );
     }
     if answer.breaking > 0 { 1 } else { 0 }
 }
@@ -435,7 +462,10 @@ mod tests {
             assert_eq!((a.avro_mode, a.breaking_only), (*mode, true));
         }
         let err = engine_args("sideways", false, "fact").expect_err("no such mode");
-        assert_eq!(err, "unknown avro mode `sideways`: expected one of backward, forward, full");
+        assert_eq!(
+            err,
+            "unknown avro mode `sideways`: expected one of backward, forward, full"
+        );
     }
 
     /// DT.1p: every models min tier maps, the default is `fact`, and another
@@ -448,7 +478,10 @@ mod tests {
         }
         assert_eq!(ContractBreakArgs::default().models_min_tier, "fact");
         let err = engine_args("backward", false, "heuristic").expect_err("no such gate");
-        assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
+        assert_eq!(
+            err,
+            "unknown models min tier `heuristic`: expected one of fact, derived"
+        );
     }
 
     #[test]

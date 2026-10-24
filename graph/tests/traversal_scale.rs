@@ -33,7 +33,12 @@ fn chain(n: usize) -> (RepoGraph, Vec<NodeId>) {
         .collect();
     let nodes = ids
         .iter()
-        .map(|&id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] })
+        .map(|&id| Node {
+            id,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        })
         .collect();
     let edges = ids
         .windows(2)
@@ -71,18 +76,32 @@ fn predecessors_and_bfs_on_40k_chain_are_linear() {
     // Backward BFS discovers the chain from the sink outwards.
     assert_eq!(preds[0], ids[N - 2]);
     assert_eq!(preds[N - 2], first);
-    assert!(took < BUDGET, "predecessors over a {N}-node chain took {took:?} (budget {BUDGET:?})");
+    assert!(
+        took < BUDGET,
+        "predecessors over a {N}-node chain took {took:?} (budget {BUDGET:?})"
+    );
 
     let t = Instant::now();
     let reached = g.bfs(first, &[edge_category::CALLS], usize::MAX);
     let took = t.elapsed();
     assert_eq!(reached.len(), N - 1);
     assert_eq!(reached, ids[1..].to_vec());
-    assert!(took < BUDGET, "bfs over a {N}-node chain took {took:?} (budget {BUDGET:?})");
+    assert!(
+        took < BUDGET,
+        "bfs over a {N}-node chain took {took:?} (budget {BUDGET:?})"
+    );
 
     let t = Instant::now();
-    let hit = g.reachable_by(last, &[ids[N / 2], first], &[edge_category::CALLS], usize::MAX);
+    let hit = g.reachable_by(
+        last,
+        &[ids[N / 2], first],
+        &[edge_category::CALLS],
+        usize::MAX,
+    );
     let took = t.elapsed();
     assert_eq!(hit, vec![ids[N / 2], first]);
-    assert!(took < BUDGET, "reachable_by over a {N}-node chain took {took:?} (budget {BUDGET:?})");
+    assert!(
+        took < BUDGET,
+        "reachable_by over a {N}-node chain took {took:?} (budget {BUDGET:?})"
+    );
 }

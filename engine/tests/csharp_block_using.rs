@@ -64,7 +64,11 @@ fn block_namespace_usings_import_from_the_file_module() {
         "the block-namespace using must import from the file MODULE; IMPORTS = {rows:?}"
     );
     assert!(
-        has(&rows, controller, (node_kind::PACKAGE, "Shop::Services::Billing")),
+        has(
+            &rows,
+            controller,
+            (node_kind::PACKAGE, "Shop::Services::Billing")
+        ),
         "the second block-namespace using; IMPORTS = {rows:?}"
     );
     assert!(

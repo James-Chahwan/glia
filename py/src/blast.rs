@@ -1,12 +1,12 @@
 //! **blast_radius** (P3, LD.5): the ranked, located closure around one or
 //! more nodes, as one walk and one ranking.
 
-use pyo3::exceptions::{PyTypeError, PyValueError};
-use pyo3::prelude::*;
 use glia_engine::BlastOptions;
 use glia_engine::identity::Collapse;
 use glia_engine::rank::Ranking;
 use glia_graph::Reach;
+use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::prelude::*;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -93,7 +93,8 @@ impl PyGraph {
         cochange: bool,
         top_files: usize,
     ) -> PyResult<Py<PyAny>> {
-        let (ranking, select) = ranking_selected(ranking, cochange).map_err(PyValueError::new_err)?;
+        let (ranking, select) =
+            ranking_selected(ranking, cochange).map_err(PyValueError::new_err)?;
         let queries = seed_queries(qnames)?;
         let mut opts = BlastOptions::default();
         opts.ranking = ranking;
@@ -122,9 +123,9 @@ fn seed_queries(qnames: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     if let Ok(one) = qnames.extract::<String>() {
         return Ok(vec![one]);
     }
-    qnames.extract::<Vec<String>>().map_err(|_| {
-        PyTypeError::new_err("qnames must be a str or a list of str")
-    })
+    qnames
+        .extract::<Vec<String>>()
+        .map_err(|_| PyTypeError::new_err("qnames must be a str or a list of str"))
 }
 
 /// The `ranking` / `cochange` keyword arguments of every ranked answer
@@ -140,7 +141,10 @@ pub(crate) fn ranking_named(ranking: &str, cochange: bool) -> Result<Ranking, St
 /// (`blast_radius`, `diff_impact`, `diff_impact_vs_rev`, `review_vs_rev`):
 /// `None` is `ppr` with the calibration applied (`BlastOptions.select`), a
 /// name is [`ranking_named`]'s ranking, explicit. Returns (ranking, select).
-pub(crate) fn ranking_selected(ranking: Option<&str>, cochange: bool) -> Result<(Ranking, bool), String> {
+pub(crate) fn ranking_selected(
+    ranking: Option<&str>,
+    cochange: bool,
+) -> Result<(Ranking, bool), String> {
     match ranking {
         None => Ok((ranking_named("ppr", cochange)?, true)),
         Some(name) => Ok((ranking_named(name, cochange)?, false)),
@@ -154,7 +158,9 @@ pub(crate) fn reach_named(direction: &str) -> Result<Reach, String> {
         "forward" => Ok(Reach::Forward),
         "backward" => Ok(Reach::Backward),
         "both" => Ok(Reach::Both),
-        o => Err(format!("direction must be forward|backward|both, got `{o}`")),
+        o => Err(format!(
+            "direction must be forward|backward|both, got `{o}`"
+        )),
     }
 }
 
@@ -166,8 +172,16 @@ mod tests {
     fn ranking_names() {
         assert_eq!(ranking_named("ppr", true).expect("ppr"), Ranking::default());
         assert_eq!(ranking_named("ppr", false).expect("ppr"), Ranking::head());
-        assert_eq!(ranking_named("ppr-wide", true).expect("wide").harness_name(), "H10[PT*]");
-        assert_eq!(ranking_named("bfs", false).expect("bfs").harness_name(), "B0");
+        assert_eq!(
+            ranking_named("ppr-wide", true)
+                .expect("wide")
+                .harness_name(),
+            "H10[PT*]"
+        );
+        assert_eq!(
+            ranking_named("bfs", false).expect("bfs").harness_name(),
+            "B0"
+        );
         assert_eq!(
             ranking_named("x", true).expect_err("x is no ranking"),
             "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"

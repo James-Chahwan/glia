@@ -15,14 +15,17 @@
 
 use std::path::Path;
 
-use glia_code_domain::glia_config::{self, IdMatch, IdPattern, LoadedConfig, PathGlobs, TrackerDecl};
+use glia_code_domain::glia_config::{
+    self, IdMatch, IdPattern, LoadedConfig, PathGlobs, TrackerDecl,
+};
 
 /// The id shapes a repo with no `[ids] patterns` uses: tickets and spec-kit
 /// requirement / success ids (`LANG-1234`, `FR-001`), spec-kit task ids (`T012`).
 pub const DEFAULT_PATTERNS: [&str; 2] = ["{U}-{N}", "T{N3}"];
 
 /// The findings words a repo with no `[ids] local_words` uses.
-pub const DEFAULT_LOCAL_WORDS: [&str; 5] = ["analysis", "finding", "remediation", "review", "audit"];
+pub const DEFAULT_LOCAL_WORDS: [&str; 5] =
+    ["analysis", "finding", "remediation", "review", "audit"];
 
 /// Where a vocabulary's patterns came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +85,14 @@ impl Default for IdVocab {
     /// The defaults: [`DEFAULT_PATTERNS`], [`DEFAULT_LOCAL_WORDS`], no trackers.
     fn default() -> Self {
         IdVocab {
-            patterns: DEFAULT_PATTERNS.iter().filter_map(|p| IdPattern::parse(p).ok()).collect(),
-            local_words: DEFAULT_LOCAL_WORDS.iter().map(|w| (*w).to_string()).collect(),
+            patterns: DEFAULT_PATTERNS
+                .iter()
+                .filter_map(|p| IdPattern::parse(p).ok())
+                .collect(),
+            local_words: DEFAULT_LOCAL_WORDS
+                .iter()
+                .map(|w| (*w).to_string())
+                .collect(),
             trackers: Vec::new(),
             markdown: Vec::new(),
             source: VocabSource::Default,
@@ -107,8 +116,15 @@ impl IdVocab {
         };
         let ids = &loaded.config.ids;
         if let Some(patterns) = &ids.patterns {
-            v.patterns = patterns.iter().filter_map(|p| IdPattern::parse(p.get_ref()).ok()).collect();
-            v.source = if v.patterns.is_empty() { VocabSource::Off } else { VocabSource::Config };
+            v.patterns = patterns
+                .iter()
+                .filter_map(|p| IdPattern::parse(p.get_ref()).ok())
+                .collect();
+            v.source = if v.patterns.is_empty() {
+                VocabSource::Off
+            } else {
+                VocabSource::Config
+            };
         }
         if let Some(words) = &ids.local_words {
             v.local_words = words.iter().map(|w| w.get_ref().clone()).collect();
@@ -126,8 +142,16 @@ impl IdVocab {
             .iter()
             .map(|p| IdPattern::parse(p).map_err(|e| format!("{p:?}: {e}")))
             .collect::<Result<Vec<_>, _>>()?;
-        let source = if parsed.is_empty() { VocabSource::Off } else { VocabSource::Config };
-        Ok(IdVocab { patterns: parsed, source, ..IdVocab::default() })
+        let source = if parsed.is_empty() {
+            VocabSource::Off
+        } else {
+            VocabSource::Config
+        };
+        Ok(IdVocab {
+            patterns: parsed,
+            source,
+            ..IdVocab::default()
+        })
     }
 
     /// The `[ids] markdown` matcher, `None` when none is declared.
@@ -162,18 +186,33 @@ impl IdVocab {
         });
         let mut kept: Vec<IdMatch> = Vec::new();
         for (_, m) in found {
-            if kept.iter().all(|k| m.claim_end <= k.start || k.claim_end <= m.start) {
+            if kept
+                .iter()
+                .all(|k| m.claim_end <= k.start || k.claim_end <= m.start)
+            {
                 kept.push(m);
             }
         }
         let mut out = Vec::new();
         for m in kept {
-            let (Some(id), Some(family)) = (text.get(m.start..m.end), text.get(m.start..m.family_end)) else {
+            let (Some(id), Some(family)) =
+                (text.get(m.start..m.end), text.get(m.start..m.family_end))
+            else {
                 continue;
             };
-            out.push(IdMention { id: id.to_string(), family: family.to_string(), start: m.start, end: m.end });
+            out.push(IdMention {
+                id: id.to_string(),
+                family: family.to_string(),
+                start: m.start,
+                end: m.end,
+            });
             for (extra, s, e) in &m.extra {
-                out.push(IdMention { id: extra.clone(), family: family.to_string(), start: *s, end: *e });
+                out.push(IdMention {
+                    id: extra.clone(),
+                    family: family.to_string(),
+                    start: *s,
+                    end: *e,
+                });
             }
         }
         out.sort_by(|a, b| (a.start, a.end, &a.id).cmp(&(b.start, b.end, &b.id)));

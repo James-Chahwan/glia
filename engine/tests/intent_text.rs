@@ -10,7 +10,8 @@ use std::path::Path;
 use std::process::Command;
 
 use glia_code_domain::snapshots::{
-    HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, write_history, write_history_with_messages,
+    HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, write_history,
+    write_history_with_messages,
 };
 use glia_engine::generate_one;
 use glia_engine::intent::text::{Candidates, TextAbsent, TextIndex};
@@ -20,7 +21,10 @@ const T0: i64 = 1_767_225_600;
 
 /// The six named sources plus `svc/m00.py` .. `svc/m25.py`.
 fn sources() -> Vec<String> {
-    let mut v: Vec<String> = ["a", "b", "c", "d", "e", "f"].iter().map(|n| format!("svc/{n}.py")).collect();
+    let mut v: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+        .iter()
+        .map(|n| format!("svc/{n}.py"))
+        .collect();
     v.extend((0..26).map(|i| format!("svc/m{i:02}.py")));
     v
 }
@@ -30,13 +34,28 @@ fn sha(n: usize) -> String {
 }
 
 fn file(p: &str) -> HistoryFile {
-    HistoryFile { p: p.to_string(), a: Some(1), d: Some(0), from: None }
+    HistoryFile {
+        p: p.to_string(),
+        a: Some(1),
+        d: Some(0),
+        from: None,
+    }
 }
 
 /// One (commit, message) pair; `files` are paths.
 fn commit(n: usize, files: &[&str], subject: &str, body: &str) -> (HistoryCommit, HistoryMessage) {
-    let c = HistoryCommit { c: sha(n), t: T0 + n as i64 * 3600, files: files.iter().map(|p| file(p)).collect() };
-    let m = HistoryMessage { c: sha(n), at: c.t, s: subject.to_string(), b: body.to_string(), br: None };
+    let c = HistoryCommit {
+        c: sha(n),
+        t: T0 + n as i64 * 3600,
+        files: files.iter().map(|p| file(p)).collect(),
+    };
+    let m = HistoryMessage {
+        c: sha(n),
+        at: c.t,
+        s: subject.to_string(),
+        b: body.to_string(),
+        br: None,
+    };
     (c, m)
 }
 
@@ -45,10 +64,25 @@ fn history() -> Vec<(HistoryCommit, HistoryMessage)> {
     let all = sources();
     let wide: Vec<&str> = all.iter().take(31).map(String::as_str).collect();
     let mut v = vec![
-        commit(1, &["svc/a.py", "svc/b.py"], "Teach the tokenizer about unicode", "Splits words properly."),
+        commit(
+            1,
+            &["svc/a.py", "svc/b.py"],
+            "Teach the tokenizer about unicode",
+            "Splits words properly.",
+        ),
         commit(2, &["svc/c.py"], "codec: handle CODEC-1234 padding", ""),
-        commit(3, &["svc/d.py", "README.md"], "codec: handle CODEC-4242 framing", "Framing bytes."),
-        commit(4, &["svc/old_e.py", "svc/f.py"], "Zebra striping in the renderer", ""),
+        commit(
+            3,
+            &["svc/d.py", "README.md"],
+            "codec: handle CODEC-4242 framing",
+            "Framing bytes.",
+        ),
+        commit(
+            4,
+            &["svc/old_e.py", "svc/f.py"],
+            "Zebra striping in the renderer",
+            "",
+        ),
         commit(5, &wide, "Sweeping walrus rename everywhere", ""),
         commit(6, &["svc/c.py"], "Excluded pelican change", ""),
         commit(7, &["docs/x.md"], "pelican docs only", ""),
@@ -75,7 +109,8 @@ fn write_snapshot(root: &Path, with_messages: bool) {
     let (commits, messages): (Vec<HistoryCommit>, Vec<HistoryMessage>) = h.into_iter().unzip();
     let meta = HistoryMeta::new(commits[0].c.clone(), 2000, None, String::new());
     if with_messages {
-        write_history_with_messages(root, meta, &commits, &[], Some(&messages)).expect("write snapshot");
+        write_history_with_messages(root, meta, &commits, &[], Some(&messages))
+            .expect("write snapshot");
     } else {
         write_history(root, meta, &commits, &[]).expect("write snapshot");
     }
@@ -99,9 +134,16 @@ fn index(root: &Path, exclude: &[usize]) -> (TextIndex, Candidates, String) {
 /// Candidate paths with a score above 0, best first, ties by path.
 fn ranked(idx: &TextIndex, c: &Candidates, q: &str) -> Vec<(String, f64)> {
     let s = idx.scores(q);
-    let mut v: Vec<(usize, f64)> = s.iter().copied().enumerate().filter(|x| x.1 > 0.0).collect();
+    let mut v: Vec<(usize, f64)> = s
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|x| x.1 > 0.0)
+        .collect();
     v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    v.into_iter().map(|(i, x)| (c.paths[i].clone(), x)).collect()
+    v.into_iter()
+        .map(|(i, x)| (c.paths[i].clone(), x))
+        .collect()
 }
 
 fn names(r: &[(String, f64)]) -> Vec<&str> {
@@ -113,7 +155,14 @@ fn candidates_are_the_code_modules() {
     let d = tree();
     write_snapshot(d.path(), true);
     let (c, _) = candidates(d.path());
-    assert_eq!(c.paths, sources().into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>());
+    assert_eq!(
+        c.paths,
+        sources()
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
     assert_eq!(c.position("svc/c.py"), Some(2));
     assert_eq!(c.position("README.md"), None);
     assert_eq!(c.deg.len(), c.len());
@@ -128,7 +177,13 @@ fn a_subject_word_ranks_its_commit_files_first() {
     assert_eq!(names(&r), ["svc/a.py", "svc/b.py"]);
     assert_eq!(r[0].1.to_bits(), r[1].1.to_bits());
     assert_eq!(idx.matched_docs("tokenizer crash"), 1);
-    assert_eq!(idx.top_commits("tokenizer crash").iter().map(|x| x.0).collect::<Vec<_>>(), [sha(1)]);
+    assert_eq!(
+        idx.top_commits("tokenizer crash")
+            .iter()
+            .map(|x| x.0)
+            .collect::<Vec<_>>(),
+        [sha(1)]
+    );
 }
 
 #[test]
@@ -151,7 +206,10 @@ fn a_wide_commit_and_an_empty_one_are_skipped() {
     let (idx, c, _) = index(d.path(), &[]);
     let st = idx.stats();
     // 8 commits: 5 (31 files) wide, 7 (docs only) empty, 6 indexed.
-    assert_eq!((st.docs, st.skipped_wide, st.skipped_empty, st.excluded), (6, 1, 1, 0));
+    assert_eq!(
+        (st.docs, st.skipped_wide, st.skipped_empty, st.excluded),
+        (6, 1, 1, 0)
+    );
     assert!(ranked(&idx, &c, "walrus").is_empty());
     assert_eq!(idx.matched_docs("walrus"), 0);
 }
@@ -177,27 +235,47 @@ fn a_pre_rename_commit_old_path_drops() {
     // fold, so only f.py scores.
     assert_eq!(names(&ranked(&idx, &c, "zebra")), ["svc/f.py"]);
     // The rename commit itself names the current path.
-    assert_eq!(names(&ranked(&idx, &c, "renderer")), ["svc/e.py", "svc/f.py"]);
+    assert_eq!(
+        names(&ranked(&idx, &c, "renderer")),
+        ["svc/e.py", "svc/f.py"]
+    );
 }
 
 #[test]
 fn absent_history_and_absent_messages() {
     let d = tree();
     let (c, _) = candidates(d.path());
-    assert_eq!(TextIndex::load(d.path(), &c, &BTreeSet::new()).err(), Some(TextAbsent::History));
+    assert_eq!(
+        TextIndex::load(d.path(), &c, &BTreeSet::new()).err(),
+        Some(TextAbsent::History)
+    );
     write_snapshot(d.path(), false);
-    assert_eq!(TextIndex::load(d.path(), &c, &BTreeSet::new()).err(), Some(TextAbsent::Messages));
+    assert_eq!(
+        TextIndex::load(d.path(), &c, &BTreeSet::new()).err(),
+        Some(TextAbsent::Messages)
+    );
     assert_eq!(TextAbsent::Messages.as_str(), "messages=absent");
 }
 
-const QUERIES: [&str; 4] = ["tokenizer crash", "CODEC-4242 regression", "zebra renderer", "pelican"];
+const QUERIES: [&str; 4] = [
+    "tokenizer crash",
+    "CODEC-4242 regression",
+    "zebra renderer",
+    "pelican",
+];
 
 /// Every query's scores as bits, one line each.
 fn score_lines(root: &Path) -> Vec<String> {
     let (idx, _, _) = index(root, &[]);
     QUERIES
         .iter()
-        .map(|q| idx.scores(q).iter().map(|x| format!("{:016x}", x.to_bits())).collect::<Vec<_>>().join(","))
+        .map(|q| {
+            idx.scores(q)
+                .iter()
+                .map(|x| format!("{:016x}", x.to_bits()))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
         .collect()
 }
 
@@ -228,12 +306,21 @@ fn scores_are_identical_across_builds_and_threads() {
     assert_eq!(first, score_lines(d.path()), "two builds");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
-        .args(["--exact", "child_scores_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_scores_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, d.path())
         .env("GLIA_THREADS", "1")
         .output()
         .expect("re-run the test binary");
-    assert!(out.status.success(), "child failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "child failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     let child: Vec<String> = stderr
         .lines()
@@ -241,7 +328,10 @@ fn scores_are_identical_across_builds_and_threads() {
         .map(String::from)
         .collect();
     assert_eq!(child, first, "GLIA_THREADS=1");
-    let markers: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[intent] text ")).collect();
+    let markers: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[intent] text "))
+        .collect();
     let label = candidates(d.path()).1;
     assert_eq!(
         markers,

@@ -43,7 +43,11 @@ fn api_web(tmp: &Path) -> (PathBuf, PathBuf) {
         "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\")\n\
          def list_users():\n    return []\n",
     );
-    write(&api, "README.md", "# API\n\nThe web client calls `loadUsers` to list users.\n");
+    write(
+        &api,
+        "README.md",
+        "# API\n\nThe web client calls `loadUsers` to list users.\n",
+    );
     write(
         &web,
         "client.ts",
@@ -54,7 +58,10 @@ fn api_web(tmp: &Path) -> (PathBuf, PathBuf) {
 }
 
 fn build(repos: &[&Path]) -> GenerateResult {
-    let paths: Vec<String> = repos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = repos
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap()
 }
 
@@ -66,11 +73,17 @@ fn layout(repos: &[&Path], dir: &Path) -> GenerateResult {
 }
 
 fn gmap(name: &str, dir: &Path) -> MergeMember {
-    read_one(&format!(r#"{{"name":"{name}","gmap":"{}"}}"#, dir.display()))
+    read_one(&format!(
+        r#"{{"name":"{name}","gmap":"{}"}}"#,
+        dir.display()
+    ))
 }
 
 fn repo(name: &str, root: &Path) -> MergeMember {
-    read_one(&format!(r#"{{"name":"{name}","repo":"{}"}}"#, root.display()))
+    read_one(&format!(
+        r#"{{"name":"{name}","repo":"{}"}}"#,
+        root.display()
+    ))
 }
 
 /// One member through the workspace reader (absolute paths), so the tests
@@ -88,7 +101,12 @@ fn gmaps(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().ends_with(".gmap"))
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
         .collect();
     out.sort();
     out
@@ -105,10 +123,16 @@ fn assert_same_layout(m: &Path, t: &Path) {
     let names = |g: &[(String, Vec<u8>)]| g.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
     assert_eq!(names(&gm), names(&gt), "shard sets differ");
     for ((name, bm), (_, bt)) in gm.iter().zip(&gt) {
-        assert!(bm == bt, "{name}: merged bytes differ from the joint build's");
+        assert!(
+            bm == bt,
+            "{name}: merged bytes differ from the joint build's"
+        );
     }
     let mut mm = manifest(m);
-    assert!(mm.get("members").is_some(), "the merged manifest records its members: {mm}");
+    assert!(
+        mm.get("members").is_some(),
+        "the merged manifest records its members: {mm}"
+    );
     mm.as_object_mut().unwrap().remove("members");
     assert_eq!(mm, manifest(t));
 }
@@ -127,7 +151,9 @@ const CHILD_ENV: &str = "LC10B_MERGE_WORKSPACE";
 /// no-op in a normal run.
 #[test]
 fn child_merge_for_stderr() {
-    let Ok(ws) = std::env::var(CHILD_ENV) else { return };
+    let Ok(ws) = std::env::var(CHILD_ENV) else {
+        return;
+    };
     let members = read_workspace(Path::new(&ws)).unwrap();
     merge_layouts(&members).unwrap();
 }
@@ -140,9 +166,18 @@ fn merge_stderr(tmp: &Path, members: &[(&str, &Path)]) -> Vec<String> {
         .map(|(n, d)| format!(r#"{{"name":"{n}","gmap":"{}"}}"#, d.display()))
         .collect();
     let ws = tmp.join("child.workspace.json");
-    std::fs::write(&ws, format!(r#"{{"version":1,"members":[{}]}}"#, list.join(","))).unwrap();
+    std::fs::write(
+        &ws,
+        format!(r#"{{"version":1,"members":[{}]}}"#, list.join(",")),
+    )
+    .unwrap();
     let out = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", "child_merge_for_stderr", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "child_merge_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, &ws)
         .output()
         .expect("re-run the test binary");
@@ -165,13 +200,24 @@ fn merge_stderr(tmp: &Path, members: &[(&str, &Path)]) -> Vec<String> {
 fn merge_equals_building_together() {
     let tmp = tempfile::tempdir().unwrap();
     let (api, web) = api_web(tmp.path());
-    let (a, b, t) = (tmp.path().join("out_a"), tmp.path().join("out_b"), tmp.path().join("out_t"));
+    let (a, b, t) = (
+        tmp.path().join("out_a"),
+        tmp.path().join("out_b"),
+        tmp.path().join("out_t"),
+    );
     layout(&[&api], &a);
     let web_only = layout(&[&web], &b);
-    assert!(!web_only.merged.pass_undo.is_empty(), "control: web alone demotes its endpoint");
+    assert!(
+        !web_only.merged.pass_undo.is_empty(),
+        "control: web alone demotes its endpoint"
+    );
     let together = layout(&[&api, &web], &t);
     assert!(
-        together.merged.cross_edges.iter().any(|e| e.category == edge_category::DOCUMENTS),
+        together
+            .merged
+            .cross_edges
+            .iter()
+            .any(|e| e.category == edge_category::DOCUMENTS),
         "control: the joint build links api's README to web's loadUsers"
     );
 
@@ -196,7 +242,10 @@ fn merge_equals_building_together() {
     // A source member is built into its own default layout first (LC.8), then
     // merged the same way.
     let m2 = merge_layouts(&[gmap("api", &a), repo("web", &web)]).unwrap();
-    assert!(web.join(".glia/graph").join(MANIFEST_NAME).is_file(), "the repo member was persisted");
+    assert!(
+        web.join(".glia/graph").join(MANIFEST_NAME).is_file(),
+        "the repo member was persisted"
+    );
     let out_m2 = tmp.path().join("out_m2");
     persist_merge(&m2, &out_m2, "test").unwrap();
     assert_same_layout(&out_m2, &t);
@@ -205,10 +254,18 @@ fn merge_equals_building_together() {
     // A re-merge into the same dir with one member leaves no shard of the
     // other behind.
     persist_merge(&merge_layouts(&[gmap("api", &a)]).unwrap(), &out_m2, "test").unwrap();
-    assert_eq!(gmaps(&out_m2).len(), gmaps(&a).len(), "{:?}", gmaps(&out_m2).len());
+    assert_eq!(
+        gmaps(&out_m2).len(),
+        gmaps(&a).len(),
+        "{:?}",
+        gmaps(&out_m2).len()
+    );
 
     let lines = merge_stderr(tmp.path(), &[("api", &a), ("web", &b)]);
-    let marker = lines.iter().find(|l| l.starts_with("[merge] members=")).expect("marker");
+    let marker = lines
+        .iter()
+        .find(|l| l.starts_with("[merge] members="))
+        .expect("marker");
     let want = format!(
         "[merge] members=2 (gmap=2 repo=0) repos=2 code_shards={} foreign_shards=0 cross_edges={} \
          kept_member_edges=0 labels_stored=0",
@@ -233,11 +290,27 @@ fn merge_equals_building_together_with_same_as() {
             "syntax = \"proto3\";\n\npackage shop;\n\nmessage OrderPlaced {{\n  string id = 1;\n{extra}}}\n"
         )
     };
-    write(&api, "package.json", r#"{"name":"api","dependencies":{"react":"^18.2.0"}}"#);
+    write(
+        &api,
+        "package.json",
+        r#"{"name":"api","dependencies":{"react":"^18.2.0"}}"#,
+    );
     write(&api, "proto/shop.proto", &message(""));
-    write(&web, "package.json", r#"{"name":"web","dependencies":{"react":"^18.2.0"}}"#);
-    write(&web, "proto/shop.proto", &message("  int64 total_cents = 2;\n"));
-    let (a, b, t) = (tmp.path().join("out_a"), tmp.path().join("out_b"), tmp.path().join("out_t"));
+    write(
+        &web,
+        "package.json",
+        r#"{"name":"web","dependencies":{"react":"^18.2.0"}}"#,
+    );
+    write(
+        &web,
+        "proto/shop.proto",
+        &message("  int64 total_cents = 2;\n"),
+    );
+    let (a, b, t) = (
+        tmp.path().join("out_a"),
+        tmp.path().join("out_b"),
+        tmp.path().join("out_t"),
+    );
     layout(&[&api], &a);
     layout(&[&web], &b);
     let together = layout(&[&api, &web], &t);
@@ -248,13 +321,26 @@ fn merge_equals_building_together_with_same_as() {
         .filter(|e| e.category == edge_category::SAME_AS)
         .filter_map(|e| Evidence::of(e).and_then(|ev| ev.rule))
         .collect();
-    assert!(rules.len() >= 2, "control: the joint build holds the stars: {rules:?}");
-    assert!(rules.iter().any(|r| r == "package_name"), "react: {rules:?}");
-    assert!(rules.iter().any(|r| r == "message_fqname/diverged"), "OrderPlaced: {rules:?}");
+    assert!(
+        rules.len() >= 2,
+        "control: the joint build holds the stars: {rules:?}"
+    );
+    assert!(
+        rules.iter().any(|r| r == "package_name"),
+        "react: {rules:?}"
+    );
+    assert!(
+        rules.iter().any(|r| r == "message_fqname/diverged"),
+        "OrderPlaced: {rules:?}"
+    );
 
     let m = merge_layouts(&[gmap("api", &a), gmap("web", &b)]).unwrap();
     let same_as = |e: &Edge| e.category == edge_category::SAME_AS;
-    assert_eq!(count(&m, same_as), rules.len(), "recomputed once, never doubled");
+    assert_eq!(
+        count(&m, same_as),
+        rules.len(),
+        "recomputed once, never doubled"
+    );
     let out_m = tmp.path().join("out_m");
     persist_merge(&m, &out_m, "test").unwrap();
     assert_same_layout(&out_m, &t);
@@ -295,7 +381,9 @@ fn grpc_caveat_is_reported() {
     );
     let lines = merge_stderr(tmp.path(), &[("server", &s), ("client", &c)]);
     assert!(
-        lines.iter().any(|l| l.starts_with("[merge] caveat: grpc client needles are per-member")),
+        lines
+            .iter()
+            .any(|l| l.starts_with("[merge] caveat: grpc client needles are per-member")),
         "{lines:?}"
     );
 }
@@ -317,7 +405,9 @@ fn repo_id_collision_is_an_error() {
     assert!(err.contains("both hold repo"), "{err}");
 
     // Bad member lists are refused before anything is read.
-    let dup = merge_layouts(&[gmap("x", &one), gmap("x", &two)]).err().unwrap_or_default();
+    let dup = merge_layouts(&[gmap("x", &one), gmap("x", &two)])
+        .err()
+        .unwrap_or_default();
     assert!(dup.contains("two members are named 'x'"), "{dup}");
     assert!(merge_layouts(&[]).is_err());
 }
@@ -336,33 +426,60 @@ fn foreign_shard_passes_through() {
     // A toy-domain file: its own graph_type and registries (LC.4) and one
     // section the store knows nothing about (LC.5b).
     let repo = RepoId::from_canonical("toy://clip-1");
-    let node = |id: u64| Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells: vec![] };
+    let node = |id: u64| Node {
+        id: NodeId(id),
+        repo,
+        confidence: Confidence::Strong,
+        cells: vec![],
+    };
     let mut core = Container {
         header: Header::for_domain("toy", &[(9001, "FRAME")], &[(1, "NEXT")], &[]).unwrap(),
         repo,
         nodes: vec![node(10), node(20)],
         edges: Vec::new(),
-        node_kinds: vec![(NodeId(10), NodeKindId(9001)), (NodeId(20), NodeKindId(9001))],
+        node_kinds: vec![
+            (NodeId(10), NodeKindId(9001)),
+            (NodeId(20), NodeKindId(9001)),
+        ],
         sections: Vec::new(),
     };
     let section = encode_section("toy", &vec![(0u64, 7u32), (40, 9)]).unwrap();
     let toy_path = tmp.path().join("toy.gmap");
     write_container(&toy_path, &mut core, &[section]).unwrap();
     let toy = std::fs::read(&toy_path).unwrap();
-    let meta = layout_meta(&built.repo_labels, &built.repo_roots, &built.parse_errors, &c);
-    let foreign = [ForeignShard { name: "clip".into(), graph_type: "toy".into(), bytes: toy.clone() }];
+    let meta = layout_meta(
+        &built.repo_labels,
+        &built.repo_roots,
+        &built.parse_errors,
+        &c,
+    );
+    let foreign = [ForeignShard {
+        name: "clip".into(),
+        graph_type: "toy".into(),
+        bytes: toy.clone(),
+    }];
     write_merged_sharded_extras(&built.merged, &meta, &foreign, &[], &c).unwrap();
-    assert_eq!(read_layout_extras(&c).unwrap().foreign, foreign, "the member carries it");
+    assert_eq!(
+        read_layout_extras(&c).unwrap().foreign,
+        foreign,
+        "the member carries it"
+    );
 
     let m = merge_layouts(&[gmap("api", &a), gmap("cam", &c)]).unwrap();
     assert_eq!(m.foreign.len(), 1);
-    assert_eq!((m.foreign[0].name.as_str(), m.foreign[0].graph_type.as_str()), ("cam-clip", "toy"));
+    assert_eq!(
+        (m.foreign[0].name.as_str(), m.foreign[0].graph_type.as_str()),
+        ("cam-clip", "toy")
+    );
     assert!(m.foreign[0].bytes == toy, "bytes untouched");
     let out = tmp.path().join("out_m");
     persist_merge(&m, &out, "test").unwrap();
 
     let shards = manifest(&out)["shards"].as_array().unwrap().clone();
-    let entry = shards.iter().find(|e| e["name"] == "cam-clip").expect("listed in the manifest");
+    let entry = shards
+        .iter()
+        .find(|e| e["name"] == "cam-clip")
+        .expect("listed in the manifest");
     let member_entry = manifest(&c)["shards"]
         .as_array()
         .unwrap()
@@ -371,26 +488,49 @@ fn foreign_shard_passes_through() {
         .cloned()
         .unwrap();
     assert_eq!(entry["graph_type"], "toy");
-    assert_eq!(entry["content_hash"], member_entry["content_hash"], "same bytes, same hash");
+    assert_eq!(
+        entry["content_hash"], member_entry["content_hash"],
+        "same bytes, same hash"
+    );
     assert!(std::fs::read(out.join("cam-clip.gmap")).unwrap() == toy);
-    assert!(shards.iter().filter(|e| e["name"] != "cam-clip").all(|e| e.get("graph_type").is_none()));
+    assert!(
+        shards
+            .iter()
+            .filter(|e| e["name"] != "cam-clip")
+            .all(|e| e.get("graph_type").is_none())
+    );
 
     // Read as code: the toy shard is skipped (and reported), the code graphs load.
     let (merged, _) = read_merged_sharded_meta(&out).unwrap();
     assert_eq!(merged.graphs.len(), m.result.merged.graphs.len());
     assert_eq!(read_layout_extras(&out).unwrap().foreign[0].bytes, toy);
-    assert_eq!(load_layout(&out).unwrap().merged.graphs.len(), merged.graphs.len());
+    assert_eq!(
+        load_layout(&out).unwrap().merged.graphs.len(),
+        merged.graphs.len()
+    );
     // LC.4: the layout inspects with the toy shard named by its own header.
     let seen = inspect_path(&out).unwrap();
-    assert!(seen.shards.iter().any(|s| s.graph_type == "toy"), "{}", seen.marker());
+    assert!(
+        seen.shards.iter().any(|s| s.graph_type == "toy"),
+        "{}",
+        seen.marker()
+    );
 
     // A merge of the merge carries it on again.
     let again = merge_layouts(&[gmap("all", &out)]).unwrap();
     assert_eq!(again.foreign[0].name, "all-cam-clip");
 
     let lines = merge_stderr(tmp.path(), &[("api", &a), ("cam", &c)]);
-    assert!(lines.iter().any(|l| l == "[gmap] skipped foreign shard clip graph_type=toy"), "{lines:?}");
-    assert!(lines.iter().any(|l| l.contains(" foreign_shards=1 ")), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "[gmap] skipped foreign shard clip graph_type=toy"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains(" foreign_shards=1 ")),
+        "{lines:?}"
+    );
 }
 
 /// A member cross edge no resolver or pass emitted (an overlay's) is kept
@@ -407,8 +547,17 @@ fn external_edges_survive_resolver_edges_do_not_duplicate() {
     // Member `aw` is itself a two-repo build: it stores the HTTP_CALLS edge.
     let mut r = build(&[&api, &web]);
     let http = |e: &Edge| e.category == edge_category::HTTP_CALLS;
-    assert_eq!(r.merged.cross_edges.iter().filter(|e| http(e)).count(), 1, "control");
-    let ids: Vec<NodeId> = r.merged.graphs[0].nodes.iter().take(2).map(|n| n.id).collect();
+    assert_eq!(
+        r.merged.cross_edges.iter().filter(|e| http(e)).count(),
+        1,
+        "control"
+    );
+    let ids: Vec<NodeId> = r.merged.graphs[0]
+        .nodes
+        .iter()
+        .take(2)
+        .map(|n| n.id)
+        .collect();
     let overlay = Edge::new(ids[0], ids[1], edge_category::CALLS, Confidence::Weak)
         .with_cell(Evidence::emitter("overlay:llm").rule("declared").to_cell());
     r.merged.cross_edges.push(overlay);
@@ -421,18 +570,33 @@ fn external_edges_survive_resolver_edges_do_not_duplicate() {
     let m = merge_layouts(&[gmap("aw", &aw), gmap("other", &o)]).unwrap();
     let is_overlay = |e: &Edge| Evidence::of(e).is_some_and(|ev| ev.emitter == "overlay:llm");
     assert_eq!(count(&m, is_overlay), 1, "the overlay edge is kept once");
-    assert_eq!(count(&m, http), together.merged.all_edges().filter(|e| http(e)).count());
+    assert_eq!(
+        count(&m, http),
+        together.merged.all_edges().filter(|e| http(e)).count()
+    );
     assert_eq!(count(&m, http), 1);
-    assert_eq!(m.result.merged.cross_edges.len(), together.merged.cross_edges.len() + 1);
+    assert_eq!(
+        m.result.merged.cross_edges.len(),
+        together.merged.cross_edges.len() + 1
+    );
 
     let lines = merge_stderr(tmp.path(), &[("aw", &aw), ("other", &o)]);
-    assert!(lines.iter().any(|l| l.ends_with(" kept_member_edges=1 labels_stored=0")), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with(" kept_member_edges=1 labels_stored=0")),
+        "{lines:?}"
+    );
 }
 
 /// Mark `root` a git checkout of `url`, so two same-basename dirs have
 /// distinct identities (LB.1) whether built together or apart.
 fn git_remote(root: &Path, url: &str) {
-    write(root, ".git/config", &format!("[remote \"origin\"]\n\turl = {url}\n"));
+    write(
+        root,
+        ".git/config",
+        &format!("[remote \"origin\"]\n\turl = {url}\n"),
+    );
 }
 
 /// Labels are set-dependent (`api` deepens to `x/api` only beside another
@@ -449,8 +613,16 @@ fn labels_recomputed_over_the_union() {
     let (lx, ly) = (tmp.path().join("out_x"), tmp.path().join("out_y"));
     let bx = layout(&[&x], &lx);
     let by = layout(&[&y], &ly);
-    assert_eq!(bx.repo_labels.values().collect::<Vec<_>>(), ["api"], "alone: depth 1");
-    assert_eq!(by.repo_labels.values().collect::<Vec<_>>(), ["api"], "alone: depth 1");
+    assert_eq!(
+        bx.repo_labels.values().collect::<Vec<_>>(),
+        ["api"],
+        "alone: depth 1"
+    );
+    assert_eq!(
+        by.repo_labels.values().collect::<Vec<_>>(),
+        ["api"],
+        "alone: depth 1"
+    );
 
     let together = build(&[&x, &y]);
     let m = merge_layouts(&[gmap("x", &lx), gmap("y", &ly)]).unwrap();
@@ -459,7 +631,10 @@ fn labels_recomputed_over_the_union() {
     labels.sort();
     assert_eq!(labels, ["x/api", "y/api"], "depth-2 labels, not two `api`s");
     let lines = merge_stderr(tmp.path(), &[("x", &lx), ("y", &ly)]);
-    assert!(lines.iter().any(|l| l.ends_with(" labels_stored=0")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.ends_with(" labels_stored=0")),
+        "{lines:?}"
+    );
 
     // y's root is gone: its stored label is kept (made distinct from x's,
     // which no longer collides and is recomputed back to depth 1).
@@ -470,7 +645,10 @@ fn labels_recomputed_over_the_union() {
     assert_eq!(m.result.repo_labels[&x_id], "api");
     assert_eq!(m.result.repo_labels[&y_id], format!("api#{}", y_id % 1000));
     let lines = merge_stderr(tmp.path(), &[("x", &lx), ("y", &ly)]);
-    assert!(lines.iter().any(|l| l.ends_with(" labels_stored=1")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.ends_with(" labels_stored=1")),
+        "{lines:?}"
+    );
 }
 
 /// The workspace manifest: paths relative to the file, exactly one of
@@ -492,12 +670,27 @@ fn workspace_manifest_is_strict() {
     assert_eq!(members[1].name(), "web");
     for (body, want) in [
         (r#"{"version":2,"members":[]}"#, "unsupported version 2"),
-        (r#"{"version":1,"members":[{"name":"a","gmap":"x","repo":"y"}]}"#, "exactly one"),
+        (
+            r#"{"version":1,"members":[{"name":"a","gmap":"x","repo":"y"}]}"#,
+            "exactly one",
+        ),
         (r#"{"version":1,"members":[{"name":"a"}]}"#, "exactly one"),
-        (r#"{"version":1,"members":[{"name":"a","gmap":"x","branch":"main"}]}"#, "unknown field"),
-        (r#"{"version":1,"members":[],"fetch":true}"#, "unknown field"),
-        (r#"{"version":1,"members":[{"name":"a","repo":"https://github.com/x/y"}]}"#, "local paths only"),
-        (r#"{"version":1,"members":[{"name":"../a","gmap":"x"}]}"#, "plain name"),
+        (
+            r#"{"version":1,"members":[{"name":"a","gmap":"x","branch":"main"}]}"#,
+            "unknown field",
+        ),
+        (
+            r#"{"version":1,"members":[],"fetch":true}"#,
+            "unknown field",
+        ),
+        (
+            r#"{"version":1,"members":[{"name":"a","repo":"https://github.com/x/y"}]}"#,
+            "local paths only",
+        ),
+        (
+            r#"{"version":1,"members":[{"name":"../a","gmap":"x"}]}"#,
+            "plain name",
+        ),
         (r#"{"version":1,"members":[]}"#, "no members"),
     ] {
         let err = read(body).err().unwrap_or_default();

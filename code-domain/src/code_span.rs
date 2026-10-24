@@ -45,7 +45,12 @@ impl CodeSpan {
     /// The span of `text` found at byte `start` of `file`, hashed.
     pub fn of(file: &str, start: u64, text: &[u8]) -> Self {
         let end = start.saturating_add(text.len() as u64);
-        Self { file: file.to_string(), start, end, xxh64: xxh64(text) }
+        Self {
+            file: file.to_string(),
+            start,
+            end,
+            xxh64: xxh64(text),
+        }
     }
 
     /// Length of the range in bytes (0 for a malformed `end < start`).
@@ -115,7 +120,12 @@ impl CodeSpan {
             return None;
         }
         let xxh64 = u64::from_str_radix(hex, 16).ok()?;
-        Some(Self { file, start, end, xxh64 })
+        Some(Self {
+            file,
+            start,
+            end,
+            xxh64,
+        })
     }
 
     /// The on-disk payload, `file` given as its index in the file's string
@@ -152,7 +162,9 @@ impl CodeSpan {
             .to_string();
         let start = take_varint(bytes, &mut at, "start")?;
         let len = take_varint(bytes, &mut at, "len")?;
-        let end = start.checked_add(len).ok_or_else(|| format!("range {start}+{len} past u64"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| format!("range {start}+{len} past u64"))?;
         let Some(hash) = bytes.get(at..at + 8) else {
             return Err(format!("truncated payload: no 8-byte xxh64 at byte {at}"));
         };
@@ -161,7 +173,12 @@ impl CodeSpan {
         if at + 8 != bytes.len() {
             return Err(format!("{} trailing byte(s)", bytes.len() - at - 8));
         }
-        Ok(Self { file, start, end, xxh64: u64::from_le_bytes(le) })
+        Ok(Self {
+            file,
+            start,
+            end,
+            xxh64: u64::from_le_bytes(le),
+        })
     }
 }
 
@@ -219,14 +236,27 @@ mod tests {
 
     #[test]
     fn bytes_round_trip_at_every_width() {
-        for (start, len) in [(0u64, 1u64), (127, 128), (16_383, 16_384), (u64::from(u32::MAX), 3)] {
-            let span = CodeSpan { file: "b/ü \"q\".py".into(), start, end: start + len, xxh64: 0xfeed };
+        for (start, len) in [
+            (0u64, 1u64),
+            (127, 128),
+            (16_383, 16_384),
+            (u64::from(u32::MAX), 3),
+        ] {
+            let span = CodeSpan {
+                file: "b/ü \"q\".py".into(),
+                start,
+                end: start + len,
+                xxh64: 0xfeed,
+            };
             let bytes = span.encode(1);
             assert_eq!(bytes[0], CODE_SPAN_TAG);
             assert_eq!(CodeSpan::decode(&bytes, 2, table), Ok(span));
         }
         let span = CodeSpan::of("src/a.rs", 5, b"fn a() {}");
-        assert_eq!(span.encode(0), [&[0x02, 0, 5, 9][..], &xxh64(b"fn a() {}").to_le_bytes()].concat());
+        assert_eq!(
+            span.encode(0),
+            [&[0x02, 0, 5, 9][..], &xxh64(b"fn a() {}").to_le_bytes()].concat()
+        );
     }
 
     #[test]
@@ -235,11 +265,20 @@ mod tests {
         let cases: Vec<(Vec<u8>, &str)> = vec![
             (vec![0x01, 0], "not a CODE span payload"),
             (vec![0x02], "truncated varint (file)"),
-            (vec![0x02, 5, 0, 0], "file index 5 outside the 2-entry strings table"),
+            (
+                vec![0x02, 5, 0, 0],
+                "file index 5 outside the 2-entry strings table",
+            ),
             (vec![0x02, 0, 0, 1, 1, 2], "no 8-byte xxh64"),
             ([&good[..], &[0][..]].concat(), "1 trailing byte(s)"),
             (
-                [&[0x02, 0][..], &[0xff; 9][..], &[0x01, 0x02][..], &[0; 8][..]].concat(),
+                [
+                    &[0x02, 0][..],
+                    &[0xff; 9][..],
+                    &[0x01, 0x02][..],
+                    &[0; 8][..],
+                ]
+                .concat(),
                 "past u64",
             ),
         ];
@@ -251,17 +290,27 @@ mod tests {
 
     #[test]
     fn json_round_trips_and_names_the_range() {
-        let span = CodeSpan { file: "b/ü \"q\".py".into(), start: 120, end: 480, xxh64: 0xab };
+        let span = CodeSpan {
+            file: "b/ü \"q\".py".into(),
+            start: 120,
+            end: 480,
+            xxh64: 0xab,
+        };
         let json = span.to_json();
         assert_eq!(
             json,
             r#"{"code_span":{"file":"b/ü \"q\".py","start":120,"end":480,"xxh64":"00000000000000ab"}}"#
         );
-        assert_eq!(CodeSpan::from_payload(&span.to_payload()), Some(span.clone()));
+        assert_eq!(
+            CodeSpan::from_payload(&span.to_payload()),
+            Some(span.clone())
+        );
         assert!(is_span_payload(&span.to_payload()));
         // The same string as Text, other CODE JSON, and bent spans are not spans.
         assert!(!is_span_payload(&CellPayload::Text(json)));
-        assert!(!is_span_payload(&CellPayload::Json(r#"{"sites":[{"line":4}]}"#.into())));
+        assert!(!is_span_payload(&CellPayload::Json(
+            r#"{"sites":[{"line":4}]}"#.into()
+        )));
         for bent in [
             r#"{"code_span":{"file":"a","start":9,"end":1,"xxh64":"0000000000000000"}}"#,
             r#"{"code_span":{"file":"a","start":1,"end":9,"xxh64":"00"}}"#,

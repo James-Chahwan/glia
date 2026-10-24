@@ -572,7 +572,10 @@ fn elixir_first_arg(source: &str, i: usize) -> Option<String> {
         let name = quoted_at(source, k)?;
         let end = k + name.len() + 2;
         (name, end)
-    } else if atom && b.get(k).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+    } else if atom
+        && b.get(k)
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
         let mut e = k;
         while e < b.len() && is_ident(b[e]) {
             e += 1;
@@ -995,8 +998,11 @@ x.createTable(name);
         // Through the data-entity funnel: a declaration, so the edge stays
         // on the migration file's MODULE.
         let repo = RepoId(1);
-        let (out, access) =
-            crate::data_entities::extract_data_entity_access(ECTO_CREATE_USERS, module_id(repo), repo);
+        let (out, access) = crate::data_entities::extract_data_entity_access(
+            ECTO_CREATE_USERS,
+            module_id(repo),
+            repo,
+        );
         assert_eq!(qnames(&out), ["data_entity:sql:users"]);
         assert!(access.sites.is_empty());
         assert_eq!(access.declared.len(), 1);

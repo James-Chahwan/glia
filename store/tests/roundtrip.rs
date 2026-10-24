@@ -33,10 +33,7 @@ fn repo() -> RepoId {
 }
 
 fn build() -> glia_graph::RepoGraph {
-    let files = [
-        ("users/users.go", "users"),
-        ("server/server.go", "server"),
-    ];
+    let files = [("users/users.go", "users"), ("server/server.go", "server")];
     let parses: Vec<_> = files
         .iter()
         .map(|(rel, pkg)| {
@@ -64,7 +61,10 @@ fn repo_graph_roundtrips_through_gmap_file() {
     write_repo_graph(&g, &path).unwrap();
     assert!(path.exists(), "written .gmap file should exist at {path:?}");
     let raw = std::fs::read(&path).unwrap();
-    assert!(raw.starts_with(b"GLIAGMAP"), "written .gmap has no GLIAGMAP preamble");
+    assert!(
+        raw.starts_with(b"GLIAGMAP"),
+        "written .gmap has no GLIAGMAP preamble"
+    );
 
     let container = MmapContainer::open(&path).unwrap();
     let archived = container.archived().unwrap();
@@ -105,7 +105,10 @@ fn repo_graph_roundtrips_through_gmap_file() {
     let qn_owned = g.nav.qname_by_id.get(&route_id).unwrap();
     let qn_archived = code.qname(route_id).expect("archived qname lookup");
     assert_eq!(qn_archived, qn_owned);
-    assert_eq!(qname_of(&container, route_id).unwrap().as_ref(), Some(qn_owned));
+    assert_eq!(
+        qname_of(&container, route_id).unwrap().as_ref(),
+        Some(qn_owned)
+    );
     assert_eq!(archived.kind(route_id), Some(node_kind::ROUTE));
 
     // Unknown id returns None (binary search miss, no panic).
@@ -163,7 +166,9 @@ fn opening_a_non_gmap_file_fails_with_old_format() {
 const EVIDENCE_JSON: &[u8] = br#"{"emitter":"#;
 
 fn has_evidence_json(bytes: &[u8]) -> bool {
-    bytes.windows(EVIDENCE_JSON.len()).any(|w| w == EVIDENCE_JSON)
+    bytes
+        .windows(EVIDENCE_JSON.len())
+        .any(|w| w == EVIDENCE_JSON)
 }
 
 fn client_repo() -> RepoId {
@@ -186,8 +191,19 @@ fn with_client(backend: RepoGraph) -> MergedGraph {
     let mut nav = CodeNav::default();
     let mut node = |kind, qname: &str| {
         let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
-        nav.record(id, qname.rsplit("::").next().unwrap_or(qname), qname, kind, None);
-        Node { id, repo, confidence: Confidence::Strong, cells: Vec::new() }
+        nav.record(
+            id,
+            qname.rsplit("::").next().unwrap_or(qname),
+            qname,
+            kind,
+            None,
+        );
+        Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        }
     };
     let caller = node(node_kind::FUNCTION, "web::api::loadUsers");
     let ep = node(node_kind::ENDPOINT, "endpoint:GET:/health");
@@ -197,10 +213,17 @@ fn with_client(backend: RepoGraph) -> MergedGraph {
         nodes: vec![caller, ep],
         edges: vec![
             Edge::new(c, e, edge_category::HTTP_CALLS, Confidence::Strong).with_cell(
-                Evidence::emitter("extractor:http").rule("fetch").at("web/api.ts", 3).to_cell(),
+                Evidence::emitter("extractor:http")
+                    .rule("fetch")
+                    .at("web/api.ts", 3)
+                    .to_cell(),
             ),
-            Edge::new(c, e, edge_category::CALLS, Confidence::Strong)
-                .with_cell(Evidence::emitter("parser:typescript").rule("intra_file").at("web/api.ts", 9).to_cell()),
+            Edge::new(c, e, edge_category::CALLS, Confidence::Strong).with_cell(
+                Evidence::emitter("parser:typescript")
+                    .rule("intra_file")
+                    .at("web/api.ts", 9)
+                    .to_cell(),
+            ),
         ],
         nav,
         symbols: SymbolTable::default(),
@@ -210,8 +233,12 @@ fn with_client(backend: RepoGraph) -> MergedGraph {
     };
     let mut merged = MergedGraph::new(vec![backend, client]);
     merged.cross_edges = vec![
-        Edge::new(e, route, edge_category::HTTP_CALLS, Confidence::Strong)
-            .with_cell(Evidence::emitter("resolver:http").rule("exact").at("web/api.ts", 3).to_cell()),
+        Edge::new(e, route, edge_category::HTTP_CALLS, Confidence::Strong).with_cell(
+            Evidence::emitter("resolver:http")
+                .rule("exact")
+                .at("web/api.ts", 3)
+                .to_cell(),
+        ),
     ];
     merged
 }
@@ -233,15 +260,28 @@ fn layout_files(dir: &Path) -> Vec<PathBuf> {
 fn evidence_interned_round_trip() {
     // (a) One file: the Go backend through write_repo_graph / decode_repo_graph.
     let g = build();
-    let with_evidence = g.edges.iter().filter(|e| e.cell(cell_type::EVIDENCE).is_some()).count();
-    assert!(with_evidence > 0, "the backend fixture's edges carry no EVIDENCE");
+    let with_evidence = g
+        .edges
+        .iter()
+        .filter(|e| e.cell(cell_type::EVIDENCE).is_some())
+        .count();
+    assert!(
+        with_evidence > 0,
+        "the backend fixture's edges carry no EVIDENCE"
+    );
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("backend.gmap");
     write_repo_graph(&g, &path).unwrap();
     let raw = std::fs::read(&path).unwrap();
-    assert!(!has_evidence_json(&raw), "backend.gmap stores EVIDENCE as JSON");
+    assert!(
+        !has_evidence_json(&raw),
+        "backend.gmap stores EVIDENCE as JSON"
+    );
     let m = MmapContainer::open(&path).unwrap();
-    assert!(m.section_bytes(STRINGS_SECTION).unwrap().is_some(), "no strings section");
+    assert!(
+        m.section_bytes(STRINGS_SECTION).unwrap().is_some(),
+        "no strings section"
+    );
     // The archived core holds every EVIDENCE cell in the compact form ...
     let archived = m.archived().unwrap();
     let interned = archived
@@ -256,7 +296,11 @@ fn evidence_interned_round_trip() {
     let back = decode_repo_graph(&m).unwrap();
     assert_eq!(back.edges.len(), g.edges.len());
     for (a, b) in back.edges.iter().zip(&g.edges) {
-        assert_eq!(a.cells, b.cells, "edge {} -> {}: cells differ after the round trip", b.from.0, b.to.0);
+        assert_eq!(
+            a.cells, b.cells,
+            "edge {} -> {}: cells differ after the round trip",
+            b.from.0, b.to.0
+        );
     }
     assert_eq!(back.edges, g.edges);
 
@@ -268,16 +312,27 @@ fn evidence_interned_round_trip() {
     assert_eq!(files.len(), 3, "two shards and cross_stack: {files:?}");
     for p in &files {
         let bytes = std::fs::read(p).unwrap();
-        assert!(!has_evidence_json(&bytes), "{}: stores EVIDENCE as JSON", p.display());
+        assert!(
+            !has_evidence_json(&bytes),
+            "{}: stores EVIDENCE as JSON",
+            p.display()
+        );
         let names = MmapContainer::open(p).unwrap().section_names().unwrap();
-        assert!(names.iter().any(|(n, _)| n == STRINGS_SECTION), "{}: {names:?}", p.display());
+        assert!(
+            names.iter().any(|(n, _)| n == STRINGS_SECTION),
+            "{}: {names:?}",
+            p.display()
+        );
     }
     assert!(files.iter().any(|p| p.ends_with(CROSS_STACK_NAME)));
     let loaded = read_merged_sharded(&dir).unwrap();
     for (a, b) in loaded.graphs.iter().zip(&merged.graphs) {
         assert_eq!(a.edges, b.edges, "repo {}: edges, cells included", b.repo.0);
     }
-    assert_eq!(loaded.cross_edges, merged.cross_edges, "cross edges, cells included");
+    assert_eq!(
+        loaded.cross_edges, merged.cross_edges,
+        "cross edges, cells included"
+    );
     let json = |e: &Edge| match &e.cell(cell_type::EVIDENCE).unwrap().payload {
         CellPayload::Json(s) => s.clone(),
         other => panic!("EVIDENCE read back as {other:?}"),
@@ -290,7 +345,13 @@ fn evidence_interned_round_trip() {
     // (c) A cell upsert rewrites the shard raw: the interned payloads stay valid
     // against the strings section copied back beside them.
     let target = merged.graphs[0].nodes[0].id;
-    upsert_cell_sharded(&dir, target, cell_type::INTENT, CellPayload::Text("cd7b".into())).unwrap();
+    upsert_cell_sharded(
+        &dir,
+        target,
+        cell_type::INTENT,
+        CellPayload::Text("cd7b".into()),
+    )
+    .unwrap();
     let again = read_merged_sharded(&dir).unwrap();
     for (a, b) in again.graphs.iter().zip(&merged.graphs) {
         assert_eq!(a.edges, b.edges, "repo {}: edges after an upsert", b.repo.0);

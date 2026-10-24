@@ -178,11 +178,12 @@ pub(super) fn apply_rpc_needles(
             lang,
             slot,
             module_id,
-            halves: NeedleHalves {
-                client,
-                server,
-                proto_rpc,
-            },
+            halves:
+                NeedleHalves {
+                    client,
+                    server,
+                    proto_rpc,
+                },
         } = out;
         let Some(fp) = parses_by_lang.get_mut(lang).and_then(|v| v.get_mut(slot)) else {
             continue;
@@ -220,7 +221,9 @@ type ParseKey = (&'static str, NodeId);
 /// DC.4: also the repeated keys. A file under one of them may be paired with
 /// ANOTHER file's parse, a cross-file input the needle memo's key cannot
 /// see, so the memo skips it.
-fn parse_index(parses_by_lang: &HashMap<&'static str, Vec<FileParse>>) -> (HashMap<ParseKey, usize>, HashSet<ParseKey>) {
+fn parse_index(
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+) -> (HashMap<ParseKey, usize>, HashSet<ParseKey>) {
     let mut index = HashMap::new();
     let mut shared = HashSet::new();
     for (lang, parses) in parses_by_lang {
@@ -340,12 +343,15 @@ fn needle_one(
     if let Some((memo, key)) = &lookup
         && let Some(held) = memo.get(path, key)
     {
-        let out = held.as_ref().zip(parse).map(|(halves, (slot, _))| NeedleOut {
-            lang,
-            slot,
-            module_id,
-            halves: halves.clone(),
-        });
+        let out = held
+            .as_ref()
+            .zip(parse)
+            .map(|(halves, (slot, _))| NeedleOut {
+                lang,
+                slot,
+                module_id,
+                halves: halves.clone(),
+            });
         return NeedleStep::Hit(out);
     }
     let key = lookup.map(|(_, key)| key);
@@ -384,7 +390,10 @@ fn needle_one(
             proto_rpc,
         },
     };
-    NeedleStep::Fresh { key, out: Some(out) }
+    NeedleStep::Fresh {
+        key,
+        out: Some(out),
+    }
 }
 
 /// LA.17: does this repo speak Twirp? Its go.mod requires the runtime, or it
@@ -562,8 +571,11 @@ mod rpc_needle_tests {
     }
 
     fn incoming(m: &MergedGraph, id: NodeId) -> Vec<CategoryId> {
-        let mut cats: Vec<CategoryId> =
-            m.all_edges().filter(|e| e.to == id).map(|e| e.category).collect();
+        let mut cats: Vec<CategoryId> = m
+            .all_edges()
+            .filter(|e| e.to == id)
+            .map(|e| e.category)
+            .collect();
         cats.sort_by_key(|c| c.0);
         cats
     }
@@ -599,10 +611,15 @@ mod rpc_needle_tests {
         assert_eq!(names, vec!["grpc_client:OrderService".to_string()]);
 
         // Merged, the server's .proto names `Greeter` for the client repo too.
-        let merged = generate_many(&[server_s.clone(), client_s.clone()]).unwrap().merged;
+        let merged = generate_many(&[server_s.clone(), client_s.clone()])
+            .unwrap()
+            .merged;
         let found = clients(&merged, client_repo);
         let names: Vec<&str> = found.iter().map(|(q, _)| q.as_str()).collect();
-        assert_eq!(names, vec!["grpc_client:Greeter", "grpc_client:OrderService"]);
+        assert_eq!(
+            names,
+            vec!["grpc_client:Greeter", "grpc_client:OrderService"]
+        );
         let (greeter, orders) = (found[0].1, found[1].1);
         assert!(has_edge(
             &merged,
@@ -633,7 +650,10 @@ mod rpc_needle_tests {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        assert_eq!(without_position(&greeter_cells), without_position(&orders_cells));
+        assert_eq!(
+            without_position(&greeter_cells),
+            without_position(&orders_cells)
+        );
         let position = |cells: &[Cell]| {
             cells
                 .iter()
@@ -713,15 +733,34 @@ mod rpc_needle_tests {
 
         let found = servers(&merged);
         let names: Vec<&str> = found.iter().map(|(q, _)| q.as_str()).collect();
-        assert_eq!(names, vec!["grpc_server:Greeter"], "OrderService has no impl here");
+        assert_eq!(
+            names,
+            vec!["grpc_server:Greeter"],
+            "OrderService has no impl here"
+        );
         let marker = found[0].1;
         let service = node_id_by_qname(&merged, "grpc:shop.Greeter");
         let say_hello = node_id_by_qname(&merged, "main::server::SayHello");
         let main_fn = node_id_by_qname(&merged, "main::main");
-        assert!(has_edge(&merged, service, marker, edge_category::HANDLED_BY));
-        assert!(has_edge(&merged, marker, say_hello, edge_category::HANDLED_BY));
+        assert!(has_edge(
+            &merged,
+            service,
+            marker,
+            edge_category::HANDLED_BY
+        ));
+        assert!(has_edge(
+            &merged,
+            marker,
+            say_hello,
+            edge_category::HANDLED_BY
+        ));
         // The receiver method serves the rpc; `main` only registers it.
-        assert!(!has_edge(&merged, marker, main_fn, edge_category::HANDLED_BY));
+        assert!(!has_edge(
+            &merged,
+            marker,
+            main_fn,
+            edge_category::HANDLED_BY
+        ));
         // Located at the embedded base, the first needle line.
         let position = cells_of(&merged, marker)
             .into_iter()
@@ -749,20 +788,29 @@ mod rpc_needle_tests {
         );
         write(&repo, "api.proto", GREETER_PROTO);
         let repo_s = repo.to_str().unwrap();
-        let names = |m: &MergedGraph| -> Vec<String> { servers(m).into_iter().map(|(q, _)| q).collect() };
+        let names =
+            |m: &MergedGraph| -> Vec<String> { servers(m).into_iter().map(|(q, _)| q).collect() };
 
         let mut cache = ParseCache::new();
         let cold = generate_one_with_cache(repo_s, &mut cache).unwrap();
         assert_eq!(names(&cold.merged), vec!["grpc_server:Greeter".to_string()]);
         let marker = servers(&cold.merged)[0].1;
         let hi = node_id_by_qname(&cold.merged, "server::Greeter::Hi");
-        assert!(has_edge(&cold.merged, marker, hi, edge_category::HANDLED_BY));
+        assert!(has_edge(
+            &cold.merged,
+            marker,
+            hi,
+            edge_category::HANDLED_BY
+        ));
 
         // A proto-only edit: server.py comes from the cache and loses its marker.
         write(&repo, "api.proto", FAREWELL_PROTO);
         let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
         assert_eq!(cache.stats.reused, 1, "server.py must come from the cache");
-        assert!(names(&warm.merged).is_empty(), "stale server marker replayed from cache");
+        assert!(
+            names(&warm.merged).is_empty(),
+            "stale server marker replayed from cache"
+        );
         let clean = generate_one(repo_s).unwrap();
         assert_eq!(
             write_store(&warm.merged, &tmp.path().join("warm")),
@@ -772,7 +820,10 @@ mod rpc_needle_tests {
 
         write(&repo, "api.proto", GREETER_PROTO);
         let warm2 = generate_one_with_cache(repo_s, &mut cache).unwrap();
-        assert_eq!(names(&warm2.merged), vec!["grpc_server:Greeter".to_string()]);
+        assert_eq!(
+            names(&warm2.merged),
+            vec!["grpc_server:Greeter".to_string()]
+        );
         let clean2 = generate_one(repo_s).unwrap();
         assert_eq!(
             write_store(&warm2.merged, &tmp.path().join("warm2")),
@@ -782,7 +833,8 @@ mod rpc_needle_tests {
     }
 
     const GREETER_PROTO: &str = "package hello;\nservice Greeter {\n  rpc Hi (A) returns (B);\n}\n";
-    const FAREWELL_PROTO: &str = "package hello;\nservice Farewell {\n  rpc Bye (A) returns (B);\n}\n";
+    const FAREWELL_PROTO: &str =
+        "package hello;\nservice Farewell {\n  rpc Bye (A) returns (B);\n}\n";
 
     #[test]
     fn rpc_needles_follow_the_proto_under_a_warm_cache() {
@@ -809,7 +861,10 @@ mod rpc_needle_tests {
         write(&repo, "api.proto", FAREWELL_PROTO);
         let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
         assert_eq!(cache.stats.reused, 1, "client.py must come from the cache");
-        assert!(names(&warm.merged).is_empty(), "stale client replayed from cache");
+        assert!(
+            names(&warm.merged).is_empty(),
+            "stale client replayed from cache"
+        );
         let clean = generate_one(repo_s).unwrap();
         assert_eq!(
             write_store(&warm.merged, &tmp.path().join("warm")),
@@ -821,7 +876,10 @@ mod rpc_needle_tests {
         write(&repo, "api.proto", GREETER_PROTO);
         let warm2 = generate_one_with_cache(repo_s, &mut cache).unwrap();
         assert_eq!(cache.stats.reused, 1);
-        assert_eq!(names(&warm2.merged), vec!["grpc_client:Greeter".to_string()]);
+        assert_eq!(
+            names(&warm2.merged),
+            vec!["grpc_client:Greeter".to_string()]
+        );
         let clean2 = generate_one(repo_s).unwrap();
         assert_eq!(
             write_store(&warm2.merged, &tmp.path().join("warm2")),

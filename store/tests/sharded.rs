@@ -13,14 +13,10 @@
 use std::path::PathBuf;
 
 use glia_code_domain::{CodeNav, edge_category, node_kind};
-use glia_core::{
-    Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId,
-};
+use glia_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId};
 use glia_graph::{RepoGraph, SymbolTable, build_go};
 use glia_parser_go::parse_file;
-use glia_store::{
-    CROSS_STACK_NAME, MANIFEST_NAME, MANIFEST_VERSION, ShardedMmap, write_sharded,
-};
+use glia_store::{CROSS_STACK_NAME, MANIFEST_NAME, MANIFEST_VERSION, ShardedMmap, write_sharded};
 
 const MODULE_PREFIX: &str = "example.com/backend";
 
@@ -40,10 +36,7 @@ fn frontend_repo() -> RepoId {
 }
 
 fn build_backend() -> RepoGraph {
-    let files = [
-        ("users/users.go", "users"),
-        ("server/server.go", "server"),
-    ];
+    let files = [("users/users.go", "users"), ("server/server.go", "server")];
     let parses: Vec<_> = files
         .iter()
         .map(|(rel, pkg)| {
@@ -191,8 +184,7 @@ fn sharded_layout_roundtrips_with_cross_edges() {
 fn no_cross_edges_writes_no_cross_stack_file() {
     let backend = build_backend();
     let dir = tempfile::tempdir().unwrap();
-    let manifest =
-        write_sharded(&[("backend", &backend)], &[], dir.path()).unwrap();
+    let manifest = write_sharded(&[("backend", &backend)], &[], dir.path()).unwrap();
     assert!(manifest.cross.is_none());
     assert!(!dir.path().join(CROSS_STACK_NAME).exists());
 

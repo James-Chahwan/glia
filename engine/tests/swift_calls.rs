@@ -19,7 +19,10 @@ use glia_core::{NodeId, NodeKindId};
 use glia_engine::generate_one;
 
 fn fixture(name: &str) -> String {
-    format!("{}/../bench/substrate-gap/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        "{}/../bench/substrate-gap/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 /// Every CALLS edge of the `swift-self-calls` build as `(from qname, to
@@ -63,15 +66,31 @@ fn calls_with_rule(name: &str) -> Vec<(String, String, Option<NodeKindId>, Strin
 fn self_calls_bind_the_enclosing_types_method() {
     let calls = calls();
     for (from, to, why) in [
-        ("Sources::Shop::Widget::run", "Sources::Shop::Widget::helper", "self.helper() in a class"),
+        (
+            "Sources::Shop::Widget::run",
+            "Sources::Shop::Widget::helper",
+            "self.helper() in a class",
+        ),
         (
             "Sources::Shop::Widget::later",
             "Sources::Shop::Widget::refresh",
             "self?.refresh() in a [weak self] closure",
         ),
-        ("Sources::Shop::Widget::build", "Sources::Shop::Widget::make", "Self.make()"),
-        ("Sources::Shop::Part::weight", "Sources::Shop::Part::base", "self.base() in a struct"),
-        ("Sources::Shop::Mode::label", "Sources::Shop::Mode::describe", "self.describe() in an enum"),
+        (
+            "Sources::Shop::Widget::build",
+            "Sources::Shop::Widget::make",
+            "Self.make()",
+        ),
+        (
+            "Sources::Shop::Part::weight",
+            "Sources::Shop::Part::base",
+            "self.base() in a struct",
+        ),
+        (
+            "Sources::Shop::Mode::label",
+            "Sources::Shop::Mode::describe",
+            "self.describe() in an enum",
+        ),
     ] {
         assert!(
             calls
@@ -86,14 +105,18 @@ fn self_calls_bind_the_enclosing_types_method() {
 fn self_call_never_binds_the_same_named_free_function() {
     let calls = calls();
     assert!(
-        !calls.iter().any(|(f, t, _)| f == "Sources::Shop::Widget::run"
-            && t == "Sources::Shop::Shapes::helper"),
+        !calls
+            .iter()
+            .any(|(f, t, _)| f == "Sources::Shop::Widget::run"
+                && t == "Sources::Shop::Shapes::helper"),
         "self.helper() must not bind the top-level FUNCTION helper; CALLS = {calls:?}"
     );
     assert!(
-        calls.iter().any(|(f, t, k)| f == "Sources::Shop::Widget::later"
-            && t == "Sources::Shop::Shapes::schedule"
-            && *k == Some(node_kind::FUNCTION)),
+        calls
+            .iter()
+            .any(|(f, t, k)| f == "Sources::Shop::Widget::later"
+                && t == "Sources::Shop::Shapes::schedule"
+                && *k == Some(node_kind::FUNCTION)),
         "control: the bare schedule {{ }} call binds the free function; CALLS = {calls:?}"
     );
 }
@@ -119,7 +142,10 @@ fn params_and_locals_bind_through_the_target() {
         ("Sources::App::Service::run", "Sources::App::Store::save"),
         ("Sources::App::Service::local", "Sources::App::Store::save"),
         ("Sources::App::Service::local", "Sources::App::Store::load"),
-        ("Sources::App::Service::freeRun", "Sources::App::Store::save"),
+        (
+            "Sources::App::Service::freeRun",
+            "Sources::App::Store::save",
+        ),
     ] {
         assert!(
             into_store.iter().any(|(f, t, k, rule)| f == from
@@ -131,9 +157,15 @@ fn params_and_locals_bind_through_the_target() {
     }
     // One edge per call site: run 1, local 4 (`s.save`, `t.load`, `u.load`,
     // `o?.save`), freeRun 1.
-    assert_eq!(into_store.len(), 6, "one edge per call site; CALLS = {calls:?}");
+    assert_eq!(
+        into_store.len(),
+        6,
+        "one edge per call site; CALLS = {calls:?}"
+    );
     assert!(
-        !calls.iter().any(|(_, t, _, _)| t.starts_with("Sources::Admin::")),
+        !calls
+            .iter()
+            .any(|(_, t, _, _)| t.starts_with("Sources::Admin::")),
         "nothing binds the Admin target's Store; CALLS = {calls:?}"
     );
 }

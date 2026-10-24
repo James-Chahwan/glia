@@ -75,8 +75,8 @@ pub(crate) mod signals;
 mod test_reports;
 mod wrappers;
 
-pub(crate) use history::{MAX_COMMIT_FILES, commit_file_sets};
 pub use history::rename_pairs;
+pub(crate) use history::{MAX_COMMIT_FILES, commit_file_sets};
 pub(crate) use infer_wrappers::infer_entity_wrappers;
 pub(crate) use scip::identity_symbols;
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
@@ -109,8 +109,11 @@ impl RepoInputs {
         let Some(cfg) = &self.config else {
             return;
         };
-        let counts: Vec<String> =
-            cfg.section_counts().iter().map(|(section, n)| format!("{section}={n}")).collect();
+        let counts: Vec<String> = cfg
+            .section_counts()
+            .iter()
+            .map(|(section, n)| format!("{section}={n}"))
+            .collect();
         eprintln!(
             "[overlay] loaded {source} repo={} version={} ({}) errors={}",
             self.label,
@@ -137,7 +140,12 @@ pub(crate) fn repo_inputs(
         Some(text) => (Some(glia_config::parse_str(text)), "overlay_text"),
         None => (glia_config::load(&root), OVERLAY_FILE),
     };
-    let inputs = RepoInputs { repo, root, label, config };
+    let inputs = RepoInputs {
+        repo,
+        root,
+        label,
+        config,
+    };
     inputs.report_overlay(source);
     inputs
 }
@@ -242,22 +250,40 @@ mod tests {
         assert_eq!(cfg.config.walk.skip, ["gen/"]);
 
         let none = root("none", None);
-        assert!(repo_inputs(repo, none.clone(), "none".into(), None).config.is_none());
+        assert!(
+            repo_inputs(repo, none.clone(), "none".into(), None)
+                .config
+                .is_none()
+        );
 
         let bad = root("bad", Some("version = 1\n[[edge]\n"));
         let inputs = repo_inputs(repo, bad.clone(), "bad".into(), None);
-        let cfg = inputs.config.as_ref().expect("a malformed overlay is Some, with its error");
+        let cfg = inputs
+            .config
+            .as_ref()
+            .expect("a malformed overlay is Some, with its error");
         assert_eq!(cfg.errors.len(), 1, "{:?}", cfg.errors);
 
         // CE.3b: a given text replaces the file, present or absent, errors included.
         let text = "version = 1\n\n[constants]\nGATEWAY = \"/gw\"\n";
         let over_ok = repo_inputs(repo, ok.clone(), "ok".into(), Some(text));
         let cfg = over_ok.config.as_ref().expect("a text is always Some");
-        assert!(cfg.config.walk.skip.is_empty(), "the file's [walk] is not read");
+        assert!(
+            cfg.config.walk.skip.is_empty(),
+            "the file's [walk] is not read"
+        );
         assert_eq!(cfg.config.constants.len(), 1);
         let over_none = repo_inputs(repo, none.clone(), "none".into(), Some(text));
-        assert_eq!(over_none.config.as_ref().map(|c| c.config.constants.len()), Some(1));
-        let over_bad = repo_inputs(repo, ok.clone(), "ok".into(), Some("version = 1\n[[edge]\n"));
+        assert_eq!(
+            over_none.config.as_ref().map(|c| c.config.constants.len()),
+            Some(1)
+        );
+        let over_bad = repo_inputs(
+            repo,
+            ok.clone(),
+            "ok".into(),
+            Some("version = 1\n[[edge]\n"),
+        );
         assert_eq!(over_bad.config.as_ref().map(|c| c.errors.len()), Some(1));
 
         for d in [ok, none, bad] {

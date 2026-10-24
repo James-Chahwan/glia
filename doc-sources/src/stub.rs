@@ -208,7 +208,11 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Recorded> {
 /// the stub serves exactly one request per accepted connection.
 fn write_response(stream: &mut TcpStream, canned: &Canned) -> io::Result<()> {
     let mut head = format!("HTTP/1.1 {} X\r\n", canned.status);
-    if !canned.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+    if !canned
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
         head.push_str("Content-Type: application/json\r\n");
     }
     for (name, value) in &canned.headers {

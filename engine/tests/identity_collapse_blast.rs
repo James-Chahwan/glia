@@ -32,7 +32,9 @@ use glia_code_domain::snapshots::{
 };
 use glia_core::NodeId;
 use glia_engine::identity::{Collapse, IdentityView};
-use glia_engine::{BlastAnswer, BlastOptions, BlastRadius, GenerateResult, blast_radius, generate_many};
+use glia_engine::{
+    BlastAnswer, BlastOptions, BlastRadius, GenerateResult, blast_radius, generate_many,
+};
 use glia_graph::Reach;
 
 fn fixture(name: &str) -> PathBuf {
@@ -42,7 +44,10 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn build_paths(roots: &[PathBuf]) -> GenerateResult {
-    let paths: Vec<String> = roots.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let paths: Vec<String> = roots
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     generate_many(&paths).unwrap_or_else(|e| panic!("{paths:?} builds: {e}"))
 }
 
@@ -52,7 +57,11 @@ fn build(name: &str, dirs: &[&str]) -> GenerateResult {
 }
 
 fn same_as_edges(r: &GenerateResult) -> usize {
-    r.merged.cross_edges.iter().filter(|e| e.category == edge_category::SAME_AS).count()
+    r.merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count()
 }
 
 /// The options of one blast: `direction`, `depth`, and collapse on with the
@@ -61,7 +70,11 @@ fn opts(r: &GenerateResult, direction: Reach, depth: usize, on: bool) -> BlastOp
     let mut o = BlastOptions::default();
     o.direction = direction;
     o.depth = depth;
-    o.collapse = if on { Collapse::with_labels(&r.repo_labels) } else { Collapse::off() };
+    o.collapse = if on {
+        Collapse::with_labels(&r.repo_labels)
+    } else {
+        Collapse::off()
+    };
     o
 }
 
@@ -98,7 +111,8 @@ fn repo_of(r: &GenerateResult, id: u64) -> String {
 const BILLING_MONEY: &str = "def format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\ndef invoice(cents):\n    return format_cents(cents)\n";
 const BILLING_ORDERS: &str = "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n\n\ndef place(total):\n    return OrderDto(total)\n";
 const SHOP_MONEY: &str = "def format_cents(cents):\n    return \"%.2f EUR\" % (cents / 100)\n\n\ndef checkout(cents):\n    return format_cents(cents)\n\n\ndef main():\n    checkout(100)\n";
-const SHOP_ORDERS: &str = "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n";
+const SHOP_ORDERS: &str =
+    "class OrderDto:\n    def __init__(self, total):\n        self.total = total\n";
 
 /// `scip-python python money 1.0.0 <descriptor>`: one package, so the two
 /// repos' definitions of one descriptor are one `scip_symbol` class.
@@ -132,10 +146,16 @@ impl ScipRepos {
         };
         write("billing/lib/money.py", BILLING_MONEY);
         write("billing/lib/orders.py", BILLING_ORDERS);
-        write("billing/package.json", "{\"name\": \"billing\", \"dependencies\": {\"left-pad\": \"1.3.0\"}}\n");
+        write(
+            "billing/package.json",
+            "{\"name\": \"billing\", \"dependencies\": {\"left-pad\": \"1.3.0\"}}\n",
+        );
         write("shop/app/money.py", SHOP_MONEY);
         write("shop/app/orders.py", SHOP_ORDERS);
-        write("shop/web/package.json", "{\"name\": \"shop-web\", \"dependencies\": {\"left-pad\": \"1.3.0\"}}\n");
+        write(
+            "shop/web/package.json",
+            "{\"name\": \"shop-web\", \"dependencies\": {\"left-pad\": \"1.3.0\"}}\n",
+        );
         for (repo, dir) in [("billing", "lib"), ("shop", "app")] {
             snapshot(&root.join(repo), dir);
         }
@@ -164,16 +184,36 @@ fn snapshot(repo: &Path, dir: &str) {
             path,
             language: "python".to_string(),
             source_hash: source_hash(&bytes),
-            defs: vec![ScipDefRow { s, line: 0, name: name.to_string() }],
+            defs: vec![ScipDefRow {
+                s,
+                line: 0,
+                name: name.to_string(),
+            }],
             refs: Vec::new(),
         }
     };
-    let documents = vec![doc("money.py", 0, "format_cents"), doc("orders.py", 1, "OrderDto")];
-    let symbols = vec![
-        ScipSymbolRecord { id: 0, symbol: symbol("`money`/format_cents()."), implements: Vec::new() },
-        ScipSymbolRecord { id: 1, symbol: symbol("`orders`/OrderDto#"), implements: Vec::new() },
+    let documents = vec![
+        doc("money.py", 0, "format_cents"),
+        doc("orders.py", 1, "OrderDto"),
     ];
-    let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+    let symbols = vec![
+        ScipSymbolRecord {
+            id: 0,
+            symbol: symbol("`money`/format_cents()."),
+            implements: Vec::new(),
+        },
+        ScipSymbolRecord {
+            id: 1,
+            symbol: symbol("`orders`/OrderDto#"),
+            implements: Vec::new(),
+        },
+    ];
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
     write_scip(repo, meta, &documents, &symbols).expect("write snapshot");
 }
 
@@ -188,7 +228,11 @@ fn contract_ops_one_row() {
     assert!(same_as_edges(&r) > 0, "control: the ops are one class");
     let q = ["GET /api/orders"];
     let docs = |a: &BlastRadius| -> Vec<BlastAnswer> {
-        a.results.iter().filter(|a| a.kind == "DOC_SECTION").cloned().collect()
+        a.results
+            .iter()
+            .filter(|a| a.kind == "DOC_SECTION")
+            .cloned()
+            .collect()
     };
 
     let off = blast(&r, &q, &opts(&r, Reach::Backward, 1, false));
@@ -202,16 +246,26 @@ fn contract_ops_one_row() {
         ],
         "HEAD shape: one DOC_SECTION row per op: {off:#?}"
     );
-    assert!(off.results.iter().all(|a| a.identity.is_none() && a.depth == 1));
+    assert!(
+        off.results
+            .iter()
+            .all(|a| a.identity.is_none() && a.depth == 1)
+    );
     assert!(!json(&off).contains("\"identity\""), "{}", json(&off));
 
-    assert!(BlastOptions::default().collapse.enabled, "collapse is on by default");
+    assert!(
+        BlastOptions::default().collapse.enabled,
+        "collapse is on by default"
+    );
     let on = blast(&r, &q, &opts(&r, Reach::Backward, 1, true));
     let on_docs = docs(&on);
     assert_eq!(on_docs.len(), 1, "{on:#?}");
     let shown = &on_docs[0];
     assert_eq!((shown.depth, shown.reason), (1, "DOCUMENTS"));
-    let id = shown.identity.as_ref().expect("the class row carries its identity");
+    let id = shown
+        .identity
+        .as_ref()
+        .expect("the class row carries its identity");
     assert_eq!(id.tier, "derived");
     assert_eq!(id.rules, ["contract_op", "contract_route"]);
     assert!(!id.diverged);
@@ -219,18 +273,32 @@ fn contract_ops_one_row() {
     let mut members: Vec<&str> = id.also_in.iter().map(|a| a.qname.as_str()).collect();
     members.push(shown.qname.as_str());
     members.sort_unstable();
-    assert_eq!(members, qnames(&off_docs), "the row and its also_in are the three ops");
+    assert_eq!(
+        members,
+        qnames(&off_docs),
+        "the row and its also_in are the three ops"
+    );
     assert!(
-        id.also_in.iter().all(|a| a.file.is_some() && a.line.is_some_and(|l| l >= 1)),
+        id.also_in
+            .iter()
+            .all(|a| a.file.is_some() && a.line.is_some_and(|l| l >= 1)),
         "contract ops are located, 1-based: {:?}",
         id.also_in
     );
-    assert!(json(&on).contains("\"identity\":{\"tier\":\"derived\""), "{}", json(&on));
+    assert!(
+        json(&on).contains("\"identity\":{\"tier\":\"derived\""),
+        "{}",
+        json(&on)
+    );
     // The shown member is located at its own place (a row of the HEAD shape).
     let head = row(&off_docs, &shown.qname).expect("the shown member is a HEAD row");
     assert_eq!((&shown.file, shown.line), (&head.file, head.line));
     // The seed is in no class.
-    assert!(on.seeds.iter().all(|s| s.identity.is_none()), "{:?}", on.seeds);
+    assert!(
+        on.seeds.iter().all(|s| s.identity.is_none()),
+        "{:?}",
+        on.seeds
+    );
 }
 
 /// (2) Over the quotient one SCIP class is one node: a backward blast from
@@ -250,13 +318,24 @@ fn quotient_crosses_scip_copies() {
     let invoice = row(&on.results, "lib::money::invoice").expect("invoice");
     let checkout = row(&on.results, "app::money::checkout").expect("checkout, through shop's copy");
     assert_eq!((invoice.depth, invoice.reason), (1, "CALLS"));
-    assert_eq!((checkout.depth, checkout.reason), (1, "CALLS"), "zero hops across the class");
+    assert_eq!(
+        (checkout.depth, checkout.reason),
+        (1, "CALLS"),
+        "zero hops across the class"
+    );
     assert_eq!(repo_of(&r, checkout.id), "shop");
     assert!(
-        on.results.iter().all(|a| !a.qname.ends_with("::format_cents")),
+        on.results
+            .iter()
+            .all(|a| !a.qname.ends_with("::format_cents")),
         "the seed's class-mate is the seed, never a row: {on:#?}"
     );
-    assert!(on.results.iter().all(|a| a.seed == "lib::money::format_cents"), "{on:#?}");
+    assert!(
+        on.results
+            .iter()
+            .all(|a| a.seed == "lib::money::format_cents"),
+        "{on:#?}"
+    );
     assert!(invoice.identity.is_none() && checkout.identity.is_none());
 
     // The seed carries its class: shop's copy, FACT, scip_symbol, diverged.
@@ -265,15 +344,27 @@ fn quotient_crosses_scip_copies() {
     let id = s.identity.as_ref().expect("the seed's identity");
     assert_eq!((id.tier, id.diverged), ("fact", true));
     assert_eq!(id.rules, ["scip_symbol"]);
-    let also: Vec<(&str, &str)> = id.also_in.iter().map(|a| (a.repo.as_str(), a.qname.as_str())).collect();
+    let also: Vec<(&str, &str)> = id
+        .also_in
+        .iter()
+        .map(|a| (a.repo.as_str(), a.qname.as_str()))
+        .collect();
     assert_eq!(also, [("shop", "app::money::format_cents")]);
 
     // Two seeds in one walk class are one seed, the first query kept.
-    let both = blast(&r, &["lib::money::format_cents", "app::money::format_cents"], &opts(&r, Reach::Backward, 4, true));
+    let both = blast(
+        &r,
+        &["lib::money::format_cents", "app::money::format_cents"],
+        &opts(&r, Reach::Backward, 4, true),
+    );
     assert_eq!(both.seeds.len(), 1, "{:?}", both.seeds);
     assert_eq!(both.seeds[0].query, "lib::money::format_cents");
     assert_eq!(json(&both.results), json(&on.results));
-    let raw_both = blast(&r, &["lib::money::format_cents", "app::money::format_cents"], &opts(&r, Reach::Backward, 4, false));
+    let raw_both = blast(
+        &r,
+        &["lib::money::format_cents", "app::money::format_cents"],
+        &opts(&r, Reach::Backward, 4, false),
+    );
     assert_eq!(raw_both.seeds.len(), 2, "HEAD: two seeds");
 }
 
@@ -291,40 +382,82 @@ fn no_double_walk() {
         .iter()
         .filter(|e| e.category == edge_category::SHARES_SCHEMA)
         .collect();
-    assert_eq!(schema.len(), 1, "control: SharedSchemaResolver pairs the DTOs");
+    assert_eq!(
+        schema.len(),
+        1,
+        "control: SharedSchemaResolver pairs the DTOs"
+    );
 
     let seed = ["lib::orders::place"];
     let off = blast(&r, &seed, &opts(&r, Reach::Both, 4, false));
-    let dtos = |a: &BlastRadius| a.results.iter().filter(|a| a.qname.ends_with("::OrderDto")).count();
-    assert_eq!(dtos(&off), 2, "HEAD: both DTOs, one through SHARES_SCHEMA: {off:#?}");
+    let dtos = |a: &BlastRadius| {
+        a.results
+            .iter()
+            .filter(|a| a.qname.ends_with("::OrderDto"))
+            .count()
+    };
+    assert_eq!(
+        dtos(&off),
+        2,
+        "HEAD: both DTOs, one through SHARES_SCHEMA: {off:#?}"
+    );
     let shared = row(&off.results, "app::orders::OrderDto").expect("shop's DTO at HEAD");
     assert_eq!((shared.depth, shared.reason), (2, "SHARES_SCHEMA"));
 
     for direction in [Reach::Forward, Reach::Both] {
         let on = blast(&r, &seed, &opts(&r, direction, 4, true));
         assert_eq!(dtos(&on), 1, "{direction:?}: the class once: {on:#?}");
-        let dto = on.results.iter().find(|a| a.qname.ends_with("::OrderDto")).expect("the DTO row");
+        let dto = on
+            .results
+            .iter()
+            .find(|a| a.qname.ends_with("::OrderDto"))
+            .expect("the DTO row");
         assert_eq!((dto.depth, dto.reason), (1, "CALLS"), "{direction:?}");
         let id = dto.identity.as_ref().expect("the DTO row's identity");
-        assert_eq!((id.tier, id.rules.as_slice()), ("fact", ["scip_symbol"].as_slice()));
+        assert_eq!(
+            (id.tier, id.rules.as_slice()),
+            ("fact", ["scip_symbol"].as_slice())
+        );
         let others: Vec<&str> = id.also_in.iter().map(|a| a.qname.as_str()).collect();
         let shown_billing = dto.qname == "lib::orders::OrderDto";
-        let want = if shown_billing { "app::orders::OrderDto" } else { "lib::orders::OrderDto" };
+        let want = if shown_billing {
+            "app::orders::OrderDto"
+        } else {
+            "lib::orders::OrderDto"
+        };
         assert_eq!(others, [want], "{direction:?}");
-        assert!(on.results.iter().all(|a| a.reason != "SHARES_SCHEMA"), "{direction:?}: {on:#?}");
+        assert!(
+            on.results.iter().all(|a| a.reason != "SHARES_SCHEMA"),
+            "{direction:?}: {on:#?}"
+        );
     }
 
     // The quotient drops the two SCIP stars and the SHARES_SCHEMA edge (the
     // left-pad `package_name` star is no walk edge and stays).
     let view = IdentityView::new(&r.merged, &Collapse::default());
     let q = view.quotient(&r.merged).expect("SCIP classes walk");
-    let kept_same_as = q.edges().filter(|e| e.category == edge_category::SAME_AS).count();
+    let kept_same_as = q
+        .edges()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .count();
     let dropped_same_as = same_as_edges(&r) - kept_same_as;
-    assert!(dropped_same_as >= 2, "the format_cents and OrderDto stars: {dropped_same_as}");
-    assert!(q.collapsed_edges() >= 2, "collapsed {}", q.collapsed_edges());
-    assert_eq!(q.collapsed_edges(), dropped_same_as + 1, "the stars and the SHARES_SCHEMA pair");
     assert!(
-        q.edges().all(|e| e.category != edge_category::SHARES_SCHEMA),
+        dropped_same_as >= 2,
+        "the format_cents and OrderDto stars: {dropped_same_as}"
+    );
+    assert!(
+        q.collapsed_edges() >= 2,
+        "collapsed {}",
+        q.collapsed_edges()
+    );
+    assert_eq!(
+        q.collapsed_edges(),
+        dropped_same_as + 1,
+        "the stars and the SHARES_SCHEMA pair"
+    );
+    assert!(
+        q.edges()
+            .all(|e| e.category != edge_category::SHARES_SCHEMA),
         "the SHARES_SCHEMA pair is intra-class"
     );
 }
@@ -338,26 +471,42 @@ fn packages_fold_not_walk() {
     let r = build("identity-npm-package", &["web", "admin"]);
     assert!(same_as_edges(&r) > 0);
     let view = IdentityView::new(&r.merged, &Collapse::with_labels(&r.repo_labels));
-    assert!(!view.is_empty() && !view.has_walk_classes(), "package_name collapses, never walks");
+    assert!(
+        !view.is_empty() && !view.has_walk_classes(),
+        "package_name collapses, never walks"
+    );
 
     for direction in [Reach::Forward, Reach::Both] {
         let on = blast(&r, &["package.json"], &opts(&r, direction, 4, true));
         let seed_repo = repo_of(&r, on.seeds[0].id);
-        let react: Vec<&BlastAnswer> = on.results.iter().filter(|a| a.qname == "package:npm:react").collect();
+        let react: Vec<&BlastAnswer> = on
+            .results
+            .iter()
+            .filter(|a| a.qname == "package:npm:react")
+            .collect();
         assert_eq!(react.len(), 1, "{direction:?}: one react row: {on:#?}");
         assert!(
             on.results.iter().all(|a| repo_of(&r, a.id) == seed_repo),
             "{direction:?}: the walk stays in {seed_repo}: {on:#?}"
         );
         let id = react[0].identity.as_ref().expect("react's identity");
-        assert_eq!((id.tier, id.rules.as_slice()), ("fact", ["package_name"].as_slice()));
+        assert_eq!(
+            (id.tier, id.rules.as_slice()),
+            ("fact", ["package_name"].as_slice())
+        );
         assert_eq!(id.also_in.len(), 1);
-        assert_ne!(id.also_in[0].repo, seed_repo, "also_in names the other repo");
+        assert_ne!(
+            id.also_in[0].repo, seed_repo,
+            "also_in names the other repo"
+        );
 
         // The walk is the HEAD walk: the same rows, scores and order.
         let off = blast(&r, &["package.json"], &opts(&r, direction, 4, false));
         let strip = |a: &BlastRadius| -> Vec<(u64, String, usize, u64)> {
-            a.results.iter().map(|x| (x.id, x.qname.clone(), x.depth, x.score.to_bits())).collect()
+            a.results
+                .iter()
+                .map(|x| (x.id, x.qname.clone(), x.depth, x.score.to_bits()))
+                .collect()
         };
         assert_eq!(strip(&on), strip(&off), "{direction:?}");
     }
@@ -369,14 +518,32 @@ fn packages_fold_not_walk() {
     let r = repos.build();
     let seeds = ["package.json", "web::package.json"];
     let off = blast(&r, &seeds, &opts(&r, Reach::Forward, 1, false));
-    assert_eq!(off.seeds.len(), 2, "control: both manifests resolve: {:?}", off.seeds);
-    let pads = |a: &BlastRadius| a.results.iter().filter(|x| x.qname == "package:npm:left-pad").count();
+    assert_eq!(
+        off.seeds.len(),
+        2,
+        "control: both manifests resolve: {:?}",
+        off.seeds
+    );
+    let pads = |a: &BlastRadius| {
+        a.results
+            .iter()
+            .filter(|x| x.qname == "package:npm:left-pad")
+            .count()
+    };
     assert_eq!(pads(&off), 2, "{off:#?}");
     let on = blast(&r, &seeds, &opts(&r, Reach::Forward, 1, true));
     assert_eq!(pads(&on), 1, "{on:#?}");
     assert_eq!(on.results.len(), off.results.len() - 1);
-    let best = off.results.iter().find(|x| x.qname == "package:npm:left-pad").expect("a pad");
-    let pad = on.results.iter().find(|x| x.qname == "package:npm:left-pad").expect("the pad row");
+    let best = off
+        .results
+        .iter()
+        .find(|x| x.qname == "package:npm:left-pad")
+        .expect("a pad");
+    let pad = on
+        .results
+        .iter()
+        .find(|x| x.qname == "package:npm:left-pad")
+        .expect("the pad row");
     assert_eq!(pad.id, best.id, "the best-scored member is the row");
     assert!(pad.identity.as_ref().is_some_and(|i| i.also_in.len() == 1));
     let mut top = opts(&r, Reach::Forward, 1, true);
@@ -399,11 +566,23 @@ fn live_any_member() {
         r.merged
             .graphs
             .iter()
-            .find_map(|g| g.nav.qname_by_id.iter().find(|(_, v)| v.as_str() == q).map(|(k, _)| *k))
+            .find_map(|g| {
+                g.nav
+                    .qname_by_id
+                    .iter()
+                    .find(|(_, v)| v.as_str() == q)
+                    .map(|(k, _)| *k)
+            })
             .unwrap_or_else(|| panic!("no node {q}"))
     };
-    assert!(!live.contains(&id_of("lib::money::format_cents")), "control: billing's copy is dead");
-    assert!(live.contains(&id_of("app::money::format_cents")), "control: main reaches shop's copy");
+    assert!(
+        !live.contains(&id_of("lib::money::format_cents")),
+        "control: billing's copy is dead"
+    );
+    assert!(
+        live.contains(&id_of("app::money::format_cents")),
+        "control: main reaches shop's copy"
+    );
 
     let seed = ["lib::money::invoice"];
     let mut o = opts(&r, Reach::Forward, 4, true);
@@ -411,7 +590,10 @@ fn live_any_member() {
     let on = blast(&r, &seed, &o);
     assert_eq!(on.results.len(), 1, "{on:#?}");
     let fc = &on.results[0];
-    assert_eq!(fc.qname, "lib::money::format_cents", "the display member, though dead");
+    assert_eq!(
+        fc.qname, "lib::money::format_cents",
+        "the display member, though dead"
+    );
     assert!(fc.live, "the class is live through shop's copy");
     assert!(fc.identity.is_some());
 
@@ -422,7 +604,10 @@ fn live_any_member() {
     let mut raw = opts(&r, Reach::Forward, 4, false);
     raw.live_only = true;
     let off = blast(&r, &seed, &raw);
-    assert!(off.results.is_empty(), "HEAD: billing's copy is dead: {off:#?}");
+    assert!(
+        off.results.is_empty(),
+        "HEAD: billing's copy is dead: {off:#?}"
+    );
     assert_eq!(off.absence.as_ref().map(|a| a.reason), Some("no_match"));
 }
 
@@ -434,7 +619,11 @@ fn no_class_byte_identical() {
     assert_eq!(same_as_edges(&r), 0, "control: one repo, no class");
     let repos = ScipRepos::new("one");
     let billing = build_paths(&[repos.0.join("billing")]);
-    assert_eq!(same_as_edges(&billing), 0, "control: one SCIP repo, no class");
+    assert_eq!(
+        same_as_edges(&billing),
+        0,
+        "control: one SCIP repo, no class"
+    );
     for (r, queries) in [
         (&r, vec!["package.json"]),
         (&r, vec!["src::index::App", "package:npm:react"]),
@@ -451,7 +640,10 @@ fn no_class_byte_identical() {
                 off.collapse = Collapse::off();
                 let a = json(&blast(r, &queries, &on));
                 let b = json(&blast(r, &queries, &off));
-                assert_eq!(a, b, "{queries:?} {direction:?} live_only={live_only} top_k={top_k:?}");
+                assert_eq!(
+                    a, b,
+                    "{queries:?} {direction:?} live_only={live_only} top_k={top_k:?}"
+                );
                 assert!(!a.contains("\"identity\""), "{a}");
             }
         }

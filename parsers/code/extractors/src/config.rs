@@ -180,22 +180,42 @@ impl ConfigDef {
     /// A name with no value attached (read sites, k8s `valueFrom:`, bare
     /// compose `- KEY` passthrough).
     fn bare(name: impl Into<String>, source: &'static str) -> Self {
-        ConfigDef { name: name.into(), value: None, source, flavor: Flavor::Env }
+        ConfigDef {
+            name: name.into(),
+            value: None,
+            source,
+            flavor: Flavor::Env,
+        }
     }
 
     /// A secrets-manager reference `config:secret:<provider>/<name>`.
     pub(crate) fn secret(name: impl Into<String>, provider: &'static str) -> Self {
-        ConfigDef { name: name.into(), value: None, source: provider, flavor: Flavor::Secret }
+        ConfigDef {
+            name: name.into(),
+            value: None,
+            source: provider,
+            flavor: Flavor::Secret,
+        }
     }
 
     /// A feature-flag key `config:flag:<name>`, `provider` on the cell.
     pub(crate) fn flag(name: impl Into<String>, provider: &'static str) -> Self {
-        ConfigDef { name: name.into(), value: None, source: provider, flavor: Flavor::Flag }
+        ConfigDef {
+            name: name.into(),
+            value: None,
+            source: provider,
+            flavor: Flavor::Flag,
+        }
     }
 
     /// A .NET setting `config:setting:<Section:Key>` (CL.7b).
     fn setting(name: impl Into<String>, value: Option<String>, source: &'static str) -> Self {
-        ConfigDef { name: name.into(), value, source, flavor: Flavor::Setting }
+        ConfigDef {
+            name: name.into(),
+            value,
+            source,
+            flavor: Flavor::Setting,
+        }
     }
 }
 
@@ -224,7 +244,8 @@ pub fn extract_config_reads(
     // index into ENV_READ_IDIOMS, for the `[config] env-read` marker only.
     let env = |hits: Vec<(String, usize)>| hits.into_iter().map(|(n, o)| (n, o, Flavor::Env, None));
     let idiom = |at: usize, hits: Vec<(String, usize)>| {
-        hits.into_iter().map(move |(n, o)| (n, o, Flavor::Env, Some(at)))
+        hits.into_iter()
+            .map(move |(n, o)| (n, o, Flavor::Env, Some(at)))
     };
     let mut reads: Vec<(String, usize, Flavor, Option<usize>)> = Vec::new();
     reads.extend(env(scan_python_env(source)));
@@ -286,41 +307,41 @@ pub fn extract_config_reads(
 }
 
 /// Extract env-var definitions from a Dockerfile.
-pub fn extract_dockerfile_defs(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> ConfigNodes {
+pub fn extract_dockerfile_defs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     build_nodes(scan_dockerfile_env(source), Side::Define, module_id, repo)
 }
 
 /// Extract env-var definitions from a `.env`-style key/value file.
-pub fn extract_dotenv_defs(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> ConfigNodes {
+pub fn extract_dotenv_defs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     build_nodes(scan_dotenv(source), Side::Define, module_id, repo)
 }
 
 /// Extract env-var definitions from a YAML manifest (k8s `env:`/`envFrom:`,
 /// docker-compose `environment:`). Caller is responsible for content-gating
 /// or path-gating to YAML files.
-pub fn extract_yaml_env_defs(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> ConfigNodes {
+pub fn extract_yaml_env_defs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     let k8s = scan_k8s_env(source);
     let mut items: Vec<(ConfigDef, Side)> =
         k8s.env.into_iter().map(|d| (d, Side::Define)).collect();
-    items.extend(scan_compose_environment(source).into_iter().map(|d| (d, Side::Define)));
+    items.extend(
+        scan_compose_environment(source)
+            .into_iter()
+            .map(|d| (d, Side::Define)),
+    );
     // A13.8: the Secrets a workload consumes, the Secrets a manifest declares,
     // and the flags a Flipt file declares. One call, so a file that both
     // declares and consumes the same Secret yields ONE node with both edges.
     items.extend(k8s.secret_reads.into_iter().map(|d| (d, Side::Read)));
-    items.extend(scan_k8s_secret_manifests(source).into_iter().map(|d| (d, Side::Define)));
-    items.extend(scan_flag_definitions(source).into_iter().map(|d| (d, Side::Define)));
+    items.extend(
+        scan_k8s_secret_manifests(source)
+            .into_iter()
+            .map(|d| (d, Side::Define)),
+    );
+    items.extend(
+        scan_flag_definitions(source)
+            .into_iter()
+            .map(|d| (d, Side::Define)),
+    );
     let out = build_sided(items, module_id, repo);
     if let Some(marker) = crate::secrets_flags::marker(&[&out], "yaml") {
         eprintln!("{marker}");
@@ -340,11 +361,16 @@ const SETTINGS_KEY_CAP: usize = 2_000;
 /// admits it beside the contract / JSON Schema sniffs and the engine routes
 /// it to [`extract_settings_json_defs`] before either.
 pub fn is_dotnet_settings_path(path: &str) -> bool {
-    let base = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    let base = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
     base.strip_prefix("appsettings")
         .and_then(|r| r.strip_suffix(".json"))
         .is_some_and(|mid| {
-            mid.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            mid.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         })
 }
 
@@ -409,7 +435,11 @@ pub fn extract_settings_json_defs(
 fn flatten_settings(v: &serde_json::Value, prefix: &str, out: &mut Vec<(String, Option<String>)>) {
     use serde_json::Value;
     let join = |seg: &str| {
-        if prefix.is_empty() { seg.to_string() } else { format!("{prefix}:{seg}") }
+        if prefix.is_empty() {
+            seg.to_string()
+        } else {
+            format!("{prefix}:{seg}")
+        }
     };
     match v {
         Value::Object(map) => {
@@ -487,11 +517,7 @@ fn strip_jsonc(source: &str) -> String {
             }
         } else if c == '"' {
             in_str = true;
-        } else if c == ','
-            && no_comments[i + 1..]
-                .trim_start()
-                .starts_with(['}', ']'])
-        {
+        } else if c == ',' && no_comments[i + 1..].trim_start().starts_with(['}', ']']) {
             continue;
         }
         out.push(c);
@@ -506,7 +532,11 @@ pub(crate) fn build_nodes(
     module_id: NodeId,
     repo: RepoId,
 ) -> ConfigNodes {
-    build_sided(defs.into_iter().map(|d| (d, side)).collect(), module_id, repo)
+    build_sided(
+        defs.into_iter().map(|d| (d, side)).collect(),
+        module_id,
+        repo,
+    )
 }
 
 /// The one CONFIG_KEY emit path: node + READS_CONFIG / DEFINES_CONFIG edge +
@@ -526,8 +556,7 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
     let mut nav = CodeNav::default();
     // qname -> index into `nodes`, so a repeat of a key that arrived
     // value-less can still be upgraded by a later definition that has one.
-    let mut seen: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut edged: std::collections::HashSet<(usize, Side)> = std::collections::HashSet::new();
     // The `[config]` marker counts the env track only; secrets and flags
     // report through `[secrets]`, settings files through `[config] settings`
@@ -538,7 +567,11 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
 
     let mut expanded: Vec<(ConfigDef, Side, bool)> = Vec::with_capacity(items.len());
     for (def, side) in items {
-        let ov = if side == Side::Define { dotnet_env_override(&def) } else { None };
+        let ov = if side == Side::Define {
+            dotnet_env_override(&def)
+        } else {
+            None
+        };
         expanded.push((def, side, false));
         if let Some(ov) = ov {
             expanded.push((ov, Side::Define, true));
@@ -612,7 +645,10 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
             };
             if is_override {
                 let emitter = define_emitter(def.source);
-                evidence::attach(&mut edge, Evidence::emitter(emitter).rule("dotnet_env_override"));
+                evidence::attach(
+                    &mut edge,
+                    Evidence::emitter(emitter).rule("dotnet_env_override"),
+                );
                 overrides += 1;
                 override_emitter.get_or_insert(emitter);
             }
@@ -628,7 +664,12 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
         eprintln!("[config] env overrides -> settings={overrides} source={source}");
     }
 
-    ConfigNodes { nodes, edges, nav, sites: Vec::new() }
+    ConfigNodes {
+        nodes,
+        edges,
+        nav,
+        sites: Vec::new(),
+    }
 }
 
 /// CL.7b: .NET's environment configuration provider reads an env var
@@ -647,7 +688,11 @@ fn dotnet_env_override(def: &ConfigDef) -> Option<ConfigDef> {
     if segs.len() < 2 || segs.iter().any(|s| s.is_empty()) {
         return None;
     }
-    Some(ConfigDef::setting(segs.join(":"), def.value.clone(), def.source))
+    Some(ConfigDef::setting(
+        segs.join(":"),
+        def.value.clone(),
+        def.source,
+    ))
 }
 
 /// The EVIDENCE emitter of an env-override setting edge: exactly the one the
@@ -682,8 +727,18 @@ const VALUE_CAP: usize = 200;
 /// Env-var names whose value must never reach the graph. Substring, not exact:
 /// `STRIPE_SECRET_KEY`, `JWT_TOKEN` and `DB_PASSWD` all have to hit.
 const SECRET_NEEDLES: [&str; 12] = [
-    "SECRET", "PASSWORD", "PASSWD", "TOKEN", "APIKEY", "API_KEY", "PRIVATE_KEY",
-    "CREDENTIAL", "ACCESS_KEY", "SESSION_KEY", "SALT", "SIGNING",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "APIKEY",
+    "API_KEY",
+    "PRIVATE_KEY",
+    "CREDENTIAL",
+    "ACCESS_KEY",
+    "SESSION_KEY",
+    "SALT",
+    "SIGNING",
 ];
 
 fn is_secret_name(name: &str) -> bool {
@@ -693,8 +748,13 @@ fn is_secret_name(name: &str) -> bool {
 
 /// Value fragments that mark an embedded credential (an ADO.NET / Npgsql /
 /// Azure connection string) whatever the key is called.
-const SECRET_VALUE_NEEDLES: [&str; 5] =
-    ["PASSWORD=", "PWD=", "ACCOUNTKEY=", "SHAREDACCESSKEY=", "SECRET="];
+const SECRET_VALUE_NEEDLES: [&str; 5] = [
+    "PASSWORD=",
+    "PWD=",
+    "ACCOUNTKEY=",
+    "SHAREDACCESSKEY=",
+    "SECRET=",
+];
 
 /// CL.7b: A13.7's rule for a `config:setting:` key, which is stricter than the
 /// env rule because .NET names its secrets differently. Redacted when the
@@ -799,9 +859,7 @@ fn escape_json(s: &str) -> String {
 fn clean_value(raw: &str) -> Option<String> {
     let t = raw.trim();
     let b = t.as_bytes();
-    let quoted = b.len() >= 2
-        && (b[0] == b'"' || b[0] == b'\'')
-        && b[b.len() - 1] == b[0];
+    let quoted = b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0];
     let t = if quoted {
         &t[1..t.len() - 1]
     } else {
@@ -831,8 +889,7 @@ fn is_valid_env_name(s: &str) -> bool {
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
     }
-    s.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// A secrets-manager reference: 1..=200 chars with no whitespace, no quote or
@@ -859,7 +916,9 @@ pub(crate) fn is_valid_setting_key(s: &str) -> bool {
     (1..=128).contains(&s.len())
         && s.split(':').all(|seg| {
             !seg.is_empty()
-                && seg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
         })
 }
 
@@ -995,7 +1054,8 @@ fn scan_dotnet_env(source: &str) -> Vec<(String, usize)> {
 
 /// A `.cs` file, the one .NET language the engine routes (CL.7b).
 fn is_csharp_path(path: &str) -> bool {
-    path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("cs"))
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("cs"))
 }
 
 /// CL.7b: .NET `IConfiguration` reads, as `(Section:Key, offset)`, scanned
@@ -1034,7 +1094,9 @@ fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
     while let Some(rel) = source[from..].find("[") {
         let at = from + rel;
         from = at + 1;
-        let Some(key) = csharp_literal_arg(&source[at + 1..], b"]") else { continue };
+        let Some(key) = csharp_literal_arg(&source[at + 1..], b"]") else {
+            continue;
+        };
         if let Some((prefix, start)) = dotnet_receiver(source, at, true, 0) {
             out.push((join_setting(prefix, &key), start));
         }
@@ -1050,8 +1112,12 @@ fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
         while let Some(rel) = source[from..].find(&needle) {
             let dot = from + rel;
             from = dot + needle.len();
-            let Some(args) = dotnet_call_args(&source[from..], generic) else { continue };
-            let Some(key) = csharp_literal_arg(&source[from + args..], b"),") else { continue };
+            let Some(args) = dotnet_call_args(&source[from..], generic) else {
+                continue;
+            };
+            let Some(key) = csharp_literal_arg(&source[from + args..], b"),") else {
+                continue;
+            };
             let key = match method {
                 "GetConnectionString" => format!("ConnectionStrings:{key}"),
                 _ => key,
@@ -1130,7 +1196,9 @@ fn csharp_literal_arg(after: &str, closers: &[u8]) -> Option<String> {
     while j < b.len() && b[j].is_ascii_whitespace() {
         j += 1;
     }
-    b.get(j).is_some_and(|c| closers.contains(c)).then(|| after[start..end].to_string())
+    b.get(j)
+        .is_some_and(|c| closers.contains(c))
+        .then(|| after[start..end].to_string())
 }
 
 /// What a .NET config read at byte `pos` (its `[`, or the `.` before its
@@ -1181,7 +1249,11 @@ fn dotnet_receiver(
         .collect::<String>()
         .to_ascii_lowercase();
     let configish = ident.ends_with("configuration") || ident.ends_with("config");
-    let root = if indexer { configish } else { configish || !ident.contains("section") };
+    let root = if indexer {
+        configish
+    } else {
+        configish || !ident.contains("section")
+    };
     root.then_some((None, start))
 }
 
@@ -1268,7 +1340,9 @@ fn scan_elixir_env(source: &str) -> Vec<(String, usize)> {
 /// `@env('local')` directive (an environment NAME test, not a key read) out;
 /// a namespaced `\env(` or a concatenated `.env(` is the helper and reads.
 fn scan_laravel_env(source: &str, path: &str) -> Vec<(String, usize)> {
-    let is_php = path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("php"));
+    let is_php = path
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("php"));
     if !is_php {
         return Vec::new();
     }
@@ -1276,10 +1350,12 @@ fn scan_laravel_env(source: &str, path: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "env(")
         .into_iter()
         .filter(|(_, at)| {
-            at.checked_sub(1).and_then(|i| bytes.get(i)).is_none_or(|&b| {
-                let ident = b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
-                !(ident || matches!(b, b'>' | b':' | b'$' | b'@'))
-            })
+            at.checked_sub(1)
+                .and_then(|i| bytes.get(i))
+                .is_none_or(|&b| {
+                    let ident = b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+                    !(ident || matches!(b, b'>' | b':' | b'$' | b'@'))
+                })
         })
         .collect()
 }
@@ -1494,8 +1570,7 @@ fn scan_k8s_env(source: &str) -> K8sScan {
                 continue;
             }
         }
-        if let Some((key, is_secret)) =
-            K8S_REF_KEYS.iter().find(|(k, _)| t_stripped.starts_with(k))
+        if let Some((key, is_secret)) = K8S_REF_KEYS.iter().find(|(k, _)| t_stripped.starts_with(k))
         {
             let rest = &t_stripped[key.len()..];
             if rest.trim().is_empty() {
@@ -1522,7 +1597,10 @@ fn scan_k8s_env(source: &str) -> K8sScan {
             }
         }
     }
-    K8sScan { env: out, secret_reads }
+    K8sScan {
+        env: out,
+        secret_reads,
+    }
 }
 
 /// Leading-space count and trimmed text of every non-blank, non-comment line.
@@ -1826,7 +1904,10 @@ public class Db
         let out = extract_config_reads(src, "Db.cs", module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
-        assert_eq!(keys, vec!["config:env:AWS_REGION", "config:env:DATABASE_URL"]);
+        assert_eq!(
+            keys,
+            vec!["config:env:AWS_REGION", "config:env:DATABASE_URL"]
+        );
         let reads: Vec<_> = out
             .edges
             .iter()
@@ -1837,9 +1918,17 @@ public class Db
         // One site per literal read, each at its needle; the non-literal
         // `GetEnvironmentVariable(name)` contributes neither node nor site.
         assert_eq!(out.sites.len(), 2);
-        let db =
-            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, "config:env:DATABASE_URL");
-        let (_, off) = out.sites.iter().find(|(id, _)| *id == db).expect("DATABASE_URL site");
+        let db = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            "config:env:DATABASE_URL",
+        );
+        let (_, off) = out
+            .sites
+            .iter()
+            .find(|(id, _)| *id == db)
+            .expect("DATABASE_URL site");
         assert!(src[*off..].starts_with("Environment.GetEnvironmentVariable(\"DATABASE_URL\")"));
     }
 
@@ -1894,9 +1983,17 @@ object Db {
         assert!(reads.iter().all(|e| e.from == module_id(repo)));
         // One site per read, at its needle (LE.4b re-homes from there).
         assert_eq!(out.sites.len(), 8, "{:?}", out.sites);
-        let db =
-            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, "config:env:DATABASE_URL");
-        let (_, off) = out.sites.iter().find(|(id, _)| *id == db).expect("DATABASE_URL site");
+        let db = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            "config:env:DATABASE_URL",
+        );
+        let (_, off) = out
+            .sites
+            .iter()
+            .find(|(id, _)| *id == db)
+            .expect("DATABASE_URL site");
         assert!(src[*off..].starts_with("sys.env(\"DATABASE_URL\")"));
     }
 
@@ -1916,7 +2013,11 @@ $key = $_ENV['API_KEY'];
 
     /// DH.5: the offsets of every site whose key is `config:env:<key>`.
     fn site_offsets(out: &ConfigNodes, repo: RepoId, key: &str) -> Vec<usize> {
-        out.sites.iter().filter(|(k, _)| *k == env_id(repo, key)).map(|(_, o)| *o).collect()
+        out.sites
+            .iter()
+            .filter(|(k, _)| *k == env_id(repo, key))
+            .map(|(_, o)| *o)
+            .collect()
     }
 
     fn sorted_config_keys(out: &ConfigNodes) -> Vec<String> {
@@ -1933,7 +2034,10 @@ $key = $_ENV['API_KEY'];
                    final port = Platform.environment[\"PORT\"];\n\
                    final any = Platform.environment[name];\n";
         let out = extract_config_reads(src, "client/bin/db.dart", module_id(repo), repo);
-        assert_eq!(sorted_config_keys(&out), ["config:env:DATABASE_URL", "config:env:PORT"]);
+        assert_eq!(
+            sorted_config_keys(&out),
+            ["config:env:DATABASE_URL", "config:env:PORT"]
+        );
         let at = src.find("Platform.environment['DATABASE_URL']").unwrap();
         assert_eq!(site_offsets(&out, repo, "DATABASE_URL"), vec![at]);
         assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
@@ -1970,7 +2074,11 @@ $key = $_ENV['API_KEY'];
             ("PHX_HOST", "System.fetch_env(\"PHX"),
             ("PORT", "System.get_env(\"PORT"),
         ] {
-            assert_eq!(site_offsets(&out, repo, key), vec![src.find(needle).unwrap()], "{key}");
+            assert_eq!(
+                site_offsets(&out, repo, key),
+                vec![src.find(needle).unwrap()],
+                "{key}"
+            );
         }
         // `System.get_env()` names no key: four reads, four sites.
         assert_eq!(out.sites.len(), 4, "{:?}", out.sites);
@@ -1985,10 +2093,20 @@ $key = $_ENV['API_KEY'];
         let out = extract_config_reads(src, "config/database.php", module_id(repo), repo);
         assert_eq!(
             sorted_config_keys(&out),
-            ["config:env:DB_DATABASE", "config:env:DB_HOST", "config:env:DB_URL"]
+            [
+                "config:env:DB_DATABASE",
+                "config:env:DB_HOST",
+                "config:env:DB_URL"
+            ]
         );
-        assert_eq!(site_offsets(&out, repo, "DB_URL"), vec![src.find("env('DB_URL')").unwrap()]);
-        assert_eq!(site_offsets(&out, repo, "DB_HOST"), vec![src.find("env('DB_HOST'").unwrap()]);
+        assert_eq!(
+            site_offsets(&out, repo, "DB_URL"),
+            vec![src.find("env('DB_URL')").unwrap()]
+        );
+        assert_eq!(
+            site_offsets(&out, repo, "DB_HOST"),
+            vec![src.find("env('DB_HOST'").unwrap()]
+        );
         assert_eq!(out.sites.len(), 3, "{:?}", out.sites);
         // The default is a value, never a key.
         assert!(!config_keys(&out).iter().any(|k| k.contains("127")));
@@ -2008,7 +2126,10 @@ $key = $_ENV['API_KEY'];
         let mut offs = site_offsets(&out, repo, "Y");
         offs.dedup();
         assert_eq!(offs, vec![at], "{:?}", out.sites);
-        assert_eq!(out.sites, extract_config_reads(src, "", module_id(repo), repo).sites);
+        assert_eq!(
+            out.sites,
+            extract_config_reads(src, "", module_id(repo), repo).sites
+        );
         assert_eq!(out.edges.len(), 1);
     }
 
@@ -2026,7 +2147,11 @@ $key = $_ENV['API_KEY'];
         ] {
             let path = "resources/views/x.blade.php";
             let out = extract_config_reads(src, path, module_id(repo), repo);
-            assert!(out.nodes.is_empty() && out.sites.is_empty(), "{src}: {:?}", config_keys(&out));
+            assert!(
+                out.nodes.is_empty() && out.sites.is_empty(),
+                "{src}: {:?}",
+                config_keys(&out)
+            );
         }
     }
 
@@ -2034,10 +2159,18 @@ $key = $_ENV['API_KEY'];
     fn laravel_env_is_php_only() {
         let repo = RepoId(1);
         let src = "export const url = env('DB_URL');\n";
-        for path in ["config/database.ts", "config/database.js", "config/database.py", ""] {
+        for path in [
+            "config/database.ts",
+            "config/database.js",
+            "config/database.py",
+            "",
+        ] {
             let out = extract_config_reads(src, path, module_id(repo), repo);
             let keys = config_keys(&out);
-            assert!(out.nodes.is_empty() && out.sites.is_empty(), "{path}: {keys:?}");
+            assert!(
+                out.nodes.is_empty() && out.sites.is_empty(),
+                "{path}: {keys:?}"
+            );
         }
         let php = extract_config_reads(src, "config/Database.PHP", module_id(repo), repo);
         assert_eq!(config_keys(&php), ["config:env:DB_URL"]);
@@ -2059,7 +2192,11 @@ $key = $_ENV['API_KEY'];
         );
         // Only the reads that name a key count: an invalid name mints nothing.
         let src = "<?php\n$a = env('9BAD');\n";
-        assert!(extract_config_reads(src, "c.php", module_id(repo), repo).sites.is_empty());
+        assert!(
+            extract_config_reads(src, "c.php", module_id(repo), repo)
+                .sites
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2233,13 +2370,33 @@ services:
             "ENV APP_HOME /srv/app\n",
         );
         let out = extract_dockerfile_defs(src, module_id(repo), repo);
-        assert!(env_payload(&out, "QUEUE_URL").unwrap().contains(r#""value":"amqp://rabbit:5672/""#));
+        assert!(
+            env_payload(&out, "QUEUE_URL")
+                .unwrap()
+                .contains(r#""value":"amqp://rabbit:5672/""#)
+        );
         // The SECOND pair on the same line keeps its own value.
-        assert!(env_payload(&out, "LOG_LEVEL").unwrap().contains(r#""value":"debug""#));
-        assert!(env_payload(&out, "GREETING").unwrap().contains(r#""value":"hello world""#));
+        assert!(
+            env_payload(&out, "LOG_LEVEL")
+                .unwrap()
+                .contains(r#""value":"debug""#)
+        );
+        assert!(
+            env_payload(&out, "GREETING")
+                .unwrap()
+                .contains(r#""value":"hello world""#)
+        );
         // Space form: everything after the key is the value.
-        assert!(env_payload(&out, "APP_HOME").unwrap().contains(r#""value":"/srv/app""#));
-        assert!(env_payload(&out, "QUEUE_URL").unwrap().contains(r#""source":"dockerfile""#));
+        assert!(
+            env_payload(&out, "APP_HOME")
+                .unwrap()
+                .contains(r#""value":"/srv/app""#)
+        );
+        assert!(
+            env_payload(&out, "QUEUE_URL")
+                .unwrap()
+                .contains(r#""source":"dockerfile""#)
+        );
     }
 
     #[test]
@@ -2264,20 +2421,33 @@ services:
                 .unwrap()
                 .contains(r#""value":"redis.svc.cluster.local:6379""#)
         );
-        assert!(env_payload(&out, "CACHE_HOST").unwrap().contains(r#""source":"k8s""#));
+        assert!(
+            env_payload(&out, "CACHE_HOST")
+                .unwrap()
+                .contains(r#""source":"k8s""#)
+        );
         // `valueFrom:` declares no literal, so DB_PASSWORD gets no cell — and
         // the nested `secretKeyRef.name` must not capture the item's value.
         assert_eq!(env_payload(&out, "DB_PASSWORD"), None);
         // A13.8: that nested `name:` is the Secret the pod READS — never an
         // env var of its own.
         let keys = config_keys(&out);
-        assert!(keys.contains(&"config:secret:k8s/db-secret".to_string()), "{keys:?}");
-        assert!(!keys.iter().any(|k| k == "config:env:db-secret"), "{keys:?}");
+        assert!(
+            keys.contains(&"config:secret:k8s/db-secret".to_string()),
+            "{keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "config:env:db-secret"),
+            "{keys:?}"
+        );
         // Its simple name keeps the provider, so no node is NAMED `db-secret`.
         let names: Vec<&String> = out.nav.name_by_id.values().collect();
         assert!(names.iter().any(|n| *n == "k8s/db-secret"), "{names:?}");
         assert!(!names.iter().any(|n| *n == "db-secret"), "{names:?}");
-        assert_eq!(edge_to(&out, "config:secret:k8s/db-secret"), vec![edge_category::READS_CONFIG]);
+        assert_eq!(
+            edge_to(&out, "config:secret:k8s/db-secret"),
+            vec![edge_category::READS_CONFIG]
+        );
         assert_eq!(
             edge_to(&out, "config:env:DB_PASSWORD"),
             vec![edge_category::DEFINES_CONFIG]
@@ -2286,11 +2456,20 @@ services:
 
     /// Categories of every edge into the node with `qname`.
     fn edge_to(out: &ConfigNodes, qname: &str) -> Vec<glia_core::EdgeCategoryId> {
-        let Some(id) = out.nav.qname_by_id.iter().find(|(_, q)| *q == qname).map(|(id, _)| *id)
+        let Some(id) = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| *q == qname)
+            .map(|(id, _)| *id)
         else {
             return vec![];
         };
-        out.edges.iter().filter(|e| e.to == id).map(|e| e.category).collect()
+        out.edges
+            .iter()
+            .filter(|e| e.to == id)
+            .map(|e| e.category)
+            .collect()
     }
 
     #[test]
@@ -2331,7 +2510,11 @@ services:
             ]
         );
         // The item after a ref block still pairs its own sibling value.
-        assert!(env_payload(&out, "AFTER").unwrap().contains(r#""value":"1""#));
+        assert!(
+            env_payload(&out, "AFTER")
+                .unwrap()
+                .contains(r#""value":"1""#)
+        );
     }
 
     #[test]
@@ -2371,7 +2554,10 @@ services:
         let out = extract_yaml_env_defs(src, module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
-        assert_eq!(keys, vec!["config:env:DB_PASSWORD", "config:secret:k8s/db-secret"]);
+        assert_eq!(
+            keys,
+            vec!["config:env:DB_PASSWORD", "config:secret:k8s/db-secret"]
+        );
         // Declared AND consumed in one file: one node, one edge per side.
         let mut cats = edge_to(&out, "config:secret:k8s/db-secret");
         cats.sort_by_key(|c| c.0);
@@ -2383,8 +2569,10 @@ services:
         let secret = out
             .nodes
             .iter()
-            .find(|n| out.nav.qname_by_id.get(&n.id).map(String::as_str)
-                == Some("config:secret:k8s/db-secret"))
+            .find(|n| {
+                out.nav.qname_by_id.get(&n.id).map(String::as_str)
+                    == Some("config:secret:k8s/db-secret")
+            })
             .expect("secret node");
         for c in &secret.cells {
             if let CellPayload::Json(s) = &c.payload {
@@ -2414,8 +2602,14 @@ services:
         let out = extract_yaml_env_defs(src, module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
-        assert_eq!(keys, vec!["config:flag:dark_mode", "config:flag:new-checkout"]);
-        assert_eq!(edge_to(&out, "config:flag:new-checkout"), vec![edge_category::DEFINES_CONFIG]);
+        assert_eq!(
+            keys,
+            vec!["config:flag:dark_mode", "config:flag:new-checkout"]
+        );
+        assert_eq!(
+            edge_to(&out, "config:flag:new-checkout"),
+            vec![edge_category::DEFINES_CONFIG]
+        );
         assert_eq!(
             crate::secrets_flags::marker(&[&out], "yaml").as_deref(),
             Some("[secrets] refs=0 providers=0 flags=0 flag_defs=2 src=yaml")
@@ -2433,7 +2627,11 @@ services:
             "      - PORT\n",
         );
         let out = extract_yaml_env_defs(src, module_id(repo), repo);
-        assert!(env_payload(&out, "DATABASE_HOST").unwrap().contains(r#""source":"compose""#));
+        assert!(
+            env_payload(&out, "DATABASE_HOST")
+                .unwrap()
+                .contains(r#""source":"compose""#)
+        );
         // Passthrough form `- KEY` names a key whose value comes from the host.
         assert_eq!(env_payload(&out, "PORT"), None);
 
@@ -2444,7 +2642,11 @@ services:
             "      LOG_LEVEL: info\n",
         );
         let out = extract_yaml_env_defs(map_src, module_id(repo), repo);
-        assert!(env_payload(&out, "LOG_LEVEL").unwrap().contains(r#""value":"info""#));
+        assert!(
+            env_payload(&out, "LOG_LEVEL")
+                .unwrap()
+                .contains(r#""value":"info""#)
+        );
     }
 
     #[test]
@@ -2457,7 +2659,12 @@ services:
             "SIGNING_SALT=abc\n",
         );
         let out = extract_dotenv_defs(src, module_id(repo), repo);
-        for key in ["STRIPE_SECRET_KEY", "JWT_TOKEN", "DB_PASSWD", "SIGNING_SALT"] {
+        for key in [
+            "STRIPE_SECRET_KEY",
+            "JWT_TOKEN",
+            "DB_PASSWD",
+            "SIGNING_SALT",
+        ] {
             let payload = env_payload(&out, key).unwrap_or_else(|| panic!("{key} has no cell"));
             assert_eq!(payload, r#"{"source":"dotenv","redacted":true}"#);
         }
@@ -2486,15 +2693,24 @@ services:
         );
         let out = extract_dotenv_defs(src, module_id(repo), repo);
         let db = env_payload(&out, "DATABASE_URL").unwrap();
-        assert!(db.contains(r#""value":"postgres://***@db.internal:5432/app""#), "{db}");
+        assert!(
+            db.contains(r#""value":"postgres://***@db.internal:5432/app""#),
+            "{db}"
+        );
         assert!(db.contains(r#""redacted":true"#), "{db}");
         assert!(!db.contains("s3cr3t"), "{db}");
         let redis = env_payload(&out, "REDIS_URL").unwrap();
-        assert!(redis.contains(r#""value":"redis://***@cache.svc:6379/0""#), "{redis}");
+        assert!(
+            redis.contains(r#""value":"redis://***@cache.svc:6379/0""#),
+            "{redis}"
+        );
         // No credentials => untouched, and an `#` inside the path is not a
         // comment.
         let plain = env_payload(&out, "PLAIN_URL").unwrap();
-        assert!(plain.contains(r#""value":"http://users-svc:8080/health#top""#), "{plain}");
+        assert!(
+            plain.contains(r#""value":"http://users-svc:8080/health#top""#),
+            "{plain}"
+        );
         assert!(plain.contains(r#""redacted":false"#), "{plain}");
     }
 
@@ -2521,7 +2737,12 @@ services:
     }
 
     fn env_id(repo: RepoId, key: &str) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &format!("config:env:{key}"))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            &format!("config:env:{key}"),
+        )
     }
 
     /// LE.4b: every read site's offset starts inside its key's read
@@ -2589,7 +2810,12 @@ services:
                 .iter()
                 .all(|&o| src.is_char_boundary(o) && src[o..].starts_with("process.env.TWICE"))
         );
-        assert_eq!(out.sites.len(), 2, "the invalid name gives no site: {:?}", out.sites);
+        assert_eq!(
+            out.sites.len(),
+            2,
+            "the invalid name gives no site: {:?}",
+            out.sites
+        );
         assert_eq!(out.edges.len(), 1);
     }
 
@@ -2611,20 +2837,34 @@ services:
         assert_eq!(sorted_keys(&out), vec!["config:env:APP_MODE".to_string()]);
         let at = rs.find("std::env::var(").unwrap();
         assert_eq!(out.sites.iter().map(|(_, o)| *o).min(), Some(at));
-        assert!(out.sites.iter().all(|(k, _)| *k == env_id(repo, "APP_MODE")));
+        assert!(
+            out.sites
+                .iter()
+                .all(|(k, _)| *k == env_id(repo, "APP_MODE"))
+        );
         // The same text read as TypeScript keeps every HEAD read.
         let ts = extract_config_reads(rs, "src/x.ts", module_id(repo), repo);
         assert_eq!(
             sorted_keys(&ts),
-            ["config:env:APP_MODE", "config:env:DOC_KEY", "config:env:JWT_SECRET"]
+            [
+                "config:env:APP_MODE",
+                "config:env:DOC_KEY",
+                "config:env:JWT_SECRET"
+            ]
         );
         // Python: a plain read and one inside an f-string, sites at the needle.
         let py = "import os\nDB_URL = os.getenv(\"DB_URL\")\n\
                   URL = f\"redis://{os.getenv('REDIS_HOST')}:6379/0\"\n\
                   # os.getenv('COMMENTED')\nS = \"os.environ['IN_STRING']\"\n";
         let out = extract_config_reads(py, "app/settings.py", module_id(repo), repo);
-        assert_eq!(sorted_keys(&out), ["config:env:DB_URL", "config:env:REDIS_HOST"]);
-        for (key, needle) in [("DB_URL", "os.getenv(\"DB_URL"), ("REDIS_HOST", "os.getenv('REDIS")] {
+        assert_eq!(
+            sorted_keys(&out),
+            ["config:env:DB_URL", "config:env:REDIS_HOST"]
+        );
+        for (key, needle) in [
+            ("DB_URL", "os.getenv(\"DB_URL"),
+            ("REDIS_HOST", "os.getenv('REDIS"),
+        ] {
             let at = py.find(needle).unwrap();
             let offs: Vec<usize> = out
                 .sites
@@ -2639,8 +2879,16 @@ services:
     #[test]
     fn define_side_carries_no_sites() {
         let repo = RepoId(1);
-        assert!(extract_dotenv_defs("A=1\n", module_id(repo), repo).sites.is_empty());
-        assert!(extract_dockerfile_defs("ENV B=2\n", module_id(repo), repo).sites.is_empty());
+        assert!(
+            extract_dotenv_defs("A=1\n", module_id(repo), repo)
+                .sites
+                .is_empty()
+        );
+        assert!(
+            extract_dockerfile_defs("ENV B=2\n", module_id(repo), repo)
+                .sites
+                .is_empty()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2660,10 +2908,13 @@ services:
     fn payload_of(out: &ConfigNodes, qname: &str) -> Option<String> {
         let (id, _) = out.nav.qname_by_id.iter().find(|(_, q)| *q == qname)?;
         let node = out.nodes.iter().find(|n| n.id == *id)?;
-        node.cells.iter().find(|c| c.kind == cell_type::ENV).map(|c| match &c.payload {
-            CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
-            CellPayload::Bytes(_) => String::new(),
-        })
+        node.cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENV)
+            .map(|c| match &c.payload {
+                CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
     }
 
     /// Every ENV / EVIDENCE payload in `out`, for leak checks.
@@ -2682,12 +2933,27 @@ services:
 
     #[test]
     fn setting_key_validator() {
-        for ok in ["Stripe:SecretKey", "Logging:LogLevel:Microsoft.AspNetCore", "Endpoints:0:Url", "Db", "a-b_c.d"]
-        {
+        for ok in [
+            "Stripe:SecretKey",
+            "Logging:LogLevel:Microsoft.AspNetCore",
+            "Endpoints:0:Url",
+            "Db",
+            "a-b_c.d",
+        ] {
             assert!(is_valid_setting_key(ok), "{ok}");
         }
         let long = "a".repeat(129);
-        for bad in ["", "Stripe:", ":Key", "A::B", "has space", "$schema", "a\"b", "x{0}", long.as_str()] {
+        for bad in [
+            "",
+            "Stripe:",
+            ":Key",
+            "A::B",
+            "has space",
+            "$schema",
+            "a\"b",
+            "x{0}",
+            long.as_str(),
+        ] {
             assert!(!is_valid_setting_key(bad), "{bad}");
         }
         assert!(is_valid_setting_key(&"a".repeat(128)));
@@ -2746,12 +3012,19 @@ public class Payments
         );
         // Read side: READS_CONFIG from the module, no value cell, one site
         // per read at its receiver / method name.
-        assert!(out.edges.iter().all(|e| e.category == edge_category::READS_CONFIG
-            && e.from == module_id(repo)));
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG && e.from == module_id(repo))
+        );
         assert!(out.nodes.iter().all(|n| n.cells.is_empty()));
         assert_eq!(out.sites.len(), keys.len());
         let site = |key: &str| {
-            out.sites.iter().find(|(id, _)| *id == setting_id(repo, key)).map(|(_, o)| *o).unwrap()
+            out.sites
+                .iter()
+                .find(|(id, _)| *id == setting_id(repo, key))
+                .map(|(_, o)| *o)
+                .unwrap()
         };
         assert!(src[site("Stripe:SecretKey")..].starts_with("configuration[\"Stripe:SecretKey\"]"));
         assert!(src[site("Retry:Max")..].starts_with("GetValue<int>(\"Retry:Max\")"));
@@ -2759,7 +3032,11 @@ public class Payments
         assert!(src[site("Smtp:Host")..].starts_with("configuration.GetSection(\"Smtp\")"));
         // Nothing reads without an IConfiguration mention.
         let plain = "var x = config[\"A:B\"];\nvar y = settings.GetValue<int>(\"C:D\");\n";
-        assert!(extract_config_reads(plain, "X.cs", module_id(repo), repo).nodes.is_empty());
+        assert!(
+            extract_config_reads(plain, "X.cs", module_id(repo), repo)
+                .nodes
+                .is_empty()
+        );
         // A minimal-API Program.cs reads through `builder.Configuration`.
         let program = "var builder = WebApplication.CreateBuilder(args);\n\
                        var cs = builder.Configuration[\"Redis:Host\"];\n";
@@ -2773,7 +3050,8 @@ public class Payments
     #[test]
     fn dotnet_config_reads_only_in_csharp_files() {
         let repo = RepoId(1);
-        let src = "interface IConfiguration { apiUrl: string }\nconst u = this.config[\"apiUrl\"];\n";
+        let src =
+            "interface IConfiguration { apiUrl: string }\nconst u = this.config[\"apiUrl\"];\n";
         for path in ["src/app/config.ts", "src/x.rs", "Program.csx", "cs", ""] {
             let out = extract_config_reads(src, path, module_id(repo), repo);
             assert!(out.nodes.is_empty(), "{path}: {:?}", config_keys(&out));
@@ -2814,17 +3092,32 @@ public class Payments
             payload_of(&out, "config:setting:Retry:Max").as_deref(),
             Some(r#"{"value":"3","source":"appsettings","redacted":false}"#)
         );
-        assert!(payload_of(&out, "config:setting:Retry:Enabled").unwrap().contains(r#""value":"true""#));
-        assert!(payload_of(&out, "config:setting:Endpoints:1:Url").unwrap().contains(r#""value":"https://+:443""#));
-        assert!(payload_of(&out, "config:setting:Note").unwrap().contains("// not a comment, /* nor this */"));
+        assert!(
+            payload_of(&out, "config:setting:Retry:Enabled")
+                .unwrap()
+                .contains(r#""value":"true""#)
+        );
+        assert!(
+            payload_of(&out, "config:setting:Endpoints:1:Url")
+                .unwrap()
+                .contains(r#""value":"https://+:443""#)
+        );
+        assert!(
+            payload_of(&out, "config:setting:Note")
+                .unwrap()
+                .contains("// not a comment, /* nor this */")
+        );
         // null and "" declare the key with no value.
         assert_eq!(payload_of(&out, "config:setting:Retry:Backoff"), None);
         assert_eq!(payload_of(&out, "config:setting:Retry:Empty"), None);
         // Every key is a DEFINES_CONFIG target of the file's module, named by
         // its full path.
         assert_eq!(out.edges.len(), keys.len());
-        assert!(out.edges.iter().all(|e| e.category == edge_category::DEFINES_CONFIG
-            && e.from == module_id(repo)));
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::DEFINES_CONFIG && e.from == module_id(repo))
+        );
         let id = setting_id(repo, "Retry:Max");
         assert_eq!(out.nav.name_by_id[&id], "Retry:Max");
         assert!(out.sites.is_empty());
@@ -2842,7 +3135,8 @@ public class Payments
   "Storage": { "Main": "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=c2VjcmV0" },
   "Upstream": { "Url": "https://svc:p4ss@users.internal/api" }
 }"#;
-        let out = extract_settings_json_defs(src, "appsettings.Production.json", module_id(repo), repo);
+        let out =
+            extract_settings_json_defs(src, "appsettings.Production.json", module_id(repo), repo);
         for key in [
             "Stripe:SecretKey",
             "Stripe:PublishableKey",
@@ -2858,12 +3152,28 @@ public class Payments
                 "{key}"
             );
         }
-        assert!(payload_of(&out, "config:setting:Jwt:Issuer").unwrap().contains(r#""value":"payments""#));
+        assert!(
+            payload_of(&out, "config:setting:Jwt:Issuer")
+                .unwrap()
+                .contains(r#""value":"payments""#)
+        );
         // A URL keeps its host and loses its userinfo (A13.7).
         let up = payload_of(&out, "config:setting:Upstream:Url").unwrap();
-        assert!(up.contains(r#""value":"https://***@users.internal/api""#), "{up}");
+        assert!(
+            up.contains(r#""value":"https://***@users.internal/api""#),
+            "{up}"
+        );
         let all = all_payloads(&out);
-        for leak in ["sk_test_", "pk_test_", "jwt-signing", "hunter2", "Host=db", "cache:6379", "c2VjcmV0", "p4ss"] {
+        for leak in [
+            "sk_test_",
+            "pk_test_",
+            "jwt-signing",
+            "hunter2",
+            "Host=db",
+            "cache:6379",
+            "c2VjcmV0",
+            "p4ss",
+        ] {
             assert!(!all.contains(leak), "{leak} leaked: {all}");
         }
         // The value never becomes an identity either.
@@ -2873,7 +3183,12 @@ public class Payments
     #[test]
     fn appsettings_parse_error_mints_nothing() {
         let repo = RepoId(1);
-        for bad in ["{ \"Stripe\": { \"SecretKey\": ", "[ { \"A\": 1 } ]", "\"just a string\"", ""] {
+        for bad in [
+            "{ \"Stripe\": { \"SecretKey\": ",
+            "[ { \"A\": 1 } ]",
+            "\"just a string\"",
+            "",
+        ] {
             let out = extract_settings_json_defs(bad, "appsettings.json", module_id(repo), repo);
             assert!(out.nodes.is_empty() && out.edges.is_empty(), "{bad:?}");
         }
@@ -2882,7 +3197,9 @@ public class Payments
     #[test]
     fn appsettings_key_cap() {
         let repo = RepoId(1);
-        let body: Vec<String> = (0..SETTINGS_KEY_CAP + 5).map(|i| format!("\"K{i}\": {i}")).collect();
+        let body: Vec<String> = (0..SETTINGS_KEY_CAP + 5)
+            .map(|i| format!("\"K{i}\": {i}"))
+            .collect();
         let src = format!("{{ {} }}", body.join(", "));
         let out = extract_settings_json_defs(&src, "appsettings.json", module_id(repo), repo);
         assert_eq!(out.nodes.len(), SETTINGS_KEY_CAP);
@@ -2901,9 +3218,13 @@ public class Payments
         ] {
             assert!(is_dotnet_settings_path(ok), "{ok}");
         }
-        for bad in
-            ["myappsettings.json", "appsettings.json.bak", "launchSettings.json", "appsettings.yaml", "appsettings x.json"]
-        {
+        for bad in [
+            "myappsettings.json",
+            "appsettings.json.bak",
+            "launchSettings.json",
+            "appsettings.yaml",
+            "appsettings x.json",
+        ] {
             assert!(!is_dotnet_settings_path(bad), "{bad}");
         }
     }
@@ -2926,8 +3247,11 @@ public class Payments
             ]
         );
         for key in ["Stripe:SecretKey", "Retry:Max"] {
-            let edges: Vec<&Edge> =
-                out.edges.iter().filter(|e| e.to == setting_id(repo, key)).collect();
+            let edges: Vec<&Edge> = out
+                .edges
+                .iter()
+                .filter(|e| e.to == setting_id(repo, key))
+                .collect();
             assert_eq!(edges.len(), 1, "{key}");
             assert_eq!(edges[0].category, edge_category::DEFINES_CONFIG);
             assert_eq!(edges[0].from, module_id(repo));
@@ -2936,7 +3260,11 @@ public class Payments
             assert_eq!(ev.rule.as_deref(), Some("dotnet_env_override"));
         }
         // The env edges are untouched: no evidence yet (route.rs stamps them).
-        let env_edge = out.edges.iter().find(|e| e.to == env_id(repo, "Stripe__SecretKey")).unwrap();
+        let env_edge = out
+            .edges
+            .iter()
+            .find(|e| e.to == env_id(repo, "Stripe__SecretKey"))
+            .unwrap();
         assert!(Evidence::of(env_edge).is_none());
         assert_eq!(
             payload_of(&out, "config:setting:Stripe:SecretKey").as_deref(),
@@ -2948,7 +3276,11 @@ public class Payments
         );
         assert!(!all_payloads(&out).contains("sk_live_x"));
         // Item order: each override follows its env define.
-        let order: Vec<&String> = out.nodes.iter().map(|n| &out.nav.qname_by_id[&n.id]).collect();
+        let order: Vec<&String> = out
+            .nodes
+            .iter()
+            .map(|n| &out.nav.qname_by_id[&n.id])
+            .collect();
         assert_eq!(
             order,
             [
@@ -2961,7 +3293,11 @@ public class Payments
         );
 
         // .env: a three-segment override, emitter extractor:dotenv.
-        let out = extract_dotenv_defs("Logging__LogLevel__Default=Warning\n", module_id(repo), repo);
+        let out = extract_dotenv_defs(
+            "Logging__LogLevel__Default=Warning\n",
+            module_id(repo),
+            repo,
+        );
         let edge = out
             .edges
             .iter()
@@ -3003,7 +3339,11 @@ public class Payments
         // compose environment map: emitter extractor:yaml too.
         let compose = "services:\n  api:\n    environment:\n      Retry__Max: 5\n";
         let out = extract_yaml_env_defs(compose, module_id(repo), repo);
-        let edge = out.edges.iter().find(|e| e.to == setting_id(repo, "Retry:Max")).unwrap();
+        let edge = out
+            .edges
+            .iter()
+            .find(|e| e.to == setting_id(repo, "Retry:Max"))
+            .unwrap();
         assert_eq!(Evidence::of(edge).unwrap().emitter, "extractor:yaml");
     }
 
@@ -3014,12 +3354,20 @@ public class Payments
             assert!(dotnet_env_override(&env(none)).is_none(), "{none}");
         }
         let ov = dotnet_env_override(&env("A__B__C")).expect("A__B__C overrides");
-        assert_eq!((ov.name.as_str(), ov.flavor, ov.source), ("A:B:C", Flavor::Setting, "dockerfile"));
+        assert_eq!(
+            (ov.name.as_str(), ov.flavor, ov.source),
+            ("A:B:C", Flavor::Setting, "dockerfile")
+        );
         // Only an env define overrides: a secret or flag never does.
         assert!(dotnet_env_override(&ConfigDef::flag("A__B", "flipt")).is_none());
         // A read states no override.
         let repo = RepoId(1);
-        let out = extract_config_reads("os.getenv('Stripe__SecretKey')\n", "", module_id(repo), repo);
+        let out = extract_config_reads(
+            "os.getenv('Stripe__SecretKey')\n",
+            "",
+            module_id(repo),
+            repo,
+        );
         assert_eq!(config_keys(&out), ["config:env:Stripe__SecretKey"]);
     }
 }

@@ -81,8 +81,8 @@ fn main() -> Result<()> {
 
     let graph = build_repo_graph(&args.src, &args.repo_canonical)?;
 
-    let seeds_bytes = fs::read(&args.seeds)
-        .with_context(|| format!("read {}", args.seeds.display()))?;
+    let seeds_bytes =
+        fs::read(&args.seeds).with_context(|| format!("read {}", args.seeds.display()))?;
     let seeds: SeedsFile = serde_json::from_slice(&seeds_bytes).context("parse seeds JSON")?;
     eprintln!("[seeds] {} activated qnames", seeds.activated.len());
 
@@ -100,20 +100,30 @@ fn main() -> Result<()> {
     // `synth_callsite_argflow::run`, run here as a SynthHook so glia-3d's
     // Inject scene can put the same hook in its own plan. Bin handles only
     // the disk I/O.
-    let hook = CallsiteArgflowSynth { id_start: args.id_start };
+    let hook = CallsiteArgflowSynth {
+        id_start: args.id_start,
+    };
     let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
     let mut view = ActivatedView::from_ranked(activated);
     plan.synthesize(&graph, &mut view);
-    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), view.synth.len());
+    eprintln!(
+        "[synth] plan hooks=[{}] cells={}",
+        view.applied.join(","),
+        view.synth.len()
+    );
     let emitted: Vec<SummaryEntry> = view
         .synth
         .into_iter()
-        .map(|c| SummaryEntry { id: c.id, qname: c.key, score: c.score, summary: c.text })
+        .map(|c| SummaryEntry {
+            id: c.id,
+            qname: c.key,
+            score: c.score,
+            summary: c.text,
+        })
         .collect();
 
     let existing: Vec<SummaryEntry> = serde_json::from_slice(
-        &fs::read(&args.summaries)
-            .with_context(|| format!("read {}", args.summaries.display()))?,
+        &fs::read(&args.summaries).with_context(|| format!("read {}", args.summaries.display()))?,
     )
     .context("parse summaries JSON")?;
     let mut out: Vec<SummaryEntry> = existing;

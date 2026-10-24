@@ -470,7 +470,8 @@ fn loader_dropped_stanzas_are_rejected_rows() {
     assert_eq!(fix("layer:top"), undeclared);
     assert_eq!(fix("web-uses-copy"), undeclared);
     assert!(
-        fix("frontend-no-backend").starts_with("set `version = 2` at the top of .glia/overlay.toml"),
+        fix("frontend-no-backend")
+            .starts_with("set `version = 2` at the top of .glia/overlay.toml"),
         "{}",
         fix("frontend-no-backend")
     );
@@ -515,7 +516,10 @@ fn whole_file_rejection_is_one_row() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = fixture(
         tmp.path(),
-        Some(&handlers_overlay("version = 2\n", "categorys = [\"CALLS\"]")),
+        Some(&handlers_overlay(
+            "version = 2\n",
+            "categorys = [\"CALLS\"]",
+        )),
     );
     let r = build(&dir);
     let report = check_with_roots(&r.merged, &roots(&r), &CheckOptions::default());
@@ -570,7 +574,10 @@ fn whole_file_rejection_is_one_row() {
     std::fs::write(&path, handlers_overlay("", "categories = [\"CALLS\"]")).unwrap();
     let nover = check_with_roots(&r.merged, &roots(&r), &CheckOptions::default());
     assert_eq!(nover.unanchored.len(), 1, "{:?}", nover.unanchored);
-    assert_eq!(nover.unanchored[0].decl.as_deref(), Some(".glia/overlay.toml"));
+    assert_eq!(
+        nover.unanchored[0].decl.as_deref(),
+        Some(".glia/overlay.toml")
+    );
     assert_eq!(
         nover.unanchored[0].fix,
         "add `version = 1` as the first line (`version = 2` to use rule / transitive / via / min_tier)"
@@ -584,7 +591,11 @@ fn whole_file_rejection_is_one_row() {
     )
     .unwrap();
     let edge_only = check_with_roots(&r.merged, &roots(&r), &CheckOptions::default());
-    assert!(edge_only.unanchored.is_empty(), "{:?}", edge_only.unanchored);
+    assert!(
+        edge_only.unanchored.is_empty(),
+        "{:?}",
+        edge_only.unanchored
+    );
     assert_eq!(
         serde_json::to_string(&edge_only).unwrap(),
         serde_json::to_string(&check(&r.merged)).unwrap()

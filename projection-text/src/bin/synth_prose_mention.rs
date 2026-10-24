@@ -18,10 +18,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use regex::Regex;
 use glia_code_domain::node_kind;
 use glia_core::NodeId;
 use glia_projection_text::driver_utils::build_repo_graph;
+use regex::Regex;
 
 #[derive(Parser, Debug)]
 #[command(about = "Derive a directive from issue prose mentions (B2, cycle 0.6)")]
@@ -52,10 +52,37 @@ struct Mention {
 }
 
 const STOP: &[&str] = &[
-    "I", "We", "You", "The", "When", "Then", "If", "But", "And", "Or", "It", "This",
-    "That", "There", "Here", "What", "Why", "How", "Bug", "Issue", "Fix", "TODO",
-    "Note", "Example", "Description", "Error", "Exception", "Traceback", "File",
-    "Hello", "Hi",
+    "I",
+    "We",
+    "You",
+    "The",
+    "When",
+    "Then",
+    "If",
+    "But",
+    "And",
+    "Or",
+    "It",
+    "This",
+    "That",
+    "There",
+    "Here",
+    "What",
+    "Why",
+    "How",
+    "Bug",
+    "Issue",
+    "Fix",
+    "TODO",
+    "Note",
+    "Example",
+    "Description",
+    "Error",
+    "Exception",
+    "Traceback",
+    "File",
+    "Hello",
+    "Hi",
 ];
 
 fn main() -> Result<()> {
@@ -70,12 +97,15 @@ fn main() -> Result<()> {
     );
 
     if mentions.is_empty() {
-        write_empty(&args.text_out, "no prose mentions matched extraction patterns")?;
+        write_empty(
+            &args.text_out,
+            "no prose mentions matched extraction patterns",
+        )?;
         return Ok(());
     }
 
-    let graph = build_repo_graph(&args.src, &args.repo_canonical)
-        .context("build_repo_graph failed")?;
+    let graph =
+        build_repo_graph(&args.src, &args.repo_canonical).context("build_repo_graph failed")?;
     eprintln!("[synth_prose_mention] graph: {} nodes", graph.nodes.len());
 
     let tail_idx = build_tail_index(&graph);

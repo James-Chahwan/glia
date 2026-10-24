@@ -38,9 +38,17 @@ fn flask(handler: &str) -> String {
 /// serve `/health`; web/ (package.json) calls `http://users-svc:8080/health`.
 fn write_monorepo(dir: &Path) {
     write(dir, "services/admin/app.py", &flask("admin_health"));
-    write(dir, "services/admin/pyproject.toml", "[project]\nname = \"admin\"\n");
+    write(
+        dir,
+        "services/admin/pyproject.toml",
+        "[project]\nname = \"admin\"\n",
+    );
     write(dir, "services/users/app.py", &flask("users_health"));
-    write(dir, "services/users/pyproject.toml", "[project]\nname = \"users\"\n");
+    write(
+        dir,
+        "services/users/pyproject.toml",
+        "[project]\nname = \"users\"\n",
+    );
     write(dir, "web/package.json", "{\"name\": \"web\"}\n");
     write(
         dir,
@@ -131,7 +139,10 @@ fn monorepo_services_keep_their_own_routes() {
     for g in &m.graphs {
         for (id, q) in &g.nav.qname_by_id {
             if q.starts_with("GET /health @") || q.starts_with("endpoint:GET:/health @") {
-                assert_eq!(g.nav.name_by_id.get(id).map(String::as_str), Some("GET /health"));
+                assert_eq!(
+                    g.nav.name_by_id.get(id).map(String::as_str),
+                    Some("GET /health")
+                );
             }
         }
     }
@@ -156,11 +167,15 @@ fn single_project_repo_is_untouched() {
     );
     let m = build(d).merged;
     assert_eq!(
-        qnames_of(&m, node_kind::ROUTE).into_iter().collect::<Vec<_>>(),
+        qnames_of(&m, node_kind::ROUTE)
+            .into_iter()
+            .collect::<Vec<_>>(),
         ["GET /users"]
     );
     assert_eq!(
-        qnames_of(&m, node_kind::ENDPOINT).into_iter().collect::<Vec<_>>(),
+        qnames_of(&m, node_kind::ENDPOINT)
+            .into_iter()
+            .collect::<Vec<_>>(),
         ["endpoint:GET:/users"]
     );
     assert_eq!(
@@ -207,7 +222,12 @@ fn incremental_matches_clean() {
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&out)
             .unwrap()
             .flatten()
-            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
             .collect();
         files.sort();
         files
@@ -216,11 +236,18 @@ fn incremental_matches_clean() {
     let warm = generate_one_incremental(path).expect("warm incremental");
     // The warm build really is served from the persisted cache.
     let persisted = ParseCache::load(path);
-    assert!(persisted.len() >= 3, "every parsed file cached: {}", persisted.len());
+    assert!(
+        persisted.len() >= 3,
+        "every parsed file cached: {}",
+        persisted.len()
+    );
     let mut mem = ParseCache::new();
     generate_one_with_cache(path, &mut mem).expect("cold in-memory");
     let warm_mem = generate_one_with_cache(path, &mut mem).expect("warm in-memory");
-    assert_eq!(mem.stats.reparsed, 0, "the second in-memory build reparses nothing");
+    assert_eq!(
+        mem.stats.reparsed, 0,
+        "the second in-memory build reparses nothing"
+    );
     assert!(mem.stats.reused >= 3);
     let clean = generate_one(path).expect("clean");
     assert!(
@@ -228,9 +255,21 @@ fn incremental_matches_clean() {
         "the warm build qualifies cache-served parses too"
     );
     let clean_bytes = write_gmap(&clean, "clean");
-    assert_eq!(write_gmap(&cold, "cold"), clean_bytes, "cold incremental == clean");
-    assert_eq!(write_gmap(&warm, "warm"), clean_bytes, "warm incremental == clean");
-    assert_eq!(write_gmap(&warm_mem, "warm_mem"), clean_bytes, "cache-served == clean");
+    assert_eq!(
+        write_gmap(&cold, "cold"),
+        clean_bytes,
+        "cold incremental == clean"
+    );
+    assert_eq!(
+        write_gmap(&warm, "warm"),
+        clean_bytes,
+        "warm incremental == clean"
+    );
+    assert_eq!(
+        write_gmap(&warm_mem, "warm_mem"),
+        clean_bytes,
+        "cache-served == clean"
+    );
 }
 
 /// `glia arch` on the monorepo: each service owns its own route. HEAD
@@ -260,7 +299,11 @@ fn service_map_counts_one_route_per_service() {
     links.sort();
     assert_eq!(
         links,
-        [("web".to_string(), "services/users".to_string(), "GET /health".to_string())],
+        [(
+            "web".to_string(),
+            "services/users".to_string(),
+            "GET /health".to_string()
+        )],
         "the host names users; channels read the owner-free path"
     );
 }

@@ -215,9 +215,24 @@ fn cross_class_signal_reads_bind() {
     );
     let store = "src::app::draft.store::DraftStore";
     for (target, kind, rule, text) in [
-        ("save", node_kind::METHOD, "receiver_type", "this.store.save()"),
-        ("length", node_kind::STATE_VAR, "receiver_state", "this.store.length()"),
-        ("draft", node_kind::STATE_VAR, "receiver_state", "this.other.draft()"),
+        (
+            "save",
+            node_kind::METHOD,
+            "receiver_type",
+            "this.store.save()",
+        ),
+        (
+            "length",
+            node_kind::STATE_VAR,
+            "receiver_state",
+            "this.store.length()",
+        ),
+        (
+            "draft",
+            node_kind::STATE_VAR,
+            "receiver_state",
+            "this.other.draft()",
+        ),
     ] {
         let to = node(&nodes, &format!("{store}::{target}"), kind);
         let edge = m
@@ -233,7 +248,11 @@ fn cross_class_signal_reads_bind() {
         };
         assert_eq!(file, "src/app/editor.component.ts");
         let src = source_line(&repo, &file, line);
-        assert!(src.contains(text), "{target}: {file}:{line} is `{}`", src.trim());
+        assert!(
+            src.contains(text),
+            "{target}: {file}:{line} is `{}`",
+            src.trim()
+        );
     }
     // In-class reads stay CH.2's: `length`'s computed body reads `draft`.
     let length = node(&nodes, &format!("{store}::length"), node_kind::STATE_VAR);

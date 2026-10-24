@@ -102,7 +102,9 @@ use glia_activation::algo::CategorySet;
 use glia_activation::algo::classes::Classes;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
-use glia_code_domain::wire::{JsonKind, ModelSchema, Shape, WireFormat, json_kind, json_schema_kind};
+use glia_code_domain::wire::{
+    JsonKind, ModelSchema, Shape, WireFormat, json_kind, json_schema_kind,
+};
 use glia_code_domain::{cell_type, edge_category, node_kind, same_as};
 use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 use glia_graph::{
@@ -502,7 +504,11 @@ pub(crate) fn collect_holders(merged: &MergedGraph) -> BTreeMap<u64, Holder> {
         for n in &g.nodes {
             let message = match g.nav.kind_by_id.get(&n.id).copied() {
                 Some(k) if k == node_kind::MESSAGE_TYPE => {
-                    if g.nav.qname_by_id.get(&n.id).is_some_and(|q| q.starts_with(GRAPHQL_TYPE_PREFIX)) {
+                    if g.nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .is_some_and(|q| q.starts_with(GRAPHQL_TYPE_PREFIX))
+                    {
                         continue;
                     }
                     true
@@ -590,7 +596,10 @@ fn schema_copies(merged: &MergedGraph, holders: &BTreeMap<u64, Holder>) -> Vec<(
         for g in &merged.graphs {
             for n in &g.nodes {
                 if is_message(n.id.0) && classes.class_of(n.id).is_some() {
-                    members.entry(classes.rep(n.id).0).or_default().push((n.id.0, n.repo));
+                    members
+                        .entry(classes.rep(n.id).0)
+                        .or_default()
+                        .push((n.id.0, n.repo));
                 }
             }
         }
@@ -1640,7 +1649,8 @@ impl NodeFacts {
         FieldSide {
             repo_id: repo,
             qname: at.qname,
-            format: format.unwrap_or_else(|| site.map(|f| f.as_str().to_string()).unwrap_or_default()),
+            format: format
+                .unwrap_or_else(|| site.map(|f| f.as_str().to_string()).unwrap_or_default()),
             file: at.file,
             line: at.line,
         }
@@ -1669,15 +1679,18 @@ impl NodeFacts {
 
 /// The HTTP contract ops (OpenAPI / swagger, any source with a method and a
 /// path) that DOCUMENT each ROUTE: route id -> op ids, ascending.
-fn documenting_ops(merged: &MergedGraph, holders: &BTreeMap<u64, Holder>) -> BTreeMap<u64, Vec<u64>> {
+fn documenting_ops(
+    merged: &MergedGraph,
+    holders: &BTreeMap<u64, Holder>,
+) -> BTreeMap<u64, Vec<u64>> {
     let mut out: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for e in merged
         .all_edges()
         .filter(|e| e.category == edge_category::DOCUMENTS)
     {
-        let is_op = holders
-            .get(&e.from.0)
-            .is_some_and(|h| !h.message && h.origin_str("method").is_some() && !h.payloads.is_empty());
+        let is_op = holders.get(&e.from.0).is_some_and(|h| {
+            !h.message && h.origin_str("method").is_some() && !h.payloads.is_empty()
+        });
         if is_op {
             out.entry(e.to.0).or_default().push(e.from.0);
         }
@@ -1727,7 +1740,14 @@ fn model_rows(
         .collect();
     let mut out = Vec::new();
 
-    type Seen = (String, Dir, SideKey, SideKey, Vec<(String, &'static str)>, Vec<&'static str>);
+    type Seen = (
+        String,
+        Dir,
+        SideKey,
+        SideKey,
+        Vec<(String, &'static str)>,
+        Vec<&'static str>,
+    );
     let mut seen: BTreeSet<Seen> = BTreeSet::new();
     for p in &wp.pairs {
         let Some(dir) = Dir::of(p.direction) else {
@@ -1742,12 +1762,25 @@ fn model_rows(
             None => SideKey::Site(p.handler.0, String::new(), 0),
         };
         let sig = p.changes.iter().map(|c| (c.path.clone(), c.rule)).collect();
-        if !seen.insert((p.route_qname.clone(), dir, client_key, server_key, sig, p.notes.clone())) {
+        if !seen.insert((
+            p.route_qname.clone(),
+            dir,
+            client_key,
+            server_key,
+            sig,
+            p.notes.clone(),
+        )) {
             continue;
         }
         let client = match p.client_model {
             Some(m) => facts.model(loc, m, p.client_format),
-            None => facts.site(loc, p.endpoint, p.client_format, Some(&p.file), Some(p.line)),
+            None => facts.site(
+                loc,
+                p.endpoint,
+                p.client_format,
+                Some(&p.file),
+                Some(p.line),
+            ),
         };
         let server = match p.server_model {
             Some(m) => facts.model(loc, m, p.server_format),
@@ -1764,7 +1797,13 @@ fn model_rows(
         out.push(wire_row(p, dir, roots, key, producer, consumer));
     }
 
-    type SeenOp = (u64, Dir, SideKey, Vec<(String, &'static str)>, Option<&'static str>);
+    type SeenOp = (
+        u64,
+        Dir,
+        SideKey,
+        Vec<(String, &'static str)>,
+        Option<&'static str>,
+    );
     let mut seen_op: BTreeSet<SeenOp> = BTreeSet::new();
     for w in &cw.wires {
         let ops: BTreeSet<u64> = w
@@ -1783,7 +1822,11 @@ fn model_rows(
                 Ok(s) => s.format == "openapi",
                 Err(_) => h.origin_str("source") == Some("openapi"),
             };
-            let display = h.origin.as_ref().and_then(same_as::contract_op_key).map(|k| k.display);
+            let display = h
+                .origin
+                .as_ref()
+                .and_then(same_as::contract_op_key)
+                .map(|k| k.display);
             let (true, Some(display)) = (openapi, display) else {
                 continue;
             };
@@ -1812,7 +1855,10 @@ fn model_rows(
                 };
                 let (sig, note) = match &verdict {
                     Ok(c) => (
-                        c.d.changes.iter().map(|x| (x.field.clone(), x.rule)).collect(),
+                        c.d.changes
+                            .iter()
+                            .map(|x| (x.field.clone(), x.rule))
+                            .collect(),
                         c.note(),
                     ),
                     Err(note) => (Vec::new(), Some(*note)),
@@ -1858,7 +1904,10 @@ fn wire_roots(w: &ClientWire, p: &WirePair, dir: Dir) -> Option<(bool, bool)> {
         .sites(dir.wire())
         .iter()
         .find(|s| Some(s.line) == p.server_line)?;
-    Some((element_kind(client).is_some(), element_kind(&server.shape).is_some()))
+    Some((
+        element_kind(client).is_some(),
+        element_kind(&server.shape).is_some(),
+    ))
 }
 
 /// A verdict row with its comparison's note (`open`, `union`), unless the
@@ -1910,7 +1959,9 @@ fn wire_row(
         let (change, prod, cons) = wire_change(dir, c);
         d.push((section, &c.path), change, (prod, cons), c.rule, c.breaking);
     }
-    let note = [NOTE_OPEN, NOTE_UNION].into_iter().find(|n| p.notes.contains(n));
+    let note = [NOTE_OPEN, NOTE_UNION]
+        .into_iter()
+        .find(|n| p.notes.contains(n));
     noted_row(HTTP_MODEL, key, producer, consumer, d, note)
 }
 
@@ -1994,7 +2045,13 @@ fn graphql_rows(merged: &MergedGraph, loc: &Locator<'_>) -> Vec<FieldDiffRow> {
         .collect();
     let facts = NodeFacts::new(merged, &wanted);
     let format = Some(WireFormat::Graphql);
-    type Seen<'a> = (u64, &'a str, u64, Vec<(&'a str, &'static str)>, Option<&'static str>);
+    type Seen<'a> = (
+        u64,
+        &'a str,
+        u64,
+        Vec<(&'a str, &'static str)>,
+        Option<&'static str>,
+    );
     let mut seen: BTreeSet<Seen<'_>> = BTreeSet::new();
     let mut out = Vec::new();
     for p in &gp.pairs {
@@ -2002,7 +2059,11 @@ fn graphql_rows(merged: &MergedGraph, loc: &Locator<'_>) -> Vec<FieldDiffRow> {
         let note = p
             .refused
             .or_else(|| p.notes.contains(&NOTE_OPEN).then_some(NOTE_OPEN));
-        let sig = p.changes.iter().map(|c| (c.path.as_str(), c.rule)).collect();
+        let sig = p
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.rule))
+            .collect();
         if !seen.insert((p.op.0, p.root_field.as_str(), producer_id.0, sig, note)) {
             continue;
         }
@@ -2124,8 +2185,16 @@ struct View<'s> {
 
 fn client_view(v: &ResolvedShape) -> Option<View<'_>> {
     if v.model.is_some() || matches!(v.written, Shape::Object { .. }) {
-        let fields = v.fields.iter().map(|(k, f)| (k.as_str(), (f, f.required))).collect();
-        return Some(View { fields, open: v.open, union: false });
+        let fields = v
+            .fields
+            .iter()
+            .map(|(k, f)| (k.as_str(), (f, f.required)))
+            .collect();
+        return Some(View {
+            fields,
+            open: v.open,
+            union: false,
+        });
     }
     if !matches!(v.written, Shape::Union(_)) || v.members.is_empty() {
         return None;
@@ -2144,9 +2213,15 @@ fn client_view(v: &ResolvedShape) -> Option<View<'_>> {
         }
     }
     for (k, (_, req)) in &mut fields {
-        *req = views.iter().all(|view| view.fields.get(k).is_some_and(|(_, r)| *r));
+        *req = views
+            .iter()
+            .all(|view| view.fields.get(k).is_some_and(|(_, r)| *r));
     }
-    Some(View { fields, open: views.iter().any(|view| view.open), union: true })
+    Some(View {
+        fields,
+        open: views.iter().any(|view| view.open),
+        union: true,
+    })
 }
 
 /// `prefix.name`, or `name` at the body root.
@@ -2241,7 +2316,8 @@ impl<'a> ContractCmp<'a> {
             Dir::Response => (op, client),
             Dir::Request => (client, op),
         };
-        self.d.push((self.section, field), change, sides, rule, breaking);
+        self.d
+            .push((self.section, field), change, sides, rule, breaking);
     }
 
     /// An op name whose type is an unresolvable `$ref`: one unknown change.
@@ -2250,7 +2326,13 @@ impl<'a> ContractCmp<'a> {
             return false;
         }
         if self.refs.insert(name.to_string()) {
-            self.push(name, UNKNOWN, (f.ty.as_deref(), None), "unresolved_ref", false);
+            self.push(
+                name,
+                UNKNOWN,
+                (f.ty.as_deref(), None),
+                "unresolved_ref",
+                false,
+            );
         }
         true
     }
@@ -2357,7 +2439,11 @@ impl<'a> ContractCmp<'a> {
                     && a != b
                 {
                     let ty = of.ty.as_deref().unwrap_or("any");
-                    let ty = if array { format!("{ty}[]") } else { ty.to_string() };
+                    let ty = if array {
+                        format!("{ty}[]")
+                    } else {
+                        ty.to_string()
+                    };
                     self.mismatch(hit, &ty, &text);
                     continue;
                 }
@@ -2398,9 +2484,13 @@ impl<'a> ContractCmp<'a> {
             }
             let ty = of.ty.as_deref();
             match self.dir {
-                Dir::Response => {
-                    self.push(name, "producer_only", (ty, None), "contract_field_unread", false)
-                }
+                Dir::Response => self.push(
+                    name,
+                    "producer_only",
+                    (ty, None),
+                    "contract_field_unread",
+                    false,
+                ),
                 Dir::Request if of.required => self.push(
                     name,
                     "consumer_only",
@@ -2408,9 +2498,13 @@ impl<'a> ContractCmp<'a> {
                     "contract_required_missing",
                     true,
                 ),
-                Dir::Request => {
-                    self.push(name, "consumer_only", (ty, None), "contract_field_unset", false)
-                }
+                Dir::Request => self.push(
+                    name,
+                    "consumer_only",
+                    (ty, None),
+                    "contract_field_unset",
+                    false,
+                ),
             }
         }
     }
@@ -2548,7 +2642,10 @@ mod tests {
                     id,
                     repo,
                     confidence: Confidence::Strong,
-                    cells: vec![Cell { kind: cell_type::SCHEMA_FIELDS, payload: CellPayload::Json(fields.into()) }],
+                    cells: vec![Cell {
+                        kind: cell_type::SCHEMA_FIELDS,
+                        payload: CellPayload::Json(fields.into()),
+                    }],
                 });
                 nav.record(id, "Item", q, node_kind::MESSAGE_TYPE, None);
                 id
@@ -2557,8 +2654,12 @@ mod tests {
                 "message:graphql:Item",
                 r#"{"fields":[{"name":"id","required":true,"type":"ID!"}],"format":"graphql"}"#,
             );
-            let proto = with_proto
-                .then(|| add("message:proto:shop.Item", r#"{"format":"proto","fields":[{"name":"id","type":"string","number":1}]}"#));
+            let proto = with_proto.then(|| {
+                add(
+                    "message:proto:shop.Item",
+                    r#"{"format":"proto","fields":[{"name":"id","type":"string","number":1}]}"#,
+                )
+            });
             let g = RepoGraph {
                 repo,
                 nodes,
@@ -2578,7 +2679,10 @@ mod tests {
         let proto = proto.map(|p| p.0);
         assert_eq!(holders.keys().next().copied(), proto);
         let by_name = message_types_by_name(&holders);
-        assert_eq!(by_name.get(&(repo.0, "Item")).cloned(), proto.map(|p| vec![p]));
+        assert_eq!(
+            by_name.get(&(repo.0, "Item")).cloned(),
+            proto.map(|p| vec![p])
+        );
 
         let (merged, _) = graph(false);
         let holders = collect_holders(&merged);

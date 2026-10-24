@@ -155,8 +155,11 @@ fn main() -> Result<()> {
     let chain_depths: HashMap<String, usize> = match &args.chain {
         Some(p) => {
             let m = load_chain_depths(p)?;
-            eprintln!("[keysym] chain JSON: {} qnames, depth histogram {:?}",
-                m.len(), depth_histogram(&m));
+            eprintln!(
+                "[keysym] chain JSON: {} qnames, depth histogram {:?}",
+                m.len(),
+                depth_histogram(&m)
+            );
             m
         }
         None => HashMap::new(),
@@ -192,7 +195,11 @@ fn main() -> Result<()> {
         .cells_of(KEY_SYMBOLS)
         .map(source_cell)
         .collect::<Result<_>>()?;
-    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), out.len());
+    eprintln!(
+        "[synth] plan hooks=[{}] cells={}",
+        view.applied.join(","),
+        out.len()
+    );
     write_json(&args.out, &out)?;
     eprintln!("[write] {}", args.out.display());
     Ok(())
