@@ -1637,7 +1637,7 @@ questions over one graph computes `entrypoint_reachable` once.
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
   dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
-- **0.5.3 — ranking: complete on local `main`, awaiting the version bump.** James, 2026-10-18:
+- **0.5.3 — ranking: complete on local `main`, version bumped, awaiting the tag.** James, 2026-10-18:
   the ranking experiments' table becomes 0.5.3, *"it's a small lay up step and has the
   biggest generalised wins"*; items 6-11 and the hygiene confirmed 2026-10-23 (*"yes to all"*). Scope in
   `dev-notes/next-leap-0.5.3.md` (items 1-11, the gate, the hygiene), evidence

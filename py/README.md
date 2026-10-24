@@ -32,6 +32,12 @@ that parse differently report different stamps.
 
 ## What's new in 0.5.3
 
+**Pin exactly: `glia-py==0.5.3`.**
+
+```bash
+pip install glia-py==0.5.3
+```
+
 0.5.3 is the ranking release: the API conventions below stay, the ranked answers take a few
 keywords and gain a few keys, and their row order can change. Pin it exactly, as every glia
 release. The store format is unchanged (format 3) and so is every graph a build writes: the
