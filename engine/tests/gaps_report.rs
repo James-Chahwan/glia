@@ -737,3 +737,97 @@ fn deterministic() {
         "id leads a row: {a}"
     );
 }
+
+/// FD.27: a `[[constraint]] rule` that parses and analyses but defines no
+/// `violation` output. `glia check` refuses it (exit 2); gaps lists it as a
+/// `rotted_rule` row too, reason `no violation output`, beside the rule
+/// that does define one (no row).
+const NO_VIOLATION_OVERLAY: &str = r#"version = 2
+
+[[constraint]]
+id = "ok"
+kind = "invariant"
+text = "web code calls"
+rule = 'violation(f) :- calls(f, _), in_scope(f, "web").'
+
+[[constraint]]
+id = "outputless"
+kind = "invariant"
+text = "modules exist"
+rule = 'x(A) :- node(A, "MODULE").'
+"#;
+
+#[test]
+fn rotted_rule_names_a_rule_with_no_violation_output() {
+    let (web, api) = r1_pair("noviolation");
+    write(&web, ".glia/overlay.toml", NO_VIOLATION_OVERLAY);
+    let paths = [s(&web), s(&api)];
+    let rep = report(&generate_many(&paths).expect("build"));
+    std::fs::remove_dir_all(web.parent().expect("parent")).ok();
+
+    let rotted = rows(&rep, ROTTED_RULE);
+    assert_eq!(rotted.len(), 1, "{rep:#?}");
+    let r = rotted[0];
+    assert_eq!(
+        (
+            r.qname.as_str(),
+            r.kind,
+            r.file.as_deref(),
+            r.line,
+            r.suggest,
+            r.tier
+        ),
+        (
+            "outputless",
+            "constraint",
+            Some(".glia/overlay.toml"),
+            Some(9),
+            "remove",
+            Tier::Fact.as_str()
+        ),
+        "{r:#?}"
+    );
+    assert_eq!(
+        r.detail,
+        "repo=web constraint outputless rule: no violation output (the rule defines no `violation` predicate, so `glia check` cannot evaluate it)"
+    );
+}
+
+/// The env var that makes [`no_violation_marker_child`] run.
+const NO_VIOLATION_CHILD: &str = "GLIA_FD27_GAPS_CHILD";
+
+/// Runs only inside [`no_violation_marker_fires`]'s child.
+#[test]
+fn no_violation_marker_child() {
+    if std::env::var(NO_VIOLATION_CHILD).is_err() {
+        return;
+    }
+    let (web, api) = r1_pair("noviolation_marker");
+    write(&web, ".glia/overlay.toml", NO_VIOLATION_OVERLAY);
+    let paths = [s(&web), s(&api)];
+    report(&generate_many(&paths).expect("build"));
+    std::fs::remove_dir_all(web.parent().expect("parent")).ok();
+}
+
+#[test]
+fn no_violation_marker_fires() {
+    let exe = std::env::current_exe().expect("the test binary");
+    let out = std::process::Command::new(exe)
+        .args([
+            "no_violation_marker_child",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(NO_VIOLATION_CHILD, "1")
+        .env("GLIA_NO_PERSIST", "1")
+        .output()
+        .expect("the test binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[gaps] rotted_rule"))
+        .collect();
+    assert_eq!(lines, ["[gaps] rotted_rule no_violation=1"], "{stderr}");
+}

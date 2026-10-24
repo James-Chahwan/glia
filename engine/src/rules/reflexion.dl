@@ -1,6 +1,8 @@
 // The reflexion model (CC-2, check v2) as rules (DB.8a): engine/src/check.rs module doc
-// `# Reflexion model (check v2)` states every relation, and its native functions are
-// the parity oracle (rules::reflexion_parity) until DB.8b deletes them.
+// `# Reflexion model (check v2)` states every relation. DB.8b deleted the native
+// functions: the goldens in engine/tests/data/reflexion/ are the oracle
+// (rules::reflexion_parity), and a change to this program's semantics regenerates them
+// with GLIA_UPDATE_GOLDEN=1 and declares it.
 //
 // A component is an Int: its index in check's ModelEdb.components (sorted by name), so
 // every relation keys as the native maps do. The EDB is engine/src/rules/reflexion.rs's

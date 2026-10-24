@@ -427,6 +427,44 @@ pub fn validate(text: &str) -> Vec<RuleDiagnostic> {
     }
 }
 
+/// The output a `[[constraint]] rule` defines: its violation rows (check.rs
+/// `RULE_OUTPUT`, overlay_loop's writer).
+const CONSTRAINT_OUTPUT: &str = "violation";
+
+impl RuleDiagnostic {
+    /// The message of the diagnostic [`Self::validate_constraint`] gives a
+    /// rule that defines no [`CONSTRAINT_OUTPUT`].
+    pub(crate) const NO_VIOLATION_OUTPUT: &str = "no violation output (the rule defines no `violation` predicate, so `glia check` cannot evaluate it)";
+
+    /// FD.27: [`validate`] for a `[[constraint]] rule`: its error diagnostics,
+    /// or, when it validates but defines no `violation` rule head, the one
+    /// unplaced (`0:0`) [`Self::NO_VIOLATION_OUTPUT`] diagnostic. Empty when `glia
+    /// check` can evaluate the rule. gaps' `rotted_rule` reads it; check's
+    /// [`evaluate_rule`] refuses the same programs (a parse or analysis error,
+    /// or ``rule defines no `violation` predicate``), so the two agree.
+    /// An associated fn because `rules::query` is private and the rules facade
+    /// re-exports no new name in this packet: crate code reaches it as
+    /// `crate::rules::RuleDiagnostic::validate_constraint`.
+    pub(crate) fn validate_constraint(text: &str) -> Vec<RuleDiagnostic> {
+        let diags = validate(text);
+        if !diags.is_empty() {
+            return diags;
+        }
+        let defines = parse_program(DEFAULT_SOURCE, text)
+            .is_ok_and(|p| p.rules.iter().any(|r| r.head.pred == CONSTRAINT_OUTPUT));
+        if defines {
+            Vec::new()
+        } else {
+            vec![RuleDiagnostic {
+                line: 0,
+                column: 0,
+                message: Self::NO_VIOLATION_OUTPUT.to_string(),
+                predicate: None,
+            }]
+        }
+    }
+}
+
 /// Evaluate the rule program `text` (spans named `source_name`, the prelude merged
 /// in) over `facts`, which must be facts over `merged`, for its one output
 /// `output`, every row explained: the rows in rendered order with their NodeIds

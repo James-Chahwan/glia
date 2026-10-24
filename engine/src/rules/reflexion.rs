@@ -119,7 +119,53 @@ pub(crate) fn derive_tiered<'m>(
 ) -> Result<(ReflexionFacts<'m>, DependentTiers), String> {
     let sites = edge_sites(merged, &checked);
     let relations = model_relations(facts, &edb, &sites);
-    evaluate_model(facts, edb, checked, sites, relations)
+    let cap = model_budget(&relations, edb.components.len());
+    evaluate_model(facts, edb, checked, sites, relations, cap)
+}
+
+/// The row budget of one model evaluation (FD.27). glia-rules charges every
+/// emitted binding and builtin row as well as every derived row, so the budget
+/// bounds the bindings [`REFLEXION`]'s bodies emit: `owns` joins each placed
+/// node with each declared path (placed x paths); `shadowed` joins a node's
+/// `owns` rows pairwise, at most depth^2 per node, depth being the most
+/// declared paths one path sits under (itself included); `dep` and
+/// `unmapped_edge` walk each edge site once; the component-pair relations at
+/// most components^2. The budget is
+/// `4 x (placed x (paths + depth^2) + sites + components^2) + 10,000`, read
+/// from the EDB `relations` (placed: the `located` + `project_path` rows;
+/// paths: the `component_path` rows, at least one; sites: the `edge_site`
+/// rows), so a valid model never stops on it, and a runaway rule edit stops
+/// with a check error naming reflexion instead of exhausting memory.
+fn model_budget(relations: &[ModelRelation], components: usize) -> usize {
+    let rel = |name: &'static str| relations.iter().filter(move |r| r.name == name);
+    let rows = |name: &'static str| rel(name).map(|r| r.rows.len()).sum::<usize>();
+    let placed = rows("located").saturating_add(rows("project_path"));
+    let declared: Vec<&str> = rel("component_path")
+        .flat_map(|r| r.rows.iter())
+        .filter_map(|row| match row.values.get(1) {
+            Some(Value::Str(p)) => Some(p.as_str()),
+            _ => None,
+        })
+        .collect();
+    let paths = declared.len().max(1);
+    // A plain prefix over-counts the segment test `under`, never under-counts.
+    let depth = declared
+        .iter()
+        .map(|p| {
+            declared
+                .iter()
+                .filter(|q| **q == "." || p.starts_with(**q))
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    placed
+        .saturating_mul(paths.saturating_add(depth.saturating_mul(depth)))
+        .saturating_add(rows("edge_site"))
+        .saturating_add(components.saturating_mul(components))
+        .saturating_mul(4)
+        .saturating_add(10_000)
 }
 
 /// The relations [`REFLEXION`] defines: its distinct rule heads (15).
@@ -129,21 +175,28 @@ fn relation_count(program: &Program) -> usize {
 }
 
 /// Evaluate [`REFLEXION`] over `facts` and the EDB `relations` (built from `edb` and
-/// `sites` by [`model_relations`]) and read the result back. Emits the marker.
+/// `sites` by [`model_relations`]) under the row budget `max_rows`
+/// ([`model_budget`]) and read the result back. Emits the marker; a stop on the
+/// budget prints glia-rules' `[rules] budget pred=<p> rows=<n> cap=<c>` and is an
+/// `Err` starting `reflexion: ` (other errors keep their own text).
 fn evaluate_model<'m>(
     facts: &CodeFacts<'m>,
     edb: ModelEdb,
     checked: Vec<EdgeCategoryId>,
     sites: Vec<DepEdge<'m>>,
     relations: Vec<ModelRelation>,
+    max_rows: usize,
 ) -> Result<(ReflexionFacts<'m>, DependentTiers), String> {
     let program = parsed()?;
     let src = ModelFacts { facts, relations };
     let mut options = Options::default();
     options.outputs = OUTPUTS.iter().map(|s| (*s).to_string()).collect();
     options.magic = false;
-    options.max_rows = usize::MAX;
-    let ev = evaluate(program, &src, &options).map_err(|e| e.to_string())?;
+    options.max_rows = max_rows;
+    let ev = evaluate(program, &src, &options).map_err(|e| match e {
+        RulesError::Budget { .. } => format!("reflexion: {e}"),
+        _ => e.to_string(),
+    })?;
     for w in ev.warnings() {
         eprintln!("{w}");
     }
@@ -758,9 +811,77 @@ mod tests {
                 _ => {}
             }
         }
-        evaluate_model(facts, edb, Vec::new(), Vec::new(), relations)
+        evaluate_model(facts, edb, Vec::new(), Vec::new(), relations, usize::MAX)
             .expect("the prelude evaluates")
             .0
+    }
+
+    /// `n` components on `m` nested paths (`d0`, `d0/d1`, ..), each path one
+    /// component's, and `files` located files at the deepest path: every file
+    /// sits under every path, so `owns` and `shadowed` reach files x paths.
+    fn nested(n_files: usize, m_paths: usize) -> (ModelEdb, Vec<String>) {
+        let paths: Vec<String> = (1..=m_paths)
+            .map(|d| {
+                (0..d)
+                    .map(|i| format!("d{i}"))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect();
+        let names: Vec<String> = (0..m_paths).map(|i| format!("c{i:02}")).collect();
+        let entries: Vec<(&str, Vec<&str>)> = names
+            .iter()
+            .zip(&paths)
+            .map(|(n, p)| (n.as_str(), vec![p.as_str()]))
+            .collect();
+        let refs: Vec<(&str, &[&str])> = entries.iter().map(|(n, p)| (*n, p.as_slice())).collect();
+        let deepest = paths.last().cloned().unwrap_or_default();
+        let files = (0..n_files).map(|i| format!("{deepest}/f{i}.py")).collect();
+        (declared(&refs), files)
+    }
+
+    /// FD.27: the model's budget holds every row an N x M overlay derives,
+    /// and a cap below them stops the evaluation with an error naming
+    /// reflexion.
+    #[test]
+    fn model_budget_holds_the_model_and_a_low_cap_stops_it() {
+        let g = empty();
+        let facts = CodeFacts::new(&g);
+        let (n, m) = (300, 12);
+        let relations_for = |edb: &ModelEdb, files: &[String]| {
+            let mut relations = model_relations(&facts, edb, &[]);
+            let located: Vec<BuiltinRow> = files
+                .iter()
+                .zip((0u64..).map(NodeId))
+                .map(|(f, id)| fact(vec![Value::Node(id), string(f)]))
+                .collect();
+            for r in &mut relations {
+                if r.name == "located" {
+                    r.rows = located.clone();
+                }
+            }
+            relations
+        };
+        let (edb, files) = nested(n, m);
+        let relations = relations_for(&edb, &files);
+        let cap = model_budget(&relations, edb.components.len());
+        assert_eq!(cap, 4 * (n * (m + m * m) + m * m) + 10_000);
+        assert!(
+            cap > 4 * n * m + 10_000,
+            "the depth term: the spec's 4 x placed x paths + 10,000 stops this valid model"
+        );
+        let (f, _) = evaluate_model(&facts, edb, Vec::new(), Vec::new(), relations, cap)
+            .expect("a valid model stays under its budget");
+        assert_eq!(f.in_component.len(), n, "the deepest path owns every file");
+        assert!(f.unmapped.is_empty());
+
+        // owns alone derives n x m rows: a cap below them stops.
+        let (edb, files) = nested(n, m);
+        let relations = relations_for(&edb, &files);
+        let err = evaluate_model(&facts, edb, Vec::new(), Vec::new(), relations, n * m / 2)
+            .err()
+            .expect("a cap below the model's rows stops it");
+        assert!(err.starts_with("reflexion: "), "{err}");
     }
 
     /// The component of each of nodes `0..n`, by name.

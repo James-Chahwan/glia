@@ -24,7 +24,7 @@
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
 //! | `redundant_rule` | an `[[edge]]` equal to an edge whose ORIGIN is not the overlay (the extractor caught up) | fact | `remove` |
-//! | `rotted_rule` | DB.4: a loader-kept `[[constraint]]` whose `rule` text this glia can no longer read (`rules::validate`: a parse error, an unknown kind / category / predicate, a wrong arity, a reserved prelude name); `detail` is the first diagnostic, `rule <line>:<col>: <message>` (+ how many more); a fact about this glia, not the code | fact | `remove` |
+//! | `rotted_rule` | DB.4: a loader-kept `[[constraint]]` whose `rule` text this glia can no longer read (`RuleDiagnostic::validate_constraint`: a parse error, an unknown kind / category / predicate, a wrong arity, a reserved prelude name, or, FD.27, no `violation` output, which `glia check` refuses too); `detail` is the first diagnostic, `rule <line>:<col>: <message>` (+ how many more), or `rule: no violation output (..)` for an outputless rule; a fact about this glia, not the code | fact | `remove` |
 //! | `orphaned_cell` | a `.glia/cells.jsonl` / `.glia/vectors.jsonl` row whose qname + hint bind nothing | fact | `glia cell ls --check --rekey` |
 //!
 //! `kind` is the node kind for a graph row, the overlay section for a rule
@@ -77,7 +77,8 @@
 //! stanza with no anchor binds a scope's PROJECT, which is not a qname: the
 //! `[declared] orphaned ... scope=` stderr line reports that case. A
 //! `rotted_rule` reads no node: [`crate::rules::validate`] checks the text
-//! against the code schema and the prelude with no graph, so a stanza both
+//! against the code schema and the prelude with no graph, and (FD.27) a rule
+//! that validates but defines no `violation` rule head is a row too, so a stanza both
 //! anchored nowhere and unreadable is two gaps with two ids. A stanza the
 //! loader dropped (a version-1 file that sets `rule`) is not a row: the
 //! `[overlay] error` line already names it.
@@ -1416,12 +1417,16 @@ fn collect_rows(
             all: None,
             extracted: None,
             want: wanted,
+            no_violation: 0,
         };
         for (repo, root) in roots {
             ctx.rule_rows(*repo, root, &mut ids, &mut rows);
             if want(ORPHANED_CELL) {
                 ctx.cell_rows(*repo, root, &mut ids, &mut rows);
             }
+        }
+        if ctx.no_violation > 0 {
+            eprintln!("[gaps] rotted_rule no_violation={}", ctx.no_violation);
         }
     }
     Collected {
@@ -1806,6 +1811,9 @@ struct RootCtx<'a> {
     /// Built on first use.
     extracted: Option<HashMap<(u64, u64, u32), bool>>,
     want: &'a [&'static str],
+    /// `rotted_rule` rows for a rule with no `violation` output (FD.27), the
+    /// `[gaps] rotted_rule no_violation=<n>` marker.
+    no_violation: usize,
 }
 
 impl RootCtx<'_> {
@@ -1913,10 +1921,16 @@ impl RootCtx<'_> {
                 let Some(text) = c.rule.as_deref() else {
                     continue;
                 };
-                let diags = crate::rules::validate(text);
+                let diags = crate::rules::RuleDiagnostic::validate_constraint(text);
                 let Some(detail) = rot_detail(&label, &c.id, &diags) else {
                     continue;
                 };
+                if diags
+                    .first()
+                    .is_some_and(|d| d.message == crate::rules::RuleDiagnostic::NO_VIOLATION_OUTPUT)
+                {
+                    self.no_violation += 1;
+                }
                 rows.push(GapRow {
                     id: ids.id(ROTTED_RULE, rule_key(repo, "constraint", &[&c.id])),
                     category: ROTTED_RULE,
@@ -2101,10 +2115,15 @@ impl RootCtx<'_> {
 /// own text, and how many more there are; `None` when the rule validates.
 fn rot_detail(label: &str, id: &str, diags: &[crate::rules::RuleDiagnostic]) -> Option<String> {
     let first = diags.first()?;
-    let mut detail = format!(
-        "repo={label} constraint {id} rule {}:{}: {}",
-        first.line, first.column, first.message
-    );
+    let mut detail = if first.line == 0 {
+        // Unplaced: the rule as a whole (FD.27's `no violation output`).
+        format!("repo={label} constraint {id} rule: {}", first.message)
+    } else {
+        format!(
+            "repo={label} constraint {id} rule {}:{}: {}",
+            first.line, first.column, first.message
+        )
+    };
     if diags.len() > 1 {
         detail.push_str(&format!(" (+{} more)", diags.len() - 1));
     }

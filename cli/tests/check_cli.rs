@@ -1146,8 +1146,15 @@ via = [\"services/api/public\"]
             (".glia/overlay.toml", overlay),
         ],
     );
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, mut markers) = glia(&["check", &fx.path()]);
     assert_eq!(code, 1, "{stdout}");
+    // FD.27: one shared level vector line per check with a transitive rule,
+    // last; its length is the fixture's edge count.
+    let levels = markers.pop().unwrap_or_default();
+    assert!(
+        levels.starts_with("[check] transitive edge_levels=") && levels.ends_with(" rules=1"),
+        "{levels}"
+    );
     assert_eq!(
         markers,
         vec![

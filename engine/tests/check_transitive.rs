@@ -502,8 +502,20 @@ fn markers(which: &str) -> Vec<String> {
 
 #[test]
 fn marker_counts_hits_per_chain() {
+    let mut via = markers("via");
+    // FD.27's shared level vector line: one, right before `[rules] check`,
+    // its length the merged graph's edge count (pinned apart from the rest).
+    let at = via
+        .iter()
+        .position(|l| l.starts_with("[check] transitive edge_levels="))
+        .expect("the edge_levels line");
+    let levels = via.remove(at);
+    assert!(
+        levels.ends_with(" rules=1") && at + 1 == via.len(),
+        "{levels} at {at}: {via:?}"
+    );
     assert_eq!(
-        markers("via"),
+        via,
         [
             "[check] rules=1 checked=1 violations=2 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0",
             "[check] tiers fact=2 derived=0 heuristic=0",
@@ -514,5 +526,103 @@ fn marker_counts_hits_per_chain() {
     assert_eq!(
         markers("mixed").last().map(String::as_str),
         Some("[rules] check invariant=0 rows=0 transitive=1 hits=2 (imports=0 symbols=0 mixed=2)")
+    );
+}
+
+/// FD.27: [`SHORTCUTS`]' declared edges with a second transitive rule,
+/// `shared` never reaching the api's internals. Both rules read one shared
+/// per-edge level vector.
+const SHARED_RULE: &str = "
+[[constraint]]
+id = \"shared-no-internal\"
+kind = \"forbid_edge\"
+from = \"shared\"
+to = \"services/api/internal\"
+transitive = true
+";
+
+/// FD.27: two transitive rules in one check give exactly the violations each
+/// gives alone: the shared level vector reads every edge as the per-rule
+/// reading did.
+#[test]
+fn two_transitive_rules_share_levels_and_agree() {
+    let edges_only = SHORTCUTS
+        .split("[[constraint]]")
+        .next()
+        .expect("the edge stanzas");
+    let both = format!("{SHORTCUTS}{SHARED_RULE}");
+    let shared_alone = format!("{edges_only}{SHARED_RULE}");
+    let together = report(&both);
+    assert!(together.errors.is_empty(), "{together:#?}");
+    let mut apart = report(SHORTCUTS).violations;
+    apart.extend(report(&shared_alone).violations);
+    apart.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+    // The stanza sits at another overlay line alone: compare all but `decl`.
+    let undeclared = |vs: &[Violation]| -> Vec<Violation> {
+        vs.iter()
+            .cloned()
+            .map(|mut v| {
+                v.decl = None;
+                v
+            })
+            .collect()
+    };
+    let (together_v, apart) = (undeclared(&together.violations), undeclared(&apart));
+    assert_eq!(
+        format!("{together_v:?}"),
+        format!("{apart:?}"),
+        "the shared vector moves no violation"
+    );
+    let rules: Vec<&str> = together
+        .violations
+        .iter()
+        .map(|v| v.rule_id.as_str())
+        .collect();
+    assert!(rules.contains(&"shared-no-internal"), "{together:#?}");
+    assert!(rules.contains(&"web-no-api"), "{together:#?}");
+}
+
+/// The env var that makes [`two_rules_child`] run.
+const TWO_CHILD: &str = "GLIA_FD27_TWO_CHILD";
+
+/// Runs only inside [`edge_levels_marker_fires_once`]'s child.
+#[test]
+fn two_rules_child() {
+    if std::env::var(TWO_CHILD).is_err() {
+        return;
+    }
+    report(&format!("{SHORTCUTS}{SHARED_RULE}"));
+}
+
+#[test]
+fn edge_levels_marker_fires_once() {
+    let exe = std::env::current_exe().expect("the test binary");
+    let out = Command::new(Path::new(&exe))
+        .args([
+            "two_rules_child",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(TWO_CHILD, "1")
+        .env("GLIA_NO_PERSIST", "1")
+        .output()
+        .expect("the test binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[check] transitive edge_levels="))
+        .collect();
+    assert_eq!(lines.len(), 1, "{stderr}");
+    let e: usize = lines[0]
+        .strip_prefix("[check] transitive edge_levels=")
+        .and_then(|r| r.strip_suffix(" rules=2"))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("marker shape: {}", lines[0]));
+    assert!(
+        e > 0,
+        "the vector holds the merged graph's edges: {}",
+        lines[0]
     );
 }

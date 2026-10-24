@@ -297,7 +297,12 @@
 //! `[rules] check invariant=<I> rows=<R> transitive=<T> hits=<H> (imports=<a> symbols=<b> mixed=<c>)`
 //! counts the rule invariants evaluated and their rows, and the transitive
 //! rules evaluated, their hits and the hits each chain reported (`a + b + c =
-//! H`, DB.3b) — grep `^\[rules\] check`. The rules layer's own `[rules]
+//! H`, DB.3b) — grep `^\[rules\] check`. When a transitive rule was
+//! evaluated, the line before it is `[check] transitive edge_levels=<e>
+//! rules=<r>` (FD.27): every transitive rule's symbol walks read one per-edge
+//! level vector of the merged graph, keyed by edge ordinal and built on the
+//! first walk that needs it (`e` its length, 0 when only import chains ran),
+//! instead of re-tiering each kept edge per rule. The rules layer's own `[rules]
 //! prelude` / `[rules] eval` lines print during each rule's evaluation,
 //! before these. A check
 //! with a model prints, before them, the model evaluation's `[rules] eval`
@@ -833,6 +838,7 @@ fn run_check(
             }
         }
         [stats.imports, stats.symbols, stats.mixed] = ctx.path_hits;
+        stats.edge_levels = ctx.edge_levels.as_ref().map_or(0, Vec::len);
         report.errors.append(&mut model.errors);
         if !model.components.is_empty() {
             let checked = model.checked();
@@ -915,6 +921,12 @@ fn run_check(
             report.violations.len() - blocking,
         );
     }
+    if stats.transitive > 0 {
+        eprintln!(
+            "[check] transitive edge_levels={} rules={}",
+            stats.edge_levels, stats.transitive
+        );
+    }
     if stats.invariant + stats.transitive > 0 {
         eprintln!(
             "[rules] check invariant={} rows={} transitive={} hits={} (imports={} symbols={} mixed={})",
@@ -943,6 +955,8 @@ struct RuleStats {
     imports: usize,
     symbols: usize,
     mixed: usize,
+    /// The shared level vector's length ([`Ctx::edge_levels`]), FD.27.
+    edge_levels: usize,
 }
 
 /// An invariant with Datalog `rule` text: evaluated by [`rule_invariant`].
@@ -1082,6 +1096,11 @@ struct Ctx<'a> {
     /// rule it failed is one that checks nothing ([`EMPTY_SCOPE`]). Taken
     /// on each rule error.
     empty: RefCell<Option<(String, &'static str)>>,
+    /// Each edge of [`Self::merged`]'s `GraphSource::edges`, by ordinal: its
+    /// `edge_tier_of` level (FD.27). Built on the first transitive walk over
+    /// the node graph and read by every later one, so several transitive
+    /// rules over one big merge tier each edge once.
+    edge_levels: Option<Vec<u8>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -1092,7 +1111,15 @@ impl<'a> Ctx<'a> {
             qnames: HashMap::new(),
             path_hits: [0; 3],
             empty: RefCell::new(None),
+            edge_levels: None,
         }
+    }
+
+    /// [`Self::edge_levels`], built on first use.
+    fn edge_levels(&mut self) -> &[u8] {
+        let merged = self.merged;
+        self.edge_levels
+            .get_or_insert_with(|| merged.edges().map(|e| edge_tier_of(e).level()).collect())
     }
 
     /// The nodes strictly in `scope` (`CodeFacts::members`: literal, no label
@@ -1335,6 +1362,12 @@ enum Chain {
 trait PathGraph: GraphSource {
     /// The edge's [`Tier::level`]: the first pass that may walk it.
     fn level(&self, e: &Edge) -> u8;
+    /// The level of each of `kept`, `(ordinal in GraphSource::edges, edge)`
+    /// pairs. The default tiers each edge; the check's own merged graph reads
+    /// the shared [`Ctx::edge_levels`] instead (FD.27).
+    fn levels(&self, _ctx: &mut Ctx<'_>, kept: &[(usize, &Edge)]) -> Vec<u8> {
+        kept.iter().map(|(_, e)| self.level(e)).collect()
+    }
     /// Where the edge is asserted and its `why` tier and note, for its
     /// witness row.
     fn site(&self, e: &Edge) -> (Option<Evidence>, (Tier, Option<String>));
@@ -1345,6 +1378,16 @@ trait PathGraph: GraphSource {
 impl PathGraph for MergedGraph {
     fn level(&self, e: &Edge) -> u8 {
         edge_tier_of(e).level()
+    }
+
+    fn levels(&self, ctx: &mut Ctx<'_>, kept: &[(usize, &Edge)]) -> Vec<u8> {
+        if !std::ptr::eq(self, ctx.merged) {
+            return kept.iter().map(|(_, e)| self.level(e)).collect();
+        }
+        let table = ctx.edge_levels();
+        kept.iter()
+            .map(|(k, e)| table.get(*k).copied().unwrap_or_else(|| self.level(e)))
+            .collect()
     }
 
     fn site(&self, e: &Edge) -> (Option<Evidence>, (Tier, Option<String>)) {
@@ -1548,12 +1591,16 @@ fn walk_chain<G: PathGraph + ?Sized>(
     let keep = CategorySet::of(cats);
     let adj = Adjacency::build(&barred, &keep);
     // The kept edges in index order (`Adjacency::build` keeps the global edge
-    // order filtered by `keep`), each with its tier level.
-    let kept: Vec<&Edge> = barred
+    // order filtered by `keep`: `barred`'s edges are `graph`'s, those leaving
+    // a stop node dropped), each with its ordinal in `graph` and its tier
+    // level.
+    let ordinals: Vec<(usize, &Edge)> = graph
         .edges()
-        .filter(|e| keep.contains(e.category))
+        .enumerate()
+        .filter(|(_, e)| !scopes.stops(e.from) && keep.contains(e.category))
         .collect();
-    let levels: Vec<u8> = kept.iter().map(|e| graph.level(e)).collect();
+    let levels: Vec<u8> = graph.levels(ctx, &ordinals);
+    let kept: Vec<&Edge> = ordinals.into_iter().map(|(_, e)| e).collect();
     let starts: Vec<(NodeId, u8)> = seeds.iter().map(|&s| (s, 0)).collect();
     let walk = bfs_levels(
         &adj,
